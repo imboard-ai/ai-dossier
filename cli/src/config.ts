@@ -28,7 +28,7 @@ const DEFAULT_CONFIG: DossierConfig = {
  */
 function ensureConfigDir(): void {
   if (!fs.existsSync(CONFIG_DIR)) {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
+    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
 }
 
@@ -83,4 +83,4 @@ function setConfig(key: string, value: unknown): boolean {
   return saveConfig(config);
 }
 
-export { loadConfig, saveConfig, getConfig, setConfig, CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG };
+export { ensureConfigDir, loadConfig, saveConfig, getConfig, setConfig, CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG };
