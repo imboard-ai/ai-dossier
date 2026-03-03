@@ -1187,6 +1187,84 @@ program
   });
 
 // ============================================================================
+// COMMAND: login (IMPLEMENTED)
+// ============================================================================
+program
+  .command('login')
+  .description('Authenticate with the dossier registry via GitHub')
+  .action(async () => {
+    const { runOAuthFlow } = require('../lib/oauth');
+    const { saveCredentials } = require('../lib/credentials');
+    const { getRegistryUrl } = require('../lib/registry-client');
+
+    try {
+      const registryUrl = getRegistryUrl();
+      const result = await runOAuthFlow(registryUrl);
+
+      saveCredentials({
+        token: result.token,
+        username: result.username,
+        orgs: result.orgs,
+      });
+
+      console.log(`\n✅ Logged in as ${result.username}`);
+      if (result.orgs.length > 0) {
+        console.log(`   Organizations: ${result.orgs.join(', ')}`);
+      }
+      console.log('');
+    } catch (err) {
+      console.error(`\n❌ Login failed: ${err.message}\n`);
+      process.exit(1);
+    }
+  });
+
+// ============================================================================
+// COMMAND: logout (IMPLEMENTED)
+// ============================================================================
+program
+  .command('logout')
+  .description('Remove stored registry credentials')
+  .action(() => {
+    const { deleteCredentials } = require('../lib/credentials');
+
+    const deleted = deleteCredentials();
+    if (deleted) {
+      console.log('\n✅ Logged out successfully\n');
+    } else {
+      console.log('\nℹ️  Not logged in (no credentials found)\n');
+    }
+  });
+
+// ============================================================================
+// COMMAND: whoami (IMPLEMENTED)
+// ============================================================================
+program
+  .command('whoami')
+  .description('Show current registry user')
+  .action(() => {
+    const { loadCredentials, isExpired } = require('../lib/credentials');
+
+    const credentials = loadCredentials();
+    if (!credentials) {
+      console.log('\nℹ️  Not logged in');
+      console.log('   Run `dossier login` to authenticate\n');
+      process.exit(1);
+    }
+
+    if (isExpired(credentials)) {
+      console.log('\n⚠️  Credentials expired');
+      console.log('   Run `dossier login` to re-authenticate\n');
+      process.exit(1);
+    }
+
+    console.log(`\n👤 ${credentials.username}`);
+    if (credentials.orgs.length > 0) {
+      console.log(`   Organizations: ${credentials.orgs.join(', ')}`);
+    }
+    console.log('');
+  });
+
+// ============================================================================
 // COMMAND: checksum (IMPLEMENTED)
 // ============================================================================
 program
