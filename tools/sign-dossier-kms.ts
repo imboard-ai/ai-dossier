@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env npx tsx
 
 /**
  * Dossier AWS KMS Signing Tool
@@ -6,7 +6,7 @@
  * Signs a dossier with AWS KMS and embeds the checksum and signature in the frontmatter.
  *
  * Usage:
- *   node tools/sign-dossier-kms.js <dossier-file> [options]
+ *   npx tsx tools/sign-dossier-kms.ts <dossier-file> [options]
  *
  * Prerequisites:
  *   - AWS SDK must be installed (npm install @aws-sdk/client-kms)
@@ -14,25 +14,21 @@
  *   - Permission to use the KMS key
  *
  * Example:
- *   node tools/sign-dossier-kms.js examples/devops/deploy-to-aws.ds.md \\
- *     --key-id alias/dossier-official-prod \\
+ *   npx tsx tools/sign-dossier-kms.ts examples/devops/deploy-to-aws.ds.md \
+ *     --key-id alias/dossier-official-prod \
  *     --signed-by "Dossier Team <team@dossier.ai>"
  */
 
-const { KmsSigner } = require('@imboard-ai/dossier-core');
-const {
-  readAndParseDossier,
-  addChecksum,
-  handleDryRun,
-  writeDossier,
-} = require('./lib/signing-common');
-const { createCliParser } = require('./lib/cli-parser');
+import { KmsSigner, type SignatureResult } from '@imboard-ai/dossier-core';
+import { createCliParser } from './lib/cli-parser';
+import { addChecksum, handleDryRun, readAndParseDossier, writeDossier } from './lib/signing-common';
 
 // Configure CLI parser
 const parseArgs = createCliParser({
   name: 'Dossier AWS KMS Signing Tool',
-  description: 'Signs a dossier with AWS KMS and embeds the checksum and signature in the frontmatter.',
-  usage: 'node tools/sign-dossier-kms.js <dossier-file> [options]',
+  description:
+    'Signs a dossier with AWS KMS and embeds the checksum and signature in the frontmatter.',
+  usage: 'npx tsx tools/sign-dossier-kms.ts <dossier-file> [options]',
   options: [
     {
       name: 'keyId',
@@ -65,13 +61,13 @@ Environment Variables:
   AWS_SECRET_ACCESS_KEY AWS secret key
 
 Example:
-  node tools/sign-dossier-kms.js examples/devops/deploy-to-aws.ds.md \\
+  npx tsx tools/sign-dossier-kms.ts examples/devops/deploy-to-aws.ds.md \\
     --key-id alias/dossier-official-prod \\
     --signed-by "Dossier Team <team@dossier.ai>"`,
 });
 
 // Main function
-async function main() {
+async function main(): Promise<void> {
   const options = parseArgs();
 
   console.log('🔐 Dossier AWS KMS Signing Tool\n');
@@ -80,7 +76,7 @@ async function main() {
   console.log(`Region: ${options.region}`);
 
   // Read and parse dossier
-  const { frontmatter, body } = readAndParseDossier(options.dossierFile);
+  const { frontmatter, body } = readAndParseDossier(options.dossierFile as string);
 
   // Calculate and add checksum
   addChecksum(frontmatter, body);
@@ -93,12 +89,12 @@ async function main() {
   // Sign with AWS KMS
   console.log('\n✍️  Signing with AWS KMS...');
 
-  let signatureResult;
+  let signatureResult: SignatureResult;
   try {
-    const signer = new KmsSigner(options.keyId, options.region);
+    const signer = new KmsSigner(options.keyId as string, options.region as string);
     signatureResult = await signer.sign(body);
   } catch (err) {
-    console.error(`\nError: ${err.message}`);
+    console.error(`\nError: ${(err as Error).message}`);
     process.exit(1);
   }
 
@@ -110,11 +106,11 @@ async function main() {
 
   // Add optional metadata
   if (options.signedBy) {
-    frontmatter.signature.signed_by = options.signedBy;
+    frontmatter.signature.signed_by = options.signedBy as string;
   }
 
   // Write updated dossier
-  writeDossier(options.dossierFile, frontmatter, body);
+  writeDossier(options.dossierFile as string, frontmatter, body);
   console.log('\n✅ Dossier signed successfully!');
   console.log(`\nSignature details:`);
   console.log(`  Algorithm: ECDSA-SHA-256`);
@@ -125,9 +121,7 @@ async function main() {
 }
 
 // Run
-if (require.main === module) {
-  main().catch((err) => {
-    console.error(`\nFatal error: ${err.message}`);
-    process.exit(1);
-  });
-}
+main().catch((err: unknown) => {
+  console.error(`\nFatal error: ${(err as Error).message}`);
+  process.exit(1);
+});

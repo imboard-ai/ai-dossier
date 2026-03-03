@@ -40,7 +40,7 @@ export function loadMarkdownResource(relativePath: string, resourceName: string)
  * @param resourceName - Human-readable name for logging
  * @returns A function that loads the resource when called
  */
-export const createResourceLoader = (
-  relativePath: string,
-  resourceName: string
-): (() => string) => (): string => loadMarkdownResource(relativePath, resourceName);
+export const createResourceLoader =
+  (relativePath: string, resourceName: string): (() => string) =>
+  (): string =>
+    loadMarkdownResource(relativePath, resourceName);

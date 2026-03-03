@@ -3,32 +3,28 @@
  * Provides a declarative way to define CLI options
  */
 
-/**
- * @typedef {Object} OptionConfig
- * @property {string} name - Option name (used as key in result)
- * @property {string} flag - Flag without -- prefix (e.g., 'key-id')
- * @property {string} description - Description for help text
- * @property {boolean} [required] - Whether option is required
- * @property {*} [defaultValue] - Default value if not provided
- * @property {boolean} [isBoolean] - If true, option is a flag (no value)
- * @property {Function} [defaultFn] - Function to compute default value
- */
+export interface OptionConfig {
+  name: string;
+  flag: string;
+  description: string;
+  required?: boolean;
+  defaultValue?: string;
+  isBoolean?: boolean;
+  defaultFn?: () => string;
+}
 
-/**
- * @typedef {Object} ParserConfig
- * @property {string} name - Tool name for help text
- * @property {string} description - Tool description
- * @property {string} usage - Usage line
- * @property {OptionConfig[]} options - Available options
- * @property {string} [extraHelp] - Additional help text (examples, notes)
- */
+export interface ParserConfig {
+  name: string;
+  description: string;
+  usage: string;
+  options: OptionConfig[];
+  extraHelp?: string;
+}
 
 /**
  * Print help message and exit
- * @param {ParserConfig} config - Parser configuration
- * @param {number} exitCode - Exit code (0 for help, 1 for error)
  */
-function printHelp(config, exitCode) {
+function printHelp(config: ParserConfig, exitCode: number): never {
   console.log(`
 ${config.name}
 
@@ -56,11 +52,9 @@ Options:`);
 
 /**
  * Create a CLI argument parser
- * @param {ParserConfig} config - Parser configuration
- * @returns {Function} Parser function that returns parsed options
  */
-function createCliParser(config) {
-  return function parseArgs() {
+function createCliParser(config: ParserConfig): () => Record<string, string | boolean | null> {
+  return function parseArgs(): Record<string, string | boolean | null> {
     const args = process.argv.slice(2);
 
     // Help check
@@ -69,7 +63,7 @@ function createCliParser(config) {
     }
 
     // First positional argument is the dossier file
-    const result = {
+    const result: Record<string, string | boolean | null> = {
       dossierFile: args[0],
     };
 
@@ -111,7 +105,4 @@ function createCliParser(config) {
   };
 }
 
-module.exports = {
-  createCliParser,
-  printHelp,
-};
+export { createCliParser, printHelp };

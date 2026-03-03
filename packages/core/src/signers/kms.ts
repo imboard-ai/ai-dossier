@@ -9,8 +9,8 @@ import {
   SigningAlgorithmSpec,
   VerifyCommand,
 } from '@aws-sdk/client-kms';
-import type { SignatureResult, Signer, Verifier } from './index';
 import { sha256Hash } from '../utils/crypto';
+import type { SignatureResult, Signer, Verifier } from './index';
 
 export class KmsSigner implements Signer {
   readonly algorithm = 'ECDSA-SHA-256';

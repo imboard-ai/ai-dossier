@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env npx tsx
 
 /**
  * Dossier Verification Tool
@@ -6,29 +6,57 @@
  * Verifies the integrity (checksum) and authenticity (signature) of a dossier.
  *
  * Usage:
- *   node tools/verify-dossier.js <dossier-file> [--trusted-keys <file>]
+ *   npx tsx tools/verify-dossier.ts <dossier-file> [--trusted-keys <file>]
  *
  * Example:
- *   node tools/verify-dossier.js examples/devops/deploy-to-aws.ds.md
- *   node tools/verify-dossier.js examples/devops/deploy-to-aws.ds.md --trusted-keys ~/.dossier/trusted-keys.txt
+ *   npx tsx tools/verify-dossier.ts examples/devops/deploy-to-aws.ds.md
+ *   npx tsx tools/verify-dossier.ts examples/devops/deploy-to-aws.ds.md --trusted-keys ~/.dossier/trusted-keys.txt
  */
 
-const path = require('node:path');
-const os = require('node:os');
-const {
-  parseDossierContent,
-  verifyIntegrity,
+import os from 'node:os';
+import path from 'node:path';
+import {
+  type DossierFrontmatter,
   loadTrustedKeys,
-  verifySignature,
+  type ParsedDossier,
+  parseDossierContent,
   readFileIfExists,
-} = require('@imboard-ai/dossier-core');
-const { createCliParser } = require('./lib/cli-parser');
+  verifyIntegrity,
+  verifySignature,
+} from '@imboard-ai/dossier-core';
+import { createCliParser } from './lib/cli-parser';
+
+interface VerifyResult {
+  dossierFile: string;
+  integrity: {
+    status: string;
+    message: string;
+    expectedHash?: string;
+    actualHash?: string;
+  };
+  authenticity: {
+    status: string;
+    message: string;
+    signer: string | null;
+    keyId: string | null;
+    isTrusted: boolean;
+    trustedAs?: string;
+  };
+  riskAssessment: {
+    riskLevel: string | null;
+    riskFactors: string[];
+    destructiveOperations: string[];
+    requiresApproval: boolean | null;
+  };
+  recommendation: string;
+  errors: string[];
+}
 
 // Configure CLI parser
 const parseArgs = createCliParser({
   name: 'Dossier Verification Tool',
   description: 'Verifies the integrity (checksum) and authenticity (signature) of a dossier.',
-  usage: 'node tools/verify-dossier.js <dossier-file> [options]',
+  usage: 'npx tsx tools/verify-dossier.ts <dossier-file> [options]',
   options: [
     {
       name: 'trustedKeysFile',
@@ -45,13 +73,13 @@ const parseArgs = createCliParser({
   ],
   extraHelp: `
 Example:
-  node tools/verify-dossier.js examples/devops/deploy-to-aws.ds.md
-  node tools/verify-dossier.js examples/devops/deploy-to-aws.ds.md --trusted-keys ./my-keys.txt`,
+  npx tsx tools/verify-dossier.ts examples/devops/deploy-to-aws.ds.md
+  npx tsx tools/verify-dossier.ts examples/devops/deploy-to-aws.ds.md --trusted-keys ./my-keys.txt`,
 });
 
 // Main verification function
-async function verifyDossier(dossierFile, trustedKeysFile) {
-  const result = {
+async function verifyDossier(dossierFile: string, trustedKeysFile: string): Promise<VerifyResult> {
+  const result: VerifyResult = {
     dossierFile,
     integrity: {
       status: 'unknown',
@@ -83,11 +111,11 @@ async function verifyDossier(dossierFile, trustedKeysFile) {
   }
 
   // Parse dossier
-  let parsed;
+  let parsed: ParsedDossier;
   try {
     parsed = parseDossierContent(content);
   } catch (err) {
-    result.errors.push(`Parse error: ${err.message}`);
+    result.errors.push(`Parse error: ${(err as Error).message}`);
     result.recommendation = 'BLOCK';
     return result;
   }
@@ -144,16 +172,18 @@ async function verifyDossier(dossierFile, trustedKeysFile) {
       }
     } catch (err) {
       result.authenticity.status = 'error';
-      result.authenticity.message = `Verification error: ${err.message}`;
-      result.errors.push(`Signature verification error: ${err.message}`);
+      result.authenticity.message = `Verification error: ${(err as Error).message}`;
+      result.errors.push(`Signature verification error: ${(err as Error).message}`);
     }
   }
 
   // 3. RISK ASSESSMENT
-  result.riskAssessment.riskLevel = frontmatter.risk_level || 'unknown';
-  result.riskAssessment.riskFactors = frontmatter.risk_factors || [];
-  result.riskAssessment.destructiveOperations = frontmatter.destructive_operations || [];
-  result.riskAssessment.requiresApproval = frontmatter.requires_approval !== false; // default true
+  result.riskAssessment.riskLevel = (frontmatter as DossierFrontmatter).risk_level || 'unknown';
+  result.riskAssessment.riskFactors = (frontmatter as DossierFrontmatter).risk_factors || [];
+  result.riskAssessment.destructiveOperations =
+    (frontmatter as DossierFrontmatter).destructive_operations || [];
+  result.riskAssessment.requiresApproval =
+    (frontmatter as DossierFrontmatter).requires_approval !== false; // default true
 
   // 4. RECOMMENDATION
   if (result.recommendation === 'UNKNOWN') {
@@ -183,7 +213,7 @@ async function verifyDossier(dossierFile, trustedKeysFile) {
 }
 
 // Pretty print results
-function printResults(result) {
+function printResults(result: VerifyResult): void {
   console.log('\n🔍 Dossier Verification Report\n');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   console.log(`File: ${result.dossierFile}`);
@@ -292,10 +322,13 @@ function printResults(result) {
 }
 
 // Main
-async function main() {
+async function main(): Promise<void> {
   const options = parseArgs();
 
-  const result = await verifyDossier(options.dossierFile, options.trustedKeysFile);
+  const result = await verifyDossier(
+    options.dossierFile as string,
+    options.trustedKeysFile as string
+  );
 
   if (options.jsonOutput) {
     console.log(JSON.stringify(result, null, 2));
@@ -314,13 +347,9 @@ async function main() {
 }
 
 // Run
-if (require.main === module) {
-  try {
-    main();
-  } catch (err) {
-    console.error(`\nFatal error: ${err.message}`);
-    process.exit(1);
-  }
-}
+main().catch((err: unknown) => {
+  console.error(`\nFatal error: ${(err as Error).message}`);
+  process.exit(1);
+});
 
-module.exports = { verifyDossier };
+export { verifyDossier };

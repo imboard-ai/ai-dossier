@@ -1,11 +1,11 @@
-#!/usr/bin/env node
+#!/usr/bin/env npx tsx
 
 /**
  * Test script for list_dossiers functionality
  */
 
-const { listDossiers } = require('./dist/tools/listDossiers.js');
-const path = require('node:path');
+import path from 'node:path';
+import { listDossiers } from './dist/tools/listDossiers.js';
 
 // Test with the examples directory
 const examplesPath = path.join(__dirname, '../examples');
@@ -21,7 +21,7 @@ try {
   console.log('Test completed successfully!');
   process.exit(0);
 } catch (error) {
-  console.error('Test failed:', error.message);
-  console.error(error.stack);
+  console.error('Test failed:', (error as Error).message);
+  console.error((error as Error).stack);
   process.exit(1);
 }

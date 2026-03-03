@@ -14,7 +14,7 @@ help:
 	@echo "Build order:"
 	@echo "  1. packages/core (TypeScript → dist/)"
 	@echo "  2. mcp-server (TypeScript → dist/, depends on core)"
-	@echo "  3. cli (JavaScript, no build needed)"
+	@echo "  3. cli (TypeScript → dist/)"
 
 ## install: Install all npm dependencies
 install:
@@ -40,14 +40,16 @@ build-mcp: build-core
 
 ## build-cli: Build CLI (depends on core)
 build-cli: build-core
-	@echo "Checking CLI..."
-	@echo "✓ CLI is JavaScript - no build needed"
+	@echo "Building CLI..."
+	cd cli && npm run build
+	@echo "✓ cli built"
 
 ## clean: Remove all build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf packages/core/dist
 	rm -rf mcp-server/dist
+	rm -rf cli/dist
 	@echo "✓ Build artifacts cleaned"
 
 ## rebuild: Clean and rebuild all packages

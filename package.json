@@ -18,7 +18,7 @@
     "format": "biome format --write .",
     "check": "biome check --write .",
     "publish:core": "cd packages/core && npm run build && npm publish",
-    "publish:cli": "cd cli && npm publish",
+    "publish:cli": "cd cli && npm run build && npm publish",
     "publish:all": "npm run publish:core && npm run publish:cli"
   },
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
@@ -29,6 +29,7 @@
   },
   "devDependencies": {
     "@aws-sdk/client-kms": "^3.932.0",
-    "@biomejs/biome": "^2.3.6"
+    "@biomejs/biome": "^2.3.6",
+    "tsx": "^4.20.6"
   }
 }

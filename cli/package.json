@@ -8,10 +8,11 @@
   },
   "files": [
     "bin/",
-    "lib/",
+    "dist/",
     "README.md"
   ],
   "scripts": {
+    "build": "tsc",
     "test": "./test-verify.sh"
   },
   "keywords": [
@@ -45,5 +46,9 @@
   "dependencies": {
     "@imboard-ai/dossier-core": "^1.0.1",
     "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^24.10.0"
   }
 }

@@ -1,28 +1,35 @@
 /**
  * Common utilities for dossier signing tools
- * Shared by sign-dossier.js and sign-dossier-kms.js
+ * Shared by sign-dossier.ts and sign-dossier-kms.ts
  */
 
-const fs = require('node:fs');
-const { parseDossierContent, calculateChecksum, readFileIfExists } = require('@imboard-ai/dossier-core');
+import fs from 'node:fs';
+import {
+  calculateChecksum,
+  type DossierFrontmatter,
+  type ParsedDossier,
+  parseDossierContent,
+  readFileIfExists,
+} from '@imboard-ai/dossier-core';
 
 /**
  * Read and parse a dossier file
- * @param {string} dossierFile - Path to dossier file
- * @returns {{ frontmatter: object, body: string }} Parsed dossier
  */
-function readAndParseDossier(dossierFile) {
+function readAndParseDossier(dossierFile: string): {
+  frontmatter: DossierFrontmatter;
+  body: string;
+} {
   const content = readFileIfExists(dossierFile);
   if (!content) {
     console.error(`Error: File not found: ${dossierFile}`);
     process.exit(1);
   }
 
-  let parsed;
+  let parsed: ParsedDossier;
   try {
     parsed = parseDossierContent(content);
   } catch (err) {
-    console.error(`Error: ${err.message}`);
+    console.error(`Error: ${(err as Error).message}`);
     process.exit(1);
   }
 
@@ -31,11 +38,8 @@ function readAndParseDossier(dossierFile) {
 
 /**
  * Calculate and add checksum to frontmatter
- * @param {object} frontmatter - Frontmatter object to update
- * @param {string} body - Dossier body content
- * @returns {string} The calculated checksum hash
  */
-function addChecksum(frontmatter, body) {
+function addChecksum(frontmatter: DossierFrontmatter, body: string): string {
   console.log('\n📊 Calculating checksum...');
   const checksum = calculateChecksum(body);
   console.log(`   SHA256: ${checksum}`);
@@ -43,16 +47,15 @@ function addChecksum(frontmatter, body) {
   frontmatter.checksum = {
     algorithm: 'sha256',
     hash: checksum,
-  };
+  } as DossierFrontmatter['checksum'];
 
   return checksum;
 }
 
 /**
  * Handle dry run - print checksum without signing
- * @param {object} frontmatter - Frontmatter with checksum added
  */
-function handleDryRun(frontmatter) {
+function handleDryRun(frontmatter: DossierFrontmatter): void {
   console.log('\n✅ Dry run complete (checksum calculated, no signature)');
   console.log('\nUpdated frontmatter:');
   console.log(JSON.stringify(frontmatter, null, 2));
@@ -60,11 +63,8 @@ function handleDryRun(frontmatter) {
 
 /**
  * Write updated dossier file with new frontmatter
- * @param {string} dossierFile - Path to dossier file
- * @param {object} frontmatter - Updated frontmatter
- * @param {string} body - Dossier body content
  */
-function writeDossier(dossierFile, frontmatter, body) {
+function writeDossier(dossierFile: string, frontmatter: DossierFrontmatter, body: string): void {
   console.log('\n💾 Updating dossier file...');
 
   const updatedContent = `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
@@ -73,9 +73,4 @@ function writeDossier(dossierFile, frontmatter, body) {
   console.log('   ✓ File updated');
 }
 
-module.exports = {
-  readAndParseDossier,
-  addChecksum,
-  handleDryRun,
-  writeDossier,
-};
+export { readAndParseDossier, addChecksum, handleDryRun, writeDossier };

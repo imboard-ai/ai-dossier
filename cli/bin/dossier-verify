@@ -24,7 +24,7 @@ const {
   loadTrustedKeys,
   verifySignature
 } = require('@imboard-ai/dossier-core');
-const { convertGitHubBlobToRaw } = require('../lib/github-url');
+const { convertGitHubBlobToRaw } = require('../dist/github-url');
 
 // Colors for terminal output
 const colors = {

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env npx tsx
 
 /**
  * Dossier Schema Validator (Node.js)
@@ -7,13 +7,13 @@
  *
  * Usage:
  *   npm install ajv ajv-formats
- *   node validate-dossier.js /path/to/dossier.md
+ *   npx tsx validate-dossier.ts /path/to/dossier.md
  */
 
-const fs = require('node:fs');
-const path = require('node:path');
-const Ajv = require('ajv');
-const addFormats = require('ajv-formats');
+import fs from 'node:fs';
+import path from 'node:path';
+import Ajv, { type ErrorObject } from 'ajv';
+import addFormats from 'ajv-formats';
 
 // Load schema
 const schemaPath = path.join(__dirname, '../../dossier-schema.json');
@@ -27,7 +27,7 @@ const validate = ajv.compile(schema);
 /**
  * Extract JSON frontmatter from a Dossier markdown file
  */
-function extractFrontmatter(filePath) {
+function extractFrontmatter(filePath: string): Record<string, unknown> {
   const content = fs.readFileSync(filePath, 'utf8');
 
   // Match ---dossier\n{...}\n---
@@ -43,19 +43,23 @@ function extractFrontmatter(filePath) {
   try {
     return JSON.parse(jsonString);
   } catch (err) {
-    throw new Error(`Failed to parse frontmatter JSON: ${err.message}`);
+    throw new Error(`Failed to parse frontmatter JSON: ${(err as Error).message}`);
   }
 }
 
 /**
  * Validate a Dossier file
  */
-function validateDossier(filePath) {
+function validateDossier(filePath: string): boolean {
   console.log(`\n🔍 Validating: ${filePath}\n`);
 
   try {
     // Extract frontmatter
-    const frontmatter = extractFrontmatter(filePath);
+    const frontmatter = extractFrontmatter(filePath) as {
+      title?: string;
+      version?: string;
+      status?: string;
+    };
     console.log('✓ Frontmatter extracted successfully');
     console.log(`  Title: ${frontmatter.title}`);
     console.log(`  Version: ${frontmatter.version}`);
@@ -70,7 +74,7 @@ function validateDossier(filePath) {
       return true;
     } else {
       console.log('❌ INVALID - Schema validation failed:\n');
-      validate.errors.forEach((err, i) => {
+      (validate.errors as ErrorObject[]).forEach((err, i) => {
         console.log(`  Error ${i + 1}:`);
         console.log(`    Path: ${err.instancePath || '(root)'}`);
         console.log(`    Message: ${err.message}`);
@@ -82,7 +86,7 @@ function validateDossier(filePath) {
       return false;
     }
   } catch (err) {
-    console.log(`❌ ERROR: ${err.message}\n`);
+    console.log(`❌ ERROR: ${(err as Error).message}\n`);
     return false;
   }
 }
@@ -90,12 +94,12 @@ function validateDossier(filePath) {
 /**
  * Main
  */
-function main() {
+function main(): void {
   const args = process.argv.slice(2);
 
   if (args.length === 0) {
-    console.log('Usage: node validate-dossier.js <dossier-file.md>');
-    console.log('Example: node validate-dossier.js ../../examples/devops/deploy-to-aws.md');
+    console.log('Usage: npx tsx validate-dossier.ts <dossier-file.md>');
+    console.log('Example: npx tsx validate-dossier.ts ../../examples/devops/deploy-to-aws.md');
     process.exit(1);
   }
 
@@ -111,8 +115,6 @@ function main() {
 }
 
 // Run if called directly
-if (require.main === module) {
-  main();
-}
+main();
 
-module.exports = { extractFrontmatter, validateDossier };
+export { extractFrontmatter, validateDossier };

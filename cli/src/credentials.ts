@@ -3,16 +3,23 @@
  * Stores credentials at ~/.dossier/credentials.json with secure file permissions.
  */
 
-const fs = require('node:fs');
-const path = require('node:path');
-const { CONFIG_DIR } = require('./config');
+import fs from 'node:fs';
+import path from 'node:path';
+import { CONFIG_DIR } from './config';
+
+export interface Credentials {
+  token: string;
+  username: string;
+  orgs: string[];
+  expiresAt: string | null;
+}
 
 const CREDENTIALS_FILE = path.join(CONFIG_DIR, 'credentials.json');
 
 /**
  * Ensure the config directory exists.
  */
-function ensureConfigDir() {
+function ensureConfigDir(): void {
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   }
@@ -20,9 +27,8 @@ function ensureConfigDir() {
 
 /**
  * Save credentials to file with secure permissions (0600).
- * @param {{ token: string, username: string, orgs: string[], expiresAt?: string }} credentials
  */
-function saveCredentials(credentials) {
+function saveCredentials(credentials: Credentials): void {
   ensureConfigDir();
   const data = {
     token: credentials.token,
@@ -35,9 +41,8 @@ function saveCredentials(credentials) {
 
 /**
  * Load credentials from file.
- * @returns {{ token: string, username: string, orgs: string[], expiresAt: string|null } | null}
  */
-function loadCredentials() {
+function loadCredentials(): Credentials | null {
   if (!fs.existsSync(CREDENTIALS_FILE)) {
     return null;
   }
@@ -60,9 +65,8 @@ function loadCredentials() {
 
 /**
  * Delete the credentials file.
- * @returns {boolean} True if deleted, false if it didn't exist.
  */
-function deleteCredentials() {
+function deleteCredentials(): boolean {
   if (fs.existsSync(CREDENTIALS_FILE)) {
     fs.unlinkSync(CREDENTIALS_FILE);
     return true;
@@ -72,10 +76,8 @@ function deleteCredentials() {
 
 /**
  * Check if credentials are expired.
- * @param {{ expiresAt: string|null }} credentials
- * @returns {boolean}
  */
-function isExpired(credentials) {
+function isExpired(credentials: Pick<Credentials, 'expiresAt'>): boolean {
   if (!credentials.expiresAt) {
     return false;
   }
@@ -87,10 +89,4 @@ function isExpired(credentials) {
   }
 }
 
-module.exports = {
-  CREDENTIALS_FILE,
-  saveCredentials,
-  loadCredentials,
-  deleteCredentials,
-  isExpired,
-};
+export { CREDENTIALS_FILE, saveCredentials, loadCredentials, deleteCredentials, isExpired };

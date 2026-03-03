@@ -8,8 +8,8 @@
 const { program } = require('commander');
 const { execSync } = require('child_process');
 const path = require('path');
-const config = require('../lib/config');
-const { convertGitHubBlobToRaw } = require('../lib/github-url');
+const config = require('../dist/config');
+const { convertGitHubBlobToRaw } = require('../dist/github-url');
 
 // Package info
 const pkg = require('../package.json');
@@ -1193,9 +1193,9 @@ program
   .command('login')
   .description('Authenticate with the dossier registry via GitHub')
   .action(async () => {
-    const { runOAuthFlow } = require('../lib/oauth');
-    const { saveCredentials } = require('../lib/credentials');
-    const { getRegistryUrl } = require('../lib/registry-client');
+    const { runOAuthFlow } = require('../dist/oauth');
+    const { saveCredentials } = require('../dist/credentials');
+    const { getRegistryUrl } = require('../dist/registry-client');
 
     try {
       const registryUrl = getRegistryUrl();
@@ -1225,7 +1225,7 @@ program
   .command('logout')
   .description('Remove stored registry credentials')
   .action(() => {
-    const { deleteCredentials } = require('../lib/credentials');
+    const { deleteCredentials } = require('../dist/credentials');
 
     const deleted = deleteCredentials();
     if (deleted) {
@@ -1242,7 +1242,7 @@ program
   .command('whoami')
   .description('Show current registry user')
   .action(() => {
-    const { loadCredentials, isExpired } = require('../lib/credentials');
+    const { loadCredentials, isExpired } = require('../dist/credentials');
 
     const credentials = loadCredentials();
     if (!credentials) {

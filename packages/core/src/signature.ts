@@ -7,12 +7,12 @@
 
 import { createPublicKey, verify } from 'node:crypto';
 import { homedir } from 'node:os';
-import { sha256Hash } from './utils/crypto';
-import { readFileIfExists } from './utils/fs';
 import { join } from 'node:path';
 import { KMSClient, SigningAlgorithmSpec, VerifyCommand } from '@aws-sdk/client-kms';
 import type { SignatureResult } from './signers';
 import { getVerifierRegistry } from './signers';
+import { sha256Hash } from './utils/crypto';
+import { readFileIfExists } from './utils/fs';
 
 /**
  * Load trusted keys from file
