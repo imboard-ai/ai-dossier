@@ -3019,6 +3019,176 @@ keysCmd
   });
 
 // ============================================================================
+// COMMAND: lint (IMPLEMENTED)
+// ============================================================================
+program
+  .command('lint')
+  .description('Lint dossier files for errors and warnings')
+  .argument('[file]', 'Dossier file to lint')
+  .option('--strict', 'Treat warnings as errors')
+  .option('--json', 'Output diagnostics as JSON')
+  .option('--quiet', 'Only show errors (suppress warnings and info)')
+  .option('--config <path>', 'Path to .dossierrc.json config file')
+  .option('--list-rules', 'List all available lint rules and exit')
+  .action((file, options) => {
+    const core = require('@imboard-ai/dossier-core');
+
+    // List rules mode
+    if (options.listRules) {
+      const registry = new core.LintRuleRegistry();
+      registry.registerAll(core.defaultRules);
+      const rules = registry.getRules();
+
+      if (options.json) {
+        console.log(JSON.stringify(rules.map(r => ({
+          id: r.id,
+          description: r.description,
+          defaultSeverity: r.defaultSeverity,
+        })), null, 2));
+      } else {
+        console.log('Available lint rules:\n');
+        for (const rule of rules) {
+          const severity = rule.defaultSeverity.toUpperCase().padEnd(7);
+          console.log(`  ${severity}  ${rule.id}`);
+          console.log(`           ${rule.description}\n`);
+        }
+      }
+      process.exit(0);
+    }
+
+    if (!file) {
+      console.error('Error: missing required argument "file"');
+      process.exit(2);
+    }
+
+    // Load config
+    let lintConfig;
+    if (options.config) {
+      const fs = require('fs');
+      try {
+        const raw = fs.readFileSync(options.config, 'utf8');
+        const parsed = JSON.parse(raw);
+        lintConfig = { rules: parsed.rules || {} };
+      } catch (err) {
+        console.error(`Error loading config: ${err.message}`);
+        process.exit(2);
+      }
+    }
+
+    // Run linter
+    let result;
+    try {
+      result = core.lintDossierFile(file, lintConfig);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(2);
+    }
+
+    // Filter diagnostics based on --quiet
+    let diagnostics = result.diagnostics;
+    if (options.quiet) {
+      diagnostics = diagnostics.filter(d => d.severity === 'error');
+    }
+
+    // JSON output
+    if (options.json) {
+      console.log(JSON.stringify({
+        file,
+        diagnostics,
+        errorCount: result.errorCount,
+        warningCount: result.warningCount,
+        infoCount: result.infoCount,
+      }, null, 2));
+    } else {
+      // Human-readable output
+      if (diagnostics.length === 0) {
+        console.log(`${file}: no issues found`);
+      } else {
+        for (const d of diagnostics) {
+          const icon = d.severity === 'error' ? 'x' : d.severity === 'warning' ? '!' : 'i';
+          const field = d.field ? ` (${d.field})` : '';
+          console.log(`  ${icon} ${d.severity.padEnd(7)}  ${d.message}${field}  [${d.ruleId}]`);
+        }
+        console.log(`\n  ${result.errorCount} error(s), ${result.warningCount} warning(s), ${result.infoCount} info`);
+      }
+    }
+
+    // Exit codes: 0 = clean, 1 = warnings only, 2 = errors
+    const effectiveErrors = options.strict
+      ? result.errorCount + result.warningCount
+      : result.errorCount;
+
+    if (effectiveErrors > 0) {
+      process.exit(2);
+    } else if (result.warningCount > 0) {
+      process.exit(1);
+    } else {
+      process.exit(0);
+    }
+  });
+
+// ============================================================================
+// COMMAND: format (IMPLEMENTED)
+// ============================================================================
+program
+  .command('format')
+  .description('Format dossier files')
+  .argument('<file>', 'Dossier file to format')
+  .option('--check', 'Check if file is already formatted (exit 1 if not)')
+  .option('--no-checksum', 'Do not update checksum after formatting')
+  .option('--no-sort-keys', 'Do not sort frontmatter keys')
+  .option('--indent <n>', 'JSON indentation spaces', '2')
+  .option('--json', 'Output result as JSON')
+  .action((file, options) => {
+    const core = require('@imboard-ai/dossier-core');
+    const fs = require('fs');
+
+    const formatOptions = {
+      indent: parseInt(options.indent, 10),
+      sortKeys: options.sortKeys !== false,
+      updateChecksum: options.checksum !== false,
+    };
+
+    try {
+      if (options.check) {
+        // Check mode: read file, format in memory, compare
+        const content = fs.readFileSync(file, 'utf8');
+        const result = core.formatDossierContent(content, formatOptions);
+
+        if (options.json) {
+          console.log(JSON.stringify({ file, formatted: !result.changed }, null, 2));
+        } else {
+          if (result.changed) {
+            console.log(`${file}: needs formatting`);
+          } else {
+            console.log(`${file}: already formatted`);
+          }
+        }
+
+        process.exit(result.changed ? 1 : 0);
+      } else {
+        // Format mode: format file in place
+        const result = core.formatDossierFile(file, formatOptions);
+
+        if (options.json) {
+          console.log(JSON.stringify({ file, changed: result.changed }, null, 2));
+        } else {
+          if (result.changed) {
+            console.log(`${file}: formatted`);
+          } else {
+            console.log(`${file}: already formatted`);
+          }
+        }
+
+        process.exit(0);
+      }
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(2);
+    }
+  });
+
+// ============================================================================
 // Parse and execute
 // ============================================================================
 program.parse(process.argv);

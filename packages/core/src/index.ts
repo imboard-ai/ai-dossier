@@ -10,7 +10,26 @@
 
 // Checksum exports
 export { calculateChecksum, verifyIntegrity } from './checksum';
-
+export type { FormatOptions, FormatResult } from './formatter';
+// Formatter exports
+export { formatDossierContent, formatDossierFile } from './formatter';
+export type {
+  LintConfig,
+  LintDiagnostic,
+  LintResult,
+  LintRule,
+  LintRuleContext,
+  LintSeverity,
+  RuleSeverityOverride,
+} from './linter';
+// Linter exports
+export {
+  defaultRules,
+  LintRuleRegistry,
+  lintDossier,
+  lintDossierFile,
+  loadLintConfig,
+} from './linter';
 // Parser exports
 export { parseDossierContent, parseDossierFile, validateFrontmatter } from './parser';
 // Signature exports

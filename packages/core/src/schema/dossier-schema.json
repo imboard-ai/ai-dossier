@@ -1,0 +1,745 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/imboard-ai/dossier/schema/v1.0.0",
+  "title": "Dossier Schema",
+  "description": "JSON Schema for Dossier frontmatter metadata, providing deterministic structure for LLM agent automation",
+  "type": "object",
+  "required": [
+    "dossier_schema_version",
+    "title",
+    "version",
+    "protocol_version",
+    "status",
+    "objective",
+    "checksum",
+    "risk_level",
+    "requires_approval"
+  ],
+  "properties": {
+    "dossier_schema_version": {
+      "type": "string",
+      "description": "Version of the Dossier Schema specification being used",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "const": "1.0.0"
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable title of the Dossier",
+      "minLength": 3,
+      "maxLength": 200
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version of this specific Dossier",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9.-]+)?(\\+[a-zA-Z0-9.-]+)?$"
+    },
+    "protocol_version": {
+      "type": "string",
+      "description": "Dossier Protocol version this Dossier adheres to",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "status": {
+      "type": "string",
+      "description": "Lifecycle status of this Dossier",
+      "enum": ["Draft", "Stable", "Deprecated", "Experimental"]
+    },
+    "last_updated": {
+      "type": "string",
+      "description": "ISO 8601 date when the Dossier was last updated",
+      "format": "date"
+    },
+    "objective": {
+      "type": "string",
+      "description": "Clear, single-purpose statement (1-3 sentences) describing what this Dossier accomplishes",
+      "minLength": 10,
+      "maxLength": 500
+    },
+    "category": {
+      "type": "array",
+      "description": "Categories for organizing and discovering Dossiers",
+      "items": {
+        "type": "string",
+        "enum": [
+          "devops",
+          "database",
+          "development",
+          "data-science",
+          "security",
+          "testing",
+          "deployment",
+          "maintenance",
+          "setup",
+          "migration",
+          "monitoring",
+          "infrastructure",
+          "ci-cd",
+          "documentation"
+        ]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "tags": {
+      "type": "array",
+      "description": "Free-form tags for searchability (e.g., 'docker', 'aws', 'postgresql')",
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "maxLength": 50
+      },
+      "uniqueItems": true
+    },
+    "tools_required": {
+      "type": "array",
+      "description": "List of tools/commands that must be available for execution",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Tool or command name (e.g., 'docker', 'terraform', 'npm')"
+          },
+          "version": {
+            "type": "string",
+            "description": "Minimum version required (optional)"
+          },
+          "check_command": {
+            "type": "string",
+            "description": "Command to verify tool availability (e.g., 'docker --version')"
+          },
+          "install_url": {
+            "type": "string",
+            "description": "URL to installation instructions",
+            "format": "uri"
+          }
+        }
+      }
+    },
+    "estimated_duration": {
+      "type": "object",
+      "description": "Estimated time to complete this Dossier",
+      "properties": {
+        "min_minutes": {
+          "type": "number",
+          "description": "Minimum estimated duration in minutes",
+          "minimum": 0
+        },
+        "max_minutes": {
+          "type": "number",
+          "description": "Maximum estimated duration in minutes",
+          "minimum": 0
+        }
+      }
+    },
+    "risk_level": {
+      "type": "string",
+      "description": "Risk assessment of executing this Dossier (REQUIRED for security)",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "risk_factors": {
+      "type": "array",
+      "description": "Specific risk factors this dossier involves",
+      "items": {
+        "type": "string",
+        "enum": [
+          "modifies_files",
+          "deletes_files",
+          "modifies_cloud_resources",
+          "requires_credentials",
+          "network_access",
+          "executes_external_code",
+          "database_operations",
+          "system_configuration"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "requires_approval": {
+      "type": "boolean",
+      "description": "Whether user approval is required before execution (REQUIRED)",
+      "default": true
+    },
+    "destructive_operations": {
+      "type": "array",
+      "description": "Human-readable list of potentially destructive operations this dossier performs",
+      "items": {
+        "type": "string",
+        "minLength": 10
+      }
+    },
+    "checksum": {
+      "type": "object",
+      "description": "Content integrity hash (REQUIRED for security - verifies dossier hasn't been tampered with)",
+      "required": ["algorithm", "hash"],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "description": "Hash algorithm used",
+          "enum": ["sha256"],
+          "const": "sha256"
+        },
+        "hash": {
+          "type": "string",
+          "description": "SHA256 hash of dossier body content (after frontmatter)",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "description": "Optional cryptographic signature for authenticity verification (dual-signature system: AWS KMS for official, minisign for community)",
+      "required": ["algorithm", "signed_by"],
+      "oneOf": [
+        {
+          "description": "AWS KMS signature (official dossiers)",
+          "required": ["algorithm", "key_id", "signature", "signed_by"],
+          "properties": {
+            "algorithm": {
+              "type": "string",
+              "const": "ecdsa-sha256",
+              "description": "ECDSA signature with SHA256 (AWS KMS)"
+            },
+            "key_id": {
+              "type": "string",
+              "description": "AWS KMS key identifier (e.g., 'imboard-ai-2024-kms' or ARN)",
+              "examples": ["imboard-ai-2024-kms", "arn:aws:kms:us-east-1:942039714848:key/xxx"]
+            },
+            "signature": {
+              "type": "string",
+              "description": "Base64-encoded ECDSA signature (DER format)",
+              "pattern": "^[A-Za-z0-9+/]+=*$"
+            },
+            "public_key": {
+              "type": "string",
+              "description": "Base64-encoded DER public key from AWS KMS (optional, can be fetched from KMS)"
+            },
+            "signed_by": {
+              "type": "string",
+              "description": "Signer identity",
+              "examples": ["Imboard AI Security Team <security@imboard.ai>"]
+            },
+            "timestamp": {
+              "type": "string",
+              "description": "When the signature was created (ISO 8601 format)",
+              "format": "date-time"
+            }
+          }
+        },
+        {
+          "description": "minisign signature (community dossiers)",
+          "required": ["algorithm", "public_key", "signature", "signed_by"],
+          "properties": {
+            "algorithm": {
+              "type": "string",
+              "const": "ed25519",
+              "description": "Ed25519 signature (minisign)"
+            },
+            "public_key": {
+              "type": "string",
+              "description": "Minisign public key (base64 encoded, starts with 'RWT')",
+              "pattern": "^RWT[A-Za-z0-9+/=]+$"
+            },
+            "signature": {
+              "type": "string",
+              "description": "Minisign signature data (includes trusted comment)"
+            },
+            "key_id": {
+              "type": "string",
+              "description": "Human-readable key identifier",
+              "examples": ["author-2024", "community-member-2024"]
+            },
+            "signed_by": {
+              "type": "string",
+              "description": "Signer identity",
+              "examples": ["Author Name <author@example.com>"]
+            },
+            "timestamp": {
+              "type": "string",
+              "description": "When the signature was created (ISO 8601 format)",
+              "format": "date-time"
+            }
+          }
+        }
+      ]
+    },
+    "relationships": {
+      "type": "object",
+      "description": "Relationships with other Dossiers",
+      "properties": {
+        "preceded_by": {
+          "type": "array",
+          "description": "Dossiers that should run before this one",
+          "items": {
+            "type": "object",
+            "required": ["dossier"],
+            "properties": {
+              "dossier": {
+                "type": "string",
+                "description": "Name or path of the preceding Dossier"
+              },
+              "condition": {
+                "type": "string",
+                "enum": ["required", "optional", "suggested"],
+                "description": "Whether this prerequisite is required, optional, or suggested"
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why this prerequisite exists"
+              }
+            }
+          }
+        },
+        "followed_by": {
+          "type": "array",
+          "description": "Dossiers that should run after this one",
+          "items": {
+            "type": "object",
+            "required": ["dossier"],
+            "properties": {
+              "dossier": {
+                "type": "string",
+                "description": "Name or path of the following Dossier"
+              },
+              "condition": {
+                "type": "string",
+                "enum": ["required", "suggested"],
+                "description": "Whether this follow-up is required or suggested"
+              },
+              "purpose": {
+                "type": "string",
+                "description": "Purpose of the follow-up Dossier"
+              }
+            }
+          }
+        },
+        "alternatives": {
+          "type": "array",
+          "description": "Alternative Dossiers that accomplish similar goals",
+          "items": {
+            "type": "object",
+            "required": ["dossier"],
+            "properties": {
+              "dossier": {
+                "type": "string",
+                "description": "Name or path of the alternative Dossier"
+              },
+              "when_to_use": {
+                "type": "string",
+                "description": "When to use the alternative instead"
+              }
+            }
+          }
+        },
+        "conflicts_with": {
+          "type": "array",
+          "description": "Dossiers that conflict with this one",
+          "items": {
+            "type": "object",
+            "required": ["dossier", "reason"],
+            "properties": {
+              "dossier": {
+                "type": "string",
+                "description": "Name or path of the conflicting Dossier"
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why they conflict"
+              }
+            }
+          }
+        },
+        "can_run_parallel_with": {
+          "type": "array",
+          "description": "Dossiers that can be executed in parallel",
+          "items": {
+            "type": "string",
+            "description": "Name or path of parallelizable Dossier"
+          }
+        }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "description": "Input parameters and data required",
+      "properties": {
+        "required": {
+          "type": "array",
+          "description": "Required inputs that must be provided",
+          "items": {
+            "type": "object",
+            "required": ["name", "description"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Input parameter name"
+              },
+              "description": {
+                "type": "string",
+                "description": "Description of the input"
+              },
+              "type": {
+                "type": "string",
+                "description": "Data type (e.g., 'string', 'number', 'file', 'array')"
+              },
+              "validation": {
+                "type": "string",
+                "description": "Validation rules or regex pattern"
+              },
+              "example": {
+                "type": "string",
+                "description": "Example value"
+              }
+            }
+          }
+        },
+        "optional": {
+          "type": "array",
+          "description": "Optional inputs with default behaviors",
+          "items": {
+            "type": "object",
+            "required": ["name", "description"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "Input parameter name"
+              },
+              "description": {
+                "type": "string",
+                "description": "Description of the input"
+              },
+              "type": {
+                "type": "string",
+                "description": "Data type"
+              },
+              "default": {
+                "description": "Default value if not provided"
+              },
+              "example": {
+                "type": "string",
+                "description": "Example value"
+              }
+            }
+          }
+        },
+        "from_dossiers": {
+          "type": "array",
+          "description": "Inputs sourced from other Dossiers' outputs",
+          "items": {
+            "type": "object",
+            "required": ["source_dossier", "output_name"],
+            "properties": {
+              "source_dossier": {
+                "type": "string",
+                "description": "Name or path of source Dossier"
+              },
+              "output_name": {
+                "type": "string",
+                "description": "Name of the output from source Dossier"
+              },
+              "usage": {
+                "type": "string",
+                "description": "How this input is used"
+              }
+            }
+          }
+        }
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "description": "Outputs produced by this Dossier",
+      "properties": {
+        "files": {
+          "type": "array",
+          "description": "Files created or modified",
+          "items": {
+            "type": "object",
+            "required": ["path", "description"],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "File path (may include variables like ${PROJECT_ROOT})"
+              },
+              "description": {
+                "type": "string",
+                "description": "Description of the file"
+              },
+              "required": {
+                "type": "boolean",
+                "description": "Whether this file is always created",
+                "default": true
+              },
+              "format": {
+                "type": "string",
+                "description": "File format (e.g., 'json', 'yaml', 'sql')"
+              }
+            }
+          }
+        },
+        "configuration": {
+          "type": "array",
+          "description": "Configuration values produced",
+          "items": {
+            "type": "object",
+            "required": ["key", "description"],
+            "properties": {
+              "key": {
+                "type": "string",
+                "description": "Configuration key or variable name"
+              },
+              "description": {
+                "type": "string",
+                "description": "Description of the configuration"
+              },
+              "consumed_by": {
+                "type": "array",
+                "description": "Dossiers that consume this configuration",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "export_as": {
+                "type": "string",
+                "description": "How to export (e.g., 'env_var', 'file', 'terraform_output')"
+              }
+            }
+          }
+        },
+        "state_changes": {
+          "type": "array",
+          "description": "State changes made by this Dossier",
+          "items": {
+            "type": "object",
+            "required": ["description"],
+            "properties": {
+              "description": {
+                "type": "string",
+                "description": "Description of the state change"
+              },
+              "affects": {
+                "type": "string",
+                "description": "What this state change affects"
+              },
+              "reversible": {
+                "type": "boolean",
+                "description": "Whether this change can be rolled back"
+              }
+            }
+          }
+        },
+        "artifacts": {
+          "type": "array",
+          "description": "Generated artifacts (scripts, reports, logs)",
+          "items": {
+            "type": "object",
+            "required": ["path", "purpose"],
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Artifact path"
+              },
+              "purpose": {
+                "type": "string",
+                "description": "Purpose of the artifact"
+              },
+              "type": {
+                "type": "string",
+                "description": "Type of artifact (e.g., 'script', 'log', 'report')"
+              }
+            }
+          }
+        }
+      }
+    },
+    "coupling": {
+      "type": "object",
+      "description": "Coupling level with other systems and Dossiers",
+      "required": ["level"],
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": ["None", "Loose", "Medium", "Tight"],
+          "description": "Coupling level"
+        },
+        "details": {
+          "type": "string",
+          "description": "Explanation of coupling level and dependencies"
+        }
+      }
+    },
+    "prerequisites": {
+      "type": "array",
+      "description": "Prerequisites that must exist before execution",
+      "items": {
+        "type": "object",
+        "required": ["description"],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Description of the prerequisite"
+          },
+          "validation_command": {
+            "type": "string",
+            "description": "Command to validate this prerequisite exists"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["file", "directory", "tool", "service", "permission", "environment"],
+            "description": "Type of prerequisite"
+          }
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "description": "Success criteria and validation commands",
+      "properties": {
+        "success_criteria": {
+          "type": "array",
+          "description": "Verifiable criteria for success",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verification_commands": {
+          "type": "array",
+          "description": "Commands to verify success",
+          "items": {
+            "type": "object",
+            "required": ["command", "expected"],
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "Command to run"
+              },
+              "expected": {
+                "type": "string",
+                "description": "Expected output or result"
+              },
+              "description": {
+                "type": "string",
+                "description": "What this verifies"
+              }
+            }
+          }
+        }
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "description": "Rollback information for reversing this Dossier",
+      "properties": {
+        "supported": {
+          "type": "boolean",
+          "description": "Whether rollback is supported"
+        },
+        "procedure": {
+          "type": "string",
+          "description": "Description of rollback procedure"
+        },
+        "automated": {
+          "type": "boolean",
+          "description": "Whether rollback can be automated"
+        },
+        "backup_required": {
+          "type": "boolean",
+          "description": "Whether backup is required before execution"
+        }
+      }
+    },
+    "authors": {
+      "type": "array",
+      "description": "Authors or maintainers of this Dossier",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Author name"
+          },
+          "email": {
+            "type": "string",
+            "description": "Author email",
+            "format": "email"
+          },
+          "url": {
+            "type": "string",
+            "description": "Author URL",
+            "format": "uri"
+          }
+        }
+      }
+    },
+    "license": {
+      "type": "string",
+      "description": "License identifier (SPDX format recommended)"
+    },
+    "homepage": {
+      "type": "string",
+      "description": "URL to Dossier homepage or documentation",
+      "format": "uri"
+    },
+    "repository": {
+      "type": "string",
+      "description": "URL to Dossier source repository",
+      "format": "uri"
+    },
+    "custom": {
+      "type": "object",
+      "description": "Custom metadata fields (prefixed with X- in markdown)",
+      "additionalProperties": true
+    },
+    "mcp_integration": {
+      "type": "object",
+      "description": "MCP (Model Context Protocol) server integration metadata for automatic dossier execution",
+      "properties": {
+        "required": {
+          "type": "boolean",
+          "description": "Whether the dossier MCP server is required for execution",
+          "default": false
+        },
+        "server_name": {
+          "type": "string",
+          "description": "npm package name of the required MCP server",
+          "default": "@dossier/mcp-server"
+        },
+        "min_version": {
+          "type": "string",
+          "description": "Minimum MCP server version required (semver format)",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "features_used": {
+          "type": "array",
+          "description": "List of MCP tools and resources this dossier uses",
+          "items": {
+            "type": "string",
+            "enum": [
+              "verify_dossier",
+              "read_dossier",
+              "list_dossiers",
+              "validate_dossier",
+              "dossier://protocol",
+              "dossier://security",
+              "dossier://concept"
+            ]
+          },
+          "uniqueItems": true
+        },
+        "fallback": {
+          "type": "string",
+          "description": "Behavior when MCP server is not available",
+          "enum": ["manual_execution", "degraded", "error"],
+          "default": "manual_execution"
+        },
+        "benefits": {
+          "type": "array",
+          "description": "Benefits of using MCP server for this dossier",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
