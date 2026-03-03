@@ -891,7 +891,7 @@ function formatTable(dossiers, showPath = false) {
 
 program
   .command('list')
-  .description('List available dossiers in a directory or repository')
+  .description('List available dossiers from registry, directory, or repository')
   .argument('[source]', 'Directory, GitHub repo (github:owner/repo), or URL', '.')
   .option('-r, --recursive', 'Search subdirectories recursively (default for remote)')
   .option('--signed-only', 'Only show signed dossiers')
@@ -899,9 +899,68 @@ program
   .option('--category <category>', 'Filter by category')
   .option('--format <fmt>', 'Output format (table, json, simple)', 'table')
   .option('--show-path', 'Show full path instead of filename')
+  .option('--source <type>', 'Source type: registry, local, github')
+  .option('--page <number>', 'Page number (registry only)', '1')
+  .option('--per-page <number>', 'Results per page (registry only)', '20')
   .action(async (source, options) => {
     const fs = require('fs');
     const path = require('path');
+
+    // If --source registry, query the registry directly
+    if (options.source === 'registry') {
+      const { getClient } = require('../dist/registry-client');
+
+      const page = parseInt(options.page, 10) || 1;
+      const perPage = parseInt(options.perPage, 10) || 20;
+
+      try {
+        const client = getClient();
+        const result = await client.listDossiers({ category: options.category, page, perPage });
+
+        const dossiers = result.dossiers || result.data || [];
+
+        if (options.format === 'json') {
+          console.log(JSON.stringify(result, null, 2));
+          process.exit(0);
+        }
+
+        if (options.format === 'simple') {
+          for (const d of dossiers) {
+            console.log(d.name || '');
+          }
+          process.exit(0);
+        }
+
+        if (dossiers.length === 0) {
+          console.log('\n⚠️  No dossiers found in registry\n');
+          process.exit(0);
+        }
+
+        const total = result.total || dossiers.length;
+        console.log(`\n📋 Registry dossiers (${total} total):\n`);
+
+        for (const d of dossiers) {
+          const name = d.name || '';
+          const version = d.version || '';
+          const title = d.title || '';
+          const category = Array.isArray(d.category) ? d.category.join(', ') : (d.category || '');
+          console.log(`  ${name.padEnd(30)} ${('v' + version).padEnd(10)} ${category.padEnd(12)} ${title}`);
+        }
+
+        const totalPages = result.totalPages || Math.ceil(total / perPage);
+        if (totalPages > 1) {
+          console.log(`\nPage ${page}/${totalPages}`);
+          if (page < totalPages) {
+            console.log(`Use --page ${page + 1} to see more results`);
+          }
+        }
+        console.log('');
+      } catch (err) {
+        console.error(`\n❌ Registry list failed: ${err.message}\n`);
+        process.exit(1);
+      }
+      process.exit(0);
+    }
 
     // Parse the source to determine type
     const parsed = parseListSource(source);
@@ -1030,6 +1089,97 @@ program
     }
 
     process.exit(0);
+  });
+
+// ============================================================================
+// COMMAND: search (IMPLEMENTED)
+// ============================================================================
+program
+  .command('search')
+  .description('Search the registry for dossiers')
+  .argument('<query>', 'Search keywords')
+  .option('--category <category>', 'Filter by category (devops, database, development, security, etc.)')
+  .option('--page <number>', 'Page number', '1')
+  .option('--per-page <number>', 'Results per page', '20')
+  .option('--json', 'Output as JSON')
+  .action(async (query, options) => {
+    const { getClient } = require('../dist/registry-client');
+
+    const page = parseInt(options.page, 10) || 1;
+    const perPage = parseInt(options.perPage, 10) || 20;
+
+    try {
+      const client = getClient();
+
+      // Fetch all dossiers from registry, then filter client-side
+      // (the registry API does not yet have a dedicated search endpoint)
+      const result = await client.listDossiers({ category: options.category, page: 1, perPage: 100 });
+      const allDossiers = result.dossiers || [];
+
+      // Client-side full-text search across metadata fields
+      const queryLower = query.toLowerCase();
+      const terms = queryLower.split(/\s+/).filter(Boolean);
+
+      const matched = allDossiers.filter(d => {
+        const fields = [
+          d.name || '',
+          d.title || '',
+          d.description || d.objective || '',
+          ...(Array.isArray(d.category) ? d.category : [d.category || '']),
+          ...(d.tags || []),
+        ].map(f => String(f).toLowerCase()).join(' ');
+
+        return terms.every(term => fields.includes(term) || fields.indexOf(term) !== -1);
+      });
+
+      // Paginate client-side results
+      const total = matched.length;
+      const start = (page - 1) * perPage;
+      const dossiers = matched.slice(start, start + perPage);
+
+      if (options.json) {
+        console.log(JSON.stringify({ dossiers, total, page, perPage }, null, 2));
+        process.exit(0);
+      }
+
+      if (dossiers.length === 0) {
+        console.log(`\nNo dossiers found matching "${query}".\n`);
+        process.exit(0);
+      }
+
+      console.log(`\n🔍 Found ${total} dossier(s) matching "${query}":\n`);
+
+      for (const d of dossiers) {
+        const name = d.name || '';
+        const version = d.version || '';
+        const title = d.title || '';
+        const category = Array.isArray(d.category) ? d.category.join(', ') : (d.category || '');
+        const description = d.description || d.objective || '';
+
+        console.log(`  ${name} (v${version})${category ? '  [' + category + ']' : ''}`);
+        if (title) {
+          console.log(`  ${title}`);
+        }
+        if (description) {
+          const snippet = description.length > 100 ? description.slice(0, 100) + '...' : description;
+          console.log(`  ${snippet}`);
+        }
+        console.log('');
+      }
+
+      // Pagination info
+      const totalPages = Math.ceil(total / perPage);
+      if (totalPages > 1) {
+        console.log(`Page ${page}/${totalPages} (${perPage} per page)`);
+        if (page < totalPages) {
+          console.log(`Use --page ${page + 1} to see more results`);
+        }
+        console.log('');
+      }
+    } catch (err) {
+      console.error(`\n❌ Search failed: ${err.message}\n`);
+      process.exit(1);
+    }
   });
 
 // ============================================================================
