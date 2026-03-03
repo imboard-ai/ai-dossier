@@ -3,17 +3,21 @@
  * Handles reading and writing user preferences to ~/.dossier/config.json
  */
 
-const fs = require('node:fs');
-const path = require('node:path');
-const os = require('node:os');
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+export interface DossierConfig {
+  defaultLlm: string;
+  theme: string;
+  auditLog: boolean;
+  [key: string]: unknown;
+}
 
 const CONFIG_DIR = path.join(os.homedir(), '.dossier');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
-/**
- * Default configuration
- */
-const DEFAULT_CONFIG = {
+const DEFAULT_CONFIG: DossierConfig = {
   defaultLlm: 'auto',
   theme: 'auto',
   auditLog: true,
@@ -22,7 +26,7 @@ const DEFAULT_CONFIG = {
 /**
  * Ensure config directory exists
  */
-function ensureConfigDir() {
+function ensureConfigDir(): void {
   if (!fs.existsSync(CONFIG_DIR)) {
     fs.mkdirSync(CONFIG_DIR, { recursive: true });
   }
@@ -30,9 +34,8 @@ function ensureConfigDir() {
 
 /**
  * Load configuration from file
- * @returns {Object} Configuration object
  */
-function loadConfig() {
+function loadConfig(): DossierConfig {
   try {
     if (!fs.existsSync(CONFIG_FILE)) {
       return { ...DEFAULT_CONFIG };
@@ -51,47 +54,33 @@ function loadConfig() {
 
 /**
  * Save configuration to file
- * @param {Object} config - Configuration object to save
  */
-function saveConfig(config) {
+function saveConfig(config: DossierConfig): boolean {
   try {
     ensureConfigDir();
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
     return true;
   } catch (error) {
-    console.error('❌ Error: Could not save config file:', error.message);
+    console.error('❌ Error: Could not save config file:', (error as Error).message);
     return false;
   }
 }
 
 /**
  * Get a specific config value
- * @param {string} key - Config key to retrieve
- * @returns {*} Config value
  */
-function getConfig(key) {
+function getConfig(key: string): unknown {
   const config = loadConfig();
   return config[key];
 }
 
 /**
  * Set a specific config value
- * @param {string} key - Config key to set
- * @param {*} value - Value to set
- * @returns {boolean} Success status
  */
-function setConfig(key, value) {
+function setConfig(key: string, value: unknown): boolean {
   const config = loadConfig();
   config[key] = value;
   return saveConfig(config);
 }
 
-module.exports = {
-  loadConfig,
-  saveConfig,
-  getConfig,
-  setConfig,
-  CONFIG_DIR,
-  CONFIG_FILE,
-  DEFAULT_CONFIG,
-};
+export { loadConfig, saveConfig, getConfig, setConfig, CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG };

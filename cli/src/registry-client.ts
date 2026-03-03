@@ -6,12 +6,10 @@
 const DEFAULT_REGISTRY_URL = 'https://dossier-registry-mvp-ten.vercel.app';
 
 class RegistryError extends Error {
-  /**
-   * @param {string} message
-   * @param {number|null} statusCode
-   * @param {string|null} code
-   */
-  constructor(message, statusCode = null, code = null) {
+  statusCode: number | null;
+  code: string | null;
+
+  constructor(message: string, statusCode: number | null = null, code: string | null = null) {
     super(message);
     this.name = 'RegistryError';
     this.statusCode = statusCode;
@@ -19,22 +17,36 @@ class RegistryError extends Error {
   }
 }
 
+interface ListDossiersOptions {
+  category?: string;
+  page?: number;
+  perPage?: number;
+}
+
+interface SearchOptions {
+  page?: number;
+  perPage?: number;
+}
+
+interface DossierContentResult {
+  content: string;
+  digest: string | null;
+}
+
 class RegistryClient {
-  /**
-   * @param {string} baseUrl - Registry base URL
-   * @param {string|null} token - Optional Bearer token for authenticated requests
-   */
-  constructor(baseUrl, token = null) {
+  private baseUrl: string;
+  private token: string | null;
+
+  constructor(baseUrl: string, token: string | null = null) {
     this.baseUrl = `${baseUrl.replace(/\/+$/, '')}/api/v1`;
     this.token = token;
   }
 
   /**
    * Build request headers.
-   * @returns {Record<string, string>}
    */
-  _buildHeaders(contentType = null) {
-    const headers = { Accept: 'application/json' };
+  private _buildHeaders(contentType: string | null = null): Record<string, string> {
+    const headers: Record<string, string> = { Accept: 'application/json' };
     if (this.token) {
       headers.Authorization = `Bearer ${this.token}`;
     }
@@ -46,16 +58,14 @@ class RegistryClient {
 
   /**
    * Handle API response, throwing on errors.
-   * @param {Response} response
-   * @returns {Promise<any>}
    */
-  async _handleResponse(response) {
+  private async _handleResponse(response: Response): Promise<unknown> {
     if (!response.ok) {
       let message = `Registry request failed: ${response.status} ${response.statusText}`;
-      let code = null;
+      let code: string | null = null;
 
       try {
-        const body = await response.json();
+        const body = (await response.json()) as { error?: { message?: string; code?: string } };
         const errorData = body.error || {};
         if (errorData.message) {
           message = errorData.message;
@@ -73,11 +83,8 @@ class RegistryClient {
 
   /**
    * Build URL with query parameters.
-   * @param {string} path
-   * @param {Record<string, any>} params
-   * @returns {string}
    */
-  _buildUrl(path, params = {}) {
+  private _buildUrl(path: string, params: Record<string, unknown> = {}): string {
     const url = new URL(`${this.baseUrl}${path}`);
     for (const [key, value] of Object.entries(params)) {
       if (value != null) {
@@ -89,11 +96,9 @@ class RegistryClient {
 
   /**
    * List dossiers from the registry.
-   * @param {{ category?: string, page?: number, perPage?: number }} options
-   * @returns {Promise<{ dossiers: any[], pagination: any }>}
    */
-  async listDossiers(options = {}) {
-    const params = {
+  async listDossiers(options: ListDossiersOptions = {}): Promise<unknown> {
+    const params: Record<string, unknown> = {
       page: options.page || 1,
       per_page: options.perPage || 20,
     };
@@ -109,12 +114,9 @@ class RegistryClient {
 
   /**
    * Get metadata for a dossier.
-   * @param {string} name - Dossier name (e.g., 'myorg/deploy')
-   * @param {string|null} version - Optional version (default: latest)
-   * @returns {Promise<any>}
    */
-  async getDossier(name, version = null) {
-    const params = {};
+  async getDossier(name: string, version: string | null = null): Promise<unknown> {
+    const params: Record<string, unknown> = {};
     if (version) {
       params.version = version;
     }
@@ -127,12 +129,12 @@ class RegistryClient {
 
   /**
    * Download dossier content.
-   * @param {string} name - Dossier name
-   * @param {string|null} version - Optional version
-   * @returns {Promise<{ content: string, digest: string|null }>}
    */
-  async getDossierContent(name, version = null) {
-    const params = {};
+  async getDossierContent(
+    name: string,
+    version: string | null = null
+  ): Promise<DossierContentResult> {
+    const params: Record<string, unknown> = {};
     if (version) {
       params.version = version;
     }
@@ -143,10 +145,10 @@ class RegistryClient {
 
     if (!response.ok) {
       let message = `Failed to download dossier '${name}': ${response.status} ${response.statusText}`;
-      let code = null;
+      let code: string | null = null;
 
       try {
-        const body = await response.json();
+        const body = (await response.json()) as { error?: { message?: string; code?: string } };
         const errorData = body.error || {};
         if (errorData.message) {
           message = errorData.message;
@@ -167,12 +169,9 @@ class RegistryClient {
 
   /**
    * Search dossiers.
-   * @param {string} query - Search query
-   * @param {{ page?: number, perPage?: number }} options
-   * @returns {Promise<any>}
    */
-  async searchDossiers(query, options = {}) {
-    const params = {
+  async searchDossiers(query: string, options: SearchOptions = {}): Promise<unknown> {
+    const params: Record<string, unknown> = {
       q: query,
       page: options.page || 1,
       per_page: options.perPage || 20,
@@ -186,13 +185,13 @@ class RegistryClient {
 
   /**
    * Publish a dossier to the registry.
-   * @param {string} namespace - Target namespace (e.g., 'myorg/tools')
-   * @param {string} content - Full .ds.md file content
-   * @param {string|null} changelog - Optional changelog message
-   * @returns {Promise<any>}
    */
-  async publishDossier(namespace, content, changelog = null) {
-    const data = { namespace, content };
+  async publishDossier(
+    namespace: string,
+    content: string,
+    changelog: string | null = null
+  ): Promise<unknown> {
+    const data: Record<string, string> = { namespace, content };
     if (changelog) {
       data.changelog = changelog;
     }
@@ -207,12 +206,9 @@ class RegistryClient {
 
   /**
    * Delete a dossier from the registry.
-   * @param {string} name - Dossier name
-   * @param {string|null} version - Optional specific version to delete
-   * @returns {Promise<any>}
    */
-  async removeDossier(name, version = null) {
-    const params = {};
+  async removeDossier(name: string, version: string | null = null): Promise<unknown> {
+    const params: Record<string, unknown> = {};
     if (version) {
       params.version = version;
     }
@@ -226,9 +222,8 @@ class RegistryClient {
 
   /**
    * Get current user info.
-   * @returns {Promise<any>}
    */
-  async getMe() {
+  async getMe(): Promise<unknown> {
     const response = await fetch(this._buildUrl('/me'), {
       headers: this._buildHeaders(),
     });
@@ -237,11 +232,8 @@ class RegistryClient {
 
   /**
    * Exchange OAuth code for access token.
-   * @param {string} code - Authorization code
-   * @param {string} redirectUri - Redirect URI used in the auth request
-   * @returns {Promise<any>}
    */
-  async exchangeCode(code, redirectUri) {
+  async exchangeCode(code: string, redirectUri: string): Promise<unknown> {
     const response = await fetch(this._buildUrl('/auth/token'), {
       method: 'POST',
       headers: this._buildHeaders('application/json'),
@@ -253,27 +245,22 @@ class RegistryClient {
 
 /**
  * Get registry URL from environment or use default.
- * @returns {string}
  */
-function getRegistryUrl() {
+function getRegistryUrl(): string {
   return process.env.DOSSIER_REGISTRY_URL || DEFAULT_REGISTRY_URL;
 }
 
 /**
  * Create a registry client from environment configuration.
- * @param {string|null} token - Optional auth token
- * @returns {RegistryClient}
  */
-function getClient(token = null) {
+function getClient(token: string | null = null): RegistryClient {
   return new RegistryClient(getRegistryUrl(), token);
 }
 
 /**
  * Parse a name@version string.
- * @param {string} name - Dossier name, optionally with @version suffix
- * @returns {[string, string|null]} Tuple of [name, version]
  */
-function parseNameVersion(name) {
+function parseNameVersion(name: string): [string, string | null] {
   if (name.includes('@')) {
     const idx = name.lastIndexOf('@');
     return [name.slice(0, idx), name.slice(idx + 1)];
@@ -281,7 +268,7 @@ function parseNameVersion(name) {
   return [name, null];
 }
 
-module.exports = {
+export {
   RegistryClient,
   RegistryError,
   getRegistryUrl,

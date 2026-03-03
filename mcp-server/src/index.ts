@@ -6,6 +6,7 @@
  * Enables LLMs to discover, verify, and execute dossiers securely
  */
 
+import { getErrorMessage, getErrorStack } from '@imboard-ai/dossier-core';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -16,7 +17,6 @@ import {
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { getErrorMessage, getErrorStack } from '@imboard-ai/dossier-core';
 import { getConceptResource } from './resources/concept.js';
 import { getProtocolResource } from './resources/protocol.js';
 import { getSecurityResource } from './resources/security.js';
@@ -135,10 +135,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       stack: getErrorStack(error),
     });
 
-    return createToolResponse(
-      { error: { message: getErrorMessage(error), tool: name } },
-      true
-    );
+    return createToolResponse({ error: { message: getErrorMessage(error), tool: name } }, true);
   }
 });
 
