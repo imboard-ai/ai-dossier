@@ -3,7 +3,7 @@
  * Uses Node.js built-in fetch (Node 18+).
  */
 
-const DEFAULT_REGISTRY_URL = 'https://dossier-registry-mvp-ten.vercel.app';
+const DEFAULT_REGISTRY_URL = 'https://dossier-registry-mvp.vercel.app';
 
 class RegistryError extends Error {
   statusCode: number | null;
