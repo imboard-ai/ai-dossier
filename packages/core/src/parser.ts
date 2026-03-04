@@ -39,7 +39,7 @@ export function parseDossierContent(content: string): ParsedDossier {
  * Read and parse a dossier file
  */
 export function parseDossierFile(filePath: string): ParsedDossier {
-  const content = readFileIfExists(filePath, 'Dossier file not found: {path}')!;
+  const content = readFileIfExists(filePath, 'Dossier file not found: {path}') as string;
   return parseDossierContent(content);
 }
 

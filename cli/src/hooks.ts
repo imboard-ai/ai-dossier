@@ -126,9 +126,10 @@ function removeClaudeHook(): boolean {
     }
     return false;
   };
-  settings.hooks!.UserPromptSubmit = hooks.filter((h) => !matchesHook(h));
+  const filteredHooks = hooks.filter((h) => !matchesHook(h));
+  settings.hooks = { ...settings.hooks, UserPromptSubmit: filteredHooks };
 
-  if (settings.hooks!.UserPromptSubmit!.length === originalLength) {
+  if (filteredHooks.length === originalLength) {
     return false;
   }
 

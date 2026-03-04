@@ -300,7 +300,7 @@ Follow the Dossier Execution Protocol:
       }
       const category = args?.category as string | undefined;
       const riskLevel = args?.risk_level as string | undefined;
-      const filename = title.toLowerCase().replace(/\s+/g, '-') + '.ds.md';
+      const filename = `${title.toLowerCase().replace(/\s+/g, '-')}.ds.md`;
 
       return {
         messages: [

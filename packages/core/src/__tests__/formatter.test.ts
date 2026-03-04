@@ -42,7 +42,7 @@ describe('formatDossierContent', () => {
 
       // Parse the formatted output to check key order
       const match = result.formatted.match(/^---dossier\n([\s\S]*?)\n---/);
-      const formatted = JSON.parse(match![1]);
+      const formatted = JSON.parse(match?.[1] as string);
       const keys = Object.keys(formatted);
 
       // dossier_schema_version should be first
@@ -64,7 +64,7 @@ describe('formatDossierContent', () => {
       const result = formatDossierContent(content, { sortKeys: false });
 
       const match = result.formatted.match(/^---dossier\n([\s\S]*?)\n---/);
-      const formatted = JSON.parse(match![1]);
+      const formatted = JSON.parse(match?.[1] as string);
       const keys = Object.keys(formatted);
 
       expect(keys[0]).toBe('version');
@@ -133,7 +133,7 @@ describe('formatDossierContent', () => {
       const result = formatDossierContent(content);
 
       const match = result.formatted.match(/^---dossier\n([\s\S]*?)\n---/);
-      const formatted = JSON.parse(match![1]);
+      const formatted = JSON.parse(match?.[1] as string);
       const expectedHash = calculateChecksum(body);
       expect(formatted.checksum.hash).toBe(expectedHash);
     });
@@ -149,7 +149,7 @@ describe('formatDossierContent', () => {
       const result = formatDossierContent(content, { updateChecksum: false });
 
       const match = result.formatted.match(/^---dossier\n([\s\S]*?)\n---/);
-      const formatted = JSON.parse(match![1]);
+      const formatted = JSON.parse(match?.[1] as string);
       expect(formatted.checksum.hash).toBe(oldHash);
     });
   });
@@ -191,7 +191,7 @@ describe('formatDossierContent', () => {
       const result = formatDossierContent(content);
 
       const match = result.formatted.match(/^---dossier\n([\s\S]*?)\n---/);
-      const formatted = JSON.parse(match![1]);
+      const formatted = JSON.parse(match?.[1] as string);
       const keys = Object.keys(formatted);
 
       const aIdx = keys.indexOf('custom_field_a');
