@@ -1,9 +1,35 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { registerKeysCommand } from '../../commands/keys';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
+vi.mock('node:crypto', async () => {
+  const actual = await vi.importActual<typeof import('node:crypto')>('node:crypto');
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      generateKeyPairSync: vi.fn().mockReturnValue({
+        privateKey: {
+          export: vi
+            .fn()
+            .mockReturnValue('-----BEGIN PRIVATE KEY-----\nmock\n-----END PRIVATE KEY-----\n'),
+        },
+        publicKey: {
+          export: vi.fn().mockImplementation((opts: any) => {
+            if (opts.format === 'der') {
+              // Return a buffer with 44 bytes (12 header + 32 key)
+              return Buffer.alloc(44, 0);
+            }
+            return '-----BEGIN PUBLIC KEY-----\nmock\n-----END PUBLIC KEY-----\n';
+          }),
+        },
+      }),
+    },
+  };
+});
 
 const mockedFs = vi.mocked(fs);
 
@@ -48,6 +74,67 @@ describe('keys command', () => {
         .mocked(console.log)
         .mock.calls.filter((c) => typeof c[0] === 'string' && c[0].includes('public_key'));
       expect(jsonCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('keys generate', () => {
+    it('should generate a key pair', async () => {
+      mockedFs.existsSync.mockReturnValue(false);
+
+      const program = createTestProgram();
+      registerKeysCommand(program);
+
+      await expect(program.parseAsync(['node', 'dossier', 'keys', 'generate'])).rejects.toThrow(
+        'process.exit(0)'
+      );
+
+      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(2);
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Key pair generated'));
+    });
+
+    it('should use custom name', async () => {
+      mockedFs.existsSync.mockReturnValue(false);
+
+      const program = createTestProgram();
+      registerKeysCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'keys', 'generate', '--name', 'mykey'])
+      ).rejects.toThrow('process.exit(0)');
+
+      expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('mykey.pem'),
+        expect.any(String),
+        expect.any(Object)
+      );
+    });
+
+    it('should refuse to overwrite without --force', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+
+      const program = createTestProgram();
+      registerKeysCommand(program);
+
+      await expect(program.parseAsync(['node', 'dossier', 'keys', 'generate'])).rejects.toThrow(
+        'process.exit(1)'
+      );
+
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('already exist'));
+    });
+
+    it('should overwrite with --force', async () => {
+      mockedFs.existsSync.mockImplementation(() => true);
+      mockedFs.writeFileSync.mockClear();
+
+      const program = createTestProgram();
+      registerKeysCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'keys', 'generate', '--force'])
+      ).rejects.toThrow('process.exit(0)');
+
+      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(2);
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Key pair generated'));
     });
   });
 

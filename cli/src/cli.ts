@@ -14,6 +14,8 @@ import { registerConfigCommand } from './commands/config-cmd';
 import { registerCreateCommand } from './commands/create';
 import { registerExportCommand } from './commands/export';
 import { registerFormatCommand } from './commands/format';
+import { registerFromFileCommand } from './commands/from-file';
+import { registerGetCommand } from './commands/get';
 import { registerInfoCommand } from './commands/info';
 import { registerInitCommand } from './commands/init';
 import { registerInstallSkillCommand } from './commands/install-skill';
@@ -67,6 +69,8 @@ registerInstallSkillCommand(program);
 registerKeysCommand(program);
 registerLintCommand(program);
 registerFormatCommand(program);
+registerFromFileCommand(program);
+registerGetCommand(program);
 
 // Parse and execute
 program.parse(process.argv);

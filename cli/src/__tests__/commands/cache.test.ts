@@ -41,6 +41,46 @@ describe('cache command', () => {
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Cached dossiers'));
     });
 
+    it('should show sizes with --size flag', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readdirSync.mockReturnValue([
+        { name: '1.0.0.meta.json', isDirectory: () => false } as any,
+      ] as any);
+      mockedFs.readFileSync.mockReturnValue(JSON.stringify({ cached_at: '2025-01-01T00:00:00Z' }));
+      mockedFs.statSync.mockReturnValue({ size: 2048 } as any);
+
+      const program = createTestProgram();
+      registerCacheCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'cache', 'list', '--size'])
+      ).rejects.toThrow('process.exit(0)');
+
+      // SIZE header should appear with --size
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('SIZE'));
+    });
+
+    it('should not show sizes without --size flag', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readdirSync.mockReturnValue([
+        { name: '1.0.0.meta.json', isDirectory: () => false } as any,
+      ] as any);
+      mockedFs.readFileSync.mockReturnValue(JSON.stringify({ cached_at: '2025-01-01T00:00:00Z' }));
+      mockedFs.statSync.mockReturnValue({ size: 512 } as any);
+
+      const program = createTestProgram();
+      registerCacheCommand(program);
+
+      await expect(program.parseAsync(['node', 'dossier', 'cache', 'list'])).rejects.toThrow(
+        'process.exit(0)'
+      );
+
+      // Check that SIZE header is NOT in any log call
+      const logCalls = vi.mocked(console.log).mock.calls;
+      const hasSizeHeader = logCalls.some((c) => typeof c[0] === 'string' && c[0].includes('SIZE'));
+      expect(hasSizeHeader).toBe(false);
+    });
+
     it('should output JSON with --json', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readdirSync.mockReturnValue([

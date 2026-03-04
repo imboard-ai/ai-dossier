@@ -12,7 +12,8 @@ export function registerCacheCommand(program: Command): void {
     .command('list')
     .description('Show all cached dossiers')
     .option('--json', 'Output as JSON')
-    .action((options: { json?: boolean }) => {
+    .option('--size', 'Show file sizes')
+    .action((options: { json?: boolean; size?: boolean }) => {
       const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
 
       if (!fs.existsSync(cacheDir)) {
@@ -78,14 +79,23 @@ export function registerCacheCommand(program: Command): void {
       }
 
       console.log(`\n📦 Cached dossiers (${entries.length}):\n`);
-      console.log(`  ${'NAME'.padEnd(40)} ${'VERSION'.padEnd(10)} ${'SIZE'.padEnd(8)} CACHED AT`);
-      console.log(`  ${'─'.repeat(40)} ${'─'.repeat(10)} ${'─'.repeat(8)} ${'─'.repeat(19)}`);
+      if (options.size) {
+        console.log(`  ${'NAME'.padEnd(40)} ${'VERSION'.padEnd(10)} ${'SIZE'.padEnd(8)} CACHED AT`);
+        console.log(`  ${'─'.repeat(40)} ${'─'.repeat(10)} ${'─'.repeat(8)} ${'─'.repeat(19)}`);
+      } else {
+        console.log(`  ${'NAME'.padEnd(40)} ${'VERSION'.padEnd(10)} CACHED AT`);
+        console.log(`  ${'─'.repeat(40)} ${'─'.repeat(10)} ${'─'.repeat(19)}`);
+      }
 
       for (const e of entries) {
         const date = e.cached_at ? e.cached_at.slice(0, 19).replace('T', ' ') : '';
-        console.log(
-          `  ${e.name.padEnd(40)} ${e.version.padEnd(10)} ${formatSize(e.size).padEnd(8)} ${date}`
-        );
+        if (options.size) {
+          console.log(
+            `  ${e.name.padEnd(40)} ${e.version.padEnd(10)} ${formatSize(e.size).padEnd(8)} ${date}`
+          );
+        } else {
+          console.log(`  ${e.name.padEnd(40)} ${e.version.padEnd(10)} ${date}`);
+        }
       }
       console.log('');
       process.exit(0);
