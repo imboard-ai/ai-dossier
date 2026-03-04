@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import type { Command } from 'commander';
+import { safeDossierPath } from '../helpers';
 
 export function registerCacheCommand(program: Command): void {
   const cacheCmd = program.command('cache').description('Manage local dossier cache');
@@ -200,7 +201,7 @@ export function registerCacheCommand(program: Command): void {
       }
 
       if (name) {
-        const dossierDir = path.join(cacheDir, ...name.split('/'));
+        const dossierDir = safeDossierPath(cacheDir, name);
         if (!fs.existsSync(dossierDir)) {
           console.error(`\n❌ Not cached: ${name}\n`);
           process.exit(1);

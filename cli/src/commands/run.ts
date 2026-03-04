@@ -1,10 +1,16 @@
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import * as config from '../config';
-import { buildLlmCommand, detectLlm, runVerification } from '../helpers';
+import {
+  buildLlmCommand,
+  detectLlm,
+  downloadUrlToTempFile,
+  runVerification,
+  safeDossierPath,
+} from '../helpers';
 import { getClient, parseNameVersion } from '../registry-client';
 
 export function registerRunCommand(program: Command): void {
@@ -45,7 +51,7 @@ export function registerRunCommand(program: Command): void {
         let cached = false;
 
         if (!options.fresh) {
-          const dossierCacheDir = path.join(cacheDir, ...dossierName.split('/'));
+          const dossierCacheDir = safeDossierPath(cacheDir, dossierName);
           if (fs.existsSync(dossierCacheDir)) {
             const metaFiles = fs
               .readdirSync(dossierCacheDir)
@@ -77,7 +83,7 @@ export function registerRunCommand(program: Command): void {
             const result = await client.getDossierContent(dossierName, resolvedVersion);
 
             if (!options.fresh) {
-              const dossierCacheDir = path.join(cacheDir, ...dossierName.split('/'));
+              const dossierCacheDir = safeDossierPath(cacheDir, dossierName);
               fs.mkdirSync(dossierCacheDir, { recursive: true, mode: 0o700 });
               const contentFile = path.join(dossierCacheDir, `${resolvedVersion}.ds.md`);
               fs.writeFileSync(contentFile, result.content, 'utf8');
@@ -183,6 +189,20 @@ export function registerRunCommand(program: Command): void {
       console.log('📋 [MVP: Audit log printed to console]');
       console.log('📋 [Future: Would send to audit server]\n');
 
+      // If resolvedFile is still a URL, download it to a temp file first
+      const isResolvedUrl =
+        resolvedFile.startsWith('http://') || resolvedFile.startsWith('https://');
+      let tmpUrlFile: string | null = null;
+      if (isResolvedUrl) {
+        try {
+          tmpUrlFile = downloadUrlToTempFile(resolvedFile);
+          resolvedFile = tmpUrlFile;
+        } catch (err: any) {
+          console.error(`\n❌ Failed to download: ${err.message}\n`);
+          process.exit(1);
+        }
+      }
+
       if (options.dryRun) {
         console.log('🧪 DRY RUN MODE - No execution\n');
         console.log('Would execute:');
@@ -190,12 +210,18 @@ export function registerRunCommand(program: Command): void {
         console.log(`   LLM: ${llmOption}`);
 
         const llmToUse = detectLlm(llmOption as string, true);
-        const command = llmToUse
+        const descriptor = llmToUse
           ? buildLlmCommand(llmToUse, resolvedFile, options.headless)
-          : 'No LLM detected - would show error';
+          : null;
 
-        console.log(`   Command: ${command}\n`);
+        console.log(
+          `   Command: ${descriptor ? descriptor.description : 'No LLM detected - would show error'}\n`
+        );
         console.log('✅ All verifications passed - ready to execute');
+        if (tmpUrlFile)
+          try {
+            fs.unlinkSync(tmpUrlFile);
+          } catch {}
         process.exit(0);
       }
 
@@ -203,25 +229,47 @@ export function registerRunCommand(program: Command): void {
 
       const llmToUse = detectLlm(llmOption as string);
       if (!llmToUse) {
+        if (tmpUrlFile)
+          try {
+            fs.unlinkSync(tmpUrlFile);
+          } catch {}
         process.exit(2);
       }
 
-      const command = buildLlmCommand(llmToUse, resolvedFile, options.headless);
-      if (!command) {
+      const descriptor = buildLlmCommand(llmToUse, resolvedFile, options.headless);
+      if (!descriptor) {
         console.log(`❌ Unknown LLM: ${llmToUse}\n`);
         console.log('Supported: claude-code, auto\n');
+        if (tmpUrlFile)
+          try {
+            fs.unlinkSync(tmpUrlFile);
+          } catch {}
         process.exit(2);
       }
 
       try {
         const mode = options.headless ? 'headless' : 'interactive';
         console.log(`   Mode: ${mode}`);
-        console.log(`   Executing: ${command}\n`);
-        execSync(command, { stdio: 'inherit' });
+        console.log(`   Executing: ${descriptor.description}\n`);
+        const result = spawnSync(descriptor.cmd, descriptor.args, {
+          stdio: descriptor.stdin ? ['pipe', 'inherit', 'inherit'] : 'inherit',
+          input: descriptor.stdin,
+        });
+        if (result.status !== 0) {
+          throw { status: result.status };
+        }
         console.log('\n✅ Execution completed');
       } catch (error: any) {
         console.log('\n❌ Execution failed');
+        if (tmpUrlFile)
+          try {
+            fs.unlinkSync(tmpUrlFile);
+          } catch {}
         process.exit(error.status || 2);
       }
+      if (tmpUrlFile)
+        try {
+          fs.unlinkSync(tmpUrlFile);
+        } catch {}
     });
 }

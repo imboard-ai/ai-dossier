@@ -4,7 +4,7 @@
  * decodes JWT token to extract user info.
  */
 
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import readline from 'node:readline';
 
 export interface OAuthResult {
@@ -46,16 +46,20 @@ function decodeBase64Url(data: string): string {
  */
 function openBrowser(url: string): void {
   const platform = process.platform;
-  let command: string;
+  let cmd: string;
+  let args: string[];
   if (platform === 'darwin') {
-    command = `open "${url}"`;
+    cmd = 'open';
+    args = [url];
   } else if (platform === 'win32') {
-    command = `start "" "${url}"`;
+    cmd = 'cmd';
+    args = ['/c', 'start', '', url];
   } else {
-    command = `xdg-open "${url}"`;
+    cmd = 'xdg-open';
+    args = [url];
   }
 
-  exec(command, (_err) => {
+  execFile(cmd, args, (_err) => {
     // Browser failed to open — URL is already printed for the user
   });
 }

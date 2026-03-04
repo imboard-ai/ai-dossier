@@ -82,7 +82,7 @@ describe('config', () => {
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         CONFIG_FILE,
         expect.stringContaining('"claude-code"'),
-        'utf8'
+        { encoding: 'utf8', mode: 0o600 }
       );
     });
 
@@ -116,7 +116,7 @@ describe('config', () => {
       expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
         CONFIG_FILE,
         expect.stringContaining('"claude-code"'),
-        'utf8'
+        { encoding: 'utf8', mode: 0o600 }
       );
     });
   });

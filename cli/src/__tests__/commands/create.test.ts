@@ -1,8 +1,7 @@
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { registerCreateCommand } from '../../commands/create';
-import * as config from '../../config';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
@@ -53,14 +52,16 @@ describe('create command', () => {
     vi.mocked(detectLlm).mockReturnValue('claude-code');
     mockedFs.existsSync.mockReturnValue(true);
     mockedFs.readFileSync.mockReturnValue('# Meta dossier content');
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
+    vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
 
     const program = createTestProgram();
     registerCreateCommand(program);
 
     await program.parseAsync(['node', 'dossier', 'create', '--title', 'My Dossier']);
 
-    expect(execSync).toHaveBeenCalled();
+    expect(spawnSync).toHaveBeenCalledWith('claude', [expect.stringContaining('dossier-create-')], {
+      stdio: 'inherit',
+    });
     expect(mockedFs.writeFileSync).toHaveBeenCalled();
     expect(mockedFs.unlinkSync).toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('completed'));
@@ -70,9 +71,7 @@ describe('create command', () => {
     vi.mocked(detectLlm).mockReturnValue('claude-code');
     mockedFs.existsSync.mockReturnValue(true);
     mockedFs.readFileSync.mockReturnValue('# Meta dossier');
-    vi.mocked(execSync).mockImplementation(() => {
-      throw Object.assign(new Error('exec failed'), { status: 1 });
-    });
+    vi.mocked(spawnSync).mockReturnValue({ status: 1 } as any);
 
     const program = createTestProgram();
     registerCreateCommand(program);

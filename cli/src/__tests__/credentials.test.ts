@@ -78,6 +78,7 @@ describe('credentials', () => {
     });
 
     it('should return parsed credentials from file', () => {
+      mockedFs.statSync.mockReturnValue({ mode: 0o100600 } as any);
       mockedFs.readFileSync.mockReturnValue(
         JSON.stringify({ token: 'tok', username: 'user', orgs: ['o'], expires_at: null })
       );
@@ -92,25 +93,40 @@ describe('credentials', () => {
     });
 
     it('should return null if token is missing', () => {
+      mockedFs.statSync.mockReturnValue({ mode: 0o100600 } as any);
       mockedFs.readFileSync.mockReturnValue(JSON.stringify({ username: 'user' }));
       expect(loadCredentials()).toBeNull();
     });
 
     it('should return null if username is missing', () => {
+      mockedFs.statSync.mockReturnValue({ mode: 0o100600 } as any);
       mockedFs.readFileSync.mockReturnValue(JSON.stringify({ token: 'tok' }));
       expect(loadCredentials()).toBeNull();
     });
 
     it('should return null on invalid JSON', () => {
+      mockedFs.statSync.mockReturnValue({ mode: 0o100600 } as any);
       mockedFs.readFileSync.mockReturnValue('not json');
       expect(loadCredentials()).toBeNull();
     });
 
     it('should default orgs to empty array when missing', () => {
+      mockedFs.statSync.mockReturnValue({ mode: 0o100600 } as any);
       mockedFs.readFileSync.mockReturnValue(JSON.stringify({ token: 'tok', username: 'user' }));
 
       const creds = loadCredentials();
       expect(creds?.orgs).toEqual([]);
+    });
+
+    it('should warn and fix insecure permissions', () => {
+      mockedFs.statSync.mockReturnValue({ mode: 0o100644 } as any);
+      mockedFs.readFileSync.mockReturnValue(
+        JSON.stringify({ token: 'tok', username: 'user', orgs: [], expires_at: null })
+      );
+
+      loadCredentials();
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('insecure permissions'));
+      expect(mockedFs.chmodSync).toHaveBeenCalledWith(CREDENTIALS_FILE, 0o600);
     });
   });
 

@@ -47,6 +47,17 @@ function loadCredentials(): Credentials | null {
     return null;
   }
   try {
+    // Verify file permissions haven't been loosened
+    const stats = fs.statSync(CREDENTIALS_FILE);
+    const otherPerms = stats.mode & 0o077;
+    if (otherPerms !== 0) {
+      console.error(
+        `⚠️  Warning: ${CREDENTIALS_FILE} has insecure permissions (${(stats.mode & 0o777).toString(8)}). ` +
+          `Expected 0600. Credentials may have been compromised. Fixing permissions.`
+      );
+      fs.chmodSync(CREDENTIALS_FILE, 0o600);
+    }
+
     const raw = fs.readFileSync(CREDENTIALS_FILE, 'utf8');
     const data = JSON.parse(raw);
     if (!data.token || !data.username) {

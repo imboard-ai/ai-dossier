@@ -58,7 +58,10 @@ function loadConfig(): DossierConfig {
 function saveConfig(config: DossierConfig): boolean {
   try {
     ensureConfigDir();
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
     return true;
   } catch (error) {
     console.error('❌ Error: Could not save config file:', (error as Error).message);

@@ -3,6 +3,7 @@
  * Should be called AFTER verify_dossier passes
  */
 
+import { resolve } from 'node:path';
 import { type DossierFrontmatter, parseDossierFile } from '@imboard-ai/dossier-core';
 import { logger } from '../utils/logger';
 
@@ -30,6 +31,13 @@ export interface ReadDossierOutput {
  */
 export function readDossier(input: ReadDossierInput): ReadDossierOutput {
   const { path } = input;
+
+  // Validate path stays within the current working directory
+  const resolvedPath = resolve(path);
+  const cwd = process.cwd();
+  if (!resolvedPath.startsWith(`${cwd}/`) && resolvedPath !== cwd) {
+    throw new Error(`Access denied: path "${path}" is outside the working directory`);
+  }
 
   logger.info('Reading dossier', { dossierFile: path });
 

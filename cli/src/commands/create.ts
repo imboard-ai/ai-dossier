@@ -1,10 +1,10 @@
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import * as config from '../config';
-import { BIN_DIR, detectLlm, REPO_ROOT } from '../helpers';
+import { detectLlm, REPO_ROOT } from '../helpers';
 
 export function registerCreateCommand(program: Command): void {
   program
@@ -68,10 +68,7 @@ ${options.template ? `- **Template reference**: ${options.template}` : '- **Temp
 
         console.log('🤖 Launching dossier creation assistant (interactive mode)...\n');
 
-        let command: string;
-        if (llm === 'claude-code') {
-          command = `claude "$(cat '${tmpFile}')"`;
-        } else {
+        if (llm !== 'claude-code') {
           console.log(`❌ Unknown LLM: ${llm}\n`);
           console.log('Supported: claude-code, auto\n');
           try {
@@ -81,10 +78,13 @@ ${options.template ? `- **Template reference**: ${options.template}` : '- **Temp
         }
 
         try {
-          execSync(command, { stdio: 'inherit', shell: '/bin/bash' });
+          const result = spawnSync('claude', [tmpFile], { stdio: 'inherit' });
           try {
             fs.unlinkSync(tmpFile);
           } catch {}
+          if (result.status !== 0) {
+            throw { status: result.status, message: `claude exited with code ${result.status}` };
+          }
         } catch (execError) {
           try {
             fs.unlinkSync(tmpFile);

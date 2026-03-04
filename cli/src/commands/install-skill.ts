@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
+import { safeDossierPath } from '../helpers';
 import { getClient, parseNameVersion } from '../registry-client';
 
 export function registerInstallSkillCommand(program: Command): void {
@@ -93,7 +94,7 @@ export function registerInstallSkillCommand(program: Command): void {
           let resolvedVersion = version;
 
           if (!version) {
-            const dossierCacheDir = path.join(cacheDir, ...dossierName.split('/'));
+            const dossierCacheDir = safeDossierPath(cacheDir, dossierName);
             if (fs.existsSync(dossierCacheDir)) {
               const metaFiles = fs
                 .readdirSync(dossierCacheDir)
@@ -108,7 +109,10 @@ export function registerInstallSkillCommand(program: Command): void {
               }
             }
           } else {
-            const contentFile = path.join(cacheDir, ...dossierName.split('/'), `${version}.ds.md`);
+            const contentFile = path.join(
+              safeDossierPath(cacheDir, dossierName),
+              `${version}.ds.md`
+            );
             if (fs.existsSync(contentFile)) {
               content = fs.readFileSync(contentFile, 'utf8');
               resolvedVersion = version;

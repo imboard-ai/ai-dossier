@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
+import { safeDossierPath } from '../helpers';
 import { getClient, parseNameVersion } from '../registry-client';
 
 export function registerPullCommand(program: Command): void {
@@ -24,7 +25,7 @@ export function registerPullCommand(program: Command): void {
             version = meta.version || 'latest';
           }
 
-          const dossierDir = path.join(cacheDir, ...dossierName.split('/'));
+          const dossierDir = safeDossierPath(cacheDir, dossierName);
           const contentFile = path.join(dossierDir, `${version}.ds.md`);
           const metaFile = path.join(dossierDir, `${version}.meta.json`);
 

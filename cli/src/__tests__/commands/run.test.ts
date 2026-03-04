@@ -1,4 +1,4 @@
-import { execSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerRunCommand } from '../../commands/run';
@@ -21,7 +21,7 @@ const mockClient = {
 
 describe('run command', () => {
   beforeEach(() => {
-    vi.mocked(execSync).mockReset();
+    vi.mocked(spawnSync).mockReset();
     vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
     vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
       if (name.includes('@')) {
@@ -32,7 +32,14 @@ describe('run command', () => {
     });
     vi.mocked(helpers.runVerification).mockResolvedValue({ passed: true, checks: [] });
     vi.mocked(helpers.detectLlm).mockReturnValue('claude-code');
-    vi.mocked(helpers.buildLlmCommand).mockReturnValue('claude "test.ds.md"');
+    vi.mocked(helpers.buildLlmCommand).mockReturnValue({
+      cmd: 'claude',
+      args: ['test.ds.md'],
+      description: 'claude "test.ds.md"',
+    });
+    vi.mocked(helpers.safeDossierPath).mockImplementation((_base: string, name: string) => {
+      return `/home/.dossier/cache/${name}`;
+    });
     vi.mocked(config.getConfig).mockReturnValue(undefined);
     // Remove any CLAUDE_CODE env to prevent nested detection
     delete process.env.CLAUDE_CODE;
@@ -42,14 +49,14 @@ describe('run command', () => {
   it('should run a local dossier file', async () => {
     mockedFs.existsSync.mockReturnValue(true);
     mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
-    vi.mocked(execSync).mockReturnValue(Buffer.from(''));
+    vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
 
     const program = createTestProgram();
     registerRunCommand(program);
 
     await program.parseAsync(['node', 'dossier', 'run', 'test.ds.md']);
 
-    expect(execSync).toHaveBeenCalled();
+    expect(spawnSync).toHaveBeenCalled();
     expect(helpers.runVerification).toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Executing'));
   });
@@ -81,7 +88,7 @@ describe('run command', () => {
     ).rejects.toThrow('process.exit(0)');
 
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('DRY RUN'));
-    expect(execSync).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
   });
 
   it('should exit 1 when registry dossier not found', async () => {

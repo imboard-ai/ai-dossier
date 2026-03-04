@@ -4,7 +4,7 @@
  */
 
 import { readdirSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { type DossierListItem, getErrorMessage, parseDossierFile } from '@imboard-ai/dossier-core';
 import { logger } from '../utils/logger';
 
@@ -64,6 +64,13 @@ function findDossierFiles(dir: string, basePath: string, recursive: boolean): st
 export function listDossiers(input: ListDossiersInput): ListDossiersOutput {
   const searchPath = input.path || process.cwd();
   const recursive = input.recursive !== false; // default true
+
+  // Validate path stays within the current working directory
+  const resolvedPath = resolve(searchPath);
+  const cwd = process.cwd();
+  if (!resolvedPath.startsWith(`${cwd}/`) && resolvedPath !== cwd) {
+    throw new Error(`Access denied: path "${searchPath}" is outside the working directory`);
+  }
 
   logger.info('Scanning for dossiers', { searchPath, recursive });
 

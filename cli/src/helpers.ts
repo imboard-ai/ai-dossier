@@ -3,7 +3,7 @@
  * Extracted from the monolithic bin/dossier entry point.
  */
 
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -105,6 +105,42 @@ export interface GitHubFile {
 }
 
 // ============================================================================
+// Security helpers
+// ============================================================================
+
+/**
+ * Validate a dossier name to prevent path traversal attacks.
+ * Rejects names containing '..' segments or absolute paths.
+ * @throws Error if the name is invalid.
+ */
+export function validateDossierName(name: string): void {
+  const segments = name.split('/');
+  for (const segment of segments) {
+    if (segment === '..' || segment === '.' || segment === '') {
+      throw new Error(`Invalid dossier name: "${name}" contains unsafe path segments`);
+    }
+  }
+  if (path.isAbsolute(name)) {
+    throw new Error(`Invalid dossier name: "${name}" must not be an absolute path`);
+  }
+}
+
+/**
+ * Safely join a base directory with a dossier name and verify the result
+ * stays within the base directory.
+ * @throws Error if the resolved path escapes the base directory.
+ */
+export function safeDossierPath(baseDir: string, dossierName: string): string {
+  validateDossierName(dossierName);
+  const resolved = path.resolve(baseDir, ...dossierName.split('/'));
+  const resolvedBase = path.resolve(baseDir);
+  if (!resolved.startsWith(`${resolvedBase}${path.sep}`) && resolved !== resolvedBase) {
+    throw new Error(`Path traversal detected: "${dossierName}" resolves outside base directory`);
+  }
+  return resolved;
+}
+
+// ============================================================================
 // Helper functions
 // ============================================================================
 
@@ -167,30 +203,66 @@ export function detectLlm(llmOption: string, silent = false): string | null {
   }
 }
 
+export interface LlmExecDescriptor {
+  cmd: string;
+  args: string[];
+  /** If set, pipe this content to the process's stdin */
+  stdin?: string;
+  /** Human-readable description for logging */
+  description: string;
+}
+
 /**
- * Build the execution command for a given LLM.
- * @returns The command to execute, or null for unknown LLM.
+ * Download a URL to a local temp file (synchronous).
+ * Returns the temp file path.
  */
-export function buildLlmCommand(llm: string, file: string, headless = false): string | null {
-  // Detect if file is a URL and convert GitHub blob URLs to raw URLs
-  const isUrl = file.startsWith('http://') || file.startsWith('https://');
-  const resolvedFile = isUrl ? convertGitHubBlobToRaw(file) : file;
+export function downloadUrlToTempFile(url: string): string {
+  const resolvedUrl = convertGitHubBlobToRaw(url);
+  const tmpFile = path.join(
+    require('node:os').tmpdir(),
+    `dossier-${Date.now()}-${Math.random().toString(36).slice(2)}.ds.md`
+  );
+  const result = spawnSync('curl', ['-sL', '-o', tmpFile, '--', resolvedUrl], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 30000,
+  });
+  if (result.status !== 0) {
+    throw new Error(`Failed to download ${resolvedUrl}: curl exit code ${result.status}`);
+  }
+  if (!fs.existsSync(tmpFile) || fs.statSync(tmpFile).size === 0) {
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {}
+    throw new Error(`Downloaded file is empty: ${resolvedUrl}`);
+  }
+  return tmpFile;
+}
 
+/**
+ * Build the execution descriptor for a given LLM.
+ * File must be a local file path (download URLs first with downloadUrlToTempFile).
+ * @returns The execution descriptor, or null for unknown LLM.
+ */
+export function buildLlmCommand(
+  llm: string,
+  file: string,
+  headless = false
+): LlmExecDescriptor | null {
   if (llm === 'claude-code') {
-    const claudeCommand = headless ? 'claude -p' : 'claude';
-
-    if (isUrl) {
-      if (headless) {
-        return `tmpfile=$(mktemp /tmp/dossier.XXXXXX.ds.md) && curl -sL "${resolvedFile}" -o "\${tmpfile}" && test -s "\${tmpfile}" && cat "\${tmpfile}" | claude -p; status=$?; rm -f "\${tmpfile}"; exit $status`;
-      } else {
-        return `tmpfile=$(mktemp /tmp/dossier.XXXXXX.ds.md) && curl -sL "${resolvedFile}" -o "\${tmpfile}" && test -s "\${tmpfile}" && claude "\${tmpfile}"; status=$?; rm -f "\${tmpfile}"; exit $status`;
-      }
+    if (headless) {
+      const content = fs.readFileSync(file, 'utf8');
+      return {
+        cmd: 'claude',
+        args: ['-p'],
+        stdin: content,
+        description: `cat "${file}" | claude -p`,
+      };
     } else {
-      if (headless) {
-        return `cat "${resolvedFile}" | claude -p`;
-      } else {
-        return `claude "${resolvedFile}"`;
-      }
+      return {
+        cmd: 'claude',
+        args: [file],
+        description: `claude "${file}"`,
+      };
     }
   } else {
     return null;
@@ -228,53 +300,50 @@ export async function runVerification(
     results.stages.push({ stage: 1, name: 'Integrity', skipped: true });
   }
 
-  // Stage 2: Author Whitelist/Blacklist (TBD - demo)
+  // Stage 2: Author Whitelist/Blacklist (not yet implemented)
   if (!options.skipAuthorCheck && !options.skipAllChecks) {
     console.log('👤 Stage 2: Author Whitelist/Blacklist');
-    console.log('   ✅ PASSED: Author check (not in blacklist)');
-    console.log('   📋 [Demo: Would check ~/.dossier/authors-whitelist.txt]');
-    console.log('   📋 [Demo: Would check ~/.dossier/authors-blacklist.txt]\n');
-    results.stages.push({ stage: 2, name: 'Author Check', passed: true, demo: true });
+    console.log('   ⚠️  NOT IMPLEMENTED: Author check');
+    console.log('   📋 [Would check ~/.dossier/authors-whitelist.txt]');
+    console.log('   📋 [Would check ~/.dossier/authors-blacklist.txt]\n');
+    results.stages.push({ stage: 2, name: 'Author Check', skipped: true, demo: true });
   } else {
     console.log('⚠️  Stage 2: SKIPPED - Author check\n');
     results.stages.push({ stage: 2, name: 'Author Check', skipped: true });
   }
 
-  // Stage 3: Dossier Whitelist/Blacklist (TBD - demo)
+  // Stage 3: Dossier Whitelist/Blacklist (not yet implemented)
   if (!options.skipDossierCheck && !options.skipAllChecks) {
     console.log('📋 Stage 3: Dossier Whitelist/Blacklist');
-    console.log('   ✅ PASSED: Dossier check (not in blacklist)');
-    console.log('   📋 [Demo: Would check ~/.dossier/dossiers-whitelist.txt]');
-    console.log('   📋 [Demo: Would check ~/.dossier/dossiers-blacklist.txt]\n');
-    results.stages.push({ stage: 3, name: 'Dossier Check', passed: true, demo: true });
+    console.log('   ⚠️  NOT IMPLEMENTED: Dossier check');
+    console.log('   📋 [Would check ~/.dossier/dossiers-whitelist.txt]');
+    console.log('   📋 [Would check ~/.dossier/dossiers-blacklist.txt]\n');
+    results.stages.push({ stage: 3, name: 'Dossier Check', skipped: true, demo: true });
   } else {
     console.log('⚠️  Stage 3: SKIPPED - Dossier check\n');
     results.stages.push({ stage: 3, name: 'Dossier Check', skipped: true });
   }
 
-  // Stage 4: Risk Assessment
+  // Stage 4: Risk Assessment (not yet implemented)
   if (!options.skipRiskAssessment && !options.skipAllChecks) {
     console.log('🔴 Stage 4: Risk Assessment');
-    console.log('   ✅ PASSED: Risk level acceptable');
-    console.log('   📊 Risk: MEDIUM (based on verification)\n');
-    if (!options.force && !options.noPrompt) {
-      console.log('   ℹ️  High-risk dossiers would prompt for confirmation here');
-    }
-    results.stages.push({ stage: 4, name: 'Risk Assessment', passed: true });
+    console.log('   ⚠️  NOT IMPLEMENTED: Risk assessment');
+    console.log('   📋 [Would evaluate risk level and prompt for high-risk dossiers]\n');
+    results.stages.push({ stage: 4, name: 'Risk Assessment', skipped: true, demo: true });
   } else {
     console.log('⚠️  Stage 4: SKIPPED - Risk assessment\n');
     results.stages.push({ stage: 4, name: 'Risk Assessment', skipped: true });
   }
 
-  // Stage 5: Review Dossier (TBD - demo)
+  // Stage 5: Review Dossier (not yet implemented)
   if (!options.skipReview && !options.skipAllChecks) {
     const reviewDossierPath = options.reviewDossier || 'built-in://review-dossier.ds.md';
     console.log('🔍 Stage 5: Review Dossier Analysis');
     console.log(`   Using: ${reviewDossierPath}`);
-    console.log('   ✅ PASSED: Review dossier approved');
-    console.log('   📋 [Demo: Would execute review dossier to analyze target]');
-    console.log('   📋 [Demo: Review dossier would check for dangerous patterns]\n');
-    results.stages.push({ stage: 5, name: 'Review Dossier', passed: true, demo: true });
+    console.log('   ⚠️  NOT IMPLEMENTED: Review dossier analysis');
+    console.log('   📋 [Would execute review dossier to analyze target]');
+    console.log('   📋 [Would check for dangerous patterns]\n');
+    results.stages.push({ stage: 5, name: 'Review Dossier', skipped: true, demo: true });
   } else {
     console.log('⚠️  Stage 5: SKIPPED - Review dossier\n');
     results.stages.push({ stage: 5, name: 'Review Dossier', skipped: true });

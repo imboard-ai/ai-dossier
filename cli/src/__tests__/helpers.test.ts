@@ -222,22 +222,21 @@ describe('detectLlm', () => {
 
 describe('buildLlmCommand', () => {
   it('should build command for claude-code with local file', () => {
-    const cmd = buildLlmCommand('claude-code', '/path/to/dossier.ds.md');
-    expect(cmd).toBe('claude "/path/to/dossier.ds.md"');
+    mockedFs.readFileSync.mockReturnValue('file content');
+    const result = buildLlmCommand('claude-code', '/path/to/dossier.ds.md');
+    expect(result).not.toBeNull();
+    expect((result as NonNullable<typeof result>).cmd).toBe('claude');
+    expect((result as NonNullable<typeof result>).args).toEqual(['/path/to/dossier.ds.md']);
+    expect((result as NonNullable<typeof result>).stdin).toBeUndefined();
   });
 
   it('should build headless command for claude-code', () => {
-    const cmd = buildLlmCommand('claude-code', '/path/to/dossier.ds.md', true);
-    expect(cmd).toBe('cat "/path/to/dossier.ds.md" | claude -p');
-  });
-
-  it('should handle URLs by converting GitHub blob to raw', () => {
-    const cmd = buildLlmCommand(
-      'claude-code',
-      'https://github.com/owner/repo/blob/main/test.ds.md'
-    );
-    expect(cmd).toContain('raw.githubusercontent.com');
-    expect(cmd).toContain('curl -sL');
+    mockedFs.readFileSync.mockReturnValue('file content');
+    const result = buildLlmCommand('claude-code', '/path/to/dossier.ds.md', true);
+    expect(result).not.toBeNull();
+    expect((result as NonNullable<typeof result>).cmd).toBe('claude');
+    expect((result as NonNullable<typeof result>).args).toEqual(['-p']);
+    expect((result as NonNullable<typeof result>).stdin).toBe('file content');
   });
 
   it('should return null for unknown LLM', () => {
