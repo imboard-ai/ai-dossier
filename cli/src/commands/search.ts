@@ -12,6 +12,7 @@ export function registerSearchCommand(program: Command): void {
     )
     .option('--page <number>', 'Page number', '1')
     .option('--per-page <number>', 'Results per page', '20')
+    .option('--limit <number>', 'Maximum total results')
     .option('-c, --content', 'Also search dossier body content')
     .option('--json', 'Output as JSON')
     .action(
@@ -21,12 +22,14 @@ export function registerSearchCommand(program: Command): void {
           category?: string;
           page: string;
           perPage: string;
+          limit?: string;
           json?: boolean;
           content?: boolean;
         }
       ) => {
         const page = parseInt(options.page, 10) || 1;
         const perPage = parseInt(options.perPage, 10) || 20;
+        const limit = options.limit ? parseInt(options.limit, 10) : undefined;
 
         let allDossiers: any[];
         try {
@@ -108,6 +111,10 @@ export function registerSearchCommand(program: Command): void {
           for (const d of matched) {
             (d as any)._contentSnippet = contentMatches.get(d.name);
           }
+        }
+
+        if (limit && limit > 0) {
+          matched = matched.slice(0, limit);
         }
 
         const total = matched.length;

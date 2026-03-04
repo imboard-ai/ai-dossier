@@ -49,6 +49,7 @@ describe('keys command', () => {
 
     it('should display trusted keys', async () => {
       mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readdirSync.mockReturnValue([] as any);
       mockedFs.readFileSync.mockReturnValue('abc123key team-key-2025\ndef456key other-key\n');
       const program = createTestProgram();
       registerKeysCommand(program);
@@ -60,8 +61,24 @@ describe('keys command', () => {
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining('2 trusted key(s)'));
     });
 
+    it('should list generated key pairs', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readdirSync.mockReturnValue(['default.pem', 'default.pub', 'mykey.pem'] as any);
+      mockedFs.readFileSync.mockReturnValue('abc123key team-key\n');
+      const program = createTestProgram();
+      registerKeysCommand(program);
+
+      await expect(program.parseAsync(['node', 'dossier', 'keys', 'list'])).rejects.toThrow(
+        'process.exit(0)'
+      );
+
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Generated Key Pairs'));
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('2 key pair(s)'));
+    });
+
     it('should output JSON with --json', async () => {
       mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readdirSync.mockReturnValue(['default.pem', 'default.pub'] as any);
       mockedFs.readFileSync.mockReturnValue('abc123key team-key\n');
       const program = createTestProgram();
       registerKeysCommand(program);
@@ -72,7 +89,7 @@ describe('keys command', () => {
 
       const jsonCalls = vi
         .mocked(console.log)
-        .mock.calls.filter((c) => typeof c[0] === 'string' && c[0].includes('public_key'));
+        .mock.calls.filter((c) => typeof c[0] === 'string' && c[0].includes('"trusted"'));
       expect(jsonCalls.length).toBeGreaterThan(0);
     });
   });

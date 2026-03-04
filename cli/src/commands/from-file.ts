@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { calculateChecksum, Ed25519Signer } from '@imboard-ai/dossier-core';
 import type { Command } from 'commander';
@@ -11,12 +12,12 @@ export function registerFromFileCommand(program: Command): void {
     .option('--name <name>', 'Dossier name')
     .option('--title <title>', 'Dossier title')
     .option('--version <version>', 'Dossier version', '1.0.0')
-    .option('--status <status>', 'Dossier status', 'stable')
+    .option('--status <status>', 'Dossier status', 'draft')
     .option('--objective <text>', 'Dossier objective')
     .option('--author <name>', 'Author name (repeatable)', collectValues, [])
     .option('--meta <path>', 'JSON file with frontmatter fields')
     .option('--sign', 'Sign the dossier')
-    .option('--key <path>', 'Private key path for signing')
+    .option('--key <name-or-path>', 'Key name from ~/.dossier/ or path to private key')
     .option('--signed-by <name>', 'Signer identity')
     .option('-o, --output <path>', 'Output file path')
     .action(
@@ -101,10 +102,18 @@ export function registerFromFileCommand(program: Command): void {
             console.error('\n❌ --key is required when using --sign\n');
             process.exit(1);
           }
-          const keyPath = path.resolve(options.key);
+          let keyPath = path.resolve(options.key);
+          // Support name-based lookup from ~/.dossier/
           if (!fs.existsSync(keyPath)) {
-            console.error(`\n❌ Key file not found: ${keyPath}\n`);
-            process.exit(1);
+            const namedPath = path.join(os.homedir(), '.dossier', `${options.key}.pem`);
+            if (fs.existsSync(namedPath)) {
+              keyPath = namedPath;
+            } else {
+              console.error(`\n❌ Key not found: ${options.key}`);
+              console.error(`   Checked: ${keyPath}`);
+              console.error(`   Checked: ${namedPath}\n`);
+              process.exit(1);
+            }
           }
 
           try {
