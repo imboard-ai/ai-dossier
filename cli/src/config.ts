@@ -83,4 +83,13 @@ function setConfig(key: string, value: unknown): boolean {
   return saveConfig(config);
 }
 
-export { ensureConfigDir, loadConfig, saveConfig, getConfig, setConfig, CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG };
+export {
+  ensureConfigDir,
+  loadConfig,
+  saveConfig,
+  getConfig,
+  setConfig,
+  CONFIG_DIR,
+  CONFIG_FILE,
+  DEFAULT_CONFIG,
+};

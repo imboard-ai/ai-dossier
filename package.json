@@ -17,9 +17,13 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "check": "biome check --write .",
+    "prepare": "husky",
     "publish:core": "cd packages/core && npm run build && npm publish",
     "publish:cli": "cd cli && npm run build && npm publish",
     "publish:all": "npm run publish:core && npm run publish:cli"
+  },
+  "lint-staged": {
+    "*.{ts,js,json}": "biome check --write --no-errors-on-unmatched"
   },
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "license": "MIT",
@@ -30,6 +34,8 @@
   "devDependencies": {
     "@aws-sdk/client-kms": "^3.932.0",
     "@biomejs/biome": "^2.3.6",
+    "husky": "^9.1.7",
+    "lint-staged": "^15.5.1",
     "tsx": "^4.20.6"
   }
 }

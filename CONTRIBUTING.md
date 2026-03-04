@@ -87,6 +87,23 @@ Use GitHub Discussions for:
      ```
    - Restart Claude Code and test MCP tools
 
+### Code Quality
+
+This project uses [Biome](https://biomejs.dev/) for linting and formatting.
+
+**Automatic enforcement (pre-commit hook):**
+After running `npm install`, a Git pre-commit hook is automatically set up via [husky](https://typicode.github.io/husky/). Every commit will run Biome on your staged files and auto-fix issues before committing.
+
+**Manual commands:**
+```bash
+npm run lint          # Check for lint & format errors (read-only)
+npm run lint:fix      # Auto-fix lint & format errors
+npm run format        # Auto-format all files
+```
+
+**CI enforcement:**
+Pull requests are checked by a dedicated `lint` job in CI. Merging is blocked until the codebase passes `npm run lint`.
+
 ## Adding an Example Dossier
 
 Example dossiers are one of the most valuable contributions!
