@@ -61,50 +61,96 @@ export function registerKeysCommand(program: Command): void {
 
   keysCmd
     .command('list')
-    .description('List trusted signing keys')
+    .description('List trusted and generated signing keys')
     .option('--json', 'JSON output')
     .action((options: { json?: boolean }) => {
-      const trustedKeysPath = path.join(os.homedir(), '.dossier', 'trusted-keys.txt');
+      const dossierDir = path.join(os.homedir(), '.dossier');
+      const trustedKeysPath = path.join(dossierDir, 'trusted-keys.txt');
 
-      console.log('\n🔑 Trusted Signing Keys\n');
-
-      if (!fs.existsSync(trustedKeysPath)) {
-        console.log('⚠️  No trusted keys file found');
-        console.log(`   Location: ${trustedKeysPath}`);
-        console.log('\nTo add a trusted key:');
-        console.log('   dossier keys add <public-key> <identifier>\n');
-        process.exit(0);
+      // Discover generated key pairs in ~/.dossier/
+      const generatedKeys: { name: string; privatePath: string; publicPath: string }[] = [];
+      if (fs.existsSync(dossierDir)) {
+        const files = fs.readdirSync(dossierDir);
+        const pemFiles = files.filter((f) => f.endsWith('.pem'));
+        for (const pem of pemFiles) {
+          const name = pem.replace('.pem', '');
+          const pubFile = `${name}.pub`;
+          generatedKeys.push({
+            name,
+            privatePath: path.join(dossierDir, pem),
+            publicPath: files.includes(pubFile) ? path.join(dossierDir, pubFile) : '',
+          });
+        }
       }
 
-      const content = fs.readFileSync(trustedKeysPath, 'utf8');
-      const lines = content.split('\n').filter((line) => line.trim() && !line.startsWith('#'));
-
-      if (lines.length === 0) {
-        console.log('⚠️  No trusted keys configured');
-        console.log(`   File exists at: ${trustedKeysPath}`);
-        console.log('\nTo add a trusted key:');
-        console.log('   dossier keys add <public-key> <identifier>\n');
-        process.exit(0);
+      // Load trusted keys
+      let trustedLines: string[] = [];
+      if (fs.existsSync(trustedKeysPath)) {
+        const content = fs.readFileSync(trustedKeysPath, 'utf8');
+        trustedLines = content.split('\n').filter((line) => line.trim() && !line.startsWith('#'));
       }
 
       if (options.json) {
-        const keys = lines.map((line) => {
+        const trusted = trustedLines.map((line) => {
           const [key, ...idParts] = line.trim().split(/\s+/);
-          return { public_key: key, identifier: idParts.join(' ') };
+          return { type: 'trusted', public_key: key, identifier: idParts.join(' ') };
         });
-        console.log(JSON.stringify(keys, null, 2));
-      } else {
-        console.log(`Total: ${lines.length} trusted key(s)\n`);
-        lines.forEach((line, index) => {
-          const [key, ...idParts] = line.trim().split(/\s+/);
-          const identifier = idParts.join(' ');
-          const shortKey = key.length > 60 ? key.substring(0, 60) + '...' : key;
-          console.log(`${index + 1}. ${identifier}`);
-          console.log(`   ${shortKey}`);
+        const generated = generatedKeys.map((k) => ({
+          type: 'generated',
+          name: k.name,
+          private_key: k.privatePath,
+          public_key: k.publicPath,
+        }));
+        console.log(JSON.stringify({ trusted, generated }, null, 2));
+        process.exit(0);
+      }
+
+      // Display generated keys
+      if (generatedKeys.length > 0) {
+        console.log('\n🔑 Generated Key Pairs\n');
+        console.log(`Total: ${generatedKeys.length} key pair(s)\n`);
+        generatedKeys.forEach((k, index) => {
+          console.log(`${index + 1}. ${k.name}`);
+          console.log(`   Private: ${k.privatePath}`);
+          if (k.publicPath) {
+            console.log(`   Public:  ${k.publicPath}`);
+          }
           console.log();
         });
-        console.log(`Location: ${trustedKeysPath}\n`);
       }
+
+      // Display trusted keys
+      console.log('🔑 Trusted Signing Keys\n');
+
+      if (trustedLines.length === 0) {
+        if (!fs.existsSync(trustedKeysPath)) {
+          console.log('⚠️  No trusted keys file found');
+          console.log(`   Location: ${trustedKeysPath}`);
+        } else {
+          console.log('⚠️  No trusted keys configured');
+          console.log(`   File exists at: ${trustedKeysPath}`);
+        }
+        console.log('\nTo add a trusted key:');
+        console.log('   dossier keys add <public-key> <identifier>\n');
+
+        if (generatedKeys.length === 0) {
+          console.log('To generate a new key pair:');
+          console.log('   dossier keys generate\n');
+        }
+
+        process.exit(0);
+      }
+
+      console.log(`Total: ${trustedLines.length} trusted key(s)\n`);
+      trustedLines.forEach((line, index) => {
+        const [key, ...idParts] = line.trim().split(/\s+/);
+        const identifier = idParts.join(' ');
+        const shortKey = key.length > 60 ? key.substring(0, 60) + '...' : key;
+        console.log(`${index + 1}. ${identifier}`);
+        console.log(`   ${shortKey}`);
+        console.log();
+      });
+      console.log(`Location: ${trustedKeysPath}\n`);
 
       process.exit(0);
     });

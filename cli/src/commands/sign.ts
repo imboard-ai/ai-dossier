@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { OFFICIAL_KMS_KEYS, REPO_ROOT } from '../helpers';
@@ -10,7 +11,10 @@ export function registerSignCommand(program: Command): void {
     .description('Sign dossier with cryptographic key (supports any AWS KMS key)')
     .argument('<file>', 'Dossier file to sign')
     .option('--method <type>', 'Signing method: kms (AWS KMS) or ed25519 (local key)', 'kms')
-    .option('--key <path>', 'Path to Ed25519 private key (required for ed25519 method)')
+    .option(
+      '--key <name-or-path>',
+      'Key name from ~/.dossier/ or path to Ed25519 private key (required for ed25519 method)'
+    )
     .option(
       '--key-id <id>',
       'KMS key alias/ARN (e.g., alias/my-key or arn:aws:kms:...) or ed25519 key ID'
@@ -94,18 +98,26 @@ export function registerSignCommand(program: Command): void {
           if (!options.key && !options.dryRun) {
             console.log('\n❌ Error: --key is required for ed25519 signing');
             console.log('\nGenerate a key pair with:');
-            console.log('  openssl genpkey -algorithm ED25519 -out private-key.pem');
-            console.log('  openssl pkey -in private-key.pem -pubout -out public-key.pem');
+            console.log('  dossier keys generate --name my-key');
             console.log('\nThen sign with:');
-            console.log(`  dossier sign ${file} --method ed25519 --key private-key.pem`);
+            console.log(`  dossier sign ${file} --method ed25519 --key my-key`);
+            console.log(`  dossier sign ${file} --method ed25519 --key /path/to/key.pem`);
             process.exit(1);
           }
 
           if (options.key) {
-            const keyPath = path.resolve(options.key);
+            let keyPath = path.resolve(options.key);
+            // Support name-based lookup from ~/.dossier/
             if (!fs.existsSync(keyPath)) {
-              console.log(`\n❌ Key file not found: ${keyPath}`);
-              process.exit(1);
+              const namedPath = path.join(os.homedir(), '.dossier', `${options.key}.pem`);
+              if (fs.existsSync(namedPath)) {
+                keyPath = namedPath;
+              } else {
+                console.log(`\n❌ Key not found: ${options.key}`);
+                console.log(`   Checked: ${keyPath}`);
+                console.log(`   Checked: ${namedPath}`);
+                process.exit(1);
+              }
             }
             signArgs.push('--key', keyPath);
             console.log(`   Key: ${keyPath}`);
