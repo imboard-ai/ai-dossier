@@ -111,7 +111,7 @@ export function registerPublishCommand(program: Command): void {
         let existingVersion: string | null = null;
         let versionExists = false;
         try {
-          const existing = (await client.getDossier(fullPath, version)) as any;
+          const existing = await client.getDossier(fullPath, version);
           if (existing && existing.version === version) {
             versionExists = true;
           }
@@ -144,7 +144,7 @@ export function registerPublishCommand(program: Command): void {
 
         // Check if dossier exists at any version (for overwrite warning)
         try {
-          const existing = (await client.getDossier(fullPath)) as any;
+          const existing = await client.getDossier(fullPath);
           if (existing) {
             existingVersion = existing.version || null;
           }
@@ -186,11 +186,7 @@ export function registerPublishCommand(program: Command): void {
         }
 
         try {
-          const result = (await client.publishDossier(
-            namespace,
-            content,
-            options.changelog || null
-          )) as any;
+          const result = await client.publishDossier(namespace, content, options.changelog || null);
 
           const verifyCommand = `dossier info ${fullPath}@${version}`;
           const cdnDelaySeconds = 30;

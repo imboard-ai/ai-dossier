@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import type { DossierListItem } from '../registry-client';
 import { getClient } from '../registry-client';
 
 export function registerSearchCommand(program: Command): void {
@@ -31,14 +32,14 @@ export function registerSearchCommand(program: Command): void {
         const perPage = parseInt(options.perPage, 10) || 20;
         const limit = options.limit ? parseInt(options.limit, 10) : undefined;
 
-        let allDossiers: any[];
+        let allDossiers: DossierListItem[];
         try {
           const client = getClient();
-          const result = (await client.listDossiers({
+          const result = await client.listDossiers({
             category: options.category,
             page: 1,
             perPage: 100,
-          })) as any;
+          });
           allDossiers = result.dossiers || [];
         } catch (err: unknown) {
           console.error(`\n❌ Search failed: ${(err as Error).message}\n`);
@@ -49,7 +50,7 @@ export function registerSearchCommand(program: Command): void {
         const queryLower = query.toLowerCase();
         const terms = queryLower.split(/\s+/).filter(Boolean);
 
-        let matched = allDossiers.filter((d: any) => {
+        let matched = allDossiers.filter((d) => {
           const fields = [
             d.name || '',
             d.title || '',
@@ -57,23 +58,24 @@ export function registerSearchCommand(program: Command): void {
             ...(Array.isArray(d.category) ? d.category : [d.category || '']),
             ...(d.tags || []),
           ]
-            .map((f: string) => String(f).toLowerCase())
+            .map((f) => String(f).toLowerCase())
             .join(' ');
 
           return terms.every((term) => fields.includes(term) || fields.indexOf(term) !== -1);
         });
 
         // Content search: fetch body and filter by content match
+        let contentMatches: Map<string, string> | null = null;
         if (options.content) {
           const client = getClient();
           const CONCURRENCY = 5;
-          const contentMatches: Map<string, string> = new Map();
+          contentMatches = new Map();
 
           // Process in batches for concurrency limiting
           for (let i = 0; i < matched.length; i += CONCURRENCY) {
             const batch = matched.slice(i, i + CONCURRENCY);
-            const results = await Promise.all(
-              batch.map(async (d: any) => {
+            await Promise.all(
+              batch.map(async (d) => {
                 try {
                   const { content } = await client.getDossierContent(d.name, d.version || null);
                   const bodyLower = content.toLowerCase();
@@ -87,30 +89,17 @@ export function registerSearchCommand(program: Command): void {
                       (start > 0 ? '...' : '') +
                       content.slice(start, end).replace(/\n/g, ' ') +
                       (end < content.length ? '...' : '');
-                    contentMatches.set(d.name, snippet);
-                    return d;
+                    contentMatches?.set(d.name, snippet);
                   }
-                  return null;
                 } catch {
-                  return null;
+                  // Skip dossiers that fail to fetch
                 }
               })
             );
-            // We don't filter here yet; we collect results
-            for (const r of results) {
-              if (r === null) {
-                // Mark for removal
-              }
-            }
           }
 
           // Keep only dossiers that matched in content
-          matched = matched.filter((d: any) => contentMatches.has(d.name));
-
-          // Attach snippets for display
-          for (const d of matched) {
-            (d as any)._contentSnippet = contentMatches.get(d.name);
-          }
+          matched = matched.filter((d) => contentMatches?.has(d.name));
         }
 
         if (limit && limit > 0) {
@@ -149,8 +138,9 @@ export function registerSearchCommand(program: Command): void {
               description.length > 100 ? `${description.slice(0, 100)}...` : description;
             console.log(`  ${snippet}`);
           }
-          if ((d as any)._contentSnippet) {
-            console.log(`  Content match: ${(d as any)._contentSnippet}`);
+          const snippet = contentMatches?.get(d.name);
+          if (snippet) {
+            console.log(`  Content match: ${snippet}`);
           }
           console.log('');
         }

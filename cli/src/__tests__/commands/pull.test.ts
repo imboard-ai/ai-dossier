@@ -13,7 +13,7 @@ describe('pull command', () => {
   const mockClient = {
     getDossier: vi.fn(),
     getDossierContent: vi.fn(),
-    baseUrl: 'https://registry.example.com/api/v1',
+    getRegistryBaseUrl: () => 'https://registry.example.com',
   };
 
   beforeEach(() => {

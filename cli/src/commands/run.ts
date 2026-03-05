@@ -78,7 +78,7 @@ export function registerRunCommand(program: Command): void {
             const client = getClient();
             let resolvedVersion = version;
             if (!resolvedVersion) {
-              const meta = (await client.getDossier(dossierName)) as any;
+              const meta = await client.getDossier(dossierName);
               resolvedVersion = meta.version || 'latest';
             }
             const result = await client.getDossierContent(dossierName, resolvedVersion);
@@ -94,7 +94,7 @@ export function registerRunCommand(program: Command): void {
                   {
                     cached_at: new Date().toISOString(),
                     version: resolvedVersion,
-                    source_registry_url: (client as any).baseUrl.replace(/\/api\/v1$/, ''),
+                    source_registry_url: client.getRegistryBaseUrl(),
                   },
                   null,
                   2

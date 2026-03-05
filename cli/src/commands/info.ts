@@ -36,7 +36,7 @@ export function registerInfoCommand(program: Command): void {
         try {
           const [dossierName, version] = parseNameVersion(fileOrName);
           const client = getClient();
-          const meta = (await client.getDossier(dossierName, version || null)) as any;
+          const meta = await client.getDossier(dossierName, version || null);
           frontmatter = meta;
           body = null;
         } catch (err: any) {
