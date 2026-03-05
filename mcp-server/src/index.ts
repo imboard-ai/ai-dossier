@@ -17,6 +17,7 @@ import {
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { getConceptResource } from './resources/concept.js';
+import { getOrchestrationResource } from './resources/orchestration.js';
 import { getProtocolResource } from './resources/protocol.js';
 import { getSecurityResource } from './resources/security.js';
 import { type CancelJourneyInput, cancelJourney } from './tools/cancelJourney.js';
@@ -322,6 +323,13 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => {
         description: 'Introduction to dossiers - what they are and why to use them',
         mimeType: 'text/markdown',
       },
+      {
+        uri: 'dossier://orchestration',
+        name: 'Orchestration Reference',
+        description:
+          'Complete reference for multi-dossier journey tools: resolve_graph, verify_graph, start_journey, step_complete, get_journey_status, cancel_journey',
+        mimeType: 'text/markdown',
+      },
     ],
   };
 });
@@ -346,6 +354,10 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
 
       case 'dossier://concept':
         content = getConceptResource();
+        break;
+
+      case 'dossier://orchestration':
+        content = getOrchestrationResource();
         break;
 
       default:
@@ -375,11 +387,24 @@ server.setRequestHandler(ListPromptsRequestSchema, async () => {
     prompts: [
       {
         name: 'execute-dossier',
-        description: 'Run a dossier with verification and protocol',
+        description:
+          'Run a dossier with verification and protocol. Automatically chooses single-dossier or multi-dossier journey flow based on relationships.',
         arguments: [
           {
             name: 'dossier_path',
             description: 'Path or URL to the dossier file',
+            required: true,
+          },
+        ],
+      },
+      {
+        name: 'execute-journey',
+        description:
+          'Guide the LLM through a multi-step dossier journey: resolve, verify, present plan, execute steps in order, collect outputs.',
+        arguments: [
+          {
+            name: 'graph_id',
+            description: 'ID of a previously resolved graph (from resolve_graph)',
             required: true,
           },
         ],
@@ -429,20 +454,93 @@ server.setRequestHandler(GetPromptRequestSchema, async (request) => {
               type: 'text',
               text: `Execute the dossier at: ${dossierPath}
 
-Follow the Dossier Execution Protocol:
+## Decision: Single or Multi-Dossier?
 
-1. **VERIFY** - Run \`dossier verify ${dossierPath}\` to check integrity and signature
-   - If verification fails, STOP and report the issue
-   - If signature is from untrusted source, ask user whether to proceed
+First, read the dossier metadata to check for relationships:
+- Use \`read_dossier({ path: "${dossierPath}" })\` and inspect the \`metadata.relationships\` field.
 
-2. **READ** - Use the read_dossier tool to get the dossier content
+**If the dossier has \`relationships.preceded_by\` or \`relationships.followed_by\` with \`condition: "required"\`:**
+→ Use the **journey flow** (multi-dossier):
+1. \`resolve_graph({ dossier: "${dossierPath}" })\` — build execution plan
+2. \`verify_graph({ graph_id })\` — batch-verify all dossiers
+   - BLOCK → STOP, report integrity failure
+   - WARN → inform user, ask to proceed
+3. Present the journey plan to the user: steps, risk, estimated duration
+4. \`start_journey({ graph_id })\` — begin execution, get first step
+5. Execute each step's body, then call \`step_complete({ journey_id, status: "completed", outputs: {...} })\`
+6. Repeat until journey status is "completed" or "failed"
+7. Report the journey summary
 
-3. **EXECUTE** - Follow the instructions in the dossier body
-   - Respect any risk_level warnings
+**Otherwise (no required relationships):**
+→ Use the **single-dossier flow**:
+1. \`verify_dossier({ path: "${dossierPath}" })\` — check integrity and signature
+   - If verification fails → STOP and report the issue
+   - If signature is untrusted → ask user whether to proceed
+2. \`read_dossier({ path: "${dossierPath}" })\` — get dossier content
+3. Execute the dossier body instructions
+   - Respect \`risk_level\` warnings
    - Ask for confirmation before destructive operations
    - Report progress as you complete each step
+4. Summarize what was accomplished`,
+            },
+          },
+        ],
+      };
+    }
 
-4. **REPORT** - Summarize what was accomplished`,
+    case 'execute-journey': {
+      const graphId = args?.graph_id as string;
+      if (!graphId) {
+        throw new Error('graph_id argument is required');
+      }
+      return {
+        messages: [
+          {
+            role: 'user',
+            content: {
+              type: 'text',
+              text: `Execute the multi-dossier journey for graph: ${graphId}
+
+## Journey Execution Steps
+
+1. **Verify the graph** (if not already done):
+   \`verify_graph({ graph_id: "${graphId}" })\`
+   - BLOCK → STOP, list the blockers to the user
+   - WARN → inform the user of unsigned/high-risk dossiers, ask to proceed
+   - ALLOW → continue
+
+2. **Present the journey plan** to the user:
+   - List each step: "Step 1: setup-project → Step 2: install-deps → Step 3: run-tests"
+   - Show aggregate risk level
+   - Ask: "Ready to proceed?"
+
+3. **Start the journey**:
+   \`start_journey({ graph_id: "${graphId}" })\`
+   → Returns \`{ journey_id, step: { index, dossier, body, context } }\`
+
+4. **For each step**:
+   a. Show the user: "Executing step [index+1]/[total]: [dossier]"
+   b. Execute the step body instructions
+   c. Collect any outputs declared in the dossier (e.g., \`project_path\`, \`cluster_arn\`)
+   d. Call: \`step_complete({ journey_id, status: "completed", outputs: { key: value } })\`
+   e. If \`status: "running"\` → repeat with next step
+   f. If \`status: "completed"\` → journey done, show summary
+   g. If \`status: "failed"\` → show failure summary, diagnose with user
+
+5. **On step failure**:
+   - Diagnose what went wrong
+   - Ask user: retry manually and call step_complete again, or cancel?
+   - To cancel: \`cancel_journey({ journey_id, reason: "..." })\`
+
+6. **Report** the journey summary:
+   - Steps completed, failed, total duration
+   - All collected outputs
+   - Next recommended actions (from dossier relationships)
+
+## Tips
+- Use \`get_journey_status({ journey_id })\` to inspect state at any point
+- The \`context\` field in each step contains outputs from previous steps — use them
+- Never skip calling \`step_complete\` even if a step has no outputs`,
             },
           },
         ],
