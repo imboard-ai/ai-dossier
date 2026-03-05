@@ -1,18 +1,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  type DossierFrontmatter,
-  parseDossierContent,
-  validateFrontmatter,
-} from '@ai-dossier/core';
+import { type DossierFrontmatter, parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { isExpired, loadCredentials } from '../credentials';
 import { getClient } from '../registry-client';
 
 function bumpVersion(current: string, bump: 'minor' | 'major'): string {
   const parts = current.split('.').map(Number);
-  if (parts.length !== 3 || parts.some(isNaN)) {
+  if (parts.length !== 3 || parts.some(Number.isNaN)) {
     // Can't bump non-semver, return as-is
     return current;
   }
@@ -230,7 +226,7 @@ export function registerSkillExportCommand(program: Command): void {
               if (!options.json) {
                 console.log(`   ⚠️  Verification failed: ${(verifyErr as Error).message}`);
                 console.log(
-                  '   CDN propagation may take a few seconds. Try: dossier info ' + fullPath
+                  `   CDN propagation may take a few seconds. Try: dossier info ${fullPath}`
                 );
               }
             }

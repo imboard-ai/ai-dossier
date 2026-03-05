@@ -37,6 +37,11 @@ export function registerListCommand(program: Command): void {
           source?: string;
           page?: string;
           perPage?: string;
+          recursive?: boolean;
+          signedOnly?: boolean;
+          risk?: string;
+          category?: string;
+          showPath?: boolean;
         }
       ) => {
         if (options.json) {
@@ -44,8 +49,8 @@ export function registerListCommand(program: Command): void {
         }
 
         if (options.source === 'registry') {
-          const page = parseInt(options.page, 10) || 1;
-          const perPage = parseInt(options.perPage, 10) || 20;
+          const page = parseInt(options.page || '1', 10) || 1;
+          const perPage = parseInt(options.perPage || '20', 10) || 20;
 
           let registryResult: ListDossiersResult;
           try {

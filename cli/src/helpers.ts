@@ -10,6 +10,7 @@ import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  type DossierFrontmatter,
   parseDossierContent,
   RECOMMENDED_FIELDS,
   REQUIRED_FIELDS,
@@ -502,16 +503,15 @@ export function parseDossierMetadataFromContent(
 ): DossierMetadata {
   try {
     const parsed = parseDossierContent(content);
-    const frontmatter = parsed.frontmatter as Record<string, any>;
+    const frontmatter: DossierFrontmatter = parsed.frontmatter;
+    const category = frontmatter.category as string | string[] | undefined;
     return {
       path: filePath,
       filename: path.basename(filePath),
       title: frontmatter.title || path.basename(filePath, '.ds.md'),
       version: frontmatter.version || '-',
       risk_level: frontmatter.risk_level || 'unknown',
-      category: Array.isArray(frontmatter.category)
-        ? frontmatter.category.join(', ')
-        : frontmatter.category || '-',
+      category: Array.isArray(category) ? category.join(', ') : (category as string) || '-',
       status: frontmatter.status || '-',
       signed: !!frontmatter.signature,
       checksum: !!frontmatter.checksum,

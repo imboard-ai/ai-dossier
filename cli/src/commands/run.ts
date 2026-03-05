@@ -204,7 +204,8 @@ export function registerRunCommand(program: Command): void {
           process.exit(1);
         }
 
-        const llmOption = options.llm || config.getConfig('defaultLlm') || 'auto';
+        const llmOption =
+          options.llm || (config.getConfig('defaultLlm') as string | undefined) || 'auto';
 
         console.log('📝 Audit Log:');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');

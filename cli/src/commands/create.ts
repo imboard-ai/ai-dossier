@@ -35,7 +35,8 @@ export function registerCreateCommand(program: Command): void {
         }
       ) => {
         try {
-          const llmOption = options.llm || config.getConfig('defaultLlm') || 'auto';
+          const llmOption =
+            options.llm || (config.getConfig('defaultLlm') as string | undefined) || 'auto';
           const llm = detectLlm(llmOption, false);
 
           if (!llm) {

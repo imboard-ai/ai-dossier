@@ -65,7 +65,9 @@ export function registerValidateCommand(program: Command): void {
 
         if (
           frontmatter.risk_level &&
-          !VALID_RISK_LEVELS.includes(frontmatter.risk_level.toLowerCase())
+          !VALID_RISK_LEVELS.includes(
+            frontmatter.risk_level.toLowerCase() as (typeof VALID_RISK_LEVELS)[number]
+          )
         ) {
           warnings.push(
             `Unknown risk_level: "${frontmatter.risk_level}" (expected: ${VALID_RISK_LEVELS.join(', ')})`
@@ -74,7 +76,9 @@ export function registerValidateCommand(program: Command): void {
 
         if (
           frontmatter.status &&
-          !VALID_STATUSES.some((s: string) => s.toLowerCase() === frontmatter.status.toLowerCase())
+          !VALID_STATUSES.some(
+            (s: string) => s.toLowerCase() === (frontmatter.status as string).toLowerCase()
+          )
         ) {
           warnings.push(
             `Unknown status: "${frontmatter.status}" (expected: ${VALID_STATUSES.join(', ')})`
