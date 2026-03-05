@@ -42,7 +42,12 @@ import { registerWhoamiCommand } from './commands/whoami';
 program
   .name('ai-dossier')
   .description('CLI tool for creating, verifying, and executing dossiers')
-  .version(pkg.version);
+  .version(pkg.version)
+  .option('--agent', 'Output machine-readable capability manifest for agent discovery')
+  .addHelpText(
+    'after',
+    '\nAgent-friendly: Run `ai-dossier --agent` for machine-readable capabilities.'
+  );
 
 // Register all commands
 registerVerifyCommand(program);
@@ -73,6 +78,30 @@ registerFormatCommand(program);
 registerFromFileCommand(program);
 registerGetCommand(program);
 registerCommandsCommand(program);
+
+// Handle --agent flag before normal parsing
+if (process.argv.includes('--agent')) {
+  const manifest = {
+    agent_protocol: '1.0',
+    cli: 'ai-dossier',
+    version: pkg.version,
+    discovery_command: 'ai-dossier commands',
+    capabilities: {
+      json_output: '--json',
+      skip_prompts: '-y / --yes',
+      non_tty_safe: true,
+      machine_errors: true,
+    },
+    quick_start: [
+      'ai-dossier commands                    # discover all commands and flags',
+      'ai-dossier whoami --json               # check auth status',
+      'ai-dossier search <query> --json       # find dossiers',
+      'ai-dossier list --json --source registry  # list all registry dossiers',
+    ],
+  };
+  console.log(JSON.stringify(manifest, null, 2));
+  process.exit(0);
+}
 
 // Parse and execute
 program.parse(process.argv);

@@ -19,10 +19,14 @@ import {
 import { getConceptResource } from './resources/concept.js';
 import { getProtocolResource } from './resources/protocol.js';
 import { getSecurityResource } from './resources/security.js';
+import { type CancelJourneyInput, cancelJourney } from './tools/cancelJourney.js';
+import { type GetJourneyStatusInput, getJourneyStatus } from './tools/getJourneyStatus.js';
 import { type ListDossiersInput, listDossiers } from './tools/listDossiers.js';
 import { type ReadDossierInput, readDossier } from './tools/readDossier.js';
 import { type ResolveGraphInput, resolveGraph } from './tools/resolveGraph.js';
 import { type SearchDossiersInput, searchDossiers } from './tools/searchDossiers.js';
+import { type StartJourneyInput, startJourney } from './tools/startJourney.js';
+import { type StepCompleteInput, stepComplete } from './tools/stepComplete.js';
 import { type VerifyDossierInput, verifyDossier } from './tools/verifyDossier.js';
 import { type VerifyGraphInput, verifyGraph } from './tools/verifyGraph.js';
 import { logger } from './utils/logger.js';
@@ -149,6 +153,80 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
+      {
+        name: 'start_journey',
+        description:
+          "Start a journey session from a resolved and verified graph. Creates a session, returns the first step's dossier content with any injected context. Call step_complete after executing each step.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            graph_id: {
+              type: 'string',
+              description: 'ID of a previously resolved graph (from resolve_graph)',
+            },
+          },
+          required: ['graph_id'],
+        },
+      },
+      {
+        name: 'step_complete',
+        description:
+          'Mark the current journey step as complete or failed. Advances to the next step and returns its dossier content with injected context from previous outputs. Returns a summary when the last step completes or a step fails.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            journey_id: {
+              type: 'string',
+              description: 'Journey session ID (from start_journey)',
+            },
+            outputs: {
+              type: 'object',
+              description:
+                'Key-value outputs collected during this step (e.g. { cluster_arn: "arn:..." })',
+            },
+            status: {
+              type: 'string',
+              enum: ['completed', 'failed'],
+              description: 'Whether this step succeeded or failed',
+            },
+          },
+          required: ['journey_id', 'status'],
+        },
+      },
+      {
+        name: 'get_journey_status',
+        description:
+          'Get the current state of a journey session: completed steps, current step, remaining steps, and collected outputs.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            journey_id: {
+              type: 'string',
+              description: 'Journey session ID (from start_journey)',
+            },
+          },
+          required: ['journey_id'],
+        },
+      },
+      {
+        name: 'cancel_journey',
+        description:
+          'Cancel an active journey session. Returns a summary of what completed before cancellation.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            journey_id: {
+              type: 'string',
+              description: 'Journey session ID (from start_journey)',
+            },
+            reason: {
+              type: 'string',
+              description: 'Optional reason for cancellation',
+            },
+          },
+          required: ['journey_id'],
+        },
+      },
     ],
   };
 });
@@ -188,6 +266,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'verify_graph': {
         const result = await verifyGraph(args as unknown as VerifyGraphInput);
+        return createToolResponse(result);
+      }
+
+      case 'start_journey': {
+        const result = await startJourney(args as unknown as StartJourneyInput);
+        return createToolResponse(result);
+      }
+
+      case 'step_complete': {
+        const result = await stepComplete(args as unknown as StepCompleteInput);
+        return createToolResponse(result);
+      }
+
+      case 'get_journey_status': {
+        const result = getJourneyStatus(args as unknown as GetJourneyStatusInput);
+        return createToolResponse(result);
+      }
+
+      case 'cancel_journey': {
+        const result = cancelJourney(args as unknown as CancelJourneyInput);
         return createToolResponse(result);
       }
 
