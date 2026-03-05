@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { parseDossierContent, VALID_RISK_LEVELS, VALID_STATUSES } from '@ai-dossier/core';
+import { parseDossierContent, validateFrontmatter } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { isExpired, loadCredentials } from '../credentials';
 import { getClient } from '../registry-client';
@@ -50,25 +50,7 @@ export function registerPublishCommand(program: Command): void {
           process.exit(1);
         }
 
-        const errors: string[] = [];
-        const required = ['title', 'version'];
-        for (const field of required) {
-          if (!frontmatter[field]) {
-            errors.push(`Missing required field: ${field}`);
-          }
-        }
-        if (
-          frontmatter.risk_level &&
-          !VALID_RISK_LEVELS.includes(frontmatter.risk_level.toLowerCase())
-        ) {
-          errors.push(`Invalid risk_level: ${frontmatter.risk_level}`);
-        }
-        if (
-          frontmatter.status &&
-          !VALID_STATUSES.some((s) => s.toLowerCase() === frontmatter.status.toLowerCase())
-        ) {
-          errors.push(`Invalid status: ${frontmatter.status}`);
-        }
+        const errors = validateFrontmatter(frontmatter);
         if (errors.length > 0) {
           console.error('\n❌ Validation errors:');
           for (const err of errors) {

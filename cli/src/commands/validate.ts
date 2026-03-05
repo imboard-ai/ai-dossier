@@ -1,8 +1,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { parseDossierContent } from '@ai-dossier/core';
+import {
+  parseDossierContent,
+  RECOMMENDED_FIELDS,
+  REQUIRED_FIELDS,
+  VALID_RISK_LEVELS,
+  VALID_STATUSES,
+} from '@ai-dossier/core';
 import type { Command } from 'commander';
-import { RECOMMENDED_FIELDS, REQUIRED_FIELDS, VALID_RISK_LEVELS, VALID_STATUSES } from '../helpers';
 
 export function registerValidateCommand(program: Command): void {
   program
