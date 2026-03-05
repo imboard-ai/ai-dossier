@@ -10,8 +10,8 @@ Technical specifications and reference material for the Dossier project.
 
 ## API & CLI Reference
 
+- [Core API Reference](core-api.md) - `@ai-dossier/core` library API documentation
 - [CLI Reference](cli.md) *(coming soon)* - Command-line tool options and usage
-- [API Reference](api.md) *(coming soon)* - Core library API documentation
 
 ## File Formats
 
