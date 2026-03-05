@@ -36,8 +36,8 @@ cd cli
 npm link  # Links the CLI globally for development
 
 # Or use directly
-chmod +x bin/dossier-verify
-./bin/dossier-verify <file-or-url>
+chmod +x bin/ai-dossier
+./bin/ai-dossier verify <file-or-url>
 ```
 
 ---
@@ -74,10 +74,10 @@ Commands that require confirmation (`publish`, `remove`, `cache clean`) will fai
 
 ```bash
 # Verify local file
-dossier-verify path/to/dossier.ds.md
+ai-dossier verify path/to/dossier.ds.md
 
 # Verify remote dossier
-dossier-verify https://example.com/dossier.ds.md
+ai-dossier verify https://example.com/dossier.ds.md
 ```
 
 **Exit codes**:
@@ -88,7 +88,7 @@ dossier-verify https://example.com/dossier.ds.md
 ### Verbose Mode
 
 ```bash
-dossier-verify --verbose path/to/dossier.ds.md
+ai-dossier verify --verbose path/to/dossier.ds.md
 ```
 
 Shows:
@@ -103,7 +103,7 @@ Shows:
 ```bash
 # Shell function wrapper
 claude-run-dossier() {
-  if dossier-verify "$1"; then
+  if ai-dossier verify "$1"; then
     claude-code "The dossier at $1 has been verified. Please execute it."
   else
     echo "❌ Security verification failed. Not executing."
@@ -117,7 +117,7 @@ claude-run-dossier https://example.com/dossier.ds.md
 **Cursor**:
 ```bash
 cursor-run-dossier() {
-  if dossier-verify "$1"; then
+  if ai-dossier verify "$1"; then
     cursor "Execute the verified dossier at $1"
   else
     echo "❌ Verification failed"
@@ -132,7 +132,7 @@ safe-run-dossier() {
   local url="$1"
   local tool="${2:-claude-code}"
 
-  if dossier-verify "$url"; then
+  if ai-dossier verify "$url"; then
     echo "✅ Dossier verified. Passing to $tool..."
     "$tool" "run $url"
   else
@@ -199,7 +199,7 @@ safe-run-dossier https://example.com/dossier.ds.md cursor
 ### Example 1: Legitimate Dossier (Passes)
 
 ```bash
-$ dossier-verify examples/data-science/train-ml-model.ds.md
+$ ai-dossier verify examples/data-science/train-ml-model.ds.md
 
 🔐 Dossier Verification Tool
 
@@ -228,7 +228,7 @@ $ echo $?
 ### Example 2: Malicious Dossier (Blocked)
 
 ```bash
-$ dossier-verify https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/security/validate-project-config.ds.md
+$ ai-dossier verify https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/security/validate-project-config.ds.md
 
 🔐 Dossier Verification Tool
 
@@ -268,7 +268,7 @@ $ echo $?
 # Wrapper function for Claude Code
 claude-run-dossier() {
   echo "Verifying dossier security..."
-  if ~/projects/dossier/cli/bin/dossier-verify "$1"; then
+  if ai-dossier verify "$1"; then
     echo ""
     echo "✅ Verification passed. Executing with Claude Code..."
     claude-code "Execute the verified dossier at $1"
@@ -292,7 +292,7 @@ claude-run-dossier https://example.com/dossier.ds.md
 
 ```
 User Command:
-dossier-verify https://example.com/dossier.ds.md
+ai-dossier verify https://example.com/dossier.ds.md
          ↓
     Download/Read File
          ↓
@@ -357,23 +357,28 @@ Exit 0 (safe) or 1 (unsafe)
 
 ## Roadmap
 
-### v0.1.0 (Current)
+### v0.1.0
 - ✅ Basic checksum verification
 - ✅ Signature presence detection
 - ✅ Exit code support
 - ✅ URL download support
 
-### v0.2.0 (Next)
-- ⏳ Full minisign signature verification
-- ⏳ Trusted keys management (~/.dossier/trusted-keys.txt)
-- ⏳ --run flag implementation
-- ⏳ Better error messages
+### v0.2.0
+- ✅ Multi-command CLI structure (`ai-dossier <command>`)
+- ✅ `dossier run` command with 5-stage verification pipeline
+- ✅ LLM auto-detection and execution integration
 
-### v0.3.0 (Future)
-- ⏳ Interactive trust prompts
-- ⏳ Key import/export
-- ⏳ Signature verification caching
-- ⏳ JSON output mode (for tooling)
+### v0.3.0
+- ✅ Modular TypeScript migration
+- ✅ Comprehensive test suite (261+ tests)
+- ✅ CLI parity with dossier-tools
+- ✅ `@ai-dossier` npm scope and CI/CD publishing
+
+### v0.4.0 (Current)
+- ✅ Unified dossier parser across core/cli/mcp
+- ✅ JSON output mode (`--json` flag on commands)
+- ✅ Registry integration (publish, remove, install-skill)
+- ✅ Non-TTY stdin detection
 
 ### v1.0.0 (Stable)
 - ⏳ Complete signature verification
@@ -392,10 +397,10 @@ cd cli
 npm link  # For local testing
 
 # Test
-dossier-verify ../examples/devops/deploy-to-aws.ds.md
+ai-dossier verify ../examples/devops/deploy-to-aws.ds.md
 
 # Test with malicious example
-dossier-verify ../examples/security/validate-project-config.ds.md
+ai-dossier verify ../examples/security/validate-project-config.ds.md
 ```
 
 ### Adding Features

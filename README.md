@@ -66,9 +66,8 @@ Verify dossier security before execution:
 ```bash
 # Clone the repo and use the CLI verification tool
 git clone https://github.com/imboard-ai/ai-dossier.git
-cd dossier
-chmod +x cli/bin/dossier-verify
-cli/bin/dossier-verify examples/git-project-review/atomic/readme-reality-check.ds.md
+cd ai-dossier
+npx @ai-dossier/cli verify examples/git-project-review/atomic/readme-reality-check.ds.md
 ```
 
 ---
@@ -144,7 +143,7 @@ https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/git-projec
 
 ## Security & Verification
 
-- Use the CLI tool (`cli/bin/dossier-verify`) to verify checksums/signatures before execution
+- Use the CLI tool (`ai-dossier verify`) to verify checksums/signatures before execution
 - Prefer MCP mode for sandboxed, permissioned operations
 - See [SECURITY_STATUS.md](./SECURITY_STATUS.md) for current guarantees and limitations
 

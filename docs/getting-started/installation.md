@@ -37,7 +37,7 @@ These tools can read files, so they can learn about dossiers on-the-fly.
 ```bash
 # Clone this repo (has example dossiers)
 git clone https://github.com/imboard-ai/ai-dossier.git
-cd dossier
+cd ai-dossier
 ```
 
 Or add dossiers to your existing project:
@@ -122,9 +122,9 @@ The AI will follow the dossier instructions, adapt to your project, and execute 
 
 ---
 
-### Path 3: I Want Zero Friction 🚀 (Future)
+### Path 3: I Want Zero Friction 🚀 (MCP Server)
 
-**Coming Soon**: MCP Server for Claude Desktop and other MCP-compatible tools
+**Available Now**: MCP Server for Claude Code and other MCP-compatible tools
 
 With the MCP server, you can simply say:
 
@@ -138,7 +138,7 @@ And it just works! The AI automatically:
 - Reads the content
 - Executes following the protocol
 
-**Status**: Specification complete, implementation in progress.
+**Status**: MVP Complete — core security verification tools working, ready for testing.
 
 📚 See [mcp-server/README.md](./mcp-server/README.md) for details and contribute!
 
@@ -407,11 +407,11 @@ diagnose the issue. Then propose a fix."
 │   Edit: Objective, Prerequisites, Actions, Validation      │
 ├─────────────────────────────────────────────────────────────┤
 │ KEY FILES                                                   │
-│   README.md        - Dossier concept overview              │
-│   FAQ.md           - Common objections & comparisons       │
-│   SPECIFICATION.md - How to create dossiers                │
-│   PROTOCOL.md      - How to execute dossiers               │
-│   examples/        - Real-world examples                    │
+│   README.md                      - Concept overview        │
+│   PROTOCOL.md                    - Execution protocol      │
+│   docs/reference/specification.md - Dossier spec           │
+│   docs/explanation/faq.md         - FAQ & comparisons      │
+│   examples/                       - Real-world examples    │
 └─────────────────────────────────────────────────────────────┘
 ```
 

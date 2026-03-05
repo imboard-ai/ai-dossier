@@ -358,7 +358,7 @@ https://raw.githubusercontent.com/you/dossiers/main/deploy.ds.md
 
 **From community**:
 - ⚠️ Treat like code: review before executing
-- ✅ Use verification tools: `dossier-verify`
+- ✅ Use verification tools: `ai-dossier verify`
 - ✅ Test in safe environments first
 - ✅ Check dossier metadata (risk level, author)
 

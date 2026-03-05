@@ -87,14 +87,14 @@ That was wrong. Security cannot be delegated to LLMs - it must be enforced by co
 
 ### Short-Term (3-6 months)
 
-**Command-Line Tool**: `dossier-verify`
+**Command-Line Tool**: `ai-dossier verify`
 ```bash
 # Verify before executing
-dossier-verify https://example.com/dossier.ds.md
+ai-dossier verify https://example.com/dossier.ds.md
 # Exit code 0 = safe, 1 = unsafe
 
 # Verify and run (enforces verification)
-dossier-verify --run https://example.com/dossier.ds.md
+ai-dossier verify --run https://example.com/dossier.ds.md
 ```
 
 **Platform Support**: Advocate for native dossier support in:
@@ -160,7 +160,7 @@ This would let MCP servers intercept file access and enforce verification.
 
 ## 3. What We're Providing Today
 
-### Command-Line Tool: `dossier-verify`
+### Command-Line Tool: `ai-dossier verify`
 
 **Install**:
 ```bash
@@ -170,18 +170,18 @@ npm install -g @ai-dossier/cli
 **Usage**:
 ```bash
 # Verify a dossier (exit 0 = safe, 1 = unsafe)
-dossier-verify path/to/dossier.ds.md
-dossier-verify https://example.com/dossier.ds.md
+ai-dossier verify path/to/dossier.ds.md
+ai-dossier verify https://example.com/dossier.ds.md
 
 # Verify and display report
-dossier-verify --verbose path/to/dossier.ds.md
+ai-dossier verify --verbose path/to/dossier.ds.md
 
 # Verify and run (enforces verification)
-dossier-verify --run path/to/dossier.ds.md
+ai-dossier verify --run path/to/dossier.ds.md
 
 # Pass to your LLM tool only if verification passes
-dossier-verify https://example.com/dossier.ds.md && \
-  claude-code "run $(dossier-verify --output-path)"
+ai-dossier verify https://example.com/dossier.ds.md && \
+  claude-code "run $(ai-dossier verify --output-path)"
 ```
 
 **What it does**:
@@ -198,7 +198,7 @@ dossier-verify https://example.com/dossier.ds.md && \
 ```bash
 # Add to your shell profile
 claude-run-dossier() {
-  dossier-verify "$1" && claude-code "run $1"
+  ai-dossier verify "$1" && claude-code "run $1"
 }
 
 # Then use:
@@ -208,7 +208,7 @@ claude-run-dossier https://example.com/dossier.ds.md
 **Cursor**:
 ```bash
 cursor-run-dossier() {
-  dossier-verify "$1" && cursor "run $1"
+  ai-dossier verify "$1" && cursor "run $1"
 }
 ```
 
@@ -218,7 +218,7 @@ safe-run-dossier() {
   local url="$1"
   local tool="${2:-claude-code}"  # Default to claude-code
 
-  if dossier-verify "$url"; then
+  if ai-dossier verify "$url"; then
     "$tool" "run $url"
   else
     echo "❌ Security verification failed. Dossier not executed."
@@ -302,7 +302,7 @@ As the dossier standard gains adoption, security enforcement will improve throug
 **Security Level**: Low (manual, optional)
 
 #### Layer 2: Tooling Adoption (3-6 months)
-- ✅ `dossier-verify` CLI enforces verification
+- ✅ `ai-dossier verify` CLI enforces verification
 - ✅ Shell wrappers provide convenience
 - ✅ Community shares best practices
 
@@ -366,7 +366,7 @@ As the dossier standard gains adoption, security enforcement will improve throug
 
 ```bash
 # 1. Verify the dossier once
-dossier-verify https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/devops/deploy-to-aws.ds.md
+ai-dossier verify https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/devops/deploy-to-aws.ds.md
 
 # 2. If it passes, you can use it
 claude-code "run https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/devops/deploy-to-aws.ds.md"
@@ -403,7 +403,7 @@ safe-run-dossier https://example.com/unknown-dossier.ds.md
 curl https://example.com/dossier.ds.md > /tmp/dossier.ds.md
 
 # 2. Verify
-dossier-verify /tmp/dossier.ds.md
+ai-dossier verify /tmp/dossier.ds.md
 
 # 3. Read the code manually
 less /tmp/dossier.ds.md
@@ -499,13 +499,13 @@ New dossier to run?
 - ✅ Have valid checksums
 - ✅ Some are signed
 
-But still verify them using `dossier-verify` to build good habits.
+But still verify them using `ai-dossier verify` to build good habits.
 
 ### Q: What if my LLM tool doesn't have MCP support?
 
-**A**: Use the command-line `dossier-verify` tool:
+**A**: Use the command-line `ai-dossier verify` tool:
 ```bash
-dossier-verify URL && your-tool "run URL"
+ai-dossier verify URL && your-tool "run URL"
 ```
 
 This works with ANY LLM tool.
@@ -533,7 +533,7 @@ Timeline: 6-12 months for major platform support.
 **A**: Be honest:
 - ✅ Dossiers are powerful for automation
 - ⚠️ Security requires active verification
-- ✅ Tools are available (dossier-verify)
+- ✅ Tools are available (`ai-dossier verify`)
 - ⚠️ Automatic enforcement coming later
 - ✅ Use trusted sources in the meantime
 
@@ -544,7 +544,7 @@ Timeline: 6-12 months for major platform support.
 ### For Individual Users
 
 **Today**:
-1. Install `dossier-verify` CLI (when available)
+1. Install `ai-dossier` CLI (when available)
 2. Always verify before execution
 3. Use official examples to learn
 4. Build verification into your workflow
@@ -565,7 +565,7 @@ Timeline: 6-12 months for major platform support.
 1. ✅ Establish policy: "Always verify dossiers"
 2. ✅ Use only trusted sources initially
 3. ✅ Train team on verification process
-4. ✅ Set up `dossier-verify` for all developers
+4. ✅ Set up `ai-dossier verify` for all developers
 
 **Short-term (1-3 months)**:
 1. ✅ Create organization-specific trusted keys list
@@ -624,7 +624,7 @@ We commit to:
 
 ### Contribute
 
-**Tooling**: Help build `dossier-verify` CLI
+**Tooling**: Help build `ai-dossier` CLI
 **Documentation**: Improve security guidance
 **Advocacy**: Request support from your tool vendor
 **Wrappers**: Share your enforcement scripts
@@ -652,7 +652,7 @@ We commit to:
 - 🌐 Registry and trust infrastructure
 
 **What You Should Do**:
-- ✅ Use `dossier-verify` when available
+- ✅ Use `ai-dossier verify` when available
 - ✅ Verify before execution
 - ✅ Trust known sources
 - ✅ Stay informed about updates

@@ -23,14 +23,14 @@ Dossier is a lightweight automation standard built on three principles:
 
 ### Core Library (`@ai-dossier/core`)
 Shared verification and parsing logic used by all tools. Handles:
-- Dossier parsing (YAML frontmatter + Markdown body)
+- Dossier parsing (JSON frontmatter + Markdown body)
 - SHA256 checksum verification
 - Signature verification (Minisign, AWS KMS)
 
 ### CLI Tool (`@ai-dossier/cli`)
 Command-line verification tool for end users:
 ```bash
-dossier-verify <file-or-url>
+ai-dossier verify <file-or-url>
 ```
 
 ### MCP Server (`@ai-dossier/mcp-server`)
@@ -38,14 +38,18 @@ Model Context Protocol integration for AI agents like Claude Code.
 
 ## File Format
 
-Dossiers are Markdown files with YAML frontmatter:
+Dossiers are Markdown files with JSON frontmatter using the `---dossier` delimiter:
 
 ```markdown
----
-title: Example Dossier
-version: "1.0.0"
-checksum: "sha256:abc123..."
-signature: "minisign:xyz789..."
+---dossier
+{
+  "title": "Example Dossier",
+  "version": "1.0.0",
+  "checksum": {
+    "algorithm": "sha256",
+    "hash": "e3b0c44298fc1c149afbf4c8996fb924..."
+  }
+}
 ---
 
 # Instructions

@@ -72,7 +72,7 @@ export function verifySignature(dossier: Dossier): SignatureResult
 
 **Purpose**: Command-line verification for users
 
-**Entry Point**: `bin/dossier-verify`
+**Entry Point**: `bin/ai-dossier`
 
 **Flow**:
 ```

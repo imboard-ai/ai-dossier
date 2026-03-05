@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [@ai-dossier/cli@0.4.1] - 2026-02-20
+
+### Fixed
+- Skip URL download in dry-run mode (#128)
+- Detect non-TTY stdin and fail gracefully instead of hanging (#107, #127)
+- Add CDN propagation warning after publish and remove (#106, #118)
+- install-skill cache validation, `--fresh` flag, and `--json` output (#117)
+
+### Changed
+- Return `VerifyResult` from crypto verification instead of bare boolean (#83, #125)
+- Use core `validateFrontmatter` and import constants from core (#119, #123)
+
+### Added
+- `--json` flag on `remove`, `whoami`, `list`, and `publish` commands (#105, #102, #121, #114)
+- `commands` command for JSON inventory of all CLI commands (#122)
+- Publish collision warning and full path output (#114)
+
+## [@ai-dossier/cli@0.4.0] - 2026-01-15
+
+### Added
+- Unified dossier parser across core/cli/mcp (#81, #115)
+- Registry integration — merged dossier-registry into monorepo (#68)
+- Batch verification for dossier graphs (#71, #111)
+- Dependency graph resolver for dossier relationships (#100)
+
+### Changed
+- License changed from ELv2 to AGPL-3.0 (#129)
+- Use core library signers directly in sign command (#99)
+- Upgraded to Node 24 and ES2024 target
+
+### Fixed
+- Security vulnerabilities in dependencies (#65)
+- Biome lint enforcement on every commit and PR (#57)
+
+## [@ai-dossier/cli@0.3.0] - 2025-12-15
+
+### Added
+- Modular TypeScript migration from monolithic CLI (#54, #59)
+- Comprehensive test suite with 261+ tests (#47, #62)
+- CLI parity with dossier-tools (#61, #63, #64)
+- npm CI/CD publishing under `@ai-dossier` scope (#48)
+
+### Changed
+- Package scope: `@imboard-ai/*` → `@ai-dossier/*`
+- Default registry URL updated to `dossier-registry.vercel.app`
+
 ## [@imboard-ai/dossier-cli@0.2.1] - 2025-11-15
 
 ### Added
@@ -147,7 +193,10 @@ git log --oneline
 
 For detailed publishing instructions, see [docs/guides/publishing-packages.md](docs/guides/publishing-packages.md).
 
-[Unreleased]: https://github.com/imboard-ai/dossier/compare/v0.1.0...HEAD
-[@dossier/core@1.0.0]: https://github.com/imboard-ai/dossier/releases/tag/v1.0.0
-[@dossier/cli@0.1.0]: https://github.com/imboard-ai/dossier/releases/tag/v0.1.0
-[@dossier/mcp-server@1.0.0]: https://github.com/imboard-ai/dossier/releases/tag/v1.0.0
+[Unreleased]: https://github.com/imboard-ai/ai-dossier/compare/v0.4.1...HEAD
+[@ai-dossier/cli@0.4.1]: https://github.com/imboard-ai/ai-dossier/compare/v0.4.0...v0.4.1
+[@ai-dossier/cli@0.4.0]: https://github.com/imboard-ai/ai-dossier/compare/v0.3.0...v0.4.0
+[@ai-dossier/cli@0.3.0]: https://github.com/imboard-ai/ai-dossier/compare/v0.2.1...v0.3.0
+[@dossier/core@1.0.0]: https://github.com/imboard-ai/ai-dossier/releases/tag/v1.0.0
+[@dossier/cli@0.1.0]: https://github.com/imboard-ai/ai-dossier/releases/tag/v0.1.0
+[@dossier/mcp-server@1.0.0]: https://github.com/imboard-ai/ai-dossier/releases/tag/v1.0.0

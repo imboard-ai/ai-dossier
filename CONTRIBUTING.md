@@ -70,7 +70,7 @@ Use GitHub Discussions for:
    ```bash
    cd cli
    npm test  # If tests are available
-   node bin/dossier-verify.js --help
+   npx ai-dossier verify --help
    ```
 
 5. **Test the MCP server** (requires Claude Code):

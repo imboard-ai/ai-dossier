@@ -21,7 +21,7 @@ See [installation.md](installation.md) for detailed installation instructions fo
 Once installed, try verifying an example dossier:
 
 ```bash
-dossier-verify https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/devops/deploy-to-aws.ds.md
+ai-dossier verify https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/devops/deploy-to-aws.ds.md
 ```
 
 ## Next Steps

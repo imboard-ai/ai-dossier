@@ -20,7 +20,7 @@ Get started with dossiers in your personal projects with minimal setup.
      }
      ```
      (Replace `/path/to/dossier` with your actual cloned repo path)
-   - **Option B (CLI)**: Clone the repo and use `cli/bin/dossier-verify <dossier-path>` directly
+   - **Option B (CLI)**: Install and use `npx @ai-dossier/cli verify <dossier-path>` or `ai-dossier verify <dossier-path>` directly
 
 2. **Try the Hello Dossier example**
    - Copy the **Hello Dossier** block from the README into your LLM
@@ -77,8 +77,7 @@ Add dossiers to your open-source project to help contributors and maintainers.
      - name: Verify README reality check
        if: contains(github.event.pull_request.changed_files, 'README.md') || contains(github.event.pull_request.changed_files, 'docs/')
        run: |
-         chmod +x dossier-tools/cli/bin/dossier-verify
-         dossier-tools/cli/bin/dossier-verify dossiers/readme-reality-check.ds.md
+         npx @ai-dossier/cli verify dossiers/readme-reality-check.ds.md
      ```
 
 5. **Document dossier usage in CONTRIBUTING.md**
@@ -208,8 +207,7 @@ Create a **failure response guide** for when validations fail:
 
    - name: Verify deploy dossier
      run: |
-       chmod +x dossier-tools/cli/bin/dossier-verify
-       dossier-tools/cli/bin/dossier-verify dossiers/deploy.ds.md
+       npx @ai-dossier/cli verify dossiers/deploy.ds.md
 
    - name: Execute deploy
      run: # ... deployment steps
