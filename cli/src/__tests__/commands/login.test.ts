@@ -21,6 +21,7 @@ describe('login command', () => {
       username: 'testuser',
       orgs: ['org1'],
       email: 'test@example.com',
+      expiresAt: null,
     });
 
     const program = createTestProgram();

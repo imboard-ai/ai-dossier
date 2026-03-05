@@ -1,0 +1,79 @@
+### Dossier Registry API - Production Tests
+### Update @baseUrl with your actual Vercel deployment URL
+
+@baseUrl = https://dossier-registry.vercel.app
+
+### Health Check
+GET {{baseUrl}}/api/v1/health
+
+###
+
+### List All Dossiers
+GET {{baseUrl}}/api/v1/dossiers
+
+###
+
+### Get Dossier Metadata
+GET {{baseUrl}}/api/v1/dossiers/getting-started/hello
+
+###
+
+### Get Dossier Content (302 Redirect to CDN)
+GET {{baseUrl}}/api/v1/dossiers/getting-started/hello/content
+
+###
+
+### 404 - Dossier Not Found
+GET {{baseUrl}}/api/v1/dossiers/nonexistent/dossier
+
+###
+
+### ========================================
+### Authentication Tests
+### ========================================
+
+### Get Current User - No Token (should return 401 MISSING_TOKEN)
+GET {{baseUrl}}/api/v1/me
+
+###
+
+### Get Current User - Invalid Token (should return 401 INVALID_TOKEN)
+GET {{baseUrl}}/api/v1/me
+Authorization: Bearer invalid.token.here
+
+###
+
+### Get Current User - Valid Token
+# Replace <JWT> with actual token from OAuth flow
+# GET {{baseUrl}}/api/v1/me
+# Authorization: Bearer <JWT>
+
+###
+
+### ========================================
+### Publish Tests
+### ========================================
+
+### Publish Dossier - No Token (should return 401)
+POST {{baseUrl}}/api/v1/dossiers
+Content-Type: application/json
+
+{
+  "namespace": "yuvaldim/test",
+  "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello",
+  "changelog": "Initial publish"
+}
+
+###
+
+### Publish Dossier - Valid (should return 201)
+# Replace <JWT> with actual token from OAuth flow
+# POST {{baseUrl}}/api/v1/dossiers
+# Content-Type: application/json
+# Authorization: Bearer <JWT>
+#
+# {
+#   "namespace": "yuvaldim/test",
+#   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello\n\nThis is a test dossier.",
+#   "changelog": "Initial publish"
+# }

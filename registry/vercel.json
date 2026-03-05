@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/v1/dossiers/:path*",
+      "destination": "/api/v1/dossiers/[...name]?name=:path*"
+    },
+    {
+      "source": "/auth/login",
+      "destination": "/api/auth/login"
+    },
+    {
+      "source": "/auth/callback",
+      "destination": "/api/auth/callback"
+    }
+  ]
+}

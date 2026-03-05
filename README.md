@@ -1237,6 +1237,7 @@ If you don't have an LLM agent:
 ### Integrations
 - [MCP Server](./mcp-server/) - Model Context Protocol integration
 - [CLI Tool](./cli/) - Command-line verification tool
+- [Registry](./registry/) - Dossier registry API (deployed via Vercel)
 - [MI6](https://github.com/imboard-ai/mi6) - Community implementation example
 
 ---
