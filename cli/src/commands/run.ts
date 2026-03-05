@@ -185,6 +185,20 @@ export function registerRunCommand(program: Command): void {
       console.log('   Status:      VERIFIED');
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
+      if (options.dryRun) {
+        console.log('🧪 DRY RUN MODE - No execution\n');
+        console.log('Would execute:');
+        console.log(`   File: ${resolvedFile}`);
+        console.log(`   LLM: ${llmOption}`);
+
+        const llmToUse = detectLlm(llmOption as string, true);
+        console.log(
+          `   Command: ${llmToUse ? `claude "${resolvedFile}"` : 'No LLM detected - would show error'}\n`
+        );
+        console.log('✅ All verifications passed - ready to execute');
+        process.exit(0);
+      }
+
       // If resolvedFile is still a URL, download it to a temp file first
       const isResolvedUrl =
         resolvedFile.startsWith('http://') || resolvedFile.startsWith('https://');
@@ -209,25 +223,6 @@ export function registerRunCommand(program: Command): void {
             );
           }
       };
-
-      if (options.dryRun) {
-        console.log('🧪 DRY RUN MODE - No execution\n');
-        console.log('Would execute:');
-        console.log(`   File: ${resolvedFile}`);
-        console.log(`   LLM: ${llmOption}`);
-
-        const llmToUse = detectLlm(llmOption as string, true);
-        const descriptor = llmToUse
-          ? buildLlmCommand(llmToUse, resolvedFile, options.headless)
-          : null;
-
-        console.log(
-          `   Command: ${descriptor ? descriptor.description : 'No LLM detected - would show error'}\n`
-        );
-        console.log('✅ All verifications passed - ready to execute');
-        cleanupTmpFile();
-        process.exit(0);
-      }
 
       console.log('🤖 Executing Dossier...\n');
 
