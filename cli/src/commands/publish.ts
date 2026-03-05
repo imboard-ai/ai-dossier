@@ -179,6 +179,9 @@ export function registerPublishCommand(program: Command): void {
             options.changelog || null
           )) as any;
 
+          const verifyCommand = `dossier info ${fullPath}@${version}`;
+          const cdnDelaySeconds = 30;
+
           if (options.json) {
             console.log(
               JSON.stringify(
@@ -190,6 +193,10 @@ export function registerPublishCommand(program: Command): void {
                   url: result.content_url || null,
                   existed: existingVersion !== null,
                   previousVersion: existingVersion,
+                  verification: {
+                    verify_command: verifyCommand,
+                    cdn_delay_seconds: cdnDelaySeconds,
+                  },
                 },
                 null,
                 2
@@ -203,7 +210,9 @@ export function registerPublishCommand(program: Command): void {
             if (result.content_url) {
               console.log(`   URL: ${result.content_url}`);
             }
-            console.log('');
+            console.log(
+              `\n   ⏳ CDN propagation may take up to ${cdnDelaySeconds}s. Verify with:\n   $ ${verifyCommand}\n`
+            );
           }
         } catch (err: any) {
           if (options.json) {

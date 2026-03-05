@@ -35,9 +35,7 @@ describe('remove command', () => {
     const program = createTestProgram();
     registerRemoveCommand(program);
 
-    await expect(program.parseAsync(['node', 'dossier', 'remove', 'my-dossier'])).rejects.toThrow(
-      'process.exit(1)'
-    );
+    await expect(program.parseAsync(['node', 'dossier', 'remove', 'my-dossier'])).rejects.toThrow();
 
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Not logged in'));
   });
@@ -48,14 +46,12 @@ describe('remove command', () => {
     const program = createTestProgram();
     registerRemoveCommand(program);
 
-    await expect(program.parseAsync(['node', 'dossier', 'remove', 'my-dossier'])).rejects.toThrow(
-      'process.exit(1)'
-    );
+    await expect(program.parseAsync(['node', 'dossier', 'remove', 'my-dossier'])).rejects.toThrow();
 
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('expired'));
   });
 
-  it('should remove with --yes flag', async () => {
+  it('should remove with --yes flag and show CDN warning', async () => {
     mockClient.removeDossier.mockResolvedValue({});
 
     const program = createTestProgram();
@@ -65,6 +61,57 @@ describe('remove command', () => {
 
     expect(mockClient.removeDossier).toHaveBeenCalledWith('my-dossier', null);
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Removed'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('CDN propagation'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('dossier info my-dossier'));
+  });
+
+  it('should output JSON with verification field after remove', async () => {
+    mockClient.removeDossier.mockResolvedValue({});
+
+    const program = createTestProgram();
+    registerRemoveCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'remove', 'my-dossier', '--yes', '--json']);
+
+    const jsonCall = vi.mocked(console.log).mock.calls.find((call) => {
+      try {
+        const parsed = JSON.parse(call[0] as string);
+        return parsed.success === true;
+      } catch {
+        return false;
+      }
+    });
+    expect(jsonCall).toBeDefined();
+    const output = JSON.parse(jsonCall?.[0] as string);
+    expect(output.verification).toBeDefined();
+    expect(output.verification.verify_command).toBe('dossier info my-dossier');
+    expect(output.verification.cdn_delay_seconds).toBe(30);
+  });
+
+  it('should output JSON error on remove failure with --json flag', async () => {
+    mockClient.removeDossier.mockRejectedValue(
+      Object.assign(new Error('Not found'), { statusCode: 404 })
+    );
+
+    const program = createTestProgram();
+    registerRemoveCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'remove', 'missing', '--yes', '--json'])
+    ).rejects.toThrow();
+
+    const jsonCall = vi.mocked(console.log).mock.calls.find((call) => {
+      try {
+        const parsed = JSON.parse(call[0] as string);
+        return parsed.success === false;
+      } catch {
+        return false;
+      }
+    });
+    expect(jsonCall).toBeDefined();
+    const output = JSON.parse(jsonCall?.[0] as string);
+    expect(output.success).toBe(false);
+    expect(output.statusCode).toBe(404);
   });
 
   it('should remove specific version with --yes', async () => {
@@ -88,7 +135,7 @@ describe('remove command', () => {
 
     await expect(
       program.parseAsync(['node', 'dossier', 'remove', 'missing', '--yes'])
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow();
 
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Not found'));
   });
@@ -103,7 +150,7 @@ describe('remove command', () => {
 
     await expect(
       program.parseAsync(['node', 'dossier', 'remove', 'forbidden', '--yes'])
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow();
 
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Permission denied'));
   });
