@@ -30,13 +30,15 @@ export interface Signer {
 
 export interface VerifyResult {
   valid: boolean;
-  /** Present when valid is false due to an error (not a genuine verification failure) */
   error?: string;
 }
 
 export interface Verifier {
   /**
-   * Verify a signature
+   * Verify a signature.
+   * Returns { valid: true } for valid signatures,
+   * { valid: false } for cryptographically invalid signatures,
+   * { valid: false, error: '...' } when verification could not complete (e.g., network error).
    */
   verify(content: string, signature: SignatureResult): Promise<VerifyResult>;
 

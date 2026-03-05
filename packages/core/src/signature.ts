@@ -46,9 +46,7 @@ export function loadTrustedKeys(filePath?: string): Map<string, string> {
       }
     }
   } catch (err) {
-    process.stderr.write(
-      `Warning: error parsing trusted keys file ${keysPath}: ${(err as Error).message}\n`
-    );
+    console.error(`Warning: failed to parse trusted keys: ${(err as Error).message}`);
   }
 
   return keys;
@@ -59,7 +57,6 @@ export function loadTrustedKeys(filePath?: string): Map<string, string> {
  * @param content - The content to verify
  * @param signature - Base64-encoded signature
  * @param publicKey - PEM-format Ed25519 public key
- * @returns VerifyResult with valid flag and optional error
  */
 export function verifyWithEd25519(
   content: string,
@@ -87,7 +84,6 @@ export function verifyWithEd25519(
 
 /**
  * Verify signature using AWS KMS (ECDSA-SHA-256)
- * @returns VerifyResult with valid flag and optional error
  */
 export async function verifyWithKms(
   content: string,
@@ -123,7 +119,7 @@ export async function verifyWithKms(
  * This is a convenience function that encapsulates registry lookup
  * @param content - The content to verify
  * @param signature - Signature result object containing algorithm and signature data
- * @returns VerifyResult with valid flag and optional error
+ * @returns Promise<boolean> - true if signature is valid, false otherwise
  */
 export async function verifySignature(
   content: string,

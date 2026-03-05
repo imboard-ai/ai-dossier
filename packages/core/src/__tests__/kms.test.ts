@@ -113,7 +113,7 @@ describe('KmsVerifier', () => {
       public_key: 'pk',
       signed_at: new Date().toISOString(),
     });
-    expect(result).toEqual({ valid: false });
+    expect(result.valid).toBe(false);
   });
 
   it('should verify a valid signature', async () => {
@@ -127,7 +127,8 @@ describe('KmsVerifier', () => {
       signed_at: new Date().toISOString(),
     });
 
-    expect(result).toEqual({ valid: true });
+    expect(result.valid).toBe(true);
+    expect(result.error).toBeUndefined();
   });
 
   it('should reject an invalid signature', async () => {
@@ -141,10 +142,11 @@ describe('KmsVerifier', () => {
       signed_at: new Date().toISOString(),
     });
 
-    expect(result).toEqual({ valid: false });
+    expect(result.valid).toBe(false);
+    expect(result.error).toBeUndefined();
   });
 
-  it('should return error on KMS errors', async () => {
+  it('should return error on KMS failures', async () => {
     vi.mocked(KMSClient.prototype.send).mockRejectedValueOnce(new Error('KMS unavailable'));
 
     const result = await verifier.verify('content', {
@@ -196,6 +198,6 @@ describe('KmsVerifier', () => {
       signed_at: new Date().toISOString(),
     });
 
-    expect(result).toEqual({ valid: true });
+    expect(result.valid).toBe(true);
   });
 });

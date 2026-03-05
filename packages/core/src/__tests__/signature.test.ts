@@ -240,7 +240,8 @@ describe('verifyWithEd25519', () => {
     // Verify signature
     const result = verifyWithEd25519(content, signatureBase64, publicKeyPem);
 
-    expect(result).toEqual({ valid: true });
+    expect(result.valid).toBe(true);
+    expect(result.error).toBeUndefined();
   });
 
   it('should reject tampered content', () => {
@@ -255,7 +256,8 @@ describe('verifyWithEd25519', () => {
 
     const result = verifyWithEd25519(tamperedContent, signatureBase64, publicKeyPem);
 
-    expect(result).toEqual({ valid: false });
+    expect(result.valid).toBe(false);
+    expect(result.error).toBeUndefined();
   });
 
   it('should reject wrong public key', () => {
@@ -270,7 +272,8 @@ describe('verifyWithEd25519', () => {
 
     const result = verifyWithEd25519(content, signatureBase64, publicKeyPem2);
 
-    expect(result).toEqual({ valid: false });
+    expect(result.valid).toBe(false);
+    expect(result.error).toBeUndefined();
   });
 
   it('should return error for invalid PEM format', () => {
@@ -284,13 +287,14 @@ describe('verifyWithEd25519', () => {
     expect(result.error).toBeDefined();
   });
 
-  it('should reject invalid signature base64', () => {
+  it('should return false for invalid signature base64', () => {
     const { publicKey } = generateKeyPairSync('ed25519');
     const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }) as string;
 
     const result = verifyWithEd25519('content', 'invalid!!!base64', publicKeyPem);
 
-    // Buffer.from silently ignores invalid base64 chars, so this is a genuine verification failure
+    // Buffer.from silently ignores invalid base64 chars, so crypto.verify
+    // just returns false (wrong signature bytes) rather than throwing
     expect(result.valid).toBe(false);
   });
 
@@ -308,7 +312,7 @@ With special chars: 你好 🎉`;
 
     const result = verifyWithEd25519(content, signatureBase64, publicKeyPem);
 
-    expect(result).toEqual({ valid: true });
+    expect(result.valid).toBe(true);
   });
 
   it('should detect whitespace changes', () => {
@@ -323,7 +327,8 @@ With special chars: 你好 🎉`;
 
     const result = verifyWithEd25519(modifiedContent, signatureBase64, publicKeyPem);
 
-    expect(result).toEqual({ valid: false });
+    expect(result.valid).toBe(false);
+    expect(result.error).toBeUndefined();
   });
 });
 

@@ -153,9 +153,9 @@ async function verifyDossier(dossierFile: string, trustedKeysFile: string): Prom
     }
 
     // Verify signature
-    const sigResult = await verifySignature(body, sig);
+    const verifyResult = await verifySignature(body, sig);
 
-    if (sigResult.valid) {
+    if (verifyResult.valid) {
       if (result.authenticity.isTrusted) {
         result.authenticity.status = 'verified';
         result.authenticity.message = `Verified signature from trusted source: ${result.authenticity.trustedAs}`;
@@ -163,11 +163,13 @@ async function verifyDossier(dossierFile: string, trustedKeysFile: string): Prom
         result.authenticity.status = 'signed_unknown';
         result.authenticity.message = `Valid signature but key is not in trusted list`;
       }
-    } else if (sigResult.error) {
+    } else if (verifyResult.error) {
+      // Verification could not complete (network error, service unavailable, etc.)
       result.authenticity.status = 'error';
-      result.authenticity.message = `Verification error: ${sigResult.error}`;
-      result.errors.push(`Signature verification error: ${sigResult.error}`);
+      result.authenticity.message = `Verification error: ${verifyResult.error}`;
+      result.errors.push(`Signature verification error: ${verifyResult.error}`);
     } else {
+      // Cryptographically invalid signature
       result.authenticity.status = 'invalid';
       result.authenticity.message = 'SIGNATURE VERIFICATION FAILED';
       result.errors.push('Signature verification FAILED - do not execute!');
