@@ -40,6 +40,14 @@ export {
   VALID_STATUSES,
   validateFrontmatter,
 } from './parser';
+export type {
+  ChecksumStatus,
+  SignatureStatus,
+  VerificationRiskLevel,
+  VerificationRiskResult,
+} from './risk-assessment';
+// Risk assessment exports
+export { assessVerificationRisk } from './risk-assessment';
 // Signature exports
 export { loadTrustedKeys, verifySignature, verifyWithEd25519, verifyWithKms } from './signature';
 // Signer/Verifier interfaces and implementations

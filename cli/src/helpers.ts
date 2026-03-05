@@ -18,6 +18,7 @@ import {
 } from '@ai-dossier/core';
 
 import { convertGitHubBlobToRaw } from './github-url';
+import { verifyDossier as verifyDossierModule } from './verify-dossier';
 
 // ============================================================================
 // Path constants
@@ -279,7 +280,6 @@ export async function runVerification(
   file: string,
   options: VerificationOptions
 ): Promise<VerificationResult> {
-  const verifyScript = path.join(BIN_DIR, 'dossier-verify');
   const results: VerificationResult = { passed: true, stages: [] };
 
   console.log('🔐 Running Multi-Stage Verification Pipeline...\n');
@@ -287,11 +287,11 @@ export async function runVerification(
   // Stage 1: Integrity Check (checksum + signature)
   if (!options.skipChecksum && !options.skipAllChecks) {
     console.log('📊 Stage 1: Integrity Check (checksum + signature)');
-    try {
-      execSync(`node "${verifyScript}" "${file}" --exit-code-only 2>/dev/null`, { stdio: 'pipe' });
+    const passed = await verifyDossierModule(file, { verbose: false });
+    if (passed) {
       console.log('   ✅ PASSED: Checksum and signature valid\n');
       results.stages.push({ stage: 1, name: 'Integrity', passed: true });
-    } catch {
+    } else {
       console.log('   ❌ FAILED: Verification failed');
       console.log(`   Run "dossier verify ${file}" for details\n`);
       results.passed = false;
@@ -562,18 +562,10 @@ export function parseDossierMetadataLocal(filePath: string): DossierMetadata {
 }
 
 /**
- * Verify a dossier file using the verify script (quick check).
+ * Verify a dossier file (quick check using the TS module directly).
  */
-export function verifyDossierQuick(filePath: string): boolean {
-  const verifyScript = path.join(BIN_DIR, 'dossier-verify');
-  try {
-    execSync(`node "${verifyScript}" "${filePath}" --exit-code-only 2>/dev/null`, {
-      stdio: 'pipe',
-    });
-    return true;
-  } catch {
-    return false;
-  }
+export async function verifyDossierQuick(filePath: string): Promise<boolean> {
+  return verifyDossierModule(filePath, { verbose: false });
 }
 
 /**
