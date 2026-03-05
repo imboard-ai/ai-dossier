@@ -31,7 +31,15 @@ export {
   loadLintConfig,
 } from './linter';
 // Parser exports
-export { parseDossierContent, parseDossierFile, validateFrontmatter } from './parser';
+export {
+  parseDossierContent,
+  parseDossierFile,
+  RECOMMENDED_FIELDS,
+  REQUIRED_FIELDS,
+  VALID_RISK_LEVELS,
+  VALID_STATUSES,
+  validateFrontmatter,
+} from './parser';
 // Signature exports
 export { loadTrustedKeys, verifySignature, verifyWithEd25519, verifyWithKms } from './signature';
 // Signer/Verifier interfaces and implementations

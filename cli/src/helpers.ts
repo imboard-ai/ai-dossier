@@ -9,7 +9,13 @@ import http from 'node:http';
 import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
-import { parseDossierContent } from '@ai-dossier/core';
+import {
+  parseDossierContent,
+  RECOMMENDED_FIELDS,
+  REQUIRED_FIELDS,
+  VALID_RISK_LEVELS,
+  VALID_STATUSES,
+} from '@ai-dossier/core';
 
 import { convertGitHubBlobToRaw } from './github-url';
 
@@ -37,17 +43,8 @@ export const OFFICIAL_KMS_KEYS = [
   'arn:aws:kms:us-east-1:942039714848:key/d9ccd3fc-b190-49fd-83f7-e94df6620c1d',
 ];
 
-/** Required frontmatter fields per schema spec */
-export const REQUIRED_FIELDS = ['dossier_schema_version', 'title', 'version'];
-
-/** Recommended fields (warn if missing) */
-export const RECOMMENDED_FIELDS = ['objective', 'risk_level', 'status'];
-
-/** Valid values for risk_level */
-export const VALID_RISK_LEVELS = ['low', 'medium', 'high', 'critical'];
-
-/** Valid values for status */
-export const VALID_STATUSES = ['draft', 'stable', 'deprecated', 'experimental'];
+// Re-export validation constants from core (single source of truth)
+export { RECOMMENDED_FIELDS, REQUIRED_FIELDS, VALID_RISK_LEVELS, VALID_STATUSES };
 
 // ============================================================================
 // TypeScript interfaces
@@ -516,83 +513,29 @@ export function parseDossierMetadataFromContent(
   filePath: string
 ): DossierMetadata {
   try {
-    // Check for ---dossier JSON frontmatter format
-    if (content.startsWith('---dossier')) {
-      try {
-        const parsed = parseDossierContent(content);
-        const frontmatter = parsed.frontmatter as Record<string, any>;
-        return {
-          path: filePath,
-          filename: path.basename(filePath),
-          title: frontmatter.title || path.basename(filePath, '.ds.md'),
-          version: frontmatter.version || '-',
-          risk_level: frontmatter.risk_level || 'unknown',
-          category: Array.isArray(frontmatter.category)
-            ? frontmatter.category.join(', ')
-            : frontmatter.category || '-',
-          status: frontmatter.status || '-',
-          signed: !!frontmatter.signature,
-          checksum: !!frontmatter.checksum,
-          objective: frontmatter.objective || '',
-          error: null,
-        };
-      } catch {
-        return {
-          path: filePath,
-          filename: path.basename(filePath),
-          title: path.basename(filePath, '.ds.md'),
-          error: 'Invalid JSON frontmatter',
-        };
-      }
-    }
-
-    // Check for standard YAML frontmatter format
-    const yamlFrontmatterMatch = content.match(/^---\s*\n([\s\S]*?)\n---/);
-    if (yamlFrontmatterMatch) {
-      const frontmatter: Record<string, string> = {};
-      const lines = yamlFrontmatterMatch[1].split('\n');
-      for (const line of lines) {
-        const match = line.match(/^(\w+):\s*(.*)$/);
-        if (match) {
-          let value = match[2].trim();
-          if (
-            (value.startsWith('"') && value.endsWith('"')) ||
-            (value.startsWith("'") && value.endsWith("'"))
-          ) {
-            value = value.slice(1, -1);
-          }
-          frontmatter[match[1]] = value;
-        }
-      }
-
-      return {
-        path: filePath,
-        filename: path.basename(filePath),
-        title: frontmatter.title || path.basename(filePath, '.ds.md'),
-        version: frontmatter.version || '-',
-        risk_level: frontmatter.risk_level || 'unknown',
-        category: frontmatter.category || '-',
-        status: frontmatter.status || '-',
-        signed: !!frontmatter.signature,
-        checksum: !!frontmatter.checksum,
-        objective: frontmatter.objective || '',
-        error: null,
-      };
-    }
-
-    // No frontmatter found
+    const parsed = parseDossierContent(content);
+    const frontmatter = parsed.frontmatter as Record<string, any>;
     return {
       path: filePath,
       filename: path.basename(filePath),
-      title: path.basename(filePath, '.ds.md'),
-      error: 'No frontmatter found',
+      title: frontmatter.title || path.basename(filePath, '.ds.md'),
+      version: frontmatter.version || '-',
+      risk_level: frontmatter.risk_level || 'unknown',
+      category: Array.isArray(frontmatter.category)
+        ? frontmatter.category.join(', ')
+        : frontmatter.category || '-',
+      status: frontmatter.status || '-',
+      signed: !!frontmatter.signature,
+      checksum: !!frontmatter.checksum,
+      objective: frontmatter.objective || '',
+      error: null,
     };
-  } catch (err) {
+  } catch {
     return {
       path: filePath,
       filename: path.basename(filePath),
       title: path.basename(filePath, '.ds.md'),
-      error: (err as Error).message,
+      error: 'Invalid frontmatter',
     };
   }
 }

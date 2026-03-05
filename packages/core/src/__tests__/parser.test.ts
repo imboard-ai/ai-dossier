@@ -5,16 +5,14 @@ import { describe, expect, it } from 'vitest';
 import { parseDossierContent, parseDossierFile, validateFrontmatter } from '../parser';
 
 describe('parseDossierContent', () => {
-  it('should parse valid dossier with minimal frontmatter', () => {
+  it('should parse valid dossier with JSON frontmatter', () => {
     const content = `---dossier
 {
+  "dossier_schema_version": "1.0.0",
   "version": "1.0.0",
-  "protocol_version": "1.0",
   "title": "Test Dossier",
   "objective": "Test parsing",
-  "risk_level": "low",
-  "risk_factors": [],
-  "destructive_operations": []
+  "risk_level": "low"
 }
 ---
 # Body content
@@ -32,16 +30,19 @@ This is the markdown body.`;
   it('should parse dossier with complex frontmatter', () => {
     const content = `---dossier
 {
+  "dossier_schema_version": "1.0.0",
   "version": "1.0.0",
-  "protocol_version": "1.0",
   "title": "Complex Test",
   "objective": "Test complex parsing",
   "risk_level": "high",
   "risk_factors": ["data_loss", "security"],
   "destructive_operations": ["delete_files"],
-  "checksum": "abc123",
+  "checksum": {
+    "algorithm": "sha256",
+    "hash": "abc123def456abc123def456abc123def456abc123def456abc123def456abc1"
+  },
   "signature": {
-    "algorithm": "minisign",
+    "algorithm": "ed25519",
     "signature": "sig123",
     "public_key": "key123",
     "signed_at": "2024-11-17T00:00:00Z"
@@ -57,17 +58,17 @@ With various content`;
     expect(result.frontmatter.risk_level).toBe('high');
     expect(result.frontmatter.risk_factors).toEqual(['data_loss', 'security']);
     expect(result.frontmatter.destructive_operations).toEqual(['delete_files']);
-    expect(result.frontmatter.checksum).toBe('abc123');
-    expect(result.frontmatter.signature?.algorithm).toBe('minisign');
+    expect(result.frontmatter.checksum?.algorithm).toBe('sha256');
+    expect(result.frontmatter.signature?.algorithm).toBe('ed25519');
   });
 
-  it('should reject invalid frontmatter JSON', () => {
+  it('should reject invalid frontmatter', () => {
     const content = `---dossier
-{ invalid json, missing quotes }
+key: [invalid
 ---
 body`;
 
-    expect(() => parseDossierContent(content)).toThrow('Failed to parse frontmatter JSON');
+    expect(() => parseDossierContent(content)).toThrow('Failed to parse frontmatter');
   });
 
   it('should reject missing frontmatter', () => {
@@ -76,27 +77,59 @@ body`;
     expect(() => parseDossierContent(content)).toThrow('Invalid dossier format');
   });
 
-  it('should reject malformed frontmatter delimiter', () => {
+  it('should parse standard YAML frontmatter (--- delimiter)', () => {
     const content = `---
-{
-  "version": "1.0.0"
-}
+dossier_schema_version: "1.0.0"
+title: YAML Dossier
+version: "1.0.0"
+status: Stable
 ---
-body`;
+# Body content`;
 
-    expect(() => parseDossierContent(content)).toThrow('Invalid dossier format');
+    const result = parseDossierContent(content);
+
+    expect(result.frontmatter.title).toBe('YAML Dossier');
+    expect(result.frontmatter.version).toBe('1.0.0');
+    expect(result.frontmatter.status).toBe('Stable');
+    expect(result.body).toContain('# Body content');
+  });
+
+  it('should parse ---dossier with YAML content', () => {
+    const content = `---dossier
+name: my-dossier
+title: My Dossier
+version: "1.0.0"
+tags:
+  - javascript
+  - nodejs
+---
+# Content`;
+
+    const result = parseDossierContent(content);
+
+    expect(result.frontmatter.name).toBe('my-dossier');
+    expect(result.frontmatter.title).toBe('My Dossier');
+    expect((result.frontmatter as any).tags).toEqual(['javascript', 'nodejs']);
+  });
+
+  it('should parse ---json frontmatter', () => {
+    const content = `---json
+{"title": "JSON Dossier", "version": "1.0.0"}
+---
+# Content`;
+
+    const result = parseDossierContent(content);
+
+    expect(result.frontmatter.title).toBe('JSON Dossier');
+    expect(result.frontmatter.version).toBe('1.0.0');
   });
 
   it('should handle empty body', () => {
     const content = `---dossier
 {
+  "dossier_schema_version": "1.0.0",
   "version": "1.0.0",
-  "protocol_version": "1.0",
-  "title": "Test",
-  "objective": "Test",
-  "risk_level": "low",
-  "risk_factors": [],
-  "destructive_operations": []
+  "title": "Test"
 }
 ---
 `;
@@ -109,13 +142,9 @@ body`;
     const content = `---dossier
 
 {
+  "dossier_schema_version": "1.0.0",
   "version": "1.0.0",
-  "protocol_version": "1.0",
-  "title": "Test",
-  "objective": "Test",
-  "risk_level": "low",
-  "risk_factors": [],
-  "destructive_operations": []
+  "title": "Test"
 }
 
 ---
@@ -125,6 +154,25 @@ body`;
     const result = parseDossierContent(content);
     expect(result.frontmatter.version).toBe('1.0.0');
     expect(result.body).toContain('# Body');
+  });
+
+  it('should preserve the raw content', () => {
+    const content = `---dossier
+{
+  "title": "Test",
+  "version": "1.0.0"
+}
+---
+body`;
+
+    const result = parseDossierContent(content);
+    expect(result.raw).toBe(content);
+  });
+
+  it('should throw on null/undefined/empty input', () => {
+    expect(() => parseDossierContent(null as any)).toThrow();
+    expect(() => parseDossierContent(undefined as any)).toThrow();
+    expect(() => parseDossierContent('')).toThrow();
   });
 });
 
@@ -136,13 +184,10 @@ describe('parseDossierFile', () => {
 
     const content = `---dossier
 {
+  "dossier_schema_version": "1.0.0",
   "version": "1.0.0",
-  "protocol_version": "1.0",
   "title": "File Test",
-  "objective": "Test file parsing",
-  "risk_level": "low",
-  "risk_factors": [],
-  "destructive_operations": []
+  "objective": "Test file parsing"
 }
 ---
 # Test body`;
@@ -168,13 +213,9 @@ describe('parseDossierFile', () => {
 describe('validateFrontmatter', () => {
   it('should pass validation for complete valid frontmatter', () => {
     const frontmatter: any = {
+      dossier_schema_version: '1.0.0',
       version: '1.0.0',
-      protocol_version: '1.0',
       title: 'Valid Dossier',
-      objective: 'Test validation',
-      risk_level: 'low',
-      risk_factors: [],
-      destructive_operations: [],
     };
 
     const errors = validateFrontmatter(frontmatter);
@@ -184,28 +225,22 @@ describe('validateFrontmatter', () => {
   it('should detect missing required fields', () => {
     const frontmatter: any = {
       version: '1.0.0',
-      title: 'Incomplete Dossier',
-      // Missing: protocol_version, objective, risk_level, risk_factors, destructive_operations
+      // Missing: dossier_schema_version, title
     };
 
     const errors = validateFrontmatter(frontmatter);
 
-    expect(errors).toContain('Missing required field: protocol_version');
-    expect(errors).toContain('Missing required field: objective');
-    expect(errors).toContain('Missing required field: risk_level');
-    expect(errors).toContain('Missing required field: risk_factors');
-    expect(errors).toContain('Missing required field: destructive_operations');
+    expect(errors).toContain('Missing required field: dossier_schema_version');
+    expect(errors).toContain('Missing required field: title');
+    expect(errors).not.toContain('Missing required field: version');
   });
 
   it('should reject invalid risk_level', () => {
     const frontmatter: any = {
+      dossier_schema_version: '1.0.0',
       version: '1.0.0',
-      protocol_version: '1.0',
       title: 'Test',
-      objective: 'Test',
       risk_level: 'invalid_level',
-      risk_factors: [],
-      destructive_operations: [],
     };
 
     const errors = validateFrontmatter(frontmatter);
@@ -220,13 +255,10 @@ describe('validateFrontmatter', () => {
 
     for (const level of validLevels) {
       const frontmatter: any = {
+        dossier_schema_version: '1.0.0',
         version: '1.0.0',
-        protocol_version: '1.0',
         title: 'Test',
-        objective: 'Test',
         risk_level: level,
-        risk_factors: [],
-        destructive_operations: [],
       };
 
       const errors = validateFrontmatter(frontmatter);
@@ -236,13 +268,9 @@ describe('validateFrontmatter', () => {
 
   it('should reject invalid status', () => {
     const frontmatter: any = {
+      dossier_schema_version: '1.0.0',
       version: '1.0.0',
-      protocol_version: '1.0',
       title: 'Test',
-      objective: 'Test',
-      risk_level: 'low',
-      risk_factors: [],
-      destructive_operations: [],
       status: 'invalid_status',
     };
 
@@ -253,18 +281,23 @@ describe('validateFrontmatter', () => {
     );
   });
 
-  it('should accept all valid statuses', () => {
-    const validStatuses = ['draft', 'stable', 'deprecated'];
+  it('should accept all valid statuses (case-insensitive)', () => {
+    const validStatuses = [
+      'draft',
+      'stable',
+      'deprecated',
+      'experimental',
+      'Draft',
+      'Stable',
+      'Deprecated',
+      'Experimental',
+    ];
 
     for (const status of validStatuses) {
       const frontmatter: any = {
+        dossier_schema_version: '1.0.0',
         version: '1.0.0',
-        protocol_version: '1.0',
         title: 'Test',
-        objective: 'Test',
-        risk_level: 'low',
-        risk_factors: [],
-        destructive_operations: [],
         status,
       };
 
@@ -275,13 +308,9 @@ describe('validateFrontmatter', () => {
 
   it('should allow optional status field', () => {
     const frontmatter: any = {
+      dossier_schema_version: '1.0.0',
       version: '1.0.0',
-      protocol_version: '1.0',
       title: 'Test',
-      objective: 'Test',
-      risk_level: 'low',
-      risk_factors: [],
-      destructive_operations: [],
       // status is optional
     };
 

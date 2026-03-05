@@ -2,30 +2,35 @@
  * TypeScript type definitions for Dossier format
  */
 
+export type DossierStatus = 'Draft' | 'Stable' | 'Deprecated' | 'Experimental';
+
 export interface DossierFrontmatter {
-  version: string;
-  protocol_version: string;
-  created: string;
-  updated: string;
+  dossier_schema_version?: string;
+  name?: string;
   title: string;
-  objective: string;
-  status: 'draft' | 'stable' | 'deprecated';
-  risk_level: 'low' | 'medium' | 'high' | 'critical';
-  risk_factors: string[];
-  destructive_operations: string[];
-  requires_approval: boolean;
+  version: string;
+  protocol_version?: string;
+  created?: string;
+  updated?: string;
+  last_updated?: string;
+  objective?: string;
+  status?: DossierStatus;
+  risk_level?: 'low' | 'medium' | 'high' | 'critical';
+  risk_factors?: string[];
+  destructive_operations?: string[];
+  requires_approval?: boolean;
   checksum?: {
     algorithm: string;
     hash: string;
-    calculated_at: string;
+    calculated_at?: string;
   };
   signature?: {
     algorithm: string;
     signature: string;
-    public_key: string;
-    key_id: string;
-    signed_by: string;
-    signed_at: string;
+    public_key?: string;
+    key_id?: string;
+    signed_by?: string;
+    signed_at?: string;
   };
   [key: string]: unknown; // Allow additional fields
 }

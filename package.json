@@ -6,7 +6,8 @@
   "workspaces": [
     "packages/*",
     "mcp-server",
-    "cli"
+    "cli",
+    "registry"
   ],
   "scripts": {
     "build": "make build",

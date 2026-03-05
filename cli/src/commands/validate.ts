@@ -35,37 +35,10 @@ export function registerValidateCommand(program: Command): void {
       const warnings: string[] = [];
       let frontmatter: Record<string, any> | null = null;
 
-      let isJson = false;
       try {
         const parsed = parseDossierContent(content);
         frontmatter = parsed.frontmatter as Record<string, any>;
-        isJson = true;
       } catch {
-        // Not valid ---dossier JSON frontmatter, try YAML
-      }
-
-      const yamlMatch = !isJson && content.match(/^---\s*\n([\s\S]*?)\n---/);
-
-      if (isJson) {
-        // Already parsed above
-      } else if (yamlMatch) {
-        warnings.push('YAML frontmatter detected - basic validation only');
-        frontmatter = {};
-        const lines = yamlMatch[1].split('\n');
-        for (const line of lines) {
-          const match = line.match(/^(\w+):\s*(.*)$/);
-          if (match) {
-            let value = match[2].trim();
-            if (
-              (value.startsWith('"') && value.endsWith('"')) ||
-              (value.startsWith("'") && value.endsWith("'"))
-            ) {
-              value = value.slice(1, -1);
-            }
-            frontmatter[match[1]] = value;
-          }
-        }
-      } else {
         errors.push('No frontmatter found. Expected ---dossier or --- at start of file.');
       }
 

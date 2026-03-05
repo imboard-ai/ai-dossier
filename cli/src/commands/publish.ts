@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { parseDossierContent } from '@ai-dossier/core';
+import { parseDossierContent, VALID_RISK_LEVELS, VALID_STATUSES } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { isExpired, loadCredentials } from '../credentials';
 import { getClient } from '../registry-client';
@@ -53,12 +53,13 @@ export function registerPublishCommand(program: Command): void {
             errors.push(`Missing required field: ${field}`);
           }
         }
-        const validRiskLevels = ['low', 'medium', 'high', 'critical'];
-        if (frontmatter.risk_level && !validRiskLevels.includes(frontmatter.risk_level)) {
+        if (
+          frontmatter.risk_level &&
+          !VALID_RISK_LEVELS.includes(frontmatter.risk_level.toLowerCase())
+        ) {
           errors.push(`Invalid risk_level: ${frontmatter.risk_level}`);
         }
-        const validStatuses = ['draft', 'stable', 'deprecated', 'experimental'];
-        if (frontmatter.status && !validStatuses.includes(frontmatter.status.toLowerCase())) {
+        if (frontmatter.status && !VALID_STATUSES.includes(frontmatter.status.toLowerCase())) {
           errors.push(`Invalid status: ${frontmatter.status}`);
         }
         if (errors.length > 0) {
