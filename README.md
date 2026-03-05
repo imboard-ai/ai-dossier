@@ -6,9 +6,13 @@
 ✅ Built-in verification (checksums, signatures, success criteria)
 ✅ Works with Claude, ChatGPT, Cursor—any LLM
 
-[![Spec](https://img.shields.io/badge/Dossier%20Spec-v1.0-blue)](#)
-[![MCP Ready](https://img.shields.io/badge/MCP-Ready-brightgreen)](#)
-[![Security](https://img.shields.io/badge/Verification-Checksums%20%26%20Signatures-yellow)](#)
+[![CI](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
+[![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Spec](https://img.shields.io/badge/Dossier%20Spec-v1.0-blue)](docs/reference/README.md)
+[![MCP Ready](https://img.shields.io/badge/MCP-Ready-brightgreen)](mcp-server)
+[![Verification](https://img.shields.io/badge/Verification-Checksums%20%26%20Signatures-yellow)](docs/explanation/security-model.md)
 [![GitHub](https://img.shields.io/github/stars/imboard-ai/ai-dossier?style=social)](https://github.com/imboard-ai/ai-dossier)
 
 > **Quick Concept**
