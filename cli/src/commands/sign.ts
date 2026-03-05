@@ -1,9 +1,14 @@
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  calculateChecksum,
+  Ed25519Signer,
+  KmsSigner,
+  parseDossierContent,
+} from '@ai-dossier/core';
 import type { Command } from 'commander';
-import { OFFICIAL_KMS_KEYS, REPO_ROOT } from '../helpers';
+import { OFFICIAL_KMS_KEYS } from '../helpers';
 
 export function registerSignCommand(program: Command): void {
   program
@@ -47,13 +52,27 @@ export function registerSignCommand(program: Command): void {
         console.log(`   File: ${dossierFile}`);
         console.log(`   Method: ${options.method}`);
 
-        const toolsDir = path.join(REPO_ROOT, 'tools');
-        let signTool: string;
-        const signArgs: string[] = [dossierFile];
+        // Read and parse the dossier
+        const content = fs.readFileSync(dossierFile, 'utf8');
+        let parsed;
+        try {
+          parsed = parseDossierContent(content);
+        } catch (err: unknown) {
+          console.log(`\n❌ Failed to parse dossier: ${(err as Error).message}`);
+          process.exit(1);
+        }
+        const { frontmatter, body } = parsed;
+
+        // Calculate checksum
+        const checksum = calculateChecksum(body);
+        console.log(`\n📊 Calculating checksum...`);
+        console.log(`   SHA256: ${checksum}`);
+        frontmatter.checksum = {
+          algorithm: 'sha256',
+          hash: checksum,
+        } as typeof frontmatter.checksum;
 
         if (options.method === 'kms') {
-          signTool = path.join(toolsDir, 'sign-dossier-kms.js');
-
           const effectiveKeyId = options.keyId || 'alias/dossier-official-prod';
 
           const isOfficialKey = OFFICIAL_KMS_KEYS.some(
@@ -85,16 +104,30 @@ export function registerSignCommand(program: Command): void {
             console.log('   This should only be done by authorized maintainers.\n');
           }
 
-          if (options.keyId) signArgs.push('--key-id', options.keyId);
-          if (options.region) signArgs.push('--region', options.region);
-          if (options.signedBy) signArgs.push('--signed-by', options.signedBy);
-          if (options.dryRun) signArgs.push('--dry-run');
-
           console.log(`   KMS Key: ${effectiveKeyId}`);
           console.log(`   Region: ${options.region || process.env.AWS_REGION || 'us-east-1'}`);
-        } else if (options.method === 'ed25519') {
-          signTool = path.join(toolsDir, 'sign-dossier.js');
 
+          if (options.dryRun) {
+            console.log('\n   [DRY RUN - will not sign]');
+            console.log('\n✅ Dry run complete (checksum calculated, no signature)');
+            console.log('\nUpdated frontmatter:');
+            console.log(JSON.stringify(frontmatter, null, 2));
+            return;
+          }
+
+          try {
+            const region = options.region || process.env.AWS_REGION || 'us-east-1';
+            const signer = new KmsSigner(effectiveKeyId, region);
+            const sigResult = await signer.sign(body);
+            frontmatter.signature = {
+              ...sigResult,
+              signed_by: options.signedBy || '(not specified)',
+            } as typeof frontmatter.signature;
+          } catch (err: unknown) {
+            console.log(`\n❌ KMS signing failed: ${(err as Error).message}`);
+            process.exit(1);
+          }
+        } else if (options.method === 'ed25519') {
           if (!options.key && !options.dryRun) {
             console.log('\n❌ Error: --key is required for ed25519 signing');
             console.log('\nGenerate a key pair with:');
@@ -105,9 +138,9 @@ export function registerSignCommand(program: Command): void {
             process.exit(1);
           }
 
+          let keyPath: string | undefined;
           if (options.key) {
-            let keyPath = path.resolve(options.key);
-            // Support name-based lookup from ~/.dossier/
+            keyPath = path.resolve(options.key);
             if (!fs.existsSync(keyPath)) {
               const namedPath = path.join(os.homedir(), '.dossier', `${options.key}.pem`);
               if (fs.existsSync(namedPath)) {
@@ -119,13 +152,29 @@ export function registerSignCommand(program: Command): void {
                 process.exit(1);
               }
             }
-            signArgs.push('--key', keyPath);
             console.log(`   Key: ${keyPath}`);
           }
 
-          if (options.keyId) signArgs.push('--key-id', options.keyId);
-          if (options.signedBy) signArgs.push('--signed-by', options.signedBy);
-          if (options.dryRun) signArgs.push('--dry-run');
+          if (options.dryRun) {
+            console.log('\n   [DRY RUN - will not sign]');
+            console.log('\n✅ Dry run complete (checksum calculated, no signature)');
+            console.log('\nUpdated frontmatter:');
+            console.log(JSON.stringify(frontmatter, null, 2));
+            return;
+          }
+
+          try {
+            const signer = new Ed25519Signer(keyPath!);
+            const sigResult = await signer.sign(body);
+            frontmatter.signature = {
+              ...sigResult,
+              key_id: options.keyId || sigResult.key_id,
+              signed_by: options.signedBy || '(not specified)',
+            } as typeof frontmatter.signature;
+          } catch (err: unknown) {
+            console.log(`\n❌ Signing failed: ${(err as Error).message}`);
+            process.exit(1);
+          }
         } else {
           console.log(`\n❌ Unknown signing method: ${options.method}`);
           console.log('\nSupported methods:');
@@ -134,31 +183,18 @@ export function registerSignCommand(program: Command): void {
           process.exit(1);
         }
 
-        if (!fs.existsSync(signTool)) {
-          console.log(`\n❌ Signing tool not found: ${signTool}`);
-          console.log('\nThis may be a package installation issue.');
-          console.log('Please report at: https://github.com/imboard-ai/ai-dossier/issues');
-          process.exit(1);
-        }
-
         if (options.signedBy) console.log(`   Signed by: ${options.signedBy}`);
-        if (options.dryRun) console.log('\n   [DRY RUN - will not sign]');
 
-        console.log('');
+        // Write updated dossier
+        const updatedContent = `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
+        fs.writeFileSync(dossierFile, updatedContent, 'utf8');
 
-        try {
-          const result = spawnSync('node', [signTool, ...signArgs], {
-            stdio: 'inherit',
-            cwd: REPO_ROOT,
-          });
-
-          if (result.status !== 0) {
-            process.exit(result.status || 1);
-          }
-        } catch (err: unknown) {
-          console.log(`\n❌ Signing failed: ${(err as Error).message}`);
-          process.exit(1);
-        }
+        console.log('\n✅ Dossier signed successfully!');
+        console.log(`\nSignature details:`);
+        console.log(`  Algorithm: ${frontmatter.signature!.algorithm}`);
+        console.log(`  Key ID: ${frontmatter.signature!.key_id || '(not specified)'}`);
+        console.log(`  Signed by: ${frontmatter.signature!.signed_by || '(not specified)'}`);
+        console.log(`  Signed at: ${frontmatter.signature!.signed_at}`);
       }
     );
 }
