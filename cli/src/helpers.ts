@@ -29,9 +29,6 @@ export const CLI_ROOT = path.resolve(__dirname, '..');
 /** The bin/ directory */
 export const BIN_DIR = path.join(CLI_ROOT, 'bin');
 
-/** Repository root (parent of cli/) */
-export const REPO_ROOT = path.resolve(CLI_ROOT, '..');
-
 // ============================================================================
 // Shared constants
 // ============================================================================

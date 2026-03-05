@@ -11,8 +11,6 @@ vi.mock('../../helpers', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../helpers')>();
   return {
     ...actual,
-    REPO_ROOT: '/repo',
-    BIN_DIR: '/repo/cli/bin',
     detectLlm: vi.fn(),
   };
 });
