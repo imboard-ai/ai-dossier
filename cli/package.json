@@ -27,7 +27,7 @@
     "cli"
   ],
   "author": "Imboard AI",
-  "license": "Elastic-2.0",
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "https://github.com/imboard-ai/ai-dossier.git",

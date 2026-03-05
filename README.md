@@ -222,9 +222,7 @@ Dossiers embody this philosophy - they give AI agents clear structure and guidan
 
 ## License
 
-This project is licensed under the [Elastic License 2.0 (ELv2)](LICENSE). You are free to use, copy, modify, and distribute it, with one restriction: you may not offer it as a hosted or managed service to third parties.
-
-The canonical hosted registry is operated by [ImBoard.ai](https://github.com/imboard-ai) at `dossier-registry.vercel.app`.
+This project is licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](LICENSE). You are free to use, copy, modify, and distribute it, provided that any modified versions or network services using this software also make their source code available under the same license.
 
 ## References
 

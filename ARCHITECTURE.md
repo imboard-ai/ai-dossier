@@ -136,4 +136,4 @@ For comprehensive architecture documentation, see:
 
 ---
 
-**License**: [Elastic License 2.0 (ELv2)](LICENSE) | **Maintained by**: Imboard AI
+**License**: [AGPL-3.0](LICENSE) | **Maintained by**: Imboard AI

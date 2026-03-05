@@ -22,7 +22,7 @@
   },
   "keywords": [],
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
-  "license": "Elastic-2.0",
+  "license": "AGPL-3.0-only",
   "type": "commonjs",
   "bugs": {
     "url": "https://github.com/imboard-ai/ai-dossier/issues"
