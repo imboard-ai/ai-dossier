@@ -79,7 +79,7 @@ export function registerSearchCommand(program: Command): void {
                   const bodyLower = content.toLowerCase();
                   if (terms.some((term) => bodyLower.includes(term))) {
                     // Extract snippet around first match
-                    const firstTerm = terms.find((t) => bodyLower.includes(t))!;
+                    const firstTerm = terms.find((t) => bodyLower.includes(t)) ?? terms[0];
                     const idx = bodyLower.indexOf(firstTerm);
                     const start = Math.max(0, idx - 50);
                     const end = Math.min(content.length, idx + firstTerm.length + 50);
@@ -140,13 +140,13 @@ export function registerSearchCommand(program: Command): void {
           const category = Array.isArray(d.category) ? d.category.join(', ') : d.category || '';
           const description = d.description || d.objective || '';
 
-          console.log(`  ${name} (v${version})${category ? '  [' + category + ']' : ''}`);
+          console.log(`  ${name} (v${version})${category ? `  [${category}]` : ''}`);
           if (title) {
             console.log(`  ${title}`);
           }
           if (description) {
             const snippet =
-              description.length > 100 ? description.slice(0, 100) + '...' : description;
+              description.length > 100 ? `${description.slice(0, 100)}...` : description;
             console.log(`  ${snippet}`);
           }
           if ((d as any)._contentSnippet) {

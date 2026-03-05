@@ -5,7 +5,6 @@
  * using mocked filesystem for credential storage.
  */
 
-import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerLogoutCommand } from '../../commands/logout';
 import { registerWhoamiCommand } from '../../commands/whoami';

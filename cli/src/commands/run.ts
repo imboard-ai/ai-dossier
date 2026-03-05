@@ -142,7 +142,7 @@ export function registerRunCommand(program: Command): void {
           if (fm.risk_level) log(`   Risk Level: ${fm.risk_level}`);
           if (fm.objective || fm.description) {
             const obj = fm.objective || fm.description;
-            const snippet = obj.length > 100 ? obj.slice(0, 100) + '...' : obj;
+            const snippet = obj.length > 100 ? `${obj.slice(0, 100)}...` : obj;
             log(`   Objective:  ${snippet}`);
           }
           log('');

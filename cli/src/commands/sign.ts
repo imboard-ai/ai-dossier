@@ -1,12 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {
-  calculateChecksum,
-  Ed25519Signer,
-  KmsSigner,
-  parseDossierContent,
-} from '@ai-dossier/core';
+import { calculateChecksum, Ed25519Signer, KmsSigner, parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { OFFICIAL_KMS_KEYS } from '../helpers';
 
@@ -54,7 +49,7 @@ export function registerSignCommand(program: Command): void {
 
         // Read and parse the dossier
         const content = fs.readFileSync(dossierFile, 'utf8');
-        let parsed;
+        let parsed: ReturnType<typeof parseDossierContent>;
         try {
           parsed = parseDossierContent(content);
         } catch (err: unknown) {
@@ -164,7 +159,7 @@ export function registerSignCommand(program: Command): void {
           }
 
           try {
-            const signer = new Ed25519Signer(keyPath!);
+            const signer = new Ed25519Signer(keyPath as string);
             const sigResult = await signer.sign(body);
             frontmatter.signature = {
               ...sigResult,
@@ -191,10 +186,10 @@ export function registerSignCommand(program: Command): void {
 
         console.log('\n✅ Dossier signed successfully!');
         console.log(`\nSignature details:`);
-        console.log(`  Algorithm: ${frontmatter.signature!.algorithm}`);
-        console.log(`  Key ID: ${frontmatter.signature!.key_id || '(not specified)'}`);
-        console.log(`  Signed by: ${frontmatter.signature!.signed_by || '(not specified)'}`);
-        console.log(`  Signed at: ${frontmatter.signature!.signed_at}`);
+        console.log(`  Algorithm: ${frontmatter.signature?.algorithm}`);
+        console.log(`  Key ID: ${frontmatter.signature?.key_id || '(not specified)'}`);
+        console.log(`  Signed by: ${frontmatter.signature?.signed_by || '(not specified)'}`);
+        console.log(`  Signed at: ${frontmatter.signature?.signed_at}`);
       }
     );
 }

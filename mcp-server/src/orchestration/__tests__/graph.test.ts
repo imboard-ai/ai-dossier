@@ -127,7 +127,7 @@ describe('detectCycle', () => {
     const cycle = detectCycle(graph);
 
     expect(cycle).not.toBeNull();
-    expect(cycle!.length).toBeGreaterThanOrEqual(3); // at least [a, b, a]
+    expect(cycle?.length).toBeGreaterThanOrEqual(3); // at least [a, b, a]
     // Cycle should contain both nodes
     expect(cycle).toContain('a');
     expect(cycle).toContain('b');

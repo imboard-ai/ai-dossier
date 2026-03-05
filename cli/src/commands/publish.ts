@@ -2,7 +2,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
-import { parseDossierContent, validateFrontmatter } from '@ai-dossier/core';
+import {
+  type DossierFrontmatter,
+  parseDossierContent,
+  validateFrontmatter,
+} from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { isExpired, loadCredentials } from '../credentials';
 import { getClient } from '../registry-client';
@@ -70,7 +74,7 @@ export function registerPublishCommand(program: Command): void {
           process.exit(1);
         }
 
-        const errors = validateFrontmatter(frontmatter);
+        const errors = validateFrontmatter(frontmatter as DossierFrontmatter);
         if (errors.length > 0) {
           console.error('\n❌ Validation errors:');
           for (const err of errors) {

@@ -37,7 +37,7 @@ vi.mock('../../utils/logger', () => ({
 import { buildExecutionPlan, buildGraph, CycleError } from '../../orchestration/graph';
 import { DossierResolver } from '../../orchestration/resolver';
 
-const mockResolverInstance = () => {
+const _mockResolverInstance = () => {
   const instance = new DossierResolver();
   return instance;
 };

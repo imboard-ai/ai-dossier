@@ -145,7 +145,7 @@ export function registerKeysCommand(program: Command): void {
       trustedLines.forEach((line, index) => {
         const [key, ...idParts] = line.trim().split(/\s+/);
         const identifier = idParts.join(' ');
-        const shortKey = key.length > 60 ? key.substring(0, 60) + '...' : key;
+        const shortKey = key.length > 60 ? `${key.substring(0, 60)}...` : key;
         console.log(`${index + 1}. ${identifier}`);
         console.log(`   ${shortKey}`);
         console.log();

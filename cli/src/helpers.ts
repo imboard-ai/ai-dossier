@@ -293,7 +293,7 @@ export async function runVerification(
       results.stages.push({ stage: 1, name: 'Integrity', passed: true });
     } catch {
       console.log('   ❌ FAILED: Verification failed');
-      console.log('   Run "dossier verify ' + file + '" for details\n');
+      console.log(`   Run "dossier verify ${file}" for details\n`);
       results.passed = false;
       results.stages.push({ stage: 1, name: 'Integrity', passed: false });
       return results;
@@ -447,7 +447,7 @@ export async function findDossierFilesGitHub(
               .filter((item: { type: string; path: string }) => {
                 if (item.type !== 'blob') return false;
                 if (!item.path.endsWith('.ds.md')) return false;
-                if (subpath && !item.path.startsWith(subpath + '/') && item.path !== subpath)
+                if (subpath && !item.path.startsWith(`${subpath}/`) && item.path !== subpath)
                   return false;
                 if (item.path.includes('node_modules/')) return false;
                 return true;
@@ -594,7 +594,7 @@ export function formatTable(dossiers: DossierMetadata[], showPath = false): stri
   output += 'SIGNED'.padEnd(signedWidth + 2);
   output += showPath ? 'PATH' : 'FILE';
   output += '\n';
-  output += '─'.repeat(titleWidth + riskWidth + signedWidth + 50) + '\n';
+  output += `${'─'.repeat(titleWidth + riskWidth + signedWidth + 50)}\n`;
 
   for (const d of dossiers) {
     const title = (d.title || d.filename).substring(0, titleWidth);

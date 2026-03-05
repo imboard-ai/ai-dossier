@@ -165,7 +165,7 @@ export function registerCacheCommand(program: Command): void {
 
       if (options.olderThan) {
         const days = parseInt(options.olderThan, 10);
-        if (isNaN(days) || days <= 0) {
+        if (Number.isNaN(days) || days <= 0) {
           console.error('\n❌ --older-than must be a positive number\n');
           process.exit(1);
         }

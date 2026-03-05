@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { registerKeysCommand } from '../../commands/keys';

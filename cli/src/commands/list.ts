@@ -77,7 +77,7 @@ export function registerListCommand(program: Command): void {
           const title = d.title || '';
           const category = Array.isArray(d.category) ? d.category.join(', ') : d.category || '';
           console.log(
-            `  ${name.padEnd(30)} ${('v' + version).padEnd(10)} ${category.padEnd(12)} ${title}`
+            `  ${name.padEnd(30)} ${(`v${version}`).padEnd(10)} ${category.padEnd(12)} ${title}`
           );
         }
 
@@ -104,10 +104,10 @@ export function registerListCommand(program: Command): void {
 
         try {
           const files = await findDossierFilesGitHub(
-            parsed.owner!,
-            parsed.repo!,
+            parsed.owner ?? '',
+            parsed.repo ?? '',
             parsed.path || '',
-            parsed.branch!
+            parsed.branch ?? 'main'
           );
 
           if (files.length === 0) {

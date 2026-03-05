@@ -70,7 +70,7 @@ export function registerInstallSkillCommand(program: Command): void {
             console.log(`  ${e.name}`);
             if (description) {
               const snippet =
-                description.length > 80 ? description.slice(0, 80) + '...' : description;
+                description.length > 80 ? `${description.slice(0, 80)}...` : description;
               console.log(`  ${snippet}`);
             }
             console.log('');
@@ -97,7 +97,7 @@ export function registerInstallSkillCommand(program: Command): void {
         }
 
         const [dossierName, version] = parseNameVersion(name);
-        const skillName = dossierName.split('/').pop()!;
+        const skillName = dossierName.split('/').pop() ?? dossierName;
         const skillDir = path.join(skillsDir, skillName);
         const skillFile = path.join(skillDir, 'SKILL.md');
 
@@ -192,13 +192,13 @@ export function registerInstallSkillCommand(program: Command): void {
             );
           } else {
             console.log(
-              `\n✅ Installed skill '${skillName}'${resolvedVersion ? ' (v' + resolvedVersion + ')' : ''}`
+              `\n✅ Installed skill '${skillName}'${resolvedVersion ? ` (v${resolvedVersion})` : ''}`
             );
             console.log(`   Location: ${skillFile}`);
             console.log(`   Source: ${dossierName}`);
             console.log(`   Size: ${fileSize} bytes`);
             if (summary) {
-              const snippet = summary.length > 80 ? summary.slice(0, 80) + '...' : summary;
+              const snippet = summary.length > 80 ? `${summary.slice(0, 80)}...` : summary;
               console.log(`   Summary: ${snippet}`);
             }
             console.log('');

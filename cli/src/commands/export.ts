@@ -45,7 +45,7 @@ export function registerExportCommand(program: Command): void {
       fs.writeFileSync(path.resolve(outputPath), content, 'utf8');
 
       console.log(`\n✅ Exported: ${outputPath}`);
-      console.log(`   Source: ${dossierName}${version ? '@' + version : ''}`);
+      console.log(`   Source: ${dossierName}${version ? `@${version}` : ''}`);
       if (digest) {
         console.log(`   Digest: ${digest}`);
       }

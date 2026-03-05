@@ -81,7 +81,9 @@ describe('from-file command', () => {
     const program = createTestProgram();
     registerFromFileCommand(program);
 
-    await expect(program.parseAsync(['node', 'dossier', 'from-file', 'input.txt'])).rejects.toThrow();
+    await expect(
+      program.parseAsync(['node', 'dossier', 'from-file', 'input.txt'])
+    ).rejects.toThrow();
   });
 
   it('should load metadata from --meta file', async () => {
@@ -231,6 +233,5 @@ describe('from-file command', () => {
         '--sign',
       ])
     ).rejects.toThrow();
-
   });
 });

@@ -38,10 +38,10 @@ export function parseDossierContent(content: string): ParsedDossier {
   if (content.startsWith('---dossier')) {
     // Strip "---dossier" and any trailing text on the same line, keep the newline
     const firstNewline = content.indexOf('\n');
-    normalized = '---\n' + (firstNewline >= 0 ? content.slice(firstNewline + 1) : '');
+    normalized = `---\n${firstNewline >= 0 ? content.slice(firstNewline + 1) : ''}`;
   } else if (content.startsWith('---json')) {
     const firstNewline = content.indexOf('\n');
-    normalized = '---\n' + (firstNewline >= 0 ? content.slice(firstNewline + 1) : '');
+    normalized = `---\n${firstNewline >= 0 ? content.slice(firstNewline + 1) : ''}`;
   } else if (!content.startsWith('---')) {
     throw new Error(
       'Invalid dossier format. Expected:\n---dossier\n{...}\n---\n[body]\nor standard YAML frontmatter (---)'

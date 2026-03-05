@@ -52,9 +52,7 @@ describe('sign command', () => {
     const program = createTestProgram();
     registerSignCommand(program);
 
-    await expect(
-      program.parseAsync(['node', 'dossier', 'sign', 'test.ds.md'])
-    ).rejects.toThrow();
+    await expect(program.parseAsync(['node', 'dossier', 'sign', 'test.ds.md'])).rejects.toThrow();
 
     // Should not have written the file (signing was blocked)
     expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
