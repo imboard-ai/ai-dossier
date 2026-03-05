@@ -106,14 +106,14 @@ describe('KmsVerifier', () => {
     expect(verifier.supports('RSA')).toBe(false);
   });
 
-  it('should return false when key_id is missing', async () => {
+  it('should return invalid when key_id is missing', async () => {
     const result = await verifier.verify('content', {
       algorithm: 'ECDSA-SHA-256',
       signature: 'sig',
       public_key: 'pk',
       signed_at: new Date().toISOString(),
     });
-    expect(result).toBe(false);
+    expect(result).toEqual({ valid: false });
   });
 
   it('should verify a valid signature', async () => {
@@ -127,7 +127,7 @@ describe('KmsVerifier', () => {
       signed_at: new Date().toISOString(),
     });
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ valid: true });
   });
 
   it('should reject an invalid signature', async () => {
@@ -141,10 +141,10 @@ describe('KmsVerifier', () => {
       signed_at: new Date().toISOString(),
     });
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ valid: false });
   });
 
-  it('should return false on KMS errors', async () => {
+  it('should return error on KMS errors', async () => {
     vi.mocked(KMSClient.prototype.send).mockRejectedValueOnce(new Error('KMS unavailable'));
 
     const result = await verifier.verify('content', {
@@ -155,7 +155,8 @@ describe('KmsVerifier', () => {
       signed_at: new Date().toISOString(),
     });
 
-    expect(result).toBe(false);
+    expect(result.valid).toBe(false);
+    expect(result.error).toBe('KMS unavailable');
   });
 
   it('should extract region from ARN', async () => {
@@ -195,6 +196,6 @@ describe('KmsVerifier', () => {
       signed_at: new Date().toISOString(),
     });
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ valid: true });
   });
 });

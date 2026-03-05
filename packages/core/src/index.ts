@@ -53,6 +53,7 @@ export {
   Signer,
   Verifier,
   VerifierRegistry,
+  VerifyResult,
 } from './signers';
 // Type exports
 export * from './types';

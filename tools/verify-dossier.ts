@@ -153,27 +153,25 @@ async function verifyDossier(dossierFile: string, trustedKeysFile: string): Prom
     }
 
     // Verify signature
-    try {
-      const isValid = await verifySignature(body, sig);
+    const sigResult = await verifySignature(body, sig);
 
-      if (isValid) {
-        if (result.authenticity.isTrusted) {
-          result.authenticity.status = 'verified';
-          result.authenticity.message = `Verified signature from trusted source: ${result.authenticity.trustedAs}`;
-        } else {
-          result.authenticity.status = 'signed_unknown';
-          result.authenticity.message = `Valid signature but key is not in trusted list`;
-        }
+    if (sigResult.valid) {
+      if (result.authenticity.isTrusted) {
+        result.authenticity.status = 'verified';
+        result.authenticity.message = `Verified signature from trusted source: ${result.authenticity.trustedAs}`;
       } else {
-        result.authenticity.status = 'invalid';
-        result.authenticity.message = 'SIGNATURE VERIFICATION FAILED';
-        result.errors.push('Signature verification FAILED - do not execute!');
-        result.recommendation = 'BLOCK';
+        result.authenticity.status = 'signed_unknown';
+        result.authenticity.message = `Valid signature but key is not in trusted list`;
       }
-    } catch (err) {
+    } else if (sigResult.error) {
       result.authenticity.status = 'error';
-      result.authenticity.message = `Verification error: ${(err as Error).message}`;
-      result.errors.push(`Signature verification error: ${(err as Error).message}`);
+      result.authenticity.message = `Verification error: ${sigResult.error}`;
+      result.errors.push(`Signature verification error: ${sigResult.error}`);
+    } else {
+      result.authenticity.status = 'invalid';
+      result.authenticity.message = 'SIGNATURE VERIFICATION FAILED';
+      result.errors.push('Signature verification FAILED - do not execute!');
+      result.recommendation = 'BLOCK';
     }
   }
 

@@ -28,11 +28,17 @@ export interface Signer {
   readonly algorithm: string;
 }
 
+export interface VerifyResult {
+  valid: boolean;
+  /** Present when valid is false due to an error (not a genuine verification failure) */
+  error?: string;
+}
+
 export interface Verifier {
   /**
    * Verify a signature
    */
-  verify(content: string, signature: SignatureResult): Promise<boolean>;
+  verify(content: string, signature: SignatureResult): Promise<VerifyResult>;
 
   /**
    * Check if this verifier supports the given algorithm

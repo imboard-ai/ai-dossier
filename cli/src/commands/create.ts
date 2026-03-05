@@ -114,14 +114,22 @@ ${options.template !== DEFAULT_CREATE_TEMPLATE ? `- **Template reference**: ${op
           const result = spawnSync('claude', [tmpFile], { stdio: 'inherit' });
           try {
             fs.unlinkSync(tmpFile);
-          } catch {}
+          } catch (cleanupErr) {
+            process.stderr.write(
+              `Warning: failed to clean up temp file ${tmpFile}: ${(cleanupErr as Error).message}\n`
+            );
+          }
           if (result.status !== 0) {
             throw { status: result.status, message: `claude exited with code ${result.status}` };
           }
         } catch (execError) {
           try {
             fs.unlinkSync(tmpFile);
-          } catch {}
+          } catch (cleanupErr) {
+            process.stderr.write(
+              `Warning: failed to clean up temp file ${tmpFile}: ${(cleanupErr as Error).message}\n`
+            );
+          }
           throw execError;
         }
 

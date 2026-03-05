@@ -193,18 +193,9 @@ async function checkSignature(body, frontmatter) {
   // key_id is easier to manage in trusted-keys.txt file
   const isTrusted = trustedKeys.has(signature.key_id) || trustedKeys.has(signature.public_key);
 
-  try {
-    const isValid = await verifySignature(body, signature);
+  const result = await verifySignature(body, signature);
 
-    if (!isValid) {
-      return {
-        present: true,
-        verified: false,
-        trusted: isTrusted,
-        message: 'Signature verification FAILED',
-      };
-    }
-
+  if (result.valid) {
     return {
       present: true,
       verified: true,
@@ -213,14 +204,23 @@ async function checkSignature(body, frontmatter) {
         ? `Verified signature from trusted source: ${trustedKeys.get(signature.key_id) || trustedKeys.get(signature.public_key)}`
         : 'Valid signature but key is not in trusted list',
     };
-  } catch (err) {
+  }
+
+  if (result.error) {
     return {
       present: true,
       verified: false,
       trusted: false,
-      message: `Verification error: ${err.message}`,
+      message: `Verification error: ${result.error}`,
     };
   }
+
+  return {
+    present: true,
+    verified: false,
+    trusted: isTrusted,
+    message: 'Signature verification FAILED',
+  };
 }
 
 // Assess risk
