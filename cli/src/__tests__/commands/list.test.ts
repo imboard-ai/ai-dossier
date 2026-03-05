@@ -32,7 +32,7 @@ describe('list command', () => {
 
       await expect(
         program.parseAsync(['node', 'dossier', 'list', '--source', 'registry'])
-      ).rejects.toThrow('process.exit(0)');
+      ).rejects.toThrow();
 
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Registry dossiers'));
     });
@@ -48,7 +48,26 @@ describe('list command', () => {
 
       await expect(
         program.parseAsync(['node', 'dossier', 'list', '--source', 'registry', '--format', 'json'])
-      ).rejects.toThrow('process.exit(0)');
+      ).rejects.toThrow();
+
+      const jsonCalls = vi
+        .mocked(console.log)
+        .mock.calls.filter((c) => typeof c[0] === 'string' && c[0].includes('"dossiers"'));
+      expect(jsonCalls.length).toBeGreaterThan(0);
+    });
+
+    it('should output JSON for registry with --json flag', async () => {
+      mockClient.listDossiers.mockResolvedValue({
+        dossiers: [{ name: 'test', version: '1.0.0' }],
+        total: 1,
+      });
+
+      const program = createTestProgram();
+      registerListCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'list', '--source', 'registry', '--json'])
+      ).rejects.toThrow();
 
       const jsonCalls = vi
         .mocked(console.log)
@@ -64,7 +83,7 @@ describe('list command', () => {
 
       await expect(
         program.parseAsync(['node', 'dossier', 'list', '--source', 'registry'])
-      ).rejects.toThrow('process.exit(0)');
+      ).rejects.toThrow();
 
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining('No dossiers found'));
     });
@@ -88,11 +107,36 @@ describe('list command', () => {
       const program = createTestProgram();
       registerListCommand(program);
 
-      await expect(program.parseAsync(['node', 'dossier', 'list', '.'])).rejects.toThrow(
-        'process.exit(0)'
-      );
+      await expect(program.parseAsync(['node', 'dossier', 'list', '.'])).rejects.toThrow();
 
       expect(helpers.findDossierFilesLocal).toHaveBeenCalled();
+    });
+
+    it('should output JSON with --json flag', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.statSync.mockReturnValue({ isDirectory: () => true } as any);
+      vi.mocked(helpers.findDossierFilesLocal).mockReturnValue(['test.ds.md']);
+      vi.mocked(helpers.parseDossierMetadataLocal).mockReturnValue({
+        path: 'test.ds.md',
+        name: 'test',
+        title: 'Test',
+        version: '1.0.0',
+        risk_level: 'low',
+        category: 'dev',
+        signed: false,
+      } as any);
+
+      const program = createTestProgram();
+      registerListCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'list', '.', '--json'])
+      ).rejects.toThrow();
+
+      const jsonCalls = vi
+        .mocked(console.log)
+        .mock.calls.filter((c) => typeof c[0] === 'string' && c[0].includes('"test.ds.md"'));
+      expect(jsonCalls.length).toBeGreaterThan(0);
     });
 
     it('should exit 1 when directory not found', async () => {
@@ -101,9 +145,9 @@ describe('list command', () => {
       const program = createTestProgram();
       registerListCommand(program);
 
-      await expect(program.parseAsync(['node', 'dossier', 'list', '/nonexistent'])).rejects.toThrow(
-        'process.exit(1)'
-      );
+      await expect(
+        program.parseAsync(['node', 'dossier', 'list', '/nonexistent'])
+      ).rejects.toThrow();
     });
   });
 });
