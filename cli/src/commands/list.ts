@@ -21,12 +21,17 @@ export function registerListCommand(program: Command): void {
     .option('--signed-only', 'Only show signed dossiers')
     .option('--risk <level>', 'Filter by risk level (low, medium, high, critical)')
     .option('--category <category>', 'Filter by category')
+    .option('--json', 'Output as JSON')
     .option('--format <fmt>', 'Output format (table, json, simple)', 'table')
     .option('--show-path', 'Show full path instead of filename')
     .option('--source <type>', 'Source type: registry, local, github')
     .option('--page <number>', 'Page number (registry only)', '1')
     .option('--per-page <number>', 'Results per page (registry only)', '20')
     .action(async (source: string, options: any) => {
+      if (options.json) {
+        options.format = 'json';
+      }
+
       if (options.source === 'registry') {
         const page = parseInt(options.page, 10) || 1;
         const perPage = parseInt(options.perPage, 10) || 20;
