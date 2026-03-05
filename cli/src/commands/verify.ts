@@ -10,13 +10,7 @@ export function registerVerifyCommand(program: Command): void {
     .option('--verbose', 'Show detailed verification output')
     .option('--json', 'Output result as JSON')
     .option('--skip-checksum', 'Skip checksum verification (DANGEROUS)')
-    .option('--skip-signature', 'Skip signature verification')
-    .option('--skip-author-check', 'Skip author whitelist/blacklist')
-    .option('--skip-dossier-check', 'Skip dossier whitelist/blacklist')
-    .option('--skip-risk-assessment', 'Skip risk level checks')
-    .option('--skip-review', 'Skip review dossier execution')
     .option('--skip-all-checks', 'Skip ALL verifications (VERY DANGEROUS)')
-    .option('--review-dossier <file>', 'Custom review dossier')
     .action(
       async (
         file: string,
@@ -39,8 +33,7 @@ export function registerVerifyCommand(program: Command): void {
           console.log('Stages completed:');
           result.stages.forEach((s) => {
             const status = s.passed ? '✅' : s.skipped ? '⚠️' : '❌';
-            const demo = s.demo ? ' (demo)' : '';
-            console.log(`  ${status} Stage ${s.stage}: ${s.name}${demo}`);
+            console.log(`  ${status} Stage ${s.stage}: ${s.name}`);
           });
         } else {
           console.log('✅ Verification passed\n');
