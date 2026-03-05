@@ -26,7 +26,6 @@ vi.mock('../../helpers', async (importOriginal) => {
   return {
     ...actual,
     OFFICIAL_KMS_KEYS: ['alias/dossier-official-prod'],
-    REPO_ROOT: '/repo',
   };
 });
 
