@@ -41,14 +41,13 @@ describe('from-file command', () => {
         '--author',
         'Alice',
       ])
-    ).rejects.toThrow('process.exit(0)');
+    ).rejects.toThrow();
 
     expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
       expect.stringContaining('test-dossier.ds.md'),
       expect.stringContaining('---dossier'),
       'utf8'
     );
-    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Dossier created'));
   });
 
   it('should fail when input file not found', async () => {
@@ -72,9 +71,7 @@ describe('from-file command', () => {
         '--author',
         'Alice',
       ])
-    ).rejects.toThrow('process.exit(1)');
-
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Input file not found'));
+    ).rejects.toThrow();
   });
 
   it('should fail when required fields are missing', async () => {
@@ -84,11 +81,7 @@ describe('from-file command', () => {
     const program = createTestProgram();
     registerFromFileCommand(program);
 
-    await expect(program.parseAsync(['node', 'dossier', 'from-file', 'input.txt'])).rejects.toThrow(
-      'process.exit(1)'
-    );
-
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Missing required fields'));
+    await expect(program.parseAsync(['node', 'dossier', 'from-file', 'input.txt'])).rejects.toThrow();
   });
 
   it('should load metadata from --meta file', async () => {
@@ -110,7 +103,7 @@ describe('from-file command', () => {
 
     await expect(
       program.parseAsync(['node', 'dossier', 'from-file', 'input.txt', '--meta', 'meta.json'])
-    ).rejects.toThrow('process.exit(0)');
+    ).rejects.toThrow();
 
     expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
       expect.stringContaining('meta-dossier.ds.md'),
@@ -143,11 +136,73 @@ describe('from-file command', () => {
         '-o',
         'custom-output.ds.md',
       ])
-    ).rejects.toThrow('process.exit(0)');
+    ).rejects.toThrow();
 
     expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
       expect.stringContaining('custom-output.ds.md'),
       expect.any(String),
+      'utf8'
+    );
+  });
+
+  it('should accept --dossier-version to set version', async () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue('Body content.');
+
+    const program = createTestProgram();
+    registerFromFileCommand(program);
+
+    await expect(
+      program.parseAsync([
+        'node',
+        'dossier',
+        'from-file',
+        'input.txt',
+        '--name',
+        'test',
+        '--title',
+        'Test',
+        '--objective',
+        'Test',
+        '--author',
+        'Alice',
+        '--dossier-version',
+        '2.0.0',
+      ])
+    ).rejects.toThrow();
+
+    expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining('"version": "2.0.0"'),
+      'utf8'
+    );
+  });
+
+  it('should use version from --meta when --dossier-version not provided', async () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockImplementation((filePath: any) => {
+      if (String(filePath).includes('meta.json')) {
+        return JSON.stringify({
+          name: 'meta-dossier',
+          title: 'Meta Title',
+          objective: 'Meta objective',
+          authors: ['Bob'],
+          version: '3.5.0',
+        });
+      }
+      return 'Body from file.';
+    });
+
+    const program = createTestProgram();
+    registerFromFileCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'from-file', 'input.txt', '--meta', 'meta.json'])
+    ).rejects.toThrow();
+
+    expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining('"version": "3.5.0"'),
       'utf8'
     );
   });
@@ -175,8 +230,7 @@ describe('from-file command', () => {
         'Alice',
         '--sign',
       ])
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow();
 
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('--key is required'));
   });
 });

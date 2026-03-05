@@ -11,7 +11,7 @@ export function registerFromFileCommand(program: Command): void {
     .argument('<input>', 'Path to text file (body content)')
     .option('--name <name>', 'Dossier name')
     .option('--title <title>', 'Dossier title')
-    .option('--version <version>', 'Dossier version', '1.0.0')
+    .option('--dossier-version <version>', 'Dossier version')
     .option('--status <status>', 'Dossier status', 'draft')
     .option('--objective <text>', 'Dossier objective')
     .option('--author <name>', 'Author name (repeatable)', collectValues, [])
@@ -26,7 +26,7 @@ export function registerFromFileCommand(program: Command): void {
         options: {
           name?: string;
           title?: string;
-          version: string;
+          dossierVersion?: string;
           status: string;
           objective?: string;
           author: string[];
@@ -82,11 +82,12 @@ export function registerFromFileCommand(program: Command): void {
         }
 
         // Build frontmatter
+        const version = options.dossierVersion || (meta.version as string) || '1.0.0';
         const frontmatter: Record<string, unknown> = {
           ...meta,
           name,
           title,
-          version: options.version,
+          version,
           status: options.status,
           objective,
           authors: authors.map((a) => ({ name: a })),
@@ -139,7 +140,7 @@ export function registerFromFileCommand(program: Command): void {
         console.log(`\n✅ Dossier created: ${outputPath}`);
         console.log(`   Name:    ${name}`);
         console.log(`   Title:   ${title}`);
-        console.log(`   Version: ${options.version}`);
+        console.log(`   Version: ${version}`);
         if (options.sign) {
           console.log('   Signed:  yes');
         }
