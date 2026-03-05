@@ -9,7 +9,7 @@ import { createPublicKey, verify } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { KMSClient, SigningAlgorithmSpec, VerifyCommand } from '@aws-sdk/client-kms';
-import type { SignatureResult } from './signers';
+import type { SignatureResult, VerifyResult } from './signers';
 import { getVerifierRegistry } from './signers';
 import { sha256Hash } from './utils/crypto';
 import { readFileIfExists } from './utils/fs';
@@ -45,8 +45,10 @@ export function loadTrustedKeys(filePath?: string): Map<string, string> {
         keys.set(publicKey, keyId);
       }
     }
-  } catch (_err) {
-    // Silently handle errors - consumers can check the returned Map size
+  } catch (err) {
+    process.stderr.write(
+      `Warning: error parsing trusted keys file ${keysPath}: ${(err as Error).message}\n`
+    );
   }
 
   return keys;
@@ -57,8 +59,13 @@ export function loadTrustedKeys(filePath?: string): Map<string, string> {
  * @param content - The content to verify
  * @param signature - Base64-encoded signature
  * @param publicKey - PEM-format Ed25519 public key
+ * @returns VerifyResult with valid flag and optional error
  */
-export function verifyWithEd25519(content: string, signature: string, publicKey: string): boolean {
+export function verifyWithEd25519(
+  content: string,
+  signature: string,
+  publicKey: string
+): VerifyResult {
   try {
     const signatureBuffer = Buffer.from(signature, 'base64');
     const contentBuffer = Buffer.from(content, 'utf8');
@@ -71,21 +78,23 @@ export function verifyWithEd25519(content: string, signature: string, publicKey:
     });
 
     // Verify Ed25519 signature (algorithm is null for Ed25519)
-    return verify(null, contentBuffer, publicKeyObject, signatureBuffer);
-  } catch (_err) {
-    return false;
+    const valid = verify(null, contentBuffer, publicKeyObject, signatureBuffer);
+    return { valid };
+  } catch (err) {
+    return { valid: false, error: (err as Error).message };
   }
 }
 
 /**
  * Verify signature using AWS KMS (ECDSA-SHA-256)
+ * @returns VerifyResult with valid flag and optional error
  */
 export async function verifyWithKms(
   content: string,
   signature: string,
   keyId: string,
   region = 'us-east-1'
-): Promise<boolean> {
+): Promise<VerifyResult> {
   const client = new KMSClient({ region });
 
   // Calculate SHA256 digest of content (must match signing process)
@@ -103,9 +112,9 @@ export async function verifyWithKms(
 
   try {
     const response = await client.send(command);
-    return response.SignatureValid === true;
-  } catch (_err) {
-    return false;
+    return { valid: response.SignatureValid === true };
+  } catch (err) {
+    return { valid: false, error: (err as Error).message };
   }
 }
 
@@ -114,12 +123,12 @@ export async function verifyWithKms(
  * This is a convenience function that encapsulates registry lookup
  * @param content - The content to verify
  * @param signature - Signature result object containing algorithm and signature data
- * @returns Promise<boolean> - true if signature is valid, false otherwise
+ * @returns VerifyResult with valid flag and optional error
  */
 export async function verifySignature(
   content: string,
   signature: SignatureResult
-): Promise<boolean> {
+): Promise<VerifyResult> {
   const verifierRegistry = getVerifierRegistry();
   const verifier = verifierRegistry.get(signature.algorithm);
   return await verifier.verify(content, signature);

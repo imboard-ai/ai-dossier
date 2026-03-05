@@ -10,7 +10,7 @@ import {
   VerifyCommand,
 } from '@aws-sdk/client-kms';
 import { sha256Hash } from '../utils/crypto';
-import type { SignatureResult, Signer, Verifier } from './index';
+import type { SignatureResult, Signer, Verifier, VerifyResult } from './index';
 
 export class KmsSigner implements Signer {
   readonly algorithm = 'ECDSA-SHA-256';
@@ -85,9 +85,9 @@ export class KmsVerifier implements Verifier {
     return algorithm === 'ECDSA-SHA-256';
   }
 
-  async verify(content: string, signature: SignatureResult): Promise<boolean> {
+  async verify(content: string, signature: SignatureResult): Promise<VerifyResult> {
     if (!signature.key_id) {
-      return false;
+      return { valid: false };
     }
 
     try {
@@ -108,9 +108,9 @@ export class KmsVerifier implements Verifier {
       });
 
       const response = await client.send(command);
-      return response.SignatureValid === true;
-    } catch (_err) {
-      return false;
+      return { valid: response.SignatureValid === true };
+    } catch (err) {
+      return { valid: false, error: (err as Error).message };
     }
   }
 

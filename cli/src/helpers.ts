@@ -231,7 +231,11 @@ export function downloadUrlToTempFile(url: string): string {
   if (!fs.existsSync(tmpFile) || fs.statSync(tmpFile).size === 0) {
     try {
       fs.unlinkSync(tmpFile);
-    } catch {}
+    } catch (err) {
+      process.stderr.write(
+        `Warning: failed to clean up temp file ${tmpFile}: ${(err as Error).message}\n`
+      );
+    }
     throw new Error(`Downloaded file is empty: ${resolvedUrl}`);
   }
   return tmpFile;
@@ -332,8 +336,8 @@ export function findDossierFilesLocal(dir: string, recursive = false): string[] 
         results.push(fullPath);
       }
     }
-  } catch {
-    // Silently skip directories we can't read
+  } catch (err) {
+    process.stderr.write(`Warning: cannot read directory ${dir}: ${(err as Error).message}\n`);
   }
 
   return results;

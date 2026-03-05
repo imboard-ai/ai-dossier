@@ -129,8 +129,10 @@ export function registerRunCommand(program: Command): void {
         try {
           const parsed = parseDossierContent(content);
           fm = parsed.frontmatter;
-        } catch {
-          // Non-fatal: metadata display is best-effort
+        } catch (err) {
+          process.stderr.write(
+            `Warning: failed to parse dossier metadata: ${(err as Error).message}\n`
+          );
         }
 
         if (fm && (fm.title || fm.risk_level || fm.objective)) {
@@ -145,8 +147,10 @@ export function registerRunCommand(program: Command): void {
           }
           log('');
         }
-      } catch {
-        // Non-fatal
+      } catch (err) {
+        process.stderr.write(
+          `Warning: failed to read dossier summary: ${(err as Error).message}\n`
+        );
       }
 
       // Nested session detection
@@ -199,7 +203,11 @@ export function registerRunCommand(program: Command): void {
         if (tmpUrlFile)
           try {
             fs.unlinkSync(tmpUrlFile);
-          } catch {}
+          } catch (err) {
+            process.stderr.write(
+              `Warning: failed to clean up temp file ${tmpUrlFile}: ${(err as Error).message}\n`
+            );
+          }
       };
 
       if (options.dryRun) {

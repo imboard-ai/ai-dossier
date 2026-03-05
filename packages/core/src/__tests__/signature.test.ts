@@ -240,7 +240,7 @@ describe('verifyWithEd25519', () => {
     // Verify signature
     const result = verifyWithEd25519(content, signatureBase64, publicKeyPem);
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ valid: true });
   });
 
   it('should reject tampered content', () => {
@@ -255,7 +255,7 @@ describe('verifyWithEd25519', () => {
 
     const result = verifyWithEd25519(tamperedContent, signatureBase64, publicKeyPem);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ valid: false });
   });
 
   it('should reject wrong public key', () => {
@@ -270,26 +270,28 @@ describe('verifyWithEd25519', () => {
 
     const result = verifyWithEd25519(content, signatureBase64, publicKeyPem2);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ valid: false });
   });
 
-  it('should handle invalid PEM format', () => {
+  it('should return error for invalid PEM format', () => {
     const content = 'Test content';
     const signature = 'dGVzdA==';
     const invalidPem = 'not-a-valid-pem';
 
     const result = verifyWithEd25519(content, signature, invalidPem);
 
-    expect(result).toBe(false);
+    expect(result.valid).toBe(false);
+    expect(result.error).toBeDefined();
   });
 
-  it('should handle invalid signature base64', () => {
+  it('should reject invalid signature base64', () => {
     const { publicKey } = generateKeyPairSync('ed25519');
     const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }) as string;
 
     const result = verifyWithEd25519('content', 'invalid!!!base64', publicKeyPem);
 
-    expect(result).toBe(false);
+    // Buffer.from silently ignores invalid base64 chars, so this is a genuine verification failure
+    expect(result.valid).toBe(false);
   });
 
   it('should work with multiline content', () => {
@@ -306,7 +308,7 @@ With special chars: 你好 🎉`;
 
     const result = verifyWithEd25519(content, signatureBase64, publicKeyPem);
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ valid: true });
   });
 
   it('should detect whitespace changes', () => {
@@ -321,7 +323,7 @@ With special chars: 你好 🎉`;
 
     const result = verifyWithEd25519(modifiedContent, signatureBase64, publicKeyPem);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ valid: false });
   });
 });
 

@@ -5,7 +5,7 @@
 import type { KeyObject } from 'node:crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import type { SignatureResult, Signer, Verifier } from './index';
+import type { SignatureResult, Signer, Verifier, VerifyResult } from './index';
 
 export class Ed25519Signer implements Signer {
   readonly algorithm = 'ed25519';
@@ -51,7 +51,7 @@ export class Ed25519Verifier implements Verifier {
     return algorithm === 'ed25519';
   }
 
-  async verify(content: string, signature: SignatureResult): Promise<boolean> {
+  async verify(content: string, signature: SignatureResult): Promise<VerifyResult> {
     try {
       const signatureBuffer = Buffer.from(signature.signature, 'base64');
       const contentBuffer = Buffer.from(content, 'utf8');
@@ -64,9 +64,10 @@ export class Ed25519Verifier implements Verifier {
       });
 
       // Verify Ed25519 signature
-      return verify(null, contentBuffer, publicKeyObject, signatureBuffer);
-    } catch (_err) {
-      return false;
+      const valid = verify(null, contentBuffer, publicKeyObject, signatureBuffer);
+      return { valid };
+    } catch (err) {
+      return { valid: false, error: (err as Error).message };
     }
   }
 }
