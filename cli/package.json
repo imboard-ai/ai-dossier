@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Command-line tool for creating, verifying, and executing dossiers",
   "main": "dist/cli.js",
   "bin": {
@@ -27,7 +27,7 @@
     "cli"
   ],
   "author": "Imboard AI",
-  "license": "Elastic-2.0",
+  "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
     "url": "https://github.com/imboard-ai/ai-dossier.git",

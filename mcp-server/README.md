@@ -341,7 +341,7 @@ This transforms dossiers from "interesting idea" to "production-ready automation
 - **Language**: TypeScript
 - **Runtime**: Node.js 18+
 - **Dependencies**: @modelcontextprotocol/sdk
-- **License**: Elastic License 2.0 (ELv2)
+- **License**: AGPL-3.0
 
 ---
 

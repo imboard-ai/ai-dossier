@@ -33,4 +33,4 @@ All contributors must follow our [Code of Conduct](../../CODE_OF_CONDUCT.md).
 
 ## License
 
-By contributing to Dossier, you agree that your contributions will be licensed under the [Elastic License 2.0 (ELv2)](../LICENSE).
+By contributing to Dossier, you agree that your contributions will be licensed under the [GNU Affero General Public License v3.0 (AGPL-3.0)](../LICENSE).

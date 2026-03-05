@@ -1141,7 +1141,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for:
 
 ## License
 
-MIT - See LICENSE file
+AGPL-3.0 - See LICENSE file
 
 ---
 
