@@ -9,7 +9,8 @@ export function registerRemoveCommand(program: Command): void {
     .description('Remove a dossier from the registry')
     .argument('<name>', 'Dossier name (use name@version to remove a specific version)')
     .option('-y, --yes', 'Skip confirmation prompt')
-    .action(async (name: string, options: { yes?: boolean }) => {
+    .option('--json', 'Output as JSON')
+    .action(async (name: string, options: { yes?: boolean; json?: boolean }) => {
       const credentials = loadCredentials();
       if (!credentials) {
         console.error('\n❌ Not logged in. Run `dossier login` first.\n');
@@ -45,9 +46,50 @@ export function registerRemoveCommand(program: Command): void {
       try {
         const client = getClient(credentials.token);
         await client.removeDossier(dossierName, version || null);
-        console.log(`\n✅ Removed: ${target}\n`);
+
+        const verifyCommand = `dossier info ${target}`;
+        const cdnDelaySeconds = 30;
+
+        if (options.json) {
+          console.log(
+            JSON.stringify(
+              {
+                success: true,
+                name: dossierName,
+                version: version || null,
+                target,
+                verification: {
+                  verify_command: verifyCommand,
+                  cdn_delay_seconds: cdnDelaySeconds,
+                },
+              },
+              null,
+              2
+            )
+          );
+        } else {
+          console.log(`\n✅ Removed: ${target}`);
+          console.log(
+            `\n   ⏳ CDN propagation may take up to ${cdnDelaySeconds}s. Verify with:\n   $ ${verifyCommand}\n`
+          );
+        }
       } catch (err: any) {
-        if (err.statusCode === 401) {
+        if (options.json) {
+          console.log(
+            JSON.stringify(
+              {
+                success: false,
+                error: err.code || 'remove_failed',
+                message: err.message,
+                name: dossierName,
+                version: version || null,
+                statusCode: err.statusCode || null,
+              },
+              null,
+              2
+            )
+          );
+        } else if (err.statusCode === 401) {
           console.error('\n❌ Session expired. Run `dossier login` to re-authenticate.\n');
         } else if (err.statusCode === 403) {
           console.error(`\n❌ Permission denied: ${err.message}\n`);

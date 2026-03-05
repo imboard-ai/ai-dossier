@@ -116,6 +116,49 @@ describe('publish command', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('org/test-dossier@1.0.0'));
   });
 
+  it('should show CDN propagation warning after successful publish', async () => {
+    mockClient.publishDossier.mockResolvedValue({
+      name: 'org/test-dossier',
+      content_url: 'https://registry.example.com/dossiers/org/test-dossier',
+    });
+
+    const program = createTestProgram();
+    registerPublishCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes']);
+
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('CDN propagation'));
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining('dossier info org/test-dossier@1.0.0')
+    );
+  });
+
+  it('should include verification field in JSON output after publish', async () => {
+    mockClient.publishDossier.mockResolvedValue({
+      name: 'org/test-dossier',
+      content_url: 'https://registry.example.com/dossiers/org/test-dossier',
+    });
+
+    const program = createTestProgram();
+    registerPublishCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes', '--json']);
+
+    const jsonCall = vi.mocked(console.log).mock.calls.find((call) => {
+      try {
+        const parsed = JSON.parse(call[0] as string);
+        return parsed.success === true;
+      } catch {
+        return false;
+      }
+    });
+    expect(jsonCall).toBeDefined();
+    const output = JSON.parse(jsonCall?.[0] as string);
+    expect(output.verification).toBeDefined();
+    expect(output.verification.verify_command).toBe('dossier info org/test-dossier@1.0.0');
+    expect(output.verification.cdn_delay_seconds).toBe(30);
+  });
+
   it('should exit 1 on same-version collision (pre-publish check)', async () => {
     mockClient.getDossier.mockReset();
     // First call (with version) returns existing dossier — same version exists
