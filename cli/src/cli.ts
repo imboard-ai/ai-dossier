@@ -10,6 +10,7 @@ const pkg = require('../package.json');
 
 import { registerCacheCommand } from './commands/cache';
 import { registerChecksumCommand } from './commands/checksum';
+import { registerCommandsCommand } from './commands/commands';
 import { registerConfigCommand } from './commands/config-cmd';
 import { registerCreateCommand } from './commands/create';
 import { registerExportCommand } from './commands/export';
@@ -71,6 +72,7 @@ registerLintCommand(program);
 registerFormatCommand(program);
 registerFromFileCommand(program);
 registerGetCommand(program);
+registerCommandsCommand(program);
 
 // Parse and execute
 program.parse(process.argv);
