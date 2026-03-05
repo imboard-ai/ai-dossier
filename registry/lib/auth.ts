@@ -4,7 +4,7 @@ import type { JwtPayload, VercelRequest } from './types';
 
 export function signJwt(payload: Omit<JwtPayload, 'iat' | 'exp'>): string {
   return jwt.sign(payload, config.auth.jwt.secret, {
-    expiresIn: 30 * 24 * 60 * 60, // 30 days in seconds
+    expiresIn: 7 * 24 * 60 * 60, // 7 days in seconds
   });
 }
 

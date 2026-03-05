@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import * as auth from '../../../lib/auth';
 import config from '../../../lib/config';
 import { handleCors } from '../../../lib/cors';
-import { getRootNamespace } from '../../../lib/dossier';
+import { getRootNamespace, validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
 import { canPublishTo } from '../../../lib/permissions';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
@@ -112,6 +112,13 @@ async function handleDelete(
     }
     return res.status(401).json({
       error: { code: 'INVALID_TOKEN', message: 'Invalid token. Please login again.' },
+    });
+  }
+
+  const namespaceValidation = validateNamespace(dossierName);
+  if (!namespaceValidation.valid) {
+    return res.status(400).json({
+      error: { code: 'INVALID_NAMESPACE', message: namespaceValidation.error },
     });
   }
 

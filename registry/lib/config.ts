@@ -1,23 +1,42 @@
-// Environment variables are required and set via Vercel project settings
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
 const config = {
   content: {
     org: 'imboard-ai',
     repo: 'dossier-content',
     branch: 'main',
-    botToken: process.env.GITHUB_BOT_TOKEN as string,
+    get botToken(): string {
+      return requireEnv('GITHUB_BOT_TOKEN');
+    },
   },
 
   auth: {
     github: {
-      clientId: process.env.GITHUB_CLIENT_ID as string,
-      clientSecret: process.env.GITHUB_CLIENT_SECRET as string,
+      get clientId(): string {
+        return requireEnv('GITHUB_CLIENT_ID');
+      },
+      get clientSecret(): string {
+        return requireEnv('GITHUB_CLIENT_SECRET');
+      },
       scopes: 'read:user read:org',
       tokenUrl: 'https://github.com/login/oauth/access_token',
       apiUrl: 'https://api.github.com',
     },
     jwt: {
-      secret: process.env.JWT_SECRET as string,
+      get secret(): string {
+        return requireEnv('JWT_SECRET');
+      },
     },
+  },
+
+  get baseUrl(): string {
+    return requireEnv('REGISTRY_BASE_URL');
   },
 
   cdnBaseUrl: 'https://cdn.jsdelivr.net/gh',
