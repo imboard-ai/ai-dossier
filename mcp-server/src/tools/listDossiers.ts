@@ -3,9 +3,9 @@
  * Thin wrapper around `ai-dossier list --format json [path]`
  */
 
-import { resolve } from 'node:path';
 import { CliNotFoundError, execCli } from '../utils/cli-wrapper';
 import { logger } from '../utils/logger';
+import { validatePathWithinCwd } from '../utils/paths';
 
 export interface ListDossiersInput {
   path?: string;
@@ -36,12 +36,7 @@ export async function listDossiers(input: ListDossiersInput): Promise<ListDossie
   const searchPath = input.path || process.cwd();
   const recursive = input.recursive !== false;
 
-  // Validate path stays within the current working directory
-  const resolvedPath = resolve(searchPath);
-  const cwd = process.cwd();
-  if (!resolvedPath.startsWith(`${cwd}/`) && resolvedPath !== cwd) {
-    throw new Error(`Access denied: path "${searchPath}" is outside the working directory`);
-  }
+  const resolvedPath = validatePathWithinCwd(searchPath);
 
   logger.info('Scanning for dossiers via CLI', { searchPath, recursive });
 

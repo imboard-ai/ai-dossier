@@ -4,10 +4,10 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { parseDossierContent } from '@ai-dossier/core';
 import { CliNotFoundError, execCli } from '../utils/cli-wrapper';
 import { logger } from '../utils/logger';
+import { validatePathWithinCwd } from '../utils/paths';
 
 export interface ReadDossierInput {
   path: string;
@@ -24,12 +24,7 @@ export interface ReadDossierOutput {
 export async function readDossier(input: ReadDossierInput): Promise<ReadDossierOutput> {
   const { path: dossierPath } = input;
 
-  // Validate path stays within the current working directory
-  const resolvedPath = resolve(dossierPath);
-  const cwd = process.cwd();
-  if (!resolvedPath.startsWith(`${cwd}/`) && resolvedPath !== cwd) {
-    throw new Error(`Access denied: path "${dossierPath}" is outside the working directory`);
-  }
+  const resolvedPath = validatePathWithinCwd(dossierPath);
 
   logger.info('Reading dossier via CLI', { dossierFile: dossierPath });
 
