@@ -42,19 +42,19 @@ function log(message, color = 'reset') {
 }
 
 function error(message) {
-  log(`❌ ${message}`, 'red');
+  log(`\u274C ${message}`, 'red');
 }
 
 function success(message) {
-  log(`✅ ${message}`, 'green');
+  log(`\u2705 ${message}`, 'green');
 }
 
 function warning(message) {
-  log(`⚠️  ${message}`, 'yellow');
+  log(`\u26A0\uFE0F  ${message}`, 'yellow');
 }
 
 function info(message) {
-  log(`ℹ️  ${message}`, 'cyan');
+  log(`\u2139\uFE0F  ${message}`, 'cyan');
 }
 
 // Parse command line arguments
@@ -120,10 +120,10 @@ ${colors.bright}Examples:${colors.reset}
   fi
 
 ${colors.bright}Security Checks:${colors.reset}
-  ✓ SHA256 checksum verification (required)
-  ✓ Signature verification (if present)
-  ✓ Trusted keys check
-  ✓ Risk level assessment
+  \u2713 SHA256 checksum verification (required)
+  \u2713 Signature verification (if present)
+  \u2713 Trusted keys check
+  \u2713 Risk level assessment
 
 ${colors.bright}More Information:${colors.reset}
   Documentation: https://github.com/imboard/ai-dossier
@@ -272,7 +272,7 @@ function assessRisk(frontmatter, checksumResult, signatureResult) {
 // Main verification function
 async function verifyDossier(input, options) {
   try {
-    log(`\n${colors.bright}🔐 Dossier Verification Tool${colors.reset}\n`);
+    log(`\n${colors.bright}\uD83D\uDD10 Dossier Verification Tool${colors.reset}\n`);
 
     // Determine if input is URL or file
     const isUrl = input.startsWith('http://') || input.startsWith('https://');
@@ -304,7 +304,7 @@ async function verifyDossier(input, options) {
     }
 
     // Verify checksum
-    console.log(`\n${colors.bright}📊 Integrity Check:${colors.reset}`);
+    console.log(`\n${colors.bright}\uD83D\uDCCA Integrity Check:${colors.reset}`);
     const checksumResult = verifyChecksum(body, frontmatter.checksum?.hash);
 
     if (checksumResult.passed) {
@@ -321,7 +321,7 @@ async function verifyDossier(input, options) {
     }
 
     // Verify signature
-    console.log(`\n${colors.bright}🔏 Authenticity Check:${colors.reset}`);
+    console.log(`\n${colors.bright}\uD83D\uDD0F Authenticity Check:${colors.reset}`);
     const signatureResult = await checkSignature(body, frontmatter);
 
     if (signatureResult.present) {
@@ -349,7 +349,7 @@ async function verifyDossier(input, options) {
     }
 
     // Assess risk
-    console.log(`\n${colors.bright}🔴 Risk Assessment:${colors.reset}`);
+    console.log(`\n${colors.bright}\uD83D\uDD34 Risk Assessment:${colors.reset}`);
     const risk = assessRisk(frontmatter, checksumResult, signatureResult);
 
     const riskColors = {
@@ -432,4 +432,12 @@ if (require.main === module) {
   });
 }
 
-module.exports = { verifyDossier, parseDossier, verifyChecksum };
+module.exports = {
+  verifyDossier,
+  parseDossier,
+  verifyChecksum,
+  assessRisk,
+  checkSignature,
+  parseArgs,
+  downloadFile,
+};
