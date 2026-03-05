@@ -5,7 +5,6 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { getErrorMessage } from '@ai-dossier/core';
 import { logger } from './logger';
 
 /**
@@ -28,9 +27,11 @@ export function loadMarkdownResource(relativePath: string, resourceName: string)
   } catch (err) {
     logger.error(`Failed to load ${relativePath}`, {
       path: fullPath,
-      error: getErrorMessage(err),
+      error: err instanceof Error ? err.message : String(err),
     });
-    throw new Error(`Failed to load ${relativePath}: ${getErrorMessage(err)}`);
+    throw new Error(
+      `Failed to load ${relativePath}: ${err instanceof Error ? err.message : String(err)}`
+    );
   }
 }
 

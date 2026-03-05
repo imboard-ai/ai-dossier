@@ -31,10 +31,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@aws-sdk/client-kms": "^3.927.0",
-    "@ai-dossier/core": "*",
     "@modelcontextprotocol/sdk": "^1.21.0",
-    "tweetnacl": "^1.0.3",
     "zod": "^3.25.76"
   },
   "devDependencies": {

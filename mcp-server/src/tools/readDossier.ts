@@ -1,10 +1,11 @@
 /**
  * read_dossier tool - Read and return dossier content
- * Should be called AFTER verify_dossier passes
+ * Thin wrapper around `ai-dossier info --json <path>` + file read for body
  */
 
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { type DossierFrontmatter, parseDossierFile } from '@ai-dossier/core';
+import { CliNotFoundError, execCli } from '../utils/cli-wrapper';
 import { logger } from '../utils/logger';
 
 export interface ReadDossierInput {
@@ -12,57 +13,58 @@ export interface ReadDossierInput {
 }
 
 export interface ReadDossierOutput {
-  metadata: {
-    title: string;
-    version: string;
-    protocol: string;
-    status: string;
-    risk_level: string;
-    objective: string;
-    path: string;
-  };
-  frontmatter: DossierFrontmatter;
+  metadata: Record<string, unknown>;
   body: string;
 }
 
 /**
- * Read and parse a dossier file
- * Returns metadata and content for LLM execution
+ * Extract the body content from a dossier file (everything after the frontmatter).
  */
-export function readDossier(input: ReadDossierInput): ReadDossierOutput {
-  const { path } = input;
+function extractBody(content: string): string {
+  // JSON frontmatter: ---dossier\n...\n---
+  const jsonMatch = content.match(/^---dossier\s*\n[\s\S]*?\n---\n?([\s\S]*)$/);
+  if (jsonMatch) return jsonMatch[1];
+
+  // YAML frontmatter: ---\n...\n---
+  const yamlMatch = content.match(/^---\s*\n[\s\S]*?\n---\n?([\s\S]*)$/);
+  if (yamlMatch) return yamlMatch[1];
+
+  return content;
+}
+
+/**
+ * Read and parse a dossier file via CLI
+ */
+export async function readDossier(input: ReadDossierInput): Promise<ReadDossierOutput> {
+  const { path: dossierPath } = input;
 
   // Validate path stays within the current working directory
-  const resolvedPath = resolve(path);
+  const resolvedPath = resolve(dossierPath);
   const cwd = process.cwd();
   if (!resolvedPath.startsWith(`${cwd}/`) && resolvedPath !== cwd) {
-    throw new Error(`Access denied: path "${path}" is outside the working directory`);
+    throw new Error(`Access denied: path "${dossierPath}" is outside the working directory`);
   }
 
-  logger.info('Reading dossier', { dossierFile: path });
+  logger.info('Reading dossier via CLI', { dossierFile: dossierPath });
 
-  const parsed = parseDossierFile(path);
-  const { frontmatter, body } = parsed;
+  try {
+    const metadata = await execCli<Record<string, unknown>>('info', [dossierPath, '--json']);
 
-  const output: ReadDossierOutput = {
-    metadata: {
-      title: frontmatter.title,
-      version: frontmatter.version,
-      protocol: frontmatter.protocol_version,
-      status: frontmatter.status,
-      risk_level: frontmatter.risk_level,
-      objective: frontmatter.objective,
-      path,
-    },
-    frontmatter,
-    body,
-  };
+    // Read body directly from file (info --json returns only metadata)
+    const fileContent = readFileSync(resolvedPath, 'utf8');
+    const body = extractBody(fileContent);
 
-  logger.info('Dossier read successfully', {
-    dossierFile: path,
-    title: frontmatter.title,
-    bodyLength: body.length,
-  });
+    logger.info('Dossier read successfully', {
+      dossierFile: dossierPath,
+      title: metadata.title,
+      bodyLength: body.length,
+    });
 
-  return output;
+    return { metadata, body };
+  } catch (error) {
+    if (error instanceof CliNotFoundError) {
+      throw new Error(error.message);
+    }
+    throw error;
+  }
 }

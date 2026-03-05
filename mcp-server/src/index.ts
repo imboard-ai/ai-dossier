@@ -6,7 +6,6 @@
  * Enables LLMs to discover, verify, and execute dossiers securely
  */
 
-import { getErrorMessage, getErrorStack } from '@ai-dossier/core';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -22,6 +21,7 @@ import { getProtocolResource } from './resources/protocol.js';
 import { getSecurityResource } from './resources/security.js';
 import { type ListDossiersInput, listDossiers } from './tools/listDossiers.js';
 import { type ReadDossierInput, readDossier } from './tools/readDossier.js';
+import { type SearchDossiersInput, searchDossiers } from './tools/searchDossiers.js';
 import { type VerifyDossierInput, verifyDossier } from './tools/verifyDossier.js';
 import { logger } from './utils/logger.js';
 import { createToolResponse } from './utils/response.js';
@@ -49,17 +49,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'verify_dossier',
         description:
-          '🔒 Security verification - Verify integrity (checksum) and authenticity (signature) of a dossier. Returns ALLOW/WARN/BLOCK recommendation.',
+          'Security verification - Verify integrity (checksum) and authenticity (signature) of a dossier. Returns pass/fail with stage details.',
         inputSchema: {
           type: 'object',
           properties: {
             path: {
               type: 'string',
               description: 'Path to dossier file (.ds.md)',
-            },
-            trusted_keys_path: {
-              type: 'string',
-              description: 'Path to trusted-keys.txt (default: ~/.dossier/trusted-keys.txt)',
             },
           },
           required: ['path'],
@@ -98,6 +94,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
         },
       },
+      {
+        name: 'search_dossiers',
+        description:
+          'Search the dossier registry for available dossiers by keyword. Returns matching dossiers with metadata.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Search keywords',
+            },
+            category: {
+              type: 'string',
+              description: 'Filter by category (devops, database, development, security, etc.)',
+            },
+          },
+          required: ['query'],
+        },
+      },
     ],
   };
 });
@@ -116,12 +131,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'read_dossier': {
-        const result = readDossier(args as unknown as ReadDossierInput);
+        const result = await readDossier(args as unknown as ReadDossierInput);
         return createToolResponse(result);
       }
 
       case 'list_dossiers': {
-        const result = listDossiers(args as unknown as ListDossiersInput);
+        const result = await listDossiers(args as unknown as ListDossiersInput);
+        return createToolResponse(result);
+      }
+
+      case 'search_dossiers': {
+        const result = await searchDossiers(args as unknown as SearchDossiersInput);
         return createToolResponse(result);
       }
 
@@ -129,13 +149,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         throw new Error(`Unknown tool: ${name}`);
     }
   } catch (error) {
-    logger.error('Tool execution error', {
-      tool: name,
-      error: getErrorMessage(error),
-      stack: getErrorStack(error),
-    });
-
-    return createToolResponse({ error: { message: getErrorMessage(error), tool: name } }, true);
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error('Tool execution error', { tool: name, error: message });
+    return createToolResponse({ error: { message, tool: name } }, true);
   }
 });
 
@@ -202,12 +218,8 @@ server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
       ],
     };
   } catch (error) {
-    logger.error('Resource read error', {
-      uri,
-      error: getErrorMessage(error),
-      stack: getErrorStack(error),
-    });
-
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error('Resource read error', { uri, error: message });
     throw error;
   }
 });
@@ -344,10 +356,8 @@ async function main() {
     // Keep process alive
     process.stdin.resume();
   } catch (error) {
-    logger.error('Failed to start server', {
-      error: getErrorMessage(error),
-      stack: getErrorStack(error),
-    });
+    const message = error instanceof Error ? error.message : String(error);
+    logger.error('Failed to start server', { error: message });
     process.exit(1);
   }
 }
@@ -365,9 +375,7 @@ process.on('SIGTERM', () => {
 
 // Run server
 main().catch((error) => {
-  logger.error('Fatal error', {
-    error: getErrorMessage(error),
-    stack: getErrorStack(error),
-  });
+  const message = error instanceof Error ? error.message : String(error);
+  logger.error('Fatal error', { error: message });
   process.exit(1);
 });
