@@ -121,13 +121,38 @@ export function registerRunCommand(program: Command): void {
         }
       }
 
+      // If resolvedFile is still a URL, download it first
+      if (resolvedFile.startsWith('http://') || resolvedFile.startsWith('https://')) {
+        try {
+          resolvedFile = downloadUrlToTempFile(resolvedFile);
+        } catch (err: any) {
+          console.error(`\n❌ Failed to download: ${err.message}\n`);
+          process.exit(1);
+        }
+      }
+
+      // TOCTOU mitigation: read the file once and create a private copy.
+      // This prevents an attacker from swapping the file between verification
+      // and execution (threat T13).
+      let dossierContent: string;
+      try {
+        dossierContent = fs.readFileSync(path.resolve(resolvedFile), 'utf8');
+      } catch (err: any) {
+        console.error(`\n❌ Failed to read dossier: ${err.message}\n`);
+        process.exit(1);
+      }
+
+      const secureTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dossier-run-'));
+      const secureTmpFile = path.join(secureTmpDir, path.basename(resolvedFile));
+      fs.writeFileSync(secureTmpFile, dossierContent, { mode: 0o600 });
+      resolvedFile = secureTmpFile;
+
       // Show metadata summary
       try {
-        const content = fs.readFileSync(path.resolve(resolvedFile), 'utf8');
         let fm: any = null;
 
         try {
-          const parsed = parseDossierContent(content);
+          const parsed = parseDossierContent(dossierContent);
           fm = parsed.frontmatter;
         } catch (err) {
           process.stderr.write(
@@ -156,20 +181,18 @@ export function registerRunCommand(program: Command): void {
       // Nested session detection
       if (process.env.CLAUDE_CODE === '1' || process.env.CLAUDECODE === '1') {
         console.error('ℹ️  Running inside Claude Code — outputting dossier content\n');
-        try {
-          const content = fs.readFileSync(path.resolve(resolvedFile), 'utf8');
-          process.stdout.write(content);
-          process.exit(0);
-        } catch (err: any) {
-          console.error(`\n❌ Failed to read dossier: ${err.message}\n`);
-          process.exit(1);
-        }
+        process.stdout.write(dossierContent);
+        fs.unlinkSync(secureTmpFile);
+        fs.rmdirSync(secureTmpDir);
+        process.exit(0);
       }
 
       const result = await runVerification(resolvedFile, options);
 
       if (!result.passed) {
         console.log('❌ Verification failed - cannot execute\n');
+        fs.unlinkSync(secureTmpFile);
+        fs.rmdirSync(secureTmpDir);
         process.exit(1);
       }
 
@@ -196,39 +219,29 @@ export function registerRunCommand(program: Command): void {
           `   Command: ${llmToUse ? `claude "${resolvedFile}"` : 'No LLM detected - would show error'}\n`
         );
         console.log('✅ All verifications passed - ready to execute');
+        fs.unlinkSync(secureTmpFile);
+        fs.rmdirSync(secureTmpDir);
         process.exit(0);
       }
 
-      // If resolvedFile is still a URL, download it to a temp file first
-      const isResolvedUrl =
-        resolvedFile.startsWith('http://') || resolvedFile.startsWith('https://');
-      let tmpUrlFile: string | null = null;
-      if (isResolvedUrl) {
+      const cleanupSecureTmp = () => {
         try {
-          tmpUrlFile = downloadUrlToTempFile(resolvedFile);
-          resolvedFile = tmpUrlFile;
-        } catch (err: any) {
-          console.error(`\n❌ Failed to download: ${err.message}\n`);
-          process.exit(1);
+          fs.unlinkSync(secureTmpFile);
+        } catch {
+          /* already cleaned */
         }
-      }
-
-      const cleanupTmpFile = () => {
-        if (tmpUrlFile)
-          try {
-            fs.unlinkSync(tmpUrlFile);
-          } catch (err) {
-            process.stderr.write(
-              `Warning: failed to clean up temp file ${tmpUrlFile}: ${(err as Error).message}\n`
-            );
-          }
+        try {
+          fs.rmdirSync(secureTmpDir);
+        } catch {
+          /* already cleaned */
+        }
       };
 
       console.log('🤖 Executing Dossier...\n');
 
       const llmToUse = detectLlm(llmOption as string);
       if (!llmToUse) {
-        cleanupTmpFile();
+        cleanupSecureTmp();
         process.exit(2);
       }
 
@@ -236,7 +249,7 @@ export function registerRunCommand(program: Command): void {
       if (!descriptor) {
         console.log(`❌ Unknown LLM: ${llmToUse}\n`);
         console.log('Supported: claude-code, auto\n');
-        cleanupTmpFile();
+        cleanupSecureTmp();
         process.exit(2);
       }
 
@@ -254,9 +267,9 @@ export function registerRunCommand(program: Command): void {
         console.log('\n✅ Execution completed');
       } catch (error: any) {
         console.log('\n❌ Execution failed');
-        cleanupTmpFile();
+        cleanupSecureTmp();
         process.exit(error.status || 2);
       }
-      cleanupTmpFile();
+      cleanupSecureTmp();
     });
 }

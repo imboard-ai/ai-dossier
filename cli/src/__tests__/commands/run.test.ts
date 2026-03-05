@@ -41,6 +41,11 @@ describe('run command', () => {
       return `/home/.dossier/cache/${name}`;
     });
     vi.mocked(config.getConfig).mockReturnValue(undefined);
+    // Mock TOCTOU mitigation temp file operations
+    mockedFs.mkdtempSync.mockReturnValue('/tmp/dossier-run-test');
+    mockedFs.writeFileSync.mockReturnValue(undefined);
+    mockedFs.unlinkSync.mockReturnValue(undefined);
+    mockedFs.rmdirSync.mockReturnValue(undefined);
     // Remove any CLAUDE_CODE env to prevent nested detection
     delete process.env.CLAUDE_CODE;
     delete process.env.CLAUDECODE;
