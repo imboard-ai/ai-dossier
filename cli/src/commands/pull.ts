@@ -21,7 +21,7 @@ export function registerPullCommand(program: Command): void {
 
         try {
           if (!version) {
-            const meta = (await client.getDossier(dossierName)) as any;
+            const meta = await client.getDossier(dossierName);
             version = meta.version || 'latest';
           }
 
@@ -55,7 +55,7 @@ export function registerPullCommand(program: Command): void {
               {
                 cached_at: new Date().toISOString(),
                 version,
-                source_registry_url: (client as any).baseUrl.replace(/\/api\/v1$/, ''),
+                source_registry_url: client.getRegistryBaseUrl(),
               },
               null,
               2

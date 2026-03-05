@@ -1,4 +1,5 @@
 import type { Command } from 'commander';
+import type { DossierInfo } from '../registry-client';
 import { getClient, parseNameVersion } from '../registry-client';
 
 export function registerGetCommand(program: Command): void {
@@ -10,7 +11,7 @@ export function registerGetCommand(program: Command): void {
     .action(async (nameArg: string, options: { json?: boolean }) => {
       const [dossierName, version] = parseNameVersion(nameArg);
 
-      let meta: any;
+      let meta: DossierInfo;
       try {
         const client = getClient();
         meta = await client.getDossier(dossierName, version || null);
@@ -49,7 +50,7 @@ export function registerGetCommand(program: Command): void {
       const authors = meta.authors;
       if (Array.isArray(authors) && authors.length > 0) {
         const authorStr = authors
-          .map((a: any) => (typeof a === 'string' ? a : a.name || ''))
+          .map((a) => (typeof a === 'string' ? a : a.name || ''))
           .filter(Boolean)
           .join(', ');
         if (authorStr) console.log(`   Authors      ${authorStr}`);

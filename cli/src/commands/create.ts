@@ -67,7 +67,7 @@ export function registerCreateCommand(program: Command): void {
             const client = getClient();
             let resolvedVersion = version;
             if (!resolvedVersion) {
-              const meta = (await client.getDossier(dossierName)) as any;
+              const meta = await client.getDossier(dossierName);
               resolvedVersion = meta.version || 'latest';
             }
             const result = await client.getDossierContent(dossierName, resolvedVersion);

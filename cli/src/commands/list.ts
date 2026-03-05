@@ -10,6 +10,7 @@ import {
   parseDossierMetadataLocal,
   parseListSource,
 } from '../helpers';
+import type { ListDossiersResult } from '../registry-client';
 import { getClient } from '../registry-client';
 
 export function registerListCommand(program: Command): void {
@@ -36,20 +37,20 @@ export function registerListCommand(program: Command): void {
         const page = parseInt(options.page, 10) || 1;
         const perPage = parseInt(options.perPage, 10) || 20;
 
-        let registryResult: any;
+        let registryResult: ListDossiersResult;
         try {
           const client = getClient();
-          registryResult = (await client.listDossiers({
+          registryResult = await client.listDossiers({
             category: options.category,
             page,
             perPage,
-          })) as any;
+          });
         } catch (err: unknown) {
           console.error(`\n❌ Registry list failed: ${(err as Error).message}\n`);
           process.exit(1);
         }
 
-        const dossiers: any[] = registryResult.dossiers || registryResult.data || [];
+        const dossiers = registryResult.dossiers || registryResult.data || [];
 
         if (options.format === 'json') {
           console.log(JSON.stringify(registryResult, null, 2));
