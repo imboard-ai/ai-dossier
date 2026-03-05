@@ -105,7 +105,7 @@ export function registerPublishCommand(program: Command): void {
           if (existing) {
             versionExists = true;
           }
-        } catch (err: any) {
+        } catch {
           // 404 = version doesn't exist (expected), other errors = warn but don't block
         }
 
@@ -138,7 +138,7 @@ export function registerPublishCommand(program: Command): void {
           if (existing) {
             existingVersion = existing.version || null;
           }
-        } catch (err: any) {
+        } catch {
           // Ignore — dossier doesn't exist or check failed
         }
 

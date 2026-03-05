@@ -156,7 +156,7 @@ describe('publish command', () => {
       }
     });
     expect(jsonCall).toBeDefined();
-    const output = JSON.parse(jsonCall![0] as string);
+    const output = JSON.parse(jsonCall?.[0] as string);
     expect(output.success).toBe(false);
     expect(output.path).toBe('org/test-dossier');
   });
@@ -181,7 +181,7 @@ describe('publish command', () => {
       }
     });
     expect(jsonCall).toBeDefined();
-    const output = JSON.parse(jsonCall![0] as string);
+    const output = JSON.parse(jsonCall?.[0] as string);
     expect(output.registryPath).toBe('org/test-dossier@1.0.0');
     expect(output.url).toBe('https://registry.example.com/dossiers/org/test-dossier');
   });
