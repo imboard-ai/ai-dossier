@@ -8,6 +8,13 @@ export function registerLoginCommand(program: Command): void {
     .command('login')
     .description('Authenticate with the dossier registry via GitHub')
     .action(async () => {
+      if (!process.stdin.isTTY) {
+        console.error('\n❌ Non-interactive session detected. Cannot run OAuth flow.');
+        console.error('   Set the DOSSIER_REGISTRY_TOKEN environment variable instead:\n');
+        console.error('   export DOSSIER_REGISTRY_TOKEN=<your-token>\n');
+        process.exit(1);
+      }
+
       try {
         const registryUrl = getRegistryUrl();
         const result = await runOAuthFlow(registryUrl);

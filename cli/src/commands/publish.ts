@@ -149,6 +149,13 @@ export function registerPublishCommand(program: Command): void {
         }
 
         if (!options.yes) {
+          if (!process.stdin.isTTY) {
+            console.error(
+              '\n❌ Non-interactive session detected. Use -y/--yes to skip confirmation.\n'
+            );
+            process.exit(1);
+          }
+
           console.log('\n📦 Publishing dossier:\n');
           console.log(`   Registry:  ${registryPath}`);
           console.log(`   File:      ${path.basename(dossierFile)}`);

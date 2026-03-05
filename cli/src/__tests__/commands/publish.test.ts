@@ -101,6 +101,25 @@ describe('publish command', () => {
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Validation errors'));
   });
 
+  it('should exit 1 in non-TTY without --yes', async () => {
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+
+    const program = createTestProgram();
+    registerPublishCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md'])
+    ).rejects.toThrow();
+
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Non-interactive session'));
+
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: originalIsTTY,
+      configurable: true,
+    });
+  });
+
   it('should publish with --yes flag and show full registry path', async () => {
     mockClient.publishDossier.mockResolvedValue({
       name: 'org/test-dossier',

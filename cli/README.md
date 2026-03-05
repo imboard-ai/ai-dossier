@@ -42,6 +42,32 @@ chmod +x bin/dossier-verify
 
 ---
 
+## Authentication
+
+### Interactive (Browser OAuth)
+
+```bash
+dossier login
+```
+
+### Non-Interactive (CI/CD, Agents)
+
+Set the `DOSSIER_REGISTRY_TOKEN` environment variable:
+
+```bash
+export DOSSIER_REGISTRY_TOKEN=<your-token>
+
+# Optional: set user/org context
+export DOSSIER_REGISTRY_USER=<username>
+export DOSSIER_REGISTRY_ORGS=org1,org2
+```
+
+When `DOSSIER_REGISTRY_TOKEN` is set, it takes precedence over stored credentials. This is recommended for CI/CD pipelines, Docker containers, and AI agent contexts where interactive login is not possible.
+
+Commands that require confirmation (`publish`, `remove`, `cache clean`) will fail with a clear error in non-interactive sessions. Use `-y`/`--yes` to skip confirmation prompts.
+
+---
+
 ## Usage
 
 ### Basic Verification

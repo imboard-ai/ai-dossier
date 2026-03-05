@@ -118,6 +118,62 @@ describe('credentials', () => {
       expect(creds?.orgs).toEqual([]);
     });
 
+    it('should return credentials from DOSSIER_REGISTRY_TOKEN env var', () => {
+      const saved = {
+        token: process.env.DOSSIER_REGISTRY_TOKEN,
+        user: process.env.DOSSIER_REGISTRY_USER,
+        orgs: process.env.DOSSIER_REGISTRY_ORGS,
+      };
+
+      process.env.DOSSIER_REGISTRY_TOKEN = 'env-token';
+      process.env.DOSSIER_REGISTRY_USER = 'env-user';
+      process.env.DOSSIER_REGISTRY_ORGS = 'org1,org2';
+
+      try {
+        const creds = loadCredentials();
+        expect(creds).toEqual({
+          token: 'env-token',
+          username: 'env-user',
+          orgs: ['org1', 'org2'],
+          expiresAt: null,
+        });
+        // Env var should take precedence — file should not be read
+        expect(mockedFs.readFileSync).not.toHaveBeenCalled();
+      } finally {
+        if (saved.token === undefined) delete process.env.DOSSIER_REGISTRY_TOKEN;
+        else process.env.DOSSIER_REGISTRY_TOKEN = saved.token;
+        if (saved.user === undefined) delete process.env.DOSSIER_REGISTRY_USER;
+        else process.env.DOSSIER_REGISTRY_USER = saved.user;
+        if (saved.orgs === undefined) delete process.env.DOSSIER_REGISTRY_ORGS;
+        else process.env.DOSSIER_REGISTRY_ORGS = saved.orgs;
+      }
+    });
+
+    it('should use default username when only DOSSIER_REGISTRY_TOKEN is set', () => {
+      const saved = {
+        token: process.env.DOSSIER_REGISTRY_TOKEN,
+        user: process.env.DOSSIER_REGISTRY_USER,
+        orgs: process.env.DOSSIER_REGISTRY_ORGS,
+      };
+
+      process.env.DOSSIER_REGISTRY_TOKEN = 'env-token';
+      delete process.env.DOSSIER_REGISTRY_USER;
+      delete process.env.DOSSIER_REGISTRY_ORGS;
+
+      try {
+        const creds = loadCredentials();
+        expect(creds?.username).toBe('token-auth');
+        expect(creds?.orgs).toEqual([]);
+      } finally {
+        if (saved.token === undefined) delete process.env.DOSSIER_REGISTRY_TOKEN;
+        else process.env.DOSSIER_REGISTRY_TOKEN = saved.token;
+        if (saved.user === undefined) delete process.env.DOSSIER_REGISTRY_USER;
+        else process.env.DOSSIER_REGISTRY_USER = saved.user;
+        if (saved.orgs === undefined) delete process.env.DOSSIER_REGISTRY_ORGS;
+        else process.env.DOSSIER_REGISTRY_ORGS = saved.orgs;
+      }
+    });
+
     it('should warn and fix insecure permissions', () => {
       mockedFs.statSync.mockReturnValue({ mode: 0o100644 } as any);
       mockedFs.readFileSync.mockReturnValue(

@@ -121,6 +121,12 @@ export function registerCacheCommand(program: Command): void {
 
       async function confirm(msg: string): Promise<boolean> {
         if (options.yes) return true;
+        if (!process.stdin.isTTY) {
+          console.error(
+            '\n❌ Non-interactive session detected. Use -y/--yes to skip confirmation.\n'
+          );
+          process.exit(1);
+        }
         const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
         const answer = await new Promise<string>((resolve) => {
           rl.question(`${msg} (y/N) `, resolve);

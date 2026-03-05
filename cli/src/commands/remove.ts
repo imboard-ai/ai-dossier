@@ -45,6 +45,13 @@ export function registerRemoveCommand(program: Command): void {
       const target = version ? `${dossierName}@${version}` : dossierName;
 
       if (!options.yes) {
+        if (!process.stdin.isTTY) {
+          console.error(
+            '\n❌ Non-interactive session detected. Use -y/--yes to skip confirmation.\n'
+          );
+          process.exit(1);
+        }
+
         const msg = version
           ? `Are you sure you want to remove version '${version}' of '${dossierName}'?`
           : `Are you sure you want to remove '${dossierName}' and ALL its versions?`;

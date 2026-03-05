@@ -40,9 +40,20 @@ function saveCredentials(credentials: Credentials): void {
 }
 
 /**
- * Load credentials from file.
+ * Load credentials from file or DOSSIER_REGISTRY_TOKEN env var.
+ * The env var takes precedence when set.
  */
 function loadCredentials(): Credentials | null {
+  const envToken = process.env.DOSSIER_REGISTRY_TOKEN;
+  if (envToken) {
+    return {
+      token: envToken,
+      username: process.env.DOSSIER_REGISTRY_USER || 'token-auth',
+      orgs: process.env.DOSSIER_REGISTRY_ORGS ? process.env.DOSSIER_REGISTRY_ORGS.split(',') : [],
+      expiresAt: null,
+    };
+  }
+
   if (!fs.existsSync(CREDENTIALS_FILE)) {
     return null;
   }

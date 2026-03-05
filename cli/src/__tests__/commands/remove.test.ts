@@ -51,6 +51,23 @@ describe('remove command', () => {
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('expired'));
   });
 
+  it('should exit 1 in non-TTY without --yes', async () => {
+    const originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+
+    const program = createTestProgram();
+    registerRemoveCommand(program);
+
+    await expect(program.parseAsync(['node', 'dossier', 'remove', 'my-dossier'])).rejects.toThrow();
+
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Non-interactive session'));
+
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: originalIsTTY,
+      configurable: true,
+    });
+  });
+
   it('should remove with --yes flag and show CDN warning', async () => {
     mockClient.removeDossier.mockResolvedValue({});
 
