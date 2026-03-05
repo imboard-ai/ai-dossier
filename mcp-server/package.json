@@ -22,6 +22,18 @@
   ],
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "license": "Elastic-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/imboard-ai/ai-dossier.git",
+    "directory": "mcp-server"
+  },
+  "homepage": "https://github.com/imboard-ai/ai-dossier#readme",
+  "bugs": {
+    "url": "https://github.com/imboard-ai/ai-dossier/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "type": "commonjs",
   "files": [
     "dist/"
