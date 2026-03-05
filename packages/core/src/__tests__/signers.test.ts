@@ -1,4 +1,4 @@
-import { generateKeyPairSync, sign as cryptoSign } from 'node:crypto';
+import { sign as cryptoSign, generateKeyPairSync } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
