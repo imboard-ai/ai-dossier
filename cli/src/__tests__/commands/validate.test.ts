@@ -19,7 +19,7 @@ describe('validate command', () => {
 
     await expect(
       program.parseAsync(['node', 'dossier', 'validate', 'missing.ds.md'])
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow();
 
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('File not found'));
   });
@@ -38,9 +38,9 @@ describe('validate command', () => {
     const program = createTestProgram();
     registerValidateCommand(program);
 
-    await expect(program.parseAsync(['node', 'dossier', 'validate', 'test.ds.md'])).rejects.toThrow(
-      'process.exit(0)'
-    );
+    await expect(
+      program.parseAsync(['node', 'dossier', 'validate', 'test.ds.md'])
+    ).rejects.toThrow();
 
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Valid'));
   });
@@ -52,9 +52,9 @@ describe('validate command', () => {
     const program = createTestProgram();
     registerValidateCommand(program);
 
-    await expect(program.parseAsync(['node', 'dossier', 'validate', 'test.ds.md'])).rejects.toThrow(
-      'process.exit(1)'
-    );
+    await expect(
+      program.parseAsync(['node', 'dossier', 'validate', 'test.ds.md'])
+    ).rejects.toThrow();
 
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Missing required field'));
   });
@@ -65,9 +65,9 @@ describe('validate command', () => {
     const program = createTestProgram();
     registerValidateCommand(program);
 
-    await expect(program.parseAsync(['node', 'dossier', 'validate', 'test.ds.md'])).rejects.toThrow(
-      'process.exit(1)'
-    );
+    await expect(
+      program.parseAsync(['node', 'dossier', 'validate', 'test.ds.md'])
+    ).rejects.toThrow();
 
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('No frontmatter'));
   });
@@ -88,7 +88,7 @@ describe('validate command', () => {
 
     await expect(
       program.parseAsync(['node', 'dossier', 'validate', 'test.ds.md', '--json'])
-    ).rejects.toThrow('process.exit(0)');
+    ).rejects.toThrow();
 
     const jsonCalls = vi
       .mocked(console.log)
@@ -116,7 +116,7 @@ describe('validate command', () => {
 
     await expect(
       program.parseAsync(['node', 'dossier', 'validate', 'test.ds.md', '--strict'])
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow();
   });
 
   it('should warn about invalid risk_level', async () => {

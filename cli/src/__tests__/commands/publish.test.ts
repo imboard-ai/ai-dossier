@@ -13,7 +13,7 @@ vi.mock('../../registry-client');
 const mockedFs = vi.mocked(fs);
 
 const validDossier = `---dossier
-{"title":"Test Dossier","version":"1.0.0","name":"test-dossier","risk_level":"low","status":"stable"}
+{"dossier_schema_version":"1.0.0","title":"Test Dossier","version":"1.0.0","name":"test-dossier","risk_level":"low","status":"Stable"}
 ---
 Body content here`;
 
