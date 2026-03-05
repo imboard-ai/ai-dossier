@@ -248,7 +248,7 @@ dossier-mcp-server/
 ```bash
 # Clone and install
 git clone https://github.com/imboard-ai/ai-dossier.git
-cd dossier/mcp-server
+cd ai-dossier/mcp-server
 npm install
 
 # Build

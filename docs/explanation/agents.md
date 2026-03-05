@@ -751,7 +751,7 @@ cd /home/yuvaldim/projects/dossier/main && git status
 ```bash
 # Clone repository
 git clone https://github.com/imboard-ai/ai-dossier.git
-cd dossier
+cd ai-dossier
 
 # Explore core documentation
 cat README.md          # Start here

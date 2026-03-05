@@ -51,7 +51,7 @@ Use GitHub Discussions for:
 1. **Clone the repository**:
    ```bash
    git clone https://github.com/imboard-ai/ai-dossier.git
-   cd dossier
+   cd ai-dossier
    ```
 
 2. **Install dependencies** (for CLI and MCP server):

@@ -205,7 +205,7 @@ Actions → Publish Packages to GitHub Packages → Run workflow
 **Automatic Publishing (Push-based)**
 ```bash
 # Make changes to CLI
-vim cli/bin/dossier-verify
+vim cli/bin/ai-dossier
 
 # Commit and push
 git add cli/
