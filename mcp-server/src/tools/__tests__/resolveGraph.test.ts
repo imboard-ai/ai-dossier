@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ExecutionPlan } from '../../orchestration/types';
 import { resolveGraph } from '../resolveGraph';
 
 // Mock the resolver
@@ -22,6 +23,11 @@ vi.mock('../../orchestration/graph', () => ({
       this.cycle = cycle;
     }
   },
+}));
+
+vi.mock('../../utils/graphStore', () => ({
+  generateGraphId: vi.fn(() => 'test-graph-id'),
+  storeGraph: vi.fn(),
 }));
 
 vi.mock('../../utils/logger', () => ({
@@ -63,11 +69,14 @@ describe('resolveGraph tool', () => {
     };
     const mockNodes = new Map([['deploy', { name: 'deploy', source: 'local' as const }]]);
     const mockGraph = { nodes: mockNodes, edges: [] };
-    const mockPlan = {
+    const mockPlan: ExecutionPlan = {
       entryDossier: 'deploy',
       totalDossiers: 1,
       phases: [
-        { phase: 1, dossiers: [{ name: 'deploy', source: 'local', condition: 'required' }] },
+        {
+          phase: 1,
+          dossiers: [{ name: 'deploy', source: 'local' as const, condition: 'required' as const }],
+        },
       ],
       conflicts: [],
       warnings: [],
@@ -95,11 +104,16 @@ describe('resolveGraph tool', () => {
     };
     const mockNodes = new Map([['deploy', { name: 'deploy', source: 'registry' as const }]]);
     const mockGraph = { nodes: mockNodes, edges: [] };
-    const mockPlan = {
+    const mockPlan: ExecutionPlan = {
       entryDossier: 'deploy',
       totalDossiers: 1,
       phases: [
-        { phase: 1, dossiers: [{ name: 'deploy', source: 'registry', condition: 'required' }] },
+        {
+          phase: 1,
+          dossiers: [
+            { name: 'deploy', source: 'registry' as const, condition: 'required' as const },
+          ],
+        },
       ],
       conflicts: [],
       warnings: [],

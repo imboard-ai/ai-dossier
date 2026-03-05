@@ -24,6 +24,7 @@ import { type ReadDossierInput, readDossier } from './tools/readDossier.js';
 import { type ResolveGraphInput, resolveGraph } from './tools/resolveGraph.js';
 import { type SearchDossiersInput, searchDossiers } from './tools/searchDossiers.js';
 import { type VerifyDossierInput, verifyDossier } from './tools/verifyDossier.js';
+import { type VerifyGraphInput, verifyGraph } from './tools/verifyGraph.js';
 import { logger } from './utils/logger.js';
 import { createToolResponse } from './utils/response.js';
 
@@ -129,6 +130,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['dossier'],
         },
       },
+      {
+        name: 'verify_graph',
+        description:
+          'Batch security verification for a dossier dependency graph. Verifies all dossiers in a resolved graph and returns an aggregate security report with per-dossier breakdown and overall recommendation.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            graph_id: {
+              type: 'string',
+              description: 'ID of a previously resolved graph (from resolve_graph)',
+            },
+            dossier: {
+              type: 'string',
+              description:
+                'Path to dossier file (.ds.md) or registry name. Resolves and verifies in one shot.',
+            },
+          },
+        },
+      },
     ],
   };
 });
@@ -163,6 +183,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'resolve_graph': {
         const result = await resolveGraph(args as unknown as ResolveGraphInput);
+        return createToolResponse(result);
+      }
+
+      case 'verify_graph': {
+        const result = await verifyGraph(args as unknown as VerifyGraphInput);
         return createToolResponse(result);
       }
 

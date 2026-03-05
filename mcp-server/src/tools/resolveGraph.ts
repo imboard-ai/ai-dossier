@@ -8,6 +8,7 @@ import { resolve } from 'node:path';
 import { buildExecutionPlan, buildGraph, CycleError } from '../orchestration/graph';
 import { DossierResolver } from '../orchestration/resolver';
 import type { ExecutionPlan } from '../orchestration/types';
+import { generateGraphId, storeGraph } from '../utils/graphStore';
 import { logger } from '../utils/logger';
 
 export interface ResolveGraphInput {
@@ -15,6 +16,7 @@ export interface ResolveGraphInput {
 }
 
 export interface ResolveGraphOutput {
+  graph_id: string;
   plan: ExecutionPlan;
 }
 
@@ -62,14 +64,18 @@ export async function resolveGraph(
     // Generate the execution plan
     const plan = buildExecutionPlan(graph, entryDossier.name);
 
+    const graphId = generateGraphId();
+    storeGraph(graphId, plan);
+
     logger.info('Dependency graph resolved', {
       entryDossier: entryDossier.name,
       totalDossiers: plan.totalDossiers,
       phases: plan.phases.length,
       conflicts: plan.conflicts.length,
+      graphId,
     });
 
-    return { plan };
+    return { graph_id: graphId, plan };
   } catch (error) {
     if (error instanceof CycleError) {
       return {
