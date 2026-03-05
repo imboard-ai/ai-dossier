@@ -1,9 +1,20 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { safeDossierPath } from '../helpers';
 import { getClient, parseNameVersion } from '../registry-client';
+
+function compareSemver(a: string, b: string): number {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
 
 export function registerInstallSkillCommand(program: Command): void {
   program
@@ -11,12 +22,20 @@ export function registerInstallSkillCommand(program: Command): void {
     .description('Install a registry dossier as a Claude Code skill')
     .argument('[name]', 'Dossier name to install (use name@version for specific version)')
     .option('--force', 'Overwrite if skill already exists')
+    .option('--fresh', 'Bypass cache and fetch from registry')
     .option('--list', 'List currently installed skills')
     .option('--remove <skill>', 'Remove an installed skill')
+    .option('--json', 'Output as JSON')
     .action(
       async (
         name: string | undefined,
-        options: { force?: boolean; list?: boolean; remove?: string }
+        options: {
+          force?: boolean;
+          fresh?: boolean;
+          list?: boolean;
+          remove?: string;
+          json?: boolean;
+        }
       ) => {
         const skillsDir = path.join(os.homedir(), '.claude', 'skills');
 
@@ -92,30 +111,38 @@ export function registerInstallSkillCommand(program: Command): void {
           const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
           let content: string | null = null;
           let resolvedVersion = version;
+          let fromCache = false;
 
-          if (!version) {
-            const dossierCacheDir = safeDossierPath(cacheDir, dossierName);
-            if (fs.existsSync(dossierCacheDir)) {
-              const metaFiles = fs
-                .readdirSync(dossierCacheDir)
-                .filter((f) => f.endsWith('.meta.json'));
-              if (metaFiles.length > 0) {
-                const ver = metaFiles[0].replace('.meta.json', '');
-                const contentFile = path.join(dossierCacheDir, `${ver}.ds.md`);
-                if (fs.existsSync(contentFile)) {
-                  content = fs.readFileSync(contentFile, 'utf8');
-                  resolvedVersion = ver;
+          if (!options.fresh) {
+            if (!version) {
+              const dossierCacheDir = safeDossierPath(cacheDir, dossierName);
+              if (fs.existsSync(dossierCacheDir)) {
+                const metaFiles = fs
+                  .readdirSync(dossierCacheDir)
+                  .filter((f) => f.endsWith('.meta.json'));
+                if (metaFiles.length > 0) {
+                  const versions = metaFiles
+                    .map((f) => f.replace('.meta.json', ''))
+                    .sort(compareSemver);
+                  const ver = versions[versions.length - 1];
+                  const contentFile = path.join(dossierCacheDir, `${ver}.ds.md`);
+                  if (fs.existsSync(contentFile)) {
+                    content = fs.readFileSync(contentFile, 'utf8');
+                    resolvedVersion = ver;
+                    fromCache = true;
+                  }
                 }
               }
-            }
-          } else {
-            const contentFile = path.join(
-              safeDossierPath(cacheDir, dossierName),
-              `${version}.ds.md`
-            );
-            if (fs.existsSync(contentFile)) {
-              content = fs.readFileSync(contentFile, 'utf8');
-              resolvedVersion = version;
+            } else {
+              const contentFile = path.join(
+                safeDossierPath(cacheDir, dossierName),
+                `${version}.ds.md`
+              );
+              if (fs.existsSync(contentFile)) {
+                content = fs.readFileSync(contentFile, 'utf8');
+                resolvedVersion = version;
+                fromCache = true;
+              }
             }
           }
 
@@ -132,13 +159,64 @@ export function registerInstallSkillCommand(program: Command): void {
           fs.mkdirSync(skillDir, { recursive: true });
           fs.writeFileSync(skillFile, content, 'utf8');
 
-          console.log(
-            `\n✅ Installed skill '${skillName}'${resolvedVersion ? ' (v' + resolvedVersion + ')' : ''}`
-          );
-          console.log(`   Location: ${skillFile}`);
-          console.log(`   Source: ${dossierName}\n`);
+          const fileSize = Buffer.byteLength(content, 'utf8');
+          let summary = '';
+          try {
+            const parsed = parseDossierContent(content);
+            const fm = parsed.frontmatter as Record<string, any>;
+            summary = fm.objective || '';
+            if (!summary) {
+              const firstLine = parsed.body.split('\n').find((l) => l.trim().length > 0);
+              summary = firstLine?.replace(/^#+\s*/, '').trim() || '';
+            }
+          } catch {
+            // Could not parse — skip summary
+          }
+
+          if (options.json) {
+            console.log(
+              JSON.stringify(
+                {
+                  success: true,
+                  skill: skillName,
+                  source: dossierName,
+                  version: resolvedVersion || null,
+                  location: skillFile,
+                  fileSize,
+                  summary: summary || null,
+                  cached: fromCache,
+                },
+                null,
+                2
+              )
+            );
+          } else {
+            console.log(
+              `\n✅ Installed skill '${skillName}'${resolvedVersion ? ' (v' + resolvedVersion + ')' : ''}`
+            );
+            console.log(`   Location: ${skillFile}`);
+            console.log(`   Source: ${dossierName}`);
+            console.log(`   Size: ${fileSize} bytes`);
+            if (summary) {
+              const snippet = summary.length > 80 ? summary.slice(0, 80) + '...' : summary;
+              console.log(`   Summary: ${snippet}`);
+            }
+            console.log('');
+          }
         } catch (err: any) {
-          if (err.statusCode === 404) {
+          if (options.json) {
+            console.log(
+              JSON.stringify(
+                {
+                  success: false,
+                  error: err.statusCode === 404 ? 'not_found' : 'install_failed',
+                  message: err.statusCode === 404 ? `Not found: ${name}` : err.message,
+                },
+                null,
+                2
+              )
+            );
+          } else if (err.statusCode === 404) {
             console.error(`\n❌ Not found in registry: ${name}\n`);
           } else {
             console.error(`\n❌ Install failed: ${err.message}\n`);
