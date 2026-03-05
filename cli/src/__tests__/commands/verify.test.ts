@@ -13,10 +13,7 @@ describe('verify command', () => {
   it('should exit 0 when verification passes', async () => {
     vi.mocked(helpers.runVerification).mockResolvedValue({
       passed: true,
-      stages: [
-        { stage: 1, name: 'Integrity', passed: true },
-        { stage: 2, name: 'Author Check', passed: true, demo: true },
-      ],
+      stages: [{ stage: 1, name: 'Integrity', passed: true }],
     });
 
     const program = createTestProgram();
@@ -44,11 +41,7 @@ describe('verify command', () => {
   it('should show stage details with --verbose', async () => {
     vi.mocked(helpers.runVerification).mockResolvedValue({
       passed: true,
-      stages: [
-        { stage: 1, name: 'Integrity', passed: true },
-        { stage: 2, name: 'Author Check', passed: true, demo: true },
-        { stage: 3, name: 'Dossier Check', skipped: true },
-      ],
+      stages: [{ stage: 1, name: 'Integrity', passed: true }],
     });
 
     const program = createTestProgram();
@@ -71,21 +64,13 @@ describe('verify command', () => {
     registerVerifyCommand(program);
 
     await expect(
-      program.parseAsync([
-        'node',
-        'dossier',
-        'verify',
-        'test.ds.md',
-        '--skip-checksum',
-        '--skip-risk-assessment',
-      ])
+      program.parseAsync(['node', 'dossier', 'verify', 'test.ds.md', '--skip-checksum'])
     ).rejects.toThrow();
 
     expect(helpers.runVerification).toHaveBeenCalledWith(
       'test.ds.md',
       expect.objectContaining({
         skipChecksum: true,
-        skipRiskAssessment: true,
       })
     );
   });

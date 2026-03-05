@@ -51,13 +51,8 @@ export { RECOMMENDED_FIELDS, REQUIRED_FIELDS, VALID_RISK_LEVELS, VALID_STATUSES 
 export interface VerificationOptions {
   skipChecksum?: boolean;
   skipAllChecks?: boolean;
-  skipAuthorCheck?: boolean;
-  skipDossierCheck?: boolean;
-  skipRiskAssessment?: boolean;
-  skipReview?: boolean;
   force?: boolean;
   noPrompt?: boolean;
-  reviewDossier?: string;
 }
 
 export interface VerificationStage {
@@ -65,7 +60,6 @@ export interface VerificationStage {
   name: string;
   passed?: boolean;
   skipped?: boolean;
-  demo?: boolean;
 }
 
 export interface VerificationResult {
@@ -299,13 +293,6 @@ export async function runVerification(
     console.log('⚠️  Stage 1: SKIPPED - Integrity check\n');
     results.stages.push({ stage: 1, name: 'Integrity', skipped: true });
   }
-
-  // Stages 2-5 are planned but not yet available.
-  // Skip them silently to avoid misleading output.
-  results.stages.push({ stage: 2, name: 'Author Check', skipped: true });
-  results.stages.push({ stage: 3, name: 'Dossier Check', skipped: true });
-  results.stages.push({ stage: 4, name: 'Risk Assessment', skipped: true });
-  results.stages.push({ stage: 5, name: 'Review Dossier', skipped: true });
 
   return results;
 }

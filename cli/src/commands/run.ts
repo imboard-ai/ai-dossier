@@ -27,14 +27,7 @@ export function registerRunCommand(program: Command): void {
     .option('--fresh', 'Skip cache, fetch fresh from registry')
     .option('--pull', 'Update cache before running')
     .option('--skip-checksum', 'Skip checksum verification (DANGEROUS)')
-    .option('--skip-signature', 'Skip signature verification')
-    .option('--skip-author-check', 'Skip author whitelist/blacklist')
-    .option('--skip-dossier-check', 'Skip dossier whitelist/blacklist')
-    .option('--skip-risk-assessment', 'Skip risk level checks')
-    .option('--skip-review', 'Skip review dossier execution')
     .option('--skip-all-checks', 'Skip ALL verifications (VERY DANGEROUS)')
-    .option('--review-dossier <file>', 'Custom review dossier')
-    .option('--review-llm <name>', 'LLM for review step')
     .action(async (file: string, options: any) => {
       let resolvedFile = file;
       const isUrl = file.startsWith('http://') || file.startsWith('https://');
