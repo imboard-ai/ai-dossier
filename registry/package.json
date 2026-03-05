@@ -17,16 +17,17 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/imboard-ai/dossier-registry.git"
+    "url": "git+https://github.com/imboard-ai/ai-dossier.git",
+    "directory": "registry"
   },
   "keywords": [],
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "license": "Elastic-2.0",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/imboard-ai/dossier-registry/issues"
+    "url": "https://github.com/imboard-ai/ai-dossier/issues"
   },
-  "homepage": "https://github.com/imboard-ai/dossier-registry#readme",
+  "homepage": "https://github.com/imboard-ai/ai-dossier/tree/main/registry#readme",
   "dependencies": {
     "gray-matter": "^4.0.3",
     "jsonwebtoken": "^9.0.2"
