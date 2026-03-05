@@ -106,13 +106,13 @@ export function registerPublishCommand(program: Command): void {
         const fullPath = `${namespace}/${name}`;
         const registryPath = `${fullPath}@${version}`;
 
-        // Pre-publish existence check
+        // Pre-publish existence check — version-specific via registry API
         const client = getClient(credentials.token);
         let existingVersion: string | null = null;
         let versionExists = false;
         try {
           const existing = (await client.getDossier(fullPath, version)) as any;
-          if (existing) {
+          if (existing && existing.version === version) {
             versionExists = true;
           }
         } catch {

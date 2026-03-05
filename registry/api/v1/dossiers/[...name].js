@@ -31,15 +31,8 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // Fetch manifest to find the dossier
-    const manifestUrl = config.getManifestUrl();
-    const response = await fetch(manifestUrl);
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch manifest: ${response.status}`);
-    }
-
-    const manifest = await response.json();
+    // Fetch manifest via GitHub API (not raw.githubusercontent.com) to avoid stale cache
+    const manifest = await github.getManifest();
     const dossier = manifest.dossiers.find((d) => d.name === dossierName);
 
     if (!dossier) {
@@ -47,6 +40,16 @@ module.exports = async (req, res) => {
         error: {
           code: 'DOSSIER_NOT_FOUND',
           message: `Dossier '${dossierName}' not found`,
+        },
+      });
+    }
+
+    // If a specific version was requested, verify it matches
+    if (version && dossier.version !== version) {
+      return res.status(404).json({
+        error: {
+          code: 'VERSION_NOT_FOUND',
+          message: `Dossier '${dossierName}' version '${version}' not found (latest: ${dossier.version})`,
         },
       });
     }
