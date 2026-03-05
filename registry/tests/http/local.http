@@ -1,0 +1,176 @@
+### Dossier Registry API - Local Tests
+### Base URL: http://localhost:3000 (default Vercel dev port)
+
+@baseUrl = http://localhost:3000
+
+### Health Check
+GET {{baseUrl}}/api/v1/health
+
+###
+
+### List All Dossiers
+GET {{baseUrl}}/api/v1/dossiers
+
+###
+
+### Get Dossier Metadata
+GET {{baseUrl}}/api/v1/dossiers/getting-started/hello
+
+###
+
+### Get Dossier Content (302 Redirect to CDN)
+GET {{baseUrl}}/api/v1/dossiers/getting-started/hello/content
+
+###
+
+### 404 - Dossier Not Found
+GET {{baseUrl}}/api/v1/dossiers/nonexistent/dossier
+
+###
+
+### 404 - Nested path not found
+GET {{baseUrl}}/api/v1/dossiers/some/deep/nested/path
+
+###
+
+### ========================================
+### Authentication Tests
+### ========================================
+
+### Get Current User - No Token (should return 401 MISSING_TOKEN)
+GET {{baseUrl}}/api/v1/me
+
+###
+
+### Get Current User - Invalid Token (should return 401 INVALID_TOKEN)
+GET {{baseUrl}}/api/v1/me
+Authorization: Bearer invalid.token.here
+
+###
+
+### Get Current User - Valid Token
+# Replace <JWT> with actual token from OAuth flow
+# GET {{baseUrl}}/api/v1/me
+# Authorization: Bearer <JWT>
+
+###
+
+### OAuth Callback - Missing Code (should return error page)
+GET {{baseUrl}}/auth/callback
+
+###
+
+### OAuth Callback - With Test Code (will fail but tests routing)
+GET {{baseUrl}}/auth/callback?code=test_code
+
+###
+
+### ========================================
+### Publish Tests
+### ========================================
+
+### Publish Dossier - No Token (should return 401)
+POST {{baseUrl}}/api/v1/dossiers
+Content-Type: application/json
+
+{
+  "namespace": "yuvaldim/test",
+  "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello",
+  "changelog": "Initial publish"
+}
+
+###
+
+### Publish Dossier - Missing namespace (should return 400)
+# POST {{baseUrl}}/api/v1/dossiers
+# Content-Type: application/json
+# Authorization: Bearer <JWT>
+#
+# {
+#   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello"
+# }
+
+###
+
+### Publish Dossier - Invalid frontmatter (should return 400)
+# POST {{baseUrl}}/api/v1/dossiers
+# Content-Type: application/json
+# Authorization: Bearer <JWT>
+#
+# {
+#   "namespace": "yuvaldim/test",
+#   "content": "# No frontmatter here"
+# }
+
+###
+
+### Publish Dossier - Wrong namespace (should return 403)
+# POST {{baseUrl}}/api/v1/dossiers
+# Content-Type: application/json
+# Authorization: Bearer <JWT>
+#
+# {
+#   "namespace": "someone-else/test",
+#   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello"
+# }
+
+###
+
+### Publish Dossier - Valid (should return 201)
+# Replace <JWT> with actual token from OAuth flow
+# POST {{baseUrl}}/api/v1/dossiers
+# Content-Type: application/json
+# Authorization: Bearer <JWT>
+#
+# {
+#   "namespace": "yuvaldim/test",
+#   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello\n\nThis is a test dossier.",
+#   "changelog": "Initial publish"
+# }
+
+###
+
+### ========================================
+### Delete Tests
+### ========================================
+
+### Delete Dossier - No Token (should return 401 MISSING_TOKEN)
+DELETE {{baseUrl}}/api/v1/dossiers/test-org/my-dossier
+
+###
+
+### Delete Dossier - Invalid Token (should return 401 INVALID_TOKEN)
+DELETE {{baseUrl}}/api/v1/dossiers/test-org/my-dossier
+Authorization: Bearer invalid.token.here
+
+###
+
+### Delete Dossier - Not Found (should return 404)
+# DELETE {{baseUrl}}/api/v1/dossiers/nonexistent/dossier
+# Authorization: Bearer <JWT>
+
+###
+
+### Delete Dossier - Wrong namespace (should return 403 FORBIDDEN)
+# DELETE {{baseUrl}}/api/v1/dossiers/someone-else/my-dossier
+# Authorization: Bearer <JWT>
+
+###
+
+### Delete Dossier - Valid (should return 200)
+# Replace <JWT> with actual token from OAuth flow
+# DELETE {{baseUrl}}/api/v1/dossiers/yuvaldim/test/my-dossier
+# Authorization: Bearer <JWT>
+
+###
+
+### Delete Dossier - Specific Version (should return 200)
+# Replace <JWT> with actual token from OAuth flow
+# DELETE {{baseUrl}}/api/v1/dossiers/yuvaldim/test/my-dossier?version=1.0.0
+# Authorization: Bearer <JWT>
+
+###
+
+### Delete Dossier - Wrong Version (should return 404 VERSION_NOT_FOUND)
+# DELETE {{baseUrl}}/api/v1/dossiers/yuvaldim/test/my-dossier?version=99.0.0
+# Authorization: Bearer <JWT>

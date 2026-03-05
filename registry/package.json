@@ -1,0 +1,37 @@
+{
+  "name": "dossier-registry",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "lib": "lib",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "jest",
+    "generate:jwt-secret": "node -e \"console.log(require('crypto').randomBytes(32).toString('base64'))\"",
+    "auth:url": "./scripts/auth-url.sh",
+    "auth:url:local": "./scripts/auth-url.sh local",
+    "test:publish": "./scripts/test-publish.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imboard-ai/dossier-registry.git"
+  },
+  "keywords": [],
+  "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
+  "license": "Elastic-2.0",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/imboard-ai/dossier-registry/issues"
+  },
+  "homepage": "https://github.com/imboard-ai/dossier-registry#readme",
+  "dependencies": {
+    "gray-matter": "^4.0.3",
+    "jsonwebtoken": "^9.0.2"
+  },
+  "devDependencies": {
+    "jest": "^30.2.0"
+  }
+}
