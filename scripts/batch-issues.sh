@@ -263,6 +263,43 @@ check_outcome() {
   fi
 }
 
+RUNS_LOG="$HOME/.dossier/runs.jsonl"
+
+# ── Show dossier trace info at job start ──
+show_start_trace() {
+  local issue="$1"
+  local cache_dir="$HOME/.dossier/cache/imboard-ai/full-cycle-issue"
+  local ver="?"
+  local src="unknown"
+  # Read cached version from meta
+  if [[ -d "$cache_dir" ]]; then
+    local meta
+    meta=$(ls -t "$cache_dir"/*.meta.json 2>/dev/null | head -1)
+    if [[ -n "$meta" ]]; then
+      ver=$(jq -r '.version // "?"' "$meta" 2>/dev/null || echo "?")
+      src="cache"
+      local latest
+      latest=$(jq -r '.latest_known_version // empty' "$meta" 2>/dev/null)
+      if [[ -n "$latest" && "$latest" != "$ver" ]]; then
+        log -e "         \033[33m⚠ update: ${latest} available (cached: ${ver})\033[0m"
+      fi
+    fi
+  fi
+  log "         dossier: full-cycle-issue@${ver} (${src})"
+}
+
+# ── Show dossier trace info at job completion ──
+show_end_trace() {
+  local issue="$1"
+  if [[ ! -f "$RUNS_LOG" ]]; then return; fi
+  # Find the most recent run-log entries created during this job
+  local entries
+  entries=$(tail -20 "$RUNS_LOG" | jq -r 'select(.dossier | test("full-cycle-issue")) | "\(.dossier)@\(.resolved_version) via \(.source)"' 2>/dev/null | tail -1)
+  if [[ -n "$entries" ]]; then
+    log "         trace: ${entries}"
+  fi
+}
+
 RUNNING=0
 PIDS=()
 ISSUE_MAP=()
@@ -275,6 +312,7 @@ for issue in "${ISSUES[@]}"; do
         wait "${PIDS[$i]}" || true
         EXIT_CODE=$?
         check_outcome "${ISSUE_MAP[$i]}" "$EXIT_CODE"
+        show_end_trace "${ISSUE_MAP[$i]}"
         unset 'PIDS['"$i"']'
         unset 'ISSUE_MAP['"$i"']'
         RUNNING=$((RUNNING - 1))
@@ -292,6 +330,7 @@ for issue in "${ISSUES[@]}"; do
     log "[dry-run] #${issue}: echo \"full cycle issue #${issue}\" | claude -p --model ${MODEL} --allowedTools Bash,Read,Edit,Write,Glob,Grep,Agent"
   else
     log "[starting] #${issue} -> ${LOG_FILE}"
+    show_start_trace "$issue"
     nohup bash -c "echo 'full cycle issue #${issue}' | claude -p \
       --model '${MODEL}' \
       --allowedTools 'Bash,Read,Edit,Write,Glob,Grep,Agent'" \
@@ -308,6 +347,7 @@ for i in "${!PIDS[@]}"; do
   wait "${PIDS[$i]}" || true
   EXIT_CODE=$?
   check_outcome "${ISSUE_MAP[$i]}" "$EXIT_CODE"
+  show_end_trace "${ISSUE_MAP[$i]}"
 done
 
 log ""
