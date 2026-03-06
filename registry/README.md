@@ -71,6 +71,30 @@ The registry enforces origin-based CORS with CSRF protection:
 
 See [`lib/cors.ts`](lib/cors.ts) for the implementation and the [API design doc](docs/planning/registry-api-design.md#cors-configuration) for the full specification.
 
+## Error Observability
+
+Dossier and search endpoint responses include an `X-Request-Id` header for request tracing. Server errors (5xx) also include a `request_id` field in the JSON body for correlating with server logs.
+
+**Example error response:**
+
+```json
+{
+  "error": {
+    "code": "UPSTREAM_ERROR",
+    "message": "Failed to fetch dossier list",
+    "request_id": "550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+**Tracing an error:**
+
+1. Copy the `request_id` from the error response (or the `X-Request-Id` header)
+2. Search server logs for that ID — all log entries for the request include the same `requestId` field
+3. Server errors are logged as structured JSON with error type, message, and stack trace
+
+See [`lib/responses.ts`](lib/responses.ts) for the implementation.
+
 ## Design Docs
 
 - [MVP0 Implementation](docs/planning/mvp0-implementation.md) — read-only registry architecture
