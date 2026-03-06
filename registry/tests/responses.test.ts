@@ -1,5 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import { getRequestId, invalidPathError, methodNotAllowed, serverError } from '../lib/responses';
+import {
+  badRequest,
+  generateErrorRef,
+  getRequestId,
+  invalidPathError,
+  jsonError,
+  methodNotAllowed,
+  normalizeError,
+  notFound,
+  serverError,
+} from '../lib/responses';
 import type { VercelRequest } from '../lib/types';
 import { createViMockRes } from './helpers/mocks';
 
@@ -173,7 +183,8 @@ describe('serverError', () => {
     expect(jsonArg.error.error_type).toBeUndefined();
 
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
-    expect(loggedJson.errorType).toBe('string');
+    // normalizeError wraps strings into Error objects, so errorType is always 'Error'
+    expect(loggedJson.errorType).toBe('Error');
 
     consoleSpy.mockRestore();
   });
@@ -198,6 +209,74 @@ describe('invalidPathError', () => {
     expect(loggedJson.identifier).toBe('my-org/evil-dossier');
 
     warnSpy.mockRestore();
+  });
+});
+
+describe('normalizeError', () => {
+  it('returns the same Error instance when given an Error', () => {
+    const err = new Error('test');
+    expect(normalizeError(err)).toBe(err);
+  });
+
+  it('wraps a string into an Error', () => {
+    const result = normalizeError('string failure');
+    expect(result).toBeInstanceOf(Error);
+    expect(result.message).toBe('string failure');
+  });
+
+  it('wraps null into an Error', () => {
+    const result = normalizeError(null);
+    expect(result).toBeInstanceOf(Error);
+    expect(result.message).toBe('null');
+  });
+});
+
+describe('generateErrorRef', () => {
+  it('returns a hex string of the expected length', () => {
+    const ref = generateErrorRef();
+    // ERROR_REF_BYTES = 4, so hex string is 8 characters
+    expect(ref).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('returns different values on successive calls', () => {
+    const refs = new Set(Array.from({ length: 10 }, () => generateErrorRef()));
+    expect(refs.size).toBeGreaterThan(1);
+  });
+});
+
+describe('jsonError', () => {
+  it('sets the status and returns the standard error shape', () => {
+    const res = createViMockRes();
+    jsonError(res, 418, 'TEAPOT', 'I am a teapot');
+
+    expect(res.status).toHaveBeenCalledWith(418);
+    expect(res.json).toHaveBeenCalledWith({
+      error: { code: 'TEAPOT', message: 'I am a teapot' },
+    });
+  });
+});
+
+describe('badRequest', () => {
+  it('returns 400 with the standard error shape', () => {
+    const res = createViMockRes();
+    badRequest(res, 'MISSING_FIELD', 'name is required');
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      error: { code: 'MISSING_FIELD', message: 'name is required' },
+    });
+  });
+});
+
+describe('notFound', () => {
+  it('returns 404 with the standard error shape', () => {
+    const res = createViMockRes();
+    notFound(res, 'DOSSIER_NOT_FOUND', "Dossier 'foo' not found");
+
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith({
+      error: { code: 'DOSSIER_NOT_FOUND', message: "Dossier 'foo' not found" },
+    });
   });
 });
 

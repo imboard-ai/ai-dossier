@@ -2,7 +2,7 @@ import { DEFAULT_PER_PAGE, HTTP_STATUS, MAX_PER_PAGE, MAX_QUERY_LENGTH } from '.
 import { handleCors } from '../../lib/cors';
 import { fetchManifestDossiers, normalizeDossier } from '../../lib/manifest';
 import { queryString } from '../../lib/query';
-import { getRequestId, methodNotAllowed, serverError } from '../../lib/responses';
+import { badRequest, getRequestId, methodNotAllowed, serverError } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -20,18 +20,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const perPageStr = queryString(req.query.per_page);
 
   if (!q || !q.trim()) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: { code: 'MISSING_QUERY', message: 'Query parameter "q" is required' },
-    });
+    return badRequest(res, 'MISSING_QUERY', 'Query parameter "q" is required');
   }
 
   if (q.length > MAX_QUERY_LENGTH) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: {
-        code: 'QUERY_TOO_LONG',
-        message: `Query exceeds maximum length of ${MAX_QUERY_LENGTH} characters`,
-      },
-    });
+    return badRequest(
+      res,
+      'QUERY_TOO_LONG',
+      `Query exceeds maximum length of ${MAX_QUERY_LENGTH} characters`
+    );
   }
 
   const page = Math.max(1, Number.parseInt(pageStr, 10) || 1);

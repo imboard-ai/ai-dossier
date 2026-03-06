@@ -1,9 +1,39 @@
 import crypto from 'node:crypto';
-import { HTTP_STATUS } from './constants';
+import { ERROR_REF_BYTES, HTTP_STATUS } from './constants';
 import createLogger from './logger';
 import type { VercelRequest, VercelResponse } from './types';
 
 const log = createLogger('responses');
+
+/** Converts an unknown caught value into a proper Error instance. */
+export function normalizeError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+/** Generates a short hex reference code for correlating error logs with user-facing messages. */
+export function generateErrorRef(): string {
+  return crypto.randomBytes(ERROR_REF_BYTES).toString('hex');
+}
+
+/** Returns a JSON error response with the standard `{ error: { code, message } }` shape. */
+export function jsonError(
+  res: VercelResponse,
+  status: number,
+  code: string,
+  message: string
+): VercelResponse {
+  return res.status(status).json({ error: { code, message } });
+}
+
+/** Returns a 400 Bad Request JSON error response. */
+export function badRequest(res: VercelResponse, code: string, message: string): VercelResponse {
+  return jsonError(res, HTTP_STATUS.BAD_REQUEST, code, message);
+}
+
+/** Returns a 404 Not Found JSON error response. */
+export function notFound(res: VercelResponse, code: string, message: string): VercelResponse {
+  return jsonError(res, HTTP_STATUS.NOT_FOUND, code, message);
+}
 
 function formatAllowed(methods: string[]): string {
   if (methods.length === 1) return methods[0];
@@ -51,9 +81,7 @@ export function invalidPathError(
   identifier: string
 ): VercelResponse {
   log.warn('Path traversal detected', { requestId, identifier });
-  return res.status(HTTP_STATUS.BAD_REQUEST).json({
-    error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
-  });
+  return badRequest(res, 'INVALID_PATH', 'Path traversal is not allowed');
 }
 
 /** Returns a structured JSON error response with logging, request tracing, and a configurable status code (defaults to 502). */
@@ -70,13 +98,12 @@ export function serverError(
   }
 ): VercelResponse {
   const requestId = opts.requestId || crypto.randomUUID();
-  const errorMessage = opts.error instanceof Error ? opts.error.message : String(opts.error);
-  const errorType = opts.error instanceof Error ? opts.error.name : typeof opts.error;
+  const normalized = normalizeError(opts.error);
   log.error(opts.operation, {
     requestId,
-    errorType,
-    error: errorMessage,
-    stack: opts.error instanceof Error ? opts.error.stack : undefined,
+    errorType: normalized.name,
+    error: normalized.message,
+    stack: normalized.stack,
     ...opts.context,
   });
   return res.status(opts.status ?? HTTP_STATUS.BAD_GATEWAY).json({

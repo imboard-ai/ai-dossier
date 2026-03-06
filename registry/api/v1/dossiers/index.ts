@@ -7,8 +7,10 @@ import * as github from '../../../lib/github';
 import createLogger from '../../../lib/logger';
 import { fetchManifestDossiers, normalizeDossier } from '../../../lib/manifest';
 import {
+  badRequest,
   getRequestId,
   invalidPathError,
+  jsonError,
   methodNotAllowed,
   serverError,
 } from '../../../lib/responses';
@@ -63,63 +65,48 @@ async function handleList(_req: VercelRequest, res: VercelResponse, requestId: s
 async function handlePublish(req: VercelRequest, res: VercelResponse, requestId: string) {
   const contentType = req.headers['content-type'];
   if (!contentType || !contentType.includes('application/json')) {
-    return res.status(HTTP_STATUS.UNSUPPORTED_MEDIA_TYPE).json({
-      error: {
-        code: 'UNSUPPORTED_MEDIA_TYPE',
-        message: `Content-Type must be application/json, received: ${contentType || '(none)'}`,
-      },
-    });
+    return jsonError(
+      res,
+      HTTP_STATUS.UNSUPPORTED_MEDIA_TYPE,
+      'UNSUPPORTED_MEDIA_TYPE',
+      `Content-Type must be application/json, received: ${contentType || '(none)'}`
+    );
   }
 
   const { namespace, content, changelog } = req.body || {};
 
   if (!namespace || typeof namespace !== 'string') {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: {
-        code: 'MISSING_FIELD',
-        message: 'Missing required field: namespace (must be a string)',
-      },
-    });
+    return badRequest(res, 'MISSING_FIELD', 'Missing required field: namespace (must be a string)');
   }
 
   if (!content || typeof content !== 'string') {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: {
-        code: 'MISSING_FIELD',
-        message: 'Missing required field: content (must be a string)',
-      },
-    });
+    return badRequest(res, 'MISSING_FIELD', 'Missing required field: content (must be a string)');
   }
 
   if (changelog !== undefined && typeof changelog !== 'string') {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: { code: 'INVALID_FIELD', message: 'Field changelog must be a string' },
-    });
+    return badRequest(res, 'INVALID_FIELD', 'Field changelog must be a string');
   }
 
   if (typeof changelog === 'string' && changelog.length > MAX_CHANGELOG_LENGTH) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: {
-        code: 'CHANGELOG_TOO_LONG',
-        message: `Changelog exceeds maximum length of ${MAX_CHANGELOG_LENGTH} characters`,
-      },
-    });
+    return badRequest(
+      res,
+      'CHANGELOG_TOO_LONG',
+      `Changelog exceeds maximum length of ${MAX_CHANGELOG_LENGTH} characters`
+    );
   }
 
   if (content.length > MAX_CONTENT_SIZE) {
-    return res.status(HTTP_STATUS.CONTENT_TOO_LARGE).json({
-      error: {
-        code: 'CONTENT_TOO_LARGE',
-        message: `Content exceeds maximum size of ${MAX_CONTENT_SIZE / 1024}KB`,
-      },
-    });
+    return jsonError(
+      res,
+      HTTP_STATUS.CONTENT_TOO_LARGE,
+      'CONTENT_TOO_LARGE',
+      `Content exceeds maximum size of ${MAX_CONTENT_SIZE / 1024}KB`
+    );
   }
 
   const namespaceValidation = dossier.validateNamespace(namespace);
   if (!namespaceValidation.valid) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: { code: 'INVALID_NAMESPACE', message: namespaceValidation.error },
-    });
+    return badRequest(res, 'INVALID_NAMESPACE', namespaceValidation.error);
   }
 
   const authorized = await authorizePublish(req, res, namespace);
@@ -129,16 +116,12 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
   try {
     parsed = dossier.parseFrontmatter(content);
   } catch (err) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: { code: 'INVALID_CONTENT', message: err instanceof Error ? err.message : String(err) },
-    });
+    return badRequest(res, 'INVALID_CONTENT', err instanceof Error ? err.message : String(err));
   }
 
   const validation = dossier.validateDossier(parsed.frontmatter);
   if (!validation.valid) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: { code: 'INVALID_CONTENT', message: validation.errors.join('; ') },
-    });
+    return badRequest(res, 'INVALID_CONTENT', validation.errors.join('; '));
   }
 
   const fullPath = dossier.buildFullName(namespace, parsed.frontmatter.name as string);
