@@ -48,6 +48,10 @@ export interface Manifest {
   sha: string | null;
 }
 
+export type AuthResult =
+  | { ok: true; payload: JwtPayload }
+  | { ok: false; status: number; error: { code: string; message: string } };
+
 export interface DeleteResult {
   found: boolean;
   version?: string | null;

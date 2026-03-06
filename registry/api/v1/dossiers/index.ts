@@ -69,29 +69,11 @@ async function handleList(_req: VercelRequest, res: VercelResponse) {
 }
 
 async function handlePublish(req: VercelRequest, res: VercelResponse) {
-  const token = auth.extractBearerToken(req);
-  if (!token) {
-    return res.status(401).json({
-      error: {
-        code: 'MISSING_TOKEN',
-        message: 'Authorization header required. Use: Bearer <token>',
-      },
-    });
+  const authResult = auth.authenticateRequest(req);
+  if (!authResult.ok) {
+    return res.status(authResult.status).json({ error: authResult.error });
   }
-
-  let jwtPayload: import('../../../lib/types').JwtPayload;
-  try {
-    jwtPayload = auth.verifyJwt(token);
-  } catch (err) {
-    if (err instanceof Error && err.name === 'TokenExpiredError') {
-      return res.status(401).json({
-        error: { code: 'TOKEN_EXPIRED', message: 'Token has expired. Please login again.' },
-      });
-    }
-    return res.status(401).json({
-      error: { code: 'INVALID_TOKEN', message: 'Invalid token. Please login again.' },
-    });
-  }
+  const jwtPayload = authResult.payload;
 
   const { namespace, content, changelog } = req.body || {};
 
