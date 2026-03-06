@@ -76,12 +76,13 @@ Functions implemented:
 - [x] Create OAuth callback handler
 
 Flow:
-1. Receive `?code=xxx` from GitHub redirect
-2. Handle errors from GitHub (`?error=...`)
-3. Exchange code for GitHub access token (POST to GitHub)
-4. Fetch user info + org memberships (parallel requests)
-5. Create JWT: `{ sub: username, email, orgs, iat, exp }`
-6. Display HTML page with:
+1. Receive `?code=xxx&state=xxx` from GitHub redirect
+2. Validate `state` parameter against the value stored in an HttpOnly cookie (CSRF protection)
+3. Handle errors from GitHub (`?error=...`)
+4. Exchange code for GitHub access token (POST to GitHub)
+5. Fetch user info + org memberships (parallel requests)
+6. Create JWT: `{ sub: username, email, orgs, iat, exp }`
+7. Display HTML page with:
    - Organizations list (with badges)
    - "Missing an org?" link to grant access
    - Base64-encoded JWT for copy/paste

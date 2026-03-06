@@ -440,11 +440,11 @@ dossier search "aws deploy" --category devops --signed
 {
   "access_token": "eyJ...",
   "token_type": "Bearer",
-  "expires_in": 3600,
-  "refresh_token": "...",
-  "scope": ["read", "write"]
+  "expires_in": 604800
 }
 ```
+
+> **Note:** The current implementation issues a single JWT with a 7-day expiry. There is no separate refresh token. The `scope` field is not used.
 
 ---
 
@@ -540,22 +540,15 @@ Override via `CORS_ALLOWED_ORIGINS` env var (comma-separated).
 
 ---
 
-## Token Refresh Flow
+## Token Lifetime
 
-```http
-POST /auth/token
-Content-Type: application/json
+The current implementation uses a single JWT with a **7-day expiry** (`JWT_EXPIRY_SECONDS = 604800`). There is no refresh token flow — users re-authenticate via OAuth when the token expires.
 
-{
-  "grant_type": "refresh_token",
-  "refresh_token": "dGhpcyBpcyBhIHJlZnJlc2g..."
-}
-```
+> **Note:** The `POST /auth/token` refresh endpoint and separate access/refresh token lifetimes described in the original Prod0 design have not been implemented. The MVP1 implementation chose a simpler single-JWT approach.
 
 **Token Lifetimes:**
-- Access token: 1 hour
-- Refresh token: 30 days
-- API key: configurable (default: 1 year)
+- JWT: 7 days
+- API key: configurable (default: 1 year) — planned for Prod0
 
 ---
 
