@@ -84,6 +84,16 @@ export function invalidPathError(
   return badRequest(res, 'INVALID_PATH', 'Path traversal is not allowed');
 }
 
+/** Returns a 400 response for invalid namespace values, with a warning log. */
+export function invalidNamespaceError(
+  res: VercelResponse,
+  requestId: string,
+  message: string
+): VercelResponse {
+  log.warn('Invalid namespace', { requestId, detail: message });
+  return badRequest(res, 'INVALID_NAMESPACE', message);
+}
+
 /** Returns a structured JSON error response with logging, request tracing, and a configurable status code (defaults to 502). */
 export function serverError(
   res: VercelResponse,

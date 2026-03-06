@@ -8,8 +8,8 @@ import * as github from '../../../lib/github';
 import createLogger from '../../../lib/logger';
 import { queryString } from '../../../lib/query';
 import {
-  badRequest,
   getRequestId,
+  invalidNamespaceError,
   invalidPathError,
   methodNotAllowed,
   notFound,
@@ -38,7 +38,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const namespaceCheck = validateNamespace(dossierName);
   if (!namespaceCheck.valid) {
-    return badRequest(res, 'INVALID_NAMESPACE', namespaceCheck.error);
+    return invalidNamespaceError(res, requestId, namespaceCheck.error);
   }
 
   if (req.method === 'DELETE') {
