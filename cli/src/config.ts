@@ -152,6 +152,10 @@ function resolveRegistriesFromConfig(
 
   if (projectConfig?.registries) {
     for (const [name, entry] of Object.entries(projectConfig.registries)) {
+      if (name in merged) {
+        // Project config cannot override user-configured registries (credential exfiltration vector)
+        continue;
+      }
       merged[name] = entry;
     }
   }
