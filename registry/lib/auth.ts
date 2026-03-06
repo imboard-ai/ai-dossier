@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import config from './config';
-import type { JwtPayload, VercelRequest } from './types';
+import type { JwtPayload, VercelRequest, VercelResponse } from './types';
 
 export function signJwt(payload: Omit<JwtPayload, 'iat' | 'exp'>): string {
   return jwt.sign(payload, config.auth.jwt.secret, {
@@ -12,6 +12,34 @@ export function verifyJwt(token: string): JwtPayload {
   return jwt.verify(token, config.auth.jwt.secret, {
     algorithms: ['HS256'],
   }) as JwtPayload;
+}
+
+export function requireAuth(req: VercelRequest, res: VercelResponse): JwtPayload | null {
+  const token = extractBearerToken(req);
+  if (!token) {
+    res.status(401).json({
+      error: {
+        code: 'MISSING_TOKEN',
+        message: 'Authorization header required. Use: Bearer <token>',
+      },
+    });
+    return null;
+  }
+
+  try {
+    return verifyJwt(token);
+  } catch (err) {
+    if (err instanceof Error && err.name === 'TokenExpiredError') {
+      res.status(401).json({
+        error: { code: 'TOKEN_EXPIRED', message: 'Token has expired. Please login again.' },
+      });
+      return null;
+    }
+    res.status(401).json({
+      error: { code: 'INVALID_TOKEN', message: 'Invalid token. Please login again.' },
+    });
+    return null;
+  }
 }
 
 export function extractBearerToken(req: VercelRequest): string | null {
