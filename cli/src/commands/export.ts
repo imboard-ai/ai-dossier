@@ -48,11 +48,19 @@ export function registerExportCommand(program: Command): void {
       const outputPath = options.output || `${dossierName.replace(/\//g, '-')}.ds.md`;
       const outputDir = path.dirname(path.resolve(outputPath));
 
-      if (!fs.existsSync(outputDir)) {
-        fs.mkdirSync(outputDir, { recursive: true });
-      }
+      try {
+        if (!fs.existsSync(outputDir)) {
+          fs.mkdirSync(outputDir, { recursive: true });
+        }
 
-      fs.writeFileSync(path.resolve(outputPath), content, 'utf8');
+        fs.writeFileSync(path.resolve(outputPath), content, 'utf8');
+      } catch (writeErr: unknown) {
+        console.error(
+          `\n❌ Failed to write file '${path.resolve(outputPath)}': ${(writeErr as Error).message}\n`
+        );
+        process.exit(1);
+        return;
+      }
 
       console.log(`\n✅ Exported: ${outputPath}`);
       console.log(`   Source: ${dossierName}${version ? `@${version}` : ''}`);

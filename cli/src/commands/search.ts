@@ -51,7 +51,12 @@ export function registerSearchCommand(program: Command): void {
 
           allDossiers = result.dossiers;
         } catch (err: unknown) {
-          console.error(`\n❌ Search failed: ${(err as Error).message}\n`);
+          const registryNames = resolveRegistries()
+            .map((r) => r.name)
+            .join(', ');
+          console.error(
+            `\n❌ Search failed across registries [${registryNames}]: ${(err as Error).message}\n`
+          );
           process.exit(1);
           return;
         }
@@ -103,8 +108,10 @@ export function registerSearchCommand(program: Command): void {
                       (end < content.length ? '...' : '');
                     contentMatches?.set(d.name, snippet);
                   }
-                } catch {
-                  // Skip dossiers that fail to fetch
+                } catch (fetchErr: unknown) {
+                  console.error(
+                    `⚠️  Failed to fetch content for '${d.name}' from '${d._registry}': ${(fetchErr as Error).message}`
+                  );
                 }
               })
             );

@@ -140,7 +140,7 @@ describe('search command', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('deploy-app'));
   });
 
-  it('should exit 1 on API error', async () => {
+  it('should exit 1 on API error with registry context', async () => {
     vi.mocked(multiRegistry.multiRegistryList).mockRejectedValue(new Error('Network error'));
 
     const program = createTestProgram();
@@ -148,6 +148,42 @@ describe('search command', () => {
 
     await expect(program.parseAsync(['node', 'dossier', 'search', 'test'])).rejects.toThrow();
 
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Search failed'));
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Search failed across registries [public]')
+    );
+  });
+
+  it('should log warning when content fetch fails for a dossier', async () => {
+    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+      dossiers: [
+        {
+          name: 'fail-dossier',
+          title: 'Fail',
+          description: 'will fail content fetch',
+          category: 'test',
+          tags: ['fail'],
+          version: '1.0.0',
+          _registry: 'public',
+        },
+      ] as any,
+      total: 1,
+      errors: [],
+    });
+
+    const mockClient = {
+      getDossierContent: vi.fn().mockRejectedValue(new Error('connection refused')),
+    };
+    vi.mocked(registryClient.getClientForRegistry).mockReturnValue(mockClient as any);
+
+    const program = createTestProgram();
+    registerSearchCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'search', 'fail', '--content'])
+    ).rejects.toThrow();
+
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining("Failed to fetch content for 'fail-dossier' from 'public'")
+    );
   });
 });
