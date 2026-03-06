@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
+import { printRegistryErrors } from '../helpers';
 import { multiRegistryGetContent } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
@@ -20,9 +21,7 @@ export function registerExportCommand(program: Command): void {
         const { result, errors } = await multiRegistryGetContent(dossierName, version || null);
         if (!result) {
           console.error(`\n❌ Not found: ${name}`);
-          for (const e of errors) {
-            console.error(`   ${e.registry}: ${e.error}`);
-          }
+          printRegistryErrors(errors);
           console.error('');
           process.exit(1);
           return;

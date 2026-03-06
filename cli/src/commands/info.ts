@@ -4,6 +4,7 @@ import path from 'node:path';
 import { parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { resolveRegistries } from '../config';
+import { printRegistryErrors } from '../helpers';
 import { multiRegistryGetDossier } from '../multi-registry';
 import type { DossierInfo } from '../registry-client';
 import { parseNameVersion } from '../registry-client';
@@ -44,9 +45,7 @@ export function registerInfoCommand(program: Command): void {
           if (!meta) {
             console.error(`\n❌ Not found: ${fileOrName}`);
             console.error('   Not a local file and not found in any registry');
-            for (const e of metaErrors) {
-              console.error(`   ${e.registry}: ${e.error}`);
-            }
+            printRegistryErrors(metaErrors);
             console.error('');
             process.exit(1);
           }

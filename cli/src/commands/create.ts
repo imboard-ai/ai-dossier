@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import * as config from '../config';
-import { detectLlm } from '../helpers';
+import { detectLlm, printRegistryErrors } from '../helpers';
 import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
@@ -92,9 +92,7 @@ export function registerCreateCommand(program: Command): void {
                 console.error(
                   '   Check the template name or use --template to specify a different one'
                 );
-                for (const e of contentErrors) {
-                  console.error(`   ${e.registry}: ${e.error}`);
-                }
+                printRegistryErrors(contentErrors);
                 console.error('');
                 process.exit(2);
               }

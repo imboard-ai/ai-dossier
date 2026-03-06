@@ -15,6 +15,7 @@ import {
   formatTable,
   parseDossierMetadataFromContent,
   parseListSource,
+  printRegistryErrors,
   RECOMMENDED_FIELDS,
   REQUIRED_FIELDS,
   VALID_RISK_LEVELS,
@@ -279,5 +280,44 @@ describe('findDossierFilesLocal', () => {
     });
 
     expect(findDossierFilesLocal('/no/access')).toEqual([]);
+  });
+});
+
+describe('printRegistryErrors', () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it('should print errors in indent style by default', () => {
+    const errors = [
+      { registry: 'main', error: 'Not found' },
+      { registry: 'backup', error: 'Timeout' },
+    ];
+
+    printRegistryErrors(errors);
+
+    expect(errorSpy).toHaveBeenCalledTimes(2);
+    expect(errorSpy).toHaveBeenCalledWith('   main: Not found');
+    expect(errorSpy).toHaveBeenCalledWith('   backup: Timeout');
+  });
+
+  it('should print errors in warning style', () => {
+    const errors = [{ registry: 'cdn', error: 'Connection refused' }];
+
+    printRegistryErrors(errors, 'warning');
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith("⚠️  Registry 'cdn': Connection refused");
+  });
+
+  it('should handle empty errors array', () => {
+    printRegistryErrors([]);
+    expect(errorSpy).not.toHaveBeenCalled();
   });
 });

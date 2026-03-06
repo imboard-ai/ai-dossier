@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 import { resolveRegistries } from '../config';
+import { printRegistryErrors } from '../helpers';
 import { multiRegistryGetDossier } from '../multi-registry';
 import type { DossierInfo } from '../registry-client';
 import { parseNameVersion } from '../registry-client';
@@ -20,9 +21,7 @@ export function registerGetCommand(program: Command): void {
         const { result, errors } = await multiRegistryGetDossier(dossierName, version || null);
         if (!result) {
           console.error(`\n❌ Not found in any registry: ${nameArg}`);
-          for (const e of errors) {
-            console.error(`   ${e.registry}: ${e.error}`);
-          }
+          printRegistryErrors(errors);
           console.error('');
           process.exit(1);
         }

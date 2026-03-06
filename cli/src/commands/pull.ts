@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { safeDossierPath } from '../helpers';
+import { printRegistryErrors, safeDossierPath } from '../helpers';
 import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
@@ -26,9 +26,7 @@ export function registerPullCommand(program: Command): void {
             const { result: meta, errors: metaErrors } = await multiRegistryGetDossier(dossierName);
             if (!meta) {
               console.error(`❌ ${nameArg}: not found in any registry`);
-              for (const e of metaErrors) {
-                console.error(`   ${e.registry}: ${e.error}`);
-              }
+              printRegistryErrors(metaErrors);
               continue;
             }
             version = meta.version || 'latest';
@@ -50,9 +48,7 @@ export function registerPullCommand(program: Command): void {
           );
           if (!result) {
             console.error(`❌ ${nameArg}: not found in any registry`);
-            for (const e of contentErrors) {
-              console.error(`   ${e.registry}: ${e.error}`);
-            }
+            printRegistryErrors(contentErrors);
             continue;
           }
           const content = result.content;

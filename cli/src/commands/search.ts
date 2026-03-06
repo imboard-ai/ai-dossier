@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 import { resolveRegistries } from '../config';
 import { loadCredentials } from '../credentials';
+import { printRegistryErrors } from '../helpers';
 import type { LabeledDossierListItem } from '../multi-registry';
 import { multiRegistryList } from '../multi-registry';
 import { getClientForRegistry } from '../registry-client';
@@ -44,9 +45,7 @@ export function registerSearchCommand(program: Command): void {
           });
 
           if (result.errors.length > 0) {
-            for (const e of result.errors) {
-              console.error(`⚠️  Registry '${e.registry}': ${e.error}`);
-            }
+            printRegistryErrors(result.errors, 'warning');
           }
 
           allDossiers = result.dossiers;

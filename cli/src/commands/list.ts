@@ -10,6 +10,7 @@ import {
   formatTable,
   parseDossierMetadataLocal,
   parseListSource,
+  printRegistryErrors,
 } from '../helpers';
 import { multiRegistryList } from '../multi-registry';
 
@@ -73,9 +74,7 @@ Multi-registry note:
             });
 
             if (result.errors.length > 0) {
-              for (const e of result.errors) {
-                console.error(`⚠️  Registry '${e.registry}': ${e.error}`);
-              }
+              printRegistryErrors(result.errors, 'warning');
               const totalRegistries = resolveRegistries().length;
               const failed = result.errors.length;
               console.error(

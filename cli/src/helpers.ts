@@ -587,3 +587,20 @@ export function formatTable(dossiers: DossierMetadata[], showPath = false): stri
 
   return output;
 }
+
+/**
+ * Print registry errors to stderr in a consistent format.
+ * Used across commands when multi-registry lookups partially or fully fail.
+ */
+export function printRegistryErrors(
+  errors: ReadonlyArray<{ registry: string; error: string }>,
+  style: 'indent' | 'warning' = 'indent'
+): void {
+  for (const e of errors) {
+    if (style === 'warning') {
+      console.error(`⚠️  Registry '${e.registry}': ${e.error}`);
+    } else {
+      console.error(`   ${e.registry}: ${e.error}`);
+    }
+  }
+}

@@ -9,6 +9,7 @@ import {
   buildLlmCommand,
   detectLlm,
   downloadUrlToTempFile,
+  printRegistryErrors,
   runVerification,
   safeDossierPath,
 } from '../helpers';
@@ -92,9 +93,7 @@ export function registerRunCommand(program: Command): void {
                 if (!meta) {
                   console.error(`\n❌ Not found: ${file}`);
                   console.error('   Not a local file and not found in any registry');
-                  for (const e of metaErrors) {
-                    console.error(`   ${e.registry}: ${e.error}`);
-                  }
+                  printRegistryErrors(metaErrors);
                   console.error('');
                   process.exit(1);
                 }
@@ -107,9 +106,7 @@ export function registerRunCommand(program: Command): void {
               if (!result) {
                 console.error(`\n❌ Not found: ${file}`);
                 console.error('   Not a local file and not found in any registry');
-                for (const e of contentErrors) {
-                  console.error(`   ${e.registry}: ${e.error}`);
-                }
+                printRegistryErrors(contentErrors);
                 console.error('');
                 process.exit(1);
               }

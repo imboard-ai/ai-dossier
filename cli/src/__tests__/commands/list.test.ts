@@ -108,8 +108,9 @@ describe('list command', () => {
         program.parseAsync(['node', 'dossier', 'list', '--source', 'registry'])
       ).rejects.toThrow();
 
-      expect(console.error).toHaveBeenCalledWith(
-        expect.stringContaining("Registry 'private': connection refused")
+      expect(helpers.printRegistryErrors).toHaveBeenCalledWith(
+        [{ registry: 'private', error: 'connection refused' }],
+        'warning'
       );
       expect(console.error).toHaveBeenCalledWith(
         expect.stringContaining('Showing partial results (1/2 registries responded)')
