@@ -1,4 +1,4 @@
-import type { LintRule } from '../types';
+import type { LintDiagnostic, LintRule } from '../types';
 
 export const riskLevelConsistencyRule: LintRule = {
   id: 'risk-level-consistency',
@@ -8,7 +8,7 @@ export const riskLevelConsistencyRule: LintRule = {
   run(context) {
     const { risk_level, destructive_operations, external_references, risk_factors } =
       context.frontmatter;
-    const diagnostics = [];
+    const diagnostics: LintDiagnostic[] = [];
 
     if (
       risk_level === 'low' &&
@@ -17,7 +17,7 @@ export const riskLevelConsistencyRule: LintRule = {
     ) {
       diagnostics.push({
         ruleId: 'risk-level-consistency',
-        severity: 'warning' as const,
+        severity: 'warning',
         message: `risk_level is "low" but ${destructive_operations.length} destructive operation(s) declared — consider "medium" or higher`,
         field: 'risk_level',
       });
@@ -27,7 +27,7 @@ export const riskLevelConsistencyRule: LintRule = {
       if (!Array.isArray(risk_factors) || !risk_factors.includes('network_access')) {
         diagnostics.push({
           ruleId: 'risk-level-consistency',
-          severity: 'warning' as const,
+          severity: 'warning',
           message:
             'external_references declared but risk_factors does not include "network_access"',
           field: 'risk_factors',

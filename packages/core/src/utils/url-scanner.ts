@@ -1,6 +1,13 @@
 import type { DossierFrontmatter, ExternalReference } from '../types';
 
+// Matches http/https URLs, stopping at whitespace and common delimiters
+// that typically surround URLs in markdown/text (quotes, angle brackets,
+// parentheses, commas, semicolons, backticks).
 const URL_REGEX = /https?:\/\/[^\s"'<>\])|,;`]+/g;
+
+// Strip trailing periods and closing parens that are often part of
+// surrounding prose rather than the URL itself (e.g. "see https://x.com).")
+const TRAILING_PUNCTUATION = /[.)]+$/;
 
 const PLACEHOLDER_PATTERNS = [
   /^https?:\/\/example\.(com|org|net)/,
@@ -19,7 +26,7 @@ export function isPlaceholderUrl(url: string): boolean {
 
 export function scanBodyForUrls(body: string): string[] {
   const matches = body.match(URL_REGEX) || [];
-  const cleaned = matches.map((url) => url.replace(/[.)]+$/, ''));
+  const cleaned = matches.map((url) => url.replace(TRAILING_PUNCTUATION, ''));
   const unique = [...new Set(cleaned)];
   return unique.filter((url) => !isPlaceholderUrl(url));
 }
@@ -42,11 +49,11 @@ export function collectDeclaredUrls(frontmatter: DossierFrontmatter): string[] {
   }
 
   if (typeof frontmatter.homepage === 'string') {
-    urls.push(frontmatter.homepage as string);
+    urls.push(frontmatter.homepage);
   }
 
   if (typeof frontmatter.repository === 'string') {
-    urls.push(frontmatter.repository as string);
+    urls.push(frontmatter.repository);
   }
 
   if (Array.isArray(frontmatter.authors)) {
