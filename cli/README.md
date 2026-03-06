@@ -350,12 +350,14 @@ When resolving registries, the CLI follows this priority:
 
 ### Per-Command Registry Flag
 
-Most registry commands accept `--registry <name>` to target a specific registry:
+Write commands accept `--registry <name>` to target a specific registry:
 
 ```bash
-ai-dossier search --registry internal "deploy"
 ai-dossier publish --registry team my-dossier.ds.md
+ai-dossier login --registry internal
 ```
+
+Read commands (`search`, `get`, `pull`) query all configured registries in parallel.
 
 ---
 
