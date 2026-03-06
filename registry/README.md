@@ -27,6 +27,7 @@ This package (`@ai-dossier/registry`) is an npm workspace within the [ai-dossier
 | DELETE | `/api/v1/dossiers/{name}` | Yes | Delete a dossier |
 | GET | `/api/v1/me` | Yes | Current user info |
 | GET | `/auth/login` | No | Start GitHub OAuth flow |
+| GET | `/auth/callback` | No | GitHub OAuth callback (returns JWT) |
 
 **Production**: https://dossier-registry.vercel.app
 
@@ -51,8 +52,10 @@ registry/
 │   ├── auth/         # OAuth login + callback
 │   └── v1/           # Versioned API endpoints
 ├── lib/              # Shared utilities (auth, config, CORS, GitHub client)
+├── scripts/          # Helper scripts (auth, publish, delete)
 ├── tests/            # Vitest test files
 ├── docs/             # Planning and design documents
+├── package.json
 ├── vercel.json       # Vercel routing config
 └── tsconfig.json
 ```

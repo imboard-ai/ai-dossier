@@ -89,7 +89,7 @@ See [security/ARCHITECTURE.md](security/ARCHITECTURE.md) for details.
 ## Technology Stack
 
 - **Language**: TypeScript/JavaScript
-- **Runtime**: Node.js ≥ 18
+- **Runtime**: Node.js ≥ 20
 - **Cryptography**:
   - SHA-256 for checksums
   - Ed25519 (Minisign) for signatures
