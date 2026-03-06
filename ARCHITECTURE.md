@@ -40,6 +40,15 @@ Model Context Protocol integration for AI agents like Claude Code.
 ### Registry (`@ai-dossier/registry`)
 Vercel serverless API for discovering, publishing, and managing dossiers. Uses GitHub OAuth + JWT for authentication and jsDelivr CDN for content delivery.
 
+### Multi-Registry Resolution (CLI)
+The CLI supports multiple configured registries and queries them in parallel using `Promise.allSettled()`. All multi-registry functions (`multiRegistryGetDossier`, `multiRegistryGetContent`, `multiRegistryList`, `multiRegistrySearch`) return structured results that include both the data and per-registry error details:
+
+```typescript
+{ result: T | null, errors: Array<{ registry: string; error: string }> }
+```
+
+This allows partial failures to be surfaced without blocking successful results from other registries. See `docs/architecture/overview.md` for architectural details and `cli/src/multi-registry.ts` for implementation.
+
 ## File Format
 
 Dossiers are Markdown files with JSON frontmatter using the `---dossier` delimiter:
