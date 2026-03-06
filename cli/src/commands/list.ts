@@ -16,7 +16,9 @@ import { multiRegistryList } from '../multi-registry';
 export function registerListCommand(program: Command): void {
   program
     .command('list')
-    .description('List available dossiers from registry, directory, or repository')
+    .description(
+      'List available dossiers from registry, directory, or repository. With --source registry, queries all configured registries in parallel.'
+    )
     .argument('[source]', 'Directory, GitHub repo (github:owner/repo), or URL', '.')
     .option('-r, --recursive', 'Search subdirectories recursively (default for remote)')
     .option('--signed-only', 'Only show signed dossiers')
@@ -28,6 +30,16 @@ export function registerListCommand(program: Command): void {
     .option('--source <type>', 'Source type: registry, local, github')
     .option('--page <number>', 'Page number (registry only)', '1')
     .option('--per-page <number>', 'Results per page (registry only)', '20')
+    .addHelpText(
+      'after',
+      `
+Multi-registry note:
+  When multiple registries are configured, --page and --per-page apply to each
+  registry independently. For consistent results across registries, use
+  --per-page with a value large enough to capture all dossiers per registry,
+  or use 'search' for filtered queries.
+`
+    )
     .action(
       async (
         source: string,

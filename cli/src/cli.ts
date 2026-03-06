@@ -116,12 +116,31 @@ if (process.argv.includes('--agent')) {
       skip_prompts: '-y / --yes',
       non_tty_safe: true,
       machine_errors: true,
+      multi_registry: true,
+    },
+    registry: {
+      description:
+        'Supports multiple registries queried in parallel. Configure via config command, .dossierrc.json, or DOSSIER_REGISTRY_URL env var.',
+      commands: {
+        configure: 'ai-dossier config --add-registry <name> --url <url>',
+        list_registries: 'ai-dossier config --list-registries --json',
+        set_default: 'ai-dossier config --set-default-registry <name>',
+      },
+      env_vars: [
+        'DOSSIER_REGISTRY_URL',
+        'DOSSIER_REGISTRY_TOKEN',
+        'DOSSIER_REGISTRY_USER',
+        'DOSSIER_REGISTRY_ORGS',
+      ],
+      project_config: '.dossierrc.json',
     },
     quick_start: [
       'ai-dossier commands                    # discover all commands and flags',
       'ai-dossier whoami --json               # check auth status',
       'ai-dossier search <query> --json       # find dossiers',
       'ai-dossier list --json --source registry  # list all registry dossiers',
+      'ai-dossier config --list-registries --json  # list configured registries',
+      'ai-dossier config --add-registry internal --url https://dossier.company.com  # add registry',
     ],
   };
   console.log(JSON.stringify(manifest, null, 2));
