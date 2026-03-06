@@ -28,11 +28,13 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
     console.log(`[auth/login] Redirecting to GitHub OAuth`);
     res.redirect(`https://github.com/login/oauth/authorize?${params}`);
   } catch (err) {
-    console.error('[auth/login] Failed to initiate login redirect:', err);
+    const errorRef = crypto.randomBytes(4).toString('hex');
+    console.error(`[auth/login] Failed to initiate login redirect (ref=${errorRef}):`, err);
     return res.status(500).json({
       error: {
         code: 'LOGIN_ERROR',
         message: 'Failed to initiate login. Please try again.',
+        ref: errorRef,
       },
     });
   }

@@ -92,13 +92,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(200).send(renderSuccessPage(user.login, orgs, displayCode, clientId));
   } catch (err) {
     const error = err instanceof Error ? err : new Error(String(err));
-    console.error('[auth/callback] OAuth callback failed:', error.message, error.stack);
+    const errorRef = crypto.randomBytes(4).toString('hex');
+    console.error(
+      `[auth/callback] OAuth callback failed (ref=${errorRef}):`,
+      error.message,
+      error.stack
+    );
     return res
       .status(500)
       .send(
         renderErrorPage(
           'Authentication Error',
-          'Failed to complete authentication. Please try again.'
+          'Failed to complete authentication. Please try again.',
+          errorRef
         )
       );
   }
@@ -234,7 +240,9 @@ function renderSuccessPage(
 </html>`;
 }
 
-function renderErrorPage(title: string, message: string): string {
+function renderErrorPage(title: string, message: string, errorRef?: string): string {
+  const refHtml = errorRef ? `<p class="error-ref">Reference: ${escapeHtml(errorRef)}</p>` : '';
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -264,6 +272,7 @@ function renderErrorPage(title: string, message: string): string {
     h1 { color: #dc3545; margin-bottom: 16px; font-size: 24px; }
     .message { color: #666; line-height: 1.6; }
     .error-icon { font-size: 48px; margin-bottom: 16px; }
+    .error-ref { color: #999; font-size: 12px; margin-top: 16px; font-family: monospace; }
   </style>
 </head>
 <body>
@@ -271,6 +280,7 @@ function renderErrorPage(title: string, message: string): string {
     <div class="error-icon">&#10060;</div>
     <h1>${escapeHtml(title)}</h1>
     <p class="message">${escapeHtml(message)}</p>
+    ${refHtml}
   </div>
 </body>
 </html>`;
