@@ -18,7 +18,9 @@ import { parseNameVersion } from '../registry-client';
 export function registerRunCommand(program: Command): void {
   program
     .command('run')
-    .description('Verify, audit, and execute dossier')
+    .description(
+      'Verify, audit, and execute dossier. Registry names are resolved across all configured registries.'
+    )
     .argument('<file>', 'Dossier file, URL, or registry name to run')
     .option('--llm <name>', 'LLM to use (claude-code, auto)')
     .option('--headless', 'Run in headless mode (non-interactive, for CI/CD)')

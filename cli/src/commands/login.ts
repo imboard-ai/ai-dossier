@@ -6,8 +6,18 @@ import { runOAuthFlow } from '../oauth';
 export function registerLoginCommand(program: Command): void {
   program
     .command('login')
-    .description('Authenticate with the dossier registry via GitHub')
+    .description(
+      'Authenticate with the dossier registry via GitHub. Use --registry to target a specific registry.'
+    )
     .option('--registry <name>', 'Registry to authenticate with')
+    .addHelpText(
+      'after',
+      `
+For non-interactive environments (CI/CD), use environment variables instead:
+  DOSSIER_REGISTRY_TOKEN  Auth token for registry access
+  DOSSIER_REGISTRY_URL    Registry URL (creates virtual "env" registry)
+`
+    )
     .action(async (options: { registry?: string }) => {
       if (!process.stdin.isTTY) {
         console.error('\n❌ Non-interactive session detected. Cannot run OAuth flow.');

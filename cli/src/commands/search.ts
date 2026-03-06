@@ -8,7 +8,7 @@ import { getClientForRegistry } from '../registry-client';
 export function registerSearchCommand(program: Command): void {
   program
     .command('search')
-    .description('Search the registry for dossiers')
+    .description('Search for dossiers across all configured registries')
     .argument('<query>', 'Search keywords')
     .option(
       '--category <category>',
