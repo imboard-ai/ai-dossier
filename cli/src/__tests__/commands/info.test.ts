@@ -4,7 +4,7 @@ import { registerInfoCommand } from '../../commands/info';
 import * as config from '../../config';
 import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
-import { createTestProgram } from '../helpers/test-utils';
+import { createTestProgram, parseNameVersionImpl } from '../helpers/test-utils';
 
 vi.mock('node:fs');
 vi.mock('../../multi-registry');
@@ -18,13 +18,7 @@ describe('info command', () => {
     vi.mocked(config.resolveRegistries).mockReturnValue([
       { name: 'public', url: 'https://test.registry.com' },
     ]);
-    vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
-      if (name.includes('@')) {
-        const idx = name.lastIndexOf('@');
-        return [name.slice(0, idx), name.slice(idx + 1)];
-      }
-      return [name, null];
-    });
+    vi.mocked(registryClient.parseNameVersion).mockImplementation(parseNameVersionImpl);
   });
 
   it('should display info for local file with JSON frontmatter', async () => {

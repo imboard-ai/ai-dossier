@@ -6,7 +6,7 @@ import * as config from '../../config';
 import * as helpers from '../../helpers';
 import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
-import { createTestProgram } from '../helpers/test-utils';
+import { createTestProgram, parseNameVersionImpl } from '../helpers/test-utils';
 
 vi.mock('node:fs');
 vi.mock('node:child_process');
@@ -20,13 +20,7 @@ const mockedFs = vi.mocked(fs);
 describe('run command', () => {
   beforeEach(() => {
     vi.mocked(spawnSync).mockReset();
-    vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
-      if (name.includes('@')) {
-        const idx = name.lastIndexOf('@');
-        return [name.slice(0, idx), name.slice(idx + 1)];
-      }
-      return [name, null];
-    });
+    vi.mocked(registryClient.parseNameVersion).mockImplementation(parseNameVersionImpl);
     vi.mocked(helpers.runVerification).mockResolvedValue({ passed: true, checks: [] });
     vi.mocked(helpers.detectLlm).mockReturnValue('claude-code');
     vi.mocked(helpers.buildLlmCommand).mockReturnValue({

@@ -1,6 +1,7 @@
 /**
  * Shared test utilities and factories for CLI tests.
  */
+
 import { Command } from 'commander';
 
 /**
@@ -77,3 +78,15 @@ export async function runCommand(
   registerFn(program);
   await program.parseAsync(['node', 'dossier', ...args]);
 }
+
+/**
+ * Reusable parseNameVersion mock implementation.
+ * Mirrors the real implementation — use with vi.mocked().
+ */
+export const parseNameVersionImpl = (name: string): [string, string | null] => {
+  if (name.includes('@')) {
+    const idx = name.lastIndexOf('@');
+    return [name.slice(0, idx), name.slice(idx + 1)];
+  }
+  return [name, null];
+};

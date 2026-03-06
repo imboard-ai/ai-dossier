@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerInstallSkillCommand } from '../../commands/install-skill';
 import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
-import { createTestProgram } from '../helpers/test-utils';
+import { createTestProgram, parseNameVersionImpl } from '../helpers/test-utils';
 
 vi.mock('node:fs');
 vi.mock('../../multi-registry');
@@ -13,13 +13,7 @@ const mockedFs = vi.mocked(fs);
 
 describe('install-skill command', () => {
   beforeEach(() => {
-    vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
-      if (name.includes('@')) {
-        const idx = name.lastIndexOf('@');
-        return [name.slice(0, idx), name.slice(idx + 1)];
-      }
-      return [name, null];
-    });
+    vi.mocked(registryClient.parseNameVersion).mockImplementation(parseNameVersionImpl);
   });
 
   it('should list installed skills with --list', async () => {

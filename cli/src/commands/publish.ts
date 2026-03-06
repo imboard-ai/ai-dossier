@@ -8,9 +8,8 @@ import {
   validateFrontmatter,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
-import { resolveWriteRegistry } from '../config';
-import { isExpired, loadCredentials } from '../credentials';
 import { getClientForRegistry } from '../registry-client';
+import { handleRegistryWriteError, requireWriteAuth } from '../write-auth';
 
 export function registerPublishCommand(program: Command): void {
   program
@@ -33,45 +32,11 @@ export function registerPublishCommand(program: Command): void {
           json?: boolean;
         }
       ) => {
-        let targetRegistry: import('../config').ResolvedRegistry;
-        try {
-          targetRegistry = resolveWriteRegistry(options.registry);
-        } catch (err: unknown) {
-          console.error(`\n❌ ${(err as Error).message}\n`);
-          process.exit(1);
-        }
-
-        const credentials = loadCredentials(targetRegistry.name);
-        if (!credentials) {
-          if (options.json) {
-            console.log(
-              JSON.stringify(
-                { published: false, error: 'Not logged in', code: 'not_logged_in' },
-                null,
-                2
-              )
-            );
-          } else {
-            console.error(
-              `\n❌ Not logged in to registry '${targetRegistry.name}'. Run \`dossier login --registry ${targetRegistry.name}\` first.\n`
-            );
-          }
-          process.exit(1);
-        }
-        if (isExpired(credentials)) {
-          if (options.json) {
-            console.log(
-              JSON.stringify(
-                { published: false, error: 'Credentials expired', code: 'expired' },
-                null,
-                2
-              )
-            );
-          } else {
-            console.error('\n❌ Credentials expired. Run `dossier login` to re-authenticate.\n');
-          }
-          process.exit(1);
-        }
+        const { targetRegistry, credentials } = requireWriteAuth({
+          registryFlag: options.registry,
+          json: options.json,
+          jsonResultKey: 'published',
+        });
 
         const dossierFile = path.resolve(file);
         if (!fs.existsSync(dossierFile)) {
@@ -241,36 +206,11 @@ export function registerPublishCommand(program: Command): void {
             );
           }
         } catch (err: unknown) {
-          const e = err as { statusCode?: number; message: string; code?: string };
-          if (options.json) {
-            console.log(
-              JSON.stringify(
-                {
-                  published: false,
-                  error: e.message,
-                  code: e.code || 'publish_failed',
-                },
-                null,
-                2
-              )
-            );
-          } else if (e.statusCode === 401) {
-            console.error('\n❌ Session expired. Run `dossier login` to re-authenticate.\n');
-          } else if (e.statusCode === 403) {
-            console.error(`\n❌ Permission denied: ${e.message}\n`);
-          } else if (e.statusCode === 409) {
-            console.error(`\n❌ Version conflict: ${registryPath} — ${e.message}\n`);
-          } else {
-            console.error(`\n❌ Publish failed: ${e.message}`);
-            if (e.statusCode) {
-              console.error(`   Status: ${e.statusCode}`);
-            }
-            if (e.code) {
-              console.error(`   Code: ${e.code}`);
-            }
-            console.error('');
-          }
-          process.exit(1);
+          handleRegistryWriteError(err, {
+            json: options.json,
+            jsonResultKey: 'published',
+            actionLabel: 'Publish',
+          });
         }
       }
     );

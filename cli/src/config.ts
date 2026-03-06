@@ -134,10 +134,13 @@ function loadProjectConfig(): DossierConfig | null {
  *   4. User-level ~/.dossier/config.json
  *   5. Hardcoded default (public registry)
  */
-function resolveRegistries(): ResolvedRegistry[] {
-  const userConfig = loadConfig();
-  const projectConfig = loadProjectConfig();
-
+/**
+ * Internal: resolve registries from pre-loaded configs (avoids redundant file reads).
+ */
+function resolveRegistriesFromConfig(
+  userConfig: DossierConfig,
+  projectConfig: DossierConfig | null
+): ResolvedRegistry[] {
   // Merge registries: project overlays user (project wins on name conflicts)
   const merged: Record<string, RegistryEntry> = {};
 
@@ -175,12 +178,18 @@ function resolveRegistries(): ResolvedRegistry[] {
   }));
 }
 
+function resolveRegistries(): ResolvedRegistry[] {
+  return resolveRegistriesFromConfig(loadConfig(), loadProjectConfig());
+}
+
 /**
  * Resolve which single registry to use for write operations.
  * Priority: --registry flag > defaultRegistry (project > user) > first registry
  */
 function resolveWriteRegistry(registryFlag?: string): ResolvedRegistry {
-  const registries = resolveRegistries();
+  const userConfig = loadConfig();
+  const projectConfig = loadProjectConfig();
+  const registries = resolveRegistriesFromConfig(userConfig, projectConfig);
 
   if (registryFlag) {
     const found = registries.find((r) => r.name === registryFlag);
@@ -194,9 +203,6 @@ function resolveWriteRegistry(registryFlag?: string): ResolvedRegistry {
     return found;
   }
 
-  // Check defaultRegistry in project config first, then user config
-  const projectConfig = loadProjectConfig();
-  const userConfig = loadConfig();
   const defaultName = projectConfig?.defaultRegistry || userConfig.defaultRegistry;
 
   if (defaultName) {

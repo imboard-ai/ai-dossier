@@ -1,12 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  DEFAULT_REGISTRY_URL,
-  getClient,
-  getRegistryUrl,
-  parseNameVersion,
-  RegistryClient,
-  RegistryError,
-} from '../registry-client';
+import { parseNameVersion, RegistryClient, RegistryError } from '../registry-client';
 
 describe('parseNameVersion', () => {
   it('should parse name without version', () => {
@@ -23,40 +16,6 @@ describe('parseNameVersion', () => {
 
   it('should use last @ for version split', () => {
     expect(parseNameVersion('name@with@signs@1.0')).toEqual(['name@with@signs', '1.0']);
-  });
-});
-
-describe('getRegistryUrl', () => {
-  const originalEnv = process.env.DOSSIER_REGISTRY_URL;
-
-  afterEach(() => {
-    if (originalEnv !== undefined) {
-      process.env.DOSSIER_REGISTRY_URL = originalEnv;
-    } else {
-      delete process.env.DOSSIER_REGISTRY_URL;
-    }
-  });
-
-  it('should return default URL when env is not set', () => {
-    delete process.env.DOSSIER_REGISTRY_URL;
-    expect(getRegistryUrl()).toBe(DEFAULT_REGISTRY_URL);
-  });
-
-  it('should return env URL when set', () => {
-    process.env.DOSSIER_REGISTRY_URL = 'https://custom.registry.com';
-    expect(getRegistryUrl()).toBe('https://custom.registry.com');
-  });
-});
-
-describe('getClient', () => {
-  it('should create a RegistryClient with default URL', () => {
-    const client = getClient();
-    expect(client).toBeInstanceOf(RegistryClient);
-  });
-
-  it('should create a RegistryClient with provided token', () => {
-    const client = getClient('my-token');
-    expect(client).toBeInstanceOf(RegistryClient);
   });
 });
 

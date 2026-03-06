@@ -3,8 +3,6 @@
  * Uses Node.js built-in fetch (Node 18+).
  */
 
-const DEFAULT_REGISTRY_URL = 'https://dossier-registry.vercel.app';
-
 class RegistryError extends Error {
   statusCode: number | null;
   code: string | null;
@@ -298,20 +296,6 @@ class RegistryClient {
 }
 
 /**
- * Get registry URL from environment or use default.
- */
-function getRegistryUrl(): string {
-  return process.env.DOSSIER_REGISTRY_URL || DEFAULT_REGISTRY_URL;
-}
-
-/**
- * Create a registry client from environment configuration.
- */
-function getClient(token: string | null = null): RegistryClient {
-  return new RegistryClient(getRegistryUrl(), token);
-}
-
-/**
  * Create a registry client for a specific resolved registry.
  */
 function getClientForRegistry(registryUrl: string, token: string | null = null): RegistryClient {
@@ -329,15 +313,7 @@ function parseNameVersion(name: string): [string, string | null] {
   return [name, null];
 }
 
-export {
-  RegistryClient,
-  RegistryError,
-  getRegistryUrl,
-  getClient,
-  getClientForRegistry,
-  parseNameVersion,
-  DEFAULT_REGISTRY_URL,
-};
+export { RegistryClient, RegistryError, getClientForRegistry, parseNameVersion };
 
 export type {
   DossierInfo,

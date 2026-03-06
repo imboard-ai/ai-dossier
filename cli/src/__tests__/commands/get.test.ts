@@ -3,7 +3,7 @@ import { registerGetCommand } from '../../commands/get';
 import * as config from '../../config';
 import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
-import { createTestProgram } from '../helpers/test-utils';
+import { createTestProgram, parseNameVersionImpl } from '../helpers/test-utils';
 
 vi.mock('../../multi-registry');
 vi.mock('../../registry-client');
@@ -11,13 +11,7 @@ vi.mock('../../config');
 
 describe('get command', () => {
   beforeEach(() => {
-    vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
-      if (name.includes('@')) {
-        const idx = name.lastIndexOf('@');
-        return [name.slice(0, idx), name.slice(idx + 1)];
-      }
-      return [name, null];
-    });
+    vi.mocked(registryClient.parseNameVersion).mockImplementation(parseNameVersionImpl);
     vi.mocked(config.resolveRegistries).mockReturnValue([
       { name: 'public', url: 'https://test.com' },
     ]);

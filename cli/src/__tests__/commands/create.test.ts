@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerCreateCommand } from '../../commands/create';
 import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
-import { createTestProgram } from '../helpers/test-utils';
+import { createTestProgram, parseNameVersionImpl } from '../helpers/test-utils';
 
 vi.mock('node:fs');
 vi.mock('node:child_process');
@@ -26,10 +26,7 @@ const { detectLlm } = await import('../../helpers');
 
 describe('create command', () => {
   beforeEach(() => {
-    vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
-      const parts = name.split('@');
-      return [parts[0], parts[1] || ''];
-    });
+    vi.mocked(registryClient.parseNameVersion).mockImplementation(parseNameVersionImpl);
   });
 
   it('should exit 2 when LLM not detected', async () => {
