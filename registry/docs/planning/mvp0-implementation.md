@@ -160,6 +160,47 @@ dossier-content/
 
 **Production API:** https://dossier-registry.vercel.app
 
+### Error Responses
+
+All error responses return JSON with a consistent structure:
+
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "Human-readable description"
+  }
+}
+```
+
+Server errors (5xx) also include a `request_id` field for log correlation.
+
+#### `GET /api/v1/dossiers` (List)
+
+| Status | Code | Cause |
+|--------|------|-------|
+| 502 | `UPSTREAM_ERROR` | Manifest fetch failed — CDN unreachable, network timeout, HTTP error from jsDelivr, or malformed JSON (missing `dossiers` array) |
+| 405 | `METHOD_NOT_ALLOWED` | Unsupported HTTP method |
+
+#### `GET /api/v1/dossiers/{name}` (Metadata)
+
+| Status | Code | Cause |
+|--------|------|-------|
+| 400 | `INVALID_NAMESPACE` | Dossier name fails validation (invalid characters, exceeds depth/length limits) |
+| 400 | `INVALID_PATH` | Path traversal detected (e.g., `../` segments) |
+| 404 | `DOSSIER_NOT_FOUND` | No dossier with that name exists in the manifest |
+| 404 | `VERSION_NOT_FOUND` | Requested `?version=` does not match the current version |
+| 502 | `UPSTREAM_ERROR` | GitHub API error when fetching manifest |
+| 405 | `METHOD_NOT_ALLOWED` | Unsupported HTTP method |
+
+#### `GET /api/v1/dossiers/{name}/content`
+
+Same errors as the metadata endpoint above, plus:
+
+| Status | Code | Cause |
+|--------|------|-------|
+| 404 | `CONTENT_NOT_FOUND` | Dossier exists in manifest but content file is missing from the content repo |
+
 ---
 
 ## 7. Lessons Learned

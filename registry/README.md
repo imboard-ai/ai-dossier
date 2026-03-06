@@ -31,6 +31,34 @@ This package (`@ai-dossier/registry`) is an npm workspace within the [ai-dossier
 
 **Production**: https://dossier-registry.vercel.app
 
+### Error Responses
+
+All endpoints return errors in a consistent JSON format:
+
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "Human-readable description"
+  }
+}
+```
+
+Common error codes:
+
+| Status | Code | Description |
+|--------|------|-------------|
+| 400 | `INVALID_NAMESPACE` | Dossier name fails validation (invalid characters, depth, or length) |
+| 400 | `INVALID_PATH` | Path traversal attempt detected |
+| 400 | `MISSING_FIELD` | Required field missing from request body |
+| 404 | `DOSSIER_NOT_FOUND` | Dossier does not exist in the manifest |
+| 404 | `VERSION_NOT_FOUND` | Requested version does not match current version |
+| 404 | `CONTENT_NOT_FOUND` | Dossier entry exists but content file is missing |
+| 405 | `METHOD_NOT_ALLOWED` | HTTP method not supported for this endpoint |
+| 502 | `UPSTREAM_ERROR` | CDN or GitHub API request failed (network error, timeout, malformed response) |
+
+Server errors (5xx) include a `request_id` for correlating with server logs. See [Error Observability](#error-observability) for tracing details.
+
 ## Development
 
 ```bash
