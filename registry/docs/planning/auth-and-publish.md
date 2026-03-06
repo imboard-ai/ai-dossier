@@ -238,11 +238,20 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
 ```
 
 **Response (401 Unauthorized):**
+
+Three distinct error codes are returned depending on the failure:
+
+| Code | Message | When |
+|------|---------|------|
+| `MISSING_TOKEN` | `Authorization header required. Use: Bearer <token>` | No Authorization header |
+| `TOKEN_EXPIRED` | `Token has expired. Please login again.` | JWT has expired |
+| `INVALID_TOKEN` | `Invalid token. Please login again.` | JWT signature invalid |
+
 ```json
 {
   "error": {
-    "code": "INVALID_TOKEN",
-    "message": "Invalid or expired token"
+    "code": "MISSING_TOKEN",
+    "message": "Authorization header required. Use: Bearer <token>"
   }
 }
 ```
@@ -280,14 +289,8 @@ Dossier content here...
 ```
 
 **Response (401 Unauthorized):**
-```json
-{
-  "error": {
-    "code": "INVALID_TOKEN",
-    "message": "Invalid or expired token"
-  }
-}
-```
+
+Same three distinct error codes as `GET /api/v1/me` above (`MISSING_TOKEN`, `TOKEN_EXPIRED`, `INVALID_TOKEN`).
 
 **Response (403 Forbidden):**
 ```json

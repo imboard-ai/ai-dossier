@@ -248,5 +248,9 @@ describe('credentials', () => {
     it('should return true on invalid date string (fail-closed)', () => {
       expect(isExpired({ expiresAt: 'not-a-date' })).toBe(true);
     });
+
+    it('should return false on empty string expiresAt (treated as no expiration)', () => {
+      expect(isExpired({ expiresAt: '' })).toBe(false);
+    });
   });
 });
