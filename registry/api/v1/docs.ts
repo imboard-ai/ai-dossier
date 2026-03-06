@@ -118,6 +118,7 @@ const publishDossierEndpoint = {
     401: 'MISSING_TOKEN, INVALID_TOKEN, TOKEN_EXPIRED',
     403: 'FORBIDDEN - Cannot publish to this namespace',
     413: 'CONTENT_TOO_LARGE - Max 1MB',
+    502: 'PUBLISH_ERROR - Includes request_id for log correlation',
   },
 };
 
@@ -137,7 +138,18 @@ const deleteDossierEndpoint = {
     401: 'MISSING_TOKEN, INVALID_TOKEN, TOKEN_EXPIRED',
     403: 'FORBIDDEN - Cannot delete from this namespace',
     404: 'DOSSIER_NOT_FOUND, VERSION_NOT_FOUND',
-    502: 'DELETE_ERROR - Failed to delete dossier',
+    502: 'DELETE_ERROR - Includes request_id for log correlation',
+  },
+};
+
+const errorResponseDoc = {
+  description: 'Server errors (5xx) include a request_id for correlating with server logs',
+  format: {
+    error: {
+      code: 'string - Error code (e.g., UPSTREAM_ERROR)',
+      message: 'string - Human-readable error description',
+      request_id: 'string (UUID) - Correlation ID for server log lookup',
+    },
   },
 };
 
@@ -209,6 +221,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       header: 'Authorization: Bearer <token>',
     },
     endpoints,
+    errorResponse: errorResponseDoc,
     frontmatter: frontmatterDocs,
     namespaces: namespaceDocs,
   });

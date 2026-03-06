@@ -10,10 +10,19 @@ export async function fetchManifestDossiers(): Promise<ManifestDossier[]> {
   const response = await fetch(manifestUrl);
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch manifest: ${response.status}`);
+    const body = await response.text().catch(() => '');
+    throw new Error(
+      `Failed to fetch manifest: ${response.status} ${response.statusText} — ${body}`
+    );
   }
 
-  const manifest = (await response.json()) as { dossiers: ManifestDossier[] };
+  let manifest: { dossiers: ManifestDossier[] };
+  try {
+    manifest = (await response.json()) as { dossiers: ManifestDossier[] };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Invalid manifest JSON from ${manifestUrl}: ${msg}`);
+  }
   return manifest.dossiers;
 }
 

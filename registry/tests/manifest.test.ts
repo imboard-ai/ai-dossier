@@ -32,9 +32,19 @@ describe('fetchManifestDossiers', () => {
   });
 
   it('throws on non-ok response', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+        text: () => Promise.resolve('upstream error'),
+      })
+    );
 
-    await expect(fetchManifestDossiers()).rejects.toThrow('Failed to fetch manifest: 500');
+    await expect(fetchManifestDossiers()).rejects.toThrow(
+      'Failed to fetch manifest: 500 Internal Server Error — upstream error'
+    );
   });
 });
 
