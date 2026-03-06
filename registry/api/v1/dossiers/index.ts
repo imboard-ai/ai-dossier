@@ -1,9 +1,10 @@
 import { authenticateRequest } from '../../../lib/auth';
 import config from '../../../lib/config';
-import { DOSSIER_DEFAULTS, MAX_CONTENT_SIZE } from '../../../lib/constants';
+import { MAX_CONTENT_SIZE } from '../../../lib/constants';
 import { handleCors } from '../../../lib/cors';
 import * as dossier from '../../../lib/dossier';
 import * as github from '../../../lib/github';
+import { fetchManifestDossiers, normalizeDossier } from '../../../lib/manifest';
 import { canPublishTo } from '../../../lib/permissions';
 import type { ManifestDossier, VercelRequest, VercelResponse } from '../../../lib/types';
 
@@ -25,20 +26,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
 async function handleList(_req: VercelRequest, res: VercelResponse) {
   try {
-    const manifestUrl = config.getManifestUrl();
-    const response = await fetch(manifestUrl);
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch manifest: ${response.status}`);
-    }
-
-    const manifest = (await response.json()) as { dossiers: ManifestDossier[] };
-
-    const dossiers = manifest.dossiers.map((d) => ({
-      ...DOSSIER_DEFAULTS,
-      ...d,
-      url: config.getCdnUrl(d.path),
-    }));
+    const raw = await fetchManifestDossiers();
+    const dossiers = raw.map(normalizeDossier);
 
     return res.status(200).json({
       dossiers,

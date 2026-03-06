@@ -1,7 +1,7 @@
-import config from '../../lib/config';
-import { DEFAULT_PER_PAGE, DOSSIER_DEFAULTS, MAX_PER_PAGE } from '../../lib/constants';
+import { DEFAULT_PER_PAGE, MAX_PER_PAGE } from '../../lib/constants';
 import { handleCors } from '../../lib/cors';
-import type { ManifestDossier, VercelRequest, VercelResponse } from '../../lib/types';
+import { fetchManifestDossiers, normalizeDossier } from '../../lib/manifest';
+import type { VercelRequest, VercelResponse } from '../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
@@ -27,17 +27,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   );
 
   try {
-    const manifestUrl = config.getManifestUrl();
-    const response = await fetch(manifestUrl);
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch manifest: ${response.status}`);
-    }
-
-    const manifest = (await response.json()) as { dossiers: ManifestDossier[] };
+    const allDossiers = await fetchManifestDossiers();
 
     const query = q.toLowerCase();
-    const matched = manifest.dossiers.filter((d) => {
+    const matched = allDossiers.filter((d) => {
       if (d.name?.toLowerCase().includes(query)) return true;
       if (d.title?.toLowerCase().includes(query)) return true;
       if (typeof d.description === 'string' && d.description.toLowerCase().includes(query))
@@ -52,11 +45,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const start = (page - 1) * perPage;
     const paged = matched.slice(start, start + perPage);
 
-    const dossiers = paged.map((d) => ({
-      ...DOSSIER_DEFAULTS,
-      ...d,
-      url: config.getCdnUrl(d.path),
-    }));
+    const dossiers = paged.map(normalizeDossier);
 
     return res.status(200).json({
       dossiers,

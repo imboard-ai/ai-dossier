@@ -1,6 +1,6 @@
 import path from 'node:path';
 import config from './config';
-import { USER_AGENT } from './constants';
+import { DOSSIER_DEFAULTS, USER_AGENT } from './constants';
 import type { DeleteResult, FileContent, Manifest, ManifestDossier } from './types';
 
 const GITHUB_API = 'https://api.github.com';
@@ -198,13 +198,9 @@ export async function publishDossier(
   console.log(`[publish] Step 2/2: Updating manifest for ${metadata.name}`);
   const manifest = await getManifest();
 
-  const OPTIONAL_MANIFEST_FIELDS = [
-    'description',
-    'category',
-    'tags',
-    'authors',
-    'tools_required',
-  ] as const;
+  const OPTIONAL_MANIFEST_FIELDS = Object.keys(DOSSIER_DEFAULTS) as Array<
+    keyof typeof DOSSIER_DEFAULTS
+  >;
 
   const dossierEntry: ManifestDossier = {
     name: fullPath,

@@ -1,4 +1,4 @@
-import crypto from 'node:crypto';
+import { sha256Hex } from '@ai-dossier/core';
 import { authenticateRequest } from '../../../lib/auth';
 import config from '../../../lib/config';
 import { handleCors } from '../../../lib/cors';
@@ -67,7 +67,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         });
       }
 
-      const digest = crypto.createHash('sha256').update(fileContent.content).digest('hex');
+      const digest = sha256Hex(fileContent.content);
 
       res.setHeader('Content-Type', 'text/markdown');
       res.setHeader('X-Dossier-Digest', `sha256:${digest}`);
