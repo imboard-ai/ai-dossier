@@ -60,6 +60,17 @@ registry/
 └── tsconfig.json
 ```
 
+## CORS & Security
+
+The registry enforces origin-based CORS with CSRF protection:
+
+- **Allowed origins**: `https://dossier.imboard.ai`, `https://registry.dossier.dev` (default). Override with the `CORS_ALLOWED_ORIGINS` environment variable (comma-separated list).
+- **Read-only requests** (`GET`, `HEAD`): allowed from any origin.
+- **Mutating requests** (`POST`, `PUT`, `PATCH`, `DELETE`): blocked with `403 ORIGIN_NOT_ALLOWED` if the browser origin is not on the allowlist.
+- **Non-browser clients** (no `Origin` header): always allowed through.
+
+See [`lib/cors.ts`](lib/cors.ts) for the implementation and the [API design doc](docs/planning/registry-api-design.md#cors-configuration) for the full specification.
+
 ## Design Docs
 
 - [MVP0 Implementation](docs/planning/mvp0-implementation.md) — read-only registry architecture

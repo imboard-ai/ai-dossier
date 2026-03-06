@@ -505,6 +505,22 @@ Vary: Origin
 Default allowed origins: `https://dossier.imboard.ai`, `https://registry.dossier.dev`.
 Override via `CORS_ALLOWED_ORIGINS` env var (comma-separated).
 
+### CSRF Protection
+
+Mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`) from browser origins not on the allowlist are rejected with:
+
+```json
+{
+  "error": {
+    "code": "ORIGIN_NOT_ALLOWED",
+    "message": "Origin not allowed for mutating requests"
+  }
+}
+```
+**HTTP status:** `403 Forbidden`
+
+Read-only methods (`GET`, `HEAD`) are allowed from any origin. Requests without an `Origin` header (non-browser clients such as `curl` or the CLI) are also allowed, since CSRF is a browser-only attack vector.
+
 ---
 
 ## Version Immutability
