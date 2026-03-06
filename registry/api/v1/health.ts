@@ -1,3 +1,4 @@
+import config from '../../lib/config';
 import { handleCors } from '../../lib/cors';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
 
@@ -7,6 +8,6 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
   res.status(200).json({
     status: 'OK',
     service: 'Dossier Registry API',
-    version: 'MVP1',
+    version: config.apiVersion,
   });
 }

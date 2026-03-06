@@ -7,6 +7,8 @@ function requireEnv(name: string): string {
 }
 
 const config = {
+  apiVersion: 'MVP1',
+
   content: {
     org: 'imboard-ai',
     repo: 'dossier-content',
