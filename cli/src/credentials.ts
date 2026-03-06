@@ -174,12 +174,11 @@ function isExpired(credentials: Pick<Credentials, 'expiresAt'>): boolean {
   if (!credentials.expiresAt) {
     return false;
   }
-  try {
-    const expires = new Date(credentials.expiresAt);
-    return Date.now() > expires.getTime();
-  } catch {
-    return false;
+  const expires = new Date(credentials.expiresAt);
+  if (Number.isNaN(expires.getTime())) {
+    return true;
   }
+  return Date.now() > expires.getTime();
 }
 
 /**
