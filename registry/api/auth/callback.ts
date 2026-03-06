@@ -21,6 +21,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const { code, error, error_description, state } = req.query as Record<string, string>;
 
   if (error) {
+    console.warn('[auth/callback] OAuth provider error:', error, error_description);
     return res
       .status(400)
       .send(renderErrorPage('Authentication Failed', error_description || error));
@@ -41,6 +42,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     crypto.timingSafeEqual(Buffer.from(state), Buffer.from(expectedState));
 
   if (!stateValid) {
+    console.warn(
+      '[auth/callback] State validation failed:',
+      !state ? 'missing query state' : !expectedState ? 'missing cookie state' : 'state mismatch'
+    );
     return res
       .status(403)
       .send(

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { OAUTH_STATE_COOKIE } from '../lib/constants';
 import { validateNamespace } from '../lib/dossier';
 
 describe('path traversal defense (sanitizePath)', () => {
@@ -161,7 +162,7 @@ describe('OAuth state parameter (CSRF protection)', () => {
     expect(state).toHaveLength(64); // 32 bytes hex-encoded
 
     // Verify state cookie is set
-    expect(setCookieHeader).toContain('dossier_oauth_state=');
+    expect(setCookieHeader).toContain(`${OAUTH_STATE_COOKIE}=`);
     expect(setCookieHeader).toContain('HttpOnly');
     expect(setCookieHeader).toContain('Secure');
     expect(setCookieHeader).toContain('SameSite=Lax');
@@ -212,8 +213,7 @@ describe('OAuth state parameter (CSRF protection)', () => {
         state: 'wrong-state-value-that-is-64-chars-long-aaaaaaaaaaaaaaaaaaaaaaaaa',
       },
       headers: {
-        cookie:
-          'dossier_oauth_state=correct-state-value-is-64-chars-long-bbbbbbbbbbbbbbbbbbbbbbbbb',
+        cookie: `${OAUTH_STATE_COOKIE}=correct-state-value-is-64-chars-long-bbbbbbbbbbbbbbbbbbbbbbbbb`,
       },
     } as any;
 
@@ -248,7 +248,7 @@ describe('OAuth state parameter (CSRF protection)', () => {
     const req = {
       method: 'GET',
       query: { code: 'test-code', state },
-      headers: { cookie: `dossier_oauth_state=${state}` },
+      headers: { cookie: `${OAUTH_STATE_COOKIE}=${state}` },
     } as any;
 
     const headers: Record<string, string> = {};
