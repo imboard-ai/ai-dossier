@@ -3,6 +3,9 @@ import config from './config';
 import { DOSSIER_DEFAULTS } from './constants';
 import type { ManifestDossier } from './types';
 
+// Fetches manifest via CDN for read-only list/search (fast, cached).
+// Write operations (publish/delete) use github.getManifest() instead
+// to access the sha needed for atomic updates via the GitHub API.
 export async function fetchManifestDossiers(): Promise<ManifestDossier[]> {
   const manifestUrl = config.getManifestUrl();
 

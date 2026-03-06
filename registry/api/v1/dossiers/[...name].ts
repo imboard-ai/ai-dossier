@@ -4,7 +4,7 @@ import config from '../../../lib/config';
 import { handleCors } from '../../../lib/cors';
 import { validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
-import { methodNotAllowed } from '../../../lib/responses';
+import { methodNotAllowed, serverError } from '../../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -95,12 +95,11 @@ async function handleGet(
         error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
       });
     }
-    console.error(`[dossier/get] Error fetching '${dossierName}':`, error);
-    return res.status(502).json({
-      error: {
-        code: 'UPSTREAM_ERROR',
-        message: 'Failed to fetch dossier information',
-      },
+    return serverError(res, {
+      operation: `dossier.get(${dossierName})`,
+      error,
+      code: 'UPSTREAM_ERROR',
+      message: 'Failed to fetch dossier information',
     });
   }
 }
@@ -151,12 +150,11 @@ async function handleDelete(
         error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
       });
     }
-    console.error(`[dossier/delete] Error deleting '${dossierName}':`, err);
-    return res.status(502).json({
-      error: {
-        code: 'DELETE_ERROR',
-        message: 'Failed to delete dossier. Please try again.',
-      },
+    return serverError(res, {
+      operation: `dossier.delete(${dossierName})`,
+      error: err,
+      code: 'DELETE_ERROR',
+      message: 'Failed to delete dossier. Please try again.',
     });
   }
 }

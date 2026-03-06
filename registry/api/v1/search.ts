@@ -1,7 +1,7 @@
 import { DEFAULT_PER_PAGE, MAX_PER_PAGE } from '../../lib/constants';
 import { handleCors } from '../../lib/cors';
 import { fetchManifestDossiers, normalizeDossier } from '../../lib/manifest';
-import { methodNotAllowed } from '../../lib/responses';
+import { methodNotAllowed, serverError } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -53,12 +53,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       pagination: { page, per_page: perPage, total },
     });
   } catch (error) {
-    console.error('Error searching dossiers:', error);
-    return res.status(502).json({
-      error: {
-        code: 'UPSTREAM_ERROR',
-        message: 'Failed to search dossiers',
-      },
+    return serverError(res, {
+      operation: 'dossier.search',
+      error,
+      code: 'UPSTREAM_ERROR',
+      message: 'Failed to search dossiers',
     });
   }
 }
