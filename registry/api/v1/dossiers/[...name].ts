@@ -38,7 +38,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const namespaceCheck = validateNamespace(dossierName);
   if (!namespaceCheck.valid) {
-    return badRequest(res, 'INVALID_NAMESPACE', namespaceCheck.error);
+    return badRequest(res, 'INVALID_NAMESPACE', namespaceCheck.error, requestId);
   }
 
   if (req.method === 'DELETE') {
@@ -61,14 +61,15 @@ async function handleGet(
     const dossierEntry = manifest.dossiers.find((d) => d.name === dossierName);
 
     if (!dossierEntry) {
-      return notFound(res, 'DOSSIER_NOT_FOUND', `Dossier '${dossierName}' not found`);
+      return notFound(res, 'DOSSIER_NOT_FOUND', `Dossier '${dossierName}' not found`, requestId);
     }
 
     if (version && dossierEntry.version !== version) {
       return notFound(
         res,
         'VERSION_NOT_FOUND',
-        `Dossier '${dossierName}' version '${version}' not found (latest: ${dossierEntry.version})`
+        `Dossier '${dossierName}' version '${version}' not found (latest: ${dossierEntry.version})`,
+        requestId
       );
     }
 
@@ -77,7 +78,12 @@ async function handleGet(
       const fileContent = await github.getFileContent(dossierEntry.path);
 
       if (!fileContent) {
-        return notFound(res, 'CONTENT_NOT_FOUND', `Content for dossier '${dossierName}' not found`);
+        return notFound(
+          res,
+          'CONTENT_NOT_FOUND',
+          `Content for dossier '${dossierName}' not found`,
+          requestId
+        );
       }
 
       const digest = sha256Hex(fileContent.content);
@@ -115,22 +121,23 @@ async function handleDelete(
   version: string | undefined,
   requestId: string
 ) {
-  const authorized = await authorizePublish(req, res, dossierName);
-  if (!authorized) return;
-
   try {
+    const authorized = await authorizePublish(req, res, dossierName);
+    if (!authorized) return;
+
     log.info('Deleting dossier', { requestId, dossier: dossierName, version });
     const result = await github.deleteDossier(dossierName, version || null);
 
     if (!result.found) {
-      return notFound(res, 'DOSSIER_NOT_FOUND', `Dossier '${dossierName}' not found`);
+      return notFound(res, 'DOSSIER_NOT_FOUND', `Dossier '${dossierName}' not found`, requestId);
     }
 
     if (result.versionMismatch) {
       return notFound(
         res,
         'VERSION_NOT_FOUND',
-        `Version '${result.requestedVersion}' not found. Current version is '${result.currentVersion}'`
+        `Version '${result.requestedVersion}' not found. Current version is '${result.currentVersion}'`,
+        requestId
       );
     }
 

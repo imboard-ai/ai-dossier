@@ -199,7 +199,11 @@ describe('invalidPathError', () => {
 
     expect(res.status).toHaveBeenCalledWith(400);
     expect(res.json).toHaveBeenCalledWith({
-      error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
+      error: {
+        code: 'INVALID_PATH',
+        message: 'Path traversal is not allowed',
+        request_id: 'req-abc',
+      },
     });
 
     const loggedJson = JSON.parse(warnSpy.mock.calls[0][0] as string);
@@ -254,6 +258,15 @@ describe('jsonError', () => {
       error: { code: 'TEAPOT', message: 'I am a teapot' },
     });
   });
+
+  it('includes request_id when provided', () => {
+    const res = createViMockRes();
+    jsonError(res, 400, 'BAD', 'bad request', 'req-123');
+
+    expect(res.json).toHaveBeenCalledWith({
+      error: { code: 'BAD', message: 'bad request', request_id: 'req-123' },
+    });
+  });
 });
 
 describe('badRequest', () => {
@@ -266,6 +279,15 @@ describe('badRequest', () => {
       error: { code: 'MISSING_FIELD', message: 'name is required' },
     });
   });
+
+  it('includes request_id when provided', () => {
+    const res = createViMockRes();
+    badRequest(res, 'MISSING_FIELD', 'name is required', 'req-456');
+
+    expect(res.json).toHaveBeenCalledWith({
+      error: { code: 'MISSING_FIELD', message: 'name is required', request_id: 'req-456' },
+    });
+  });
 });
 
 describe('notFound', () => {
@@ -276,6 +298,19 @@ describe('notFound', () => {
     expect(res.status).toHaveBeenCalledWith(404);
     expect(res.json).toHaveBeenCalledWith({
       error: { code: 'DOSSIER_NOT_FOUND', message: "Dossier 'foo' not found" },
+    });
+  });
+
+  it('includes request_id when provided', () => {
+    const res = createViMockRes();
+    notFound(res, 'DOSSIER_NOT_FOUND', "Dossier 'foo' not found", 'req-789');
+
+    expect(res.json).toHaveBeenCalledWith({
+      error: {
+        code: 'DOSSIER_NOT_FOUND',
+        message: "Dossier 'foo' not found",
+        request_id: 'req-789',
+      },
     });
   });
 });

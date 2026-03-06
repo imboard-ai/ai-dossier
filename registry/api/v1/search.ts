@@ -20,14 +20,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const perPageStr = queryString(req.query.per_page);
 
   if (!q || !q.trim()) {
-    return badRequest(res, 'MISSING_QUERY', 'Query parameter "q" is required');
+    return badRequest(res, 'MISSING_QUERY', 'Query parameter "q" is required', requestId);
   }
 
   if (q.length > MAX_QUERY_LENGTH) {
     return badRequest(
       res,
       'QUERY_TOO_LONG',
-      `Query exceeds maximum length of ${MAX_QUERY_LENGTH} characters`
+      `Query exceeds maximum length of ${MAX_QUERY_LENGTH} characters`,
+      requestId
     );
   }
 
