@@ -20,7 +20,14 @@ export async function authenticateRequest(
 ): Promise<JwtPayload | null> {
   const token = extractBearerToken(req);
   if (!token) {
-    console.warn(`[auth] Missing token: ${req.method} ${req.url}`);
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: 'auth.missing_token',
+        method: req.method,
+        url: req.url,
+      })
+    );
     res.status(401).json({
       error: {
         code: 'MISSING_TOKEN',
@@ -35,7 +42,14 @@ export async function authenticateRequest(
   } catch (err) {
     const code =
       err instanceof Error && err.name === 'TokenExpiredError' ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN';
-    console.warn(`[auth] ${code}: ${req.method} ${req.url}`);
+    console.warn(
+      JSON.stringify({
+        level: 'warn',
+        event: `auth.${code.toLowerCase()}`,
+        method: req.method,
+        url: req.url,
+      })
+    );
     if (code === 'TOKEN_EXPIRED') {
       res.status(401).json({
         error: { code, message: 'Token has expired. Please login again.' },
@@ -141,7 +155,13 @@ export async function authorizePublish(
   const permission = canPublishTo(jwtPayload, namespace);
   if (!permission.allowed) {
     console.warn(
-      `[auth] FORBIDDEN: user=${jwtPayload.sub} namespace=${namespace} reason=${permission.reason}`
+      JSON.stringify({
+        level: 'warn',
+        event: 'auth.forbidden',
+        user: jwtPayload.sub,
+        namespace,
+        reason: permission.reason,
+      })
     );
     res.status(403).json({
       error: { code: 'FORBIDDEN', message: permission.reason },

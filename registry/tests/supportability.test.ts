@@ -138,9 +138,13 @@ describe('auth failure logging', () => {
     await authenticateRequest(req, res);
 
     expect(statusCode).toBe(401);
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('[auth] Missing token: POST /api/v1/dossiers')
-    );
+    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(loggedJson).toMatchObject({
+      level: 'warn',
+      event: 'auth.missing_token',
+      method: 'POST',
+      url: '/api/v1/dossiers',
+    });
 
     consoleSpy.mockRestore();
   });
@@ -179,9 +183,13 @@ describe('auth failure logging', () => {
     await authModule.authenticateRequest(req, res);
 
     expect(statusCode).toBe(401);
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('[auth] INVALID_TOKEN: DELETE /api/v1/dossiers/foo/bar')
-    );
+    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(loggedJson).toMatchObject({
+      level: 'warn',
+      event: 'auth.invalid_token',
+      method: 'DELETE',
+      url: '/api/v1/dossiers/foo/bar',
+    });
 
     consoleSpy.mockRestore();
     vi.doUnmock('jsonwebtoken');

@@ -5,24 +5,27 @@ import { handleCors } from '../../../lib/cors';
 import * as dossier from '../../../lib/dossier';
 import * as github from '../../../lib/github';
 import { fetchManifestDossiers, normalizeDossier } from '../../../lib/manifest';
-import { methodNotAllowed, serverError } from '../../../lib/responses';
+import { getRequestId, methodNotAllowed, serverError } from '../../../lib/responses';
 import type { ManifestDossier, VercelRequest, VercelResponse } from '../../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
 
+  const requestId = getRequestId(req);
+  res.setHeader('X-Request-Id', requestId);
+
   if (req.method === 'GET') {
-    return handleList(req, res);
+    return handleList(req, res, requestId);
   }
 
   if (req.method === 'POST') {
-    return handlePublish(req, res);
+    return handlePublish(req, res, requestId);
   }
 
   return methodNotAllowed(res, 'GET', 'POST');
 }
 
-async function handleList(_req: VercelRequest, res: VercelResponse) {
+async function handleList(_req: VercelRequest, res: VercelResponse, requestId: string) {
   try {
     const raw = await fetchManifestDossiers();
     const dossiers = raw.map(normalizeDossier);
@@ -41,11 +44,12 @@ async function handleList(_req: VercelRequest, res: VercelResponse) {
       error,
       code: 'UPSTREAM_ERROR',
       message: 'Failed to fetch dossier list',
+      requestId,
     });
   }
 }
 
-async function handlePublish(req: VercelRequest, res: VercelResponse) {
+async function handlePublish(req: VercelRequest, res: VercelResponse, requestId: string) {
   const contentType = req.headers['content-type'];
   if (!contentType || !contentType.includes('application/json')) {
     return res.status(415).json({
@@ -134,6 +138,9 @@ async function handlePublish(req: VercelRequest, res: VercelResponse) {
     });
   } catch (err) {
     if (err instanceof github.PathTraversalError) {
+      console.warn(
+        JSON.stringify({ level: 'warn', event: 'path_traversal', requestId, namespace })
+      );
       return res.status(400).json({
         error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
       });
@@ -143,6 +150,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse) {
       error: err,
       code: 'PUBLISH_ERROR',
       message: 'Failed to publish dossier',
+      requestId,
     });
   }
 }

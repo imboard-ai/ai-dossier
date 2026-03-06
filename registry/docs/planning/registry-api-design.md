@@ -297,11 +297,12 @@ GET /dossiers/myorg/deploy/content?digest=sha256:35aab...
   "error": {
     "code": "DOSSIER_NOT_FOUND",
     "message": "Dossier 'myorg/unknown' not found",
-    "request_id": "req_abc123",
-    "documentation_url": "https://docs.dossier.ai/errors/..."
+    "request_id": "550e8400-e29b-41d4-a716-446655440000"
   }
 }
 ```
+
+All responses include the `X-Request-Id` header for request correlation. Server errors (5xx) always include `request_id` in the response body.
 
 **Common codes:** `DOSSIER_NOT_FOUND`, `CONTENT_NOT_FOUND`, `UPSTREAM_ERROR`, `DELETE_ERROR`, `PUBLISH_ERROR`, `MISSING_FIELD`, `INVALID_NAMESPACE`, `INVALID_CONTENT`, `CONTENT_TOO_LARGE`, `INVALID_PATH`, `MISSING_TOKEN`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `FORBIDDEN`, `METHOD_NOT_ALLOWED`, `LOGIN_ERROR`, `VERSION_NOT_FOUND`, `VERSION_EXISTS`, `RATE_LIMITED`
 

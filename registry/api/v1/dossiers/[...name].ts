@@ -4,11 +4,14 @@ import config from '../../../lib/config';
 import { handleCors } from '../../../lib/cors';
 import { validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
-import { methodNotAllowed, serverError } from '../../../lib/responses';
+import { getRequestId, methodNotAllowed, serverError } from '../../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
+
+  const requestId = getRequestId(req);
+  res.setHeader('X-Request-Id', requestId);
 
   if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'DELETE') {
     return methodNotAllowed(res, 'GET', 'HEAD', 'DELETE');
@@ -29,19 +32,23 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   if (req.method === 'DELETE') {
-    return handleDelete(req, res, dossierName, version);
+    return handleDelete(req, res, dossierName, version, requestId);
   }
 
-  return handleGet(res, dossierName, version, isContentRequest);
+  return handleGet(res, dossierName, version, isContentRequest, requestId);
 }
 
 async function handleGet(
   res: VercelResponse,
   dossierName: string,
   version: string | undefined,
-  isContentRequest: boolean
+  isContentRequest: boolean,
+  requestId: string
 ) {
   try {
+    console.log(
+      JSON.stringify({ level: 'info', requestId, op: 'getManifest', dossier: dossierName })
+    );
     const manifest = await github.getManifest();
     const dossierEntry = manifest.dossiers.find((d) => d.name === dossierName);
 
@@ -64,6 +71,9 @@ async function handleGet(
     }
 
     if (isContentRequest) {
+      console.log(
+        JSON.stringify({ level: 'info', requestId, op: 'getFileContent', path: dossierEntry.path })
+      );
       const fileContent = await github.getFileContent(dossierEntry.path);
 
       if (!fileContent) {
@@ -91,6 +101,9 @@ async function handleGet(
     });
   } catch (error) {
     if (error instanceof github.PathTraversalError) {
+      console.warn(
+        JSON.stringify({ level: 'warn', event: 'path_traversal', requestId, dossier: dossierName })
+      );
       return res.status(400).json({
         error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
       });
@@ -100,6 +113,7 @@ async function handleGet(
       error,
       code: 'UPSTREAM_ERROR',
       message: 'Failed to fetch dossier information',
+      requestId,
     });
   }
 }
@@ -108,12 +122,22 @@ async function handleDelete(
   req: VercelRequest,
   res: VercelResponse,
   dossierName: string,
-  version: string | undefined
+  version: string | undefined,
+  requestId: string
 ) {
   const authorized = await authorizePublish(req, res, dossierName);
   if (!authorized) return;
 
   try {
+    console.log(
+      JSON.stringify({
+        level: 'info',
+        requestId,
+        op: 'deleteDossier',
+        dossier: dossierName,
+        version,
+      })
+    );
     const result = await github.deleteDossier(dossierName, version || null);
 
     if (!result.found) {
@@ -146,6 +170,9 @@ async function handleDelete(
     return res.status(200).json(response);
   } catch (err) {
     if (err instanceof github.PathTraversalError) {
+      console.warn(
+        JSON.stringify({ level: 'warn', event: 'path_traversal', requestId, dossier: dossierName })
+      );
       return res.status(400).json({
         error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
       });
@@ -155,6 +182,7 @@ async function handleDelete(
       error: err,
       code: 'DELETE_ERROR',
       message: 'Failed to delete dossier. Please try again.',
+      requestId,
     });
   }
 }
