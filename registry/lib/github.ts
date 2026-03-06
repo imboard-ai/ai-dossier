@@ -1,9 +1,7 @@
 import path from 'node:path';
 import config from './config';
-import { DOSSIER_DEFAULTS, USER_AGENT } from './constants';
+import { DOSSIER_DEFAULTS, GITHUB_API_VERSION, USER_AGENT } from './constants';
 import type { DeleteResult, FileContent, Manifest, ManifestDossier } from './types';
-
-const GITHUB_API = 'https://api.github.com';
 
 export class PathTraversalError extends Error {
   constructor(filePath: string) {
@@ -21,7 +19,7 @@ function sanitizePath(filePath: string): string {
 }
 
 async function githubRequest(endpoint: string, options: RequestInit = {}): Promise<Response> {
-  const url = endpoint.startsWith('http') ? endpoint : `${GITHUB_API}${endpoint}`;
+  const url = endpoint.startsWith('http') ? endpoint : `${config.auth.github.apiUrl}${endpoint}`;
 
   let response: Response;
   try {
@@ -30,7 +28,7 @@ async function githubRequest(endpoint: string, options: RequestInit = {}): Promi
       headers: {
         Authorization: `Bearer ${config.content.botToken}`,
         Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
+        'X-GitHub-Api-Version': GITHUB_API_VERSION,
         'User-Agent': USER_AGENT,
         ...(options.headers as Record<string, string>),
       },

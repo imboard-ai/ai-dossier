@@ -10,8 +10,8 @@ const config = {
   apiVersion: 'MVP1',
 
   content: {
-    org: 'imboard-ai',
-    repo: 'dossier-content',
+    org: process.env.CONTENT_ORG || 'imboard-ai',
+    repo: process.env.CONTENT_REPO || 'dossier-content',
     branch: 'main',
     get botToken(): string {
       return requireEnv('GITHUB_BOT_TOKEN');

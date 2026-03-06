@@ -117,6 +117,29 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 }
 
+function basePageStyles(): string {
+  return `
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .container {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.1);
+      padding: 40px;
+      max-width: 500px;
+      width: 100%;
+      text-align: center;
+    }`;
+}
+
 function renderSuccessPage(
   username: string,
   orgs: string[],
@@ -136,26 +159,7 @@ function renderSuccessPage(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Dossier Login - Success</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #f5f5f5;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-    }
-    .container {
-      background: white;
-      border-radius: 12px;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.1);
-      padding: 40px;
-      max-width: 500px;
-      width: 100%;
-      text-align: center;
-    }
+  <style>${basePageStyles()}
     h1 { color: #1a1a1a; margin-bottom: 8px; font-size: 24px; }
     .subtitle { color: #666; margin-bottom: 16px; }
     .orgs-section { margin-bottom: 20px; }
@@ -254,26 +258,7 @@ function renderErrorPage(title: string, message: string): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Dossier Login - Error</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      background: #f5f5f5;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 20px;
-    }
-    .container {
-      background: white;
-      border-radius: 12px;
-      box-shadow: 0 4px 24px rgba(0,0,0,0.1);
-      padding: 40px;
-      max-width: 500px;
-      width: 100%;
-      text-align: center;
-    }
+  <style>${basePageStyles()}
     h1 { color: #dc3545; margin-bottom: 16px; font-size: 24px; }
     .message { color: #666; line-height: 1.6; }
     .error-icon { font-size: 48px; margin-bottom: 16px; }

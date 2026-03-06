@@ -22,6 +22,9 @@ export const JWT_EXPIRY_SECONDS = 7 * 24 * 60 * 60;
 /** Valid slug pattern: lowercase alphanumeric with hyphens, no leading/trailing hyphen. */
 export const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;
 
+/** GitHub API version header value. */
+export const GITHUB_API_VERSION = '2022-11-28';
+
 /** User-Agent header for outgoing GitHub API requests. */
 export const USER_AGENT = 'Dossier-Registry';
 

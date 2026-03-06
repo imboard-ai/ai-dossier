@@ -9,6 +9,11 @@ vi.mock('../lib/config', () => ({
       branch: 'main',
       botToken: 'fake-token',
     },
+    auth: {
+      github: {
+        apiUrl: 'https://api.github.com',
+      },
+    },
   },
 }));
 
