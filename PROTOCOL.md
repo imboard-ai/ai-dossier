@@ -90,6 +90,31 @@ Use `get_journey_status({ journey_id })` at any point to inspect:
 
 ---
 
+## External Reference Handling
+
+A dossier's checksum covers the body text (URLs are tamper-evident), but the **content at those URLs is NOT covered** by the signature or checksum. This means a signed dossier can reference external resources that bypass the trust chain.
+
+### Frontmatter Fields
+
+- **`content_scope`**: `"self-contained"` (no external fetches) or `"references-external"` (contains external URLs)
+- **`external_references`**: Array declaring each external URL with `type`, `trust_level`, and `required` status
+
+### Agent Behavior
+
+| Scenario | Action |
+|----------|--------|
+| URL declared in `external_references` | Proceed — author has acknowledged the dependency |
+| URL declared with `type: "script"` and `trust_level: "unknown"` | Require explicit user approval before fetching or executing |
+| URL NOT declared in `external_references` | Warn user — URL is not in the trust chain |
+| `content_scope` is `"self-contained"` but body has URLs | Treat as configuration error — warn and flag |
+| `read_dossier` returns `security_notices` | Display notices to user before executing body |
+
+### Detection
+
+The linter rule `external-references-declared` (default severity: `error`) scans the body for URLs and cross-references them against declared `external_references`. Placeholder URLs (`example.com`, `localhost`, `${VAR}`) are automatically excluded. URLs from `tools_required[].install_url`, `homepage`, `repository`, and `authors[].url` are auto-exempt.
+
+---
+
 ## Risk Level Handling
 
 | Risk Level | Required Action |

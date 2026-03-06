@@ -5,6 +5,9 @@
  * to produce a recommendation (ALLOW or BLOCK).
  */
 
+import type { DossierFrontmatter } from './types';
+import { collectDeclaredUrls, findUndeclaredUrls, scanBodyForUrls } from './utils/url-scanner';
+
 export interface ChecksumStatus {
   passed: boolean;
 }
@@ -70,4 +73,54 @@ export function assessVerificationRisk(
     issues,
     recommendation: shouldBlock ? 'BLOCK' : 'ALLOW',
   };
+}
+
+export interface ContentRiskResult {
+  level: VerificationRiskLevel;
+  issues: string[];
+  undeclaredUrls: string[];
+}
+
+export function assessContentRisk(
+  frontmatter: DossierFrontmatter,
+  body: string
+): ContentRiskResult {
+  const issues: string[] = [];
+  let level: VerificationRiskLevel = 'low';
+
+  const bodyUrls = scanBodyForUrls(body);
+  if (bodyUrls.length === 0) {
+    return { level, issues, undeclaredUrls: [] };
+  }
+
+  const declaredUrls = collectDeclaredUrls(frontmatter);
+  const undeclaredUrls = findUndeclaredUrls(bodyUrls, declaredUrls);
+
+  if (undeclaredUrls.length > 0) {
+    issues.push(
+      `Body contains ${undeclaredUrls.length} undeclared external URL(s): ${undeclaredUrls.join(', ')}`
+    );
+    if (level === 'low') level = 'medium';
+  }
+
+  if (Array.isArray(frontmatter.external_references)) {
+    for (const ref of frontmatter.external_references) {
+      if (ref.type === 'script' && ref.trust_level === 'unknown') {
+        issues.push(
+          `External script with unknown trust level: ${ref.url} — requires user approval`
+        );
+        level = 'high';
+      }
+    }
+  }
+
+  if (
+    bodyUrls.length > 0 &&
+    Array.isArray(frontmatter.risk_factors) &&
+    !frontmatter.risk_factors.includes('network_access')
+  ) {
+    issues.push('Body contains external URLs but risk_factors does not include "network_access"');
+  }
+
+  return { level, issues, undeclaredUrls };
 }

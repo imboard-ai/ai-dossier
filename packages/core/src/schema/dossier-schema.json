@@ -168,6 +168,53 @@
         "minLength": 10
       }
     },
+    "content_scope": {
+      "type": "string",
+      "description": "Whether the dossier body is self-contained or references external URLs",
+      "enum": ["self-contained", "references-external"]
+    },
+    "external_references": {
+      "type": "array",
+      "description": "Manifest of all external resources referenced in the dossier body",
+      "items": {
+        "type": "object",
+        "required": ["url", "description", "type", "trust_level", "required"],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "URL or URL prefix of the external resource",
+            "format": "uri"
+          },
+          "description": {
+            "type": "string",
+            "description": "What this external resource is used for"
+          },
+          "type": {
+            "type": "string",
+            "description": "Type of external resource",
+            "enum": [
+              "download",
+              "api",
+              "documentation",
+              "script",
+              "config",
+              "image",
+              "dossier",
+              "other"
+            ]
+          },
+          "trust_level": {
+            "type": "string",
+            "description": "Trust level of the external resource",
+            "enum": ["trusted", "user-verified", "unknown"]
+          },
+          "required": {
+            "type": "boolean",
+            "description": "Whether this external resource is required for execution"
+          }
+        }
+      }
+    },
     "checksum": {
       "type": "object",
       "description": "Content integrity hash (REQUIRED for security - verifies dossier hasn't been tampered with)",

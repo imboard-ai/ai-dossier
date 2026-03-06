@@ -4,6 +4,28 @@
 
 export type DossierStatus = 'Draft' | 'Stable' | 'Deprecated' | 'Experimental';
 
+export type ContentScope = 'self-contained' | 'references-external';
+
+export type ExternalReferenceType =
+  | 'download'
+  | 'api'
+  | 'documentation'
+  | 'script'
+  | 'config'
+  | 'image'
+  | 'dossier'
+  | 'other';
+
+export type ExternalTrustLevel = 'trusted' | 'user-verified' | 'unknown';
+
+export interface ExternalReference {
+  url: string;
+  description: string;
+  type: ExternalReferenceType;
+  trust_level: ExternalTrustLevel;
+  required: boolean;
+}
+
 export interface DossierFrontmatter {
   dossier_schema_version?: string;
   name?: string;
@@ -18,6 +40,8 @@ export interface DossierFrontmatter {
   risk_level?: 'low' | 'medium' | 'high' | 'critical';
   risk_factors?: string[];
   destructive_operations?: string[];
+  content_scope?: ContentScope;
+  external_references?: ExternalReference[];
   requires_approval?: boolean;
   checksum?: {
     algorithm: string;

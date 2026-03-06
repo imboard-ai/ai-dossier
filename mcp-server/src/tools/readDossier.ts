@@ -4,7 +4,12 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { parseDossierContent } from '@ai-dossier/core';
+import {
+  collectDeclaredUrls,
+  findUndeclaredUrls,
+  parseDossierContent,
+  scanBodyForUrls,
+} from '@ai-dossier/core';
 import { CliNotFoundError, execCli } from '../utils/cli-wrapper';
 import { logger } from '../utils/logger';
 import { validatePathWithinCwd } from '../utils/paths';
@@ -16,6 +21,7 @@ export interface ReadDossierInput {
 export interface ReadDossierOutput {
   metadata: Record<string, unknown>;
   body: string;
+  security_notices?: string[];
 }
 
 /**
@@ -46,7 +52,25 @@ export async function readDossier(input: ReadDossierInput): Promise<ReadDossierO
       bodyLength: body.length,
     });
 
-    return { metadata, body };
+    const securityNotices: string[] = [];
+    const bodyUrls = scanBodyForUrls(body);
+    if (bodyUrls.length > 0) {
+      const declaredUrls = collectDeclaredUrls(
+        metadata as import('@ai-dossier/core').DossierFrontmatter
+      );
+      const undeclared = findUndeclaredUrls(bodyUrls, declaredUrls);
+      if (undeclared.length > 0) {
+        securityNotices.push(
+          `WARNING: ${undeclared.length} undeclared external URL(s) found in body: ${undeclared.join(', ')}. These URLs are NOT covered by the dossier trust chain.`
+        );
+      }
+    }
+
+    return {
+      metadata,
+      body,
+      ...(securityNotices.length > 0 ? { security_notices: securityNotices } : {}),
+    };
   } catch (error) {
     if (error instanceof CliNotFoundError) {
       throw new Error(error.message);

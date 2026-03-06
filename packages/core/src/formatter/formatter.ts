@@ -24,6 +24,8 @@ const KEY_ORDER: string[] = [
   'risk_factors',
   'requires_approval',
   'destructive_operations',
+  'content_scope',
+  'external_references',
   'prerequisites',
   'inputs',
   'outputs',
