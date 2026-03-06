@@ -4,6 +4,32 @@ import * as config from '../config';
 const REQUIRED_PROTOCOL = 'https:';
 const VALID_LLMS = ['auto', 'claude-code'];
 
+function printConfigEntries(cfg: config.DossierConfig): void {
+  Object.entries(cfg).forEach(([k, v]) => {
+    if (typeof v === 'object' && v !== null) {
+      console.log(`   ${k}: ${JSON.stringify(v)}`);
+    } else {
+      console.log(`   ${k}: ${v}`);
+    }
+  });
+}
+
+function printConfigKeys(header: string): void {
+  console.log(header);
+  for (const k of Object.keys(config.DEFAULT_CONFIG)) {
+    console.log(`   - ${k}`);
+  }
+}
+
+function saveConfigOrExit(cfg: config.DossierConfig, successMessage: string): void {
+  if (config.saveConfig(cfg)) {
+    console.log(successMessage);
+  } else {
+    console.error('❌ Failed to save configuration');
+    process.exit(1);
+  }
+}
+
 interface ConfigOptions {
   list?: boolean;
   reset?: boolean;
@@ -21,6 +47,7 @@ function handleListRegistries(options: ConfigOptions): void {
   const registries = config.resolveRegistries();
   const currentConfig = config.loadConfig();
   const projectConfig = config.loadProjectConfig();
+  const defaultName = projectConfig?.defaultRegistry || currentConfig.defaultRegistry;
 
   if (options.json) {
     console.log(
@@ -30,9 +57,9 @@ function handleListRegistries(options: ConfigOptions): void {
             name: r.name,
             url: r.url,
             readonly: r.readonly || false,
-            default: r.name === (projectConfig?.defaultRegistry || currentConfig.defaultRegistry),
+            default: r.name === defaultName,
           })),
-          defaultRegistry: projectConfig?.defaultRegistry || currentConfig.defaultRegistry || null,
+          defaultRegistry: defaultName || null,
         },
         null,
         2
@@ -40,7 +67,6 @@ function handleListRegistries(options: ConfigOptions): void {
     );
   } else {
     console.log('\n📋 Configured Registries:\n');
-    const defaultName = projectConfig?.defaultRegistry || currentConfig.defaultRegistry;
     for (const r of registries) {
       const flags: string[] = [];
       if (r.name === defaultName) flags.push('default');
@@ -90,15 +116,13 @@ function handleAddRegistry(options: ConfigOptions): void {
     currentConfig.defaultRegistry = options.addRegistry;
   }
 
-  if (config.saveConfig(currentConfig)) {
-    console.log(`\n✅ Added registry '${options.addRegistry}': ${options.url}`);
-    if (options.default) console.log('   Set as default registry');
-    if (options.readonly) console.log('   Marked as read-only');
-    console.log('');
-  } else {
-    console.error('❌ Failed to save configuration');
-    process.exit(1);
-  }
+  const details = [
+    `\n✅ Added registry '${options.addRegistry}': ${options.url}`,
+    ...(options.default ? ['   Set as default registry'] : []),
+    ...(options.readonly ? ['   Marked as read-only'] : []),
+    '',
+  ].join('\n');
+  saveConfigOrExit(currentConfig, details);
   process.exit(0);
 }
 
@@ -114,12 +138,7 @@ function handleRemoveRegistry(options: ConfigOptions): void {
     delete currentConfig.defaultRegistry;
   }
 
-  if (config.saveConfig(currentConfig)) {
-    console.log(`\n✅ Removed registry '${options.removeRegistry}'\n`);
-  } else {
-    console.error('❌ Failed to save configuration');
-    process.exit(1);
-  }
+  saveConfigOrExit(currentConfig, `\n✅ Removed registry '${options.removeRegistry}'\n`);
   process.exit(0);
 }
 
@@ -136,12 +155,7 @@ function handleSetDefaultRegistry(options: ConfigOptions): void {
   const currentConfig = config.loadConfig();
   currentConfig.defaultRegistry = options.setDefaultRegistry;
 
-  if (config.saveConfig(currentConfig)) {
-    console.log(`\n✅ Default registry set to '${options.setDefaultRegistry}'\n`);
-  } else {
-    console.error('❌ Failed to save configuration');
-    process.exit(1);
-  }
+  saveConfigOrExit(currentConfig, `\n✅ Default registry set to '${options.setDefaultRegistry}'\n`);
   process.exit(0);
 }
 
@@ -149,13 +163,7 @@ function handleListConfig(): void {
   const currentConfig = config.loadConfig();
   console.log('📋 Current Configuration:\n');
   console.log(`   Config file: ${config.CONFIG_FILE}\n`);
-  Object.entries(currentConfig).forEach(([k, v]) => {
-    if (typeof v === 'object' && v !== null) {
-      console.log(`   ${k}: ${JSON.stringify(v)}`);
-    } else {
-      console.log(`   ${k}: ${v}`);
-    }
-  });
+  printConfigEntries(currentConfig);
   console.log('\nTo change a setting: dossier config <key> <value>');
   console.log('Example: dossier config defaultLlm claude-code\n');
   process.exit(0);
@@ -170,19 +178,11 @@ function handleReset(): void {
   if (currentConfig.defaultRegistry) {
     resetConfig.defaultRegistry = currentConfig.defaultRegistry;
   }
-  if (config.saveConfig(resetConfig)) {
-    console.log('✅ Configuration reset to defaults (registry settings preserved)\n');
-    Object.entries(resetConfig).forEach(([k, v]) => {
-      if (typeof v === 'object' && v !== null) {
-        console.log(`   ${k}: ${JSON.stringify(v)}`);
-      } else {
-        console.log(`   ${k}: ${v}`);
-      }
-    });
-  } else {
-    console.log('❌ Failed to reset configuration');
-    process.exit(1);
-  }
+  saveConfigOrExit(
+    resetConfig,
+    '✅ Configuration reset to defaults (registry settings preserved)\n'
+  );
+  printConfigEntries(resetConfig);
   process.exit(0);
 }
 
@@ -196,10 +196,7 @@ function handleGetConfig(key: string): void {
     }
   } else {
     console.log(`❌ Unknown configuration key: ${key}\n`);
-    console.log('Available keys:');
-    for (const k of Object.keys(config.DEFAULT_CONFIG)) {
-      console.log(`   - ${k}`);
-    }
+    printConfigKeys('Available keys:');
     process.exit(1);
   }
   process.exit(0);
@@ -208,10 +205,7 @@ function handleGetConfig(key: string): void {
 function handleSetConfig(key: string, value: string): void {
   if (!(key in config.DEFAULT_CONFIG)) {
     console.log(`⚠️  Warning: '${key}' is not a standard config key\n`);
-    console.log('Standard keys:');
-    for (const k of Object.keys(config.DEFAULT_CONFIG)) {
-      console.log(`   - ${k}`);
-    }
+    printConfigKeys('Standard keys:');
     console.log('\nContinuing anyway...\n');
   }
 
@@ -226,12 +220,11 @@ function handleSetConfig(key: string, value: string): void {
     }
   }
 
-  if (config.setConfig(key, value)) {
-    console.log(`✅ Configuration updated: ${key} = ${value}`);
-  } else {
-    console.log('❌ Failed to update configuration');
+  if (!config.setConfig(key, value)) {
+    console.error('❌ Failed to save configuration');
     process.exit(1);
   }
+  console.log(`✅ Configuration updated: ${key} = ${value}`);
   process.exit(0);
 }
 
