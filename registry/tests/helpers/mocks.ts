@@ -56,16 +56,18 @@ export function createMockRes() {
   };
 }
 
-export function createViMockRes() {
-  const res: Record<string, ReturnType<typeof vi.fn>> = {};
+type ViMockRes = VercelResponse & {
+  status: ReturnType<typeof vi.fn>;
+  json: ReturnType<typeof vi.fn>;
+  setHeader: ReturnType<typeof vi.fn>;
+  end: ReturnType<typeof vi.fn>;
+};
+
+export function createViMockRes(): ViMockRes {
+  const res = {} as ViMockRes;
   res.status = vi.fn().mockReturnValue(res);
   res.json = vi.fn().mockReturnValue(res);
   res.setHeader = vi.fn().mockReturnValue(res);
   res.end = vi.fn().mockReturnValue(res);
-  return res as unknown as VercelResponse & {
-    status: ReturnType<typeof vi.fn>;
-    json: ReturnType<typeof vi.fn>;
-    setHeader: ReturnType<typeof vi.fn>;
-    end: ReturnType<typeof vi.fn>;
-  };
+  return res;
 }

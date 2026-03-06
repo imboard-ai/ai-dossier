@@ -61,3 +61,9 @@ export const MAX_QUERY_LENGTH = 1000;
 
 /** Maximum changelog message length in characters. */
 export const MAX_CHANGELOG_LENGTH = 500;
+
+/** Byte length for random error reference codes. */
+export const ERROR_REF_BYTES = 4;
+
+/** Duration in ms for the "Copied!" feedback on the success page. */
+export const COPY_FEEDBACK_MS = 2000;

@@ -1,7 +1,12 @@
 import crypto from 'node:crypto';
 import * as auth from '../../lib/auth';
 import config from '../../lib/config';
-import { HTTP_STATUS, OAUTH_STATE_COOKIE } from '../../lib/constants';
+import {
+  COPY_FEEDBACK_MS,
+  ERROR_REF_BYTES,
+  HTTP_STATUS,
+  OAUTH_STATE_COOKIE,
+} from '../../lib/constants';
 import createLogger from '../../lib/logger';
 import { methodNotAllowed } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
@@ -13,6 +18,12 @@ function parseCookie(req: VercelRequest, name: string): string | undefined {
   if (!header) return undefined;
   const match = header.split(';').find((c) => c.trim().startsWith(`${name}=`));
   return match ? match.split('=')[1]?.trim() : undefined;
+}
+
+function stateFailureReason(state: string | undefined, expectedState: string | undefined): string {
+  if (!state) return 'missing query state';
+  if (!expectedState) return 'missing cookie state';
+  return 'state mismatch';
 }
 
 function validateOAuthState(
@@ -36,11 +47,7 @@ function validateOAuthState(
 
   if (!valid) {
     log.warn('State validation failed', {
-      reason: !state
-        ? 'missing query state'
-        : !expectedState
-          ? 'missing cookie state'
-          : 'state mismatch',
+      reason: stateFailureReason(state, expectedState),
     });
     res
       .status(HTTP_STATUS.FORBIDDEN)
@@ -115,7 +122,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     await exchangeCodeAndRenderSuccess(res, code);
   } catch (err) {
     const caughtError = err instanceof Error ? err : new Error(String(err));
-    const errorRef = crypto.randomBytes(4).toString('hex');
+    const errorRef = crypto.randomBytes(ERROR_REF_BYTES).toString('hex');
     log.error(`OAuth callback failed (ref=${errorRef})`, {
       error: caughtError.message,
       stack: caughtError.stack,
@@ -258,7 +265,7 @@ function renderSuccessPage(
         document.querySelector('.copy-btn').textContent = 'Copied!';
         setTimeout(() => {
           document.querySelector('.copy-btn').textContent = 'Copy Code';
-        }, 2000);
+        }, ${COPY_FEEDBACK_MS});
       });
     }
   </script>
