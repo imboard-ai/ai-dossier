@@ -110,7 +110,6 @@ dossier pull myorg/deploy@1.0.0   # Download specific version
 **`GET /dossiers/{name}/content`**
 ```
 Content-Type: text/markdown; charset=utf-8
-X-Dossier-Version: 1.2.0
 X-Dossier-Digest: sha256:abc123...
 
 ---dossier
@@ -130,7 +129,7 @@ X-Dossier-Digest: sha256:abc123...
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| `GET` | `/auth/github` | 🌐 | Initiate GitHub OAuth |
+| `GET` | `/auth/login` | 🌐 | Initiate GitHub OAuth |
 | `GET` | `/auth/callback` | 🌐 | OAuth callback |
 | `POST` | `/auth/token` | 🌐 | Exchange code for token |
 | `POST` | `/auth/revoke` | 🔑 | Revoke token |
@@ -304,7 +303,7 @@ GET /dossiers/myorg/deploy/content?digest=sha256:35aab...
 }
 ```
 
-**Common codes:** `INVALID_DOSSIER_FORMAT`, `SCHEMA_VALIDATION_FAILED`, `CHECKSUM_MISMATCH`, `VERSION_EXISTS`, `SIGNATURE_INVALID`, `FORBIDDEN`, `RATE_LIMITED`
+**Common codes:** `DOSSIER_NOT_FOUND`, `CONTENT_NOT_FOUND`, `UPSTREAM_ERROR`, `DELETE_ERROR`, `PUBLISH_ERROR`, `MISSING_FIELD`, `INVALID_NAMESPACE`, `INVALID_CONTENT`, `CONTENT_TOO_LARGE`, `INVALID_PATH`, `MISSING_TOKEN`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `FORBIDDEN`, `METHOD_NOT_ALLOWED`, `LOGIN_ERROR`, `VERSION_NOT_FOUND`, `VERSION_EXISTS`, `RATE_LIMITED`
 
 ---
 

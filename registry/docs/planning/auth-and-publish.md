@@ -135,7 +135,7 @@ The Registry API is a server-side service hosted on Vercel.
 | `GET` | `/api/v1/health` | Health check |
 | `GET` | `/api/v1/dossiers` | List all dossiers |
 | `GET` | `/api/v1/dossiers/{name}` | Get dossier metadata |
-| `GET` | `/api/v1/dossiers/{name}/content` | Redirect to CDN |
+| `GET` | `/api/v1/dossiers/{name}/content` | Returns dossier content with `X-Dossier-Digest` header |
 | `GET` | `/auth/login` | Initiates OAuth flow - sets CSRF state cookie, redirects to GitHub |
 | `GET` | `/auth/callback` | OAuth callback - exchanges code, displays JWT for copy/paste |
 
@@ -156,6 +156,8 @@ The Registry API is a server-side service hosted on Vercel.
 | `GITHUB_BOT_TOKEN` | Token to write to content repo |
 | `REGISTRY_BASE_URL` | Base URL for OAuth redirect (e.g., `https://registry.dossier.dev`) |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allowed CORS origins (optional, has defaults) |
+
+> **Note:** All variables except `CORS_ALLOWED_ORIGINS` are required. The Registry uses lazy validation — a missing variable causes a clear error (`Missing required environment variable: <name>`) on the first request that needs it.
 
 ---
 
@@ -383,7 +385,7 @@ Dossier content here...
 │   │                                    │ Create JWT:           │         │
 │   │                                    │ - sub: alex-turner    │         │
 │   │                                    │ - orgs: [...]         │         │
-│   │                                    │ - exp: +7 days         │         │
+│   │                                    │ - exp: +7 days        │         │
 │   │                                    │ Sign with JWT_SECRET  │         │
 │   │                                    │                       │         │
 │   │ Browser shows page:                │                       │         │
