@@ -17,7 +17,11 @@ export function getRequestId(req: VercelRequest): string {
   const header = req.headers['x-request-id'];
   const existing = Array.isArray(header) ? header[0] : header;
   if (existing && VALID_REQUEST_ID.test(existing)) return existing;
-  return crypto.randomUUID();
+  const generated = crypto.randomUUID();
+  if (existing) {
+    log.warn('Rejected invalid X-Request-Id', { provided: existing, generated });
+  }
+  return generated;
 }
 
 export function methodNotAllowed(res: VercelResponse, ...allowed: string[]): VercelResponse {

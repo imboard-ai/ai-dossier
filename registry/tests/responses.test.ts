@@ -140,16 +140,24 @@ describe('getRequestId', () => {
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
   });
 
-  it('rejects request IDs longer than 64 characters', () => {
+  it('rejects request IDs longer than 64 characters and logs warning', () => {
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const req = { headers: { 'x-request-id': 'a'.repeat(65) } } as never;
     const id = getRequestId(req);
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(loggedJson.message).toBe('Rejected invalid X-Request-Id');
+    consoleSpy.mockRestore();
   });
 
-  it('rejects request IDs with invalid characters', () => {
+  it('rejects request IDs with invalid characters and logs warning', () => {
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const req = { headers: { 'x-request-id': '<script>alert(1)</script>' } } as never;
     const id = getRequestId(req);
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    expect(loggedJson.message).toBe('Rejected invalid X-Request-Id');
+    consoleSpy.mockRestore();
   });
 
   it('accepts alphanumeric IDs with hyphens', () => {
