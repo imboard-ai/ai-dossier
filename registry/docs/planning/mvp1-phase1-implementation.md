@@ -64,6 +64,8 @@ Functions implemented:
 - `signJwt(payload)` - Create signed JWT with claims
 - `verifyJwt(token)` - Verify and decode JWT
 - `extractBearerToken(req)` - Extract token from Authorization header
+- `authenticateRequest(req, res)` - Verify JWT from request, send 401 with specific error codes (MISSING_TOKEN, TOKEN_EXPIRED, INVALID_TOKEN)
+- `authorizePublish(req, res, namespace)` - Authenticate and check namespace publish permission
 - `encodeAsDisplayCode(token)` - Base64url encode JWT for display
 - `decodeDisplayCode(code)` - Decode display code back to JWT
 - `exchangeGitHubCode(code)` - Exchange OAuth code for access token
