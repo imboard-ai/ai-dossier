@@ -56,15 +56,20 @@ describe('path.posix.normalize behavior for sanitizePath', () => {
 });
 
 describe('CORS restriction', () => {
-  it('does not set Access-Control-Allow-Origin for unknown origins', async () => {
-    const { setCorsHeaders } = await import('../lib/cors');
+  function createMockReqRes(origin?: string) {
     const headers: Record<string, string> = {};
-    const req = { headers: { origin: 'https://evil.com' } } as any;
+    const req = { headers: origin ? { origin } : {} } as any;
     const res = {
       setHeader: (key: string, value: string) => {
         headers[key] = value;
       },
     } as any;
+    return { headers, req, res };
+  }
+
+  it('does not set Access-Control-Allow-Origin for unknown origins', async () => {
+    const { setCorsHeaders } = await import('../lib/cors');
+    const { headers, req, res } = createMockReqRes('https://evil.com');
 
     setCorsHeaders(req, res);
 
@@ -74,13 +79,7 @@ describe('CORS restriction', () => {
 
   it('sets Access-Control-Allow-Origin for allowed origins', async () => {
     const { setCorsHeaders } = await import('../lib/cors');
-    const headers: Record<string, string> = {};
-    const req = { headers: { origin: 'https://dossier.imboard.ai' } } as any;
-    const res = {
-      setHeader: (key: string, value: string) => {
-        headers[key] = value;
-      },
-    } as any;
+    const { headers, req, res } = createMockReqRes('https://dossier.imboard.ai');
 
     setCorsHeaders(req, res);
 
@@ -94,13 +93,7 @@ describe('CORS restriction', () => {
 
     // Re-import to pick up env var change
     const cors = await import('../lib/cors');
-    const headers: Record<string, string> = {};
-    const req = { headers: { origin: 'https://custom.example.com' } } as any;
-    const res = {
-      setHeader: (key: string, value: string) => {
-        headers[key] = value;
-      },
-    } as any;
+    const { headers, req, res } = createMockReqRes('https://custom.example.com');
 
     cors.setCorsHeaders(req, res);
 
@@ -116,13 +109,7 @@ describe('CORS restriction', () => {
 
   it('does not set origin header when no origin in request', async () => {
     const { setCorsHeaders } = await import('../lib/cors');
-    const headers: Record<string, string> = {};
-    const req = { headers: {} } as any;
-    const res = {
-      setHeader: (key: string, value: string) => {
-        headers[key] = value;
-      },
-    } as any;
+    const { headers, req, res } = createMockReqRes();
 
     setCorsHeaders(req, res);
 

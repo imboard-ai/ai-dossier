@@ -33,6 +33,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return handleDelete(req, res, dossierName, version as string);
   }
 
+  return handleGet(res, dossierName, version as string | undefined, isContentRequest);
+}
+
+async function handleGet(
+  res: VercelResponse,
+  dossierName: string,
+  version: string | undefined,
+  isContentRequest: boolean
+) {
   try {
     const manifest = await github.getManifest();
     const dossierEntry = manifest.dossiers.find((d) => d.name === dossierName);
@@ -92,22 +101,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 }
 
+async function authorizePublish(
+  req: VercelRequest,
+  res: VercelResponse,
+  dossierName: string
+): Promise<boolean> {
+  const jwtPayload = await authenticateRequest(req, res);
+  if (!jwtPayload) return false;
+
+  const rootNamespace = getRootNamespace(dossierName);
+  const permission = canPublishTo(jwtPayload, rootNamespace);
+  if (!permission.allowed) {
+    res.status(403).json({
+      error: { code: 'FORBIDDEN', message: permission.reason },
+    });
+    return false;
+  }
+
+  return true;
+}
+
 async function handleDelete(
   req: VercelRequest,
   res: VercelResponse,
   dossierName: string,
   version: string | undefined
 ) {
-  const jwtPayload = await authenticateRequest(req, res);
-  if (!jwtPayload) return;
-
-  const rootNamespace = getRootNamespace(dossierName);
-  const permission = canPublishTo(jwtPayload, rootNamespace);
-  if (!permission.allowed) {
-    return res.status(403).json({
-      error: { code: 'FORBIDDEN', message: permission.reason },
-    });
-  }
+  const authorized = await authorizePublish(req, res, dossierName);
+  if (!authorized) return;
 
   try {
     const result = await github.deleteDossier(dossierName, version || null);
