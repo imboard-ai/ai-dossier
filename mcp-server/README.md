@@ -41,7 +41,7 @@ LLM:  "Found project-init dossier v1.0.0. Analyzing prerequisites..."
 ### 🛠️ Tools
 
 - **`list_dossiers`** - Discover available dossiers
-- **`read_dossier`** - Get dossier content and metadata
+- **`read_dossier`** - Get dossier content and metadata. Returns `security_notices` when undeclared external URLs are detected in the body.
 - **`get_registry`** - Understand dossier relationships
 - **`validate_dossier`** - Check specification compliance
 - **`verify_dossier`** - 🔒 Verify integrity and authenticity (security)
