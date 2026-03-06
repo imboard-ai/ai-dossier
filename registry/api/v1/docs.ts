@@ -120,7 +120,7 @@ const publishDossierEndpoint = {
   errors: {
     400: 'MISSING_FIELD, INVALID_FIELD, INVALID_NAMESPACE, INVALID_CONTENT, CHANGELOG_TOO_LONG',
     401: 'MISSING_TOKEN, INVALID_TOKEN, TOKEN_EXPIRED',
-    403: 'FORBIDDEN - Cannot publish to this namespace',
+    403: 'FORBIDDEN - Cannot publish to this namespace (includes `namespace` field)',
     413: 'CONTENT_TOO_LARGE - Max 1MB',
     502: 'PUBLISH_ERROR - Includes request_id for log correlation',
   },
@@ -140,7 +140,7 @@ const deleteDossierEndpoint = {
   },
   errors: {
     401: 'MISSING_TOKEN, INVALID_TOKEN, TOKEN_EXPIRED',
-    403: 'FORBIDDEN - Cannot delete from this namespace',
+    403: 'FORBIDDEN - Cannot delete from this namespace (includes `namespace` field)',
     404: 'DOSSIER_NOT_FOUND, VERSION_NOT_FOUND',
     502: 'DELETE_ERROR - Includes request_id for log correlation',
   },

@@ -298,8 +298,9 @@ Same three distinct error codes as `GET /api/v1/me` above (`MISSING_TOKEN`, `TOK
 ```json
 {
   "error": {
-    "code": "NAMESPACE_FORBIDDEN",
-    "message": "You don't have permission to publish to 'other-org/*'"
+    "code": "FORBIDDEN",
+    "message": "Cannot publish to namespace 'other-org/some-dossier'",
+    "namespace": "other-org/some-dossier"
   }
 }
 ```
