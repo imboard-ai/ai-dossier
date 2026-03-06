@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock config before importing github
 vi.mock('../lib/config', () => ({
@@ -118,5 +118,59 @@ describe('getManifest', () => {
     });
 
     await expect(getManifest()).rejects.toThrow(/Failed to parse manifest/);
+  });
+});
+
+describe('PathTraversalError', () => {
+  it('should be an instance of Error with name PathTraversalError', async () => {
+    const { PathTraversalError } = await import('../lib/github');
+    const err = new PathTraversalError('../etc/passwd');
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe('PathTraversalError');
+    expect(err.message).toContain('../etc/passwd');
+  });
+
+  it('should be thrown by sanitizePath via getFileContent', async () => {
+    const { getFileContent, PathTraversalError } = await import('../lib/github');
+    await expect(getFileContent('../etc/passwd')).rejects.toThrow(PathTraversalError);
+  });
+});
+
+describe('githubRequest - non-OK response logging', () => {
+  it('should log non-OK responses to console.error', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { getFileContent } = await import('../lib/github');
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 403,
+      statusText: 'Forbidden',
+      text: () => Promise.resolve('rate limit'),
+    });
+
+    try {
+      await getFileContent('some/path');
+    } catch {
+      // expected
+    }
+
+    expect(consoleSpy).toHaveBeenCalledWith(expect.stringContaining('GitHub API request failed'));
+    consoleSpy.mockRestore();
+  });
+});
+
+describe('deleteFile - non-JSON error response', () => {
+  it('should handle non-JSON error responses gracefully', async () => {
+    const { deleteFile } = await import('../lib/github');
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      json: () => Promise.reject(new Error('not json')),
+      text: () => Promise.resolve('plain text error'),
+    });
+
+    await expect(deleteFile('valid/path', 'msg', 'sha')).rejects.toThrow(
+      /GitHub API error: 500 - plain text error/
+    );
   });
 });

@@ -116,6 +116,11 @@ async function handlePublish(req: VercelRequest, res: VercelResponse) {
       published_at: new Date().toISOString(),
     });
   } catch (err) {
+    if (err instanceof github.PathTraversalError) {
+      return res.status(400).json({
+        error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
+      });
+    }
     console.error('Error publishing dossier:', err);
     return res.status(502).json({
       error: {
