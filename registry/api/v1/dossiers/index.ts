@@ -14,7 +14,7 @@ import {
   methodNotAllowed,
   serverError,
 } from '../../../lib/responses';
-import type { ManifestDossier, VercelRequest, VercelResponse } from '../../../lib/types';
+import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 const log = createLogger('dossiers/index');
 
@@ -133,12 +133,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
   const changelogMessage = sanitizedChangelog || 'No changelog provided';
 
   try {
-    await github.publishDossier(
-      fullPath,
-      content,
-      parsed.frontmatter as unknown as ManifestDossier,
-      changelogMessage
-    );
+    await github.publishDossier(fullPath, content, parsed.frontmatter, changelogMessage);
 
     log.info('Dossier published', {
       requestId,

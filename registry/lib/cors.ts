@@ -20,9 +20,13 @@ function getAllowedOrigins(): string[] {
  * Unknown origins receive no Allow-Origin header but still get the allowed methods/headers
  * so preflight responses are well-formed.
  */
-export function setCorsHeaders(req: VercelRequest, res: VercelResponse): void {
+export function setCorsHeaders(
+  req: VercelRequest,
+  res: VercelResponse,
+  allowedOrigins?: string[]
+): void {
   const origin = req.headers.origin;
-  const allowed = getAllowedOrigins();
+  const allowed = allowedOrigins ?? getAllowedOrigins();
 
   if (origin && allowed.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
@@ -51,7 +55,8 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  *   since CSRF is a browser-only attack vector.
  */
 export function handleCors(req: VercelRequest, res: VercelResponse): boolean {
-  setCorsHeaders(req, res);
+  const allowedOrigins = getAllowedOrigins();
+  setCorsHeaders(req, res, allowedOrigins);
 
   if (req.method === 'OPTIONS') {
     res.status(HTTP_STATUS.NO_CONTENT).end();
@@ -63,7 +68,7 @@ export function handleCors(req: VercelRequest, res: VercelResponse): boolean {
   // an Origin header come from non-browser clients (curl, CLI) which are not
   // susceptible to CSRF, so they are also allowed through.
   const origin = req.headers.origin;
-  if (origin && MUTATING_METHODS.has(req.method ?? '') && !getAllowedOrigins().includes(origin)) {
+  if (origin && MUTATING_METHODS.has(req.method ?? '') && !allowedOrigins.includes(origin)) {
     log.warn('Blocked mutating request from disallowed origin', { method: req.method, origin });
     res.status(HTTP_STATUS.FORBIDDEN).json({
       error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Origin not allowed for mutating requests' },

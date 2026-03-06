@@ -48,12 +48,17 @@ export interface Manifest {
   sha: string | null;
 }
 
+export interface GitHubCommitResponse {
+  content: { name: string; path: string; sha: string } | null;
+  commit: { sha: string; message: string };
+}
+
 export interface DeleteResult {
   found: boolean;
   version?: string | null;
   versionMismatch?: boolean;
   currentVersion?: string;
   requestedVersion?: string;
-  file?: unknown;
-  manifest?: unknown;
+  file?: GitHubCommitResponse;
+  manifest?: GitHubCommitResponse;
 }
