@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { authenticateRequest } from '../lib/auth';
 import { OAUTH_STATE_COOKIE } from '../lib/constants';
+import { createMockReq, createMockRes, findLogEntry } from './helpers/mocks';
 
 describe('successful mutation logging', () => {
   it('logs successful publish with structured data', async () => {
@@ -42,7 +43,7 @@ describe('successful mutation logging', () => {
     const handlerModule = await import('../api/v1/dossiers/index');
     const handler = handlerModule.default;
 
-    const req = {
+    const req = createMockReq({
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -53,35 +54,15 @@ describe('successful mutation logging', () => {
         namespace: 'testorg',
         content: '---\nname: my-dossier\nversion: 1.0.0\n---\n# Hello',
       },
-    } as any;
+    });
 
-    let statusCode = 0;
-    let body: any = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: () => {},
-    } as any;
+    const { res, getStatus } = createMockRes();
 
-    await handler(req, res);
+    await handler(req, res as any);
 
-    expect(statusCode).toBe(201);
+    expect(getStatus()).toBe(201);
 
-    const publishLog = consoleSpy.mock.calls
-      .map((call) => {
-        try {
-          return JSON.parse(call[0] as string);
-        } catch {
-          return null;
-        }
-      })
-      .find((entry) => entry?.message === 'Dossier published');
+    const publishLog = findLogEntry(consoleSpy, 'Dossier published');
 
     expect(publishLog).toBeDefined();
     expect(publishLog).toMatchObject({
@@ -127,39 +108,19 @@ describe('successful mutation logging', () => {
     const handlerModule = await import('../api/v1/dossiers/[...name]');
     const handler = handlerModule.default;
 
-    const req = {
+    const req = createMockReq({
       method: 'DELETE',
       query: { name: ['testorg', 'my-dossier'], version: '1.0.0' },
       headers: { authorization: 'Bearer valid-token', 'x-request-id': 'req-456' },
-    } as any;
+    });
 
-    let statusCode = 0;
-    let body: any = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: () => {},
-    } as any;
+    const { res, getStatus } = createMockRes();
 
-    await handler(req, res);
+    await handler(req, res as any);
 
-    expect(statusCode).toBe(200);
+    expect(getStatus()).toBe(200);
 
-    const deleteLog = consoleSpy.mock.calls
-      .map((call) => {
-        try {
-          return JSON.parse(call[0] as string);
-        } catch {
-          return null;
-        }
-      })
-      .find((entry) => entry?.message === 'Dossier deleted');
+    const deleteLog = findLogEntry(consoleSpy, 'Dossier deleted');
 
     expect(deleteLog).toBeDefined();
     expect(deleteLog).toMatchObject({
@@ -197,27 +158,17 @@ describe('auth error response includes namespace', () => {
     const authModule = await import('../lib/auth');
     const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const req = {
+    const req = createMockReq({
       headers: { authorization: 'Bearer valid-token' },
-    } as any;
+    });
 
-    let statusCode = 0;
-    let body: any = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = b;
-          },
-        };
-      },
-    } as any;
+    const { res, getStatus, getBody } = createMockRes();
 
-    const result = await authModule.authorizePublish(req, res, 'other-org/some-dossier');
+    const result = await authModule.authorizePublish(req, res as any, 'other-org/some-dossier');
 
     expect(result).toBe(false);
-    expect(statusCode).toBe(403);
+    expect(getStatus()).toBe(403);
+    const body = getBody() as { error: { namespace: string; code: string } };
     expect(body.error.namespace).toBe('other-org/some-dossier');
     expect(body.error.code).toBe('FORBIDDEN');
 
@@ -234,39 +185,25 @@ describe('error correlation IDs', () => {
 
     // Provide valid state so we reach the try/catch block (code exchange will fail)
     const state = crypto.randomBytes(32).toString('hex');
-    const req = {
+    const req = createMockReq({
       method: 'GET',
       query: { code: 'bad-code', state },
       headers: { cookie: `${OAUTH_STATE_COOKIE}=${state}` },
-    } as any;
+    });
 
-    let statusCode = 0;
-    let body = '';
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          send: (b: string) => {
-            body = b;
-          },
-          json: (b: any) => {
-            body = JSON.stringify(b);
-          },
-        };
-      },
-      setHeader: () => {},
-    } as any;
+    const { res, getStatus, getBody } = createMockRes();
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await handler(req, res);
+    await handler(req, res as any);
 
-    expect(statusCode).toBe(500);
+    expect(getStatus()).toBe(500);
 
     // Error page should contain a reference code (8 hex chars)
+    const body = getBody() as string;
     const refMatch = body.match(/Reference:\s*([a-f0-9]{8})/);
     expect(refMatch).not.toBeNull();
-    const errorRef = refMatch![1];
+    const errorRef = refMatch?.[1];
 
     // Console log should contain the same ref
     const logCall = consoleSpy.mock.calls.find((call) =>
@@ -307,28 +244,16 @@ describe('error correlation IDs', () => {
     const loginModule = await import('../api/auth/login');
     const handler = loginModule.default;
 
-    const req = { method: 'GET' } as any;
+    const req = createMockReq({ method: 'GET' });
 
-    let statusCode = 0;
-    let body: any = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: () => {},
-      redirect: () => {},
-    } as any;
+    const { res, getStatus, getBody } = createMockRes();
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    handler(req, res);
+    handler(req, res as any);
 
-    expect(statusCode).toBe(500);
+    expect(getStatus()).toBe(500);
+    const body = getBody() as { error: { ref: string } };
     expect(body.error.ref).toMatch(/^[a-f0-9]{8}$/);
 
     // Console log should contain the same ref
@@ -346,22 +271,86 @@ describe('error correlation IDs', () => {
   });
 });
 
+describe('search handler logging', () => {
+  it('logs search completed with structured data', async () => {
+    vi.resetModules();
+
+    vi.doMock('../lib/manifest', () => ({
+      fetchManifestDossiers: vi.fn().mockResolvedValue([
+        { name: 'test-dossier', title: 'Test Dossier', description: 'A test' },
+        { name: 'other-dossier', title: 'Other', description: 'Another' },
+      ]),
+      normalizeDossier: (d: any) => d,
+    }));
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const handlerModule = await import('../api/v1/search');
+    const handler = handlerModule.default;
+
+    const req = {
+      method: 'GET',
+      headers: { 'x-request-id': 'req-search-123' },
+      query: { q: 'test' },
+    } as any;
+
+    let statusCode = 0;
+    let body: any = {};
+    const res = {
+      status: (code: number) => {
+        statusCode = code;
+        return {
+          json: (b: any) => {
+            body = b;
+          },
+        };
+      },
+      setHeader: () => {},
+    } as any;
+
+    await handler(req, res);
+
+    expect(statusCode).toBe(200);
+
+    const searchLog = consoleSpy.mock.calls
+      .map((call) => {
+        try {
+          return JSON.parse(call[0] as string);
+        } catch {
+          return null;
+        }
+      })
+      .find((entry) => entry?.message === 'Search completed');
+
+    expect(searchLog).toBeDefined();
+    expect(searchLog).toMatchObject({
+      level: 'info',
+      context: 'search',
+      requestId: 'req-search-123',
+      query: 'test',
+      total: 1,
+    });
+
+    consoleSpy.mockRestore();
+    vi.doUnmock('../lib/manifest');
+  });
+});
+
 describe('auth failure logging', () => {
   it('logs missing token attempts', async () => {
     const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const req = { method: 'POST', url: '/api/v1/dossiers', headers: {} } as any;
-    let statusCode = 0;
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return { json: () => {} };
-      },
-    } as any;
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/v1/dossiers',
+      headers: {},
+    });
 
-    await authenticateRequest(req, res);
+    const { res, getStatus } = createMockRes();
 
-    expect(statusCode).toBe(401);
+    await authenticateRequest(req, res as any);
+
+    expect(getStatus()).toBe(401);
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
     expect(loggedJson).toMatchObject({
       level: 'warn',
@@ -391,22 +380,17 @@ describe('auth failure logging', () => {
     const authModule = await import('../lib/auth');
     const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const req = {
+    const req = createMockReq({
       method: 'DELETE',
       url: '/api/v1/dossiers/foo/bar',
       headers: { authorization: 'Bearer bad-token' },
-    } as any;
-    let statusCode = 0;
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return { json: () => {} };
-      },
-    } as any;
+    });
 
-    await authModule.authenticateRequest(req, res);
+    const { res, getStatus } = createMockRes();
 
-    expect(statusCode).toBe(401);
+    await authModule.authenticateRequest(req, res as any);
+
+    expect(getStatus()).toBe(401);
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
     expect(loggedJson).toMatchObject({
       level: 'warn',

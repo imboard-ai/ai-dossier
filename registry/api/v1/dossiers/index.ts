@@ -9,12 +9,13 @@ import { fetchManifestDossiers, normalizeDossier } from '../../../lib/manifest';
 import {
   badRequest,
   getRequestId,
+  invalidNamespaceError,
   invalidPathError,
   jsonError,
   methodNotAllowed,
   serverError,
 } from '../../../lib/responses';
-import type { ManifestDossier, VercelRequest, VercelResponse } from '../../../lib/types';
+import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 const log = createLogger('dossiers/index');
 
@@ -65,14 +66,19 @@ async function handleList(_req: VercelRequest, res: VercelResponse, requestId: s
 export type PublishInput = { namespace: string; content: string; changelog: string | undefined };
 
 /** Validates the publish request body and headers. Returns validated fields on success, or `null` after sending an error response. */
-export function validatePublishInput(req: VercelRequest, res: VercelResponse): PublishInput | null {
+export function validatePublishInput(
+  req: VercelRequest,
+  res: VercelResponse,
+  requestId: string
+): PublishInput | null {
   const contentType = req.headers['content-type'];
   if (!contentType || !contentType.includes('application/json')) {
     jsonError(
       res,
       HTTP_STATUS.UNSUPPORTED_MEDIA_TYPE,
       'UNSUPPORTED_MEDIA_TYPE',
-      `Content-Type must be application/json, received: ${contentType || '(none)'}`
+      `Content-Type must be application/json, received: ${contentType || '(none)'}`,
+      requestId
     );
     return null;
   }
@@ -80,17 +86,27 @@ export function validatePublishInput(req: VercelRequest, res: VercelResponse): P
   const { namespace, content, changelog } = req.body || {};
 
   if (!namespace || typeof namespace !== 'string') {
-    badRequest(res, 'MISSING_FIELD', 'Missing required field: namespace (must be a string)');
+    badRequest(
+      res,
+      'MISSING_FIELD',
+      'Missing required field: namespace (must be a string)',
+      requestId
+    );
     return null;
   }
 
   if (!content || typeof content !== 'string') {
-    badRequest(res, 'MISSING_FIELD', 'Missing required field: content (must be a string)');
+    badRequest(
+      res,
+      'MISSING_FIELD',
+      'Missing required field: content (must be a string)',
+      requestId
+    );
     return null;
   }
 
   if (changelog !== undefined && typeof changelog !== 'string') {
-    badRequest(res, 'INVALID_FIELD', 'Field changelog must be a string');
+    badRequest(res, 'INVALID_FIELD', 'Field changelog must be a string', requestId);
     return null;
   }
 
@@ -98,7 +114,8 @@ export function validatePublishInput(req: VercelRequest, res: VercelResponse): P
     badRequest(
       res,
       'CHANGELOG_TOO_LONG',
-      `Changelog exceeds maximum length of ${MAX_CHANGELOG_LENGTH} characters`
+      `Changelog exceeds maximum length of ${MAX_CHANGELOG_LENGTH} characters`,
+      requestId
     );
     return null;
   }
@@ -108,14 +125,15 @@ export function validatePublishInput(req: VercelRequest, res: VercelResponse): P
       res,
       HTTP_STATUS.CONTENT_TOO_LARGE,
       'CONTENT_TOO_LARGE',
-      `Content exceeds maximum size of ${MAX_CONTENT_SIZE / 1024}KB`
+      `Content exceeds maximum size of ${MAX_CONTENT_SIZE / 1024}KB`,
+      requestId
     );
     return null;
   }
 
   const namespaceValidation = dossier.validateNamespace(namespace);
   if (!namespaceValidation.valid) {
-    badRequest(res, 'INVALID_NAMESPACE', namespaceValidation.error ?? 'Invalid namespace');
+    invalidNamespaceError(res, requestId, namespaceValidation.error);
     return null;
   }
 
@@ -123,44 +141,40 @@ export function validatePublishInput(req: VercelRequest, res: VercelResponse): P
 }
 
 async function handlePublish(req: VercelRequest, res: VercelResponse, requestId: string) {
-  const input = validatePublishInput(req, res);
-  if (!input) {
-    log.warn('Publish validation failed', { requestId });
-    return;
-  }
+  const input = validatePublishInput(req, res, requestId);
+  if (!input) return;
 
   const { namespace, content, changelog } = input;
 
-  const authorized = await authorizePublish(req, res, namespace);
-  if (!authorized) return;
-
-  let parsed: ReturnType<typeof dossier.parseFrontmatter>;
   try {
-    parsed = dossier.parseFrontmatter(content);
-  } catch (err) {
-    return badRequest(res, 'INVALID_CONTENT', err instanceof Error ? err.message : String(err));
-  }
+    const authorized = await authorizePublish(req, res, namespace);
+    if (!authorized) return;
 
-  const validation = dossier.validateDossier(parsed.frontmatter);
-  if (!validation.valid) {
-    return badRequest(res, 'INVALID_CONTENT', validation.errors.join('; '));
-  }
+    let parsed: ReturnType<typeof dossier.parseFrontmatter>;
+    try {
+      parsed = dossier.parseFrontmatter(content);
+    } catch (err) {
+      return badRequest(
+        res,
+        'INVALID_CONTENT',
+        err instanceof Error ? err.message : String(err),
+        requestId
+      );
+    }
 
-  const fullPath = dossier.buildFullName(namespace, parsed.frontmatter.name as string);
-  // Strip control characters (except space) to prevent git commit message injection
-  const sanitizedChangelog = changelog ? changelog.replace(CONTROL_CHARS, '').trim() : '';
-  if (changelog && sanitizedChangelog !== changelog) {
-    log.warn('Stripped control characters from changelog', { requestId, namespace });
-  }
-  const changelogMessage = sanitizedChangelog || 'No changelog provided';
+    const validation = dossier.validateDossier(parsed.frontmatter);
+    if (!validation.valid) {
+      return badRequest(res, 'INVALID_CONTENT', validation.errors.join('; '), requestId);
+    }
 
-  try {
-    await github.publishDossier(
-      fullPath,
-      content,
-      parsed.frontmatter as unknown as ManifestDossier,
-      changelogMessage
-    );
+    const fullPath = dossier.buildFullName(namespace, parsed.frontmatter.name as string);
+    // Strip control characters (except space) to prevent git commit message injection
+    const sanitizedChangelog = changelog ? changelog.replace(CONTROL_CHARS, '').trim() : '';
+    if (changelog && sanitizedChangelog !== changelog) {
+      log.warn('Stripped control characters from changelog', { requestId, namespace });
+    }
+    const changelogMessage = sanitizedChangelog || 'No changelog provided';
+    await github.publishDossier(fullPath, content, parsed.frontmatter, changelogMessage);
 
     log.info('Dossier published', {
       requestId,
@@ -186,7 +200,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       code: 'PUBLISH_ERROR',
       message: 'Failed to publish dossier',
       requestId,
-      context: { namespace, path: fullPath },
+      context: { namespace },
     });
   }
 }

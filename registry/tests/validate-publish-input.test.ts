@@ -26,7 +26,7 @@ describe('validatePublishInput', () => {
   it('returns validated fields for a valid request', () => {
     const req = makeReq();
     const { res } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toEqual({
       namespace: 'test-org',
       content: validBody.content,
@@ -38,7 +38,7 @@ describe('validatePublishInput', () => {
     const body = { ...validBody, changelog: 'Updated docs' };
     const req = makeReq({ body });
     const { res } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).not.toBeNull();
     expect(result?.changelog).toBe('Updated docs');
   });
@@ -46,7 +46,7 @@ describe('validatePublishInput', () => {
   it('rejects missing content-type', () => {
     const req = makeReq({ headers: {} });
     const { res, getStatus, getBody } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toBeNull();
     expect(getStatus()).toBe(415);
     expect(errorCode(getBody())).toBe('UNSUPPORTED_MEDIA_TYPE');
@@ -55,7 +55,7 @@ describe('validatePublishInput', () => {
   it('rejects wrong content-type', () => {
     const req = makeReq({ headers: { 'content-type': 'text/plain' } });
     const { res, getStatus } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toBeNull();
     expect(getStatus()).toBe(415);
   });
@@ -63,7 +63,7 @@ describe('validatePublishInput', () => {
   it('rejects missing namespace', () => {
     const req = makeReq({ body: { content: 'x' } });
     const { res, getStatus, getBody } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toBeNull();
     expect(getStatus()).toBe(400);
     expect(errorCode(getBody())).toBe('MISSING_FIELD');
@@ -72,7 +72,7 @@ describe('validatePublishInput', () => {
   it('rejects non-string namespace', () => {
     const req = makeReq({ body: { namespace: 123, content: 'x' } });
     const { res, getStatus } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toBeNull();
     expect(getStatus()).toBe(400);
   });
@@ -80,7 +80,7 @@ describe('validatePublishInput', () => {
   it('rejects missing content', () => {
     const req = makeReq({ body: { namespace: 'test-org' } });
     const { res, getStatus, getBody } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toBeNull();
     expect(getStatus()).toBe(400);
     expect(errorCode(getBody())).toBe('MISSING_FIELD');
@@ -89,7 +89,7 @@ describe('validatePublishInput', () => {
   it('rejects non-string changelog', () => {
     const req = makeReq({ body: { ...validBody, changelog: 42 } });
     const { res, getStatus, getBody } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toBeNull();
     expect(getStatus()).toBe(400);
     expect(errorCode(getBody())).toBe('INVALID_FIELD');
@@ -100,7 +100,7 @@ describe('validatePublishInput', () => {
       body: { ...validBody, changelog: 'a'.repeat(MAX_CHANGELOG_LENGTH + 1) },
     });
     const { res, getStatus, getBody } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toBeNull();
     expect(getStatus()).toBe(400);
     expect(errorCode(getBody())).toBe('CHANGELOG_TOO_LONG');
@@ -111,7 +111,7 @@ describe('validatePublishInput', () => {
       body: { namespace: 'test-org', content: 'x'.repeat(MAX_CONTENT_SIZE + 1) },
     });
     const { res, getStatus, getBody } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toBeNull();
     expect(getStatus()).toBe(413);
     expect(errorCode(getBody())).toBe('CONTENT_TOO_LARGE');
@@ -120,7 +120,7 @@ describe('validatePublishInput', () => {
   it('rejects invalid namespace format', () => {
     const req = makeReq({ body: { namespace: '../../etc/passwd', content: 'x' } });
     const { res, getStatus, getBody } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toBeNull();
     expect(getStatus()).toBe(400);
     expect(errorCode(getBody())).toBe('INVALID_NAMESPACE');
@@ -132,7 +132,7 @@ describe('validatePublishInput', () => {
       headers: { 'content-type': 'application/json' },
     }) as unknown as VercelRequest;
     const { res, getStatus } = createMockRes();
-    const result = validatePublishInput(req, res as unknown as VercelResponse);
+    const result = validatePublishInput(req, res as unknown as VercelResponse, 'test-req-id');
     expect(result).toBeNull();
     expect(getStatus()).toBe(400);
   });

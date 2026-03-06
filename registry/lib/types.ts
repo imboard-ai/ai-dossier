@@ -10,10 +10,7 @@ export interface JwtPayload {
   exp?: number;
 }
 
-export interface NamespaceValidation {
-  valid: boolean;
-  error: string | null;
-}
+export type NamespaceValidation = { valid: true; error: null } | { valid: false; error: string };
 
 export interface DossierValidation {
   valid: boolean;
@@ -48,12 +45,17 @@ export interface Manifest {
   sha: string | null;
 }
 
+export interface GitHubCommitResponse {
+  content: { name: string; path: string; sha: string } | null;
+  commit: { sha: string; message: string };
+}
+
 export interface DeleteResult {
   found: boolean;
   version?: string | null;
   versionMismatch?: boolean;
   currentVersion?: string;
   requestedVersion?: string;
-  file?: unknown;
-  manifest?: unknown;
+  file?: GitHubCommitResponse;
+  manifest?: GitHubCommitResponse;
 }

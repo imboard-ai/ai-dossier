@@ -1,8 +1,16 @@
 import path from 'node:path';
+import type { DossierFrontmatter } from '@ai-dossier/core';
+import { getErrorMessage } from '@ai-dossier/core';
 import config from './config';
 import { DOSSIER_DEFAULTS, GITHUB_API_VERSION, USER_AGENT } from './constants';
 import createLogger from './logger';
-import type { DeleteResult, FileContent, Manifest, ManifestDossier } from './types';
+import type {
+  DeleteResult,
+  FileContent,
+  GitHubCommitResponse,
+  Manifest,
+  ManifestDossier,
+} from './types';
 
 const log = createLogger('github');
 
@@ -21,6 +29,17 @@ function sanitizePath(filePath: string): string {
   return normalized;
 }
 
+async function throwGitHubApiError(response: Response): Promise<never> {
+  let errorMessage: string;
+  try {
+    const data = (await response.json()) as { message?: string };
+    errorMessage = data.message || JSON.stringify(data);
+  } catch {
+    errorMessage = await response.text().catch(() => 'unknown error');
+  }
+  throw new Error(`GitHub API error: ${response.status} - ${errorMessage}`);
+}
+
 async function githubRequest(endpoint: string, options: RequestInit = {}): Promise<Response> {
   const url = endpoint.startsWith('http') ? endpoint : `${config.auth.github.apiUrl}${endpoint}`;
 
@@ -37,8 +56,7 @@ async function githubRequest(endpoint: string, options: RequestInit = {}): Promi
       },
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`GitHub API request failed for ${url}: ${message}`);
+    throw new Error(`GitHub API request failed for ${url}: ${getErrorMessage(err)}`);
   }
 
   if (!response.ok) {
@@ -74,7 +92,11 @@ export async function getFileContent(filePath: string): Promise<FileContent | nu
   };
 }
 
-export async function deleteFile(filePath: string, message: string, sha: string): Promise<unknown> {
+export async function deleteFile(
+  filePath: string,
+  message: string,
+  sha: string
+): Promise<GitHubCommitResponse> {
   const safePath = sanitizePath(filePath);
   const { org, repo } = config.content;
 
@@ -84,17 +106,10 @@ export async function deleteFile(filePath: string, message: string, sha: string)
   });
 
   if (!response.ok) {
-    let errorMessage: string;
-    try {
-      const data = (await response.json()) as { message?: string };
-      errorMessage = data.message || JSON.stringify(data);
-    } catch {
-      errorMessage = await response.text().catch(() => 'unknown error');
-    }
-    throw new Error(`GitHub API error: ${response.status} - ${errorMessage}`);
+    await throwGitHubApiError(response);
   }
 
-  return response.json();
+  return response.json() as Promise<GitHubCommitResponse>;
 }
 
 export async function createOrUpdateFile(
@@ -102,7 +117,7 @@ export async function createOrUpdateFile(
   content: string,
   message: string,
   sha: string | null = null
-): Promise<unknown> {
+): Promise<GitHubCommitResponse> {
   const safePath = sanitizePath(filePath);
   const { org, repo } = config.content;
   const body: Record<string, string> = {
@@ -120,17 +135,10 @@ export async function createOrUpdateFile(
   });
 
   if (!response.ok) {
-    let errorMessage: string;
-    try {
-      const data = (await response.json()) as { message?: string };
-      errorMessage = data.message || JSON.stringify(data);
-    } catch {
-      errorMessage = await response.text().catch(() => 'unknown error');
-    }
-    throw new Error(`GitHub API error: ${response.status} - ${errorMessage}`);
+    await throwGitHubApiError(response);
   }
 
-  return response.json();
+  return response.json() as Promise<GitHubCommitResponse>;
 }
 
 export async function getManifest(): Promise<Manifest> {
@@ -144,8 +152,7 @@ export async function getManifest(): Promise<Manifest> {
   try {
     manifest = JSON.parse(result.content);
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
-    throw new Error(`Failed to parse manifest (index.json): ${message}`);
+    throw new Error(`Failed to parse manifest (index.json): ${getErrorMessage(e)}`);
   }
   return { ...manifest, sha: result.sha };
 }
@@ -153,7 +160,7 @@ export async function getManifest(): Promise<Manifest> {
 export async function updateManifest(
   currentManifest: Manifest,
   dossierEntry: ManifestDossier
-): Promise<unknown> {
+): Promise<GitHubCommitResponse> {
   const { sha, ...manifest } = currentManifest;
 
   const existingIndex = manifest.dossiers.findIndex((d) => d.name === dossierEntry.name);
@@ -178,7 +185,7 @@ export async function updateManifest(
 export async function removeFromManifest(
   currentManifest: Manifest,
   dossierName: string
-): Promise<unknown> {
+): Promise<GitHubCommitResponse> {
   const { sha, ...manifest } = currentManifest;
 
   const existingIndex = manifest.dossiers.findIndex((d) => d.name === dossierName);
@@ -198,9 +205,9 @@ export async function removeFromManifest(
 export async function publishDossier(
   fullPath: string,
   content: string,
-  metadata: ManifestDossier,
+  metadata: DossierFrontmatter,
   changelog: string
-): Promise<{ file: unknown; manifest: unknown }> {
+): Promise<{ file: GitHubCommitResponse; manifest: GitHubCommitResponse }> {
   const filePath = `${fullPath}.ds.md`;
 
   const existing = await getFileContent(filePath);
@@ -238,14 +245,13 @@ export async function publishDossier(
     }
   }
 
-  let manifestResult: unknown;
+  let manifestResult: GitHubCommitResponse;
   try {
     manifestResult = await updateManifest(manifest, dossierEntry);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
     log.error('File written but manifest update failed — orphaned file needs cleanup', {
       filePath,
-      error: message,
+      error: getErrorMessage(err),
     });
     throw err;
   }
@@ -296,14 +302,13 @@ export async function deleteDossier(
   log.info('Content file deleted', { step: '1/2' });
 
   log.info('Removing from manifest', { step: '2/2', dossier: dossierName });
-  let manifestResult: unknown;
+  let manifestResult: GitHubCommitResponse;
   try {
     manifestResult = await removeFromManifest(manifest, dossierName);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
     log.error('File deleted but manifest update failed — manual cleanup required', {
       filePath,
-      error: message,
+      error: getErrorMessage(err),
     });
     throw err;
   }

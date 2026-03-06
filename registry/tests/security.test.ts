@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MAX_CHANGELOG_LENGTH, MAX_QUERY_LENGTH, OAUTH_STATE_COOKIE } from '../lib/constants';
 import { validateNamespace } from '../lib/dossier';
 import { createMockReq, createMockRes } from './helpers/mocks';
@@ -402,6 +402,67 @@ describe('CORS headers not leaked to disallowed origins', () => {
     expect(headers['Access-Control-Allow-Methods']).toBeDefined();
     expect(headers['Access-Control-Allow-Headers']).toBeDefined();
     expect(headers.Vary).toBe('Origin');
+  });
+});
+
+describe('CORS_ALLOWED_ORIGINS empty entry filtering', () => {
+  it('filters out empty entries from trailing commas', async () => {
+    const originalEnv = process.env.CORS_ALLOWED_ORIGINS;
+    process.env.CORS_ALLOWED_ORIGINS = 'https://a.example.com,,https://b.example.com,';
+
+    vi.resetModules();
+    const cors = await import('../lib/cors');
+    const { headers, req, res } = createCorsReqRes('https://a.example.com');
+
+    cors.setCorsHeaders(req, res);
+
+    expect(headers['Access-Control-Allow-Origin']).toBe('https://a.example.com');
+
+    // Empty string should NOT match
+    const { headers: emptyHeaders, req: emptyReq, res: emptyRes } = createCorsReqRes('');
+    cors.setCorsHeaders(emptyReq, emptyRes);
+    expect(emptyHeaders['Access-Control-Allow-Origin']).toBeUndefined();
+
+    if (originalEnv === undefined) {
+      delete process.env.CORS_ALLOWED_ORIGINS;
+    } else {
+      process.env.CORS_ALLOWED_ORIGINS = originalEnv;
+    }
+  });
+
+  it('logs warning when empty entries are present', async () => {
+    const originalEnv = process.env.CORS_ALLOWED_ORIGINS;
+    process.env.CORS_ALLOWED_ORIGINS = 'https://a.example.com,,';
+
+    vi.resetModules();
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const cors = await import('../lib/cors');
+    const { req, res } = createCorsReqRes('https://a.example.com');
+    cors.setCorsHeaders(req, res);
+
+    const warningLog = consoleSpy.mock.calls
+      .map((call) => {
+        try {
+          return JSON.parse(call[0] as string);
+        } catch {
+          return null;
+        }
+      })
+      .find(
+        (entry) => entry?.message === 'CORS_ALLOWED_ORIGINS contains empty entries — filtered out'
+      );
+
+    expect(warningLog).toBeDefined();
+    expect(warningLog.raw).toBe(3);
+    expect(warningLog.filtered).toBe(1);
+
+    consoleSpy.mockRestore();
+    if (originalEnv === undefined) {
+      delete process.env.CORS_ALLOWED_ORIGINS;
+    } else {
+      process.env.CORS_ALLOWED_ORIGINS = originalEnv;
+    }
   });
 });
 
