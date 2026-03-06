@@ -14,5 +14,6 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
     scope: config.auth.github.scopes,
   });
 
+  console.log(`[auth/login] Redirecting to GitHub OAuth`);
   res.redirect(`https://github.com/login/oauth/authorize?${params}`);
 }

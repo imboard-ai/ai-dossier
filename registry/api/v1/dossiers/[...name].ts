@@ -82,7 +82,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       content_url: config.getCdnUrl(dossierEntry.path),
     });
   } catch (error) {
-    console.error('Error fetching dossier:', error);
+    console.error(`[dossier/get] Error fetching '${dossierName}':`, error);
     return res.status(502).json({
       error: {
         code: 'UPSTREAM_ERROR',
@@ -141,7 +141,7 @@ async function handleDelete(
 
     return res.status(200).json(response);
   } catch (err) {
-    console.error('Error deleting dossier:', err);
+    console.error(`[dossier/delete] Error deleting '${dossierName}':`, err);
     return res.status(502).json({
       error: {
         code: 'DELETE_ERROR',
