@@ -3,6 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { OAUTH_STATE_COOKIE } from '../lib/constants';
 import { validateNamespace } from '../lib/dossier';
+import { createMockReq, createMockRes } from './helpers/mocks';
 
 describe('path traversal defense (sanitizePath)', () => {
   // We test via the exported getFileContent which internally calls sanitizePath.
@@ -58,20 +59,20 @@ describe('path.posix.normalize behavior for sanitizePath', () => {
 });
 
 describe('CORS restriction', () => {
-  function createMockReqRes(origin?: string) {
-    const headers: Record<string, string> = {};
-    const req = { headers: origin ? { origin } : {} } as any;
+  function createCorsReqRes(origin?: string) {
+    const resHeaders: Record<string, string> = {};
+    const req = createMockReq({ headers: origin ? { origin } : {} });
     const res = {
       setHeader: (key: string, value: string) => {
-        headers[key] = value;
+        resHeaders[key] = value;
       },
-    } as any;
-    return { headers, req, res };
+    };
+    return { headers: resHeaders, req, res };
   }
 
   it('does not set Access-Control-Allow-Origin for unknown origins', async () => {
     const { setCorsHeaders } = await import('../lib/cors');
-    const { headers, req, res } = createMockReqRes('https://evil.com');
+    const { headers, req, res } = createCorsReqRes('https://evil.com');
 
     setCorsHeaders(req, res);
 
@@ -81,7 +82,7 @@ describe('CORS restriction', () => {
 
   it('sets Access-Control-Allow-Origin for allowed origins', async () => {
     const { setCorsHeaders } = await import('../lib/cors');
-    const { headers, req, res } = createMockReqRes('https://dossier.imboard.ai');
+    const { headers, req, res } = createCorsReqRes('https://dossier.imboard.ai');
 
     setCorsHeaders(req, res);
 
@@ -95,7 +96,7 @@ describe('CORS restriction', () => {
 
     // Re-import to pick up env var change
     const cors = await import('../lib/cors');
-    const { headers, req, res } = createMockReqRes('https://custom.example.com');
+    const { headers, req, res } = createCorsReqRes('https://custom.example.com');
 
     cors.setCorsHeaders(req, res);
 
@@ -111,7 +112,7 @@ describe('CORS restriction', () => {
 
   it('does not set origin header when no origin in request', async () => {
     const { setCorsHeaders } = await import('../lib/cors');
-    const { headers, req, res } = createMockReqRes();
+    const { headers, req, res } = createCorsReqRes();
 
     setCorsHeaders(req, res);
 
@@ -120,14 +121,11 @@ describe('CORS restriction', () => {
 });
 
 describe('CORS mutating request rejection', () => {
-  function createMockReqResFull(method: string, origin?: string) {
+  function createCorsMutatingReqRes(method: string, origin?: string) {
     let statusCode = 0;
-    let body: any = null;
+    let body: unknown = null;
     const resHeaders: Record<string, string> = {};
-    const req = {
-      method,
-      headers: origin ? { origin } : {},
-    } as any;
+    const req = createMockReq({ method, headers: origin ? { origin } : {} });
     const res = {
       setHeader: (key: string, value: string) => {
         resHeaders[key] = value;
@@ -135,30 +133,36 @@ describe('CORS mutating request rejection', () => {
       status: (code: number) => {
         statusCode = code;
         return {
-          json: (b: any) => {
+          json: (b: unknown) => {
             body = b;
           },
           end: () => {},
         };
       },
-    } as any;
-    return { req, res, getStatus: () => statusCode, getBody: () => body, resHeaders };
+    };
+    return {
+      req,
+      res,
+      getStatus: () => statusCode,
+      getBody: () => body as Record<string, unknown>,
+      resHeaders,
+    };
   }
 
   it('rejects POST from disallowed origin', async () => {
     const { handleCors } = await import('../lib/cors');
-    const { req, res, getStatus, getBody } = createMockReqResFull('POST', 'https://evil.com');
+    const { req, res, getStatus, getBody } = createCorsMutatingReqRes('POST', 'https://evil.com');
 
     const handled = handleCors(req, res);
 
     expect(handled).toBe(true);
     expect(getStatus()).toBe(403);
-    expect(getBody().error.code).toBe('ORIGIN_NOT_ALLOWED');
+    expect((getBody().error as Record<string, unknown>).code).toBe('ORIGIN_NOT_ALLOWED');
   });
 
   it('rejects DELETE from disallowed origin', async () => {
     const { handleCors } = await import('../lib/cors');
-    const { req, res, getStatus } = createMockReqResFull('DELETE', 'https://evil.com');
+    const { req, res, getStatus } = createCorsMutatingReqRes('DELETE', 'https://evil.com');
 
     const handled = handleCors(req, res);
 
@@ -168,7 +172,7 @@ describe('CORS mutating request rejection', () => {
 
   it('allows GET from disallowed origin (read-only)', async () => {
     const { handleCors } = await import('../lib/cors');
-    const { req, res, getStatus } = createMockReqResFull('GET', 'https://evil.com');
+    const { req, res, getStatus } = createCorsMutatingReqRes('GET', 'https://evil.com');
 
     const handled = handleCors(req, res);
 
@@ -178,7 +182,7 @@ describe('CORS mutating request rejection', () => {
 
   it('allows POST from allowed origin', async () => {
     const { handleCors } = await import('../lib/cors');
-    const { req, res, getStatus } = createMockReqResFull('POST', 'https://dossier.imboard.ai');
+    const { req, res, getStatus } = createCorsMutatingReqRes('POST', 'https://dossier.imboard.ai');
 
     const handled = handleCors(req, res);
 
@@ -188,7 +192,7 @@ describe('CORS mutating request rejection', () => {
 
   it('allows POST without origin (non-browser client)', async () => {
     const { handleCors } = await import('../lib/cors');
-    const { req, res, getStatus } = createMockReqResFull('POST');
+    const { req, res, getStatus } = createCorsMutatingReqRes('POST');
 
     const handled = handleCors(req, res);
 
@@ -235,43 +239,6 @@ describe('Content-Type and body field validation', () => {
 });
 
 describe('OAuth state parameter (CSRF protection)', () => {
-  function createMockReq(
-    overrides: Partial<{
-      method: string;
-      query: Record<string, string>;
-      headers: Record<string, string>;
-    }> = {}
-  ) {
-    return {
-      method: overrides.method ?? 'GET',
-      query: overrides.query ?? {},
-      headers: overrides.headers ?? {},
-    } as any;
-  }
-
-  function createMockRes() {
-    let statusCode = 0;
-    let body = '';
-    const headers: Record<string, string> = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = JSON.stringify(b);
-          },
-          send: (b: string) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: (key: string, value: string) => {
-        headers[key] = value;
-      },
-    } as any;
-    return { res, getStatus: () => statusCode, getBody: () => body, headers };
-  }
-
   it('login handler sets state cookie and includes state in redirect URL', async () => {
     const loginModule = await import('../api/auth/login');
     const handler = loginModule.default;
@@ -282,7 +249,7 @@ describe('OAuth state parameter (CSRF protection)', () => {
     const req = createMockReq();
     let redirectUrl = '';
     const { res, headers } = createMockRes();
-    res.redirect = (url: string) => {
+    (res as Record<string, unknown>).redirect = (url: string) => {
       redirectUrl = url;
     };
 

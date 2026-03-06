@@ -1,24 +1,12 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import config from '../lib/config';
-
-function createMockReq(method = 'GET', host = 'registry.example.com') {
-  return { method, headers: { host } } as any;
-}
-
-function createMockRes() {
-  const res: any = {};
-  res.status = vi.fn().mockReturnValue(res);
-  res.json = vi.fn().mockReturnValue(res);
-  res.setHeader = vi.fn().mockReturnValue(res);
-  res.end = vi.fn().mockReturnValue(res);
-  return res;
-}
+import { createMockReq, createViMockRes } from './helpers/mocks';
 
 describe('docs handler', () => {
   it('should return 200 with API documentation', async () => {
     const { default: handler } = await import('../api/v1/docs');
-    const req = createMockReq();
-    const res = createMockRes();
+    const req = createMockReq({ headers: { host: 'registry.example.com' } });
+    const res = createViMockRes();
 
     await handler(req, res);
 
@@ -31,8 +19,8 @@ describe('docs handler', () => {
 
   it('should include all endpoint definitions', async () => {
     const { default: handler } = await import('../api/v1/docs');
-    const req = createMockReq();
-    const res = createMockRes();
+    const req = createMockReq({ headers: { host: 'registry.example.com' } });
+    const res = createViMockRes();
 
     await handler(req, res);
 
@@ -52,8 +40,8 @@ describe('docs handler', () => {
 
   it('should include authentication, frontmatter, and namespaces sections', async () => {
     const { default: handler } = await import('../api/v1/docs');
-    const req = createMockReq();
-    const res = createMockRes();
+    const req = createMockReq({ headers: { host: 'registry.example.com' } });
+    const res = createViMockRes();
 
     await handler(req, res);
 
@@ -68,8 +56,8 @@ describe('docs handler', () => {
 
   it('should return 405 for non-GET requests', async () => {
     const { default: handler } = await import('../api/v1/docs');
-    const req = createMockReq('POST');
-    const res = createMockRes();
+    const req = createMockReq({ method: 'POST', headers: { host: 'registry.example.com' } });
+    const res = createViMockRes();
 
     await handler(req, res);
 
@@ -82,8 +70,8 @@ describe('docs handler', () => {
 describe('health handler', () => {
   it('should return 200 with health status using config.apiVersion', async () => {
     const { default: handler } = await import('../api/v1/health');
-    const req = createMockReq();
-    const res = createMockRes();
+    const req = createMockReq({ headers: { host: 'registry.example.com' } });
+    const res = createViMockRes();
 
     handler(req, res);
 

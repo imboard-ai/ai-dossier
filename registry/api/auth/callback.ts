@@ -49,18 +49,44 @@ function validateOAuthState(
   return !!valid;
 }
 
+function queryString(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+async function exchangeCodeAndRenderSuccess(res: VercelResponse, code: string): Promise<void> {
+  console.log('[auth/callback] Exchanging OAuth code for access token');
+  const accessToken = await auth.exchangeGitHubCode(code);
+
+  console.log('[auth/callback] Fetching user info and orgs');
+  const [user, orgs] = await Promise.all([
+    auth.fetchGitHubUser(accessToken),
+    auth.fetchGitHubOrgs(accessToken),
+  ]);
+  console.log(`[auth/callback] User: ${user.login}, orgs: [${orgs.join(', ')}]`);
+
+  const token = auth.signJwt({ sub: user.login, email: user.email || null, orgs });
+  const displayCode = auth.encodeAsDisplayCode(token);
+  const clientId = config.auth.github.clientId;
+
+  console.log(`[auth/callback] Login complete for ${user.login}`);
+  res.status(200).send(renderSuccessPage(user.login, orgs, displayCode, clientId));
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'GET') {
     return methodNotAllowed(res, 'GET');
   }
 
-  const { code, error, error_description, state } = req.query as Record<string, string>;
+  const code = queryString(req.query.code);
+  const error = queryString(req.query.error);
+  const errorDescription = queryString(req.query.error_description);
+  const state = queryString(req.query.state);
 
   if (error) {
-    console.warn('[auth/callback] OAuth provider error:', error, error_description);
+    console.warn('[auth/callback] OAuth provider error:', error, errorDescription);
     return res
       .status(400)
-      .send(renderErrorPage('Authentication Failed', error_description || error));
+      .send(renderErrorPage('Authentication Failed', errorDescription || error));
   }
 
   if (!validateOAuthState(req, res, state)) {
@@ -80,35 +106,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
-    console.log('[auth/callback] Exchanging OAuth code for access token');
-    const accessToken = await auth.exchangeGitHubCode(code);
-
-    console.log('[auth/callback] Fetching user info and orgs');
-    const [user, orgs] = await Promise.all([
-      auth.fetchGitHubUser(accessToken),
-      auth.fetchGitHubOrgs(accessToken),
-    ]);
-    console.log(`[auth/callback] User: ${user.login}, orgs: [${orgs.join(', ')}]`);
-
-    const jwtPayload = {
-      sub: user.login,
-      email: user.email || null,
-      orgs,
-    };
-    const token = auth.signJwt(jwtPayload);
-
-    const displayCode = auth.encodeAsDisplayCode(token);
-
-    const clientId = config.auth.github.clientId;
-    console.log(`[auth/callback] Login complete for ${user.login}`);
-    return res.status(200).send(renderSuccessPage(user.login, orgs, displayCode, clientId));
+    await exchangeCodeAndRenderSuccess(res, code);
   } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err));
+    const caughtError = err instanceof Error ? err : new Error(String(err));
     const errorRef = crypto.randomBytes(4).toString('hex');
     console.error(
       `[auth/callback] OAuth callback failed (ref=${errorRef}):`,
-      error.message,
-      error.stack
+      caughtError.message,
+      caughtError.stack
     );
     return res
       .status(500)
@@ -145,26 +150,8 @@ function basePageStyles(): string {
     }`;
 }
 
-function renderSuccessPage(
-  username: string,
-  orgs: string[],
-  code: string,
-  clientId: string
-): string {
-  const orgsHtml =
-    orgs.length > 0
-      ? `<div class="orgs-list">${orgs.map((org) => `<span class="org-badge">${escapeHtml(org)}</span>`).join(' ')}</div>`
-      : '<div class="orgs-list"><span class="no-orgs">No organizations detected</span></div>';
-
-  const grantUrl = `https://github.com/settings/connections/applications/${escapeHtml(clientId)}`;
-
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dossier Login - Success</title>
-  <style>${basePageStyles()}
+function successPageStyles(): string {
+  return `
     h1 { color: #1a1a1a; margin-bottom: 8px; font-size: 24px; }
     .subtitle { color: #666; margin-bottom: 16px; }
     .orgs-section { margin-bottom: 20px; }
@@ -178,11 +165,7 @@ function renderSuccessPage(
       font-size: 13px;
     }
     .no-orgs { color: #999; font-size: 13px; font-style: italic; }
-    .org-hint {
-      margin-top: 12px;
-      font-size: 12px;
-      color: #666;
-    }
+    .org-hint { margin-top: 12px; font-size: 12px; color: #666; }
     .org-hint a { color: #007bff; text-decoration: none; }
     .org-hint a:hover { text-decoration: underline; }
     .code-box {
@@ -212,7 +195,29 @@ function renderSuccessPage(
       margin-top: 16px;
     }
     .copy-btn:hover { background: #0056b3; }
-    .success-icon { font-size: 48px; margin-bottom: 16px; color: #28a745; }
+    .success-icon { font-size: 48px; margin-bottom: 16px; color: #28a745; }`;
+}
+
+function renderSuccessPage(
+  username: string,
+  orgs: string[],
+  code: string,
+  clientId: string
+): string {
+  const orgsHtml =
+    orgs.length > 0
+      ? `<div class="orgs-list">${orgs.map((org) => `<span class="org-badge">${escapeHtml(org)}</span>`).join(' ')}</div>`
+      : '<div class="orgs-list"><span class="no-orgs">No organizations detected</span></div>';
+
+  const grantUrl = `https://github.com/settings/connections/applications/${escapeHtml(clientId)}`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dossier Login - Success</title>
+  <style>${basePageStyles()}${successPageStyles()}
   </style>
 </head>
 <body>
