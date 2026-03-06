@@ -16,8 +16,17 @@ export async function fetchManifestDossiers(): Promise<ManifestDossier[]> {
 
 export function normalizeDossier(dossier: ManifestDossier): ManifestDossier & { url: string } {
   return {
-    ...DOSSIER_DEFAULTS,
-    ...dossier,
+    name: dossier.name,
+    title: dossier.title,
+    version: dossier.version,
+    path: dossier.path,
+    description: dossier.description ?? DOSSIER_DEFAULTS.description,
+    category: dossier.category ?? DOSSIER_DEFAULTS.category,
+    tags: Array.isArray(dossier.tags) ? dossier.tags : DOSSIER_DEFAULTS.tags,
+    authors: Array.isArray(dossier.authors) ? dossier.authors : DOSSIER_DEFAULTS.authors,
+    tools_required: Array.isArray(dossier.tools_required)
+      ? dossier.tools_required
+      : DOSSIER_DEFAULTS.tools_required,
     url: config.getCdnUrl(dossier.path),
   };
 }

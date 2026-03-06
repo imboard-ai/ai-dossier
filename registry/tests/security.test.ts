@@ -119,6 +119,121 @@ describe('CORS restriction', () => {
   });
 });
 
+describe('CORS mutating request rejection', () => {
+  function createMockReqResFull(method: string, origin?: string) {
+    let statusCode = 0;
+    let body: any = null;
+    const resHeaders: Record<string, string> = {};
+    const req = {
+      method,
+      headers: origin ? { origin } : {},
+    } as any;
+    const res = {
+      setHeader: (key: string, value: string) => {
+        resHeaders[key] = value;
+      },
+      status: (code: number) => {
+        statusCode = code;
+        return {
+          json: (b: any) => {
+            body = b;
+          },
+          end: () => {},
+        };
+      },
+    } as any;
+    return { req, res, getStatus: () => statusCode, getBody: () => body, resHeaders };
+  }
+
+  it('rejects POST from disallowed origin', async () => {
+    const { handleCors } = await import('../lib/cors');
+    const { req, res, getStatus, getBody } = createMockReqResFull('POST', 'https://evil.com');
+
+    const handled = handleCors(req, res);
+
+    expect(handled).toBe(true);
+    expect(getStatus()).toBe(403);
+    expect(getBody().error.code).toBe('ORIGIN_NOT_ALLOWED');
+  });
+
+  it('rejects DELETE from disallowed origin', async () => {
+    const { handleCors } = await import('../lib/cors');
+    const { req, res, getStatus } = createMockReqResFull('DELETE', 'https://evil.com');
+
+    const handled = handleCors(req, res);
+
+    expect(handled).toBe(true);
+    expect(getStatus()).toBe(403);
+  });
+
+  it('allows GET from disallowed origin (read-only)', async () => {
+    const { handleCors } = await import('../lib/cors');
+    const { req, res, getStatus } = createMockReqResFull('GET', 'https://evil.com');
+
+    const handled = handleCors(req, res);
+
+    expect(handled).toBe(false);
+    expect(getStatus()).toBe(0);
+  });
+
+  it('allows POST from allowed origin', async () => {
+    const { handleCors } = await import('../lib/cors');
+    const { req, res, getStatus } = createMockReqResFull('POST', 'https://dossier.imboard.ai');
+
+    const handled = handleCors(req, res);
+
+    expect(handled).toBe(false);
+    expect(getStatus()).toBe(0);
+  });
+
+  it('allows POST without origin (non-browser client)', async () => {
+    const { handleCors } = await import('../lib/cors');
+    const { req, res, getStatus } = createMockReqResFull('POST');
+
+    const handled = handleCors(req, res);
+
+    expect(handled).toBe(false);
+    expect(getStatus()).toBe(0);
+  });
+});
+
+describe('Content-Type and body field validation', () => {
+  it('normalizeDossier uses explicit field picking (no prototype pollution)', async () => {
+    const { normalizeDossier } = await import('../lib/manifest');
+
+    const malicious = {
+      name: 'ns/d',
+      title: 'D',
+      version: '1.0.0',
+      path: 'ns/d.ds.md',
+      __proto__: { polluted: true },
+      constructor: { polluted: true },
+    } as any;
+
+    const result = normalizeDossier(malicious);
+
+    expect(result).not.toHaveProperty('polluted');
+    expect(result).not.toHaveProperty('constructor.polluted');
+    expect(result.name).toBe('ns/d');
+  });
+
+  it('normalizeDossier does not carry unexpected fields from manifest', async () => {
+    const { normalizeDossier } = await import('../lib/manifest');
+
+    const dossier = {
+      name: 'ns/d',
+      title: 'D',
+      version: '1.0.0',
+      path: 'ns/d.ds.md',
+      unexpected_field: 'should not appear',
+    } as any;
+
+    const result = normalizeDossier(dossier);
+
+    expect(result).not.toHaveProperty('unexpected_field');
+  });
+});
+
 describe('OAuth state parameter (CSRF protection)', () => {
   function createMockReq(
     overrides: Partial<{
