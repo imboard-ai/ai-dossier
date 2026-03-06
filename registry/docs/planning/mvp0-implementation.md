@@ -73,7 +73,7 @@ imboard-ai/development/setup-react-library
 │  └────┬────┘      └────────┬─────────┘                         │
 │       │                    │                                    │
 │       │                    │ fetch index.json                   │
-│       │                    │ or 302 redirect                    │
+│       │                    │ or return content                  │
 │       │                    ▼                                    │
 │       │           ┌──────────────────┐                         │
 │       └──────────▶│  jsDelivr CDN    │                         │
@@ -143,7 +143,7 @@ dossier-content/
 - [x] Created `lib/config.js` with content repo details
 - [x] Implemented `GET /api/v1/dossiers` (List)
 - [x] Implemented `GET /api/v1/dossiers/[...name]` (Metadata)
-- [x] Implemented `GET /api/v1/dossiers/[...name]/content` (302 redirect)
+- [x] Implemented `GET /api/v1/dossiers/[...name]/content` (returns content with digest header)
 - [x] Added `vercel.json` for route rewrites
 - [x] Deployed to production
 
@@ -156,7 +156,7 @@ dossier-content/
 | `GET /api/v1/health` | Health check | ✅ Done |
 | `GET /api/v1/dossiers` | List all dossiers (7 total) | ✅ Done |
 | `GET /api/v1/dossiers/{name}` | Get dossier metadata | ✅ Done |
-| `GET /api/v1/dossiers/{name}/content` | 302 redirect to CDN | ✅ Done |
+| `GET /api/v1/dossiers/{name}/content` | Returns content with `X-Dossier-Digest` header | ✅ Done |
 
 **Production API:** https://dossier-registry.vercel.app
 
@@ -200,6 +200,7 @@ See [auth-and-publish.md](./auth-and-publish.md) for full auth architecture.
 
 | Endpoint | Description | Status |
 |----------|-------------|--------|
+| `GET /auth/login` | Initiate GitHub OAuth (redirects to GitHub) | ✅ Done |
 | `GET /auth/callback` | GitHub OAuth callback, returns JWT | ✅ Done |
 | `GET /api/v1/me` | Current user info (protected) | ✅ Done |
 

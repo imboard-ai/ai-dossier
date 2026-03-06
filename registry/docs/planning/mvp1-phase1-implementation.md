@@ -183,7 +183,7 @@ Authorization: Bearer <JWT>
   "email": null,
   "orgs": ["imboard-ai"],
   "iat": 1764847354,
-  "exp": 1764850954
+  "exp": 1765452154
 }
 ```
 
@@ -191,4 +191,4 @@ Authorization: Bearer <JWT>
 - `email` - From GitHub profile (may be null)
 - `orgs` - Array of org logins user belongs to
 - `iat` - Issued at timestamp
-- `exp` - Expiry (1 hour from issue)
+- `exp` - Expiry (7 days from issue)
