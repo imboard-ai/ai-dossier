@@ -1,20 +1,11 @@
-import * as auth from '../../../lib/auth';
+import { authenticateRequest } from '../../../lib/auth';
 import config from '../../../lib/config';
+import { DOSSIER_DEFAULTS, MAX_CONTENT_SIZE } from '../../../lib/constants';
 import { handleCors } from '../../../lib/cors';
 import * as dossier from '../../../lib/dossier';
 import * as github from '../../../lib/github';
 import { canPublishTo } from '../../../lib/permissions';
 import type { ManifestDossier, VercelRequest, VercelResponse } from '../../../lib/types';
-
-const MAX_CONTENT_SIZE = 1024 * 1024; // 1MB
-
-const DOSSIER_DEFAULTS = {
-  description: null,
-  category: null,
-  tags: [],
-  authors: [],
-  tools_required: [],
-};
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
@@ -69,29 +60,8 @@ async function handleList(_req: VercelRequest, res: VercelResponse) {
 }
 
 async function handlePublish(req: VercelRequest, res: VercelResponse) {
-  const token = auth.extractBearerToken(req);
-  if (!token) {
-    return res.status(401).json({
-      error: {
-        code: 'MISSING_TOKEN',
-        message: 'Authorization header required. Use: Bearer <token>',
-      },
-    });
-  }
-
-  let jwtPayload: import('../../../lib/types').JwtPayload;
-  try {
-    jwtPayload = auth.verifyJwt(token);
-  } catch (err) {
-    if (err instanceof Error && err.name === 'TokenExpiredError') {
-      return res.status(401).json({
-        error: { code: 'TOKEN_EXPIRED', message: 'Token has expired. Please login again.' },
-      });
-    }
-    return res.status(401).json({
-      error: { code: 'INVALID_TOKEN', message: 'Invalid token. Please login again.' },
-    });
-  }
+  const jwtPayload = await authenticateRequest(req, res);
+  if (!jwtPayload) return;
 
   const { namespace, content, changelog } = req.body || {};
 

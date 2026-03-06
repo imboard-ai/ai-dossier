@@ -1,14 +1,7 @@
 import config from '../../lib/config';
+import { DOSSIER_DEFAULTS } from '../../lib/constants';
 import { handleCors } from '../../lib/cors';
 import type { ManifestDossier, VercelRequest, VercelResponse } from '../../lib/types';
-
-const DOSSIER_DEFAULTS = {
-  description: null,
-  category: null,
-  tags: [],
-  authors: [],
-  tools_required: [],
-};
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
@@ -46,11 +39,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (d.title?.toLowerCase().includes(query)) return true;
       if (typeof d.description === 'string' && d.description.toLowerCase().includes(query))
         return true;
-      if (typeof d.category === 'string' && d.category.toLowerCase().includes(query)) return true;
-      if (
-        Array.isArray(d.category) &&
-        d.category.some((c: string) => c.toLowerCase().includes(query))
-      )
+      if (Array.isArray(d.category) && d.category.some((c) => c.toLowerCase().includes(query)))
         return true;
       if (Array.isArray(d.tags) && d.tags.some((t) => t.toLowerCase().includes(query))) return true;
       return false;

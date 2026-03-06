@@ -36,7 +36,7 @@ export interface ManifestDossier {
   version: string;
   path: string;
   description?: string | null;
-  category?: string | string[] | null;
+  category?: string[] | null;
   tags?: string[];
   authors?: unknown[];
   tools_required?: unknown[];

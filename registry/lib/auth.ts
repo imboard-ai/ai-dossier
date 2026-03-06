@@ -1,11 +1,47 @@
 import jwt from 'jsonwebtoken';
 import config from './config';
-import type { JwtPayload, VercelRequest } from './types';
+import { JWT_EXPIRY_SECONDS } from './constants';
+import type { JwtPayload, VercelRequest, VercelResponse } from './types';
 
 export function signJwt(payload: Omit<JwtPayload, 'iat' | 'exp'>): string {
   return jwt.sign(payload, config.auth.jwt.secret, {
-    expiresIn: 30 * 24 * 60 * 60, // 30 days in seconds
+    expiresIn: JWT_EXPIRY_SECONDS,
   });
+}
+
+/**
+ * Authenticate a request: extract Bearer token, verify JWT, return payload.
+ * Returns null and sends the error response if authentication fails.
+ */
+export async function authenticateRequest(
+  req: VercelRequest,
+  res: VercelResponse
+): Promise<JwtPayload | null> {
+  const token = extractBearerToken(req);
+  if (!token) {
+    res.status(401).json({
+      error: {
+        code: 'MISSING_TOKEN',
+        message: 'Authorization header required. Use: Bearer <token>',
+      },
+    });
+    return null;
+  }
+
+  try {
+    return verifyJwt(token);
+  } catch (err) {
+    if (err instanceof Error && err.name === 'TokenExpiredError') {
+      res.status(401).json({
+        error: { code: 'TOKEN_EXPIRED', message: 'Token has expired. Please login again.' },
+      });
+    } else {
+      res.status(401).json({
+        error: { code: 'INVALID_TOKEN', message: 'Invalid token. Please login again.' },
+      });
+    }
+    return null;
+  }
 }
 
 export function verifyJwt(token: string): JwtPayload {
