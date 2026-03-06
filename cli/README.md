@@ -148,6 +148,32 @@ safe-run-dossier https://example.com/dossier.ds.md cursor
 
 ---
 
+## Multi-Registry Resolution
+
+The CLI queries all configured registries in parallel when resolving dossiers (e.g., `dossier get`, `dossier run`, `dossier pull`). This uses `Promise.allSettled()` so a single registry failure does not block results from other registries.
+
+### Error Handling
+
+All multi-registry operations return structured errors alongside results:
+
+```
+$ dossier get org/my-dossier
+# If registry A is down but registry B has it → returns result + error from A
+# If no registry has it → returns null + errors from each registry
+```
+
+When a registry-level error occurs, the CLI displays:
+- Which registry failed and why
+- Whether a result was still found from another registry
+
+This means you can configure multiple registries for redundancy — the CLI will succeed as long as at least one registry can serve the requested dossier.
+
+### Configuration
+
+See `dossier config` for managing registry URLs. Multiple registries are queried in parallel, not sequentially.
+
+---
+
 ## What It Checks
 
 ### 1. Integrity (Checksum)
