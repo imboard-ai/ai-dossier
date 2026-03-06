@@ -83,6 +83,19 @@ export function registerConfigCommand(program: Command): void {
             process.exit(1);
           }
 
+          // Validate HTTPS — reject http:// and other insecure protocols
+          try {
+            const parsed = new URL(options.url);
+            if (parsed.protocol !== 'https:') {
+              console.error(`\n❌ Registry URL must use HTTPS: ${options.url}\n`);
+              console.error('Only https:// URLs are allowed to protect credentials in transit.\n');
+              process.exit(1);
+            }
+          } catch {
+            console.error(`\n❌ Invalid URL: ${options.url}\n`);
+            process.exit(1);
+          }
+
           const currentConfig = config.loadConfig();
           if (!currentConfig.registries) {
             currentConfig.registries = {};

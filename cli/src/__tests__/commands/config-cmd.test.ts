@@ -91,4 +91,88 @@ describe('config command', () => {
     expect(config.saveConfig).toHaveBeenCalledWith(config.DEFAULT_CONFIG);
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('reset to defaults'));
   });
+
+  describe('--add-registry HTTPS validation', () => {
+    it('should reject http:// registry URLs', async () => {
+      const program = createTestProgram();
+      registerConfigCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'config',
+          '--add-registry',
+          'insecure',
+          '--url',
+          'http://registry.example.com',
+        ])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('Registry URL must use HTTPS')
+      );
+    });
+
+    it('should reject file:// registry URLs', async () => {
+      const program = createTestProgram();
+      registerConfigCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'config',
+          '--add-registry',
+          'local',
+          '--url',
+          'file:///etc/passwd',
+        ])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('Registry URL must use HTTPS')
+      );
+    });
+
+    it('should reject invalid URLs', async () => {
+      const program = createTestProgram();
+      registerConfigCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'config',
+          '--add-registry',
+          'bad',
+          '--url',
+          'not-a-url',
+        ])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Invalid URL'));
+    });
+
+    it('should accept https:// registry URLs', async () => {
+      vi.mocked(config.saveConfig).mockReturnValue(true);
+      const program = createTestProgram();
+      registerConfigCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'config',
+          '--add-registry',
+          'secure',
+          '--url',
+          'https://registry.example.com',
+        ])
+      ).rejects.toThrow();
+
+      expect(config.saveConfig).toHaveBeenCalled();
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Added registry 'secure'"));
+    });
+  });
 });
