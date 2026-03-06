@@ -29,12 +29,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   try {
+    console.log('[auth/callback] Exchanging OAuth code for access token');
     const accessToken = await auth.exchangeGitHubCode(code);
 
+    console.log('[auth/callback] Fetching user info and orgs');
     const [user, orgs] = await Promise.all([
       auth.fetchGitHubUser(accessToken),
       auth.fetchGitHubOrgs(accessToken),
     ]);
+    console.log(`[auth/callback] User: ${user.login}, orgs: [${orgs.join(', ')}]`);
 
     const jwtPayload = {
       sub: user.login,
@@ -46,9 +49,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const displayCode = auth.encodeAsDisplayCode(token);
 
     const clientId = config.auth.github.clientId;
+    console.log(`[auth/callback] Login complete for ${user.login}`);
     return res.status(200).send(renderSuccessPage(user.login, orgs, displayCode, clientId));
   } catch (err) {
-    console.error('OAuth callback error:', err);
+    const error = err instanceof Error ? err : new Error(String(err));
+    console.error('[auth/callback] OAuth callback failed:', error.message, error.stack);
     return res
       .status(500)
       .send(
@@ -71,7 +76,7 @@ function renderSuccessPage(
       ? `<div class="orgs-list">${orgs.map((org) => `<span class="org-badge">${escapeHtml(org)}</span>`).join(' ')}</div>`
       : '<div class="orgs-list"><span class="no-orgs">No organizations detected</span></div>';
 
-  const grantUrl = `https://github.com/settings/connections/applications/${clientId}`;
+  const grantUrl = `https://github.com/settings/connections/applications/${escapeHtml(clientId)}`;
 
   return `<!DOCTYPE html>
 <html lang="en">
