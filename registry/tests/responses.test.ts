@@ -1,17 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { methodNotAllowed, serverError } from '../lib/responses';
-
-function createMockRes() {
-  const res: Record<string, unknown> = {};
-  res.status = vi.fn().mockReturnValue(res);
-  res.json = vi.fn().mockReturnValue(res);
-  return res;
-}
+import { createViMockRes } from './helpers/mocks';
 
 describe('methodNotAllowed', () => {
   it('returns 405 with single method', () => {
-    const res = createMockRes();
-    methodNotAllowed(res as never, 'GET');
+    const res = createViMockRes();
+    methodNotAllowed(res, 'GET');
 
     expect(res.status).toHaveBeenCalledWith(405);
     expect(res.json).toHaveBeenCalledWith({
@@ -20,8 +14,8 @@ describe('methodNotAllowed', () => {
   });
 
   it('returns 405 with two methods', () => {
-    const res = createMockRes();
-    methodNotAllowed(res as never, 'GET', 'POST');
+    const res = createViMockRes();
+    methodNotAllowed(res, 'GET', 'POST');
 
     expect(res.json).toHaveBeenCalledWith({
       error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET and POST are allowed' },
@@ -29,8 +23,8 @@ describe('methodNotAllowed', () => {
   });
 
   it('returns 405 with three methods using Oxford comma', () => {
-    const res = createMockRes();
-    methodNotAllowed(res as never, 'GET', 'HEAD', 'DELETE');
+    const res = createViMockRes();
+    methodNotAllowed(res, 'GET', 'HEAD', 'DELETE');
 
     expect(res.json).toHaveBeenCalledWith({
       error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET, HEAD, and DELETE are allowed' },
@@ -40,10 +34,10 @@ describe('methodNotAllowed', () => {
 
 describe('serverError', () => {
   it('returns 502 with request_id and logs structured JSON', () => {
-    const res = createMockRes();
+    const res = createViMockRes();
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    serverError(res as never, {
+    serverError(res, {
       operation: 'dossier.list',
       error: new Error('upstream timeout'),
       code: 'UPSTREAM_ERROR',
@@ -69,10 +63,10 @@ describe('serverError', () => {
   });
 
   it('supports custom status code', () => {
-    const res = createMockRes();
+    const res = createViMockRes();
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    serverError(res as never, {
+    serverError(res, {
       operation: 'test',
       error: 'string error',
       code: 'TEST',
