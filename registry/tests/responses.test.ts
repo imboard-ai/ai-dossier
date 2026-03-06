@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { getRequestId, methodNotAllowed, serverError } from '../lib/responses';
+import { getRequestId, invalidPathError, methodNotAllowed, serverError } from '../lib/responses';
 import type { VercelRequest } from '../lib/types';
 import { createViMockRes } from './helpers/mocks';
 
@@ -176,6 +176,28 @@ describe('serverError', () => {
     expect(loggedJson.errorType).toBe('string');
 
     consoleSpy.mockRestore();
+  });
+});
+
+describe('invalidPathError', () => {
+  it('returns 400 with INVALID_PATH code and logs warning', () => {
+    const res = createViMockRes();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    invalidPathError(res, 'req-abc', 'my-org/evil-dossier');
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
+    });
+
+    const loggedJson = JSON.parse(warnSpy.mock.calls[0][0] as string);
+    expect(loggedJson.level).toBe('warn');
+    expect(loggedJson.message).toBe('Path traversal detected');
+    expect(loggedJson.requestId).toBe('req-abc');
+    expect(loggedJson.identifier).toBe('my-org/evil-dossier');
+
+    warnSpy.mockRestore();
   });
 });
 

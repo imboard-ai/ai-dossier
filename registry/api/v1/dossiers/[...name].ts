@@ -7,7 +7,12 @@ import { validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
 import createLogger from '../../../lib/logger';
 import { queryString } from '../../../lib/query';
-import { getRequestId, methodNotAllowed, serverError } from '../../../lib/responses';
+import {
+  getRequestId,
+  invalidPathError,
+  methodNotAllowed,
+  serverError,
+} from '../../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 const log = createLogger('dossiers/[name]');
@@ -102,10 +107,7 @@ async function handleGet(
     });
   } catch (error) {
     if (error instanceof github.PathTraversalError) {
-      log.warn('Path traversal detected', { requestId, dossier: dossierName });
-      return res.status(HTTP_STATUS.BAD_REQUEST).json({
-        error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
-      });
+      return invalidPathError(res, requestId, dossierName);
     }
     return serverError(res, {
       operation: `dossier.get(${dossierName})`,
@@ -163,10 +165,7 @@ async function handleDelete(
     return res.status(HTTP_STATUS.OK).json(response);
   } catch (err) {
     if (err instanceof github.PathTraversalError) {
-      log.warn('Path traversal detected', { requestId, dossier: dossierName });
-      return res.status(HTTP_STATUS.BAD_REQUEST).json({
-        error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
-      });
+      return invalidPathError(res, requestId, dossierName);
     }
     return serverError(res, {
       operation: `dossier.delete(${dossierName})`,

@@ -44,6 +44,18 @@ export function methodNotAllowed(
   });
 }
 
+/** Returns a 400 response for path traversal attempts, with a warning log. */
+export function invalidPathError(
+  res: VercelResponse,
+  requestId: string,
+  identifier: string
+): VercelResponse {
+  log.warn('Path traversal detected', { requestId, identifier });
+  return res.status(HTTP_STATUS.BAD_REQUEST).json({
+    error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
+  });
+}
+
 /** Returns a structured JSON error response with logging, request tracing, and a configurable status code (defaults to 502). */
 export function serverError(
   res: VercelResponse,
