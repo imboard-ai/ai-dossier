@@ -306,6 +306,11 @@ GET /dossiers/myorg/deploy/content?digest=sha256:35aab...
 
 All responses include the `X-Request-Id` header for request correlation. Server errors (5xx) always include `request_id` in the response body.
 
+**X-Request-Id validation:** Clients may send their own `X-Request-Id` header. The server validates it against these rules:
+- Must be 1-64 characters long
+- Only alphanumeric characters (`a-z`, `A-Z`, `0-9`) and hyphens (`-`) are allowed
+- Invalid values are replaced without returning an error to the client; the server logs a warning and generates a UUID instead
+
 **Common codes:** `DOSSIER_NOT_FOUND`, `CONTENT_NOT_FOUND`, `UPSTREAM_ERROR`, `DELETE_ERROR`, `PUBLISH_ERROR`, `MISSING_FIELD`, `INVALID_NAMESPACE`, `INVALID_CONTENT`, `CONTENT_TOO_LARGE`, `INVALID_PATH`, `MISSING_TOKEN`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `FORBIDDEN`, `METHOD_NOT_ALLOWED`, `LOGIN_ERROR`, `VERSION_NOT_FOUND`, `VERSION_EXISTS`, `RATE_LIMITED`
 
 ---
@@ -465,7 +470,7 @@ dossier search "aws deploy" --category devops --signed
 
 ### Required Response Headers
 ```
-X-Request-Id: req_abc123          # For debugging/support
+X-Request-Id: req-abc123           # For debugging/support
 X-RateLimit-Limit: 1000
 X-RateLimit-Remaining: 999
 X-RateLimit-Reset: 1701612000
@@ -554,8 +559,10 @@ Read-only methods (`GET`, `HEAD`) are allowed from any origin. Requests without 
 | `SIGNATURE_INVALID` | 400 | Signature verification failed |
 | `VERSION_EXISTS` | 409 | Version already published |
 | `VERSION_INVALID` | 400 | Not valid semver or not greater than existing |
-| `FORBIDDEN` | 403 | No permission to publish to namespace (response includes `namespace` field) |
+| `FORBIDDEN` | 403 | No permission to publish to namespace (see note below) |
 | `RATE_LIMITED` | 429 | Too many publish requests (include `Retry-After`) |
+
+> **FORBIDDEN response details:** The 403 response uses a generic message (`"Cannot publish to namespace '<name>'"`) that does not expose user identity or org membership. The response body includes a `namespace` field for client-side error handling.
 
 ---
 
