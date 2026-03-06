@@ -32,6 +32,8 @@ Design a registry API for dossiers (similar to npm/Docker registries) supporting
 
 ## Authentication Overview
 
+> **Detailed auth narrative:** For OAuth flow diagrams, the two-token system explanation, credential storage, and auth security considerations, see [`auth-and-publish.md`](./auth-and-publish.md).
+
 **Auth Legend:**
 - 🌐 **Public** - No authentication required
 - 🔑 **Auth Required** - Bearer token or API key required

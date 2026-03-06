@@ -1,6 +1,8 @@
 # Authentication and Publishing Architecture
 
-This document describes how users authenticate with the Dossier Registry CLI and how dossiers are published to the content repository.
+This document describes how users authenticate with the Dossier Registry CLI and how dossiers are published to the content repository. It focuses on the *narrative flow* — the "why" and "how" of auth and publishing.
+
+> **Canonical API reference:** For endpoint specifications, CLI command listings, error codes, and phased rollout details, see [`registry-api-design.md`](./registry-api-design.md).
 
 ---
 
@@ -64,29 +66,9 @@ The CLI is a client-side tool that runs on the user's machine.
 
 ## CLI Commands
 
-### No Authentication Required
+For the full CLI command reference and endpoint mappings, see the [MVP0](./registry-api-design.md#mvp0-read-only-public-access) and [MVP1](./registry-api-design.md#mvp1-publishing) sections in the API design doc.
 
-These commands hit public Registry API endpoints:
-
-```bash
-dossier list                           # GET /api/v1/dossiers
-dossier list --category devops         # GET /api/v1/dossiers?category=devops
-dossier info org/name                  # GET /api/v1/dossiers/{name}
-dossier pull org/name                  # GET /api/v1/dossiers/{name}/content
-dossier run ./local.ds.md              # Local only, no API call
-dossier create                         # Local only, no API call
-```
-
-### Authentication Required
-
-These commands require a stored JWT:
-
-```bash
-dossier login                          # Opens browser → GitHub OAuth → copy/paste code
-dossier logout                         # Deletes ~/.dossier/credentials
-dossier whoami                         # GET /api/v1/me (with JWT)
-dossier publish ./my.ds.md             # POST /api/v1/dossiers (with JWT)
-```
+Key auth-related commands: `dossier login`, `dossier logout`, `dossier whoami`, `dossier publish`.
 
 ## CLI Credential Storage
 
@@ -128,24 +110,9 @@ The Registry API is a server-side service hosted on Vercel.
 
 ## Registry API Endpoints
 
-### Public Endpoints (No Auth)
+For the complete endpoint specification (public, protected, and phased rollout), see the [API Specification](./registry-api-design.md#api-specification) in the API design doc.
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/v1/health` | Health check |
-| `GET` | `/api/v1/dossiers` | List all dossiers |
-| `GET` | `/api/v1/dossiers/{name}` | Get dossier metadata |
-| `GET` | `/api/v1/dossiers/{name}/content` | Returns dossier content with `X-Dossier-Digest` header |
-| `GET` | `/auth/login` | Initiates OAuth flow - sets CSRF state cookie, redirects to GitHub |
-| `GET` | `/auth/callback` | OAuth callback - exchanges code, displays JWT for copy/paste |
-
-### Protected Endpoints (JWT Required)
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/v1/me` | Get current user info from JWT |
-| `POST` | `/api/v1/dossiers` | Publish a dossier |
-| `DELETE` | `/api/v1/dossiers/{name}` | Delete a dossier |
+The auth-specific endpoints are `/auth/login`, `/auth/callback`, `/api/v1/me`, `POST /api/v1/dossiers`, and `DELETE /api/v1/dossiers/{name}`. Their detailed flows are documented below in [Part 3](#part-3-cli--registry-communication) and [Part 4](#part-4-flows).
 
 ## Registry Environment Variables
 
@@ -555,6 +522,8 @@ Also returned when the requested version doesn't match:
 
 # Part 5: Two Token System
 
+> For token lifetimes and API key scopes, see [Token Lifetimes](./registry-api-design.md#token-lifetimes) and [API Key Scopes](./registry-api-design.md#api-key-scopes) in the API design doc.
+
 | Token | Where Used | Purpose | Scope | Owner |
 |-------|------------|---------|-------|-------|
 | **User JWT** | CLI → Registry API | Prove user identity | Contains username + orgs | Issued by Registry, stored by CLI |
@@ -583,6 +552,8 @@ Signed by Registry using `JWT_SECRET` environment variable.
 ---
 
 # Part 6: Namespace Permissions
+
+> See also [Namespace Ownership](./registry-api-design.md#namespace-ownership) in the API design doc for naming rules and reserved names.
 
 A user can publish to a namespace if:
 
@@ -655,6 +626,8 @@ S3 API
 
 # Part 8: Security Considerations
 
+This section covers auth-specific security concerns. For CORS configuration and request-level CSRF protection, see [CORS Configuration](./registry-api-design.md#cors-configuration) in the API design doc.
+
 ### 1. Stale Org Permissions ⚠️
 
 **Problem:** If a user is removed from an org after login, their JWT still contains that org until expiry.
@@ -685,6 +658,8 @@ S3 API
 - Valid `.ds.md` format (YAML/JSON frontmatter)
 - Schema validation on frontmatter
 
+For publish validation error codes, see [Publish Validation Errors](./registry-api-design.md#publish-validation-errors) in the API design doc.
+
 ### 5. Bot Token Scope
 
 **MVP1:** Personal Access Token with `repo` scope.
@@ -701,32 +676,10 @@ The `GITHUB_CLIENT_SECRET` is stored only in Registry environment variables, nev
 
 **Mitigation:** The login endpoint generates a cryptographically random `state` parameter (32 bytes, hex-encoded) and stores it in an `HttpOnly; Secure; SameSite=Lax` cookie (`dossier_oauth_state`). The same value is sent to GitHub as the `state` query parameter. On callback, the Registry validates that the `state` from GitHub matches the cookie value using a timing-safe comparison. If the state is missing or mismatched, the request is rejected.
 
+For CORS-level CSRF protection on mutating API requests, see [CSRF Protection](./registry-api-design.md#csrf-protection) in the API design doc.
+
 ---
 
 # Part 9: Implementation Phases
 
-### Phase 1: Auth Foundation
-- [ ] Create GitHub OAuth App
-- [ ] Implement `GET /auth/callback` - exchange code, display JWT code for copy/paste
-- [ ] Implement `GET /api/v1/me` - return user info from JWT
-- [ ] JWT signing and verification
-
-### Phase 2: Publish Endpoint
-- [ ] Implement `POST /api/v1/dossiers`
-- [ ] JWT verification middleware
-- [ ] Namespace permission checking
-- [ ] Path validation (security)
-- [ ] Content validation (format, size)
-
-### Phase 3: Content Store Integration
-- [ ] Set up bot token with repo access
-- [ ] Implement GitHub commit via API
-- [ ] Update index.json on publish
-- [ ] Handle conflicts (version exists)
-
-### Phase 4: CLI Integration (separate repo)
-- [ ] `dossier login` command (open browser, prompt for code)
-- [ ] `dossier logout` command
-- [ ] `dossier whoami` command
-- [ ] `dossier publish` command
-- [ ] Credential storage in `~/.dossier/credentials`
+For the phased rollout plan (MVP0 → MVP1 → Prod0 → Prod1) and the full endpoint roadmap, see the [Phase Overview](./registry-api-design.md#phase-overview) and [Phase Summary](./registry-api-design.md#phase-summary) in the API design doc.
