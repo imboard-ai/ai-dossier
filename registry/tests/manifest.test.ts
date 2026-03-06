@@ -31,19 +31,33 @@ describe('fetchManifestDossiers', () => {
     expect(result).toEqual(mockDossiers);
   });
 
-  it('throws on non-ok response', async () => {
+  it('throws on non-ok response with URL', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 500 }));
+
+    await expect(fetchManifestDossiers()).rejects.toThrow(
+      'Failed to fetch manifest from https://raw.githubusercontent.com/org/repo/main/index.json: HTTP 500'
+    );
+  });
+
+  it('wraps network errors with context', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('fetch failed')));
+
+    await expect(fetchManifestDossiers()).rejects.toThrow(
+      'Failed to fetch manifest from https://raw.githubusercontent.com/org/repo/main/index.json: fetch failed'
+    );
+  });
+
+  it('throws on malformed manifest without dossiers array', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockResolvedValue({
-        ok: false,
-        status: 500,
-        statusText: 'Internal Server Error',
-        text: () => Promise.resolve('upstream error'),
+        ok: true,
+        json: () => Promise.resolve({}),
       })
     );
 
     await expect(fetchManifestDossiers()).rejects.toThrow(
-      'Failed to fetch manifest: 500 Internal Server Error — upstream error'
+      'Invalid manifest from https://raw.githubusercontent.com/org/repo/main/index.json: missing or malformed "dossiers" array'
     );
   });
 });
@@ -58,6 +72,13 @@ describe('normalizeDossier', () => {
     expect(result.tags).toEqual([]);
     expect(result.authors).toEqual([]);
     expect(result.tools_required).toEqual([]);
+  });
+
+  it('throws when dossier.path is missing', () => {
+    const dossier = { name: 'ns/d', title: 'D', version: '1.0.0', path: '' };
+    expect(() => normalizeDossier(dossier)).toThrow(
+      'Cannot normalize dossier "ns/d": missing path'
+    );
   });
 
   it('preserves existing fields over defaults', () => {

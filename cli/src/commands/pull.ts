@@ -10,7 +10,9 @@ import { parseNameVersion } from '../registry-client';
 export function registerPullCommand(program: Command): void {
   program
     .command('pull')
-    .description('Download a dossier from the registry to local cache')
+    .description(
+      'Download a dossier from the registry to local cache. Searches all configured registries.'
+    )
     .argument('<name...>', 'Dossier name(s) (use name@version for a specific version)')
     .option('--force', 'Re-download even if already cached')
     .action(async (names: string[], options: { force?: boolean }) => {

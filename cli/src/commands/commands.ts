@@ -90,7 +90,7 @@ function extractCommand(cmd: Command): CommandInfo {
 
 export function registerCommandsCommand(program: Command): void {
   program
-    .command('commands')
+    .command('commands', { hidden: true })
     .description('List all available commands and their flags as JSON')
     .option('--command <name>', 'Show detail for a single command')
     .action((options: { command?: string }) => {

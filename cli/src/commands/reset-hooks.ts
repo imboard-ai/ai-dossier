@@ -3,7 +3,7 @@ import * as hooks from '../hooks';
 
 export function registerResetHooksCommand(program: Command): void {
   program
-    .command('reset-hooks')
+    .command('reset-hooks', { hidden: true })
     .description('Remove the Claude Code discovery hook')
     .action(() => {
       const removed = hooks.removeClaudeHook();

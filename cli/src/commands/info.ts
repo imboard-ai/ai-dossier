@@ -11,7 +11,7 @@ import { parseNameVersion } from '../registry-client';
 export function registerInfoCommand(program: Command): void {
   program
     .command('info')
-    .description('Show dossier metadata')
+    .description('Show dossier metadata. For registry names, searches all configured registries.')
     .argument('<file-or-name>', 'Local dossier file path or registry dossier name')
     .option('--json', 'Output as JSON')
     .action(async (fileOrName: string, options: { json?: boolean }) => {

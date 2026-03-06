@@ -14,8 +14,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return methodNotAllowed(res, 'GET', 'HEAD', 'DELETE');
   }
 
-  const { name, version } = req.query as Record<string, string | string[]>;
-  const pathParts = Array.isArray(name) ? name : (name as string).split('/');
+  const name = req.query.name;
+  const version = Array.isArray(req.query.version) ? req.query.version[0] : req.query.version;
+  const pathParts = Array.isArray(name) ? name : typeof name === 'string' ? name.split('/') : [];
 
   const isContentRequest = pathParts[pathParts.length - 1] === 'content';
   const dossierName = isContentRequest ? pathParts.slice(0, -1).join('/') : pathParts.join('/');
@@ -28,10 +29,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   if (req.method === 'DELETE') {
-    return handleDelete(req, res, dossierName, version as string);
+    return handleDelete(req, res, dossierName, version);
   }
 
-  return handleGet(res, dossierName, version as string | undefined, isContentRequest);
+  return handleGet(res, dossierName, version, isContentRequest);
 }
 
 async function handleGet(

@@ -11,7 +11,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return methodNotAllowed(res, 'GET');
   }
 
-  const { q, page: pageStr, per_page: perPageStr } = req.query as Record<string, string>;
+  const q = Array.isArray(req.query.q) ? req.query.q[0] : req.query.q;
+  const pageStr = Array.isArray(req.query.page) ? req.query.page[0] : req.query.page;
+  const perPageStr = Array.isArray(req.query.per_page) ? req.query.per_page[0] : req.query.per_page;
 
   if (!q || !q.trim()) {
     return res.status(400).json({

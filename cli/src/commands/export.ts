@@ -7,7 +7,7 @@ import { parseNameVersion } from '../registry-client';
 export function registerExportCommand(program: Command): void {
   program
     .command('export')
-    .description('Download a dossier and save to a local file')
+    .description('Download a dossier and save to a local file. Searches all configured registries.')
     .argument('<name>', 'Dossier name (use name@version for a specific version)')
     .option('-o, --output <path>', 'Output file path')
     .option('--stdout', 'Print to stdout instead of saving to file')

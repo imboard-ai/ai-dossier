@@ -46,17 +46,36 @@ async function handleList(_req: VercelRequest, res: VercelResponse) {
 }
 
 async function handlePublish(req: VercelRequest, res: VercelResponse) {
-  const { namespace, content, changelog } = req.body || {};
-
-  if (!namespace) {
-    return res.status(400).json({
-      error: { code: 'MISSING_FIELD', message: 'Missing required field: namespace' },
+  const contentType = req.headers['content-type'];
+  if (!contentType || !contentType.includes('application/json')) {
+    return res.status(415).json({
+      error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type must be application/json' },
     });
   }
 
-  if (!content) {
+  const { namespace, content, changelog } = req.body || {};
+
+  if (!namespace || typeof namespace !== 'string') {
     return res.status(400).json({
-      error: { code: 'MISSING_FIELD', message: 'Missing required field: content' },
+      error: {
+        code: 'MISSING_FIELD',
+        message: 'Missing required field: namespace (must be a string)',
+      },
+    });
+  }
+
+  if (!content || typeof content !== 'string') {
+    return res.status(400).json({
+      error: {
+        code: 'MISSING_FIELD',
+        message: 'Missing required field: content (must be a string)',
+      },
+    });
+  }
+
+  if (changelog !== undefined && typeof changelog !== 'string') {
+    return res.status(400).json({
+      error: { code: 'INVALID_FIELD', message: 'Field changelog must be a string' },
     });
   }
 

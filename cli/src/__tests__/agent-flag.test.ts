@@ -25,9 +25,17 @@ describe('--agent flag', () => {
       skip_prompts: '-y / --yes',
       non_tty_safe: true,
       machine_errors: true,
+      multi_registry: true,
     });
     expect(manifest.quick_start).toBeInstanceOf(Array);
     expect(manifest.quick_start.length).toBeGreaterThan(0);
+
+    // Registry section should describe multi-registry support
+    expect(manifest.registry).toBeDefined();
+    expect(manifest.registry.commands).toBeDefined();
+    expect(manifest.registry.env_vars).toBeInstanceOf(Array);
+    expect(manifest.registry.env_vars).toContain('DOSSIER_REGISTRY_URL');
+    expect(manifest.registry.project_config).toBe('.dossierrc.json');
   });
 
   it('should include agent hint in --help output', () => {

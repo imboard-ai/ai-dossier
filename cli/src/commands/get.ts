@@ -7,7 +7,9 @@ import { parseNameVersion } from '../registry-client';
 export function registerGetCommand(program: Command): void {
   program
     .command('get')
-    .description('Get dossier metadata from the registry')
+    .description(
+      'Get dossier metadata from the registry. Searches all configured registries and returns the first match.'
+    )
     .argument('<name>', 'Dossier name (optionally with @version, e.g., my-dossier@1.0.0)')
     .option('--json', 'Output as JSON')
     .action(async (nameArg: string, options: { json?: boolean }) => {
