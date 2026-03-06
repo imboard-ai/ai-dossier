@@ -83,8 +83,8 @@ Update `lib/config.js`:
 github: {
   botToken: process.env.GITHUB_BOT_TOKEN,
   contentRepo: {
-    owner: 'imboard-ai',
-    repo: 'dossier-content',
+    owner: 'imboard-ai',    // override with CONTENT_ORG env var
+    repo: 'dossier-content', // override with CONTENT_REPO env var
   },
 },
 ```

@@ -155,9 +155,11 @@ The Registry API is a server-side service hosted on Vercel.
 | `JWT_SECRET` | Secret key to sign/verify JWTs |
 | `GITHUB_BOT_TOKEN` | Token to write to content repo |
 | `REGISTRY_BASE_URL` | Base URL for OAuth redirect (e.g., `https://registry.dossier.dev`) |
+| `CONTENT_ORG` | GitHub org owning the content repo (optional, defaults to `imboard-ai`) |
+| `CONTENT_REPO` | GitHub repo name for dossier content (optional, defaults to `dossier-content`) |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allowed CORS origins (optional, has defaults) |
 
-> **Note:** All variables except `CORS_ALLOWED_ORIGINS` are required. The Registry uses lazy validation — a missing variable causes a clear error (`Missing required environment variable: <name>`) on the first request that needs it.
+> **Note:** All variables except `CONTENT_ORG`, `CONTENT_REPO`, and `CORS_ALLOWED_ORIGINS` are required. The Registry uses lazy validation — a missing variable causes a clear error (`Missing required environment variable: <name>`) on the first request that needs it.
 
 ---
 
