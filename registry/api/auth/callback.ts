@@ -80,7 +80,7 @@ async function exchangeCodeAndRenderSuccess(res: VercelResponse, code: string): 
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'GET') {
-    return methodNotAllowed(res, 'GET');
+    return methodNotAllowed(req, res, 'GET');
   }
 
   const code = queryString(req.query.code);

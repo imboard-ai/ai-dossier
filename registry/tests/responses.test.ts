@@ -1,34 +1,69 @@
 import { describe, expect, it, vi } from 'vitest';
 import { getRequestId, methodNotAllowed, serverError } from '../lib/responses';
+import type { VercelRequest } from '../lib/types';
 import { createViMockRes } from './helpers/mocks';
 
 describe('methodNotAllowed', () => {
+  const mockReq = { method: 'POST', url: '/api/v1/test', headers: {} } as unknown as VercelRequest;
+
   it('returns 405 with single method', () => {
     const res = createViMockRes();
-    methodNotAllowed(res, 'GET');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    methodNotAllowed(mockReq, res, 'GET');
 
     expect(res.status).toHaveBeenCalledWith(405);
     expect(res.json).toHaveBeenCalledWith({
       error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET is allowed' },
     });
+    vi.restoreAllMocks();
   });
 
   it('returns 405 with two methods', () => {
     const res = createViMockRes();
-    methodNotAllowed(res, 'GET', 'POST');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    methodNotAllowed(mockReq, res, 'GET', 'POST');
 
     expect(res.json).toHaveBeenCalledWith({
       error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET and POST are allowed' },
     });
+    vi.restoreAllMocks();
   });
 
   it('returns 405 with three methods using Oxford comma', () => {
     const res = createViMockRes();
-    methodNotAllowed(res, 'GET', 'HEAD', 'DELETE');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    methodNotAllowed(mockReq, res, 'GET', 'HEAD', 'DELETE');
 
     expect(res.json).toHaveBeenCalledWith({
       error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET, HEAD, and DELETE are allowed' },
     });
+    vi.restoreAllMocks();
+  });
+
+  it('logs rejected method and URL', () => {
+    const res = createViMockRes();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const req = {
+      method: 'DELETE',
+      url: '/api/v1/search',
+      headers: {},
+    } as unknown as VercelRequest;
+
+    methodNotAllowed(req, res, 'GET');
+
+    expect(warnSpy).toHaveBeenCalledOnce();
+    const loggedJson = JSON.parse(warnSpy.mock.calls[0][0] as string);
+    expect(loggedJson.level).toBe('warn');
+    expect(loggedJson.context).toBe('responses');
+    expect(loggedJson.message).toBe('method-not-allowed');
+    expect(loggedJson.method).toBe('DELETE');
+    expect(loggedJson.url).toBe('/api/v1/search');
+    expect(loggedJson.allowed).toEqual(['GET']);
+
+    warnSpy.mockRestore();
   });
 });
 

@@ -206,7 +206,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
 
   if (req.method !== 'GET') {
-    return methodNotAllowed(res, 'GET');
+    return methodNotAllowed(req, res, 'GET');
   }
 
   const baseUrl = `https://${req.headers.host}`;

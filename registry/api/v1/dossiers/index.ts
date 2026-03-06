@@ -25,7 +25,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return handlePublish(req, res, requestId);
   }
 
-  return methodNotAllowed(res, 'GET', 'POST');
+  return methodNotAllowed(req, res, 'GET', 'POST');
 }
 
 async function handleList(_req: VercelRequest, res: VercelResponse, requestId: string) {

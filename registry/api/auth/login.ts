@@ -9,7 +9,7 @@ const log = createLogger('auth/login');
 
 export default function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'GET') {
-    return methodNotAllowed(res, 'GET');
+    return methodNotAllowed(req, res, 'GET');
   }
 
   try {

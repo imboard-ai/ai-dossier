@@ -17,7 +17,16 @@ export function getRequestId(req: VercelRequest): string {
   return existing || crypto.randomUUID();
 }
 
-export function methodNotAllowed(res: VercelResponse, ...allowed: string[]): VercelResponse {
+export function methodNotAllowed(
+  req: VercelRequest,
+  res: VercelResponse,
+  ...allowed: string[]
+): VercelResponse {
+  log.warn('method-not-allowed', {
+    method: req.method,
+    url: req.url,
+    allowed,
+  });
   return res.status(HTTP_STATUS.METHOD_NOT_ALLOWED).json({
     error: {
       code: 'METHOD_NOT_ALLOWED',
