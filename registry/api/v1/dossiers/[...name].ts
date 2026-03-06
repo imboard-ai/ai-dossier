@@ -90,6 +90,11 @@ async function handleGet(
       content_url: config.getCdnUrl(dossierEntry.path),
     });
   } catch (error) {
+    if (error instanceof github.PathTraversalError) {
+      return res.status(400).json({
+        error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
+      });
+    }
     console.error(`[dossier/get] Error fetching '${dossierName}':`, error);
     return res.status(502).json({
       error: {
@@ -141,6 +146,11 @@ async function handleDelete(
 
     return res.status(200).json(response);
   } catch (err) {
+    if (err instanceof github.PathTraversalError) {
+      return res.status(400).json({
+        error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
+      });
+    }
     console.error(`[dossier/delete] Error deleting '${dossierName}':`, err);
     return res.status(502).json({
       error: {

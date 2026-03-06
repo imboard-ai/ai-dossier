@@ -10,20 +10,30 @@ export default function handler(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  const state = crypto.randomBytes(32).toString('hex');
+  try {
+    const state = crypto.randomBytes(32).toString('hex');
 
-  const params = new URLSearchParams({
-    client_id: config.auth.github.clientId,
-    redirect_uri: `${config.baseUrl}/auth/callback`,
-    scope: config.auth.github.scopes,
-    state,
-  });
+    const params = new URLSearchParams({
+      client_id: config.auth.github.clientId,
+      redirect_uri: `${config.baseUrl}/auth/callback`,
+      scope: config.auth.github.scopes,
+      state,
+    });
 
-  res.setHeader(
-    'Set-Cookie',
-    `${OAUTH_STATE_COOKIE}=${state}; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=${OAUTH_STATE_MAX_AGE}`
-  );
+    res.setHeader(
+      'Set-Cookie',
+      `${OAUTH_STATE_COOKIE}=${state}; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=${OAUTH_STATE_MAX_AGE}`
+    );
 
-  console.log(`[auth/login] Redirecting to GitHub OAuth`);
-  res.redirect(`https://github.com/login/oauth/authorize?${params}`);
+    console.log(`[auth/login] Redirecting to GitHub OAuth`);
+    res.redirect(`https://github.com/login/oauth/authorize?${params}`);
+  } catch (err) {
+    console.error('[auth/login] Failed to initiate login redirect:', err);
+    return res.status(500).json({
+      error: {
+        code: 'LOGIN_ERROR',
+        message: 'Failed to initiate login. Please try again.',
+      },
+    });
+  }
 }

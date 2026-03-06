@@ -5,10 +5,17 @@ import type { DeleteResult, FileContent, Manifest, ManifestDossier } from './typ
 
 const GITHUB_API = 'https://api.github.com';
 
+export class PathTraversalError extends Error {
+  constructor(filePath: string) {
+    super(`Path traversal detected: ${filePath}`);
+    this.name = 'PathTraversalError';
+  }
+}
+
 function sanitizePath(filePath: string): string {
   const normalized = path.posix.normalize(filePath);
   if (normalized.startsWith('/') || normalized.split('/').includes('..')) {
-    throw new Error(`Path traversal detected: ${filePath}`);
+    throw new PathTraversalError(filePath);
   }
   return normalized;
 }
@@ -31,6 +38,12 @@ async function githubRequest(endpoint: string, options: RequestInit = {}): Promi
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`GitHub API request failed for ${url}: ${message}`);
+  }
+
+  if (!response.ok) {
+    console.error(
+      `GitHub API request failed: ${options.method || 'GET'} ${endpoint} → ${response.status} ${response.statusText}`
+    );
   }
 
   return response;
@@ -66,15 +79,18 @@ export async function deleteFile(filePath: string, message: string, sha: string)
     body: JSON.stringify({ message, sha }),
   });
 
-  const data = (await response.json()) as { message?: string };
-
   if (!response.ok) {
-    throw new Error(
-      `GitHub API error: ${response.status} - ${data.message || JSON.stringify(data)}`
-    );
+    let errorMessage: string;
+    try {
+      const data = (await response.json()) as { message?: string };
+      errorMessage = data.message || JSON.stringify(data);
+    } catch {
+      errorMessage = await response.text().catch(() => 'unknown error');
+    }
+    throw new Error(`GitHub API error: ${response.status} - ${errorMessage}`);
   }
 
-  return data;
+  return response.json();
 }
 
 export async function createOrUpdateFile(
@@ -99,15 +115,18 @@ export async function createOrUpdateFile(
     body: JSON.stringify(body),
   });
 
-  const data = (await response.json()) as { message?: string };
-
   if (!response.ok) {
-    throw new Error(
-      `GitHub API error: ${response.status} - ${data.message || JSON.stringify(data)}`
-    );
+    let errorMessage: string;
+    try {
+      const data = (await response.json()) as { message?: string };
+      errorMessage = data.message || JSON.stringify(data);
+    } catch {
+      errorMessage = await response.text().catch(() => 'unknown error');
+    }
+    throw new Error(`GitHub API error: ${response.status} - ${errorMessage}`);
   }
 
-  return data;
+  return response.json();
 }
 
 export async function getManifest(): Promise<Manifest> {

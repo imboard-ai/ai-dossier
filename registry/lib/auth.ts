@@ -82,7 +82,10 @@ export async function exchangeGitHubCode(code: string): Promise<string> {
   });
 
   if (!response.ok) {
-    throw new Error(`GitHub OAuth token exchange failed: ${response.status}`);
+    const body = await response.text().catch(() => 'unknown error');
+    throw new Error(
+      `GitHub OAuth token exchange failed: ${response.status} ${response.statusText} — ${body}`
+    );
   }
 
   const data = (await response.json()) as {
@@ -110,7 +113,10 @@ export async function fetchGitHubUser(
   });
 
   if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.status}`);
+    const body = await response.text().catch(() => '');
+    throw new Error(
+      `GitHub API error fetching user: ${response.status} ${response.statusText} — ${body}`
+    );
   }
 
   return (await response.json()) as { login: string; email: string | null };
@@ -149,7 +155,10 @@ export async function fetchGitHubOrgs(accessToken: string): Promise<string[]> {
   });
 
   if (!response.ok) {
-    throw new Error(`GitHub API error: ${response.status}`);
+    const body = await response.text().catch(() => '');
+    throw new Error(
+      `GitHub API error fetching orgs: ${response.status} ${response.statusText} — ${body}`
+    );
   }
 
   const orgs = (await response.json()) as Array<{ login: string }>;

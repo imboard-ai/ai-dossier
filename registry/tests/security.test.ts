@@ -86,7 +86,7 @@ describe('CORS restriction', () => {
     setCorsHeaders(req, res);
 
     expect(headers['Access-Control-Allow-Origin']).toBe('https://dossier.imboard.ai');
-    expect(headers['Vary']).toBe('Origin');
+    expect(headers.Vary).toBe('Origin');
   });
 
   it('respects CORS_ALLOWED_ORIGINS env var', async () => {
@@ -131,7 +131,7 @@ describe('OAuth state parameter (CSRF protection)', () => {
     let redirectUrl = '';
     let setCookieHeader = '';
     const res = {
-      status: (code: number) => ({ json: () => {} }),
+      status: (_code: number) => ({ json: () => {} }),
       setHeader: (key: string, value: string) => {
         if (key === 'Set-Cookie') setCookieHeader = value;
       },
@@ -240,9 +240,9 @@ describe('OAuth state parameter (CSRF protection)', () => {
 
     const headers: Record<string, string> = {};
     const res = {
-      status: (code: number) => ({
+      status: (_code: number) => ({
         json: () => {},
-        send: (b: string) => {},
+        send: (_b: string) => {},
       }),
       setHeader: (key: string, value: string) => {
         headers[key] = value;
@@ -265,7 +265,7 @@ describe('JWT token expiry', () => {
     const token = signJwt({ sub: 'testuser', email: null, orgs: [] });
     const decoded = verifyJwt(token);
 
-    const expiryDays = (decoded.exp! - decoded.iat!) / (24 * 60 * 60);
+    const expiryDays = ((decoded.exp ?? 0) - (decoded.iat ?? 0)) / (24 * 60 * 60);
     expect(expiryDays).toBe(7);
   });
 });

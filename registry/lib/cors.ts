@@ -17,6 +17,8 @@ export function setCorsHeaders(req: VercelRequest, res: VercelResponse): void {
   if (origin && allowed.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
+  } else if (origin) {
+    console.warn(`[cors] Rejected origin: ${origin}`);
   }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS, HEAD');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept');
