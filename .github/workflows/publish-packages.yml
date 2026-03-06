@@ -70,6 +70,9 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install npm with trusted publishing support
+        run: npm install -g npm@latest
+
       - name: Install dependencies
         run: npm install
 
@@ -123,7 +126,7 @@ jobs:
         if: steps.check-core.outputs.skip != 'true'
         run: |
           cd packages/core
-          npm publish --provenance --access public --registry https://registry.npmjs.org
+          npm publish --provenance --access public
 
       - name: Check if @ai-dossier/cli needs publishing
         id: check-cli
@@ -142,7 +145,7 @@ jobs:
         if: steps.check-cli.outputs.skip != 'true'
         run: |
           cd cli
-          npm publish --provenance --access public --registry https://registry.npmjs.org
+          npm publish --provenance --access public
 
       - name: Check if @ai-dossier/mcp-server needs publishing
         id: check-mcp
@@ -161,7 +164,7 @@ jobs:
         if: steps.check-mcp.outputs.skip != 'true'
         run: |
           cd mcp-server
-          npm publish --provenance --access public --registry https://registry.npmjs.org
+          npm publish --provenance --access public
 
   verify:
     needs: publish
