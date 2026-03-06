@@ -55,3 +55,9 @@ export const DEFAULT_PER_PAGE = 20;
 
 /** Maximum items per page for search/list. */
 export const MAX_PER_PAGE = 100;
+
+/** Maximum search query length in characters. */
+export const MAX_QUERY_LENGTH = 1000;
+
+/** Maximum changelog message length in characters. */
+export const MAX_CHANGELOG_LENGTH = 500;
