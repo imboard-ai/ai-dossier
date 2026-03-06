@@ -311,7 +311,7 @@ All responses include the `X-Request-Id` header for request correlation. Server 
 - Only alphanumeric characters (`a-z`, `A-Z`, `0-9`) and hyphens (`-`) are allowed
 - Invalid values are replaced without returning an error to the client; the server logs a warning and generates a UUID instead
 
-**Common codes:** `DOSSIER_NOT_FOUND`, `CONTENT_NOT_FOUND`, `UPSTREAM_ERROR`, `DELETE_ERROR`, `PUBLISH_ERROR`, `MISSING_FIELD`, `INVALID_NAMESPACE`, `INVALID_CONTENT`, `CONTENT_TOO_LARGE`, `INVALID_PATH`, `MISSING_TOKEN`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `FORBIDDEN`, `METHOD_NOT_ALLOWED`, `LOGIN_ERROR`, `VERSION_NOT_FOUND`, `VERSION_EXISTS`, `RATE_LIMITED`
+**Common codes:** `DOSSIER_NOT_FOUND`, `CONTENT_NOT_FOUND`, `UPSTREAM_ERROR`, `DELETE_ERROR`, `PUBLISH_ERROR`, `MISSING_FIELD`, `INVALID_FIELD`, `INVALID_NAMESPACE`, `INVALID_CONTENT`, `CONTENT_TOO_LARGE`, `CHANGELOG_TOO_LONG`, `QUERY_TOO_LONG`, `INVALID_PATH`, `MISSING_TOKEN`, `INVALID_TOKEN`, `TOKEN_EXPIRED`, `FORBIDDEN`, `ORIGIN_NOT_ALLOWED`, `METHOD_NOT_ALLOWED`, `UNSUPPORTED_MEDIA_TYPE`, `LOGIN_ERROR`, `VERSION_NOT_FOUND`, `VERSION_EXISTS`, `RATE_LIMITED`
 
 ---
 
@@ -501,13 +501,17 @@ Content-Range: bytes 0-1023/15420
 
 ## CORS Configuration
 
-CORS is restricted to an allowlist of known origins:
+CORS is restricted to an allowlist of known origins. CORS response headers (`Access-Control-Allow-Origin`, `Access-Control-Allow-Methods`, `Access-Control-Allow-Headers`, `Vary`) are **only sent when the request origin is on the allowlist**. Requests from unknown origins receive no CORS headers at all.
+
+**Allowed origin response:**
 ```
-Access-Control-Allow-Origin: <allowed origin>     # Allowlisted origins only
+Access-Control-Allow-Origin: <allowed origin>
 Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS, HEAD
 Access-Control-Allow-Headers: Authorization, Content-Type, Accept
 Vary: Origin
 ```
+
+**Unknown origin response:** No CORS headers are set. The browser enforces the same-origin policy.
 
 Default allowed origins: `https://dossier.imboard.ai`, `https://registry.dossier.dev`.
 Override via `CORS_ALLOWED_ORIGINS` env var (comma-separated).

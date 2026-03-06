@@ -48,14 +48,23 @@ Common error codes:
 
 | Status | Code | Description |
 |--------|------|-------------|
+| 400 | `INVALID_CONTENT` | Missing/malformed frontmatter |
+| 400 | `INVALID_FIELD` | Invalid field value (e.g. changelog not a string) |
 | 400 | `INVALID_NAMESPACE` | Dossier name fails validation (invalid characters, depth, or length) |
 | 400 | `INVALID_PATH` | Path traversal attempt detected |
 | 400 | `MISSING_FIELD` | Required field missing from request body |
+| 400 | `CHANGELOG_TOO_LONG` | Changelog exceeds maximum length (500 characters) |
+| 400 | `QUERY_TOO_LONG` | Search query exceeds maximum length (1000 characters) |
+| 403 | `FORBIDDEN` | User cannot publish to this namespace |
+| 403 | `ORIGIN_NOT_ALLOWED` | Mutating request from disallowed browser origin |
 | 404 | `DOSSIER_NOT_FOUND` | Dossier does not exist in the manifest |
 | 404 | `VERSION_NOT_FOUND` | Requested version does not match current version |
 | 404 | `CONTENT_NOT_FOUND` | Dossier entry exists but content file is missing |
 | 405 | `METHOD_NOT_ALLOWED` | HTTP method not supported for this endpoint |
+| 413 | `CONTENT_TOO_LARGE` | Content exceeds 1MB limit |
+| 415 | `UNSUPPORTED_MEDIA_TYPE` | Content-Type is not application/json |
 | 502 | `UPSTREAM_ERROR` | CDN or GitHub API request failed (network error, timeout, malformed response) |
+| 502 | `PUBLISH_ERROR` | GitHub API commit failed (includes request_id for log correlation) |
 
 Server errors (5xx) include a `request_id` for correlating with server logs. See [Error Observability](#error-observability) for tracing details.
 

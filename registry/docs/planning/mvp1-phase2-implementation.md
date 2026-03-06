@@ -67,10 +67,16 @@ Content-Type: application/json
 |--------|------|------|
 | 400 | `INVALID_CONTENT` | Missing/malformed frontmatter |
 | 400 | `MISSING_FIELD` | Required field missing (name, title, version) |
+| 400 | `INVALID_FIELD` | Invalid field value (e.g. changelog not a string) |
+| 400 | `INVALID_NAMESPACE` | Dossier name fails validation (invalid characters, depth, or length) |
+| 400 | `CHANGELOG_TOO_LONG` | Changelog exceeds maximum length (500 characters) |
+| 400 | `INVALID_PATH` | Path traversal attempt detected |
 | 401 | `MISSING_TOKEN` | No Authorization header |
 | 401 | `INVALID_TOKEN` | Invalid/expired JWT |
 | 403 | `FORBIDDEN` | User cannot publish to this namespace |
 | 413 | `CONTENT_TOO_LARGE` | Content exceeds 1MB limit |
+| 415 | `UNSUPPORTED_MEDIA_TYPE` | Content-Type is not application/json |
+| 502 | `PUBLISH_ERROR` | GitHub API commit failed (includes request_id for log correlation) |
 
 ---
 

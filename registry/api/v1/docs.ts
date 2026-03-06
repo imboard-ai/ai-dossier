@@ -122,6 +122,7 @@ const publishDossierEndpoint = {
     401: 'MISSING_TOKEN, INVALID_TOKEN, TOKEN_EXPIRED',
     403: 'FORBIDDEN - Cannot publish to this namespace (includes `namespace` field)',
     413: 'CONTENT_TOO_LARGE - Max 1MB',
+    415: 'UNSUPPORTED_MEDIA_TYPE - Content-Type must be application/json',
     502: 'PUBLISH_ERROR - Includes request_id for log correlation',
   },
 };

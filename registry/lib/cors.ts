@@ -24,9 +24,9 @@ function getAllowedOrigins(): string[] {
 
 /**
  * Sets CORS response headers based on the request origin.
- * If the origin is in the allowlist, reflects it in Access-Control-Allow-Origin.
- * Unknown origins receive no Allow-Origin header but still get the allowed methods/headers
- * so preflight responses are well-formed.
+ * If the origin is in the allowlist, reflects it in Access-Control-Allow-Origin
+ * along with Allow-Methods, Allow-Headers, and Vary headers.
+ * Unknown origins receive no CORS headers at all.
  */
 export function setCorsHeaders(
   req: VercelRequest,
