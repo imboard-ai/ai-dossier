@@ -516,6 +516,8 @@ Vary: Origin
 Default allowed origins: `https://dossier.imboard.ai`, `https://registry.dossier.dev`.
 Override via `CORS_ALLOWED_ORIGINS` env var (comma-separated).
 
+**Origin normalization:** Both request origins and allowlist entries are normalized before comparison using the URL API. This lowercases the protocol and hostname, strips default ports (80 for HTTP, 443 for HTTPS), and removes trailing slashes. For example, `https://DOSSIER.IMBOARD.AI:443/` is normalized to `https://dossier.imboard.ai`.
+
 ### CSRF Protection
 
 Mutating requests (`POST`, `PUT`, `PATCH`, `DELETE`) from browser origins not on the allowlist are rejected with:
