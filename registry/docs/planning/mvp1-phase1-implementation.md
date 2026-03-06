@@ -180,18 +180,6 @@ Authorization: Bearer <JWT>
 
 ## JWT Claims Structure
 
-```json
-{
-  "sub": "yuvaldim",
-  "email": null,
-  "orgs": ["imboard-ai"],
-  "iat": 1764847354,
-  "exp": 1765452154
-}
-```
+See [Auth & Publish — JWT Structure](auth-and-publish.md#jwt-structure) for the canonical JWT claims definition.
 
-- `sub` - GitHub username (personal namespace)
-- `email` - From GitHub profile (may be null)
-- `orgs` - Array of org logins user belongs to
-- `iat` - Issued at timestamp
-- `exp` - Expiry (7 days from issue)
+Fields: `sub` (GitHub username), `email`, `orgs` (org memberships), `iat`, `exp` (7-day expiry).
