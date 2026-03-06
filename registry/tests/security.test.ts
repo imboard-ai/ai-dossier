@@ -120,6 +120,43 @@ describe('CORS restriction', () => {
 });
 
 describe('OAuth state parameter (CSRF protection)', () => {
+  function createMockReq(
+    overrides: Partial<{
+      method: string;
+      query: Record<string, string>;
+      headers: Record<string, string>;
+    }> = {}
+  ) {
+    return {
+      method: overrides.method ?? 'GET',
+      query: overrides.query ?? {},
+      headers: overrides.headers ?? {},
+    } as any;
+  }
+
+  function createMockRes() {
+    let statusCode = 0;
+    let body = '';
+    const headers: Record<string, string> = {};
+    const res = {
+      status: (code: number) => {
+        statusCode = code;
+        return {
+          json: (b: any) => {
+            body = JSON.stringify(b);
+          },
+          send: (b: string) => {
+            body = b;
+          },
+        };
+      },
+      setHeader: (key: string, value: string) => {
+        headers[key] = value;
+      },
+    } as any;
+    return { res, getStatus: () => statusCode, getBody: () => body, headers };
+  }
+
   it('login handler sets state cookie and includes state in redirect URL', async () => {
     const loginModule = await import('../api/auth/login');
     const handler = loginModule.default;
@@ -127,18 +164,12 @@ describe('OAuth state parameter (CSRF protection)', () => {
     process.env.REGISTRY_BASE_URL = 'https://registry.example.com';
     process.env.GITHUB_CLIENT_ID = 'test-client-id';
 
-    const req = { method: 'GET' } as any;
+    const req = createMockReq();
     let redirectUrl = '';
-    let setCookieHeader = '';
-    const res = {
-      status: (_code: number) => ({ json: () => {} }),
-      setHeader: (key: string, value: string) => {
-        if (key === 'Set-Cookie') setCookieHeader = value;
-      },
-      redirect: (url: string) => {
-        redirectUrl = url;
-      },
-    } as any;
+    const { res, headers } = createMockRes();
+    res.redirect = (url: string) => {
+      redirectUrl = url;
+    };
 
     handler(req, res);
 
@@ -149,6 +180,7 @@ describe('OAuth state parameter (CSRF protection)', () => {
     expect(state).toHaveLength(64); // 32 bytes hex-encoded
 
     // Verify state cookie is set
+    const setCookieHeader = headers['Set-Cookie'];
     expect(setCookieHeader).toContain(`${OAUTH_STATE_COOKIE}=`);
     expect(setCookieHeader).toContain('HttpOnly');
     expect(setCookieHeader).toContain('Secure');
@@ -160,41 +192,20 @@ describe('OAuth state parameter (CSRF protection)', () => {
     const callbackModule = await import('../api/auth/callback');
     const handler = callbackModule.default;
 
-    const req = {
-      method: 'GET',
-      query: { code: 'test-code' },
-      headers: {},
-    } as any;
-
-    let statusCode = 0;
-    let body = '';
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = JSON.stringify(b);
-          },
-          send: (b: string) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: () => {},
-    } as any;
+    const req = createMockReq({ query: { code: 'test-code' } });
+    const { res, getStatus, getBody } = createMockRes();
 
     await handler(req, res);
 
-    expect(statusCode).toBe(403);
-    expect(body).toContain('state mismatch');
+    expect(getStatus()).toBe(403);
+    expect(getBody()).toContain('state mismatch');
   });
 
   it('callback handler rejects request with mismatched state', async () => {
     const callbackModule = await import('../api/auth/callback');
     const handler = callbackModule.default;
 
-    const req = {
-      method: 'GET',
+    const req = createMockReq({
       query: {
         code: 'test-code',
         state: 'wrong-state-value-that-is-64-chars-long-aaaaaaaaaaaaaaaaaaaaaaaaa',
@@ -202,29 +213,13 @@ describe('OAuth state parameter (CSRF protection)', () => {
       headers: {
         cookie: `${OAUTH_STATE_COOKIE}=correct-state-value-is-64-chars-long-bbbbbbbbbbbbbbbbbbbbbbbbb`,
       },
-    } as any;
-
-    let statusCode = 0;
-    let body = '';
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = JSON.stringify(b);
-          },
-          send: (b: string) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: () => {},
-    } as any;
+    });
+    const { res, getStatus, getBody } = createMockRes();
 
     await handler(req, res);
 
-    expect(statusCode).toBe(403);
-    expect(body).toContain('state mismatch');
+    expect(getStatus()).toBe(403);
+    expect(getBody()).toContain('state mismatch');
   });
 
   it('callback handler clears state cookie on response', async () => {
@@ -232,22 +227,11 @@ describe('OAuth state parameter (CSRF protection)', () => {
     const handler = callbackModule.default;
 
     const state = crypto.randomBytes(32).toString('hex');
-    const req = {
-      method: 'GET',
+    const req = createMockReq({
       query: { code: 'test-code', state },
       headers: { cookie: `${OAUTH_STATE_COOKIE}=${state}` },
-    } as any;
-
-    const headers: Record<string, string> = {};
-    const res = {
-      status: (_code: number) => ({
-        json: () => {},
-        send: (_b: string) => {},
-      }),
-      setHeader: (key: string, value: string) => {
-        headers[key] = value;
-      },
-    } as any;
+    });
+    const { res, headers } = createMockRes();
 
     // This will fail at the GitHub OAuth exchange step, but the cookie
     // should be cleared before that point
