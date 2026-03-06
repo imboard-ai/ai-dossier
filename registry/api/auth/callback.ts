@@ -69,6 +69,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   if (!code) {
+    console.warn('[auth/callback] Missing authorization code in callback');
     return res
       .status(400)
       .send(
