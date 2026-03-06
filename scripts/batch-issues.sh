@@ -6,6 +6,7 @@
 #   ./scripts/batch-issues.sh 102 103 104 105
 #   ./scripts/batch-issues.sh 102..110              # all open issues in range 102-110
 #   ./scripts/batch-issues.sh 50..60 102 103        # mix ranges and individual issues
+#   ./scripts/batch-issues.sh --label epic/v2        # sequential epic: all open issues with label
 #   ./scripts/batch-issues.sh $(gh issue list --label "agent-friendly" --json number --jq '.[].number')
 #
 # Each issue gets its own Claude Code agent in a separate process.
@@ -13,6 +14,7 @@
 #
 # Options:
 #   --max-parallel N   Max concurrent agents (default: 3)
+#   --label LABEL      Fetch all open issues with this label and run sequentially (epic mode)
 #   --dry-run          Print commands without executing
 #   --model MODEL      Model to use (default: opus)
 
@@ -25,6 +27,7 @@ cd "$SCRIPT_DIR/.."
 MAX_PARALLEL=3
 DRY_RUN=false
 MODEL="opus"
+LABEL=""
 ISSUES=()
 
 while [[ $# -gt 0 ]]; do
@@ -32,6 +35,7 @@ while [[ $# -gt 0 ]]; do
     --max-parallel) MAX_PARALLEL="$2"; shift 2 ;;
     --dry-run)      DRY_RUN=true; shift ;;
     --model)        MODEL="$2"; shift 2 ;;
+    --label)        LABEL="$2"; shift 2 ;;
     *)
       if [[ "$1" =~ ^([0-9]+)\.\.([0-9]+)$ ]]; then
         range_start="${BASH_REMATCH[1]}"
@@ -60,16 +64,37 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# ── Label mode: fetch open issues by label (epic mode) ──
+if [[ -n "$LABEL" ]]; then
+  echo "Epic mode: fetching open issues with label \"${LABEL}\"..."
+  label_issues=$(gh issue list --state open --label "$LABEL" --limit 500 \
+    --json number --jq '[.[].number] | sort | .[]')
+  if [[ -z "$label_issues" ]]; then
+    echo "No open issues found with label \"${LABEL}\""
+    exit 0
+  fi
+  while IFS= read -r num; do
+    ISSUES+=("$num")
+    echo "  Found open issue #${num}"
+  done <<< "$label_issues"
+  # Epic mode forces sequential execution so each issue builds on the last
+  MAX_PARALLEL=1
+  echo ""
+  echo "Running ${#ISSUES[@]} issues sequentially (epic mode)"
+fi
+
 if [[ ${#ISSUES[@]} -eq 0 ]]; then
-  echo "Usage: $0 [--max-parallel N] [--model MODEL] [--dry-run] <issue-numbers|ranges...>"
+  echo "Usage: $0 [--max-parallel N] [--model MODEL] [--dry-run] [--label LABEL] <issue-numbers|ranges...>"
   echo ""
   echo "Arguments can be individual issue numbers or ranges (START..END)."
   echo "Ranges expand to all open issues within the range."
+  echo "Use --label to fetch all open issues with a GitHub label (epic mode, sequential)."
   echo ""
   echo "Examples:"
   echo "  $0 102 103 104"
   echo "  $0 102..110                  # all open issues from 102 to 110"
   echo "  $0 50..60 102 103            # mix ranges and individual numbers"
+  echo "  $0 --label epic/v2           # sequential epic: all issues with label"
   echo "  $0 --max-parallel 5 --model opus \$(gh issue list --label bug --json number --jq '.[].number')"
   exit 1
 fi
