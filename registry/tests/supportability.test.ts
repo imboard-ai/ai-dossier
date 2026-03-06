@@ -2,6 +2,29 @@ import crypto from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { authenticateRequest } from '../lib/auth';
 import { OAUTH_STATE_COOKIE } from '../lib/constants';
+import { createMockRes } from './helpers/mocks';
+
+// Structured log entries are single-line JSON with this shape:
+// { "level": "info|warn|error", "context": "module", "message": "...", ...extras }
+// info → console.log (stdout), warn → console.warn (stderr), error → console.error (stderr)
+
+/** Search console spy calls for a parsed JSON log entry matching the given message. */
+function findLogEntry(
+  spy: ReturnType<typeof vi.spyOn>,
+  message: string
+): Record<string, unknown> | undefined {
+  return (
+    spy.mock.calls
+      .map((call) => {
+        try {
+          return JSON.parse(call[0] as string);
+        } catch {
+          return null;
+        }
+      })
+      .find((entry) => entry?.message === message) ?? undefined
+  );
+}
 
 describe('successful mutation logging', () => {
   it('logs successful publish with structured data', async () => {
@@ -55,33 +78,13 @@ describe('successful mutation logging', () => {
       },
     } as any;
 
-    let statusCode = 0;
-    let body: any = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: () => {},
-    } as any;
+    const { res, getStatus } = createMockRes();
 
-    await handler(req, res);
+    await handler(req, res as any);
 
-    expect(statusCode).toBe(201);
+    expect(getStatus()).toBe(201);
 
-    const publishLog = consoleSpy.mock.calls
-      .map((call) => {
-        try {
-          return JSON.parse(call[0] as string);
-        } catch {
-          return null;
-        }
-      })
-      .find((entry) => entry?.message === 'Dossier published');
+    const publishLog = findLogEntry(consoleSpy, 'Dossier published');
 
     expect(publishLog).toBeDefined();
     expect(publishLog).toMatchObject({
@@ -133,33 +136,13 @@ describe('successful mutation logging', () => {
       headers: { authorization: 'Bearer valid-token', 'x-request-id': 'req-456' },
     } as any;
 
-    let statusCode = 0;
-    let body: any = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: () => {},
-    } as any;
+    const { res, getStatus } = createMockRes();
 
-    await handler(req, res);
+    await handler(req, res as any);
 
-    expect(statusCode).toBe(200);
+    expect(getStatus()).toBe(200);
 
-    const deleteLog = consoleSpy.mock.calls
-      .map((call) => {
-        try {
-          return JSON.parse(call[0] as string);
-        } catch {
-          return null;
-        }
-      })
-      .find((entry) => entry?.message === 'Dossier deleted');
+    const deleteLog = findLogEntry(consoleSpy, 'Dossier deleted');
 
     expect(deleteLog).toBeDefined();
     expect(deleteLog).toMatchObject({
@@ -201,25 +184,14 @@ describe('auth error response includes namespace', () => {
       headers: { authorization: 'Bearer valid-token' },
     } as any;
 
-    let statusCode = 0;
-    let body: any = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = b;
-          },
-        };
-      },
-    } as any;
+    const { res, getStatus, getBody } = createMockRes();
 
-    const result = await authModule.authorizePublish(req, res, 'other-org/some-dossier');
+    const result = await authModule.authorizePublish(req, res as any, 'other-org/some-dossier');
 
     expect(result).toBe(false);
-    expect(statusCode).toBe(403);
-    expect(body.error.namespace).toBe('other-org/some-dossier');
-    expect(body.error.code).toBe('FORBIDDEN');
+    expect(getStatus()).toBe(403);
+    expect((getBody() as any).error.namespace).toBe('other-org/some-dossier');
+    expect((getBody() as any).error.code).toBe('FORBIDDEN');
 
     consoleSpy.mockRestore();
     vi.doUnmock('jsonwebtoken');
@@ -240,31 +212,16 @@ describe('error correlation IDs', () => {
       headers: { cookie: `${OAUTH_STATE_COOKIE}=${state}` },
     } as any;
 
-    let statusCode = 0;
-    let body = '';
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          send: (b: string) => {
-            body = b;
-          },
-          json: (b: any) => {
-            body = JSON.stringify(b);
-          },
-        };
-      },
-      setHeader: () => {},
-    } as any;
+    const { res, getStatus, getBody } = createMockRes();
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await handler(req, res);
+    await handler(req, res as any);
 
-    expect(statusCode).toBe(500);
+    expect(getStatus()).toBe(500);
 
     // Error page should contain a reference code (8 hex chars)
-    const refMatch = body.match(/Reference:\s*([a-f0-9]{8})/);
+    const refMatch = (getBody() as string).match(/Reference:\s*([a-f0-9]{8})/);
     expect(refMatch).not.toBeNull();
     const errorRef = refMatch![1];
 
@@ -309,31 +266,18 @@ describe('error correlation IDs', () => {
 
     const req = { method: 'GET' } as any;
 
-    let statusCode = 0;
-    let body: any = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: () => {},
-      redirect: () => {},
-    } as any;
+    const { res, getStatus, getBody } = createMockRes();
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    handler(req, res);
+    handler(req, res as any);
 
-    expect(statusCode).toBe(500);
-    expect(body.error.ref).toMatch(/^[a-f0-9]{8}$/);
+    expect(getStatus()).toBe(500);
+    expect((getBody() as any).error.ref).toMatch(/^[a-f0-9]{8}$/);
 
     // Console log should contain the same ref
     const logCall = consoleSpy.mock.calls.find((call) =>
-      String(call[0]).includes(`ref=${body.error.ref}`)
+      String(call[0]).includes(`ref=${(getBody() as any).error.ref}`)
     );
     expect(logCall).toBeDefined();
 
@@ -351,17 +295,11 @@ describe('auth failure logging', () => {
     const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const req = { method: 'POST', url: '/api/v1/dossiers', headers: {} } as any;
-    let statusCode = 0;
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return { json: () => {} };
-      },
-    } as any;
+    const { res, getStatus } = createMockRes();
 
-    await authenticateRequest(req, res);
+    await authenticateRequest(req, res as any);
 
-    expect(statusCode).toBe(401);
+    expect(getStatus()).toBe(401);
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
     expect(loggedJson).toMatchObject({
       level: 'warn',
@@ -396,17 +334,11 @@ describe('auth failure logging', () => {
       url: '/api/v1/dossiers/foo/bar',
       headers: { authorization: 'Bearer bad-token' },
     } as any;
-    let statusCode = 0;
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return { json: () => {} };
-      },
-    } as any;
+    const { res, getStatus } = createMockRes();
 
-    await authModule.authenticateRequest(req, res);
+    await authModule.authenticateRequest(req, res as any);
 
-    expect(statusCode).toBe(401);
+    expect(getStatus()).toBe(401);
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
     expect(loggedJson).toMatchObject({
       level: 'warn',

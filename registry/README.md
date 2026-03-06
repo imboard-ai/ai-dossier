@@ -123,6 +123,55 @@ Dossier and search endpoint responses include an `X-Request-Id` header for reque
 
 See [`lib/responses.ts`](lib/responses.ts) for the implementation.
 
+## Structured Logging
+
+All server-side logging uses structured JSON via `createLogger(context)` from `lib/logger.ts`. Each log entry is a single-line JSON string sent to stdout (`info`) or stderr (`warn`, `error`), compatible with Vercel's log ingestion.
+
+**Log format:**
+
+```json
+{
+  "level": "info | warn | error",
+  "context": "module-name",
+  "message": "Human-readable description",
+  "...extras": "Additional key-value pairs"
+}
+```
+
+**Destinations:** `info` logs go to `console.log` (stdout); `warn` to `console.warn` (stderr); `error` to `console.error` (stderr).
+
+**Usage in new modules:**
+
+```ts
+import createLogger from '../lib/logger';
+
+const log = createLogger('my-module');
+
+log.info('Operation succeeded', { userId: 'abc', durationMs: 42 });
+log.warn('Deprecated parameter used', { param: 'old_name' });
+log.error('Upstream failed', { url, status: 502 });
+```
+
+## Development Conventions
+
+### HTTP Status Constants
+
+Use `HTTP_STATUS` from `lib/constants.ts` instead of hardcoded numeric status codes:
+
+```ts
+import { HTTP_STATUS } from '../lib/constants';
+
+// Good
+res.status(HTTP_STATUS.OK).json(data);
+res.status(HTTP_STATUS.NOT_FOUND).json({ error: { code: 'DOSSIER_NOT_FOUND', message: '...' } });
+
+// Bad — avoid magic numbers
+res.status(200).json(data);
+res.status(404).json({ error: { code: 'DOSSIER_NOT_FOUND', message: '...' } });
+```
+
+Available constants: `OK` (200), `CREATED` (201), `NO_CONTENT` (204), `BAD_REQUEST` (400), `UNAUTHORIZED` (401), `FORBIDDEN` (403), `NOT_FOUND` (404), `METHOD_NOT_ALLOWED` (405), `CONTENT_TOO_LARGE` (413), `UNSUPPORTED_MEDIA_TYPE` (415), `INTERNAL_SERVER_ERROR` (500), `BAD_GATEWAY` (502).
+
 ## Design Docs
 
 - [MVP0 Implementation](docs/planning/mvp0-implementation.md) — read-only registry architecture
