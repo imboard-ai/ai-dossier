@@ -90,6 +90,17 @@ describe('CORS restriction', () => {
     expect(headers.Vary).toBe('Origin');
   });
 
+  it('includes PUT and PATCH in Access-Control-Allow-Methods', async () => {
+    const { setCorsHeaders } = await import('../lib/cors');
+    const { headers, req, res } = createCorsReqRes('https://dossier.imboard.ai');
+
+    setCorsHeaders(req, res);
+
+    const methods = headers['Access-Control-Allow-Methods'] as string;
+    expect(methods).toContain('PUT');
+    expect(methods).toContain('PATCH');
+  });
+
   it('respects CORS_ALLOWED_ORIGINS env var', async () => {
     const originalEnv = process.env.CORS_ALLOWED_ORIGINS;
     process.env.CORS_ALLOWED_ORIGINS = 'https://custom.example.com,https://another.example.com';

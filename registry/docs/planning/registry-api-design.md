@@ -506,7 +506,7 @@ CORS is restricted to an allowlist of known origins. CORS response headers (`Acc
 **Allowed origin response:**
 ```
 Access-Control-Allow-Origin: <allowed origin>
-Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS, HEAD
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD
 Access-Control-Allow-Headers: Authorization, Content-Type, Accept
 Vary: Origin
 ```

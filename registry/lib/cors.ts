@@ -38,7 +38,7 @@ export function setCorsHeaders(
 
   if (origin && allowed.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS, HEAD');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept');
     res.setHeader('Vary', 'Origin');
   } else if (origin) {
