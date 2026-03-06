@@ -346,6 +346,71 @@ describe('error correlation IDs', () => {
   });
 });
 
+describe('search handler logging', () => {
+  it('logs search completed with structured data', async () => {
+    vi.resetModules();
+
+    vi.doMock('../lib/manifest', () => ({
+      fetchManifestDossiers: vi.fn().mockResolvedValue([
+        { name: 'test-dossier', title: 'Test Dossier', description: 'A test' },
+        { name: 'other-dossier', title: 'Other', description: 'Another' },
+      ]),
+      normalizeDossier: (d: any) => d,
+    }));
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const handlerModule = await import('../api/v1/search');
+    const handler = handlerModule.default;
+
+    const req = {
+      method: 'GET',
+      headers: { 'x-request-id': 'req-search-123' },
+      query: { q: 'test' },
+    } as any;
+
+    let statusCode = 0;
+    let body: any = {};
+    const res = {
+      status: (code: number) => {
+        statusCode = code;
+        return {
+          json: (b: any) => {
+            body = b;
+          },
+        };
+      },
+      setHeader: () => {},
+    } as any;
+
+    await handler(req, res);
+
+    expect(statusCode).toBe(200);
+
+    const searchLog = consoleSpy.mock.calls
+      .map((call) => {
+        try {
+          return JSON.parse(call[0] as string);
+        } catch {
+          return null;
+        }
+      })
+      .find((entry) => entry?.message === 'Search completed');
+
+    expect(searchLog).toBeDefined();
+    expect(searchLog).toMatchObject({
+      level: 'info',
+      context: 'search',
+      requestId: 'req-search-123',
+      query: 'test',
+      total: 1,
+    });
+
+    consoleSpy.mockRestore();
+    vi.doUnmock('../lib/manifest');
+  });
+});
+
 describe('auth failure logging', () => {
   it('logs missing token attempts', async () => {
     const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});

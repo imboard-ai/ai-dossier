@@ -9,7 +9,15 @@ const DEFAULT_ALLOWED_ORIGINS = ['https://dossier.imboard.ai', 'https://registry
 function getAllowedOrigins(): string[] {
   const envOrigins = process.env.CORS_ALLOWED_ORIGINS;
   if (envOrigins) {
-    return envOrigins.split(',').map((o) => o.trim());
+    const raw = envOrigins.split(',').map((o) => o.trim());
+    const filtered = raw.filter(Boolean);
+    if (filtered.length < raw.length) {
+      log.warn('CORS_ALLOWED_ORIGINS contains empty entries — filtered out', {
+        raw: raw.length,
+        filtered: filtered.length,
+      });
+    }
+    return filtered;
   }
   return DEFAULT_ALLOWED_ORIGINS;
 }

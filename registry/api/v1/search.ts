@@ -1,9 +1,12 @@
 import { DEFAULT_PER_PAGE, HTTP_STATUS, MAX_PER_PAGE, MAX_QUERY_LENGTH } from '../../lib/constants';
 import { handleCors } from '../../lib/cors';
+import createLogger from '../../lib/logger';
 import { fetchManifestDossiers, normalizeDossier } from '../../lib/manifest';
 import { queryString } from '../../lib/query';
 import { badRequest, getRequestId, methodNotAllowed, serverError } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
+
+const log = createLogger('search');
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
@@ -57,6 +60,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const paged = matched.slice(start, start + perPage);
 
     const dossiers = paged.map(normalizeDossier);
+
+    log.info('Search completed', { requestId, query: q, total, page, perPage });
 
     return res.status(HTTP_STATUS.OK).json({
       dossiers,
