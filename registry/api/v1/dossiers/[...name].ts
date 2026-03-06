@@ -148,6 +148,8 @@ async function handleDelete(
       });
     }
 
+    log.info('Dossier deleted', { requestId, dossier: dossierName, version });
+
     const response: Record<string, string> = {
       message: 'Dossier deleted',
       name: dossierName,

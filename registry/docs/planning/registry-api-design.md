@@ -552,7 +552,7 @@ Read-only methods (`GET`, `HEAD`) are allowed from any origin. Requests without 
 | `SIGNATURE_INVALID` | 400 | Signature verification failed |
 | `VERSION_EXISTS` | 409 | Version already published |
 | `VERSION_INVALID` | 400 | Not valid semver or not greater than existing |
-| `NAMESPACE_FORBIDDEN` | 403 | No permission to publish to namespace |
+| `FORBIDDEN` | 403 | No permission to publish to namespace (response includes `namespace` field) |
 | `RATE_LIMITED` | 429 | Too many publish requests (include `Retry-After`) |
 
 ---

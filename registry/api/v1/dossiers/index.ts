@@ -152,6 +152,13 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       changelogMessage
     );
 
+    log.info('Dossier published', {
+      requestId,
+      namespace,
+      name: fullPath,
+      version: parsed.frontmatter.version,
+    });
+
     return res.status(HTTP_STATUS.CREATED).json({
       name: fullPath,
       version: parsed.frontmatter.version,
