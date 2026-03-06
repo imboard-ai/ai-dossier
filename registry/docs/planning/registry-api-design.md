@@ -494,13 +494,16 @@ Content-Range: bytes 0-1023/15420
 
 ## CORS Configuration
 
-For browser-based clients:
+CORS is restricted to an allowlist of known origins:
 ```
-Access-Control-Allow-Origin: *                    # Public endpoints
-Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS
-Access-Control-Allow-Headers: Authorization, Content-Type
-Access-Control-Max-Age: 86400
+Access-Control-Allow-Origin: <allowed origin>     # Allowlisted origins only
+Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS, HEAD
+Access-Control-Allow-Headers: Authorization, Content-Type, Accept
+Vary: Origin
 ```
+
+Default allowed origins: `https://dossier.imboard.ai`, `https://registry.dossier.dev`.
+Override via `CORS_ALLOWED_ORIGINS` env var (comma-separated).
 
 ---
 

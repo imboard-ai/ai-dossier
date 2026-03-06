@@ -22,6 +22,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const isContentRequest = pathParts[pathParts.length - 1] === 'content';
   const dossierName = isContentRequest ? pathParts.slice(0, -1).join('/') : pathParts.join('/');
 
+  const namespaceCheck = validateNamespace(dossierName);
+  if (!namespaceCheck.valid) {
+    return res.status(400).json({
+      error: { code: 'INVALID_NAMESPACE', message: namespaceCheck.error },
+    });
+  }
+
   if (req.method === 'DELETE') {
     return handleDelete(req, res, dossierName, version as string);
   }
@@ -112,13 +119,6 @@ async function handleDelete(
     }
     return res.status(401).json({
       error: { code: 'INVALID_TOKEN', message: 'Invalid token. Please login again.' },
-    });
-  }
-
-  const namespaceValidation = validateNamespace(dossierName);
-  if (!namespaceValidation.valid) {
-    return res.status(400).json({
-      error: { code: 'INVALID_NAMESPACE', message: namespaceValidation.error },
     });
   }
 

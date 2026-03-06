@@ -6,7 +6,7 @@ const GITHUB_API = 'https://api.github.com';
 
 function sanitizePath(filePath: string): string {
   const normalized = path.posix.normalize(filePath);
-  if (normalized.startsWith('..') || normalized.startsWith('/') || normalized.includes('/../')) {
+  if (normalized.startsWith('/') || normalized.split('/').includes('..')) {
     throw new Error(`Path traversal detected: ${filePath}`);
   }
   return normalized;

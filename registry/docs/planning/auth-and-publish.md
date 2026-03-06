@@ -153,6 +153,8 @@ The Registry API is a server-side service hosted on Vercel.
 | `GITHUB_CLIENT_SECRET` | OAuth App client secret (private, only in Registry) |
 | `JWT_SECRET` | Secret key to sign/verify JWTs |
 | `GITHUB_BOT_TOKEN` | Token to write to content repo |
+| `REGISTRY_BASE_URL` | Base URL for OAuth redirect (e.g., `https://registry.dossier.dev`) |
+| `CORS_ALLOWED_ORIGINS` | Comma-separated allowed CORS origins (optional, has defaults) |
 
 ---
 
@@ -592,7 +594,7 @@ S3 API
 
 **Problem:** If a user is removed from an org after login, their JWT still contains that org until expiry.
 
-**Mitigation:** Short JWT expiry (1 hour). User must re-login to refresh org list.
+**Mitigation:** JWT expiry of 7 days. User must re-login to refresh org list.
 
 ### 2. JWT Storage on Client
 

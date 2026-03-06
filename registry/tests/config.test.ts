@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 describe('config', () => {
   const REQUIRED_VARS = {
@@ -18,7 +18,7 @@ describe('config', () => {
     }
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) {
         delete process.env[key];
@@ -26,11 +26,7 @@ describe('config', () => {
         process.env[key] = value;
       }
     }
-    // Reset module cache so config is re-evaluated
-    const modules = Object.keys(await import.meta.glob('../lib/config.ts'));
-    for (const mod of modules) {
-      // vitest handles this via dynamic import
-    }
+    vi.resetModules();
   });
 
   it('should throw when GITHUB_BOT_TOKEN is missing', async () => {
