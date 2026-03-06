@@ -6,6 +6,7 @@ import { handleCors } from '../../../lib/cors';
 import { validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
 import createLogger from '../../../lib/logger';
+import { queryString } from '../../../lib/query';
 import { getRequestId, methodNotAllowed, serverError } from '../../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
@@ -22,7 +23,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const name = req.query.name;
-  const version = Array.isArray(req.query.version) ? req.query.version[0] : req.query.version;
+  const version = queryString(req.query.version);
   const pathParts = Array.isArray(name) ? name : typeof name === 'string' ? name.split('/') : [];
 
   const isContentRequest = pathParts[pathParts.length - 1] === 'content';
