@@ -76,6 +76,11 @@ Multi-registry note:
               for (const e of result.errors) {
                 console.error(`⚠️  Registry '${e.registry}': ${e.error}`);
               }
+              const totalRegistries = resolveRegistries().length;
+              const failed = result.errors.length;
+              console.error(
+                `⚠️  Showing partial results (${totalRegistries - failed}/${totalRegistries} registries responded)\n`
+              );
             }
 
             const dossiers = result.dossiers;

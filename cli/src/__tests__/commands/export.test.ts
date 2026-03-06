@@ -15,6 +15,8 @@ describe('export command', () => {
   beforeEach(() => {
     vi.mocked(registryClient.parseNameVersion).mockImplementation(parseNameVersionImpl);
     mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.writeFileSync.mockReset();
+    mockedFs.mkdirSync.mockReset();
   });
 
   it('should export dossier to file', async () => {
@@ -77,6 +79,26 @@ describe('export command', () => {
     ).rejects.toThrow();
 
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Not found'));
+  });
+
+  it('should exit 1 with message on file write error', async () => {
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      result: { content: '# Dossier content', digest: null, _registry: 'public' },
+      errors: [],
+    });
+    mockedFs.writeFileSync.mockImplementation(() => {
+      throw new Error('EACCES: permission denied');
+    });
+
+    const program = createTestProgram();
+    registerExportCommand(program);
+
+    await expect(program.parseAsync(['node', 'dossier', 'export', 'my-dossier'])).rejects.toThrow();
+
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Failed to write file'));
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('EACCES: permission denied')
+    );
   });
 
   it('should use custom output path with -o', async () => {

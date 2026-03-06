@@ -88,6 +88,34 @@ describe('list command', () => {
       expect(jsonCalls.length).toBeGreaterThan(0);
     });
 
+    it('should show partial results warning when some registries fail', async () => {
+      vi.mocked(config.resolveRegistries).mockReturnValue([
+        { name: 'public', url: 'https://public.registry.com' },
+        { name: 'private', url: 'https://private.registry.com' },
+      ]);
+      vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+        dossiers: [
+          { name: 'test', version: '1.0.0', title: 'Test', category: 'dev', _registry: 'public' },
+        ] as any,
+        total: 1,
+        errors: [{ registry: 'private', error: 'connection refused' }],
+      });
+
+      const program = createTestProgram();
+      registerListCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'list', '--source', 'registry'])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining("Registry 'private': connection refused")
+      );
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('Showing partial results (1/2 registries responded)')
+      );
+    });
+
     it('should show empty message for registry', async () => {
       vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
         dossiers: [],

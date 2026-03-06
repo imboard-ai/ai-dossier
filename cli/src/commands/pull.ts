@@ -66,21 +66,28 @@ export function registerPullCommand(program: Command): void {
             }
           }
 
-          fs.mkdirSync(dossierDir, { recursive: true, mode: 0o700 });
-          fs.writeFileSync(contentFile, content, 'utf8');
-          fs.writeFileSync(
-            metaFile,
-            JSON.stringify(
-              {
-                cached_at: new Date().toISOString(),
-                version,
-                source_registry: result._registry,
-              },
-              null,
-              2
-            ),
-            'utf8'
-          );
+          try {
+            fs.mkdirSync(dossierDir, { recursive: true, mode: 0o700 });
+            fs.writeFileSync(contentFile, content, 'utf8');
+            fs.writeFileSync(
+              metaFile,
+              JSON.stringify(
+                {
+                  cached_at: new Date().toISOString(),
+                  version,
+                  source_registry: result._registry,
+                },
+                null,
+                2
+              ),
+              'utf8'
+            );
+          } catch (writeErr: unknown) {
+            console.error(
+              `❌ ${dossierName}@${version}: failed to write cache files to '${dossierDir}': ${(writeErr as Error).message}`
+            );
+            continue;
+          }
 
           const status = options.force ? 'updated' : 'downloaded';
           console.log(`✅ ${dossierName}@${version} (${status}) [${result._registry}]`);

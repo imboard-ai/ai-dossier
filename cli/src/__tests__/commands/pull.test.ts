@@ -93,6 +93,33 @@ describe('pull command', () => {
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('not found'));
   });
 
+  it('should log error and continue on cache write failure', async () => {
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      result: { version: '1.0.0', _registry: 'public' },
+      errors: [],
+    } as any);
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      result: { content: '# Dossier', digest: null, _registry: 'public' },
+      errors: [],
+    });
+    mockedFs.existsSync.mockReturnValue(false);
+    mockedFs.mkdirSync.mockImplementation(() => {
+      throw new Error('EACCES: permission denied');
+    });
+
+    const program = createTestProgram();
+    registerPullCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'pull', 'org/my-dossier']);
+
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('failed to write cache files')
+    );
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('EACCES: permission denied')
+    );
+  });
+
   it('should pull specific version', async () => {
     vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
       result: { content: '# Content', digest: null, _registry: 'public' },
