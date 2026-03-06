@@ -280,6 +280,20 @@ ai-dossier login                      # default registry
 ai-dossier login --registry internal  # named registry
 ```
 
+### Viewing Configured Registries
+
+Use `--list-registries` to see which registries are configured and which is the default:
+
+```bash
+# Human-readable output
+dossier config --list-registries
+
+# Machine-readable JSON (useful for scripts and agents)
+dossier config --list-registries --json
+```
+
+This is helpful when an error message says a registry was not found — run `--list-registries` to see what's available and verify the name.
+
 See the [CLI README](../../cli/README.md#registry-configuration) for full registry configuration details.
 
 ---
@@ -403,6 +417,36 @@ defined in PROTOCOL.md. This includes:
 "Check the Troubleshooting section of the dossier and
 diagnose the issue. Then propose a fix."
 ```
+
+### "insecure permissions" warning on credentials
+
+The CLI stores authentication tokens in `~/.dossier/credentials.json` with restricted permissions (`0600`). If the file permissions are loosened, you'll see:
+
+```
+⚠️  Warning: ~/.dossier/credentials.json has insecure permissions (644). Expected 0600. Credentials may have been compromised. Fixing permissions.
+```
+
+Fix by running:
+```bash
+chmod 600 ~/.dossier/credentials.json
+```
+
+The CLI will also attempt to fix this automatically.
+
+### "Failed to save credentials"
+
+This means the CLI couldn't write to the credentials file after login. Common fixes:
+
+1. Ensure `~/.dossier/` exists and is writable:
+   ```bash
+   mkdir -p ~/.dossier && chmod 700 ~/.dossier
+   ```
+2. In containers or CI where the home directory is read-only, use an environment variable instead:
+   ```bash
+   export DOSSIER_REGISTRY_TOKEN=<your-token>
+   ```
+
+See the [CLI README troubleshooting](../../cli/README.md#troubleshooting) for more details.
 
 ---
 

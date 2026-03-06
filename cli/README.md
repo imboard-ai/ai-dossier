@@ -571,6 +571,81 @@ ai-dossier verify ../examples/security/validate-project-config.ds.md
 
 ---
 
+## Troubleshooting
+
+### "insecure permissions" warning
+
+```
+⚠️  Warning: ~/.dossier/credentials.json has insecure permissions (644). Expected 0600. Credentials may have been compromised. Fixing permissions.
+```
+
+**What it means**: The credentials file is readable by other users on the system. The CLI expects `0600` (owner read/write only) to protect your authentication tokens.
+
+**How to fix**:
+
+```bash
+chmod 600 ~/.dossier/credentials.json
+```
+
+The CLI will also attempt to fix permissions automatically when it detects this issue.
+
+**Common causes**:
+- Manually creating or editing the file with a text editor
+- Copying the file from another system without preserving permissions
+- Running the CLI as a different user than the file owner
+
+### "Failed to save credentials"
+
+```
+Failed to save credentials to ~/.dossier/credentials.json: <reason>
+```
+
+**What it means**: The CLI could not write to the credentials file after `dossier login` or a token refresh.
+
+**How to fix**:
+
+1. **Check directory exists**: The config directory `~/.dossier/` must exist. The CLI creates it automatically, but if creation failed:
+   ```bash
+   mkdir -p ~/.dossier
+   chmod 700 ~/.dossier
+   ```
+
+2. **Check write permissions**: Ensure your user owns the directory and file:
+   ```bash
+   ls -la ~/.dossier/
+   # If ownership is wrong:
+   sudo chown -R $(whoami) ~/.dossier
+   ```
+
+3. **Check disk space**: Ensure the filesystem has available space.
+
+4. **Check for read-only filesystem**: In some container or CI environments, the home directory may be read-only. Use the `DOSSIER_REGISTRY_TOKEN` environment variable instead:
+   ```bash
+   export DOSSIER_REGISTRY_TOKEN=<your-token>
+   ```
+
+### "Registry not found"
+
+```
+Registry 'myregistry' not found. Available: public. Run 'dossier config --list-registries' to see configured registries.
+```
+
+**What it means**: The `--registry` flag references a registry name that isn't configured.
+
+**How to fix**:
+
+1. List configured registries to see what's available:
+   ```bash
+   dossier config --list-registries
+   ```
+
+2. Add the missing registry:
+   ```bash
+   dossier config --add-registry myregistry --url https://dossier.example.com
+   ```
+
+---
+
 ## FAQ
 
 ### Q: Why a separate CLI tool?
