@@ -158,15 +158,13 @@ All multi-registry operations return structured errors alongside results:
 
 ```
 $ dossier get org/my-dossier
-# If registry A is down but registry B has it → returns result + error from A
-# If no registry has it → returns null + errors from each registry
+# If registry A is down but registry B has it → returns result silently from B
+# If no registry has it → displays errors from each registry
 ```
 
-When a registry-level error occurs, the CLI displays:
-- Which registry failed and why
-- Whether a result was still found from another registry
+When **all registries fail**, the CLI displays per-registry error details showing which registry failed and why. When at least one registry succeeds, the result is returned without surfacing errors from other registries.
 
-This means you can configure multiple registries for redundancy — the CLI will succeed as long as at least one registry can serve the requested dossier.
+This means you can configure multiple registries for redundancy — the CLI will succeed as long as at least one registry can serve the requested dossier. Registries are queried in the order they appear in your configuration; the first successful response is used.
 
 ### Configuration
 

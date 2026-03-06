@@ -101,7 +101,7 @@ Exit 0 (safe) or 1 (unsafe)
 
 The CLI supports querying multiple registries in parallel when resolving dossiers. This is handled by the `multi-registry` module (`cli/src/multi-registry.ts`).
 
-**Resolution strategy**: All configured registries are queried simultaneously using `Promise.allSettled()`. The first successful result is returned immediately, while errors from individual registries are collected and returned alongside the result.
+**Resolution strategy**: All configured registries are queried simultaneously using `Promise.allSettled()`. For **get** operations (`multiRegistryGetDossier`, `multiRegistryGetContent`), the first successful result is returned. For **list/search** operations (`multiRegistryList`, `multiRegistrySearch`), results from all successful registries are merged. In both cases, per-registry errors are collected and returned alongside the result.
 
 ```
 User: dossier get org/my-dossier

@@ -47,7 +47,7 @@ The CLI supports multiple configured registries and queries them in parallel usi
 { result: T | null, errors: Array<{ registry: string; error: string }> }
 ```
 
-This allows partial failures to be surfaced without blocking successful results from other registries. See `cli/src/multi-registry.ts` for implementation and `docs/architecture/overview.md` for the full resolution flow.
+This allows partial failures to be surfaced without blocking successful results from other registries. See `docs/architecture/overview.md` for architectural details and `cli/src/multi-registry.ts` for implementation.
 
 ## File Format
 
