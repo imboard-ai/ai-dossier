@@ -13,6 +13,7 @@ function formatAllowed(methods: string[]): string {
 
 const VALID_REQUEST_ID = /^[a-zA-Z0-9-]{1,64}$/;
 
+/** Extracts the request ID from the x-request-id header, or generates a new UUID if absent. */
 export function getRequestId(req: VercelRequest): string {
   const header = req.headers['x-request-id'];
   const existing = Array.isArray(header) ? header[0] : header;
@@ -43,6 +44,7 @@ export function methodNotAllowed(
   });
 }
 
+/** Returns a structured JSON error response with logging, request tracing, and a configurable status code (defaults to 502). */
 export function serverError(
   res: VercelResponse,
   opts: {
