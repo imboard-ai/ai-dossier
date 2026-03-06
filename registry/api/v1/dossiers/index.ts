@@ -9,6 +9,7 @@ import { fetchManifestDossiers, normalizeDossier } from '../../../lib/manifest';
 import {
   badRequest,
   getRequestId,
+  invalidNamespaceError,
   invalidPathError,
   jsonError,
   methodNotAllowed,
@@ -106,7 +107,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
 
   const namespaceValidation = dossier.validateNamespace(namespace);
   if (!namespaceValidation.valid) {
-    return badRequest(res, 'INVALID_NAMESPACE', namespaceValidation.error);
+    return invalidNamespaceError(res, requestId, namespaceValidation.error);
   }
 
   const authorized = await authorizePublish(req, res, namespace);

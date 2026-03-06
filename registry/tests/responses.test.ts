@@ -3,6 +3,7 @@ import {
   badRequest,
   generateErrorRef,
   getRequestId,
+  invalidNamespaceError,
   invalidPathError,
   jsonError,
   methodNotAllowed,
@@ -209,6 +210,41 @@ describe('invalidPathError', () => {
     expect(loggedJson.identifier).toBe('my-org/evil-dossier');
 
     warnSpy.mockRestore();
+  });
+});
+
+describe('invalidNamespaceError', () => {
+  it('returns 400 with INVALID_NAMESPACE code and logs warning', () => {
+    const res = createViMockRes();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    invalidNamespaceError(res, 'req-123', 'Namespace is required');
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(res.json).toHaveBeenCalledWith({
+      error: { code: 'INVALID_NAMESPACE', message: 'Namespace is required' },
+    });
+
+    const loggedJson = JSON.parse(warnSpy.mock.calls[0][0] as string);
+    expect(loggedJson.level).toBe('warn');
+    expect(loggedJson.message).toBe('Invalid namespace');
+    expect(loggedJson.requestId).toBe('req-123');
+    expect(loggedJson.detail).toBe('Namespace is required');
+
+    warnSpy.mockRestore();
+  });
+
+  it('passes through the error message', () => {
+    const res = createViMockRes();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    invalidNamespaceError(res, 'req-456', 'Invalid namespace segment: UPPER');
+
+    expect(res.json).toHaveBeenCalledWith({
+      error: { code: 'INVALID_NAMESPACE', message: 'Invalid namespace segment: UPPER' },
+    });
+
+    vi.restoreAllMocks();
   });
 });
 

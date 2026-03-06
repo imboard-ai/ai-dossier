@@ -10,10 +10,7 @@ export interface JwtPayload {
   exp?: number;
 }
 
-export interface NamespaceValidation {
-  valid: boolean;
-  error: string | null;
-}
+export type NamespaceValidation = { valid: true; error: null } | { valid: false; error: string };
 
 export interface DossierValidation {
   valid: boolean;

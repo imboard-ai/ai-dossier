@@ -58,7 +58,7 @@ describe('successful mutation logging', () => {
 
     const { res, getStatus } = createMockRes();
 
-    await handler(req, res);
+    await handler(req, res as any);
 
     expect(getStatus()).toBe(201);
 
@@ -116,7 +116,7 @@ describe('successful mutation logging', () => {
 
     const { res, getStatus } = createMockRes();
 
-    await handler(req, res);
+    await handler(req, res as any);
 
     expect(getStatus()).toBe(200);
 
@@ -164,7 +164,7 @@ describe('auth error response includes namespace', () => {
 
     const { res, getStatus, getBody } = createMockRes();
 
-    const result = await authModule.authorizePublish(req, res, 'other-org/some-dossier');
+    const result = await authModule.authorizePublish(req, res as any, 'other-org/some-dossier');
 
     expect(result).toBe(false);
     expect(getStatus()).toBe(403);
@@ -195,7 +195,7 @@ describe('error correlation IDs', () => {
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await handler(req, res);
+    await handler(req, res as any);
 
     expect(getStatus()).toBe(500);
 
@@ -250,7 +250,7 @@ describe('error correlation IDs', () => {
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    handler(req, res);
+    handler(req, res as any);
 
     expect(getStatus()).toBe(500);
     const body = getBody() as { error: { ref: string } };
@@ -283,7 +283,7 @@ describe('auth failure logging', () => {
 
     const { res, getStatus } = createMockRes();
 
-    await authenticateRequest(req, res);
+    await authenticateRequest(req, res as any);
 
     expect(getStatus()).toBe(401);
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
@@ -323,7 +323,7 @@ describe('auth failure logging', () => {
 
     const { res, getStatus } = createMockRes();
 
-    await authModule.authenticateRequest(req, res);
+    await authModule.authenticateRequest(req, res as any);
 
     expect(getStatus()).toBe(401);
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
