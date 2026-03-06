@@ -1,15 +1,10 @@
 import crypto from 'node:crypto';
 import * as auth from '../../lib/auth';
 import config from '../../lib/config';
-import {
-  COPY_FEEDBACK_MS,
-  ERROR_REF_BYTES,
-  HTTP_STATUS,
-  OAUTH_STATE_COOKIE,
-} from '../../lib/constants';
+import { COPY_FEEDBACK_MS, HTTP_STATUS, OAUTH_STATE_COOKIE } from '../../lib/constants';
 import createLogger from '../../lib/logger';
 import { queryString } from '../../lib/query';
-import { methodNotAllowed } from '../../lib/responses';
+import { generateErrorRef, methodNotAllowed, normalizeError } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
 
 const log = createLogger('auth/callback');
@@ -118,8 +113,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     await exchangeCodeAndRenderSuccess(res, code);
   } catch (err) {
-    const caughtError = err instanceof Error ? err : new Error(String(err));
-    const errorRef = crypto.randomBytes(ERROR_REF_BYTES).toString('hex');
+    const caughtError = normalizeError(err);
+    const errorRef = generateErrorRef();
     log.error(`OAuth callback failed (ref=${errorRef})`, {
       error: caughtError.message,
       stack: caughtError.stack,

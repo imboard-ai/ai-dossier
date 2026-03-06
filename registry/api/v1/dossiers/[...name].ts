@@ -8,9 +8,11 @@ import * as github from '../../../lib/github';
 import createLogger from '../../../lib/logger';
 import { queryString } from '../../../lib/query';
 import {
+  badRequest,
   getRequestId,
   invalidPathError,
   methodNotAllowed,
+  notFound,
   serverError,
 } from '../../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
@@ -36,9 +38,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const namespaceCheck = validateNamespace(dossierName);
   if (!namespaceCheck.valid) {
-    return res.status(HTTP_STATUS.BAD_REQUEST).json({
-      error: { code: 'INVALID_NAMESPACE', message: namespaceCheck.error },
-    });
+    return badRequest(res, 'INVALID_NAMESPACE', namespaceCheck.error);
   }
 
   if (req.method === 'DELETE') {
@@ -61,21 +61,15 @@ async function handleGet(
     const dossierEntry = manifest.dossiers.find((d) => d.name === dossierName);
 
     if (!dossierEntry) {
-      return res.status(HTTP_STATUS.NOT_FOUND).json({
-        error: {
-          code: 'DOSSIER_NOT_FOUND',
-          message: `Dossier '${dossierName}' not found`,
-        },
-      });
+      return notFound(res, 'DOSSIER_NOT_FOUND', `Dossier '${dossierName}' not found`);
     }
 
     if (version && dossierEntry.version !== version) {
-      return res.status(HTTP_STATUS.NOT_FOUND).json({
-        error: {
-          code: 'VERSION_NOT_FOUND',
-          message: `Dossier '${dossierName}' version '${version}' not found (latest: ${dossierEntry.version})`,
-        },
-      });
+      return notFound(
+        res,
+        'VERSION_NOT_FOUND',
+        `Dossier '${dossierName}' version '${version}' not found (latest: ${dossierEntry.version})`
+      );
     }
 
     if (isContentRequest) {
@@ -83,12 +77,7 @@ async function handleGet(
       const fileContent = await github.getFileContent(dossierEntry.path);
 
       if (!fileContent) {
-        return res.status(HTTP_STATUS.NOT_FOUND).json({
-          error: {
-            code: 'CONTENT_NOT_FOUND',
-            message: `Content for dossier '${dossierName}' not found`,
-          },
-        });
+        return notFound(res, 'CONTENT_NOT_FOUND', `Content for dossier '${dossierName}' not found`);
       }
 
       const digest = sha256Hex(fileContent.content);
@@ -134,21 +123,15 @@ async function handleDelete(
     const result = await github.deleteDossier(dossierName, version || null);
 
     if (!result.found) {
-      return res.status(HTTP_STATUS.NOT_FOUND).json({
-        error: {
-          code: 'DOSSIER_NOT_FOUND',
-          message: `Dossier '${dossierName}' not found`,
-        },
-      });
+      return notFound(res, 'DOSSIER_NOT_FOUND', `Dossier '${dossierName}' not found`);
     }
 
     if (result.versionMismatch) {
-      return res.status(HTTP_STATUS.NOT_FOUND).json({
-        error: {
-          code: 'VERSION_NOT_FOUND',
-          message: `Version '${result.requestedVersion}' not found. Current version is '${result.currentVersion}'`,
-        },
-      });
+      return notFound(
+        res,
+        'VERSION_NOT_FOUND',
+        `Version '${result.requestedVersion}' not found. Current version is '${result.currentVersion}'`
+      );
     }
 
     log.info('Dossier deleted', { requestId, dossier: dossierName, version });
