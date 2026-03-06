@@ -28,16 +28,18 @@ const meEndpoint = {
   },
 };
 
+const paginationDoc = {
+  page: 'number',
+  per_page: 'number',
+  total: 'number',
+};
+
 const listDossiersEndpoint = {
   description: 'List all dossiers',
   authentication: false,
   response: {
     dossiers: 'array - List of dossier metadata',
-    pagination: {
-      page: 'number',
-      per_page: 'number',
-      total: 'number',
-    },
+    pagination: paginationDoc,
   },
 };
 
@@ -66,11 +68,7 @@ const searchEndpoint = {
   },
   response: {
     dossiers: 'array - List of matching dossier metadata',
-    pagination: {
-      page: 'number',
-      per_page: 'number',
-      total: 'number',
-    },
+    pagination: paginationDoc,
   },
 };
 

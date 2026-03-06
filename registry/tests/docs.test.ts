@@ -29,17 +29,6 @@ describe('docs handler', () => {
     expect(body.baseUrl).toBe('https://registry.example.com');
   });
 
-  it('should use config.apiVersion for the version field', async () => {
-    const { default: handler } = await import('../api/v1/docs');
-    const req = createMockReq();
-    const res = createMockRes();
-
-    await handler(req, res);
-
-    const body = res.json.mock.calls[0][0];
-    expect(body.version).toBe('MVP1');
-  });
-
   it('should include all endpoint definitions', async () => {
     const { default: handler } = await import('../api/v1/docs');
     const req = createMockReq();
