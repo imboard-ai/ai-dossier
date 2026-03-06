@@ -51,7 +51,7 @@ registry/
 ├── api/              # Vercel serverless function handlers
 │   ├── auth/         # OAuth login + callback
 │   └── v1/           # Versioned API endpoints
-├── lib/              # Shared utilities (auth, config, CORS, GitHub client, responses, logging, etc.)
+├── lib/              # Shared utilities (auth, config, CORS, GitHub client, query parsing, responses, logging, etc.)
 ├── scripts/          # Helper scripts (auth, publish, delete)
 ├── tests/            # Vitest test files
 ├── docs/             # Planning and design documents
