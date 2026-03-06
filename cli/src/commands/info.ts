@@ -3,8 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
+import { resolveRegistries } from '../config';
+import { multiRegistryGetDossier } from '../multi-registry';
 import type { DossierInfo } from '../registry-client';
-import { getClient, parseNameVersion } from '../registry-client';
+import { parseNameVersion } from '../registry-client';
 
 export function registerInfoCommand(program: Command): void {
   program
@@ -33,13 +35,20 @@ export function registerInfoCommand(program: Command): void {
           process.exit(1);
         }
       } else {
-        source = `registry: ${fileOrName}`;
         try {
           const [dossierName, version] = parseNameVersion(fileOrName);
-          const client = getClient();
-          const meta = await client.getDossier(dossierName, version || null);
+          const meta = await multiRegistryGetDossier(dossierName, version || null);
+          if (!meta) {
+            console.error(`\n❌ Not found: ${fileOrName}`);
+            console.error('   Not a local file and not found in any registry\n');
+            process.exit(1);
+          }
           frontmatter = meta;
           body = null;
+          const showLabel = resolveRegistries().length > 1;
+          source = showLabel
+            ? `registry: ${fileOrName} [${meta._registry}]`
+            : `registry: ${fileOrName}`;
         } catch (err: unknown) {
           const e = err as { statusCode?: number; message: string };
           if (e.statusCode === 404) {

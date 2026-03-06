@@ -1,22 +1,18 @@
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerInstallSkillCommand } from '../../commands/install-skill';
+import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
+vi.mock('../../multi-registry');
 vi.mock('../../registry-client');
 
 const mockedFs = vi.mocked(fs);
 
 describe('install-skill command', () => {
-  const mockClient = {
-    getDossier: vi.fn(),
-    getDossierContent: vi.fn(),
-  };
-
   beforeEach(() => {
-    vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
     vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
       if (name.includes('@')) {
         const idx = name.lastIndexOf('@');
@@ -93,12 +89,15 @@ describe('install-skill command', () => {
   });
 
   it('should install from registry', async () => {
-    // existsSync: first call for skillFile check (false), then for cache checks (false)
     mockedFs.existsSync.mockReturnValue(false);
-    mockClient.getDossier.mockResolvedValue({ version: '1.0.0' });
-    mockClient.getDossierContent.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      version: '1.0.0',
+      _registry: 'public',
+    } as any);
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
       content: '# Skill content',
-    });
+      _registry: 'public',
+    } as any);
 
     const program = createTestProgram();
     registerInstallSkillCommand(program);

@@ -12,7 +12,9 @@ import { registerInfoCommand } from '../../commands/info';
 import { registerPublishCommand } from '../../commands/publish';
 import { registerRemoveCommand } from '../../commands/remove';
 import { registerSearchCommand } from '../../commands/search';
+import * as config from '../../config';
 import * as credentials from '../../credentials';
+import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
 
@@ -20,6 +22,8 @@ vi.mock('node:fs');
 vi.mock('node:readline');
 vi.mock('../../credentials');
 vi.mock('../../registry-client');
+vi.mock('../../multi-registry');
+vi.mock('../../config');
 
 const mockedFs = vi.mocked(fs);
 
@@ -42,9 +46,7 @@ Deploy the application.
 describe('registry flow integration', () => {
   const mockClient = {
     publishDossier: vi.fn(),
-    listDossiers: vi.fn(),
     getDossier: vi.fn(),
-    getDossierContent: vi.fn(),
     removeDossier: vi.fn(),
   };
 
@@ -56,6 +58,13 @@ describe('registry flow integration', () => {
     mockedFs.readFileSync.mockReset();
     mockedFs.writeFileSync.mockReset();
 
+    vi.mocked(config.resolveWriteRegistry).mockReturnValue({
+      name: 'public',
+      url: 'https://test.registry.com',
+    });
+    vi.mocked(config.resolveRegistries).mockReturnValue([
+      { name: 'public', url: 'https://test.registry.com' },
+    ]);
     vi.mocked(credentials.loadCredentials).mockReturnValue({
       token: 'tok',
       username: 'user',
@@ -63,7 +72,7 @@ describe('registry flow integration', () => {
       expiresAt: null,
     });
     vi.mocked(credentials.isExpired).mockReturnValue(false);
-    vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
+    vi.mocked(registryClient.getClientForRegistry).mockReturnValue(mockClient as any);
     vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
       if (name.includes('@')) {
         const idx = name.lastIndexOf('@');
@@ -77,6 +86,9 @@ describe('registry flow integration', () => {
     // Step 1: Publish
     mockedFs.existsSync.mockReturnValue(true);
     mockedFs.readFileSync.mockReturnValue(dossierContent);
+    mockClient.getDossier.mockRejectedValue(
+      Object.assign(new Error('Not found'), { statusCode: 404 })
+    );
     mockClient.publishDossier.mockResolvedValue({
       name: 'org/my-workflow',
       content_url: 'https://registry.example.com/org/my-workflow',
@@ -90,15 +102,18 @@ describe('registry flow integration', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Published'));
 
     // Step 2: Search
-    mockClient.listDossiers.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
       dossiers: [
         {
           name: 'org/my-workflow',
           title: 'My Workflow',
           description: 'Automate deployment',
           tags: ['deploy'],
+          _registry: 'public',
         },
-      ],
+      ] as any,
+      total: 1,
+      errors: [],
     });
 
     const search = createTestProgram();
@@ -109,10 +124,11 @@ describe('registry flow integration', () => {
 
     // Step 3: Info from registry
     mockedFs.existsSync.mockReturnValue(false); // Not a local file
-    mockClient.getDossier.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
       name: 'org/my-workflow',
       title: 'My Workflow',
       version: '1.0.0',
+      _registry: 'public',
     });
 
     const info = createTestProgram();
@@ -123,9 +139,10 @@ describe('registry flow integration', () => {
 
     // Step 4: Export
     mockedFs.existsSync.mockReturnValue(true); // Output dir exists
-    mockClient.getDossierContent.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
       content: dossierContent,
       digest: null,
+      _registry: 'public',
     });
 
     const exp = createTestProgram();
@@ -149,6 +166,9 @@ describe('registry flow integration', () => {
   it('should handle publish then 409 conflict on re-publish', async () => {
     mockedFs.existsSync.mockReturnValue(true);
     mockedFs.readFileSync.mockReturnValue(dossierContent);
+    mockClient.getDossier.mockRejectedValue(
+      Object.assign(new Error('Not found'), { statusCode: 404 })
+    );
 
     // First publish succeeds
     mockClient.publishDossier.mockResolvedValue({ name: 'org/my-workflow' });

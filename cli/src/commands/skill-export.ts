@@ -3,8 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { type DossierFrontmatter, parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
+import { resolveWriteRegistry } from '../config';
 import { isExpired, loadCredentials } from '../credentials';
-import { getClient } from '../registry-client';
+import { getClientForRegistry } from '../registry-client';
 
 function bumpVersion(current: string, bump: 'minor' | 'major'): string {
   const parts = current.split('.').map(Number);
@@ -38,6 +39,7 @@ export function registerSkillExportCommand(program: Command): void {
     .option('--no-bump', 'Publish without version bump')
     .option('--changelog <message>', 'Changelog message')
     .option('--verify', 'Re-install after publish to verify roundtrip')
+    .option('--registry <name>', 'Target registry to publish to')
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Output as JSON')
     .action(
@@ -50,11 +52,20 @@ export function registerSkillExportCommand(program: Command): void {
           bump?: boolean;
           changelog?: string;
           verify?: boolean;
+          registry?: string;
           yes?: boolean;
           json?: boolean;
         }
       ) => {
-        const credentials = loadCredentials();
+        let targetRegistry: import('../config').ResolvedRegistry;
+        try {
+          targetRegistry = resolveWriteRegistry(options.registry);
+        } catch (err: unknown) {
+          console.error(`\n❌ ${(err as Error).message}\n`);
+          process.exit(1);
+        }
+
+        const credentials = loadCredentials(targetRegistry.name);
         if (!credentials) {
           if (options.json) {
             console.log(
@@ -65,7 +76,9 @@ export function registerSkillExportCommand(program: Command): void {
               )
             );
           } else {
-            console.error('\n❌ Not logged in. Run `dossier login` first.\n');
+            console.error(
+              `\n❌ Not logged in to registry '${targetRegistry.name}'. Run \`dossier login --registry ${targetRegistry.name}\` first.\n`
+            );
           }
           process.exit(1);
         }
@@ -175,7 +188,7 @@ export function registerSkillExportCommand(program: Command): void {
         }
 
         try {
-          const client = getClient(credentials.token);
+          const client = getClientForRegistry(targetRegistry.url, credentials.token);
           const result = await client.publishDossier(
             namespace,
             content,

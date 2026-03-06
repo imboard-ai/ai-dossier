@@ -7,6 +7,7 @@ vi.mock('../../credentials');
 
 describe('logout command', () => {
   it('should show success when credentials exist', async () => {
+    vi.mocked(credentials.listCredentialRegistries).mockReturnValue(['public']);
     vi.mocked(credentials.deleteCredentials).mockReturnValue(true);
     const program = createTestProgram();
     registerLogoutCommand(program);
@@ -17,6 +18,7 @@ describe('logout command', () => {
   });
 
   it('should show not-logged-in when no credentials', async () => {
+    vi.mocked(credentials.listCredentialRegistries).mockReturnValue([]);
     vi.mocked(credentials.deleteCredentials).mockReturnValue(false);
     const program = createTestProgram();
     registerLogoutCommand(program);

@@ -1,15 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerGetCommand } from '../../commands/get';
+import * as config from '../../config';
+import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
 
+vi.mock('../../multi-registry');
 vi.mock('../../registry-client');
+vi.mock('../../config');
 
 describe('get command', () => {
-  const mockClient = { getDossier: vi.fn() };
-
   beforeEach(() => {
-    vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
     vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
       if (name.includes('@')) {
         const idx = name.lastIndexOf('@');
@@ -17,10 +18,13 @@ describe('get command', () => {
       }
       return [name, null];
     });
+    vi.mocked(config.resolveRegistries).mockReturnValue([
+      { name: 'public', url: 'https://test.com' },
+    ]);
   });
 
   it('should display dossier metadata from registry', async () => {
-    mockClient.getDossier.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
       name: 'deploy-app',
       title: 'Deploy Application',
       version: '1.0.0',
@@ -29,6 +33,7 @@ describe('get command', () => {
       objective: 'Deploy to production',
       authors: [{ name: 'Alice' }],
       tags: ['deploy', 'ci'],
+      _registry: 'public',
     });
 
     const program = createTestProgram();
@@ -36,16 +41,17 @@ describe('get command', () => {
 
     await expect(program.parseAsync(['node', 'dossier', 'get', 'deploy-app'])).rejects.toThrow();
 
-    expect(mockClient.getDossier).toHaveBeenCalledWith('deploy-app', null);
+    expect(multiRegistry.multiRegistryGetDossier).toHaveBeenCalledWith('deploy-app', null);
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('deploy-app'));
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Deploy Application'));
   });
 
   it('should pass version when using name@version', async () => {
-    mockClient.getDossier.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
       name: 'deploy-app',
       title: 'Deploy Application',
       version: '2.0.0',
+      _registry: 'public',
     });
 
     const program = createTestProgram();
@@ -55,14 +61,15 @@ describe('get command', () => {
       program.parseAsync(['node', 'dossier', 'get', 'deploy-app@2.0.0'])
     ).rejects.toThrow();
 
-    expect(mockClient.getDossier).toHaveBeenCalledWith('deploy-app', '2.0.0');
+    expect(multiRegistry.multiRegistryGetDossier).toHaveBeenCalledWith('deploy-app', '2.0.0');
   });
 
   it('should output JSON with --json', async () => {
-    mockClient.getDossier.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
       name: 'test',
       title: 'Test',
       version: '1.0.0',
+      _registry: 'public',
     });
 
     const program = createTestProgram();
@@ -78,27 +85,14 @@ describe('get command', () => {
     expect(jsonCalls.length).toBeGreaterThan(0);
   });
 
-  it('should exit 1 on 404', async () => {
-    const err = new Error('Not found');
-    (err as any).statusCode = 404;
-    mockClient.getDossier.mockRejectedValue(err);
+  it('should exit 1 on not found', async () => {
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue(null);
 
     const program = createTestProgram();
     registerGetCommand(program);
 
     await expect(program.parseAsync(['node', 'dossier', 'get', 'nonexistent'])).rejects.toThrow();
 
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Not found in registry'));
-  });
-
-  it('should exit 1 on other errors', async () => {
-    mockClient.getDossier.mockRejectedValue(new Error('Network error'));
-
-    const program = createTestProgram();
-    registerGetCommand(program);
-
-    await expect(program.parseAsync(['node', 'dossier', 'get', 'some-dossier'])).rejects.toThrow();
-
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Registry error'));
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Not found'));
   });
 });

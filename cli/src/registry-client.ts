@@ -312,6 +312,13 @@ function getClient(token: string | null = null): RegistryClient {
 }
 
 /**
+ * Create a registry client for a specific resolved registry.
+ */
+function getClientForRegistry(registryUrl: string, token: string | null = null): RegistryClient {
+  return new RegistryClient(registryUrl, token);
+}
+
+/**
  * Parse a name@version string.
  */
 function parseNameVersion(name: string): [string, string | null] {
@@ -327,6 +334,7 @@ export {
   RegistryError,
   getRegistryUrl,
   getClient,
+  getClientForRegistry,
   parseNameVersion,
   DEFAULT_REGISTRY_URL,
 };

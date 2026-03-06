@@ -8,21 +8,28 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerLogoutCommand } from '../../commands/logout';
 import { registerWhoamiCommand } from '../../commands/whoami';
+import * as config from '../../config';
 import * as credentials from '../../credentials';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
 vi.mock('../../credentials');
+vi.mock('../../config');
 
 describe('auth flow integration', () => {
   beforeEach(() => {
     vi.mocked(credentials.loadCredentials).mockReset();
     vi.mocked(credentials.isExpired).mockReset();
     vi.mocked(credentials.deleteCredentials).mockReset();
+    vi.mocked(credentials.listCredentialRegistries).mockReset();
+    vi.mocked(config.resolveRegistries).mockReturnValue([
+      { name: 'public', url: 'https://test.registry.com' },
+    ]);
   });
 
   it('should show not logged in, then logged in after credentials exist, then logged out', async () => {
     // Step 1: Not logged in
+    vi.mocked(credentials.listCredentialRegistries).mockReturnValue([]);
     vi.mocked(credentials.loadCredentials).mockReturnValue(null);
 
     const whoami1 = createTestProgram();
@@ -32,6 +39,7 @@ describe('auth flow integration', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Not logged in'));
 
     // Step 2: Simulate credentials being stored (post-login)
+    vi.mocked(credentials.listCredentialRegistries).mockReturnValue(['public']);
     vi.mocked(credentials.loadCredentials).mockReturnValue({
       token: 'tok-abc',
       username: 'testuser',
@@ -49,6 +57,7 @@ describe('auth flow integration', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('myorg'));
 
     // Step 3: Logout
+    vi.mocked(credentials.listCredentialRegistries).mockReturnValue(['public']);
     vi.mocked(credentials.deleteCredentials).mockReturnValue(true as any);
 
     const logout = createTestProgram();
@@ -61,6 +70,7 @@ describe('auth flow integration', () => {
   });
 
   it('should detect expired credentials', async () => {
+    vi.mocked(credentials.listCredentialRegistries).mockReturnValue(['public']);
     vi.mocked(credentials.loadCredentials).mockReturnValue({
       token: 'expired-tok',
       username: 'user',

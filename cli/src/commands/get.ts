@@ -1,6 +1,8 @@
 import type { Command } from 'commander';
+import { resolveRegistries } from '../config';
+import { multiRegistryGetDossier } from '../multi-registry';
 import type { DossierInfo } from '../registry-client';
-import { getClient, parseNameVersion } from '../registry-client';
+import { parseNameVersion } from '../registry-client';
 
 export function registerGetCommand(program: Command): void {
   program
@@ -11,10 +13,14 @@ export function registerGetCommand(program: Command): void {
     .action(async (nameArg: string, options: { json?: boolean }) => {
       const [dossierName, version] = parseNameVersion(nameArg);
 
-      let meta: DossierInfo;
+      let meta: DossierInfo & { _registry?: string };
       try {
-        const client = getClient();
-        meta = await client.getDossier(dossierName, version || null);
+        const result = await multiRegistryGetDossier(dossierName, version || null);
+        if (!result) {
+          console.error(`\n❌ Not found in any registry: ${nameArg}\n`);
+          process.exit(1);
+        }
+        meta = result;
       } catch (err: unknown) {
         const e = err as { statusCode?: number; message: string };
         if (e.statusCode === 404) {
@@ -30,7 +36,9 @@ export function registerGetCommand(program: Command): void {
         process.exit(0);
       }
 
-      console.log(`\n📄 Dossier: ${meta.name || dossierName}\n`);
+      const showLabel = resolveRegistries().length > 1;
+      const label = showLabel && meta._registry ? ` [${meta._registry}]` : '';
+      console.log(`\n📄 Dossier: ${meta.name || dossierName}${label}\n`);
 
       const fields: [string, string][] = [
         ['Name', meta.name || ''],

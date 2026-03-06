@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerLoginCommand } from '../../commands/login';
+import * as config from '../../config';
 import * as credentials from '../../credentials';
 import * as oauth from '../../oauth';
-import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('../../oauth');
 vi.mock('../../credentials');
-vi.mock('../../registry-client');
+vi.mock('../../config');
 
 describe('login command', () => {
   let originalIsTTY: boolean | undefined;
@@ -15,8 +15,13 @@ describe('login command', () => {
   beforeEach(() => {
     originalIsTTY = process.stdin.isTTY;
     Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
-    // Mocks are reset by global afterEach (setup.ts)
-    vi.mocked(registryClient.getRegistryUrl).mockReturnValue('https://test.registry.com');
+    vi.mocked(config.resolveRegistries).mockReturnValue([
+      { name: 'public', url: 'https://test.registry.com' },
+    ]);
+    vi.mocked(config.resolveRegistryByName).mockReturnValue({
+      name: 'public',
+      url: 'https://test.registry.com',
+    });
   });
 
   afterEach(() => {
@@ -36,12 +41,15 @@ describe('login command', () => {
     registerLoginCommand(program);
     await program.parseAsync(['node', 'dossier', 'login']);
 
-    expect(credentials.saveCredentials).toHaveBeenCalledWith({
-      token: 'test-token',
-      username: 'testuser',
-      orgs: ['org1'],
-      expiresAt: null,
-    });
+    expect(credentials.saveCredentials).toHaveBeenCalledWith(
+      {
+        token: 'test-token',
+        username: 'testuser',
+        orgs: ['org1'],
+        expiresAt: null,
+      },
+      'public'
+    );
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Logged in as testuser'));
   });
 

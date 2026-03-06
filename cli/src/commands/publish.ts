@@ -8,8 +8,9 @@ import {
   validateFrontmatter,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
+import { resolveWriteRegistry } from '../config';
 import { isExpired, loadCredentials } from '../credentials';
-import { getClient } from '../registry-client';
+import { getClientForRegistry } from '../registry-client';
 
 export function registerPublishCommand(program: Command): void {
   program
@@ -19,13 +20,28 @@ export function registerPublishCommand(program: Command): void {
     .option('--changelog <message>', 'Changelog message for this version')
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--namespace <namespace>', 'Override namespace (e.g., imboard-ai/skills)')
+    .option('--registry <name>', 'Target registry to publish to')
     .option('--json', 'Output as JSON')
     .action(
       async (
         file: string,
-        options: { changelog?: string; yes?: boolean; namespace?: string; json?: boolean }
+        options: {
+          changelog?: string;
+          yes?: boolean;
+          namespace?: string;
+          registry?: string;
+          json?: boolean;
+        }
       ) => {
-        const credentials = loadCredentials();
+        let targetRegistry: import('../config').ResolvedRegistry;
+        try {
+          targetRegistry = resolveWriteRegistry(options.registry);
+        } catch (err: unknown) {
+          console.error(`\n❌ ${(err as Error).message}\n`);
+          process.exit(1);
+        }
+
+        const credentials = loadCredentials(targetRegistry.name);
         if (!credentials) {
           if (options.json) {
             console.log(
@@ -36,7 +52,9 @@ export function registerPublishCommand(program: Command): void {
               )
             );
           } else {
-            console.error('\n❌ Not logged in. Run `dossier login` first.\n');
+            console.error(
+              `\n❌ Not logged in to registry '${targetRegistry.name}'. Run \`dossier login --registry ${targetRegistry.name}\` first.\n`
+            );
           }
           process.exit(1);
         }
@@ -107,7 +125,7 @@ export function registerPublishCommand(program: Command): void {
         const registryPath = `${fullPath}@${version}`;
 
         // Pre-publish existence check — version-specific via registry API
-        const client = getClient(credentials.token);
+        const client = getClientForRegistry(targetRegistry.url, credentials.token);
         let existingVersion: string | null = null;
         let versionExists = false;
         try {
@@ -161,7 +179,8 @@ export function registerPublishCommand(program: Command): void {
           }
 
           console.log('\n📦 Publishing dossier:\n');
-          console.log(`   Registry:  ${registryPath}`);
+          console.log(`   Registry:  ${targetRegistry.name} (${targetRegistry.url})`);
+          console.log(`   Path:      ${registryPath}`);
           console.log(`   File:      ${path.basename(dossierFile)}`);
           if (options.changelog) {
             console.log(`   Changelog: ${options.changelog}`);
@@ -198,6 +217,7 @@ export function registerPublishCommand(program: Command): void {
                   published: true,
                   name: result.name || fullPath,
                   version,
+                  registry: targetRegistry.name,
                   content_url: result.content_url || null,
                   verification: {
                     verify_command: verifyCommand,
@@ -209,7 +229,7 @@ export function registerPublishCommand(program: Command): void {
               )
             );
           } else {
-            console.log(`\n✅ Published ${registryPath}`);
+            console.log(`\n✅ Published ${registryPath} [${targetRegistry.name}]`);
             if (existingVersion) {
               console.log(`   Updated from v${existingVersion}`);
             }

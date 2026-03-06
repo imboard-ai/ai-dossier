@@ -1,19 +1,23 @@
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerInfoCommand } from '../../commands/info';
+import * as config from '../../config';
+import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
+vi.mock('../../multi-registry');
 vi.mock('../../registry-client');
+vi.mock('../../config');
 
 const mockedFs = vi.mocked(fs);
 
 describe('info command', () => {
-  const mockClient = { getDossier: vi.fn() };
-
   beforeEach(() => {
-    vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
+    vi.mocked(config.resolveRegistries).mockReturnValue([
+      { name: 'public', url: 'https://test.registry.com' },
+    ]);
     vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
       if (name.includes('@')) {
         const idx = name.lastIndexOf('@');
@@ -53,10 +57,11 @@ describe('info command', () => {
 
   it('should fetch info from registry when not a local file', async () => {
     mockedFs.existsSync.mockReturnValue(false);
-    mockClient.getDossier.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
       name: 'org/dossier',
       title: 'Registry Dossier',
       version: '1.0.0',
+      _registry: 'public',
     });
 
     const program = createTestProgram();
@@ -64,7 +69,7 @@ describe('info command', () => {
 
     await expect(program.parseAsync(['node', 'dossier', 'info', 'org/dossier'])).rejects.toThrow();
 
-    expect(mockClient.getDossier).toHaveBeenCalledWith('org/dossier', null);
+    expect(multiRegistry.multiRegistryGetDossier).toHaveBeenCalledWith('org/dossier', null);
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Registry Dossier'));
   });
 
@@ -88,9 +93,7 @@ describe('info command', () => {
 
   it('should exit 1 on registry 404', async () => {
     mockedFs.existsSync.mockReturnValue(false);
-    mockClient.getDossier.mockRejectedValue(
-      Object.assign(new Error('Not found'), { statusCode: 404 })
-    );
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue(null);
 
     const program = createTestProgram();
     registerInfoCommand(program);

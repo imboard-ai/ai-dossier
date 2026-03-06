@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerSkillExportCommand } from '../../commands/skill-export';
+import * as config from '../../config';
 import * as credentials from '../../credentials';
 import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
@@ -8,6 +9,7 @@ import { createTestProgram } from '../helpers/test-utils';
 vi.mock('node:fs');
 vi.mock('../../credentials');
 vi.mock('../../registry-client');
+vi.mock('../../config');
 
 const mockedFs = vi.mocked(fs);
 
@@ -28,9 +30,13 @@ describe('skill-export command', () => {
     '---dossier\n{"dossier_schema_version":"1.0.0","name":"my-skill","title":"My Skill","version":"1.0.0"}\n---\n# Skill body';
 
   beforeEach(() => {
+    vi.mocked(config.resolveWriteRegistry).mockReturnValue({
+      name: 'public',
+      url: 'https://test.registry.com',
+    });
     vi.mocked(credentials.loadCredentials).mockReturnValue(validCredentials);
     vi.mocked(credentials.isExpired).mockReturnValue(false);
-    vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
+    vi.mocked(registryClient.getClientForRegistry).mockReturnValue(mockClient as any);
     mockClient.publishDossier.mockReset();
     mockClient.getDossierContent.mockReset();
     mockedFs.existsSync.mockReset();

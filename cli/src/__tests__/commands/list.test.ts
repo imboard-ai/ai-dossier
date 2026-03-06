@@ -1,30 +1,41 @@
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerListCommand } from '../../commands/list';
+import * as config from '../../config';
 import * as helpers from '../../helpers';
-import * as registryClient from '../../registry-client';
+import * as multiRegistry from '../../multi-registry';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
-vi.mock('../../registry-client');
+vi.mock('../../multi-registry');
 vi.mock('../../helpers');
+vi.mock('../../config');
 
 const mockedFs = vi.mocked(fs);
 
 describe('list command', () => {
-  const mockClient = { listDossiers: vi.fn() };
-
   beforeEach(() => {
-    vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
+    vi.mocked(config.resolveRegistries).mockReturnValue([
+      { name: 'public', url: 'https://test.registry.com' },
+    ]);
     vi.mocked(helpers.parseListSource).mockReturnValue({ type: 'local', path: '.' });
     vi.mocked(helpers.formatTable).mockReturnValue('formatted table');
   });
 
   describe('registry source', () => {
     it('should list registry dossiers', async () => {
-      mockClient.listDossiers.mockResolvedValue({
-        dossiers: [{ name: 'test-dossier', version: '1.0.0', title: 'Test', category: 'devops' }],
+      vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+        dossiers: [
+          {
+            name: 'test-dossier',
+            version: '1.0.0',
+            title: 'Test',
+            category: 'devops',
+            _registry: 'public',
+          },
+        ] as any,
         total: 1,
+        errors: [],
       });
 
       const program = createTestProgram();
@@ -38,9 +49,10 @@ describe('list command', () => {
     });
 
     it('should output JSON for registry', async () => {
-      mockClient.listDossiers.mockResolvedValue({
-        dossiers: [{ name: 'test', version: '1.0.0' }],
+      vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+        dossiers: [{ name: 'test', version: '1.0.0', _registry: 'public' }] as any,
         total: 1,
+        errors: [],
       });
 
       const program = createTestProgram();
@@ -57,9 +69,10 @@ describe('list command', () => {
     });
 
     it('should output JSON for registry with --json flag', async () => {
-      mockClient.listDossiers.mockResolvedValue({
-        dossiers: [{ name: 'test', version: '1.0.0' }],
+      vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+        dossiers: [{ name: 'test', version: '1.0.0', _registry: 'public' }] as any,
         total: 1,
+        errors: [],
       });
 
       const program = createTestProgram();
@@ -76,7 +89,11 @@ describe('list command', () => {
     });
 
     it('should show empty message for registry', async () => {
-      mockClient.listDossiers.mockResolvedValue({ dossiers: [], total: 0 });
+      vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+        dossiers: [],
+        total: 0,
+        errors: [],
+      });
 
       const program = createTestProgram();
       registerListCommand(program);

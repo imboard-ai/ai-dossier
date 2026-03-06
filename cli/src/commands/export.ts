@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { getClient, parseNameVersion } from '../registry-client';
+import { multiRegistryGetContent } from '../multi-registry';
+import { parseNameVersion } from '../registry-client';
 
 export function registerExportCommand(program: Command): void {
   program
@@ -16,8 +17,12 @@ export function registerExportCommand(program: Command): void {
       let content: string;
       let digest: string | null;
       try {
-        const client = getClient();
-        const result = await client.getDossierContent(dossierName, version || null);
+        const result = await multiRegistryGetContent(dossierName, version || null);
+        if (!result) {
+          console.error(`\n❌ Not found: ${name}\n`);
+          process.exit(1);
+          return;
+        }
         content = result.content;
         digest = result.digest;
       } catch (err: unknown) {

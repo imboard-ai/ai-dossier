@@ -4,7 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { safeDossierPath } from '../helpers';
-import { getClient, parseNameVersion } from '../registry-client';
+import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
+import { parseNameVersion } from '../registry-client';
 
 export function registerPullCommand(program: Command): void {
   program
@@ -14,14 +15,17 @@ export function registerPullCommand(program: Command): void {
     .option('--force', 'Re-download even if already cached')
     .action(async (names: string[], options: { force?: boolean }) => {
       const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
-      const client = getClient();
 
       for (const nameArg of names) {
         let [dossierName, version] = parseNameVersion(nameArg);
 
         try {
           if (!version) {
-            const meta = await client.getDossier(dossierName);
+            const meta = await multiRegistryGetDossier(dossierName);
+            if (!meta) {
+              console.error(`❌ ${nameArg}: not found in any registry`);
+              continue;
+            }
             version = meta.version || 'latest';
           }
 
@@ -35,7 +39,11 @@ export function registerPullCommand(program: Command): void {
             continue;
           }
 
-          const result = await client.getDossierContent(dossierName, version);
+          const result = await multiRegistryGetContent(dossierName, version);
+          if (!result) {
+            console.error(`❌ ${nameArg}: not found in any registry`);
+            continue;
+          }
           const content = result.content;
           const digest = result.digest;
 
@@ -55,7 +63,7 @@ export function registerPullCommand(program: Command): void {
               {
                 cached_at: new Date().toISOString(),
                 version,
-                source_registry_url: client.getRegistryBaseUrl(),
+                source_registry: result._registry,
               },
               null,
               2
@@ -64,7 +72,7 @@ export function registerPullCommand(program: Command): void {
           );
 
           const status = options.force ? 'updated' : 'downloaded';
-          console.log(`✅ ${dossierName}@${version} (${status})`);
+          console.log(`✅ ${dossierName}@${version} (${status}) [${result._registry}]`);
           console.log(`   ${contentFile}`);
         } catch (err: unknown) {
           const e = err as { statusCode?: number; message: string };

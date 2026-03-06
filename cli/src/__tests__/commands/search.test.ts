@@ -1,19 +1,24 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerSearchCommand } from '../../commands/search';
+import * as config from '../../config';
+import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
 
+vi.mock('../../multi-registry');
 vi.mock('../../registry-client');
+vi.mock('../../config');
+vi.mock('../../credentials');
 
 describe('search command', () => {
-  const mockClient = { listDossiers: vi.fn(), getDossierContent: vi.fn() };
-
   beforeEach(() => {
-    vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
+    vi.mocked(config.resolveRegistries).mockReturnValue([
+      { name: 'public', url: 'https://test.registry.com' },
+    ]);
   });
 
   it('should display matching results', async () => {
-    mockClient.listDossiers.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
       dossiers: [
         {
           name: 'deploy-app',
@@ -21,6 +26,7 @@ describe('search command', () => {
           description: 'Deploy to production',
           category: 'devops',
           tags: ['deploy'],
+          _registry: 'public',
         },
         {
           name: 'setup-db',
@@ -28,14 +34,16 @@ describe('search command', () => {
           description: 'Initialize database',
           category: 'database',
           tags: ['db'],
+          _registry: 'public',
         },
-      ],
+      ] as any,
+      total: 2,
+      errors: [],
     });
 
     const program = createTestProgram();
     registerSearchCommand(program);
 
-    // When results are found and no --json, function completes normally (no process.exit)
     await program.parseAsync(['node', 'dossier', 'search', 'deploy']);
 
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Found 1'));
@@ -43,7 +51,11 @@ describe('search command', () => {
   });
 
   it('should show no results message', async () => {
-    mockClient.listDossiers.mockResolvedValue({ dossiers: [] });
+    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+      dossiers: [],
+      total: 0,
+      errors: [],
+    });
 
     const program = createTestProgram();
     registerSearchCommand(program);
@@ -56,8 +68,18 @@ describe('search command', () => {
   });
 
   it('should output JSON with --json', async () => {
-    mockClient.listDossiers.mockResolvedValue({
-      dossiers: [{ name: 'test', title: 'Test', description: 'test dossier', tags: ['test'] }],
+    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+      dossiers: [
+        {
+          name: 'test',
+          title: 'Test',
+          description: 'test dossier',
+          tags: ['test'],
+          _registry: 'public',
+        },
+      ] as any,
+      total: 1,
+      errors: [],
     });
 
     const program = createTestProgram();
@@ -74,7 +96,7 @@ describe('search command', () => {
   });
 
   it('should filter by content with --content flag', async () => {
-    mockClient.listDossiers.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
       dossiers: [
         {
           name: 'deploy-app',
@@ -83,6 +105,7 @@ describe('search command', () => {
           category: 'devops',
           tags: ['deploy'],
           version: '1.0.0',
+          _registry: 'public',
         },
         {
           name: 'setup-db',
@@ -91,30 +114,34 @@ describe('search command', () => {
           category: 'database',
           tags: ['db'],
           version: '1.0.0',
+          _registry: 'public',
         },
-      ],
+      ] as any,
+      total: 2,
+      errors: [],
     });
 
-    mockClient.getDossierContent.mockImplementation(async (name: string) => {
-      if (name === 'deploy-app') {
-        return { content: 'This is about deploying kubernetes clusters', digest: null };
-      }
-      return { content: 'This is about postgres setup', digest: null };
-    });
+    const mockContentClient = {
+      getDossierContent: vi.fn().mockImplementation(async (name: string) => {
+        if (name === 'deploy-app') {
+          return { content: 'This is about deploying kubernetes clusters', digest: null };
+        }
+        return { content: 'This is about postgres setup', digest: null };
+      }),
+    };
+    vi.mocked(registryClient.getClientForRegistry).mockReturnValue(mockContentClient as any);
 
     const program = createTestProgram();
     registerSearchCommand(program);
 
-    // Search for "kubernetes" with --content; only deploy-app body contains it
-    // First, metadata filter for "deploy" matches deploy-app
     await program.parseAsync(['node', 'dossier', 'search', 'deploy', '--content']);
 
-    expect(mockClient.getDossierContent).toHaveBeenCalled();
+    expect(mockContentClient.getDossierContent).toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('deploy-app'));
   });
 
   it('should exit 1 on API error', async () => {
-    mockClient.listDossiers.mockRejectedValue(new Error('Network error'));
+    vi.mocked(multiRegistry.multiRegistryList).mockRejectedValue(new Error('Network error'));
 
     const program = createTestProgram();
     registerSearchCommand(program);

@@ -4,7 +4,8 @@ import path from 'node:path';
 import { parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { safeDossierPath } from '../helpers';
-import { getClient, parseNameVersion } from '../registry-client';
+import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
+import { parseNameVersion } from '../registry-client';
 
 function compareSemver(a: string, b: string): number {
   const pa = a.split('.').map(Number);
@@ -147,12 +148,17 @@ export function registerInstallSkillCommand(program: Command): void {
           }
 
           if (!content) {
-            const client = getClient();
             if (!resolvedVersion) {
-              const meta = await client.getDossier(dossierName);
+              const meta = await multiRegistryGetDossier(dossierName);
+              if (!meta) {
+                throw { statusCode: 404, message: `Not found: ${dossierName}` };
+              }
               resolvedVersion = meta.version || 'latest';
             }
-            const result = await client.getDossierContent(dossierName, resolvedVersion);
+            const result = await multiRegistryGetContent(dossierName, resolvedVersion);
+            if (!result) {
+              throw { statusCode: 404, message: `Not found: ${dossierName}` };
+            }
             content = result.content;
           }
 

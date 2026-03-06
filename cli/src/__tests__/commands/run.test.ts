@@ -4,25 +4,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerRunCommand } from '../../commands/run';
 import * as config from '../../config';
 import * as helpers from '../../helpers';
+import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
 vi.mock('node:child_process');
 vi.mock('../../config');
+vi.mock('../../multi-registry');
 vi.mock('../../registry-client');
 vi.mock('../../helpers');
 
 const mockedFs = vi.mocked(fs);
-const mockClient = {
-  getDossier: vi.fn(),
-  getDossierContent: vi.fn(),
-};
 
 describe('run command', () => {
   beforeEach(() => {
     vi.mocked(spawnSync).mockReset();
-    vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
     vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
       if (name.includes('@')) {
         const idx = name.lastIndexOf('@');
@@ -97,9 +94,7 @@ describe('run command', () => {
   it('should exit 1 when registry dossier not found', async () => {
     mockedFs.existsSync.mockReturnValue(false);
     mockedFs.readdirSync.mockReturnValue([]);
-    mockClient.getDossier.mockRejectedValue(
-      Object.assign(new Error('Not found'), { statusCode: 404 })
-    );
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue(null);
 
     const program = createTestProgram();
     registerRunCommand(program);

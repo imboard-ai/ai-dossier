@@ -1,6 +1,9 @@
 import type { Command } from 'commander';
-import type { DossierListItem } from '../registry-client';
-import { getClient } from '../registry-client';
+import { resolveRegistries } from '../config';
+import { loadCredentials } from '../credentials';
+import type { LabeledDossierListItem } from '../multi-registry';
+import { multiRegistryList } from '../multi-registry';
+import { getClientForRegistry } from '../registry-client';
 
 export function registerSearchCommand(program: Command): void {
   program
@@ -32,15 +35,21 @@ export function registerSearchCommand(program: Command): void {
         const perPage = parseInt(options.perPage, 10) || 20;
         const limit = options.limit ? parseInt(options.limit, 10) : undefined;
 
-        let allDossiers: DossierListItem[];
+        let allDossiers: LabeledDossierListItem[];
         try {
-          const client = getClient();
-          const result = await client.listDossiers({
+          const result = await multiRegistryList({
             category: options.category,
             page: 1,
             perPage: 100,
           });
-          allDossiers = result.dossiers || [];
+
+          if (result.errors.length > 0) {
+            for (const e of result.errors) {
+              console.error(`⚠️  Registry '${e.registry}': ${e.error}`);
+            }
+          }
+
+          allDossiers = result.dossiers;
         } catch (err: unknown) {
           console.error(`\n❌ Search failed: ${(err as Error).message}\n`);
           process.exit(1);
@@ -67,7 +76,7 @@ export function registerSearchCommand(program: Command): void {
         // Content search: fetch body and filter by content match
         let contentMatches: Map<string, string> | null = null;
         if (options.content) {
-          const client = getClient();
+          const registries = resolveRegistries();
           const CONCURRENCY = 5;
           contentMatches = new Map();
 
@@ -77,6 +86,9 @@ export function registerSearchCommand(program: Command): void {
             await Promise.all(
               batch.map(async (d) => {
                 try {
+                  const reg = registries.find((r) => r.name === d._registry) || registries[0];
+                  const token = loadCredentials(reg.name)?.token || null;
+                  const client = getClientForRegistry(reg.url, token);
                   const { content } = await client.getDossierContent(d.name, d.version || null);
                   const bodyLower = content.toLowerCase();
                   if (terms.some((term) => bodyLower.includes(term))) {
@@ -109,6 +121,7 @@ export function registerSearchCommand(program: Command): void {
         const total = matched.length;
         const start = (page - 1) * perPage;
         const dossiers = matched.slice(start, start + perPage);
+        const showRegistryLabel = resolveRegistries().length > 1;
 
         if (options.json) {
           console.log(JSON.stringify({ dossiers, total, page, perPage }, null, 2));
@@ -128,8 +141,9 @@ export function registerSearchCommand(program: Command): void {
           const title = d.title || '';
           const category = Array.isArray(d.category) ? d.category.join(', ') : d.category || '';
           const description = d.description || d.objective || '';
+          const label = showRegistryLabel ? ` [${d._registry}]` : '';
 
-          console.log(`  ${name} (v${version})${category ? `  [${category}]` : ''}`);
+          console.log(`  ${name} (v${version})${category ? `  [${category}]` : ''}${label}`);
           if (title) {
             console.log(`  ${title}`);
           }

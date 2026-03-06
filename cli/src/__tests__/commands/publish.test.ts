@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerPublishCommand } from '../../commands/publish';
+import * as config from '../../config';
 import * as credentials from '../../credentials';
 import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
@@ -9,6 +10,7 @@ vi.mock('node:fs');
 vi.mock('node:readline');
 vi.mock('../../credentials');
 vi.mock('../../registry-client');
+vi.mock('../../config');
 
 const mockedFs = vi.mocked(fs);
 
@@ -21,6 +23,10 @@ describe('publish command', () => {
   const mockClient = { publishDossier: vi.fn(), getDossier: vi.fn() };
 
   beforeEach(() => {
+    vi.mocked(config.resolveWriteRegistry).mockReturnValue({
+      name: 'public',
+      url: 'https://test.registry.com',
+    });
     vi.mocked(credentials.loadCredentials).mockReturnValue({
       token: 'tok',
       username: 'user',
@@ -28,7 +34,7 @@ describe('publish command', () => {
       expiresAt: null,
     });
     vi.mocked(credentials.isExpired).mockReturnValue(false);
-    vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
+    vi.mocked(registryClient.getClientForRegistry).mockReturnValue(mockClient as any);
     mockClient.getDossier.mockRejectedValue(
       Object.assign(new Error('Not found'), { statusCode: 404 })
     );
@@ -180,13 +186,11 @@ describe('publish command', () => {
 
   it('should exit 1 on same-version collision (pre-publish check)', async () => {
     mockClient.getDossier.mockReset();
-    // First call (with version) returns existing dossier — same version exists
     mockClient.getDossier.mockResolvedValueOnce({ name: 'org/test-dossier', version: '1.0.0' });
 
     const program = createTestProgram();
     registerPublishCommand(program);
 
-    // In vitest v4, process.exit records the call but doesn't halt execution
     try {
       await program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes']);
     } catch {
@@ -266,11 +270,9 @@ describe('publish command', () => {
 
   it('should warn when dossier exists at different version', async () => {
     mockClient.getDossier.mockReset();
-    // First call (with version) — 404 (specific version doesn't exist)
     mockClient.getDossier.mockRejectedValueOnce(
       Object.assign(new Error('Not found'), { statusCode: 404 })
     );
-    // Second call (without version) — dossier exists at different version
     mockClient.getDossier.mockResolvedValueOnce({ name: 'org/test-dossier', version: '0.9.0' });
 
     mockClient.publishDossier.mockResolvedValue({

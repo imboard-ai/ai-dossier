@@ -5,7 +5,8 @@ import path from 'node:path';
 import type { Command } from 'commander';
 import * as config from '../config';
 import { detectLlm } from '../helpers';
-import { getClient, parseNameVersion } from '../registry-client';
+import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
+import { parseNameVersion } from '../registry-client';
 
 const DEFAULT_CREATE_TEMPLATE = 'imboard-ai/meta/create-dossier';
 
@@ -77,13 +78,19 @@ export function registerCreateCommand(program: Command): void {
 
           if (!cached) {
             try {
-              const client = getClient();
               let resolvedVersion = version;
               if (!resolvedVersion) {
-                const meta = await client.getDossier(dossierName);
-                resolvedVersion = meta.version || 'latest';
+                const meta = await multiRegistryGetDossier(dossierName);
+                resolvedVersion = meta?.version || 'latest';
               }
-              const result = await client.getDossierContent(dossierName, resolvedVersion);
+              const result = await multiRegistryGetContent(dossierName, resolvedVersion);
+              if (!result) {
+                console.error(`❌ Template not found: ${options.template}`);
+                console.error(
+                  '   Check the template name or use --template to specify a different one\n'
+                );
+                process.exit(2);
+              }
               metaDossierContent = result.content;
               console.log(`📥 Fetched template: ${dossierName}@${resolvedVersion}\n`);
             } catch (err: unknown) {

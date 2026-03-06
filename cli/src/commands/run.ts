@@ -12,7 +12,8 @@ import {
   runVerification,
   safeDossierPath,
 } from '../helpers';
-import { getClient, parseNameVersion } from '../registry-client';
+import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
+import { parseNameVersion } from '../registry-client';
 
 export function registerRunCommand(program: Command): void {
   program
@@ -82,13 +83,22 @@ export function registerRunCommand(program: Command): void {
 
           if (!cached) {
             try {
-              const client = getClient();
               let resolvedVersion = version;
               if (!resolvedVersion) {
-                const meta = await client.getDossier(dossierName);
+                const meta = await multiRegistryGetDossier(dossierName);
+                if (!meta) {
+                  console.error(`\n❌ Not found: ${file}`);
+                  console.error('   Not a local file and not found in any registry\n');
+                  process.exit(1);
+                }
                 resolvedVersion = meta.version || 'latest';
               }
-              const result = await client.getDossierContent(dossierName, resolvedVersion);
+              const result = await multiRegistryGetContent(dossierName, resolvedVersion);
+              if (!result) {
+                console.error(`\n❌ Not found: ${file}`);
+                console.error('   Not a local file and not found in any registry\n');
+                process.exit(1);
+              }
 
               if (!options.fresh) {
                 const dossierCacheDir = safeDossierPath(cacheDir, dossierName);
@@ -101,7 +111,7 @@ export function registerRunCommand(program: Command): void {
                     {
                       cached_at: new Date().toISOString(),
                       version: resolvedVersion,
-                      source_registry_url: client.getRegistryBaseUrl(),
+                      source_registry: result._registry,
                     },
                     null,
                     2

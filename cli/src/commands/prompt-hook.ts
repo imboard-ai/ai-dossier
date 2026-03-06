@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 import { readStdin } from '../helpers';
 import * as hooks from '../hooks';
-import { getClient } from '../registry-client';
+import { multiRegistryList } from '../multi-registry';
 
 export function registerPromptHookCommand(program: Command): void {
   program
@@ -28,20 +28,10 @@ export function registerPromptHookCommand(program: Command): void {
         let dossiers = hooks.getCachedDossierList();
 
         if (!dossiers) {
-          const client = getClient();
-
           dossiers = [];
-          let page = 1;
-          const perPage = 100;
-
-          while (true) {
-            const result = await client.listDossiers({ page, perPage });
-            const items = result.dossiers || result.data || [];
-            for (const d of items) {
-              dossiers.push({ name: d.name, title: d.title || d.name });
-            }
-            if (items.length < perPage) break;
-            page++;
+          const result = await multiRegistryList({ page: 1, perPage: 100 });
+          for (const d of result.dossiers) {
+            dossiers.push({ name: d.name, title: d.title || d.name });
           }
 
           hooks.saveDossierListCache(dossiers);

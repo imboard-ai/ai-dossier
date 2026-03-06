@@ -1,7 +1,8 @@
 import readline from 'node:readline';
 import type { Command } from 'commander';
+import { resolveWriteRegistry } from '../config';
 import { isExpired, loadCredentials } from '../credentials';
-import { getClient, parseNameVersion } from '../registry-client';
+import { getClientForRegistry, parseNameVersion } from '../registry-client';
 
 export function registerRemoveCommand(program: Command): void {
   program
@@ -9,9 +10,18 @@ export function registerRemoveCommand(program: Command): void {
     .description('Remove a dossier from the registry')
     .argument('<name>', 'Dossier name (use name@version to remove a specific version)')
     .option('-y, --yes', 'Skip confirmation prompt')
+    .option('--registry <name>', 'Target registry to remove from')
     .option('--json', 'Output as JSON')
-    .action(async (name: string, options: { yes?: boolean; json?: boolean }) => {
-      const credentials = loadCredentials();
+    .action(async (name: string, options: { yes?: boolean; registry?: string; json?: boolean }) => {
+      let targetRegistry: import('../config').ResolvedRegistry;
+      try {
+        targetRegistry = resolveWriteRegistry(options.registry);
+      } catch (err: unknown) {
+        console.error(`\n❌ ${(err as Error).message}\n`);
+        process.exit(1);
+      }
+
+      const credentials = loadCredentials(targetRegistry.name);
       if (!credentials) {
         if (options.json) {
           console.log(
@@ -22,7 +32,9 @@ export function registerRemoveCommand(program: Command): void {
             )
           );
         } else {
-          console.error('\n❌ Not logged in. Run `dossier login` first.\n');
+          console.error(
+            `\n❌ Not logged in to registry '${targetRegistry.name}'. Run \`dossier login --registry ${targetRegistry.name}\` first.\n`
+          );
         }
         process.exit(1);
       }
@@ -56,7 +68,8 @@ export function registerRemoveCommand(program: Command): void {
           ? `Are you sure you want to remove version '${version}' of '${dossierName}'?`
           : `Are you sure you want to remove '${dossierName}' and ALL its versions?`;
 
-        console.log(`\n⚠️  ${msg}\n`);
+        console.log(`\n⚠️  ${msg}`);
+        console.log(`   Registry: ${targetRegistry.name}\n`);
 
         const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
         const answer = await new Promise<string>((resolve) => {
@@ -71,7 +84,7 @@ export function registerRemoveCommand(program: Command): void {
       }
 
       try {
-        const client = getClient(credentials.token);
+        const client = getClientForRegistry(targetRegistry.url, credentials.token);
         await client.removeDossier(dossierName, version || null);
 
         const verifyCommand = `dossier info ${target}`;
@@ -83,6 +96,7 @@ export function registerRemoveCommand(program: Command): void {
               {
                 removed: true,
                 name: target,
+                registry: targetRegistry.name,
                 verification: {
                   verify_command: verifyCommand,
                   cdn_delay_seconds: cdnDelaySeconds,
@@ -93,7 +107,7 @@ export function registerRemoveCommand(program: Command): void {
             )
           );
         } else {
-          console.log(`\n✅ Removed: ${target}`);
+          console.log(`\n✅ Removed: ${target} [${targetRegistry.name}]`);
           console.log(
             `\n   ⏳ CDN propagation may take up to ${cdnDelaySeconds}s. Verify with:\n   $ ${verifyCommand}\n`
           );

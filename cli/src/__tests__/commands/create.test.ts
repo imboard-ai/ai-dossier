@@ -1,12 +1,16 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerCreateCommand } from '../../commands/create';
+import * as multiRegistry from '../../multi-registry';
+import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
 vi.mock('node:child_process');
 vi.mock('../../config');
+vi.mock('../../multi-registry');
+vi.mock('../../registry-client');
 vi.mock('../../helpers', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../helpers')>();
   return {
@@ -14,16 +18,6 @@ vi.mock('../../helpers', async (importOriginal) => {
     detectLlm: vi.fn(),
   };
 });
-vi.mock('../../registry-client', () => ({
-  getClient: vi.fn(() => ({
-    getDossier: vi.fn().mockResolvedValue({ version: '1.0.0' }),
-    getDossierContent: vi.fn().mockResolvedValue({ content: '# Meta dossier content' }),
-  })),
-  parseNameVersion: vi.fn((name: string) => {
-    const parts = name.split('@');
-    return [parts[0], parts[1] || ''];
-  }),
-}));
 
 const mockedFs = vi.mocked(fs);
 
@@ -31,6 +25,13 @@ const mockedFs = vi.mocked(fs);
 const { detectLlm } = await import('../../helpers');
 
 describe('create command', () => {
+  beforeEach(() => {
+    vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
+      const parts = name.split('@');
+      return [parts[0], parts[1] || ''];
+    });
+  });
+
   it('should exit 2 when LLM not detected', async () => {
     vi.mocked(detectLlm).mockReturnValue(null);
 
@@ -47,10 +48,7 @@ describe('create command', () => {
       throw new Error('ENOENT');
     });
 
-    const { getClient } = await import('../../registry-client');
-    vi.mocked(getClient).mockReturnValue({
-      getDossier: vi.fn().mockRejectedValue({ statusCode: 404 }),
-    } as any);
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue(null);
 
     const program = createTestProgram();
     registerCreateCommand(program);
@@ -68,10 +66,13 @@ describe('create command', () => {
     });
     vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
 
-    const { getClient } = await import('../../registry-client');
-    vi.mocked(getClient).mockReturnValue({
-      getDossier: vi.fn().mockResolvedValue({ version: '1.0.0' }),
-      getDossierContent: vi.fn().mockResolvedValue({ content: '# Meta dossier content' }),
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      version: '1.0.0',
+      _registry: 'public',
+    } as any);
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      content: '# Meta dossier content',
+      _registry: 'public',
     } as any);
 
     const program = createTestProgram();
@@ -95,10 +96,13 @@ describe('create command', () => {
     });
     vi.mocked(spawnSync).mockReturnValue({ status: 1 } as any);
 
-    const { getClient } = await import('../../registry-client');
-    vi.mocked(getClient).mockReturnValue({
-      getDossier: vi.fn().mockResolvedValue({ version: '1.0.0' }),
-      getDossierContent: vi.fn().mockResolvedValue({ content: '# Meta dossier' }),
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      version: '1.0.0',
+      _registry: 'public',
+    } as any);
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      content: '# Meta dossier',
+      _registry: 'public',
     } as any);
 
     const program = createTestProgram();

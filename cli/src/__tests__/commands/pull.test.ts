@@ -1,28 +1,23 @@
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerPullCommand } from '../../commands/pull';
+import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
+vi.mock('../../multi-registry');
 vi.mock('../../registry-client');
 
 const mockedFs = vi.mocked(fs);
 
 describe('pull command', () => {
-  const mockClient = {
-    getDossier: vi.fn(),
-    getDossierContent: vi.fn(),
-    getRegistryBaseUrl: () => 'https://registry.example.com',
-  };
-
   beforeEach(() => {
-    mockClient.getDossier.mockReset();
-    mockClient.getDossierContent.mockReset();
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockReset();
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockReset();
     mockedFs.existsSync.mockReset();
     mockedFs.mkdirSync.mockReset();
     mockedFs.writeFileSync.mockReset();
-    vi.mocked(registryClient.getClient).mockReturnValue(mockClient as any);
     vi.mocked(registryClient.parseNameVersion).mockImplementation((name: string) => {
       if (name.includes('@')) {
         const idx = name.lastIndexOf('@');
@@ -33,10 +28,14 @@ describe('pull command', () => {
   });
 
   it('should download and cache a dossier', async () => {
-    mockClient.getDossier.mockResolvedValue({ version: '1.0.0' });
-    mockClient.getDossierContent.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      version: '1.0.0',
+      _registry: 'public',
+    } as any);
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
       content: '# Dossier',
       digest: null,
+      _registry: 'public',
     });
     mockedFs.existsSync.mockReturnValue(false);
 
@@ -51,8 +50,10 @@ describe('pull command', () => {
   });
 
   it('should skip already cached dossier', async () => {
-    mockClient.getDossier.mockResolvedValue({ version: '1.0.0' });
-    // existsSync: true for both contentFile and metaFile checks
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      version: '1.0.0',
+      _registry: 'public',
+    } as any);
     mockedFs.existsSync.mockReturnValue(true);
 
     const program = createTestProgram();
@@ -60,15 +61,19 @@ describe('pull command', () => {
 
     await program.parseAsync(['node', 'dossier', 'pull', 'org/my-dossier']);
 
-    expect(mockClient.getDossierContent).not.toHaveBeenCalled();
+    expect(multiRegistry.multiRegistryGetContent).not.toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('already cached'));
   });
 
   it('should force re-download with --force', async () => {
-    mockClient.getDossier.mockResolvedValue({ version: '1.0.0' });
-    mockClient.getDossierContent.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      version: '1.0.0',
+      _registry: 'public',
+    } as any);
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
       content: '# Updated',
       digest: null,
+      _registry: 'public',
     });
     mockedFs.existsSync.mockReturnValue(true);
 
@@ -77,14 +82,12 @@ describe('pull command', () => {
 
     await program.parseAsync(['node', 'dossier', 'pull', 'org/my-dossier', '--force']);
 
-    expect(mockClient.getDossierContent).toHaveBeenCalled();
+    expect(multiRegistry.multiRegistryGetContent).toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('updated'));
   });
 
   it('should handle 404 error', async () => {
-    mockClient.getDossier.mockRejectedValue(
-      Object.assign(new Error('Not found'), { statusCode: 404 })
-    );
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue(null);
     mockedFs.existsSync.mockReturnValue(false);
 
     const program = createTestProgram();
@@ -96,9 +99,10 @@ describe('pull command', () => {
   });
 
   it('should pull specific version', async () => {
-    mockClient.getDossierContent.mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
       content: '# Content',
       digest: null,
+      _registry: 'public',
     });
     mockedFs.existsSync.mockReturnValue(false);
 
@@ -107,6 +111,6 @@ describe('pull command', () => {
 
     await program.parseAsync(['node', 'dossier', 'pull', 'org/dossier@2.0.0']);
 
-    expect(mockClient.getDossierContent).toHaveBeenCalledWith('org/dossier', '2.0.0');
+    expect(multiRegistry.multiRegistryGetContent).toHaveBeenCalledWith('org/dossier', '2.0.0');
   });
 });

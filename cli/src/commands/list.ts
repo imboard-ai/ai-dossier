@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
+import { resolveRegistries } from '../config';
 import type { DossierMetadata } from '../helpers';
 import {
   fetchDossierMetadata,
@@ -10,8 +11,7 @@ import {
   parseDossierMetadataLocal,
   parseListSource,
 } from '../helpers';
-import type { ListDossiersResult } from '../registry-client';
-import { getClient } from '../registry-client';
+import { multiRegistryList } from '../multi-registry';
 
 export function registerListCommand(program: Command): void {
   program
@@ -51,60 +51,68 @@ export function registerListCommand(program: Command): void {
         if (options.source === 'registry') {
           const page = parseInt(options.page || '1', 10) || 1;
           const perPage = parseInt(options.perPage || '20', 10) || 20;
+          const showRegistryLabel = resolveRegistries().length > 1;
 
-          let registryResult: ListDossiersResult;
           try {
-            const client = getClient();
-            registryResult = await client.listDossiers({
+            const result = await multiRegistryList({
               category: options.category,
               page,
               perPage,
             });
+
+            if (result.errors.length > 0) {
+              for (const e of result.errors) {
+                console.error(`⚠️  Registry '${e.registry}': ${e.error}`);
+              }
+            }
+
+            const dossiers = result.dossiers;
+
+            if (options.format === 'json') {
+              console.log(
+                JSON.stringify({ dossiers, total: result.total, page, perPage }, null, 2)
+              );
+              process.exit(0);
+            }
+
+            if (options.format === 'simple') {
+              for (const d of dossiers) {
+                const label = showRegistryLabel ? ` [${d._registry}]` : '';
+                console.log(`${d.name || ''}${label}`);
+              }
+              process.exit(0);
+            }
+
+            if (dossiers.length === 0) {
+              console.log('\n⚠️  No dossiers found in registry\n');
+              process.exit(0);
+            }
+
+            console.log(`\n📋 Registry dossiers (${result.total} total):\n`);
+
+            for (const d of dossiers) {
+              const name = d.name || '';
+              const version = d.version || '';
+              const title = d.title || '';
+              const category = Array.isArray(d.category) ? d.category.join(', ') : d.category || '';
+              const label = showRegistryLabel ? ` [${d._registry}]` : '';
+              console.log(
+                `  ${name.padEnd(30)} ${(`v${version}`).padEnd(10)} ${category.padEnd(12)} ${title}${label}`
+              );
+            }
+
+            const totalPages = Math.ceil(result.total / perPage);
+            if (totalPages > 1) {
+              console.log(`\nPage ${page}/${totalPages}`);
+              if (page < totalPages) {
+                console.log(`Use --page ${page + 1} to see more results`);
+              }
+            }
+            console.log('');
           } catch (err: unknown) {
             console.error(`\n❌ Registry list failed: ${(err as Error).message}\n`);
             process.exit(1);
           }
-
-          const dossiers = registryResult.dossiers || registryResult.data || [];
-
-          if (options.format === 'json') {
-            console.log(JSON.stringify(registryResult, null, 2));
-            process.exit(0);
-          }
-
-          if (options.format === 'simple') {
-            for (const d of dossiers) {
-              console.log(d.name || '');
-            }
-            process.exit(0);
-          }
-
-          if (dossiers.length === 0) {
-            console.log('\n⚠️  No dossiers found in registry\n');
-            process.exit(0);
-          }
-
-          const total = registryResult.total || dossiers.length;
-          console.log(`\n📋 Registry dossiers (${total} total):\n`);
-
-          for (const d of dossiers) {
-            const name = d.name || '';
-            const version = d.version || '';
-            const title = d.title || '';
-            const category = Array.isArray(d.category) ? d.category.join(', ') : d.category || '';
-            console.log(
-              `  ${name.padEnd(30)} ${(`v${version}`).padEnd(10)} ${category.padEnd(12)} ${title}`
-            );
-          }
-
-          const totalPages = registryResult.totalPages || Math.ceil(total / perPage);
-          if (totalPages > 1) {
-            console.log(`\nPage ${page}/${totalPages}`);
-            if (page < totalPages) {
-              console.log(`Use --page ${page + 1} to see more results`);
-            }
-          }
-          console.log('');
           process.exit(0);
         }
 
