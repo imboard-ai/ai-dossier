@@ -134,14 +134,19 @@ Add publish tests.
 
 ```
 lib/
-  config.js      # Add github.botToken config
-  auth.js        # Existing JWT utilities
-  dossier.js     # NEW - Dossier parsing/validation
-  github.js      # NEW - GitHub API for commits
-  permissions.js # NEW - Namespace permission checking
+  auth.ts         # JWT utilities and request authentication
+  config.ts       # Add github.botToken config
+  constants.ts    # Shared constants (user agent, CDN URLs)
+  cors.ts         # CORS handling utilities
+  dossier.ts      # Dossier parsing/validation
+  github.ts       # GitHub API for commits
+  manifest.ts     # Manifest fetching and normalization
+  permissions.ts  # Namespace permission checking
+  responses.ts    # Shared HTTP response helpers
+  types.ts        # TypeScript type definitions
 api/v1/
   dossiers/
-    index.js     # UPDATE - Add POST handler
+    index.ts      # UPDATE - Add POST handler
 ```
 
 ---
