@@ -11,6 +11,43 @@ function parseCookie(req: VercelRequest, name: string): string | undefined {
   return match ? match.split('=')[1]?.trim() : undefined;
 }
 
+function validateOAuthState(
+  req: VercelRequest,
+  res: VercelResponse,
+  state: string | undefined
+): boolean {
+  const expectedState = parseCookie(req, OAUTH_STATE_COOKIE);
+
+  // Clear the state cookie regardless of outcome
+  res.setHeader(
+    'Set-Cookie',
+    `${OAUTH_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=0`
+  );
+
+  const valid =
+    state &&
+    expectedState &&
+    state.length === expectedState.length &&
+    crypto.timingSafeEqual(Buffer.from(state), Buffer.from(expectedState));
+
+  if (!valid) {
+    console.warn(
+      '[auth/callback] State validation failed:',
+      !state ? 'missing query state' : !expectedState ? 'missing cookie state' : 'state mismatch'
+    );
+    res
+      .status(403)
+      .send(
+        renderErrorPage(
+          'Invalid State',
+          'OAuth state mismatch — possible CSRF attack. Please try logging in again.'
+        )
+      );
+  }
+
+  return !!valid;
+}
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'GET') {
     return res.status(405).json({
@@ -27,36 +64,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       .send(renderErrorPage('Authentication Failed', error_description || error));
   }
 
-  const expectedState = parseCookie(req, OAUTH_STATE_COOKIE);
-
-  // Clear the state cookie regardless of outcome
-  res.setHeader(
-    'Set-Cookie',
-    `${OAUTH_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Path=/auth; Max-Age=0`
-  );
-
-  const stateValid =
-    state &&
-    expectedState &&
-    state.length === expectedState.length &&
-    crypto.timingSafeEqual(Buffer.from(state), Buffer.from(expectedState));
-
-  if (!stateValid) {
-    console.warn(
-      '[auth/callback] State validation failed:',
-      !state ? 'missing query state' : !expectedState ? 'missing cookie state' : 'state mismatch'
-    );
-    return res
-      .status(403)
-      .send(
-        renderErrorPage(
-          'Invalid State',
-          'OAuth state mismatch — possible CSRF attack. Please try logging in again.'
-        )
-      );
+  if (!validateOAuthState(req, res, state)) {
+    return;
   }
 
   if (!code) {
+    console.warn('[auth/callback] Missing authorization code in callback');
     return res
       .status(400)
       .send(
