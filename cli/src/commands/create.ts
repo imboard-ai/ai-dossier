@@ -21,72 +21,86 @@ export function registerCreateCommand(program: Command): void {
     .option('--category <category>', 'Category (devops, data-science, development, etc.)')
     .option('--tags <tags>', 'Comma-separated tags')
     .option('--llm <name>', 'LLM to use (claude-code, auto)', 'auto')
-    .action(async (file: string | undefined, options: any) => {
-      try {
-        const llmOption = options.llm || config.getConfig('defaultLlm') || 'auto';
-        const llm = detectLlm(llmOption, false);
-
-        if (!llm) {
-          process.exit(2);
+    .action(
+      async (
+        file: string | undefined,
+        options: {
+          template: string;
+          title?: string;
+          objective?: string;
+          risk?: string;
+          category?: string;
+          tags?: string;
+          llm?: string;
         }
+      ) => {
+        try {
+          const llmOption =
+            options.llm || (config.getConfig('defaultLlm') as string | undefined) || 'auto';
+          const llm = detectLlm(llmOption, false);
 
-        if (llm !== 'claude-code') {
-          console.error(`❌ Unknown LLM: ${llm}\n`);
-          console.error('Supported: claude-code, auto\n');
-          process.exit(2);
-        }
-
-        // Fetch template from registry
-        const [dossierName, version] = parseNameVersion(options.template);
-        let metaDossierContent = '';
-
-        // Check cache first
-        const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
-        const dossierCacheDir = path.join(cacheDir, ...dossierName.split('/'));
-        let cached = false;
-
-        if (fs.existsSync(dossierCacheDir)) {
-          const metaFiles = fs
-            .readdirSync(dossierCacheDir)
-            .filter((f: string) => f.endsWith('.meta.json'));
-          for (const mf of metaFiles) {
-            const ver = mf.replace('.meta.json', '');
-            if (version && ver !== version) continue;
-            const contentFile = path.join(dossierCacheDir, `${ver}.ds.md`);
-            if (fs.existsSync(contentFile)) {
-              metaDossierContent = fs.readFileSync(contentFile, 'utf8');
-              cached = true;
-              console.log(`📦 Using cached template: ${dossierName}@${ver}\n`);
-              break;
-            }
-          }
-        }
-
-        if (!cached) {
-          try {
-            const client = getClient();
-            let resolvedVersion = version;
-            if (!resolvedVersion) {
-              const meta = await client.getDossier(dossierName);
-              resolvedVersion = meta.version || 'latest';
-            }
-            const result = await client.getDossierContent(dossierName, resolvedVersion);
-            metaDossierContent = result.content;
-            console.log(`📥 Fetched template: ${dossierName}@${resolvedVersion}\n`);
-          } catch (err: any) {
-            if (err.statusCode === 404) {
-              console.error(`❌ Template not found: ${options.template}`);
-              console.error(
-                '   Check the template name or use --template to specify a different one\n'
-              );
-            } else {
-              console.error(`❌ Failed to fetch template: ${err.message}\n`);
-            }
+          if (!llm) {
             process.exit(2);
           }
-        }
 
-        const contextHeader = `
+          if (llm !== 'claude-code') {
+            console.error(`❌ Unknown LLM: ${llm}\n`);
+            console.error('Supported: claude-code, auto\n');
+            process.exit(2);
+          }
+
+          // Fetch template from registry
+          const [dossierName, version] = parseNameVersion(options.template);
+          let metaDossierContent = '';
+
+          // Check cache first
+          const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
+          const dossierCacheDir = path.join(cacheDir, ...dossierName.split('/'));
+          let cached = false;
+
+          if (fs.existsSync(dossierCacheDir)) {
+            const metaFiles = fs
+              .readdirSync(dossierCacheDir)
+              .filter((f: string) => f.endsWith('.meta.json'));
+            for (const mf of metaFiles) {
+              const ver = mf.replace('.meta.json', '');
+              if (version && ver !== version) continue;
+              const contentFile = path.join(dossierCacheDir, `${ver}.ds.md`);
+              if (fs.existsSync(contentFile)) {
+                metaDossierContent = fs.readFileSync(contentFile, 'utf8');
+                cached = true;
+                console.log(`📦 Using cached template: ${dossierName}@${ver}\n`);
+                break;
+              }
+            }
+          }
+
+          if (!cached) {
+            try {
+              const client = getClient();
+              let resolvedVersion = version;
+              if (!resolvedVersion) {
+                const meta = await client.getDossier(dossierName);
+                resolvedVersion = meta.version || 'latest';
+              }
+              const result = await client.getDossierContent(dossierName, resolvedVersion);
+              metaDossierContent = result.content;
+              console.log(`📥 Fetched template: ${dossierName}@${resolvedVersion}\n`);
+            } catch (err: unknown) {
+              const e = err as { statusCode?: number; message: string };
+              if (e.statusCode === 404) {
+                console.error(`❌ Template not found: ${options.template}`);
+                console.error(
+                  '   Check the template name or use --template to specify a different one\n'
+                );
+              } else {
+                console.error(`❌ Failed to fetch template: ${e.message}\n`);
+              }
+              process.exit(2);
+            }
+          }
+
+          const contextHeader = `
 # USER-PROVIDED CONTEXT
 
 The user ran the dossier create command with the following parameters:
@@ -105,39 +119,41 @@ ${options.template !== DEFAULT_CREATE_TEMPLATE ? `- **Template reference**: ${op
 
 `;
 
-        const tmpFile = path.join(os.tmpdir(), `dossier-create-${Date.now()}.ds.md`);
-        fs.writeFileSync(tmpFile, contextHeader + metaDossierContent, 'utf8');
+          const tmpFile = path.join(os.tmpdir(), `dossier-create-${Date.now()}.ds.md`);
+          fs.writeFileSync(tmpFile, contextHeader + metaDossierContent, 'utf8');
 
-        console.log('🤖 Launching dossier creation assistant (interactive mode)...\n');
+          console.log('🤖 Launching dossier creation assistant (interactive mode)...\n');
 
-        try {
-          const result = spawnSync('claude', [tmpFile], { stdio: 'inherit' });
           try {
-            fs.unlinkSync(tmpFile);
-          } catch (cleanupErr) {
-            process.stderr.write(
-              `Warning: failed to clean up temp file ${tmpFile}: ${(cleanupErr as Error).message}\n`
-            );
+            const result = spawnSync('claude', [tmpFile], { stdio: 'inherit' });
+            try {
+              fs.unlinkSync(tmpFile);
+            } catch (cleanupErr) {
+              process.stderr.write(
+                `Warning: failed to clean up temp file ${tmpFile}: ${(cleanupErr as Error).message}\n`
+              );
+            }
+            if (result.status !== 0) {
+              throw { status: result.status, message: `claude exited with code ${result.status}` };
+            }
+          } catch (execError) {
+            try {
+              fs.unlinkSync(tmpFile);
+            } catch (cleanupErr) {
+              process.stderr.write(
+                `Warning: failed to clean up temp file ${tmpFile}: ${(cleanupErr as Error).message}\n`
+              );
+            }
+            throw execError;
           }
-          if (result.status !== 0) {
-            throw { status: result.status, message: `claude exited with code ${result.status}` };
-          }
-        } catch (execError) {
-          try {
-            fs.unlinkSync(tmpFile);
-          } catch (cleanupErr) {
-            process.stderr.write(
-              `Warning: failed to clean up temp file ${tmpFile}: ${(cleanupErr as Error).message}\n`
-            );
-          }
-          throw execError;
+
+          console.log('\n✅ Dossier creation completed');
+        } catch (error: unknown) {
+          const e = error as { message?: string; status?: number };
+          console.error('\n❌ Dossier creation failed');
+          console.error(`   Error: ${e.message}`);
+          process.exit(e.status || 2);
         }
-
-        console.log('\n✅ Dossier creation completed');
-      } catch (error: any) {
-        console.error('\n❌ Dossier creation failed');
-        console.error(`   Error: ${error.message}`);
-        process.exit(error.status || 2);
       }
-    });
+    );
 }

@@ -1,8 +1,17 @@
+import path from 'node:path';
 import config from './config';
 import { USER_AGENT } from './constants';
 import type { DeleteResult, FileContent, Manifest, ManifestDossier } from './types';
 
 const GITHUB_API = 'https://api.github.com';
+
+function sanitizePath(filePath: string): string {
+  const normalized = path.posix.normalize(filePath);
+  if (normalized.startsWith('/') || normalized.split('/').includes('..')) {
+    throw new Error(`Path traversal detected: ${filePath}`);
+  }
+  return normalized;
+}
 
 async function githubRequest(endpoint: string, options: RequestInit = {}): Promise<Response> {
   const url = endpoint.startsWith('http') ? endpoint : `${GITHUB_API}${endpoint}`;
@@ -21,9 +30,10 @@ async function githubRequest(endpoint: string, options: RequestInit = {}): Promi
   return response;
 }
 
-export async function getFileContent(path: string): Promise<FileContent | null> {
+export async function getFileContent(filePath: string): Promise<FileContent | null> {
+  const safePath = sanitizePath(filePath);
   const { org, repo } = config.content;
-  const response = await githubRequest(`/repos/${org}/${repo}/contents/${path}`);
+  const response = await githubRequest(`/repos/${org}/${repo}/contents/${safePath}`);
 
   if (response.status === 404) {
     return null;
@@ -40,10 +50,11 @@ export async function getFileContent(path: string): Promise<FileContent | null> 
   };
 }
 
-export async function deleteFile(path: string, message: string, sha: string): Promise<unknown> {
+export async function deleteFile(filePath: string, message: string, sha: string): Promise<unknown> {
+  const safePath = sanitizePath(filePath);
   const { org, repo } = config.content;
 
-  const response = await githubRequest(`/repos/${org}/${repo}/contents/${path}`, {
+  const response = await githubRequest(`/repos/${org}/${repo}/contents/${safePath}`, {
     method: 'DELETE',
     body: JSON.stringify({ message, sha }),
   });
@@ -59,11 +70,12 @@ export async function deleteFile(path: string, message: string, sha: string): Pr
 }
 
 export async function createOrUpdateFile(
-  path: string,
+  filePath: string,
   content: string,
   message: string,
   sha: string | null = null
 ): Promise<unknown> {
+  const safePath = sanitizePath(filePath);
   const { org, repo } = config.content;
   const body: Record<string, string> = {
     message,
@@ -74,7 +86,7 @@ export async function createOrUpdateFile(
     body.sha = sha;
   }
 
-  const response = await githubRequest(`/repos/${org}/${repo}/contents/${path}`, {
+  const response = await githubRequest(`/repos/${org}/${repo}/contents/${safePath}`, {
     method: 'PUT',
     body: JSON.stringify(body),
   });

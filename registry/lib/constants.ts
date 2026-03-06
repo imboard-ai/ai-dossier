@@ -16,8 +16,8 @@ export const MAX_NAMESPACE_DEPTH = 5;
 /** Maximum dossier name length. */
 export const MAX_NAME_LENGTH = 64;
 
-/** JWT token expiry in seconds (30 days). */
-export const JWT_EXPIRY_SECONDS = 30 * 24 * 60 * 60;
+/** JWT token expiry in seconds (7 days). */
+export const JWT_EXPIRY_SECONDS = 7 * 24 * 60 * 60;
 
 /** Valid slug pattern: lowercase alphanumeric with hyphens, no leading/trailing hyphen. */
 export const SLUG_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$/;

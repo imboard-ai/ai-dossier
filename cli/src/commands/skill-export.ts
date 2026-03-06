@@ -1,14 +1,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { parseDossierContent, validateFrontmatter } from '@ai-dossier/core';
+import { type DossierFrontmatter, parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { isExpired, loadCredentials } from '../credentials';
 import { getClient } from '../registry-client';
 
 function bumpVersion(current: string, bump: 'minor' | 'major'): string {
   const parts = current.split('.').map(Number);
-  if (parts.length !== 3 || parts.some(isNaN)) {
+  if (parts.length !== 3 || parts.some(Number.isNaN)) {
     // Can't bump non-semver, return as-is
     return current;
   }
@@ -117,10 +117,10 @@ export function registerSkillExportCommand(program: Command): void {
 
         let content = fs.readFileSync(skillFile, 'utf8');
 
-        let frontmatter: Record<string, any>;
+        let frontmatter: DossierFrontmatter;
         try {
           const parsed = parseDossierContent(content);
-          frontmatter = parsed.frontmatter as Record<string, any>;
+          frontmatter = parsed.frontmatter;
         } catch (err: unknown) {
           if (options.json) {
             console.log(
@@ -226,7 +226,7 @@ export function registerSkillExportCommand(program: Command): void {
               if (!options.json) {
                 console.log(`   ⚠️  Verification failed: ${(verifyErr as Error).message}`);
                 console.log(
-                  '   CDN propagation may take a few seconds. Try: dossier info ' + fullPath
+                  `   CDN propagation may take a few seconds. Try: dossier info ${fullPath}`
                 );
               }
             }
@@ -235,27 +235,28 @@ export function registerSkillExportCommand(program: Command): void {
           if (!options.json) {
             console.log('');
           }
-        } catch (err: any) {
+        } catch (err: unknown) {
+          const e = err as { statusCode?: number; message: string; code?: string };
           if (options.json) {
             console.log(
               JSON.stringify(
                 {
                   exported: false,
-                  error: err.message,
-                  code: err.code || 'export_failed',
+                  error: e.message,
+                  code: e.code || 'export_failed',
                 },
                 null,
                 2
               )
             );
-          } else if (err.statusCode === 401) {
+          } else if (e.statusCode === 401) {
             console.error('\n❌ Session expired. Run `dossier login` to re-authenticate.\n');
-          } else if (err.statusCode === 403) {
-            console.error(`\n❌ Permission denied: ${err.message}\n`);
-          } else if (err.statusCode === 409) {
-            console.error(`\n❌ Version conflict: ${fullPath}@${newVersion} — ${err.message}\n`);
+          } else if (e.statusCode === 403) {
+            console.error(`\n❌ Permission denied: ${e.message}\n`);
+          } else if (e.statusCode === 409) {
+            console.error(`\n❌ Version conflict: ${fullPath}@${newVersion} — ${e.message}\n`);
           } else {
-            console.error(`\n❌ Export failed: ${err.message}\n`);
+            console.error(`\n❌ Export failed: ${e.message}\n`);
           }
           process.exit(1);
         }

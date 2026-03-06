@@ -98,27 +98,28 @@ export function registerRemoveCommand(program: Command): void {
             `\n   ⏳ CDN propagation may take up to ${cdnDelaySeconds}s. Verify with:\n   $ ${verifyCommand}\n`
           );
         }
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const e = err as { statusCode?: number; message: string; code?: string };
         if (options.json) {
           console.log(
             JSON.stringify(
               {
                 removed: false,
-                error: err.message,
-                code: err.code || 'remove_failed',
+                error: e.message,
+                code: e.code || 'remove_failed',
               },
               null,
               2
             )
           );
-        } else if (err.statusCode === 401) {
+        } else if (e.statusCode === 401) {
           console.error('\n❌ Session expired. Run `dossier login` to re-authenticate.\n');
-        } else if (err.statusCode === 403) {
-          console.error(`\n❌ Permission denied: ${err.message}\n`);
-        } else if (err.statusCode === 404) {
+        } else if (e.statusCode === 403) {
+          console.error(`\n❌ Permission denied: ${e.message}\n`);
+        } else if (e.statusCode === 404) {
           console.error(`\n❌ Not found: ${target}\n`);
         } else {
-          console.error(`\n❌ Remove failed: ${err.message}\n`);
+          console.error(`\n❌ Remove failed: ${e.message}\n`);
         }
         process.exit(1);
       }

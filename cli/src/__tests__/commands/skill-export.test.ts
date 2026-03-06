@@ -167,7 +167,7 @@ describe('skill-export command', () => {
       .mocked(console.log)
       .mock.calls.find((c) => typeof c[0] === 'string' && c[0].includes('"exported"'));
     expect(jsonCall).toBeDefined();
-    const parsed = JSON.parse(jsonCall![0] as string);
+    const parsed = JSON.parse(jsonCall?.[0] as string);
     expect(parsed.exported).toBe(true);
     expect(parsed.version).toBe('1.1.0');
   });

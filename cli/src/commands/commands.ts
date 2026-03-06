@@ -45,8 +45,21 @@ function extractOption(opt: Option): OptionInfo {
 }
 
 function extractCommand(cmd: Command): CommandInfo {
+  // Commander exposes registeredArguments as a public property not reflected in the type defs
+  const registeredArgs = (
+    cmd as unknown as {
+      registeredArguments?: Array<{
+        _name: string;
+        description: string;
+        required: boolean;
+        variadic: boolean;
+        defaultValue?: unknown;
+        argChoices?: string[];
+      }>;
+    }
+  ).registeredArguments;
   const args: ArgumentInfo[] =
-    (cmd as any).registeredArguments?.map((arg: any) => {
+    registeredArgs?.map((arg) => {
       const info: ArgumentInfo = {
         name: arg._name,
         description: arg.description || '',
@@ -85,7 +98,7 @@ export function registerCommandsCommand(program: Command): void {
 
       if (options.command) {
         const cmd = program.commands.find(
-          (c) => c.name() === options.command || c.aliases().includes(options.command!)
+          (c) => c.name() === options.command || c.aliases().includes(options.command as string)
         );
         if (!cmd) {
           console.error(`\nUnknown command: ${options.command}\n`);

@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
+import type { DossierInfo } from '../registry-client';
 import { getClient, parseNameVersion } from '../registry-client';
 
 export function registerInfoCommand(program: Command): void {
@@ -12,7 +13,7 @@ export function registerInfoCommand(program: Command): void {
     .argument('<file-or-name>', 'Local dossier file path or registry dossier name')
     .option('--json', 'Output as JSON')
     .action(async (fileOrName: string, options: { json?: boolean }) => {
-      let frontmatter: Record<string, any>;
+      let frontmatter: DossierInfo;
       let body: string | null;
       let source: string;
 
@@ -25,7 +26,7 @@ export function registerInfoCommand(program: Command): void {
 
         try {
           const parsed = parseDossierContent(content);
-          frontmatter = parsed.frontmatter as Record<string, any>;
+          frontmatter = parsed.frontmatter as unknown as DossierInfo;
           body = parsed.body;
         } catch {
           console.error('\n❌ Invalid dossier format: no frontmatter found\n');
@@ -39,26 +40,27 @@ export function registerInfoCommand(program: Command): void {
           const meta = await client.getDossier(dossierName, version || null);
           frontmatter = meta;
           body = null;
-        } catch (err: any) {
-          if (err.statusCode === 404) {
+        } catch (err: unknown) {
+          const e = err as { statusCode?: number; message: string };
+          if (e.statusCode === 404) {
             console.error(`\n❌ Not found: ${fileOrName}`);
             console.error('   Not a local file and not found in registry\n');
           } else {
-            console.error(`\n❌ Error: ${err.message}\n`);
+            console.error(`\n❌ Error: ${e.message}\n`);
           }
           process.exit(1);
         }
       }
 
       if (options.json) {
-        console.log(JSON.stringify(frontmatter!, null, 2));
+        console.log(JSON.stringify(frontmatter, null, 2));
         process.exit(0);
       }
 
       console.log(`\n📄 Dossier Info\n`);
       console.log(`   Source:    ${source}`);
 
-      const fm = frontmatter!;
+      const fm = frontmatter;
       const fields: [string, string][] = [
         ['Name', fm.name || fm.title || ''],
         ['Title', fm.title || ''],
@@ -78,7 +80,7 @@ export function registerInfoCommand(program: Command): void {
       const authors = fm.authors;
       if (Array.isArray(authors) && authors.length > 0) {
         const authorStr = authors
-          .map((a: any) => {
+          .map((a: string | { name: string }) => {
             if (typeof a === 'string') {
               const nameMatch = a.match(/^name:\s*(.+)$/);
               return nameMatch ? nameMatch[1] : a;

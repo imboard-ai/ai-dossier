@@ -15,6 +15,7 @@ help:
 	@echo "  1. packages/core (TypeScript → dist/)"
 	@echo "  2. mcp-server (TypeScript → dist/, depends on core)"
 	@echo "  3. cli (TypeScript → dist/)"
+	@echo "  4. registry (TypeScript, deployed via Vercel, depends on core)"
 
 ## install: Install all npm dependencies
 install:

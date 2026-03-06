@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  type DossierFrontmatter,
   parseDossierContent,
   RECOMMENDED_FIELDS,
   REQUIRED_FIELDS,
@@ -38,11 +39,11 @@ export function registerValidateCommand(program: Command): void {
       const content = fs.readFileSync(dossierFile, 'utf8');
       const errors: string[] = [];
       const warnings: string[] = [];
-      let frontmatter: Record<string, any> | null = null;
+      let frontmatter: DossierFrontmatter | null = null;
 
       try {
         const parsed = parseDossierContent(content);
-        frontmatter = parsed.frontmatter as Record<string, any>;
+        frontmatter = parsed.frontmatter;
       } catch {
         errors.push('No frontmatter found. Expected ---dossier or --- at start of file.');
       }
@@ -64,7 +65,9 @@ export function registerValidateCommand(program: Command): void {
 
         if (
           frontmatter.risk_level &&
-          !VALID_RISK_LEVELS.includes(frontmatter.risk_level.toLowerCase())
+          !VALID_RISK_LEVELS.includes(
+            frontmatter.risk_level.toLowerCase() as (typeof VALID_RISK_LEVELS)[number]
+          )
         ) {
           warnings.push(
             `Unknown risk_level: "${frontmatter.risk_level}" (expected: ${VALID_RISK_LEVELS.join(', ')})`
@@ -73,7 +76,9 @@ export function registerValidateCommand(program: Command): void {
 
         if (
           frontmatter.status &&
-          !VALID_STATUSES.some((s: string) => s.toLowerCase() === frontmatter.status.toLowerCase())
+          !VALID_STATUSES.some(
+            (s: string) => s.toLowerCase() === (frontmatter.status as string).toLowerCase()
+          )
         ) {
           warnings.push(
             `Unknown status: "${frontmatter.status}" (expected: ${VALID_STATUSES.join(', ')})`

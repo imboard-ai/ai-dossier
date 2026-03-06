@@ -15,11 +15,12 @@ export function registerGetCommand(program: Command): void {
       try {
         const client = getClient();
         meta = await client.getDossier(dossierName, version || null);
-      } catch (err: any) {
-        if (err.statusCode === 404) {
+      } catch (err: unknown) {
+        const e = err as { statusCode?: number; message: string };
+        if (e.statusCode === 404) {
           console.error(`\n❌ Not found in registry: ${nameArg}\n`);
         } else {
-          console.error(`\n❌ Registry error: ${err.message}\n`);
+          console.error(`\n❌ Registry error: ${e.message}\n`);
         }
         process.exit(1);
       }

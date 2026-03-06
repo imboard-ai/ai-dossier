@@ -66,11 +66,12 @@ export function registerPullCommand(program: Command): void {
           const status = options.force ? 'updated' : 'downloaded';
           console.log(`✅ ${dossierName}@${version} (${status})`);
           console.log(`   ${contentFile}`);
-        } catch (err: any) {
-          if (err.statusCode === 404) {
+        } catch (err: unknown) {
+          const e = err as { statusCode?: number; message: string };
+          if (e.statusCode === 404) {
             console.error(`❌ ${nameArg}: not found in registry`);
           } else {
-            console.error(`❌ ${nameArg}: ${err.message}`);
+            console.error(`❌ ${nameArg}: ${e.message}`);
           }
         }
       }

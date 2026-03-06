@@ -20,11 +20,12 @@ export function registerExportCommand(program: Command): void {
         const result = await client.getDossierContent(dossierName, version || null);
         content = result.content;
         digest = result.digest;
-      } catch (err: any) {
-        if (err.statusCode === 404) {
+      } catch (err: unknown) {
+        const e = err as { statusCode?: number; message: string };
+        if (e.statusCode === 404) {
           console.error(`\n❌ Not found: ${name}\n`);
         } else {
-          console.error(`\n❌ Export failed: ${err.message}\n`);
+          console.error(`\n❌ Export failed: ${e.message}\n`);
         }
         process.exit(1);
         return;

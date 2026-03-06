@@ -18,6 +18,7 @@ Dossier is a lightweight automation standard built on three principles:
 │  @ai-dossier/cli      │  Command-line tool │
 │  @ai-dossier/core     │  Verification lib  │
 │  @ai-dossier/mcp      │  AI agent support  │
+│  @ai-dossier/registry │  Registry API      │
 └─────────────────────────────────────────┘
 ```
 
@@ -35,6 +36,9 @@ ai-dossier verify <file-or-url>
 
 ### MCP Server (`@ai-dossier/mcp-server`)
 Model Context Protocol integration for AI agents like Claude Code.
+
+### Registry (`@ai-dossier/registry`)
+Vercel serverless API for discovering, publishing, and managing dossiers. Uses GitHub OAuth + JWT for authentication and jsDelivr CDN for content delivery.
 
 ## File Format
 
@@ -85,7 +89,7 @@ See [security/ARCHITECTURE.md](security/ARCHITECTURE.md) for details.
 ## Technology Stack
 
 - **Language**: TypeScript/JavaScript
-- **Runtime**: Node.js ≥ 18
+- **Runtime**: Node.js ≥ 20
 - **Cryptography**:
   - SHA-256 for checksums
   - Ed25519 (Minisign) for signatures
@@ -99,6 +103,7 @@ dossier/
 │   └── core/              # @ai-dossier/core
 ├── cli/                   # @ai-dossier/cli
 ├── mcp-server/           # @ai-dossier/mcp-server
+├── registry/             # @ai-dossier/registry (Vercel serverless API)
 ├── examples/             # Example dossiers
 ├── security/             # Security documentation
 ├── docs/                 # Detailed documentation

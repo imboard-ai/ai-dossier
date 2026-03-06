@@ -26,7 +26,13 @@ export function registerCacheCommand(program: Command): void {
         process.exit(0);
       }
 
-      const entries: any[] = [];
+      const entries: {
+        name: string;
+        version: string;
+        size: number;
+        cached_at: string;
+        path: string;
+      }[] = [];
       function walk(dir: string): void {
         if (!fs.existsSync(dir)) return;
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -111,135 +117,140 @@ export function registerCacheCommand(program: Command): void {
     .option('--older-than <days>', 'Remove entries older than N days')
     .option('--all', 'Remove all cached dossiers')
     .option('-y, --yes', 'Skip confirmation prompt')
-    .action(async (name: string | undefined, options: any) => {
-      const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
+    .action(
+      async (
+        name: string | undefined,
+        options: { ver?: string; olderThan?: string; all?: boolean; yes?: boolean }
+      ) => {
+        const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
 
-      if (!fs.existsSync(cacheDir)) {
-        console.log('\nNo cached dossiers.\n');
-        process.exit(0);
-      }
-
-      async function confirm(msg: string): Promise<boolean> {
-        if (options.yes) return true;
-        if (!process.stdin.isTTY) {
-          console.error(
-            '\n❌ Non-interactive session detected. Use -y/--yes to skip confirmation.\n'
-          );
-          process.exit(1);
-        }
-        const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-        const answer = await new Promise<string>((resolve) => {
-          rl.question(`${msg} (y/N) `, resolve);
-        });
-        rl.close();
-        return answer.toString().toLowerCase() === 'y';
-      }
-
-      function rmDir(dir: string): void {
-        fs.rmSync(dir, { recursive: true, force: true });
-        let parent = path.dirname(dir);
-        while (parent !== cacheDir && parent.startsWith(cacheDir)) {
-          try {
-            const contents = fs.readdirSync(parent);
-            if (contents.length === 0) {
-              fs.rmdirSync(parent);
-              parent = path.dirname(parent);
-            } else {
-              break;
-            }
-          } catch {
-            break;
-          }
-        }
-      }
-
-      if (options.all) {
-        if (!(await confirm('Remove ALL cached dossiers?'))) {
-          console.log('\nAborted.\n');
-          process.exit(0);
-        }
-        fs.rmSync(cacheDir, { recursive: true, force: true });
-        console.log('\n✅ Cache cleared.\n');
-        process.exit(0);
-      }
-
-      if (options.olderThan) {
-        const days = parseInt(options.olderThan, 10);
-        if (Number.isNaN(days) || days <= 0) {
-          console.error('\n❌ --older-than must be a positive number\n');
-          process.exit(1);
-        }
-
-        const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-        let count = 0;
-
-        function walkClean(dir: string): void {
-          if (!fs.existsSync(dir)) return;
-          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-            const full = path.join(dir, entry.name);
-            if (entry.isDirectory()) {
-              walkClean(full);
-            } else if (entry.name.endsWith('.meta.json')) {
-              try {
-                const meta = JSON.parse(fs.readFileSync(full, 'utf8'));
-                if (meta.cached_at && new Date(meta.cached_at).getTime() < cutoff) {
-                  const version = entry.name.replace('.meta.json', '');
-                  const contentFile = path.join(dir, `${version}.ds.md`);
-                  fs.unlinkSync(full);
-                  if (fs.existsSync(contentFile)) fs.unlinkSync(contentFile);
-                  count++;
-                }
-              } catch {
-                // skip
-              }
-            }
-          }
-        }
-
-        if (!(await confirm(`Remove dossiers cached more than ${days} days ago?`))) {
-          console.log('\nAborted.\n');
+        if (!fs.existsSync(cacheDir)) {
+          console.log('\nNo cached dossiers.\n');
           process.exit(0);
         }
 
-        walkClean(cacheDir);
-        console.log(`\n✅ Removed ${count} cached dossier(s).\n`);
-        process.exit(0);
-      }
-
-      if (name) {
-        const dossierDir = safeDossierPath(cacheDir, name);
-        if (!fs.existsSync(dossierDir)) {
-          console.error(`\n❌ Not cached: ${name}\n`);
-          process.exit(1);
-        }
-
-        if (options.ver) {
-          const contentFile = path.join(dossierDir, `${options.ver}.ds.md`);
-          const metaFile = path.join(dossierDir, `${options.ver}.meta.json`);
-          if (!fs.existsSync(contentFile) && !fs.existsSync(metaFile)) {
-            console.error(`\n❌ Version ${options.ver} not cached for ${name}\n`);
+        async function confirm(msg: string): Promise<boolean> {
+          if (options.yes) return true;
+          if (!process.stdin.isTTY) {
+            console.error(
+              '\n❌ Non-interactive session detected. Use -y/--yes to skip confirmation.\n'
+            );
             process.exit(1);
           }
-          if (fs.existsSync(contentFile)) fs.unlinkSync(contentFile);
-          if (fs.existsSync(metaFile)) fs.unlinkSync(metaFile);
-          console.log(`\n✅ Removed: ${name}@${options.ver}\n`);
-        } else {
-          if (!(await confirm(`Remove all cached versions of '${name}'?`))) {
+          const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+          const answer = await new Promise<string>((resolve) => {
+            rl.question(`${msg} (y/N) `, resolve);
+          });
+          rl.close();
+          return answer.toString().toLowerCase() === 'y';
+        }
+
+        function rmDir(dir: string): void {
+          fs.rmSync(dir, { recursive: true, force: true });
+          let parent = path.dirname(dir);
+          while (parent !== cacheDir && parent.startsWith(cacheDir)) {
+            try {
+              const contents = fs.readdirSync(parent);
+              if (contents.length === 0) {
+                fs.rmdirSync(parent);
+                parent = path.dirname(parent);
+              } else {
+                break;
+              }
+            } catch {
+              break;
+            }
+          }
+        }
+
+        if (options.all) {
+          if (!(await confirm('Remove ALL cached dossiers?'))) {
             console.log('\nAborted.\n');
             process.exit(0);
           }
-          rmDir(dossierDir);
-          console.log(`\n✅ Removed: ${name} (all versions)\n`);
+          fs.rmSync(cacheDir, { recursive: true, force: true });
+          console.log('\n✅ Cache cleared.\n');
+          process.exit(0);
         }
+
+        if (options.olderThan) {
+          const days = parseInt(options.olderThan, 10);
+          if (Number.isNaN(days) || days <= 0) {
+            console.error('\n❌ --older-than must be a positive number\n');
+            process.exit(1);
+          }
+
+          const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+          let count = 0;
+
+          function walkClean(dir: string): void {
+            if (!fs.existsSync(dir)) return;
+            for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+              const full = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                walkClean(full);
+              } else if (entry.name.endsWith('.meta.json')) {
+                try {
+                  const meta = JSON.parse(fs.readFileSync(full, 'utf8'));
+                  if (meta.cached_at && new Date(meta.cached_at).getTime() < cutoff) {
+                    const version = entry.name.replace('.meta.json', '');
+                    const contentFile = path.join(dir, `${version}.ds.md`);
+                    fs.unlinkSync(full);
+                    if (fs.existsSync(contentFile)) fs.unlinkSync(contentFile);
+                    count++;
+                  }
+                } catch {
+                  // skip
+                }
+              }
+            }
+          }
+
+          if (!(await confirm(`Remove dossiers cached more than ${days} days ago?`))) {
+            console.log('\nAborted.\n');
+            process.exit(0);
+          }
+
+          walkClean(cacheDir);
+          console.log(`\n✅ Removed ${count} cached dossier(s).\n`);
+          process.exit(0);
+        }
+
+        if (name) {
+          const dossierDir = safeDossierPath(cacheDir, name);
+          if (!fs.existsSync(dossierDir)) {
+            console.error(`\n❌ Not cached: ${name}\n`);
+            process.exit(1);
+          }
+
+          if (options.ver) {
+            const contentFile = path.join(dossierDir, `${options.ver}.ds.md`);
+            const metaFile = path.join(dossierDir, `${options.ver}.meta.json`);
+            if (!fs.existsSync(contentFile) && !fs.existsSync(metaFile)) {
+              console.error(`\n❌ Version ${options.ver} not cached for ${name}\n`);
+              process.exit(1);
+            }
+            if (fs.existsSync(contentFile)) fs.unlinkSync(contentFile);
+            if (fs.existsSync(metaFile)) fs.unlinkSync(metaFile);
+            console.log(`\n✅ Removed: ${name}@${options.ver}\n`);
+          } else {
+            if (!(await confirm(`Remove all cached versions of '${name}'?`))) {
+              console.log('\nAborted.\n');
+              process.exit(0);
+            }
+            rmDir(dossierDir);
+            console.log(`\n✅ Removed: ${name} (all versions)\n`);
+          }
+          process.exit(0);
+        }
+
+        console.log('\nUsage:');
+        console.log('  dossier cache clean <name>              Remove all versions of a dossier');
+        console.log('  dossier cache clean <name> --ver X      Remove specific version');
+        console.log('  dossier cache clean --older-than <days>  Remove stale entries');
+        console.log('  dossier cache clean --all                Remove everything');
+        console.log('');
         process.exit(0);
       }
-
-      console.log('\nUsage:');
-      console.log('  dossier cache clean <name>              Remove all versions of a dossier');
-      console.log('  dossier cache clean <name> --ver X      Remove specific version');
-      console.log('  dossier cache clean --older-than <days>  Remove stale entries');
-      console.log('  dossier cache clean --all                Remove everything');
-      console.log('');
-      process.exit(0);
-    });
+    );
 }

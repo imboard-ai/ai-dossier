@@ -100,7 +100,7 @@ imboard-ai/development/setup-react-library
 | Serverless Functions | Vercel / Node.js | Hosting the API endpoints |
 | Content & Metadata | GitHub Public Repo | Source of truth for `.ds.md` files and `index.json` |
 | Content Delivery | jsDelivr CDN | Global delivery of all content |
-| Dependencies | None | API is dependency-free |
+| Dependencies | None (MVP0); `@ai-dossier/core`, `jsonwebtoken` added in MVP1 | Auth and shared verification added post-MVP0 |
 
 ### Content Repo Structure
 
@@ -224,4 +224,4 @@ See [mvp1-phase2-implementation.md](./mvp1-phase2-implementation.md) for Phase 2
 | **Update mechanism** | API writes | Git commits |
 | **Failure modes** | DB outage, sync drift | CDN outage only |
 
-For MVP0 (read-only), static manifest is sufficient. MVP1 will require a database for auth/user data.
+For MVP0 (read-only), static manifest is sufficient. MVP1 uses stateless JWT auth (no database required).

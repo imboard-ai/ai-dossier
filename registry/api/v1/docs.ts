@@ -94,6 +94,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         authentication: false,
         response: 'text/markdown body with X-Dossier-Digest header (sha256:<hex>)',
       },
+      'DELETE /api/v1/dossiers/{name}': {
+        description: 'Delete a dossier',
+        authentication: true,
+        parameters: {
+          name: 'string - Full dossier name (e.g., imboard-ai/development/setup-react)',
+          version: 'string (query, optional) - Specific version to delete',
+        },
+        response: {
+          message: 'string - "Dossier deleted"',
+          name: 'string - Full dossier name',
+          version: 'string (optional) - Deleted version',
+        },
+        errors: {
+          401: 'MISSING_TOKEN, INVALID_TOKEN, TOKEN_EXPIRED',
+          403: 'FORBIDDEN - Cannot delete from this namespace',
+          404: 'DOSSIER_NOT_FOUND, VERSION_NOT_FOUND',
+          502: 'DELETE_ERROR - Failed to delete dossier',
+        },
+      },
       'POST /api/v1/dossiers': {
         description: 'Publish a new dossier',
         authentication: true,

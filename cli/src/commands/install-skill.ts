@@ -163,8 +163,8 @@ export function registerInstallSkillCommand(program: Command): void {
           let summary = '';
           try {
             const parsed = parseDossierContent(content);
-            const fm = parsed.frontmatter as Record<string, any>;
-            summary = fm.objective || '';
+            const fm = parsed.frontmatter as Record<string, unknown>;
+            summary = (fm.objective as string) || '';
             if (!summary) {
               const firstLine = parsed.body.split('\n').find((l) => l.trim().length > 0);
               summary = firstLine?.replace(/^#+\s*/, '').trim() || '';
@@ -203,23 +203,24 @@ export function registerInstallSkillCommand(program: Command): void {
             }
             console.log('');
           }
-        } catch (err: any) {
+        } catch (err: unknown) {
+          const e = err as { statusCode?: number; message: string };
           if (options.json) {
             console.log(
               JSON.stringify(
                 {
                   success: false,
-                  error: err.statusCode === 404 ? 'not_found' : 'install_failed',
-                  message: err.statusCode === 404 ? `Not found: ${name}` : err.message,
+                  error: e.statusCode === 404 ? 'not_found' : 'install_failed',
+                  message: e.statusCode === 404 ? `Not found: ${name}` : e.message,
                 },
                 null,
                 2
               )
             );
-          } else if (err.statusCode === 404) {
+          } else if (e.statusCode === 404) {
             console.error(`\n❌ Not found in registry: ${name}\n`);
           } else {
-            console.error(`\n❌ Install failed: ${err.message}\n`);
+            console.error(`\n❌ Install failed: ${e.message}\n`);
           }
           process.exit(1);
         }

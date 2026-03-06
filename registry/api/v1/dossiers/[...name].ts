@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { authenticateRequest } from '../../../lib/auth';
 import config from '../../../lib/config';
 import { handleCors } from '../../../lib/cors';
-import { getRootNamespace } from '../../../lib/dossier';
+import { getRootNamespace, validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
 import { canPublishTo } from '../../../lib/permissions';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
@@ -21,6 +21,13 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const isContentRequest = pathParts[pathParts.length - 1] === 'content';
   const dossierName = isContentRequest ? pathParts.slice(0, -1).join('/') : pathParts.join('/');
+
+  const namespaceCheck = validateNamespace(dossierName);
+  if (!namespaceCheck.valid) {
+    return res.status(400).json({
+      error: { code: 'INVALID_NAMESPACE', message: namespaceCheck.error },
+    });
+  }
 
   if (req.method === 'DELETE') {
     return handleDelete(req, res, dossierName, version as string);

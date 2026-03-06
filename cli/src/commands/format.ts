@@ -12,50 +12,61 @@ export function registerFormatCommand(program: Command): void {
     .option('--no-sort-keys', 'Do not sort frontmatter keys')
     .option('--indent <n>', 'JSON indentation spaces', '2')
     .option('--json', 'Output result as JSON')
-    .action((file: string, options: any) => {
-      const formatOptions = {
-        indent: parseInt(options.indent, 10),
-        sortKeys: options.sortKeys !== false,
-        updateChecksum: options.checksum !== false,
-      };
-
-      let exitCode = 0;
-      try {
-        if (options.check) {
-          const content = fs.readFileSync(file, 'utf8');
-          const result = formatDossierContent(content, formatOptions);
-
-          if (options.json) {
-            console.log(JSON.stringify({ file, formatted: !result.changed }, null, 2));
-          } else {
-            if (result.changed) {
-              console.log(`${file}: needs formatting`);
-            } else {
-              console.log(`${file}: already formatted`);
-            }
-          }
-
-          exitCode = result.changed ? 1 : 0;
-        } else {
-          const result = formatDossierFile(file, formatOptions);
-
-          if (options.json) {
-            console.log(JSON.stringify({ file, changed: result.changed }, null, 2));
-          } else {
-            if (result.changed) {
-              console.log(`${file}: formatted`);
-            } else {
-              console.log(`${file}: already formatted`);
-            }
-          }
-
-          exitCode = 0;
+    .action(
+      (
+        file: string,
+        options: {
+          check?: boolean;
+          checksum?: boolean;
+          sortKeys?: boolean;
+          indent: string;
+          json?: boolean;
         }
-      } catch (err: any) {
-        console.error(`Error: ${err.message}`);
-        exitCode = 2;
-      }
+      ) => {
+        const formatOptions = {
+          indent: parseInt(options.indent, 10),
+          sortKeys: options.sortKeys !== false,
+          updateChecksum: options.checksum !== false,
+        };
 
-      process.exit(exitCode);
-    });
+        let exitCode = 0;
+        try {
+          if (options.check) {
+            const content = fs.readFileSync(file, 'utf8');
+            const result = formatDossierContent(content, formatOptions);
+
+            if (options.json) {
+              console.log(JSON.stringify({ file, formatted: !result.changed }, null, 2));
+            } else {
+              if (result.changed) {
+                console.log(`${file}: needs formatting`);
+              } else {
+                console.log(`${file}: already formatted`);
+              }
+            }
+
+            exitCode = result.changed ? 1 : 0;
+          } else {
+            const result = formatDossierFile(file, formatOptions);
+
+            if (options.json) {
+              console.log(JSON.stringify({ file, changed: result.changed }, null, 2));
+            } else {
+              if (result.changed) {
+                console.log(`${file}: formatted`);
+              } else {
+                console.log(`${file}: already formatted`);
+              }
+            }
+
+            exitCode = 0;
+          }
+        } catch (err: unknown) {
+          console.error(`Error: ${(err as Error).message}`);
+          exitCode = 2;
+        }
+
+        process.exit(exitCode);
+      }
+    );
 }
