@@ -1,11 +1,15 @@
 import { sha256Hex } from '@ai-dossier/core';
 import { authorizePublish } from '../../../lib/auth';
 import config from '../../../lib/config';
+import { HTTP_STATUS } from '../../../lib/constants';
 import { handleCors } from '../../../lib/cors';
 import { validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
+import createLogger from '../../../lib/logger';
 import { getRequestId, methodNotAllowed, serverError } from '../../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
+
+const log = createLogger('dossiers/[name]');
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
@@ -26,7 +30,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const namespaceCheck = validateNamespace(dossierName);
   if (!namespaceCheck.valid) {
-    return res.status(400).json({
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({
       error: { code: 'INVALID_NAMESPACE', message: namespaceCheck.error },
     });
   }
@@ -46,14 +50,12 @@ async function handleGet(
   requestId: string
 ) {
   try {
-    console.log(
-      JSON.stringify({ level: 'info', requestId, op: 'getManifest', dossier: dossierName })
-    );
+    log.info('Getting manifest', { requestId, dossier: dossierName });
     const manifest = await github.getManifest();
     const dossierEntry = manifest.dossiers.find((d) => d.name === dossierName);
 
     if (!dossierEntry) {
-      return res.status(404).json({
+      return res.status(HTTP_STATUS.NOT_FOUND).json({
         error: {
           code: 'DOSSIER_NOT_FOUND',
           message: `Dossier '${dossierName}' not found`,
@@ -62,7 +64,7 @@ async function handleGet(
     }
 
     if (version && dossierEntry.version !== version) {
-      return res.status(404).json({
+      return res.status(HTTP_STATUS.NOT_FOUND).json({
         error: {
           code: 'VERSION_NOT_FOUND',
           message: `Dossier '${dossierName}' version '${version}' not found (latest: ${dossierEntry.version})`,
@@ -71,13 +73,11 @@ async function handleGet(
     }
 
     if (isContentRequest) {
-      console.log(
-        JSON.stringify({ level: 'info', requestId, op: 'getFileContent', path: dossierEntry.path })
-      );
+      log.info('Getting file content', { requestId, path: dossierEntry.path });
       const fileContent = await github.getFileContent(dossierEntry.path);
 
       if (!fileContent) {
-        return res.status(404).json({
+        return res.status(HTTP_STATUS.NOT_FOUND).json({
           error: {
             code: 'CONTENT_NOT_FOUND',
             message: `Content for dossier '${dossierName}' not found`,
@@ -89,10 +89,10 @@ async function handleGet(
 
       res.setHeader('Content-Type', 'text/markdown');
       res.setHeader('X-Dossier-Digest', `sha256:${digest}`);
-      return res.status(200).send(fileContent.content);
+      return res.status(HTTP_STATUS.OK).send(fileContent.content);
     }
 
-    return res.status(200).json({
+    return res.status(HTTP_STATUS.OK).json({
       name: dossierEntry.name,
       title: dossierEntry.title,
       version: dossierEntry.version,
@@ -101,10 +101,8 @@ async function handleGet(
     });
   } catch (error) {
     if (error instanceof github.PathTraversalError) {
-      console.warn(
-        JSON.stringify({ level: 'warn', event: 'path_traversal', requestId, dossier: dossierName })
-      );
-      return res.status(400).json({
+      log.warn('Path traversal detected', { requestId, dossier: dossierName });
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
         error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
       });
     }
@@ -129,19 +127,11 @@ async function handleDelete(
   if (!authorized) return;
 
   try {
-    console.log(
-      JSON.stringify({
-        level: 'info',
-        requestId,
-        op: 'deleteDossier',
-        dossier: dossierName,
-        version,
-      })
-    );
+    log.info('Deleting dossier', { requestId, dossier: dossierName, version });
     const result = await github.deleteDossier(dossierName, version || null);
 
     if (!result.found) {
-      return res.status(404).json({
+      return res.status(HTTP_STATUS.NOT_FOUND).json({
         error: {
           code: 'DOSSIER_NOT_FOUND',
           message: `Dossier '${dossierName}' not found`,
@@ -150,7 +140,7 @@ async function handleDelete(
     }
 
     if (result.versionMismatch) {
-      return res.status(404).json({
+      return res.status(HTTP_STATUS.NOT_FOUND).json({
         error: {
           code: 'VERSION_NOT_FOUND',
           message: `Version '${result.requestedVersion}' not found. Current version is '${result.currentVersion}'`,
@@ -167,13 +157,11 @@ async function handleDelete(
       response.version = version;
     }
 
-    return res.status(200).json(response);
+    return res.status(HTTP_STATUS.OK).json(response);
   } catch (err) {
     if (err instanceof github.PathTraversalError) {
-      console.warn(
-        JSON.stringify({ level: 'warn', event: 'path_traversal', requestId, dossier: dossierName })
-      );
-      return res.status(400).json({
+      log.warn('Path traversal detected', { requestId, dossier: dossierName });
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
         error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
       });
     }

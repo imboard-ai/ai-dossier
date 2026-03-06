@@ -1,8 +1,11 @@
 import jwt from 'jsonwebtoken';
 import config from './config';
-import { JWT_EXPIRY_SECONDS, USER_AGENT } from './constants';
+import { HTTP_STATUS, JWT_EXPIRY_SECONDS, USER_AGENT } from './constants';
+import createLogger from './logger';
 import { canPublishTo } from './permissions';
 import type { JwtPayload, VercelRequest, VercelResponse } from './types';
+
+const log = createLogger('auth');
 
 export function signJwt(payload: Omit<JwtPayload, 'iat' | 'exp'>): string {
   return jwt.sign(payload, config.auth.jwt.secret, {
@@ -20,15 +23,8 @@ export async function authenticateRequest(
 ): Promise<JwtPayload | null> {
   const token = extractBearerToken(req);
   if (!token) {
-    console.warn(
-      JSON.stringify({
-        level: 'warn',
-        event: 'auth.missing_token',
-        method: req.method,
-        url: req.url,
-      })
-    );
-    res.status(401).json({
+    log.warn('Missing token', { event: 'auth.missing_token', method: req.method, url: req.url });
+    res.status(HTTP_STATUS.UNAUTHORIZED).json({
       error: {
         code: 'MISSING_TOKEN',
         message: 'Authorization header required. Use: Bearer <token>',
@@ -42,20 +38,17 @@ export async function authenticateRequest(
   } catch (err) {
     const code =
       err instanceof Error && err.name === 'TokenExpiredError' ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN';
-    console.warn(
-      JSON.stringify({
-        level: 'warn',
-        event: `auth.${code.toLowerCase()}`,
-        method: req.method,
-        url: req.url,
-      })
-    );
+    log.warn(code === 'TOKEN_EXPIRED' ? 'Token expired' : 'Invalid token', {
+      event: `auth.${code.toLowerCase()}`,
+      method: req.method,
+      url: req.url,
+    });
     if (code === 'TOKEN_EXPIRED') {
-      res.status(401).json({
+      res.status(HTTP_STATUS.UNAUTHORIZED).json({
         error: { code, message: 'Token has expired. Please login again.' },
       });
     } else {
-      res.status(401).json({
+      res.status(HTTP_STATUS.UNAUTHORIZED).json({
         error: { code, message: 'Invalid token. Please login again.' },
       });
     }
@@ -154,16 +147,13 @@ export async function authorizePublish(
 
   const permission = canPublishTo(jwtPayload, namespace);
   if (!permission.allowed) {
-    console.warn(
-      JSON.stringify({
-        level: 'warn',
-        event: 'auth.forbidden',
-        user: jwtPayload.sub,
-        namespace,
-        reason: permission.reason,
-      })
-    );
-    res.status(403).json({
+    log.warn('Forbidden', {
+      event: 'auth.forbidden',
+      user: jwtPayload.sub,
+      namespace,
+      reason: permission.reason,
+    });
+    res.status(HTTP_STATUS.FORBIDDEN).json({
       error: { code: 'FORBIDDEN', message: permission.reason },
     });
     return false;

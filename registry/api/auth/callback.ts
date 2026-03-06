@@ -1,9 +1,12 @@
 import crypto from 'node:crypto';
 import * as auth from '../../lib/auth';
 import config from '../../lib/config';
-import { OAUTH_STATE_COOKIE } from '../../lib/constants';
+import { HTTP_STATUS, OAUTH_STATE_COOKIE } from '../../lib/constants';
+import createLogger from '../../lib/logger';
 import { methodNotAllowed } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
+
+const log = createLogger('auth/callback');
 
 function parseCookie(req: VercelRequest, name: string): string | undefined {
   const header = req.headers.cookie;
@@ -32,12 +35,15 @@ function validateOAuthState(
     crypto.timingSafeEqual(Buffer.from(state), Buffer.from(expectedState));
 
   if (!valid) {
-    console.warn(
-      '[auth/callback] State validation failed:',
-      !state ? 'missing query state' : !expectedState ? 'missing cookie state' : 'state mismatch'
-    );
+    log.warn('State validation failed', {
+      reason: !state
+        ? 'missing query state'
+        : !expectedState
+          ? 'missing cookie state'
+          : 'state mismatch',
+    });
     res
-      .status(403)
+      .status(HTTP_STATUS.FORBIDDEN)
       .send(
         renderErrorPage(
           'Invalid State',
@@ -54,22 +60,22 @@ function queryString(value: string | string[] | undefined): string | undefined {
 }
 
 async function exchangeCodeAndRenderSuccess(res: VercelResponse, code: string): Promise<void> {
-  console.log('[auth/callback] Exchanging OAuth code for access token');
+  log.info('Exchanging OAuth code for access token');
   const accessToken = await auth.exchangeGitHubCode(code);
 
-  console.log('[auth/callback] Fetching user info and orgs');
+  log.info('Fetching user info and orgs');
   const [user, orgs] = await Promise.all([
     auth.fetchGitHubUser(accessToken),
     auth.fetchGitHubOrgs(accessToken),
   ]);
-  console.log(`[auth/callback] User: ${user.login}, orgs: [${orgs.join(', ')}]`);
+  log.info('User authenticated', { user: user.login, orgs });
 
   const token = auth.signJwt({ sub: user.login, email: user.email || null, orgs });
   const displayCode = auth.encodeAsDisplayCode(token);
   const clientId = config.auth.github.clientId;
 
-  console.log(`[auth/callback] Login complete for ${user.login}`);
-  res.status(200).send(renderSuccessPage(user.login, orgs, displayCode, clientId));
+  log.info('Login complete', { user: user.login });
+  res.status(HTTP_STATUS.OK).send(renderSuccessPage(user.login, orgs, displayCode, clientId));
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -83,9 +89,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const state = queryString(req.query.state);
 
   if (error) {
-    console.warn('[auth/callback] OAuth provider error:', error, errorDescription);
+    log.warn('OAuth provider error', { error, errorDescription });
     return res
-      .status(400)
+      .status(HTTP_STATUS.BAD_REQUEST)
       .send(renderErrorPage('Authentication Failed', errorDescription || error));
   }
 
@@ -94,9 +100,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   if (!code) {
-    console.warn('[auth/callback] Missing authorization code in callback');
+    log.warn('Missing authorization code in callback');
     return res
-      .status(400)
+      .status(HTTP_STATUS.BAD_REQUEST)
       .send(
         renderErrorPage(
           'Missing Code',
@@ -110,13 +116,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   } catch (err) {
     const caughtError = err instanceof Error ? err : new Error(String(err));
     const errorRef = crypto.randomBytes(4).toString('hex');
-    console.error(
-      `[auth/callback] OAuth callback failed (ref=${errorRef}):`,
-      caughtError.message,
-      caughtError.stack
-    );
+    log.error(`OAuth callback failed (ref=${errorRef})`, {
+      error: caughtError.message,
+      stack: caughtError.stack,
+    });
     return res
-      .status(500)
+      .status(HTTP_STATUS.INTERNAL_SERVER_ERROR)
       .send(
         renderErrorPage(
           'Authentication Error',

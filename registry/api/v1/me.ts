@@ -1,4 +1,5 @@
 import { authenticateRequest } from '../../lib/auth';
+import { HTTP_STATUS } from '../../lib/constants';
 import { handleCors } from '../../lib/cors';
 import { methodNotAllowed } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
@@ -17,7 +18,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const orgs = payload.orgs || [];
   const canPublishTo = [`${username}/*`, ...orgs.map((org) => `${org}/*`)];
 
-  return res.status(200).json({
+  return res.status(HTTP_STATUS.OK).json({
     username,
     email: payload.email || null,
     orgs,

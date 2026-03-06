@@ -1,3 +1,19 @@
+/** HTTP status codes used across API handlers. */
+export const HTTP_STATUS = {
+  OK: 200,
+  CREATED: 201,
+  NO_CONTENT: 204,
+  BAD_REQUEST: 400,
+  UNAUTHORIZED: 401,
+  FORBIDDEN: 403,
+  NOT_FOUND: 404,
+  METHOD_NOT_ALLOWED: 405,
+  CONTENT_TOO_LARGE: 413,
+  UNSUPPORTED_MEDIA_TYPE: 415,
+  INTERNAL_SERVER_ERROR: 500,
+  BAD_GATEWAY: 502,
+} as const;
+
 /** Default fields for dossier list/search responses. */
 export const DOSSIER_DEFAULTS = {
   description: null,

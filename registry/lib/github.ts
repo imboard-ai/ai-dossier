@@ -1,7 +1,10 @@
 import path from 'node:path';
 import config from './config';
 import { DOSSIER_DEFAULTS, GITHUB_API_VERSION, USER_AGENT } from './constants';
+import createLogger from './logger';
 import type { DeleteResult, FileContent, Manifest, ManifestDossier } from './types';
+
+const log = createLogger('github');
 
 export class PathTraversalError extends Error {
   constructor(filePath: string) {
@@ -39,9 +42,12 @@ async function githubRequest(endpoint: string, options: RequestInit = {}): Promi
   }
 
   if (!response.ok) {
-    console.error(
-      `GitHub API request failed: ${options.method || 'GET'} ${endpoint} → ${response.status} ${response.statusText}`
-    );
+    log.error('GitHub API request failed', {
+      method: options.method || 'GET',
+      endpoint,
+      status: response.status,
+      statusText: response.statusText,
+    });
   }
 
   return response;
@@ -203,16 +209,16 @@ export async function publishDossier(
     ? `Update ${metadata.name} to v${metadata.version}: ${changelog}`
     : `Publish ${metadata.name} v${metadata.version}: ${changelog}`;
 
-  console.log(`[publish] Step 1/2: Writing content file ${filePath}`);
+  log.info('Writing content file', { step: '1/2', filePath });
   const fileResult = await createOrUpdateFile(
     filePath,
     content,
     fileMessage,
     existing?.sha ?? null
   );
-  console.log(`[publish] Step 1/2 complete: content file written`);
+  log.info('Content file written', { step: '1/2' });
 
-  console.log(`[publish] Step 2/2: Updating manifest for ${metadata.name}`);
+  log.info('Updating manifest', { step: '2/2', dossier: metadata.name });
   const manifest = await getManifest();
 
   const OPTIONAL_MANIFEST_FIELDS = Object.keys(DOSSIER_DEFAULTS) as Array<
@@ -237,13 +243,13 @@ export async function publishDossier(
     manifestResult = await updateManifest(manifest, dossierEntry);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(
-      `[publish] CRITICAL: File ${filePath} written but manifest update failed. Orphaned file needs cleanup.`,
-      message
-    );
+    log.error('File written but manifest update failed — orphaned file needs cleanup', {
+      filePath,
+      error: message,
+    });
     throw err;
   }
-  console.log(`[publish] Step 2/2 complete: manifest updated for ${metadata.name}`);
+  log.info('Manifest updated', { step: '2/2', dossier: metadata.name });
 
   return { file: fileResult, manifest: manifestResult };
 }
@@ -281,27 +287,27 @@ export async function deleteDossier(
     };
   }
 
-  console.log(`[delete] Step 1/2: Deleting content file ${filePath}`);
+  log.info('Deleting content file', { step: '1/2', filePath });
   const fileResult = await deleteFile(
     filePath,
     `Delete ${dossierName} v${dossierEntry.version}`,
     existing.sha
   );
-  console.log(`[delete] Step 1/2 complete: content file deleted`);
+  log.info('Content file deleted', { step: '1/2' });
 
-  console.log(`[delete] Step 2/2: Removing ${dossierName} from manifest`);
+  log.info('Removing from manifest', { step: '2/2', dossier: dossierName });
   let manifestResult: unknown;
   try {
     manifestResult = await removeFromManifest(manifest, dossierName);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(
-      `[delete] CRITICAL: File ${filePath} deleted but manifest update failed. Manual cleanup required.`,
-      message
-    );
+    log.error('File deleted but manifest update failed — manual cleanup required', {
+      filePath,
+      error: message,
+    });
     throw err;
   }
-  console.log(`[delete] Step 2/2 complete: manifest updated`);
+  log.info('Manifest updated', { step: '2/2' });
 
   return {
     found: true,

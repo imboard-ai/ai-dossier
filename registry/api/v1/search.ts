@@ -1,4 +1,4 @@
-import { DEFAULT_PER_PAGE, MAX_PER_PAGE } from '../../lib/constants';
+import { DEFAULT_PER_PAGE, HTTP_STATUS, MAX_PER_PAGE } from '../../lib/constants';
 import { handleCors } from '../../lib/cors';
 import { fetchManifestDossiers, normalizeDossier } from '../../lib/manifest';
 import { methodNotAllowed, serverError } from '../../lib/responses';
@@ -16,7 +16,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const perPageStr = Array.isArray(req.query.per_page) ? req.query.per_page[0] : req.query.per_page;
 
   if (!q || !q.trim()) {
-    return res.status(400).json({
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({
       error: { code: 'MISSING_QUERY', message: 'Query parameter "q" is required' },
     });
   }
@@ -48,7 +48,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     const dossiers = paged.map(normalizeDossier);
 
-    return res.status(200).json({
+    return res.status(HTTP_STATUS.OK).json({
       dossiers,
       pagination: { page, per_page: perPage, total },
     });

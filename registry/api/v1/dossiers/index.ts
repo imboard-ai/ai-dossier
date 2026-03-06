@@ -1,12 +1,15 @@
 import { authorizePublish } from '../../../lib/auth';
 import config from '../../../lib/config';
-import { MAX_CONTENT_SIZE } from '../../../lib/constants';
+import { HTTP_STATUS, MAX_CONTENT_SIZE } from '../../../lib/constants';
 import { handleCors } from '../../../lib/cors';
 import * as dossier from '../../../lib/dossier';
 import * as github from '../../../lib/github';
+import createLogger from '../../../lib/logger';
 import { fetchManifestDossiers, normalizeDossier } from '../../../lib/manifest';
 import { getRequestId, methodNotAllowed, serverError } from '../../../lib/responses';
 import type { ManifestDossier, VercelRequest, VercelResponse } from '../../../lib/types';
+
+const log = createLogger('dossiers/index');
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
@@ -30,7 +33,7 @@ async function handleList(_req: VercelRequest, res: VercelResponse, requestId: s
     const raw = await fetchManifestDossiers();
     const dossiers = raw.map(normalizeDossier);
 
-    return res.status(200).json({
+    return res.status(HTTP_STATUS.OK).json({
       dossiers,
       pagination: {
         page: 1,
@@ -52,7 +55,7 @@ async function handleList(_req: VercelRequest, res: VercelResponse, requestId: s
 async function handlePublish(req: VercelRequest, res: VercelResponse, requestId: string) {
   const contentType = req.headers['content-type'];
   if (!contentType || !contentType.includes('application/json')) {
-    return res.status(415).json({
+    return res.status(HTTP_STATUS.UNSUPPORTED_MEDIA_TYPE).json({
       error: { code: 'UNSUPPORTED_MEDIA_TYPE', message: 'Content-Type must be application/json' },
     });
   }
@@ -60,7 +63,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
   const { namespace, content, changelog } = req.body || {};
 
   if (!namespace || typeof namespace !== 'string') {
-    return res.status(400).json({
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({
       error: {
         code: 'MISSING_FIELD',
         message: 'Missing required field: namespace (must be a string)',
@@ -69,7 +72,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
   }
 
   if (!content || typeof content !== 'string') {
-    return res.status(400).json({
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({
       error: {
         code: 'MISSING_FIELD',
         message: 'Missing required field: content (must be a string)',
@@ -78,13 +81,13 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
   }
 
   if (changelog !== undefined && typeof changelog !== 'string') {
-    return res.status(400).json({
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({
       error: { code: 'INVALID_FIELD', message: 'Field changelog must be a string' },
     });
   }
 
   if (content.length > MAX_CONTENT_SIZE) {
-    return res.status(413).json({
+    return res.status(HTTP_STATUS.CONTENT_TOO_LARGE).json({
       error: {
         code: 'CONTENT_TOO_LARGE',
         message: `Content exceeds maximum size of ${MAX_CONTENT_SIZE / 1024}KB`,
@@ -94,7 +97,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
 
   const namespaceValidation = dossier.validateNamespace(namespace);
   if (!namespaceValidation.valid) {
-    return res.status(400).json({
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({
       error: { code: 'INVALID_NAMESPACE', message: namespaceValidation.error },
     });
   }
@@ -106,14 +109,14 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
   try {
     parsed = dossier.parseFrontmatter(content);
   } catch (err) {
-    return res.status(400).json({
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({
       error: { code: 'INVALID_CONTENT', message: err instanceof Error ? err.message : String(err) },
     });
   }
 
   const validation = dossier.validateDossier(parsed.frontmatter);
   if (!validation.valid) {
-    return res.status(400).json({
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({
       error: { code: 'INVALID_CONTENT', message: validation.errors.join('; ') },
     });
   }
@@ -129,7 +132,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       changelogMessage
     );
 
-    return res.status(201).json({
+    return res.status(HTTP_STATUS.CREATED).json({
       name: fullPath,
       version: parsed.frontmatter.version,
       title: parsed.frontmatter.title,
@@ -138,10 +141,8 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
     });
   } catch (err) {
     if (err instanceof github.PathTraversalError) {
-      console.warn(
-        JSON.stringify({ level: 'warn', event: 'path_traversal', requestId, namespace })
-      );
-      return res.status(400).json({
+      log.warn('Path traversal detected', { requestId, namespace });
+      return res.status(HTTP_STATUS.BAD_REQUEST).json({
         error: { code: 'INVALID_PATH', message: 'Path traversal is not allowed' },
       });
     }

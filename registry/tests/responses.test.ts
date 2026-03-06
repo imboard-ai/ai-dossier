@@ -55,7 +55,8 @@ describe('serverError', () => {
 
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
     expect(loggedJson.level).toBe('error');
-    expect(loggedJson.operation).toBe('dossier.list');
+    expect(loggedJson.context).toBe('responses');
+    expect(loggedJson.message).toBe('dossier.list');
     expect(loggedJson.requestId).toBe(jsonArg.error.request_id);
     expect(loggedJson.errorType).toBe('Error');
     expect(loggedJson.error).toBe('upstream timeout');
