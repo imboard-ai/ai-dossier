@@ -4,15 +4,14 @@ import config from '../../../lib/config';
 import { handleCors } from '../../../lib/cors';
 import { validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
+import { methodNotAllowed } from '../../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
 
   if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'DELETE') {
-    return res.status(405).json({
-      error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET, HEAD, and DELETE are allowed' },
-    });
+    return methodNotAllowed(res, 'GET', 'HEAD', 'DELETE');
   }
 
   const { name, version } = req.query as Record<string, string | string[]>;

@@ -1,15 +1,14 @@
 import { DEFAULT_PER_PAGE, MAX_PER_PAGE } from '../../lib/constants';
 import { handleCors } from '../../lib/cors';
 import { fetchManifestDossiers, normalizeDossier } from '../../lib/manifest';
+import { methodNotAllowed } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
 
   if (req.method !== 'GET') {
-    return res.status(405).json({
-      error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET is allowed' },
-    });
+    return methodNotAllowed(res, 'GET');
   }
 
   const { q, page: pageStr, per_page: perPageStr } = req.query as Record<string, string>;

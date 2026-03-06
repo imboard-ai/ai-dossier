@@ -5,6 +5,7 @@ import { handleCors } from '../../../lib/cors';
 import * as dossier from '../../../lib/dossier';
 import * as github from '../../../lib/github';
 import { fetchManifestDossiers, normalizeDossier } from '../../../lib/manifest';
+import { methodNotAllowed } from '../../../lib/responses';
 import type { ManifestDossier, VercelRequest, VercelResponse } from '../../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -18,9 +19,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return handlePublish(req, res);
   }
 
-  return res.status(405).json({
-    error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET and POST are allowed' },
-  });
+  return methodNotAllowed(res, 'GET', 'POST');
 }
 
 async function handleList(_req: VercelRequest, res: VercelResponse) {

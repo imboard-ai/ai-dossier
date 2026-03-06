@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import * as auth from '../../lib/auth';
 import config from '../../lib/config';
 import { OAUTH_STATE_COOKIE } from '../../lib/constants';
+import { methodNotAllowed } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
 
 function parseCookie(req: VercelRequest, name: string): string | undefined {
@@ -50,9 +51,7 @@ function validateOAuthState(
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'GET') {
-    return res.status(405).json({
-      error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET is allowed' },
-    });
+    return methodNotAllowed(res, 'GET');
   }
 
   const { code, error, error_description, state } = req.query as Record<string, string>;

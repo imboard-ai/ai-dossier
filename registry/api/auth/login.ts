@@ -1,13 +1,12 @@
 import crypto from 'node:crypto';
 import config from '../../lib/config';
 import { OAUTH_STATE_COOKIE, OAUTH_STATE_MAX_AGE } from '../../lib/constants';
+import { methodNotAllowed } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
 
 export default function handler(req: VercelRequest, res: VercelResponse) {
   if (req.method !== 'GET') {
-    return res.status(405).json({
-      error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET is allowed' },
-    });
+    return methodNotAllowed(res, 'GET');
   }
 
   try {

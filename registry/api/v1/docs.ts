@@ -1,5 +1,6 @@
 import config from '../../lib/config';
 import { handleCors } from '../../lib/cors';
+import { methodNotAllowed } from '../../lib/responses';
 import type { VercelRequest, VercelResponse } from '../../lib/types';
 
 const healthEndpoint = {
@@ -192,9 +193,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
 
   if (req.method !== 'GET') {
-    return res.status(405).json({
-      error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET is allowed' },
-    });
+    return methodNotAllowed(res, 'GET');
   }
 
   const baseUrl = `https://${req.headers.host}`;
