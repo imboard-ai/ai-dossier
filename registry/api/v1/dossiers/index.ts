@@ -11,6 +11,9 @@ import type { ManifestDossier, VercelRequest, VercelResponse } from '../../../li
 
 const log = createLogger('dossiers/index');
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping dangerous chars
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
 
@@ -132,9 +135,10 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
 
   const fullPath = dossier.buildFullName(namespace, parsed.frontmatter.name as string);
   // Strip control characters (except space) to prevent git commit message injection
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping dangerous chars
-  const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
   const sanitizedChangelog = changelog ? changelog.replace(CONTROL_CHARS, '').trim() : '';
+  if (changelog && sanitizedChangelog !== changelog) {
+    log.warn('Stripped control characters from changelog', { requestId, namespace });
+  }
   const changelogMessage = sanitizedChangelog || 'No changelog provided';
 
   try {

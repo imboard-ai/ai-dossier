@@ -5,6 +5,17 @@ import { MAX_CHANGELOG_LENGTH, MAX_QUERY_LENGTH, OAUTH_STATE_COOKIE } from '../l
 import { validateNamespace } from '../lib/dossier';
 import { createMockReq, createMockRes } from './helpers/mocks';
 
+function createCorsReqRes(origin?: string) {
+  const resHeaders: Record<string, string> = {};
+  const req = createMockReq({ headers: origin ? { origin } : {} });
+  const res = {
+    setHeader: (key: string, value: string) => {
+      resHeaders[key] = value;
+    },
+  };
+  return { headers: resHeaders, req, res };
+}
+
 describe('path traversal defense (sanitizePath)', () => {
   // We test via the exported getFileContent which internally calls sanitizePath.
   // Since getFileContent makes network calls, we test sanitizePath logic directly
@@ -59,17 +70,6 @@ describe('path.posix.normalize behavior for sanitizePath', () => {
 });
 
 describe('CORS restriction', () => {
-  function createCorsReqRes(origin?: string) {
-    const resHeaders: Record<string, string> = {};
-    const req = createMockReq({ headers: origin ? { origin } : {} });
-    const res = {
-      setHeader: (key: string, value: string) => {
-        resHeaders[key] = value;
-      },
-    };
-    return { headers: resHeaders, req, res };
-  }
-
   it('does not set Access-Control-Allow-Origin for unknown origins', async () => {
     const { setCorsHeaders } = await import('../lib/cors');
     const { headers, req, res } = createCorsReqRes('https://evil.com');
@@ -381,17 +381,6 @@ describe('changelog sanitization', () => {
 });
 
 describe('CORS headers not leaked to disallowed origins', () => {
-  function createCorsReqRes(origin?: string) {
-    const resHeaders: Record<string, string> = {};
-    const req = createMockReq({ headers: origin ? { origin } : {} });
-    const res = {
-      setHeader: (key: string, value: string) => {
-        resHeaders[key] = value;
-      },
-    };
-    return { headers: resHeaders, req, res };
-  }
-
   it('does not set Allow-Methods or Allow-Headers for rejected origins', async () => {
     const { setCorsHeaders } = await import('../lib/cors');
     const { headers, req, res } = createCorsReqRes('https://evil.com');
