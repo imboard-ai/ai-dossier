@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import config from './config';
 import { JWT_EXPIRY_SECONDS, USER_AGENT } from './constants';
+import { canPublishTo } from './permissions';
 import type { JwtPayload, VercelRequest, VercelResponse } from './types';
 
 export function signJwt(payload: Omit<JwtPayload, 'iat' | 'exp'>): string {
@@ -113,6 +114,29 @@ export async function fetchGitHubUser(
   }
 
   return (await response.json()) as { login: string; email: string | null };
+}
+
+/**
+ * Authenticate + check publish/delete permission for a namespace.
+ * Sends 401/403 error responses directly. Returns true if authorized.
+ */
+export async function authorizePublish(
+  req: VercelRequest,
+  res: VercelResponse,
+  namespace: string
+): Promise<boolean> {
+  const jwtPayload = await authenticateRequest(req, res);
+  if (!jwtPayload) return false;
+
+  const permission = canPublishTo(jwtPayload, namespace);
+  if (!permission.allowed) {
+    res.status(403).json({
+      error: { code: 'FORBIDDEN', message: permission.reason },
+    });
+    return false;
+  }
+
+  return true;
 }
 
 export async function fetchGitHubOrgs(accessToken: string): Promise<string[]> {

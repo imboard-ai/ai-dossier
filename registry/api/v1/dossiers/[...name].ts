@@ -1,10 +1,9 @@
 import { sha256Hex } from '@ai-dossier/core';
-import { authenticateRequest } from '../../../lib/auth';
+import { authorizePublish } from '../../../lib/auth';
 import config from '../../../lib/config';
 import { handleCors } from '../../../lib/cors';
-import { getRootNamespace, validateNamespace } from '../../../lib/dossier';
+import { validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
-import { canPublishTo } from '../../../lib/permissions';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -99,26 +98,6 @@ async function handleGet(
       },
     });
   }
-}
-
-async function authorizePublish(
-  req: VercelRequest,
-  res: VercelResponse,
-  dossierName: string
-): Promise<boolean> {
-  const jwtPayload = await authenticateRequest(req, res);
-  if (!jwtPayload) return false;
-
-  const rootNamespace = getRootNamespace(dossierName);
-  const permission = canPublishTo(jwtPayload, rootNamespace);
-  if (!permission.allowed) {
-    res.status(403).json({
-      error: { code: 'FORBIDDEN', message: permission.reason },
-    });
-    return false;
-  }
-
-  return true;
 }
 
 async function handleDelete(

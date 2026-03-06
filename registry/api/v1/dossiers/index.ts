@@ -1,11 +1,10 @@
-import { authenticateRequest } from '../../../lib/auth';
+import { authorizePublish } from '../../../lib/auth';
 import config from '../../../lib/config';
 import { MAX_CONTENT_SIZE } from '../../../lib/constants';
 import { handleCors } from '../../../lib/cors';
 import * as dossier from '../../../lib/dossier';
 import * as github from '../../../lib/github';
 import { fetchManifestDossiers, normalizeDossier } from '../../../lib/manifest';
-import { canPublishTo } from '../../../lib/permissions';
 import type { ManifestDossier, VercelRequest, VercelResponse } from '../../../lib/types';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -49,9 +48,6 @@ async function handleList(_req: VercelRequest, res: VercelResponse) {
 }
 
 async function handlePublish(req: VercelRequest, res: VercelResponse) {
-  const jwtPayload = await authenticateRequest(req, res);
-  if (!jwtPayload) return;
-
   const { namespace, content, changelog } = req.body || {};
 
   if (!namespace) {
@@ -82,12 +78,8 @@ async function handlePublish(req: VercelRequest, res: VercelResponse) {
     });
   }
 
-  const permission = canPublishTo(jwtPayload, namespace);
-  if (!permission.allowed) {
-    return res.status(403).json({
-      error: { code: 'FORBIDDEN', message: permission.reason },
-    });
-  }
+  const authorized = await authorizePublish(req, res, namespace);
+  if (!authorized) return;
 
   let parsed: ReturnType<typeof dossier.parseFrontmatter>;
   try {
