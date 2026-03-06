@@ -1,9 +1,20 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { OAUTH_STATE_COOKIE } from '../lib/constants';
+import { MAX_CHANGELOG_LENGTH, MAX_QUERY_LENGTH, OAUTH_STATE_COOKIE } from '../lib/constants';
 import { validateNamespace } from '../lib/dossier';
 import { createMockReq, createMockRes } from './helpers/mocks';
+
+function createCorsReqRes(origin?: string) {
+  const resHeaders: Record<string, string> = {};
+  const req = createMockReq({ headers: origin ? { origin } : {} });
+  const res = {
+    setHeader: (key: string, value: string) => {
+      resHeaders[key] = value;
+    },
+  };
+  return { headers: resHeaders, req, res };
+}
 
 describe('path traversal defense (sanitizePath)', () => {
   // We test via the exported getFileContent which internally calls sanitizePath.
@@ -59,17 +70,6 @@ describe('path.posix.normalize behavior for sanitizePath', () => {
 });
 
 describe('CORS restriction', () => {
-  function createCorsReqRes(origin?: string) {
-    const resHeaders: Record<string, string> = {};
-    const req = createMockReq({ headers: origin ? { origin } : {} });
-    const res = {
-      setHeader: (key: string, value: string) => {
-        resHeaders[key] = value;
-      },
-    };
-    return { headers: resHeaders, req, res };
-  }
-
   it('does not set Access-Control-Allow-Origin for unknown origins', async () => {
     const { setCorsHeaders } = await import('../lib/cors');
     const { headers, req, res } = createCorsReqRes('https://evil.com');
@@ -77,7 +77,7 @@ describe('CORS restriction', () => {
     setCorsHeaders(req, res);
 
     expect(headers['Access-Control-Allow-Origin']).toBeUndefined();
-    expect(headers['Access-Control-Allow-Methods']).toBeDefined();
+    expect(headers['Access-Control-Allow-Methods']).toBeUndefined();
   });
 
   it('sets Access-Control-Allow-Origin for allowed origins', async () => {
@@ -320,6 +320,88 @@ describe('OAuth state parameter (CSRF protection)', () => {
     await handler(req, res).catch(() => {});
 
     expect(headers['Set-Cookie']).toContain('Max-Age=0');
+  });
+});
+
+describe('search query length limit', () => {
+  it('rejects queries exceeding MAX_QUERY_LENGTH', async () => {
+    const searchModule = await import('../api/v1/search');
+    const handler = searchModule.default;
+
+    const longQuery = 'a'.repeat(MAX_QUERY_LENGTH + 1);
+    const req = createMockReq({ query: { q: longQuery } });
+    const { res, getStatus, getBody } = createMockRes();
+
+    await handler(req, res);
+
+    expect(getStatus()).toBe(400);
+    expect((getBody() as Record<string, Record<string, unknown>>).error.code).toBe(
+      'QUERY_TOO_LONG'
+    );
+  });
+
+  it('accepts queries at exactly MAX_QUERY_LENGTH', async () => {
+    const searchModule = await import('../api/v1/search');
+    const handler = searchModule.default;
+
+    const exactQuery = 'a'.repeat(MAX_QUERY_LENGTH);
+    const req = createMockReq({ query: { q: exactQuery } });
+    const { res, getStatus } = createMockRes();
+
+    await handler(req, res);
+
+    // Should not be rejected for length (may fail for other reasons like upstream)
+    expect(getStatus()).not.toBe(400);
+  });
+});
+
+describe('changelog sanitization', () => {
+  it('rejects changelog exceeding MAX_CHANGELOG_LENGTH', async () => {
+    const dossierModule = await import('../api/v1/dossiers/index');
+    const handler = dossierModule.default;
+
+    const req = createMockReq({
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: {
+        namespace: 'test-ns',
+        content: '---\nname: test\ntitle: Test\nversion: 1.0.0\n---\n# Test',
+        changelog: 'a'.repeat(MAX_CHANGELOG_LENGTH + 1),
+      },
+    });
+    const { res, getStatus, getBody } = createMockRes();
+
+    await handler(req, res);
+
+    expect(getStatus()).toBe(400);
+    expect((getBody() as Record<string, Record<string, unknown>>).error.code).toBe(
+      'CHANGELOG_TOO_LONG'
+    );
+  });
+});
+
+describe('CORS headers not leaked to disallowed origins', () => {
+  it('does not set Allow-Methods or Allow-Headers for rejected origins', async () => {
+    const { setCorsHeaders } = await import('../lib/cors');
+    const { headers, req, res } = createCorsReqRes('https://evil.com');
+
+    setCorsHeaders(req, res);
+
+    expect(headers['Access-Control-Allow-Origin']).toBeUndefined();
+    expect(headers['Access-Control-Allow-Methods']).toBeUndefined();
+    expect(headers['Access-Control-Allow-Headers']).toBeUndefined();
+  });
+
+  it('sets all CORS headers for allowed origins', async () => {
+    const { setCorsHeaders } = await import('../lib/cors');
+    const { headers, req, res } = createCorsReqRes('https://dossier.imboard.ai');
+
+    setCorsHeaders(req, res);
+
+    expect(headers['Access-Control-Allow-Origin']).toBe('https://dossier.imboard.ai');
+    expect(headers['Access-Control-Allow-Methods']).toBeDefined();
+    expect(headers['Access-Control-Allow-Headers']).toBeDefined();
+    expect(headers.Vary).toBe('Origin');
   });
 });
 

@@ -1,4 +1,4 @@
-import { DEFAULT_PER_PAGE, HTTP_STATUS, MAX_PER_PAGE } from '../../lib/constants';
+import { DEFAULT_PER_PAGE, HTTP_STATUS, MAX_PER_PAGE, MAX_QUERY_LENGTH } from '../../lib/constants';
 import { handleCors } from '../../lib/cors';
 import { fetchManifestDossiers, normalizeDossier } from '../../lib/manifest';
 import { methodNotAllowed, serverError } from '../../lib/responses';
@@ -18,6 +18,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!q || !q.trim()) {
     return res.status(HTTP_STATUS.BAD_REQUEST).json({
       error: { code: 'MISSING_QUERY', message: 'Query parameter "q" is required' },
+    });
+  }
+
+  if (q.length > MAX_QUERY_LENGTH) {
+    return res.status(HTTP_STATUS.BAD_REQUEST).json({
+      error: {
+        code: 'QUERY_TOO_LONG',
+        message: `Query exceeds maximum length of ${MAX_QUERY_LENGTH} characters`,
+      },
     });
   }
 
