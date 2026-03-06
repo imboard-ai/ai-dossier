@@ -161,7 +161,7 @@ Authorization: Bearer <JWT>
 ## Testing
 
 ### OAuth Flow
-1. Open: `https://github.com/login/oauth/authorize?client_id=<CLIENT_ID>&scope=read:user%20read:org&redirect_uri=https://dossier-registry.vercel.app/auth/callback`
+1. Open: `https://dossier-registry.vercel.app/auth/login`
 2. Authorize the app
 3. Copy the displayed code
 4. Decode: `echo "<CODE>" | base64 -d` to get JWT
@@ -183,7 +183,7 @@ Authorization: Bearer <JWT>
   "email": null,
   "orgs": ["imboard-ai"],
   "iat": 1764847354,
-  "exp": 1764850954
+  "exp": 1765452154
 }
 ```
 
@@ -191,4 +191,4 @@ Authorization: Bearer <JWT>
 - `email` - From GitHub profile (may be null)
 - `orgs` - Array of org logins user belongs to
 - `iat` - Issued at timestamp
-- `exp` - Expiry (1 hour from issue)
+- `exp` - Expiry (7 days from issue)

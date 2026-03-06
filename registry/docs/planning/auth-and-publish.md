@@ -136,6 +136,7 @@ The Registry API is a server-side service hosted on Vercel.
 | `GET` | `/api/v1/dossiers` | List all dossiers |
 | `GET` | `/api/v1/dossiers/{name}` | Get dossier metadata |
 | `GET` | `/api/v1/dossiers/{name}/content` | Redirect to CDN |
+| `GET` | `/auth/login` | Initiates OAuth flow - sets CSRF state cookie, redirects to GitHub |
 | `GET` | `/auth/callback` | OAuth callback - exchanges code, displays JWT for copy/paste |
 
 ### Protected Endpoints (JWT Required)
@@ -175,8 +176,9 @@ Authorization: Bearer <JWT>
 ```
 1. User runs: dossier login
 
-2. CLI generates a random `state` parameter (32 bytes, hex-encoded)
-   and opens browser directly to GitHub OAuth URL:
+2. CLI opens browser to {REGISTRY_URL}/auth/login
+   The Registry generates a random `state` parameter (32 bytes, hex-encoded),
+   stores it in an HttpOnly cookie, and redirects the browser to GitHub:
    https://github.com/login/oauth/authorize?
      client_id={GITHUB_CLIENT_ID}
      &scope=read:user,read:org
@@ -332,14 +334,20 @@ Dossier content here...
 │   │ login       │                      │                       │         │
 │   │ ──────────> │                      │                       │         │
 │   │             │                      │                       │         │
-│   │             │ Generate random state, set state cookie       │         │
-│   │             │ Open browser directly to GitHub:             │         │
-│   │             │ github.com/login/oauth/authorize?            │         │
-│   │             │   client_id=xxx&                             │         │
-│   │             │   scope=read:user,read:org&                  │         │
-│   │             │   redirect_uri={REGISTRY}/auth/callback&     │         │
-│   │             │   state={random_state}                       │         │
-│   │ <────────── │ ─────────────────────────────────────────────>         │
+│   │             │ Open browser to                              │         │
+│   │             │ {REGISTRY}/auth/login                        │         │
+│   │             │ ───────────────────> │                       │         │
+│   │             │                      │ Generate random state │         │
+│   │             │                      │ Set state cookie      │         │
+│   │             │                      │ Redirect to GitHub:   │         │
+│   │             │                      │ github.com/login/     │         │
+│   │             │                      │   oauth/authorize?    │         │
+│   │             │                      │   client_id=xxx&      │         │
+│   │             │                      │   scope=read:user,    │         │
+│   │             │                      │   read:org&           │         │
+│   │             │                      │   state={state}       │         │
+│   │             │                      │ ────────────────────> │         │
+│   │ <────────── │ <──────────────────── ─────────────────────────────────>         │
 │   │             │                      │                       │         │
 │   │ Browser shows GitHub OAuth consent │                       │         │
 │   │ (read:user, read:org scopes)       │                       │         │
@@ -406,7 +414,7 @@ Dossier content here...
 ```
 
 **Key points:**
-- CLI opens browser directly to GitHub (not to Registry)
+- CLI opens browser to Registry's `/auth/login`, which sets a CSRF state cookie and redirects to GitHub
 - Registry only receives the callback after user approves
 - Registry displays code in browser for user to copy/paste back to CLI
 - CLI never needs to run a local server
@@ -516,7 +524,7 @@ Dossier content here...
   "email": "alex.turner@gmail.com",
   "orgs": ["arctic-monkeys", "the-last-shadow-puppets"],
   "iat": 1701684000,
-  "exp": 1701687600
+  "exp": 1702288800
 }
 ```
 

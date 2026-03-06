@@ -441,7 +441,7 @@ dossier search "aws deploy" --category devops --signed
 {
   "access_token": "eyJ...",
   "token_type": "Bearer",
-  "expires_in": 604800,
+  "expires_in": 604800
   "scope": ["read", "write"]
 }
 ```
@@ -540,17 +540,7 @@ Override via `CORS_ALLOWED_ORIGINS` env var (comma-separated).
 
 ---
 
-## Token Refresh Flow
-
-```http
-POST /auth/token
-Content-Type: application/json
-
-{
-  "grant_type": "refresh_token",
-  "refresh_token": "dGhpcyBpcyBhIHJlZnJlc2g..."
-}
-```
+## Token Lifetimes
 
 **Token Lifetimes:**
 - JWT token: 7 days (no refresh token; user must re-login after expiry)
