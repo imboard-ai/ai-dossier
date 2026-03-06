@@ -15,24 +15,37 @@ export function generateErrorRef(): string {
   return crypto.randomBytes(ERROR_REF_BYTES).toString('hex');
 }
 
-/** Returns a JSON error response with the standard `{ error: { code, message } }` shape. */
+/** Returns a JSON error response with the standard `{ error: { code, message, request_id? } }` shape. */
 export function jsonError(
   res: VercelResponse,
   status: number,
   code: string,
-  message: string
+  message: string,
+  requestId?: string
 ): VercelResponse {
-  return res.status(status).json({ error: { code, message } });
+  const error: Record<string, string> = { code, message };
+  if (requestId) error.request_id = requestId;
+  return res.status(status).json({ error });
 }
 
 /** Returns a 400 Bad Request JSON error response. */
-export function badRequest(res: VercelResponse, code: string, message: string): VercelResponse {
-  return jsonError(res, HTTP_STATUS.BAD_REQUEST, code, message);
+export function badRequest(
+  res: VercelResponse,
+  code: string,
+  message: string,
+  requestId?: string
+): VercelResponse {
+  return jsonError(res, HTTP_STATUS.BAD_REQUEST, code, message, requestId);
 }
 
 /** Returns a 404 Not Found JSON error response. */
-export function notFound(res: VercelResponse, code: string, message: string): VercelResponse {
-  return jsonError(res, HTTP_STATUS.NOT_FOUND, code, message);
+export function notFound(
+  res: VercelResponse,
+  code: string,
+  message: string,
+  requestId?: string
+): VercelResponse {
+  return jsonError(res, HTTP_STATUS.NOT_FOUND, code, message, requestId);
 }
 
 function formatAllowed(methods: string[]): string {
@@ -81,7 +94,17 @@ export function invalidPathError(
   identifier: string
 ): VercelResponse {
   log.warn('Path traversal detected', { requestId, identifier });
-  return badRequest(res, 'INVALID_PATH', 'Path traversal is not allowed');
+  return badRequest(res, 'INVALID_PATH', 'Path traversal is not allowed', requestId);
+}
+
+/** Returns a 400 response for invalid namespace values, with a warning log. */
+export function invalidNamespaceError(
+  res: VercelResponse,
+  requestId: string,
+  message: string
+): VercelResponse {
+  log.warn('Invalid namespace', { requestId, detail: message });
+  return badRequest(res, 'INVALID_NAMESPACE', message, requestId);
 }
 
 /** Returns a structured JSON error response with logging, request tracing, and a configurable status code (defaults to 502). */

@@ -9,12 +9,13 @@ import { fetchManifestDossiers, normalizeDossier } from '../../../lib/manifest';
 import {
   badRequest,
   getRequestId,
+  invalidNamespaceError,
   invalidPathError,
   jsonError,
   methodNotAllowed,
   serverError,
 } from '../../../lib/responses';
-import type { ManifestDossier, VercelRequest, VercelResponse } from '../../../lib/types';
+import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 const log = createLogger('dossiers/index');
 
@@ -69,29 +70,41 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       res,
       HTTP_STATUS.UNSUPPORTED_MEDIA_TYPE,
       'UNSUPPORTED_MEDIA_TYPE',
-      `Content-Type must be application/json, received: ${contentType || '(none)'}`
+      `Content-Type must be application/json, received: ${contentType || '(none)'}`,
+      requestId
     );
   }
 
   const { namespace, content, changelog } = req.body || {};
 
   if (!namespace || typeof namespace !== 'string') {
-    return badRequest(res, 'MISSING_FIELD', 'Missing required field: namespace (must be a string)');
+    return badRequest(
+      res,
+      'MISSING_FIELD',
+      'Missing required field: namespace (must be a string)',
+      requestId
+    );
   }
 
   if (!content || typeof content !== 'string') {
-    return badRequest(res, 'MISSING_FIELD', 'Missing required field: content (must be a string)');
+    return badRequest(
+      res,
+      'MISSING_FIELD',
+      'Missing required field: content (must be a string)',
+      requestId
+    );
   }
 
   if (changelog !== undefined && typeof changelog !== 'string') {
-    return badRequest(res, 'INVALID_FIELD', 'Field changelog must be a string');
+    return badRequest(res, 'INVALID_FIELD', 'Field changelog must be a string', requestId);
   }
 
   if (typeof changelog === 'string' && changelog.length > MAX_CHANGELOG_LENGTH) {
     return badRequest(
       res,
       'CHANGELOG_TOO_LONG',
-      `Changelog exceeds maximum length of ${MAX_CHANGELOG_LENGTH} characters`
+      `Changelog exceeds maximum length of ${MAX_CHANGELOG_LENGTH} characters`,
+      requestId
     );
   }
 
@@ -100,45 +113,45 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       res,
       HTTP_STATUS.CONTENT_TOO_LARGE,
       'CONTENT_TOO_LARGE',
-      `Content exceeds maximum size of ${MAX_CONTENT_SIZE / 1024}KB`
+      `Content exceeds maximum size of ${MAX_CONTENT_SIZE / 1024}KB`,
+      requestId
     );
   }
 
   const namespaceValidation = dossier.validateNamespace(namespace);
   if (!namespaceValidation.valid) {
-    return badRequest(res, 'INVALID_NAMESPACE', namespaceValidation.error);
+    return invalidNamespaceError(res, requestId, namespaceValidation.error);
   }
-
-  const authorized = await authorizePublish(req, res, namespace);
-  if (!authorized) return;
-
-  let parsed: ReturnType<typeof dossier.parseFrontmatter>;
-  try {
-    parsed = dossier.parseFrontmatter(content);
-  } catch (err) {
-    return badRequest(res, 'INVALID_CONTENT', err instanceof Error ? err.message : String(err));
-  }
-
-  const validation = dossier.validateDossier(parsed.frontmatter);
-  if (!validation.valid) {
-    return badRequest(res, 'INVALID_CONTENT', validation.errors.join('; '));
-  }
-
-  const fullPath = dossier.buildFullName(namespace, parsed.frontmatter.name as string);
-  // Strip control characters (except space) to prevent git commit message injection
-  const sanitizedChangelog = changelog ? changelog.replace(CONTROL_CHARS, '').trim() : '';
-  if (changelog && sanitizedChangelog !== changelog) {
-    log.warn('Stripped control characters from changelog', { requestId, namespace });
-  }
-  const changelogMessage = sanitizedChangelog || 'No changelog provided';
 
   try {
-    await github.publishDossier(
-      fullPath,
-      content,
-      parsed.frontmatter as unknown as ManifestDossier,
-      changelogMessage
-    );
+    const authorized = await authorizePublish(req, res, namespace);
+    if (!authorized) return;
+
+    let parsed: ReturnType<typeof dossier.parseFrontmatter>;
+    try {
+      parsed = dossier.parseFrontmatter(content);
+    } catch (err) {
+      return badRequest(
+        res,
+        'INVALID_CONTENT',
+        err instanceof Error ? err.message : String(err),
+        requestId
+      );
+    }
+
+    const validation = dossier.validateDossier(parsed.frontmatter);
+    if (!validation.valid) {
+      return badRequest(res, 'INVALID_CONTENT', validation.errors.join('; '), requestId);
+    }
+
+    const fullPath = dossier.buildFullName(namespace, parsed.frontmatter.name as string);
+    // Strip control characters (except space) to prevent git commit message injection
+    const sanitizedChangelog = changelog ? changelog.replace(CONTROL_CHARS, '').trim() : '';
+    if (changelog && sanitizedChangelog !== changelog) {
+      log.warn('Stripped control characters from changelog', { requestId, namespace });
+    }
+    const changelogMessage = sanitizedChangelog || 'No changelog provided';
+    await github.publishDossier(fullPath, content, parsed.frontmatter, changelogMessage);
 
     log.info('Dossier published', {
       requestId,
@@ -164,7 +177,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       code: 'PUBLISH_ERROR',
       message: 'Failed to publish dossier',
       requestId,
-      context: { namespace, path: fullPath },
+      context: { namespace },
     });
   }
 }

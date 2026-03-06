@@ -3,16 +3,18 @@ import type { VercelRequest, VercelResponse } from '../../lib/types';
 
 type MockReqOverrides = Partial<{
   method: string;
-  query: Record<string, string>;
+  url: string;
+  query: Record<string, string | string[]>;
   headers: Record<string, string>;
   body: unknown;
 }>;
 
 export function createMockReq(
   overrides: MockReqOverrides = {}
-): Pick<VercelRequest, 'method' | 'query' | 'headers' | 'body'> {
+): Pick<VercelRequest, 'method' | 'url' | 'query' | 'headers' | 'body'> {
   return {
     method: overrides.method ?? 'GET',
+    url: overrides.url,
     query: overrides.query ?? {},
     headers: overrides.headers ?? {},
     body: overrides.body ?? undefined,
@@ -54,6 +56,23 @@ export function createMockRes() {
     getBody: () => body,
     headers,
   };
+}
+
+type SpyInstance = ReturnType<typeof vi.spyOn>;
+
+export function findLogEntry(
+  spy: SpyInstance,
+  messageValue: string
+): Record<string, unknown> | undefined {
+  return spy.mock.calls
+    .map((call) => {
+      try {
+        return JSON.parse(call[0] as string) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })
+    .find((entry): entry is Record<string, unknown> => entry?.message === messageValue);
 }
 
 type ViMockRes = VercelResponse & {
