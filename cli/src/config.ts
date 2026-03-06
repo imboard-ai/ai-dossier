@@ -8,6 +8,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+/**
+ * A single registry entry in the user or project configuration.
+ * URLs must use HTTPS to protect credentials in transit — the CLI
+ * rejects non-HTTPS URLs when adding registries via `dossier config --add-registry`.
+ */
 export interface RegistryEntry {
   url: string;
   default?: boolean;
@@ -23,6 +28,12 @@ export interface DossierConfig {
   [key: string]: unknown;
 }
 
+/**
+ * A registry after resolution from all config sources (user, project, env).
+ * Each resolved registry is isolated: credentials are stored per-registry
+ * in ~/.dossier/credentials.json, and project-level configs cannot override
+ * user-configured registry URLs to prevent credential exfiltration.
+ */
 export interface ResolvedRegistry {
   name: string;
   url: string;

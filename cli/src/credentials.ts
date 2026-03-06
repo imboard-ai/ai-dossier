@@ -1,7 +1,15 @@
 /**
  * Credential storage for Dossier registry authentication.
- * Stores per-registry credentials at ~/.dossier/credentials.json with secure file permissions.
+ * Stores per-registry credentials at ~/.dossier/credentials.json with secure file permissions (0600).
  * Auto-migrates old flat format to keyed-by-registry format.
+ *
+ * Security model:
+ * - **HTTPS enforcement**: Registry URLs must use HTTPS (enforced in config.ts when adding
+ *   registries) so credentials are never sent over plain HTTP.
+ * - **Per-registry isolation**: Each registry has its own credential entry. A compromised
+ *   registry token cannot be used to authenticate against other registries.
+ * - **Environment variable override**: DOSSIER_REGISTRY_TOKEN creates a virtual "env"
+ *   credential entry for CI/CD contexts; it is never persisted to disk.
  */
 
 import fs from 'node:fs';

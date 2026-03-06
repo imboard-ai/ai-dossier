@@ -150,6 +150,27 @@ https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/git-projec
 
 ---
 
+## Registry & Multi-Registry Support
+
+The CLI supports multiple registries for discovering, publishing, and sharing dossiers across teams and organizations.
+
+- **Multi-registry**: Configure multiple registries (public, internal, mirrors) queried in parallel
+- **HTTPS enforcement**: All registry URLs must use HTTPS to protect credentials in transit
+- **Per-registry credentials**: Each registry has isolated authentication — a compromised token cannot access other registries
+- **Project-level config**: Add a `.dossierrc.json` to your project for team-shared registry settings
+
+```bash
+# Add a private registry
+dossier config --add-registry internal --url https://dossier.company.com
+
+# List configured registries
+dossier config --list-registries
+```
+
+See the [CLI documentation](./cli/README.md#config-command) for full registry management options.
+
+---
+
 ## Adopter Playbooks
 
 - **Solo Dev**: paste a `.ds.md` into your LLM and run via MCP or CLI

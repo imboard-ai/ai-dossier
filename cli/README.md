@@ -172,6 +172,74 @@ See `dossier config` for managing registry URLs. Multiple registries are queried
 
 ---
 
+## Config Command
+
+Manage CLI settings and registry configuration.
+
+### General Settings
+
+```bash
+# List all configuration
+dossier config --list
+
+# Get a setting
+dossier config defaultLlm
+
+# Set a setting
+dossier config defaultLlm claude-code
+
+# Reset to defaults (preserves registry settings)
+dossier config --reset
+```
+
+### Registry Management
+
+All registry URLs **must use HTTPS** to protect credentials in transit.
+
+```bash
+# List configured registries
+dossier config --list-registries
+dossier config --list-registries --json
+
+# Add a registry
+dossier config --add-registry internal --url https://dossier.company.com
+
+# Add as default + read-only
+dossier config --add-registry mirror --url https://mirror.example.com --default --readonly
+
+# Remove a registry
+dossier config --remove-registry mirror
+
+# Change the default registry
+dossier config --set-default-registry internal
+```
+
+### Project-Level Config (`.dossierrc.json`)
+
+Place a `.dossierrc.json` in your project root for team-shared registry settings:
+
+```json
+{
+  "registries": {
+    "internal": { "url": "https://dossier.company.com" }
+  },
+  "defaultRegistry": "internal"
+}
+```
+
+Project registries are merged with user registries. User-configured registries take precedence on name conflicts to prevent credential exfiltration.
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `DOSSIER_REGISTRY_URL` | Override/add a registry URL (creates virtual "env" registry) |
+| `DOSSIER_REGISTRY_TOKEN` | Auth token for the virtual "env" registry (ephemeral, never persisted to disk). Recommended for CI/CD and agent contexts. |
+| `DOSSIER_REGISTRY_USER` | Username for registry authentication |
+| `DOSSIER_REGISTRY_ORGS` | Comma-separated org scopes for registry queries |
+
+---
+
 ## What It Checks
 
 ### 1. Integrity (Checksum)
@@ -312,11 +380,9 @@ claude-run-dossier https://example.com/dossier.ds.md
 
 ## Registry Configuration
 
-The CLI supports multiple registries for discovering, pulling, and publishing dossiers.
+The CLI supports multiple registries for discovering, pulling, and publishing dossiers. Use `dossier config` to manage registries — see [Config Command](#config-command) for CLI usage.
 
 ### Configuration File (`~/.dossier/config.json`)
-
-Configure registries in your user config:
 
 ```json
 {
@@ -337,34 +403,7 @@ Configure registries in your user config:
 }
 ```
 
-### Project-Level Config (`.dossierrc.json`)
-
-Place a `.dossierrc.json` in your project root to add project-specific registries:
-
-```json
-{
-  "registries": {
-    "team": {
-      "url": "https://dossier.myteam.example.com"
-    }
-  },
-  "defaultRegistry": "team"
-}
-```
-
-Project registries are merged with user registries. User-configured registries take precedence on name conflicts to prevent credential exfiltration.
-
-### Environment Variable
-
-Set `DOSSIER_REGISTRY_URL` to add a virtual `env` registry:
-
-```bash
-export DOSSIER_REGISTRY_URL=https://custom-registry.example.com
-```
-
 ### Resolution Priority
-
-When resolving registries, the CLI follows this priority:
 
 1. `--registry` flag on the command
 2. `DOSSIER_REGISTRY_URL` environment variable
