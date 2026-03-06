@@ -1,9 +1,9 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_CHANGELOG_LENGTH, MAX_QUERY_LENGTH, OAUTH_STATE_COOKIE } from '../lib/constants';
 import { validateNamespace } from '../lib/dossier';
-import { createMockReq, createMockRes } from './helpers/mocks';
+import { createMockReq, createMockRes, findLogEntry } from './helpers/mocks';
 
 function createCorsReqRes(origin?: string) {
   const resHeaders: Record<string, string> = {};
@@ -463,6 +463,110 @@ describe('CORS_ALLOWED_ORIGINS empty entry filtering', () => {
     } else {
       process.env.CORS_ALLOWED_ORIGINS = originalEnv;
     }
+  });
+});
+
+describe('CORS rejection log context', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('includes path in rejected origin log', async () => {
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { setCorsHeaders } = await import('../lib/cors');
+    const req = createMockReq({
+      url: '/api/v1/dossiers',
+      headers: { origin: 'https://evil.com' },
+    });
+    const resHeaders: Record<string, string> = {};
+    const res = {
+      setHeader: (key: string, value: string) => {
+        resHeaders[key] = value;
+      },
+    };
+
+    setCorsHeaders(req, res);
+
+    const entry = findLogEntry(consoleSpy, 'Rejected origin');
+    expect(entry).toBeDefined();
+    expect(entry).toMatchObject({
+      origin: 'https://evil.com',
+      path: '/api/v1/dossiers',
+    });
+
+    consoleSpy.mockRestore();
+  });
+
+  it('includes path and statusCode in blocked mutating request log', async () => {
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { handleCors } = await import('../lib/cors');
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/v1/dossiers',
+      headers: { origin: 'https://evil.com' },
+    });
+    const { res } = createMockRes();
+
+    handleCors(req, res as any);
+
+    const entry = findLogEntry(consoleSpy, 'Blocked mutating request from disallowed origin');
+    expect(entry).toBeDefined();
+    expect(entry).toMatchObject({
+      method: 'POST',
+      origin: 'https://evil.com',
+      path: '/api/v1/dossiers',
+      statusCode: 403,
+    });
+
+    consoleSpy.mockRestore();
+  });
+});
+
+describe('CORS accepted mutating request logging', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('logs debug entry for accepted mutating request from allowed origin', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { handleCors } = await import('../lib/cors');
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/v1/dossiers',
+      headers: { origin: 'https://dossier.imboard.ai' },
+    });
+    const { res } = createMockRes();
+
+    handleCors(req, res as any);
+
+    const entry = findLogEntry(consoleSpy, 'Accepted mutating request from allowed origin');
+    expect(entry).toBeDefined();
+    expect(entry).toMatchObject({
+      level: 'debug',
+      method: 'POST',
+      origin: 'https://dossier.imboard.ai',
+      path: '/api/v1/dossiers',
+    });
+
+    consoleSpy.mockRestore();
+  });
+
+  it('does not log debug entry for GET requests', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { handleCors } = await import('../lib/cors');
+    const req = createMockReq({
+      method: 'GET',
+      url: '/api/v1/dossiers',
+      headers: { origin: 'https://dossier.imboard.ai' },
+    });
+    const { res } = createMockRes();
+
+    handleCors(req, res as any);
+
+    const entry = findLogEntry(consoleSpy, 'Accepted mutating request from allowed origin');
+    expect(entry).toBeUndefined();
+
+    consoleSpy.mockRestore();
   });
 });
 

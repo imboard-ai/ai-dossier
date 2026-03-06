@@ -42,7 +42,7 @@ export function setCorsHeaders(
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept');
     res.setHeader('Vary', 'Origin');
   } else if (origin) {
-    log.warn('Rejected origin', { origin });
+    log.warn('Rejected origin', { origin, path: req.url });
   }
 }
 
@@ -77,11 +77,24 @@ export function handleCors(req: VercelRequest, res: VercelResponse): boolean {
   // susceptible to CSRF, so they are also allowed through.
   const origin = req.headers.origin;
   if (origin && MUTATING_METHODS.has(req.method ?? '') && !allowedOrigins.includes(origin)) {
-    log.warn('Blocked mutating request from disallowed origin', { method: req.method, origin });
+    log.warn('Blocked mutating request from disallowed origin', {
+      method: req.method,
+      origin,
+      path: req.url,
+      statusCode: HTTP_STATUS.FORBIDDEN,
+    });
     res.status(HTTP_STATUS.FORBIDDEN).json({
       error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Origin not allowed for mutating requests' },
     });
     return true;
+  }
+
+  if (origin && MUTATING_METHODS.has(req.method ?? '')) {
+    log.debug('Accepted mutating request from allowed origin', {
+      method: req.method,
+      origin,
+      path: req.url,
+    });
   }
 
   return false;

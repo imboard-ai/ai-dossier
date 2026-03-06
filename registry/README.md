@@ -134,20 +134,20 @@ See [`lib/responses.ts`](lib/responses.ts) for the implementation.
 
 ## Structured Logging
 
-All server-side logging uses structured JSON via `createLogger(context)` from `lib/logger.ts`. Each log entry is a single-line JSON string sent to stdout (`info`) or stderr (`warn`, `error`), compatible with Vercel's log ingestion.
+All server-side logging uses structured JSON via `createLogger(context)` from `lib/logger.ts`. Each log entry is a single-line JSON string sent to stdout (`debug`, `info`) or stderr (`warn`, `error`), compatible with Vercel's log ingestion.
 
 **Log format:**
 
 ```json
 {
-  "level": "info | warn | error",
+  "level": "debug | info | warn | error",
   "context": "module-name",
   "message": "Human-readable description",
   "...extras": "Additional key-value pairs"
 }
 ```
 
-**Destinations:** `info` logs go to `console.log` (stdout); `warn` to `console.warn` (stderr); `error` to `console.error` (stderr).
+**Destinations:** `debug` and `info` logs go to `console.log` (stdout); `warn` to `console.warn` (stderr); `error` to `console.error` (stderr).
 
 **Usage in new modules:**
 
