@@ -96,7 +96,7 @@ describe('registry flow integration', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Published'));
 
     // Step 2: Search
-    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistrySearch).mockResolvedValue({
       dossiers: [
         {
           name: 'org/my-workflow',

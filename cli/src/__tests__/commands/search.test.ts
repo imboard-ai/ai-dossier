@@ -18,7 +18,7 @@ describe('search command', () => {
   });
 
   it('should display matching results', async () => {
-    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistrySearch).mockResolvedValue({
       dossiers: [
         {
           name: 'deploy-app',
@@ -28,16 +28,8 @@ describe('search command', () => {
           tags: ['deploy'],
           _registry: 'public',
         },
-        {
-          name: 'setup-db',
-          title: 'Setup Database',
-          description: 'Initialize database',
-          category: 'database',
-          tags: ['db'],
-          _registry: 'public',
-        },
       ] as any,
-      total: 2,
+      total: 1,
       errors: [],
     });
 
@@ -51,7 +43,7 @@ describe('search command', () => {
   });
 
   it('should show no results message', async () => {
-    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistrySearch).mockResolvedValue({
       dossiers: [],
       total: 0,
       errors: [],
@@ -68,7 +60,7 @@ describe('search command', () => {
   });
 
   it('should output JSON with --json', async () => {
-    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistrySearch).mockResolvedValue({
       dossiers: [
         {
           name: 'test',
@@ -96,7 +88,7 @@ describe('search command', () => {
   });
 
   it('should filter by content with --content flag', async () => {
-    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistrySearch).mockResolvedValue({
       dossiers: [
         {
           name: 'deploy-app',
@@ -141,7 +133,7 @@ describe('search command', () => {
   });
 
   it('should exit 1 on API error with registry context', async () => {
-    vi.mocked(multiRegistry.multiRegistryList).mockRejectedValue(new Error('Network error'));
+    vi.mocked(multiRegistry.multiRegistrySearch).mockRejectedValue(new Error('Network error'));
 
     const program = createTestProgram();
     registerSearchCommand(program);
@@ -154,7 +146,7 @@ describe('search command', () => {
   });
 
   it('should clamp page to minimum of 1', async () => {
-    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistrySearch).mockResolvedValue({
       dossiers: [
         {
           name: 'test',
@@ -178,7 +170,7 @@ describe('search command', () => {
   });
 
   it('should clamp perPage to maximum of 1000', async () => {
-    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistrySearch).mockResolvedValue({
       dossiers: [
         {
           name: 'test',
@@ -202,7 +194,7 @@ describe('search command', () => {
   });
 
   it('should clamp perPage to minimum of 1', async () => {
-    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistrySearch).mockResolvedValue({
       dossiers: [
         {
           name: 'test',
@@ -226,7 +218,7 @@ describe('search command', () => {
   });
 
   it('should log warning when content fetch fails for a dossier', async () => {
-    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+    vi.mocked(multiRegistry.multiRegistrySearch).mockResolvedValue({
       dossiers: [
         {
           name: 'fail-dossier',

@@ -8,7 +8,7 @@ import {
   printRegistryErrors,
 } from '../helpers';
 import type { LabeledDossierListItem } from '../multi-registry';
-import { multiRegistryList } from '../multi-registry';
+import { multiRegistrySearch } from '../multi-registry';
 import { getClientForRegistry } from '../registry-client';
 
 /** Registers the `search` command — searches for dossiers across all configured registries. */
@@ -41,10 +41,9 @@ export function registerSearchCommand(program: Command): void {
         const { page, perPage } = parsePaginationParams(options.page, options.perPage);
         const limit = options.limit ? Math.max(1, parseInt(options.limit, 10) || 1) : undefined;
 
-        let allDossiers: LabeledDossierListItem[];
+        let matched: LabeledDossierListItem[];
         try {
-          const result = await multiRegistryList({
-            category: options.category,
+          const result = await multiRegistrySearch(query, {
             page: 1,
             perPage: 100,
           });
@@ -53,7 +52,15 @@ export function registerSearchCommand(program: Command): void {
             printRegistryErrors(result.errors, 'warning');
           }
 
-          allDossiers = result.dossiers;
+          matched = result.dossiers;
+
+          if (options.category) {
+            const cat = options.category.toLowerCase();
+            matched = matched.filter((d) => {
+              const cats = Array.isArray(d.category) ? d.category : [d.category || ''];
+              return cats.some((c) => String(c).toLowerCase().includes(cat));
+            });
+          }
         } catch (err: unknown) {
           const registryNames = resolveRegistries()
             .map((r) => r.name)
@@ -65,29 +72,13 @@ export function registerSearchCommand(program: Command): void {
           return;
         }
 
-        const queryLower = query.toLowerCase();
-        const terms = queryLower.split(/\s+/).filter(Boolean);
-
-        let matched = allDossiers.filter((d) => {
-          const fields = [
-            d.name || '',
-            d.title || '',
-            d.description || d.objective || '',
-            ...(Array.isArray(d.category) ? d.category : [d.category || '']),
-            ...(d.tags || []),
-          ]
-            .map((f) => String(f).toLowerCase())
-            .join(' ');
-
-          return terms.every((term) => fields.includes(term));
-        });
-
         // Content search: fetch body and filter by content match
         let contentMatches: Map<string, string> | null = null;
         if (options.content) {
           const registries = resolveRegistries();
           const CONCURRENCY = 5;
           contentMatches = new Map();
+          const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
 
           // Process in batches for concurrency limiting
           for (let i = 0; i < matched.length; i += CONCURRENCY) {

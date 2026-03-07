@@ -12,6 +12,7 @@ import type {
   DossierInfo,
   DossierListItem,
   ListDossiersOptions,
+  SearchOptions,
 } from './registry-client';
 import { getClientForRegistry } from './registry-client';
 
@@ -101,37 +102,46 @@ async function multiRegistryListFrom(
 }
 
 /**
- * Search dossiers across all registries.
- * Fetches all dossiers and filters client-side (same as single-registry search).
+ * Search dossiers across all registries using server-side search.
+ * Each registry filters results server-side; this function merges them.
  */
 async function multiRegistrySearch(
   query: string,
-  options: ListDossiersOptions = {}
+  options: SearchOptions = {}
 ): Promise<MultiRegistrySearchResult> {
-  const listResult = await multiRegistryList({ ...options, page: 1, perPage: 100 });
+  const registries = resolveRegistries();
 
-  const queryLower = query.toLowerCase();
-  const terms = queryLower.split(/\s+/).filter(Boolean);
+  const results = await Promise.allSettled(
+    registries.map(async (reg) => {
+      const token = getTokenForRegistry(reg.name);
+      const client = getClientForRegistry(reg.url, token);
+      const result = await client.searchDossiers(query, options);
+      const dossiers = (result.dossiers || []).map((d) => ({
+        ...d,
+        _registry: reg.name,
+      }));
+      return { dossiers, total: result.total || dossiers.length };
+    })
+  );
 
-  const matched = listResult.dossiers.filter((d) => {
-    const fields = [
-      d.name || '',
-      d.title || '',
-      d.description || d.objective || '',
-      ...(Array.isArray(d.category) ? d.category : [d.category || '']),
-      ...(d.tags || []),
-    ]
-      .map((f) => String(f).toLowerCase())
-      .join(' ');
+  const allDossiers: LabeledDossierListItem[] = [];
+  const errors: Array<{ registry: string; error: string }> = [];
+  let total = 0;
 
-    return terms.every((term) => fields.includes(term) || fields.indexOf(term) !== -1);
-  });
+  for (let i = 0; i < results.length; i++) {
+    const result = results[i];
+    if (result.status === 'fulfilled') {
+      allDossiers.push(...result.value.dossiers);
+      total += result.value.total;
+    } else {
+      errors.push({
+        registry: registries[i].name,
+        error: result.reason?.message || String(result.reason),
+      });
+    }
+  }
 
-  return {
-    dossiers: matched,
-    total: matched.length,
-    errors: listResult.errors,
-  };
+  return { dossiers: allDossiers, total, errors };
 }
 
 /**
