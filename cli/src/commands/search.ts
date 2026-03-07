@@ -1,7 +1,12 @@
 import type { Command } from 'commander';
 import { resolveRegistries } from '../config';
 import { loadCredentials } from '../credentials';
-import { parsePaginationParams, printRegistryErrors } from '../helpers';
+import {
+  formatDossierFields,
+  logPaginationInfo,
+  parsePaginationParams,
+  printRegistryErrors,
+} from '../helpers';
 import type { LabeledDossierListItem } from '../multi-registry';
 import { multiRegistryList } from '../multi-registry';
 import { getClientForRegistry } from '../registry-client';
@@ -74,7 +79,7 @@ export function registerSearchCommand(program: Command): void {
             .map((f) => String(f).toLowerCase())
             .join(' ');
 
-          return terms.every((term) => fields.includes(term) || fields.indexOf(term) !== -1);
+          return terms.every((term) => fields.includes(term));
         });
 
         // Content search: fetch body and filter by content match
@@ -142,11 +147,7 @@ export function registerSearchCommand(program: Command): void {
         console.log(`\n🔍 Found ${total} dossier(s) matching "${query}":\n`);
 
         for (const d of dossiers) {
-          const name = d.name || '';
-          const version = d.version || '';
-          const title = d.title || '';
-          const category = Array.isArray(d.category) ? d.category.join(', ') : d.category || '';
-          const description = d.description || d.objective || '';
+          const { name, version, title, category, description } = formatDossierFields(d);
           const label = showRegistryLabel ? ` [${d._registry}]` : '';
 
           console.log(`  ${name} (v${version})${category ? `  [${category}]` : ''}${label}`);
@@ -165,14 +166,7 @@ export function registerSearchCommand(program: Command): void {
           console.log('');
         }
 
-        const totalPages = Math.ceil(total / perPage);
-        if (totalPages > 1) {
-          console.log(`Page ${page}/${totalPages} (${perPage} per page)`);
-          if (page < totalPages) {
-            console.log(`Use --page ${page + 1} to see more results`);
-          }
-          console.log('');
-        }
+        logPaginationInfo(total, page, perPage);
       }
     );
 }

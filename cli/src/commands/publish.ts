@@ -1,10 +1,10 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import {
   type DossierFrontmatter,
   parseDossierContent,
+  sha256Hex,
   validateFrontmatter,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
@@ -69,7 +69,7 @@ export function registerPublishCommand(program: Command): void {
 
         const existingHash = frontmatter.checksum?.hash;
         if (existingHash) {
-          const actualHash = crypto.createHash('sha256').update(body, 'utf8').digest('hex');
+          const actualHash = sha256Hex(body);
           if (existingHash !== actualHash) {
             console.error(
               '\n❌ Checksum mismatch - content has been modified without updating checksum'

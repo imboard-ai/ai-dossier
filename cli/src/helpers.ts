@@ -647,3 +647,39 @@ export function printRegistryErrors(
     }
   }
 }
+
+/**
+ * Extract and format common dossier display fields from a registry list item.
+ * Used by search and list commands to normalize metadata for display.
+ */
+export function formatDossierFields(d: {
+  name?: string;
+  version?: string;
+  title?: string;
+  category?: string | string[];
+  description?: string;
+  objective?: string;
+}): { name: string; version: string; title: string; category: string; description: string } {
+  return {
+    name: d.name || '',
+    version: d.version || '',
+    title: d.title || '',
+    category: Array.isArray(d.category) ? d.category.join(', ') : d.category || '',
+    description: d.description || d.objective || '',
+  };
+}
+
+/**
+ * Log pagination info to the console.
+ * Used by search and list commands when results span multiple pages.
+ */
+export function logPaginationInfo(total: number, page: number, perPage: number): void {
+  const totalPages = Math.ceil(total / perPage);
+  if (totalPages > 1) {
+    console.log(`\nPage ${page}/${totalPages} (${perPage} per page)`);
+    if (page < totalPages) {
+      console.log(`Use --page ${page + 1} to see more results`);
+    }
+    console.log('');
+  }
+}

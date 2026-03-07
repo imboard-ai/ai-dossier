@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 import { resolveRegistries } from '../config';
-import { printRegistryErrors } from '../helpers';
+import { formatDossierFields, printRegistryErrors } from '../helpers';
 import { multiRegistryGetDossier } from '../multi-registry';
 import type { DossierInfo } from '../registry-client';
 import { parseNameVersion } from '../registry-client';
@@ -45,14 +45,15 @@ export function registerGetCommand(program: Command): void {
       const label = showLabel && meta._registry ? ` [${meta._registry}]` : '';
       console.log(`\n📄 Dossier: ${meta.name || dossierName}${label}\n`);
 
+      const formatted = formatDossierFields(meta);
       const fields: [string, string][] = [
-        ['Name', meta.name || ''],
-        ['Title', meta.title || ''],
-        ['Version', meta.version || ''],
+        ['Name', formatted.name],
+        ['Title', formatted.title],
+        ['Version', formatted.version],
         ['Status', meta.status || ''],
-        ['Category', Array.isArray(meta.category) ? meta.category.join(', ') : meta.category || ''],
+        ['Category', formatted.category],
         ['Risk Level', meta.risk_level || ''],
-        ['Objective', meta.objective || meta.description || ''],
+        ['Objective', formatted.description],
       ];
 
       for (const [label, value] of fields) {

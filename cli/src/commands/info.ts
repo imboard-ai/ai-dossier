@@ -1,7 +1,6 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { parseDossierContent } from '@ai-dossier/core';
+import { parseDossierContent, sha256Hex } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { resolveRegistries } from '../config';
 import { printRegistryErrors } from '../helpers';
@@ -114,7 +113,7 @@ export function registerInfoCommand(program: Command): void {
       if (body !== null) {
         const checksumInfo = fm.checksum;
         if (checksumInfo?.hash) {
-          const actual = crypto.createHash('sha256').update(body, 'utf8').digest('hex');
+          const actual = sha256Hex(body);
           const valid = actual === checksumInfo.hash;
           console.log(
             `   Checksum:  ${checksumInfo.hash.slice(0, 16)}... ${valid ? '✅ valid' : '❌ mismatch'}`

@@ -1,7 +1,7 @@
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { sha256Hex } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { printRegistryErrors, safeDossierPath } from '../helpers';
 import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
@@ -56,7 +56,7 @@ export function registerPullCommand(program: Command): void {
           const digest = result.digest;
 
           if (digest) {
-            const actual = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
+            const actual = sha256Hex(content);
             if (actual !== digest) {
               console.error(`❌ ${dossierName}@${version}: checksum mismatch after download`);
               continue;
