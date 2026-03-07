@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   badRequest,
   generateErrorRef,
@@ -14,12 +14,20 @@ import {
 import type { VercelRequest } from '../lib/types';
 import { createViMockRes } from './helpers/mocks';
 
+beforeEach(() => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('methodNotAllowed', () => {
   const mockReq = { method: 'POST', url: '/api/v1/test', headers: {} } as unknown as VercelRequest;
 
   it('returns 405 with single method', () => {
     const res = createViMockRes();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     methodNotAllowed(mockReq, res, 'GET');
 
@@ -27,36 +35,31 @@ describe('methodNotAllowed', () => {
     expect(res.json).toHaveBeenCalledWith({
       error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET is allowed' },
     });
-    vi.restoreAllMocks();
   });
 
   it('returns 405 with two methods', () => {
     const res = createViMockRes();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     methodNotAllowed(mockReq, res, 'GET', 'POST');
 
     expect(res.json).toHaveBeenCalledWith({
       error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET and POST are allowed' },
     });
-    vi.restoreAllMocks();
   });
 
   it('returns 405 with three methods using Oxford comma', () => {
     const res = createViMockRes();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     methodNotAllowed(mockReq, res, 'GET', 'HEAD', 'DELETE');
 
     expect(res.json).toHaveBeenCalledWith({
       error: { code: 'METHOD_NOT_ALLOWED', message: 'Only GET, HEAD, and DELETE are allowed' },
     });
-    vi.restoreAllMocks();
   });
 
   it('logs rejected method and path (without query string)', () => {
     const res = createViMockRes();
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.mocked(console.warn);
     const req = {
       method: 'DELETE',
       url: '/api/v1/search?q=sensitive',
@@ -73,15 +76,13 @@ describe('methodNotAllowed', () => {
     expect(loggedJson.method).toBe('DELETE');
     expect(loggedJson.path).toBe('/api/v1/search');
     expect(loggedJson.allowed).toEqual(['GET']);
-
-    warnSpy.mockRestore();
   });
 });
 
 describe('serverError', () => {
   it('returns 502 with request_id and logs structured JSON', () => {
     const res = createViMockRes();
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const errorSpy = vi.mocked(console.error);
 
     serverError(res, {
       operation: 'dossier.list',
@@ -99,7 +100,7 @@ describe('serverError', () => {
     );
     expect(jsonArg.error.error_type).toBeUndefined();
 
-    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    const loggedJson = JSON.parse(errorSpy.mock.calls[0][0] as string);
     expect(loggedJson.level).toBe('error');
     expect(loggedJson.context).toBe('responses');
     expect(loggedJson.message).toBe('dossier.list');
@@ -107,13 +108,10 @@ describe('serverError', () => {
     expect(loggedJson.errorType).toBe('Error');
     expect(loggedJson.error).toBe('upstream timeout');
     expect(loggedJson.stack).toBeDefined();
-
-    consoleSpy.mockRestore();
   });
 
   it('supports custom status code', () => {
     const res = createViMockRes();
-    vi.spyOn(console, 'error').mockImplementation(() => {});
 
     serverError(res, {
       operation: 'test',
@@ -124,12 +122,11 @@ describe('serverError', () => {
     });
 
     expect(res.status).toHaveBeenCalledWith(500);
-    vi.restoreAllMocks();
   });
 
   it('uses provided requestId instead of generating one', () => {
     const res = createViMockRes();
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const errorSpy = vi.mocked(console.error);
 
     serverError(res, {
       operation: 'test',
@@ -142,15 +139,13 @@ describe('serverError', () => {
     const jsonArg = (res.json as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(jsonArg.error.request_id).toBe('my-request-id-123');
 
-    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    const loggedJson = JSON.parse(errorSpy.mock.calls[0][0] as string);
     expect(loggedJson.requestId).toBe('my-request-id-123');
-
-    consoleSpy.mockRestore();
   });
 
   it('includes context fields in log output', () => {
     const res = createViMockRes();
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const errorSpy = vi.mocked(console.error);
 
     serverError(res, {
       operation: 'dossier.publish',
@@ -161,17 +156,15 @@ describe('serverError', () => {
       context: { namespace: 'my-org', path: 'my-org/my-dossier' },
     });
 
-    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    const loggedJson = JSON.parse(errorSpy.mock.calls[0][0] as string);
     expect(loggedJson.namespace).toBe('my-org');
     expect(loggedJson.path).toBe('my-org/my-dossier');
     expect(loggedJson.requestId).toBe('req-123');
-
-    consoleSpy.mockRestore();
   });
 
   it('includes errorType in log but not in response', () => {
     const res = createViMockRes();
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const errorSpy = vi.mocked(console.error);
 
     serverError(res, {
       operation: 'test',
@@ -183,18 +176,16 @@ describe('serverError', () => {
     const jsonArg = (res.json as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(jsonArg.error.error_type).toBeUndefined();
 
-    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    const loggedJson = JSON.parse(errorSpy.mock.calls[0][0] as string);
     // normalizeError wraps strings into Error objects, so errorType is always 'Error'
     expect(loggedJson.errorType).toBe('Error');
-
-    consoleSpy.mockRestore();
   });
 });
 
 describe('invalidPathError', () => {
   it('returns 400 with INVALID_PATH code and logs warning', () => {
     const res = createViMockRes();
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.mocked(console.warn);
 
     invalidPathError(res, 'req-abc', 'my-org/evil-dossier');
 
@@ -212,15 +203,13 @@ describe('invalidPathError', () => {
     expect(loggedJson.message).toBe('Path traversal detected');
     expect(loggedJson.requestId).toBe('req-abc');
     expect(loggedJson.identifier).toBe('my-org/evil-dossier');
-
-    warnSpy.mockRestore();
   });
 });
 
 describe('invalidNamespaceError', () => {
   it('returns 400 with INVALID_NAMESPACE code and logs warning', () => {
     const res = createViMockRes();
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.mocked(console.warn);
 
     invalidNamespaceError(res, 'req-123', 'Namespace is required');
 
@@ -234,13 +223,10 @@ describe('invalidNamespaceError', () => {
     expect(loggedJson.message).toBe('Invalid namespace');
     expect(loggedJson.requestId).toBe('req-123');
     expect(loggedJson.detail).toBe('Namespace is required');
-
-    warnSpy.mockRestore();
   });
 
   it('passes through the error message', () => {
     const res = createViMockRes();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     invalidNamespaceError(res, 'req-456', 'Invalid namespace segment: UPPER');
 
@@ -251,8 +237,6 @@ describe('invalidNamespaceError', () => {
         request_id: 'req-456',
       },
     });
-
-    vi.restoreAllMocks();
   });
 });
 
@@ -373,23 +357,21 @@ describe('getRequestId', () => {
   });
 
   it('rejects request IDs longer than 64 characters and logs warning', () => {
-    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.mocked(console.warn);
     const req = { headers: { 'x-request-id': 'a'.repeat(65) } } as never;
     const id = getRequestId(req);
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    const loggedJson = JSON.parse(warnSpy.mock.calls[0][0] as string);
     expect(loggedJson.message).toBe('Rejected invalid X-Request-Id');
-    consoleSpy.mockRestore();
   });
 
   it('rejects request IDs with invalid characters and logs warning', () => {
-    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = vi.mocked(console.warn);
     const req = { headers: { 'x-request-id': '<script>alert(1)</script>' } } as never;
     const id = getRequestId(req);
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
-    const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
+    const loggedJson = JSON.parse(warnSpy.mock.calls[0][0] as string);
     expect(loggedJson.message).toBe('Rejected invalid X-Request-Id');
-    consoleSpy.mockRestore();
   });
 
   it('accepts alphanumeric IDs with hyphens', () => {

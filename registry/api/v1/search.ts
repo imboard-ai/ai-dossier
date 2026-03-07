@@ -42,25 +42,22 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   );
 
   try {
-    const allDossiers = await fetchManifestDossiers();
+    const raw = await fetchManifestDossiers();
+    const allDossiers = raw.map(normalizeDossier);
 
     const query = q.toLowerCase();
     const matched = allDossiers.filter((d) => {
-      if (d.name?.toLowerCase().includes(query)) return true;
-      if (d.title?.toLowerCase().includes(query)) return true;
-      if (typeof d.description === 'string' && d.description.toLowerCase().includes(query))
-        return true;
-      if (Array.isArray(d.category) && d.category.some((c) => c.toLowerCase().includes(query)))
-        return true;
-      if (Array.isArray(d.tags) && d.tags.some((t) => t.toLowerCase().includes(query))) return true;
+      if (d.name.toLowerCase().includes(query)) return true;
+      if (d.title.toLowerCase().includes(query)) return true;
+      if (d.description?.toLowerCase().includes(query)) return true;
+      if (d.category?.some((c) => c.toLowerCase().includes(query))) return true;
+      if (d.tags.some((t) => t.toLowerCase().includes(query))) return true;
       return false;
     });
 
     const total = matched.length;
     const start = (page - 1) * perPage;
-    const paged = matched.slice(start, start + perPage);
-
-    const dossiers = paged.map(normalizeDossier);
+    const dossiers = matched.slice(start, start + perPage);
 
     log.info('Search completed', { requestId, query: q, total, page, perPage });
 

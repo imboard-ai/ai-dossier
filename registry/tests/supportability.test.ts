@@ -277,10 +277,24 @@ describe('search handler logging', () => {
 
     vi.doMock('../lib/manifest', () => ({
       fetchManifestDossiers: vi.fn().mockResolvedValue([
-        { name: 'test-dossier', title: 'Test Dossier', description: 'A test' },
-        { name: 'other-dossier', title: 'Other', description: 'Another' },
+        {
+          name: 'test-dossier',
+          title: 'Test Dossier',
+          description: 'A test',
+          category: [],
+          tags: [],
+          path: 'test',
+        },
+        {
+          name: 'other-dossier',
+          title: 'Other',
+          description: 'Another',
+          category: [],
+          tags: [],
+          path: 'other',
+        },
       ]),
-      normalizeDossier: (d: any) => d,
+      normalizeDossier: (d: any) => ({ ...d, url: `https://cdn.example.com/${d.path}` }),
     }));
 
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -288,39 +302,18 @@ describe('search handler logging', () => {
     const handlerModule = await import('../api/v1/search');
     const handler = handlerModule.default;
 
-    const req = {
+    const req = createMockReq({
       method: 'GET',
       headers: { 'x-request-id': 'req-search-123' },
       query: { q: 'test' },
-    } as any;
+    });
+    const { res, getStatus } = createMockRes();
 
-    let statusCode = 0;
-    let body: any = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: () => {},
-    } as any;
+    await handler(req as any, res as any);
 
-    await handler(req, res);
+    expect(getStatus()).toBe(200);
 
-    expect(statusCode).toBe(200);
-
-    const searchLog = consoleSpy.mock.calls
-      .map((call) => {
-        try {
-          return JSON.parse(call[0] as string);
-        } catch {
-          return null;
-        }
-      })
-      .find((entry) => entry?.message === 'Search completed');
+    const searchLog = findLogEntry(consoleSpy, 'Search completed');
 
     expect(searchLog).toBeDefined();
     expect(searchLog).toMatchObject({
