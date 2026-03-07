@@ -1,13 +1,14 @@
 {
   "name": "@ai-dossier/mcp-server",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "MCP server for dossier automation standard - enables LLMs to discover, verify, and execute dossiers",
   "main": "dist/index.js",
   "bin": {
     "dossier-mcp-server": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run"
@@ -35,8 +36,10 @@
     "node": ">=20.0.0"
   },
   "type": "commonjs",
+  "mcpName": "io.github.imboard-ai/dossier",
   "files": [
-    "dist/"
+    "dist/",
+    "LICENSE"
   ],
   "publishConfig": {
     "access": "public",
