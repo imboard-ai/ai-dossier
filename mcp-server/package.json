@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/mcp-server",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "MCP server for dossier automation standard - enables LLMs to discover, verify, and execute dossiers",
   "main": "dist/index.js",
   "bin": {
