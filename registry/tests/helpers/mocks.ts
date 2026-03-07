@@ -75,6 +75,25 @@ export function findLogEntry(
     .find((entry): entry is Record<string, unknown> => entry?.message === messageValue);
 }
 
+export function jwtVerifyFactory(
+  overrides: Partial<{ sub: string; email: string | null; orgs: string[] }> = {}
+) {
+  return () => ({
+    default: {
+      verify: () => ({ sub: 'testuser', email: null, orgs: ['testorg'], ...overrides }),
+    },
+  });
+}
+
+export function authConfigFactory(overrides: Record<string, unknown> = {}) {
+  return () => ({
+    default: {
+      auth: { jwt: { secret: 'test-secret' } },
+      ...overrides,
+    },
+  });
+}
+
 type ViMockRes = VercelResponse & {
   status: ReturnType<typeof vi.fn>;
   json: ReturnType<typeof vi.fn>;

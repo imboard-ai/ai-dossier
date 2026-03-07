@@ -2,23 +2,23 @@ import crypto from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { authenticateRequest } from '../lib/auth';
 import { OAUTH_STATE_COOKIE } from '../lib/constants';
-import { createMockReq, createMockRes, findLogEntry } from './helpers/mocks';
+import {
+  authConfigFactory,
+  createMockReq,
+  createMockRes,
+  findLogEntry,
+  jwtVerifyFactory,
+} from './helpers/mocks';
 
 describe('successful mutation logging', () => {
   it('logs successful publish with structured data', async () => {
     vi.resetModules();
 
-    vi.doMock('jsonwebtoken', () => ({
-      default: {
-        verify: () => ({ sub: 'testuser', email: null, orgs: ['testorg'] }),
-      },
-    }));
-    vi.doMock('../lib/config', () => ({
-      default: {
-        auth: { jwt: { secret: 'test-secret' } },
-        getCdnUrl: (path: string) => `https://cdn.example.com/${path}`,
-      },
-    }));
+    vi.doMock('jsonwebtoken', jwtVerifyFactory());
+    vi.doMock(
+      '../lib/config',
+      authConfigFactory({ getCdnUrl: (path: string) => `https://cdn.example.com/${path}` })
+    );
     vi.doMock('../lib/github', () => ({
       publishDossier: vi.fn().mockResolvedValue(undefined),
       PathTraversalError: class extends Error {},
@@ -83,16 +83,8 @@ describe('successful mutation logging', () => {
   it('logs successful delete with structured data', async () => {
     vi.resetModules();
 
-    vi.doMock('jsonwebtoken', () => ({
-      default: {
-        verify: () => ({ sub: 'testuser', email: null, orgs: ['testorg'] }),
-      },
-    }));
-    vi.doMock('../lib/config', () => ({
-      default: {
-        auth: { jwt: { secret: 'test-secret' } },
-      },
-    }));
+    vi.doMock('jsonwebtoken', jwtVerifyFactory());
+    vi.doMock('../lib/config', authConfigFactory());
     vi.doMock('../lib/github', () => ({
       deleteDossier: vi.fn().mockResolvedValue({ found: true, versionMismatch: false }),
       getManifest: vi.fn(),
@@ -141,16 +133,8 @@ describe('auth error response includes namespace', () => {
   it('403 response body includes namespace field', async () => {
     vi.resetModules();
 
-    vi.doMock('jsonwebtoken', () => ({
-      default: {
-        verify: () => ({ sub: 'testuser', email: null, orgs: [] }),
-      },
-    }));
-    vi.doMock('../lib/config', () => ({
-      default: {
-        auth: { jwt: { secret: 'test-secret' } },
-      },
-    }));
+    vi.doMock('jsonwebtoken', jwtVerifyFactory({ orgs: [] }));
+    vi.doMock('../lib/config', authConfigFactory());
     vi.doMock('../lib/dossier', () => ({
       getRootNamespace: (ns: string) => ns.split('/')[0],
     }));
@@ -280,7 +264,7 @@ describe('search handler logging', () => {
         { name: 'test-dossier', title: 'Test Dossier', description: 'A test' },
         { name: 'other-dossier', title: 'Other', description: 'Another' },
       ]),
-      normalizeDossier: (d: any) => d,
+      normalizeDossier: (d: unknown) => d,
     }));
 
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -288,39 +272,19 @@ describe('search handler logging', () => {
     const handlerModule = await import('../api/v1/search');
     const handler = handlerModule.default;
 
-    const req = {
+    const req = createMockReq({
       method: 'GET',
       headers: { 'x-request-id': 'req-search-123' },
       query: { q: 'test' },
-    } as any;
+    });
 
-    let statusCode = 0;
-    let body: any = {};
-    const res = {
-      status: (code: number) => {
-        statusCode = code;
-        return {
-          json: (b: any) => {
-            body = b;
-          },
-        };
-      },
-      setHeader: () => {},
-    } as any;
+    const { res, getStatus } = createMockRes();
 
-    await handler(req, res);
+    await handler(req, res as any);
 
-    expect(statusCode).toBe(200);
+    expect(getStatus()).toBe(200);
 
-    const searchLog = consoleSpy.mock.calls
-      .map((call) => {
-        try {
-          return JSON.parse(call[0] as string);
-        } catch {
-          return null;
-        }
-      })
-      .find((entry) => entry?.message === 'Search completed');
+    const searchLog = findLogEntry(consoleSpy, 'Search completed');
 
     expect(searchLog).toBeDefined();
     expect(searchLog).toMatchObject({
@@ -351,6 +315,7 @@ describe('auth failure logging', () => {
     await authenticateRequest(req, res as any);
 
     expect(getStatus()).toBe(401);
+    expect(consoleSpy).toHaveBeenCalled();
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
     expect(loggedJson).toMatchObject({
       level: 'warn',
@@ -371,11 +336,7 @@ describe('auth failure logging', () => {
         },
       },
     }));
-    vi.doMock('../lib/config', () => ({
-      default: {
-        auth: { jwt: { secret: 'test-secret' } },
-      },
-    }));
+    vi.doMock('../lib/config', authConfigFactory());
 
     const authModule = await import('../lib/auth');
     const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -391,6 +352,7 @@ describe('auth failure logging', () => {
     await authModule.authenticateRequest(req, res as any);
 
     expect(getStatus()).toBe(401);
+    expect(consoleSpy).toHaveBeenCalled();
     const loggedJson = JSON.parse(consoleSpy.mock.calls[0][0] as string);
     expect(loggedJson).toMatchObject({
       level: 'warn',
