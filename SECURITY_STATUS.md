@@ -633,7 +633,7 @@ We commit to:
 
 - **GitHub**: Watch the repository for updates
 - **Discussions**: Join community conversations
-- **Newsletter**: [Coming soon] Security updates
+- **Releases**: Watch the [GitHub releases](https://github.com/imboard-ai/ai-dossier/releases) for security updates
 
 ---
 

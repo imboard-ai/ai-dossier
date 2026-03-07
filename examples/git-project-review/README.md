@@ -154,7 +154,6 @@ Variable: "Does the schema support referencing other dossier files?"
 - Identify confusing areas before diving in
 
 ### For Security/Audit
-- *(Coming soon: security-scan.dossier)*
 - Find common vulnerability patterns
 - Check input validation
 
