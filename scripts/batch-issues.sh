@@ -344,18 +344,19 @@ for issue in "${ISSUES[@]}"; do
   # Build agent prompt — add pool hint if --pool is active
   AGENT_PROMPT="full cycle issue #${issue}"
   if [[ "$USE_POOL" == "true" ]]; then
-    POOL_STATE_PATH="$(git rev-parse --show-toplevel)/../worktrees/.pool-state.json"
-    AGENT_PROMPT="full cycle issue #${issue}. If a worktree pool exists at ${POOL_STATE_PATH}, use 'npx worktree-pool claim --issue ${issue} --branch <branch>' instead of creating a new worktree."
+    AGENT_PROMPT="full cycle issue #${issue}. Use 'npx worktree-pool claim --issue ${issue} --branch <branch>' to claim a pre-warmed worktree instead of creating a new one."
   fi
 
   if [[ "$DRY_RUN" == "true" ]]; then
-    log "[dry-run] #${issue}: echo \"${AGENT_PROMPT}\" | claude -p --model ${MODEL} --allowedTools Bash,Read,Edit,Write,Glob,Grep,Agent"
+    log "[dry-run] #${issue}: claude -p --model ${MODEL} --allowedTools Bash,Read,Edit,Write,Glob,Grep,Agent"
   else
     log "[starting] #${issue} -> ${LOG_FILE}"
     show_start_trace "$issue"
-    nohup bash -c "echo '${AGENT_PROMPT}' | claude -p \
+    PROMPT_FILE="$(mktemp)"
+    printf '%s' "${AGENT_PROMPT}" > "$PROMPT_FILE"
+    nohup bash -c "cat '$PROMPT_FILE' | claude -p \
       --model '${MODEL}' \
-      --allowedTools 'Bash,Read,Edit,Write,Glob,Grep,Agent'" \
+      --allowedTools 'Bash,Read,Edit,Write,Glob,Grep,Agent'; rm -f '$PROMPT_FILE'" \
       > "$LOG_FILE" 2>&1 &
     PID=$!
     PIDS+=("$PID")
