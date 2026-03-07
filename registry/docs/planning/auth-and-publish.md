@@ -344,15 +344,8 @@ Returned when the dossier name fails validation:
 | `INVALID_PATH` | Path traversal detected |
 
 **Response (403 Forbidden):**
-```json
-{
-  "error": {
-    "code": "FORBIDDEN",
-    "message": "Cannot delete from namespace 'other-org/some-dossier'",
-    "namespace": "other-org/some-dossier"
-  }
-}
-```
+
+Same `FORBIDDEN` response as `POST /api/v1/dossiers` above.
 
 **Response (404 Not Found):**
 ```json
