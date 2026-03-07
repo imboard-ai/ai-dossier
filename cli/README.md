@@ -1,4 +1,8 @@
-# Dossier CLI - Security Verification Tool
+# @ai-dossier/cli
+
+[![npm version](https://img.shields.io/npm/v/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
+[![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
 **Enforce cryptographic verification before executing dossiers.**
 
@@ -687,11 +691,18 @@ Exit 0 (safe) or 1 (unsafe)
 - ✅ CLI parity with dossier-tools
 - ✅ `@ai-dossier` npm scope and CI/CD publishing
 
-### v0.4.0 (Current)
+### v0.4.0
 - ✅ Unified dossier parser across core/cli/mcp
 - ✅ JSON output mode (`--json` flag on commands)
 - ✅ Registry integration (publish, remove, install-skill)
 - ✅ Non-TTY stdin detection
+
+### v0.5.0 (Current)
+- ✅ Multi-registry support with parallel resolution
+- ✅ `dossier create` command with meta-dossier templates
+- ✅ `dossier export` and `dossier pull` commands
+- ✅ Agent discovery (`--agent` flag)
+- ✅ Enhanced auth: browser OAuth and env-based tokens
 
 ### v1.0.0 (Stable)
 - ⏳ Complete signature verification

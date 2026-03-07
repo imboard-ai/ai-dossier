@@ -1,5 +1,9 @@
 # @ai-dossier/core
 
+[![npm version](https://img.shields.io/npm/v/@ai-dossier/core)](https://www.npmjs.com/package/@ai-dossier/core)
+[![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/core)](https://www.npmjs.com/package/@ai-dossier/core)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
+
 Core parsing, verification, and linting logic for the [Dossier](https://github.com/imboard-ai/ai-dossier) automation standard.
 
 ## Installation
@@ -8,7 +12,7 @@ Core parsing, verification, and linting logic for the [Dossier](https://github.c
 npm install @ai-dossier/core
 ```
 
-Requires Node.js >= 18.0.0.
+Requires Node.js >= 20.0.0.
 
 ## Quick Start
 
@@ -225,6 +229,16 @@ import type {
   FormatOptions,        // { indent, sortKeys, updateChecksum }
   FormatResult,         // { formatted, changed }
 } from '@ai-dossier/core';
+```
+
+## Development
+
+Part of the [ai-dossier](https://github.com/imboard-ai/ai-dossier) monorepo.
+
+```bash
+npm run build -w packages/core    # build
+npm run test -w packages/core     # test
+make build-core                   # build via Makefile
 ```
 
 ## License
