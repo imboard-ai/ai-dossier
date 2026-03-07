@@ -9,7 +9,6 @@ import { fetchManifestDossiers, normalizeDossier } from '../../../lib/manifest';
 import {
   badRequest,
   getRequestId,
-  invalidNamespaceError,
   invalidPathError,
   jsonError,
   methodNotAllowed,
@@ -67,84 +66,89 @@ async function handleList(_req: VercelRequest, res: VercelResponse, requestId: s
 
 export type PublishInput = { namespace: string; content: string; changelog: string | undefined };
 
-/** Validates the publish request body and headers. Returns validated fields on success, or `null` after sending an error response. */
-export function validatePublishInput(
-  req: VercelRequest,
-  res: VercelResponse,
-  requestId: string
-): PublishInput | null {
+export type ValidationSuccess = { ok: true; data: PublishInput };
+export type ValidationFailure = { ok: false; status: number; code: string; message: string };
+export type ValidationResult = ValidationSuccess | ValidationFailure;
+
+/** Pure validation: returns a discriminated union instead of writing to `res`. */
+export function validatePublishInput(req: VercelRequest): ValidationResult {
   const contentType = req.headers['content-type'];
   if (!contentType || !contentType.includes('application/json')) {
-    jsonError(
-      res,
-      HTTP_STATUS.UNSUPPORTED_MEDIA_TYPE,
-      'UNSUPPORTED_MEDIA_TYPE',
-      `Content-Type must be application/json, received: ${contentType || '(none)'}`,
-      requestId
-    );
-    return null;
+    return {
+      ok: false,
+      status: HTTP_STATUS.UNSUPPORTED_MEDIA_TYPE,
+      code: 'UNSUPPORTED_MEDIA_TYPE',
+      message: `Content-Type must be application/json, received: ${contentType || '(none)'}`,
+    };
   }
 
   const { namespace, content, changelog } = req.body || {};
 
   if (!namespace || typeof namespace !== 'string') {
-    badRequest(
-      res,
-      'MISSING_FIELD',
-      'Missing required field: namespace (must be a string)',
-      requestId
-    );
-    return null;
+    return {
+      ok: false,
+      status: HTTP_STATUS.BAD_REQUEST,
+      code: 'MISSING_FIELD',
+      message: 'Missing required field: namespace (must be a string)',
+    };
   }
 
   if (!content || typeof content !== 'string') {
-    badRequest(
-      res,
-      'MISSING_FIELD',
-      'Missing required field: content (must be a string)',
-      requestId
-    );
-    return null;
+    return {
+      ok: false,
+      status: HTTP_STATUS.BAD_REQUEST,
+      code: 'MISSING_FIELD',
+      message: 'Missing required field: content (must be a string)',
+    };
   }
 
   if (changelog !== undefined && typeof changelog !== 'string') {
-    badRequest(res, 'INVALID_FIELD', 'Field changelog must be a string', requestId);
-    return null;
+    return {
+      ok: false,
+      status: HTTP_STATUS.BAD_REQUEST,
+      code: 'INVALID_FIELD',
+      message: 'Field changelog must be a string',
+    };
   }
 
   if (typeof changelog === 'string' && changelog.length > MAX_CHANGELOG_LENGTH) {
-    badRequest(
-      res,
-      'CHANGELOG_TOO_LONG',
-      `Changelog exceeds maximum length of ${MAX_CHANGELOG_LENGTH} characters`,
-      requestId
-    );
-    return null;
+    return {
+      ok: false,
+      status: HTTP_STATUS.BAD_REQUEST,
+      code: 'CHANGELOG_TOO_LONG',
+      message: `Changelog exceeds maximum length of ${MAX_CHANGELOG_LENGTH} characters`,
+    };
   }
 
   if (content.length > MAX_CONTENT_SIZE) {
-    jsonError(
-      res,
-      HTTP_STATUS.CONTENT_TOO_LARGE,
-      'CONTENT_TOO_LARGE',
-      `Content exceeds maximum size of ${MAX_CONTENT_SIZE / 1024}KB`,
-      requestId
-    );
-    return null;
+    return {
+      ok: false,
+      status: HTTP_STATUS.CONTENT_TOO_LARGE,
+      code: 'CONTENT_TOO_LARGE',
+      message: `Content exceeds maximum size of ${MAX_CONTENT_SIZE / 1024}KB`,
+    };
   }
 
   const namespaceValidation = dossier.validateNamespace(namespace);
   if (!namespaceValidation.valid) {
-    invalidNamespaceError(res, requestId, namespaceValidation.error);
-    return null;
+    return {
+      ok: false,
+      status: HTTP_STATUS.BAD_REQUEST,
+      code: 'INVALID_NAMESPACE',
+      message: namespaceValidation.error,
+    };
   }
 
-  return { namespace, content, changelog };
+  return { ok: true, data: { namespace, content, changelog } };
 }
 
 async function handlePublish(req: VercelRequest, res: VercelResponse, requestId: string) {
-  const input = validatePublishInput(req, res, requestId);
-  if (!input) return;
+  const result = validatePublishInput(req);
+  if (!result.ok) {
+    return jsonError(res, result.status, result.code, result.message, requestId);
+  }
+
+  const input = result.data;
 
   const { namespace, content, changelog } = input;
 
