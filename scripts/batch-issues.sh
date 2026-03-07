@@ -341,11 +341,7 @@ for issue in "${ISSUES[@]}"; do
 
   LOG_FILE="${LOG_DIR}/${issue}.log"
 
-  # Build agent prompt — add pool hint if --pool is active
   AGENT_PROMPT="full cycle issue #${issue}"
-  if [[ "$USE_POOL" == "true" ]]; then
-    AGENT_PROMPT="full cycle issue #${issue}. Use 'npx worktree-pool claim --issue ${issue} --branch <branch>' to claim a pre-warmed worktree instead of creating a new one."
-  fi
 
   if [[ "$DRY_RUN" == "true" ]]; then
     log "[dry-run] #${issue}: claude -p --model ${MODEL} --allowedTools Bash,Read,Edit,Write,Glob,Grep,Agent"
