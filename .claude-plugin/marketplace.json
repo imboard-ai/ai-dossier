@@ -1,0 +1,36 @@
+{
+  "name": "ai-dossier",
+  "version": "1.0.0",
+  "description": "MCP server for the dossier automation standard — discover, verify, and execute dossiers from Claude Code",
+  "owner": {
+    "name": "imboard-ai",
+    "email": "yuval.dimnik@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "dossier-mcp-server",
+      "description": "MCP server for dossier automation — enables LLMs to discover, verify, and execute dossiers (structured automation recipes)",
+      "version": "1.0.4",
+      "author": {
+        "name": "Yuval Dimnik",
+        "email": "yuval.dimnik@gmail.com"
+      },
+      "source": {
+        "source": "npm",
+        "package": "@ai-dossier/mcp-server"
+      },
+      "homepage": "https://github.com/imboard-ai/ai-dossier",
+      "repository": "https://github.com/imboard-ai/ai-dossier",
+      "license": "AGPL-3.0-only",
+      "category": "automation",
+      "keywords": ["dossier", "automation", "mcp", "verification", "orchestration"],
+      "mcpServers": {
+        "dossier": {
+          "command": "npx",
+          "args": ["-y", "@ai-dossier/mcp-server"]
+        }
+      },
+      "strict": false
+    }
+  ]
+}
