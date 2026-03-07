@@ -148,6 +148,98 @@ safe-run-dossier https://example.com/dossier.ds.md cursor
 
 ---
 
+## Registry Commands
+
+### Search
+
+Search for dossiers across all configured registries:
+
+```bash
+# Basic search
+ai-dossier search "deployment"
+
+# Filter by category
+ai-dossier search "ci" --category devops
+
+# Search dossier body content (-c is short for --content)
+ai-dossier search "docker" -c
+
+# Limit total results
+ai-dossier search "setup" --limit 50
+
+# Paginate results
+ai-dossier search "setup" --page 2 --per-page 10
+
+# JSON output
+ai-dossier search "auth" --json
+```
+
+### List
+
+List dossiers from the registry, a local directory, or a GitHub repo:
+
+```bash
+# List all registry dossiers
+ai-dossier list --source registry
+
+# List with JSON output
+ai-dossier list --source registry --json
+
+# Paginate registry results
+ai-dossier list --source registry --page 2 --per-page 10
+
+# Filter by category (registry mode)
+ai-dossier list --source registry --category security
+
+# List local dossiers (-r is short for --recursive)
+ai-dossier list .
+ai-dossier list ./dossiers -r
+
+# List from a GitHub repo
+ai-dossier list github:owner/repo
+
+# Filter local/GitHub results by risk level or signed status
+ai-dossier list . --risk high
+ai-dossier list . --signed-only
+```
+
+### Pull
+
+Download dossiers from the registry to the local cache (`~/.dossier/cache/`):
+
+```bash
+# Pull a dossier (latest version)
+ai-dossier pull org/my-dossier
+
+# Pull a specific version
+ai-dossier pull org/my-dossier@1.2.0
+
+# Pull multiple dossiers
+ai-dossier pull org/dossier-a org/dossier-b
+
+# Force re-download
+ai-dossier pull org/my-dossier --force
+```
+
+Pulled dossiers are cached locally with checksum verification. Subsequent `pull` calls skip the download if the version is already cached (use `--force` to override).
+
+### Export
+
+Download a dossier and save it to a local file:
+
+```bash
+# Export to default filename (org-name.ds.md)
+ai-dossier export org/my-dossier
+
+# Export to a specific file
+ai-dossier export org/my-dossier -o ./local-copy.ds.md
+
+# Print to stdout (for piping)
+ai-dossier export org/my-dossier --stdout
+```
+
+---
+
 ## Multi-Registry Resolution
 
 The CLI queries all configured registries in parallel when resolving dossiers (e.g., `dossier get`, `dossier run`, `dossier pull`). This uses `Promise.allSettled()` so a single registry failure does not block results from other registries.

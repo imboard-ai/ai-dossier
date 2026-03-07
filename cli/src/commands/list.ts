@@ -15,6 +15,7 @@ import {
 } from '../helpers';
 import { multiRegistryList } from '../multi-registry';
 
+/** Registers the `list` command — lists dossiers from registry, directory, or GitHub repo. */
 export function registerListCommand(program: Command): void {
   program
     .command('list')

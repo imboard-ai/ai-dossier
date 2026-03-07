@@ -5,6 +5,7 @@ import { printRegistryErrors, validateRelativePath } from '../helpers';
 import { multiRegistryGetContent } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
+/** Registers the `export` command — downloads a dossier and saves it to a local file. */
 export function registerExportCommand(program: Command): void {
   program
     .command('export')

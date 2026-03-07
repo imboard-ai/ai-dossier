@@ -7,6 +7,7 @@ import { printRegistryErrors, safeDossierPath } from '../helpers';
 import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
+/** Registers the `pull` command — downloads dossiers from the registry to local cache. */
 export function registerPullCommand(program: Command): void {
   program
     .command('pull')

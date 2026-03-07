@@ -6,6 +6,7 @@ import type { LabeledDossierListItem } from '../multi-registry';
 import { multiRegistryList } from '../multi-registry';
 import { getClientForRegistry } from '../registry-client';
 
+/** Registers the `search` command — searches for dossiers across all configured registries. */
 export function registerSearchCommand(program: Command): void {
   program
     .command('search')

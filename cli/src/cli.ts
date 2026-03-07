@@ -54,6 +54,9 @@ program
     `Quick Start:
   $ ai-dossier init                    Set up ~/.dossier/ directory
   $ ai-dossier search <query>          Find dossiers in the registry
+  $ ai-dossier list --source registry  List all registry dossiers
+  $ ai-dossier pull <name>             Download a dossier to local cache
+  $ ai-dossier export <name>           Save a dossier to a local file
   $ ai-dossier run <file-or-name>      Verify and execute a dossier
   $ ai-dossier create [file]           Create a new dossier
 
