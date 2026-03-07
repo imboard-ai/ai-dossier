@@ -91,7 +91,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     log.warn('OAuth provider error', { error, errorDescription });
     return res
       .status(HTTP_STATUS.BAD_REQUEST)
-      .send(renderErrorPage('Authentication Failed', errorDescription || error));
+      .send(
+        renderErrorPage(
+          'Authentication Failed',
+          'GitHub authentication failed. Please try again or contact support.'
+        )
+      );
   }
 
   if (!validateOAuthState(req, res, state)) {
