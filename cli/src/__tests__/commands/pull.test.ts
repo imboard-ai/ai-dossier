@@ -78,7 +78,7 @@ describe('pull command', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('updated'));
   });
 
-  it('should handle 404 error', async () => {
+  it('should exit 1 when all items fail', async () => {
     vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
       result: null,
       errors: [],
@@ -88,12 +88,14 @@ describe('pull command', () => {
     const program = createTestProgram();
     registerPullCommand(program);
 
-    await program.parseAsync(['node', 'dossier', 'pull', 'missing/dossier']);
+    await expect(
+      program.parseAsync(['node', 'dossier', 'pull', 'missing/dossier'])
+    ).rejects.toThrow();
 
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('not found'));
   });
 
-  it('should log error and continue on cache write failure', async () => {
+  it('should exit 1 on cache write failure when all items fail', async () => {
     vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
       result: { version: '1.0.0', _registry: 'public' },
       errors: [],
@@ -110,14 +112,35 @@ describe('pull command', () => {
     const program = createTestProgram();
     registerPullCommand(program);
 
-    await program.parseAsync(['node', 'dossier', 'pull', 'org/my-dossier']);
+    await expect(
+      program.parseAsync(['node', 'dossier', 'pull', 'org/my-dossier'])
+    ).rejects.toThrow();
 
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('failed to write cache files')
     );
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('EACCES: permission denied')
-    );
+  });
+
+  it('should exit 0 when some items succeed and some fail', async () => {
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockImplementation(async (name: string) => {
+      if (name === 'org/good') {
+        return { result: { version: '1.0.0', _registry: 'public' } as any, errors: [] };
+      }
+      return { result: null, errors: [] };
+    });
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      result: { content: '# Dossier', digest: null, _registry: 'public' },
+      errors: [],
+    });
+    mockedFs.existsSync.mockReturnValue(false);
+
+    const program = createTestProgram();
+    registerPullCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'pull', 'org/good', 'org/missing']);
+
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('downloaded'));
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('not found'));
   });
 
   it('should pull specific version', async () => {

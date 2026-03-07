@@ -18,6 +18,7 @@ export function registerPullCommand(program: Command): void {
     .option('--force', 'Re-download even if already cached')
     .action(async (names: string[], options: { force?: boolean }) => {
       const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
+      let failures = 0;
 
       for (const nameArg of names) {
         let [dossierName, version] = parseNameVersion(nameArg);
@@ -28,6 +29,7 @@ export function registerPullCommand(program: Command): void {
             if (!meta) {
               console.error(`❌ ${nameArg}: not found in any registry`);
               printRegistryErrors(metaErrors);
+              failures++;
               continue;
             }
             version = meta.version || 'latest';
@@ -50,6 +52,7 @@ export function registerPullCommand(program: Command): void {
           if (!result) {
             console.error(`❌ ${nameArg}: not found in any registry`);
             printRegistryErrors(contentErrors);
+            failures++;
             continue;
           }
           const content = result.content;
@@ -59,6 +62,7 @@ export function registerPullCommand(program: Command): void {
             const actual = sha256Hex(content);
             if (actual !== digest) {
               console.error(`❌ ${dossierName}@${version}: checksum mismatch after download`);
+              failures++;
               continue;
             }
           }
@@ -83,6 +87,7 @@ export function registerPullCommand(program: Command): void {
             console.error(
               `❌ ${dossierName}@${version}: failed to write cache files to '${dossierDir}': ${(writeErr as Error).message}`
             );
+            failures++;
             continue;
           }
 
@@ -96,7 +101,12 @@ export function registerPullCommand(program: Command): void {
           } else {
             console.error(`❌ ${nameArg}: ${e.message}`);
           }
+          failures++;
         }
+      }
+
+      if (failures === names.length) {
+        process.exit(1);
       }
     });
 }
