@@ -305,7 +305,7 @@ function destroyWorktree(gitRoot: string, tempBranch: string, absPath: string): 
     fs.rmSync(absPath, { recursive: true, force: true });
   }
   try {
-    git(`branch -D ${tempBranch}`, { cwd: gitRoot });
+    git(`branch -D "${tempBranch}"`, { cwd: gitRoot });
   } catch {
     // branch may not exist
   }
@@ -360,7 +360,7 @@ export async function replenish(
     });
 
     try {
-      git(`branch ${tempBranch} origin/main`, { cwd: gitRoot });
+      git(`branch "${tempBranch}" origin/main`, { cwd: gitRoot });
       git(`worktree add "${absWorktreePath}" ${tempBranch}`, {
         cwd: gitRoot,
       });
@@ -466,7 +466,7 @@ export function claim(issue: number, branch: string): { path: string } | null {
     }
 
     // Create issue branch
-    git(`checkout -b ${branch}`, { cwd: absPath });
+    git(`checkout -b "${branch}"`, { cwd: absPath });
 
     // Rename directory
     if (absPath !== newAbsPath && !fs.existsSync(newAbsPath)) {
@@ -476,7 +476,7 @@ export function claim(issue: number, branch: string): { path: string } | null {
 
     // Delete temp branch
     try {
-      git(`branch -d ${worktree.temp_branch}`, { cwd: gitRoot });
+      git(`branch -d "${worktree.temp_branch}"`, { cwd: gitRoot });
     } catch {
       // may already be deleted
     }
@@ -529,12 +529,12 @@ export function returnWorktree(worktreePath: string): void {
     }));
 
     git('fetch origin', { cwd: absPath });
-    git(`checkout -b ${newTempBranch} origin/main`, { cwd: absPath });
+    git(`checkout -b "${newTempBranch}" origin/main`, { cwd: absPath });
     git('clean -fd', { cwd: absPath });
 
     if (entry.assigned_branch) {
       try {
-        git(`branch -D ${entry.assigned_branch}`, { cwd: absPath });
+        git(`branch -D "${entry.assigned_branch}"`, { cwd: absPath });
       } catch {
         // may not exist
       }
@@ -701,7 +701,7 @@ export function gc(): {
         result: undefined,
       }));
       try {
-        git(`branch -D ${wt.temp_branch}`, { cwd: gitRoot });
+        git(`branch -D "${wt.temp_branch}"`, { cwd: gitRoot });
       } catch {
         // branch may not exist
       }
