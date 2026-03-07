@@ -88,6 +88,8 @@ export function registerSearchCommand(program: Command): void {
           const registries = resolveRegistries();
           const CONCURRENCY = 5;
           contentMatches = new Map();
+          let contentFetchFailures = 0;
+          const matchedCount = matched.length;
 
           // Process in batches for concurrency limiting
           for (let i = 0; i < matched.length; i += CONCURRENCY) {
@@ -113,11 +115,18 @@ export function registerSearchCommand(program: Command): void {
                     contentMatches?.set(d.name, snippet);
                   }
                 } catch (fetchErr: unknown) {
+                  contentFetchFailures++;
                   console.error(
                     `⚠️  Failed to fetch content for '${d.name}' from '${d._registry}': ${(fetchErr as Error).message}`
                   );
                 }
               })
+            );
+          }
+
+          if (contentFetchFailures > 0) {
+            console.error(
+              `\n⚠️  Content search incomplete: ${contentFetchFailures}/${matchedCount} fetches failed. Results may be partial.\n`
             );
           }
 

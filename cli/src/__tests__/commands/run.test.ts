@@ -102,7 +102,7 @@ describe('run command', () => {
       program.parseAsync(['node', 'dossier', 'run', 'missing/dossier'])
     ).rejects.toThrow();
 
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Not found'));
+    expect(helpers.printRegistryNotFoundError).toHaveBeenCalledWith('missing/dossier', []);
   });
 
   it('should exit 2 when no LLM detected', async () => {

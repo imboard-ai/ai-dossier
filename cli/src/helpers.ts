@@ -205,8 +205,9 @@ export function readStdin(timeoutMs = 5000): Promise<string | null> {
       clearTimeout(timer);
       resolve(data || null);
     });
-    process.stdin.on('error', () => {
+    process.stdin.on('error', (err) => {
       clearTimeout(timer);
+      process.stderr.write(`Warning: stdin read error: ${err.message}\n`);
       resolve(null);
     });
     process.stdin.resume();
@@ -646,6 +647,43 @@ export function printRegistryErrors(
       console.error(`   ${e.registry}: ${e.error}`);
     }
   }
+}
+
+const NOT_FOUND_PATTERNS = ['404', 'not found'] as const;
+const TIMEOUT_PATTERNS = ['timeout', 'etimedout', 'econnaborted'] as const;
+
+/**
+ * Classify and print a user-facing error when all registries fail to resolve a dossier.
+ * Distinguishes between 404s, timeouts, mixed failures, and other errors.
+ */
+export function printRegistryNotFoundError(
+  label: string,
+  errors: ReadonlyArray<{ registry: string; error: string }>
+): void {
+  const has404 = errors.some((e) => {
+    const lower = e.error.toLowerCase();
+    return NOT_FOUND_PATTERNS.some((p) => lower.includes(p));
+  });
+  const hasTimeout = errors.some((e) => {
+    const lower = e.error.toLowerCase();
+    return TIMEOUT_PATTERNS.some((p) => lower.includes(p));
+  });
+
+  if (hasTimeout && !has404) {
+    console.error(`\n❌ Could not reach any registry for: ${label}`);
+    console.error('   All registries timed out — check network connectivity');
+  } else if (has404 && hasTimeout) {
+    console.error(`\n❌ Not found: ${label}`);
+    console.error('   Some registries returned 404, others timed out — results may be incomplete');
+  } else if (!has404 && !hasTimeout) {
+    console.error(`\n❌ All registries failed for: ${label}`);
+    console.error('   See individual errors below');
+  } else {
+    console.error(`\n❌ Not found: ${label}`);
+    console.error('   Not a local file and not found in any registry');
+  }
+  printRegistryErrors(errors);
+  console.error('');
 }
 
 /**
