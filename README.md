@@ -40,11 +40,30 @@
 
 ## Try it Now
 
-**Option A — Claude Code with MCP (Recommended)**
+**Option A — Claude Code Plugin (Recommended)**
 
-Add the Dossier MCP server to enable automatic verification:
+```
+/plugin marketplace add imboard-ai/ai-dossier
+/plugin install dossier-mcp-server@ai-dossier
+```
 
-**Step 1**: Create or edit `~/.claude/settings.local.json`
+That's it — the dossier MCP server is now available across all your projects with auto-updates.
+
+---
+
+**Option B — Manual MCP Setup (Claude Code / Claude Desktop)**
+
+If you prefer manual configuration or need project-scoped setup:
+
+```bash
+# Claude Code (global)
+claude mcp add dossier --scope user -- npx @ai-dossier/mcp-server
+
+# Claude Code (project-only)
+claude mcp add dossier -- npx @ai-dossier/mcp-server
+```
+
+Or add to `~/.claude/settings.local.json` / `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
@@ -56,11 +75,9 @@ Add the Dossier MCP server to enable automatic verification:
 }
 ```
 
-**Step 2**: Restart Claude Code to load the MCP server
-
 ---
 
-**Option B — Command-Line Verification (Works Anywhere)**
+**Option C — Command-Line Verification (Works Anywhere)**
 
 Verify dossier security before execution:
 
@@ -73,7 +90,7 @@ npx @ai-dossier/cli verify examples/git-project-review/atomic/readme-reality-che
 
 ---
 
-**Option C — Try with Any LLM (Zero Installation)**
+**Option D — Try with Any LLM (Zero Installation)**
 
 Copy this into any LLM chat (Claude, ChatGPT, Gemini):
 ```markdown

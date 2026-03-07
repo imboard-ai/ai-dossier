@@ -4,7 +4,16 @@ MCP server for the dossier automation standard. Enables LLMs to discover, verify
 
 ## Installation
 
-### Claude Code
+### Claude Code Plugin (Recommended)
+
+```
+/plugin marketplace add imboard-ai/ai-dossier
+/plugin install dossier-mcp-server@ai-dossier
+```
+
+One-time setup — auto-updates included.
+
+### Claude Code (Manual)
 
 ```bash
 # Global (available across all projects)
@@ -23,7 +32,7 @@ Add to `claude_desktop_config.json`:
   "mcpServers": {
     "dossier": {
       "command": "npx",
-      "args": ["@ai-dossier/mcp-server"]
+      "args": ["-y", "@ai-dossier/mcp-server"]
     }
   }
 }
@@ -180,7 +189,7 @@ make build-mcp                 # build core + mcp-server together
 
 **Adding a resource:** create `src/resources/myResource.ts`, register in `src/index.ts` (add to ListResources + ReadResource switch).
 
-**For dossier users (not contributors):** install via `claude mcp add dossier -- npx @ai-dossier/mcp-server` to get `dossier://` resources and tools at runtime.
+**For dossier users (not contributors):** install via `claude mcp add dossier -- npx @ai-dossier/mcp-server` to get `dossier://` resources and tools at runtime. MCP Registry name: `ai.imboard/dossier`.
 
 ---
 
