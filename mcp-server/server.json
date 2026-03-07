@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.imboard-ai/dossier",
+  "name": "ai.imboard/dossier",
   "description": "MCP server for dossier automation standard - enables LLMs to discover, verify, and execute dossiers",
   "repository": {
     "url": "https://github.com/imboard-ai/ai-dossier",
     "source": "github"
   },
-  "version": "1.0.3",
+  "version": "1.0.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@ai-dossier/mcp-server",
-      "version": "1.0.3",
+      "version": "1.0.4",
       "transport": { "type": "stdio" }
     }
   ]

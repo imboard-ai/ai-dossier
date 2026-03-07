@@ -2,6 +2,11 @@
 
 All notable changes to `@ai-dossier/mcp-server` will be documented in this file.
 
+## [1.0.4] - 2026-03-07
+
+### Changed
+- Switched MCP Registry namespace from `io.github.imboard-ai/dossier` to `ai.imboard/dossier` (DNS-based auth)
+
 ## [1.0.3] - 2026-03-07
 
 ### Changed
