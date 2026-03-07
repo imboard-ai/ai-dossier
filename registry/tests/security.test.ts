@@ -101,6 +101,30 @@ describe('CORS restriction', () => {
     expect(methods).toContain('PATCH');
   });
 
+  it('derives MUTATING_METHODS from ALLOWED_METHODS (single source of truth)', async () => {
+    const { ALLOWED_METHODS, MUTATING_METHODS } = await import('../lib/cors');
+
+    for (const method of MUTATING_METHODS) {
+      expect(ALLOWED_METHODS).toContain(method);
+    }
+    // Read-only methods should not be in MUTATING_METHODS
+    expect(MUTATING_METHODS.has('GET')).toBe(false);
+    expect(MUTATING_METHODS.has('HEAD')).toBe(false);
+    expect(MUTATING_METHODS.has('OPTIONS')).toBe(false);
+  });
+
+  it('Access-Control-Allow-Methods header matches ALLOWED_METHODS constant', async () => {
+    const { setCorsHeaders, ALLOWED_METHODS } = await import('../lib/cors');
+    const { headers, req, res } = createCorsReqRes('https://dossier.imboard.ai');
+
+    setCorsHeaders(req, res);
+
+    const headerMethods = (headers['Access-Control-Allow-Methods'] as string)
+      .split(',')
+      .map((m) => m.trim());
+    expect(headerMethods).toEqual([...ALLOWED_METHODS]);
+  });
+
   it('respects CORS_ALLOWED_ORIGINS env var', async () => {
     const originalEnv = process.env.CORS_ALLOWED_ORIGINS;
     process.env.CORS_ALLOWED_ORIGINS = 'https://custom.example.com,https://another.example.com';

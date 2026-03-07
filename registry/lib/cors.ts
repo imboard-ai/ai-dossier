@@ -6,6 +6,26 @@ const log = createLogger('cors');
 
 const DEFAULT_ALLOWED_ORIGINS = ['https://dossier.imboard.ai', 'https://registry.dossier.dev'];
 
+/** Single source of truth for HTTP methods allowed through CORS. */
+export const ALLOWED_METHODS = [
+  'GET',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+  'OPTIONS',
+  'HEAD',
+] as const;
+
+const SAFE_METHODS: ReadonlySet<string> = new Set(['GET', 'OPTIONS', 'HEAD']);
+
+/** Subset of ALLOWED_METHODS that mutate state and require CSRF origin checks. */
+export const MUTATING_METHODS = new Set<string>(
+  ALLOWED_METHODS.filter((m) => !SAFE_METHODS.has(m))
+);
+
+const ALLOWED_HEADERS = ['Authorization', 'Content-Type', 'Accept'] as const;
+
 /**
  * Normalizes an origin string for case-insensitive, port-aware comparison.
  * Uses the URL API which lowercases protocol/hostname, strips default ports
@@ -54,15 +74,13 @@ export function setCorsHeaders(
 
   if (normalizedOrigin && allowed.includes(normalizedOrigin)) {
     res.setHeader('Access-Control-Allow-Origin', normalizedOrigin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD');
-    res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept');
+    res.setHeader('Access-Control-Allow-Methods', ALLOWED_METHODS.join(', '));
+    res.setHeader('Access-Control-Allow-Headers', ALLOWED_HEADERS.join(', '));
     res.setHeader('Vary', 'Origin');
   } else if (origin) {
     log.warn('Rejected origin', { origin, normalizedOrigin, path: req.url });
   }
 }
-
-const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
  * Handles CORS preflight and enforces origin-based CSRF protection.
