@@ -228,6 +228,8 @@ Three distinct error codes are returned depending on the failure:
 
 ### POST /api/v1/dossiers
 
+All responses include the `X-Request-Id` header for request tracing (see [Request Tracing](#request-tracing)).
+
 **Request:**
 ```http
 POST /api/v1/dossiers
@@ -266,17 +268,48 @@ Same three distinct error codes as `GET /api/v1/me` above (`MISSING_TOKEN`, `TOK
 }
 ```
 
-**Response (400 Bad Request):**
+**Validation Errors:**
+
+| Status | Code | When | Example message |
+|--------|------|------|-----------------|
+| 415 | `UNSUPPORTED_MEDIA_TYPE` | `Content-Type` is not `application/json` | `Content-Type must be application/json, received: text/plain` |
+| 400 | `MISSING_FIELD` | Required field `namespace` or `content` is missing or not a string | `Missing required field: namespace (must be a string)` |
+| 400 | `INVALID_FIELD` | Optional field `changelog` is present but not a string | `Field changelog must be a string` |
+| 400 | `CHANGELOG_TOO_LONG` | `changelog` exceeds maximum length | `Changelog exceeds maximum length of 500 characters` |
+| 413 | `CONTENT_TOO_LARGE` | `content` exceeds 1 MB | `Content exceeds maximum size of 1024KB` |
+| 400 | `INVALID_NAMESPACE` | Namespace fails format validation | *(varies by validation rule)* |
+| 400 | `INVALID_PATH` | Path traversal detected in namespace | `Path traversal is not allowed` |
+| 400 | `INVALID_CONTENT` | Frontmatter is missing, malformed, or fails schema validation | `Missing required field: name; Missing required field: title` |
+
+All error responses from the publish endpoint (validation, server, and path errors) include `request_id` in the body:
 ```json
 {
   "error": {
-    "code": "INVALID_CONTENT",
-    "message": "Missing required field: name; Missing required field: title"
+    "code": "<ERROR_CODE>",
+    "message": "<human-readable detail>",
+    "request_id": "<X-Request-Id value>"
+  }
+}
+```
+
+> **Note:** Authentication errors (401) do not include `request_id`. For the full error code reference, see [Publish Validation Errors](./registry-api-design.md#publish-validation-errors).
+
+**Response (502 Bad Gateway):**
+
+Returned when the content store write fails. Includes `request_id` for log correlation:
+```json
+{
+  "error": {
+    "code": "PUBLISH_ERROR",
+    "message": "Failed to publish dossier",
+    "request_id": "a1b2c3d4-..."
   }
 }
 ```
 
 ### DELETE /api/v1/dossiers/{name}
+
+All responses include the `X-Request-Id` header for request tracing (see [Request Tracing](#request-tracing)).
 
 **Request:**
 ```http
@@ -301,12 +334,22 @@ Note: `version` is only included when a specific version was requested via `?ver
 
 Same three distinct error codes as `GET /api/v1/me` above (`MISSING_TOKEN`, `TOKEN_EXPIRED`, `INVALID_TOKEN`).
 
+**Response (400 Bad Request):**
+
+Returned when the dossier name fails validation:
+
+| Code | When |
+|------|------|
+| `INVALID_NAMESPACE` | Name fails namespace format validation |
+| `INVALID_PATH` | Path traversal detected |
+
 **Response (403 Forbidden):**
 ```json
 {
   "error": {
     "code": "FORBIDDEN",
-    "message": "You don't have permission to delete from 'other-org/*'"
+    "message": "Cannot publish to namespace 'other-org/some-dossier'",
+    "namespace": "other-org/some-dossier"
   }
 }
 ```
@@ -330,6 +373,30 @@ Also returned when the requested version doesn't match:
   }
 }
 ```
+
+**Response (502 Bad Gateway):**
+
+Returned when the content store delete fails. Includes `request_id` for log correlation:
+```json
+{
+  "error": {
+    "code": "DELETE_ERROR",
+    "message": "Failed to delete dossier. Please try again.",
+    "request_id": "a1b2c3d4-..."
+  }
+}
+```
+
+### Request Tracing
+
+The dossier endpoints (`/api/v1/dossiers`, `/api/v1/dossiers/{name}`) and the search endpoint (`/api/v1/search`) return an `X-Request-Id` response header for request tracing and log correlation. Authentication endpoints (`/api/v1/me`, `/auth/*`) do not.
+
+**How it works:**
+- If the client sends an `X-Request-Id` request header with a valid value (alphanumeric/hyphens, 1–64 chars), the server echoes it back.
+- If the header is missing or invalid, the server generates a new UUID and uses that instead. Invalid values are logged as warnings.
+- All error responses from these endpoints (validation, not-found, and server errors) include the request ID in the JSON body as `request_id`, enabling users to reference it when reporting issues.
+
+For additional details, see [Error Format](./registry-api-design.md#error-format) in the API design doc.
 
 ---
 
