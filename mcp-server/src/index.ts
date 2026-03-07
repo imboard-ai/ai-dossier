@@ -16,22 +16,52 @@ import {
   ListToolsRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import { getConceptResource } from './resources/concept.js';
 import { getOrchestrationResource } from './resources/orchestration.js';
 import { getProtocolResource } from './resources/protocol.js';
 import { getSecurityResource } from './resources/security.js';
-import { type CancelJourneyInput, cancelJourney } from './tools/cancelJourney.js';
-import { type GetJourneyStatusInput, getJourneyStatus } from './tools/getJourneyStatus.js';
-import { type ListDossiersInput, listDossiers } from './tools/listDossiers.js';
-import { type ReadDossierInput, readDossier } from './tools/readDossier.js';
-import { type ResolveGraphInput, resolveGraph } from './tools/resolveGraph.js';
-import { type SearchDossiersInput, searchDossiers } from './tools/searchDossiers.js';
-import { type StartJourneyInput, startJourney } from './tools/startJourney.js';
-import { type StepCompleteInput, stepComplete } from './tools/stepComplete.js';
-import { type VerifyDossierInput, verifyDossier } from './tools/verifyDossier.js';
-import { type VerifyGraphInput, verifyGraph } from './tools/verifyGraph.js';
+import { cancelJourney } from './tools/cancelJourney.js';
+import { getJourneyStatus } from './tools/getJourneyStatus.js';
+import { listDossiers } from './tools/listDossiers.js';
+import { readDossier } from './tools/readDossier.js';
+import { resolveGraph } from './tools/resolveGraph.js';
+import { searchDossiers } from './tools/searchDossiers.js';
+import { startJourney } from './tools/startJourney.js';
+import { stepComplete } from './tools/stepComplete.js';
+import { verifyDossier } from './tools/verifyDossier.js';
+import { verifyGraph } from './tools/verifyGraph.js';
 import { logger } from './utils/logger.js';
 import { createToolResponse } from './utils/response.js';
+
+// --- Zod schemas for tool input validation ---
+
+const VerifyDossierSchema = z.object({ path: z.string() });
+const ReadDossierSchema = z.object({ path: z.string() });
+const ListDossiersSchema = z.object({
+  path: z.string().optional(),
+  recursive: z.boolean().optional(),
+});
+const SearchDossiersSchema = z.object({
+  query: z.string(),
+  category: z.string().optional(),
+});
+const ResolveGraphSchema = z.object({ dossier: z.string() });
+const VerifyGraphSchema = z.object({
+  graph_id: z.string().optional(),
+  dossier: z.string().optional(),
+});
+const StartJourneySchema = z.object({ graph_id: z.string() });
+const StepCompleteSchema = z.object({
+  journey_id: z.string(),
+  outputs: z.record(z.unknown()).optional(),
+  status: z.enum(['completed', 'failed']),
+});
+const GetJourneyStatusSchema = z.object({ journey_id: z.string() });
+const CancelJourneySchema = z.object({
+  journey_id: z.string(),
+  reason: z.string().optional(),
+});
 
 // Read version from package.json to avoid hardcoded drift
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -245,52 +275,52 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case 'verify_dossier': {
-        const result = await verifyDossier(args as unknown as VerifyDossierInput);
+        const result = await verifyDossier(VerifyDossierSchema.parse(args));
         return createToolResponse(result);
       }
 
       case 'read_dossier': {
-        const result = await readDossier(args as unknown as ReadDossierInput);
+        const result = await readDossier(ReadDossierSchema.parse(args));
         return createToolResponse(result);
       }
 
       case 'list_dossiers': {
-        const result = await listDossiers(args as unknown as ListDossiersInput);
+        const result = await listDossiers(ListDossiersSchema.parse(args));
         return createToolResponse(result);
       }
 
       case 'search_dossiers': {
-        const result = await searchDossiers(args as unknown as SearchDossiersInput);
+        const result = await searchDossiers(SearchDossiersSchema.parse(args));
         return createToolResponse(result);
       }
 
       case 'resolve_graph': {
-        const result = await resolveGraph(args as unknown as ResolveGraphInput);
+        const result = await resolveGraph(ResolveGraphSchema.parse(args));
         return createToolResponse(result);
       }
 
       case 'verify_graph': {
-        const result = await verifyGraph(args as unknown as VerifyGraphInput);
+        const result = await verifyGraph(VerifyGraphSchema.parse(args));
         return createToolResponse(result);
       }
 
       case 'start_journey': {
-        const result = await startJourney(args as unknown as StartJourneyInput);
+        const result = await startJourney(StartJourneySchema.parse(args));
         return createToolResponse(result);
       }
 
       case 'step_complete': {
-        const result = await stepComplete(args as unknown as StepCompleteInput);
+        const result = await stepComplete(StepCompleteSchema.parse(args));
         return createToolResponse(result);
       }
 
       case 'get_journey_status': {
-        const result = getJourneyStatus(args as unknown as GetJourneyStatusInput);
+        const result = getJourneyStatus(GetJourneyStatusSchema.parse(args));
         return createToolResponse(result);
       }
 
       case 'cancel_journey': {
-        const result = cancelJourney(args as unknown as CancelJourneyInput);
+        const result = cancelJourney(CancelJourneySchema.parse(args));
         return createToolResponse(result);
       }
 

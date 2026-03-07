@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/mcp-server",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "MCP server for dossier automation standard - enables LLMs to discover, verify, and execute dossiers",
   "main": "dist/index.js",
   "bin": {
@@ -46,7 +46,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@ai-dossier/core": "^1.0.1",
+    "@ai-dossier/core": "^1.2.0",
     "@modelcontextprotocol/sdk": "^1.21.0",
     "zod": "^3.25.76"
   },
@@ -54,6 +54,6 @@
     "@types/node": "^24.10.0",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
-    "vitest": "^3.1.1"
+    "vitest": "^4.0.9"
   }
 }

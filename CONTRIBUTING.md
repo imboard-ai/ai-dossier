@@ -43,7 +43,7 @@ Use GitHub Discussions for:
 ## Local Development
 
 ### Prerequisites
-- Node.js 18+ recommended
+- Node.js 20+ required (vitest v4 + vite v7 dropped Node 18)
 - Git
 
 ### Setup
@@ -54,22 +54,19 @@ Use GitHub Discussions for:
    cd ai-dossier
    ```
 
-2. **Install dependencies** (for CLI and MCP server):
+2. **Install dependencies** (npm workspaces — one command at root):
    ```bash
-   cd cli && npm install && cd ..
-   cd mcp-server && npm install && cd ..
+   npm install
    ```
 
 3. **Build the tools**:
    ```bash
-   cd cli && npm run build && cd ..
-   cd mcp-server && npm run build && cd ..
+   make build-all
    ```
 
 4. **Test the CLI**:
    ```bash
-   cd cli
-   npm test  # If tests are available
+   npm run test -w cli
    npx ai-dossier verify --help
    ```
 
@@ -273,7 +270,7 @@ Use the GitHub Actions UI to trigger the workflow with an automatic version bump
 - **minor** (1.x.0): New features, backward-compatible changes
 - **major** (x.0.0): Breaking changes
 
-All three packages (`@ai-dossier/core`, `@ai-dossier/cli`, `@ai-dossier/mcp-server`) are versioned together.
+All packages (`@ai-dossier/core`, `@ai-dossier/cli`, `@ai-dossier/mcp-server`, `@ai-dossier/worktree-pool`) are published from the same pipeline.
 
 ## Security Vulnerabilities
 
@@ -329,9 +326,9 @@ By contributing to Dossier, you agree that your contributions will be licensed u
 
 ## Questions?
 
-- Check the [FAQ](./FAQ.md) for common questions
-- Read the [QUICK_START](./QUICK_START.md) for usage guidance
-- Review [SPECIFICATION.md](./SPECIFICATION.md) for the formal spec
+- Check the [FAQ](docs/explanation/faq.md) for common questions
+- Read the [Quick Start](docs/getting-started/installation.md) for usage guidance
+- Review the [Specification](docs/reference/specification.md) for the formal spec
 - Open a discussion on GitHub for questions
 
 ## Recognition

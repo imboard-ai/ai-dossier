@@ -1,4 +1,4 @@
-import { type ExecSyncOptions, execSync } from 'node:child_process';
+import { type ExecSyncOptions, execFileSync, execSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
@@ -27,15 +27,15 @@ interface PoolDirConfig {
 
 function findGitRoot(): string {
   return (
-    execSync('git rev-parse --show-toplevel', {
+    execFileSync('git', ['rev-parse', '--show-toplevel'], {
       encoding: 'utf-8',
     }) as string
   ).trim();
 }
 
-function git(args: string, opts?: ExecSyncOptions): string {
+function git(args: string[], opts?: ExecSyncOptions): string {
   return (
-    execSync(`git ${args}`, {
+    execFileSync('git', args, {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
       ...opts,
@@ -71,7 +71,7 @@ function writePoolDirConfig(gitRoot: string, poolDir: string): void {
 
 function discoverPoolDirFromWorktrees(gitRoot: string): string | null {
   try {
-    const output = git('worktree list --porcelain', { cwd: gitRoot });
+    const output = git(['worktree', 'list', '--porcelain'], { cwd: gitRoot });
     const worktreePaths: string[] = [];
     for (const line of output.split('\n')) {
       if (line.startsWith('worktree ')) {
@@ -300,16 +300,16 @@ function copyEnvFiles(gitRoot: string, targetDir: string): void {
 
 function destroyWorktree(gitRoot: string, tempBranch: string, absPath: string): void {
   try {
-    git(`worktree remove "${absPath}" --force`, { cwd: gitRoot });
+    git(['worktree', 'remove', absPath, '--force'], { cwd: gitRoot });
   } catch {
     fs.rmSync(absPath, { recursive: true, force: true });
   }
   try {
-    git(`branch -D "${tempBranch}"`, { cwd: gitRoot });
+    git(['branch', '-D', tempBranch], { cwd: gitRoot });
   } catch {
     // branch may not exist
   }
-  git('worktree prune', { cwd: gitRoot });
+  git(['worktree', 'prune'], { cwd: gitRoot });
 }
 
 // --- Public operations ---
@@ -322,7 +322,7 @@ export async function replenish(
   const poolDir = await resolvePoolDir(gitRoot, { interactive: true });
   fs.mkdirSync(poolDir, { recursive: true });
 
-  git('fetch origin', { cwd: gitRoot });
+  git(['fetch', 'origin'], { cwd: gitRoot });
 
   let toCreate: number;
   if (count !== undefined) {
@@ -345,7 +345,7 @@ export async function replenish(
     const tempBranch = `pool/spare-${id}`;
 
     const baseCommit = withLock(poolDir, (state) => {
-      const sha = git('rev-parse origin/main', { cwd: gitRoot });
+      const sha = git(['rev-parse', 'origin/main'], { cwd: gitRoot });
       const wt: PoolWorktree = {
         id,
         path: id,
@@ -360,8 +360,8 @@ export async function replenish(
     });
 
     try {
-      git(`branch "${tempBranch}" origin/main`, { cwd: gitRoot });
-      git(`worktree add "${absWorktreePath}" ${tempBranch}`, {
+      git(['branch', tempBranch, 'origin/main'], { cwd: gitRoot });
+      git(['worktree', 'add', absWorktreePath, tempBranch], {
         cwd: gitRoot,
       });
 
@@ -436,18 +436,20 @@ export function claim(issue: number, branch: string): { path: string } | null {
 
   try {
     // Check freshness
-    const currentMain = git('rev-parse origin/main', { cwd: gitRoot });
+    const currentMain = git(['rev-parse', 'origin/main'], { cwd: gitRoot });
     if (worktree.base_commit !== currentMain) {
       let lockChanged = false;
       try {
-        const diff = git(`diff --name-only ${worktree.base_commit}..origin/main`, { cwd: gitRoot });
+        const diff = git(['diff', '--name-only', `${worktree.base_commit}..origin/main`], {
+          cwd: gitRoot,
+        });
         lockChanged = diff.includes('package-lock.json');
       } catch {
         lockChanged = true;
       }
 
-      git('fetch origin', { cwd: absPath });
-      git('reset --hard origin/main', { cwd: absPath });
+      git(['fetch', 'origin'], { cwd: absPath });
+      git(['reset', '--hard', 'origin/main'], { cwd: absPath });
 
       if (lockChanged) {
         execSync('npm install', {
@@ -464,17 +466,17 @@ export function claim(issue: number, branch: string): { path: string } | null {
     }
 
     // Create issue branch
-    git(`checkout -b "${branch}"`, { cwd: absPath });
+    git(['checkout', '-b', branch], { cwd: absPath });
 
     // Rename directory
     if (absPath !== newAbsPath && !fs.existsSync(newAbsPath)) {
       fs.renameSync(absPath, newAbsPath);
-      git('worktree repair', { cwd: gitRoot });
+      git(['worktree', 'repair'], { cwd: gitRoot });
     }
 
     // Delete temp branch
     try {
-      git(`branch -d "${worktree.temp_branch}"`, { cwd: gitRoot });
+      git(['branch', '-d', worktree.temp_branch], { cwd: gitRoot });
     } catch {
       // may already be deleted
     }
@@ -526,13 +528,13 @@ export function returnWorktree(worktreePath: string): void {
   });
 
   try {
-    git('fetch origin', { cwd: absPath });
-    git(`checkout -b "${newTempBranch}" origin/main`, { cwd: absPath });
-    git('clean -fd', { cwd: absPath });
+    git(['fetch', 'origin'], { cwd: absPath });
+    git(['checkout', '-b', newTempBranch, 'origin/main'], { cwd: absPath });
+    git(['clean', '-fd'], { cwd: absPath });
 
     if (entry.assigned_branch) {
       try {
-        git(`branch -D "${entry.assigned_branch}"`, { cwd: absPath });
+        git(['branch', '-D', entry.assigned_branch], { cwd: absPath });
       } catch {
         // may not exist
       }
@@ -540,13 +542,15 @@ export function returnWorktree(worktreePath: string): void {
 
     if (absPath !== newAbsPath) {
       fs.renameSync(absPath, newAbsPath);
-      git('worktree repair', { cwd: gitRoot });
+      git(['worktree', 'repair'], { cwd: gitRoot });
     }
 
-    const currentMain = git('rev-parse origin/main', { cwd: gitRoot });
+    const currentMain = git(['rev-parse', 'origin/main'], { cwd: gitRoot });
     let lockChanged = false;
     try {
-      const diff = git(`diff --name-only ${entry.base_commit}..origin/main`, { cwd: gitRoot });
+      const diff = git(['diff', '--name-only', `${entry.base_commit}..origin/main`], {
+        cwd: gitRoot,
+      });
       lockChanged = diff.includes('package-lock.json');
     } catch {
       lockChanged = true;
@@ -602,7 +606,7 @@ export function returnWorktree(worktreePath: string): void {
 export function refresh(): { refreshed: number; errors: string[] } {
   const gitRoot = findGitRoot();
   const poolDir = resolvePoolDirSync(gitRoot);
-  git('fetch origin', { cwd: gitRoot });
+  git(['fetch', 'origin'], { cwd: gitRoot });
 
   const state = readState(poolDir);
   const warmWorktrees = state.worktrees.filter((w) => w.status === 'warm');
@@ -612,8 +616,8 @@ export function refresh(): { refreshed: number; errors: string[] } {
   for (const wt of warmWorktrees) {
     const absPath = toAbs(poolDir, wt.path);
     try {
-      git('fetch origin', { cwd: absPath });
-      git('reset --hard origin/main', { cwd: absPath });
+      git(['fetch', 'origin'], { cwd: absPath });
+      git(['reset', '--hard', 'origin/main'], { cwd: absPath });
       execSync('npm install', {
         cwd: absPath,
         stdio: 'pipe',
@@ -625,7 +629,7 @@ export function refresh(): { refreshed: number; errors: string[] } {
         timeout: 300_000,
       });
 
-      const newSha = git('rev-parse HEAD', { cwd: absPath });
+      const newSha = git(['rev-parse', 'HEAD'], { cwd: absPath });
       withLock(poolDir, (state) => ({
         state: updateWorktree(state, wt.id, {
           base_commit: newSha,
@@ -699,7 +703,7 @@ export function gc(): {
         result: undefined,
       }));
       try {
-        git(`branch -D "${wt.temp_branch}"`, { cwd: gitRoot });
+        git(['branch', '-D', wt.temp_branch], { cwd: gitRoot });
       } catch {
         // branch may not exist
       }
@@ -716,7 +720,7 @@ export function gc(): {
     try {
       const absPath = toAbs(poolDir, dirName);
       try {
-        git(`worktree remove "${absPath}" --force`, { cwd: gitRoot });
+        git(['worktree', 'remove', absPath, '--force'], { cwd: gitRoot });
       } catch {
         fs.rmSync(absPath, { recursive: true, force: true });
       }
@@ -729,7 +733,7 @@ export function gc(): {
     }
   }
 
-  git('worktree prune', { cwd: gitRoot });
+  git(['worktree', 'prune'], { cwd: gitRoot });
 
   return { removed, staleIds, orphanIds, errors };
 }
