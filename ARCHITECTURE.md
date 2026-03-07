@@ -49,6 +49,18 @@ The CLI supports multiple configured registries and queries them in parallel usi
 
 This allows partial failures to be surfaced without blocking successful results from other registries. See `docs/architecture/overview.md` for architectural details and `cli/src/multi-registry.ts` for implementation.
 
+### Multi-Registry Failure Modes
+
+| Scenario | Behavior | User-Facing Output |
+|----------|----------|-------------------|
+| **All registries timeout** | All `Promise.allSettled()` results are rejected. `get`/`run` exit 1 with per-registry errors. `list`/`search` exit 0 with empty results and per-registry warnings. | `❌ Not found in any registry` or per-registry error details |
+| **Network partition** | Same as timeout — unreachable registries produce rejected promises. Reachable registries return normally. | Partial results with `⚠️  Showing partial results (N/M registries responded)` |
+| **Auth failure across registries** | Registry returns 401/403. Caught as `RegistryError` and included in the `errors` array. Other registries still queried. | `⚠️  Registry 'name': unauthorized` or similar per-registry error |
+| **Invalid response format** | JSON parse failure caught in `RegistryClient`. Falls back to HTTP status text. Treated as a registry error. | `⚠️  Registry 'name': <HTTP status text>` |
+| **No registries configured** | CLI falls back to hardcoded public registry. Commands proceed normally. | No error — transparent fallback |
+
+See [cli/README.md](cli/README.md#exit-codes) for per-command exit codes.
+
 ## File Format
 
 Dossiers are Markdown files with JSON frontmatter using the `---dossier` delimiter:

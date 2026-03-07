@@ -152,6 +152,30 @@ safe-run-dossier https://example.com/dossier.ds.md cursor
 
 The CLI queries all configured registries in parallel when resolving dossiers (e.g., `dossier get`, `dossier run`, `dossier pull`). This uses `Promise.allSettled()` so a single registry failure does not block results from other registries.
 
+### Exit Codes
+
+Multi-registry commands use the following exit codes:
+
+| Command | `0` (Success) | `1` (Failure) | `2` (Config/Runtime Error) |
+|---------|---------------|---------------|---------------------------|
+| `get` | Dossier found | Not found in any registry, or all registries failed | — |
+| `list --source registry` | Results returned, including when all registries fail (empty list + warnings) | Unexpected runtime error | — |
+| `search` | Results returned, including when all registries fail (no matches + warnings) | Unexpected runtime error | — |
+| `pull` | Always exits 0. Per-item errors are printed but do not affect the exit code. | — | — |
+| `run` | Dossier executed successfully | Not found, fetch failed, or verification failed | No LLM detected, unknown LLM, or execution failed |
+
+**Partial failures**: When some registries fail but at least one succeeds, `list` returns exit `0` with a warning showing which registries failed:
+```
+⚠️  Registry 'internal': connection timeout
+⚠️  Showing partial results (1/2 registries responded)
+```
+
+When **all** registries fail, `list` and `search` still exit `0` but display per-registry error warnings and report no results found.
+
+### No Registries Configured
+
+If no registries are configured (no user config, no project `.dossierrc.json`, no `DOSSIER_REGISTRY_URL` env var), the CLI falls back to the hardcoded public registry (`https://dossier-registry.vercel.app`). Commands proceed normally — there is no error or special exit code for this scenario.
+
 ### Error Handling
 
 All multi-registry operations return structured errors alongside results:
@@ -164,7 +188,7 @@ $ dossier get org/my-dossier
 
 When **all registries fail**, the CLI displays per-registry error details showing which registry failed and why. When at least one registry succeeds, the result is returned without surfacing errors from other registries.
 
-This means you can configure multiple registries for redundancy — the CLI will succeed as long as at least one registry can serve the requested dossier. Registries are queried in the order they appear in your configuration; the first successful response is used.
+This means you can configure multiple registries for redundancy — the CLI will succeed as long as at least one registry can serve the requested dossier. Registries are queried in parallel; for `get` and `run`, the first successful result (by configuration order) is used.
 
 ### Configuration
 
