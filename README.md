@@ -146,6 +146,7 @@ https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/git-projec
 
 - Use the CLI tool (`ai-dossier verify`) to verify checksums/signatures before execution
 - Prefer MCP mode for sandboxed, permissioned operations
+- **External reference declaration**: Dossiers that fetch or link to external URLs must declare them in `external_references` with trust levels. The linter flags undeclared URLs, and the MCP server's `read_dossier` tool returns `security_notices` for any undeclared external URLs found in the body. This mitigates transitive trust risks from unvetted external content.
 - See [SECURITY_STATUS.md](./SECURITY_STATUS.md) for current guarantees and limitations
 
 ---

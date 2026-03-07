@@ -6,6 +6,20 @@ const log = createLogger('cors');
 
 const DEFAULT_ALLOWED_ORIGINS = ['https://dossier.imboard.ai', 'https://registry.dossier.dev'];
 
+/**
+ * Normalizes an origin string for case-insensitive, port-aware comparison.
+ * Uses the URL API which lowercases protocol/hostname, strips default ports
+ * (80 for http, 443 for https), and removes trailing slashes.
+ */
+function normalizeOrigin(origin: string): string {
+  try {
+    return new URL(origin).origin;
+  } catch {
+    log.warn('Failed to parse origin as URL, falling back to lowercase', { origin });
+    return origin.toLowerCase();
+  }
+}
+
 function getAllowedOrigins(): string[] {
   const envOrigins = process.env.CORS_ALLOWED_ORIGINS;
   if (envOrigins) {
@@ -17,9 +31,9 @@ function getAllowedOrigins(): string[] {
         filtered: filtered.length,
       });
     }
-    return filtered;
+    return filtered.map(normalizeOrigin);
   }
-  return DEFAULT_ALLOWED_ORIGINS;
+  return DEFAULT_ALLOWED_ORIGINS.map(normalizeOrigin);
 }
 
 /**
@@ -31,18 +45,20 @@ function getAllowedOrigins(): string[] {
 export function setCorsHeaders(
   req: VercelRequest,
   res: VercelResponse,
-  allowedOrigins?: string[]
+  allowedOrigins?: string[],
+  preNormalizedOrigin?: string
 ): void {
   const origin = req.headers.origin;
   const allowed = allowedOrigins ?? getAllowedOrigins();
+  const normalizedOrigin = preNormalizedOrigin ?? (origin ? normalizeOrigin(origin) : undefined);
 
-  if (origin && allowed.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS, HEAD');
+  if (normalizedOrigin && allowed.includes(normalizedOrigin)) {
+    res.setHeader('Access-Control-Allow-Origin', normalizedOrigin);
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, Accept');
     res.setHeader('Vary', 'Origin');
   } else if (origin) {
-    log.warn('Rejected origin', { origin });
+    log.warn('Rejected origin', { origin, normalizedOrigin, path: req.url });
   }
 }
 
@@ -63,8 +79,10 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  *   since CSRF is a browser-only attack vector.
  */
 export function handleCors(req: VercelRequest, res: VercelResponse): boolean {
+  const origin = req.headers.origin;
+  const normalizedOrigin = origin ? normalizeOrigin(origin) : undefined;
   const allowedOrigins = getAllowedOrigins();
-  setCorsHeaders(req, res, allowedOrigins);
+  setCorsHeaders(req, res, allowedOrigins, normalizedOrigin);
 
   if (req.method === 'OPTIONS') {
     res.status(HTTP_STATUS.NO_CONTENT).end();
@@ -75,13 +93,30 @@ export function handleCors(req: VercelRequest, res: VercelResponse): boolean {
   // GET/HEAD are read-only so they pass regardless of origin. Requests without
   // an Origin header come from non-browser clients (curl, CLI) which are not
   // susceptible to CSRF, so they are also allowed through.
-  const origin = req.headers.origin;
-  if (origin && MUTATING_METHODS.has(req.method ?? '') && !allowedOrigins.includes(origin)) {
-    log.warn('Blocked mutating request from disallowed origin', { method: req.method, origin });
+  if (
+    normalizedOrigin &&
+    MUTATING_METHODS.has(req.method ?? '') &&
+    !allowedOrigins.includes(normalizedOrigin)
+  ) {
+    log.warn('Blocked mutating request from disallowed origin', {
+      method: req.method,
+      origin,
+      normalizedOrigin,
+      path: req.url,
+      statusCode: HTTP_STATUS.FORBIDDEN,
+    });
     res.status(HTTP_STATUS.FORBIDDEN).json({
       error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Origin not allowed for mutating requests' },
     });
     return true;
+  }
+
+  if (origin && MUTATING_METHODS.has(req.method ?? '')) {
+    log.debug('Accepted mutating request from allowed origin', {
+      method: req.method,
+      origin,
+      path: req.url,
+    });
   }
 
   return false;

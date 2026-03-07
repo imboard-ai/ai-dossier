@@ -244,6 +244,23 @@ ai-dossier login
 export DOSSIER_REGISTRY_TOKEN=<your-token>
 ```
 
+#### Authentication troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `❌ Session expired. Run 'dossier login' to re-authenticate.` | Token expired or revoked by registry | Re-run `ai-dossier login` or set a fresh `DOSSIER_REGISTRY_TOKEN` |
+| `❌ Not logged in to registry '<name>'.` | No credentials stored for this registry | Run `ai-dossier login --registry <name>` |
+| Login hangs or browser doesn't open | Non-interactive environment (CI, Docker, SSH) | Use `DOSSIER_REGISTRY_TOKEN` instead of interactive login |
+| `Failed to save credentials` | `~/.dossier/` is read-only or missing | See [CLI README troubleshooting](../../cli/README.md#troubleshooting) |
+| `DOSSIER_REGISTRY_TOKEN` ignored | Token set after CLI process started | Export the variable before running the CLI command |
+
+For CI/CD pipelines, always use the environment variable approach:
+
+```bash
+export DOSSIER_REGISTRY_TOKEN="${DOSSIER_TOKEN}"   # from your CI secrets
+ai-dossier publish my-dossier.ds.md
+```
+
 ### Registry Configuration
 
 By default the CLI uses the public Dossier registry. Teams can configure additional registries in `~/.dossier/config.json`:

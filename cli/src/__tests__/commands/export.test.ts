@@ -110,12 +110,63 @@ describe('export command', () => {
     const program = createTestProgram();
     registerExportCommand(program);
 
-    await program.parseAsync(['node', 'dossier', 'export', 'my-dossier', '-o', '/tmp/out.ds.md']);
+    await program.parseAsync(['node', 'dossier', 'export', 'my-dossier', '-o', 'output/out.ds.md']);
 
     expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
       expect.stringContaining('out.ds.md'),
       'content',
       'utf8'
     );
+  });
+
+  it('should reject absolute output paths', async () => {
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      result: { content: 'content', digest: null, _registry: 'public' },
+      errors: [],
+    });
+
+    const program = createTestProgram();
+    registerExportCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'export', 'my-dossier', '-o', '/tmp/out.ds.md'])
+    ).rejects.toThrow();
+
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('must be relative'));
+    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it('should reject path traversal in output path', async () => {
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      result: { content: 'content', digest: null, _registry: 'public' },
+      errors: [],
+    });
+
+    const program = createTestProgram();
+    registerExportCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'export', 'my-dossier', '-o', '../../../etc/out.md'])
+    ).rejects.toThrow();
+
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('must not contain ".."'));
+    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it('should reject embedded path traversal', async () => {
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      result: { content: 'content', digest: null, _registry: 'public' },
+      errors: [],
+    });
+
+    const program = createTestProgram();
+    registerExportCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'export', 'my-dossier', '-o', 'foo/../bar/out.md'])
+    ).rejects.toThrow();
+
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('must not contain ".."'));
+    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
   });
 });

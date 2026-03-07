@@ -1,10 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { printRegistryErrors } from '../helpers';
+import { printRegistryErrors, validateRelativePath } from '../helpers';
 import { multiRegistryGetContent } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
+/** Registers the `export` command — downloads a dossier and saves it to a local file. */
 export function registerExportCommand(program: Command): void {
   program
     .command('export')
@@ -45,6 +46,15 @@ export function registerExportCommand(program: Command): void {
       }
 
       const outputPath = options.output || `${dossierName.replace(/\//g, '-')}.ds.md`;
+
+      try {
+        validateRelativePath(outputPath);
+      } catch (err: unknown) {
+        console.error(`\n❌ ${(err as Error).message}\n`);
+        process.exit(1);
+        return;
+      }
+
       const outputDir = path.dirname(path.resolve(outputPath));
 
       try {

@@ -8,7 +8,19 @@ import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
 vi.mock('../../multi-registry');
-vi.mock('../../helpers');
+vi.mock('../../helpers', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../helpers')>();
+  return {
+    ...actual,
+    parseListSource: vi.fn(),
+    formatTable: vi.fn(),
+    findDossierFilesLocal: vi.fn(),
+    parseDossierMetadataLocal: vi.fn(),
+    findDossierFilesGitHub: vi.fn(),
+    fetchDossierMetadata: vi.fn(),
+    printRegistryErrors: vi.fn(),
+  };
+});
 vi.mock('../../config');
 
 const mockedFs = vi.mocked(fs);
@@ -115,6 +127,70 @@ describe('list command', () => {
       expect(console.error).toHaveBeenCalledWith(
         expect.stringContaining('Showing partial results (1/2 registries responded)')
       );
+    });
+
+    it('should clamp page to minimum of 1', async () => {
+      vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+        dossiers: [
+          {
+            name: 'test',
+            version: '1.0.0',
+            title: 'Test',
+            category: 'devops',
+            _registry: 'public',
+          },
+        ] as any,
+        total: 1,
+        errors: [],
+      });
+
+      const program = createTestProgram();
+      registerListCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'list', '--source', 'registry', '--page', '-5'])
+      ).rejects.toThrow();
+
+      expect(multiRegistry.multiRegistryList).toHaveBeenCalledWith(
+        expect.objectContaining({ page: 1 })
+      );
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Page'));
+    });
+
+    it('should clamp perPage to maximum of 1000', async () => {
+      vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+        dossiers: [
+          {
+            name: 'test',
+            version: '1.0.0',
+            title: 'Test',
+            category: 'devops',
+            _registry: 'public',
+          },
+        ] as any,
+        total: 1,
+        errors: [],
+      });
+
+      const program = createTestProgram();
+      registerListCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'list',
+          '--source',
+          'registry',
+          '--per-page',
+          '99999',
+        ])
+      ).rejects.toThrow();
+
+      expect(multiRegistry.multiRegistryList).toHaveBeenCalledWith(
+        expect.objectContaining({ perPage: 1000 })
+      );
+      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Per-page'));
     });
 
     it('should show empty message for registry', async () => {

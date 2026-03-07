@@ -101,7 +101,7 @@ registry/
 
 The registry enforces origin-based CORS with CSRF protection:
 
-- **Allowed origins**: `https://dossier.imboard.ai`, `https://registry.dossier.dev` (default). Override with the `CORS_ALLOWED_ORIGINS` environment variable (comma-separated list).
+- **Allowed origins**: `https://dossier.imboard.ai`, `https://registry.dossier.dev` (default). Override with the `CORS_ALLOWED_ORIGINS` environment variable (comma-separated list). Origins are normalized before comparison: hostnames are lowercased, default ports (80/443) are stripped, and trailing slashes are removed.
 - **Read-only requests** (`GET`, `HEAD`): allowed from any origin.
 - **Mutating requests** (`POST`, `PUT`, `PATCH`, `DELETE`): blocked with `403 ORIGIN_NOT_ALLOWED` if the browser origin is not on the allowlist.
 - **Non-browser clients** (no `Origin` header): always allowed through.
@@ -134,20 +134,20 @@ See [`lib/responses.ts`](lib/responses.ts) for the implementation.
 
 ## Structured Logging
 
-All server-side logging uses structured JSON via `createLogger(context)` from `lib/logger.ts`. Each log entry is a single-line JSON string sent to stdout (`info`) or stderr (`warn`, `error`), compatible with Vercel's log ingestion.
+All server-side logging uses structured JSON via `createLogger(context)` from `lib/logger.ts`. Each log entry is a single-line JSON string sent to stdout (`debug`, `info`) or stderr (`warn`, `error`), compatible with Vercel's log ingestion.
 
 **Log format:**
 
 ```json
 {
-  "level": "info | warn | error",
+  "level": "debug | info | warn | error",
   "context": "module-name",
   "message": "Human-readable description",
   "...extras": "Additional key-value pairs"
 }
 ```
 
-**Destinations:** `info` logs go to `console.log` (stdout); `warn` to `console.warn` (stderr); `error` to `console.error` (stderr).
+**Destinations:** `debug` and `info` logs go to `console.log` (stdout); `warn` to `console.warn` (stderr); `error` to `console.error` (stderr).
 
 **Usage in new modules:**
 

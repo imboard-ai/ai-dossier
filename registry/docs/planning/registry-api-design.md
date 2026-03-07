@@ -506,7 +506,7 @@ CORS is restricted to an allowlist of known origins. CORS response headers (`Acc
 **Allowed origin response:**
 ```
 Access-Control-Allow-Origin: <allowed origin>
-Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS, HEAD
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD
 Access-Control-Allow-Headers: Authorization, Content-Type, Accept
 Vary: Origin
 ```
@@ -515,6 +515,8 @@ Vary: Origin
 
 Default allowed origins: `https://dossier.imboard.ai`, `https://registry.dossier.dev`.
 Override via `CORS_ALLOWED_ORIGINS` env var (comma-separated).
+
+**Origin normalization:** Both request origins and allowlist entries are normalized before comparison using the URL API. This lowercases the protocol and hostname, strips default ports (80 for HTTP, 443 for HTTPS), and removes trailing slashes. For example, `https://DOSSIER.IMBOARD.AI:443/` is normalized to `https://dossier.imboard.ai`.
 
 ### CSRF Protection
 

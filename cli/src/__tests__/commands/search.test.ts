@@ -153,6 +153,78 @@ describe('search command', () => {
     );
   });
 
+  it('should clamp page to minimum of 1', async () => {
+    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+      dossiers: [
+        {
+          name: 'test',
+          title: 'Test',
+          description: 'test dossier',
+          tags: ['test'],
+          _registry: 'public',
+        },
+      ] as any,
+      total: 1,
+      errors: [],
+    });
+
+    const program = createTestProgram();
+    registerSearchCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'search', 'test', '--page', '-5']);
+
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Page'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Found 1'));
+  });
+
+  it('should clamp perPage to maximum of 1000', async () => {
+    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+      dossiers: [
+        {
+          name: 'test',
+          title: 'Test',
+          description: 'test dossier',
+          tags: ['test'],
+          _registry: 'public',
+        },
+      ] as any,
+      total: 1,
+      errors: [],
+    });
+
+    const program = createTestProgram();
+    registerSearchCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'search', 'test', '--per-page', '99999']);
+
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Per-page'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Found 1'));
+  });
+
+  it('should clamp perPage to minimum of 1', async () => {
+    vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
+      dossiers: [
+        {
+          name: 'test',
+          title: 'Test',
+          description: 'test dossier',
+          tags: ['test'],
+          _registry: 'public',
+        },
+      ] as any,
+      total: 1,
+      errors: [],
+    });
+
+    const program = createTestProgram();
+    registerSearchCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'search', 'test', '--per-page', '0']);
+
+    expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Per-page'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Found 1'));
+  });
+
   it('should log warning when content fetch fails for a dossier', async () => {
     vi.mocked(multiRegistry.multiRegistryList).mockResolvedValue({
       dossiers: [

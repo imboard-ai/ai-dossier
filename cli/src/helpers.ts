@@ -45,6 +45,9 @@ export const OFFICIAL_KMS_KEYS = [
 // Re-export validation constants from core (single source of truth)
 export { RECOMMENDED_FIELDS, REQUIRED_FIELDS, VALID_RISK_LEVELS, VALID_STATUSES };
 
+/** Maximum results per page for CLI pagination commands. */
+export const MAX_PER_PAGE = 1000;
+
 // ============================================================================
 // TypeScript interfaces
 // ============================================================================
@@ -99,6 +102,46 @@ export interface GitHubFile {
 // ============================================================================
 // Security helpers
 // ============================================================================
+
+/**
+ * Validate that a path is relative and contains no ".." traversal.
+ * @throws Error if the path is absolute or contains path traversal.
+ */
+export function validateRelativePath(filePath: string): void {
+  if (path.isAbsolute(filePath)) {
+    throw new Error(`Path '${filePath}' must be relative (absolute paths are not allowed)`);
+  }
+  if (filePath.split(path.sep).includes('..') || filePath.split('/').includes('..')) {
+    throw new Error(`Path '${filePath}' must not contain ".." (path traversal is not allowed)`);
+  }
+}
+
+/**
+ * Parse and clamp pagination options from CLI string arguments.
+ * Logs a warning when values are clamped.
+ */
+export function parsePaginationParams(
+  pageStr: string | undefined,
+  perPageStr: string | undefined,
+  defaults: { page: number; perPage: number } = { page: 1, perPage: 20 }
+): { page: number; perPage: number } {
+  const parsedPage = parseInt(pageStr || String(defaults.page), 10);
+  const rawPage = Number.isNaN(parsedPage) ? defaults.page : parsedPage;
+  const parsedPerPage = parseInt(perPageStr || String(defaults.perPage), 10);
+  const rawPerPage = Number.isNaN(parsedPerPage) ? defaults.perPage : parsedPerPage;
+
+  const page = Math.max(1, rawPage);
+  const perPage = Math.min(MAX_PER_PAGE, Math.max(1, rawPerPage));
+
+  if (rawPage !== page) {
+    console.warn(`⚠️  Page ${rawPage} clamped to ${page} (minimum 1)`);
+  }
+  if (rawPerPage !== perPage) {
+    console.warn(`⚠️  Per-page ${rawPerPage} clamped to ${perPage} (range 1–${MAX_PER_PAGE})`);
+  }
+
+  return { page, perPage };
+}
 
 /**
  * Validate a dossier name to prevent path traversal attacks.

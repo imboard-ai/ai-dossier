@@ -1,9 +1,9 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_CHANGELOG_LENGTH, MAX_QUERY_LENGTH, OAUTH_STATE_COOKIE } from '../lib/constants';
 import { validateNamespace } from '../lib/dossier';
-import { createMockReq, createMockRes } from './helpers/mocks';
+import { createMockReq, createMockRes, findLogEntry } from './helpers/mocks';
 
 function createCorsReqRes(origin?: string) {
   const resHeaders: Record<string, string> = {};
@@ -88,6 +88,17 @@ describe('CORS restriction', () => {
 
     expect(headers['Access-Control-Allow-Origin']).toBe('https://dossier.imboard.ai');
     expect(headers.Vary).toBe('Origin');
+  });
+
+  it('includes PUT and PATCH in Access-Control-Allow-Methods', async () => {
+    const { setCorsHeaders } = await import('../lib/cors');
+    const { headers, req, res } = createCorsReqRes('https://dossier.imboard.ai');
+
+    setCorsHeaders(req, res);
+
+    const methods = headers['Access-Control-Allow-Methods'] as string;
+    expect(methods).toContain('PUT');
+    expect(methods).toContain('PATCH');
   });
 
   it('respects CORS_ALLOWED_ORIGINS env var', async () => {
@@ -380,6 +391,83 @@ describe('changelog sanitization', () => {
   });
 });
 
+describe('CORS origin normalization', () => {
+  it('matches case-insensitive origins (blocks bypass via uppercase)', async () => {
+    const { setCorsHeaders } = await import('../lib/cors');
+    const { headers, req, res } = createCorsReqRes('https://DOSSIER.IMBOARD.AI');
+
+    setCorsHeaders(req, res);
+
+    expect(headers['Access-Control-Allow-Origin']).toBe('https://dossier.imboard.ai');
+  });
+
+  it('matches origins with default port 443 stripped', async () => {
+    const { setCorsHeaders } = await import('../lib/cors');
+    const { headers, req, res } = createCorsReqRes('https://dossier.imboard.ai:443');
+
+    setCorsHeaders(req, res);
+
+    expect(headers['Access-Control-Allow-Origin']).toBe('https://dossier.imboard.ai');
+  });
+
+  it('matches origins with trailing slash stripped', async () => {
+    const { setCorsHeaders } = await import('../lib/cors');
+    const { headers, req, res } = createCorsReqRes('https://dossier.imboard.ai/');
+
+    setCorsHeaders(req, res);
+
+    expect(headers['Access-Control-Allow-Origin']).toBe('https://dossier.imboard.ai');
+  });
+
+  it('rejects origin with non-default port', async () => {
+    const { setCorsHeaders } = await import('../lib/cors');
+    const { headers, req, res } = createCorsReqRes('https://dossier.imboard.ai:8443');
+
+    setCorsHeaders(req, res);
+
+    expect(headers['Access-Control-Allow-Origin']).toBeUndefined();
+  });
+
+  function createCorsHandlerReqRes(method: string, origin: string) {
+    let statusCode = 0;
+    const resHeaders: Record<string, string> = {};
+    const req = createMockReq({ method, headers: { origin } });
+    const res = {
+      setHeader: (key: string, value: string) => {
+        resHeaders[key] = value;
+      },
+      status: (code: number) => {
+        statusCode = code;
+        return { json: () => {}, end: () => {} };
+      },
+    };
+    return { req, res, getStatus: () => statusCode, resHeaders };
+  }
+
+  it('allows case-insensitive POST from allowed origin (CSRF bypass prevention)', async () => {
+    const { handleCors } = await import('../lib/cors');
+    const { req, res, getStatus } = createCorsHandlerReqRes('POST', 'https://DOSSIER.IMBOARD.AI');
+
+    const handled = handleCors(req, res);
+
+    expect(handled).toBe(false);
+    expect(getStatus()).toBe(0);
+  });
+
+  it('allows POST from origin with default port (port bypass prevention)', async () => {
+    const { handleCors } = await import('../lib/cors');
+    const { req, res, getStatus } = createCorsHandlerReqRes(
+      'POST',
+      'https://dossier.imboard.ai:443'
+    );
+
+    const handled = handleCors(req, res);
+
+    expect(handled).toBe(false);
+    expect(getStatus()).toBe(0);
+  });
+});
+
 describe('CORS headers not leaked to disallowed origins', () => {
   it('does not set Allow-Methods or Allow-Headers for rejected origins', async () => {
     const { setCorsHeaders } = await import('../lib/cors');
@@ -463,6 +551,110 @@ describe('CORS_ALLOWED_ORIGINS empty entry filtering', () => {
     } else {
       process.env.CORS_ALLOWED_ORIGINS = originalEnv;
     }
+  });
+});
+
+describe('CORS rejection log context', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('includes path in rejected origin log', async () => {
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { setCorsHeaders } = await import('../lib/cors');
+    const req = createMockReq({
+      url: '/api/v1/dossiers',
+      headers: { origin: 'https://evil.com' },
+    });
+    const resHeaders: Record<string, string> = {};
+    const res = {
+      setHeader: (key: string, value: string) => {
+        resHeaders[key] = value;
+      },
+    };
+
+    setCorsHeaders(req, res);
+
+    const entry = findLogEntry(consoleSpy, 'Rejected origin');
+    expect(entry).toBeDefined();
+    expect(entry).toMatchObject({
+      origin: 'https://evil.com',
+      path: '/api/v1/dossiers',
+    });
+
+    consoleSpy.mockRestore();
+  });
+
+  it('includes path and statusCode in blocked mutating request log', async () => {
+    const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { handleCors } = await import('../lib/cors');
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/v1/dossiers',
+      headers: { origin: 'https://evil.com' },
+    });
+    const { res } = createMockRes();
+
+    handleCors(req, res as any);
+
+    const entry = findLogEntry(consoleSpy, 'Blocked mutating request from disallowed origin');
+    expect(entry).toBeDefined();
+    expect(entry).toMatchObject({
+      method: 'POST',
+      origin: 'https://evil.com',
+      path: '/api/v1/dossiers',
+      statusCode: 403,
+    });
+
+    consoleSpy.mockRestore();
+  });
+});
+
+describe('CORS accepted mutating request logging', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it('logs debug entry for accepted mutating request from allowed origin', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { handleCors } = await import('../lib/cors');
+    const req = createMockReq({
+      method: 'POST',
+      url: '/api/v1/dossiers',
+      headers: { origin: 'https://dossier.imboard.ai' },
+    });
+    const { res } = createMockRes();
+
+    handleCors(req, res as any);
+
+    const entry = findLogEntry(consoleSpy, 'Accepted mutating request from allowed origin');
+    expect(entry).toBeDefined();
+    expect(entry).toMatchObject({
+      level: 'debug',
+      method: 'POST',
+      origin: 'https://dossier.imboard.ai',
+      path: '/api/v1/dossiers',
+    });
+
+    consoleSpy.mockRestore();
+  });
+
+  it('does not log debug entry for GET requests', async () => {
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { handleCors } = await import('../lib/cors');
+    const req = createMockReq({
+      method: 'GET',
+      url: '/api/v1/dossiers',
+      headers: { origin: 'https://dossier.imboard.ai' },
+    });
+    const { res } = createMockRes();
+
+    handleCors(req, res as any);
+
+    const entry = findLogEntry(consoleSpy, 'Accepted mutating request from allowed origin');
+    expect(entry).toBeUndefined();
+
+    consoleSpy.mockRestore();
   });
 });
 

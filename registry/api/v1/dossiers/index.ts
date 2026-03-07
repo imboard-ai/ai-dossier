@@ -44,6 +44,8 @@ async function handleList(_req: VercelRequest, res: VercelResponse, requestId: s
     const raw = await fetchManifestDossiers();
     const dossiers = raw.map(normalizeDossier);
 
+    // List returns all dossiers in a single page (no pagination params accepted).
+    // Search (api/v1/search.ts) supports page/per_page query params for real pagination.
     return res.status(HTTP_STATUS.OK).json({
       dossiers,
       pagination: {

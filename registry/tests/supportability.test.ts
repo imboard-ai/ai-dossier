@@ -261,10 +261,27 @@ describe('search handler logging', () => {
 
     vi.doMock('../lib/manifest', () => ({
       fetchManifestDossiers: vi.fn().mockResolvedValue([
-        { name: 'test-dossier', title: 'Test Dossier', description: 'A test' },
-        { name: 'other-dossier', title: 'Other', description: 'Another' },
+        {
+          name: 'test-dossier',
+          title: 'Test Dossier',
+          description: 'A test',
+          category: [],
+          tags: [],
+          path: 'test',
+        },
+        {
+          name: 'other-dossier',
+          title: 'Other',
+          description: 'Another',
+          category: [],
+          tags: [],
+          path: 'other',
+        },
       ]),
-      normalizeDossier: (d: unknown) => d,
+      normalizeDossier: (d: Record<string, unknown>) => ({
+        ...d,
+        url: `https://cdn.example.com/${d.path}`,
+      }),
     }));
 
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -277,10 +294,9 @@ describe('search handler logging', () => {
       headers: { 'x-request-id': 'req-search-123' },
       query: { q: 'test' },
     });
-
     const { res, getStatus } = createMockRes();
 
-    await handler(req, res as any);
+    await handler(req as any, res as any);
 
     expect(getStatus()).toBe(200);
 

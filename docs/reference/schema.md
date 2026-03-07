@@ -211,6 +211,54 @@ Dossier Schema metadata is embedded at the **top of the Markdown file** using JS
 
 ---
 
+### External References
+
+#### `content_scope`
+- **Type**: Enum
+- **Values**: `"self-contained"`, `"references-external"`
+- **Description**: Whether the dossier body is self-contained or references external URLs. Set to `"references-external"` when the body contains any external URLs (the linter enforces this).
+
+#### `external_references`
+- **Type**: Array of objects
+- **Description**: Manifest of all external resources referenced in the dossier body. Required when `content_scope` is `"references-external"`.
+- **Fields**:
+  - `url` (required): URL or URL prefix of the external resource
+  - `description` (required): What this external resource is used for
+  - `type` (required): Type of resource — `"download"`, `"api"`, `"documentation"`, `"script"`, `"config"`, `"image"`, `"dossier"`, or `"other"`
+  - `trust_level` (required): Trust level — `"trusted"`, `"user-verified"`, or `"unknown"`
+  - `required` (required): Whether this external resource is required for execution
+
+**Example**:
+```json
+"content_scope": "references-external",
+"external_references": [
+  {
+    "url": "https://registry.npmjs.org",
+    "description": "NPM registry for package installation",
+    "type": "download",
+    "trust_level": "trusted",
+    "required": true
+  },
+  {
+    "url": "https://raw.githubusercontent.com/org/repo/main/setup.sh",
+    "description": "Bootstrap script fetched during setup",
+    "type": "script",
+    "trust_level": "user-verified",
+    "required": false
+  }
+]
+```
+
+**Linter rule**: `external-references-declared` (default severity: `error`) scans the body for URLs and cross-references them against declared `external_references`. Placeholder URLs (`example.com`, `localhost`, `${VAR}`) are automatically excluded. URLs from `tools_required[].install_url`, `homepage`, `repository`, and `authors[].url` are auto-exempt.
+
+**Recommended agent behavior** (see [PROTOCOL.md](../../PROTOCOL.md) for full details):
+- URLs declared in `external_references` → Proceed (author has acknowledged the dependency)
+- URLs with `type: "script"` and `trust_level: "unknown"` → Require explicit user approval
+- URLs NOT declared in `external_references` → Warn user (URL is not in the trust chain)
+- `content_scope` is `"self-contained"` but body has URLs → Treat as configuration error
+
+---
+
 ### Risk & Duration
 
 #### `risk_level`
