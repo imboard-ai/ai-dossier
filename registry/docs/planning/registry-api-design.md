@@ -563,7 +563,7 @@ Read-only methods (`GET`, `HEAD`) are allowed from any origin. Requests without 
 | `SCHEMA_VALIDATION_FAILED` | 400 | Frontmatter doesn't match schema |
 | `CHECKSUM_MISMATCH` | 400 | Declared checksum != computed |
 | `SIGNATURE_INVALID` | 400 | Signature verification failed |
-| `VERSION_EXISTS` | 409 | Version already published |
+| `VERSION_EXISTS` | 409 | Version already published *(planned — not yet implemented)* |
 | `VERSION_INVALID` | 400 | Not valid semver or not greater than existing |
 | `FORBIDDEN` | 403 | No permission to publish to namespace (see note below) |
 | `RATE_LIMITED` | 429 | Too many publish requests (include `Retry-After`) |

@@ -45,7 +45,7 @@ Content-Type: application/json
 ```json
 {
   "namespace": "imboard-ai/development",
-  "content": "---\nname: setup-react\ntitle: Setup React Library\nversion: 1.0.0\n---\n\n# Instructions\n...",
+  "content": "---dossier\n{\n  \"name\": \"setup-react\",\n  \"title\": \"Setup React Library\",\n  \"version\": \"1.0.0\"\n}\n---\n\n# Instructions\n...",
   "changelog": "Initial publish"
 }
 ```
@@ -96,7 +96,7 @@ github: {
 
 ### Step 2: Create `lib/dossier.js` - Dossier parsing utilities
 Functions:
-- `parseFrontmatter(content)` - Extract YAML frontmatter from .ds.md
+- `parseFrontmatter(content)` - Extract JSON/YAML frontmatter from .ds.md
 - `validateDossier(parsed)` - Check required fields (name, title, version)
 - `buildFullName(namespace, name)` - Combine namespace + name
 
@@ -159,21 +159,25 @@ api/v1/
 ## Dossier Frontmatter Schema
 
 Required fields:
-```yaml
----
-name: setup-react        # Slug, lowercase, hyphens only
-title: Setup React Library
-version: 1.0.0           # Semver
+```json
+---dossier
+{
+  "name": "setup-react",
+  "title": "Setup React Library",
+  "version": "1.0.0"
+}
 ---
 ```
 
 Optional fields:
-```yaml
----
-description: Short description
-category: development
-tags: [react, library]
-author: yuvaldim
+```json
+---dossier
+{
+  "description": "Short description",
+  "category": "development",
+  "tags": ["react", "library"],
+  "author": "yuvaldim"
+}
 ---
 ```
 
@@ -182,7 +186,7 @@ author: yuvaldim
 ## Validation Rules
 
 1. **Content size:** Max 1MB
-2. **Frontmatter:** Must be valid YAML between `---` markers
+2. **Frontmatter:** Must be valid JSON/YAML between `---dossier` or `---` markers
 3. **Required fields:** name, title, version
 4. **Name format:** lowercase alphanumeric + hyphens, 1-64 chars
 5. **Version format:** Valid semver (x.y.z)
@@ -224,7 +228,7 @@ author: yuvaldim
 1. **Path traversal:** Reject names containing `..`, `/`, or non-alphanumeric chars
 2. **Namespace validation:** Always verify against JWT claims
 3. **Bot token scope:** Limited to content repo only
-4. **Content validation:** Parse YAML safely, reject malformed input
+4. **Content validation:** Parse JSON/YAML safely, reject malformed input
 
 ---
 
