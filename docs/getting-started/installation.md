@@ -45,8 +45,8 @@ Or add dossiers to your existing project:
 ```bash
 # In your project directory
 mkdir -p dossiers
-curl -o dossiers/project-init.md \
-  https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/development/setup-react-library.md
+curl -o dossiers/project-init.ds.md \
+  https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/development/setup-react-library.ds.md
 ```
 
 #### Step 2: Tell your AI to learn and execute
@@ -320,10 +320,10 @@ See the [CLI README](../../cli/README.md#registry-configuration) for full regist
 ### 1. Explore Examples
 
 See [examples/](./examples/) for real-world dossiers:
-- **Data Science**: [ML Training Pipeline](./examples/data-science/train-ml-model.md)
-- **Database**: [Schema Migration](./examples/database/migrate-schema.md)
-- **Frontend**: [React Component Library](./examples/development/setup-react-library.md)
-- **DevOps**: [AWS Deployment](./examples/devops/deploy-to-aws.md)
+- **Data Science**: [ML Training Pipeline](../../examples/data-science/train-ml-model.ds.md)
+- **Database**: [Schema Migration](../../examples/database/migrate-schema.ds.md)
+- **Frontend**: [React Component Library](../../examples/development/setup-react-library.ds.md)
+- **DevOps**: [AWS Deployment](../../examples/devops/deploy-to-aws.ds.md)
 
 ### 2. Create Your Own Dossiers
 

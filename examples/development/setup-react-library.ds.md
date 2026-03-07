@@ -169,7 +169,7 @@ Success means: A fully functional component library that can be developed locall
 ## Prerequisites
 
 **Environment Requirements**:
-- Node.js 18+ installed
+- Node.js 20+ installed
 - NPM 9+ or Yarn/PNPM
 - Git installed
 - Modern code editor (VSCode recommended)

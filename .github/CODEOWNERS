@@ -1,0 +1,9 @@
+# Default owner for everything
+* @yuvaldim
+
+# Package-specific ownership
+/packages/core/ @yuvaldim
+/cli/ @yuvaldim
+/mcp-server/ @yuvaldim
+/registry/ @yuvaldim
+/packages/worktree-pool/ @yuvaldim

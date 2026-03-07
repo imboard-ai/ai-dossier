@@ -82,7 +82,7 @@ This is a **one-time setup** that enhances all future dossier executions.
 ### Required
 
 - **Claude Code** installed and running
-- **Node.js 18+** and npm installed
+- **Node.js 20+** and npm installed
   - Check: `node --version` and `npm --version`
   - If missing: https://nodejs.org/
 - **Text editor** to edit JSON configuration files

@@ -32,7 +32,7 @@
 🔗 **Multi-registry**: Configure multiple registries for teams and organizations
 🌐 **Works with**: Claude, ChatGPT, Cursor, any LLM—no vendor lock-in
 
-**Status**: v1.0 protocol | 15+ production examples | Active development
+**Status**: v1.0 protocol | 15+ example templates | Active development
 
 > **File conventions**: Dossiers use `.ds.md` (immutable instructions) and `.dsw.md` (mutable working files). Frontmatter uses `---dossier` (JSON) instead of `---` (YAML) to avoid parser conflicts. [Learn more](docs/explanation/faq.md#what-do-the-dsmd-and-dswmd-file-extensions-mean)
 

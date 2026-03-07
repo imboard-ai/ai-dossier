@@ -636,7 +636,7 @@ Exit 0 (safe) or 1 (unsafe)
 1. **Fail Secure**: Default to blocking on any verification failure
 2. **Exit Codes**: Machine-readable results for scripting
 3. **Clear Output**: Human-readable for manual use
-4. **No Dependencies**: Uses only Node.js built-ins
+4. **Minimal Dependencies**: Core verification + commander CLI framework
 5. **Fast**: Verification in milliseconds
 
 ---

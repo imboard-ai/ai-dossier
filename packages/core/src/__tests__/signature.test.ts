@@ -334,9 +334,5 @@ With special chars: 你好 🎉`;
 
 describe('verifyWithKms', () => {
   // Full KMS signer/verifier tests with mocked AWS SDK are in kms.test.ts
-  // These are kept as documentation that KMS integration tests would require real AWS credentials
-  it('should be tested via mocked AWS SDK in kms.test.ts', () => {
-    // See kms.test.ts for comprehensive mocked tests
-    expect(true).toBe(true);
-  });
+  it.skip('requires mocked AWS SDK — see kms.test.ts for comprehensive tests', () => {});
 });

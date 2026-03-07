@@ -102,7 +102,7 @@ verify:
 		echo "Usage: make verify FILE=path/to/file.ds.md"; \
 		exit 1; \
 	fi
-	node cli/bin/dossier-verify "$(FILE)"
+	node cli/dist/cli.js verify "$(FILE)"
 
 ## dev: Watch mode for development (builds core on change)
 dev:

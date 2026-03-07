@@ -1,4 +1,4 @@
-import { type ExecSyncOptions, execFileSync, execSync } from 'node:child_process';
+import { type ExecSyncOptions, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as readline from 'node:readline';
@@ -372,12 +372,12 @@ export async function replenish(
 
       copyEnvFiles(gitRoot, absWorktreePath);
 
-      execSync('npm install', {
+      execFileSync('npm', ['install'], {
         cwd: absWorktreePath,
         stdio: 'pipe',
         timeout: 300_000,
       });
-      execSync('make build-core build-mcp build-cli', {
+      execFileSync('make', ['build-core', 'build-mcp', 'build-cli'], {
         cwd: absWorktreePath,
         stdio: 'pipe',
         timeout: 300_000,
@@ -408,7 +408,7 @@ export async function replenish(
     }
   };
 
-  // Note: createOne uses execSync so parallelism is not possible in a single
+  // Note: createOne uses execFileSync so parallelism is not possible in a single
   // process. The --parallel flag is reserved for future async implementation.
   for (let i = 0; i < toCreate; i++) {
     createOne();
@@ -452,12 +452,12 @@ export function claim(issue: number, branch: string): { path: string } | null {
       git(['reset', '--hard', 'origin/main'], { cwd: absPath });
 
       if (lockChanged) {
-        execSync('npm install', {
+        execFileSync('npm', ['install'], {
           cwd: absPath,
           stdio: 'pipe',
           timeout: 300_000,
         });
-        execSync('make build-core build-mcp build-cli', {
+        execFileSync('make', ['build-core', 'build-mcp', 'build-cli'], {
           cwd: absPath,
           stdio: 'pipe',
           timeout: 300_000,
@@ -557,12 +557,12 @@ export function returnWorktree(worktreePath: string): void {
     }
 
     if (lockChanged) {
-      execSync('npm install', {
+      execFileSync('npm', ['install'], {
         cwd: newAbsPath,
         stdio: 'pipe',
         timeout: 300_000,
       });
-      execSync('make build-core build-mcp build-cli', {
+      execFileSync('make', ['build-core', 'build-mcp', 'build-cli'], {
         cwd: newAbsPath,
         stdio: 'pipe',
         timeout: 300_000,
@@ -618,12 +618,12 @@ export function refresh(): { refreshed: number; errors: string[] } {
     try {
       git(['fetch', 'origin'], { cwd: absPath });
       git(['reset', '--hard', 'origin/main'], { cwd: absPath });
-      execSync('npm install', {
+      execFileSync('npm', ['install'], {
         cwd: absPath,
         stdio: 'pipe',
         timeout: 300_000,
       });
-      execSync('make build-core build-mcp build-cli', {
+      execFileSync('make', ['build-core', 'build-mcp', 'build-cli'], {
         cwd: absPath,
         stdio: 'pipe',
         timeout: 300_000,
