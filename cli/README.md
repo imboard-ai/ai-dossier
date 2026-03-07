@@ -384,6 +384,8 @@ The CLI supports multiple registries for discovering, pulling, and publishing do
 
 ### Configuration File (`~/.dossier/config.json`)
 
+The CLI **auto-creates** `~/.dossier/config.json` the first time you modify settings (e.g., via `dossier config --add-registry`). You do not need to create this file manually. If the file does not exist, the CLI uses built-in defaults (the public registry at `https://dossier-registry.vercel.app`).
+
 ```json
 {
   "registries": {
@@ -403,6 +405,25 @@ The CLI supports multiple registries for discovering, pulling, and publishing do
 }
 ```
 
+See [Read-Only Registries](#read-only-registries) for how the `"readonly"` flag affects operations.
+
+To create the config manually:
+
+```bash
+mkdir -p -m 700 ~/.dossier
+cat > ~/.dossier/config.json << 'EOF'
+{
+  "registries": {
+    "public": {
+      "url": "https://dossier-registry.vercel.app",
+      "default": true
+    }
+  }
+}
+EOF
+chmod 600 ~/.dossier/config.json
+```
+
 ### Resolution Priority
 
 1. `--registry` flag on the command
@@ -410,6 +431,26 @@ The CLI supports multiple registries for discovering, pulling, and publishing do
 3. Project-level `.dossierrc.json`
 4. User-level `~/.dossier/config.json`
 5. Hardcoded default (public registry)
+
+To verify which registries are active and their resolution order, run:
+
+```bash
+dossier config --list-registries
+```
+
+### Read-Only Registries
+
+Registries marked `"readonly": true` can be used for read operations (`search`, `get`, `pull`) but **block write operations** (`publish`, `remove`). Attempting a write operation against a read-only registry produces:
+
+```
+❌ Registry 'readonly-mirror' is read-only
+```
+
+When resolving a write target (e.g., for `publish`), the CLI skips read-only registries and falls back to the first writable registry. If all configured registries are read-only, the CLI returns:
+
+```
+❌ No writable registry configured. All registries are read-only.
+```
 
 ### Per-Command Registry Flag
 
@@ -642,6 +683,52 @@ Registry 'myregistry' not found. Available: public. Run 'dossier config --list-r
 2. Add the missing registry:
    ```bash
    dossier config --add-registry myregistry --url https://dossier.example.com
+   ```
+
+### "Unreachable registry URL"
+
+When a registry is unreachable, the error appears as part of per-registry error output:
+
+```
+❌ Not found in any registry: org/my-dossier
+   internal: fetch failed
+```
+
+**What it means**: The registry URL is not reachable — the server may be down, the URL may be wrong, or there may be a network/firewall issue. When using multiple registries, the CLI succeeds as long as at least one registry responds (see [Multi-Registry Resolution](#multi-registry-resolution)).
+
+**How to fix**:
+
+1. Verify the URL is correct:
+   ```bash
+   dossier config --list-registries
+   curl -s https://dossier.company.com/health
+   ```
+
+2. If the URL is wrong, remove and re-add:
+   ```bash
+   dossier config --remove-registry internal
+   dossier config --add-registry internal --url https://correct-url.company.com
+   ```
+
+### "Malformed config file"
+
+```
+⚠️  Warning: Could not read config file (Unexpected token ...), using defaults
+```
+
+**What it means**: The config file contains invalid JSON. The CLI **does not fail** — it logs a warning and falls back to built-in defaults.
+
+**How to fix**:
+
+1. Validate the JSON:
+   ```bash
+   python3 -m json.tool < ~/.dossier/config.json
+   ```
+
+2. Fix syntax errors, or delete and recreate:
+   ```bash
+   rm ~/.dossier/config.json
+   dossier config --add-registry public --url https://dossier-registry.vercel.app --default
    ```
 
 ---
