@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
 import { resolveRegistries } from '../config';
-import type { DossierMetadata } from '../helpers';
+import type { DossierMetadata, ListSource } from '../helpers';
 import {
   fetchDossierMetadata,
   findDossierFilesGitHub,
@@ -16,6 +16,197 @@ import {
   printRegistryErrors,
 } from '../helpers';
 import { multiRegistryList } from '../multi-registry';
+
+interface ListOptions {
+  json?: boolean;
+  format?: string;
+  source?: string;
+  page?: string;
+  perPage?: string;
+  recursive?: boolean;
+  signedOnly?: boolean;
+  risk?: string;
+  category?: string;
+  showPath?: boolean;
+}
+
+async function handleRegistryList(options: ListOptions): Promise<void> {
+  const { page, perPage } = parsePaginationParams(options.page, options.perPage);
+  const showRegistryLabel = resolveRegistries().length > 1;
+
+  try {
+    const result = await multiRegistryList({
+      category: options.category,
+      page,
+      perPage,
+    });
+
+    if (result.errors.length > 0) {
+      printRegistryErrors(result.errors, 'warning');
+      const totalRegistries = resolveRegistries().length;
+      const failed = result.errors.length;
+      console.error(
+        `⚠️  Showing partial results (${totalRegistries - failed}/${totalRegistries} registries responded)\n`
+      );
+    }
+
+    const dossiers = result.dossiers;
+
+    if (options.format === 'json') {
+      console.log(JSON.stringify({ dossiers, total: result.total, page, perPage }, null, 2));
+      process.exit(0);
+    }
+
+    if (options.format === 'simple') {
+      for (const d of dossiers) {
+        const label = showRegistryLabel ? ` [${d._registry}]` : '';
+        console.log(`${d.name || ''}${label}`);
+      }
+      process.exit(0);
+    }
+
+    if (dossiers.length === 0) {
+      console.log('\n⚠️  No dossiers found in registry\n');
+      process.exit(0);
+    }
+
+    console.log(`\n📋 Registry dossiers (${result.total} total):\n`);
+
+    for (const d of dossiers) {
+      const { name, version, title, category } = formatDossierFields(d);
+      const label = showRegistryLabel ? ` [${d._registry}]` : '';
+      console.log(
+        `  ${name.padEnd(30)} ${(`v${version}`).padEnd(10)} ${category.padEnd(12)} ${title}${label}`
+      );
+    }
+
+    logPaginationInfo(result.total, page, perPage);
+  } catch (err: unknown) {
+    console.error(`\n❌ Registry list failed: ${(err as Error).message}\n`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+async function handleGitHubList(parsed: ListSource): Promise<DossierMetadata[]> {
+  console.log(`\n🔍 Fetching dossiers from GitHub: ${parsed.owner}/${parsed.repo}`);
+  if (parsed.path) {
+    console.log(`   Path: ${parsed.path}`);
+  }
+  console.log(`   Branch: ${parsed.branch}\n`);
+
+  try {
+    const files = await findDossierFilesGitHub(
+      parsed.owner ?? '',
+      parsed.repo ?? '',
+      parsed.path || '',
+      parsed.branch ?? 'main'
+    );
+
+    if (files.length === 0) {
+      console.log('⚠️  No dossiers found (*.ds.md files)');
+      process.exit(0);
+    }
+
+    console.log(`   Found ${files.length} dossier file(s)\n`);
+    console.log('📥 Fetching metadata...\n');
+
+    const dossiers: DossierMetadata[] = [];
+    const batchSize = 5;
+    for (let i = 0; i < files.length; i += batchSize) {
+      const batch = files.slice(i, i + batchSize);
+      const results = await Promise.all(batch.map((f) => fetchDossierMetadata(f.rawUrl, f.path)));
+      dossiers.push(...results);
+    }
+    return dossiers;
+  } catch (err: unknown) {
+    console.error(`❌ Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
+}
+
+function handleLocalList(parsed: ListSource, recursive?: boolean): DossierMetadata[] {
+  const searchDir = path.resolve(parsed.path || '.');
+
+  if (!fs.existsSync(searchDir)) {
+    console.log(`❌ Directory not found: ${searchDir}`);
+    process.exit(1);
+  }
+
+  if (!fs.statSync(searchDir).isDirectory()) {
+    console.log(`❌ Not a directory: ${searchDir}`);
+    process.exit(1);
+  }
+
+  console.log(`\n🔍 Searching for dossiers in: ${searchDir}`);
+  if (recursive) {
+    console.log('   (recursive search enabled)');
+  }
+
+  const files = findDossierFilesLocal(searchDir, recursive);
+
+  if (files.length === 0) {
+    console.log('\n⚠️  No dossiers found (*.ds.md files)');
+    console.log('\nTips:');
+    console.log('  - Use --recursive to search subdirectories');
+    console.log('  - Ensure files have the .ds.md extension');
+    console.log('  - Try: dossier list github:owner/repo\n');
+    process.exit(0);
+  }
+
+  console.log(`   Found ${files.length} dossier file(s)\n`);
+  return files.map((f) => parseDossierMetadataLocal(f));
+}
+
+function filterDossiers(dossiers: DossierMetadata[], options: ListOptions): DossierMetadata[] {
+  let filtered = dossiers;
+  if (options.signedOnly) {
+    filtered = filtered.filter((d) => d.signed === true);
+  }
+  if (options.risk) {
+    const riskLevel = options.risk.toLowerCase();
+    filtered = filtered.filter((d) => (d.risk_level || '').toLowerCase() === riskLevel);
+  }
+  if (options.category) {
+    const category = options.category.toLowerCase();
+    filtered = filtered.filter((d) => (d.category || '').toLowerCase().includes(category));
+  }
+  return filtered;
+}
+
+function outputDossiers(dossiers: DossierMetadata[], options: ListOptions): void {
+  if (options.format === 'json') {
+    console.log(JSON.stringify(dossiers, null, 2));
+  } else if (options.format === 'simple') {
+    for (const d of dossiers) {
+      console.log(d.path);
+    }
+  } else {
+    console.log(formatTable(dossiers, options.showPath));
+
+    console.log(`\nTotal: ${dossiers.length} dossier(s)`);
+
+    const signed = dossiers.filter((d) => d.signed).length;
+    const unsigned = dossiers.length - signed;
+    if (signed > 0 || unsigned > 0) {
+      console.log(`   Signed: ${signed}  |  Unsigned: ${unsigned}`);
+    }
+
+    const riskCounts: Record<string, number> = {};
+    for (const d of dossiers) {
+      const risk = (d.risk_level || 'unknown').toLowerCase();
+      riskCounts[risk] = (riskCounts[risk] || 0) + 1;
+    }
+    const riskSummary = Object.entries(riskCounts)
+      .map(([k, v]) => `${k}: ${v}`)
+      .join('  |  ');
+    if (riskSummary) {
+      console.log(`   Risk: ${riskSummary}`);
+    }
+
+    console.log('');
+  }
+}
 
 /** Registers the `list` command — lists dossiers from registry, directory, or GitHub repo. */
 export function registerListCommand(program: Command): void {
@@ -45,202 +236,24 @@ Multi-registry note:
   or use 'search' for filtered queries.
 `
     )
-    .action(
-      async (
-        source: string,
-        options: {
-          json?: boolean;
-          format?: string;
-          source?: string;
-          page?: string;
-          perPage?: string;
-          recursive?: boolean;
-          signedOnly?: boolean;
-          risk?: string;
-          category?: string;
-          showPath?: boolean;
-        }
-      ) => {
-        if (options.json) {
-          options.format = 'json';
-        }
-
-        if (options.source === 'registry') {
-          const { page, perPage } = parsePaginationParams(options.page, options.perPage);
-          const showRegistryLabel = resolveRegistries().length > 1;
-
-          try {
-            const result = await multiRegistryList({
-              category: options.category,
-              page,
-              perPage,
-            });
-
-            if (result.errors.length > 0) {
-              printRegistryErrors(result.errors, 'warning');
-              const totalRegistries = resolveRegistries().length;
-              const failed = result.errors.length;
-              console.error(
-                `⚠️  Showing partial results (${totalRegistries - failed}/${totalRegistries} registries responded)\n`
-              );
-            }
-
-            const dossiers = result.dossiers;
-
-            if (options.format === 'json') {
-              console.log(
-                JSON.stringify({ dossiers, total: result.total, page, perPage }, null, 2)
-              );
-              process.exit(0);
-            }
-
-            if (options.format === 'simple') {
-              for (const d of dossiers) {
-                const label = showRegistryLabel ? ` [${d._registry}]` : '';
-                console.log(`${d.name || ''}${label}`);
-              }
-              process.exit(0);
-            }
-
-            if (dossiers.length === 0) {
-              console.log('\n⚠️  No dossiers found in registry\n');
-              process.exit(0);
-            }
-
-            console.log(`\n📋 Registry dossiers (${result.total} total):\n`);
-
-            for (const d of dossiers) {
-              const { name, version, title, category } = formatDossierFields(d);
-              const label = showRegistryLabel ? ` [${d._registry}]` : '';
-              console.log(
-                `  ${name.padEnd(30)} ${(`v${version}`).padEnd(10)} ${category.padEnd(12)} ${title}${label}`
-              );
-            }
-
-            logPaginationInfo(result.total, page, perPage);
-          } catch (err: unknown) {
-            console.error(`\n❌ Registry list failed: ${(err as Error).message}\n`);
-            process.exit(1);
-          }
-          process.exit(0);
-        }
-
-        const parsed = parseListSource(source);
-        let dossiers: DossierMetadata[] = [];
-
-        if (parsed.type === 'github') {
-          console.log(`\n🔍 Fetching dossiers from GitHub: ${parsed.owner}/${parsed.repo}`);
-          if (parsed.path) {
-            console.log(`   Path: ${parsed.path}`);
-          }
-          console.log(`   Branch: ${parsed.branch}\n`);
-
-          try {
-            const files = await findDossierFilesGitHub(
-              parsed.owner ?? '',
-              parsed.repo ?? '',
-              parsed.path || '',
-              parsed.branch ?? 'main'
-            );
-
-            if (files.length === 0) {
-              console.log('⚠️  No dossiers found (*.ds.md files)');
-              process.exit(0);
-            }
-
-            console.log(`   Found ${files.length} dossier file(s)\n`);
-            console.log('📥 Fetching metadata...\n');
-
-            const batchSize = 5;
-            for (let i = 0; i < files.length; i += batchSize) {
-              const batch = files.slice(i, i + batchSize);
-              const results = await Promise.all(
-                batch.map((f) => fetchDossierMetadata(f.rawUrl, f.path))
-              );
-              dossiers.push(...results);
-            }
-          } catch (err: unknown) {
-            console.log(`❌ Error: ${(err as Error).message}`);
-            process.exit(1);
-          }
-        } else {
-          const searchDir = path.resolve(parsed.path || '.');
-
-          if (!fs.existsSync(searchDir)) {
-            console.log(`❌ Directory not found: ${searchDir}`);
-            process.exit(1);
-          }
-
-          if (!fs.statSync(searchDir).isDirectory()) {
-            console.log(`❌ Not a directory: ${searchDir}`);
-            process.exit(1);
-          }
-
-          console.log(`\n🔍 Searching for dossiers in: ${searchDir}`);
-          if (options.recursive) {
-            console.log('   (recursive search enabled)');
-          }
-
-          const files = findDossierFilesLocal(searchDir, options.recursive);
-
-          if (files.length === 0) {
-            console.log('\n⚠️  No dossiers found (*.ds.md files)');
-            console.log('\nTips:');
-            console.log('  - Use --recursive to search subdirectories');
-            console.log('  - Ensure files have the .ds.md extension');
-            console.log('  - Try: dossier list github:owner/repo\n');
-            process.exit(0);
-          }
-
-          console.log(`   Found ${files.length} dossier file(s)\n`);
-          dossiers = files.map((f) => parseDossierMetadataLocal(f));
-        }
-
-        if (options.signedOnly) {
-          dossiers = dossiers.filter((d) => d.signed === true);
-        }
-        if (options.risk) {
-          const riskLevel = options.risk.toLowerCase();
-          dossiers = dossiers.filter((d) => (d.risk_level || '').toLowerCase() === riskLevel);
-        }
-        if (options.category) {
-          const category = options.category.toLowerCase();
-          dossiers = dossiers.filter((d) => (d.category || '').toLowerCase().includes(category));
-        }
-
-        if (options.format === 'json') {
-          console.log(JSON.stringify(dossiers, null, 2));
-        } else if (options.format === 'simple') {
-          for (const d of dossiers) {
-            console.log(d.path);
-          }
-        } else {
-          console.log(formatTable(dossiers, options.showPath));
-
-          console.log(`\nTotal: ${dossiers.length} dossier(s)`);
-
-          const signed = dossiers.filter((d) => d.signed).length;
-          const unsigned = dossiers.length - signed;
-          if (signed > 0 || unsigned > 0) {
-            console.log(`   Signed: ${signed}  |  Unsigned: ${unsigned}`);
-          }
-
-          const riskCounts: Record<string, number> = {};
-          for (const d of dossiers) {
-            const risk = (d.risk_level || 'unknown').toLowerCase();
-            riskCounts[risk] = (riskCounts[risk] || 0) + 1;
-          }
-          const riskSummary = Object.entries(riskCounts)
-            .map(([k, v]) => `${k}: ${v}`)
-            .join('  |  ');
-          if (riskSummary) {
-            console.log(`   Risk: ${riskSummary}`);
-          }
-
-          console.log('');
-        }
-
-        process.exit(0);
+    .action(async (source: string, options: ListOptions) => {
+      if (options.json) {
+        options.format = 'json';
       }
-    );
+
+      if (options.source === 'registry') {
+        await handleRegistryList(options);
+        return;
+      }
+
+      const parsed = parseListSource(source);
+      const dossiers =
+        parsed.type === 'github'
+          ? await handleGitHubList(parsed)
+          : handleLocalList(parsed, options.recursive);
+
+      const filtered = filterDossiers(dossiers, options);
+      outputDossiers(filtered, options);
+      process.exit(0);
+    });
 }
