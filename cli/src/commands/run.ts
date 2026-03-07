@@ -10,6 +10,7 @@ import {
   detectLlm,
   downloadUrlToTempFile,
   printRegistryErrors,
+  printRegistryNotFoundError,
   runVerification,
   safeDossierPath,
 } from '../helpers';
@@ -151,10 +152,7 @@ export function registerRunCommand(program: Command): void {
                 const { result: meta, errors: metaErrors } =
                   await multiRegistryGetDossier(dossierName);
                 if (!meta) {
-                  console.error(`\n❌ Not found: ${file}`);
-                  console.error('   Not a local file and not found in any registry');
-                  printRegistryErrors(metaErrors);
-                  console.error('');
+                  printRegistryNotFoundError(file, metaErrors);
                   process.exit(1);
                 }
                 resolvedVersion = meta.version || 'latest';
@@ -164,10 +162,7 @@ export function registerRunCommand(program: Command): void {
                 resolvedVersion
               );
               if (!result) {
-                console.error(`\n❌ Not found: ${file}`);
-                console.error('   Not a local file and not found in any registry');
-                printRegistryErrors(contentErrors);
-                console.error('');
+                printRegistryNotFoundError(file, contentErrors);
                 process.exit(1);
               }
 
@@ -390,13 +385,21 @@ export function registerRunCommand(program: Command): void {
         const cleanupSecureTmp = () => {
           try {
             fs.unlinkSync(secureTmpFile);
-          } catch {
-            /* already cleaned */
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+              process.stderr.write(
+                `Warning: failed to clean up secure temp file: ${String((err as Error).message || err)}\n`
+              );
+            }
           }
           try {
             fs.rmdirSync(secureTmpDir);
-          } catch {
-            /* already cleaned */
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+              process.stderr.write(
+                `Warning: failed to clean up secure temp dir: ${String((err as Error).message || err)}\n`
+              );
+            }
           }
         };
 

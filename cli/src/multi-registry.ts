@@ -138,6 +138,7 @@ async function multiRegistrySearch(
  * Get dossier info from the first registry that has it.
  * Tries all registries in parallel, returns the first success.
  * Returns error details when all registries fail.
+ * When DOSSIER_DEBUG is set, logs which registry served the request to stderr.
  */
 async function multiRegistryGetDossier(
   name: string,
@@ -158,6 +159,11 @@ async function multiRegistryGetDossier(
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r.status === 'fulfilled') {
+      if (process.env.DOSSIER_DEBUG) {
+        process.stderr.write(
+          `[multi-registry] getDossier '${name}' served by '${r.value._registry}'\n`
+        );
+      }
       return { result: r.value, errors: [] };
     }
     errors.push({
@@ -172,6 +178,7 @@ async function multiRegistryGetDossier(
 /**
  * Get dossier content from the first registry that has it.
  * Returns error details when all registries fail.
+ * When DOSSIER_DEBUG is set, logs which registry served the request to stderr.
  */
 async function multiRegistryGetContent(
   name: string,
@@ -192,6 +199,11 @@ async function multiRegistryGetContent(
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r.status === 'fulfilled') {
+      if (process.env.DOSSIER_DEBUG) {
+        process.stderr.write(
+          `[multi-registry] getContent '${name}' served by '${r.value._registry}'\n`
+        );
+      }
       return { result: r.value, errors: [] };
     }
     errors.push({
