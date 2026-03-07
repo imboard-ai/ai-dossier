@@ -40,9 +40,9 @@ export function collectDeclaredUrls(frontmatter: DossierFrontmatter): string[] {
     }
   }
 
-  if (Array.isArray(frontmatter.tools_required)) {
-    for (const tool of frontmatter.tools_required as Array<Record<string, unknown>>) {
-      if (typeof tool.install_url === 'string') {
+  if (frontmatter.tools_required) {
+    for (const tool of frontmatter.tools_required) {
+      if (tool.install_url) {
         urls.push(tool.install_url);
       }
     }
@@ -56,9 +56,9 @@ export function collectDeclaredUrls(frontmatter: DossierFrontmatter): string[] {
     urls.push(frontmatter.repository);
   }
 
-  if (Array.isArray(frontmatter.authors)) {
-    for (const author of frontmatter.authors as Array<Record<string, unknown>>) {
-      if (typeof author.url === 'string') {
+  if (frontmatter.authors) {
+    for (const author of frontmatter.authors) {
+      if (author.url) {
         urls.push(author.url);
       }
     }

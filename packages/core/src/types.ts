@@ -26,6 +26,19 @@ export interface ExternalReference {
   required: boolean;
 }
 
+export interface ToolRequired {
+  name: string;
+  version?: string;
+  check_command?: string;
+  install_url?: string;
+}
+
+export interface DossierAuthor {
+  name?: string;
+  email?: string;
+  url?: string;
+}
+
 export interface DossierFrontmatter {
   dossier_schema_version?: string;
   name?: string;
@@ -42,6 +55,8 @@ export interface DossierFrontmatter {
   destructive_operations?: string[];
   content_scope?: ContentScope;
   external_references?: ExternalReference[];
+  tools_required?: ToolRequired[];
+  authors?: DossierAuthor[];
   requires_approval?: boolean;
   checksum?: {
     algorithm: string;
