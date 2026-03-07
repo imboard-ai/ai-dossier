@@ -1,7 +1,7 @@
 # Dossier Build System
 # Handles build order dependencies across npm workspaces
 
-.PHONY: all build build-all clean test test-coverage install help lint format check
+.PHONY: all build build-all clean test test-coverage install help lint format check build-pool
 .DEFAULT_GOAL := help
 
 ## help: Show this help message
@@ -15,7 +15,8 @@ help:
 	@echo "  1. packages/core (TypeScript → dist/)"
 	@echo "  2. mcp-server (TypeScript → dist/, depends on core)"
 	@echo "  3. cli (TypeScript → dist/)"
-	@echo "  4. registry (TypeScript, deployed via Vercel, depends on core)"
+	@echo "  4. packages/worktree-pool (TypeScript → dist/)"
+	@echo "  5. registry (TypeScript, deployed via Vercel, depends on core)"
 
 ## install: Install all npm dependencies
 install:
@@ -27,7 +28,7 @@ install:
 build: lint build-all
 
 ## build-all: Build all packages in dependency order (no lint)
-build-all: build-core build-mcp build-cli
+build-all: build-core build-mcp build-cli build-pool
 	@echo "✓ All packages built successfully"
 
 ## build-core: Build @ai-dossier/core package
@@ -48,10 +49,17 @@ build-cli: build-core
 	cd cli && npm run build
 	@echo "✓ cli built"
 
+## build-pool: Build @ai-dossier/worktree-pool package
+build-pool:
+	@echo "Building packages/worktree-pool..."
+	cd packages/worktree-pool && npm run build
+	@echo "✓ packages/worktree-pool built"
+
 ## clean: Remove all build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf packages/core/dist
+	rm -rf packages/worktree-pool/dist
 	rm -rf mcp-server/dist
 	rm -rf cli/dist
 	@echo "✓ Build artifacts cleaned"
