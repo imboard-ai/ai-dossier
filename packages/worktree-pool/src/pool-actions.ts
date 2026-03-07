@@ -223,7 +223,7 @@ function acquireLock(poolDir: string): void {
             `If no other process is running, remove ${lockPath}`
         );
       }
-      execSync(`sleep ${LOCK_RETRY_MS / 1000}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_MS);
     }
   }
 }
@@ -316,7 +316,7 @@ function destroyWorktree(gitRoot: string, tempBranch: string, absPath: string): 
 
 export async function replenish(
   count?: number,
-  parallel = false
+  _parallel = false
 ): Promise<{ created: number; errors: string[] }> {
   const gitRoot = findGitRoot();
   const poolDir = await resolvePoolDir(gitRoot, { interactive: true });
@@ -339,7 +339,7 @@ export async function replenish(
   const errors: string[] = [];
   let created = 0;
 
-  const createOne = async (): Promise<void> => {
+  const createOne = (): void => {
     const id = generateId();
     const absWorktreePath = toAbs(poolDir, id);
     const tempBranch = `pool/spare-${id}`;
@@ -408,12 +408,10 @@ export async function replenish(
     }
   };
 
-  if (parallel) {
-    await Promise.all(Array.from({ length: toCreate }, () => createOne()));
-  } else {
-    for (let i = 0; i < toCreate; i++) {
-      await createOne();
-    }
+  // Note: createOne uses execSync so parallelism is not possible in a single
+  // process. The --parallel flag is reserved for future async implementation.
+  for (let i = 0; i < toCreate; i++) {
+    createOne();
   }
 
   return { created, errors };
@@ -511,23 +509,23 @@ export function returnWorktree(worktreePath: string): void {
   const poolDir = resolvePoolDirSync(gitRoot);
   const absPath = path.resolve(worktreePath);
 
-  const state = readState(poolDir);
-  const entry = state.worktrees.find((w) => toAbs(poolDir, w.path) === absPath);
-
-  if (!entry) {
-    throw new Error(`Worktree not found in pool state: ${worktreePath}`);
-  }
-
   const newId = generateId();
   const newTempBranch = `pool/spare-${newId}`;
   const newAbsPath = toAbs(poolDir, newId);
 
-  try {
-    withLock(poolDir, (state) => ({
-      state: updateWorktree(state, entry.id, { status: 'recycling' }),
-      result: undefined,
-    }));
+  // Look up entry and mark as recycling atomically under lock
+  const entry = withLock(poolDir, (state) => {
+    const found = state.worktrees.find((w) => toAbs(poolDir, w.path) === absPath);
+    if (!found) {
+      throw new Error(`Worktree not found in pool state: ${worktreePath}`);
+    }
+    return {
+      state: updateWorktree(state, found.id, { status: 'recycling' }),
+      result: { ...found },
+    };
+  });
 
+  try {
     git('fetch origin', { cwd: absPath });
     git(`checkout -b "${newTempBranch}" origin/main`, { cwd: absPath });
     git('clean -fd', { cwd: absPath });

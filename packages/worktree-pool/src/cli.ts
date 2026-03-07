@@ -7,7 +7,7 @@ function usage(): void {
 
 Commands:
   status                          Show pool inventory
-  replenish [--count N] [--parallel]  Pre-warm spares up to target
+  replenish [--count N]             Pre-warm spares up to target
   claim --issue N --branch B      Claim a warm worktree, print path
   return --path P                 Return worktree to pool
   refresh                         Fetch + rebuild all warm worktrees
@@ -71,11 +71,8 @@ async function main(): Promise<void> {
 
       case 'replenish': {
         const count = flags.count ? Number.parseInt(String(flags.count), 10) : undefined;
-        const parallel = flags.parallel === true;
-        console.error(
-          `Replenishing pool${count ? ` (count: ${count})` : ''}${parallel ? ' (parallel)' : ''}...`
-        );
-        const result = await replenish(count, parallel);
+        console.error(`Replenishing pool${count ? ` (count: ${count})` : ''}...`);
+        const result = await replenish(count);
         console.error(`Created ${result.created} worktree(s)`);
         if (result.errors.length > 0) {
           for (const err of result.errors) {
