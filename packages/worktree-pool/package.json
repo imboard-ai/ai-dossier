@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/worktree-pool",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Pre-warmed git worktree pool for instant issue setup",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
