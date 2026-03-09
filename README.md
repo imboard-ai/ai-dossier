@@ -19,7 +19,7 @@
 > Dossier turns plain-text instructions into executable workflows with built-in verification.
 > Like Dockerfiles for AI automation—structured, portable, verifiable.
 
-**New here?** → [5-min Quick Start](docs/getting-started/installation.md) | **Want to try now?** → [30-sec demo](#try-it-now)
+**New here?** → [5-min Quick Start](docs/getting-started/installation.md) | **Want to try now?** → [Get started in 30 seconds](#get-started)
 
 ---
 
@@ -38,32 +38,49 @@
 
 ---
 
-## Try it Now
+## Get Started
 
-**Option A — Claude Code Plugin (Recommended)**
+### 1. Run a dossier — zero install
+
+Pick any LLM you already have and paste this:
+
+```
+Analyze my project using the dossier at:
+https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/guides/context-engineering-best-practices.ds.md
+```
+
+That's it. The LLM reads the dossier and follows its instructions — no tools needed.
+
+Want to verify it first?
+
+```bash
+npx @ai-dossier/cli verify https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/guides/context-engineering-best-practices.ds.md
+```
+
+### 2. Add the MCP server to Claude Code
+
+One command gives Claude Code native dossier support — discover, verify, and execute dossiers without copy-pasting URLs:
+
+```bash
+claude mcp add dossier --scope user -- npx @ai-dossier/mcp-server
+```
+
+Then ask Claude: *"List available dossiers"* or *"Run the scaffold-typescript-project dossier"*.
+
+<details>
+<summary>Alternative: Claude Code plugin (auto-updates)</summary>
 
 ```
 /plugin marketplace add imboard-ai/ai-dossier
 /plugin install dossier-mcp-server@ai-dossier
 ```
+</details>
 
-That's it — the dossier MCP server is now available across all your projects with auto-updates.
+<details>
+<summary>Alternative: Manual JSON config (Claude Desktop or other MCP clients)</summary>
 
----
+Add to `claude_desktop_config.json` or your MCP client's config file:
 
-**Option B — Manual MCP Setup (Claude Code / Claude Desktop)**
-
-If you prefer manual configuration or need project-scoped setup:
-
-```bash
-# Claude Code (global)
-claude mcp add dossier --scope user -- npx @ai-dossier/mcp-server
-
-# Claude Code (project-only)
-claude mcp add dossier -- npx @ai-dossier/mcp-server
-```
-
-Or add to `~/.claude/settings.local.json` / `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
@@ -74,47 +91,47 @@ Or add to `~/.claude/settings.local.json` / `claude_desktop_config.json`:
   }
 }
 ```
+</details>
 
----
+### 3. Create your own dossier
 
-**Option C — Command-Line Verification (Works Anywhere)**
-
-Verify dossier security before execution:
+Initialize dossier in your project (sets up `~/.dossier/`, hooks, and MCP config):
 
 ```bash
-# Clone the repo and use the CLI verification tool
-git clone https://github.com/imboard-ai/ai-dossier.git
-cd ai-dossier
-npx @ai-dossier/cli verify examples/git-project-review/atomic/readme-reality-check.ds.md
+npx @ai-dossier/cli init
 ```
 
----
+Then create a dossier:
 
-**Option D — Try with Any LLM (Zero Installation)**
+```bash
+npx @ai-dossier/cli create my-workflow
+```
 
-Copy this into any LLM chat (Claude, ChatGPT, Gemini):
+This scaffolds a `.ds.md` file you can edit. A dossier is just Markdown with a JSON frontmatter block:
+
 ```markdown
 ---dossier
 {
-  "title": "Hello World",
+  "title": "My Workflow",
   "version": "1.0.0",
   "protocol_version": "1.0",
-  "status": "stable",
-  "objective": "Print a friendly greeting and verify success",
+  "status": "draft",
+  "objective": "Describe what this automates",
   "risk_level": "low"
 }
 ---
 
-# Hello World
+# My Workflow
 
 ## Actions
-1. Print: "Hello from Dossier!"
+1. Step one — what to do
+2. Step two — what to verify
 
 ## Validation
-- Output contains "Hello from Dossier"
+- Expected outcome was achieved
 ```
 
-**Expected result**: The LLM will print "Hello from Dossier!" and confirm success.
+See the [Authoring Guide](docs/guides/authoring-guidelines.md) for the full spec, or browse the [Dossier Registry](https://registry.dossier.dev) for real-world examples.
 
 ---
 
@@ -135,27 +152,18 @@ Copy this into any LLM chat (Claude, ChatGPT, Gemini):
 
 ---
 
-## Examples Gallery
+## Examples
 
-Real-world dossiers demonstrating the protocol across different domains:
+| Example | Use Case |
+|---------|----------|
+| [Scaffold TypeScript Project](./examples/setup/scaffold-typescript-project.ds.md) | Scaffold a production-ready TS project with CI, testing, linting |
+| [Context Engineering Best Practices](./examples/guides/context-engineering-best-practices.ds.md) | Reference guide for writing effective AI agent context files |
 
-| Example | Use Case | Est. Time |
-|---------|----------|-----------|
-| [Git Project Reality Check](./examples/git-project-review/) | Audit README claims against actual code with evidence | ~5 min |
-| [Setup React Library](./examples/development/setup-react-library.ds.md) | Initialize production-ready component library with TypeScript, Storybook, tests | ~10 min |
-| [ML Training Pipeline](./examples/data-science/train-ml-model.ds.md) | Train and validate ML models with reproducible experiment logs | ~10-15 min |
-| [DB Migration](./examples/database/migrate-schema.ds.md) | Execute schema changes with automatic backup and rollback capability | ~10 min |
-| [AWS Deploy](./examples/devops/deploy-to-aws.ds.md) | Deploy applications to AWS with infrastructure validation | ~15 min |
-| [External References](./examples/security/external-references-example.ds.md) | Declare and manage external URLs with trust levels | ~5 min |
+Browse the **[Dossier Registry](https://registry.dossier.dev)** for the full collection — DevOps, databases, data science, security, and more.
 
-**Who should try these**: Project maintainers, DevOps/SRE teams, ML engineers, frontend developers
-
-**Run the first one now:**
-
-Ask your LLM:
-```
-Analyze my project using the readme-reality-check dossier from:
-https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/git-project-review/atomic/readme-reality-check.ds.md
+```bash
+# Search from the CLI
+npx @ai-dossier/cli search deploy
 ```
 
 ---
