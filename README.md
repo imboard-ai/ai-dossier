@@ -19,7 +19,7 @@
 > Dossier turns plain-text instructions into executable workflows with built-in verification.
 > Like Dockerfiles for AI automation—structured, portable, verifiable.
 
-**New here?** → [5-min Quick Start](docs/getting-started/installation.md) | **Want to try now?** → [Get started in 30 seconds](#get-started)
+**New here?** → [5-min Quick Start](docs/getting-started/installation.md) | **Using Claude Code?** → [MCP in 60 Seconds](docs/tutorials/mcp-quickstart.md) | **Want to try now?** → [Get started in 30 seconds](#get-started)
 
 ---
 
@@ -212,7 +212,7 @@ See the [CLI documentation](./cli/README.md#config-command) for full registry ma
 
 | | |
 |---|---|
-| **Getting Started** | [Quick Start](docs/getting-started/installation.md) · [Your First Dossier](docs/tutorials/your-first-dossier.md) · [FAQ](docs/explanation/faq.md) |
+| **Getting Started** | [Quick Start](docs/getting-started/installation.md) · [MCP in 60 Seconds](docs/tutorials/mcp-quickstart.md) · [Your First Dossier](docs/tutorials/your-first-dossier.md) · [FAQ](docs/explanation/faq.md) |
 | **Reference** | [Protocol](docs/reference/protocol.md) · [Specification](docs/reference/specification.md) · [Schema](docs/reference/schema.md) · [JSON Schema](./dossier-schema.json) |
 | **Guides** | [Authoring Guidelines](docs/guides/authoring-guidelines.md) · [Dossier Guide](docs/guides/dossier-guide.md) · [Adopter Playbooks](docs/guides/adopter-playbooks.md) · [Examples](./examples/) |
 | **Packages** | [CLI](./cli/) · [MCP Server](./mcp-server/) · [Core Library](./packages/core/) · [Registry](./registry/) |
