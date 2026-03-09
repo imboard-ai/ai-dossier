@@ -7,6 +7,7 @@
 ✅ Works with Claude, ChatGPT, Cursor—any LLM
 
 [![CI](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml)
+[![Examples](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml)
 [![npm version](https://img.shields.io/npm/v/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
@@ -214,7 +215,7 @@ See the [CLI documentation](./cli/README.md#config-command) for full registry ma
 |---|---|
 | **Getting Started** | [Quick Start](docs/getting-started/installation.md) · [Your First Dossier](docs/tutorials/your-first-dossier.md) · [FAQ](docs/explanation/faq.md) |
 | **Reference** | [Protocol](docs/reference/protocol.md) · [Specification](docs/reference/specification.md) · [Schema](docs/reference/schema.md) · [JSON Schema](./dossier-schema.json) |
-| **Guides** | [Authoring Guidelines](docs/guides/authoring-guidelines.md) · [Dossier Guide](docs/guides/dossier-guide.md) · [Adopter Playbooks](docs/guides/adopter-playbooks.md) · [Examples](./examples/) |
+| **Guides** | [Authoring Guidelines](docs/guides/authoring-guidelines.md) · [Dossier Guide](docs/guides/dossier-guide.md) · [CI/CD Integration](docs/guides/ci-cd-integration.md) · [Adopter Playbooks](docs/guides/adopter-playbooks.md) · [Examples](./examples/) |
 | **Packages** | [CLI](./cli/) · [MCP Server](./mcp-server/) · [Core Library](./packages/core/) · [Registry](./registry/) |
 | **Project** | [Architecture](ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) |
 
