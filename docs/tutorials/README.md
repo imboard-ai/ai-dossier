@@ -4,15 +4,16 @@ Step-by-step learning experiences designed to help you master Dossier.
 
 ## Available Tutorials
 
-- **[Your First Dossier](./your-first-dossier.md)** - Create, verify, and execute your first dossier
+1. **[MCP in 60 Seconds](./mcp-quickstart.md)** - Add dossier support to Claude Code with one command
+2. **[Your First Dossier](./your-first-dossier.md)** - Create, verify, and execute your first dossier
+3. **[Author and Publish](./author-and-publish.md)** - Write a dossier from scratch and publish it to the registry
+4. **[Record a Demo](./record-a-demo.md)** - Create terminal recordings of dossier executions
 
-## Tutorial Format
+## Where to Start
 
-Each tutorial:
-- Takes you step-by-step through a real-world scenario
-- Assumes no prior knowledge
-- Includes hands-on exercises
-- Shows you how to verify your progress
+- **Using Claude Code?** Start with [MCP in 60 Seconds](./mcp-quickstart.md) -- you will be running dossiers in under a minute.
+- **Want to understand the format?** Start with [Your First Dossier](./your-first-dossier.md) for a hands-on walkthrough of dossier structure.
+- **Ready to create your own?** Jump to [Author and Publish](./author-and-publish.md).
 
 ## Not Finding What You Need?
 
