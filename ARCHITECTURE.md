@@ -11,15 +11,23 @@ Dossier is a lightweight automation standard built on three principles:
 
 ## System Components
 
-```
-┌─────────────────────────────────────────┐
-│         Dossier Ecosystem                │
-├─────────────────────────────────────────┤
-│  @ai-dossier/cli      │  Command-line tool │
-│  @ai-dossier/core     │  Verification lib  │
-│  @ai-dossier/mcp      │  AI agent support  │
-│  @ai-dossier/registry │  Registry API      │
-└─────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Ecosystem["Dossier Ecosystem"]
+        Core["@ai-dossier/core\nVerification library"]
+        CLI["@ai-dossier/cli\nCommand-line tool"]
+        MCP["@ai-dossier/mcp-server\nAI agent support"]
+        Registry["@ai-dossier/registry\nRegistry API"]
+    end
+
+    Core --> CLI
+    Core --> MCP
+    CLI --> Registry
+
+    style Core fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    style CLI fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    style MCP fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    style Registry fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
 ```
 
 ### Core Library (`@ai-dossier/core`)
@@ -83,18 +91,18 @@ Your automation steps here...
 
 ## Verification Flow
 
-```
-Download/Read Dossier
-    ↓
-Parse frontmatter + body
-    ↓
-Verify checksum (integrity)
-    ↓
-Verify signature (authenticity)
-    ↓
-Risk assessment
-    ↓
-Execute or BLOCK
+```mermaid
+flowchart TD
+    A["Download / Read Dossier"] --> B["Parse frontmatter + body"]
+    B --> C["Verify checksum\n(integrity)"]
+    C --> D["Verify signature\n(authenticity)"]
+    D --> E["Risk assessment"]
+    E -->|"safe"| F["Execute"]
+    E -->|"blocked"| G["BLOCK"]
+
+    style A fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    style F fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    style G fill:#ffebee,stroke:#c62828,color:#b71c1c
 ```
 
 ## Security Model

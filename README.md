@@ -2,10 +2,6 @@
 
 **Stop writing brittle scripts. Start writing instructions that AI executes intelligently.**
 
-✅ Portable workflows that adapt to your project
-✅ Built-in verification (checksums, signatures, success criteria)
-✅ Works with Claude, ChatGPT, Cursor—any LLM
-
 [![CI](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
@@ -17,7 +13,25 @@
 
 > **Quick Concept**
 > Dossier turns plain-text instructions into executable workflows with built-in verification.
-> Like Dockerfiles for AI automation—structured, portable, verifiable.
+> Like Dockerfiles for AI automation — structured, portable, verifiable.
+
+```
+  ┌──────────────────────────────────────────────────────────────────────┐
+  │                                                                      │
+  │    Write instructions       Verify integrity       AI executes       │
+  │    in Markdown (.ds.md)     with checksums &       the workflow      │
+  │                             signatures             intelligently     │
+  │                                                                      │
+  │    ┌──────────┐    sign     ┌──────────┐   run     ┌──────────┐     │
+  │    │  Author  │ ─────────> │  Verify  │ ────────> │ AI Agent │     │
+  │    └──────────┘            └──────────┘            └──────────┘     │
+  │         │                       │                       │            │
+  │     .ds.md file            checksum +              validated         │
+  │     with JSON              signature               results with     │
+  │     frontmatter            verification            evidence         │
+  │                                                                      │
+  └──────────────────────────────────────────────────────────────────────┘
+```
 
 **New here?** → [5-min Quick Start](docs/getting-started/installation.md) | **Using Claude Code?** → [MCP in 60 Seconds](docs/tutorials/mcp-quickstart.md) | **Want to try now?** → [Get started in 30 seconds](#get-started)
 
@@ -25,12 +39,24 @@
 
 ## At a Glance
 
-📝 **What**: Structured instruction files (`.ds.md`) that AI agents execute intelligently
-🎯 **Why**: Replace brittle scripts with adaptive, verifiable automation that handles edge cases naturally
-⚡ **How**: Create dossier → Run with your AI → Get validated results with evidence
-🔒 **Safety**: Built-in checksums, cryptographic signatures, and CLI verification tools
-🔗 **Multi-registry**: Configure multiple registries for teams and organizations
-🌐 **Works with**: Claude, ChatGPT, Cursor, any LLM—no vendor lock-in
+```mermaid
+flowchart LR
+    A["📝 Create\n.ds.md file"] --> B["🔏 Sign\nchecksum +\nsignature"]
+    B --> C["✅ Verify\nintegrity &\nauthenticity"]
+    C --> D["🤖 Execute\nAI runs the\nworkflow"]
+    D --> E["📋 Validate\nsuccess criteria\n& evidence"]
+
+    style A fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    style B fill:#fce4ec,stroke:#c62828,color:#b71c1c
+    style C fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    style D fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    style E fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+```
+
+**What**: Structured instruction files (`.ds.md`) that AI agents execute intelligently
+**Why**: Replace brittle scripts with adaptive, verifiable automation that handles edge cases naturally
+**Safety**: Built-in checksums, cryptographic signatures, and CLI verification tools
+**Works with**: Claude, ChatGPT, Cursor, any LLM — no vendor lock-in
 
 **Status**: Protocol v1.0 (stable spec) | CLI v0.8.0 | 15+ example templates | Active development
 
@@ -152,6 +178,82 @@ See the [Authoring Guide](docs/guides/authoring-guidelines.md) for the full spec
 
 ---
 
+## Architecture
+
+```mermaid
+graph TB
+    subgraph Packages["@ai-dossier packages"]
+        Core["@ai-dossier/core\nParsing, verification,\nlinting, risk assessment"]
+        CLI["@ai-dossier/cli\nCommand-line tool\nverify, sign, search, run"]
+        MCP["@ai-dossier/mcp-server\nMCP integration for\nClaude Code & others"]
+        Registry["@ai-dossier/registry\nVercel serverless API\nDiscover & publish"]
+    end
+
+    subgraph Inputs["Dossier Files"]
+        DS[".ds.md\nImmutable instructions\nJSON frontmatter + Markdown"]
+        DSW[".dsw.md\nMutable working files\nExecution state"]
+    end
+
+    subgraph Consumers["AI Agents"]
+        Claude["Claude Code"]
+        ChatGPT["ChatGPT"]
+        Cursor["Cursor"]
+        Other["Any LLM"]
+    end
+
+    DS --> Core
+    DSW --> Core
+    Core --> CLI
+    Core --> MCP
+    CLI --> Registry
+    MCP --> Claude
+    MCP --> ChatGPT
+    MCP --> Cursor
+    MCP --> Other
+    CLI -->|"verify & run"| Consumers
+
+    style Core fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    style CLI fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    style MCP fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    style Registry fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    style DS fill:#fff9c4,stroke:#f9a825,color:#f57f17
+    style DSW fill:#fff9c4,stroke:#f9a825,color:#f57f17
+```
+
+### Verification Pipeline
+
+Every dossier goes through a multi-stage security pipeline before execution:
+
+```mermaid
+flowchart TD
+    Start(["dossier verify file.ds.md"]) --> Parse["Parse frontmatter\n+ Markdown body"]
+    Parse --> Checksum{"Checksum\nverification"}
+
+    Checksum -->|"SHA-256 match"| SigCheck{"Signature\nverification"}
+    Checksum -->|"mismatch"| Block["BLOCK execution\nContent tampered"]
+
+    SigCheck -->|"valid + trusted"| Risk["Risk assessment"]
+    SigCheck -->|"valid + untrusted"| Risk
+    SigCheck -->|"unsigned"| Risk
+    SigCheck -->|"invalid"| Block
+
+    Risk -->|"low"| Safe["SAFE to execute"]
+    Risk -->|"medium/high"| Caution["PROCEED with caution"]
+    Risk -->|"critical + unsigned"| Block
+
+    style Start fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    style Safe fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    style Caution fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    style Block fill:#ffebee,stroke:#c62828,color:#b71c1c
+    style Checksum fill:#f5f5f5,stroke:#616161,color:#212121
+    style SigCheck fill:#f5f5f5,stroke:#616161,color:#212121
+    style Risk fill:#f5f5f5,stroke:#616161,color:#212121
+```
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system architecture.
+
+---
+
 ## Examples
 
 | Example | Use Case |
@@ -170,6 +272,22 @@ npx @ai-dossier/cli search deploy
 
 ## Security & Verification
 
+```mermaid
+flowchart LR
+    Author["Author"] -->|"signs"| Dossier[".ds.md"]
+    Dossier -->|"distributed via"| Registry["Registry / URL"]
+    Registry -->|"fetched by"| CLI["CLI / MCP"]
+    CLI -->|"verifies"| Checks["Checksum\n+ Signature\n+ Risk Level"]
+    Checks -->|"safe"| Execute["Execute"]
+    Checks -->|"blocked"| Reject["Reject"]
+
+    style Author fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    style Dossier fill:#fff9c4,stroke:#f9a825,color:#f57f17
+    style Checks fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    style Execute fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    style Reject fill:#ffebee,stroke:#c62828,color:#b71c1c
+```
+
 - Use the CLI tool (`ai-dossier verify`) to verify checksums/signatures before execution
 - Prefer MCP mode for sandboxed, permissioned operations
 - **External reference declaration**: Dossiers that fetch or link to external URLs must declare them in `external_references` with trust levels. The linter flags undeclared URLs, and the MCP server's `read_dossier` tool returns `security_notices` for any undeclared external URLs found in the body. This mitigates transitive trust risks from unvetted external content.
@@ -180,6 +298,23 @@ npx @ai-dossier/cli search deploy
 ## Registry & Multi-Registry Support
 
 The CLI supports multiple registries for discovering, publishing, and sharing dossiers across teams and organizations.
+
+```mermaid
+flowchart LR
+    CLI["dossier CLI"] -->|"parallel query"| R1["Public Registry\nregistry.dossier.dev"]
+    CLI -->|"parallel query"| R2["Internal Registry\ndossier.company.com"]
+    CLI -->|"parallel query"| R3["Mirror Registry\nmirror.example.com"]
+
+    R1 -->|"results"| Merge["Merge results\n(partial failure OK)"]
+    R2 -->|"results"| Merge
+    R3 -->|"error"| Merge
+
+    Merge --> User["User sees\ncombined results"]
+
+    style CLI fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    style Merge fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    style R3 fill:#ffebee,stroke:#c62828,color:#b71c1c
+```
 
 - **Multi-registry**: Configure multiple registries (public, internal, mirrors) queried in parallel
 - **HTTPS enforcement**: All registry URLs must use HTTPS to protect credentials in transit
@@ -202,9 +337,9 @@ See the [CLI documentation](./cli/README.md#config-command) for full registry ma
 
 - **Solo Dev**: paste a `.ds.md` into your LLM and run via MCP or CLI
 - **OSS Maintainer**: add `/dossiers` + a CI check that runs the Reality Check on your README
-- **Platform Team**: start with init → deploy → rollback dossiers; wire secrets & scanners
+- **Platform Team**: start with init -> deploy -> rollback dossiers; wire secrets & scanners
 
-👉 Detailed playbooks in [docs/guides/adopter-playbooks.md](docs/guides/adopter-playbooks.md)
+Detailed playbooks in [docs/guides/adopter-playbooks.md](docs/guides/adopter-playbooks.md)
 
 ---
 
@@ -235,7 +370,7 @@ Dossiers embody this philosophy - they give AI agents clear structure and guidan
 
 ---
 
-**🎯 Dossier: Universal LLM Automation Standard**
+**Dossier: Universal LLM Automation Standard**
 *Structure your agents. Not your scripts.*
 
 ---
