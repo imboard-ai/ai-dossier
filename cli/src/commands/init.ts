@@ -7,9 +7,10 @@ import * as hooks from '../hooks';
 export function registerInitCommand(program: Command): void {
   program
     .command('init')
-    .description('Initialize ~/.dossier/ directory and install Claude Code hook')
+    .description('Initialize ~/.dossier/ directory, install Claude Code hook and MCP server')
     .option('--skip-hooks', 'Skip installing the Claude Code hook')
-    .action((options: { skipHooks?: boolean }) => {
+    .option('--skip-mcp', 'Skip configuring the MCP server for Claude Code')
+    .action((options: { skipHooks?: boolean; skipMcp?: boolean }) => {
       const dossierDir = config.CONFIG_DIR;
       const cacheDir = path.join(dossierDir, 'cache');
       const trustedKeysPath = path.join(dossierDir, 'trusted-keys.txt');
@@ -56,6 +57,32 @@ export function registerInitCommand(program: Command): void {
         }
       }
 
+      if (options.skipMcp) {
+        console.log('   - Skipped MCP server configuration (--skip-mcp)');
+      } else {
+        const result = hooks.installMcpServer();
+        if (result === 'installed') {
+          console.log('   ✓ Configured MCP server for Claude Code');
+        } else if (result === 'already') {
+          console.log('   ✓ MCP server already configured');
+        } else {
+          console.log('   ⚠ Could not configure MCP server automatically');
+          console.log('     Run manually: claude mcp add dossier -- npx @ai-dossier/mcp-server');
+        }
+      }
+
       console.log('\n✅ Dossier initialized successfully\n');
+
+      // What's next? summary
+      console.log("📋 What's next?\n");
+      console.log('   Try these commands:');
+      console.log('   $ ai-dossier search deploy      Search for dossiers');
+      console.log('   $ ai-dossier list                List local dossiers');
+      console.log('   $ ai-dossier create my-task      Create a new dossier');
+      console.log('');
+      if (!options.skipMcp) {
+        console.log('   Claude Code can now discover and run dossiers automatically.');
+        console.log('   Start a Claude Code session and ask it to list available dossiers.\n');
+      }
     });
 }

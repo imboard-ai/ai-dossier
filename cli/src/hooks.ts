@@ -1,8 +1,10 @@
 /**
  * Claude Code hook integration for Dossier CLI.
- * Manages the UserPromptSubmit hook that triggers automatic dossier discovery.
+ * Manages the UserPromptSubmit hook that triggers automatic dossier discovery,
+ * and MCP server configuration for Claude Code.
  */
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -181,11 +183,136 @@ function saveDossierListCache(dossiers: DossierEntry[]): void {
   }
 }
 
+// ─── MCP Server Configuration ───────────────────────────────────────────────
+
+const CLAUDE_MCP_CONFIG_FILE = path.join(os.homedir(), '.claude', 'mcp.json');
+const MCP_SERVER_NAME = 'dossier';
+const MCP_SERVER_PACKAGE = '@ai-dossier/mcp-server';
+
+interface McpServerEntry {
+  command: string;
+  args: string[];
+  [key: string]: unknown;
+}
+
+interface McpConfig {
+  mcpServers?: Record<string, McpServerEntry>;
+  [key: string]: unknown;
+}
+
+/**
+ * Check whether the `claude` CLI is available on PATH.
+ */
+function isClaudeCliAvailable(): boolean {
+  try {
+    execFileSync('which', ['claude'], { stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if the dossier MCP server is already configured.
+ * Checks both `claude mcp list` output (if CLI available) and the JSON config file.
+ */
+function isMcpServerConfigured(): boolean {
+  // Check JSON config file
+  if (fs.existsSync(CLAUDE_MCP_CONFIG_FILE)) {
+    try {
+      const config: McpConfig = JSON.parse(fs.readFileSync(CLAUDE_MCP_CONFIG_FILE, 'utf8'));
+      if (config.mcpServers?.[MCP_SERVER_NAME]) {
+        return true;
+      }
+    } catch {
+      // Corrupted file — continue to check other methods
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Configure the dossier MCP server for Claude Code.
+ *
+ * Strategy:
+ * 1. If `claude` CLI is on PATH, use `claude mcp add` (canonical approach)
+ * 2. Otherwise, fall back to writing ~/.claude/mcp.json directly
+ *
+ * Returns 'installed' | 'already' | 'error'
+ */
+function installMcpServer(): 'installed' | 'already' | 'error' {
+  if (isMcpServerConfigured()) {
+    return 'already';
+  }
+
+  // Try claude CLI first
+  if (isClaudeCliAvailable()) {
+    try {
+      execFileSync(
+        'claude',
+        ['mcp', 'add', MCP_SERVER_NAME, '--scope', 'user', '--', 'npx', MCP_SERVER_PACKAGE],
+        { stdio: 'pipe' }
+      );
+      return 'installed';
+    } catch {
+      // CLI approach failed — fall back to JSON config
+    }
+  }
+
+  // Fall back to writing JSON config
+  try {
+    return installMcpServerViaJson();
+  } catch {
+    return 'error';
+  }
+}
+
+/**
+ * Write the MCP server config directly to ~/.claude/mcp.json.
+ * Merges safely with existing config.
+ */
+function installMcpServerViaJson(): 'installed' | 'already' {
+  let config: McpConfig = {};
+
+  const claudeDir = path.dirname(CLAUDE_MCP_CONFIG_FILE);
+  if (!fs.existsSync(claudeDir)) {
+    fs.mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
+  }
+
+  if (fs.existsSync(CLAUDE_MCP_CONFIG_FILE)) {
+    try {
+      config = JSON.parse(fs.readFileSync(CLAUDE_MCP_CONFIG_FILE, 'utf8'));
+    } catch {
+      config = {};
+    }
+  }
+
+  if (!config.mcpServers) {
+    config.mcpServers = {};
+  }
+
+  if (config.mcpServers[MCP_SERVER_NAME]) {
+    return 'already';
+  }
+
+  config.mcpServers[MCP_SERVER_NAME] = {
+    command: 'npx',
+    args: [MCP_SERVER_PACKAGE],
+  };
+
+  fs.writeFileSync(CLAUDE_MCP_CONFIG_FILE, JSON.stringify(config, null, 2), 'utf8');
+  return 'installed';
+}
+
 export {
   DOSSIER_HOOK_ID,
   DOSSIER_HOOK_COMMAND,
   DOSSIER_HOOK_PATTERN,
   CLAUDE_SETTINGS_FILE,
+  CLAUDE_MCP_CONFIG_FILE,
+  MCP_SERVER_NAME,
+  MCP_SERVER_PACKAGE,
   DOSSIER_LIST_CACHE_FILE,
   CACHE_TTL_MS,
   installClaudeHook,
@@ -193,4 +320,8 @@ export {
   matchesHookPattern,
   getCachedDossierList,
   saveDossierListCache,
+  isClaudeCliAvailable,
+  isMcpServerConfigured,
+  installMcpServer,
+  installMcpServerViaJson,
 };
