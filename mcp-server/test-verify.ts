@@ -7,8 +7,8 @@
 import path from 'node:path';
 import { verifyDossier } from './dist/tools/verifyDossier.js';
 
-// Test with the git worktree dossier
-const dossierPath = path.join(__dirname, '../examples/development/add-git-worktree-support.ds.md');
+// Test with the hello-world test fixture
+const dossierPath = path.join(__dirname, '../examples/test/hello-world.ds.md');
 
 console.log('Testing verify_dossier with:', dossierPath);
 console.log('');
