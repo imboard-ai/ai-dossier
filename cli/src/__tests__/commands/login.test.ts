@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerLoginCommand } from '../../commands/login';
 import * as config from '../../config';
 import * as credentials from '../../credentials';

@@ -34,7 +34,7 @@ const dossierContent = `---dossier
   "version": "1.0.0",
   "name": "my-workflow",
   "risk_level": "medium",
-  "status": "stable",
+  "status": "Stable",
   "objective": "Automate deployment"
 }
 ---
