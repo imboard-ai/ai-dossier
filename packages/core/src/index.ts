@@ -60,6 +60,25 @@ export type {
 } from './risk-assessment';
 // Risk assessment exports
 export { assessContentRisk, assessVerificationRisk } from './risk-assessment';
+// Security scanner exports
+export type {
+  SecurityCategory,
+  SecurityFinding,
+  SecurityReport,
+  SecurityRule,
+  SecurityRuleContext,
+  SecurityRuleSeverityOverride,
+  SecurityScanConfig,
+  SecuritySeverity,
+} from './security-scanner';
+export {
+  buildReport,
+  defaultSecurityRules,
+  SecurityRuleRegistry,
+  scanDossier,
+  scanDossierFile,
+  scanMarkdown,
+} from './security-scanner';
 // Signature exports
 export { loadTrustedKeys, verifySignature, verifyWithEd25519, verifyWithKms } from './signature';
 // Signer/Verifier interfaces and implementations
