@@ -5,11 +5,22 @@
  * - Dossier parsing (frontmatter + body extraction)
  * - Checksum verification (SHA256 integrity checks)
  * - Signature verification (Minisign and AWS KMS)
+ * - Output coherence validation
  * - TypeScript type definitions
  */
 
 // Checksum exports
 export { calculateChecksum, verifyIntegrity } from './checksum';
+// Coherence validation exports
+export type {
+  CoherenceContext,
+  CoherenceDiagnostic,
+  CoherenceResult,
+  CoherenceSeverity,
+  DeclaredOutputSchema,
+  StepOutput,
+} from './coherence';
+export { validateCoherence, validateStepCoherence } from './coherence';
 export type { FormatOptions, FormatResult } from './formatter';
 // Formatter exports
 export { formatDossierContent, formatDossierFile } from './formatter';
