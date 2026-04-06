@@ -6,6 +6,7 @@
 
 import { resolve } from 'node:path';
 import { buildExecutionPlan, buildGraph, CycleError } from '../orchestration/graph';
+import { validateGraphMappings } from '../orchestration/outputMapper';
 import { DossierResolver } from '../orchestration/resolver';
 import type { ExecutionPlan } from '../orchestration/types';
 import { generateGraphId, storeGraph } from '../utils/graphStore';
@@ -63,6 +64,10 @@ export async function resolveGraph(
 
     // Generate the execution plan
     const plan = buildExecutionPlan(graph, entryDossier.name);
+
+    // Validate cross-dossier output mappings and surface warnings
+    const mappingWarnings = validateGraphMappings(plan, nodes);
+    plan.warnings.push(...mappingWarnings);
 
     const graphId = generateGraphId();
     storeGraph(graphId, plan);

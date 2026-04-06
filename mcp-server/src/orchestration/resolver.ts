@@ -9,7 +9,13 @@
 import { resolve } from 'node:path';
 import { CliNotFoundError, execCli } from '../utils/cli-wrapper';
 import { logger } from '../utils/logger';
-import type { DossierNode, DossierRelationships, ResolvedDossier } from './types';
+import type {
+  DossierNode,
+  DossierRelationships,
+  FromDossierDeclaration,
+  OutputConfigItem,
+  ResolvedDossier,
+} from './types';
 
 interface ListItem {
   path: string;
@@ -120,6 +126,42 @@ export class DossierResolver {
       if (visited.has(current.name)) continue;
       visited.add(current.name);
 
+      const inputsMeta = current.metadata.inputs as Record<string, unknown> | undefined;
+      const outputsMeta = current.metadata.outputs as Record<string, unknown> | undefined;
+
+      const rawFromDossiers = inputsMeta?.from_dossiers;
+      const fromDossiers = Array.isArray(rawFromDossiers)
+        ? (rawFromDossiers.filter(
+            (d): d is FromDossierDeclaration =>
+              d != null &&
+              typeof d === 'object' &&
+              typeof (d as Record<string, unknown>).source_dossier === 'string' &&
+              typeof (d as Record<string, unknown>).output_name === 'string'
+          ) as FromDossierDeclaration[])
+        : undefined;
+
+      const rawOutputConfig = outputsMeta?.configuration;
+      const outputConfig = Array.isArray(rawOutputConfig)
+        ? (rawOutputConfig.filter(
+            (c): c is OutputConfigItem =>
+              c != null &&
+              typeof c === 'object' &&
+              typeof (c as Record<string, unknown>).key === 'string' &&
+              typeof (c as Record<string, unknown>).description === 'string'
+          ) as OutputConfigItem[])
+        : undefined;
+
+      if (
+        rawFromDossiers &&
+        !fromDossiers?.length &&
+        Array.isArray(rawFromDossiers) &&
+        rawFromDossiers.length > 0
+      ) {
+        logger.warn('Dossier has malformed from_dossiers declarations — skipped', {
+          dossier: current.name,
+        });
+      }
+
       nodes.set(current.name, {
         name: current.name,
         source: current.source,
@@ -128,6 +170,8 @@ export class DossierResolver {
           (current.metadata.risk_level as string) ?? (current.metadata.riskLevel as string),
         status: current.metadata.status as string,
         relationships: current.relationships,
+        fromDossiers,
+        outputConfig,
       });
 
       // Queue all referenced dossiers for resolution

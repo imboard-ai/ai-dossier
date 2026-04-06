@@ -1,43 +1,74 @@
 /**
  * Cross-dossier output mapper.
- * Connects dossier outputs to downstream dossier inputs, enabling automatic
- * data flow between steps in a journey.
+ * Connects outputs from completed dossier steps to the inputs of downstream steps,
+ * enabling automatic data flow in multi-dossier journeys.
  *
  * Schema fields consumed:
- *   inputs.from_dossiers  — declares what this dossier expects from prior steps
- *   outputs.configuration — declares what this dossier produces for later steps
+ *   inputs.from_dossiers[].{ source_dossier, output_name, usage }
+ *   outputs.configuration[].{ key, consumed_by, export_as }
  */
 
-// --- Types matching dossier schema ---
+import { logger } from '../utils/logger';
+import type { DossierNode, ExecutionPlan, FromDossierDeclaration } from './types';
 
-export interface FromDossierInput {
-  source_dossier: string;
-  output_name: string;
-  usage?: string;
+// ---------------------------------------------------------------------------
+// In-memory storage: journeyId → dossierName → outputKey → value
+// ---------------------------------------------------------------------------
+
+const MAX_JOURNEYS = 1000;
+const journeyOutputStore = new Map<string, Map<string, Map<string, unknown>>>();
+
+export function initJourneyOutputs(journeyId: string): void {
+  if (!journeyOutputStore.has(journeyId)) {
+    // Evict oldest entry if at capacity
+    if (journeyOutputStore.size >= MAX_JOURNEYS) {
+      const oldest = journeyOutputStore.keys().next().value!;
+      journeyOutputStore.delete(oldest);
+      logger.warn('Journey output store at capacity, evicted oldest entry', {
+        evicted: oldest,
+        maxJourneys: MAX_JOURNEYS,
+      });
+    }
+    journeyOutputStore.set(journeyId, new Map());
+  }
 }
 
-export interface OutputConfiguration {
-  key: string;
-  description: string;
-  consumed_by?: string[];
-  export_as?: string;
+/**
+ * Store outputs reported by the LLM after completing a step.
+ */
+export function collectOutputs(
+  journeyId: string,
+  dossierName: string,
+  outputs: Record<string, unknown>
+): void {
+  if (!journeyOutputStore.has(journeyId)) {
+    initJourneyOutputs(journeyId);
+  }
+  const journey = journeyOutputStore.get(journeyId)!;
+  const existing = journey.get(dossierName) ?? new Map<string, unknown>();
+  for (const [key, value] of Object.entries(outputs)) {
+    existing.set(key, value);
+  }
+  journey.set(dossierName, existing);
 }
 
-// --- Internal / result types ---
-
-export interface CollectedOutput {
-  key: string;
-  value: string;
-  export_as?: string;
+/**
+ * Get all collected outputs for a journey.
+ */
+export function getJourneyOutputs(journeyId: string): Map<string, Map<string, unknown>> {
+  return journeyOutputStore.get(journeyId) ?? new Map();
 }
 
-export interface ResolvedInput {
-  source_dossier: string;
-  output_name: string;
-  value: string;
-  export_as?: string;
-  usage?: string;
+/**
+ * Remove journey outputs from memory (e.g. on cancel or completion).
+ */
+export function clearJourneyOutputs(journeyId: string): void {
+  journeyOutputStore.delete(journeyId);
 }
+
+// ---------------------------------------------------------------------------
+// Graph-resolution time validation
+// ---------------------------------------------------------------------------
 
 export interface MappingValidationWarning {
   dossier: string;
@@ -46,138 +77,135 @@ export interface MappingValidationWarning {
   message: string;
 }
 
-// --- OutputMapper class ---
-
 /**
- * Stores outputs collected from completed dossier steps and resolves them
- * into the inputs of subsequent steps.
- *
- * Lifecycle per journey session:
- *   1. Call collectOutput() each time a step reports an output value.
- *   2. Call resolveInputs() / generateContextString() to inject values into
- *      the next step's dossier prompt.
- *   3. Call validateInputs() at graph-resolution time to surface missing outputs
- *      before execution begins.
- *   4. Call clear() to reset between journey sessions.
+ * Validate that all from_dossiers declarations in the graph reference source
+ * dossiers that exist in the graph and appear in an earlier execution phase.
+ * Returns an array of human-readable warning strings (empty = no issues).
  */
-export class OutputMapper {
-  /** dossier name → (output key → collected output) */
-  private readonly store = new Map<string, Map<string, CollectedOutput>>();
+export function validateGraphMappings(
+  plan: ExecutionPlan,
+  nodes: Map<string, DossierNode>
+): string[] {
+  const warnings: string[] = [];
 
-  /**
-   * Store an output value reported by a completed dossier step.
-   * Called when the LLM invokes the step_complete tool.
-   */
-  collectOutput(dossier: string, key: string, value: string, export_as?: string): void {
-    if (!this.store.has(dossier)) {
-      this.store.set(dossier, new Map());
+  // Build a map of dossier name → phase index for ordering checks
+  const phaseOf = new Map<string, number>();
+  for (const phase of plan.phases) {
+    for (const entry of phase.dossiers) {
+      phaseOf.set(entry.name, phase.phase);
     }
-    this.store.get(dossier)?.set(key, { key, value, export_as });
   }
 
-  /**
-   * Return all collected outputs for a specific dossier.
-   */
-  getOutputs(dossier: string): CollectedOutput[] {
-    const map = this.store.get(dossier);
-    return map ? [...map.values()] : [];
-  }
+  for (const [name, node] of nodes) {
+    if (!node.fromDossiers?.length) continue;
 
-  /**
-   * Resolve a dossier's from_dossiers inputs against previously collected
-   * outputs. Inputs whose source value has not yet been collected are silently
-   * skipped (the caller decides whether that is an error).
-   */
-  resolveInputs(fromDossiers: FromDossierInput[]): ResolvedInput[] {
-    const resolved: ResolvedInput[] = [];
+    for (const decl of node.fromDossiers) {
+      const sourcePhase = phaseOf.get(decl.source_dossier);
 
-    for (const input of fromDossiers) {
-      const output = this.store.get(input.source_dossier)?.get(input.output_name);
-      if (output === undefined) continue;
-
-      resolved.push({
-        source_dossier: input.source_dossier,
-        output_name: input.output_name,
-        value: output.value,
-        export_as: output.export_as,
-        usage: input.usage,
-      });
-    }
-
-    return resolved;
-  }
-
-  /**
-   * Generate an LLM-readable context string listing all resolved input values.
-   * Returns null when no inputs could be resolved (e.g. first step in a journey).
-   *
-   * Example output:
-   *   The following values are available from previous steps:
-   *   - `cluster_arn = arn:aws:ecs:us-east-1:123:cluster/prod` [env_var] (from setup-infra) — Target ECS cluster
-   */
-  generateContextString(fromDossiers: FromDossierInput[]): string | null {
-    const resolved = this.resolveInputs(fromDossiers);
-    if (resolved.length === 0) return null;
-
-    const lines = ['The following values are available from previous steps:'];
-    for (const r of resolved) {
-      const exportTag = r.export_as ? ` [${r.export_as}]` : '';
-      const usageNote = r.usage ? ` — ${r.usage}` : '';
-      lines.push(
-        `- \`${r.output_name} = ${r.value}\`${exportTag} (from ${r.source_dossier})${usageNote}`
-      );
-    }
-
-    return lines.join('\n');
-  }
-
-  /**
-   * Validate that a dossier's from_dossiers inputs have matching output
-   * declarations in their source dossiers. Run this at graph-resolution time,
-   * before any step executes.
-   *
-   * @param dossier        - name of the dossier being validated
-   * @param fromDossiers   - its inputs.from_dossiers declarations
-   * @param sourceOutputs  - map of dossier name → declared outputs.configuration
-   * @returns warnings for missing or mismatched declarations (empty = all good)
-   */
-  validateInputs(
-    dossier: string,
-    fromDossiers: FromDossierInput[],
-    sourceOutputs: Map<string, OutputConfiguration[]>
-  ): MappingValidationWarning[] {
-    const warnings: MappingValidationWarning[] = [];
-
-    for (const input of fromDossiers) {
-      const outputs = sourceOutputs.get(input.source_dossier);
-
-      if (!outputs) {
-        warnings.push({
-          dossier,
-          source_dossier: input.source_dossier,
-          output_name: input.output_name,
-          message: `Source dossier "${input.source_dossier}" is not in the execution graph or declares no outputs`,
-        });
+      if (sourcePhase === undefined) {
+        warnings.push(
+          `"${name}" declares input "${decl.output_name}" from "${decl.source_dossier}", ` +
+            `but "${decl.source_dossier}" is not in the execution graph`
+        );
         continue;
       }
 
-      if (!outputs.some((o) => o.key === input.output_name)) {
-        warnings.push({
-          dossier,
-          source_dossier: input.source_dossier,
-          output_name: input.output_name,
-          message: `Source dossier "${input.source_dossier}" does not declare an output named "${input.output_name}"`,
-        });
+      const consumerPhase = phaseOf.get(name)!;
+      if (sourcePhase >= consumerPhase) {
+        warnings.push(
+          `"${name}" (phase ${consumerPhase}) declares input "${decl.output_name}" from ` +
+            `"${decl.source_dossier}" (phase ${sourcePhase}), ` +
+            `but the source does not precede the consumer`
+        );
       }
     }
-
-    return warnings;
   }
 
-  /**
-   * Clear all stored outputs. Call between journey sessions.
-   */
-  clear(): void {
-    this.store.clear();
+  return warnings;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime: resolve inputs for a step
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the subset of declared from_dossiers inputs that are currently available
+ * in the journey outputs store.
+ */
+export function resolveStepInputs(
+  fromDossiers: FromDossierDeclaration[],
+  availableOutputs: Map<string, Map<string, unknown>>
+): Record<string, unknown> {
+  const resolved: Record<string, unknown> = {};
+  // Track which source_dossier owns each output_name so we can detect collisions
+  const sourceOf = new Map<string, string>();
+
+  for (const decl of fromDossiers) {
+    const value = availableOutputs.get(decl.source_dossier)?.get(decl.output_name);
+    if (value !== undefined) {
+      const prevSource = sourceOf.get(decl.output_name);
+      if (prevSource !== undefined) {
+        // Collision — move the previous entry to a namespaced key if not already moved
+        if (resolved[decl.output_name] !== undefined) {
+          resolved[`${prevSource}.${decl.output_name}`] = resolved[decl.output_name];
+          delete resolved[decl.output_name];
+        }
+        resolved[`${decl.source_dossier}.${decl.output_name}`] = value;
+      } else {
+        resolved[decl.output_name] = value;
+        sourceOf.set(decl.output_name, decl.source_dossier);
+      }
+    }
   }
+  return resolved;
+}
+
+// ---------------------------------------------------------------------------
+// LLM context injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a Markdown context block to prepend to a dossier's body when
+ * serving it to the LLM, injecting available output values from prior steps.
+ * Returns an empty string when there are no declarations.
+ */
+export function generateInjectedContext(
+  fromDossiers: FromDossierDeclaration[],
+  availableOutputs: Map<string, Map<string, unknown>>
+): string {
+  if (!fromDossiers.length) return '';
+
+  const resolved: Array<{ decl: FromDossierDeclaration; value: unknown }> = [];
+  const missing: FromDossierDeclaration[] = [];
+
+  for (const decl of fromDossiers) {
+    const value = availableOutputs.get(decl.source_dossier)?.get(decl.output_name);
+    if (value !== undefined) {
+      resolved.push({ decl, value });
+    } else {
+      missing.push(decl);
+    }
+  }
+
+  const lines: string[] = ['## Injected Values from Previous Steps', ''];
+
+  if (resolved.length > 0) {
+    lines.push('The following values are available from previous steps:', '');
+    for (const { decl, value } of resolved) {
+      const usage = decl.usage ? ` — ${decl.usage}` : '';
+      lines.push(
+        `- \`${decl.output_name}\` = \`${JSON.stringify(value)}\`${usage} *(from \`${decl.source_dossier}\`)*`
+      );
+    }
+  }
+
+  if (missing.length > 0) {
+    lines.push('', 'The following inputs were declared but not yet available:', '');
+    for (const decl of missing) {
+      const usage = decl.usage ? ` — ${decl.usage}` : '';
+      lines.push(`- \`${decl.output_name}\`${usage} *(expected from \`${decl.source_dossier}\`)*`);
+    }
+  }
+
+  return lines.join('\n');
 }

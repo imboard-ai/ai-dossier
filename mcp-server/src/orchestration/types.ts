@@ -38,6 +38,8 @@ export interface DossierNode {
   riskLevel?: string;
   status?: string;
   relationships?: DossierRelationships;
+  fromDossiers?: FromDossierDeclaration[];
+  outputConfig?: OutputConfigItem[];
 }
 
 export interface GraphEdge {
@@ -79,6 +81,21 @@ export interface ExecutionPlan {
   phases: ExecutionPhase[];
   conflicts: ConflictWarning[];
   warnings: string[];
+}
+
+// --- Output mapping types ---
+
+export interface FromDossierDeclaration {
+  source_dossier: string;
+  output_name: string;
+  usage?: string;
+}
+
+export interface OutputConfigItem {
+  key: string;
+  description: string;
+  consumed_by?: string[];
+  export_as?: string;
 }
 
 // --- Resolver types ---

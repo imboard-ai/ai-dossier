@@ -1,250 +1,292 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import type { FromDossierInput, OutputConfiguration } from '../outputMapper';
-import { OutputMapper } from '../outputMapper';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import {
+  clearJourneyOutputs,
+  collectOutputs,
+  generateInjectedContext,
+  getJourneyOutputs,
+  initJourneyOutputs,
+  resolveStepInputs,
+  validateGraphMappings,
+} from '../outputMapper';
+import type { DossierNode, ExecutionPlan, FromDossierDeclaration } from '../types';
 
-describe('OutputMapper', () => {
-  let mapper: OutputMapper;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-  beforeEach(() => {
-    mapper = new OutputMapper();
+function makeNode(name: string, overrides: Partial<DossierNode> = {}): DossierNode {
+  return { name, source: 'local', ...overrides };
+}
+
+function makePlan(phases: Array<{ phase: number; names: string[] }>): ExecutionPlan {
+  return {
+    entryDossier: phases[0]?.names[0] ?? '',
+    totalDossiers: phases.reduce((n, p) => n + p.names.length, 0),
+    phases: phases.map(({ phase, names }) => ({
+      phase,
+      dossiers: names.map((name) => ({ name, source: 'local', condition: 'required' })),
+    })),
+    conflicts: [],
+    warnings: [],
+  };
+}
+
+// ---------------------------------------------------------------------------
+// collectOutputs / getJourneyOutputs / clearJourneyOutputs
+// ---------------------------------------------------------------------------
+
+describe('journey output store', () => {
+  const jid = 'test-journey-1';
+
+  afterEach(() => {
+    clearJourneyOutputs(jid);
   });
 
-  describe('collectOutput / getOutputs', () => {
-    it('should store and retrieve a collected output', () => {
-      mapper.collectOutput('setup-infra', 'cluster_arn', 'arn:aws:ecs:us-east-1:123:cluster/prod');
-
-      const outputs = mapper.getOutputs('setup-infra');
-      expect(outputs).toHaveLength(1);
-      expect(outputs[0]).toEqual({
-        key: 'cluster_arn',
-        value: 'arn:aws:ecs:us-east-1:123:cluster/prod',
-        export_as: undefined,
-      });
-    });
-
-    it('should store export_as metadata alongside the value', () => {
-      mapper.collectOutput('setup-infra', 'cluster_arn', 'arn:aws:ecs:...', 'env_var');
-
-      const outputs = mapper.getOutputs('setup-infra');
-      expect(outputs[0].export_as).toBe('env_var');
-    });
-
-    it('should store multiple outputs for the same dossier', () => {
-      mapper.collectOutput('setup-infra', 'cluster_arn', 'arn:...');
-      mapper.collectOutput('setup-infra', 'region', 'us-east-1');
-
-      expect(mapper.getOutputs('setup-infra')).toHaveLength(2);
-    });
-
-    it('should overwrite an output with the same key', () => {
-      mapper.collectOutput('setup-infra', 'cluster_arn', 'old-value');
-      mapper.collectOutput('setup-infra', 'cluster_arn', 'new-value');
-
-      const outputs = mapper.getOutputs('setup-infra');
-      expect(outputs).toHaveLength(1);
-      expect(outputs[0].value).toBe('new-value');
-    });
-
-    it('should return an empty array for unknown dossiers', () => {
-      expect(mapper.getOutputs('nonexistent')).toEqual([]);
-    });
+  it('should initialise an empty store for a journey', () => {
+    initJourneyOutputs(jid);
+    expect(getJourneyOutputs(jid).size).toBe(0);
   });
 
-  describe('resolveInputs', () => {
-    beforeEach(() => {
-      mapper.collectOutput(
-        'setup-infra',
-        'cluster_arn',
-        'arn:aws:ecs:us-east-1:123:cluster/prod',
-        'env_var'
-      );
-      mapper.collectOutput('setup-infra', 'region', 'us-east-1');
-      mapper.collectOutput('build-image', 'image_uri', 'ecr.amazonaws.com/app:latest');
+  it('should collect outputs for a dossier', () => {
+    collectOutputs(jid, 'setup-infra', {
+      cluster_arn: 'arn:aws:ecs:us-east-1:123456789012:cluster/my-cluster',
     });
-
-    it('should resolve inputs that have matching collected outputs', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'setup-infra', output_name: 'cluster_arn', usage: 'Target ECS cluster' },
-      ];
-
-      const resolved = mapper.resolveInputs(fromDossiers);
-
-      expect(resolved).toHaveLength(1);
-      expect(resolved[0]).toEqual({
-        source_dossier: 'setup-infra',
-        output_name: 'cluster_arn',
-        value: 'arn:aws:ecs:us-east-1:123:cluster/prod',
-        export_as: 'env_var',
-        usage: 'Target ECS cluster',
-      });
-    });
-
-    it('should resolve inputs from multiple source dossiers', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'setup-infra', output_name: 'cluster_arn' },
-        { source_dossier: 'build-image', output_name: 'image_uri' },
-      ];
-
-      const resolved = mapper.resolveInputs(fromDossiers);
-
-      expect(resolved).toHaveLength(2);
-      expect(resolved.map((r) => r.output_name)).toEqual(['cluster_arn', 'image_uri']);
-    });
-
-    it('should skip inputs whose source dossier has not reported outputs', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'not-yet-run', output_name: 'some_value' },
-      ];
-
-      const resolved = mapper.resolveInputs(fromDossiers);
-      expect(resolved).toHaveLength(0);
-    });
-
-    it('should skip inputs whose output key does not exist in the source', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'setup-infra', output_name: 'nonexistent_key' },
-      ];
-
-      const resolved = mapper.resolveInputs(fromDossiers);
-      expect(resolved).toHaveLength(0);
-    });
-
-    it('should return an empty array for an empty from_dossiers list', () => {
-      expect(mapper.resolveInputs([])).toEqual([]);
-    });
+    const outputs = getJourneyOutputs(jid);
+    expect(outputs.get('setup-infra')?.get('cluster_arn')).toBe(
+      'arn:aws:ecs:us-east-1:123456789012:cluster/my-cluster'
+    );
   });
 
-  describe('generateContextString', () => {
-    beforeEach(() => {
-      mapper.collectOutput(
-        'setup-infra',
-        'cluster_arn',
-        'arn:aws:ecs:us-east-1:123:cluster/prod',
-        'env_var'
-      );
-      mapper.collectOutput('build-image', 'image_uri', 'ecr.amazonaws.com/app:latest');
-    });
-
-    it('should generate a context string for resolved inputs', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'setup-infra', output_name: 'cluster_arn', usage: 'Target ECS cluster' },
-      ];
-
-      const context = mapper.generateContextString(fromDossiers);
-
-      expect(context).not.toBeNull();
-      expect(context).toContain('The following values are available from previous steps:');
-      expect(context).toContain('cluster_arn = arn:aws:ecs:us-east-1:123:cluster/prod');
-      expect(context).toContain('[env_var]');
-      expect(context).toContain('from setup-infra');
-      expect(context).toContain('Target ECS cluster');
-    });
-
-    it('should include multiple resolved inputs in the context string', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'setup-infra', output_name: 'cluster_arn' },
-        { source_dossier: 'build-image', output_name: 'image_uri' },
-      ];
-
-      const context = mapper.generateContextString(fromDossiers);
-
-      expect(context).toContain('cluster_arn');
-      expect(context).toContain('image_uri');
-    });
-
-    it('should omit export_as tag when not set', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'build-image', output_name: 'image_uri' },
-      ];
-
-      const context = mapper.generateContextString(fromDossiers);
-
-      expect(context).not.toContain('[');
-    });
-
-    it('should return null when no inputs can be resolved', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'not-yet-run', output_name: 'some_value' },
-      ];
-
-      expect(mapper.generateContextString(fromDossiers)).toBeNull();
-    });
-
-    it('should return null for an empty from_dossiers list', () => {
-      expect(mapper.generateContextString([])).toBeNull();
-    });
+  it('should merge additional outputs for the same dossier', () => {
+    collectOutputs(jid, 'setup-infra', { cluster_arn: 'arn:1' });
+    collectOutputs(jid, 'setup-infra', { vpc_id: 'vpc-123' });
+    const dossierOutputs = getJourneyOutputs(jid).get('setup-infra')!;
+    expect(dossierOutputs.get('cluster_arn')).toBe('arn:1');
+    expect(dossierOutputs.get('vpc_id')).toBe('vpc-123');
   });
 
-  describe('validateInputs', () => {
-    const sourceOutputs: Map<string, OutputConfiguration[]> = new Map([
+  it('should collect outputs for multiple dossiers independently', () => {
+    collectOutputs(jid, 'step-a', { key_a: 'value_a' });
+    collectOutputs(jid, 'step-b', { key_b: 'value_b' });
+    const outputs = getJourneyOutputs(jid);
+    expect(outputs.get('step-a')?.get('key_a')).toBe('value_a');
+    expect(outputs.get('step-b')?.get('key_b')).toBe('value_b');
+  });
+
+  it('should return an empty map for unknown journey ids', () => {
+    expect(getJourneyOutputs('nonexistent-journey').size).toBe(0);
+  });
+
+  it('should clear journey outputs', () => {
+    collectOutputs(jid, 'step-a', { x: 1 });
+    clearJourneyOutputs(jid);
+    expect(getJourneyOutputs(jid).size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateGraphMappings
+// ---------------------------------------------------------------------------
+
+describe('validateGraphMappings', () => {
+  it('should return no warnings when all mappings are valid', () => {
+    const nodes = new Map<string, DossierNode>([
       [
         'setup-infra',
-        [
-          { key: 'cluster_arn', description: 'ECS cluster ARN', export_as: 'env_var' },
-          { key: 'region', description: 'AWS region' },
-        ],
+        makeNode('setup-infra', {
+          outputConfig: [{ key: 'cluster_arn', description: 'ECS cluster ARN' }],
+        }),
+      ],
+      [
+        'deploy',
+        makeNode('deploy', {
+          fromDossiers: [{ source_dossier: 'setup-infra', output_name: 'cluster_arn' }],
+        }),
       ],
     ]);
+    const plan = makePlan([
+      { phase: 1, names: ['setup-infra'] },
+      { phase: 2, names: ['deploy'] },
+    ]);
 
-    it('should return no warnings when all inputs are satisfied', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'setup-infra', output_name: 'cluster_arn' },
-        { source_dossier: 'setup-infra', output_name: 'region' },
-      ];
-
-      const warnings = mapper.validateInputs('deploy-app', fromDossiers, sourceOutputs);
-      expect(warnings).toHaveLength(0);
-    });
-
-    it('should warn when the source dossier is not in the execution graph', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'not-in-graph', output_name: 'some_value' },
-      ];
-
-      const warnings = mapper.validateInputs('deploy-app', fromDossiers, sourceOutputs);
-
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0].source_dossier).toBe('not-in-graph');
-      expect(warnings[0].dossier).toBe('deploy-app');
-      expect(warnings[0].message).toContain('not in the execution graph');
-    });
-
-    it('should warn when the source dossier does not declare the required output', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'setup-infra', output_name: 'undeclared_output' },
-      ];
-
-      const warnings = mapper.validateInputs('deploy-app', fromDossiers, sourceOutputs);
-
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0].output_name).toBe('undeclared_output');
-      expect(warnings[0].message).toContain('does not declare an output named "undeclared_output"');
-    });
-
-    it('should return multiple warnings for multiple missing inputs', () => {
-      const fromDossiers: FromDossierInput[] = [
-        { source_dossier: 'not-in-graph', output_name: 'foo' },
-        { source_dossier: 'setup-infra', output_name: 'missing_key' },
-      ];
-
-      const warnings = mapper.validateInputs('deploy-app', fromDossiers, sourceOutputs);
-      expect(warnings).toHaveLength(2);
-    });
-
-    it('should return no warnings for an empty from_dossiers list', () => {
-      expect(mapper.validateInputs('deploy-app', [], sourceOutputs)).toHaveLength(0);
-    });
+    expect(validateGraphMappings(plan, nodes)).toHaveLength(0);
   });
 
-  describe('clear', () => {
-    it('should remove all stored outputs', () => {
-      mapper.collectOutput('setup-infra', 'cluster_arn', 'some-arn');
-      mapper.collectOutput('build-image', 'image_uri', 'some-uri');
+  it('should warn when source_dossier is not in the graph', () => {
+    const nodes = new Map<string, DossierNode>([
+      [
+        'deploy',
+        makeNode('deploy', {
+          fromDossiers: [{ source_dossier: 'missing-dossier', output_name: 'cluster_arn' }],
+        }),
+      ],
+    ]);
+    const plan = makePlan([{ phase: 1, names: ['deploy'] }]);
 
-      mapper.clear();
+    const warnings = validateGraphMappings(plan, nodes);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('"missing-dossier" is not in the execution graph');
+  });
 
-      expect(mapper.getOutputs('setup-infra')).toHaveLength(0);
-      expect(mapper.getOutputs('build-image')).toHaveLength(0);
+  it('should warn when source_dossier is in the same phase as the consumer', () => {
+    const nodes = new Map<string, DossierNode>([
+      ['a', makeNode('a')],
+      [
+        'b',
+        makeNode('b', {
+          fromDossiers: [{ source_dossier: 'a', output_name: 'some_key' }],
+        }),
+      ],
+    ]);
+    // Both in phase 1 — ordering is wrong
+    const plan = makePlan([{ phase: 1, names: ['a', 'b'] }]);
+
+    const warnings = validateGraphMappings(plan, nodes);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('does not precede the consumer');
+  });
+
+  it('should warn when source_dossier is in a later phase than the consumer', () => {
+    const nodes = new Map<string, DossierNode>([
+      ['late-step', makeNode('late-step')],
+      [
+        'early-consumer',
+        makeNode('early-consumer', {
+          fromDossiers: [{ source_dossier: 'late-step', output_name: 'some_key' }],
+        }),
+      ],
+    ]);
+    const plan = makePlan([
+      { phase: 1, names: ['early-consumer'] },
+      { phase: 2, names: ['late-step'] },
+    ]);
+
+    const warnings = validateGraphMappings(plan, nodes);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('does not precede the consumer');
+  });
+
+  it('should return no warnings for nodes with no fromDossiers', () => {
+    const nodes = new Map<string, DossierNode>([
+      ['step-a', makeNode('step-a')],
+      ['step-b', makeNode('step-b')],
+    ]);
+    const plan = makePlan([
+      { phase: 1, names: ['step-a'] },
+      { phase: 2, names: ['step-b'] },
+    ]);
+
+    expect(validateGraphMappings(plan, nodes)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveStepInputs
+// ---------------------------------------------------------------------------
+
+describe('resolveStepInputs', () => {
+  it('should resolve available inputs', () => {
+    const fromDossiers: FromDossierDeclaration[] = [
+      { source_dossier: 'setup-infra', output_name: 'cluster_arn' },
+    ];
+    const available = new Map([
+      ['setup-infra', new Map<string, unknown>([['cluster_arn', 'arn:123']])],
+    ]);
+
+    expect(resolveStepInputs(fromDossiers, available)).toEqual({ cluster_arn: 'arn:123' });
+  });
+
+  it('should skip inputs that are not yet available', () => {
+    const fromDossiers: FromDossierDeclaration[] = [
+      { source_dossier: 'step-a', output_name: 'key_a' },
+      { source_dossier: 'step-b', output_name: 'key_b' },
+    ];
+    const available = new Map([['step-a', new Map<string, unknown>([['key_a', 'val_a']])]]);
+
+    expect(resolveStepInputs(fromDossiers, available)).toEqual({ key_a: 'val_a' });
+  });
+
+  it('should return empty object when nothing is available', () => {
+    const fromDossiers: FromDossierDeclaration[] = [
+      { source_dossier: 'setup-infra', output_name: 'cluster_arn' },
+    ];
+    expect(resolveStepInputs(fromDossiers, new Map())).toEqual({});
+  });
+
+  it('should namespace keys when two sources provide the same output_name', () => {
+    const fromDossiers: FromDossierDeclaration[] = [
+      { source_dossier: 'step-a', output_name: 'region' },
+      { source_dossier: 'step-b', output_name: 'region' },
+    ];
+    const available = new Map([
+      ['step-a', new Map<string, unknown>([['region', 'us-east-1']])],
+      ['step-b', new Map<string, unknown>([['region', 'eu-west-1']])],
+    ]);
+
+    const result = resolveStepInputs(fromDossiers, available);
+    expect(result).toEqual({
+      'step-a.region': 'us-east-1',
+      'step-b.region': 'eu-west-1',
     });
+    expect(result['region']).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generateInjectedContext
+// ---------------------------------------------------------------------------
+
+describe('generateInjectedContext', () => {
+  it('should return empty string when fromDossiers is empty', () => {
+    expect(generateInjectedContext([], new Map())).toBe('');
+  });
+
+  it('should list resolved values', () => {
+    const fromDossiers: FromDossierDeclaration[] = [
+      { source_dossier: 'setup-infra', output_name: 'cluster_arn', usage: 'Target ECS cluster' },
+    ];
+    const available = new Map([
+      ['setup-infra', new Map<string, unknown>([['cluster_arn', 'arn:aws:ecs:123']])],
+    ]);
+
+    const ctx = generateInjectedContext(fromDossiers, available);
+    expect(ctx).toContain('cluster_arn');
+    expect(ctx).toContain('arn:aws:ecs:123');
+    expect(ctx).toContain('Target ECS cluster');
+    expect(ctx).toContain('setup-infra');
+  });
+
+  it('should list missing inputs separately', () => {
+    const fromDossiers: FromDossierDeclaration[] = [
+      { source_dossier: 'step-a', output_name: 'key_a' },
+      { source_dossier: 'step-b', output_name: 'key_b' },
+    ];
+    const available = new Map([['step-a', new Map<string, unknown>([['key_a', 'val_a']])]]);
+
+    const ctx = generateInjectedContext(fromDossiers, available);
+    expect(ctx).toContain('key_a');
+    expect(ctx).toContain('val_a');
+    expect(ctx).toContain('key_b');
+    expect(ctx).toContain('not yet available');
+  });
+
+  it('should handle all inputs missing', () => {
+    const fromDossiers: FromDossierDeclaration[] = [
+      { source_dossier: 'step-a', output_name: 'key_a' },
+    ];
+    const ctx = generateInjectedContext(fromDossiers, new Map());
+    expect(ctx).toContain('key_a');
+    expect(ctx).toContain('not yet available');
+    expect(ctx).not.toContain('available from previous steps');
+  });
+
+  it('should include usage description when present', () => {
+    const fromDossiers: FromDossierDeclaration[] = [
+      { source_dossier: 'step-a', output_name: 'my_key', usage: 'Used for auth' },
+    ];
+    const available = new Map([['step-a', new Map<string, unknown>([['my_key', 'secret']])]]);
+
+    const ctx = generateInjectedContext(fromDossiers, available);
+    expect(ctx).toContain('Used for auth');
   });
 });
