@@ -8,48 +8,131 @@
   "status": "Draft",
   "last_updated": "2026-04-06",
   "objective": "Take a problem signal and orchestrate PM, UX/FE, and DB/BE agents through discovery, PRD creation, spec generation, and GH issue decomposition — producing a complete feature folder with dependency-linked issues ready for implementation",
-  "category": ["development", "workflow"],
-  "tags": ["feature", "prd", "issues", "workflow", "multi-agent", "planning", "discovery", "pm"],
+  "category": [
+    "development",
+    "workflow"
+  ],
+  "tags": [
+    "feature",
+    "prd",
+    "issues",
+    "workflow",
+    "multi-agent",
+    "planning",
+    "discovery",
+    "pm"
+  ],
   "tools_required": [
-    {"name": "gh", "version": ">=2.0.0", "check_command": "gh --version"},
-    {"name": "git", "version": ">=2.30.0", "check_command": "git --version"}
+    {
+      "name": "gh",
+      "version": ">=2.0.0",
+      "check_command": "gh --version"
+    },
+    {
+      "name": "git",
+      "version": ">=2.30.0",
+      "check_command": "git --version"
+    }
   ],
   "risk_level": "medium",
   "requires_approval": true,
-  "risk_factors": ["modifies_files", "network_access"],
+  "risk_factors": [
+    "modifies_files",
+    "network_access"
+  ],
   "destructive_operations": [
     "Creates files in ./features/<slug>/ directory",
     "Creates GitHub issues on the repository"
   ],
-  "estimated_duration": {"min_minutes": 30, "max_minutes": 120},
+  "estimated_duration": {
+    "min_minutes": 30,
+    "max_minutes": 120
+  },
   "inputs": {
     "required": [
-      {"name": "problem_signal", "description": "The problem to solve — a user complaint, feature request, or observed pain point", "type": "string", "example": "Users can't see their company profile after onboarding"}
+      {
+        "name": "problem_signal",
+        "description": "The problem to solve — a user complaint, feature request, or observed pain point",
+        "type": "string",
+        "example": "Users can't see their company profile after onboarding"
+      }
     ],
     "optional": [
-      {"name": "warmup_dossier", "description": "Project-specific worktree warmup dossier for implementation phase", "type": "string", "default": ""},
-      {"name": "skip_implementation", "description": "Stop after GH issues are created (no implementation)", "type": "boolean", "default": false},
-      {"name": "implementation_mode", "description": "Which issue workflow to use: guided or full-cycle", "type": "string", "default": "guided"},
-      {"name": "feature_dir", "description": "Custom path for the feature folder (default: ./features/<slug>/)", "type": "string", "default": ""}
+      {
+        "name": "warmup_dossier",
+        "description": "Project-specific worktree warmup dossier for implementation phase",
+        "type": "string",
+        "default": ""
+      },
+      {
+        "name": "skip_implementation",
+        "description": "Stop after GH issues are created (no implementation)",
+        "type": "boolean",
+        "default": false
+      },
+      {
+        "name": "implementation_mode",
+        "description": "Which issue workflow to use: guided or full-cycle",
+        "type": "string",
+        "default": "guided"
+      },
+      {
+        "name": "feature_dir",
+        "description": "Custom path for the feature folder (default: ./features/<slug>/)",
+        "type": "string",
+        "default": ""
+      }
     ]
   },
   "outputs": {
     "files": [
-      {"path": "features/<slug>/STATUS.md", "description": "State machine for resumability"},
-      {"path": "features/<slug>/prd.md", "description": "Approved PRD"},
-      {"path": "features/<slug>/fe-spec.md", "description": "FE component specification"},
-      {"path": "features/<slug>/issues.md", "description": "Issue decomposition with dependency chain"},
-      {"path": "features/<slug>/process-log.md", "description": "Decision log with timestamps"}
+      {
+        "path": "features/<slug>/STATUS.md",
+        "description": "State machine for resumability"
+      },
+      {
+        "path": "features/<slug>/prd.md",
+        "description": "Approved PRD"
+      },
+      {
+        "path": "features/<slug>/fe-spec.md",
+        "description": "FE component specification"
+      },
+      {
+        "path": "features/<slug>/issues.md",
+        "description": "Issue decomposition with dependency chain"
+      },
+      {
+        "path": "features/<slug>/process-log.md",
+        "description": "Decision log with timestamps"
+      }
     ],
-    "state_changes": [{"description": "Creates GitHub issues on the repository", "affects": "GitHub issue tracker", "reversible": true}]
+    "state_changes": [
+      {
+        "description": "Creates GitHub issues on the repository",
+        "affects": "GitHub issue tracker",
+        "reversible": true
+      }
+    ]
   },
   "relationships": {
     "followed_by": [
-      {"dossier": "guided-cycle-issue", "condition": "suggested", "purpose": "Implement created issues with human review"},
-      {"dossier": "full-cycle-issue", "condition": "suggested", "purpose": "Implement created issues autonomously"}
+      {
+        "dossier": "guided-cycle-issue",
+        "condition": "suggested",
+        "purpose": "Implement created issues with human review"
+      },
+      {
+        "dossier": "full-cycle-issue",
+        "condition": "suggested",
+        "purpose": "Implement created issues autonomously"
+      }
     ]
   },
-  "checksum": {"algorithm": "sha256", "hash": "05881ed999c168493c5d874d671defa7a8fbf1eabf04e2478e2871bfbab0e2a4"}
+  "checksum": {
+    "algorithm": "sha256",
+    "hash": "2b53b7894391c928b93d266dbe1d71d48f938c6c42c9af5df9ce8b009db3b077"
+  }
 }
 ---
 
