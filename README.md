@@ -823,7 +823,11 @@ This is a **community-driven effort** to make LLM automation truly accessible. H
 - [PROTOCOL.md](./PROTOCOL.md) - Dossier execution protocol
 - [SPECIFICATION.md](./SPECIFICATION.md) - Formal dossier specification
 - [SCHEMA.md](./SCHEMA.md) - Dossier schema specification (v1.0.0)
+- [TRACING.md](./TRACING.md) - Execution tracing system (v1.0.0) **NEW**
 - [dossier-schema.json](./dossier-schema.json) - JSON Schema definition
+- [trace-schema.json](./trace-schema.json) - Trace schema definition
+- [TRACE_SERVER_API.md](./TRACE_SERVER_API.md) - Trace server API specification
+- [trace-server/](./trace-server/) - Reference trace server implementation
 - [mcp-server/](./mcp-server/) - MCP Server for frictionless integration
 - [examples/](./examples/) - Example dossier implementations
 - [examples/validation/](./examples/validation/) - Schema validation tools

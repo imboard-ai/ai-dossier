@@ -1,0 +1,38 @@
+{
+  "name": "@dossier/trace-server",
+  "version": "1.0.0",
+  "description": "Reference implementation of Dossier Trace Server for tracking agent execution",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test"
+  },
+  "keywords": [
+    "dossier",
+    "trace",
+    "execution",
+    "audit",
+    "llm",
+    "agent"
+  ],
+  "author": "Dossier Project",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "express-rate-limit": "^7.1.5",
+    "ajv": "^8.12.0",
+    "ajv-formats": "^2.1.1",
+    "uuid": "^9.0.1",
+    "better-sqlite3": "^9.2.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

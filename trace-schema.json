@@ -1,0 +1,420 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/imboard-ai/dossier/trace-schema/v1.0.0",
+  "title": "Dossier Execution Trace Schema",
+  "description": "Schema for tracking agent execution of Dossiers, enabling compliance, auditing, and debugging",
+  "type": "object",
+  "required": [
+    "trace_schema_version",
+    "trace_id",
+    "dossier",
+    "started_at",
+    "status"
+  ],
+  "properties": {
+    "trace_schema_version": {
+      "type": "string",
+      "description": "Version of the trace schema",
+      "const": "1.0.0"
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "Unique identifier for this execution trace (UUID)",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "dossier": {
+      "type": "object",
+      "description": "Information about the Dossier being executed",
+      "required": ["title", "version"],
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Dossier title"
+        },
+        "version": {
+          "type": "string",
+          "description": "Dossier version (semver)"
+        },
+        "file_path": {
+          "type": "string",
+          "description": "Path to Dossier file"
+        },
+        "objective": {
+          "type": "string",
+          "description": "Dossier objective statement"
+        }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "description": "Information about the agent executing the Dossier",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Agent name (e.g., 'Claude Code', 'claude-4-6')"
+        },
+        "version": {
+          "type": "string",
+          "description": "Agent version or model ID"
+        },
+        "session_id": {
+          "type": "string",
+          "description": "Agent session identifier"
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "description": "Execution environment information",
+      "properties": {
+        "user": {
+          "type": "string",
+          "description": "User who initiated execution"
+        },
+        "hostname": {
+          "type": "string",
+          "description": "Hostname where execution occurred"
+        },
+        "working_directory": {
+          "type": "string",
+          "description": "Working directory path"
+        },
+        "os": {
+          "type": "string",
+          "description": "Operating system"
+        },
+        "custom": {
+          "type": "object",
+          "description": "Custom environment metadata",
+          "additionalProperties": true
+        }
+      }
+    },
+    "started_at": {
+      "type": "string",
+      "description": "ISO 8601 timestamp when execution started",
+      "format": "date-time"
+    },
+    "completed_at": {
+      "type": "string",
+      "description": "ISO 8601 timestamp when execution completed",
+      "format": "date-time"
+    },
+    "duration_ms": {
+      "type": "number",
+      "description": "Total execution duration in milliseconds",
+      "minimum": 0
+    },
+    "status": {
+      "type": "string",
+      "description": "Current execution status",
+      "enum": ["running", "success", "failed", "cancelled"]
+    },
+    "steps": {
+      "type": "array",
+      "description": "Ordered list of execution steps",
+      "items": {
+        "type": "object",
+        "required": ["step_id", "timestamp", "type"],
+        "properties": {
+          "step_id": {
+            "type": "string",
+            "description": "Unique step identifier (UUID or sequential)"
+          },
+          "timestamp": {
+            "type": "string",
+            "description": "ISO 8601 timestamp of this step",
+            "format": "date-time"
+          },
+          "type": {
+            "type": "string",
+            "description": "Type of step",
+            "enum": [
+              "prerequisite_check",
+              "context_gathering",
+              "decision_point",
+              "action",
+              "validation",
+              "error",
+              "user_interaction"
+            ]
+          },
+          "dossier_section": {
+            "type": "string",
+            "description": "Dossier section this step implements (e.g., 'Prerequisites', 'Step 3: Deploy Infrastructure')"
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable description of what happened"
+          },
+          "action": {
+            "type": "object",
+            "description": "Action performed",
+            "properties": {
+              "type": {
+                "type": "string",
+                "description": "Action type (e.g., 'command', 'file_write', 'api_call')"
+              },
+              "command": {
+                "type": "string",
+                "description": "Command executed (if type=command)"
+              },
+              "file_path": {
+                "type": "string",
+                "description": "File path (if type=file_write/file_read)"
+              },
+              "details": {
+                "type": "object",
+                "description": "Additional action details",
+                "additionalProperties": true
+              }
+            }
+          },
+          "result": {
+            "type": "object",
+            "description": "Result of the step",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": ["success", "failed", "skipped", "partial"],
+                "description": "Step outcome"
+              },
+              "output": {
+                "type": "string",
+                "description": "Output from the action (truncated if large)"
+              },
+              "exit_code": {
+                "type": "integer",
+                "description": "Exit code (for commands)"
+              },
+              "error": {
+                "type": "string",
+                "description": "Error message if failed"
+              }
+            }
+          },
+          "duration_ms": {
+            "type": "number",
+            "description": "Step duration in milliseconds",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "deviations": {
+      "type": "array",
+      "description": "Deviations from the Dossier specification",
+      "items": {
+        "type": "object",
+        "required": ["dossier_section", "type", "description"],
+        "properties": {
+          "dossier_section": {
+            "type": "string",
+            "description": "Dossier section where deviation occurred"
+          },
+          "type": {
+            "type": "string",
+            "description": "Type of deviation",
+            "enum": [
+              "skipped_step",
+              "modified_action",
+              "alternative_approach",
+              "added_step",
+              "context_adapted"
+            ]
+          },
+          "expected": {
+            "type": "string",
+            "description": "What the Dossier specified"
+          },
+          "actual": {
+            "type": "string",
+            "description": "What the agent actually did"
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why the deviation occurred"
+          },
+          "approved_by": {
+            "type": "string",
+            "description": "Who approved the deviation (if applicable)",
+            "enum": ["user", "agent", "auto"]
+          }
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "description": "Validation results against Dossier success criteria",
+      "properties": {
+        "performed": {
+          "type": "boolean",
+          "description": "Whether validation was performed"
+        },
+        "success_criteria": {
+          "type": "array",
+          "description": "Results for each success criterion",
+          "items": {
+            "type": "object",
+            "required": ["criterion", "result"],
+            "properties": {
+              "criterion": {
+                "type": "string",
+                "description": "Success criterion from Dossier"
+              },
+              "result": {
+                "type": "string",
+                "enum": ["pass", "fail", "skipped"],
+                "description": "Validation result"
+              },
+              "verification_command": {
+                "type": "string",
+                "description": "Command used to verify"
+              },
+              "output": {
+                "type": "string",
+                "description": "Verification output"
+              },
+              "timestamp": {
+                "type": "string",
+                "format": "date-time",
+                "description": "When validation was performed"
+              }
+            }
+          }
+        },
+        "overall_result": {
+          "type": "string",
+          "enum": ["pass", "fail", "partial"],
+          "description": "Overall validation result"
+        }
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "description": "Outputs produced during execution",
+      "properties": {
+        "files_created": {
+          "type": "array",
+          "description": "Files created during execution",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "File path"
+              },
+              "size_bytes": {
+                "type": "number",
+                "description": "File size in bytes"
+              },
+              "checksum": {
+                "type": "string",
+                "description": "File checksum (SHA-256)"
+              }
+            }
+          }
+        },
+        "configuration": {
+          "type": "object",
+          "description": "Configuration values produced",
+          "additionalProperties": true
+        },
+        "artifacts": {
+          "type": "array",
+          "description": "Artifacts generated",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "description": "Artifact path"
+              },
+              "type": {
+                "type": "string",
+                "description": "Artifact type (script, log, report, etc.)"
+              },
+              "purpose": {
+                "type": "string",
+                "description": "Purpose of the artifact"
+              }
+            }
+          }
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "description": "Errors encountered during execution",
+      "items": {
+        "type": "object",
+        "required": ["timestamp", "message"],
+        "properties": {
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When error occurred"
+          },
+          "step_id": {
+            "type": "string",
+            "description": "Step where error occurred"
+          },
+          "message": {
+            "type": "string",
+            "description": "Error message"
+          },
+          "stack_trace": {
+            "type": "string",
+            "description": "Stack trace (if available)"
+          },
+          "recovery_action": {
+            "type": "string",
+            "description": "How the error was handled"
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Execution metrics",
+      "properties": {
+        "total_steps": {
+          "type": "number",
+          "description": "Total number of steps executed"
+        },
+        "successful_steps": {
+          "type": "number",
+          "description": "Number of successful steps"
+        },
+        "failed_steps": {
+          "type": "number",
+          "description": "Number of failed steps"
+        },
+        "commands_executed": {
+          "type": "number",
+          "description": "Total commands executed"
+        },
+        "files_modified": {
+          "type": "number",
+          "description": "Number of files created or modified"
+        },
+        "user_interactions": {
+          "type": "number",
+          "description": "Number of times user input was required"
+        }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "description": "Custom tags for filtering/searching traces",
+      "items": {
+        "type": "string"
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Custom metadata",
+      "additionalProperties": true
+    }
+  }
+}
