@@ -16,57 +16,63 @@ This example shows how to add execution tracing to your Vercel backend, reusing 
 
 ## Database Setup
 
-### Option 1: Vercel Postgres (Recommended)
+**Default: Vercel Postgres** (Serverless PostgreSQL, native Vercel integration)
 
-**Why**: Native integration, serverless, JSONB support
+### Quick Setup (2 minutes)
 
-**Setup**:
 ```bash
-# In your Vercel dashboard
-# → Storage → Create Database → Postgres
+# 1. Create database (via Vercel dashboard or CLI)
+vercel storage create postgres dossier-traces
 
-# Or via CLI
-vercel storage create postgres
-
-# Add to your project
+# 2. Pull environment variables
 vercel env pull .env.local
-```
+# This automatically adds:
+#   POSTGRES_URL
+#   POSTGRES_PRISMA_URL
+#   POSTGRES_URL_NON_POOLING
 
-**Install Prisma**:
-```bash
+# 3. Install Prisma (if not already installed)
 npm install prisma @prisma/client
+
+# 4. Initialize Prisma (if new project)
 npx prisma init
-```
 
-**Update `.env.local`**:
-```env
-# Auto-populated by Vercel
-POSTGRES_URL="postgres://..."
-POSTGRES_PRISMA_URL="postgres://..."
-POSTGRES_URL_NON_POOLING="postgres://..."
-```
-
-**Prisma Configuration** (`prisma/schema.prisma`):
-```prisma
+# 5. Update prisma/schema.prisma datasource:
 datasource db {
   provider = "postgresql"
   url      = env("POSTGRES_PRISMA_URL")
   directUrl = env("POSTGRES_URL_NON_POOLING")
 }
-```
 
-**Migrate**:
-```bash
-# Add trace tables to your existing schema
-npx prisma migrate dev --name add-tracing
+# 6. Add trace models (copy from prisma/schema.prisma in this directory)
+
+# 7. Run migration
+npx prisma migrate dev --name add-dossier-tracing
 npx prisma generate
 ```
 
+**Done!** Your Vercel app now has a PostgreSQL database with trace tables.
+
+### Why Vercel Postgres?
+
+✅ **One-click setup** in Vercel dashboard  
+✅ **JSONB support** for storing full traces  
+✅ **Serverless** - scales automatically, pay per usage  
+✅ **Free tier**: 512 MB storage, 1 GB bandwidth/month  
+✅ **Team-friendly** - shared with your Vercel project  
+
+**Storage estimate**:
+- 512 MB = ~10,000-50,000 traces (depending on step count)
+- With 90-day retention, free tier handles most teams
+
 ---
 
-### Option 2: Supabase
+## Alternative Databases
 
-**Why**: PostgreSQL + auth + realtime, generous free tier
+<details>
+<summary><strong>Option 2: Supabase</strong> (Better free tier, realtime features)</summary>
+
+**Why**: PostgreSQL + auth + realtime, 500 MB free storage
 
 **Setup**:
 ```bash
@@ -75,20 +81,44 @@ npx prisma generate
 
 # .env.local
 DATABASE_URL="postgresql://postgres:[password]@[project-ref].supabase.co:5432/postgres"
-```
 
-**Install**:
-```bash
+# 3. Install
 npm install @supabase/supabase-js prisma @prisma/client
+
+# 4. Run migration
+npx prisma migrate dev --name add-tracing
 ```
 
----
+**When to use**: If you want realtime trace updates or better free tier.
 
-### Option 3: Direct SQL (No ORM)
+</details>
+
+<details>
+<summary><strong>Option 3: Neon</strong> (Serverless PostgreSQL, 3 GB free)</summary>
+
+**Why**: Generous free tier (3 GB), database branching
+
+**Setup**:
+```bash
+# 1. Create project at neon.tech
+# 2. Get connection string
+
+# .env.local
+DATABASE_URL="postgresql://..."
+
+# 3. Run migration
+npx prisma migrate dev --name add-tracing
+```
+
+**When to use**: If you need more free storage or branching features.
+
+</details>
+
+<details>
+<summary><strong>Option 4: Direct SQL</strong> (No ORM)</summary>
 
 **Why**: Simplest, no Prisma overhead
 
-**Using Vercel Postgres directly**:
 ```typescript
 // lib/db.ts
 import { sql } from '@vercel/postgres';
@@ -103,15 +133,11 @@ export async function createTrace(trace: any) {
   `;
   return result.rows[0];
 }
-
-export async function getTrace(traceId: string, userId: string) {
-  const result = await sql`
-    SELECT * FROM traces 
-    WHERE trace_id = ${traceId} AND user_id = ${userId}
-  `;
-  return result.rows[0];
-}
 ```
+
+**When to use**: If you prefer raw SQL over Prisma.
+
+</details>
 
 ---
 
