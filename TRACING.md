@@ -34,6 +34,30 @@ When an LLM agent executes a Dossier:
 
 ## Architecture
 
+Dossier Tracing supports **three deployment models**:
+
+### 1. Local Mode (Solo Developer)
+```
+Agent → Local SQLite → Done
+(No server needed!)
+```
+
+### 2. Team Server (Organization)
+```
+All Team Agents → Shared Trace Server → Org Database
+(Single server for entire team)
+```
+
+### 3. SaaS Mode (Multi-Tenant) [Future]
+```
+Multiple Orgs → SaaS Service → Isolated Tenant DBs
+(Managed service)
+```
+
+**See [TRACE_DEPLOYMENT_MODELS.md](./TRACE_DEPLOYMENT_MODELS.md) for complete details.**
+
+### Detailed Flow (Team Server Mode)
+
 ```
 ┌──────────────┐
 │    Agent     │
@@ -45,69 +69,97 @@ When an LLM agent executes a Dossier:
        ▼
 ┌─────────────────────┐
 │  Trace Client Lib   │
-│  (in agent code)    │
+│  (auto-detects mode)│
 └──────────┬──────────┘
-           │ HTTPS/REST
-           ▼
-┌──────────────────────┐
-│   Trace Server       │
-│ (Customer-Deployed)  │
-│                      │
-│ - Stores traces      │
-│ - Provides API       │
-│ - Privacy/compliance │
-└──────────┬───────────┘
            │
-           ▼
-┌──────────────────────┐
-│     Storage          │
-│  (SQLite/PostgreSQL) │
-└──────────────────────┘
+           ├─→ LOCAL: SQLite file
+           │
+           └─→ SERVER: HTTPS/REST
+                  ▼
+           ┌──────────────────────┐
+           │   Trace Server       │
+           │ (Team/Org Deployed)  │
+           │                      │
+           │ - Shared visibility  │
+           │ - Team analytics     │
+           │ - Compliance         │
+           └──────────┬───────────┘
+                      │
+                      ▼
+           ┌──────────────────────┐
+           │     Storage          │
+           │  (SQLite/PostgreSQL) │
+           └──────────────────────┘
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Deploy Trace Server
+Choose your deployment model:
 
-Each customer deploys their own trace server for privacy:
+### Option 1: Local Mode (Solo Developer)
+
+**Zero setup** - just start using it:
 
 ```bash
+# No configuration needed!
+# Traces automatically save to ~/.dossier/traces.db
+```
+
+```javascript
+import { DossierExecutor } from '@dossier/executor';
+
+// Auto-detects local mode (no server configured)
+const executor = new DossierExecutor();
+
+// Execute Dossier (tracing happens automatically to local SQLite)
+await executor.execute('deploy-to-aws.md');
+```
+
+**View traces**:
+```bash
+sqlite3 ~/.dossier/traces.db "SELECT * FROM traces ORDER BY started_at DESC LIMIT 10"
+```
+
+---
+
+### Option 2: Team Server (Organization)
+
+**One-time setup** for entire team:
+
+```bash
+# Deploy trace server (once per team/org)
 cd trace-server
 export API_KEY=$(openssl rand -hex 32)
 docker-compose up -d
 ```
 
-**Why customer-deployed?**
-- Privacy: Execution data stays in your infrastructure
-- Compliance: Meet GDPR, SOC 2, industry requirements
-- Control: Your data, your retention policies
-
-### 2. Configure Agent
-
-Set trace server URL in agent configuration:
+**Each team member configures**:
 
 ```bash
-export DOSSIER_TRACE_SERVER="https://traces.your-company.com/api/v1"
-export DOSSIER_TRACE_API_KEY="your-api-key"
+export TRACE_MODE=server
+export TRACE_SERVER_URL="https://traces.your-company.com/api/v1"
+export TRACE_API_KEY="team-shared-key"
 ```
-
-### 3. Execute Dossier with Tracing
-
-When an agent executes a Dossier, it automatically logs to the trace server:
 
 ```javascript
 import { DossierExecutor } from '@dossier/executor';
 
-const executor = new DossierExecutor({
-  traceServer: process.env.DOSSIER_TRACE_SERVER,
-  traceApiKey: process.env.DOSSIER_TRACE_API_KEY
-});
+// Auto-detects server mode (TRACE_SERVER_URL is set)
+const executor = new DossierExecutor();
 
-// Execute Dossier (tracing happens automatically)
+// Execute Dossier (tracing happens to team server)
 await executor.execute('deploy-to-aws.md');
 ```
+
+**Benefits**:
+- ✅ Centralized visibility (all team traces)
+- ✅ Compliance/auditing (organization-wide)
+- ✅ Team analytics
+- ✅ Customer-deployed (privacy, control)
+
+**See [TRACE_DEPLOYMENT_MODELS.md](./TRACE_DEPLOYMENT_MODELS.md) for complete deployment guide.**
 
 ---
 
