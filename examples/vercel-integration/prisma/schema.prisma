@@ -1,0 +1,114 @@
+// Prisma Schema for Vercel-Integrated Dossier Tracing
+// Add this to your existing Prisma schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Existing models (example - adapt to your actual schema)
+model User {
+  id          String   @id @default(cuid())
+  email       String   @unique
+  name        String?
+  createdAt   DateTime @default(now())
+
+  // Relations
+  spaces      Space[]
+  traces      Trace[]
+}
+
+model Space {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  userId      String
+  createdAt   DateTime @default(now())
+
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  dossiers    Dossier[]
+  traces      Trace[]
+
+  @@index([userId])
+}
+
+model Dossier {
+  id          String   @id @default(cuid())
+  spaceId     String
+  title       String
+  version     String
+  content     String   @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relations
+  space       Space    @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  traces      Trace[]
+
+  @@index([spaceId])
+}
+
+// NEW: Trace models for execution tracking
+model Trace {
+  id              String   @id @default(cuid())
+  traceId         String   @unique // UUID from trace_schema
+  userId          String
+  spaceId         String
+  dossierId       String?  // Optional link to Dossier record
+
+  // Core trace data
+  dossierTitle    String
+  dossierVersion  String
+  agentName       String?
+  agentVersion    String?
+
+  startedAt       DateTime
+  completedAt     DateTime?
+  durationMs      Int?
+  status          String   // 'running', 'success', 'failed', 'cancelled'
+
+  // Full trace data (JSON - conforms to trace-schema.json)
+  data            Json
+
+  // Metadata
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  space           Space    @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  dossier         Dossier? @relation(fields: [dossierId], references: [id], onDelete: SetNull)
+  steps           TraceStep[]
+
+  @@index([userId])
+  @@index([spaceId])
+  @@index([traceId])
+  @@index([status])
+  @@index([startedAt])
+  @@index([dossierTitle])
+}
+
+model TraceStep {
+  id          String   @id @default(cuid())
+  traceId     String
+  stepId      String   // UUID from step
+  stepNumber  Int
+  timestamp   DateTime
+  type        String   // 'prerequisite_check', 'action', 'validation', etc.
+
+  // Full step data (JSON)
+  data        Json
+
+  createdAt   DateTime @default(now())
+
+  // Relations
+  trace       Trace    @relation(fields: [traceId], references: [id], onDelete: Cascade)
+
+  @@index([traceId])
+  @@index([stepNumber])
+}
