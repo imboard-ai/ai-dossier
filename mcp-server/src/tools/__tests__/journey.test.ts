@@ -16,6 +16,12 @@ vi.mock('node:fs', () => ({
 // Mock core parser
 vi.mock('@ai-dossier/core', () => ({
   parseDossierContent: vi.fn((raw: string) => ({ body: raw })),
+  createTraceRecorder: vi.fn(() => ({
+    enabled: false,
+    create: vi.fn().mockResolvedValue(undefined),
+    appendStep: vi.fn().mockResolvedValue(undefined),
+    complete: vi.fn().mockResolvedValue(undefined),
+  })),
 }));
 
 // Mock logger
