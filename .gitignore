@@ -152,3 +152,4 @@ REFACTORING_PLAN.md
 # Worktrees
 worktrees/
 .worktree-pool.json
+.env*.local

@@ -27,6 +27,7 @@
   "homepage": "https://github.com/imboard-ai/ai-dossier/tree/main/registry#readme",
   "dependencies": {
     "@ai-dossier/core": "*",
+    "@neondatabase/serverless": "^1.1.0",
     "jsonwebtoken": "^9.0.2"
   },
   "devDependencies": {
