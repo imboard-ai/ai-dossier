@@ -4,6 +4,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { DossierTraceInfo } from '@ai-dossier/core';
 import type { PhaseEntry } from './types';
 
 export interface JourneyStep {
@@ -14,6 +15,12 @@ export interface JourneyStep {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
   injectedContext?: string;
   collectedOutputs?: Record<string, unknown>;
+  /**
+   * Cached at the time the step's dossier was first read (in startJourney
+   * or when advancing in stepComplete). Recorded into the trace so we
+   * know which exact dossier version + body hash ran for each step.
+   */
+  dossierMeta?: DossierTraceInfo;
 }
 
 export interface JourneySession {

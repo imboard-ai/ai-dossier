@@ -5,7 +5,8 @@
 
 import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { parseDossierContent } from '@ai-dossier/core';
+import { type DossierFrontmatter, parseDossierContent } from '@ai-dossier/core';
+import { extractDossierTraceInfo } from '../orchestration/dossier-trace-info';
 import { getRecorder } from '../orchestration/recorder';
 import { createSession, stepsFromPhases, updateSession } from '../orchestration/session';
 import type { PhaseEntry } from '../orchestration/types';
@@ -37,25 +38,33 @@ export interface StartJourneyError {
 }
 
 /**
- * Fetch the markdown body of a dossier step.
- * Local dossiers are read from disk; registry dossiers return empty string as fallback.
+ * Fetch the body + parsed frontmatter of a dossier step. The frontmatter
+ * is returned (when parseable) so callers can record audit metadata
+ * (version, checksum, signature) in the execution trace.
+ *
+ * Local dossiers are read from disk; registry dossiers return an empty
+ * body + null frontmatter as fallback.
  */
-function fetchDossierBody(entry: Pick<PhaseEntry, 'source' | 'path' | 'name'>): string {
+export function fetchDossierContent(entry: Pick<PhaseEntry, 'source' | 'path' | 'name'>): {
+  body: string;
+  frontmatter: DossierFrontmatter | null;
+} {
   if (entry.source === 'local' && entry.path) {
     try {
       const raw = readFileSync(entry.path, 'utf8');
       try {
-        return parseDossierContent(raw).body;
+        const parsed = parseDossierContent(raw);
+        return { body: parsed.body, frontmatter: parsed.frontmatter };
       } catch {
-        return raw;
+        return { body: raw, frontmatter: null };
       }
     } catch {
       logger.warn('Could not read dossier file', { path: entry.path });
-      return '';
+      return { body: '', frontmatter: null };
     }
   }
   // Registry dossiers: body is not available without a download step
-  return '';
+  return { body: '', frontmatter: null };
 }
 
 /**
@@ -103,7 +112,14 @@ export async function startJourney(
   updateSession(session);
 
   const first = entries[0];
-  const body = fetchDossierBody(first);
+  const { body, frontmatter } = fetchDossierContent(first);
+
+  // Cache audit metadata on the session step so stepComplete can include
+  // the same checksum/version on the appendStep payload — without
+  // re-reading the file or trusting Claude's report.
+  const dossierMeta = extractDossierTraceInfo(first.name, frontmatter);
+  session.steps[0].dossierMeta = dossierMeta;
+  updateSession(session);
 
   logger.info('Journey started', {
     journeyId: session.id,
@@ -115,7 +131,7 @@ export async function startJourney(
   // Fire-and-forget: opens a trace if DOSSIER_TRACE_URL/TOKEN are set.
   getRecorder().create({
     trace_id: session.id,
-    dossier: { title: first.name, version: 'unknown' },
+    dossier: dossierMeta,
     agent: { name: 'mcp-server', host: hostname() },
     started_at: session.startedAt.toISOString(),
     status: 'running',

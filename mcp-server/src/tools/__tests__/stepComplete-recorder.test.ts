@@ -12,8 +12,15 @@ vi.mock('node:fs', () => ({
   readFileSync: vi.fn(() => '# Body'),
 }));
 
+// Per-test override hook; default returns frontmatter so the audit
+// metadata (version + checksum + signature) lands on each appendStep.
+const mockParse = vi.fn((raw: string) => ({
+  body: raw,
+  frontmatter: { title: 'Mock Title', version: '1.0.0' },
+}));
+
 vi.mock('@ai-dossier/core', () => ({
-  parseDossierContent: vi.fn((raw: string) => ({ body: raw })),
+  parseDossierContent: (raw: string) => mockParse(raw),
 }));
 
 vi.mock('../../utils/logger', () => ({
@@ -115,6 +122,63 @@ describe('stepComplete → TraceRecorder', () => {
 
     expect(mockRecorder.complete).toHaveBeenCalledTimes(1);
     expect(mockRecorder.complete.mock.calls[0][1].status).toBe('failed');
+  });
+
+  it('records dossier_meta (version + checksum) on each appendStep', async () => {
+    // Different frontmatter per dossier so we can prove the cached metadata
+    // is per-step, not just the entry dossier's metadata reused.
+    mockParse
+      .mockReturnValueOnce({
+        body: '# a',
+        frontmatter: {
+          title: 'Dossier A',
+          version: '1.0.0',
+          checksum: { algorithm: 'sha256', hash: 'aaa-hash' },
+        },
+      } as never)
+      .mockReturnValueOnce({
+        body: '# b',
+        frontmatter: {
+          title: 'Dossier B',
+          version: '2.5.0',
+          checksum: { algorithm: 'sha256', hash: 'bbb-hash' },
+          signature: {
+            algorithm: 'ed25519',
+            signature: 'sig-bytes-ignored',
+            signed_by: 'tester',
+            key_id: 'k1',
+            signed_at: '2026-05-13T20:00:00Z',
+          },
+        },
+      } as never);
+
+    storeGraph('g-meta', makePlan(['a', 'b']));
+    const start = (await startJourney({ graph_id: 'g-meta' })) as { journey_id: string };
+    await stepComplete({ journey_id: start.journey_id, status: 'completed' });
+    await stepComplete({ journey_id: start.journey_id, status: 'completed' });
+
+    expect(mockRecorder.appendStep).toHaveBeenCalledTimes(2);
+
+    const stepA = mockRecorder.appendStep.mock.calls[0][1];
+    expect(stepA.dossier_meta).toEqual({
+      title: 'Dossier A',
+      version: '1.0.0',
+      checksum: { algorithm: 'sha256', hash: 'aaa-hash' },
+    });
+
+    const stepB = mockRecorder.appendStep.mock.calls[1][1];
+    expect(stepB.dossier_meta.title).toBe('Dossier B');
+    expect(stepB.dossier_meta.version).toBe('2.5.0');
+    expect(stepB.dossier_meta.checksum).toEqual({ algorithm: 'sha256', hash: 'bbb-hash' });
+    expect(stepB.dossier_meta.signature).toEqual({
+      algorithm: 'ed25519',
+      signed_by: 'tester',
+      key_id: 'k1',
+      signed_at: '2026-05-13T20:00:00Z',
+    });
+    // Signature bytes + public key are NEVER recorded.
+    expect(stepB.dossier_meta.signature.signature).toBeUndefined();
+    expect(stepB.dossier_meta.signature.public_key).toBeUndefined();
   });
 
   it('does not finalize on an intermediate (non-final) completed step', async () => {
