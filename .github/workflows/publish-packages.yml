@@ -154,12 +154,17 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      # Node 22 ships npm 10.x, which supports `npm publish --provenance`
-      # (OIDC trusted publishing) natively. Self-upgrading to npm@latest on
-      # the GH Actions toolcache image currently fails with a corrupted
-      # arborist install (missing promise-retry), so we just use bundled npm.
-      - name: Print npm version
-        run: npm --version
+      # Trusted-publishing AUTH (OIDC token used as the npm publish
+      # credential) requires npm 11.5+. Node 22's bundled npm is 10.9.7,
+      # which can sign provenance attestations but cannot authenticate
+      # the publish PUT, so the registry returns 404. Install npm 11+ via
+      # corepack — `npm install -g npm@latest` is broken on the current
+      # GH Actions toolcache image (arborist's promise-retry is missing).
+      - name: Install npm 11+ via corepack
+        run: |
+          corepack enable
+          corepack prepare npm@latest --activate
+          npm --version
 
       - name: Install dependencies
         run: npm ci
