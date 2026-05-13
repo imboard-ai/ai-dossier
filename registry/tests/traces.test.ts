@@ -177,6 +177,7 @@ describe('POST /api/v1/traces', () => {
     });
     expect(traces.createTrace).toHaveBeenCalledWith(
       OWNER,
+      expect.any(Array),
       expect.objectContaining({ trace_id: VALID_UUID })
     );
   });
@@ -277,7 +278,7 @@ describe('GET /api/v1/traces/:traceId', () => {
     );
     expect(getStatus()).toBe(404);
     expect(getBody()).toMatchObject({ error: { code: 'NOT_FOUND' } });
-    expect(traces.getTrace).toHaveBeenCalledWith(OWNER, OTHER_UUID);
+    expect(traces.getTrace).toHaveBeenCalledWith(OWNER, OTHER_UUID, { org: undefined });
   });
 
   it('returns the full trace on happy path', async () => {
@@ -505,5 +506,147 @@ describe('validateCreatePayload (pure)', () => {
     const { validateCreatePayload } = await import('../api/v1/traces/index');
     const result = validateCreatePayload(null);
     expect(result.ok).toBe(false);
+  });
+});
+
+// ---- Org-scoped reads ----
+
+describe('Org-scoped reads', () => {
+  async function withOrgs<T>(orgs: string[], fn: () => Promise<T>): Promise<T> {
+    const jwt = await import('jsonwebtoken');
+    const original = jwt.default.verify;
+    (jwt.default.verify as unknown) = () => ({ sub: OWNER, email: null, orgs });
+    try {
+      return await fn();
+    } finally {
+      (jwt.default.verify as unknown) = original;
+    }
+  }
+
+  it('createTrace receives JWT orgs and writes them through', async () => {
+    await withOrgs(['imboard-ai', 'other-org'], async () => {
+      (traces.createTrace as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        id: '1',
+        traceId: VALID_UUID,
+        createdAt: new Date('2026-05-13T10:00:01Z'),
+      });
+      const { res, getStatus } = createMockRes();
+      await tracesHandler(
+        createMockReq({
+          method: 'POST',
+          body: {
+            trace_id: VALID_UUID,
+            dossier: { title: 'X', version: '1.0.0' },
+            started_at: '2026-05-13T10:00:00Z',
+            status: 'running',
+          },
+          headers: authedHeaders(),
+        }) as never,
+        res as never
+      );
+      expect(getStatus()).toBe(201);
+      expect(traces.createTrace).toHaveBeenCalledWith(
+        OWNER,
+        ['imboard-ai', 'other-org'],
+        expect.objectContaining({ trace_id: VALID_UUID })
+      );
+    });
+  });
+
+  it('GET /api/v1/traces?org=imboard-ai threads the org through listTraces', async () => {
+    await withOrgs(['imboard-ai'], async () => {
+      (traces.listTraces as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        rows: [],
+        total: 0,
+        limit: 50,
+        offset: 0,
+      });
+      const { res, getStatus } = createMockRes();
+      await tracesHandler(
+        createMockReq({
+          method: 'GET',
+          query: { org: 'imboard-ai' },
+          headers: authedHeaders(),
+        }) as never,
+        res as never
+      );
+      expect(getStatus()).toBe(200);
+      expect(traces.listTraces).toHaveBeenCalledWith(
+        OWNER,
+        expect.objectContaining({ org: 'imboard-ai' })
+      );
+    });
+  });
+
+  it('GET /api/v1/traces?org=X returns 403 when X is not in JWT orgs', async () => {
+    await withOrgs(['imboard-ai'], async () => {
+      const { res, getStatus, getBody } = createMockRes();
+      await tracesHandler(
+        createMockReq({
+          method: 'GET',
+          query: { org: 'other-org' },
+          headers: authedHeaders(),
+        }) as never,
+        res as never
+      );
+      expect(getStatus()).toBe(403);
+      expect(getBody()).toMatchObject({ error: { code: 'FORBIDDEN' } });
+      expect(traces.listTraces).not.toHaveBeenCalled();
+    });
+  });
+
+  it('GET /api/v1/traces/:id?org=imboard-ai threads the org through getTrace', async () => {
+    await withOrgs(['imboard-ai'], async () => {
+      (traces.getTrace as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        trace_id: VALID_UUID,
+        status: 'success',
+        steps: [],
+      });
+      const { res, getStatus } = createMockRes();
+      await traceIdHandler(
+        createMockReq({
+          method: 'GET',
+          query: { traceId: VALID_UUID, org: 'imboard-ai' },
+          headers: authedHeaders(),
+        }) as never,
+        res as never
+      );
+      expect(getStatus()).toBe(200);
+      expect(traces.getTrace).toHaveBeenCalledWith(OWNER, VALID_UUID, { org: 'imboard-ai' });
+    });
+  });
+
+  it('GET /api/v1/traces/:id?org=X returns 403 when X is not in JWT orgs', async () => {
+    await withOrgs(['imboard-ai'], async () => {
+      const { res, getStatus, getBody } = createMockRes();
+      await traceIdHandler(
+        createMockReq({
+          method: 'GET',
+          query: { traceId: VALID_UUID, org: 'other-org' },
+          headers: authedHeaders(),
+        }) as never,
+        res as never
+      );
+      expect(getStatus()).toBe(403);
+      expect(getBody()).toMatchObject({ error: { code: 'FORBIDDEN' } });
+      expect(traces.getTrace).not.toHaveBeenCalled();
+    });
+  });
+
+  it('GET /api/v1/traces/:id/steps?org=X returns 403 when X is not in JWT orgs', async () => {
+    await withOrgs(['imboard-ai'], async () => {
+      const { res, getStatus, getBody } = createMockRes();
+      await stepsHandler(
+        createMockReq({
+          method: 'GET',
+          query: { traceId: VALID_UUID, org: 'other-org' },
+          headers: authedHeaders(),
+        }) as never,
+        res as never
+      );
+      expect(getStatus()).toBe(403);
+      expect(getBody()).toMatchObject({ error: { code: 'FORBIDDEN' } });
+      expect(traces.listSteps).not.toHaveBeenCalled();
+    });
   });
 });

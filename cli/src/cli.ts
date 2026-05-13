@@ -36,6 +36,7 @@ import { registerRunCommand } from './commands/run';
 import { registerSearchCommand } from './commands/search';
 import { registerSignCommand } from './commands/sign';
 import { registerSkillExportCommand } from './commands/skill-export';
+import { registerTracesCommand } from './commands/traces';
 import { registerValidateCommand } from './commands/validate';
 import { registerVerifyCommand } from './commands/verify';
 import { registerWhoamiCommand } from './commands/whoami';
@@ -105,6 +106,7 @@ registerConfigCommand(program);
 registerCacheCommand(program);
 registerHistoryCommand(program);
 registerDoctorCommand(program);
+registerTracesCommand(program);
 
 // Hidden
 registerPromptHookCommand(program);

@@ -4,6 +4,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { hostname } from 'node:os';
 import { parseDossierContent } from '@ai-dossier/core';
 import { getRecorder } from '../orchestration/recorder';
 import { createSession, stepsFromPhases, updateSession } from '../orchestration/session';
@@ -115,7 +116,7 @@ export async function startJourney(
   getRecorder().create({
     trace_id: session.id,
     dossier: { title: first.name, version: 'unknown' },
-    agent: { name: 'mcp-server' },
+    agent: { name: 'mcp-server', host: hostname() },
     started_at: session.startedAt.toISOString(),
     status: 'running',
   });

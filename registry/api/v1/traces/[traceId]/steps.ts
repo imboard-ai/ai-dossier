@@ -34,7 +34,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const owner = payload.sub;
 
   if (req.method === 'POST') return handleAppend(req, res, owner, traceId, requestId);
-  if (req.method === 'GET') return handleList(res, owner, traceId, requestId);
+  if (req.method === 'GET') return handleList(req, res, payload, traceId, requestId);
 
   return methodNotAllowed(req, res, 'GET', 'POST');
 }
@@ -84,9 +84,26 @@ async function handleAppend(
   }
 }
 
-async function handleList(res: VercelResponse, owner: string, traceId: string, requestId: string) {
+async function handleList(
+  req: VercelRequest,
+  res: VercelResponse,
+  payload: { sub: string; orgs: string[] },
+  traceId: string,
+  requestId: string
+) {
+  const org = pickOne(req.query.org);
+  if (org && !payload.orgs.includes(org)) {
+    return jsonError(
+      res,
+      HTTP_STATUS.FORBIDDEN,
+      'FORBIDDEN',
+      `You are not a member of org '${org}'`,
+      requestId
+    );
+  }
+
   try {
-    const steps = await listSteps(owner, traceId);
+    const steps = await listSteps(payload.sub, traceId, { org });
     if (steps === null) return notFound(res, 'NOT_FOUND', 'Trace not found', requestId);
     return res.status(HTTP_STATUS.OK).json({ trace_id: traceId, steps });
   } catch (err) {
@@ -96,7 +113,7 @@ async function handleList(res: VercelResponse, owner: string, traceId: string, r
       code: 'UPSTREAM_ERROR',
       message: 'Failed to list steps',
       requestId,
-      context: { owner, traceId },
+      context: { owner: payload.sub, traceId },
     });
   }
 }

@@ -77,6 +77,60 @@ describe('RegistryClient', () => {
     });
   });
 
+  describe('listTraces', () => {
+    it('should call /traces with bearer auth and no params by default', async () => {
+      await client.listTraces();
+      const [url, init] = vi.mocked(fetch).mock.calls[0];
+      expect(url).toContain('/api/v1/traces');
+      expect((init as RequestInit).headers).toMatchObject({
+        Authorization: 'Bearer test-token',
+      });
+    });
+
+    it('passes status, dossier, from, to, limit, offset, org as query params', async () => {
+      await client.listTraces({
+        status: 'failed',
+        dossier: 'full-cycle',
+        from: '2026-05-01',
+        to: '2026-05-13',
+        limit: 25,
+        offset: 50,
+        org: 'imboard-ai',
+      });
+      const url = vi.mocked(fetch).mock.calls[0][0] as string;
+      expect(url).toContain('status=failed');
+      expect(url).toContain('dossier=full-cycle');
+      expect(url).toContain('from=2026-05-01');
+      expect(url).toContain('to=2026-05-13');
+      expect(url).toContain('limit=25');
+      expect(url).toContain('offset=50');
+      expect(url).toContain('org=imboard-ai');
+    });
+
+    it('omits unset params from the URL', async () => {
+      await client.listTraces();
+      const url = vi.mocked(fetch).mock.calls[0][0] as string;
+      expect(url).not.toContain('status=');
+      expect(url).not.toContain('org=');
+    });
+  });
+
+  describe('getTrace', () => {
+    it('should call /traces/:id', async () => {
+      await client.getTrace('abc-123');
+      const url = vi.mocked(fetch).mock.calls[0][0] as string;
+      expect(url).toContain('/api/v1/traces/abc-123');
+      expect(url).not.toContain('org=');
+    });
+
+    it('threads org through as query param', async () => {
+      await client.getTrace('abc-123', { org: 'imboard-ai' });
+      const url = vi.mocked(fetch).mock.calls[0][0] as string;
+      expect(url).toContain('/api/v1/traces/abc-123');
+      expect(url).toContain('org=imboard-ai');
+    });
+  });
+
   describe('getDossier', () => {
     it('should call correct endpoint', async () => {
       await client.getDossier('my-dossier');
