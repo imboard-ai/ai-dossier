@@ -22,6 +22,12 @@ vi.mock('@ai-dossier/core', () => ({
     appendStep: vi.fn().mockResolvedValue(undefined),
     complete: vi.fn().mockResolvedValue(undefined),
   })),
+  resolveTraceConfig: vi.fn(() => ({
+    enabled: false,
+    url: null,
+    token: null,
+    sources: { enabled: { layer: 'default' }, url: null, token: null },
+  })),
 }));
 
 // Mock logger
