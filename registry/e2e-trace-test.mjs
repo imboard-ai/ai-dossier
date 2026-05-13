@@ -7,8 +7,8 @@
 //   BASE_URL=http://localhost:3000 node e2e-trace-test.mjs
 //   BASE_URL=https://dossier-registry.vercel.app node e2e-trace-test.mjs
 
-import jwt from 'jsonwebtoken';
 import { randomUUID } from 'node:crypto';
+import jwt from 'jsonwebtoken';
 
 const BASE = (process.env.BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
 const SECRET = process.env.JWT_SECRET;
@@ -50,7 +50,11 @@ async function call(method, path, opts = {}) {
   let body = null;
   if (res.status !== 204) {
     const text = await res.text();
-    try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = text;
+    }
   }
   return { status: res.status, body, requestId: res.headers.get('x-request-id') };
 }
@@ -64,7 +68,11 @@ console.log(`  trace: ${TRACE_ID}\n`);
 console.log('Auth:');
 {
   const r = await call('POST', '/api/v1/traces', { body: {} });
-  check('POST /api/v1/traces without token → 401 MISSING_TOKEN', r.status === 401 && r.body?.error?.code === 'MISSING_TOKEN', `got ${r.status} ${JSON.stringify(r.body)}`);
+  check(
+    'POST /api/v1/traces without token → 401 MISSING_TOKEN',
+    r.status === 401 && r.body?.error?.code === 'MISSING_TOKEN',
+    `got ${r.status} ${JSON.stringify(r.body)}`
+  );
 }
 
 // ---- create ----
@@ -97,7 +105,11 @@ console.log('\nConflict:');
       status: 'running',
     },
   });
-  check('POST same trace_id → 409 CONFLICT', r.status === 409 && r.body?.error?.code === 'CONFLICT', `got ${r.status} ${JSON.stringify(r.body)}`);
+  check(
+    'POST same trace_id → 409 CONFLICT',
+    r.status === 409 && r.body?.error?.code === 'CONFLICT',
+    `got ${r.status} ${JSON.stringify(r.body)}`
+  );
 }
 
 // ---- list ----
@@ -127,16 +139,31 @@ console.log('\nAppend steps:');
     token: aliceToken,
     body: { step_id: 's1', type: 'action', detail: 'first step' },
   });
-  check('POST /steps (1st) → 201, step_number=1', r1.status === 201 && r1.body?.step_number === 1, `got ${r1.status} ${JSON.stringify(r1.body)}`);
+  check(
+    'POST /steps (1st) → 201, step_number=1',
+    r1.status === 201 && r1.body?.step_number === 1,
+    `got ${r1.status} ${JSON.stringify(r1.body)}`
+  );
 
   const r2 = await call('POST', `/api/v1/traces/${TRACE_ID}/steps`, {
     token: aliceToken,
     body: { step_id: 's2', type: 'validation', detail: 'second step' },
   });
-  check('POST /steps (2nd) → 201, step_number=2', r2.status === 201 && r2.body?.step_number === 2, `got ${r2.status} ${JSON.stringify(r2.body)}`);
+  check(
+    'POST /steps (2nd) → 201, step_number=2',
+    r2.status === 201 && r2.body?.step_number === 2,
+    `got ${r2.status} ${JSON.stringify(r2.body)}`
+  );
 
   const r3 = await call('GET', `/api/v1/traces/${TRACE_ID}/steps`, { token: aliceToken });
-  check('GET /steps → 200, two steps in order', r3.status === 200 && r3.body?.steps?.length === 2 && r3.body.steps[0].step_id === 's1' && r3.body.steps[1].step_id === 's2', `got ${r3.status} ${JSON.stringify(r3.body)}`);
+  check(
+    'GET /steps → 200, two steps in order',
+    r3.status === 200 &&
+      r3.body?.steps?.length === 2 &&
+      r3.body.steps[0].step_id === 's1' &&
+      r3.body.steps[1].step_id === 's2',
+    `got ${r3.status} ${JSON.stringify(r3.body)}`
+  );
 }
 
 // ---- patch ----
@@ -146,31 +173,52 @@ console.log('\nPatch:');
     token: aliceToken,
     body: { status: 'success', completed_at: new Date().toISOString(), duration_ms: 1234 },
   });
-  check('PATCH /api/v1/traces/:id → 200', r.status === 200, `got ${r.status} ${JSON.stringify(r.body)}`);
+  check(
+    'PATCH /api/v1/traces/:id → 200',
+    r.status === 200,
+    `got ${r.status} ${JSON.stringify(r.body)}`
+  );
 
   const r2 = await call('GET', `/api/v1/traces/${TRACE_ID}`, { token: aliceToken });
-  check('GET after patch shows status=success', r2.body?.status === 'success', `got status=${r2.body?.status}`);
+  check(
+    'GET after patch shows status=success',
+    r2.body?.status === 'success',
+    `got status=${r2.body?.status}`
+  );
 }
 
 // ---- cross-owner isolation ----
 console.log('\nOwner isolation:');
 {
   const r = await call('GET', `/api/v1/traces/${TRACE_ID}`, { token: bobToken });
-  check('bob GET alice\'s trace → 404 NOT_FOUND', r.status === 404 && r.body?.error?.code === 'NOT_FOUND', `got ${r.status} ${JSON.stringify(r.body)}`);
+  check(
+    "bob GET alice's trace → 404 NOT_FOUND",
+    r.status === 404 && r.body?.error?.code === 'NOT_FOUND',
+    `got ${r.status} ${JSON.stringify(r.body)}`
+  );
 
   const r2 = await call('DELETE', `/api/v1/traces/${TRACE_ID}`, { token: bobToken });
-  check('bob DELETE alice\'s trace → 404 NOT_FOUND', r2.status === 404 && r2.body?.error?.code === 'NOT_FOUND', `got ${r2.status} ${JSON.stringify(r2.body)}`);
+  check(
+    "bob DELETE alice's trace → 404 NOT_FOUND",
+    r2.status === 404 && r2.body?.error?.code === 'NOT_FOUND',
+    `got ${r2.status} ${JSON.stringify(r2.body)}`
+  );
 
   const r3 = await call('GET', '/api/v1/traces', { token: bobToken });
-  const aliceTraceVisibleToBob = Array.isArray(r3.body?.traces) && r3.body.traces.some((t) => t.trace_id === TRACE_ID);
-  check('bob LIST does not include alice\'s trace', !aliceTraceVisibleToBob);
+  const aliceTraceVisibleToBob =
+    Array.isArray(r3.body?.traces) && r3.body.traces.some((t) => t.trace_id === TRACE_ID);
+  check("bob LIST does not include alice's trace", !aliceTraceVisibleToBob);
 }
 
 // ---- validation ----
 console.log('\nValidation:');
 {
   const r = await call('POST', '/api/v1/traces', { token: aliceToken, body: {} });
-  check('empty body → 400 MISSING_FIELD', r.status === 400 && r.body?.error?.code === 'MISSING_FIELD', `got ${r.status}`);
+  check(
+    'empty body → 400 MISSING_FIELD',
+    r.status === 400 && r.body?.error?.code === 'MISSING_FIELD',
+    `got ${r.status}`
+  );
 }
 {
   const r = await call('POST', '/api/v1/traces', {
@@ -182,7 +230,11 @@ console.log('\nValidation:');
       status: 'running',
     },
   });
-  check('non-UUID trace_id → 400 INVALID_FIELD', r.status === 400 && r.body?.error?.code === 'INVALID_FIELD', `got ${r.status}`);
+  check(
+    'non-UUID trace_id → 400 INVALID_FIELD',
+    r.status === 400 && r.body?.error?.code === 'INVALID_FIELD',
+    `got ${r.status}`
+  );
 }
 
 // ---- delete + verify gone ----
