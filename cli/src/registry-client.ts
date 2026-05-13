@@ -57,6 +57,36 @@ interface DossierListItem {
   tags?: string[];
 }
 
+interface ListTracesOptions {
+  status?: string;
+  dossier?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+  org?: string;
+}
+
+interface TraceListItem {
+  trace_id: string;
+  dossier: { title: string; version: string };
+  agent?: { name?: string; version?: string; host?: string };
+  started_at: string;
+  completed_at: string | null;
+  status: 'running' | 'success' | 'failed' | 'cancelled';
+  duration_ms: number | null;
+}
+
+interface ListTracesResult {
+  traces: TraceListItem[];
+  pagination: {
+    total: number;
+    limit: number;
+    offset: number;
+    next: string | null;
+  };
+}
+
 interface ListDossiersResult {
   dossiers?: DossierListItem[];
   data?: DossierListItem[];
@@ -273,6 +303,43 @@ class RegistryClient {
   }
 
   /**
+   * List execution traces. Defaults to the authenticated user's own traces;
+   * pass `org` to list traces from anyone in that org (requires membership).
+   */
+  async listTraces(options: ListTracesOptions = {}): Promise<ListTracesResult> {
+    const params: Record<string, unknown> = {};
+    if (options.status) params.status = options.status;
+    if (options.dossier) params.dossier = options.dossier;
+    if (options.from) params.from = options.from;
+    if (options.to) params.to = options.to;
+    if (options.limit != null) params.limit = options.limit;
+    if (options.offset != null) params.offset = options.offset;
+    if (options.org) params.org = options.org;
+
+    const response = await fetch(this._buildUrl('/traces', params), {
+      headers: this._buildHeaders(),
+    });
+    return this._handleResponse<ListTracesResult>(response);
+  }
+
+  /**
+   * Fetch a single execution trace by id (includes all its steps inline).
+   * Pass `org` to read a trace from another member of that org (requires membership).
+   */
+  async getTrace(
+    traceId: string,
+    options: { org?: string } = {}
+  ): Promise<Record<string, unknown>> {
+    const params: Record<string, unknown> = {};
+    if (options.org) params.org = options.org;
+
+    const response = await fetch(this._buildUrl(`/traces/${traceId}`, params), {
+      headers: this._buildHeaders(),
+    });
+    return this._handleResponse<Record<string, unknown>>(response);
+  }
+
+  /**
    * Get current user info.
    */
   async getMe(): Promise<Record<string, unknown>> {
@@ -324,4 +391,7 @@ export type {
   SearchResult,
   ListDossiersOptions,
   SearchOptions,
+  ListTracesOptions,
+  ListTracesResult,
+  TraceListItem,
 };
