@@ -74,7 +74,9 @@ describe('startJourney → TraceRecorder.create', () => {
     expect(arg.trace_id).toBe(result.journey_id);
     expect(arg.status).toBe('running');
     expect(arg.dossier.title).toBe('entry-dossier');
-    expect(arg.agent).toEqual({ name: 'mcp-server' });
+    expect(arg.agent.name).toBe('mcp-server');
+    expect(typeof arg.agent.host).toBe('string');
+    expect(arg.agent.host.length).toBeGreaterThan(0);
     expect(typeof arg.started_at).toBe('string');
     expect(new Date(arg.started_at).toString()).not.toBe('Invalid Date');
   });
