@@ -94,6 +94,14 @@ export {
   VerifierRegistry,
   VerifyResult,
 } from './signers';
+// Trace config resolver (precedence: env > project > user > defaults)
+export type {
+  ConfigLayer as TraceConfigLayer,
+  ResolvedTraceConfig,
+  TraceConfigOptions,
+  TraceConfigSource,
+} from './trace-config';
+export { resolveTraceConfig } from './trace-config';
 // Trace recorder exports (opt-in execution tracing — see registry /api/v1/traces)
 export type {
   StepInput as TraceStepInput,
