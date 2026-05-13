@@ -1,15 +1,26 @@
-// Singleton TraceRecorder for the MCP server. Lazily constructed from
-// env vars (DOSSIER_TRACE_URL, DOSSIER_TRACE_TOKEN). Tests can inject a
-// mock via setRecorder() to assert calls without hitting the network.
+// Singleton TraceRecorder for the MCP server. Lazily constructed from the
+// resolved trace config (env > project > user > defaults — see
+// @ai-dossier/core/trace-config). Tests can inject a mock via setRecorder().
 
-import { createTraceRecorder, type TraceRecorder, type TraceStatus } from '@ai-dossier/core';
+import {
+  createTraceRecorder,
+  resolveTraceConfig,
+  type TraceRecorder,
+  type TraceStatus,
+} from '@ai-dossier/core';
 import type { JourneySession } from './session';
 
 let recorder: TraceRecorder | null = null;
 
 export function getRecorder(): TraceRecorder {
   if (!recorder) {
-    recorder = createTraceRecorder();
+    const config = resolveTraceConfig();
+    if (config.enabled && config.url && config.token) {
+      recorder = createTraceRecorder({ url: config.url, token: config.token });
+    } else {
+      // Returns a disabled (no-op) recorder when no config is in effect.
+      recorder = createTraceRecorder({ url: '', token: '' });
+    }
   }
   return recorder;
 }
