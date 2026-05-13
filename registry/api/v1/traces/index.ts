@@ -19,7 +19,7 @@ import {
   type TraceStatus,
   VALID_STATUSES,
 } from '../../../lib/traces';
-import type { VercelRequest, VercelResponse } from '../../../lib/types';
+import type { JwtPayload, VercelRequest, VercelResponse } from '../../../lib/types';
 
 const log = createLogger('traces/index');
 
@@ -33,10 +33,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const payload = await authenticateRequest(req, res);
   if (!payload) return;
-  const owner = payload.sub;
 
-  if (req.method === 'GET') return handleList(req, res, owner, requestId);
-  if (req.method === 'POST') return handleCreate(req, res, owner, requestId);
+  if (req.method === 'GET') return handleList(req, res, payload, requestId);
+  if (req.method === 'POST') return handleCreate(req, res, payload, requestId);
 
   return methodNotAllowed(req, res, 'GET', 'POST');
 }
@@ -44,7 +43,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 async function handleList(
   req: VercelRequest,
   res: VercelResponse,
-  owner: string,
+  payload: JwtPayload,
   requestId: string
 ) {
   const q = req.query as Record<string, string | string[] | undefined>;
@@ -54,6 +53,7 @@ async function handleList(
   const to = pickOne(q.to);
   const limit = pickOne(q.limit);
   const offset = pickOne(q.offset);
+  const org = pickOne(q.org);
 
   if (status && !VALID_STATUSES.includes(status as TraceStatus)) {
     return badRequest(
@@ -64,14 +64,25 @@ async function handleList(
     );
   }
 
+  if (org && !payload.orgs.includes(org)) {
+    return jsonError(
+      res,
+      HTTP_STATUS.FORBIDDEN,
+      'FORBIDDEN',
+      `You are not a member of org '${org}'`,
+      requestId
+    );
+  }
+
   try {
-    const result = await listTraces(owner, {
+    const result = await listTraces(payload.sub, {
       dossier,
       status: status as TraceStatus | undefined,
       from,
       to,
       limit,
       offset,
+      org,
     });
     const nextOffset = result.offset + result.limit;
     const hasMore = nextOffset < result.total;
@@ -150,9 +161,10 @@ export function validateCreatePayload(body: unknown): CreateValidationResult {
 async function handleCreate(
   req: VercelRequest,
   res: VercelResponse,
-  owner: string,
+  payload: JwtPayload,
   requestId: string
 ) {
+  const owner = payload.sub;
   const contentLength = Number(req.headers['content-length'] || 0);
   if (contentLength > MAX_CONTENT_SIZE) {
     return jsonError(
@@ -170,7 +182,7 @@ async function handleCreate(
   }
 
   try {
-    const result = await createTrace(owner, validated.data);
+    const result = await createTrace(owner, payload.orgs, validated.data);
     log.info('Trace created', { requestId, owner, traceId: result.traceId });
     return res.status(HTTP_STATUS.CREATED).json({
       trace_id: result.traceId,

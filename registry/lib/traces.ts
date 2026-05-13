@@ -1,5 +1,12 @@
-// Trace query helpers. Every function is owner-scoped: callers MUST pass the
-// JWT subject as `owner` and never read rows where owner != JWT subject.
+// Trace query helpers.
+//
+// **Writes** (create/update/delete/appendStep) are owner-scoped: callers MUST
+// pass the JWT subject as `owner` and the row must match it.
+//
+// **Reads** (get/list/listSteps) accept an optional `org` argument. When set,
+// the lookup matches any trace whose `orgs` array contains that org instead
+// of matching `owner`. Handlers MUST verify the requested org is in the
+// caller's JWT `orgs` claim before passing it through.
 //
 // The full trace blob (conforming to the Dossier execution trace schema
 // authored on the schema-implementation branch) lives in traces.data (JSONB).
@@ -44,6 +51,21 @@ export interface TraceListFilters {
   to?: string | null;
   limit?: string | number;
   offset?: string | number;
+  /**
+   * If set, query traces from any owner whose `orgs` array contains this org
+   * instead of querying by owner. Callers MUST verify the value is present in
+   * the caller's JWT `orgs` claim before passing it through.
+   */
+  org?: string | null;
+}
+
+export interface ReadScope {
+  /**
+   * Either an org name (read traces from any owner in this org) or undefined
+   * (default: read traces owned by `owner`). Handlers MUST verify the org is
+   * in the caller's JWT `orgs` claim before passing it through.
+   */
+  org?: string;
 }
 
 export interface TraceListRow {
@@ -64,17 +86,23 @@ export interface CreateResult {
   createdAt: Date | string;
 }
 
-export async function createTrace(owner: string, trace: TraceInput): Promise<CreateResult> {
+export async function createTrace(
+  owner: string,
+  orgs: string[],
+  trace: TraceInput
+): Promise<CreateResult> {
   const startedAt = new Date(trace.started_at);
   const completedAt = trace.completed_at ? new Date(trace.completed_at) : null;
+  // Empty array becomes NULL so it's clearly distinguishable from "no orgs set".
+  const orgsValue = orgs.length > 0 ? orgs : null;
   const rows = (await sql`
     INSERT INTO traces (
-      trace_id, owner,
+      trace_id, owner, orgs,
       dossier_title, dossier_version, agent_name, agent_version,
       started_at, completed_at, duration_ms, status,
       data
     ) VALUES (
-      ${trace.trace_id}, ${owner},
+      ${trace.trace_id}, ${owner}, ${orgsValue},
       ${trace.dossier.title}, ${trace.dossier.version},
       ${trace.agent?.name ?? null}, ${trace.agent?.version ?? null},
       ${startedAt}, ${completedAt}, ${trace.duration_ms ?? null}, ${trace.status},
@@ -88,12 +116,18 @@ export async function createTrace(owner: string, trace: TraceInput): Promise<Cre
 
 export async function getTrace(
   owner: string,
-  traceId: string
+  traceId: string,
+  scope: ReadScope = {}
 ): Promise<Record<string, unknown> | null> {
+  const orgScope = scope.org ?? null;
   const traces = (await sql`
     SELECT id, data
     FROM traces
-    WHERE trace_id = ${traceId} AND owner = ${owner}
+    WHERE trace_id = ${traceId}
+      AND (
+        (${orgScope}::text IS NULL AND owner = ${owner})
+        OR (${orgScope}::text IS NOT NULL AND ${orgScope} = ANY(orgs))
+      )
     LIMIT 1
   `) as Array<{ id: string; data: Record<string, unknown> }>;
   if (traces.length === 0) return null;
@@ -120,7 +154,7 @@ export async function listTraces(
   owner: string,
   filters: TraceListFilters = {}
 ): Promise<ListResult> {
-  const { dossier = null, status = null, from = null, to = null } = filters;
+  const { dossier = null, status = null, from = null, to = null, org = null } = filters;
   const limit = Math.min(Number.parseInt(String(filters.limit ?? '50'), 10) || 50, 200);
   const offset = Number.parseInt(String(filters.offset ?? '0'), 10) || 0;
 
@@ -131,7 +165,11 @@ export async function listTraces(
     SELECT trace_id, dossier_title, dossier_version, agent_name, agent_version,
            started_at, completed_at, status, duration_ms
     FROM traces
-    WHERE owner = ${owner}
+    WHERE
+      (
+        (${org}::text IS NULL AND owner = ${owner})
+        OR (${org}::text IS NOT NULL AND ${org} = ANY(orgs))
+      )
       AND (${dossier}::text  IS NULL OR dossier_title = ${dossier})
       AND (${status}::text   IS NULL OR status        = ${status})
       AND (${fromDate}::timestamptz IS NULL OR started_at >= ${fromDate})
@@ -143,7 +181,11 @@ export async function listTraces(
   const countRows = (await sql`
     SELECT COUNT(*)::int AS count
     FROM traces
-    WHERE owner = ${owner}
+    WHERE
+      (
+        (${org}::text IS NULL AND owner = ${owner})
+        OR (${org}::text IS NOT NULL AND ${org} = ANY(orgs))
+      )
       AND (${dossier}::text  IS NULL OR dossier_title = ${dossier})
       AND (${status}::text   IS NULL OR status        = ${status})
       AND (${fromDate}::timestamptz IS NULL OR started_at >= ${fromDate})
@@ -255,15 +297,21 @@ export async function appendStep(
 }
 
 /**
- * @returns null if trace not found / not owned by `owner`
+ * @returns null if trace not found / not visible under the given scope
  */
 export async function listSteps(
   owner: string,
-  traceId: string
+  traceId: string,
+  scope: ReadScope = {}
 ): Promise<Record<string, unknown>[] | null> {
+  const orgScope = scope.org ?? null;
   const traces = (await sql`
     SELECT id FROM traces
-    WHERE trace_id = ${traceId} AND owner = ${owner}
+    WHERE trace_id = ${traceId}
+      AND (
+        (${orgScope}::text IS NULL AND owner = ${owner})
+        OR (${orgScope}::text IS NOT NULL AND ${orgScope} = ANY(orgs))
+      )
     LIMIT 1
   `) as Array<{ id: string }>;
   if (traces.length === 0) return null;

@@ -40,16 +40,33 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!payload) return;
   const owner = payload.sub;
 
-  if (req.method === 'GET') return handleGet(res, owner, traceId, requestId);
+  if (req.method === 'GET') return handleGet(req, res, payload, traceId, requestId);
   if (req.method === 'PATCH') return handlePatch(req, res, owner, traceId, requestId);
   if (req.method === 'DELETE') return handleDelete(res, owner, traceId, requestId);
 
   return methodNotAllowed(req, res, 'GET', 'PATCH', 'DELETE');
 }
 
-async function handleGet(res: VercelResponse, owner: string, traceId: string, requestId: string) {
+async function handleGet(
+  req: VercelRequest,
+  res: VercelResponse,
+  payload: { sub: string; orgs: string[] },
+  traceId: string,
+  requestId: string
+) {
+  const org = pickOne(req.query.org);
+  if (org && !payload.orgs.includes(org)) {
+    return jsonError(
+      res,
+      HTTP_STATUS.FORBIDDEN,
+      'FORBIDDEN',
+      `You are not a member of org '${org}'`,
+      requestId
+    );
+  }
+
   try {
-    const trace = await getTrace(owner, traceId);
+    const trace = await getTrace(payload.sub, traceId, { org });
     if (!trace) return notFound(res, 'NOT_FOUND', 'Trace not found', requestId);
     return res.status(HTTP_STATUS.OK).json(trace);
   } catch (err) {
@@ -59,7 +76,7 @@ async function handleGet(res: VercelResponse, owner: string, traceId: string, re
       code: 'UPSTREAM_ERROR',
       message: 'Failed to get trace',
       requestId,
-      context: { owner, traceId },
+      context: { owner: payload.sub, traceId },
     });
   }
 }
