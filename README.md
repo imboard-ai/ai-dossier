@@ -350,7 +350,7 @@ Detailed playbooks in [docs/guides/adopter-playbooks.md](docs/guides/adopter-pla
 |---|---|
 | **Getting Started** | [Quick Start](docs/getting-started/installation.md) · [MCP in 60 Seconds](docs/tutorials/mcp-quickstart.md) · [Your First Dossier](docs/tutorials/your-first-dossier.md) · [FAQ](docs/explanation/faq.md) |
 | **Reference** | [Protocol](docs/reference/protocol.md) · [Specification](docs/reference/specification.md) · [Schema](docs/reference/schema.md) · [JSON Schema](./dossier-schema.json) |
-| **Guides** | [Authoring Guidelines](docs/guides/authoring-guidelines.md) · [Dossier Guide](docs/guides/dossier-guide.md) · [CI/CD Integration](docs/guides/ci-cd-integration.md) · [Adopter Playbooks](docs/guides/adopter-playbooks.md) · [Examples](./examples/) |
+| **Guides** | [Authoring Guidelines](docs/guides/authoring-guidelines.md) · [Dossier Guide](docs/guides/dossier-guide.md) · [CI/CD Integration](docs/guides/ci-cd-integration.md) · [Execution Tracing](docs/guides/tracing.md) · [Adopter Playbooks](docs/guides/adopter-playbooks.md) · [Examples](./examples/) |
 | **Packages** | [CLI](./cli/) · [MCP Server](./mcp-server/) · [Core Library](./packages/core/) · [Registry](./registry/) |
 | **Project** | [Architecture](ARCHITECTURE.md) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md) |
 
