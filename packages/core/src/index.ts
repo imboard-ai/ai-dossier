@@ -94,6 +94,16 @@ export {
   VerifierRegistry,
   VerifyResult,
 } from './signers';
+// Trace recorder exports (opt-in execution tracing — see registry /api/v1/traces)
+export type {
+  StepInput as TraceStepInput,
+  TraceInput,
+  TraceRecorder,
+  TraceRecorderOptions,
+  TraceStatus,
+  TraceUpdate,
+} from './trace-recorder';
+export { createTraceRecorder, VALID_TRACE_STATUSES } from './trace-recorder';
 // Type exports
 export * from './types';
 // Crypto utilities
