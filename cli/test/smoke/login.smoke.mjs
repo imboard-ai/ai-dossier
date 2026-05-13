@@ -22,11 +22,12 @@ if (!BIN) {
 }
 
 // Import the prompt constant from the same package the binary belongs to so
-// the marker stays in sync with the production string. Resolved relative to
-// the binary path so this works for both workspace builds and unpacked
-// tarballs in CI.
+// the marker stays in sync with the production string. Use a package
+// specifier rather than a relative path so it resolves regardless of whether
+// the binary is a workspace file (`cli/bin/ai-dossier`) or an installed
+// symlink (`node_modules/.bin/ai-dossier` → `@ai-dossier/cli/bin/...`).
 const requireFromBin = createRequire(path.resolve(BIN));
-const { LOGIN_CODE_PROMPT } = requireFromBin('../dist/oauth.js');
+const { LOGIN_CODE_PROMPT } = requireFromBin('@ai-dossier/cli/dist/oauth.js');
 if (typeof LOGIN_CODE_PROMPT !== 'string') {
   console.error('FAIL: could not load LOGIN_CODE_PROMPT from CLI build');
   process.exit(2);
