@@ -154,8 +154,12 @@ jobs:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install npm with trusted publishing support
-        run: npm install -g npm@latest
+      # Node 22 ships npm 10.x, which supports `npm publish --provenance`
+      # (OIDC trusted publishing) natively. Self-upgrading to npm@latest on
+      # the GH Actions toolcache image currently fails with a corrupted
+      # arborist install (missing promise-retry), so we just use bundled npm.
+      - name: Print npm version
+        run: npm --version
 
       - name: Install dependencies
         run: npm ci
