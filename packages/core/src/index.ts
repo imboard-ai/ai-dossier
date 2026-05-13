@@ -104,6 +104,7 @@ export type {
 export { resolveTraceConfig } from './trace-config';
 // Trace recorder exports (opt-in execution tracing — see registry /api/v1/traces)
 export type {
+  DossierTraceInfo,
   StepInput as TraceStepInput,
   TraceInput,
   TraceRecorder,

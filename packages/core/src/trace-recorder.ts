@@ -6,9 +6,34 @@
 export const VALID_TRACE_STATUSES = ['running', 'success', 'failed', 'cancelled'] as const;
 export type TraceStatus = (typeof VALID_TRACE_STATUSES)[number];
 
+/**
+ * Audit metadata about a dossier as it appeared at execution time. The
+ * `checksum` MUST be the same hash that was verified before the agent
+ * ran (i.e. the value from the dossier's own `checksum.hash` field), so
+ * a stored trace can be cross-referenced against the original file.
+ *
+ * Signature: we record metadata about who signed it (algorithm, signer,
+ * key id, when), not the signature bytes themselves — the latter are
+ * reproducible by re-fetching the dossier at the recorded version.
+ */
+export interface DossierTraceInfo {
+  title: string;
+  version: string;
+  /** The body-content hash that was verified at run time. */
+  checksum?: { algorithm: string; hash: string };
+  /** Metadata about the dossier's signature (omit signature bytes). */
+  signature?: {
+    algorithm: string;
+    signed_by?: string;
+    key_id?: string;
+    signed_at?: string;
+  };
+  [key: string]: unknown;
+}
+
 export interface TraceInput {
   trace_id: string;
-  dossier: { title: string; version: string; [key: string]: unknown };
+  dossier: DossierTraceInfo;
   agent?: { name?: string; version?: string; [key: string]: unknown };
   started_at: string;
   completed_at?: string;

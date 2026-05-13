@@ -4,7 +4,8 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { parseDossierContent } from '@ai-dossier/core';
+import { type DossierFrontmatter, parseDossierContent } from '@ai-dossier/core';
+import { extractDossierTraceInfo } from '../orchestration/dossier-trace-info';
 import { finalizeTrace, getRecorder } from '../orchestration/recorder';
 import type { JourneyStep, JourneySummary } from '../orchestration/session';
 import {
@@ -41,20 +42,24 @@ export interface StepCompleteError {
 
 export type StepCompleteOutput = StepCompleteRunning | StepCompleteDone;
 
-function fetchDossierBody(step: JourneyStep): string {
+function fetchDossierContent(step: JourneyStep): {
+  body: string;
+  frontmatter: DossierFrontmatter | null;
+} {
   if (step.source === 'local' && step.path) {
     try {
       const raw = readFileSync(step.path, 'utf8');
       try {
-        return parseDossierContent(raw).body;
+        const parsed = parseDossierContent(raw);
+        return { body: parsed.body, frontmatter: parsed.frontmatter };
       } catch {
-        return raw;
+        return { body: raw, frontmatter: null };
       }
     } catch {
-      return '';
+      return { body: '', frontmatter: null };
     }
   }
-  return '';
+  return { body: '', frontmatter: null };
 }
 
 export async function stepComplete(
@@ -93,13 +98,16 @@ export async function stepComplete(
   }
   currentStep.status = status;
 
-  // Fire-and-forget: append this step to the trace.
+  // Fire-and-forget: append this step to the trace. `dossier_meta` carries
+  // the version + checksum + signature metadata captured when the step's
+  // dossier was first read, so the trace pins exactly which content ran.
   const recorder = getRecorder();
   recorder.appendStep(session.id, {
     step_id: `${currentStep.dossier}-${session.currentStepIndex}`,
     type: status,
     timestamp: new Date().toISOString(),
     dossier: currentStep.dossier,
+    dossier_meta: currentStep.dossierMeta ?? null,
     index: session.currentStepIndex,
     outputs: outputs ?? null,
   });
@@ -146,9 +154,12 @@ export async function stepComplete(
   const context = buildOutputContext(session.outputs);
   nextStep.injectedContext = context;
 
-  updateSession(session);
+  const { body, frontmatter } = fetchDossierContent(nextStep);
+  // Cache audit metadata on the step so the next stepComplete includes
+  // the same checksum/version when this step finishes.
+  nextStep.dossierMeta = extractDossierTraceInfo(nextStep.dossier, frontmatter);
 
-  const body = fetchDossierBody(nextStep);
+  updateSession(session);
 
   logger.info('Journey advanced to next step', {
     journeyId: journey_id,
