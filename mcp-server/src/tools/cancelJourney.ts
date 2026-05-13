@@ -3,6 +3,7 @@
  * Returns a summary of what completed before cancellation.
  */
 
+import { finalizeTrace, getRecorder } from '../orchestration/recorder';
 import type { JourneySummary } from '../orchestration/session';
 import { buildSummary, getSession, updateSession } from '../orchestration/session';
 import { logger } from '../utils/logger';
@@ -61,6 +62,8 @@ export function cancelJourney(input: CancelJourneyInput): CancelJourneyOutput | 
   session.completedAt = new Date();
   session.cancelReason = reason;
   updateSession(session);
+
+  finalizeTrace(getRecorder(), session, 'cancelled');
 
   logger.info('Journey cancelled', {
     journeyId: journey_id,

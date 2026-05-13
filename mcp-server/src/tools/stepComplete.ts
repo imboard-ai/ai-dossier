@@ -5,6 +5,7 @@
 
 import { readFileSync } from 'node:fs';
 import { parseDossierContent } from '@ai-dossier/core';
+import { finalizeTrace, getRecorder } from '../orchestration/recorder';
 import type { JourneyStep, JourneySummary } from '../orchestration/session';
 import {
   buildOutputContext,
@@ -92,10 +93,23 @@ export async function stepComplete(
   }
   currentStep.status = status;
 
+  // Fire-and-forget: append this step to the trace.
+  const recorder = getRecorder();
+  recorder.appendStep(session.id, {
+    step_id: `${currentStep.dossier}-${session.currentStepIndex}`,
+    type: status,
+    timestamp: new Date().toISOString(),
+    dossier: currentStep.dossier,
+    index: session.currentStepIndex,
+    outputs: outputs ?? null,
+  });
+
   if (status === 'failed') {
     session.status = 'failed';
     session.completedAt = new Date();
     updateSession(session);
+
+    finalizeTrace(recorder, session, 'failed');
 
     logger.info('Journey failed at step', {
       journeyId: journey_id,
@@ -113,6 +127,8 @@ export async function stepComplete(
     session.status = 'completed';
     session.completedAt = new Date();
     updateSession(session);
+
+    finalizeTrace(recorder, session, 'success');
 
     logger.info('Journey completed', {
       journeyId: journey_id,
