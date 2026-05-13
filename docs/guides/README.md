@@ -15,6 +15,9 @@ Task-oriented guides for accomplishing specific goals with Dossier.
 - [Adopter playbooks](adopter-playbooks.md) - How organizations can adopt Dossier
 - [Dossier Guide](dossier-guide.md) - Deep dive into concepts, schema, security, and best practices
 
+### Observability
+- [Execution tracing](tracing.md) - Record agent runs to a queryable registry; self-host your own trace DB
+
 ## Can't Find What You Need?
 
 - Check [Tutorials](../tutorials/) for step-by-step learning
