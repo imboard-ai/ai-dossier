@@ -157,14 +157,19 @@ jobs:
       # Trusted-publishing AUTH (OIDC token used as the npm publish
       # credential) requires npm 11.5+. Node 22's bundled npm is 10.9.7,
       # which can sign provenance attestations but cannot authenticate
-      # the publish PUT, so the registry returns 404. Install npm 11+ via
-      # corepack — `npm install -g npm@latest` is broken on the current
-      # GH Actions toolcache image (arborist's promise-retry is missing).
-      - name: Install npm 11+ via corepack
+      # the publish PUT, so the registry returns 404.
+      #
+      # `npm install -g npm@latest` is broken on the current GH Actions
+      # toolcache image (arborist's promise-retry is missing on the
+      # global rebuild path). `corepack prepare npm@latest --activate`
+      # doesn't shadow the bundled npm either. Workaround: install npm
+      # into a local prefix (no global rebuild step) and prepend it to
+      # PATH so the version that runs the publish steps is 11+.
+      - name: Install npm 11+ to local prefix
         run: |
-          corepack enable
-          corepack prepare npm@latest --activate
-          npm --version
+          npm install --prefix /tmp/npm-latest npm@latest
+          echo "/tmp/npm-latest/node_modules/.bin" >> $GITHUB_PATH
+          /tmp/npm-latest/node_modules/.bin/npm --version
 
       - name: Install dependencies
         run: npm ci
