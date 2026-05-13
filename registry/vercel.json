@@ -1,11 +1,11 @@
 {
   "installCommand": "cd .. && npm install",
   "buildCommand": "cd .. && npm run -w @ai-dossier/core build",
-  "outputDirectory": ".",
+  "outputDirectory": "public",
   "rewrites": [
     {
-      "source": "/api/v1/dossiers/:path*",
-      "destination": "/api/v1/dossiers/[...name]?name=:path*"
+      "source": "/api/v1/dossiers/:path(.*)",
+      "destination": "/api/v1/dossiers/[...name]?name=:path"
     },
     {
       "source": "/auth/login",
