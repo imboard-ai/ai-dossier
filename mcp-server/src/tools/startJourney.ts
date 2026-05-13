@@ -5,6 +5,7 @@
 
 import { readFileSync } from 'node:fs';
 import { parseDossierContent } from '@ai-dossier/core';
+import { getRecorder } from '../orchestration/recorder';
 import { createSession, stepsFromPhases, updateSession } from '../orchestration/session';
 import type { PhaseEntry } from '../orchestration/types';
 import { getGraph } from '../utils/graphStore';
@@ -108,6 +109,15 @@ export async function startJourney(
     graphId: graph_id,
     totalSteps: steps.length,
     firstStep: first.name,
+  });
+
+  // Fire-and-forget: opens a trace if DOSSIER_TRACE_URL/TOKEN are set.
+  getRecorder().create({
+    trace_id: session.id,
+    dossier: { title: first.name, version: 'unknown' },
+    agent: { name: 'mcp-server' },
+    started_at: session.startedAt.toISOString(),
+    status: 'running',
   });
 
   return {
