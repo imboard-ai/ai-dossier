@@ -13,11 +13,26 @@ export interface RunLogEntry {
   resolved_version: string;
   source: 'cache' | 'registry' | 'local' | 'url';
   registry?: string;
+  /**
+   * How the version was resolved (only meaningful for registry sources):
+   *   - 'pinned'      — caller passed name@version explicitly
+   *   - 'registry'    — resolver called the registry and got a fresh version
+   *   - 'cache'       — resolver served from TTL'd resolution cache (no registry call)
+   *   - 'stale-cache' — registry was unreachable; fell back to highest cached semver
+   * Useful for postmortems answering "did this run hit a stale resolution that
+   * masked a registry outage?". Absent for local files and URLs.
+   */
+  resolution_source?: 'pinned' | 'registry' | 'cache' | 'stale-cache';
   verification: 'passed' | 'failed' | 'skipped' | 'nested-skip';
   llm: string;
   user: string;
   cwd: string;
   nested: boolean;
+  /**
+   * Deprecated: written by the pre-#401 update-check machinery. Retained on the
+   * interface so `dossier history` can still display this field when reading
+   * older runs.jsonl entries. Not written by new runs.
+   */
   update_available?: string;
 }
 

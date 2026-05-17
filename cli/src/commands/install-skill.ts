@@ -3,19 +3,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
-import { safeDossierPath } from '../helpers';
-import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
+import {
+  parseMaxAgeOption,
+  readCachedContent,
+  resolveCachedVersion,
+  writeCachedContent,
+} from '../cache-resolver';
+import { multiRegistryGetContent } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
-
-function compareSemver(a: string, b: string): number {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    const diff = (pa[i] || 0) - (pb[i] || 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
 
 export function registerInstallSkillCommand(program: Command): void {
   program
@@ -23,7 +18,11 @@ export function registerInstallSkillCommand(program: Command): void {
     .description('Install a registry dossier as a Claude Code skill')
     .argument('[name]', 'Dossier name to install (use name@version for specific version)')
     .option('--force', 'Overwrite if skill already exists')
-    .option('--fresh', 'Bypass cache and fetch from registry')
+    .option('--fresh', 'Skip cache, fetch fresh from registry')
+    .option(
+      '--max-age <seconds>',
+      'Max age of cached version resolution before re-checking the registry (default: 300, 0 = always check)'
+    )
     .option('--list', 'List currently installed skills')
     .option('--remove <skill>', 'Remove an installed skill')
     .option('--json', 'Output as JSON')
@@ -33,6 +32,7 @@ export function registerInstallSkillCommand(program: Command): void {
         options: {
           force?: boolean;
           fresh?: boolean;
+          maxAge?: string;
           list?: boolean;
           remove?: string;
           json?: boolean;
@@ -109,52 +109,30 @@ export function registerInstallSkillCommand(program: Command): void {
         }
 
         try {
-          const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
-          let content: string | null = null;
           let resolvedVersion = version;
+
+          // For versionless installs: resolve which version to use via the TTL'd resolver.
+          if (!version) {
+            const maxAgeSeconds = parseMaxAgeOption(options.maxAge);
+            const resolved = await resolveCachedVersion(dossierName, {
+              fresh: options.fresh,
+              maxAgeSeconds,
+            });
+            resolvedVersion = resolved.version;
+          }
+
+          let content: string | null = null;
           let fromCache = false;
 
           if (!options.fresh) {
-            if (!version) {
-              const dossierCacheDir = safeDossierPath(cacheDir, dossierName);
-              if (fs.existsSync(dossierCacheDir)) {
-                const metaFiles = fs
-                  .readdirSync(dossierCacheDir)
-                  .filter((f) => f.endsWith('.meta.json'));
-                if (metaFiles.length > 0) {
-                  const versions = metaFiles
-                    .map((f) => f.replace('.meta.json', ''))
-                    .sort(compareSemver);
-                  const ver = versions[versions.length - 1];
-                  const contentFile = path.join(dossierCacheDir, `${ver}.ds.md`);
-                  if (fs.existsSync(contentFile)) {
-                    content = fs.readFileSync(contentFile, 'utf8');
-                    resolvedVersion = ver;
-                    fromCache = true;
-                  }
-                }
-              }
-            } else {
-              const contentFile = path.join(
-                safeDossierPath(cacheDir, dossierName),
-                `${version}.ds.md`
-              );
-              if (fs.existsSync(contentFile)) {
-                content = fs.readFileSync(contentFile, 'utf8');
-                resolvedVersion = version;
-                fromCache = true;
-              }
+            const cached = readCachedContent(dossierName, resolvedVersion as string);
+            if (cached !== null) {
+              content = cached;
+              fromCache = true;
             }
           }
 
           if (!content) {
-            if (!resolvedVersion) {
-              const { result: meta } = await multiRegistryGetDossier(dossierName);
-              if (!meta) {
-                throw { statusCode: 404, message: `Not found: ${dossierName}` };
-              }
-              resolvedVersion = meta.version || 'latest';
-            }
             const { result: fetchedContent } = await multiRegistryGetContent(
               dossierName,
               resolvedVersion
@@ -163,6 +141,15 @@ export function registerInstallSkillCommand(program: Command): void {
               throw { statusCode: 404, message: `Not found: ${dossierName}` };
             }
             content = fetchedContent.content;
+            // Write to cache so future installs hit it.
+            if (!options.fresh) {
+              writeCachedContent(
+                dossierName,
+                resolvedVersion as string,
+                content,
+                fetchedContent._registry
+              );
+            }
           }
 
           fs.mkdirSync(skillDir, { recursive: true });

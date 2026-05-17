@@ -49,6 +49,7 @@ const DEFAULT_CONFIG: DossierConfig = {
   defaultLlm: 'auto',
   theme: 'auto',
   auditLog: true,
+  'cache.resolutionTtlSeconds': 300,
 };
 
 /**

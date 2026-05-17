@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { sha256Hex } from '@ai-dossier/core';
 import type { Command } from 'commander';
+import { cachedContentPath, writeCachedContent } from '../cache-resolver';
 import { printRegistryErrors, safeDossierPath } from '../helpers';
 import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
@@ -36,7 +37,7 @@ export function registerPullCommand(program: Command): void {
           }
 
           const dossierDir = safeDossierPath(cacheDir, dossierName);
-          const contentFile = path.join(dossierDir, `${version}.ds.md`);
+          const contentFile = cachedContentPath(dossierName, version);
           const metaFile = path.join(dossierDir, `${version}.meta.json`);
 
           if (!options.force && fs.existsSync(contentFile) && fs.existsSync(metaFile)) {
@@ -68,21 +69,9 @@ export function registerPullCommand(program: Command): void {
           }
 
           try {
-            fs.mkdirSync(dossierDir, { recursive: true, mode: 0o700 });
-            fs.writeFileSync(contentFile, content, 'utf8');
-            fs.writeFileSync(
-              metaFile,
-              JSON.stringify(
-                {
-                  cached_at: new Date().toISOString(),
-                  version,
-                  source_registry: result._registry,
-                },
-                null,
-                2
-              ),
-              'utf8'
-            );
+            writeCachedContent(dossierName, version, content, result._registry, {
+              throwOnError: true,
+            });
           } catch (writeErr: unknown) {
             console.error(
               `❌ ${dossierName}@${version}: failed to write cache files to '${dossierDir}': ${(writeErr as Error).message}`
