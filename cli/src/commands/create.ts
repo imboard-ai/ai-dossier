@@ -3,9 +3,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Command } from 'commander';
+import {
+  parseMaxAgeOption,
+  readCachedContent,
+  resolveCachedVersion,
+  writeCachedContent,
+} from '../cache-resolver';
 import * as config from '../config';
 import { detectLlm, printRegistryErrors } from '../helpers';
-import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
+import { multiRegistryGetContent } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
 const DEFAULT_CREATE_TEMPLATE = 'imboard-ai/meta/create-dossier-and-skill';
@@ -22,6 +28,11 @@ export function registerCreateCommand(program: Command): void {
     .option('--category <category>', 'Category (devops, data-science, development, etc.)')
     .option('--tags <tags>', 'Comma-separated tags')
     .option('--llm <name>', 'LLM to use (claude-code, auto)', 'auto')
+    .option(
+      '--max-age <seconds>',
+      'Max age of cached version resolution before re-checking the registry (default: 300, 0 = always check)'
+    )
+    .option('--fresh', 'Skip cache, fetch fresh from registry')
     .action(
       async (
         file: string | undefined,
@@ -33,6 +44,8 @@ export function registerCreateCommand(program: Command): void {
           category?: string;
           tags?: string;
           llm?: string;
+          maxAge?: string;
+          fresh?: boolean;
         }
       ) => {
         try {
@@ -50,39 +63,40 @@ export function registerCreateCommand(program: Command): void {
             process.exit(2);
           }
 
-          // Fetch template from registry
-          const [dossierName, version] = parseNameVersion(options.template);
-          let metaDossierContent = '';
+          // Fetch template from registry (with TTL'd version resolution for versionless names)
+          const [dossierName, pinnedVersion] = parseNameVersion(options.template);
 
-          // Check cache first
-          const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
-          const dossierCacheDir = path.join(cacheDir, ...dossierName.split('/'));
-          let cached = false;
-
-          if (fs.existsSync(dossierCacheDir)) {
-            const metaFiles = fs
-              .readdirSync(dossierCacheDir)
-              .filter((f: string) => f.endsWith('.meta.json'));
-            for (const mf of metaFiles) {
-              const ver = mf.replace('.meta.json', '');
-              if (version && ver !== version) continue;
-              const contentFile = path.join(dossierCacheDir, `${ver}.ds.md`);
-              if (fs.existsSync(contentFile)) {
-                metaDossierContent = fs.readFileSync(contentFile, 'utf8');
-                cached = true;
-                console.log(`📦 Using cached template: ${dossierName}@${ver}\n`);
-                break;
-              }
+          let resolvedVersion = pinnedVersion;
+          if (!pinnedVersion) {
+            let maxAgeSeconds: number | undefined;
+            try {
+              maxAgeSeconds = parseMaxAgeOption(options.maxAge);
+            } catch (err: unknown) {
+              console.error(`\n❌ ${(err as Error).message}\n`);
+              process.exit(2);
+            }
+            try {
+              const resolved = await resolveCachedVersion(dossierName, {
+                fresh: options.fresh,
+                maxAgeSeconds,
+              });
+              resolvedVersion = resolved.version;
+            } catch (err: unknown) {
+              console.error(`\n❌ ${(err as Error).message}\n`);
+              process.exit(2);
             }
           }
 
-          if (!cached) {
+          let metaDossierContent = '';
+          const cachedContent = !options.fresh
+            ? readCachedContent(dossierName, resolvedVersion as string)
+            : null;
+
+          if (cachedContent !== null) {
+            metaDossierContent = cachedContent;
+            console.log(`📦 Using cached template: ${dossierName}@${resolvedVersion}\n`);
+          } else {
             try {
-              let resolvedVersion = version;
-              if (!resolvedVersion) {
-                const { result: meta } = await multiRegistryGetDossier(dossierName);
-                resolvedVersion = meta?.version || 'latest';
-              }
               const { result, errors: contentErrors } = await multiRegistryGetContent(
                 dossierName,
                 resolvedVersion
@@ -97,6 +111,14 @@ export function registerCreateCommand(program: Command): void {
                 process.exit(2);
               }
               metaDossierContent = result.content;
+              if (!options.fresh) {
+                writeCachedContent(
+                  dossierName,
+                  resolvedVersion as string,
+                  result.content,
+                  result._registry
+                );
+              }
               console.log(`📥 Fetched template: ${dossierName}@${resolvedVersion}\n`);
             } catch (err: unknown) {
               const e = err as { statusCode?: number; message: string };

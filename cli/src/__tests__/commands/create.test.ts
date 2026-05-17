@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as cacheResolver from '../../cache-resolver';
 import { registerCreateCommand } from '../../commands/create';
 import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
@@ -11,6 +12,7 @@ vi.mock('node:child_process');
 vi.mock('../../config');
 vi.mock('../../multi-registry');
 vi.mock('../../registry-client');
+vi.mock('../../cache-resolver');
 vi.mock('../../helpers', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../helpers')>();
   return {
@@ -27,6 +29,18 @@ const { detectLlm } = await import('../../helpers');
 describe('create command', () => {
   beforeEach(() => {
     vi.mocked(registryClient.parseNameVersion).mockImplementation(parseNameVersionImpl);
+    vi.mocked(cacheResolver.resolveCachedVersion).mockResolvedValue({
+      version: '1.0.0',
+      source: 'registry',
+      registry: 'public',
+    });
+    // Auto-mock returns undefined; the production code uses `!== null` to detect
+    // cache misses, so undefined would be a false cache hit. Default to "no cache".
+    vi.mocked(cacheResolver.readCachedContent).mockReturnValue(null);
+    vi.mocked(cacheResolver.writeCachedContent).mockImplementation(() => undefined);
+    vi.mocked(cacheResolver.parseMaxAgeOption).mockImplementation((raw: string | undefined) =>
+      raw === undefined ? undefined : Number(raw)
+    );
   });
 
   it('should exit 2 when LLM not detected', async () => {
@@ -45,10 +59,8 @@ describe('create command', () => {
       throw new Error('ENOENT');
     });
 
-    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
-      result: null,
-      errors: [],
-    } as any);
+    // Resolver returns a version but content fetch fails — exercises the
+    // "Template not found" branch in create.ts.
     vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
       result: null,
       errors: [],

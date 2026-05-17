@@ -4,34 +4,24 @@ import os from 'node:os';
 import path from 'node:path';
 import { type DossierFrontmatter, parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
+import {
+  cachedContentPath,
+  parseMaxAgeOption,
+  type ResolutionSource,
+  resolveCachedVersion,
+  writeCachedContent,
+} from '../cache-resolver';
 import * as config from '../config';
 import {
   buildLlmCommand,
   detectLlm,
   downloadUrlToTempFile,
-  printRegistryErrors,
   printRegistryNotFoundError,
   runVerification,
-  safeDossierPath,
 } from '../helpers';
-import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
+import { multiRegistryGetContent } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 import { appendRunLog } from '../run-log';
-
-/**
- * Check if a newer version exists in the registry.
- * Returns the latest version string, or null if no update / error / timeout.
- */
-async function checkForUpdate(dossierName: string, cachedVersion: string): Promise<string | null> {
-  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000));
-  const check = multiRegistryGetDossier(dossierName).then(({ result }) => {
-    if (result?.version && result.version !== cachedVersion) {
-      return result.version;
-    }
-    return null;
-  });
-  return Promise.race([check, timeout]);
-}
 
 export function registerRunCommand(program: Command): void {
   program
@@ -47,6 +37,10 @@ export function registerRunCommand(program: Command): void {
     .option('--no-prompt', "Don't ask for confirmation")
     .option('--fresh', 'Skip cache, fetch fresh from registry')
     .option('--pull', 'Update cache before running')
+    .option(
+      '--max-age <seconds>',
+      'Max age of cached version resolution before re-checking the registry (default: 300, 0 = always check)'
+    )
     .option('--skip-checksum', 'Skip checksum verification (DANGEROUS)')
     .option('--skip-all-checks', 'Skip ALL verifications (VERY DANGEROUS)')
     .action(
@@ -60,6 +54,7 @@ export function registerRunCommand(program: Command): void {
           noPrompt?: boolean;
           fresh?: boolean;
           pull?: boolean;
+          maxAge?: string;
           skipChecksum?: boolean;
           skipAllChecks?: boolean;
         }
@@ -77,86 +72,75 @@ export function registerRunCommand(program: Command): void {
           resolvedVersion: 'unknown',
           source: 'local' as 'cache' | 'registry' | 'local' | 'url',
           registry: undefined as string | undefined,
-          updateAvailable: undefined as string | undefined,
+          resolutionSource: undefined as
+            | 'cache'
+            | 'registry'
+            | 'stale-cache'
+            | 'pinned'
+            | undefined,
         };
-
-        let updateCheckPromise: Promise<string | null> | null = null;
 
         // If not a URL or local file, treat as a registry name
         if (!isUrl && !isLocalFile) {
-          const [dossierName, version] = parseNameVersion(file);
+          const [dossierName, pinnedVersion] = parseNameVersion(file);
 
-          const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
-          let cached = false;
+          // resolvedVersion starts as pinnedVersion (string | null); when null, the
+          // resolver below populates it. After that block it's guaranteed non-null.
+          let resolvedVersion: string | null = pinnedVersion;
+          let resolvedRegistry: string | undefined;
+          // `'pinned'` is added locally for name@version requests that bypass the resolver.
+          let resolutionSource: ResolutionSource | 'pinned' = 'pinned';
 
-          if (!options.fresh) {
-            const dossierCacheDir = safeDossierPath(cacheDir, dossierName);
-            if (fs.existsSync(dossierCacheDir)) {
-              const metaFiles = fs
-                .readdirSync(dossierCacheDir)
-                .filter((f: string) => f.endsWith('.meta.json'));
-              for (const mf of metaFiles) {
-                const ver = mf.replace('.meta.json', '');
-                if (version && ver !== version) continue;
-                const contentFile = path.join(dossierCacheDir, `${ver}.ds.md`);
-                if (fs.existsSync(contentFile)) {
-                  if (!options.pull) {
-                    resolvedFile = contentFile;
-                    cached = true;
-                    runContext.source = 'cache';
-                    runContext.resolvedVersion = ver;
-
-                    // Check meta for previously-detected update
-                    const metaPath = path.join(dossierCacheDir, mf);
-                    try {
-                      const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-                      if (meta.latest_known_version && meta.latest_known_version !== ver) {
-                        runContext.updateAvailable = meta.latest_known_version;
-                      }
-                      const checkedAt = meta.latest_checked_at
-                        ? new Date(meta.latest_checked_at).getTime()
-                        : 0;
-                      const oneHourAgo = Date.now() - 3600000;
-                      if (checkedAt < oneHourAgo) {
-                        updateCheckPromise = checkForUpdate(dossierName, ver)
-                          .then((latestVer) => {
-                            try {
-                              meta.latest_known_version = latestVer || ver;
-                              meta.latest_checked_at = new Date().toISOString();
-                              fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
-                            } catch {
-                              /* ignore meta write errors */
-                            }
-                            if (latestVer) runContext.updateAvailable = latestVer;
-                            return latestVer;
-                          })
-                          .catch(() => null);
-                      }
-                    } catch {
-                      // Meta read failed — start a fresh check
-                      updateCheckPromise = checkForUpdate(dossierName, ver).catch(() => null);
-                    }
-
-                    log(`📦 Using cached: ${dossierName}@${ver}\n`);
-                    break;
-                  }
-                }
-              }
+          // For versionless requests: resolve which version to use via the TTL'd resolver.
+          // Pinned versions skip resolution — they're content-addressable.
+          if (!pinnedVersion) {
+            let maxAgeSeconds: number | undefined;
+            try {
+              maxAgeSeconds = parseMaxAgeOption(options.maxAge);
+            } catch (err: unknown) {
+              console.error(`\n❌ ${(err as Error).message}\n`);
+              process.exit(1);
+            }
+            try {
+              const resolved = await resolveCachedVersion(dossierName, {
+                fresh: options.fresh || options.pull,
+                maxAgeSeconds,
+              });
+              resolvedVersion = resolved.version;
+              resolvedRegistry = resolved.registry;
+              resolutionSource = resolved.source;
+            } catch (err: unknown) {
+              console.error(`\n❌ ${(err as Error).message}\n`);
+              process.exit(1);
             }
           }
 
-          if (!cached) {
+          const contentFile = cachedContentPath(dossierName, resolvedVersion as string);
+          const haveCachedContent = !options.fresh && !options.pull && fs.existsSync(contentFile);
+
+          runContext.resolutionSource = resolutionSource;
+
+          if (haveCachedContent) {
+            resolvedFile = contentFile;
+            runContext.source = 'cache';
+            runContext.resolvedVersion = resolvedVersion as string;
+            runContext.registry = resolvedRegistry;
+            // Make the resolution path explicit so users can tell:
+            //   - "cache hit, fresh resolution" (resolver hit registry, content already on disk)
+            //   - "cache hit, TTL'd resolution" (resolver served from resolution cache)
+            //   - "cache hit, STALE resolution" (registry was unreachable; resolver fell back)
+            //   - "pinned version" (no resolution involved)
+            let suffix = '';
+            if (resolutionSource === 'stale-cache') {
+              suffix = ' (version resolution is STALE — registry was unreachable)';
+            } else if (resolutionSource === 'cache') {
+              suffix = ' (version resolution from TTL cache; pass --max-age 0 to recheck)';
+            } else if (resolutionSource === 'registry') {
+              suffix = ' (version freshly resolved from registry)';
+            }
+            log(`📦 Using cached: ${dossierName}@${resolvedVersion}${suffix}\n`);
+          } else {
             try {
-              let resolvedVersion = version;
-              if (!resolvedVersion) {
-                const { result: meta, errors: metaErrors } =
-                  await multiRegistryGetDossier(dossierName);
-                if (!meta) {
-                  printRegistryNotFoundError(file, metaErrors);
-                  process.exit(1);
-                }
-                resolvedVersion = meta.version || 'latest';
-              }
               const { result, errors: contentErrors } = await multiRegistryGetContent(
                 dossierName,
                 resolvedVersion
@@ -167,37 +151,32 @@ export function registerRunCommand(program: Command): void {
               }
 
               if (!options.fresh) {
-                const dossierCacheDir = safeDossierPath(cacheDir, dossierName);
-                fs.mkdirSync(dossierCacheDir, { recursive: true, mode: 0o700 });
-                const contentFile = path.join(dossierCacheDir, `${resolvedVersion}.ds.md`);
-                fs.writeFileSync(contentFile, result.content, 'utf8');
-                fs.writeFileSync(
-                  path.join(dossierCacheDir, `${resolvedVersion}.meta.json`),
-                  JSON.stringify(
-                    {
-                      cached_at: new Date().toISOString(),
-                      version: resolvedVersion,
-                      source_registry: result._registry,
-                    },
-                    null,
-                    2
-                  ),
-                  'utf8'
+                writeCachedContent(
+                  dossierName,
+                  resolvedVersion as string,
+                  result.content,
+                  result._registry,
+                  { throwOnError: true }
                 );
                 resolvedFile = contentFile;
-                runContext.source = 'registry';
-                runContext.resolvedVersion = resolvedVersion || 'unknown';
-                runContext.registry = result._registry;
-                log(`📥 Fetched: ${dossierName}@${resolvedVersion}\n`);
+                // "Refreshed" earlier was misleading: resolver served from cache, but the *content*
+                // was newly downloaded. Be explicit about both axes.
+                if (resolutionSource === 'cache') {
+                  log(
+                    `📥 Fetched content for ${dossierName}@${resolvedVersion} (version resolution from TTL cache)\n`
+                  );
+                } else {
+                  log(`📥 Fetched: ${dossierName}@${resolvedVersion}\n`);
+                }
               } else {
                 const tmpFile = path.join(os.tmpdir(), `dossier-${Date.now()}.ds.md`);
                 fs.writeFileSync(tmpFile, result.content, 'utf8');
                 resolvedFile = tmpFile;
-                runContext.source = 'registry';
-                runContext.resolvedVersion = resolvedVersion || 'unknown';
-                runContext.registry = result._registry;
                 log(`📥 Fetched: ${dossierName}@${resolvedVersion} (not cached)\n`);
               }
+              runContext.source = 'registry';
+              runContext.resolvedVersion = resolvedVersion as string;
+              runContext.registry = result._registry;
             } catch (err: unknown) {
               const e = err as { statusCode?: number; message: string };
               if (e.statusCode === 404) {
@@ -271,17 +250,6 @@ export function registerRunCommand(program: Command): void {
 
         // Nested session detection
         if (process.env.CLAUDE_CODE === '1' || process.env.CLAUDECODE === '1') {
-          // Wait for update check before showing warning
-          if (updateCheckPromise) {
-            await updateCheckPromise.catch(() => null);
-          }
-          if (runContext.updateAvailable) {
-            console.error(
-              `\n⚠️  Update available: ${file}@${runContext.updateAvailable} (cached: ${runContext.resolvedVersion})`
-            );
-            console.error('   Run with --pull to update\n');
-          }
-
           console.error('ℹ️  Running inside Claude Code — outputting dossier content\n');
 
           const llmOption =
@@ -292,29 +260,18 @@ export function registerRunCommand(program: Command): void {
             resolved_version: runContext.resolvedVersion,
             source: runContext.source,
             registry: runContext.registry,
+            resolution_source: runContext.resolutionSource,
             verification: 'nested-skip',
             llm: llmOption,
             user: `${process.env.USER || 'unknown'}@${os.hostname()}`,
             cwd: process.cwd(),
             nested: true,
-            update_available: runContext.updateAvailable,
           });
 
           process.stdout.write(dossierContent);
           fs.unlinkSync(secureTmpFile);
           fs.rmdirSync(secureTmpDir);
           process.exit(0);
-        }
-
-        // Wait for update check before verification
-        if (updateCheckPromise) {
-          await updateCheckPromise.catch(() => null);
-        }
-        if (runContext.updateAvailable) {
-          console.log(
-            `\n⚠️  Update available: ${file}@${runContext.updateAvailable} (cached: ${runContext.resolvedVersion})`
-          );
-          console.log('   Run with --pull to update\n');
         }
 
         const result = await runVerification(resolvedFile, options);
@@ -330,12 +287,12 @@ export function registerRunCommand(program: Command): void {
             resolved_version: runContext.resolvedVersion,
             source: runContext.source,
             registry: runContext.registry,
+            resolution_source: runContext.resolutionSource,
             verification: 'failed',
             llm: llmOption,
             user: `${process.env.USER || 'unknown'}@${os.hostname()}`,
             cwd: process.cwd(),
             nested: false,
-            update_available: runContext.updateAvailable,
           });
           fs.unlinkSync(secureTmpFile);
           fs.rmdirSync(secureTmpDir);
@@ -348,12 +305,12 @@ export function registerRunCommand(program: Command): void {
           resolved_version: runContext.resolvedVersion,
           source: runContext.source,
           registry: runContext.registry,
+          resolution_source: runContext.resolutionSource,
           verification: options.skipAllChecks ? 'skipped' : 'passed',
           llm: llmOption,
           user: `${process.env.USER || 'unknown'}@${os.hostname()}`,
           cwd: process.cwd(),
           nested: false,
-          update_available: runContext.updateAvailable,
         });
 
         console.log('📝 Audit Log:');

@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as cacheResolver from '../../cache-resolver';
 import { registerRunCommand } from '../../commands/run';
 import * as config from '../../config';
 import * as helpers from '../../helpers';
@@ -16,11 +17,13 @@ vi.mock('../../multi-registry');
 vi.mock('../../registry-client');
 vi.mock('../../helpers');
 vi.mock('../../run-log');
+vi.mock('../../cache-resolver');
 
 const mockedFs = vi.mocked(fs);
 
 describe('run command', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     vi.mocked(spawnSync).mockReset();
     vi.mocked(registryClient.parseNameVersion).mockImplementation(parseNameVersionImpl);
     vi.mocked(helpers.runVerification).mockResolvedValue({ passed: true, checks: [] });
@@ -34,6 +37,13 @@ describe('run command', () => {
       return `/home/.dossier/cache/${name}`;
     });
     vi.mocked(config.getConfig).mockReturnValue(undefined);
+    // cache-resolver helpers used by run.ts after the resolveCachedVersion call.
+    // The module is fully mocked, so these need explicit stubs or they return undefined
+    // and break the URL-detection branch below.
+    vi.mocked(cacheResolver.cachedContentPath).mockImplementation(
+      (name: string, version: string) => `/home/.dossier/cache/${name}/${version}.ds.md`
+    );
+    vi.mocked(cacheResolver.writeCachedContent).mockImplementation(() => {});
     // Mock TOCTOU mitigation temp file operations
     mockedFs.mkdtempSync.mockReturnValue('/tmp/dossier-run-test');
     mockedFs.writeFileSync.mockReturnValue(undefined);
@@ -87,13 +97,12 @@ describe('run command', () => {
     expect(spawnSync).not.toHaveBeenCalled();
   });
 
-  it('should exit 1 when registry dossier not found', async () => {
+  it('should exit 1 when registry dossier not found (resolver throws)', async () => {
     mockedFs.existsSync.mockReturnValue(false);
     mockedFs.readdirSync.mockReturnValue([]);
-    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
-      result: null,
-      errors: [],
-    } as any);
+    vi.mocked(cacheResolver.resolveCachedVersion).mockRejectedValue(
+      new Error('Failed to resolve missing/dossier: registry unreachable and no cached version')
+    );
 
     const program = createTestProgram();
     registerRunCommand(program);
@@ -102,7 +111,7 @@ describe('run command', () => {
       program.parseAsync(['node', 'dossier', 'run', 'missing/dossier'])
     ).rejects.toThrow();
 
-    expect(helpers.printRegistryNotFoundError).toHaveBeenCalledWith('missing/dossier', []);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Failed to resolve'));
   });
 
   it('should exit 2 when no LLM detected', async () => {
@@ -190,28 +199,31 @@ describe('run command', () => {
     );
   });
 
-  it('should show stale cache warning when meta has newer version', async () => {
-    // Set up as registry name (not local file)
+  it('auto-resolves to the registry version when a stale version is cached (regression: #401)', async () => {
+    // Cache has 1.0.0 on disk, but registry says 1.1.0 is current.
+    // Old behavior: silently used 1.0.0 + cosmetic "Update available" warning.
+    // New behavior: resolveCachedVersion returns 1.1.0 — we re-fetch and execute that.
+    vi.mocked(cacheResolver.resolveCachedVersion).mockResolvedValue({
+      version: '1.1.0',
+      source: 'registry',
+      registry: 'public',
+    });
+    // 1.1.0 content file is not yet cached — forces a registry fetch.
     mockedFs.existsSync.mockImplementation((p: any) => {
       const ps = String(p);
-      // Not a local file, but cache dir + content file exist
-      if (ps.includes('cache/org/test')) return true;
-      if (ps.endsWith('.ds.md') && ps.includes('cache')) return true;
+      if (ps.endsWith('1.0.0.ds.md')) return true;
+      if (ps.endsWith('1.1.0.ds.md')) return false;
       return false;
     });
-    mockedFs.readdirSync.mockReturnValue(['1.0.0.meta.json'] as any);
-    mockedFs.readFileSync.mockImplementation((p: any) => {
-      const ps = String(p);
-      if (ps.includes('.meta.json')) {
-        return JSON.stringify({
-          cached_at: '2026-03-06T10:00:00Z',
-          version: '1.0.0',
-          latest_known_version: '2.0.0',
-          latest_checked_at: new Date().toISOString(),
-        });
-      }
-      return '---dossier\n{"title":"Test"}\n---\nBody';
-    });
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      result: {
+        content: '---dossier\n{"title":"Test"}\n---\nBody',
+        digest: null,
+        _registry: 'public',
+      },
+      errors: [],
+    } as any);
+    mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
     vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
 
     const program = createTestProgram();
@@ -219,6 +231,57 @@ describe('run command', () => {
 
     await program.parseAsync(['node', 'dossier', 'run', 'org/test']);
 
-    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Update available'));
+    expect(cacheResolver.resolveCachedVersion).toHaveBeenCalledWith(
+      'org/test',
+      expect.objectContaining({ fresh: undefined })
+    );
+    expect(multiRegistry.multiRegistryGetContent).toHaveBeenCalledWith('org/test', '1.1.0');
+    expect(runLog.appendRunLog).toHaveBeenCalledWith(
+      expect.objectContaining({ resolved_version: '1.1.0' })
+    );
+  });
+
+  it('uses cached content when resolver returns a version that is already on disk', async () => {
+    vi.mocked(cacheResolver.resolveCachedVersion).mockResolvedValue({
+      version: '1.2.3',
+      source: 'cache',
+      registry: 'public',
+    });
+    mockedFs.existsSync.mockImplementation((p: any) => {
+      const ps = String(p);
+      // 1.2.3 content file exists in cache.
+      if (ps.endsWith('1.2.3.ds.md')) return true;
+      return false;
+    });
+    mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+    vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
+
+    const program = createTestProgram();
+    registerRunCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'run', 'org/test']);
+
+    expect(multiRegistry.multiRegistryGetContent).not.toHaveBeenCalled();
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Using cached'));
+  });
+
+  it('does not call the version resolver for pinned name@version', async () => {
+    mockedFs.existsSync.mockImplementation((p: any) => {
+      const ps = String(p);
+      if (ps.endsWith('2.5.0.ds.md')) return true;
+      return false;
+    });
+    mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+    vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
+
+    const program = createTestProgram();
+    registerRunCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'run', 'org/test@2.5.0']);
+
+    expect(cacheResolver.resolveCachedVersion).not.toHaveBeenCalled();
+    expect(runLog.appendRunLog).toHaveBeenCalledWith(
+      expect.objectContaining({ resolved_version: '2.5.0' })
+    );
   });
 });

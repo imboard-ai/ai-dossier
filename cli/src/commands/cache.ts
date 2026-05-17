@@ -3,10 +3,95 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import type { Command } from 'commander';
+import { DEFAULT_RESOLUTION_TTL_SECONDS, listResolutions } from '../cache-resolver';
+import { getConfig } from '../config';
 import { safeDossierPath } from '../helpers';
+
+function formatAge(ageMs: number): string {
+  const seconds = Math.round(ageMs / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  return `${days}d`;
+}
 
 export function registerCacheCommand(program: Command): void {
   const cacheCmd = program.command('cache').description('Manage local dossier cache');
+
+  // cache resolutions
+  cacheCmd
+    .command('resolutions')
+    .description('Show cached versionless → version resolutions (with age and TTL status)')
+    .option('--json', 'Output as JSON')
+    .action((options: { json?: boolean }) => {
+      const entries = listResolutions();
+
+      // Effective TTL from config (same precedence cache-resolver uses)
+      const configuredTtl = getConfig('cache.resolutionTtlSeconds');
+      const ttlSeconds =
+        typeof configuredTtl === 'number' && Number.isFinite(configuredTtl) && configuredTtl >= 0
+          ? configuredTtl
+          : DEFAULT_RESOLUTION_TTL_SECONDS;
+
+      const now = Date.now();
+      const enriched = entries.map((e) => {
+        const resolvedAtMs = new Date(e.record.resolved_at).getTime();
+        const ageMs = Number.isFinite(resolvedAtMs) ? now - resolvedAtMs : null;
+        const expired = ageMs !== null && ttlSeconds > 0 ? ageMs >= ttlSeconds * 1000 : false;
+        return { ...e, ageMs, expired };
+      });
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            {
+              ttl_seconds: ttlSeconds,
+              entries: enriched.map((e) => ({
+                name: e.name,
+                resolved_version: e.record.resolved_version,
+                resolved_at: e.record.resolved_at,
+                source_registry: e.record.source_registry,
+                age_seconds: e.ageMs !== null ? Math.round(e.ageMs / 1000) : null,
+                expired: e.expired,
+              })),
+            },
+            null,
+            2
+          )
+        );
+        process.exit(0);
+      }
+
+      if (entries.length === 0) {
+        console.log('\nNo version resolutions cached.');
+        console.log(`(TTL: ${ttlSeconds}s — set via cache.resolutionTtlSeconds or --max-age)\n`);
+        process.exit(0);
+      }
+
+      console.log(`\n🔖 Cached resolutions (${entries.length}), TTL: ${ttlSeconds}s:\n`);
+      console.log(
+        `  ${'NAME'.padEnd(40)} ${'VERSION'.padEnd(10)} ${'REGISTRY'.padEnd(10)} ${'AGE'.padEnd(8)} STATUS`
+      );
+      console.log(
+        `  ${'─'.repeat(40)} ${'─'.repeat(10)} ${'─'.repeat(10)} ${'─'.repeat(8)} ${'─'.repeat(8)}`
+      );
+      for (const e of enriched) {
+        const registry = e.record.source_registry || '-';
+        const age = e.ageMs !== null ? formatAge(e.ageMs) : '?';
+        const status = e.ageMs === null ? 'invalid' : e.expired ? 'EXPIRED' : 'fresh';
+        console.log(
+          `  ${e.name.padEnd(40)} ${e.record.resolved_version.padEnd(10)} ${registry.padEnd(10)} ${age.padEnd(8)} ${status}`
+        );
+      }
+      console.log('');
+      console.log(
+        '  Tip: EXPIRED entries are re-resolved on next run. Use --max-age 0 or --fresh to force a recheck.\n'
+      );
+      process.exit(0);
+    });
 
   // cache list
   cacheCmd

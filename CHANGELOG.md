@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- TTL-based version resolution for versionless dossier references (`run`, `create`, `install-skill`): stale versionless requests auto-update silently within a configurable window (default 300s). Resolution metadata lives under `~/.dossier/cache/.resolution/<name>.json`.
+- New `--max-age <seconds>` flag on `run`, `create`, and `install-skill` (default 300, `0` = always re-check the registry).
+- `--fresh` flag on `create` (already supported on `run` and `install-skill`) to bypass the resolution cache for one call.
+- New config key `cache.resolutionTtlSeconds` (default `300`) in `~/.dossier/config.json`.
+- New subcommand `ai-dossier cache resolutions` (with `--json`) to inspect cached versionless → version mappings.
+- Stale-cache fallback: when the registry is unreachable and a cached version exists, the CLI uses the highest-semver cached copy and prints a loud stderr warning rather than failing.
+
+### Removed
+- Cosmetic "Update available: ...@X (run --pull to update)" warning at the end of `run`. Versionless requests now auto-update within the TTL window, so the warning is no longer needed.
+
 ## [v1.3.0 / v0.8.0] - 2026-03-07
 
 ### Fixed

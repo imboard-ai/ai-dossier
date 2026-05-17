@@ -225,7 +225,7 @@ ai-dossier pull org/dossier-a org/dossier-b
 ai-dossier pull org/my-dossier --force
 ```
 
-Pulled dossiers are cached locally with checksum verification. Subsequent `pull` calls skip the download if the version is already cached (use `--force` to override).
+Pulled dossiers are cached locally with checksum verification. Subsequent `pull` calls skip the download if the version is already cached (use `--force` to override). See [Cache and Version Resolution](#cache-and-version-resolution) for how versionless names are resolved and how to control freshness.
 
 ### Export
 
@@ -240,6 +240,71 @@ ai-dossier export org/my-dossier -o ./local-copy.ds.md
 
 # Print to stdout (for piping)
 ai-dossier export org/my-dossier --stdout
+```
+
+---
+
+## Cache and Version Resolution
+
+The CLI maintains a local cache at `~/.dossier/cache/`:
+
+- **Content cache** — `~/.dossier/cache/<name>/<version>.ds.md` (the dossier bytes, content-addressable by version).
+- **Resolution cache** — `~/.dossier/cache/.resolution/<name>.json` (which version a versionless name resolves to, with TTL).
+
+### How versionless names resolve
+
+Pinned references (`org/my-dossier@1.2.3`) are content-addressable and never expire — they bypass the resolver entirely.
+
+Versionless references (`org/my-dossier`) are resolved through a **TTL'd resolution cache**:
+
+1. If a recent resolution exists (within TTL) → reuse it (no registry call).
+2. Otherwise → call the registry, write the resolved version to the resolution cache, return it.
+3. If the registry is unreachable → fall back to the highest-semver cached version and print a loud stderr warning. If nothing is cached, fail with a clear error.
+
+This applies to `ai-dossier run`, `ai-dossier create`, and `ai-dossier install-skill`.
+
+### Controlling freshness
+
+| Flag | Effect |
+|------|--------|
+| (none) | Use cached resolution if newer than `cache.resolutionTtlSeconds` (default 300s). |
+| `--max-age <seconds>` | Override TTL for this call. `0` forces a registry check. |
+| `--fresh` | Skip the resolution cache and the content cache; fetch fresh from the registry. |
+| `--pull` (`run` only) | Refresh the content cache (re-download) but still resolve via the resolver. |
+
+```bash
+# Default: use cached resolution if within 300s
+ai-dossier run org/my-dossier
+
+# Force a registry re-check
+ai-dossier run org/my-dossier --max-age 0
+
+# Skip the entire cache for this call
+ai-dossier run org/my-dossier --fresh
+```
+
+Configure the default TTL:
+
+```bash
+dossier config cache.resolutionTtlSeconds 600
+```
+
+### `cache` subcommand
+
+```bash
+# Show all cached dossiers (content cache)
+ai-dossier cache list
+ai-dossier cache list --size --json
+
+# Show cached versionless → version resolutions (with timestamps)
+ai-dossier cache resolutions
+ai-dossier cache resolutions --json
+
+# Remove cached entries
+ai-dossier cache clean <name>             # all versions of a dossier
+ai-dossier cache clean <name> --ver 1.2.0 # specific version
+ai-dossier cache clean --older-than 30    # entries older than N days
+ai-dossier cache clean --all              # everything (prompts; use -y to skip)
 ```
 
 ---
