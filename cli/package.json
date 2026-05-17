@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/cli",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "Command-line tool for creating, verifying, and executing dossiers",
   "main": "dist/cli.js",
   "bin": {
@@ -46,7 +46,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@ai-dossier/core": "^1.3.4",
+    "@ai-dossier/core": "^1.3.5",
     "commander": "^12.1.0"
   },
   "devDependencies": {
