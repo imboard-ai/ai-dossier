@@ -2,15 +2,15 @@
 
 A comprehensive guide to understanding, creating, and using dossiers.
 
-> **New here?** Start with the [Quick Start Guide](../getting-started/installation.md) or the [README](../../README.md) first.
+> **New here?** Start with the [Quick Start Guide](../getting-started/quick-start.md) or the [README](../../README.md) first.
 
 ---
 
 ## What Are Dossiers?
 
-A **dossier** is a structured instruction file (`.ds.md`) that an AI agent can execute. Instead of writing complex scripts that try to handle every edge case, dossiers provide **clear instructions** that LLM agents (like Claude Code, GPT-4, Cursor, Copilot) can follow intelligently.
+A **dossier** is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. It's the same kind of thing as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry to distribute it through. The same `.ds.md` file runs on Claude Code, GPT, Cursor, or any capable agent.
 
-> See [FAQ](../explanation/faq.md) for common objections and detailed comparisons to alternatives (AGENTS.md, scripts, CI/CD, frameworks).
+> See [FAQ](../explanation/faq.md) for common objections and detailed comparisons — including [Isn't a dossier just a skill?](../explanation/faq.md#isnt-a-dossier-just-a-skill) and AGENTS.md, scripts, CI/CD, and frameworks.
 
 ### Dossiers vs. AGENTS.md Files
 

@@ -1,6 +1,6 @@
-# Dossier — Automation Instructions for AI Agents
+# Dossier — Portable, Signed Skills for Any AI Agent
 
-**Stop writing brittle scripts. Start writing instructions that AI executes intelligently.**
+**Skills are easy to write. Dossiers make them trustworthy, versioned, and portable across every LLM tool.**
 
 [![CI](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml)
 [![Examples](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml)
@@ -13,8 +13,8 @@
 [![GitHub](https://img.shields.io/github/stars/imboard-ai/ai-dossier?style=social)](https://github.com/imboard-ai/ai-dossier)
 
 > **Quick Concept**
-> Dossier turns plain-text instructions into executable workflows with built-in verification.
-> Like Dockerfiles for AI automation — structured, portable, verifiable.
+> A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in.
+> Think npm or Docker Hub, but for AI skills: signed, versioned, shareable.
 
 ```
   ┌──────────────────────────────────────────────────────────────────────┐
@@ -34,7 +34,7 @@
   └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**New here?** → [5-min Quick Start](docs/getting-started/installation.md) | **Using Claude Code?** → [MCP in 60 Seconds](docs/tutorials/mcp-quickstart.md) | **Want to try now?** → [Get started in 30 seconds](#get-started)
+**New here?** → [5-min Quick Start](docs/getting-started/quick-start.md) | **Using Claude Code?** → [MCP in 60 Seconds](docs/tutorials/mcp-quickstart.md) | **Want to try now?** → [Get started in 30 seconds](#get-started)
 
 ---
 
@@ -54,12 +54,12 @@ flowchart LR
     style E fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
 ```
 
-**What**: Structured instruction files (`.ds.md`) that AI agents execute intelligently
-**Why**: Replace brittle scripts with adaptive, verifiable automation that handles edge cases naturally
+**What**: Skills (`.ds.md` files) any AI agent can run — signed, versioned, portable across tools
+**Why**: A plain skill lives in one tool and anyone can tamper with it; a dossier is that same skill made verifiable, version-pinned, and shareable
 **Safety**: Built-in checksums, cryptographic signatures, and CLI verification tools
 **Works with**: Claude, ChatGPT, Cursor, any LLM — no vendor lock-in
 
-**Status**: Protocol v1.0 (stable spec) | CLI v0.8.0 | 15+ example templates | Active development
+**Status**: Protocol v1.0 (stable spec) | CLI v0.8.5 | 15+ example skills | Active development
 
 > **File conventions**: Dossiers use `.ds.md` (immutable instructions) and `.dsw.md` (mutable working files). Frontmatter uses `---dossier` (JSON) instead of `---` (YAML) to avoid parser conflicts. [Learn more](docs/explanation/faq.md#what-do-the-dsmd-and-dswmd-file-extensions-mean)
 
@@ -158,24 +158,25 @@ This scaffolds a `.ds.md` file you can edit. A dossier is just Markdown with a J
 - Expected outcome was achieved
 ```
 
-See the [Authoring Guide](docs/guides/authoring-guidelines.md) for the full spec, or browse the [Dossier Registry](https://registry.dossier.dev) for real-world examples.
+See the [Authoring Guide](docs/guides/authoring-guidelines.md) for the full spec, or browse the [Dossier Registry](https://dossier-registry.vercel.app) for real-world examples.
 
 ---
 
 ## Why Use Dossier?
 
-**"How is this different from AGENTS.md files?"** Many projects already use files like `AGENTS.md` or `.cursorrules` for AI context. Here's the key distinction:
+**"Isn't this just a skill?"** Yes — a dossier *is* a skill. The difference is everything a plain skill (like a Claude Code `SKILL.md`) lacks:
 
-|  | AGENTS.md | Dossier |
-|--|-----------|---------|
-| **Purpose** | Project context & conventions | Executable workflow automation |
+|  | Plain skill (`SKILL.md`) | Dossier |
+|--|--------------------------|---------|
+| **Trust** | Unsigned — anyone can tamper | Checksum + cryptographic signature, verified before run |
+| **Versioning** | Informal | Semantic versioning you can pin |
+| **Distribution** | Copy-paste / per-tool | Registry — discoverable, `ai-dossier install-skill` |
+| **Portability** | Locked to one tool | Same file runs on Claude, ChatGPT, Cursor, any LLM |
 | **Validation** | None | Built-in success criteria |
-| **Security** | None | Checksums + cryptographic signatures |
-| **Portability** | Project-specific | Cross-project, shareable |
-| **Tooling** | None | CLI verification, MCP integration |
-| **Versioning** | Informal | Semantic versioning (v1.0.0) |
 
-**They're complementary**: Use AGENTS.md to explain *your project*, use dossiers to automate *workflows*.
+**Trigger skills bridge the two**: a thin `SKILL.md` whose job is to invoke a versioned, signed dossier (`ai-dossier run <registry-path>`) — you keep the natural-language trigger *and* gain signing, versioning, and registry distribution.
+
+**"How about AGENTS.md files?"** Different job: `AGENTS.md` explains *your project*; a dossier automates a *workflow*. They're complementary.
 
 ---
 
@@ -262,7 +263,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system architecture.
 | [Scaffold TypeScript Project](./examples/setup/scaffold-typescript-project.ds.md) | Scaffold a production-ready TS project with CI, testing, linting |
 | [Context Engineering Best Practices](./examples/guides/context-engineering-best-practices.ds.md) | Reference guide for writing effective AI agent context files |
 
-Browse the **[Dossier Registry](https://registry.dossier.dev)** for the full collection — DevOps, databases, data science, security, and more.
+Browse the **[Dossier Registry](https://dossier-registry.vercel.app)** for the full collection — DevOps, databases, data science, security, and more.
 
 ```bash
 # Search from the CLI
@@ -302,7 +303,7 @@ The CLI supports multiple registries for discovering, publishing, and sharing do
 
 ```mermaid
 flowchart LR
-    CLI["dossier CLI"] -->|"parallel query"| R1["Public Registry\nregistry.dossier.dev"]
+    CLI["dossier CLI"] -->|"parallel query"| R1["Public Registry\ndossier-registry.vercel.app"]
     CLI -->|"parallel query"| R2["Internal Registry\ndossier.company.com"]
     CLI -->|"parallel query"| R3["Mirror Registry\nmirror.example.com"]
 
@@ -348,7 +349,7 @@ Detailed playbooks in [docs/guides/adopter-playbooks.md](docs/guides/adopter-pla
 
 | | |
 |---|---|
-| **Getting Started** | [Quick Start](docs/getting-started/installation.md) · [MCP in 60 Seconds](docs/tutorials/mcp-quickstart.md) · [Your First Dossier](docs/tutorials/your-first-dossier.md) · [FAQ](docs/explanation/faq.md) |
+| **Getting Started** | [Quick Start](docs/getting-started/quick-start.md) · [Installation](docs/getting-started/installation.md) · [MCP in 60 Seconds](docs/tutorials/mcp-quickstart.md) · [Your First Dossier](docs/tutorials/your-first-dossier.md) · [FAQ](docs/explanation/faq.md) |
 | **Reference** | [Protocol](docs/reference/protocol.md) · [Specification](docs/reference/specification.md) · [Schema](docs/reference/schema.md) · [JSON Schema](./dossier-schema.json) |
 | **Guides** | [Authoring Guidelines](docs/guides/authoring-guidelines.md) · [Dossier Guide](docs/guides/dossier-guide.md) · [CI/CD Integration](docs/guides/ci-cd-integration.md) · [Execution Tracing](docs/guides/tracing.md) · [Adopter Playbooks](docs/guides/adopter-playbooks.md) · [Examples](./examples/) |
 | **Packages** | [CLI](./cli/) · [MCP Server](./mcp-server/) · [Core Library](./packages/core/) · [Registry](./registry/) |
@@ -358,21 +359,21 @@ Detailed playbooks in [docs/guides/adopter-playbooks.md](docs/guides/adopter-pla
 
 ## Philosophy
 
-> "Agents need structure. Dossiers provide it."
+> "A skill tells an agent what to do. A dossier lets you trust it."
 
-Dossiers embody this philosophy - they give AI agents clear structure and guidance, enabling them to intelligently automate complex workflows that would be brittle to script.
+Dossiers take the skill — a reusable instruction set any AI can run — and add the things that make it safe to share: a verifiable signature, a pinnable version, and a registry to distribute it through.
 
 **The dossier standard** enables:
-- **Adaptability**: LLMs understand context and adjust behavior
-- **Maintainability**: Markdown documentation instead of complex scripts
-- **Collaboration**: Clear, readable instructions anyone can contribute to
-- **Continuous improvement**: Self-improving through the protocol
-- **Universal adoption**: Any project, any workflow, any implementation
+- **Trust**: cryptographic signatures and checksums, verified before execution
+- **Versioning**: semantic versions you can pin and upgrade deliberately
+- **Distribution**: a registry that makes skills discoverable and installable
+- **Portability**: any project, any workflow, any LLM — no vendor lock-in
+- **Adaptability**: agents understand context and adjust behavior
 
 ---
 
-**Dossier: Universal LLM Automation Standard**
-*Structure your agents. Not your scripts.*
+**Dossier: Portable, Verifiable Skills for Any LLM**
+*Skills you can trust.*
 
 ---
 

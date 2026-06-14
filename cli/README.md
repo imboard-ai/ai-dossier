@@ -4,11 +4,13 @@
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
-**Enforce cryptographic verification before executing dossiers.**
+**Install, verify, and publish dossiers — portable, signed, versioned skills — for any LLM tool.**
+
+A dossier is a skill with trust built in. This CLI is how you author them, verify their signatures, publish them to a registry, and install them as Claude Code skills (`install-skill` / `skill-export`).
 
 ## The Problem This Solves
 
-**Reality**: LLMs cannot be relied upon to enforce security checks automatically.
+A plain skill is unsigned, unversioned, and locked to one tool — and **LLMs cannot be relied upon to enforce security checks automatically.**
 
 Even with MCP server installed and protocol documentation:
 - ❌ LLMs may skip verification
@@ -241,6 +243,47 @@ ai-dossier export org/my-dossier -o ./local-copy.ds.md
 # Print to stdout (for piping)
 ai-dossier export org/my-dossier --stdout
 ```
+
+---
+
+## Skills
+
+A dossier is a skill with trust, versioning, and registry distribution added. These commands bridge the registry and Claude Code skills (`~/.claude/skills/`).
+
+A **trigger skill** is a thin `SKILL.md` that fires on a phrase and invokes a versioned, signed dossier via `ai-dossier run <registry-path>`. You author and trigger it like any skill, but it gains signing, version pinning, and registry distribution.
+
+### `install-skill` — registry dossier → Claude Code skill
+
+```bash
+# Install a published skill into ~/.claude/skills/
+ai-dossier install-skill org/skills/my-skill
+
+# List installed skills / force a fresh re-pull / remove one
+ai-dossier install-skill --list
+ai-dossier install-skill org/skills/my-skill --fresh --force
+ai-dossier install-skill --remove my-skill
+```
+
+Restart Claude Code (or start a new session) to pick up a newly installed skill. At run time the skill calls `ai-dossier run <registry-path>`, which fetches and verifies the dossier on demand — so you don't need to install the dossier separately.
+
+### `skill-export` — local skill → registry dossier
+
+Publish a locally installed skill to the registry as a versioned, signed dossier so others can `install-skill` it:
+
+```bash
+# Publish ~/.claude/skills/my-skill to the registry (minor version bump)
+ai-dossier skill-export my-skill --namespace org/skills
+
+# Pin an explicit version, add a changelog, verify the roundtrip
+ai-dossier skill-export my-skill --version 2.0.0 --changelog "Add range support" --verify
+```
+
+| Option | Effect |
+|--------|--------|
+| `--namespace <ns>` | Registry namespace (default: first org or username) |
+| `--version <v>` / `--major` / `--no-bump` | Control the published version |
+| `--changelog <msg>` | Changelog message for the release |
+| `--verify` | Re-install after publish to confirm the roundtrip |
 
 ---
 
@@ -706,34 +749,20 @@ Exit 0 (safe) or 1 (unsafe)
 
 ---
 
-## Limitations
+## Capabilities & Limitations
 
-### Current Limitations
+### What's implemented
 
-1. **Signature Verification**: Basic implementation
-   - Detects test signatures (invalid/fake)
-   - Full minisign verification requires external tool
-   - Future: Native minisign support
+- ✅ **Checksum verification** (SHA256) — catches any tampering with the dossier body
+- ✅ **Signature verification** — Ed25519 (Minisign-compatible) and AWS KMS; signatures are validated, not just detected
+- ✅ **Trusted keys** — verified against `~/.dossier/trusted-keys.txt`; manage with `ai-dossier keys`
+- ✅ **Risk assessment** — declared risk level + destructive-operation analysis gate execution
+- ✅ **Execution** — `ai-dossier run` verifies, then executes if checks pass
 
-2. **Trusted Keys**: Not yet implemented
-   - Future: Check against ~/.dossier/trusted-keys.txt
-   - Future: Key management commands
+### Current limitations
 
-3. **Execution**: --run flag not implemented
-   - Currently just verifies
-   - Future: Execute if verification passes
-
-### Why These Limitations Exist
-
-**Current status**: MVP for verification enforcement
-**Focus**: Get checksum verification working reliably
-**Future**: Full signature verification, trust management, execution
-
-**But even with limitations**:
-- ✅ Checksum verification catches tampering
-- ✅ Signature presence detection works
-- ✅ Exit codes enable integration
-- ✅ Enforces security before LLM involvement
+- Verification is a single integrity stage (checksum + signature) plus risk assessment — there is no multi-stage sandbox; the executing agent enforces runtime permissions.
+- Trust is local: you decide which keys to trust. A valid signature from an untrusted key is reported as such, not auto-trusted.
 
 ---
 
@@ -747,7 +776,7 @@ Exit 0 (safe) or 1 (unsafe)
 
 ### v0.2.0
 - ✅ Multi-command CLI structure (`ai-dossier <command>`)
-- ✅ `dossier run` command with 5-stage verification pipeline
+- ✅ `ai-dossier run` command with integrity verification (checksum + signature)
 - ✅ LLM auto-detection and execution integration
 
 ### v0.3.0
@@ -780,18 +809,18 @@ Exit 0 (safe) or 1 (unsafe)
 - ✅ Coverage thresholds enforcement
 - ✅ Documentation consistency fixes
 
-### v0.8.0 (Current)
+### v0.8.x (Current)
 - ✅ Zod validation on MCP prompt handlers
 - ✅ Complete doc link audit and fix (30+ broken links)
-- ✅ Remove all "coming soon" stubs
-- ✅ Purge stale GitHub Packages / Node 18 references
-- ✅ Improved getting-started learning path
+- ✅ Ed25519 + AWS KMS signature verification with trusted-keys
+- ✅ `install-skill` / `skill-export` (Claude Code skill bridge)
+- ✅ Execution tracing with verified checksum + signer metadata
+- ✅ TTL-based version resolution for the content cache
 
 ### v1.0.0 (Stable)
-- ⏳ Complete signature verification
-- ⏳ Trust management UI
-- ⏳ Integration with major LLM tools
-- ⏳ Comprehensive documentation
+- ⏳ Stable, frozen CLI surface and exit-code contract
+- ⏳ Deeper integration with major LLM tools
+- ⏳ Expanded registry/discovery features
 
 ---
 

@@ -19,16 +19,16 @@
 
 ## Overview
 
-The Dossier Schema is a **JSON-based frontmatter format** that provides deterministic, machine-readable metadata for Dossier automation files. It transforms Dossiers from purely interpretive Markdown documents into **structured, validatable, and discoverable automation specifications**.
+The Dossier Schema is a **JSON-based frontmatter format** that provides deterministic, machine-readable metadata for dossiers. It is what makes a dossier more than a plain skill: the metadata carries the signature, version, and discovery information a skill needs to be trusted, pinned, and distributed through a registry.
 
 ### Key Benefits
 
-1. **Deterministic Parsing**: LLMs and tools can extract metadata reliably without natural language interpretation
-2. **Fast Validation**: Schema validation fails fast before expensive LLM execution
-3. **Tooling Foundation**: Enables CLI tools, IDEs, registries, and automation systems
-4. **Searchability**: Programmatic discovery by category, tags, tools, dependencies
-5. **Predictable Costs**: Know required tools and dependencies before execution
-6. **Professional Credibility**: Demonstrates maturity for enterprise adoption
+1. **Deterministic Parsing**: LLMs and tools extract metadata reliably without natural language interpretation
+2. **Trust**: checksum + signature fields let tools verify integrity and authorship before execution
+3. **Versioning**: explicit version fields make skills pinnable and upgradeable
+4. **Searchability**: programmatic discovery by category, tags, tools, dependencies — the basis of the registry
+5. **Fast Validation**: schema validation fails fast before expensive LLM execution
+6. **Tooling Foundation**: enables CLI tools, IDEs, registries, and automation systems
 
 ---
 

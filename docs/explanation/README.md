@@ -1,10 +1,10 @@
 # Explanation & Concepts
 
-Understanding-oriented documentation that explains how and why Dossier works.
+Understanding-oriented documentation that explains how and why Dossier works. A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in; these docs explain what that adds and why it matters.
 
 ## Core Concepts
 
-- [AI Agents](agents.md) - How AI agents work with dossiers
+- [Isn't a dossier just a skill?](faq.md#isnt-a-dossier-just-a-skill) - How dossiers relate to skills, and the trigger-skill pattern
 - [Security Model](security-model.md) - Understanding Dossier's security approach
 - [FAQ](faq.md) - Frequently asked questions
 
@@ -30,12 +30,12 @@ Understanding-oriented documentation that explains how and why Dossier works.
 
 ## Philosophy
 
-Dossier is built on these principles:
-- **Security by default**: Verify before execution
-- **Human-readable**: Markdown that both humans and AI can understand
-- **Cryptographically verifiable**: SHA256 and optional signatures
-- **Lightweight**: No heavy dependencies or complex infrastructure
-- **Open standard**: Community-driven, vendor-neutral
+Dossier takes a skill and adds what makes it safe to share:
+- **Trust**: cryptographic signatures + checksums, verified before execution
+- **Versioning**: semantic versions you can pin and upgrade deliberately
+- **Distribution**: a registry that makes skills discoverable and installable
+- **Portability**: human-readable Markdown that runs on any LLM tool — vendor-neutral
+- **Open standard**: community-driven, no heavy infrastructure
 
 ## Related Reading
 

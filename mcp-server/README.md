@@ -4,7 +4,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/mcp-server)](https://www.npmjs.com/package/@ai-dossier/mcp-server)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
-MCP server for the dossier automation standard. Enables LLMs to discover, verify, and execute dossiers through the [Model Context Protocol](https://modelcontextprotocol.io/).
+MCP server that lets any MCP-capable LLM discover, verify, and run dossiers — portable, signed skills — through the [Model Context Protocol](https://modelcontextprotocol.io/). If you've used Claude Code skills, dossiers will feel familiar: they're skills you can verify, version, and pull from a registry.
 
 ## Installation
 

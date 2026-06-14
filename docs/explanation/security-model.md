@@ -553,18 +553,18 @@ mv ~/.claude/settings.local.json.backup ~/.claude/settings.local.json
 - **[PROTOCOL.md](../reference/protocol.md)** - Security Verification Protocol
 - **[SECURITY.md](../../SECURITY.md)** - Security policy
 - **[examples/security/README.md](../../examples/security/README.md)** - Detailed analysis
-- **[KEYS.txt](./KEYS.txt)** - Official trusted public keys
+- **[KEYS.txt](../../KEYS.txt)** - Official trusted public keys
 
 ### Setup Guides
 
 - **[examples/setup/setup-dossier-mcp.ds.md](../../examples/setup/setup-dossier-mcp.ds.md)** - Interactive setup
-- **[MCP_AUTO_DETECTION_IMPLEMENTATION_STATUS.md](./MCP_AUTO_DETECTION_IMPLEMENTATION_STATUS.md)** - Implementation details
+- **[MCP implementation status](../contributing/mcp/implementation-status.md)** - Implementation details
 
 ### Security Documentation
 
-- **[security/](./security/)** - Complete security documentation
-- **[security/ARCHITECTURE.md](./security/ARCHITECTURE.md)** - Security architecture
-- **[security/THREAT_MODEL.md](./security/THREAT_MODEL.md)** - Threat analysis
+- **[security/](../../security/)** - Complete security documentation
+- **[security/ARCHITECTURE.md](../../security/ARCHITECTURE.md)** - Security architecture
+- **[security/THREAT_MODEL.md](../../security/THREAT_MODEL.md)** - Threat analysis
 
 ---
 

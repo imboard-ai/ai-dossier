@@ -126,7 +126,7 @@ Publish:
 ai-dossier publish setup-dev-environment.ds.md
 ```
 
-Your dossier is now discoverable via `ai-dossier search` and the [Dossier Registry](https://registry.dossier.dev).
+Your dossier is now discoverable via `ai-dossier search` and the [Dossier Registry](https://dossier-registry.vercel.app).
 
 ## Lifecycle Summary
 
@@ -139,6 +139,6 @@ create  -->  write  -->  validate  -->  checksum  -->  test  -->  publish
 
 ## Next Steps
 
-- Browse the [Dossier Registry](https://registry.dossier.dev) to see published dossiers
+- Browse the [Dossier Registry](https://dossier-registry.vercel.app) to see published dossiers
 - Read the [Dossier Guide](../guides/dossier-guide.md) for the full schema reference
 - Learn about [signatures and security](../explanation/security-model.md) for signing dossiers

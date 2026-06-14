@@ -726,11 +726,11 @@ The security architecture defends against:
 
 ### Git Worktree Handling for AI Assistants
 
-**⚠️ IMPORTANT**: This project uses git worktrees. The main repository is at `/home/yuvaldim/projects/dossier/main`, but you may be invoked from other directories.
+**⚠️ IMPORTANT**: This project uses git worktrees. The main repository is at `/path/to/ai-dossier/main`, but you may be invoked from other directories.
 
 **Git Command Logic**:
 1. **Always attempt git commands in the current working directory first**
-2. **If the command fails with "fatal: not a git repository"**, fall back to the main worktree at `/home/yuvaldim/projects/dossier/main`
+2. **If the command fails with "fatal: not a git repository"**, fall back to the main worktree at `/path/to/ai-dossier/main`
 
 **Example Pattern**:
 ```bash
@@ -738,7 +738,7 @@ The security architecture defends against:
 git status
 
 # If that fails, use:
-cd /home/yuvaldim/projects/dossier/main && git status
+cd /path/to/ai-dossier/main && git status
 ```
 
 **Why This Matters**:
@@ -985,7 +985,7 @@ Test dossiers on real projects:
 ## Project Structure
 
 ```
-/home/yuvaldim/projects/dossier/
+/path/to/ai-dossier/
 │
 ├── README.md                    # Project introduction, value proposition
 ├── QUICK_START.md              # 5-minute getting started guide

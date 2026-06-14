@@ -1,11 +1,13 @@
 # Signing Dossiers: Practical Guide
 
-**Last Updated**: 2025-11-24
+**Last Updated**: 2026-06-14
 **Status**: Active
 
 ---
 
 ## Overview
+
+Signing is what turns a skill into a *trusted* skill — the single biggest thing a dossier adds over a plain `SKILL.md`. A plain skill has no way to prove who wrote it or that it hasn't been tampered with; a signed dossier does, and `ai-dossier install-skill` / `run` verify that signature before the agent executes anything.
 
 This guide covers the practical steps for signing dossiers locally and in CI/CD. It complements the [Key Management documentation](../../security/KEY_MANAGEMENT.md) with hands-on procedures and troubleshooting.
 
@@ -57,7 +59,7 @@ console.log('   Public key: my-public-key.pem (share this)');
 
 ```bash
 # Sign with your Ed25519 key
-node tools/sign-dossier.js path/to/your-dossier.ds.md \
+ai-dossier sign --method ed25519 path/to/your-dossier.ds.md \
   --key my-signing-key.pem \
   --key-id "my-name-2025" \
   --signed-by "Your Name <your.email@example.com>"
@@ -67,8 +69,8 @@ node tools/sign-dossier.js path/to/your-dossier.ds.md \
 
 ```bash
 # Verify locally (requires adding your key to trusted keys)
-dossier keys add "$(cat my-public-key.pem | tr -d '\n')" "my-name-2025"
-dossier verify path/to/your-dossier.ds.md
+ai-dossier keys add "$(cat my-public-key.pem | tr -d '\n')" "my-name-2025"
+ai-dossier verify path/to/your-dossier.ds.md
 ```
 
 #### Step 4: Publish Your Public Key
@@ -95,7 +97,7 @@ $(openssl pkey -pubin -in my-public-key.pem -outform DER | sha256sum | cut -d' '
 **Verification**:
 ```bash
 # Users can add your key:
-dossier keys add "$(curl -s https://raw.githubusercontent.com/your-repo/main/KEYS.txt | grep -A 10 'Public Key' | tail -n +2 | head -n 3 | tr -d '\n')" "my-name-2025"
+ai-dossier keys add "$(curl -s https://raw.githubusercontent.com/your-repo/main/KEYS.txt | grep -A 10 'Public Key' | tail -n +2 | head -n 3 | tr -d '\n')" "my-name-2025"
 ```
 EOF
 ```
@@ -122,14 +124,14 @@ aws sts get-caller-identity
 
 ```bash
 # Basic signing
-node tools/sign-dossier-kms.js path/to/your-dossier.ds.md
+ai-dossier sign path/to/your-dossier.ds.md
 
 # With signed_by identity (recommended)
-node tools/sign-dossier-kms.js path/to/your-dossier.ds.md \
+ai-dossier sign path/to/your-dossier.ds.md \
   --signed-by "Your Name <your.email@example.com>"
 
 # Specify KMS key (if not using default)
-node tools/sign-dossier-kms.js path/to/your-dossier.ds.md \
+ai-dossier sign path/to/your-dossier.ds.md \
   --key-id alias/dossier-official-prod \
   --region us-east-1 \
   --signed-by "Your Name <your.email@example.com>"
@@ -139,15 +141,15 @@ node tools/sign-dossier-kms.js path/to/your-dossier.ds.md \
 
 ```bash
 # Verify locally
-dossier verify path/to/your-dossier.ds.md
+ai-dossier verify path/to/your-dossier.ds.md
 
 # Should show:
 # ✅ PASSED: Checksum and signature valid
 ```
 
-### What the Signing Tool Does
+### What the Signing Command Does
 
-The `sign-dossier-kms.js` tool performs these steps:
+When signing with AWS KMS, `ai-dossier sign` performs these steps:
 
 1. **Reads the dossier file** and parses frontmatter + body
 2. **Calculates checksum** (SHA256 of body only, not frontmatter)
@@ -218,14 +220,11 @@ jobs:
 
       - name: Sign dossiers
         run: |
-          # Install dependencies
-          npm ci
-
           # Sign all unsigned dossiers in examples/
           for file in examples/**/*.ds.md; do
             if ! grep -q '"signature"' "$file"; then
               echo "Signing: $file"
-              node tools/sign-dossier-kms.js "$file" \
+              npx @ai-dossier/cli sign "$file" \
                 --signed-by "Dossier Team <team@dossier.ai>"
             fi
           done
@@ -244,7 +243,7 @@ jobs:
 1. **Navigate to Actions tab** on GitHub
 2. **Select "sign" workflow**
 3. **Click "Run workflow"**
-4. **Select branch** (usually `main` or `cli-work`)
+4. **Select branch** (usually `main`)
 5. **Click "Run workflow" button**
 
 The workflow will:
@@ -298,36 +297,24 @@ GitHub Actions uses OpenID Connect (OIDC) to get temporary AWS credentials:
 
 ### How Verification Works
 
-The `dossier verify` command performs 5-stage verification:
+The `ai-dossier verify` command runs an integrity stage followed by a risk assessment:
 
-**Stage 1: Integrity Check**
+**Stage 1: Integrity Check (checksum + signature)**
 1. Parse dossier file (separate frontmatter and body)
-2. Calculate checksum: `SHA256(body)`
-3. Compare with `checksum.hash` in frontmatter
-4. If signature present, verify it
+2. Calculate checksum: `SHA256(body)` and compare with `checksum.hash` in frontmatter
+3. If a signature is present, verify it (Ed25519 / AWS KMS) and check the signer against your trusted keys (`~/.dossier/trusted-keys.txt`)
 
-**Stage 2: Author Whitelist/Blacklist**
-- Check `signed_by` against whitelists/blacklists
-- Currently demo mode (not enforced)
+**Risk assessment**
+- Evaluate `risk_level`, `risk_factors`, and `destructive_operations` from frontmatter
+- Determine whether the dossier is safe to execute or requires approval
 
-**Stage 3: Dossier Whitelist/Blacklist**
-- Check dossier file/URL against lists
-- Currently demo mode (not enforced)
-
-**Stage 4: Risk Assessment**
-- Evaluate `risk_level` from frontmatter
-- Check `risk_factors` and `destructive_operations`
-- Determine if approval required
-
-**Stage 5: Review Dossier Analysis**
-- Optional: Execute review dossier to analyze content
-- Currently demo mode (prints what would happen)
+> A valid signature from a key that isn't in your trusted list is reported as "valid but untrusted" — it is not auto-trusted. Add the key with `ai-dossier keys add` to trust it.
 
 ### AWS KMS Signature Verification
 
 **Critical Implementation Detail**: Verification must match signing process.
 
-#### Signing Process (tools/sign-dossier-kms.js)
+#### Signing Process (`ai-dossier sign`, KMS method)
 ```javascript
 // 1. Hash the body
 const hash = crypto.createHash('sha256').update(body, 'utf8').digest();
@@ -365,13 +352,13 @@ const command = new VerifyCommand({
 
 ```bash
 # Test on the meta-dossier
-dossier verify examples/authoring/create-dossier.ds.md
+ai-dossier verify examples/authoring/create-dossier.ds.md
 
 # Test from GitHub URL
-dossier verify https://raw.githubusercontent.com/imboard-ai/ai-dossier/cli-work/examples/authoring/create-dossier.ds.md
+ai-dossier verify https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/examples/authoring/create-dossier.ds.md
 
 # Verbose output
-dossier verify examples/authoring/create-dossier.ds.md --verbose
+ai-dossier verify examples/authoring/create-dossier.ds.md --verbose
 ```
 
 ---
@@ -427,7 +414,7 @@ npm install @aws-sdk/client-kms
 **Error: "File not found"**
 ```bash
 # Use absolute or correct relative path
-node tools/sign-dossier-kms.js $(pwd)/examples/my-dossier.ds.md
+ai-dossier sign $(pwd)/examples/my-dossier.ds.md
 ```
 
 **Error: "Access Denied" from KMS**
@@ -466,13 +453,13 @@ aws kms describe-key --key-id alias/dossier-official-prod
 
 1. **Always include `--signed-by`**
    ```bash
-   node tools/sign-dossier-kms.js file.ds.md \
+   ai-dossier sign file.ds.md \
      --signed-by "Your Name <email@domain.com>"
    ```
 
 2. **Verify after signing**
    ```bash
-   dossier verify file.ds.md
+   ai-dossier verify file.ds.md
    ```
 
 3. **Sign before committing**
@@ -526,7 +513,7 @@ aws kms describe-key --key-id alias/dossier-official-prod
 # Sign all dossiers in a directory
 for file in examples/devops/*.ds.md; do
   echo "Signing: $file"
-  node tools/sign-dossier-kms.js "$file" \
+  ai-dossier sign "$file" \
     --signed-by "DevOps Team <devops@example.com>"
 done
 ```
@@ -536,7 +523,7 @@ done
 ```bash
 # After editing a dossier, re-sign it
 vim examples/my-dossier.ds.md
-node tools/sign-dossier-kms.js examples/my-dossier.ds.md \
+ai-dossier sign examples/my-dossier.ds.md \
   --signed-by "Your Name <email@domain.com>"
 ```
 
@@ -546,7 +533,7 @@ node tools/sign-dossier-kms.js examples/my-dossier.ds.md \
 # Pre-push hook script
 #!/bin/bash
 for file in $(git diff --cached --name-only | grep '\.ds\.md$'); do
-  if ! dossier verify "$file"; then
+  if ! ai-dossier verify "$file"; then
     echo "❌ Verification failed: $file"
     exit 1
   fi

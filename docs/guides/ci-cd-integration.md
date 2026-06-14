@@ -97,7 +97,7 @@ ai-dossier lint "$file" --strict
 
 ```yaml
 - name: Install @ai-dossier/cli
-  run: npm install -g @ai-dossier/cli@0.8.0
+  run: npm install -g @ai-dossier/cli@0.8.5
 ```
 
 ---

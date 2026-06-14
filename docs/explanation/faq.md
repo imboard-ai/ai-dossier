@@ -2,7 +2,7 @@
 
 ## Table of Contents
 - [Understanding Dossiers](#understanding-dossiers)
-- [Dossiers vs. Alternatives](#dossiers-vs-alternatives)
+- [Dossiers vs. Alternatives](#dossiers-vs-alternatives) — [Isn't a dossier just a skill?](#isnt-a-dossier-just-a-skill)
 - [Protocol & Governance](#protocol--governance)
 - [Security & Trust](#security--trust)
 - [Technical Concerns](#technical-concerns) (file extensions, `---dossier` delimiter, determinism)
@@ -14,9 +14,9 @@
 
 ### What exactly is a dossier?
 
-A dossier is a structured instruction set (in markdown format) that an LLM agent can execute to automate complex workflows. Think of it as a recipe that tells an AI how to accomplish a multi-step task, complete with validation steps, prerequisites, and success criteria.
+A dossier is a skill — a reusable instruction set an AI executes — with **trust, versioning, and cross-tool portability** built in. It's the same kind of thing as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry to distribute it through.
 
-**Key difference from other approaches**: Dossiers combine human-readable instructions with machine-readable metadata (via JSON frontmatter), making them both documentation AND executable automation.
+**Key difference from a plain skill**: a dossier combines human-readable instructions with machine-readable metadata (JSON frontmatter) and a verification pipeline, so it can be signed, version-pinned, and run safely on *any* LLM tool — not just the one it was written in.
 
 ### Who needs dossiers? Can't LLMs just work from natural language?
 
@@ -35,19 +35,25 @@ You: "I don't know. What should they check?"
 *Result: 10+ back-and-forth messages, inconsistent results, forgotten steps*
 
 **✅ With Dossiers**:
-```yaml
-name: "Zero-Downtime Production Deploy"
-prerequisites:
-  - Health check endpoint at /health
-  - Load balancer configured
-  - Rollback plan documented
-context:
-  - deployment_strategy: "blue-green"
-  - health_check_timeout: "30s"
-validation:
-  - "New version responds to health checks"
-  - "Traffic gradually shifted to new version"
-  - "Old version remains available for rollback"
+```markdown
+---dossier
+{
+  "title": "Zero-Downtime Production Deploy",
+  "version": "1.0.0",
+  "prerequisites": [
+    "Health check endpoint at /health",
+    "Load balancer configured",
+    "Rollback plan documented"
+  ],
+  "validation": {
+    "success_criteria": [
+      "New version responds to health checks",
+      "Traffic gradually shifted to new version",
+      "Old version remains available for rollback"
+    ]
+  }
+}
+---
 ```
 *Result: Consistent execution, validated steps, clear requirements*
 
@@ -63,6 +69,27 @@ validation:
 ---
 
 ## Dossiers vs. Alternatives
+
+### Isn't a dossier just a skill?
+
+**Yes — a dossier *is* a skill.** If you've used Claude Code Skills (a `SKILL.md` that triggers on a phrase and tells the agent what to do), you already understand the core idea. The difference is everything a plain skill *lacks*:
+
+| | Plain skill (`SKILL.md`) | Dossier |
+|---|--------------------------|---------|
+| Trust / integrity | ❌ Unsigned — anyone can edit it | ✅ Checksum + signature, verified before run |
+| Author verification | ❌ No | ✅ Cryptographic signatures |
+| Versioning | ❌ Informal | ✅ Semantic versioning you can pin |
+| Distribution | ❌ Copy-paste / per-tool | ✅ Registry — `ai-dossier install-skill` |
+| Validation | ❌ No | ✅ Built-in success criteria |
+| Works across all LLMs | ⚠️ Locked to one tool | ✅ Same file, any LLM |
+
+**The trigger-skill pattern bridges the two.** A *trigger skill* is a thin `SKILL.md` whose only job is to invoke a versioned, signed dossier:
+
+1. The skill gives you the natural-language trigger ("full cycle issue 42").
+2. It calls `ai-dossier run <registry-path>`, which fetches and verifies the dossier before the agent executes it.
+3. You publish your local skill as a dossier with `ai-dossier skill-export`, and install a registry dossier as a skill with `ai-dossier install-skill`.
+
+So you don't choose between skills and dossiers — you write a skill and back it with a dossier to gain signing, versioning, and registry distribution for free.
 
 ### How are dossiers different from AGENTS.md files?
 
@@ -114,34 +141,27 @@ System: *Backup was in /tmp, now gone*
 #### The Dossier Approach (Structured Protocol)
 
 **✅ Same workflow as dossier**:
-```yaml
----
-name: "Database Migration with Safety Checks"
-version: "1.2.0"
-schema_version: "1.0.0"
-checksum: "sha256:a3f2c..."
-
-prerequisites:
-  - Database credentials with migration privileges
-  - Backup storage with >50GB free space
-  - Staging environment available
-
-context:
-  backup_location: "/var/backups/db"
-  backup_retention: "30 days"
-  staging_url: "staging.example.com"
-
-validation:
-  - name: "Backup created"
-    check: "Backup file exists and size > 1MB"
-  - name: "Migration successful"
-    check: "Migration script exit code = 0"
-  - name: "Staging tests pass"
-    check: "All integration tests return green"
-
-rollback:
-  - "If validation fails, restore from backup"
-  - "Document failure reason in incident log"
+```markdown
+---dossier
+{
+  "title": "Database Migration with Safety Checks",
+  "version": "1.2.0",
+  "dossier_schema_version": "1.0.0",
+  "checksum": {"algorithm": "sha256", "hash": "a3f2c..."},
+  "prerequisites": [
+    "Database credentials with migration privileges",
+    "Backup storage with >50GB free space",
+    "Staging environment available"
+  ],
+  "validation": {
+    "success_criteria": [
+      "Backup file exists and size > 1MB",
+      "Migration script exit code = 0",
+      "All integration tests return green"
+    ]
+  },
+  "rollback": {"supported": true, "notes": "If validation fails, restore from backup; document failure in incident log"}
+}
 ---
 
 # Instructions
@@ -362,7 +382,7 @@ https://raw.githubusercontent.com/you/dossiers/main/deploy.ds.md
 - ✅ Test in safe environments first
 - ✅ Check dossier metadata (risk level, author)
 
-**See [security/README.md](./security/README.md) for comprehensive security guidance.**
+**See [security/README.md](../../security/README.md) for comprehensive security guidance.**
 
 ---
 
@@ -815,7 +835,7 @@ If validation doesn't match the stated goal, red flag!
 
 **1. Version control friendly**
 ```bash
-git log database-migration.dossier.md
+git log database-migration.ds.md
 # See full history of instruction changes
 git diff v1.0.0 v2.0.0
 # See exact changes between versions
@@ -838,7 +858,7 @@ signature:
 **4. Execution logging**
 ```json
 {
-  "dossier": "database-migration.dossier.md",
+  "dossier": "database-migration.ds.md",
   "version": "1.2.0",
   "checksum": "sha256:a3f2c...",
   "executed_by": "deploy-bot",
@@ -925,7 +945,7 @@ If your editor shows the JSON block as visible text, that's normal behavior and 
 **1. Schema validation** (happens before LLM execution)
 ```bash
 # Validates structure instantly
-dossier validate my-workflow.dossier.md
+ai-dossier lint my-workflow.ds.md
 # ✓ Valid schema
 # ✓ Checksum verified
 # ✓ All required fields present
@@ -1046,10 +1066,10 @@ Output tokens: ~1,000 (commands + reasoning)
 Total: ~3,000 tokens per execution
 ```
 
-**At current pricing** (as of early 2025):
+**Approximate pricing** (check your provider for current rates):
 ```
 Claude Sonnet: ~$0.01 per execution
-GPT-4: ~$0.03 per execution
+GPT-4 class:   ~$0.03 per execution
 ```
 
 #### Time Savings
@@ -1088,10 +1108,10 @@ Total: $4.01 per execution
 **1. Use appropriate LLM**
 ```yaml
 # Simple dossier
-recommended_model: "claude-3-haiku"  # Cheap, fast
+recommended_model: "claude-haiku-4-5"  # Cheap, fast
 
 # Complex reasoning required
-recommended_model: "claude-sonnet-4"  # More capable
+recommended_model: "claude-sonnet-4-6"  # More capable
 ```
 
 **2. Efficient structure**
@@ -1412,7 +1432,7 @@ psql $DB_URL -c "SELECT COUNT(*) FROM users"
 echo "Migration complete"
 ```
 
-**Converted to dossier** (`migrate-db.dossier.md`):
+**Converted to dossier** (`migrate-db.ds.md`):
 ```yaml
 ---
 name: "Database Migration with Safety Checks"
@@ -1551,9 +1571,9 @@ Version 1.3: Remove script, LLM executes directly
 
 **1. Human-readable diffs**
 ```diff
-diff --git a/deploy.dossier.md b/deploy.dossier.md
---- a/deploy.dossier.md
-+++ b/deploy.dossier.md
+diff --git a/deploy.ds.md b/deploy.ds.md
+--- a/deploy.ds.md
++++ b/deploy.ds.md
 @@ -8,7 +8,8 @@
  validation:
    - name: "Health check passes"
@@ -1620,7 +1640,7 @@ validation:
 **Update version and checksum**:
 ```bash
 # After resolving conflict
-dossier recalculate-checksum deploy.dossier.md
+ai-dossier checksum deploy.ds.md --update
 # Updates checksum automatically
 ```
 
@@ -1651,7 +1671,7 @@ Reduces conflict probability (different files).
 **3. Use branches for experiments**
 ```bash
 git checkout -b improve-deploy-validation
-# Modify deploy.dossier.md
+# Modify deploy.ds.md
 # Test thoroughly
 git checkout main
 git merge improve-deploy-validation
@@ -1682,34 +1702,34 @@ git merge improve-deploy-validation
 **1. Creating dossiers**
 ```bash
 # Just create a markdown file
-vim my-workflow.dossier.md
+vim my-workflow.ds.md
 ```
 
 **2. Validating dossiers**
 ```bash
 # Schema validation (local)
-dossier validate my-workflow.dossier.md
+ai-dossier lint my-workflow.ds.md
 ```
 
 **3. Calculating checksums**
 ```bash
 # Local cryptographic hash
-dossier checksum my-workflow.dossier.md
+ai-dossier checksum my-workflow.ds.md
 ```
 
 **4. Signing dossiers**
 ```bash
 # Uses local GPG keyring
-dossier sign my-workflow.dossier.md --key 0x1234ABCD
+ai-dossier sign my-workflow.ds.md --key 0x1234ABCD
 ```
 
 **5. Executing dossiers**
 ```bash
 # If you have local LLM (Ollama, etc.)
-claude-code execute my-workflow.dossier.md
+claude-code execute my-workflow.ds.md
 
 # Or manual execution (follow instructions yourself)
-cat my-workflow.dossier.md
+cat my-workflow.ds.md
 ```
 
 #### What Requires Internet
@@ -1738,7 +1758,7 @@ cat my-workflow.dossier.md
 
 ```bash
 # 1. Download dossiers in advance
-git clone https://github.com/your-org/dossiers.git
+git clone https://github.com/imboard-ai/ai-dossier.git
 
 # 2. Use local LLM
 docker run -d ollama/ollama
@@ -1748,7 +1768,7 @@ ollama pull llama2
 gpg --import team-keys.asc
 
 # 4. Execute entirely offline
-claude-code execute --model local/llama2 deploy.dossier.md
+claude-code execute --model local/llama2 deploy.ds.md
 ```
 
 **Benefits**:
@@ -1790,7 +1810,7 @@ Everything works without internet.
 
 ### How can I contribute?
 
-- **Report issues**: [GitHub Issues](https://github.com/your-org/dossier/issues)
+- **Report issues**: [GitHub Issues](https://github.com/imboard-ai/ai-dossier/issues)
 - **Submit dossiers**: Share your workflows with the community
 - **Improve docs**: PRs welcome for documentation improvements
 - **Join discussion**: Community forum / Discord / Slack

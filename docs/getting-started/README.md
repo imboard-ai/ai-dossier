@@ -1,6 +1,6 @@
 # Getting Started with Dossier
 
-Welcome! This guide will help you get up and running with Dossier quickly.
+Welcome! A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. This guide gets you running one, then authoring your own.
 
 ## Recommended Learning Path
 
@@ -31,7 +31,7 @@ ai-dossier verify https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/e
 ## Next Steps
 
 - [Create your first dossier](../tutorials/your-first-dossier.md) — Step-by-step tutorial
-- [Learn about the protocol](../reference/protocol.md) — How dossiers execute
+- [Learn about the protocol](../reference/protocol.md) — How dossiers are verified and run
 - [Explore example dossiers](../../examples/) — Real-world templates
 - [Understand security model](../explanation/security-model.md) — Checksums, signatures, risk levels
 

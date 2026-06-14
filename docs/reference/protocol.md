@@ -8,7 +8,7 @@
 
 ## Overview
 
-This protocol defines **standard execution guidelines** for all dossiers. Every dossier references this protocol to ensure consistent, safe, and continuously improving automation.
+This protocol defines **standard execution guidelines** for all dossiers — the portable, signed skills defined by the [Dossier Specification](specification.md). Every dossier references this protocol to ensure consistent, safe, and continuously improving execution, regardless of which LLM tool runs it.
 
 **Purpose**:
 - Provide meta-instructions that apply to ALL dossiers
@@ -1850,6 +1850,6 @@ What would you like to do?
 
 **🎯 Dossier Execution Protocol v1.0**
 
-> "Structure your agents. Not your scripts."
+> "Skills you can trust."
 
 *This protocol ensures dossiers are safe, consistent, and continuously improving.*

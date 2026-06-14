@@ -8,7 +8,7 @@
 
 ## Abstract
 
-This document defines the **Dossier standard** - a universal format for LLM-executable automation instructions. Dossiers provide structured guidance that AI agents can interpret and execute intelligently, adapting to project-specific contexts while maintaining consistency and safety.
+This document defines the **Dossier standard** - a universal format for portable, verifiable, versioned skills. A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. Dossiers provide structured guidance that AI agents interpret and execute intelligently, adapting to project-specific contexts while maintaining consistency and safety.
 
 ---
 
@@ -44,22 +44,23 @@ This specification covers:
 
 ### 2.1 Definition
 
-A **dossier** is a structured markdown document containing instructions for LLM agents to execute complex automation workflows with context-awareness and adaptability.
+A **dossier** is a skill — a reusable instruction set an AI executes — expressed as a structured markdown document, with the trust, versioning, and portability needed to share it safely across tools. It is the same kind of artifact as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry path.
 
 ### 2.2 Key Characteristics
 
 **Dossiers are**:
 - ✅ **Declarative**: Describe what should be accomplished, not exact commands
 - ✅ **Context-aware**: Instructions adapt based on analyzed project state
-- ✅ **Self-documenting**: Serve as both automation and documentation
-- ✅ **LLM-agnostic**: Work with any capable LLM agent
+- ✅ **Verifiable**: Carry a checksum and optional signature, checked before execution
+- ✅ **Versioned**: Semantically versioned and pinnable
+- ✅ **Portable**: Work with any capable LLM agent, on any tool
 - ✅ **Self-improving**: Can be enhanced based on execution feedback
 
-**Dossiers are NOT**:
-- ❌ **Scripts**: Not executable code with fixed logic
-- ❌ **Tutorials**: Not step-by-step human guides
-- ❌ **Configuration**: Not data files or settings
-- ❌ **LLM-specific**: Not tied to one AI implementation
+**Dossiers add, on top of a plain skill**:
+- 🔏 **Trust**: integrity + authenticity verification (a plain skill has none)
+- 📌 **Versioning**: explicit semantic versions instead of informal edits
+- 🌐 **Distribution**: a registry that makes skills discoverable and installable
+- 🔁 **Portability**: one file that runs across LLM tools, not locked to one
 
 ### 2.3 Use Cases
 

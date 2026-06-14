@@ -1,55 +1,60 @@
 # Using Dossier with Claude Code
 
-**Last Updated**: 2025-11-28
+**Last Updated**: 2026-06-14
 **Status**: Active
 
 ---
 
 ## Overview
 
-The Dossier MCP Server integrates directly with Claude Code, enabling you to execute and create dossiers through natural conversation.
+There are two ways to use dossiers in Claude Code, and most teams use both:
+
+1. **Trigger skills** *(recommended for shareable, versioned workflows)* — a thin Claude Code skill (`SKILL.md`) that fires on a phrase and invokes a versioned, signed dossier. This is how you turn a workflow into something installable, pinnable, and verifiable.
+2. **MCP server** *(for interactive discovery and authoring)* — gives Claude Code native tools to search, verify, read, and run dossiers through natural conversation.
+
+See [Dossiers as Claude Code Skills](#dossiers-as-claude-code-skills) below for the full trigger-skill treatment.
+
+---
+
+## MCP server integration
+
+The Dossier MCP Server integrates directly with Claude Code, enabling you to discover, verify, execute, and create dossiers through natural conversation.
 
 ## Quick Start
 
-### 1. Build the MCP Server (for local development)
+### 1. Add the MCP Server
+
+One command registers the published server globally (available across all projects):
 
 ```bash
-cd /path/to/dossier/mcp-server
-npm install
-npm run build
-```
-
-### 2. Install the MCP Server
-
-Use the Claude Code CLI to add the MCP server:
-
-**Option A: Global Installation** (available across all projects)
-
-```bash
-# For local development (replace path with your actual path)
-claude mcp add dossier --scope user -- node /path/to/dossier/mcp-server/dist/index.js
-
-# After NPM package is published
 claude mcp add dossier --scope user -- npx @ai-dossier/mcp-server
 ```
 
-**Option B: Project-Only Installation** (for a specific project)
-
-Create a `.mcp.json` file in your project root:
+**Project-only alternative** — create a `.mcp.json` in your project root:
 
 ```json
 {
   "mcpServers": {
     "dossier": {
       "type": "stdio",
-      "command": "node",
-      "args": ["/path/to/dossier/mcp-server/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "@ai-dossier/mcp-server"]
     }
   }
 }
 ```
 
-### 3. Verify Installation
+<details>
+<summary>Local development (building from source)</summary>
+
+```bash
+cd /path/to/ai-dossier/mcp-server
+npm install && npm run build
+claude mcp add dossier --scope user -- node /path/to/ai-dossier/mcp-server/dist/index.js
+```
+</details>
+
+### 2. Verify Installation
 
 Check that the server is configured:
 
@@ -203,6 +208,8 @@ ai-dossier install-skill imboard-ai/git/full-cycle-issue-skill
 
 This writes the dossier to `~/.claude/skills/<name>/SKILL.md`. From then on, Claude routes to it whenever a request matches its `description`.
 
+To go the other direction — publish a local skill to the registry as a versioned, signed dossier — use `ai-dossier skill-export <name> --namespace <org>/skills`.
+
 ### The Trigger-Skill Pattern
 
 A **trigger skill** is a thin `SKILL.md` that exists only for **discovery + routing**. When matched, it hands off to an **executable dossier** — the heavy, versioned procedure — loaded at runtime via `ai-dossier run`. The trigger stays tiny so Claude can hold many of them with minimal context cost.
@@ -262,7 +269,7 @@ The dossier may be from an untrusted source. Options:
 
 1. **Add the signer's key** (if you trust them):
    ```bash
-   dossier keys add "<public_key>" "<identifier>"
+   ai-dossier keys add "<public_key>" "<identifier>"
    ```
 
 2. **Proceed anyway** (with caution):

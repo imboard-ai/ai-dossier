@@ -1,6 +1,6 @@
 # Dossier Documentation
 
-Welcome to the Dossier project documentation. Dossier is an automation standard for AI agents that combines executable instructions with cryptographic verification.
+Welcome to the Dossier project documentation. A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. Think npm or Docker Hub, but for AI skills: signed, versioned, shareable.
 
 ## Quick Navigation
 
@@ -32,16 +32,18 @@ Project roadmaps, planning documents, and development notes.
 
 ## What is Dossier?
 
-Dossier is a lightweight, open automation standard that combines:
-- **Markdown-based instructions** - Human and AI readable
-- **Metadata with frontmatter** - Structured information about the automation
-- **Cryptographic verification** - SHA256 checksums and optional signatures
-- **Security-first design** - Verify before execution
+A dossier is a skill that adds what a plain skill (like a Claude Code `SKILL.md`) lacks:
+- **Trust** - SHA256 checksums + cryptographic signatures, verified before execution
+- **Versioning** - semantic versions you can pin
+- **Distribution** - a registry that makes skills discoverable and installable
+- **Portability** - human-readable Markdown that runs on any LLM tool
+
+A **trigger skill** bridges the two: a thin `SKILL.md` that invokes a versioned, signed dossier (`ai-dossier run <registry-path>`).
 
 ## Key Components
 
 - **Protocol** - The dossier file format and verification standard
-- **CLI** - Command-line tool for verifying dossiers
+- **CLI** - Author, verify, publish, and run dossiers; the skill bridge (`install-skill` / `skill-export`)
 - **MCP Server** - Model Context Protocol integration for AI agents
 - **Core Library** - Shared verification and parsing logic
 

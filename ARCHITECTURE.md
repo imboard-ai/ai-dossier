@@ -4,10 +4,11 @@ This document provides a high-level overview of the Dossier project architecture
 
 ## Quick Overview
 
-Dossier is a lightweight automation standard built on three principles:
-1. **Human-readable**: Markdown files that both humans and AI can understand
-2. **Cryptographically verifiable**: SHA256 checksums + optional signatures
-3. **Security-first**: Verify before execution
+A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. Dossier adds four things on top of a plain skill:
+1. **Trust**: SHA256 checksums + cryptographic signatures, verified before execution
+2. **Versioning**: semantic versions you can pin
+3. **Distribution**: a registry that makes skills discoverable and installable
+4. **Portability**: human-readable Markdown that runs on any LLM tool
 
 ## System Components
 
@@ -15,9 +16,10 @@ Dossier is a lightweight automation standard built on three principles:
 graph TB
     subgraph Ecosystem["Dossier Ecosystem"]
         Core["@ai-dossier/core\nVerification library"]
-        CLI["@ai-dossier/cli\nCommand-line tool"]
+        CLI["@ai-dossier/cli\nCommand-line tool\n+ skill bridge"]
         MCP["@ai-dossier/mcp-server\nAI agent support"]
         Registry["@ai-dossier/registry\nRegistry API"]
+        Pool["@ai-dossier/worktree-pool\nPre-warmed worktrees"]
     end
 
     Core --> CLI
@@ -28,6 +30,7 @@ graph TB
     style CLI fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
     style MCP fill:#fff3e0,stroke:#ef6c00,color:#e65100
     style Registry fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
+    style Pool fill:#ede7f6,stroke:#4527a0,color:#311b92
 ```
 
 ### Core Library (`@ai-dossier/core`)
@@ -37,10 +40,11 @@ Shared verification and parsing logic used by all tools. Handles:
 - Signature verification (Minisign, AWS KMS)
 
 ### CLI Tool (`@ai-dossier/cli`)
-Command-line verification tool for end users:
+Command-line tool for end users — verify, sign, publish, and run dossiers:
 ```bash
 ai-dossier verify <file-or-url>
 ```
+It is also the **skill bridge**: `ai-dossier install-skill` turns a registry dossier into a Claude Code skill, and `ai-dossier skill-export` publishes a local skill back to the registry as a versioned, signed dossier.
 
 ### MCP Server (`@ai-dossier/mcp-server`)
 Model Context Protocol integration for AI agents like Claude Code.
@@ -128,7 +132,8 @@ See [security/ARCHITECTURE.md](security/ARCHITECTURE.md) for details.
 ```
 dossier/
 ├── packages/
-│   └── core/              # @ai-dossier/core
+│   ├── core/              # @ai-dossier/core
+│   └── worktree-pool/     # @ai-dossier/worktree-pool (pre-warmed git worktrees)
 ├── cli/                   # @ai-dossier/cli
 ├── mcp-server/           # @ai-dossier/mcp-server
 ├── registry/             # @ai-dossier/registry (Vercel serverless API)

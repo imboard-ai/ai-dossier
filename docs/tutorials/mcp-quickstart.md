@@ -2,6 +2,8 @@
 
 Add dossier support to Claude Code and start using dossiers immediately.
 
+> If you've used Claude Code skills, dossiers will feel familiar — they're skills you can verify, version, and pull from a registry. This adds that to Claude Code in one command.
+
 ## Prerequisites
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and working

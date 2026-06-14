@@ -8,18 +8,10 @@ Get started with dossiers in your personal projects with minimal setup.
 ### Steps
 
 1. **Install MCP integration (Claude Code) or use the CLI**
-   - **Option A (MCP)**: Add to `~/.claude/settings.local.json`:
-     ```json
-     {
-       "mcpServers": {
-         "dossier": {
-           "command": "node",
-           "args": ["/path/to/dossier/mcp-server/dist/index.js"]
-         }
-       }
-     }
+   - **Option A (MCP)**: One command registers the server globally:
+     ```bash
+     claude mcp add dossier --scope user -- npx @ai-dossier/mcp-server
      ```
-     (Replace `/path/to/dossier` with your actual cloned repo path)
    - **Option B (CLI)**: Install and use `npx @ai-dossier/cli verify <dossier-path>` or `ai-dossier verify <dossier-path>` directly
 
 2. **Try the Hello Dossier example**
@@ -35,6 +27,13 @@ Get started with dossiers in your personal projects with minimal setup.
 4. **Save and reuse**
    - Save your dossier as `my-task.ds.md` in your project
    - Reference it in future work: "Execute my-task.ds.md"
+
+5. **Turn it into a trigger skill** *(optional)*
+   - Publish it as a versioned, signed skill so it fires on a phrase instead of a filename:
+     ```bash
+     ai-dossier skill-export my-task --namespace your-name/skills
+     ```
+   - Reinstall it (or share it) with `ai-dossier install-skill your-name/skills/my-task` — now it triggers in Claude Code, signed and version-pinned.
 
 ### Example Use Cases
 - **Publishing workflow**: Build → test → version → publish → tag
@@ -80,7 +79,14 @@ Add dossiers to your open-source project to help contributors and maintainers.
          npx @ai-dossier/cli verify dossiers/readme-reality-check.ds.md
      ```
 
-5. **Document dossier usage in CONTRIBUTING.md**
+5. **Distribute them as installable skills**
+   - Publish maintainer workflows to a registry so contributors install them instead of copy-pasting `.ds.md` paths:
+     ```bash
+     ai-dossier skill-export onboarding --namespace your-org/skills
+     ```
+   - Contributors then run `ai-dossier install-skill your-org/skills/onboarding` and trigger it by phrase — signed and version-pinned, so everyone runs the same vetted version.
+
+6. **Document dossier usage in CONTRIBUTING.md**
    - Explain that contributors can use dossiers for complex maintainer tasks
    - Encourage contributors to propose new dossiers via PR
 
@@ -138,8 +144,8 @@ Create a governed, validated workflow system for your platform operations.
    {
      "mcpServers": {
        "dossier": {
-         "command": "node",
-         "args": ["/shared/path/to/dossier/mcp-server/dist/index.js"],
+         "command": "npx",
+         "args": ["-y", "@ai-dossier/mcp-server"],
          "env": {
            "DOSSIER_REGISTRY": "https://your-registry.example.com/dossiers"
          }
@@ -147,7 +153,7 @@ Create a governed, validated workflow system for your platform operations.
      }
    }
    ```
-   (Set up a shared location or clone the repo for each team member)
+   (Point `DOSSIER_REGISTRY` at your internal registry; team-shared settings can live in a project `.dossierrc.json`)
 
 2. **Test with the team** using a safe dossier first
 
@@ -372,7 +378,7 @@ Track these to measure dossier adoption success:
 
 ## Getting Help
 
-- Read the [Quick Start Guide](../getting-started/installation.md) for step-by-step guidance
+- Read the [Quick Start Guide](../getting-started/quick-start.md) for step-by-step guidance
 - Check [examples/](../../examples/) for more dossier patterns
 - Review [FAQ.md](../explanation/faq.md) for common questions
 - See [SPECIFICATION.md](../reference/specification.md) for formal dossier structure
