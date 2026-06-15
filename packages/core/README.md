@@ -4,7 +4,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/core)](https://www.npmjs.com/package/@ai-dossier/core)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
-Core parsing, verification, and linting logic for the [Dossier](https://github.com/imboard-ai/ai-dossier) automation standard.
+Core parsing, verification, signing, and linting logic for [Dossier](https://github.com/imboard-ai/ai-dossier) — portable, signed, versioned skills for any LLM tool.
 
 ## Installation
 
