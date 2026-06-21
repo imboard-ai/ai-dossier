@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/mcp-server",
-  "version": "1.3.5",
+  "version": "1.3.6",
   "description": "MCP server that lets any LLM discover, verify, and run dossiers — portable, signed skills — via the Model Context Protocol.",
   "main": "dist/index.js",
   "bin": {
