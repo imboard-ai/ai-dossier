@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { sha256Hex } from '@ai-dossier/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerPullCommand } from '../../commands/pull';
 import * as multiRegistry from '../../multi-registry';
@@ -141,6 +142,51 @@ describe('pull command', () => {
 
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('downloaded'));
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('not found'));
+  });
+
+  it('should accept a digest carrying the `sha256:` algorithm prefix', async () => {
+    // The registry sends `X-Dossier-Digest: sha256:<hex>`, while sha256Hex
+    // returns the bare hex. A valid download must not be rejected purely over
+    // the prefix label (regression for the "checksum mismatch after download" bug).
+    const content = '# Dossier body';
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      result: { version: '1.0.0', _registry: 'public' },
+      errors: [],
+    } as any);
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      result: { content, digest: `sha256:${sha256Hex(content)}`, _registry: 'public' },
+      errors: [],
+    });
+    mockedFs.existsSync.mockReturnValue(false);
+
+    const program = createTestProgram();
+    registerPullCommand(program);
+
+    await program.parseAsync(['node', 'dossier', 'pull', 'org/my-dossier']);
+
+    expect(console.error).not.toHaveBeenCalledWith(expect.stringContaining('checksum mismatch'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('downloaded'));
+  });
+
+  it('should still reject a genuinely mismatched digest', async () => {
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      result: { version: '1.0.0', _registry: 'public' },
+      errors: [],
+    } as any);
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+      result: { content: '# Dossier body', digest: 'sha256:deadbeef', _registry: 'public' },
+      errors: [],
+    });
+    mockedFs.existsSync.mockReturnValue(false);
+
+    const program = createTestProgram();
+    registerPullCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'pull', 'org/my-dossier'])
+    ).rejects.toThrow();
+
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('checksum mismatch'));
   });
 
   it('should pull specific version', async () => {

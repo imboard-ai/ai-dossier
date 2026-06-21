@@ -61,7 +61,12 @@ export function registerPullCommand(program: Command): void {
 
           if (digest) {
             const actual = sha256Hex(content);
-            if (actual !== digest) {
+            // The registry sends the digest with an algorithm prefix (e.g.
+            // `sha256:<hex>`); sha256Hex returns the bare hex. Strip the prefix
+            // and compare case-insensitively so a valid download is not rejected
+            // purely because of the `sha256:` label.
+            const expected = digest.replace(/^sha256:/i, '');
+            if (actual.toLowerCase() !== expected.toLowerCase()) {
               console.error(`❌ ${dossierName}@${version}: checksum mismatch after download`);
               failures++;
               continue;
