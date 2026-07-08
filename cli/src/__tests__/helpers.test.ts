@@ -242,6 +242,80 @@ describe('buildLlmCommand', () => {
     expect((result as NonNullable<typeof result>).stdin).toBe('file content');
   });
 
+  it('should forward passthrough flags in headless mode', () => {
+    mockedFs.readFileSync.mockReturnValue('file content');
+    const result = buildLlmCommand('claude-code', '/path/to/dossier.ds.md', true, {
+      model: 'sonnet',
+      budget: 2,
+      permissionMode: 'bypassPermissions',
+      allowedTools: 'Bash Read Write',
+    });
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.cmd).toBe('claude');
+    expect(r.args).toEqual([
+      '-p',
+      '--model',
+      'sonnet',
+      '--max-budget-usd',
+      '2',
+      '--permission-mode',
+      'bypassPermissions',
+      '--allowedTools',
+      'Bash,Read,Write',
+    ]);
+    expect(r.stdin).toBe('file content');
+    expect(r.description).toContain('--model');
+    expect(r.description).toContain('--max-budget-usd');
+    expect(r.description).toContain('--allowedTools');
+  });
+
+  it('should normalize comma- and space-separated allowed tools (dedupe, trim)', () => {
+    mockedFs.readFileSync.mockReturnValue('file content');
+    const result = buildLlmCommand('claude-code', '/path/to/dossier.ds.md', true, {
+      allowedTools: 'Bash  Read, Write ,Bash,',
+    });
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.args).toEqual(['-p', '--allowedTools', 'Bash,Read,Write']);
+  });
+
+  it('should forward --model in interactive (non-headless) mode', () => {
+    mockedFs.readFileSync.mockReturnValue('file content');
+    const result = buildLlmCommand('claude-code', '/path/to/dossier.ds.md', false, {
+      model: 'sonnet',
+    });
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.args).toEqual(['--model', 'sonnet', '/path/to/dossier.ds.md']);
+    expect(r.stdin).toBeUndefined();
+    expect(r.description).toBe('claude --model sonnet "/path/to/dossier.ds.md"');
+  });
+
+  it('should ignore headless-only flags in interactive mode (model still forwarded)', () => {
+    mockedFs.readFileSync.mockReturnValue('file content');
+    const result = buildLlmCommand('claude-code', '/path/to/dossier.ds.md', false, {
+      model: 'sonnet',
+      budget: 2,
+      permissionMode: 'bypassPermissions',
+      allowedTools: 'Bash Read',
+    });
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.args).toEqual(['--model', 'sonnet', '/path/to/dossier.ds.md']);
+    expect(r.stdin).toBeUndefined();
+  });
+
+  it('should handle budget of 0 in headless mode', () => {
+    mockedFs.readFileSync.mockReturnValue('file content');
+    const result = buildLlmCommand('claude-code', '/path/to/dossier.ds.md', true, {
+      budget: 0,
+    });
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.args).toEqual(['-p', '--max-budget-usd', '0']);
+  });
+
   it('should return null for unknown LLM', () => {
     expect(buildLlmCommand('unknown-llm', '/file.ds.md')).toBeNull();
   });
