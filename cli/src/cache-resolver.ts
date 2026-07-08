@@ -77,7 +77,7 @@ function readResolution(dossierName: string): ResolutionRecord | null {
   }
 }
 
-function writeResolution(dossierName: string, record: ResolutionRecord): void {
+export function writeResolution(dossierName: string, record: ResolutionRecord): void {
   const file = resolutionFilePath(dossierName);
   const targetDir = path.dirname(file);
   // Node's mkdir({recursive:true,mode}) only applies `mode` to the leaf directory it creates.
