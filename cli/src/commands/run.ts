@@ -32,6 +32,20 @@ export function registerRunCommand(program: Command): void {
     .argument('<file>', 'Dossier file, URL, or registry name to run')
     .option('--llm <name>', 'LLM to use (claude-code, auto)')
     .option('--headless', 'Run in headless mode (non-interactive, for CI/CD)')
+    .option('--model <name>', 'Model alias/name (forwarded to claude --model)')
+    .option(
+      '--budget <usd>',
+      'Max USD budget (headless only; forwarded to claude --max-budget-usd)',
+      parseFloat
+    )
+    .option(
+      '--permission-mode <mode>',
+      'Permission mode (headless only; forwarded to claude --permission-mode)'
+    )
+    .option(
+      '--allowed-tools <list>',
+      'Comma- or space-separated allowed tools (headless only; forwarded to claude --allowedTools)'
+    )
     .option('--dry-run', 'Show plan without executing')
     .option('--force', 'Skip risk warnings')
     .option('--no-prompt', "Don't ask for confirmation")
@@ -49,6 +63,10 @@ export function registerRunCommand(program: Command): void {
         options: {
           llm?: string;
           headless?: boolean;
+          model?: string;
+          budget?: number;
+          permissionMode?: string;
+          allowedTools?: string;
           dryRun?: boolean;
           force?: boolean;
           noPrompt?: boolean;
@@ -323,6 +341,15 @@ export function registerRunCommand(program: Command): void {
         console.log('   Status:      VERIFIED');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 
+        if (
+          !options.headless &&
+          (options.budget != null || options.permissionMode || options.allowedTools)
+        ) {
+          process.stderr.write(
+            'Warning: --budget, --permission-mode, and --allowed-tools require --headless (claude -p) and will be ignored in interactive mode.\n'
+          );
+        }
+
         if (options.dryRun) {
           console.log('🧪 DRY RUN MODE - No execution\n');
           console.log('Would execute:');
@@ -330,8 +357,19 @@ export function registerRunCommand(program: Command): void {
           console.log(`   LLM: ${llmOption}`);
 
           const llmToUse = detectLlm(llmOption as string, true);
+          const passthrough = {
+            model: options.model,
+            budget: options.budget,
+            permissionMode: options.permissionMode,
+            allowedTools: options.allowedTools,
+          };
+          const descriptor = llmToUse
+            ? buildLlmCommand(llmToUse, resolvedFile, options.headless, passthrough)
+            : null;
           console.log(
-            `   Command: ${llmToUse ? `claude "${resolvedFile}"` : 'No LLM detected - would show error'}\n`
+            `   Command: ${
+              descriptor ? descriptor.description : 'No LLM detected - would show error'
+            }\n`
           );
           console.log('✅ All verifications passed - ready to execute');
           fs.unlinkSync(secureTmpFile);
@@ -368,7 +406,12 @@ export function registerRunCommand(program: Command): void {
           process.exit(2);
         }
 
-        const descriptor = buildLlmCommand(llmToUse, resolvedFile, options.headless);
+        const descriptor = buildLlmCommand(llmToUse, resolvedFile, options.headless, {
+          model: options.model,
+          budget: options.budget,
+          permissionMode: options.permissionMode,
+          allowedTools: options.allowedTools,
+        });
         if (!descriptor) {
           console.log(`❌ Unknown LLM: ${llmToUse}\n`);
           console.log('Supported: claude-code, auto\n');

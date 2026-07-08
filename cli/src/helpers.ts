@@ -249,6 +249,36 @@ export interface LlmExecDescriptor {
 }
 
 /**
+ * Passthrough options forwarded to the underlying LLM CLI (claude-code).
+ * These map to claude flags; most only apply in headless (`-p`) mode.
+ */
+export interface LlmPassthroughOptions {
+  model?: string;
+  /** USD budget; forwarded as `--max-budget-usd` (headless only). */
+  budget?: number;
+  permissionMode?: string;
+  /** Raw list from the CLI (space- or comma-separated); normalized to commas. */
+  allowedTools?: string;
+}
+
+/**
+ * Normalize a raw allowed-tools list (space- or comma-separated) into the
+ * comma-separated form claude's `--allowedTools` flag expects. Trims empties
+ * and de-dupes while preserving order.
+ */
+function normalizeAllowedTools(raw: string): string | null {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const piece of raw.split(/[\s,]+/)) {
+    const trimmed = piece.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    parts.push(trimmed);
+  }
+  return parts.length > 0 ? parts.join(',') : null;
+}
+
+/**
  * Download a URL to a local temp file (synchronous).
  * Returns the temp file path.
  */
@@ -286,26 +316,50 @@ export function downloadUrlToTempFile(url: string): string {
 export function buildLlmCommand(
   llm: string,
   file: string,
-  headless = false
+  headless = false,
+  passthrough?: LlmPassthroughOptions
 ): LlmExecDescriptor | null {
-  if (llm === 'claude-code') {
-    if (headless) {
-      const content = fs.readFileSync(file, 'utf8');
-      return {
-        cmd: 'claude',
-        args: ['-p'],
-        stdin: content,
-        description: `cat "${file}" | claude -p`,
-      };
-    } else {
-      return {
-        cmd: 'claude',
-        args: [file],
-        description: `claude "${file}"`,
-      };
-    }
-  } else {
+  if (llm !== 'claude-code') {
     return null;
+  }
+
+  if (headless) {
+    const content = fs.readFileSync(file, 'utf8');
+    const args = ['-p'];
+    if (passthrough?.model) {
+      args.push('--model', passthrough.model);
+    }
+    if (passthrough?.budget != null && !Number.isNaN(passthrough.budget)) {
+      args.push('--max-budget-usd', String(passthrough.budget));
+    }
+    if (passthrough?.permissionMode) {
+      args.push('--permission-mode', passthrough.permissionMode);
+    }
+    const tools = passthrough?.allowedTools
+      ? normalizeAllowedTools(passthrough.allowedTools)
+      : null;
+    if (tools) {
+      args.push('--allowedTools', tools);
+    }
+    const extraFlags = args.length > 1 ? ` ${args.slice(1).join(' ')}` : '';
+    return {
+      cmd: 'claude',
+      args,
+      stdin: content,
+      description: `cat "${file}" | claude -p${extraFlags}`,
+    };
+  } else {
+    const args: string[] = [];
+    if (passthrough?.model) {
+      args.push('--model', passthrough.model);
+    }
+    args.push(file);
+    const flagPrefix = args.length > 1 ? `${args.slice(0, -1).join(' ')} ` : '';
+    return {
+      cmd: 'claude',
+      args,
+      description: `claude ${flagPrefix}"${file}"`,
+    };
   }
 }
 
