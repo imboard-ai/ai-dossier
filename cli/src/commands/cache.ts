@@ -2,10 +2,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import { sha256Hex } from '@ai-dossier/core';
 import type { Command } from 'commander';
-import { DEFAULT_RESOLUTION_TTL_SECONDS, listResolutions } from '../cache-resolver';
+import {
+  DEFAULT_RESOLUTION_TTL_SECONDS,
+  highestCachedSemver,
+  listResolutions,
+  writeCachedContent,
+  writeResolution,
+} from '../cache-resolver';
 import { getConfig } from '../config';
-import { safeDossierPath } from '../helpers';
+import { printRegistryErrors, safeDossierPath } from '../helpers';
+import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
 
 function formatAge(ageMs: number): string {
   const seconds = Math.round(ageMs / 1000);
@@ -16,6 +24,48 @@ function formatAge(ageMs: number): string {
   if (hours < 24) return `${hours}h`;
   const days = Math.round(hours / 24);
   return `${days}d`;
+}
+
+interface CachedDossierEntry {
+  name: string;
+  version: string;
+  size: number;
+  cached_at: string;
+  path: string;
+}
+
+/** Walk ~/.dossier/cache and return one entry per cached (name, version). */
+function walkCachedDossiers(cacheDir: string): CachedDossierEntry[] {
+  const entries: CachedDossierEntry[] = [];
+  function walk(dir: string): void {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.name.endsWith('.meta.json')) {
+        try {
+          const meta = JSON.parse(fs.readFileSync(full, 'utf8'));
+          const version = entry.name.replace('.meta.json', '');
+          const contentFile = path.join(dir, `${version}.ds.md`);
+          if (!fs.existsSync(contentFile)) return;
+          const rel = path.relative(cacheDir, dir);
+          const stats = fs.statSync(contentFile);
+          entries.push({
+            name: rel,
+            version,
+            size: stats.size,
+            cached_at: meta.cached_at,
+            path: contentFile,
+          });
+        } catch {
+          // skip invalid entries
+        }
+      }
+    }
+  }
+  walk(cacheDir);
+  return entries;
 }
 
 export function registerCacheCommand(program: Command): void {
@@ -111,42 +161,7 @@ export function registerCacheCommand(program: Command): void {
         process.exit(0);
       }
 
-      const entries: {
-        name: string;
-        version: string;
-        size: number;
-        cached_at: string;
-        path: string;
-      }[] = [];
-      function walk(dir: string): void {
-        if (!fs.existsSync(dir)) return;
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          const full = path.join(dir, entry.name);
-          if (entry.isDirectory()) {
-            walk(full);
-          } else if (entry.name.endsWith('.meta.json')) {
-            try {
-              const meta = JSON.parse(fs.readFileSync(full, 'utf8'));
-              const version = entry.name.replace('.meta.json', '');
-              const contentFile = path.join(dir, `${version}.ds.md`);
-              if (!fs.existsSync(contentFile)) return;
-
-              const rel = path.relative(cacheDir, dir);
-              const stats = fs.statSync(contentFile);
-              entries.push({
-                name: rel,
-                version,
-                size: stats.size,
-                cached_at: meta.cached_at,
-                path: contentFile,
-              });
-            } catch {
-              // skip invalid entries
-            }
-          }
-        }
-      }
-      walk(cacheDir);
+      const entries = walkCachedDossiers(cacheDir);
 
       if (entries.length === 0) {
         if (options.json) {
@@ -191,6 +206,189 @@ export function registerCacheCommand(program: Command): void {
       }
       console.log('');
       process.exit(0);
+    });
+
+  // cache refresh
+  cacheCmd
+    .command('refresh')
+    .description('Re-fetch the latest published version for cached dossiers')
+    .argument('[name...]', 'Specific dossier name(s) to refresh (default: all cached)')
+    .option('--json', 'Output a machine-readable summary')
+    .action(async (names: string[], options: { json?: boolean }) => {
+      const cacheDir = path.join(os.homedir(), '.dossier', 'cache');
+
+      if (!fs.existsSync(cacheDir)) {
+        if (options.json) {
+          console.log(
+            JSON.stringify({ total: 0, refreshed: [], up_to_date: [], failed: [] }, null, 2)
+          );
+        } else {
+          console.log('\nNo cached dossiers to refresh.\n');
+        }
+        return;
+      }
+
+      const entries = walkCachedDossiers(cacheDir);
+
+      // Resolve the target set: explicit names if provided, otherwise every cached name.
+      let targets: string[];
+      if (names.length > 0) {
+        targets = names;
+      } else {
+        targets = [...new Set(entries.map((e) => e.name))].sort();
+        if (targets.length === 0) {
+          if (options.json) {
+            console.log(
+              JSON.stringify({ total: 0, refreshed: [], up_to_date: [], failed: [] }, null, 2)
+            );
+          } else {
+            console.log('\nNo cached dossiers to refresh.\n');
+          }
+          return;
+        }
+      }
+
+      const refreshed: Array<{ name: string; old_version: string; new_version: string }> = [];
+      const upToDate: Array<{ name: string; version: string }> = [];
+      const failed: Array<{ name: string; error: string }> = [];
+
+      for (const name of targets) {
+        // For named refresh, a name that isn't cached is a user error — point at `pull`.
+        if (names.length > 0 && !entries.some((e) => e.name === name)) {
+          const msg = `not cached (use \`dossier pull ${name}\` to fetch it)`;
+          failed.push({ name, error: msg });
+          if (!options.json) {
+            console.error(`❌ ${name}: ${msg}`);
+          }
+          continue;
+        }
+
+        try {
+          const oldVersion = highestCachedSemver(name);
+
+          // Resolve the latest published version directly from the registry.
+          // (Not via resolveCachedVersion — its stale-fallback would mask registry
+          // failures, and refresh must report those as failures.)
+          const { result: meta, errors: metaErrors } = await multiRegistryGetDossier(name);
+          if (!meta || !meta.version) {
+            const msg =
+              metaErrors.length > 0 ? metaErrors.map((e) => e.error).join('; ') : 'not found';
+            failed.push({ name, error: msg });
+            if (!options.json) {
+              console.error(`❌ ${name}: ${msg}`);
+              printRegistryErrors(metaErrors);
+            }
+            continue;
+          }
+
+          const newVersion = meta.version;
+          const registry = meta._registry;
+
+          // Same version already cached — refresh the resolution timestamp and skip the
+          // (byte-identical) content re-download.
+          if (oldVersion && oldVersion === newVersion) {
+            writeResolution(name, {
+              resolved_version: newVersion,
+              resolved_at: new Date().toISOString(),
+              source_registry: registry,
+            });
+            upToDate.push({ name, version: newVersion });
+            if (!options.json) {
+              console.log(`✅ ${name}@${newVersion} (already latest)`);
+            }
+            continue;
+          }
+
+          // Version changed (or content missing) — fetch the new content.
+          const { result, errors: contentErrors } = await multiRegistryGetContent(name, newVersion);
+          if (!result) {
+            const msg =
+              contentErrors.length > 0
+                ? contentErrors.map((e) => e.error).join('; ')
+                : 'content not found';
+            failed.push({ name, error: msg });
+            if (!options.json) {
+              console.error(`❌ ${name}: ${msg}`);
+              printRegistryErrors(contentErrors);
+            }
+            continue;
+          }
+
+          if (result.digest) {
+            const actual = sha256Hex(result.content);
+            // Registry sends the digest with an algorithm prefix (e.g. `sha256:<hex>`);
+            // sha256Hex returns the bare hex. Strip the prefix and compare
+            // case-insensitively so a valid download isn't rejected over the label.
+            const expected = result.digest.replace(/^sha256:/i, '');
+            if (actual.toLowerCase() !== expected.toLowerCase()) {
+              failed.push({ name, error: 'checksum mismatch after refresh' });
+              if (!options.json) {
+                console.error(`❌ ${name}@${newVersion}: checksum mismatch after refresh`);
+              }
+              continue;
+            }
+          }
+
+          try {
+            writeCachedContent(name, newVersion, result.content, registry, {
+              throwOnError: true,
+            });
+          } catch (writeErr: unknown) {
+            const msg = `failed to write cache: ${(writeErr as Error).message}`;
+            failed.push({ name, error: msg });
+            if (!options.json) {
+              console.error(`❌ ${name}@${newVersion}: ${msg}`);
+            }
+            continue;
+          }
+
+          // Content is now cached for the new version — refresh the resolution record.
+          writeResolution(name, {
+            resolved_version: newVersion,
+            resolved_at: new Date().toISOString(),
+            source_registry: registry,
+          });
+
+          refreshed.push({
+            name,
+            old_version: oldVersion ?? '<none>',
+            new_version: newVersion,
+          });
+          if (!options.json) {
+            console.log(`🔄 ${name}: ${oldVersion ?? '<none>'} → ${newVersion}`);
+          }
+        } catch (err: unknown) {
+          const e = err as { statusCode?: number; message: string };
+          const msg = e.statusCode === 404 ? 'not found in registry' : e.message;
+          failed.push({ name, error: msg });
+          if (!options.json) {
+            console.error(`❌ ${name}: ${msg}`);
+          }
+        }
+      }
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            {
+              total: targets.length,
+              refreshed,
+              up_to_date: upToDate,
+              failed,
+            },
+            null,
+            2
+          )
+        );
+      } else {
+        console.log(
+          `\n${refreshed.length} refreshed, ${upToDate.length} up-to-date, ${failed.length} failed.`
+        );
+      }
+
+      if (failed.length === targets.length && targets.length > 0) {
+        process.exit(1);
+      }
     });
 
   // cache clean

@@ -201,6 +201,19 @@ describe('cache-resolver', () => {
 
       expect(highestCachedSemver('org/x')).toBe('1.0.0');
     });
+
+    // Regression for #407 problem 1: `run` must pick the highest cached version,
+    // not the first readdir entry. A naive `versions[0]` would return 3.1.0 here.
+    it('returns the highest semver, not the first readdir entry (#407)', () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readdirSync.mockReturnValue([
+        '3.1.0.meta.json',
+        '3.2.0.meta.json',
+        '3.3.0.meta.json',
+      ] as any);
+
+      expect(highestCachedSemver('org/x')).toBe('3.3.0');
+    });
   });
 
   describe('listResolutions', () => {
