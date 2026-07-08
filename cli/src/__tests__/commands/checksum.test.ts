@@ -11,6 +11,9 @@ const mockedFs = vi.mocked(fs);
 describe('checksum command', () => {
   beforeEach(() => {
     // Mocks are reset by global afterEach (setup.ts)
+    mockedFs.existsSync.mockReset();
+    mockedFs.readFileSync.mockReset();
+    mockedFs.writeFileSync.mockReset();
   });
 
   it('should exit 1 when file not found', async () => {
@@ -113,5 +116,92 @@ describe('checksum command', () => {
 
     expect(mockedFs.writeFileSync).toHaveBeenCalled();
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Checksum added'));
+  });
+
+  it('should report "Checksum updated" when body changed with --update', async () => {
+    const body = '\n\n# Test Dossier\n\nBody content here.\n';
+    const staleHash = crypto.createHash('sha256').update('different body', 'utf8').digest('hex');
+    const frontmatter = {
+      dossier_schema_version: '1.0',
+      title: 'Test Dossier',
+      version: '1.0.0',
+      objective: 'Test objective',
+      risk_level: 'low',
+      status: 'Draft',
+      category: ['testing'],
+      checksum: { algorithm: 'sha256', hash: staleHash },
+    };
+    const content = `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
+
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(content);
+    const program = createTestProgram();
+    registerChecksumCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'checksum', 'test.ds.md', '--update'])
+    ).rejects.toThrow();
+
+    expect(mockedFs.writeFileSync).toHaveBeenCalled();
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Checksum updated'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining(staleHash));
+  });
+
+  it('should report "Body checksum unchanged" + note when only frontmatter changed with --update', async () => {
+    const body = '\n\n# Test Dossier\n\nBody content here.\n';
+    const hash = crypto.createHash('sha256').update(body, 'utf8').digest('hex');
+    const frontmatter = {
+      dossier_schema_version: '1.0',
+      title: 'Test Dossier',
+      version: '1.0.0',
+      objective: 'Test objective',
+      risk_level: 'low',
+      status: 'Draft',
+      category: ['testing'],
+      name: 'Added Name',
+      checksum: { hash },
+    };
+    const content = `---dossier\n${JSON.stringify(frontmatter, null, 4)}\n---\n${body}`;
+
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(content);
+    const program = createTestProgram();
+    registerChecksumCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'checksum', 'test.ds.md', '--update'])
+    ).rejects.toThrow();
+
+    expect(mockedFs.writeFileSync).toHaveBeenCalled();
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Body checksum unchanged'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('frontmatter changed'));
+  });
+
+  it('should report "Checksum unchanged" and skip write when nothing changed with --update', async () => {
+    const body = '\n\n# Test Dossier\n\nBody content here.\n';
+    const hash = crypto.createHash('sha256').update(body, 'utf8').digest('hex');
+    const frontmatter = {
+      dossier_schema_version: '1.0',
+      title: 'Test Dossier',
+      version: '1.0.0',
+      objective: 'Test objective',
+      risk_level: 'low',
+      status: 'Draft',
+      category: ['testing'],
+      checksum: { algorithm: 'sha256', hash },
+    };
+    const content = `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
+
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(content);
+    const program = createTestProgram();
+    registerChecksumCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'checksum', 'test.ds.md', '--update'])
+    ).rejects.toThrow();
+
+    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Checksum unchanged'));
   });
 });
