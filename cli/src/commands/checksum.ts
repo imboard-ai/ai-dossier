@@ -70,19 +70,30 @@ export function registerChecksumCommand(program: Command): void {
         };
 
         const updatedContent = `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
-        fs.writeFileSync(dossierFile, updatedContent, 'utf8');
+        const fileChanged = updatedContent !== content;
+        if (fileChanged) {
+          fs.writeFileSync(dossierFile, updatedContent, 'utf8');
+        }
 
         if (!options.quiet) {
           if (existingHash === calculatedHash) {
-            console.log('✅ Checksum unchanged');
+            if (fileChanged) {
+              console.log('✅ Body checksum unchanged');
+              console.log(`   SHA256: ${calculatedHash}`);
+              console.log("   Note: frontmatter changed — 'git diff' to see.");
+            } else {
+              console.log('✅ Checksum unchanged');
+              console.log(`   SHA256: ${calculatedHash}`);
+            }
           } else if (existingHash) {
             console.log('✅ Checksum updated');
             console.log(`   Old: ${existingHash}`);
             console.log(`   New: ${calculatedHash}`);
+            console.log(`   SHA256: ${calculatedHash}`);
           } else {
             console.log('✅ Checksum added');
+            console.log(`   SHA256: ${calculatedHash}`);
           }
-          console.log(`   SHA256: ${calculatedHash}`);
         } else {
           console.log(calculatedHash);
         }
