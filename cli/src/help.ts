@@ -12,7 +12,7 @@ const CATEGORIES: Array<{ name: string; commands: string[] }> = [
     name: 'Registry',
     commands: ['search', 'list', 'info', 'get', 'pull', 'export', 'publish', 'remove'],
   },
-  { name: 'Skills', commands: ['install-skill', 'skill-export'] },
+  { name: 'Skills', commands: ['install-skill', 'skill-export', 'sync-skills'] },
   { name: 'Security', commands: ['sign', 'checksum', 'keys'] },
   { name: 'Auth & Config', commands: ['login', 'logout', 'whoami', 'config', 'cache', 'doctor'] },
 ];

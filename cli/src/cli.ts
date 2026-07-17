@@ -36,6 +36,7 @@ import { registerRunCommand } from './commands/run';
 import { registerSearchCommand } from './commands/search';
 import { registerSignCommand } from './commands/sign';
 import { registerSkillExportCommand } from './commands/skill-export';
+import { registerSyncSkillsCommand } from './commands/sync-skills';
 import { registerTracesCommand } from './commands/traces';
 import { registerValidateCommand } from './commands/validate';
 import { registerVerifyCommand } from './commands/verify';
@@ -92,6 +93,7 @@ registerRemoveCommand(program);
 // Skills
 registerInstallSkillCommand(program);
 registerSkillExportCommand(program);
+registerSyncSkillsCommand(program);
 
 // Security
 registerSignCommand(program);

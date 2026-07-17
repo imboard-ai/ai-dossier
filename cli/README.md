@@ -266,6 +266,30 @@ ai-dossier install-skill --remove my-skill
 
 Restart Claude Code (or start a new session) to pick up a newly installed skill. At run time the skill calls `ai-dossier run <registry-path>`, which fetches and verifies the dossier on demand — so you don't need to install the dossier separately.
 
+**opencode support (auto-detect)**: When `~/.config/opencode/` exists, `install-skill` also writes a YAML-frontmatter wrapper to `~/.config/opencode/skills/<name>/SKILL.md`. opencode's parser only accepts standard YAML frontmatter (`---`), so dossier skills that use `---dossier` (JSON) frontmatter would otherwise be invisible. The wrapper carries the same `name`, `description`, and body; the signed source in `~/.claude/skills/` is never modified. Delegating skills (body contains `ai-dossier run`) also get an `allowedTools: [Bash(ai-dossier run *)]` line so opencode auto-approves the delegation.
+
+Override with `--for claude|opencode|both`:
+
+```bash
+ai-dossier install-skill org/skills/my-skill --for claude   # skip opencode wrapper
+ai-dossier install-skill org/skills/my-skill --for both     # force opencode even if dir absent
+```
+
+`--remove` cleans both locations. `--list` badges each skill with the tools it's installed in (`[claude, opencode]` or `[claude]`).
+
+### `sync-skills` — regenerate opencode wrappers for existing installs
+
+Use after installing opencode on a machine that already has dossier skills, or after any manual change to `~/.claude/skills/`:
+
+```bash
+ai-dossier sync-skills                # write missing wrappers, prune orphans
+ai-dossier sync-skills --dry-run      # show what would change without writing
+ai-dossier sync-skills --no-prune     # keep wrappers even if the source is gone
+ai-dossier sync-skills --json         # machine-readable output
+```
+
+Idempotent — re-running is safe and reports `unchanged` for wrappers already in sync.
+
 ### `skill-export` — local skill → registry dossier
 
 Publish a locally installed skill to the registry as a versioned, signed dossier so others can `install-skill` it:
