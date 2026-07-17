@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **opencode integration for `install-skill`**: when `~/.config/opencode/` exists, dossier skills now dual-write a YAML-frontmatter wrapper to `~/.config/opencode/skills/<name>/SKILL.md` so [opencode](https://opencode.ai) can discover and trigger them. The signed source in `~/.claude/skills/` is never modified. Wrappers of delegating skills (body invokes `ai-dossier run`) include `allowedTools: [Bash(ai-dossier run *)]` so opencode auto-approves the delegation. Override with `--for claude|opencode|both`.
+- New `ai-dossier sync-skills` command — retroactively generates opencode wrappers for skills already installed in `~/.claude/skills/` and prunes orphaned wrappers. Idempotent. Supports `--dry-run`, `--no-prune`, and `--json`.
+- `install-skill --list` now badges each skill with the tools it's installed in (`[claude, opencode]` or `[claude]`); `install-skill --remove` cleans both locations.
 - TTL-based version resolution for versionless dossier references (`run`, `create`, `install-skill`): stale versionless requests auto-update silently within a configurable window (default 300s). Resolution metadata lives under `~/.dossier/cache/.resolution/<name>.json`.
 - New `--max-age <seconds>` flag on `run`, `create`, and `install-skill` (default 300, `0` = always re-check the registry).
 - `--fresh` flag on `create` (already supported on `run` and `install-skill`) to bypass the resolution cache for one call.
