@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Bump `hono` (4.12.18 → 4.12.30), `js-yaml` (3.14.2 → 3.15.0), and `qs` (2.0.2 → 2.0.4) to close pre-existing advisories flagged by `npm audit --audit-level=high`. Within-semver, no API changes.
+
 ### Added
 - **opencode integration for `install-skill`**: when `~/.config/opencode/` exists, dossier skills now dual-write a YAML-frontmatter wrapper to `~/.config/opencode/skills/<name>/SKILL.md` so [opencode](https://opencode.ai) can discover and trigger them. The signed source in `~/.claude/skills/` is never modified. Wrappers of delegating skills (body invokes `ai-dossier run`) include `allowedTools: [Bash(ai-dossier run *)]` so opencode auto-approves the delegation. Override with `--for claude|opencode|both`.
 - New `ai-dossier sync-skills` command — retroactively generates opencode wrappers for skills already installed in `~/.claude/skills/` and prunes orphaned wrappers. Idempotent. Supports `--dry-run`, `--no-prune`, and `--json`.
