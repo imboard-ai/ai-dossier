@@ -73,7 +73,12 @@
           "monitoring",
           "infrastructure",
           "ci-cd",
-          "documentation"
+          "documentation",
+          "git",
+          "review",
+          "skills",
+          "workflow",
+          "orchestration"
         ]
       },
       "minItems": 1,
@@ -145,12 +150,16 @@
         "enum": [
           "modifies_files",
           "deletes_files",
+          "modifies_directory_structure",
           "modifies_cloud_resources",
           "requires_credentials",
           "network_access",
           "executes_external_code",
           "database_operations",
-          "system_configuration"
+          "system_configuration",
+          "creates_pull_request",
+          "merges_code",
+          "incurs_cost"
         ]
       },
       "uniqueItems": true
