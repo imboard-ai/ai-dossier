@@ -235,7 +235,7 @@
     },
     "signature": {
       "type": "object",
-      "description": "Optional cryptographic signature for authenticity verification (dual-signature system: AWS KMS for official, minisign for community)",
+      "description": "Optional cryptographic signature for authenticity verification (dual-signature system: AWS KMS for official, Ed25519 for community)",
       "required": ["algorithm", "signed_by"],
       "oneOf": [
         {
@@ -261,35 +261,54 @@
               "type": "string",
               "description": "Base64-encoded DER public key from AWS KMS (optional, can be fetched from KMS)"
             },
+            "covers": {
+              "type": "string",
+              "description": "Which bytes the signature covers. 'frontmatter+body' binds the security metadata (risk_level, requires_approval, destructive_operations) to the signature. Absent means the legacy body-only scheme, under which frontmatter is unprotected.",
+              "enum": ["body", "frontmatter+body"],
+              "default": "body"
+            },
             "signed_by": {
               "type": "string",
               "description": "Signer identity",
               "examples": ["Imboard AI Security Team <security@imboard.ai>"]
             },
-            "timestamp": {
+            "signed_at": {
               "type": "string",
               "description": "When the signature was created (ISO 8601 format)",
+              "format": "date-time"
+            },
+            "timestamp": {
+              "type": "string",
+              "description": "Deprecated alias for signed_at (ISO 8601 format)",
               "format": "date-time"
             }
           }
         },
         {
-          "description": "minisign signature (community dossiers)",
+          "description": "Ed25519 signature (community dossiers)",
           "required": ["algorithm", "public_key", "signature", "signed_by"],
           "properties": {
             "algorithm": {
               "type": "string",
               "const": "ed25519",
-              "description": "Ed25519 signature (minisign)"
+              "description": "Ed25519 signature (Node.js crypto)"
             },
             "public_key": {
               "type": "string",
-              "description": "Minisign public key (base64 encoded, starts with 'RWT')",
-              "pattern": "^RWT[A-Za-z0-9+/=]+$"
+              "description": "Ed25519 public key. Canonical form is the raw 32-byte key, base64-encoded — the form 'dossier keys add' prints and the trusted-key list stores. SPKI PEM (emitted by the signer between 2025-11-18 and 0.8.7) and legacy minisign 'RWT...' keys are still accepted on the read path.",
+              "pattern": "^(RWT[A-Za-z0-9+/=]+|[A-Za-z0-9+/]{43}=|-----BEGIN PUBLIC KEY-----[A-Za-z0-9+/=\\s]+-----END PUBLIC KEY-----\\s*)$",
+              "examples": ["m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE="]
             },
             "signature": {
               "type": "string",
-              "description": "Minisign signature data (includes trusted comment)"
+              "description": "Base64-encoded Ed25519 signature over the payload named by 'covers'",
+              "pattern": "^[A-Za-z0-9+/]+=*$"
+            },
+            "covers": {
+              "type": "string",
+              "description": "Which bytes the signature covers. 'frontmatter+body' binds the security metadata (risk_level, requires_approval, destructive_operations) to the signature. Absent means the legacy body-only scheme, under which frontmatter is unprotected.",
+              "enum": ["body", "frontmatter+body"],
+              "default": "body"
             },
             "key_id": {
               "type": "string",
@@ -301,9 +320,14 @@
               "description": "Signer identity",
               "examples": ["Author Name <author@example.com>"]
             },
-            "timestamp": {
+            "signed_at": {
               "type": "string",
               "description": "When the signature was created (ISO 8601 format)",
+              "format": "date-time"
+            },
+            "timestamp": {
+              "type": "string",
+              "description": "Deprecated alias for signed_at (ISO 8601 format)",
               "format": "date-time"
             }
           }

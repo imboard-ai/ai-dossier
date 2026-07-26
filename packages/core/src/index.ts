@@ -94,6 +94,16 @@ export {
   VerifierRegistry,
   VerifyResult,
 } from './signers';
+// Signing payload exports (key normalization + canonical signed payload)
+export type { SignatureCoverage } from './signing-payload';
+export {
+  buildSignedPayload,
+  canonicalizeFrontmatter,
+  normalizePublicKey,
+  publicKeysMatch,
+  signatureCoverage,
+  toSpkiPem,
+} from './signing-payload';
 // Trace config resolver (precedence: env > project > user > defaults)
 export type {
   ConfigLayer as TraceConfigLayer,

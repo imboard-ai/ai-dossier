@@ -70,6 +70,8 @@ export interface DossierFrontmatter {
     key_id?: string;
     signed_by?: string;
     signed_at?: string;
+    /** Which bytes the signature covers. Absent means the legacy body-only scheme. */
+    covers?: 'body' | 'frontmatter+body';
   };
   [key: string]: unknown; // Allow additional fields
 }

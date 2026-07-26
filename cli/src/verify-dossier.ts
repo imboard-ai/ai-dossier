@@ -17,8 +17,11 @@ import type {
 } from '@ai-dossier/core';
 import {
   assessVerificationRisk,
+  buildSignedPayload,
   loadTrustedKeys,
+  normalizePublicKey,
   parseDossierContent,
+  signatureCoverage,
   verifyIntegrity,
   verifySignature,
 } from '@ai-dossier/core';
@@ -134,11 +137,24 @@ export async function checkSignature(
 
   const signature = frontmatter.signature;
   const trustedKeys = loadTrustedKeys();
+
+  // Compare keys in their normalized (raw base64) form: the trusted-key list and
+  // the signature block do not always carry the same encoding.
+  const normalizedKey = signature.public_key ? normalizePublicKey(signature.public_key) : undefined;
   const isTrusted =
     (signature.key_id != null && trustedKeys.has(signature.key_id)) ||
-    (signature.public_key != null && trustedKeys.has(signature.public_key));
+    (signature.public_key != null && trustedKeys.has(signature.public_key)) ||
+    (normalizedKey != null && trustedKeys.has(normalizedKey));
 
-  const result = await verifySignature(body, signature as SignatureResult);
+  // Legacy signatures cover the body alone; v2 covers frontmatter + body.
+  const coverage = signatureCoverage(signature as { covers?: string });
+  const signedPayload = buildSignedPayload(
+    frontmatter as unknown as Record<string, unknown>,
+    body,
+    coverage
+  );
+
+  const result = await verifySignature(signedPayload, signature as SignatureResult);
 
   if (result.valid) {
     let trustedName = '';
@@ -146,6 +162,7 @@ export async function checkSignature(
       trustedName =
         (signature.key_id ? trustedKeys.get(signature.key_id) : undefined) ||
         (signature.public_key ? trustedKeys.get(signature.public_key) : undefined) ||
+        (normalizedKey ? trustedKeys.get(normalizedKey) : undefined) ||
         '';
     }
     return {
