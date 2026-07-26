@@ -36,6 +36,42 @@ function makeValidDossier(overrides: Record<string, unknown> = {}, body?: string
 
 describe('lintDossier', () => {
   describe('schema-valid rule', () => {
+    // The registry corpus uses these; they were rejected until the vocabulary was
+    // widened, which made 24 category and 10 risk_factor usages fail lint.
+    it('accepts the category values the registry actually uses', () => {
+      for (const category of ['git', 'review', 'skills', 'workflow', 'orchestration']) {
+        const result = lintDossier(makeValidDossier({ category: [category] }));
+        const errors = result.diagnostics.filter(
+          (d) => d.ruleId === 'schema-valid' && d.severity === 'error'
+        );
+        expect(errors, `category "${category}" should be valid`).toHaveLength(0);
+      }
+    });
+
+    it('accepts risk factors for PR, merge, layout, and cost consequences', () => {
+      const factors = [
+        'modifies_directory_structure',
+        'creates_pull_request',
+        'merges_code',
+        'incurs_cost',
+      ];
+      const result = lintDossier(makeValidDossier({ risk_factors: factors }));
+      const errors = result.diagnostics.filter(
+        (d) => d.ruleId === 'schema-valid' && d.severity === 'error'
+      );
+      expect(errors).toHaveLength(0);
+    });
+
+    it('still rejects mitigations masquerading as risk factors', () => {
+      const result = lintDossier(
+        makeValidDossier({ risk_factors: ['requires_multiple_safety_checks'] })
+      );
+      const errors = result.diagnostics.filter(
+        (d) => d.ruleId === 'schema-valid' && d.severity === 'error'
+      );
+      expect(errors.length).toBeGreaterThan(0);
+    });
+
     it('should pass for valid frontmatter', () => {
       const content = makeValidDossier();
       const result = lintDossier(content);

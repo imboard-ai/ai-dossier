@@ -175,7 +175,7 @@ Dossier Schema metadata is embedded at the **top of the Markdown file** using JS
 #### `category`
 - **Type**: Array of strings
 - **Description**: Primary categories for organization
-- **Values**: `devops`, `database`, `development`, `data-science`, `security`, `testing`, `deployment`, `maintenance`, `setup`, `migration`, `monitoring`, `infrastructure`, `ci-cd`, `documentation`
+- **Values**: `devops`, `database`, `development`, `data-science`, `security`, `testing`, `deployment`, `maintenance`, `setup`, `migration`, `monitoring`, `infrastructure`, `ci-cd`, `documentation`, `git`, `review`, `skills`, `workflow`, `orchestration`
 - **Example**: `["devops", "deployment"]`
 
 #### `tags`
@@ -262,6 +262,12 @@ Dossier Schema metadata is embedded at the **top of the Markdown file** using JS
 - **Values**: `"low"`, `"medium"`, `"high"`, `"critical"`
 - **Description**: Risk level of execution
 - **Example**: `"high"` for production deployments, `"low"` for documentation generation
+
+#### `risk_factors`
+- **Type**: Array of enum values
+- **Values**: `modifies_files`, `deletes_files`, `modifies_directory_structure`, `modifies_cloud_resources`, `requires_credentials`, `network_access`, `executes_external_code`, `database_operations`, `system_configuration`, `creates_pull_request`, `merges_code`, `incurs_cost`
+- **Description**: What the dossier does that carries risk. This is a controlled vocabulary describing *actions with consequences*, not mitigations — a dossier that performs extra safety checks does not declare that here.
+- **Example**: `["modifies_files", "creates_pull_request", "incurs_cost"]`
 
 #### `estimated_duration`
 - **Type**: Object
