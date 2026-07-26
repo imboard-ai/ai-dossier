@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Ed25519Signer, Ed25519Verifier } from '../signers/ed25519';
 import { VerifierRegistry } from '../signers/registry';
+import { normalizePublicKey } from '../signing-payload';
 
 describe('Ed25519Signer', () => {
   let tempDir: string;
@@ -40,7 +41,10 @@ describe('Ed25519Signer', () => {
 
     expect(result.algorithm).toBe('ed25519');
     expect(result.signature).toBeTruthy();
-    expect(result.public_key).toContain('BEGIN PUBLIC KEY');
+    // Raw 32-byte base64 — the form the trusted-key list stores. Emitting SPKI PEM
+    // here (2025-11-18 to 0.8.7) meant a signature could never match a trusted key.
+    expect(result.public_key).not.toContain('BEGIN PUBLIC KEY');
+    expect(Buffer.from(result.public_key, 'base64')).toHaveLength(32);
     expect(result.signed_at).toBeTruthy();
   });
 
@@ -57,8 +61,9 @@ describe('Ed25519Signer', () => {
   it('should return public key via getPublicKey', async () => {
     const signer = new Ed25519Signer(privateKeyPath);
     const pk = await signer.getPublicKey();
-    expect(pk).toContain('BEGIN PUBLIC KEY');
-    expect(pk).toBe(publicKeyPem);
+    expect(pk).not.toContain('BEGIN PUBLIC KEY');
+    // Same key as the PEM on disk, just the raw form.
+    expect(pk).toBe(normalizePublicKey(publicKeyPem));
   });
 });
 

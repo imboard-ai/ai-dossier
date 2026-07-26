@@ -5,10 +5,13 @@
 export interface SignatureResult {
   algorithm: string;
   signature: string;
+  /** Ed25519 public key, raw 32-byte base64 (canonical) or SPKI PEM (legacy). */
   public_key: string;
   key_id?: string;
   signed_by?: string;
   signed_at: string;
+  /** Which bytes the signature covers. Absent means the legacy body-only scheme. */
+  covers?: 'body' | 'frontmatter+body';
 }
 
 export interface Signer {

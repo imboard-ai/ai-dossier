@@ -83,8 +83,8 @@ The following are explicitly **out of scope**:
 
 Dossier implements multiple security layers:
 
-1. **Integrity Verification** (SHA256 checksums) - Required
-2. **Cryptographic Signatures** (AWS KMS + minisign) - Optional
+1. **Integrity Verification** (SHA256 checksums of the body) - Required
+2. **Cryptographic Signatures** (AWS KMS + Ed25519), covering frontmatter and body - Optional
 3. **Risk Assessment Metadata** - Required
 4. **Automated Verification** (MCP tools) - Optional
 5. **User Approval Flows** - Required for high-risk operations

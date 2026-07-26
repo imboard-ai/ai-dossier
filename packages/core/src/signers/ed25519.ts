@@ -5,12 +5,13 @@
 import type { KeyObject } from 'node:crypto';
 import { createPrivateKey, createPublicKey, sign, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { normalizePublicKey, toSpkiPem } from '../signing-payload';
 import type { SignatureResult, Signer, Verifier, VerifyResult } from './index';
 
 export class Ed25519Signer implements Signer {
   readonly algorithm = 'ed25519';
   private privateKey: KeyObject;
-  private publicKeyPem: string;
+  private publicKeyBase64: string;
 
   constructor(privateKeyPath: string) {
     // Load private key from PEM file
@@ -21,12 +22,15 @@ export class Ed25519Signer implements Signer {
       type: 'pkcs8',
     });
 
-    // Extract public key
+    // Emit raw 32-byte base64 — the form `dossier keys add` prints, the trusted-key
+    // list stores, and the published corpus carries. Signing emitted SPKI PEM between
+    // 2025-11-18 and this change, which could never match a trusted-key entry.
     const publicKey = createPublicKey(this.privateKey);
-    this.publicKeyPem = publicKey.export({
+    const publicKeyPem = publicKey.export({
       type: 'spki',
       format: 'pem',
     }) as string;
+    this.publicKeyBase64 = normalizePublicKey(publicKeyPem);
   }
 
   async sign(content: string): Promise<SignatureResult> {
@@ -36,13 +40,13 @@ export class Ed25519Signer implements Signer {
     return {
       algorithm: this.algorithm,
       signature: signatureBuffer.toString('base64'),
-      public_key: this.publicKeyPem,
+      public_key: this.publicKeyBase64,
       signed_at: new Date().toISOString(),
     };
   }
 
   async getPublicKey(): Promise<string> {
-    return this.publicKeyPem;
+    return this.publicKeyBase64;
   }
 }
 
@@ -56,9 +60,9 @@ export class Ed25519Verifier implements Verifier {
       const signatureBuffer = Buffer.from(signature.signature, 'base64');
       const contentBuffer = Buffer.from(content, 'utf8');
 
-      // Create public key object from PEM
+      // Accept raw base64 or SPKI PEM — both are in circulation.
       const publicKeyObject = createPublicKey({
-        key: signature.public_key,
+        key: toSpkiPem(signature.public_key),
         format: 'pem',
         type: 'spki',
       });

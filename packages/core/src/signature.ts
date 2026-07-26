@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { KMSClient, SigningAlgorithmSpec, VerifyCommand } from '@aws-sdk/client-kms';
 import type { SignatureResult, VerifyResult } from './signers';
 import { getVerifierRegistry } from './signers';
+import { normalizePublicKey, toSpkiPem } from './signing-payload';
 import { sha256Hash } from './utils/crypto';
 import { readFileIfExists } from './utils/fs';
 
@@ -43,6 +44,13 @@ export function loadTrustedKeys(filePath?: string): Map<string, string> {
         const publicKey = parts[0];
         const keyId = parts.slice(1).join(' ');
         keys.set(publicKey, keyId);
+
+        // Index the normalized form too, so a key registered in one encoding
+        // still matches a signature that carries another.
+        const normalized = normalizePublicKey(publicKey);
+        if (normalized !== publicKey) {
+          keys.set(normalized, keyId);
+        }
       }
     }
   } catch (err) {
@@ -67,9 +75,9 @@ export function verifyWithEd25519(
     const signatureBuffer = Buffer.from(signature, 'base64');
     const contentBuffer = Buffer.from(content, 'utf8');
 
-    // Create public key object from PEM
+    // Accept raw base64 or SPKI PEM — both are in circulation.
     const publicKeyObject = createPublicKey({
-      key: publicKey,
+      key: toSpkiPem(publicKey),
       format: 'pem',
       type: 'spki',
     });

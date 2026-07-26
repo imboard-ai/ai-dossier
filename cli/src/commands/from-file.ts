@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { calculateChecksum, Ed25519Signer } from '@ai-dossier/core';
+import { buildSignedPayload, calculateChecksum, Ed25519Signer } from '@ai-dossier/core';
 import type { Command } from 'commander';
 
 export function registerFromFileCommand(program: Command): void {
@@ -119,9 +119,10 @@ export function registerFromFileCommand(program: Command): void {
 
           try {
             const signer = new Ed25519Signer(keyPath);
-            const sigResult = await signer.sign(body);
+            const sigResult = await signer.sign(buildSignedPayload(frontmatter, body));
             frontmatter.signature = {
               ...sigResult,
+              covers: 'frontmatter+body',
               signed_by: options.signedBy || 'unknown',
             };
           } catch (err: unknown) {

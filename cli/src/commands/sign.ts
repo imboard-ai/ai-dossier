@@ -1,7 +1,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { calculateChecksum, Ed25519Signer, KmsSigner, parseDossierContent } from '@ai-dossier/core';
+import {
+  buildSignedPayload,
+  calculateChecksum,
+  Ed25519Signer,
+  KmsSigner,
+  parseDossierContent,
+} from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { OFFICIAL_KMS_KEYS } from '../helpers';
 
@@ -113,9 +119,12 @@ export function registerSignCommand(program: Command): void {
           try {
             const region = options.region || process.env.AWS_REGION || 'us-east-1';
             const signer = new KmsSigner(effectiveKeyId, region);
-            const sigResult = await signer.sign(body);
+            const sigResult = await signer.sign(
+              buildSignedPayload(frontmatter as unknown as Record<string, unknown>, body)
+            );
             frontmatter.signature = {
               ...sigResult,
+              covers: 'frontmatter+body',
               signed_by: options.signedBy || '(not specified)',
             } as typeof frontmatter.signature;
           } catch (err: unknown) {
@@ -160,9 +169,12 @@ export function registerSignCommand(program: Command): void {
 
           try {
             const signer = new Ed25519Signer(keyPath as string);
-            const sigResult = await signer.sign(body);
+            const sigResult = await signer.sign(
+              buildSignedPayload(frontmatter as unknown as Record<string, unknown>, body)
+            );
             frontmatter.signature = {
               ...sigResult,
+              covers: 'frontmatter+body',
               key_id: options.keyId || sigResult.key_id,
               signed_by: options.signedBy || '(not specified)',
             } as typeof frontmatter.signature;

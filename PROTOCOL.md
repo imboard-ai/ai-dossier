@@ -92,7 +92,9 @@ Use `get_journey_status({ journey_id })` at any point to inspect:
 
 ## External Reference Handling
 
-A dossier's checksum covers the body text (URLs are tamper-evident), but the **content at those URLs is NOT covered** by the signature or checksum. This means a signed dossier can reference external resources that bypass the trust chain.
+A dossier's checksum covers the body text, and a `covers: frontmatter+body` signature additionally binds the frontmatter — including `risk_level`, `requires_approval`, and `external_references`. The **content at those URLs is still NOT covered** by either. This means a signed dossier can reference external resources that bypass the trust chain.
+
+> Signatures written before v0.8.7 omit `covers` and protect the body alone; their frontmatter — including the risk metadata the runner gates on — is unauthenticated. Re-sign to bind it.
 
 ### Frontmatter Fields
 
