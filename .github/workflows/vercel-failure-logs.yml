@@ -46,6 +46,7 @@ env:
   AWS_REGION: us-east-1
   ROLE_ARN: arn:aws:iam::942039714848:role/github-dossier-vercel-logs
   SSM_PARAM: /dossier/vercel_token
+  VERCEL_TEAM_SLUG: imboard
 
 jobs:
   report:
@@ -79,6 +80,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           VERCEL_TOKEN: ${{ steps.token.outputs.token }}
+          VERCEL_TEAM_SLUG: ${{ env.VERCEL_TEAM_SLUG }}
         with:
           script: |
             const token = process.env.VERCEL_TOKEN;
@@ -108,11 +110,15 @@ jobs:
             }
             core.info(`resolved deployment reference: ${deploymentId}`);
 
+            // The project belongs to a team, so every call needs the team scope or
+            // the API answers as though the resource does not exist — which is how
+            // an events fetch came back empty rather than erroring.
+            const slug = process.env.VERCEL_TEAM_SLUG;
             const api = async (path) => {
-              const res = await fetch(`https://api.vercel.com${path}`, {
-                headers: { Authorization: `Bearer ${token}` },
-              });
-              if (!res.ok) throw new Error(`${path} → ${res.status} ${await res.text()}`);
+              const url = new URL(`https://api.vercel.com${path}`);
+              if (slug) url.searchParams.set('slug', slug);
+              const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+              if (!res.ok) throw new Error(`${path} → ${res.status} ${(await res.text()).slice(0, 300)}`);
               return res;
             };
 
@@ -122,6 +128,18 @@ jobs:
             // "slightly noisy output" rather than an empty comment.
             const stripAnsi = (t) => t.replace(/\u001b\[[0-9;]*m/g, '');
             const ERROR_RE = /error|failed|cannot find|not found|exit code|fatal/i;
+
+            // Resolve whatever reference we have (hostname or id) to a canonical
+            // dpl_ id; the events endpoint only answers for the latter.
+            try {
+              const meta = await (await api(`/v13/deployments/${deploymentId}`)).json();
+              if (meta?.id) {
+                core.info(`resolved ${deploymentId} → ${meta.id} (state=${meta.readyState ?? '?'})`);
+                deploymentId = meta.id;
+              }
+            } catch (err) {
+              core.warning(`Could not resolve deployment metadata: ${err.message}`);
+            }
 
             let all = [];
             try {
