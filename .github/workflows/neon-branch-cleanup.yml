@@ -119,13 +119,42 @@ jobs:
               return res.status === 204 ? null : res.json();
             };
 
+            // The console surfaces an org id and a project id, and they are easy to
+            // confuse. An org id cannot be used as a project id, so resolve it rather
+            // than failing with an opaque 404.
+            let projectId = project;
+            if (/^org-/i.test(project)) {
+              core.info(`"${project}" looks like an org id; resolving its project(s)…`);
+              try {
+                const owned = (await neon(`/projects?org_id=${encodeURIComponent(project)}`)).projects ?? [];
+                if (owned.length === 1) {
+                  projectId = owned[0].id;
+                  core.info(`resolved org → project: ${owned[0].name} (${projectId})`);
+                } else if (owned.length === 0) {
+                  core.warning(`No projects found for org ${project}. Store the project id in ${process.env.SSM_PROJECT_ID || '/dossier/neon_project_id'}.`);
+                  return;
+                } else {
+                  core.warning(
+                    `Org ${project} has ${owned.length} projects, so which one is ambiguous: ` +
+                    owned.map((p) => `${p.name} (${p.id})`).join(', ') +
+                    '. Store the specific project id instead of the org id.'
+                  );
+                  return;
+                }
+              } catch (err) {
+                core.warning(`Could not resolve org to a project: ${err.message}`);
+                return;
+              }
+            }
+
             let branches;
             try {
-              branches = (await neon(`/projects/${project}/branches`)).branches ?? [];
+              branches = (await neon(`/projects/${projectId}/branches`)).branches ?? [];
             } catch (err) {
               core.warning(`Could not list Neon branches: ${err.message}`);
               return;
             }
+            core.info(`using project ${projectId}`);
             core.info(`project has ${branches.length} branch(es)`);
 
             // Never delete these, whatever the name matching says.
@@ -161,7 +190,7 @@ jobs:
                 continue;
               }
               try {
-                await neon(`/projects/${project}/branches/${b.id}`, 'DELETE');
+                await neon(`/projects/${projectId}/branches/${b.id}`, 'DELETE');
                 core.info(`deleted: ${b.name} (${b.id})`);
               } catch (err) {
                 core.warning(`Failed to delete ${b.name} (${b.id}): ${err.message}`);
