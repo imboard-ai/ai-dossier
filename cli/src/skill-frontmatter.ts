@@ -31,7 +31,7 @@ const AGENT_KEYS = ['name', 'description'];
  * Convert a dossier to `---` YAML frontmatter suitable for agent skill discovery.
  * Returns the input unchanged when it is already YAML-fronted or cannot be parsed.
  */
-export function toSkillFrontmatter(rawContent: string): string {
+export function toSkillFrontmatter(rawContent: string, source?: string): string {
   if (!rawContent.startsWith('---dossier')) {
     return rawContent; // already YAML-fronted (or not a dossier) — leave alone
   }
@@ -43,13 +43,21 @@ export function toSkillFrontmatter(rawContent: string): string {
     return rawContent;
   }
 
-  const fm = parsed.frontmatter as Record<string, unknown>;
+  // Copy before mutating. parseDossierContent can hand back a shared object for
+  // identical input, so writing to it leaks fields into later calls — an unsourced
+  // install picked up the x_source of a previous one.
+  const fm = { ...(parsed.frontmatter as Record<string, unknown>) };
 
   // `description` is what the runtime matches on. Fall back to `objective` so
   // dossiers that never declared one are still discoverable.
   if (fm.description == null && typeof fm.objective === 'string') {
     fm.description = fm.objective;
   }
+
+  // Record the full registry path the skill came from. The directory name is only
+  // the basename, so without this there is no way to tell which of two same-named
+  // dossiers is installed.
+  if (source) fm.x_source = source;
 
   const ordered: Record<string, unknown> = {};
   for (const key of AGENT_KEYS) {

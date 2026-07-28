@@ -1,6 +1,20 @@
 name: sign
+
+# Why this runs on a schedule:
+#   This workflow exercises the KMS signing path end to end. It was dispatch-only,
+#   so when the repo was renamed imboard-ai/dossier -> imboard-ai/ai-dossier the OIDC
+#   trust policy stopped matching and the role could no longer be assumed. Nothing
+#   failed loudly, because nothing ran it. The breakage sat undetected from
+#   2025-11-06 until 2026-07-28 -- roughly nine months.
+#
+#   The weekly run is the detector. It signs a throwaway artifact and costs nothing,
+#   but it turns a silent credential/permission failure into a red check within days
+#   instead of whenever somebody next remembers to sign something by hand.
 on:
   workflow_dispatch: {}
+  schedule:
+    # Mondays 06:00 UTC — early enough in the week that a failure gets seen.
+    - cron: '0 6 * * 1'
 
 permissions:
   id-token: write
