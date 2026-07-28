@@ -1,0 +1,42 @@
+name: Print OIDC Claim
+
+# A diagnostic utility, not part of any pipeline.
+#
+# GitHub's OIDC subject claim varies by trigger in ways that are easy to get wrong,
+# and an IAM trust policy that does not match fails with a bare
+# "Not authorized to perform sts:AssumeRoleWithWebIdentity" that names nothing.
+# This repository has hit that three times:
+#
+#   - sign.yml stopped working for nine months after the repo was renamed, because
+#     the policy still named imboard-ai/dossier
+#   - deployment_status turned out to emit an EMPTY ref (repo:owner/name:ref:),
+#     so no branch pattern could ever match it
+#   - the Neon cleanup role was written for one trigger and tested with another
+#
+# Run this, read the subject, then write the trust policy to match it. Do not
+# reason about what the claim "should" be.
+#
+# The subject is not a secret — it identifies the workflow, not the credential.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  claim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print the OIDC subject for this trigger
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = await core.getIDToken('sts.amazonaws.com');
+            const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+            core.info('--- OIDC claims ---');
+            for (const k of ['sub', 'aud', 'repository', 'repository_owner', 'ref', 'ref_type', 'event_name', 'workflow', 'environment', 'job_workflow_ref']) {
+              if (claims[k] !== undefined) core.info(`${k.padEnd(18)} ${claims[k]}`);
+            }
+            core.notice(`OIDC subject for ${context.eventName}: ${claims.sub}`);
