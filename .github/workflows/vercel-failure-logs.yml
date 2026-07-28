@@ -116,24 +116,45 @@ jobs:
               return res;
             };
 
-            // Events endpoint streams NDJSON; take the error-ish lines.
-            let lines = [];
+            // The events endpoint has returned both a JSON array and NDJSON across
+            // API versions, and event shapes vary (payload.text vs text). Parse
+            // defensively and keep every text line, so a shape change degrades to
+            // "slightly noisy output" rather than an empty comment.
+            const stripAnsi = (t) => t.replace(/\u001b\[[0-9;]*m/g, '');
+            const ERROR_RE = /error|failed|cannot find|not found|exit code|fatal/i;
+
+            let all = [];
             try {
-              const res = await api(`/v3/deployments/${deploymentId}/events?limit=200`);
+              const res = await api(`/v3/deployments/${deploymentId}/events?builds=1&limit=500`);
               const text = await res.text();
-              for (const raw of text.split('\n')) {
-                if (!raw.trim()) continue;
-                let ev;
-                try { ev = JSON.parse(raw); } catch { continue; }
-                const payloadText = ev?.payload?.text ?? ev?.text ?? '';
-                if (!payloadText) continue;
-                const isError = ev.type === 'stderr' || ev.type === 'error' || ev.type === 'fatal'
-                  || /error|failed|cannot find|not found|exit code/i.test(payloadText);
-                if (isError) lines.push(payloadText.replace(/\u001b\[[0-9;]*m/g, ''));
+
+              let events = [];
+              try {
+                const asJson = JSON.parse(text);
+                events = Array.isArray(asJson) ? asJson : (asJson.events ?? [asJson]);
+              } catch {
+                events = text
+                  .split('\n')
+                  .filter((l) => l.trim())
+                  .map((l) => { try { return JSON.parse(l); } catch { return { text: l }; } });
+              }
+
+              core.info(`fetched ${events.length} event(s)`);
+              for (const ev of events) {
+                const t = ev?.payload?.text ?? ev?.text ?? '';
+                if (t) all.push({ type: ev.type ?? '', text: stripAnsi(String(t)).trimEnd() });
               }
             } catch (err) {
               core.warning(`Could not read deployment events: ${err.message}`);
               return;
+            }
+
+            const errors = all.filter(
+              (l) => ['stderr', 'error', 'fatal'].includes(l.type) || ERROR_RE.test(l.text)
+            );
+            let lines = (errors.length ? errors : all).map((l) => l.text);
+            if (errors.length === 0 && all.length > 0) {
+              core.info('no error-classified lines; falling back to the build output tail');
             }
 
             if (lines.length === 0) lines = ['(no error lines captured — open the deployment for full logs)'];
