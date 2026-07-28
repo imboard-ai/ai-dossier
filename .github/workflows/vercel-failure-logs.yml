@@ -10,8 +10,19 @@ name: Surface Vercel Build Failures
 #   This posts the failing build's error lines directly onto the pull request.
 #
 # The token lives in SSM Parameter Store, not a GitHub secret, so it rotates in the
-# same place as everything else. CI reads it through the existing OIDC role
-# (github-dossier-oidc), which sign.yml already assumes — no static AWS credentials.
+# same place as everything else. CI reads it via OIDC — no static AWS credentials.
+#
+# It uses its own role (github-dossier-vercel-logs) rather than the existing
+# github-dossier-oidc, deliberately. On a deployment_status event GitHub emits an
+# EMPTY ref in the OIDC subject:
+#
+#     repo:imboard-ai/ai-dossier:ref:
+#
+# That claim is identical for every deployment_status event in the repo, including
+# deployments from FORK pull requests — there is nothing in it to distinguish them.
+# Trusting it on github-dossier-oidc would expose the official KMS dossier signing
+# key to any fork PR. This role trusts that exact claim (StringEquals, not
+# StringLike) and can do exactly one thing: read /dossier/vercel_token.
 #
 # Setup:
 #   1. Store the token:  chamber write dossier vercel_token "<token>"
@@ -33,7 +44,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  ROLE_ARN: arn:aws:iam::942039714848:role/github-dossier-oidc
+  ROLE_ARN: arn:aws:iam::942039714848:role/github-dossier-vercel-logs
   SSM_PARAM: /dossier/vercel_token
 
 jobs:
@@ -41,18 +52,6 @@ jobs:
     if: github.event.deployment_status.state == 'failure'
     runs-on: ubuntu-latest
     steps:
-      # TEMPORARY: print the OIDC subject claim so the IAM trust policy can be
-      # matched against what GitHub actually sends. The sub is not a secret.
-      - name: Show OIDC subject claim
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const t = await core.getIDToken('sts.amazonaws.com');
-            const payload = JSON.parse(Buffer.from(t.split('.')[1], 'base64').toString());
-            core.info(`OIDC sub = ${payload.sub}`);
-            core.info(`OIDC aud = ${payload.aud}`);
-            core.info(`event    = ${context.eventName}  ref = ${payload.ref ?? '(none)'}`);
-
       - name: Configure AWS creds via OIDC
         id: aws
         continue-on-error: true          # a missing role must not fail the build
