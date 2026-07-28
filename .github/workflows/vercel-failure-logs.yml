@@ -141,6 +141,26 @@ jobs:
               core.warning(`Could not resolve deployment metadata: ${err.message}`);
             }
 
+            // TEMPORARY probe: find which log endpoint actually answers for a failed
+            // build, in one run instead of one deploy per guess.
+            for (const candidate of [
+              `/v3/deployments/${deploymentId}/events`,
+              `/v2/deployments/${deploymentId}/events`,
+              `/v3/deployments/${deploymentId}/events?builds=1`,
+              `/v1/deployments/${deploymentId}/builds`,
+              `/v2/deployments/${deploymentId}/builds`,
+            ]) {
+              try {
+                const url = new URL(`https://api.vercel.com${candidate}`);
+                if (slug) url.searchParams.set('slug', slug);
+                const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+                const body = await r.text();
+                core.info(`PROBE ${candidate} → ${r.status} len=${body.length} :: ${body.slice(0, 200).replace(/\n/g, ' | ')}`);
+              } catch (e) {
+                core.info(`PROBE ${candidate} → threw ${e.message}`);
+              }
+            }
+
             let all = [];
             try {
               const res = await api(`/v3/deployments/${deploymentId}/events?builds=1&limit=500`);
