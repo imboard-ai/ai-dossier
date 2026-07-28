@@ -1,0 +1,109 @@
+name: Surface Vercel Build Failures
+
+# Why this exists:
+#   When a Vercel preview deploy fails, the GitHub check shows only "Deployment has
+#   failed" and a link that requires a Vercel login to read. Anyone without dashboard
+#   access — including agents working on the repo — cannot tell whether the failure is
+#   caused by the PR or is pre-existing, which turns a two-minute question into a
+#   guessing game.
+#
+#   This posts the failing build's error lines directly onto the pull request.
+#
+# Setup: add a repository secret VERCEL_TOKEN (Vercel → Account Settings → Tokens,
+# scoped to the team that owns the project). Without it the job exits quietly, so the
+# workflow is safe to merge before the secret exists.
+
+on:
+  deployment_status:
+
+permissions:
+  pull-requests: write
+  contents: read
+  deployments: read
+
+jobs:
+  report:
+    if: github.event.deployment_status.state == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch build logs and comment on the PR
+        uses: actions/github-script@v7
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        with:
+          script: |
+            const token = process.env.VERCEL_TOKEN;
+            if (!token) {
+              core.warning('VERCEL_TOKEN is not set — skipping. Add the secret to enable build-log reporting.');
+              return;
+            }
+
+            const targetUrl = context.payload.deployment_status.target_url || '';
+            const envUrl = context.payload.deployment_status.environment_url || '';
+            core.info(`target_url=${targetUrl} environment_url=${envUrl}`);
+
+            // The deployment id is the last path segment of the dashboard URL.
+            const idMatch = targetUrl.match(/\/([A-Za-z0-9]{20,})(?:\?|$)/);
+            const deploymentId = idMatch ? idMatch[1] : null;
+            if (!deploymentId) {
+              core.warning(`Could not extract a deployment id from ${targetUrl}`);
+              return;
+            }
+
+            const api = async (path) => {
+              const res = await fetch(`https://api.vercel.com${path}`, {
+                headers: { Authorization: `Bearer ${token}` },
+              });
+              if (!res.ok) throw new Error(`${path} → ${res.status} ${await res.text()}`);
+              return res;
+            };
+
+            // Events endpoint streams NDJSON; take the error-ish lines.
+            let lines = [];
+            try {
+              const res = await api(`/v3/deployments/${deploymentId}/events?limit=200`);
+              const text = await res.text();
+              for (const raw of text.split('\n')) {
+                if (!raw.trim()) continue;
+                let ev;
+                try { ev = JSON.parse(raw); } catch { continue; }
+                const payloadText = ev?.payload?.text ?? ev?.text ?? '';
+                if (!payloadText) continue;
+                const isError = ev.type === 'stderr' || ev.type === 'error' || ev.type === 'fatal'
+                  || /error|failed|cannot find|not found|exit code/i.test(payloadText);
+                if (isError) lines.push(payloadText.replace(/\u001b\[[0-9;]*m/g, ''));
+              }
+            } catch (err) {
+              core.warning(`Could not read deployment events: ${err.message}`);
+              return;
+            }
+
+            if (lines.length === 0) lines = ['(no error lines captured — open the deployment for full logs)'];
+            const tail = lines.slice(-40).join('\n').slice(-6000);
+
+            // Find the PR for this SHA.
+            const sha = context.payload.deployment.sha;
+            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner, repo: context.repo.repo, commit_sha: sha,
+            });
+            const pr = prs.find((p) => p.state === 'open');
+            if (!pr) { core.info('No open PR for this commit; logging only.'); core.info(tail); return; }
+
+            const body = [
+              '### ❌ Vercel preview build failed',
+              '',
+              `Deployment: ${targetUrl}`,
+              '',
+              'Error lines from the build:',
+              '',
+              '```',
+              tail,
+              '```',
+              '',
+              '<sub>Posted automatically so the failure is readable without a Vercel login.</sub>',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: pr.number, body,
+            });
