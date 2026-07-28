@@ -76,7 +76,10 @@ jobs:
           set +e
           KEY=$(aws ssm get-parameter --name "$SSM_API_KEY" --with-decryption \
                   --query 'Parameter.Value' --output text 2>/dev/null)
-          PROJ=$(aws ssm get-parameter --name "$SSM_PROJECT_ID" \
+          # chamber stores every value as a SecureString, so this needs decryption too.
+          # Without it SSM returns the KMS ciphertext, which sails through the empty
+          # check and only fails much later as a confusing 404 from the Neon API.
+          PROJ=$(aws ssm get-parameter --name "$SSM_PROJECT_ID" --with-decryption \
                   --query 'Parameter.Value' --output text 2>/dev/null)
           if [ -z "$KEY" ] || [ "$KEY" = "None" ] || [ -z "$PROJ" ] || [ "$PROJ" = "None" ]; then
             echo "::warning::Could not read Neon credentials from SSM — skipping cleanup."
@@ -144,6 +147,15 @@ jobs:
             // confuse. An org id cannot be used as a project id, so resolve it rather
             // than failing with an opaque 404.
             let projectId = project;
+            // A KMS ciphertext is long, base64-ish and starts with AQIC. Catching it
+            // here gives a message that names the cause, instead of a 404 from Neon.
+            if (/^AQIC/.test(project) || project.length > 120) {
+              core.warning(
+                'NEON_PROJECT_ID looks like a KMS ciphertext rather than a project id — ' +
+                'the SSM read is missing --with-decryption.'
+              );
+              return;
+            }
             if (/^org-/i.test(project)) {
               core.info(`"${project}" looks like an org id; resolving its project(s)…`);
               try {
