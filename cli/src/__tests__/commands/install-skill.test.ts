@@ -158,8 +158,16 @@ describe('install-skill command', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Installed skill'));
   });
 
-  it('should exit 1 when skill already exists without --force', async () => {
+  // Behaviour changed deliberately: the gate is now on IDENTITY, not existence.
+  // Reinstalling the same dossier is the common case and no longer needs --force —
+  // requiring it there taught everyone to pass --force reflexively, which is exactly
+  // what made a genuine collision dangerous.
+  it('exits 1 when a DIFFERENT dossier occupies the skill directory', async () => {
     mockedFs.existsSync.mockReturnValue(true);
+    // An installed skill recording a different registry path.
+    mockedFs.readFileSync.mockReturnValue(
+      `---dossier\n${JSON.stringify({ name: 'my-skill', x_source: 'other-org/my-skill' })}\n---\n# body\n` as never
+    );
 
     const program = createTestProgram();
     registerInstallSkillCommand(program);
@@ -168,7 +176,10 @@ describe('install-skill command', () => {
       program.parseAsync(['node', 'dossier', 'install-skill', 'org/my-skill'])
     ).rejects.toThrow();
 
-    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('already installed'));
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('already installed from a different dossier')
+    );
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('other-org/my-skill'));
   });
 
   it('auto-writes opencode wrapper when ~/.config/opencode exists', async () => {

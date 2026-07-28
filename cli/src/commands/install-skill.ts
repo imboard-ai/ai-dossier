@@ -20,6 +20,7 @@ import {
   writeOpencodeWrapper,
 } from '../opencode-sync';
 import { parseNameVersion } from '../registry-client';
+import { checkSkillCollision, collisionMessage } from '../skill-collision';
 import { toSkillFrontmatter } from '../skill-frontmatter';
 
 /** Valid values for --for. Anything else is rejected up front. */
@@ -144,10 +145,24 @@ export function registerInstallSkillCommand(program: Command): void {
         const skillDir = path.join(skillsDir, skillName);
         const skillFile = path.join(skillDir, 'SKILL.md');
 
-        if (!options.force && fs.existsSync(skillFile)) {
-          console.error(`\n❌ Skill '${skillName}' already installed at ${skillDir}`);
-          console.error('   Use --force to overwrite\n');
-          process.exit(1);
+        // Reinstalling or upgrading the SAME dossier is the common case and should not
+        // need --force; requiring it there taught everyone to pass --force reflexively,
+        // which is precisely what made the dangerous case dangerous. A DIFFERENT dossier
+        // occupying the directory (two registry paths sharing a basename) still stops,
+        // and now says which one it is instead of just "already installed".
+        if (fs.existsSync(skillFile)) {
+          const collision = checkSkillCollision(skillFile, dossierName);
+          if (collision.collides && !options.force) {
+            console.error(
+              collisionMessage(
+                skillName,
+                collision.existingSource as string,
+                dossierName,
+                skillFile
+              )
+            );
+            process.exit(1);
+          }
         }
 
         try {
@@ -200,7 +215,7 @@ export function registerInstallSkillCommand(program: Command): void {
             fs.mkdirSync(skillDir, { recursive: true });
             // Emit YAML frontmatter so the runtime can read `name`/`description`.
             // The signed payload is unchanged — see skill-frontmatter.ts.
-            fs.writeFileSync(skillFile, toSkillFrontmatter(content), 'utf8');
+            fs.writeFileSync(skillFile, toSkillFrontmatter(content, dossierName), 'utf8');
           }
 
           // Dual-write the opencode wrapper when requested. YAML-native sources are
