@@ -206,7 +206,7 @@ jobs:
             if (!pr) { core.info('No open PR for this commit; logging only.'); core.info(tail); return; }
 
             const body = [
-              '### ❌ Vercel preview build failed',
+              '### ❌ Vercel preview deployment failed',
               '',
               `Deployment: ${targetUrl}`,
               '',
