@@ -12,6 +12,15 @@ cd "$(git rev-parse --show-toplevel)/../worktrees/<branch-name>"
 
 **Before any work, verify:** `pwd | grep -q "worktree" || echo "STOP: create a worktree first"`
 
+## Before debugging infrastructure
+
+Read `docs/explanation/infrastructure-lessons.md` first. It records failures that
+already cost significant time here — silent OIDC trust mismatches, SSM ciphertext
+passing as a value, Vercel preview failures that are actually a Neon branch quota,
+stale CLI versions producing wrong signatures. Several present with symptoms far from
+their cause, and at least three were made worse by reasoning about how something
+"should" work instead of printing the actual value.
+
 ## Project Quick Reference
 
 | Directory | Purpose |
