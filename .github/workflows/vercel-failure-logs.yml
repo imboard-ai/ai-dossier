@@ -131,34 +131,28 @@ jobs:
 
             // Resolve whatever reference we have (hostname or id) to a canonical
             // dpl_ id; the events endpoint only answers for the latter.
+            let failureSummary = '';
             try {
               const meta = await (await api(`/v13/deployments/${deploymentId}`)).json();
               if (meta?.id) {
                 core.info(`resolved ${deploymentId} → ${meta.id} (state=${meta.readyState ?? '?'})`);
                 deploymentId = meta.id;
               }
+              // A deployment can fail AFTER a clean build (bad config, function init
+              // crash, routing error). Build events are empty in that case and the
+              // reason only appears here, so surface it either way.
+              const bits = [
+                meta?.readyState && `state: ${meta.readyState}`,
+                meta?.errorCode && `errorCode: ${meta.errorCode}`,
+                meta?.errorMessage && `errorMessage: ${meta.errorMessage}`,
+                meta?.errorStep && `errorStep: ${meta.errorStep}`,
+              ].filter(Boolean);
+              if (bits.length) {
+                failureSummary = bits.join('\n');
+                core.info(`deployment failure summary:\n${failureSummary}`);
+              }
             } catch (err) {
               core.warning(`Could not resolve deployment metadata: ${err.message}`);
-            }
-
-            // TEMPORARY probe: find which log endpoint actually answers for a failed
-            // build, in one run instead of one deploy per guess.
-            for (const candidate of [
-              `/v3/deployments/${deploymentId}/events`,
-              `/v2/deployments/${deploymentId}/events`,
-              `/v3/deployments/${deploymentId}/events?builds=1`,
-              `/v1/deployments/${deploymentId}/builds`,
-              `/v2/deployments/${deploymentId}/builds`,
-            ]) {
-              try {
-                const url = new URL(`https://api.vercel.com${candidate}`);
-                if (slug) url.searchParams.set('slug', slug);
-                const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-                const body = await r.text();
-                core.info(`PROBE ${candidate} → ${r.status} len=${body.length} :: ${body.slice(0, 200).replace(/\n/g, ' | ')}`);
-              } catch (e) {
-                core.info(`PROBE ${candidate} → threw ${e.message}`);
-              }
             }
 
             let all = [];
@@ -195,7 +189,12 @@ jobs:
               core.info('no error-classified lines; falling back to the build output tail');
             }
 
-            if (lines.length === 0) lines = ['(no error lines captured — open the deployment for full logs)'];
+            if (lines.length === 0) {
+              lines = [
+                'No build log events — the build itself did not fail.',
+                'The deployment errored after building, so the reason is in the summary above.',
+              ];
+            }
             const tail = lines.slice(-40).join('\n').slice(-6000);
 
             // Find the PR for this SHA.
@@ -211,7 +210,8 @@ jobs:
               '',
               `Deployment: ${targetUrl}`,
               '',
-              'Error lines from the build:',
+              ...(failureSummary ? ['**Deployment status**', '', '```', failureSummary, '```', ''] : []),
+              'Build output:',
               '',
               '```',
               tail,
