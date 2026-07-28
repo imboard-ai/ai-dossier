@@ -162,6 +162,37 @@ describe('lintDossier', () => {
   });
 
   describe('risk-level-consistency rule', () => {
+    it('warns when a high-consequence factor is rated below high', () => {
+      const content = makeValidDossier({ risk_level: 'medium', risk_factors: ['merges_code'] });
+      const result = lintDossier(content);
+      const w = result.diagnostics.filter((d) => d.ruleId === 'risk-level-consistency');
+      expect(w).toHaveLength(1);
+      expect(w[0].severity).toBe('warning');
+      expect(w[0].message).toContain('merges_code');
+    });
+
+    it('does not warn once the level matches the consequence', () => {
+      const content = makeValidDossier({ risk_level: 'high', risk_factors: ['merges_code'] });
+      const result = lintDossier(content);
+      expect(result.diagnostics.filter((d) => d.ruleId === 'risk-level-consistency')).toHaveLength(
+        0
+      );
+    });
+
+    // Autonomy is a policy choice, not an inconsistency. A high-risk dossier run
+    // deliberately without approval must not be flagged.
+    it('says nothing about requires_approval', () => {
+      const content = makeValidDossier({
+        risk_level: 'high',
+        risk_factors: ['merges_code'],
+        requires_approval: false,
+      });
+      const result = lintDossier(content);
+      expect(result.diagnostics.filter((d) => d.ruleId === 'risk-level-consistency')).toHaveLength(
+        0
+      );
+    });
+
     it('should warn when low risk has destructive operations', () => {
       const content = makeValidDossier({
         risk_level: 'low',

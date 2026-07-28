@@ -20,6 +20,7 @@ import {
   writeOpencodeWrapper,
 } from '../opencode-sync';
 import { parseNameVersion } from '../registry-client';
+import { toSkillFrontmatter } from '../skill-frontmatter';
 
 /** Valid values for --for. Anything else is rejected up front. */
 const VALID_TARGETS = new Set<SyncTarget>(['claude', 'opencode', 'both']);
@@ -197,7 +198,9 @@ export function registerInstallSkillCommand(program: Command): void {
           // future flows (e.g. opencode-only refreshes via sync-skills) can opt out.
           if (targets.writeClaude) {
             fs.mkdirSync(skillDir, { recursive: true });
-            fs.writeFileSync(skillFile, content, 'utf8');
+            // Emit YAML frontmatter so the runtime can read `name`/`description`.
+            // The signed payload is unchanged — see skill-frontmatter.ts.
+            fs.writeFileSync(skillFile, toSkillFrontmatter(content), 'utf8');
           }
 
           // Dual-write the opencode wrapper when requested. YAML-native sources are
