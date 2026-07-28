@@ -41,6 +41,18 @@ jobs:
     if: github.event.deployment_status.state == 'failure'
     runs-on: ubuntu-latest
     steps:
+      # TEMPORARY: print the OIDC subject claim so the IAM trust policy can be
+      # matched against what GitHub actually sends. The sub is not a secret.
+      - name: Show OIDC subject claim
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const t = await core.getIDToken('sts.amazonaws.com');
+            const payload = JSON.parse(Buffer.from(t.split('.')[1], 'base64').toString());
+            core.info(`OIDC sub = ${payload.sub}`);
+            core.info(`OIDC aud = ${payload.aud}`);
+            core.info(`event    = ${context.eventName}  ref = ${payload.ref ?? '(none)'}`);
+
       - name: Configure AWS creds via OIDC
         id: aws
         continue-on-error: true          # a missing role must not fail the build
