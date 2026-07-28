@@ -91,13 +91,22 @@ jobs:
             const envUrl = context.payload.deployment_status.environment_url || '';
             core.info(`target_url=${targetUrl} environment_url=${envUrl}`);
 
-            // The deployment id is the last path segment of the dashboard URL.
-            const idMatch = targetUrl.match(/\/([A-Za-z0-9]{20,})(?:\?|$)/);
-            const deploymentId = idMatch ? idMatch[1] : null;
+            // deployment_status carries the deployment HOSTNAME as target_url
+            // (e.g. dossier-registry-abc123-imboard.vercel.app), not the dashboard
+            // URL. The Vercel API accepts either form as {idOrUrl}, so prefer an
+            // explicit dpl_/dashboard id when present and otherwise pass the host.
+            const source = envUrl || targetUrl;
+            const dashboardId = source.match(/vercel\.com\/[^/]+\/[^/]+\/([A-Za-z0-9]{20,})/);
+            let deploymentId = dashboardId ? dashboardId[1] : null;
             if (!deploymentId) {
-              core.warning(`Could not extract a deployment id from ${targetUrl}`);
-              return;
+              try {
+                deploymentId = new URL(source).host;
+              } catch {
+                core.warning(`Could not derive a deployment reference from ${source}`);
+                return;
+              }
             }
+            core.info(`resolved deployment reference: ${deploymentId}`);
 
             const api = async (path) => {
               const res = await fetch(`https://api.vercel.com${path}`, {
