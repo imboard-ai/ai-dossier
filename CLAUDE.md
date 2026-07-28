@@ -12,6 +12,13 @@ cd "$(git rev-parse --show-toplevel)/../worktrees/<branch-name>"
 
 **Before any work, verify:** `pwd | grep -q "worktree" || echo "STOP: create a worktree first"`
 
+## Known: Vercel preview checks fail
+
+Every PR shows a failing Vercel check. Account-level `Resource provisioning failed`,
+not caused by any branch — production deploys fine, only previews fail. Do not
+investigate or try to fix it in code. `lint` + `test` are the real gates. See
+CONTRIBUTING.md → "Known Infrastructure Issues".
+
 ## Project Quick Reference
 
 | Directory | Purpose |

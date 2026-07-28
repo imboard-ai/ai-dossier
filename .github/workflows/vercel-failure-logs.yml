@@ -151,6 +151,23 @@ jobs:
                 failureSummary = bits.join('\n');
                 core.info(`deployment failure summary:\n${failureSummary}`);
               }
+
+              // KNOWN CONDITION — preview deploys currently fail account-side with
+              // "Resource provisioning failed" while production deploys succeed. It is
+              // not caused by any PR. Commenting it on every pull request is pure noise
+              // and trains people to ignore this bot, so log it and stay quiet.
+              // Delete this block once previews are provisioning again.
+              const knownPreviewFault =
+                /resource provisioning failed/i.test(meta?.errorMessage ?? '') &&
+                (context.payload.deployment?.environment ?? '').toLowerCase() !== 'production';
+              if (knownPreviewFault) {
+                core.notice(
+                  'Preview deployment failed with the known account-level "Resource provisioning failed" ' +
+                  'condition. Production deploys are unaffected. Not commenting — see CONTRIBUTING.md ' +
+                  '("Known infrastructure issues").'
+                );
+                return;
+              }
             } catch (err) {
               core.warning(`Could not resolve deployment metadata: ${err.message}`);
             }

@@ -204,6 +204,28 @@ For significant changes to the protocol, specification, or security model, pleas
 - New example dossiers
 - Minor tool improvements
 
+## Known Infrastructure Issues
+
+### Vercel preview deployments fail — expected, not your PR
+
+Every pull request shows a failing **Vercel** check. This is a known account-level
+condition and **nothing in your branch causes it**. Do not spend time bisecting it.
+
+- **Production is unaffected.** Merges to `main` deploy successfully; only PR previews fail.
+- The build itself succeeds (`readyState: READY`). The deployment then fails with
+  `errorCode: BUILD_FAILED`, `errorMessage: Resource provisioning failed` — Vercel's
+  wording for standing up attached resources, not for compiling.
+- Established by a control PR containing a single README comment and no dependency or
+  code changes, which failed identically.
+
+`lint` and `test` are the checks that gate quality. A red Vercel check alongside green
+`lint`/`test` is the current normal state.
+
+The `Surface Vercel Build Failures` workflow deliberately stays silent on this specific
+condition so it does not comment the same message on every PR. It still reports any
+*other* deployment failure. Remove that suppression in
+`.github/workflows/vercel-failure-logs.yml` once previews provision again.
+
 ## Code Review Process
 
 All submissions require review. We use GitHub pull requests for this purpose.
