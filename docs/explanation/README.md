@@ -42,3 +42,4 @@ Dossier takes a skill and adds what makes it safe to share:
 - [Protocol Reference](../reference/protocol.md) - Technical details
 - [Architecture Overview](../architecture/README.md) - System design
 - [Security Documentation](../../security/) - In-depth security analysis
+- [Infrastructure Lessons](infrastructure-lessons.md) — diagnosed failures worth not repeating: OIDC claims, SSM decryption, Neon quotas, publishing pitfalls

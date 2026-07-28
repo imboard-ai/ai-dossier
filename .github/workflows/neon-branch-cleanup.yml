@@ -36,8 +36,12 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: 'Pull request number to clean up'
-        required: true
+        description: 'Pull request number to clean up (leave blank if using head_ref)'
+        required: false
+        type: string
+      head_ref:
+        description: 'Git branch name to clean up directly — for branches that never had a PR, which the close event cannot cover'
+        required: false
         type: string
       dry_run:
         description: 'List what would be deleted without deleting'
@@ -96,6 +100,7 @@ jobs:
           NEON_API_KEY: ${{ steps.creds.outputs.key }}
           NEON_PROJECT_ID: ${{ steps.creds.outputs.project }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          INPUT_HEAD_REF: ${{ inputs.head_ref }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           # Arming is explicit. workflow_dispatch honours its dry_run input; the
           # automatic pull_request path only deletes once the repository variable
@@ -117,7 +122,9 @@ jobs:
             const prNumber = process.env.PR_NUMBER;
 
             // On workflow_dispatch there is no event payload, so resolve the head ref.
-            let headRef = process.env.PR_HEAD_REF;
+            // head_ref is also accepted directly: a push to a branch with no PR still
+            // provisions a Neon branch, and no close event will ever fire for it.
+            let headRef = process.env.PR_HEAD_REF || process.env.INPUT_HEAD_REF;
             if (!headRef && prNumber) {
               const { data: pr } = await github.rest.pulls.get({
                 owner: context.repo.owner, repo: context.repo.repo,
@@ -125,7 +132,10 @@ jobs:
               });
               headRef = pr.head.ref;
             }
-            if (!headRef) { core.warning('Could not determine the PR head ref.'); return; }
+            if (!headRef) {
+              core.warning('Provide either pr_number or head_ref — neither was resolvable.');
+              return;
+            }
             core.info(`PR #${prNumber}, head ref: ${headRef}${dryRun ? '  [DRY RUN]' : ''}`);
             if (dryRun && context.eventName !== 'workflow_dispatch') {
               core.notice(
