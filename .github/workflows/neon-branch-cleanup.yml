@@ -143,41 +143,40 @@ jobs:
               return res.status === 204 ? null : res.json();
             };
 
-            // The console surfaces an org id and a project id, and they are easy to
-            // confuse. An org id cannot be used as a project id, so resolve it rather
-            // than failing with an opaque 404.
+            // Resolve whatever was stored to a concrete project id. The console shows
+            // an org id, a project name and a project id, they look similar enough to
+            // confuse, and only the id works against /projects/{id}/branches — a wrong
+            // value returns a bare 404 that does not say which of the three it wanted.
+            // Listing first and matching on id, then name, makes all three work.
             let projectId = project;
-            // A KMS ciphertext is long, base64-ish and starts with AQIC. Catching it
-            // here gives a message that names the cause, instead of a 404 from Neon.
-            if (/^AQIC/.test(project) || project.length > 120) {
-              core.warning(
-                'NEON_PROJECT_ID looks like a KMS ciphertext rather than a project id — ' +
-                'the SSM read is missing --with-decryption.'
-              );
-              return;
-            }
-            if (/^org-/i.test(project)) {
-              core.info(`"${project}" looks like an org id; resolving its project(s)…`);
-              try {
-                const owned = (await neon(`/projects?org_id=${encodeURIComponent(project)}`)).projects ?? [];
-                if (owned.length === 1) {
-                  projectId = owned[0].id;
-                  core.info(`resolved org → project: ${owned[0].name} (${projectId})`);
-                } else if (owned.length === 0) {
-                  core.warning(`No projects found for org ${project}. Store the project id in ${process.env.SSM_PROJECT_ID || '/dossier/neon_project_id'}.`);
-                  return;
-                } else {
-                  core.warning(
-                    `Org ${project} has ${owned.length} projects, so which one is ambiguous: ` +
-                    owned.map((p) => `${p.name} (${p.id})`).join(', ') +
-                    '. Store the specific project id instead of the org id.'
-                  );
-                  return;
-                }
-              } catch (err) {
-                core.warning(`Could not resolve org to a project: ${err.message}`);
+            try {
+              const all = (await neon('/projects')).projects ?? [];
+              core.info(`account has ${all.length} project(s): ${all.map((p) => `${p.name} (${p.id})`).join(', ')}`);
+
+              const byId = all.find((p) => p.id === project);
+              const byName = all.filter((p) => p.name === project);
+              const byOrg = /^org-/i.test(project) ? all.filter((p) => p.org_id === project) : [];
+
+              if (byId) {
+                projectId = byId.id;
+              } else if (byName.length === 1) {
+                core.info(`"${project}" is a project NAME; resolved to id ${byName[0].id}`);
+                projectId = byName[0].id;
+              } else if (byOrg.length === 1) {
+                core.info(`"${project}" is an ORG id; resolved to project ${byOrg[0].name} (${byOrg[0].id})`);
+                projectId = byOrg[0].id;
+              } else {
+                const candidates = byName.length ? byName : byOrg;
+                core.warning(
+                  candidates.length > 1
+                    ? `"${project}" matches ${candidates.length} projects: ${candidates.map((p) => `${p.name} (${p.id})`).join(', ')}. Store the specific project id.`
+                    : `"${project}" matched no project by id, name or org. Store the project id from Neon Console -> Settings -> General.`
+                );
                 return;
               }
+            } catch (err) {
+              core.warning(`Could not list Neon projects: ${err.message}`);
+              return;
             }
 
             let branches;
