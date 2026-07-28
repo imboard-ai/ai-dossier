@@ -9,27 +9,65 @@ name: Surface Vercel Build Failures
 #
 #   This posts the failing build's error lines directly onto the pull request.
 #
-# Setup: add a repository secret VERCEL_TOKEN (Vercel → Account Settings → Tokens,
-# scoped to the team that owns the project). Without it the job exits quietly, so the
-# workflow is safe to merge before the secret exists.
+# The token lives in SSM Parameter Store, not a GitHub secret, so it rotates in the
+# same place as everything else. CI reads it through the existing OIDC role
+# (github-dossier-oidc), which sign.yml already assumes — no static AWS credentials.
+#
+# Setup:
+#   1. Store the token:  chamber write dossier vercel_token "<token>"
+#      (equivalently: aws ssm put-parameter --name /dossier/vercel_token \
+#         --type SecureString --value "<token>")
+#   2. Grant the OIDC role ssm:GetParameter on arn:aws:ssm:us-east-1:942039714848:
+#      parameter/dossier/vercel_token, plus kms:Decrypt on the key encrypting it.
+#
+# Until both are done the job logs a warning and exits, so this is safe to merge early.
 
 on:
   deployment_status:
 
 permissions:
+  id-token: write        # required to assume the OIDC role
   pull-requests: write
   contents: read
   deployments: read
+
+env:
+  AWS_REGION: us-east-1
+  ROLE_ARN: arn:aws:iam::942039714848:role/github-dossier-oidc
+  SSM_PARAM: /dossier/vercel_token
 
 jobs:
   report:
     if: github.event.deployment_status.state == 'failure'
     runs-on: ubuntu-latest
     steps:
+      - name: Configure AWS creds via OIDC
+        id: aws
+        continue-on-error: true          # a missing role must not fail the build
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Read Vercel token from SSM
+        id: token
+        if: steps.aws.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set +e
+          VALUE=$(aws ssm get-parameter --name "$SSM_PARAM" --with-decryption \
+                    --query 'Parameter.Value' --output text 2>/dev/null)
+          if [ -z "$VALUE" ] || [ "$VALUE" = "None" ]; then
+            echo "::warning::Could not read $SSM_PARAM — skipping build-log reporting."
+            exit 0
+          fi
+          echo "::add-mask::$VALUE"
+          echo "token=$VALUE" >> "$GITHUB_OUTPUT"
+
       - name: Fetch build logs and comment on the PR
         uses: actions/github-script@v7
         env:
-          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TOKEN: ${{ steps.token.outputs.token }}
         with:
           script: |
             const token = process.env.VERCEL_TOKEN;
