@@ -21,7 +21,11 @@ name: Neon Branch Cleanup
 #        repo:imboard-ai/ai-dossier:pull_request
 #      with ssm:GetParameter on parameter/dossier/neon_*
 #
-#   Until both exist the job logs a warning and exits, so it is safe to merge early.
+#   3. After validating with a dry run, set repository variable
+#      NEON_CLEANUP_ARMED=true to allow deletion on pull_request close.
+#
+#   Until 1 and 2 exist the job logs a warning and exits; until 3 is set every
+#   automatic run is a dry run. Safe to merge before any of them.
 #
 # Fork safety: GitHub does not grant id-token: write to workflows triggered by fork
 # pull requests, so the role assumption simply fails there and nothing is deleted.
@@ -90,7 +94,18 @@ jobs:
           NEON_PROJECT_ID: ${{ steps.creds.outputs.project }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          # Arming is explicit. workflow_dispatch honours its dry_run input; the
+          # automatic pull_request path only deletes once the repository variable
+          # NEON_CLEANUP_ARMED is "true". Without it every automatic run is a dry run.
+          #
+          # This exists because workflow_dispatch only registers from the default
+          # branch, so this workflow cannot be exercised until it is merged — and
+          # merging something that deletes databases before it has ever run once is a
+          # bad trade. Merge, dispatch a dry run, read the log, then arm it.
+          DRY_RUN: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && inputs.dry_run
+                || vars.NEON_CLEANUP_ARMED != 'true' }}
         with:
           script: |
             const key = process.env.NEON_API_KEY;
@@ -109,6 +124,12 @@ jobs:
             }
             if (!headRef) { core.warning('Could not determine the PR head ref.'); return; }
             core.info(`PR #${prNumber}, head ref: ${headRef}${dryRun ? '  [DRY RUN]' : ''}`);
+            if (dryRun && context.eventName !== 'workflow_dispatch') {
+              core.notice(
+                'Dry run: set repository variable NEON_CLEANUP_ARMED=true to enable deletion. ' +
+                'Validate the matching with a workflow_dispatch dry run first.'
+              );
+            }
 
             const neon = async (path, method = 'GET') => {
               const res = await fetch(`https://console.neon.tech/api/v2${path}`, {
