@@ -1,0 +1,219 @@
+name: Neon Branch Cleanup
+
+# Why this exists:
+#   The Neon/Vercel integration creates a database branch per preview deployment but
+#   exposes no lifecycle control we could find, so every pull request leaks a branch
+#   permanently. On the free tier's 10-branch cap that means preview deployments start
+#   failing with "Resource provisioning failed" after roughly ten PRs — production is
+#   unaffected, because it provisions nothing, which is what made the cause hard to see.
+#
+#   This deletes the branch belonging to a pull request when that pull request closes.
+#
+# Safety: this deletes databases, so it is deliberately conservative. It refuses to
+# touch the primary/default branch, refuses a hardcoded protected list, and only
+# deletes branches whose name actually references this PR. Anything it is unsure about
+# is logged and left alone. Run it with workflow_dispatch + dry_run first.
+#
+# Setup:
+#   1. chamber write dossier neon_api_key    "<neon api key>"
+#      chamber write dossier neon_project_id "<neon project id>"
+#   2. An IAM role github-dossier-neon-cleanup trusting the OIDC subject
+#        repo:imboard-ai/ai-dossier:pull_request
+#      with ssm:GetParameter on parameter/dossier/neon_*
+#
+#   3. After validating with a dry run, set repository variable
+#      NEON_CLEANUP_ARMED=true to allow deletion on pull_request close.
+#
+#   Until 1 and 2 exist the job logs a warning and exits; until 3 is set every
+#   automatic run is a dry run. Safe to merge before any of them.
+#
+# Fork safety: GitHub does not grant id-token: write to workflows triggered by fork
+# pull requests, so the role assumption simply fails there and nothing is deleted.
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Pull request number to clean up'
+        required: true
+        type: string
+      dry_run:
+        description: 'List what would be deleted without deleting'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: read
+
+env:
+  AWS_REGION: us-east-1
+  ROLE_ARN: arn:aws:iam::942039714848:role/github-dossier-neon-cleanup
+  SSM_API_KEY: /dossier/neon_api_key
+  SSM_PROJECT_ID: /dossier/neon_project_id
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS creds via OIDC
+        id: aws
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Read Neon credentials from SSM
+        id: creds
+        if: steps.aws.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set +e
+          KEY=$(aws ssm get-parameter --name "$SSM_API_KEY" --with-decryption \
+                  --query 'Parameter.Value' --output text 2>/dev/null)
+          PROJ=$(aws ssm get-parameter --name "$SSM_PROJECT_ID" \
+                  --query 'Parameter.Value' --output text 2>/dev/null)
+          if [ -z "$KEY" ] || [ "$KEY" = "None" ] || [ -z "$PROJ" ] || [ "$PROJ" = "None" ]; then
+            echo "::warning::Could not read Neon credentials from SSM — skipping cleanup."
+            exit 0
+          fi
+          echo "::add-mask::$KEY"
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+          echo "project=$PROJ" >> "$GITHUB_OUTPUT"
+
+      - name: Delete the branch for this pull request
+        if: steps.creds.outputs.key != ''
+        uses: actions/github-script@v7
+        env:
+          NEON_API_KEY: ${{ steps.creds.outputs.key }}
+          NEON_PROJECT_ID: ${{ steps.creds.outputs.project }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          # Arming is explicit. workflow_dispatch honours its dry_run input; the
+          # automatic pull_request path only deletes once the repository variable
+          # NEON_CLEANUP_ARMED is "true". Without it every automatic run is a dry run.
+          #
+          # This exists because workflow_dispatch only registers from the default
+          # branch, so this workflow cannot be exercised until it is merged — and
+          # merging something that deletes databases before it has ever run once is a
+          # bad trade. Merge, dispatch a dry run, read the log, then arm it.
+          DRY_RUN: >-
+            ${{ github.event_name == 'workflow_dispatch'
+                && inputs.dry_run
+                || vars.NEON_CLEANUP_ARMED != 'true' }}
+        with:
+          script: |
+            const key = process.env.NEON_API_KEY;
+            const project = process.env.NEON_PROJECT_ID;
+            const dryRun = process.env.DRY_RUN === 'true';
+            const prNumber = process.env.PR_NUMBER;
+
+            // On workflow_dispatch there is no event payload, so resolve the head ref.
+            let headRef = process.env.PR_HEAD_REF;
+            if (!headRef && prNumber) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner, repo: context.repo.repo,
+                pull_number: Number(prNumber),
+              });
+              headRef = pr.head.ref;
+            }
+            if (!headRef) { core.warning('Could not determine the PR head ref.'); return; }
+            core.info(`PR #${prNumber}, head ref: ${headRef}${dryRun ? '  [DRY RUN]' : ''}`);
+            if (dryRun && context.eventName !== 'workflow_dispatch') {
+              core.notice(
+                'Dry run: set repository variable NEON_CLEANUP_ARMED=true to enable deletion. ' +
+                'Validate the matching with a workflow_dispatch dry run first.'
+              );
+            }
+
+            const neon = async (path, method = 'GET') => {
+              const res = await fetch(`https://console.neon.tech/api/v2${path}`, {
+                method,
+                headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
+              });
+              if (!res.ok) throw new Error(`${method} ${path} → ${res.status} ${(await res.text()).slice(0, 300)}`);
+              return res.status === 204 ? null : res.json();
+            };
+
+            // The console surfaces an org id and a project id, and they are easy to
+            // confuse. An org id cannot be used as a project id, so resolve it rather
+            // than failing with an opaque 404.
+            let projectId = project;
+            if (/^org-/i.test(project)) {
+              core.info(`"${project}" looks like an org id; resolving its project(s)…`);
+              try {
+                const owned = (await neon(`/projects?org_id=${encodeURIComponent(project)}`)).projects ?? [];
+                if (owned.length === 1) {
+                  projectId = owned[0].id;
+                  core.info(`resolved org → project: ${owned[0].name} (${projectId})`);
+                } else if (owned.length === 0) {
+                  core.warning(`No projects found for org ${project}. Store the project id in ${process.env.SSM_PROJECT_ID || '/dossier/neon_project_id'}.`);
+                  return;
+                } else {
+                  core.warning(
+                    `Org ${project} has ${owned.length} projects, so which one is ambiguous: ` +
+                    owned.map((p) => `${p.name} (${p.id})`).join(', ') +
+                    '. Store the specific project id instead of the org id.'
+                  );
+                  return;
+                }
+              } catch (err) {
+                core.warning(`Could not resolve org to a project: ${err.message}`);
+                return;
+              }
+            }
+
+            let branches;
+            try {
+              branches = (await neon(`/projects/${projectId}/branches`)).branches ?? [];
+            } catch (err) {
+              core.warning(`Could not list Neon branches: ${err.message}`);
+              return;
+            }
+            core.info(`using project ${projectId}`);
+            core.info(`project has ${branches.length} branch(es)`);
+
+            // Never delete these, whatever the name matching says.
+            const PROTECTED = new Set(['main', 'master', 'production', 'prod', 'preview-shared']);
+
+            const slug = headRef.replace(/[^a-zA-Z0-9-]/g, '-').toLowerCase();
+            const matches = branches.filter((b) => {
+              if (b.primary || b.default || b.protected) return false;
+              if (PROTECTED.has((b.name || '').toLowerCase())) return false;
+              const n = (b.name || '').toLowerCase();
+              // Only delete when the branch name actually references this PR — either
+              // the head ref itself or the conventional preview/pr-<n> forms.
+              return (
+                n.includes(headRef.toLowerCase()) ||
+                n.includes(slug) ||
+                n === `preview/pr-${prNumber}` ||
+                n === `pr-${prNumber}`
+              );
+            });
+
+            if (matches.length === 0) {
+              core.info('No branch matched this pull request — nothing to do.');
+              const skipped = branches
+                .filter((b) => b.primary || b.default || PROTECTED.has((b.name || '').toLowerCase()))
+                .map((b) => b.name);
+              if (skipped.length) core.info(`protected/primary, never considered: ${skipped.join(', ')}`);
+              return;
+            }
+
+            for (const b of matches) {
+              if (dryRun) {
+                core.info(`[dry run] would delete: ${b.name} (${b.id})`);
+                continue;
+              }
+              try {
+                await neon(`/projects/${projectId}/branches/${b.id}`, 'DELETE');
+                core.info(`deleted: ${b.name} (${b.id})`);
+              } catch (err) {
+                core.warning(`Failed to delete ${b.name} (${b.id}): ${err.message}`);
+              }
+            }
