@@ -384,3 +384,5 @@ This project is licensed under the [GNU Affero General Public License v3.0 (AGPL
 ## References
 
 See [REFERENCES.md](REFERENCES.md) for the full list of academic references and industry research supporting the dossier approach.
+
+<!-- vercel build control probe -->
