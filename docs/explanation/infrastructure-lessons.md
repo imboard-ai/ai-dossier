@@ -138,6 +138,46 @@ must be reclaimed with a manual dispatch.
 
 ---
 
+## Trusted keys: compare key material, never key strings
+
+**Symptom:** every locally signed dossier verifies as "valid but untrusted", however
+many times you re-add the key. `keys add` reports success, `keys list` shows the key.
+
+**Cause:** the same Ed25519 key has three legal spellings — raw 32-byte base64, SPKI
+PEM, and base64 SPKI DER — and the trust check was a string comparison. The signer
+started emitting PEM in 2025-11-18 while `keys generate` printed, and
+`trusted-keys.txt` stored, raw base64. Neither side was wrong; they simply never
+produced equal strings. It went unnoticed for ~8 months because the failure mode is a
+warning, not an error.
+
+**How to check quickly:** print both forms rather than reasoning about them.
+
+```bash
+ai-dossier keys list                                   # canonical form of what is trusted
+grep -A1 'public_key' your-dossier.ds.md               # what the signature carries
+```
+
+If those differ in shape, the key is fine and the encoding is the bug.
+
+**The rule that came out of it:** a trust decision resolves key *material* through one
+parser (`normalizePublicKey` / `findTrustedIdentifier`), never a string equality on
+whatever the file happened to contain. Two corollaries, both of which were live holes:
+
+- The parser must be **strict**, not merely lenient-in-reverse. Node's base64 decoder
+  discards unrecognized characters and stops at padding, so `<valid key><any trailing
+  text>` decoded to that key — a key-substitution primitive. Round-tripping the decode
+  and rejecting mismatches collapses each string onto at most one key.
+- Validate on the **write** path too. `normalizePublicKey` returns uninterpretable
+  input unchanged so exact-match still works when reading; that same leniency in
+  `keys add` would store a typo or a `.pub` file *path* under a ✅, and the only
+  symptom is "not trusted" forever after. `isSupportedPublicKey` exists for this.
+
+**Ergonomic trap worth knowing:** a PEM starts with `-`, so `keys add "$(cat k.pub)"`
+is parsed as an unknown option and the command never runs. Use `keys add -- "$(cat
+k.pub)" "id"`, or copy the base64 command that `ai-dossier verify` prints.
+
+---
+
 ## Publishing dossiers
 
 ### Use a CLI built from current `main`

@@ -271,6 +271,9 @@ The dossier may be from an untrusted source. Options:
    ```bash
    ai-dossier keys add "<public_key>" "<identifier>"
    ```
+   `ai-dossier verify <dossier>` prints this command ready to run, with the key
+   already in the canonical base64 form. If you paste a PEM instead, put `--`
+   first — a PEM starts with `-` and is otherwise read as an option.
 
 2. **Proceed anyway** (with caution):
    - Claude will ask if you want to proceed with an unsigned dossier

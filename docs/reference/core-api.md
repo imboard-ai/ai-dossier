@@ -153,7 +153,7 @@ Verify an Ed25519 signature directly.
 **Parameters:**
 - `content` — The content that was signed
 - `signature` — Base64-encoded signature
-- `publicKey` — PEM-format Ed25519 public key
+- `publicKey` — Ed25519 public key as SPKI PEM, raw 32-byte base64, or base64 SPKI DER. Whatever form is passed, the key is rebuilt from a single parse before verification, so the key material verified against is the same material a trust check matches on.
 
 ### `verifyWithKms(content: string, signature: string, keyId: string, region?: string): Promise<VerifyResult>`
 
@@ -174,10 +174,52 @@ Load trusted public keys from a file.
 **File format:**
 ```
 # Comments start with #
-<public-key-pem> <key-id>
+<public-key> <identifier>
 ```
 
-**Returns:** `Map<publicKey, keyId>`
+One entry per line. `<public-key>` is canonically the raw 32-byte base64 Ed25519 key that
+`ai-dossier keys add` writes; a multi-line SPKI PEM block written by an older CLI is
+rejoined and still honoured, as are legacy minisign `RWT...` keys.
+
+**Returns:** `Map<publicKey, identifier>` — each key is indexed under both the form it was
+written in and its normalized raw base64 form, so an entry recorded in one encoding still
+matches a signature carrying another.
+
+Lines that cannot be read as entries are reported to stderr rather than dropped silently: a
+skipped entry is a key the user believes is trusted and is not, and the only other symptom
+would be `verify` reporting "not trusted" with nothing pointing back at the file.
+
+### `findTrustedIdentifier(trustedKeys: Map<string, string>, signature: { algorithm?: string; key_id?: string; public_key?: string }): string | undefined`
+
+Resolve the identifier a signature is trusted under, or `undefined` when none of its key
+forms appear in the trust list. Every trust decision should go through this, so "is it
+trusted" and "who is it" cannot disagree.
+
+Only key material the verifier actually used is eligible, chosen by `algorithm` rather than
+by which fields happen to be set. `ECDSA-SHA-256` (KMS) verification asks KMS to check the
+signature against `key_id` and never reads `public_key`, so only the ARN can confer trust;
+every other scheme verifies against `public_key`, so only that may. Letting an ignored field
+confer trust would hand it out for free — the trust list is keyed by public key and public
+keys are public, so an Ed25519 dossier could name a trusted signer's key in `key_id` while
+verifying under an attacker's `public_key`.
+
+### Key-format and trust-file helpers
+
+| Export | Purpose |
+|---|---|
+| `normalizePublicKey(key: string): string` | Reduce a key to its canonical raw 32-byte base64 form. Returns the input trimmed when it denotes no Ed25519 key, so exact-match comparison still works on the read path. |
+| `isSupportedPublicKey(key: string): boolean` | Whether a key is one this project can verify against — raw base64, SPKI PEM, base64 SPKI DER, or a legacy minisign `RWT...` key. Use this on **write** paths (`keys add`), where `normalizePublicKey`'s pass-through would otherwise store a typo or a file path as a trusted key. |
+| `publicKeysMatch(a: string, b: string): boolean` | Compare two keys after normalization. |
+| `parseTrustedKeys(content: string): { entries: TrustedKeyEntry[]; problems: TrustedKeyProblem[] }` | Split trusted-keys file content into `{ publicKey, keyId }` entries, plus the lines it had to skip (each with a 1-based `line` and a `message`). The single definition of the file format — anything that lists, counts, or matches trusted keys goes through it, so `keys list` cannot disagree with what verification trusts. |
+| `isKmsKeyIdentifier(value: string): boolean` | Whether a string is an AWS KMS key ARN, and so a usable trust-list entry for a KMS-signed dossier. Paired with `isSupportedPublicKey` on write paths, since a KMS ARN is not a public key. |
+| `reportTrustedKeyProblems(problems, source?)` | Print unusable entries to stderr, capped at 3, with a re-add hint. Silent when there are none. |
+| `trustedKeysFromContent(content, source?)` | Build the trust map from file content without touching the filesystem. `loadTrustedKeys` is this plus a file read. Pass `source` to name the file in warnings; omit it to stay silent. |
+
+**Types:** `TrustedKeyEntry { publicKey, keyId }`, `TrustedKeyProblem { line, message }`.
+
+Only Ed25519 keys normalize. An AWS KMS signature carries an ECDSA SPKI DER in `public_key`,
+which `isSupportedPublicKey` reports as unsupported — KMS trust is matched on that exact
+base64 string as written in the trust file.
 
 ---
 

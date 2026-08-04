@@ -80,7 +80,18 @@ export {
   scanMarkdown,
 } from './security-scanner';
 // Signature exports
-export { loadTrustedKeys, verifySignature, verifyWithEd25519, verifyWithKms } from './signature';
+export type { TrustedKeyEntry, TrustedKeyProblem } from './signature';
+export {
+  findTrustedIdentifier,
+  isKmsKeyIdentifier,
+  loadTrustedKeys,
+  parseTrustedKeys,
+  reportTrustedKeyProblems,
+  trustedKeysFromContent,
+  verifySignature,
+  verifyWithEd25519,
+  verifyWithKms,
+} from './signature';
 // Signer/Verifier interfaces and implementations
 export {
   Ed25519Signer,
@@ -99,6 +110,7 @@ export type { SignatureCoverage } from './signing-payload';
 export {
   buildSignedPayload,
   canonicalizeFrontmatter,
+  isSupportedPublicKey,
   normalizePublicKey,
   publicKeysMatch,
   signatureCoverage,

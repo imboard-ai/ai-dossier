@@ -152,9 +152,10 @@ Actions:
 **If dossier has `signature` field**:
 
 1. **Extract signature** from frontmatter
-2. **Verify signature** using public_key (minisign or verify-dossier tool)
+2. **Verify signature** using public_key (Ed25519 or AWS KMS, via `ai-dossier verify`)
 3. **Check trust level**:
-   - Is `public_key` in user's `~/.dossier/trusted-keys.txt`?
+   - Is `public_key` in user's `~/.dossier/trusted-keys.txt`? Compare **normalized** keys —
+     the same Ed25519 key has several legal encodings, so a string match gives false negatives.
    - Or is it a known official key (e.g., imboard-ai)?
 
 **Trust levels**:
