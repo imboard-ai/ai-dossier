@@ -15,6 +15,7 @@ import * as config from '../config';
 import {
   buildLlmCommand,
   detectLlm,
+  detectNestedHost,
   downloadUrlToTempFile,
   printRegistryNotFoundError,
   runVerification,
@@ -80,7 +81,8 @@ export function registerRunCommand(program: Command): void {
         let resolvedFile = file;
         const isUrl = file.startsWith('http://') || file.startsWith('https://');
         const isLocalFile = !isUrl && fs.existsSync(path.resolve(file));
-        const isNested = process.env.CLAUDE_CODE === '1' || process.env.CLAUDECODE === '1';
+        const nestedHost = detectNestedHost();
+        const isNested = nestedHost !== null;
         const log = isNested
           ? (...args: unknown[]) => console.error(...args)
           : (...args: unknown[]) => console.log(...args);
@@ -267,8 +269,8 @@ export function registerRunCommand(program: Command): void {
         }
 
         // Nested session detection
-        if (process.env.CLAUDE_CODE === '1' || process.env.CLAUDECODE === '1') {
-          console.error('ℹ️  Running inside Claude Code — outputting dossier content\n');
+        if (nestedHost !== null) {
+          console.error(`ℹ️  Running inside ${nestedHost} — outputting dossier content\n`);
 
           const llmOption =
             options.llm || (config.getConfig('defaultLlm') as string | undefined) || 'auto';

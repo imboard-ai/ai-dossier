@@ -28,6 +28,7 @@ describe('run command', () => {
     vi.mocked(registryClient.parseNameVersion).mockImplementation(parseNameVersionImpl);
     vi.mocked(helpers.runVerification).mockResolvedValue({ passed: true, checks: [] });
     vi.mocked(helpers.detectLlm).mockReturnValue('claude-code');
+    vi.mocked(helpers.detectNestedHost).mockReturnValue(null);
     vi.mocked(helpers.buildLlmCommand).mockReturnValue({
       cmd: 'claude',
       args: ['test.ds.md'],
@@ -49,9 +50,6 @@ describe('run command', () => {
     mockedFs.writeFileSync.mockReturnValue(undefined);
     mockedFs.unlinkSync.mockReturnValue(undefined);
     mockedFs.rmdirSync.mockReturnValue(undefined);
-    // Remove any CLAUDE_CODE env to prevent nested detection
-    delete process.env.CLAUDE_CODE;
-    delete process.env.CLAUDECODE;
   });
 
   it('should run a local dossier file', async () => {
@@ -163,8 +161,8 @@ describe('run command', () => {
     );
   });
 
-  it('should call appendRunLog in nested mode', async () => {
-    process.env.CLAUDE_CODE = '1';
+  it('should call appendRunLog in nested mode (Claude Code)', async () => {
+    vi.mocked(helpers.detectNestedHost).mockReturnValue('Claude Code');
     mockedFs.existsSync.mockReturnValue(true);
     mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
 
@@ -180,6 +178,27 @@ describe('run command', () => {
         nested: true,
       })
     );
+    expect(spawnSync).not.toHaveBeenCalled();
+  });
+
+  it('should call appendRunLog in nested mode (opencode)', async () => {
+    vi.mocked(helpers.detectNestedHost).mockReturnValue('opencode');
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+
+    const program = createTestProgram();
+    registerRunCommand(program);
+
+    await expect(program.parseAsync(['node', 'dossier', 'run', 'test.ds.md'])).rejects.toThrow();
+
+    expect(runLog.appendRunLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dossier: 'test.ds.md',
+        verification: 'nested-skip',
+        nested: true,
+      })
+    );
+    expect(spawnSync).not.toHaveBeenCalled();
   });
 
   it('should log verification as skipped with --skip-all-checks', async () => {

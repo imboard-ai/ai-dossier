@@ -215,6 +215,23 @@ export function readStdin(timeoutMs = 5000): Promise<string | null> {
 }
 
 /**
+ * Detect whether we're already running inside an interactive agent session
+ * (Claude Code or opencode), identified by the session env var each sets.
+ * When nested, `run` should hand the dossier content back to the calling
+ * session instead of spawning a new LLM subprocess.
+ * @returns The host's display name, or null if not nested.
+ */
+export function detectNestedHost(): string | null {
+  if (process.env.CLAUDE_CODE === '1' || process.env.CLAUDECODE === '1') {
+    return 'Claude Code';
+  }
+  if (process.env.OPENCODE === '1') {
+    return 'opencode';
+  }
+  return null;
+}
+
+/**
  * Detect and resolve which LLM to use.
  * @returns The resolved LLM name, or null if none detected.
  */

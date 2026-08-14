@@ -11,6 +11,7 @@ const mockedExecFileSync = vi.mocked(execFileSync);
 import {
   buildLlmCommand,
   detectLlm,
+  detectNestedHost,
   findDossierFilesLocal,
   formatDossierFields,
   formatTable,
@@ -220,6 +221,37 @@ describe('detectLlm', () => {
     mockedExecFileSync.mockReturnValue(Buffer.from('/usr/bin/claude'));
 
     expect(detectLlm('auto', true)).toBe('claude-code');
+  });
+});
+
+describe('detectNestedHost', () => {
+  const nestedEnvVars = ['CLAUDE_CODE', 'CLAUDECODE', 'OPENCODE'] as const;
+
+  beforeEach(() => {
+    for (const key of nestedEnvVars) delete process.env[key];
+  });
+
+  afterEach(() => {
+    for (const key of nestedEnvVars) delete process.env[key];
+  });
+
+  it('should return null when no nested-session env var is set', () => {
+    expect(detectNestedHost()).toBeNull();
+  });
+
+  it('should detect Claude Code via CLAUDE_CODE', () => {
+    process.env.CLAUDE_CODE = '1';
+    expect(detectNestedHost()).toBe('Claude Code');
+  });
+
+  it('should detect Claude Code via CLAUDECODE', () => {
+    process.env.CLAUDECODE = '1';
+    expect(detectNestedHost()).toBe('Claude Code');
+  });
+
+  it('should detect opencode via OPENCODE', () => {
+    process.env.OPENCODE = '1';
+    expect(detectNestedHost()).toBe('opencode');
   });
 });
 
