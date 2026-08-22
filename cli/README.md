@@ -523,6 +523,35 @@ Project registries are merged with user registries. User-configured registries t
 - ❌ Invalid → Signature failed → **BLOCK**
 - ⚠️ No signature → Unsigned (warn for high-risk)
 
+#### Managing trusted keys
+
+Trust is a local decision: a valid signature from a key you have not added is
+reported as untrusted, never auto-trusted. Keys live in `~/.dossier/trusted-keys.txt`,
+one `<public-key> <identifier>` per line.
+
+```bash
+ai-dossier keys generate --name my-key   # new Ed25519 pair in ~/.dossier/
+ai-dossier keys list                     # what is trusted right now
+ai-dossier keys add <public-key> <identifier>
+```
+
+`keys add` accepts a raw 44-char base64 key, an SPKI PEM block, or a legacy
+minisign `RWT...` key, and stores the **canonical raw base64** form regardless —
+so a key added in one encoding still matches a signature carrying another.
+Anything it cannot interpret (a typo, a truncated key, a path to a `.pub` file)
+is rejected outright rather than written and silently never matching.
+
+> **Passing a PEM needs `--`.** A PEM begins with `-`, which the option parser
+> reads as a flag:
+> ```bash
+> ai-dossier keys add -- "$(cat ~/.dossier/my-key.pub)" "my-key"
+> ```
+> `ai-dossier verify <dossier>` sidesteps this entirely — it prints a
+> ready-to-run `keys add` command with the key already in base64 form.
+
+If `keys list` warns about unusable entries, those keys are **not** trusted; the
+warning names the line to fix.
+
 ### 3. Risk Assessment
 
 **Analyzes**:

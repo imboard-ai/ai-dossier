@@ -34,6 +34,17 @@ Community contributors should use Ed25519 signing, which uses Node.js built-in c
 
 #### Step 1: Generate Your Key Pair
 
+The CLI does this for you, writing `~/.dossier/<name>.pem` (private, `0600`) and
+`~/.dossier/<name>.pub` (public), and printing the public key in its canonical
+raw base64 form:
+
+```bash
+ai-dossier keys generate --name my-name-2025
+```
+
+<details>
+<summary>Or generate the pair by hand</summary>
+
 ```bash
 # Generate Ed25519 key pair
 node -e "
@@ -55,6 +66,12 @@ console.log('   Public key: my-public-key.pem (share this)');
 "
 ```
 
+</details>
+
+The steps below use the hand-generated `my-signing-key.pem` / `my-public-key.pem`
+names; if you used `keys generate`, substitute `~/.dossier/my-name-2025.pem` and
+`~/.dossier/my-name-2025.pub`.
+
 #### Step 2: Sign a Dossier
 
 ```bash
@@ -68,38 +85,43 @@ ai-dossier sign --method ed25519 path/to/your-dossier.ds.md \
 #### Step 3: Verify the Signature
 
 ```bash
-# Verify locally (requires adding your key to trusted keys)
-ai-dossier keys add "$(cat my-public-key.pem | tr -d '\n')" "my-name-2025"
+# Verify locally (requires adding your key to trusted keys).
+# The `--` is required: a PEM starts with "-", which the option parser would
+# otherwise read as a flag. The key is stored in its canonical raw base64 form.
+ai-dossier keys add -- "$(cat my-public-key.pem)" "my-name-2025"
 ai-dossier verify path/to/your-dossier.ds.md
 ```
 
 #### Step 4: Publish Your Public Key
 
-Add your public key to your repository so others can verify your signatures:
+Add your public key to your repository so others can verify your signatures.
+
+Publish the **canonical raw base64** form, not the PEM. It is a single line, so
+readers can copy it straight into `keys add` without the `--` escape, and it is
+exactly what `trusted-keys.txt` stores:
 
 ```bash
-# Create KEYS.txt in your repository
-cat > KEYS.txt << 'EOF'
+# Canonical form = the last 32 bytes of the SPKI DER, base64-encoded.
+# (`ai-dossier keys generate` prints this directly as "Public key (base64)".)
+KEY=$(openssl pkey -pubin -in my-public-key.pem -outform DER | tail -c 32 | base64)
+
+# Write it to KEYS.txt (unquoted heredoc, so the variables expand)
+cat > KEYS.txt << EOF
 # Dossier Author Public Keys
 
 ## Your Name (your.email@example.com)
 
-**Key ID**: my-name-2025
-**Algorithm**: Ed25519
-**Created**: 2025-11-24
-
-**Public Key**:
-$(cat my-public-key.pem)
-
-**Fingerprint**:
-$(openssl pkey -pubin -in my-public-key.pem -outform DER | sha256sum | cut -d' ' -f1)
-
-**Verification**:
-```bash
-# Users can add your key:
-ai-dossier keys add "$(curl -s https://raw.githubusercontent.com/your-repo/main/KEYS.txt | grep -A 10 'Public Key' | tail -n +2 | head -n 3 | tr -d '\n')" "my-name-2025"
-```
+- **Key ID**: my-name-2025
+- **Algorithm**: Ed25519
+- **Created**: 2025-11-24
+- **Public Key**: \`${KEY}\`
 EOF
+```
+
+Readers then trust you with one line — no PEM, no `--`:
+
+```bash
+ai-dossier keys add "<the base64 string from KEYS.txt>" "my-name-2025"
 ```
 
 ### Using AWS KMS (Official Dossiers)

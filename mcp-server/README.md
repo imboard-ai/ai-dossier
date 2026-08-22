@@ -133,7 +133,7 @@ LLM:  *Calls verify_dossier*
 ### Features
 
 - **Integrity**: SHA256 checksums ensure dossiers haven't been modified
-- **Signatures**: Optional minisign cryptographic signatures
+- **Signatures**: Optional Ed25519 or AWS KMS cryptographic signatures (legacy minisign keys still verify)
 - **Risk assessment**: Declared risk level and specific risk factors per dossier
 - **Trust model**: Decentralized — users choose which signing keys to trust via `~/.dossier/trusted-keys.txt`
 

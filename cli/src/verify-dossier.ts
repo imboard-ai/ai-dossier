@@ -18,6 +18,9 @@ import type {
 import {
   assessVerificationRisk,
   buildSignedPayload,
+  findTrustedIdentifier,
+  isKmsKeyIdentifier,
+  isSupportedPublicKey,
   loadTrustedKeys,
   normalizePublicKey,
   parseDossierContent,
@@ -136,15 +139,11 @@ export async function checkSignature(
   }
 
   const signature = frontmatter.signature;
-  const trustedKeys = loadTrustedKeys();
 
-  // Compare keys in their normalized (raw base64) form: the trusted-key list and
-  // the signature block do not always carry the same encoding.
-  const normalizedKey = signature.public_key ? normalizePublicKey(signature.public_key) : undefined;
-  const isTrusted =
-    (signature.key_id != null && trustedKeys.has(signature.key_id)) ||
-    (signature.public_key != null && trustedKeys.has(signature.public_key)) ||
-    (normalizedKey != null && trustedKeys.has(normalizedKey));
+  // The trusted-key list and the signature block do not always carry the same
+  // encoding; core resolves that across every form the signature offers.
+  const trustedName = findTrustedIdentifier(loadTrustedKeys(), signature);
+  const isTrusted = trustedName !== undefined;
 
   // Legacy signatures cover the body alone; v2 covers frontmatter + body.
   const coverage = signatureCoverage(signature as { covers?: string });
@@ -157,14 +156,6 @@ export async function checkSignature(
   const result = await verifySignature(signedPayload, signature as SignatureResult);
 
   if (result.valid) {
-    let trustedName = '';
-    if (isTrusted) {
-      trustedName =
-        (signature.key_id ? trustedKeys.get(signature.key_id) : undefined) ||
-        (signature.public_key ? trustedKeys.get(signature.public_key) : undefined) ||
-        (normalizedKey ? trustedKeys.get(normalizedKey) : undefined) ||
-        '';
-    }
     return {
       present: true,
       verified: true,
@@ -190,6 +181,54 @@ export async function checkSignature(
     trusted: isTrusted,
     message: 'Signature verification FAILED',
   };
+}
+
+/** Cap on the identifier suggested below, so a padded `signed_by` cannot fill the terminal. */
+const MAX_SUGGESTED_IDENTIFIER_LENGTH = 64;
+
+/**
+ * Print the `ai-dossier keys add` command that would trust this signer.
+ *
+ * Every byte here comes from a dossier that is not yet trusted and is printed as
+ * a command the user is invited to paste into a shell, so both halves are
+ * constrained first. `signed_by` is free-form, and quotes, `$` or backticks in a
+ * signer name would turn the hint into arbitrary command execution, so it is
+ * stripped to characters that cannot mean anything to the shell. The key is
+ * printed only when it is one `keys add` would actually accept — normalization
+ * hands back anything it cannot interpret, and printing that inside quotes would
+ * splice attacker-chosen text into the command.
+ */
+function printTrustHint(signature: DossierFrontmatter['signature']): void {
+  // Suggest exactly the key `findTrustedIdentifier` will look up, or the command
+  // would appear to succeed and change nothing: the KMS key ARN for a KMS
+  // signature, the public key otherwise. Normalized to the canonical raw-key
+  // base64, since `public_key` is a multi-line PEM on dossiers signed before
+  // 0.8.7 — which would make this command unrunnable.
+  const isKms = signature?.algorithm === 'ECDSA-SHA-256';
+  const publicKey = isKms
+    ? signature?.key_id
+    : signature?.public_key && normalizePublicKey(signature.public_key);
+
+  if (!publicKey || !(isSupportedPublicKey(publicKey) || isKmsKeyIdentifier(publicKey))) {
+    console.log(
+      `\n   ${colors.cyan}This signature carries no key in a form that can be trusted.${colors.reset}\n`
+    );
+    return;
+  }
+
+  const identifier =
+    signature?.signed_by
+      ?.split('<')[0]
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9._-]/g, '')
+      .slice(0, MAX_SUGGESTED_IDENTIFIER_LENGTH) || 'unknown-signer';
+
+  console.log(`\n   ${colors.cyan}To trust this signer, run:${colors.reset}`);
+  console.log(
+    `   ${colors.bright}ai-dossier keys add "${publicKey}" "${identifier}"${colors.reset}\n`
+  );
 }
 
 // ============================================================================
@@ -256,15 +295,7 @@ export async function verifyDossier(input: string, options: VerifyOptions): Prom
         if (frontmatter.signature?.signed_by) {
           console.log(`   Signed by: ${frontmatter.signature.signed_by}`);
         }
-        console.log(`\n   ${colors.cyan}To trust this signer, run:${colors.reset}`);
-        const sig = frontmatter.signature;
-        const publicKey = sig?.public_key || sig?.key_id;
-        const identifier = sig?.signed_by
-          ? sig.signed_by.split('<')[0].trim().toLowerCase().replace(/\s+/g, '-')
-          : 'unknown-signer';
-        console.log(
-          `   ${colors.bright}dossier keys add "${publicKey}" "${identifier}"${colors.reset}\n`
-        );
+        printTrustHint(frontmatter.signature);
       } else {
         warning(signatureResult.message);
         if (frontmatter.signature?.signed_by) {

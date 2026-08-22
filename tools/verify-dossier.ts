@@ -17,6 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   type DossierFrontmatter,
+  findTrustedIdentifier,
   loadTrustedKeys,
   type ParsedDossier,
   parseDossierContent,
@@ -143,13 +144,11 @@ async function verifyDossier(dossierFile: string, trustedKeysFile: string): Prom
     result.authenticity.signer = sig.signed_by || 'Unknown';
     result.authenticity.keyId = sig.key_id || 'Unknown';
 
-    // Load trusted keys
-    const trustedKeys = loadTrustedKeys(trustedKeysFile);
-
-    // Check if key is trusted
-    if (trustedKeys.has(sig.public_key || sig.key_id)) {
+    // Check if key is trusted (core matches across key encodings)
+    const trustedAs = findTrustedIdentifier(loadTrustedKeys(trustedKeysFile), sig);
+    if (trustedAs !== undefined) {
       result.authenticity.isTrusted = true;
-      result.authenticity.trustedAs = trustedKeys.get(sig.public_key || sig.key_id);
+      result.authenticity.trustedAs = trustedAs;
     }
 
     // Verify signature

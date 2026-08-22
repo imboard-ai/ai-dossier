@@ -105,6 +105,9 @@ import {
   verifyWithEd25519,
   verifyWithKms,
   loadTrustedKeys,
+  findTrustedIdentifier,
+  normalizePublicKey,
+  isSupportedPublicKey,
 } from '@ai-dossier/core';
 ```
 
@@ -119,7 +122,7 @@ console.log(result.valid); // true | false
 
 #### `verifyWithEd25519(content: string, signature: string, publicKey: string): VerifyResult`
 
-Verify an Ed25519 signature directly.
+Verify an Ed25519 signature directly. `publicKey` may be SPKI PEM, raw 32-byte base64, or base64 SPKI DER.
 
 #### `verifyWithKms(content: string, signature: string, keyId: string, region?: string): Promise<VerifyResult>`
 
@@ -127,7 +130,17 @@ Verify an ECDSA-SHA-256 signature using AWS KMS.
 
 #### `loadTrustedKeys(filePath?: string): Map<string, string>`
 
-Load trusted public keys from a file (default: `~/.dossier/trusted-keys.txt`). Returns a map of public key to key ID.
+Load trusted public keys from a file (default: `~/.dossier/trusted-keys.txt`), format `<public-key> <identifier>` one per line. Returns a map of public key to identifier, indexed under both the written and the normalized form. Unreadable lines are reported to stderr, not dropped silently.
+
+#### `findTrustedIdentifier(trustedKeys, signature): string | undefined`
+
+Resolve the identifier a signature is trusted under. Use this rather than probing the map by hand — it consults `key_id` only when there is no `public_key`, which is what stops a dossier from claiming a trusted signer's identity while verifying under a different key.
+
+#### `normalizePublicKey(key) / isSupportedPublicKey(key)`
+
+Reduce an Ed25519 key to its canonical raw 32-byte base64 form, and test whether a key is one this project can verify against. Validate with `isSupportedPublicKey` before *storing* a key: `normalizePublicKey` deliberately passes uninterpretable input through.
+
+See [core API reference](../../docs/reference/core-api.md#key-format-and-trust-file-helpers) for the full trust-file helper set.
 
 ### Linting
 

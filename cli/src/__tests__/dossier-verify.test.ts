@@ -1,8 +1,8 @@
-import { createHash } from 'node:crypto';
+import { createHash, sign as cryptoSign, generateKeyPairSync } from 'node:crypto';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assessVerificationRisk } from '@ai-dossier/core';
+import { assessVerificationRisk, type DossierFrontmatter } from '@ai-dossier/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { checkSignature, downloadFile, parseArgs, verifyDossier } from '../verify-dossier';
@@ -121,6 +121,77 @@ describe('checkSignature', () => {
     });
     expect(result.present).toBe(true);
     expect(result.verified).toBe(false);
+  });
+
+  const originalHome = process.env.HOME;
+  const trustDirs: string[] = [];
+
+  afterEach(() => {
+    process.env.HOME = originalHome;
+    // Cleanup here rather than at the end of each test, so a failed assertion
+    // still leaves no temp dir behind.
+    for (const dir of trustDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Point the trusted-key lookup at a temp dir: `os.homedir()` reads $HOME on
+  // POSIX, which is how the list is located.
+  const useTrustList = (contents: string): void => {
+    const trustDir = join(tmpdir(), `dossier-trust-${Date.now()}-${Math.random()}`);
+    mkdirSync(join(trustDir, '.dossier'), { recursive: true });
+    writeFileSync(join(trustDir, '.dossier', 'trusted-keys.txt'), contents, 'utf8');
+    trustDirs.push(trustDir);
+    process.env.HOME = trustDir;
+  };
+
+  // A real Ed25519 signature over `body`, with the public key in both encodings
+  // that are in circulation.
+  const signWithFreshKey = (
+    body: string,
+    keyId?: string
+  ): { pem: string; rawBase64: string; frontmatter: DossierFrontmatter } => {
+    const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+    const pem = publicKey.export({ type: 'spki', format: 'pem' }) as string;
+    return {
+      pem,
+      rawBase64: publicKey.export({ type: 'spki', format: 'der' }).subarray(12).toString('base64'),
+      frontmatter: {
+        title: 'T',
+        version: '1',
+        signature: {
+          algorithm: 'ed25519',
+          signature: cryptoSign(null, Buffer.from(body, 'utf8'), privateKey).toString('base64'),
+          public_key: pem,
+          ...(keyId ? { key_id: keyId } : {}),
+        },
+      },
+    };
+  };
+
+  // Dossiers signed before 0.8.7 carry an SPKI PEM in `public_key`, while
+  // `keys add` stores the raw base64 — they must still resolve to the same key.
+  it('should trust a PEM-format public key registered as raw base64', async () => {
+    const body = 'signed body';
+    const { rawBase64, frontmatter } = signWithFreshKey(body, 'unrelated-key-id');
+    useTrustList(`${rawBase64} test-signer\n`);
+
+    const result = await checkSignature(body, frontmatter);
+
+    expect(result.verified).toBe(true);
+    expect(result.trusted).toBe(true);
+    expect(result.message).toContain('test-signer');
+  });
+
+  it('should not trust a valid signature whose key is absent from the trust list', async () => {
+    const body = 'signed body';
+    const { frontmatter } = signWithFreshKey(body);
+    useTrustList('RWTSomeOtherKey== other-signer\n');
+
+    const result = await checkSignature(body, frontmatter);
+
+    expect(result.verified).toBe(true);
+    expect(result.trusted).toBe(false);
   });
 });
 

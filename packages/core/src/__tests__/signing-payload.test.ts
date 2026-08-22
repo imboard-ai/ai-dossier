@@ -7,6 +7,7 @@ import { Ed25519Signer, Ed25519Verifier } from '../signers/ed25519';
 import {
   buildSignedPayload,
   canonicalizeFrontmatter,
+  isSupportedPublicKey,
   normalizePublicKey,
   publicKeysMatch,
   signatureCoverage,
@@ -219,5 +220,38 @@ describe('end-to-end signing', () => {
     const verifier = new Ed25519Verifier();
     const result = await verifier.verify(buildSignedPayload(frontmatter, body), asPem);
     expect(result.valid).toBe(true);
+  });
+});
+
+describe('isSupportedPublicKey', () => {
+  const { publicKey } = generateKeyPairSync('ed25519');
+  const pem = publicKey.export({ type: 'spki', format: 'pem' }) as string;
+  const raw = publicKey.export({ type: 'spki', format: 'der' }).subarray(12).toString('base64');
+
+  it('accepts every form a key legitimately arrives in', () => {
+    expect(isSupportedPublicKey(raw)).toBe(true);
+    expect(isSupportedPublicKey(pem)).toBe(true);
+    expect(isSupportedPublicKey(PUBLISHED_RAW_KEY)).toBe(true);
+    expect(isSupportedPublicKey('RWTsomeMinisignKey==')).toBe(true);
+  });
+
+  it('rejects input normalizePublicKey would hand back uninterpreted', () => {
+    // These all survive normalizePublicKey unchanged, which is correct for the
+    // read path and disastrous on the write path: `keys add` would store them as
+    // trusted keys and the only symptom would be a permanent "not trusted".
+    for (const bad of [
+      '',
+      '   ',
+      'notakey',
+      '~/.dossier/default.pub',
+      '/home/me/.dossier/default.pub',
+      'default.pub',
+      raw.slice(0, 20),
+      '-----BEGIN PUBLIC KEY-----\nnot base64 at all\n-----END PUBLIC KEY-----',
+    ]) {
+      expect(isSupportedPublicKey(bad), `expected ${JSON.stringify(bad)} to be rejected`).toBe(
+        false
+      );
+    }
   });
 });

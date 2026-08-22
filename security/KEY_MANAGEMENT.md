@@ -529,25 +529,58 @@ ssss-split -t 3 -n 5 < author-2024.key
 
 ## Trust Management
 
-### Users Adding Trusted Keys
+### Trusted Keys File Format
+
+`~/.dossier/trusted-keys.txt` holds **two whitespace-separated fields per line**:
+
+```
+<public-key> <identifier>
+```
+
+The first field is the key material itself — there is no algorithm column, and
+anything extra is absorbed into the identifier. Blank lines and `#` comments are
+ignored; lines that do not parse are reported by `ai-dossier keys list` and are
+**not** trusted.
+
+Prefer the CLI over hand-editing, so the key is normalized and validated before
+it is written:
+
+```bash
+ai-dossier keys add <public-key> <identifier>
+```
+
+#### Community Keys (Ed25519)
+
+The canonical form is the raw 32-byte key in base64 — what `ai-dossier keys
+generate` prints and what `keys add` stores, whatever encoding you hand it:
+
+```bash
+ai-dossier keys add "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=" "john-doe-2024"
+```
+
+Resulting line:
+
+```
+m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE= john-doe-2024
+```
 
 #### Official Keys (AWS KMS)
 
+KMS signatures are verified by asking KMS itself, using `signature.key_id` — the
+key ARN. The public key a KMS signature also carries is never read, so the **ARN
+is what the trust check matches**, and the ARN is what to add:
+
 ```bash
-# Create trusted keys file
-mkdir -p ~/.dossier
-cat > ~/.dossier/trusted-keys.txt << EOF
-# Official Imboard AI Key
-ecdsa-sha256 imboard-ai-2024-kms arn:aws:kms:us-east-1:942039714848:key/xxx
-EOF
+ai-dossier keys add \
+  "arn:aws:kms:us-east-1:942039714848:key/1234abcd-12ab-34cd-56ef-1234567890ab" \
+  "imboard-ai-2024-kms"
 ```
 
-#### Community Keys
+Resolve an alias to the underlying key ARN with:
 
 ```bash
-# Add community author key
-echo "ed25519 john-doe-2024 RWTx5V7Kf1KLN8BVF3PqZ8cN9nJxH5kM2wQ4pS6rT7yU8vW9xA0bC1dD2e==" \
-  >> ~/.dossier/trusted-keys.txt
+aws kms describe-key --key-id alias/dossier-official-prod \
+  --output text --query KeyMetadata.Arn
 ```
 
 ### Verification Before Trust
