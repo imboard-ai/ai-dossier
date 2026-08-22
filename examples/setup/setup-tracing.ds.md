@@ -1,6 +1,7 @@
 ---dossier
 {
   "dossier_schema_version": "1.0.0",
+  "name": "setup-tracing",
   "title": "Setup Tracing",
   "version": "1.0.0",
   "protocol_version": "1.0",
