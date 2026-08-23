@@ -2,10 +2,10 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Implement Issue — Code and Test",
-  "version": "1.3.1",
+  "version": "1.4.1",
   "protocol_version": "1.0",
   "status": "Stable",
-  "last_updated": "2026-06-25",
+  "last_updated": "2026-08-23",
   "objective": "Implement the solution described in the planning document, run tests, and auto-fix lint issues",
   "category": [
     "development"
@@ -37,6 +37,11 @@
         "description": "Base branch for comparing pre-existing test failures",
         "type": "string",
         "default": "main"
+      },
+      {
+        "name": "run_id",
+        "description": "Runstate run id minted by gate-issue; pass through unchanged",
+        "type": "string"
       }
     ]
   },
@@ -48,13 +53,13 @@
   "name": "implement-issue",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "b03b46d90fa08362daa01715eeaefac882c52e9db820c5ca0266363b489030f0"
+    "hash": "6cf48a37b374707f533d5a5715353214cbd712187b300a517cc37f6402b2a83f"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "hU39KumGt+ld/LvN2WBqEr/XA+DPQl3yKCEqsSHaCyXU2CQICCseJIv0zdc7k9Q9El1/sP8wrYO2jqKvLF8lBw==",
+    "signature": "mpvQ/wOWoULzkZX4tFo/4lPA0J+N7uYTPnI7tE5Ar0geGqZyhujDE7b0YsWyJRlMk4rUL6iyM/plXbfeqPWsDQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-07-26T12:47:33.413Z",
+    "signed_at": "2026-08-23T13:51:25.213Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -96,7 +101,9 @@ Read the planning file at `planning_file` path. Extract:
 
 **Before building**, run the project's auto-fixer to avoid lint iteration loops.
 
-**First, prefer the project's combined script.** Grep `package.json` / `Makefile` for a single script that bundles everything CI runs — common names: `hygiene`, `hygiene:ci`, `check`, `lint:fix`, `format`, `precommit`. If one exists, run it (or its `:fix` / `:write` variant) — this is the single source of truth and matches what CI will check.
+**If `scripts/ci-parity.sh` exists in the repo, run `bash scripts/ci-parity.sh` instead of detecting the toolchain.** It is the project's own definition of what CI enforces. Record `ci_parity=pass` if it passed first time, `ci_parity=fail-then-fixed` if you had to fix and re-run, `ci_parity=skipped` if the script does not exist (then use the detection fallback below, as today). Carry the value to the runstate milestone.
+
+**If no ci-parity script, prefer the project's combined script.** Grep `package.json` / `Makefile` for a single script that bundles everything CI runs — common names: `hygiene`, `hygiene:ci`, `check`, `lint:fix`, `format`, `precommit`. If one exists, run it (or its `:fix` / `:write` variant) — this is the single source of truth and matches what CI will check.
 
 **If no combined script, detect the toolchain and run ALL configured fixers** — running only the linter when the project also uses a separate formatter is the #1 reason CI hygiene fails after local checks pass:
 
@@ -116,7 +123,11 @@ Check config files to identify the toolchain: `biome.json`, `.eslintrc*` / `esli
    - Cover happy path + key edge cases + error paths
    - Follow existing test patterns and conventions in the repo
    - Place tests where the project convention expects them (e.g., `__tests__/`, `*.test.ts`, `*.spec.ts`)
-4. **Run the full test suite** to catch regressions (e.g., `npm test`)
+4. **Run tests scoped to what changed** — a full-suite run on a large monorepo costs minutes and buys little:
+   - pnpm: `pnpm --filter "...[<base_branch>]" run test`
+   - npm/yarn workspaces: run `test` in each workspace whose files appear in `git diff --name-only <base_branch>`
+   - single package: full suite
+   ESCAPE HATCHES — affected-filtering is known to skip everything in these cases. If the diff touches `scripts/**`, `.github/**`, lockfiles, or adds a new package directory, ALSO run the repo's shell tests / full suite. Record the counts for the runstate milestone.
 5. **If tests fail**, check whether they are **pre-existing failures** by comparing against the base branch:
    ```bash
    git stash && git checkout <base_branch> && npm test 2>&1 | tail -5 && git checkout - && git stash pop
@@ -130,7 +141,8 @@ Check config files to identify the toolchain: `biome.json`, `.eslintrc*` / `esli
 1. Run lint auto-fixer one more time after tests (test creation may introduce lint issues) — same commands as Step 3.
 
 2. **Verify in CI-check mode before reporting complete.** Run the same checks CI will run, in check (read-only) mode — if anything reports issues that the fixer didn't resolve, fix manually before continuing. CI WILL fail otherwise.
-   - Prefer the project's CI script if one exists (e.g., `npm run hygiene:ci`, `npm run check`).
+   - If `scripts/ci-parity.sh` exists, run `bash scripts/ci-parity.sh` — it is the authority; update `ci_parity` accordingly.
+   - Otherwise prefer the project's CI script if one exists (e.g., `npm run hygiene:ci`, `npm run check`).
    - Otherwise run check-mode equivalents of every tool in Step 3:
      - Biome: `npx biome check .`
      - ESLint + Prettier: `npx eslint . && npx prettier --check .`
@@ -156,12 +168,34 @@ List the changed files:
 git diff --name-only
 ```
 
+### Step 7: Runstate Milestone
+
+Post the phase milestone to the issue. This is the last step of the phase — if implementation aborts, post `status=blocked` with `reason=<short-slug>` instead and stop. The issue number is the `{number}` in the planning filename. Comments are append-only: never edit or delete a prior milestone. Do not skip this in nested or fleet mode — it is the only state that survives the session.
+
+```bash
+gh issue comment <issue_number> --body "$(cat <<EOF
+<!-- runstate:v1 -->
+phase=implement status=done run=<run_id> at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+head=<short sha of HEAD>
+files=<n>
+tests_added=<n>
+tests_run=<n>
+ci_parity=pass|fail-then-fixed|skipped
+next=review
+EOF
+)"
+```
+
+`at` is filled in by the template (the heredoc is unquoted so `$(date …)` expands); put no other `$` in values. With uncommitted work, use `$(git rev-parse --short HEAD)-dirty` for `head`. Values contain no spaces (use `-` or `,`); paths are absolute.
+
 ## Output
 
 - `changed_files`: list of modified/created files
 - `tests_created`: number of new test files created
 - `tests_run`: number of test files executed
 - `pre_existing_failures`: count of ignored pre-existing test failures
+- `ci_parity`: pass | fail-then-fixed | skipped
+- Posts runstate milestone to the issue (`phase=implement`)
 
 ## Validation
 
@@ -172,10 +206,12 @@ git diff --name-only
 - [ ] Lint auto-fixer was run before AND after testing
 - [ ] Tests exist and pass for changed code (created if missing)
 - [ ] Any new/changed backend registry route ships with an integration test in the same PR (route-coverage ratchet stays green)
-- [ ] Full test suite was run
+- [ ] Tests scoped to the diff were run, plus the full suite when an escape hatch applies
 - [ ] Pre-existing failures were verified against base branch (not blindly fixed)
 - [ ] CI-mode verification (check-only) passes — including any separate formatter (e.g. Prettier) and typecheck
 - [ ] Any newly added package/workspace/module is wired into PR CI (typecheck + tests), or the gap is recorded as a follow-up
+- [ ] `scripts/ci-parity.sh` was used when present, and `ci_parity` was recorded
+- [ ] Runstate milestone comment was posted to the issue
 
 ## Troubleshooting
 

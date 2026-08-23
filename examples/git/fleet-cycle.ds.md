@@ -3,10 +3,10 @@
   "dossier_schema_version": "1.0.0",
   "name": "fleet-cycle",
   "title": "Fleet Cycle — Orchestrate Multiple Issues",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-07-31",
+  "last_updated": "2026-08-23",
   "objective": "Take a SET of GitHub issues to merged PRs by building a dependency-aware wave plan and dispatching full-cycle-issue runs across background agents — serial, parallel, or mixed",
   "category": [
     "development"
@@ -87,13 +87,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "14e901a1643b988fa50df514b2f9d2e556fe9fe7320854366af098493e0b2870"
+    "hash": "ed9a7893dccbae0bb63801e1a0f7f014837947659ff7fb0155db06953818f8f2"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "mC3IpnC7zcky2liEjOMTFYvUa3/sfoVO/PXFPFixZLY2q8G2laBFbFRd5CvojySOq3bd9/EylcWfAgBjp4n7DQ==",
+    "signature": "lXL12aTuU7tLJD9RvvltKAU24rXKL7iRFrVQlax/7QgfvIgmyne8r0GWUeSJeeNgAPO+tCRlfA+Qlh8Izn6mCw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-07-31T07:18:11.034Z",
+    "signed_at": "2026-08-23T06:37:16.031Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -174,6 +174,22 @@ Respect `max_parallel`: if a wave has more issues than the cap, dispatch in batc
 - **Retention**: after writing, list `FLEET-PLAN-*.md.gz` in that project's log directory by mtime and delete all but the 20 most recent.
 - Present a concise version of the plan in the conversation — the file is for audit/history, not re-read during this run.
 
+## Phase 3.5: Prewarm the Pool
+
+Before dispatching each wave, from the **orchestrator** — not the agents:
+
+```bash
+# N = the smaller of this wave's size and max_parallel
+N=$(( wave_size < max_parallel ? wave_size : max_parallel ))
+npx worktree-pool replenish --count "$N"
+```
+
+Then wait until `npx worktree-pool status` shows Warm >= N. Poll every 10s, max 10 min.
+
+Replenish is serial by construction, so one orchestrator prewarm is strictly cheaper than N agents cold-starting behind the pool lock.
+
+If the pool is not configured, say so once and continue — agents fall back to cold worktrees.
+
 ## Phase 4: Dispatch and Supervise
 
 For each wave, in order:
@@ -188,6 +204,8 @@ For each wave, in order:
 5. Do not advance to the next wave until the current wave has fully resolved (all runs either merged, failed, or blocked).
 6. **An agent reporting idle or "done" is NOT proof of merge.** Background full-cycle agents routinely idle with the PR green-but-unmerged. Before marking an issue **succeeded**, advancing to the next wave, or dispatching dependents, the orchestrator MUST independently verify `gh pr view <pr> --json mergedAt,state` shows `mergedAt` non-null **and** `state` `MERGED`, **and** the issue is CLOSED. If the PR is green-but-unmerged, merge it directly (`gh pr merge <pr> --squash`) — or re-task the agent — before proceeding. Never treat an idle/"done" signal as merge confirmation.
 
+**Runstate is per-run, not per-fleet.** Each `full-cycle-issue` run mints its own `run_id` at its gate phase; fleet-cycle neither mints nor passes one. The orchestrator reads runstate, it does not write it.
+
 **Concurrency discipline:** never exceed `max_parallel` concurrent runs, and never exceed worktree-pool capacity. If the pool is exhausted, queue and dispatch as worktrees free up rather than cold-starting many worktrees at once.
 
 ## Phase 5: Aggregate Report
@@ -198,6 +216,7 @@ Produce a single roll-up across the whole fleet:
 - **Failed**: each with the failure reason and where it stopped.
 - **Blocked**: each with which failed dependency blocked it (so the user can re-run after fixing).
 - **The wave plan as executed**, including any divergence from the original plan.
+- **Runstate**: a direct link to each issue's LAST `<!-- runstate:v1 -->` comment, so the exact phase each run reached is one click away (including failed and blocked issues).
 
 Post the roll-up to the conversation. Include direct PR URLs for every merged and failed issue.
 
@@ -235,7 +254,8 @@ Post the roll-up to the conversation. Include direct PR URLs for every merged an
 - [ ] Dependents branched from updated base after their dependency merged
 - [ ] Failures blocked their transitive dependents; independents continued
 - [ ] Wave N+1 gated on wave N resolution
-- [ ] Aggregate report posted with per-issue status and PR links
+- [ ] Pool prewarmed before each wave (or the missing-pool case reported once)
+- [ ] Aggregate report posted with per-issue status, PR links, and last-runstate-comment links
 
 ## Relationship to Other Dossiers
 

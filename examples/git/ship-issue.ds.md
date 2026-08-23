@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "ship-issue",
   "title": "Ship Issue — Commit, PR, Merge, Deploy, Teardown",
-  "version": "1.5.0",
+  "version": "1.7.0",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Commit changes, push, create a PR, wait for CI, merge, confirm the merge reached production, and clean up the worktree",
@@ -64,6 +64,16 @@
         "description": "Whether the worktree was claimed from the pool (affects cleanup)",
         "type": "boolean",
         "default": false
+      },
+      {
+        "name": "run_id",
+        "description": "Runstate run id minted by gate-issue; pass through unchanged",
+        "type": "string"
+      },
+      {
+        "name": "ac_results",
+        "description": "Per-acceptance-criterion checklist from review-issue's Agent 7 (Conformance) — criterion, verdict, file:line or reason. Used to populate the PR body's Acceptance Criteria section.",
+        "type": "string"
       }
     ]
   },
@@ -74,13 +84,14 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "19710492a8f1781a02af6f6ec7f5e71da3aa69bcb2a6df80b870ce201285e549"
+    "hash": "1175c7e412050ed0a5a818821b68b2a76da93867bac7c1b75572e9fe9dbd775a"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "+gGZ3r4M0C2cIEx7Tj3qOISPh9IT4OFSdxFbFX3EVCt2+BLKQWXl/2gMU1+5WQ/Kq9echASl+pZ76PHUpCljCA==",
-    "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAT5MH6NyHt3zBur6eq+EVSNOA2AZbuSRpov+/BRFzLnY=\n-----END PUBLIC KEY-----\n",
-    "signed_at": "2026-08-05T11:04:47.017Z",
+    "signature": "32fNSoRQf/kXGDkPQ2BAjcynIegumShj+GrAQUOxiZMmvR2wQHIOZAsb7mlDNrEWJjV2H+/3z/CyDz0I3MebCw==",
+    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
+    "signed_at": "2026-08-23T14:03:51.355Z",
+    "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
   }
@@ -108,6 +119,7 @@ Ship the implementation: commit, push, create PR, wait for CI, merge, and clean 
 
 ### Step 1: Commit
 
+0. **If `scripts/ci-parity.sh` exists in the repo, run `bash scripts/ci-parity.sh` before committing.** It is the project's own definition of what CI enforces — catching a hygiene failure here costs seconds instead of a full CI round-trip. Fix and re-run until it passes. If the script does not exist, skip this and commit as usual.
 1. Stage relevant files (never `.env`, credentials, secrets)
 2. Commit with conventional commits format:
    ```
@@ -135,6 +147,10 @@ gh pr create --base <base_branch> --title "<short title>" --body "$(cat <<'EOF'
 
 Closes #<issue_number>
 
+## Acceptance Criteria
+- [x] AC1 <criterion> — <file:line>
+- [ ] AC2 <criterion> — not met / unverifiable: <reason>
+
 ## Test plan
 - <how to verify>
 
@@ -142,6 +158,26 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 EOF
 )"
 ```
+
+The Acceptance Criteria boxes come from `ac_results` (review-issue's Agent 7 output, passed through by full-cycle-issue): a checked box with `file:line` for each `met` AC, an unchecked box with the reason for `not-met`/`unverifiable`. If `ac_results` is empty (Agent 7 was skipped — no AC list existed), omit this section.
+
+### Step 3b: Runstate Milestone (awaiting-merge)
+
+Post this BEFORE the CI wait — it is what tells a later reader that a PR exists and the run is parked on CI, even if this session dies mid-wait. Comments are append-only: never edit or delete a prior milestone.
+
+```bash
+gh issue comment <issue_number> --body "$(cat <<EOF
+<!-- runstate:v1 -->
+phase=ship status=awaiting-merge run=<run_id> at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+pr=<pr-number>
+head=<short sha of the pushed commit>
+ci_fix_attempts=0
+next=ship
+EOF
+)"
+```
+
+`at` is filled in by the template (the heredoc is unquoted so `$(date …)` expands); put no other `$` in values. Values contain no spaces (use `-` or `,`); paths are absolute.
 
 ### Step 4: Wait for CI — stable-confirmation gate (stay in this turn)
 
@@ -364,6 +400,25 @@ merge is confirmed.
    git push origin --delete <branch-name> 2>/dev/null || true
    ```
 
+### Step 8: Runstate Milestone (final)
+
+Post the second and final ship milestone, after merge and teardown. This is the last step of the phase — if ship aborts (CI red after 2 attempts, merge conflict, failed deploy), post `status=blocked` with `reason=<short-slug>` instead and stop. Do not skip this in nested or fleet mode — it is the only state that survives the session.
+
+```bash
+gh issue comment <issue_number> --body "$(cat <<EOF
+<!-- runstate:v1 -->
+phase=ship status=done run=<run_id> at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+pr=<pr-number>
+merge_commit=<short sha from Step 6b>
+ci_fix_attempts=<n>
+cleanup=pool_returned|worktree_removed|skipped
+next=report
+EOF
+)"
+```
+
+`at` is filled in by the template (the heredoc is unquoted so `$(date …)` expands); put no other `$` in values. `ci_fix_attempts` is how many Step 5 fix-and-push cycles ran (0 if CI was green first time). Values contain no spaces (use `-` or `,`); paths are absolute.
+
 ## Output
 
 - `pr_number`: the created PR number
@@ -371,12 +426,15 @@ merge is confirmed.
 - `merge_status`: merged | failed
 - `target_branch`: the branch merged into
 - `cleanup`: pool_returned | worktree_removed | skipped
+- `ci_fix_attempts`: number of CI fix-and-push cycles run in Step 5
+- Posts TWO runstate milestones to the issue (`phase=ship`: `awaiting-merge` before the CI wait, then `done`)
 
 ## Validation
 
 - [ ] Changes committed with conventional commits format
 - [ ] Branch pushed to remote
 - [ ] PR created targeting correct base_branch
+- [ ] PR body includes the Acceptance Criteria section from `ac_results` (when non-empty)
 - [ ] CI passed (or failures fixed within 2 attempts)
 - [ ] CI confirmed green on two consecutive stable polls — not a single transient success
 - [ ] CI wait done in-turn (foreground batch re-runs) — never backgrounded or deferred
@@ -386,6 +444,8 @@ merge is confirmed.
 - [ ] in-progress label removed
 - [ ] Worktree returned to pool or removed
 - [ ] Returned to original directory
+- [ ] `scripts/ci-parity.sh` was run before committing when present
+- [ ] Two runstate milestone comments were posted (`awaiting-merge` before the CI wait, final after teardown)
 
 ## Troubleshooting
 

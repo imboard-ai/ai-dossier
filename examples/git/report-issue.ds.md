@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "report-issue",
   "title": "Report Issue — Rich Completion Summary",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Generate a comprehensive completion report covering what changed, user-facing implications, dev/ops implications, and review results — posted to both conversation and PR comment",
@@ -60,6 +60,11 @@
         "description": "How the worktree was cleaned up: pool_returned, worktree_removed, or skipped",
         "type": "string",
         "default": "worktree_removed"
+      },
+      {
+        "name": "run_id",
+        "description": "Runstate run id minted by gate-issue; pass through unchanged",
+        "type": "string"
       }
     ]
   },
@@ -70,13 +75,14 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "46fa7b122425bf58c3331996dde6bbf6060ad4d3829bff2e1c6a2ac458cd3b8a"
+    "hash": "bf044b483f2966225b3498e5019c212ab062e30da5dd189a24d0b1c4d513d7ab"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "GPmqiDX9IIbvCi3LaSGn+yYPUMPJNypIH2r7gVdM36jrB3/+Tw7RhvWtEgZHcjyPZwlHMjC5AUcqLF04mHVmDQ==",
-    "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAT5MH6NyHt3zBur6eq+EVSNOA2AZbuSRpov+/BRFzLnY=\n-----END PUBLIC KEY-----\n",
-    "signed_at": "2026-08-05T11:05:13.430Z",
+    "signature": "ffuzmK+wMqb/rGgKd68NgbbiXdihOaYBeRlUlB4Zq/GDFxHghwbLYMDMKGsvoSYouCFC5/gOn/ZEkEBeHyvKCw==",
+    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
+    "signed_at": "2026-08-23T14:05:54.575Z",
+    "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
   }
@@ -224,11 +230,45 @@ EOF
 )"
 ```
 
+### Step 4b: Trap index write-back (mechanical trigger)
+
+First, check the trigger condition. Fetch the last `phase=ship` and `phase=implement` runstate milestones:
+
+```bash
+gh issue view <issue_number> --json comments \
+  --jq '[.comments[].body | select(startswith("<!-- runstate:v1 -->"))]'
+```
+
+Read `ci_fix_attempts` from the last `phase=ship status=done` milestone, and `ci_parity` from the `phase=implement` milestone.
+
+If the repo has `docs/agent-traps.md` AND (`ci_fix_attempts` ≥ 1 OR `ci_parity=fail-then-fixed`), you MUST append exactly one row: `| <the literal error string a future agent would grep> | <what actually went wrong> | <the fix, as a command or one sentence> | PR #<n> |`. Commit it on a tiny follow-up branch and open a PR (`docs(traps): …`), or if the repo allows, include it before merge. Otherwise `traps_added=0`. If the file does not exist, skip and note it.
+
+### Step 4c: Extract learnings + delete PLANNING file
+
+Per the repo's AGENTS.md rule if present; at minimum delete `PLANNING-<n>-*.md` from the worktree if still present (it never belongs in main).
+
 ### Step 5: Output
 
 ```
 Report posted to conversation and PR #<pr_number>.
 ```
+
+### Step 6: Runstate Milestone
+
+Post the final phase milestone to the issue. This is the last step of the cycle. Comments are append-only: never edit or delete a prior milestone. Do not skip this in nested or fleet mode — it is the only state that survives the session.
+
+```bash
+gh issue comment <issue_number> --body "$(cat <<EOF
+<!-- runstate:v1 -->
+phase=report status=done run=<run_id> at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+pr=<pr_number>
+traps_added=<n>
+next=done
+EOF
+)"
+```
+
+`at` is filled in by the template (the heredoc is unquoted so `$(date …)` expands); put no other `$` in values. `traps_added` is the number of rows appended to `docs/agent-traps.md` in Step 4b (0 or 1 normally). Values contain no spaces (use `-` or `,`); paths are absolute.
 
 ## Output
 
@@ -237,6 +277,7 @@ Report posted to conversation and PR #<pr_number>.
 - `deployed`: the deployed SHA when a deploy was confirmed; `null` when merged-but-not-deployed; `"n/a"` when the project has no deploy step. NEVER omit — a missing value reads as success.
 - `user_implications_count`: number of user-facing implications
 - `devops_implications_count`: number of dev/ops implications
+- Posts runstate milestone to the issue (`phase=report`)
 
 ## Validation
 
@@ -248,6 +289,9 @@ Report posted to conversation and PR #<pr_number>.
 - [ ] Condensed report posted as PR comment
 - [ ] If base_branch != main: epic sub-issue note included
 - [ ] Review results accurately reflect what was fixed and clean
+- [ ] Trap index write-back checked: if `docs/agent-traps.md` exists and (`ci_fix_attempts` ≥ 1 OR `ci_parity=fail-then-fixed`), exactly one row was appended and shipped via a follow-up PR or pre-merge commit; otherwise `traps_added=0`
+- [ ] `PLANNING-<n>-*.md` was deleted from the worktree if still present
+- [ ] Runstate milestone comment was posted to the issue
 
 ## Troubleshooting
 

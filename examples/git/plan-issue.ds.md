@@ -2,7 +2,7 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Plan Issue — Rich Planning Document",
-  "version": "1.1.2",
+  "version": "1.3.0",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Read a GitHub issue and its comments, explore relevant codebase areas, confirm any new state/flow is actually reachable, and write a rich planning document for structured implementation",
@@ -48,6 +48,11 @@
         "description": "How to query this project's production data to confirm a new state/flow actually occurs (used by the reachability check). Bind this per-project to a concrete method — e.g. a read-only database MCP server, a read replica, or an analytics warehouse. If unset, the reachability check uses the generic default below and degrades to escalate-when-unverifiable.",
         "type": "string",
         "default": "If your environment exposes a read-only production data store (a database MCP server, read replica, or analytics warehouse), use it to run a read-only count of the triggering condition. If no such access exists, treat reachability as unverifiable and escalate rather than assuming the state occurs."
+      },
+      {
+        "name": "run_id",
+        "description": "Runstate run id minted by gate-issue; pass through unchanged",
+        "type": "string"
       }
     ]
   },
@@ -59,13 +64,13 @@
   "name": "plan-issue",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "c5301cef91cbe1fc3ae37d4e41c7e351a1c39d4c4b61ff72f3158f98fc8bfb4d"
+    "hash": "d0c73545effd4fa495dded8c2bdc60863258414c42be3520e0234ac544e4b53f"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "oUoApeO0Zmie90RhYBiFFLY47OAOgRTS2GPlKbMN3aE3jdMR3mz0MxP4PfVr6CXac7bkDLkbymdl4lrSaNFSAw==",
+    "signature": "hiC4BqTb6metwjCICbr/FDBA4k1yyzWy5KKnsyn39cQL7vGmPH+QnCCj4kGglFzHmf9COZ/CRGarjuibmEOfAw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-07-26T12:47:43.066Z",
+    "signed_at": "2026-08-23T14:03:50.547Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -114,6 +119,7 @@ Based on the issue description and comments:
 2. Read key files to understand current implementation
 3. Check for existing patterns, utilities, or abstractions that should be reused
 4. If `base_branch` is not `main`, ensure you are exploring code on `base_branch` (it may have changes not yet on main)
+5. If `docs/agent-traps.md` exists, read it in full (it is small by design) and grep it for terms from the issue title and the affected paths. Mention any hit under Risk Areas.
 
 ### Step 4b: Reachability Check (REQUIRED before planning any new state/flow)
 
@@ -143,6 +149,11 @@ Create (or overwrite) `PLANNING-<issue_number>-<slug>.md` in the worktree_path w
 ## Problem
 <What's wrong or what's needed. Synthesized from issue body + comments.
 Include any clarifications or updated requirements from comments.>
+
+## Acceptance Criteria
+<One line per criterion, verbatim from the issue where it states them; otherwise derive the minimal testable set. Each must be checkable by reading code/tests.>
+- [ ] AC1 <criterion>
+- [ ] AC2 <criterion>
 
 ## Approach
 <Proposed solution, 3-7 bullets. Each bullet should be actionable.>
@@ -193,10 +204,33 @@ Print the planning file path and a brief summary:
 ```
 Planning complete: <worktree_path>/PLANNING-<number>-<slug>.md
 Approach: <1-sentence summary>
+Acceptance criteria: <count>
 Files: <count> files identified
 Open questions: <count> (or "none")
 Visual review: required / not required
 ```
+
+### Step 7: Runstate Milestone
+
+Post the phase milestone to the issue. This is the last step of the phase — if planning aborts, post `status=blocked` with `reason=<short-slug>` instead and stop. Comments are append-only: never edit or delete a prior milestone. Do not skip this in nested or fleet mode — it is the only state that survives the session.
+
+```bash
+gh issue comment <issue_number> --body "$(cat <<EOF
+<!-- runstate:v1 -->
+phase=plan status=done run=<run_id> at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+planning=<abs path to planning file>
+head=<short sha of base at plan time>
+open_questions=<n>
+visual_review=true|false
+ac_count=<n>
+AC1=<criterion, verbatim>
+AC2=<criterion, verbatim>
+next=implement
+EOF
+)"
+```
+
+`at` is filled in by the template (the heredoc is unquoted so `$(date …)` expands); put no other `$` in values. Values contain no spaces (use `-` or `,`); paths are absolute — **except the `AC<n>=` lines, which are the one exception to the no-spaces rule: write each criterion verbatim, spaces included.** Emit one `AC<n>=` line per criterion (not exactly two — the template shows two for illustration).
 
 ## Output
 
@@ -205,17 +239,22 @@ Visual review: required / not required
 - `files_count`: number of files to modify
 - `open_questions_count`: number of open questions
 - `visual_review_required`: true/false
+- `ac_count`: number of acceptance criteria written
+- Posts runstate milestone to the issue (`phase=plan`, including `ac_count` and one `AC<n>=` line per criterion)
 
 ## Validation
 
 - [ ] Issue body and ALL comments were read
 - [ ] Relevant code was explored on the correct base branch
+- [ ] `docs/agent-traps.md`, if present, was read in full and grepped for terms from the issue title and affected paths; any hit is under Risk Areas
 - [ ] Reachability check performed for every new state/flow (prod data cited, or N/A justified); unreachable states escalated, not built
 - [ ] Planning file follows the `PLANNING-{number}-{slug}.md` naming convention
-- [ ] All sections are populated (Problem, Approach, Files, Risk, Tests)
+- [ ] Acceptance Criteria section is populated — verbatim from the issue where stated, else the minimal testable set, each checkable by reading code/tests
+- [ ] All sections are populated (Problem, Acceptance Criteria, Approach, Files, Risk, Tests)
 - [ ] Existing utilities and patterns were identified in "Reusable Code" section
 - [ ] Open Questions section only contains genuinely ambiguous items
 - [ ] Visual Review checkbox reflects whether FE files are expected to change
+- [ ] Runstate milestone comment was posted to the issue
 
 ## Troubleshooting
 

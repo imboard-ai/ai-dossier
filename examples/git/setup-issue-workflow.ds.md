@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "setup-issue-workflow",
   "title": "Setup Issue Workflow",
-  "version": "1.9.3",
+  "version": "1.10.1",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Create a workflow for GitHub issues that fetches issue details, creates appropriately named branches, optionally sets up git worktrees with environment warmup (or claims from a pre-warmed pool), and generates planning files for structured development",
@@ -25,6 +25,11 @@
         "description": "Target branch to branch from and merge into. Overrides issue body parsing ('merges into `<branch>`'). Use for epic sub-issues or when the target is not main.",
         "type": "string",
         "default": "auto"
+      },
+      {
+        "name": "run_id",
+        "description": "Runstate run id minted by gate-issue; pass through unchanged",
+        "type": "string"
       }
     ]
   },
@@ -33,10 +38,6 @@
       "name": "Yuval Dimnik"
     }
   ],
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "b0cc346c8c062396f17249f2f686836e15e4110141e45d75820f80dc1f5e31b0"
-  },
   "external_references": [
     {
       "url": "https://cli.github.com/",
@@ -71,11 +72,15 @@
   "risk_factors": [
     "network_access"
   ],
+  "checksum": {
+    "algorithm": "sha256",
+    "hash": "5a9148858bbbb485866b7821c106c36066b376826db9401184202c55c4edcfec"
+  },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "egGqAae+w2copa/yYiOS8gtz5NV02NW9tuq8K96ivHQlfPcfD51JAsohFHkvNTqhgAqjNxLsETCl/LvOOKvWBg==",
+    "signature": "gcUHJ2RMA4OtuL7if/RfzAcgKo8BPjvpoplBZyQJ8992iTT9Ts5f/PCfLG/ugmFN2lyoZEs+bKm9KlXnFxpuCA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-07-28T08:22:15.926Z",
+    "signed_at": "2026-08-23T13:51:22.559Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -647,6 +652,25 @@ Next steps:
    gh pr create --base <BASE_BRANCH> --title "<title>" --body "Closes #<NUMBER>"
 ```
 
+### Step 11: Runstate Milestone
+
+Post the phase milestone to the issue. This is the last step of the phase — if setup aborts, post `status=blocked` with `reason=<short-slug>` instead and stop. Comments are append-only: never edit or delete a prior milestone. Do not skip this in nested or fleet mode — it is the only state that survives the session.
+
+```bash
+gh issue comment <NUMBER> --body "$(cat <<EOF
+<!-- runstate:v1 -->
+phase=setup status=done run=<run_id> at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+branch=<branch-name>
+worktree=<absolute worktree path>
+pool_claimed=true|false
+base_branch=<BASE_BRANCH>
+next=plan
+EOF
+)"
+```
+
+`at` is filled in by the template (the heredoc is unquoted so `$(date …)` expands); put no other `$` in values. `pool_claimed=true` only when Step 5.1 claimed from the pool. In current-directory mode use the absolute repo root for `worktree`. Values contain no spaces (use `-` or `,`); paths are absolute.
+
 ## Validation
 
 **All modes:**
@@ -656,6 +680,7 @@ Next steps:
 - [ ] Planning file (PLANNING-{number}-{slug}.md) was created
 - [ ] Planning file contains all required sections
 - [ ] User was shown clear next steps
+- [ ] Runstate milestone comment was posted to the issue
 
 **Worktree mode — pool-claimed (ALL required before showing success):**
 - [ ] `npx worktree-pool status` was checked
