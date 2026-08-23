@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 
-import { claim, gc, init, refresh, replenish, returnWorktree, status } from './pool-actions';
+import {
+  claim,
+  detect,
+  gc,
+  init,
+  refresh,
+  replenish,
+  returnWorktree,
+  status,
+} from './pool-actions';
 
 function usage(): void {
   console.error(`Usage: worktree-pool <command> [options]
@@ -12,7 +21,8 @@ Commands:
   return --path P                 Return worktree to pool
   refresh                         Fetch + rebuild all warm worktrees
   gc                              Remove stale/orphaned worktrees
-  init                            Configure pool directory for this project`);
+  init                            Configure pool directory for this project
+  detect [dir]                    Print detected package manager env as JSON`);
 }
 
 function parseArgs(args: string[]): { command: string; flags: Record<string, string | boolean> } {
@@ -138,6 +148,12 @@ async function main(): Promise<void> {
             console.error(`  Error: ${err}`);
           }
         }
+        break;
+      }
+
+      case 'detect': {
+        const dir = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
+        console.log(JSON.stringify(detect(dir), null, 2));
         break;
       }
 

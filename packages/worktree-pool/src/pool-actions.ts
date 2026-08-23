@@ -9,19 +9,31 @@ import {
   findStaleWorktrees,
   getPoolStatus,
   getSparesNeeded,
+  normalizePoolFileConfig,
+  remoteForBaseRef,
   removeWorktree,
   updateWorktree,
   validateState,
 } from './pool-state';
-import { generateId, type PoolState, type PoolWorktree } from './types';
+import {
+  detectProjectEnv,
+  lockfileChangedInDiff,
+  lockfilePathFor,
+  resolveProjectDir,
+  resolveWarmCommands,
+} from './project-env';
+import {
+  generateId,
+  type PoolFileConfig,
+  type PoolState,
+  type PoolWorktree,
+  type ProjectEnv,
+} from './types';
 
 const LOCK_TIMEOUT_MS = 10_000;
 const LOCK_RETRY_MS = 200;
+const WARM_COMMAND_TIMEOUT_MS = 300_000;
 const POOL_CONFIG_FILE = '.worktree-pool.json';
-
-interface PoolDirConfig {
-  pool_dir: string;
-}
 
 // --- Git helpers ---
 
@@ -49,24 +61,48 @@ function getConfigPath(gitRoot: string): string {
   return path.join(gitRoot, POOL_CONFIG_FILE);
 }
 
-function readPoolDirConfig(gitRoot: string): PoolDirConfig | null {
+/**
+ * Read `.worktree-pool.json` from the repo root. Missing or corrupt files fall
+ * back to defaults. `pool_dir`, when set, is resolved to an absolute path.
+ */
+export function readPoolFileConfig(gitRoot: string): PoolFileConfig {
   const configPath = getConfigPath(gitRoot);
-  if (!fs.existsSync(configPath)) return null;
+  if (!fs.existsSync(configPath)) return normalizePoolFileConfig({});
+  let raw: unknown;
   try {
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    if (raw.pool_dir && typeof raw.pool_dir === 'string') {
-      return { pool_dir: path.resolve(gitRoot, raw.pool_dir) };
-    }
+    raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
   } catch {
     // corrupt config — treat as absent
+    return normalizePoolFileConfig({});
   }
-  return null;
+  const cfg = normalizePoolFileConfig(raw);
+  if (cfg.pool_dir) {
+    cfg.pool_dir = path.resolve(gitRoot, cfg.pool_dir);
+  }
+  return cfg;
 }
 
+function readPoolDirConfig(gitRoot: string): { pool_dir: string } | null {
+  const cfg = readPoolFileConfig(gitRoot);
+  return cfg.pool_dir ? { pool_dir: cfg.pool_dir } : null;
+}
+
+/** Persist `pool_dir` without clobbering other keys in the config file. */
 function writePoolDirConfig(gitRoot: string, poolDir: string): void {
   const configPath = getConfigPath(gitRoot);
-  const relPoolDir = path.relative(gitRoot, poolDir);
-  fs.writeFileSync(configPath, `${JSON.stringify({ pool_dir: relPoolDir }, null, 2)}\n`);
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(configPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        existing = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // corrupt config — overwrite it
+    }
+  }
+  existing.pool_dir = path.relative(gitRoot, poolDir);
+  fs.writeFileSync(configPath, `${JSON.stringify(existing, null, 2)}\n`);
 }
 
 function discoverPoolDirFromWorktrees(gitRoot: string): string | null {
@@ -296,6 +332,37 @@ function copyEnvFiles(gitRoot: string, targetDir: string): void {
   walk(gitRoot, 0, '');
 }
 
+// --- Warm-up commands ---
+
+/**
+ * Run the project's warm-up commands (install + build) inside a worktree.
+ *
+ * Commands come from `warm_commands` in `.worktree-pool.json` when set,
+ * otherwise from package-manager detection. They run in
+ * `<worktree>/<project_subdir>` so nested monorepo package roots work.
+ */
+function runWarmCommands(worktreeAbsPath: string, cfg: PoolFileConfig): void {
+  const projectDir = resolveProjectDir(worktreeAbsPath, cfg.project_subdir);
+  for (const cmd of resolveWarmCommands(projectDir, cfg)) {
+    const [bin, ...args] = cmd;
+    if (!bin) continue;
+    execFileSync(bin, args, {
+      cwd: projectDir,
+      stdio: 'pipe',
+      timeout: WARM_COMMAND_TIMEOUT_MS,
+    });
+  }
+}
+
+/**
+ * Repo-root-relative lockfile path for a worktree, used to decide whether a
+ * range of upstream commits invalidates the installed dependencies.
+ */
+function lockfilePathForWorktree(worktreeAbsPath: string, cfg: PoolFileConfig): string {
+  const projectDir = resolveProjectDir(worktreeAbsPath, cfg.project_subdir);
+  return lockfilePathFor(detectProjectEnv(projectDir), cfg.project_subdir);
+}
+
 // --- Destroy helper ---
 
 function destroyWorktree(gitRoot: string, tempBranch: string, absPath: string): void {
@@ -319,10 +386,11 @@ export async function replenish(
   _parallel = false
 ): Promise<{ created: number; errors: string[] }> {
   const gitRoot = findGitRoot();
+  const cfg = readPoolFileConfig(gitRoot);
   const poolDir = await resolvePoolDir(gitRoot, { interactive: true });
   fs.mkdirSync(poolDir, { recursive: true });
 
-  git(['fetch', 'origin'], { cwd: gitRoot });
+  git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: gitRoot });
 
   let toCreate: number;
   if (count !== undefined) {
@@ -345,7 +413,7 @@ export async function replenish(
     const tempBranch = `pool/spare-${id}`;
 
     const baseCommit = withLock(poolDir, (state) => {
-      const sha = git(['rev-parse', 'origin/main'], { cwd: gitRoot });
+      const sha = git(['rev-parse', cfg.base_ref], { cwd: gitRoot });
       const wt: PoolWorktree = {
         id,
         path: id,
@@ -360,7 +428,7 @@ export async function replenish(
     });
 
     try {
-      git(['branch', tempBranch, 'origin/main'], { cwd: gitRoot });
+      git(['branch', tempBranch, cfg.base_ref], { cwd: gitRoot });
       git(['worktree', 'add', absWorktreePath, tempBranch], {
         cwd: gitRoot,
       });
@@ -372,16 +440,7 @@ export async function replenish(
 
       copyEnvFiles(gitRoot, absWorktreePath);
 
-      execFileSync('npm', ['install'], {
-        cwd: absWorktreePath,
-        stdio: 'pipe',
-        timeout: 300_000,
-      });
-      execFileSync('make', ['build-core', 'build-mcp', 'build-cli'], {
-        cwd: absWorktreePath,
-        stdio: 'pipe',
-        timeout: 300_000,
-      });
+      runWarmCommands(absWorktreePath, cfg);
 
       withLock(poolDir, (state) => ({
         state: updateWorktree(state, id, {
@@ -419,6 +478,7 @@ export async function replenish(
 
 export function claim(issue: number, branch: string): { path: string } | null {
   const gitRoot = findGitRoot();
+  const cfg = readPoolFileConfig(gitRoot);
   const poolDir = resolvePoolDirSync(gitRoot);
 
   const result = withLock(poolDir, (state) => {
@@ -436,32 +496,24 @@ export function claim(issue: number, branch: string): { path: string } | null {
 
   try {
     // Check freshness
-    const currentMain = git(['rev-parse', 'origin/main'], { cwd: gitRoot });
-    if (worktree.base_commit !== currentMain) {
+    const currentBase = git(['rev-parse', cfg.base_ref], { cwd: gitRoot });
+    if (worktree.base_commit !== currentBase) {
+      const lockfilePath = lockfilePathForWorktree(absPath, cfg);
       let lockChanged = false;
       try {
-        const diff = git(['diff', '--name-only', `${worktree.base_commit}..origin/main`], {
+        const diff = git(['diff', '--name-only', `${worktree.base_commit}..${cfg.base_ref}`], {
           cwd: gitRoot,
         });
-        lockChanged = diff.includes('package-lock.json');
+        lockChanged = lockfileChangedInDiff(diff, lockfilePath);
       } catch {
         lockChanged = true;
       }
 
-      git(['fetch', 'origin'], { cwd: absPath });
-      git(['reset', '--hard', 'origin/main'], { cwd: absPath });
+      git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: absPath });
+      git(['reset', '--hard', cfg.base_ref], { cwd: absPath });
 
       if (lockChanged) {
-        execFileSync('npm', ['install'], {
-          cwd: absPath,
-          stdio: 'pipe',
-          timeout: 300_000,
-        });
-        execFileSync('make', ['build-core', 'build-mcp', 'build-cli'], {
-          cwd: absPath,
-          stdio: 'pipe',
-          timeout: 300_000,
-        });
+        runWarmCommands(absPath, cfg);
       }
     }
 
@@ -508,6 +560,7 @@ export function claim(issue: number, branch: string): { path: string } | null {
 
 export function returnWorktree(worktreePath: string): void {
   const gitRoot = findGitRoot();
+  const cfg = readPoolFileConfig(gitRoot);
   const poolDir = resolvePoolDirSync(gitRoot);
   const absPath = path.resolve(worktreePath);
 
@@ -528,8 +581,8 @@ export function returnWorktree(worktreePath: string): void {
   });
 
   try {
-    git(['fetch', 'origin'], { cwd: absPath });
-    git(['checkout', '-b', newTempBranch, 'origin/main'], { cwd: absPath });
+    git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: absPath });
+    git(['checkout', '-b', newTempBranch, cfg.base_ref], { cwd: absPath });
     git(['clean', '-fd'], { cwd: absPath });
 
     if (entry.assigned_branch) {
@@ -545,28 +598,20 @@ export function returnWorktree(worktreePath: string): void {
       git(['worktree', 'repair'], { cwd: gitRoot });
     }
 
-    const currentMain = git(['rev-parse', 'origin/main'], { cwd: gitRoot });
+    const currentBase = git(['rev-parse', cfg.base_ref], { cwd: gitRoot });
+    const lockfilePath = lockfilePathForWorktree(newAbsPath, cfg);
     let lockChanged = false;
     try {
-      const diff = git(['diff', '--name-only', `${entry.base_commit}..origin/main`], {
+      const diff = git(['diff', '--name-only', `${entry.base_commit}..${cfg.base_ref}`], {
         cwd: gitRoot,
       });
-      lockChanged = diff.includes('package-lock.json');
+      lockChanged = lockfileChangedInDiff(diff, lockfilePath);
     } catch {
       lockChanged = true;
     }
 
     if (lockChanged) {
-      execFileSync('npm', ['install'], {
-        cwd: newAbsPath,
-        stdio: 'pipe',
-        timeout: 300_000,
-      });
-      execFileSync('make', ['build-core', 'build-mcp', 'build-cli'], {
-        cwd: newAbsPath,
-        stdio: 'pipe',
-        timeout: 300_000,
-      });
+      runWarmCommands(newAbsPath, cfg);
     }
 
     withLock(poolDir, (state) => ({
@@ -575,7 +620,7 @@ export function returnWorktree(worktreePath: string): void {
         path: newId,
         status: 'warm',
         temp_branch: newTempBranch,
-        base_commit: currentMain,
+        base_commit: currentBase,
         warmed_at: new Date().toISOString(),
         assigned_to_issue: null,
         assigned_branch: null,
@@ -605,8 +650,9 @@ export function returnWorktree(worktreePath: string): void {
 
 export function refresh(): { refreshed: number; errors: string[] } {
   const gitRoot = findGitRoot();
+  const cfg = readPoolFileConfig(gitRoot);
   const poolDir = resolvePoolDirSync(gitRoot);
-  git(['fetch', 'origin'], { cwd: gitRoot });
+  git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: gitRoot });
 
   const state = readState(poolDir);
   const warmWorktrees = state.worktrees.filter((w) => w.status === 'warm');
@@ -616,18 +662,9 @@ export function refresh(): { refreshed: number; errors: string[] } {
   for (const wt of warmWorktrees) {
     const absPath = toAbs(poolDir, wt.path);
     try {
-      git(['fetch', 'origin'], { cwd: absPath });
-      git(['reset', '--hard', 'origin/main'], { cwd: absPath });
-      execFileSync('npm', ['install'], {
-        cwd: absPath,
-        stdio: 'pipe',
-        timeout: 300_000,
-      });
-      execFileSync('make', ['build-core', 'build-mcp', 'build-cli'], {
-        cwd: absPath,
-        stdio: 'pipe',
-        timeout: 300_000,
-      });
+      git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: absPath });
+      git(['reset', '--hard', cfg.base_ref], { cwd: absPath });
+      runWarmCommands(absPath, cfg);
 
       const newSha = git(['rev-parse', 'HEAD'], { cwd: absPath });
       withLock(poolDir, (state) => ({
@@ -743,6 +780,24 @@ export function status(): ReturnType<typeof getPoolStatus> & { pool_dir: string 
   const poolDir = resolvePoolDirSync(gitRoot);
   const state = readState(poolDir);
   return { ...getPoolStatus(state), pool_dir: poolDir };
+}
+
+/**
+ * Detect the project environment for `dir`, or — when omitted — for this
+ * repo's package root (git root plus `project_subdir` from the pool config).
+ */
+export function detect(dir?: string): ProjectEnv {
+  if (dir) {
+    return detectProjectEnv(path.resolve(dir));
+  }
+  let gitRoot: string;
+  try {
+    gitRoot = findGitRoot();
+  } catch {
+    return detectProjectEnv(process.cwd());
+  }
+  const cfg = readPoolFileConfig(gitRoot);
+  return detectProjectEnv(resolveProjectDir(gitRoot, cfg.project_subdir));
 }
 
 export async function init(): Promise<{ pool_dir: string }> {

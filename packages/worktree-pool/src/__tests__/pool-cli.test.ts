@@ -32,12 +32,20 @@ describe.sequential('pool-cli integration', () => {
     return JSON.parse(fs.readFileSync(statePath, 'utf-8'));
   }
 
-  function writePoolConfig(gitRoot: string, dir: string): void {
+  function writePoolConfig(gitRoot: string, dir: string, extra?: Record<string, unknown>): void {
     const relDir = path.relative(gitRoot, dir);
     fs.writeFileSync(
       path.join(gitRoot, '.worktree-pool.json'),
-      JSON.stringify({ pool_dir: relDir })
+      JSON.stringify({ pool_dir: relDir, ...extra })
     );
+  }
+
+  /** Commit working-tree changes and publish them to the fixture's bare origin. */
+  function commitAndPush(message: string): void {
+    execSync('git add -A', { cwd: repo.root, stdio: 'pipe' });
+    execSync(`git commit -m "${message}"`, { cwd: repo.root, stdio: 'pipe' });
+    execSync('git push origin main', { cwd: repo.root, stdio: 'pipe' });
+    execSync('git fetch origin', { cwd: repo.root, stdio: 'pipe' });
   }
 
   beforeEach(() => {
@@ -145,6 +153,105 @@ describe.sequential('pool-cli integration', () => {
     expect(output).toContain('Warm: 1');
     expect(output).toContain('Assigned: 1');
     expect(output).toContain('Total: 2');
+  });
+
+  it('detect prints the project env as JSON', () => {
+    const env = JSON.parse(runPool('detect'));
+    // Fixture repo is npm with no lockfile and a `build` script
+    expect(env.pm).toBe('npm');
+    expect(env.lockfile).toBe('package-lock.json');
+    expect(env.installCmd).toEqual(['npm', 'install']);
+    expect(env.buildCmd).toEqual(['npm', 'run', 'build']);
+  });
+
+  it('detect accepts an explicit directory', () => {
+    const pnpmDir = path.join(repo.root, 'pnpm-project');
+    fs.mkdirSync(pnpmDir);
+    fs.writeFileSync(
+      path.join(pnpmDir, 'package.json'),
+      JSON.stringify({ name: 'p', scripts: { 'build:libs': 'tsc -b' } })
+    );
+    fs.writeFileSync(path.join(pnpmDir, 'pnpm-lock.yaml'), '');
+
+    const env = JSON.parse(runPool(`detect "${pnpmDir}"`));
+    expect(env.pm).toBe('pnpm');
+    expect(env.installCmd).toEqual(['pnpm', 'install', '--frozen-lockfile', '--prefer-offline']);
+    expect(env.buildCmd).toEqual(['pnpm', 'run', 'build:libs']);
+  });
+
+  it('detect resolves project_subdir from the pool config', () => {
+    const appDir = path.join(repo.root, 'app');
+    fs.mkdirSync(appDir);
+    fs.writeFileSync(
+      path.join(appDir, 'package.json'),
+      JSON.stringify({ name: 'app', packageManager: 'yarn@4.1.0' })
+    );
+    writePoolConfig(repo.root, poolDir, { project_subdir: 'app' });
+
+    const env = JSON.parse(runPool('detect'));
+    expect(env.pm).toBe('yarn');
+  });
+
+  it('replenish runs configured warm_commands inside project_subdir', () => {
+    const appDir = path.join(repo.root, 'app');
+    fs.mkdirSync(appDir);
+    fs.writeFileSync(path.join(appDir, 'package.json'), JSON.stringify({ name: 'app' }));
+    commitAndPush('add app subdir');
+
+    writePoolConfig(repo.root, poolDir, {
+      project_subdir: 'app',
+      warm_commands: [
+        ['node', '-e', 'require("fs").writeFileSync("warm-marker.txt", process.cwd())'],
+      ],
+    });
+
+    runPool('replenish --count 1');
+
+    const state = readPoolState();
+    const wtPath = path.join(poolDir, String(state?.worktrees[0].path));
+    const marker = path.join(wtPath, 'app', 'warm-marker.txt');
+    expect(fs.existsSync(marker)).toBe(true);
+    // Warm commands must run in <worktree>/<project_subdir>
+    expect(fs.realpathSync(fs.readFileSync(marker, 'utf-8').trim())).toBe(
+      fs.realpathSync(path.join(wtPath, 'app'))
+    );
+  });
+
+  it('replenish honours a non-default base_ref', () => {
+    execSync('git checkout -b develop', { cwd: repo.root, stdio: 'pipe' });
+    fs.writeFileSync(path.join(repo.root, 'DEVELOP.md'), 'develop only\n');
+    execSync('git add -A', { cwd: repo.root, stdio: 'pipe' });
+    execSync('git commit -m "develop commit"', { cwd: repo.root, stdio: 'pipe' });
+    execSync('git push origin develop', { cwd: repo.root, stdio: 'pipe' });
+    execSync('git checkout main', { cwd: repo.root, stdio: 'pipe' });
+    execSync('git fetch origin', { cwd: repo.root, stdio: 'pipe' });
+
+    writePoolConfig(repo.root, poolDir, { base_ref: 'origin/develop' });
+    runPool('replenish --count 1');
+
+    const state = readPoolState();
+    const wtPath = path.join(poolDir, String(state?.worktrees[0].path));
+    expect(fs.existsSync(path.join(wtPath, 'DEVELOP.md'))).toBe(true);
+
+    const developSha = execSync('git rev-parse origin/develop', {
+      cwd: repo.root,
+      encoding: 'utf-8',
+    }).trim();
+    expect(state?.worktrees[0].base_commit).toBe(developSha);
+  });
+
+  it('init preserves other keys in an existing pool config', () => {
+    fs.writeFileSync(
+      path.join(repo.root, '.worktree-pool.json'),
+      JSON.stringify({ warm_commands: [['echo', 'hi']], base_ref: 'origin/develop' })
+    );
+
+    runPool('init');
+
+    const cfg = JSON.parse(fs.readFileSync(path.join(repo.root, '.worktree-pool.json'), 'utf-8'));
+    expect(cfg.warm_commands).toEqual([['echo', 'hi']]);
+    expect(cfg.base_ref).toBe('origin/develop');
+    expect(typeof cfg.pool_dir).toBe('string');
   });
 
   it('init configures pool directory', () => {

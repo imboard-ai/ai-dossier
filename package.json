@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "build": "make build",
+    "build:libs": "make build-core build-mcp build-cli",
     "clean": "make clean",
     "rebuild": "make rebuild",
     "test": "make test",
