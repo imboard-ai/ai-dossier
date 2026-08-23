@@ -1,11 +1,12 @@
 ---dossier
 {
   "dossier_schema_version": "1.0.0",
+  "name": "fleet-cycle",
   "title": "Fleet Cycle — Orchestrate Multiple Issues",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-06-14",
+  "last_updated": "2026-07-31",
   "objective": "Take a SET of GitHub issues to merged PRs by building a dependency-aware wave plan and dispatching full-cycle-issue runs across background agents — serial, parallel, or mixed",
   "category": [
     "development"
@@ -22,13 +23,13 @@
     "full-cycle",
     "dependencies"
   ],
-  "risk_level": "medium",
-  "requires_approval": false,
+  "risk_level": "high",
   "risk_factors": [
     "modifies_files",
     "network_access",
     "executes_external_code"
   ],
+  "requires_approval": false,
   "destructive_operations": [
     "Dispatches multiple full-cycle-issue runs, each of which creates branches, worktrees, PRs, and merges code",
     "Spawns background agents that operate autonomously",
@@ -73,9 +74,9 @@
   "outputs": {
     "files": [
       {
-        "path": "FLEET-PLAN-{timestamp}.md",
-        "description": "The dependency DAG and wave plan written before dispatch",
-        "format": "markdown"
+        "path": "~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md.gz",
+        "description": "Gzipped dependency DAG and wave plan, written before dispatch, kept per-project outside the working tree (most recent 20 retained)",
+        "format": "markdown+gzip"
       }
     ]
   },
@@ -84,17 +85,18 @@
       "name": "Yuval Dimnik"
     }
   ],
-  "name": "fleet-cycle",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "892a8cae626f861112c826d3a0ea46dc97e8f462c616ec84dd93f88221cdb30b"
+    "hash": "14e901a1643b988fa50df514b2f9d2e556fe9fe7320854366af098493e0b2870"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "cicf9FQLU+vywrSDAwFoQ31l3magIG9pgYw/6+kyvuBSGqN+X+8LcuwNlGlb115IvY9LRBsk2CP2ntPOovz5DA==",
-    "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEANvCyj7RG85NwvvB5AozhC8Oep2DnwY4X3YC1fY/8E9E=\n-----END PUBLIC KEY-----\n",
-    "signed_at": "2026-06-14T16:02:38.612Z",
-    "signed_by": "(not specified)"
+    "signature": "mC3IpnC7zcky2liEjOMTFYvUa3/sfoVO/PXFPFixZLY2q8G2laBFbFRd5CvojySOq3bd9/EylcWfAgBjp4n7DQ==",
+    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
+    "signed_at": "2026-07-31T07:18:11.034Z",
+    "covers": "frontmatter+body",
+    "key_id": "imboard-ai",
+    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
   }
 }
 ---
@@ -165,7 +167,12 @@ Apply `mode`:
 
 Respect `max_parallel`: if a wave has more issues than the cap, dispatch in batches within the wave, refilling as runs finish.
 
-**Write `FLEET-PLAN-{timestamp}.md`** capturing: the resolved set, the dependency edges with their justification (explicit vs inferred), the wave breakdown, the concurrency cap, and the failure policy. Present a concise version in the conversation.
+**Write the wave plan to `~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md`** capturing: the resolved set, the dependency edges with their justification (explicit vs inferred), the wave breakdown, the concurrency cap, and the failure policy.
+- `{project}` = repo slug `<owner>-<repo>` from `gh repo view --json owner,name -q '.owner.login + "-" + .name'`; if that fails (no remote / no `gh`), fall back to the basename of `git rev-parse --show-toplevel`.
+- `{timestamp}` = UTC `YYYYMMDD-HHMMSS`.
+- `mkdir -p` the target directory, write the file, then `gzip -f` it in place so the artifact on disk is `FLEET-PLAN-{timestamp}.md.gz`.
+- **Retention**: after writing, list `FLEET-PLAN-*.md.gz` in that project's log directory by mtime and delete all but the 20 most recent.
+- Present a concise version of the plan in the conversation — the file is for audit/history, not re-read during this run.
 
 ## Phase 4: Dispatch and Supervise
 
@@ -179,6 +186,7 @@ For each wave, in order:
    - Issues with no dependency on the failure continue normally.
    - Record the failure and the blocked set for the final report.
 5. Do not advance to the next wave until the current wave has fully resolved (all runs either merged, failed, or blocked).
+6. **An agent reporting idle or "done" is NOT proof of merge.** Background full-cycle agents routinely idle with the PR green-but-unmerged. Before marking an issue **succeeded**, advancing to the next wave, or dispatching dependents, the orchestrator MUST independently verify `gh pr view <pr> --json mergedAt,state` shows `mergedAt` non-null **and** `state` `MERGED`, **and** the issue is CLOSED. If the PR is green-but-unmerged, merge it directly (`gh pr merge <pr> --squash`) — or re-task the agent — before proceeding. Never treat an idle/"done" signal as merge confirmation.
 
 **Concurrency discipline:** never exceed `max_parallel` concurrent runs, and never exceed worktree-pool capacity. If the pool is exhausted, queue and dispatch as worktrees free up rather than cold-starting many worktrees at once.
 
@@ -201,6 +209,7 @@ Post the roll-up to the conversation. Include direct PR URLs for every merged an
 - **`gh` / CI rate limits and contention.** Many simultaneous runs hammer the API and CI queue. Keep `max_parallel` modest (default 3).
 - **Optimistic independence.** The most expensive failure mode is assuming two issues are independent when they aren't — you discover it at merge time after both ran. When in doubt, serialize.
 - **Background agent visibility.** Long-running background runs can fail silently. Supervise actively; surface failures as they happen, not only at the end.
+- **Green-but-unmerged idle.** Background full-cycle agents reliably idle with the PR green but unmerged, then emit an idle/"done" signal that looks like progress. The orchestrator must independently verify `mergedAt` is non-null (Phase 4, rule 6) before counting an issue as succeeded — never trust the agent's idle signal as proof of merge.
 - **Partial fleet success is normal.** Blocking dependents on failure means a run may end with some issues merged, some failed, some blocked. The report must make the blocked set and its cause explicit so the user can re-run the remainder.
 
 ## Decision Points
@@ -219,7 +228,7 @@ Post the roll-up to the conversation. Include direct PR URLs for every merged an
 - [ ] Issue set resolved from list/range; closed/missing issues reported as skipped
 - [ ] Dependency graph built from explicit + inferred signals
 - [ ] No undetected dependency cycle
-- [ ] Wave plan computed and written to `FLEET-PLAN-{timestamp}.md`
+- [ ] Wave plan computed and written to `~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md.gz` (gzipped; older entries beyond the most recent 20 pruned)
 - [ ] Plan presented before dispatch
 - [ ] Each issue dispatched as a background `full-cycle-issue` run
 - [ ] Concurrency never exceeded `max_parallel` or pool capacity
