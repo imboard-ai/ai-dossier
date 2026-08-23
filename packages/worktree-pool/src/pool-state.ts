@@ -226,3 +226,141 @@ export function getPoolStatus(state: PoolState): PoolStatus {
     worktrees: state.worktrees,
   };
 }
+
+// --- Provenance ---
+//
+// `pool_dir` is routinely the same directory a developer keeps their own
+// worktrees in (imboard-ai/ai-dossier#438: `gc` deleted 29 of them). Location
+// inside `pool_dir` is therefore never evidence of ownership — provenance is.
+
+/** Directory-name shape of a worktree the pool created itself (`generateId()`). */
+export const POOL_DIR_NAME_PATTERN = /^pool-\d+-\d+$/;
+
+/** Prefix of the temp branch the pool checks out in its own spare worktrees. */
+export const POOL_TEMP_BRANCH_PREFIX = 'pool/spare-';
+
+/** True when `name` matches the pool's own `pool-<timestamp>-<pid>` naming. */
+export function isPoolDirName(name: string): boolean {
+  return POOL_DIR_NAME_PATTERN.test(name);
+}
+
+/** True when `branch` is one of the pool's own `pool/spare-*` temp branches. */
+export function isPoolTempBranch(branch: string | null | undefined): boolean {
+  return (
+    typeof branch === 'string' &&
+    branch.startsWith(POOL_TEMP_BRANCH_PREFIX) &&
+    branch.length > POOL_TEMP_BRANCH_PREFIX.length
+  );
+}
+
+export type PoolProvenance =
+  /** Recorded in `.pool-state.json`. */
+  | 'tracked'
+  /** Not in state, but unmistakably created by the pool (name + temp branch). */
+  | 'pool-created'
+  /** Anything else — someone else's worktree, or a directory we cannot vouch for. */
+  | 'foreign';
+
+export interface PoolDirEntryInput {
+  /** Directory name inside the pool directory. */
+  name: string;
+  /** Branch checked out there, or `null` for detached HEAD / not a worktree. */
+  branch: string | null;
+  /** Whether git lists the directory as a worktree of this repo. */
+  registered: boolean;
+  /** Whether the directory exists on disk. */
+  existsOnDisk: boolean;
+  /** Matching `.pool-state.json` entry, when there is one. */
+  stateEntry: PoolWorktree | null;
+}
+
+export interface PoolDirClassification {
+  provenance: PoolProvenance;
+  /** `true` only when the pool may remove this directory. */
+  owned: boolean;
+  /** Human-readable justification, printed by `gc` and `status`. */
+  reason: string;
+}
+
+/**
+ * Decide whether a directory inside the pool directory belongs to the pool.
+ *
+ * Owned iff it is recorded in `.pool-state.json` (and still looks like the
+ * worktree that record describes), or it carries both of the pool's own marks:
+ * a `pool-<timestamp>-<pid>` directory name *and* a `pool/spare-*` branch.
+ * Everything else is foreign and must never be removed.
+ */
+export function classifyPoolDirEntry(input: PoolDirEntryInput): PoolDirClassification {
+  const { name, branch, registered, existsOnDisk, stateEntry } = input;
+  const branchLabel = branch ?? (registered ? 'detached HEAD' : 'no branch');
+
+  if (stateEntry) {
+    if (!existsOnDisk) {
+      return {
+        provenance: 'tracked',
+        owned: true,
+        reason: `recorded in .pool-state.json as ${stateEntry.id}, already gone from disk`,
+      };
+    }
+    // A developer worktree is always registered with git, so an unregistered
+    // directory carrying a name we wrote into our own state is ours.
+    if (!registered) {
+      return {
+        provenance: 'tracked',
+        owned: true,
+        reason: `recorded in .pool-state.json as ${stateEntry.id}, no longer a registered worktree`,
+      };
+    }
+    if (
+      branch === stateEntry.temp_branch ||
+      (stateEntry.assigned_branch !== null && branch === stateEntry.assigned_branch) ||
+      isPoolTempBranch(branch)
+    ) {
+      return {
+        provenance: 'tracked',
+        owned: true,
+        reason: `recorded in .pool-state.json as ${stateEntry.id} (${branchLabel})`,
+      };
+    }
+    return {
+      provenance: 'foreign',
+      owned: false,
+      reason:
+        `recorded in .pool-state.json as ${stateEntry.id}, but ${name} now has ` +
+        `${branchLabel} checked out instead of ${stateEntry.temp_branch}`,
+    };
+  }
+
+  if (!isPoolDirName(name)) {
+    return {
+      provenance: 'foreign',
+      owned: false,
+      reason:
+        'not recorded in .pool-state.json and the directory name does not match ' +
+        "the pool's own pool-<timestamp>-<pid> naming",
+    };
+  }
+  if (!registered) {
+    return {
+      provenance: 'foreign',
+      owned: false,
+      reason:
+        "matches the pool's directory naming but is not a registered git worktree, " +
+        'so its provenance cannot be confirmed',
+    };
+  }
+  if (!isPoolTempBranch(branch)) {
+    return {
+      provenance: 'foreign',
+      owned: false,
+      reason:
+        `matches the pool's directory naming but has ${branchLabel} checked out ` +
+        'instead of a pool/spare-* temp branch',
+    };
+  }
+  return {
+    provenance: 'pool-created',
+    owned: true,
+    reason: `pool-created name with temp branch ${branch}, not recorded in .pool-state.json`,
+  };
+}

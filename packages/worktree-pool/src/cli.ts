@@ -20,9 +20,13 @@ Commands:
   claim --issue N --branch B      Claim a warm worktree, print path
   return --path P                 Return worktree to pool
   refresh                         Fetch + rebuild all warm worktrees
-  gc                              Remove stale/orphaned worktrees
+  gc [--dry-run] [--yes]          Remove stale/orphaned worktrees
   init                            Configure pool directory for this project
-  detect [dir]                    Print detected package manager env as JSON`);
+  detect [dir]                    Print detected package manager env as JSON
+
+The pool only ever removes worktrees it created. Worktrees sharing the pool
+directory that the pool did not create are reported as "foreign, skipped" and
+are never touched. gc requires --yes when stdin is not a TTY.`);
 }
 
 function parseArgs(args: string[]): { command: string; flags: Record<string, string | boolean> } {
@@ -76,6 +80,12 @@ async function main(): Promise<void> {
             console.log(`  ${wt.id}  [${wt.status}]  ${wt.path}${info}`);
           }
         }
+        if (s.foreign.length > 0) {
+          console.log(`\nOther (foreign, never touched by the pool): ${s.foreign.length}`);
+          for (const f of s.foreign) {
+            console.log(`  ${f.name}  [${f.branch ?? 'detached'}]  ${f.reason}`);
+          }
+        }
         break;
       }
 
@@ -125,6 +135,12 @@ async function main(): Promise<void> {
         console.error('Refreshing warm worktrees...');
         const result = refresh();
         console.error(`Refreshed ${result.refreshed} worktree(s)`);
+        if (result.skipped.length > 0) {
+          console.error(`Foreign, skipped: ${result.skipped.length}`);
+          for (const f of result.skipped) {
+            console.error(`  ${f.path} — ${f.reason}`);
+          }
+        }
         if (result.errors.length > 0) {
           for (const err of result.errors) {
             console.error(`  Error: ${err}`);
@@ -134,19 +150,26 @@ async function main(): Promise<void> {
       }
 
       case 'gc': {
-        console.error('Running garbage collection...');
-        const result = gc();
-        console.error(`Removed ${result.removed} worktree(s)`);
-        if (result.staleIds.length > 0) {
-          console.error(`  Stale: ${result.staleIds.join(', ')}`);
-        }
-        if (result.orphanIds.length > 0) {
-          console.error(`  Orphans: ${result.orphanIds.join(', ')}`);
+        const dryRun = flags['dry-run'] === true || flags['dry-run'] === 'true';
+        const yes = flags.yes === true || flags.yes === 'true' || flags.force === true;
+        console.error(dryRun ? 'Garbage collection (dry run)...' : 'Running garbage collection...');
+        const result = await gc({ dryRun, yes });
+        if (!result.dryRun && !result.aborted) {
+          console.error(`Removed ${result.removed} item(s)`);
+          if (result.staleIds.length > 0) {
+            console.error(`  Stale: ${result.staleIds.join(', ')}`);
+          }
+          if (result.orphanIds.length > 0) {
+            console.error(`  Orphans: ${result.orphanIds.join(', ')}`);
+          }
         }
         if (result.errors.length > 0) {
           for (const err of result.errors) {
             console.error(`  Error: ${err}`);
           }
+        }
+        if (result.aborted) {
+          process.exit(1);
         }
         break;
       }

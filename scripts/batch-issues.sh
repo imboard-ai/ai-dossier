@@ -382,7 +382,7 @@ log "Logs: ${LOG_DIR}/"
 if [[ "$USE_POOL" == "true" && "$DRY_RUN" != "true" ]]; then
   log ""
   log "Cleaning up worktree pool..."
-  npx worktree-pool gc 2>&1 | while IFS= read -r line; do log "  [pool] $line"; done
+  npx worktree-pool gc --yes 2>&1 | while IFS= read -r line; do log "  [pool] $line"; done
 fi
 
 # ── JSON output ──

@@ -5,11 +5,14 @@ import * as readline from 'node:readline';
 import {
   addWorktree,
   claimWorktree as claimFromState,
+  classifyPoolDirEntry,
   createEmptyState,
   findStaleWorktrees,
   getPoolStatus,
   getSparesNeeded,
+  isPoolTempBranch,
   normalizePoolFileConfig,
+  type PoolDirClassification,
   remoteForBaseRef,
   removeWorktree,
   updateWorktree,
@@ -363,20 +366,171 @@ function lockfilePathForWorktree(worktreeAbsPath: string, cfg: PoolFileConfig): 
   return lockfilePathFor(detectProjectEnv(projectDir), cfg.project_subdir);
 }
 
+// --- Ownership / provenance ---
+//
+// The pool directory is routinely shared with worktrees a developer made by
+// hand (imboard-ai/ai-dossier#438). Every path that deletes a directory or a
+// branch goes through this layer first; nothing is removed on the strength of
+// its location alone.
+
+/** Resolve symlinks so paths from git and from config compare equal. */
+function realpathOrSelf(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/**
+ * Absolute worktree path -> checked-out branch, from `git worktree list`.
+ * A registered worktree with a detached HEAD maps to `null`.
+ */
+function listWorktreeBranches(gitRoot: string): Map<string, string | null> {
+  const map = new Map<string, string | null>();
+  let output: string;
+  try {
+    output = git(['worktree', 'list', '--porcelain'], { cwd: gitRoot });
+  } catch {
+    return map;
+  }
+  let current: string | null = null;
+  for (const raw of output.split('\n')) {
+    const line = raw.trimEnd();
+    if (line.startsWith('worktree ')) {
+      current = realpathOrSelf(line.slice('worktree '.length));
+      map.set(current, null);
+    } else if (current !== null && line.startsWith('branch ')) {
+      map.set(current, line.slice('branch '.length).replace(/^refs\/heads\//, ''));
+    } else if (line === '') {
+      current = null;
+    }
+  }
+  return map;
+}
+
+/** Everything the provenance check needs, gathered once per command. */
+interface OwnershipContext {
+  gitRoot: string;
+  poolDir: string;
+  state: PoolState;
+  branches: Map<string, string | null>;
+}
+
+function buildOwnershipContext(
+  gitRoot: string,
+  poolDir: string,
+  state?: PoolState
+): OwnershipContext {
+  return {
+    gitRoot,
+    poolDir,
+    state: state ?? readState(poolDir),
+    branches: listWorktreeBranches(gitRoot),
+  };
+}
+
+export interface PoolDirEntryReport extends PoolDirClassification {
+  /** Directory name inside the pool directory. */
+  name: string;
+  /** Absolute path on disk. */
+  path: string;
+  /** Branch checked out there, or `null`. */
+  branch: string | null;
+}
+
+/** Classify one absolute path against the pool's provenance rules. */
+function classifyPath(ctx: OwnershipContext, absPath: string): PoolDirEntryReport {
+  const resolved = realpathOrSelf(absPath);
+  const name = path.basename(resolved);
+  const poolDirReal = realpathOrSelf(ctx.poolDir);
+
+  if (path.dirname(resolved) !== poolDirReal) {
+    return {
+      name,
+      path: resolved,
+      branch: ctx.branches.get(resolved) ?? null,
+      provenance: 'foreign',
+      owned: false,
+      reason: `outside the pool directory (${poolDirReal})`,
+    };
+  }
+
+  const registered = ctx.branches.has(resolved);
+  const classification = classifyPoolDirEntry({
+    name,
+    branch: ctx.branches.get(resolved) ?? null,
+    registered,
+    existsOnDisk: fs.existsSync(resolved),
+    stateEntry: ctx.state.worktrees.find((w) => w.path === name) ?? null,
+  });
+
+  return {
+    name,
+    path: resolved,
+    branch: ctx.branches.get(resolved) ?? null,
+    ...classification,
+  };
+}
+
+/** Every directory inside the pool directory, classified. */
+function scanPoolDir(ctx: OwnershipContext): PoolDirEntryReport[] {
+  if (!fs.existsSync(ctx.poolDir)) return [];
+  const reports: PoolDirEntryReport[] = [];
+  for (const entry of fs.readdirSync(ctx.poolDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') {
+      continue;
+    }
+    reports.push(classifyPath(ctx, path.join(ctx.poolDir, entry.name)));
+  }
+  return reports;
+}
+
+/** Foreign worktrees found in the pool directory, for reporting. */
+function foreignInPoolDir(
+  gitRoot: string,
+  poolDir: string,
+  state?: PoolState
+): PoolDirEntryReport[] {
+  const ctx = buildOwnershipContext(gitRoot, poolDir, state);
+  return scanPoolDir(ctx).filter((e) => !e.owned);
+}
+
 // --- Destroy helper ---
 
-function destroyWorktree(gitRoot: string, tempBranch: string, absPath: string): void {
+/**
+ * Remove a worktree the pool created. Refuses anything it cannot prove is the
+ * pool's own — the caller is expected to report the refusal, not swallow it.
+ */
+function destroyWorktree(ctx: OwnershipContext, tempBranch: string | null, absPath: string): void {
+  const classification = classifyPath(ctx, absPath);
+  if (!classification.owned) {
+    throw new Error(
+      `Refusing to remove ${absPath}: ${classification.reason}. ` +
+        'The worktree pool only removes worktrees it created.'
+    );
+  }
+
   try {
-    git(['worktree', 'remove', absPath, '--force'], { cwd: gitRoot });
+    git(['worktree', 'remove', absPath, '--force'], { cwd: ctx.gitRoot });
   } catch {
     fs.rmSync(absPath, { recursive: true, force: true });
   }
+  deletePoolTempBranch(ctx.gitRoot, tempBranch);
+  git(['worktree', 'prune'], { cwd: ctx.gitRoot });
+}
+
+/**
+ * Delete a `pool/spare-*` branch. Any other ref is left alone — a corrupt or
+ * hand-edited `.pool-state.json` must not be able to delete a real branch.
+ */
+function deletePoolTempBranch(gitRoot: string, branch: string | null | undefined): void {
+  if (!isPoolTempBranch(branch)) return;
   try {
-    git(['branch', '-D', tempBranch], { cwd: gitRoot });
+    git(['branch', '-D', branch as string], { cwd: gitRoot });
   } catch {
     // branch may not exist
   }
-  git(['worktree', 'prune'], { cwd: gitRoot });
 }
 
 // --- Public operations ---
@@ -456,9 +610,13 @@ export async function replenish(
       const msg = err instanceof Error ? err.message : String(err);
       errors.push(`Failed to create ${id}: ${msg}`);
       try {
-        destroyWorktree(gitRoot, tempBranch, absWorktreePath);
-      } catch {
-        // best effort
+        destroyWorktree(buildOwnershipContext(gitRoot, poolDir), tempBranch, absWorktreePath);
+      } catch (cleanupErr) {
+        // A refusal here means the path is not provably ours — say so rather
+        // than deleting it anyway.
+        errors.push(
+          `Could not clean up ${id}: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`
+        );
       }
       withLock(poolDir, (state) => ({
         state: removeWorktree(state, id),
@@ -594,6 +752,9 @@ export function returnWorktree(worktreePath: string): void {
     }
 
     if (absPath !== newAbsPath) {
+      if (fs.existsSync(newAbsPath)) {
+        throw new Error(`Recycle target already exists: ${newAbsPath}`);
+      }
       fs.renameSync(absPath, newAbsPath);
       git(['worktree', 'repair'], { cwd: gitRoot });
     }
@@ -628,39 +789,62 @@ export function returnWorktree(worktreePath: string): void {
       result: undefined,
     }));
   } catch (err) {
-    try {
-      destroyWorktree(gitRoot, entry.temp_branch, absPath);
-    } catch {
-      // best effort
-    }
-    try {
-      destroyWorktree(gitRoot, newTempBranch, newAbsPath);
-    } catch {
-      // best effort
+    // Cleanup is best-effort but never indiscriminate: `destroyWorktree`
+    // refuses any path it cannot prove the pool created, and those refusals
+    // are surfaced instead of being retried with `rm -rf`.
+    const skipped: string[] = [];
+    const ctx = buildOwnershipContext(gitRoot, poolDir);
+    for (const [branch, target] of [
+      [entry.temp_branch, absPath],
+      [newTempBranch, newAbsPath],
+    ] as const) {
+      if (!fs.existsSync(target)) continue;
+      try {
+        destroyWorktree(ctx, branch, target);
+      } catch (cleanupErr) {
+        skipped.push(cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr));
+      }
     }
     withLock(poolDir, (state) => ({
       state: removeWorktree(state, entry.id),
       result: undefined,
     }));
+    const suffix = skipped.length > 0 ? ` Left on disk: ${skipped.join('; ')}` : '';
     throw new Error(
-      `Recycle failed (destroyed worktree): ${err instanceof Error ? err.message : String(err)}`
+      `Recycle failed (destroyed worktree): ${err instanceof Error ? err.message : String(err)}.${suffix}`
     );
   }
 }
 
-export function refresh(): { refreshed: number; errors: string[] } {
+export interface RefreshResult {
+  refreshed: number;
+  /** Worktrees left untouched because provenance could not be confirmed. */
+  skipped: PoolDirEntryReport[];
+  errors: string[];
+}
+
+export function refresh(): RefreshResult {
   const gitRoot = findGitRoot();
   const cfg = readPoolFileConfig(gitRoot);
   const poolDir = resolvePoolDirSync(gitRoot);
   git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: gitRoot });
 
   const state = readState(poolDir);
+  const ctx = buildOwnershipContext(gitRoot, poolDir, state);
   const warmWorktrees = state.worktrees.filter((w) => w.status === 'warm');
   let refreshed = 0;
+  const skipped: PoolDirEntryReport[] = [];
   const errors: string[] = [];
 
   for (const wt of warmWorktrees) {
     const absPath = toAbs(poolDir, wt.path);
+    // `git reset --hard` destroys uncommitted work, so it is only ever pointed
+    // at a directory that still looks like the pool worktree state describes.
+    const classification = classifyPath(ctx, absPath);
+    if (!classification.owned) {
+      skipped.push(classification);
+      continue;
+    }
     try {
       git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: absPath });
       git(['reset', '--hard', cfg.base_ref], { cwd: absPath });
@@ -682,15 +866,72 @@ export function refresh(): { refreshed: number; errors: string[] } {
     }
   }
 
-  return { refreshed, errors };
+  return { refreshed, skipped, errors };
 }
 
-export function gc(): {
+export interface GcOptions {
+  /** Report what would be removed and exit without touching anything. */
+  dryRun?: boolean;
+  /** Approve the removal list without prompting. */
+  yes?: boolean;
+  /** Override TTY detection for the confirmation prompt. */
+  interactive?: boolean;
+}
+
+export type GcCandidateKind =
+  /** Pool worktree past `stale_after_hours` — removed from disk and state. */
+  | 'stale'
+  /** State row with nothing (of ours) on disk — the row is dropped, disk untouched. */
+  | 'orphan-state'
+  /** Pool-created directory missing from state — removed from disk. */
+  | 'orphan-disk';
+
+export interface GcCandidate {
+  kind: GcCandidateKind;
+  /** Pool worktree id, or the directory name for a disk-only orphan. */
+  id: string;
+  /** Absolute path, or `null` when only a state row is dropped. */
+  path: string | null;
+  /** Branch to delete along with it, when it is one of ours. */
+  tempBranch: string | null;
+  reason: string;
+}
+
+export interface GcResult {
   removed: number;
   staleIds: string[];
   orphanIds: string[];
+  /** Everything in the pool directory the pool refuses to touch. */
+  foreign: PoolDirEntryReport[];
+  /** The exact removal list, whether or not it was executed. */
+  candidates: GcCandidate[];
+  dryRun: boolean;
+  /** `true` when confirmation was missing and nothing was removed. */
+  aborted: boolean;
   errors: string[];
-} {
+}
+
+function describeGcPlan(candidates: GcCandidate[], foreign: PoolDirEntryReport[]): void {
+  if (candidates.length === 0) {
+    console.error('Nothing to remove.');
+  } else {
+    console.error(`Will remove ${candidates.length} item(s):`);
+    for (const c of candidates) {
+      const target = c.path ?? '(state entry only)';
+      console.error(`  [${c.kind}] ${target}`);
+      console.error(`      ${c.reason}`);
+    }
+  }
+  if (foreign.length > 0) {
+    console.error(`\nForeign, skipped (${foreign.length}) — not created by the pool:`);
+    for (const f of foreign) {
+      console.error(`  ${f.path}`);
+      console.error(`      ${f.reason}`);
+    }
+  }
+}
+
+export async function gc(opts: GcOptions = {}): Promise<GcResult> {
   const gitRoot = findGitRoot();
   const poolDir = resolvePoolDirSync(gitRoot);
   const errors: string[] = [];
@@ -698,88 +939,131 @@ export function gc(): {
   const orphanIds: string[] = [];
   let removed = 0;
 
-  // Get disk state — directory names inside poolDir
-  const existingNames = new Set<string>();
-  if (fs.existsSync(poolDir)) {
-    for (const entry of fs.readdirSync(poolDir, { withFileTypes: true })) {
-      if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
-        existingNames.add(entry.name);
-      }
-    }
-  }
-
   const state = readState(poolDir);
+  const ctx = buildOwnershipContext(gitRoot, poolDir, state);
+  const onDisk = scanPoolDir(ctx);
+  const foreign = onDisk.filter((e) => !e.owned);
+  const ownedNames = new Set(onDisk.filter((e) => e.owned).map((e) => e.name));
 
-  // Remove stale worktrees
-  const stale = findStaleWorktrees(state);
-  for (const wt of stale) {
-    try {
-      destroyWorktree(gitRoot, wt.temp_branch, toAbs(poolDir, wt.path));
-      withLock(poolDir, (s) => ({
-        state: removeWorktree(s, wt.id),
-        result: undefined,
-      }));
-      staleIds.push(wt.id);
-      removed++;
-    } catch (err) {
-      errors.push(
-        `Failed to remove stale ${wt.id}: ${err instanceof Error ? err.message : String(err)}`
-      );
+  const candidates: GcCandidate[] = [];
+  const claimed = new Set<string>();
+
+  // Stale pool worktrees.
+  for (const wt of findStaleWorktrees(state)) {
+    claimed.add(wt.id);
+    const classification = classifyPath(ctx, toAbs(poolDir, wt.path));
+    if (classification.owned) {
+      candidates.push({
+        kind: 'stale',
+        id: wt.id,
+        path: toAbs(poolDir, wt.path),
+        tempBranch: wt.temp_branch,
+        reason: `stale past ${state.config.stale_after_hours}h (warmed ${wt.warmed_at}); ${classification.reason}`,
+      });
+    } else {
+      // The directory this row points at is no longer ours. Drop the row so the
+      // pool is not wedged, but leave the directory alone.
+      candidates.push({
+        kind: 'orphan-state',
+        id: wt.id,
+        path: null,
+        tempBranch: wt.temp_branch,
+        reason: `stale state entry for ${wt.path}, which is ${classification.reason} — directory left on disk`,
+      });
     }
   }
 
-  // Reconcile orphans — compare relative path names
+  // State rows whose directory is gone (or was never ours).
+  for (const wt of state.worktrees) {
+    if (claimed.has(wt.id)) continue;
+    if (ownedNames.has(wt.path)) continue;
+    claimed.add(wt.id);
+    const classification = classifyPath(ctx, toAbs(poolDir, wt.path));
+    candidates.push({
+      kind: 'orphan-state',
+      id: wt.id,
+      path: null,
+      tempBranch: wt.temp_branch,
+      reason: `state entry for ${wt.path}: ${classification.reason}`,
+    });
+  }
+
+  // Pool-created directories with no state row.
   const stateNames = new Set(state.worktrees.map((w) => w.path));
-  const inStateNotOnDisk = state.worktrees.filter((w) => !existingNames.has(w.path));
-  const onDiskNotInState = [...existingNames].filter((name) => !stateNames.has(name));
+  for (const entry of onDisk) {
+    if (!entry.owned || stateNames.has(entry.name)) continue;
+    candidates.push({
+      kind: 'orphan-disk',
+      id: entry.name,
+      path: entry.path,
+      tempBranch: entry.branch,
+      reason: entry.reason,
+    });
+  }
 
-  for (const wt of inStateNotOnDisk) {
-    try {
-      withLock(poolDir, (s) => ({
-        state: removeWorktree(s, wt.id),
-        result: undefined,
-      }));
-      try {
-        git(['branch', '-D', wt.temp_branch], { cwd: gitRoot });
-      } catch {
-        // branch may not exist
-      }
-      orphanIds.push(wt.id);
-      removed++;
-    } catch (err) {
-      errors.push(
-        `Failed to clean orphan state ${wt.id}: ${err instanceof Error ? err.message : String(err)}`
-      );
+  describeGcPlan(candidates, foreign);
+
+  const base = { staleIds, orphanIds, foreign, candidates, errors };
+
+  if (opts.dryRun) {
+    console.error('\nDry run — nothing was removed.');
+    return { ...base, removed: 0, dryRun: true, aborted: false };
+  }
+
+  if (candidates.length > 0 && !opts.yes) {
+    const interactive = opts.interactive ?? Boolean(process.stdin.isTTY);
+    if (!interactive) {
+      console.error('\nRefusing to remove without confirmation. Re-run with --yes (or --dry-run).');
+      return { ...base, removed: 0, dryRun: false, aborted: true };
+    }
+    const answer = await promptUser(`\nRemove ${candidates.length} item(s)? [y/N]: `);
+    if (!/^y(es)?$/i.test(answer)) {
+      console.error('Aborted — nothing was removed.');
+      return { ...base, removed: 0, dryRun: false, aborted: true };
     }
   }
 
-  for (const dirName of onDiskNotInState) {
+  for (const c of candidates) {
     try {
-      const absPath = toAbs(poolDir, dirName);
-      try {
-        git(['worktree', 'remove', absPath, '--force'], { cwd: gitRoot });
-      } catch {
-        fs.rmSync(absPath, { recursive: true, force: true });
+      if (c.path !== null) {
+        destroyWorktree(ctx, c.tempBranch, c.path);
+      } else {
+        deletePoolTempBranch(gitRoot, c.tempBranch);
       }
-      orphanIds.push(dirName);
+      if (c.kind !== 'orphan-disk') {
+        withLock(poolDir, (s) => ({
+          state: removeWorktree(s, c.id),
+          result: undefined,
+        }));
+      }
+      if (c.kind === 'stale') staleIds.push(c.id);
+      else orphanIds.push(c.id);
       removed++;
     } catch (err) {
       errors.push(
-        `Failed to clean orphan disk ${dirName}: ${err instanceof Error ? err.message : String(err)}`
+        `Failed to remove ${c.path ?? c.id}: ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }
 
   git(['worktree', 'prune'], { cwd: gitRoot });
 
-  return { removed, staleIds, orphanIds, errors };
+  return { ...base, removed, dryRun: false, aborted: false };
 }
 
-export function status(): ReturnType<typeof getPoolStatus> & { pool_dir: string } {
+export function status(): ReturnType<typeof getPoolStatus> & {
+  pool_dir: string;
+  /** Worktrees sharing the pool directory that the pool did not create. */
+  foreign: PoolDirEntryReport[];
+} {
   const gitRoot = findGitRoot();
   const poolDir = resolvePoolDirSync(gitRoot);
   const state = readState(poolDir);
-  return { ...getPoolStatus(state), pool_dir: poolDir };
+  return {
+    ...getPoolStatus(state),
+    pool_dir: poolDir,
+    foreign: foreignInPoolDir(gitRoot, poolDir, state),
+  };
 }
 
 /**

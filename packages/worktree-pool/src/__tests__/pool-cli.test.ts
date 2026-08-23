@@ -26,6 +26,18 @@ describe.sequential('pool-cli integration', () => {
     });
   }
 
+  /** Same as `runPool`, but with stderr folded into the returned output. */
+  function runPoolCombined(args: string, cwd?: string): string {
+    const tsxPath = path.resolve(__dirname, '../../../../node_modules/.bin/tsx');
+    const cliPath = path.resolve(__dirname, '../cli.ts');
+    return execSync(`"${tsxPath}" "${cliPath}" ${args} 2>&1`, {
+      cwd: cwd || repo.root,
+      encoding: 'utf-8',
+      env: { ...process.env, FORCE_COLOR: '0' },
+      timeout: 30_000,
+    });
+  }
+
   function readPoolState(): PoolState | null {
     const statePath = path.join(poolDir, '.pool-state.json');
     if (!fs.existsSync(statePath)) return null;
@@ -136,10 +148,46 @@ describe.sequential('pool-cli integration', () => {
     state.config.stale_after_hours = 24;
     fs.writeFileSync(path.join(poolDir, '.pool-state.json'), JSON.stringify(state, null, 2));
 
-    runPool('gc');
+    runPool('gc --yes');
 
     const newState = readPoolState();
     expect(newState?.worktrees).toHaveLength(0);
+  });
+
+  it('gc refuses to remove without --yes when stdin is not a TTY', () => {
+    runPool('replenish --count 1');
+
+    const state = readPoolState() as NonNullable<ReturnType<typeof readPoolState>>;
+    const old = new Date();
+    old.setDate(old.getDate() - 10);
+    state.worktrees[0].warmed_at = old.toISOString();
+    state.config.stale_after_hours = 24;
+    fs.writeFileSync(path.join(poolDir, '.pool-state.json'), JSON.stringify(state, null, 2));
+
+    expect(() => runPool('gc')).toThrow();
+
+    // Nothing was removed.
+    expect(readPoolState()?.worktrees).toHaveLength(1);
+    expect(fs.existsSync(path.join(poolDir, state.worktrees[0].path))).toBe(true);
+  });
+
+  it('gc --dry-run lists the removal plan without removing anything', () => {
+    runPool('replenish --count 1');
+
+    const state = readPoolState() as NonNullable<ReturnType<typeof readPoolState>>;
+    const old = new Date();
+    old.setDate(old.getDate() - 10);
+    state.worktrees[0].warmed_at = old.toISOString();
+    state.config.stale_after_hours = 24;
+    fs.writeFileSync(path.join(poolDir, '.pool-state.json'), JSON.stringify(state, null, 2));
+
+    const output = runPoolCombined('gc --dry-run');
+    expect(output).toContain('Will remove 1 item(s)');
+    expect(output).toContain(state.worktrees[0].path);
+    expect(output).toContain('Dry run');
+
+    expect(readPoolState()?.worktrees).toHaveLength(1);
+    expect(fs.existsSync(path.join(poolDir, state.worktrees[0].path))).toBe(true);
   });
 
   it('status shows correct counts after operations', () => {
