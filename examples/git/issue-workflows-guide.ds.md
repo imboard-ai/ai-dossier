@@ -1,8 +1,10 @@
 ---dossier
 {
   "dossier_schema_version": "1.0.0",
+  "name": "issue-workflows-guide",
   "title": "Issue Workflows Guide",
-  "version": "1.1.0",
+  "version": "1.1.2",
+  "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Reference guide for the issue workflow family — explains when to use each workflow, how they compose from shared sub-dossiers, and available flags",
   "category": [
@@ -17,15 +19,24 @@
     "reference"
   ],
   "risk_level": "low",
+  "requires_approval": false,
   "authors": [
     {
       "name": "Yuval Dimnik"
     }
   ],
-  "name": "issue-workflows-guide",
   "checksum": {
     "algorithm": "sha256",
     "hash": "9cf43454feadb5dddca5b699ca7903bdbf1427487ea46573497217958ca97dac"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "signature": "Oh70+lWhaA2ChlHrFm96S2E8e2Vf9OzEczFPbc63XYOODWxiPs15TEDGayMqJWnnXkYiuxFKi9yBhqvPq/6HDw==",
+    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
+    "signed_at": "2026-07-26T12:47:36.818Z",
+    "covers": "frontmatter+body",
+    "key_id": "imboard-ai",
+    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
   }
 }
 ---

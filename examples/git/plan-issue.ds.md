@@ -2,9 +2,10 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Plan Issue — Rich Planning Document",
-  "version": "1.0.0",
+  "version": "1.1.2",
+  "protocol_version": "1.0",
   "status": "Stable",
-  "objective": "Read a GitHub issue and its comments, explore relevant codebase areas, and write a rich planning document for structured implementation",
+  "objective": "Read a GitHub issue and its comments, explore relevant codebase areas, confirm any new state/flow is actually reachable, and write a rich planning document for structured implementation",
   "category": [
     "development"
   ],
@@ -17,6 +18,7 @@
     "planning"
   ],
   "risk_level": "low",
+  "requires_approval": false,
   "risk_factors": [
     "modifies_files"
   ],
@@ -40,6 +42,12 @@
         "description": "Path to the worktree where the planning file should be created. Defaults to current directory.",
         "type": "string",
         "default": "."
+      },
+      {
+        "name": "prod_data_access",
+        "description": "How to query this project's production data to confirm a new state/flow actually occurs (used by the reachability check). Bind this per-project to a concrete method — e.g. a read-only database MCP server, a read replica, or an analytics warehouse. If unset, the reachability check uses the generic default below and degrades to escalate-when-unverifiable.",
+        "type": "string",
+        "default": "If your environment exposes a read-only production data store (a database MCP server, read replica, or analytics warehouse), use it to run a read-only count of the triggering condition. If no such access exists, treat reachability as unverifiable and escalate rather than assuming the state occurs."
       }
     ]
   },
@@ -51,7 +59,16 @@
   "name": "plan-issue",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "bb766ae70597ac965da41cf0acc5926e45e0ef9adad66e72fa4f19535013292a"
+    "hash": "c5301cef91cbe1fc3ae37d4e41c7e351a1c39d4c4b61ff72f3158f98fc8bfb4d"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "signature": "oUoApeO0Zmie90RhYBiFFLY47OAOgRTS2GPlKbMN3aE3jdMR3mz0MxP4PfVr6CXac7bkDLkbymdl4lrSaNFSAw==",
+    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
+    "signed_at": "2026-07-26T12:47:43.066Z",
+    "covers": "frontmatter+body",
+    "key_id": "imboard-ai",
+    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
   }
 }
 ---
@@ -98,6 +115,24 @@ Based on the issue description and comments:
 3. Check for existing patterns, utilities, or abstractions that should be reused
 4. If `base_branch` is not `main`, ensure you are exploring code on `base_branch` (it may have changes not yet on main)
 
+### Step 4b: Reachability Check (REQUIRED before planning any new state/flow)
+
+If the issue introduces a NEW state, branch, flow, or user-reachable condition, establish that real input can actually reach it **before** planning the build. Building unreachable states is a top source of wasted work — code that gets shipped and then ripped out once it turns out nothing ever triggers it.
+
+For each new state/flow the change would introduce:
+
+1. **What real input reaches this state?** Trace the concrete trigger — which user action, API payload, data-record shape, or config produces it.
+2. **Does production data confirm it happens?** Do not reason from first principles — query real data. Use the access method described by the `prod_data_access` parameter to run a **read-only** count of the triggering condition.
+3. **Record the evidence** (the query and the result count) in the planning document's "Reachability Evidence" section.
+
+Decision rule:
+
+- **0 occurrences in prod** → the state is currently unreachable. Do NOT plan the build. Add to Open Questions: _"Reachability unconfirmed — prod shows 0 occurrences of `<trigger>`. Confirm whether this state is real or imminent before building."_ and treat it as an escalation.
+- **>0 occurrences** → reachable; proceed, and cite the count as justification in the plan.
+- **No prod access, or not a data-reachable state** (pure UI, infra, refactor, copy change) → state explicitly why a data check is N/A and proceed.
+
+Skip this step only for issues that add no new reachable state (refactors, copy changes, dependency bumps, pure infra).
+
 ### Step 5: Write Planning Document
 
 Create (or overwrite) `PLANNING-<issue_number>-<slug>.md` in the worktree_path with this structure:
@@ -114,6 +149,11 @@ Include any clarifications or updated requirements from comments.>
 1. <First change — what and why>
 2. <Second change — what and why>
 3. ...
+
+## Reachability Evidence
+<For each NEW state/flow the approach introduces: the trigger, the prod query run, and the result count.
+State "N/A — no new reachable state" for refactors / infra / copy changes.>
+- State: <name> | Trigger: <what produces it> | Prod check: <query> → <N occurrences> | Verdict: reachable / UNREACHABLE (escalated) / N/A
 
 ## Files to Modify
 - `path/to/file.ts` — <what changes and why>
@@ -170,6 +210,7 @@ Visual review: required / not required
 
 - [ ] Issue body and ALL comments were read
 - [ ] Relevant code was explored on the correct base branch
+- [ ] Reachability check performed for every new state/flow (prod data cited, or N/A justified); unreachable states escalated, not built
 - [ ] Planning file follows the `PLANNING-{number}-{slug}.md` naming convention
 - [ ] All sections are populated (Problem, Approach, Files, Risk, Tests)
 - [ ] Existing utilities and patterns were identified in "Reusable Code" section
