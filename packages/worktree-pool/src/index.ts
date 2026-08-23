@@ -1,7 +1,9 @@
 export {
   claim,
+  detect,
   gc,
   init,
+  readPoolFileConfig,
   refresh,
   replenish,
   resolvePoolDir,
@@ -9,4 +11,5 @@ export {
   status,
 } from './pool-actions';
 export * from './pool-state';
+export * from './project-env';
 export * from './types';

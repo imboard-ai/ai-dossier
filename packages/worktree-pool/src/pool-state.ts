@@ -1,10 +1,65 @@
 import {
+  DEFAULT_BASE_REF,
   DEFAULT_CONFIG,
   type PoolConfig,
+  type PoolFileConfig,
   type PoolState,
   type PoolWorktree,
   SCHEMA_VERSION,
 } from './types';
+
+/**
+ * Normalize raw `.worktree-pool.json` contents into a `PoolFileConfig`.
+ *
+ * Lenient by design — a malformed optional key is dropped rather than thrown,
+ * so a hand-edited config can never wedge the pool. `pool_dir` is returned as
+ * written (callers resolve it against the git root).
+ */
+export function normalizePoolFileConfig(raw: unknown): PoolFileConfig {
+  const cfg: PoolFileConfig = { base_ref: DEFAULT_BASE_REF };
+  if (!raw || typeof raw !== 'object') return cfg;
+  const obj = raw as Record<string, unknown>;
+
+  if (typeof obj.pool_dir === 'string' && obj.pool_dir.length > 0) {
+    cfg.pool_dir = obj.pool_dir;
+  }
+
+  if (typeof obj.project_subdir === 'string') {
+    const trimmed = obj.project_subdir
+      .trim()
+      .replace(/^\.\/+/, '')
+      .replace(/[/\\]+$/, '');
+    if (trimmed.length > 0 && trimmed !== '.') {
+      cfg.project_subdir = trimmed;
+    }
+  }
+
+  if (Array.isArray(obj.warm_commands)) {
+    const commands = obj.warm_commands.filter(
+      (cmd): cmd is string[] =>
+        Array.isArray(cmd) && cmd.length > 0 && cmd.every((part) => typeof part === 'string')
+    );
+    if (commands.length > 0) {
+      cfg.warm_commands = commands.map((cmd) => [...cmd]);
+    }
+  }
+
+  if (typeof obj.base_ref === 'string' && obj.base_ref.trim().length > 0) {
+    cfg.base_ref = obj.base_ref.trim();
+  }
+
+  return cfg;
+}
+
+/**
+ * Remote name implied by a base ref (`origin/main` -> `origin`). Refs without a
+ * remote prefix (`main`) fall back to `origin`.
+ */
+export function remoteForBaseRef(baseRef: string): string {
+  const slash = baseRef.indexOf('/');
+  if (slash <= 0) return 'origin';
+  return baseRef.slice(0, slash);
+}
 
 export function createEmptyState(configOverrides?: Partial<PoolConfig>): PoolState {
   return {

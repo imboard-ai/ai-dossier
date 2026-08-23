@@ -4,7 +4,9 @@
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/worktree-pool)](https://www.npmjs.com/package/@ai-dossier/worktree-pool)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
-Pre-warmed git worktree pool for instant issue setup. Eliminates the ~3-5 minute cold start (git worktree add + npm install + build) by maintaining a pool of ready-to-use worktrees.
+Pre-warmed git worktree pool for instant issue setup. Eliminates the ~3-5 minute cold start (git worktree add + install + build) by maintaining a pool of ready-to-use worktrees.
+
+Works with pnpm, yarn, bun and npm — the package manager, lockfile and build command are detected from the project, or pinned explicitly in `.worktree-pool.json`.
 
 ## Install
 
@@ -31,6 +33,7 @@ Requires Node.js >= 20.0.0.
 | `worktree-pool refresh` | Fetch origin + rebuild in all warm worktrees |
 | `worktree-pool gc` | Remove stale/orphaned/excess worktrees |
 | `worktree-pool init` | Configure pool directory for this project |
+| `worktree-pool detect [dir]` | Print the detected package-manager env as JSON |
 
 ## Quick Start
 
@@ -61,15 +64,17 @@ worktree-pool gc
 replenish          claim               return
     |                 |                   |
     v                 v                   v
-origin/main ──> [warm worktree] ──> [assigned] ──> [recycled/warm]
-                 npm install         rename to       reset to
+ base_ref  ──> [warm worktree] ──> [assigned] ──> [recycled/warm]
+                 install             rename to       reset to
                  + build             feature branch  temp branch
 ```
 
-1. **Replenish** creates worktrees from `origin/main` on temp branches, runs `npm install` and builds
+1. **Replenish** creates worktrees from `base_ref` (default `origin/main`) on temp branches, then runs the warm commands (install + build)
 2. **Claim** renames a warm worktree, switches to your feature branch — instant setup (~2s)
 3. **Return** recycles the worktree back to pool on a fresh temp branch
 4. **GC** removes stale entries (>72h) and reconciles disk state vs pool state
+
+Claim and return only re-run the warm commands when the project's lockfile changed between the worktree's base commit and `base_ref` — otherwise the existing `node_modules` and build output are reused.
 
 ### Pool State
 
@@ -84,13 +89,67 @@ Concurrent access is protected by atomic `mkdir`-based file locking.
 
 ## Configuration
 
-Default pool settings (configurable via `.pool-state.json`):
+### Pool sizing — `.pool-state.json`
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `target_spares` | 5 | Number of warm spares to maintain |
 | `max_pool_size` | 10 | Maximum total worktrees in pool |
 | `stale_after_hours` | 72 | Hours before a warm worktree is considered stale |
+
+### Project layout — `.worktree-pool.json`
+
+Lives at the repo root. Every key is optional; `worktree-pool init` writes `pool_dir` into it without touching the others.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `pool_dir` | `../worktrees` | Directory holding pool worktrees, relative to the repo root |
+| `project_subdir` | _(none)_ | Package root relative to the worktree root, for repos whose `package.json` is nested (e.g. `"main"`). Warm commands run here, and the lockfile is looked for here |
+| `warm_commands` | _(detected)_ | Explicit warm-up commands as argv arrays. Wins over detection |
+| `base_ref` | `origin/main` | Ref that pool worktrees are branched from and reset to. The remote to fetch is taken from its prefix (`upstream/develop` fetches `upstream`) |
+
+```json
+{
+  "pool_dir": "../worktrees",
+  "project_subdir": "main",
+  "base_ref": "origin/develop",
+  "warm_commands": [
+    ["pnpm", "install", "--frozen-lockfile", "--prefer-offline"],
+    ["pnpm", "run", "build:libs"]
+  ]
+}
+```
+
+### Package-manager detection
+
+When `warm_commands` is not set, the warm-up is derived from the project directory (`<worktree>/<project_subdir>`):
+
+1. **Package manager** — the `packageManager` field in `package.json` wins; otherwise the first lockfile found, probed in the order `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb` / `bun.lock`, `package-lock.json`; otherwise npm.
+2. **Install** — the frozen variant when the lockfile is present, a plain install when it is not (`npm ci`, `pnpm install --frozen-lockfile`, and `yarn install --immutable` all fail without a lockfile).
+3. **Build** — `build:libs` if that script exists, else `build`, else no build step.
+
+| Manager | Lockfile | Install (lockfile present) | Install (no lockfile) |
+|---------|----------|----------------------------|-----------------------|
+| pnpm | `pnpm-lock.yaml` | `pnpm install --frozen-lockfile --prefer-offline` | `pnpm install --prefer-offline` |
+| yarn | `yarn.lock` | `yarn install --immutable` | `yarn install` |
+| bun | `bun.lockb` / `bun.lock` | `bun install` | `bun install` |
+| npm | `package-lock.json` | `npm ci` | `npm install` |
+
+Inspect what would run:
+
+```bash
+worktree-pool detect            # this repo's package root
+worktree-pool detect ./apps/api # any directory
+```
+
+```json
+{
+  "pm": "pnpm",
+  "lockfile": "pnpm-lock.yaml",
+  "installCmd": ["pnpm", "install", "--frozen-lockfile", "--prefer-offline"],
+  "buildCmd": ["pnpm", "run", "build:libs"]
+}
+```
 
 ## Integration
 
