@@ -106,6 +106,21 @@ describe.sequential('pool-cli integration', () => {
     expect(branch).toBe('feature/999-test');
   });
 
+  it('claim accepts --issue 0 (issue zero is not a missing argument)', () => {
+    runPool('replenish --count 1');
+
+    const claimedPath = runPool('claim --issue 0 --branch feature/0-test').trim();
+    expect(claimedPath).toContain('feature-0-test');
+    expect(fs.existsSync(claimedPath)).toBe(true);
+
+    const state = readPoolState();
+    expect(state?.worktrees[0].assigned_to_issue).toBe(0);
+
+    // A missing or non-numeric --issue must still be rejected.
+    expect(() => runPool('claim --branch feature/0-test')).toThrow();
+    expect(() => runPool('claim --issue abc --branch feature/0-test')).toThrow();
+  });
+
   it('claim returns exit 1 when pool is empty', () => {
     expect(() => runPool('claim --issue 999 --branch feature/999-test')).toThrow();
   });
