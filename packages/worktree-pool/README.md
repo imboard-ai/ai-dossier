@@ -31,7 +31,7 @@ Requires Node.js >= 20.0.0.
 | `worktree-pool claim --issue N --branch B` | Claim a warm worktree, print path |
 | `worktree-pool return --path P` | Return worktree to pool for reuse |
 | `worktree-pool refresh` | Fetch origin + rebuild in all warm worktrees |
-| `worktree-pool gc` | Remove stale/orphaned/excess worktrees |
+| `worktree-pool gc [--dry-run] [--yes]` | Remove stale/orphaned pool worktrees (never anything else) |
 | `worktree-pool init` | Configure pool directory for this project |
 | `worktree-pool detect [dir]` | Print the detected package-manager env as JSON |
 
@@ -54,8 +54,9 @@ cd "$WORKTREE_PATH"
 # Return worktree to pool when done
 worktree-pool return --path "$WORKTREE_PATH"
 
-# Clean up stale worktrees
-worktree-pool gc
+# Clean up stale worktrees (prints the plan first, then asks)
+worktree-pool gc --dry-run   # show what would go
+worktree-pool gc --yes       # remove it, no prompt (required when stdin is not a TTY)
 ```
 
 ## How It Works
@@ -72,7 +73,7 @@ replenish          claim               return
 1. **Replenish** creates worktrees from `base_ref` (default `origin/main`) on temp branches, then runs the warm commands (install + build)
 2. **Claim** renames a warm worktree, switches to your feature branch — instant setup (~2s)
 3. **Return** recycles the worktree back to pool on a fresh temp branch
-4. **GC** removes stale entries (>72h) and reconciles disk state vs pool state
+4. **GC** removes stale entries (>72h) and reconciles disk state vs pool state — only for worktrees the pool created (see [Sharing the pool directory](#sharing-the-pool-directory))
 
 Claim and return only re-run the warm commands when the project's lockfile changed between the worktree's base commit and `base_ref` — otherwise the existing `node_modules` and build output are reused.
 
@@ -86,6 +87,47 @@ creating -> warming -> warm -> assigned -> recycling -> warm
 ```
 
 Concurrent access is protected by atomic `mkdir`-based file locking.
+
+## Sharing the pool directory
+
+`pool_dir` may be — and usually is — the same directory you keep your own
+worktrees in. **The pool never touches a worktree it did not create.**
+
+A worktree in `pool_dir` belongs to the pool only when either:
+
+- its path is recorded in `.pool-state.json`, **or**
+- its directory name matches the pool's own `pool-<timestamp>-<pid>` naming
+  **and** it has a `pool/spare-*` temp branch checked out.
+
+Everything else — your branch worktrees, plain directories, even a directory
+that happens to match the pool's naming but is on a branch of yours — is
+*foreign*. Foreign worktrees are listed by `status` and `gc` as
+`foreign, skipped` and are never removed, reset, or cleaned by `gc`, `refresh`,
+or a failed `return`. Branches are held to the same rule: `gc` only ever deletes
+`pool/spare-*` refs.
+
+Because deletions are irreversible for uncommitted work, `gc` also prints the
+exact list it is about to remove and then either asks for confirmation (TTY) or
+requires `--yes`. Use `--dry-run` to see the plan and exit.
+
+```bash
+$ worktree-pool gc --dry-run
+Will remove 1 item(s):
+  [stale] /repo/../worktrees/pool-1750000000000-4242
+      stale past 72h (warmed 2026-08-13T15:13:22.790Z); recorded in .pool-state.json
+
+Foreign, skipped (2) — not created by the pool:
+  /repo/../worktrees/2332-budget-composable-dashboard
+      not recorded in .pool-state.json and the directory name does not match the pool's own pool-<timestamp>-<pid> naming
+  /repo/../worktrees/fix-1173-playwright-start
+      not recorded in .pool-state.json and the directory name does not match the pool's own pool-<timestamp>-<pid> naming
+
+Dry run — nothing was removed.
+```
+
+If a pool worktree's directory has drifted — the recorded path now holds a
+different branch — `gc` drops the stale row from `.pool-state.json` and leaves
+the directory on disk rather than guessing.
 
 ## Configuration
 
