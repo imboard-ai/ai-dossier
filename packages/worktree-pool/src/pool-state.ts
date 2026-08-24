@@ -137,12 +137,22 @@ export function removeWorktree(state: PoolState, id: string): PoolState {
   };
 }
 
+/**
+ * Claim the first warm worktree, optionally skipping ones the caller cannot
+ * use. `isUsable` exists so a corrupted entry (directory on disk, git admin
+ * dir pruned away — imboard-ai/ai-dossier#443) is passed over in favour of the
+ * next warm spare instead of being handed out and failing with a raw
+ * `fatal: not a git repository`.
+ */
 export function claimWorktree(
   state: PoolState,
   issue: number,
-  branch: string
+  branch: string,
+  isUsable?: (worktree: PoolWorktree) => boolean
 ): { state: PoolState; worktree: PoolWorktree } | null {
-  const warm = state.worktrees.find((w) => w.status === 'warm');
+  const warm = state.worktrees.find(
+    (w) => w.status === 'warm' && (isUsable === undefined || isUsable(w))
+  );
   if (!warm) return null;
 
   const updated: PoolWorktree = {
@@ -272,6 +282,12 @@ export interface PoolDirEntryInput {
   existsOnDisk: boolean;
   /** Matching `.pool-state.json` entry, when there is one. */
   stateEntry: PoolWorktree | null;
+  /**
+   * Whether the directory's git admin dir (`.git/worktrees/<id>`) is gone, so
+   * every git command inside it fails with `fatal: not a git repository`.
+   * Undefined when the caller did not look.
+   */
+  adminDirMissing?: boolean;
 }
 
 export interface PoolDirClassification {
@@ -280,6 +296,12 @@ export interface PoolDirClassification {
   owned: boolean;
   /** Human-readable justification, printed by `gc` and `status`. */
   reason: string;
+  /**
+   * Directory is on disk but git has no admin dir for it, so it is unusable
+   * until repaired or removed. Reported by `status` and skipped by `claim`
+   * rather than being handed out and failing mid-operation.
+   */
+  broken: boolean;
 }
 
 /**
@@ -289,16 +311,33 @@ export interface PoolDirClassification {
  * worktree that record describes), or it carries both of the pool's own marks:
  * a `pool-<timestamp>-<pid>` directory name *and* a `pool/spare-*` branch.
  * Everything else is foreign and must never be removed.
+ *
+ * Ownership and brokenness are independent: `broken` says the directory is
+ * unusable, never that it may be deleted.
  */
 export function classifyPoolDirEntry(input: PoolDirEntryInput): PoolDirClassification {
-  const { name, branch, registered, existsOnDisk, stateEntry } = input;
+  const { name, branch, registered, existsOnDisk, stateEntry, adminDirMissing } = input;
   const branchLabel = branch ?? (registered ? 'detached HEAD' : 'no branch');
+
+  // A directory git no longer lists, whose `.git` link points at an admin dir
+  // that is gone. Only claimed for directories we have some reason to believe
+  // were worktrees of ours — a plain scratch directory is merely foreign.
+  const broken =
+    existsOnDisk === true &&
+    registered === false &&
+    adminDirMissing === true &&
+    (stateEntry !== null || isPoolDirName(name));
+  const brokenNote = broken
+    ? ' — its git admin dir is gone (a `git worktree prune` after an unrepaired ' +
+      'rename), so every git command inside it fails'
+    : '';
 
   if (stateEntry) {
     if (!existsOnDisk) {
       return {
         provenance: 'tracked',
         owned: true,
+        broken,
         reason: `recorded in .pool-state.json as ${stateEntry.id}, already gone from disk`,
       };
     }
@@ -308,7 +347,10 @@ export function classifyPoolDirEntry(input: PoolDirEntryInput): PoolDirClassific
       return {
         provenance: 'tracked',
         owned: true,
-        reason: `recorded in .pool-state.json as ${stateEntry.id}, no longer a registered worktree`,
+        broken,
+        reason:
+          `recorded in .pool-state.json as ${stateEntry.id}, no longer a ` +
+          `registered worktree${brokenNote}`,
       };
     }
     if (
@@ -319,12 +361,14 @@ export function classifyPoolDirEntry(input: PoolDirEntryInput): PoolDirClassific
       return {
         provenance: 'tracked',
         owned: true,
+        broken,
         reason: `recorded in .pool-state.json as ${stateEntry.id} (${branchLabel})`,
       };
     }
     return {
       provenance: 'foreign',
       owned: false,
+      broken,
       reason:
         `recorded in .pool-state.json as ${stateEntry.id}, but ${name} now has ` +
         `${branchLabel} checked out instead of ${stateEntry.temp_branch}`,
@@ -335,6 +379,7 @@ export function classifyPoolDirEntry(input: PoolDirEntryInput): PoolDirClassific
     return {
       provenance: 'foreign',
       owned: false,
+      broken,
       reason:
         'not recorded in .pool-state.json and the directory name does not match ' +
         "the pool's own pool-<timestamp>-<pid> naming",
@@ -344,15 +389,17 @@ export function classifyPoolDirEntry(input: PoolDirEntryInput): PoolDirClassific
     return {
       provenance: 'foreign',
       owned: false,
+      broken,
       reason:
         "matches the pool's directory naming but is not a registered git worktree, " +
-        'so its provenance cannot be confirmed',
+        `so its provenance cannot be confirmed${brokenNote}`,
     };
   }
   if (!isPoolTempBranch(branch)) {
     return {
       provenance: 'foreign',
       owned: false,
+      broken,
       reason:
         `matches the pool's directory naming but has ${branchLabel} checked out ` +
         'instead of a pool/spare-* temp branch',
@@ -361,6 +408,7 @@ export function classifyPoolDirEntry(input: PoolDirEntryInput): PoolDirClassific
   return {
     provenance: 'pool-created',
     owned: true,
+    broken,
     reason: `pool-created name with temp branch ${branch}, not recorded in .pool-state.json`,
   };
 }

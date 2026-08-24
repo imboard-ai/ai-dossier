@@ -383,6 +383,48 @@ function realpathOrSelf(p: string): string {
 }
 
 /**
+ * Absolute path of the git admin dir a linked worktree points at, or `null`
+ * when the directory carries no readable `.git` link. A directory holding a
+ * real `.git` directory (a whole repo, not a linked worktree) reports itself.
+ */
+function resolveWorktreeAdminDir(absPath: string): string | null {
+  const dotGit = path.join(absPath, '.git');
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(dotGit);
+  } catch {
+    return null;
+  }
+  if (stat.isDirectory()) return dotGit;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(dotGit, 'utf-8');
+  } catch {
+    return null;
+  }
+  const match = /^gitdir:\s*(.+)$/m.exec(raw);
+  if (!match) return null;
+  const target = match[1].trim();
+  if (target.length === 0) return null;
+  return path.isAbsolute(target) ? target : path.resolve(absPath, target);
+}
+
+/**
+ * True when a directory that is on disk has lost the git admin dir behind it.
+ *
+ * This is the #443 corruption: a rename repaired without its new path leaves a
+ * dangling `gitdir` forward link, and the next `git worktree prune` deletes
+ * `.git/worktrees/<id>`. The directory survives with a `.git` file pointing at
+ * nothing, so every git command inside it fails with
+ * `fatal: not a git repository`.
+ */
+function isWorktreeAdminDirMissing(absPath: string): boolean {
+  if (!fs.existsSync(absPath)) return false;
+  const adminDir = resolveWorktreeAdminDir(absPath);
+  return adminDir === null || !fs.existsSync(adminDir);
+}
+
+/**
  * Absolute worktree path -> checked-out branch, from `git worktree list`.
  * A registered worktree with a detached HEAD maps to `null`.
  */
@@ -452,6 +494,7 @@ function classifyPath(ctx: OwnershipContext, absPath: string): PoolDirEntryRepor
       branch: ctx.branches.get(resolved) ?? null,
       provenance: 'foreign',
       owned: false,
+      broken: false,
       reason: `outside the pool directory (${poolDirReal})`,
     };
   }
@@ -463,6 +506,7 @@ function classifyPath(ctx: OwnershipContext, absPath: string): PoolDirEntryRepor
     registered,
     existsOnDisk: fs.existsSync(resolved),
     stateEntry: ctx.state.worktrees.find((w) => w.path === name) ?? null,
+    adminDirMissing: registered ? false : isWorktreeAdminDirMissing(resolved),
   });
 
   return {
@@ -486,14 +530,36 @@ function scanPoolDir(ctx: OwnershipContext): PoolDirEntryReport[] {
   return reports;
 }
 
-/** Foreign worktrees found in the pool directory, for reporting. */
-function foreignInPoolDir(
+/**
+ * Split the pool directory into the two things worth reporting: worktrees the
+ * pool did not create, and entries corrupted on disk (#443).
+ *
+ * A corrupted entry is listed only under `broken` — reporting it as foreign as
+ * well would read as two separate problems with one directory.
+ */
+function reportPoolDirEntries(
   gitRoot: string,
   poolDir: string,
   state?: PoolState
-): PoolDirEntryReport[] {
-  const ctx = buildOwnershipContext(gitRoot, poolDir, state);
-  return scanPoolDir(ctx).filter((e) => !e.owned);
+): { foreign: PoolDirEntryReport[]; broken: PoolDirEntryReport[] } {
+  const entries = scanPoolDir(buildOwnershipContext(gitRoot, poolDir, state));
+  const broken = entries.filter((e) => e.broken);
+  const brokenPaths = new Set(broken.map((e) => e.path));
+  return {
+    foreign: entries.filter((e) => !e.owned && !brokenPaths.has(e.path)),
+    broken,
+  };
+}
+
+/**
+ * Corrupted pool directories: still on disk, but git has no admin dir for them
+ * (#443). Reported so a broken pool is visible rather than surfacing as a raw
+ * `fatal: not a git repository` from whichever command touched it first.
+ */
+export function findBrokenEntries(): PoolDirEntryReport[] {
+  const gitRoot = findGitRoot();
+  const poolDir = resolvePoolDirSync(gitRoot);
+  return reportPoolDirEntries(gitRoot, poolDir).broken;
 }
 
 // --- Destroy helper ---
@@ -634,13 +700,33 @@ export async function replenish(
   return { created, errors };
 }
 
-export function claim(issue: number, branch: string): { path: string } | null {
+export interface ClaimResult {
+  /** Absolute path of the claimed worktree. */
+  path: string;
+  /**
+   * Warm entries passed over because they are corrupted on disk (#443). The
+   * claim still succeeds; these are reported so the pool can be repaired.
+   */
+  broken: PoolDirEntryReport[];
+}
+
+export function claim(issue: number, branch: string): ClaimResult | null {
   const gitRoot = findGitRoot();
   const cfg = readPoolFileConfig(gitRoot);
   const poolDir = resolvePoolDirSync(gitRoot);
 
+  // A warm entry whose directory lost its git admin dir would fail every git
+  // command with a raw `fatal: not a git repository`. Skip it and take the
+  // next warm spare instead, reporting what was passed over.
+  const brokenSkipped: PoolDirEntryReport[] = [];
   const result = withLock(poolDir, (state) => {
-    const claimed = claimFromState(state, issue, branch);
+    const ctx = buildOwnershipContext(gitRoot, poolDir, state);
+    const claimed = claimFromState(state, issue, branch, (candidate) => {
+      const report = classifyPath(ctx, toAbs(poolDir, candidate.path));
+      if (!report.broken) return true;
+      brokenSkipped.push(report);
+      return false;
+    });
     if (!claimed) return { state, result: null };
     return { state: claimed.state, result: claimed.worktree };
   });
@@ -678,10 +764,15 @@ export function claim(issue: number, branch: string): { path: string } | null {
     // Create issue branch
     git(['checkout', '-b', branch], { cwd: absPath });
 
-    // Rename directory
+    // Rename directory.
+    // `git worktree repair` must be given the *new* path: a pathless repair
+    // only fixes the worktree->repo back-link, leaving the repo-side
+    // `.git/worktrees/<id>/gitdir` forward link pointing at the old location.
+    // The next `git worktree prune` then sees a dangling gitdir, deletes the
+    // admin dir, and the renamed worktree is corrupted (#443).
     if (absPath !== newAbsPath && !fs.existsSync(newAbsPath)) {
       fs.renameSync(absPath, newAbsPath);
-      git(['worktree', 'repair'], { cwd: gitRoot });
+      git(['worktree', 'repair', newAbsPath], { cwd: gitRoot });
     }
 
     // Delete temp branch
@@ -701,7 +792,7 @@ export function claim(issue: number, branch: string): { path: string } | null {
       result: undefined,
     }));
 
-    return { path: newAbsPath };
+    return { path: newAbsPath, broken: brokenSkipped };
   } catch (err) {
     // Revert claim on failure
     withLock(poolDir, (state) => ({
@@ -756,7 +847,9 @@ export function returnWorktree(worktreePath: string): void {
         throw new Error(`Recycle target already exists: ${newAbsPath}`);
       }
       fs.renameSync(absPath, newAbsPath);
-      git(['worktree', 'repair'], { cwd: gitRoot });
+      // Repair the moved worktree by its new path — see the note in `claim`;
+      // a pathless repair leaves a dangling gitdir for `prune` to delete (#443).
+      git(['worktree', 'repair', newAbsPath], { cwd: gitRoot });
     }
 
     const currentBase = git(['rev-parse', cfg.base_ref], { cwd: gitRoot });
@@ -1055,14 +1148,18 @@ export function status(): ReturnType<typeof getPoolStatus> & {
   pool_dir: string;
   /** Worktrees sharing the pool directory that the pool did not create. */
   foreign: PoolDirEntryReport[];
+  /** Directories on disk that git no longer has an admin dir for (#443). */
+  broken: PoolDirEntryReport[];
 } {
   const gitRoot = findGitRoot();
   const poolDir = resolvePoolDirSync(gitRoot);
   const state = readState(poolDir);
+  const { foreign, broken } = reportPoolDirEntries(gitRoot, poolDir, state);
   return {
     ...getPoolStatus(state),
     pool_dir: poolDir,
-    foreign: foreignInPoolDir(gitRoot, poolDir, state),
+    foreign,
+    broken,
   };
 }
 
