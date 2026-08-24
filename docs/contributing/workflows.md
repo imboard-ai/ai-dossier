@@ -16,6 +16,7 @@ This document describes all GitHub Actions workflows in the Dossier project, the
 
 | Workflow | File | Trigger | Purpose |
 |----------|------|---------|---------|
+| CI | `ci.yml` | Pull request to main | Lint, build, test, and enforce version bumps on publishable packages |
 | Sign | `sign.yml` | Manual | Test AWS KMS signing for dossier authentication |
 | Publish Packages | `publish-packages.yml` | Push to main / Manual | Publish npm packages to the public npm registry |
 
@@ -304,6 +305,18 @@ git push
 
 # Or use workflow with version bump
 Actions → Publish Packages → Run workflow → Select "patch"
+```
+
+### CI Fails: "Version-bump check FAILED"
+
+**Problem**: The PR changes a publishable package's `src/` or `bin/` but its `package.json`
+version still matches the base branch. The publish workflow would skip it as already published.
+
+**Solution**: Bump the package's version, or apply the `no-release-needed` label when the change
+needs no release:
+```bash
+cd cli
+npm version patch --no-git-tag-version
 ```
 
 ### Workflow Fails: "Permission denied" (Publishing)

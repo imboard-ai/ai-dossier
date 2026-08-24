@@ -37,6 +37,7 @@ Use GitHub Discussions for:
 - Keep commits focused and use descriptive messages
 - Include tests or runnable examples when applicable
 - Update documentation to reflect behavior changes
+- **Bump the version** of any publishable package whose `src/` or `bin/` you change (see [Release Process](#release-process))
 - Add validation steps to any effectful examples
 - Reference related issues with `Fixes #123` or `Relates to #456`
 
@@ -224,6 +225,21 @@ All submissions require review. We use GitHub pull requests for this purpose.
 ## Release Process
 
 Packages are published to the public npm registry under the `@ai-dossier` scope.
+
+### Version Bumps Are Enforced on PRs
+
+The publish workflow skips any package whose version is already on npm, so a PR that changes
+package source without bumping the version merges but never gets released. CI's `version-bump`
+job (`scripts/check-version-bumps.mjs`) catches this at PR time: it fails when a publishable
+package's `src/` or `bin/` changed and its `package.json` version still matches the base branch.
+Test files under those directories are ignored.
+
+```bash
+cd cli && npm version patch --no-git-tag-version   # or minor, major
+```
+
+If the change genuinely needs no release, apply the **`no-release-needed`** label to the PR to
+skip the check.
 
 ### Tag-based Workflow (Primary)
 

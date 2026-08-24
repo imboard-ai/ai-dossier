@@ -73,6 +73,12 @@ When running the workflow manually:
 - **major**: 1.0.0 → 2.0.0 (breaking changes)
 - **skip**: Don't bump version, just publish current
 
+### Enforced on Pull Requests
+
+CI's `version-bump` job fails a PR that changes a publishable package's `src/` or `bin/` without
+bumping that package's `package.json` version, because the publish workflow silently skips any
+version already on npm. Apply the `no-release-needed` label when a change truly needs no release.
+
 ### Manual Version Bumps
 
 ```bash

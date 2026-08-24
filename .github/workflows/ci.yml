@@ -4,10 +4,22 @@ on:
   pull_request:
     branches:
       - main
+    # `labeled`/`unlabeled` are on top of the default set so the `version-bump`
+    # job's `no-release-needed` escape label takes effect immediately. Without
+    # them, applying the label to an already-red PR re-runs nothing (a manual
+    # re-run replays the original event payload, which lacks the new label), so
+    # the author would have to push an empty commit to clear the check.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+# Every job here only reads the repository. Pinning this explicitly keeps the
+# checked-out PR code (which CI executes) from ever getting a writable
+# GITHUB_TOKEN, regardless of the repo-level default workflow permission.
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -76,8 +88,14 @@ jobs:
         with:
           node-version: 22
 
+      # Never splice `${{ }}` into a `run:` body: the value is substituted
+      # into the script *before* the shell sees it, so PR-controlled data
+      # (base ref, labels, titles) would run as shell. Pass it through `env:`
+      # and read it as a quoted shell variable instead.
       - name: Fetch base branch
-        run: git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: git fetch --no-tags origin -- "$BASE_REF"
 
       - name: Check publishable packages have version bumps
         env:

@@ -34,13 +34,15 @@ their cause, and at least three were made worse by reasoning about how something
 ```bash
 make build-all    # build core → mcp-server + cli (skip lint)
 make build        # lint then build
-make test         # test all workspaces
+make test         # test all workspaces + repo scripts (scripts/*.test.mjs)
 make check        # biome format + lint with auto-fix
 ```
 
 - Node 20+ required (vitest v4 + vite v7 dropped Node 18)
 - Linter/formatter: **Biome** (not ESLint/Prettier) — `npx biome check --write .`
 - Build order: core first, then mcp-server and cli (both depend on core)
+- Changing a publishable package's `src/`/`bin/` requires bumping that package's `package.json`
+  version — CI's `version-bump` job fails the PR otherwise (label `no-release-needed` opts out)
 - MCP integration: see `mcp-server/README.md`
 
 ## Publishing dossiers and skills

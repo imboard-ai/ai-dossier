@@ -7,11 +7,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   analyze,
+  CheckUnavailableError,
   discoverPackages,
   ESCAPE_LABEL,
   formatReport,
   isReleaseRelevant,
   run,
+  versionAtRef,
 } from './check-version-bumps.mjs';
 
 const SCRIPT_PATH = fileURLToPath(new URL('./check-version-bumps.mjs', import.meta.url));
@@ -23,13 +25,11 @@ const PACKAGES = [
   { dir: 'packages/worktree-pool', name: '@ai-dossier/worktree-pool', version: '0.5.3' },
 ];
 
-/** Base versions identical to HEAD — i.e. nothing was bumped. */
-const UNBUMPED = {
-  'packages/core': '1.4.1',
-  cli: '0.10.0',
-  'mcp-server': '1.4.1',
-  'packages/worktree-pool': '0.5.3',
-};
+/**
+ * Base versions identical to HEAD — i.e. nothing was bumped. Derived from
+ * PACKAGES so the two never drift apart when a fixture version is edited.
+ */
+const UNBUMPED = Object.fromEntries(PACKAGES.map((p) => [p.dir, p.version]));
 
 function check(changedFiles, { baseVersions = UNBUMPED, labels = [], packages = PACKAGES } = {}) {
   return analyze({ changedFiles, packages, baseVersions, labels });
@@ -154,6 +154,24 @@ describe('formatReport — AC3: message names the package and the exact fix', ()
     const report = formatReport(check(['cli/src/a.ts', 'mcp-server/src/b.ts']));
     expect(report).toContain('Fix: bump @ai-dossier/cli version');
     expect(report).toContain('Fix: bump @ai-dossier/mcp-server version');
+  });
+
+  it('truncates a long changed-file list instead of dumping every path', () => {
+    const many = Array.from({ length: 12 }, (_, i) => `cli/src/f${i}.ts`);
+    const changedLine = formatReport(check(many))
+      .split('\n')
+      .find((l) => l.startsWith('  Changed:'));
+
+    expect(changedLine).toMatch(/, \.\.\.$/);
+    expect(changedLine.match(/cli\/src\/f\d+\.ts/g)).toHaveLength(5);
+  });
+
+  it('does not truncate when the list is short enough to show in full', () => {
+    const changedLine = formatReport(check(['cli/src/a.ts', 'cli/src/b.ts']))
+      .split('\n')
+      .find((l) => l.startsWith('  Changed:'));
+
+    expect(changedLine).not.toMatch(/\.\.\./);
   });
 
   it('reports a clean pass without a fix hint', () => {
@@ -321,5 +339,273 @@ describe('discoverPackages + run — end to end against a real git repo', () => 
 
     expect(status).toBe(1);
     expect(stderr).toContain('bump @fixture/lib version');
+  });
+});
+
+describe('unsupported workspaces patterns fail loudly rather than silently passing', () => {
+  let root;
+
+  beforeAll(() => {
+    root = mkdtempSync(join(tmpdir(), 'version-bump-globs-'));
+    mkdirSync(join(root, 'packages/lib/src'), { recursive: true });
+    writeFileSync(
+      join(root, 'packages/lib/package.json'),
+      `${JSON.stringify({ name: '@fixture/lib', version: '1.0.0' }, null, 2)}\n`
+    );
+    // A real repo with a resolvable merge base, so the exit-2 assertions below
+    // can only be caused by the workspaces problem under test — not by the
+    // earlier "cannot compute a merge base" guard.
+    const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    writeFileSync(join(root, 'packages/lib/src/index.js'), 'export const b = 1;\n');
+    writeFileSync(join(root, 'package.json'), '{}\n');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+  });
+
+  afterAll(() => {
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+
+  const writeRootPkg = (workspaces) =>
+    writeFileSync(
+      join(root, 'package.json'),
+      `${JSON.stringify({ name: 'root', private: true, workspaces }, null, 2)}\n`
+    );
+
+  it('still expands the supported trailing-/* form', () => {
+    writeRootPkg(['packages/*']);
+    expect(discoverPackages(root).map((p) => p.dir)).toEqual(['packages/lib']);
+  });
+
+  it('throws on a glob shape it cannot expand instead of yielding zero packages', () => {
+    // A silent empty expansion is the dangerous outcome: every package would be
+    // unguarded while the check still reported green.
+    writeRootPkg(['packages/**']);
+    expect(() => discoverPackages(root)).toThrow(CheckUnavailableError);
+    // Pinned to the glob-specific wording on purpose: the generic "no publishable
+    // package was discovered" error also names the pattern, so a looser matcher
+    // would still pass if the glob guard were deleted.
+    expect(() => discoverPackages(root)).toThrow(/glob shape this guard cannot expand/);
+  });
+
+  it('throws on an unexpandable glob even when other entries do yield packages', () => {
+    // The dangerous partial case: `cli` resolves, so the package list is non-empty
+    // and the "discovered nothing" backstop never fires — yet `packages/**`
+    // contributed zero packages and left packages/lib silently unguarded.
+    mkdirSync(join(root, 'cli/src'), { recursive: true });
+    writeFileSync(
+      join(root, 'cli/package.json'),
+      `${JSON.stringify({ name: '@fixture/cli', version: '1.0.0' }, null, 2)}\n`
+    );
+    writeRootPkg(['packages/**', 'cli']);
+    expect(() => discoverPackages(root)).toThrow(/glob shape this guard cannot expand/);
+    rmSync(join(root, 'cli'), { recursive: true, force: true });
+  });
+
+  it('rejects a non-string workspaces entry rather than crashing on it later', () => {
+    writeRootPkg(['packages/*', 42]);
+    expect(() => discoverPackages(root)).toThrow(CheckUnavailableError);
+    expect(() => discoverPackages(root)).toThrow(/non-string entry/);
+  });
+
+  it('reaches the check at all — a supported workspaces list exits 0 here', () => {
+    // Baseline for the two exit-2 cases below: same repo, same args, only the
+    // workspaces field differs.
+    writeRootPkg(['packages/*']);
+    const out = [];
+    const code = run(['--repo-root', root, '--base', 'HEAD', '--head', 'HEAD'], {
+      log: (m) => out.push(m),
+      error: (m) => out.push(m),
+    });
+    expect(code).toBe(0);
+  });
+
+  it('surfaces the failure as exit code 2, never 0', () => {
+    writeRootPkg(['packages/**']);
+    const out = [];
+    const code = run(['--repo-root', root, '--base', 'HEAD', '--head', 'HEAD'], {
+      log: (m) => out.push(m),
+      error: (m) => out.push(m),
+    });
+    expect(code).toBe(2);
+    expect(out.join('\n')).toContain('could not run');
+  });
+
+  it('reports a malformed root package.json as could-not-run, not as a pass', () => {
+    writeFileSync(join(root, 'package.json'), '{ not json');
+    const out = [];
+    const code = run(['--repo-root', root, '--base', 'HEAD', '--head', 'HEAD'], {
+      log: (m) => out.push(m),
+      error: (m) => out.push(m),
+    });
+    expect(code).toBe(2);
+    expect(out.join('\n')).toContain('could not run');
+  });
+});
+
+describe('formatReport — CI log states what was compared', () => {
+  const context = {
+    base: 'origin/main',
+    head: 'HEAD',
+    mergeBase: '0123456789abcdef0123456789abcdef01234567',
+    changedFileCount: 7,
+    packageCount: 4,
+  };
+
+  it('leads every report with the base ref, merge base and counts', () => {
+    for (const result of [
+      check(['README.md']),
+      check(['cli/src/a.ts']),
+      check(['cli/src/a.ts'], { baseVersions: { ...UNBUMPED, cli: '0.9.1' } }),
+      check(['cli/src/a.ts'], { labels: [ESCAPE_LABEL] }),
+    ]) {
+      const report = formatReport({ ...result, context });
+      expect(report.split('\n')[0]).toContain("base 'origin/main'");
+      expect(report.split('\n')[0]).toContain('merge base 0123456789ab');
+      expect(report.split('\n')[0]).toContain('7 changed file(s)');
+      expect(report.split('\n')[0]).toContain('4 publishable package(s)');
+    }
+  });
+});
+
+describe('formatReport — escape label names what it waived', () => {
+  it('lists the packages the label let through', () => {
+    const report = formatReport(check(['cli/src/a.ts'], { labels: [ESCAPE_LABEL] }));
+    expect(report).toContain('SKIPPED');
+    expect(report).toContain('@ai-dossier/cli');
+    expect(report).toContain('version 0.10.0 unchanged');
+  });
+
+  it('says plainly that nothing was waived when nothing would have failed', () => {
+    const report = formatReport(check(['README.md'], { labels: [ESCAPE_LABEL] }));
+    expect(report).toContain('No publishable package needs a version bump');
+    expect(report).not.toContain('unchanged.');
+  });
+});
+
+describe('never fails open — a check that cannot run exits 2, not 0', () => {
+  const repos = [];
+
+  const makeRepo = (rootPkg, files = {}) => {
+    const repo = mkdtempSync(join(tmpdir(), 'version-bump-guard-open-'));
+    repos.push(repo);
+    const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    writeFileSync(join(repo, 'package.json'), `${JSON.stringify(rootPkg, null, 2)}\n`);
+    for (const [rel, body] of Object.entries(files)) {
+      mkdirSync(join(repo, rel, '..'), { recursive: true });
+      writeFileSync(join(repo, rel), body);
+    }
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    git('branch', 'base-ref');
+    mkdirSync(join(repo, 'cli/src'), { recursive: true });
+    writeFileSync(join(repo, 'cli/src/index.js'), 'export const a = 2;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'change cli src');
+    return repo;
+  };
+
+  const runIn = (repo, argv = []) => {
+    const out = [];
+    const code = run(['--repo-root', repo, '--base', 'base-ref', ...argv], {
+      log: (m) => out.push(m),
+      error: (m) => out.push(m),
+    });
+    return { code, out: out.join('\n') };
+  };
+
+  afterAll(() => {
+    for (const repo of repos) rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('exits 2 when the root package.json has no workspaces field', () => {
+    const repo = makeRepo(
+      { name: 'root', private: true },
+      {
+        'cli/package.json': '{"name":"@fixture/cli","version":"1.0.0"}\n',
+        'cli/src/index.js': 'export const a = 1;\n',
+      }
+    );
+    const { code, out } = runIn(repo);
+    expect(code).toBe(2);
+    expect(out).toContain('`workspaces`');
+    expect(out).toContain('checking nothing');
+  });
+
+  it('exits 2 when every workspace is private, so nothing is discoverable', () => {
+    const repo = makeRepo(
+      { name: 'root', private: true, workspaces: ['cli'] },
+      {
+        'cli/package.json': '{"name":"@fixture/cli","version":"1.0.0","private":true}\n',
+        'cli/src/index.js': 'export const a = 1;\n',
+      }
+    );
+    const { code, out } = runIn(repo);
+    expect(code).toBe(2);
+    expect(out).toContain('no publishable package was discovered');
+    expect(out).toContain('cli (private)');
+  });
+
+  it('exits 2 rather than silently skipping a workspace with unparseable package.json', () => {
+    const repo = makeRepo(
+      { name: 'root', private: true, workspaces: ['cli', 'lib'] },
+      {
+        'cli/package.json': '{"name":"@fixture/cli", "version": OOPS}\n',
+        'cli/src/index.js': 'export const a = 1;\n',
+        'lib/package.json': '{"name":"@fixture/lib","version":"1.0.0"}\n',
+      }
+    );
+    const { code, out } = runIn(repo);
+    expect(code).toBe(2);
+    expect(out).toContain('cli/package.json');
+    expect(out).toContain('would silently exempt it');
+  });
+
+  it('exits 2 when the root package.json itself is unparseable', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'version-bump-guard-open-'));
+    repos.push(repo);
+    const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    writeFileSync(join(repo, 'package.json'), '{ not json\n');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+    git('branch', 'base-ref');
+
+    const { code, out } = runIn(repo);
+    expect(code).toBe(2);
+    expect(out).toContain('not valid JSON');
+  });
+
+  it('exits 2 on a missing or malformed argument instead of guessing', () => {
+    expect(run(['--base'], { log: () => {}, error: () => {} })).toBe(2);
+    expect(
+      run(['--repo-root', '.', '--base', '--labels', 'x'], { log: () => {}, error: () => {} })
+    ).toBe(2);
+    expect(run(['--totally-unknown'], { log: () => {}, error: () => {} })).toBe(2);
+
+    const out = [];
+    run(['--base', 'origin/'], { log: (m) => out.push(m), error: (m) => out.push(m) });
+    expect(out.join('\n')).toContain('pull_request');
+  });
+
+  it('versionAtRef distinguishes "absent on base" from "cannot read"', () => {
+    const repo = makeRepo(
+      { name: 'root', private: true, workspaces: ['cli'] },
+      {
+        'cli/package.json': '{"name":"@fixture/cli","version":"1.0.0"}\n',
+        'cli/src/index.js': 'export const a = 1;\n',
+      }
+    );
+    expect(versionAtRef(repo, 'base-ref', 'cli')).toBe('1.0.0');
+    expect(versionAtRef(repo, 'base-ref', 'packages/never-existed')).toBe(null);
+    expect(() => versionAtRef(repo, 'no-such-ref', 'cli')).toThrow(CheckUnavailableError);
   });
 });
