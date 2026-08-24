@@ -12,19 +12,9 @@ import {
   writeResolution,
 } from '../cache-resolver';
 import { getConfig } from '../config';
+import { formatAge } from '../duration';
 import { printRegistryErrors, safeDossierPath } from '../helpers';
 import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
-
-function formatAge(ageMs: number): string {
-  const seconds = Math.round(ageMs / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.round(hours / 24);
-  return `${days}d`;
-}
 
 interface CachedDossierEntry {
   name: string;

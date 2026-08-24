@@ -350,15 +350,18 @@ ai-dossier runstate verify --issue 440
 | `last` | Prints the most recent milestone on the issue, parsed | no |
 | `verify` | Runs the gate's resume verification and prints `resume_from` + `resume_context` | no |
 | `mint` | Prints a fresh run id (`r-<issue>-<hex>`) | no |
+| `stats` | Reports per-phase durations derived from the trail's `at=` stamps; aggregates across a `--issues` selection | no |
 
-`last` and `verify` are strictly read-only — they only run `gh issue view`, `gh pr view`,
-`git ls-remote`/`rev-parse`, and `stat`, so they work fine without push access to the
-repository.
+`last`, `verify`, and `stats` are strictly read-only — they only run `gh issue view`,
+`gh pr view`, `git ls-remote`/`rev-parse`, and `stat`, so they work fine without push
+access to the repository.
 
-Every subcommand takes `--issue <n>` (a positive integer — the number only, not a URL or
-a `#`-prefixed string). `post`, `last`, and `verify` additionally take `--repo
-<owner/name>` (a bare slug, not a URL; defaults to the repository `gh` resolves for the
-current directory) and `--json`. `mint` takes `--issue` and nothing else.
+`--issue <n>` (a positive integer — the number only, not a URL or a `#`-prefixed string)
+is required by `post`, `last`, `verify`, and `mint`; `stats` takes either `--issue <n>` or
+`--issues <list>`, exactly one of the two. `post`, `last`, `verify`, and `stats`
+additionally take `--repo <owner/name>` (a bare slug, not a URL; defaults to the
+repository `gh` resolves for the current directory) and `--json`. `mint` takes `--issue`
+and nothing else.
 
 `last` prints the milestone's own `key=value` lines, so the output is already in the
 shape a shell or a dossier reads:
@@ -436,6 +439,11 @@ This table is the executable copy of the "Runstate Milestones" table in
 | `ship` (1st, before the CI wait) | `awaiting-merge` | `pr` `head` `ci_fix_attempts` |
 | `ship` (2nd, after merge + teardown) | `done`, `blocked` | `pr` `merge_commit` `ci_fix_attempts` `cleanup` |
 | `report` | `done` | `pr` `traps_added` |
+
+A phase may carry keys beyond its required ones, and one is worth knowing about:
+`gate` should also pass `model=<agent model id>`, which is what lets
+[`runstate stats`](#stats) break whole-run durations down by model. Runs whose trail
+carries the key nowhere are bucketed as `unknown`.
 
 The `Statuses` column is a closed set: a status not listed for a phase is rejected, so
 `report` cannot be `blocked` and only `ship` may be `awaiting-merge`. Any phase that
@@ -556,6 +564,66 @@ above.
 
 `--json` returns the same fields as an object (`resume_from`, `run_id`, `verified`,
 `resume_context`, plus `hard_block`, `note`, and `warnings` when they apply).
+
+### stats
+
+Every milestone stamps `at=`, so a run's per-phase durations are already in the trail —
+nothing has to be measured while the run happens. `stats` is the read side of that:
+
+```bash
+ai-dossier runstate stats --issue 440
+```
+
+```
+Issue #440 — run r-440-ab56, model claude-opus-5 — total 49m 6s (2946s)
+  phase       status          started               ended                       duration
+  gate        done            -                     2026-08-24T07:42:54Z               -
+  setup       done            2026-08-24T07:42:54Z  2026-08-24T07:45:11Z   2m 17s (137s)
+  plan        done            2026-08-24T07:45:11Z  2026-08-24T07:47:08Z   1m 57s (117s)
+  implement   done            2026-08-24T07:47:08Z  2026-08-24T07:55:05Z   7m 57s (477s)
+  review      done            2026-08-24T07:55:05Z  2026-08-24T08:24:06Z  29m 1s (1741s)
+  ship        awaiting-merge  2026-08-24T08:24:06Z  2026-08-24T08:25:39Z    1m 33s (93s)
+  merge-wait  done            2026-08-24T08:25:39Z  2026-08-24T08:31:13Z   5m 34s (334s)
+  report      done            2026-08-24T08:31:13Z  2026-08-24T08:32:00Z       47s (47s)
+```
+
+A phase starts at the previous milestone's `at=` and ends at its own, so the first
+milestone of a run has no measurable start and reports `-`. The gap between ship's two
+milestones is reported as its own **`merge-wait`** row: it is the one span that measures
+waiting rather than working, and folding it into `ship` would make ship's median a
+function of CI queue depth. A trail with several `run=` ids — a resumed or re-run issue —
+gets one table per run, never pairing one run's milestone with another's.
+
+`--issues` takes a fleet-style selection (`1,2,3`, `1..9`, or mixed `1,2,5..8`, capped at
+200 issues since each costs a `gh` call) and reports the aggregates instead of every
+table: per-phase median/min/max, a per-run total, and a breakdown by the `model=` the gate
+milestone recorded.
+
+```bash
+ai-dossier runstate stats --issues 440,448,451
+```
+
+Trails are imperfect in practice, and `stats` reports what it could not measure rather
+than guessing:
+
+- A milestone whose `at=` is not a real timestamp — the literal `$(date -u …)` that
+  pre-CLI heredocs pasted verbatim — is skipped **and breaks the chain**, so the next
+  phase reports `-` instead of a duration silently covering two phases.
+- A span that ends before it starts (milestones stamped by clocks that disagree) is
+  reported as negative, and every aggregate row it lands in is marked `⚠ N skewed`.
+- A run with only one usable milestone — the normal state of anything still in flight —
+  has no total, rather than a fabricated `0s` that would drag every median toward zero.
+- An issue with no runstate comments says so, and an issue that cannot be read at all is
+  named and left out while the rest of the selection is still reported.
+
+Warnings go to stderr in both human and `--json` mode, so stdout stays parseable and
+`stats` still exits 0 — a degraded read is not a failure. It exits 1 only when nothing in
+the selection could be read.
+
+`--json` returns `repo`, `issues`, `runs` (each with `run`, `model`, `last_phase`,
+`last_status`, `total_seconds`, and a `phases` array of
+`{phase, status, started_at, ended_at, seconds}`), `aggregates.phases`,
+`aggregates.models`, `issues_without_trail`, `issues_failed`, and `warnings`.
 
 ---
 

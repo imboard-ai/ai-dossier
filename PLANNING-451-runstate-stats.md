@@ -12,12 +12,12 @@ analysis side of the timing decision made in #440.
 
 ## Acceptance Criteria
 
-- [ ] AC1 `ai-dossier runstate stats --issue <n> [--repo owner/name] [--json]`: reads the issue's runstate trail and prints a per-phase table: phase, status, started (prev milestone's at), ended (its at), duration (human + seconds). Multi-run trails (multiple `run=` ids) are grouped per run id; the ship `awaiting-merge`→`done` gap is reported as `merge-wait`.
-- [ ] AC2 `--issues <a,b,c..d>` (list/range, same parsing as fleet) aggregates across issues: per-phase median/min/max duration, per-run total, and a per-`model=` breakdown when gate milestones carry it (gate-issue ≥1.4.1).
-- [ ] AC3 Handles imperfect trails: missing phases, `blocked`/`partial` statuses, literal-unexpanded `at=` values (skip with a warning), and issues with no runstate comments (say so, exit 0).
-- [ ] AC4 `--json` emits machine-readable output (per-run phases array + aggregates); the human table uses tabular alignment.
-- [ ] AC5 Unit tests with fixture trails covering AC1–AC3 (including a real-world-shaped broken trail).
-- [ ] AC6 Read-only: only `gh issue view` calls; no writes, no network beyond gh.
+- [x] AC1 `ai-dossier runstate stats --issue <n> [--repo owner/name] [--json]`: reads the issue's runstate trail and prints a per-phase table: phase, status, started (prev milestone's at), ended (its at), duration (human + seconds). Multi-run trails (multiple `run=` ids) are grouped per run id; the ship `awaiting-merge`→`done` gap is reported as `merge-wait`.
+- [x] AC2 `--issues <a,b,c..d>` (list/range, same parsing as fleet) aggregates across issues: per-phase median/min/max duration, per-run total, and a per-`model=` breakdown when gate milestones carry it (gate-issue ≥1.4.1).
+- [x] AC3 Handles imperfect trails: missing phases, `blocked`/`partial` statuses, literal-unexpanded `at=` values (skip with a warning), and issues with no runstate comments (say so, exit 0).
+- [x] AC4 `--json` emits machine-readable output (per-run phases array + aggregates); the human table uses tabular alignment.
+- [x] AC5 Unit tests with fixture trails covering AC1–AC3 (including a real-world-shaped broken trail).
+- [x] AC6 Read-only: only `gh issue view` calls; no writes, no network beyond gh.
 
 ## Approach
 

@@ -4,14 +4,15 @@
  * Every milestone already stamps `at=`, so a run's per-phase durations are latent in the
  * trail the moment it is written — nothing needs to be measured, stored, or timed at run
  * time. This module is the read side of that decision: it turns the milestones
- * {@link ../runstate!parseMilestones} produces into per-phase spans and aggregates.
+ * {@link ./runstate!parseMilestones} produces into per-phase spans and aggregates.
  *
- * Pure and dependency-free, exactly like `runstate.ts` — no `gh`, no network, no clock, no
- * filesystem — so the arithmetic is unit-testable against fixture trails and the command
- * layer only has to render what it returns.
+ * Pure and dependency-free — no `gh`, no network, no clock, no filesystem — so the
+ * arithmetic is unit-testable against fixture trails and the command layer only has to
+ * render what it returns.
  */
 
-import { type ParsedMilestone, PHASES } from './runstate';
+import { MILLIS_PER_SECOND } from './duration';
+import { type ParsedMilestone, PHASES, type Phase, type Status } from './runstate';
 
 /**
  * The synthetic phase covering the gap between ship's two milestones — the PR is open and
@@ -22,38 +23,40 @@ import { type ParsedMilestone, PHASES } from './runstate';
 export const MERGE_WAIT_PHASE = 'merge-wait';
 
 /**
+ * Phase and status literals this module branches on.
+ *
+ * Annotated with the protocol's own types so a rename in {@link ./runstate!PHASES} or
+ * {@link ./runstate!STATUSES} fails the build here, rather than silently switching off
+ * merge-wait detection and the `model=` lookup — the two things this module exists for.
+ */
+const SHIP_PHASE: Phase = 'ship';
+const GATE_PHASE: Phase = 'gate';
+const AWAITING_MERGE: Status = 'awaiting-merge';
+
+/**
  * Row order for aggregate tables: the protocol's phase order, with `merge-wait` sitting
  * where it happens (between ship and report). Alphabetical order would read
  * `gate, implement, merge-wait, plan, …`, which tells a reader nothing about a pipeline.
  */
 export const STATS_PHASE_ORDER: readonly string[] = (() => {
-  const shipIdx = PHASES.indexOf('ship');
+  const shipIdx = PHASES.indexOf(SHIP_PHASE);
   return [...PHASES.slice(0, shipIdx + 1), MERGE_WAIT_PHASE, ...PHASES.slice(shipIdx + 1)];
 })();
 
-/** The bucket a run lands in when its gate milestone carries no `model=` key. */
+/** The bucket a run lands in when no milestone in the run carries a `model=` key. */
 export const UNKNOWN_MODEL = 'unknown';
 
 /** The group a milestone lands in when it carries no `run=` id. */
 export const UNKNOWN_RUN = 'unknown-run';
 
 /**
- * Most issues a single `--issues` selection may expand to.
- *
- * Each issue costs one `gh issue view` round trip, so a mistyped range (`1..10000`, a
- * transposed `1..99` written `1..999`) would sit there firing thousands of requests before
- * anyone noticed. The cap turns that into an immediate, named error.
- */
-export const MAX_ISSUE_SELECTION = 200;
-
-/**
  * `at=` values that a shell was supposed to expand and did not.
  *
  * Milestones written before the `runstate post` CLI existed were heredocs, and agents
  * pasted `at=$(date -u +%Y-%m-%dT%H:%M:%SZ)` verbatim often enough that real trails carry
- * it (`imboard-ai/imboard-monorepo#3684`). `post` now rejects `$` in any value, so no new
- * milestone can look like this — but the historical trails are exactly the ones worth
- * analysing, so they are skipped with a warning rather than crashing the run.
+ * it (`imboard-ai/imboard-monorepo#3684`). The class also covers backticks, the other
+ * shell-substitution form: `post` rejects `$` outright so no new milestone can carry one,
+ * and a backtick is treated the same here defensively.
  */
 const UNEXPANDED_RE = /[$`]/;
 
@@ -64,10 +67,35 @@ const UNEXPANDED_RE = /[$`]/;
  */
 const TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
-const SECONDS_PER_MINUTE = 60;
-const SECONDS_PER_HOUR = 3600;
-const SECONDS_PER_DAY = 86400;
-const MILLIS_PER_SECOND = 1000;
+/**
+ * Longest a milestone-derived value may be once it reaches a table cell or a warning.
+ *
+ * Every `key=value` in a trail is remote data — anyone who can comment on the issue can
+ * post something shaped like a milestone — so an untruncated value is a 65 KB comment
+ * pasted into an operator's terminal.
+ */
+const MAX_CELL_LENGTH = 120;
+
+/** The replacement drawn in place of a control character. */
+const CONTROL_REPLACEMENT = '�';
+
+/**
+ * Make a milestone-derived value safe to print.
+ *
+ * Control characters are the real hazard, not merely a cosmetic one: `parseMilestone` is
+ * deliberately tolerant and validates nothing but the marker, so `status=` or `model=` can
+ * carry ANSI escapes or a carriage return. Printed raw, those repaint or erase rows of the
+ * table an operator reads to decide whether a run succeeded. They also make `.length`
+ * disagree with the drawn width, which silently destroys column alignment.
+ */
+export function renderValue(value: string): string {
+  let clean = '';
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    clean += code < 0x20 || code === 0x7f ? CONTROL_REPLACEMENT : char;
+  }
+  return clean.length > MAX_CELL_LENGTH ? `${clean.slice(0, MAX_CELL_LENGTH)}…` : clean;
+}
 
 /** One phase span within a run: what ran, when it ended, and how long it took. */
 export interface PhaseTiming {
@@ -86,49 +114,74 @@ export interface PhaseTiming {
 export interface RunStats {
   issue: number;
   run: string;
-  /** The `model=` recorded by the gate milestone (gate-issue ≥1.4.1), or null. */
+  /** The `model=` recorded by the run (see {@link modelOf}), or null. */
   model: string | null;
   phases: PhaseTiming[];
+  /** The last milestone's phase — how far the run actually got. */
+  last_phase: string;
+  /** The last milestone's status, so an in-flight or blocked run is recognisable. */
+  last_status: string;
   /** First usable milestone's `at=`. */
   started_at: string | null;
   /** Last usable milestone's `at=`. */
   ended_at: string | null;
-  /** `started_at` → `ended_at`, or null when the run has fewer than two usable milestones. */
+  /**
+   * `started_at` → `ended_at`, or null when the run has fewer than TWO usable milestones.
+   *
+   * One usable milestone is not a zero-length run — it is a run whose length is unknown,
+   * which is the normal state of anything still in flight. Reporting it as `0` would drag
+   * every median it feeds toward zero with a duration nobody measured.
+   */
   total_seconds: number | null;
 }
 
 /** Median/min/max over every sample of one phase across the selected runs. */
 export interface PhaseAggregate {
   phase: string;
+  /** Spans of this phase that had a measurable duration; unmeasurable ones are excluded. */
   samples: number;
   median_seconds: number;
   min_seconds: number;
   max_seconds: number;
+  /** Samples below zero, i.e. from clock skew — a median over these is not meaningful. */
+  negative_samples: number;
 }
 
 /** Per-`model=` view of whole-run totals — the point of recording `model=` at the gate. */
 export interface ModelAggregate {
   model: string;
   runs: number;
-  /** Runs of this model that had a measurable total. */
+  /** Runs of this model whose total was measurable; the rest are excluded below. */
   samples: number;
   median_total_seconds: number | null;
   min_total_seconds: number | null;
   max_total_seconds: number | null;
+  negative_samples: number;
 }
 
+/** The two cross-run rollups: per-phase spread, and whole-run totals bucketed by model. */
 export interface StatsAggregates {
   phases: PhaseAggregate[];
   models: ModelAggregate[];
 }
 
+/** An issue in the selection that could not be read at all, and why. */
+export interface FailedIssue {
+  issue: number;
+  error: string;
+}
+
 /** Everything `runstate stats` needs to render, for one issue or many. */
 export interface StatsReport {
+  /** The repository the trails were read from, when the caller named one. */
+  repo: string | null;
   issues: number[];
   runs: RunStats[];
   aggregates: StatsAggregates;
   /** Issues in the selection whose trail had no runstate milestones at all. */
   issues_without_trail: number[];
+  /** Issues that could not be read — distinct from an issue that simply has no trail. */
+  issues_failed: FailedIssue[];
   /** Degraded reads: skipped milestones, clock skew, missing run ids. */
   warnings: string[];
 }
@@ -146,109 +199,32 @@ function elapsedSeconds(from: string, to: string): number {
 }
 
 /**
- * Median of a non-empty numeric list. Even counts average the two middle values — stated
- * because the other convention (lower middle) is equally common and the difference shows up
- * in exactly the small sample sizes these trails produce.
+ * Median of a non-empty numeric list, rounded to whole seconds.
+ *
+ * Even counts average the two middle values — stated because the other convention (lower
+ * middle) is equally common and the difference shows up in exactly the small sample sizes
+ * these trails produce.
+ *
+ * @throws when `values` is empty — an empty median is `NaN`, which renders as a
+ * plausible-looking `NaN (NaNs)` cell rather than announcing itself.
  */
 export function median(values: number[]): number {
+  if (values.length === 0) {
+    throw new Error('median() requires at least one sample');
+  }
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
 }
 
-/**
- * Seconds as the largest two units that carry information: `45s`, `5m 3s`, `2h 14m`,
- * `1d 3h`. Two units because one is too coarse to compare runs (`2h` hides 59 minutes) and
- * three is noise at these magnitudes.
- */
-export function formatDuration(seconds: number): string {
-  if (seconds < 0) return `-${formatDuration(-seconds)}`;
-  if (seconds < SECONDS_PER_MINUTE) return `${seconds}s`;
-  if (seconds < SECONDS_PER_HOUR) {
-    return `${Math.floor(seconds / SECONDS_PER_MINUTE)}m ${seconds % SECONDS_PER_MINUTE}s`;
-  }
-  if (seconds < SECONDS_PER_DAY) {
-    const hours = Math.floor(seconds / SECONDS_PER_HOUR);
-    const minutes = Math.floor((seconds % SECONDS_PER_HOUR) / SECONDS_PER_MINUTE);
-    return `${hours}h ${minutes}m`;
-  }
-  const days = Math.floor(seconds / SECONDS_PER_DAY);
-  return `${days}d ${Math.floor((seconds % SECONDS_PER_DAY) / SECONDS_PER_HOUR)}h`;
+/** Smallest value, folded rather than spread — see {@link ./table!renderTable}. */
+function minOf(values: number[]): number {
+  return values.reduce((a, b) => (b < a ? b : a));
 }
 
-/** A duration for the table: human form plus the raw seconds it was derived from. */
-export function formatDurationCell(seconds: number | null): string {
-  return seconds === null ? '-' : `${formatDuration(seconds)} (${seconds}s)`;
-}
-
-/**
- * Expand a fleet-style issue selection — `1,2,3`, `1..9`, or mixed `1,2,5..8` — into a
- * sorted, de-duplicated list.
- *
- * Same grammar as `imboard-ai/git/fleet-cycle`, so an operator can paste the selection they
- * dispatched a fleet with straight into `stats` and measure exactly that set.
- *
- * @throws Error naming the offending token, so a typo in one of nine terms is not reported
- * as a failure of the whole selection.
- */
-export function parseIssueSelection(raw: string): number[] {
-  const trimmed = raw.trim();
-  if (trimmed === '') {
-    throw new Error(`Empty issue selection — expected a list or range, e.g. 1,2,5..8`);
-  }
-
-  const issues = new Set<number>();
-  for (const token of trimmed.split(',')) {
-    const term = token.trim();
-    if (term === '') {
-      throw new Error(`Empty term in issue selection '${raw}' — check for a stray comma`);
-    }
-    for (const issue of expandTerm(term, raw)) issues.add(issue);
-    // Checked inside the loop so an enormous FIRST range fails before the rest is expanded.
-    if (issues.size > MAX_ISSUE_SELECTION) {
-      throw new Error(
-        `Issue selection '${raw}' expands past ${MAX_ISSUE_SELECTION} issues — each one costs a gh call. Narrow the range.`
-      );
-    }
-  }
-
-  return [...issues].sort((a, b) => a - b);
-}
-
-/** One comma-separated term of a selection: a single issue, or an inclusive `a..b` range. */
-function expandTerm(term: string, raw: string): number[] {
-  const range = term.split('..');
-  if (range.length === 1) return [requireIssue(term, raw)];
-  if (range.length !== 2) {
-    throw new Error(`Malformed range '${term}' in '${raw}' — expected <from>..<to>, e.g. 5..8`);
-  }
-
-  const from = requireIssue(range[0], raw);
-  const to = requireIssue(range[1], raw);
-  if (to < from) {
-    throw new Error(`Descending range '${term}' in '${raw}' — write it as ${to}..${from}`);
-  }
-  // Bounded before materialising: `1..1000000` must not allocate a million-entry array on
-  // its way to the selection cap.
-  if (to - from + 1 > MAX_ISSUE_SELECTION) {
-    throw new Error(
-      `Range '${term}' covers ${to - from + 1} issues, past the ${MAX_ISSUE_SELECTION} cap — each one costs a gh call. Narrow it.`
-    );
-  }
-
-  const out: number[] = [];
-  for (let n = from; n <= to; n += 1) out.push(n);
-  return out;
-}
-
-function requireIssue(value: string, raw: string): number {
-  const term = value.trim();
-  if (!/^[1-9]\d*$/.test(term)) {
-    throw new Error(
-      `Invalid issue '${term}' in '${raw}' — expected a positive issue number, e.g. 1,2,5..8`
-    );
-  }
-  return Number(term);
+/** Largest value, folded rather than spread. */
+function maxOf(values: number[]): number {
+  return values.reduce((a, b) => (b > a ? b : a));
 }
 
 /** One issue's trail, as the command layer hands it to {@link buildStatsReport}. */
@@ -290,8 +266,18 @@ function groupByRun(milestones: ParsedMilestone[]): Map<string, ParsedMilestone[
  */
 function phaseNameFor(milestone: ParsedMilestone, previous: ParsedMilestone | null): string {
   const followsAwaitingMerge =
-    previous !== null && previous.phase === 'ship' && previous.status === 'awaiting-merge';
-  return milestone.phase === 'ship' && followsAwaitingMerge ? MERGE_WAIT_PHASE : milestone.phase;
+    previous !== null && previous.phase === SHIP_PHASE && previous.status === AWAITING_MERGE;
+  return milestone.phase === SHIP_PHASE && followsAwaitingMerge
+    ? MERGE_WAIT_PHASE
+    : milestone.phase;
+}
+
+/** How a caller records a degraded read. */
+type Warn = (line: string) => void;
+
+/** Where an issue reference in a warning comes from, so `--repo` is not lost. */
+function issueRef(repo: string | null, issue: number): string {
+  return repo ? `${repo}#${issue}` : `#${issue}`;
 }
 
 /**
@@ -303,22 +289,26 @@ function phaseNameFor(milestone: ParsedMilestone, previous: ParsedMilestone | nu
  * break is `-`, and the warning says which milestone caused it.
  */
 function timePhases(
+  repo: string | null,
   issue: number,
   run: string,
   milestones: ParsedMilestone[],
-  warn: (line: string) => void
+  warn: Warn
 ): RunStats {
   const phases: PhaseTiming[] = [];
   let previous: ParsedMilestone | null = null;
   let firstAt: string | null = null;
   let lastAt: string | null = null;
+  let usable = 0;
+
+  const where = `issue ${issueRef(repo, issue)} run ${renderValue(run)}`;
 
   for (const milestone of milestones) {
     const phase = phaseNameFor(milestone, previous);
 
     if (!isUsableTimestamp(milestone.at)) {
       warn(
-        `issue #${issue} run ${run}: ${milestone.phase || '(no phase)'} milestone has an unusable at= value ('${milestone.at || '(empty)'}') — skipped, and the next phase's duration is reported as unknown`
+        `${where}: ${renderValue(milestone.phase) || '(no phase)'} milestone has an unusable at= value ('${renderValue(milestone.at) || '(empty)'}') — skipped, and the next phase's duration is reported as unknown`
       );
       previous = null;
       continue;
@@ -328,7 +318,7 @@ function timePhases(
     const seconds = startedAt === null ? null : elapsedSeconds(startedAt, milestone.at);
     if (seconds !== null && seconds < 0) {
       warn(
-        `issue #${issue} run ${run}: ${phase} ended before it started (${startedAt} → ${milestone.at}) — reported as a negative duration; the milestones were stamped by clocks that disagree`
+        `${where}: ${renderValue(phase)} ended before it started (${startedAt} → ${milestone.at}) — reported as a negative duration; the milestones were stamped by clocks that disagree`
       );
     }
 
@@ -342,31 +332,37 @@ function timePhases(
 
     if (firstAt === null) firstAt = milestone.at;
     lastAt = milestone.at;
+    usable += 1;
     previous = milestone;
   }
 
-  const model = modelOf(milestones);
+  const last = milestones[milestones.length - 1];
   return {
     issue,
     run,
-    model,
+    model: modelOf(milestones),
     phases,
+    last_phase: last?.phase ?? '',
+    last_status: last?.status ?? '',
     started_at: firstAt,
     ended_at: lastAt,
-    total_seconds: firstAt !== null && lastAt !== null ? elapsedSeconds(firstAt, lastAt) : null,
+    // Two usable milestones are the minimum that bounds a span at both ends.
+    total_seconds:
+      usable >= 2 && firstAt !== null && lastAt !== null ? elapsedSeconds(firstAt, lastAt) : null,
   };
 }
 
 /**
  * The run's `model=`, taken from its gate milestone.
  *
- * Only the gate records it (gate-issue ≥1.4.1) and only that one is authoritative, but a
- * resumed run's later phases may have executed on a different agent — so any milestone
+ * Only the gate is asked to record it (`imboard-ai/git/gate-issue` from 1.4.1 onward — the
+ * `examples/` copy in this repo predates the key), and only that one is authoritative. But
+ * a resumed run's later phases may have executed on a different agent, so any milestone
  * carrying the key is accepted as a fallback rather than reporting `unknown` for a trail
  * that plainly names its model.
  */
 function modelOf(milestones: ParsedMilestone[]): string | null {
-  const gate = milestones.find((m) => m.phase === 'gate' && m.keys.model);
+  const gate = milestones.find((m) => m.phase === GATE_PHASE && m.keys.model);
   if (gate) return gate.keys.model;
   return milestones.find((m) => m.keys.model)?.keys.model ?? null;
 }
@@ -388,8 +384,9 @@ function aggregatePhases(runs: RunStats[]): PhaseAggregate[] {
       phase,
       samples: values.length,
       median_seconds: median(values),
-      min_seconds: Math.min(...values),
-      max_seconds: Math.max(...values),
+      min_seconds: minOf(values),
+      max_seconds: maxOf(values),
+      negative_samples: values.filter((v) => v < 0).length,
     }))
     .sort(byStatsPhaseOrder);
 }
@@ -416,15 +413,33 @@ function aggregateModels(runs: RunStats[]): ModelAggregate[] {
   }
 
   return [...buckets.entries()]
-    .map(([model, bucket]) => ({
-      model,
-      runs: bucket.runs,
-      samples: bucket.totals.length,
-      median_total_seconds: bucket.totals.length > 0 ? median(bucket.totals) : null,
-      min_total_seconds: bucket.totals.length > 0 ? Math.min(...bucket.totals) : null,
-      max_total_seconds: bucket.totals.length > 0 ? Math.max(...bucket.totals) : null,
-    }))
+    .map(([model, bucket]) => {
+      const measured = bucket.totals.length > 0;
+      return {
+        model,
+        runs: bucket.runs,
+        samples: bucket.totals.length,
+        median_total_seconds: measured ? median(bucket.totals) : null,
+        min_total_seconds: measured ? minOf(bucket.totals) : null,
+        max_total_seconds: measured ? maxOf(bucket.totals) : null,
+        negative_samples: bucket.totals.filter((v) => v < 0).length,
+      };
+    })
     .sort((a, b) => a.model.localeCompare(b.model));
+}
+
+/** One aggregate row's skew note, or null when every sample was forwards. */
+export function skewNote(negativeSamples: number): string | null {
+  if (negativeSamples === 0) return null;
+  return `${negativeSamples} skewed`;
+}
+
+export interface StatsInput {
+  trails: IssueTrail[];
+  /** Issues that could not be read at all. */
+  failed?: FailedIssue[];
+  /** The repository the trails came from, for unambiguous issue references. */
+  repo?: string;
 }
 
 /**
@@ -433,11 +448,15 @@ function aggregateModels(runs: RunStats[]): ModelAggregate[] {
  * Takes trails rather than issue numbers so every rule here — grouping, pairing, skipping,
  * aggregating — is testable against fixture milestones without a `gh` in sight.
  */
-export function buildStatsReport(trails: IssueTrail[]): StatsReport {
-  const warnings: string[] = [];
-  const warn = (line: string): void => {
-    if (!warnings.includes(line)) warnings.push(line);
-  };
+export function buildStatsReport(input: StatsInput): StatsReport {
+  const { trails, failed = [], repo = null } = input;
+
+  // Counted rather than de-duplicated: two milestones skipped for the same reason produce
+  // byte-identical warnings, and collapsing them makes an operator under-count what was
+  // dropped. The Map also keeps this linear — `Array.includes` per warning is O(n²) over
+  // remote data, i.e. over however many comments anyone chose to post.
+  const counts = new Map<string, number>();
+  const warn: Warn = (line) => counts.set(line, (counts.get(line) ?? 0) + 1);
 
   const runs: RunStats[] = [];
   const withoutTrail: number[] = [];
@@ -450,46 +469,30 @@ export function buildStatsReport(trails: IssueTrail[]): StatsReport {
     for (const [run, milestones] of groupByRun(trail.milestones)) {
       if (run === UNKNOWN_RUN) {
         warn(
-          `issue #${trail.issue}: ${milestones.length} milestone(s) carry no run= id — grouped together as '${UNKNOWN_RUN}', so their durations may span unrelated runs`
+          `issue ${issueRef(repo, trail.issue)}: ${milestones.length} milestone(s) carry no run= id — grouped together as '${UNKNOWN_RUN}', so their durations may span unrelated runs`
         );
       }
-      runs.push(timePhases(trail.issue, run, milestones, warn));
+      runs.push(timePhases(repo, trail.issue, run, milestones, warn));
+    }
+  }
+
+  const phases = aggregatePhases(runs);
+  const models = aggregateModels(runs);
+  for (const phase of phases) {
+    if (phase.negative_samples > 0) {
+      warn(
+        `aggregate for phase '${renderValue(phase.phase)}' includes ${phase.negative_samples} negative sample(s) from clock skew — its median and min are not meaningful`
+      );
     }
   }
 
   return {
+    repo,
     issues: trails.map((t) => t.issue),
     runs,
-    aggregates: { phases: aggregatePhases(runs), models: aggregateModels(runs) },
+    aggregates: { phases, models },
     issues_without_trail: withoutTrail,
-    warnings,
+    issues_failed: failed,
+    warnings: [...counts.entries()].map(([line, n]) => (n > 1 ? `${line} (×${n})` : line)),
   };
-}
-
-/** Column alignment. Numeric columns read right-aligned; everything else left. */
-export type ColumnAlign = 'left' | 'right';
-
-/**
- * Render a table with each column padded to its widest cell (AC4's tabular alignment).
- *
- * Generic rather than shaped to one table: `stats` prints four different tables and every
- * other subcommand that grows one should reach for this rather than hand-pad again.
- */
-export function renderTable(
-  headers: string[],
-  rows: string[][],
-  align: ColumnAlign[] = []
-): string {
-  const widths = headers.map((header, i) =>
-    Math.max(header.length, ...rows.map((row) => (row[i] ?? '').length))
-  );
-  const pad = (cell: string, i: number): string =>
-    align[i] === 'right' ? cell.padStart(widths[i]) : cell.padEnd(widths[i]);
-  const line = (cells: string[]): string =>
-    cells
-      .map((cell, i) => pad(cell ?? '', i))
-      .join('  ')
-      .trimEnd();
-
-  return [line(headers), ...rows.map(line)].join('\n');
 }

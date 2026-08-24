@@ -10,6 +10,8 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import type { Command } from 'commander';
+import { formatDurationCell } from '../duration';
+import { parseIssueSelection } from '../issue-selection';
 import {
   buildMilestone,
   computeResume,
@@ -24,14 +26,14 @@ import {
 } from '../runstate';
 import {
   buildStatsReport,
-  type ColumnAlign,
-  formatDurationCell,
+  type FailedIssue,
   type IssueTrail,
-  parseIssueSelection,
   type RunStats,
-  renderTable,
+  renderValue,
   type StatsReport,
+  skewNote,
 } from '../runstate-stats';
+import { type ColumnAlign, renderTable } from '../table';
 
 interface PostOptions {
   issue: string;
@@ -169,10 +171,18 @@ const GH_FAILURE_CASES: readonly GhFailureCase[] = [
     fix: `Fix: check the number is right and that the repository is the one you mean — pass --repo <owner/name> when running outside it.`,
   },
   {
+    // Ahead of the 403 case on purpose: gh reports rate limiting AS an HTTP 403, so without
+    // this the operator is told to fix their permissions — which are fine. `stats --issues`
+    // can fire up to 200 sequential reads, which makes this a realistic failure.
+    match: ['rate limit', 'secondary rate', 'abuse detection', 'http 429'],
+    cause: () => 'GitHub rate-limited the request.',
+    fix: `Fix: wait for the window to reset ('gh api rate_limit' shows when), then re-run; narrow --issues to read fewer issues per run.`,
+  },
+  {
     match: ['http 403', 'permission', 'write access', 'forbidden'],
     cause: (where) =>
       `GitHub refused the request — the authenticated account lacks access to ${where}.`,
-    fix: `Fix: check the account and its scopes with 'gh auth status'; posting a milestone needs write access to the repository.`,
+    fix: `Fix: check the account and its scopes with 'gh auth status'; reading an issue needs read access to the repository, and posting a milestone needs write.`,
   },
   {
     match: ['dial tcp', 'no such host', 'timeout', 'connection refused', 'network is unreachable'],
@@ -312,42 +322,61 @@ function parseKvPairs(raw: string[]): { pairs: Array<[string, string]>; errors: 
   return { pairs, errors };
 }
 
-/** Fetch every runstate milestone on an issue, oldest first. */
-function fetchMilestones(issue: string, repo?: string): ParsedMilestone[] {
+/** A trail read, or the one reason it could not be read. */
+type TrailResult = { ok: true; milestones: ParsedMilestone[] } | { ok: false; error: string };
+
+/**
+ * Read every runstate milestone on an issue, returning WHY rather than exiting.
+ *
+ * The single-issue subcommands turn a failure here into an immediate exit; `stats --issues`
+ * cannot, because one unreadable issue in a set of nine must not discard the other eight.
+ * So the decision of what a failure means belongs to the caller, and this function only
+ * reports it.
+ */
+function tryFetchMilestones(issue: string, repo?: string): TrailResult {
   const res = exec('gh', ['issue', 'view', issue, '--json', 'comments', ...repoArgs(repo)]);
   if (!res.ok) {
-    fail([ghFailure(`Could not read issue #${issue}`, res.error, repo)]);
+    return { ok: false, error: ghFailure(`Could not read issue #${issue}`, res.error, repo) };
   }
 
   const parsed = parseGhJson<{ comments?: unknown }>(res.stdout);
   if (parsed === null) {
-    return fail([
-      [
+    return {
+      ok: false,
+      error: [
         `Could not read issue #${issue}: gh exited 0 but did not print JSON.`,
         `Expected a {"comments":[…]} object from: gh issue view ${issue} --json comments${repo ? ` --repo ${repo}` : ''}`,
         `Fix: run that command by hand — a gh older than 2.0 (no --json), or an interactive prompt landing on stdout, both look like this.`,
         `gh printed: ${snippet(res.stdout)}`,
       ].join('\n'),
-    ]);
+    };
   }
 
   // A milestone-less issue and a shape we cannot read must not look the same: the first
   // means "fresh run", the second means the tool is broken, and silently returning [] for
   // both would make a resume start over and destroy work.
   if (!Array.isArray(parsed?.comments)) {
-    return fail([
-      [
+    return {
+      ok: false,
+      error: [
         `Could not read issue #${issue}: gh's JSON has no "comments" array.`,
         `Fix: confirm your gh supports 'gh issue view <n> --json comments' (gh --version); if it does, re-run — this is not an issue with no comments, it is an unreadable response.`,
         `gh printed: ${snippet(res.stdout)}`,
       ].join('\n'),
-    ]);
+    };
   }
 
   const bodies = (parsed.comments as Array<{ body?: unknown }>).map((c) =>
     typeof c?.body === 'string' ? c.body : ''
   );
-  return parseMilestones(bodies);
+  return { ok: true, milestones: parseMilestones(bodies) };
+}
+
+/** Fetch every runstate milestone on an issue, oldest first, or exit 1 explaining why. */
+function fetchMilestones(issue: string, repo?: string): ParsedMilestone[] {
+  const result = tryFetchMilestones(issue, repo);
+  if (!result.ok) fail([result.error]);
+  return result.milestones;
 }
 
 /** `git ls-remote --exit-code` exits 2 for "no such ref" — an answer, not a fault. */
@@ -747,15 +776,21 @@ function resolveStatsIssues(options: StatsOptions): number[] {
   try {
     return parseIssueSelection(options.issues);
   } catch (err) {
-    return fail([
-      `${err instanceof Error ? err.message : String(err)}\nFix: pass a list or range of issue numbers, e.g. --issues 1,2,5..8.`,
-    ]);
+    // Selection errors already carry their own `Fix:` line — appending a generic one told
+    // the operator to do the very thing that just failed ("pass a range" on a cap error).
+    return fail([err instanceof Error ? err.message : String(err)]);
   }
 }
 
-/** Column layout of the per-run phase table (AC1). */
+/** Column layout of the per-run phase table. */
 const PHASE_TABLE_HEADERS = ['phase', 'status', 'started', 'ended', 'duration'];
 const PHASE_TABLE_ALIGN: ColumnAlign[] = ['left', 'left', 'left', 'left', 'right'];
+
+/** Per-phase spread: a label, a sample count, then three durations. */
+const SPREAD_TABLE_ALIGN: ColumnAlign[] = ['left', 'right', 'right', 'right', 'right'];
+
+const TOTALS_TABLE_HEADERS = ['run', 'issue', 'model', 'last', 'total'];
+const TOTALS_TABLE_ALIGN: ColumnAlign[] = ['left', 'right', 'left', 'left', 'right'];
 
 /** Indent applied to every table so its rows sit visibly under their heading. */
 const TABLE_INDENT = '  ';
@@ -769,12 +804,12 @@ function indent(block: string): string {
 
 /** One run's heading line: which run, on which issue, from which model. */
 function runHeading(run: RunStats): string {
-  const model = run.model ? `, model ${run.model}` : '';
+  const model = run.model ? `, model ${renderValue(run.model)}` : '';
   const total = run.total_seconds === null ? 'unknown' : formatDurationCell(run.total_seconds);
-  return `Issue #${run.issue} — run ${run.run}${model} — total ${total}`;
+  return `Issue #${run.issue} — run ${renderValue(run.run)}${model} — total ${total}`;
 }
 
-/** The per-run phase table AC1 asks for: phase, status, started, ended, duration. */
+/** The per-run phase table: phase, status, started, ended, duration. */
 function printRunTable(run: RunStats): void {
   console.log(runHeading(run));
   if (run.phases.length === 0) {
@@ -782,86 +817,82 @@ function printRunTable(run: RunStats): void {
     return;
   }
   const rows = run.phases.map((phase) => [
-    phase.phase,
-    phase.status,
+    renderValue(phase.phase),
+    renderValue(phase.status),
     phase.started_at ?? '-',
     phase.ended_at,
     formatDurationCell(phase.seconds),
   ]);
-  console.log(indent(renderTable(PHASE_TABLE_HEADERS, rows, PHASE_TABLE_ALIGN)));
+  console.log(indent(renderTable(PHASE_TABLE_HEADERS, rows, { align: PHASE_TABLE_ALIGN })));
 }
 
-/** The cross-run aggregate tables AC2 asks for: per-phase spread, totals, and by model. */
+/**
+ * A titled, indented table. Sections are separated by a blank line, but the first one only
+ * needs it when something was printed above — otherwise the output opens on an empty line.
+ */
+function makeSectionPrinter(precededByOutput: boolean) {
+  let printed = precededByOutput;
+  return (title: string, headers: string[], rows: string[][], align: ColumnAlign[]): void => {
+    console.log(printed ? `\n${title}` : title);
+    printed = true;
+    console.log(indent(renderTable(headers, rows, { align })));
+  };
+}
+
+/** A trailing note marking an aggregate row whose samples include clock-skewed spans. */
+function skewCell(negativeSamples: number): string {
+  const note = skewNote(negativeSamples);
+  return note ? `⚠ ${note}` : '';
+}
+
+/** The cross-run aggregates: per-phase spread, per-run totals, and totals by model. */
 function printAggregates(report: StatsReport, precededByTables: boolean): void {
   const { phases, models } = report.aggregates;
-
-  // Sections are separated by a blank line, but the FIRST one only needs one when
-  // something was printed above it — otherwise the output opens on an empty line.
-  let printedSomething = precededByTables;
-  const heading = (text: string): void => {
-    console.log(printedSomething ? `\n${text}` : text);
-    printedSomething = true;
-  };
+  const section = makeSectionPrinter(precededByTables);
 
   if (phases.length > 0) {
-    heading(`Per-phase duration across ${report.runs.length} run(s):`);
-    const rows = phases.map((phase) => [
-      phase.phase,
-      String(phase.samples),
-      formatDurationCell(phase.median_seconds),
-      formatDurationCell(phase.min_seconds),
-      formatDurationCell(phase.max_seconds),
-    ]);
-    console.log(
-      indent(
-        renderTable(['phase', 'n', 'median', 'min', 'max'], rows, [
-          'left',
-          'right',
-          'right',
-          'right',
-          'right',
-        ] satisfies ColumnAlign[])
-      )
+    section(
+      `Per-phase duration across ${report.runs.length} run(s):`,
+      ['phase', 'n', 'median', 'min', 'max', ''],
+      phases.map((phase) => [
+        renderValue(phase.phase),
+        String(phase.samples),
+        formatDurationCell(phase.median_seconds),
+        formatDurationCell(phase.min_seconds),
+        formatDurationCell(phase.max_seconds),
+        skewCell(phase.negative_samples),
+      ]),
+      [...SPREAD_TABLE_ALIGN, 'left']
     );
   }
 
-  heading('Per-run total:');
-  const totalRows = report.runs.map((run) => [
-    run.run,
-    `#${run.issue}`,
-    run.model ?? '-',
-    formatDurationCell(run.total_seconds),
-  ]);
-  console.log(
-    indent(
-      renderTable(['run', 'issue', 'model', 'total'], totalRows, [
-        'left',
-        'right',
-        'left',
-        'right',
-      ] satisfies ColumnAlign[])
-    )
+  section(
+    'Per-run total:',
+    TOTALS_TABLE_HEADERS,
+    report.runs.map((run) => [
+      renderValue(run.run),
+      `#${run.issue}`,
+      run.model === null ? '-' : renderValue(run.model),
+      `${renderValue(run.last_phase) || '-'}/${renderValue(run.last_status) || '-'}`,
+      formatDurationCell(run.total_seconds),
+    ]),
+    TOTALS_TABLE_ALIGN
   );
 
   if (models.length > 0) {
-    heading('By model:');
-    const rows = models.map((model) => [
-      model.model,
-      String(model.runs),
-      formatDurationCell(model.median_total_seconds),
-      formatDurationCell(model.min_total_seconds),
-      formatDurationCell(model.max_total_seconds),
-    ]);
-    console.log(
-      indent(
-        renderTable(['model', 'runs', 'median total', 'min', 'max'], rows, [
-          'left',
-          'right',
-          'right',
-          'right',
-          'right',
-        ] satisfies ColumnAlign[])
-      )
+    section(
+      'By model:',
+      ['model', 'runs', 'n', 'median total', 'min', 'max', ''],
+      models.map((model) => [
+        renderValue(model.model),
+        String(model.runs),
+        String(model.samples),
+        formatDurationCell(model.median_total_seconds),
+        formatDurationCell(model.min_total_seconds),
+        formatDurationCell(model.max_total_seconds),
+        skewCell(model.negative_samples),
+      ]),
+      ['left', 'right', 'right', 'right', 'right', 'right', 'left']
     );
   }
 }
@@ -870,7 +901,9 @@ function printAggregates(report: StatsReport, precededByTables: boolean): void {
  * Render the human report.
  *
  * Per-run phase tables are printed for a single issue; a multi-issue selection prints the
- * aggregates only, since a fleet of nine issues would otherwise bury them under ~70 rows.
+ * aggregates instead, since a fleet of nine issues would otherwise bury them under ~70
+ * rows. The aggregates always run for a multi-issue selection even when it resolved to one
+ * run — the "Per-run total" table is then the only place that run appears at all.
  */
 function printStatsHuman(report: StatsReport, multiIssue: boolean): void {
   for (const issue of report.issues_without_trail) {
@@ -887,8 +920,42 @@ function printStatsHuman(report: StatsReport, multiIssue: boolean): void {
   }
 
   // A single run's aggregates restate its own phase table with median = min = max on every
-  // row. The spread only carries information once there is something to spread across.
-  if (report.runs.length > 1) printAggregates(report, !multiIssue);
+  // row — but only when that table was actually printed.
+  if (multiIssue || report.runs.length > 1) printAggregates(report, !multiIssue);
+}
+
+/**
+ * Read every selected issue's trail, keeping going past one that cannot be read.
+ *
+ * A selection pasted from a fleet dispatch routinely contains an issue that was since
+ * transferred, deleted, or made private. Aborting on the first one throws away every gh
+ * round trip already spent and reports nothing — so a failure becomes a per-issue fact
+ * here, and only a selection where EVERY issue failed is a failure of the command.
+ */
+function readTrails(
+  issues: number[],
+  repo: string | undefined
+): { trails: IssueTrail[]; failed: FailedIssue[] } {
+  const trails: IssueTrail[] = [];
+  const failed: FailedIssue[] = [];
+
+  // Progress on stderr: 200 serial gh calls are otherwise indistinguishable from a hang,
+  // and if one fails there is nothing to say how far the run got. Only on a TTY — the
+  // carriage returns that make it a single updating line become literal escape noise in a
+  // redirected log, which is exactly where the output is read later.
+  const showProgress = issues.length > 1 && process.stderr.isTTY === true;
+
+  issues.forEach((issue, i) => {
+    if (showProgress) {
+      process.stderr.write(`\rstats: reading issue #${issue} (${i + 1}/${issues.length})…`);
+    }
+    const result = tryFetchMilestones(String(issue), repo);
+    if (result.ok) trails.push({ issue, milestones: result.milestones });
+    else failed.push({ issue, error: result.error });
+  });
+
+  if (showProgress) process.stderr.write('\r\u001b[K');
+  return { trails, failed };
 }
 
 /**
@@ -900,32 +967,39 @@ function printStatsHuman(report: StatsReport, multiIssue: boolean): void {
 function registerStatsSubcommand(cmd: Command): void {
   cmd
     .command('stats')
-    .description('Report per-phase durations from an issue’s runstate trail (read-only)')
+    .description("Report per-phase durations from an issue's runstate trail (read-only)")
     .option('--issue <number>', 'GitHub issue number')
     .option('--issues <list>', 'Issue list or range to aggregate, e.g. 1,2,5..8')
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
     .option('--json', 'Output the report as JSON')
     .action((options: StatsOptions) => {
       const issues = resolveStatsIssues(options);
+      const { trails, failed } = readTrails(issues, options.repo);
 
-      const trails: IssueTrail[] = issues.map((issue) => ({
-        issue,
-        milestones: fetchMilestones(String(issue), options.repo),
-      }));
-      const report = buildStatsReport(trails);
+      // Every issue unreadable is a genuine failure, not a degraded read — there is no
+      // report to hand back, so say why rather than printing an empty one and exiting 0.
+      if (trails.length === 0 && failed.length > 0) {
+        fail(failed.map((f) => f.error));
+      }
+
+      const report = buildStatsReport({ trails, failed, repo: options.repo });
 
       if (options.json) {
         console.log(JSON.stringify(report, null, 2));
-        return;
+      } else {
+        printStatsHuman(report, issues.length > 1);
       }
 
-      printStatsHuman(report, issues.length > 1);
-
-      // On stderr so stdout stays a parseable table. A skipped milestone or a negative
-      // span is a degraded read, not a failure: an issue with no trail at all is a valid
-      // answer too, so `stats` exits 0 in every one of these cases.
+      // On stderr in BOTH modes so stdout stays a parseable table or parseable JSON, and
+      // so a `--json` consumer watching stderr still learns the report is degraded — the
+      // same shape `verify` uses. A skipped milestone, a skew, or an issue with no trail is
+      // a degraded read, not a failure, so `stats` exits 0 in every one of those cases.
+      for (const f of report.issues_failed) {
+        console.error(`❌ stats could not read issue #${f.issue}, and left it out of the report:`);
+        for (const line of f.error.split('\n')) console.error(`   ${line}`);
+      }
       for (const warning of report.warnings) {
-        console.error(`⚠️  ${warning}`);
+        console.error(`⚠️  stats could not measure everything: ${warning}`);
       }
     });
 }

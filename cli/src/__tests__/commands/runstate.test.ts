@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerRunstateCommand } from '../../commands/runstate';
-import { RUNSTATE_MARKER } from '../../runstate';
+import { buildMilestone, RUNSTATE_MARKER } from '../../runstate';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:child_process');
@@ -71,44 +71,55 @@ function stdoutWrites(): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Capture stderr writes with `isTTY` forced either way — progress output is TTY-only, so
+ * both branches need driving.
+ */
+function captureStderrWrites(isTty: boolean): string[] {
+  const writes: string[] = [];
+  Object.defineProperty(process.stderr, 'isTTY', { value: isTty, configurable: true });
+  vi.mocked(process.stderr.write).mockImplementation(((chunk: string) => {
+    writes.push(String(chunk));
+    return true;
+  }) as unknown as typeof process.stderr.write);
+  return writes;
+}
+
 /** Build a `gh issue view --json comments` payload. */
 function commentsPayload(bodies: string[]): string {
   return JSON.stringify({ comments: bodies.map((body) => ({ body })) });
 }
 
 /**
- * One milestone comment body, as `runstate post` writes it. Extra `key=value` lines are
- * passed through so a fixture can carry `model=` or `pr=` without a second builder.
+ * One milestone comment body, built by the same function `runstate post` uses — so a
+ * fixture cannot drift from the wire format it is supposed to represent. Extra
+ * `key=value` pairs let a fixture carry `model=` or `pr=` without a second builder.
  */
 function milestoneBody(
   phase: string,
   status: string,
   run: string,
   at: string,
-  ...keys: string[]
+  keys: Record<string, string> = {},
+  next = 'done'
 ): string {
-  return [
-    RUNSTATE_MARKER,
-    `phase=${phase} status=${status} run=${run} at=${at}`,
-    ...keys,
-    'next=done',
-    '',
-  ].join('\n');
+  return buildMilestone({ phase, status, run, at, keys: Object.entries(keys), next });
 }
 
-const GATE_MILESTONE = [
-  RUNSTATE_MARKER,
-  'phase=gate status=done run=r-440-ab56 at=2026-08-24T10:00:00Z',
-  'base_branch=main',
-  'warnings=0',
-  'next=setup',
-  '',
-].join('\n');
+const GATE_MILESTONE = milestoneBody(
+  'gate',
+  'done',
+  'r-440-ab56',
+  '2026-08-24T10:00:00Z',
+  { base_branch: 'main', warnings: '0' },
+  'setup'
+);
 
 describe('runstate command', () => {
   beforeEach(() => {
     mockedExec.mockReset();
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   });
 
   describe('post', () => {
@@ -818,12 +829,14 @@ describe('runstate command', () => {
   describe('stats', () => {
     /** A complete run: seven phases plus ship's second milestone, on round timestamps. */
     const STATS_TRAIL = [
-      milestoneBody('gate', 'done', 'r-451-1eba', '2026-08-24T10:00:00Z', 'model=claude-opus-5'),
+      milestoneBody('gate', 'done', 'r-451-1eba', '2026-08-24T10:00:00Z', {
+        model: 'claude-opus-5',
+      }),
       milestoneBody('setup', 'done', 'r-451-1eba', '2026-08-24T10:02:00Z'),
       milestoneBody('plan', 'done', 'r-451-1eba', '2026-08-24T10:07:00Z'),
       milestoneBody('implement', 'done', 'r-451-1eba', '2026-08-24T10:37:00Z'),
       milestoneBody('review', 'done', 'r-451-1eba', '2026-08-24T11:07:00Z'),
-      milestoneBody('ship', 'awaiting-merge', 'r-451-1eba', '2026-08-24T11:09:00Z', 'pr=452'),
+      milestoneBody('ship', 'awaiting-merge', 'r-451-1eba', '2026-08-24T11:09:00Z', { pr: '452' }),
       milestoneBody('ship', 'done', 'r-451-1eba', '2026-08-24T11:24:00Z'),
       milestoneBody('report', 'done', 'r-451-1eba', '2026-08-24T11:25:00Z'),
     ];
@@ -852,14 +865,23 @@ describe('runstate command', () => {
 
       await run(['runstate', 'stats', '--issue', '451']);
 
-      const rows = logged()
+      // The fixture is fully deterministic, so assert the rendered rows verbatim — every
+      // column of every row, rather than re-deriving column offsets from the output.
+      const table = logged()
         .join('\n')
         .split('\n')
-        .filter((l) => /^\s+(phase|gate|setup|implement|merge-wait)\b/.test(l));
-      expect(rows.length).toBeGreaterThan(3);
-      // Every row's status column starts at the same offset.
-      const statusColumn = rows.map((r) => r.indexOf(r.trimStart().split(/\s{2,}/)[1] ?? ''));
-      expect(new Set(statusColumn).size).toBe(1);
+        .filter((l) => l.startsWith('  '));
+      expect(table).toEqual([
+        '  phase       status          started               ended                       duration',
+        '  gate        done            -                     2026-08-24T10:00:00Z               -',
+        '  setup       done            2026-08-24T10:00:00Z  2026-08-24T10:02:00Z    2m 0s (120s)',
+        '  plan        done            2026-08-24T10:02:00Z  2026-08-24T10:07:00Z    5m 0s (300s)',
+        '  implement   done            2026-08-24T10:07:00Z  2026-08-24T10:37:00Z  30m 0s (1800s)',
+        '  review      done            2026-08-24T10:37:00Z  2026-08-24T11:07:00Z  30m 0s (1800s)',
+        '  ship        awaiting-merge  2026-08-24T11:07:00Z  2026-08-24T11:09:00Z    2m 0s (120s)',
+        '  merge-wait  done            2026-08-24T11:09:00Z  2026-08-24T11:24:00Z   15m 0s (900s)',
+        '  report      done            2026-08-24T11:24:00Z  2026-08-24T11:25:00Z     1m 0s (60s)',
+      ]);
     });
 
     it('reads the trail with a single read-only gh issue view', async () => {
@@ -999,6 +1021,183 @@ describe('runstate command', () => {
       expect(errored().join(' ')).toContain('unusable at=');
       // stdout stays a parseable table.
       expect(logged().join('\n')).toContain('plan');
+    });
+
+    it('still reports the one run a multi-issue selection found', async () => {
+      // The regression this guards: per-run tables are suppressed for a multi-issue
+      // selection, so gating the aggregates on `runs.length > 1` printed NOTHING about
+      // the only run that was actually measured — silently, exit 0.
+      execHandles((_file, args) =>
+        commentsPayload(args[2] === '451' ? STATS_TRAIL : ['a plain comment'])
+      );
+
+      await run(['runstate', 'stats', '--issues', '451,452']);
+
+      const out = logged().join('\n');
+      expect(out).toContain('Issue #452 has no runstate milestones');
+      expect(out).toContain('Per-run total');
+      expect(out).toContain('r-451-1eba');
+      expect(out).toContain('1h 25m (5100s)');
+    });
+
+    it('reports how far each run got, so an in-flight run is not read as a fast one', async () => {
+      execHandles((_file, args) =>
+        commentsPayload(args[2] === '451' ? STATS_TRAIL : ['a plain comment'])
+      );
+
+      await run(['runstate', 'stats', '--issues', '451,452']);
+
+      const totals = logged()
+        .join('\n')
+        .split('\n')
+        .find((l) => l.includes('r-451-1eba'));
+      expect(totals).toContain('report/done');
+    });
+
+    it('keeps going past an issue it cannot read, and says which it left out', async () => {
+      execHandles((_file, args) => {
+        if (args[2] === '452') {
+          const err = new Error('gh failed') as Error & { status: number; stderr: string };
+          err.status = 1;
+          err.stderr = 'gh: Could not resolve to an Issue with the number of 452.';
+          throw err;
+        }
+        return commentsPayload(STATS_TRAIL);
+      });
+
+      const code = await run(['runstate', 'stats', '--issues', '451,452,453']);
+
+      // All three were attempted — one bad issue must not cancel the rest.
+      expect(code).toBeUndefined();
+      expect(mockedExec.mock.calls.map((c) => c[1]?.[2])).toEqual(['451', '452', '453']);
+      expect(logged().join('\n')).toContain('Per-run total');
+      const errors = errored().join(' ');
+      expect(errors).toContain('could not read issue #452');
+      expect(errors).toContain('left it out of the report');
+    });
+
+    it('records the failed issues in the JSON report', async () => {
+      execHandles((_file, args) => {
+        if (args[2] === '452') {
+          const err = new Error('gh failed') as Error & { status: number; stderr: string };
+          err.status = 1;
+          err.stderr = 'gh: Could not resolve to an Issue with the number of 452.';
+          throw err;
+        }
+        return commentsPayload(STATS_TRAIL);
+      });
+
+      await run(['runstate', 'stats', '--issues', '451,452', '--json']);
+
+      const report = JSON.parse(logged().join('\n'));
+      expect(report.issues_failed).toHaveLength(1);
+      expect(report.issues_failed[0].issue).toBe(452);
+      expect(report.issues).toEqual([451]);
+    });
+
+    it('fails when every issue in the selection is unreadable', async () => {
+      execHandles(() => {
+        const err = new Error('gh failed') as Error & { status: number; stderr: string };
+        err.status = 1;
+        err.stderr = 'gh: Could not resolve to an Issue.';
+        throw err;
+      });
+
+      const code = await run(['runstate', 'stats', '--issues', '451,452']);
+
+      // Nothing to report is a real failure, not a degraded read.
+      expect(code).toBe(1);
+    });
+
+    it('emits warnings on stderr under --json too, matching verify', async () => {
+      execReturns(
+        commentsPayload([
+          milestoneBody('gate', 'done', 'r-451-1eba', '$(date -u +%Y-%m-%dT%H:%M:%SZ)'),
+          milestoneBody('setup', 'done', 'r-451-1eba', '2026-08-24T10:02:00Z'),
+          milestoneBody('plan', 'done', 'r-451-1eba', '2026-08-24T10:07:00Z'),
+        ])
+      );
+
+      await run(['runstate', 'stats', '--issue', '451', '--json']);
+
+      // stdout stays pure JSON; stderr still says the report is degraded.
+      expect(() => JSON.parse(logged().join('\n'))).not.toThrow();
+      expect(errored().join(' ')).toContain('stats could not measure everything');
+    });
+
+    it('names its source in warnings, so a fleet log stays readable', async () => {
+      execReturns(
+        commentsPayload([
+          milestoneBody('gate', 'done', 'r-451-1eba', '$(date -u)'),
+          milestoneBody('setup', 'done', 'r-451-1eba', '2026-08-24T10:02:00Z'),
+          milestoneBody('plan', 'done', 'r-451-1eba', '2026-08-24T10:07:00Z'),
+        ])
+      );
+
+      await run(['runstate', 'stats', '--issue', '451', '--repo', 'imboard-ai/ai-dossier']);
+
+      expect(errored().join(' ')).toContain('stats could not measure everything');
+      expect(errored().join(' ')).toContain('imboard-ai/ai-dossier#451');
+    });
+
+    it('marks an aggregate row whose samples include a clock-skewed span', async () => {
+      execHandles((_file, args) =>
+        commentsPayload(
+          args[2] === '451'
+            ? [
+                milestoneBody('gate', 'done', 'r-451-aaaa', '2026-08-24T10:05:00Z'),
+                milestoneBody('setup', 'done', 'r-451-aaaa', '2026-08-24T10:00:00Z'),
+              ]
+            : [
+                milestoneBody('gate', 'done', 'r-452-bbbb', '2026-08-24T10:00:00Z'),
+                milestoneBody('setup', 'done', 'r-452-bbbb', '2026-08-24T10:02:00Z'),
+              ]
+        )
+      );
+
+      await run(['runstate', 'stats', '--issues', '451,452']);
+
+      const setupRow = logged()
+        .join('\n')
+        .split('\n')
+        .find((l) => l.trimStart().startsWith('setup'));
+      expect(setupRow).toContain('1 skewed');
+    });
+
+    it('sanitises a forged milestone rather than letting it repaint the table', async () => {
+      execReturns(
+        commentsPayload([
+          milestoneBody('gate', 'done', 'r-451-1eba', '2026-08-24T10:00:00Z', {
+            model: 'claude\u001b[2K-spoofed',
+          }),
+          milestoneBody('setup', 'done', 'r-451-1eba', '2026-08-24T10:02:00Z'),
+        ])
+      );
+
+      await run(['runstate', 'stats', '--issue', '451']);
+
+      const out = logged().join('\n');
+      expect(out).toContain('claude');
+      expect(out).not.toContain('\u001b[2K');
+    });
+
+    it('writes fan-out progress to a stderr TTY, keeping stdout a clean table', async () => {
+      execHandles(() => commentsPayload(STATS_TRAIL));
+      const writes = captureStderrWrites(true);
+
+      await run(['runstate', 'stats', '--issues', '451,452']);
+
+      expect(writes.join('')).toContain('reading issue #451 (1/2)');
+      expect(logged().join('\n')).not.toContain('reading issue');
+    });
+
+    it('writes no progress when stderr is redirected, where it would be escape noise', async () => {
+      execHandles(() => commentsPayload(STATS_TRAIL));
+      const writes = captureStderrWrites(false);
+
+      await run(['runstate', 'stats', '--issues', '451,452']);
+
+      expect(writes.join('')).toBe('');
     });
 
     it('refuses --issue and --issues together', async () => {
