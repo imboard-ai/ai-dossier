@@ -1,0 +1,877 @@
+import { describe, expect, it } from 'vitest';
+import {
+  buildMilestone,
+  computeResume,
+  defaultNext,
+  hitLoopCap,
+  isAcKey,
+  isIssueNumber,
+  MAX_VALUE_LENGTH,
+  mintRunId,
+  nowStamp,
+  type ParsedMilestone,
+  PHASE_SPECS,
+  PHASES,
+  parseMilestone,
+  parseMilestones,
+  type ResumeProbe,
+  RUNSTATE_MARKER,
+  requiredKeys,
+  STATUSES,
+  splitPair,
+  validateMilestone,
+} from '../runstate';
+
+/**
+ * The per-phase required-key table exactly as written in
+ * `imboard-ai/git/full-cycle-issue@3.8.0`'s "Runstate Milestones" section. Kept as a
+ * literal here (rather than derived from PHASE_SPECS) so that drifting the source table
+ * away from the dossier spec fails the suite.
+ */
+const DOSSIER_SPEC: Array<{ phase: string; statuses: string[]; keys: Record<string, string[]> }> = [
+  { phase: 'gate', statuses: ['done', 'blocked'], keys: { done: ['base_branch', 'warnings'] } },
+  {
+    phase: 'setup',
+    statuses: ['done', 'blocked'],
+    keys: { done: ['branch', 'worktree', 'pool_claimed', 'base_branch'] },
+  },
+  {
+    phase: 'plan',
+    statuses: ['done', 'blocked'],
+    keys: { done: ['planning', 'head', 'open_questions', 'visual_review'] },
+  },
+  {
+    phase: 'implement',
+    statuses: ['done', 'blocked'],
+    keys: { done: ['head', 'files', 'tests_added', 'tests_run', 'ci_parity'] },
+  },
+  {
+    phase: 'review',
+    statuses: ['done', 'partial', 'blocked'],
+    keys: {
+      done: ['head', 'fixed', 'escalated', 'agents_done', 'agents_pending'],
+      partial: ['head', 'fixed', 'escalated', 'agents_done', 'agents_pending'],
+    },
+  },
+  {
+    phase: 'ship',
+    statuses: ['awaiting-merge', 'done', 'blocked'],
+    keys: {
+      'awaiting-merge': ['pr', 'head', 'ci_fix_attempts'],
+      done: ['pr', 'merge_commit', 'ci_fix_attempts', 'cleanup'],
+    },
+  },
+  { phase: 'report', statuses: ['done'], keys: { done: ['pr', 'traps_added'] } },
+];
+
+const noopProbe: ResumeProbe = {
+  branchOnRemote: () => true,
+  dirExists: () => true,
+  fileExists: () => true,
+  headOf: () => 'abc1234',
+  prState: () => null,
+  issueClosed: () => false,
+};
+
+function probe(overrides: Partial<ResumeProbe> = {}): ResumeProbe {
+  return { ...noopProbe, ...overrides };
+}
+
+function milestone(body: string) {
+  const parsed = parseMilestone(body);
+  if (!parsed) throw new Error('expected a runstate milestone');
+  return parsed;
+}
+
+describe('runstate spec table', () => {
+  it('matches full-cycle-issue@3.8.0 phase order', () => {
+    expect([...PHASES]).toEqual(['gate', 'setup', 'plan', 'implement', 'review', 'ship', 'report']);
+  });
+
+  it('exposes exactly the four protocol statuses', () => {
+    expect([...STATUSES]).toEqual(['done', 'partial', 'blocked', 'awaiting-merge']);
+  });
+
+  it.each(DOSSIER_SPEC)('phase $phase allows only its spec statuses', ({ phase, statuses }) => {
+    expect([...PHASE_SPECS[phase as keyof typeof PHASE_SPECS].statuses].sort()).toEqual(
+      [...statuses].sort()
+    );
+  });
+
+  it.each(DOSSIER_SPEC)('phase $phase requires the spec keys', ({ phase, keys }) => {
+    for (const [status, expected] of Object.entries(keys)) {
+      const actual = requiredKeys(
+        phase as Parameters<typeof requiredKeys>[0],
+        status as Parameters<typeof requiredKeys>[1]
+      );
+      expect([...actual].sort()).toEqual([...expected].sort());
+    }
+  });
+
+  it.each(DOSSIER_SPEC)('phase $phase requires reason= when blocked', ({ phase, statuses }) => {
+    if (!statuses.includes('blocked')) return;
+    expect(requiredKeys(phase as Parameters<typeof requiredKeys>[0], 'blocked')).toContain(
+      'reason'
+    );
+  });
+});
+
+describe('defaultNext', () => {
+  it('walks the linear phase order', () => {
+    expect(defaultNext('gate', 'done')).toBe('setup');
+    expect(defaultNext('setup', 'done')).toBe('plan');
+    expect(defaultNext('plan', 'done')).toBe('implement');
+    expect(defaultNext('implement', 'done')).toBe('review');
+    expect(defaultNext('review', 'done')).toBe('ship');
+    expect(defaultNext('ship', 'done')).toBe('report');
+    expect(defaultNext('report', 'done')).toBe('done');
+  });
+
+  it('ends the run on blocked', () => {
+    for (const phase of PHASES) {
+      expect(defaultNext(phase, 'blocked')).toBe('done');
+    }
+  });
+
+  it('keeps awaiting-merge inside ship (a second ship milestone follows)', () => {
+    expect(defaultNext('ship', 'awaiting-merge')).toBe('ship');
+  });
+
+  it('keeps a partial review in review (agents still pending)', () => {
+    expect(defaultNext('review', 'partial')).toBe('review');
+  });
+});
+
+describe('buildMilestone', () => {
+  it('renders the exact protocol template', () => {
+    const body = buildMilestone({
+      phase: 'setup',
+      status: 'done',
+      run: 'r-440-ab56',
+      at: '2026-08-24T10:00:00Z',
+      keys: [
+        ['branch', 'feature/440-cli-runstate-subcommand'],
+        ['worktree', '/repo/worktrees/feature-440'],
+        ['pool_claimed', 'false'],
+        ['base_branch', 'main'],
+      ],
+    });
+
+    expect(body).toBe(
+      [
+        '<!-- runstate:v1 -->',
+        'phase=setup status=done run=r-440-ab56 at=2026-08-24T10:00:00Z',
+        'branch=feature/440-cli-runstate-subcommand',
+        'worktree=/repo/worktrees/feature-440',
+        'pool_claimed=false',
+        'base_branch=main',
+        'next=plan',
+        '',
+      ].join('\n')
+    );
+  });
+
+  it('starts with the marker readers filter on', () => {
+    const body = buildMilestone({ phase: 'gate', status: 'done', run: 'r-1-abcd' });
+    expect(body.startsWith(RUNSTATE_MARKER)).toBe(true);
+  });
+
+  it('timestamps itself in date -u format rather than leaving a shell expansion', () => {
+    const body = buildMilestone({ phase: 'gate', status: 'done', run: 'r-1-abcd' });
+    expect(body).not.toContain('$(');
+    expect(body).toMatch(/at=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/);
+  });
+
+  it('honours an explicit next override', () => {
+    const body = buildMilestone({
+      phase: 'ship',
+      status: 'awaiting-merge',
+      run: 'r-1-abcd',
+      next: 'report',
+    });
+    expect(body).toContain('next=report');
+  });
+
+  it('emits next=done for an unknown phase rather than crashing', () => {
+    const body = buildMilestone({ phase: 'nope', status: 'done', run: 'r-1-abcd' });
+    expect(body).toContain('next=done');
+  });
+});
+
+describe('nowStamp', () => {
+  it('drops milliseconds and keeps the Z suffix', () => {
+    expect(nowStamp(new Date('2026-08-24T10:11:12.345Z'))).toBe('2026-08-24T10:11:12Z');
+  });
+});
+
+describe('validateMilestone', () => {
+  const valid = {
+    phase: 'gate',
+    status: 'done',
+    run: 'r-440-ab56',
+    keys: [
+      ['base_branch', 'main'],
+      ['warnings', '0'],
+    ] as Array<[string, string]>,
+  };
+
+  it('accepts a well-formed milestone', () => {
+    expect(validateMilestone(valid)).toEqual([]);
+  });
+
+  it('rejects an unknown phase with one actionable line', () => {
+    const errors = validateMilestone({ ...valid, phase: 'deploy' });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("Unknown phase 'deploy'");
+    expect(errors[0]).toContain('gate, setup, plan, implement, review, ship, report');
+  });
+
+  it('rejects an unknown status', () => {
+    const errors = validateMilestone({ ...valid, status: 'finished' });
+    expect(errors.some((e) => e.includes("Unknown status 'finished'"))).toBe(true);
+  });
+
+  it('rejects a status that is valid globally but not for this phase', () => {
+    const errors = validateMilestone({ ...valid, status: 'partial' });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBe(
+      "Status 'partial' is not valid for phase 'gate' — expected one of: done, blocked"
+    );
+  });
+
+  it('allows partial on review only', () => {
+    expect(
+      validateMilestone({
+        phase: 'review',
+        status: 'partial',
+        run: 'r-440-ab56',
+        keys: [
+          ['head', 'abc1234'],
+          ['fixed', '2'],
+          ['escalated', '0'],
+          ['agents_done', 'security,perf'],
+          ['agents_pending', 'a11y'],
+        ],
+      })
+    ).toEqual([]);
+  });
+
+  it('names every missing required key in one line with a copy-pasteable fix', () => {
+    const errors = validateMilestone({
+      phase: 'implement',
+      status: 'done',
+      run: 'r-440-ab56',
+      keys: [['head', 'abc1234']],
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("Phase 'implement' with status 'done' requires");
+    expect(errors[0]).toContain('files=');
+    expect(errors[0]).toContain('tests_added=');
+    expect(errors[0]).toContain('tests_run=');
+    expect(errors[0]).toContain('ci_parity=');
+    expect(errors[0]).toContain('--kv files=<value>');
+  });
+
+  it('requires reason= on a blocked milestone', () => {
+    const errors = validateMilestone({ phase: 'plan', status: 'blocked', run: 'r-440-ab56' });
+    expect(errors.some((e) => e.includes('reason='))).toBe(true);
+  });
+
+  it('accepts a blocked milestone that carries reason=', () => {
+    expect(
+      validateMilestone({
+        phase: 'plan',
+        status: 'blocked',
+        run: 'r-440-ab56',
+        keys: [['reason', 'needs-clarification']],
+      })
+    ).toEqual([]);
+  });
+
+  it('rejects a shell expansion left in a value', () => {
+    const errors = validateMilestone({
+      ...valid,
+      keys: [
+        ['base_branch', 'main'],
+        ['warnings', '$(date -u)'],
+      ],
+    });
+    // One line per offending key, even though this value breaks two rules at once.
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("contains '$'");
+  });
+
+  it('rejects spaces in ordinary values', () => {
+    const errors = validateMilestone({
+      ...valid,
+      keys: [
+        ['base_branch', 'my branch'],
+        ['warnings', '0'],
+      ],
+    });
+    expect(errors.some((e) => e.includes('contains whitespace'))).toBe(true);
+  });
+
+  it('allows spaces in ac* values', () => {
+    expect(
+      validateMilestone({
+        phase: 'report',
+        status: 'done',
+        run: 'r-440-ab56',
+        keys: [
+          ['pr', '441'],
+          ['traps_added', '1'],
+          ['ac1', 'AC1 met — four subcommands with unit tests'],
+          ['ac_results', 'all four criteria verified'],
+        ],
+      })
+    ).toEqual([]);
+  });
+
+  it('rejects a relative path for path-valued keys', () => {
+    const errors = validateMilestone({
+      phase: 'setup',
+      status: 'done',
+      run: 'r-440-ab56',
+      keys: [
+        ['branch', 'feature/440'],
+        ['worktree', 'worktrees/feature-440'],
+        ['pool_claimed', 'true'],
+        ['base_branch', 'main'],
+      ],
+    });
+    expect(errors).toEqual([
+      "Key 'worktree' must be an absolute path, got 'worktrees/feature-440'",
+    ]);
+  });
+
+  it('rejects a malformed run id and points at mint', () => {
+    const errors = validateMilestone({ ...valid, run: 'run-1' });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('runstate mint');
+  });
+
+  it('rejects duplicate keys', () => {
+    const errors = validateMilestone({
+      ...valid,
+      keys: [
+        ['base_branch', 'main'],
+        ['warnings', '0'],
+        ['warnings', '1'],
+      ],
+    });
+    expect(errors).toEqual(["Duplicate key 'warnings' — each key may appear at most once"]);
+  });
+
+  it('rejects an empty value', () => {
+    const errors = validateMilestone({
+      ...valid,
+      keys: [
+        ['base_branch', ''],
+        ['warnings', '0'],
+      ],
+    });
+    expect(errors.some((e) => e.includes('empty value'))).toBe(true);
+  });
+
+  it('rejects a non-snake_case key', () => {
+    const errors = validateMilestone({
+      ...valid,
+      keys: [
+        ['base_branch', 'main'],
+        ['warnings', '0'],
+        ['BaseBranch', 'main'],
+      ],
+    });
+    expect(errors.some((e) => e.includes('lower_snake_case'))).toBe(true);
+  });
+});
+
+describe('isAcKey', () => {
+  it.each(['ac', 'ac1', 'ac12', 'ac_results', 'ac2_note'])('treats %s as an AC key', (key) => {
+    expect(isAcKey(key)).toBe(true);
+  });
+
+  it.each(['acme', 'branch', 'head'])('does not treat %s as an AC key', (key) => {
+    expect(isAcKey(key)).toBe(false);
+  });
+});
+
+describe('splitPair', () => {
+  it('splits at the first =', () => {
+    expect(splitPair('base_branch=main')).toEqual(['base_branch', 'main']);
+  });
+
+  it('keeps later = signs in the value', () => {
+    expect(splitPair('cmd=a=b=c')).toEqual(['cmd', 'a=b=c']);
+  });
+
+  it('returns an empty value for a trailing =', () => {
+    expect(splitPair('warnings=')).toEqual(['warnings', '']);
+  });
+
+  it.each(['base_branch', '', '=main'])('rejects %o, which has no key', (token) => {
+    expect(splitPair(token)).toBeNull();
+  });
+
+  it('is the grammar parseMilestone and --kv both use', () => {
+    // Guards the one behaviour the two callers must agree on: a value may contain '='.
+    const parsed = parseMilestone(
+      `${RUNSTATE_MARKER}\nphase=gate status=done run=r-1-abcd at=2026-08-24T10:00:00Z\nnext=done\n`
+    );
+    expect(parsed?.at).toBe('2026-08-24T10:00:00Z');
+  });
+});
+
+describe('parseMilestone', () => {
+  it('round-trips a built milestone', () => {
+    const body = buildMilestone({
+      phase: 'ship',
+      status: 'awaiting-merge',
+      run: 'r-440-ab56',
+      at: '2026-08-24T10:00:00Z',
+      keys: [
+        ['pr', '441'],
+        ['head', 'abc1234'],
+        ['ci_fix_attempts', '0'],
+      ],
+    });
+
+    expect(parseMilestone(body)).toEqual({
+      phase: 'ship',
+      status: 'awaiting-merge',
+      run: 'r-440-ab56',
+      at: '2026-08-24T10:00:00Z',
+      next: 'ship',
+      keys: {
+        phase: 'ship',
+        status: 'awaiting-merge',
+        run: 'r-440-ab56',
+        at: '2026-08-24T10:00:00Z',
+        pr: '441',
+        head: 'abc1234',
+        ci_fix_attempts: '0',
+        next: 'ship',
+      },
+    });
+  });
+
+  it('returns null for a non-runstate comment', () => {
+    expect(parseMilestone('**Agent pickup** — work started')).toBeNull();
+  });
+
+  it('keeps spaces in ac* values on their own line', () => {
+    const parsed = milestone(
+      `${RUNSTATE_MARKER}\nphase=report status=done run=r-440-ab56 at=2026-08-24T10:00:00Z\nac1=AC1 met in full\nnext=done\n`
+    );
+    expect(parsed.keys.ac1).toBe('AC1 met in full');
+  });
+
+  it('tolerates a milestone with only the header line', () => {
+    const parsed = milestone(
+      `${RUNSTATE_MARKER}\nphase=gate status=done run=r-440-ab56 at=2026-08-24T10:00:00Z\n`
+    );
+    expect(parsed.phase).toBe('gate');
+    expect(parsed.next).toBe('');
+  });
+
+  it('filters non-runstate comments out of a comment list', () => {
+    const bodies = [
+      'plain comment',
+      buildMilestone({ phase: 'gate', status: 'done', run: 'r-440-ab56' }),
+      'another plain comment',
+      buildMilestone({ phase: 'setup', status: 'done', run: 'r-440-ab56' }),
+    ];
+    const parsed = parseMilestones(bodies);
+    expect(parsed).toHaveLength(2);
+    expect(parsed.map((m) => m.phase)).toEqual(['gate', 'setup']);
+  });
+});
+
+describe('mintRunId', () => {
+  it('mints r-<issue>-<4 hex>', () => {
+    expect(mintRunId(440)).toMatch(/^r-440-[0-9a-f]{4}$/);
+  });
+
+  it('passes its own validation', () => {
+    const run = mintRunId('440');
+    expect(
+      validateMilestone({ phase: 'gate', status: 'blocked', run, keys: [['reason', 'x']] })
+    ).toEqual([]);
+  });
+});
+
+describe('hitLoopCap', () => {
+  const blocked = (phase: string) =>
+    milestone(
+      `${RUNSTATE_MARKER}\nphase=${phase} status=blocked run=r-1-abcd at=2026-08-24T10:00:00Z\nreason=x\nnext=done\n`
+    );
+  const done = (phase: string) =>
+    milestone(
+      `${RUNSTATE_MARKER}\nphase=${phase} status=done run=r-1-abcd at=2026-08-24T10:00:00Z\nnext=done\n`
+    );
+
+  it('fires on three consecutive blocks of the same phase', () => {
+    expect(hitLoopCap([blocked('plan'), blocked('plan'), blocked('plan')])).toBe(true);
+  });
+
+  it('does not fire on blocks of different phases', () => {
+    expect(hitLoopCap([blocked('plan'), blocked('implement'), blocked('plan')])).toBe(false);
+  });
+
+  it('does not fire when the streak is broken by a success', () => {
+    expect(hitLoopCap([blocked('plan'), done('plan'), blocked('plan')])).toBe(false);
+  });
+
+  it('does not fire with fewer than three milestones', () => {
+    expect(hitLoopCap([blocked('plan'), blocked('plan')])).toBe(false);
+  });
+});
+
+describe('computeResume', () => {
+  const m = (header: string, ...keys: string[]) =>
+    milestone(`${RUNSTATE_MARKER}\n${header}\n${keys.join('\n')}\nnext=x\n`);
+
+  const gateDone = m(
+    'phase=gate status=done run=r-440-ab56 at=2026-08-24T10:00:00Z',
+    'base_branch=main'
+  );
+  const setupDone = m(
+    'phase=setup status=done run=r-440-ab56 at=2026-08-24T10:01:00Z',
+    'branch=feature/440',
+    'worktree=/repo/worktrees/feature-440'
+  );
+  const planDone = m(
+    'phase=plan status=done run=r-440-ab56 at=2026-08-24T10:02:00Z',
+    'planning=/repo/worktrees/feature-440/PLANNING-440.md'
+  );
+  const implementDone = m(
+    'phase=implement status=done run=r-440-ab56 at=2026-08-24T10:03:00Z',
+    'head=abc1234'
+  );
+
+  const reviewDone = m('phase=review status=done run=r-440-ab56 at=2026-08-24T10:04:00Z');
+
+  it('reports a fresh run when there are no milestones', () => {
+    const result = computeResume([], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.run_id).toBeNull();
+    expect(result.last).toBeNull();
+  });
+
+  it('reuses the run id from the last milestone', () => {
+    expect(computeResume([gateDone], probe()).run_id).toBe('r-440-ab56');
+  });
+
+  it('resumes at setup after a gate milestone without verifying anything', () => {
+    expect(computeResume([gateDone], probe()).resume_from).toBe('setup');
+  });
+
+  it('resumes at plan when the setup claims verify', () => {
+    const result = computeResume([gateDone, setupDone], probe());
+    expect(result.resume_from).toBe('plan');
+    expect(result.verified).toEqual(['branch', 'worktree']);
+  });
+
+  it('falls back to setup when the branch is gone from the remote', () => {
+    const result = computeResume([gateDone, setupDone], probe({ branchOnRemote: () => false }));
+    expect(result.resume_from).toBe('setup');
+  });
+
+  it('falls back to setup when the worktree directory is gone', () => {
+    const result = computeResume([gateDone, setupDone], probe({ dirExists: () => false }));
+    expect(result.resume_from).toBe('setup');
+  });
+
+  it('resumes at implement when the planning file exists', () => {
+    const result = computeResume([gateDone, setupDone, planDone], probe());
+    expect(result.resume_from).toBe('implement');
+    expect(result.verified).toContain('planning');
+  });
+
+  it('falls back to plan when the planning file is missing', () => {
+    const result = computeResume(
+      [gateDone, setupDone, planDone],
+      probe({ fileExists: () => false })
+    );
+    expect(result.resume_from).toBe('plan');
+  });
+
+  it('falls back to setup from plan when the setup checks fail', () => {
+    const result = computeResume(
+      [gateDone, setupDone, planDone],
+      probe({ dirExists: () => false })
+    );
+    expect(result.resume_from).toBe('setup');
+  });
+
+  it('resumes at review when the worktree HEAD matches the implement milestone', () => {
+    const result = computeResume(
+      [gateDone, setupDone, planDone, implementDone],
+      probe({ headOf: () => 'abc1234' })
+    );
+    expect(result.resume_from).toBe('review');
+    expect(result.verified).toContain('head');
+  });
+
+  it('tolerates a -dirty suffix on the recorded head', () => {
+    const dirty = m(
+      'phase=implement status=done run=r-440-ab56 at=2026-08-24T10:03:00Z',
+      'head=abc1234-dirty'
+    );
+    const result = computeResume([gateDone, setupDone, dirty], probe({ headOf: () => 'abc1234' }));
+    expect(result.resume_from).toBe('review');
+  });
+
+  it('falls back to implement when HEAD moved', () => {
+    const result = computeResume(
+      [gateDone, setupDone, planDone, implementDone],
+      probe({ headOf: () => 'deadbee' })
+    );
+    expect(result.resume_from).toBe('implement');
+  });
+
+  it('resumes at ship after a completed review', () => {
+    expect(computeResume([gateDone, setupDone, reviewDone], probe()).resume_from).toBe('ship');
+  });
+
+  it('re-enters review when the review was partial', () => {
+    const reviewPartial = m(
+      'phase=review status=partial run=r-440-ab56 at=2026-08-24T10:04:00Z',
+      'agents_pending=a11y'
+    );
+    const result = computeResume([gateDone, setupDone, reviewPartial], probe());
+    expect(result.resume_from).toBe('review');
+    expect(result.resume_context.agents_pending).toBe('a11y');
+  });
+
+  it('routes awaiting-merge to ship-teardown once the PR is merged', () => {
+    const shipWaiting = m(
+      'phase=ship status=awaiting-merge run=r-440-ab56 at=2026-08-24T10:05:00Z',
+      'pr=441'
+    );
+    const result = computeResume(
+      [gateDone, setupDone, shipWaiting],
+      probe({
+        prState: () => ({ state: 'MERGED', mergedAt: '2026-08-24T11:00:00Z', mergeable: '' }),
+      })
+    );
+    expect(result.resume_from).toBe('ship-teardown');
+  });
+
+  it('routes awaiting-merge to ship-wait while the PR is open and mergeable', () => {
+    const shipWaiting = m(
+      'phase=ship status=awaiting-merge run=r-440-ab56 at=2026-08-24T10:05:00Z',
+      'pr=441'
+    );
+    const result = computeResume(
+      [gateDone, setupDone, shipWaiting],
+      probe({ prState: () => ({ state: 'OPEN', mergedAt: null, mergeable: 'MERGEABLE' }) })
+    );
+    expect(result.resume_from).toBe('ship-wait');
+  });
+
+  it('routes awaiting-merge back to ship when the PR conflicts', () => {
+    const shipWaiting = m(
+      'phase=ship status=awaiting-merge run=r-440-ab56 at=2026-08-24T10:05:00Z',
+      'pr=441'
+    );
+    const result = computeResume(
+      [gateDone, setupDone, shipWaiting],
+      probe({ prState: () => ({ state: 'OPEN', mergedAt: null, mergeable: 'CONFLICTING' }) })
+    );
+    expect(result.resume_from).toBe('ship');
+  });
+
+  it('routes awaiting-merge back to ship when the PR cannot be read', () => {
+    const shipWaiting = m(
+      'phase=ship status=awaiting-merge run=r-440-ab56 at=2026-08-24T10:05:00Z',
+      'pr=441'
+    );
+    const result = computeResume(
+      [gateDone, setupDone, shipWaiting],
+      probe({ prState: () => null })
+    );
+    expect(result.resume_from).toBe('ship');
+  });
+
+  it('resumes at report after ship done', () => {
+    const shipDone = m('phase=ship status=done run=r-440-ab56 at=2026-08-24T10:06:00Z', 'pr=441');
+    expect(computeResume([gateDone, shipDone], probe()).resume_from).toBe('report');
+  });
+
+  it('reports done when report finished and the issue is closed', () => {
+    const reportDone = m('phase=report status=done run=r-440-ab56 at=2026-08-24T10:07:00Z');
+    const result = computeResume([gateDone, reportDone], probe({ issueClosed: () => true }));
+    expect(result.resume_from).toBe('done');
+    expect(result.note).toBe('already complete');
+  });
+
+  it('re-runs report when the issue is still open', () => {
+    const reportDone = m('phase=report status=done run=r-440-ab56 at=2026-08-24T10:07:00Z');
+    expect(
+      computeResume([gateDone, reportDone], probe({ issueClosed: () => false })).resume_from
+    ).toBe('report');
+  });
+
+  it('resumes a blocked phase at that same phase', () => {
+    const blocked = m(
+      'phase=implement status=blocked run=r-440-ab56 at=2026-08-24T10:08:00Z',
+      'reason=tests-red'
+    );
+    expect(computeResume([gateDone, setupDone, blocked], probe()).resume_from).toBe('implement');
+  });
+
+  it('hard-blocks on a resume loop', () => {
+    const blocked = m(
+      'phase=plan status=blocked run=r-440-ab56 at=2026-08-24T10:08:00Z',
+      'reason=vague'
+    );
+    const result = computeResume([blocked, blocked, blocked], probe());
+    expect(result.hard_block).toBe('resume-loop');
+  });
+
+  it('merges context across milestones so later phases still see setup keys', () => {
+    const result = computeResume([gateDone, setupDone, planDone], probe());
+    expect(result.resume_context.branch).toBe('feature/440');
+    expect(result.resume_context.worktree).toBe('/repo/worktrees/feature-440');
+    expect(result.resume_context.base_branch).toBe('main');
+    expect(result.resume_context.planning).toBe('/repo/worktrees/feature-440/PLANNING-440.md');
+  });
+
+  // Comments are world-writable, and a newer dossier may post a phase this build has
+  // never heard of. Neither may crash or be silently treated as a known phase.
+  it('treats an unrecognised phase as not resumable rather than crashing', () => {
+    const alien = m('phase=deploy status=done run=r-440-ab56 at=2026-08-24T10:09:00Z');
+    const result = computeResume([gateDone, setupDone, alien], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.run_id).toBe('r-440-ab56');
+    // Nothing was probed, so nothing may be claimed as verified.
+    expect(result.verified).toEqual([]);
+  });
+
+  it('treats a milestone with no phase= line at all as not resumable', () => {
+    const headless = milestone(`${RUNSTATE_MARKER}\nstatus=done run=r-440-ab56\nnext=x\n`);
+    expect(computeResume([headless], probe()).resume_from).toBe('none');
+  });
+
+  // `verified` is emitted verbatim as the gate milestone's `verified=` key, so a repeated
+  // entry would land in the posted comment. Recording is idempotent by construction — each
+  // resolver calls setupOk at most once, and `pass` de-dupes — and this pins that, so a
+  // resolver that starts re-checking cannot quietly begin emitting `branch,branch`.
+  it.each<[string, ParsedMilestone[]]>([
+    ['plan', [gateDone, setupDone, planDone]],
+    ['implement', [gateDone, setupDone, planDone, implementDone]],
+    ['review', [gateDone, setupDone, reviewDone]],
+  ])('records each passed check once when resuming after %s', (_phase, trail) => {
+    const { verified } = computeResume(trail, probe());
+    expect(verified).toEqual([...new Set(verified)]);
+    expect(verified).toContain('branch');
+    expect(verified).toContain('worktree');
+  });
+});
+
+describe('validateMilestone — values that would corrupt the posted comment', () => {
+  const valid = {
+    phase: 'report',
+    status: 'done',
+    run: 'r-440-ab56',
+    keys: [
+      ['pr', '441'],
+      ['traps_added', '1'],
+    ] as Array<[string, string]>,
+  };
+
+  it('rejects a newline in a normal value', () => {
+    const errors = validateMilestone({
+      ...valid,
+      keys: [...valid.keys, ['note', 'a\nb']],
+    });
+    expect(errors.some((e) => e.includes('contains a newline'))).toBe(true);
+  });
+
+  it('rejects a newline in an ac* value even though spaces are allowed there', () => {
+    // Without this, `--kv ac1=$'ok\nnext=done'` forges a second next= line, and
+    // parseMilestone's first-occurrence-wins makes the FORGED one the real one.
+    const errors = validateMilestone({
+      ...valid,
+      keys: [...valid.keys, ['ac1', 'looks fine\nnext=done']],
+    });
+    expect(errors.some((e) => e.includes('contains a newline'))).toBe(true);
+  });
+
+  it('rejects a carriage return too', () => {
+    const errors = validateMilestone({
+      ...valid,
+      keys: [...valid.keys, ['ac1', 'a\rb']],
+    });
+    expect(errors.some((e) => e.includes('contains a newline'))).toBe(true);
+  });
+
+  it('rejects an oversized value by name and length', () => {
+    const errors = validateMilestone({
+      ...valid,
+      keys: [...valid.keys, ['files', 'x'.repeat(MAX_VALUE_LENGTH + 1)]],
+    });
+    const line = errors.find((e) => e.includes("Key 'files'"));
+    expect(line).toBeDefined();
+    expect(line).toContain(String(MAX_VALUE_LENGTH + 1));
+    expect(line).toContain(String(MAX_VALUE_LENGTH));
+  });
+
+  it('accepts a value right at the size cap', () => {
+    expect(
+      validateMilestone({
+        ...valid,
+        keys: [...valid.keys, ['files', 'x'.repeat(MAX_VALUE_LENGTH)]],
+      })
+    ).toEqual([]);
+  });
+});
+
+describe('validateMilestone — --next override', () => {
+  const valid = {
+    phase: 'gate',
+    status: 'done',
+    run: 'r-440-ab56',
+    keys: [
+      ['base_branch', 'main'],
+      ['warnings', '0'],
+    ] as Array<[string, string]>,
+  };
+
+  it.each([...PHASES, 'done'])('accepts next=%s', (next) => {
+    expect(validateMilestone({ ...valid, next })).toEqual([]);
+  });
+
+  it('rejects a typo and lists the legal values', () => {
+    const errors = validateMilestone({ ...valid, next: 'implememt' });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("Invalid --next 'implememt'");
+    expect(errors[0]).toContain('implement');
+  });
+
+  it('rejects a next value that would corrupt the line', () => {
+    expect(validateMilestone({ ...valid, next: 'ship\nworktree=/tmp/x' })).toHaveLength(1);
+    expect(validateMilestone({ ...valid, next: '' })).toHaveLength(1);
+  });
+});
+
+describe('isIssueNumber', () => {
+  it.each(['1', '440', '999999'])('accepts %s', (v) => {
+    expect(isIssueNumber(v)).toBe(true);
+  });
+
+  it.each([
+    '',
+    '0',
+    '-1',
+    '4.4',
+    '#440',
+    'https://github.com/o/r/issues/440',
+    ' 440',
+    'abc',
+  ])('rejects %s', (v) => {
+    expect(isIssueNumber(v)).toBe(false);
+  });
+});

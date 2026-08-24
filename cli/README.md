@@ -311,6 +311,254 @@ ai-dossier skill-export my-skill --version 2.0.0 --changelog "Add range support"
 
 ---
 
+## Runstate — workflow milestones
+
+Issue-workflow dossiers (`imboard-ai/git/full-cycle-issue` and friends) record their
+progress by appending a `<!-- runstate:v1 -->` comment to the GitHub issue after every
+phase. That trail is the only run state that survives a session: it is what lets a later
+run resume mid-workflow instead of starting over.
+
+Until now the milestone was a markdown heredoc that each agent reproduced by hand, and
+agents silently got it wrong — skipping milestones entirely, or pasting `$(date …)` into
+the comment verbatim. `ai-dossier runstate` makes it a command: the timestamp is filled
+in for you, and phase/status/required keys are validated *before* anything is posted.
+
+```bash
+# Mint the run id once, at the gate phase
+ai-dossier runstate mint --issue 440            # -> r-440-ab56
+
+# Post a milestone at the end of each phase
+ai-dossier runstate post --issue 440 \
+  --phase setup --status done --run r-440-ab56 \
+  --kv branch=feature/440-runstate \
+  --kv worktree=/repo/worktrees/feature-440-runstate \
+  --kv pool_claimed=false \
+  --kv base_branch=main
+
+# Read the last milestone back
+ai-dossier runstate last --issue 440 --json
+
+# Ask where a run should resume from
+ai-dossier runstate verify --issue 440
+```
+
+### Subcommands
+
+| Command | What it does | Writes? |
+|---|---|---|
+| `post` | Validates and posts one milestone comment via `gh issue comment` | yes |
+| `last` | Prints the most recent milestone on the issue, parsed | no |
+| `verify` | Runs the gate's resume verification and prints `resume_from` + `resume_context` | no |
+| `mint` | Prints a fresh run id (`r-<issue>-<hex>`) | no |
+
+`last` and `verify` are strictly read-only — they only run `gh issue view`, `gh pr view`,
+`git ls-remote`/`rev-parse`, and `stat`, so they work fine without push access to the
+repository.
+
+Every subcommand takes `--issue <n>` (a positive integer — the number only, not a URL or
+a `#`-prefixed string). `post`, `last`, and `verify` additionally take `--repo
+<owner/name>` (a bare slug, not a URL; defaults to the repository `gh` resolves for the
+current directory) and `--json`. `mint` takes `--issue` and nothing else.
+
+`last` prints the milestone's own `key=value` lines, so the output is already in the
+shape a shell or a dossier reads:
+
+```
+$ ai-dossier runstate last --issue 440
+phase=setup
+status=done
+run=r-440-ab56
+at=2026-08-24T07:59:32Z
+branch=feature/440-runstate
+worktree=/repo/worktrees/feature-440-runstate
+pool_claimed=false
+base_branch=main
+next=plan
+```
+
+With `--json` the same keys come back as one flat object; an issue with no milestones
+prints `No runstate milestones on issue #440.` (or `null` under `--json`) and exits 0.
+
+### `post`
+
+| Flag | Meaning |
+|---|---|
+| `--issue <n>` | Issue to comment on (required) |
+| `--phase <p>` | `gate`, `setup`, `plan`, `implement`, `review`, `ship`, `report` (required) |
+| `--status <s>` | `done`, `partial`, `blocked`, `awaiting-merge` (required) |
+| `--run <id>` | Run id minted at the gate phase (required) |
+| `--kv <key=value...>` | Phase-specific key, repeatable (and variadic: `--kv a=1 b=2` works too) |
+| `--next <phase>` | Override the computed `next=` line — a phase name or `done` |
+| `--repo <owner/name>` | Target repository (defaults to the current one) |
+| `--dry-run` | Print the comment body instead of posting it |
+| `--json` | Machine-readable output |
+
+Validation failures print one actionable message per problem on stderr and exit 1
+**without posting**:
+
+```
+$ ai-dossier runstate post --issue 440 --phase setup --status done --run r-440-ab56 --kv branch=x
+❌ Phase 'setup' with status 'done' requires worktree= pool_claimed= base_branch= — add with --kv worktree=<value> --kv pool_claimed=<value> --kv base_branch=<value>
+```
+
+A valid `--dry-run` prints the exact body that would be posted:
+
+```
+$ ai-dossier runstate post --issue 440 --phase setup --status done --run r-440-ab56 \
+    --kv branch=feature/440-runstate --kv worktree=/repo/worktrees/feature-440-runstate \
+    --kv pool_claimed=false --kv base_branch=main --dry-run
+<!-- runstate:v1 -->
+phase=setup status=done run=r-440-ab56 at=2026-08-24T07:59:32Z
+branch=feature/440-runstate
+worktree=/repo/worktrees/feature-440-runstate
+pool_claimed=false
+base_branch=main
+next=plan
+```
+
+Without `--dry-run` a successful post prints `✅ setup done → <comment url>`; `--json`
+returns `{ "posted": true, "url": …, "body": … }` (and `{ "posted": false, "dryRun":
+true, "body": … }` under `--dry-run`). See [When `gh` or `git`
+fails](#when-gh-or-git-fails) for what a failed post prints.
+
+### Phases, statuses, and required keys
+
+This table is the executable copy of the "Runstate Milestones" table in
+`imboard-ai/git/full-cycle-issue@3.8.0`:
+
+| Phase | Statuses | Required keys |
+|---|---|---|
+| `gate` | `done`, `blocked` | `base_branch` `warnings` |
+| `setup` | `done`, `blocked` | `branch` `worktree` `pool_claimed` `base_branch` |
+| `plan` | `done`, `blocked` | `planning` `head` `open_questions` `visual_review` |
+| `implement` | `done`, `blocked` | `head` `files` `tests_added` `tests_run` `ci_parity` |
+| `review` | `done`, `partial`, `blocked` | `head` `fixed` `escalated` `agents_done` `agents_pending` |
+| `ship` (1st, before the CI wait) | `awaiting-merge` | `pr` `head` `ci_fix_attempts` |
+| `ship` (2nd, after merge + teardown) | `done`, `blocked` | `pr` `merge_commit` `ci_fix_attempts` `cleanup` |
+| `report` | `done` | `pr` `traps_added` |
+
+The `Statuses` column is a closed set: a status not listed for a phase is rejected, so
+`report` cannot be `blocked` and only `ship` may be `awaiting-merge`. Any phase that
+*can* report `status=blocked` must also carry `reason=<short-slug>` when it does.
+
+`next=` is computed for you: the linear order `gate → setup → plan → implement → review →
+ship → report → done`, except that `blocked` ends the run (`next=done`) and the two
+non-terminal statuses stay in their own phase — `ship`/`awaiting-merge` is followed by a
+second `ship` milestone, and a `partial` review still has agents to run. Use `--next` to
+override.
+
+### Key and value rules
+
+Every `--kv` pair is checked before anything is posted:
+
+- Keys are `lower_snake_case` (`^[a-z][a-z0-9_]*$`) and may appear at most once.
+- No empty values — omit the key instead.
+- No `$` in values. This is the check that catches an unexpanded `$(date …)` before it
+  reaches the issue.
+- One line per value. A newline would split into extra `key=` lines that readers parse as
+  real state, so it is rejected for **every** key, including `ac*` ones — collapse it
+  (`,` or ` / `) instead.
+- No spaces in values (use `-` or `,`). Only `ac*` keys — `ac`, `ac1`, `ac_results` — are
+  exempt, because acceptance-criterion lines are prose. (The newline rule above still
+  applies to them.)
+- A value is at most 4000 characters and the whole comment at most 60000 (GitHub rejects
+  a longer issue comment with an opaque 422). A milestone is an index, not a report:
+  replace a long value with a count or a path to the full text.
+- `worktree=` and `planning=` must be absolute paths, so a resume from a different
+  working directory can still find them.
+- `--next` must be a phase name or `done`. It is written to the comment verbatim, so an
+  unchecked typo would point the next resume at a phase that does not exist.
+- Comments are append-only: never edit or delete a prior milestone.
+
+### When `gh` or `git` fails
+
+Every subcommand exits **1** on failure with the cause *and its fix* on stderr, so a
+calling dossier can branch on the exit code and an agent knows what to do next. The three
+causes that look identical from the outside are reported as three different things:
+
+```
+$ ai-dossier runstate last --issue 440
+❌ Could not read issue #440: gh is not authenticated.
+   Fix: run 'gh auth login', confirm with 'gh auth status', then re-run.
+   gh said: To get started with GitHub CLI, please run:  gh auth login
+```
+
+| Cause | What you get |
+|---|---|
+| `gh` not on PATH | "'gh' is not installed, or is not on PATH" + the install link |
+| Not logged in | "gh is not authenticated" + `gh auth login` |
+| Issue/PR does not exist | "GitHub could not find it in …" + a nudge to check `--repo` |
+| No permission (403) | "the authenticated account lacks access to …" + `gh auth status` |
+| github.com unreachable | "gh could not reach GitHub" + retry guidance |
+| Anything else | the exit status, and "run the same gh command by hand" |
+
+`gh`'s own stderr is **always** echoed on a `gh said:` line, including for causes the CLI
+cannot classify — nothing is swallowed. `gh` exiting 0 with output that is not JSON, or
+with JSON that has no `comments` array, is also a hard failure rather than a silent "no
+milestones": the two must never look alike, because reading a fresh run out of a broken
+response makes a resume start over and throw away finished work.
+
+When `post` cannot reach GitHub, it prints the exact `gh issue comment …` command to run
+by hand. The milestone is the only durable record of the phase, so re-running the phase
+costs far more than retrying the comment.
+
+### `verify`
+
+`verify` implements `imboard-ai/git/gate-issue`'s resume table. It never trusts the
+comment alone — each claim is checked against reality (is the branch still on the remote,
+does the worktree still exist, does the planning file exist, has HEAD moved, what is the
+PR's state) before it reports where to resume:
+
+```
+$ ai-dossier runstate verify --issue 440
+resume_from=implement
+run_id=r-440-ab56
+verified=branch,worktree,planning
+resume_context={"branch":"feature/440-runstate","worktree":"/repo/worktrees/feature-440-runstate",...}
+```
+
+`resume_from` is a phase name, or one of:
+
+| Value | Meaning |
+|---|---|
+| `none` | No milestones on the issue — a fresh run |
+| `ship-wait` | The PR is open and mergeable; re-enter `ship` at the CI wait |
+| `ship-teardown` | The PR is already merged; re-enter `ship` at post-merge cleanup |
+| `done` | The `report` milestone is posted and the issue is closed (`note=already complete`) |
+
+A failed check sends the resume *backwards*, never forwards: if the branch is gone from
+the remote or the worktree no longer exists, a `plan`/`implement`/`review` milestone
+still yields `resume_from=setup`. A milestone with `status=blocked` resumes at its own
+phase.
+
+`resume_context` is merged across the run's milestones (later ones winning), so a resume
+at `plan` still sees `branch`/`worktree` from the `setup` milestone. (The dossier's own
+table carries only the last milestone's keys; merging is what makes a mid-run resume
+self-sufficient.) If the last three milestones are all `blocked` on the same phase,
+`verify` adds `hard_block=resume-loop` — the run is looping and needs a human.
+
+When a check cannot run at all — `git`/`gh` is missing or the remote is unreachable, or
+the milestone's `branch=`/`worktree=`/`pr=` value is not one `verify` will hand to a
+subprocess — that check degrades to "not verified" and `verify` warns instead of failing.
+It still exits 0, because a conservative `resume_from` is the safe direction (redo a phase
+rather than skip one), but the reader needs to know the answer is conservative *because a
+check could not run*. Warnings go to stderr so stdout stays parseable:
+
+```
+⚠️  verify could not check everything: could not reach 'origin' to confirm branch 'feature/440-runstate' (git exited 128: fatal: 'origin' does not appear to be a git repository) — treating it as missing
+```
+
+Anyone who can comment on the issue can post a `<!-- runstate:v1 -->` body, so the values
+`verify` reads back are untrusted input. Nothing is run through a shell, and a value that
+would be read as a flag (leading `-`) or that is not the absolute path the protocol
+requires is refused rather than passed to `git`/`gh` — it becomes one of the warnings
+above.
+
+`--json` returns the same fields as an object (`resume_from`, `run_id`, `verified`,
+`resume_context`, plus `hard_block`, `note`, and `warnings` when they apply).
+
+---
+
 ## Cache and Version Resolution
 
 The CLI maintains a local cache at `~/.dossier/cache/`:
