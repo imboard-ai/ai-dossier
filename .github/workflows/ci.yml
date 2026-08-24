@@ -55,3 +55,32 @@ jobs:
 
       - name: Run tests with coverage
         run: make test-coverage
+
+  # Guards against the failure in #448: a package's source merges to main with its
+  # version unchanged, so the publish workflow's "already published" check skips the
+  # release and npm silently lags main (#442, #446). Fails the PR while it is still
+  # cheap to bump.
+  version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Full history so `git merge-base` against the base branch resolves.
+          # A shallow clone makes the check unable to run (it exits 2 rather
+          # than passing silently).
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fetch base branch
+        run: git fetch --no-tags origin "${{ github.event.pull_request.base.ref }}"
+
+      - name: Check publishable packages have version bumps
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: node scripts/check-version-bumps.mjs --base "origin/$BASE_REF" --labels "$PR_LABELS"

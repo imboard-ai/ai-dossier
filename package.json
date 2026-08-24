@@ -15,6 +15,7 @@
     "clean": "make clean",
     "rebuild": "make rebuild",
     "test": "make test",
+    "test:scripts": "vitest run --config vitest.scripts.config.mjs",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
@@ -42,6 +43,7 @@
     "@biomejs/biome": "^2.3.6",
     "husky": "^9.1.7",
     "lint-staged": "^15.5.1",
-    "tsx": "^4.20.6"
+    "tsx": "^4.20.6",
+    "vitest": "^4.0.9"
   }
 }

@@ -71,12 +71,14 @@ rebuild: clean build
 test:
 	@echo "Running tests..."
 	npm run test --workspaces --if-present
+	npm run test:scripts
 	@echo "✓ Tests completed"
 
 ## test-coverage: Run tests with coverage reporting and threshold enforcement
 test-coverage:
 	@echo "Running tests with coverage..."
 	npm run test:coverage --workspaces --if-present
+	npm run test:scripts
 	@echo "✓ Tests with coverage completed"
 
 ## lint: Check code for linting issues (no changes)
