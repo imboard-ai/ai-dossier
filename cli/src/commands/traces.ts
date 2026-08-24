@@ -7,6 +7,7 @@ import {
   RegistryError,
   type TraceListItem,
 } from '../registry-client';
+import { renderTable } from '../table';
 
 interface ListOptions {
   status?: string;
@@ -147,7 +148,6 @@ function handleRegistryError(err: unknown): never {
 }
 
 function printTracesTable(rows: TraceListItem[]): void {
-  // Compute column widths
   const headers = ['STATUS', 'DOSSIER', 'STARTED', 'DURATION', 'TRACE_ID'];
   const data = rows.map((t) => [
     statusIcon(t.status),
@@ -156,12 +156,11 @@ function printTracesTable(rows: TraceListItem[]): void {
     durationLabel(t.duration_ms),
     t.trace_id.slice(0, 8),
   ]);
-  const widths = headers.map((h, i) => Math.max(h.length, ...data.map((row) => row[i].length)));
-
-  const fmt = (cells: string[]) => cells.map((c, i) => c.padEnd(widths[i])).join('  ');
-  console.log(`\n  ${fmt(headers)}`);
-  console.log(`  ${widths.map((w) => '-'.repeat(w)).join('  ')}`);
-  for (const row of data) console.log(`  ${fmt(row)}`);
+  const table = renderTable(headers, data, { separator: true })
+    .split('\n')
+    .map((line) => `  ${line}`)
+    .join('\n');
+  console.log(`\n${table}`);
 }
 
 function printTraceDetail(trace: Record<string, unknown>): void {

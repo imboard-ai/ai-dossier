@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getConfig } from './config';
+import { formatAge } from './duration';
 import { safeDossierPath } from './helpers';
 import { multiRegistryGetDossier } from './multi-registry';
 
@@ -140,17 +141,6 @@ function getConfiguredTtlSeconds(): number {
   return DEFAULT_RESOLUTION_TTL_SECONDS;
 }
 
-function formatAge(ageMs: number): string {
-  const seconds = Math.round(ageMs / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  return `${days}d ago`;
-}
-
 /**
  * Resolve a versionless dossier name to a concrete version.
  *
@@ -177,7 +167,7 @@ export async function resolveCachedVersion(
         if (process.env.DOSSIER_DEBUG) {
           process.stderr.write(
             `[cache-resolver] '${dossierName}' served from resolution cache: ` +
-              `version=${cached.resolved_version}, age=${formatAge(ageMs)}, ttl=${ttl}s, registry=${cached.source_registry ?? 'unknown'}\n`
+              `version=${cached.resolved_version}, age=${formatAge(ageMs, ' ago')}, ttl=${ttl}s, registry=${cached.source_registry ?? 'unknown'}\n`
           );
         }
         return {
@@ -188,7 +178,7 @@ export async function resolveCachedVersion(
       }
       if (process.env.DOSSIER_DEBUG) {
         process.stderr.write(
-          `[cache-resolver] '${dossierName}' resolution cache expired (age=${formatAge(ageMs)}, ttl=${ttl}s); re-resolving\n`
+          `[cache-resolver] '${dossierName}' resolution cache expired (age=${formatAge(ageMs, ' ago')}, ttl=${ttl}s); re-resolving\n`
         );
       }
     } else if (process.env.DOSSIER_DEBUG) {
@@ -229,7 +219,7 @@ export async function resolveCachedVersion(
   const lastKnown = readResolution(dossierName);
   if (fallback) {
     const ageHint = lastKnown
-      ? ` (last successful check: ${formatAge(Date.now() - new Date(lastKnown.resolved_at).getTime())})`
+      ? ` (last successful check: ${formatAge(Date.now() - new Date(lastKnown.resolved_at).getTime(), ' ago')})`
       : ' (no record of last successful check)';
     const warning =
       `Registry unreachable — falling back to cached ${dossierName}@${fallback}${ageHint}.\n` +
