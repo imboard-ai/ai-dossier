@@ -129,6 +129,24 @@ If a pool worktree's directory has drifted — the recorded path now holds a
 different branch — `gc` drops the stale row from `.pool-state.json` and leaves
 the directory on disk rather than guessing.
 
+### Broken entries
+
+A pool directory that is still on disk but that git no longer has an admin dir
+for (`.git/worktrees/<id>`) is **broken**: every git command inside it fails
+with `fatal: not a git repository`. `status` lists these under `Broken`, and
+`claim` skips them and hands out the next warm spare instead of failing:
+
+```bash
+$ worktree-pool status
+...
+Broken (corrupted, skipped by claim): 1
+  pool-1787468026330-1079658  recorded in .pool-state.json as pool-1787468026330-1079658, no longer a registered worktree — its git admin dir is gone (a `git worktree prune` after an unrepaired rename), so every git command inside it fails
+Run 'worktree-pool gc --yes' to clear broken pool entries.
+```
+
+Broken entries are reported, never removed silently — `gc` clears them under
+the same ownership rules as everything else.
+
 ## Configuration
 
 ### Pool sizing — `.pool-state.json`

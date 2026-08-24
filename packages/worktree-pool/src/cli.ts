@@ -3,13 +3,28 @@
 import {
   claim,
   detect,
+  findBrokenEntries,
   gc,
   init,
+  type PoolDirEntryReport,
   refresh,
   replenish,
   returnWorktree,
   status,
 } from './pool-actions';
+
+/**
+ * Print corrupted pool directories (#443). Never fatal: a broken entry is
+ * reported and skipped, and the command it interrupted carries on.
+ */
+function reportBroken(broken: PoolDirEntryReport[]): void {
+  if (broken.length === 0) return;
+  console.error(`Broken (corrupted, skipped): ${broken.length}`);
+  for (const b of broken) {
+    console.error(`  ${b.name} — ${b.reason}`);
+  }
+  console.error("Run 'worktree-pool gc --yes' to clear broken pool entries.");
+}
 
 function usage(): void {
   console.error(`Usage: worktree-pool <command> [options]
@@ -87,6 +102,13 @@ async function main(): Promise<void> {
             console.log(`  ${f.name}  [${f.branch ?? 'detached'}]  ${f.reason}`);
           }
         }
+        if (s.broken.length > 0) {
+          console.log(`\nBroken (corrupted, skipped by claim): ${s.broken.length}`);
+          for (const b of s.broken) {
+            console.log(`  ${b.name}  ${b.reason}`);
+          }
+          console.log("Run 'worktree-pool gc --yes' to clear broken pool entries.");
+        }
         break;
       }
 
@@ -113,8 +135,10 @@ async function main(): Promise<void> {
         }
         const result = claim(issue, branch);
         if (result) {
+          reportBroken(result.broken);
           console.log(result.path);
         } else {
+          reportBroken(findBrokenEntries());
           console.error("No warm worktrees available. Run 'worktree-pool replenish' first.");
           process.exit(1);
         }
