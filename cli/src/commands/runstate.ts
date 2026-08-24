@@ -22,6 +22,16 @@ import {
   splitPair,
   validateMilestone,
 } from '../runstate';
+import {
+  buildStatsReport,
+  type ColumnAlign,
+  formatDurationCell,
+  type IssueTrail,
+  parseIssueSelection,
+  type RunStats,
+  renderTable,
+  type StatsReport,
+} from '../runstate-stats';
 
 interface PostOptions {
   issue: string;
@@ -43,6 +53,13 @@ interface ReadOptions {
 
 interface MintOptions {
   issue: string;
+}
+
+interface StatsOptions {
+  issue?: string;
+  issues?: string;
+  repo?: string;
+  json?: boolean;
 }
 
 /**
@@ -701,6 +718,218 @@ function registerVerifySubcommand(cmd: Command): void {
     });
 }
 
+/**
+ * Resolve `--issue` / `--issues` into the issue numbers to fetch.
+ *
+ * Exactly one of the two is required: silently preferring one when both are passed would
+ * quietly analyse a different set than the operator asked for, and defaulting to something
+ * when neither is passed would hit the network on a typo.
+ */
+function resolveStatsIssues(options: StatsOptions): number[] {
+  if (options.issue !== undefined && options.issues !== undefined) {
+    fail([
+      `Pass --issue or --issues, not both.\nFix: --issue ${options.issue} for one issue, or --issues ${options.issues} for a set.`,
+    ]);
+  }
+
+  if (options.issue !== undefined) {
+    requireIssueTarget({ issue: options.issue, repo: options.repo });
+    return [Number(options.issue)];
+  }
+
+  if (options.issues === undefined) {
+    fail([
+      `Missing --issue or --issues.\nFix: 'runstate stats --issue 451', or a set: 'runstate stats --issues 440,448,451' (ranges too: 440..451).`,
+    ]);
+  }
+
+  requireRepoSlug(options.repo);
+  try {
+    return parseIssueSelection(options.issues);
+  } catch (err) {
+    return fail([
+      `${err instanceof Error ? err.message : String(err)}\nFix: pass a list or range of issue numbers, e.g. --issues 1,2,5..8.`,
+    ]);
+  }
+}
+
+/** Column layout of the per-run phase table (AC1). */
+const PHASE_TABLE_HEADERS = ['phase', 'status', 'started', 'ended', 'duration'];
+const PHASE_TABLE_ALIGN: ColumnAlign[] = ['left', 'left', 'left', 'left', 'right'];
+
+/** Indent applied to every table so its rows sit visibly under their heading. */
+const TABLE_INDENT = '  ';
+
+function indent(block: string): string {
+  return block
+    .split('\n')
+    .map((line) => `${TABLE_INDENT}${line}`)
+    .join('\n');
+}
+
+/** One run's heading line: which run, on which issue, from which model. */
+function runHeading(run: RunStats): string {
+  const model = run.model ? `, model ${run.model}` : '';
+  const total = run.total_seconds === null ? 'unknown' : formatDurationCell(run.total_seconds);
+  return `Issue #${run.issue} — run ${run.run}${model} — total ${total}`;
+}
+
+/** The per-run phase table AC1 asks for: phase, status, started, ended, duration. */
+function printRunTable(run: RunStats): void {
+  console.log(runHeading(run));
+  if (run.phases.length === 0) {
+    console.log(`${TABLE_INDENT}(no milestone in this run carried a usable timestamp)`);
+    return;
+  }
+  const rows = run.phases.map((phase) => [
+    phase.phase,
+    phase.status,
+    phase.started_at ?? '-',
+    phase.ended_at,
+    formatDurationCell(phase.seconds),
+  ]);
+  console.log(indent(renderTable(PHASE_TABLE_HEADERS, rows, PHASE_TABLE_ALIGN)));
+}
+
+/** The cross-run aggregate tables AC2 asks for: per-phase spread, totals, and by model. */
+function printAggregates(report: StatsReport, precededByTables: boolean): void {
+  const { phases, models } = report.aggregates;
+
+  // Sections are separated by a blank line, but the FIRST one only needs one when
+  // something was printed above it — otherwise the output opens on an empty line.
+  let printedSomething = precededByTables;
+  const heading = (text: string): void => {
+    console.log(printedSomething ? `\n${text}` : text);
+    printedSomething = true;
+  };
+
+  if (phases.length > 0) {
+    heading(`Per-phase duration across ${report.runs.length} run(s):`);
+    const rows = phases.map((phase) => [
+      phase.phase,
+      String(phase.samples),
+      formatDurationCell(phase.median_seconds),
+      formatDurationCell(phase.min_seconds),
+      formatDurationCell(phase.max_seconds),
+    ]);
+    console.log(
+      indent(
+        renderTable(['phase', 'n', 'median', 'min', 'max'], rows, [
+          'left',
+          'right',
+          'right',
+          'right',
+          'right',
+        ] satisfies ColumnAlign[])
+      )
+    );
+  }
+
+  heading('Per-run total:');
+  const totalRows = report.runs.map((run) => [
+    run.run,
+    `#${run.issue}`,
+    run.model ?? '-',
+    formatDurationCell(run.total_seconds),
+  ]);
+  console.log(
+    indent(
+      renderTable(['run', 'issue', 'model', 'total'], totalRows, [
+        'left',
+        'right',
+        'left',
+        'right',
+      ] satisfies ColumnAlign[])
+    )
+  );
+
+  if (models.length > 0) {
+    heading('By model:');
+    const rows = models.map((model) => [
+      model.model,
+      String(model.runs),
+      formatDurationCell(model.median_total_seconds),
+      formatDurationCell(model.min_total_seconds),
+      formatDurationCell(model.max_total_seconds),
+    ]);
+    console.log(
+      indent(
+        renderTable(['model', 'runs', 'median total', 'min', 'max'], rows, [
+          'left',
+          'right',
+          'right',
+          'right',
+          'right',
+        ] satisfies ColumnAlign[])
+      )
+    );
+  }
+}
+
+/**
+ * Render the human report.
+ *
+ * Per-run phase tables are printed for a single issue; a multi-issue selection prints the
+ * aggregates only, since a fleet of nine issues would otherwise bury them under ~70 rows.
+ */
+function printStatsHuman(report: StatsReport, multiIssue: boolean): void {
+  for (const issue of report.issues_without_trail) {
+    console.log(`Issue #${issue} has no runstate milestones — nothing to measure.`);
+  }
+
+  if (report.runs.length === 0) return;
+
+  if (!multiIssue) {
+    report.runs.forEach((run, i) => {
+      if (i > 0) console.log('');
+      printRunTable(run);
+    });
+  }
+
+  // A single run's aggregates restate its own phase table with median = min = max on every
+  // row. The spread only carries information once there is something to spread across.
+  if (report.runs.length > 1) printAggregates(report, !multiIssue);
+}
+
+/**
+ * `runstate stats` — per-phase durations derived from a trail's `at=` stamps.
+ *
+ * Read-only by construction: the only subprocess it can reach is the `gh issue view` inside
+ * {@link fetchMilestones}, which is also where the auth/404/network failure taxonomy lives.
+ */
+function registerStatsSubcommand(cmd: Command): void {
+  cmd
+    .command('stats')
+    .description('Report per-phase durations from an issue’s runstate trail (read-only)')
+    .option('--issue <number>', 'GitHub issue number')
+    .option('--issues <list>', 'Issue list or range to aggregate, e.g. 1,2,5..8')
+    .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
+    .option('--json', 'Output the report as JSON')
+    .action((options: StatsOptions) => {
+      const issues = resolveStatsIssues(options);
+
+      const trails: IssueTrail[] = issues.map((issue) => ({
+        issue,
+        milestones: fetchMilestones(String(issue), options.repo),
+      }));
+      const report = buildStatsReport(trails);
+
+      if (options.json) {
+        console.log(JSON.stringify(report, null, 2));
+        return;
+      }
+
+      printStatsHuman(report, issues.length > 1);
+
+      // On stderr so stdout stays a parseable table. A skipped milestone or a negative
+      // span is a degraded read, not a failure: an issue with no trail at all is a valid
+      // answer too, so `stats` exits 0 in every one of these cases.
+      for (const warning of report.warnings) {
+        console.error(`⚠️  ${warning}`);
+      }
+    });
+}
+
 /** `runstate mint` — print a fresh run id. */
 function registerMintSubcommand(cmd: Command): void {
   cmd
@@ -715,7 +944,7 @@ function registerMintSubcommand(cmd: Command): void {
     });
 }
 
-/** Registers the `runstate` command tree (post, last, verify, mint). */
+/** Registers the `runstate` command tree (post, last, verify, mint, stats). */
 export function registerRunstateCommand(program: Command): void {
   const runstateCmd = program
     .command('runstate')
@@ -725,4 +954,5 @@ export function registerRunstateCommand(program: Command): void {
   registerLastSubcommand(runstateCmd);
   registerVerifySubcommand(runstateCmd);
   registerMintSubcommand(runstateCmd);
+  registerStatsSubcommand(runstateCmd);
 }

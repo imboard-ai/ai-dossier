@@ -76,6 +76,26 @@ function commentsPayload(bodies: string[]): string {
   return JSON.stringify({ comments: bodies.map((body) => ({ body })) });
 }
 
+/**
+ * One milestone comment body, as `runstate post` writes it. Extra `key=value` lines are
+ * passed through so a fixture can carry `model=` or `pr=` without a second builder.
+ */
+function milestoneBody(
+  phase: string,
+  status: string,
+  run: string,
+  at: string,
+  ...keys: string[]
+): string {
+  return [
+    RUNSTATE_MARKER,
+    `phase=${phase} status=${status} run=${run} at=${at}`,
+    ...keys,
+    'next=done',
+    '',
+  ].join('\n');
+}
+
 const GATE_MILESTONE = [
   RUNSTATE_MARKER,
   'phase=gate status=done run=r-440-ab56 at=2026-08-24T10:00:00Z',
@@ -792,6 +812,247 @@ describe('runstate command', () => {
       expect(code).toBe(1);
       expect(mockedExec).not.toHaveBeenCalled();
       expect(errored().join(' ')).toContain('Invalid --repo');
+    });
+  });
+
+  describe('stats', () => {
+    /** A complete run: seven phases plus ship's second milestone, on round timestamps. */
+    const STATS_TRAIL = [
+      milestoneBody('gate', 'done', 'r-451-1eba', '2026-08-24T10:00:00Z', 'model=claude-opus-5'),
+      milestoneBody('setup', 'done', 'r-451-1eba', '2026-08-24T10:02:00Z'),
+      milestoneBody('plan', 'done', 'r-451-1eba', '2026-08-24T10:07:00Z'),
+      milestoneBody('implement', 'done', 'r-451-1eba', '2026-08-24T10:37:00Z'),
+      milestoneBody('review', 'done', 'r-451-1eba', '2026-08-24T11:07:00Z'),
+      milestoneBody('ship', 'awaiting-merge', 'r-451-1eba', '2026-08-24T11:09:00Z', 'pr=452'),
+      milestoneBody('ship', 'done', 'r-451-1eba', '2026-08-24T11:24:00Z'),
+      milestoneBody('report', 'done', 'r-451-1eba', '2026-08-24T11:25:00Z'),
+    ];
+
+    it('prints a per-phase table for one issue', async () => {
+      execReturns(commentsPayload(STATS_TRAIL));
+
+      await run(['runstate', 'stats', '--issue', '451']);
+
+      const out = logged().join('\n');
+      expect(out).toContain('Issue #451 — run r-451-1eba');
+      expect(out).toContain('model claude-opus-5');
+      expect(out).toContain('phase');
+      expect(out).toContain('duration');
+      expect(out).toContain('setup');
+      expect(out).toContain('2m 0s (120s)');
+      // The ship awaiting-merge → done gap is its own row.
+      expect(out).toContain('merge-wait');
+      expect(out).toContain('15m 0s (900s)');
+      // Whole-run total.
+      expect(out).toContain('1h 25m (5100s)');
+    });
+
+    it('aligns the phase table into columns', async () => {
+      execReturns(commentsPayload(STATS_TRAIL));
+
+      await run(['runstate', 'stats', '--issue', '451']);
+
+      const rows = logged()
+        .join('\n')
+        .split('\n')
+        .filter((l) => /^\s+(phase|gate|setup|implement|merge-wait)\b/.test(l));
+      expect(rows.length).toBeGreaterThan(3);
+      // Every row's status column starts at the same offset.
+      const statusColumn = rows.map((r) => r.indexOf(r.trimStart().split(/\s{2,}/)[1] ?? ''));
+      expect(new Set(statusColumn).size).toBe(1);
+    });
+
+    it('reads the trail with a single read-only gh issue view', async () => {
+      execReturns(commentsPayload(STATS_TRAIL));
+
+      await run(['runstate', 'stats', '--issue', '451']);
+
+      expect(mockedExec).toHaveBeenCalledTimes(1);
+      const [file, args] = mockedExec.mock.calls[0];
+      expect(file).toBe('gh');
+      expect(args).toEqual(['issue', 'view', '451', '--json', 'comments']);
+    });
+
+    it('forwards --repo to gh', async () => {
+      execReturns(commentsPayload(STATS_TRAIL));
+
+      await run(['runstate', 'stats', '--issue', '451', '--repo', 'imboard-ai/ai-dossier']);
+
+      const [, args] = mockedExec.mock.calls[0];
+      expect(args).toEqual([
+        'issue',
+        'view',
+        '451',
+        '--json',
+        'comments',
+        '--repo',
+        'imboard-ai/ai-dossier',
+      ]);
+    });
+
+    it('emits per-run phases and aggregates as JSON', async () => {
+      execReturns(commentsPayload(STATS_TRAIL));
+
+      await run(['runstate', 'stats', '--issue', '451', '--json']);
+
+      const report = JSON.parse(logged().join('\n'));
+      expect(report.issues).toEqual([451]);
+      expect(report.runs).toHaveLength(1);
+      expect(report.runs[0].run).toBe('r-451-1eba');
+      expect(report.runs[0].model).toBe('claude-opus-5');
+      expect(report.runs[0].total_seconds).toBe(5100);
+      expect(report.runs[0].phases).toHaveLength(8);
+      expect(report.runs[0].phases[1]).toEqual({
+        phase: 'setup',
+        status: 'done',
+        started_at: '2026-08-24T10:00:00Z',
+        ended_at: '2026-08-24T10:02:00Z',
+        seconds: 120,
+      });
+      expect(report.aggregates.phases.map((p: { phase: string }) => p.phase)).toContain(
+        'merge-wait'
+      );
+      expect(report.aggregates.models[0]).toMatchObject({ model: 'claude-opus-5', runs: 1 });
+      expect(report.warnings).toEqual([]);
+      expect(report.issues_without_trail).toEqual([]);
+    });
+
+    it('aggregates across an issue list without printing every phase table', async () => {
+      execHandles((_file, args) => {
+        const issue = args[2];
+        return commentsPayload(
+          STATS_TRAIL.map((body) => body.replace(/r-451-1eba/g, `r-${issue}-aaaa`))
+        );
+      });
+
+      await run(['runstate', 'stats', '--issues', '451,452']);
+
+      expect(mockedExec).toHaveBeenCalledTimes(2);
+      expect(mockedExec.mock.calls.map((c) => c[1]?.[2])).toEqual(['451', '452']);
+      const out = logged().join('\n');
+      expect(out).toContain('Per-phase duration across 2 run(s)');
+      expect(out).toContain('Per-run total');
+      expect(out).toContain('By model');
+      // Per-run phase tables are suppressed for a multi-issue selection.
+      expect(out).not.toContain('Issue #451 — run');
+    });
+
+    it('expands a range in --issues', async () => {
+      execHandles(() => commentsPayload([]));
+
+      await run(['runstate', 'stats', '--issues', '10..12']);
+
+      expect(mockedExec.mock.calls.map((c) => c[1]?.[2])).toEqual(['10', '11', '12']);
+    });
+
+    it('omits the aggregate tables for a single run, which would restate its own table', async () => {
+      execReturns(commentsPayload(STATS_TRAIL));
+
+      await run(['runstate', 'stats', '--issue', '451']);
+
+      const out = logged().join('\n');
+      expect(out).toContain('Issue #451 — run r-451-1eba');
+      expect(out).not.toContain('Per-phase duration across');
+      expect(out).not.toContain('By model');
+    });
+
+    it('prints the aggregate tables when one issue carries more than one run', async () => {
+      execReturns(
+        commentsPayload([
+          ...STATS_TRAIL,
+          milestoneBody('gate', 'done', 'r-451-2222', '2026-08-24T12:00:00Z'),
+          milestoneBody('setup', 'done', 'r-451-2222', '2026-08-24T12:03:00Z'),
+        ])
+      );
+
+      await run(['runstate', 'stats', '--issue', '451']);
+
+      const out = logged().join('\n');
+      expect(out).toContain('Issue #451 — run r-451-1eba');
+      expect(out).toContain('Issue #451 — run r-451-2222');
+      expect(out).toContain('Per-phase duration across 2 run(s)');
+      // setup now has two samples with a real spread.
+      expect(out).toContain('3m 0s (180s)');
+    });
+
+    it('says so and exits 0 when the issue has no runstate comments', async () => {
+      execReturns(commentsPayload(['a plain comment', 'another one']));
+
+      const code = await run(['runstate', 'stats', '--issue', '451']);
+
+      expect(code).toBeUndefined();
+      expect(logged().join('\n')).toContain('has no runstate milestones');
+    });
+
+    it('warns on stderr about an unusable at= and still exits 0', async () => {
+      execReturns(
+        commentsPayload([
+          milestoneBody('gate', 'done', 'r-451-1eba', '$(date -u +%Y-%m-%dT%H:%M:%SZ)'),
+          milestoneBody('setup', 'done', 'r-451-1eba', '2026-08-24T10:02:00Z'),
+          milestoneBody('plan', 'done', 'r-451-1eba', '2026-08-24T10:07:00Z'),
+        ])
+      );
+
+      const code = await run(['runstate', 'stats', '--issue', '451']);
+
+      expect(code).toBeUndefined();
+      expect(errored().join(' ')).toContain('unusable at=');
+      // stdout stays a parseable table.
+      expect(logged().join('\n')).toContain('plan');
+    });
+
+    it('refuses --issue and --issues together', async () => {
+      const code = await run(['runstate', 'stats', '--issue', '451', '--issues', '451,452']);
+
+      expect(code).toBe(1);
+      expect(mockedExec).not.toHaveBeenCalled();
+      expect(errored().join(' ')).toContain('not both');
+    });
+
+    it('refuses neither --issue nor --issues', async () => {
+      const code = await run(['runstate', 'stats']);
+
+      expect(code).toBe(1);
+      expect(mockedExec).not.toHaveBeenCalled();
+      expect(errored().join(' ')).toContain('Missing --issue or --issues');
+    });
+
+    it('refuses a malformed --issues selection before calling gh', async () => {
+      const code = await run(['runstate', 'stats', '--issues', '1,abc']);
+
+      expect(code).toBe(1);
+      expect(mockedExec).not.toHaveBeenCalled();
+      expect(errored().join(' ')).toContain("Invalid issue 'abc'");
+    });
+
+    it('refuses a non-numeric --issue before calling gh', async () => {
+      const code = await run(['runstate', 'stats', '--issue', 'main']);
+
+      expect(code).toBe(1);
+      expect(mockedExec).not.toHaveBeenCalled();
+      expect(errored().join(' ')).toContain('Invalid --issue');
+    });
+
+    it('refuses a --repo that is not an owner/name slug on a --issues run', async () => {
+      const code = await run(['runstate', 'stats', '--issues', '1,2', '--repo', '--flag']);
+
+      expect(code).toBe(1);
+      expect(mockedExec).not.toHaveBeenCalled();
+      expect(errored().join(' ')).toContain('Invalid --repo');
+    });
+
+    it('reports a gh failure with its cause rather than an empty table', async () => {
+      execHandles(() => {
+        const err = new Error('gh failed') as Error & { status: number; stderr: string };
+        err.status = 1;
+        err.stderr = 'gh: Could not resolve to an Issue with the number of 99999.';
+        throw err;
+      });
+
+      const code = await run(['runstate', 'stats', '--issue', '99999']);
+
+      expect(code).toBe(1);
+      expect(errored().join(' ')).toContain('could not find it');
     });
   });
 });
