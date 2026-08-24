@@ -74,9 +74,10 @@ async function main(): Promise<void> {
         if (s.worktrees.length > 0) {
           console.log('\nWorktrees:');
           for (const wt of s.worktrees) {
-            const info = wt.assigned_to_issue
-              ? ` -> issue #${wt.assigned_to_issue} (${wt.assigned_branch})`
-              : '';
+            const info =
+              wt.assigned_to_issue !== null
+                ? ` -> issue #${wt.assigned_to_issue} (${wt.assigned_branch})`
+                : '';
             console.log(`  ${wt.id}  [${wt.status}]  ${wt.path}${info}`);
           }
         }
@@ -104,9 +105,9 @@ async function main(): Promise<void> {
       }
 
       case 'claim': {
-        const issue = flags.issue ? Number.parseInt(String(flags.issue), 10) : null;
-        const branch = flags.branch ? String(flags.branch) : null;
-        if (!issue || !branch) {
+        const issue = typeof flags.issue === 'string' ? Number.parseInt(flags.issue, 10) : NaN;
+        const branch = typeof flags.branch === 'string' ? flags.branch : null;
+        if (!Number.isInteger(issue) || branch === null) {
           console.error('Error: --issue N and --branch B are required');
           process.exit(1);
         }
