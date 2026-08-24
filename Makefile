@@ -67,16 +67,18 @@ clean:
 ## rebuild: Clean and rebuild all packages
 rebuild: clean build
 
-## test: Run tests across all packages
+## test: Run tests across all packages and repo scripts
 test:
 	@echo "Running tests..."
 	npm run test --workspaces --if-present
+	npm run test:scripts
 	@echo "✓ Tests completed"
 
-## test-coverage: Run tests with coverage reporting and threshold enforcement
+## test-coverage: Run tests (packages with coverage + repo scripts) and enforce thresholds
 test-coverage:
 	@echo "Running tests with coverage..."
 	npm run test:coverage --workspaces --if-present
+	npm run test:scripts
 	@echo "✓ Tests with coverage completed"
 
 ## lint: Check code for linting issues (no changes)

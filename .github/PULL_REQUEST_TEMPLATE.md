@@ -36,6 +36,7 @@ How was this tested?
 
 ## Checklist
 - [ ] Documentation updated (README, examples, or other docs)
+- [ ] Version bumped for any publishable package whose `src/`/`bin/` changed (or `no-release-needed` label applied)
 - [ ] Added/updated validations where relevant
 - [ ] Security considerations noted (if applicable)
 - [ ] Backwards compatibility maintained (or breaking change noted)
