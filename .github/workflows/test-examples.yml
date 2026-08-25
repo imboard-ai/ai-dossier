@@ -59,8 +59,86 @@ jobs:
       - name: Validate all example dossiers
         run: bash scripts/test-examples.sh
 
+  refresh-examples-snapshot:
+    # examples/git/*.ds.md is a hand-copied snapshot of the published
+    # imboard-ai/git/* dossier family and drifts within days (#441). This job
+    # re-pulls the latest published version of everything already snapshotted,
+    # validates the refreshed set with the same script the test-examples job
+    # uses, and opens (or updates) a single PR only when something changed —
+    # never on the regular push/pull_request/workflow_dispatch triggers, only
+    # on the workflow's existing weekly schedule.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: make build-all
+
+      - name: Pull latest dossiers and refresh examples/git
+        id: refresh
+        run: node scripts/refresh-examples-snapshot.mjs
+
+      - name: Validate refreshed example dossiers
+        if: steps.refresh.outputs.changed == 'true'
+        run: bash scripts/test-examples.sh
+
+      - name: Open or update the refresh PR
+        if: steps.refresh.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: chore/examples-git-refresh
+        # This branch is bot-owned and rewritten from scratch every week — a
+        # single clean commit against current main, not accumulated history.
+        # Any manual commit pushed here between runs is discarded by the next
+        # scheduled run. `actions/checkout@v4`'s default shallow, single-ref
+        # clone means this job never has a local remote-tracking ref for
+        # $BRANCH even when it already exists on origin, so `--force-with-lease`
+        # (which needs that ref as its expected-value baseline) fails with
+        # "stale info" on every update — a plain `--force` is what this
+        # intentionally-rewritten branch actually needs.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B "$BRANCH"
+          git add examples/git
+          git commit -m "${{ steps.refresh.outputs.pr_title }}"
+          git push -u origin "$BRANCH" --force
+
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING_PR" ]; then
+            gh pr edit "$EXISTING_PR" --body-file "${{ steps.refresh.outputs.pr_body_path }}"
+            echo "Updated PR #$EXISTING_PR"
+          else
+            gh pr create \
+              --title "${{ steps.refresh.outputs.pr_title }}" \
+              --body-file "${{ steps.refresh.outputs.pr_body_path }}" \
+              --base main \
+              --head "$BRANCH"
+          fi
+
   create-issue-on-failure:
-    needs: test-examples
+    needs: [test-examples, refresh-examples-snapshot]
+    # `failure()` only inspects jobs listed in `needs` above — both jobs must
+    # be listed or a refresh-examples-snapshot failure (bad pull, refreshed
+    # set fails validation, push/PR step error) would go unreported and the
+    # only signal would be a red run nobody's watching in real time.
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     permissions:
@@ -86,6 +164,10 @@ jobs:
               return;
             }
 
+            const failedJobs = [];
+            if ('${{ needs.test-examples.result }}' === 'failure') failedJobs.push('test-examples');
+            if ('${{ needs.refresh-examples-snapshot.result }}' === 'failure') failedJobs.push('refresh-examples-snapshot');
+
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -94,6 +176,8 @@ jobs:
                 '## Example Dossiers Failing',
                 '',
                 `The weekly scheduled run of the [Test Examples workflow](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/workflows/test-examples.yml) failed.`,
+                '',
+                `**Failed job(s):** ${failedJobs.join(', ') || '(unknown)'}`,
                 '',
                 `**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
                 '',
