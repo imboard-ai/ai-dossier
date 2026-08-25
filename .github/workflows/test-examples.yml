@@ -59,6 +59,71 @@ jobs:
       - name: Validate all example dossiers
         run: bash scripts/test-examples.sh
 
+  refresh-examples-snapshot:
+    # examples/git/*.ds.md is a hand-copied snapshot of the published
+    # imboard-ai/git/* dossier family and drifts within days (#441). This job
+    # re-pulls the latest published version of everything already snapshotted,
+    # validates the refreshed set with the same script the test-examples job
+    # uses, and opens (or updates) a single PR only when something changed —
+    # never on the regular push/pull_request/workflow_dispatch triggers, only
+    # on the workflow's existing weekly schedule.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: make build-all
+
+      - name: Pull latest dossiers and refresh examples/git
+        id: refresh
+        run: node scripts/refresh-examples-snapshot.mjs
+
+      - name: Validate refreshed example dossiers
+        if: steps.refresh.outputs.changed == 'true'
+        run: bash scripts/test-examples.sh
+
+      - name: Open or update the refresh PR
+        if: steps.refresh.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: chore/examples-git-refresh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git checkout -B "$BRANCH"
+          git add examples/git
+          git commit -m "${{ steps.refresh.outputs.pr_title }}"
+          git push -u origin "$BRANCH" --force-with-lease
+
+          EXISTING_PR=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
+          if [ -n "$EXISTING_PR" ]; then
+            gh pr edit "$EXISTING_PR" --body-file "${{ steps.refresh.outputs.pr_body_path }}"
+            echo "Updated PR #$EXISTING_PR"
+          else
+            gh pr create \
+              --title "${{ steps.refresh.outputs.pr_title }}" \
+              --body-file "${{ steps.refresh.outputs.pr_body_path }}" \
+              --base main \
+              --head "$BRANCH"
+          fi
+
   create-issue-on-failure:
     needs: test-examples
     if: failure() && github.event_name == 'schedule'
