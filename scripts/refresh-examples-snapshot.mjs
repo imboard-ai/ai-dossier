@@ -35,9 +35,11 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parseDossierContent } from '@ai-dossier/core';
 
 /** The registry owner/category every `examples/git/*.ds.md` file maps onto. */
 export const DOSSIER_PREFIX = 'imboard-ai/git';
@@ -74,27 +76,38 @@ export function dossierNameFromFile(filename) {
  * Parse the `---dossier\n{...}\n---` frontmatter block a .ds.md file opens
  * with and return its `version` field.
  *
+ * Delegates to `@ai-dossier/core`'s `parseDossierContent` — the same parser
+ * the CLI itself uses — rather than hand-rolling a regex + JSON.parse, so
+ * this script never drifts from what the project considers a valid dossier
+ * (e.g. the standard `---` YAML frontmatter form `parseDossierContent` also
+ * accepts, which a bespoke `---dossier`-only regex could not).
+ *
  * Throws rather than returning null on anything malformed — a dossier we
  * cannot version-check is a dossier the "did it change" comparison cannot
  * be trusted for, and silently treating it as unchanged would be exactly
  * the fail-open behaviour this script exists to avoid.
  */
 export function extractVersion(dossierMarkdown, sourceLabel = '<content>') {
-  const match = dossierMarkdown.match(/^---dossier\r?\n([\s\S]*?)\r?\n---\r?\n/);
-  if (!match) {
-    throw new RefreshError(`${sourceLabel}: no '---dossier ... ---' frontmatter block found.`);
-  }
-  let frontmatter;
+  let parsed;
   try {
-    frontmatter = JSON.parse(match[1]);
+    parsed = parseDossierContent(dossierMarkdown);
   } catch (err) {
-    throw new RefreshError(`${sourceLabel}: frontmatter is not valid JSON (${err.message}).`);
+    throw new RefreshError(`${sourceLabel}: ${err.message}`);
   }
-  if (typeof frontmatter.version !== 'string' || frontmatter.version.length === 0) {
+  const version = parsed.frontmatter?.version;
+  if (typeof version !== 'string' || version.length === 0) {
     throw new RefreshError(`${sourceLabel}: frontmatter has no usable 'version' field.`);
   }
-  return frontmatter.version;
+  return version;
 }
+
+/**
+ * A dossier version is used as a filesystem path segment below (as part of
+ * `${version}.ds.md`) — restrict it to characters that can never introduce a
+ * path separator (`/`, `\`) so a malformed or malicious registry response
+ * cannot influence where this script writes on disk.
+ */
+const SAFE_VERSION_RE = /^[0-9][A-Za-z0-9._+-]*$/;
 
 /**
  * Parse the version number the CLI's `pull` command reports it fetched, out
@@ -102,8 +115,15 @@ export function extractVersion(dossierMarkdown, sourceLabel = '<content>') {
  *
  * Reading the version back out of stdout — rather than re-deriving the cache
  * path some other way — keeps this script honest about what the CLI
- * actually did, including on the "(already cached)" path where `--force`
- * still re-verifies but the printed status differs.
+ * actually did. `pullOne()` always calls `pull --force` against a fresh,
+ * empty scratch cache (see below), so the printed status this script will
+ * ever see is `(downloaded)` on the first call or `(updated)` thereafter,
+ * never `(already cached)` — that status only appears when `--force` is
+ * absent. The regex doesn't hardcode a status word, so it keeps working if
+ * the CLI's status text changes.
+ *
+ * The captured version is validated against `SAFE_VERSION_RE` before being
+ * returned — see the comment on that constant.
  */
 export function parsePulledVersion(pullStdout, dossierName) {
   const escaped = dossierName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -114,10 +134,25 @@ export function parsePulledVersion(pullStdout, dossierName) {
       `could not find a pulled version for '${dossierName}' in pull output:\n${pullStdout}`
     );
   }
-  return match[1];
+  const version = match[1];
+  if (!SAFE_VERSION_RE.test(version)) {
+    throw new RefreshError(
+      `'${dossierName}' reported version '${version}', which contains characters unsafe to ` +
+        `use in a file path (expected to match ${SAFE_VERSION_RE}). Refusing to proceed.`
+    );
+  }
+  return version;
 }
 
-/** Render the AC2 old->new version table for the PR body. Empty `changes` never reaches here (AC4 short-circuits first) but is handled defensively. */
+/**
+ * Render the AC2 old->new version table for the PR body.
+ *
+ * Called unconditionally by `main()` for every run, including no-op weeks
+ * where `changes` is empty — AC4 ("no-op weeks create no PR") is enforced
+ * by the calling workflow YAML gating the PR step on `changed == 'true'`,
+ * not by this function skipping its empty-list branch, which is live,
+ * regularly-exercised code (see the "handles an empty change list" test).
+ */
 export function buildPrBody(changes) {
   const lines = [
     '## Summary',
@@ -140,6 +175,10 @@ export function buildPrBody(changes) {
     '',
     '`scripts/test-examples.sh` was run against this refreshed set in the same workflow',
     'run before this PR was opened/updated.',
+    '',
+    'This branch is rewritten from scratch each week (a single clean commit against',
+    'current main, not accumulated history) — any manual commit pushed here between',
+    'runs is discarded by the next scheduled run.',
     '',
     '🤖 Generated by the `refresh-examples-snapshot` job in `.github/workflows/test-examples.yml`.'
   );
@@ -186,9 +225,33 @@ function setGithubOutput(key, value) {
 }
 
 /**
+ * Load the CLI's own `safeDossierPath()` straight out of its build output,
+ * by file path rather than the `@ai-dossier/cli` package specifier (that
+ * package declares no public `exports` for internal modules like
+ * `helpers.js`, and `cachedContentPath()` in `cli/src/cache-resolver.ts`
+ * can't be reused as-is either — its `CACHE_DIR` constant is fixed to the
+ * real `os.homedir()` at import time in *this* process, not the child
+ * subprocess's scratch `HOME`). `createRequire` loads the CJS build
+ * synchronously, keeping `pullOne` sync like the rest of this script.
+ */
+function loadSafeDossierPath(cliPath, repoRoot) {
+  const require = createRequire(import.meta.url);
+  const helpersPath = join(dirname(resolve(repoRoot, cliPath)), 'helpers.js');
+  return require(helpersPath).safeDossierPath;
+}
+
+/**
  * Pull one dossier to a scratch cache dir (never the real `~/.dossier/cache`,
  * so this script never depends on — or pollutes — a machine's existing
  * login/cache state) and return its freshly downloaded content + version.
+ *
+ * The cache file path mirrors the `<cache>/<name>/<version>.ds.md` layout
+ * centralized in `cli/src/cache-resolver.ts`'s `cachedContentPath()` — the
+ * `<name>` portion is resolved with the CLI's own `safeDossierPath()` (which
+ * rejects a dossier name that would escape the cache dir); `<version>` comes
+ * from `parsePulledVersion()`, which independently validates it against
+ * `SAFE_VERSION_RE` before it ever reaches a path. If the cache layout in
+ * `cache-resolver.ts` changes, update this to match.
  */
 function pullOne({ name, cliPath, repoRoot, scratchHome }) {
   let stdout;
@@ -204,16 +267,9 @@ function pullOne({ name, cliPath, repoRoot, scratchHome }) {
   }
 
   const version = parsePulledVersion(stdout, name);
-  const [owner, category, ...rest] = name.split('/');
-  const cachePath = join(
-    scratchHome,
-    '.dossier',
-    'cache',
-    owner,
-    category,
-    ...rest,
-    `${version}.ds.md`
-  );
+  const safeDossierPath = loadSafeDossierPath(cliPath, repoRoot);
+  const dossierCacheDir = safeDossierPath(join(scratchHome, '.dossier', 'cache'), name);
+  const cachePath = join(dossierCacheDir, `${version}.ds.md`);
   if (!existsSync(cachePath)) {
     throw new RefreshError(
       `pull reported '${name}@${version}' but the expected cache file is missing: ${cachePath}`
