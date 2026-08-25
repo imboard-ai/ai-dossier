@@ -26,10 +26,10 @@ Requires Node.js >= 20.0.0.
 
 | Command | Description |
 |---------|-------------|
-| `worktree-pool status` | Show pool inventory (warm/assigned/stale counts) |
+| `worktree-pool status [--json]` | Show pool inventory (warm/assigned/broken counts); `--json` prints the whole inventory, including per-entry `status`, for callers |
 | `worktree-pool replenish [--count N]` | Pre-warm spares up to target count |
 | `worktree-pool claim --issue N --branch B` | Claim a warm worktree, print path |
-| `worktree-pool return --path P` | Return worktree to pool for reuse |
+| `worktree-pool return --path P [--json]` | Return worktree to pool for reuse; self-checks on success, and on failure marks the entry `broken` and exits non-zero naming the step |
 | `worktree-pool refresh` | Fetch origin + rebuild in all warm worktrees |
 | `worktree-pool gc [--dry-run] [--yes]` | Remove stale/orphaned pool worktrees (never anything else) |
 | `worktree-pool init` | Configure pool directory for this project |
@@ -72,8 +72,8 @@ replenish          claim               return
 
 1. **Replenish** creates worktrees from `base_ref` (default `origin/main`) on temp branches, then runs the warm commands (install + build)
 2. **Claim** renames a warm worktree, switches to your feature branch — instant setup (~2s)
-3. **Return** recycles the worktree back to pool on a fresh temp branch
-4. **GC** removes stale entries (>72h) and reconciles disk state vs pool state — only for worktrees the pool created (see [Sharing the pool directory](#sharing-the-pool-directory))
+3. **Return** recycles the worktree back to pool on a fresh temp branch, then verifies the result against reality — the entry really reads `warm`, no tracked file is dirty, and the new `pool/spare-*` branch is really checked out — before reporting success. A failure at any step leaves the entry `broken` (never `assigned`, never a falsely-`warm` spare), leaves the directory on disk, and exits non-zero naming the step
+4. **GC** removes broken entries and stale entries (>72h) and reconciles disk state vs pool state — only for worktrees the pool created (see [Sharing the pool directory](#sharing-the-pool-directory))
 
 Claim and return only re-run the warm commands when the project's lockfile changed between the worktree's base commit and `base_ref` — otherwise the existing `node_modules` and build output are reused.
 
@@ -84,7 +84,10 @@ Pool state is stored in `worktrees/.pool-state.json` (automatically gitignored).
 ```
 creating -> warming -> warm -> assigned -> recycling -> warm
                                        -> destroying
+                                          recycling -> broken   (a failed return)
 ```
+
+A `broken` entry is never handed out — `claim` only ever selects `warm`.
 
 Concurrent access is protected by atomic `mkdir`-based file locking.
 
@@ -102,8 +105,10 @@ A worktree in `pool_dir` belongs to the pool only when either:
 Everything else — your branch worktrees, plain directories, even a directory
 that happens to match the pool's naming but is on a branch of yours — is
 *foreign*. Foreign worktrees are listed by `status` and `gc` as
-`foreign, skipped` and are never removed, reset, or cleaned by `gc`, `refresh`,
-or a failed `return`. Branches are held to the same rule: `gc` only ever deletes
+`foreign, skipped` and are never removed, reset, or cleaned by `gc` or
+`refresh`. A failed `return` removes nothing at all — not even its own worktree
+(see [Broken entries](#broken-entries-a-failed-return)). Branches are held to
+the same rule: `gc` only ever deletes
 `pool/spare-*` refs.
 
 Because deletions are irreversible for uncommitted work, `gc` also prints the
@@ -129,23 +134,101 @@ If a pool worktree's directory has drifted — the recorded path now holds a
 different branch — `gc` drops the stale row from `.pool-state.json` and leaves
 the directory on disk rather than guessing.
 
-### Broken entries
+### Corrupted directories
 
 A pool directory that is still on disk but that git no longer has an admin dir
-for (`.git/worktrees/<id>`) is **broken**: every git command inside it fails
-with `fatal: not a git repository`. `status` lists these under `Broken`, and
+for (`.git/worktrees/<id>`) is **corrupted**: every git command inside it fails
+with `fatal: not a git repository`. `status` lists these separately, and
 `claim` skips them and hands out the next warm spare instead of failing:
 
 ```bash
 $ worktree-pool status
 ...
-Broken (corrupted, skipped by claim): 1
+Corrupted directories (no git admin dir, skipped by claim): 1
   pool-1787468026330-1079658  recorded in .pool-state.json as pool-1787468026330-1079658, no longer a registered worktree — its git admin dir is gone (a `git worktree prune` after an unrepaired rename), so every git command inside it fails
-Run 'worktree-pool gc --yes' to clear broken pool entries.
+Run 'worktree-pool gc --yes' to clear corrupted pool directories.
 ```
 
-Broken entries are reported, never removed silently — `gc` clears them under
-the same ownership rules as everything else.
+Corrupted directories are reported, never removed silently — `gc` clears them
+under the same ownership rules as everything else.
+
+### Broken entries (a failed `return`)
+
+Distinct from a corrupted *directory* above: a **broken entry** is a pool entry
+whose `return` failed part-way. Rather than being destroyed, it is left behind
+with `status: "broken"`, recording which step failed and why, so the failure is
+visible instead of silent:
+
+```bash
+$ worktree-pool return --path ../worktrees/bug-453-x
+Error: return failed at step 'rename': Recycle target already exists: /repo/../worktrees/pool-...
+Pool entry pool-1787468026330-1079658 is now marked 'broken' and was NOT destroyed.
+  Worktree left at: /repo/../worktrees/bug-453-x
+  Inspect with 'worktree-pool status --json'; clear with 'worktree-pool gc'.
+```
+
+`status` counts them in their own column and names the failed step:
+
+```
+Warm: 2  Assigned: 1  Creating: 0  Broken: 1  Other: 0  Total: 4
+
+Worktrees:
+  pool-1787468026330-1079658  [broken]  bug-453-x -> issue #453 (bug/453-x) failed at 'rename': Recycle target already exists
+```
+
+`claim` never hands one out. The directory is deliberately left on disk so the
+failure can be inspected; `gc` collects broken entries immediately — they are
+unusable from the moment they are marked and occupy `max_pool_size` capacity
+until removed — under the same ownership rules as everything else.
+
+## Checking the pool from a script
+
+`status --json` prints the whole inventory on stdout, so a caller can assert
+that a `return` actually landed instead of trusting the exit code of whoever
+claimed it did:
+
+```bash
+worktree-pool status --json | jq '.worktrees[] | select(.status == "broken")'
+```
+
+Note the two distinct fields, matching the two sections above: the top-level
+`broken[]` array lists *corrupted directories* (#443), while an entry with
+`"status": "broken"` in `worktrees[]` is a *failed return* (#453). The
+`broken_entries` count covers the latter.
+
+`return --path P --json` prints the same self-check as a JSON object:
+
+```json
+{
+  "id": "pool-1787468026330-1079658",
+  "path": "/repo/../worktrees/pool-1787468026330-1079658",
+  "verification": {
+    "entry_status": "warm",
+    "directory_clean": true,
+    "dirty_entries": [],
+    "checked_out_branch": "pool/spare-pool-1787468026330-1079658",
+    "expected_branch": "pool/spare-pool-1787468026330-1079658"
+  }
+}
+```
+
+### Programmatic use
+
+```ts
+import { returnWorktree, ReturnFailure } from '@ai-dossier/worktree-pool';
+
+try {
+  const result = returnWorktree(worktreePath);
+  // result.id, result.path, result.verification
+} catch (err) {
+  if (err instanceof ReturnFailure) {
+    // err.step (a ReturnStep), err.entryId, err.worktreePath
+    // The entry is 'broken' and the directory was NOT destroyed — unless
+    // err.markError is non-null, which means the marking write itself failed
+    // and pool state should be re-checked before the next claim.
+  }
+}
+```
 
 ## Configuration
 

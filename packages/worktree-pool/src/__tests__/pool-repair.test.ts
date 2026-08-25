@@ -162,7 +162,7 @@ describe.sequential('worktree repair after rename (#443)', () => {
 
       const output = runPoolCombined('status');
 
-      expect(output).toContain('Broken (corrupted, skipped by claim): 1');
+      expect(output).toContain('Corrupted directories (no git admin dir, skipped by claim): 1');
       expect(output).toContain(path.basename(brokenPath));
       expect(output).toContain('git admin dir is gone');
       // Reported, not fatal, and never mistaken for someone else's worktree.
@@ -181,7 +181,7 @@ describe.sequential('worktree repair after rename (#443)', () => {
       expect(healthy).toBeDefined();
 
       const output = runPoolCombined('claim --issue 443 --branch fix/443-skip');
-      expect(output).toContain('Broken (corrupted, skipped): 1');
+      expect(output).toContain('Corrupted (no git admin dir, skipped): 1');
 
       const claimed = readPoolState().worktrees.find((w) => w.assigned_to_issue === 443);
       expect(claimed?.id).toBe(healthy?.id);
@@ -206,7 +206,7 @@ describe.sequential('worktree repair after rename (#443)', () => {
       }
 
       expect(failed).toBe(true);
-      expect(output).toContain('Broken (corrupted, skipped): 1');
+      expect(output).toContain('Corrupted (no git admin dir, skipped): 1');
       expect(output).toContain('No warm worktrees available');
       expect(output).not.toContain('fatal:');
     });

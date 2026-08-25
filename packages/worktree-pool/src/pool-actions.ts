@@ -31,6 +31,8 @@ import {
   type PoolState,
   type PoolWorktree,
   type ProjectEnv,
+  type ReturnStep,
+  type WorktreeStatus,
 } from './types';
 
 const LOCK_TIMEOUT_MS = 10_000;
@@ -364,6 +366,64 @@ function runWarmCommands(worktreeAbsPath: string, cfg: PoolFileConfig): void {
 function lockfilePathForWorktree(worktreeAbsPath: string, cfg: PoolFileConfig): string {
   const projectDir = resolveProjectDir(worktreeAbsPath, cfg.project_subdir);
   return lockfilePathFor(detectProjectEnv(projectDir), cfg.project_subdir);
+}
+
+/**
+ * Did the project lockfile change between `baseCommit` and the configured base
+ * ref? An unreadable diff counts as "changed" — re-warming is cheap, a stale
+ * `node_modules` is not.
+ */
+function lockfileChangedSince(
+  gitRoot: string,
+  baseCommit: string,
+  worktreeAbsPath: string,
+  cfg: PoolFileConfig
+): boolean {
+  try {
+    const diff = git(['diff', '--name-only', `${baseCommit}..${cfg.base_ref}`], { cwd: gitRoot });
+    return lockfileChangedInDiff(diff, lockfilePathForWorktree(worktreeAbsPath, cfg));
+  } catch {
+    return true;
+  }
+}
+
+/** Message of a thrown value, whatever it is. */
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Make git's error text safe to persist and re-print. `.pool-state.json` is a
+ * plain file that `status` echoes back, and git quotes remote URLs verbatim in
+ * its errors — including any `https://user:token@host` credentials — so an
+ * unfiltered message would write a secret to disk and replay terminal escape
+ * sequences from a remote on every later `status`.
+ */
+function sanitizeReason(text: string): string {
+  return (
+    text
+      .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, '$1<redacted>@')
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping terminal escapes is the point
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+      .slice(0, 2000)
+  );
+}
+
+/**
+ * The value to record as an entry's `path`. State paths are contractually bare
+ * directory names directly inside the pool directory (`classifyPath` matches on
+ * `basename`), so anything that escapes — from a hand-edited or corrupted state
+ * file — keeps the previously recorded name rather than being written back.
+ */
+function relativePoolPath(poolDir: string, onDiskPath: string, fallback: string): string {
+  const rel = path.relative(poolDir, onDiskPath);
+  const isBareSegment =
+    rel.length > 0 &&
+    !path.isAbsolute(rel) &&
+    !rel.startsWith('..') &&
+    !rel.includes(path.sep) &&
+    rel !== '.';
+  return isBareSegment ? rel : fallback;
 }
 
 // --- Ownership / provenance ---
@@ -742,16 +802,7 @@ export function claim(issue: number, branch: string): ClaimResult | null {
     // Check freshness
     const currentBase = git(['rev-parse', cfg.base_ref], { cwd: gitRoot });
     if (worktree.base_commit !== currentBase) {
-      const lockfilePath = lockfilePathForWorktree(absPath, cfg);
-      let lockChanged = false;
-      try {
-        const diff = git(['diff', '--name-only', `${worktree.base_commit}..${cfg.base_ref}`], {
-          cwd: gitRoot,
-        });
-        lockChanged = lockfileChangedInDiff(diff, lockfilePath);
-      } catch {
-        lockChanged = true;
-      }
+      const lockChanged = lockfileChangedSince(gitRoot, worktree.base_commit, absPath, cfg);
 
       git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: absPath });
       git(['reset', '--hard', cfg.base_ref], { cwd: absPath });
@@ -807,7 +858,197 @@ export function claim(issue: number, branch: string): ClaimResult | null {
   }
 }
 
-export function returnWorktree(worktreePath: string): void {
+/**
+ * What a successful `return` verified before exiting (#453 AC2). Every field
+ * is checked against reality after the state write, not assumed from the fact
+ * that no step threw.
+ */
+export interface ReturnVerification {
+  /** Entry status re-read from `.pool-state.json` — must be `warm`. */
+  entry_status: WorktreeStatus | 'missing';
+  /**
+   * No *tracked* file in the recycled directory is modified. Untracked files
+   * are deliberately not counted: `git clean -fd` runs before the warm
+   * commands, so anything untracked at this point is warm-command output, and
+   * `replenish` marks exactly that state `warm` without complaint. Failing
+   * here on it would make `return` stricter than the path that created the
+   * spare in the first place.
+   */
+  directory_clean: boolean;
+  /** Offending `git status --porcelain` entries when `directory_clean` is false. */
+  dirty_entries: string[];
+  /** Branch actually checked out — must be the new `pool/spare-*` temp branch. */
+  checked_out_branch: string | null;
+  /** The temp branch the recycle intended to leave behind. */
+  expected_branch: string;
+}
+
+/** Outcome of a successful `returnWorktree`. */
+export interface ReturnResult {
+  /** New pool entry id after recycling. */
+  id: string;
+  /** Absolute path the recycled worktree now lives at. */
+  path: string;
+  /** The self-check that ran before this result was returned. */
+  verification: ReturnVerification;
+}
+
+/**
+ * A `return` that failed, tagged with the step that failed (#453 AC1). The
+ * pool entry has been left in `status: 'broken'` — not `assigned`, not `warm`
+ * — and the worktree directory is deliberately NOT destroyed, so the failure
+ * is inspectable and `gc` can clear it deliberately.
+ *
+ * `markError` is the one case where that promise could not be kept: the
+ * broken-marking write itself failed. Callers must report it rather than
+ * assume the entry is marked, or they reproduce the very bug #453 is about.
+ */
+export class ReturnFailure extends Error {
+  readonly step: ReturnStep;
+  readonly entryId: string | null;
+  readonly worktreePath: string;
+  /** Why the entry could NOT be marked broken, or `null` when it was marked. */
+  readonly markError: string | null;
+
+  constructor(
+    step: ReturnStep,
+    worktreePath: string,
+    entryId: string | null,
+    cause: unknown,
+    markError: string | null = null
+  ) {
+    super(`return failed at step '${step}': ${messageOf(cause)}`, { cause });
+    this.name = 'ReturnFailure';
+    this.step = step;
+    this.entryId = entryId;
+    this.worktreePath = worktreePath;
+    this.markError = markError;
+  }
+}
+
+/** Run `fn`, tagging any throw with the step it happened in. */
+function step<T>(name: ReturnStep, fn: () => T): T {
+  try {
+    return fn();
+  } catch (err) {
+    // Kept so that if a step is ever nested inside another, the innermost
+    // attribution wins rather than being overwritten by its caller.
+    if (err instanceof StepError) throw err;
+    throw new StepError(name, err);
+  }
+}
+
+/** Internal carrier so `step` can attribute a failure without unwinding twice. */
+class StepError extends Error {
+  readonly step: ReturnStep;
+  constructor(stepName: ReturnStep, cause: unknown) {
+    super(messageOf(cause), { cause });
+    this.name = 'StepError';
+    this.step = stepName;
+  }
+}
+
+/** Branch checked out at `absPath`, or `null` when it cannot be determined. */
+function currentBranchOf(absPath: string): string | null {
+  try {
+    const branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: absPath });
+    return branch === 'HEAD' ? null : branch;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Tracked-file cleanliness of `absPath`. A git failure is reported as an error
+ * rather than as "dirty" — telling an operator to look for uncommitted changes
+ * that do not exist is the wrong place to send them.
+ */
+function inspectWorktreeCleanliness(absPath: string): { clean: boolean; entries: string[] } {
+  let output: string;
+  try {
+    output = git(['status', '--porcelain', '--untracked-files=no'], { cwd: absPath });
+  } catch (err) {
+    return { clean: false, entries: [`git status failed: ${messageOf(err)}`] };
+  }
+  const entries = output.length === 0 ? [] : output.split('\n');
+  return { clean: entries.length === 0, entries };
+}
+
+/**
+ * Verify a finished recycle against reality (#453 AC2). Separate from
+ * `returnWorktree` so the rules are readable and testable on their own.
+ */
+function verifyRecycled(
+  poolDir: string,
+  newId: string,
+  newAbsPath: string,
+  newTempBranch: string
+): ReturnVerification {
+  const committed = readState(poolDir).worktrees.find((w) => w.id === newId);
+  const cleanliness = inspectWorktreeCleanliness(newAbsPath);
+  const result: ReturnVerification = {
+    entry_status: committed?.status ?? 'missing',
+    directory_clean: cleanliness.clean,
+    dirty_entries: cleanliness.entries,
+    checked_out_branch: currentBranchOf(newAbsPath),
+    expected_branch: newTempBranch,
+  };
+
+  const problems: string[] = [];
+  if (result.entry_status !== 'warm') {
+    problems.push(`entry status is '${result.entry_status}', expected 'warm'`);
+  }
+  if (!result.directory_clean) {
+    problems.push(
+      `directory ${newAbsPath} is not clean: ${result.dirty_entries.slice(0, 5).join(', ')}`
+    );
+  }
+  if (result.checked_out_branch !== newTempBranch) {
+    problems.push(
+      `checked-out branch is '${result.checked_out_branch ?? 'detached HEAD'}', ` +
+        `expected '${newTempBranch}'`
+    );
+  }
+  if (problems.length > 0) {
+    throw new Error(`post-return self-check failed: ${problems.join('; ')}`);
+  }
+  return result;
+}
+
+/**
+ * Mark a pool entry `broken` after a failed recycle. Returns `null` on
+ * success, or the reason the mark itself failed — never throws, because the
+ * caller is already reporting a failure and must not lose it, but never
+ * silently either: an unmarked entry is the #453 bug.
+ */
+function markEntryBroken(
+  poolDir: string,
+  entryId: string,
+  updates: Partial<PoolWorktree>
+): string | null {
+  try {
+    withLock(poolDir, (state) => ({
+      state: updateWorktree(state, entryId, updates),
+      result: undefined,
+    }));
+    return null;
+  } catch (err) {
+    return messageOf(err);
+  }
+}
+
+/**
+ * Recycle an assigned worktree back to `warm`.
+ *
+ * Transactional in outcome (#453): it either finishes and returns a verified
+ * `warm` entry, or it leaves the entry `broken` and throws a `ReturnFailure`
+ * naming the step. It never leaves the entry `assigned`, never reports success
+ * over an unverified pool, and — unlike the pre-#453 behaviour — never
+ * destroys the worktree on failure. A broken entry keeps its provenance
+ * (recorded id, actual on-disk path, a pool-owned temp branch) so `status`
+ * shows it and `gc` can remove it.
+ */
+export function returnWorktree(worktreePath: string): ReturnResult {
   const gitRoot = findGitRoot();
   const cfg = readPoolFileConfig(gitRoot);
   const poolDir = resolvePoolDirSync(gitRoot);
@@ -817,95 +1058,137 @@ export function returnWorktree(worktreePath: string): void {
   const newTempBranch = `pool/spare-${newId}`;
   const newAbsPath = toAbs(poolDir, newId);
 
-  // Look up entry and mark as recycling atomically under lock
-  const entry = withLock(poolDir, (state) => {
-    const found = state.worktrees.find((w) => toAbs(poolDir, w.path) === absPath);
-    if (!found) {
-      throw new Error(`Worktree not found in pool state: ${worktreePath}`);
-    }
-    return {
-      state: updateWorktree(state, found.id, { status: 'recycling' }),
-      result: { ...found },
-    };
-  });
+  // Look up the entry and mark it `recycling`, atomically. This is the one
+  // failure with no entry to mark broken — there is no entry — but it still
+  // speaks the ReturnFailure contract so the CLI and library callers get the
+  // step name rather than a bare internal error.
+  let entry: PoolWorktree;
+  try {
+    entry = withLock(poolDir, (state) => {
+      const found = state.worktrees.find((w) => toAbs(poolDir, w.path) === absPath);
+      if (!found) {
+        throw new Error(
+          `Worktree not found in pool state: ${worktreePath} (resolved to ${absPath}); ` +
+            `pool dir ${poolDir} tracks ${state.worktrees.length} entries`
+        );
+      }
+      return {
+        state: updateWorktree(state, found.id, { status: 'recycling' }),
+        result: { ...found },
+      };
+    });
+  } catch (err) {
+    throw new ReturnFailure('lookup', absPath, null, err);
+  }
+
+  // Where the directory, its branch and its state row actually are right now.
+  // Updated as the steps progress so a failure after a partial rename — or
+  // after `commit-state` has already renamed the entry id — records the truth
+  // rather than the values we started from.
+  let livePath = absPath;
+  let liveTempBranch = entry.temp_branch;
+  let liveId = entry.id;
 
   try {
-    git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: absPath });
-    git(['checkout', '-b', newTempBranch, cfg.base_ref], { cwd: absPath });
-    git(['clean', '-fd'], { cwd: absPath });
+    step('fetch', () => git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: livePath }));
 
-    if (entry.assigned_branch) {
+    step('checkout-temp-branch', () =>
+      git(['checkout', '-b', newTempBranch, cfg.base_ref], { cwd: livePath })
+    );
+    liveTempBranch = newTempBranch;
+
+    step('clean', () => git(['clean', '-fd'], { cwd: livePath }));
+
+    const assignedBranch = entry.assigned_branch;
+    if (assignedBranch) {
+      // Best-effort: the branch may already be gone. Anything else is worth
+      // saying out loud — a surviving branch collides on the next claim.
       try {
-        git(['branch', '-D', entry.assigned_branch], { cwd: absPath });
-      } catch {
-        // may not exist
+        git(['branch', '-D', assignedBranch], { cwd: livePath });
+      } catch (err) {
+        const msg = messageOf(err);
+        if (!/not found|no branch named/i.test(msg)) {
+          console.error(`Warning: could not delete assigned branch '${assignedBranch}': ${msg}`);
+        }
       }
     }
 
-    if (absPath !== newAbsPath) {
-      if (fs.existsSync(newAbsPath)) {
-        throw new Error(`Recycle target already exists: ${newAbsPath}`);
-      }
-      fs.renameSync(absPath, newAbsPath);
+    if (livePath !== newAbsPath) {
+      step('rename', () => {
+        if (fs.existsSync(newAbsPath)) {
+          throw new Error(`Recycle target already exists: ${newAbsPath}`);
+        }
+        fs.renameSync(livePath, newAbsPath);
+      });
+      livePath = newAbsPath;
       // Repair the moved worktree by its new path — see the note in `claim`;
       // a pathless repair leaves a dangling gitdir for `prune` to delete (#443).
-      git(['worktree', 'repair', newAbsPath], { cwd: gitRoot });
+      step('repair', () => git(['worktree', 'repair', newAbsPath], { cwd: gitRoot }));
     }
 
-    const currentBase = git(['rev-parse', cfg.base_ref], { cwd: gitRoot });
-    const lockfilePath = lockfilePathForWorktree(newAbsPath, cfg);
-    let lockChanged = false;
-    try {
-      const diff = git(['diff', '--name-only', `${entry.base_commit}..${cfg.base_ref}`], {
-        cwd: gitRoot,
-      });
-      lockChanged = lockfileChangedInDiff(diff, lockfilePath);
-    } catch {
-      lockChanged = true;
-    }
-
-    if (lockChanged) {
-      runWarmCommands(newAbsPath, cfg);
-    }
-
-    withLock(poolDir, (state) => ({
-      state: updateWorktree(state, entry.id, {
-        id: newId,
-        path: newId,
-        status: 'warm',
-        temp_branch: newTempBranch,
-        base_commit: currentBase,
-        warmed_at: new Date().toISOString(),
-        assigned_to_issue: null,
-        assigned_branch: null,
-      }),
-      result: undefined,
-    }));
-  } catch (err) {
-    // Cleanup is best-effort but never indiscriminate: `destroyWorktree`
-    // refuses any path it cannot prove the pool created, and those refusals
-    // are surfaced instead of being retried with `rm -rf`.
-    const skipped: string[] = [];
-    const ctx = buildOwnershipContext(gitRoot, poolDir);
-    for (const [branch, target] of [
-      [entry.temp_branch, absPath],
-      [newTempBranch, newAbsPath],
-    ] as const) {
-      if (!fs.existsSync(target)) continue;
-      try {
-        destroyWorktree(ctx, branch, target);
-      } catch (cleanupErr) {
-        skipped.push(cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr));
-      }
-    }
-    withLock(poolDir, (state) => ({
-      state: removeWorktree(state, entry.id),
-      result: undefined,
-    }));
-    const suffix = skipped.length > 0 ? ` Left on disk: ${skipped.join('; ')}` : '';
-    throw new Error(
-      `Recycle failed (destroyed worktree): ${err instanceof Error ? err.message : String(err)}.${suffix}`
+    const currentBase = step('read-base-commit', () =>
+      git(['rev-parse', cfg.base_ref], { cwd: gitRoot })
     );
+
+    step('warm-commands', () => {
+      if (lockfileChangedSince(gitRoot, entry.base_commit, newAbsPath, cfg)) {
+        runWarmCommands(newAbsPath, cfg);
+      }
+    });
+
+    step('commit-state', () =>
+      withLock(poolDir, (state) => ({
+        state: updateWorktree(state, liveId, {
+          id: newId,
+          path: newId,
+          status: 'warm',
+          temp_branch: newTempBranch,
+          base_commit: currentBase,
+          warmed_at: new Date().toISOString(),
+          assigned_to_issue: null,
+          assigned_branch: null,
+          broken_step: undefined,
+          broken_reason: undefined,
+          broken_branch: undefined,
+        }),
+        result: undefined,
+      }))
+    );
+    // `commit-state` renamed the row. Anything that fails from here on must
+    // mark THIS id, or the entry silently stays `warm` and claimable (#453).
+    liveId = newId;
+
+    // AC2: verify against reality before claiming success. A pool that only
+    // *says* it is warm is what #453 is about.
+    return {
+      id: newId,
+      path: newAbsPath,
+      verification: step('verify', () => verifyRecycled(poolDir, newId, newAbsPath, newTempBranch)),
+    };
+  } catch (err) {
+    const failedStep: ReturnStep = err instanceof StepError ? err.step : 'unknown';
+    const cause = err instanceof StepError ? (err.cause ?? err) : err;
+    const reason = sanitizeReason(messageOf(cause));
+
+    // Mark broken instead of destroying (#453). The directory stays on disk so
+    // the failure can be inspected; the entry points at where the directory
+    // actually is so `classifyPoolDirEntry` still calls it ours and `gc` can
+    // clear it.
+    const onDiskPath = fs.existsSync(livePath) ? livePath : absPath;
+    const observedBranch = currentBranchOf(onDiskPath);
+    const markError = markEntryBroken(poolDir, liveId, {
+      status: 'broken',
+      path: relativePoolPath(poolDir, onDiskPath, entry.path),
+      // NEVER widen provenance from what happens to be checked out: recording
+      // a developer's branch here would make `classifyPoolDirEntry`'s ownership
+      // test tautological and hand `gc` a directory it must refuse (#438).
+      temp_branch: isPoolTempBranch(observedBranch) ? (observedBranch as string) : liveTempBranch,
+      broken_step: failedStep,
+      broken_reason: reason,
+      broken_branch: observedBranch,
+    });
+
+    throw new ReturnFailure(failedStep, onDiskPath, liveId, cause, markError);
   }
 }
 
@@ -977,7 +1260,9 @@ export type GcCandidateKind =
   /** State row with nothing (of ours) on disk — the row is dropped, disk untouched. */
   | 'orphan-state'
   /** Pool-created directory missing from state — removed from disk. */
-  | 'orphan-disk';
+  | 'orphan-disk'
+  /** Entry a `return` left broken (#453) — removed from disk and state. */
+  | 'broken';
 
 export interface GcCandidate {
   kind: GcCandidateKind;
@@ -994,6 +1279,8 @@ export interface GcResult {
   removed: number;
   staleIds: string[];
   orphanIds: string[];
+  /** Entries removed because a `return` had left them broken (#453). */
+  brokenIds: string[];
   /** Everything in the pool directory the pool refuses to touch. */
   foreign: PoolDirEntryReport[];
   /** The exact removal list, whether or not it was executed. */
@@ -1030,6 +1317,7 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
   const errors: string[] = [];
   const staleIds: string[] = [];
   const orphanIds: string[] = [];
+  const brokenIds: string[] = [];
   let removed = 0;
 
   const state = readState(poolDir);
@@ -1041,8 +1329,32 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
   const candidates: GcCandidate[] = [];
   const claimed = new Set<string>();
 
+  // Entries a `return` left broken (#453). Collected immediately rather than
+  // after `stale_after_hours`: they are unusable from the moment they are
+  // marked, they occupy `max_pool_size` capacity until removed, and the CLI
+  // tells the operator to clear them with `gc`. Still routed through
+  // `classifyPath`, the removal plan, and the --yes/TTY confirmation.
+  for (const wt of state.worktrees) {
+    if (wt.status !== 'broken') continue;
+    claimed.add(wt.id);
+    const classification = classifyPath(ctx, toAbs(poolDir, wt.path));
+    const why =
+      `return failed at '${wt.broken_step ?? 'unknown'}': ` +
+      `${(wt.broken_reason ?? 'unknown').split('\n')[0]}`;
+    candidates.push({
+      kind: classification.owned ? 'broken' : 'orphan-state',
+      id: wt.id,
+      path: classification.owned ? toAbs(poolDir, wt.path) : null,
+      tempBranch: wt.temp_branch,
+      reason: classification.owned
+        ? `${why}; ${classification.reason}`
+        : `${why}; directory is ${classification.reason} — directory left on disk`,
+    });
+  }
+
   // Stale pool worktrees.
   for (const wt of findStaleWorktrees(state)) {
+    if (claimed.has(wt.id)) continue;
     claimed.add(wt.id);
     const classification = classifyPath(ctx, toAbs(poolDir, wt.path));
     if (classification.owned) {
@@ -1096,7 +1408,7 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
 
   describeGcPlan(candidates, foreign);
 
-  const base = { staleIds, orphanIds, foreign, candidates, errors };
+  const base = { staleIds, orphanIds, brokenIds, foreign, candidates, errors };
 
   if (opts.dryRun) {
     console.error('\nDry run — nothing was removed.');
@@ -1130,6 +1442,7 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
         }));
       }
       if (c.kind === 'stale') staleIds.push(c.id);
+      else if (c.kind === 'broken') brokenIds.push(c.id);
       else orphanIds.push(c.id);
       removed++;
     } catch (err) {
