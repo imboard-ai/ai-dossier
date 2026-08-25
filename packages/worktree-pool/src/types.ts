@@ -4,7 +4,14 @@ export type WorktreeStatus =
   | 'warm'
   | 'assigned'
   | 'recycling'
-  | 'destroying';
+  | 'destroying'
+  /**
+   * A recycle (`return`) failed part-way. The entry is deliberately left
+   * behind rather than deleted (#453) so the failure is visible to `status`
+   * and repairable by `gc`, and it is never handed out again — `claim` only
+   * ever selects `warm`.
+   */
+  | 'broken';
 
 /** Supported JavaScript package managers. */
 export type PackageManager = 'pnpm' | 'yarn' | 'bun' | 'npm';
@@ -51,7 +58,33 @@ export interface PoolWorktree {
   warmed_at: string;
   assigned_to_issue: number | null;
   assigned_branch: string | null;
+  /**
+   * Which step of `return` failed, when `status` is `broken` (#453). Named so
+   * a caller reading `status --json` learns what went wrong without having to
+   * re-derive it from the directory.
+   */
+  broken_step?: ReturnStep;
+  /** The underlying error message for `broken_step`. */
+  broken_reason?: string;
 }
+
+/**
+ * Named steps of `returnWorktree`, in execution order. A failure is always
+ * attributed to exactly one of these, and the name is printed and recorded
+ * on the broken entry (#453).
+ */
+export type ReturnStep =
+  | 'lookup'
+  | 'fetch'
+  | 'checkout-temp-branch'
+  | 'clean'
+  | 'delete-assigned-branch'
+  | 'rename'
+  | 'repair'
+  | 'read-base-commit'
+  | 'warm-commands'
+  | 'commit-state'
+  | 'verify';
 
 export interface PoolState {
   schema_version: '1.0.0';

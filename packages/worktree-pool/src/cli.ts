@@ -7,6 +7,7 @@ import {
   gc,
   init,
   type PoolDirEntryReport,
+  ReturnFailure,
   refresh,
   replenish,
   returnWorktree,
@@ -30,7 +31,7 @@ function usage(): void {
   console.error(`Usage: worktree-pool <command> [options]
 
 Commands:
-  status                          Show pool inventory
+  status [--json]                 Show pool inventory (--json for callers)
   replenish [--count N]             Pre-warm spares up to target
   claim --issue N --branch B      Claim a warm worktree, print path
   return --path P                 Return worktree to pool
@@ -41,7 +42,11 @@ Commands:
 
 The pool only ever removes worktrees it created. Worktrees sharing the pool
 directory that the pool did not create are reported as "foreign, skipped" and
-are never touched. gc requires --yes when stdin is not a TTY.`);
+are never touched. gc requires --yes when stdin is not a TTY.
+
+A failed 'return' leaves its pool entry marked 'broken' (never 'assigned' or
+'warm') and exits non-zero naming the step that failed. The worktree directory
+is left on disk for inspection; clear it with gc.`);
 }
 
 function parseArgs(args: string[]): { command: string; flags: Record<string, string | boolean> } {
@@ -79,6 +84,13 @@ async function main(): Promise<void> {
     switch (command) {
       case 'status': {
         const s = status();
+        // Machine-readable inventory (#453): `worktrees[]` already carries a
+        // per-entry `status`, so a caller can assert that a `return` actually
+        // landed instead of trusting the exit code of whoever claimed it did.
+        if (flags.json === true || flags.json === 'true') {
+          console.log(JSON.stringify(s, null, 2));
+          break;
+        }
         console.log(`Pool directory: ${s.pool_dir}`);
         console.log(
           `Warm: ${s.warm}  Assigned: ${s.assigned}  Creating: ${s.creating}  Other: ${s.other}  Total: ${s.total}`
@@ -93,7 +105,12 @@ async function main(): Promise<void> {
               wt.assigned_to_issue !== null
                 ? ` -> issue #${wt.assigned_to_issue} (${wt.assigned_branch})`
                 : '';
-            console.log(`  ${wt.id}  [${wt.status}]  ${wt.path}${info}`);
+            // A `broken` entry says which step of `return` failed (#453) —
+            // otherwise the operator has to go read the directory to find out.
+            const failure = wt.broken_step
+              ? ` failed at '${wt.broken_step}': ${wt.broken_reason ?? 'unknown'}`
+              : '';
+            console.log(`  ${wt.id}  [${wt.status}]  ${wt.path}${info}${failure}`);
           }
         }
         if (s.foreign.length > 0) {
@@ -151,8 +168,15 @@ async function main(): Promise<void> {
           console.error('Error: --path P is required');
           process.exit(1);
         }
-        returnWorktree(wtPath);
+        // Failures fall through to the outer catch, which prints the step and
+        // exits 1 (#453). The entry is left `broken`, never `assigned`.
+        const returned = returnWorktree(wtPath);
+        const v = returned.verification;
         console.error('Worktree returned to pool');
+        console.error('Self-check:');
+        console.error(`  entry ${returned.id}: ${v.entry_status}`);
+        console.error(`  directory clean: ${v.directory_clean ? 'yes' : 'no'} (${returned.path})`);
+        console.error(`  checked out: ${v.checked_out_branch ?? 'detached HEAD'}`);
         break;
       }
 
@@ -218,6 +242,15 @@ async function main(): Promise<void> {
     }
   } catch (err) {
     console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+    if (err instanceof ReturnFailure) {
+      // Say plainly what state the pool is in, so a caller cannot read a
+      // non-zero exit as "nothing happened" (#453).
+      console.error(
+        `Pool entry ${err.entryId ?? '(unknown)'} is now marked 'broken' and was NOT destroyed.`
+      );
+      console.error(`  Worktree left at: ${err.worktreePath}`);
+      console.error("  Inspect with 'worktree-pool status --json'; clear with 'worktree-pool gc'.");
+    }
     process.exit(1);
   }
 }
