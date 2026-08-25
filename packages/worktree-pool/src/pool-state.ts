@@ -45,7 +45,11 @@ export function normalizePoolFileConfig(raw: unknown): PoolFileConfig {
   }
 
   if (typeof obj.base_ref === 'string' && obj.base_ref.trim().length > 0) {
-    cfg.base_ref = obj.base_ref.trim();
+    const ref = obj.base_ref.trim();
+    // `base_ref` reaches git's argv as a positional. A leading '-' would be
+    // parsed as an option rather than a ref (`--upload-pack=...`), turning
+    // config data into a flag, so it is dropped in favour of the default.
+    if (!ref.startsWith('-')) cfg.base_ref = ref;
   }
 
   return cfg;
