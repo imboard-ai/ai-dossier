@@ -2,7 +2,14 @@ import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { PoolState } from '../types';
+import {
+  breakWorktreeAdminDir,
+  commitAndPush,
+  readPoolState,
+  runPoolExpectingFailure as runPoolExpectingFailureIn,
+  runPool as runPoolIn,
+  writePoolConfig,
+} from './helpers/cli';
 import { createTempRepo, type TempRepo } from './helpers/setup';
 
 /**
@@ -17,67 +24,10 @@ describe.sequential('pool return failure modes', () => {
   let repo: TempRepo;
   let poolDir: string;
 
-  const tsxPath = path.resolve(__dirname, '../../../../node_modules/.bin/tsx');
-  const cliPath = path.resolve(__dirname, '../cli.ts');
-
-  function runPool(args: string, cwd?: string): string {
-    return execSync(`"${tsxPath}" "${cliPath}" ${args}`, {
-      cwd: cwd || repo.root,
-      encoding: 'utf-8',
-      env: { ...process.env, FORCE_COLOR: '0' },
-      timeout: 30_000,
-    });
-  }
-
-  /** Run the CLI expecting failure; return the exit code and combined output. */
-  function runPoolExpectingFailure(args: string): { code: number; output: string } {
-    try {
-      const output = execSync(`"${tsxPath}" "${cliPath}" ${args} 2>&1`, {
-        cwd: repo.root,
-        encoding: 'utf-8',
-        env: { ...process.env, FORCE_COLOR: '0' },
-        timeout: 30_000,
-      });
-      return { code: 0, output };
-    } catch (err) {
-      const e = err as { status?: number; stdout?: string; stderr?: string };
-      return {
-        code: e.status ?? -1,
-        output: `${e.stdout ?? ''}${e.stderr ?? ''}`,
-      };
-    }
-  }
-
-  /** Same as `runPool`, but with stderr folded into the returned output. */
-  function runPoolCombined(args: string): string {
-    return execSync(`"${tsxPath}" "${cliPath}" ${args} 2>&1`, {
-      cwd: repo.root,
-      encoding: 'utf-8',
-      env: { ...process.env, FORCE_COLOR: '0' },
-      timeout: 30_000,
-    });
-  }
-
-  function readPoolState(): PoolState | null {
-    const statePath = path.join(poolDir, '.pool-state.json');
-    if (!fs.existsSync(statePath)) return null;
-    return JSON.parse(fs.readFileSync(statePath, 'utf-8'));
-  }
-
-  function writePoolConfig(gitRoot: string, dir: string): void {
-    fs.writeFileSync(
-      path.join(gitRoot, '.worktree-pool.json'),
-      JSON.stringify({ pool_dir: path.relative(gitRoot, dir) })
-    );
-  }
-
-  /** Commit working-tree changes in the fixture repo and publish to its bare origin. */
-  function commitAndPush(message: string): void {
-    execSync('git add -A', { cwd: repo.root, stdio: 'pipe' });
-    execSync(`git commit -m "${message}"`, { cwd: repo.root, stdio: 'pipe' });
-    execSync('git push origin main', { cwd: repo.root, stdio: 'pipe' });
-    execSync('git fetch origin', { cwd: repo.root, stdio: 'pipe' });
-  }
+  const runPool = (args: string) => runPoolIn(repo.root, args);
+  const runPoolCombined = (args: string) => runPoolIn(repo.root, args, { combined: true });
+  const runPoolExpectingFailure = (args: string) => runPoolExpectingFailureIn(repo.root, args);
+  const state = () => readPoolState(poolDir);
 
   beforeEach(() => {
     repo = createTempRepo();
@@ -92,7 +42,7 @@ describe.sequential('pool return failure modes', () => {
   it('leaves the entry broken (not assigned) when a dirty dir blocks the re-branch', () => {
     // A tracked file that main will move on top of.
     fs.writeFileSync(path.join(repo.root, 'shared.txt'), 'base\n');
-    commitAndPush('add shared.txt');
+    commitAndPush(repo.root, 'add shared.txt');
 
     runPool('replenish --count 1');
     const claimedPath = runPool('claim --issue 453 --branch bug/453-dirty').trim();
@@ -101,7 +51,7 @@ describe.sequential('pool return failure modes', () => {
     // `git checkout -b <temp> origin/main` now refuses: local changes would be
     // overwritten. `git clean -fd` runs *after* the checkout, so it cannot save it.
     fs.writeFileSync(path.join(repo.root, 'shared.txt'), 'moved-on-main\n');
-    commitAndPush('move shared.txt on main');
+    commitAndPush(repo.root, 'move shared.txt on main');
     fs.writeFileSync(path.join(claimedPath, 'shared.txt'), 'local-uncommitted\n');
 
     const { code, output } = runPoolExpectingFailure(`return --path "${claimedPath}"`);
@@ -110,9 +60,8 @@ describe.sequential('pool return failure modes', () => {
     // AC1: the failing step is named.
     expect(output).toContain("return failed at step 'checkout-temp-branch'");
 
-    const state = readPoolState();
-    expect(state?.worktrees).toHaveLength(1);
-    const entry = state?.worktrees[0];
+    const entry = state()?.worktrees[0];
+    expect(state()?.worktrees).toHaveLength(1);
     // AC1: broken — neither of the two states a caller could mistake for a result.
     expect(entry?.status).toBe('broken');
     expect(entry?.status).not.toBe('assigned');
@@ -128,12 +77,8 @@ describe.sequential('pool return failure modes', () => {
     runPool('replenish --count 1');
     const claimedPath = runPool('claim --issue 453 --branch bug/453-admin').trim();
 
-    // Delete the worktree's admin dir (`.git/worktrees/<id>`) — every git
-    // command inside the directory now fails with `fatal: not a git repository`.
-    const gitFile = fs.readFileSync(path.join(claimedPath, '.git'), 'utf-8').trim();
-    const adminDir = gitFile.replace(/^gitdir:\s*/, '');
-    expect(fs.existsSync(adminDir)).toBe(true);
-    fs.rmSync(adminDir, { recursive: true, force: true });
+    const adminDir = breakWorktreeAdminDir(claimedPath);
+    expect(fs.existsSync(adminDir)).toBe(false);
 
     const { code, output } = runPoolExpectingFailure(`return --path "${claimedPath}"`);
 
@@ -141,26 +86,109 @@ describe.sequential('pool return failure modes', () => {
     expect(output).toContain('return failed at step');
     expect(output).toContain("marked 'broken'");
 
-    const entry = readPoolState()?.worktrees[0];
+    const entry = state()?.worktrees[0];
     expect(entry?.status).toBe('broken');
     expect(entry?.broken_step).toBeTruthy();
     expect(fs.existsSync(claimedPath)).toBe(true);
   });
 
+  it('marks the entry broken when the post-return self-check fails', () => {
+    // The regression that survived the first cut of this suite: `commit-state`
+    // renames the entry id, so a later `verify` failure was marking an id that
+    // no longer existed — leaving the entry `warm` and claimable while the CLI
+    // announced it as broken.
+    //
+    // Force it: a warm command that dirties a *tracked* file, run because the
+    // lockfile moved on main.
+    fs.writeFileSync(path.join(repo.root, 'shared.txt'), 'base\n');
+    fs.writeFileSync(path.join(repo.root, 'package-lock.json'), '{"v":1}\n');
+    commitAndPush(repo.root, 'add shared.txt and lockfile');
+    writePoolConfig(repo.root, poolDir, {
+      warm_commands: [['sh', '-c', 'echo dirtied > shared.txt']],
+    });
+
+    runPool('replenish --count 1');
+    const claimedPath = runPool('claim --issue 453 --branch bug/453-verify').trim();
+
+    // Move the lockfile so the recycle re-runs the warm commands.
+    fs.writeFileSync(path.join(repo.root, 'package-lock.json'), '{"v":2}\n');
+    commitAndPush(repo.root, 'bump lockfile');
+
+    const { code, output } = runPoolExpectingFailure(`return --path "${claimedPath}"`);
+
+    expect(code).not.toBe(0);
+    expect(output).toContain("return failed at step 'verify'");
+
+    const entry = state()?.worktrees[0];
+    expect(entry?.status).toBe('broken');
+    expect(entry?.broken_step).toBe('verify');
+    // And the CLI's claim about the pool matches the pool.
+    expect(output).toContain("marked 'broken'");
+  });
+
+  it('names the step and modifies nothing when the path is not in the pool', () => {
+    runPool('replenish --count 1');
+    const before = JSON.stringify(state());
+
+    const { code, output } = runPoolExpectingFailure(
+      `return --path "${path.join(poolDir, 'not-a-pool-entry')}"`
+    );
+
+    expect(code).not.toBe(0);
+    expect(output).toContain("return failed at step 'lookup'");
+    expect(output).toContain('No pool entry was modified.');
+    expect(JSON.stringify(state())).toBe(before);
+  });
+
+  it('records a pool-owned temp branch, never the branch that happens to be checked out', () => {
+    // Recording the observed branch would make the ownership check that
+    // protects developer worktrees (#438) tautological.
+    fs.writeFileSync(path.join(repo.root, 'shared.txt'), 'base\n');
+    commitAndPush(repo.root, 'add shared.txt');
+
+    runPool('replenish --count 1');
+    const claimedPath = runPool('claim --issue 453 --branch bug/453-branch').trim();
+
+    fs.writeFileSync(path.join(repo.root, 'shared.txt'), 'moved-on-main\n');
+    commitAndPush(repo.root, 'move shared.txt on main');
+    fs.writeFileSync(path.join(claimedPath, 'shared.txt'), 'local-uncommitted\n');
+    runPoolExpectingFailure(`return --path "${claimedPath}"`);
+
+    const entry = state()?.worktrees[0];
+    expect(entry?.status).toBe('broken');
+    expect(entry?.temp_branch).toMatch(/^pool\/spare-/);
+    // The observed branch is kept, but only as a diagnostic.
+    expect(entry?.broken_branch).toBe('bug/453-branch');
+  });
+
   it('a broken entry is never handed out by a later claim', () => {
     runPool('replenish --count 1');
     const claimedPath = runPool('claim --issue 453 --branch bug/453-inert').trim();
-    const adminDir = fs
-      .readFileSync(path.join(claimedPath, '.git'), 'utf-8')
-      .trim()
-      .replace(/^gitdir:\s*/, '');
-    fs.rmSync(adminDir, { recursive: true, force: true });
+    breakWorktreeAdminDir(claimedPath);
     runPoolExpectingFailure(`return --path "${claimedPath}"`);
 
     // Only warm entries are claimable, so the pool now reads as empty.
     const { code, output } = runPoolExpectingFailure('claim --issue 454 --branch bug/454-next');
     expect(code).not.toBe(0);
     expect(output).toContain('No warm worktrees available');
+  });
+
+  it('gc clears a broken entry immediately, without waiting for stale_after_hours', () => {
+    // The CLI tells the operator to clear broken entries with gc; that has to
+    // be true the moment the entry is marked, not 72h later.
+    runPool('replenish --count 1');
+    const claimedPath = runPool('claim --issue 453 --branch bug/453-gc').trim();
+    breakWorktreeAdminDir(claimedPath);
+    runPoolExpectingFailure(`return --path "${claimedPath}"`);
+    expect(state()?.worktrees[0].status).toBe('broken');
+
+    const plan = runPoolCombined('gc --dry-run');
+    expect(plan).toContain('[broken]');
+    expect(plan).not.toContain('Nothing to remove.');
+
+    runPoolCombined('gc --yes');
+    expect(state()?.worktrees).toHaveLength(0);
+    expect(fs.existsSync(claimedPath)).toBe(false);
   });
 
   it('prints a self-check on success and really is warm, clean and on a temp branch', () => {
@@ -174,7 +202,7 @@ describe.sequential('pool return failure modes', () => {
     expect(output).toContain('directory clean: yes');
     expect(output).toMatch(/checked out: pool\/spare-/);
 
-    const entry = readPoolState()?.worktrees[0];
+    const entry = state()?.worktrees[0];
     expect(entry?.status).toBe('warm');
     expect(entry?.assigned_to_issue).toBeNull();
     expect(entry?.broken_step).toBeUndefined();
@@ -187,6 +215,16 @@ describe.sequential('pool return failure modes', () => {
     expect(
       execSync('git rev-parse --abbrev-ref HEAD', { cwd: recycled, encoding: 'utf-8' }).trim()
     ).toBe(entry?.temp_branch);
+  });
+
+  it('return --json emits the machine-readable result', () => {
+    runPool('replenish --count 1');
+    const claimedPath = runPool('claim --issue 453 --branch bug/453-retjson').trim();
+
+    const result = JSON.parse(runPool(`return --path "${claimedPath}" --json`));
+    expect(result.verification.entry_status).toBe('warm');
+    expect(result.verification.directory_clean).toBe(true);
+    expect(result.verification.checked_out_branch).toBe(result.verification.expected_branch);
   });
 
   it('status --json exposes per-entry state so a caller can assert the return happened', () => {
@@ -206,16 +244,13 @@ describe.sequential('pool return failure modes', () => {
     expect(after.worktrees[0].status).toBe('warm');
     expect(after.warm).toBe(1);
     expect(after.assigned).toBe(0);
+    expect(after.broken_entries).toBe(0);
   });
 
   it('status --json reports the failed step of a broken entry', () => {
     runPool('replenish --count 1');
     const claimedPath = runPool('claim --issue 453 --branch bug/453-brokenjson').trim();
-    const adminDir = fs
-      .readFileSync(path.join(claimedPath, '.git'), 'utf-8')
-      .trim()
-      .replace(/^gitdir:\s*/, '');
-    fs.rmSync(adminDir, { recursive: true, force: true });
+    breakWorktreeAdminDir(claimedPath);
     runPoolExpectingFailure(`return --path "${claimedPath}"`);
 
     const s = JSON.parse(runPool('status --json'));
@@ -223,7 +258,8 @@ describe.sequential('pool return failure modes', () => {
     expect(s.worktrees[0].broken_step).toBeTruthy();
     expect(s.warm).toBe(0);
     expect(s.assigned).toBe(0);
-    // Broken entries fall into `other`, so a caller checking `warm` is never misled.
-    expect(s.other).toBe(1);
+    // Counted on its own, so a caller checking `warm`/`broken_entries` is never misled.
+    expect(s.broken_entries).toBe(1);
+    expect(s.other).toBe(0);
   });
 });

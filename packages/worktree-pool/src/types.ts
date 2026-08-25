@@ -7,9 +7,14 @@ export type WorktreeStatus =
   | 'destroying'
   /**
    * A recycle (`return`) failed part-way. The entry is deliberately left
-   * behind rather than deleted (#453) so the failure is visible to `status`
-   * and repairable by `gc`, and it is never handed out again — `claim` only
-   * ever selects `warm`.
+   * behind rather than deleted (#453) so the failure is visible to `status`,
+   * and it is never handed out again — `claim` only ever selects `warm`.
+   * `gc` collects it immediately (not after `stale_after_hours`), under the
+   * same ownership rules as everything else.
+   *
+   * Distinct from `PoolDirClassification.broken`, which is the *disk-level*
+   * #443 sense: a directory whose git admin dir is gone. An entry can be one,
+   * the other, or both.
    */
   | 'broken';
 
@@ -64,27 +69,36 @@ export interface PoolWorktree {
    * re-derive it from the directory.
    */
   broken_step?: ReturnStep;
-  /** The underlying error message for `broken_step`. */
+  /** The underlying error message for `broken_step`, credential-redacted. */
   broken_reason?: string;
+  /**
+   * Branch observed in the directory at the moment of failure. Diagnostic
+   * only — deliberately NOT written to `temp_branch`, which must stay a
+   * pool-owned ref so the ownership check that protects developer worktrees
+   * (#438) cannot be satisfied by whatever happens to be checked out.
+   */
+  broken_branch?: string | null;
 }
 
 /**
- * Named steps of `returnWorktree`, in execution order. A failure is always
- * attributed to exactly one of these, and the name is printed and recorded
- * on the broken entry (#453).
+ * Named steps of `returnWorktree`, in execution order. Every failure is
+ * attributed to exactly one of these; the name is printed and, for every step
+ * after `lookup`, recorded on the broken entry (#453). `lookup` fails before
+ * there is an entry to mark, and `unknown` is the fallback for a throw that
+ * escaped the step wrappers.
  */
 export type ReturnStep =
   | 'lookup'
   | 'fetch'
   | 'checkout-temp-branch'
   | 'clean'
-  | 'delete-assigned-branch'
   | 'rename'
   | 'repair'
   | 'read-base-commit'
   | 'warm-commands'
   | 'commit-state'
-  | 'verify';
+  | 'verify'
+  | 'unknown';
 
 export interface PoolState {
   schema_version: '1.0.0';

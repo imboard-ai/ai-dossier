@@ -176,6 +176,11 @@ export function getAssignedCount(state: PoolState): number {
   return state.worktrees.filter((w) => w.status === 'assigned').length;
 }
 
+/** Entries a `return` left broken (#453) — unusable, and never claimed. */
+export function getBrokenCount(state: PoolState): number {
+  return state.worktrees.filter((w) => w.status === 'broken').length;
+}
+
 export function getSparesNeeded(state: PoolState): number {
   const warmCount = getWarmCount(state);
   const totalCount = state.worktrees.length;
@@ -210,6 +215,12 @@ export interface PoolStatus {
   warm: number;
   assigned: number;
   creating: number;
+  /**
+   * Entries a `return` left broken (#453). Counted separately from `other` so
+   * a caller doing the obvious health check on `status --json` cannot read a
+   * pool with a failed return as healthy.
+   */
+  broken_entries: number;
   other: number;
   total: number;
   spares_needed: number;
@@ -220,15 +231,17 @@ export interface PoolStatus {
 export function getPoolStatus(state: PoolState): PoolStatus {
   const warm = getWarmCount(state);
   const assigned = getAssignedCount(state);
+  const brokenEntries = getBrokenCount(state);
   const creating = state.worktrees.filter(
     (w) => w.status === 'creating' || w.status === 'warming'
   ).length;
-  const other = state.worktrees.length - warm - assigned - creating;
+  const other = state.worktrees.length - warm - assigned - creating - brokenEntries;
 
   return {
     warm,
     assigned,
     creating,
+    broken_entries: brokenEntries,
     other,
     total: state.worktrees.length,
     spares_needed: getSparesNeeded(state),
