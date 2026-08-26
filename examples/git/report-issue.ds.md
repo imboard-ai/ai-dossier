@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "report-issue",
   "title": "Report Issue — Rich Completion Summary",
-  "version": "1.2.0",
+  "version": "1.6.1",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Generate a comprehensive completion report covering what changed, user-facing implications, dev/ops implications, and review results — posted to both conversation and PR comment",
@@ -60,6 +60,11 @@
         "description": "How the worktree was cleaned up: pool_returned, worktree_removed, or skipped",
         "type": "string",
         "default": "worktree_removed"
+      },
+      {
+        "name": "run_id",
+        "description": "Runstate run id minted by gate-issue; pass through unchanged",
+        "type": "string"
       }
     ]
   },
@@ -68,15 +73,17 @@
       "name": "Yuval Dimnik"
     }
   ],
+  "last_updated": "2026-08-25",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "46fa7b122425bf58c3331996dde6bbf6060ad4d3829bff2e1c6a2ac458cd3b8a"
+    "hash": "e9779eb1647cc113a7ec8164809035d1d45bfd0c59221be81b467c761fcd6042"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "GPmqiDX9IIbvCi3LaSGn+yYPUMPJNypIH2r7gVdM36jrB3/+Tw7RhvWtEgZHcjyPZwlHMjC5AUcqLF04mHVmDQ==",
-    "public_key": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAT5MH6NyHt3zBur6eq+EVSNOA2AZbuSRpov+/BRFzLnY=\n-----END PUBLIC KEY-----\n",
-    "signed_at": "2026-08-05T11:05:13.430Z",
+    "signature": "PsgGVVcGFNK49ffyZUMcQvWfNQCXcOaNRJEfzeJcQYDmoGZIOdTP9f+QpPv+QTUxmFBS7nxsXDj83sf+gRJnDQ==",
+    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
+    "signed_at": "2026-08-25T19:26:56.100Z",
+    "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
   }
@@ -87,15 +94,7 @@
 
 ## Objective
 
-Generate a comprehensive completion report that tells the user:
-1. **What was done** — code changes summary
-2. **User-facing implications** — new screens, changed behaviors, breaking changes
-3. **Dev/ops implications** — new env vars, commands, schemas, dependencies, workflows
-4. **Review results** — what was fixed and clean (this dossier only runs on a real
-   completion, so there is nothing escalated to report — see full-cycle-issue's
-   Guiding Principle)
-
-The report is posted to BOTH the conversation (full version) and as a PR comment (condensed version).
+Generate a completion report covering: **what was done** (code changes), **user-facing implications** (new screens, changed behaviors, breaking changes), **dev/ops implications** (env vars, commands, schemas, dependencies, workflows), and **review results** — what was fixed and clean (this dossier only runs on a real completion, so nothing is escalated to report — full-cycle-issue's Guiding Principle). Posted BOTH to the conversation (full) and as a PR comment (condensed).
 
 ## Prerequisites
 
@@ -103,23 +102,20 @@ The report is posted to BOTH the conversation (full version) and as a PR comment
 - All review data is available from previous phases
 - GitHub CLI (gh) is installed and authenticated
 
+This phase may run in a **later session than implement** — a detached ship (ship-issue's `ship_mode`) parks the PR and ends the run, and the tail run finishing it starts fresh at `resume_from=ship-teardown`. Nothing assumes in-memory state: context comes from the runstate milestones and the PR, read in Step 1 and Step 4b.
+
 ## Actions to Perform
 
 ### Step 1: Gather Context
 
-Collect data from previous phases and the PR:
-
 ```bash
-# Get PR details
 gh pr view <pr_number> --json title,body,files,additions,deletions,mergedAt
-
-# Get issue details
 gh issue view <issue_number> --json title,labels
 ```
 
 ### Step 2: Analyze Changes for Implications
 
-Based on the files changed in the PR, determine:
+From the files changed in the PR, determine:
 
 **User-Facing Implications** — check for:
 - New routes/pages (new files in `pages/`, `routes/`, `app/` directories)
@@ -184,13 +180,7 @@ Print to conversation:
 <Worktree returned to pool for reuse. / Worktree removed.> Back in original directory.
 ```
 
-**The `Shipped` line is not decoration — it is the report's honesty gate.**
-
-`MERGE_COMMIT` alone has never meant "users can see it". A merge puts code on the default
-branch; a deploy puts it in front of people, and on some repos the merge does NOT trigger
-the deploy at all (see ship-issue Step 6c). A report that says "Cycle Complete" over
-undeployed code is the most expensive kind of wrong: everything downstream — the issue
-close, the PR comment, the human reading it — treats shipped as done.
+**The `Shipped` line is not decoration — it is the report's honesty gate.** A merge puts code on the default branch; a deploy puts it in front of people, and on some repos the merge does NOT trigger the deploy at all (ship-issue Step 6c). "Cycle Complete" over undeployed code is the most expensive kind of wrong.
 
 - deploy confirmed → `**Shipped**: <sha> (<run url>)`
 - no deploy step exists for this project → `**Shipped**: N/A — <why>`
@@ -224,11 +214,40 @@ EOF
 )"
 ```
 
+### Step 4b: Trap index write-back (mechanical trigger)
+
+Check the trigger condition — fetch the last `phase=ship` and `phase=implement` milestones:
+
+```bash
+gh issue view <issue_number> --json comments \
+  --jq '[.comments[].body | select(startswith("<!-- runstate:v1 -->"))]'
+```
+
+Read `ci_fix_attempts` from the last `phase=ship status=done` milestone, and `ci_parity` from the `phase=implement` milestone.
+
+If the repo has `docs/agent-traps.md` AND (`ci_fix_attempts` ≥ 1 OR `ci_parity=fail-then-fixed` OR the run surfaced a finding a future agent would grep for — a masked failure mode, a vacuous test pattern, a tool workaround), you MUST append one row per qualifying finding (mechanical triggers guarantee at least one; judgment findings add more — err toward writing the row): `| <the literal error string a future agent would grep> | <what actually went wrong> | <the fix, as a command or one sentence> | PR #<n> |`. Commit it on a tiny follow-up branch and open a PR (`docs(traps): …`), or if the repo allows, include it before merge. Otherwise `traps_added=0`. If the file does not exist, skip and note it.
+
+### Step 4c: Extract learnings + delete PLANNING file
+
+Per the repo's AGENTS.md rule if present; at minimum delete `PLANNING-<n>-*.md` from the worktree if still present — it never belongs in main.
+
 ### Step 5: Output
 
 ```
 Report posted to conversation and PR #<pr_number>.
 ```
+
+### Step 6: Runstate Milestone
+
+Post the final phase milestone to the issue. This is the last step of the cycle. Comments are append-only: never edit or delete a prior milestone. Do not skip this in nested or fleet mode — it is the only state that survives the session.
+
+```bash
+ai-dossier runstate post --issue <issue_number> --phase report --status done --run <run_id> \
+  --kv pr=<pr_number> \
+  --kv traps_added=<n>
+```
+
+Let the CLI stamp `at=` and compute `next=done` — do not pass either; never hand-write the comment. `traps_added` is the number of rows appended to `docs/agent-traps.md` in Step 4b (0 or 1 normally).
 
 ## Output
 
@@ -237,22 +256,23 @@ Report posted to conversation and PR #<pr_number>.
 - `deployed`: the deployed SHA when a deploy was confirmed; `null` when merged-but-not-deployed; `"n/a"` when the project has no deploy step. NEVER omit — a missing value reads as success.
 - `user_implications_count`: number of user-facing implications
 - `devops_implications_count`: number of dev/ops implications
+- Posts runstate milestone to the issue (`phase=report`)
 
 ## Validation
 
 - [ ] `Shipped` line present and accurate — deployed SHA, `N/A — <reason>`, or an explicit `NOT DEPLOYED` warning. Merged is not shipped.
-- [ ] PR details were fetched
-- [ ] Changed files were analyzed for user-facing implications
-- [ ] Changed files were analyzed for dev/ops implications
-- [ ] Full report printed to conversation
-- [ ] Condensed report posted as PR comment
+- [ ] PR details were fetched; changed files analyzed for user-facing and dev/ops implications
+- [ ] Full report printed to conversation; condensed report posted as PR comment
 - [ ] If base_branch != main: epic sub-issue note included
 - [ ] Review results accurately reflect what was fixed and clean
+- [ ] Trap index write-back checked: if `docs/agent-traps.md` exists and (`ci_fix_attempts` ≥ 1 OR `ci_parity=fail-then-fixed`), a row per qualifying finding (mechanical OR judgment-flagged) was appended and shipped via a follow-up PR or pre-merge commit; otherwise `traps_added=0`
+- [ ] `PLANNING-<n>-*.md` was deleted from the worktree if still present
+- [ ] Runstate milestone comment was posted to the issue
 
 ## Troubleshooting
 
-**PR not found**: Verify pr_number is correct and the PR exists
-
-**Can't determine implications**: Default to "None identified — review the diff manually"
-
-**PR comment fails**: May lack permissions — print report to conversation only
+| Symptom | Fix |
+|---|---|
+| PR not found | Verify pr_number is correct and the PR exists |
+| Can't determine implications | Default to "None identified — review the diff manually" |
+| PR comment fails | May lack permissions — print report to conversation only |

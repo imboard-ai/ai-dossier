@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "issue-workflows-guide",
   "title": "Issue Workflows Guide",
-  "version": "1.1.2",
+  "version": "1.4.0",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Reference guide for the issue workflow family — explains when to use each workflow, how they compose from shared sub-dossiers, and available flags",
@@ -25,15 +25,16 @@
       "name": "Yuval Dimnik"
     }
   ],
+  "last_updated": "2026-08-26",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "9cf43454feadb5dddca5b699ca7903bdbf1427487ea46573497217958ca97dac"
+    "hash": "18c7a6c3f58ee0fb244eae1a69ab13bb914957435db0766b5f091ccdd4d49d24"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "Oh70+lWhaA2ChlHrFm96S2E8e2Vf9OzEczFPbc63XYOODWxiPs15TEDGayMqJWnnXkYiuxFKi9yBhqvPq/6HDw==",
+    "signature": "w6gX85Z5EJzmREEOmId/mCxbrhfT9bh4BaqEQtjIV/w5Q8ag4yogRhJJhGwpVa2lg9ehHnC93UaKaEyowOD3Bw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-07-26T12:47:36.818Z",
+    "signed_at": "2026-08-26T06:48:21.218Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -96,13 +97,14 @@ All three skills support:
 
 | Name | Registry Path | What it does | Used by |
 |---|---|---|---|
-| `gate-issue` | `imboard-ai/git/gate-issue` | Safety check: hard blocks (closed, decomposed, epic, deps), soft warnings, base branch extraction | all three |
+| `gate-issue` | `imboard-ai/git/gate-issue` | Safety check (hard blocks, soft warnings, base branch) + **resume detection**: reads the last runstate milestone, verifies it against git/PR reality, emits `resume_from` | all three |
 | `setup-issue-workflow` | `imboard-ai/git/setup-issue-workflow` | Branch + worktree (pool or cold) + warmup + claim issue label | all three |
 | `plan-issue` | `imboard-ai/git/plan-issue` | Read issue + comments + explore code → write rich `PLANNING-{N}-{slug}.md` | all three |
-| `implement-issue` | `imboard-ai/git/implement-issue` | Implement per plan + test + lint auto-fix | guided, full-cycle |
-| `review-issue` | `imboard-ai/git/review-issue` | 5 parallel review agents (DRY, Security, Supportability, Maintainability, Docs) + fix findings | guided, full-cycle |
-| `ship-issue` | `imboard-ai/git/ship-issue` | Commit → push → PR → CI wait → merge → teardown | guided, full-cycle |
-| `report-issue` | `imboard-ai/git/report-issue` | Rich summary: what changed, user implications, dev/ops implications → conversation + PR comment | guided, full-cycle |
+| `implement-issue` | `imboard-ai/git/implement-issue` | Implement per plan + affected-scoped tests + `scripts/ci-parity.sh` when the repo has it | guided, full-cycle |
+| `review-issue` | `imboard-ai/git/review-issue` | 7 parallel review agents (DRY, Security, Supportability, Maintainability, Docs, Convention, **blind Conformance vs the issue's Acceptance Criteria**) + fix findings | guided, full-cycle |
+| `ship-issue` | `imboard-ai/git/ship-issue` | ci-parity → commit → push → PR (with AC checklist) → `awaiting-merge` milestone → CI/merge → teardown (incl. `ensure-test-env.sh --teardown`) | guided, full-cycle |
+| `report-issue` | `imboard-ai/git/report-issue` | Rich summary → conversation + PR comment; mechanical trap write-back to `docs/agent-traps.md` when a CI fix was needed; deletes the PLANNING file | guided, full-cycle |
+| `watch-task` | `imboard-ai/git/watch-task` | Armed-watchdog discipline for every long wait: blocking poll loop / harness monitor / verified scheduled wakeup, stall detection on progress signals, bounded recovery — kills the "waiting with nothing armed" lost-time failure | full-cycle (merge confirm), fleet-cycle (all supervision) |
 
 ## Shared Parameter: `base_branch`
 
@@ -111,6 +113,23 @@ All sub-dossiers receive a `base_branch` parameter. This enables epic sub-issues
 - **Source**: Parsed from issue body (`merges into \`<branch>\``), or explicit `--base` flag
 - **Default**: `main`
 - **Flow**: gate extracts → setup branches from → plan explores on → implement tests against → ship PRs into → report mentions
+
+## Runstate Milestones & Resume (v3.8+)
+
+Every phase of a full-cycle run appends a `<!-- runstate:v1 -->` comment to the GitHub issue
+(`phase= status= run= at=` plus phase keys). The issue is therefore the durable run log:
+
+- **Resume**: re-running `full cycle issue N` after a dead session makes the gate read the last
+  milestone, VERIFY it (branch/worktree exist, HEAD matches, PR state), and skip every completed
+  phase (`resume_from=`). Ship posts `status=awaiting-merge` BEFORE the CI wait — the likeliest
+  death point — so even a mid-merge death resumes in seconds.
+- **Spec conformance**: plan extracts Acceptance Criteria; review's blind Conformance agent checks
+  the diff against them (`met <file:line>` required); the PR body carries the checked list.
+- **Knowledge**: repos may provide `scripts/ci-parity.sh` (exact CI gates, run locally),
+  `scripts/ensure-test-env.sh` (remote Atlas/S3 test env, per-worktree isolation + teardown), and
+  `docs/agent-traps.md` (grep-first symptom→trap→fix index; plan reads it, report writes it).
+- **Fleet prewarm**: fleet-cycle replenishes the worktree pool once per wave via
+  `npx -y @ai-dossier/worktree-pool@^0.5.1`; agents never run pool `gc`/`refresh`.
 
 ## Visual Review Checkpoint (guided-cycle only)
 
@@ -127,3 +146,16 @@ The `report-issue` sub-dossier produces:
 - **Dev/Ops Implications**: new env vars, commands, schema changes, dependencies
 - **Review Results**: fixed findings, escalated issues, clean categories
 - Posted to both conversation and PR comment
+
+## Design rationale (moved from the executing dossiers)
+
+The dossiers carry the rules; the reasons live here.
+- **Verification buys quality, not the generator's raw strength** — why full-cycle routes by role (mechanical cheapest, generation by risk, judgment strongest). The trade: occasional wall-clock loss to a redispatch for large cost cuts, with the runstate CLI, blind conformance, ci-parity, CI and the version-bump guard holding the bar. **Tune tiers** with `ai-dossier runstate stats --issues <set>` every ~20 runs.
+- **Why the WIP sync rule exists.** A resuming agent on another machine cannot reach uncommitted work in a local worktree, and a milestone recording a local `worktree=` path is worthless to it — hence origin/<branch> is the durable work copy, the issue the durable state copy.
+- **Why milestones are CLI-posted, never hand-written.** The comment is the only run state surviving the session, so it must parse. A hand-written milestone that looks right but parses wrong makes the run unresumable; the raw `<!-- runstate:v1 -->` format is reader documentation, not a template.
+- **Pool `gc` deleted 29 developer worktrees** (2026-08-23): the pool directory is shared with developer worktrees and `@ai-dossier/worktree-pool` ≤ 0.5.0 removed everything it did not create (ai-dossier#453). Hence `status`/`claim`/`return`/`replenish`/`detect` only, always `@^0.5.1`; maintenance is a human task.
+- **Rename-then-repair.** Repurposing renames a worktree's directory, breaking git's internal tracking; `git worktree repair` fixes it.
+- **Merged is not shipped.** Where a bot token merges, GitHub does not fire `on: push`, so the deploy never runs on its own — four PRs merged green, zero deploys, 2026-07-17 (imboard#2714). That release gap is why ship-issue has Step 6c and the report's `Shipped` line is mandatory.
+- **Review is report-then-apply because parallel writers collide.** Two agents each "fixing" one problem add their own helper; the loser's ships uncalled as dead code (ai-dossier#447). One serial applier is the fix.
+- **Cleanup and duration must be verified, not claimed.** A 63-second "full review" and an untrue `cleanup=pool_returned` both looked fine in the trail (imboard#3692) — hence review's duration floor and ship's confirm-before-claiming rule.
+- **Detached ship economics.** A parked PR costs nothing to hold; an agent waiting ~20 min on CI costs a concurrency slot. So the run ends at `awaiting-merge` and a cheap tail run does teardown + report — why fleet dispatches detached, and why a quiet fleet agent is normal.
