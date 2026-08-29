@@ -210,3 +210,132 @@ describe('parseManifest', () => {
     expect(viaManifest.entries).toEqual(viaFlags.entries);
   });
 });
+
+describe('batch-level facts at creation (#472)', () => {
+  it('records anchor, run_id and eviction groups on the new batch', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [
+        {
+          issue: 201,
+          mode: 'slot',
+          batch: 'b1',
+          anchor: 900,
+          run_id: 'r-900-aaaa',
+          eviction_groups: [[201, 202]],
+        },
+        { issue: 202, mode: 'slot', batch: 'b1' },
+      ],
+      NOW
+    );
+    const batch = findBatch(state, 'b1');
+    expect(batch?.anchor).toBe(900);
+    expect(batch?.run_id).toBe('r-900-aaaa');
+    expect(batch?.eviction_groups).toEqual([[201, 202]]);
+    // recovery bookkeeping starts empty
+    expect(batch?.evictions).toEqual([]);
+    expect(batch?.fix_attempts).toEqual([]);
+    expect(batch?.rebase_attempts).toBe(0);
+    expect(batch?.branch).toBeNull();
+    expect(state.entries[0].failure_evidence).toBeNull();
+    expect(() => validateState(state)).not.toThrow();
+  });
+
+  it('defaults every batch-level fact when nothing supplies one', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 201, mode: 'slot', batch: 'b1' }],
+      NOW
+    );
+    const batch = findBatch(state, 'b1');
+    expect(batch?.anchor).toBeNull();
+    expect(batch?.run_id).toBeNull();
+    expect(batch?.eviction_groups).toEqual([]);
+  });
+
+  it('lets a later member supply a fact the first one omitted', () => {
+    let state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 201, mode: 'slot', batch: 'b1' }],
+      NOW
+    );
+    state = enqueueEntries(state, [{ issue: 202, mode: 'slot', batch: 'b1', anchor: 900 }], NOW);
+    expect(findBatch(state, 'b1')?.anchor).toBe(900);
+  });
+
+  it('rejects a conflicting re-supply rather than silently keeping the first', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 201, mode: 'slot', batch: 'b1', anchor: 900, run_id: 'r-900-aaaa' }],
+      NOW
+    );
+    expect(() =>
+      enqueueEntries(state, [{ issue: 202, mode: 'slot', batch: 'b1', anchor: 901 }], NOW)
+    ).toThrow(/refusing to re-point it to #901/);
+    expect(() =>
+      enqueueEntries(state, [{ issue: 202, mode: 'slot', batch: 'b1', run_id: 'r-901-bbbb' }], NOW)
+    ).toThrow(/refusing to re-point it to 'r-901-bbbb'/);
+
+    const grouped = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 201, mode: 'slot', batch: 'b2', eviction_groups: [[201, 202]] },
+        { issue: 202, mode: 'slot', batch: 'b2' },
+      ],
+      NOW
+    );
+    expect(() =>
+      enqueueEntries(
+        grouped,
+        [{ issue: 203, mode: 'slot', batch: 'b2', eviction_groups: [[202, 203]] }],
+        NOW
+      )
+    ).toThrow(/refusing to replace them/);
+  });
+
+  it('rejects an eviction group naming issues that are not batch members', () => {
+    expect(() =>
+      enqueueEntries(
+        createEmptyState(),
+        [{ issue: 201, mode: 'slot', batch: 'b1', eviction_groups: [[201, 999]] }],
+        NOW
+      )
+    ).toThrow(/not batch members: \[999\]/);
+  });
+
+  it('rejects batch-level facts on a full-cycle entry rather than dropping them', () => {
+    expect(() =>
+      enqueueEntries(createEmptyState(), [{ issue: 101, mode: 'full', anchor: 900 }], NOW)
+    ).toThrow(/cannot be set on a full-cycle entry/);
+  });
+
+  it('rejects a run_id the runstate CLI would refuse, and a base_branch that is not a ref', () => {
+    expect(() => parseManifest([{ issue: 5, run_id: 'batch-42' }])).toThrow(/r-<issue>-<hex>/);
+    expect(() => parseManifest([{ issue: 5, base_branch: '--upload-pack=pwn' }])).toThrow(
+      /valid git ref name/
+    );
+  });
+
+  it('parses the batch-level facts out of a manifest', () => {
+    const parsed = parseManifest({
+      entries: [
+        {
+          issue: 201,
+          mode: 'slot',
+          batch: 'b1',
+          anchor: 900,
+          run_id: 'r-900-aaaa',
+          eviction_groups: [[201, 202]],
+        },
+      ],
+    });
+    expect(parsed[0]).toMatchObject({
+      anchor: 900,
+      run_id: 'r-900-aaaa',
+      eviction_groups: [[201, 202]],
+    });
+    expect(() => parseManifest([{ issue: 5, anchor: 0 }])).toThrow(/anchor/);
+    expect(() => parseManifest([{ issue: 5, run_id: '' }])).toThrow(/run_id/);
+    expect(() => parseManifest([{ issue: 5, eviction_groups: [5] }])).toThrow(/eviction_groups/);
+  });
+});

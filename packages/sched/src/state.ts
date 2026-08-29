@@ -12,10 +12,13 @@
 import {
   type BatchEntry,
   type BatchStatus,
+  type CycleMode,
+  type FailureEvidence,
   IllegalTransitionError,
   type IssueStatus,
   LEGACY_SCHEMA_VERSIONS,
   type QueueEntry,
+  SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
   SchedNotFoundError,
   type SchedState,
@@ -32,8 +35,11 @@ const ISSUE_BASE_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   // #468: dispatched → parked is the detached-ship exit — the agent parked
   // its PR on auto-merge and exited; parked → shipped accepts the MERGE
   // (never the park — RFC-0001 §E.4 "scheduler gates on merge").
-  dispatched: ['shipped', 'parked'],
-  parked: ['shipped'],
+  // Both also carry `evicted`: a batch dissolve (#472) requeues every unshipped
+  // member whatever state it reached, and an unmodelled edge there would throw
+  // mid-eviction, after the reverts already landed.
+  dispatched: ['shipped', 'parked', 'evicted'],
+  parked: ['shipped', 'evicted'],
   shipped: ['done'],
   // batched/waiting/validated also carry `evicted`: RFC-0001 §D.2 dissolving
   // requeues members at ANY batch stage, not just mid-member (F.8).
@@ -44,7 +50,11 @@ const ISSUE_BASE_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   validated: ['shipped-in-batch', 'evicted'],
   'shipped-in-batch': ['done'],
   evicted: ['requeued'],
-  requeued: ['dispatched'],
+  // `batched` is the half-batch rail: a member requeued into a fresh batch by a
+  // halved dissolve (#472 AC4) re-enters §D.1's slot line, not the full-cycle
+  // one. Without it those members are stranded — `requeued` + `mode: 'slot'` is
+  // dispatchable as neither an issue unit nor a batch member.
+  requeued: ['dispatched', 'batched'],
   blocked: ['queued', 'waiting', 'evicted'],
   'decision-pending': ['queued'],
   done: [],
@@ -70,7 +80,11 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   // executing → executing advances the member pointer (i/N); the ⟲ in RFC-0001 §D.2.
   executing: ['executing', 'validating', 'dissolving'],
   validating: ['attributing', 'reviewing', 'dissolving'],
-  attributing: ['fixing', 'evicting'],
+  // `dissolving` because attribution can legitimately name nobody (bisect
+  // absent, errored, or unattributable) — without the edge, an unattributable
+  // red suite is a dead end with no way out but fixing or evicting a member the
+  // system cannot identify.
+  attributing: ['fixing', 'evicting', 'dissolving'],
   fixing: ['validating', 'dissolving'],
   evicting: ['validating', 'dissolving'],
   reviewing: ['shipping', 'dissolving'],
@@ -137,6 +151,36 @@ export function createEmptyState(): SchedState {
   };
 }
 
+/**
+ * A fresh `forming` batch. The single place a `BatchEntry` is constructed —
+ * enqueue's batch creation and #472's halved dissolve both call it, so a field
+ * added to `BatchEntry` cannot be remembered in one and forgotten in the other.
+ */
+export function createBatch(
+  id: string,
+  members: readonly number[],
+  now: Date,
+  opts: Partial<Pick<BatchEntry, 'base_branch' | 'anchor' | 'run_id' | 'eviction_groups'>> = {}
+): BatchEntry {
+  const timestamp = now.toISOString();
+  return {
+    id,
+    status: 'forming',
+    members: [...members],
+    base_branch: opts.base_branch ?? 'main',
+    executing_member: 0,
+    anchor: opts.anchor ?? null,
+    branch: null,
+    run_id: opts.run_id ?? null,
+    eviction_groups: (opts.eviction_groups ?? []).map((group) => [...group]),
+    evictions: [],
+    fix_attempts: [],
+    rebase_attempts: 0,
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+}
+
 const ISSUE_STATUSES = new Set<string>(Object.keys(ISSUE_BASE_TRANSITIONS));
 const BATCH_STATUSES = new Set<string>(Object.keys(BATCH_TRANSITIONS));
 const SLOT_STATUSES = new Set<string>(Object.keys(SLOT_BASE_TRANSITIONS));
@@ -187,8 +231,88 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   if (entry.cleanup !== null && entry.cleanup !== undefined && typeof entry.cleanup !== 'string') {
     throw new Error(`${label}: cleanup must be a string or null`);
   }
+  if (entry.failure_evidence !== null && entry.failure_evidence !== undefined) {
+    const evidence = entry.failure_evidence;
+    if (typeof evidence !== 'object' || Array.isArray(evidence)) {
+      throw new Error(`${label}: failure_evidence must be an object or null`);
+    }
+    const ev = evidence as Record<string, unknown>;
+    if (typeof ev.batch !== 'string' || ev.batch.length === 0) {
+      throw new Error(`${label}: failure_evidence.batch must be a non-empty string`);
+    }
+    if (!Array.isArray(ev.failing_tests) || ev.failing_tests.some((t) => typeof t !== 'string')) {
+      throw new Error(`${label}: failure_evidence.failing_tests must be an array of strings`);
+    }
+    if (
+      !Array.isArray(ev.reverted_commits) ||
+      ev.reverted_commits.some((c) => typeof c !== 'string')
+    ) {
+      throw new Error(`${label}: failure_evidence.reverted_commits must be an array of strings`);
+    }
+  }
   if (!isIsoDateString(entry.enqueued_at) || !isIsoDateString(entry.updated_at)) {
     throw new Error(`${label}: enqueued_at/updated_at must be ISO date strings`);
+  }
+}
+
+/**
+ * The #472 recovery fields of one batch. Absent fields are legacy (pre-1.3.0)
+ * and backfilled by the migration below; present ones must be well-shaped —
+ * eviction groups drive `git revert`, so a malformed group is a loud failure
+ * rather than a silently skipped co-eviction.
+ */
+function validateBatchRecovery(batch: Record<string, unknown>, id: string): void {
+  if (
+    batch.anchor !== null &&
+    batch.anchor !== undefined &&
+    (!Number.isInteger(batch.anchor) || (batch.anchor as number) <= 0)
+  ) {
+    throw new Error(`Batch ${id}: anchor must be a positive integer or null`);
+  }
+  for (const key of ['branch', 'run_id'] as const) {
+    const value = batch[key];
+    if (value !== null && value !== undefined && typeof value !== 'string') {
+      throw new Error(`Batch ${id}: ${key} must be a string or null`);
+    }
+  }
+  if (batch.eviction_groups !== undefined) {
+    if (!Array.isArray(batch.eviction_groups)) {
+      throw new Error(`Batch ${id}: eviction_groups must be an array of member groups`);
+    }
+    for (const group of batch.eviction_groups) {
+      if (!Array.isArray(group) || group.some((m) => !Number.isInteger(m) || (m as number) <= 0)) {
+        throw new Error(`Batch ${id}: each eviction group must be an array of issue numbers`);
+      }
+    }
+  }
+  // The elements, not just the arrays: `checkDissolveTrigger` counts distinct
+  // `evictions[].issue` for the >⅓ trigger and `beginFixAttempt` counts
+  // `fix_attempts[].issue` for the one-attempt cap. A record without a readable
+  // issue number silently defeats both bounds — most consequentially by making
+  // the fix-attempt cap uncountable, which allows unbounded fix dispatch.
+  for (const key of ['evictions', 'fix_attempts'] as const) {
+    const records = batch[key];
+    if (records === undefined) continue;
+    if (!Array.isArray(records)) {
+      throw new Error(`Batch ${id}: ${key} must be an array`);
+    }
+    for (const record of records as unknown[]) {
+      const issue = (record as { issue?: unknown } | null)?.issue;
+      if (
+        record === null ||
+        typeof record !== 'object' ||
+        !Number.isInteger(issue) ||
+        (issue as number) <= 0
+      ) {
+        throw new Error(`Batch ${id}: each ${key} record must carry a positive issue number`);
+      }
+    }
+  }
+  if (
+    batch.rebase_attempts !== undefined &&
+    (!Number.isInteger(batch.rebase_attempts) || (batch.rebase_attempts as number) < 0)
+  ) {
+    throw new Error(`Batch ${id}: rebase_attempts must be a non-negative integer`);
   }
 }
 
@@ -199,8 +323,11 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
  *
  * Legacy schema versions are accepted and migrated: 1.0.0 (pre-#464) slots
  * backfill `branch`/`last_head` to null; 1.1.0 (pre-#468) entries backfill
- * `pr`/`cleanup` and the state backfills `last_pr_poll_at` to null. The state
- * upgrades to the current schema on the next save.
+ * `pr`/`cleanup` and the state backfills `last_pr_poll_at` to null; 1.2.0
+ * (pre-#472) entries backfill `failure_evidence` to null and batches backfill
+ * the recovery fields (anchor/branch/run_id/eviction_groups/evictions/
+ * fix_attempts/rebase_attempts). The state upgrades to the current schema on
+ * the next save.
  */
 export function validateState(data: unknown): SchedState {
   if (!data || typeof data !== 'object') {
@@ -256,6 +383,7 @@ export function validateState(data: unknown): SchedState {
     if (!Number.isInteger(batch.executing_member) || batch.executing_member < 0) {
       throw new Error(`Batch ${batch.id}: executing_member must be a non-negative integer`);
     }
+    validateBatchRecovery(batch as unknown as Record<string, unknown>, batch.id);
     if (!isIsoDateString(batch.created_at) || !isIsoDateString(batch.updated_at)) {
       throw new Error(`Batch ${batch.id}: created_at/updated_at must be ISO date strings`);
     }
@@ -343,6 +471,8 @@ export function validateState(data: unknown): SchedState {
   // Migration: pre-#464 (1.0.0) slots carry no branch/last_head/pid_start —
   // backfill null so the returned state always has the current shape. Pre-#468
   // (1.1.0) entries carry no pr/cleanup and the state no last_pr_poll_at.
+  // Pre-#472 (1.2.0) entries carry no failure_evidence and batches none of the
+  // recovery fields.
   const slots = (obj.slots as SlotEntry[]).map((slot) => ({
     ...slot,
     branch: slot.branch ?? null,
@@ -353,12 +483,24 @@ export function validateState(data: unknown): SchedState {
     ...entry,
     pr: entry.pr ?? null,
     cleanup: entry.cleanup ?? null,
+    failure_evidence: entry.failure_evidence ?? null,
+  }));
+  const batches = (obj.batches as BatchEntry[]).map((batch) => ({
+    ...batch,
+    anchor: batch.anchor ?? null,
+    branch: batch.branch ?? null,
+    run_id: batch.run_id ?? null,
+    eviction_groups: batch.eviction_groups ?? [],
+    evictions: batch.evictions ?? [],
+    fix_attempts: batch.fix_attempts ?? [],
+    rebase_attempts: batch.rebase_attempts ?? 0,
   }));
 
   return {
     ...(data as SchedState),
     schema_version: SCHEMA_VERSION,
     entries,
+    batches,
     slots,
     last_pr_poll_at: obj.last_pr_poll_at ?? null,
   };
@@ -464,6 +606,93 @@ export function transitionSlot(
     now
   );
   return { ...state, slots };
+}
+
+/**
+ * Whether a member's work is already green — terminal, or merged (§F.8
+ * "nothing green is discarded"). Such a member is never requeued and never
+ * counted as unshipped. The single definition of "green": eviction, dissolve
+ * and the operator abandon path all ask this question, and two answers to it
+ * would be two different meanings of the invariant they exist to uphold.
+ */
+export function isPreservedMember(entry: QueueEntry): boolean {
+  return TERMINAL_ISSUE_STATUSES.has(entry.status) || SATISFIED_ISSUE_STATUSES.has(entry.status);
+}
+
+/**
+ * Patch a batch's RECORDS and COUNTERS (evictions, fix attempts, rebase count)
+ * without a status change. `status` and `id` are excluded on purpose: every
+ * status change goes through `transitionBatch`'s typed rails, never a
+ * hand-written assignment.
+ */
+export function patchBatch(
+  state: SchedState,
+  batchId: string,
+  patch: Omit<Partial<BatchEntry>, 'id' | 'status'>,
+  now: Date = new Date()
+): SchedState {
+  return {
+    ...state,
+    batches: state.batches.map((b) =>
+      b.id === batchId ? { ...b, ...patch, updated_at: now.toISOString() } : b
+    ),
+  };
+}
+
+/**
+ * Put one batch member back on the queue, whatever batch state it was in
+ * (RFC-0001 §D.1 "in-work/committed → evicted(reason) → requeued", §F.8
+ * "nothing green is discarded").
+ *
+ * The single requeue path for `abandonBatch` (operator dissolve), eviction and
+ * automatic dissolve (#472), so the "which edge applies from here?" question is
+ * answered once:
+ *
+ * - already terminal or shipped → left alone, `requeued: false`
+ * - never reached the batch rail (`queued`/`classified`), or already on the
+ *   requeue rail (`requeued`) → metadata retag only; there is no status edge to
+ *   take, and re-transitioning `requeued → requeued` would throw
+ * - `evicted` → the one remaining edge, `evicted → requeued`
+ * - anything else active → the full failure rail, `→ evicted → requeued`
+ *
+ * `target` is where the member goes next: full-cycle (`{ mode: 'full', batch:
+ * null }`) or a fresh half-batch (`{ mode: 'slot', batch: '<id>-a' }`).
+ */
+export function requeueMember(
+  state: SchedState,
+  issue: number,
+  target: { mode: CycleMode; batch: string | null },
+  reason: string,
+  now: Date = new Date(),
+  // Deliberately narrower than `Partial<QueueEntry>`: this path patches the
+  // entry directly on the queued/classified/requeued short-circuit, so a wider
+  // type would let a caller write `status` without a transition check and walk
+  // straight around the state machine.
+  extra: { failure_evidence?: FailureEvidence | null } = {}
+): { state: SchedState; requeued: boolean } {
+  const entry = state.entries.find((e) => e.issue === issue);
+  if (!entry) return { state, requeued: false };
+  if (isPreservedMember(entry)) {
+    return { state, requeued: false };
+  }
+  const patch = { ...target, reason, ...extra };
+  if (entry.status === 'queued' || entry.status === 'classified' || entry.status === 'requeued') {
+    return {
+      state: {
+        ...state,
+        entries: state.entries.map((e) =>
+          e.issue === issue ? { ...e, ...patch, updated_at: now.toISOString() } : e
+        ),
+      },
+      requeued: true,
+    };
+  }
+  let next = state;
+  if (entry.status !== 'evicted') {
+    next = transitionIssue(next, issue, 'evicted', { reason }, now);
+  }
+  next = transitionIssue(next, issue, 'requeued', patch, now);
+  return { state: next, requeued: true };
 }
 
 // --- Lookups ---
