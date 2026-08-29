@@ -34,6 +34,7 @@ export {
   parseMilestoneJson,
   parsePrViewJson,
   parseSetupInfo,
+  prOfMilestone,
   type SetupInfo,
 } from './groundtruth';
 export { issueOfUnit, JOURNAL_FILE, Journal, readJsonl, unitEvent } from './journal';
@@ -52,10 +53,12 @@ export {
   type Assignment,
   abandonBatch,
   abandonIssue,
+  assignToIdleSlot,
   batchBlockers,
   computeAssignments,
   type DependencyBlocker,
   dependencyBlockers,
+  freeCapacity,
   type RunnableUnit,
   runnableUnits,
   setPaused,
@@ -70,11 +73,12 @@ export {
   transitionSlot,
   validateState,
 } from './state';
-export { type BlockedItem, buildStatusReport, type StatusReport } from './status';
-export { runTeardown, TEARDOWN_TIMEOUT_MS, type TeardownResult } from './teardown';
+export { type BlockedItem, buildStatusReport, type ParkedItem, type StatusReport } from './status';
+export { isSafeWorktree, runTeardown, TEARDOWN_TIMEOUT_MS, type TeardownResult } from './teardown';
 export {
   type BatchEntry,
   type BatchStatus,
+  type CleanupStatus,
   CONFIG_SCHEMA_VERSION,
   type CycleMode,
   DEFAULT_MAX_SLOTS,
@@ -106,4 +110,5 @@ export {
   TERMINAL_BATCH_STATUSES,
   TERMINAL_ISSUE_STATUSES,
   TIER_LADDER,
+  TIER_ORDER,
 } from './types';

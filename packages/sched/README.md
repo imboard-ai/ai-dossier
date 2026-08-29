@@ -25,9 +25,9 @@ Consumed through the monorepo CLI (`@ai-dossier/cli` ≥ 0.19.0):
 ```bash
 ai-dossier sched enqueue --issues 101,105..109 --deps 100 --tier strong   # flags
 ai-dossier sched enqueue --from-manifest batch-prep.json                  # batch-prep output
-ai-dossier sched start            # the dispatch engine: spawn, verify, escalate (Ctrl-C stops it)
+ai-dossier sched start            # the dispatch engine: spawn, verify, escalate, watch parked PRs (Ctrl-C stops it)
 ai-dossier sched start --once     # a single reconcile+refill tick (cron-style)
-ai-dossier sched status           # queue, slots (pid/phase/last-progress), batches, blocked/failed
+ai-dossier sched status           # queue (+pr/cleanup), parked PRs, slots, batches, blocked/failed
 ai-dossier sched pause            # stop NEW assignments; live units keep running
 ai-dossier sched resume
 ai-dossier sched abandon --issue 42 --reason "operator abort"
@@ -94,13 +94,26 @@ import {
   parseManifest,         // batch-prep JSON → EnqueueInput[]
   computeAssignments,    // pure: fill idle slots with runnable units, bounded by max_slots
   runnableUnits,         // pure: which units may run right now (dep-gated)
-  tick,                  // one engine cycle: reconcile + verify + refill + spawn
+  tick,                  // one engine cycle: reconcile + verify + refill + spawn,
+                         //   and since #468: park-watch, teardown, report dispatch
   runLoop,               // the sched start loop (tick, sleep, repeat)
-  type TickResult,       // what one tick did (spawned/completed/redispatched/failed/blocked)
-  type EngineDeps,       // inject everything the engine touches (store/journal/spawn/ground truth/clock)
+  type TickResult,       // what one tick did (spawned/parked/merge-accepted/report-dispatched/
+                         //   teardown/completed/redispatched/failed/blocked)
+  type EngineDeps,       // inject everything the engine touches (store/journal/spawn/ground
+                         //   truth/clock/repoDir/teardownExec)
   createSpawnDeps,       // real detached-spawn process I/O
-  createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec)
-  resolveDispatch,       // config → resolved command/prompt/tier-models/timers
+  createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec);
+                         //   since #468 also gh pr view PR state + setup info from comments
+  resolveDispatch,       // config → resolved command/prompt/report-prompt/tier-models/timers
+  buildReportPrompt,     // report-agent prompt ({issue}/{pr}/{cleanup} substituted)
+  reportTierFor,         // report (re)dispatch tier after N escalations
+  isParkedMilestone,     // ship-phase awaiting-merge + pr= → the park signal
+  prOfMilestone,         // a milestone's pr= key as a positive integer
+  parsePrViewJson,       // gh pr view --json → PR truth (mergedAt/mergeable/blocked label)
+  parseSetupInfo,        // gh issue view --json comments → teardown inputs
+  runTeardown,           // #468 script teardown for a merged unit (pool return / worktree remove)
+  isSafeWorktree,        // worktree-path containment check (CWE-22)
+  TEARDOWN_TIMEOUT_MS,   // teardown subprocess timeout (120 s)
   Journal,               // append-only events.jsonl
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)
@@ -122,7 +135,8 @@ fake agents and stub ground truth; no LLM calls anywhere.
 ```
 ~/.dossier/sched/<project>/
 ├── state.json     # hot operational truth — atomic tmp+fsync+rename writes;
-├── config.json    # durable intent: max_slots, stall_timeout_ms, reconcile_interval_ms, dispatch
+├── config.json    # durable intent: max_slots, stall_timeout_ms, reconcile_interval_ms,
+│                  # pr_poll_interval_ms, dispatch (incl. report_prompt)
 ├── events.jsonl   # append-only event journal (the operator's flight recorder)
 ├── runs/          # per-unit agent output logs (issue-<n>.log)
 └── .sched-lock/   # cross-process directory mutex (pid; stolen from dead holders)
@@ -137,8 +151,8 @@ fake agents and stub ground truth; no LLM calls anywhere.
   never a silent queue reset. `state.json` is deletable and rebuildable from GitHub,
   which remains the system of record.
 - **Schema**: state/config files from #460 (schema 1.0.0) and #464 (1.1.0) load and
-  migrate to 1.2.0 automatically (slot `branch`/`last_head` and entry
-  `pr`/`cleanup`/`last_pr_poll_at` backfill to null).
+  migrate to 1.2.0 automatically (slot `branch`/`last_head`, entry `pr`/`cleanup`,
+  and state-level `last_pr_poll_at` backfill to null).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -156,7 +170,9 @@ prompt instructs it) and exit. The engine owns everything after the park:
    consumes zero slots), and the watcher takes over.
 2. **PR watching (AC1)** — parked PRs are polled every `pr_poll_interval_ms`
    (default 150 s — "every 2–3 min", persisted `last_pr_poll_at` so a restart
-   honors the cadence) via `gh pr view --json state,mergedAt,mergeable,labels`.
+   honors the cadence; checked on each reconcile tick when due, so a
+   `reconcile_interval_ms` longer than the interval slows the effective cadence)
+   via `gh pr view --json state,mergedAt,mergeable,labels`.
    A merge is accepted only when state is MERGED **and** `mergedAt` is non-null
    **and** the issue is closed — never inferred from an agent exit. An
    unreachable poll pauses the watcher (decision 2, option A).
@@ -166,25 +182,30 @@ prompt instructs it) and exit. The engine owns everything after the park:
 4. **Gating on MERGE, not park (AC4)** — `parked` is not a satisfied status:
    dependents stay blocked until the merge lands (`parked → shipped`).
 5. **Teardown as a script (AC2)** — on merge, the run's setup milestone
-   (recovered once from the issue's comments, no polling window) chooses the
-   script: pool-claimed worktrees run `worktree-pool return --path <wt> --json`
-   (the pool's own self-check is the verification); cold worktrees run
+   (recovered once from the issue's comments — collaborator-authored only, and
+   the worktree path must pass a containment check before any destructive
+   subprocess) chooses the script: pool-claimed worktrees run
+   `worktree-pool return --path <wt> --json` (the pool's own self-check is the
+   verification); cold worktrees run
    `git worktree remove --force <wt>` with a path-gone check. Both are
    verify-first idempotent; a failed step records `cleanup=failed-<step>` on
    the entry and in the journal — degradation, never unit failure.
-6. **Report dispatch (AC2)** — once teardown is recorded, a **mechanical-tier**
-   report agent is spawned with the report-phase prompt
-   (`dispatch.report_prompt`; `{issue}`/`{pr}`/`{cleanup}` substituted — the
-   cleanup status rides into the report). It completes like any agent; a
-   report that stalls climbs the same ladder (mechanical → mid → strong, cap
-   2), and at the cap the unit completes with `reason=report-failed…` — the
-   work is merged, so dependents are never re-blocked. The full-cycle tail-run
-   pattern (re-dispatching a whole run for teardown+report) is retired.
+6. **Report dispatch (AC2)** — once teardown is recorded (when a slot is
+   free — a waiting report consumes zero slots), a **mechanical-tier** report
+   agent is spawned with the report-phase prompt (`dispatch.report_prompt`;
+   `{issue}`/`{pr}`/`{cleanup}` substituted — the cleanup status rides into
+   the report). It completes like any agent; a report that stalls climbs the
+   same ladder (mechanical → mid → strong, cap 2), and at the cap the unit
+   completes (`done`, reason `report-escalation-cap`) with a `report-failed`
+   journal event — the work is merged, so dependents are never re-blocked.
+   The full-cycle tail-run pattern (re-dispatching a whole run for
+   teardown+report) is retired.
 
-`sched status` shows parked PRs (zero slots) and a `pr` column on the queue;
-every watcher decision lands in `events.jsonl` (`pr-parked`, `merge-accepted`,
-`pr-watch-failed`, `teardown-done`/`teardown-failed`, `report-dispatched`,
-`report-failed`).
+`sched status` shows parked PRs (zero slots, with the last poll's age), a
+`pr` column and a `cleanup` column on the queue; every watcher decision lands
+in `events.jsonl` (`pr-parked`, `merge-accepted`, `pr-watch-failed`,
+`pr-watch-waiting`, `teardown-done`/`teardown-failed`, `report-dispatched`,
+`report-failed`, `ground-truth-unreachable`).
 
 ## Development
 

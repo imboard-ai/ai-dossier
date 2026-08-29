@@ -798,14 +798,26 @@ against ground truth.
   it (unverified exits and stalls are redispatched one tier stronger — mechanical → mid →
   strong, cap 2 — then the unit fails and its transitive dependents are blocked);
   externally-advanced state and orphaned pids after a restart are detected; a freed slot
-  is refilled in the same tick. `--once` runs a single tick (cron-style); Ctrl-C stops
+  is refilled in the same tick. Since #468 the default dispatch prompt is
+  detached-ship (the agent parks its PR on `auto-merge` and stops): a parked
+  exit releases its slot, the watcher polls the PR every `pr_poll_interval_ms`
+  (default 150 000 ms, cadence persisted across restarts), and on merge —
+  only when the PR is MERGED **and** `mergedAt` is set **and** the issue is
+  closed — the engine runs script-based teardown (pool return, self-check
+  verified, or `git worktree remove --force`, path-gone verified;
+  `cleanup=failed-<step>` on a failed step) and then dispatches a
+  mechanical-tier report agent. `CONFLICTING` / closed-unmerged /
+  `auto-merge-blocked` PRs fail the unit and block its transitive dependents;
+  a failed report on a merged unit never blocks dependents (the work shipped).
+  `--once` runs a single tick (cron-style); Ctrl-C stops
   the engine while spawned agents keep running. Pids are identity-guarded via
   `/proc` start-times (a reused pid is never signalled; best-effort on macOS/Windows),
   and a FAILED ground-truth poll (gh outage) pauses that unit's stall/verify decisions
   instead of guessing — an outage never kills a healthy agent. All events are journaled
   to `events.jsonl`, and `status` shows the live phase per unit.
-- **`status`** renders the queue, slots (with pid, live phase, last-progress, recoveries),
-  batches, runnable units, and the blocked/failed sets. A blocked entry names every
+- **`status`** renders the queue (with `pr` and `cleanup` columns), parked PRs
+  (watched, zero slots, with the last poll's age), slots (with pid, live phase,
+  last-progress, recoveries), batches, runnable units, and the blocked/failed sets. A blocked entry names every
   unsatisfied dependency ("dependency #104 not merged (status: dispatched)"), so "why
   isn't #42 running?" is a read, not an investigation. `--json` emits the same report
   as data.
@@ -816,13 +828,15 @@ against ground truth.
 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically
-from `state.json` (pre-#464 state files migrate on load). A corrupt state file is a loud
+from `state.json` (pre-#464 and pre-#468 state files — schema 1.0.0/1.1.0 — migrate to
+1.2.0 on load). A corrupt state file is a loud
 error naming the file — never a silent queue reset. Concurrency is serialized by a
 `.sched-lock` directory mutex (stolen from dead holders). `config.json` holds
 `max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default
 1 800 000), `reconcile_interval_ms` (default 60 000), and the optional `dispatch`
-section; an issue with an unmerged dependency — or a batch behind an unmerged batch —
-is never runnable.
+section (including `report_prompt` for the #468 report agent); `pr_poll_interval_ms`
+(default 150 000) sets the parked-PR poll cadence; an issue with an unmerged dependency —
+or a batch behind an unmerged batch — is never runnable.
 
 Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).
 

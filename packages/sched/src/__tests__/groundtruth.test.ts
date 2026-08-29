@@ -324,3 +324,44 @@ describe('createExecGroundTruth prState/setupInfo (#468)', () => {
     expect(createExecGroundTruth(empty).setupInfo(101)).toBeNull();
   });
 });
+
+describe('parseSetupInfo author trust (defense-in-depth)', () => {
+  it('ignores setup milestones from non-collaborators (destructive-input path)', () => {
+    const setup = (assoc: string) => ({
+      body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-evil at=x\nworktree=/repo/worktrees/evil\npool_claimed=false',
+      authorAssociation: assoc,
+    });
+    // a random commenter's "setup milestone" is not a teardown source
+    expect(
+      parseSetupInfo(JSON.stringify([setup('NONE'), setup('FIRST_TIME_CONTRIBUTOR')]))
+    ).toBeNull();
+    // owner/member/collaborator milestones are trusted
+    for (const assoc of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
+      expect(parseSetupInfo(JSON.stringify([setup(assoc)]))?.worktree).toBe('/repo/worktrees/evil');
+    }
+    // a trusted setup beats a newer untrusted one
+    expect(
+      parseSetupInfo(
+        JSON.stringify([
+          {
+            body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/real\npool_claimed=false',
+            authorAssociation: 'OWNER',
+          },
+          setup('NONE'),
+        ])
+      )?.worktree
+    ).toBe('/repo/worktrees/real');
+  });
+
+  it('comments without authorAssociation (older gh / file fakes) still parse', () => {
+    expect(
+      parseSetupInfo(
+        JSON.stringify([
+          {
+            body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/wt\npool_claimed=true',
+          },
+        ])
+      )
+    ).toEqual({ worktree: '/repo/worktrees/wt', poolClaimed: true, branch: null });
+  });
+});

@@ -113,6 +113,8 @@ function harness(
     setTeardownScript: (script: (file: string, args: string[]) => string | null) => {
       teardownScript = script;
     },
+    /** A convention-valid worktree path for this harness's repo dir. */
+    wt: (name: string) => path.join(dir, 'worktrees', name),
     config,
     deps,
     enqueue: (inputs: EnqueueInput[]) =>
@@ -166,15 +168,17 @@ afterEach(() => {
   }
 });
 
-describe('dispatch (AC1: spawn with --model per tier; pid/phase/progress in state.json)', () => {
-  beforeEach(() => {
-    for (const name of fs.readdirSync(os.tmpdir())) {
-      if (name.startsWith('sched-engine-')) {
-        fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
-      }
+// One top-level sweep: every harness dir is a fresh `sched-engine-` tmpdir —
+// stale dirs from crashed runs never leak between tests.
+beforeEach(() => {
+  for (const name of fs.readdirSync(os.tmpdir())) {
+    if (name.startsWith('sched-engine-')) {
+      fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
     }
-  });
+  }
+});
 
+describe('dispatch (AC1: spawn with --model per tier; pid/phase/progress in state.json)', () => {
   it('dispatches a runnable unit as a spawned agent process with the tier model', () => {
     const h = harness();
     REGISTRIES.push(h.dir);
@@ -718,14 +722,6 @@ function removingTeardown(worktree: string): (file: string, args: string[]) => s
 }
 
 describe('#468 AC1/AC5: parking and the PR watcher', () => {
-  beforeEach(() => {
-    for (const name of fs.readdirSync(os.tmpdir())) {
-      if (name.startsWith('sched-engine-')) {
-        fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
-      }
-    }
-  });
-
   it('an agent exiting on an awaiting-merge milestone parks the unit and frees its slot', () => {
     const h = harness();
     REGISTRIES.push(h.dir);
@@ -764,8 +760,8 @@ describe('#468 AC1/AC5: parking and the PR watcher', () => {
     // the PR merges and the issue closes → 102 becomes runnable
     h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
     h.closedIssues.add(101);
-    h.setupInfos.set(101, { worktree: '/tmp/wt-101', poolClaimed: false, branch: 'f/101' });
-    h.setTeardownScript(removingTeardown('/tmp/wt-101'));
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
     h.advance(200_000);
     const result = h.tick();
     expect(result.mergeAccepted).toEqual(['issue:101']);
@@ -780,20 +776,45 @@ describe('#468 AC1/AC5: parking and the PR watcher', () => {
     REGISTRIES.push(h.dir);
     parkUnit(h, 101, 55);
 
-    // PR merged, issue still open → NOT accepted
+    // PR merged, issue still open → NOT accepted, and the wait is journaled
     h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
     h.advance(200_000);
     let result = h.tick();
     expect(result.mergeAccepted).toEqual([]);
     expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+    expect(h.events().some((e) => e.event === 'pr-watch-waiting' && e.issue === 101)).toBe(true);
 
     // issue closes → accepted
     h.closedIssues.add(101);
-    h.setupInfos.set(101, { worktree: '/tmp/wt-101', poolClaimed: false, branch: 'f/101' });
-    h.setTeardownScript(removingTeardown('/tmp/wt-101'));
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
     h.advance(200_000);
     result = h.tick();
     expect(result.mergeAccepted).toEqual(['issue:101']);
+  });
+
+  it('a report that cannot get a slot waits visibly and consumes zero slots', () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    // 101 parks first (its park frees the only slot)…
+    parkUnit(h, 101, 55);
+    // …and a long full-cycle unit takes it over before the merge lands
+    h.enqueue([{ issue: 201, mode: 'full', tier: 'mid' }]);
+    h.tick(); // dispatch 201
+
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(200_000);
+
+    const result = h.tick();
+    expect(result.mergeAccepted).toEqual(['issue:101']);
+    expect(result.teardownDone).toEqual(['issue:101']);
+    expect(result.reportDispatched).toEqual([]); // no free slot
+    expect(result.reportWaiting).toBe(1); // visible, not silent
+    // the merged unit holds NO slot while waiting (AC5)
+    expect(h.state().slots.filter((s) => s.unit === 'issue:101')).toHaveLength(0);
   });
 
   it('the poll cadence is honored: no PR poll before pr_poll_interval_ms elapses', () => {
@@ -818,8 +839,8 @@ describe('#468 AC1/AC5: parking and the PR watcher', () => {
 
     // after the interval, the merge is seen
     h.advance(120_000);
-    h.setupInfos.set(101, { worktree: '/tmp/wt-101', poolClaimed: false, branch: 'f/101' });
-    h.setTeardownScript(removingTeardown('/tmp/wt-101'));
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
     const result = h.tick();
     expect(result.mergeAccepted).toEqual(['issue:101']);
   });
@@ -841,21 +862,13 @@ describe('#468 AC1/AC5: parking and the PR watcher', () => {
 });
 
 describe('#468 AC2: teardown + report dispatch on merge', () => {
-  beforeEach(() => {
-    for (const name of fs.readdirSync(os.tmpdir())) {
-      if (name.startsWith('sched-engine-')) {
-        fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
-      }
-    }
-  });
-
   /** Park 101 (PR 55), then merge + close + provide setup info. */
   function mergedUnit(h: ReturnType<typeof harness>): void {
     parkUnit(h, 101, 55);
     h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
     h.closedIssues.add(101);
-    h.setupInfos.set(101, { worktree: '/tmp/wt-101', poolClaimed: false, branch: 'f/101' });
-    h.setTeardownScript(removingTeardown('/tmp/wt-101'));
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
     h.advance(200_000);
   }
 
@@ -875,7 +888,7 @@ describe('#468 AC2: teardown + report dispatch on merge', () => {
     // teardown ran as a script: git worktree remove --force
     const removeCall = h.teardownCalls.find((c) => c.file === 'git' && c.args[1] === 'remove');
     expect(removeCall?.args).toContain('--force');
-    expect(removeCall?.args).toContain('/tmp/wt-101');
+    expect(removeCall?.args).toContain(h.wt('wt-101'));
     expect(removeCall?.cwd).toBe(h.dir); // repoDir
 
     // teardown-done journaled
@@ -935,12 +948,12 @@ describe('#468 AC2: teardown + report dispatch on merge', () => {
     parkUnit(h, 101, 55);
     h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
     h.closedIssues.add(101);
-    h.setupInfos.set(101, { worktree: '/tmp/wt-101', poolClaimed: false, branch: 'f/101' });
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
     h.advance(200_000);
     // the remove keeps failing AND the worktree stays listed → failed step
     h.setTeardownScript((file, args) => {
       if (file === 'git' && args[1] === 'list')
-        return `worktree /repo/main\nworktree /tmp/wt-101\n`;
+        return `worktree /repo/main\nworktree ${h.wt('wt-101')}\n`;
       if (file === 'git' && args[1] === 'remove') return '';
       return null;
     });
@@ -1059,14 +1072,6 @@ describe('#468 AC2: teardown + report dispatch on merge', () => {
 });
 
 describe('#468 AC3: watcher failure paths', () => {
-  beforeEach(() => {
-    for (const name of fs.readdirSync(os.tmpdir())) {
-      if (name.startsWith('sched-engine-')) {
-        fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
-      }
-    }
-  });
-
   it('CONFLICTING → failed with reason + transitive dependents blocked', () => {
     const h = harness();
     REGISTRIES.push(h.dir);
@@ -1130,14 +1135,6 @@ describe('#468 AC3: watcher failure paths', () => {
 });
 
 describe('#468 AC6: restart mid-watch', () => {
-  beforeEach(() => {
-    for (const name of fs.readdirSync(os.tmpdir())) {
-      if (name.startsWith('sched-engine-')) {
-        fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
-      }
-    }
-  });
-
   it('a fresh engine instance resumes the watch from state.json alone', () => {
     const first = harness();
     REGISTRIES.push(first.dir);
@@ -1154,8 +1151,8 @@ describe('#468 AC6: restart mid-watch', () => {
     // the new instance watches from the persisted state — merge accepted on its tick
     h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
     h.closedIssues.add(101);
-    h.setupInfos.set(101, { worktree: '/tmp/wt-101', poolClaimed: false, branch: 'f/101' });
-    h.setTeardownScript(removingTeardown('/tmp/wt-101'));
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
     h.advance(200_000);
     const result = h.tick();
     expect(result.mergeAccepted).toEqual(['issue:101']);
@@ -1196,8 +1193,8 @@ describe('#468 AC6: restart mid-watch', () => {
 
     // after the interval: seen
     h.advance(120_000);
-    h.setupInfos.set(101, { worktree: '/tmp/wt-101', poolClaimed: false, branch: 'f/101' });
-    h.setTeardownScript(removingTeardown('/tmp/wt-101'));
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
     expect(h.tick().mergeAccepted).toEqual(['issue:101']);
   });
 });

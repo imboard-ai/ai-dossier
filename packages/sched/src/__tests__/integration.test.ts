@@ -414,12 +414,16 @@ describe('integration #468: park → watch → merged → teardown (real git) �
 
     // a REAL worktree the fake run "created"
     const branch = 'feature/401-x';
-    execFileSync('git', ['worktree', 'add', '-b', branch, path.join(repo, 'wt-401'), 'main'], {
-      cwd: repo,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    expect(fs.existsSync(path.join(repo, 'wt-401', 'README.md'))).toBe(true);
+    execFileSync(
+      'git',
+      ['worktree', 'add', '-b', branch, path.join(repo, 'worktrees', 'wt-401'), 'main'],
+      {
+        cwd: repo,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }
+    );
+    expect(fs.existsSync(path.join(repo, 'worktrees', 'wt-401', 'README.md'))).toBe(true);
 
     const h = tailHarness(truthDir, repo);
     h.enqueue([{ issue: 401, mode: 'full', tier: 'mid' }]);
@@ -446,7 +450,11 @@ describe('integration #468: park → watch → merged → teardown (real git) �
     fs.writeFileSync(path.join(truthDir, '401.closed'), '');
     fs.writeFileSync(
       path.join(truthDir, '401.setup.json'),
-      JSON.stringify({ worktree: path.join(repo, 'wt-401'), poolClaimed: false, branch })
+      JSON.stringify({
+        worktree: path.join(repo, 'worktrees', 'wt-401'),
+        poolClaimed: false,
+        branch,
+      })
     );
 
     // the watcher accepts the merge, tears the worktree down (REAL git), and
@@ -457,7 +465,7 @@ describe('integration #468: park → watch → merged → teardown (real git) �
     expect(h.state().entries[0].status).toBe('shipped');
     expect(h.state().entries[0].cleanup).toBe('done');
     // the worktree is REALLY gone
-    expect(fs.existsSync(path.join(repo, 'wt-401'))).toBe(false);
+    expect(fs.existsSync(path.join(repo, 'worktrees', 'wt-401'))).toBe(false);
 
     // the report agent (same command, report prompt) posts report done + exits
     const reportPid = h.state().slots.find((s) => s.unit === 'issue:401')?.pid as number;
@@ -499,12 +507,41 @@ describe('integration #468: park → watch → merged → teardown (real git) �
     expect(state.entries.find((e) => e.issue === 403)?.status).toBe('blocked');
   }, 30_000);
 
+  it('an auto-merge-blocked PR fails the unit and blocks transitive dependents (AC6)', async () => {
+    const truthDir = tmpDir('sched-tail-truth-');
+    const repo = scratchRepo();
+    const h = tailHarness(truthDir, repo);
+    h.enqueue([
+      { issue: 405, mode: 'full', tier: 'mid' },
+      { issue: 406, mode: 'full', tier: 'mid', deps: [405] },
+    ]);
+
+    h.tick(); // dispatch 405
+    const pid = h.state().slots[0].pid as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    expect(h.tick().parked).toEqual(['issue:405']);
+    const pr = h.state().entries.find((e) => e.issue === 405)?.pr as number;
+
+    // the auto-merge watcher blocked the PR (label applied, PR still open)
+    fs.writeFileSync(
+      path.join(truthDir, `${pr}.pr.json`),
+      JSON.stringify({ state: 'OPEN', blocked: true })
+    );
+
+    const result = h.tick();
+    expect(result.failed).toEqual(['issue:405']);
+    expect(result.blocked).toEqual([406]);
+    const state = h.state();
+    expect(state.entries.find((e) => e.issue === 405)?.reason).toBe('auto-merge-blocked');
+    expect(state.entries.find((e) => e.issue === 406)?.status).toBe('blocked');
+  }, 30_000);
+
   it('restart mid-watch: a fresh engine instance resumes from state.json and finishes the tail', async () => {
     const truthDir = tmpDir('sched-tail-truth-');
     const repo = scratchRepo();
     execFileSync(
       'git',
-      ['worktree', 'add', '-b', 'feature/404-x', path.join(repo, 'wt-404'), 'main'],
+      ['worktree', 'add', '-b', 'feature/404-x', path.join(repo, 'worktrees', 'wt-404'), 'main'],
       {
         cwd: repo,
         encoding: 'utf8',
@@ -531,13 +568,13 @@ describe('integration #468: park → watch → merged → teardown (real git) �
     fs.writeFileSync(path.join(truthDir, '404.closed'), '');
     fs.writeFileSync(
       path.join(truthDir, '404.setup.json'),
-      JSON.stringify({ worktree: path.join(repo, 'wt-404'), poolClaimed: false })
+      JSON.stringify({ worktree: path.join(repo, 'worktrees', 'wt-404'), poolClaimed: false })
     );
 
     const result = h.tick();
     expect(result.mergeAccepted).toEqual(['issue:404']);
     expect(h.state().entries[0].cleanup).toBe('done');
-    expect(fs.existsSync(path.join(repo, 'wt-404'))).toBe(false);
+    expect(fs.existsSync(path.join(repo, 'worktrees', 'wt-404'))).toBe(false);
 
     const reportPid = h.state().slots.find((s) => s.unit === 'issue:404')?.pid as number;
     expect(await waitUntilDead(h.spawnDeps, reportPid)).toBe(true);

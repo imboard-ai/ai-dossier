@@ -23,26 +23,60 @@
  */
 
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { SetupInfo } from './groundtruth';
 import type { ExecFn } from './project';
+import type { CleanupStatus } from './types';
 
 /** Timeout for teardown subprocesses — pool return shells out through npx and recycles a worktree (git ops), which is slow. */
 export const TEARDOWN_TIMEOUT_MS = 120_000;
 
-/** Pool CLI invocation (the pinned form every other dossier uses; ≤0.5.0 has a data-loss gc). */
+/**
+ * Pool CLI invocation. Requires ≥0.6.0 — `status --json`, `return --json`,
+ * and the `verification.entry_status` self-check (#453) all landed there, so
+ * `^0.5.1` (which resolves to ≤0.5.3) cannot ever satisfy the JSON contract
+ * and every pool teardown would record `failed-pool-return`. Versions ≤0.5.0
+ * additionally carry the data-loss `gc` bug — never pin lower.
+ */
 const POOL_BIN = 'npx';
-const POOL_ARGS_PREFIX = ['-y', '@ai-dossier/worktree-pool@^0.5.1'];
+const POOL_ARGS_PREFIX = ['-y', '@ai-dossier/worktree-pool@^0.6.0'];
 
 /** The outcome recorded on the entry's `cleanup` and in the journal. */
 export interface TeardownResult {
   /** `done` or `failed-<step>` — the entry's `cleanup` value verbatim. */
-  cleanup: string;
+  cleanup: CleanupStatus;
   /** Human-readable detail for the journal (empty when none). */
   detail: string;
 }
 
 /** Whether a path exists (injectable so tests need no filesystem). */
 export type FsExists = (p: string) => boolean;
+
+/**
+ * Containment check for a worktree path recovered from an issue comment
+ * (#468): the path must be absolute and fully resolved (no `..`/`.`/symlink
+ * variance), and — for COLD worktrees — live under one of the two worktree
+ * roots this project uses: `<repo>/worktrees/` (setup-issue-workflow's
+ * inside-repo convention) or `<repo>/../worktrees/` (the AGENTS.md sibling
+ * convention). A crafted milestone can otherwise make the scheduler
+ * `git worktree remove --force` ANY registered worktree — including a
+ * parallel agent's (CWE-22). Pool-claimed worktrees are validated by the
+ * pool itself (return only accepts paths in pool state), so containment
+ * applies to the cold path only.
+ */
+export function isSafeWorktree(repoRoot: string, worktree: string): boolean {
+  if (worktree.includes('\0')) return false;
+  if (!path.isAbsolute(worktree)) return false;
+  if (path.resolve(worktree) !== worktree) return false;
+  const roots = [path.resolve(repoRoot, 'worktrees'), path.resolve(repoRoot, '..', 'worktrees')];
+  return roots.some((root) => worktree.startsWith(root + path.sep));
+}
+
+/** The repo's toplevel directory (containment root), or null when git cannot say. */
+function repoToplevel(exec: ExecFn, repoDir: string): string | null {
+  const out = exec('git', ['rev-parse', '--show-toplevel'], repoDir);
+  return out !== null && path.isAbsolute(out) ? path.resolve(out) : null;
+}
 
 /** Path-listing of `git worktree list --porcelain` (null when the call fails). */
 function worktreeList(exec: ExecFn, repoDir: string): string | null {
@@ -75,8 +109,25 @@ export function runTeardown(
     }
   }
 ): TeardownResult {
+  // The worktree path originates from an issue comment written by the spawned
+  // agent — validate it before any destructive subprocess (CWE-22).
+  if (info.worktree.includes('\0') || !path.isAbsolute(info.worktree)) {
+    return {
+      cleanup: 'failed-invalid-worktree',
+      detail: `worktree path rejected (must be absolute): ${info.worktree}`,
+    };
+  }
   if (info.poolClaimed) {
+    // Pool membership is validated by the pool's own `return` (it only
+    // accepts paths in pool state) — no local containment root applies.
     return poolReturn(exec, repoDir, info.worktree);
+  }
+  const root = repoToplevel(exec, repoDir) ?? path.resolve(repoDir);
+  if (!isSafeWorktree(root, info.worktree)) {
+    return {
+      cleanup: 'failed-invalid-worktree',
+      detail: `worktree path rejected (must be a resolved path under the repo's worktrees root ${path.join(root, 'worktrees')}): ${info.worktree}`,
+    };
   }
   return worktreeRemove(exec, repoDir, info.worktree, fsExists);
 }
@@ -99,7 +150,7 @@ function poolReturn(exec: ExecFn, repoDir: string, worktree: string): TeardownRe
     return {
       cleanup: 'failed-pool-return',
       detail:
-        'worktree-pool return exited non-zero (entry left broken — inspect `worktree-pool status`)',
+        'worktree-pool return failed (non-zero exit, timeout, or npx unavailable) — entry left unverified; inspect `worktree-pool status`',
     };
   }
   // Verified before claimed: the pool's own self-check must report the
@@ -135,7 +186,7 @@ function worktreeRemove(
   if (out === null) {
     return {
       cleanup: 'failed-worktree-remove',
-      detail: 'git worktree remove exited non-zero',
+      detail: 'git worktree remove failed (non-zero exit or timeout)',
     };
   }
   // Verified before claimed: the path must be gone AND git must no longer

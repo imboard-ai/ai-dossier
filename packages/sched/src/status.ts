@@ -1,8 +1,9 @@
 /**
- * `sched status` report (AC4): queue, slots, batches, and the blocked/failed
- * sets as a machine-readable report. Text rendering lives in the CLI
- * (`cli/src/commands/sched.ts`, on top of the CLI's shared `renderTable`) —
- * the package deliberately has no dependency on CLI utilities.
+ * `sched status` report (AC4): queue, slots, batches, parked PRs, and the
+ * blocked/failed sets as a machine-readable report. Text rendering lives in
+ * the CLI (`cli/src/commands/sched.ts`, on top of the CLI's shared
+ * `renderTable`) — the package deliberately has no dependency on CLI
+ * utilities.
  */
 
 import {
@@ -41,6 +42,8 @@ export interface StatusReport {
   batches: BatchEntry[];
   /** Parked units being watched by the PR watcher (#468). */
   parked: ParkedItem[];
+  /** When the PR watcher last polled (#468) — null before the first poll. */
+  last_pr_poll_at: string | null;
   /** How many units are runnable right now. */
   runnable: number;
   /** Which units are runnable (`issue:<n>` / `batch:<id>`), in dispatch order. */
@@ -111,8 +114,8 @@ export function buildStatusReport(
   const units = state.paused ? [] : runnableUnits(state);
 
   const parked: ParkedItem[] = state.entries
-    .filter((e) => e.status === 'parked' && e.pr !== null)
-    .map((e) => ({ issue: e.issue, pr: e.pr as number, since: e.updated_at }));
+    .filter((e): e is QueueEntry & { pr: number } => e.status === 'parked' && e.pr !== null)
+    .map((e) => ({ issue: e.issue, pr: e.pr, since: e.updated_at }));
 
   return {
     project,
@@ -123,6 +126,7 @@ export function buildStatusReport(
     slots: state.slots,
     batches: state.batches,
     parked,
+    last_pr_poll_at: state.last_pr_poll_at,
     runnable: units.length,
     runnable_units: units.map((u) =>
       u.kind === 'issue' ? `issue:${u.issue}` : `batch:${u.batch}`

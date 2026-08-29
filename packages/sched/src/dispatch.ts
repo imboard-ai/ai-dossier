@@ -28,6 +28,7 @@ import {
   type ModelTier,
   type SchedConfig,
   TIER_LADDER,
+  TIER_ORDER,
 } from './types';
 
 /** Default tier → model mapping (claude aliases; override in config.json). */
@@ -179,8 +180,7 @@ export function escalateTier(tier: ModelTier): ModelTier | null {
  * `ESCALATION_CAP` check fails the unit before that null is reached.
  */
 export function reportTierFor(recoveries: number): ModelTier | null {
-  const ladder: readonly ModelTier[] = ['mechanical', 'mid', 'strong'];
-  return ladder[Math.max(0, recoveries)] ?? null;
+  return TIER_ORDER[recoveries] ?? null;
 }
 
 // --- Process I/O (injectable) ---

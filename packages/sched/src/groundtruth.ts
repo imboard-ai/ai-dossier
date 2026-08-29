@@ -2,9 +2,10 @@
  * Ground truth for completion verification (#464, AC2 — "an agent exiting is
  * never proof of completion"). The engine never trusts the spawned agent's own
  * exit; it reconciles the claimed state against the durable sources — the
- * issue's runstate milestone trail (`ai-dossier runstate last`) and GitHub
- * itself (`gh issue view`), plus `git ls-remote` for the "new pushed commit"
- * stall signal.
+ * issue's runstate milestone trail (`ai-dossier runstate last`), GitHub
+ * itself (`gh issue view`), and `git ls-remote` for the "new pushed commit"
+ * stall signal. #468 adds the parked-PR state (`gh pr view`) and the setup
+ * milestone's teardown keys (`gh issue view --json comments`).
  *
  * Everything is injectable (the `ExecFn` pattern from project.ts): tests —
  * and any consumer — supply fake ground truth and no subprocess runs.
@@ -43,7 +44,11 @@ export interface SetupInfo {
   worktree: string;
   /** Whether the worktree was claimed from the pool (`pool_claimed=true`). */
   poolClaimed: boolean;
-  /** The unit's working branch (`branch=` key), when the milestone carried it. */
+  /**
+   * The unit's working branch (`branch=` key), when the milestone carried it.
+   * Currently unused by `runTeardown` — recovered for operator/debugging
+   * value and future pool operations (e.g. branch pruning).
+   */
   branch: string | null;
 }
 
@@ -223,7 +228,10 @@ export function parsePrViewJson(stdout: string | null): PrTruth | null {
  * inputs from the run's `setup done` milestone comment (#468). Milestone
  * comments carry a `<!-- runstate:v1 -->` marker followed by `key=value`
  * lines; the setup milestone is the one whose header starts `phase=setup`.
- * Returns null when no usable setup milestone exists (verifiably).
+ * Comments from non-collaborators (authorAssociation outside
+ * OWNER/MEMBER/COLLABORATOR) are skipped — teardown inputs feed destructive
+ * scripts, so a random commenter cannot supply them. Returns null when no
+ * usable setup milestone exists (verifiably).
  */
 export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
   if (commentsJson === null || commentsJson.trim() === '') return null;
@@ -235,13 +243,23 @@ export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
   }
   if (!Array.isArray(comments)) return null;
 
+  const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
   // Newest setup milestone wins (a re-run can re-post setup).
   for (const raw of [...comments].reverse()) {
     if (raw === null || typeof raw !== 'object') continue;
-    const body = (raw as { body?: unknown }).body;
-    if (typeof body !== 'string' || !body.includes('<!-- runstate:v1 -->')) continue;
+    const comment = raw as { body?: unknown; authorAssociation?: unknown };
+    if (typeof comment.body !== 'string' || !comment.body.includes('<!-- runstate:v1 -->')) {
+      continue;
+    }
+    if (
+      comment.authorAssociation !== undefined &&
+      !TRUSTED_ASSOCIATIONS.has(String(comment.authorAssociation))
+    ) {
+      continue; // untrusted author — never a teardown source
+    }
 
-    const keys = parseMilestoneKeys(body);
+    const keys = parseMilestoneKeys(comment.body);
     if (keys.phase !== 'setup' || keys.status !== 'done') continue;
     const worktree = keys.worktree ?? null;
     if (worktree === null || worktree.length === 0) continue;
@@ -254,16 +272,36 @@ export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
   return null;
 }
 
-/** `key=value` tokens of a runstate milestone comment body (header included — its line carries several space-separated pairs). */
+/**
+ * `key=value` tokens of a runstate milestone comment body — the same pair
+ * grammar `cli/src/runstate.ts` owns (the tolerant reader): the `phase=`
+ * header line carries several space-separated pairs, other lines carry one
+ * pair each split at the FIRST `=`. First occurrence of a key wins.
+ */
 function parseMilestoneKeys(body: string): Record<string, string> {
   const keys: Record<string, string> = {};
+  const put = (token: string): void => {
+    const eq = token.indexOf('=');
+    if (eq <= 0) return;
+    const key = token.slice(0, eq);
+    if (keys[key] === undefined) keys[key] = token.slice(eq + 1);
+  };
   for (const line of body.split('\n')) {
-    for (const token of line.trim().split(/\s+/)) {
-      const match = /^([a-z_][a-z0-9_]*)=(.*)$/.exec(token);
-      if (match !== null) keys[match[1]] = match[2];
+    const trimmed = line.trim();
+    if (trimmed.startsWith('phase=')) {
+      for (const token of trimmed.split(/\s+/)) put(token);
+    } else {
+      put(trimmed);
     }
   }
   return keys;
+}
+
+/** The `pr=` key of a milestone as a positive integer, or null when absent/malformed. */
+export function prOfMilestone(milestone: GroundTruthMilestone | null): number | null {
+  if (milestone === null) return null;
+  const pr = Number.parseInt(milestone.keys.pr ?? '', 10);
+  return Number.isInteger(pr) && pr > 0 ? pr : null;
 }
 
 /**
@@ -271,11 +309,12 @@ function parseMilestoneKeys(body: string): Record<string, string> {
  * phase's `awaiting-merge` record carrying a `pr=` key. Such an exit is a
  * VERIFIED park, not an unverified exit — the watcher takes over from here.
  */
-export function isParkedMilestone(milestone: GroundTruthMilestone | null): boolean {
+export function isParkedMilestone(
+  milestone: GroundTruthMilestone | null
+): milestone is GroundTruthMilestone {
   if (milestone === null) return false;
   if (milestone.phase !== 'ship' || milestone.status !== 'awaiting-merge') return false;
-  const pr = Number.parseInt(milestone.keys.pr ?? '', 10);
-  return Number.isInteger(pr) && pr > 0;
+  return prOfMilestone(milestone) !== null;
 }
 
 /**

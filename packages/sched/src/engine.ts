@@ -28,15 +28,15 @@
  *      dependents blocked (AC3)
  *    - failures block their TRANSITIVE dependents (AC4)
  *    - report agents are dispatched for merged units whose teardown is
- *      recorded (before queue refill — cheap reports don't queue behind
- *      long runs)
+ *      already recorded (before queue refill — cheap reports don't queue
+ *      behind long runs)
+ *    - **Refill** in the SAME lock pass: `computeAssignments` fills every
+ *      freed slot — a runnable unit never waits while a slot is idle (AC5)
  * 3. **Teardown** (outside the lock — pool/git subprocesses are slow): for
  *    every freshly-merged unit, recover the setup milestone's worktree info
  *    and run pool return / worktree remove, VERIFIED before claimed
  *    (`cleanup=failed-<step>` on mismatch, AC2). Results land in a second
  *    short lock pass together with the report dispatch.
- * 4. **Refill**: `computeAssignments` fills every freed slot in the SAME tick —
- *    a runnable unit never waits while a slot is idle (AC5).
  *
  * Everything that touches the world (processes, GitHub, git) is injected;
  * the state machine is pure. Only `issue:<n>` units are dispatched — batch
@@ -63,17 +63,19 @@ import {
   isParkedMilestone,
   isVerifiedComplete,
   type PrTruth,
+  prOfMilestone,
 } from './groundtruth';
 import { issueOfUnit, type Journal, unitEvent } from './journal';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
-import { computeAssignments } from './scheduler';
+import { assignToIdleSlot, computeAssignments, freeCapacity } from './scheduler';
 import { findEntry, transitionIssue, transitionSlot } from './state';
 import { runTeardown, type TeardownResult } from './teardown';
 import {
   ESCALATION_CAP,
   type JournalEventName,
-  LIVE_SLOT_STATUSES,
+  type ModelTier,
+  type QueueEntry,
   type SchedConfig,
   type SchedState,
   type SlotEntry,
@@ -107,9 +109,20 @@ export interface TickResult {
   mergeAccepted: string[];
   /** Report agents dispatched for merged units this tick (#468). */
   reportDispatched: string[];
+  /** Merged units whose report could not dispatch — waiting for a free slot (#468). */
+  reportWaiting: number;
+  /** Units whose teardown was verified this tick (#468). */
+  teardownDone: string[];
+  /** Units whose teardown failed a step this tick (#468) — degradation, not unit failure. */
+  teardownFailed: string[];
   /** Units redispatched one tier stronger (stall or unverified exit). */
   redispatched: string[];
-  /** Units failed (escalation cap / strongest tier / spawn error / PR failure). */
+  /**
+   * Units that hit a failure rail. Full-cycle units end `failed`; MERGED
+   * units also land here on merged-aware REPORT failures
+   * (`report-escalation-cap` / report spawn-error), where the unit actually
+   * completes (`done`, reason recorded) — the report failed, not the work.
+   */
   failed: string[];
   /** Issues blocked transitively by a failure. */
   blocked: number[];
@@ -123,6 +136,9 @@ function emptyResult(): TickResult {
     parked: [],
     mergeAccepted: [],
     reportDispatched: [],
+    reportWaiting: 0,
+    teardownDone: [],
+    teardownFailed: [],
     redispatched: [],
     failed: [],
     blocked: [],
@@ -244,7 +260,9 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
  * merge-acceptance gate and must not be re-queried under the lock.
  */
 function pollParkedPrs(deps: EngineDeps, state: SchedState, dispatch: ResolvedDispatch): PrPoll {
-  const parked = state.entries.filter((e) => e.status === 'parked' && e.pr !== null);
+  const parked = state.entries.filter(
+    (e): e is QueueEntry & { pr: number } => e.status === 'parked' && e.pr !== null
+  );
   if (parked.length === 0) return { ran: false, truths: new Map(), closed: new Map() };
 
   const now = deps.now().getTime();
@@ -256,13 +274,68 @@ function pollParkedPrs(deps: EngineDeps, state: SchedState, dispatch: ResolvedDi
   const truths = new Map<number, PrTruth | undefined>();
   const closed = new Map<number, boolean>();
   for (const entry of parked) {
-    truths.set(entry.issue, deps.groundTruth.prState(entry.pr as number));
+    truths.set(entry.issue, deps.groundTruth.prState(entry.pr));
     closed.set(entry.issue, deps.groundTruth.issueClosed(entry.issue));
   }
   return { ran: true, truths, closed };
 }
 
 // --- Spawn / fail / complete / park ---
+
+/**
+ * The shared spawn-and-record tail of every agent dispatch (#464 full-cycle,
+ * #468 report): log file, try-spawn (a throw fails the unit through the
+ * declared failure rail — visible in `sched status`, never a tick abort),
+ * pid/phase/progress patch, the `assigned|recovering → running` transition,
+ * and the `spawned` journal event. `spawnUnit`/`spawnReportAgent` differ only
+ * in tier, prompt, phase, and failure opts.
+ */
+function spawnAndRecord(
+  ctx: TickCtx,
+  state: SchedState,
+  unit: string,
+  slot: SlotEntry,
+  opts: {
+    tier: ModelTier;
+    cmd: string[];
+    prompt: string;
+    phase: string;
+    failOpts?: { merged?: boolean };
+    journalExtra?: Record<string, unknown>;
+  }
+): SchedState {
+  const logFile = path.join(ctx.deps.store.runsDir, `${unitLogName(unit)}.log`);
+
+  let pid: number;
+  try {
+    pid = ctx.deps.spawnDeps.spawn(opts.cmd, opts.prompt, logFile);
+  } catch (err) {
+    return failUnit(ctx, state, unit, `spawn-error: ${(err as Error).message}`, opts.failOpts);
+  }
+
+  const now = ctx.deps.now();
+  const patch = {
+    pid,
+    pid_start: ctx.deps.spawnDeps.processStart(pid),
+    phase: opts.phase,
+    last_progress_at: now.toISOString(),
+  };
+  const next =
+    slot.status === 'assigned' || slot.status === 'recovering'
+      ? transitionSlot(state, slot.id, 'running', patch, now)
+      : patchSlot(state, slot.id, patch, now);
+
+  journal(ctx, 'spawned', unit, {
+    pid,
+    tier: opts.tier,
+    slot: slot.id,
+    cmd: opts.cmd.join(' '),
+    log: logFile,
+    ...(opts.journalExtra ?? {}),
+  });
+  ctx.result.spawned.push(unit);
+  return next;
+}
 
 /** Spawn (or respawn) the agent for `unit` and move its slot to `running`. */
 function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
@@ -284,41 +357,12 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
     return spawnReportAgent(ctx, state, unit);
   }
 
-  const cmd = buildAgentCommand(ctx.dispatch.command, entry.tier, issue, ctx.dispatch.tierModels);
-  const prompt = buildPrompt(ctx.dispatch.prompt, issue);
-  const logFile = path.join(ctx.deps.store.runsDir, `${unitLogName(unit)}.log`);
-
-  let pid: number;
-  try {
-    pid = ctx.deps.spawnDeps.spawn(cmd, prompt, logFile);
-  } catch (err) {
-    // A spawn failure fails the unit through the declared failure rail —
-    // visible in `sched status` (Failed: … spawn-error) instead of aborting
-    // the whole tick and silently discarding every other unit's reconcile.
-    return failUnit(ctx, state, unit, `spawn-error: ${(err as Error).message}`);
-  }
-
-  const now = ctx.deps.now();
-  const patch = {
-    pid,
-    pid_start: ctx.deps.spawnDeps.processStart(pid),
-    phase: 'gate',
-    last_progress_at: now.toISOString(),
-  };
-  const next =
-    slot.status === 'assigned' || slot.status === 'recovering'
-      ? transitionSlot(state, slot.id, 'running', patch, now)
-      : patchSlot(state, slot.id, patch, now);
-
-  journal(ctx, 'spawned', unit, {
-    pid,
+  return spawnAndRecord(ctx, state, unit, slot, {
     tier: entry.tier,
-    slot: slot.id,
-    cmd: cmd.join(' '),
-    log: logFile,
+    cmd: buildAgentCommand(ctx.dispatch.command, entry.tier, issue, ctx.dispatch.tierModels),
+    prompt: buildPrompt(ctx.dispatch.prompt, issue),
+    phase: 'gate',
   });
-  ctx.result.spawned.push(unit);
-  return next;
 }
 
 /**
@@ -335,41 +379,16 @@ function spawnReportAgent(ctx: TickCtx, state: SchedState, unit: string): SchedS
   const tier = reportTierFor(slot.recoveries);
   if (tier === null) return state;
 
-  const cmd = buildAgentCommand(ctx.dispatch.command, tier, issue, ctx.dispatch.tierModels);
-  const prompt = buildReportPrompt(ctx.dispatch.reportPrompt, issue, entry.pr, entry.cleanup);
-  const logFile = path.join(ctx.deps.store.runsDir, `${unitLogName(unit)}.log`);
-
-  let pid: number;
-  try {
-    pid = ctx.deps.spawnDeps.spawn(cmd, prompt, logFile);
-  } catch (err) {
+  return spawnAndRecord(ctx, state, unit, slot, {
+    tier,
+    cmd: buildAgentCommand(ctx.dispatch.command, tier, issue, ctx.dispatch.tierModels),
+    prompt: buildReportPrompt(ctx.dispatch.reportPrompt, issue, entry.pr, entry.cleanup),
+    phase: 'report',
     // Merged-aware: the PR is merged — a report spawn failure never blocks
     // dependents (gating already released at `shipped`).
-    return failUnit(ctx, state, unit, `spawn-error: ${(err as Error).message}`, { merged: true });
-  }
-
-  const now = ctx.deps.now();
-  const patch = {
-    pid,
-    pid_start: ctx.deps.spawnDeps.processStart(pid),
-    phase: 'report',
-    last_progress_at: now.toISOString(),
-  };
-  const next =
-    slot.status === 'assigned' || slot.status === 'recovering'
-      ? transitionSlot(state, slot.id, 'running', patch, now)
-      : patchSlot(state, slot.id, patch, now);
-
-  journal(ctx, 'spawned', unit, {
-    pid,
-    tier,
-    slot: slot.id,
-    cmd: cmd.join(' '),
-    log: logFile,
-    detail: 'report agent',
+    failOpts: { merged: true },
+    journalExtra: { detail: 'report agent' },
   });
-  ctx.result.spawned.push(unit);
-  return next;
 }
 
 /**
@@ -518,9 +537,7 @@ function enterRecovery(
     next = {
       ...next,
       entries: next.entries.map((e) =>
-        e.issue === issue
-          ? { ...e, tier: nextTier as NonNullable<typeof nextTier>, updated_at: now.toISOString() }
-          : e
+        e.issue === issue ? { ...e, tier: nextTier, updated_at: now.toISOString() } : e
       ),
     };
   }
@@ -537,6 +554,19 @@ function enterRecovery(
   return spawnUnit(ctx, next, unit);
 }
 
+/**
+ * Verified-exit walk to idle: `complete` is reachable only via
+ * exited → verifying → complete → idle; the fallback keeps the walk from
+ * ever wedging (assigned/recovering have nothing verified yet).
+ */
+function stepVerifiedExitToIdle(status: SlotStatus): SlotStatus {
+  if (status === 'complete' || status === 'failed') return 'idle';
+  if (status === 'running') return 'exited';
+  if (status === 'exited') return 'verifying';
+  if (status === 'verifying') return 'complete';
+  return 'failed';
+}
+
 /** Complete a unit whose ground truth is verified (AC2). */
 function completeUnit(
   ctx: TickCtx,
@@ -548,29 +578,22 @@ function completeUnit(
   if (issue === null) return state;
   const now = ctx.deps.now();
 
-  // Walk the slot machine to idle through its declared edges: complete is
-  // reachable only via exited → verifying → complete → idle.
-  let next = walkSlotToIdle(state, unit, now, (status) => {
-    if (status === 'complete' || status === 'failed') return 'idle';
-    if (status === 'running') return 'exited';
-    if (status === 'exited') return 'verifying';
-    if (status === 'verifying') return 'complete';
-    return 'failed'; // assigned/recovering: nothing verified yet — never wedge
-  });
+  const next = walkSlotToIdle(state, unit, now, stepVerifiedExitToIdle);
 
+  let withEntry = next;
   const entry = findEntry(next, issue);
   if (entry && entry.status === 'dispatched') {
-    next = transitionIssue(next, issue, 'shipped', {}, now);
-    next = transitionIssue(next, issue, 'done', {}, now);
+    withEntry = transitionIssue(next, issue, 'shipped', {}, now);
+    withEntry = transitionIssue(withEntry, issue, 'done', {}, now);
   } else if (entry && entry.status === 'shipped') {
     // A report agent completing its run (#468): shipped → done.
-    next = transitionIssue(next, issue, 'done', {}, now);
+    withEntry = transitionIssue(next, issue, 'done', {}, now);
   }
 
   journal(ctx, via, unit);
   if (via === 'external-advance') ctx.result.externalAdvances.push(unit);
   else ctx.result.completed.push(unit);
-  return next;
+  return withEntry;
 }
 
 /**
@@ -588,16 +611,10 @@ function parkUnit(
   const issue = issueOfUnit(unit);
   if (issue === null) return state;
   const now = ctx.deps.now();
-  const pr = Number.parseInt(milestone.keys.pr ?? '', 10);
-  if (!Number.isInteger(pr) || pr <= 0) return state; // isParkedMilestone guarantees this
+  const pr = prOfMilestone(milestone);
+  if (pr === null) return state; // isParkedMilestone guarantees this
 
-  let next = walkSlotToIdle(state, unit, now, (status) => {
-    if (status === 'complete' || status === 'failed') return 'idle';
-    if (status === 'running') return 'exited';
-    if (status === 'exited') return 'verifying';
-    if (status === 'verifying') return 'complete';
-    return 'failed'; // assigned/recovering: never wedge
-  });
+  let next = walkSlotToIdle(state, unit, now, stepVerifiedExitToIdle);
 
   next = transitionIssue(next, issue, 'parked', { pr }, now);
   journal(ctx, 'pr-parked', unit, { pr });
@@ -652,6 +669,15 @@ function applyProgressSignals(
   return { state: next, progressed };
 }
 
+/**
+ * The issue-closed completion signal for a live unit (#468): a report agent's
+ * issue is already closed (closed AT MERGE), so for report-phase slots the
+ * closed signal is suppressed — only the report milestone can complete them.
+ */
+function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
+  return slot.phase === 'report' ? false : truth.closed;
+}
+
 /** Reconcile one running slot against its polled ground truth. */
 function reconcileRunning(
   ctx: TickCtx,
@@ -684,12 +710,13 @@ function reconcileRunning(
 
   // Ground truth says the unit is DONE while the agent still holds the slot —
   // externally-advanced state (AC3): reclaim the slot, kill the leftover agent.
-  // A report agent's issue is already closed (closed AT MERGE), so for
-  // report-phase slots only the milestone counts. A parked milestone is
-  // deliberately NOT an advance: a detached run parks and stops — the watcher
-  // owns the tail (#468); the exit/stall rails take the agent from here.
-  const closedSignal = slot.phase === 'report' ? false : truth.closed;
-  if (isVerifiedComplete(truth.milestone, closedSignal) && !isParkedMilestone(truth.milestone)) {
+  // A parked milestone is deliberately NOT an advance: a detached run parks
+  // and stops — the watcher owns the tail (#468); the exit/stall rails take
+  // the agent from here.
+  if (
+    isVerifiedComplete(truth.milestone, effectiveClosedSignal(slot, truth)) &&
+    !isParkedMilestone(truth.milestone)
+  ) {
     journal(ctx, 'external-advance', unit, {
       pid: slot.pid,
       slot: slot.id,
@@ -751,13 +778,10 @@ function completeUnitOrRecover(
   // takes the unit (AC2's "never inferred from agent exit" cut both ways:
   // the park IS the milestone, the merge is not).
   if (entry !== undefined && entry.status === 'dispatched' && isParkedMilestone(truth.milestone)) {
-    return parkUnit(ctx, next, unit, truth.milestone as GroundTruthMilestone);
+    return parkUnit(ctx, next, unit, truth.milestone);
   }
 
-  // Report agents complete on the milestone alone (their issue closed at
-  // merge — the closed signal is already true when they spawn).
-  const closedSignal = slot.phase === 'report' ? false : truth.closed;
-  if (isVerifiedComplete(truth.milestone, closedSignal)) {
+  if (isVerifiedComplete(truth.milestone, effectiveClosedSignal(slot, truth))) {
     return completeUnit(ctx, next, unit, via);
   }
   return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', {
@@ -853,19 +877,28 @@ function requeueOrphanedDispatches(ctx: TickCtx, state: SchedState): SchedState 
  * AND the issue closed — never an agent exit. Failure states (AC3) fail the
  * unit and block transitive dependents; the engine never merges anything
  * itself. `shipped` (not `parked`) is what unblocks dependents (AC4).
+ *
+ * Entries are re-read fresh each iteration: a mid-loop failure blocks OTHER
+ * parked entries (transitive dependents), and acting on a stale snapshot
+ * would drive an already-blocked entry through `parked → shipped`.
  */
 function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): SchedState {
-  let next = state;
-  if (prPoll.ran) {
-    next = { ...next, last_pr_poll_at: ctx.deps.now().toISOString() };
-  }
-  if (!prPoll.ran) return next;
+  if (!prPoll.ran) return state;
+  let next: SchedState = { ...state, last_pr_poll_at: ctx.deps.now().toISOString() };
 
-  for (const entry of state.entries) {
-    if (entry.status !== 'parked' || entry.pr === null) continue;
-    const unit = `issue:${entry.issue}`;
-    const truth = prPoll.truths.get(entry.issue);
+  const parkedIssues = state.entries
+    .filter((e) => e.status === 'parked' && e.pr !== null)
+    .map((e) => e.issue);
+
+  for (const issue of parkedIssues) {
+    const entry = findEntry(next, issue);
+    if (!entry || entry.status !== 'parked' || entry.pr === null) continue; // blocked mid-loop
+    const unit = `issue:${issue}`;
+    const truth = prPoll.truths.get(issue);
     if (truth === undefined) {
+      if (!prPoll.truths.has(issue)) {
+        continue; // parked AFTER the poll ran (this tick) — next cadence picks it up
+      }
       journal(ctx, 'ground-truth-unreachable', unit, {
         detail: 'pr watch paused until truth returns',
       });
@@ -892,8 +925,15 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
     if (truth.state === 'MERGED' && truth.mergedAt !== null) {
       // AC1: the issue must ALSO be closed (a merged PR auto-closes it) —
       // until GitHub propagates, the unit stays parked and keeps watching.
-      if (prPoll.closed.get(entry.issue) !== true) continue;
-      next = transitionIssue(next, entry.issue, 'shipped', { reason: null }, ctx.deps.now());
+      if (prPoll.closed.get(issue) !== true) {
+        journal(ctx, 'pr-watch-waiting', unit, {
+          pr: entry.pr,
+          mergedAt: truth.mergedAt,
+          detail: 'merge seen but issue not closed — keep watching',
+        });
+        continue;
+      }
+      next = transitionIssue(next, issue, 'shipped', { reason: null }, ctx.deps.now());
       journal(ctx, 'merge-accepted', unit, { pr: entry.pr, mergedAt: truth.mergedAt });
       ctx.result.mergeAccepted.push(unit);
     }
@@ -902,63 +942,40 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
   return next;
 }
 
-/** Whether a report agent already holds (or is being dispatched for) the unit. */
-function reportSlotHolds(state: SchedState, unit: string): boolean {
-  return state.slots.some((s) => s.unit === unit);
-}
-
 /**
  * Dispatch report agents for merged units whose teardown is recorded (#468
  * AC2): shipped + pr + cleanup + no live slot + free capacity → a slot is
  * assigned (phase `report`) and a mechanical-tier agent spawned with the
  * report prompt. Reports run BEFORE queue refill — a cheap report never
  * queues behind long full-cycle runs. A unit waiting for capacity consumes
- * zero slots (AC5).
+ * zero slots (AC5) and is surfaced via `result.reportWaiting`.
  */
 function dispatchReportAgents(ctx: TickCtx, state: SchedState, config: SchedConfig): SchedState {
   let next = state;
   for (const entry of state.entries) {
     if (entry.status !== 'shipped' || entry.pr === null || entry.cleanup === null) continue;
     const unit = `issue:${entry.issue}`;
-    if (reportSlotHolds(next, unit)) continue;
+    if (slotOf(next, unit) !== undefined) continue; // a slot already holds the unit
 
-    const live = next.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length;
-    if (live >= config.max_slots) break; // full — wait (zero slots consumed)
-
-    let idle = next.slots.find((s) => s.status === 'idle');
-    if (!idle) {
-      const slot = {
-        id: next.next_slot_id,
-        status: 'idle' as const,
-        unit: null,
-        pid: null,
-        pid_start: null,
-        phase: null,
-        last_progress_at: null,
-        branch: null,
-        last_head: null,
-        recoveries: 0,
-        updated_at: ctx.deps.now().toISOString(),
-      };
-      next = { ...next, slots: [...next.slots, slot], next_slot_id: next.next_slot_id + 1 };
-      idle = slot;
+    if (freeCapacity(next, config) === 0) {
+      // Full — the report waits (zero slots consumed). Count what is waiting
+      // so the wait is visible, then stop scanning.
+      ctx.result.reportWaiting = state.entries.filter(
+        (e) =>
+          e.status === 'shipped' &&
+          e.pr !== null &&
+          e.cleanup !== null &&
+          slotOf(next, `issue:${e.issue}`) === undefined
+      ).length;
+      break;
     }
+
     const now = ctx.deps.now();
-    next = transitionSlot(
-      next,
-      idle.id,
-      'assigned',
-      {
-        unit,
-        pid: null,
-        phase: 'report',
-        last_progress_at: now.toISOString(),
-      },
-      now
-    );
-    journal(ctx, 'assigned', unit, { slot: idle.id, detail: 'report agent' });
+    const assigned = assignToIdleSlot(next, unit, 'report', now);
+    next = assigned.state;
+    journal(ctx, 'assigned', unit, { slot: assigned.slotId, detail: 'report agent' });
     journal(ctx, 'report-dispatched', unit, {
-      slot: idle.id,
+      slot: assigned.slotId,
       pr: entry.pr,
       cleanup: entry.cleanup,
     });
@@ -1041,6 +1058,8 @@ function recordTeardowns(
       cleanup: result.cleanup,
       detail: result.detail,
     });
+    if (result.cleanup === 'done') ctx.result.teardownDone.push(unit);
+    else ctx.result.teardownFailed.push(unit);
   }
   return next;
 }

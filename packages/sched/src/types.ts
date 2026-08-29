@@ -24,6 +24,8 @@ export type ModelTier = 'mechanical' | 'mid' | 'strong';
  * ```
  * queued → classified{full|slot}
  *   full:  → dispatched → (full-cycle's own phase trail) → shipped → done
+ *           #468 detached ship: dispatched → parked{pr} (PR on auto-merge;
+ *           the watcher owns the merge wait) → shipped → done
  *   slot:  → batched(b) → waiting → in-work → committed(range) → validated
  *              → shipped-in-batch → done
  * failure edges (any state):
@@ -62,6 +64,9 @@ export const SATISFIED_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set([
   'shipped-in-batch',
   'done',
 ]);
+
+/** Teardown outcome values (#468): verified cleanup or a failed step. */
+export type CleanupStatus = 'done' | `failed-${string}`;
 
 // --- D.2 Batch state machine ---
 
@@ -167,11 +172,11 @@ export interface QueueEntry {
    */
   pr: number | null;
   /**
-   * Teardown outcome for a merged unit (#468): `done`, `failed-<step>`, or
+   * Teardown outcome for a merged unit (#468): `done` or `failed-<step>`, or
    * null while teardown is still pending. Recorded only after the cleanup
    * was verified (pool return self-check / worktree path gone).
    */
-  cleanup: string | null;
+  cleanup: CleanupStatus | null;
   enqueued_at: string;
   updated_at: string;
 }
@@ -230,8 +235,9 @@ export interface SchedState {
   next_slot_id: number;
   /**
    * When the PR watcher last polled (#468) — parked PRs are polled every
-   * `pr_poll_interval_ms` (default 150 s), independently of the reconcile
-   * tick. Persisted so the cadence survives a sched restart.
+   * `pr_poll_interval_ms` (default 150 s). Polled on each reconcile tick
+   * when due (a `reconcile_interval_ms` longer than the interval slows the
+   * effective cadence); persisted so the cadence survives a sched restart.
    */
   last_pr_poll_at: string | null;
 }
@@ -245,7 +251,7 @@ export interface SchedConfig {
   reconcile_interval_ms?: number;
   /**
    * Parked-PR poll interval in ms (#468, default 150 000 — "every 2–3 min").
-   * Independent of the reconcile tick; see `SchedState.last_pr_poll_at`.
+   * Checked on each reconcile tick when due; see `SchedState.last_pr_poll_at`.
    */
   pr_poll_interval_ms?: number;
   /** Agent dispatch settings (#464); every field optional with engine defaults. */
@@ -278,6 +284,9 @@ export const TIER_LADDER: Readonly<Record<ModelTier, ModelTier | null>> = {
   mid: 'strong',
   strong: null,
 };
+
+/** The ladder as an ordered array (weakest first) — the single ordering source. */
+export const TIER_ORDER: readonly ModelTier[] = ['mechanical', 'mid', 'strong'];
 
 /** Cap on recovery attempts before a unit fails (RFC-0001 §C.1 "cap 2"). */
 export const ESCALATION_CAP = 2;
@@ -363,6 +372,7 @@ export type JournalEventName =
   | 'pr-parked'
   | 'merge-accepted'
   | 'pr-watch-failed'
+  | 'pr-watch-waiting'
   | 'teardown-done'
   | 'teardown-failed'
   | 'report-dispatched'
