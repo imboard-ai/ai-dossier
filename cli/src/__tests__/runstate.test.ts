@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { isIssueNumber } from '../gh';
 import {
   BATCH_PHASES,
   BATCH_SPECS,
@@ -9,7 +10,6 @@ import {
   hitLoopCap,
   isAcKey,
   isBatchPhase,
-  isIssueNumber,
   isKnownPhase,
   isPhase,
   KEY_VALUE_RULES,
