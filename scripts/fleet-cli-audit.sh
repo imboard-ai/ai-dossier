@@ -41,7 +41,9 @@ done
 # $1 >= $2 ?
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
 
-bin_ver() { "$1" --version 2>/dev/null | head -1; }
+# Prepend the binary's own dir so nvm-tree binaries find their sibling `node`
+# even when nvm is not on the calling shell's PATH (no system node installed).
+bin_ver() { PATH="$(dirname "$1"):$PATH" "$1" --version 2>/dev/null | head -1; }
 
 # ---------------------------------------------------------------------------
 # Payload: runs ON a host (locally or shipped over ssh via `bash -s`).
@@ -67,7 +69,7 @@ run_payload() {
     echo "PATH_MODE=${path_mode}"
     if [ -z "$default_ver" ]; then
       # Binary present but --version fails: broken install. Show why.
-      echo "DEFAULT_BROKEN=$("$default_bin" --version 2>&1 | head -2 | tr '\n' ' ')"
+      echo "DEFAULT_BROKEN=$(PATH="$(dirname "$default_bin"):$PATH" "$default_bin" --version 2>&1 | head -2 | tr '\n' ' ')"
     fi
   else
     default_ver=""
@@ -85,7 +87,7 @@ run_payload() {
       && default_bin=$(bash -c '. "$HOME/.nvm/nvm.sh" >/dev/null 2>&1; type -aP ai-dossier' 2>/dev/null | grep -v '/node_modules/' | head -1)
     if [ -n "$default_bin" ]; then
       default_ver=$(bin_ver "$default_bin")
-      [ -z "$default_ver" ] && echo "DEFAULT_BROKEN=$("$default_bin" --version 2>&1 | head -2 | tr '\n' ' ')"
+      [ -z "$default_ver" ] && echo "DEFAULT_BROKEN=$(PATH="$(dirname "$default_bin"):$PATH" "$default_bin" --version 2>&1 | head -2 | tr '\n' ' ')"
     fi
   fi
 
@@ -119,6 +121,8 @@ run_payload() {
   # npm prefix override: `npm i -g` may land in a different node's tree than the active one.
   local prefix node_dir
   prefix=$(bash -lc 'npm config get prefix' 2>/dev/null | tail -1)
+  [ -z "$prefix" ] && [ -s "$HOME/.nvm/nvm.sh" ] \
+    && prefix=$(bash -c '. "$HOME/.nvm/nvm.sh" >/dev/null 2>&1; npm config get prefix' 2>/dev/null | tail -1)
   node_dir=$(bash -lc 'command -v node' 2>/dev/null | tail -1 | xargs -r dirname | xargs -r dirname)
   echo "NPM_PREFIX=${prefix:-unknown}"
   [ -n "$prefix" ] && [ -n "$node_dir" ] && [ "$prefix" != "$node_dir" ] && echo "PREFIX_OVERRIDE=yes"
