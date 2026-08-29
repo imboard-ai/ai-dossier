@@ -1,0 +1,238 @@
+/**
+ * Types for the deterministic scheduler core (RFC-0001 §B/C.1/D, issue #460).
+ *
+ * The state unions below are the RFC-0001 §D state machines frozen into types.
+ * `state.ts` owns the transition tables; nothing here does I/O — this package
+ * makes zero LLM/agent invocations by design (AC7), and the only subprocess
+ * anywhere in it is the project-slug resolution at the CLI boundary
+ * (`project.ts`, injectable for tests).
+ */
+
+// --- Cycle modes and model tiers (RFC-0001 §B model routing) ---
+
+/** Execution mode of a queue entry. `full` runs the unchanged full-cycle; `slot` runs as a batch member. */
+export type CycleMode = 'full' | 'slot';
+
+/** Model tier the entry is dispatched at (RFC-0001 role-based routing: mechanical / generation / judgment). */
+export type ModelTier = 'mechanical' | 'mid' | 'strong';
+
+// --- D.1 Issue state machine ---
+
+/**
+ * Issue lifecycle per RFC-0001 §D.1:
+ *
+ * ```
+ * queued → classified{full|slot}
+ *   full:  → dispatched → (full-cycle's own phase trail) → shipped → done
+ *   slot:  → batched(b) → waiting → in-work → committed(range) → validated
+ *              → shipped-in-batch → done
+ * failure edges (any state):
+ *   in-work/committed → evicted(reason) → requeued{full}
+ *   any → blocked(dep-failed) | decision-pending | failed(escalation-cap)
+ * ```
+ */
+export type IssueStatus =
+  | 'queued'
+  | 'classified'
+  | 'dispatched'
+  | 'shipped'
+  | 'done'
+  | 'batched'
+  | 'waiting'
+  | 'in-work'
+  | 'committed'
+  | 'validated'
+  | 'shipped-in-batch'
+  | 'evicted'
+  | 'requeued'
+  | 'blocked'
+  | 'decision-pending'
+  | 'failed';
+
+/** Issue statuses that cannot transition further. */
+export const TERMINAL_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set(['done', 'failed']);
+
+/**
+ * Statuses that mean the issue's work has merged. Dependency edges gate on
+ * these: "an issue with an unmerged dependency is never runnable" (AC5).
+ */
+export const SATISFIED_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set([
+  'shipped',
+  'shipped-in-batch',
+  'done',
+]);
+
+// --- D.2 Batch state machine ---
+
+/**
+ * Batch lifecycle per RFC-0001 §D.2:
+ *
+ * ```
+ * forming → ready → executing(member i/N) ⟲ → validating → reviewing → shipping
+ *   → awaiting-merge → merged → deployed → reported → done
+ * failure edges:
+ *   validating → attributing → fixing(1 bounded attempt) → validating
+ *              → evicting(revert range) → validating
+ *   evictions > ⅓ OR revert-conflict → dissolving → members requeued
+ *   awaiting-merge: CONFLICTING | auto-merge-blocked → rebasing → re-validating → shipping
+ *                   (2nd failure → dissolved)
+ * ```
+ */
+export type BatchStatus =
+  | 'forming'
+  | 'ready'
+  | 'executing'
+  | 'validating'
+  | 'attributing'
+  | 'fixing'
+  | 'evicting'
+  | 'reviewing'
+  | 'shipping'
+  | 'awaiting-merge'
+  | 'rebasing'
+  | 're-validating'
+  | 'merged'
+  | 'deployed'
+  | 'reported'
+  | 'done'
+  | 'dissolving'
+  | 'dissolved';
+
+/** Batch statuses that cannot transition further. */
+export const TERMINAL_BATCH_STATUSES: ReadonlySet<BatchStatus> = new Set(['done', 'dissolved']);
+
+/**
+ * Batch statuses that mean the batch's PR has merged. Cross-batch dependency
+ * edges gate on these (a batch is never dispatched while a batch it depends
+ * on is unmerged — RFC-0001 §E.4 "scheduler gates on merge").
+ */
+export const MERGED_BATCH_STATUSES: ReadonlySet<BatchStatus> = new Set([
+  'merged',
+  'deployed',
+  'reported',
+  'done',
+]);
+
+// --- D.3 Worker slot state machine ---
+
+/**
+ * Worker slot lifecycle per RFC-0001 §D.3:
+ *
+ * ```
+ * idle → assigned(unit) → running(pid, phase, last_progress_at)
+ *   → exited → verifying(reconcile vs GitHub/runstate) → complete → idle
+ * stall: running[30 min no progress] → recovering(redispatch tier+1, ≤2) → running | failed → idle
+ * ```
+ */
+export type SlotStatus =
+  | 'idle'
+  | 'assigned'
+  | 'running'
+  | 'exited'
+  | 'verifying'
+  | 'complete'
+  | 'recovering'
+  | 'failed';
+
+/** Slot statuses that hold a live unit against `max_slots`. */
+export const LIVE_SLOT_STATUSES: ReadonlySet<SlotStatus> = new Set([
+  'assigned',
+  'running',
+  'recovering',
+]);
+
+// --- Persisted entities ---
+
+/** One queued unit of work (RFC-0001 §C.1 "queue entries"). */
+export interface QueueEntry {
+  /** GitHub issue number. Unique among active entries. */
+  issue: number;
+  /** Execution mode for this issue. */
+  mode: CycleMode;
+  /** Batch id when `mode === 'slot'`; always null for `full`. */
+  batch: string | null;
+  /** Issue numbers this entry depends on (edges gate readiness). */
+  deps: number[];
+  /** Model tier the entry is dispatched at. */
+  tier: ModelTier;
+  /** Current D.1 state. */
+  status: IssueStatus;
+  /** Free-form reason attached to failure-edge transitions (evicted/blocked/failed). */
+  reason: string | null;
+  enqueued_at: string;
+  updated_at: string;
+}
+
+/** A batch of slot-mode issues sharing one lifecycle (RFC-0001 §C.4/E.4). */
+export interface BatchEntry {
+  id: string;
+  status: BatchStatus;
+  /** Member issue numbers, in dispatch order. */
+  members: number[];
+  base_branch: string;
+  /** Index of the member currently in work, when status is `executing` (1-based member pointer). */
+  executing_member: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A worker slot (RFC-0001 §D.3). */
+export interface SlotEntry {
+  id: number;
+  status: SlotStatus;
+  /** Unit identifier currently held: `issue:<n>` or `batch:<id>`; null when idle. */
+  unit: string | null;
+  /** OS pid of the spawned agent process, when known (dispatch itself is #464). */
+  pid: number | null;
+  /** Scheduler phase the unit is in, when running. */
+  phase: string | null;
+  /** Last progress signal (new milestone or pushed commit) — stall-timer anchor. */
+  last_progress_at: string | null;
+  /** Recovery attempts for the current unit (stall ladder, cap 2 — RFC-0001 §C.1). */
+  recoveries: number;
+  updated_at: string;
+}
+
+/** Hot operational truth, persisted transactionally to `state.json` (RFC-0001 §D.4). */
+export interface SchedState {
+  schema_version: '1.0.0';
+  /** When true, `computeAssignments` returns no assignments (sched pause). */
+  paused: boolean;
+  entries: QueueEntry[];
+  batches: BatchEntry[];
+  slots: SlotEntry[];
+  /** Monotonic counter for stable slot ids. */
+  next_slot_id: number;
+}
+
+/** Durable intent, persisted separately in `config.json` (state.json is rebuildable hot truth). */
+export interface SchedConfig {
+  max_slots: number;
+}
+
+export const SCHEMA_VERSION = '1.0.0' as const;
+
+export const CONFIG_SCHEMA_VERSION = '1.0.0' as const;
+
+/** Config file shape (schema_version + the config itself). */
+export interface SchedConfigFile {
+  schema_version: '1.0.0';
+  max_slots: number;
+}
+
+export const DEFAULT_MAX_SLOTS = 3;
+
+/** Thrown by every non-declared state-machine edge. */
+export class IllegalTransitionError extends Error {
+  readonly kind: 'issue' | 'batch' | 'slot';
+  readonly from: string;
+  readonly to: string;
+
+  constructor(kind: 'issue' | 'batch' | 'slot', from: string, to: string) {
+    super(`Illegal ${kind} transition: ${from} → ${to}`);
+    this.name = 'IllegalTransitionError';
+    this.kind = kind;
+    this.from = from;
+    this.to = to;
+  }
+}

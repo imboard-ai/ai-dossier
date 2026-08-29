@@ -1,0 +1,110 @@
+/**
+ * Readiness: which units can run right now, as a pure function of state
+ * (RFC-0001 §E.4: "scheduler gates on merge" — an issue with an unmerged
+ * dependency is never runnable, and a batch is never dispatched while a batch
+ * it depends on is unmerged).
+ */
+
+import type { BatchEntry, IssueStatus, QueueEntry, SchedState } from './types';
+import { MERGED_BATCH_STATUSES, SATISFIED_ISSUE_STATUSES } from './types';
+
+/** A unit the scheduler can place on a slot: one full-mode issue, or one batch. */
+export type RunnableUnit = { kind: 'issue'; issue: number } | { kind: 'batch'; batch: string };
+
+/** Why a dependency edge currently blocks its holder. */
+export interface DependencyBlocker {
+  /** The blocked issue. */
+  issue: number;
+  /** The unsatisfied dependency. */
+  dep: number;
+  reason: 'unmerged' | 'not-in-queue';
+  /** Current status of the dependency entry, when it exists. */
+  depStatus?: IssueStatus;
+}
+
+/** Issue statuses from which a full-cycle dispatch may start. */
+const DISPATCHABLE_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set([
+  // `queued` is dispatchable because the manifest already carries the mode —
+  // the classifier (#465) only refines it later.
+  'queued',
+  'classified',
+  'requeued',
+]);
+
+function batchOf(state: SchedState, issue: number): BatchEntry | undefined {
+  return state.batches.find((b) => b.members.includes(issue));
+}
+
+/**
+ * Unsatisfied dependency edges of a single entry. Deps satisfied by
+ * membership in the SAME batch are not blockers — intra-batch ordering is the
+ * batch's own concern once dispatched (RFC-0001 §E.4).
+ */
+export function dependencyBlockers(state: SchedState, entry: QueueEntry): DependencyBlocker[] {
+  const blockers: DependencyBlocker[] = [];
+  const ownBatch = entry.batch !== null ? findBatchById(state, entry.batch) : undefined;
+  for (const dep of entry.deps) {
+    if (ownBatch?.members.includes(dep)) continue;
+    const depEntry = state.entries.find((e) => e.issue === dep);
+    if (!depEntry) {
+      blockers.push({ issue: entry.issue, dep, reason: 'not-in-queue' });
+      continue;
+    }
+    if (!SATISFIED_ISSUE_STATUSES.has(depEntry.status)) {
+      blockers.push({ issue: entry.issue, dep, reason: 'unmerged', depStatus: depEntry.status });
+    }
+  }
+  return blockers;
+}
+
+function findBatchById(state: SchedState, id: string): BatchEntry | undefined {
+  return state.batches.find((b) => b.id === id);
+}
+
+/** Whether `batch` may dispatch: status `ready` and every cross-batch/cross-issue edge merged. */
+export function batchBlockers(state: SchedState, batch: BatchEntry): DependencyBlocker[] {
+  const blockers: DependencyBlocker[] = [];
+  for (const member of batch.members) {
+    const entry = state.entries.find((e) => e.issue === member);
+    if (!entry) continue; // validateState guarantees membership consistency
+    for (const dep of entry.deps) {
+      if (batch.members.includes(dep)) continue; // intra-batch edge
+      const depBatch = batchOf(state, dep);
+      if (depBatch && depBatch.id !== batch.id) {
+        if (!MERGED_BATCH_STATUSES.has(depBatch.status)) {
+          blockers.push({ issue: member, dep, reason: 'unmerged' });
+        }
+        continue;
+      }
+      const depEntry = state.entries.find((e) => e.issue === dep);
+      if (!depEntry) {
+        blockers.push({ issue: member, dep, reason: 'not-in-queue' });
+      } else if (!SATISFIED_ISSUE_STATUSES.has(depEntry.status)) {
+        blockers.push({ issue: member, dep, reason: 'unmerged', depStatus: depEntry.status });
+      }
+    }
+  }
+  return blockers;
+}
+
+/**
+ * All runnable units in stable dispatch order: issues in queue order, then
+ * batches in creation order. A batch unit unlocks ALL its members' execution,
+ * so batches are listed after issues only for stability — the caller slices to
+ * free capacity either way.
+ */
+export function runnableUnits(state: SchedState): RunnableUnit[] {
+  const units: RunnableUnit[] = [];
+  for (const entry of state.entries) {
+    if (entry.mode !== 'full') continue;
+    if (!DISPATCHABLE_ISSUE_STATUSES.has(entry.status)) continue;
+    if (dependencyBlockers(state, entry).length > 0) continue;
+    units.push({ kind: 'issue', issue: entry.issue });
+  }
+  for (const batch of state.batches) {
+    if (batch.status !== 'ready') continue;
+    if (batchBlockers(state, batch).length > 0) continue;
+    units.push({ kind: 'batch', batch: batch.id });
+  }
+  return units;
+}
