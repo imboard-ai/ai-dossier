@@ -57,6 +57,15 @@
   "checksum": {
     "algorithm": "sha256",
     "hash": "6daa44f001ae094012f5d1286bc8697cb3c4e8a75f80bd0fcc51a30dadea98b6"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "signature": "gTCm+7Yak+u82uqMB7zxS33JJeyGViYx8TABeEPkcCiaoexDktgr8mq64BLlRgHSjfDLDvRgKoifZtUaf9GGBQ==",
+    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
+    "signed_at": "2026-08-29T17:01:01.555Z",
+    "covers": "frontmatter+body",
+    "key_id": "imboard-ai",
+    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
   }
 }
 ---
