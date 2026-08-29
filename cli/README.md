@@ -770,27 +770,42 @@ respectively; `get --json` includes the comment's `author`.
 ```bash
 ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--deps 100,104] [--tier mechanical|mid|strong]
 ai-dossier sched enqueue --from-manifest batch-prep.json
+ai-dossier sched start [--interval <seconds>] [--once] [--json]
 ai-dossier sched status [--json]
 ai-dossier sched pause | resume
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
 ```
 
-The deterministic core of batch cycles (RFC-0001): a queue, worker slots, and typed
+The deterministic core of batch cycles (RFC-0001): a queue, worker slots, typed
 issue/batch/slot state machines persisted to `~/.dossier/sched/<project>/state.json`
 (`<project>` = `owner-repo` slug, falling back to the repo basename — the same convention
-`fleet-cycle` uses for its logs). **No LLM is involved anywhere in the scheduler**: every
-decision — what is runnable, which slot gets it — is a pure function of the persisted
-state. Dispatching agents is #464; this family owns the queue and the state.
+`fleet-cycle` uses for its logs), and — since #464 — the dispatch engine. **The scheduler
+itself never invokes an LLM**: every mechanical decision (what is runnable, which slot gets
+it, whether a unit completed, when a run stalled) is a pure function of state reconciled
+against ground truth.
 
 - **`enqueue`** records entries (issue, mode, batch id, dependency edges, model tier) from
   flags or a batch-prep manifest (`--from-manifest`, a JSON file of entries — flags and
   manifest can be combined). Invalid input is rejected *before* anything is persisted:
   duplicate active issues, self-dependencies, dependency cycles, `slot` mode without a
   batch, and conflicting `base_branch` on a joining batch member.
-- **`status`** renders the queue, slots, batches, runnable units, and the blocked/failed
-  sets. A blocked entry names every unsatisfied dependency ("dependency #104 not merged
-  (status: dispatched)"), so "why isn't #42 running?" is a read, not an investigation.
-  `--json` emits the same report as data.
+- **`start`** runs the dispatch engine (#464): a runnable unit is spawned as a detached
+  agent process (`claude -p --output-format json --model <tier model>` by default,
+  auto-falling back to `opencode run`; the command, prompt, and tier→model mapping are
+  all configurable in `config.json`'s `dispatch` section) with the prompt on stdin and
+  output journaled to `runs/<unit>.log`. On every ~60s tick it reconciles: an agent that
+  exited is **not** complete until `ai-dossier runstate last` / `gh` ground truth confirms
+  it (unverified exits and stalls are redispatched one tier stronger — mechanical → mid →
+  strong, cap 2 — then the unit fails and its transitive dependents are blocked);
+  externally-advanced state and orphaned pids after a restart are detected; a freed slot
+  is refilled in the same tick. `--once` runs a single tick (cron-style); Ctrl-C stops
+  the engine while spawned agents keep running. All events are journaled to
+  `events.jsonl`, and `status` shows the live phase per unit.
+- **`status`** renders the queue, slots (with pid, live phase, last-progress, recoveries),
+  batches, runnable units, and the blocked/failed sets. A blocked entry names every
+  unsatisfied dependency ("dependency #104 not merged (status: dispatched)"), so "why
+  isn't #42 running?" is a read, not an investigation. `--json` emits the same report
+  as data.
 - **`pause`/`resume`** gate *new* assignments only — live units keep running.
 - **`abandon --issue`** fails the entry (recording the reason) and releases its slot;
   **`abandon --batch`** dissolves the batch and requeues every non-terminal member as
@@ -798,11 +813,13 @@ state. Dispatching agents is #464; this family owns the queue and the state.
 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically
-from `state.json`. A corrupt state file is a loud error naming the file — never a silent
-queue reset. Concurrency is serialized by a `.sched-lock` directory mutex (stolen from
-dead holders). `max_slots` lives in the same directory's `config.json` (default 3) and
-bounds concurrently-live units; an issue with an unmerged dependency — or a batch behind
-an unmerged batch — is never runnable.
+from `state.json` (pre-#464 state files migrate on load). A corrupt state file is a loud
+error naming the file — never a silent queue reset. Concurrency is serialized by a
+`.sched-lock` directory mutex (stolen from dead holders). `config.json` holds
+`max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default
+1 800 000), `reconcile_interval_ms` (default 60 000), and the optional `dispatch`
+section; an issue with an unmerged dependency — or a batch behind an unmerged batch —
+is never runnable.
 
 Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).
 

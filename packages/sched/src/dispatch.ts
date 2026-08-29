@@ -1,0 +1,197 @@
+/**
+ * Agent dispatch machinery (#464, AC1 — "a runnable queue unit is dispatched
+ * as a spawned agent process … with `--model` per its tier; pid + phase +
+ * last-progress timestamp tracked in state.json"; RFC-0001 §C.1 "spawns agent
+ * processes via the existing `run` machinery").
+ *
+ * The command is a template (default `claude -p --output-format json --model
+ * {model}` — the same headless invocation `ai-dossier run` builds in
+ * cli/src/helpers.ts) with `{model}`/`{issue}` placeholders; the prompt
+ * travels on stdin exactly like the run machinery's headless path. Children
+ * spawn DETACHED and unref'd: an agent must survive a sched crash (RFC F.10 —
+ * restart reconciles by pid, it never owns the agent's lifetime).
+ *
+ * All process I/O is injectable (`SpawnDeps`) so tests spawn fake agents, and
+ * the package itself never invokes an LLM — it spawns a process the operator
+ * configured.
+ */
+
+import { spawn } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import {
+  DEFAULT_STALL_TIMEOUT_MS,
+  type DispatchConfig,
+  type ModelTier,
+  type SchedConfig,
+  TIER_LADDER,
+} from './types';
+
+/** Default tier → model mapping (claude aliases; override in config.json). */
+export const DEFAULT_TIER_MODELS: Readonly<Record<ModelTier, string>> = {
+  mechanical: 'haiku',
+  mid: 'sonnet',
+  strong: 'opus',
+};
+
+/** Default headless agent command template (claude, the run machinery's first choice). */
+export const DEFAULT_DISPATCH_COMMAND: readonly string[] = [
+  'claude',
+  '-p',
+  '--output-format',
+  'json',
+  '--model',
+  '{model}',
+];
+
+/** opencode equivalent (the run machinery's second agent, #459). */
+export const OPENCODE_DISPATCH_COMMAND: readonly string[] = [
+  'opencode',
+  'run',
+  '--format',
+  'json',
+  '--model',
+  '{model}',
+];
+
+/** Default prompt sent on the child's stdin. */
+export const DEFAULT_PROMPT_TEMPLATE =
+  'Run the full-cycle-issue workflow for GitHub issue #{issue} in this repository.\n\n' +
+  'Begin by fetching the workflow: ai-dossier run imboard-ai/git/full-cycle-issue --pull\n\n' +
+  'Then execute it end-to-end for issue #{issue}, following every phase ' +
+  '(gate, setup, plan, implement, review, ship, report) without asking questions, ' +
+  'until the final report milestone is posted on the issue.';
+
+/** Fully-resolved dispatch settings the engine runs with. */
+export interface ResolvedDispatch {
+  /** Command template with `{model}`/`{issue}` placeholders. */
+  command: string[];
+  /** Prompt template with `{issue}` placeholder. */
+  prompt: string;
+  /** Model per tier; null means "no model flag" (the command's `--model {model}` pair drops). */
+  tierModels: Record<ModelTier, string | null>;
+  stallTimeoutMs: number;
+  reconcileIntervalMs: number;
+}
+
+/** Resolve engine dispatch settings from the (possibly sparse) config. */
+export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
+  const dispatch: DispatchConfig = config.dispatch ?? {};
+  const tierModels: Record<ModelTier, string | null> = {
+    mechanical: dispatch.tier_models?.mechanical ?? DEFAULT_TIER_MODELS.mechanical,
+    mid: dispatch.tier_models?.mid ?? DEFAULT_TIER_MODELS.mid,
+    strong: dispatch.tier_models?.strong ?? DEFAULT_TIER_MODELS.strong,
+  };
+  return {
+    command: dispatch.command ?? [...DEFAULT_DISPATCH_COMMAND],
+    prompt: dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE,
+    tierModels,
+    stallTimeoutMs: config.stall_timeout_ms ?? DEFAULT_STALL_TIMEOUT_MS,
+    reconcileIntervalMs: config.reconcile_interval_ms ?? 60_000,
+  };
+}
+
+/**
+ * Build the concrete agent argv for one dispatch: substitute `{issue}` and
+ * `{model}`. When the tier's model is null, the `{model}` item AND its
+ * immediately-preceding flag (e.g. `--model`) drop together — a command never
+ * carries a flag whose value is missing.
+ */
+export function buildAgentCommand(
+  template: readonly string[],
+  tier: ModelTier,
+  issue: number,
+  tierModels: Record<ModelTier, string | null>
+): string[] {
+  const model = tierModels[tier] ?? null;
+  const argv: string[] = [];
+  for (let i = 0; i < template.length; i++) {
+    const item = template[i];
+    if (item === '{model}') {
+      if (model === null) {
+        // Drop the preceding flag along with the placeholder.
+        if (argv.length > 0 && argv[argv.length - 1].startsWith('--')) argv.pop();
+        continue;
+      }
+      argv.push(model);
+      continue;
+    }
+    argv.push(item.replaceAll('{issue}', String(issue)));
+  }
+  return argv;
+}
+
+/** Build the child's stdin prompt for one dispatch. */
+export function buildPrompt(template: string, issue: number): string {
+  return template.replaceAll('{issue}', String(issue));
+}
+
+/** One tier stronger on the ladder, or null at the top (RFC-0001 §C.1). */
+export function escalateTier(tier: ModelTier): ModelTier | null {
+  return TIER_LADDER[tier];
+}
+
+// --- Process I/O (injectable) ---
+
+export interface SpawnDeps {
+  /**
+   * Spawn a detached agent process and return its pid. `logFile` receives the
+   * child's combined stdout/stderr (agents outlive sched, so their output
+   * cannot stay in this process's pipes).
+   */
+  spawn(cmd: string[], prompt: string, logFile: string): number;
+  /** Signal a pid; returns false when it was already dead. */
+  kill(pid: number): boolean;
+  /** Whether a pid is alive (best-effort; a reused pid reads as alive). */
+  isAlive(pid: number): boolean;
+}
+
+/** Real process I/O: detached spawn with output to a log file, unref'd. */
+export function createSpawnDeps(cwd?: string): SpawnDeps {
+  return {
+    spawn(cmd: string[], prompt: string, logFile: string): number {
+      fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
+      const out = fs.openSync(logFile, 'a');
+      try {
+        const child = spawn(cmd[0], cmd.slice(1), {
+          ...(cwd ? { cwd } : {}),
+          detached: true,
+          stdio: ['pipe', out, out],
+        });
+        if (child.stdin !== null) {
+          child.stdin.write(prompt);
+          child.stdin.end();
+        }
+        child.unref();
+        if (child.pid === undefined) {
+          throw new Error(`failed to spawn ${cmd.join(' ')}`);
+        }
+        return child.pid;
+      } finally {
+        // The child holds its own dups of the fd; the parent's copy must close.
+        fs.closeSync(out);
+      }
+    },
+    kill(pid: number): boolean {
+      try {
+        process.kill(pid, 'SIGTERM');
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    isAlive(pid: number): boolean {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
+      }
+    },
+  };
+}
+
+/** `issue:464` → `issue-464` (filesystem-safe unit ids for log file names). */
+export function unitLogName(unit: string): string {
+  return unit.replace(/[^A-Za-z0-9._-]/g, '-');
+}

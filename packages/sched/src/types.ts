@@ -182,12 +182,16 @@ export interface SlotEntry {
   status: SlotStatus;
   /** Unit identifier currently held: `issue:<n>` or `batch:<id>`; null when idle. */
   unit: string | null;
-  /** OS pid of the spawned agent process, when known (dispatch itself is #464). */
+  /** OS pid of the spawned agent process, when known (#464 dispatch). */
   pid: number | null;
   /** Scheduler phase the unit is in, when running. */
   phase: string | null;
   /** Last progress signal (new milestone or pushed commit) — stall-timer anchor. */
   last_progress_at: string | null;
+  /** Working branch of the unit, captured from the setup milestone's `branch=` key. */
+  branch: string | null;
+  /** Last seen head sha of `branch` on origin — the "new pushed commit" stall signal. */
+  last_head: string | null;
   /** Recovery attempts for the current unit (stall ladder, cap 2 — RFC-0001 §C.1). */
   recoveries: number;
   updated_at: string;
@@ -208,16 +212,61 @@ export interface SchedState {
 /** Durable intent, persisted separately in `config.json` (state.json is rebuildable hot truth). */
 export interface SchedConfig {
   max_slots: number;
+  /** Stall timeout in ms — no new milestone AND no new pushed commit for this long → redispatch stronger (default 30 min). */
+  stall_timeout_ms?: number;
+  /** Reconciliation tick interval in ms (default 60 000). */
+  reconcile_interval_ms?: number;
+  /** Agent dispatch settings (#464); every field optional with engine defaults. */
+  dispatch?: DispatchConfig;
 }
 
-export const SCHEMA_VERSION = '1.0.0' as const;
+/**
+ * Agent dispatch configuration (#464). The command is a template: `{model}`
+ * and `{issue}` placeholders are substituted per dispatch; a `{model}` item
+ * whose tier has no model configured drops together with its flag.
+ */
+export interface DispatchConfig {
+  /** Command template, e.g. `['claude','-p','--output-format','json','--model','{model}']`. */
+  command?: string[];
+  /** Prompt template sent on the child's stdin; `{issue}` substituted. */
+  prompt?: string;
+  /** Tier → model id/alias mapping (defaults: haiku / sonnet / opus). */
+  tier_models?: Partial<Record<ModelTier, string>>;
+}
 
-export const CONFIG_SCHEMA_VERSION = '1.0.0' as const;
+/** The escalation ladder: one tier stronger, or null at the top (RFC-0001 §C.1). */
+export const TIER_LADDER: Readonly<Record<ModelTier, ModelTier | null>> = {
+  mechanical: 'mid',
+  mid: 'strong',
+  strong: null,
+};
+
+/** Cap on recovery attempts before a unit fails (RFC-0001 §C.1 "cap 2"). */
+export const ESCALATION_CAP = 2;
+
+/** Default stall timeout: 30 minutes without a milestone or pushed commit (RFC-0001 §C.1). */
+export const DEFAULT_STALL_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** Default reconciliation tick: ~60s (RFC-0001 §C.1). */
+export const DEFAULT_RECONCILE_INTERVAL_MS = 60 * 1000;
+
+export const SCHEMA_VERSION = '1.1.0' as const;
+
+/** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
+export const LEGACY_SCHEMA_VERSIONS: readonly string[] = ['1.0.0'];
+
+export const CONFIG_SCHEMA_VERSION = '1.1.0' as const;
+
+/** Config schema versions `loadConfig` accepts (older configs carry only max_slots). */
+export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = ['1.0.0'];
 
 /** Config file shape (schema_version + the config itself). */
 export interface SchedConfigFile {
-  schema_version: typeof CONFIG_SCHEMA_VERSION;
+  schema_version: string;
   max_slots: number;
+  stall_timeout_ms?: number;
+  reconcile_interval_ms?: number;
+  dispatch?: DispatchConfig;
 }
 
 export const DEFAULT_MAX_SLOTS = 3;
@@ -247,4 +296,35 @@ export class SchedNotFoundError extends Error {
     super(message);
     this.name = 'SchedNotFoundError';
   }
+}
+
+// --- Dispatch journal events (#464, RFC-0001 §D.4 "Audit") ---
+
+/** Every event the engine journals to `events.jsonl` (append-only). */
+export type JournalEventName =
+  | 'assigned'
+  | 'spawned'
+  | 'exit-detected'
+  | 'orphan-pid'
+  | 'external-advance'
+  | 'progress'
+  | 'phase-updated'
+  | 'verify-complete'
+  | 'verify-incomplete'
+  | 'stalled'
+  | 'redispatched'
+  | 'unit-failed'
+  | 'dependents-blocked';
+
+/** One journaled event. `ts` is stamped by the journal, never by callers. */
+export interface JournalEvent {
+  ts: string;
+  event: JournalEventName;
+  /** Unit the event concerns (`issue:<n>` / `batch:<id>`), when applicable. */
+  unit?: string;
+  slot?: number;
+  issue?: number;
+  pid?: number;
+  tier?: ModelTier;
+  detail?: string;
 }

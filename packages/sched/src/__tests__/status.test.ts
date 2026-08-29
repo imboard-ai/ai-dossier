@@ -32,6 +32,8 @@ function slot(id: number, status: SlotEntry['status'], unit: string | null): Slo
     pid: null,
     phase: null,
     last_progress_at: null,
+    branch: null,
+    last_head: null,
     recoveries: 0,
     updated_at: NOW.toISOString(),
   };

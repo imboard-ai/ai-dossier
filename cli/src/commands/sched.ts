@@ -1,33 +1,41 @@
 /**
  * `ai-dossier sched` — the deterministic scheduler core (RFC-0001 §C.1, issue #460).
  *
- * enqueue / status / pause / resume / abandon operate on
- * `~/.dossier/sched/<project>/{state.json,config.json}`. Dispatching agents is
- * #464; everything here is queue and state management with zero LLM calls.
+ * enqueue / status / pause / resume / abandon manage the queue and state
+ * (#460); `sched start` runs the dispatch engine (#464): spawns agent
+ * processes for runnable units, verifies completion against ground truth,
+ * and mechanizes the stall/escalation ladder.
  */
 
 import fs from 'node:fs';
-import type { StatusReport } from '@ai-dossier/sched';
+import type { SchedConfig, StatusReport, TickResult } from '@ai-dossier/sched';
 import {
   abandonBatch,
   abandonIssue,
   buildStatusReport,
   CorruptStateError,
+  createExecGroundTruth,
+  createSpawnDeps,
   defaultExec,
+  type EngineDeps,
   EnqueueError,
   type EnqueueInput,
   enqueueEntries,
   IllegalTransitionError,
+  Journal,
   LockTimeoutError,
+  OPENCODE_DISPATCH_COMMAND,
   parseManifest,
   resolveProjectSlug,
+  runLoop,
   SchedNotFoundError,
   SchedStore,
   schedStateDir,
   setPaused,
+  tick,
 } from '@ai-dossier/sched';
 import type { Command } from 'commander';
-import { fail } from '../helpers';
+import { detectLlm, fail } from '../helpers';
 import { parseIssueSelection } from '../issue-selection';
 import { renderTable } from '../table';
 
@@ -49,6 +57,11 @@ interface AbandonOptions extends SchedOptions {
   issue?: string;
   batch?: string;
   reason?: string;
+}
+
+interface StartOptions extends SchedOptions {
+  interval?: number;
+  once?: boolean;
 }
 
 function parseMode(raw: string | undefined): 'full' | 'slot' {
@@ -127,12 +140,14 @@ function renderReport(report: StatusReport): string {
     report.slots.length === 0
       ? '(no slots materialized yet)'
       : renderTable(
-          ['slot', 'status', 'unit', 'phase', 'recoveries'],
+          ['slot', 'status', 'unit', 'pid', 'phase', 'last-progress', 'recoveries'],
           report.slots.map((s) => [
             String(s.id),
             s.status,
             s.unit ?? '-',
+            s.pid !== null ? String(s.pid) : '-',
             s.phase ?? '-',
+            s.last_progress_at !== null ? relativeTime(s.last_progress_at) : '-',
             String(s.recoveries),
           ])
         )
@@ -167,6 +182,17 @@ function renderReport(report: StatusReport): string {
       : '(none)'
   );
   return lines.join('\n');
+}
+
+/** `5m ago` / `2h ago` — compact last-progress rendering for the slot table. */
+function relativeTime(iso: string, now: number = Date.now()): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '-';
+  const seconds = Math.max(0, Math.floor((now - then) / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86_400)}d ago`;
 }
 
 // --- subcommands ---
@@ -349,11 +375,112 @@ function registerAbandonSubcommand(cmd: Command): void {
     });
 }
 
+function registerStartSubcommand(cmd: Command): void {
+  cmd
+    .command('start')
+    .description(
+      'Run the dispatch engine: spawn agents for runnable units, verify completion against ground truth, escalate stalls (Ctrl-C stops the engine; agents keep running)'
+    )
+    .option(
+      '--interval <seconds>',
+      'Reconcile tick interval in seconds (default 60)',
+      Number.parseInt
+    )
+    .option('--once', 'Run a single reconcile+refill tick and exit (cron-style)')
+    .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
+    .option('--json', 'Output tick results as JSON')
+    .action(async (opts: StartOptions) => {
+      const { store, project } = resolveStore(opts);
+      let config: SchedConfig;
+      try {
+        config = store.loadConfig();
+      } catch (err) {
+        handleKnownError(err);
+      }
+
+      // CLI flag beats config.json beats the engine default (60s).
+      if (opts.interval !== undefined) {
+        if (!Number.isInteger(opts.interval) || opts.interval <= 0) {
+          fail(['--interval must be a positive number of seconds']);
+        }
+        config = { ...config, reconcile_interval_ms: opts.interval * 1000 };
+      }
+
+      // Resolve the agent command: config dispatch.command wins; otherwise
+      // auto-detect (claude first, opencode fallback — the run machinery's
+      // order, #459) and use the matching headless template.
+      const dispatchCommand =
+        config.dispatch?.command ??
+        (detectLlm('auto', true) === 'opencode' ? [...OPENCODE_DISPATCH_COMMAND] : undefined);
+      const engineConfig = dispatchCommand
+        ? { ...config, dispatch: { ...config.dispatch, command: dispatchCommand } }
+        : config;
+
+      const deps: EngineDeps = {
+        store,
+        journal: new Journal(store.dir),
+        groundTruth: createExecGroundTruth(undefined, { repoDir: process.cwd() }),
+        spawnDeps: createSpawnDeps(process.cwd()),
+        now: () => new Date(),
+      };
+
+      const describe = (result: TickResult): string => {
+        const parts: string[] = [];
+        if (result.spawned.length > 0) parts.push(`spawned ${result.spawned.join(', ')}`);
+        if (result.externalAdvances.length > 0)
+          parts.push(`externally completed ${result.externalAdvances.join(', ')}`);
+        if (result.completed.length > 0) parts.push(`completed ${result.completed.join(', ')}`);
+        if (result.redispatched.length > 0)
+          parts.push(`redispatched ${result.redispatched.join(', ')}`);
+        if (result.failed.length > 0) parts.push(`failed ${result.failed.join(', ')}`);
+        if (result.blocked.length > 0)
+          parts.push(`blocked ${result.blocked.map((i) => `#${i}`).join(', ')}`);
+        return parts.length > 0 ? parts.join(' · ') : 'nothing to do';
+      };
+
+      if (opts.once) {
+        let result: TickResult;
+        try {
+          result = tick(deps, engineConfig);
+        } catch (err) {
+          handleKnownError(err);
+        }
+        if (opts.json) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(`✓ [${project}] tick: ${describe(result)}`);
+        }
+        return;
+      }
+
+      const interval = (engineConfig.reconcile_interval_ms ?? 60_000) / 1000;
+      console.log(
+        `▶ Scheduler engine running for ${project} (tick every ${interval}s, Ctrl-C to stop)`
+      );
+      let stopping = false;
+      process.on('SIGINT', () => {
+        if (stopping) process.exit(130);
+        stopping = true;
+        console.log('\n⏹ Stopping engine (spawned agents keep running)…');
+      });
+      await runLoop(
+        deps,
+        engineConfig,
+        () => stopping,
+        (result) => {
+          if (!opts.json) console.log(`✓ [${new Date().toISOString()}] ${describe(result)}`);
+          else console.log(JSON.stringify({ ts: new Date().toISOString(), ...result }));
+        }
+      );
+      console.log('⏹ Engine stopped');
+    });
+}
+
 export function registerSchedCommand(program: Command): void {
   const schedCmd = program
     .command('sched')
     .description(
-      'Deterministic scheduler core — queue, slots, persistent state machine (RFC-0001)'
+      'Deterministic scheduler core — queue, slots, dispatch, verification, stall ladder (RFC-0001)'
     );
 
   registerEnqueueSubcommand(schedCmd);
@@ -361,4 +488,5 @@ export function registerSchedCommand(program: Command): void {
   registerPauseResumeSubcommand(schedCmd, true);
   registerPauseResumeSubcommand(schedCmd, false);
   registerAbandonSubcommand(schedCmd);
+  registerStartSubcommand(schedCmd);
 }

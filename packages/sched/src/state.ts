@@ -14,6 +14,7 @@ import {
   type BatchStatus,
   IllegalTransitionError,
   type IssueStatus,
+  LEGACY_SCHEMA_VERSIONS,
   type QueueEntry,
   SCHEMA_VERSION,
   SchedNotFoundError,
@@ -87,7 +88,11 @@ const SLOT_BASE_TRANSITIONS: Record<SlotStatus, SlotStatus[]> = {
   assigned: ['running', 'idle'],
   running: ['exited', 'recovering'],
   exited: ['verifying'],
-  verifying: ['complete'],
+  // #464: verifying → recovering is the verify-fail rail — an agent that
+  // exited WITHOUT a verified completion is redispatched stronger, exactly
+  // like a stall (RFC-0001 §D.3's diagram predates AC2's "an agent exiting
+  // is never proof of completion"; this edge is its redispatch path).
+  verifying: ['complete', 'recovering'],
   complete: ['idle'],
   recovering: ['running', 'failed'],
   failed: ['idle'],
@@ -173,16 +178,19 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
  * Strict validation of persisted state (mirrors pool-state's `validateState`):
  * wrong schema version or malformed shape throws instead of being coerced, so
  * a corrupt file is a loud failure, never a silent queue reset.
+ *
+ * Legacy schema versions (1.0.0, pre-#464) are accepted and migrated: slot
+ * `branch`/`last_head` backfill to null and the state upgrades to the current
+ * schema on the next save.
  */
 export function validateState(data: unknown): SchedState {
   if (!data || typeof data !== 'object') {
     throw new Error('Scheduler state must be an object');
   }
   const obj = data as Record<string, unknown>;
-  if (obj.schema_version !== SCHEMA_VERSION) {
-    throw new Error(
-      `Unsupported schema version: ${String(obj.schema_version)} (expected ${SCHEMA_VERSION})`
-    );
+  const version = String(obj.schema_version);
+  if (version !== SCHEMA_VERSION && !LEGACY_SCHEMA_VERSIONS.includes(version)) {
+    throw new Error(`Unsupported schema version: ${version} (expected ${SCHEMA_VERSION})`);
   }
   if (typeof obj.paused !== 'boolean') {
     throw new Error('Scheduler state must have a paused boolean');
@@ -272,6 +280,16 @@ export function validateState(data: unknown): SchedState {
     if (slot.last_progress_at !== null && !isIsoDateString(slot.last_progress_at)) {
       throw new Error(`Slot ${slot.id}: last_progress_at must be an ISO string or null`);
     }
+    if (slot.branch !== null && slot.branch !== undefined && typeof slot.branch !== 'string') {
+      throw new Error(`Slot ${slot.id}: branch must be a string or null`);
+    }
+    if (
+      slot.last_head !== null &&
+      slot.last_head !== undefined &&
+      typeof slot.last_head !== 'string'
+    ) {
+      throw new Error(`Slot ${slot.id}: last_head must be a string or null`);
+    }
     if (!Number.isInteger(slot.recoveries) || slot.recoveries < 0) {
       throw new Error(`Slot ${slot.id}: recoveries must be a non-negative integer`);
     }
@@ -289,7 +307,15 @@ export function validateState(data: unknown): SchedState {
     throw new Error('next_slot_id must be a positive integer');
   }
 
-  return data as SchedState;
+  // Migration: pre-#464 (1.0.0) slots carry no branch/last_head — backfill
+  // null so the returned state always has the current shape.
+  const slots = (obj.slots as SlotEntry[]).map((slot) => ({
+    ...slot,
+    branch: slot.branch ?? null,
+    last_head: slot.last_head ?? null,
+  }));
+
+  return { ...(data as SchedState), schema_version: SCHEMA_VERSION, slots };
 }
 
 // --- Generic transition machinery ---
@@ -378,7 +404,8 @@ export function transitionSlot(
     throw new SchedNotFoundError(`Slot not found: ${slotId}`);
   }
   const slots = [...state.slots];
-  const clearing = to === 'idle' ? { unit: null, pid: null, phase: null } : {};
+  const clearing =
+    to === 'idle' ? { unit: null, pid: null, phase: null, branch: null, last_head: null } : {};
   const resetting = to === 'idle' ? { recoveries: 0 } : {};
   slots[idx] = transition(
     'slot',
