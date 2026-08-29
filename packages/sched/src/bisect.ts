@@ -125,13 +125,20 @@ export function runAttributionBisect(exec: ExecFn, opts: BisectOptions): BisectO
     if (out === null) {
       return { kind: 'error', detail: 'git bisect run failed' };
     }
-    const match = FIRST_BAD_RE.exec(out);
-    if (match === null) {
-      // Unparseable output is an error, never a guess — git versions differ in
-      // what they print around the first-bad line, but all of them print it.
-      return { kind: 'error', detail: 'git bisect run produced no first-bad commit line' };
+    // Ask git for the answer rather than reading its prose: a completed bisect
+    // leaves `refs/bisect/bad` pointing at the first bad commit. The
+    // "<sha> is the first bad commit" line is printed on stdout by some git
+    // versions and stderr by others, so parsing it alone makes the result
+    // depend on which git the machine happens to have — it stays only as the
+    // fallback for a git that somehow leaves no ref.
+    const sha =
+      git(['rev-parse', '--verify', '--quiet', 'refs/bisect/bad'])?.trim() ??
+      FIRST_BAD_RE.exec(out)?.[1] ??
+      '';
+    if (!SHA_RE.test(sha)) {
+      // No answer is an error, never a guess.
+      return { kind: 'error', detail: 'git bisect run identified no first-bad commit' };
     }
-    const sha = match[1];
     const issue = memberOfCommit(opts.boundary, sha);
     if (issue === null) {
       return {

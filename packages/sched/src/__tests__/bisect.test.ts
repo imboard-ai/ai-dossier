@@ -92,7 +92,8 @@ describe('runAttributionBisect (real git)', () => {
       boundary,
     });
 
-    expect(outcome.kind).toBe('first-bad');
+    // The whole object, so a failure names git's own detail instead of just 'error'.
+    expect(outcome).toMatchObject({ kind: 'first-bad' });
     if (outcome.kind !== 'first-bad') return;
     expect(outcome.issue).toBe(202);
     expect(outcome.sha).toBe(boundary[1].sha);
@@ -147,7 +148,7 @@ describe('runAttributionBisect (real git)', () => {
       boundary: boundaryOf(repo, base),
     });
 
-    expect(outcome.kind).toBe('unattributable');
+    expect(outcome).toMatchObject({ kind: 'unattributable' });
     if (outcome.kind !== 'unattributable') return;
     expect(outcome.detail).toMatch(/no \(#N\) member trailer/);
   });
