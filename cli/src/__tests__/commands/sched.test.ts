@@ -133,12 +133,24 @@ describe('ai-dossier sched enqueue', () => {
 });
 
 describe('ai-dossier sched status', () => {
-  it('renders queue, slots, batches, and blocked sets after enqueue', async () => {
+  it('renders queue, slots, batches, blocked, and runnable units after enqueue', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101,102', '--project', 'test-proj']);
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    expect(text).toContain('Scheduler [test-proj]');
+    expect(text).toContain('Runnable units: issue:101, issue:102');
+    expect(text).toContain('== Queue ==');
+    expect(text).toContain('#101');
+    expect(text).toContain('== Blocked ==');
+    expect(text).toContain('(none)');
+  });
+
+  it('names deps that are not in the queue as blocked, not runnable', async () => {
     await runSched([
       'sched',
       'enqueue',
       '--issues',
-      '101,102',
+      '101',
       '--deps',
       '100',
       '--project',
@@ -146,9 +158,7 @@ describe('ai-dossier sched status', () => {
     ]);
     await runSched(['sched', 'status', '--project', 'test-proj']);
     const text = logs.join('\n');
-    expect(text).toContain('== Queue ==');
-    expect(text).toContain('#101');
-    expect(text).toContain('== Blocked ==');
+    expect(text).toContain('Runnable units: none');
     expect(text).toContain('#100 is not in the queue');
   });
 
@@ -157,8 +167,22 @@ describe('ai-dossier sched status', () => {
     logs.length = 0;
     await runSched(['sched', 'status', '--project', 'test-proj', '--json']);
     const parsed = JSON.parse(logs.join(''));
-    expect(parsed).toMatchObject({ paused: false, max_slots: 3, runnable: 1 });
+    expect(parsed).toMatchObject({
+      project: 'test-proj',
+      paused: false,
+      max_slots: 3,
+      runnable: 1,
+      runnable_units: ['issue:1'],
+    });
     expect(parsed.queue).toHaveLength(1);
+  });
+
+  it('renders a corrupt state file as a clean error, not a stack trace', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '1', '--project', 'test-proj']);
+    fs.writeFileSync(statePath(), '{ not json');
+    await expect(runSched(['sched', 'status', '--project', 'test-proj'])).rejects.toThrow(
+      'process.exit(1)'
+    );
   });
 });
 

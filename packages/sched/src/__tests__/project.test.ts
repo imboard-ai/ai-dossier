@@ -30,6 +30,14 @@ describe('resolveProjectSlug (fleet-cycle convention)', () => {
     expect(resolveProjectSlug(weird)).toBe('a-b-c-d');
   });
 
+  it('collapses path-escaping slugs ("." and "..") instead of letting them traverse', () => {
+    // `--project ..` must never resolve to ~/.dossier itself
+    expect(schedStateDir('..', '/home/tester')).toBe('/home/tester/.dossier/sched/default');
+    expect(schedStateDir('.', '/home/tester')).toBe('/home/tester/.dossier/sched/default');
+    // slashes become dashes, so this is a safe name rather than a traversal
+    expect(schedStateDir('../..', '/home/tester')).toBe('/home/tester/.dossier/sched/..-..');
+  });
+
   it('ignores gh output that is not the expected JSON shape', () => {
     const exec: ExecFn = (file) => (file === 'gh' ? 'not json' : null);
     expect(resolveProjectSlug(exec)).toBe('default');

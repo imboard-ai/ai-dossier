@@ -28,7 +28,7 @@ function satisfy(state: ReturnType<typeof createEmptyState>, issue: number) {
 describe('computeAssignments — max_slots bound (AC5)', () => {
   it('never assigns more units than max_slots', () => {
     const state = enqueueEntries(
-      createEmptyState(NOW),
+      createEmptyState(),
       [1, 2, 3, 4, 5].map((issue) => ({ issue })),
       NOW
     );
@@ -41,7 +41,7 @@ describe('computeAssignments — max_slots bound (AC5)', () => {
   });
 
   it('reuses idle slots before materializing new ones', () => {
-    const state = enqueueEntries(createEmptyState(NOW), [{ issue: 1 }, { issue: 2 }], NOW);
+    const state = enqueueEntries(createEmptyState(), [{ issue: 1 }, { issue: 2 }], NOW);
     const r1 = computeAssignments(state, { max_slots: 3 }, NOW2);
     expect(r1.assignments).toHaveLength(2);
     // complete one unit's slot cycle → idle
@@ -58,7 +58,7 @@ describe('computeAssignments — max_slots bound (AC5)', () => {
   });
 
   it('counts live slots (assigned | running | recovering) against the bound', () => {
-    const state = enqueueEntries(createEmptyState(NOW), [{ issue: 1 }, { issue: 2 }], NOW);
+    const state = enqueueEntries(createEmptyState(), [{ issue: 1 }, { issue: 2 }], NOW);
     const r1 = computeAssignments(state, { max_slots: 2 }, NOW2);
     let s = transitionSlot(r1.state, r1.assignments[0].slot, 'running', { pid: 9 }, NOW2);
     // one running, one assigned → zero free capacity
@@ -75,7 +75,7 @@ describe('computeAssignments — max_slots bound (AC5)', () => {
 describe('computeAssignments — dependency gating (AC5)', () => {
   it('an issue with an unmerged dependency is never runnable', () => {
     const state = enqueueEntries(
-      createEmptyState(NOW),
+      createEmptyState(),
       [{ issue: 100 }, { issue: 101, deps: [100] }],
       NOW
     );
@@ -95,13 +95,13 @@ describe('computeAssignments — dependency gating (AC5)', () => {
   });
 
   it('a dep missing from the queue blocks forever and is nameable', () => {
-    const state = enqueueEntries(createEmptyState(NOW), [{ issue: 1, deps: [999] }], NOW);
+    const state = enqueueEntries(createEmptyState(), [{ issue: 1, deps: [999] }], NOW);
     expect(runnableUnits(state)).toHaveLength(0);
   });
 
   it('intra-batch deps do not block the batch; cross-batch deps gate on merge', () => {
     let state = enqueueEntries(
-      createEmptyState(NOW),
+      createEmptyState(),
       [
         { issue: 1, mode: 'slot', batch: 'b1' },
         { issue: 2, mode: 'slot', batch: 'b1', deps: [1] }, // intra-batch: fine
@@ -128,7 +128,7 @@ describe('computeAssignments — dependency gating (AC5)', () => {
 
   it('a batch unit is assigned as one slot and unlocks member work', () => {
     let state = enqueueEntries(
-      createEmptyState(NOW),
+      createEmptyState(),
       [
         { issue: 1, mode: 'slot', batch: 'b1' },
         { issue: 2, mode: 'slot', batch: 'b1' },
@@ -144,7 +144,7 @@ describe('computeAssignments — dependency gating (AC5)', () => {
 
 describe('pause / resume', () => {
   it('a paused scheduler makes no assignments; resume restores them', () => {
-    let state = enqueueEntries(createEmptyState(NOW), [{ issue: 1 }], NOW);
+    let state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
     state = setPaused(state, true);
     expect(computeAssignments(state, { max_slots: 3 }, NOW2).assignments).toHaveLength(0);
     state = setPaused(state, false);
@@ -154,7 +154,7 @@ describe('pause / resume', () => {
 
 describe('abandon', () => {
   it('abandonIssue fails the entry and releases its slot', () => {
-    const state = enqueueEntries(createEmptyState(NOW), [{ issue: 1 }], NOW);
+    const state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
     const r = computeAssignments(state, { max_slots: 1 }, NOW2);
     const s = transitionSlot(r.state, 1, 'running', { pid: 77 }, NOW2);
     const out = abandonIssue(s, 1, 'operator abort', NOW2);
@@ -166,7 +166,7 @@ describe('abandon', () => {
   });
 
   it('abandonIssue refuses terminal entries and unknown issues', () => {
-    let state = enqueueEntries(createEmptyState(NOW), [{ issue: 1 }], NOW);
+    let state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
     state = satisfy(state, 1);
     state = transitionIssue(state, 1, 'done', {}, NOW);
     expect(() => abandonIssue(state, 1)).toThrow(/already done/);
@@ -175,7 +175,7 @@ describe('abandon', () => {
 
   it('abandonBatch dissolves the batch and requeues members as full-cycle', () => {
     let state = enqueueEntries(
-      createEmptyState(NOW),
+      createEmptyState(),
       [
         { issue: 1, mode: 'slot', batch: 'b1' },
         { issue: 2, mode: 'slot', batch: 'b1' },
@@ -202,7 +202,7 @@ describe('abandon', () => {
 
   it('abandonBatch leaves shipped members untouched', () => {
     let state = enqueueEntries(
-      createEmptyState(NOW),
+      createEmptyState(),
       [
         { issue: 1, mode: 'slot', batch: 'b1' },
         { issue: 2, mode: 'slot', batch: 'b1' },
@@ -224,7 +224,7 @@ describe('abandon', () => {
 
   it('abandonBatch refuses terminal batches', () => {
     const state = enqueueEntries(
-      createEmptyState(NOW),
+      createEmptyState(),
       [{ issue: 1, mode: 'slot', batch: 'b1' }],
       NOW
     );

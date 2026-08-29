@@ -5,10 +5,12 @@
  * SAME directory (rename is atomic only within a filesystem), get fsynced, and
  * are renamed over `state.json`. A process killed between writes therefore
  * leaves either the previous complete state or the new one — never a partial
- * file (AC2). A stray `.tmp` is ignored and swept on the next load.
+ * file (AC2). A stray `.tmp` is ignored by `load()` and overwritten by the
+ * next write.
  *
  * Cross-process mutations are serialized by a directory mutex (`.sched-lock`),
- * the same acquire/release protocol as `packages/worktree-pool`.
+ * the same acquire/release protocol as `packages/worktree-pool/src/pool-actions.ts`
+ * (acquireLock/releaseLock there) — the two copies must be kept in lockstep.
  */
 
 import * as fs from 'node:fs';
@@ -17,6 +19,8 @@ import { createEmptyState, validateState } from './state';
 import {
   CONFIG_SCHEMA_VERSION,
   DEFAULT_MAX_SLOTS,
+  MAX_MAX_SLOTS,
+  MIN_MAX_SLOTS,
   type SchedConfig,
   type SchedConfigFile,
   type SchedState,
@@ -28,6 +32,21 @@ const LOCK_RETRY_MS = 200;
 const STATE_FILE = 'state.json';
 const CONFIG_FILE = 'config.json';
 const LOCK_DIR = '.sched-lock';
+
+/** Thrown when the cross-process lock cannot be acquired in time. */
+export class LockTimeoutError extends Error {
+  readonly lockPath: string;
+
+  constructor(lockPath: string, heldByPid: number | null) {
+    const holder = heldByPid !== null ? `; held by pid ${heldByPid}` : ' (no pid file found)';
+    super(
+      `Timed out waiting for scheduler lock (${LOCK_TIMEOUT_MS}ms)${holder}. ` +
+        `If that process is not running, remove ${lockPath}`
+    );
+    this.name = 'LockTimeoutError';
+    this.lockPath = lockPath;
+  }
+}
 
 export class CorruptStateError extends Error {
   readonly filePath: string;
@@ -46,7 +65,7 @@ export class CorruptStateError extends Error {
 /** Write `contents` to `filePath` atomically (tmp + fsync + rename, same directory). */
 export function writeAtomic(filePath: string, contents: string): void {
   const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmp = `${filePath}.tmp`;
   const fd = fs.openSync(tmp, 'w', 0o600);
   try {
@@ -74,23 +93,41 @@ export function writeAtomic(filePath: string, contents: string): void {
 
 function acquireLock(dir: string): void {
   const lockPath = path.join(dir, LOCK_DIR);
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
 
   const start = Date.now();
+  let heldByPid: number | null = null;
   while (true) {
     try {
       fs.mkdirSync(lockPath);
-      fs.writeFileSync(path.join(lockPath, 'pid'), String(process.pid));
+      fs.writeFileSync(path.join(lockPath, 'pid'), String(process.pid), { mode: 0o600 });
       return;
     } catch {
+      heldByPid = null;
       try {
         const pidFile = path.join(lockPath, 'pid');
         if (fs.existsSync(pidFile)) {
           const lockPid = Number.parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+          heldByPid = Number.isNaN(lockPid) ? null : lockPid;
           try {
             process.kill(lockPid, 0);
           } catch {
-            fs.rmSync(lockPath, { recursive: true, force: true });
+            // Recorded holder is dead. Take the stale lock over by RENAMING it
+            // first: with two contenders both seeing the dead pid, only one
+            // rename succeeds — the loser's rmSync cannot delete the winner's
+            // freshly-acquired lock (the plain rmSync-race the pool protocol
+            // inherits from its original mkdir-mutex).
+            const stale = `${lockPath}.stale-${process.pid}-${Date.now()}`;
+            try {
+              fs.renameSync(lockPath, stale);
+            } catch {
+              // another contender already took it over — fall through to retry
+            }
+            try {
+              fs.rmSync(stale, { recursive: true, force: true });
+            } catch {
+              // best effort cleanup
+            }
             continue;
           }
         }
@@ -99,10 +136,7 @@ function acquireLock(dir: string): void {
       }
 
       if (Date.now() - start > LOCK_TIMEOUT_MS) {
-        throw new Error(
-          `Timed out waiting for scheduler lock (${LOCK_TIMEOUT_MS}ms). ` +
-            `If no other process is running, remove ${lockPath}`
-        );
+        throw new LockTimeoutError(lockPath, heldByPid);
       }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_MS);
     }
@@ -183,11 +217,23 @@ export class SchedStore {
       if (parsed.schema_version !== CONFIG_SCHEMA_VERSION) {
         throw new Error(`unsupported schema version ${String(parsed.schema_version)}`);
       }
-      if (!Number.isInteger(parsed.max_slots) || parsed.max_slots < 1 || parsed.max_slots > 64) {
-        throw new Error('max_slots must be an integer between 1 and 64');
+      if (
+        !Number.isInteger(parsed.max_slots) ||
+        parsed.max_slots < MIN_MAX_SLOTS ||
+        parsed.max_slots > MAX_MAX_SLOTS
+      ) {
+        throw new Error(
+          `max_slots must be an integer between ${MIN_MAX_SLOTS} and ${MAX_MAX_SLOTS}`
+        );
       }
       return { max_slots: parsed.max_slots };
-    } catch {
+    } catch (err) {
+      // Deliberate degrade-to-default (unlike state.json, config is re-derivable
+      // operator intent and hard-failing every command on a typo would brick
+      // even `sched status`) — but never silently.
+      console.error(
+        `⚠ Scheduler config ${this.configPath} is unreadable (${(err as Error).message}) — using default max_slots=${DEFAULT_MAX_SLOTS}`
+      );
       return { max_slots: DEFAULT_MAX_SLOTS };
     }
   }

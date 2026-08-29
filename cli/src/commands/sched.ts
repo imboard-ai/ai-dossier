@@ -6,24 +6,30 @@
  * #464; everything here is queue and state management with zero LLM calls.
  */
 
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import type { StatusReport } from '@ai-dossier/sched';
 import {
   abandonBatch,
   abandonIssue,
   buildStatusReport,
+  CorruptStateError,
+  defaultExec,
   EnqueueError,
   type EnqueueInput,
   enqueueEntries,
   IllegalTransitionError,
+  LockTimeoutError,
   parseManifest,
-  renderStatus,
   resolveProjectSlug,
+  SchedNotFoundError,
   SchedStore,
   schedStateDir,
   setPaused,
 } from '@ai-dossier/sched';
 import type { Command } from 'commander';
+import { fail } from '../helpers';
+import { parseIssueSelection } from '../issue-selection';
+import { renderTable } from '../table';
 
 interface SchedOptions {
   project?: string;
@@ -45,34 +51,6 @@ interface AbandonOptions extends SchedOptions {
   reason?: string;
 }
 
-/**
- * Fail on stderr and exit 1, so a calling dossier can detect it (same shape
- * as `commands/runstate.ts`).
- */
-function fail(lines: string[]): never {
-  for (const line of lines) {
-    console.error(`❌ ${line}`);
-  }
-  process.exit(1);
-}
-
-function parseIssueList(raw: string, flag: string): number[] {
-  const values: number[] = [];
-  for (const part of raw.split(',')) {
-    const trimmed = part.trim();
-    if (trimmed.length === 0) continue;
-    const n = Number.parseInt(trimmed, 10);
-    if (!Number.isInteger(n) || n <= 0 || String(n) !== trimmed) {
-      fail([`--${flag} must be a comma-separated list of positive issue numbers, got '${raw}'`]);
-    }
-    values.push(n);
-  }
-  if (values.length === 0) {
-    fail([`--${flag} must contain at least one issue number`]);
-  }
-  return values;
-}
-
 function parseMode(raw: string | undefined): 'full' | 'slot' {
   if (raw === undefined || raw === 'full') return 'full';
   if (raw === 'slot') return 'slot';
@@ -85,31 +63,119 @@ function parseTier(raw: string | undefined): 'mechanical' | 'mid' | 'strong' {
   fail([`--tier must be mechanical | mid | strong, got '${raw}'`]);
 }
 
-/** Resolve the state store: explicit `--project`, else the repo's slug. */
+/** Parse an issue selection (`4,5` or `4..9`), failing through the CLI's exit path. */
+function issueList(raw: string, flag: string): number[] {
+  try {
+    return parseIssueSelection(raw);
+  } catch (err) {
+    fail([`--${flag}: ${(err as Error).message}`]);
+  }
+}
+
+/**
+ * Resolve the state store: explicit `--project`, else the repo's slug
+ * (gh owner-repo, git toplevel basename fallback — fleet-cycle's convention).
+ */
 function resolveStore(opts: SchedOptions): { store: SchedStore; project: string } {
-  const project =
-    opts.project ??
-    resolveProjectSlug((file, args, cwd) => {
-      try {
-        return String(
-          execFileSync(file, args, {
-            encoding: 'utf-8',
-            stdio: ['ignore', 'pipe', 'pipe'],
-            ...(cwd ? { cwd } : {}),
-          })
-        ).trim();
-      } catch {
-        return null;
-      }
-    });
+  const project = opts.project ?? resolveProjectSlug(defaultExec);
   return { store: new SchedStore(schedStateDir(project)), project };
 }
+
+/** Route package errors through the CLI's exit path instead of a stack trace. */
+function handleKnownError(err: unknown): never {
+  if (
+    err instanceof CorruptStateError ||
+    err instanceof LockTimeoutError ||
+    err instanceof EnqueueError ||
+    err instanceof IllegalTransitionError ||
+    err instanceof SchedNotFoundError
+  ) {
+    fail([err.message]);
+  }
+  throw err;
+}
+
+// --- status rendering (the CLI's shared table renderer, like every other
+// table-printing command; the package deliberately has no CLI dependencies) ---
+
+function renderReport(report: StatusReport): string {
+  const lines: string[] = [];
+  const state = report.paused ? 'PAUSED' : 'running';
+  const runnable = report.runnable_units.length > 0 ? report.runnable_units.join(', ') : 'none';
+  lines.push(
+    `Scheduler [${report.project}]: ${state} · slots ${report.live_slots}/${report.max_slots} live`
+  );
+  lines.push(`Runnable units: ${runnable}`);
+  lines.push('');
+  lines.push('== Queue ==');
+  lines.push(
+    renderTable(
+      ['issue', 'mode', 'batch', 'tier', 'deps', 'status'],
+      report.queue.map((e) => [
+        `#${e.issue}`,
+        e.mode,
+        e.batch ?? '-',
+        e.tier,
+        e.deps.length > 0 ? e.deps.map((d) => `#${d}`).join(',') : '-',
+        e.status,
+      ])
+    )
+  );
+  lines.push('');
+  lines.push('== Slots ==');
+  lines.push(
+    report.slots.length === 0
+      ? '(no slots materialized yet)'
+      : renderTable(
+          ['slot', 'status', 'unit', 'phase', 'recoveries'],
+          report.slots.map((s) => [
+            String(s.id),
+            s.status,
+            s.unit ?? '-',
+            s.phase ?? '-',
+            String(s.recoveries),
+          ])
+        )
+  );
+  lines.push('');
+  lines.push('== Batches ==');
+  lines.push(
+    report.batches.length === 0
+      ? '(no batches)'
+      : renderTable(
+          ['batch', 'status', 'members', 'member-in-work'],
+          report.batches.map((b) => [
+            b.id,
+            b.status,
+            b.members.length > 0 ? b.members.map((m) => `#${m}`).join(',') : '-',
+            b.executing_member > 0 ? `${b.executing_member}/${b.members.length}` : '-',
+          ])
+        )
+  );
+  lines.push('');
+  lines.push('== Blocked ==');
+  lines.push(
+    report.blocked.length > 0
+      ? report.blocked.map((b) => `#${b.issue} [${b.status}] — ${b.reason}`).join('\n')
+      : '(none)'
+  );
+  lines.push('');
+  lines.push('== Failed ==');
+  lines.push(
+    report.failed.length > 0
+      ? report.failed.map((f) => `#${f.issue} — ${f.reason ?? f.status}`).join('\n')
+      : '(none)'
+  );
+  return lines.join('\n');
+}
+
+// --- subcommands ---
 
 function registerEnqueueSubcommand(cmd: Command): void {
   cmd
     .command('enqueue')
     .description('Add issues to the scheduler queue (flags, a --from-manifest JSON file, or both)')
-    .option('--issues <numbers>', 'Comma-separated issue numbers (unless --from-manifest)')
+    .option('--issues <numbers>', 'Comma-separated issue numbers or ranges, e.g. 101,105..109')
     .option('--mode <mode>', "Execution mode: 'full' (default) or 'slot'", 'full')
     .option('--batch <id>', 'Batch id (required for slot mode)')
     .option('--deps <numbers>', 'Comma-separated dependency issue numbers (applied to all)')
@@ -121,6 +187,7 @@ function registerEnqueueSubcommand(cmd: Command): void {
       const { store, project } = resolveStore(opts);
 
       const inputs: EnqueueInput[] = [];
+      let manifestProject: string | null = null;
       if (opts.fromManifest) {
         let raw: string;
         try {
@@ -134,6 +201,13 @@ function registerEnqueueSubcommand(cmd: Command): void {
         } catch (err) {
           fail([`Manifest is not valid JSON: ${(err as Error).message}`]);
         }
+        if (
+          parsed &&
+          typeof parsed === 'object' &&
+          typeof (parsed as { project?: unknown }).project === 'string'
+        ) {
+          manifestProject = (parsed as { project: string }).project;
+        }
         try {
           inputs.push(...parseManifest(parsed));
         } catch (err) {
@@ -141,11 +215,17 @@ function registerEnqueueSubcommand(cmd: Command): void {
         }
       }
 
+      if (manifestProject !== null && manifestProject !== project) {
+        console.error(
+          `⚠ Manifest was prepared for project '${manifestProject}' but enqueueing into '${project}'`
+        );
+      }
+
       if (opts.issues) {
         const mode = parseMode(opts.mode);
         const tier = parseTier(opts.tier);
-        const deps = opts.deps ? parseIssueList(opts.deps, 'deps') : [];
-        for (const issue of parseIssueList(opts.issues, 'issues')) {
+        const deps = opts.deps ? issueList(opts.deps, 'deps') : [];
+        for (const issue of issueList(opts.issues, 'issues')) {
           inputs.push({ issue, mode, batch: opts.batch ?? null, deps, tier });
         }
       }
@@ -161,10 +241,7 @@ function registerEnqueueSubcommand(cmd: Command): void {
           return { state: next, result: next.entries.length };
         });
       } catch (err) {
-        if (err instanceof EnqueueError || err instanceof IllegalTransitionError) {
-          fail([err.message]);
-        }
-        throw err;
+        handleKnownError(err);
       }
 
       if (opts.json) {
@@ -184,14 +261,16 @@ function registerStatusSubcommand(cmd: Command): void {
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output the report as JSON')
     .action((opts: SchedOptions) => {
-      const { store } = resolveStore(opts);
-      const state = store.load();
-      const config = store.loadConfig();
-      const report = buildStatusReport(state, config);
-      if (opts.json) {
-        console.log(JSON.stringify(report, null, 2));
-      } else {
-        console.log(renderStatus(report));
+      const { store, project } = resolveStore(opts);
+      try {
+        const report = buildStatusReport(store.load(), store.loadConfig(), project);
+        if (opts.json) {
+          console.log(JSON.stringify(report, null, 2));
+        } else {
+          console.log(renderReport(report));
+        }
+      } catch (err) {
+        handleKnownError(err);
       }
     });
 }
@@ -208,14 +287,18 @@ function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
     .option('--json', 'Output the result as JSON')
     .action((opts: SchedOptions) => {
       const { store, project } = resolveStore(opts);
-      const paused = store.withLock((state) => ({
-        state: setPaused(state, pause),
-        result: pause,
-      }));
-      if (opts.json) {
-        console.log(JSON.stringify({ project, paused }));
-      } else {
-        console.log(paused ? '⏸ Scheduler paused' : '▶ Scheduler resumed');
+      try {
+        const paused = store.withLock((state) => ({
+          state: setPaused(state, pause),
+          result: pause,
+        }));
+        if (opts.json) {
+          console.log(JSON.stringify({ project, paused }));
+        } else {
+          console.log(paused ? '⏸ Scheduler paused' : '▶ Scheduler resumed');
+        }
+      } catch (err) {
+        handleKnownError(err);
       }
     });
 }
@@ -237,7 +320,7 @@ function registerAbandonSubcommand(cmd: Command): void {
       const reason = opts.reason ?? 'abandoned';
       try {
         if (opts.issue) {
-          const issue = parseIssueList(opts.issue, 'issue')[0];
+          const issue = issueList(opts.issue, 'issue')[0];
           const result = store.withLock((state) => {
             const r = abandonIssue(state, issue, reason);
             return { state: r.state, result: r.releasedSlots };
@@ -261,13 +344,7 @@ function registerAbandonSubcommand(cmd: Command): void {
           }
         }
       } catch (err) {
-        if (
-          err instanceof IllegalTransitionError ||
-          (err instanceof Error && err.message.includes('not found'))
-        ) {
-          fail([err.message]);
-        }
-        throw err;
+        handleKnownError(err);
       }
     });
 }

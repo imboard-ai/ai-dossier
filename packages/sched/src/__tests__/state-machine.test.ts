@@ -19,7 +19,7 @@ const NOW2 = new Date('2026-08-29T12:05:00Z');
 
 /** Build a state with one full issue and one batch of two slot issues. */
 function seeded(): SchedState {
-  let state = createEmptyState(NOW);
+  let state = createEmptyState();
   state = enqueueEntries(
     state,
     [

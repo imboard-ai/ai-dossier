@@ -5,6 +5,7 @@
  * it depends on is unmerged).
  */
 
+import { findBatch } from './state';
 import type { BatchEntry, IssueStatus, QueueEntry, SchedState } from './types';
 import { MERGED_BATCH_STATUSES, SATISFIED_ISSUE_STATUSES } from './types';
 
@@ -23,7 +24,7 @@ export interface DependencyBlocker {
 }
 
 /** Issue statuses from which a full-cycle dispatch may start. */
-const DISPATCHABLE_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set([
+export const DISPATCHABLE_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set([
   // `queued` is dispatchable because the manifest already carries the mode —
   // the classifier (#465) only refines it later.
   'queued',
@@ -42,7 +43,7 @@ function batchOf(state: SchedState, issue: number): BatchEntry | undefined {
  */
 export function dependencyBlockers(state: SchedState, entry: QueueEntry): DependencyBlocker[] {
   const blockers: DependencyBlocker[] = [];
-  const ownBatch = entry.batch !== null ? findBatchById(state, entry.batch) : undefined;
+  const ownBatch = entry.batch !== null ? findBatch(state, entry.batch) : undefined;
   for (const dep of entry.deps) {
     if (ownBatch?.members.includes(dep)) continue;
     const depEntry = state.entries.find((e) => e.issue === dep);
@@ -55,10 +56,6 @@ export function dependencyBlockers(state: SchedState, entry: QueueEntry): Depend
     }
   }
   return blockers;
-}
-
-function findBatchById(state: SchedState, id: string): BatchEntry | undefined {
-  return state.batches.find((b) => b.id === id);
 }
 
 /** Whether `batch` may dispatch: status `ready` and every cross-batch/cross-issue edge merged. */

@@ -16,6 +16,7 @@ import {
   type IssueStatus,
   type QueueEntry,
   SCHEMA_VERSION,
+  SchedNotFoundError,
   type SchedState,
   type SlotEntry,
   type SlotStatus,
@@ -114,7 +115,8 @@ function allowedSlotTransitions(from: SlotStatus): SlotStatus[] {
 
 // --- Construction and validation ---
 
-export function createEmptyState(_now: Date = new Date()): SchedState {
+/** An empty state carries no timestamps — nothing exists yet to stamp. */
+export function createEmptyState(): SchedState {
   return {
     schema_version: SCHEMA_VERSION,
     paused: false,
@@ -323,7 +325,7 @@ export function transitionIssue(
 ): SchedState {
   const idx = state.entries.findIndex((e) => e.issue === issue);
   if (idx === -1) {
-    throw new Error(`Queue entry not found: ${issue}`);
+    throw new SchedNotFoundError(`Queue entry not found: ${issue}`);
   }
   const entries = [...state.entries];
   entries[idx] = transition(
@@ -348,7 +350,7 @@ export function transitionBatch(
 ): SchedState {
   const idx = state.batches.findIndex((b) => b.id === batchId);
   if (idx === -1) {
-    throw new Error(`Batch not found: ${batchId}`);
+    throw new SchedNotFoundError(`Batch not found: ${batchId}`);
   }
   const batches = [...state.batches];
   batches[idx] = transition(
@@ -373,7 +375,7 @@ export function transitionSlot(
 ): SchedState {
   const idx = state.slots.findIndex((s) => s.id === slotId);
   if (idx === -1) {
-    throw new Error(`Slot not found: ${slotId}`);
+    throw new SchedNotFoundError(`Slot not found: ${slotId}`);
   }
   const slots = [...state.slots];
   const clearing = to === 'idle' ? { unit: null, pid: null, phase: null } : {};
@@ -399,9 +401,11 @@ export function findBatch(state: SchedState, batchId: string): BatchEntry | unde
   return state.batches.find((b) => b.id === batchId);
 }
 
-export { allowedIssueTransitions as issueTransitionTargets };
-
-/** All transition tables, exported for tests and status rendering. */
+/**
+ * All transition tables, exposed as public API — future consumers (#464's
+ * dispatcher, status previews) render next-state choices from here instead of
+ * re-deriving the RFC tables.
+ */
 export const TRANSITIONS = {
   issue: (from: IssueStatus) => allowedIssueTransitions(from),
   batch: (from: BatchStatus) => BATCH_TRANSITIONS[from],

@@ -11,6 +11,7 @@
  * are `gh`/`git`, never an LLM (AC7).
  */
 
+import { execFileSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -23,8 +24,6 @@ export type ExecFn = (file: string, args: string[], cwd?: string) => string | nu
 
 /** Default exec via `execFileSync`, swallowing failures. */
 export const defaultExec: ExecFn = (file, args, cwd) => {
-  // Lazy import so pure-logic consumers of this module never load child_process.
-  const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
   try {
     return String(
       execFileSync(file, args, {
@@ -42,7 +41,12 @@ export const defaultExec: ExecFn = (file, args, cwd) => {
 const SLUG_SAFE = /[^A-Za-z0-9._-]/g;
 
 function sanitizeSlug(slug: string): string {
-  return slug.replace(SLUG_SAFE, '-');
+  const out = slug.replace(SLUG_SAFE, '-');
+  // `.` and `..` survive the character allowlist but are path components that
+  // would escape `~/.dossier/sched/` (e.g. `--project ..` → `~/.dossier`
+  // itself, overwriting the global CLI config via saveConfig) — collapse them.
+  if (out === '.' || out === '..') return 'default';
+  return out;
 }
 
 /**

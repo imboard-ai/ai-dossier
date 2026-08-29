@@ -5,12 +5,9 @@ export {
   enqueueEntries,
   parseManifest,
 } from './enqueue';
-export {
-  CorruptStateError,
-  SchedStore,
-  writeAtomic,
-} from './persist';
+export { CorruptStateError, LockTimeoutError, SchedStore, writeAtomic } from './persist';
 export { defaultExec, type ExecFn, resolveProjectSlug, schedStateDir } from './project';
+export { DISPATCHABLE_ISSUE_STATUSES } from './readiness';
 export {
   type Assignment,
   abandonBatch,
@@ -33,7 +30,7 @@ export {
   transitionSlot,
   validateState,
 } from './state';
-export { type BlockedItem, buildStatusReport, renderStatus, type StatusReport } from './status';
+export { type BlockedItem, buildStatusReport, type StatusReport } from './status';
 export {
   type BatchEntry,
   type BatchStatus,
@@ -43,13 +40,16 @@ export {
   IllegalTransitionError,
   type IssueStatus,
   LIVE_SLOT_STATUSES,
+  MAX_MAX_SLOTS,
   MERGED_BATCH_STATUSES,
+  MIN_MAX_SLOTS,
   type ModelTier,
   type QueueEntry,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
   type SchedConfig,
   type SchedConfigFile,
+  SchedNotFoundError,
   type SchedState,
   type SlotEntry,
   type SlotStatus,

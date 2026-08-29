@@ -19,7 +19,13 @@ import {
 } from './readiness';
 import { findBatch, transitionBatch, transitionIssue, transitionSlot } from './state';
 import type { SchedConfig, SchedState } from './types';
-import { LIVE_SLOT_STATUSES } from './types';
+import {
+  LIVE_SLOT_STATUSES,
+  SATISFIED_ISSUE_STATUSES,
+  SchedNotFoundError,
+  TERMINAL_BATCH_STATUSES,
+  TERMINAL_ISSUE_STATUSES,
+} from './types';
 
 export { runnableUnits, dependencyBlockers, batchBlockers };
 export type { DependencyBlocker, RunnableUnit };
@@ -127,10 +133,10 @@ export function abandonIssue(
 ): { state: SchedState; releasedSlots: number[] } {
   const entry = state.entries.find((e) => e.issue === issue);
   if (!entry) {
-    throw new Error(`Queue entry not found: ${issue}`);
+    throw new SchedNotFoundError(`Queue entry not found: ${issue}`);
   }
-  if (entry.status === 'done' || entry.status === 'failed') {
-    throw new Error(`Issue ${issue} is already ${entry.status} — nothing to abandon`);
+  if (TERMINAL_ISSUE_STATUSES.has(entry.status)) {
+    throw new SchedNotFoundError(`Issue ${issue} is already ${entry.status} — nothing to abandon`);
   }
   let next = transitionIssue(state, issue, 'failed', { reason }, now);
   const unit = `issue:${issue}`;
@@ -160,10 +166,12 @@ export function abandonBatch(
 ): { state: SchedState; requeued: number[] } {
   const batch = findBatch(state, batchId);
   if (!batch) {
-    throw new Error(`Batch not found: ${batchId}`);
+    throw new SchedNotFoundError(`Batch not found: ${batchId}`);
   }
-  if (batch.status === 'done' || batch.status === 'dissolved') {
-    throw new Error(`Batch ${batchId} is already ${batch.status} — nothing to abandon`);
+  if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId} is already ${batch.status} — nothing to abandon`
+    );
   }
   let next = transitionBatch(state, batchId, 'dissolving', {}, now);
   next = transitionBatch(next, batchId, 'dissolved', {}, now);
@@ -172,12 +180,9 @@ export function abandonBatch(
   for (const issue of batch.members) {
     const entry = next.entries.find((e) => e.issue === issue);
     if (!entry) continue;
-    if (
-      entry.status === 'done' ||
-      entry.status === 'failed' ||
-      entry.status === 'shipped' ||
-      entry.status === 'shipped-in-batch'
-    ) {
+    // Nothing green is discarded (F.8): terminal or already-shipped members
+    // keep their outcome; only active members requeue.
+    if (TERMINAL_ISSUE_STATUSES.has(entry.status) || SATISFIED_ISSUE_STATUSES.has(entry.status)) {
       continue;
     }
     if (entry.status === 'queued' || entry.status === 'classified') {

@@ -152,6 +152,22 @@ export function enqueueEntries(
     if (seen.has(input.issue)) {
       throw new EnqueueError(`Duplicate issue in enqueue input: ${input.issue}`);
     }
+    // The persistence boundary: enqueue must only ever produce state that
+    // validateState (and therefore the next load) accepts.
+    if (input.batch !== undefined && input.batch !== null && input.batch.length === 0) {
+      throw new EnqueueError(`Issue ${input.issue}: batch must be a non-empty string`);
+    }
+    if (input.mode !== undefined && input.mode !== 'full' && input.mode !== 'slot') {
+      throw new EnqueueError(`Issue ${input.issue}: mode must be 'full' or 'slot'`);
+    }
+    if (
+      input.tier !== undefined &&
+      input.tier !== 'mechanical' &&
+      input.tier !== 'mid' &&
+      input.tier !== 'strong'
+    ) {
+      throw new EnqueueError(`Issue ${input.issue}: tier must be mechanical | mid | strong`);
+    }
     seen.add(input.issue);
   }
 
@@ -190,8 +206,10 @@ export function enqueueEntries(
   });
 
   // Create batches for unseen slot batch ids; reject joining a batch that has
-  // already left `forming` (composition is frozen when the batch seals).
-  const batches = state.batches.map((b) => ({ ...b, updated_at: timestamp }));
+  // already left `forming` (composition is frozen when the batch seals). Only
+  // batches actually joined get `updated_at` bumped — a blanket rewrite would
+  // churn the audit signal on every enqueue.
+  const batches = state.batches.map((b) => ({ ...b }));
   for (const input of inputs) {
     const batchId = input.batch;
     if (batchId === null || batchId === undefined) continue;
@@ -200,6 +218,11 @@ export function enqueueEntries(
       if (existing.status !== 'forming') {
         throw new EnqueueError(
           `Batch ${batchId} is ${existing.status} — members can only join while forming`
+        );
+      }
+      if (input.base_branch !== undefined && input.base_branch !== existing.base_branch) {
+        throw new EnqueueError(
+          `Batch ${batchId} was enqueued with base '${existing.base_branch}' — refusing to silently rebase it to '${input.base_branch}'`
         );
       }
       if (existing.members.includes(input.issue)) continue;

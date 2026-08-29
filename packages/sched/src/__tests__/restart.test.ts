@@ -100,14 +100,14 @@ function steps(): Step[] {
 describe('restart resumption (AC6)', () => {
   it('a restarting process reaches the identical state as a continuous one', () => {
     // CONTINUOUS — never reloads from disk
-    let continuous = createEmptyState(T0);
+    let continuous = createEmptyState();
     for (const step of steps()) {
       continuous = step.run(continuous);
     }
 
     // RESTARTING — a fresh store (simulating a new process) after every step
     const bootStore = new SchedStore(dir);
-    bootStore.save(createEmptyState(T0));
+    bootStore.save(createEmptyState());
     for (const step of steps()) {
       const processA = new SchedStore(dir); // "old process" reads current truth
       const current = processA.load();
@@ -131,7 +131,7 @@ describe('restart resumption (AC6)', () => {
 
   it('every intermediate state on disk is valid and reloadable', () => {
     const store = new SchedStore(dir);
-    let state = createEmptyState(T0);
+    let state = createEmptyState();
     store.save(state);
     for (const step of steps()) {
       state = step.run(store.load());

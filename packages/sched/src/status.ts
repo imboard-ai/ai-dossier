@@ -1,11 +1,18 @@
 /**
- * `sched status` rendering (AC4): queue, slots, batches, and the blocked /
- * failed sets, as plain text tables (the package deliberately has no
- * dependency on the CLI's table renderer).
+ * `sched status` report (AC4): queue, slots, batches, and the blocked/failed
+ * sets as a machine-readable report. Text rendering lives in the CLI
+ * (`cli/src/commands/sched.ts`, on top of the CLI's shared `renderTable`) —
+ * the package deliberately has no dependency on CLI utilities.
  */
 
-import { batchBlockers, dependencyBlockers } from './readiness';
+import {
+  batchBlockers,
+  DISPATCHABLE_ISSUE_STATUSES,
+  dependencyBlockers,
+  runnableUnits,
+} from './readiness';
 import type { BatchEntry, QueueEntry, SchedConfig, SchedState, SlotEntry } from './types';
+import { LIVE_SLOT_STATUSES, SATISFIED_ISSUE_STATUSES, TERMINAL_ISSUE_STATUSES } from './types';
 
 /** An entry that cannot progress, with the human reason. */
 export interface BlockedItem {
@@ -16,21 +23,29 @@ export interface BlockedItem {
 
 /** Machine-readable status report (`sched status --json`). */
 export interface StatusReport {
+  /** Project slug the report was built for (which state bucket this is). */
+  project: string;
   paused: boolean;
   max_slots: number;
   live_slots: number;
   queue: QueueEntry[];
   slots: SlotEntry[];
   batches: BatchEntry[];
+  /** How many units are runnable right now. */
   runnable: number;
+  /** Which units are runnable (`issue:<n>` / `batch:<id>`), in dispatch order. */
+  runnable_units: string[];
   blocked: BlockedItem[];
   failed: QueueEntry[];
 }
 
-export function buildStatusReport(state: SchedState, config: SchedConfig): StatusReport {
+export function buildStatusReport(
+  state: SchedState,
+  config: SchedConfig,
+  project: string
+): StatusReport {
   const blocked: BlockedItem[] = [];
   const failed: QueueEntry[] = [];
-  let runnable = 0;
 
   const describeBlocker = (b: { dep: number; reason: string; depStatus?: string }): string =>
     b.reason === 'not-in-queue'
@@ -50,29 +65,19 @@ export function buildStatusReport(state: SchedState, config: SchedConfig): Statu
       });
       continue;
     }
-    if (
-      entry.status === 'done' ||
-      entry.status === 'shipped' ||
-      entry.status === 'shipped-in-batch'
-    ) {
+    if (TERMINAL_ISSUE_STATUSES.has(entry.status) || SATISFIED_ISSUE_STATUSES.has(entry.status)) {
       continue;
     }
 
     if (entry.mode === 'full') {
-      if (
-        entry.status === 'queued' ||
-        entry.status === 'classified' ||
-        entry.status === 'requeued'
-      ) {
+      if (DISPATCHABLE_ISSUE_STATUSES.has(entry.status)) {
         const blockers = dependencyBlockers(state, entry);
         if (blockers.length > 0) {
           blocked.push({
             issue: entry.issue,
             status: entry.status,
-            reason: describeBlocker(blockers[0]),
+            reason: blockers.map(describeBlocker).join('; '),
           });
-        } else {
-          runnable++;
         }
       }
       continue;
@@ -87,105 +92,27 @@ export function buildStatusReport(state: SchedState, config: SchedConfig): Statu
         blocked.push({
           issue: entry.issue,
           status: entry.status,
-          reason: describeBlocker(mine[0]),
+          reason: mine.map(describeBlocker).join('; '),
         });
       }
     }
   }
 
-  for (const batch of state.batches) {
-    if (batch.status === 'ready' && batchBlockers(state, batch).length === 0) {
-      runnable++;
-    }
-  }
+  const units = state.paused ? [] : runnableUnits(state);
 
   return {
+    project,
     paused: state.paused,
     max_slots: config.max_slots,
-    live_slots: state.slots.filter(
-      (s) => s.status === 'assigned' || s.status === 'running' || s.status === 'recovering'
-    ).length,
+    live_slots: state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length,
     queue: state.entries,
     slots: state.slots,
     batches: state.batches,
-    runnable,
+    runnable: units.length,
+    runnable_units: units.map((u) =>
+      u.kind === 'issue' ? `issue:${u.issue}` : `batch:${u.batch}`
+    ),
     blocked,
     failed,
   };
-}
-
-function pad(cell: string, width: number): string {
-  return cell.length >= width ? cell : cell + ' '.repeat(width - cell.length);
-}
-
-function table(headers: string[], rows: string[][]): string {
-  const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] ?? '').length), 0)
-  );
-  const head = headers.map((h, i) => pad(h, widths[i])).join('  ');
-  const body = rows.map((r) => r.map((c, i) => pad(c ?? '', widths[i])).join('  '));
-  return [head, ...body].join('\n');
-}
-
-function renderQueue(queue: QueueEntry[]): string {
-  return table(
-    ['issue', 'mode', 'batch', 'tier', 'deps', 'status'],
-    queue.map((e) => [
-      `#${e.issue}`,
-      e.mode,
-      e.batch ?? '-',
-      e.tier,
-      e.deps.length > 0 ? e.deps.map((d) => `#${d}`).join(',') : '-',
-      e.status,
-    ])
-  );
-}
-
-function renderSlots(slots: SlotEntry[]): string {
-  if (slots.length === 0) return '(no slots materialized yet)';
-  return table(
-    ['slot', 'status', 'unit', 'phase', 'recoveries'],
-    slots.map((s) => [String(s.id), s.status, s.unit ?? '-', s.phase ?? '-', String(s.recoveries)])
-  );
-}
-
-function renderBatches(batches: BatchEntry[]): string {
-  if (batches.length === 0) return '(no batches)';
-  return table(
-    ['batch', 'status', 'members', 'member-in-work'],
-    batches.map((b) => [
-      b.id,
-      b.status,
-      b.members.length > 0 ? b.members.map((m) => `#${m}`).join(',') : '-',
-      b.executing_member > 0 ? `${b.executing_member}/${b.members.length}` : '-',
-    ])
-  );
-}
-
-function renderList(items: string[]): string {
-  return items.length > 0 ? items.join('\n') : '(none)';
-}
-
-/** Render the full human-readable status (AC4). */
-export function renderStatus(report: StatusReport): string {
-  const lines: string[] = [];
-  lines.push(
-    `Scheduler: ${report.paused ? 'PAUSED' : 'running'} · slots ${report.live_slots}/${report.max_slots} live · ${report.runnable} runnable unit(s)`
-  );
-  lines.push('');
-  lines.push('== Queue ==');
-  lines.push(renderQueue(report.queue));
-  lines.push('');
-  lines.push('== Slots ==');
-  lines.push(renderSlots(report.slots));
-  lines.push('');
-  lines.push('== Batches ==');
-  lines.push(renderBatches(report.batches));
-  lines.push('');
-  lines.push('== Blocked ==');
-  lines.push(renderList(report.blocked.map((b) => `#${b.issue} [${b.status}] — ${b.reason}`)));
-  lines.push('');
-  lines.push('== Failed ==');
-  lines.push(renderList(report.failed.map((f) => `#${f.issue} — ${f.reason ?? f.status}`)));
-  return lines.join('\n');
 }

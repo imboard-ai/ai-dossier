@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import type { Command } from 'commander';
 import { formatDurationCell } from '../duration';
+import { fail } from '../helpers';
 import { parseIssueSelection } from '../issue-selection';
 import {
   buildMilestone,
@@ -62,21 +63,6 @@ interface StatsOptions {
   issues?: string;
   repo?: string;
   json?: boolean;
-}
-
-/**
- * Fail on stderr and exit 1, so a calling dossier can detect it.
- *
- * Each entry is one problem. An entry may span lines: the first gets the ❌, the rest are
- * indented under it, which is how a cause line and its "Fix:" line stay visibly one item.
- */
-function fail(lines: string[]): never {
-  for (const line of lines) {
-    const [first, ...rest] = line.split('\n');
-    console.error(`❌ ${first}`);
-    for (const cont of rest) console.error(`   ${cont}`);
-  }
-  process.exit(1);
 }
 
 /** Why a subprocess did not produce output — enough to name the actual cause. */

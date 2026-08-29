@@ -29,7 +29,7 @@ install:
 build: lint build-all
 
 ## build-all: Build all packages in dependency order (no lint)
-build-all: build-core build-mcp build-cli build-pool build-sched
+build-all: build-core build-sched build-mcp build-cli build-pool
 	@echo "✓ All packages built successfully"
 
 ## build-core: Build @ai-dossier/core package

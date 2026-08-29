@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CorruptStateError,
   createEmptyState,
@@ -50,7 +50,7 @@ describe('SchedStore', () => {
   it('save → load round-trips exactly', () => {
     const store = new SchedStore(dir);
     let state = enqueueEntries(
-      createEmptyState(NOW),
+      createEmptyState(),
       [
         { issue: 101, mode: 'full' },
         { issue: 201, mode: 'slot', batch: 'b1', deps: [101] },
@@ -64,7 +64,7 @@ describe('SchedStore', () => {
 
   it('a crash between writes never corrupts state (interrupted-write simulation)', () => {
     const store = new SchedStore(dir);
-    const good = enqueueEntries(createEmptyState(NOW), [{ issue: 1 }], NOW);
+    const good = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
     store.save(good);
     // simulate: writer dies mid-write — tmp holds a partial payload, state.json still old
     fs.writeFileSync(`${store.statePath}.tmp`, '{"schema_version":"1.0.0","entr');
@@ -121,18 +121,22 @@ describe('SchedStore', () => {
     expect(result).toBe('stolen');
   });
 
-  it('config defaults to max_slots 3, persists overrides, and ignores corrupt files', () => {
+  it('config defaults to max_slots 3, persists overrides, and warns (not silently) on corrupt files', () => {
     const store = new SchedStore(dir);
     expect(store.loadConfig()).toEqual({ max_slots: 3 });
     store.saveConfig({ max_slots: 6 });
     expect(store.loadConfig()).toEqual({ max_slots: 6 });
     fs.writeFileSync(store.configPath, '{corrupt');
+    const warned = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(store.loadConfig()).toEqual({ max_slots: 3 });
+    expect(warned).toHaveBeenCalledTimes(1);
+    expect(String(warned.mock.calls[0][0])).toContain('unreadable');
+    warned.mockRestore();
   });
 
   it('validates what it loads (validateState integration)', () => {
     const store = new SchedStore(dir);
-    const state = enqueueEntries(createEmptyState(NOW), [{ issue: 1 }], NOW);
+    const state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
     store.save(state);
     const onDisk = JSON.parse(fs.readFileSync(store.statePath, 'utf-8'));
     expect(validateState(onDisk)).toEqual(state);

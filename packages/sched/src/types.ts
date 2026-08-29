@@ -195,7 +195,7 @@ export interface SlotEntry {
 
 /** Hot operational truth, persisted transactionally to `state.json` (RFC-0001 §D.4). */
 export interface SchedState {
-  schema_version: '1.0.0';
+  schema_version: typeof SCHEMA_VERSION;
   /** When true, `computeAssignments` returns no assignments (sched pause). */
   paused: boolean;
   entries: QueueEntry[];
@@ -216,11 +216,15 @@ export const CONFIG_SCHEMA_VERSION = '1.0.0' as const;
 
 /** Config file shape (schema_version + the config itself). */
 export interface SchedConfigFile {
-  schema_version: '1.0.0';
+  schema_version: typeof CONFIG_SCHEMA_VERSION;
   max_slots: number;
 }
 
 export const DEFAULT_MAX_SLOTS = 3;
+
+/** Bounds for `max_slots` when reading `config.json` (named — not magic numbers in persist.ts). */
+export const MIN_MAX_SLOTS = 1;
+export const MAX_MAX_SLOTS = 64;
 
 /** Thrown by every non-declared state-machine edge. */
 export class IllegalTransitionError extends Error {
@@ -234,5 +238,13 @@ export class IllegalTransitionError extends Error {
     this.kind = kind;
     this.from = from;
     this.to = to;
+  }
+}
+
+/** Thrown when an issue, batch, or slot id does not exist in the state. */
+export class SchedNotFoundError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SchedNotFoundError';
   }
 }
