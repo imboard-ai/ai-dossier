@@ -332,7 +332,7 @@ Commands used in the workflow templates:
 | `ai-dossier verify <file> --verbose` | Detailed verification output |
 | `ai-dossier lint <file>` | Lint for authoring issues |
 | `ai-dossier lint <file> --strict` | Treat warnings as errors |
-| `ai-dossier run <file> --headless` | Execute in non-interactive mode |
+| `ai-dossier run <file> --headless` | Execute in non-interactive mode (agent's final result text printed after completion; stdout is not streamed live) |
 | `ai-dossier run <file> --dry-run` | Verify without executing |
 | `ai-dossier checksum <file> --update` | Add/update checksum in frontmatter |
 

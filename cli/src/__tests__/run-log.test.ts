@@ -1,7 +1,5 @@
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as config from '../config';
 import { appendRunLog, clearRunLog, readRunLog } from '../run-log';
 
@@ -67,6 +65,56 @@ describe('run-log', () => {
 
       expect(() => appendRunLog(makeEntry())).not.toThrow();
     });
+
+    it('should write a full new-schema entry with cost/observability fields (#458)', () => {
+      const entry = makeEntry({
+        duration_ms: 123456,
+        spawned_command: 'claude -p --output-format json --model opus',
+        model: 'claude-opus-4-20250514',
+        exit_code: 0,
+        input_tokens: 1234,
+        output_tokens: 567,
+        total_cost_usd: 0.0123,
+      });
+
+      appendRunLog(entry);
+
+      const [filePath, content, opts] = mockedFs.appendFileSync.mock.calls[0];
+      expect(filePath).toContain('runs.jsonl');
+      expect(content).toBe(`${JSON.stringify(entry)}\n`);
+      expect(opts).toEqual({ mode: 0o600 });
+      const written = JSON.parse((content as string).trim());
+      expect(written.duration_ms).toBe(123456);
+      expect(written.spawned_command).toBe('claude -p --output-format json --model opus');
+      expect(written.model).toBe('claude-opus-4-20250514');
+      expect(written.exit_code).toBe(0);
+      expect(written.input_tokens).toBe(1234);
+      expect(written.output_tokens).toBe(567);
+      expect(written.total_cost_usd).toBe(0.0123);
+    });
+
+    it('should write explicit nulls for unavailable new-schema fields (never fabricated)', () => {
+      const entry = makeEntry({
+        duration_ms: 42,
+        spawned_command: null,
+        model: null,
+        exit_code: 1,
+        input_tokens: null,
+        output_tokens: null,
+        total_cost_usd: null,
+      });
+
+      appendRunLog(entry);
+
+      const [, content] = mockedFs.appendFileSync.mock.calls[0];
+      const written = JSON.parse((content as string).trim());
+      expect(written.spawned_command).toBeNull();
+      expect(written.model).toBeNull();
+      expect(written.input_tokens).toBeNull();
+      expect(written.output_tokens).toBeNull();
+      expect(written.total_cost_usd).toBeNull();
+      expect(written.exit_code).toBe(1);
+    });
   });
 
   describe('readRunLog', () => {
@@ -122,12 +170,52 @@ describe('run-log', () => {
       );
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockReturnValue(
-        entries.map((e) => JSON.stringify(e)).join('\n') + '\n'
+        `${entries.map((e) => JSON.stringify(e)).join('\n')}\n`
       );
 
       const result = readRunLog({ limit: 3 });
 
       expect(result).toHaveLength(3);
+    });
+
+    it('should parse mixed old/new schema files (#458)', () => {
+      const oldEntry = makeEntry({ timestamp: '2026-03-06T14:00:00Z' });
+      const newEntry = makeEntry({
+        timestamp: '2026-03-06T15:00:00Z',
+        duration_ms: 65000,
+        spawned_command: 'claude -p --output-format json',
+        model: 'claude-opus-4-20250514',
+        exit_code: 0,
+        input_tokens: 100,
+        output_tokens: 200,
+        total_cost_usd: 0.05,
+      });
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue(
+        `${JSON.stringify(oldEntry)}\n${JSON.stringify(newEntry)}\n`
+      );
+
+      const result = readRunLog();
+
+      // Most-recent-first: new entry first, old entry second — both parse.
+      expect(result).toHaveLength(2);
+      expect(result[0].timestamp).toBe('2026-03-06T15:00:00Z');
+      expect(result[0].duration_ms).toBe(65000);
+      expect(result[0].spawned_command).toBe('claude -p --output-format json');
+      expect(result[0].model).toBe('claude-opus-4-20250514');
+      expect(result[0].exit_code).toBe(0);
+      expect(result[0].input_tokens).toBe(100);
+      expect(result[0].output_tokens).toBe(200);
+      expect(result[0].total_cost_usd).toBe(0.05);
+      // Old-schema entry: new fields are simply absent (undefined).
+      expect(result[1].timestamp).toBe('2026-03-06T14:00:00Z');
+      expect(result[1].duration_ms).toBeUndefined();
+      expect(result[1].spawned_command).toBeUndefined();
+      expect(result[1].model).toBeUndefined();
+      expect(result[1].exit_code).toBeUndefined();
+      expect(result[1].input_tokens).toBeUndefined();
+      expect(result[1].output_tokens).toBeUndefined();
+      expect(result[1].total_cost_usd).toBeUndefined();
     });
   });
 

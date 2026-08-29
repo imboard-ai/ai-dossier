@@ -270,7 +270,8 @@ describe('buildLlmCommand', () => {
     const result = buildLlmCommand('claude-code', '/path/to/dossier.ds.md', true);
     expect(result).not.toBeNull();
     expect((result as NonNullable<typeof result>).cmd).toBe('claude');
-    expect((result as NonNullable<typeof result>).args).toEqual(['-p']);
+    // JSON output mode so the run log can capture usage (#458).
+    expect((result as NonNullable<typeof result>).args).toEqual(['-p', '--output-format', 'json']);
     expect((result as NonNullable<typeof result>).stdin).toBe('file content');
   });
 
@@ -287,6 +288,8 @@ describe('buildLlmCommand', () => {
     expect(r.cmd).toBe('claude');
     expect(r.args).toEqual([
       '-p',
+      '--output-format',
+      'json',
       '--model',
       'sonnet',
       '--max-budget-usd',
@@ -309,7 +312,7 @@ describe('buildLlmCommand', () => {
     });
     expect(result).not.toBeNull();
     const r = result as NonNullable<typeof result>;
-    expect(r.args).toEqual(['-p', '--allowedTools', 'Bash,Read,Write']);
+    expect(r.args).toEqual(['-p', '--output-format', 'json', '--allowedTools', 'Bash,Read,Write']);
   });
 
   it('should forward --model in interactive (non-headless) mode', () => {
@@ -345,7 +348,7 @@ describe('buildLlmCommand', () => {
     });
     expect(result).not.toBeNull();
     const r = result as NonNullable<typeof result>;
-    expect(r.args).toEqual(['-p', '--max-budget-usd', '0']);
+    expect(r.args).toEqual(['-p', '--output-format', 'json', '--max-budget-usd', '0']);
   });
 
   it('should return null for unknown LLM', () => {

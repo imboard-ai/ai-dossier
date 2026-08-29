@@ -342,7 +342,7 @@ export function buildLlmCommand(
 
   if (headless) {
     const content = fs.readFileSync(file, 'utf8');
-    const args = ['-p'];
+    const args = ['-p', '--output-format', 'json'];
     if (passthrough?.model) {
       args.push('--model', passthrough.model);
     }
@@ -378,6 +378,105 @@ export function buildLlmCommand(
       description: `claude ${flagPrefix}"${file}"`,
     };
   }
+}
+
+/**
+ * Usage data extracted from an agent CLI's JSON result output (#458).
+ * Every field is null when the CLI did not report it — values are never
+ * fabricated or estimated.
+ */
+export interface AgentRunUsage {
+  /** Model id the agent reported; comma-joined when several models ran (token/cost fields are totals across all). */
+  model: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_cost_usd: number | null;
+  /** The final result text (claude's `result` field), for re-emitting to stdout. */
+  result_text: string | null;
+}
+
+/**
+ * Sentinel thrown by the run command when the spawned agent exits non-zero
+ * (or fails to spawn) — carries everything the run log records about the exit.
+ */
+export interface AgentExitError {
+  /** The child's exit status; null when it was killed by a signal or failed to spawn. */
+  status: number | null;
+  /** Signal that killed the child, when applicable. */
+  signal: string | null;
+  /** Spawn failure reason (e.g. ENOENT, ENOBUFS), when applicable. */
+  spawn_error: string | null;
+  usage: AgentRunUsage | null;
+}
+
+function toCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Parse a `claude -p --output-format json` result payload into usage data.
+ *
+ * Handles both reported shapes: the classic top-level `usage` /
+ * `total_cost_usd` (older: `cost_usd`) fields, and the newer per-model
+ * `modelUsage` map (camelCase or snake_case entry keys). Returns null when the
+ * output is not a JSON object; individual fields are null when absent.
+ */
+export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsage | null {
+  if (typeof stdout !== 'string' || stdout.trim() === '') return null;
+
+  let parsed: Record<string, unknown>;
+  try {
+    const value: unknown = JSON.parse(stdout);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    parsed = value as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+
+  const usage =
+    parsed.usage && typeof parsed.usage === 'object' && !Array.isArray(parsed.usage)
+      ? (parsed.usage as Record<string, unknown>)
+      : {};
+  const modelUsage =
+    parsed.modelUsage && typeof parsed.modelUsage === 'object' && !Array.isArray(parsed.modelUsage)
+      ? (parsed.modelUsage as Record<string, unknown>)
+      : null;
+  // Keep only object-shaped entries; a scalar entry is malformed, not a model.
+  const modelEntries = modelUsage
+    ? Object.entries(modelUsage).filter(
+        (entry): entry is [string, Record<string, unknown>] =>
+          !!entry[1] && typeof entry[1] === 'object' && !Array.isArray(entry[1])
+      )
+    : [];
+
+  const sumFromModelUsage = (camel: string, snake: string): number | null => {
+    let sum = 0;
+    let seen = false;
+    for (const [, entry] of modelEntries) {
+      const value = toCount(entry[camel]) ?? toCount(entry[snake]);
+      if (value !== null) {
+        sum += value;
+        seen = true;
+      }
+    }
+    return seen ? sum : null;
+  };
+
+  const input_tokens =
+    toCount(usage.input_tokens) ?? sumFromModelUsage('inputTokens', 'input_tokens');
+  const output_tokens =
+    toCount(usage.output_tokens) ?? sumFromModelUsage('outputTokens', 'output_tokens');
+  const total_cost_usd =
+    toCount(parsed.total_cost_usd) ??
+    toCount(parsed.cost_usd) ??
+    sumFromModelUsage('totalCostUsd', 'total_cost_usd');
+
+  const modelKeys = modelEntries.map(([key]) => key);
+  const modelFromUsage = modelKeys.length > 1 ? modelKeys.join(',') : (modelKeys[0] ?? null);
+  const model = typeof parsed.model === 'string' && parsed.model ? parsed.model : modelFromUsage;
+  const result_text = typeof parsed.result === 'string' ? parsed.result : null;
+
+  return { model, input_tokens, output_tokens, total_cost_usd, result_text };
 }
 
 /**

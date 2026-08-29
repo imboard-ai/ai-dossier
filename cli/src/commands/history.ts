@@ -3,7 +3,25 @@
  */
 
 import type { Command } from 'commander';
+import { formatDurationMs } from '../duration';
 import { clearRunLog, readRunLog } from '../run-log';
+import { renderTable } from '../table';
+
+/** Cost display precision: agent-run costs are small, so keep four decimals. */
+const COST_DECIMALS = 4;
+
+const isCount = (value: number | null | undefined): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
+
+/** Token cell as "in/out"; '-' when neither side was reported (old entries). */
+function formatTokens(input: number | null | undefined, output: number | null | undefined): string {
+  if (!isCount(input) && !isCount(output)) return '-';
+  return `${isCount(input) ? input : '-'}/${isCount(output) ? output : '-'}`;
+}
+
+function formatCost(usd: number | null | undefined): string {
+  return isCount(usd) ? `$${usd.toFixed(COST_DECIMALS)}` : '-';
+}
 
 export function registerHistoryCommand(program: Command): void {
   program
@@ -47,49 +65,39 @@ export function registerHistoryCommand(program: Command): void {
           process.exit(0);
         }
 
-        // Table output
-        const colTimestamp = 20;
-        const colDossier = 35;
-        const colVersion = 8;
-        const colSource = 10;
-        const colVerified = 12;
-
-        const header = [
-          'TIMESTAMP'.padEnd(colTimestamp),
-          'DOSSIER'.padEnd(colDossier),
-          'VERSION'.padEnd(colVersion),
-          'SOURCE'.padEnd(colSource),
-          'VERIFIED'.padEnd(colVerified),
-        ].join('  ');
-
-        console.log(header);
-        console.log('─'.repeat(header.length));
-
-        for (const entry of entries) {
-          const ts = entry.timestamp
+        // Table output — columns auto-size to the widest cell, so long token
+        // counts widen the column instead of being silently truncated.
+        const headers = [
+          'TIMESTAMP',
+          'DOSSIER',
+          'VERSION',
+          'SOURCE',
+          'VERIFIED',
+          'DURATION',
+          'TOKENS(in/out)',
+          'COST',
+        ];
+        const rows = entries.map((entry) => [
+          entry.timestamp
             .replace('T', ' ')
             .replace(/\.\d+Z$/, '')
-            .slice(0, 19);
-          const dossier =
-            entry.dossier.length > colDossier - 1
-              ? `${entry.dossier.slice(0, colDossier - 4)}...`
-              : entry.dossier;
-          const ver = entry.resolved_version.slice(0, colVersion);
-          const src = entry.source.slice(0, colSource);
-          const verified = entry.verification;
+            .slice(0, 19),
+          entry.dossier,
+          entry.resolved_version,
+          entry.source,
+          entry.verification,
+          formatDurationMs(entry.duration_ms),
+          formatTokens(entry.input_tokens, entry.output_tokens),
+          formatCost(entry.total_cost_usd),
+        ]);
 
-          const line = [
-            ts.padEnd(colTimestamp),
-            dossier.padEnd(colDossier),
-            ver.padEnd(colVersion),
-            src.padEnd(colSource),
-            verified.padEnd(colVerified),
-          ].join('  ');
+        console.log(renderTable(headers, rows, { separator: true }));
 
-          console.log(line);
-
+        // Deprecated pre-#401 field: surface it after the table rather than
+        // interleaving, keyed by the row's timestamp.
+        for (const entry of entries) {
           if (entry.update_available) {
-            console.log(`  ↑ update available: ${entry.update_available}`);
+            console.log(`  ↑ ${entry.timestamp}: update available: ${entry.update_available}`);
           }
         }
 

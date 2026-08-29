@@ -39,6 +39,17 @@ export function formatDurationCell(seconds: number | null): string {
 }
 
 /**
+ * A millisecond span for a table cell: raw `ms` below one second, human form
+ * above (`2m 14s`), `-` when absent or not a finite number (runs.jsonl entries
+ * are read raw — a wrong-typed field must not crash the table).
+ */
+export function formatDurationMs(ms: number | null | undefined): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms)) return '-';
+  if (ms < MILLIS_PER_SECOND) return `${ms}ms`;
+  return formatDuration(Math.round(ms / MILLIS_PER_SECOND));
+}
+
+/**
  * An age as a single rounded unit: `45s`, `3m`, `2h`, `9d`.
  *
  * Coarser than {@link formatDuration} on purpose — "how stale is this cache entry" needs

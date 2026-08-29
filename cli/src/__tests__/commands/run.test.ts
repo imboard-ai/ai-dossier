@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as cacheResolver from '../../cache-resolver';
@@ -21,6 +21,10 @@ vi.mock('../../cache-resolver');
 
 const mockedFs = vi.mocked(fs);
 
+/** Typed spawnSync result for the #458 tests (status + optional stdout). */
+const spawnResult = (status: number | null, stdout?: string): SpawnSyncReturns<string> =>
+  ({ status, stdout }) as SpawnSyncReturns<string>;
+
 describe('run command', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -38,6 +42,10 @@ describe('run command', () => {
       return `/home/.dossier/cache/${name}`;
     });
     vi.mocked(config.getConfig).mockReturnValue(undefined);
+    // Reset the parseAgentUsage implementation explicitly: clearAllMocks only
+    // clears call history, so a mockReturnValue from a previous test would
+    // otherwise leak into the next one.
+    vi.mocked(helpers.parseAgentUsage).mockReset();
     // cache-resolver helpers used by run.ts after the resolveCachedVersion call.
     // The module is fully mocked, so these need explicit stubs or they return undefined
     // and break the URL-detection branch below.
@@ -302,5 +310,254 @@ describe('run command', () => {
     expect(runLog.appendRunLog).toHaveBeenCalledWith(
       expect.objectContaining({ resolved_version: '2.5.0' })
     );
+  });
+
+  describe('run log cost/observability fields (#458)', () => {
+    it('records usage, spawned command, exit code and duration from headless JSON output', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(0, '{"type":"result"}'));
+      vi.mocked(helpers.parseAgentUsage).mockReturnValue({
+        model: 'claude-opus-4-20250514',
+        input_tokens: 1234,
+        output_tokens: 567,
+        total_cost_usd: 0.0123,
+        result_text: 'done',
+      });
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--headless']);
+
+      expect(spawnSync).toHaveBeenCalledWith(
+        'claude',
+        ['test.ds.md'],
+        expect.objectContaining({
+          stdio: ['pipe', 'pipe', 'inherit'],
+          // Explicit cap: spawnSync's 1MB default kills children with large JSON results.
+          maxBuffer: 32 * 1024 * 1024,
+        })
+      );
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          duration_ms: expect.any(Number),
+          spawned_command: 'claude test.ds.md',
+          model: 'claude-opus-4-20250514',
+          exit_code: 0,
+          input_tokens: 1234,
+          output_tokens: 567,
+          total_cost_usd: 0.0123,
+        })
+      );
+      // The captured result text is re-emitted on stdout.
+      expect(stdoutSpy).toHaveBeenCalledWith('done\n');
+    });
+
+    it('records null usage fields and re-emits raw stdout when output is not JSON', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(0, 'plain output'));
+      vi.mocked(helpers.parseAgentUsage).mockReturnValue(null);
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--headless']);
+
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exit_code: 0,
+          model: null,
+          input_tokens: null,
+          output_tokens: null,
+          total_cost_usd: null,
+        })
+      );
+      expect(stdoutSpy).toHaveBeenCalledWith('plain output\n');
+      // The operator can tell WHY usage is null: the output was not parseable.
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('usage/cost not recorded'));
+    });
+
+    it('records null usage fields in interactive mode and keeps the requested --model alias', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(0));
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--model', 'opus']);
+
+      expect(helpers.parseAgentUsage).not.toHaveBeenCalled();
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          duration_ms: expect.any(Number),
+          spawned_command: 'claude test.ds.md',
+          model: 'opus',
+          exit_code: 0,
+          input_tokens: null,
+          output_tokens: null,
+          total_cost_usd: null,
+        })
+      );
+    });
+
+    it('records exit code and captured usage when execution fails', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(7, '{"type":"result"}'));
+      vi.mocked(helpers.parseAgentUsage).mockReturnValue({
+        model: 'claude-opus-4-20250514',
+        input_tokens: 1,
+        output_tokens: 2,
+        total_cost_usd: 0.001,
+        result_text: 'error occurred',
+      });
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--headless'])
+      ).rejects.toThrow('process.exit(7)');
+
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exit_code: 7,
+          input_tokens: 1,
+          output_tokens: 2,
+          total_cost_usd: 0.001,
+          spawned_command: 'claude test.ds.md',
+        })
+      );
+    });
+
+    it('records the spawn error when the child is killed by a signal or fails to spawn', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      vi.mocked(spawnSync).mockReturnValue({
+        status: null,
+        signal: 'SIGTERM',
+        error: new Error('spawn claude ENOBUFS'),
+        stdout: '',
+      } as unknown as ReturnType<typeof spawnSync>);
+      vi.mocked(helpers.parseAgentUsage).mockReturnValue(null);
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--headless'])
+      ).rejects.toThrow('process.exit(2)');
+
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exit_code: null,
+          spawn_error: 'spawn claude ENOBUFS',
+        })
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('spawn claude ENOBUFS'));
+    });
+
+    it('records null usage fields when the agent reports nothing (usage-unavailable path)', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      // No stdout on the spawn result; parseAgentUsage auto-mock returns undefined.
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(0));
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--headless']);
+
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exit_code: 0,
+          model: null,
+          input_tokens: null,
+          output_tokens: null,
+          total_cost_usd: null,
+        })
+      );
+    });
+
+    it('records exit code 0 with null spawned command on dry-run', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--dry-run'])
+      ).rejects.toThrow('process.exit(0)');
+
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exit_code: 0,
+          spawned_command: null,
+          model: null,
+          input_tokens: null,
+          output_tokens: null,
+          total_cost_usd: null,
+          duration_ms: expect.any(Number),
+        })
+      );
+    });
+
+    it('records exit code 1 on failed verification', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      vi.mocked(helpers.runVerification).mockResolvedValue({ passed: false, checks: [] });
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await expect(program.parseAsync(['node', 'dossier', 'run', 'test.ds.md'])).rejects.toThrow(
+        'process.exit(1)'
+      );
+
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          verification: 'failed',
+          exit_code: 1,
+          spawned_command: null,
+          duration_ms: expect.any(Number),
+        })
+      );
+    });
+
+    it('records exit code 0 and nulls in nested mode', async () => {
+      vi.mocked(helpers.detectNestedHost).mockReturnValue('opencode');
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await expect(program.parseAsync(['node', 'dossier', 'run', 'test.ds.md'])).rejects.toThrow(
+        'process.exit(0)'
+      );
+
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          verification: 'nested-skip',
+          exit_code: 0,
+          spawned_command: null,
+          model: null,
+          input_tokens: null,
+          output_tokens: null,
+          total_cost_usd: null,
+          duration_ms: expect.any(Number),
+        })
+      );
+    });
   });
 });
