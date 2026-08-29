@@ -480,6 +480,37 @@ describe('restart self-healing', () => {
   });
 });
 
+describe('spawn failures (supportability)', () => {
+  it('a throwing spawn fails the unit visibly instead of aborting the whole tick', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([
+      { issue: 101, mode: 'full', tier: 'mid' },
+      { issue: 102, mode: 'full', tier: 'mid' },
+    ]);
+
+    // The FIRST spawn throws (bad dispatch command); the second unit still dispatches.
+    let calls = 0;
+    const realSpawn = h.deps.spawnDeps.spawn;
+    const throwingSpawn = (cmd: string[], prompt: string, logFile: string): number => {
+      calls++;
+      if (calls === 1) throw new Error("failed to spawn 'claude' — is it on PATH?");
+      return realSpawn(cmd, prompt, logFile);
+    };
+    h.deps.spawnDeps = { ...h.deps.spawnDeps, spawn: throwingSpawn };
+
+    const result = h.tick();
+
+    expect(result.failed).toEqual(['issue:101']);
+    expect(result.spawned).toEqual(['issue:102']);
+    const state = h.state();
+    expect(state.entries.find((e) => e.issue === 101)?.status).toBe('failed');
+    expect(state.entries.find((e) => e.issue === 101)?.reason).toMatch(/spawn-error/);
+    expect(state.entries.find((e) => e.issue === 102)?.status).toBe('dispatched');
+    expect(h.journal.read().some((e) => e.event === 'unit-failed')).toBe(true);
+  });
+});
+
 describe('status surface (AC6)', () => {
   it('sched status renders live phase per running unit', () => {
     const h = harness();

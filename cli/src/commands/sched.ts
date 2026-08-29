@@ -16,6 +16,7 @@ import {
   CorruptStateError,
   createExecGroundTruth,
   createSpawnDeps,
+  DEFAULT_RECONCILE_INTERVAL_MS,
   defaultExec,
   type EngineDeps,
   EnqueueError,
@@ -35,6 +36,7 @@ import {
   tick,
 } from '@ai-dossier/sched';
 import type { Command } from 'commander';
+import { formatAge } from '../duration';
 import { detectLlm, fail } from '../helpers';
 import { parseIssueSelection } from '../issue-selection';
 import { renderTable } from '../table';
@@ -91,6 +93,11 @@ function issueList(raw: string, flag: string): number[] {
  */
 function resolveStore(opts: SchedOptions): { store: SchedStore; project: string } {
   const project = opts.project ?? resolveProjectSlug(defaultExec);
+  if (!opts.project && project === 'default') {
+    console.error(
+      '⚠ Could not resolve a repo from the current directory — operating on the "default" state bucket. Run sched from the repo, or pass --project.'
+    );
+  }
   return { store: new SchedStore(schedStateDir(project)), project };
 }
 
@@ -188,11 +195,7 @@ function renderReport(report: StatusReport): string {
 function relativeTime(iso: string, now: number = Date.now()): string {
   const then = Date.parse(iso);
   if (Number.isNaN(then)) return '-';
-  const seconds = Math.max(0, Math.floor((now - then) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86_400)}d ago`;
+  return formatAge(Math.max(0, now - then), ' ago');
 }
 
 // --- subcommands ---
@@ -443,7 +446,11 @@ function registerStartSubcommand(cmd: Command): void {
         try {
           result = tick(deps, engineConfig);
         } catch (err) {
+          // Route known package errors through the CLI exit path; any other
+          // failure must not surface as an unhandled async rejection (this is
+          // the cron path).
           handleKnownError(err);
+          fail([`sched tick failed: ${(err as Error).name}: ${(err as Error).message}`]);
         }
         if (opts.json) {
           console.log(JSON.stringify(result, null, 2));
@@ -453,7 +460,7 @@ function registerStartSubcommand(cmd: Command): void {
         return;
       }
 
-      const interval = (engineConfig.reconcile_interval_ms ?? 60_000) / 1000;
+      const interval = (engineConfig.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS) / 1000;
       console.log(
         `▶ Scheduler engine running for ${project} (tick every ${interval}s, Ctrl-C to stop)`
       );

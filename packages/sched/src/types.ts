@@ -2,10 +2,10 @@
  * Types for the deterministic scheduler core (RFC-0001 §B/C.1/D, issue #460).
  *
  * The state unions below are the RFC-0001 §D state machines frozen into types.
- * `state.ts` owns the transition tables; nothing here does I/O — this package
- * makes zero LLM/agent invocations by design (AC7), and the only subprocess
- * anywhere in it is the project-slug resolution at the CLI boundary
- * (`project.ts`, injectable for tests).
+ * `state.ts` owns the transition tables; nothing here does I/O. The package
+ * itself never invokes an LLM: it spawns the agent process the operator
+ * configured (dispatch.ts) and reads ground truth via injectable subprocess
+ * exec (project.ts, groundtruth.ts) — never an LLM call of its own (AC7).
  */
 
 // --- Cycle modes and model tiers (RFC-0001 §B model routing) ---
@@ -314,7 +314,9 @@ export type JournalEventName =
   | 'stalled'
   | 'redispatched'
   | 'unit-failed'
-  | 'dependents-blocked';
+  | 'dependents-blocked'
+  | 'requeued'
+  | 'tick-failed';
 
 /** One journaled event. `ts` is stamped by the journal, never by callers. */
 export interface JournalEvent {

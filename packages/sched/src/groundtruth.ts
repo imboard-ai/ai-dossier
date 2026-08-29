@@ -10,8 +10,7 @@
  * and any consumer — supply fake ground truth and no subprocess runs.
  */
 
-import { execFileSync } from 'node:child_process';
-import type { ExecFn } from './project';
+import { createExecFn, type ExecFn } from './project';
 
 /** The latest runstate milestone on an issue, as `runstate last --json` reports it. */
 export interface GroundTruthMilestone {
@@ -32,28 +31,22 @@ export interface GroundTruth {
   branchHead(branch: string): string | null;
 }
 
-/** Subprocess timeout: a hung gh/git call must not wedge a tick under the state lock. */
+/** Subprocess timeout: a hung gh/git call must not stall a tick. */
 const GROUND_TRUTH_TIMEOUT_MS = 30_000;
 
 /**
  * Default exec for ground-truth calls: like project.ts's `defaultExec` (never
- * throws) but with a hard timeout so a hung `gh`/`git` cannot hold the
- * scheduler's state lock indefinitely.
+ * throws) but with a hard timeout so a hung `gh`/`git` cannot stall a tick
+ * indefinitely (ground truth is polled outside the state lock), and a failure
+ * observer that warns on stderr — a broken ground-truth environment (gh auth
+ * expired, `ai-dossier` missing from a cron PATH) is never silent.
  */
-export const groundTruthExec: ExecFn = (file, args, cwd) => {
-  try {
-    return String(
-      execFileSync(file, args, {
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: GROUND_TRUTH_TIMEOUT_MS,
-        ...(cwd ? { cwd } : {}),
-      })
-    ).trim();
-  } catch {
-    return null;
-  }
-};
+export const groundTruthExec: ExecFn = createExecFn(GROUND_TRUTH_TIMEOUT_MS, {
+  onError: (file, args, err) =>
+    process.stderr.write(
+      `⚠ sched ground truth: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+    ),
+});
 
 /** Parse the stdout of `ai-dossier runstate last --issue N --json`. */
 export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone | null {
@@ -113,7 +106,13 @@ export function createExecGroundTruth(
       );
     },
     branchHead(branch: string): string | null {
-      const out = exec('git', ['ls-remote', 'origin', branch], opts.repoDir);
+      // The branch string originates from milestone output written by the
+      // spawned agent — validate it as a ref name and end git's option
+      // parsing with `--` so a crafted "branch" (e.g. `--upload-pack=…`)
+      // can never become a git option (CWE-88). A rejected ref degrades to
+      // null head: the pushed-commit progress signal just doesn't fire.
+      if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch)) return null;
+      const out = exec('git', ['ls-remote', 'origin', '--', branch], opts.repoDir);
       if (out === null || out === '') return null;
       const sha = out.split('\t')[0]?.trim();
       return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha : null;

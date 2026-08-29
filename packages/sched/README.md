@@ -78,7 +78,8 @@ import {
   runnableUnits,         // pure: which units may run right now (dep-gated)
   tick,                  // one engine cycle: reconcile + verify + refill + spawn
   runLoop,               // the sched start loop (tick, sleep, repeat)
-  type EngineDeps,       // inject everything the engine touches (store/spawn/ground truth/clock)
+  type TickResult,       // what one tick did (spawned/completed/redispatched/failed/blocked)
+  type EngineDeps,       // inject everything the engine touches (store/journal/spawn/ground truth/clock)
   createSpawnDeps,       // real detached-spawn process I/O
   createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec)
   resolveDispatch,       // config → resolved command/prompt/tier-models/timers

@@ -15,6 +15,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { JOURNAL_FILE } from './journal';
 import { createEmptyState, validateState } from './state';
 import {
   CONFIG_SCHEMA_VERSION,
@@ -34,7 +35,6 @@ const LOCK_RETRY_MS = 200;
 
 const STATE_FILE = 'state.json';
 const CONFIG_FILE = 'config.json';
-const JOURNAL_FILE = 'events.jsonl';
 const LOCK_DIR = '.sched-lock';
 
 /** Thrown when the cross-process lock cannot be acquired in time. */
@@ -192,7 +192,14 @@ export class SchedStore {
     try {
       raw = fs.readFileSync(statePath, 'utf-8');
     } catch (err) {
-      throw new CorruptStateError(statePath, err);
+      // An I/O failure (permissions, disk, read-only mount) is NOT corruption —
+      // the destructive "rename to reset" advice must not attach to it.
+      throw new CorruptStateError(
+        statePath,
+        new Error(
+          `could not READ the file (${(err as Error).message}) — this is an I/O failure, not corruption; renaming will not fix it`
+        )
+      );
     }
     try {
       return validateState(JSON.parse(raw));

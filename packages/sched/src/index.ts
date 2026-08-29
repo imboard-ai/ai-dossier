@@ -28,9 +28,17 @@ export {
   isVerifiedComplete,
   parseMilestoneJson,
 } from './groundtruth';
-export { Journal, unitEvent } from './journal';
+export { issueOfUnit, JOURNAL_FILE, Journal, readJsonl, unitEvent } from './journal';
+
 export { CorruptStateError, LockTimeoutError, SchedStore, writeAtomic } from './persist';
-export { defaultExec, type ExecFn, resolveProjectSlug, schedStateDir } from './project';
+export {
+  createExecFn,
+  defaultExec,
+  type ExecFn,
+  resolveProjectSlug,
+  sanitizeSlug,
+  schedStateDir,
+} from './project';
 export { DISPATCHABLE_ISSUE_STATUSES } from './readiness';
 export {
   type Assignment,

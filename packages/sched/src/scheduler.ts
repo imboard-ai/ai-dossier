@@ -31,12 +31,9 @@ export { runnableUnits, dependencyBlockers, batchBlockers };
 export type { DependencyBlocker, RunnableUnit };
 
 /** One placement made by `computeAssignments`: slot ← unit. */
-export interface Assignment {
-  slot: number;
-  kind: 'issue' | 'batch';
-  issue?: number;
-  batch?: string;
-}
+export type Assignment =
+  | { slot: number; kind: 'issue'; issue: number }
+  | { slot: number; kind: 'batch'; batch: string };
 
 function unitId(unit: RunnableUnit): string {
   return unit.kind === 'issue' ? `issue:${unit.issue}` : `batch:${unit.batch}`;

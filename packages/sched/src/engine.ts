@@ -35,21 +35,22 @@ import {
   type ResolvedDispatch,
   resolveDispatch,
   type SpawnDeps,
+  STOP_POLL_MAX_MS,
+  STOP_POLL_MIN_MS,
   unitLogName,
 } from './dispatch';
 import { type GroundTruth, type GroundTruthMilestone, isVerifiedComplete } from './groundtruth';
-import { type Journal, unitEvent } from './journal';
+import { issueOfUnit, type Journal, unitEvent } from './journal';
 import type { SchedStore } from './persist';
 import { computeAssignments } from './scheduler';
 import { findEntry, transitionIssue, transitionSlot } from './state';
 import {
   ESCALATION_CAP,
   type JournalEventName,
-  type ModelTier,
-  type QueueEntry,
   type SchedConfig,
   type SchedState,
   type SlotEntry,
+  type SlotStatus,
   TERMINAL_ISSUE_STATUSES,
 } from './types';
 
@@ -71,7 +72,7 @@ export interface TickResult {
   completed: string[];
   /** Units redispatched one tier stronger (stall or unverified exit). */
   redispatched: string[];
-  /** Units failed (escalation cap / strongest tier). */
+  /** Units failed (escalation cap / strongest tier / spawn error). */
   failed: string[];
   /** Issues blocked transitively by a failure. */
   blocked: number[];
@@ -88,55 +89,11 @@ function emptyResult(): TickResult {
   };
 }
 
-/** `issue:464` → 464; null for batch or malformed unit ids. */
-function issueOfUnit(unit: string | null): number | null {
-  if (unit === null || !unit.startsWith('issue:')) return null;
-  const n = Number.parseInt(unit.slice('issue:'.length), 10);
-  return Number.isInteger(n) && n > 0 ? n : null;
-}
-
-/**
- * Metadata patch on a slot WITHOUT a status transition (pid/phase/branch/
- * last_head/last_progress are data, not machine states — RFC-0001 §D.3 keeps
- * them alongside the status, and the transition tables stay pure).
- */
-function patchSlot(
-  state: SchedState,
-  slotId: number,
-  patch: Partial<SlotEntry>,
-  now: Date
-): SchedState {
-  return {
-    ...state,
-    slots: state.slots.map((s) =>
-      s.id === slotId ? { ...s, ...patch, updated_at: now.toISOString() } : s
-    ),
-  };
-}
-
 /** Ground-truth snapshot for one unit, gathered outside the lock. */
 interface UnitTruth {
   milestone: GroundTruthMilestone | null;
   closed: boolean;
   head: string | null;
-}
-
-function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> {
-  const out = new Map<string, UnitTruth>();
-  for (const slot of state.slots) {
-    if (slot.unit === null) continue;
-    if (slot.status !== 'running' && slot.status !== 'verifying' && slot.status !== 'exited') {
-      continue;
-    }
-    const issue = issueOfUnit(slot.unit);
-    if (issue === null || out.has(slot.unit)) continue;
-    out.set(slot.unit, {
-      milestone: deps.groundTruth.latestMilestone(issue),
-      closed: deps.groundTruth.issueClosed(issue),
-      head: slot.branch !== null ? deps.groundTruth.branchHead(slot.branch) : null,
-    });
-  }
-  return out;
 }
 
 interface TickCtx {
@@ -158,6 +115,41 @@ function slotOf(state: SchedState, unit: string): SlotEntry | undefined {
   return state.slots.find((s) => s.unit === unit);
 }
 
+/**
+ * Metadata patch on a slot WITHOUT a status transition (pid/phase/branch/
+ * last_head/last_progress are data, not machine states — RFC-0001 §D.3 keeps
+ * them alongside the status, and the transition tables stay pure).
+ */
+function patchSlot(
+  state: SchedState,
+  slotId: number,
+  patch: Partial<SlotEntry>,
+  now: Date
+): SchedState {
+  return {
+    ...state,
+    slots: state.slots.map((s) =>
+      s.id === slotId ? { ...s, ...patch, updated_at: now.toISOString() } : s
+    ),
+  };
+}
+
+/** Walk a slot to `idle` one declared edge per iteration; `step` picks the next status. */
+function walkSlotToIdle(
+  state: SchedState,
+  unit: string,
+  now: Date,
+  step: (status: SlotStatus) => SlotStatus
+): SchedState {
+  let next = state;
+  let slot = slotOf(next, unit);
+  while (slot && slot.status !== 'idle') {
+    next = transitionSlot(next, slot.id, step(slot.status), {}, now);
+    slot = slotOf(next, unit);
+  }
+  return next;
+}
+
 /** Kill the agent holding `unit`'s slot, if it is alive. */
 function killUnitAgent(ctx: TickCtx, state: SchedState, unit: string): void {
   const slot = slotOf(state, unit);
@@ -166,23 +158,27 @@ function killUnitAgent(ctx: TickCtx, state: SchedState, unit: string): void {
   }
 }
 
-/** Release the slot holding `unit` to `idle` through the failure rail. */
-function releaseSlot(ctx: TickCtx, state: SchedState, unit: string): SchedState {
-  const now = ctx.deps.now();
-  let next = state;
-  let slot = slotOf(next, unit);
-  while (slot && slot.status !== 'idle') {
-    if (slot.status === 'complete' || slot.status === 'failed') {
-      next = transitionSlot(next, slot.id, 'idle', {}, now);
-    } else {
-      // Every other unit-holding state is abortable (assigned/running/exited/
-      // verifying/recovering) — force failed, then idle.
-      next = transitionSlot(next, slot.id, 'failed', {}, now);
+// --- Poll (outside the lock) ---
+
+function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> {
+  const out = new Map<string, UnitTruth>();
+  for (const slot of state.slots) {
+    if (slot.unit === null) continue;
+    if (slot.status !== 'running' && slot.status !== 'verifying' && slot.status !== 'exited') {
+      continue;
     }
-    slot = slotOf(next, unit);
+    const issue = issueOfUnit(slot.unit);
+    if (issue === null || out.has(slot.unit)) continue;
+    out.set(slot.unit, {
+      milestone: deps.groundTruth.latestMilestone(issue),
+      closed: deps.groundTruth.issueClosed(issue),
+      head: slot.branch !== null ? deps.groundTruth.branchHead(slot.branch) : null,
+    });
   }
-  return next;
+  return out;
 }
+
+// --- Spawn / fail / complete ---
 
 /** Spawn (or respawn) the agent for `unit` and move its slot to `running`. */
 function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
@@ -203,16 +199,31 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
   const cmd = buildAgentCommand(ctx.dispatch.command, entry.tier, issue, ctx.dispatch.tierModels);
   const prompt = buildPrompt(ctx.dispatch.prompt, issue);
   const logFile = path.join(ctx.deps.store.runsDir, `${unitLogName(unit)}.log`);
-  const pid = ctx.deps.spawnDeps.spawn(cmd, prompt, logFile);
+
+  let pid: number;
+  try {
+    pid = ctx.deps.spawnDeps.spawn(cmd, prompt, logFile);
+  } catch (err) {
+    // A spawn failure fails the unit through the declared failure rail —
+    // visible in `sched status` (Failed: … spawn-error) instead of aborting
+    // the whole tick and silently discarding every other unit's reconcile.
+    return failUnit(ctx, state, unit, `spawn-error: ${(err as Error).message}`);
+  }
+
   const now = ctx.deps.now();
   const patch = { pid, phase: 'gate', last_progress_at: now.toISOString() };
-
   const next =
     slot.status === 'assigned' || slot.status === 'recovering'
       ? transitionSlot(state, slot.id, 'running', patch, now)
       : patchSlot(state, slot.id, patch, now);
 
-  journal(ctx, 'spawned', unit, { pid, tier: entry.tier, slot: slot.id, cmd: cmd.join(' ') });
+  journal(ctx, 'spawned', unit, {
+    pid,
+    tier: entry.tier,
+    slot: slot.id,
+    cmd: cmd.join(' '),
+    log: logFile,
+  });
   ctx.result.spawned.push(unit);
   return next;
 }
@@ -224,7 +235,7 @@ function failUnit(ctx: TickCtx, state: SchedState, unit: string, reason: string)
   const now = ctx.deps.now();
 
   killUnitAgent(ctx, state, unit);
-  let next = releaseSlot(ctx, state, unit);
+  let next = releaseSlotViaFailure(ctx, state, unit);
 
   const entry = findEntry(next, issue);
   if (entry && !TERMINAL_ISSUE_STATUSES.has(entry.status)) {
@@ -237,6 +248,13 @@ function failUnit(ctx: TickCtx, state: SchedState, unit: string, reason: string)
     ctx.result.blocked.push(...blocked.issues);
   }
   return next;
+}
+
+/** Release a unit's slot to idle through the failure rail (failed → idle). */
+function releaseSlotViaFailure(ctx: TickCtx, state: SchedState, unit: string): SchedState {
+  return walkSlotToIdle(state, unit, ctx.deps.now(), (status) =>
+    status === 'complete' || status === 'failed' ? 'idle' : 'failed'
+  );
 }
 
 /** Block every entry that transitively depends on `failedIssue` (AC4). */
@@ -282,7 +300,7 @@ function blockTransitiveDependents(
     // A dependent mid-run is working toward a doomed merge — release its slot.
     const unit = `issue:${issue}`;
     killUnitAgent(ctx, next, unit);
-    next = releaseSlot(ctx, next, unit);
+    next = releaseSlotViaFailure(ctx, next, unit);
 
     next = transitionIssue(next, issue, 'blocked', { reason }, now);
     journal(ctx, 'dependents-blocked', unit, { reason });
@@ -302,7 +320,8 @@ function enterRecovery(
   state: SchedState,
   unit: string,
   causeEvent: 'stalled' | 'verify-incomplete',
-  cause: string
+  cause: string,
+  evidence: Record<string, unknown> = {}
 ): SchedState {
   const issue = issueOfUnit(unit);
   if (issue === null) return state;
@@ -332,10 +351,15 @@ function enterRecovery(
   next = {
     ...next,
     entries: next.entries.map((e) =>
-      e.issue === issue ? { ...e, tier: nextTier as ModelTier, updated_at: now.toISOString() } : e
+      e.issue === issue ? { ...e, tier: nextTier, updated_at: now.toISOString() } : e
     ),
   };
-  journal(ctx, causeEvent, unit, { detail: cause, slot: slot.id });
+  journal(ctx, causeEvent, unit, {
+    detail: cause,
+    slot: slot.id,
+    ...(slot.last_progress_at !== null ? { last_progress_at: slot.last_progress_at } : {}),
+    ...evidence,
+  });
   journal(ctx, 'redispatched', unit, { tier: nextTier, slot: slot.id });
   ctx.result.redispatched.push(unit);
   // Respawn immediately on the recovering rail — recovering → running.
@@ -353,27 +377,15 @@ function completeUnit(
   if (issue === null) return state;
   const now = ctx.deps.now();
 
-  // Walk the slot machine to idle through its declared edges: the slot is in
-  // verifying/exited/running when this is called, and complete is reachable
-  // only via exited → verifying → complete → idle.
-  let next = state;
-  let slot = slotOf(next, unit);
-  while (slot && slot.status !== 'idle') {
-    if (slot.status === 'complete' || slot.status === 'failed') {
-      next = transitionSlot(next, slot.id, 'idle', {}, now);
-    } else if (slot.status === 'running') {
-      next = transitionSlot(next, slot.id, 'exited', {}, now);
-    } else if (slot.status === 'exited') {
-      next = transitionSlot(next, slot.id, 'verifying', {}, now);
-    } else if (slot.status === 'verifying') {
-      next = transitionSlot(next, slot.id, 'complete', {}, now);
-    } else {
-      // assigned/recovering: nothing verified yet — should not happen on the
-      // completion paths, but never wedge the machine.
-      next = transitionSlot(next, slot.id, 'failed', {}, now);
-    }
-    slot = slotOf(next, unit);
-  }
+  // Walk the slot machine to idle through its declared edges: complete is
+  // reachable only via exited → verifying → complete → idle.
+  let next = walkSlotToIdle(state, unit, now, (status) => {
+    if (status === 'complete' || status === 'failed') return 'idle';
+    if (status === 'running') return 'exited';
+    if (status === 'exited') return 'verifying';
+    if (status === 'verifying') return 'complete';
+    return 'failed'; // assigned/recovering: nothing verified yet — never wedge
+  });
 
   const entry = findEntry(next, issue);
   if (entry && entry.status === 'dispatched') {
@@ -389,39 +401,17 @@ function completeUnit(
   return next;
 }
 
-/** Reconcile one running slot against its polled ground truth. */
-function reconcileRunning(
+// --- Per-slot reconciliation ---
+
+/** Apply the polled milestone/branch/head signals; returns whether progress happened. */
+function applyProgressSignals(
   ctx: TickCtx,
   state: SchedState,
   slot: SlotEntry,
-  truth: UnitTruth
-): SchedState {
-  const unit = slot.unit as string;
-  const issue = issueOfUnit(unit);
-  if (issue === null) return state;
+  truth: UnitTruth,
+  unit: string
+): { state: SchedState; progressed: boolean } {
   const now = ctx.deps.now();
-
-  // Orphaned pid after a sched restart, or a normally-exited agent: the exit
-  // is DETECTED, never trusted as completion (AC2/AC3).
-  if (slot.pid !== null && !ctx.deps.spawnDeps.isAlive(slot.pid)) {
-    journal(ctx, 'exit-detected', unit, { pid: slot.pid, slot: slot.id });
-    const exited = transitionSlot(state, slot.id, 'exited', {}, now);
-    return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete');
-  }
-
-  // Ground truth says the unit is DONE while the agent still holds the slot —
-  // externally-advanced state (AC3): reclaim the slot, kill the leftover agent.
-  if (isVerifiedComplete(truth.milestone, truth.closed)) {
-    journal(ctx, 'external-advance', unit, {
-      pid: slot.pid,
-      slot: slot.id,
-      detail: truth.closed ? 'issue closed' : 'report done',
-    });
-    killUnitAgent(ctx, state, unit);
-    const exited = transitionSlot(state, slot.id, 'exited', {}, now);
-    return completeUnitOrRecover(ctx, exited, unit, truth, 'external-advance');
-  }
-
   let next = state;
   let progressed = false;
 
@@ -454,15 +444,50 @@ function reconcileRunning(
         ? `milestone ${truth.milestone.phase}/${truth.milestone.status}`
         : 'new pushed commit',
     });
-    return next;
   }
+  return { state: next, progressed };
+}
+
+/** Reconcile one running slot against its polled ground truth. */
+function reconcileRunning(
+  ctx: TickCtx,
+  state: SchedState,
+  slot: SlotEntry,
+  truth: UnitTruth,
+  unit: string
+): SchedState {
+  const now = ctx.deps.now();
+
+  // Orphaned pid after a sched restart, or a normally-exited agent: the exit
+  // is DETECTED, never trusted as completion (AC2/AC3).
+  if (slot.pid !== null && !ctx.deps.spawnDeps.isAlive(slot.pid)) {
+    journal(ctx, 'exit-detected', unit, { pid: slot.pid, slot: slot.id });
+    const exited = transitionSlot(state, slot.id, 'exited', {}, now);
+    return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete');
+  }
+
+  // Ground truth says the unit is DONE while the agent still holds the slot —
+  // externally-advanced state (AC3): reclaim the slot, kill the leftover agent.
+  if (isVerifiedComplete(truth.milestone, truth.closed)) {
+    journal(ctx, 'external-advance', unit, {
+      pid: slot.pid,
+      slot: slot.id,
+      detail: truth.closed ? 'issue closed' : 'report done',
+    });
+    killUnitAgent(ctx, state, unit);
+    const exited = transitionSlot(state, slot.id, 'exited', {}, now);
+    return completeUnitOrRecover(ctx, exited, unit, truth, 'external-advance');
+  }
+
+  const progress = applyProgressSignals(ctx, state, slot, truth, unit);
+  if (progress.progressed) return progress.state;
 
   // No progress: the stall timer (AC4).
   const lastProgress = slot.last_progress_at ? Date.parse(slot.last_progress_at) : 0;
   if (now.getTime() - lastProgress >= ctx.dispatch.stallTimeoutMs) {
-    return enterRecovery(ctx, next, unit, 'stalled', 'stall');
+    return enterRecovery(ctx, progress.state, unit, 'stalled', 'stall');
   }
-  return next;
+  return progress.state;
 }
 
 /**
@@ -489,14 +514,27 @@ function completeUnitOrRecover(
   if (isVerifiedComplete(truth.milestone, truth.closed)) {
     return completeUnit(ctx, next, unit, via);
   }
-  return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit');
+  return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', {
+    observed: truth.milestone
+      ? `milestone ${truth.milestone.phase}/${truth.milestone.status}; closed=${truth.closed}`
+      : `no milestone; closed=${truth.closed}`,
+  });
 }
 
 /** Re-attach or spawn a slot left `assigned` by a crash between assign and spawn. */
-function reconcileAssigned(ctx: TickCtx, state: SchedState, slot: SlotEntry): SchedState {
-  const unit = slot.unit as string;
+function reconcileAssigned(
+  ctx: TickCtx,
+  state: SchedState,
+  slot: SlotEntry,
+  unit: string
+): SchedState {
   if (slot.pid !== null && ctx.deps.spawnDeps.isAlive(slot.pid)) {
     // Crash after spawn, before the running transition: re-attach by pid.
+    journal(ctx, 'orphan-pid', unit, {
+      pid: slot.pid,
+      slot: slot.id,
+      detail: 're-attached after restart',
+    });
     return transitionSlot(state, slot.id, 'running', {}, ctx.deps.now());
   }
   journal(ctx, 'assigned', unit, { slot: slot.id, detail: 'crash-recovery spawn' });
@@ -504,8 +542,82 @@ function reconcileAssigned(ctx: TickCtx, state: SchedState, slot: SlotEntry): Sc
 }
 
 /** Reconcile a `recovering` slot: respawn with the escalated tier. */
-function reconcileRecovering(ctx: TickCtx, state: SchedState, slot: SlotEntry): SchedState {
-  return spawnUnit(ctx, state, slot.unit as string);
+function reconcileRecovering(ctx: TickCtx, state: SchedState, unit: string): SchedState {
+  return spawnUnit(ctx, state, unit);
+}
+
+// --- Tick phases ---
+
+/** Phase 1: reconcile every existing slot against its polled ground truth. */
+function reconcileSlots(
+  ctx: TickCtx,
+  state: SchedState,
+  polled: Map<string, UnitTruth>
+): SchedState {
+  let next = state;
+  for (const slot of state.slots) {
+    const unit = slot.unit;
+    if (unit === null) continue;
+    const truth: UnitTruth = polled.get(unit) ?? {
+      milestone: null,
+      closed: false,
+      head: null,
+    };
+    switch (slot.status) {
+      case 'assigned':
+        next = reconcileAssigned(ctx, next, slot, unit);
+        break;
+      case 'running':
+        next = reconcileRunning(ctx, next, slot, truth, unit);
+        break;
+      case 'exited':
+      case 'verifying':
+        next = completeUnitOrRecover(ctx, next, unit, truth, 'verify-complete');
+        break;
+      case 'recovering':
+        next = reconcileRecovering(ctx, next, unit);
+        break;
+      default:
+        break;
+    }
+  }
+  return next;
+}
+
+/** Phase 2: self-heal orphaned dispatches (crash between the entry and slot transitions). */
+function requeueOrphanedDispatches(ctx: TickCtx, state: SchedState): SchedState {
+  const held = new Set(state.slots.map((s) => s.unit).filter((u): u is string => u !== null));
+  let next = state;
+  for (const entry of state.entries) {
+    if (entry.status !== 'dispatched' || held.has(`issue:${entry.issue}`)) continue;
+    const now = ctx.deps.now();
+    next = transitionIssue(next, entry.issue, 'blocked', { reason: 'orphaned-dispatch' }, now);
+    next = transitionIssue(next, entry.issue, 'queued', { reason: null }, now);
+    journal(ctx, 'requeued', `issue:${entry.issue}`, {
+      detail: 'orphaned dispatch requeued after restart',
+    });
+  }
+  return next;
+}
+
+/** Phase 3: refill — every freed slot is filled in THIS tick (AC5). */
+function dispatchAssignments(ctx: TickCtx, state: SchedState, config: SchedConfig): SchedState {
+  const now = ctx.deps.now();
+  const { state: assigned, assignments } = computeAssignments(state, config, now, ['issue']);
+  let next = assigned;
+  for (const assignment of assignments) {
+    if (assignment.kind !== 'issue') continue;
+    const unit = `issue:${assignment.issue}`;
+    journal(ctx, 'assigned', unit, { slot: assignment.slot });
+    const entry = findEntry(next, assignment.issue);
+    if (!entry) continue;
+    if (entry.status === 'queued') {
+      next = transitionIssue(next, assignment.issue, 'classified', {}, now);
+    }
+    next = transitionIssue(next, assignment.issue, 'dispatched', {}, now);
+    next = spawnUnit(ctx, next, unit);
+  }
+  return next;
 }
 
 /**
@@ -519,66 +631,9 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
 
   return deps.store.withLock((state) => {
     const ctx: TickCtx = { deps, dispatch, result: emptyResult() };
-    let next = state;
-
-    // --- 1. Reconcile every existing slot ---
-    for (const slot of state.slots) {
-      if (slot.unit === null) continue;
-      const truth: UnitTruth = polled.get(slot.unit) ?? {
-        milestone: null,
-        closed: false,
-        head: null,
-      };
-      switch (slot.status) {
-        case 'assigned':
-          next = reconcileAssigned(ctx, next, slot);
-          break;
-        case 'running':
-          next = reconcileRunning(ctx, next, slot, truth);
-          break;
-        case 'exited':
-        case 'verifying':
-          next = completeUnitOrRecover(ctx, next, slot.unit as string, truth, 'verify-complete');
-          break;
-        case 'recovering':
-          next = reconcileRecovering(ctx, next, slot);
-          break;
-        default:
-          break;
-      }
-    }
-
-    // --- 2. Self-heal orphaned dispatches (crash between the entry and slot
-    // transitions): a dispatched entry no slot holds returns to the queue. ---
-    const held = new Set(next.slots.map((s) => s.unit).filter((u): u is string => u !== null));
-    for (const entry of next.entries) {
-      if (entry.status !== 'dispatched' || held.has(`issue:${entry.issue}`)) continue;
-      const now = ctx.deps.now();
-      next = transitionIssue(next, entry.issue, 'blocked', { reason: 'orphaned-dispatch' }, now);
-      next = transitionIssue(next, entry.issue, 'queued', { reason: null }, now);
-      journal(ctx, 'phase-updated', `issue:${entry.issue}`, {
-        detail: 'orphaned dispatch requeued after restart',
-      });
-    }
-
-    // --- 3. Refill: every freed slot is filled in THIS tick (AC5). ---
-    const { state: assigned, assignments } = computeAssignments(next, config, ctx.deps.now(), [
-      'issue',
-    ]);
-    next = assigned;
-    for (const assignment of assignments) {
-      if (assignment.kind !== 'issue' || assignment.issue === undefined) continue;
-      const unit = `issue:${assignment.issue}`;
-      const now = ctx.deps.now();
-      journal(ctx, 'assigned', unit, { slot: assignment.slot });
-      const entry = findEntry(next, assignment.issue) as QueueEntry;
-      if (entry.status === 'queued') {
-        next = transitionIssue(next, assignment.issue, 'classified', {}, now);
-      }
-      next = transitionIssue(next, assignment.issue, 'dispatched', {}, now);
-      next = spawnUnit(ctx, next, unit);
-    }
-
+    let next = reconcileSlots(ctx, state, polled);
+    next = requeueOrphanedDispatches(ctx, next);
+    next = dispatchAssignments(ctx, next, config);
     return { state: next, result: ctx.result };
   });
 }
@@ -586,7 +641,9 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
 /**
  * The long-running loop behind `sched start`: tick, sleep, repeat. Returns
  * when `shouldStop()` says so (the CLI wires SIGINT). A failed tick is
- * journaled and the loop continues — one bad tick (e.g. a transient gh
+ * journaled (`tick-failed`, with the error name — `LockTimeoutError` and
+ * `CorruptStateError` demand different operator actions) and reported on
+ * stderr, and the loop continues — one bad tick (e.g. a transient gh
  * failure) never stops the scheduler.
  */
 export async function runLoop(
@@ -601,7 +658,9 @@ export async function runLoop(
       const result = tick(deps, config);
       onTick?.(result);
     } catch (err) {
-      process.stderr.write(`⚠ sched tick failed: ${(err as Error).message}\n`);
+      const detail = `${(err as Error).name}: ${(err as Error).message}`;
+      process.stderr.write(`⚠ sched tick failed: ${detail}\n`);
+      deps.journal.append({ event: 'tick-failed', detail }, deps.now());
     }
     if (shouldStop()) break;
     await sleep(interval, shouldStop);
@@ -622,7 +681,7 @@ function sleep(ms: number, shouldStop: () => boolean): Promise<void> {
           resolve();
         }
       },
-      Math.min(1000, Math.max(100, Math.floor(ms / 10)))
+      Math.min(STOP_POLL_MAX_MS, Math.max(STOP_POLL_MIN_MS, Math.floor(ms / 10)))
     );
     if (typeof timer.unref === 'function') timer.unref();
     if (typeof stopCheck.unref === 'function') stopCheck.unref();

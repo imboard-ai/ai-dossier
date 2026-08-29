@@ -143,6 +143,9 @@ function isIsoDateString(value: unknown): value is string {
 }
 
 function validateQueueEntry(data: unknown, where: (n: number) => string): void {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error(`${where(0)}: entry must be an object`);
+  }
   const entry = data as Record<string, unknown>;
   if (!Number.isInteger(entry.issue) || (entry.issue as number) <= 0) {
     throw new Error(`${where(entry.issue as number)}: issue must be a positive integer`);

@@ -19,7 +19,9 @@
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { sanitizeSlug } from './project';
 import {
+  DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_STALL_TIMEOUT_MS,
   type DispatchConfig,
   type ModelTier,
@@ -87,7 +89,7 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
     prompt: dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE,
     tierModels,
     stallTimeoutMs: config.stall_timeout_ms ?? DEFAULT_STALL_TIMEOUT_MS,
-    reconcileIntervalMs: config.reconcile_interval_ms ?? 60_000,
+    reconcileIntervalMs: config.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS,
   };
 }
 
@@ -101,12 +103,11 @@ export function buildAgentCommand(
   template: readonly string[],
   tier: ModelTier,
   issue: number,
-  tierModels: Record<ModelTier, string | null>
+  tierModels: Readonly<Record<ModelTier, string | null>>
 ): string[] {
   const model = tierModels[tier] ?? null;
   const argv: string[] = [];
-  for (let i = 0; i < template.length; i++) {
-    const item = template[i];
+  for (const item of template) {
     if (item === '{model}') {
       if (model === null) {
         // Drop the preceding flag along with the placeholder.
@@ -137,35 +138,78 @@ export interface SpawnDeps {
   /**
    * Spawn a detached agent process and return its pid. `logFile` receives the
    * child's combined stdout/stderr (agents outlive sched, so their output
-   * cannot stay in this process's pipes).
+   * cannot stay in this process's pipes). Throws synchronously when the
+   * process cannot be spawned (missing binary, unwritable log dir).
    */
   spawn(cmd: string[], prompt: string, logFile: string): number;
-  /** Signal a pid; returns false when it was already dead. */
+  /** Signal a pid; returns false when it was already dead (or not ours). */
   kill(pid: number): boolean;
   /** Whether a pid is alive (best-effort; a reused pid reads as alive). */
   isAlive(pid: number): boolean;
 }
 
-/** Real process I/O: detached spawn with output to a log file, unref'd. */
+/** `issue:464` → `issue-464` (filesystem-safe unit ids for log file names). */
+export function unitLogName(unit: string): string {
+  return sanitizeSlug(unit);
+}
+
+/** Poll cadence bounds for `sleep`'s stop-check interval (engine loop). */
+export const STOP_POLL_MIN_MS = 100;
+export const STOP_POLL_MAX_MS = 1000;
+
+/**
+ * Real process I/O: detached spawn with output to a log file, unref'd.
+ *
+ * Pid-reuse guard: pids this instance spawned are remembered with their argv;
+ * a pid whose `/proc` cmdline no longer matches was reused by an unrelated
+ * process, and `kill`/`isAlive` refuse it (the agent we spawned is already
+ * dead — skipping the kill loses nothing). Pids read from state.json after a
+ * restart have no recorded identity and stay best-effort.
+ */
 export function createSpawnDeps(cwd?: string): SpawnDeps {
+  /** Pids spawned by THIS instance → their argv (pid-reuse guard). */
+  const spawnedCmds = new Map<number, string[]>();
+
+  /** A pid we spawned whose /proc cmdline no longer matches was reused. */
+  function isOurPid(pid: number): boolean {
+    const cmd = spawnedCmds.get(pid);
+    if (cmd === undefined) return true; // pid from state.json after a restart: best-effort
+    try {
+      const argv = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').split('\0').filter(Boolean);
+      return argv.length > 0 && argv[0].endsWith(path.basename(cmd[0]));
+    } catch {
+      return true; // /proc unavailable (macOS/Windows) or the process is gone
+    }
+  }
+
   return {
     spawn(cmd: string[], prompt: string, logFile: string): number {
       fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
-      const out = fs.openSync(logFile, 'a');
+      const out = fs.openSync(logFile, 'a', 0o600);
       try {
         const child = spawn(cmd[0], cmd.slice(1), {
           ...(cwd ? { cwd } : {}),
           detached: true,
           stdio: ['pipe', out, out],
         });
+        // Spawn failures surface synchronously via the pid check below; the
+        // async 'error' event must never crash the engine (ENOENT), and an
+        // agent exiting before reading stdin must never crash it either (EPIPE).
+        child.on('error', (err) => {
+          process.stderr.write(`⚠ sched: spawn '${cmd[0]}' failed: ${err.message}\n`);
+        });
         if (child.stdin !== null) {
+          child.stdin.on('error', () => {});
           child.stdin.write(prompt);
           child.stdin.end();
         }
         child.unref();
         if (child.pid === undefined) {
-          throw new Error(`failed to spawn ${cmd.join(' ')}`);
+          throw new Error(
+            `failed to spawn '${cmd[0]}' — is it on PATH? (command: ${cmd.join(' ')})`
+          );
         }
+        spawnedCmds.set(child.pid, cmd);
         return child.pid;
       } finally {
         // The child holds its own dups of the fd; the parent's copy must close.
@@ -173,6 +217,10 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
       }
     },
     kill(pid: number): boolean {
+      if (!isOurPid(pid)) {
+        spawnedCmds.delete(pid);
+        return false; // reused pid — the agent we spawned is already gone
+      }
       try {
         process.kill(pid, 'SIGTERM');
         return true;
@@ -183,15 +231,10 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
     isAlive(pid: number): boolean {
       try {
         process.kill(pid, 0);
-        return true;
+        return isOurPid(pid);
       } catch (err) {
         return (err as NodeJS.ErrnoException).code === 'EPERM';
       }
     },
   };
-}
-
-/** `issue:464` → `issue-464` (filesystem-safe unit ids for log file names). */
-export function unitLogName(unit: string): string {
-  return unit.replace(/[^A-Za-z0-9._-]/g, '-');
 }

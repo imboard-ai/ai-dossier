@@ -7,8 +7,10 @@
  * remote, no `gh`), the basename of `git rev-parse --show-toplevel`.
  *
  * The exec function is injectable so tests (and any non-CLI consumer) never
- * spawn processes. These are the ONLY subprocesses in this package — and they
- * are `gh`/`git`, never an LLM (AC7).
+ * spawn processes. Since #464 these are no longer the package's only
+ * subprocesses (dispatch.ts spawns the configured agent; groundtruth.ts execs
+ * runstate/gh/git), but all process I/O in the package is injectable, and
+ * none of it is an LLM call the scheduler makes itself (AC7).
  */
 
 import { execFileSync } from 'node:child_process';
@@ -17,34 +19,47 @@ import * as path from 'node:path';
 
 /**
  * Run a command and return trimmed stdout, or null when it fails (non-zero
- * exit, missing binary). Never throws — slug resolution degrades to the
- * fallback.
+ * exit, missing binary). Never throws — callers degrade to their fallback.
  */
 export type ExecFn = (file: string, args: string[], cwd?: string) => string | null;
 
-/** Default exec via `execFileSync`, swallowing failures. */
-export const defaultExec: ExecFn = (file, args, cwd) => {
-  try {
-    return String(
-      execFileSync(file, args, {
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-        ...(cwd ? { cwd } : {}),
-      })
-    ).trim();
-  } catch {
-    return null;
-  }
-};
+/** Build an `ExecFn` via `execFileSync` (never throws), optionally with a hard timeout and a failure observer. */
+export function createExecFn(
+  timeoutMs?: number,
+  opts?: { onError?: (file: string, args: string[], err: Error) => void }
+): ExecFn {
+  return (file, args, cwd) => {
+    try {
+      return String(
+        execFileSync(file, args, {
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),
+          ...(cwd ? { cwd } : {}),
+        })
+      ).trim();
+    } catch (err) {
+      opts?.onError?.(file, args, err as Error);
+      return null;
+    }
+  };
+}
+
+/** Default exec: no timeout. */
+export const defaultExec: ExecFn = createExecFn();
 
 /** Characters permitted in a project directory name. */
 const SLUG_SAFE = /[^A-Za-z0-9._-]/g;
 
-function sanitizeSlug(slug: string): string {
+/**
+ * Filesystem-safe form of an arbitrary identifier: everything outside
+ * `[A-Za-z0-9._-]` becomes `-`. `.` and `..` survive the character allowlist
+ * but are path components that would escape `~/.dossier/sched/` (e.g.
+ * `--project ..` → `~/.dossier` itself, overwriting the global CLI config via
+ * saveConfig) — those collapse to `default`.
+ */
+export function sanitizeSlug(slug: string): string {
   const out = slug.replace(SLUG_SAFE, '-');
-  // `.` and `..` survive the character allowlist but are path components that
-  // would escape `~/.dossier/sched/` (e.g. `--project ..` → `~/.dossier`
-  // itself, overwriting the global CLI config via saveConfig) — collapse them.
   if (out === '.' || out === '..') return 'default';
   return out;
 }

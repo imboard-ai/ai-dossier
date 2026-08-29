@@ -10,11 +10,14 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { JournalEvent, JournalEventName } from './types';
 
+/** The journal file name — the single source (persist.ts's journalPath uses it). */
+export const JOURNAL_FILE = 'events.jsonl';
+
 export class Journal {
   readonly filePath: string;
 
   constructor(dir: string) {
-    this.filePath = path.join(dir, 'events.jsonl');
+    this.filePath = path.join(dir, JOURNAL_FILE);
   }
 
   /** Append one event, stamping `ts` from the caller's clock. Never throws. */
@@ -22,7 +25,10 @@ export class Journal {
     const line: JournalEvent = { ts: now.toISOString(), ...event };
     try {
       fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-      fs.appendFileSync(this.filePath, `${JSON.stringify(line)}\n`, 'utf8');
+      fs.appendFileSync(this.filePath, `${JSON.stringify(line)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
     } catch (err) {
       process.stderr.write(
         `⚠ sched: could not append journal event ${event.event}: ${(err as Error).message}\n`
@@ -32,22 +38,38 @@ export class Journal {
 
   /** Read every event, oldest first; malformed lines are skipped. */
   read(): JournalEvent[] {
-    try {
-      if (!fs.existsSync(this.filePath)) return [];
-      const lines = fs.readFileSync(this.filePath, 'utf8').split('\n').filter(Boolean);
-      const events: JournalEvent[] = [];
-      for (const line of lines) {
-        try {
-          events.push(JSON.parse(line) as JournalEvent);
-        } catch {
-          // Skip malformed lines — the journal is append-only and best-effort.
-        }
-      }
-      return events;
-    } catch {
-      return [];
-    }
+    return readJsonl<JournalEvent>(this.filePath);
   }
+}
+
+/**
+ * Read a JSONL file oldest-first, skipping malformed lines; `[]` when the
+ * file is absent or unreadable. Shared by the journal and the CLI's run log
+ * so the read-loop exists once.
+ */
+export function readJsonl<T>(file: string): T[] {
+  try {
+    if (!fs.existsSync(file)) return [];
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    const out: T[] = [];
+    for (const line of lines) {
+      try {
+        out.push(JSON.parse(line) as T);
+      } catch {
+        // Skip malformed lines — append-only best-effort files.
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** `issue:464` → 464; null for batch or malformed unit ids. */
+export function issueOfUnit(unit: string | null): number | null {
+  if (unit === null || !unit.startsWith('issue:')) return null;
+  const n = Number.parseInt(unit.slice('issue:'.length), 10);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 /** Convenience: build the journaled event for a unit without repeating ids. */
@@ -56,13 +78,6 @@ export function unitEvent(
   unit: string,
   extra: Omit<JournalEvent, 'ts' | 'event' | 'unit'> = {}
 ): Omit<JournalEvent, 'ts' | 'event' | 'unit'> & { event: JournalEventName; unit: string } {
-  const issue = unit.startsWith('issue:')
-    ? Number.parseInt(unit.slice('issue:'.length), 10)
-    : undefined;
-  return {
-    event,
-    unit,
-    ...(issue !== undefined && !Number.isNaN(issue) ? { issue } : {}),
-    ...extra,
-  };
+  const issue = issueOfUnit(unit);
+  return { event, unit, ...(issue !== null ? { issue } : {}), ...extra };
 }

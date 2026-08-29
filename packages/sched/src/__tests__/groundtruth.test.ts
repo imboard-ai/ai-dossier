@@ -113,6 +113,27 @@ describe('createExecGroundTruth', () => {
     expect(createExecGroundTruth(exec).branchHead('x')).toBeNull();
   });
 
+  it('rejects crafted branch names that could become git options (CWE-88)', () => {
+    const calls: Array<[string, string[]]> = [];
+    const exec: ExecFn = (file, args) => {
+      calls.push([file, args]);
+      return null;
+    };
+    const gt = createExecGroundTruth(exec);
+    expect(gt.branchHead('--upload-pack=evil')).toBeNull();
+    expect(gt.branchHead('-oProxyCommand=evil')).toBeNull();
+    expect(gt.branchHead('ok-branch')).toBeNull(); // exec returns null → null head
+    // No git call may have been made for the rejected refs…
+    expect(calls.filter(([f]) => f === 'git')).toHaveLength(1);
+    // …and the legit ref is queried after the `--` end-of-options separator.
+    expect(calls.find(([f]) => f === 'git')?.[1]).toEqual([
+      'ls-remote',
+      'origin',
+      '--',
+      'ok-branch',
+    ]);
+  });
+
   it('groundTruthExec is the default exec (injectable boundary exists)', () => {
     expect(typeof groundTruthExec).toBe('function');
   });

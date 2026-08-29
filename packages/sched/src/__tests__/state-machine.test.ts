@@ -276,7 +276,7 @@ describe('slot state machine (RFC-0001 §D.3)', () => {
     state = transitionSlot(state, 1, 'recovering', { recoveries: 1 }, NOW2);
     state = transitionSlot(state, 1, 'running', { pid: 2 }, NOW2);
     state = transitionSlot(state, 1, 'recovering', { recoveries: 2 }, NOW2);
-    state = transitionSlot(state, 1, 'failed', { reason: 'escalation-cap' } as never, NOW2);
+    state = transitionSlot(state, 1, 'failed', {}, NOW2);
     state = transitionSlot(state, 1, 'idle', {}, NOW2);
     expect(state.slots[0].status).toBe('idle');
   });
