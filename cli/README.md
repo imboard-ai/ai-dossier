@@ -152,6 +152,26 @@ safe-run-dossier https://example.com/dossier.ds.md claude-code
 safe-run-dossier https://example.com/dossier.ds.md cursor
 ```
 
+## Running Dossiers (`run`)
+
+`ai-dossier run <file|url|registry-name>` verifies a dossier and executes it with a spawned agent CLI.
+
+### Agent selection (`--llm`)
+
+Accepted values: `claude-code`, `opencode`, `auto` (default). Auto-detection tries `claude` first, then `opencode`, then fails with install hints — machines with only Claude Code installed keep their existing behavior. The default agent is also configurable: `dossier config defaultLlm <claude-code|opencode|auto>`.
+
+| Flag | claude-code | opencode |
+|---|---|---|
+| `--model` | `--model` | `--model` |
+| `--budget` | `--max-budget-usd` (headless only) | no equivalent — warned and ignored |
+| `--permission-mode` | `--permission-mode` (headless only) | no equivalent — configure permissions in `opencode.json` |
+| `--allowed-tools` | `--allowedTools` (headless only) | no equivalent — configure tool access in `opencode.json` |
+
+Unsupported flag combinations print a clear per-flag warning; they are never silently dropped.
+
+- **Headless** (`--headless`): `claude -p --output-format json` or `opencode run --format json`, dossier content piped via stdin. Usage (tokens/cost) is mined from the captured output and recorded in the run log.
+- **Interactive**: `claude <file>` or `opencode run -i -- <prompt>` (a seeded session; the `--` separator keeps the `---` frontmatter from being parsed as flags). Prefer `--headless` for large dossiers — interactive opencode passes the prompt as one argv element (~128KB OS limit).
+
 ---
 
 ## Registry Commands
@@ -641,7 +661,7 @@ ai-dossier history --clear --yes       # wipe the log
 
 Columns: TIMESTAMP, DOSSIER, VERSION, SOURCE, VERIFIED, DURATION, TOKENS(in/out), COST — auto-sized to the widest cell. Entries written before v0.12.0 lack the cost/observability fields and render `-`.
 
-Headless runs execute `claude -p --output-format json`; the CLI captures stdout (32MB cap) to extract token/cost usage and prints the agent's final result text once the run completes — output is not streamed live. When the output cannot be parsed as a claude JSON result, a stderr warning says so, usage fields are recorded as `null`, and the raw stdout is re-emitted.
+Headless runs execute `claude -p --output-format json` (claude-code) or `opencode run --format json` with the dossier piped via stdin (opencode); the CLI captures stdout (32MB cap) to extract token/cost usage and prints the agent's final result text once the run completes — output is not streamed live. When the output cannot be parsed as the agent's expected result (a claude JSON result / an opencode JSONL event stream), a stderr warning says so, usage fields are recorded as `null`, and the raw stdout is re-emitted.
 
 ### runs.jsonl schema
 
@@ -653,13 +673,13 @@ Headless runs execute `claude -p --output-format json`; the CLI captures stdout 
 | `source` | `cache` \| `registry` \| `local` \| `url` |
 | `registry`, `resolution_source` | Registry that served content; how the version was resolved (`pinned`/`registry`/`cache`/`stale-cache`) — registry sources only |
 | `verification` | `passed` \| `failed` \| `skipped` \| `nested-skip` |
-| `llm`, `user`, `cwd`, `nested` | LLM option in effect; who/where ran it; whether inside an agent host |
+| `llm`, `user`, `cwd`, `nested` | For runs that spawned an agent, the resolved agent CLI (`claude-code`/`opencode`, never the raw `auto` — v0.13.0+); otherwise the `--llm` option in effect. Plus who/where ran it; whether inside an agent host |
 | `duration_ms` | Wall-clock ms, action start → entry write (v0.12.0+) |
-| `spawned_command` | Exact agent command spawned (binary + args); prompt excluded — headless prompts travel over stdin. Null when nothing was spawned (v0.12.0+) |
+| `spawned_command` | Exact agent command spawned (binary + args); prompt excluded — headless prompts travel over stdin, and opencode interactive runs log a redacted form (v0.12.0+; redaction v0.13.0+) |
 | `model` | Model reported by the agent CLI (comma-joined when several ran), else the `--model` alias; null when unknown (v0.12.0+) |
 | `exit_code` | Spawned agent's exit code, or the CLI action's for early exits; null when killed by a signal (v0.12.0+) |
 | `spawn_error` | Why there is no exit code: spawn error (e.g. ENOENT) or signal. Null when the process exited normally (v0.12.0+) |
-| `input_tokens`, `output_tokens`, `total_cost_usd` | Usage reported by the agent (headless JSON output mode); null when not reported — never fabricated (v0.12.0+) |
+| `input_tokens`, `output_tokens`, `total_cost_usd` | Usage reported by the agent (claude JSON result / opencode JSONL event stream, headless only); null when not reported — never fabricated (v0.12.0+) |
 
 Pre-v0.12.0 entries simply lack the v0.12.0+ fields; consumers must treat them as optional/nullable.
 
@@ -793,6 +813,7 @@ dossier config defaultLlm
 
 # Set a setting
 dossier config defaultLlm claude-code
+dossier config defaultLlm opencode   # accepted values: claude-code, opencode, auto
 
 # Reset to defaults (preserves registry settings)
 dossier config --reset

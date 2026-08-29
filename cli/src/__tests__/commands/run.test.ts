@@ -565,17 +565,20 @@ describe('run command', () => {
   });
 
   describe('opencode agent support (#459)', () => {
+    // Shared headless descriptor mock for the opencode tests.
+    const openCodeDescriptor = {
+      cmd: 'opencode',
+      args: ['run', '--format', 'json'],
+      stdin: 'content',
+      description: 'cat "test.ds.md" | opencode run --format json',
+      agent: 'opencode',
+    };
+
     it('records the resolved agent CLI in llm and parses opencode JSONL usage', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
       vi.mocked(helpers.detectLlm).mockReturnValue('opencode');
-      vi.mocked(helpers.buildLlmCommand).mockReturnValue({
-        cmd: 'opencode',
-        args: ['run', '--format', 'json'],
-        stdin: '---dossier\n{"title":"Test"}\n---\nBody',
-        description: 'cat "test.ds.md" | opencode run --format json',
-        agent: 'opencode',
-      });
+      vi.mocked(helpers.buildLlmCommand).mockReturnValue({ ...openCodeDescriptor });
       vi.mocked(spawnSync).mockReturnValue(
         spawnResult(0, '{"type":"text"}\n{"type":"step_finish"}')
       );
@@ -633,13 +636,7 @@ describe('run command', () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
       vi.mocked(helpers.detectLlm).mockReturnValue('opencode');
-      vi.mocked(helpers.buildLlmCommand).mockReturnValue({
-        cmd: 'opencode',
-        args: ['run', '--format', 'json'],
-        stdin: 'content',
-        description: 'cat "test.ds.md" | opencode run --format json',
-        agent: 'opencode',
-      });
+      vi.mocked(helpers.buildLlmCommand).mockReturnValue({ ...openCodeDescriptor });
       vi.mocked(spawnSync).mockReturnValue(spawnResult(0, 'plain output'));
       vi.mocked(helpers.parseOpenCodeUsage).mockReturnValue(null);
       const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -678,13 +675,7 @@ describe('run command', () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
       vi.mocked(helpers.detectLlm).mockReturnValue('opencode');
-      vi.mocked(helpers.buildLlmCommand).mockReturnValue({
-        cmd: 'opencode',
-        args: ['run', '--format', 'json'],
-        stdin: 'content',
-        description: 'cat "test.ds.md" | opencode run --format json',
-        agent: 'opencode',
-      });
+      vi.mocked(helpers.buildLlmCommand).mockReturnValue({ ...openCodeDescriptor });
       vi.mocked(spawnSync).mockReturnValue(spawnResult(7, ''));
       vi.mocked(helpers.parseOpenCodeUsage).mockReturnValue(null);
       vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -712,6 +703,32 @@ describe('run command', () => {
           exit_code: 7,
         })
       );
+    });
+
+    it('never logs the prompt body: interactive opencode uses the redacted commandForLog', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      const dossierBody = '---dossier\n{"title":"Test"}\n---\nSECRET-PROMPT-BODY';
+      mockedFs.readFileSync.mockReturnValue(dossierBody);
+      vi.mocked(helpers.detectLlm).mockReturnValue('opencode');
+      // Interactive descriptor: args carry the prompt; commandForLog redacts it.
+      vi.mocked(helpers.buildLlmCommand).mockReturnValue({
+        cmd: 'opencode',
+        args: ['run', '-i', '--', dossierBody],
+        description: 'opencode run -i -- "<prompt from test.ds.md>"',
+        commandForLog: 'opencode run -i -- "<prompt from test.ds.md>"',
+        agent: 'opencode',
+      });
+      vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--llm', 'opencode']);
+
+      const entry = vi.mocked(runLog.appendRunLog).mock.calls.at(-1)?.[0];
+      expect(entry?.spawned_command).toBe('opencode run -i -- "<prompt from test.ds.md>"');
+      expect(entry?.spawned_command).not.toContain('SECRET-PROMPT-BODY');
+      expect(entry?.llm).toBe('opencode');
     });
   });
 });

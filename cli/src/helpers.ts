@@ -243,28 +243,28 @@ export function detectLlm(llmOption: string, silent = false): string | null {
     return llmOption;
   }
 
-  // Auto-detect LLM: claude first, then opencode.
-  try {
-    execFileSync('which', ['claude'], { stdio: 'pipe' });
-    if (!silent) console.log('   Detected: Claude Code');
-    return 'claude-code';
-  } catch {
-    // Fall through to opencode.
-  }
-  try {
-    execFileSync('which', ['opencode'], { stdio: 'pipe' });
-    if (!silent) console.log('   Detected: opencode');
-    return 'opencode';
-  } catch {
-    if (!silent) {
-      console.log('❌ No supported LLM detected\n');
-      console.log('Supported LLMs:');
-      console.log('  - Claude Code (install from https://claude.com/claude-code)');
-      console.log('  - opencode (install from https://opencode.ai)\n');
-      console.log('Or specify manually: --llm claude-code | --llm opencode\n');
+  // Auto-detect LLM: claude first (historical default), then opencode.
+  const candidates = [
+    { bin: 'claude', id: 'claude-code', label: 'Claude Code' },
+    { bin: 'opencode', id: 'opencode', label: 'opencode' },
+  ];
+  for (const candidate of candidates) {
+    try {
+      execFileSync('which', [candidate.bin], { stdio: 'pipe' });
+      if (!silent) console.log(`   Detected: ${candidate.label}`);
+      return candidate.id;
+    } catch {
+      // Try the next candidate.
     }
-    return null;
   }
+  if (!silent) {
+    console.log('❌ No supported LLM detected\n');
+    console.log('Supported LLMs:');
+    console.log('  - Claude Code (install from https://claude.com/claude-code)');
+    console.log('  - opencode (install from https://opencode.ai)\n');
+    console.log('Or specify manually: --llm claude-code | --llm opencode\n');
+  }
+  return null;
 }
 
 export interface LlmExecDescriptor {
@@ -276,11 +276,20 @@ export interface LlmExecDescriptor {
   description: string;
   /** Which agent CLI this descriptor spawns — drives usage parsing and run-log recording. */
   agent: 'claude-code' | 'opencode';
+  /**
+   * Log-safe command line for runs.jsonl. Set only when `args` carry prompt
+   * content that must not be persisted verbatim (opencode interactive); the
+   * run log uses this instead of joining `args`.
+   */
+  commandForLog?: string;
 }
 
 /**
- * Passthrough options forwarded to the underlying LLM CLI (claude-code).
- * These map to claude flags; most only apply in headless (`-p`) mode.
+ * Passthrough options for the spawned agent CLI.
+ * claude-code: these map to claude flags; budget/permission-mode/allowed-tools
+ * only apply in headless (`-p`) mode. opencode: only `model` is forwarded
+ * (`--model`); the rest have no opencode CLI equivalent and emit a warning
+ * (#459 — see warnUnsupportedOpenCodeFlags).
  */
 export interface LlmPassthroughOptions {
   model?: string;
@@ -344,7 +353,9 @@ export function downloadUrlToTempFile(url: string): string {
  * has no spend-limit flag — a clear warning instead of a silent drop.
  */
 function warnUnsupportedOpenCodeFlags(passthrough?: LlmPassthroughOptions): void {
-  if (passthrough?.budget != null && !Number.isNaN(passthrough.budget)) {
+  if (passthrough?.budget != null && Number.isNaN(passthrough.budget)) {
+    console.warn('⚠️  --budget value is not a number — ignored');
+  } else if (passthrough?.budget != null) {
     console.warn(
       '⚠️  --budget has no opencode equivalent — ignored (opencode has no spend-limit flag)'
     );
@@ -366,9 +377,13 @@ function warnUnsupportedOpenCodeFlags(passthrough?: LlmPassthroughOptions): void
  * Headless: `opencode run --format json` with the dossier content piped via
  * stdin (opencode reads the prompt from stdin when no message argument is
  * given); the JSONL event stream lets usage be mined (parseOpenCodeUsage).
- * Interactive: `opencode run -i "<content>"` — bare `opencode [project]`
+ * Interactive: `opencode run -i -- <content>` — bare `opencode [project]`
  * would treat the prompt as a project path, so the seeded-session form is
- * the interactive equivalent.
+ * the interactive equivalent. The `--` separator is required: dossier
+ * content starts with `---` (frontmatter), which the child parser would
+ * otherwise read as flags. Interactive mode also caps the prompt at the OS
+ * per-argument limit (~128KB on Linux) — headless (stdin) is the size-safe
+ * path for large dossiers.
  */
 function buildOpenCodeCommand(
   file: string,
@@ -390,11 +405,18 @@ function buildOpenCodeCommand(
       agent: 'opencode',
     };
   }
-  const args = ['run', '-i', ...modelArgs, content];
+  if (content.length > 100_000) {
+    console.warn(
+      `⚠️  prompt is ${content.length} chars — may exceed the OS argv limit (~128KB); prefer --headless, which pipes the prompt via stdin`
+    );
+  }
+  const args = ['run', '-i', ...modelArgs, '--', content];
+  const commandForLog = `opencode run -i${modelFlags} -- "<prompt from ${path.basename(file)}>"`;
   return {
     cmd: 'opencode',
     args,
-    description: `opencode run -i${modelFlags} "<prompt from ${path.basename(file)}>"`,
+    commandForLog,
+    description: commandForLog,
     agent: 'opencode',
   };
 }
@@ -477,8 +499,12 @@ export interface AgentRunUsage {
 /**
  * Sentinel thrown by the run command when the spawned agent exits non-zero
  * (or fails to spawn) — carries everything the run log records about the exit.
+ * `__agentExit` is the discriminant: the catch site must not duck-type on
+ * `status`, which ordinary library errors can also carry.
  */
 export interface AgentExitError {
+  /** Discriminant — always true; narrows the catch-site check. */
+  __agentExit: true;
   /** The child's exit status; null when it was killed by a signal or failed to spawn. */
   status: number | null;
   /** Signal that killed the child, when applicable. */
@@ -490,6 +516,13 @@ export interface AgentExitError {
 
 function toCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/** Narrow an unknown value to a plain-object record; null for anything else. */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 /**
@@ -512,19 +545,12 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
     return null;
   }
 
-  const usage =
-    parsed.usage && typeof parsed.usage === 'object' && !Array.isArray(parsed.usage)
-      ? (parsed.usage as Record<string, unknown>)
-      : {};
-  const modelUsage =
-    parsed.modelUsage && typeof parsed.modelUsage === 'object' && !Array.isArray(parsed.modelUsage)
-      ? (parsed.modelUsage as Record<string, unknown>)
-      : null;
+  const usage = asRecord(parsed.usage) ?? {};
+  const modelUsage = asRecord(parsed.modelUsage);
   // Keep only object-shaped entries; a scalar entry is malformed, not a model.
   const modelEntries = modelUsage
     ? Object.entries(modelUsage).filter(
-        (entry): entry is [string, Record<string, unknown>] =>
-          !!entry[1] && typeof entry[1] === 'object' && !Array.isArray(entry[1])
+        (entry): entry is [string, Record<string, unknown>] => !!asRecord(entry[1])
       )
     : [];
 
@@ -593,19 +619,13 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
     }
     sawEvent = true;
 
-    const part =
-      event.part && typeof event.part === 'object' && !Array.isArray(event.part)
-        ? (event.part as Record<string, unknown>)
-        : null;
+    const part = asRecord(event.part);
 
     if (event.type === 'text' && part && typeof part.text === 'string') {
       texts.push(part.text);
     }
     if (event.type === 'step_finish' && part) {
-      const tokens =
-        part.tokens && typeof part.tokens === 'object' && !Array.isArray(part.tokens)
-          ? (part.tokens as Record<string, unknown>)
-          : null;
+      const tokens = asRecord(part.tokens);
       if (tokens) {
         const input = toCount(tokens.input);
         if (input !== null) {

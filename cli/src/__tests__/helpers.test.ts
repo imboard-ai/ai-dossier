@@ -430,10 +430,15 @@ describe('buildLlmCommand (opencode)', () => {
     const r = result as NonNullable<typeof result>;
     expect(r.cmd).toBe('opencode');
     // Bare `opencode [project]` would treat the prompt as a project path —
-    // the prompt must seed a `run -i` session instead.
-    expect(r.args).toEqual(['run', '-i', 'dossier content']);
+    // the prompt must seed a `run -i` session instead. The `--` separator is
+    // required: dossier content starts with `---`, which the child parser
+    // would otherwise read as flags.
+    expect(r.args).toEqual(['run', '-i', '--', 'dossier content']);
     expect(r.stdin).toBeUndefined();
     expect(r.agent).toBe('opencode');
+    // The log-safe form must not carry the prompt body.
+    expect(r.commandForLog).toBe('opencode run -i -- "<prompt from dossier.ds.md>"');
+    expect(r.commandForLog).not.toContain('dossier content');
   });
 
   it('should forward --model in interactive mode', () => {
@@ -442,7 +447,14 @@ describe('buildLlmCommand (opencode)', () => {
     });
     expect(result).not.toBeNull();
     const r = result as NonNullable<typeof result>;
-    expect(r.args).toEqual(['run', '-i', '--model', 'moonshotai/kimi-k3', 'dossier content']);
+    expect(r.args).toEqual(['run', '-i', '--model', 'moonshotai/kimi-k3', '--', 'dossier content']);
+  });
+
+  it('should warn when the interactive prompt may exceed the OS argv limit', () => {
+    mockedFs.readFileSync.mockReturnValue('x'.repeat(100_001));
+    const result = buildLlmCommand('opencode', '/path/to/dossier.ds.md', false);
+    expect(result).not.toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('argv limit'));
   });
 
   it('should warn about unsupported flags instead of silently dropping them (headless)', () => {
@@ -467,6 +479,17 @@ describe('buildLlmCommand (opencode)', () => {
     });
     expect(result).not.toBeNull();
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('--permission-mode'));
+  });
+
+  it('should warn when --budget is not a number instead of dropping it silently', () => {
+    const result = buildLlmCommand('opencode', '/path/to/dossier.ds.md', true, {
+      budget: Number.NaN,
+    });
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.args).toEqual(['run', '--format', 'json']);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('not a number'));
   });
 });
 
