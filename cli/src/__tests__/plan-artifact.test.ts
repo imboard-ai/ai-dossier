@@ -3,6 +3,7 @@ import {
   buildPlanComment,
   extractPredictedFiles,
   findLatestPlan,
+  isHeadSha,
   MAX_ARTIFACT_BODY_LENGTH,
   PLAN_SECTIONS,
   parsePlanArtifact,
@@ -148,14 +149,16 @@ describe('findLatestPlan', () => {
 
   it('takes the LAST plan comment — posting supersedes', () => {
     const latest = findLatestPlan(['noise comment', older, 'another noise', newer]);
-    expect(latest?.head).toBe('bbb2222');
-    expect(latest?.sections.Problem).toBe('v2');
+    expect(latest?.artifact.head).toBe('bbb2222');
+    expect(latest?.artifact.sections.Problem).toBe('v2');
+    expect(latest?.index).toBe(3);
   });
 
   it('ignores plans quoted inside other comments (marker must open the body)', () => {
     const quote = `> ${newer.split('\n').join('\n> ')}`;
     const latest = findLatestPlan([older, quote]);
-    expect(latest?.head).toBe('aaa1111');
+    expect(latest?.artifact.head).toBe('aaa1111');
+    expect(latest?.index).toBe(0);
   });
 
   it('returns null when no comment carries a plan', () => {
@@ -164,6 +167,22 @@ describe('findLatestPlan', () => {
 
   it('returns null for no comments at all', () => {
     expect(findLatestPlan([])).toBeNull();
+  });
+});
+
+describe('isHeadSha', () => {
+  it('accepts 7-40 lowercase hex characters', () => {
+    expect(isHeadSha('abc1234')).toBe(true);
+    expect(isHeadSha('a'.repeat(40))).toBe(true);
+  });
+
+  it('rejects uppercase, too-short, too-long, and non-hex values', () => {
+    expect(isHeadSha('ABC1234')).toBe(false);
+    expect(isHeadSha('abc123')).toBe(false);
+    expect(isHeadSha('a'.repeat(41))).toBe(false);
+    expect(isHeadSha('main')).toBe(false);
+    expect(isHeadSha('12-31')).toBe(false);
+    expect(isHeadSha('')).toBe(false);
   });
 });
 

@@ -2,7 +2,14 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerPlanCommand } from '../../commands/plan';
-import { createTestProgram } from '../helpers/test-utils';
+import {
+  errored,
+  execHandles,
+  execReturns,
+  logged,
+  runCommandTree,
+  stdoutWrites,
+} from '../helpers/test-utils';
 
 vi.mock('node:child_process');
 
@@ -33,61 +40,21 @@ const VALID_PLAN_FILE = [
 /** A posted artifact body the gh stub can serve back for `get`/`validate`. */
 const POSTED_ARTIFACT = `<!-- plan:v1 head=abc1234 -->\n\n${VALID_PLAN_FILE}`;
 
-type ExecStub = (file: string, args: string[]) => string;
-
-function execReturns(stdout: string): void {
-  mockedExec.mockReturnValue(stdout as unknown as ReturnType<typeof execFileSync>);
-}
-
-function execHandles(stub: ExecStub): void {
-  mockedExec.mockImplementation(stub as unknown as typeof execFileSync);
-}
-
-function ghCommentsJson(bodies: string[], meta = true): string {
+function ghCommentsJson(bodies: string[], association = 'MEMBER', login = 'yuvaldim'): string {
   return JSON.stringify({
     comments: bodies.map((body, i) => ({
       body,
       url: `https://github.com/o/r/issues/1#comment-${i}`,
-      createdAt: meta ? '2026-08-29T10:00:00Z' : undefined,
+      createdAt: '2026-08-29T10:00:00Z',
+      author: { login },
+      authorAssociation: association,
     })),
   });
 }
 
-async function run(args: string[]): Promise<number | undefined> {
-  const program = createTestProgram();
-  registerPlanCommand(program);
-  try {
-    await program.parseAsync(['node', 'dossier', ...args]);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : '';
-    const exit = /^process\.exit\((\d+)\)$/.exec(message);
-    if (exit) return Number(exit[1]);
-    if (isCommanderError(err)) return undefined;
-    throw err;
-  }
-  return undefined;
-}
-
-function isCommanderError(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && 'code' in err;
-}
-
-function stdoutWrites(): string[] {
-  return vi
-    .mocked(process.stdout.write)
-    .mock.calls.map((c) => String(c[0]))
-    .filter(Boolean);
-}
-
-function logged(): string[] {
-  return vi
-    .mocked(console.log)
-    .mock.calls.map((c) => String(c[0]))
-    .filter((s) => s !== 'undefined');
-}
-
-function errored(): string[] {
-  return vi.mocked(console.error).mock.calls.map((c) => String(c[0]));
+/** Run the plan command tree (shared harness, pinned registration). */
+function run(args: string[]): Promise<number | undefined> {
+  return runCommandTree(registerPlanCommand, args);
 }
 
 /** Calls made to the mocked exec, as `file args…` strings. */
@@ -96,7 +63,16 @@ function calls(): string[] {
 }
 
 function planFile(returns: string): void {
-  vi.spyOn(fs, 'readFileSync').mockReturnValue(returns as unknown as Buffer);
+  vi.spyOn(fs, 'readFileSync').mockImplementation((pathArg: unknown) => {
+    // The retry hint's temp-file write must keep working against the real fs.
+    if (typeof pathArg === 'string' && pathArg.startsWith('/tmp')) {
+      return fs.readFileSync(pathArg as never);
+    }
+    if (typeof pathArg === 'string' && String(pathArg).endsWith('plan.md')) {
+      return returns;
+    }
+    throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' });
+  });
 }
 
 beforeEach(() => {
@@ -171,6 +147,20 @@ describe('plan post', () => {
     expect(errored().join('\n')).toContain("Could not read plan file 'missing.md'");
   });
 
+  it('refuses a malformed --head before any gh call — a plan readers could never see', async () => {
+    planFile(VALID_PLAN_FILE);
+    execHandles(() => {
+      throw new Error('must not be called');
+    });
+
+    for (const bad of ['fff000', 'ABC1234', 'main']) {
+      const code = await run(['plan', 'post', '--issue', '1', '--file', 'plan.md', '--head', bad]);
+      expect(code).toBe(1);
+    }
+    expect(errored().join('\n')).toContain("Invalid head 'main'");
+    expect(calls().some((c) => c.startsWith('gh'))).toBe(false);
+  });
+
   it('stamps --head without asking git', async () => {
     planFile(VALID_PLAN_FILE);
     execHandles((file) => {
@@ -213,7 +203,19 @@ describe('plan post', () => {
     expect(calls().some((c) => c.startsWith('gh'))).toBe(false);
   });
 
-  it('names the cause and hands back the body when gh fails to post', async () => {
+  it('--dry-run --json carries the head stamp', async () => {
+    planFile(VALID_PLAN_FILE);
+    execHandles((file) => {
+      if (file === 'git') return 'abc1234';
+      throw new Error(`gh must not be called: ${file}`);
+    });
+    await run(['plan', 'post', '--issue', '1', '--file', 'plan.md', '--dry-run', '--json']);
+    const parsed = JSON.parse(logged()[0]);
+    expect(parsed).toMatchObject({ posted: false, dryRun: true, head: 'abc1234' });
+    expect(parsed.body.startsWith('<!-- plan:v1 head=abc1234 -->')).toBe(true);
+  });
+
+  it('names the cause and hands the body to a temp file when gh fails to post', async () => {
     planFile(VALID_PLAN_FILE);
     execHandles((file) => {
       if (file === 'git') return 'abc1234';
@@ -225,6 +227,21 @@ describe('plan post', () => {
     const errors = errored().join('\n');
     expect(errors).toContain('gh is not authenticated');
     expect(errors).toContain('The plan was NOT posted');
+    // Paste-safe: the suggested command takes a --body-file, never an inlined body.
+    expect(errors).toContain('--body-file');
+    expect(errors).not.toContain('--body <!--');
+  });
+
+  it('names a stall when gh is killed by the timeout instead of hanging forever', async () => {
+    planFile(VALID_PLAN_FILE);
+    execHandles((file) => {
+      if (file === 'git') return 'abc1234';
+      throw Object.assign(new Error('spawn killed'), { killed: true, signal: 'SIGTERM' });
+    });
+
+    const code = await run(['plan', 'post', '--issue', '1', '--file', 'plan.md']);
+    expect(code).toBe(1);
+    expect(errored().join('\n')).toContain('did not answer within');
   });
 });
 
@@ -257,6 +274,7 @@ describe('plan get', () => {
     ]);
     expect(parsed.url).toContain('comment-1');
     expect(parsed.created_at).toBe('2026-08-29T10:00:00Z');
+    expect(parsed.author).toBe('yuvaldim');
   });
 
   it('exits 1 distinguishably when no plan exists', async () => {
@@ -359,6 +377,37 @@ describe('plan validate', () => {
     ).toBe(true);
   });
 
+  it('warns when the canonical plan comes from an account without write access', async () => {
+    execHandles((file, args) => {
+      if (file === 'gh') return ghCommentsJson([POSTED_ARTIFACT], 'NONE', 'rando');
+      if (file === 'git' && args[0] === 'cat-file') return '';
+      if (file === 'git' && args[0] === 'rev-list') return '0';
+      throw new Error(`unexpected: ${file}`);
+    });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBeUndefined();
+    const v = verdict();
+    expect(v.valid).toBe(true);
+    expect(
+      v.reasons.some(
+        (r) => r.check === 'artifact' && r.severity === 'warn' && r.message.includes("'rando'")
+      )
+    ).toBe(true);
+  });
+
+  it('does not warn for a MEMBER-posted plan', async () => {
+    execHandles((file, args) => {
+      if (file === 'gh') return ghCommentsJson([POSTED_ARTIFACT], 'MEMBER', 'yuvaldim');
+      if (file === 'git' && args[0] === 'cat-file') return '';
+      if (file === 'git' && args[0] === 'rev-list') return '0';
+      throw new Error(`unexpected: ${file}`);
+    });
+
+    await run(['plan', 'validate', '--issue', '1']);
+    expect(verdict()).toEqual({ valid: true, reasons: [] });
+  });
+
   it('valid=false with an artifact reason when no plan exists — no git calls', async () => {
     execReturns(ghCommentsJson(['no plan here']));
     const code = await run(['plan', 'validate', '--issue', '1']);
@@ -375,7 +424,7 @@ describe('plan validate', () => {
     expect(calls().some((c) => c.startsWith('git'))).toBe(false);
   });
 
-  it('errors (not crashes) when git is missing entirely', async () => {
+  it('errors (not crashes) when git is missing entirely, with the repo hint', async () => {
     execHandles((file) => {
       if (file === 'gh') return ghCommentsJson([POSTED_ARTIFACT]);
       throw Object.assign(new Error('no git'), { code: 'ENOENT' });
@@ -387,6 +436,7 @@ describe('plan validate', () => {
     expect(
       v.reasons.some((r) => r.check === 'git' && r.message.includes('git is not installed'))
     ).toBe(true);
+    expect(v.reasons.some((r) => r.message.includes('run from inside the repository'))).toBe(true);
   });
 
   it('refuses to pass a flag-like predicted path to git', async () => {
@@ -427,5 +477,21 @@ describe('plan validate', () => {
     const v = verdict();
     expect(v.valid).toBe(true);
     expect(v.reasons.some((r) => r.check === 'sections' && r.severity === 'warn')).toBe(true);
+  });
+
+  it('treats a non-numeric rev-list count as unanswerable, not distance 0', async () => {
+    execHandles((file, args) => {
+      if (file === 'gh') return ghCommentsJson([POSTED_ARTIFACT]);
+      if (file === 'git' && args[0] === 'cat-file') return '';
+      if (file === 'git' && args[0] === 'rev-list') return 'not-a-count';
+      throw new Error(`unexpected: ${file}`);
+    });
+
+    await run(['plan', 'validate', '--issue', '1']);
+    const v = verdict();
+    expect(v.valid).toBe(true);
+    expect(
+      v.reasons.some((r) => r.check === 'git' && r.message.includes('non-numeric count'))
+    ).toBe(true);
   });
 });

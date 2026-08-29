@@ -115,10 +115,8 @@ const DIRTY_HEAD_SUFFIX_RE = /-dirty$/;
 /** Every value `next=` may legally carry: a phase to re-enter, or `done`. */
 export const NEXT_VALUES: readonly string[] = [...PHASES, 'done'];
 
-/** GitHub issue numbers are positive integers; anything else is a caller mistake. */
-export function isIssueNumber(value: string): boolean {
-  return /^[1-9]\d*$/.test(value);
-}
+// `isIssueNumber` moved to `gh.ts` next to the other CLI-input validators when that
+// module became the shared subprocess plumbing; import it from there.
 
 /**
  * Keys exempt from the no-spaces rule: acceptance-criterion lines are prose by nature.

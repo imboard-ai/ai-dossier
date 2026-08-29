@@ -7,11 +7,15 @@
  * named cause with a fix, parse `--json` output without a throw, and reject
  * values that cannot be safely passed on a command line. These lived privately in
  * `commands/runstate.ts` until the second consumer (`commands/plan.ts`) arrived;
- * they are extracted verbatim rather than reimplemented per command.
+ * they are extracted verbatim rather than reimplemented per command — and anything
+ * BOTH command suites do (fetch comments, post a comment, print a dry-run) lives
+ * here once, not twice.
  */
 
 import { execFileSync } from 'node:child_process';
-import { isIssueNumber } from './runstate';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 /**
  * Fail on stderr and exit 1, so a calling dossier can detect it.
@@ -28,10 +32,15 @@ export function fail(lines: string[]): never {
   process.exit(1);
 }
 
+/** How long any single gh/git subprocess may run before it is killed. */
+const EXEC_TIMEOUT_MS = 120_000;
+
 /** Why a subprocess did not produce output — enough to name the actual cause. */
 export interface ExecFailure {
   /** The binary itself is missing from PATH (ENOENT), rather than having exited non-zero. */
   notFound: boolean;
+  /** The process was killed after {@link EXEC_TIMEOUT_MS} instead of answering. */
+  timedOut: boolean;
   /** Exit status, or null when the process never ran or was killed by a signal. */
   status: number | null;
   /** Whatever the command wrote to stderr, falling back to the thrown message. */
@@ -46,22 +55,29 @@ export type ExecResult = { ok: true; stdout: string } | { ok: false; error: Exec
  * The whole point of the comment-protocol subcommands is that agents were silently
  * getting things wrong, so a discarded stderr is the one thing we cannot afford:
  * "gh is not installed", "gh is not logged in", and "issue 440 does not exist" need
- * three different fixes and are indistinguishable without it.
+ * three different fixes and are indistinguishable without it. A hard timeout keeps a
+ * network-stalled gh from hanging an agent-driven run with nothing to debug.
  */
 export function exec(file: string, args: string[]): ExecResult {
   try {
     const stdout = execFileSync(file, args, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: EXEC_TIMEOUT_MS,
     });
     return { ok: true, stdout: String(stdout).trim() };
   } catch (err) {
-    const e = err as NodeJS.ErrnoException & { status?: number | null; stderr?: unknown };
+    const e = err as NodeJS.ErrnoException & {
+      status?: number | null;
+      stderr?: unknown;
+      killed?: boolean;
+    };
     const stderr = String(e?.stderr ?? '').trim() || String(e?.message ?? '').trim();
     return {
       ok: false,
       error: {
         notFound: e?.code === 'ENOENT',
+        timedOut: e?.killed === true,
         status: typeof e?.status === 'number' ? e.status : null,
         stderr,
       },
@@ -72,9 +88,18 @@ export function exec(file: string, args: string[]): ExecResult {
 /** Characters of command output kept in a top-level failure message. */
 const SNIPPET_LENGTH = 300;
 
-/** Collapse output to one bounded line so a huge or binary payload stays readable. */
+/** Control characters that have no place in output a terminal will render. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching (and stripping) control characters is exactly this regex's job
+const CONTROL_CHARS_RE = /[\u0000-\u0008\u000b-\u001f\u007f\u009b]/g;
+
+/**
+ * Collapse output to one bounded line so a huge or binary payload stays readable.
+ * Control characters (ANSI/OSC escapes included) are stripped — snippets come from
+ * network-reachable comment bodies, and a terminal escape re-emitted raw can
+ * rewrite the operator's screen or clipboard.
+ */
 export function snippet(text: string, max = SNIPPET_LENGTH): string {
-  const oneLine = text.replace(/\s+/g, ' ').trim();
+  const oneLine = text.replace(CONTROL_CHARS_RE, '').replace(/\s+/g, ' ').trim();
   if (oneLine === '') return '(no output)';
   return oneLine.length > max
     ? `${oneLine.slice(0, max)}… (${oneLine.length} characters total)`
@@ -89,7 +114,7 @@ export function snippet(text: string, max = SNIPPET_LENGTH): string {
  * come before broader ones — and teaching this code a new cause is a new entry rather than
  * another branch in a growing if/else chain.
  */
-export interface GhFailureCase {
+interface GhFailureCase {
   /** Lowercased substrings of gh's stderr that identify this cause. */
   match: readonly string[];
   /** What went wrong; `where` names the repository the request targeted. */
@@ -98,7 +123,7 @@ export interface GhFailureCase {
   fix: string;
 }
 
-export const GH_FAILURE_CASES: readonly GhFailureCase[] = [
+const GH_FAILURE_CASES: readonly GhFailureCase[] = [
   {
     match: [
       'gh auth login',
@@ -170,6 +195,15 @@ export function ghFailure(action: string, err: ExecFailure, repo?: string): stri
     ].join('\n');
   }
 
+  // Named ahead of the taxonomy: a kill leaves no stderr to match on, and "check the
+  // network" is the one fix that fits every stall.
+  if (err.timedOut) {
+    return [
+      `${action}: gh did not answer within ${EXEC_TIMEOUT_MS / 1000}s.`,
+      `Fix: the call was killed as stalled — check network/proxy access, then re-run.`,
+    ].join('\n');
+  }
+
   const hint = err.stderr.toLowerCase();
   const where = repo ? `--repo ${repo}` : 'the current repository (no --repo was passed)';
   const matched = GH_FAILURE_CASES.find((c) => c.match.some((needle) => hint.includes(needle)));
@@ -180,6 +214,11 @@ export function ghFailure(action: string, err: ExecFailure, repo?: string): stri
   const fix = matched?.fix ?? `Fix: run the same gh command by hand to see the full error.`;
 
   return [cause, fix, `gh said: ${snippet(err.stderr)}`].join('\n');
+}
+
+/** GitHub issue numbers are positive integers; anything else is a caller mistake. */
+export function isIssueNumber(value: string): boolean {
+  return /^[1-9]\d*$/.test(value);
 }
 
 /** Reject a non-numeric `--issue` here rather than letting gh (or `mint`) fail obscurely. */
@@ -220,7 +259,7 @@ export function requireIssueTarget(options: { issue: string; repo?: string }): v
 }
 
 /** Whether `value` carries a control character, which has no place in a comment value. */
-export function hasControlChar(value: string): boolean {
+function hasControlChar(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
     if (code < 0x20 || code === 0x7f) return true;
@@ -251,4 +290,127 @@ export function isSafeArg(value: string): boolean {
  */
 export function isSafePath(value: string): boolean {
   return value.startsWith('/') && !hasControlChar(value);
+}
+
+/** Formats why a local `git` probe could not answer — shared by every git-reading command. */
+export function gitFailure(err: ExecFailure): string {
+  return err.notFound
+    ? 'git is not installed or not on PATH'
+    : err.timedOut
+      ? `git did not answer within ${EXEC_TIMEOUT_MS / 1000}s (killed as stalled)`
+      : `git exited ${err.status ?? 'abnormally'}: ${snippet(err.stderr, GIT_ERROR_SNIPPET_LENGTH)}`;
+}
+
+/** Characters kept when quoting git stderr inside a reason or warning line. */
+const GIT_ERROR_SNIPPET_LENGTH = 120;
+
+/** A comment as gh reports it; every field but `body` may be absent. */
+export interface GhComment {
+  body?: unknown;
+  url?: unknown;
+  createdAt?: unknown;
+  author?: { login?: unknown } | null;
+  authorAssociation?: unknown;
+}
+
+/** A comment-read, or the one reason it could not be read. */
+export type CommentsResult = { ok: true; comments: GhComment[] } | { ok: false; error: string };
+
+/**
+ * Read an issue's comments through gh, reporting WHY rather than exiting.
+ *
+ * The single-issue subcommands turn a failure here into an immediate exit; `stats
+ * --issues` cannot, because one unreadable issue in a set must not discard the rest. So
+ * the decision of what a failure means belongs to the caller, and this function only
+ * reports it.
+ */
+export function tryFetchComments(issue: string, repo?: string): CommentsResult {
+  const res = exec('gh', ['issue', 'view', issue, '--json', 'comments', ...repoArgs(repo)]);
+  if (!res.ok) {
+    return { ok: false, error: ghFailure(`Could not read issue #${issue}`, res.error, repo) };
+  }
+
+  const parsed = parseGhJson<{ comments?: unknown }>(res.stdout);
+  if (parsed === null || !Array.isArray(parsed?.comments)) {
+    // A comment-less issue and a shape we cannot read must not look the same: the first
+    // means "nothing there", the second means the tool is broken, and silently returning
+    // [] for both would make a reader report "no artifacts" over an unreadable response.
+    return {
+      ok: false,
+      error: [
+        `Could not read issue #${issue}: gh exited 0 but did not print JSON — no "comments" array.`,
+        `Fix: run 'gh issue view ${issue} --json comments' by hand — a gh older than 2.0 (no --json), or an interactive prompt landing on stdout, both look like this.`,
+        `gh printed: ${snippet(res.stdout)}`,
+      ].join('\n'),
+    };
+  }
+
+  return { ok: true, comments: parsed.comments as GhComment[] };
+}
+
+/** `--dry-run` support for comment-posting subcommands: show the body, post nothing. */
+export function printDryRun(body: string, json?: boolean, extra?: Record<string, unknown>): void {
+  if (json) {
+    console.log(JSON.stringify({ posted: false, dryRun: true, ...extra, body }, null, 2));
+  } else {
+    process.stdout.write(body);
+  }
+}
+
+/**
+ * Write `body` to a temp file and return a paste-safe retry hint using `--body-file`.
+ *
+ * Inlining the body in a suggested `gh … --body <string>` command is a paste-time
+ * injection: JSON double quotes are not shell quotes, so a body containing `$(…)` or
+ * backticks would execute the moment the operator pastes the suggestion. A file path
+ * carries no such payload.
+ */
+function retryHint(issue: string, repo: string | undefined, body: string, noun: string): string {
+  try {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-dossier-'));
+    const file = path.join(dir, `${noun}.md`);
+    fs.writeFileSync(file, body);
+    return `The ${noun} was NOT posted. Retry, or post it by hand:\ngh issue comment ${issue}${repo ? ` --repo ${repo}` : ''} --body-file ${file}`;
+  } catch {
+    return `The ${noun} was NOT posted. Retry, or save the body shown above and post it with: gh issue comment ${issue}${repo ? ` --repo ${repo}` : ''} --body-file <file>`;
+  }
+}
+
+/**
+ * Comment `body` onto an issue, with the shared failure taxonomy, the paste-safe retry
+ * hint, and the success output both protocols use.
+ *
+ * `jsonExtras` merge into the `--json` result (e.g. `head` for plans); `successLine`
+ * renders the human-mode success line for the caller's protocol.
+ */
+export function postIssueComment(options: {
+  issue: string;
+  repo?: string;
+  body: string;
+  noun: string;
+  action: string;
+  json?: boolean;
+  jsonExtras?: Record<string, unknown>;
+  successLine: (url: string) => string;
+}): void {
+  const res = exec('gh', [
+    'issue',
+    'comment',
+    options.issue,
+    '--body',
+    options.body,
+    ...repoArgs(options.repo),
+  ]);
+  if (!res.ok) {
+    fail([
+      ghFailure(options.action, res.error, options.repo),
+      retryHint(options.issue, options.repo, options.body, options.noun),
+    ]);
+  }
+
+  if (options.json) {
+    console.log(JSON.stringify({ posted: true, url: res.stdout, ...options.jsonExtras }, null, 2));
+  } else {
+    console.log(options.successLine(res.stdout));
+  }
 }

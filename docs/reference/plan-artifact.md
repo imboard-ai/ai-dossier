@@ -18,10 +18,13 @@ A plan artifact is an issue comment whose body OPENS with a marker line:
 ```
 
 - `head=` is the abbreviated SHA (`git rev-parse --short HEAD`) of the repository HEAD
-  the plan was written against. `validate` uses it to measure head-distance.
-- The marker must be the FIRST characters of the comment body. Readers filter on the
-  exact opening prefix, so a plan quoted inside another comment is never mistaken for
-  an artifact.
+  the plan was written against. `validate` uses it to measure head-distance. It must be
+  7-40 lowercase hexadecimal characters (`[0-9a-f]{7,40}`); `plan post --head` validates
+  its override against the same grammar, so a plan can never be posted in a form its own
+  readers would silently ignore.
+- The marker must be the first line of the comment body (leading/trailing whitespace on
+  that line is ignored). Readers filter on that opening line, so a plan quoted inside
+  another comment — whose lines start with `>` — is never mistaken for an artifact.
 - Everything after the marker line is the plan's markdown.
 
 ### Supersede semantics
@@ -33,8 +36,8 @@ milestones accumulate — the full history stays readable on the issue.
 
 ## Required sections
 
-The markdown after the marker must carry all five sections as `## ` headers, in this
-order:
+The markdown after the marker must carry all five sections as `## ` headers. The order
+above is canonical for authors; `post` and `validate` check presence, not order:
 
 ```markdown
 <!-- plan:v1 head=abc1234 -->
@@ -67,29 +70,35 @@ as `check: "sections"` reasons.
 
 One bullet per file. The path is either backticked — `` - `path/to/file.ts` — why `` —
 or the first bare token of the bullet — `- path/to/file.ts — why`. Backticks win when
-present, so a reason containing slashes cannot masquerade as a path. Paths are
-repo-relative POSIX paths; `validate` checks them with `git cat-file -e HEAD:<path>`
-against the current clone's HEAD.
+present, so a reason containing slashes cannot masquerade as a path; a single trailing
+`,`, `;`, or `:` after the path is dropped. Paths are repo-relative POSIX paths;
+`validate` checks them with `git cat-file -e HEAD:<path>` against the current clone's
+HEAD.
 
 ## Commands
 
 | Command | Behavior |
 |---|---|
-| `ai-dossier plan post --issue <n> --file <md>` | Validates the five sections, stamps `head=` (or takes `--head <sha>`), comments the artifact. `--dry-run` prints the body; `--repo <owner/name>` retargets; refuses a body over 60000 characters pre-flight. |
-| `ai-dossier plan get --issue <n> [--json]` | Text mode prints the artifact comment verbatim. `--json` prints `{head, problem, acceptance_criteria, predicted_files, approach, test_scope, url, created_at}` (section names snake_cased, `predicted_files` the extracted path array). No plan → stderr message + **exit 1**. |
+| `ai-dossier plan post --issue <n> --file <md>` | Validates the five sections, stamps `head=` (or takes `--head <sha>`, 7-40 lowercase hex — validated), comments the artifact. `--dry-run` prints the body; `--json` prints `{posted: false, dryRun: true, head, body}` (dry-run) or `{posted: true, head, url}`; refuses a body over 60000 characters pre-flight. |
+| `ai-dossier plan get --issue <n> [--json]` | Text mode prints the artifact comment verbatim (terminal-control characters stripped on a TTY). `--json` prints `{head, problem, acceptance_criteria, predicted_files, approach, test_scope, url, created_at, author}` (section names snake_cased, `predicted_files` the extracted path array). No plan → stderr message + **exit 1**. |
 | `ai-dossier plan validate --issue <n>` | Runs the deterministic checks below and prints `{valid, reasons[]}`. Exits 0 when valid, 1 when invalid. |
+
+All three accept `--repo <owner/name>` (target repository when running outside it).
+Every gh/git subprocess call is bounded by a 120s timeout — a stalled call is killed and
+reported as a named failure rather than hanging the command.
 
 ## Validation checks (all deterministic — no model call)
 
 | `check` | severity | meaning |
 |---|---|---|
 | `artifact` | error | No `plan:v1` comment on the issue. |
+| `artifact` | warn | The latest plan was posted by an account without write access to the repository (association is not MEMBER/OWNER/COLLABORATOR/BOT) — verify authorship before trusting it. Selection stays last-plan-wins; this is a signal, not a gate. |
 | `sections` | error | A required `## ` section is missing from the artifact. |
 | `sections` | warn | Predicted Files produced no paths (empty or no bullets). |
 | `missing-file` | error | A predicted path does not exist at current HEAD. |
 | `head-distance` | info | N > 0 commits on HEAD since the plan's `head=` — the plan may be stale. |
 | `risk-floor` | info | A predicted path touches an elevated-risk surface (see below). |
-| `git` | error / warn | git could not answer a file-existence (error) or head-distance (warn) probe — e.g. run outside a repository, or git missing. |
+| `git` | error / warn | git could not answer a file-existence (error) or head-distance (warn) probe — e.g. run outside a repository, git missing, or a stalled call. |
 
 `valid` is true iff no reason has `severity: "error"`. A consumer that needs a stronger
 signal (semantic sanity) dispatches its own model pass on top; `validate` is deliberately
@@ -116,5 +125,13 @@ fail validity on their own.
 - Marker values (`head=`, predicted paths) arrive from the network — anyone who can
   comment on the issue can forge them. Before any value reaches a `git` argv it is
   rejected unless it is non-empty, dash-free, space-free, and control-character-free,
-  so a forged `-`-prefixed value cannot be read as a flag.
-- `post` is the only write, and it validates before posting.
+  so a forged `-`-prefixed value cannot be read as a flag. `validate` additionally
+  warns when the canonical plan's author lacks write access to the repository —
+  selection itself stays last-plan-wins (the runstate:v1 convention); whether to
+  restrict selection by authorship is an open protocol decision.
+- Terminal output of network-reachable bodies strips control characters on a TTY, and
+  error snippets strip them everywhere, so a forged comment cannot inject ANSI/OSC
+  escape sequences into the operator's terminal.
+- `post` is the only write; it validates sections, the `head=` grammar, and the body
+  size before posting, and its retry hint on gh failure references a temp file with
+  `--body-file` — never an inlined body a paste could execute.

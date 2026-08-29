@@ -5,7 +5,7 @@
  * they dispatched a fleet with straight into a command that measures it.
  */
 
-import { isIssueNumber } from './runstate';
+import { isIssueNumber } from './gh';
 
 /**
  * Most issues a single selection may expand to.

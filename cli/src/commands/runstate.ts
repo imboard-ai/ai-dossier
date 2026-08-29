@@ -15,15 +15,17 @@ import {
   type ExecFailure,
   exec,
   fail,
-  ghFailure,
   isSafeArg,
   isSafePath,
   parseGhJson,
+  postIssueComment,
+  printDryRun,
   repoArgs,
   requireIssueNumber,
   requireIssueTarget,
   requireRepoSlug,
   snippet,
+  tryFetchComments,
 } from '../gh';
 import { parseIssueSelection } from '../issue-selection';
 import {
@@ -107,41 +109,9 @@ type TrailResult = { ok: true; milestones: ParsedMilestone[] } | { ok: false; er
  * reports it.
  */
 function tryFetchMilestones(issue: string, repo?: string): TrailResult {
-  const res = exec('gh', ['issue', 'view', issue, '--json', 'comments', ...repoArgs(repo)]);
-  if (!res.ok) {
-    return { ok: false, error: ghFailure(`Could not read issue #${issue}`, res.error, repo) };
-  }
-
-  const parsed = parseGhJson<{ comments?: unknown }>(res.stdout);
-  if (parsed === null) {
-    return {
-      ok: false,
-      error: [
-        `Could not read issue #${issue}: gh exited 0 but did not print JSON.`,
-        `Expected a {"comments":[…]} object from: gh issue view ${issue} --json comments${repo ? ` --repo ${repo}` : ''}`,
-        `Fix: run that command by hand — a gh older than 2.0 (no --json), or an interactive prompt landing on stdout, both look like this.`,
-        `gh printed: ${snippet(res.stdout)}`,
-      ].join('\n'),
-    };
-  }
-
-  // A milestone-less issue and a shape we cannot read must not look the same: the first
-  // means "fresh run", the second means the tool is broken, and silently returning [] for
-  // both would make a resume start over and destroy work.
-  if (!Array.isArray(parsed?.comments)) {
-    return {
-      ok: false,
-      error: [
-        `Could not read issue #${issue}: gh's JSON has no "comments" array.`,
-        `Fix: confirm your gh supports 'gh issue view <n> --json comments' (gh --version); if it does, re-run — this is not an issue with no comments, it is an unreadable response.`,
-        `gh printed: ${snippet(res.stdout)}`,
-      ].join('\n'),
-    };
-  }
-
-  const bodies = (parsed.comments as Array<{ body?: unknown }>).map((c) =>
-    typeof c?.body === 'string' ? c.body : ''
-  );
+  const result = tryFetchComments(issue, repo);
+  if (!result.ok) return { ok: false, error: result.error };
+  const bodies = result.comments.map((c) => (typeof c?.body === 'string' ? c.body : ''));
   return { ok: true, milestones: parseMilestones(bodies) };
 }
 
@@ -334,43 +304,22 @@ function makeProbe(issue: string, repo?: string, warnings: string[] = []): Resum
   };
 }
 
-/** `--dry-run`: show the exact body that would have been posted, and post nothing. */
-function printDryRun(body: string, json?: boolean): void {
-  if (json) {
-    console.log(JSON.stringify({ posted: false, dryRun: true, body }, null, 2));
-  } else {
-    process.stdout.write(body);
-  }
-}
+/** `--dry-run` and posting are shared with the plan protocol — see `../gh`. */
 
-/** Comment the built body onto the issue and report where it landed. */
+/** Comment the built milestone body onto the issue and report where it landed. */
 function postMilestone(body: string, options: PostOptions): void {
-  const res = exec('gh', [
-    'issue',
-    'comment',
-    options.issue,
-    '--body',
+  postIssueComment({
+    issue: options.issue,
+    repo: options.repo,
     body,
-    ...repoArgs(options.repo),
-  ]);
-  if (!res.ok) {
-    fail([
-      ghFailure(
-        `Failed to post the ${options.phase}/${options.status} milestone to issue #${options.issue}`,
-        res.error,
-        options.repo
-      ),
-      // The milestone is the only durable record of the phase, so hand back the body it
-      // could not post: re-running the phase is far more expensive than a retry.
-      `The milestone was NOT posted. Retry, or post it by hand:\ngh issue comment ${options.issue}${options.repo ? ` --repo ${options.repo}` : ''} --body ${JSON.stringify(body)}`,
-    ]);
-  }
-
-  if (options.json) {
-    console.log(JSON.stringify({ posted: true, url: res.stdout, body }, null, 2));
-  } else {
-    console.log(`✅ ${options.phase} ${options.status} → ${res.stdout}`);
-  }
+    noun: 'milestone',
+    action: `Failed to post the ${options.phase}/${options.status} milestone to issue #${options.issue}`,
+    json: options.json,
+    // The milestone is the only durable record of the phase, so the body is handed back
+    // in the JSON result: re-running the phase is far more expensive than a retry.
+    jsonExtras: { body },
+    successLine: (url) => `✅ ${options.phase} ${options.status} → ${url}`,
+  });
 }
 
 /**
@@ -734,8 +683,9 @@ function readTrails(
 /**
  * `runstate stats` — per-phase durations derived from a trail's `at=` stamps.
  *
- * Read-only by construction: the only subprocess it can reach is the `gh issue view` inside
- * {@link fetchMilestones}, which is also where the auth/404/network failure taxonomy lives.
+ * Read-only by construction: the only subprocesses it can reach are the `gh issue view`
+ * inside {@link fetchMilestones} and the verify probes, which apply the shared gh/git
+ * failure taxonomy from `src/gh.ts`.
  */
 function registerStatsSubcommand(cmd: Command): void {
   cmd

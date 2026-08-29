@@ -12,6 +12,8 @@
  * command layer (`commands/plan.ts`).
  */
 
+import { MAX_BODY_LENGTH } from './runstate';
+
 /**
  * Opens every plan artifact comment. Unlike the runstate marker, it carries `head=` — the
  * repo HEAD the plan was written against — because `validate` measures how far the repo
@@ -35,15 +37,25 @@ export const PLAN_SECTIONS = [
 ] as const;
 export type PlanSection = (typeof PLAN_SECTIONS)[number];
 
-/** `head=<7+ hex chars>` — the short-sha form `git rev-parse --short HEAD` prints. */
+/** `head=<7-40 hex chars>` — the short-sha form `git rev-parse --short HEAD` prints. */
 const HEAD_IN_MARKER_RE = /^<!-- plan:v1 head=([0-9a-f]{7,40}) -->$/;
 
 /**
- * GitHub rejects an issue comment over 65536 characters with an opaque 422, and
- * `execFileSync` can hit E2BIG even earlier — the same cap `runstate` defends. Checked
- * pre-flight so the failure names the size instead of surfacing as "gh failed".
+ * Whether a value is a well-formed `head=` stamp: 7–40 lowercase hex characters.
+ * `post --head` validates its override with this, so a plan can never be posted in a
+ * form its own readers would refuse to recognize.
  */
-export const MAX_ARTIFACT_BODY_LENGTH = 60000;
+export function isHeadSha(value: string): boolean {
+  return /^[0-9a-f]{7,40}$/.test(value);
+}
+
+/**
+ * GitHub rejects an issue comment over 65536 characters with an opaque 422, and
+ * `execFileSync` can hit E2BIG even earlier — the same cap `runstate` defends, imported
+ * so the two protocols can never drift apart on it. Checked pre-flight so the failure
+ * names the size instead of surfacing as "gh failed".
+ */
+export const MAX_ARTIFACT_BODY_LENGTH = MAX_BODY_LENGTH;
 
 /** A parsed plan artifact. */
 export interface PlanArtifact {
@@ -51,6 +63,8 @@ export interface PlanArtifact {
   head: string;
   /** The full comment body, marker included — what `get` prints in text mode. */
   raw: string;
+  /** The comment body without the marker line — the plan's own markdown. */
+  markdown: string;
   /** Raw markdown of each required section, keyed by section name. */
   sections: Record<PlanSection, string>;
   /** Repo-relative paths extracted from the Predicted Files section. */
@@ -146,9 +160,17 @@ export function parsePlanArtifact(body: string): PlanArtifact | null {
   return {
     head: marker.head,
     raw: body,
+    markdown,
     sections,
     predictedFiles: extractPredictedFiles(sections['Predicted Files']),
   };
+}
+
+/** The canonical (latest) plan and the index of the comment carrying it. */
+export interface LatestPlan {
+  artifact: PlanArtifact;
+  /** Index into the `commentBodies` array that was passed in. */
+  index: number;
 }
 
 /**
@@ -156,13 +178,15 @@ export function parsePlanArtifact(body: string): PlanArtifact | null {
  *
  * Supersede semantics are append-only like runstate: `post` never edits, so the LAST
  * parseable plan:v1 comment is the canonical plan and everything before it is history.
+ * The index is returned so the caller can lift comment metadata (url, createdAt) from
+ * the same comment without re-scanning for it.
  */
-export function findLatestPlan(commentBodies: string[]): PlanArtifact | null {
-  let latest: PlanArtifact | null = null;
-  for (const body of commentBodies) {
+export function findLatestPlan(commentBodies: string[]): LatestPlan | null {
+  let latest: LatestPlan | null = null;
+  commentBodies.forEach((body, index) => {
     const parsed = parsePlanArtifact(body);
-    if (parsed !== null) latest = parsed;
-  }
+    if (parsed !== null) latest = { artifact: parsed, index };
+  });
   return latest;
 }
 

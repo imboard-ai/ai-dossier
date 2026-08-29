@@ -675,14 +675,18 @@ ai-dossier plan validate --issue 462
 | `get` | Prints the latest artifact (raw in text mode, parsed fields with `--json`); exits 1 when no plan exists | no |
 | `validate` | Deterministic checks against the local clone; prints a `{valid, reasons[]}` JSON verdict; exits 1 when invalid | no |
 
-`validate` runs three checks, all deterministic: every Predicted Files path exists at
-current HEAD (`git cat-file -e HEAD:<path>`), head-distance (commits on HEAD since the
-plan's `head=` — an info reason when non-zero), and a risk-floor scan of Predicted Files
-(auth/secrets, payments/billing, migrations/schema, protocol surfaces are flagged as
-elevated-risk, info severity). Reasons carry `{check, severity, message}`; only
-`severity: "error"` fails validity — `get` and `validate` are read-only aside from
-`post`'s comment. All three take `--repo <owner/name>`; `post` also takes `--head <sha>`
-and `--dry-run`.
+`validate` runs the deterministic checks — all five sections present, every Predicted
+Files path exists at current HEAD (`git cat-file -e HEAD:<path>`), head-distance (commits
+on HEAD since the plan's `head=` — an info reason when non-zero), and a risk-floor scan of
+Predicted Files (auth/secrets, payments/billing, migrations/schema, protocol surfaces are
+flagged as elevated-risk, info severity) — reporting `{check, severity, message}` reasons
+(full check/severity table in [docs/reference/plan-artifact.md](../docs/reference/plan-artifact.md)).
+Reasons carry `{check, severity, message}`; only `severity: "error"` fails validity —
+`get` and `validate` are read-only aside from `post`'s comment. All three take `--repo
+<owner/name>`; `post` also takes `--head <sha>` (7-40 lowercase hex, validated),
+`--dry-run`, and `--json` (JSON result: `{posted, head, url}`, or `{posted: false,
+dryRun: true, head, body}` in dry-run). `get` and `validate` take `--json` / emit JSON
+respectively; `get --json` includes the comment's `author`.
 
 ---
 

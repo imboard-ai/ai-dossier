@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { isIssueNumber } from '../gh';
 import {
   buildMilestone,
   computeResume,
   defaultNext,
   hitLoopCap,
   isAcKey,
-  isIssueNumber,
   MAX_VALUE_LENGTH,
   mintRunId,
   nowStamp,
