@@ -1,13 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BATCH_PHASES,
+  BATCH_SPECS,
   buildMilestone,
+  CLASSIFY_SPEC,
   computeResume,
   defaultNext,
   hitLoopCap,
   isAcKey,
+  isBatchPhase,
   isIssueNumber,
+  isKnownPhase,
+  isPhase,
+  KEY_VALUE_RULES,
   MAX_VALUE_LENGTH,
   mintRunId,
+  NEXT_VALUES,
   nowStamp,
   type ParsedMilestone,
   PHASE_SPECS,
@@ -81,6 +89,11 @@ function milestone(body: string) {
   const parsed = parseMilestone(body);
   if (!parsed) throw new Error('expected a runstate milestone');
   return parsed;
+}
+
+/** One milestone from a header line plus key lines — the computeResume fixtures' shape. */
+function m(header: string, ...keys: string[]) {
+  return milestone(`${RUNSTATE_MARKER}\n${header}\n${keys.join('\n')}\nnext=x\n`);
 }
 
 describe('runstate spec table', () => {
@@ -529,9 +542,6 @@ describe('hitLoopCap', () => {
 });
 
 describe('computeResume', () => {
-  const m = (header: string, ...keys: string[]) =>
-    milestone(`${RUNSTATE_MARKER}\n${header}\n${keys.join('\n')}\nnext=x\n`);
-
   const gateDone = m(
     'phase=gate status=done run=r-440-ab56 at=2026-08-24T10:00:00Z',
     'base_branch=main'
@@ -873,5 +883,554 @@ describe('isIssueNumber', () => {
     'abc',
   ])('rejects %s', (v) => {
     expect(isIssueNumber(v)).toBe(false);
+  });
+});
+
+/**
+ * The #461 vocabulary, transcribed from the issue's acceptance criteria (RFC-0001
+ * C.2/D.2). Kept as a literal so drifting the source tables away from the issue text
+ * fails the suite, same as DOSSIER_SPEC above.
+ */
+describe('runstate spec table — classify and batch phases (#461)', () => {
+  it('keeps the full-cycle line untouched', () => {
+    expect(PHASES).toEqual(['gate', 'setup', 'plan', 'implement', 'review', 'ship', 'report']);
+  });
+
+  it('exposes classify with exactly the eight verdict keys on done', () => {
+    expect(CLASSIFY_SPEC.statuses).toEqual(['done', 'blocked']);
+    expect(requiredKeys('classify', 'done')).toEqual([
+      'mode',
+      'risk',
+      'est_files',
+      'est_diff',
+      'areas',
+      'test_scope',
+      'deps',
+      'confidence',
+    ]);
+  });
+
+  it('exposes the batch line with exactly the issue’s status sets', () => {
+    expect(BATCH_PHASES).toEqual([
+      'batch-setup',
+      'batch-validate',
+      'batch-review',
+      'batch-ship',
+      'batch-report',
+    ]);
+    for (const phase of BATCH_PHASES) {
+      expect(BATCH_SPECS[phase].statuses).toEqual(
+        phase === 'batch-ship'
+          ? ['awaiting-merge', 'done', 'blocked']
+          : phase === 'batch-report'
+            ? ['done']
+            : ['done', 'blocked']
+      );
+      // Deliberately no phase-specific required keys — the scheduler dossier owns those.
+      expect(requiredKeys(phase, 'done')).toEqual([]);
+    }
+  });
+
+  it('isKnownPhase accepts classify and the batch line; isPhase accepts neither', () => {
+    expect(isKnownPhase('classify')).toBe(true);
+    expect(isKnownPhase('batch-ship')).toBe(true);
+    expect(isPhase('classify')).toBe(false);
+    expect(isPhase('batch-ship')).toBe(false);
+    expect(isBatchPhase('batch-report')).toBe(true);
+    expect(isBatchPhase('ship')).toBe(false);
+  });
+
+  it('pins the #465-facing value-grammar key set', () => {
+    expect(Object.keys(KEY_VALUE_RULES).sort()).toEqual([
+      'areas',
+      'batch',
+      'confidence',
+      'deps',
+      'est_diff',
+      'est_files',
+      'mode',
+      'risk',
+      'test_scope',
+    ]);
+  });
+});
+
+describe('defaultNext — classify and batch phases (#461)', () => {
+  it('ends a classify trail at done (the dispatched cycle mints its own run)', () => {
+    expect(defaultNext('classify', 'done')).toBe('done');
+  });
+
+  it('ends a blocked classify trail at done like every blocked phase', () => {
+    expect(defaultNext('classify', 'blocked')).toBe('done');
+  });
+
+  it('walks the batch line in order', () => {
+    expect(defaultNext('batch-setup', 'done')).toBe('batch-validate');
+    expect(defaultNext('batch-validate', 'done')).toBe('batch-review');
+    expect(defaultNext('batch-review', 'done')).toBe('batch-ship');
+    expect(defaultNext('batch-ship', 'done')).toBe('batch-report');
+    expect(defaultNext('batch-report', 'done')).toBe('done');
+  });
+
+  it('keeps batch-ship awaiting-merge inside batch-ship (a second milestone follows)', () => {
+    expect(defaultNext('batch-ship', 'awaiting-merge')).toBe('batch-ship');
+  });
+
+  it('allows batch phases as --next values but not classify — nothing transitions INTO classify', () => {
+    expect(NEXT_VALUES).toContain('batch-ship');
+    expect(NEXT_VALUES).toContain('batch-report');
+    expect(NEXT_VALUES).not.toContain('classify');
+    expect(
+      validateMilestone({
+        phase: 'gate',
+        status: 'done',
+        run: 'r-440-ab56',
+        keys: [
+          ['base_branch', 'main'],
+          ['warnings', '0'],
+        ],
+        next: 'classify',
+      })
+    ).toEqual([expect.stringContaining("Invalid --next 'classify'")]);
+  });
+});
+
+describe('validateMilestone — classify (#461)', () => {
+  const verdict = (overrides: Record<string, string> = {}) => {
+    const pairs: Array<[string, string]> = [
+      ['mode', 'slot'],
+      ['risk', 'low'],
+      ['est_files', '3'],
+      ['est_diff', '120'],
+      ['areas', 'cli,docs'],
+      ['test_scope', 'focused'],
+      ['deps', 'none'],
+      ['confidence', '0.85'],
+    ];
+    const base = new Map(pairs);
+    for (const [k, v] of Object.entries(overrides)) base.set(k, v);
+    return {
+      phase: 'classify',
+      status: 'done',
+      run: 'r-440-ab56',
+      keys: [...base.entries()],
+    };
+  };
+
+  it('accepts a well-formed slot verdict', () => {
+    expect(validateMilestone(verdict())).toEqual([]);
+  });
+
+  it('accepts a well-formed full verdict', () => {
+    expect(validateMilestone(verdict({ mode: 'full' }))).toEqual([]);
+  });
+
+  it('names every missing verdict key in one line with a copy-pasteable fix', () => {
+    const errors = validateMilestone({
+      phase: 'classify',
+      status: 'done',
+      run: 'r-440-ab56',
+      keys: [['mode', 'full']],
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("Phase 'classify' with status 'done' requires");
+    for (const key of [
+      'risk=',
+      'est_files=',
+      'est_diff=',
+      'areas=',
+      'test_scope=',
+      'deps=',
+      'confidence=',
+    ]) {
+      expect(errors[0]).toContain(key);
+    }
+  });
+
+  it('requires reason= on a blocked classify milestone', () => {
+    const errors = validateMilestone({
+      phase: 'classify',
+      status: 'blocked',
+      run: 'r-440-ab56',
+      keys: [],
+    });
+    expect(errors.join('\n')).toContain('reason=');
+  });
+});
+
+describe('validateMilestone — batch phases (#461)', () => {
+  it.each([
+    ['batch-setup', 'done'],
+    ['batch-validate', 'done'],
+    ['batch-review', 'done'],
+    ['batch-ship', 'awaiting-merge'],
+    ['batch-ship', 'done'],
+    ['batch-report', 'done'],
+  ])('accepts %s/%s with no phase-specific keys', (phase, status) => {
+    expect(validateMilestone({ phase, status, run: 'r-440-ab56', keys: [] })).toEqual([]);
+  });
+
+  it.each([
+    ['batch-setup', 'awaiting-merge'],
+    ['batch-report', 'blocked'],
+    ['batch-review', 'partial'],
+    ['batch-validate', 'awaiting-merge'],
+  ])('rejects %s/%s — not in the phase’s status set', (phase, status) => {
+    const errors = validateMilestone({ phase, status, run: 'r-440-ab56', keys: [] });
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain(`Status '${status}' is not valid for phase '${phase}'`);
+  });
+
+  it('requires reason= on a blocked batch milestone', () => {
+    const errors = validateMilestone({
+      phase: 'batch-validate',
+      status: 'blocked',
+      run: 'r-440-ab56',
+      keys: [],
+    });
+    expect(errors.join('\n')).toContain('reason=');
+  });
+
+  it('lists classify and the batch line in the unknown-phase error', () => {
+    const errors = validateMilestone({
+      phase: 'clssify',
+      status: 'done',
+      run: 'r-440-ab56',
+      keys: [],
+    });
+    expect(errors[0]).toContain('classify');
+    expect(errors[0]).toContain('batch-setup');
+    expect(errors[0]).toContain('batch-report');
+  });
+});
+
+describe('validateMilestone — value grammars for the new keys (#461)', () => {
+  const withKey = (key: string, value: string) => {
+    const base = new Map<string, string>([
+      ['mode', 'full'],
+      ['risk', 'low'],
+      ['est_files', '1'],
+      ['est_diff', '1'],
+      ['areas', 'cli'],
+      ['test_scope', 'focused'],
+      ['deps', 'none'],
+      ['confidence', '0.5'],
+    ]);
+    base.set(key, value);
+    return validateMilestone({
+      phase: 'classify',
+      status: 'done',
+      run: 'r-440-ab56',
+      keys: [...base.entries()],
+    });
+  };
+
+  it.each([
+    ['mode', 'full'],
+    ['mode', 'slot'],
+    ['risk', 'low'],
+    ['risk', 'med'],
+    ['risk', 'high'],
+    ['test_scope', 'focused'],
+    ['test_scope', 'broad'],
+    ['test_scope', 'unknown'],
+    ['est_files', '0'],
+    ['est_files', '12'],
+    ['est_diff', '400'],
+    ['confidence', '0'],
+    ['confidence', '0.6'],
+    ['confidence', '0.85'],
+    ['confidence', '1'],
+    ['confidence', '1.0'],
+    ['areas', 'cli'],
+    ['areas', 'cli,docs,mcp-server'],
+    ['deps', 'none'],
+    ['deps', '474'],
+    ['deps', '474,480'],
+    ['batch', 'b-2026-08-29-01'],
+    ['batch', 'b1'],
+  ])('accepts %s=%s', (key, value) => {
+    // `batch` is not one of classify's keys, so prove it on a phase that takes it free-form.
+    if (key === 'batch') {
+      expect(
+        validateMilestone({
+          phase: 'plan',
+          status: 'done',
+          run: 'r-440-ab56',
+          keys: [
+            ['planning', '/repo/PLANNING.md'],
+            ['head', 'abc1234'],
+            ['open_questions', '0'],
+            ['visual_review', 'false'],
+            [key, value],
+          ],
+        })
+      ).toEqual([]);
+      return;
+    }
+    expect(withKey(key, value)).toEqual([]);
+  });
+
+  it.each([
+    ['mode', 'Slot'],
+    ['mode', 'fulll'],
+    ['risk', 'medium'],
+    ['risk', 'extreme'],
+    ['test_scope', 'huge'],
+    ['est_files', '-1'],
+    ['est_files', '3.5'],
+    ['est_files', 'many'],
+    ['est_diff', '-400'],
+    ['est_diff', '1.5'],
+    ['confidence', 'high'],
+    ['confidence', '1.5'],
+    ['confidence', '-0.1'],
+    ['confidence', '.5'],
+    ['confidence', '85%'],
+    ['areas', 'CLI Docs'],
+    ['areas', 'cli,'],
+    ['deps', '12,a'],
+    ['deps', '#12'],
+    ['batch', 'b 1'],
+    ['batch', '#b1'],
+    ['batch', 'b/1'],
+  ])('rejects %s=%s with one actionable line', (key, value) => {
+    const errors = withKey(key, value);
+    expect(errors).toHaveLength(1);
+    // For a grammar-carrying key the key-specific message fires even when the value
+    // also has a space — it shows the correct form, which is the more actionable answer.
+    expect(errors[0]).toMatch(
+      new RegExp(`Key '${key}' (has an invalid value|contains whitespace)`)
+    );
+    expect(errors[0]).toMatch(/— /);
+  });
+
+  it('prefers the grammar message over the generic whitespace message for a known key', () => {
+    expect(withKey('areas', 'CLI Docs')).toEqual([
+      expect.stringContaining("Key 'areas' has an invalid value 'CLI Docs' — expected"),
+    ]);
+  });
+
+  it('validates mode and batch on the slot-cycle phases too, not just classify', () => {
+    const errors = validateMilestone({
+      phase: 'implement',
+      status: 'done',
+      run: 'r-440-ab56',
+      keys: [
+        ['head', 'abc1234'],
+        ['files', '2'],
+        ['tests_added', '1'],
+        ['tests_run', '3'],
+        ['ci_parity', 'pass'],
+        ['mode', 'slots'],
+        ['batch', 'b/1'],
+      ],
+    });
+    expect(errors).toEqual([
+      "Key 'mode' has an invalid value 'slots' — expected one of: full, slot",
+      expect.stringContaining("Key 'batch' has an invalid value 'b/1'"),
+    ]);
+  });
+});
+
+describe('computeResume — golden regression table for existing phases (#461)', () => {
+  const shipAwaiting = m(
+    'phase=ship status=awaiting-merge run=r-440-ab56 at=2026-08-24T10:05:00Z',
+    'pr=1',
+    'head=abc1234',
+    'ci_fix_attempts=0'
+  );
+  const shipDone = m(
+    'phase=ship status=done run=r-440-ab56 at=2026-08-24T10:06:00Z',
+    'pr=1',
+    'merge_commit=def5678',
+    'ci_fix_attempts=0',
+    'cleanup=worktree_removed'
+  );
+  const reportDone = m(
+    'phase=report status=done run=r-440-ab56 at=2026-08-24T10:07:00Z',
+    'pr=1',
+    'traps_added=0'
+  );
+  const gateDone2 = m(
+    'phase=gate status=done run=r-440-ab56 at=2026-08-24T10:00:00Z',
+    'base_branch=main'
+  );
+  const setupDone2 = m(
+    'phase=setup status=done run=r-440-ab56 at=2026-08-24T10:01:00Z',
+    'branch=feature/440',
+    'worktree=/repo/worktrees/feature-440'
+  );
+  const planDone2 = m(
+    'phase=plan status=done run=r-440-ab56 at=2026-08-24T10:02:00Z',
+    'planning=/repo/worktrees/feature-440/PLANNING-440.md'
+  );
+  const implementDone2 = m(
+    'phase=implement status=done run=r-440-ab56 at=2026-08-24T10:03:00Z',
+    'head=abc1234'
+  );
+  const reviewDone2 = m('phase=review status=done run=r-440-ab56 at=2026-08-24T10:04:00Z');
+
+  const mergedPr = () => ({
+    state: 'MERGED',
+    mergedAt: '2026-08-24T10:05:30Z',
+    mergeable: 'MERGEABLE',
+  });
+  const openMergeablePr = () => ({ state: 'OPEN', mergedAt: null, mergeable: 'MERGEABLE' });
+
+  it.each([
+    ['gate done → setup', [gateDone2], 'setup'],
+    ['setup done (claims verify) → plan', [gateDone2, setupDone2], 'plan'],
+    ['plan done (file exists) → implement', [gateDone2, setupDone2, planDone2], 'implement'],
+    [
+      'implement done (head matches) → review',
+      [gateDone2, setupDone2, planDone2, implementDone2],
+      'review',
+    ],
+    ['review done → ship', [gateDone2, setupDone2, planDone2, implementDone2, reviewDone2], 'ship'],
+    [
+      'ship awaiting-merge (merged) → ship-teardown',
+      [gateDone2, setupDone2, planDone2, implementDone2, reviewDone2, shipAwaiting],
+      'ship-teardown',
+    ],
+    [
+      'ship done → report',
+      [gateDone2, setupDone2, planDone2, implementDone2, reviewDone2, shipDone],
+      'report',
+    ],
+    [
+      'report done (issue closed) → done',
+      [gateDone2, setupDone2, planDone2, implementDone2, reviewDone2, shipDone, reportDone],
+      'done',
+    ],
+  ])('%s', (_name, trail, expected) => {
+    const p = probe({
+      prState: (pr) => (pr === '1' ? mergedPr() : openMergeablePr()),
+      issueClosed: () => true,
+    });
+    expect(computeResume(trail as (typeof gateDone2)[], p).resume_from).toBe(expected);
+  });
+
+  it('keeps awaiting-merge routing for an open mergeable PR', () => {
+    const trail = [gateDone2, setupDone2, planDone2, implementDone2, reviewDone2, shipAwaiting];
+    expect(computeResume(trail, probe({ prState: () => openMergeablePr() })).resume_from).toBe(
+      'ship-wait'
+    );
+  });
+});
+
+describe('computeResume — classify, batch, and slot-mode trails (#461)', () => {
+  const classifyFull = m(
+    'phase=classify status=done run=r-440-ab56 at=2026-08-24T09:00:00Z',
+    'mode=full',
+    'risk=low',
+    'est_files=2',
+    'est_diff=80',
+    'areas=cli',
+    'test_scope=focused',
+    'deps=none',
+    'confidence=0.9'
+  );
+  const classifySlot = m(
+    'phase=classify status=done run=r-440-ab56 at=2026-08-24T09:00:00Z',
+    'mode=slot',
+    'risk=low',
+    'est_files=2',
+    'est_diff=80',
+    'areas=cli',
+    'test_scope=focused',
+    'deps=none',
+    'confidence=0.9'
+  );
+  const implementSlot = m(
+    'phase=implement status=done run=r-440-ab56 at=2026-08-24T10:03:00Z',
+    'head=abc1234',
+    'mode=slot',
+    'batch=b-2026-08-29-01'
+  );
+  const reviewSlotBatchKeyOnly = m(
+    'phase=review status=done run=r-440-ab56 at=2026-08-24T10:04:00Z',
+    'batch=b-2026-08-29-01'
+  );
+  const batchShipAwaiting = m(
+    'phase=batch-ship status=awaiting-merge run=r-480-cd12 at=2026-08-24T10:05:00Z',
+    'batch=b-2026-08-29-01'
+  );
+
+  it('treats a classify-full trail as a fresh entry with a note', () => {
+    const result = computeResume([classifyFull], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.slot_trail).toBeUndefined();
+    expect(result.note).toContain('classify');
+  });
+
+  it('flags a classify-slot trail with the slot signal', () => {
+    const result = computeResume([classifySlot], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.slot_trail).toBe(true);
+  });
+
+  it('re-enters a slot-mode member fresh (mode=slot), with the distinguishable signal', () => {
+    const result = computeResume([classifySlot, implementSlot], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.slot_trail).toBe(true);
+    expect(result.note).toContain('slot-mode');
+  });
+
+  it('re-enters fresh on a batch= key alone, without mode=', () => {
+    const result = computeResume([reviewSlotBatchKeyOnly], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.slot_trail).toBe(true);
+  });
+
+  it('treats a batch anchor trail as not-a-full-cycle-run, without the slot signal', () => {
+    const result = computeResume([batchShipAwaiting], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.slot_trail).toBeUndefined();
+    expect(result.note).toContain('batch anchor');
+  });
+
+  it('still resumes normally when slot milestones are history, not the last milestone', () => {
+    const gateAfterEviction = m(
+      'phase=gate status=done run=r-440-99aa at=2026-08-24T11:00:00Z',
+      'base_branch=main'
+    );
+    const result = computeResume([implementSlot, gateAfterEviction], probe());
+    expect(result.resume_from).toBe('setup');
+    expect(result.slot_trail).toBeUndefined();
+  });
+
+  it('keeps the resume loop cap ahead of the slot/classify checks', () => {
+    const blocked1 = m(
+      'phase=classify status=blocked run=r-440-ab56 at=2026-08-24T09:00:00Z',
+      'reason=escalation-cap'
+    );
+    const blocked2 = m(
+      'phase=classify status=blocked run=r-440-ab56 at=2026-08-24T09:05:00Z',
+      'reason=escalation-cap'
+    );
+    const blocked3 = m(
+      'phase=classify status=blocked run=r-440-ab56 at=2026-08-24T09:10:00Z',
+      'reason=escalation-cap'
+    );
+    const result = computeResume([blocked1, blocked2, blocked3], probe());
+    expect(result.hard_block).toBe('resume-loop');
+  });
+
+  it('explains a fresh entry from an unknown phase rather than returning silently', () => {
+    const triage = m('phase=triage status=done run=r-440-ab56 at=2026-08-24T09:00:00Z');
+    const result = computeResume([triage], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.note).toContain("unknown phase 'triage'");
+  });
+
+  it('enters fresh (with the note) rather than resuming at a blocked milestone of an unknown phase', () => {
+    const blockedTriage = m(
+      'phase=triage status=blocked run=r-440-ab56 at=2026-08-24T09:00:00Z',
+      'reason=x'
+    );
+    const result = computeResume([blockedTriage], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.note).toContain("unknown phase 'triage'");
   });
 });
