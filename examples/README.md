@@ -12,7 +12,7 @@ For a full collection of example dossiers — covering DevOps, databases, data s
 | `setup/scaffold-typescript-project.ds.md` | Scaffold a TypeScript project with CI, testing, linting |
 | `guides/context-engineering-best-practices.ds.md` | Reference guide for writing effective AI agent context files |
 | `validation/` | Standalone validation scripts (Node.js, Python) for checking dossiers against the JSON schema |
-| `git/` | Snapshot of the `imboard-ai/git/*` issue-workflow family (`gate`, `setup`, `plan`, `implement`, `review`, `ship`, `report`, `full-cycle-issue`, `fleet-cycle`, `git-sync`, `issue-cycle-classifier`, `slot-cycle`, guide). The registry is the source of truth; these are copies of the latest published versions, refreshed automatically by a weekly CI job (see `.github/workflows/test-examples.yml`) |
+| `git/` | Snapshot of the `imboard-ai/git/*` issue-workflow family (`gate`, `setup`, `plan`, `implement`, `review`, `ship`, `report`, `full-cycle-issue`, `fleet-cycle`, `git-sync`, `issue-cycle-classifier`, `slot-cycle`, `batch-issues-preparation`, guide). The registry is the source of truth; these are copies of the latest published versions, refreshed automatically by a weekly CI job (see `.github/workflows/test-examples.yml`) |
 | `authoring/` | Example of creating a new dossier and its companion skill |
 
 ## Finding dossiers
