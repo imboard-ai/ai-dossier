@@ -51,29 +51,42 @@ run_payload() {
   local target="$1" floor="$2" fix="$3"
   local default_bin default_ver copies_stale=0 copies_total=0
 
-  # What an agent's login shell actually resolves. Over non-interactive ssh,
-  # login shells often skip nvm init — fall back to sourcing nvm explicitly
-  # (that is what interactive agent sessions on the host end up with).
+  # What an agent's login shell actually resolves. Two adjustments:
+  # - ignore workspace copies in node_modules/.bin (running via `npm run`
+  #   prepends them to PATH — they are not what real shells resolve);
+  # - over non-interactive ssh, login shells often skip nvm init — fall back
+  #   to sourcing nvm explicitly (what interactive sessions end up with).
   local path_mode="login-shell"
-  default_bin=$(bash -lc 'command -v ai-dossier' 2>/dev/null | tail -1)
+  default_bin=$(bash -lc 'type -aP ai-dossier' 2>/dev/null | grep -v '/node_modules/' | head -1)
   if [ -z "$default_bin" ] && [ -s "$HOME/.nvm/nvm.sh" ]; then
-    default_bin=$(bash -c '. "$HOME/.nvm/nvm.sh" >/dev/null 2>&1; command -v ai-dossier' 2>/dev/null | tail -1)
+    default_bin=$(bash -c '. "$HOME/.nvm/nvm.sh" >/dev/null 2>&1; type -aP ai-dossier' 2>/dev/null | grep -v '/node_modules/' | head -1)
     [ -n "$default_bin" ] && path_mode="nvm-fallback (NOT on non-interactive ssh PATH)"
   fi
   if [ -n "$default_bin" ]; then
     default_ver=$(bin_ver "$default_bin")
     echo "PATH_MODE=${path_mode}"
+    if [ -z "$default_ver" ]; then
+      # Binary present but --version fails: broken install. Show why.
+      echo "DEFAULT_BROKEN=$("$default_bin" --version 2>&1 | head -2 | tr '\n' ' ')"
+    fi
   else
     default_ver=""
   fi
 
   if [ "$fix" = 1 ]; then
-    bash -lc "npm i -g @ai-dossier/cli@${target}" >/dev/null 2>&1 \
-      || bash -c ". \"\$HOME/.nvm/nvm.sh\" >/dev/null 2>&1; npm i -g @ai-dossier/cli@${target}" >/dev/null 2>&1
-    default_bin=$(bash -lc 'command -v ai-dossier' 2>/dev/null | tail -1)
+    local inst_out
+    inst_out=$(bash -lc "npm i -g @ai-dossier/cli@${target}" 2>&1)
+    if [ $? -ne 0 ]; then
+      inst_out=$(bash -c ". \"\$HOME/.nvm/nvm.sh\" >/dev/null 2>&1; npm i -g @ai-dossier/cli@${target}" 2>&1)
+      [ $? -ne 0 ] && echo "INSTALL_ERROR=$(echo "$inst_out" | grep -m1 -i 'err' || echo "$inst_out" | tail -1)"
+    fi
+    default_bin=$(bash -lc 'type -aP ai-dossier' 2>/dev/null | grep -v '/node_modules/' | head -1)
     [ -z "$default_bin" ] && [ -s "$HOME/.nvm/nvm.sh" ] \
-      && default_bin=$(bash -c '. "$HOME/.nvm/nvm.sh" >/dev/null 2>&1; command -v ai-dossier' 2>/dev/null | tail -1)
-    [ -n "$default_bin" ] && default_ver=$(bin_ver "$default_bin")
+      && default_bin=$(bash -c '. "$HOME/.nvm/nvm.sh" >/dev/null 2>&1; type -aP ai-dossier' 2>/dev/null | grep -v '/node_modules/' | head -1)
+    if [ -n "$default_bin" ]; then
+      default_ver=$(bin_ver "$default_bin")
+      [ -z "$default_ver" ] && echo "DEFAULT_BROKEN=$("$default_bin" --version 2>&1 | head -2 | tr '\n' ' ')"
+    fi
   fi
 
   echo "DEFAULT_BIN=${default_bin:-none}"
