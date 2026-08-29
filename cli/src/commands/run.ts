@@ -13,16 +13,18 @@ import {
 } from '../cache-resolver';
 import * as config from '../config';
 import {
+  type AgentRunUsage,
   buildLlmCommand,
   detectLlm,
   detectNestedHost,
   downloadUrlToTempFile,
+  parseAgentUsage,
   printRegistryNotFoundError,
   runVerification,
 } from '../helpers';
 import { multiRegistryGetContent } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
-import { appendRunLog } from '../run-log';
+import { appendRunLog, type RunLogEntry } from '../run-log';
 
 export function registerRunCommand(program: Command): void {
   program
@@ -86,6 +88,9 @@ export function registerRunCommand(program: Command): void {
         const log = isNested
           ? (...args: unknown[]) => console.error(...args)
           : (...args: unknown[]) => console.log(...args);
+        // Wall-clock start for the run-log duration field (#458): from action
+        // entry (fetch/resolve/verify included) to the entry write.
+        const startTime = Date.now();
 
         const runContext = {
           dossierArg: file,
@@ -286,6 +291,13 @@ export function registerRunCommand(program: Command): void {
             user: `${process.env.USER || 'unknown'}@${os.hostname()}`,
             cwd: process.cwd(),
             nested: true,
+            duration_ms: Date.now() - startTime,
+            spawned_command: null,
+            model: null,
+            exit_code: 0,
+            input_tokens: null,
+            output_tokens: null,
+            total_cost_usd: null,
           });
 
           process.stdout.write(dossierContent);
@@ -313,24 +325,53 @@ export function registerRunCommand(program: Command): void {
             user: `${process.env.USER || 'unknown'}@${os.hostname()}`,
             cwd: process.cwd(),
             nested: false,
+            duration_ms: Date.now() - startTime,
+            spawned_command: null,
+            model: null,
+            exit_code: 1,
+            input_tokens: null,
+            output_tokens: null,
+            total_cost_usd: null,
           });
           fs.unlinkSync(secureTmpFile);
           fs.rmdirSync(secureTmpDir);
           process.exit(1);
         }
 
-        appendRunLog({
-          timestamp: new Date().toISOString(),
-          dossier: file,
-          resolved_version: runContext.resolvedVersion,
-          source: runContext.source,
-          registry: runContext.registry,
-          resolution_source: runContext.resolutionSource,
-          verification: options.skipAllChecks ? 'skipped' : 'passed',
-          llm: llmOption,
-          user: `${process.env.USER || 'unknown'}@${os.hostname()}`,
-          cwd: process.cwd(),
-          nested: false,
+        // Append the run-log entry at each exit point with the run's outcome
+        // (duration, spawned command, exit code, usage) — #458. Null-defaults
+        // every unavailable field; overrides supplied by the caller.
+        const finishRunLog = (extra: Partial<RunLogEntry>): void => {
+          appendRunLog({
+            timestamp: new Date().toISOString(),
+            dossier: file,
+            resolved_version: runContext.resolvedVersion,
+            source: runContext.source,
+            registry: runContext.registry,
+            resolution_source: runContext.resolutionSource,
+            verification: options.skipAllChecks ? 'skipped' : 'passed',
+            llm: llmOption,
+            user: `${process.env.USER || 'unknown'}@${os.hostname()}`,
+            cwd: process.cwd(),
+            nested: false,
+            duration_ms: Date.now() - startTime,
+            spawned_command: null,
+            model: null,
+            exit_code: null,
+            input_tokens: null,
+            output_tokens: null,
+            total_cost_usd: null,
+            ...extra,
+          });
+        };
+
+        // Map parsed agent usage onto run-log fields; null when the agent did
+        // not report usage (interactive mode, non-JSON output).
+        const usageLogFields = (usage: AgentRunUsage | null) => ({
+          model: usage?.model ?? options.model ?? null,
+          input_tokens: usage?.input_tokens ?? null,
+          output_tokens: usage?.output_tokens ?? null,
+          total_cost_usd: usage?.total_cost_usd ?? null,
         });
 
         console.log('📝 Audit Log:');
@@ -374,6 +415,7 @@ export function registerRunCommand(program: Command): void {
             }\n`
           );
           console.log('✅ All verifications passed - ready to execute');
+          finishRunLog({ exit_code: 0 });
           fs.unlinkSync(secureTmpFile);
           fs.rmdirSync(secureTmpDir);
           process.exit(0);
@@ -404,6 +446,7 @@ export function registerRunCommand(program: Command): void {
 
         const llmToUse = detectLlm(llmOption as string);
         if (!llmToUse) {
+          finishRunLog({ exit_code: 2 });
           cleanupSecureTmp();
           process.exit(2);
         }
@@ -417,26 +460,65 @@ export function registerRunCommand(program: Command): void {
         if (!descriptor) {
           console.log(`❌ Unknown LLM: ${llmToUse}\n`);
           console.log('Supported: claude-code, auto\n');
+          finishRunLog({ exit_code: 2 });
           cleanupSecureTmp();
           process.exit(2);
         }
+
+        // The exact spawned command (binary + args). Headless prompts travel
+        // over stdin, so args never contain prompt content.
+        const spawnedCommand = [descriptor.cmd, ...descriptor.args].join(' ');
 
         try {
           const mode = options.headless ? 'headless' : 'interactive';
           console.log(`   Mode: ${mode}`);
           console.log(`   Executing: ${descriptor.description}\n`);
-          const result = spawnSync(descriptor.cmd, descriptor.args, {
-            stdio: descriptor.stdin ? ['pipe', 'inherit', 'inherit'] : 'inherit',
-            input: descriptor.stdin,
-          });
+          // Headless: capture stdout so the agent's usage report (JSON output
+          // mode) can be mined; stderr still streams. Interactive: the TUI
+          // owns the terminal — nothing to capture.
+          const result = options.headless
+            ? spawnSync(descriptor.cmd, descriptor.args, {
+                stdio: ['pipe', 'pipe', 'inherit'],
+                input: descriptor.stdin,
+              })
+            : spawnSync(descriptor.cmd, descriptor.args, {
+                stdio: descriptor.stdin ? ['pipe', 'inherit', 'inherit'] : 'inherit',
+                input: descriptor.stdin,
+              });
+          // Normalize captured stdout to a string (spawnSync types it as
+          // string | Buffer depending on the stdio configuration).
+          const stdoutText =
+            result.stdout == null
+              ? undefined
+              : typeof result.stdout === 'string'
+                ? result.stdout
+                : result.stdout.toString('utf8');
+          const usage = options.headless ? parseAgentUsage(stdoutText) : null;
+          if (options.headless) {
+            // `claude -p --output-format json` buffers its whole result;
+            // re-emit the agent's text so headless consumers still see the
+            // output on stdout. Falls back to raw stdout when unparseable.
+            const text = usage?.result_text ?? stdoutText ?? '';
+            if (text) {
+              process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
+            }
+          }
           if (result.status !== 0) {
-            throw { status: result.status };
+            throw { status: result.status, usage };
           }
           console.log('\n✅ Execution completed');
+          finishRunLog({ spawned_command: spawnedCommand, exit_code: 0, ...usageLogFields(usage) });
         } catch (error: unknown) {
           console.log('\n❌ Execution failed');
+          const status = (error as { status?: number }).status ?? null;
+          const usage = (error as { usage?: AgentRunUsage | null }).usage ?? null;
+          finishRunLog({
+            spawned_command: spawnedCommand,
+            exit_code: status,
+            ...usageLogFields(usage),
+          });
           cleanupSecureTmp();
-          process.exit((error as { status?: number }).status || 2);
+          process.exit(status || 2);
         }
         cleanupSecureTmp();
       }

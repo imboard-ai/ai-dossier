@@ -34,6 +34,29 @@ export interface RunLogEntry {
    * older runs.jsonl entries. Not written by new runs.
    */
   update_available?: string;
+  /**
+   * Cost/observability fields (#458). All optional and nullable so old-schema
+   * entries still parse; written by new runs with explicit nulls when a value
+   * is unavailable — never fabricated.
+   */
+  /** Wall-clock duration of the run in milliseconds (action start → entry write). */
+  duration_ms?: number | null;
+  /**
+   * The exact agent command spawned (binary + args). Prompt content is excluded
+   * (headless prompts travel over stdin). Null when nothing was spawned
+   * (nested-skip, failed verification, dry-run, no LLM detected).
+   */
+  spawned_command?: string | null;
+  /** Model id as reported by the agent CLI, else the requested --model alias. Null when unknown. */
+  model?: string | null;
+  /** Exit code of the spawned agent process, or of the CLI action for early exits. Null when killed by a signal or failed to spawn. */
+  exit_code?: number | null;
+  /** Input tokens reported by the agent CLI. Null when unavailable. */
+  input_tokens?: number | null;
+  /** Output tokens reported by the agent CLI. Null when unavailable. */
+  output_tokens?: number | null;
+  /** Total cost in USD reported by the agent CLI. Null when unavailable. */
+  total_cost_usd?: number | null;
 }
 
 const LOG_FILE = path.join(CONFIG_DIR, 'runs.jsonl');
