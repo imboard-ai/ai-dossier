@@ -407,7 +407,7 @@ prints `No runstate milestones on issue #440.` (or `null` under `--json`) and ex
 | Flag | Meaning |
 |---|---|
 | `--issue <n>` | Issue to comment on (required) |
-| `--phase <p>` | `gate`, `setup`, `plan`, `implement`, `review`, `ship`, `report` (required) |
+| `--phase <p>` | `classify`, `gate`, `setup`, `plan`, `implement`, `review`, `ship`, `report`, or a batch phase — `batch-setup`, `batch-validate`, `batch-review`, `batch-ship`, `batch-report` (required) |
 | `--status <s>` | `done`, `partial`, `blocked`, `awaiting-merge` (required) |
 | `--run <id>` | Run id minted at the gate phase (required) |
 | `--kv <key=value...>` | Phase-specific key, repeatable (and variadic: `--kv a=1 b=2` works too) |
@@ -460,6 +460,47 @@ This table is the executable copy of the "Runstate Milestones" table in
 | `ship` (2nd, after merge + teardown) | `done`, `blocked` | `pr` `merge_commit` `ci_fix_attempts` `cleanup` |
 | `report` | `done` | `pr` `traps_added` |
 
+### Classify and batch phases (RFC-0001 Batch Cycles)
+
+Two more phase families are accepted alongside the full-cycle line (#461):
+
+| Phase | Statuses | Required keys |
+|---|---|---|
+| `classify` | `done`, `blocked` | `mode` `risk` `est_files` `est_diff` `areas` `test_scope` `deps` `confidence` |
+| `batch-setup` | `done`, `blocked` | — |
+| `batch-validate` | `done`, `blocked` | — |
+| `batch-review` | `done`, `blocked` | — |
+| `batch-ship` | `awaiting-merge`, `done`, `blocked` | — |
+| `batch-report` | `done` | — |
+
+`classify` is posted by the issue-cycle-classifier **before** any cycle is dispatched, so
+it is not a station on the full-cycle line: its `next=` is `done` (the dispatched cycle
+mints its own run id), and `runstate verify` on an issue whose latest milestone is a
+classify record reports `resume_from=none` — a full-cycle run always enters fresh. The
+eight verdict keys are validated by value grammar (below); the classifier's
+`rationale_comment=<link>` is accepted but not required.
+
+The `batch-*` phases are posted on **batch anchor issues** (one anchor per batch, created
+by batch preparation), never on member issues. They deliberately carry no phase-specific
+required keys beyond the universal blocked→`reason` — the batch scheduler dossier owns
+what its milestones record; this table fixes the phase names and status sets so the
+vocabulary underneath it is stable. `batch-ship` mirrors `ship`'s two-milestone shape:
+`awaiting-merge`, then `done` after the merge, and `stats` reports the gap between them
+as `merge-wait`. `next=` walks the batch line: batch-setup → batch-validate →
+batch-review → batch-ship → batch-report → done.
+
+### mode=slot and batch= on plan/implement/review
+
+Slot-cycle members post the ordinary `plan`/`implement`/`review` milestones with two
+extra keys: `mode=slot` and `batch=<id>`. Both are accepted on any phase, and
+`runstate verify` treats a trail whose **latest** milestone carries either key as
+slot-mode: `resume_from=none` — an evicted member re-enters full-cycle fresh (the batch
+worktree is machine-local; there is nothing to resume) — plus a distinguishable
+`slot_trail=present` signal (text) / `slot_trail: true` (JSON), so "fresh because slot"
+never looks like "fresh because there was no trail". Slot milestones deeper in the trail
+are history and do not affect resume: once a full-cycle `gate` milestone follows them,
+resume derives from the full-cycle trail as usual.
+
 A phase may carry keys beyond its required ones, and one is worth knowing about:
 `gate` should also pass `model=<agent model id>`, which is what lets
 [`runstate stats`](#stats) break whole-run durations down by model. Runs whose trail
@@ -494,6 +535,21 @@ Every `--kv` pair is checked before anything is posted:
   replace a long value with a count or a path to the full text.
 - `worktree=` and `planning=` must be absolute paths, so a resume from a different
   working directory can still find them.
+- The classify/slot-mode keys carry a value grammar, checked wherever the key appears
+  (#461):
+
+  | Key | Grammar |
+  |---|---|
+  | `mode` | one of `full`, `slot` |
+  | `risk` | one of `low`, `med`, `high` |
+  | `test_scope` | one of `focused`, `broad`, `unknown` |
+  | `est_files` | non-negative integer, e.g. `3` |
+  | `est_diff` | non-negative integer (lines), e.g. `400` |
+  | `confidence` | decimal `0`–`1`, e.g. `0.85` (RFC-0001 E.2 compares it to 0.6) |
+  | `areas` | comma-separated lowercase slugs, e.g. `cli,docs` |
+  | `deps` | `none`, or comma-separated issue numbers, e.g. `474,480` |
+  | `batch` | a batch id slug (letters, digits, `.`, `_`, `-`), e.g. `b-2026-08-29-01` |
+
 - `--next` must be a phase name or `done`. It is written to the comment verbatim, so an
   unchecked typo would point the next resume at a phase that does not exist.
 - Comments are append-only: never edit or delete a prior milestone.
@@ -549,7 +605,7 @@ resume_context={"branch":"feature/440-runstate","worktree":"/repo/worktrees/feat
 
 | Value | Meaning |
 |---|---|
-| `none` | No milestones on the issue — a fresh run |
+| `none` | No milestones on the issue — a fresh run. Also returned when the latest milestone is slot-mode (`slot_trail=present`), a `classify` record, or a batch-phase trail: full-cycle always enters fresh from those (see [classify and batch phases](#classify-and-batch-phases-rfc-0001-batch-cycles)) |
 | `ship-wait` | The PR is open and mergeable; re-enter `ship` at the CI wait |
 | `ship-teardown` | The PR is already merged; re-enter `ship` at post-merge cleanup |
 | `done` | The `report` milestone is posted and the issue is closed (`note=already complete`) |

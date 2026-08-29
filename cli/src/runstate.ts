@@ -18,6 +18,35 @@ export const RUNSTATE_MARKER = '<!-- runstate:v1 -->';
 export const PHASES = ['gate', 'setup', 'plan', 'implement', 'review', 'ship', 'report'] as const;
 export type Phase = (typeof PHASES)[number];
 
+/**
+ * The classifier phase (RFC-0001 C.2, ai-dossier#461). Posted by
+ * `issue-cycle-classifier` before any cycle is dispatched, so it is NOT a station on the
+ * full-cycle line — `PHASES` deliberately excludes it, and everything that keys off
+ * `PHASES` (resume semantics, `defaultNext`'s linear walk) keeps its current meaning.
+ */
+export const CLASSIFY_PHASE = 'classify';
+export type ClassifyPhase = typeof CLASSIFY_PHASE;
+
+/**
+ * Batch phases (RFC-0001 D.2), in execution order. Posted on batch ANCHOR issues by the
+ * batch scheduler — a member issue never carries them — which is why they too stay out
+ * of `PHASES`: `runstate verify` on a member issue must not try to resume them.
+ */
+export const BATCH_PHASES = [
+  'batch-setup',
+  'batch-validate',
+  'batch-review',
+  'batch-ship',
+  'batch-report',
+] as const;
+export type BatchPhase = (typeof BATCH_PHASES)[number];
+
+/** Every phase name `post` accepts: the full-cycle line plus classify and the batch line. */
+export type KnownPhase = Phase | ClassifyPhase | BatchPhase;
+
+/** All accepted phases, classify first and the batch line after the full-cycle one. */
+export const ALL_PHASES: readonly KnownPhase[] = [CLASSIFY_PHASE, ...PHASES, ...BATCH_PHASES];
+
 /** Milestone statuses. */
 export const STATUSES = ['done', 'partial', 'blocked', 'awaiting-merge'] as const;
 export type Status = (typeof STATUSES)[number];
@@ -95,6 +124,40 @@ export const PHASE_SPECS: Record<Phase, PhaseSpec> = {
 };
 
 /**
+ * The classify verdict (RFC-0001 C.2 / E): `mode`, `risk`, `est_files`, `est_diff`,
+ * `areas`, `test_scope`, `deps`, `confidence`. The classifier dossier also posts a
+ * `rationale_comment=<link>` and applies a `cycle:*` label; those live outside the
+ * milestone contract (#465 consumes "keys per #461", so this table is the contract).
+ */
+export const CLASSIFY_SPEC: PhaseSpec = {
+  statuses: ['done', 'blocked'],
+  required: {
+    done: ['mode', 'risk', 'est_files', 'est_diff', 'areas', 'test_scope', 'deps', 'confidence'],
+  },
+};
+
+/**
+ * The batch line (RFC-0001 D.2). Deliberately no phase-specific required keys (beyond
+ * the universal blocked→reason): the batch scheduler dossier owns what its milestones
+ * carry, and this table only fixes the phase names and their status sets so the
+ * vocabulary is stable underneath it.
+ */
+export const BATCH_SPECS: Record<BatchPhase, PhaseSpec> = {
+  'batch-setup': { statuses: ['done', 'blocked'], required: {} },
+  'batch-validate': { statuses: ['done', 'blocked'], required: {} },
+  'batch-review': { statuses: ['done', 'blocked'], required: {} },
+  'batch-ship': { statuses: ['awaiting-merge', 'done', 'blocked'], required: {} },
+  'batch-report': { statuses: ['done'], required: {} },
+};
+
+/** The spec of every accepted phase — validation's single lookup table. */
+const ALL_PHASE_SPECS: Record<KnownPhase, PhaseSpec> = {
+  classify: CLASSIFY_SPEC,
+  ...PHASE_SPECS,
+  ...BATCH_SPECS,
+};
+
+/**
  * `r-<issue>-<hex>`, minted once per run by the gate phase. Accepts four or more hex
  * chars so a longer id from another minter still reads back as valid.
  */
@@ -112,8 +175,12 @@ export const RESUME_LOOP_CAP = 3;
 /** Suffix `implement` milestones add to `head=` when the worktree had uncommitted changes. */
 const DIRTY_HEAD_SUFFIX_RE = /-dirty$/;
 
-/** Every value `next=` may legally carry: a phase to re-enter, or `done`. */
-export const NEXT_VALUES: readonly string[] = [...PHASES, 'done'];
+/**
+ * Every value `next=` may legally carry: a phase to re-enter, or `done`. Includes
+ * classify and the batch line, because `defaultNext` can now return them and `--next`
+ * may point at them.
+ */
+export const NEXT_VALUES: readonly string[] = [...ALL_PHASES, 'done'];
 
 /** GitHub issue numbers are positive integers; anything else is a caller mistake. */
 export function isIssueNumber(value: string): boolean {
@@ -135,31 +202,121 @@ export function isPhase(value: string): value is Phase {
   return (PHASES as readonly string[]).includes(value);
 }
 
+/** True for any phase `post` accepts — the full-cycle line, classify, and the batch line. */
+export function isKnownPhase(value: string): value is KnownPhase {
+  return (ALL_PHASES as readonly string[]).includes(value);
+}
+
+/** True for the batch line only (RFC-0001 D.2). */
+export function isBatchPhase(value: string): value is BatchPhase {
+  return (BATCH_PHASES as readonly string[]).includes(value);
+}
+
 export function isStatus(value: string): value is Status {
   return (STATUSES as readonly string[]).includes(value);
 }
 
 /**
+ * The grammar a classify/slot-mode value must follow (ai-dossier#461). Checked wherever
+ * the key appears — a key's value grammar is global, so a `mode=slot` typo is caught on
+ * `implement` exactly as it would be on `classify`.
+ *
+ * Each rule names what a valid value looks like, so a rejection is actionable in one
+ * line, in the style of the rest of this module.
+ */
+interface KeyValueRule {
+  test: (value: string) => boolean;
+  expects: string;
+}
+
+/** `est_files`/`est_diff`: a count or a size, never signed, fractional, or descriptive. */
+const NON_NEGATIVE_INT_RE = /^\d+$/;
+
+/** `confidence`: the RFC-0001 E.2 floor compares it to 0.6, so it is a 0–1 decimal. */
+const CONFIDENCE_RE = /^(?:0(?:\.\d+)?|1(?:\.0+)?)$/;
+
+/** `areas`: one or more lowercase slugs, comma-separated (`cli,docs`). */
+const AREA_SLUGS_RE = /^[a-z0-9][a-z0-9-]*(?:,[a-z0-9][a-z0-9-]*)*$/;
+
+/** `deps`: literally `none`, or comma-separated issue numbers (`474,480`). */
+const DEPS_RE = /^(?:none|\d+(?:,\d+)*)$/;
+
+/** `batch`: a batch id slug — no spaces, slashes, or `#`. */
+const BATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** One rule per enum-valued key; the message lists the closed set verbatim. */
+function enumRule(values: readonly string[]): KeyValueRule {
+  return {
+    test: (value) => (values as readonly string[]).includes(value),
+    expects: `expected one of: ${values.join(', ')}`,
+  };
+}
+
+export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
+  mode: enumRule(['full', 'slot']),
+  risk: enumRule(['low', 'med', 'high']),
+  test_scope: enumRule(['focused', 'broad', 'unknown']),
+  est_files: {
+    test: (v) => NON_NEGATIVE_INT_RE.test(v),
+    expects: 'expected a non-negative integer file count, e.g. 3',
+  },
+  est_diff: {
+    test: (v) => NON_NEGATIVE_INT_RE.test(v),
+    expects: 'expected a non-negative integer diff size (lines), e.g. 400',
+  },
+  confidence: {
+    test: (v) => CONFIDENCE_RE.test(v),
+    expects: 'expected a decimal between 0 and 1, e.g. 0.85 (RFC-0001 E.2 compares it to 0.6)',
+  },
+  areas: {
+    test: (v) => AREA_SLUGS_RE.test(v),
+    expects: "expected comma-separated lowercase slugs, e.g. cli,docs — use '-' inside a slug",
+  },
+  deps: {
+    test: (v) => DEPS_RE.test(v),
+    expects: "expected 'none' or comma-separated issue numbers, e.g. 474,480",
+  },
+  batch: {
+    test: (v) => BATCH_ID_RE.test(v),
+    expects: "expected a batch id slug (letters, digits, '.', '_', '-'), e.g. b-2026-08-29-01",
+  },
+};
+
+/**
  * The phase that follows `phase`, for the milestone's `next=` line.
  *
  * - `blocked` ends the run, so `next=done`.
- * - the two non-terminal statuses keep the run inside the same phase: ship's
- *   `awaiting-merge` is the FIRST of ship's two milestones (CI wait, then teardown),
- *   and a `partial` review still has agents left to run — which is exactly how
- *   gate-issue's resume table reads them back.
+ * - the two non-terminal statuses keep the run inside the same phase: ship's and
+ *   batch-ship's `awaiting-merge` are the FIRST of two milestones (CI wait, then
+ *   teardown), and a `partial` review still has agents left to run — which is exactly
+ *   how gate-issue's resume table reads them back.
  * - otherwise the linear order gate → setup → plan → implement → review → ship →
  *   report → done.
+ * - `classify` is a standalone pre-cycle record: the cycle it dispatches mints its own
+ *   run, so classification ends its own trail (`next=done`).
+ * - the batch line walks its own order: batch-setup → batch-validate → batch-review →
+ *   batch-ship → batch-report → done.
  */
-export function defaultNext(phase: Phase, status: Status): Phase | 'done' {
+const BATCH_NEXT: Record<BatchPhase, KnownPhase | 'done'> = {
+  'batch-setup': 'batch-validate',
+  'batch-validate': 'batch-review',
+  'batch-review': 'batch-ship',
+  'batch-ship': 'batch-report',
+  'batch-report': 'done',
+};
+
+export function defaultNext(phase: KnownPhase, status: Status): KnownPhase | 'done' {
   if (status === 'blocked') return 'done';
   if (status === 'awaiting-merge' || status === 'partial') return phase;
+  if (phase === CLASSIFY_PHASE) return 'done';
+  if (isBatchPhase(phase)) return BATCH_NEXT[phase];
   const idx = PHASES.indexOf(phase);
   return idx === PHASES.length - 1 ? 'done' : PHASES[idx + 1];
 }
 
 /** The keys `phase` must carry when reporting `status`. */
-export function requiredKeys(phase: Phase, status: Status): readonly string[] {
-  const spec = PHASE_SPECS[phase];
+export function requiredKeys(phase: KnownPhase, status: Status): readonly string[] {
+  const spec = ALL_PHASE_SPECS[phase];
   const base = spec.required[status] ?? [];
   return status === 'blocked' ? [...base, ...BLOCKED_REQUIRED] : base;
 }
@@ -205,6 +362,10 @@ function firstKeyProblem(key: string, value: string): string | null {
   if ((PATH_KEYS as readonly string[]).includes(key) && !value.startsWith('/')) {
     return `Key '${key}' must be an absolute path, got '${value}'`;
   }
+  const rule = KEY_VALUE_RULES[key];
+  if (rule && !rule.test(value)) {
+    return `Key '${key}' has an invalid value '${value}' — ${rule.expects}`;
+  }
   return null;
 }
 
@@ -218,14 +379,14 @@ export function validateMilestone(input: MilestoneInput): string[] {
   const { phase, status, run } = input;
   const keys = input.keys ?? [];
 
-  if (!isPhase(phase)) {
-    errors.push(`Unknown phase '${phase}' — expected one of: ${PHASES.join(', ')}`);
+  if (!isKnownPhase(phase)) {
+    errors.push(`Unknown phase '${phase}' — expected one of: ${ALL_PHASES.join(', ')}`);
   }
 
   if (!isStatus(status)) {
     errors.push(`Unknown status '${status}' — expected one of: ${STATUSES.join(', ')}`);
-  } else if (isPhase(phase)) {
-    const allowed = PHASE_SPECS[phase].statuses;
+  } else if (isKnownPhase(phase)) {
+    const allowed = ALL_PHASE_SPECS[phase].statuses;
     if (!allowed.includes(status)) {
       errors.push(
         `Status '${status}' is not valid for phase '${phase}' — expected one of: ${allowed.join(', ')}`
@@ -261,7 +422,7 @@ export function validateMilestone(input: MilestoneInput): string[] {
     if (problem) errors.push(problem);
   }
 
-  if (isPhase(phase) && isStatus(status) && PHASE_SPECS[phase].statuses.includes(status)) {
+  if (isKnownPhase(phase) && isStatus(status) && ALL_PHASE_SPECS[phase].statuses.includes(status)) {
     const missing = requiredKeys(phase, status).filter((k) => !seen.has(k));
     if (missing.length > 0) {
       errors.push(
@@ -286,7 +447,7 @@ export function buildMilestone(input: MilestoneInput): string {
   const at = input.at ?? nowStamp();
   const next =
     input.next ??
-    (isPhase(input.phase) && isStatus(input.status)
+    (isKnownPhase(input.phase) && isStatus(input.status)
       ? defaultNext(input.phase, input.status)
       : 'done');
 
@@ -410,6 +571,15 @@ export interface ResumeResult {
   last: ParsedMilestone | null;
   /** Set when the run must hard-block instead of resuming (currently `resume-loop`). */
   hard_block?: string;
+  /**
+   * True when the freshest milestone on the trail is slot-mode — it carries
+   * `mode=slot` or a `batch=` id (RFC-0001 C.4), or is a `classify` verdict with
+   * `mode=slot`. Full-cycle re-enters such an issue FRESH: a slot trail has no
+   * full-cycle phases to resume (the batch worktree is machine-local, and an evicted
+   * member is requeued as `full` from scratch), so the signal exists to make "fresh
+   * because slot" distinguishable from "fresh because there was no trail".
+   */
+  slot_trail?: boolean;
   /** Human-readable note, e.g. "already complete". */
   note?: string;
 }
@@ -527,6 +697,32 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
 
   if (hitLoopCap(milestones)) {
     return { ...base, resume_from: last.phase, hard_block: 'resume-loop' };
+  }
+
+  // Classify and the batch line are known to `post` but are not stations on the
+  // full-cycle line, so a trail ending on them has nothing for full-cycle to resume.
+  // The checks sit ABOVE the blocked rule on purpose: a slot-mode or batch milestone
+  // that reports `blocked` still re-enters full-cycle fresh (the state machine that
+  // posted it is not the one resuming), and only the resume loop cap outranks them.
+  if (last.phase === CLASSIFY_PHASE) {
+    const slot = last.keys.mode === 'slot';
+    return {
+      ...base,
+      resume_from: 'none',
+      note: 'classify record — full-cycle enters fresh',
+      ...(slot ? { slot_trail: true } : {}),
+    };
+  }
+  if (isBatchPhase(last.phase)) {
+    return { ...base, resume_from: 'none', note: 'batch anchor trail — not a full-cycle run' };
+  }
+  if (last.keys.mode === 'slot' || last.keys.batch !== undefined) {
+    return {
+      ...base,
+      resume_from: 'none',
+      slot_trail: true,
+      note: 'slot-mode trail — full-cycle re-enters fresh',
+    };
   }
 
   // Any blocked milestone resumes at that same phase.

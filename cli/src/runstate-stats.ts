@@ -12,7 +12,15 @@
  */
 
 import { MILLIS_PER_SECOND } from './duration';
-import { type ParsedMilestone, PHASES, type Phase, type Status } from './runstate';
+import {
+  BATCH_PHASES,
+  type BatchPhase,
+  CLASSIFY_PHASE,
+  type ParsedMilestone,
+  PHASES,
+  type Phase,
+  type Status,
+} from './runstate';
 
 /**
  * The synthetic phase covering the gap between ship's two milestones — the PR is open and
@@ -31,16 +39,29 @@ export const MERGE_WAIT_PHASE = 'merge-wait';
  */
 const SHIP_PHASE: Phase = 'ship';
 const GATE_PHASE: Phase = 'gate';
+const BATCH_SHIP_PHASE: BatchPhase = 'batch-ship';
 const AWAITING_MERGE: Status = 'awaiting-merge';
 
+/** True for the two phases whose `done` milestone can be the far side of a merge wait. */
+function isShipLike(phase: string): boolean {
+  return phase === SHIP_PHASE || phase === BATCH_SHIP_PHASE;
+}
+
 /**
- * Row order for aggregate tables: the protocol's phase order, with `merge-wait` sitting
- * where it happens (between ship and report). Alphabetical order would read
+ * Row order for aggregate tables: classify before the cycle starts, the protocol's
+ * phase order with `merge-wait` sitting where it happens (between ship and report), and
+ * the batch line after the full-cycle one. Alphabetical order would read
  * `gate, implement, merge-wait, plan, …`, which tells a reader nothing about a pipeline.
  */
 export const STATS_PHASE_ORDER: readonly string[] = (() => {
   const shipIdx = PHASES.indexOf(SHIP_PHASE);
-  return [...PHASES.slice(0, shipIdx + 1), MERGE_WAIT_PHASE, ...PHASES.slice(shipIdx + 1)];
+  return [
+    CLASSIFY_PHASE,
+    ...PHASES.slice(0, shipIdx + 1),
+    MERGE_WAIT_PHASE,
+    ...PHASES.slice(shipIdx + 1),
+    ...BATCH_PHASES,
+  ];
 })();
 
 /** The bucket a run lands in when no milestone in the run carries a `model=` key. */
@@ -261,15 +282,14 @@ function groupByRun(milestones: ParsedMilestone[]): Map<string, ParsedMilestone[
 /**
  * The phase name a milestone is reported under.
  *
- * A `ship` milestone that follows ship's `awaiting-merge` is the far side of the CI +
- * merge wait, so it is relabelled — the row measures the wait, not a second ship.
+ * A `ship`/`batch-ship` milestone that follows the same phase's `awaiting-merge` is the
+ * far side of the CI + merge wait, so it is relabelled — the row measures the wait, not
+ * a second ship.
  */
 function phaseNameFor(milestone: ParsedMilestone, previous: ParsedMilestone | null): string {
   const followsAwaitingMerge =
-    previous !== null && previous.phase === SHIP_PHASE && previous.status === AWAITING_MERGE;
-  return milestone.phase === SHIP_PHASE && followsAwaitingMerge
-    ? MERGE_WAIT_PHASE
-    : milestone.phase;
+    previous !== null && isShipLike(previous.phase) && previous.status === AWAITING_MERGE;
+  return isShipLike(milestone.phase) && followsAwaitingMerge ? MERGE_WAIT_PHASE : milestone.phase;
 }
 
 /** How a caller records a degraded read. */
