@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "batch-issues-preparation",
   "title": "Batch Issues Preparation — classify, DAG, compose batches, enqueue",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "protocol_version": "1.0",
   "status": "Draft",
   "last_updated": "2026-08-29",
@@ -63,13 +63,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "78b295c340937e52918acbd9c2efb134860b1070c94ad92c85608e6f84d831ef"
+    "hash": "8f1b580ca01fa644865601dfcec761e4c4e6d8323ce576d7c290a043cd0f0b5b"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "JHo3fNMRFk1m5YnEBMlQfmi73ibEAuBtz7/JJ2+/FT4YkLVn0gDoAkPQfCCRTXVaCjllO40cN5hf745EnahHAQ==",
+    "signature": "li6xdh6GP1J6APeZzkMMyj6A5POZ0zp4zFVB/hnImk9z9JstS1GRQT7zr3ACUzCfgTx1v27tGXk3+Eyj0odPDA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T19:14:39.713Z",
+    "signed_at": "2026-08-29T19:28:28.150Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -106,7 +106,7 @@ The judgment-heavy front door of Batch Cycles (RFC-0001 C.3): turn a raw issue l
 
 The skipped table goes in the output AND the audit file: issue, reason.
 
-### Step 2: Build the Dependency DAG (fleet-cycle Phase 2 rules, verbatim)
+### Step 2: Build the Dependency DAG (fleet-cycle Phase 2 rules; one deliberate divergence — see the file-overlap bullet)
 
 For every pair of remaining issues, determine whether one must merge **before** the other. **When uncertain, prefer adding a dependency edge (serialize) over assuming independence** — a false parallel is far more expensive than a false serial.
 
@@ -118,7 +118,7 @@ For every pair of remaining issues, determine whether one must merge **before** 
 
 **Inferred dependency signals (judgment):**
 
-- **File-overlap collision** — two issues that will plausibly modify the same files or modules (use the classify records' predicted files and areas once Step 3 has run; before that, the issue text)
+- **File-overlap collision** — two issues that will plausibly modify the same files or modules (use the classify records' predicted files and areas once Step 3 has run; before that, the issue text). Fleet serializes colliding issues; batch cycles deliberately diverge on this one point: when both issues classify slot and land in the SAME batch, overlap is co-batched as an E.4 eviction group instead of serialized — the edge remains and orders the members internally
 - **Logical/data ordering** — issue B builds on a capability, schema, or API that issue A introduces
 - **Shared migration, lockfile, or global-config surface** — will conflict on merge even if "different features"
 
@@ -131,7 +131,7 @@ For every edge A→B, resolve B's state: edges to merged/closed deps are **satis
 ### Step 3: Classify Every Issue (parallel cheap dispatches)
 
 1. **Reuse**: if an issue's LATEST runstate milestone is `phase=classify status=done`, take the verdict from that record — do not re-classify (re-posting would bury the trail).
-2. Otherwise dispatch **one cheap-tier agent per issue** (bounded: at most 8 concurrent), each running exactly `ai-dossier run imboard-ai/git/issue-cycle-classifier` for that one issue. Classification is cheap and safe to parallelize; the classifier posts its own records, labels, and rationale (#465). DAG analysis stays with the orchestrator at the strongest tier (fleet 1b routing: judgment here, mechanical elsewhere).
+2. Otherwise dispatch **one cheap-tier agent per issue** (bounded: at most 8 concurrent), each running exactly `ai-dossier run imboard-ai/git/issue-cycle-classifier` for that one issue, **passing the submitted set in the dispatch context** (e.g. `submitted set: 1,2,5..8`) — classifier floor rule 9 ("outside the submitted set") must see open in-set deps as batched-with-this-issue so they do not force `full`. Classification is cheap and safe to parallelize; the classifier posts its own records, labels, and rationale (#465). DAG analysis stays with the orchestrator at the strongest tier (fleet 1b routing: judgment here, mechanical elsewhere).
 3. Collect each verdict from `ai-dossier runstate last --issue <n> --json`: `mode`, `risk`, `est_files`, `est_diff`, `areas`, `test_scope`, `deps`, `confidence`.
 4. A classifier `blocked` record (e.g. `unreadable-issue`) drops the issue — reported as skipped. One failed dispatch is retried once; a persistent failure skips that issue, never the whole run.
 
@@ -151,7 +151,7 @@ For every edge A→B, resolve B's state: edges to merged/closed deps are **satis
 Split the classified set:
 
 - `mode=full` issues are **never batched** — they become full-mode queue entries.
-- Issues with an **open dependency outside the submitted set** (classifier floor rule 9 has already forced them full) are **deferred**: classified and planned, but NOT enqueued — an out-of-graph dep stays permanently unsatisfied in the queue (enqueue semantics), so enqueueing them would strand them blocked forever. Report as `deferred-external-dep`; re-run prep once the dep merges.
+- Issues with an **open dependency outside the submitted set** (classifier floor rule 9 has already forced them full) are **deferred**: classified and planned, but NOT enqueued — an out-of-graph dep stays permanently unsatisfied in the queue (enqueue semantics), so enqueueing them would strand them blocked forever. Report as `deferred-external-dep`; re-run prep once the dep merges. **Deferral is transitive**: an issue whose open in-set dependency is deferred is itself deferred (reported as `deferred-external-dep` with the chain) — enqueueing it would strand it on a dep that never enters the queue.
 - The remaining `mode=slot` issues are packed into batches.
 
 **Hard constraints — ALL must hold for every batch:**
@@ -200,15 +200,17 @@ Split the classified set:
    - full-mode entries: `{issue, mode: "full", deps, tier, base_branch}` — deps list only OPEN set-internal deps (edges to merged issues were dropped in Step 2)
    - slot members: `{issue, mode: "slot", batch: <batch_id>, deps, tier, base_branch}` — deps list only OPEN deps **outside this member's own batch** (same-batch deps are encoded in member order)
    - tier: docs/test/chore-only areas + `risk=low` → `mechanical`; `risk=high` → `strong`; otherwise `mid`
-3. Enqueue, from the target repo:
 
+   Zero entries after skips/deferrals → do NOT invoke `sched enqueue` (it rejects an empty manifest); report the run as a no-op with the audit file.
+
+3. Enqueue, from the target repo:
    ```bash
    ai-dossier sched enqueue --from-manifest <manifest-path>
    ```
 
    On `EnqueueError` STOP and surface the error plus the manifest path — enqueue is atomic (nothing was saved); fix the cause (e.g. duplicate active issue) and re-run. Never silently retry with a trimmed manifest.
 4. Verify: `ai-dossier sched status` shows the new entries and batches; note the result in the output.
-5. `dry_run=true` → steps 1-2 run (the manifest is written and reported), steps 3-4 are skipped. Everything before Step 8 — classify records, plan artifacts, anchors, audit — is REAL under dry_run; that is the shadow-mode deliverable (RFC-0001 G Step 2).
+5. `dry_run=true` → items 1-2 run (the manifest is written and reported), items 3-4 (enqueue and verify) are skipped. Everything before Step 8 — classify records, plan artifacts, anchors, audit — is REAL under dry_run; that is the shadow-mode deliverable (RFC-0001 G Step 2).
 
 ### Step 9: Output
 
@@ -240,7 +242,7 @@ Consumed by `ai-dossier sched enqueue --from-manifest` (#460 — `parseManifest`
 | `issue` | positive integer | required; unique among entries; must not be an active queue entry |
 | `mode` | `full` \| `slot` | default `full`; `slot` requires `batch`; `full` must omit `batch` |
 | `batch` | non-empty string | batch id; all members of a batch share it and one `base_branch`; a batch id only joins while forming |
-| `deps` | integer[] | open issue numbers this entry waits on; merged deps dropped; same-batch member deps omitted (member order encodes them); no self-deps; no cycles — enqueue rejects the whole manifest |
+| `deps` | positive integer[] | open issue numbers this entry waits on; merged deps dropped; same-batch member deps omitted (member order encodes them); no self-deps; no cycles — enqueue rejects the whole manifest |
 | `tier` | `mechanical` \| `mid` \| `strong` | default `mid` |
 | `base_branch` | non-empty string | branch the unit works from; must match across a batch's members |
 
@@ -268,7 +270,7 @@ Example:
 | One overlap cluster would become two | Refuse the candidate — ≤ 1 eviction group per batch, hard. |
 | Slot issue depends on a full-mode entry | Allowed — the member entry carries the dep; the scheduler gates on that entry's completion. |
 | No slot-eligible issues | Valid outcome — manifest carries full-mode entries only, zero batches. |
-| Everything skipped/deferred/full | Report honestly; an empty batch plan is not an error. |
+| Everything skipped/deferred/full | Report honestly; an empty batch plan is not an error — and skip the enqueue call (it rejects a zero-entry manifest). |
 | Classifier floor rule hits after reuse of an old classify record | Trust the record — re-classification buries trails; the slot-cycle tripwires catch stale verdicts at execution time. |
 
 ## Validation
