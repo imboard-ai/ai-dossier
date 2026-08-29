@@ -61,9 +61,7 @@ export function computeAssignments(
     return { state, assignments: [] };
   }
 
-  const live = state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length;
-  const freeCapacity = Math.max(0, config.max_slots - live);
-  if (freeCapacity === 0) {
+  if (freeCapacity(state, config) === 0) {
     return { state, assignments: [] };
   }
 
@@ -71,7 +69,7 @@ export function computeAssignments(
   const candidates = runnableUnits(state)
     .filter((unit) => kinds.includes(unit.kind))
     .filter((unit) => !held.has(unitId(unit)));
-  const taken = candidates.slice(0, freeCapacity);
+  const taken = candidates.slice(0, freeCapacity(state, config));
   if (taken.length === 0) {
     return { state, assignments: [] };
   }
@@ -79,44 +77,68 @@ export function computeAssignments(
   let next = state;
   const assignments: Assignment[] = [];
   for (const unit of taken) {
-    let idle = next.slots.find((s) => s.status === 'idle');
-    if (!idle) {
-      const slot = {
-        id: next.next_slot_id,
-        status: 'idle' as const,
-        unit: null,
-        pid: null,
-        pid_start: null,
-        phase: null,
-        last_progress_at: null,
-        branch: null,
-        last_head: null,
-        recoveries: 0,
-        updated_at: now.toISOString(),
-      };
-      next = { ...next, slots: [...next.slots, slot], next_slot_id: next.next_slot_id + 1 };
-      idle = slot;
-    }
-    next = transitionSlot(
-      next,
-      idle.id,
-      'assigned',
-      {
-        unit: unitId(unit),
-        pid: null,
-        phase: null,
-        last_progress_at: now.toISOString(),
-      },
-      now
-    );
+    const assigned = assignToIdleSlot(next, unitId(unit), null, now);
+    next = assigned.state;
     assignments.push(
       unit.kind === 'issue'
-        ? { slot: idle.id, kind: 'issue', issue: unit.issue }
-        : { slot: idle.id, kind: 'batch', batch: unit.batch }
+        ? { slot: assigned.slotId, kind: 'issue', issue: unit.issue }
+        : { slot: assigned.slotId, kind: 'batch', batch: unit.batch }
     );
   }
 
   return { state: next, assignments };
+}
+
+/** Free live-agent capacity: `max_slots` minus the slots holding live units (AC5). */
+export function freeCapacity(state: SchedState, config: SchedConfig): number {
+  const live = state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length;
+  return Math.max(0, config.max_slots - live);
+}
+
+/**
+ * Assign `unit` to an idle slot (materializing one lazily when none is idle —
+ * a typed `idle → assigned` edge, never a synthetic mid-state) and return the
+ * new state plus the slot's id. Shared by queue refill (computeAssignments)
+ * and the #468 report dispatch so the slot-invariant shape exists once.
+ */
+export function assignToIdleSlot(
+  state: SchedState,
+  unit: string,
+  phase: string | null,
+  now: Date
+): { state: SchedState; slotId: number } {
+  let next = state;
+  let idle = next.slots.find((s) => s.status === 'idle');
+  if (!idle) {
+    const slot = {
+      id: next.next_slot_id,
+      status: 'idle' as const,
+      unit: null,
+      pid: null,
+      pid_start: null,
+      phase: null,
+      last_progress_at: null,
+      branch: null,
+      last_head: null,
+      recoveries: 0,
+      updated_at: now.toISOString(),
+    };
+    next = { ...next, slots: [...next.slots, slot], next_slot_id: next.next_slot_id + 1 };
+    idle = slot;
+  }
+  next = transitionSlot(
+    next,
+    idle.id,
+    'assigned',
+    {
+      unit,
+      pid: null,
+      phase,
+      last_progress_at: now.toISOString(),
+    },
+    now
+  );
+  return { state: next, slotId: idle.id };
 }
 
 /**

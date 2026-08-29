@@ -10,8 +10,10 @@ import {
   type GroundTruth,
   type GroundTruthMilestone,
   Journal,
+  type PrTruth,
   type SchedConfig,
   SchedStore,
+  type SetupInfo,
   type SpawnDeps,
   tick,
 } from '../index';
@@ -19,10 +21,15 @@ import {
 /**
  * Engine harness: a real SchedStore on a temp dir, fully fake process I/O
  * (spawn/kill/isAlive backed by a pid counter and a liveness set), and
- * scriptable ground truth. No subprocesses, no LLM calls.
+ * scriptable ground truth. No subprocesses, no LLM calls. Since #468 the
+ * ground truth is also scriptable for PR states and setup info, and the
+ * teardown exec is a recording fake.
  */
-function harness(opts?: { maxSlots?: number; stallTimeoutMs?: number }) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-engine-'));
+function harness(
+  opts?: { maxSlots?: number; stallTimeoutMs?: number; prPollIntervalMs?: number },
+  existingDir?: string
+) {
+  const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'sched-engine-'));
   const store = new SchedStore(dir);
   const journal = new Journal(dir);
 
@@ -49,11 +56,25 @@ function harness(opts?: { maxSlots?: number; stallTimeoutMs?: number }) {
   const closedIssues = new Set<number>();
   const branchHeads = new Map<string, string>();
   const unreachable = new Set<number>();
+  const prStates = new Map<number, PrTruth | undefined>();
+  const prUnreachable = new Set<number>();
+  const setupInfos = new Map<number, SetupInfo | null | undefined>();
+  const setupUnreachable = new Set<number>();
+  const teardownCalls: Array<{ file: string; args: string[]; cwd?: string }> = [];
+  /** Scriptable teardown subprocess behavior (default: every call fails). */
+  let teardownScript: (file: string, args: string[]) => string | null = () => null;
   const groundTruth: GroundTruth = {
     latestMilestone: (issue) =>
       unreachable.has(issue) ? undefined : (milestones.get(issue) ?? null),
     issueClosed: (issue) => closedIssues.has(issue),
     branchHead: (branch) => branchHeads.get(branch) ?? null,
+    prState: (pr) => (prUnreachable.has(pr) ? undefined : prStates.get(pr)),
+    setupInfo: (issue) =>
+      setupUnreachable.has(issue) ? undefined : (setupInfos.get(issue) ?? null),
+  };
+  const teardownExec = (file: string, args: string[], cwd?: string): string | null => {
+    teardownCalls.push({ file, args, cwd });
+    return teardownScript(file, args);
   };
 
   let clock = new Date('2026-08-29T12:00:00Z');
@@ -63,11 +84,14 @@ function harness(opts?: { maxSlots?: number; stallTimeoutMs?: number }) {
     groundTruth,
     spawnDeps,
     now: () => clock,
+    repoDir: dir,
+    teardownExec,
   };
 
   const config: SchedConfig = {
     max_slots: opts?.maxSlots ?? 3,
     ...(opts?.stallTimeoutMs !== undefined ? { stall_timeout_ms: opts.stallTimeoutMs } : {}),
+    ...(opts?.prPollIntervalMs !== undefined ? { pr_poll_interval_ms: opts.prPollIntervalMs } : {}),
   };
 
   return {
@@ -81,24 +105,59 @@ function harness(opts?: { maxSlots?: number; stallTimeoutMs?: number }) {
     closedIssues,
     branchHeads,
     unreachable,
+    prStates,
+    prUnreachable,
+    setupInfos,
+    setupUnreachable,
+    teardownCalls,
+    setTeardownScript: (script: (file: string, args: string[]) => string | null) => {
+      teardownScript = script;
+    },
+    /** A convention-valid worktree path for this harness's repo dir. */
+    wt: (name: string) => path.join(dir, 'worktrees', name),
     config,
     deps,
     enqueue: (inputs: EnqueueInput[]) =>
       store.withLock((state) => ({ state: enqueueEntries(state, inputs, clock), result: null })),
     tick: () => tick(deps, config),
     state: () => store.load(),
-    setMilestone: (issue: number, phase: string, status = 'done', at?: string) =>
+    events: () => journal.read(),
+    setMilestone: (
+      issue: number,
+      phase: string,
+      status = 'done',
+      at?: string,
+      keys: Record<string, string> = {}
+    ) =>
       milestones.set(issue, {
         phase,
         status,
         run: `r-${issue}-x`,
         at: at ?? clock.toISOString(),
-        keys: {},
+        keys,
+      }),
+    setPr: (pr: number, truth: Partial<PrTruth> & { state: PrTruth['state'] }) =>
+      prStates.set(pr, {
+        mergedAt: null,
+        mergeable: 'MERGEABLE',
+        blocked: false,
+        ...truth,
       }),
     advance: (ms: number) => {
       clock = new Date(clock.getTime() + ms);
     },
     clock: () => clock,
+  };
+}
+
+/** The milestone shape a detached ship run posts when parking its PR (#468). */
+function parkMilestone(pr: number, at?: string): GroundTruthMilestone {
+  return {
+    phase: 'ship',
+    status: 'awaiting-merge',
+    run: 'r-1-x',
+    at: at ?? new Date('2026-08-29T12:00:00Z').toISOString(),
+    keys: { pr: String(pr), head: 'abc1234', ci_fix_attempts: '0' },
   };
 }
 
@@ -109,15 +168,17 @@ afterEach(() => {
   }
 });
 
-describe('dispatch (AC1: spawn with --model per tier; pid/phase/progress in state.json)', () => {
-  beforeEach(() => {
-    for (const name of fs.readdirSync(os.tmpdir())) {
-      if (name.startsWith('sched-engine-')) {
-        fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
-      }
+// One top-level sweep: every harness dir is a fresh `sched-engine-` tmpdir —
+// stale dirs from crashed runs never leak between tests.
+beforeEach(() => {
+  for (const name of fs.readdirSync(os.tmpdir())) {
+    if (name.startsWith('sched-engine-')) {
+      fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
     }
-  });
+  }
+});
 
+describe('dispatch (AC1: spawn with --model per tier; pid/phase/progress in state.json)', () => {
   it('dispatches a runnable unit as a spawned agent process with the tier model', () => {
     const h = harness();
     REGISTRIES.push(h.dir);
@@ -620,5 +681,520 @@ describe('tier progression across the ladder', () => {
     h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
     const result = h.tick();
     expect(result.failed).toEqual(['issue:101']);
+  });
+});
+
+// --- #468: PR watching + script-based tail work ---
+
+/** Drive one unit to parked: enqueue → dispatch → agent parks PR #pr → exits. */
+function parkUnit(h: ReturnType<typeof harness>, issue: number, pr: number): void {
+  h.enqueue([{ issue, mode: 'full', tier: 'mid' }]);
+  h.tick(); // dispatch
+  h.setMilestone(issue, 'setup', 'done', undefined, {
+    branch: `feature/${issue}-x`,
+    worktree: `/tmp/wt-${issue}`,
+    pool_claimed: 'false',
+  });
+  h.milestones.set(issue, parkMilestone(pr));
+  h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid); // agent exits after parking
+  const result = h.tick();
+  expect(result.parked).toEqual([`issue:${issue}`]);
+  const entry = h.state().entries.find((e) => e.issue === issue);
+  expect(entry?.status).toBe('parked');
+  expect(entry?.pr).toBe(pr);
+}
+
+/** A teardown script that removes `worktree` from git's listing on `git worktree remove`. */
+function removingTeardown(worktree: string): (file: string, args: string[]) => string | null {
+  let removed = false;
+  return (file, args) => {
+    if (file === 'git' && args[0] === 'worktree' && args[1] === 'list') {
+      return removed
+        ? 'worktree /repo/main\nHEAD abc\n'
+        : `worktree /repo/main\nworktree ${worktree}\n`;
+    }
+    if (file === 'git' && args[1] === 'remove') {
+      removed = true;
+      return '';
+    }
+    return null;
+  };
+}
+
+describe('#468 AC1/AC5: parking and the PR watcher', () => {
+  it('an agent exiting on an awaiting-merge milestone parks the unit and frees its slot', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    // AC5: a waiting unit consumes zero slots
+    const state = h.state();
+    expect(state.slots.filter((s) => s.unit === 'issue:101')).toHaveLength(0);
+    expect(state.slots.every((s) => s.status === 'idle')).toBe(true);
+    // the park is journaled
+    expect(h.events().some((e) => e.event === 'pr-parked' && e.issue === 101)).toBe(true);
+  });
+
+  it('a parked PR never unblocks dependents; MERGE does (AC4)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([
+      { issue: 101, mode: 'full', tier: 'mid' },
+      { issue: 102, mode: 'full', tier: 'mid', deps: [101] },
+    ]);
+    h.tick(); // 101 dispatched (102 dep-blocked)
+    expect(h.spawnCalls).toHaveLength(1);
+
+    // 101 parks
+    h.milestones.set(101, parkMilestone(55));
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+
+    // while parked: 102 still blocked (parking is not merging)
+    h.setPr(55, { state: 'OPEN' });
+    h.advance(200_000);
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(1); // 102 never dispatched
+    expect(h.state().entries.find((e) => e.issue === 102)?.status).toBe('queued');
+
+    // the PR merges and the issue closes → 102 becomes runnable
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(200_000);
+    const result = h.tick();
+    expect(result.mergeAccepted).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('shipped');
+    // 102 dispatched in the same tick (or the report agent holds the slot first)
+    const later = h.spawnCalls.map((c) => c.prompt).join('\n');
+    expect(later).toContain('#102');
+  });
+
+  it('merge acceptance requires the issue to be closed too (AC1)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+
+    // PR merged, issue still open → NOT accepted, and the wait is journaled
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.advance(200_000);
+    let result = h.tick();
+    expect(result.mergeAccepted).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+    expect(h.events().some((e) => e.event === 'pr-watch-waiting' && e.issue === 101)).toBe(true);
+
+    // issue closes → accepted
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(200_000);
+    result = h.tick();
+    expect(result.mergeAccepted).toEqual(['issue:101']);
+  });
+
+  it('a report that cannot get a slot waits visibly and consumes zero slots', () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    // 101 parks first (its park frees the only slot)…
+    parkUnit(h, 101, 55);
+    // …and a long full-cycle unit takes it over before the merge lands
+    h.enqueue([{ issue: 201, mode: 'full', tier: 'mid' }]);
+    h.tick(); // dispatch 201
+
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(200_000);
+
+    const result = h.tick();
+    expect(result.mergeAccepted).toEqual(['issue:101']);
+    expect(result.teardownDone).toEqual(['issue:101']);
+    expect(result.reportDispatched).toEqual([]); // no free slot
+    expect(result.reportWaiting).toBe(1); // visible, not silent
+    // the merged unit holds NO slot while waiting (AC5)
+    expect(h.state().slots.filter((s) => s.unit === 'issue:101')).toHaveLength(0);
+  });
+
+  it('the poll cadence is honored: no PR poll before pr_poll_interval_ms elapses', () => {
+    const h = harness({ prPollIntervalMs: 150_000 });
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN' });
+
+    // first poll happens (last_pr_poll_at was null)
+    const first = h.tick();
+    expect(first.parked).toEqual([]);
+    expect(h.state().last_pr_poll_at).toBe(h.clock().toISOString());
+    const polledAt = h.state().last_pr_poll_at;
+
+    // before the interval elapses, a MERGED PR is not even looked at
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(101);
+    h.advance(60_000);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+    expect(h.state().last_pr_poll_at).toBe(polledAt);
+
+    // after the interval, the merge is seen
+    h.advance(120_000);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    const result = h.tick();
+    expect(result.mergeAccepted).toEqual(['issue:101']);
+  });
+
+  it('an unreachable PR poll pauses the watcher (decision 2, option A)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.prUnreachable.add(55);
+    h.advance(200_000);
+    const result = h.tick();
+    expect(result.mergeAccepted).toEqual([]);
+    expect(result.failed).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+    expect(h.events().some((e) => e.event === 'ground-truth-unreachable' && e.issue === 101)).toBe(
+      true
+    );
+  });
+});
+
+describe('#468 AC2: teardown + report dispatch on merge', () => {
+  /** Park 101 (PR 55), then merge + close + provide setup info. */
+  function mergedUnit(h: ReturnType<typeof harness>): void {
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(200_000);
+  }
+
+  it('merged → teardown script runs (verified) → cheap-tier report agent dispatched', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    mergedUnit(h);
+
+    const result = h.tick();
+    expect(result.mergeAccepted).toEqual(['issue:101']);
+
+    const state = h.state();
+    const entry = state.entries.find((e) => e.issue === 101);
+    expect(entry?.status).toBe('shipped');
+    expect(entry?.cleanup).toBe('done'); // verified before claimed
+
+    // teardown ran as a script: git worktree remove --force
+    const removeCall = h.teardownCalls.find((c) => c.file === 'git' && c.args[1] === 'remove');
+    expect(removeCall?.args).toContain('--force');
+    expect(removeCall?.args).toContain(h.wt('wt-101'));
+    expect(removeCall?.cwd).toBe(h.dir); // repoDir
+
+    // teardown-done journaled
+    expect(h.events().some((e) => e.event === 'teardown-done' && e.issue === 101)).toBe(true);
+
+    // a report agent was dispatched on a slot in the SAME tick
+    expect(result.reportDispatched).toEqual(['issue:101']);
+    const reportSpawn = h.spawnCalls[h.spawnCalls.length - 1];
+    expect(reportSpawn.cmd.join(' ')).toMatch(/haiku/); // cheap tier (mechanical)
+    expect(reportSpawn.prompt).toContain('report');
+    expect(reportSpawn.prompt).toContain('#101');
+    expect(reportSpawn.prompt).toContain('#55');
+    expect(reportSpawn.prompt).toContain('done');
+    const slot = state.slots.find((s) => s.unit === 'issue:101');
+    expect(slot?.status).toBe('running');
+    expect(slot?.phase).toBe('report');
+  });
+
+  it('pool-claimed worktrees return to the pool (verified via the pool self-check)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: '/pool/wt-101', poolClaimed: true, branch: 'f/101' });
+    h.advance(200_000);
+    h.setTeardownScript((file, args) => {
+      if (file === 'npx' && args[2] === 'status') {
+        return JSON.stringify({ worktrees: [] });
+      }
+      if (file === 'npx' && args[2] === 'return') {
+        return JSON.stringify({
+          id: 'wt-9',
+          path: '/pool/wt-9',
+          verification: {
+            entry_status: 'warm',
+            directory_clean: true,
+            checked_out_branch: 'pool/spare-9',
+            expected_branch: 'pool/spare-9',
+          },
+        });
+      }
+      return null;
+    });
+
+    const result = h.tick();
+    expect(result.mergeAccepted).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.cleanup).toBe('done');
+    const returnCall = h.teardownCalls.find((c) => c.file === 'npx' && c.args[2] === 'return');
+    expect(returnCall?.args).toContain('--path');
+    expect(returnCall?.args).toContain('/pool/wt-101');
+  });
+
+  it('a failed teardown records cleanup=failed-<step> and the report still dispatches', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.advance(200_000);
+    // the remove keeps failing AND the worktree stays listed → failed step
+    h.setTeardownScript((file, args) => {
+      if (file === 'git' && args[1] === 'list')
+        return `worktree /repo/main\nworktree ${h.wt('wt-101')}\n`;
+      if (file === 'git' && args[1] === 'remove') return '';
+      return null;
+    });
+
+    const result = h.tick();
+    expect(result.reportDispatched).toEqual(['issue:101']); // report regardless
+    const entry = h.state().entries.find((e) => e.issue === 101);
+    expect(entry?.status).toBe('shipped');
+    expect(entry?.cleanup).toBe('failed-worktree-remove');
+    expect(h.events().some((e) => e.event === 'teardown-failed' && e.issue === 101)).toBe(true);
+    // the failure is surfaced to the report agent
+    const reportSpawn = h.spawnCalls[h.spawnCalls.length - 1];
+    expect(reportSpawn.prompt).toContain('failed-worktree-remove');
+  });
+
+  it('missing setup info records failed-missing-setup-info; unreachable defers to the next tick', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(101);
+    h.advance(200_000);
+
+    // verifiably no setup milestone → failed step, report dispatched
+    h.setupInfos.set(101, null);
+    let result = h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.cleanup).toBe(
+      'failed-missing-setup-info'
+    );
+    expect(result.reportDispatched).toEqual(['issue:101']);
+
+    // unreachable → teardown deferred (cleanup stays null), retried later
+    parkUnit(h, 202, 66);
+    h.setPr(66, { state: 'MERGED', mergedAt: '2026-08-29T12:40:00Z' });
+    h.closedIssues.add(202);
+    h.advance(200_000);
+    h.setupUnreachable.add(202);
+    result = h.tick();
+    const entry202 = h.state().entries.find((e) => e.issue === 202);
+    expect(entry202?.status).toBe('shipped');
+    expect(entry202?.cleanup).toBeNull(); // deferred, not failed
+    expect(result.reportDispatched).toEqual([]); // no report before teardown is attempted
+    expect(h.events().some((e) => e.event === 'ground-truth-unreachable' && e.issue === 202)).toBe(
+      true
+    );
+  });
+
+  it('the report agent completes the unit: report-done milestone → shipped → done', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    mergedUnit(h);
+    h.tick(); // merge accepted + teardown + report dispatched
+
+    // the report agent posts its final milestone and exits
+    h.milestones.set(101, {
+      phase: 'report',
+      status: 'done',
+      run: 'r-101-x',
+      at: h.clock().toISOString(),
+      keys: {},
+    });
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    const result = h.tick();
+    expect(result.completed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('done');
+    expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
+  });
+
+  it('a dead report agent is redispatched up the report ladder, then fails WITHOUT blocking dependents', () => {
+    const h = harness({ stallTimeoutMs: 1000 });
+    REGISTRIES.push(h.dir);
+    mergedUnit(h);
+    h.tick(); // report agent #1 (mechanical/haiku)
+
+    // report agent dies without posting anything — redispatched at mid
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    let result = h.tick();
+    expect(result.redispatched).toEqual(['issue:101']);
+    expect(h.spawnCalls[h.spawnCalls.length - 1].cmd.join(' ')).toMatch(/sonnet/);
+
+    // dies again → strong
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    result = h.tick();
+    expect(result.redispatched).toEqual(['issue:101']);
+    expect(h.spawnCalls[h.spawnCalls.length - 1].cmd.join(' ')).toMatch(/opus/);
+
+    // dies a third time → cap → the REPORT failed but the unit is MERGED:
+    // entry completes (done, reason recorded), dependents stay released
+    h.enqueue([{ issue: 102, mode: 'full', tier: 'mid', deps: [101] }]);
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    result = h.tick();
+    expect(result.failed).toEqual(['issue:101']);
+    expect(result.blocked).toEqual([]); // merged — dependents stay released
+    expect(h.events().some((e) => e.event === 'report-failed' && e.issue === 101)).toBe(true);
+    const entry101 = h.state().entries.find((e) => e.issue === 101);
+    expect(entry101?.status).toBe('done'); // work is merged — the unit completes
+    expect(entry101?.reason).toBe('report-escalation-cap');
+    // 102 was never blocked by the report failure — it dispatches against the merged dep
+    expect(h.state().entries.find((e) => e.issue === 102)?.status).toBe('dispatched');
+  });
+
+  it('a running report agent is never killed by the already-closed issue (report completion is milestone-only)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    mergedUnit(h);
+    h.tick(); // report dispatched; issue 101 is closed (merged) the whole time
+
+    // the report agent is alive and mid-work; the issue being closed must NOT
+    // external-advance it (its completion is the report milestone only)
+    const result = h.tick();
+    expect(result.externalAdvances).toEqual([]);
+    const slot = h.state().slots.find((s) => s.unit === 'issue:101');
+    expect(slot?.status).toBe('running');
+    expect(h.killedPids).toHaveLength(0);
+  });
+});
+
+describe('#468 AC3: watcher failure paths', () => {
+  it('CONFLICTING → failed with reason + transitive dependents blocked', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([
+      { issue: 101, mode: 'full', tier: 'mid' },
+      { issue: 102, mode: 'full', tier: 'mid', deps: [101] },
+      { issue: 103, mode: 'full', tier: 'mid', deps: [102] }, // transitive
+    ]);
+    h.tick(); // 101 dispatched
+    h.milestones.set(101, parkMilestone(55));
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick(); // parked
+
+    h.setPr(55, { state: 'OPEN', mergeable: 'CONFLICTING' });
+    h.advance(200_000);
+    const result = h.tick();
+
+    expect(result.failed).toEqual(['issue:101']);
+    expect(result.blocked).toEqual([102, 103]); // transitive
+    const state = h.state();
+    expect(state.entries.find((e) => e.issue === 101)?.reason).toBe('pr-conflicting');
+    expect(state.entries.find((e) => e.issue === 102)?.status).toBe('blocked');
+    expect(state.entries.find((e) => e.issue === 103)?.status).toBe('blocked');
+    expect(h.events().some((e) => e.event === 'pr-watch-failed' && e.issue === 101)).toBe(true);
+  });
+
+  it('closed-unmerged → failed with reason', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'CLOSED' });
+    h.advance(200_000);
+    const result = h.tick();
+    expect(result.failed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('pr-closed-unmerged');
+  });
+
+  it('auto-merge-blocked label → failed with reason', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN', blocked: true });
+    h.advance(200_000);
+    const result = h.tick();
+    expect(result.failed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('auto-merge-blocked');
+  });
+
+  it('OPEN and mergeable keeps watching (no failure, no slots)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN' });
+    h.advance(200_000);
+    const result = h.tick();
+    expect(result.failed).toEqual([]);
+    expect(result.mergeAccepted).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+    expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
+  });
+});
+
+describe('#468 AC6: restart mid-watch', () => {
+  it('a fresh engine instance resumes the watch from state.json alone', () => {
+    const first = harness();
+    REGISTRIES.push(first.dir);
+    parkUnit(first, 101, 55);
+    // engine "dies" — a brand-new instance (new store/journal/fakes) takes over
+    const h = harness({}, first.dir);
+    REGISTRIES.push(h.dir);
+
+    // state survived: parked, pr recorded, zero live slots
+    const loaded = h.state();
+    expect(loaded.entries.find((e) => e.issue === 101)?.status).toBe('parked');
+    expect(loaded.entries.find((e) => e.issue === 101)?.pr).toBe(55);
+
+    // the new instance watches from the persisted state — merge accepted on its tick
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(200_000);
+    const result = h.tick();
+    expect(result.mergeAccepted).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.cleanup).toBe('done');
+    expect(result.reportDispatched).toEqual(['issue:101']);
+
+    // report completes
+    h.milestones.set(101, {
+      phase: 'report',
+      status: 'done',
+      run: 'r-101-x',
+      at: h.clock().toISOString(),
+      keys: {},
+    });
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('done');
+  });
+
+  it('the PR poll cadence survives the restart (last_pr_poll_at persisted)', () => {
+    const first = harness({ prPollIntervalMs: 150_000 });
+    REGISTRIES.push(first.dir);
+    parkUnit(first, 101, 55);
+    first.setPr(55, { state: 'OPEN' });
+    first.tick(); // polls now
+    const polledAt = first.state().last_pr_poll_at;
+    expect(polledAt).not.toBeNull();
+
+    // restart + only 60s pass: no re-poll (the merge is invisible)
+    const h = harness({ prPollIntervalMs: 150_000 }, first.dir);
+    REGISTRIES.push(h.dir);
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(101);
+    h.advance(60_000);
+    h.tick();
+    expect(h.state().last_pr_poll_at).toBe(polledAt);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+
+    // after the interval: seen
+    h.advance(120_000);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    expect(h.tick().mergeAccepted).toEqual(['issue:101']);
   });
 });

@@ -142,3 +142,66 @@ describe('SchedStore', () => {
     expect(validateState(onDisk)).toEqual(state);
   });
 });
+
+describe('#468 config: pr_poll_interval_ms and dispatch.report_prompt', () => {
+  it('round-trips the watcher cadence and the report prompt', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-468-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({
+        max_slots: 2,
+        pr_poll_interval_ms: 120_000,
+        dispatch: { report_prompt: 'custom report {issue} {pr} {cleanup}' },
+      });
+      const config = store.loadConfig();
+      expect(config.max_slots).toBe(2);
+      expect(config.pr_poll_interval_ms).toBe(120_000);
+      expect(config.dispatch?.report_prompt).toBe('custom report {issue} {pr} {cleanup}');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-positive pr_poll_interval_ms (degrades to defaults, loudly)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-468-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({ schema_version: '1.2.0', max_slots: 2, pr_poll_interval_ms: 0 })
+      );
+      const err = console.error;
+      const warnings: string[] = [];
+      console.error = (msg: string) => warnings.push(msg);
+      try {
+        expect(store.loadConfig()).toEqual({ max_slots: 3 });
+      } finally {
+        console.error = err;
+      }
+      expect(warnings.some((w) => w.includes('unreadable'))).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('loads legacy 1.1.0 configs (dispatch without report_prompt)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-468-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({
+          schema_version: '1.1.0',
+          max_slots: 4,
+          dispatch: { command: ['claude', '-p'] },
+        })
+      );
+      const config = store.loadConfig();
+      expect(config.max_slots).toBe(4);
+      expect(config.dispatch?.command).toEqual(['claude', '-p']);
+      expect(config.dispatch?.report_prompt).toBeUndefined();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

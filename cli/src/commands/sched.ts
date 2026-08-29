@@ -2,9 +2,11 @@
  * `ai-dossier sched` — the deterministic scheduler core (RFC-0001 §C.1, issue #460).
  *
  * enqueue / status / pause / resume / abandon manage the queue and state
- * (#460); `sched start` runs the dispatch engine (#464): spawns agent
- * processes for runnable units, verifies completion against ground truth,
- * and mechanizes the stall/escalation ladder.
+ * (#460); `sched start` runs the dispatch engine (#464: spawning agent
+ * processes, verifying their completion against ground truth, mechanizing
+ * the stall/escalation ladder) and since #468 also the detached-ship tail:
+ * watching parked PRs, script-based teardown of merged worktrees, and the
+ * cheap-tier report dispatch.
  */
 
 import fs from 'node:fs';
@@ -14,6 +16,7 @@ import {
   abandonIssue,
   buildStatusReport,
   CorruptStateError,
+  createExecFn,
   createExecGroundTruth,
   createSpawnDeps,
   DEFAULT_RECONCILE_INTERVAL_MS,
@@ -33,6 +36,7 @@ import {
   SchedStore,
   schedStateDir,
   setPaused,
+  TEARDOWN_TIMEOUT_MS,
   tick,
 } from '@ai-dossier/sched';
 import type { Command } from 'commander';
@@ -130,7 +134,7 @@ function renderReport(report: StatusReport): string {
   lines.push('== Queue ==');
   lines.push(
     renderTable(
-      ['issue', 'mode', 'batch', 'tier', 'deps', 'status'],
+      ['issue', 'mode', 'batch', 'tier', 'deps', 'status', 'pr', 'cleanup'],
       report.queue.map((e) => [
         `#${e.issue}`,
         e.mode,
@@ -138,10 +142,24 @@ function renderReport(report: StatusReport): string {
         e.tier,
         e.deps.length > 0 ? e.deps.map((d) => `#${d}`).join(',') : '-',
         e.status,
+        e.pr !== null && e.pr !== undefined ? String(e.pr) : '-',
+        e.cleanup ?? '-',
       ])
     )
   );
   lines.push('');
+  if (report.parked.length > 0) {
+    const lastPoll = report.last_pr_poll_at
+      ? `; last poll ${relativeTime(report.last_pr_poll_at)}`
+      : '; never polled';
+    lines.push(`== Parked PRs (watched, zero slots${lastPoll}) ==`);
+    lines.push(
+      report.parked
+        .map((p) => `#${p.issue} — PR #${p.pr} (parked ${relativeTime(p.since)})`)
+        .join('\n')
+    );
+    lines.push('');
+  }
   lines.push('== Slots ==');
   lines.push(
     report.slots.length === 0
@@ -382,7 +400,7 @@ function registerStartSubcommand(cmd: Command): void {
   cmd
     .command('start')
     .description(
-      'Run the dispatch engine: spawn agents for runnable units, verify completion against ground truth, escalate stalls (Ctrl-C stops the engine; agents keep running)'
+      'Run the dispatch engine: spawn agents, verify completion, escalate stalls, watch parked PRs, tear down merged worktrees, dispatch report agents (Ctrl-C stops the engine; agents keep running)'
     )
     .option(
       '--interval <seconds>',
@@ -425,11 +443,29 @@ function registerStartSubcommand(cmd: Command): void {
         groundTruth: createExecGroundTruth(undefined, { repoDir: process.cwd() }),
         spawnDeps: createSpawnDeps(process.cwd()),
         now: () => new Date(),
+        repoDir: process.cwd(),
+        teardownExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
+          onError: (file, args, err) =>
+            process.stderr.write(
+              `⚠ sched teardown: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+            ),
+        }),
       };
 
       const describe = (result: TickResult): string => {
         const parts: string[] = [];
         if (result.spawned.length > 0) parts.push(`spawned ${result.spawned.join(', ')}`);
+        if (result.parked.length > 0) parts.push(`parked ${result.parked.join(', ')}`);
+        if (result.mergeAccepted.length > 0)
+          parts.push(`merge accepted ${result.mergeAccepted.join(', ')}`);
+        if (result.teardownDone.length > 0)
+          parts.push(`teardown done ${result.teardownDone.join(', ')}`);
+        if (result.teardownFailed.length > 0)
+          parts.push(`teardown failed ${result.teardownFailed.join(', ')}`);
+        if (result.reportDispatched.length > 0)
+          parts.push(`report dispatched ${result.reportDispatched.join(', ')}`);
+        if (result.reportWaiting > 0)
+          parts.push(`${result.reportWaiting} report(s) waiting for a free slot`);
         if (result.externalAdvances.length > 0)
           parts.push(`externally completed ${result.externalAdvances.join(', ')}`);
         if (result.completed.length > 0) parts.push(`completed ${result.completed.join(', ')}`);

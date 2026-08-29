@@ -1,8 +1,9 @@
 /**
- * `sched status` report (AC4): queue, slots, batches, and the blocked/failed
- * sets as a machine-readable report. Text rendering lives in the CLI
- * (`cli/src/commands/sched.ts`, on top of the CLI's shared `renderTable`) —
- * the package deliberately has no dependency on CLI utilities.
+ * `sched status` report (AC4): queue, slots, batches, parked PRs, and the
+ * blocked/failed sets as a machine-readable report. Text rendering lives in
+ * the CLI (`cli/src/commands/sched.ts`, on top of the CLI's shared
+ * `renderTable`) — the package deliberately has no dependency on CLI
+ * utilities.
  */
 
 import {
@@ -21,6 +22,14 @@ export interface BlockedItem {
   reason: string;
 }
 
+/** A parked unit awaiting its PR merge (#468). */
+export interface ParkedItem {
+  issue: number;
+  pr: number;
+  /** When the unit parked (entry `updated_at`). */
+  since: string;
+}
+
 /** Machine-readable status report (`sched status --json`). */
 export interface StatusReport {
   /** Project slug the report was built for (which state bucket this is). */
@@ -31,6 +40,10 @@ export interface StatusReport {
   queue: QueueEntry[];
   slots: SlotEntry[];
   batches: BatchEntry[];
+  /** Parked units being watched by the PR watcher (#468). */
+  parked: ParkedItem[];
+  /** When the PR watcher last polled (#468) — null before the first poll. */
+  last_pr_poll_at: string | null;
   /** How many units are runnable right now. */
   runnable: number;
   /** Which units are runnable (`issue:<n>` / `batch:<id>`), in dispatch order. */
@@ -100,6 +113,10 @@ export function buildStatusReport(
 
   const units = state.paused ? [] : runnableUnits(state);
 
+  const parked: ParkedItem[] = state.entries
+    .filter((e): e is QueueEntry & { pr: number } => e.status === 'parked' && e.pr !== null)
+    .map((e) => ({ issue: e.issue, pr: e.pr, since: e.updated_at }));
+
   return {
     project,
     paused: state.paused,
@@ -108,6 +125,8 @@ export function buildStatusReport(
     queue: state.entries,
     slots: state.slots,
     batches: state.batches,
+    parked,
+    last_pr_poll_at: state.last_pr_poll_at,
     runnable: units.length,
     runnable_units: units.map((u) =>
       u.kind === 'issue' ? `issue:${u.issue}` : `batch:${u.batch}`

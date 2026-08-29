@@ -200,6 +200,8 @@ export function enqueueEntries(
       tier: input.tier ?? 'mid',
       status: 'queued',
       reason: null,
+      pr: null,
+      cleanup: null,
       enqueued_at: timestamp,
       updated_at: timestamp,
     };

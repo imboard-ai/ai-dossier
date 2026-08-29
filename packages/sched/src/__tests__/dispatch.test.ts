@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   buildAgentCommand,
   buildPrompt,
+  buildReportPrompt,
   DEFAULT_DISPATCH_COMMAND,
   DEFAULT_TIER_MODELS,
   escalateTier,
+  reportTierFor,
   resolveDispatch,
   type SchedConfig,
 } from '../index';
@@ -138,4 +140,50 @@ describe('createSpawnDeps (real processes)', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }, 10_000);
+});
+
+// --- #468: report dispatch ---
+
+describe('report dispatch (#468 AC2)', () => {
+  it('the default prompt is detached ship mode (park and stop)', () => {
+    const resolved = resolveDispatch({ max_slots: 1 });
+    expect(resolved.prompt).toContain('detached');
+    expect(resolved.prompt).toContain('auto-merge');
+    expect(resolved.prompt).toContain('STOP');
+    // the tail is the scheduler's, not the agent's
+    expect(resolved.prompt).toContain('scheduler');
+  });
+
+  it('buildReportPrompt substitutes issue, pr, and cleanup', () => {
+    const out = buildReportPrompt(
+      'Report for #{issue} — PR #{pr} — cleanup {cleanup}',
+      468,
+      55,
+      'failed-pool-return'
+    );
+    expect(out).toBe('Report for #468 — PR #55 — cleanup failed-pool-return');
+  });
+
+  it('report prompts are configurable via dispatch.report_prompt', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: { report_prompt: 'custom report {issue}/{pr}/{cleanup}' },
+    });
+    expect(resolved.reportPrompt).toBe('custom report {issue}/{pr}/{cleanup}');
+  });
+
+  it('reportTierFor climbs mechanical → mid → strong and stops', () => {
+    expect(reportTierFor(0)).toBe('mechanical');
+    expect(reportTierFor(1)).toBe('mid');
+    expect(reportTierFor(2)).toBe('strong');
+    expect(reportTierFor(3)).toBeNull();
+    expect(reportTierFor(99)).toBeNull();
+  });
+
+  it('prPollIntervalMs resolves from config with the 2-3 minute default', () => {
+    expect(resolveDispatch({ max_slots: 1 }).prPollIntervalMs).toBe(150_000);
+    expect(resolveDispatch({ max_slots: 1, pr_poll_interval_ms: 120_000 }).prPollIntervalMs).toBe(
+      120_000
+    );
+  });
 });

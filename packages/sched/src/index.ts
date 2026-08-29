@@ -1,13 +1,16 @@
 export {
   buildAgentCommand,
   buildPrompt,
+  buildReportPrompt,
   createSpawnDeps,
   DEFAULT_DISPATCH_COMMAND,
   DEFAULT_PROMPT_TEMPLATE,
+  DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
   escalateTier,
   OPENCODE_DISPATCH_COMMAND,
   type ResolvedDispatch,
+  reportTierFor,
   resolveDispatch,
   type SpawnDeps,
   unitLogName,
@@ -25,8 +28,14 @@ export {
   type GroundTruth,
   type GroundTruthMilestone,
   groundTruthExec,
+  isParkedMilestone,
   isVerifiedComplete,
+  type PrTruth,
   parseMilestoneJson,
+  parsePrViewJson,
+  parseSetupInfo,
+  prOfMilestone,
+  type SetupInfo,
 } from './groundtruth';
 export { issueOfUnit, JOURNAL_FILE, Journal, readJsonl, unitEvent } from './journal';
 
@@ -44,10 +53,12 @@ export {
   type Assignment,
   abandonBatch,
   abandonIssue,
+  assignToIdleSlot,
   batchBlockers,
   computeAssignments,
   type DependencyBlocker,
   dependencyBlockers,
+  freeCapacity,
   type RunnableUnit,
   runnableUnits,
   setPaused,
@@ -62,13 +73,16 @@ export {
   transitionSlot,
   validateState,
 } from './state';
-export { type BlockedItem, buildStatusReport, type StatusReport } from './status';
+export { type BlockedItem, buildStatusReport, type ParkedItem, type StatusReport } from './status';
+export { isSafeWorktree, runTeardown, TEARDOWN_TIMEOUT_MS, type TeardownResult } from './teardown';
 export {
   type BatchEntry,
   type BatchStatus,
+  type CleanupStatus,
   CONFIG_SCHEMA_VERSION,
   type CycleMode,
   DEFAULT_MAX_SLOTS,
+  DEFAULT_PR_POLL_INTERVAL_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_STALL_TIMEOUT_MS,
   type DispatchConfig,
@@ -96,4 +110,5 @@ export {
   TERMINAL_BATCH_STATUSES,
   TERMINAL_ISSUE_STATUSES,
   TIER_LADDER,
+  TIER_ORDER,
 } from './types';

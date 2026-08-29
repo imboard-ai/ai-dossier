@@ -5,6 +5,7 @@ import {
   findBatch,
   findEntry,
   IllegalTransitionError,
+  SATISFIED_ISSUE_STATUSES,
   type SchedState,
   TERMINAL_BATCH_STATUSES,
   TERMINAL_ISSUE_STATUSES,
@@ -110,6 +111,49 @@ describe('issue state machine (RFC-0001 §D.1)', () => {
       }
       void i;
     });
+  });
+
+  it('walks the detached-ship park rail (#468): dispatched → parked → shipped → done', () => {
+    let state = seeded();
+    state = transitionIssue(state, 101, 'classified', {}, NOW2);
+    state = transitionIssue(state, 101, 'dispatched', {}, NOW2);
+    state = transitionIssue(state, 101, 'parked', { pr: 55 }, NOW2);
+    const parked = findEntry(state, 101);
+    expect(parked?.status).toBe('parked');
+    expect(parked?.pr).toBe(55);
+    // parked is NOT a satisfied status — gating on MERGE, never the park (AC4)
+    expect(SATISFIED_ISSUE_STATUSES.has('parked')).toBe(false);
+    state = transitionIssue(state, 101, 'shipped', {}, NOW2);
+    state = transitionIssue(state, 101, 'done', {}, NOW2);
+    expect(findEntry(state, 101)?.status).toBe('done');
+  });
+
+  it('parked entries keep the universal failure edges (watcher failures, AC3)', () => {
+    let state = seeded();
+    state = transitionIssue(state, 101, 'classified', {}, NOW);
+    state = transitionIssue(state, 101, 'dispatched', {}, NOW);
+    state = transitionIssue(state, 101, 'parked', { pr: 55 }, NOW);
+    expect(() =>
+      transitionIssue(state, 101, 'failed', { reason: 'pr-conflicting' }, NOW2)
+    ).not.toThrow();
+    expect(() => transitionIssue(state, 101, 'blocked', {}, NOW2)).not.toThrow();
+  });
+
+  it('parked is reachable only from dispatched, and leaves only to shipped (+failure edges)', () => {
+    let state = seeded();
+    // not from queued
+    expect(() => transitionIssue(state, 101, 'parked', { pr: 55 }, NOW)).toThrow(
+      IllegalTransitionError
+    );
+    state = transitionIssue(state, 101, 'classified', {}, NOW);
+    expect(() => transitionIssue(state, 101, 'parked', { pr: 55 }, NOW)).toThrow(
+      IllegalTransitionError
+    );
+    state = transitionIssue(state, 101, 'dispatched', {}, NOW);
+    state = transitionIssue(state, 101, 'parked', { pr: 55 }, NOW);
+    // parked → evicted/requeued are batch rails and stay illegal here
+    expect(() => transitionIssue(state, 101, 'evicted', {}, NOW)).toThrow(IllegalTransitionError);
+    expect(() => transitionIssue(state, 101, 'requeued', {}, NOW)).toThrow(IllegalTransitionError);
   });
 
   it('throws IllegalTransitionError on non-declared edges', () => {
@@ -376,7 +420,7 @@ describe('validateState', () => {
   });
 });
 
-describe('#464 schema migration (1.0.0 → 1.1.0)', () => {
+describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0)', () => {
   it('loads a pre-#464 1.0.0 state and backfills slot branch/last_head as null', () => {
     // Exactly what #460 persisted: no branch/last_head on slots.
     const legacy = {
@@ -411,12 +455,74 @@ describe('#464 schema migration (1.0.0 → 1.1.0)', () => {
       next_slot_id: 2,
     };
     const migrated = validateState(legacy);
-    expect(migrated.schema_version).toBe('1.1.0');
+    expect(migrated.schema_version).toBe('1.2.0');
     expect(migrated.slots[0].branch).toBeNull();
     expect(migrated.slots[0].last_head).toBeNull();
     // everything #460 persisted is preserved
     expect(migrated.slots[0].pid).toBe(4242);
     expect(migrated.entries[0].issue).toBe(101);
+  });
+
+  it('loads a pre-#468 1.1.0 state and backfills pr/cleanup/last_pr_poll_at as null', () => {
+    // Exactly what #464 persisted: entries without pr/cleanup, no
+    // last_pr_poll_at on the state.
+    const legacy = {
+      schema_version: '1.1.0',
+      paused: false,
+      entries: [
+        {
+          issue: 101,
+          mode: 'full',
+          batch: null,
+          deps: [],
+          tier: 'mid',
+          status: 'dispatched',
+          reason: null,
+          enqueued_at: NOW.toISOString(),
+          updated_at: NOW.toISOString(),
+        },
+      ],
+      batches: [],
+      slots: [
+        {
+          id: 1,
+          status: 'running',
+          unit: 'issue:101',
+          pid: 4242,
+          pid_start: null,
+          phase: 'ship',
+          last_progress_at: NOW.toISOString(),
+          branch: 'feature/101-x',
+          last_head: null,
+          recoveries: 0,
+          updated_at: NOW.toISOString(),
+        },
+      ],
+      next_slot_id: 2,
+    };
+    const migrated = validateState(legacy);
+    expect(migrated.schema_version).toBe('1.2.0');
+    expect(migrated.entries[0].pr).toBeNull();
+    expect(migrated.entries[0].cleanup).toBeNull();
+    expect(migrated.last_pr_poll_at).toBeNull();
+    // everything #464 persisted is preserved
+    expect(migrated.slots[0].branch).toBe('feature/101-x');
+    expect(migrated.entries[0].status).toBe('dispatched');
+  });
+
+  it('rejects a malformed pr field', () => {
+    const state = seeded();
+    const bad = {
+      ...state,
+      entries: state.entries.map((e) => ({ ...e, pr: 'not-a-number' })),
+    };
+    expect(() => validateState(bad)).toThrow(/pr must be a positive integer or null/);
+  });
+
+  it('rejects a malformed last_pr_poll_at', () => {
+    const state = seeded();
+    const bad = { ...state, last_pr_poll_at: 'yesterday' };
+    expect(() => validateState(bad)).toThrow(/last_pr_poll_at/);
   });
 
   it('current-schema states round-trip unchanged', () => {
