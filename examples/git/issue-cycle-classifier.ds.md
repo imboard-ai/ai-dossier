@@ -56,7 +56,7 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "be790e835c4a036254d12ca0559e23312ffbdcede19a7646e10d44de53b03437"
+    "hash": "6daa44f001ae094012f5d1286bc8697cb3c4e8a75f80bd0fcc51a30dadea98b6"
   }
 }
 ---
@@ -72,7 +72,7 @@ Score ONE issue for execution mode (`full` vs `slot`). Inspect issue metadata an
 ## Prerequisites
 
 - GitHub CLI (gh) installed and authenticated
-- `ai-dossier` CLI >= 0.15.0 (`ai-dossier runstate post --phase classify` vocabulary, ai-dossier#461)
+- `ai-dossier` CLI >= 0.14.0 (`ai-dossier runstate post --phase classify` vocabulary, ai-dossier#461)
 - Run from the repository that owns the issue — path probes and `git grep` run against it
 - `ai-dossier whoami` works (not needed for `dry_run`)
 
@@ -103,8 +103,8 @@ Gather, in order of authority:
 
 Produce the verdict fields:
 
-- `est_files` — predicted number of files (integer)
-- `est_diff` — predicted total diff lines (integer)
+- `est_files` — predicted number of files (non-negative integer)
+- `est_diff` — predicted total diff lines (non-negative integer)
 - `areas` — comma-separated lowercase slugs (`cli,docs`)
 - `test_scope` — `focused` (predictable, named test files) | `broad` (cross-cutting, needs full suite) | `unknown`
 - `deps` — `none` or comma-separated issue numbers
@@ -115,7 +115,7 @@ Produce the verdict fields:
 
 Evaluate all ten rules explicitly. **Uncertainty ⇒ full** — a rule you cannot evaluate counts as a hit.
 
-1. **Risk-floor area**: any predicted path touches auth, payments/billing, migrations, `.github/**`, security, crypto, secrets, or infra/terraform (review-issue Stage 1 list, verbatim)
+1. **Risk-floor area**: any predicted path touches auth, payment/billing, migrations, `.github/**`, security, crypto, secrets, or infra/terraform (review-issue Stage 1 list, verbatim)
 2. **Schema or data migration** anywhere in the predicted change
 3. **New package/workspace** created
 4. **Deploy-pipeline change** (CI/CD, deploy scripts, release flow)
@@ -160,17 +160,18 @@ RUN_ID=$(ai-dossier runstate mint --issue <issue_number>)
 ai-dossier runstate post --issue <issue_number> --phase classify --status done --run "$RUN_ID" \
   --kv mode=<full|slot> \
   --kv risk=<low|med|high> \
-  --kv est_files=<integer> \
-  --kv est_diff=<integer> \
+  --kv est_files=<non-negative integer> \
+  --kv est_diff=<non-negative integer> \
   --kv areas=<comma,slugs> \
   --kv test_scope=<focused|broad|unknown> \
   --kv deps=<none|123,456> \
   --kv confidence=<0-1 decimal>
 ```
 
-4. **Apply the verdict label** (replace a prior cycle:* label if the issue carries one from an earlier classification):
+4. **Apply the verdict label** — remove the opposite mode's label first (no-op when absent) so a reclassified issue never carries both:
 
 ```bash
+gh issue edit <issue_number> --remove-label "cycle:<other-mode>" 2>/dev/null || true
 gh issue edit <issue_number> --add-label "cycle:<mode>"
 ```
 
@@ -186,6 +187,15 @@ areas=<slugs> test_scope=<t> deps=<d> confidence=<c>
 Floor hits: <rule numbers, or none>  Label: cycle:<mode> applied (or dry-run)
 ```
 
+## Output
+
+- `mode`: `full` | `slot`
+- `risk`: `low` | `med` | `high`
+- `est_files` / `est_diff`: predicted counts (non-negative integers)
+- `areas`: comma-separated slugs; `test_scope`: `focused` | `broad` | `unknown`
+- `deps`: `none` or issue numbers; `confidence`: 0–1 decimal
+- Posted: `phase=classify` runstate milestone, `cycle:<mode>` label, rationale comment (all skipped under `dry_run`)
+
 ## Validation
 
 - [ ] Issue body AND comments read; plan:v1 artifact consumed when present
@@ -200,7 +210,7 @@ Floor hits: <rule numbers, or none>  Label: cycle:<mode> applied (or dry-run)
 
 | Symptom | Fix |
 |---|---|
-| `runstate post` rejects `--phase classify` | CLI older than 0.15.0 — upgrade (`npm i -g @ai-dossier/cli`); use the global binary by absolute path if a repo-local `node_modules/.bin` shadow exists |
+| `runstate post` rejects `--phase classify` | CLI older than 0.14.0 — upgrade (`npm i -g @ai-dossier/cli`); use the global binary by absolute path if a repo-local `node_modules/.bin` shadow exists |
 | `est_diff`/`est_files` rejected | Must be non-negative integers — no ranges, no "about", no `+`/`k` suffixes |
 | `confidence` rejected | Decimal between 0 and 1 (`0.85`), not a percentage |
 | No plan:v1 artifact | Expected — estimate predicted files from issue text and probe with `git grep`/`ls`; lower `confidence` when paths cannot be grounded |
