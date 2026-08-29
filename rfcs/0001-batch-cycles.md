@@ -3,7 +3,7 @@
 - **Status**: Proposal
 - **Author(s)**: Yuval Dimnik
 - **Created**: 2026-08-29
-- **Related**: full-cycle-issue v3.14.1, fleet-cycle v1.7.0 (registry: imboard-ai/git/*), Progressive Determinism brief
+- **Related**: Epic #474 (implementation tracking, issues #458–#473) · full-cycle-issue v3.14.1, fleet-cycle v1.7.0 (registry: imboard-ai/git/*) · Progressive Determinism brief
 
 
 ## Executive summary
