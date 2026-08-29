@@ -179,7 +179,11 @@ function bisectScript(badSha: string, runOutput: string): ExecFn {
   return (file, args) => {
     if (file !== 'git') return at === 'bad' ? null : '';
     if (args[0] === 'symbolic-ref') return 'feature/batch';
-    if (args[0] === 'rev-parse') return 'f'.repeat(40);
+    // The completed bisect leaves refs/bisect/bad at the first bad commit —
+    // this is what the implementation reads, in preference to git's prose.
+    if (args[0] === 'rev-parse') {
+      return args.includes('refs/bisect/bad') ? badSha : 'f'.repeat(40);
+    }
     if (args[0] === 'checkout') {
       at = args.includes(badSha) ? 'bad' : 'good';
       return '';
