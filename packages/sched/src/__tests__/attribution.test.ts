@@ -36,7 +36,7 @@ describe('attributeByOverlap', () => {
     expect(result.attributed.get(201)).toEqual([test]);
     expect(result.ambiguous).toEqual([]);
     expect(result.unattributed).toEqual([]);
-    expect(offendersOf(result)).toEqual([201]);
+    expect(offendersOf(result.attributed)).toEqual([201]);
   });
 
   it('attributes by an exact changed-path match', () => {
@@ -49,7 +49,7 @@ describe('attributeByOverlap', () => {
     // src/foo.ts changed → src/foo.test.ts is that member's surface.
     const test = failingTest('src/foo.test.ts', 'foo');
     const result = attributeByOverlap([test], [member(201, ['src/foo.ts'])]);
-    expect(offendersOf(result)).toEqual([201]);
+    expect(offendersOf(result.attributed)).toEqual([201]);
   });
 
   it('never lets a top-level change claim the whole repo', () => {
@@ -57,7 +57,7 @@ describe('attributeByOverlap', () => {
     const test = failingTest('src/foo.test.ts', 'foo');
     const result = attributeByOverlap([test], [member(201, ['README.md'])]);
     expect(result.unattributed).toEqual([test]);
-    expect(offendersOf(result)).toEqual([]);
+    expect(offendersOf(result.attributed)).toEqual([]);
   });
 
   it('reports several overlapping members as ambiguous, never a guess', () => {
@@ -76,7 +76,7 @@ describe('attributeByOverlap', () => {
       [test],
       [member(201, ['src/shared/other.ts']), member(202, ['src/shared/util.ts'], [test.file])]
     );
-    expect(offendersOf(result)).toEqual([202]);
+    expect(offendersOf(result.attributed)).toEqual([202]);
     expect(result.ambiguous).toEqual([]);
   });
 
@@ -89,7 +89,7 @@ describe('attributeByOverlap', () => {
   it('normalizes path shapes before comparing', () => {
     const test = failingTest('./src/foo.test.ts', 'foo');
     const result = attributeByOverlap([test], [member(201, ['src/foo.ts'])]);
-    expect(offendersOf(result)).toEqual([201]);
+    expect(offendersOf(result.attributed)).toEqual([201]);
   });
 });
 
@@ -186,5 +186,37 @@ describe('memberRanges and memberOfCommit', () => {
     expect(memberOfCommit(commits, 'bbbbbbb2')).toBe(202);
     expect(memberOfCommit(commits, 'bbbbbbb')).toBe(202);
     expect(memberOfCommit(commits, 'deadbee')).toBeNull();
+  });
+});
+
+describe('memberRanges ordering and ambiguous shas', () => {
+  it('records each commit position so eviction can revert newest-first across members', () => {
+    const interleaved = parseBoundaryCommits(
+      [
+        'aaaaaaa1\tfeat: a1 (#201)',
+        'bbbbbbb2\tfeat: b1 (#202)',
+        'aaaaaaa3\tfeat: a2 (#201)',
+        'bbbbbbb4\tfeat: b2 (#202)',
+      ].join('\n')
+    );
+    const ranges = memberRanges(interleaved);
+    expect(ranges.find((r) => r.issue === 201)?.positions).toEqual([0, 2]);
+    expect(ranges.find((r) => r.issue === 202)?.positions).toEqual([1, 3]);
+  });
+
+  it('refuses to name a member when an abbreviated sha matches two commits', () => {
+    // Both boundary commits share the `abc1234` prefix — blaming either would
+    // revert an innocent member's work.
+    const colliding = parseBoundaryCommits(
+      ['abc1234aaa\tfeat: a (#201)', 'abc1234bbb\tfeat: b (#202)'].join('\n')
+    );
+    expect(memberOfCommit(colliding, 'abc1234')).toBeNull();
+    // ...but a prefix that resolves to exactly one commit still attributes.
+    expect(memberOfCommit(colliding, 'abc1234aaa')).toBe(201);
+  });
+
+  it('matches shas case-insensitively', () => {
+    const commits = parseBoundaryCommits('ABCDEF1234\tfeat: a (#201)');
+    expect(memberOfCommit(commits, 'abcdef1234')).toBe(201);
   });
 });

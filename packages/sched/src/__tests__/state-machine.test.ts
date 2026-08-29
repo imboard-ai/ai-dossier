@@ -152,9 +152,25 @@ describe('issue state machine (RFC-0001 §D.1)', () => {
     );
     state = transitionIssue(state, 101, 'dispatched', {}, NOW);
     state = transitionIssue(state, 101, 'parked', { pr: 55 }, NOW);
-    // parked → evicted/requeued are batch rails and stay illegal here
-    expect(() => transitionIssue(state, 101, 'evicted', {}, NOW)).toThrow(IllegalTransitionError);
+    // requeued is still reachable only THROUGH evicted, never directly
     expect(() => transitionIssue(state, 101, 'requeued', {}, NOW)).toThrow(IllegalTransitionError);
+    // ...but evicted itself is legal from parked (#472): a dissolving batch
+    // requeues every unshipped member whatever state it reached, and an
+    // unmodelled edge there throws mid-eviction, after the reverts have landed.
+    const evicted = transitionIssue(state, 101, 'evicted', {}, NOW);
+    expect(findEntry(evicted, 101)?.status).toBe('evicted');
+  });
+
+  it('lets a halved dissolve put a requeued member back on the batch rail (#472)', () => {
+    let state = seeded();
+    state = transitionIssue(state, 201, 'classified', {}, NOW);
+    state = transitionIssue(state, 201, 'batched', {}, NOW);
+    state = transitionIssue(state, 201, 'evicted', {}, NOW);
+    state = transitionIssue(state, 201, 'requeued', { mode: 'slot', batch: 'b1' }, NOW);
+    // Without requeued → batched, a member requeued into a half-batch is
+    // dispatchable as neither an issue unit nor a batch member.
+    state = transitionIssue(state, 201, 'batched', {}, NOW);
+    expect(findEntry(state, 201)?.status).toBe('batched');
   });
 
   it('throws IllegalTransitionError on non-declared edges', () => {

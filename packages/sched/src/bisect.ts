@@ -10,7 +10,7 @@
  * later git operation in that checkout.
  */
 
-import { type BoundaryCommit, memberOfCommit, SHA_RE } from './attribution';
+import { type BoundaryCommit, memberOfCommit, SAFE_REF_RE, SHA_RE } from './attribution';
 import type { ExecFn } from './project';
 
 /** What a bisect run concluded. */
@@ -34,17 +34,21 @@ export interface BisectOptions {
   /**
    * The command `git bisect run` executes at each step. MUST be scoped to the
    * failing tests only — a full suite makes the bisect cost O(members × suite).
+   * It is executed as a binary, so it must come from operator configuration —
+   * never from issue-comment or suite-output text.
    */
   testCommand: readonly string[];
   /** Boundary commits of the batch branch, for mapping the first-bad sha to a member. */
   boundary: readonly BoundaryCommit[];
+  /**
+   * Called when cleanup (bisect reset / checkout restore) fails. This module
+   * has no journal of its own; the caller routes these into one.
+   */
+  onWarn?: (detail: string) => void;
 }
 
 /** `<sha> is the first bad commit` — the line every git version prints on success. */
 const FIRST_BAD_RE = /^([0-9a-f]{7,40}) is the first bad commit/im;
-
-/** A branch name safe to pass back to `git checkout` (groundtruth.ts's ref pattern). */
-const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
 /**
  * Bisect the batch branch for the commit that broke `testCommand`.
@@ -65,23 +69,52 @@ export function runAttributionBisect(exec: ExecFn, opts: BisectOptions): BisectO
   }
 
   const git = (args: string[]): string | null => exec('git', args, opts.repoDir);
+  const runTests = (): string | null =>
+    exec(opts.testCommand[0], [...opts.testCommand.slice(1)], opts.repoDir);
 
   // Where the checkout was before we touched it. `git bisect reset` returns to
   // wherever HEAD was when `bisect start` ran — which is our OWN detach, not
-  // the caller's branch — so the restore is explicit.
+  // the caller's branch — so the restore is explicit. A detached or unreadable
+  // HEAD falls back to the sha: with no restore at all the checkout is left on
+  // our probe commit, and the next recovery step then commits onto a detached
+  // HEAD, leaving the batch branch silently behind.
   const originalRef = git(['symbolic-ref', '--quiet', '--short', 'HEAD']);
-  const restore = originalRef !== null && REF_RE.test(originalRef) ? originalRef : null;
-
-  // Verify the bad end really is bad, from a clean bisect state.
-  git(['bisect', 'reset']);
-  if (git(['checkout', '--detach', opts.bad]) === null) {
-    return { kind: 'error', detail: `cannot check out bad commit ${opts.bad}` };
+  const originalSha = git(['rev-parse', 'HEAD']);
+  const restore: string[] | null =
+    originalRef !== null && SAFE_REF_RE.test(originalRef)
+      ? ['checkout', originalRef]
+      : originalSha !== null && SHA_RE.test(originalSha)
+        ? ['checkout', '--detach', originalSha]
+        : null;
+  if (restore === null) {
+    return { kind: 'error', detail: 'cannot read HEAD to restore it after the bisect' };
   }
+
+  git(['bisect', 'reset']);
   try {
-    const atBad = exec(opts.testCommand[0], [...opts.testCommand.slice(1)], opts.repoDir);
-    if (atBad !== null) {
+    // Verify the bad end really is bad. Inside the try: every exit from here on
+    // must go through the restore in `finally`.
+    if (git(['checkout', '--detach', opts.bad]) === null) {
+      return { kind: 'error', detail: `cannot check out bad commit ${opts.bad}` };
+    }
+    if (runTests() !== null) {
       return { kind: 'green' };
     }
+
+    // ...and that the command can tell good from bad at all. A runner that
+    // cannot execute (missing binary, wrong cwd, bad argv) "fails" at the good
+    // end too, and bisecting on it marks EVERY commit bad — reporting the
+    // earliest commit in the range, an innocent member, as the culprit.
+    if (git(['checkout', '--detach', opts.good]) === null) {
+      return { kind: 'error', detail: `cannot check out good commit ${opts.good}` };
+    }
+    if (runTests() === null) {
+      return {
+        kind: 'error',
+        detail: `test command fails at the known-good commit ${opts.good} too — it cannot discriminate (missing runner, wrong cwd, or a pre-existing failure); refusing to bisect`,
+      };
+    }
+
     if (git(['bisect', 'start', opts.bad, opts.good]) === null) {
       return {
         kind: 'error',
@@ -109,9 +142,15 @@ export function runAttributionBisect(exec: ExecFn, opts: BisectOptions): BisectO
     }
     return { kind: 'first-bad', sha, issue };
   } finally {
-    // Always — a checkout left mid-bisect (or detached at our own probe)
-    // breaks every later git operation in that worktree.
-    git(['bisect', 'reset']);
-    if (restore !== null) git(['checkout', restore]);
+    // Always — a checkout left mid-bisect (or detached at one of our probes)
+    // breaks every later git operation in that worktree. A cleanup that itself
+    // fails is reported through `onWarn`: this module has no journal, and a
+    // poisoned checkout that nothing recorded is the worst outcome here.
+    if (git(['bisect', 'reset']) === null) {
+      opts.onWarn?.('git bisect reset failed — the checkout may be left mid-bisect');
+    }
+    if (git(restore) === null) {
+      opts.onWarn?.(`git ${restore.join(' ')} failed — the checkout may be left detached`);
+    }
   }
 }

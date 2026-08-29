@@ -69,6 +69,11 @@ function dirOf(p: string): string {
   return idx === -1 ? '' : p.slice(0, idx);
 }
 
+/** Whether `member` explicitly ran `normalizedFile` focused — the strongest signal. */
+function focusesOn(member: MemberFootprint, normalizedFile: string): boolean {
+  return member.focusedTests.some((t) => normalizePath(t) === normalizedFile);
+}
+
 /**
  * Whether `member` overlaps `testFile`. Focused tests win outright; otherwise
  * the file must be one the member changed, or live under a directory it
@@ -77,7 +82,7 @@ function dirOf(p: string): string {
  */
 function overlaps(member: MemberFootprint, testFile: string): boolean {
   const file = normalizePath(testFile);
-  if (member.focusedTests.some((t) => normalizePath(t) === file)) return true;
+  if (focusesOn(member, file)) return true;
   for (const raw of member.changedPaths) {
     const changed = normalizePath(raw);
     if (changed === file) return true;
@@ -105,9 +110,8 @@ export function attributeByOverlap(
     // A focused-test match is the stronger signal: when any member claims the
     // file explicitly, members that merely changed a neighbouring path are not
     // candidates — otherwise the strong signal could never break a tie.
-    const focused = members.filter((m) =>
-      m.focusedTests.some((t) => normalizePath(t) === normalizePath(test.file))
-    );
+    const file = normalizePath(test.file);
+    const focused = members.filter((m) => focusesOn(m, file));
     const candidates = focused.length > 0 ? focused : members.filter((m) => overlaps(m, test.file));
     if (candidates.length === 1) {
       const issue = candidates[0].issue;
@@ -123,8 +127,8 @@ export function attributeByOverlap(
 }
 
 /** Members with at least one failing test attributed to them, ascending. */
-export function offendersOf(attribution: OverlapAttribution): number[] {
-  return [...attribution.attributed.keys()].sort((a, b) => a - b);
+export function offendersOf(attributed: ReadonlyMap<number, unknown>): number[] {
+  return [...attributed.keys()].sort((a, b) => a - b);
 }
 
 // --- Parsers ---
@@ -210,8 +214,20 @@ export interface BoundaryCommit {
  */
 const ISSUE_TRAILER_RE = /\(#(\d+)\)\s*$/;
 
-/** A full sha as git prints it (bisect and revert argv are validated against this). */
+/**
+ * A full or abbreviated sha as git prints it — 7 to 40 hex characters. Bisect
+ * endpoints and revert argv are validated against this before they become git
+ * arguments (CWE-88).
+ */
 export const SHA_RE = /^[0-9a-f]{7,40}$/i;
+
+/**
+ * A git ref name safe to interpolate into argv (CWE-88) — the pattern
+ * `groundtruth.ts` established for branch names off untrusted milestone text.
+ * Defined here, beside `SHA_RE`, so the package has one "validate before it
+ * becomes a git argument" home rather than a copy per module.
+ */
+export const SAFE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
 /**
  * Parse `git log --reverse --format=%H%x09%s <base>..<head>` — OLDEST FIRST,
@@ -243,6 +259,12 @@ export interface MemberRange {
   to: string;
   /** Every commit of the member, oldest first. */
   commits: string[];
+  /**
+   * Each commit's index in the boundary list, parallel to `commits`. Grouping
+   * by member loses branch order; eviction needs it back to revert newest-first
+   * ACROSS members (see `memberRanges`).
+   */
+  positions: number[];
 }
 
 /**
@@ -251,26 +273,44 @@ export interface MemberRange {
  * `from`/`to` describe the member's span for reporting; `commits` is what a
  * revert actually walks. They differ when members interleave — reverting the
  * literal `from^..to` range would then revert a neighbour's commits too, so
- * eviction reverts the explicit commit list in reverse order instead.
+ * eviction reverts the explicit commits instead, ordered by `positions`:
+ * for a branch `A1 B1 A2 B2`, evicting both members must revert
+ * `B2 A2 B1 A1`, not each member's commits as a block.
  */
 export function memberRanges(boundary: readonly BoundaryCommit[]): MemberRange[] {
-  const byIssue = new Map<number, string[]>();
-  for (const commit of boundary) {
-    if (commit.issue === null) continue;
-    byIssue.set(commit.issue, [...(byIssue.get(commit.issue) ?? []), commit.sha]);
-  }
-  return [...byIssue.entries()].map(([issue, commits]) => ({
+  const byIssue = new Map<number, { commits: string[]; positions: number[] }>();
+  boundary.forEach((commit, position) => {
+    if (commit.issue === null) return;
+    const group = byIssue.get(commit.issue) ?? { commits: [], positions: [] };
+    group.commits.push(commit.sha);
+    group.positions.push(position);
+    byIssue.set(commit.issue, group);
+  });
+  return [...byIssue.entries()].map(([issue, group]) => ({
     issue,
-    from: commits[0],
-    to: commits[commits.length - 1],
-    commits,
+    from: group.commits[0],
+    to: group.commits[group.commits.length - 1],
+    commits: group.commits,
+    positions: group.positions,
   }));
 }
 
-/** The member owning `sha`, or null when the commit carries no `(#N)` trailer. */
+/**
+ * The member owning `sha`, or null when the commit carries no `(#N)` trailer.
+ *
+ * Either side may be abbreviated (bisect reports a short sha; boundary commits
+ * are full), so matching is prefix-based — but an AMBIGUOUS prefix returns null
+ * rather than the first hit. Attribution feeds eviction, and eviction reverts
+ * work: a wrong answer here destroys an innocent member's commits, so "cannot
+ * tell" must never collapse into "probably this one".
+ */
 export function memberOfCommit(boundary: readonly BoundaryCommit[], sha: string): number | null {
-  const match = boundary.find(
-    (c) => c.sha === sha || c.sha.startsWith(sha) || sha.startsWith(c.sha)
-  );
-  return match?.issue ?? null;
+  const needle = sha.toLowerCase();
+  const matches = boundary.filter((c) => {
+    const candidate = c.sha.toLowerCase();
+    return candidate.startsWith(needle) || needle.startsWith(candidate);
+  });
+  const issues = new Set(matches.map((m) => m.issue));
+  if (matches.length === 0 || issues.size > 1) return null;
+  return matches[0].issue;
 }

@@ -180,3 +180,77 @@ describe('runAttributionBisect (real git)', () => {
     ).toEqual({ kind: 'error', detail: 'bisect test command is empty' });
   });
 });
+
+describe('runAttributionBisect refuses to guess', () => {
+  it('errors instead of bisecting when the test command cannot run at all', () => {
+    // A command that fails everywhere (missing binary) "fails at bad" exactly
+    // like a real failure — bisecting on it would mark every commit bad and
+    // blame the earliest member in the range.
+    const { repo, base, head } = scratchRepo([
+      { subject: 'feat: member a (#201)', value: 'ok-a' },
+      { subject: 'feat: member b (#202)', value: 'broken' },
+    ]);
+    const outcome = runAttributionBisect(exec, {
+      repoDir: repo,
+      good: base,
+      bad: head,
+      testCommand: ['definitely-not-a-binary-xyz'],
+      boundary: boundaryOf(repo, base),
+    });
+
+    expect(outcome.kind).toBe('error');
+    if (outcome.kind !== 'error') return;
+    expect(outcome.detail).toMatch(/cannot discriminate/);
+    // and it still leaves the checkout where it found it
+    expect(git(['rev-parse', '--abbrev-ref', 'HEAD'], repo).trim()).toBe('main');
+  });
+
+  it('restores a detached checkout to the commit it started on', () => {
+    const { repo, base, head } = scratchRepo([
+      { subject: 'feat: member a (#201)', value: 'ok-a' },
+      { subject: 'feat: member b (#202)', value: 'broken' },
+    ]);
+    // Start detached: `git bisect reset` alone would return to our own probe.
+    git(['checkout', '--detach', head], repo);
+
+    runAttributionBisect(exec, {
+      repoDir: repo,
+      good: base,
+      bad: head,
+      testCommand: TEST_COMMAND,
+      boundary: boundaryOf(repo, base),
+    });
+
+    expect(git(['rev-parse', 'HEAD'], repo).trim()).toBe(head);
+    expect(git(['status', '--porcelain'], repo).trim()).toBe('');
+  });
+
+  it('reports cleanup failures through onWarn rather than silently', () => {
+    const { repo, base, head } = scratchRepo([
+      { subject: 'feat: member b (#202)', value: 'broken' },
+    ]);
+    const warnings: string[] = [];
+    // A git that works until the cleanup, then fails it.
+    let done = false;
+    const failingCleanup = ((file, args, cwd) => {
+      if (file === 'git' && args[0] === 'bisect' && args[1] === 'run') {
+        done = true;
+        return exec(file, args, cwd);
+      }
+      if (done && file === 'git' && (args[0] === 'bisect' || args[0] === 'checkout')) return null;
+      return exec(file, args, cwd);
+    }) as typeof exec;
+
+    runAttributionBisect(failingCleanup, {
+      repoDir: repo,
+      good: base,
+      bad: head,
+      testCommand: TEST_COMMAND,
+      boundary: boundaryOf(repo, base),
+      onWarn: (detail) => warnings.push(detail),
+    });
+
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(warnings.join(' ')).toMatch(/bisect reset failed|checkout may be left/);
+  });
+});

@@ -7,7 +7,8 @@ machines, crash-safe persistence, the **dispatch engine** (#464: spawning agent
 processes, verifying their completion against ground truth, mechanizing the
 stall/escalation ladder), and since #468 the **PR watcher + tail work** (parked-PR
 watching, script-based teardown, cheap-tier report dispatch — retiring the fleet
-pattern of re-dispatching a full-cycle run for the tail). The scheduler itself **never
+pattern of re-dispatching a full-cycle run for the tail), and since #472 **batch failure
+recovery** (attribution, bisect, one bounded fix, eviction, dissolve). The scheduler itself **never
 invokes an LLM** — it spawns the agent process the operator configured and reconciles
 the durable record (`ai-dossier runstate` / `gh` / `git`) that the spawned run leaves
 behind.
@@ -88,8 +89,11 @@ Only `issue:<n>` units are dispatched today — batch member sequencing is a fol
 ## Batch failure recovery (#472)
 
 What happens when a batch's aggregate suite goes red, or its PR will not merge
-(RFC-0001 §F.2/F.8/F.9). The modules are the machinery the batch execution loop calls;
-they are usable — and tested — standalone.
+(RFC-0001 §F.2/F.8/F.9).
+
+**Not yet wired into `sched start`** — `tick()` still dispatches only `issue:<n>` units
+(the batch execution loop is a follow-up, see above). These modules are the library
+surface that loop will call, and they are tested standalone against real scratch repos.
 
 ```
 validating → attributing → fixing (ONE bounded attempt) → validating
@@ -102,32 +106,52 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
 
 1. **Attribution (AC1)** — `attributeByOverlap` maps each failing test to a member by
    focused-test match, then by changed-path overlap. Exactly one candidate attributes;
-   more than one is AMBIGUOUS and none is UNATTRIBUTED — neither is ever guessed. Both
-   go to `runAttributionBisect`, a real `git bisect run` over the branch's issue-boundary
-   commits executing ONLY the failing tests, mapping the first-bad commit to a member
-   through its `(#N)` subject trailer. A first-bad commit with no trailer reports
-   `unattributable` rather than blaming a neighbour, and the bisect always resets.
+   more than one is AMBIGUOUS and none is UNATTRIBUTED — neither is ever guessed. When
+   the caller supplies a `BisectSpec`, both go to `runAttributionBisect`: a real
+   `git bisect run` over the branch's `good..bad` range executing ONLY the failing tests,
+   whose first-bad commit is mapped to a member through the `(#N)` subject trailer on the
+   branch's issue-boundary commits (every unresolved test is then attributed to that
+   member). A first-bad commit with no trailer, or an abbreviated sha matching two
+   commits, reports `unattributable` rather than blaming a neighbour. The bisect refuses
+   to run at all unless the test command actually discriminates — it must fail at `bad`
+   AND pass at `good`, so a missing runner cannot silently convict the earliest member —
+   and it always resets the checkout to where it found it. Without a `BisectSpec`,
+   overlap is the whole verdict and unresolved tests stay unattributed.
 2. **One bounded fix attempt (AC2)** — `beginFixAttempt` returns the mid-tier command and
    prompt for the CALLER to spawn (sched never invokes an LLM) and records the attempt.
    A second call for the same member returns `null`: the next step is eviction, so a
    batch cannot burn its budget on one broken member.
-3. **Eviction (AC2)** — `evictMembers` reverts the member's commits (an eviction group
-   reverts together), requeues it as full-cycle with `failure_evidence` attached (batch,
-   reason, failing tests, attribution method, reverted commits), re-runs the suite and
-   checks the dissolve trigger. A conflicting revert is aborted and dissolves the batch —
-   a half-reverted worktree is not a state any later step can reason about.
-4. **Dissolve (AC3)** — `dissolveBatch` abandons the branch and requeues every UNSHIPPED
-   member: `full` (each as its own full-cycle run) or `halved` (two fresh `forming`
-   half-batches, entries retagged, eviction groups inherited where they survive the
-   split). Shipped and terminal members keep their outcome — nothing green is discarded.
+3. **Eviction (AC2)** — `evictMembers` reverts the member's commits newest-first across
+   members (an eviction group reverts together), requeues it as full-cycle with
+   `failure_evidence` attached (batch, reason, failing tests, attribution method, reverted
+   commits), re-runs the suite and checks the dissolve trigger. A conflicting revert is
+   aborted so the worktree is clean and the batch dissolves — the reverts that already
+   landed ride along on the abandoned branch, which is why it is abandoned rather than
+   reused. An eviction group that reaches an already-shipped member dissolves instead of
+   reverting merged work.
+4. **Dissolve (AC3)** — `dissolveBatch` marks the batch `dissolved` and requeues every
+   UNSHIPPED member: `full` (each as its own full-cycle run) or `halved` (one or two fresh
+   `forming` half-batches — a single remaining member yields one — entries retagged,
+   eviction groups inherited where they survive the split). Shipped and terminal members
+   keep their outcome; nothing green is discarded, and no git runs — the batch branch is
+   simply left behind unmerged, since sched deletes nothing.
 5. **PR conflict (AC4)** — `handlePrConflict` rebases the batch branch, re-runs the suite
-   and re-ships ONCE. A second occurrence, a conflicting rebase, or a red suite after a
-   clean rebase dissolves into two half-batches.
+   and re-ships ONCE. A second occurrence, a conflicting rebase, a failed fetch, an
+   unusable `base_branch`, a checkout that is not on the batch branch, or a red suite
+   after a clean rebase dissolves into two half-batches.
 6. **Milestones (AC5)** — every eviction and dissolve posts a `batch-validate` /
    `batch-ship` milestone to the batch ANCHOR issue via `ai-dossier runstate post`, with
-   the reason, the evicted/requeued/preserved members and the attribution method; each
-   per-member outcome is journaled and kept in the batch's `evictions` (the classifier
-   feedback signal).
+   the reason, the evicted/requeued/preserved members and the attribution method (a
+   successful re-ship posts `batch-ship awaiting-merge`); each per-member outcome is
+   journaled and kept in the batch's `evictions` (the classifier feedback signal). A batch
+   with no `anchor` or no `run_id` cannot post — the CLI requires both — so the milestone
+   it could not post is journaled in full instead of vanishing.
+
+Ten journal events carry the detail: `suite-failed`, `attributed`, `fix-dispatched`,
+`fix-resolved`, `member-evicted`, `revert-conflict`, `batch-rebased`, `batch-dissolved`,
+`batch-split` and `milestone-post-failed`, plus `git-failed` for any git command that
+returned non-zero (the injected `ExecFn` collapses every git failure into `null`, so the
+command that produced one is always recorded).
 
 Schema 1.3.0 carries the new state: `BatchEntry` gains `anchor`, `branch`, `run_id`,
 `eviction_groups`, `evictions`, `fix_attempts` and `rebase_attempts`; `QueueEntry` gains
@@ -175,6 +199,13 @@ import {
   dissolveBatch,         // full or halved dissolve; preserves everything green
   handlePrConflict,      // rebase + re-ship once, then dissolve into halves
   createExecMilestonePoster, // batch milestones via `ai-dossier runstate post`
+  expandEvictionGroups,  // members that must revert together (§E.4 eviction groups)
+  requeueMember,         // the one requeue path abandon/evict/dissolve all take
+  isPreservedMember,     // the single definition of "already green"
+  createBatch,           // the single BatchEntry constructor
+  type RecoveryDeps,     // inject exec/repoDir/journal/milestone-poster/suite-runner/clock
+  type SuiteRunner,      // re-runs the aggregate suite after a revert or rebase
+  type BatchMilestonePoster, // batch-milestone sink (createExecMilestonePoster is default)
   Journal,               // append-only events.jsonl
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)
@@ -211,8 +242,10 @@ fake agents and stub ground truth; no LLM calls anywhere.
 - **Corrupt state is loud**: `load()` throws `CorruptStateError` naming the file —
   never a silent queue reset. `state.json` is deletable and rebuildable from GitHub,
   which remains the system of record.
-- **Schema**: state/config files from #460 (schema 1.0.0) and #464 (1.1.0) load and
-  migrate to 1.2.0 automatically (slot `branch`/`last_head`, entry `pr`/`cleanup`,
+- **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0) and #468 (1.2.0)
+  load and migrate to 1.3.0 automatically (slot `branch`/`last_head`/`pid_start`, entry
+  `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
+  `evictions`/`fix_attempts`/`rebase_attempts`,
   and state-level `last_pr_poll_at` backfill to null).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an

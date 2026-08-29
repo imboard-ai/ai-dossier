@@ -6,7 +6,8 @@
  * cycles at enqueue time rather than at assignment time.
  */
 
-import { findBatch } from './state';
+import { SAFE_REF_RE } from './attribution';
+import { createBatch, findBatch } from './state';
 import type { CycleMode, ModelTier, QueueEntry, SchedState } from './types';
 import { TERMINAL_ISSUE_STATUSES } from './types';
 
@@ -16,6 +17,13 @@ export class EnqueueError extends Error {
     this.name = 'EnqueueError';
   }
 }
+
+/**
+ * Run-id grammar, kept identical to `RUN_ID_RE` in `cli/src/runstate.ts` — the
+ * CLI is the validating authority for milestones, and this package cannot
+ * import from it (the dependency runs the other way).
+ */
+const RUN_ID_RE = /^r-\d+-[0-9a-f]{4,}$/;
 
 /** One unit of work as provided by flags or a manifest (defaults applied by `enqueueEntries`). */
 export interface EnqueueInput {
@@ -90,8 +98,11 @@ export function parseManifest(raw: unknown): EnqueueInput[] {
       input.tier = obj.tier;
     }
     if (obj.base_branch !== undefined) {
-      if (typeof obj.base_branch !== 'string' || obj.base_branch.length === 0) {
-        throw new EnqueueError(`Manifest entry [${i}]: base_branch must be a non-empty string`);
+      // A ref name, not merely a non-empty string: this value ends up in
+      // `git fetch`/`git rebase` argv during batch recovery, and rejecting it
+      // there costs a dissolved batch instead of a rejected manifest.
+      if (typeof obj.base_branch !== 'string' || !SAFE_REF_RE.test(obj.base_branch)) {
+        throw new EnqueueError(`Manifest entry [${i}]: base_branch must be a valid git ref name`);
       }
       input.base_branch = obj.base_branch;
     }
@@ -99,8 +110,14 @@ export function parseManifest(raw: unknown): EnqueueInput[] {
       input.anchor = asPositiveInt(obj.anchor, `Manifest entry [${i}]: anchor`);
     }
     if (obj.run_id !== undefined) {
-      if (typeof obj.run_id !== 'string' || obj.run_id.length === 0) {
-        throw new EnqueueError(`Manifest entry [${i}]: run_id must be a non-empty string`);
+      // The runstate grammar, checked here rather than discovered at recovery
+      // time: `ai-dossier runstate post` rejects anything else, so a run id the
+      // CLI dislikes makes every batch milestone un-postable — a failure that
+      // surfaces far from the manifest that caused it.
+      if (typeof obj.run_id !== 'string' || !RUN_ID_RE.test(obj.run_id)) {
+        throw new EnqueueError(
+          `Manifest entry [${i}]: run_id must match r-<issue>-<hex>, e.g. r-900-ab56 (mint one with: ai-dossier runstate mint --issue <n>)`
+        );
       }
       input.run_id = obj.run_id;
     }
@@ -257,6 +274,19 @@ export function enqueueEntries(
     if (mode === 'full' && batch !== null) {
       throw new EnqueueError(`Issue ${input.issue}: full mode cannot carry a batch id`);
     }
+    // Batch-level facts on a batch-less entry would be parsed, validated and
+    // then silently dropped — the same class of quiet misconfiguration that
+    // `assertBatchFactsAgree` exists to prevent one field over.
+    if (
+      batch === null &&
+      (input.anchor !== undefined ||
+        input.run_id !== undefined ||
+        input.eviction_groups !== undefined)
+    ) {
+      throw new EnqueueError(
+        `Issue ${input.issue}: anchor/run_id/eviction_groups describe a batch — they cannot be set on a full-cycle entry`
+      );
+    }
     return {
       issue: input.issue,
       mode,
@@ -305,24 +335,31 @@ export function enqueueEntries(
       existing.members = [...existing.members, input.issue];
       existing.updated_at = timestamp;
     } else {
-      batches.push({
-        id: batchId,
-        status: 'forming',
-        members: [input.issue],
-        base_branch: input.base_branch ?? 'main',
-        executing_member: 0,
-        anchor: input.anchor ?? null,
-        branch: null,
-        run_id: input.run_id ?? null,
-        eviction_groups: input.eviction_groups?.map((g) => [...g]) ?? [],
-        evictions: [],
-        fix_attempts: [],
-        rebase_attempts: 0,
-        created_at: timestamp,
-        updated_at: timestamp,
-      });
+      batches.push(
+        createBatch(batchId, [input.issue], now, {
+          base_branch: input.base_branch,
+          anchor: input.anchor,
+          run_id: input.run_id,
+          eviction_groups: input.eviction_groups,
+        })
+      );
     }
   }
 
-  return { ...state, entries: [...state.entries, ...entries], batches };
+  // Eviction groups must name members of their own batch: a stray issue number
+  // would expand an eviction to a non-member and count against the batch size
+  // in the dissolve trigger, dissolving the batch below its real threshold.
+  const combined = { ...state, entries: [...state.entries, ...entries], batches };
+  for (const batch of batches) {
+    for (const group of batch.eviction_groups) {
+      const strays = group.filter((issue) => !batch.members.includes(issue));
+      if (strays.length > 0) {
+        throw new EnqueueError(
+          `Batch ${batch.id}: eviction group [${group.join(',')}] names issues that are not batch members: [${strays.join(',')}]`
+        );
+      }
+    }
+  }
+
+  return combined;
 }

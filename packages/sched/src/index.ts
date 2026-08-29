@@ -12,6 +12,7 @@ export {
   offendersOf,
   parseBoundaryCommits,
   parseVitestJson,
+  SAFE_REF_RE,
   SHA_RE,
 } from './attribution';
 export { type BisectOptions, type BisectOutcome, runAttributionBisect } from './bisect';
@@ -73,7 +74,6 @@ export {
   type AttributionOutcome,
   type BatchMilestone,
   type BatchMilestonePoster,
-  type BatchPhase,
   type BisectSpec,
   beginAttribution,
   beginFixAttempt,
@@ -111,9 +111,12 @@ export {
   setPaused,
 } from './scheduler';
 export {
+  createBatch,
   createEmptyState,
   findBatch,
   findEntry,
+  isPreservedMember,
+  patchBatch,
   requeueMember,
   TRANSITIONS,
   transitionBatch,
@@ -125,7 +128,9 @@ export { type BlockedItem, buildStatusReport, type ParkedItem, type StatusReport
 export { isSafeWorktree, runTeardown, TEARDOWN_TIMEOUT_MS, type TeardownResult } from './teardown';
 export {
   type AttributionMethod,
+  BATCH_PHASES,
   type BatchEntry,
+  type BatchPhase,
   type BatchStatus,
   type CleanupStatus,
   CONFIG_SCHEMA_VERSION,
@@ -139,6 +144,7 @@ export {
   ESCALATION_CAP,
   type EvictionRecord,
   type FailureEvidence,
+  FIX_ATTEMPT_TIER,
   type FixAttemptRecord,
   IllegalTransitionError,
   type IssueStatus,

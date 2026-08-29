@@ -278,16 +278,42 @@ describe('batch-level facts at creation (#472)', () => {
 
     const grouped = enqueueEntries(
       createEmptyState(),
-      [{ issue: 201, mode: 'slot', batch: 'b2', eviction_groups: [[201, 202]] }],
+      [
+        { issue: 201, mode: 'slot', batch: 'b2', eviction_groups: [[201, 202]] },
+        { issue: 202, mode: 'slot', batch: 'b2' },
+      ],
       NOW
     );
     expect(() =>
       enqueueEntries(
         grouped,
-        [{ issue: 202, mode: 'slot', batch: 'b2', eviction_groups: [[202, 203]] }],
+        [{ issue: 203, mode: 'slot', batch: 'b2', eviction_groups: [[202, 203]] }],
         NOW
       )
     ).toThrow(/refusing to replace them/);
+  });
+
+  it('rejects an eviction group naming issues that are not batch members', () => {
+    expect(() =>
+      enqueueEntries(
+        createEmptyState(),
+        [{ issue: 201, mode: 'slot', batch: 'b1', eviction_groups: [[201, 999]] }],
+        NOW
+      )
+    ).toThrow(/not batch members: \[999\]/);
+  });
+
+  it('rejects batch-level facts on a full-cycle entry rather than dropping them', () => {
+    expect(() =>
+      enqueueEntries(createEmptyState(), [{ issue: 101, mode: 'full', anchor: 900 }], NOW)
+    ).toThrow(/cannot be set on a full-cycle entry/);
+  });
+
+  it('rejects a run_id the runstate CLI would refuse, and a base_branch that is not a ref', () => {
+    expect(() => parseManifest([{ issue: 5, run_id: 'batch-42' }])).toThrow(/r-<issue>-<hex>/);
+    expect(() => parseManifest([{ issue: 5, base_branch: '--upload-pack=pwn' }])).toThrow(
+      /valid git ref name/
+    );
   });
 
   it('parses the batch-level facts out of a manifest', () => {

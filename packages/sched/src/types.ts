@@ -249,13 +249,21 @@ export interface BatchEntry {
   executing_member: number;
   /**
    * The batch ANCHOR issue — where every batch milestone posts (#472 AC5).
-   * Null until batch-prep supplies one; recovery then journals instead of
-   * posting, rather than guessing an issue to comment on.
+   * Null until batch-prep supplies one; recovery then journals the milestone it
+   * could not post, rather than guessing an issue to comment on.
    */
   anchor: number | null;
-  /** The batch working branch, null until batch-setup creates it. */
+  /**
+   * The batch working branch. Reserved for the batch-setup phase; nothing in
+   * this package writes it yet, and recovery only READS it — to refuse a rebase
+   * when the checkout is on some other branch.
+   */
   branch: string | null;
-  /** runstate run id of the batch run, null until batch-setup mints it. */
+  /**
+   * runstate run id of the batch run (`r-<issue>-<hex>`), null until batch-setup
+   * mints it. `ai-dossier runstate post` REQUIRES a run id, so a batch without
+   * one cannot post milestones at all — recovery journals them instead.
+   */
   run_id: string | null;
   /**
    * Members that must revert together when any one of them is evicted
@@ -355,6 +363,12 @@ export interface DispatchConfig {
    * `DEFAULT_REPORT_PROMPT_TEMPLATE`.
    */
   report_prompt?: string;
+  /**
+   * Prompt template for the one bounded fix attempt on a failing batch member
+   * (#472); `{issue}`, `{batch}` and `{tests}` substituted. Defaults to
+   * `DEFAULT_FIX_PROMPT_TEMPLATE`.
+   */
+  fix_prompt?: string;
 }
 
 /** The escalation ladder: one tier stronger, or null at the top (RFC-0001 §C.1). */
@@ -387,6 +401,31 @@ export const DISSOLVE_EVICTION_FRACTION = 1 / 3;
 
 /** Bounded fix attempts per member before it is evicted (§F.2 "one bounded attempt"). */
 export const MAX_FIX_ATTEMPTS_PER_MEMBER = 1;
+
+/**
+ * Tier the one bounded fix attempt runs at (§F.2 "mid-tier agent dispatch").
+ * Deliberately not the member's own tier: that tier already produced the code
+ * the suite is failing on.
+ */
+export const FIX_ATTEMPT_TIER: ModelTier = 'mid';
+
+/**
+ * The batch-line runstate phases (RFC-0001 §D.2).
+ *
+ * MUST stay in sync with `BATCH_PHASES`/`BATCH_SPECS` in `cli/src/runstate.ts`,
+ * which is the validating authority — this package cannot import from the CLI
+ * (the CLI depends on this package), so the vocabulary is a deliberate copy.
+ * A phase or status the CLI rejects makes the milestone un-postable at runtime.
+ */
+export const BATCH_PHASES = [
+  'batch-setup',
+  'batch-validate',
+  'batch-review',
+  'batch-ship',
+  'batch-report',
+] as const;
+
+export type BatchPhase = (typeof BATCH_PHASES)[number];
 
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
@@ -470,6 +509,7 @@ export type JournalEventName =
   | 'report-failed'
   // #472 batch failure recovery (RFC-0001 §F.2/F.8/F.9)
   | 'suite-failed'
+  | 'git-failed'
   | 'attributed'
   | 'fix-dispatched'
   | 'fix-resolved'
