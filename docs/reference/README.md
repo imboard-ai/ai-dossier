@@ -18,6 +18,7 @@ Technical specifications and reference material for the Dossier project.
 - Dossier files (`.ds.md`) - Markdown with JSON frontmatter
 - Working files (`.dsw.md`) - Mutable execution state
 - Signature formats - Ed25519 and AWS KMS signatures
+- [Plan artifacts (`plan:v1`)](plan-artifact.md) - Canonical per-issue plan comments
 
 ## Standards & Compliance
 
