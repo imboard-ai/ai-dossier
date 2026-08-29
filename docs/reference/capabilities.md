@@ -5,8 +5,8 @@ dossiers and workflows need (run focused tests, lint, build, install dependencie
 prepare a worktree) expressed as named commands instead of re-reasoned by an agent on
 every use. Per the Progressive Determinism brief (RFC-0001), repos should accumulate
 these deterministic implementations and use them as the fast path, with reasoning as
-the fallback. The scheduler's slot-cycle (`test.focused` / `lint.run`) consumes this
-manifest as its fast path.
+the fallback. The scheduler's slot-cycle (`test.focused` / `lint.run`) is planned to
+consume this manifest as its fast path (follow-up #464).
 
 - **Where it lives**: `.dossier/automation/manifest.yaml` in the repo (resolved from the
   directory you run `ai-dossier` in).
@@ -45,10 +45,11 @@ capabilities:
 |---|---|---|---|
 | `version` | `1` | no | Manifest format version (currently only `1`; absent = `1`) |
 | `capabilities` | mapping | yes | Capability id → entry |
-| entry `.command` | string | yes | Command line executed via the shell, from the repo root |
+| entry `.command` | string | yes | Command line executed via the shell, in the directory `ai-dossier` runs in |
 | entry `.lifecycle` | `active` \| `shadow` | no | `active` (default) = executable; `shadow` = declared but not yet trusted to run |
 | entry `.assumptions` | list of probes | no | Preconditions checked **before** the command runs |
 | entry `.description` | string | no | What the capability does (shown by `cap list`) |
+| entry `.timeout_ms` | number | no | Per-entry command timeout in ms (default 5 min; a timeout is `automation-broken`) |
 
 Capability ids are dotted lowercase words (`test.focused`, `worktree.prepare`).
 
@@ -59,8 +60,8 @@ the outcome is `automation-broken` and the command never runs.**
 
 | Probe | Example | Check |
 |---|---|---|
-| `file-exists` | `- file-exists: package.json` | Path (file or dir, repo-relative) exists |
-| `tool-version` | `- tool-version: node>=20` | `<tool> --version` output satisfies `<op><version>` (ops: `>= > <= < =`) |
+| `file-exists` | `- file-exists: package.json` | Path (file or dir, relative to the run directory) exists |
+| `tool-version` | `- tool-version: node>=20` | `<tool> --version` output satisfies `<op><version>` (ops: `>= > <= < = ==`; `==` is an alias of `=`) |
 
 ## `cap list [--json]`
 
@@ -70,8 +71,10 @@ a hard error (exit 1) with a message naming the problem.
 
 ## `cap run <id> [-- args]`
 
-Executes one capability. Extra args after `--` are appended to the entry's command
-(`cap run test.focused -- --grep auth` → `npm test -- --silent --grep auth`).
+Executes one capability. Extra args after `--` are **shell-quoted and appended** to the
+entry's command (`cap run test.focused -- --grep auth` → `npm test -- --silent --grep auth`).
+Args are data, not shell syntax — an arg containing `;`, `$()`, or spaces reaches the
+command as a single literal word; put shell syntax in the manifest `command` itself.
 Only `lifecycle: active` entries execute; a `shadow` entry refuses with
 `capability-unavailable`.
 
@@ -83,12 +86,16 @@ first — consumers read the final line):
 |---|---|---|
 | `ok` | 0 | Command ran and exited 0 |
 | `task-failed` | 1 | Command ran and legitimately failed (e.g. red tests) — *the operation's* failure, not the automation's |
-| `automation-broken` | 2 | Assumption probe failed · command missing/not executable (shell 126/127) · abnormal termination (signal / exit > 128) · manifest invalid |
+| `automation-broken` | 2 | Assumption probe failed · command missing/not executable (shell 126/127) · abnormal termination (signal / exit > 128) · timeout · manifest invalid |
 | `capability-unavailable` | 3 | Id not in the manifest, no manifest at all, or `lifecycle: shadow` |
 
 The distinction matters to callers: `task-failed` means "trust the result — the task
 itself failed"; `automation-broken` means "do not trust the machinery — fall back to
 reasoning"; `capability-unavailable` means "no fast path here — reason from scratch".
+
+> Exit 1 is also the CLI's generic usage-error exit (e.g. a typo'd command). Machine
+> consumers should read the envelope's last stdout line — present for every `cap run`
+> outcome — rather than the exit code alone, and check stderr for usage errors.
 
 Envelope example:
 
@@ -101,8 +108,9 @@ Envelope example:
 Every `cap run` — all four outcomes included — appends one JSON line to
 `~/.dossier/caps.jsonl` (append-only, mode 0600; disable with
 `dossier config auditLog false`), recording `capability`, `outcome`, `exit_code`,
-`duration_ms`, `cwd`, and `timestamp`. This mirrors the `runs.jsonl` dossier telemetry
-but stays a separate file because a capability execution is not a dossier run.
+`duration_ms`, `reason` (why a non-ok outcome happened), `signal`, `cwd`, and
+`timestamp`. This mirrors the `runs.jsonl` dossier telemetry but stays a separate file
+because a capability execution is not a dossier run.
 
 ## Capability id vocabulary
 

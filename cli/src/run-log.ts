@@ -5,7 +5,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { CONFIG_DIR, ensureConfigDir, getConfig } from './config';
+import { CONFIG_DIR } from './config';
+import { appendAuditJsonl } from './jsonl-log';
 
 export interface RunLogEntry {
   timestamp: string;
@@ -68,13 +69,7 @@ const LOG_FILE = path.join(CONFIG_DIR, 'runs.jsonl');
  * Respects auditLog config flag. Never crashes the run.
  */
 export function appendRunLog(entry: RunLogEntry): void {
-  try {
-    if (getConfig('auditLog') === false) return;
-    ensureConfigDir();
-    fs.appendFileSync(LOG_FILE, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-  } catch {
-    // Never crash the run
-  }
+  appendAuditJsonl(LOG_FILE, entry);
 }
 
 /**

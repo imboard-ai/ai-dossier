@@ -1,17 +1,18 @@
 /**
  * Capability run telemetry — append-only JSONL at ~/.dossier/caps.jsonl.
  *
- * Modeled on run-log.ts (appendFileSync, mode 0600, respects the auditLog
- * config flag, never crashes the caller). Kept separate from runs.jsonl
- * because a dossier run entry (dossier, resolved_version, verification, llm…)
- * does not describe a capability execution; `caps.jsonl` carries exactly the
- * capability contract fields: id, outcome, duration.
+ * Modeled on run-log.ts via the shared appendAuditJsonl helper (respects the
+ * auditLog config flag, mode 0600, never crashes the run). Kept separate from
+ * runs.jsonl because a dossier run entry (dossier, resolved_version,
+ * verification, llm…) does not describe a capability execution; `caps.jsonl`
+ * carries the capability run fields: capability, outcome, exit_code,
+ * duration_ms, reason, signal, cwd, timestamp.
  */
 
-import fs from 'node:fs';
 import path from 'node:path';
 import type { CapabilityOutcome } from './capability';
-import { CONFIG_DIR, ensureConfigDir, getConfig } from './config';
+import { CONFIG_DIR } from './config';
+import { appendAuditJsonl } from './jsonl-log';
 
 export interface CapLogEntry {
   timestamp: string;
@@ -19,6 +20,10 @@ export interface CapLogEntry {
   outcome: CapabilityOutcome;
   exit_code: number | null;
   duration_ms: number;
+  /** Why a non-ok outcome happened, from the run envelope (postmortem traceability). */
+  reason: string | null;
+  /** Signal that killed the command, when abnormal termination occurred. */
+  signal: string | null;
   cwd: string;
 }
 
@@ -29,13 +34,7 @@ const CAP_LOG_FILE = path.join(CONFIG_DIR, 'caps.jsonl');
  * Respects auditLog config flag. Never crashes the run.
  */
 export function appendCapLog(entry: CapLogEntry): void {
-  try {
-    if (getConfig('auditLog') === false) return;
-    ensureConfigDir();
-    fs.appendFileSync(CAP_LOG_FILE, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-  } catch {
-    // Never crash the run
-  }
+  appendAuditJsonl(CAP_LOG_FILE, entry);
 }
 
 export { CAP_LOG_FILE };

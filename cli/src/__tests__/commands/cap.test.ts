@@ -3,8 +3,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendCapLog } from '../../cap-log';
-import { compareVersions, parseCapabilityManifest } from '../../capability';
+import { parseCapabilityManifest } from '../../capability';
 import { registerCapCommand } from '../../commands/cap';
+import { compareVersions } from '../../version';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('../../cap-log', () => ({
@@ -145,16 +146,67 @@ capabilities:
       expect(typeof mockedAppendCapLog.mock.calls[0][0].duration_ms).toBe('number');
     });
 
-    it('appends extra args after -- to the command', async () => {
+    it('appends extra args to the command (plain and -- separated)', async () => {
       writeManifest(`
 capabilities:
   echo.args:
-    command: node -e "require('fs').writeFileSync('args.txt', process.argv.slice(1).join(','))"
+    command: node -e "require('fs').writeFileSync('args.txt', JSON.stringify(process.argv.slice(1)))"
 `);
 
       await expect(runCap('run', 'echo.args', 'alpha', 'beta')).rejects.toThrow('process.exit(0)');
+      expect(fs.readFileSync(path.join(tmpDir, 'args.txt'), 'utf-8')).toBe('["alpha","beta"]');
 
-      expect(fs.readFileSync(path.join(tmpDir, 'args.txt'), 'utf-8')).toBe('alpha,beta');
+      fs.unlinkSync(path.join(tmpDir, 'args.txt'));
+      await expect(runCap('run', 'echo.args', '--', 'x', 'y')).rejects.toThrow('process.exit(0)');
+      expect(fs.readFileSync(path.join(tmpDir, 'args.txt'), 'utf-8')).toBe('["x","y"]');
+    });
+
+    it('shell-quotes args so metacharacters cannot inject shell syntax', async () => {
+      writeManifest(`
+capabilities:
+  echo.safe:
+    command: node -e "require('fs').writeFileSync('got.txt', process.argv.slice(1).join('|'))"
+`);
+
+      await expect(runCap('run', 'echo.safe', 'a;touch pwned', '$(echo hi)')).rejects.toThrow(
+        'process.exit(0)'
+      );
+
+      // The args arrive as literal data — and no `pwned` file was created
+      expect(fs.readFileSync(path.join(tmpDir, 'got.txt'), 'utf-8')).toBe(
+        'a;touch pwned|$(echo hi)'
+      );
+      expect(fs.existsSync(path.join(tmpDir, 'pwned'))).toBe(false);
+    });
+
+    it('guarantees the envelope is a standalone last line even without a trailing child newline', async () => {
+      writeManifest(`
+capabilities:
+  no.newline:
+    command: node -e "process.stdout.write('partial-line-no-newline')"
+`);
+
+      await expect(runCap('run', 'no.newline')).rejects.toThrow('process.exit(0)');
+
+      const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+      const envelope = JSON.parse(calls[calls.length - 1]);
+      expect(envelope.outcome).toBe('ok');
+    });
+
+    it('times out a hung command per timeout_ms and reports automation-broken', async () => {
+      writeManifest(`
+capabilities:
+  slow.cap:
+    command: sleep 5
+    timeout_ms: 500
+`);
+
+      await expect(runCap('run', 'slow.cap')).rejects.toThrow('process.exit(2)');
+
+      const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+      const envelope = JSON.parse(calls[calls.length - 1]);
+      expect(envelope.outcome).toBe('automation-broken');
+      expect(envelope.reason).toContain('timed out');
     });
   });
 
@@ -265,6 +317,20 @@ capabilities:
       expect(envelope.outcome).toBe('automation-broken');
       expect(envelope.reason).toContain('abnormal termination');
     });
+
+    it('exits 2 with the manifest path when the manifest is malformed', async () => {
+      writeManifest('capabilities: [not, a, mapping]\n');
+
+      await expect(runCap('run', 'some.cap')).rejects.toThrow('process.exit(2)');
+
+      const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+      const envelope = JSON.parse(calls[calls.length - 1]);
+      expect(envelope.outcome).toBe('automation-broken');
+      expect(envelope.reason).toContain('manifest invalid');
+      expect(envelope.reason).toContain(
+        path.join(tmpDir, '.dossier', 'automation', 'manifest.yaml')
+      );
+    });
   });
 
   describe('cap run — outcome: capability-unavailable', () => {
@@ -354,6 +420,12 @@ capabilities:
       expect(() =>
         parseCapabilityManifest('version: 2\ncapabilities:\n  a.b:\n    command: x\n')
       ).toThrow(/unsupported manifest version/);
+    });
+
+    it('rejects a quoted version string with an unambiguous message', () => {
+      expect(() =>
+        parseCapabilityManifest('version: "1"\ncapabilities:\n  a.b:\n    command: x\n')
+      ).toThrow(/unsupported manifest version "1"/);
     });
   });
 

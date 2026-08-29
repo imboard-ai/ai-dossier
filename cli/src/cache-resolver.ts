@@ -20,6 +20,7 @@ import { getConfig } from './config';
 import { formatAge } from './duration';
 import { safeDossierPath } from './helpers';
 import { multiRegistryGetDossier } from './multi-registry';
+import { compareVersions } from './version';
 
 export const DEFAULT_RESOLUTION_TTL_SECONDS = 300;
 export const CACHE_DIR = path.join(os.homedir(), '.dossier', 'cache');
@@ -108,16 +109,6 @@ export function writeResolution(dossierName: string, record: ResolutionRecord): 
   fs.writeFileSync(file, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
 }
 
-function compareSemver(a: string, b: string): number {
-  const pa = a.split('.').map(Number);
-  const pb = b.split('.').map(Number);
-  for (let i = 0; i < 3; i++) {
-    const diff = (pa[i] || 0) - (pb[i] || 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
-
 /** Highest-semver version currently cached on disk for this name, or null. */
 export function highestCachedSemver(dossierName: string): string | null {
   try {
@@ -128,7 +119,7 @@ export function highestCachedSemver(dossierName: string): string | null {
       .filter((f) => f.endsWith('.meta.json'))
       .map((f) => f.replace('.meta.json', ''))
       .filter((v) => fs.existsSync(path.join(dir, `${v}.ds.md`)))
-      .sort(compareSemver);
+      .sort(compareVersions);
     return versions.length > 0 ? versions[versions.length - 1] : null;
   } catch {
     return null;

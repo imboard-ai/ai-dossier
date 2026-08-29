@@ -14,6 +14,7 @@ import { appendCapLog } from '../cap-log';
 import {
   AUTOMATION_DIR,
   CAPABILITY_EXIT_CODES,
+  type CapabilityManifest,
   CapManifestError,
   type CapRunResult,
   loadCapabilityManifest,
@@ -27,7 +28,7 @@ interface ListOptions {
   json?: boolean;
 }
 
-function loadOrFail(): ReturnType<typeof loadCapabilityManifest> {
+function loadOrFail(): CapabilityManifest {
   try {
     return loadCapabilityManifest(process.cwd());
   } catch (err) {
@@ -105,13 +106,13 @@ export function registerCapCommand(program: Command): void {
   cap
     .command('run <id> [args...]')
     .description(
-      'Execute one capability; extra args after -- are appended to the command. ' +
+      'Execute one capability; extra args after -- are shell-quoted and appended to the command. ' +
         'Exit codes: 0 ok, 1 task-failed, 2 automation-broken, 3 capability-unavailable'
     )
     .allowUnknownOption(true)
     .action((id: string, args: string[]) => {
       const cwd = process.cwd();
-      const result = runCapabilityFromCwd(id, args ?? [], cwd);
+      const result = runCapabilityFromCwd(id, args, cwd);
 
       appendCapLog({
         timestamp: new Date().toISOString(),
@@ -119,10 +120,15 @@ export function registerCapCommand(program: Command): void {
         outcome: result.outcome,
         exit_code: result.exit_code,
         duration_ms: result.duration_ms,
+        reason: result.reason,
+        signal: result.signal,
         cwd,
       });
 
-      console.log(envelope(result));
+      // Leading newline: a child whose last write had no trailing newline must
+      // not end up on the same line as the envelope — the envelope is the
+      // machine-readable LAST stdout line, so it has to stand alone.
+      console.log(`\n${envelope(result)}`);
       process.exit(CAPABILITY_EXIT_CODES[result.outcome]);
     });
 }

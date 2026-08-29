@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CapLogEntry } from '../cap-log';
 import { appendCapLog, CAP_LOG_FILE } from '../cap-log';
+import type { CapabilityOutcome } from '../capability';
 import * as config from '../config';
 
 vi.mock('node:fs');
@@ -19,12 +21,14 @@ describe('cap-log', () => {
     mockedFs.appendFileSync.mockReturnValue(undefined);
   });
 
-  const makeEntry = (overrides = {}) => ({
+  const makeEntry = (overrides: Partial<CapLogEntry> = {}): CapLogEntry => ({
     timestamp: '2026-08-29T15:00:00.000Z',
     capability: 'test.focused',
-    outcome: 'ok' as const,
+    outcome: 'ok',
     exit_code: 0,
     duration_ms: 842,
+    reason: null,
+    signal: null,
     cwd: '/home/test/repo',
     ...overrides,
   });
@@ -60,7 +64,13 @@ describe('cap-log', () => {
     });
 
     it('should record all four outcome kinds without crashing', () => {
-      for (const outcome of ['ok', 'task-failed', 'automation-broken', 'capability-unavailable']) {
+      const outcomes: CapabilityOutcome[] = [
+        'ok',
+        'task-failed',
+        'automation-broken',
+        'capability-unavailable',
+      ];
+      for (const outcome of outcomes) {
         appendCapLog(
           makeEntry({ outcome, exit_code: outcome === 'ok' ? 0 : null, duration_ms: 5 })
         );
