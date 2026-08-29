@@ -206,6 +206,7 @@ describe('detectLlm', () => {
 
   it('should return the llm name when not auto', () => {
     expect(detectLlm('claude-code')).toBe('claude-code');
+    expect(detectLlm('opencode')).toBe('opencode');
     expect(detectLlm('custom-llm')).toBe('custom-llm');
   });
 
@@ -221,6 +222,37 @@ describe('detectLlm', () => {
     mockedExecFileSync.mockReturnValue(Buffer.from('/usr/bin/claude'));
 
     expect(detectLlm('auto', true)).toBe('claude-code');
+  });
+
+  it('should prefer claude over opencode when both are installed (order: claude first)', () => {
+    mockedExecFileSync.mockImplementation((_cmd: string, args: readonly string[]) =>
+      args[0] === 'claude' ? Buffer.from('/usr/bin/claude') : Buffer.from('/usr/bin/opencode')
+    );
+
+    expect(detectLlm('auto', true)).toBe('claude-code');
+    expect(mockedExecFileSync).toHaveBeenCalledTimes(1);
+    expect(mockedExecFileSync).toHaveBeenCalledWith('which', ['claude'], { stdio: 'pipe' });
+  });
+
+  it('should fall back to opencode when claude is absent', () => {
+    mockedExecFileSync.mockImplementation((_cmd: string, args: readonly string[]) => {
+      if (args[0] === 'claude') throw new Error('not found');
+      return Buffer.from('/usr/bin/opencode');
+    });
+
+    expect(detectLlm('auto', true)).toBe('opencode');
+    expect(mockedExecFileSync).toHaveBeenCalledWith('which', ['claude'], { stdio: 'pipe' });
+    expect(mockedExecFileSync).toHaveBeenCalledWith('which', ['opencode'], { stdio: 'pipe' });
+  });
+
+  it('should return null when neither claude nor opencode is installed', () => {
+    mockedExecFileSync.mockImplementation(() => {
+      throw new Error('not found');
+    });
+
+    expect(detectLlm('auto', true)).toBeNull();
+    expect(mockedExecFileSync).toHaveBeenCalledWith('which', ['claude'], { stdio: 'pipe' });
+    expect(mockedExecFileSync).toHaveBeenCalledWith('which', ['opencode'], { stdio: 'pipe' });
   });
 });
 
@@ -263,6 +295,7 @@ describe('buildLlmCommand', () => {
     expect((result as NonNullable<typeof result>).cmd).toBe('claude');
     expect((result as NonNullable<typeof result>).args).toEqual(['/path/to/dossier.ds.md']);
     expect((result as NonNullable<typeof result>).stdin).toBeUndefined();
+    expect((result as NonNullable<typeof result>).agent).toBe('claude-code');
   });
 
   it('should build headless command for claude-code', () => {
@@ -353,6 +386,87 @@ describe('buildLlmCommand', () => {
 
   it('should return null for unknown LLM', () => {
     expect(buildLlmCommand('unknown-llm', '/file.ds.md')).toBeNull();
+  });
+});
+
+describe('buildLlmCommand (opencode)', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedFs.readFileSync.mockReturnValue('dossier content');
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('should build headless command with the dossier piped via stdin', () => {
+    const result = buildLlmCommand('opencode', '/path/to/dossier.ds.md', true);
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.cmd).toBe('opencode');
+    expect(r.args).toEqual(['run', '--format', 'json']);
+    expect(r.stdin).toBe('dossier content');
+    expect(r.agent).toBe('opencode');
+    expect(r.description).toContain('opencode run --format json');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('should forward --model in headless mode', () => {
+    const result = buildLlmCommand('opencode', '/path/to/dossier.ds.md', true, {
+      model: 'moonshotai/kimi-k3',
+    });
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.args).toEqual(['run', '--format', 'json', '--model', 'moonshotai/kimi-k3']);
+    expect(r.stdin).toBe('dossier content');
+  });
+
+  it('should build interactive command as a seeded session (run -i), not a project path', () => {
+    const result = buildLlmCommand('opencode', '/path/to/dossier.ds.md', false);
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.cmd).toBe('opencode');
+    // Bare `opencode [project]` would treat the prompt as a project path —
+    // the prompt must seed a `run -i` session instead.
+    expect(r.args).toEqual(['run', '-i', 'dossier content']);
+    expect(r.stdin).toBeUndefined();
+    expect(r.agent).toBe('opencode');
+  });
+
+  it('should forward --model in interactive mode', () => {
+    const result = buildLlmCommand('opencode', '/path/to/dossier.ds.md', false, {
+      model: 'moonshotai/kimi-k3',
+    });
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.args).toEqual(['run', '-i', '--model', 'moonshotai/kimi-k3', 'dossier content']);
+  });
+
+  it('should warn about unsupported flags instead of silently dropping them (headless)', () => {
+    const result = buildLlmCommand('opencode', '/path/to/dossier.ds.md', true, {
+      budget: 2,
+      permissionMode: 'bypassPermissions',
+      allowedTools: 'Bash Read',
+    });
+    expect(result).not.toBeNull();
+    const r = result as NonNullable<typeof result>;
+    expect(r.args).toEqual(['run', '--format', 'json']);
+    const warnings = warnSpy.mock.calls.map((call) => String(call[0]));
+    expect(warnings).toHaveLength(3);
+    expect(warnings.some((w) => w.includes('--budget'))).toBe(true);
+    expect(warnings.some((w) => w.includes('--permission-mode'))).toBe(true);
+    expect(warnings.some((w) => w.includes('--allowed-tools'))).toBe(true);
+  });
+
+  it('should warn about unsupported flags in interactive mode too', () => {
+    const result = buildLlmCommand('opencode', '/path/to/dossier.ds.md', false, {
+      permissionMode: 'bypassPermissions',
+    });
+    expect(result).not.toBeNull();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('--permission-mode'));
   });
 });
 

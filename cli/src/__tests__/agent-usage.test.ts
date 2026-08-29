@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseAgentUsage } from '../helpers';
+import { parseAgentUsage, parseOpenCodeUsage } from '../helpers';
 
 describe('parseAgentUsage', () => {
   it('parses the classic usage shape (usage + total_cost_usd + model)', () => {
@@ -155,6 +155,132 @@ describe('parseAgentUsage', () => {
     expect(parseAgentUsage(stdout)).toMatchObject({
       input_tokens: null,
       output_tokens: null,
+    });
+  });
+});
+
+describe('parseOpenCodeUsage', () => {
+  // Events captured from a real `echo prompt | opencode run --format json` run
+  // (trimmed to the fields the parser reads).
+  const event = (obj: Record<string, unknown>) => JSON.stringify(obj);
+
+  const textEvent = (text: string) =>
+    event({
+      type: 'text',
+      timestamp: 1787999439397,
+      sessionID: 'ses_test',
+      part: { id: 'prt_1', type: 'text', text, time: { start: 1, end: 2 } },
+    });
+
+  const stepFinish = (input: number, output: number, cost: number) =>
+    event({
+      type: 'step_finish',
+      timestamp: 1787999439536,
+      sessionID: 'ses_test',
+      part: {
+        id: 'prt_2',
+        type: 'step-finish',
+        reason: 'stop',
+        tokens: {
+          total: input + output,
+          input,
+          output,
+          reasoning: 0,
+          cache: { write: 0, read: 0 },
+        },
+        cost,
+      },
+    });
+
+  const stepStart = event({
+    type: 'step_start',
+    timestamp: 1787999439396,
+    sessionID: 'ses_test',
+    part: { id: 'prt_0', type: 'step-start' },
+  });
+
+  it('parses text, tokens and cost from a JSONL event stream', () => {
+    const stdout = [stepStart, textEvent('OK'), stepFinish(26502, 3, 0.03771504)].join('\n');
+
+    expect(parseOpenCodeUsage(stdout)).toEqual({
+      model: null, // opencode events carry no model id — caller falls back to --model
+      input_tokens: 26502,
+      output_tokens: 3,
+      total_cost_usd: 0.03771504,
+      result_text: 'OK',
+    });
+  });
+
+  it('concatenates text parts in order and sums tokens/cost across steps', () => {
+    const stdout = [
+      stepStart,
+      textEvent('first '),
+      stepFinish(100, 10, 0.01),
+      textEvent('second'),
+      stepFinish(50, 5, 0.02),
+    ].join('\n');
+
+    expect(parseOpenCodeUsage(stdout)).toEqual({
+      model: null,
+      input_tokens: 150,
+      output_tokens: 15,
+      total_cost_usd: 0.03,
+      result_text: 'first second',
+    });
+  });
+
+  it('tolerates blank lines between events', () => {
+    const stdout = `\n${textEvent('OK')}\n\n${stepFinish(1, 2, 0.5)}\n\n`;
+
+    expect(parseOpenCodeUsage(stdout)).toMatchObject({
+      input_tokens: 1,
+      output_tokens: 2,
+      total_cost_usd: 0.5,
+    });
+  });
+
+  it('reports null usage fields when no step_finish reported numbers', () => {
+    const stdout = [stepStart, textEvent('no usage')].join('\n');
+
+    expect(parseOpenCodeUsage(stdout)).toEqual({
+      model: null,
+      input_tokens: null,
+      output_tokens: null,
+      total_cost_usd: null,
+      result_text: 'no usage',
+    });
+  });
+
+  it('reports null result_text when no text parts arrived', () => {
+    const stdout = [stepStart, stepFinish(1, 1, 0.1)].join('\n');
+
+    expect(parseOpenCodeUsage(stdout)).toMatchObject({ result_text: null });
+  });
+
+  it('returns null when any line is not JSON (not an opencode event stream)', () => {
+    const stdout = [stepStart, 'plain text', stepFinish(1, 1, 0.1)].join('\n');
+    expect(parseOpenCodeUsage(stdout)).toBeNull();
+  });
+
+  it('returns null for empty or undefined stdout', () => {
+    expect(parseOpenCodeUsage('')).toBeNull();
+    expect(parseOpenCodeUsage('   ')).toBeNull();
+    expect(parseOpenCodeUsage(undefined)).toBeNull();
+    expect(parseOpenCodeUsage(null)).toBeNull();
+  });
+
+  it('ignores non-numeric token/cost values instead of recording NaN', () => {
+    const stdout = [
+      event({
+        type: 'step_finish',
+        part: { type: 'step-finish', tokens: { input: 'many', output: null }, cost: 'cheap' },
+      }),
+    ].join('\n');
+
+    expect(parseOpenCodeUsage(stdout)).toMatchObject({
+      input_tokens: null,
+      output_tokens: null,
+      total_cost_usd: null,
     });
   });
 });

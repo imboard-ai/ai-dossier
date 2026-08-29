@@ -37,6 +37,7 @@ describe('run command', () => {
       cmd: 'claude',
       args: ['test.ds.md'],
       description: 'claude "test.ds.md"',
+      agent: 'claude-code',
     });
     vi.mocked(helpers.safeDossierPath).mockImplementation((_base: string, name: string) => {
       return `/home/.dossier/cache/${name}`;
@@ -46,6 +47,7 @@ describe('run command', () => {
     // clears call history, so a mockReturnValue from a previous test would
     // otherwise leak into the next one.
     vi.mocked(helpers.parseAgentUsage).mockReset();
+    vi.mocked(helpers.parseOpenCodeUsage).mockReset();
     // cache-resolver helpers used by run.ts after the resolveCachedVersion call.
     // The module is fully mocked, so these need explicit stubs or they return undefined
     // and break the URL-detection branch below.
@@ -344,6 +346,7 @@ describe('run command', () => {
         expect.objectContaining({
           duration_ms: expect.any(Number),
           spawned_command: 'claude test.ds.md',
+          llm: 'claude-code',
           model: 'claude-opus-4-20250514',
           exit_code: 0,
           input_tokens: 1234,
@@ -556,6 +559,157 @@ describe('run command', () => {
           output_tokens: null,
           total_cost_usd: null,
           duration_ms: expect.any(Number),
+        })
+      );
+    });
+  });
+
+  describe('opencode agent support (#459)', () => {
+    it('records the resolved agent CLI in llm and parses opencode JSONL usage', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      vi.mocked(helpers.detectLlm).mockReturnValue('opencode');
+      vi.mocked(helpers.buildLlmCommand).mockReturnValue({
+        cmd: 'opencode',
+        args: ['run', '--format', 'json'],
+        stdin: '---dossier\n{"title":"Test"}\n---\nBody',
+        description: 'cat "test.ds.md" | opencode run --format json',
+        agent: 'opencode',
+      });
+      vi.mocked(spawnSync).mockReturnValue(
+        spawnResult(0, '{"type":"text"}\n{"type":"step_finish"}')
+      );
+      vi.mocked(helpers.parseOpenCodeUsage).mockReturnValue({
+        model: null,
+        input_tokens: 73,
+        output_tokens: 6,
+        total_cost_usd: 0.00774516,
+        result_text: 'PIPED-OK',
+      });
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'run',
+        'test.ds.md',
+        '--headless',
+        '--llm',
+        'opencode',
+      ]);
+
+      // Usage parsing dispatches on the spawned agent's CLI.
+      expect(helpers.parseOpenCodeUsage).toHaveBeenCalled();
+      expect(helpers.parseAgentUsage).not.toHaveBeenCalled();
+      expect(spawnSync).toHaveBeenCalledWith(
+        'opencode',
+        ['run', '--format', 'json'],
+        expect.objectContaining({
+          stdio: ['pipe', 'pipe', 'inherit'],
+          maxBuffer: 32 * 1024 * 1024,
+        })
+      );
+      // The run log records WHICH agent CLI was spawned — the resolved
+      // 'opencode', not the raw --llm option value.
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          llm: 'opencode',
+          spawned_command: 'opencode run --format json',
+          model: null, // opencode events carry no model id; no --model alias given
+          input_tokens: 73,
+          output_tokens: 6,
+          total_cost_usd: 0.00774516,
+          exit_code: 0,
+        })
+      );
+      // The extracted result text is re-emitted on stdout.
+      expect(stdoutSpy).toHaveBeenCalledWith('PIPED-OK\n');
+    });
+
+    it('re-emits raw stdout and warns when opencode output is not a JSONL event stream', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      vi.mocked(helpers.detectLlm).mockReturnValue('opencode');
+      vi.mocked(helpers.buildLlmCommand).mockReturnValue({
+        cmd: 'opencode',
+        args: ['run', '--format', 'json'],
+        stdin: 'content',
+        description: 'cat "test.ds.md" | opencode run --format json',
+        agent: 'opencode',
+      });
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(0, 'plain output'));
+      vi.mocked(helpers.parseOpenCodeUsage).mockReturnValue(null);
+      const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'run',
+        'test.ds.md',
+        '--headless',
+        '--llm',
+        'opencode',
+      ]);
+
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          llm: 'opencode',
+          exit_code: 0,
+          model: null,
+          input_tokens: null,
+          output_tokens: null,
+          total_cost_usd: null,
+        })
+      );
+      expect(stdoutSpy).toHaveBeenCalledWith('plain output\n');
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('not an opencode JSONL event stream')
+      );
+    });
+
+    it('records the resolved agent in llm when execution fails (opencode)', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      vi.mocked(helpers.detectLlm).mockReturnValue('opencode');
+      vi.mocked(helpers.buildLlmCommand).mockReturnValue({
+        cmd: 'opencode',
+        args: ['run', '--format', 'json'],
+        stdin: 'content',
+        description: 'cat "test.ds.md" | opencode run --format json',
+        agent: 'opencode',
+      });
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(7, ''));
+      vi.mocked(helpers.parseOpenCodeUsage).mockReturnValue(null);
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'run',
+          'test.ds.md',
+          '--headless',
+          '--llm',
+          'opencode',
+        ])
+      ).rejects.toThrow('process.exit(7)');
+
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          llm: 'opencode',
+          spawned_command: 'opencode run --format json',
+          exit_code: 7,
         })
       );
     });

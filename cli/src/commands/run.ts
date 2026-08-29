@@ -20,6 +20,7 @@ import {
   detectNestedHost,
   downloadUrlToTempFile,
   parseAgentUsage,
+  parseOpenCodeUsage,
   printRegistryNotFoundError,
   runVerification,
 } from '../helpers';
@@ -41,21 +42,21 @@ export function registerRunCommand(program: Command): void {
       'Verify, audit, and execute dossier. Registry names are resolved across all configured registries.'
     )
     .argument('<file>', 'Dossier file, URL, or registry name to run')
-    .option('--llm <name>', 'LLM to use (claude-code, auto)')
+    .option('--llm <name>', 'LLM to use (claude-code, opencode, auto)')
     .option('--headless', 'Run in headless mode (non-interactive, for CI/CD)')
-    .option('--model <name>', 'Model alias/name (forwarded to claude --model)')
+    .option('--model <name>', 'Model alias/name (forwarded to claude --model / opencode --model)')
     .option(
       '--budget <usd>',
-      'Max USD budget (headless only; forwarded to claude --max-budget-usd)',
+      'Max USD budget (headless only; claude only — opencode has no equivalent)',
       parseFloat
     )
     .option(
       '--permission-mode <mode>',
-      'Permission mode (headless only; forwarded to claude --permission-mode)'
+      'Permission mode (headless only; claude only — opencode permissions live in opencode.json)'
     )
     .option(
       '--allowed-tools <list>',
-      'Comma- or space-separated allowed tools (headless only; forwarded to claude --allowedTools)'
+      'Comma- or space-separated allowed tools (headless only; claude only — opencode tool access lives in opencode.json)'
     )
     .option('--dry-run', 'Show plan without executing')
     .option('--force', 'Skip risk warnings')
@@ -425,7 +426,7 @@ export function registerRunCommand(program: Command): void {
         });
         if (!descriptor) {
           console.log(`❌ Unknown LLM: ${llmToUse}\n`);
-          console.log('Supported: claude-code, auto\n');
+          console.log('Supported: claude-code, opencode, auto\n');
           finishRunLog({ exit_code: 2 });
           cleanupSecureTmp();
           process.exit(2);
@@ -462,10 +463,20 @@ export function registerRunCommand(program: Command): void {
               : typeof result.stdout === 'string'
                 ? result.stdout
                 : result.stdout.toString('utf8');
-          const usage = options.headless ? parseAgentUsage(stdoutText) : null;
+          // Usage parsing is agent-specific: claude emits one JSON blob,
+          // opencode a JSONL event stream (#459).
+          const usage = options.headless
+            ? descriptor.agent === 'opencode'
+              ? parseOpenCodeUsage(stdoutText)
+              : parseAgentUsage(stdoutText)
+            : null;
           if (options.headless && stdoutText && (usage === null || usage.result_text === null)) {
+            const expected =
+              descriptor.agent === 'opencode'
+                ? 'an opencode JSONL event stream'
+                : 'a claude JSON result';
             process.stderr.write(
-              'Warning: agent output was not a claude JSON result — usage/cost not recorded; raw output re-emitted\n'
+              `Warning: agent output was not ${expected} — usage/cost not recorded; raw output re-emitted\n`
             );
           }
           if (options.headless) {
@@ -487,7 +498,12 @@ export function registerRunCommand(program: Command): void {
             throw exitError;
           }
           console.log('\n✅ Execution completed');
-          finishRunLog({ spawned_command: spawnedCommand, exit_code: 0, ...usageLogFields(usage) });
+          finishRunLog({
+            llm: llmToUse,
+            spawned_command: spawnedCommand,
+            exit_code: 0,
+            ...usageLogFields(usage),
+          });
         } catch (error: unknown) {
           console.log('\n❌ Execution failed');
           const exitError =
@@ -505,6 +521,7 @@ export function registerRunCommand(program: Command): void {
           const status = exitError?.status ?? null;
           const usage = exitError?.usage ?? null;
           finishRunLog({
+            llm: llmToUse,
             spawned_command: spawnedCommand,
             exit_code: status,
             spawn_error: exitError?.spawn_error ?? exitError?.signal ?? null,

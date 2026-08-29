@@ -233,6 +233,9 @@ export function detectNestedHost(): string | null {
 
 /**
  * Detect and resolve which LLM to use.
+ * Auto-detection tries `claude` first (preserving the historical default),
+ * then falls back to `opencode` — so machines with only one agent CLI
+ * installed still resolve, and machines with neither get a clear error.
  * @returns The resolved LLM name, or null if none detected.
  */
 export function detectLlm(llmOption: string, silent = false): string | null {
@@ -240,17 +243,25 @@ export function detectLlm(llmOption: string, silent = false): string | null {
     return llmOption;
   }
 
-  // Auto-detect LLM
+  // Auto-detect LLM: claude first, then opencode.
   try {
     execFileSync('which', ['claude'], { stdio: 'pipe' });
     if (!silent) console.log('   Detected: Claude Code');
     return 'claude-code';
   } catch {
+    // Fall through to opencode.
+  }
+  try {
+    execFileSync('which', ['opencode'], { stdio: 'pipe' });
+    if (!silent) console.log('   Detected: opencode');
+    return 'opencode';
+  } catch {
     if (!silent) {
       console.log('❌ No supported LLM detected\n');
-      console.log('Supported LLM:');
-      console.log('  - Claude Code (install from https://claude.com/claude-code)\n');
-      console.log('Or specify manually: --llm claude-code\n');
+      console.log('Supported LLMs:');
+      console.log('  - Claude Code (install from https://claude.com/claude-code)');
+      console.log('  - opencode (install from https://opencode.ai)\n');
+      console.log('Or specify manually: --llm claude-code | --llm opencode\n');
     }
     return null;
   }
@@ -263,6 +274,8 @@ export interface LlmExecDescriptor {
   stdin?: string;
   /** Human-readable description for logging */
   description: string;
+  /** Which agent CLI this descriptor spawns — drives usage parsing and run-log recording. */
+  agent: 'claude-code' | 'opencode';
 }
 
 /**
@@ -326,6 +339,67 @@ export function downloadUrlToTempFile(url: string): string {
 }
 
 /**
+ * Warn about passthrough flags opencode has no CLI equivalent for (#459).
+ * Permissions and tool access are configured in opencode.json, and opencode
+ * has no spend-limit flag — a clear warning instead of a silent drop.
+ */
+function warnUnsupportedOpenCodeFlags(passthrough?: LlmPassthroughOptions): void {
+  if (passthrough?.budget != null && !Number.isNaN(passthrough.budget)) {
+    console.warn(
+      '⚠️  --budget has no opencode equivalent — ignored (opencode has no spend-limit flag)'
+    );
+  }
+  if (passthrough?.permissionMode) {
+    console.warn(
+      '⚠️  --permission-mode has no opencode equivalent — ignored (configure permissions in opencode.json)'
+    );
+  }
+  if (passthrough?.allowedTools) {
+    console.warn(
+      '⚠️  --allowed-tools has no opencode equivalent — ignored (configure tool access in opencode.json)'
+    );
+  }
+}
+
+/**
+ * Build the execution descriptor for opencode.
+ * Headless: `opencode run --format json` with the dossier content piped via
+ * stdin (opencode reads the prompt from stdin when no message argument is
+ * given); the JSONL event stream lets usage be mined (parseOpenCodeUsage).
+ * Interactive: `opencode run -i "<content>"` — bare `opencode [project]`
+ * would treat the prompt as a project path, so the seeded-session form is
+ * the interactive equivalent.
+ */
+function buildOpenCodeCommand(
+  file: string,
+  headless: boolean,
+  passthrough?: LlmPassthroughOptions
+): LlmExecDescriptor {
+  warnUnsupportedOpenCodeFlags(passthrough);
+  const content = fs.readFileSync(file, 'utf8');
+  const modelArgs = passthrough?.model ? ['--model', passthrough.model] : [];
+  const modelFlags = modelArgs.length > 0 ? ` ${modelArgs.join(' ')}` : '';
+
+  if (headless) {
+    const args = ['run', '--format', 'json', ...modelArgs];
+    return {
+      cmd: 'opencode',
+      args,
+      stdin: content,
+      description: `cat "${file}" | opencode run --format json${modelFlags}`,
+      agent: 'opencode',
+    };
+  }
+  const args = ['run', '-i', ...modelArgs, content];
+  return {
+    cmd: 'opencode',
+    args,
+    description: `opencode run -i${modelFlags} "<prompt from ${path.basename(file)}>"`,
+    agent: 'opencode',
+  };
+}
+
+/**
  * Build the execution descriptor for a given LLM.
  * File must be a local file path (download URLs first with downloadUrlToTempFile).
  * @returns The execution descriptor, or null for unknown LLM.
@@ -336,6 +410,9 @@ export function buildLlmCommand(
   headless = false,
   passthrough?: LlmPassthroughOptions
 ): LlmExecDescriptor | null {
+  if (llm === 'opencode') {
+    return buildOpenCodeCommand(file, headless, passthrough);
+  }
   if (llm !== 'claude-code') {
     return null;
   }
@@ -364,6 +441,7 @@ export function buildLlmCommand(
       args,
       stdin: content,
       description: `cat "${file}" | claude -p${extraFlags}`,
+      agent: 'claude-code',
     };
   } else {
     const args: string[] = [];
@@ -376,6 +454,7 @@ export function buildLlmCommand(
       cmd: 'claude',
       args,
       description: `claude ${flagPrefix}"${file}"`,
+      agent: 'claude-code',
     };
   }
 }
@@ -477,6 +556,85 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
   const result_text = typeof parsed.result === 'string' ? parsed.result : null;
 
   return { model, input_tokens, output_tokens, total_cost_usd, result_text };
+}
+
+/**
+ * Parse an `opencode run --format json` result stream into usage data (#459).
+ *
+ * opencode emits one JSON event per line: the assistant's text arrives in
+ * `type:"text"` parts, and per-step token/cost totals in `type:"step_finish"`
+ * parts (a multi-step run emits several — tokens and cost are summed). The
+ * model id is not present in the events, so `model` is null and callers fall
+ * back to the requested --model alias. Returns null when the output is not a
+ * JSONL event stream (any non-JSON line disqualifies it); individual fields
+ * are null when absent — never fabricated.
+ */
+export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunUsage | null {
+  if (typeof stdout !== 'string' || stdout.trim() === '') return null;
+
+  let sawEvent = false;
+  const texts: string[] = [];
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let costUsd = 0;
+  let sawUsage = false;
+
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    let event: Record<string, unknown>;
+    try {
+      const value: unknown = JSON.parse(trimmed);
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+      event = value as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    sawEvent = true;
+
+    const part =
+      event.part && typeof event.part === 'object' && !Array.isArray(event.part)
+        ? (event.part as Record<string, unknown>)
+        : null;
+
+    if (event.type === 'text' && part && typeof part.text === 'string') {
+      texts.push(part.text);
+    }
+    if (event.type === 'step_finish' && part) {
+      const tokens =
+        part.tokens && typeof part.tokens === 'object' && !Array.isArray(part.tokens)
+          ? (part.tokens as Record<string, unknown>)
+          : null;
+      if (tokens) {
+        const input = toCount(tokens.input);
+        if (input !== null) {
+          inputTokens += input;
+          sawUsage = true;
+        }
+        const output = toCount(tokens.output);
+        if (output !== null) {
+          outputTokens += output;
+          sawUsage = true;
+        }
+      }
+      const cost = toCount(part.cost);
+      if (cost !== null) {
+        costUsd += cost;
+        sawUsage = true;
+      }
+    }
+  }
+
+  if (!sawEvent) return null;
+
+  return {
+    model: null,
+    input_tokens: sawUsage ? inputTokens : null,
+    output_tokens: sawUsage ? outputTokens : null,
+    total_cost_usd: sawUsage ? costUsd : null,
+    result_text: texts.length > 0 ? texts.join('') : null,
+  };
 }
 
 /**
