@@ -13,12 +13,14 @@ import type { Command } from 'commander';
 import { formatDurationCell } from '../duration';
 import { parseIssueSelection } from '../issue-selection';
 import {
+  BATCH_PHASES,
   buildMilestone,
   computeResume,
   isIssueNumber,
   MAX_BODY_LENGTH,
   mintRunId,
   type ParsedMilestone,
+  PHASES,
   parseMilestones,
   type ResumeProbe,
   splitPair,
@@ -627,10 +629,13 @@ function registerPostSubcommand(cmd: Command): void {
     .requiredOption('--issue <number>', 'GitHub issue number')
     .requiredOption(
       '--phase <phase>',
-      'classify, gate, setup, plan, implement, review, ship, report, or a batch phase (batch-setup, batch-validate, batch-review, batch-ship, batch-report)'
+      `classify, ${[...PHASES].join(', ')}, or a batch phase (${BATCH_PHASES.join(', ')})`
     )
     .requiredOption('--status <status>', 'done, partial, blocked, or awaiting-merge')
-    .requiredOption('--run <id>', 'Run id minted by the gate phase (r-<issue>-<hex>)')
+    .requiredOption(
+      '--run <id>',
+      'Run id (r-<issue>-<hex>) — mint one with: runstate mint; full-cycle runs mint it at the gate phase'
+    )
     .option('--kv <key=value...>', 'Phase-specific key=value pair (repeatable)')
     .option('--next <phase>', 'Override the computed next= value')
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')

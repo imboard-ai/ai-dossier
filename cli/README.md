@@ -409,7 +409,7 @@ prints `No runstate milestones on issue #440.` (or `null` under `--json`) and ex
 | `--issue <n>` | Issue to comment on (required) |
 | `--phase <p>` | `classify`, `gate`, `setup`, `plan`, `implement`, `review`, `ship`, `report`, or a batch phase — `batch-setup`, `batch-validate`, `batch-review`, `batch-ship`, `batch-report` (required) |
 | `--status <s>` | `done`, `partial`, `blocked`, `awaiting-merge` (required) |
-| `--run <id>` | Run id minted at the gate phase (required) |
+| `--run <id>` | Run id (`r-<issue>-<hex>`) — mint one with `runstate mint`; full-cycle runs mint it at the gate phase (required) |
 | `--kv <key=value...>` | Phase-specific key, repeatable (and variadic: `--kv a=1 b=2` works too) |
 | `--next <phase>` | Override the computed `next=` line — a phase name or `done` |
 | `--repo <owner/name>` | Target repository (defaults to the current one) |
@@ -476,8 +476,9 @@ Two more phase families are accepted alongside the full-cycle line (#461):
 `classify` is posted by the issue-cycle-classifier **before** any cycle is dispatched, so
 it is not a station on the full-cycle line: its `next=` is `done` (the dispatched cycle
 mints its own run id), and `runstate verify` on an issue whose latest milestone is a
-classify record reports `resume_from=none` — a full-cycle run always enters fresh. The
-eight verdict keys are validated by value grammar (below); the classifier's
+classify record reports `resume_from=none` — a full-cycle run always enters fresh. A
+classify verdict with `mode=slot` additionally carries the `slot_trail` signal (below).
+The eight verdict keys are validated by value grammar (below); the classifier's
 `rationale_comment=<link>` is accepted but not required.
 
 The `batch-*` phases are posted on **batch anchor issues** (one anchor per batch, created
@@ -486,18 +487,27 @@ required keys beyond the universal blocked→`reason` — the batch scheduler do
 what its milestones record; this table fixes the phase names and status sets so the
 vocabulary underneath it is stable. `batch-ship` mirrors `ship`'s two-milestone shape:
 `awaiting-merge`, then `done` after the merge, and `stats` reports the gap between them
-as `merge-wait`. `next=` walks the batch line: batch-setup → batch-validate →
-batch-review → batch-ship → batch-report → done.
+under its own `batch-merge-wait` label (not pooled with full-cycle `merge-wait`).
+`next=` walks the batch line: batch-setup → batch-validate → batch-review → batch-ship →
+batch-report → done.
+
+> **Compatibility.** Reading and posting these phases requires CLI ≥ 0.14.0. An older
+> CLI rejects them outright on `post` (`Unknown phase 'classify' — expected one of: …`),
+> but its `verify` derives a bogus `resume_from` from a *blocked* classify/batch
+> milestone — don't point an old CLI at batch anchor issues.
 
 ### mode=slot and batch= on plan/implement/review
 
 Slot-cycle members post the ordinary `plan`/`implement`/`review` milestones with two
 extra keys: `mode=slot` and `batch=<id>`. Both are accepted on any phase, and
-`runstate verify` treats a trail whose **latest** milestone carries either key as
-slot-mode: `resume_from=none` — an evicted member re-enters full-cycle fresh (the batch
-worktree is machine-local; there is nothing to resume) — plus a distinguishable
+`runstate verify` treats a trail whose **latest** milestone is a full-cycle-line phase
+carrying either key — or a `classify` verdict with `mode=slot` — as slot-mode:
+`resume_from=none` — an evicted member re-enters full-cycle fresh (the batch worktree is
+machine-local; there is nothing to resume) — plus a distinguishable
 `slot_trail=present` signal (text) / `slot_trail: true` (JSON), so "fresh because slot"
-never looks like "fresh because there was no trail". Slot milestones deeper in the trail
+never looks like "fresh because there was no trail". A trail whose latest milestone is a
+`batch-*` phase (an anchor issue) sets no slot signal — it reports its own note,
+`batch anchor trail — not a full-cycle run`. Slot milestones deeper in the trail
 are history and do not affect resume: once a full-cycle `gate` milestone follows them,
 resume derives from the full-cycle trail as usual.
 
@@ -507,8 +517,9 @@ A phase may carry keys beyond its required ones, and one is worth knowing about:
 carries the key nowhere are bucketed as `unknown`.
 
 The `Statuses` column is a closed set: a status not listed for a phase is rejected, so
-`report` cannot be `blocked` and only `ship` may be `awaiting-merge`. Any phase that
-*can* report `status=blocked` must also carry `reason=<short-slug>` when it does.
+`report` cannot be `blocked` and only the ship phases (`ship`, `batch-ship`) may be
+`awaiting-merge`. Any phase that *can* report `status=blocked` must also carry
+`reason=<short-slug>` when it does.
 
 `next=` is computed for you: the linear order `gate → setup → plan → implement → review →
 ship → report → done`, except that `blocked` ends the run (`next=done`) and the two
@@ -548,7 +559,7 @@ Every `--kv` pair is checked before anything is posted:
   | `confidence` | decimal `0`–`1`, e.g. `0.85` (RFC-0001 E.2 compares it to 0.6) |
   | `areas` | comma-separated lowercase slugs, e.g. `cli,docs` |
   | `deps` | `none`, or comma-separated issue numbers, e.g. `474,480` |
-  | `batch` | a batch id slug (letters, digits, `.`, `_`, `-`), e.g. `b-2026-08-29-01` |
+  | `batch` | a batch id slug starting with a letter or digit, then letters, digits, `.`, `_`, `-` (e.g. `b-2026-08-29-01`) |
 
 - `--next` must be a phase name or `done`. It is written to the comment verbatim, so an
   unchecked typo would point the next resume at a phase that does not exist.
@@ -639,7 +650,8 @@ requires is refused rather than passed to `git`/`gh` — it becomes one of the w
 above.
 
 `--json` returns the same fields as an object (`resume_from`, `run_id`, `verified`,
-`resume_context`, plus `hard_block`, `note`, and `warnings` when they apply).
+`resume_context`, plus `slot_trail`, `hard_block`, `note`, and `warnings` when they
+apply).
 
 ### stats
 
@@ -669,6 +681,13 @@ milestones is reported as its own **`merge-wait`** row: it is the one span that 
 waiting rather than working, and folding it into `ship` would make ship's median a
 function of CI queue depth. A trail with several `run=` ids — a resumed or re-run issue —
 gets one table per run, never pairing one run's milestone with another's.
+
+New-phase rows (#461): a `classify` verdict that prefixes the run's `gate` sits before
+`gate` in every table — note its span (the classifier → cycle dispatch wait) is charged
+to `gate`, since pairing is by previous milestone; and `batch-*` rows sit after
+`report`, with `batch-ship`'s awaiting-merge → done gap reported as
+**`batch-merge-wait`** (kept separate from full-cycle `merge-wait` so a mixed
+`--issues` selection never pools the two populations).
 
 `--issues` takes a fleet-style selection (`1,2,3`, `1..9`, or mixed `1,2,5..8`, capped at
 200 issues since each costs a `gh` call) and reports the aggregates instead of every

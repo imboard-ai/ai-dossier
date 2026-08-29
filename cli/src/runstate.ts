@@ -3,10 +3,12 @@
  * append to a GitHub issue after every phase.
  *
  * This module is the executable copy of the "Runstate Milestones" table in
- * `imboard-ai/git/full-cycle-issue@3.8.0`. Dossiers used to ask agents to reproduce a
- * markdown heredoc by hand; smaller models skipped it or pasted `$(date …)` literally.
- * Everything here is pure and dependency-free so it can be unit tested without touching
- * `gh`, the network, or the filesystem.
+ * `imboard-ai/git/full-cycle-issue@3.8.0`, extended by the classify/batch-phase
+ * vocabulary of RFC-0001 Batch Cycles (#461; see epic #474 — the RFC itself is
+ * `rfcs/0001-batch-cycles.md`, pending merge at the time of writing). Dossiers used to
+ * ask agents to reproduce a markdown heredoc by hand; smaller models skipped it or
+ * pasted `$(date …)` literally. Everything here is pure and dependency-free so it can
+ * be unit tested without touching `gh`, the network, or the filesystem.
  */
 
 import { randomBytes } from 'node:crypto';
@@ -46,6 +48,9 @@ export type KnownPhase = Phase | ClassifyPhase | BatchPhase;
 
 /** All accepted phases, classify first and the batch line after the full-cycle one. */
 export const ALL_PHASES: readonly KnownPhase[] = [CLASSIFY_PHASE, ...PHASES, ...BATCH_PHASES];
+
+/** The one mode value that marks a slot-cycle trail; shared by the grammar and resume. */
+export const SLOT_MODE = 'slot';
 
 /** Milestone statuses. */
 export const STATUSES = ['done', 'partial', 'blocked', 'awaiting-merge'] as const;
@@ -176,11 +181,12 @@ export const RESUME_LOOP_CAP = 3;
 const DIRTY_HEAD_SUFFIX_RE = /-dirty$/;
 
 /**
- * Every value `next=` may legally carry: a phase to re-enter, or `done`. Includes
- * classify and the batch line, because `defaultNext` can now return them and `--next`
- * may point at them.
+ * Every value `next=` may legally carry: a phase to re-enter, or `done`. The batch line
+ * is included because `defaultNext` returns it; `classify` is deliberately absent —
+ * nothing transitions INTO classify (it is always a trail's first milestone), so a
+ * `next=classify` pointer would name a transition no state machine makes.
  */
-export const NEXT_VALUES: readonly string[] = [...ALL_PHASES, 'done'];
+export const NEXT_VALUES: readonly string[] = [...PHASES, ...BATCH_PHASES, 'done'];
 
 /** GitHub issue numbers are positive integers; anything else is a caller mistake. */
 export function isIssueNumber(value: string): boolean {
@@ -198,6 +204,7 @@ export function isAcKey(key: string): boolean {
   return AC_KEY_RE.test(key);
 }
 
+/** True for the full-cycle line ONLY — classify and the batch line are not phases here; see {@link isKnownPhase}. */
 export function isPhase(value: string): value is Phase {
   return (PHASES as readonly string[]).includes(value);
 }
@@ -253,7 +260,7 @@ function enumRule(values: readonly string[]): KeyValueRule {
 }
 
 export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
-  mode: enumRule(['full', 'slot']),
+  mode: enumRule(['full', SLOT_MODE]),
   risk: enumRule(['low', 'med', 'high']),
   test_scope: enumRule(['focused', 'broad', 'unknown']),
   est_files: {
@@ -282,6 +289,15 @@ export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
   },
 };
 
+/** The batch line's successor order, for `defaultNext`. */
+const BATCH_NEXT: Record<BatchPhase, KnownPhase | 'done'> = {
+  'batch-setup': 'batch-validate',
+  'batch-validate': 'batch-review',
+  'batch-review': 'batch-ship',
+  'batch-ship': 'batch-report',
+  'batch-report': 'done',
+};
+
 /**
  * The phase that follows `phase`, for the milestone's `next=` line.
  *
@@ -297,14 +313,6 @@ export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
  * - the batch line walks its own order: batch-setup → batch-validate → batch-review →
  *   batch-ship → batch-report → done.
  */
-const BATCH_NEXT: Record<BatchPhase, KnownPhase | 'done'> = {
-  'batch-setup': 'batch-validate',
-  'batch-validate': 'batch-review',
-  'batch-review': 'batch-ship',
-  'batch-ship': 'batch-report',
-  'batch-report': 'done',
-};
-
 export function defaultNext(phase: KnownPhase, status: Status): KnownPhase | 'done' {
   if (status === 'blocked') return 'done';
   if (status === 'awaiting-merge' || status === 'partial') return phase;
@@ -356,15 +364,18 @@ function firstKeyProblem(key: string, value: string): string | null {
   if (value.length > MAX_VALUE_LENGTH) {
     return `Key '${key}' is ${value.length} characters — the maximum is ${MAX_VALUE_LENGTH}; summarise it (e.g. a count, or a path to the full text) instead of inlining it`;
   }
+  // Checked before the generic whitespace rule: for a grammar-carrying key, the
+  // key-specific message shows the correct form ('cli,docs'), which is the more
+  // actionable answer for the same mistake.
+  const rule = KEY_VALUE_RULES[key];
+  if (rule && !rule.test(value)) {
+    return `Key '${key}' has an invalid value '${value}' — ${rule.expects}`;
+  }
   if (/\s/.test(value) && !isAcKey(key)) {
     return `Key '${key}' contains whitespace — values must not contain spaces (use '-' or ','); only ac* keys are exempt`;
   }
   if ((PATH_KEYS as readonly string[]).includes(key) && !value.startsWith('/')) {
     return `Key '${key}' must be an absolute path, got '${value}'`;
-  }
-  const rule = KEY_VALUE_RULES[key];
-  if (rule && !rule.test(value)) {
-    return `Key '${key}' has an invalid value '${value}' — ${rule.expects}`;
   }
   return null;
 }
@@ -572,12 +583,14 @@ export interface ResumeResult {
   /** Set when the run must hard-block instead of resuming (currently `resume-loop`). */
   hard_block?: string;
   /**
-   * True when the freshest milestone on the trail is slot-mode — it carries
-   * `mode=slot` or a `batch=` id (RFC-0001 C.4), or is a `classify` verdict with
-   * `mode=slot`. Full-cycle re-enters such an issue FRESH: a slot trail has no
-   * full-cycle phases to resume (the batch worktree is machine-local, and an evicted
-   * member is requeued as `full` from scratch), so the signal exists to make "fresh
-   * because slot" distinguishable from "fresh because there was no trail".
+   * True when the freshest milestone marks the trail as slot-mode — a full-cycle-line
+   * milestone (plan/implement/review) carrying `mode=slot` or a `batch=` id, or a
+   * `classify` verdict with `mode=slot` (RFC-0001 C.4). Full-cycle re-enters such an
+   * issue FRESH: a slot trail has no full-cycle phases to resume (the batch worktree is
+   * machine-local, and an evicted member is requeued as `full` from scratch), so the
+   * signal exists to make "fresh because slot" distinguishable from "fresh because
+   * there was no trail". A trail whose latest milestone is a BATCH phase (an anchor
+   * issue) sets no slot_trail — it reports its own note instead.
    */
   slot_trail?: boolean;
   /** Human-readable note, e.g. "already complete". */
@@ -679,6 +692,35 @@ const PHASE_RESUMERS: Record<Phase, (scan: ResumeScan) => ResumeDecision> = {
 };
 
 /**
+ * The fresh-entry verdicts for a last milestone the full-cycle cannot resume from —
+ * classify, a batch phase, slot-mode, or a phase this CLI does not know at all.
+ *
+ * Checked ABOVE the blocked rule on purpose: a slot-mode or batch milestone that
+ * reports `blocked` still re-enters full-cycle fresh (the state machine that posted it
+ * is not the one resuming); only the resume loop cap outranks them.
+ */
+function freshEntry(last: ParsedMilestone): { note: string; slot_trail?: boolean } | null {
+  if (last.phase === CLASSIFY_PHASE) {
+    return {
+      note: 'classify record — full-cycle enters fresh',
+      ...(last.keys.mode === SLOT_MODE ? { slot_trail: true } : {}),
+    };
+  }
+  if (isBatchPhase(last.phase)) {
+    return { note: 'batch anchor trail — not a full-cycle run' };
+  }
+  if (last.keys.mode === SLOT_MODE || last.keys.batch !== undefined) {
+    return { note: 'slot-mode trail — full-cycle re-enters fresh', slot_trail: true };
+  }
+  if (!isPhase(last.phase)) {
+    return {
+      note: `unknown phase '${last.phase}' — not a full-cycle phase this CLI knows; entering fresh`,
+    };
+  }
+  return null;
+}
+
+/**
  * Resolve where a run should resume from, implementing the resume verification table in
  * `imboard-ai/git/gate-issue`. Never trusts the milestone alone — every claim is checked
  * against reality through `probe`, and {@link PHASE_RESUMERS} holds the per-phase rules.
@@ -699,30 +741,9 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
     return { ...base, resume_from: last.phase, hard_block: 'resume-loop' };
   }
 
-  // Classify and the batch line are known to `post` but are not stations on the
-  // full-cycle line, so a trail ending on them has nothing for full-cycle to resume.
-  // The checks sit ABOVE the blocked rule on purpose: a slot-mode or batch milestone
-  // that reports `blocked` still re-enters full-cycle fresh (the state machine that
-  // posted it is not the one resuming), and only the resume loop cap outranks them.
-  if (last.phase === CLASSIFY_PHASE) {
-    const slot = last.keys.mode === 'slot';
-    return {
-      ...base,
-      resume_from: 'none',
-      note: 'classify record — full-cycle enters fresh',
-      ...(slot ? { slot_trail: true } : {}),
-    };
-  }
-  if (isBatchPhase(last.phase)) {
-    return { ...base, resume_from: 'none', note: 'batch anchor trail — not a full-cycle run' };
-  }
-  if (last.keys.mode === 'slot' || last.keys.batch !== undefined) {
-    return {
-      ...base,
-      resume_from: 'none',
-      slot_trail: true,
-      note: 'slot-mode trail — full-cycle re-enters fresh',
-    };
+  const fresh = freshEntry(last);
+  if (fresh) {
+    return { ...base, resume_from: 'none', ...fresh };
   }
 
   // Any blocked milestone resumes at that same phase.
@@ -730,8 +751,8 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
     return { ...base, resume_from: last.phase || 'none' };
   }
 
-  // A phase this version does not know — a hand-written comment, or one written by a
-  // newer dossier — is not resumable, so the caller starts over.
+  // freshEntry has already returned for every non-full-cycle phase, so this only
+  // narrows the type for the resolver lookup below.
   if (!isPhase(last.phase)) {
     return { ...base, resume_from: 'none' };
   }

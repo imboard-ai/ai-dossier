@@ -12,6 +12,7 @@ import {
   isIssueNumber,
   isKnownPhase,
   isPhase,
+  KEY_VALUE_RULES,
   MAX_VALUE_LENGTH,
   mintRunId,
   NEXT_VALUES,
@@ -88,6 +89,11 @@ function milestone(body: string) {
   const parsed = parseMilestone(body);
   if (!parsed) throw new Error('expected a runstate milestone');
   return parsed;
+}
+
+/** One milestone from a header line plus key lines — the computeResume fixtures' shape. */
+function m(header: string, ...keys: string[]) {
+  return milestone(`${RUNSTATE_MARKER}\n${header}\n${keys.join('\n')}\nnext=x\n`);
 }
 
 describe('runstate spec table', () => {
@@ -536,9 +542,6 @@ describe('hitLoopCap', () => {
 });
 
 describe('computeResume', () => {
-  const m = (header: string, ...keys: string[]) =>
-    milestone(`${RUNSTATE_MARKER}\n${header}\n${keys.join('\n')}\nnext=x\n`);
-
   const gateDone = m(
     'phase=gate status=done run=r-440-ab56 at=2026-08-24T10:00:00Z',
     'base_branch=main'
@@ -928,13 +931,27 @@ describe('runstate spec table — classify and batch phases (#461)', () => {
     }
   });
 
-  it('accepts classify and the batch line in isKnownPhase, and only classify-side in isPhase', () => {
+  it('isKnownPhase accepts classify and the batch line; isPhase accepts neither', () => {
     expect(isKnownPhase('classify')).toBe(true);
     expect(isKnownPhase('batch-ship')).toBe(true);
     expect(isPhase('classify')).toBe(false);
     expect(isPhase('batch-ship')).toBe(false);
     expect(isBatchPhase('batch-report')).toBe(true);
     expect(isBatchPhase('ship')).toBe(false);
+  });
+
+  it('pins the #465-facing value-grammar key set', () => {
+    expect(Object.keys(KEY_VALUE_RULES).sort()).toEqual([
+      'areas',
+      'batch',
+      'confidence',
+      'deps',
+      'est_diff',
+      'est_files',
+      'mode',
+      'risk',
+      'test_scope',
+    ]);
   });
 });
 
@@ -959,9 +976,22 @@ describe('defaultNext — classify and batch phases (#461)', () => {
     expect(defaultNext('batch-ship', 'awaiting-merge')).toBe('batch-ship');
   });
 
-  it('allows the new phases as --next values', () => {
-    expect(NEXT_VALUES).toContain('classify');
+  it('allows batch phases as --next values but not classify — nothing transitions INTO classify', () => {
     expect(NEXT_VALUES).toContain('batch-ship');
+    expect(NEXT_VALUES).toContain('batch-report');
+    expect(NEXT_VALUES).not.toContain('classify');
+    expect(
+      validateMilestone({
+        phase: 'gate',
+        status: 'done',
+        run: 'r-440-ab56',
+        keys: [
+          ['base_branch', 'main'],
+          ['warnings', '0'],
+        ],
+        next: 'classify',
+      })
+    ).toEqual([expect.stringContaining("Invalid --next 'classify'")]);
   });
 });
 
@@ -1167,12 +1197,18 @@ describe('validateMilestone — value grammars for the new keys (#461)', () => {
   ])('rejects %s=%s with one actionable line', (key, value) => {
     const errors = withKey(key, value);
     expect(errors).toHaveLength(1);
-    // A value with a space trips the generic whitespace rule first — equally actionable,
-    // and the name the rule uses for the same mistake.
+    // For a grammar-carrying key the key-specific message fires even when the value
+    // also has a space — it shows the correct form, which is the more actionable answer.
     expect(errors[0]).toMatch(
       new RegExp(`Key '${key}' (has an invalid value|contains whitespace)`)
     );
     expect(errors[0]).toMatch(/— /);
+  });
+
+  it('prefers the grammar message over the generic whitespace message for a known key', () => {
+    expect(withKey('areas', 'CLI Docs')).toEqual([
+      expect.stringContaining("Key 'areas' has an invalid value 'CLI Docs' — expected"),
+    ]);
   });
 
   it('validates mode and batch on the slot-cycle phases too, not just classify', () => {
@@ -1198,9 +1234,6 @@ describe('validateMilestone — value grammars for the new keys (#461)', () => {
 });
 
 describe('computeResume — golden regression table for existing phases (#461)', () => {
-  const m = (header: string, ...keys: string[]) =>
-    milestone(`${RUNSTATE_MARKER}\n${header}\n${keys.join('\n')}\nnext=x\n`);
-
   const shipAwaiting = m(
     'phase=ship status=awaiting-merge run=r-440-ab56 at=2026-08-24T10:05:00Z',
     'pr=1',
@@ -1287,9 +1320,6 @@ describe('computeResume — golden regression table for existing phases (#461)',
 });
 
 describe('computeResume — classify, batch, and slot-mode trails (#461)', () => {
-  const m = (header: string, ...keys: string[]) =>
-    milestone(`${RUNSTATE_MARKER}\n${header}\n${keys.join('\n')}\nnext=x\n`);
-
   const classifyFull = m(
     'phase=classify status=done run=r-440-ab56 at=2026-08-24T09:00:00Z',
     'mode=full',
@@ -1385,5 +1415,22 @@ describe('computeResume — classify, batch, and slot-mode trails (#461)', () =>
     );
     const result = computeResume([blocked1, blocked2, blocked3], probe());
     expect(result.hard_block).toBe('resume-loop');
+  });
+
+  it('explains a fresh entry from an unknown phase rather than returning silently', () => {
+    const triage = m('phase=triage status=done run=r-440-ab56 at=2026-08-24T09:00:00Z');
+    const result = computeResume([triage], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.note).toContain("unknown phase 'triage'");
+  });
+
+  it('enters fresh (with the note) rather than resuming at a blocked milestone of an unknown phase', () => {
+    const blockedTriage = m(
+      'phase=triage status=blocked run=r-440-ab56 at=2026-08-24T09:00:00Z',
+      'reason=x'
+    );
+    const result = computeResume([blockedTriage], probe());
+    expect(result.resume_from).toBe('none');
+    expect(result.note).toContain("unknown phase 'triage'");
   });
 });
