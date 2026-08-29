@@ -1,0 +1,49 @@
+{
+  "name": "@ai-dossier/sched",
+  "version": "0.1.0",
+  "description": "Deterministic scheduler core for dossier batch cycles — queue, slots, typed state machines, crash-safe persistence. Zero LLM invocations.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
+  },
+  "keywords": [
+    "scheduler",
+    "state-machine",
+    "dossier",
+    "batch",
+    "orchestration"
+  ],
+  "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/imboard-ai/ai-dossier.git",
+    "directory": "packages/sched"
+  },
+  "homepage": "https://github.com/imboard-ai/ai-dossier#readme",
+  "bugs": {
+    "url": "https://github.com/imboard-ai/ai-dossier/issues"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@vitest/coverage-v8": "^4.0.9",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.9"
+  }
+}

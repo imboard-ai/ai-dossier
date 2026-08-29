@@ -75,7 +75,7 @@ jobs:
       - name: Pack all packages
         run: |
           mkdir -p /tmp/tarballs
-          for pkg in packages/core cli mcp-server packages/worktree-pool; do
+          for pkg in packages/core packages/sched cli mcp-server packages/worktree-pool; do
             (cd "$pkg" && npm pack --pack-destination /tmp/tarballs)
           done
           ls -1 /tmp/tarballs
@@ -86,9 +86,11 @@ jobs:
           # `ls ... | head -1` guards against npm pack ever producing multiple
           # matching tarballs (e.g. versioned + tag-suffixed builds).
           CORE_TGZ=$(ls /tmp/tarballs/ai-dossier-core-*.tgz | head -1)
+          SCHED_TGZ=$(ls /tmp/tarballs/ai-dossier-sched-*.tgz | head -1)
           CLI_TGZ=$(ls /tmp/tarballs/ai-dossier-cli-*.tgz | head -1)
-          # cli depends on @ai-dossier/core; install both via file: so npm
-          # resolves the peer locally without needing the registry version.
+          # cli depends on @ai-dossier/core and @ai-dossier/sched; install via
+          # file: so npm resolves the peers locally without needing registry
+          # versions.
           cat > package.json <<EOF
           {
             "name": "smoke-fixture",
@@ -96,6 +98,7 @@ jobs:
             "private": true,
             "dependencies": {
               "@ai-dossier/core": "file:$CORE_TGZ",
+              "@ai-dossier/sched": "file:$SCHED_TGZ",
               "@ai-dossier/cli":  "file:$CLI_TGZ"
             }
           }
@@ -226,6 +229,27 @@ jobs:
           cd packages/core
           npm publish --provenance --access public
 
+      - name: Check if @ai-dossier/sched needs publishing
+        id: check-sched
+        run: |
+          CURRENT=$(node -p "require('./packages/sched/package.json').version")
+          PUBLISHED=$(npm view @ai-dossier/sched version 2>/dev/null || echo "0.0.0")
+          if [ "$CURRENT" = "$PUBLISHED" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Sched $CURRENT already published, skipping"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "Publishing sched $CURRENT (current published: $PUBLISHED)"
+          fi
+
+      # Before cli: a published cli tarball depends on @ai-dossier/sched, so
+      # the registry must have it first or the cli install breaks for users.
+      - name: Publish @ai-dossier/sched
+        if: steps.check-sched.outputs.skip != 'true'
+        run: |
+          cd packages/sched
+          npm publish --provenance --access public
+
       - name: Check if @ai-dossier/cli needs publishing
         id: check-cli
         run: |
@@ -297,6 +321,7 @@ jobs:
         run: |
           echo "Verifying published packages..."
           npm view @ai-dossier/core version
+          npm view @ai-dossier/sched version
           npm view @ai-dossier/cli version
           npm view @ai-dossier/mcp-server version
           npm view @ai-dossier/worktree-pool version

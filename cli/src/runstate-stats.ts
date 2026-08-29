@@ -12,7 +12,13 @@
  */
 
 import { MILLIS_PER_SECOND } from './duration';
-import { type ParsedMilestone, PHASES, type Phase, type Status } from './runstate';
+import {
+  ALL_PHASES,
+  type BatchPhase,
+  type ParsedMilestone,
+  type Phase,
+  type Status,
+} from './runstate';
 
 /**
  * The synthetic phase covering the gap between ship's two milestones — the PR is open and
@@ -23,6 +29,15 @@ import { type ParsedMilestone, PHASES, type Phase, type Status } from './runstat
 export const MERGE_WAIT_PHASE = 'merge-wait';
 
 /**
+ * batch-ship's equivalent gap, reported under its own label rather than pooled with
+ * full-cycle `merge-wait`: in a mixed `--issues` selection (batch anchors alongside
+ * member issues) a shared label would silently mix the two populations, and the row
+ * would sort into the full-cycle section of the table rather than sitting with the
+ * batch line it belongs to.
+ */
+export const BATCH_MERGE_WAIT_PHASE = 'batch-merge-wait';
+
+/**
  * Phase and status literals this module branches on.
  *
  * Annotated with the protocol's own types so a rename in {@link ./runstate!PHASES} or
@@ -31,17 +46,22 @@ export const MERGE_WAIT_PHASE = 'merge-wait';
  */
 const SHIP_PHASE: Phase = 'ship';
 const GATE_PHASE: Phase = 'gate';
+const BATCH_SHIP_PHASE: BatchPhase = 'batch-ship';
 const AWAITING_MERGE: Status = 'awaiting-merge';
 
 /**
- * Row order for aggregate tables: the protocol's phase order, with `merge-wait` sitting
- * where it happens (between ship and report). Alphabetical order would read
- * `gate, implement, merge-wait, plan, …`, which tells a reader nothing about a pipeline.
+ * Row order for aggregate tables: `ALL_PHASES` order (classify, the full-cycle line,
+ * the batch line), with a merge-wait row inserted after each ship-like phase where the
+ * wait happens. Derived from {@link ./runstate!ALL_PHASES} so a phase added there lands
+ * here too, rather than silently sorting to the end alphabetically.
  */
-export const STATS_PHASE_ORDER: readonly string[] = (() => {
-  const shipIdx = PHASES.indexOf(SHIP_PHASE);
-  return [...PHASES.slice(0, shipIdx + 1), MERGE_WAIT_PHASE, ...PHASES.slice(shipIdx + 1)];
-})();
+export const STATS_PHASE_ORDER: readonly string[] = ALL_PHASES.flatMap((phase) =>
+  phase === SHIP_PHASE
+    ? [phase, MERGE_WAIT_PHASE]
+    : phase === BATCH_SHIP_PHASE
+      ? [phase, BATCH_MERGE_WAIT_PHASE]
+      : [phase]
+);
 
 /** The bucket a run lands in when no milestone in the run carries a `model=` key. */
 export const UNKNOWN_MODEL = 'unknown';
@@ -261,15 +281,22 @@ function groupByRun(milestones: ParsedMilestone[]): Map<string, ParsedMilestone[
 /**
  * The phase name a milestone is reported under.
  *
- * A `ship` milestone that follows ship's `awaiting-merge` is the far side of the CI +
- * merge wait, so it is relabelled — the row measures the wait, not a second ship.
+ * A ship-like milestone (`ship`/`batch-ship`) that follows the SAME phase's
+ * `awaiting-merge` is the far side of the CI + merge wait, so it is relabelled — the row
+ * measures the wait, not a second ship. The same-phase requirement is part of the
+ * contract: a `ship` → `batch-ship` transition (malformed on any real trail) must not
+ * be relabelled.
  */
 function phaseNameFor(milestone: ParsedMilestone, previous: ParsedMilestone | null): string {
-  const followsAwaitingMerge =
-    previous !== null && previous.phase === SHIP_PHASE && previous.status === AWAITING_MERGE;
-  return milestone.phase === SHIP_PHASE && followsAwaitingMerge
-    ? MERGE_WAIT_PHASE
-    : milestone.phase;
+  if (
+    previous !== null &&
+    previous.phase === milestone.phase &&
+    previous.status === AWAITING_MERGE
+  ) {
+    if (milestone.phase === SHIP_PHASE) return MERGE_WAIT_PHASE;
+    if (milestone.phase === BATCH_SHIP_PHASE) return BATCH_MERGE_WAIT_PHASE;
+  }
+  return milestone.phase;
 }
 
 /** How a caller records a degraded read. */

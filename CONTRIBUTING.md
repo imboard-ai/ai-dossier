@@ -266,7 +266,7 @@ Use the GitHub Actions UI to trigger the workflow with an automatic version bump
 - **minor** (1.x.0): New features, backward-compatible changes
 - **major** (x.0.0): Breaking changes
 
-All packages (`@ai-dossier/core`, `@ai-dossier/cli`, `@ai-dossier/mcp-server`, `@ai-dossier/worktree-pool`) are published from the same pipeline.
+All packages (`@ai-dossier/core`, `@ai-dossier/sched`, `@ai-dossier/cli`, `@ai-dossier/mcp-server`, `@ai-dossier/worktree-pool`) are published from the same pipeline.
 
 ## Security Vulnerabilities
 

@@ -26,6 +26,7 @@ their cause, and at least three were made worse by reasoning about how something
 | Directory | Purpose |
 |-----------|---------|
 | `packages/core/` | Shared library — parsing, verification, linting, risk assessment |
+| `packages/sched/` | Deterministic scheduler core — queue, slots, persistent state machine |
 | `cli/` | CLI tool (`dossier verify`, `dossier search`, etc.) |
 | `mcp-server/` | MCP server — tools/resources/prompts for LLM integration |
 | `registry/` | Vercel-deployed registry API |
@@ -40,7 +41,7 @@ make check        # biome format + lint with auto-fix
 
 - Node 20+ required (vitest v4 + vite v7 dropped Node 18)
 - Linter/formatter: **Biome** (not ESLint/Prettier) — `npx biome check --write .`
-- Build order: core first, then mcp-server and cli (both depend on core)
+- Build order: core first, then sched, then mcp-server and cli (cli depends on core + sched)
 - Changing a publishable package's `src/`/`bin/` requires bumping that package's `package.json`
   version — CI's `version-bump` job fails the PR otherwise (label `no-release-needed` opts out)
 - MCP integration: see `mcp-server/README.md`

@@ -1069,3 +1069,22 @@ export function logPaginationInfo(total: number, page: number, perPage: number):
     console.log('');
   }
 }
+
+// ============================================================================
+// CLI failure exit
+// ============================================================================
+
+/**
+ * Fail on stderr and exit 1, so a calling dossier can detect it.
+ *
+ * Each entry is one problem. An entry may span lines: the first gets the ❌, the rest are
+ * indented under it, which is how a cause line and its "Fix:" line stay visibly one item.
+ */
+export function fail(lines: string[]): never {
+  for (const line of lines) {
+    const [first, ...rest] = line.split('\n');
+    console.error(`❌ ${first}`);
+    for (const cont of rest) console.error(`   ${cont}`);
+  }
+  process.exit(1);
+}
