@@ -22,6 +22,31 @@ export interface GroundTruthMilestone {
   keys: Record<string, string>;
 }
 
+/**
+ * A parked PR's GitHub state (#468 AC1) — the exact fields the watcher
+ * decides on, from `gh pr view --json state,mergedAt,mergeable,labels`.
+ */
+export interface PrTruth {
+  /** GitHub PR state: OPEN | MERGED | CLOSED. */
+  state: 'OPEN' | 'MERGED' | 'CLOSED';
+  /** Set only for a genuinely merged PR (never inferred from state alone). */
+  mergedAt: string | null;
+  /** Mergeability as GitHub reports it; UNKNOWN while it is still computing. */
+  mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
+  /** True when the PR carries the `auto-merge-blocked` label (the watcher's block signal). */
+  blocked: boolean;
+}
+
+/** Teardown inputs recovered from a run's `setup` milestone (#468 AC2). */
+export interface SetupInfo {
+  /** Absolute worktree path (`worktree=` key of the setup milestone). */
+  worktree: string;
+  /** Whether the worktree was claimed from the pool (`pool_claimed=true`). */
+  poolClaimed: boolean;
+  /** The unit's working branch (`branch=` key), when the milestone carried it. */
+  branch: string | null;
+}
+
 export interface GroundTruth {
   /**
    * Latest runstate milestone on the issue. **Tri-state (decision 2, option
@@ -40,6 +65,16 @@ export interface GroundTruth {
   issueClosed(issue: number): boolean;
   /** Current head sha of `branch` on origin, or null when unknown/absent/unreachable. */
   branchHead(branch: string): string | null;
+  /**
+   * A parked PR's GitHub state (#468). Same tri-state: `undefined` = poll
+   * FAILED (unreachable — watcher decisions pause); an object = the truth.
+   */
+  prState(pr: number): PrTruth | undefined;
+  /**
+   * Teardown inputs from the issue's `setup` milestone (#468): `null` = the
+   * issue verifiably has no setup milestone; `undefined` = poll FAILED.
+   */
+  setupInfo(issue: number): SetupInfo | null | undefined;
 }
 
 /** Subprocess timeout: a hung gh/git call must not stall a tick. */
@@ -94,12 +129,14 @@ export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone 
  * - `ai-dossier runstate last --issue N --json` — the milestone trail
  * - `gh issue view N --json state --jq .state` — issue closed
  * - `git ls-remote origin <branch>` — branch head
+ * - `gh pr view <n> --json state,mergedAt,mergeable,labels` — parked-PR state (#468)
+ * - `gh issue view N --json comments` — the setup milestone's teardown keys (#468)
  *
  * `repoDir` is the cwd for git; gh resolves the repo from cwd by default.
- * Every failure degrades safely: a failed milestone poll reports UNREACHABLE
+ * Every failure degrades safely: a failed milestone/PR poll reports UNREACHABLE
  * (undefined — decision 2, option A), a failed closed-poll reports false, a
  * failed head-poll null. Ground truth being unreachable pauses the engine's
- * stall/verify decisions; it never crashes a tick.
+ * stall/verify/watch decisions; it never crashes a tick.
  */
 export function createExecGroundTruth(
   exec: ExecFn = groundTruthExec,
@@ -134,7 +171,111 @@ export function createExecGroundTruth(
       const sha = out.split('\t')[0]?.trim();
       return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
     },
+    prState(pr: number): PrTruth | undefined {
+      const out = exec(
+        'gh',
+        ['pr', 'view', String(pr), '--json', 'state,mergedAt,mergeable,labels'],
+        opts.repoDir
+      );
+      if (out === null) return undefined; // poll failed — unreachable
+      return parsePrViewJson(out) ?? undefined;
+    },
+    setupInfo(issue: number): SetupInfo | null | undefined {
+      const out = exec('gh', ['issue', 'view', String(issue), '--json', 'comments'], opts.repoDir);
+      if (out === null) return undefined; // poll failed — unreachable
+      return parseSetupInfo(out);
+    },
   };
+}
+
+/** Parse the stdout of `gh pr view --json state,mergedAt,mergeable,labels`. */
+export function parsePrViewJson(stdout: string | null): PrTruth | null {
+  if (stdout === null || stdout.trim() === '') return null;
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (parsed === null || typeof parsed !== 'object') return null;
+    const obj = parsed as Record<string, unknown>;
+    if (typeof obj.state !== 'string') return null;
+    const state = obj.state.toUpperCase();
+    if (state !== 'OPEN' && state !== 'MERGED' && state !== 'CLOSED') return null;
+    const mergedAt = typeof obj.mergedAt === 'string' && obj.mergedAt !== '' ? obj.mergedAt : null;
+    const mergeableRaw = typeof obj.mergeable === 'string' ? obj.mergeable.toUpperCase() : null;
+    const mergeable =
+      mergeableRaw === 'MERGEABLE' || mergeableRaw === 'CONFLICTING' || mergeableRaw === 'UNKNOWN'
+        ? mergeableRaw
+        : null;
+    const blocked = Array.isArray(obj.labels)
+      ? obj.labels.some(
+          (l) =>
+            l !== null &&
+            typeof l === 'object' &&
+            (l as { name?: unknown }).name === 'auto-merge-blocked'
+        )
+      : false;
+    return { state, mergedAt, mergeable, blocked };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse the stdout of `gh issue view --json comments` and recover the teardown
+ * inputs from the run's `setup done` milestone comment (#468). Milestone
+ * comments carry a `<!-- runstate:v1 -->` marker followed by `key=value`
+ * lines; the setup milestone is the one whose header starts `phase=setup`.
+ * Returns null when no usable setup milestone exists (verifiably).
+ */
+export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
+  if (commentsJson === null || commentsJson.trim() === '') return null;
+  let comments: unknown;
+  try {
+    comments = JSON.parse(commentsJson);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(comments)) return null;
+
+  // Newest setup milestone wins (a re-run can re-post setup).
+  for (const raw of [...comments].reverse()) {
+    if (raw === null || typeof raw !== 'object') continue;
+    const body = (raw as { body?: unknown }).body;
+    if (typeof body !== 'string' || !body.includes('<!-- runstate:v1 -->')) continue;
+
+    const keys = parseMilestoneKeys(body);
+    if (keys.phase !== 'setup' || keys.status !== 'done') continue;
+    const worktree = keys.worktree ?? null;
+    if (worktree === null || worktree.length === 0) continue;
+    return {
+      worktree,
+      poolClaimed: keys.pool_claimed === 'true',
+      branch: keys.branch ?? null,
+    };
+  }
+  return null;
+}
+
+/** `key=value` tokens of a runstate milestone comment body (header included — its line carries several space-separated pairs). */
+function parseMilestoneKeys(body: string): Record<string, string> {
+  const keys: Record<string, string> = {};
+  for (const line of body.split('\n')) {
+    for (const token of line.trim().split(/\s+/)) {
+      const match = /^([a-z_][a-z0-9_]*)=(.*)$/.exec(token);
+      if (match !== null) keys[match[1]] = match[2];
+    }
+  }
+  return keys;
+}
+
+/**
+ * The detached-ship park signal (#468): the latest milestone is the ship
+ * phase's `awaiting-merge` record carrying a `pr=` key. Such an exit is a
+ * VERIFIED park, not an unverified exit — the watcher takes over from here.
+ */
+export function isParkedMilestone(milestone: GroundTruthMilestone | null): boolean {
+  if (milestone === null) return false;
+  if (milestone.phase !== 'ship' || milestone.status !== 'awaiting-merge') return false;
+  const pr = Number.parseInt(milestone.keys.pr ?? '', 10);
+  return Number.isInteger(pr) && pr > 0;
 }
 
 /**

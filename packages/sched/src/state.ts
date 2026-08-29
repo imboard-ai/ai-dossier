@@ -29,7 +29,11 @@ import {
 const ISSUE_BASE_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   queued: ['classified'],
   classified: ['dispatched', 'batched'],
-  dispatched: ['shipped'],
+  // #468: dispatched → parked is the detached-ship exit — the agent parked
+  // its PR on auto-merge and exited; parked → shipped accepts the MERGE
+  // (never the park — RFC-0001 §E.4 "scheduler gates on merge").
+  dispatched: ['shipped', 'parked'],
+  parked: ['shipped'],
   shipped: ['done'],
   // batched/waiting/validated also carry `evicted`: RFC-0001 §D.2 dissolving
   // requeues members at ANY batch stage, not just mid-member (F.8).
@@ -129,6 +133,7 @@ export function createEmptyState(): SchedState {
     batches: [],
     slots: [],
     next_slot_id: 1,
+    last_pr_poll_at: null,
   };
 }
 
@@ -172,6 +177,16 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   if (entry.reason !== null && typeof entry.reason !== 'string') {
     throw new Error(`${label}: reason must be a string or null`);
   }
+  if (
+    entry.pr !== null &&
+    entry.pr !== undefined &&
+    (!Number.isInteger(entry.pr) || (entry.pr as number) <= 0)
+  ) {
+    throw new Error(`${label}: pr must be a positive integer or null`);
+  }
+  if (entry.cleanup !== null && entry.cleanup !== undefined && typeof entry.cleanup !== 'string') {
+    throw new Error(`${label}: cleanup must be a string or null`);
+  }
   if (!isIsoDateString(entry.enqueued_at) || !isIsoDateString(entry.updated_at)) {
     throw new Error(`${label}: enqueued_at/updated_at must be ISO date strings`);
   }
@@ -182,9 +197,10 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
  * wrong schema version or malformed shape throws instead of being coerced, so
  * a corrupt file is a loud failure, never a silent queue reset.
  *
- * Legacy schema versions (1.0.0, pre-#464) are accepted and migrated: slot
- * `branch`/`last_head` backfill to null and the state upgrades to the current
- * schema on the next save.
+ * Legacy schema versions are accepted and migrated: 1.0.0 (pre-#464) slots
+ * backfill `branch`/`last_head` to null; 1.1.0 (pre-#468) entries backfill
+ * `pr`/`cleanup` and the state backfills `last_pr_poll_at` to null. The state
+ * upgrades to the current schema on the next save.
  */
 export function validateState(data: unknown): SchedState {
   if (!data || typeof data !== 'object') {
@@ -316,17 +332,36 @@ export function validateState(data: unknown): SchedState {
   if (!Number.isInteger(obj.next_slot_id) || (obj.next_slot_id as number) < 1) {
     throw new Error('next_slot_id must be a positive integer');
   }
+  if (
+    obj.last_pr_poll_at !== null &&
+    obj.last_pr_poll_at !== undefined &&
+    !isIsoDateString(obj.last_pr_poll_at)
+  ) {
+    throw new Error('last_pr_poll_at must be an ISO date string or null');
+  }
 
   // Migration: pre-#464 (1.0.0) slots carry no branch/last_head/pid_start —
-  // backfill null so the returned state always has the current shape.
+  // backfill null so the returned state always has the current shape. Pre-#468
+  // (1.1.0) entries carry no pr/cleanup and the state no last_pr_poll_at.
   const slots = (obj.slots as SlotEntry[]).map((slot) => ({
     ...slot,
     branch: slot.branch ?? null,
     last_head: slot.last_head ?? null,
     pid_start: slot.pid_start ?? null,
   }));
+  const entries = (obj.entries as QueueEntry[]).map((entry) => ({
+    ...entry,
+    pr: entry.pr ?? null,
+    cleanup: entry.cleanup ?? null,
+  }));
 
-  return { ...(data as SchedState), schema_version: SCHEMA_VERSION, slots };
+  return {
+    ...(data as SchedState),
+    schema_version: SCHEMA_VERSION,
+    entries,
+    slots,
+    last_pr_poll_at: obj.last_pr_poll_at ?? null,
+  };
 }
 
 // --- Generic transition machinery ---

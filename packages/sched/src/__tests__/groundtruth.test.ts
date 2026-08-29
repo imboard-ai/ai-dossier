@@ -4,8 +4,11 @@ import {
   type ExecFn,
   type GroundTruthMilestone,
   groundTruthExec,
+  isParkedMilestone,
   isVerifiedComplete,
   parseMilestoneJson,
+  parsePrViewJson,
+  parseSetupInfo,
 } from '../index';
 
 describe('parseMilestoneJson', () => {
@@ -140,5 +143,184 @@ describe('createExecGroundTruth', () => {
 
   it('groundTruthExec is the default exec (injectable boundary exists)', () => {
     expect(typeof groundTruthExec).toBe('function');
+  });
+});
+
+// --- #468: PR state, setup info, park detection ---
+
+describe('parsePrViewJson (#468 AC1)', () => {
+  it('parses the gh pr view --json shape', () => {
+    const stdout = JSON.stringify({
+      state: 'MERGED',
+      mergedAt: '2026-08-29T12:30:00Z',
+      mergeable: 'MERGEABLE',
+      labels: [{ name: 'auto-merge' }, { name: 'feature' }],
+    });
+    expect(parsePrViewJson(stdout)).toEqual({
+      state: 'MERGED',
+      mergedAt: '2026-08-29T12:30:00Z',
+      mergeable: 'MERGEABLE',
+      blocked: false,
+    });
+  });
+
+  it('detects the auto-merge-blocked label', () => {
+    const stdout = JSON.stringify({
+      state: 'OPEN',
+      mergedAt: null,
+      mergeable: 'CONFLICTING',
+      labels: [{ name: 'auto-merge-blocked' }],
+    });
+    expect(parsePrViewJson(stdout)).toEqual({
+      state: 'OPEN',
+      mergedAt: null,
+      mergeable: 'CONFLICTING',
+      blocked: true,
+    });
+  });
+
+  it('missing mergeability and labels degrade safely', () => {
+    const stdout = JSON.stringify({ state: 'OPEN', mergedAt: null });
+    expect(parsePrViewJson(stdout)).toEqual({
+      state: 'OPEN',
+      mergedAt: null,
+      mergeable: null,
+      blocked: false,
+    });
+  });
+
+  it('null / garbage / unknown states are not a truth', () => {
+    expect(parsePrViewJson(null)).toBeNull();
+    expect(parsePrViewJson('')).toBeNull();
+    expect(parsePrViewJson('not json')).toBeNull();
+    expect(parsePrViewJson('{"state":"DRAFT"}')).toBeNull();
+  });
+});
+
+describe('isParkedMilestone (#468 park detection)', () => {
+  const milestone = (phase: string, status: string, keys: Record<string, string> = {}) => ({
+    phase,
+    status,
+    run: 'r',
+    at: '2026-08-29T12:00:00Z',
+    keys,
+  });
+
+  it('only ship/awaiting-merge milestones carrying pr= are parks', () => {
+    expect(isParkedMilestone(milestone('ship', 'awaiting-merge', { pr: '55' }))).toBe(true);
+    expect(isParkedMilestone(milestone('ship', 'awaiting-merge', {}))).toBe(false);
+    expect(isParkedMilestone(milestone('ship', 'awaiting-merge', { pr: 'not-a-number' }))).toBe(
+      false
+    );
+    expect(isParkedMilestone(milestone('ship', 'done', { pr: '55' }))).toBe(false);
+    expect(isParkedMilestone(milestone('report', 'done'))).toBe(false);
+    expect(isParkedMilestone(null)).toBe(false);
+  });
+});
+
+describe('parseSetupInfo (#468 teardown inputs)', () => {
+  const comments = (bodies: string[]) => JSON.stringify(bodies.map((body) => ({ body })));
+
+  it('recovers worktree/pool_claimed from the setup milestone comment', () => {
+    const json = comments([
+      '<!-- runstate:v1 -->\nphase=gate status=done run=r-1 at=2026-08-29T10:00:00Z\nnext=setup',
+      '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=2026-08-29T10:05:00Z\nbranch=feature/101-x\nworktree=/repo/worktrees/feature-101-x\npool_claimed=false\nnext=plan',
+      '<!-- runstate:v1 -->\nphase=ship status=awaiting-merge run=r-1 at=2026-08-29T11:00:00Z\npr=55\nnext=done',
+    ]);
+    expect(parseSetupInfo(json)).toEqual({
+      worktree: '/repo/worktrees/feature-101-x',
+      poolClaimed: false,
+      branch: 'feature/101-x',
+    });
+  });
+
+  it('pool_claimed=true is recognized; newest setup comment wins', () => {
+    const json = comments([
+      '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=2026-08-29T10:05:00Z\nworktree=/old-wt\npool_claimed=false',
+      '<!-- runstate:v1 -->\nphase=setup status=done run=r-2 at=2026-08-29T14:05:00Z\nworktree=/pool/wt-9\npool_claimed=true',
+    ]);
+    expect(parseSetupInfo(json)).toEqual({
+      worktree: '/pool/wt-9',
+      poolClaimed: true,
+      branch: null,
+    });
+  });
+
+  it('no setup milestone, no worktree key, or garbage → null', () => {
+    expect(parseSetupInfo(null)).toBeNull();
+    expect(parseSetupInfo('[]')).toBeNull();
+    expect(parseSetupInfo('not json')).toBeNull();
+    expect(
+      parseSetupInfo(
+        comments(['<!-- runstate:v1 -->\nphase=gate status=done run=r-1 at=x\nworktree=/wt'])
+      )
+    ).toBeNull();
+    expect(
+      parseSetupInfo(
+        comments(['<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\npool_claimed=false'])
+      )
+    ).toBeNull();
+    // a blocked setup milestone is not a usable teardown source
+    expect(
+      parseSetupInfo(
+        comments([
+          '<!-- runstate:v1 -->\nphase=setup status=blocked run=r-1 at=x\nworktree=/wt\npool_claimed=false',
+        ])
+      )
+    ).toBeNull();
+  });
+});
+
+describe('createExecGroundTruth prState/setupInfo (#468)', () => {
+  it('reads PR state and setup info through the exec fn', () => {
+    const calls: Array<[string, string[]]> = [];
+    const exec: ExecFn = (file, args) => {
+      calls.push([file, args]);
+      if (file === 'gh' && args[0] === 'pr') {
+        return JSON.stringify({
+          state: 'MERGED',
+          mergedAt: '2026-08-29T12:30:00Z',
+          mergeable: 'MERGEABLE',
+          labels: [],
+        });
+      }
+      if (file === 'gh' && args[0] === 'issue' && args.includes('comments')) {
+        return JSON.stringify([
+          {
+            body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/wt-9\npool_claimed=true',
+          },
+        ]);
+      }
+      return null;
+    };
+    const gt = createExecGroundTruth(exec, { repoDir: '/repo' });
+
+    expect(gt.prState(55)).toEqual({
+      state: 'MERGED',
+      mergedAt: '2026-08-29T12:30:00Z',
+      mergeable: 'MERGEABLE',
+      blocked: false,
+    });
+    expect(gt.setupInfo(101)).toEqual({
+      worktree: '/wt-9',
+      poolClaimed: true,
+      branch: null,
+    });
+    // the PR poll asks gh for exactly the watcher's fields
+    expect(
+      calls.some(
+        ([f, a]) => f === 'gh' && a[0] === 'pr' && a.some((arg) => arg.includes('mergedAt'))
+      )
+    ).toBe(true);
+  });
+
+  it('a failed poll is unreachable for both PR state and setup info', () => {
+    const failing: ExecFn = () => null;
+    const gt = createExecGroundTruth(failing);
+    expect(gt.prState(55)).toBeUndefined();
+    expect(gt.setupInfo(101)).toBeUndefined();
+    // a verifiably-empty comment list is known-absent, not unreachable
+    const empty: ExecFn = (_file, args) => (args.includes('comments') ? '[]' : null);
+    expect(createExecGroundTruth(empty).setupInfo(101)).toBeNull();
   });
 });

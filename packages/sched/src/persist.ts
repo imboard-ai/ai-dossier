@@ -260,6 +260,12 @@ export class SchedStore {
         }
         config.reconcile_interval_ms = parsed.reconcile_interval_ms;
       }
+      if (parsed.pr_poll_interval_ms !== undefined) {
+        if (!Number.isInteger(parsed.pr_poll_interval_ms) || parsed.pr_poll_interval_ms <= 0) {
+          throw new Error('pr_poll_interval_ms must be a positive integer (milliseconds)');
+        }
+        config.pr_poll_interval_ms = parsed.pr_poll_interval_ms;
+      }
       if (parsed.dispatch !== undefined) {
         config.dispatch = validateDispatchConfig(parsed.dispatch);
       }
@@ -284,6 +290,9 @@ export class SchedStore {
         : {}),
       ...(config.reconcile_interval_ms !== undefined
         ? { reconcile_interval_ms: config.reconcile_interval_ms }
+        : {}),
+      ...(config.pr_poll_interval_ms !== undefined
+        ? { pr_poll_interval_ms: config.pr_poll_interval_ms }
         : {}),
       ...(config.dispatch !== undefined ? { dispatch: config.dispatch } : {}),
     };
@@ -311,6 +320,9 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   if (dispatch.prompt !== undefined && typeof dispatch.prompt !== 'string') {
     throw new Error('dispatch.prompt must be a string');
   }
+  if (dispatch.report_prompt !== undefined && typeof dispatch.report_prompt !== 'string') {
+    throw new Error('dispatch.report_prompt must be a string');
+  }
   if (dispatch.tier_models !== undefined) {
     if (dispatch.tier_models === null || typeof dispatch.tier_models !== 'object') {
       throw new Error('dispatch.tier_models must be an object');
@@ -327,6 +339,7 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   const out: DispatchConfig = {};
   if (dispatch.command !== undefined) out.command = dispatch.command as string[];
   if (dispatch.prompt !== undefined) out.prompt = dispatch.prompt as string;
+  if (dispatch.report_prompt !== undefined) out.report_prompt = dispatch.report_prompt as string;
   if (dispatch.tier_models !== undefined) {
     out.tier_models = dispatch.tier_models as Partial<Record<ModelTier, string>>;
   }

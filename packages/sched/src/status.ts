@@ -21,6 +21,14 @@ export interface BlockedItem {
   reason: string;
 }
 
+/** A parked unit awaiting its PR merge (#468). */
+export interface ParkedItem {
+  issue: number;
+  pr: number;
+  /** When the unit parked (entry `updated_at`). */
+  since: string;
+}
+
 /** Machine-readable status report (`sched status --json`). */
 export interface StatusReport {
   /** Project slug the report was built for (which state bucket this is). */
@@ -31,6 +39,8 @@ export interface StatusReport {
   queue: QueueEntry[];
   slots: SlotEntry[];
   batches: BatchEntry[];
+  /** Parked units being watched by the PR watcher (#468). */
+  parked: ParkedItem[];
   /** How many units are runnable right now. */
   runnable: number;
   /** Which units are runnable (`issue:<n>` / `batch:<id>`), in dispatch order. */
@@ -100,6 +110,10 @@ export function buildStatusReport(
 
   const units = state.paused ? [] : runnableUnits(state);
 
+  const parked: ParkedItem[] = state.entries
+    .filter((e) => e.status === 'parked' && e.pr !== null)
+    .map((e) => ({ issue: e.issue, pr: e.pr as number, since: e.updated_at }));
+
   return {
     project,
     paused: state.paused,
@@ -108,6 +122,7 @@ export function buildStatusReport(
     queue: state.entries,
     slots: state.slots,
     batches: state.batches,
+    parked,
     runnable: units.length,
     runnable_units: units.map((u) =>
       u.kind === 'issue' ? `issue:${u.issue}` : `batch:${u.batch}`

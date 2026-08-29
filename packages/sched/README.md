@@ -3,11 +3,14 @@
 [![npm](https://img.shields.io/npm/v/@ai-dossier/sched.svg)](https://www.npmjs.com/package/@ai-dossier/sched)
 
 Deterministic scheduler core for dossier batch cycles — queue, worker slots, typed state
-machines, crash-safe persistence, and (since #464) the **dispatch engine**: spawning agent
-processes, verifying their completion against ground truth, and mechanizing the
-stall/escalation ladder. The scheduler itself **never invokes an LLM** — it spawns the
-agent process the operator configured and reconciles the durable record
-(`ai-dossier runstate` / `gh` / `git`) that the spawned run leaves behind.
+machines, crash-safe persistence, the **dispatch engine** (#464: spawning agent
+processes, verifying their completion against ground truth, mechanizing the
+stall/escalation ladder), and since #468 the **PR watcher + tail work** (parked-PR
+watching, script-based teardown, cheap-tier report dispatch — retiring the fleet
+pattern of re-dispatching a full-cycle run for the tail). The scheduler itself **never
+invokes an LLM** — it spawns the agent process the operator configured and reconciles
+the durable record (`ai-dossier runstate` / `gh` / `git`) that the spawned run leaves
+behind.
 
 Design: RFC-0001 *Batch Cycles* §B/C.1/D (the RFC lives on branch `docs/batch-cycles-rfc`,
 not yet merged to `main`; the §D state machines are frozen verbatim into the types below).
@@ -17,7 +20,7 @@ this state machine makes impossible to forget.
 
 ## CLI surface
 
-Consumed through the monorepo CLI (`@ai-dossier/cli` ≥ 0.18.0):
+Consumed through the monorepo CLI (`@ai-dossier/cli` ≥ 0.19.0):
 
 ```bash
 ai-dossier sched enqueue --issues 101,105..109 --deps 100 --tier strong   # flags
@@ -133,13 +136,55 @@ fake agents and stub ground truth; no LLM calls anywhere.
 - **Corrupt state is loud**: `load()` throws `CorruptStateError` naming the file —
   never a silent queue reset. `state.json` is deletable and rebuildable from GitHub,
   which remains the system of record.
-- **Schema**: state/config files from #460 (schema 1.0.0) load and migrate to 1.1.0
-  automatically (slot `branch`/`last_head` backfill to null).
+- **Schema**: state/config files from #460 (schema 1.0.0) and #464 (1.1.0) load and
+  migrate to 1.2.0 automatically (slot `branch`/`last_head` and entry
+  `pr`/`cleanup`/`last_pr_poll_at` backfill to null).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
 - **Pause** stops new assignments only; abandon routes through the typed failure rails
   (`evicted → requeued{full}` for batch members — nothing green is discarded).
+
+## The PR watcher + tail work (#468)
+
+Dispatched runs park their PR on `auto-merge` (detached ship mode — the default
+prompt instructs it) and exit. The engine owns everything after the park:
+
+1. **Park detection (AC1)** — an agent exit whose latest milestone is the ship
+   phase's `awaiting-merge` (with `pr=`) is a VERIFIED park, not an unverified
+   exit: the entry moves to `parked`, the slot is released (a waiting unit
+   consumes zero slots), and the watcher takes over.
+2. **PR watching (AC1)** — parked PRs are polled every `pr_poll_interval_ms`
+   (default 150 s — "every 2–3 min", persisted `last_pr_poll_at` so a restart
+   honors the cadence) via `gh pr view --json state,mergedAt,mergeable,labels`.
+   A merge is accepted only when state is MERGED **and** `mergedAt` is non-null
+   **and** the issue is closed — never inferred from an agent exit. An
+   unreachable poll pauses the watcher (decision 2, option A).
+3. **Failure states (AC3)** — `CONFLICTING`, closed-unmerged, or the
+   `auto-merge-blocked` label fail the unit with the reason and block its
+   TRANSITIVE dependents. The engine never merges anything itself.
+4. **Gating on MERGE, not park (AC4)** — `parked` is not a satisfied status:
+   dependents stay blocked until the merge lands (`parked → shipped`).
+5. **Teardown as a script (AC2)** — on merge, the run's setup milestone
+   (recovered once from the issue's comments, no polling window) chooses the
+   script: pool-claimed worktrees run `worktree-pool return --path <wt> --json`
+   (the pool's own self-check is the verification); cold worktrees run
+   `git worktree remove --force <wt>` with a path-gone check. Both are
+   verify-first idempotent; a failed step records `cleanup=failed-<step>` on
+   the entry and in the journal — degradation, never unit failure.
+6. **Report dispatch (AC2)** — once teardown is recorded, a **mechanical-tier**
+   report agent is spawned with the report-phase prompt
+   (`dispatch.report_prompt`; `{issue}`/`{pr}`/`{cleanup}` substituted — the
+   cleanup status rides into the report). It completes like any agent; a
+   report that stalls climbs the same ladder (mechanical → mid → strong, cap
+   2), and at the cap the unit completes with `reason=report-failed…` — the
+   work is merged, so dependents are never re-blocked. The full-cycle tail-run
+   pattern (re-dispatching a whole run for teardown+report) is retired.
+
+`sched status` shows parked PRs (zero slots) and a `pr` column on the queue;
+every watcher decision lands in `events.jsonl` (`pr-parked`, `merge-accepted`,
+`pr-watch-failed`, `teardown-done`/`teardown-failed`, `report-dispatched`,
+`report-failed`).
 
 ## Development
 
@@ -152,4 +197,6 @@ npm test         # vitest — state machines, persistence, crash/restart, engine
 
 No network, no GitHub in unit tests — persistence tests run on temp directories; the
 integration tests spawn fake-agent fixtures against a scratch git repo with stubbed
-ground truth.
+ground truth. The #468 integration tests run the full detached-ship tail
+(park → watch → merge → REAL worktree removal → report) end-to-end, including a
+sched restart mid-watch.

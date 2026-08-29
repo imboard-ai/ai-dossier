@@ -35,6 +35,7 @@ export type IssueStatus =
   | 'queued'
   | 'classified'
   | 'dispatched'
+  | 'parked'
   | 'shipped'
   | 'done'
   | 'batched'
@@ -159,6 +160,18 @@ export interface QueueEntry {
   status: IssueStatus;
   /** Free-form reason attached to failure-edge transitions (evicted/blocked/failed). */
   reason: string | null;
+  /**
+   * PR number the unit parked on `auto-merge` (#468), from the ship phase's
+   * `awaiting-merge` milestone (`pr=` key). Set when the agent exits parked;
+   * drives the PR watcher until the merge is accepted.
+   */
+  pr: number | null;
+  /**
+   * Teardown outcome for a merged unit (#468): `done`, `failed-<step>`, or
+   * null while teardown is still pending. Recorded only after the cleanup
+   * was verified (pool return self-check / worktree path gone).
+   */
+  cleanup: string | null;
   enqueued_at: string;
   updated_at: string;
 }
@@ -215,6 +228,12 @@ export interface SchedState {
   slots: SlotEntry[];
   /** Monotonic counter for stable slot ids. */
   next_slot_id: number;
+  /**
+   * When the PR watcher last polled (#468) — parked PRs are polled every
+   * `pr_poll_interval_ms` (default 150 s), independently of the reconcile
+   * tick. Persisted so the cadence survives a sched restart.
+   */
+  last_pr_poll_at: string | null;
 }
 
 /** Durable intent, persisted separately in `config.json` (state.json is rebuildable hot truth). */
@@ -224,6 +243,11 @@ export interface SchedConfig {
   stall_timeout_ms?: number;
   /** Reconciliation tick interval in ms (default 60 000). */
   reconcile_interval_ms?: number;
+  /**
+   * Parked-PR poll interval in ms (#468, default 150 000 — "every 2–3 min").
+   * Independent of the reconcile tick; see `SchedState.last_pr_poll_at`.
+   */
+  pr_poll_interval_ms?: number;
   /** Agent dispatch settings (#464); every field optional with engine defaults. */
   dispatch?: DispatchConfig;
 }
@@ -240,6 +264,12 @@ export interface DispatchConfig {
   prompt?: string;
   /** Tier → model id/alias mapping (defaults: haiku / sonnet / opus). */
   tier_models?: Partial<Record<ModelTier, string>>;
+  /**
+   * Prompt template for the report agent dispatched after a merged PR
+   * (#468); `{issue}`, `{pr}` and `{cleanup}` substituted. Defaults to
+   * `DEFAULT_REPORT_PROMPT_TEMPLATE`.
+   */
+  report_prompt?: string;
 }
 
 /** The escalation ladder: one tier stronger, or null at the top (RFC-0001 §C.1). */
@@ -258,15 +288,18 @@ export const DEFAULT_STALL_TIMEOUT_MS = 30 * 60 * 1000;
 /** Default reconciliation tick: ~60s (RFC-0001 §C.1). */
 export const DEFAULT_RECONCILE_INTERVAL_MS = 60 * 1000;
 
-export const SCHEMA_VERSION = '1.1.0' as const;
+/** Default parked-PR poll interval: 2.5 min (#468 AC1 "every 2–3 min"). */
+export const DEFAULT_PR_POLL_INTERVAL_MS = 150 * 1000;
+
+export const SCHEMA_VERSION = '1.2.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
-export const LEGACY_SCHEMA_VERSIONS: readonly string[] = ['1.0.0'];
+export const LEGACY_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0'];
 
-export const CONFIG_SCHEMA_VERSION = '1.1.0' as const;
+export const CONFIG_SCHEMA_VERSION = '1.2.0' as const;
 
 /** Config schema versions `loadConfig` accepts (older configs carry only max_slots). */
-export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = ['1.0.0'];
+export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0'];
 
 /** Config file shape (schema_version + the config itself). */
 export interface SchedConfigFile {
@@ -274,6 +307,7 @@ export interface SchedConfigFile {
   max_slots: number;
   stall_timeout_ms?: number;
   reconcile_interval_ms?: number;
+  pr_poll_interval_ms?: number;
   dispatch?: DispatchConfig;
 }
 
@@ -325,7 +359,14 @@ export type JournalEventName =
   | 'dependents-blocked'
   | 'requeued'
   | 'ground-truth-unreachable'
-  | 'tick-failed';
+  | 'tick-failed'
+  | 'pr-parked'
+  | 'merge-accepted'
+  | 'pr-watch-failed'
+  | 'teardown-done'
+  | 'teardown-failed'
+  | 'report-dispatched'
+  | 'report-failed';
 
 /** One journaled event. `ts` is stamped by the journal, never by callers. */
 export interface JournalEvent {

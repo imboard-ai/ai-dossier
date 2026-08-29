@@ -95,3 +95,36 @@ describe('buildStatusReport', () => {
     expect(report.blocked[0].reason).toContain('#902');
   });
 });
+
+describe('#468: parked units in the status report', () => {
+  it('parked entries surface with their PR and consume zero live slots', () => {
+    let state = seeded();
+    state = transitionIssue(state, 101, 'classified', {}, NOW);
+    state = transitionIssue(state, 101, 'dispatched', {}, NOW);
+    state = transitionIssue(state, 101, 'parked', { pr: 55 }, NOW);
+
+    const report = buildStatusReport(state, { max_slots: 3 }, 'proj');
+    expect(report.parked).toEqual([{ issue: 101, pr: 55, since: NOW.toISOString() }]);
+    expect(report.live_slots).toBe(0);
+    // the dependent stays runnable-blocked while parked (gating on MERGE)
+    expect(report.blocked.some((b) => b.issue === 102)).toBe(true);
+  });
+
+  it('shipped units are no longer parked; cleanup rides the queue entry', () => {
+    let state = seeded();
+    state = transitionIssue(state, 101, 'classified', {}, NOW);
+    state = transitionIssue(state, 101, 'dispatched', {}, NOW);
+    state = transitionIssue(state, 101, 'parked', { pr: 55 }, NOW);
+    state = transitionIssue(state, 101, 'shipped', {}, NOW);
+    state = {
+      ...state,
+      entries: state.entries.map((e) => (e.issue === 101 ? { ...e, cleanup: 'done' } : e)),
+    };
+
+    const report = buildStatusReport(state, { max_slots: 3 }, 'proj');
+    expect(report.parked).toEqual([]);
+    expect(report.queue.find((e) => e.issue === 101)?.cleanup).toBe('done');
+    // merged → the dependent is no longer blocked
+    expect(report.blocked.some((b) => b.issue === 102)).toBe(false);
+  });
+});

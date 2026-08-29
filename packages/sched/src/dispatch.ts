@@ -21,6 +21,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sanitizeSlug } from './project';
 import {
+  DEFAULT_PR_POLL_INTERVAL_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_STALL_TIMEOUT_MS,
   type DispatchConfig,
@@ -56,13 +57,33 @@ export const OPENCODE_DISPATCH_COMMAND: readonly string[] = [
   '{model}',
 ];
 
-/** Default prompt sent on the child's stdin. */
+/**
+ * Default prompt sent on the child's stdin. Detached ship mode (#468): the
+ * agent parks the PR on `auto-merge` and STOPS — the scheduler's PR watcher
+ * owns the merge wait and dispatches teardown + report as tail work. The
+ * fleet pattern of re-dispatching a full-cycle run for the tail is retired.
+ * Operators wanting attached runs (agent drives to the final report itself)
+ * override `dispatch.prompt` in config.json.
+ */
 export const DEFAULT_PROMPT_TEMPLATE =
   'Run the full-cycle-issue workflow for GitHub issue #{issue} in this repository.\n\n' +
   'Begin by fetching the workflow: ai-dossier run imboard-ai/git/full-cycle-issue --pull\n\n' +
-  'Then execute it end-to-end for issue #{issue}, following every phase ' +
-  '(gate, setup, plan, implement, review, ship, report) without asking questions, ' +
-  'until the final report milestone is posted on the issue.';
+  'Then execute it for issue #{issue} in detached ship mode (ship_mode=detached), following every ' +
+  'phase (gate, setup, plan, implement, review) without asking questions, until Phase 5 parks the ' +
+  'PR: apply the auto-merge label, post the awaiting-merge milestone, and STOP. Do not wait for ' +
+  'the merge, do not run teardown or report — the scheduler watches the PR and dispatches those.';
+
+/**
+ * Default prompt for the report agent dispatched after a merged PR (#468
+ * AC2) — a cheap-tier run of the report phase only, never a full cycle.
+ */
+export const DEFAULT_REPORT_PROMPT_TEMPLATE =
+  'Run the report phase for GitHub issue #{issue} in this repository.\n\n' +
+  'Begin by fetching the workflow: ai-dossier run imboard-ai/git/report-issue --pull\n\n' +
+  'The work is DONE: pull request #{pr} is merged (merge commit via `gh pr view {pr}`), the issue ' +
+  'is closed, and the worktree is already torn down (cleanup status: {cleanup}). Do not ' +
+  're-implement, re-review, or re-ship anything — produce the final report for issue #{issue} and ' +
+  'post its runstate milestone.';
 
 /** Fully-resolved dispatch settings the engine runs with. */
 export interface ResolvedDispatch {
@@ -70,10 +91,14 @@ export interface ResolvedDispatch {
   command: string[];
   /** Prompt template with `{issue}` placeholder. */
   prompt: string;
+  /** Report-agent prompt template with `{issue}`/`{pr}`/`{cleanup}` placeholders (#468). */
+  reportPrompt: string;
   /** Model per tier; null means "no model flag" (the command's `--model {model}` pair drops). */
   tierModels: Record<ModelTier, string | null>;
   stallTimeoutMs: number;
   reconcileIntervalMs: number;
+  /** Parked-PR poll interval (#468 AC1, default 150 s — "every 2–3 min"). */
+  prPollIntervalMs: number;
 }
 
 /** Resolve engine dispatch settings from the (possibly sparse) config. */
@@ -87,9 +112,11 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
   return {
     command: dispatch.command ?? [...DEFAULT_DISPATCH_COMMAND],
     prompt: dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE,
+    reportPrompt: dispatch.report_prompt ?? DEFAULT_REPORT_PROMPT_TEMPLATE,
     tierModels,
     stallTimeoutMs: config.stall_timeout_ms ?? DEFAULT_STALL_TIMEOUT_MS,
     reconcileIntervalMs: config.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS,
+    prPollIntervalMs: config.pr_poll_interval_ms ?? DEFAULT_PR_POLL_INTERVAL_MS,
   };
 }
 
@@ -127,9 +154,33 @@ export function buildPrompt(template: string, issue: number): string {
   return template.replaceAll('{issue}', String(issue));
 }
 
+/** Build the report agent's stdin prompt (#468): `{issue}`/`{pr}`/`{cleanup}` substituted. */
+export function buildReportPrompt(
+  template: string,
+  issue: number,
+  pr: number,
+  cleanup: string
+): string {
+  return template
+    .replaceAll('{issue}', String(issue))
+    .replaceAll('{pr}', String(pr))
+    .replaceAll('{cleanup}', cleanup);
+}
+
 /** One tier stronger on the ladder, or null at the top (RFC-0001 §C.1). */
 export function escalateTier(tier: ModelTier): ModelTier | null {
   return TIER_LADDER[tier];
+}
+
+/**
+ * The tier for a report-agent (re)dispatch after `recoveries` escalations
+ * (#468): reports start cheap (mechanical) and climb the same ladder —
+ * mechanical → mid → strong — with null past the top. The engine's
+ * `ESCALATION_CAP` check fails the unit before that null is reached.
+ */
+export function reportTierFor(recoveries: number): ModelTier | null {
+  const ladder: readonly ModelTier[] = ['mechanical', 'mid', 'strong'];
+  return ladder[Math.max(0, recoveries)] ?? null;
 }
 
 // --- Process I/O (injectable) ---

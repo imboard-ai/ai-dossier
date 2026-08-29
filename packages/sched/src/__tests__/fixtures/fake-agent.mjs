@@ -7,6 +7,11 @@
  *   complete — posts a fake `report done` milestone JSON into --milestones-dir, exits 0
  *   die      — exits 1 having done nothing verifiable
  *   sleep    — sleeps --sleep-ms (default 30s) then exits
+ *   tail     — #468: a detached-ship agent. Decides by prompt: a REPORT
+ *              dispatch ("report phase") posts `report done`; a full-cycle
+ *              dispatch posts the ship phase's `awaiting-merge` milestone
+ *              (with `pr=` from --pr=, defaulting to the issue number) —
+ *              the park — and exits 0.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -27,23 +32,38 @@ process.stdin.on('end', () => {
   const mode = opt('mode') ?? 'complete';
   const dir = opt('milestones-dir');
 
-  if (mode === 'complete' && dir) {
+  const post = (phase, status, keys = {}) => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, `${issue}.json`),
       JSON.stringify(
         {
-          phase: 'report',
-          status: 'done',
+          phase,
+          status,
           run: `r-${issue}-fake`,
           at: new Date().toISOString(),
-          keys: {},
+          keys,
         },
         null,
         2
       )
     );
+  };
+
+  if (mode === 'complete' && dir) {
+    post('report', 'done');
     console.log(`fake agent: posted report done for #${issue}`);
+    process.exit(0);
+  }
+  if (mode === 'tail' && dir) {
+    if (/report phase/i.test(input)) {
+      post('report', 'done');
+      console.log(`fake report agent: posted report done for #${issue}`);
+      process.exit(0);
+    }
+    const pr = opt('pr') ?? issue;
+    post('ship', 'awaiting-merge', { pr: String(pr), head: 'abc1234', ci_fix_attempts: '0' });
+    console.log(`fake agent: parked PR #${pr} for #${issue}`);
     process.exit(0);
   }
   if (mode === 'die') {
