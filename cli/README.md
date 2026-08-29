@@ -722,6 +722,49 @@ the selection could be read.
 
 ---
 
+## Plan Artifacts (`plan`) — plan:v1
+
+Issues used to be planned up to three times (triage, batch prep, plan-issue). The
+`plan:v1` artifact replaces that with ONE canonical plan stored on the issue itself:
+posting is append-only, readers take the LAST `plan:v1` comment, and consumers
+validate-and-refine instead of replanning. It lives on the issue — not a file — because
+batch preparation runs before any branch exists. Full format spec:
+[docs/reference/plan-artifact.md](../docs/reference/plan-artifact.md).
+
+```bash
+# Post a plan (validates the five sections first; head= stamps current HEAD)
+ai-dossier plan post --issue 462 --file plan.md
+
+# Read the latest plan back (last plan:v1 comment wins)
+ai-dossier plan get --issue 462 --json
+
+# Deterministic validation — no model call anywhere
+ai-dossier plan validate --issue 462
+```
+
+### Subcommands
+
+| Command | What it does | Writes? |
+|---|---|---|
+| `post` | Validates the file's five sections, stamps `head=`, comments it via `gh issue comment` | yes |
+| `get` | Prints the latest artifact (raw in text mode, parsed fields with `--json`); exits 1 when no plan exists | no |
+| `validate` | Deterministic checks against the local clone; prints a `{valid, reasons[]}` JSON verdict; exits 1 when invalid | no |
+
+`validate` runs the deterministic checks — all five sections present, every Predicted
+Files path exists at current HEAD (`git cat-file -e HEAD:<path>`), head-distance (commits
+on HEAD since the plan's `head=` — an info reason when non-zero), and a risk-floor scan of
+Predicted Files (auth/secrets, payments/billing, migrations/schema, protocol surfaces are
+flagged as elevated-risk, info severity) — reporting `{check, severity, message}` reasons
+(full check/severity table in [docs/reference/plan-artifact.md](../docs/reference/plan-artifact.md)).
+Reasons carry `{check, severity, message}`; only `severity: "error"` fails validity —
+`get` and `validate` are read-only aside from `post`'s comment. All three take `--repo
+<owner/name>`; `post` also takes `--head <sha>` (7-40 lowercase hex, validated),
+`--dry-run`, and `--json` (JSON result: `{posted, head, url}`, or `{posted: false,
+dryRun: true, head, body}` in dry-run). `get` and `validate` take `--json` / emit JSON
+respectively; `get --json` includes the comment's `author`.
+
+---
+
 ## Scheduler core (`sched`)
 
 ```bash

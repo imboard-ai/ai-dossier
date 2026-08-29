@@ -27,6 +27,7 @@ import { registerLintCommand } from './commands/lint';
 import { registerListCommand } from './commands/list';
 import { registerLoginCommand } from './commands/login';
 import { registerLogoutCommand } from './commands/logout';
+import { registerPlanCommand } from './commands/plan';
 import { registerPromptHookCommand } from './commands/prompt-hook';
 import { registerPublishCommand } from './commands/publish';
 import { registerPullCommand } from './commands/pull';
@@ -112,6 +113,7 @@ registerHistoryCommand(program);
 registerDoctorCommand(program);
 registerTracesCommand(program);
 registerRunstateCommand(program);
+registerPlanCommand(program);
 registerSchedCommand(program);
 
 // Hidden

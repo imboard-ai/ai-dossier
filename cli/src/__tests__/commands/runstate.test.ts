@@ -1,74 +1,24 @@
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerRunstateCommand } from '../../commands/runstate';
 import { buildMilestone, RUNSTATE_MARKER } from '../../runstate';
-import { createTestProgram } from '../helpers/test-utils';
+import {
+  errored,
+  execHandles,
+  execReturns,
+  logged,
+  runCommandTree,
+  stdoutWrites,
+} from '../helpers/test-utils';
 
 vi.mock('node:child_process');
 
 const mockedExec = vi.mocked(execFileSync);
 
-/**
- * `execFileSync` is overloaded, and the overload `vi.mocked` resolves to returns a Buffer
- * — but every call site under test passes `encoding: 'utf8'` and therefore gets a string.
- * Stubs go through these two helpers so the one unavoidable cast lives in a single place
- * instead of an `as never` at every `mockReturnValue`.
- */
-type ExecStub = (file: string, args: string[]) => string;
-
-/** Every command invocation returns `stdout`. */
-function execReturns(stdout: string): void {
-  mockedExec.mockReturnValue(stdout as unknown as ReturnType<typeof execFileSync>);
-}
-
-/** Dispatch on the command being run — throw from `stub` to simulate a non-zero exit. */
-function execHandles(stub: ExecStub): void {
-  mockedExec.mockImplementation(stub as unknown as typeof execFileSync);
-}
-
-/**
- * Run the command tree and return the exit code the action asked for.
- *
- * The shared test setup replaces `process.exit` with a throw of
- * `process.exit(<code>)`, and `createTestProgram` puts commander in exitOverride mode —
- * so both kinds of exit surface here as exceptions rather than killing the runner.
- */
-async function run(args: string[]): Promise<number | undefined> {
-  const program = createTestProgram();
-  registerRunstateCommand(program);
-  try {
-    await program.parseAsync(['node', 'dossier', ...args]);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : '';
-    const exit = /^process\.exit\((\d+)\)$/.exec(message);
-    if (exit) return Number(exit[1]);
-    if (isCommanderError(err)) return undefined;
-    throw err;
-  }
-  return undefined;
-}
-
-/** Commander's exitOverride throws a CommanderError, which carries a `code` string. */
-function isCommanderError(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && 'code' in err;
-}
-
-function logged(): string[] {
-  return vi
-    .mocked(console.log)
-    .mock.calls.map((c) => String(c[0]))
-    .filter((s) => s !== 'undefined');
-}
-
-function errored(): string[] {
-  return vi.mocked(console.error).mock.calls.map((c) => String(c[0]));
-}
-
-function stdoutWrites(): string[] {
-  return vi
-    .mocked(process.stdout.write)
-    .mock.calls.map((c) => String(c[0]))
-    .filter(Boolean);
+/** Run the runstate command tree (shared harness, pinned registration). */
+function run(args: string[]): Promise<number | undefined> {
+  return runCommandTree(registerRunstateCommand, args);
 }
 
 /**
@@ -796,7 +746,13 @@ describe('runstate command', () => {
       expect(out).toContain('lacks access');
       expect(out).toContain('was NOT posted');
       expect(out).toContain('gh issue comment 440');
-      expect(out).toContain(RUNSTATE_MARKER);
+      // The retry hint is paste-safe: the body goes to a temp file (never inlined in a
+      // shell command, where $(…) or backticks would execute on paste) and that file
+      // carries the milestone body verbatim.
+      expect(out).toContain('--body-file');
+      const saved = /--body-file (\S+)/.exec(out)?.[1];
+      expect(saved).toBeDefined();
+      expect(fs.readFileSync(saved as string, 'utf8')).toContain(RUNSTATE_MARKER);
     });
   });
 
