@@ -11,6 +11,7 @@ Technical specifications and reference material for the Dossier project.
 ## API & CLI Reference
 
 - [Core API Reference](core-api.md) - `@ai-dossier/core` library API documentation
+- [Capability Manifest](capabilities.md) - `.dossier/automation/manifest.yaml` spec and the `cap` command
 - [CLI Reference](../../cli/README.md) - Command-line tool options and usage
 
 ## File Formats

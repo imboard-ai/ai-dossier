@@ -770,27 +770,45 @@ respectively; `get --json` includes the comment's `author`.
 ```bash
 ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--deps 100,104] [--tier mechanical|mid|strong]
 ai-dossier sched enqueue --from-manifest batch-prep.json
+ai-dossier sched start [--interval <seconds>] [--once] [--json]
 ai-dossier sched status [--json]
 ai-dossier sched pause | resume
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
 ```
 
-The deterministic core of batch cycles (RFC-0001): a queue, worker slots, and typed
+The deterministic core of batch cycles (RFC-0001): a queue, worker slots, typed
 issue/batch/slot state machines persisted to `~/.dossier/sched/<project>/state.json`
 (`<project>` = `owner-repo` slug, falling back to the repo basename — the same convention
-`fleet-cycle` uses for its logs). **No LLM is involved anywhere in the scheduler**: every
-decision — what is runnable, which slot gets it — is a pure function of the persisted
-state. Dispatching agents is #464; this family owns the queue and the state.
+`fleet-cycle` uses for its logs), and — since #464 — the dispatch engine. **The scheduler
+itself never invokes an LLM**: every mechanical decision (what is runnable, which slot gets
+it, whether a unit completed, when a run stalled) is a pure function of state reconciled
+against ground truth.
 
 - **`enqueue`** records entries (issue, mode, batch id, dependency edges, model tier) from
   flags or a batch-prep manifest (`--from-manifest`, a JSON file of entries — flags and
   manifest can be combined). Invalid input is rejected *before* anything is persisted:
   duplicate active issues, self-dependencies, dependency cycles, `slot` mode without a
   batch, and conflicting `base_branch` on a joining batch member.
-- **`status`** renders the queue, slots, batches, runnable units, and the blocked/failed
-  sets. A blocked entry names every unsatisfied dependency ("dependency #104 not merged
-  (status: dispatched)"), so "why isn't #42 running?" is a read, not an investigation.
-  `--json` emits the same report as data.
+- **`start`** runs the dispatch engine (#464): a runnable unit is spawned as a detached
+  agent process (`claude -p --output-format json --model <tier model>` by default,
+  auto-falling back to `opencode run`; the command, prompt, and tier→model mapping are
+  all configurable in `config.json`'s `dispatch` section) with the prompt on stdin and
+  output journaled to `runs/<unit>.log`. On every ~60s tick it reconciles: an agent that
+  exited is **not** complete until `ai-dossier runstate last` / `gh` ground truth confirms
+  it (unverified exits and stalls are redispatched one tier stronger — mechanical → mid →
+  strong, cap 2 — then the unit fails and its transitive dependents are blocked);
+  externally-advanced state and orphaned pids after a restart are detected; a freed slot
+  is refilled in the same tick. `--once` runs a single tick (cron-style); Ctrl-C stops
+  the engine while spawned agents keep running. Pids are identity-guarded via
+  `/proc` start-times (a reused pid is never signalled; best-effort on macOS/Windows),
+  and a FAILED ground-truth poll (gh outage) pauses that unit's stall/verify decisions
+  instead of guessing — an outage never kills a healthy agent. All events are journaled
+  to `events.jsonl`, and `status` shows the live phase per unit.
+- **`status`** renders the queue, slots (with pid, live phase, last-progress, recoveries),
+  batches, runnable units, and the blocked/failed sets. A blocked entry names every
+  unsatisfied dependency ("dependency #104 not merged (status: dispatched)"), so "why
+  isn't #42 running?" is a read, not an investigation. `--json` emits the same report
+  as data.
 - **`pause`/`resume`** gate *new* assignments only — live units keep running.
 - **`abandon --issue`** fails the entry (recording the reason) and releases its slot;
   **`abandon --batch`** dissolves the batch and requeues every non-terminal member as
@@ -798,13 +816,64 @@ state. Dispatching agents is #464; this family owns the queue and the state.
 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically
-from `state.json`. A corrupt state file is a loud error naming the file — never a silent
-queue reset. Concurrency is serialized by a `.sched-lock` directory mutex (stolen from
-dead holders). `max_slots` lives in the same directory's `config.json` (default 3) and
-bounds concurrently-live units; an issue with an unmerged dependency — or a batch behind
-an unmerged batch — is never runnable.
+from `state.json` (pre-#464 state files migrate on load). A corrupt state file is a loud
+error naming the file — never a silent queue reset. Concurrency is serialized by a
+`.sched-lock` directory mutex (stolen from dead holders). `config.json` holds
+`max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default
+1 800 000), `reconcile_interval_ms` (default 60 000), and the optional `dispatch`
+section; an issue with an unmerged dependency — or a batch behind an unmerged batch —
+is never runnable.
 
 Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).
+
+---
+
+## Capabilities (`cap`)
+
+```bash
+ai-dossier cap list [--json]       # inspect .dossier/automation/manifest.yaml
+ai-dossier cap run test.focused    # execute one capability
+ai-dossier cap run test.focused -- --grep auth   # extra args are shell-quoted and appended
+```
+
+A repo declares its deterministic, recurring operations — tests, lint, build, deps
+install, worktree prep — in `.dossier/automation/manifest.yaml` so agents execute them
+directly instead of re-reasoning (Progressive Determinism, RFC-0001; the scheduler's
+slot-cycle fast path will consume the same manifest, #464). Entries should mostly
+reference existing repo tooling (package scripts, Makefile targets):
+
+```yaml
+capabilities:
+  test.focused:
+    command: npm test -- --silent
+    lifecycle: active          # active | shadow (listed, not executable)
+    description: Focused vitest suite
+    timeout_ms: 300000         # optional; default 5 min, timeout = automation-broken
+    assumptions:               # probes run BEFORE the command; failure = automation-broken
+      - file-exists: package.json
+      - tool-version: node>=20
+```
+
+Extra args after `--` are shell-quoted and appended (they are data, not shell syntax):
+
+```bash
+ai-dossier cap run test.focused -- --grep auth   # → npm test -- --silent --grep auth
+```
+
+`cap run` reports one of exactly four outcomes — the JSON envelope is the **last
+stdout line**, and the exit code matches:
+
+| Outcome | Exit | Meaning |
+|---|---|---|
+| `ok` | 0 | Command ran, exited 0 |
+| `task-failed` | 1 | Command ran, legitimately failed (red tests) |
+| `automation-broken` | 2 | Probe failed / command missing / timeout / abnormal termination — fall back to reasoning |
+| `capability-unavailable` | 3 | Id not in manifest (or `shadow`) — no fast path |
+
+A repo without `.dossier/automation/` is normal: `cap list` is empty and exits 0. Every
+run appends telemetry (capability, outcome, exit code, duration, reason, cwd) to
+`~/.dossier/caps.jsonl`. Full spec and the capability id vocabulary:
+[docs/reference/capabilities.md](../docs/reference/capabilities.md).
 
 ---
 

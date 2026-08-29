@@ -31,12 +31,9 @@ export { runnableUnits, dependencyBlockers, batchBlockers };
 export type { DependencyBlocker, RunnableUnit };
 
 /** One placement made by `computeAssignments`: slot ← unit. */
-export interface Assignment {
-  slot: number;
-  kind: 'issue' | 'batch';
-  issue?: number;
-  batch?: string;
-}
+export type Assignment =
+  | { slot: number; kind: 'issue'; issue: number }
+  | { slot: number; kind: 'batch'; batch: string };
 
 function unitId(unit: RunnableUnit): string {
   return unit.kind === 'issue' ? `issue:${unit.issue}` : `batch:${unit.batch}`;
@@ -48,11 +45,17 @@ function unitId(unit: RunnableUnit): string {
  * capacity = max_slots − live. Idle slots are reused first; new slots are
  * materialized lazily (as `idle`, then transitioned `idle → assigned` — a
  * typed edge, never a synthetic mid-state).
+ *
+ * `kinds` restricts which unit kinds may be assigned (default: both). The
+ * #464 engine dispatches `issue` units only — batch member sequencing is a
+ * follow-up — so it passes `['issue']` and a `ready` batch never occupies a
+ * slot it cannot run on yet.
  */
 export function computeAssignments(
   state: SchedState,
   config: SchedConfig,
-  now: Date = new Date()
+  now: Date = new Date(),
+  kinds: readonly ('issue' | 'batch')[] = ['issue', 'batch']
 ): { state: SchedState; assignments: Assignment[] } {
   if (state.paused) {
     return { state, assignments: [] };
@@ -65,7 +68,9 @@ export function computeAssignments(
   }
 
   const held = new Set(state.slots.map((s) => s.unit).filter((u): u is string => u !== null));
-  const candidates = runnableUnits(state).filter((unit) => !held.has(unitId(unit)));
+  const candidates = runnableUnits(state)
+    .filter((unit) => kinds.includes(unit.kind))
+    .filter((unit) => !held.has(unitId(unit)));
   const taken = candidates.slice(0, freeCapacity);
   if (taken.length === 0) {
     return { state, assignments: [] };
@@ -81,8 +86,11 @@ export function computeAssignments(
         status: 'idle' as const,
         unit: null,
         pid: null,
+        pid_start: null,
         phase: null,
         last_progress_at: null,
+        branch: null,
+        last_head: null,
         recoveries: 0,
         updated_at: now.toISOString(),
       };
