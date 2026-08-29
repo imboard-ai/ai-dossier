@@ -386,13 +386,27 @@ export function buildLlmCommand(
  * fabricated or estimated.
  */
 export interface AgentRunUsage {
-  /** Model id the agent reported for the run. */
+  /** Model id the agent reported; comma-joined when several models ran (token/cost fields are totals across all). */
   model: string | null;
   input_tokens: number | null;
   output_tokens: number | null;
   total_cost_usd: number | null;
   /** The final result text (claude's `result` field), for re-emitting to stdout. */
   result_text: string | null;
+}
+
+/**
+ * Sentinel thrown by the run command when the spawned agent exits non-zero
+ * (or fails to spawn) — carries everything the run log records about the exit.
+ */
+export interface AgentExitError {
+  /** The child's exit status; null when it was killed by a signal or failed to spawn. */
+  status: number | null;
+  /** Signal that killed the child, when applicable. */
+  signal: string | null;
+  /** Spawn failure reason (e.g. ENOENT, ENOBUFS), when applicable. */
+  spawn_error: string | null;
+  usage: AgentRunUsage | null;
 }
 
 function toCount(value: unknown): number | null {
@@ -425,14 +439,20 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
       : {};
   const modelUsage =
     parsed.modelUsage && typeof parsed.modelUsage === 'object' && !Array.isArray(parsed.modelUsage)
-      ? (parsed.modelUsage as Record<string, Record<string, unknown>>)
+      ? (parsed.modelUsage as Record<string, unknown>)
       : null;
+  // Keep only object-shaped entries; a scalar entry is malformed, not a model.
+  const modelEntries = modelUsage
+    ? Object.entries(modelUsage).filter(
+        (entry): entry is [string, Record<string, unknown>] =>
+          !!entry[1] && typeof entry[1] === 'object' && !Array.isArray(entry[1])
+      )
+    : [];
 
-  const entries = modelUsage ? Object.values(modelUsage) : [];
   const sumFromModelUsage = (camel: string, snake: string): number | null => {
     let sum = 0;
     let seen = false;
-    for (const entry of entries) {
+    for (const [, entry] of modelEntries) {
       const value = toCount(entry[camel]) ?? toCount(entry[snake]);
       if (value !== null) {
         sum += value;
@@ -451,7 +471,8 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
     toCount(parsed.cost_usd) ??
     sumFromModelUsage('totalCostUsd', 'total_cost_usd');
 
-  const modelFromUsage = modelUsage ? (Object.keys(modelUsage)[0] ?? null) : null;
+  const modelKeys = modelEntries.map(([key]) => key);
+  const modelFromUsage = modelKeys.length > 1 ? modelKeys.join(',') : (modelKeys[0] ?? null);
   const model = typeof parsed.model === 'string' && parsed.model ? parsed.model : modelFromUsage;
   const result_text = typeof parsed.result === 'string' ? parsed.result : null;
 

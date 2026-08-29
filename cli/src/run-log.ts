@@ -44,13 +44,15 @@ export interface RunLogEntry {
   /**
    * The exact agent command spawned (binary + args). Prompt content is excluded
    * (headless prompts travel over stdin). Null when nothing was spawned
-   * (nested-skip, failed verification, dry-run, no LLM detected).
+   * (nested-skip, failed verification, dry-run, no LLM detected, unknown LLM).
    */
   spawned_command?: string | null;
   /** Model id as reported by the agent CLI, else the requested --model alias. Null when unknown. */
   model?: string | null;
   /** Exit code of the spawned agent process, or of the CLI action for early exits. Null when killed by a signal or failed to spawn. */
   exit_code?: number | null;
+  /** Why the spawned process produced no exit code: spawn error (e.g. ENOENT) or signal. Null when the process exited normally. */
+  spawn_error?: string | null;
   /** Input tokens reported by the agent CLI. Null when unavailable. */
   input_tokens?: number | null;
   /** Output tokens reported by the agent CLI. Null when unavailable. */

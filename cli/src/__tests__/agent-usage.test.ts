@@ -50,11 +50,42 @@ describe('parseAgentUsage', () => {
 
     const usage = parseAgentUsage(stdout);
     expect(usage).toMatchObject({
-      model: 'claude-opus-4-20250514',
+      // Multiple models ran: model lists them comma-joined, tokens/cost are totals.
+      model: 'claude-opus-4-20250514,claude-haiku-4-20250514',
       input_tokens: 125,
       output_tokens: 55,
       total_cost_usd: 0.021,
       result_text: 'ok',
+    });
+  });
+
+  it('reports the single model as-is when only one ran', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      modelUsage: {
+        'claude-opus-4-20250514': { inputTokens: 7, outputTokens: 3, totalCostUsd: 0.5 },
+      },
+    });
+
+    expect(parseAgentUsage(stdout)).toMatchObject({
+      model: 'claude-opus-4-20250514',
+    });
+  });
+
+  it('ignores malformed (non-object) modelUsage entries', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      modelUsage: {
+        'claude-opus-4-20250514': 'not an object',
+        'claude-haiku-4-20250514': { inputTokens: 10, outputTokens: 2, totalCostUsd: 0.01 },
+      },
+    });
+
+    expect(parseAgentUsage(stdout)).toMatchObject({
+      model: 'claude-haiku-4-20250514',
+      input_tokens: 10,
+      output_tokens: 2,
+      total_cost_usd: 0.01,
     });
   });
 

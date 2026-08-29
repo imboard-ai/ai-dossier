@@ -1,7 +1,5 @@
 import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as config from '../config';
 import { appendRunLog, clearRunLog, readRunLog } from '../run-log';
 
@@ -172,7 +170,7 @@ describe('run-log', () => {
       );
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockReturnValue(
-        entries.map((e) => JSON.stringify(e)).join('\n') + '\n'
+        `${entries.map((e) => JSON.stringify(e)).join('\n')}\n`
       );
 
       const result = readRunLog({ limit: 3 });

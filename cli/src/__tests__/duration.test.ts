@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatAge, formatDuration, formatDurationCell } from '../duration';
+import { formatAge, formatDuration, formatDurationCell, formatDurationMs } from '../duration';
 
 describe('formatDuration', () => {
   it('renders sub-minute durations in seconds', () => {
@@ -61,5 +61,30 @@ describe('formatAge', () => {
     expect(formatAge(60_000)).toBe('1m');
     expect(formatAge(3_600_000)).toBe('1h');
     expect(formatAge(86_400_000)).toBe('1d');
+  });
+});
+
+describe('formatDurationMs', () => {
+  it('renders sub-second spans as raw milliseconds', () => {
+    expect(formatDurationMs(0)).toBe('0ms');
+    expect(formatDurationMs(412)).toBe('412ms');
+    expect(formatDurationMs(999)).toBe('999ms');
+  });
+
+  it('renders one second and above in human form', () => {
+    expect(formatDurationMs(1000)).toBe('1s');
+    expect(formatDurationMs(74_000)).toBe('1m 14s');
+    expect(formatDurationMs(7_500_000)).toBe('2h 5m');
+  });
+
+  it('renders null and undefined as a dash (old-schema run-log entries)', () => {
+    expect(formatDurationMs(null)).toBe('-');
+    expect(formatDurationMs(undefined)).toBe('-');
+  });
+
+  it('renders wrong-typed values as a dash instead of crashing', () => {
+    expect(formatDurationMs('74000' as unknown as number)).toBe('-');
+    expect(formatDurationMs(Number.NaN)).toBe('-');
+    expect(formatDurationMs(Number.POSITIVE_INFINITY)).toBe('-');
   });
 });

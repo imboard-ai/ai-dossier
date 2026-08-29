@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as cacheResolver from '../../cache-resolver';
@@ -20,6 +20,10 @@ vi.mock('../../run-log');
 vi.mock('../../cache-resolver');
 
 const mockedFs = vi.mocked(fs);
+
+/** Typed spawnSync result for the #458 tests (status + optional stdout). */
+const spawnResult = (status: number | null, stdout?: string): SpawnSyncReturns<string> =>
+  ({ status, stdout }) as SpawnSyncReturns<string>;
 
 describe('run command', () => {
   beforeEach(() => {
@@ -312,7 +316,7 @@ describe('run command', () => {
     it('records usage, spawned command, exit code and duration from headless JSON output', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
-      vi.mocked(spawnSync).mockReturnValue({ status: 0, stdout: '{"type":"result"}' } as any);
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(0, '{"type":"result"}'));
       vi.mocked(helpers.parseAgentUsage).mockReturnValue({
         model: 'claude-opus-4-20250514',
         input_tokens: 1234,
@@ -330,7 +334,11 @@ describe('run command', () => {
       expect(spawnSync).toHaveBeenCalledWith(
         'claude',
         ['test.ds.md'],
-        expect.objectContaining({ stdio: ['pipe', 'pipe', 'inherit'] })
+        expect.objectContaining({
+          stdio: ['pipe', 'pipe', 'inherit'],
+          // Explicit cap: spawnSync's 1MB default kills children with large JSON results.
+          maxBuffer: 32 * 1024 * 1024,
+        })
       );
       expect(runLog.appendRunLog).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -350,9 +358,10 @@ describe('run command', () => {
     it('records null usage fields and re-emits raw stdout when output is not JSON', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
-      vi.mocked(spawnSync).mockReturnValue({ status: 0, stdout: 'plain output' } as any);
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(0, 'plain output'));
       vi.mocked(helpers.parseAgentUsage).mockReturnValue(null);
       const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
       const program = createTestProgram();
       registerRunCommand(program);
@@ -369,12 +378,14 @@ describe('run command', () => {
         })
       );
       expect(stdoutSpy).toHaveBeenCalledWith('plain output\n');
+      // The operator can tell WHY usage is null: the output was not parseable.
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('usage/cost not recorded'));
     });
 
     it('records null usage fields in interactive mode and keeps the requested --model alias', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
-      vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(0));
 
       const program = createTestProgram();
       registerRunCommand(program);
@@ -398,7 +409,7 @@ describe('run command', () => {
     it('records exit code and captured usage when execution fails', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
-      vi.mocked(spawnSync).mockReturnValue({ status: 7, stdout: '{"type":"result"}' } as any);
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(7, '{"type":"result"}'));
       vi.mocked(helpers.parseAgentUsage).mockReturnValue({
         model: 'claude-opus-4-20250514',
         input_tokens: 1,
@@ -426,11 +437,40 @@ describe('run command', () => {
       );
     });
 
+    it('records the spawn error when the child is killed by a signal or fails to spawn', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+      vi.mocked(spawnSync).mockReturnValue({
+        status: null,
+        signal: 'SIGTERM',
+        error: new Error('spawn claude ENOBUFS'),
+        stdout: '',
+      } as unknown as ReturnType<typeof spawnSync>);
+      vi.mocked(helpers.parseAgentUsage).mockReturnValue(null);
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+      const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const program = createTestProgram();
+      registerRunCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--headless'])
+      ).rejects.toThrow('process.exit(2)');
+
+      expect(runLog.appendRunLog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exit_code: null,
+          spawn_error: 'spawn claude ENOBUFS',
+        })
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(expect.stringContaining('spawn claude ENOBUFS'));
+    });
+
     it('records null usage fields when the agent reports nothing (usage-unavailable path)', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
       // No stdout on the spawn result; parseAgentUsage auto-mock returns undefined.
-      vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
+      vi.mocked(spawnSync).mockReturnValue(spawnResult(0));
 
       const program = createTestProgram();
       registerRunCommand(program);

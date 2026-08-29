@@ -627,6 +627,44 @@ the selection could be read.
 
 ---
 
+## Run History (`history`)
+
+Every `ai-dossier run` appends one JSON line to `~/.dossier/runs.jsonl` (append-only; disable with `dossier config auditLog false`).
+
+```bash
+ai-dossier history                     # last 20 runs
+ai-dossier history --limit 50
+ai-dossier history --dossier org/my-dossier
+ai-dossier history --json              # raw entries, machine-readable
+ai-dossier history --clear --yes       # wipe the log
+```
+
+Columns: TIMESTAMP, DOSSIER, VERSION, SOURCE, VERIFIED, DURATION, TOKENS(in/out), COST — auto-sized to the widest cell. Entries written before v0.12.0 lack the cost/observability fields and render `-`.
+
+Headless runs execute `claude -p --output-format json`; the CLI captures stdout (32MB cap) to extract token/cost usage and prints the agent's final result text once the run completes — output is not streamed live. When the output cannot be parsed as a claude JSON result, a stderr warning says so, usage fields are recorded as `null`, and the raw stdout is re-emitted.
+
+### runs.jsonl schema
+
+| Field | Meaning |
+|---|---|
+| `timestamp` | ISO-8601 entry write time |
+| `dossier` | Argument as given (file, URL, or registry name) |
+| `resolved_version` | Resolved version (`unknown` for local files) |
+| `source` | `cache` \| `registry` \| `local` \| `url` |
+| `registry`, `resolution_source` | Registry that served content; how the version was resolved (`pinned`/`registry`/`cache`/`stale-cache`) — registry sources only |
+| `verification` | `passed` \| `failed` \| `skipped` \| `nested-skip` |
+| `llm`, `user`, `cwd`, `nested` | LLM option in effect; who/where ran it; whether inside an agent host |
+| `duration_ms` | Wall-clock ms, action start → entry write (v0.12.0+) |
+| `spawned_command` | Exact agent command spawned (binary + args); prompt excluded — headless prompts travel over stdin. Null when nothing was spawned (v0.12.0+) |
+| `model` | Model reported by the agent CLI (comma-joined when several ran), else the `--model` alias; null when unknown (v0.12.0+) |
+| `exit_code` | Spawned agent's exit code, or the CLI action's for early exits; null when killed by a signal (v0.12.0+) |
+| `spawn_error` | Why there is no exit code: spawn error (e.g. ENOENT) or signal. Null when the process exited normally (v0.12.0+) |
+| `input_tokens`, `output_tokens`, `total_cost_usd` | Usage reported by the agent (headless JSON output mode); null when not reported — never fabricated (v0.12.0+) |
+
+Pre-v0.12.0 entries simply lack the v0.12.0+ fields; consumers must treat them as optional/nullable.
+
+---
+
 ## Cache and Version Resolution
 
 The CLI maintains a local cache at `~/.dossier/cache/`:
