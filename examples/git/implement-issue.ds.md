@@ -2,10 +2,10 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Implement Issue — Code and Test",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "protocol_version": "1.0",
   "status": "Stable",
-  "last_updated": "2026-08-25",
+  "last_updated": "2026-08-29",
   "objective": "Implement the solution described in the planning document, run tests, and auto-fix lint issues",
   "category": [
     "development"
@@ -53,13 +53,13 @@
   "name": "implement-issue",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "5956115a9cdcf70c3188810d87aa80a5fda46487c073323d2d871e5e7c02137b"
+    "hash": "f6b3769ecd76e49fcfab7a3d73e665fc4082e8234cff0a130e4a0340b00bb545"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "5WxbkadA8xzBSasCGd0o3vYg3hKwucnMEMLmEvpBCHfQHfLbb4h/1fDCMNhXiBG1RSrUyZRKOMVjZzKN4PaqAQ==",
+    "signature": "+i4dVrHMfzo/R95J7mP88J0vsVb6xHSztSVrLM/nhuojQcmoiEYkFMdPjMavYmjZJN276iK5zYB0pk4tYfbwBQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-25T19:26:53.630Z",
+    "signed_at": "2026-08-29T20:06:14.352Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -83,7 +83,7 @@ Implement the solution described in the planning document. Code the changes, run
 
 ### Step 1: Read the Plan
 
-Read `planning_file`. Extract: the approach, files to modify, reusable code to leverage, the test strategy.
+Read `planning_file`. Extract: the approach, predicted files, reusable code to leverage, the test scope.
 
 ### Step 2: Implement
 
