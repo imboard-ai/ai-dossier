@@ -20,6 +20,7 @@ import {
   detectNestedHost,
   downloadUrlToTempFile,
   parseAgentUsage,
+  parseOpenCodeUsage,
   printRegistryNotFoundError,
   runVerification,
 } from '../helpers';
@@ -41,21 +42,21 @@ export function registerRunCommand(program: Command): void {
       'Verify, audit, and execute dossier. Registry names are resolved across all configured registries.'
     )
     .argument('<file>', 'Dossier file, URL, or registry name to run')
-    .option('--llm <name>', 'LLM to use (claude-code, auto)')
+    .option('--llm <name>', 'LLM to use (claude-code, opencode, auto)')
     .option('--headless', 'Run in headless mode (non-interactive, for CI/CD)')
-    .option('--model <name>', 'Model alias/name (forwarded to claude --model)')
+    .option('--model <name>', 'Model alias/name (forwarded to claude --model / opencode --model)')
     .option(
       '--budget <usd>',
-      'Max USD budget (headless only; forwarded to claude --max-budget-usd)',
+      'Max USD budget (headless only; claude only — opencode has no equivalent)',
       parseFloat
     )
     .option(
       '--permission-mode <mode>',
-      'Permission mode (headless only; forwarded to claude --permission-mode)'
+      'Permission mode (headless only; claude only — opencode permissions live in opencode.json)'
     )
     .option(
       '--allowed-tools <list>',
-      'Comma- or space-separated allowed tools (headless only; forwarded to claude --allowedTools)'
+      'Comma- or space-separated allowed tools (headless only; claude only — opencode tool access lives in opencode.json)'
     )
     .option('--dry-run', 'Show plan without executing')
     .option('--force', 'Skip risk warnings')
@@ -101,6 +102,12 @@ export function registerRunCommand(program: Command): void {
         const startTime = Date.now();
         const llmOption =
           options.llm || (config.getConfig('defaultLlm') as string | undefined) || 'auto';
+        const passthrough = {
+          model: options.model,
+          budget: options.budget,
+          permissionMode: options.permissionMode,
+          allowedTools: options.allowedTools,
+        };
 
         const runContext = {
           dossierArg: file,
@@ -377,7 +384,7 @@ export function registerRunCommand(program: Command): void {
           (options.budget != null || options.permissionMode || options.allowedTools)
         ) {
           process.stderr.write(
-            'Warning: --budget, --permission-mode, and --allowed-tools require --headless (claude -p) and will be ignored in interactive mode.\n'
+            'Warning: --budget, --permission-mode, and --allowed-tools are forwarded to claude only, and only in headless mode; opencode ignores them entirely (configure permissions/tools in opencode.json).\n'
           );
         }
 
@@ -388,12 +395,6 @@ export function registerRunCommand(program: Command): void {
           console.log(`   LLM: ${llmOption}`);
 
           const llmToUse = detectLlm(llmOption as string, true);
-          const passthrough = {
-            model: options.model,
-            budget: options.budget,
-            permissionMode: options.permissionMode,
-            allowedTools: options.allowedTools,
-          };
           const descriptor = llmToUse
             ? buildLlmCommand(llmToUse, resolvedFile, options.headless, passthrough)
             : null;
@@ -417,30 +418,29 @@ export function registerRunCommand(program: Command): void {
           process.exit(2);
         }
 
-        const descriptor = buildLlmCommand(llmToUse, resolvedFile, options.headless, {
-          model: options.model,
-          budget: options.budget,
-          permissionMode: options.permissionMode,
-          allowedTools: options.allowedTools,
-        });
+        const descriptor = buildLlmCommand(llmToUse, resolvedFile, options.headless, passthrough);
         if (!descriptor) {
           console.log(`❌ Unknown LLM: ${llmToUse}\n`);
-          console.log('Supported: claude-code, auto\n');
+          console.log('Supported: claude-code, opencode, auto\n');
           finishRunLog({ exit_code: 2 });
           cleanupSecureTmp();
           process.exit(2);
         }
 
-        // The exact spawned command (binary + args). Headless prompts travel
-        // over stdin, so args never contain prompt content.
-        const spawnedCommand = [descriptor.cmd, ...descriptor.args].join(' ');
+        // The exact spawned command (binary + args), log-safe: descriptors
+        // whose args carry prompt content (opencode interactive) provide a
+        // redacted commandForLog — prompt content never reaches runs.jsonl.
+        const spawnedCommand =
+          descriptor.commandForLog ?? [descriptor.cmd, ...descriptor.args].join(' ');
 
         try {
           const mode = options.headless ? 'headless' : 'interactive';
+          const isOpencode = descriptor.agent === 'opencode';
           console.log(`   Mode: ${mode}`);
           console.log(`   Executing: ${descriptor.description}\n`);
-          // Headless: capture stdout so the agent's usage report (JSON output
-          // mode) can be mined; stderr still streams. maxBuffer is explicit
+          // Headless: capture stdout so the agent's usage report (claude
+          // `--output-format json` blob / opencode `--format json` JSONL
+          // events) can be mined; stderr still streams. maxBuffer is explicit
           // because spawnSync's 1MB default kills children whose JSON result
           // exceeds it. Interactive: the TUI owns the terminal — nothing to
           // capture.
@@ -462,16 +462,30 @@ export function registerRunCommand(program: Command): void {
               : typeof result.stdout === 'string'
                 ? result.stdout
                 : result.stdout.toString('utf8');
-          const usage = options.headless ? parseAgentUsage(stdoutText) : null;
-          if (options.headless && stdoutText && (usage === null || usage.result_text === null)) {
+          // Usage parsing is agent-specific: claude emits one JSON blob,
+          // opencode a JSONL event stream (#459).
+          const usage = options.headless
+            ? isOpencode
+              ? parseOpenCodeUsage(stdoutText)
+              : parseAgentUsage(stdoutText)
+            : null;
+          const expectedFormat = isOpencode
+            ? 'an opencode JSONL event stream'
+            : 'a claude JSON result';
+          if (options.headless && stdoutText && usage === null) {
             process.stderr.write(
-              'Warning: agent output was not a claude JSON result — usage/cost not recorded; raw output re-emitted\n'
+              `Warning: agent output was not ${expectedFormat} — usage/cost not recorded; raw output re-emitted\n`
+            );
+          } else if (options.headless && stdoutText && usage?.result_text === null) {
+            process.stderr.write(
+              `Warning: no result text found in ${expectedFormat} — raw output re-emitted\n`
             );
           }
           if (options.headless) {
-            // `claude -p --output-format json` buffers its whole result;
-            // re-emit the agent's text so headless consumers still see the
-            // output on stdout. Falls back to raw stdout when unparseable.
+            // Headless agents buffer their whole result (claude emits one JSON
+            // blob; opencode one JSONL event stream); re-emit the agent's text
+            // so headless consumers still see the output on stdout. Falls back
+            // to raw stdout when unparseable.
             const text = usage?.result_text ?? stdoutText ?? '';
             if (text) {
               process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
@@ -479,6 +493,7 @@ export function registerRunCommand(program: Command): void {
           }
           if (result.status !== 0) {
             const exitError: AgentExitError = {
+              __agentExit: true,
               status: result.status,
               signal: result.signal ?? null,
               spawn_error: result.error?.message ?? null,
@@ -487,11 +502,18 @@ export function registerRunCommand(program: Command): void {
             throw exitError;
           }
           console.log('\n✅ Execution completed');
-          finishRunLog({ spawned_command: spawnedCommand, exit_code: 0, ...usageLogFields(usage) });
+          finishRunLog({
+            llm: llmToUse,
+            spawned_command: spawnedCommand,
+            exit_code: 0,
+            ...usageLogFields(usage),
+          });
         } catch (error: unknown) {
           console.log('\n❌ Execution failed');
+          // Narrow on the discriminant — never duck-type on `status`, which
+          // ordinary library errors can also carry.
           const exitError =
-            error !== null && typeof error === 'object' && 'status' in error
+            error !== null && typeof error === 'object' && '__agentExit' in error
               ? (error as AgentExitError)
               : null;
           if (exitError) {
@@ -505,6 +527,7 @@ export function registerRunCommand(program: Command): void {
           const status = exitError?.status ?? null;
           const usage = exitError?.usage ?? null;
           finishRunLog({
+            llm: llmToUse,
             spawned_command: spawnedCommand,
             exit_code: status,
             spawn_error: exitError?.spawn_error ?? exitError?.signal ?? null,
