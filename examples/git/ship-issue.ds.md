@@ -3,10 +3,10 @@
   "dossier_schema_version": "1.0.0",
   "name": "ship-issue",
   "title": "Ship Issue — Commit, PR, Merge, Deploy, Teardown",
-  "version": "1.11.1",
+  "version": "1.12.0",
   "protocol_version": "1.0",
   "status": "Stable",
-  "objective": "Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached)",
+  "objective": "Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch",
   "category": [
     "development"
   ],
@@ -17,7 +17,8 @@
     "github",
     "ship",
     "pr",
-    "merge"
+    "merge",
+    "batch-cycles"
   ],
   "risk_level": "high",
   "risk_factors": [
@@ -29,7 +30,7 @@
   "requires_approval": false,
   "destructive_operations": [
     "Pushes branch to remote",
-    "Creates and merges pull request",
+    "Creates and merges pull request (squash for per-issue PRs; rebase for batch PRs — one commit per member issue lands on the base branch)",
     "Deletes branch after merge"
   ],
   "inputs": {
@@ -78,7 +79,22 @@
       },
       {
         "name": "ac_results",
-        "description": "Per-acceptance-criterion checklist from review-issue's Agent 7 (Conformance) — criterion, verdict, file:line or reason. Used to populate the PR body's Acceptance Criteria section.",
+        "description": "Per-acceptance-criterion checklist from review-issue's Agent 7 (Conformance) — criterion, verdict, file:line or reason. Used to populate the PR body's Acceptance Criteria section. Per-issue mode only.",
+        "type": "string"
+      },
+      {
+        "name": "batch_id",
+        "description": "Batch id slug (e.g. b-2026-08-29-01). When set, run BATCH MODE: ship the batch PR from the batch branch against the batch ANCHOR issue (issue_number is the anchor number) — per-member PR sections, Closes #N per member, rebase-merge. Unset = ordinary per-issue ship.",
+        "type": "string"
+      },
+      {
+        "name": "members",
+        "description": "Batch mode only: comma-separated member issue numbers (e.g. 101,102,104). Drives the PR body's per-member sections and the Closes #N list. Default: derived from the batch branch's per-issue commits.",
+        "type": "string"
+      },
+      {
+        "name": "member_verdicts",
+        "description": "Batch mode only: per-member per-AC conformance verdicts from slot-cycles, passed through by review-issue's aggregate mode (Agent 7 format: 'ACn <criterion> — met <file:line> | not-met | unverifiable'). Populates the PR body's per-member Acceptance Criteria checkboxes.",
         "type": "string"
       }
     ]
@@ -88,16 +104,16 @@
       "name": "Yuval Dimnik"
     }
   ],
-  "last_updated": "2026-08-26",
+  "last_updated": "2026-08-29",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "dd1689ca0ff2980c1249287e88ef99fc91c9e074a02862a7625260bfceafdd8f"
+    "hash": "fea376daf692fa5ad90dff53f0e08f3d820e7c8b7cf4255f6e4050cdd050fadc"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "4EpRzoQZ5lkkD847/XHNrsJ/cN+xo1eCCQnA22l9Xs+DMwEq0BYRUWTDkviNkisMphZkd6VaRJ998vNh1ZoyDA==",
+    "signature": "D4cc1cRmKH2YPq5iLlGZSXFFfQFHdv4KqdQpLC6onfY5V2CNiOUELR0RsLNKUIg39/5NIAVtAnZl8cssGbJ/BA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-26T10:41:16.356Z",
+    "signed_at": "2026-08-29T18:59:29.202Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -114,13 +130,184 @@ Ship the implementation: commit, push, create PR, wait for CI, merge, and clean 
 ## Prerequisites
 
 - All code changes are ready (implemented, tested, reviewed)
-- review-issue found zero escalated findings — any escalation stops the run before this dossier (full-cycle-issue's Guiding Principle). This dossier does not create GitHub issues; it assumes the diff is ready to ship as-is.
-- You are in the worktree/working directory with uncommitted changes
+- review-issue found zero escalated findings — any escalation stops the run before this dossier (full-cycle-issue's Guiding Principle). This dossier does not create GitHub issues; it assumes the diff is ready to ship as-is. In batch mode: review-issue's AGGREGATE mode found zero escalated findings (the anchor's `batch-review` milestone carries `escalated=0`).
+- You are in the worktree/working directory with uncommitted changes (per-issue) or on the clean batch branch (batch mode)
 - GitHub CLI (gh) is installed and authenticated
-- `ai-dossier` CLI >= 0.10.0 is installed — both ship milestones are posted through it
+- `ai-dossier` CLI >= 0.10.0 is installed — both ship milestones are posted through it (batch mode needs >= 0.14.0 for the `batch-ship` phase)
 - You have push access
 
+## Mode Selection
+
+`batch_id` set → run **Batch Mode** below, then stop — the per-issue flow ("Actions to Perform") does not run. Unset → the ordinary per-issue flow.
+
+## Batch Mode (Batch PR — rebase-merge) — RFC-0001 C.5
+
+Ship the batch: ONE PR from the batch branch, per-member body sections, `Closes #N` per member, **rebase-merged** so each member's issue-boundary commit lands individually on the base branch (squash would collapse them and break eviction/bisect/traceability — RFC-0001 constraint 4). `issue_number` is the batch ANCHOR number; milestones post on the anchor. The scheduler dispatches this mode after `batch-review` posted `escalated=0`.
+
+**The per-issue steps below are the semantic spec for the batch equivalents**: the CI-trigger gate (Step 2.5), phantom-green defense (Step 4), CI-failure handling (Step 5, max 2 attempts), merge confirmation (Step 6b), deploy-confirm (Step 6c), and teardown (Step 7) apply VERBATIM to the batch PR and batch worktree. Deviations are explicit here; everywhere else read the per-issue text with `<issue_number>` as "the members" and `<branch-name>` as "the batch branch".
+
+### Batch Step 0: Assert the rebase-merge prerequisites (hard abort)
+
+Batch PRs must rebase-merge. Assert, never assume — the external coordination item (repo settings + watcher support, imboard-ai/imboard-monorepo#3902) must be PRESENT, not presumed. Each failure posts `ai-dossier runstate post --issue <anchor_number> --phase batch-ship --status blocked --run <run_id> --kv batch=<batch_id> --kv reason=<slug>` plus ONE comment on the anchor naming the remediation, and STOPS — the batch waits intact on its branch; members' commits are untouched.
+
+1. **Repo allows rebase merging** (always asserted):
+   ```bash
+   gh api repos/{owner}/{repo} --jq .allow_rebase_merge
+   ```
+   Must be `true`. `false` → `reason=rebase-not-allowed`; comment: enable Settings → Pull Requests → "Allow rebase merging" (external prerequisite, imboard-ai/imboard-monorepo#3902) — squash is not an acceptable fallback for a batch PR.
+2. **The auto-merge watcher supports batch-epic rebase** (asserted when the repo HAS a watcher — `.github/workflows/auto-merge-watcher.yml` exists in this worktree): a watcher without rebase support would SQUASH the batch PR on the `auto-merge` label — silently destroying per-issue attribution, the worst failure mode. Fetch the watcher script from THIS repo and check for the batch-epic rebase path:
+   ```bash
+   grep -c -e 'batch-epic' -e '\-\-rebase' scripts/auto-merge-watcher.sh
+   ```
+   Both markers present → supported. Script absent from its canonical path or markers missing → `reason=watcher-no-rebase`; comment: update the watcher to rebase-merge `batch-epic`-labeled PRs (reference implementation: imboard-ai/imboard-monorepo#3902).
+3. **Detached mode needs a watcher at all**: no `.github/workflows/auto-merge-watcher.yml` AND `ship_mode=detached` → `reason=no-watcher` (nothing would ever merge the parked PR). Attached mode without a watcher self-merges with `--rebase` (Batch Step 6) — only assertion 1 applies there.
+
+### Batch Step 1: Commit — nothing to commit
+
+Every member landed its issue-boundary commit (slot-cycle contract) and aggregate review landed at most one clean batch-level fix commit; the tree is clean. Step 1's planning-doc removal and ci-parity run do NOT apply: the batch worktree carries no `PLANNING-*` files, and the full suite + ci-parity are batch-validate's job (the scheduler runs them on the combined diff before review) — ship does not repeat them. If `git status --porcelain` is NOT empty, something violated the contract: post `reason=dirty-worktree` and stop.
+
+### Batch Step 2: Push
+
+```bash
+git push origin <batch-branch>
+```
+
+(Usually a no-op — members and review already pushed; this carries any straggler.)
+
+### Batch Step 2.5: CI-Trigger Gate — VERBATIM
+
+Same regex, same empty-commit remedy, same blocking `CI-TRIGGER-OK` requirement immediately before `gh pr create`. Slot-cycle commits carry no skip markers by contract and review's aggregate fix commit is clean by contract — a marker on the head means someone violated those contracts; the gate exists precisely so the violation cannot silently open a CI-less PR. The empty-commit remedy (`chore: enable CI for PR head`) is rebase-safe: a clean empty commit landing on the base branch is harmless.
+
+### Batch Step 3: Create the Batch PR
+
+Per-member material comes from the batch branch and `member_verdicts`:
+
+```bash
+git fetch origin <base_branch>
+git log origin/<base_branch>..HEAD --oneline   # one `(#N)`-trailed commit per member → per-member one-liners
+```
+
+Create the label (idempotent) and the PR, then apply BOTH labels — `batch-epic` is the watcher's rebase trigger, `auto-merge` is its merge trigger:
+
+```bash
+gh label create batch-epic --color "5319E7" \
+  --description "Batch cycle PR — watcher rebase-merges (keeps one commit per member issue)" --force
+gh pr create --base <base_branch> --title "Batch <batch_id>: <N> issues" --body "$(cat <<'EOF'
+## Summary
+Batch <batch_id> — <one-line batch summary>. Members: #<m1>, #<m2>, …
+
+Rebase-merge: one commit per member issue lands on <base_branch> (eviction/bisect/traceability — RFC-0001 C.5).
+
+## Members
+
+### #<m1> — <one line from its boundary commit>
+- [x] AC1 <criterion> — met <file:line>
+- [ ] AC2 <criterion> — not met / unverifiable: <reason>
+Closes #<m1>
+
+### #<m2> — <one line from its boundary commit>
+- [x] AC1 <criterion> — met <file:line>
+Closes #<m2>
+
+## Test plan
+- batch-validate: full suite + ci-parity on the combined diff
+- per-member: focused tests + changed-file lint + per-issue blind conformance (slot-cycles)
+EOF
+)"
+gh api -X POST repos/{owner}/{repo}/issues/<pr-number>/labels -f "labels[]=batch-epic"   # then CONFIRM both labels are present
+```
+
+The per-member AC checkboxes come from `member_verdicts` (checked + `file:line` for `met`, unchecked with reason otherwise) — same mapping as per-issue Step 3. `Closes #N` per member (NOT the anchor — the anchor closes at batch-report). The `gh api` label call is the Projects-classic-safe path from Step 3c item 1; re-read the PR labels and confirm `batch-epic` is present before continuing — without it the watcher would squash-merge.
+
+### Batch Step 3a: Confirm CI Actually Triggered — VERBATIM
+
+Same proof (≥1 `pull_request`-triggered run for the head sha, or the repo provably has none). This is doubly load-bearing for a batch: the watcher's presence-of-checks floor refuses zero-check PRs, and the batch carries N issues per CI run.
+
+### Batch Step 3b: Runstate Milestone (awaiting-merge) — on the ANCHOR
+
+```bash
+ai-dossier runstate post --issue <anchor_number> --phase batch-ship --status awaiting-merge --run <run_id> \
+  --kv batch=<batch_id> \
+  --kv pr=<pr-number> \
+  --kv head=<short sha of the pushed commit> \
+  --kv ci_fix_attempts=0 \
+  --kv members=<comma list> \
+  --kv strategy=rebase \
+  --next batch-ship
+```
+
+`--next batch-ship` is the mid-phase override (same purpose as per-issue's `--next ship`): the milestone is mid-phase, so the next phase is still batch-ship. The CLI stamps `at=` itself.
+
+### Batch Step 3c: ship_mode — attached or detached
+
+**`attached` (default)** — continue to Batch Step 4 and drive the phase to its end (CI wait, merge, merge confirmation, deploy confirmation, teardown, final milestone). Without a watcher, self-merge with `--rebase` (Batch Step 6); with a watcher, hand the merge to it exactly as per-issue Step 3c/detached does.
+
+**`detached`** — park the PR and stop. Preconditions: Batch Step 0 assertions passed (including the watcher, which detached requires) and Step 3a passed. Apply the `auto-merge` label via the REST-safe call (Step 3c item 1), CONFIRM it is present (retry once, then escalate as a hard blocker — never fall back to polling CI yourself), confirm `batch-epic` is still present, and print the handoff line and STOP:
+
+```
+Ship detached: batch PR #<pr-number> parked on auto-merge (rebase — batch-epic); run the batch tail (teardown + report) after merge.
+```
+
+Do NOT wait for CI, merge, tear down, or report. Leave the batch worktree in place. The watcher rebase-merges the `batch-epic` PR; the scheduler (or a tail run) resumes at teardown from the `awaiting-merge` milestone.
+
+### Batch Step 4: Wait for CI — VERBATIM
+
+Same stable-confirmation gate, same bounded poll batches, same same-turn discipline. One CI run now carries N issues — the phantom-green defense matters more, not less.
+
+### Batch Step 5: Handle CI Failures — VERBATIM (max 2 attempts)
+
+Same identify → fix → push → re-wait loop against the AGGREGATE. Failing-test-to-member attribution (revert, evict, force-push rebuild) is the scheduler's F.3 machinery, NOT this mode's — ship fixes the aggregate or, after 2 attempts, hands off (`decision-pending` on the anchor, same as per-issue Step 5 item 5).
+
+### Batch Step 6: Merge — rebase, never squash
+
+- **Repo with a watcher**: hand the merge to the watcher — apply and confirm the `auto-merge` label (Batch Step 3c), then poll `gh pr view <pr-number> --json mergedAt` as an armed watch (~3–5 min intervals, up to ~25 min). The watcher rebase-merges because the PR carries `batch-epic`. Do NOT self-merge while a watcher owns merges, and do NOT remove `batch-epic` — that would flip the watcher to squash.
+- **Attached, no watcher**: after the Step 4 gate passes,
+  ```bash
+  gh pr merge <pr-number> --rebase
+  ```
+  Never `--squash` for a batch PR, and no `--delete-branch` (worktrees; cleanup is Batch Step 7). There is no `--subject`/`--body` to pass — a rebase merge replays the members' own commit messages, which is the point.
+
+### Batch Step 6b: Confirm the Merge — VERBATIM
+
+`gh pr view <pr-number> --json mergedAt,state` — `mergedAt` non-null, `state` `MERGED`, before anything else.
+
+### Batch Step 6c: MERGE_COMMIT and deploy-confirm under rebase-merge
+
+**N commits land, not one.** A rebase merge replays every batch-branch commit onto the base branch as a linear range — each member's `(#N)`-trailed commit lands individually (individually revertable — the traceability the strategy exists for), and the commits get NEW shas on the base branch (rebase replays; member shas recorded in slot milestones are branch shas, not main shas — traceability on the base branch is the `(#N)` trailers, never the shas).
+
+- **`MERGE_COMMIT` = the merge head**: `gh pr view <pr-number> --json mergeCommit --jq '.mergeCommit.oid'` — the LAST commit of the replayed range on the base branch. Do not assume a single squash sha (report-issue 1.7.1's batch variant already expects this: "record the batch PR's merge head SHA").
+- **Deploy-confirm uses the branch-head containment check, unchanged**: `git fetch origin --quiet && git merge-base --is-ancestor <MERGE_COMMIT> <deployed_sha>` — the merge head CONTAINS every member commit (the range is linear), so any deploy carrying the merge head ships the entire batch. Find the deploy mechanism, check whether a deploy already carries the merge, dispatch it yourself if nothing does within ~5 minutes, escalate a failed deploy — all VERBATIM from per-issue Step 6c. Where a bot token merges, `on: push` does not fire and the deploy NEVER runs by itself — the batch makes this worse (N issues live to nobody), so the dispatch is not optional.
+
+### Batch Step 7: Teardown — the batch worktree
+
+Same order and verification discipline as per-issue Step 7, scoped to the batch:
+
+1. `scripts/ensure-test-env.sh --teardown` if the repo has it (batch test resources leak the same way).
+2. `cd` back to `original_dir` (if provided).
+3. Pool return if `pool_claimed` (setup's batch mode claims with the anchor issue) — `npx -y @ai-dossier/worktree-pool@^0.5.1 return --path <worktree_path>`; verify with pool `status` AND `git worktree list` before claiming `cleanup=pool_returned`.
+4. Else remove the worktree and delete the batch branch (local + remote). Deleting the branch after a rebase merge is safe — every commit was replayed onto the base branch; the replayed range is the durable artifact.
+5. Remove the `in-progress`-style labels only per the anchor's flow (the scheduler/report owns anchor closure).
+
+### Batch Step 8: Final Runstate Milestone — on the ANCHOR
+
+```bash
+ai-dossier runstate post --issue <anchor_number> --phase batch-ship --status done --run <run_id> \
+  --kv batch=<batch_id> \
+  --kv pr=<pr-number> \
+  --kv merge_commit=<short sha of the merge head> \
+  --kv ci_fix_attempts=<n> \
+  --kv deploy=<confirmed-sha|n/a|blocked-<reason>> \
+  --kv cleanup=pool_returned|worktree_removed|skipped \
+  --kv test_env=torn-down|none \
+  --kv members=<comma list> \
+  --kv strategy=rebase
+```
+
+The CLI computes `next=batch-report` — report-issue's batch variant consumes this milestone (`merge_commit=`, `deploy=`, `members=`). `merge_commit=` empty is the same failure it is per-issue: a batch report over an unmerged PR is a failed run, never a clean one.
+
 ## Actions to Perform
+
+*The per-issue flow — skip entirely when `batch_id` is set (Batch Mode above).*
 
 ### Step 1: Commit
 
@@ -420,7 +607,8 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 - `target_branch`: the branch merged into
 - `cleanup`: pool_returned | worktree_removed | skipped
 - `ci_fix_attempts`: number of CI fix-and-push cycles run in Step 5
-- Posts TWO runstate milestones to the issue (`phase=ship`: `awaiting-merge` before the CI wait, then `done`) — in `detached` mode only the first, and the tail run posts the second
+- Batch mode: `merge_commit` = the rebase merge head (N member commits landed individually), `members`, `strategy=rebase`
+- Posts TWO runstate milestones to the issue (`phase=ship`: `awaiting-merge` before the CI wait, then `done`) — in `detached` mode only the first, and the tail run posts the second. Batch mode posts `phase=batch-ship` milestones on the ANCHOR with the same two-step shape.
 
 ## Validation
 
@@ -440,6 +628,7 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 - [ ] Worktree returned to pool or removed; returned to original directory
 - [ ] `scripts/ci-parity.sh` was run before committing when present
 - [ ] Runstate milestones were posted via `ai-dossier runstate post` (`awaiting-merge` before the CI wait — with `--next ship` — and, on the attached/tail path, the final one after teardown)
+- Batch mode: rebase prerequisites asserted BEFORE the PR (repo `allow_rebase_merge`, watcher batch-epic rebase support when a watcher exists, watcher presence for detached) — each failure posted `phase=batch-ship status=blocked reason=rebase-not-allowed|watcher-no-rebase|no-watcher` and stopped; PR body has one section per member with its AC checkboxes (from `member_verdicts`) and `Closes #N` per member (never the anchor); `batch-epic` AND `auto-merge` labels applied and confirmed; merged with `--rebase` (never `--squash`); `MERGE_COMMIT` = the merge head, deploy confirmed via the unchanged containment check; teardown returned/removed the BATCH worktree and deleted the batch branch; both milestones posted on the ANCHOR (`batch-ship` awaiting-merge with `--next batch-ship`, then done with `batch=` `pr=` `merge_commit=` `deploy=` `cleanup=` `test_env=` `members=` `strategy=rebase`)
 
 ## Troubleshooting
 
@@ -452,3 +641,7 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 | Detached run looks unfinished | It is — by design. A `ship awaiting-merge` milestone with no `ship done` after it is a parked PR, not a failure. The tail run (`full cycle issue <n>`) resumes at `ship-teardown` once the PR merges. |
 | `--delete-branch` fails in worktree | Expected — don't use it. Clean up in Step 7. |
 | Pool return fails | Not an error — fall back to manual worktree remove. |
+| Batch: `reason=rebase-not-allowed` / `watcher-no-rebase` / `no-watcher` | Hard aborts by design — the external prerequisites (imboard-ai/imboard-monorepo#3902) are absent. Fix the repo settings / watcher on the TARGET repo, then re-dispatch; never fall back to squash. |
+| Batch: watcher squashed the PR anyway | The `batch-epic` label was missing at merge time (or the watcher predates #3902). Not recoverable post-merge — the per-issue commits are collapsed on the base branch; surface it on the anchor immediately (this is what Batch Step 0 exists to prevent). |
+| Batch: `merge_commit` looks like a member commit's sha | Correct — the rebase merge head IS the last replayed commit. It contains every member commit (linear range); the containment check works unchanged. |
+| Batch: PR body missing a member section | Derivation from the batch log missed an issue — fall back to the `members` input; never ship a PR whose `Closes #N` list disagrees with the members list. |
