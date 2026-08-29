@@ -23,8 +23,9 @@ Full-cycle's plan phase always replans from scratch, even when a plan already ex
 - State: "fresh-planning path on absent artifact" | Trigger: issue with no plan:v1 comment | Prod check: same queries show 2 of 2 issues artifact-free | Verdict: reachable (the default today).
 
 ## Predicted Files
-- `~/.dossier/cache/imboard-ai/git/plan-issue/1.6.0.ds.md` → local working copy `plan-issue.ds.md` (worktree root, git-excluded) — the registry dossier edit: new Step 0, refine path in Step 5, post in Step 5b, plan_reused in Step 7, version 1.7.0; published with sign+lint+verify
-- `examples/git/plan-issue.ds.md` — snapshot refreshed from the published 1.7.0 (the repo PR artifact)
+- `examples/git/plan-issue.ds.md` — snapshot refreshed from the published plan-issue 1.7.0 (the repo PR artifact)
+
+(The primary deliverable — the registry dossier `imboard-ai/git/plan-issue` 1.6.0 → 1.7.0 — is NOT a repo file: it is edited via `ai-dossier pull` on a local working copy and published to the registry; never cloned/committed. Working copy: `plan-issue.ds.md` in the worktree root, git-excluded.)
 
 ## Reusable Code
 - `ai-dossier plan post/get/validate` (CLI 0.16.0, `cli/src/commands/plan.ts`, `cli/src/plan-artifact.ts`) — the entire artifact surface; the dossier only orchestrates it
