@@ -15,12 +15,16 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { JOURNAL_FILE } from './journal';
 import { createEmptyState, validateState } from './state';
 import {
   CONFIG_SCHEMA_VERSION,
   DEFAULT_MAX_SLOTS,
+  type DispatchConfig,
+  LEGACY_CONFIG_SCHEMA_VERSIONS,
   MAX_MAX_SLOTS,
   MIN_MAX_SLOTS,
+  type ModelTier,
   type SchedConfig,
   type SchedConfigFile,
   type SchedState,
@@ -170,6 +174,15 @@ export class SchedStore {
     return path.join(this.dir, CONFIG_FILE);
   }
 
+  get journalPath(): string {
+    return path.join(this.dir, JOURNAL_FILE);
+  }
+
+  /** Directory for per-unit agent output logs (`runs/<unit>.log`). */
+  get runsDir(): string {
+    return path.join(this.dir, 'runs');
+  }
+
   load(): SchedState {
     const statePath = this.statePath;
     if (!fs.existsSync(statePath)) {
@@ -179,7 +192,14 @@ export class SchedStore {
     try {
       raw = fs.readFileSync(statePath, 'utf-8');
     } catch (err) {
-      throw new CorruptStateError(statePath, err);
+      // An I/O failure (permissions, disk, read-only mount) is NOT corruption —
+      // the destructive "rename to reset" advice must not attach to it.
+      throw new CorruptStateError(
+        statePath,
+        new Error(
+          `could not READ the file (${(err as Error).message}) — this is an I/O failure, not corruption; renaming will not fix it`
+        )
+      );
     }
     try {
       return validateState(JSON.parse(raw));
@@ -214,8 +234,9 @@ export class SchedStore {
     }
     try {
       const parsed = JSON.parse(fs.readFileSync(this.configPath, 'utf-8')) as SchedConfigFile;
-      if (parsed.schema_version !== CONFIG_SCHEMA_VERSION) {
-        throw new Error(`unsupported schema version ${String(parsed.schema_version)}`);
+      const version = String(parsed.schema_version);
+      if (version !== CONFIG_SCHEMA_VERSION && !LEGACY_CONFIG_SCHEMA_VERSIONS.includes(version)) {
+        throw new Error(`unsupported schema version ${version}`);
       }
       if (
         !Number.isInteger(parsed.max_slots) ||
@@ -226,7 +247,23 @@ export class SchedStore {
           `max_slots must be an integer between ${MIN_MAX_SLOTS} and ${MAX_MAX_SLOTS}`
         );
       }
-      return { max_slots: parsed.max_slots };
+      const config: SchedConfig = { max_slots: parsed.max_slots };
+      if (parsed.stall_timeout_ms !== undefined) {
+        if (!Number.isInteger(parsed.stall_timeout_ms) || parsed.stall_timeout_ms <= 0) {
+          throw new Error('stall_timeout_ms must be a positive integer (milliseconds)');
+        }
+        config.stall_timeout_ms = parsed.stall_timeout_ms;
+      }
+      if (parsed.reconcile_interval_ms !== undefined) {
+        if (!Number.isInteger(parsed.reconcile_interval_ms) || parsed.reconcile_interval_ms <= 0) {
+          throw new Error('reconcile_interval_ms must be a positive integer (milliseconds)');
+        }
+        config.reconcile_interval_ms = parsed.reconcile_interval_ms;
+      }
+      if (parsed.dispatch !== undefined) {
+        config.dispatch = validateDispatchConfig(parsed.dispatch);
+      }
+      return config;
     } catch (err) {
       // Deliberate degrade-to-default (unlike state.json, config is re-derivable
       // operator intent and hard-failing every command on a typo would brick
@@ -242,7 +279,56 @@ export class SchedStore {
     const file: SchedConfigFile = {
       schema_version: CONFIG_SCHEMA_VERSION,
       max_slots: config.max_slots,
+      ...(config.stall_timeout_ms !== undefined
+        ? { stall_timeout_ms: config.stall_timeout_ms }
+        : {}),
+      ...(config.reconcile_interval_ms !== undefined
+        ? { reconcile_interval_ms: config.reconcile_interval_ms }
+        : {}),
+      ...(config.dispatch !== undefined ? { dispatch: config.dispatch } : {}),
     };
     writeAtomic(this.configPath, `${JSON.stringify(file, null, 2)}\n`);
   }
+}
+
+const MODEL_TIERS: readonly ModelTier[] = ['mechanical', 'mid', 'strong'];
+
+/** Strict validation of the optional `dispatch` section (#464). */
+function validateDispatchConfig(raw: unknown): DispatchConfig {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('dispatch must be an object');
+  }
+  const dispatch = raw as Record<string, unknown>;
+  if (dispatch.command !== undefined) {
+    if (
+      !Array.isArray(dispatch.command) ||
+      dispatch.command.length === 0 ||
+      dispatch.command.some((c) => typeof c !== 'string' || c.length === 0)
+    ) {
+      throw new Error('dispatch.command must be a non-empty array of non-empty strings');
+    }
+  }
+  if (dispatch.prompt !== undefined && typeof dispatch.prompt !== 'string') {
+    throw new Error('dispatch.prompt must be a string');
+  }
+  if (dispatch.tier_models !== undefined) {
+    if (dispatch.tier_models === null || typeof dispatch.tier_models !== 'object') {
+      throw new Error('dispatch.tier_models must be an object');
+    }
+    for (const [tier, model] of Object.entries(dispatch.tier_models)) {
+      if (!MODEL_TIERS.includes(tier as ModelTier)) {
+        throw new Error(`dispatch.tier_models: unknown tier '${tier}'`);
+      }
+      if (typeof model !== 'string' || model.length === 0) {
+        throw new Error(`dispatch.tier_models.${tier} must be a non-empty string`);
+      }
+    }
+  }
+  const out: DispatchConfig = {};
+  if (dispatch.command !== undefined) out.command = dispatch.command as string[];
+  if (dispatch.prompt !== undefined) out.prompt = dispatch.prompt as string;
+  if (dispatch.tier_models !== undefined) {
+    out.tier_models = dispatch.tier_models as Partial<Record<ModelTier, string>>;
+  }
+  return out;
 }
