@@ -25,6 +25,15 @@ export interface EnqueueInput {
   deps?: number[];
   tier?: ModelTier;
   base_branch?: string;
+  /**
+   * Batch-level facts batch-prep knows at composition time (#472). They
+   * describe the BATCH, not the entry, so every member of one batch must
+   * supply the same values — a conflicting re-supply is rejected rather than
+   * silently re-pointing the batch's milestones or eviction grouping.
+   */
+  anchor?: number;
+  run_id?: string;
+  eviction_groups?: number[][];
 }
 
 function asPositiveInt(value: unknown, label: string): number {
@@ -86,6 +95,30 @@ export function parseManifest(raw: unknown): EnqueueInput[] {
       }
       input.base_branch = obj.base_branch;
     }
+    if (obj.anchor !== undefined) {
+      input.anchor = asPositiveInt(obj.anchor, `Manifest entry [${i}]: anchor`);
+    }
+    if (obj.run_id !== undefined) {
+      if (typeof obj.run_id !== 'string' || obj.run_id.length === 0) {
+        throw new EnqueueError(`Manifest entry [${i}]: run_id must be a non-empty string`);
+      }
+      input.run_id = obj.run_id;
+    }
+    if (obj.eviction_groups !== undefined) {
+      if (!Array.isArray(obj.eviction_groups)) {
+        throw new EnqueueError(`Manifest entry [${i}]: eviction_groups must be an array`);
+      }
+      input.eviction_groups = obj.eviction_groups.map((group, j) => {
+        if (!Array.isArray(group)) {
+          throw new EnqueueError(
+            `Manifest entry [${i}]: eviction_groups[${j}] must be an array of issue numbers`
+          );
+        }
+        return group.map((m, k) =>
+          asPositiveInt(m, `Manifest entry [${i}]: eviction_groups[${j}][${k}]`)
+        );
+      });
+    }
     return input;
   });
 }
@@ -127,6 +160,38 @@ export function assertNoDependencyCycle(state: SchedState, inputs: EnqueueInput[
 
   for (const node of edges.keys()) {
     visit(node, []);
+  }
+}
+
+/**
+ * A batch-level fact supplied twice must be supplied identically (#472). The
+ * anchor is where every batch milestone posts and the eviction groups decide
+ * which members revert together — silently keeping the first value while a
+ * later manifest says something else would post the batch's failure report to
+ * the wrong issue, or evict half a coupled group.
+ */
+function assertBatchFactsAgree(
+  batchId: string,
+  existing: { anchor: number | null; run_id: string | null; eviction_groups: number[][] },
+  input: EnqueueInput
+): void {
+  if (input.anchor !== undefined && existing.anchor !== null && existing.anchor !== input.anchor) {
+    throw new EnqueueError(
+      `Batch ${batchId} was enqueued with anchor #${existing.anchor} — refusing to re-point it to #${input.anchor}`
+    );
+  }
+  if (input.run_id !== undefined && existing.run_id !== null && existing.run_id !== input.run_id) {
+    throw new EnqueueError(
+      `Batch ${batchId} was enqueued with run_id '${existing.run_id}' — refusing to re-point it to '${input.run_id}'`
+    );
+  }
+  if (input.eviction_groups !== undefined && existing.eviction_groups.length > 0) {
+    const supplied = JSON.stringify(input.eviction_groups);
+    if (JSON.stringify(existing.eviction_groups) !== supplied) {
+      throw new EnqueueError(
+        `Batch ${batchId} already has eviction groups ${JSON.stringify(existing.eviction_groups)} — refusing to replace them with ${supplied}`
+      );
+    }
   }
 }
 
@@ -202,6 +267,7 @@ export function enqueueEntries(
       reason: null,
       pr: null,
       cleanup: null,
+      failure_evidence: null,
       enqueued_at: timestamp,
       updated_at: timestamp,
     };
@@ -227,6 +293,14 @@ export function enqueueEntries(
           `Batch ${batchId} was enqueued with base '${existing.base_branch}' — refusing to silently rebase it to '${input.base_branch}'`
         );
       }
+      assertBatchFactsAgree(batchId, existing, input);
+      // The first member to carry a batch-level fact sets it; later members
+      // must agree (assertBatchFactsAgree) or say nothing.
+      existing.anchor = existing.anchor ?? input.anchor ?? null;
+      existing.run_id = existing.run_id ?? input.run_id ?? null;
+      if (existing.eviction_groups.length === 0 && input.eviction_groups !== undefined) {
+        existing.eviction_groups = input.eviction_groups.map((g) => [...g]);
+      }
       if (existing.members.includes(input.issue)) continue;
       existing.members = [...existing.members, input.issue];
       existing.updated_at = timestamp;
@@ -237,6 +311,13 @@ export function enqueueEntries(
         members: [input.issue],
         base_branch: input.base_branch ?? 'main',
         executing_member: 0,
+        anchor: input.anchor ?? null,
+        branch: null,
+        run_id: input.run_id ?? null,
+        eviction_groups: input.eviction_groups?.map((g) => [...g]) ?? [],
+        evictions: [],
+        fix_attempts: [],
+        rebase_attempts: 0,
         created_at: timestamp,
         updated_at: timestamp,
       });

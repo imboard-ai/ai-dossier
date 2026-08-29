@@ -86,6 +86,22 @@ export const DEFAULT_REPORT_PROMPT_TEMPLATE =
   're-implement, re-review, or re-ship anything — produce the final report for issue #{issue} and ' +
   'post its runstate milestone.';
 
+/**
+ * Default prompt for the ONE bounded fix attempt a batch member gets before it
+ * is evicted (#472 AC2). Deliberately narrow: the agent fixes the named
+ * failures on the batch branch it is already on — it does not re-plan, re-scope
+ * or touch other members' work, because the next step after a red re-run is
+ * reverting this member's commits, not a second attempt.
+ */
+export const DEFAULT_FIX_PROMPT_TEMPLATE =
+  'The aggregate test suite for batch {batch} is failing, and the failures were attributed to ' +
+  'issue #{issue}.\n\nFailing tests:\n{tests}\n\n' +
+  'You are on the batch branch with every member already committed. Fix ONLY these failures, in ' +
+  "the code belonging to issue #{issue}; do not revert or modify other members' commits, do not " +
+  're-plan the issue, and do not open a PR. Commit the fix on this branch with the `(#{issue})` ' +
+  'subject trailer. This is the only fix attempt — if the suite is still red afterwards the ' +
+  "member's commits are reverted and it is requeued as a standalone full-cycle run.";
+
 /** Fully-resolved dispatch settings the engine runs with. */
 export interface ResolvedDispatch {
   /** Command template with `{model}`/`{issue}` placeholders. */
@@ -166,6 +182,26 @@ export function buildReportPrompt(
     .replaceAll('{issue}', String(issue))
     .replaceAll('{pr}', String(pr))
     .replaceAll('{cleanup}', cleanup);
+}
+
+/**
+ * Build the fix agent's stdin prompt (#472): `{issue}`, `{batch}` and the
+ * failing-test list substituted. Tests are rendered one per line so the agent
+ * gets the exact ids the suite reported, not a summary.
+ */
+export function buildFixPrompt(
+  template: string,
+  issue: number,
+  batch: string,
+  tests: readonly string[]
+): string {
+  return template
+    .replaceAll('{issue}', String(issue))
+    .replaceAll('{batch}', batch)
+    .replaceAll(
+      '{tests}',
+      tests.length > 0 ? tests.map((t) => `- ${t}`).join('\n') : '- (none reported)'
+    );
 }
 
 /** One tier stronger on the ladder, or null at the top (RFC-0001 §C.1). */

@@ -17,11 +17,16 @@ import {
   type RunnableUnit,
   runnableUnits,
 } from './readiness';
-import { findBatch, transitionBatch, transitionIssue, transitionSlot } from './state';
+import {
+  findBatch,
+  requeueMember,
+  transitionBatch,
+  transitionIssue,
+  transitionSlot,
+} from './state';
 import type { SchedConfig, SchedState } from './types';
 import {
   LIVE_SLOT_STATUSES,
-  SATISFIED_ISSUE_STATUSES,
   SchedNotFoundError,
   TERMINAL_BATCH_STATUSES,
   TERMINAL_ISSUE_STATUSES,
@@ -206,38 +211,14 @@ export function abandonBatch(
   let next = transitionBatch(state, batchId, 'dissolving', {}, now);
   next = transitionBatch(next, batchId, 'dissolved', {}, now);
 
+  // Nothing green is discarded (F.8): terminal or already-shipped members keep
+  // their outcome; only active members requeue, each through the one shared
+  // requeue path (state.ts) that #472's eviction and dissolve also take.
   const requeued: number[] = [];
   for (const issue of batch.members) {
-    const entry = next.entries.find((e) => e.issue === issue);
-    if (!entry) continue;
-    // Nothing green is discarded (F.8): terminal or already-shipped members
-    // keep their outcome; only active members requeue.
-    if (TERMINAL_ISSUE_STATUSES.has(entry.status) || SATISFIED_ISSUE_STATUSES.has(entry.status)) {
-      continue;
-    }
-    if (entry.status === 'queued' || entry.status === 'classified') {
-      // Never reached the batch rail — retag as full-cycle (metadata change,
-      // not a status transition) and it stays queued as-is.
-      next = {
-        ...next,
-        entries: next.entries.map((e) =>
-          e.issue === issue
-            ? { ...e, mode: 'full', batch: null, reason, updated_at: now.toISOString() }
-            : e
-        ),
-      };
-      requeued.push(issue);
-      continue;
-    }
-    if (entry.status === 'evicted' || entry.status === 'requeued') {
-      next = transitionIssue(next, issue, 'requeued', { mode: 'full', batch: null, reason }, now);
-      requeued.push(issue);
-      continue;
-    }
-    // Any other active state: force onto the failure rail (evicted → requeued{full}).
-    next = transitionIssue(next, issue, 'evicted', { reason }, now);
-    next = transitionIssue(next, issue, 'requeued', { mode: 'full', batch: null, reason }, now);
-    requeued.push(issue);
+    const result = requeueMember(next, issue, { mode: 'full', batch: null }, reason, now);
+    next = result.state;
+    if (result.requeued) requeued.push(issue);
   }
   return { state: next, requeued };
 }

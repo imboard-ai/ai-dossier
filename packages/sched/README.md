@@ -85,6 +85,54 @@ Two engine-safety policies were explicit product decisions on #464:
 Only `issue:<n>` units are dispatched today — batch member sequencing is a follow-up
 (#464 non-goal).
 
+## Batch failure recovery (#472)
+
+What happens when a batch's aggregate suite goes red, or its PR will not merge
+(RFC-0001 §F.2/F.8/F.9). The modules are the machinery the batch execution loop calls;
+they are usable — and tested — standalone.
+
+```
+validating → attributing → fixing (ONE bounded attempt) → validating
+                         → evicting (revert the member's commits) → validating
+  > ⅓ of members evicted, or a revert conflict → dissolving → members requeued
+awaiting-merge (CONFLICTING | auto-merge-blocked)
+                         → rebasing → re-validating → shipping
+                         → (2nd occurrence) dissolving into two half-batches
+```
+
+1. **Attribution (AC1)** — `attributeByOverlap` maps each failing test to a member by
+   focused-test match, then by changed-path overlap. Exactly one candidate attributes;
+   more than one is AMBIGUOUS and none is UNATTRIBUTED — neither is ever guessed. Both
+   go to `runAttributionBisect`, a real `git bisect run` over the branch's issue-boundary
+   commits executing ONLY the failing tests, mapping the first-bad commit to a member
+   through its `(#N)` subject trailer. A first-bad commit with no trailer reports
+   `unattributable` rather than blaming a neighbour, and the bisect always resets.
+2. **One bounded fix attempt (AC2)** — `beginFixAttempt` returns the mid-tier command and
+   prompt for the CALLER to spawn (sched never invokes an LLM) and records the attempt.
+   A second call for the same member returns `null`: the next step is eviction, so a
+   batch cannot burn its budget on one broken member.
+3. **Eviction (AC2)** — `evictMembers` reverts the member's commits (an eviction group
+   reverts together), requeues it as full-cycle with `failure_evidence` attached (batch,
+   reason, failing tests, attribution method, reverted commits), re-runs the suite and
+   checks the dissolve trigger. A conflicting revert is aborted and dissolves the batch —
+   a half-reverted worktree is not a state any later step can reason about.
+4. **Dissolve (AC3)** — `dissolveBatch` abandons the branch and requeues every UNSHIPPED
+   member: `full` (each as its own full-cycle run) or `halved` (two fresh `forming`
+   half-batches, entries retagged, eviction groups inherited where they survive the
+   split). Shipped and terminal members keep their outcome — nothing green is discarded.
+5. **PR conflict (AC4)** — `handlePrConflict` rebases the batch branch, re-runs the suite
+   and re-ships ONCE. A second occurrence, a conflicting rebase, or a red suite after a
+   clean rebase dissolves into two half-batches.
+6. **Milestones (AC5)** — every eviction and dissolve posts a `batch-validate` /
+   `batch-ship` milestone to the batch ANCHOR issue via `ai-dossier runstate post`, with
+   the reason, the evicted/requeued/preserved members and the attribution method; each
+   per-member outcome is journaled and kept in the batch's `evictions` (the classifier
+   feedback signal).
+
+Schema 1.3.0 carries the new state: `BatchEntry` gains `anchor`, `branch`, `run_id`,
+`eviction_groups`, `evictions`, `fix_attempts` and `rebase_attempts`; `QueueEntry` gains
+`failure_evidence`. 1.2.0 states migrate on load.
+
 ## API surface
 
 ```ts
@@ -114,6 +162,19 @@ import {
   runTeardown,           // #468 script teardown for a merged unit (pool return / worktree remove)
   isSafeWorktree,        // worktree-path containment check (CWE-22)
   TEARDOWN_TIMEOUT_MS,   // teardown subprocess timeout (120 s)
+  attributeByOverlap,    // #472 pure stage-1 attribution: failing tests → members
+  parseVitestJson,       // vitest --reporter=json → failing tests
+  parseBoundaryCommits,  // git log → issue-boundary commits via the (#N) trailer
+  memberRanges,          // boundary commits → each member's commit list
+  runAttributionBisect,  // stage-2: real git bisect over the failing tests only
+  beginAttribution,      // validating → attributing (overlap, then bisect if needed)
+  beginFixAttempt,       // the ONE bounded mid-tier fix dispatch instruction
+  resolveFixAttempt,     // record its outcome, back to validating
+  evictMembers,          // revert + requeue with evidence + suite re-run + dissolve check
+  checkDissolveTrigger,  // pure: > ⅓ of members evicted
+  dissolveBatch,         // full or halved dissolve; preserves everything green
+  handlePrConflict,      // rebase + re-ship once, then dissolve into halves
+  createExecMilestonePoster, // batch milestones via `ai-dossier runstate post`
   Journal,               // append-only events.jsonl
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)

@@ -210,3 +210,106 @@ describe('parseManifest', () => {
     expect(viaManifest.entries).toEqual(viaFlags.entries);
   });
 });
+
+describe('batch-level facts at creation (#472)', () => {
+  it('records anchor, run_id and eviction groups on the new batch', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [
+        {
+          issue: 201,
+          mode: 'slot',
+          batch: 'b1',
+          anchor: 900,
+          run_id: 'r-900-aaaa',
+          eviction_groups: [[201, 202]],
+        },
+        { issue: 202, mode: 'slot', batch: 'b1' },
+      ],
+      NOW
+    );
+    const batch = findBatch(state, 'b1');
+    expect(batch?.anchor).toBe(900);
+    expect(batch?.run_id).toBe('r-900-aaaa');
+    expect(batch?.eviction_groups).toEqual([[201, 202]]);
+    // recovery bookkeeping starts empty
+    expect(batch?.evictions).toEqual([]);
+    expect(batch?.fix_attempts).toEqual([]);
+    expect(batch?.rebase_attempts).toBe(0);
+    expect(batch?.branch).toBeNull();
+    expect(state.entries[0].failure_evidence).toBeNull();
+    expect(() => validateState(state)).not.toThrow();
+  });
+
+  it('defaults every batch-level fact when nothing supplies one', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 201, mode: 'slot', batch: 'b1' }],
+      NOW
+    );
+    const batch = findBatch(state, 'b1');
+    expect(batch?.anchor).toBeNull();
+    expect(batch?.run_id).toBeNull();
+    expect(batch?.eviction_groups).toEqual([]);
+  });
+
+  it('lets a later member supply a fact the first one omitted', () => {
+    let state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 201, mode: 'slot', batch: 'b1' }],
+      NOW
+    );
+    state = enqueueEntries(state, [{ issue: 202, mode: 'slot', batch: 'b1', anchor: 900 }], NOW);
+    expect(findBatch(state, 'b1')?.anchor).toBe(900);
+  });
+
+  it('rejects a conflicting re-supply rather than silently keeping the first', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 201, mode: 'slot', batch: 'b1', anchor: 900, run_id: 'r-900-aaaa' }],
+      NOW
+    );
+    expect(() =>
+      enqueueEntries(state, [{ issue: 202, mode: 'slot', batch: 'b1', anchor: 901 }], NOW)
+    ).toThrow(/refusing to re-point it to #901/);
+    expect(() =>
+      enqueueEntries(state, [{ issue: 202, mode: 'slot', batch: 'b1', run_id: 'r-901-bbbb' }], NOW)
+    ).toThrow(/refusing to re-point it to 'r-901-bbbb'/);
+
+    const grouped = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 201, mode: 'slot', batch: 'b2', eviction_groups: [[201, 202]] }],
+      NOW
+    );
+    expect(() =>
+      enqueueEntries(
+        grouped,
+        [{ issue: 202, mode: 'slot', batch: 'b2', eviction_groups: [[202, 203]] }],
+        NOW
+      )
+    ).toThrow(/refusing to replace them/);
+  });
+
+  it('parses the batch-level facts out of a manifest', () => {
+    const parsed = parseManifest({
+      entries: [
+        {
+          issue: 201,
+          mode: 'slot',
+          batch: 'b1',
+          anchor: 900,
+          run_id: 'r-900-aaaa',
+          eviction_groups: [[201, 202]],
+        },
+      ],
+    });
+    expect(parsed[0]).toMatchObject({
+      anchor: 900,
+      run_id: 'r-900-aaaa',
+      eviction_groups: [[201, 202]],
+    });
+    expect(() => parseManifest([{ issue: 5, anchor: 0 }])).toThrow(/anchor/);
+    expect(() => parseManifest([{ issue: 5, run_id: '' }])).toThrow(/run_id/);
+    expect(() => parseManifest([{ issue: 5, eviction_groups: [5] }])).toThrow(/eviction_groups/);
+  });
+});

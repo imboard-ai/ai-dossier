@@ -6,6 +6,7 @@ import {
   findEntry,
   IllegalTransitionError,
   SATISFIED_ISSUE_STATUSES,
+  SCHEMA_VERSION,
   type SchedState,
   TERMINAL_BATCH_STATUSES,
   TERMINAL_ISSUE_STATUSES,
@@ -420,7 +421,7 @@ describe('validateState', () => {
   });
 });
 
-describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0)', () => {
+describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0)', () => {
   it('loads a pre-#464 1.0.0 state and backfills slot branch/last_head as null', () => {
     // Exactly what #460 persisted: no branch/last_head on slots.
     const legacy = {
@@ -455,7 +456,7 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0)', () => {
       next_slot_id: 2,
     };
     const migrated = validateState(legacy);
-    expect(migrated.schema_version).toBe('1.2.0');
+    expect(migrated.schema_version).toBe(SCHEMA_VERSION);
     expect(migrated.slots[0].branch).toBeNull();
     expect(migrated.slots[0].last_head).toBeNull();
     // everything #460 persisted is preserved
@@ -501,13 +502,93 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0)', () => {
       next_slot_id: 2,
     };
     const migrated = validateState(legacy);
-    expect(migrated.schema_version).toBe('1.2.0');
+    expect(migrated.schema_version).toBe(SCHEMA_VERSION);
     expect(migrated.entries[0].pr).toBeNull();
     expect(migrated.entries[0].cleanup).toBeNull();
     expect(migrated.last_pr_poll_at).toBeNull();
     // everything #464 persisted is preserved
     expect(migrated.slots[0].branch).toBe('feature/101-x');
     expect(migrated.entries[0].status).toBe('dispatched');
+  });
+
+  it('loads a pre-#472 1.2.0 state and backfills the recovery fields', () => {
+    // Exactly what #468 persisted: entries with pr/cleanup but no
+    // failure_evidence, batches with none of the recovery fields.
+    const legacy = {
+      schema_version: '1.2.0',
+      paused: false,
+      entries: [
+        {
+          issue: 201,
+          mode: 'slot',
+          batch: 'b1',
+          deps: [],
+          tier: 'mid',
+          status: 'committed',
+          reason: null,
+          pr: 77,
+          cleanup: null,
+          enqueued_at: NOW.toISOString(),
+          updated_at: NOW.toISOString(),
+        },
+      ],
+      batches: [
+        {
+          id: 'b1',
+          status: 'validating',
+          members: [201],
+          base_branch: 'main',
+          executing_member: 1,
+          created_at: NOW.toISOString(),
+          updated_at: NOW.toISOString(),
+        },
+      ],
+      slots: [],
+      next_slot_id: 1,
+      last_pr_poll_at: null,
+    };
+    const migrated = validateState(legacy);
+    expect(migrated.schema_version).toBe(SCHEMA_VERSION);
+    expect(migrated.entries[0].failure_evidence).toBeNull();
+    const batch = findBatch(migrated, 'b1');
+    expect(batch?.anchor).toBeNull();
+    expect(batch?.branch).toBeNull();
+    expect(batch?.run_id).toBeNull();
+    expect(batch?.eviction_groups).toEqual([]);
+    expect(batch?.evictions).toEqual([]);
+    expect(batch?.fix_attempts).toEqual([]);
+    expect(batch?.rebase_attempts).toBe(0);
+    // everything #468 persisted is preserved
+    expect(migrated.entries[0].pr).toBe(77);
+    expect(batch?.status).toBe('validating');
+    expect(batch?.executing_member).toBe(1);
+  });
+
+  it('rejects malformed recovery fields rather than coercing them', () => {
+    const state = seeded();
+    const badGroups = {
+      ...state,
+      batches: state.batches.map((b) => ({ ...b, eviction_groups: [[201, 'nope']] })),
+    };
+    expect(() => validateState(badGroups)).toThrow(/eviction group/);
+
+    const badAnchor = {
+      ...state,
+      batches: state.batches.map((b) => ({ ...b, anchor: -1 })),
+    };
+    expect(() => validateState(badAnchor)).toThrow(/anchor must be a positive integer/);
+
+    const badRebase = {
+      ...state,
+      batches: state.batches.map((b) => ({ ...b, rebase_attempts: -2 })),
+    };
+    expect(() => validateState(badRebase)).toThrow(/rebase_attempts/);
+
+    const badEvidence = {
+      ...state,
+      entries: state.entries.map((e) => ({ ...e, failure_evidence: { batch: '' } })),
+    };
+    expect(() => validateState(badEvidence)).toThrow(/failure_evidence\.batch/);
   });
 
   it('rejects a malformed pr field', () => {
