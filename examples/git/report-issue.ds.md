@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "report-issue",
   "title": "Report Issue — Rich Completion Summary",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Generate a comprehensive completion report covering what changed, user-facing implications, dev/ops implications, and review results — posted to both conversation and PR comment; in batch mode (batch_id set): one batch report on the anchor plus one short completion comment per member issue",
@@ -86,13 +86,13 @@
   "last_updated": "2026-08-29",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "cf9da113143a89b676a1d91e015806fa8d3784f718fd9109b468e000fd9b86ac"
+    "hash": "ed8f6cdc74640786ad34cb7dd3e624c3a351312c340117344b993815ab2f1361"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "tA+vl/INAovU+Zg/7ofb+qtV7kfn+h75l/GHvLpK5EqpFRPIH9t63+H9ISW9dufW+s+dpgg7S7ekWz+aoL6vAw==",
+    "signature": "IZgDGuoklwe4o3kwstULpzxteChdKja3GZpmFlZ5YxvhcibQ+DQusZ6dRLodGom5OhwxAsBrNdw18iqvW5phAg==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T18:04:15.155Z",
+    "signed_at": "2026-08-29T18:21:28.170Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -158,7 +158,7 @@ ai-dossier runstate post --issue <anchor_number> --phase batch-report --status d
   --kv traps_added=<n>
 ```
 
-`<run_id>` is the batch's run id; the CLI stamps `next=done`. `merge_commit` empty is the same failure it is in the report body — a blocked milestone with `reason=no-merge-commit` is the honest posting, not `done`.
+`<run_id>` is the batch's run id; the CLI stamps `next=done`. `merge_commit` empty is the same failure it is in the report body — the CLI accepts only `status=done` for `batch-report`, so state the failure in the report body's first line (honesty gate) and omit `merge_commit=` from the milestone rather than posting `done` over it.
 
 ## Actions to Perform
 

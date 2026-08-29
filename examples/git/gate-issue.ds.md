@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "gate-issue",
   "title": "Gate Issue — Pre-Flight Safety Check",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "protocol_version": "1.0",
   "status": "Stable",
   "last_updated": "2026-08-29",
@@ -50,13 +50,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "25a3b2ff5a405d9fc7a36d8d915e691e8c12e70149c0413ed7b07e19dc1fc8e1"
+    "hash": "fba1e5ce8e28e4c2811b4b93f29e362b21c04a385e5c8ae01059941b89f06a14"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "ZdJ2K8bhJ0rgyZu+m/sGphUFxBeqRUH9CtSBCt06vm0amzZR/593GgnF7j77pLnX1K7Jb7GHxh27rT5JOMiZDA==",
+    "signature": "Ooww3tkm1aHD/HROEGK8Xx2YcO9BM1fISLL+kMfnVvBvnkb+NGkrBNyyyDOx1wJ6xXcDzbLqmootLM4PWh4oBA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T18:04:13.029Z",
+    "signed_at": "2026-08-29T18:21:27.060Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -73,7 +73,7 @@ Lightweight safety gate (~30s) — check issue metadata for blockers before comm
 ## Prerequisites
 
 - GitHub CLI (gh) is installed and authenticated
-- `ai-dossier` CLI >= 0.10.0 is installed (`ai-dossier runstate --help`) — this phase mints, reads, and posts runstate through it
+- `ai-dossier` CLI >= 0.14.0 is installed (`ai-dossier runstate --help`) — this phase mints, reads, and posts runstate through it, and its fresh-entry verdicts (classify/slot/batch-anchor, `slot_trail`) and the `batch-*` phases need the Batch Cycles vocabulary (0.14.0)
 - You are in a git repository with GitHub as a remote
 
 ## Actions to Perform
@@ -273,6 +273,6 @@ Let the CLI stamp `at=` and compute `next=` (here `setup`) — do not pass eithe
 | Symptom | Fix |
 |---|---|
 | `gh` not found | Install GitHub CLI: https://cli.github.com/ |
-| `ai-dossier runstate` not found | The CLI is older than 0.10.0 — install it (`npm i -g @ai-dossier/cli`). Do not fall back to hand-written milestone comments. |
+| `ai-dossier runstate` not found, or it rejects `batch-*` phases / emits no `slot_trail` | The CLI is older than 0.14.0 — install it (`npm i -g @ai-dossier/cli`). Do not fall back to hand-written milestone comments. |
 | Issue not found | Verify the issue number and repository access |
 | Dependencies check slow | Only checks issues explicitly referenced with "Depends on #N" |

@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "setup-issue-workflow",
   "title": "Setup Issue Workflow",
-  "version": "1.14.0",
+  "version": "1.14.1",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Create a workflow for GitHub issues: fetch issue details, create appropriately named branches, set up git worktrees with environment warmup (or claim from a pre-warmed pool), and generate planning files; in batch mode (batch_id) it creates the shared batch branch for the batch anchor instead",
@@ -80,13 +80,13 @@
   "last_updated": "2026-08-29",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "8eb9922ad8683d95015861c570e2bdc5b3783efa5a2a47f221e4286311bd8e11"
+    "hash": "dcbca3c0060d32aef51cb11a4e5ceab92aeba1492bc45445aec8e50c1d389f21"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "ZWj3l1lHpboGgIToEjm6YXsMdXd3fl60i2pIHgeUSqhpFORRUY3HyOFSLgnkhBctjU9VzMaLf6Q258+NmlJQAA==",
+    "signature": "NXJOoOgjivDOoSe7Oxmo+W27fdKOT0oCt1SbMN1n9ajvGrXNmAuCaskYSxCS03EA0vp/iBdpcKikN/+zAUNzDA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T18:04:14.072Z",
+    "signed_at": "2026-08-29T18:21:27.636Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -146,7 +146,7 @@ If the `batch_id` input is set, this run is **batch mode**: it runs ONCE per bat
 - **Branch name**: `batch/<batch_id>-<YYYYMMDD>` (UTC date at creation) — e.g. `batch/b1-20260829`. Branch from `BASE_BRANCH`. No type prefix, no issue number, no title slug — those are per-issue concepts.
 - **Worktree path**: `$REPO_ROOT/worktrees/batch-<batch_id>-<YYYYMMDD>`.
 - **Steps 3 and 4 are SKIPPED** (branch type and title slug do not apply).
-- Steps 5.1 (pool claim), 6, 7, 8 and 8.5 run unchanged with the batch branch name — the pool claim or cold path is identical to per-issue mode. The anchor issue number is passed to `worktree-pool claim --issue`.
+- Steps 5.1 (pool claim), 6, 7, 8 and 8.5 run with the batch branch name and the batch worktree path above — substitute `batch-<batch_id>-<YYYYMMDD>` for the per-issue `<type>-<issue-number>-<slug>` template in Steps 6 and 8; the pool claim or cold path is otherwise identical to per-issue mode. The anchor issue number is passed to `worktree-pool claim --issue`.
 - **Step 9 (planning scaffold) is SKIPPED** — the batch worktree carries no `PLANNING-*` file. Member issues' plans live on the issues themselves as `plan:v1` artifact comments (produced by batch-prep or plan-issue).
 - The Step 11 milestone posts `phase=batch-setup` on the ANCHOR issue (see Step 11).
 
@@ -432,7 +432,7 @@ Let the CLI stamp `at=` and compute `next=plan` — do not pass either; never ha
 - [ ] Final summary includes the Environment Status section with warmup results
 
 **Repurpose worktree mode only:**
-- [ ] Existing worktree listed and selected; switched to a new branch created from origin/main
+- [ ] Existing worktree listed and selected; switched to a new branch created from origin/$BASE_BRANCH
 - [ ] Directory renamed to match the new issue; `git worktree repair` completed without errors and `git worktree list` shows the correct path and branch
 - [ ] Stale files handled (discarded or user acknowledged); warm-up skipped (dependencies already present)
 

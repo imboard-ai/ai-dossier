@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "issue-workflows-guide",
   "title": "Issue Workflows Guide",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Reference guide for the issue workflow family — explains when to use each workflow, how they compose from shared sub-dossiers, and available flags",
@@ -28,13 +28,13 @@
   "last_updated": "2026-08-29",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "3e1c35996e0b2dfa428e10695e7e8df4126cebf9739baab8b0b40e1831e1aa2b"
+    "hash": "874e600aaa78321a6c00cc73a2a1a25c38e5d3d75de68f7f55232b21cec5046c"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "4njQb+1EZf/Zq3QqGnZxRqHRBgqaWr1SjCc2EgogS4TyinbnM41KK2sGx1immi7uZMctKbbwXDlwtdpxsz/TDQ==",
+    "signature": "V8Ngrmr9Z/ng5Vz+2i7GT3S65C5WahfPnsb/F1LxyhEEc6M7K2OHACbTOmzpQIVVSmf7CxQghWP+q9zDSTq2Cg==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T10:26:15.545Z",
+    "signed_at": "2026-08-29T18:21:28.724Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -98,7 +98,7 @@ All three skills support:
 | Name | Registry Path | What it does | Used by |
 |---|---|---|---|
 | `gate-issue` | `imboard-ai/git/gate-issue` | Safety check (hard blocks, soft warnings, base branch) + **resume detection**: reads the last runstate milestone, verifies it against git/PR reality, emits `resume_from` | all three |
-| `setup-issue-workflow` | `imboard-ai/git/setup-issue-workflow` | Branch + worktree (pool or cold) + warmup + claim issue label | all three |
+| `setup-issue-workflow` | `imboard-ai/git/setup-issue-workflow` | Branch + worktree (pool or cold) + warmup | all three |
 | `plan-issue` | `imboard-ai/git/plan-issue` | Read issue + comments + explore code → write rich `PLANNING-{N}-{slug}.md` | all three |
 | `implement-issue` | `imboard-ai/git/implement-issue` | Implement per plan + affected-scoped tests + `scripts/ci-parity.sh` when the repo has it | guided, full-cycle |
 | `review-issue` | `imboard-ai/git/review-issue` | 7 parallel review agents (DRY, Security, Supportability, Maintainability, Docs, Convention, **blind Conformance vs the issue's Acceptance Criteria**) + fix findings | guided, full-cycle |
