@@ -9,6 +9,7 @@ import { program } from 'commander';
 const pkg = require('../package.json');
 
 import { registerCacheCommand } from './commands/cache';
+import { registerCapCommand } from './commands/cap';
 import { registerChecksumCommand } from './commands/checksum';
 import { registerCommandsCommand } from './commands/commands';
 import { registerConfigCommand } from './commands/config-cmd';
@@ -113,6 +114,7 @@ registerDoctorCommand(program);
 registerTracesCommand(program);
 registerRunstateCommand(program);
 registerSchedCommand(program);
+registerCapCommand(program);
 
 // Hidden
 registerPromptHookCommand(program);
