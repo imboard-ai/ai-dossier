@@ -14,12 +14,14 @@ import { formatDurationCell } from '../duration';
 import { fail } from '../helpers';
 import { parseIssueSelection } from '../issue-selection';
 import {
+  BATCH_PHASES,
   buildMilestone,
   computeResume,
   isIssueNumber,
   MAX_BODY_LENGTH,
   mintRunId,
   type ParsedMilestone,
+  PHASES,
   parseMilestones,
   type ResumeProbe,
   splitPair,
@@ -611,9 +613,15 @@ function registerPostSubcommand(cmd: Command): void {
     .command('post')
     .description('Build and post a runstate milestone comment (validates before posting)')
     .requiredOption('--issue <number>', 'GitHub issue number')
-    .requiredOption('--phase <phase>', 'gate, setup, plan, implement, review, ship, or report')
+    .requiredOption(
+      '--phase <phase>',
+      `classify, ${[...PHASES].join(', ')}, or a batch phase (${BATCH_PHASES.join(', ')})`
+    )
     .requiredOption('--status <status>', 'done, partial, blocked, or awaiting-merge')
-    .requiredOption('--run <id>', 'Run id minted by the gate phase (r-<issue>-<hex>)')
+    .requiredOption(
+      '--run <id>',
+      'Run id (r-<issue>-<hex>) — mint one with: runstate mint; full-cycle runs mint it at the gate phase'
+    )
     .option('--kv <key=value...>', 'Phase-specific key=value pair (repeatable)')
     .option('--next <phase>', 'Override the computed next= value')
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
@@ -706,6 +714,7 @@ function registerVerifySubcommand(cmd: Command): void {
               run_id: result.run_id,
               verified: result.verified,
               resume_context: result.resume_context,
+              ...(result.slot_trail ? { slot_trail: true } : {}),
               ...(result.hard_block ? { hard_block: result.hard_block } : {}),
               ...(result.note ? { note: result.note } : {}),
               ...(warnings.length > 0 ? { warnings } : {}),
@@ -718,6 +727,7 @@ function registerVerifySubcommand(cmd: Command): void {
         console.log(`resume_from=${result.resume_from}`);
         console.log(`run_id=${result.run_id ?? 'none'}`);
         console.log(`verified=${result.verified.length > 0 ? result.verified.join(',') : 'none'}`);
+        if (result.slot_trail) console.log('slot_trail=present');
         if (result.hard_block) console.log(`hard_block=${result.hard_block}`);
         if (result.note) console.log(`note=${result.note}`);
         console.log(`resume_context=${JSON.stringify(result.resume_context)}`);

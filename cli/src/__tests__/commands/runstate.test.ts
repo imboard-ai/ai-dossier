@@ -267,6 +267,106 @@ describe('runstate command', () => {
       expect(errored().some((l) => l.includes("Malformed --kv 'base_branch'"))).toBe(true);
     });
 
+    it('posts a classify verdict with all eight keys (#461)', async () => {
+      execReturns('url\n');
+
+      await run([
+        'runstate',
+        'post',
+        '--issue',
+        '440',
+        '--phase',
+        'classify',
+        '--status',
+        'done',
+        '--run',
+        'r-440-ab56',
+        '--kv',
+        'mode=slot',
+        '--kv',
+        'risk=low',
+        '--kv',
+        'est_files=3',
+        '--kv',
+        'est_diff=120',
+        '--kv',
+        'areas=cli,docs',
+        '--kv',
+        'test_scope=focused',
+        '--kv',
+        'deps=none',
+        '--kv',
+        'confidence=0.85',
+      ]);
+
+      const body = mockedExec.mock.calls[0][1]?.[4] ?? '';
+      expect(body).toContain('phase=classify status=done run=r-440-ab56');
+      expect(body).toContain('mode=slot');
+      expect(body).toContain('confidence=0.85');
+      expect(body).toContain('next=done');
+    });
+
+    it('posts a batch-ship awaiting-merge milestone (#461)', async () => {
+      execReturns('url\n');
+
+      await run([
+        'runstate',
+        'post',
+        '--issue',
+        '480',
+        '--phase',
+        'batch-ship',
+        '--status',
+        'awaiting-merge',
+        '--run',
+        'r-480-cd12',
+        '--kv',
+        'batch=b-2026-08-29-01',
+      ]);
+
+      const body = mockedExec.mock.calls[0][1]?.[4] ?? '';
+      expect(body).toContain('phase=batch-ship status=awaiting-merge');
+      expect(body).toContain('next=batch-ship');
+    });
+
+    it('refuses a malformed verdict value with an actionable line and posts nothing (#461)', async () => {
+      const code = await run([
+        'runstate',
+        'post',
+        '--issue',
+        '440',
+        '--phase',
+        'classify',
+        '--status',
+        'done',
+        '--run',
+        'r-440-ab56',
+        '--kv',
+        'mode=full',
+        '--kv',
+        'risk=extreme',
+        '--kv',
+        'est_files=2',
+        '--kv',
+        'est_diff=50',
+        '--kv',
+        'areas=cli',
+        '--kv',
+        'test_scope=unknown',
+        '--kv',
+        'deps=none',
+        '--kv',
+        'confidence=0.9',
+      ]);
+
+      expect(code).toBe(1);
+      expect(mockedExec).not.toHaveBeenCalled();
+      expect(errored()).toHaveLength(1);
+      expect(errored()[0]).toContain(
+        "Key 'risk' has an invalid value 'extreme' — expected one of: low, med, high"
+      );
+    });
+
     it('prints the body without posting under --dry-run', async () => {
       await run([
         'runstate',
@@ -472,6 +572,67 @@ describe('runstate command', () => {
       await run(['runstate', 'verify', '--issue', '440']);
 
       expect(logged()).toContain('hard_block=resume-loop');
+    });
+
+    it('reports slot_trail=present for a slot-mode member trail (#461)', async () => {
+      const slotImplement = [
+        RUNSTATE_MARKER,
+        'phase=implement status=done run=r-440-ab56 at=2026-08-24T10:03:00Z',
+        'head=abc1234',
+        'mode=slot',
+        'batch=b-2026-08-29-01',
+        'next=x',
+        '',
+      ].join('\n');
+      execReturns(commentsPayload([slotImplement]));
+
+      await run(['runstate', 'verify', '--issue', '440']);
+
+      expect(logged()).toContain('resume_from=none');
+      expect(logged()).toContain('slot_trail=present');
+      expect(logged().some((l) => l.startsWith('note=slot-mode trail'))).toBe(true);
+    });
+
+    it('reports slot_trail in --json for a slot-mode member trail (#461)', async () => {
+      const classifySlot = [
+        RUNSTATE_MARKER,
+        'phase=classify status=done run=r-440-ab56 at=2026-08-24T09:00:00Z',
+        'mode=slot',
+        'risk=low',
+        'est_files=3',
+        'est_diff=120',
+        'areas=cli',
+        'test_scope=focused',
+        'deps=none',
+        'confidence=0.85',
+        'next=done',
+        '',
+      ].join('\n');
+      execReturns(commentsPayload([classifySlot]));
+
+      await run(['runstate', 'verify', '--issue', '440', '--json']);
+
+      const parsed = JSON.parse(logged()[0]);
+      expect(parsed.resume_from).toBe('none');
+      expect(parsed.slot_trail).toBe(true);
+      expect(parsed.note).toContain('classify');
+    });
+
+    it('treats a batch anchor trail as not-a-full-cycle-run (#461)', async () => {
+      const batchShip = [
+        RUNSTATE_MARKER,
+        'phase=batch-ship status=awaiting-merge run=r-480-cd12 at=2026-08-24T10:05:00Z',
+        'batch=b-2026-08-29-01',
+        'next=batch-ship',
+        '',
+      ].join('\n');
+      execReturns(commentsPayload([batchShip]));
+
+      await run(['runstate', 'verify', '--issue', '480']);
+
+      expect(logged()).toContain('resume_from=none');
+      expect(logged().some((l) => l.startsWith('note=batch anchor trail'))).toBe(true);
+      expect(logged()).not.toContain('slot_trail=present');
     });
 
     it('only ever runs read-only commands', async () => {
