@@ -86,6 +86,7 @@ export function computeAssignments(
         status: 'idle' as const,
         unit: null,
         pid: null,
+        pid_start: null,
         phase: null,
         last_progress_at: null,
         branch: null,

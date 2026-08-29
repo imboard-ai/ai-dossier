@@ -64,6 +64,21 @@ where every mechanical supervision decision is code, not remembered prose:
    progress, stalled, redispatched, unit-failed, dependents-blocked, …) is appended to
    `events.jsonl`; `sched status` shows the live phase per unit.
 
+Two engine-safety policies were explicit product decisions on #464:
+
+- **Pid identity is hybrid-verified (decision 1, option C).** Every spawn records the
+  child's `/proc/<pid>/stat` start-time and persists it in `state.json` (`pid_start`);
+  `kill`/`isAlive` refuse a pid whose current start-time no longer matches — a reused
+  pid is never signalled, across engine restarts too. Platforms without `/proc`
+  (macOS/Windows) and legacy pids without a recorded start-time stay best-effort.
+- **Unreachable ground truth pauses decisions (decision 2, option A).** A FAILED
+  milestone poll (`undefined`) is distinct from a verifiably-empty trail (`null`):
+  while a poll is unreachable (gh auth expired, `ai-dossier` missing from a cron PATH,
+  network down), stall and verify-fail decisions pause for that unit — an outage can
+  never kill a healthy agent or fail a unit as "unverified". An agent that exits during
+  an outage holds in `verifying` until truth returns. Each pause is journaled as
+  `ground-truth-unreachable`.
+
 Only `issue:<n>` units are dispatched today — batch member sequencing is a follow-up
 (#464 non-goal).
 

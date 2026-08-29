@@ -184,6 +184,14 @@ export interface SlotEntry {
   unit: string | null;
   /** OS pid of the spawned agent process, when known (#464 dispatch). */
   pid: number | null;
+  /**
+   * `/proc/<pid>/stat` start-time (field 22) recorded at spawn, when
+   * available (Linux). Persisted so a restarted sched can verify a state.json
+   * pid still belongs to our agent — a mismatched start time means the pid
+   * was reused by an unrelated process and must never be signalled (decision
+   * 1, option C). Null on platforms without /proc: best-effort.
+   */
+  pid_start: number | null;
   /** Scheduler phase the unit is in, when running. */
   phase: string | null;
   /** Last progress signal (new milestone or pushed commit) — stall-timer anchor. */
@@ -316,6 +324,7 @@ export type JournalEventName =
   | 'unit-failed'
   | 'dependents-blocked'
   | 'requeued'
+  | 'ground-truth-unreachable'
   | 'tick-failed';
 
 /** One journaled event. `ts` is stamped by the journal, never by callers. */

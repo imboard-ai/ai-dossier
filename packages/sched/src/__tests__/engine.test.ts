@@ -42,13 +42,16 @@ function harness(opts?: { maxSlots?: number; stallTimeoutMs?: number }) {
       return alive.delete(pid);
     },
     isAlive: (pid) => alive.has(pid),
+    processStart: () => null, // no /proc in the fake — best-effort identity
   };
 
   const milestones = new Map<number, GroundTruthMilestone | null>();
   const closedIssues = new Set<number>();
   const branchHeads = new Map<string, string>();
+  const unreachable = new Set<number>();
   const groundTruth: GroundTruth = {
-    latestMilestone: (issue) => milestones.get(issue) ?? null,
+    latestMilestone: (issue) =>
+      unreachable.has(issue) ? undefined : (milestones.get(issue) ?? null),
     issueClosed: (issue) => closedIssues.has(issue),
     branchHead: (branch) => branchHeads.get(branch) ?? null,
   };
@@ -77,6 +80,7 @@ function harness(opts?: { maxSlots?: number; stallTimeoutMs?: number }) {
     milestones,
     closedIssues,
     branchHeads,
+    unreachable,
     config,
     deps,
     enqueue: (inputs: EnqueueInput[]) =>
@@ -477,6 +481,74 @@ describe('restart self-healing', () => {
     expect(result.spawned).toEqual(['issue:101']);
     expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('dispatched');
     expect(h.state().slots.find((s) => s.unit === 'issue:101')?.status).toBe('running');
+  });
+});
+
+describe('ground-truth outage pause (decision 2, option A)', () => {
+  it('an unreachable poll pauses the stall decision — no kill, no redispatch, journaled', () => {
+    const h = harness({ stallTimeoutMs: 30 * 60 * 1000 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+    h.tick();
+    const pid = h.spawnCalls[0].pid;
+
+    // Outage: the milestone poll fails, the stall window elapses.
+    h.unreachable.add(101);
+    h.advance(45 * 60 * 1000);
+    const result = h.tick();
+
+    expect(result.redispatched).toHaveLength(0);
+    expect(result.failed).toHaveLength(0);
+    expect(h.killedPids).toHaveLength(0); // the healthy agent was NOT killed
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('dispatched');
+    expect(h.journal.read().some((e) => e.event === 'ground-truth-unreachable')).toBe(true);
+
+    // Truth returns WITH progress made during the outage → progress, still no stall.
+    h.unreachable.delete(101);
+    h.setMilestone(101, 'implement', 'done');
+    const after = h.tick();
+    expect(after.redispatched).toHaveLength(0);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('dispatched');
+    void pid;
+  });
+
+  it('an agent exit during an outage holds in verifying; truth returning completes it', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    h.tick();
+
+    // The agent exits DURING the outage — exit detection is local truth and
+    // still fires; verification pauses because truth is unreachable.
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.unreachable.add(101);
+    let result = h.tick();
+    expect(result.completed).toHaveLength(0);
+    expect(result.redispatched).toHaveLength(0); // NOT failed as unverified — paused
+    const slot = h.state().slots.find((s) => s.unit === 'issue:101');
+    expect(slot?.status).toBe('verifying');
+
+    // Truth returns and confirms report done → the held exit completes.
+    h.unreachable.delete(101);
+    h.setMilestone(101, 'report', 'done');
+    result = h.tick();
+    expect(result.completed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('done');
+  });
+
+  it('an agent exit during an outage, with truth returning empty, rides the recovery ladder once', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.unreachable.add(101);
+    h.tick(); // paused in verifying
+
+    h.unreachable.delete(101); // truth returns: no milestone exists (known-absent)
+    const result = h.tick();
+    expect(result.redispatched).toEqual(['issue:101']); // NOW the ladder decides
+    expect(h.state().entries.find((e) => e.issue === 101)?.tier).toBe('mid');
   });
 });
 

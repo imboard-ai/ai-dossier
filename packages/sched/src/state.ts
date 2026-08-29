@@ -277,6 +277,13 @@ export function validateState(data: unknown): SchedState {
     if (slot.pid !== null && !Number.isInteger(slot.pid)) {
       throw new Error(`Slot ${slot.id}: pid must be an integer or null`);
     }
+    if (
+      slot.pid_start !== null &&
+      slot.pid_start !== undefined &&
+      (!Number.isInteger(slot.pid_start) || slot.pid_start < 0)
+    ) {
+      throw new Error(`Slot ${slot.id}: pid_start must be a non-negative integer or null`);
+    }
     if (slot.phase !== null && typeof slot.phase !== 'string') {
       throw new Error(`Slot ${slot.id}: phase must be a string or null`);
     }
@@ -310,12 +317,13 @@ export function validateState(data: unknown): SchedState {
     throw new Error('next_slot_id must be a positive integer');
   }
 
-  // Migration: pre-#464 (1.0.0) slots carry no branch/last_head — backfill
-  // null so the returned state always has the current shape.
+  // Migration: pre-#464 (1.0.0) slots carry no branch/last_head/pid_start —
+  // backfill null so the returned state always has the current shape.
   const slots = (obj.slots as SlotEntry[]).map((slot) => ({
     ...slot,
     branch: slot.branch ?? null,
     last_head: slot.last_head ?? null,
+    pid_start: slot.pid_start ?? null,
   }));
 
   return { ...(data as SchedState), schema_version: SCHEMA_VERSION, slots };
@@ -408,7 +416,9 @@ export function transitionSlot(
   }
   const slots = [...state.slots];
   const clearing =
-    to === 'idle' ? { unit: null, pid: null, phase: null, branch: null, last_head: null } : {};
+    to === 'idle'
+      ? { unit: null, pid: null, pid_start: null, phase: null, branch: null, last_head: null }
+      : {};
   const resetting = to === 'idle' ? { recoveries: 0 } : {};
   slots[idx] = transition(
     'slot',

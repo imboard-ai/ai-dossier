@@ -799,8 +799,11 @@ against ground truth.
   strong, cap 2 — then the unit fails and its transitive dependents are blocked);
   externally-advanced state and orphaned pids after a restart are detected; a freed slot
   is refilled in the same tick. `--once` runs a single tick (cron-style); Ctrl-C stops
-  the engine while spawned agents keep running. All events are journaled to
-  `events.jsonl`, and `status` shows the live phase per unit.
+  the engine while spawned agents keep running. Pids are identity-guarded via
+  `/proc` start-times (a reused pid is never signalled; best-effort on macOS/Windows),
+  and a FAILED ground-truth poll (gh outage) pauses that unit's stall/verify decisions
+  instead of guessing — an outage never kills a healthy agent. All events are journaled
+  to `events.jsonl`, and `status` shows the live phase per unit.
 - **`status`** renders the queue, slots (with pid, live phase, last-progress, recoveries),
   batches, runnable units, and the blocked/failed sets. A blocked entry names every
   unsatisfied dependency ("dependency #104 not merged (status: dispatched)"), so "why

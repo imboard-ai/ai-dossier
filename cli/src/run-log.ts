@@ -5,7 +5,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { readJsonl } from '@ai-dossier/sched';
 import { CONFIG_DIR } from './config';
 import { appendAuditJsonl } from './jsonl-log';
 
@@ -75,18 +74,31 @@ export function appendRunLog(entry: RunLogEntry): void {
 
 /**
  * Read the run log, filter, return most-recent-first.
- * Malformed lines are skipped (shared readJsonl helper).
+ * Skips malformed lines.
  */
 export function readRunLog(opts?: { limit?: number; dossier?: string }): RunLogEntry[] {
-  let entries = readJsonl<RunLogEntry>(LOG_FILE);
-  if (opts?.dossier) {
-    entries = entries.filter((e) => e.dossier === opts.dossier);
+  try {
+    if (!fs.existsSync(LOG_FILE)) return [];
+    const lines = fs.readFileSync(LOG_FILE, 'utf8').split('\n').filter(Boolean);
+    let entries: RunLogEntry[] = [];
+    for (const line of lines) {
+      try {
+        entries.push(JSON.parse(line));
+      } catch {
+        // Skip malformed lines
+      }
+    }
+    if (opts?.dossier) {
+      entries = entries.filter((e) => e.dossier === opts.dossier);
+    }
+    entries.reverse();
+    if (opts?.limit) {
+      entries = entries.slice(0, opts.limit);
+    }
+    return entries;
+  } catch {
+    return [];
   }
-  entries.reverse();
-  if (opts?.limit) {
-    entries = entries.slice(0, opts.limit);
-  }
-  return entries;
 }
 
 /**

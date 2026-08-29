@@ -23,11 +23,22 @@ export interface GroundTruthMilestone {
 }
 
 export interface GroundTruth {
-  /** Latest runstate milestone on the issue, or null when the issue has none. */
-  latestMilestone(issue: number): GroundTruthMilestone | null;
-  /** Whether the GitHub issue is CLOSED (a merged PR auto-closes it). */
+  /**
+   * Latest runstate milestone on the issue. **Tri-state (decision 2, option
+   * A):** an object = the milestone; `null` = the issue verifiably has NO
+   * milestone (known-absent); `undefined` = the poll FAILED (unreachable —
+   * gh auth expired, `ai-dossier` missing, network down). Callers must PAUSE
+   * decisions that need truth (stall, verify-fail) while unreachable, never
+   * treat it as "no progress".
+   */
+  latestMilestone(issue: number): GroundTruthMilestone | null | undefined;
+  /**
+   * Whether the GitHub issue is CLOSED (a merged PR auto-closes it). False
+   * when unreachable — an unreachable poll can never *confirm* completion,
+   * which is the only direction this signal is used in.
+   */
   issueClosed(issue: number): boolean;
-  /** Current head sha of `branch` on origin, or null when unknown/absent. */
+  /** Current head sha of `branch` on origin, or null when unknown/absent/unreachable. */
   branchHead(branch: string): string | null;
 }
 
@@ -85,8 +96,10 @@ export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone 
  * - `git ls-remote origin <branch>` — branch head
  *
  * `repoDir` is the cwd for git; gh resolves the repo from cwd by default.
- * Every failure degrades to null/false — ground truth being unreachable must
- * pause a decision (treated as "unknown"), never crash the tick.
+ * Every failure degrades safely: a failed milestone poll reports UNREACHABLE
+ * (undefined — decision 2, option A), a failed closed-poll reports false, a
+ * failed head-poll null. Ground truth being unreachable pauses the engine's
+ * stall/verify decisions; it never crashes a tick.
  */
 export function createExecGroundTruth(
   exec: ExecFn = groundTruthExec,
@@ -94,10 +107,14 @@ export function createExecGroundTruth(
 ): GroundTruth {
   const runstateBin = opts.runstateBin ?? 'ai-dossier';
   return {
-    latestMilestone(issue: number): GroundTruthMilestone | null {
-      return parseMilestoneJson(
-        exec(runstateBin, ['runstate', 'last', '--issue', String(issue), '--json'], opts.repoDir)
+    latestMilestone(issue: number): GroundTruthMilestone | null | undefined {
+      const out = exec(
+        runstateBin,
+        ['runstate', 'last', '--issue', String(issue), '--json'],
+        opts.repoDir
       );
+      if (out === null) return undefined; // subprocess failed — unreachable, NOT known-absent
+      return parseMilestoneJson(out); // 'null' output → null (verifiably no milestone)
     },
     issueClosed(issue: number): boolean {
       return (

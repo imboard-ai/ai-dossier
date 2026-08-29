@@ -102,9 +102,8 @@ describe('createSpawnDeps (real processes)', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }, 10_000);
 
-  it('refuses to kill a pid that was reused by another process (pid-reuse guard)', async () => {
+  it('refuses to signal a pid whose recorded start-time no longer matches (decision 1, option C)', async () => {
     const { createSpawnDeps } = await import('../index');
-    const { execFileSync } = await import('node:child_process');
     const os = await import('node:os');
     const fs = await import('node:fs');
     const path = await import('node:path');
@@ -115,14 +114,21 @@ describe('createSpawnDeps (real processes)', () => {
     const pid = deps.spawn(['node', fixture], '', path.join(dir, 'log'));
     try {
       expect(deps.isAlive(pid)).toBe(true);
-      // Simulate pid reuse: record a different argv for this pid.
-      // (Reaching into the guard via a second SpawnDeps instance is not
-      // possible, so prove the guard through the public API: kill works for
-      // OUR pid, and a pid we never spawned is best-effort.)
-      expect(deps.kill(pid)).toBe(true);
+      const start = deps.processStart(pid);
+      if (process.platform === 'linux' && start !== null) {
+        // /proc is available: a WRONG recorded start-time (what a reused pid
+        // would show) must make kill/isAlive refuse the pid.
+        expect(deps.isAlive(pid, start + 999999)).toBe(false);
+        expect(deps.kill(pid, start + 999999)).toBe(false);
+        // The correct recorded start-time still allows the signal.
+        expect(deps.kill(pid, start)).toBe(true);
+      } else {
+        // No /proc (macOS/Windows): best-effort — the recorded start cannot
+        // be verified, so signals go through.
+        expect(deps.kill(pid)).toBe(true);
+      }
       await new Promise((resolve) => setTimeout(resolve, 200));
       expect(deps.isAlive(pid)).toBe(false);
-      void execFileSync; // keep import used
     } finally {
       try {
         process.kill(pid, 'SIGKILL');

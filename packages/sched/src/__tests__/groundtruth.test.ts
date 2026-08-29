@@ -99,12 +99,16 @@ describe('createExecGroundTruth', () => {
     expect(calls.some(([f]) => f === 'git')).toBe(true);
   });
 
-  it('degrades to null/false when the subprocess fails — never crashes the tick', () => {
+  it('distinguishes unreachable from known-absent when the subprocess fails (decision 2, option A)', () => {
     const failing: ExecFn = () => null;
     const gt = createExecGroundTruth(failing);
-    expect(gt.latestMilestone(1)).toBeNull();
-    expect(gt.issueClosed(1)).toBe(false);
+    expect(gt.latestMilestone(1)).toBeUndefined(); // FAILED poll — unreachable, not absent
+    expect(gt.issueClosed(1)).toBe(false); // never confirms completion
     expect(gt.branchHead('x')).toBeNull();
+
+    // A poll that RUNS and answers "no milestone" is known-absent, not unreachable.
+    const ok: ExecFn = (_file, args) => (args.includes('runstate') ? 'null' : null);
+    expect(createExecGroundTruth(ok).latestMilestone(1)).toBeNull();
   });
 
   it('a non-40-hex ls-remote line is not a head sha', () => {

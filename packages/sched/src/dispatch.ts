@@ -142,10 +142,24 @@ export interface SpawnDeps {
    * process cannot be spawned (missing binary, unwritable log dir).
    */
   spawn(cmd: string[], prompt: string, logFile: string): number;
-  /** Signal a pid; returns false when it was already dead (or not ours). */
-  kill(pid: number): boolean;
-  /** Whether a pid is alive (best-effort; a reused pid reads as alive). */
-  isAlive(pid: number): boolean;
+  /**
+   * Signal a pid; returns false when it was already dead (or not ours).
+   * `expectedStart` (the persisted `/proc` start-time) enables the pid-reuse
+   * guard: a pid whose start-time no longer matches was reused by an
+   * unrelated process and is never signalled.
+   */
+  kill(pid: number, expectedStart?: number): boolean;
+  /**
+   * Whether a pid is alive (best-effort). `expectedStart` applies the same
+   * pid-reuse guard as `kill`.
+   */
+  isAlive(pid: number, expectedStart?: number): boolean;
+  /**
+   * `/proc/<pid>/stat` start-time (field 22) of a pid, when the platform
+   * exposes it (Linux); null elsewhere. The engine persists this at spawn so
+   * pid identity survives engine restarts (decision 1, option C).
+   */
+  processStart(pid: number): number | null;
 }
 
 /** `issue:464` → `issue-464` (filesystem-safe unit ids for log file names). */
@@ -158,28 +172,50 @@ export const STOP_POLL_MIN_MS = 100;
 export const STOP_POLL_MAX_MS = 1000;
 
 /**
+ * `/proc/<pid>/stat` start-time (field 22, clock ticks since boot) — stable
+ * process identity for the lifetime of the pid, so a recycled pid is
+ * detectable. Null when /proc is unavailable (macOS/Windows) or the process
+ * is gone.
+ */
+export function procStartTime(pid: number): number | null {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8');
+    // comm (field 2) is parenthesized and may contain spaces — everything
+    // after the LAST ')' is fields 3..N, space-separated.
+    const close = stat.lastIndexOf(')');
+    if (close === -1) return null;
+    const fields = stat.slice(close + 2).split(' ');
+    // field 22 (starttime) -> index 19 in the post-comm array (field 3 = index 0)
+    const start = Number.parseInt(fields[19] ?? '', 10);
+    return Number.isInteger(start) && start >= 0 ? start : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Real process I/O: detached spawn with output to a log file, unref'd.
  *
- * Pid-reuse guard: pids this instance spawned are remembered with their argv;
- * a pid whose `/proc` cmdline no longer matches was reused by an unrelated
- * process, and `kill`/`isAlive` refuse it (the agent we spawned is already
- * dead — skipping the kill loses nothing). Pids read from state.json after a
- * restart have no recorded identity and stay best-effort.
+ * Pid-reuse guard (decision 1, option C — hybrid): every pid this instance
+ * spawns is recorded with its `/proc` start-time; `kill`/`isAlive` accept the
+ * start-time persisted in state.json and refuse a pid whose current
+ * start-time no longer matches (it was reused by an unrelated process — the
+ * agent we spawned is already dead, so skipping the signal loses nothing).
+ * On platforms without /proc the guard degrades to best-effort, and pids
+ * without a recorded start-time (e.g. from pre-decision state files) stay
+ * best-effort everywhere.
  */
 export function createSpawnDeps(cwd?: string): SpawnDeps {
-  /** Pids spawned by THIS instance → their argv (pid-reuse guard). */
-  const spawnedCmds = new Map<number, string[]>();
+  /** Pids spawned by THIS instance -> their /proc start-time (Linux). */
+  const spawnedStarts = new Map<number, number>();
 
-  /** A pid we spawned whose /proc cmdline no longer matches was reused. */
-  function isOurPid(pid: number): boolean {
-    const cmd = spawnedCmds.get(pid);
-    if (cmd === undefined) return true; // pid from state.json after a restart: best-effort
-    try {
-      const argv = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').split('\0').filter(Boolean);
-      return argv.length > 0 && argv[0].endsWith(path.basename(cmd[0]));
-    } catch {
-      return true; // /proc unavailable (macOS/Windows) or the process is gone
-    }
+  /** True when `pid` plausibly still names the process we recorded. */
+  function matchesRecordedStart(pid: number, expectedStart: number | undefined): boolean {
+    const expected = expectedStart ?? spawnedStarts.get(pid);
+    if (expected === undefined) return true; // no recorded identity — best-effort
+    const current = procStartTime(pid);
+    if (current === null) return true; // /proc unavailable (non-Linux) or a race — best-effort
+    return current === expected;
   }
 
   return {
@@ -209,32 +245,37 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
             `failed to spawn '${cmd[0]}' — is it on PATH? (command: ${cmd.join(' ')})`
           );
         }
-        spawnedCmds.set(child.pid, cmd);
+        const start = procStartTime(child.pid);
+        if (start !== null) spawnedStarts.set(child.pid, start);
         return child.pid;
       } finally {
         // The child holds its own dups of the fd; the parent's copy must close.
         fs.closeSync(out);
       }
     },
-    kill(pid: number): boolean {
-      if (!isOurPid(pid)) {
-        spawnedCmds.delete(pid);
+    kill(pid: number, expectedStart?: number): boolean {
+      if (!matchesRecordedStart(pid, expectedStart)) {
+        spawnedStarts.delete(pid);
         return false; // reused pid — the agent we spawned is already gone
       }
       try {
         process.kill(pid, 'SIGTERM');
         return true;
       } catch {
+        spawnedStarts.delete(pid);
         return false;
       }
     },
-    isAlive(pid: number): boolean {
+    isAlive(pid: number, expectedStart?: number): boolean {
       try {
         process.kill(pid, 0);
-        return isOurPid(pid);
+        return matchesRecordedStart(pid, expectedStart);
       } catch (err) {
         return (err as NodeJS.ErrnoException).code === 'EPERM';
       }
+    },
+    processStart(pid: number): number | null {
+      return procStartTime(pid);
     },
   };
 }

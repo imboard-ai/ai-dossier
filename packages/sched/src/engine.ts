@@ -91,6 +91,8 @@ function emptyResult(): TickResult {
 
 /** Ground-truth snapshot for one unit, gathered outside the lock. */
 interface UnitTruth {
+  /** False when the milestone poll FAILED (unreachable) — decisions that need truth pause (decision 2, option A). */
+  reachable: boolean;
   milestone: GroundTruthMilestone | null;
   closed: boolean;
   head: string | null;
@@ -153,8 +155,12 @@ function walkSlotToIdle(
 /** Kill the agent holding `unit`'s slot, if it is alive. */
 function killUnitAgent(ctx: TickCtx, state: SchedState, unit: string): void {
   const slot = slotOf(state, unit);
-  if (slot && slot.pid !== null && ctx.deps.spawnDeps.isAlive(slot.pid)) {
-    ctx.deps.spawnDeps.kill(slot.pid);
+  if (
+    slot &&
+    slot.pid !== null &&
+    ctx.deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
+  ) {
+    ctx.deps.spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
   }
 }
 
@@ -169,8 +175,10 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
     }
     const issue = issueOfUnit(slot.unit);
     if (issue === null || out.has(slot.unit)) continue;
+    const milestone = deps.groundTruth.latestMilestone(issue);
     out.set(slot.unit, {
-      milestone: deps.groundTruth.latestMilestone(issue),
+      reachable: milestone !== undefined,
+      milestone: milestone ?? null,
       closed: deps.groundTruth.issueClosed(issue),
       head: slot.branch !== null ? deps.groundTruth.branchHead(slot.branch) : null,
     });
@@ -211,7 +219,12 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
   }
 
   const now = ctx.deps.now();
-  const patch = { pid, phase: 'gate', last_progress_at: now.toISOString() };
+  const patch = {
+    pid,
+    pid_start: ctx.deps.spawnDeps.processStart(pid),
+    phase: 'gate',
+    last_progress_at: now.toISOString(),
+  };
   const next =
     slot.status === 'assigned' || slot.status === 'recovering'
       ? transitionSlot(state, slot.id, 'running', patch, now)
@@ -460,10 +473,22 @@ function reconcileRunning(
 
   // Orphaned pid after a sched restart, or a normally-exited agent: the exit
   // is DETECTED, never trusted as completion (AC2/AC3).
-  if (slot.pid !== null && !ctx.deps.spawnDeps.isAlive(slot.pid)) {
+  if (slot.pid !== null && !ctx.deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
     journal(ctx, 'exit-detected', unit, { pid: slot.pid, slot: slot.id });
     const exited = transitionSlot(state, slot.id, 'exited', {}, now);
     return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete');
+  }
+
+  // The milestone poll FAILED (gh outage, missing binary) — unreachable is NOT
+  // known-absent (decision 2, option A): stall and advance decisions pause for
+  // this unit until truth returns. The dead-pid rail above still ran — local
+  // truth needs no network.
+  if (!truth.reachable) {
+    journal(ctx, 'ground-truth-unreachable', unit, {
+      slot: slot.id,
+      detail: 'stall/advance decisions paused until truth returns',
+    });
+    return state;
   }
 
   // Ground truth says the unit is DONE while the agent still holds the slot —
@@ -510,6 +535,17 @@ function completeUnitOrRecover(
     slot = slotOf(next, unit);
   }
   if (!slot || slot.status !== 'verifying') return next;
+
+  // The poll failed — unreachable is not "unverified" (decision 2, option A):
+  // hold the exit in `verifying` until truth returns, then decide. The agent
+  // is already gone; no slot work is lost by waiting.
+  if (!truth.reachable) {
+    journal(ctx, 'ground-truth-unreachable', unit, {
+      slot: slot.id,
+      detail: 'exit verification paused until truth returns',
+    });
+    return next;
+  }
 
   if (isVerifiedComplete(truth.milestone, truth.closed)) {
     return completeUnit(ctx, next, unit, via);
@@ -559,6 +595,7 @@ function reconcileSlots(
     const unit = slot.unit;
     if (unit === null) continue;
     const truth: UnitTruth = polled.get(unit) ?? {
+      reachable: true,
       milestone: null,
       closed: false,
       head: null,
