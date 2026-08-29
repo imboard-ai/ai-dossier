@@ -808,6 +808,55 @@ Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).
 
 ---
 
+## Capabilities (`cap`)
+
+```bash
+ai-dossier cap list [--json]       # inspect .dossier/automation/manifest.yaml
+ai-dossier cap run test.focused    # execute one capability
+ai-dossier cap run test.focused -- --grep auth   # extra args are shell-quoted and appended
+```
+
+A repo declares its deterministic, recurring operations — tests, lint, build, deps
+install, worktree prep — in `.dossier/automation/manifest.yaml` so agents execute them
+directly instead of re-reasoning (Progressive Determinism, RFC-0001; the scheduler's
+slot-cycle fast path will consume the same manifest, #464). Entries should mostly
+reference existing repo tooling (package scripts, Makefile targets):
+
+```yaml
+capabilities:
+  test.focused:
+    command: npm test -- --silent
+    lifecycle: active          # active | shadow (listed, not executable)
+    description: Focused vitest suite
+    timeout_ms: 300000         # optional; default 5 min, timeout = automation-broken
+    assumptions:               # probes run BEFORE the command; failure = automation-broken
+      - file-exists: package.json
+      - tool-version: node>=20
+```
+
+Extra args after `--` are shell-quoted and appended (they are data, not shell syntax):
+
+```bash
+ai-dossier cap run test.focused -- --grep auth   # → npm test -- --silent --grep auth
+```
+
+`cap run` reports one of exactly four outcomes — the JSON envelope is the **last
+stdout line**, and the exit code matches:
+
+| Outcome | Exit | Meaning |
+|---|---|---|
+| `ok` | 0 | Command ran, exited 0 |
+| `task-failed` | 1 | Command ran, legitimately failed (red tests) |
+| `automation-broken` | 2 | Probe failed / command missing / timeout / abnormal termination — fall back to reasoning |
+| `capability-unavailable` | 3 | Id not in manifest (or `shadow`) — no fast path |
+
+A repo without `.dossier/automation/` is normal: `cap list` is empty and exits 0. Every
+run appends telemetry (capability, outcome, exit code, duration, reason, cwd) to
+`~/.dossier/caps.jsonl`. Full spec and the capability id vocabulary:
+[docs/reference/capabilities.md](../docs/reference/capabilities.md).
+
+---
+
 ## Run History (`history`)
 
 Every `ai-dossier run` appends one JSON line to `~/.dossier/runs.jsonl` (append-only; disable with `dossier config auditLog false`).
