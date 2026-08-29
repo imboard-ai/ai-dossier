@@ -1,0 +1,293 @@
+---dossier
+{
+  "dossier_schema_version": "1.0.0",
+  "name": "batch-issues-preparation",
+  "title": "Batch Issues Preparation — classify, DAG, compose batches, enqueue",
+  "version": "1.0.0",
+  "protocol_version": "1.0",
+  "status": "Draft",
+  "last_updated": "2026-08-29",
+  "objective": "Turn a raw issue list/range into classified, dependency-ordered, batched queue entries for the scheduler (RFC-0001 C.3): resolve the set, build the dependency DAG, classify every issue, ensure a plan:v1 artifact on each, compose batches per E.4, create batch-epic anchor issues, write the audit file, and enqueue via sched enqueue --from-manifest",
+  "category": [
+    "development"
+  ],
+  "tags": [
+    "issue",
+    "workflow",
+    "batch-cycles",
+    "classification",
+    "scheduling",
+    "runstate"
+  ],
+  "risk_level": "medium",
+  "risk_factors": [
+    "network_access"
+  ],
+  "requires_approval": false,
+  "destructive_operations": [
+    "Creates batch-epic anchor issues and applies labels in the target repo",
+    "Posts classify records, rationale comments, and plan:v1 artifacts on prepared issues",
+    "Writes scheduler queue entries via sched enqueue --from-manifest (skipped under dry_run)"
+  ],
+  "inputs": {
+    "required": [
+      {
+        "name": "issues",
+        "description": "Issue list/range to prepare — fleet-cycle Phase 1 grammar: explicit list `1,2,3`, range `1..9`, mixed `1,2,5..8`",
+        "type": "string"
+      }
+    ],
+    "optional": [
+      {
+        "name": "dry_run",
+        "description": "Produce everything (classify records, plan artifacts, anchor issues, audit file, manifest) but do NOT invoke sched enqueue — the shadow-mode deliverable (RFC-0001 G Step 2): backlogs get classified and planned while execution stays untouched.",
+        "type": "boolean",
+        "default": false
+      }
+    ]
+  },
+  "authors": [
+    {
+      "name": "Yuval Dimnik"
+    }
+  ],
+  "external_references": [
+    {
+      "url": "https://cli.github.com/",
+      "description": "GitHub CLI documentation",
+      "type": "documentation",
+      "trust_level": "trusted",
+      "required": false
+    }
+  ],
+  "content_scope": "references-external",
+  "checksum": {
+    "algorithm": "sha256",
+    "hash": "78b295c340937e52918acbd9c2efb134860b1070c94ad92c85608e6f84d831ef"
+  },
+  "signature": {
+    "algorithm": "ed25519",
+    "signature": "JHo3fNMRFk1m5YnEBMlQfmi73ibEAuBtz7/JJ2+/FT4YkLVn0gDoAkPQfCCRTXVaCjllO40cN5hf745EnahHAQ==",
+    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
+    "signed_at": "2026-08-29T19:14:39.713Z",
+    "covers": "frontmatter+body",
+    "key_id": "imboard-ai",
+    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
+  }
+}
+---
+
+# Batch Issues Preparation — classify, DAG, compose batches, enqueue
+
+## Objective
+
+The judgment-heavy front door of Batch Cycles (RFC-0001 C.3): turn a raw issue list/range — potentially hundreds — into classified, dependency-ordered, batched queue entries for the deterministic scheduler (`ai-dossier sched`, #460). Everything after the queue is the scheduler's; everything deeper than a light plan is slot-cycle's or full-cycle's.
+
+**Non-responsibilities (RFC-0001 C.3):** execution and supervision (the scheduler's), deep per-issue planning (slot/full cycle's). This dossier never dispatches a cycle, never creates worktrees, branches, or PRs, and never posts batch milestones on anchors — the scheduler owns the batch lifecycle from `batch-setup` onward.
+
+## Prerequisites
+
+- `ai-dossier` CLI >= 0.18.0 (`sched enqueue --from-manifest`, `plan post|get`, `runstate mint|post|last`, the classify vocabulary #461). Beware shadow copies: a repo-local `node_modules/.bin/ai-dossier` can shadow the global install — when a documented command reports `unknown command`, call the newer binary by absolute path.
+- GitHub CLI (`gh`) installed and authenticated
+- `imboard-ai/git/issue-cycle-classifier` (#465) available in the registry
+- Run from the repository that owns the issues — dependency resolution, path grounding, and `sched enqueue`'s project detection run against it
+
+## Actions to Perform
+
+### Step 1: Resolve the Issue Set (fleet-cycle Phase 1 semantics)
+
+1. Parse `issues` into a concrete list of integers — explicit list `1,2,3` → `[1,2,3]`; range `1..9` → `[1..9]`; mixed `1,2,5..8` → `[1,2,5,6,7,8]`. De-duplicate and sort ascending.
+2. For each issue, fetch state, title, body, labels, and comments (`gh issue view <n> --json ...`).
+3. Drop issues that cannot be prepared — and REPORT every one with its reason (never silently omit):
+   - **closed** or **non-existent** (fleet Phase 1 rule)
+   - label `epic`, `batch-epic`, `decomposed`, or `needs-clarification` — not implementable as a unit
+   - **in-flight or parked**: label `in-progress` or `decision-pending`, OR its latest runstate milestone (`ai-dossier runstate last --issue <n> --json`) is any phase other than `classify`. A classify record landing on an active run's trail breaks its resume — gate-issue reads the LAST milestone and would treat the run as fresh.
+   - already an **active entry** in the scheduler queue (`ai-dossier sched status --json`; entries in terminal states may be re-prepared; a missing sched state is an empty queue)
+
+The skipped table goes in the output AND the audit file: issue, reason.
+
+### Step 2: Build the Dependency DAG (fleet-cycle Phase 2 rules, verbatim)
+
+For every pair of remaining issues, determine whether one must merge **before** the other. **When uncertain, prefer adding a dependency edge (serialize) over assuming independence** — a false parallel is far more expensive than a false serial.
+
+**Explicit dependency signals (authoritative):**
+
+- "depends on #X", "blocked by #X", "after #X" in the issue body or comments
+- GitHub issue links / tracked-by / parent-child (epic → sub-issue)
+- A declared `base_branch` (`merges into \`<branch>\``) that points at another issue's branch or epic
+
+**Inferred dependency signals (judgment):**
+
+- **File-overlap collision** — two issues that will plausibly modify the same files or modules (use the classify records' predicted files and areas once Step 3 has run; before that, the issue text)
+- **Logical/data ordering** — issue B builds on a capability, schema, or API that issue A introduces
+- **Shared migration, lockfile, or global-config surface** — will conflict on merge even if "different features"
+
+Also record each issue's `base_branch` (parsed from `merges into \`<branch>\``; default `main`).
+
+Detect cycles over the combined graph; a true cycle is **surfaced and STOPS the run** — report the cycle's members and edges; the operator resolves it.
+
+For every edge A→B, resolve B's state: edges to merged/closed deps are **satisfied — drop them** from the manifest-facing graph; open deps outside the submitted set make A un-preparable (Step 5 defers it).
+
+### Step 3: Classify Every Issue (parallel cheap dispatches)
+
+1. **Reuse**: if an issue's LATEST runstate milestone is `phase=classify status=done`, take the verdict from that record — do not re-classify (re-posting would bury the trail).
+2. Otherwise dispatch **one cheap-tier agent per issue** (bounded: at most 8 concurrent), each running exactly `ai-dossier run imboard-ai/git/issue-cycle-classifier` for that one issue. Classification is cheap and safe to parallelize; the classifier posts its own records, labels, and rationale (#465). DAG analysis stays with the orchestrator at the strongest tier (fleet 1b routing: judgment here, mechanical elsewhere).
+3. Collect each verdict from `ai-dossier runstate last --issue <n> --json`: `mode`, `risk`, `est_files`, `est_diff`, `areas`, `test_scope`, `deps`, `confidence`.
+4. A classifier `blocked` record (e.g. `unreadable-issue`) drops the issue — reported as skipped. One failed dispatch is retried once; a persistent failure skips that issue, never the whole run.
+
+### Step 4: Ensure a plan:v1 Artifact on Every Issue (#462)
+
+1. `ai-dossier plan get --issue <n>` per remaining issue; exit 0 → an artifact exists, keep it (validate-and-refine belongs to plan-issue / slot-cycle, not here).
+2. Missing → author a **light** artifact and post it:
+   - **Problem** — 1-2 sentences from the issue body
+   - **Acceptance Criteria** — verbatim from the issue's requirements/AC checkboxes; else the minimal testable set
+   - **Predicted Files** — best effort from the issue text and the classifier's inspection; ground named paths with quick probes (`git grep -l "<module>"`, `ls <path>`); empty only when the issue names nothing and no path is inferable
+   - **Approach** — 2-4 bullets from the issue's own scope/approach text
+   - **Test Scope** — from the classify record's `test_scope`
+3. Post with `ai-dossier plan post --issue <n> --file <md>`; write the scratch markdown under `$TMPDIR` (batch-prep owns no worktree, so nothing may dirty a tree).
+
+### Step 5: Compose Batches (RFC-0001 E.4)
+
+Split the classified set:
+
+- `mode=full` issues are **never batched** — they become full-mode queue entries.
+- Issues with an **open dependency outside the submitted set** (classifier floor rule 9 has already forced them full) are **deferred**: classified and planned, but NOT enqueued — an out-of-graph dep stays permanently unsatisfied in the queue (enqueue semantics), so enqueueing them would strand them blocked forever. Report as `deferred-external-dep`; re-run prep once the dep merges.
+- The remaining `mode=slot` issues are packed into batches.
+
+**Hard constraints — ALL must hold for every batch:**
+
+1. Same `base_branch`
+2. Every member's external deps satisfied: merged, a full-mode entry in this run, or a member of an **earlier** batch (never a later one)
+3. ≤ 4 members (initial cap; raise only with measured eviction rate < 10%)
+4. Σ `est_diff` ≤ 1,200 predicted lines
+5. ≤ 1 eviction group: members with overlapping predicted paths MAY share a batch deliberately (they see each other's changes in the shared worktree — this eliminates cross-PR merge conflicts) but form an **eviction group**; a batch may contain at most one overlapping cluster
+6. No two members with `risk=med`+ touching the same area
+
+**Packing (deterministic first-fit):** walk slot issues in topological order. For each, first-fit into the earliest existing batch with the same `base_branch` that still satisfies all six constraints with the candidate added — prefer file-disjoint placement; an overlapping candidate may join only if it creates no second overlap cluster and all its slot-mode deps are members of this batch or of earlier batches (a candidate must never land in a batch earlier than a batch holding its dependency — that would create a backward batch edge). No batch fits → open a new batch. Intra-batch deps stay intra-batch: member order encodes them.
+
+**Member order within a batch:** dependency order → ascending risk (safest first — evicting a late risky member never invalidates early safe ones) → issue number.
+
+**Batch ids:** `b-<YYYYMMDD>-<NN>` — bump NN until the id appears neither in `sched status --json` nor among open `batch-epic` anchors (`gh issue list --label batch-epic --state open`).
+
+**Batch-level DAG:** an edge B1 → B2 (B1 merges first) whenever any member edge crosses the two batches — derived from member edges, never invented. A member dep on a full-mode entry gates through that entry's queue dep (kept in the member's manifest `deps`).
+
+### Step 6: Create the Anchor Issues
+
+1. Idempotently create the label:
+
+   ```bash
+   gh label create "batch-epic" --color "5319E7" --description "Batch anchor — members share one lifecycle (RFC-0001)" --force
+   ```
+
+2. One anchor per batch — title `Batch <batch_id>: #a, #b, #c`, label `batch-epic`, body:
+   - task list of members **in execution order**: `- [ ] #N <title> — risk=<r> est_files=<n> est_diff=<n>`
+   - the eviction group (or "none")
+   - batch-level dependencies (or "none")
+   - the audit-file path
+   - under `dry_run`: a line stating members are NOT enqueued
+3. Record anchor numbers for the output and the audit file.
+
+### Step 7: Write the Audit File (fleet-cycle convention)
+
+- Project slug: `gh repo view --json owner,name -q '.owner.login + "-" + .name'`; on failure, basename of `git rev-parse --show-toplevel`.
+- `mkdir -p ~/.dossier/logs/batch-prep/<project>`; write `BATCH-PLAN-<UTC YYYYMMDD-HHMMSS>.md` capturing: the resolved set; every skipped issue with its reason; the dependency edges with justification (explicit vs inferred); the classify verdict table; each batch (id, base, members in order, per-member risk/est, eviction group, batch deps); the full-mode entries with tiers; the deferred issues; anchor links; the manifest path.
+- `gzip -f` it in place (artifact on disk: `BATCH-PLAN-<ts>.md.gz`). Retention: keep the 20 most recent `BATCH-PLAN-*.md.gz` in that directory, delete older.
+
+### Step 8: Emit the Manifest and Enqueue
+
+1. Final skip-check against `ai-dossier sched status --json` — drop issues that became active queue entries since Step 1 (report).
+2. Write the manifest (schema below) to `~/.dossier/logs/batch-prep/<project>/manifest-<ts>.json` (plain JSON — machine-consumed):
+   - full-mode entries: `{issue, mode: "full", deps, tier, base_branch}` — deps list only OPEN set-internal deps (edges to merged issues were dropped in Step 2)
+   - slot members: `{issue, mode: "slot", batch: <batch_id>, deps, tier, base_branch}` — deps list only OPEN deps **outside this member's own batch** (same-batch deps are encoded in member order)
+   - tier: docs/test/chore-only areas + `risk=low` → `mechanical`; `risk=high` → `strong`; otherwise `mid`
+3. Enqueue, from the target repo:
+
+   ```bash
+   ai-dossier sched enqueue --from-manifest <manifest-path>
+   ```
+
+   On `EnqueueError` STOP and surface the error plus the manifest path — enqueue is atomic (nothing was saved); fix the cause (e.g. duplicate active issue) and re-run. Never silently retry with a trimmed manifest.
+4. Verify: `ai-dossier sched status` shows the new entries and batches; note the result in the output.
+5. `dry_run=true` → steps 1-2 run (the manifest is written and reported), steps 3-4 are skipped. Everything before Step 8 — classify records, plan artifacts, anchors, audit — is REAL under dry_run; that is the shadow-mode deliverable (RFC-0001 G Step 2).
+
+### Step 9: Output
+
+```
+Batch preparation complete: <n> issues in → <b> batches (<m> slot members) + <f> full-mode entries
+Skipped:   <issue: reason, ...>
+Deferred:  <issue: open external dep #X, ...>
+Batches:   <per batch: id, members in order, eviction group, deps, anchor #>
+Full-mode: <issue → tier, ...>
+Manifest:  <path> (enqueued | dry-run — NOT enqueued)
+Audit:     ~/.dossier/logs/batch-prep/<project>/BATCH-PLAN-<ts>.md.gz
+```
+
+## The Enqueue Manifest Schema
+
+Consumed by `ai-dossier sched enqueue --from-manifest` (#460 — `parseManifest` is the contract). Envelope:
+
+```json
+{
+  "project": "<owner-repo slug>",
+  "entries": [ ... ]
+}
+```
+
+`project` is informational (the CLI resolves the project from the working directory); a bare entries array is also accepted, but always emit the envelope.
+
+| Field | Type | Rules |
+|---|---|---|
+| `issue` | positive integer | required; unique among entries; must not be an active queue entry |
+| `mode` | `full` \| `slot` | default `full`; `slot` requires `batch`; `full` must omit `batch` |
+| `batch` | non-empty string | batch id; all members of a batch share it and one `base_branch`; a batch id only joins while forming |
+| `deps` | integer[] | open issue numbers this entry waits on; merged deps dropped; same-batch member deps omitted (member order encodes them); no self-deps; no cycles — enqueue rejects the whole manifest |
+| `tier` | `mechanical` \| `mid` \| `strong` | default `mid` |
+| `base_branch` | non-empty string | branch the unit works from; must match across a batch's members |
+
+Example:
+
+```json
+{
+  "project": "imboard-ai-ai-dossier",
+  "entries": [
+    { "issue": 101, "mode": "full", "deps": [], "tier": "mid", "base_branch": "main" },
+    { "issue": 102, "mode": "slot", "batch": "b-20260829-01", "deps": [101], "tier": "mechanical", "base_branch": "main" },
+    { "issue": 103, "mode": "slot", "batch": "b-20260829-01", "deps": [], "tier": "mechanical", "base_branch": "main" }
+  ]
+}
+```
+
+## Pitfalls and Decision Points
+
+| Situation | Decision / why |
+|---|---|
+| Uncertain whether two issues collide | Add the dependency edge (serialize). False serial < false parallel. |
+| Dependency cycle detected | Surface it and STOP the run. |
+| Issue in-flight (label or runstate trail) | Skip it — a classify record on an active trail breaks the run's resume. |
+| Open dep outside the submitted set | Classify and plan it, but defer enqueue — out-of-graph deps stay permanently unsatisfied in the queue. |
+| One overlap cluster would become two | Refuse the candidate — ≤ 1 eviction group per batch, hard. |
+| Slot issue depends on a full-mode entry | Allowed — the member entry carries the dep; the scheduler gates on that entry's completion. |
+| No slot-eligible issues | Valid outcome — manifest carries full-mode entries only, zero batches. |
+| Everything skipped/deferred/full | Report honestly; an empty batch plan is not an error. |
+| Classifier floor rule hits after reuse of an old classify record | Trust the record — re-classification buries trails; the slot-cycle tripwires catch stale verdicts at execution time. |
+
+## Validation
+
+- [ ] Issue set resolved from list/range; closed/missing/in-flight/not-implementable/already-queued issues reported as skipped
+- [ ] DAG built per fleet-cycle Phase 2 rules (explicit authoritative, serialize-when-unsure); cycles surfaced and stopped the run
+- [ ] Every retained issue has a classify record (reused or freshly dispatched) and a plan:v1 artifact (existing or light)
+- [ ] Every batch satisfies all six E.4 hard constraints; member order = dependency → ascending risk → issue number; batch-level edges derived from member edges only
+- [ ] One `batch-epic` anchor per batch (label created idempotently) with task-list body of members
+- [ ] Audit file written and gzipped under `~/.dossier/logs/batch-prep/<project>/` (retention 20)
+- [ ] Manifest written per the schema; `sched enqueue --from-manifest` invoked and verified via `sched status` — or explicitly skipped under `dry_run`
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `sched` subcommand unknown | CLI < 0.18.0 or a shadow copy — call the global binary by absolute path |
+| `EnqueueError: already in the queue` | The issue became active between Step 1 and Step 8 — drop it from the manifest, report, re-run |
+| `EnqueueError: dependency cycle` | The queue plus manifest contain a cycle the prep DAG check missed — fix the manifest and re-run |
+| `plan post` rejects the file | All five sections are required (Problem, Acceptance Criteria, Predicted Files, Approach, Test Scope) |
+| `runstate last` returns a classify record with missing keys | Stale or hand-written record — re-dispatch the classifier for that issue |
+| No `sched` state for the project | Fresh project — treat `sched status` as an empty queue and proceed |
