@@ -722,6 +722,49 @@ the selection could be read.
 
 ---
 
+## Scheduler core (`sched`)
+
+```bash
+ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--deps 100,104] [--tier mechanical|mid|strong]
+ai-dossier sched enqueue --from-manifest batch-prep.json
+ai-dossier sched status [--json]
+ai-dossier sched pause | resume
+ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
+```
+
+The deterministic core of batch cycles (RFC-0001): a queue, worker slots, and typed
+issue/batch/slot state machines persisted to `~/.dossier/sched/<project>/state.json`
+(`<project>` = `owner-repo` slug, falling back to the repo basename — the same convention
+`fleet-cycle` uses for its logs). **No LLM is involved anywhere in the scheduler**: every
+decision — what is runnable, which slot gets it — is a pure function of the persisted
+state. Dispatching agents is #464; this family owns the queue and the state.
+
+- **`enqueue`** records entries (issue, mode, batch id, dependency edges, model tier) from
+  flags or a batch-prep manifest (`--from-manifest`, a JSON file of entries — flags and
+  manifest can be combined). Invalid input is rejected *before* anything is persisted:
+  duplicate active issues, self-dependencies, dependency cycles, `slot` mode without a
+  batch, and conflicting `base_branch` on a joining batch member.
+- **`status`** renders the queue, slots, batches, runnable units, and the blocked/failed
+  sets. A blocked entry names every unsatisfied dependency ("dependency #104 not merged
+  (status: dispatched)"), so "why isn't #42 running?" is a read, not an investigation.
+  `--json` emits the same report as data.
+- **`pause`/`resume`** gate *new* assignments only — live units keep running.
+- **`abandon --issue`** fails the entry (recording the reason) and releases its slot;
+  **`abandon --batch`** dissolves the batch and requeues every non-terminal member as
+  full-cycle — members already shipped keep their outcome.
+
+State is written atomically (tmp + fsync + rename), so a process killed between writes
+always leaves the previous complete state, and a scheduler restart resumes identically
+from `state.json`. A corrupt state file is a loud error naming the file — never a silent
+queue reset. Concurrency is serialized by a `.sched-lock` directory mutex (stolen from
+dead holders). `max_slots` lives in the same directory's `config.json` (default 3) and
+bounds concurrently-live units; an issue with an unmerged dependency — or a batch behind
+an unmerged batch — is never runnable.
+
+Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).
+
+---
+
 ## Run History (`history`)
 
 Every `ai-dossier run` appends one JSON line to `~/.dossier/runs.jsonl` (append-only; disable with `dossier config auditLog false`).

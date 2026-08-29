@@ -20,10 +20,12 @@ graph TB
         MCP["@ai-dossier/mcp-server\nAI agent support"]
         Registry["@ai-dossier/registry\nRegistry API"]
         Pool["@ai-dossier/worktree-pool\nPre-warmed worktrees"]
+        Sched["@ai-dossier/sched\nDeterministic scheduler core"]
     end
 
     Core --> CLI
     Core --> MCP
+    Sched --> CLI
     CLI --> Registry
 
     style Core fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
@@ -31,6 +33,7 @@ graph TB
     style MCP fill:#fff3e0,stroke:#ef6c00,color:#e65100
     style Registry fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c
     style Pool fill:#ede7f6,stroke:#4527a0,color:#311b92
+    style Sched fill:#ede7f6,stroke:#4527a0,color:#311b92
 ```
 
 ### Core Library (`@ai-dossier/core`)
@@ -133,6 +136,7 @@ See [security/ARCHITECTURE.md](security/ARCHITECTURE.md) for details.
 dossier/
 ├── packages/
 │   ├── core/              # @ai-dossier/core
+│   ├── sched/             # @ai-dossier/sched (deterministic scheduler core)
 │   └── worktree-pool/     # @ai-dossier/worktree-pool (pre-warmed git worktrees)
 ├── cli/                   # @ai-dossier/cli
 ├── mcp-server/           # @ai-dossier/mcp-server

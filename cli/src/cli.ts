@@ -34,6 +34,7 @@ import { registerRemoveCommand } from './commands/remove';
 import { registerResetHooksCommand } from './commands/reset-hooks';
 import { registerRunCommand } from './commands/run';
 import { registerRunstateCommand } from './commands/runstate';
+import { registerSchedCommand } from './commands/sched';
 import { registerSearchCommand } from './commands/search';
 import { registerSignCommand } from './commands/sign';
 import { registerSkillExportCommand } from './commands/skill-export';
@@ -111,6 +112,7 @@ registerHistoryCommand(program);
 registerDoctorCommand(program);
 registerTracesCommand(program);
 registerRunstateCommand(program);
+registerSchedCommand(program);
 
 // Hidden
 registerPromptHookCommand(program);

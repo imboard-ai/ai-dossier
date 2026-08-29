@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/cli",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Create, verify, sign, publish, and run dossiers — portable, signed, versioned skills for any LLM tool. The dossier ⇄ Claude Code skill bridge (install-skill / skill-export).",
   "main": "dist/cli.js",
   "bin": {
@@ -54,6 +54,7 @@
   },
   "dependencies": {
     "@ai-dossier/core": "^1.4.1",
+    "@ai-dossier/sched": "^0.1.0",
     "commander": "^12.1.0",
     "yaml": "^2.8.3"
   },
