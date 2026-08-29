@@ -47,7 +47,7 @@ LLM orchestrator: resolves set → builds dependency DAG (serialize-when-unsure)
 - **worktree-pool** (`main/packages/worktree-pool/`): `status|claim|return|replenish|refresh|gc|init|detect`; config `.worktree-pool.json` (`base_ref`, `warm_commands`, `target_spares`, `max_pool_size`); pool warm-up is now package-manager-aware (#433).
 - **mcp-server orchestration** (`main/mcp-server/src/orchestration/`): graph/journey machinery (`buildExecutionPlan`, `startJourney`/`stepComplete`) — exists but is **not used** by the issue-workflow family. Its granularity is dossier-dependency graphs, not issue scheduling; reviewed and set aside (see C.7 rejected alternatives).
 - **Repo-local scripts** (imboard): `scripts/ci-parity.sh`, `scripts/ensure-test-env.sh` — proto-capabilities per the Progressive Determinism brief.
-- **External:** auto-merge watcher Action (imboard repo; the presence-of-checks gap (issue #3799 — the watcher merged PR #3797 with zero check-runs) was fixed by imboard PR #3803, merged 2026-08-26; the issue-workflows-guide dossier still describes it as unshipped and needs a text refresh. Remaining gap for this plan: no rebase-merge support).
+- **External:** auto-merge watcher Action (imboard repo; the presence-of-checks gap (issue #3799 — the watcher merged PR #3797 with zero check-runs) was fixed for default-branch PRs by imboard PR #3803, merged 2026-08-26. Remaining gaps for this plan — no rebase-merge support, and no presence floor for PRs targeting non-default branches — are covered by imboard#3902, in progress).
 
 ### Q2 — Where the cost actually is (per issue, today)
 
@@ -288,7 +288,7 @@ Not context (fresh agent per member) and not issue count per se. The binding con
 
 ### Q19 — genuinely new failure modes batching introduces
 
-Cross-issue interference (A breaks B in the same worktree) — caught by the incremental gate + aggregate suite, attributed by F.2. **Deploy coupling** — one deploy carries N issues; a post-merge incident reverts N at once; mitigation: modest batch size, per-issue commits make selective revert possible. **Attribution error** (innocent member evicted) — bisect is deterministic; the evicted issue re-runs as full-cycle, so the cost of a wrong eviction is tokens, never a wrong merge. **Review dilution** — one aggregate pass reads mixed concerns; mitigated by per-issue conformance staying separate + diff-size cap. **Long-ish-lived batch branch drift** — F.9; batch wall-clock target < a few hours. **Traceability thinning** — issue↔PR is now N:1; compensated by per-issue commits in main (rebase-merge), `Closes #N` lines, per-issue report comments, `batch=<id>` milestone keys. **Watcher semantics** — the auto-merge watcher must handle rebase-merge for batch PRs, and its shipped presence-of-checks guards (imboard #3803/#3801/#2983/#3158) must be verified to hold on that new path — batch PRs raise the stakes of a silently-unchecked merge.
+Cross-issue interference (A breaks B in the same worktree) — caught by the incremental gate + aggregate suite, attributed by F.2. **Deploy coupling** — one deploy carries N issues; a post-merge incident reverts N at once; mitigation: modest batch size, per-issue commits make selective revert possible. **Attribution error** (innocent member evicted) — bisect is deterministic; the evicted issue re-runs as full-cycle, so the cost of a wrong eviction is tokens, never a wrong merge. **Review dilution** — one aggregate pass reads mixed concerns; mitigated by per-issue conformance staying separate + diff-size cap. **Long-ish-lived batch branch drift** — F.9; batch wall-clock target < a few hours. **Traceability thinning** — issue↔PR is now N:1; compensated by per-issue commits in main (rebase-merge), `Closes #N` lines, per-issue report comments, `batch=<id>` milestone keys. **Watcher semantics** — the auto-merge watcher must handle rebase-merge for batch PRs, and its presence-of-checks guards (imboard #3803, default-branch-scoped; extended to all PRs by imboard#3902) must be verified to hold on that new path — batch PRs raise the stakes of a silently-unchecked merge.
 
 ---
 
@@ -342,7 +342,7 @@ Rollback at every step = stop enqueueing that class; full-cycle path is never mo
 | Plan-artifact comment format (`<!-- plan:v1 -->`) + CLI read/write helper | `main/cli/` |
 | Labels: `cycle:full`, `cycle:slot`, `batch-epic`, `evicted` | target repos |
 
-**Modified:** setup-issue-workflow, review-issue, ship-issue, report-issue, gate-issue (batch/slot modes — registry publishes); auto-merge watcher (rebase-merge for `batch-epic` PRs; presence-of-checks guards already shipped in imboard #3803 — extend their tests to the rebase path) — *external repo, long lead, start first*; full-cycle's plan-issue (optional plan-artifact consumption).
+**Modified:** setup-issue-workflow, review-issue, ship-issue, report-issue, gate-issue (batch/slot modes — registry publishes); auto-merge watcher (rebase-merge for `batch-epic` PRs; presence floor extended to all PRs + rebase strategy in imboard#3902, in progress) — *external repo, long lead, start first*; full-cycle's plan-issue (optional plan-artifact consumption).
 
 **Deprecated:** fleet-cycle (→ alias over sched, after Step 1 parity ×3 fleets); full-cycle tail-run pattern (→ sched scripts).
 
