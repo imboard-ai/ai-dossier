@@ -61,6 +61,17 @@ Per-issue wall-clock comes from runstate trails (`ai-dossier runstate stats --is
 - Sched engine journal `~/.dossier/sched/imboard-ai-imboard-monorepo/events.jsonl` (every decision), `state.json`, per-agent output `runs/issue-<n>.log` (claude `-p` JSON: usage, cost, duration, turns).
 - Runstate trails on GitHub issues (both arms).
 - `~/.dossier/runs.jsonl` (hcc2) — per-machine dossier telemetry.
+- opencode session DB (`~/.local/share/opencode/opencode.db`) — the Fleet A arm's per-session tokens/cost (glm/kimi/gpt ran via opencode on hcc2; `runs.jsonl` nested entries carry no token data by design — tokens are only logged for `ai-dossier run`-spawned agent runs).
+
+**AC3 accounting (runs.jsonl aggregation, per host):**
+
+| Host | Reachable from this run | runs.jsonl content for the measured windows | CLI ≥ 0.13.0 verified |
+|---|---|---|---|
+| hcc2 (this run) | ✅ | W1 window: 70 entries (agents' nested dossier fetches — gate ×13, full-cycle ×10, …), all with duration telemetry, 0 with tokens (nested fetches never carry them); Fleet A window: 274 entries, only 14 with telemetry — hcc2's earliest telemetry entry is 2026-08-29T09:29Z, so **the fleet baseline window largely predates CLI 0.13.0 on hcc2** | sched window ✅ (0.19.0); fleet window ❌ (pre-0.13.0 for most of it) |
+| wls | ❌ no outbound SSH credentials (verified: no keys, publickey denied, no VPN) | not readable | unverifiable |
+| hcc | ❌ same | not readable | unverifiable |
+
+Consequence, handled transparently: token data for both arms comes from the agent CLIs' own records on hcc2 (claude usage JSON for the sched arm; opencode.db for the Fleet A arm — both hcc2-local, so neither arm is undercounted by host scope), and the cross-host `runs.jsonl` aggregate the AC asks for is recorded as a gap (§6). Fleet B ran on a different host entirely — its tokens are unreachable from hcc2.
 
 ## 3. Results
 
@@ -73,7 +84,7 @@ Timeline facts (from `events.jsonl`, verbatim in `docs/reports/evidence/`):
 | #3810 | mid (sonnet) | 50 m | **52 m** | #3922 | ✅ posted (+85 m) |
 | #3886 | mid → strong (exit-recovery) | 83 m | **87 m** | #3924 | ✅ posted (+88 m) |
 | #3891 | mid (cold worktree) | 122 m | **126 m** | #3925 | ❌ missing (D5/#500 — rich report comment posted, milestone not) |
-| #3862 | mid → strong (exit-recovery) | 191 m | pending merge | #3926 | pending |
+| #3862 | mid → strong (exit-recovery) | 191 m | **200 m** (merged 01:42:54Z) | #3926 | ✅ posted (queued for a free slot while W2 held all 3) |
 
 **Slot occupancy while runnable work existed: 100.0%** (state-machine view; window 22:22:55 → 23:13:07 — first spawn until the last queued unit dispatched; 9 045 busy slot-seconds / 9 045 demand slot-seconds at 3 slots). The two events that could have idled a slot did not:
 
@@ -105,7 +116,40 @@ A second, stricter view counts a slot busy only while its agent process is actua
 
 ## 4. Baseline comparison
 
-<!-- wall-clock + tokens vs Fleet A/B -->
+### 4.1 The fleet cohorts (hcc2, same repo, detached full-cycle)
+
+**Fleet A** — `FLEET-PLAN-20260828-054148` + same-window members (Aug 28–29; glm-5.3 / kimi-k3-fast / gpt-5.6 via opencode). Completed members: #3848, #3851, #3852, #3860, #3864 (+ #3857 gate-blocked as `no-actionable-work`, #3862 never dispatched, #3859/#3861 from adjacent fleets):
+
+| Issue | Span (first→last milestone) | Supervision stall-gaps (>45 m, non-merge-wait) |
+|---|---|---|
+| #3848 | 24.2 h | gate 4.7 h + 1.3 h + 1.3 h + 0.9 h, plan 6.8 h, … |
+| #3851 | 3.2 h | implement 2.3 h |
+| #3852 | 7.9 h | gate 2.5 h, implement 3.9 h |
+| #3860 | 4.4 h | gate 2.1 h |
+| #3864 | 4.1 h | gate 1.1 h + 0.8 h, implement 1.3 h |
+| **median** | **4.1 h** | 7/10 issues show gaps; **39.1 h** total gap time in the window |
+
+**Fleet B** — `FLEET-PLAN-20260826-091737` (Aug 25–26; claude sonnet-5/opus-5, 10 completed): per-issue spans 1.9–28.8 h (median 3.3 h), makespan 47.9 h; #3752 alone shows a 16.3 h gate gap. **Fleet B executed on a different host** — its token/session data is not on hcc2 (see §6).
+
+### 4.2 Un-tailed merges — the baseline's own record
+
+The imboard worktree pool on hcc2 currently holds **9 assigned worktrees whose issues are CLOSED** (#3714, #3715, #3729, #3759, #3848, #3856, #3859, #3863, #3871 — verified closed) — merged fleet members whose teardown never ran. That is the fleet's un-tailed-merge record on this host (a stock accumulated across recent fleet runs, not a single workload's flow). The sched arm's corresponding record: W1 processed every merge's tail in-tick (§3.1).
+
+### 4.3 Head-to-head (W1 vs the fleets)
+
+| Metric | sched W1 (4 issues) | Fleet A (6-issue fleet) | Fleet B (11-issue fleet) |
+|---|---|---|---|
+| Slot occupancy while runnable work existed | **100%** (state-machine; same-tick refill 8–11 ms) | not measurable — no slot events; stall-gaps are the proxy | same |
+| Idle while runnable (worst observed) | 0 engine-alive idle; ≤60 s exit-detection per tick | multi-hour gate gaps (4.7 h, 2.5 h, 2.1 h…) | 16.3 h gate gap on #3752 |
+| Un-tailed merges | **0** (tail ran on every merge; teardown success 0/3 — bug #496; report milestone 2/3 — bug #500) | ≥9 leaked worktrees on this host | (part of the same pool leak) |
+| Per-issue spawn→merged | **52–200 m, median ~107 m** | 3.2–7.9 h span (incl. stalls) | 1.9–28.8 h span |
+| Makespan | **3.33 h / 4 issues** | 05:41→16:35 next-day incl. wave deps | 47.9 h / 10 issues |
+| Stall recoveries | 3 triggered / 3 succeeded / 0 failed | supervision is prose — stalls are visible only as gaps | same |
+| Cost per issue | $27.7 (claude sonnet/opus) | ~$10.5 (glm/kimi/gpt) — model pricing, not architecture | unreachable (other host) |
+
+Caveats carried into §6: model heterogeneity (claude vs glm/kimi/gpt), issue-size mix, and the stall-vs-work ambiguity inside long fleet implement phases (fleet gaps in gate/setup are unambiguous; implement gaps may include real work).
+
+<!-- W2/W3 rows extend this table in §3 -->
 
 ## 5. Divergences found
 
