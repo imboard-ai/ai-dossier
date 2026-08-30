@@ -1,0 +1,128 @@
+{
+  "schema_version": "1.2.0",
+  "paused": false,
+  "entries": [
+    {
+      "issue": 3889,
+      "mode": "full",
+      "batch": null,
+      "deps": [],
+      "tier": "strong",
+      "status": "dispatched",
+      "reason": null,
+      "pr": null,
+      "cleanup": null,
+      "enqueued_at": "2026-08-30T04:36:13.845Z",
+      "updated_at": "2026-08-30T04:36:49.565Z"
+    },
+    {
+      "issue": 3890,
+      "mode": "full",
+      "batch": null,
+      "deps": [],
+      "tier": "strong",
+      "status": "dispatched",
+      "reason": null,
+      "pr": null,
+      "cleanup": null,
+      "enqueued_at": "2026-08-30T04:36:13.845Z",
+      "updated_at": "2026-08-30T04:36:49.573Z"
+    },
+    {
+      "issue": 3414,
+      "mode": "full",
+      "batch": null,
+      "deps": [],
+      "tier": "strong",
+      "status": "dispatched",
+      "reason": null,
+      "pr": null,
+      "cleanup": null,
+      "enqueued_at": "2026-08-30T04:36:14.997Z",
+      "updated_at": "2026-08-30T04:36:49.577Z"
+    },
+    {
+      "issue": 3433,
+      "mode": "full",
+      "batch": null,
+      "deps": [],
+      "tier": "mid",
+      "status": "queued",
+      "reason": null,
+      "pr": null,
+      "cleanup": null,
+      "enqueued_at": "2026-08-30T04:36:14.997Z",
+      "updated_at": "2026-08-30T04:36:14.997Z"
+    },
+    {
+      "issue": 3824,
+      "mode": "full",
+      "batch": null,
+      "deps": [],
+      "tier": "mid",
+      "status": "queued",
+      "reason": null,
+      "pr": null,
+      "cleanup": null,
+      "enqueued_at": "2026-08-30T04:36:14.997Z",
+      "updated_at": "2026-08-30T04:36:14.997Z"
+    },
+    {
+      "issue": 3408,
+      "mode": "full",
+      "batch": null,
+      "deps": [],
+      "tier": "strong",
+      "status": "queued",
+      "reason": null,
+      "pr": null,
+      "cleanup": null,
+      "enqueued_at": "2026-08-30T04:36:16.134Z",
+      "updated_at": "2026-08-30T04:36:16.134Z"
+    }
+  ],
+  "batches": [],
+  "slots": [
+    {
+      "id": 1,
+      "status": "running",
+      "unit": "issue:3889",
+      "pid": 322631,
+      "pid_start": 33032485,
+      "phase": "gate",
+      "last_progress_at": "2026-08-30T04:36:49.573Z",
+      "branch": null,
+      "last_head": null,
+      "recoveries": 1,
+      "updated_at": "2026-08-30T04:36:49.573Z"
+    },
+    {
+      "id": 2,
+      "status": "running",
+      "unit": "issue:3890",
+      "pid": 322632,
+      "pid_start": 33032485,
+      "phase": "gate",
+      "last_progress_at": "2026-08-30T04:36:49.577Z",
+      "branch": null,
+      "last_head": null,
+      "recoveries": 1,
+      "updated_at": "2026-08-30T04:36:49.577Z"
+    },
+    {
+      "id": 3,
+      "status": "running",
+      "unit": "issue:3414",
+      "pid": 322634,
+      "pid_start": 33032486,
+      "phase": "gate",
+      "last_progress_at": "2026-08-30T04:36:49.581Z",
+      "branch": null,
+      "last_head": null,
+      "recoveries": 1,
+      "updated_at": "2026-08-30T04:36:49.581Z"
+    }
+  ],
+  "next_slot_id": 4,
+  "last_pr_poll_at": null
+}
