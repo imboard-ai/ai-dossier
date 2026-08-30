@@ -24,7 +24,7 @@ This report is the committable artifact (issue #471 scope). Divergences found al
 | Execution host | `hcc2` (16 vCPU, 30 GB RAM) — the only host reachable from this run |
 | CLI | `@ai-dossier/cli` 0.19.0 (npm; upgraded from 0.14.0 in pre-flight — sched requires ≥ 0.19.0; ≥ 0.13.0 required for token telemetry) |
 | Scheduler | `ai-dossier sched` (packages/sched, #460/#464/#468), engine config: `max_slots=3`, `stall_timeout_ms=5400000` (90 min — see §5 divergence #495), reconcile tick 60 s, PR poll 150 s, dispatch `claude -p --output-format json --model {model}` |
-| Dispatch tiers | full-cycle units: `mid` (sonnet); security-class issue: `strong` (opus); report agents: mechanical (haiku), ladder per #468 |
+| Dispatch tiers | W1/W2 (claude): `mid` = sonnet, report = haiku, ladder → opus. From 04:47Z (W3 + re-drives): opencode via **openrouter** per owner instruction — `mid` = `~z-ai/glm-latest`, `strong` = `~moonshotai/kimi-latest`, report = mechanical (glm) — mirroring the fleet baselines' glm/kimi model families (claude's weekly limit and then llmgateway's Dev Plan credits ran out mid-validation; see D8) |
 | Workload repo | `imboard-ai/imboard-monorepo` (the same repo and backlog the fleet-cycle baselines ran against) |
 | Dispatch prompt | default detached full-cycle template + `warmup_dossier imboard-ai/imboard/warm-worktree-pnpm-ssm` (the same warmup path the fleet baselines used — parity requirement) |
 
@@ -111,7 +111,23 @@ A second, stricter view counts a slot busy only while its agent process is actua
 | #3862 | 2 (2×cycle) | 30.6 M | 122 196 | $37.27 |
 | **W1 total** | 10 | 122.9 M | 382 692 | **$110.94** (≈ $27.7/issue) |
 
-<!-- W2, W3 sections follow -->
+### 3.2 W2 — #3890, #3889, #3756, #3500 (2026-08-30 01:37Z → 03:51Z)
+
+W2 ran under the default prompt on claude tiers and hit three distinct external walls — which is precisely what real workloads look like; each outcome is recorded per-unit:
+
+| Unit | Outcome | PR | Detail |
+|---|---|---|---|
+| #3500 | ✅ merged + tail | #3928 | park 03:42 → merged 03:45:52 → merge-accepted + report-dispatched same tick; report milestone missing (D5/#500 — second instance) |
+| #3756 | ❌ unit-failed (`auto-merge-blocked`) | #3927 | imboard auto-merge watcher blocked a green, mergeable PR on persistent CANCELLED check-runs (the known imboard#3884 traps race — external). Operator re-queue re-blocked instantly; PR left for human disposition. Ledger staleness = D6/#501 |
+| #3889 | ⚠️ unit-failed at ladder cap — **quota wall** | — | implement done + pushed (03:04), review started; Claude weekly limit hit 03:50Z → agent exit → strong redispatch died at 1 turn → cap. Work survives on branch; re-driven after the provider switch |
+| #3890 | ⚠️ same as #3889 | — | implement done + pushed (03:45); same quota-wall ladder burn; re-driven |
+
+- **Slot occupancy while runnable work existed:** window 01:37:02 (first spawn) → 02:47:08 (#3890, the last queued unit, first spawn — freed by #3756's unit-failure at 02:46): slots never idled while runnable work waited. The freed slot first served the waiting #3862 report agent (02:45:10, tail-before-new-work tick order), then #3890 within 3 minutes (tick cadence). #3889's 90-minute implement ran right up to its stall deadline and pushed at 03:04 — 21 minutes before the timer.
+- **Un-tailed merges:** 1 merge (#3500) — tail ran same-tick (teardown failed per D2/#496; report dispatched, milestone missing per D5/#500).
+- **Stall recoveries:** 2 triggered (both #497-style sonnet exits mid-implement — "waiting for ci-parity/background test"), 2 redispatched at strong tier; both opus resumes were then killed by the quota wall (counted under D8, not as ladder failures of their own).
+- **Cost (claude, partial before the wall):** #3500 $44.66 (3 dispatches), #3756 $54.85 (2), #3889 $31.77 (2), #3890 $10.48 (2) — **$141.76 total for 4 partially-completed issues**; quota-wall ladder deaths cost ~$0 in tokens but each cache-priming spawn that died instantly still billed its context upload (#3890's $10.48 is almost entirely cache writes). Usage details in evidence logs.
+
+<!-- W3 section follows -->
 
 
 ## 4. Baseline comparison
@@ -159,6 +175,10 @@ Caveats carried into §6: model heterogeneity (claude vs glm/kimi/gpt), issue-si
 | D2 | `parseSetupInfo` JSON-parses `gh issue view --json comments` output as a bare array, but gh returns `{"comments":[...]}` — **teardown always fails** with `failed-missing-setup-info`; pool worktrees leak per merge (report tail unaffected). Reproduced directly; mock drift in the #468 fixtures masked it | [#496](https://github.com/imboard-ai/ai-dossier/issues/496) |
 | D3 | Headless full-cycle agents (sonnet ×2 in W1) exit their session while a background build/test command still runs ("Waiting for ci-parity.sh…") — unverified-exit rail recovers correctly but burns a tier escalation + restart latency each time | [#497](https://github.com/imboard-ai/ai-dossier/issues/497) |
 | D4 (op) | Engine processes spawned from an interactive agent harness get reaped when the harness call ends; switched W1 to the `sched start --once` cron deployment mid-run (21-min engine gap 22:37:30→23:05:50 recorded in the journal). Cron mode = every tick is a cold restart — reconciliation-by-pid proved itself (exit-detected → redispatched same tick) | — (operational note, not a sched defect) |
+| D5 | Report-agent completion's closed-signal suppression is overwritten by `phase-updated` (`slot.phase` tracks the issue's milestone phase, not the agent role) — units complete without a report milestone. Hit on #3891 (W1) and #3500 (W2) | [#500](https://github.com/imboard-ai/ai-dossier/issues/500) |
+| D6 | `unit-failed` ledger goes stale when an externally-blocked PR is later merged by the operator — no reconcile path for terminal-failed entries whose world changed (W2 #3756: watcher-blocked on the known imboard CANCELLED-checks race, PR left green for human disposition; ledger stays failed) | [#501](https://github.com/imboard-ai/ai-dossier/issues/501) |
+| D7 | Re-enqueueing a terminal (failed) unit corrupts `state.json` — `enqueueEntries` allows the re-enqueue but appends without replacing the old entry; the just-written state fails its own `validateState` on the next load, bricking every command incl. the cron engine until a manual reset | [#502](https://github.com/imboard-ai/ai-dossier/issues/502) |
+| D8 (op) | Model-API quota walls ride the stall ladder to unit failure: Claude's weekly limit (03:50Z) then llmgateway's Dev Plan credit limit (04:37Z) produced instant zero-token exits — every unit burned its ladder to `unit-failed` within minutes while its pushed work was fine; no dispatch-health pause exists (unlike the ground-truth-unreachable pause). Operator response: provider switch to openrouter per owner instruction; affected units re-driven via re-enqueue | [#505](https://github.com/imboard-ai/ai-dossier/issues/505) |
 
 ## 6. Limitations
 
