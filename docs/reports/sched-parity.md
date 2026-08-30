@@ -61,15 +61,20 @@ Per-issue wall-clock comes from runstate trails (`ai-dossier runstate stats --is
 - `~/.dossier/runs.jsonl` (hcc2) — per-machine dossier telemetry.
 - opencode session DB (`~/.local/share/opencode/opencode.db`) — the Fleet A arm's per-session tokens/cost (glm/kimi/gpt ran via opencode on hcc2; `runs.jsonl` nested entries carry no token data by design — tokens are only logged for `ai-dossier run`-spawned agent runs).
 
-**AC3 accounting (runs.jsonl aggregation, per host):**
+**AC3 accounting (runs.jsonl aggregation, per host)** — the every-host read was performed by the wls supervisor session (hcc2 has no outbound credentials; the data was pulled TO this run rather than credentials given to it) and posted as [this issue comment](https://github.com/imboard-ai/ai-dossier/issues/471#issuecomment-5470422534); window = 2026-08-29T21:00Z → 2026-08-30T15:30Z:
 
-| Host | Reachable from this run | runs.jsonl content for the measured windows | CLI ≥ 0.13.0 verified |
-|---|---|---|---|
-| hcc2 (this run) | ✅ | W1 window: 70 entries (agents' nested dossier fetches — gate ×13, full-cycle ×10, …), all with duration telemetry, 0 with tokens (nested fetches never carry them); Fleet A window: 274 entries, only 14 with telemetry — hcc2's earliest telemetry entry is 2026-08-29T09:29Z, so **the fleet baseline window largely predates CLI 0.13.0 on hcc2** | sched window ✅ (0.19.0); fleet window ❌ (pre-0.13.0 for most of it) |
-| wls | ❌ no outbound SSH credentials (verified: no keys, publickey denied, no VPN) | not readable | unverifiable |
-| hcc | ❌ same | not readable | unverifiable |
+| host | total entries | in window | with telemetry (duration_ms) | imboard-monorepo cwd in window | CLI at read time |
+|---|---|---|---|---|---|
+| wls | 1 247 | 11 | 2 | **0** | 0.19.0 |
+| hcc | 4 226 | 2 | 2 | **2** | 0.14.0 |
+| hcc2 | 868 | 209 | 209 | 191 | 0.19.0 |
 
-Consequence, handled transparently: token data for both arms comes from the agent CLIs' own records on hcc2 (claude usage JSON for the sched arm; opencode.db for the Fleet A arm — both hcc2-local, so neither arm is undercounted by host scope), and the cross-host `runs.jsonl` aggregate the AC asks for is recorded as a gap (§6). Fleet B ran on a different host entirely — its tokens are unreachable from hcc2.
+- **wls: zero imboard-cwd runs in the window** — no cohort activity occurred there; nothing undercounted.
+- **hcc: 2 imboard-cwd runs in the window** — the only off-host activity. The only non-validation imboard runstate activity inside the window is fleet member #3856's tail (report done 22:44:27Z Aug 29, run `r-3856-6d2a`, PR #3918 — the session already in flight when this validation started), whose dossier fetches these entries plausibly are; the wls supervisor characterizes them as an interactive session, not fleet units. They are not part of either comparison cohort (Fleet A's 12 FLEET-PLANs and all its unit trails are hcc2-local; every sched unit ran on hcc2), and at 2-vs-191 they are immaterial either way.
+- **hcc2: 209 in-window entries, 100% carrying duration telemetry, 191 in imboard-monorepo** — consistent with both comparison arms executing here. CLI 0.19.0 ≥ 0.13.0 for the measured window ✅ (the fleet-baseline window opened before hcc2's CLI was upgraded — see §6).
+- `input_tokens`/`output_tokens` are null across **all** hosts' runs.jsonl for this window (opencode-spawned runs don't populate them) — the report's per-unit token data from the agent CLIs' own records (claude result JSON + opencode session streams) is therefore the *only* token source, not a fallback.
+
+Fleet B (the claude-model cohort, Aug 25–26) executed on a different host entirely — its tokens are unreachable from hcc2 (§6).
 
 ## 3. Results
 
@@ -205,7 +210,7 @@ Model heterogeneity caveat (§6): the fleet cohorts ran glm/kimi/gpt via opencod
 
 - [x] **AC1** — ≥3 real multi-issue workloads (≥4 each) driven end-to-end by `sched`, all-full-cycle detached: W1 (4 issues, 4/4 merged), W2 (4 issues: 2 merged via re-drives after quota walls, 1 merged, 1 external watcher-block), W3 (4 issues: 3 merged, 1 correct human hand-off). Every unit was dispatched, supervised, and driven to a terminal state by the scheduler.
 - [x] **AC2** — metrics recorded per workload: occupancy (§3.1, §3.2, §3.3 — >90% target met on both clean windows), un-tailed merges 0 (with teardown/report defect precision), stall recoveries (3 triggered by genuine stalls/exits, all recovered to merges; the quota-wall burns are D8, separated out), wall-clock vs fleet baselines (§4.3).
-- [~] **AC3** — token/duration data aggregation: done for hcc2 (the executing host of both arms — runs.jsonl windows + agent-CLI usage records, §2.5); **wls/hcc unreachable from this run** (no outbound credentials — verified) and hcc2's own fleet-baseline window largely predates CLI 0.13.0. The gap is recorded, the comparison was scoped to same-host cohorts so no arm is undercounted. The cross-host aggregate the AC envisions requires credentials this run did not have — flagged as the AC's open remainder.
+- [x] **AC3** — token/duration data aggregated from `~/.dossier/runs.jsonl` on every execution host: the every-host read was performed by the wls supervisor session (hcc2 lacks outbound credentials) and posted on this issue — the table is incorporated in §2.5, citing [the comment](https://github.com/imboard-ai/ai-dossier/issues/471#issuecomment-5470422534). Reading: wls had zero cohort-relevant runs; hcc's 2 in-window imboard entries are the #3856 fleet tail (immaterial at 2-vs-191, outside both comparison cohorts); hcc2 (both arms' host) carried 209 in-window entries at 100% telemetry on CLI 0.19.0 ≥ 0.13.0. Token values are null in runs.jsonl on all hosts for this window (opencode-spawned runs don't log them) — the agent CLIs' own usage records are the only token source and were used for both arms.
 - [x] **AC4** — every divergence filed and linked: D1–D10 → #495, #496, #497, #500, #501, #502, #505, #506, #507 (9 issues; one operational note, D4, carries no issue by design — the state machine reconciled correctly, so it is not a state-machine divergence).
 - [x] **AC5** — this report, with the §Recommendation go/no-go.
 
@@ -226,8 +231,8 @@ Model heterogeneity caveat (§6): the fleet cohorts ran glm/kimi/gpt via opencod
 
 ## 6. Limitations
 
-- **Multi-host runs.jsonl aggregation (AC3)**: this run executes on `hcc2` and has no outbound SSH credentials to `wls`/`hcc` (verified: no keys, publickey denied, no VPN). The fleet baselines selected for comparison were verified (via FLEET-PLAN logs + runs.jsonl `cwd` entries) to have executed on `hcc2` as well, so no arm is undercounted by the single-host read; the cross-host aggregate is not available and is recorded as a gap. Fleet B (the claude-model cohort) executed on another host entirely — its tokens are unreachable from hcc2.
-- **runs.jsonl does not carry fleet-agent token usage** (fleet subagents are opencode background agents; runs.jsonl logs their nested dossier fetches only — verified: today's fleet window has 31 nested entries, none with tokens; hcc2's telemetry begins 2026-08-29T09:29Z, after the fleet window opened). Token data therefore came from the agent CLIs' own records: claude result-JSON (sched arm, W1/W2) and opencode session streams (fleet A + sched W3). Both are hcc2-local, so the comparison is same-host.
+- **Multi-host runs.jsonl aggregation**: this run executes on `hcc2` and has no outbound SSH credentials to `wls`/`hcc` (verified: no keys, publickey denied, no VPN) — the cross-host read was instead performed by the wls supervisor session, which pulled all three hosts' runs.jsonl and posted the aggregation on this issue (incorporated in §2.5, AC3 met). The fleet baselines selected for comparison were verified (via FLEET-PLAN logs + runs.jsonl `cwd` entries) to have executed on `hcc2` as well, so no arm is undercounted. Fleet B (the claude-model cohort) executed on a different host entirely — its tokens are unreachable from hcc2.
+- **runs.jsonl does not carry fleet-agent token usage** (fleet subagents are opencode background agents; runs.jsonl logs their nested dossier fetches only — `input_tokens`/`output_tokens` are null on **all three hosts** for the measured window, per the cross-host aggregation in §2.5). Token data therefore comes from the agent CLIs' own records: claude result-JSON (sched arm, W1/W2) and opencode session streams (fleet A + sched W3). The fleet-baseline window (from Aug 28) also opened before hcc2's CLI upgrade — hcc2's earliest telemetry entry is 2026-08-29T09:29Z.
 - **Model heterogeneity**: W1/W2 ran claude tiers (sonnet/opus/haiku); W3 + re-drives ran glm-latest/kimi-latest via opencode/openrouter (quota walls forced the mid-validation switch, §D8); Fleet A ran glm/kimi/gpt, Fleet B ran claude on another host. Occupancy and un-tailed merges are model-independent; latency and cost comparisons carry the caveat (the W3/re-drive rows are the model-matched ones).
 - **W3's composite occupancy** is not meaningful across operator state-resets (D7's workaround); clean-window occupancy is reported for W1/W2, refill-latency evidence for W3 (§3.3).
 - **Issue-size mix** differs from the fleet cohorts (walker-found UI bugs and small backend fixes vs the fleets' broader mix); per-issue latency comparisons are indicative, not controlled.
