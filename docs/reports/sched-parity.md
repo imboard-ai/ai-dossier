@@ -64,7 +64,44 @@ Per-issue wall-clock comes from runstate trails (`ai-dossier runstate stats --is
 
 ## 3. Results
 
-<!-- per-workload tables land here -->
+### 3.1 W1 — #3891, #3862, #3810, #3886 (2026-08-29 22:22Z → …)
+
+Timeline facts (from `events.jsonl`, verbatim in `docs/reports/evidence/`):
+
+| Unit | Dispatch tier(s) | Spawn → park | Spawn → merged | PR | Report milestone |
+|---|---|---|---|---|---|
+| #3810 | mid (sonnet) | 50 m | **52 m** | #3922 | ✅ posted (+85 m) |
+| #3886 | mid → strong (exit-recovery) | 83 m | **87 m** | #3924 | ✅ posted (+88 m) |
+| #3891 | mid (cold worktree) | 122 m | **126 m** | #3925 | ❌ missing (D5/#500 — rich report comment posted, milestone not) |
+| #3862 | mid → strong (exit-recovery) | 191 m | pending merge | #3926 | pending |
+
+**Slot occupancy while runnable work existed: 100.0%** (state-machine view; window 22:22:55 → 23:13:07 — first spawn until the last queued unit dispatched; 9 045 busy slot-seconds / 9 045 demand slot-seconds at 3 slots). The two events that could have idled a slot did not:
+
+- #3810 parked at 23:13:07.705 → slot freed → **#3891 assigned+spawned in the same tick at 23:13:07.716 (11 ms later)** — the fleet's named failure (idle slot while runnable work waits) is structurally impossible here.
+- #3886 parked at 23:46:08.650 → **#3810's report agent assigned+spawned in the same tick at 23:46:08.658 (8 ms later)**.
+
+A second, stricter view counts a slot busy only while its agent process is actually alive (excluding dead-agent detection latency): 76% raw — dominated by a 21-minute window where **no engine process existed at all** (the validation harness reaped engine processes spawned from its session; D4). Excluding that documented outage, detection-to-redispatch under the cron engine was ≤ 60 s per exit (tick cadence), and the same-tick refill property still held everywhere the engine was alive.
+
+**Un-tailed merges: 0** (every merge received tail processing in the same or next tick) — with precision:
+- teardown attempted+recorded: 3/3 merges, **succeeded 0/3** — every one failed with `failed-missing-setup-info` (D2/#496, a mock-drift bug: teardown never runs; pool worktrees leak)
+- report dispatched: 3/3; report milestone posted: 2/3 (#3891's completed via the D5/#500 bug without its milestone)
+
+**Stall recoveries: triggered 3, succeeded 3.** #3886 and #3862: sonnet agents exited mid-implement while a background build ran (#497) → `verify-incomplete` → redispatched at strong tier in the same tick → both resumed from the runstate trail and drove to merged PRs. #3891: mechanical report agent exited unverified → redispatched mid → completed (via D5). No unit hit the escalation cap; no unit failed.
+
+**Wall-clock:** spawn→merged per issue 52–126 m (median 87 m) vs the fleet baselines' per-issue spans of 1.9–28.8 h (Fleet B median 3.3 h, Fleet A median 4.1 h — which include supervision stalls; §4). Makespan for 4 issues: ~3 h (3 merged by +2.93 h; #3862 parked at +3.2 h, merge pending CI). Caveat: issue mix and models differ from the fleet cohorts (§6).
+
+**Tokens/cost (claude usage per unit, all dispatches summed):**
+
+| Unit | Dispatches | Cache-read | Output tokens | Cost |
+|---|---|---|---|---|
+| #3810 | 2 (cycle+report) | 40.0 M | 121 806 | $13.23 |
+| #3886 | 3 (2×cycle+report) | 21.2 M | 80 135 | $27.41 |
+| #3891 | 3 (cycle+2×report) | 31.1 M | 58 555 | $33.02 |
+| #3862 | 2 (2×cycle) | 30.6 M | 122 196 | $37.27 |
+| **W1 total** | 10 | 122.9 M | 382 692 | **$110.94** (≈ $27.7/issue) |
+
+<!-- W2, W3 sections follow -->
+
 
 ## 4. Baseline comparison
 
@@ -74,7 +111,10 @@ Per-issue wall-clock comes from runstate trails (`ai-dossier runstate stats --is
 
 | # | Finding | Filed |
 |---|---|---|
-| D1 | Default `stall_timeout_ms` (30 min) is shorter than one imboard implement phase — healthy long-phase agents would burn the escalation ladder and fail; operator workaround `stall_timeout_ms=90min` applied for W1–W3 | #495 |
+| D1 | Default `stall_timeout_ms` (30 min) is shorter than one imboard implement phase — healthy long-phase agents would burn the escalation ladder and fail; operator workaround `stall_timeout_ms=90min` applied for W1–W3 | [#495](https://github.com/imboard-ai/ai-dossier/issues/495) |
+| D2 | `parseSetupInfo` JSON-parses `gh issue view --json comments` output as a bare array, but gh returns `{"comments":[...]}` — **teardown always fails** with `failed-missing-setup-info`; pool worktrees leak per merge (report tail unaffected). Reproduced directly; mock drift in the #468 fixtures masked it | [#496](https://github.com/imboard-ai/ai-dossier/issues/496) |
+| D3 | Headless full-cycle agents (sonnet ×2 in W1) exit their session while a background build/test command still runs ("Waiting for ci-parity.sh…") — unverified-exit rail recovers correctly but burns a tier escalation + restart latency each time | [#497](https://github.com/imboard-ai/ai-dossier/issues/497) |
+| D4 (op) | Engine processes spawned from an interactive agent harness get reaped when the harness call ends; switched W1 to the `sched start --once` cron deployment mid-run (21-min engine gap 22:37:30→23:05:50 recorded in the journal). Cron mode = every tick is a cold restart — reconciliation-by-pid proved itself (exit-detected → redispatched same tick) | — (operational note, not a sched defect) |
 
 ## 6. Limitations
 
