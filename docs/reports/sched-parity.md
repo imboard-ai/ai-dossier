@@ -5,9 +5,7 @@
 
 ## Recommendation
 
-**Conditional GO** for deprecating fleet-cycle supervision, contingent on the two tail bugs being fixed: **#496** (teardown never runs — a one-line parse fix) and **#500** (report milestones optional under a suppression bug — a small fix). The named fleet failure — *slots idle while runnable work exists* — is **gone**: occupancy while runnable work existed measured 100.0% (W1) and 99.0% (W2) with park→refill latencies of 8–11 ms in the same tick, and the fleet's own record on this host (≥9 leaked, un-tailed merge worktrees; multi-hour invisible stall gaps) is exactly what the scheduler eliminated mechanically. Every divergence found (D1–D10) was detected, journaled, and either recovered automatically or isolated to a filed, fixable issue — none are architectural. Until #496/#500 land, fleet-cycle's teardown/report should keep running for sched-merged PRs (or fix forward immediately — both fixes are small); #505 (dispatch-health pause) and #507 (enqueue label pre-screening) are recommended before widening beyond full-cycle dispatch.
-
-## 1. What this gate decides
+**Conditional GO** for deprecating fleet-cycle supervision, contingent on the two tail bugs being fixed: **#496** (teardown never runs — a one-line parse fix) and **#500** (report milestones optional under a suppression bug — a small fix). The named fleet failure — *slots idle while runnable work exists* — is **gone**: occupancy while runnable work existed measured 100.0% (W1) and 99.0% (W2) with park→refill latencies of 8–11 ms in the same tick, and the fleet's own record on this host (≥9 leaked, un-tailed merge worktrees; multi-hour invisible stall gaps) is exactly what the scheduler eliminated mechanically. Every divergence found (D1–D10) was detected, journaled, and either recovered automatically or isolated to a filed issue (or, for D4, an operational note) — none are architectural. Until #496/#500 land, fleet-cycle's teardown/report should keep running for sched-merged PRs (or fix forward immediately — both fixes are small); #505 (dispatch-health pause) and #507 (enqueue label pre-screening) are recommended before widening beyond full-cycle dispatch.## 1. What this gate decides
 
 RFC-0001 (branch `docs/batch-cycles-rfc`) Step 1 requires `dossier-sched` to demonstrate parity with fleet-cycle on real workloads before any batching begins — specifically to prove the named fleet failure is gone: **slots sitting idle while runnable work exists**. Exit criterion (§G):
 
@@ -24,7 +22,7 @@ This report is the committable artifact (issue #471 scope). Divergences found al
 | Execution host | `hcc2` (16 vCPU, 30 GB RAM) — the only host reachable from this run |
 | CLI | `@ai-dossier/cli` 0.19.0 (npm; upgraded from 0.14.0 in pre-flight — sched requires ≥ 0.19.0; ≥ 0.13.0 required for token telemetry) |
 | Scheduler | `ai-dossier sched` (packages/sched, #460/#464/#468), engine config: `max_slots=3`, `stall_timeout_ms=5400000` (90 min — see §5 divergence #495), reconcile tick 60 s, PR poll 150 s, dispatch `claude -p --output-format json --model {model}` |
-| Dispatch tiers | W1/W2 (claude): `mid` = sonnet, report = haiku, ladder → opus. From 04:47Z (W3 + re-drives): opencode via **openrouter** per owner instruction — `mid` = `~z-ai/glm-latest`, `strong` = `~moonshotai/kimi-latest`, report = mechanical (glm) — mirroring the fleet baselines' glm/kimi model families (claude's weekly limit and then llmgateway's Dev Plan credits ran out mid-validation; see D8) |
+| Dispatch tiers | W1/W2 (claude): `mid` = sonnet, report = haiku, ladder → opus. From 04:36Z (W3 + re-drives): opencode — llmgateway-routed models first, then **openrouter** per owner instruction from 05:07Z — `mid` = `~z-ai/glm-latest`, `strong` = `~moonshotai/kimi-latest`, report = mechanical (glm) — mirroring the fleet baselines' glm/kimi model families (claude's weekly limit and then llmgateway's Dev Plan credits ran out mid-validation; see D8) |
 | Workload repo | `imboard-ai/imboard-monorepo` (the same repo and backlog the fleet-cycle baselines ran against) |
 | Dispatch prompt | default detached full-cycle template + `warmup_dossier imboard-ai/imboard/warm-worktree-pnpm-ssm` (the same warmup path the fleet baselines used — parity requirement) |
 
@@ -34,9 +32,9 @@ Three sequential workloads, each ≥ 4 real backlog issues, all-full-cycle detac
 
 | Workload | Issues | Tiers | Window |
 |---|---|---|---|
-| W1 | #3891, #3862, #3810, #3886 | mid | 2026-08-29 22:22Z → … |
-| W2 | #3890, #3889, #3756, #3500 | mid | … |
-| W3 | #3433, #3414, #3408, #3824 | mid, mid, strong, mid | … |
+| W1 | #3891, #3862, #3810, #3886 | mid | 2026-08-29 22:22Z → 2026-08-30 01:44Z |
+| W2 | #3890, #3889, #3756, #3500 | mid | 2026-08-30 01:37Z → 03:51Z (re-drives completed 09:23Z) |
+| W3 | #3433, #3414, #3408, #3824 | mid, mid, strong, mid | 2026-08-30 04:36Z → 15:36Z (+ W2 re-drives #3889/#3890 riding the same window) |
 
 Issue selection: open imboard backlog issues with clear code-level scope, no `decision-pending`/`needs-clarification`/`epic`/`in-progress` labels, no open `Depends on` — pre-screened with the same criteria gate-issue enforces (a gate-blocked unit burns a slot for ~90 min on the stall ladder; see divergence #495).
 
@@ -44,7 +42,7 @@ Issue selection: open imboard backlog issues with clear code-level scope, no `de
 
 Fleet-cycle plans live in `~/.dossier/logs/fleet-cycle/imboard-ai-imboard-monorepo/FLEET-PLAN-*.md.gz` on the orchestrating host. Two comparable cohorts were selected (same repo, detached full-cycle dispatch, max-parallel 3, overlapping issue classes):
 
-- **Fleet A** — `FLEET-PLAN-20260828-054148` (+ same-window members): 6-issue fleet, waves, dependency-gated. Completed members: #3851, #3852, #3860, #3864 (+ #3857 gate-blocked, #3862 never dispatched); models glm-5.3 / kimi-k3-fast / gpt-5.6-luna.
+- **Fleet A** — `FLEET-PLAN-20260828-054148` (+ same-window members incl. its external prerequisite #3848): 6-issue fleet, waves, dependency-gated. Completed members: #3848, #3851, #3852, #3860, #3864 (+ #3857 gate-blocked, #3862 never dispatched; #3859/#3861 from adjacent same-window fleets); models glm-5.3 / kimi-k3-fast / gpt-5.6-luna.
 - **Fleet B** — `FLEET-PLAN-20260826-091737`: 11-issue fleet, claude models (sonnet-5/opus-5) — the token-comparable cohort.
 
 Per-issue wall-clock comes from runstate trails (`ai-dossier runstate stats --issues …`, host-agnostic — GitHub is the system of record); makespan from first gate `at=` to last `report done at=`.
@@ -75,7 +73,7 @@ Consequence, handled transparently: token data for both arms comes from the agen
 
 ## 3. Results
 
-### 3.1 W1 — #3891, #3862, #3810, #3886 (2026-08-29 22:22Z → …)
+### 3.1 W1 — #3891, #3862, #3810, #3886 (2026-08-29 22:22Z → 2026-08-30 01:44Z)
 
 Timeline facts (from `events.jsonl`, verbatim in `docs/reports/evidence/`):
 
@@ -91,15 +89,15 @@ Timeline facts (from `events.jsonl`, verbatim in `docs/reports/evidence/`):
 - #3810 parked at 23:13:07.705 → slot freed → **#3891 assigned+spawned in the same tick at 23:13:07.716 (11 ms later)** — the fleet's named failure (idle slot while runnable work waits) is structurally impossible here.
 - #3886 parked at 23:46:08.650 → **#3810's report agent assigned+spawned in the same tick at 23:46:08.658 (8 ms later)**.
 
-A second, stricter view counts a slot busy only while its agent process is actually alive (excluding dead-agent detection latency): 76% raw — dominated by a 21-minute window where **no engine process existed at all** (the validation harness reaped engine processes spawned from its session; D4). Excluding that documented outage, detection-to-redispatch under the cron engine was ≤ 60 s per exit (tick cadence), and the same-tick refill property still held everywhere the engine was alive.
+A second, stricter view counts a slot busy only while its agent process is actually alive (excluding dead-agent detection latency): 76% raw — dominated by a ~28-minute window where **no engine process existed at all** (the validation harness reaped engine processes spawned from its session; journal silence 22:36:24→23:05:53; D4). Excluding that documented outage, detection-to-redispatch under the cron engine was ≤ 60 s per exit (tick cadence), and the same-tick refill property still held everywhere the engine was alive.
 
-**Un-tailed merges: 0** (every merge received tail processing in the same or next tick) — with precision:
-- teardown attempted+recorded: 3/3 merges, **succeeded 0/3** — every one failed with `failed-missing-setup-info` (D2/#496, a mock-drift bug: teardown never runs; pool worktrees leak)
-- report dispatched: 3/3; report milestone posted: 2/3 (#3891's completed via the D5/#500 bug without its milestone)
+**Un-tailed merges: 0** (every merge received teardown in the same tick, and report dispatch as soon as a slot freed — same-tick in 3 of 4 cases here, minutes later for #3862's) — with precision:
+- teardown attempted+recorded: 4/4 merges, **succeeded 0/4** — every one failed with `failed-missing-setup-info` (D2/#496, a mock-drift bug: teardown never runs; pool worktrees leak)
+- report dispatched: 4/4; report milestone posted: 3/4 (#3891's completed via the D5/#500 bug without its milestone)
 
-**Stall recoveries: triggered 3, succeeded 3.** #3886 and #3862: sonnet agents exited mid-implement while a background build ran (#497) → `verify-incomplete` → redispatched at strong tier in the same tick → both resumed from the runstate trail and drove to merged PRs. #3891: mechanical report agent exited unverified → redispatched mid → completed (via D5). No unit hit the escalation cap; no unit failed.
+**Ladder/exit recoveries: triggered 3, succeeded 3 (0 stall-timer events — all three were `verify-incomplete` exit recoveries).** #3886 and #3862: sonnet agents exited mid-implement while a background build ran (#497) → `verify-incomplete` → redispatched at strong tier in the same tick → both resumed from the runstate trail and drove to merged PRs. #3891: mechanical report agent exited unverified → redispatched mid → completed (via D5). No unit hit the escalation cap; no unit failed.
 
-**Wall-clock:** spawn→merged per issue 52–126 m (median 87 m) vs the fleet baselines' per-issue spans of 1.9–28.8 h (Fleet B median 3.3 h, Fleet A median 4.1 h — which include supervision stalls; §4). Makespan for 4 issues: ~3 h (3 merged by +2.93 h; #3862 parked at +3.2 h, merge pending CI). Caveat: issue mix and models differ from the fleet cohorts (§6).
+**Wall-clock:** spawn→merged per issue 52–200 m (median 106.5 m; 87 m excluding #3862's 200 m, which includes a 61-minute report-slot wait and CI) vs the fleet baselines' per-issue spans of 1.9–28.8 h (Fleet B median 3.3 h, Fleet A median 4.4 h — which include supervision stalls; §4). Makespan for 4 issues: 3.33 h (first spawn → last merge-accepted 01:44). Caveat: issue mix and models differ from the fleet cohorts (§6).
 
 **Tokens/cost (claude usage per unit, all dispatches summed):**
 
@@ -108,8 +106,8 @@ A second, stricter view counts a slot busy only while its agent process is actua
 | #3810 | 2 (cycle+report) | 40.0 M | 121 806 | $13.23 |
 | #3886 | 3 (2×cycle+report) | 21.2 M | 80 135 | $27.41 |
 | #3891 | 3 (cycle+2×report) | 31.1 M | 58 555 | $33.02 |
-| #3862 | 2 (2×cycle) | 30.6 M | 122 196 | $37.27 |
-| **W1 total** | 10 | 122.9 M | 382 692 | **$110.94** (≈ $27.7/issue) |
+| #3862 | 3 (2×cycle+report) | 30.7 M | 126 180 | $37.40 |
+| **W1 total** | 11 | 123.0 M | 386 676 | **$111.06** (≈ $27.8/issue) |
 
 ### 3.2 W2 — #3890, #3889, #3756, #3500 (2026-08-30 01:37Z → 03:51Z)
 
@@ -122,25 +120,25 @@ W2 ran under the default prompt on claude tiers and hit three distinct external 
 | #3889 | ⚠️ unit-failed at ladder cap — **quota wall** | — | implement done + pushed (03:04), review started; Claude weekly limit hit 03:50Z → agent exit → strong redispatch died at 1 turn → cap. Work survives on branch; re-driven after the provider switch |
 | #3890 | ⚠️ same as #3889 | — | implement done + pushed (03:45); same quota-wall ladder burn; re-driven |
 
-- **Slot occupancy while runnable work existed:** window 01:37:02 (first spawn) → 02:47:08 (#3890, the last queued unit, first spawn — freed by #3756's unit-failure at 02:46): slots never idled while runnable work waited. The freed slot first served the waiting #3862 report agent (02:45:10, tail-before-new-work tick order), then #3890 within 3 minutes (tick cadence). #3889's 90-minute implement ran right up to its stall deadline and pushed at 03:04 — 21 minutes before the timer.
-- **Un-tailed merges:** 1 merge (#3500) — tail ran same-tick (teardown failed per D2/#496; report dispatched, milestone missing per D5/#500).
-- **Stall recoveries:** 2 triggered (both #497-style sonnet exits mid-implement — "waiting for ci-parity/background test"), 2 redispatched at strong tier; both opus resumes were then killed by the quota wall (counted under D8, not as ladder failures of their own).
-- **Cost (claude, partial before the wall):** #3500 $44.66 (3 dispatches), #3756 $54.85 (2), #3889 $31.77 (2), #3890 $10.48 (2) — **$141.76 total for 4 partially-completed issues**; quota-wall ladder deaths cost ~$0 in tokens but each cache-priming spawn that died instantly still billed its context upload (#3890's $10.48 is almost entirely cache writes). Usage details in evidence logs.
+- **Slot occupancy while runnable work existed:** window 01:37:02 (first spawn) → 02:47:08 (#3890, the last queued unit, first spawn — the slot was freed by #3756's park at 02:45:10, which the waiting #3862 report agent took in the same tick, tail-before-new-work; #3756's `auto-merge-blocked` unit-failure itself landed at 02:46:10): slots never idled while runnable work waited; measured 12 500 busy / 12 630 demand slot-seconds = **99.0%** (the gap is the report-agent exit → next-tick dispatch of #3890, ~2 minutes of tick cadence). #3889's 90-minute implement ran right up to its stall deadline and pushed at 03:04 — 21 minutes before the timer.
+- **Un-tailed merges:** 1 merge (#3500) — teardown same-tick (failed per D2/#496), report dispatched same-tick, milestone missing per D5/#500.
+- **Ladder/exit recoveries:** 2 triggered (both #497-style sonnet exits mid-implement — "waiting for ci-parity/background test", 0 stall-timer events), 2 redispatched at strong tier; both opus resumes were then killed by the quota wall (counted under D8, not as ladder failures of their own).
+- **Cost (claude, partial before the wall):** #3500 $44.66 (3 dispatches), #3756 $54.85 (2), #3889 $31.77 (2), #3890 $10.48 (2 logged results — its 63-minute mid run's usage result did not make the log, so its figure is a floor) — **≥ $141.76 total for 4 partially-completed issues**; quota-wall ladder deaths cost ~$0 in tokens but each cache-priming spawn that died instantly still billed its context upload (#3890's $10.48 is almost entirely cache writes). Usage details in evidence logs.
 
 ### 3.3 W3 — #3433, #3414, #3408 (strong), #3824 (+ W2 re-drives #3889/#3890 riding the same window)
 
 W3 changed dispatch to opencode/openrouter (claude weekly limit, see D8) and paid for every gap the first opencode round had:
 
-**Round 1 (04:47–05:24Z, all units lost to infrastructure, zero work lost):** the opencode dispatch lacked `--auto`, so headless agents auto-rejected worktree-path tool calls (external_directory) and died mid-phase (D10/#506); the operator's cron wrapper was missing the opencode bin dir from PATH, so every redispatch spawn errored and the cascade insta-failed all six queue/running units in ~15 minutes (#506's cascade note). All state was recoverable — pushed work survives, the resume rails carry it — and the queue was rebuilt by hand (the D7 re-enqueue corruption makes the rebuild a manual dance, #502).
+**Round 1 (04:36–05:24Z, all units lost to infrastructure, zero work lost):** the opencode dispatch lacked `--auto`, so headless agents auto-rejected worktree-path tool calls (external_directory) and died mid-phase (D10/#506); the operator's cron wrapper was missing the opencode bin dir from PATH, so every redispatch spawn errored and the cascade insta-failed all six queue/running units in ~15 minutes (#506's cascade note). All state was recoverable — pushed work survives, the resume rails carry it — and the queue was rebuilt by hand (the D7 re-enqueue corruption makes the rebuild a manual dance, #502).
 
-**Round 2 (05:40Z →, `--auto` + fixed PATH + glm/kimi on openrouter):**
+**Round 2 (05:39Z →, `--auto` + fixed PATH + glm/kimi, openrouter-routed from 05:07Z):**
 
 | Unit | Story | Outcome |
 |---|---|---|
-| #3824 | first opencode agent died on the permission wall mid-implement; re-drive resumed its uncommitted worktree work (`wip(recovered)`) and drove to park 06:37 → **PR #3929 merged 06:45** → report done 06:57 (report milestone ✅ posted) | ✅ merged + tailed |
+| #3824 | first opencode agent died on the permission wall mid-implement; re-drive resumed its uncommitted worktree work (`wip(recovered)`) and drove to park 06:38 → **PR #3929 merged 06:45** → report done 06:57 (report milestone ✅ posted) | ✅ merged + tailed |
 | #3414 | plan phase correctly handed off as **decision-pending** (`reachability-zero-prod-usage` — zero prod occurrences of concurrent investor-update sends; the retro #1632 rule firing on real data) | 🔶 human hand-off (by design); its exit then burned the ladder to `unit-failed` (D9/#507 — sched has no human-handoff state) |
-| #3408 (strong/kimi) | kimi agent killed by the in-flight credit race (06:58, D8 wall #3) before credits landed; re-driven 08:09, stalled out at the 90-min cap (10:28), re-driven again under the raised 180-min window (10:48) → implement done 12:54 → **PR #3936 merged 15:18** → report done 15:35 | ✅ merged + tailed |
-| #3433 | glm agent stalled the full 90-min timer mid-implement (heavy backend fix) → `stalled` → redispatched strong (kimi) 09:06 → stalled again at the strongest-tier cap (10:46) → re-driven under the 180-min window (10:49) with the recovered worktree → implement done 11:50 → review done 12:46 → **PR #3934 merged 14:15** → report done 14:33. The one genuine stall-recovery that reached a merge | ✅ merged + tailed (2 stalls, recovered twice) |
+| #3408 (strong/kimi) | kimi agent killed by the in-flight credit race (06:58, D8 wall #3) before credits landed; re-driven 08:09, stalled out at the 90-min cap (10:28), re-driven again under the raised 180-min window (10:49) → implement done 12:54 → **PR #3936 merged 15:18** → report done 15:35 | ✅ merged + tailed |
+| #3433 | glm agent stalled the full 90-min timer with no milestone progress past gate (heavy backend fix) → `stalled` → redispatched strong (kimi) 09:06 → stalled again at the strongest-tier cap (10:46) → re-driven under the 180-min window (10:49) with the recovered worktree → implement done 11:50 → review done 12:46 → **PR #3934 merged 14:15** → report done 14:33. The one genuine stall-recovery that reached a merge | ✅ merged + tailed (2 stalls, recovered twice) |
 | #3889 (W2 re-drive) | re-drive #3: gate 07:21 → review done 08:00 → park 08:09 → **PR #3930 merged 08:13** → report done 09:16; the engine detected the externally-advanced state (report posted while the agent still lived) and reclaimed the slot with `external-advance` — AC3 reconcile working | ✅ merged + tailed |
 | #3890 (W2 re-drive) | re-drive #3: review done 08:45 → park 09:10 (**PR #3932 merged 09:11 — 1-minute park→merge**) → report done 09:23 | ✅ merged + tailed |
 
@@ -181,7 +179,7 @@ The park→refill chain held throughout: #3824's park (06:38) refilled #3890's r
 | #3852 | 7.9 h | gate 2.5 h, implement 3.9 h |
 | #3860 | 4.4 h | gate 2.1 h |
 | #3864 | 4.1 h | gate 1.1 h + 0.8 h, implement 1.3 h |
-| **median** | **4.1 h** | 7/10 issues show gaps; **39.1 h** total gap time in the window |
+| **median** | **4.4 h** (of the 5 shown members) | 7/10 same-window issues show >45 m gaps; **39.1 h** total gap time in the window |
 
 **Fleet B** — `FLEET-PLAN-20260826-091737` (Aug 25–26; claude sonnet-5/opus-5, 10 completed): per-issue spans 1.9–28.8 h (median 3.3 h), makespan 47.9 h; #3752 alone shows a 16.3 h gate gap. **Fleet B executed on a different host** — its token/session data is not on hcc2 (see §6).
 
@@ -195,11 +193,11 @@ The imboard worktree pool on hcc2 currently holds **9 assigned worktrees whose i
 |---|---|---|---|
 | Slot occupancy while runnable work existed | **W1 100.0% · W2 99.0%** (state-machine view; park→refill 8–11 ms, same tick; the only W2 dip = 1 tick of 60 s cadence) | not measurable — no slot events; stall-gaps are the proxy | same |
 | Idle while runnable (worst observed) | 0 while any engine was alive; ≤60 s per event by tick cadence | gate gaps 4.7 h / 2.5 h / 2.1 h… (39.1 h total in window) | 16.3 h gate gap on #3752; 33.6 h total |
-| Un-tailed merges (no tail processing) | **0** — every merge got teardown+report in the same or next tick (teardown success 0/10 = bug #496; report milestone 8/10 = bug #500; both filed) | ≥9 leaked worktrees on this host (closed issues, pool never returned) | part of the same leak stock |
+| Un-tailed merges (no tail processing) | **0** — every merge got teardown same-tick and report dispatch as soon as a slot freed (same-tick in 7/10, minutes later in 3/10; teardown success 0/10 = bug #496; report milestone 8/10 = bug #500; both filed) | ≥9 leaked worktrees on this host (closed issues, pool never returned) | part of the same leak stock |
 | Stall handling | deterministic: journaled `stalled` → same-tick redispatch stronger → 3 stall/exit recoveries reached merges; cap bounded | invisible multi-hour gaps; supervision is remembered prose | same |
-| Per-issue clean spawn→merged | **52–270 m** (median ~112 m) | 3.2–7.9 h span incl. stalls (median 4.1 h) | 1.9–28.8 h span (median 3.3 h) |
+| Per-issue clean spawn→merged | **52–270 m** (~119 m over all 10 merged units; 112 m for the W3/re-drive cohort) | 3.2–7.9 h span incl. stalls (median 4.4 h of the shown members) | 1.9–28.8 h span (median 3.3 h) |
 | Makespan | W1: 3.33 h / 4 issues (4/4 merged) | 05:41→16:35+ incl. wave deps | 47.9 h / 10 issues |
-| Cost per issue | W1 claude $27.7 · W2 claude $141.8 (4 partial issues, wall-truncated) · W3/re-drives glm+kimi ~198.5 M tokens ≈ $66 (≈ $9–11/issue) | ~$10.5/issue (glm/kimi via opencode) | unreachable (other host) |
+| Cost per issue | W1 claude $27.8 · W2 claude $141.8 (4 partial issues, wall-truncated) · W3/re-drives glm+kimi ~198.5 M tokens ≈ $66 (≈ $9–11/issue) | ~$10.5/issue (glm/kimi via opencode) | unreachable (other host) |
 
 Model heterogeneity caveat (§6): the fleet cohorts ran glm/kimi/gpt via opencode; the sched arm ran claude (W1/W2) then glm/kimi (W3+re-drives) — the W3/re-drive rows are the model-comparable ones, and they land in the fleet's own cost band (~$9–11 vs ~$10.5/issue).
 
@@ -208,7 +206,7 @@ Model heterogeneity caveat (§6): the fleet cohorts ran glm/kimi/gpt via opencod
 - [x] **AC1** — ≥3 real multi-issue workloads (≥4 each) driven end-to-end by `sched`, all-full-cycle detached: W1 (4 issues, 4/4 merged), W2 (4 issues: 2 merged via re-drives after quota walls, 1 merged, 1 external watcher-block), W3 (4 issues: 3 merged, 1 correct human hand-off). Every unit was dispatched, supervised, and driven to a terminal state by the scheduler.
 - [x] **AC2** — metrics recorded per workload: occupancy (§3.1, §3.2, §3.3 — >90% target met on both clean windows), un-tailed merges 0 (with teardown/report defect precision), stall recoveries (3 triggered by genuine stalls/exits, all recovered to merges; the quota-wall burns are D8, separated out), wall-clock vs fleet baselines (§4.3).
 - [~] **AC3** — token/duration data aggregation: done for hcc2 (the executing host of both arms — runs.jsonl windows + agent-CLI usage records, §2.5); **wls/hcc unreachable from this run** (no outbound credentials — verified) and hcc2's own fleet-baseline window largely predates CLI 0.13.0. The gap is recorded, the comparison was scoped to same-host cohorts so no arm is undercounted. The cross-host aggregate the AC envisions requires credentials this run did not have — flagged as the AC's open remainder.
-- [x] **AC4** — every divergence filed and linked: D1–D10 → #495, #496, #497, #500, #501, #502, #505, #506, #507 (10 issues; two operational notes carry no issue by design).
+- [x] **AC4** — every divergence filed and linked: D1–D10 → #495, #496, #497, #500, #501, #502, #505, #506, #507 (9 issues; one operational note, D4, carries no issue by design — the state machine reconciled correctly, so it is not a state-machine divergence).
 - [x] **AC5** — this report, with the §Recommendation go/no-go.
 
 ## 5. Divergences found
@@ -218,7 +216,7 @@ Model heterogeneity caveat (§6): the fleet cohorts ran glm/kimi/gpt via opencod
 | D1 | Default `stall_timeout_ms` (30 min) is shorter than one imboard implement phase — healthy long-phase agents would burn the escalation ladder and fail; operator workaround `stall_timeout_ms=90min` applied for W1–W3 | [#495](https://github.com/imboard-ai/ai-dossier/issues/495) |
 | D2 | `parseSetupInfo` JSON-parses `gh issue view --json comments` output as a bare array, but gh returns `{"comments":[...]}` — **teardown always fails** with `failed-missing-setup-info`; pool worktrees leak per merge (report tail unaffected). Reproduced directly; mock drift in the #468 fixtures masked it | [#496](https://github.com/imboard-ai/ai-dossier/issues/496) |
 | D3 | Headless full-cycle agents (sonnet ×2 in W1) exit their session while a background build/test command still runs ("Waiting for ci-parity.sh…") — unverified-exit rail recovers correctly but burns a tier escalation + restart latency each time | [#497](https://github.com/imboard-ai/ai-dossier/issues/497) |
-| D4 (op) | Engine processes spawned from an interactive agent harness get reaped when the harness call ends; switched W1 to the `sched start --once` cron deployment mid-run (21-min engine gap 22:37:30→23:05:50 recorded in the journal). Cron mode = every tick is a cold restart — reconciliation-by-pid proved itself (exit-detected → redispatched same tick) | — (operational note, not a sched defect) |
+| D4 (op) | Engine processes spawned from an interactive agent harness get reaped when the harness call ends; switched W1 to the `sched start --once` cron deployment mid-run (~28-minute engine gap, journal silence 22:36:24→23:05:53). Cron mode = every tick is a cold restart — reconciliation-by-pid proved itself (exit-detected → redispatched same tick) | — (operational note, not a sched defect) |
 | D5 | Report-agent completion's closed-signal suppression is overwritten by `phase-updated` (`slot.phase` tracks the issue's milestone phase, not the agent role) — units complete without a report milestone. Hit on #3891 (W1) and #3500 (W2) | [#500](https://github.com/imboard-ai/ai-dossier/issues/500) |
 | D6 | `unit-failed` ledger goes stale when an externally-blocked PR is later merged by the operator — no reconcile path for terminal-failed entries whose world changed (W2 #3756: watcher-blocked on the known imboard CANCELLED-checks race, PR left green for human disposition; ledger stays failed) | [#501](https://github.com/imboard-ai/ai-dossier/issues/501) |
 | D7 | Re-enqueueing a terminal (failed) unit corrupts `state.json` — `enqueueEntries` allows the re-enqueue but appends without replacing the old entry; the just-written state fails its own `validateState` on the next load, bricking every command incl. the cron engine until a manual reset | [#502](https://github.com/imboard-ai/ai-dossier/issues/502) |
@@ -237,8 +235,8 @@ Model heterogeneity caveat (§6): the fleet cohorts ran glm/kimi/gpt via opencod
 
 ## 7. Appendix — evidence
 
-- Sched journal (every decision, verbatim): `docs/reports/evidence/sched-events-w1.jsonl` (W1 snapshot) and the full `events.jsonl` (~300 events) — the machine-readable record behind every §3 claim; state snapshots (including the two corrupt-state artifacts that evidence #502/#506) preserved in the validation workspace.
-- Per-agent raw output: `runs/issue-<n>.log` for all 12 units (claude result JSON with usage/cost; opencode event streams with per-step tokens) — copied to `docs/reports/evidence/` at PR time.
+- Sched journal (every decision, verbatim): `docs/reports/evidence/sched-events-w1.jsonl` (W1 snapshot, 63 events) and `docs/reports/evidence/sched-events-final.jsonl` (the complete journal, 403 events) — the machine-readable record behind every §3 claim; two corrupt-state artifacts (`state.json.corrupt-duplicate-3889` evidencing #502, `state.json.corrupt-ladder-burn` from the #506 cascade window) are committed alongside.
+- Per-agent output: `docs/reports/evidence/agent-logs-summary.md` — every claude result (usage/cost/turns/duration) and opencode API error, condensed per unit; the full raw streams remain on hcc2 at `~/.dossier/sched/imboard-ai-imboard-monorepo/runs/issue-<n>.log`.
 - Fleet baselines: `~/.dossier/logs/fleet-cycle/imboard-ai-imboard-monorepo/FLEET-PLAN-*.md.gz` (12 plans), runstate trails via `ai-dossier runstate stats --issues … --repo imboard-ai/imboard-monorepo --json`, opencode session-DB token attribution (Fleet A ≈ $52.72 for the 5 completed core members).
 - Operational trail: this issue's runstate milestones (gate → setup → plan → implement) and the imboard issues' own trails (#3810, #3862, #3886, #3891, #3433, #3408, #3824, #3889, #3890, #3500 merged with full runstate histories; #3414 decision-pending hand-off; #3756's PR #3927 left for human disposition).
 - Filed issues: #495, #496, #497, #500, #501, #502, #505, #506, #507.
