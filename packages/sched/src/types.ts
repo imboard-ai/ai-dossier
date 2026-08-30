@@ -68,6 +68,49 @@ export const SATISFIED_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set([
 /** Teardown outcome values (#468): verified cleanup or a failed step. */
 export type CleanupStatus = 'done' | `failed-${string}`;
 
+// --- Batch failure recovery (#472, RFC-0001 §F.2/F.8/F.9) ---
+
+/**
+ * Requeue context for an evicted member (F.2 — "requeue the member as
+ * full-cycle **with its context** (plan artifact + failure evidence
+ * attached)"). The plan artifact already lives on the issue as the durable
+ * `plan:v1` comment; this record is the failure evidence the requeued
+ * full-cycle run reads instead of re-deriving what broke.
+ */
+export interface FailureEvidence {
+  /** Batch the member was evicted from. */
+  batch: string;
+  /** Failing tests attributed to the member, as the suite reported them. */
+  failing_tests: string[];
+  /** How the failure was attributed: overlap heuristic, bisect, or group eviction. */
+  attribution: 'overlap' | 'bisect' | 'group' | 'unattributed';
+  /** Eviction reason slug (test-failure | eviction-group | revert-conflict | ...). */
+  reason: string;
+  /** Commits reverted for this eviction, oldest first; a group eviction carries the whole group's. */
+  reverted_commits: string[];
+  at: string;
+}
+
+/** One recorded eviction (RFC-0001 §D.4 — state.json persists "eviction history"). */
+export interface EvictionRecord {
+  issue: number;
+  /** Eviction reason slug. */
+  reason: string;
+  /** Member commits reverted, oldest first. */
+  reverted_commits: string[];
+  /** Members evicted together with this one (the eviction group), this member included. */
+  group: number[];
+  at: string;
+}
+
+/** One bounded fix attempt (F.2 — "1 bounded fix attempt"; see {@link MAX_FIX_ATTEMPTS}). */
+export interface FixAttemptRecord {
+  issue: number;
+  /** `pending` while the fix agent runs; the suite verdict after resolution. */
+  outcome: 'pending' | 'green' | 'red';
+  at: string;
+}
+
 // --- D.2 Batch state machine ---
 
 /**
@@ -177,6 +220,11 @@ export interface QueueEntry {
    * was verified (pool return self-check / worktree path gone).
    */
   cleanup: CleanupStatus | null;
+  /**
+   * Failure evidence attached when an evicted batch member requeues as
+   * full-cycle (#472, F.2). Null until the entry has been evicted.
+   */
+  failure_evidence: FailureEvidence | null;
   enqueued_at: string;
   updated_at: string;
 }
@@ -190,6 +238,38 @@ export interface BatchEntry {
   base_branch: string;
   /** Index of the member currently in work, when status is `executing` (1-based member pointer). */
   executing_member: number;
+  /**
+   * Anchor issue number — where batch milestones post (#472). Null for
+   * legacy batches enqueued before the anchor was recorded.
+   */
+  anchor: number | null;
+  /**
+   * Batch branch name (`batch/<id>-<date>`); null until setup creates it.
+   * The rebase path (F.9) rewrites this branch.
+   */
+  branch: string | null;
+  /**
+   * Batch runstate run id (`run=` on the anchor's batch milestones); null
+   * for legacy batches. Recovery milestones post with it when present.
+   */
+  run_id: string | null;
+  /**
+   * Eviction groups (RFC-0001 §E.4): sets of members whose predicted paths
+   * overlap — they see each other's changes in the worktree, so their
+   * commits revert TOGETHER when any one of them is evicted. At most one
+   * group per batch (prep's composition constraint); ungrouped members
+   * revert alone.
+   */
+  eviction_groups: number[][];
+  /** Eviction history (RFC-0001 §D.4) — grows by one record per evicted member. */
+  evictions: EvictionRecord[];
+  /** Bounded fix attempts (F.2) — at most {@link MAX_FIX_ATTEMPTS} per member. */
+  fix_attempts: FixAttemptRecord[];
+  /**
+   * Rebase attempts on the batch-PR conflict path (F.9 — "re-ship once");
+   * the second CONFLICTING/auto-merge-blocked occurrence dissolves the batch.
+   */
+  rebase_attempts: number;
   created_at: string;
   updated_at: string;
 }
@@ -300,10 +380,22 @@ export const DEFAULT_RECONCILE_INTERVAL_MS = 60 * 1000;
 /** Default parked-PR poll interval: 2.5 min (#468 AC1 "every 2–3 min"). */
 export const DEFAULT_PR_POLL_INTERVAL_MS = 150 * 1000;
 
-export const SCHEMA_VERSION = '1.2.0' as const;
+/**
+ * Strictly more than this fraction of a batch's members evicted ⇒ dissolve
+ * (RFC-0001 §F.2 "evictions > ⅓ … → dissolve batch").
+ */
+export const DISSOLVE_EVICTED_FRACTION = 1 / 3;
+
+/** Bounded fix attempts per offending member (RFC-0001 §F.2 "1 bounded fix attempt"). */
+export const MAX_FIX_ATTEMPTS = 1;
+
+/** Rebase attempts on the batch-PR conflict path (RFC-0001 §F.9 "re-ship once"). */
+export const MAX_REBASE_ATTEMPTS = 1;
+
+export const SCHEMA_VERSION = '1.3.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
-export const LEGACY_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0'];
+export const LEGACY_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0', '1.2.0'];
 
 export const CONFIG_SCHEMA_VERSION = '1.2.0' as const;
 
@@ -376,7 +468,20 @@ export type JournalEventName =
   | 'teardown-done'
   | 'teardown-failed'
   | 'report-dispatched'
-  | 'report-failed';
+  | 'report-failed'
+  // --- Batch failure recovery (#472, RFC-0001 §F) ---
+  /** The aggregate suite failed; `detail` carries the failing-test count. */
+  | 'suite-failed'
+  /** Attribution resolved; `detail` carries overlap|bisect|decision-pending. */
+  | 'attributed'
+  /** A bounded mid-tier fix attempt was dispatched for a member. */
+  | 'fix-dispatched'
+  /** A member was evicted (reverted + requeued); `detail` carries the reason. */
+  | 'member-evicted'
+  /** The batch branch was rebased onto a moved base (F.9). */
+  | 'batch-rebased'
+  /** The batch was dissolved; `detail` carries the reason. */
+  | 'batch-dissolved';
 
 /** One journaled event. `ts` is stamped by the journal, never by callers. */
 export interface JournalEvent {

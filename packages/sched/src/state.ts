@@ -12,6 +12,9 @@
 import {
   type BatchEntry,
   type BatchStatus,
+  type EvictionRecord,
+  type FailureEvidence,
+  type FixAttemptRecord,
   IllegalTransitionError,
   type IssueStatus,
   LEGACY_SCHEMA_VERSIONS,
@@ -142,9 +145,44 @@ const BATCH_STATUSES = new Set<string>(Object.keys(BATCH_TRANSITIONS));
 const SLOT_STATUSES = new Set<string>(Object.keys(SLOT_BASE_TRANSITIONS));
 const CYCLE_MODES = new Set(['full', 'slot']);
 const MODEL_TIERS = new Set(['mechanical', 'mid', 'strong']);
+const ATTRIBUTION_METHODS = new Set(['overlap', 'bisect', 'group', 'unattributed']);
+const FIX_OUTCOMES = new Set(['pending', 'green', 'red']);
 
 function isIsoDateString(value: unknown): value is string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
+}
+
+function isSha(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{7,40}$/i.test(value);
+}
+
+/** Validate a {@link FailureEvidence} record (#472); throws on malformed shape. */
+function validateFailureEvidence(data: unknown, label: string): void {
+  if (data === null || data === undefined) return;
+  if (typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error(`${label}: failure_evidence must be an object or null`);
+  }
+  const ev = data as Record<string, unknown>;
+  if (typeof ev.batch !== 'string' || ev.batch.length === 0) {
+    throw new Error(`${label}: failure_evidence.batch must be a non-empty string`);
+  }
+  if (!Array.isArray(ev.failing_tests) || ev.failing_tests.some((t) => typeof t !== 'string')) {
+    throw new Error(`${label}: failure_evidence.failing_tests must be an array of strings`);
+  }
+  if (!ATTRIBUTION_METHODS.has(String(ev.attribution))) {
+    throw new Error(
+      `${label}: failure_evidence.attribution must be overlap | bisect | group | unattributed`
+    );
+  }
+  if (typeof ev.reason !== 'string' || ev.reason.length === 0) {
+    throw new Error(`${label}: failure_evidence.reason must be a non-empty string`);
+  }
+  if (!Array.isArray(ev.reverted_commits) || ev.reverted_commits.some((c) => !isSha(c))) {
+    throw new Error(`${label}: failure_evidence.reverted_commits must be an array of shas`);
+  }
+  if (!isIsoDateString(ev.at)) {
+    throw new Error(`${label}: failure_evidence.at must be an ISO date string`);
+  }
 }
 
 function validateQueueEntry(data: unknown, where: (n: number) => string): void {
@@ -187,6 +225,7 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   if (entry.cleanup !== null && entry.cleanup !== undefined && typeof entry.cleanup !== 'string') {
     throw new Error(`${label}: cleanup must be a string or null`);
   }
+  validateFailureEvidence(entry.failure_evidence ?? null, label);
   if (!isIsoDateString(entry.enqueued_at) || !isIsoDateString(entry.updated_at)) {
     throw new Error(`${label}: enqueued_at/updated_at must be ISO date strings`);
   }
@@ -199,8 +238,11 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
  *
  * Legacy schema versions are accepted and migrated: 1.0.0 (pre-#464) slots
  * backfill `branch`/`last_head` to null; 1.1.0 (pre-#468) entries backfill
- * `pr`/`cleanup` and the state backfills `last_pr_poll_at` to null. The state
- * upgrades to the current schema on the next save.
+ * `pr`/`cleanup` and the state backfills `last_pr_poll_at` to null; 1.2.0
+ * (pre-#472) batches backfill the recovery fields (`anchor`, `branch`,
+ * `run_id`, `eviction_groups`, `evictions`, `fix_attempts`,
+ * `rebase_attempts`) and entries backfill `failure_evidence` to null. The
+ * state upgrades to the current schema on the next save.
  */
 export function validateState(data: unknown): SchedState {
   if (!data || typeof data !== 'object') {
@@ -255,6 +297,100 @@ export function validateState(data: unknown): SchedState {
     }
     if (!Number.isInteger(batch.executing_member) || batch.executing_member < 0) {
       throw new Error(`Batch ${batch.id}: executing_member must be a non-negative integer`);
+    }
+    // --- Recovery fields (#472, schema 1.3.0; legacy states backfill in the migration below) ---
+    // Like pr/cleanup before them, the fields validate only when present —
+    // pre-1.3.0 states reach the migration backfill, not a throw.
+    if (
+      batch.anchor !== null &&
+      batch.anchor !== undefined &&
+      (!Number.isInteger(batch.anchor) || (batch.anchor as number) <= 0)
+    ) {
+      throw new Error(`Batch ${batch.id}: anchor must be a positive integer or null`);
+    }
+    if (batch.branch !== null && batch.branch !== undefined && typeof batch.branch !== 'string') {
+      throw new Error(`Batch ${batch.id}: branch must be a string or null`);
+    }
+    if (batch.run_id !== null && batch.run_id !== undefined && typeof batch.run_id !== 'string') {
+      throw new Error(`Batch ${batch.id}: run_id must be a string or null`);
+    }
+    if (
+      batch.eviction_groups !== undefined &&
+      (!Array.isArray(batch.eviction_groups) ||
+        batch.eviction_groups.some(
+          (g) =>
+            !Array.isArray(g) ||
+            g.length === 0 ||
+            g.some((m) => !Number.isInteger(m) || (m as number) <= 0)
+        ))
+    ) {
+      throw new Error(
+        `Batch ${batch.id}: eviction_groups must be an array of non-empty member-number arrays`
+      );
+    }
+    const groups = (batch.eviction_groups ?? []) as number[][];
+    const grouped = new Set<number>();
+    for (const group of groups) {
+      for (const member of group) {
+        if (grouped.has(member)) {
+          throw new Error(
+            `Batch ${batch.id}: member ${member} appears in more than one eviction group`
+          );
+        }
+        grouped.add(member);
+      }
+    }
+    for (const group of groups) {
+      for (const member of group) {
+        if (!(batch.members as number[]).includes(member)) {
+          throw new Error(
+            `Batch ${batch.id}: eviction group member ${member} is not a batch member`
+          );
+        }
+      }
+    }
+    if (batch.evictions !== undefined && !Array.isArray(batch.evictions)) {
+      throw new Error(`Batch ${batch.id}: evictions must be an array`);
+    }
+    for (const ev of (batch.evictions ?? []) as EvictionRecord[]) {
+      if (!Number.isInteger(ev?.issue) || (ev?.issue as number) <= 0) {
+        throw new Error(`Batch ${batch.id}: evictions[].issue must be a positive integer`);
+      }
+      if (typeof ev?.reason !== 'string' || ev.reason.length === 0) {
+        throw new Error(`Batch ${batch.id}: evictions[].reason must be a non-empty string`);
+      }
+      if (!Array.isArray(ev?.reverted_commits) || ev.reverted_commits.some((c) => !isSha(c))) {
+        throw new Error(`Batch ${batch.id}: evictions[].reverted_commits must be shas`);
+      }
+      if (
+        !Array.isArray(ev?.group) ||
+        ev.group.some((m) => !Number.isInteger(m) || (m as number) <= 0)
+      ) {
+        throw new Error(`Batch ${batch.id}: evictions[].group must be member numbers`);
+      }
+      if (!isIsoDateString(ev?.at)) {
+        throw new Error(`Batch ${batch.id}: evictions[].at must be an ISO date string`);
+      }
+    }
+    if (batch.fix_attempts !== undefined && !Array.isArray(batch.fix_attempts)) {
+      throw new Error(`Batch ${batch.id}: fix_attempts must be an array`);
+    }
+    for (const fa of (batch.fix_attempts ?? []) as FixAttemptRecord[]) {
+      if (!Number.isInteger(fa?.issue) || (fa?.issue as number) <= 0) {
+        throw new Error(`Batch ${batch.id}: fix_attempts[].issue must be a positive integer`);
+      }
+      if (!FIX_OUTCOMES.has(String(fa?.outcome))) {
+        throw new Error(`Batch ${batch.id}: fix_attempts[].outcome must be pending | green | red`);
+      }
+      if (!isIsoDateString(fa?.at)) {
+        throw new Error(`Batch ${batch.id}: fix_attempts[].at must be an ISO date string`);
+      }
+    }
+    if (
+      batch.rebase_attempts !== undefined &&
+      (!Number.isInteger(batch.rebase_attempts) || (batch.rebase_attempts as number) < 0)
+    ) {
+      throw new Error(`Batch ${batch.id}: rebase_attempts must be a non-negative integer`);
     }
     if (!isIsoDateString(batch.created_at) || !isIsoDateString(batch.updated_at)) {
       throw new Error(`Batch ${batch.id}: created_at/updated_at must be ISO date strings`);
@@ -343,6 +479,8 @@ export function validateState(data: unknown): SchedState {
   // Migration: pre-#464 (1.0.0) slots carry no branch/last_head/pid_start —
   // backfill null so the returned state always has the current shape. Pre-#468
   // (1.1.0) entries carry no pr/cleanup and the state no last_pr_poll_at.
+  // Pre-#472 (1.2.0) batches/entries carry no recovery fields — backfill the
+  // nulls/empties the recovery core (#472) expects.
   const slots = (obj.slots as SlotEntry[]).map((slot) => ({
     ...slot,
     branch: slot.branch ?? null,
@@ -353,12 +491,24 @@ export function validateState(data: unknown): SchedState {
     ...entry,
     pr: entry.pr ?? null,
     cleanup: entry.cleanup ?? null,
+    failure_evidence: entry.failure_evidence ?? null,
+  }));
+  const batches = (obj.batches as BatchEntry[]).map((batch) => ({
+    ...batch,
+    anchor: batch.anchor ?? null,
+    branch: batch.branch ?? null,
+    run_id: batch.run_id ?? null,
+    eviction_groups: batch.eviction_groups ?? [],
+    evictions: batch.evictions ?? [],
+    fix_attempts: batch.fix_attempts ?? [],
+    rebase_attempts: batch.rebase_attempts ?? 0,
   }));
 
   return {
     ...(data as SchedState),
     schema_version: SCHEMA_VERSION,
     entries,
+    batches,
     slots,
     last_pr_poll_at: obj.last_pr_poll_at ?? null,
   };

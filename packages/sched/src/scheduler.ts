@@ -18,7 +18,7 @@ import {
   runnableUnits,
 } from './readiness';
 import { findBatch, transitionBatch, transitionIssue, transitionSlot } from './state';
-import type { SchedConfig, SchedState } from './types';
+import type { BatchEntry, SchedConfig, SchedState } from './types';
 import {
   LIVE_SLOT_STATUSES,
   SATISFIED_ISSUE_STATUSES,
@@ -184,28 +184,18 @@ export function abandonIssue(
 }
 
 /**
- * `sched abandon --batch B`: dissolve the batch and requeue every non-terminal
- * member as full-cycle (RFC-0001 §D.2 dissolving → "members requeued"; F.8
- * "nothing green is discarded" — members already shipped stay put).
+ * Requeue every unshipped member of a dissolving batch as full-cycle
+ * (RFC-0001 §D.2 dissolving → "members requeued"; F.8 "nothing green is
+ * discarded" — members already shipped stay put). Shared by the operator
+ * `abandonBatch` and the recovery core's automatic dissolve (#472).
  */
-export function abandonBatch(
+export function requeueUnshippedMembers(
   state: SchedState,
-  batchId: string,
-  reason = 'batch abandoned',
+  batch: BatchEntry,
+  reason: string,
   now: Date = new Date()
 ): { state: SchedState; requeued: number[] } {
-  const batch = findBatch(state, batchId);
-  if (!batch) {
-    throw new SchedNotFoundError(`Batch not found: ${batchId}`);
-  }
-  if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
-    throw new SchedNotFoundError(
-      `Batch ${batchId} is already ${batch.status} — nothing to abandon`
-    );
-  }
-  let next = transitionBatch(state, batchId, 'dissolving', {}, now);
-  next = transitionBatch(next, batchId, 'dissolved', {}, now);
-
+  let next = state;
   const requeued: number[] = [];
   for (const issue of batch.members) {
     const entry = next.entries.find((e) => e.issue === issue);
@@ -229,7 +219,13 @@ export function abandonBatch(
       requeued.push(issue);
       continue;
     }
-    if (entry.status === 'evicted' || entry.status === 'requeued') {
+    if (entry.status === 'requeued') {
+      // Already requeued as full-cycle (e.g. evicted by #472's recovery
+      // before the batch dissolved) — nothing to do, but it counts.
+      requeued.push(issue);
+      continue;
+    }
+    if (entry.status === 'evicted') {
       next = transitionIssue(next, issue, 'requeued', { mode: 'full', batch: null, reason }, now);
       requeued.push(issue);
       continue;
@@ -240,4 +236,36 @@ export function abandonBatch(
     requeued.push(issue);
   }
   return { state: next, requeued };
+}
+
+/**
+ * `sched abandon --batch B`: dissolve the batch and requeue every non-terminal
+ * member as full-cycle (RFC-0001 §D.2 dissolving → "members requeued"; F.8
+ * "nothing green is discarded" — members already shipped stay put).
+ */
+export function abandonBatch(
+  state: SchedState,
+  batchId: string,
+  reason = 'batch abandoned',
+  now: Date = new Date()
+): { state: SchedState; requeued: number[] } {
+  const batch = findBatch(state, batchId);
+  if (!batch) {
+    throw new SchedNotFoundError(`Batch not found: ${batchId}`);
+  }
+  if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId} is already ${batch.status} — nothing to abandon`
+    );
+  }
+  let next = transitionBatch(state, batchId, 'dissolving', {}, now);
+  next = transitionBatch(next, batchId, 'dissolved', {}, now);
+
+  const { state: requeuedState, requeued } = requeueUnshippedMembers(
+    next,
+    findBatch(next, batchId) as BatchEntry,
+    reason,
+    now
+  );
+  return { state: requeuedState, requeued };
 }

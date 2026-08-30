@@ -119,6 +119,20 @@ import {
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
   validateState,         // strict persisted-state validation (1.0.0 files migrate)
+  // #472 batch failure recovery (RFC-0001 §F.2/F.8/F.9):
+  attributeByOverlap,    // F.2 stage 1: failing tests ↔ members by overlap (pure)
+  parseVitestJson,       // vitest --reporter=json → failing tests
+  parseBoundaryCommits,  // git log → boundary commits via the (#N) trailer
+  runAttributionBisect,  // F.2 stage 2: deterministic git bisect over boundary commits
+  attributeSuiteFailure, // the full attribution pipeline (overlap + bisect)
+  beginFixAttempt,       // the ONE bounded mid-tier fix attempt per member
+  resolveFixAttempt,     // suite verdict → fixing → validating
+  evictMembers,          // revert ranges (eviction groups together) + requeue
+                         //   with failure evidence + suite re-run + ⅓ trigger
+  dissolveBatch,         // dissolving → dissolved; requeue full or halve into
+                         //   two forming half-batches (nothing green discarded)
+  handlePrConflict,      // F.9: rebase → re-validate → re-ship once; 2nd → halves
+  createExecBatchPoster, // batch milestones on the anchor via ai-dossier runstate
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
 } from '@ai-dossier/sched';
@@ -206,6 +220,63 @@ prompt instructs it) and exit. The engine owns everything after the park:
 in `events.jsonl` (`pr-parked`, `merge-accepted`, `pr-watch-failed`,
 `pr-watch-waiting`, `teardown-done`/`teardown-failed`, `report-dispatched`,
 `report-failed`, `ground-truth-unreachable`).
+
+## Batch failure recovery (#472, RFC-0001 §F.2/F.8/F.9)
+
+The recovery core for the batch lifecycle: when the aggregate suite fails or
+the batch PR conflicts, the pipeline attributes deterministically, fixes
+boundedly, evicts surgically, and dissolves as the last resort — nothing
+green is thrown away. It is a library the batch-execution loop calls (the
+engine's batch member sequencing is a #464 follow-up); everything is fully
+testable standalone against scratch repos.
+
+- **Attribution (AC1)** — `attributeByOverlap` maps failing tests to members
+  by focused-test match, then changed-path overlap (test file / source stem /
+  containing directory). Ambiguous or unmatched tests go to ONE deterministic
+  bisect (`runAttributionBisect`): real `git bisect run` over the issue-boundary
+  commits (members land exactly one commit ending `(#N)` — the same trailer the
+  slot-cycle and aggregate-review dossiers key on), running ONLY the failing
+  tests. A first-bad commit that is not a member's boundary commit (e.g. a
+  batch-level review fix) is unattributable → decision-pending on the anchor;
+  it is never force-mapped. Bisect always resets; unparsable output is an
+  error, never a guess.
+- **One bounded fix attempt (AC2)** — `beginFixAttempt` transitions
+  `attributing → fixing`, records a `pending` attempt (a crash can never
+  double-dispatch) and returns a mid-tier dispatch INSTRUCTION (the caller
+  spawns it — the package never invokes an LLM). `resolveFixAttempt` records
+  the suite verdict and returns to `validating`; red re-enters the pipeline
+  with the spent attempt suppressing a second dispatch — eviction next.
+- **Eviction (AC2/AC6)** — `evictMembers` reverts the offender's commit
+  range with real `git revert` (newest first); **eviction groups revert
+  together** (RFC §E.4 — members whose predicted paths overlap). A conflict
+  aborts the revert and dissolves. Members requeue as full-cycle
+  (`evicted → requeued{full}`) with `failure_evidence` attached (batch,
+  failing tests, attribution method, reverted commits) — the plan artifact
+  already lives on the issue as the `plan:v1` comment. The suite re-runs
+  after a clean eviction.
+- **Dissolve (AC3)** — triggers: strictly more than ⅓ of the members evicted,
+  or a revert conflict. `dissolveBatch` strategy `full` requeues every
+  unshipped member as full-cycle (the `abandonBatch` semantics); strategy
+  `halved` splits the still-batched members into two forming half-batches
+  (`<id>-a` / `<id>-b`, conflict probability ∝ batch width — F.9). Shipped
+  members keep their outcome; evicted members keep their full-cycle requeue.
+- **Batch-PR conflict (AC4)** — `handlePrConflict` (CONFLICTING /
+  `auto-merge-blocked`): first occurrence rebases the batch branch onto the
+  moved base (`fetch` + `rebase`; conflict ⇒ abort + halve), force-pushes
+  with `--force-with-lease`, re-runs the suite, and re-ships once
+  (`rebasing → re-validating → shipping`). The second occurrence dissolves
+  into two half-batches immediately.
+- **Milestones + journal (AC5)** — every eviction/dissolve posts a batch
+  milestone on the anchor (`createExecBatchPoster` shells
+  `ai-dossier runstate post --phase batch-validate` with reasons and what was
+  preserved; a failed post warns, never crashes) and journals
+  `member-evicted` / `batch-dissolved` / `batch-rebased` — the per-member
+  outcomes are the classifier feedback signal.
+
+Persisted state (schema 1.3.0, migrated from 1.2.0 on load): batches carry
+`anchor`, `branch`, `run_id`, `eviction_groups`, `evictions` (the §D.4
+eviction history), `fix_attempts`, `rebase_attempts`; entries carry
+`failure_evidence`.
 
 ## Development
 

@@ -1,4 +1,21 @@
 export {
+  type AttributionMethod,
+  attributeByOverlap,
+  type BoundaryCommit,
+  commitsOfMember,
+  type FailingTest,
+  type MemberFootprint,
+  parseBoundaryCommits,
+  parseVitestJson,
+  type TestAttribution,
+} from './attribution';
+export {
+  type BisectDeps,
+  type BisectInput,
+  type BisectOutcome,
+  runAttributionBisect,
+} from './bisect';
+export {
   buildAgentCommand,
   buildPrompt,
   buildReportPrompt,
@@ -38,7 +55,6 @@ export {
   type SetupInfo,
 } from './groundtruth';
 export { issueOfUnit, JOURNAL_FILE, Journal, readJsonl, unitEvent } from './journal';
-
 export { CorruptStateError, LockTimeoutError, SchedStore, writeAtomic } from './persist';
 export {
   createExecFn,
@@ -50,6 +66,27 @@ export {
 } from './project';
 export { DISPATCHABLE_ISSUE_STATUSES } from './readiness';
 export {
+  type AttributionVerdict,
+  attributeSuiteFailure,
+  type BatchMilestone,
+  beginFixAttempt,
+  createExecBatchPoster,
+  DEFAULT_FIX_PROMPT_TEMPLATE,
+  type DecisionPending,
+  type DissolveOutcome,
+  dissolveBatch,
+  dissolveTriggered,
+  type EvictOutcome,
+  evictMembers,
+  type FixDispatch,
+  handlePrConflict,
+  type PrConflictOutcome,
+  type RecoveryDeps,
+  readBoundaries,
+  resolveFixAttempt,
+  type SuiteResult,
+} from './recovery';
+export {
   type Assignment,
   abandonBatch,
   abandonIssue,
@@ -60,6 +97,7 @@ export {
   dependencyBlockers,
   freeCapacity,
   type RunnableUnit,
+  requeueUnshippedMembers,
   runnableUnits,
   setPaused,
 } from './scheduler';
@@ -85,8 +123,12 @@ export {
   DEFAULT_PR_POLL_INTERVAL_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_STALL_TIMEOUT_MS,
+  DISSOLVE_EVICTED_FRACTION,
   type DispatchConfig,
   ESCALATION_CAP,
+  type EvictionRecord,
+  type FailureEvidence,
+  type FixAttemptRecord,
   IllegalTransitionError,
   type IssueStatus,
   type JournalEvent,
@@ -94,7 +136,9 @@ export {
   LEGACY_CONFIG_SCHEMA_VERSIONS,
   LEGACY_SCHEMA_VERSIONS,
   LIVE_SLOT_STATUSES,
+  MAX_FIX_ATTEMPTS,
   MAX_MAX_SLOTS,
+  MAX_REBASE_ATTEMPTS,
   MERGED_BATCH_STATUSES,
   MIN_MAX_SLOTS,
   type ModelTier,

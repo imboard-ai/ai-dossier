@@ -25,6 +25,22 @@ export interface EnqueueInput {
   deps?: number[];
   tier?: ModelTier;
   base_branch?: string;
+  /**
+   * Anchor issue number — recorded on the batch when this input CREATES it
+   * (#472; batch milestones post there). Conflict with an existing batch's
+   * anchor is an EnqueueError, like base_branch.
+   */
+  anchor?: number;
+  /**
+   * Batch runstate run id — recorded on the batch when this input CREATES it
+   * (#472; recovery milestones post with it).
+   */
+  run_id?: string;
+  /**
+   * Eviction groups for the batch (RFC-0001 §E.4) — recorded when this input
+   * CREATES the batch. Members whose predicted paths overlap revert together.
+   */
+  eviction_groups?: number[][];
 }
 
 function asPositiveInt(value: unknown, label: string): number {
@@ -85,6 +101,31 @@ export function parseManifest(raw: unknown): EnqueueInput[] {
         throw new EnqueueError(`Manifest entry [${i}]: base_branch must be a non-empty string`);
       }
       input.base_branch = obj.base_branch;
+    }
+    if (obj.anchor !== undefined && obj.anchor !== null) {
+      input.anchor = asPositiveInt(obj.anchor, `Manifest entry [${i}]: anchor`);
+    }
+    if (obj.run_id !== undefined && obj.run_id !== null) {
+      if (typeof obj.run_id !== 'string' || obj.run_id.length === 0) {
+        throw new EnqueueError(`Manifest entry [${i}]: run_id must be a non-empty string`);
+      }
+      input.run_id = obj.run_id;
+    }
+    if (obj.eviction_groups !== undefined) {
+      if (
+        !Array.isArray(obj.eviction_groups) ||
+        obj.eviction_groups.some(
+          (g: unknown) =>
+            !Array.isArray(g) ||
+            (g as unknown[]).length === 0 ||
+            (g as unknown[]).some((m) => !Number.isInteger(m) || (m as number) <= 0)
+        )
+      ) {
+        throw new EnqueueError(
+          `Manifest entry [${i}]: eviction_groups must be an array of non-empty member-number arrays`
+        );
+      }
+      input.eviction_groups = obj.eviction_groups as number[][];
     }
     return input;
   });
@@ -168,6 +209,27 @@ export function enqueueEntries(
     ) {
       throw new EnqueueError(`Issue ${input.issue}: tier must be mechanical | mid | strong`);
     }
+    if (input.anchor !== undefined) {
+      asPositiveInt(input.anchor, `Issue ${input.issue}: anchor`);
+    }
+    if (
+      input.run_id !== undefined &&
+      (typeof input.run_id !== 'string' || input.run_id.length === 0)
+    ) {
+      throw new EnqueueError(`Issue ${input.issue}: run_id must be a non-empty string`);
+    }
+    if (
+      input.eviction_groups !== undefined &&
+      (!Array.isArray(input.eviction_groups) ||
+        input.eviction_groups.some(
+          (g) =>
+            !Array.isArray(g) || g.length === 0 || g.some((m) => !Number.isInteger(m) || m <= 0)
+        ))
+    ) {
+      throw new EnqueueError(
+        `Issue ${input.issue}: eviction_groups must be an array of non-empty member-number arrays`
+      );
+    }
     seen.add(input.issue);
   }
 
@@ -202,6 +264,7 @@ export function enqueueEntries(
       reason: null,
       pr: null,
       cleanup: null,
+      failure_evidence: null,
       enqueued_at: timestamp,
       updated_at: timestamp,
     };
@@ -227,6 +290,43 @@ export function enqueueEntries(
           `Batch ${batchId} was enqueued with base '${existing.base_branch}' — refusing to silently rebase it to '${input.base_branch}'`
         );
       }
+      // #472: batch-creation metadata is join-consistent or rejected — an
+      // anchor that changes mid-formation would post milestones to two issues.
+      // Null fields fill from the joining input (metadata supplied late).
+      if (
+        input.anchor !== undefined &&
+        existing.anchor !== null &&
+        input.anchor !== existing.anchor
+      ) {
+        throw new EnqueueError(
+          `Batch ${batchId} was enqueued with anchor #${existing.anchor} — refusing to change it to #${input.anchor}`
+        );
+      }
+      if (
+        input.run_id !== undefined &&
+        existing.run_id !== null &&
+        input.run_id !== existing.run_id
+      ) {
+        throw new EnqueueError(
+          `Batch ${batchId} was enqueued with run_id '${existing.run_id}' — refusing to change it to '${input.run_id}'`
+        );
+      }
+      if (input.anchor !== undefined && existing.anchor === null) {
+        existing.anchor = input.anchor;
+      }
+      if (input.run_id !== undefined && existing.run_id === null) {
+        existing.run_id = input.run_id;
+      }
+      if (
+        input.eviction_groups !== undefined &&
+        existing.eviction_groups.length > 0 &&
+        !groupsEqual(input.eviction_groups, existing.eviction_groups)
+      ) {
+        throw new EnqueueError(`Batch ${batchId} was enqueued with different eviction_groups`);
+      }
+      if (input.eviction_groups !== undefined && existing.eviction_groups.length === 0) {
+        existing.eviction_groups = input.eviction_groups.map((g) => [...g]);
+      }
       if (existing.members.includes(input.issue)) continue;
       existing.members = [...existing.members, input.issue];
       existing.updated_at = timestamp;
@@ -237,11 +337,39 @@ export function enqueueEntries(
         members: [input.issue],
         base_branch: input.base_branch ?? 'main',
         executing_member: 0,
+        anchor: input.anchor ?? null,
+        branch: null,
+        run_id: input.run_id ?? null,
+        eviction_groups: input.eviction_groups ? input.eviction_groups.map((g) => [...g]) : [],
+        evictions: [],
+        fix_attempts: [],
+        rebase_attempts: 0,
         created_at: timestamp,
         updated_at: timestamp,
       });
     }
   }
 
+  // Boundary invariant: eviction groups may reference members joining in the
+  // same call (batch-prep sends the whole batch at once), but by the end of
+  // the call every group member must be a batch member — otherwise the
+  // produced state would fail validateState on load.
+  for (const batch of batches) {
+    for (const group of batch.eviction_groups) {
+      for (const member of group) {
+        if (!batch.members.includes(member)) {
+          throw new EnqueueError(
+            `Batch ${batch.id}: eviction group member ${member} is not a batch member`
+          );
+        }
+      }
+    }
+  }
+
   return { ...state, entries: [...state.entries, ...entries], batches };
+}
+
+function groupsEqual(a: number[][], b: number[][]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((g, i) => g.length === b[i].length && g.every((m, j) => m === b[i][j]));
 }

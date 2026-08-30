@@ -420,7 +420,7 @@ describe('validateState', () => {
   });
 });
 
-describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0)', () => {
+describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0)', () => {
   it('loads a pre-#464 1.0.0 state and backfills slot branch/last_head as null', () => {
     // Exactly what #460 persisted: no branch/last_head on slots.
     const legacy = {
@@ -455,7 +455,7 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0)', () => {
       next_slot_id: 2,
     };
     const migrated = validateState(legacy);
-    expect(migrated.schema_version).toBe('1.2.0');
+    expect(migrated.schema_version).toBe('1.3.0');
     expect(migrated.slots[0].branch).toBeNull();
     expect(migrated.slots[0].last_head).toBeNull();
     // everything #460 persisted is preserved
@@ -501,13 +501,65 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0)', () => {
       next_slot_id: 2,
     };
     const migrated = validateState(legacy);
-    expect(migrated.schema_version).toBe('1.2.0');
+    expect(migrated.schema_version).toBe('1.3.0');
     expect(migrated.entries[0].pr).toBeNull();
     expect(migrated.entries[0].cleanup).toBeNull();
     expect(migrated.last_pr_poll_at).toBeNull();
     // everything #464 persisted is preserved
     expect(migrated.slots[0].branch).toBe('feature/101-x');
     expect(migrated.entries[0].status).toBe('dispatched');
+  });
+
+  it('loads a pre-#472 1.2.0 state and backfills the recovery fields (#472)', () => {
+    // Exactly what #468 persisted: batches without anchor/branch/run_id/
+    // eviction_groups/evictions/fix_attempts/rebase_attempts, entries
+    // without failure_evidence.
+    const legacy = {
+      schema_version: '1.2.0',
+      paused: false,
+      entries: [
+        {
+          issue: 101,
+          mode: 'slot',
+          batch: 'b1',
+          deps: [],
+          tier: 'mid',
+          status: 'committed',
+          reason: null,
+          pr: null,
+          cleanup: null,
+          enqueued_at: NOW.toISOString(),
+          updated_at: NOW.toISOString(),
+        },
+      ],
+      batches: [
+        {
+          id: 'b1',
+          status: 'executing',
+          members: [101],
+          base_branch: 'main',
+          executing_member: 1,
+          created_at: NOW.toISOString(),
+          updated_at: NOW.toISOString(),
+        },
+      ],
+      slots: [],
+      next_slot_id: 1,
+      last_pr_poll_at: null,
+    };
+    const migrated = validateState(legacy);
+    expect(migrated.schema_version).toBe('1.3.0');
+    expect(migrated.batches[0].anchor).toBeNull();
+    expect(migrated.batches[0].branch).toBeNull();
+    expect(migrated.batches[0].run_id).toBeNull();
+    expect(migrated.batches[0].eviction_groups).toEqual([]);
+    expect(migrated.batches[0].evictions).toEqual([]);
+    expect(migrated.batches[0].fix_attempts).toEqual([]);
+    expect(migrated.batches[0].rebase_attempts).toBe(0);
+    expect(migrated.entries[0].failure_evidence).toBeNull();
+    // everything #468 persisted is preserved
+    expect(migrated.batches[0].status).toBe('executing');
+    expect(migrated.entries[0].batch).toBe('b1');
   });
 
   it('rejects a malformed pr field', () => {
@@ -569,5 +621,88 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0)', () => {
         next_slot_id: 1,
       })
     ).toThrow(/Unsupported schema version/);
+  });
+
+  it('rejects a member in two eviction groups', () => {
+    let state = seeded();
+    state = {
+      ...state,
+      batches: state.batches.map((b) => ({
+        ...b,
+        eviction_groups: [[201, 202], [202]],
+      })),
+    };
+    expect(() => validateState(state)).toThrow(/appears in more than one eviction group/);
+  });
+
+  it('rejects an eviction group naming a non-member', () => {
+    let state = seeded();
+    state = {
+      ...state,
+      batches: state.batches.map((b) => ({
+        ...b,
+        eviction_groups: [[201, 999]],
+      })),
+    };
+    expect(() => validateState(state)).toThrow(/eviction group member 999 is not a batch member/);
+  });
+
+  it('rejects a malformed anchor and rebase_attempts', () => {
+    const state = seeded();
+    const badAnchor = {
+      ...state,
+      batches: state.batches.map((b) => ({ ...b, anchor: -1 })),
+    };
+    expect(() => validateState(badAnchor)).toThrow(/anchor must be a positive integer or null/);
+    const badRebases = {
+      ...state,
+      batches: state.batches.map((b) => ({ ...b, rebase_attempts: -1 })),
+    };
+    expect(() => validateState(badRebases)).toThrow(
+      /rebase_attempts must be a non-negative integer/
+    );
+  });
+
+  it('rejects a malformed failure_evidence record', () => {
+    const state = seeded();
+    const bad = {
+      ...state,
+      entries: state.entries.map((e) => ({
+        ...e,
+        failure_evidence: { batch: 'b1', failing_tests: 'nope' },
+      })),
+    };
+    expect(() => validateState(bad)).toThrow(/failure_evidence\.failing_tests/);
+  });
+
+  it('accepts a complete recovery-shaped batch (round-trip)', () => {
+    let state = seeded();
+    state = transitionBatch(state, 'b1', 'ready', {}, NOW);
+    state = {
+      ...state,
+      batches: state.batches.map((b) => ({
+        ...b,
+        anchor: 301,
+        branch: 'batch/b1-20260829',
+        run_id: 'r-301-ab12',
+        eviction_groups: [[201, 202]],
+        evictions: [
+          {
+            issue: 201,
+            reason: 'test-failure',
+            reverted_commits: ['0123456789abcdef0123456789abcdef01234567'],
+            group: [201, 202],
+            at: NOW.toISOString(),
+          },
+        ],
+        fix_attempts: [{ issue: 201, outcome: 'red', at: NOW.toISOString() }],
+        rebase_attempts: 1,
+      })),
+    };
+    const roundTripped = validateState(JSON.parse(JSON.stringify(state)));
+    expect(roundTripped.batches[0].anchor).toBe(301);
+    expect(roundTripped.batches[0].evictions[0].issue).toBe(201);
+    expect(roundTripped.batches[0].fix_attempts[0].outcome).toBe('red');
+    expect(roundTripped.batches[0].rebase_attempts).toBe(1);
   });
 });

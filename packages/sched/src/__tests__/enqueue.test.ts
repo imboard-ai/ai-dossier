@@ -166,6 +166,89 @@ describe('enqueueEntries', () => {
       enqueueEntries(state, [{ issue: 2, mode: 'slot', batch: 'b1', base_branch: 'develop' }], NOW)
     ).not.toThrow();
   });
+
+  it('records anchor, run_id, and eviction_groups when creating a batch (#472)', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [
+        {
+          issue: 201,
+          mode: 'slot',
+          batch: 'b1',
+          anchor: 301,
+          run_id: 'r-301-ab12',
+          eviction_groups: [[201, 202]],
+        },
+        { issue: 202, mode: 'slot', batch: 'b1' },
+      ],
+      NOW
+    );
+    const batch = findBatch(state, 'b1');
+    expect(batch?.anchor).toBe(301);
+    expect(batch?.run_id).toBe('r-301-ab12');
+    expect(batch?.eviction_groups).toEqual([[201, 202]]);
+    expect(batch?.branch).toBeNull();
+    expect(batch?.evictions).toEqual([]);
+    expect(batch?.fix_attempts).toEqual([]);
+    expect(batch?.rebase_attempts).toBe(0);
+    expect(() => validateState(JSON.parse(JSON.stringify(state)))).not.toThrow();
+  });
+
+  it('rejects an anchor conflict when joining an existing forming batch (#472)', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1, mode: 'slot', batch: 'b1', anchor: 301 }],
+      NOW
+    );
+    expect(() =>
+      enqueueEntries(state, [{ issue: 2, mode: 'slot', batch: 'b1', anchor: 302 }], NOW)
+    ).toThrow(/refusing to change it to #302/);
+    expect(() =>
+      enqueueEntries(state, [{ issue: 2, mode: 'slot', batch: 'b1', anchor: 301 }], NOW)
+    ).not.toThrow();
+  });
+
+  it('rejects conflicting eviction_groups when joining an existing forming batch (#472)', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 1, mode: 'slot', batch: 'b1', eviction_groups: [[1, 2]] },
+        { issue: 2, mode: 'slot', batch: 'b1' },
+      ],
+      NOW
+    );
+    expect(() =>
+      enqueueEntries(state, [{ issue: 3, mode: 'slot', batch: 'b1', eviction_groups: [[3]] }], NOW)
+    ).toThrow(/different eviction_groups/);
+  });
+
+  it('rejects a group naming a member that never joins the batch (#472)', () => {
+    expect(() =>
+      enqueueEntries(
+        createEmptyState(),
+        [{ issue: 1, mode: 'slot', batch: 'b1', eviction_groups: [[1, 9]] }],
+        NOW
+      )
+    ).toThrow(/eviction group member 9 is not a batch member/);
+  });
+
+  it('rejects malformed recovery metadata at the boundary (#472)', () => {
+    expect(() =>
+      enqueueEntries(createEmptyState(), [{ issue: 1, mode: 'slot', batch: 'b1', anchor: 0 }], NOW)
+    ).toThrow(/anchor must be a positive integer/);
+    expect(() =>
+      enqueueEntries(createEmptyState(), [{ issue: 1, mode: 'slot', batch: 'b1', run_id: '' }], NOW)
+    ).toThrow(/run_id must be a non-empty string/);
+    expect(() =>
+      enqueueEntries(
+        createEmptyState(),
+        [{ issue: 1, mode: 'slot', batch: 'b1', eviction_groups: [[]] }],
+        NOW
+      )
+    ).toThrow(/eviction_groups/);
+    expect(() => parseManifest([{ issue: 5, anchor: 'x' }])).toThrow(/anchor/);
+    expect(() => parseManifest([{ issue: 5, eviction_groups: [[0]] }])).toThrow(/eviction_groups/);
+  });
 });
 
 describe('assertNoDependencyCycle', () => {
