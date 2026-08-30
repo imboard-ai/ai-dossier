@@ -127,7 +127,26 @@ W2 ran under the default prompt on claude tiers and hit three distinct external 
 - **Stall recoveries:** 2 triggered (both #497-style sonnet exits mid-implement — "waiting for ci-parity/background test"), 2 redispatched at strong tier; both opus resumes were then killed by the quota wall (counted under D8, not as ladder failures of their own).
 - **Cost (claude, partial before the wall):** #3500 $44.66 (3 dispatches), #3756 $54.85 (2), #3889 $31.77 (2), #3890 $10.48 (2) — **$141.76 total for 4 partially-completed issues**; quota-wall ladder deaths cost ~$0 in tokens but each cache-priming spawn that died instantly still billed its context upload (#3890's $10.48 is almost entirely cache writes). Usage details in evidence logs.
 
-<!-- W3 section follows -->
+### 3.3 W3 — #3433, #3414, #3408 (strong), #3824 (+ W2 re-drives #3889/#3890 riding the same window)
+
+W3 changed dispatch to opencode/openrouter (claude weekly limit, see D8) and paid for every gap the first opencode round had:
+
+**Round 1 (04:47–05:24Z, all units lost to infrastructure, zero work lost):** the opencode dispatch lacked `--auto`, so headless agents auto-rejected worktree-path tool calls (external_directory) and died mid-phase (D10/#506); the operator's cron wrapper was missing the opencode bin dir from PATH, so every redispatch spawn errored and the cascade insta-failed all six queue/running units in ~15 minutes (#506's cascade note). All state was recoverable — pushed work survives, the resume rails carry it — and the queue was rebuilt by hand (the D7 re-enqueue corruption makes the rebuild a manual dance, #502).
+
+**Round 2 (05:40Z →, `--auto` + fixed PATH + glm/kimi on openrouter):**
+
+| Unit | Story | Outcome |
+|---|---|---|
+| #3824 | first opencode agent died on the permission wall mid-implement; re-drive resumed its uncommitted worktree work (`wip(recovered)`) and drove to park 06:37 → **PR #3929 merged 06:45** → report done 06:57 (report milestone ✅ posted) | ✅ merged + tailed |
+| #3414 | plan phase correctly handed off as **decision-pending** (`reachability-zero-prod-usage` — zero prod occurrences of concurrent investor-update sends; the retro #1632 rule firing on real data) | 🔶 human hand-off (by design); its exit then burned the ladder to `unit-failed` (D9/#507 — sched has no human-handoff state) |
+| #3408 (strong/kimi) | kimi agent killed by the in-flight credit race (06:58, D8 wall #3) before credits landed; re-driven 08:09 | in flight → merged (final state below) |
+| #3433 | glm agent stalled for the full 90-min timer mid-implement (heavy backend fix) → `stalled` → redispatched strong (kimi) 09:06 → re-gated 09:14, resumed from the recovered worktree | in flight → merged (final state below) |
+| #3889 (W2 re-drive) | re-drive #3: gate 07:21 → review done 08:00 → park 08:09 → **PR #3930 merged 08:13** → report done 09:16; the engine detected the externally-advanced state (report posted while the agent still lived) and reclaimed the slot with `external-advance` — AC3 reconcile working | ✅ merged + tailed |
+| #3890 (W2 re-drive) | re-drive #3: review done 08:45 → park 09:10 (**PR #3932 merged 09:11 — 1-minute park→merge**) → report done 09:23 | ✅ merged + tailed |
+
+The park→refill chain held throughout: #3824's park (06:38) refilled #3890's re-drive in the same tick; #3889's park (08:09) refilled #3408 same-tick; #3890's park (09:10) dispatched #3889's waiting report agent same-tick; #3890's report dispatch at 09:17 followed the external-advance reclaim. Every slot-freeing event was followed by a new assignment within one tick (≤60 s) — the fleet's idle-while-runnable failure never appeared whenever an engine was alive.
+
+<!-- final metrics table for W3 lands here when 3433/3408 settle -->
 
 
 ## 4. Baseline comparison
