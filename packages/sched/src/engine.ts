@@ -116,6 +116,10 @@ export interface TickResult {
   parked: string[];
   /** Parked units whose merge was accepted this tick (#468). */
   mergeAccepted: string[];
+  /** `failed reason=auto-merge-blocked` units reconciled to `shipped` this tick after a later merge (#501). */
+  staleReconciled: string[];
+  /** Dependents released from `blocked reason=dep-failed:<n>` this tick because `<n>` reconciled to `shipped` (#501). */
+  dependentsUnblocked: string[];
   /** Report agents dispatched for merged units this tick (#468). */
   reportDispatched: string[];
   /** Merged units whose report could not dispatch — waiting for a free slot (#468). */
@@ -144,6 +148,8 @@ function emptyResult(): TickResult {
     completed: [],
     parked: [],
     mergeAccepted: [],
+    staleReconciled: [],
+    dependentsUnblocked: [],
     reportDispatched: [],
     reportWaiting: 0,
     teardownDone: [],
@@ -275,27 +281,79 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
 }
 
 /**
+ * The `QueueEntry.reason` written when the watcher sees the `auto-merge-blocked`
+ * label (#468 AC3) — the ONLY reason #501's stale-failure reconcile is
+ * eligible for. Written in `reconcileParked`, read by `pollParkedPrs` and
+ * `reconcileStaleFailedParks`; conceptually distinct from (but happens to
+ * share the string with) the GitHub label name matched in
+ * `groundtruth.ts`'s `parsePrViewJson`.
+ */
+const AUTO_MERGE_BLOCKED_REASON = 'auto-merge-blocked';
+
+/**
+ * #501: how long after a unit fails `auto-merge-blocked` its PR stays
+ * watched for a late operator re-queue + merge. `failed` entries are never
+ * pruned from `state.entries`, and each watched entry costs its own
+ * `gh pr view` + `gh issue view` per poll — past this window an abandoned
+ * entry is left as a plain terminal failure rather than polled forever.
+ */
+const STALE_RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * #501: a `failed` entry a later merge can still reconcile — the single
+ * definition shared by the poll set (`pollParkedPrs`) and the reconcile set
+ * (`reconcileStaleFailedParks`, including its mid-loop re-check). Duplicating
+ * this predicate is exactly how a poll set and a reconcile set can silently
+ * drift out of sync.
+ */
+function isStaleFailedPark(e: QueueEntry, nowMs: number): e is QueueEntry & { pr: number } {
+  return (
+    e.status === 'failed' &&
+    e.reason === AUTO_MERGE_BLOCKED_REASON &&
+    e.pr !== null &&
+    nowMs - Date.parse(e.updated_at) < STALE_RECONCILE_WINDOW_MS
+  );
+}
+
+/**
+ * RFC-0001 §E.4 / #468 AC1's merged half: MERGED with a real merge
+ * timestamp. The issue-closed half is checked separately by callers that
+ * need to distinguish "merged, not yet closed" (journaled as
+ * `pr-watch-waiting`) from "not merged at all".
+ */
+function isPrMerged(truth: PrTruth): truth is PrTruth & { mergedAt: string } {
+  return truth.state === 'MERGED' && truth.mergedAt !== null;
+}
+
+/**
  * Poll parked PRs on their own cadence (#468 AC1 — every 2–3 min, persisted
  * `last_pr_poll_at` so a restart honors it). Runs only when parked entries
  * exist AND the interval elapsed; every subprocess stays outside the lock.
  * The issue-closed signal rides along — it is the second half of the
  * merge-acceptance gate and must not be re-queried under the lock.
+ *
+ * #501: also polls `failed reason=auto-merge-blocked` entries — a unit an
+ * operator may have manually re-queued and merged after the engine already
+ * marked it terminal. Piggybacking this poll (rather than a second cadence)
+ * means `reconcileStaleFailedParks` needs no separate scheduling — it still
+ * costs the usual `gh pr view`/`gh issue view` pair per watched entry.
  */
 function pollParkedPrs(deps: EngineDeps, state: SchedState, dispatch: ResolvedDispatch): PrPoll {
-  const parked = state.entries.filter(
-    (e): e is QueueEntry & { pr: number } => e.status === 'parked' && e.pr !== null
+  const nowMs = deps.now().getTime();
+  const watchable = state.entries.filter(
+    (e): e is QueueEntry & { pr: number } =>
+      (e.status === 'parked' && e.pr !== null) || isStaleFailedPark(e, nowMs)
   );
-  if (parked.length === 0) return { ran: false, truths: new Map(), closed: new Map() };
+  if (watchable.length === 0) return { ran: false, truths: new Map(), closed: new Map() };
 
-  const now = deps.now().getTime();
   const last = state.last_pr_poll_at !== null ? Date.parse(state.last_pr_poll_at) : 0;
-  if (Number.isFinite(last) && now - last < dispatch.prPollIntervalMs) {
+  if (Number.isFinite(last) && nowMs - last < dispatch.prPollIntervalMs) {
     return { ran: false, truths: new Map(), closed: new Map() };
   }
 
   const truths = new Map<number, PrTruth | undefined>();
   const closed = new Map<number, boolean>();
-  for (const entry of parked) {
+  for (const entry of watchable) {
     truths.set(entry.issue, deps.groundTruth.prState(entry.pr));
     closed.set(entry.issue, deps.groundTruth.issueClosed(entry.issue));
   }
@@ -1015,19 +1073,15 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
       return failUnit(ctx, next, unit, reason);
     };
 
-    if (truth.blocked) {
-      next = failWatch('auto-merge-blocked');
-      continue;
-    }
-    if (truth.mergeable === 'CONFLICTING') {
-      next = failWatch('pr-conflicting');
-      continue;
-    }
-    if (truth.state === 'CLOSED' && truth.mergedAt === null) {
-      next = failWatch('pr-closed-unmerged');
-      continue;
-    }
-    if (truth.state === 'MERGED' && truth.mergedAt !== null) {
+    // #501: MERGED is checked FIRST, before any failure rail. A PR that is
+    // genuinely merged is merged regardless of a leftover `auto-merge-blocked`
+    // label (GitHub does not clear labels on merge) or a `mergeable` snapshot
+    // that hasn't caught up yet — checking `blocked`/`CONFLICTING` first would
+    // fail a unit whose work already shipped, only to have
+    // `reconcileStaleFailedParks` immediately re-reconcile it later that same
+    // tick, after `blockTransitiveDependents` had already wedged its
+    // dependents on a "failure" that was never real.
+    if (isPrMerged(truth)) {
       // AC1: the issue must ALSO be closed (a merged PR auto-closes it) —
       // until GitHub propagates, the unit stays parked and keeps watching.
       if (prPoll.closed.get(issue) !== true) {
@@ -1041,10 +1095,121 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
       next = transitionIssue(next, issue, 'shipped', { reason: null }, ctx.deps.now());
       journal(ctx, 'merge-accepted', unit, { pr: entry.pr, mergedAt: truth.mergedAt });
       ctx.result.mergeAccepted.push(unit);
+      continue;
     }
-    // OPEN (or MERGED without a date / mergeable UNKNOWN) — keep watching.
+    if (truth.blocked) {
+      next = failWatch(AUTO_MERGE_BLOCKED_REASON);
+      continue;
+    }
+    if (truth.mergeable === 'CONFLICTING') {
+      next = failWatch('pr-conflicting');
+      continue;
+    }
+    if (truth.state === 'CLOSED' && truth.mergedAt === null) {
+      next = failWatch('pr-closed-unmerged');
+    }
+    // OPEN (or mergeable UNKNOWN) — keep watching.
   }
   return next;
+}
+
+/**
+ * #501: reconcile `failed reason=auto-merge-blocked` entries whose PR later
+ * merged after an operator manually re-queued it (removed
+ * `auto-merge-blocked`, re-added `auto-merge`) — outside the engine's own
+ * watch, since `reconcileParked` stops watching an entry the instant it
+ * leaves `parked`, including into `failed`. Flips it to `shipped` so
+ * `sched status` and `dispatchReportAgents` treat it exactly like a
+ * normally-watched merge, and unblocks dependents wedged on the original
+ * (now-reversed) failure; ground truth comes from `pollParkedPrs`, which
+ * this piggybacks — no separate poll pass, though each watched entry still
+ * costs its own `gh pr view`/`gh issue view`.
+ *
+ * Deliberately narrow: only `isStaleFailedPark` entries are eligible (AC3) —
+ * a `failed` entry for any other reason, or one whose PR has sat blocked
+ * past `STALE_RECONCILE_WINDOW_MS`, is never touched.
+ */
+function reconcileStaleFailedParks(ctx: TickCtx, state: SchedState, prPoll: PrPoll): SchedState {
+  if (!prPoll.ran) return state;
+  let next: SchedState = state;
+  const nowMs = ctx.deps.now().getTime();
+
+  const staleFailed = state.entries.filter((e) => isStaleFailedPark(e, nowMs)).map((e) => e.issue);
+
+  for (const issue of staleFailed) {
+    const entry = findEntry(next, issue);
+    if (!entry || !isStaleFailedPark(entry, nowMs)) continue; // reconciled or expired mid-loop
+    const unit = `issue:${issue}`;
+    const truth = prPoll.truths.get(issue);
+    if (truth === undefined) {
+      if (!prPoll.truths.has(issue)) {
+        continue; // failed AFTER the poll ran this tick — next cadence picks it up
+      }
+      journal(ctx, 'ground-truth-unreachable', unit, {
+        detail: 'stale-failure reconcile paused until truth returns',
+      });
+      continue;
+    }
+
+    if (!isPrMerged(truth)) continue; // still blocked/open/conflicting — stays failed
+
+    if (prPoll.closed.get(issue) !== true) {
+      journal(ctx, 'pr-watch-waiting', unit, {
+        pr: entry.pr,
+        mergedAt: truth.mergedAt,
+        reason: AUTO_MERGE_BLOCKED_REASON,
+        detail: 'stale-failed PR merged but the issue is still open — keep watching',
+      });
+      continue;
+    }
+
+    const failedAt = entry.updated_at;
+    next = transitionIssue(next, issue, 'shipped', { reason: null }, ctx.deps.now());
+    journal(ctx, 'stale-failure-reconciled', unit, {
+      pr: entry.pr,
+      mergedAt: truth.mergedAt,
+      reason: AUTO_MERGE_BLOCKED_REASON,
+      failedAt,
+      detail: `PR #${entry.pr} is MERGED and the issue is closed — ledger reconciled failed to shipped (failed at ${failedAt}); teardown and report will now dispatch`,
+    });
+    ctx.result.staleReconciled.push(unit);
+
+    const unblocked = unblockDependentsOf(ctx, next, issue);
+    next = unblocked.state;
+    ctx.result.dependentsUnblocked.push(...unblocked.units);
+  }
+  return next;
+}
+
+/**
+ * #501: undo `blockTransitiveDependents` for a unit that turned out to have
+ * shipped after all. `blockTransitiveDependents` stamps EVERY entry in the
+ * transitive closure with the same `dep-failed:<issue>` reason (never a
+ * more-specific one per level), so matching that one string recovers the
+ * whole closure without re-walking the dependency graph. A `slot`-mode
+ * dependent returns to `waiting` (its batch rail), a `full`-mode one to
+ * `queued` — both are already-legal edges out of `blocked`.
+ */
+function unblockDependentsOf(
+  ctx: TickCtx,
+  state: SchedState,
+  issue: number
+): { state: SchedState; units: string[] } {
+  const depReason = `dep-failed:${issue}`;
+  const now = ctx.deps.now();
+  let next = state;
+  const units: string[] = [];
+  for (const entry of state.entries) {
+    if (entry.status !== 'blocked' || entry.reason !== depReason) continue;
+    const to = entry.mode === 'slot' ? 'waiting' : 'queued';
+    next = transitionIssue(next, entry.issue, to, { reason: null }, now);
+    const unit = `issue:${entry.issue}`;
+    journal(ctx, 'stale-failure-reconciled', unit, {
+      detail: `dependency #${issue} actually merged — unblocked from ${depReason}`,
+    });
+    units.push(unit);
+  }
+  return { state: next, units };
 }
 
 /**
@@ -1201,6 +1366,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     const ctx: TickCtx = { deps, dispatch, result: emptyResult() };
     let next = reconcileSlots(ctx, state, polled);
     next = reconcileParked(ctx, next, prPoll);
+    next = reconcileStaleFailedParks(ctx, next, prPoll);
     next = requeueOrphanedDispatches(ctx, next);
     next = dispatchReportAgents(ctx, next, config);
     next = dispatchAssignments(ctx, next, config);

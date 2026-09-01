@@ -5,6 +5,7 @@ import {
   findBatch,
   findEntry,
   IllegalTransitionError,
+  type IssueStatus,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
   type SchedState,
@@ -200,6 +201,43 @@ describe('issue state machine (RFC-0001 §D.1)', () => {
     );
     expect(() => transitionIssue(done, 101, 'blocked')).toThrow(IllegalTransitionError);
     expect(() => transitionIssue(done, 101, 'failed')).toThrow(IllegalTransitionError);
+  });
+
+  it('failed has exactly one outgoing edge, to shipped (#501 stale-failure reconcile)', () => {
+    let state = seeded();
+    state = transitionIssue(state, 101, 'classified', {}, NOW);
+    state = transitionIssue(state, 101, 'dispatched', {}, NOW);
+    state = transitionIssue(state, 101, 'parked', { pr: 55 }, NOW);
+    state = transitionIssue(state, 101, 'failed', { reason: 'auto-merge-blocked' }, NOW2);
+
+    // `state` is the pre-transition value — transitionIssue is pure (state.ts
+    // header invariant), so re-using it below for every other target is safe.
+    const shipped = transitionIssue(state, 101, 'shipped', { reason: null }, NOW2);
+    expect(findEntry(shipped, 101)?.status).toBe('shipped');
+
+    const ALL_STATUSES: IssueStatus[] = [
+      'queued',
+      'classified',
+      'dispatched',
+      'parked',
+      'shipped',
+      'done',
+      'batched',
+      'waiting',
+      'in-work',
+      'committed',
+      'validated',
+      'shipped-in-batch',
+      'evicted',
+      'requeued',
+      'blocked',
+      'decision-pending',
+      'failed',
+    ];
+    for (const to of ALL_STATUSES) {
+      if (to === 'shipped') continue; // already proven above
+      expect(() => transitionIssue(state, 101, to, {}, NOW2)).toThrow(IllegalTransitionError);
+    }
   });
 
   it('throws on unknown issue', () => {

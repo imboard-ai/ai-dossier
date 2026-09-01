@@ -61,7 +61,21 @@ const ISSUE_BASE_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   blocked: ['queued', 'waiting', 'evicted'],
   'decision-pending': ['queued'],
   done: [],
-  failed: [],
+  // #501: the ONLY outgoing edge from `failed` — reconciles a
+  // `reason=auto-merge-blocked` entry whose PR was later manually re-queued
+  // and merged outside the engine's own watch (reconcileParked stops
+  // watching the instant an entry leaves `parked`, including into
+  // `failed`). This table can't see *why* a caller wants the edge; the
+  // engine (`reconcileStaleFailedParks`, via `isStaleFailedPark`) is what
+  // restricts it to that one reason — every other `failed` entry stays
+  // terminal. It's "the ONLY edge" only because `failed` stays a member of
+  // `TERMINAL_ISSUE_STATUSES` — `allowedIssueTransitions` below skips the
+  // universal failure edges for terminal rows; dropping `failed` from that
+  // set would silently reopen `blocked`/`decision-pending`/`failed` here.
+  // Because THIS table is the sole enforcement, any future caller of
+  // `transitionIssue` can legally drive a `failed` entry to `shipped` — keep
+  // that behind `isStaleFailedPark` rather than re-deriving the check.
+  failed: ['shipped'],
 };
 
 /** Failure edges RFC-0001 §D.1 attaches to ANY state (blocked / decision-pending / failed). */

@@ -1377,6 +1377,180 @@ describe('#468 AC3: watcher failure paths', () => {
   });
 });
 
+describe('#501: stale auto-merge-blocked failures reconcile after a later merge', () => {
+  it('a failed auto-merge-blocked unit reconciles to shipped once the PR merges and the issue closes', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN', blocked: true });
+    h.advance(200_000);
+    let result = h.tick();
+    expect(result.failed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+
+    // Operator re-queues the PR and it merges. No `parked` entries exist any
+    // more at this point — this also proves the pollParkedPrs poll-skip
+    // guard fix, since the poll must still run for a stale-failed-only tick.
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T13:00:00Z' });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(200_000);
+    result = h.tick();
+
+    expect(result.staleReconciled).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('shipped');
+    const ev = h.events().find((e) => e.event === 'stale-failure-reconciled' && e.issue === 101);
+    expect(ev).toMatchObject({
+      issue: 101,
+      pr: 55,
+      mergedAt: '2026-08-29T13:00:00Z',
+      reason: 'auto-merge-blocked',
+    });
+    expect(String(ev?.detail)).toContain('MERGED');
+  });
+
+  it('does not reconcile while the PR merged but the issue is still open, and journals pr-watch-waiting', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN', blocked: true });
+    h.advance(200_000);
+    h.tick();
+
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T13:00:00Z' });
+    h.advance(200_000);
+    const result = h.tick();
+
+    expect(result.staleReconciled).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+    expect(h.events().some((e) => e.event === 'pr-watch-waiting' && e.issue === 101)).toBe(true);
+  });
+
+  it('never reconciles a failed entry for any reason other than auto-merge-blocked', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN', mergeable: 'CONFLICTING' });
+    h.advance(200_000);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('pr-conflicting');
+
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T13:00:00Z' });
+    h.closedIssues.add(101);
+    h.advance(200_000);
+    const result = h.tick();
+
+    expect(result.staleReconciled).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+  });
+
+  it('an unreachable PR poll on a stale-failed entry journals ground-truth-unreachable, not silence', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN', blocked: true });
+    h.advance(200_000);
+    h.tick(); // 101 fails, auto-merge-blocked
+
+    h.prUnreachable.add(55);
+    h.advance(200_000);
+    const result = h.tick();
+
+    expect(result.staleReconciled).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+    expect(h.events().some((e) => e.event === 'ground-truth-unreachable' && e.issue === 101)).toBe(
+      true
+    );
+  });
+
+  it('stops watching (and re-polling) a stale-failed entry once the reconcile window elapses', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN', blocked: true });
+    h.advance(200_000);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+
+    // 8 days later the PR merges, but the (7-day) reconcile window has elapsed —
+    // the entry is no longer watchable at all, so the poll itself never runs.
+    h.advance(8 * 24 * 60 * 60 * 1000);
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-09-06T13:00:00Z' });
+    h.closedIssues.add(101);
+    const result = h.tick();
+
+    expect(result.staleReconciled).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+  });
+
+  it('a PR that is MERGED but still carries a stale auto-merge-blocked label is accepted, never failed', () => {
+    // Regression: reconcileParked used to check `blocked` before `MERGED`, so
+    // a PR merged while the label was still attached would fail the unit and
+    // block its dependents in the same tick reconcileStaleFailedParks would
+    // have immediately un-failed it — a noisy, dependent-wedging round trip.
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([
+      { issue: 101, mode: 'full', tier: 'mid' },
+      { issue: 102, mode: 'full', tier: 'mid', deps: [101] },
+    ]);
+    h.tick();
+    h.milestones.set(101, parkMilestone(55));
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick(); // 101 parked
+
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T13:00:00Z', blocked: true });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(200_000);
+    const result = h.tick();
+
+    expect(result.mergeAccepted).toEqual(['issue:101']);
+    expect(result.failed).toEqual([]);
+    expect(result.blocked).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('shipped');
+    expect(h.state().entries.find((e) => e.issue === 102)?.status).not.toBe('blocked');
+  });
+
+  it('reconciling a stale failure also unblocks its transitively-dependent entries', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([
+      { issue: 101, mode: 'full', tier: 'mid' },
+      { issue: 102, mode: 'full', tier: 'mid', deps: [101] },
+      { issue: 103, mode: 'full', tier: 'mid', deps: [102] }, // transitive
+    ]);
+    h.tick(); // 101 dispatched
+    h.milestones.set(101, parkMilestone(55));
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick(); // 101 parked
+
+    h.setPr(55, { state: 'OPEN', blocked: true });
+    h.advance(200_000);
+    let result = h.tick(); // 101 fails, 102+103 blocked transitively
+    expect(result.failed).toEqual(['issue:101']);
+    expect(result.blocked.slice().sort()).toEqual([102, 103]);
+    expect(h.state().entries.find((e) => e.issue === 102)?.status).toBe('blocked');
+    expect(h.state().entries.find((e) => e.issue === 103)?.status).toBe('blocked');
+
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T13:00:00Z' });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(200_000);
+    result = h.tick();
+
+    expect(result.staleReconciled).toEqual(['issue:101']);
+    expect(result.dependentsUnblocked.slice().sort()).toEqual(['issue:102', 'issue:103']);
+    // 102's only dep (101) is now shipped, so it's runnable and dispatches in
+    // this same tick; 103 still depends on 102 (not yet satisfied) and stays queued.
+    expect(h.state().entries.find((e) => e.issue === 102)?.status).toBe('dispatched');
+    expect(h.state().entries.find((e) => e.issue === 103)?.status).toBe('queued');
+  });
+});
+
 describe('#468 AC6: restart mid-watch', () => {
   it('a fresh engine instance resumes the watch from state.json alone', () => {
     const first = harness();

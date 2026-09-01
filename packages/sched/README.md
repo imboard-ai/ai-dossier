@@ -222,8 +222,9 @@ import {
   tick,                  // one engine cycle: reconcile + verify + refill + spawn,
                          //   and since #468: park-watch, teardown, report dispatch
   runLoop,               // the sched start loop (tick, sleep, repeat)
-  type TickResult,       // what one tick did (spawned/parked/merge-accepted/report-dispatched/
-                         //   teardown/completed/redispatched/failed/blocked)
+  type TickResult,       // what one tick did (spawned/parked/merge-accepted/stale-reconciled/
+                         //   dependents-unblocked/report-dispatched/teardown/completed/
+                         //   redispatched/failed/blocked)
   type EngineDeps,       // inject everything the engine touches (store/journal/spawn/ground
                          //   truth/clock/repoDir/teardownExec)
   createSpawnDeps,       // real detached-spawn process I/O
@@ -356,12 +357,30 @@ prompt instructs it) and exit. The engine owns everything after the park:
    journal event — the work is merged, so dependents are never re-blocked.
    The full-cycle tail-run pattern (re-dispatching a whole run for
    teardown+report) is retired.
+7. **Stale-failure reconcile (#501)** — a `failed reason=auto-merge-blocked`
+   entry stops being watched the instant it leaves `parked`, but an operator
+   can manually clear the watcher's block and re-queue the same PR outside
+   the engine entirely. `pollParkedPrs` also polls these stale-failed entries
+   on the same cadence — no second poll pass, though each watched entry still
+   costs its own `gh pr view`/`gh issue view` — for up to 7 days after the
+   failure (`STALE_RECONCILE_WINDOW_MS`); past that an abandoned failure is
+   left alone rather than polled forever. Once the PR shows `MERGED` with
+   `mergedAt` set and the issue closed (the same three-part gate as AC1
+   above), the entry flips `failed → shipped`, re-enters the normal
+   teardown → report-dispatch path (items 5–6 above), and unblocks whatever
+   dependents `blockTransitiveDependents` wedged on the original (now
+   reversed) failure — `sched status` stops listing it under `failed`, and
+   both the reconcile and the unblock are journaled as
+   `stale-failure-reconciled`. A merged PR is accepted ahead of any failure
+   check even while it still carries a stale `auto-merge-blocked` label
+   (GitHub does not clear labels on merge) — checking the label first would
+   fail, then immediately un-fail, a unit that never actually failed.
 
 `sched status` shows parked PRs (zero slots, with the last poll's age), a
 `pr` column and a `cleanup` column on the queue; every watcher decision lands
 in `events.jsonl` (`pr-parked`, `merge-accepted`, `pr-watch-failed`,
 `pr-watch-waiting`, `teardown-done`/`teardown-failed`, `report-dispatched`,
-`report-failed`, `ground-truth-unreachable`).
+`report-failed`, `ground-truth-unreachable`, `stale-failure-reconciled`).
 
 ## Development
 

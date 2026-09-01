@@ -65,6 +65,14 @@ describe('buildStatusReport', () => {
     expect(report.failed[0].reason).toBe('escalation-cap');
   });
 
+  it('#501: a stale-failure-reconciled unit no longer appears under failed', () => {
+    let state = seeded();
+    state = transitionIssue(state, 101, 'failed', { reason: 'auto-merge-blocked' }, NOW);
+    state = transitionIssue(state, 101, 'shipped', { reason: null }, NOW);
+    const report = buildStatusReport(state, { max_slots: 3 }, 'p');
+    expect(report.failed).toEqual([]);
+  });
+
   it('counts live slots and reports paused state (paused ⇒ zero runnable)', () => {
     let state = seeded();
     state = transitionIssue(state, 101, 'classified', {}, NOW);

@@ -178,6 +178,24 @@ k.pub)" "id"`, or copy the base64 command that `ai-dossier verify` prints.
 
 ---
 
+## A workspace package's own `^x.y.0` range can shadow-copy itself
+
+Bumping a monorepo package's `version` past a dependent's declared caret range
+(e.g. `packages/sched` `0.5.x → 0.6.0` while `cli/package.json` still pins
+`"@ai-dossier/sched": "^0.5.0"`) makes `npm install` decide the workspace
+symlink no longer satisfies the range. It then fetches the **published**
+registry version into a real, non-symlinked `cli/node_modules/@ai-dossier/sched`
+— silently shadowing the local workspace package with old code. The symptom
+looks nothing like a version problem: `tsc` reports a brand-new exported field
+as `Property 'x' does not exist on type 'Y'`, because the type-checker is
+reading the stale nested copy's `.d.ts`, not the one you just edited. `npm ls
+<pkg> --all` shows it immediately (`invalid: "^0.6.0" from cli`); `rm -rf
+cli/node_modules && npm install` from the repo root clears it (a partial `rm
+-rf cli/node_modules/@ai-dossier/sched` was not enough in practice — the
+directory came back at the old version until the whole `node_modules` was
+removed). The actual fix is to bump the dependent's declared range in the same
+commit as the version bump (`^0.5.0 → ^0.6.0`), not just the version.
+
 ## Publishing dossiers
 
 ### Use a CLI built from current `main`
