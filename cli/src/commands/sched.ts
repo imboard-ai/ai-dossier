@@ -620,6 +620,10 @@ function registerStartSubcommand(cmd: Command): void {
         if (result.parked.length > 0) parts.push(`parked ${result.parked.join(', ')}`);
         if (result.mergeAccepted.length > 0)
           parts.push(`merge accepted ${result.mergeAccepted.join(', ')}`);
+        if (result.staleReconciled.length > 0)
+          parts.push(`stale failure reconciled ${result.staleReconciled.join(', ')}`);
+        if (result.dependentsUnblocked.length > 0)
+          parts.push(`dependents unblocked ${result.dependentsUnblocked.join(', ')}`);
         if (result.teardownDone.length > 0)
           parts.push(`teardown done ${result.teardownDone.join(', ')}`);
         if (result.teardownFailed.length > 0)

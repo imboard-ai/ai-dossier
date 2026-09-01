@@ -833,6 +833,12 @@ against ground truth.
   mechanical-tier report agent. `CONFLICTING` / closed-unmerged /
   `auto-merge-blocked` PRs fail the unit and block its transitive dependents;
   a failed report on a merged unit never blocks dependents (the work shipped).
+  An `auto-merge-blocked` failure isn't necessarily final (#501): if an
+  operator later re-queues and merges that same PR, the engine keeps polling
+  it (piggybacking the parked-PR cadence) and reconciles the entry back to
+  `shipped` — journaled `stale-failure-reconciled` — unblocking whatever
+  dependents were blocked by the original failure, up to a 7-day watch
+  window past which an abandoned failure is left as-is.
   `--once` runs a single tick (cron-style); Ctrl-C stops
   the engine while spawned agents keep running. Pids are identity-guarded via
   `/proc` start-times (a reused pid is never signalled; best-effort on macOS/Windows),

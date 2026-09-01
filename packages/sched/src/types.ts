@@ -31,6 +31,9 @@ export type ModelTier = 'mechanical' | 'mid' | 'strong';
  * failure edges (any state):
  *   in-work/committed → evicted(reason) → requeued{full}
  *   any → blocked(dep-failed) | decision-pending | failed(escalation-cap)
+ *   failed(auto-merge-blocked) → shipped   (#501 stale-failure reconcile —
+ *     the ONE edge out of `failed`, engine-guarded to that one reason; see
+ *     `state.ts`'s `ISSUE_BASE_TRANSITIONS.failed`)
  * ```
  */
 export type IssueStatus =
@@ -52,7 +55,14 @@ export type IssueStatus =
   | 'decision-pending'
   | 'failed';
 
-/** Issue statuses that cannot transition further. */
+/**
+ * Issue statuses the normal rails never leave: `done` is absolute, and
+ * `failed` has exactly one escape hatch (`failed → shipped`, #501's
+ * stale-failure reconcile — see `state.ts`). Membership here also suppresses
+ * the universal failure edges in `allowedIssueTransitions` — that's the
+ * mechanism that keeps `failed`'s one outgoing edge from also reopening
+ * `blocked`/`decision-pending`/`failed` itself.
+ */
 export const TERMINAL_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set(['done', 'failed']);
 
 /**
@@ -566,6 +576,10 @@ export type JournalEventName =
   | 'teardown-failed'
   | 'report-dispatched'
   | 'report-failed'
+  // #501: a `failed reason=auto-merge-blocked` entry whose PR was later
+  // manually re-queued and merged is reconciled back to `shipped` (and its
+  // dependents unblocked).
+  | 'stale-failure-reconciled'
   // #472 batch failure recovery (RFC-0001 §F.2/F.8/F.9)
   | 'suite-failed'
   | 'git-failed'
@@ -582,10 +596,7 @@ export type JournalEventName =
   // NOT the engine — sched enqueue appends these before the issue is ever
   // dispatched)
   | 'label-blocked'
-  | 'label-check-failed'
-  // #501: a `failed reason=auto-merge-blocked` entry whose PR was later
-  // manually re-queued and merged is reconciled back to `shipped`.
-  | 'stale-failure-reconciled';
+  | 'label-check-failed';
 
 /** One journaled event. `ts` is stamped by the journal, never by callers. */
 export interface JournalEvent {

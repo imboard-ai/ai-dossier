@@ -66,8 +66,15 @@ const ISSUE_BASE_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   // and merged outside the engine's own watch (reconcileParked stops
   // watching the instant an entry leaves `parked`, including into
   // `failed`). This table can't see *why* a caller wants the edge; the
-  // engine (`reconcileStaleFailedParks`) is what restricts it to that one
-  // reason — every other `failed` entry stays terminal.
+  // engine (`reconcileStaleFailedParks`, via `isStaleFailedPark`) is what
+  // restricts it to that one reason — every other `failed` entry stays
+  // terminal. It's "the ONLY edge" only because `failed` stays a member of
+  // `TERMINAL_ISSUE_STATUSES` — `allowedIssueTransitions` below skips the
+  // universal failure edges for terminal rows; dropping `failed` from that
+  // set would silently reopen `blocked`/`decision-pending`/`failed` here.
+  // Because THIS table is the sole enforcement, any future caller of
+  // `transitionIssue` can legally drive a `failed` entry to `shipped` — keep
+  // that behind `isStaleFailedPark` rather than re-deriving the check.
   failed: ['shipped'],
 };
 
