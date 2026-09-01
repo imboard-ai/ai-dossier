@@ -28,6 +28,7 @@ export {
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
   escalateTier,
+  NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
   type ResolvedDispatch,
   reportTierFor,

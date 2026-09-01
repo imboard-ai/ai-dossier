@@ -59,6 +59,23 @@ export const OPENCODE_DISPATCH_COMMAND: readonly string[] = [
 ];
 
 /**
+ * Shared hardening sentence appended to any dispatch prompt that runs a
+ * build/test/lint command (#497): a headless `claude -p` session ends the
+ * instant the model stops responding, so an agent that starts a long command
+ * and then reports "waiting for it to finish" abandons the run with the
+ * subprocess still going. The engine's `verify-incomplete` recovery path
+ * (engine.ts's unverified-exit case) catches this and redispatches one tier
+ * stronger, but every occurrence burns an escalation for a reason unrelated
+ * to model capability. Excluded from `DEFAULT_REPORT_PROMPT_TEMPLATE`, which
+ * only reads already-merged state and never spawns a long command.
+ */
+export const NO_BACKGROUND_EXIT_INSTRUCTION =
+  'IMPORTANT — this is a HEADLESS session: never end the session while a command you still need ' +
+  '(build, test, lint, CI) is running. Run long commands in the FOREGROUND and wait for them, or ' +
+  "poll with sleep loops until completion. Exiting while 'waiting' on a background process " +
+  'abandons the run.';
+
+/**
  * Default prompt sent on the child's stdin. Detached ship mode (#468): the
  * agent parks the PR on `auto-merge` and STOPS — the scheduler's PR watcher
  * owns the merge wait and dispatches teardown + report as tail work. The
@@ -72,7 +89,7 @@ export const DEFAULT_PROMPT_TEMPLATE =
   'Then execute it for issue #{issue} in detached ship mode (ship_mode=detached), following every ' +
   'phase (gate, setup, plan, implement, review) without asking questions, until Phase 5 parks the ' +
   'PR: apply the auto-merge label, post the awaiting-merge milestone, and STOP. Do not wait for ' +
-  'the merge, do not run teardown or report — the scheduler watches the PR and dispatches those.';
+  `the merge, do not run teardown or report — the scheduler watches the PR and dispatches those.\n\n${NO_BACKGROUND_EXIT_INSTRUCTION}`;
 
 /**
  * Default prompt for the report agent dispatched after a merged PR (#468
@@ -101,7 +118,7 @@ export const DEFAULT_FIX_PROMPT_TEMPLATE =
   "the code belonging to issue #{issue}; do not revert or modify other members' commits, do not " +
   're-plan the issue, and do not open a PR. Commit the fix on this branch with the `(#{issue})` ' +
   'subject trailer. This is the only fix attempt — if the suite is still red afterwards the ' +
-  "member's commits are reverted and it is requeued as a standalone full-cycle run.";
+  `member's commits are reverted and it is requeued as a standalone full-cycle run.\n\n${NO_BACKGROUND_EXIT_INSTRUCTION}`;
 
 /** Failing tests rendered into the fix prompt before it is truncated. */
 const MAX_PROMPT_TESTS = 50;
