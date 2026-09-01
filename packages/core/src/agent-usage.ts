@@ -373,6 +373,17 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
  * holds no opencode event at all; individual non-JSON lines (stderr warnings
  * interleaved by the scheduler's merged stdout/stderr fd) are skipped, not
  * treated as disqualifying.
+ *
+ * **Cross-agent caveat.** opencode reports `tokens.reasoning` SEPARATELY from
+ * `tokens.output` (a step's `total` is input + output + reasoning +
+ * cache.read), whereas claude folds thinking tokens into `output_tokens`.
+ * Reasoning is 45-75% of generated tokens in real logs, so an opencode
+ * `output_tokens` is NOT directly comparable to a claude one — do not put the
+ * two in the same column of a cost comparison without saying so. It is left
+ * out rather than summed in because this module never derives a value the
+ * agent did not report; capturing it needs a field of its own on
+ * {@link AgentRunUsage} and `RunLogEntry`, which is a schema change beyond
+ * ai-dossier#524's scope.
  */
 export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunUsage | null {
   if (typeof stdout !== 'string' || stdout.trim() === '') return null;
