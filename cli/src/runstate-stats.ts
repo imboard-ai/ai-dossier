@@ -46,8 +46,12 @@ export const BATCH_MERGE_WAIT_PHASE = 'batch-merge-wait';
  */
 const SHIP_PHASE: Phase = 'ship';
 const GATE_PHASE: Phase = 'gate';
+const REPORT_PHASE: Phase = 'report';
 const BATCH_SHIP_PHASE: BatchPhase = 'batch-ship';
+const BATCH_REPORT_PHASE: BatchPhase = 'batch-report';
 const AWAITING_MERGE: Status = 'awaiting-merge';
+const DONE: Status = 'done';
+const BLOCKED: Status = 'blocked';
 
 /**
  * Row order for aggregate tables: `ALL_PHASES` order (classify, the full-cycle line,
@@ -65,6 +69,70 @@ export const STATS_PHASE_ORDER: readonly string[] = ALL_PHASES.flatMap((phase) =
 
 /** The bucket a run lands in when no milestone in the run carries a `model=` key. */
 export const UNKNOWN_MODEL = 'unknown';
+
+/**
+ * Gateway and provider tokens stripped from a recorded `model=` to find its bucket.
+ *
+ * Agents record whatever id their CLI was invoked with, and the same model reaches the trail
+ * under several spellings depending on how it was routed: `glm-5.3` direct vs
+ * `llmgateway/glm-5.3` through a gateway, `z-ai/glm-latest` vs opencode's `~z-ai/glm-latest`
+ * alias form, `openrouter-kimi-latest` vs `moonshotai/kimi-latest`. Unbucketed, a single
+ * model's runs split across rows and the per-model view — the whole reason the gate records
+ * `model=` — answers a question nobody asked (`imboard-ai/ai-dossier#528`).
+ *
+ * Deliberately an allowlist of *known routing* tokens, never a generic "drop the first
+ * segment" rule: merging two genuinely different models is the one error this table cannot
+ * survive, so an unrecognised leading segment is always kept.
+ */
+export const MODEL_ROUTING_PREFIXES: readonly string[] = [
+  'llmgateway',
+  'openrouter',
+  'moonshotai',
+  'anthropic',
+  'alibaba',
+  'google',
+  'openai',
+  'z-ai',
+  'zai',
+];
+
+/** Separators a routing prefix is joined to the model id with. */
+const ROUTING_SEPARATORS: readonly string[] = ['/', '-'];
+
+/** Bound on prefix stripping, so a pathological id (`llmgateway/openrouter/…`) still terminates. */
+const MAX_ROUTING_PREFIXES = 4;
+
+/**
+ * The bucket key for a recorded `model=` — the model itself, with routing noise removed.
+ *
+ * Lowercased, any leading `~` (opencode's gateway-alias marker) dropped, then known routing
+ * prefixes peeled off. Never returns empty: an id that is *only* routing tokens is its own
+ * bucket rather than collapsing into every other such id.
+ */
+export function canonicalModel(raw: string): string {
+  const lowered = raw.trim().toLowerCase();
+  let value = lowered.replace(/^~+/, '');
+
+  for (let i = 0; i < MAX_ROUTING_PREFIXES; i++) {
+    const stripped = stripRoutingPrefix(value);
+    if (stripped === null) break;
+    value = stripped;
+  }
+
+  return value === '' ? lowered : value;
+}
+
+/** One routing prefix off the front of `value`, or null when it does not start with one. */
+function stripRoutingPrefix(value: string): string | null {
+  for (const prefix of MODEL_ROUTING_PREFIXES) {
+    for (const separator of ROUTING_SEPARATORS) {
+      const head = `${prefix}${separator}`;
+      // `length >` and not `>=`: a value that is nothing but a prefix keeps its identity.
+      if (value.startsWith(head) && value.length > head.length) return value.slice(head.length);
+    }
+  }
+  return null;
+}
 
 /** The group a milestone lands in when it carries no `run=` id. */
 export const UNKNOWN_RUN = 'unknown-run';
@@ -167,9 +235,23 @@ export interface PhaseAggregate {
   negative_samples: number;
 }
 
-/** Per-`model=` view of whole-run totals — the point of recording `model=` at the gate. */
+/**
+ * Per-`model=` view of whole-run totals and outcomes — the point of recording `model=`.
+ *
+ * Duration alone answers "how long", never "which models finish the work". Both are needed
+ * to route a tier at a model with any evidence behind it, so the bucket carries the run's
+ * terminal state alongside its span.
+ */
 export interface ModelAggregate {
+  /** Canonical bucket key — see {@link canonicalModel}. */
   model: string;
+  /**
+   * The distinct raw `model=` spellings that folded into this bucket, sorted.
+   *
+   * Always populated (a bucket with one spelling lists that one), so a fold is visible in
+   * the output rather than silently reshaping someone's cohort.
+   */
+  aliases: string[];
   runs: number;
   /** Runs of this model whose total was measurable; the rest are excluded below. */
   samples: number;
@@ -177,6 +259,16 @@ export interface ModelAggregate {
   min_total_seconds: number | null;
   max_total_seconds: number | null;
   negative_samples: number;
+  /**
+   * Runs whose last milestone was a delivery phase at `done` — see {@link DELIVERED_PHASES}.
+   */
+  completed: number;
+  /** Runs whose last milestone was `blocked`, whatever the phase. */
+  blocked: number;
+  /** Everything else: still in flight, parked awaiting merge, partial, or fenced. */
+  unfinished: number;
+  /** `completed / runs`, in [0, 1]. */
+  completion_rate: number;
 }
 
 /** The two cross-run rollups: per-phase spread, and whole-run totals bucketed by model. */
@@ -428,14 +520,53 @@ function byStatsPhaseOrder(a: { phase: string }, b: { phase: string }): number {
   return a.phase.localeCompare(b.phase);
 }
 
-/** Whole-run totals bucketed by `model=`, so runs become comparable across models. */
+/**
+ * Phases whose `done` means the work was delivered.
+ *
+ * `report` is the protocol's terminal phase, but `ship done` is posted only after the merge
+ * AND teardown are confirmed — the PR is in the base branch by then. The report tail is
+ * routinely a *separately dispatched* run (the scheduler dispatches a report agent against
+ * a merged PR), so counting `report` alone would score the delivering run as unfinished and
+ * report a completion rate far below what the trail actually shows.
+ */
+const DELIVERED_PHASES: readonly string[] = [
+  SHIP_PHASE,
+  REPORT_PHASE,
+  BATCH_SHIP_PHASE,
+  BATCH_REPORT_PHASE,
+];
+
+/** True when the run's last milestone says the work was delivered, not merely stopped. */
+function isCompleted(run: RunStats): boolean {
+  return run.last_status === DONE && DELIVERED_PHASES.includes(run.last_phase);
+}
+
+/** Whole-run totals and outcomes bucketed by `model=`, so runs become comparable across models. */
 function aggregateModels(runs: RunStats[]): ModelAggregate[] {
-  const buckets = new Map<string, { runs: number; totals: number[] }>();
+  interface Bucket {
+    runs: number;
+    totals: number[];
+    aliases: Set<string>;
+    completed: number;
+    blocked: number;
+  }
+  const buckets = new Map<string, Bucket>();
+
   for (const run of runs) {
-    const key = run.model ?? UNKNOWN_MODEL;
-    const bucket = buckets.get(key) ?? { runs: 0, totals: [] };
+    const raw = run.model ?? UNKNOWN_MODEL;
+    const key = run.model === null ? UNKNOWN_MODEL : canonicalModel(run.model);
+    const bucket = buckets.get(key) ?? {
+      runs: 0,
+      totals: [],
+      aliases: new Set<string>(),
+      completed: 0,
+      blocked: 0,
+    };
     bucket.runs += 1;
+    bucket.aliases.add(raw);
     if (run.total_seconds !== null) bucket.totals.push(run.total_seconds);
+    if (isCompleted(run)) bucket.completed += 1;
+    else if (run.last_status === BLOCKED) bucket.blocked += 1;
     buckets.set(key, bucket);
   }
 
@@ -444,12 +575,17 @@ function aggregateModels(runs: RunStats[]): ModelAggregate[] {
       const measured = bucket.totals.length > 0;
       return {
         model,
+        aliases: [...bucket.aliases].sort(),
         runs: bucket.runs,
         samples: bucket.totals.length,
         median_total_seconds: measured ? median(bucket.totals) : null,
         min_total_seconds: measured ? minOf(bucket.totals) : null,
         max_total_seconds: measured ? maxOf(bucket.totals) : null,
         negative_samples: bucket.totals.filter((v) => v < 0).length,
+        completed: bucket.completed,
+        blocked: bucket.blocked,
+        unfinished: bucket.runs - bucket.completed - bucket.blocked,
+        completion_rate: bucket.completed / bucket.runs,
       };
     })
     .sort((a, b) => a.model.localeCompare(b.model));

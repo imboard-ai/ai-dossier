@@ -54,6 +54,7 @@ import {
   buildStatsReport,
   type FailedIssue,
   type IssueTrail,
+  type ModelAggregate,
   type RunStats,
   renderValue,
   type StatsReport,
@@ -112,6 +113,9 @@ interface StatsOptions {
 
 /** Characters kept in a `verify` warning, which is one line among several. */
 const WARNING_SNIPPET_LENGTH = 120;
+
+/** Scale for rendering a 0–1 rate as a percentage. */
+const PERCENT = 100;
 
 /** Parse `--kv k=v` occurrences into ordered pairs. */
 function parseKvPairs(raw: string[]): { pairs: Array<[string, string]>; errors: string[] } {
@@ -893,19 +897,55 @@ function printAggregates(report: StatsReport, precededByTables: boolean): void {
   if (models.length > 0) {
     section(
       'By model:',
-      ['model', 'runs', 'n', 'median total', 'min', 'max', ''],
+      ['model', 'runs', 'done', 'blocked', 'open', 'rate', 'n', 'median total', 'min', 'max', ''],
       models.map((model) => [
         renderValue(model.model),
         String(model.runs),
+        String(model.completed),
+        String(model.blocked),
+        String(model.unfinished),
+        formatRateCell(model.completion_rate),
         String(model.samples),
         formatDurationCell(model.median_total_seconds),
         formatDurationCell(model.min_total_seconds),
         formatDurationCell(model.max_total_seconds),
-        skewCell(model.negative_samples),
+        modelNoteCell(model),
       ]),
-      ['left', 'right', 'right', 'right', 'right', 'right', 'left']
+      [
+        'left',
+        'right',
+        'right',
+        'right',
+        'right',
+        'right',
+        'right',
+        'right',
+        'right',
+        'right',
+        'left',
+      ]
     );
   }
+}
+
+/** A completion rate as a whole-percent cell. */
+function formatRateCell(rate: number): string {
+  return `${Math.round(rate * PERCENT)}%`;
+}
+
+/**
+ * The trailing note for a model row: clock skew, and which raw `model=` spellings folded in.
+ *
+ * The fold is disclosed rather than assumed — a reader comparing arms needs to see that
+ * `glm-5.3` and `llmgateway/glm-5.3` were counted as one model before trusting the row.
+ */
+function modelNoteCell(model: ModelAggregate): string {
+  const notes: string[] = [];
+  const skew = skewCell(model.negative_samples);
+  if (skew !== '') notes.push(skew);
+  const folded = model.aliases.filter((alias) => alias !== model.model);
+  if (folded.length > 0) notes.push(`folded: ${folded.join(', ')}`);
+  return notes.join(' · ');
 }
 
 /**

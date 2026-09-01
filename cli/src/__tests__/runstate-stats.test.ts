@@ -3,6 +3,7 @@ import { buildMilestone, nowStamp, parseMilestones, RUNSTATE_MARKER } from '../r
 import {
   BATCH_MERGE_WAIT_PHASE,
   buildStatsReport,
+  canonicalModel,
   type IssueTrail,
   isUsableTimestamp,
   MERGE_WAIT_PHASE,
@@ -280,25 +281,35 @@ describe('buildStatsReport — AC1: multi-run trails', () => {
     expect(report.runs[0].last_status).toBe('blocked');
   });
 
-  it('buckets whole-run totals by model', () => {
+  it('buckets whole-run totals and outcomes by model', () => {
     expect(report.aggregates.models).toEqual([
       {
         model: 'claude-opus-5',
+        aliases: ['claude-opus-5'],
         runs: 1,
         samples: 1,
         median_total_seconds: 1800,
         min_total_seconds: 1800,
         max_total_seconds: 1800,
         negative_samples: 0,
+        completed: 1,
+        blocked: 0,
+        unfinished: 0,
+        completion_rate: 1,
       },
       {
         model: 'claude-sonnet-5',
+        aliases: ['claude-sonnet-5'],
         runs: 1,
         samples: 1,
         median_total_seconds: 1200,
         min_total_seconds: 1200,
         max_total_seconds: 1200,
         negative_samples: 0,
+        completed: 0,
+        blocked: 1,
+        unfinished: 0,
+        completion_rate: 0,
       },
     ]);
   });
@@ -747,5 +758,126 @@ describe('buildStatsReport — classify and batch phases (#461)', () => {
     ];
     const run = reportFor(1, malformed).runs[0];
     expect(run.phases.map((p) => p.phase)).toEqual(['ship', 'batch-ship']);
+  });
+});
+
+describe('canonicalModel — routing prefixes folded into one bucket', () => {
+  it('folds the real-world spellings of one model onto one key', () => {
+    // Every pair observed on real trails: ai-dossier #460–#538 and imboard-monorepo #471.
+    expect(canonicalModel('llmgateway/glm-5.3')).toBe(canonicalModel('glm-5.3'));
+    expect(canonicalModel('~z-ai/glm-latest')).toBe(canonicalModel('z-ai/glm-latest'));
+    expect(canonicalModel('openrouter-kimi-latest')).toBe(canonicalModel('moonshotai/kimi-latest'));
+  });
+
+  it('strips the gateway alias marker and lowercases', () => {
+    expect(canonicalModel('~z-ai/GLM-Latest')).toBe('glm-latest');
+  });
+
+  it('peels a chain of routing prefixes', () => {
+    expect(canonicalModel('llmgateway/openrouter-kimi-latest')).toBe('kimi-latest');
+  });
+
+  it('never strips an unrecognised leading segment', () => {
+    // The one error this table cannot survive is merging two different models.
+    expect(canonicalModel('claude-sonnet-5')).toBe('claude-sonnet-5');
+    expect(canonicalModel('acme/glm-5.3')).toBe('acme/glm-5.3');
+  });
+
+  it('keeps a value that is nothing but a routing prefix as its own bucket', () => {
+    expect(canonicalModel('openrouter')).toBe('openrouter');
+    expect(canonicalModel('openrouter/')).toBe('openrouter/');
+  });
+
+  it('keeps distinct model versions distinct', () => {
+    expect(canonicalModel('llmgateway/glm-5.3')).not.toBe(canonicalModel('z-ai/glm-latest'));
+  });
+});
+
+describe('buildStatsReport — model buckets answer "which tiers are safe"', () => {
+  /** One model recorded under two routing spellings, with opposite outcomes. */
+  const SPLIT_SPELLINGS = [
+    trail(1, [
+      milestone('gate', 'done', 'r-1-aaaa', '2026-08-24T09:00:00Z', { model: 'glm-5.3' }),
+      milestone('report', 'done', 'r-1-aaaa', '2026-08-24T09:30:00Z'),
+    ]),
+    trail(2, [
+      milestone('gate', 'done', 'r-2-bbbb', '2026-08-24T09:00:00Z', {
+        model: 'llmgateway/glm-5.3',
+      }),
+      milestone('implement', 'blocked', 'r-2-bbbb', '2026-08-24T09:10:00Z', { reason: 'quota' }),
+    ]),
+    trail(3, [
+      milestone('gate', 'done', 'r-3-cccc', '2026-08-24T09:00:00Z', { model: 'glm-5.3' }),
+      milestone('ship', 'awaiting-merge', 'r-3-cccc', '2026-08-24T09:20:00Z', { pr: '9' }),
+    ]),
+  ];
+
+  const report = buildStatsReport({ trails: SPLIT_SPELLINGS });
+
+  it('reports one bucket, not one per spelling', () => {
+    expect(report.aggregates.models).toHaveLength(1);
+    expect(report.aggregates.models[0].model).toBe('glm-5.3');
+    expect(report.aggregates.models[0].runs).toBe(3);
+  });
+
+  it('discloses which raw spellings folded in, so the merge is never silent', () => {
+    expect(report.aggregates.models[0].aliases).toEqual(['glm-5.3', 'llmgateway/glm-5.3']);
+  });
+
+  it('counts terminal outcomes so a bucket says whether the work finished', () => {
+    expect(report.aggregates.models[0]).toMatchObject({
+      completed: 1,
+      blocked: 1,
+      unfinished: 1,
+      completion_rate: 1 / 3,
+    });
+  });
+
+  it('leaves the per-run rows on their raw recorded model', () => {
+    // The fold is an aggregation choice; the evidence trail keeps what was written.
+    expect(report.runs.map((r) => r.model)).toEqual(['glm-5.3', 'llmgateway/glm-5.3', 'glm-5.3']);
+  });
+
+  it('counts ship done as delivered — the merge and teardown are confirmed by then', () => {
+    // The report tail is routinely a separately dispatched run; scoring the delivering run
+    // as unfinished would put every scheduler-dispatched arm's completion rate far too low.
+    const shipped = reportFor(7, [
+      milestone('gate', 'done', 'r-7-9999', '2026-08-24T09:00:00Z', { model: 'glm-5.3' }),
+      milestone('ship', 'done', 'r-7-9999', '2026-08-24T09:40:00Z', { merge_commit: 'abc1234' }),
+    ]);
+    expect(shipped.aggregates.models[0]).toMatchObject({ completed: 1, completion_rate: 1 });
+  });
+
+  it('counts a batch-report done as completed', () => {
+    const batch = reportFor(4, [
+      milestone('gate', 'done', 'r-4-dddd', '2026-08-24T09:00:00Z', { model: 'glm-5.3' }),
+      milestone('batch-report', 'done', 'r-4-dddd', '2026-08-24T09:30:00Z'),
+    ]);
+    expect(batch.aggregates.models[0]).toMatchObject({ completed: 1, completion_rate: 1 });
+  });
+
+  it('does not count a mid-pipeline done as completed', () => {
+    const midway = reportFor(5, [
+      milestone('gate', 'done', 'r-5-eeee', '2026-08-24T09:00:00Z', { model: 'glm-5.3' }),
+      milestone('review', 'done', 'r-5-eeee', '2026-08-24T09:30:00Z'),
+    ]);
+    expect(midway.aggregates.models[0]).toMatchObject({
+      completed: 0,
+      blocked: 0,
+      unfinished: 1,
+      completion_rate: 0,
+    });
+  });
+
+  it('buckets runs with no model= under unknown without canonicalising it', () => {
+    const none = reportFor(6, [
+      milestone('gate', 'done', 'r-6-ffff', '2026-08-24T09:00:00Z'),
+      milestone('report', 'done', 'r-6-ffff', '2026-08-24T09:30:00Z'),
+    ]);
+    expect(none.aggregates.models[0]).toMatchObject({
+      model: UNKNOWN_MODEL,
+      aliases: [UNKNOWN_MODEL],
+      runs: 1,
+    });
   });
 });
