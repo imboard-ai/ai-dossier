@@ -100,7 +100,7 @@ describe('computeAssignments — dependency gating (AC5)', () => {
   });
 
   it('intra-batch deps do not block the batch; cross-batch deps gate on merge', () => {
-    let state = enqueueEntries(
+    const state = enqueueEntries(
       createEmptyState(),
       [
         { issue: 1, mode: 'slot', batch: 'b1' },
@@ -109,9 +109,7 @@ describe('computeAssignments — dependency gating (AC5)', () => {
       ],
       NOW
     );
-    // seal both batches
-    state = transitionBatch(state, 'b1', 'ready', {}, NOW);
-    state = transitionBatch(state, 'b2', 'ready', {}, NOW);
+    // both batches already sealed forming → ready by enqueueEntries
 
     const units = runnableUnits(state);
     expect(units).toEqual([{ kind: 'batch', batch: 'b1' }]); // b2 gated on b1's merge
@@ -127,7 +125,7 @@ describe('computeAssignments — dependency gating (AC5)', () => {
   });
 
   it('a batch unit is assigned as one slot and unlocks member work', () => {
-    let state = enqueueEntries(
+    const state = enqueueEntries(
       createEmptyState(),
       [
         { issue: 1, mode: 'slot', batch: 'b1' },
@@ -135,7 +133,6 @@ describe('computeAssignments — dependency gating (AC5)', () => {
       ],
       NOW
     );
-    state = transitionBatch(state, 'b1', 'ready', {}, NOW);
     const r = computeAssignments(state, { max_slots: 2 }, NOW2);
     expect(r.assignments).toEqual([{ slot: 1, kind: 'batch', batch: 'b1' }]);
     expect(r.state.slots[0].unit).toBe('batch:b1');
@@ -201,7 +198,6 @@ describe('abandon', () => {
       ],
       NOW
     );
-    state = transitionBatch(state, 'b1', 'ready', {}, NOW);
     state = transitionBatch(state, 'b1', 'executing', {}, NOW);
     // #1 mid-member (walk the slot rail to in-work), #2 still waiting
     state = transitionIssue(state, 1, 'classified', {}, NOW);
@@ -228,7 +224,6 @@ describe('abandon', () => {
       ],
       NOW
     );
-    state = transitionBatch(state, 'b1', 'ready', {}, NOW);
     state = transitionIssue(state, 1, 'classified', {}, NOW);
     state = transitionIssue(state, 1, 'batched', {}, NOW);
     state = transitionIssue(state, 1, 'waiting', {}, NOW);

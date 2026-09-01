@@ -98,6 +98,39 @@ describe('ai-dossier sched enqueue', () => {
     expect(state.batches[0]).toMatchObject({ id: 'b1', members: [2] });
   });
 
+  it('--more-members-expected holds a batch open; the next call without it seals (#535 AC1)', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '1',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--more-members-expected',
+      '--project',
+      'test-proj',
+    ]);
+    let state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b1', status: 'forming' });
+
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '2',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--project',
+      'test-proj',
+    ]);
+    state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b1', status: 'ready', members: [1, 2] });
+  });
+
   it('flags and manifest entries combine into one enqueue', async () => {
     const manifest = path.join(home, 'manifest.json');
     fs.writeFileSync(

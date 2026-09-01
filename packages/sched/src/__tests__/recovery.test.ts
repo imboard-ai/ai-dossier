@@ -113,7 +113,6 @@ function batchState(
       state = transitionIssue(state, issue, to, {}, NOW);
     }
   }
-  state = transitionBatch(state, 'b1', 'ready', {}, NOW);
   state = transitionBatch(state, 'b1', 'executing', {}, NOW);
   state = transitionBatch(state, 'b1', 'validating', {}, NOW);
   if (status === 'attributing') state = transitionBatch(state, 'b1', 'attributing', {}, NOW);

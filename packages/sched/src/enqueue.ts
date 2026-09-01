@@ -12,7 +12,7 @@
 
 import { SAFE_REF_RE } from './attribution';
 import { unwrapList } from './json';
-import { createBatch, findBatch } from './state';
+import { createBatch, findBatch, transitionBatch } from './state';
 import type { CycleMode, ModelTier, QueueEntry, SchedState } from './types';
 import { TERMINAL_ISSUE_STATUSES } from './types';
 
@@ -74,6 +74,19 @@ export interface EnqueueInput {
   anchor?: number;
   run_id?: string;
   eviction_groups?: number[][];
+  /**
+   * Declares that MORE members for this entry's batch will land in a LATER
+   * `enqueue` call — set by a caller who knows composition isn't finished yet
+   * (e.g. an oversized manifest split across several `--from-manifest` calls,
+   * or a batch composed incrementally via repeated `--issues --batch`). Any
+   * entry in a call carrying `true` withholds that call's seal for its batch
+   * even though the call touched it (#535 AC1's "partial batch" clause); omit
+   * it, or set `false`, on the call that lands the last declared member so it
+   * seals normally. Unlike `anchor`/`run_id`/`eviction_groups`, this is a
+   * per-call signal, not a batch identity fact — it is never checked for
+   * cross-call agreement.
+   */
+  more_members_expected?: boolean;
   /**
    * Name of a hard-block GitHub label found on this issue (#507, e.g.
    * `decision-pending`), resolved by the CLI's pre-screen before calling
@@ -171,6 +184,12 @@ export function parseManifest(raw: unknown): EnqueueInput[] {
         );
       });
     }
+    if (obj.more_members_expected !== undefined) {
+      if (typeof obj.more_members_expected !== 'boolean') {
+        throw new EnqueueError(`Manifest entry [${i}]: more_members_expected must be a boolean`);
+      }
+      input.more_members_expected = obj.more_members_expected;
+    }
     return input;
   });
 }
@@ -256,6 +275,9 @@ function assertBatchFactsAgree(
 /**
  * Append validated entries to the queue (AC1). Returns the new state; throws
  * `EnqueueError` on any rejection — the caller saves nothing when it throws.
+ * Also seals any batch this call completes (created or joined, still
+ * `forming`, and not held open via `more_members_expected`) to `ready` in the
+ * same transaction (#535) — see `sealCompletedBatches`.
  */
 export function enqueueEntries(
   state: SchedState,
@@ -343,10 +365,11 @@ export function enqueueEntries(
       batch === null &&
       (input.anchor !== undefined ||
         input.run_id !== undefined ||
-        input.eviction_groups !== undefined)
+        input.eviction_groups !== undefined ||
+        input.more_members_expected !== undefined)
     ) {
       throw new EnqueueError(
-        `Issue ${input.issue}: anchor/run_id/eviction_groups describe a batch — they cannot be set on a full-cycle entry`
+        `Issue ${input.issue}: anchor/run_id/eviction_groups/more_members_expected describe a batch — they cannot be set on a full-cycle entry`
       );
     }
     // A `decision-pending` GITHUB LABEL (one of the four hard-block labels
@@ -376,9 +399,17 @@ export function enqueueEntries(
   // batches actually joined get `updated_at` bumped — a blanket rewrite would
   // churn the audit signal on every enqueue.
   const batches = state.batches.map((b) => ({ ...b }));
+  // Collected alongside the loop below (not re-derived from `inputs` after
+  // the fact) so the two can never drift: every batch id this call touches,
+  // and which of those it was told to leave open (#535 AC1's "partial batch"
+  // clause — see `sealCompletedBatches`).
+  const touchedBatchIds = new Set<string>();
+  const heldBatchIds = new Set<string>();
   for (const input of inputs) {
     const batchId = input.batch;
     if (batchId === null || batchId === undefined) continue;
+    touchedBatchIds.add(batchId);
+    if (input.more_members_expected) heldBatchIds.add(batchId);
     const existing = findBatch({ ...state, batches }, batchId);
     if (existing) {
       if (existing.status !== 'forming') {
@@ -459,5 +490,38 @@ export function enqueueEntries(
     }
   }
 
-  return combined;
+  return sealCompletedBatches(combined, touchedBatchIds, heldBatchIds, now);
+}
+
+/**
+ * Seal every batch this call touched (created or joined) and was not told to
+ * hold open: composition is frozen the moment a batch seals (this file's own
+ * long-standing promise at the top of the batch-join loop, previously
+ * unenforced — #535). A caller declares a batch complete simply by NOT
+ * setting `more_members_expected` on any of this call's entries for it — the
+ * common case, since a manifest normally declares a batch's full membership
+ * in one `enqueue` call (batch-prep composes the batch before writing it) —
+ * so by the time this transaction commits, whatever such a batch received
+ * here is everything it is ever getting; the `status !== 'forming'` check
+ * earlier in this function already refuses a later call from adding more. A
+ * batch held open (AC1's "partial batch… seals when the last declared member
+ * lands") stays `forming` until a later call touches it again without the
+ * hold. Sealing here, not at dispatch time, is what makes `forming` batches
+ * show up under `sched status`'s Runnable units at all.
+ */
+function sealCompletedBatches(
+  state: SchedState,
+  touchedBatchIds: ReadonlySet<string>,
+  heldBatchIds: ReadonlySet<string>,
+  now: Date
+): SchedState {
+  let sealed = state;
+  for (const batchId of touchedBatchIds) {
+    if (heldBatchIds.has(batchId)) continue;
+    const batch = findBatch(sealed, batchId);
+    if (batch && batch.status === 'forming') {
+      sealed = transitionBatch(sealed, batchId, 'ready', {}, now);
+    }
+  }
+  return sealed;
 }

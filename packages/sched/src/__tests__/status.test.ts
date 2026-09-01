@@ -5,7 +5,6 @@ import {
   enqueueEntries,
   type SchedState,
   type SlotEntry,
-  transitionBatch,
   transitionIssue,
 } from '../index';
 
@@ -44,8 +43,7 @@ function slot(id: number, status: SlotEntry['status'], unit: string | null): Slo
 describe('buildStatusReport', () => {
   it('classifies runnable, blocked, and failed entries (AC4)', () => {
     let state = seeded();
-    // #102 blocked on unmerged #101; #101 runnable; batch b1 sealed and runnable
-    state = transitionBatch(state, 'b1', 'ready', {}, NOW);
+    // #102 blocked on unmerged #101; #101 runnable; batch b1 sealed (by enqueueEntries) and runnable
     state = transitionIssue(state, 101, 'classified', {}, NOW);
 
     const report = buildStatusReport(state, { max_slots: 3 }, 'test-proj');

@@ -155,7 +155,8 @@ describe('enqueueEntries', () => {
   });
 
   it('rejects joining a batch that has sealed (left forming)', () => {
-    let state = enqueueEntries(
+    // No hand-mutation needed — the first call already seals it (#535).
+    const state = enqueueEntries(
       createEmptyState(),
       [
         { issue: 1, mode: 'slot', batch: 'b1' },
@@ -163,13 +164,71 @@ describe('enqueueEntries', () => {
       ],
       NOW
     );
-    state = {
-      ...state,
-      batches: state.batches.map((b) => (b.id === 'b1' ? { ...b, status: 'ready' as const } : b)),
-    };
+    expect(findBatch(state, 'b1')?.status).toBe('ready');
     expect(() => enqueueEntries(state, [{ issue: 3, mode: 'slot', batch: 'b1' }], NOW)).toThrow(
       /only join while forming/
     );
+  });
+
+  it('seals a complete batch forming → ready in the same transaction (#535)', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 1, mode: 'slot', batch: 'b1' },
+        { issue: 2, mode: 'slot', batch: 'b1' },
+      ],
+      NOW
+    );
+    expect(findBatch(state, 'b1')?.status).toBe('ready');
+    // Sealed — a later call can no longer join it (composition is frozen).
+    expect(() => enqueueEntries(state, [{ issue: 3, mode: 'slot', batch: 'b1' }], NOW)).toThrow(
+      /only join while forming/
+    );
+  });
+
+  it('holds a batch open across multiple enqueue calls, sealing when the last declared member lands (#535 AC1)', () => {
+    // The caller (an oversized manifest split across calls, or a batch
+    // composed incrementally via --issues --batch) knows more members are
+    // still coming, so it marks the entry `more_members_expected: true` —
+    // the call must NOT seal the batch even though it touched it.
+    let state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1, mode: 'slot', batch: 'b1', more_members_expected: true }],
+      NOW
+    );
+    expect(findBatch(state, 'b1')?.status).toBe('forming');
+    // A second held call still doesn't seal it.
+    state = enqueueEntries(
+      state,
+      [{ issue: 2, mode: 'slot', batch: 'b1', more_members_expected: true }],
+      NOW
+    );
+    expect(findBatch(state, 'b1')?.status).toBe('forming');
+    // The call landing the last declared member omits the flag — seals now.
+    state = enqueueEntries(state, [{ issue: 3, mode: 'slot', batch: 'b1' }], NOW);
+    expect(findBatch(state, 'b1')?.status).toBe('ready');
+    expect(findBatch(state, 'b1')?.members).toEqual([1, 2, 3]);
+  });
+
+  it('rejects more_members_expected on a full-cycle entry', () => {
+    expect(() =>
+      enqueueEntries(
+        createEmptyState(),
+        [{ issue: 1, mode: 'full', more_members_expected: true }],
+        NOW
+      )
+    ).toThrow(/cannot be set on a full-cycle entry/);
+  });
+
+  it('does not seal or touch a batch a call did not enqueue any member into', () => {
+    let state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1, mode: 'slot', batch: 'b1', more_members_expected: true }],
+      NOW
+    );
+    const before = findBatch(state, 'b1');
+    state = enqueueEntries(state, [{ issue: 99, mode: 'full' }], NOW);
+    expect(findBatch(state, 'b1')).toEqual(before);
   });
 
   it('allows deps pointing outside the queue (they surface as blocked, not cycles)', () => {
@@ -215,7 +274,15 @@ describe('enqueueEntries', () => {
   it('rejects a base_branch conflict when joining an existing forming batch', () => {
     const state = enqueueEntries(
       createEmptyState(),
-      [{ issue: 1, mode: 'slot', batch: 'b1', base_branch: 'develop' }],
+      [
+        {
+          issue: 1,
+          mode: 'slot',
+          batch: 'b1',
+          base_branch: 'develop',
+          more_members_expected: true,
+        },
+      ],
       NOW
     );
     expect(() =>
@@ -315,7 +382,7 @@ describe('batch-level facts at creation (#472)', () => {
   it('lets a later member supply a fact the first one omitted', () => {
     let state = enqueueEntries(
       createEmptyState(),
-      [{ issue: 201, mode: 'slot', batch: 'b1' }],
+      [{ issue: 201, mode: 'slot', batch: 'b1', more_members_expected: true }],
       NOW
     );
     state = enqueueEntries(state, [{ issue: 202, mode: 'slot', batch: 'b1', anchor: 900 }], NOW);
@@ -325,7 +392,16 @@ describe('batch-level facts at creation (#472)', () => {
   it('rejects a conflicting re-supply rather than silently keeping the first', () => {
     const state = enqueueEntries(
       createEmptyState(),
-      [{ issue: 201, mode: 'slot', batch: 'b1', anchor: 900, run_id: 'r-900-aaaa' }],
+      [
+        {
+          issue: 201,
+          mode: 'slot',
+          batch: 'b1',
+          anchor: 900,
+          run_id: 'r-900-aaaa',
+          more_members_expected: true,
+        },
+      ],
       NOW
     );
     expect(() =>
@@ -338,8 +414,14 @@ describe('batch-level facts at creation (#472)', () => {
     const grouped = enqueueEntries(
       createEmptyState(),
       [
-        { issue: 201, mode: 'slot', batch: 'b2', eviction_groups: [[201, 202]] },
-        { issue: 202, mode: 'slot', batch: 'b2' },
+        {
+          issue: 201,
+          mode: 'slot',
+          batch: 'b2',
+          eviction_groups: [[201, 202]],
+          more_members_expected: true,
+        },
+        { issue: 202, mode: 'slot', batch: 'b2', more_members_expected: true },
       ],
       NOW
     );
