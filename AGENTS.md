@@ -21,6 +21,13 @@ stale CLI versions producing wrong signatures. Several present with symptoms far
 their cause, and at least three were made worse by reasoning about how something
 "should" work instead of printing the actual value.
 
+## Before planning an issue
+
+Read `docs/agent-traps.md` in full and grep it for terms from the issue title and
+affected paths — it is a grep-first symptom → trap → fix index of traps already
+learned in this repo. Append a row when a run required a CI fix or surfaces a trap a
+future agent should search for first.
+
 ## Project Quick Reference
 
 | Directory | Purpose |
