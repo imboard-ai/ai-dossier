@@ -165,6 +165,8 @@ export {
   MERGED_BATCH_STATUSES,
   MIN_MAX_SLOTS,
   type ModelTier,
+  PHASES,
+  type Phase,
   type QueueEntry,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,

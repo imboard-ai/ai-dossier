@@ -189,7 +189,9 @@ export const MERGED_BATCH_STATUSES: ReadonlySet<BatchStatus> = new Set([
  * ```
  * idle → assigned(unit) → running(pid, phase, last_progress_at)
  *   → exited → verifying(reconcile vs GitHub/runstate) → complete → idle
- * stall: running[30 min no progress] → recovering(redispatch tier+1, ≤2) → running | failed → idle
+ * stall: running[no progress for the in-flight phase's stall timeout —
+ *   30 min default, 90 min for `implement` (#495)] → recovering(redispatch
+ *   tier+1, ≤2) → running | failed → idle
  * ```
  */
 export type SlotStatus =
@@ -313,7 +315,14 @@ export interface SlotEntry {
    * 1, option C). Null on platforms without /proc: best-effort.
    */
   pid_start: number | null;
-  /** Scheduler phase the unit is in, when running. */
+  /**
+   * The phase of the LATEST POSTED milestone — the phase that just
+   * COMPLETED, not the one in flight, since it only advances when a
+   * milestone lands (see `role`'s doc below for the report-agent case). For
+   * the CURRENTLY RUNNING phase, use the milestone's `next=` key instead
+   * (`stallTimeoutForPhase`, #495) — reading `phase` directly for that
+   * purpose applies a phase's stall allowance one phase too late.
+   */
   phase: string | null;
   /**
    * The agent's role: set when the slot is assigned (`assignToIdleSlot`) and
@@ -373,7 +382,14 @@ export interface SchedState {
 /** Durable intent, persisted separately in `config.json` (state.json is rebuildable hot truth). */
 export interface SchedConfig {
   max_slots: number;
-  /** Stall timeout in ms — no new milestone AND no new pushed commit for this long → redispatch stronger (default 30 min). */
+  /**
+   * Stall timeout in ms — no new milestone AND no new pushed commit for this
+   * long → redispatch stronger (default 30 min). Applies to any phase with
+   * no per-phase allowance; a phase with a built-in `DEFAULT_PHASE_STALL_TIMEOUT_MS`
+   * entry (`implement`, 90 min) uses `max(built-in, this value)` — raising
+   * this floor never silently shortens it — while an explicit
+   * `dispatch.phase_stall_timeout_ms` entry always wins verbatim (#495).
+   */
   stall_timeout_ms?: number;
   /** Reconciliation tick interval in ms (default 60 000). */
   reconcile_interval_ms?: number;
@@ -400,11 +416,12 @@ export interface DispatchConfig {
   tier_models?: Partial<Record<ModelTier, string>>;
   /**
    * Per-phase stall timeout overrides in ms, keyed by runstate milestone
-   * phase (e.g. `implement`) — falls back to `stall_timeout_ms` (or its own
-   * built-in default, for `implement`) for any phase not listed. Selected by
-   * the CURRENTLY RUNNING phase — the last milestone's `next=` — not the
-   * last COMPLETED phase, since a long phase's progress signals go quiet for
-   * its entire duration (#495).
+   * phase (one of `PHASES`/`BATCH_PHASES` below — an unrecognized key is
+   * rejected at config-load time, never silently ignored) — falls back to
+   * `stall_timeout_ms` (or its own built-in default, for `implement`) for
+   * any phase not listed. Selected by the CURRENTLY RUNNING phase — the last
+   * milestone's `next=` — not the last COMPLETED phase, since a long
+   * phase's progress signals go quiet for its entire duration (#495).
    */
   phase_stall_timeout_ms?: Record<string, number>;
   /**
@@ -459,13 +476,17 @@ export const DEFAULT_STALL_TIMEOUT_MS = 30 * 60 * 1000;
  * implement + test suite) with zero intermediate milestone or pushed
  * commit, so the blanket 30-min default kills healthy agents mid-phase. 90
  * minutes matches the value operators had already validated as a manual
- * per-project workaround (W1 fleet-parity evidence) — long enough to cover
- * a real implement phase, short enough that the ladder still fires on a
- * genuine hang. Every other phase keeps `DEFAULT_STALL_TIMEOUT_MS`.
+ * per-project workaround (`docs/reports/sched-parity.md` §2.1 engine config
+ * / §5 divergence D1 — the W1-W3 fleet-parity run applied
+ * `stall_timeout_ms=90min` globally) — long enough to cover a real implement
+ * phase, short enough that the ladder still fires on a genuine hang. Every
+ * other phase keeps `DEFAULT_STALL_TIMEOUT_MS`. Frozen: exported from the
+ * package, so an in-process consumer mutating it must never change the
+ * ladder for every other project sharing the process.
  */
-export const DEFAULT_PHASE_STALL_TIMEOUT_MS: Readonly<Record<string, number>> = {
+export const DEFAULT_PHASE_STALL_TIMEOUT_MS: Readonly<Record<string, number>> = Object.freeze({
   implement: 90 * 60 * 1000,
-};
+});
 
 /** Default reconciliation tick: ~60s (RFC-0001 §C.1). */
 export const DEFAULT_RECONCILE_INTERVAL_MS = 60 * 1000;
@@ -488,6 +509,20 @@ export const MAX_FIX_ATTEMPTS_PER_MEMBER = 1;
  * the suite is failing on.
  */
 export const FIX_ATTEMPT_TIER: ModelTier = 'mid';
+
+/**
+ * The per-issue full-cycle runstate phases.
+ *
+ * MUST stay in sync with `PHASES` in `cli/src/runstate.ts`, which is the
+ * validating authority — this package cannot import from the CLI (the CLI
+ * depends on this package), so the vocabulary is a deliberate copy, exactly
+ * like `BATCH_PHASES` below. Used to reject an unrecognized
+ * `dispatch.phase_stall_timeout_ms` key at config-load time (#495) instead
+ * of silently ignoring a typo.
+ */
+export const PHASES = ['gate', 'setup', 'plan', 'implement', 'review', 'ship', 'report'] as const;
+
+export type Phase = (typeof PHASES)[number];
 
 /**
  * The batch-line runstate phases (RFC-0001 §D.2).

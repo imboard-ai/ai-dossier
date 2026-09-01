@@ -15,8 +15,10 @@
  *    - `assigned` slots (crash between assign and spawn) are spawned/re-attached
  *    - `running` slots: dead pid → exit rail; ground truth says complete →
  *      external advance (kill the leftover agent, complete); new milestone or
- *      pushed commit → progress; no progress for `stall_timeout_ms` →
- *      redispatch one tier stronger (cap 2, then failed)
+ *      pushed commit → progress; no progress for the in-flight phase's
+ *      stall timeout (`stall_timeout_ms`, or a per-phase override —
+ *      `implement` defaults to 90 min, #495) → redispatch one tier
+ *      stronger (cap 2, then failed)
  *    - `exited`/`verifying` slots: the agent exited — completion is verified
  *      against ground truth, never assumed (AC2); an exit whose milestone is
  *      the ship phase's `awaiting-merge` (with `pr=`) is a VERIFIED park:
@@ -830,11 +832,16 @@ function reconcileRunning(
   // milestone's `next=`, not `slot.phase` — `slot.phase` is set to
   // `truth.milestone.phase`, which names the phase that just COMPLETED, so
   // using it directly would apply a phase's timeout allowance to the phase
-  // AFTER it (#495). Falls back to `slot.phase` (set to 'gate' at spawn) for
-  // the brief window before any milestone has posted.
+  // AFTER it (#495). Falls back to `slot.phase` (set to 'gate' at spawn,
+  // 'report' for a report agent) for the brief window before any milestone
+  // has posted.
   const activePhase = truth.milestone?.keys.next ?? slot.phase;
-  if (msSinceLastProgress(slot, now) >= stallTimeoutForPhase(ctx.dispatch, activePhase)) {
-    return enterRecovery(ctx, progress.state, unit, 'stalled', 'stall');
+  const stallTimeoutMs = stallTimeoutForPhase(ctx.dispatch, activePhase);
+  if (msSinceLastProgress(slot, now) >= stallTimeoutMs) {
+    return enterRecovery(ctx, progress.state, unit, 'stalled', 'stall', {
+      active_phase: activePhase,
+      stall_timeout_ms: stallTimeoutMs,
+    });
   }
   return progress.state;
 }

@@ -206,71 +206,99 @@ describe('#468 config: pr_poll_interval_ms and dispatch.report_prompt', () => {
   });
 });
 
+/** Writes a raw config file (module-level `dir`) and asserts it degrades to defaults with a warning matching every `expectedInMessage` fragment. */
+function expectConfigRejected(rawConfig: unknown, ...expectedInMessage: string[]): void {
+  const store = new SchedStore(dir);
+  fs.writeFileSync(store.configPath, JSON.stringify(rawConfig));
+  const warned = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    expect(store.loadConfig()).toEqual({ max_slots: 3 });
+    const message = String(warned.mock.calls[0]?.[0]);
+    expect(message).toContain('unreadable');
+    for (const fragment of expectedInMessage) expect(message).toContain(fragment);
+  } finally {
+    warned.mockRestore();
+  }
+}
+
 describe('#495 config: dispatch.phase_stall_timeout_ms', () => {
   it('round-trips a per-phase stall timeout override', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-495-'));
-    try {
-      const store = new SchedStore(dir);
-      store.saveConfig({
-        max_slots: 2,
-        dispatch: { phase_stall_timeout_ms: { implement: 5_400_000 } },
-      });
-      const config = store.loadConfig();
-      expect(config.dispatch?.phase_stall_timeout_ms).toEqual({ implement: 5_400_000 });
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    const store = new SchedStore(dir);
+    store.saveConfig({
+      max_slots: 2,
+      dispatch: { phase_stall_timeout_ms: { implement: 5_400_000 } },
+    });
+    const config = store.loadConfig();
+    expect(config.dispatch?.phase_stall_timeout_ms).toEqual({ implement: 5_400_000 });
   });
 
   it('rejects a non-positive phase timeout (degrades to defaults, loudly)', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-495-'));
-    try {
-      const store = new SchedStore(dir);
-      fs.writeFileSync(
-        store.configPath,
-        JSON.stringify({
-          schema_version: '1.2.0',
-          max_slots: 2,
-          dispatch: { phase_stall_timeout_ms: { implement: 0 } },
-        })
-      );
-      const err = console.error;
-      const warnings: string[] = [];
-      console.error = (msg: string) => warnings.push(msg);
-      try {
-        expect(store.loadConfig()).toEqual({ max_slots: 3 });
-      } finally {
-        console.error = err;
-      }
-      expect(warnings.some((w) => w.includes('unreadable'))).toBe(true);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    expectConfigRejected(
+      {
+        schema_version: '1.2.0',
+        max_slots: 2,
+        dispatch: { phase_stall_timeout_ms: { implement: 0 } },
+      },
+      'phase_stall_timeout_ms.implement',
+      'positive integer'
+    );
   });
 
   it('rejects a non-object phase_stall_timeout_ms', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-495-'));
-    try {
-      const store = new SchedStore(dir);
-      fs.writeFileSync(
-        store.configPath,
-        JSON.stringify({
-          schema_version: '1.2.0',
-          max_slots: 2,
-          dispatch: { phase_stall_timeout_ms: 'implement' },
-        })
-      );
-      const err = console.error;
-      const warnings: string[] = [];
-      console.error = (msg: string) => warnings.push(msg);
-      try {
-        expect(store.loadConfig()).toEqual({ max_slots: 3 });
-      } finally {
-        console.error = err;
-      }
-      expect(warnings.some((w) => w.includes('unreadable'))).toBe(true);
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
+    expectConfigRejected(
+      { schema_version: '1.2.0', max_slots: 2, dispatch: { phase_stall_timeout_ms: 'implement' } },
+      'phase_stall_timeout_ms'
+    );
+  });
+
+  it('rejects an array phase_stall_timeout_ms (not just non-object)', () => {
+    expectConfigRejected(
+      {
+        schema_version: '1.2.0',
+        max_slots: 2,
+        dispatch: { phase_stall_timeout_ms: [90_000, 1_000] },
+      },
+      'phase_stall_timeout_ms'
+    );
+  });
+
+  it('rejects an unrecognized phase key (typo protection)', () => {
+    expectConfigRejected(
+      {
+        schema_version: '1.2.0',
+        max_slots: 2,
+        dispatch: { phase_stall_timeout_ms: { implment: 5_400_000 } },
+      },
+      "unknown phase 'implment'"
+    );
+  });
+
+  it('accepts a batch-phase key (aggregate-mode units share the same stall check)', () => {
+    const store = new SchedStore(dir);
+    store.saveConfig({
+      max_slots: 2,
+      dispatch: { phase_stall_timeout_ms: { 'batch-review': 3_600_000 } },
+    });
+    expect(store.loadConfig().dispatch?.phase_stall_timeout_ms).toEqual({
+      'batch-review': 3_600_000,
+    });
+  });
+});
+
+describe('#495 config: dispatch.fix_prompt (pre-existing gap in the function this PR extends)', () => {
+  it('round-trips a custom fix prompt', () => {
+    const store = new SchedStore(dir);
+    store.saveConfig({
+      max_slots: 2,
+      dispatch: { fix_prompt: 'fix #{issue} in batch {batch}: {tests}' },
+    });
+    expect(store.loadConfig().dispatch?.fix_prompt).toBe('fix #{issue} in batch {batch}: {tests}');
+  });
+
+  it('rejects a non-string fix_prompt', () => {
+    expectConfigRejected(
+      { schema_version: '1.2.0', max_slots: 2, dispatch: { fix_prompt: 42 } },
+      'fix_prompt'
+    );
   });
 });

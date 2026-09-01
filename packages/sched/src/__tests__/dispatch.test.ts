@@ -122,6 +122,34 @@ describe('stallTimeoutForPhase (#495)', () => {
     const resolved = resolveDispatch({ max_slots: 1, stall_timeout_ms: 42_000 });
     expect(stallTimeoutForPhase(resolved, null)).toBe(42_000);
   });
+
+  it('an inherited Object.prototype key is not an override (hardening)', () => {
+    const resolved = resolveDispatch({ max_slots: 1, stall_timeout_ms: 42_000 });
+    for (const p of ['constructor', 'toString', '__proto__', 'valueOf', 'hasOwnProperty']) {
+      expect(stallTimeoutForPhase(resolved, p)).toBe(42_000);
+    }
+  });
+
+  it('the "done" sentinel (a legal next= value) is not a phase override', () => {
+    const resolved = resolveDispatch({ max_slots: 1, stall_timeout_ms: 42_000 });
+    expect(stallTimeoutForPhase(resolved, 'done')).toBe(42_000);
+  });
+
+  it('a built-in phase default is a FLOOR against a larger global stall_timeout_ms, never shortened by it', () => {
+    const resolved = resolveDispatch({ max_slots: 1, stall_timeout_ms: 3 * 60 * 60 * 1000 });
+    expect(stallTimeoutForPhase(resolved, 'implement')).toBe(3 * 60 * 60 * 1000);
+    // a phase with no built-in default still just uses the (now larger) global
+    expect(stallTimeoutForPhase(resolved, 'plan')).toBe(3 * 60 * 60 * 1000);
+  });
+
+  it('an explicit phase override always wins, even below the built-in default', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      stall_timeout_ms: 3 * 60 * 60 * 1000,
+      dispatch: { phase_stall_timeout_ms: { implement: 5_000 } },
+    });
+    expect(stallTimeoutForPhase(resolved, 'implement')).toBe(5_000);
+  });
 });
 
 describe('createSpawnDeps (real processes)', () => {

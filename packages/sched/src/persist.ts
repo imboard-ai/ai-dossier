@@ -18,6 +18,7 @@ import * as path from 'node:path';
 import { JOURNAL_FILE } from './journal';
 import { createEmptyState, validateState } from './state';
 import {
+  BATCH_PHASES,
   CONFIG_SCHEMA_VERSION,
   DEFAULT_MAX_SLOTS,
   type DispatchConfig,
@@ -25,6 +26,7 @@ import {
   MAX_MAX_SLOTS,
   MIN_MAX_SLOTS,
   type ModelTier,
+  PHASES,
   type SchedConfig,
   type SchedConfigFile,
   type SchedState,
@@ -249,22 +251,19 @@ export class SchedStore {
       }
       const config: SchedConfig = { max_slots: parsed.max_slots };
       if (parsed.stall_timeout_ms !== undefined) {
-        if (!Number.isInteger(parsed.stall_timeout_ms) || parsed.stall_timeout_ms <= 0) {
-          throw new Error('stall_timeout_ms must be a positive integer (milliseconds)');
-        }
-        config.stall_timeout_ms = parsed.stall_timeout_ms;
+        config.stall_timeout_ms = requirePositiveIntMs('stall_timeout_ms', parsed.stall_timeout_ms);
       }
       if (parsed.reconcile_interval_ms !== undefined) {
-        if (!Number.isInteger(parsed.reconcile_interval_ms) || parsed.reconcile_interval_ms <= 0) {
-          throw new Error('reconcile_interval_ms must be a positive integer (milliseconds)');
-        }
-        config.reconcile_interval_ms = parsed.reconcile_interval_ms;
+        config.reconcile_interval_ms = requirePositiveIntMs(
+          'reconcile_interval_ms',
+          parsed.reconcile_interval_ms
+        );
       }
       if (parsed.pr_poll_interval_ms !== undefined) {
-        if (!Number.isInteger(parsed.pr_poll_interval_ms) || parsed.pr_poll_interval_ms <= 0) {
-          throw new Error('pr_poll_interval_ms must be a positive integer (milliseconds)');
-        }
-        config.pr_poll_interval_ms = parsed.pr_poll_interval_ms;
+        config.pr_poll_interval_ms = requirePositiveIntMs(
+          'pr_poll_interval_ms',
+          parsed.pr_poll_interval_ms
+        );
       }
       if (parsed.dispatch !== undefined) {
         config.dispatch = validateDispatchConfig(parsed.dispatch);
@@ -273,9 +272,15 @@ export class SchedStore {
     } catch (err) {
       // Deliberate degrade-to-default (unlike state.json, config is re-derivable
       // operator intent and hard-failing every command on a typo would brick
-      // even `sched status`) — but never silently.
+      // even `sched status`) — but never silently. The whole file degrades, not
+      // just the invalid field: name the full blast radius so an operator does
+      // not read "unreadable" and assume only the field named in the message
+      // reverted (#495 — a `dispatch.*` typo used to look like a narrow issue).
       console.error(
-        `⚠ Scheduler config ${this.configPath} is unreadable (${(err as Error).message}) — using default max_slots=${DEFAULT_MAX_SLOTS}`
+        `⚠ Scheduler config ${this.configPath} is unreadable (${(err as Error).message}) — ` +
+          `ALL config (max_slots, stall_timeout_ms, reconcile_interval_ms, pr_poll_interval_ms, ` +
+          `dispatch command/prompt/models/phase-timeouts) reverted to built-in defaults ` +
+          `(max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
       );
       return { max_slots: DEFAULT_MAX_SLOTS };
     }
@@ -302,12 +307,32 @@ export class SchedStore {
 
 const MODEL_TIERS: readonly ModelTier[] = ['mechanical', 'mid', 'strong'];
 
+/** Every phase name a `dispatch.phase_stall_timeout_ms` key may legally name (#495). */
+const STALL_PHASES: readonly string[] = [...PHASES, ...BATCH_PHASES];
+
+/** A positive-integer-milliseconds field, validated once and reused by every `*_ms` config key. */
+function requirePositiveIntMs(label: string, value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new Error(
+      `${label} must be a positive integer (milliseconds); got ${JSON.stringify(value)}`
+    );
+  }
+  return value;
+}
+
+/** A plain (non-array, non-null) object field, validated once and reused by every map-shaped config key. */
+function requirePlainObject(label: string, value: unknown): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(
+      `${label} must be an object; got ${Array.isArray(value) ? 'array' : typeof value}`
+    );
+  }
+  return value as Record<string, unknown>;
+}
+
 /** Strict validation of the optional `dispatch` section (#464). */
 function validateDispatchConfig(raw: unknown): DispatchConfig {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new Error('dispatch must be an object');
-  }
-  const dispatch = raw as Record<string, unknown>;
+  const dispatch = requirePlainObject('dispatch', raw);
   if (dispatch.command !== undefined) {
     if (
       !Array.isArray(dispatch.command) ||
@@ -323,11 +348,12 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   if (dispatch.report_prompt !== undefined && typeof dispatch.report_prompt !== 'string') {
     throw new Error('dispatch.report_prompt must be a string');
   }
+  if (dispatch.fix_prompt !== undefined && typeof dispatch.fix_prompt !== 'string') {
+    throw new Error('dispatch.fix_prompt must be a string');
+  }
   if (dispatch.tier_models !== undefined) {
-    if (dispatch.tier_models === null || typeof dispatch.tier_models !== 'object') {
-      throw new Error('dispatch.tier_models must be an object');
-    }
-    for (const [tier, model] of Object.entries(dispatch.tier_models)) {
+    const tierModels = requirePlainObject('dispatch.tier_models', dispatch.tier_models);
+    for (const [tier, model] of Object.entries(tierModels)) {
       if (!MODEL_TIERS.includes(tier as ModelTier)) {
         throw new Error(`dispatch.tier_models: unknown tier '${tier}'`);
       }
@@ -337,24 +363,24 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
     }
   }
   if (dispatch.phase_stall_timeout_ms !== undefined) {
-    if (
-      dispatch.phase_stall_timeout_ms === null ||
-      typeof dispatch.phase_stall_timeout_ms !== 'object'
-    ) {
-      throw new Error('dispatch.phase_stall_timeout_ms must be an object');
-    }
-    for (const [phase, ms] of Object.entries(dispatch.phase_stall_timeout_ms)) {
-      if (!Number.isInteger(ms) || (ms as number) <= 0) {
+    const phaseTimeouts = requirePlainObject(
+      'dispatch.phase_stall_timeout_ms',
+      dispatch.phase_stall_timeout_ms
+    );
+    for (const [phase, ms] of Object.entries(phaseTimeouts)) {
+      if (!STALL_PHASES.includes(phase)) {
         throw new Error(
-          `dispatch.phase_stall_timeout_ms.${phase} must be a positive integer (milliseconds)`
+          `dispatch.phase_stall_timeout_ms: unknown phase '${phase}' (expected one of: ${STALL_PHASES.join(', ')})`
         );
       }
+      requirePositiveIntMs(`dispatch.phase_stall_timeout_ms.${phase}`, ms);
     }
   }
   const out: DispatchConfig = {};
   if (dispatch.command !== undefined) out.command = dispatch.command as string[];
   if (dispatch.prompt !== undefined) out.prompt = dispatch.prompt as string;
   if (dispatch.report_prompt !== undefined) out.report_prompt = dispatch.report_prompt as string;
+  if (dispatch.fix_prompt !== undefined) out.fix_prompt = dispatch.fix_prompt as string;
   if (dispatch.tier_models !== undefined) {
     out.tier_models = dispatch.tier_models as Partial<Record<ModelTier, string>>;
   }
