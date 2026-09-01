@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerRunstateCommand } from '../../commands/runstate';
-import { buildMilestone, RUNSTATE_MARKER } from '../../runstate';
+import { buildMilestone, FENCE_STATUS, RUNSTATE_MARKER } from '../../runstate';
 import {
   errored,
   execHandles,
@@ -33,6 +33,26 @@ function captureStderrWrites(isTty: boolean): string[] {
     return true;
   }) as unknown as typeof process.stderr.write);
   return writes;
+}
+
+/**
+ * The `gh issue comment` call `post` made, or undefined when it posted nothing.
+ *
+ * Indexed by COMMAND rather than by position: since #504 every `post` first reads the
+ * trail to check for a fence, so the comment is no longer the first gh call and a
+ * positional lookup would silently assert against the read instead.
+ */
+function commentCall(): [string, string[]] | undefined {
+  const call = mockedExec.mock.calls.find(
+    (c) =>
+      c[0] === 'gh' && (c[1] as string[])?.[0] === 'issue' && (c[1] as string[])?.[1] === 'comment'
+  );
+  return call === undefined ? undefined : [call[0] as string, call[1] as string[]];
+}
+
+/** The milestone body `post` handed to `gh issue comment`, or '' when it posted nothing. */
+function postedBody(): string {
+  return commentCall()?.[1][4] ?? '';
 }
 
 /** Build a `gh issue view --json comments` payload. */
@@ -93,11 +113,12 @@ describe('runstate command', () => {
         'warnings=0',
       ]);
 
-      expect(mockedExec).toHaveBeenCalledTimes(1);
-      const [file, args] = mockedExec.mock.calls[0];
+      const call = commentCall();
+      expect(call).toBeDefined();
+      const [file, args] = call as [string, string[]];
       expect(file).toBe('gh');
-      expect(args?.slice(0, 3)).toEqual(['issue', 'comment', '440']);
-      const body = (args as string[])[4];
+      expect(args.slice(0, 3)).toEqual(['issue', 'comment', '440']);
+      const body = args[4];
       expect(body).toContain(RUNSTATE_MARKER);
       expect(body).toContain('phase=gate status=done run=r-440-ab56');
       expect(body).toContain('base_branch=main');
@@ -249,7 +270,7 @@ describe('runstate command', () => {
         'confidence=0.85',
       ]);
 
-      const body = mockedExec.mock.calls[0][1]?.[4] ?? '';
+      const body = postedBody();
       expect(body).toContain('phase=classify status=done run=r-440-ab56');
       expect(body).toContain('mode=slot');
       expect(body).toContain('confidence=0.85');
@@ -274,7 +295,7 @@ describe('runstate command', () => {
         'batch=b-2026-08-29-01',
       ]);
 
-      const body = mockedExec.mock.calls[0][1]?.[4] ?? '';
+      const body = postedBody();
       expect(body).toContain('phase=batch-ship status=awaiting-merge');
       expect(body).toContain('next=batch-ship');
     });
@@ -1419,6 +1440,297 @@ describe('runstate command', () => {
 
       expect(code).toBe(1);
       expect(errored().join(' ')).toContain('could not find it');
+    });
+  });
+});
+
+describe('run fencing — the command half (#504)', () => {
+  const RUN = 'r-504-fc02';
+
+  /** A `superseded` milestone comment body, as `runstate fence` posts it. */
+  function fenceBody(gen: number, takeover: string, phase = 'implement'): string {
+    return milestoneBody(phase, FENCE_STATUS, RUN, '2026-08-30T11:00:00Z', {
+      gen: String(gen),
+      takeover,
+    });
+  }
+
+  /** An implement milestone the zombie of a fenced run would try to post. */
+  const IMPLEMENT_ARGS = [
+    'runstate',
+    'post',
+    '--issue',
+    '504',
+    '--phase',
+    'implement',
+    '--status',
+    'done',
+    '--run',
+    RUN,
+    '--kv',
+    'head=abc1234',
+    '--kv',
+    'files=3',
+    '--kv',
+    'tests_added=1',
+    '--kv',
+    'tests_run=4',
+    '--kv',
+    'ci_parity=pass',
+  ];
+
+  /** gh with a trail read answering `bodies` and every other call succeeding. */
+  function ghWithTrail(bodies: string[]): void {
+    execHandles((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'view') {
+        return commentsPayload(bodies);
+      }
+      return 'https://github.com/o/r/issues/504#issuecomment-9\n';
+    });
+  }
+
+  beforeEach(() => {
+    // This block sits outside the main `runstate command` describe, so it repeats that
+    // block's spies rather than inheriting them.
+    mockedExec.mockReset();
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  describe('post rejects a superseded generation (AC3)', () => {
+    it('refuses a zombie post and comments NOTHING on the issue', async () => {
+      ghWithTrail([fenceBody(1, 'slot-2-r1')]);
+
+      const code = await run(IMPLEMENT_ARGS);
+
+      expect(code).toBe(1);
+      // The whole point: the trail is not extended. A rejection that still posted would
+      // be a warning, not a fence.
+      expect(commentCall()).toBeUndefined();
+      const errors = errored().join('\n');
+      expect(errors).toContain('was SUPERSEDED');
+      expect(errors).toContain('slot-2-r1');
+      expect(errors).toContain('--gen 1');
+    });
+
+    it('accepts the takeover posting at the generation its fence installed', async () => {
+      ghWithTrail([fenceBody(1, 'slot-2-r1')]);
+
+      const code = await run([...IMPLEMENT_ARGS, '--gen', '1']);
+
+      expect(code).toBeUndefined();
+      expect(postedBody()).toContain('gen=1');
+    });
+
+    it('refuses generation 1 once a recovery-of-recovery installed generation 2', async () => {
+      ghWithTrail([fenceBody(1, 'slot-2-r1'), fenceBody(2, 'slot-2-r2')]);
+
+      expect(await run([...IMPLEMENT_ARGS, '--gen', '1'])).toBe(1);
+      expect(commentCall()).toBeUndefined();
+      expect(errored().join('\n')).toContain('slot-2-r2');
+    });
+
+    it('lets a run with no fence on its trail post as it always did', async () => {
+      ghWithTrail([GATE_MILESTONE]);
+
+      expect(await run(IMPLEMENT_ARGS)).toBeUndefined();
+      expect(postedBody()).toContain('phase=implement status=done');
+      // No `--gen` was passed, so nothing about generations reaches the comment.
+      expect(postedBody()).not.toContain('gen=');
+    });
+
+    it('never lets a fence post reject itself', async () => {
+      // Posting generation 2 over an existing generation-1 fence would be refused by the
+      // ordinary rule; the fencing mechanism has to be exempt or it could never escalate.
+      ghWithTrail([fenceBody(1, 'slot-2-r1')]);
+
+      const code = await run([
+        'runstate',
+        'fence',
+        '--issue',
+        '504',
+        '--run',
+        RUN,
+        '--phase',
+        'implement',
+        '--takeover',
+        'slot-2-r2',
+      ]);
+
+      expect(code).toBeUndefined();
+      expect(postedBody()).toContain(`status=${FENCE_STATUS}`);
+      expect(postedBody()).toContain('gen=2');
+    });
+
+    it('posts anyway, with a warning, when the trail cannot be read', async () => {
+      // A milestone is a phase's only durable record: losing one to a transient gh
+      // outage is worse than the race the fence prevents.
+      execHandles((file, args) => {
+        if (file === 'gh' && args[0] === 'issue' && args[1] === 'view') {
+          throw new Error('gh: network unreachable');
+        }
+        return 'https://github.com/o/r/issues/504#issuecomment-9\n';
+      });
+
+      expect(await run(IMPLEMENT_ARGS)).toBeUndefined();
+      expect(postedBody()).toContain('phase=implement status=done');
+      expect(errored().join('\n')).toContain('posting anyway');
+    });
+
+    it('skips the trail read entirely on --dry-run', async () => {
+      execReturns('');
+
+      await run([...IMPLEMENT_ARGS, '--dry-run']);
+
+      expect(mockedExec).not.toHaveBeenCalled();
+      expect(stdoutWrites().join('')).toContain('phase=implement status=done');
+    });
+
+    it('refuses a --gen that is not a generation', async () => {
+      execReturns('');
+
+      expect(await run([...IMPLEMENT_ARGS, '--gen', 'two'])).toBe(1);
+      expect(mockedExec).not.toHaveBeenCalled();
+      expect(errored().join('\n')).toContain('non-negative integer run generation');
+    });
+  });
+
+  describe('fence (AC1)', () => {
+    it('installs generation 1 on a run that was never fenced', async () => {
+      ghWithTrail([GATE_MILESTONE]);
+
+      await run([
+        'runstate',
+        'fence',
+        '--issue',
+        '504',
+        '--run',
+        RUN,
+        '--phase',
+        'implement',
+        '--takeover',
+        'slot-2-r1',
+      ]);
+
+      const body = postedBody();
+      expect(body).toContain(`phase=implement status=${FENCE_STATUS} run=${RUN}`);
+      expect(body).toContain('gen=1');
+      expect(body).toContain('takeover=slot-2-r1');
+      // The fence hands the phase back so the takeover re-enters it.
+      expect(body).toContain('next=implement');
+      // The installed generation is printed, because the caller must give it to the
+      // takeover agent.
+      expect(logged().join('\n')).toContain('gen=1');
+    });
+
+    it('increments off the live trail rather than assuming generation 1', async () => {
+      ghWithTrail([GATE_MILESTONE, fenceBody(1, 'slot-2-r1'), fenceBody(2, 'slot-2-r2')]);
+
+      await run([
+        'runstate',
+        'fence',
+        '--issue',
+        '504',
+        '--run',
+        RUN,
+        '--phase',
+        'review',
+        '--takeover',
+        'slot-2-r3',
+      ]);
+
+      expect(postedBody()).toContain('gen=3');
+    });
+
+    it('reports the generation in --json for a machine caller', async () => {
+      ghWithTrail([GATE_MILESTONE]);
+
+      await run([
+        'runstate',
+        'fence',
+        '--issue',
+        '504',
+        '--run',
+        RUN,
+        '--phase',
+        'implement',
+        '--takeover',
+        'slot-2-r1',
+        '--json',
+      ]);
+
+      const parsed = JSON.parse(logged().join('\n'));
+      expect(parsed.gen).toBe(1);
+      expect(parsed.takeover).toBe('slot-2-r1');
+    });
+
+    it('refuses a takeover label that could be read as a flag', async () => {
+      ghWithTrail([GATE_MILESTONE]);
+
+      expect(
+        await run([
+          'runstate',
+          'fence',
+          '--issue',
+          '504',
+          '--run',
+          RUN,
+          '--phase',
+          'implement',
+          '--takeover',
+          'has spaces',
+        ])
+      ).toBe(1);
+      expect(commentCall()).toBeUndefined();
+    });
+  });
+
+  describe('check (AC2)', () => {
+    it('exits 3 when the run has been superseded', async () => {
+      ghWithTrail([GATE_MILESTONE, fenceBody(1, 'slot-2-r1')]);
+
+      const code = await run(['runstate', 'check', '--issue', '504', '--run', RUN]);
+
+      expect(code).toBe(3);
+      const output = [...logged(), ...errored()].join('\n');
+      expect(output).toContain('fenced=true');
+      expect(output).toContain('slot-2-r1');
+    });
+
+    it('exits 0 for the takeover checking at its own generation', async () => {
+      ghWithTrail([GATE_MILESTONE, fenceBody(1, 'slot-2-r1')]);
+
+      const code = await run(['runstate', 'check', '--issue', '504', '--run', RUN, '--gen', '1']);
+
+      expect(code).toBeUndefined();
+      expect(logged().join('\n')).toContain('fenced=false');
+    });
+
+    it('exits 0 for a run that was never fenced', async () => {
+      ghWithTrail([GATE_MILESTONE]);
+
+      expect(await run(['runstate', 'check', '--issue', '504', '--run', RUN])).toBeUndefined();
+      expect(logged().join('\n')).toContain('fenced=false');
+    });
+
+    it('reports the run as live, with a warning, when the trail cannot be read', async () => {
+      // Symmetrical with `post`: a transient gh outage must not abort a healthy run.
+      execHandles(() => {
+        throw new Error('gh: network unreachable');
+      });
+
+      expect(await run(['runstate', 'check', '--issue', '504', '--run', RUN])).toBeUndefined();
+      expect(errored().join('\n')).toContain('reporting the run as live');
+    });
+
+    it('answers in JSON for a machine caller', async () => {
+      ghWithTrail([GATE_MILESTONE, fenceBody(1, 'slot-2-r1')]);
+
+      const code = await run(['runstate', 'check', '--issue', '504', '--run', RUN, '--json']);
+
+      expect(code).toBe(3);
+      const parsed = JSON.parse(logged().join('\n'));
+      expect(parsed).toMatchObject({ fenced: true, gen: 0, current: 1, takeover: 'slot-2-r1' });
     });
   });
 });

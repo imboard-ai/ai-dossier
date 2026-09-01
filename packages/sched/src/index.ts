@@ -35,6 +35,8 @@ export {
   resolveDispatch,
   type SpawnDeps,
   stallTimeoutForPhase,
+  stallTimeoutForSlot,
+  takeoverInstruction,
   unitLogName,
 } from './dispatch';
 export { type EngineDeps, runLoop, type TickResult, tick } from './engine';
@@ -47,6 +49,7 @@ export {
   labelBlockReason,
   parseManifest,
 } from './enqueue';
+export { createExecRunFencer, parseFenceGeneration, type RunFencer } from './fence';
 export {
   createExecGroundTruth,
   type GroundTruth,

@@ -11,6 +11,7 @@ import {
   type GroundTruthMilestone,
   Journal,
   type PrTruth,
+  type RunFencer,
   type SchedConfig,
   SchedStore,
   type SetupInfo,
@@ -31,6 +32,7 @@ function harness(
     stallTimeoutMs?: number;
     phaseStallTimeoutMs?: Record<string, number>;
     prPollIntervalMs?: number;
+    fenceTakeoverTimeoutMs?: number;
   },
   existingDir?: string
 ) {
@@ -82,6 +84,29 @@ function harness(
     return teardownScript(file, args);
   };
 
+  /**
+   * Recording fake fencer (#504): monotonic per-run generations, and a switch to make
+   * the fence fail so the degraded redispatch path is exercised. `spawnsBefore` is what
+   * pins the ORDER the ladder must keep — the fence is written before the takeover
+   * exists, so it survives the takeover dying too.
+   */
+  const fenceCalls: Array<{
+    issue: number;
+    run: string;
+    phase: string;
+    takeover: string;
+    spawnsBefore: number;
+  }> = [];
+  const fenceGens = new Map<string, number>();
+  let fenceFails = false;
+  const fencer: RunFencer = (issue, run, phase, takeover) => {
+    fenceCalls.push({ issue, run, phase, takeover, spawnsBefore: spawnCalls.length });
+    if (fenceFails) return null;
+    const gen = (fenceGens.get(run) ?? 0) + 1;
+    fenceGens.set(run, gen);
+    return gen;
+  };
+
   let clock = new Date('2026-08-29T12:00:00Z');
   const deps: EngineDeps = {
     store,
@@ -91,14 +116,24 @@ function harness(
     now: () => clock,
     repoDir: dir,
     teardownExec,
+    fencer,
   };
 
   const config: SchedConfig = {
     max_slots: opts?.maxSlots ?? 3,
     ...(opts?.stallTimeoutMs !== undefined ? { stall_timeout_ms: opts.stallTimeoutMs } : {}),
     ...(opts?.prPollIntervalMs !== undefined ? { pr_poll_interval_ms: opts.prPollIntervalMs } : {}),
-    ...(opts?.phaseStallTimeoutMs !== undefined
-      ? { dispatch: { phase_stall_timeout_ms: opts.phaseStallTimeoutMs } }
+    ...(opts?.phaseStallTimeoutMs !== undefined || opts?.fenceTakeoverTimeoutMs !== undefined
+      ? {
+          dispatch: {
+            ...(opts?.phaseStallTimeoutMs !== undefined
+              ? { phase_stall_timeout_ms: opts.phaseStallTimeoutMs }
+              : {}),
+            ...(opts?.fenceTakeoverTimeoutMs !== undefined
+              ? { fence_takeover_timeout_ms: opts.fenceTakeoverTimeoutMs }
+              : {}),
+          },
+        }
       : {}),
   };
 
@@ -118,6 +153,14 @@ function harness(
     setupInfos,
     setupUnreachable,
     teardownCalls,
+    fenceCalls,
+    setFenceFails: (fails: boolean) => {
+      fenceFails = fails;
+    },
+    /** Drop the fencer entirely — an engine built before #504, or misconfigured. */
+    removeFencer: () => {
+      deps.fencer = undefined;
+    },
     setTeardownScript: (script: (file: string, args: string[]) => string | null) => {
       teardownScript = script;
     },
@@ -1669,5 +1712,174 @@ describe('#468 AC6: restart mid-watch', () => {
     h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
     h.setTeardownScript(removingTeardown(h.wt('wt-101')));
     expect(h.tick().mergeAccepted).toEqual(['issue:101']);
+  });
+});
+
+describe('zombie-run fencing on redispatch (#504)', () => {
+  /**
+   * A stalling unit: dispatched, one milestone posted, then silence. The stall timeout
+   * is an hour and the fence window fifteen minutes, so the two are trivially
+   * distinguishable by how far the clock is advanced.
+   */
+  function stalling(opts: { fenceTakeoverTimeoutMs?: number } = {}) {
+    const h = harness({ stallTimeoutMs: 60 * 60 * 1000, ...opts });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 504, mode: 'full', tier: 'mechanical' }]);
+    h.tick(); // dispatch
+    h.setMilestone(504, 'gate', 'done', undefined, { next: 'setup' });
+    return h;
+  }
+
+  const HOUR = 60 * 60 * 1000;
+
+  it('writes the takeover record BEFORE the replacement agent is spawned (AC1)', () => {
+    const h = stalling();
+    h.advance(HOUR + 1000);
+
+    const result = h.tick();
+
+    expect(result.redispatched).toEqual(['issue:504']);
+    expect(h.fenceCalls).toHaveLength(1);
+    const fence = h.fenceCalls[0];
+    expect(fence.issue).toBe(504);
+    // The run id and phase come off the polled trail, not from local bookkeeping.
+    expect(fence.run).toBe('r-504-x');
+    expect(fence.phase).toBe('gate');
+    // The ordering is the point: `killUnitAgent` only reaches a pid this process can
+    // signal, so the durable record has to exist before the takeover does.
+    expect(fence.spawnsBefore).toBe(1);
+    expect(h.spawnCalls).toHaveLength(2);
+    expect(h.events().some((e) => e.event === 'fence-written')).toBe(true);
+  });
+
+  it('records the installed generation on the slot and hands it to the takeover', () => {
+    const h = stalling();
+    h.advance(HOUR + 1000);
+    h.tick();
+
+    const slot = h.state().slots.find((s) => s.unit === 'issue:504');
+    expect(slot?.gen).toBe(1);
+    expect(slot?.fenced_at).toBe(h.clock().toISOString());
+
+    // The agent has to learn its generation, or its own posts are refused by the CLI.
+    const takeoverPrompt = h.spawnCalls[1].prompt;
+    expect(takeoverPrompt).toContain('TAKEOVER');
+    expect(takeoverPrompt).toContain('--gen 1');
+    expect(takeoverPrompt).toContain('runstate check');
+    // A first dispatch is unchanged.
+    expect(h.spawnCalls[0].prompt).not.toContain('TAKEOVER');
+  });
+
+  it('redispatches unfenced, loudly, when the fence cannot be written', () => {
+    const h = stalling();
+    h.setFenceFails(true);
+    h.advance(HOUR + 1000);
+
+    const result = h.tick();
+
+    // Degraded, never blocked: refusing to redispatch would strand the unit forever.
+    expect(result.redispatched).toEqual(['issue:504']);
+    expect(h.spawnCalls).toHaveLength(2);
+    expect(h.events().some((e) => e.event === 'fence-failed')).toBe(true);
+    const slot = h.state().slots.find((s) => s.unit === 'issue:504');
+    expect(slot?.gen).toBe(0);
+    // No fence landed, so the short takeover watch never arms — one failure must not
+    // compound into a shortened allowance.
+    expect(slot?.fenced_at).toBeNull();
+    expect(h.spawnCalls[1].prompt).not.toContain('TAKEOVER');
+  });
+
+  it('redispatches unfenced when the trail carries no run id to fence', () => {
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 504, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    // No milestone at all: an agent that has posted nothing has also written nothing
+    // to race over.
+    h.advance(HOUR + 1000);
+
+    expect(h.tick().redispatched).toEqual(['issue:504']);
+    expect(h.fenceCalls).toHaveLength(0);
+    expect(
+      h.events().some((e) => e.event === 'fence-failed' && e.detail?.includes('no run id'))
+    ).toBe(true);
+  });
+
+  it('re-enters the ladder on the short fence window when a takeover posts nothing (AC4)', () => {
+    const h = stalling({ fenceTakeoverTimeoutMs: 15 * 60 * 1000 });
+    h.advance(HOUR + 1000);
+    h.tick(); // first stall → fence gen 1
+
+    // Twenty minutes: past the 15-minute fence window, nowhere near the 1-hour phase
+    // allowance. Without the short window this takeover's death goes unnoticed for
+    // another 40 minutes.
+    h.advance(20 * 60 * 1000);
+    const result = h.tick();
+
+    expect(result.redispatched).toEqual(['issue:504']);
+    // Recovery-of-recovery: the second fence supersedes the first takeover in turn.
+    expect(h.fenceCalls).toHaveLength(2);
+    expect(h.fenceCalls[1].takeover).not.toBe(h.fenceCalls[0].takeover);
+    const slot = h.state().slots.find((s) => s.unit === 'issue:504');
+    expect(slot?.gen).toBe(2);
+    expect(slot?.recoveries).toBe(2);
+    expect(h.spawnCalls[2].prompt).toContain('--gen 2');
+  });
+
+  it('gives a takeover that IS working the phase allowance again', () => {
+    const h = stalling({ fenceTakeoverTimeoutMs: 15 * 60 * 1000 });
+    h.advance(HOUR + 1000);
+    h.tick(); // fence gen 1
+
+    // The takeover posts: it is demonstrably alive, so the short watch disarms.
+    h.advance(10 * 60 * 1000);
+    h.setMilestone(504, 'setup', 'done', undefined, { next: 'plan' });
+    h.tick();
+    expect(h.state().slots.find((s) => s.unit === 'issue:504')?.fenced_at).toBeNull();
+
+    // Twenty more minutes would have stalled it under the fence window; under the
+    // phase allowance it is still healthy.
+    h.advance(20 * 60 * 1000);
+    expect(h.tick().redispatched).toEqual([]);
+    expect(h.fenceCalls).toHaveLength(1);
+  });
+
+  it('fences an unverified exit too, not only a stall', () => {
+    const h = stalling();
+    // The agent exits without ever reaching `report done` — an unverified exit.
+    h.alive.clear();
+
+    const result = h.tick();
+
+    expect(result.redispatched).toEqual(['issue:504']);
+    expect(h.fenceCalls).toHaveLength(1);
+    expect(h.fenceCalls[0].run).toBe('r-504-x');
+  });
+
+  it('never fences a unit that fails at the escalation cap', () => {
+    const h = stalling();
+    h.advance(HOUR + 1000);
+    h.tick(); // recovery 1 (mechanical → mid)
+    h.advance(HOUR + 1000);
+    h.tick(); // recovery 2 (mid → strong)
+    expect(h.fenceCalls).toHaveLength(2);
+
+    h.advance(HOUR + 1000);
+    const result = h.tick(); // cap reached → failed, no takeover to announce
+
+    expect(result.failed).toEqual(['issue:504']);
+    expect(h.fenceCalls).toHaveLength(2);
+  });
+
+  it('runs the pre-#504 redispatch path when no fencer is configured', () => {
+    const h = stalling();
+    h.removeFencer();
+    h.advance(HOUR + 1000);
+
+    expect(h.tick().redispatched).toEqual(['issue:504']);
+    expect(h.fenceCalls).toHaveLength(0);
+    expect(
+      h.events().some((e) => e.event === 'fence-failed' && e.detail?.includes('no fencer'))
+    ).toBe(true);
   });
 });

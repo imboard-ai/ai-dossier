@@ -18,6 +18,7 @@ import {
   CorruptStateError,
   createExecFn,
   createExecGroundTruth,
+  createExecRunFencer,
   createSpawnDeps,
   DEFAULT_RECONCILE_INTERVAL_MS,
   defaultExec,
@@ -25,6 +26,7 @@ import {
   EnqueueError,
   type EnqueueInput,
   enqueueEntries,
+  groundTruthExec,
   IllegalTransitionError,
   Journal,
   LockTimeoutError,
@@ -612,6 +614,11 @@ function registerStartSubcommand(cmd: Command): void {
               `⚠ sched teardown: '${file} ${args.join(' ')}' failed: ${err.message}\n`
             ),
         }),
+        // #504: the ladder fences a superseded run before respawning its takeover.
+        // Shares the ground-truth exec — same `ai-dossier` binary, same timeout, same
+        // never-throws contract — so a fence failure degrades the redispatch instead of
+        // aborting the tick.
+        fencer: createExecRunFencer(groundTruthExec, { repoDir: process.cwd() }),
       };
 
       const describe = (result: TickResult): string => {

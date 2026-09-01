@@ -21,6 +21,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sanitizeSlug } from './project';
 import {
+  DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
   DEFAULT_PHASE_STALL_TIMEOUT_MS,
   DEFAULT_PR_POLL_INTERVAL_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
@@ -160,6 +161,12 @@ export interface ResolvedDispatch {
   reconcileIntervalMs: number;
   /** Parked-PR poll interval (#468 AC1, default 150 s — "every 2–3 min"). */
   prPollIntervalMs: number;
+  /**
+   * Stall allowance for a takeover that has posted NOTHING since it was fenced in
+   * (#504 AC4). Selected over the phase timeout only while `SlotEntry.fenced_at` is
+   * set — see `stallTimeoutForSlot`.
+   */
+  fenceTakeoverTimeoutMs: number;
 }
 
 /** Resolve engine dispatch settings from the (possibly sparse) config. */
@@ -180,6 +187,7 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
     phaseStallTimeoutMs: resolvePhaseStallTimeouts(config),
     reconcileIntervalMs: config.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS,
     prPollIntervalMs: config.pr_poll_interval_ms ?? DEFAULT_PR_POLL_INTERVAL_MS,
+    fenceTakeoverTimeoutMs: dispatch.fence_takeover_timeout_ms ?? DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
   };
 }
 
@@ -227,6 +235,23 @@ export function stallTimeoutForPhase(dispatch: ResolvedDispatch, phase: string |
 }
 
 /**
+ * The stall allowance for a slot: the phase timeout, shortened to
+ * `fenceTakeoverTimeoutMs` while a takeover has posted nothing at all (#504 AC4).
+ *
+ * `Math.min`, so the short window can only ever bring recovery FORWARD. A phase whose
+ * own allowance is already shorter than the fence window keeps it — a takeover should
+ * never get MORE time than a first dispatch would have had for the same phase.
+ */
+export function stallTimeoutForSlot(
+  dispatch: ResolvedDispatch,
+  phase: string | null,
+  fencedAt: string | null
+): number {
+  const phaseMs = stallTimeoutForPhase(dispatch, phase);
+  return fencedAt === null ? phaseMs : Math.min(phaseMs, dispatch.fenceTakeoverTimeoutMs);
+}
+
+/**
  * Build the concrete agent argv for one dispatch: substitute `{issue}` and
  * `{model}`. When the tier's model is null, the `{model}` item AND its
  * immediately-preceding flag (e.g. `--model`) drop together — a command never
@@ -255,9 +280,35 @@ export function buildAgentCommand(
   return argv;
 }
 
-/** Build the child's stdin prompt for one dispatch. */
-export function buildPrompt(template: string, issue: number): string {
-  return template.replaceAll('{issue}', String(issue));
+/**
+ * What a takeover agent is told about the run it inherited (#504).
+ *
+ * Appended only for `gen > 0`, so an ordinary first dispatch reads exactly as it does
+ * today. Two instructions, both load-bearing: pass `--gen` so the agent's own posts are
+ * accepted (the CLI refuses a lower generation), and CHECK before the expensive phases so
+ * it discovers its own supersession early if it is itself replaced later.
+ */
+export function takeoverInstruction(issue: number, gen: number): string {
+  return (
+    `TAKEOVER — you are generation ${gen} of the run on issue #${issue}: an earlier agent was ` +
+    'superseded and fenced out of the runstate trail. Pass `--gen ' +
+    `${gen}\` on EVERY \`ai-dossier runstate post\` for this issue, or the post is refused. ` +
+    `Before implement, before review, and before ship, run \`ai-dossier runstate check --issue ${issue} ` +
+    `--run <run_id> --gen ${gen}\`; a non-zero exit means YOU have been superseded in turn — stop ` +
+    'immediately, do not push, and do not open a PR. Resume the existing work rather than ' +
+    'restarting it: the trail and the pushed branch are the durable state.'
+  );
+}
+
+/**
+ * Build the child's stdin prompt for one dispatch.
+ *
+ * `gen` is the runstate generation the agent owns; 0 (the default) is a first dispatch
+ * and produces today's prompt unchanged.
+ */
+export function buildPrompt(template: string, issue: number, gen = 0): string {
+  const rendered = template.replaceAll('{issue}', String(issue)).replaceAll('{gen}', String(gen));
+  return gen > 0 ? `${rendered}\n\n${takeoverInstruction(issue, gen)}` : rendered;
 }
 
 /** Build the report agent's stdin prompt (#468): `{issue}`/`{pr}`/`{cleanup}` substituted. */

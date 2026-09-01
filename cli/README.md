@@ -360,6 +360,11 @@ ai-dossier runstate last --issue 440 --json
 
 # Ask where a run should resume from
 ai-dossier runstate verify --issue 440
+
+# Supersede a stalled run before redispatching it, then work as the takeover
+ai-dossier runstate fence --issue 440 --run r-440-ab56 \
+  --phase implement --takeover slot-2-r1        # -> gen=1
+ai-dossier runstate check --issue 440 --run r-440-ab56 --gen 1   # exit 3 = superseded
 ```
 
 ### Subcommands
@@ -369,10 +374,12 @@ ai-dossier runstate verify --issue 440
 | `post` | Validates and posts one milestone comment via `gh issue comment` | yes |
 | `last` | Prints the most recent milestone on the issue, parsed | no |
 | `verify` | Runs the gate's resume verification and prints `resume_from` + `resume_context` | no |
+| `fence` | Supersedes a run: posts the takeover record and prints the generation it installed (#504) | yes |
+| `check` | Reports whether a run generation has been superseded; exits `3` when it has (#504) | no |
 | `mint` | Prints a fresh run id (`r-<issue>-<hex>`) | no |
 | `stats` | Reports per-phase durations derived from the trail's `at=` stamps; aggregates across a `--issues` selection | no |
 
-`last`, `verify`, and `stats` are strictly read-only — they only run `gh issue view`,
+`last`, `verify`, `check`, and `stats` are strictly read-only — they only run `gh issue view`,
 `gh pr view`, `git ls-remote`/`rev-parse`, and `stat`, so they work fine without push
 access to the repository.
 
@@ -412,6 +419,7 @@ prints `No runstate milestones on issue #440.` (or `null` under `--json`) and ex
 | `--run <id>` | Run id (`r-<issue>-<hex>`) — mint one with `runstate mint`; full-cycle runs mint it at the gate phase (required) |
 | `--kv <key=value...>` | Phase-specific key, repeatable (and variadic: `--kv a=1 b=2` works too) |
 | `--next <phase>` | Override the computed `next=` line — a phase name or `done` |
+| `--gen <n>` | Run generation this agent owns (default 0). A post below the trail's fenced generation is refused — see [Run fencing](#run-fencing-504) |
 | `--repo <owner/name>` | Target repository (defaults to the current one) |
 | `--dry-run` | Print the comment body instead of posting it |
 | `--json` | Machine-readable output |
@@ -495,6 +503,58 @@ batch-report → done.
 > CLI rejects them outright on `post` (`Unknown phase 'classify' — expected one of: …`),
 > but its `verify` derives a bogus `resume_from` from a *blocked* classify/batch
 > milestone — don't point an old CLI at batch anchor issues.
+
+### Run fencing (#504)
+
+The stall-recovery ladder redispatches the *same* run, so a takeover inherits the run id
+and its trail. Nothing used to tell the run it replaced that it had been replaced — and a
+scheduler can only kill a process it can see. In the #472 race the original agent was
+alive the whole time (throttled, cwd outside the worktree); both runs implemented the
+issue in full and both kept posting to one trail.
+
+A **generation** fences the trail. `runstate fence` posts a `status=superseded` milestone —
+valid on every phase, carrying `gen=<n>` and `takeover=<label>` — and prints the generation
+it installed:
+
+```bash
+$ ai-dossier runstate fence --issue 440 --run r-440-ab56 --phase implement --takeover slot-2-r1
+✅ fenced r-440-ab56 gen=1 takeover=slot-2-r1 → https://github.com/o/r/issues/440#issuecomment-9
+```
+
+From then on `post` refuses anything from a lower generation, **before** writing to the
+issue:
+
+```bash
+$ ai-dossier runstate post --issue 440 --phase implement --status done --run r-440-ab56 …
+❌ Run r-440-ab56 was SUPERSEDED — refusing to post an implement/done milestone from generation 0.
+   It was fenced at generation 1 (takeover 'slot-2-r1', fenced at implement on 2026-08-30T11:00:00Z).
+   …
+   Fix: stop working on this issue and exit. … If you ARE the takeover, pass --gen 1.
+```
+
+Generation 0 is the default, which is what makes this work on a fleet that has not been
+upgraded: an agent that knows nothing about fencing posts at 0 and is locked out the
+moment generation 1 exists. `>` not `>=` — the takeover posting at exactly its own
+generation is live, and a recovery-of-recovery at generation 2 fences the first takeover
+in turn.
+
+`runstate check` is the same question without a write, for a workflow to run before
+implement, review, and ship:
+
+```bash
+$ ai-dossier runstate check --issue 440 --run r-440-ab56 --gen 1
+fenced=false
+gen=1
+current_gen=1
+```
+
+It exits **3** when the caller has been superseded (distinct from `1`, so a script can
+tell "you were replaced" from "you called this wrong"), and `verify` reports the owning
+generation as `generation=`.
+
+Both `post` and `check` **fail open** if the trail cannot be read: a milestone is a
+phase's only durable record, and losing one to a transient `gh` outage is a worse failure
+than the race this prevents. The degradation is warned about on stderr, never silent.
 
 ### mode=slot and batch= on plan/implement/review
 

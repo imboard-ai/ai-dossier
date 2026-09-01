@@ -64,9 +64,10 @@ import {
   type SpawnDeps,
   STOP_POLL_MAX_MS,
   STOP_POLL_MIN_MS,
-  stallTimeoutForPhase,
+  stallTimeoutForSlot,
   unitLogName,
 } from './dispatch';
+import type { RunFencer } from './fence';
 import {
   type GroundTruth,
   type GroundTruthMilestone,
@@ -105,6 +106,12 @@ export interface EngineDeps {
   repoDir: string;
   /** Exec for teardown scripts (#468); injectable so tests never touch git/npx. */
   teardownExec: ExecFn;
+  /**
+   * Writes the takeover record before a redispatch respawns (#504). Optional: an
+   * engine constructed without one redispatches exactly as it did before fencing
+   * existed, journaling `fence-failed` so the gap is visible rather than silent.
+   */
+  fencer?: RunFencer;
 }
 
 /** What one tick did — surfaced by `sched start`. */
@@ -445,8 +452,12 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
   return spawnAndRecord(ctx, state, unit, slot, {
     tier: entry.tier,
     cmd: buildAgentCommand(ctx.dispatch.command, entry.tier, issue, ctx.dispatch.tierModels),
-    prompt: buildPrompt(ctx.dispatch.prompt, issue),
+    // The slot's generation reaches the agent here (#504): a takeover is told which
+    // generation it owns, so its own `runstate post --gen` is accepted while the run it
+    // replaced is refused. A first dispatch is generation 0 and reads as it always did.
+    prompt: buildPrompt(ctx.dispatch.prompt, issue, slot.gen),
     phase: 'gate',
+    ...(slot.gen > 0 ? { journalExtra: { detail: `takeover gen=${slot.gen}` } } : {}),
   });
 }
 
@@ -574,6 +585,61 @@ function blockTransitiveDependents(
 }
 
 /**
+ * Post the takeover record for a unit about to be redispatched (#504 AC1), returning the
+ * generation the fence installed — or null when no fence could be written.
+ *
+ * Two ways to get null, both journaled as `fence-failed` and both DEGRADED rather than
+ * fatal:
+ *
+ * - **No run id.** The run id lives on the trail, so a unit whose milestones are
+ *   unreadable (or that has posted none yet) has nothing to fence. An agent with no
+ *   milestone has also written nothing to race over.
+ * - **The post failed.** gh auth, a missing binary, a network wall.
+ *
+ * The redispatch proceeds either way. Refusing to redispatch would strand a stalled unit
+ * forever, which is a worse and more common failure than the race a fence prevents; the
+ * journal line is what makes the unprotected redispatch visible afterwards.
+ */
+function writeFence(
+  ctx: TickCtx,
+  unit: string,
+  issue: number,
+  slot: SlotEntry,
+  truth: UnitTruth
+): number | null {
+  const run = truth.milestone?.run ?? '';
+  if (ctx.deps.fencer === undefined || run === '') {
+    journal(ctx, 'fence-failed', unit, {
+      slot: slot.id,
+      detail:
+        ctx.deps.fencer === undefined
+          ? 'no fencer configured — redispatching unfenced'
+          : 'no run id on the trail to fence — redispatching unfenced',
+    });
+    return null;
+  }
+
+  // The phase the superseded agent was IN, as its own last milestone recorded it — the
+  // fence names where the work was taken over, not where it will resume.
+  const phase = truth.milestone?.phase ?? slot.phase ?? 'gate';
+  const takeover = `slot-${slot.id}-r${slot.recoveries + 1}`;
+  const gen = ctx.deps.fencer(issue, run, phase, takeover);
+  if (gen === null) {
+    journal(ctx, 'fence-failed', unit, {
+      slot: slot.id,
+      detail: `runstate fence did not report a generation for ${run} — redispatching unfenced`,
+    });
+    return null;
+  }
+
+  journal(ctx, 'fence-written', unit, {
+    slot: slot.id,
+    detail: `${run} gen=${gen} takeover=${takeover}`,
+  });
+  return gen;
+}
+
+/**
  * The recovery decision for a unit that must be redispatched one tier
  * stronger (stall or unverified exit, AC4). At the escalation cap or the
  * strongest tier, the unit fails instead — the designed signal that a human,
@@ -587,6 +653,7 @@ function enterRecovery(
   unit: string,
   causeEvent: 'stalled' | 'verify-incomplete',
   cause: string,
+  truth: UnitTruth,
   evidence: Record<string, unknown> = {}
 ): SchedState {
   const issue = issueOfUnit(unit);
@@ -611,11 +678,25 @@ function enterRecovery(
     return failUnit(ctx, state, unit, reason, { merged: report });
   }
 
+  // Fence BEFORE the respawn (#504 AC1/AC4): `killUnitAgent` above only reaches a pid
+  // this process can see and signal, and #472 proved that is not the same as a dead
+  // agent. The takeover record is what stops the survivor from writing to the trail —
+  // and it is written first precisely so it survives the takeover dying too.
+  const fenced = writeFence(ctx, unit, issue, slot, truth);
+
   let next = transitionSlot(
     state,
     slot.id,
     'recovering',
-    { pid: null, recoveries: slot.recoveries + 1 },
+    {
+      pid: null,
+      recoveries: slot.recoveries + 1,
+      gen: fenced ?? slot.gen,
+      // Only a fence that actually landed starts the short takeover watch: an
+      // unfenced redispatch is already degraded, and cutting its allowance down
+      // would compound one failure with another.
+      fenced_at: fenced === null ? null : now.toISOString(),
+    },
     now
   );
   if (!report) {
@@ -744,7 +825,17 @@ function applyProgressSignals(
   }
 
   if (progressed) {
-    next = patchSlot(next, slot.id, { last_progress_at: now.toISOString() }, now);
+    // The takeover is demonstrably alive, so the short fence watch has done its job and
+    // the phase's ordinary stall allowance takes over from here (#504 AC4).
+    next = patchSlot(
+      next,
+      slot.id,
+      {
+        last_progress_at: now.toISOString(),
+        ...(slot.fenced_at !== null ? { fenced_at: null } : {}),
+      },
+      now
+    );
     journal(ctx, 'progress', unit, {
       slot: slot.id,
       detail: truth.milestone
@@ -836,11 +927,16 @@ function reconcileRunning(
   // 'report' for a report agent) for the brief window before any milestone
   // has posted.
   const activePhase = truth.milestone?.keys.next ?? slot.phase;
-  const stallTimeoutMs = stallTimeoutForPhase(ctx.dispatch, activePhase);
+  // A takeover that has posted NOTHING since it was fenced in gets the short fence
+  // window instead of the phase's full allowance (#504 AC4) — a takeover can die on its
+  // own first breath, and waiting out an `implement`-length timeout to notice wastes the
+  // time the redispatch was meant to save.
+  const stallTimeoutMs = stallTimeoutForSlot(ctx.dispatch, activePhase, slot.fenced_at);
   if (msSinceLastProgress(slot, now) >= stallTimeoutMs) {
-    return enterRecovery(ctx, progress.state, unit, 'stalled', 'stall', {
+    return enterRecovery(ctx, progress.state, unit, 'stalled', 'stall', truth, {
       active_phase: activePhase,
       stall_timeout_ms: stallTimeoutMs,
+      ...(slot.fenced_at !== null ? { fenced_at: slot.fenced_at } : {}),
     });
   }
   return progress.state;
@@ -961,7 +1057,7 @@ function completeUnitOrRecover(
 
   const suspect = msSinceLastProgress(slot, now) < SUSPECT_DISPATCH_WINDOW_MS;
   next = recordDispatchOutcome(ctx, next, unit, slot, suspect);
-  return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', {
+  return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', truth, {
     observed: truth.milestone
       ? `milestone ${truth.milestone.phase}/${truth.milestone.status}; closed=${truth.closed}`
       : `no milestone; closed=${truth.closed}`,

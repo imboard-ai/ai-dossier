@@ -52,8 +52,19 @@ export const ALL_PHASES: readonly KnownPhase[] = [CLASSIFY_PHASE, ...PHASES, ...
 /** The one mode value that marks a slot-cycle trail; shared by the grammar and resume. */
 export const SLOT_MODE = 'slot';
 
+/**
+ * The fence status (#504) — the takeover record the stall-recovery ladder writes BEFORE
+ * the replacement agent starts.
+ *
+ * A `superseded` milestone says "generation N now owns this run"; every earlier
+ * generation is fenced out of the trail. It is universally valid — a takeover can happen
+ * at any phase — so it is deliberately absent from every {@link PhaseSpec.statuses} and
+ * allowed by {@link statusAllowed} instead of being listed thirteen times.
+ */
+export const FENCE_STATUS = 'superseded' as const;
+
 /** Milestone statuses. */
-export const STATUSES = ['done', 'partial', 'blocked', 'awaiting-merge'] as const;
+export const STATUSES = ['done', 'partial', 'blocked', 'awaiting-merge', FENCE_STATUS] as const;
 export type Status = (typeof STATUSES)[number];
 
 /**
@@ -78,6 +89,16 @@ export interface PhaseSpec {
 
 /** Keys required whenever a phase reports `status=blocked`. */
 export const BLOCKED_REQUIRED = ['reason'] as const;
+
+/**
+ * Keys required on a {@link FENCE_STATUS} milestone, for every phase.
+ *
+ * `gen` is what actually fences — the escalation ladder deliberately REUSES the run id
+ * across a redispatch (gate-issue Step 1.5 reads the trail's `run=` back), so a run id
+ * alone cannot tell the takeover apart from the run it replaced. `takeover` names who
+ * took over, so a fenced agent's abort message can say what superseded it.
+ */
+export const FENCE_REQUIRED = ['gen', 'takeover'] as const;
 
 /**
  * Caps that keep a milestone postable. GitHub rejects an issue comment over 65536
@@ -246,6 +267,13 @@ const DEPS_RE = /^(?:none|\d+(?:,\d+)*)$/;
 /** `batch`: a batch id slug — no spaces, slashes, or `#`. */
 const BATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/**
+ * `takeover`: a label naming what took the run over (#504) — a run id, a slot id, an
+ * agent name. Loose on purpose (the ladder has no single naming scheme) but still a
+ * single flag-safe token, since it is read back out of a comment and shown to an agent.
+ */
+const TAKEOVER_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
+
 /** One rule per enum-valued key; the message lists the closed set verbatim. */
 function enumRule(values: readonly string[]): KeyValueRule {
   return {
@@ -282,6 +310,15 @@ export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
     test: (v) => BATCH_ID_RE.test(v),
     expects: "expected a batch id slug (letters, digits, '.', '_', '-'), e.g. b-2026-08-29-01",
   },
+  gen: {
+    test: (v) => NON_NEGATIVE_INT_RE.test(v),
+    expects:
+      'expected a non-negative integer run generation, e.g. 1 (mint one with: runstate fence)',
+  },
+  takeover: {
+    test: (v) => TAKEOVER_RE.test(v),
+    expects: 'expected a single token naming what took the run over, e.g. slot-2 or r-504-fc02',
+  },
 };
 
 /** The batch line's successor order, for `defaultNext`. */
@@ -310,6 +347,10 @@ const BATCH_NEXT: Record<BatchPhase, KnownPhase | 'done'> = {
  */
 export function defaultNext(phase: KnownPhase, status: Status): KnownPhase | 'done' {
   if (status === 'blocked') return 'done';
+  // A fence hands the SAME phase to the takeover, so the trail still points at work to
+  // be done — that is what makes a fence whose takeover died resumable rather than
+  // terminal (#504). `classify` is exempt only because it is not a `next=` value.
+  if (status === FENCE_STATUS) return phase === CLASSIFY_PHASE ? 'done' : phase;
   if (status === 'awaiting-merge' || status === 'partial') return phase;
   if (phase === CLASSIFY_PHASE) return 'done';
   if (isBatchPhase(phase)) return BATCH_NEXT[phase];
@@ -317,8 +358,14 @@ export function defaultNext(phase: KnownPhase, status: Status): KnownPhase | 'do
   return idx === PHASES.length - 1 ? 'done' : PHASES[idx + 1];
 }
 
+/** Whether `phase` may report `status` — the fence status is valid on every phase (#504). */
+export function statusAllowed(phase: KnownPhase, status: Status): boolean {
+  return status === FENCE_STATUS || ALL_PHASE_SPECS[phase].statuses.includes(status);
+}
+
 /** The keys `phase` must carry when reporting `status`. */
 export function requiredKeys(phase: KnownPhase, status: Status): readonly string[] {
+  if (status === FENCE_STATUS) return FENCE_REQUIRED;
   const spec = ALL_PHASE_SPECS[phase];
   const base = spec.required[status] ?? [];
   return status === 'blocked' ? [...base, ...BLOCKED_REQUIRED] : base;
@@ -391,13 +438,11 @@ export function validateMilestone(input: MilestoneInput): string[] {
 
   if (!isStatus(status)) {
     errors.push(`Unknown status '${status}' — expected one of: ${STATUSES.join(', ')}`);
-  } else if (isKnownPhase(phase)) {
-    const allowed = ALL_PHASE_SPECS[phase].statuses;
-    if (!allowed.includes(status)) {
-      errors.push(
-        `Status '${status}' is not valid for phase '${phase}' — expected one of: ${allowed.join(', ')}`
-      );
-    }
+  } else if (isKnownPhase(phase) && !statusAllowed(phase, status)) {
+    const allowed = [...ALL_PHASE_SPECS[phase].statuses, FENCE_STATUS];
+    errors.push(
+      `Status '${status}' is not valid for phase '${phase}' — expected one of: ${allowed.join(', ')}`
+    );
   }
 
   if (!RUN_ID_RE.test(run)) {
@@ -428,7 +473,7 @@ export function validateMilestone(input: MilestoneInput): string[] {
     if (problem) errors.push(problem);
   }
 
-  if (isKnownPhase(phase) && isStatus(status) && ALL_PHASE_SPECS[phase].statuses.includes(status)) {
+  if (isKnownPhase(phase) && isStatus(status) && statusAllowed(phase, status)) {
     const missing = requiredKeys(phase, status).filter((k) => !seen.has(k));
     if (missing.length > 0) {
       errors.push(
@@ -541,6 +586,86 @@ export function mintRunId(issue: number | string): string {
   return `r-${issue}-${randomBytes(RUN_ID_RANDOM_BYTES).toString('hex')}`;
 }
 
+// --- Fencing (#504) ---
+
+/**
+ * The generation of a run that has never been fenced, and the generation a caller that
+ * knows nothing about fencing implicitly posts at.
+ *
+ * Zero is deliberately the default rather than an error: an agent running an older
+ * dossier — or the zombie this whole mechanism exists to stop — passes no generation at
+ * all, so it lands at 0 and is fenced out the moment generation 1 exists. Nothing has to
+ * be upgraded for the fence to take effect on the runs that matter.
+ */
+export const DEFAULT_GENERATION = 0;
+
+/** The `gen=` of a milestone, or {@link DEFAULT_GENERATION} when absent or unreadable. */
+export function generationOf(milestone: ParsedMilestone): number {
+  const raw = milestone.keys.gen;
+  if (raw === undefined) return DEFAULT_GENERATION;
+  const parsed = parseGeneration(raw);
+  return parsed ?? DEFAULT_GENERATION;
+}
+
+/** Read a generation off a flag or a comment value; null when it is not one. */
+export function parseGeneration(raw: string): number | null {
+  if (!NON_NEGATIVE_INT_RE.test(raw)) return null;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/**
+ * The highest-generation fence on `run`'s trail, or null when the run was never fenced.
+ *
+ * Scanned by highest generation rather than by position because milestones are only
+ * append-ordered, not generation-ordered: a zombie can post AFTER the fence that
+ * superseded it, and taking the last fence by position would then read back the older
+ * one and un-fence the trail.
+ */
+export function latestFence(
+  milestones: readonly ParsedMilestone[],
+  run: string
+): ParsedMilestone | null {
+  if (run === '') return null;
+  let best: ParsedMilestone | null = null;
+  let bestGen = -1;
+  for (const milestone of milestones) {
+    if (milestone.status !== FENCE_STATUS || milestone.run !== run) continue;
+    const gen = generationOf(milestone);
+    if (gen > bestGen) {
+      bestGen = gen;
+      best = milestone;
+    }
+  }
+  return best;
+}
+
+/** The generation that currently owns `run` — 0 when it was never fenced. */
+export function fenceGeneration(milestones: readonly ParsedMilestone[], run: string): number {
+  const fence = latestFence(milestones, run);
+  return fence === null ? DEFAULT_GENERATION : generationOf(fence);
+}
+
+/**
+ * Whether a run at `gen` has been superseded: some fence installed a HIGHER generation.
+ *
+ * Equal generations are live — the takeover posts at exactly the generation its own
+ * fence installed, so `>` (not `>=`) is what lets the replacement work while every
+ * earlier generation is locked out.
+ */
+export function isFenced(
+  milestones: readonly ParsedMilestone[],
+  run: string,
+  gen: number
+): boolean {
+  return fenceGeneration(milestones, run) > gen;
+}
+
+/** The generation the next fence on `run` should install. */
+export function nextFenceGeneration(milestones: readonly ParsedMilestone[], run: string): number {
+  return fenceGeneration(milestones, run) + 1;
+}
+
 /**
  * The world-facing checks the resume table needs. Injected so {@link computeResume}
  * stays pure and testable — the command layer supplies the `git`/`gh`/`fs` versions.
@@ -597,6 +722,12 @@ export interface ResumeResult {
   slot_trail?: boolean;
   /** Human-readable note, e.g. "already complete". */
   note?: string;
+  /**
+   * The generation that owns this run (#504) — 0 for a run that was never fenced. A
+   * resuming agent passes it to `runstate post --gen`; posting below it is rejected,
+   * which is what stops a superseded run from extending the trail.
+   */
+  generation: number;
   /**
    * Whether the `worktree=` path carried in `resume_context` exists on this machine —
    * `n/a` when no milestone recorded one. Bonus signal only: it never changes
@@ -756,6 +887,7 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
       resume_context: {},
       last: null,
       local_worktree: 'n/a',
+      generation: DEFAULT_GENERATION,
     };
   }
 
@@ -771,6 +903,7 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
     resume_context: context,
     last,
     local_worktree,
+    generation: fenceGeneration(milestones, last.run),
   };
 
   if (hitLoopCap(milestones)) {
@@ -780,6 +913,18 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
   const fresh = freshEntry(last);
   if (fresh) {
     return { ...base, resume_from: 'none', ...fresh };
+  }
+
+  // A fence is the last thing on the trail: the takeover was announced but has not
+  // posted yet (#504). It may never post — the takeover can die too — so this is a
+  // resumable state, at the fenced phase and at the generation the fence installed,
+  // rather than a terminal one or an unknown status falling through to a fresh entry.
+  if (last.status === FENCE_STATUS) {
+    return {
+      ...base,
+      resume_from: last.phase || 'none',
+      note: `fenced by '${last.keys.takeover ?? 'unknown'}' at generation ${base.generation} — resume as that generation`,
+    };
   }
 
   // Any blocked milestone resumes at that same phase.

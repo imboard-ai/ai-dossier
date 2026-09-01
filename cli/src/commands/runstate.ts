@@ -32,10 +32,17 @@ import {
   BATCH_PHASES,
   buildMilestone,
   computeResume,
+  DEFAULT_GENERATION,
+  FENCE_STATUS,
+  fenceGeneration,
+  generationOf,
+  latestFence,
   MAX_BODY_LENGTH,
   mintRunId,
+  nextFenceGeneration,
   type ParsedMilestone,
   PHASES,
+  parseGeneration,
   parseMilestones,
   type ResumeProbe,
   splitPair,
@@ -59,8 +66,27 @@ interface PostOptions {
   run: string;
   kv?: string[];
   next?: string;
+  gen?: string;
   repo?: string;
   dryRun?: boolean;
+  json?: boolean;
+}
+
+interface FenceOptions {
+  issue: string;
+  phase: string;
+  run: string;
+  takeover: string;
+  repo?: string;
+  dryRun?: boolean;
+  json?: boolean;
+}
+
+interface CheckOptions {
+  issue: string;
+  run: string;
+  gen?: string;
+  repo?: string;
   json?: boolean;
 }
 
@@ -375,6 +401,71 @@ function requirePostableBody(body: string, pairs: Array<[string, string]>): void
   ]);
 }
 
+// --- Fencing (#504) ---
+
+/**
+ * Exit code `check` uses for "this run has been superseded".
+ *
+ * Distinct from `fail`'s 1 on purpose: a fenced run is a correct, expected answer that a
+ * caller should act on by aborting quietly, not a usage error to be retried. A shell
+ * `if ! ai-dossier runstate check …` can tell the two apart.
+ */
+export const FENCED_EXIT_CODE = 3;
+
+/** Read `--gen`, or exit explaining what a generation is. */
+function requireGeneration(raw: string | undefined, flag: string): number {
+  if (raw === undefined) return DEFAULT_GENERATION;
+  const parsed = parseGeneration(raw);
+  if (parsed === null) {
+    fail([
+      `Invalid ${flag} '${raw}' — expected a non-negative integer run generation.\nFix: pass the generation this run owns, e.g. ${flag} 1 (a run that was never fenced is ${DEFAULT_GENERATION}).`,
+    ]);
+  }
+  return parsed;
+}
+
+/** How a fenced run is described wherever one is reported. */
+function fenceDescription(fence: ParsedMilestone): string {
+  return `generation ${generationOf(fence)} (takeover '${fence.keys.takeover ?? 'unknown'}', fenced at ${fence.phase || 'unknown phase'} on ${fence.at || 'an unrecorded date'})`;
+}
+
+/**
+ * Refuse to post from a superseded generation (#504 AC3).
+ *
+ * The zombie this guards against is by definition not running the code that would check
+ * for a fence voluntarily, so the check lives HERE — in the one command that can write to
+ * the trail — rather than only in the workflow that is supposed to call it.
+ *
+ * Two deliberate exemptions:
+ * - a {@link FENCE_STATUS} post is the fencing mechanism itself and can never self-reject;
+ * - a trail that cannot be READ posts anyway, with a warning. A milestone is a phase's
+ *   only durable record, and losing one to a transient gh outage is a worse failure than
+ *   the race this prevents.
+ */
+function requireNotFenced(options: PostOptions, gen: number): void {
+  if (options.status === FENCE_STATUS) return;
+
+  const result = tryFetchMilestones(options.issue, options.repo);
+  if (!result.ok) {
+    console.error(
+      `⚠️  Could not read issue #${options.issue} to check whether run ${options.run} was superseded — posting anyway. (${result.error.split('\n')[0]})`
+    );
+    return;
+  }
+
+  const fence = latestFence(result.milestones, options.run);
+  if (fence === null || generationOf(fence) <= gen) return;
+
+  fail([
+    [
+      `Run ${options.run} was SUPERSEDED — refusing to post a ${options.phase}/${options.status} milestone from generation ${gen}.`,
+      `It was fenced at ${fenceDescription(fence)}.`,
+      `This run no longer owns issue #${options.issue}: another agent took it over, and two runs writing one trail is what this check exists to prevent.`,
+      `Fix: stop working on this issue and exit. Do not push, do not open a PR, do not retry — the takeover is doing the work. If you ARE the takeover, pass --gen ${generationOf(fence)}.`,
+    ].join('\n'),
+  ]);
+}
+
 /** `runstate post` — validate a milestone, then comment it onto the issue. */
 function registerPostSubcommand(cmd: Command): void {
   cmd
@@ -392,18 +483,30 @@ function registerPostSubcommand(cmd: Command): void {
     )
     .option('--kv <key=value...>', 'Phase-specific key=value pair (repeatable)')
     .option('--next <phase>', 'Override the computed next= value')
+    .option(
+      '--gen <n>',
+      "Run generation this agent owns (default 0) — a post below the trail's fenced generation is refused"
+    )
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
     .option('--dry-run', 'Print the comment body without posting it')
     .option('--json', 'Output the result as JSON')
     .action((options: PostOptions) => {
       requireIssueTarget(options);
+      const gen = requireGeneration(options.gen, '--gen');
       const { pairs, errors: kvErrors } = parseKvPairs(options.kv ?? []);
+
+      // A generation above the default is recorded on the milestone itself, so the trail
+      // shows which generation did the work. Appended rather than merged: an explicit
+      // `--kv gen=` alongside `--gen` surfaces as the duplicate-key error it is, instead
+      // of one silently overriding the other.
+      const keys =
+        gen > DEFAULT_GENERATION ? [...pairs, ['gen', String(gen)] as [string, string]] : pairs;
 
       const input = {
         phase: options.phase,
         status: options.status,
         run: options.run,
-        keys: pairs,
+        keys,
         next: options.next,
       };
       const errors = [...kvErrors, ...validateMilestone(input)];
@@ -411,12 +514,13 @@ function registerPostSubcommand(cmd: Command): void {
 
       const body = buildMilestone(input);
 
-      requirePostableBody(body, pairs);
+      requirePostableBody(body, keys);
 
       if (options.dryRun) {
         printDryRun(body, options.json);
         return;
       }
+      requireNotFenced(options, gen);
       postMilestone(body, options);
     });
 }
@@ -480,6 +584,7 @@ function registerVerifySubcommand(cmd: Command): void {
             {
               resume_from: result.resume_from,
               run_id: result.run_id,
+              generation: result.generation,
               verified: result.verified,
               resume_context: result.resume_context,
               local_worktree: result.local_worktree,
@@ -495,6 +600,7 @@ function registerVerifySubcommand(cmd: Command): void {
       } else {
         console.log(`resume_from=${result.resume_from}`);
         console.log(`run_id=${result.run_id ?? 'none'}`);
+        console.log(`generation=${result.generation}`);
         console.log(`verified=${result.verified.length > 0 ? result.verified.join(',') : 'none'}`);
         console.log(`local_worktree=${result.local_worktree}`);
         if (result.slot_trail) console.log('slot_trail=present');
@@ -785,7 +891,141 @@ function registerMintSubcommand(cmd: Command): void {
     });
 }
 
-/** Registers the `runstate` command tree (post, last, verify, mint, stats). */
+/**
+ * `runstate fence` — supersede a run: post the takeover record that locks every earlier
+ * generation out of the trail (#504 AC1).
+ *
+ * Called by the stall-recovery ladder BEFORE the replacement agent is spawned, so the
+ * fence is durable even if the takeover dies on its first breath.
+ */
+function registerFenceSubcommand(cmd: Command): void {
+  cmd
+    .command('fence')
+    .description('Supersede a run: post a takeover record fencing its generation out of the trail')
+    .requiredOption('--issue <number>', 'GitHub issue number')
+    .requiredOption('--run <id>', 'Run id being superseded (r-<issue>-<hex>)')
+    .requiredOption('--phase <phase>', 'Phase the superseded run was in when it was taken over')
+    .requiredOption(
+      '--takeover <label>',
+      'What is taking the run over (a run id, slot id, or agent name)'
+    )
+    .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
+    .option('--dry-run', 'Print the comment body without posting it')
+    .option('--json', 'Output the result as JSON')
+    .action((options: FenceOptions) => {
+      requireIssueTarget(options);
+      const milestones = fetchMilestones(options.issue, options.repo);
+      // Read-then-increment off the live trail, so a recovery-of-recovery fences the
+      // FIRST takeover too rather than reinstalling the generation it already owns.
+      const gen = nextFenceGeneration(milestones, options.run);
+
+      const keys: Array<[string, string]> = [
+        ['gen', String(gen)],
+        ['takeover', options.takeover],
+      ];
+      const input = {
+        phase: options.phase,
+        status: FENCE_STATUS,
+        run: options.run,
+        keys,
+      };
+      const errors = validateMilestone(input);
+      if (errors.length > 0) fail(errors);
+
+      const body = buildMilestone(input);
+      requirePostableBody(body, keys);
+
+      if (options.dryRun) {
+        printDryRun(body, options.json, { gen });
+        return;
+      }
+
+      postIssueComment({
+        issue: options.issue,
+        repo: options.repo,
+        body,
+        noun: 'fence',
+        action: `Failed to fence run ${options.run} on issue #${options.issue}`,
+        json: options.json,
+        // `gen` is the whole point of the call: the caller must hand it to the takeover
+        // agent, so it rides both output modes rather than only the JSON one.
+        jsonExtras: { body, gen, run: options.run, takeover: options.takeover },
+        successLine: (url) =>
+          `✅ fenced ${options.run} gen=${gen} takeover=${options.takeover} → ${url}`,
+      });
+    });
+}
+
+/**
+ * `runstate check` — the agent-side checkpoint (#504 AC2): has this run been superseded?
+ *
+ * Exits {@link FENCED_EXIT_CODE} when it has, so a workflow can run it before implement,
+ * before review, and before ship and abort on a non-zero exit. A trail that cannot be
+ * read reports live, for the same reason `post` posts anyway: a transient gh outage must
+ * not abort a healthy run.
+ */
+function registerCheckSubcommand(cmd: Command): void {
+  cmd
+    .command('check')
+    .description(
+      `Check whether a run generation has been superseded (read-only; exits ${FENCED_EXIT_CODE} when fenced)`
+    )
+    .requiredOption('--issue <number>', 'GitHub issue number')
+    .requiredOption('--run <id>', 'Run id to check (r-<issue>-<hex>)')
+    .option('--gen <n>', 'Generation this agent owns (default 0)')
+    .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
+    .option('--json', 'Output the result as JSON')
+    .action((options: CheckOptions) => {
+      requireIssueTarget(options);
+      const gen = requireGeneration(options.gen, '--gen');
+
+      const result = tryFetchMilestones(options.issue, options.repo);
+      if (!result.ok) {
+        console.error(
+          `⚠️  check could not read issue #${options.issue} — reporting the run as live. (${result.error.split('\n')[0]})`
+        );
+        printCheckResult({ fenced: false, gen, current: gen }, options.json);
+        return;
+      }
+
+      const current = fenceGeneration(result.milestones, options.run);
+      const fence = latestFence(result.milestones, options.run);
+      if (fence === null || current <= gen) {
+        printCheckResult({ fenced: false, gen, current }, options.json);
+        return;
+      }
+
+      printCheckResult(
+        {
+          fenced: true,
+          gen,
+          current,
+          takeover: fence.keys.takeover ?? null,
+          phase: fence.phase,
+          at: fence.at,
+        },
+        options.json
+      );
+      console.error(
+        `❌ Run ${options.run} was SUPERSEDED at ${fenceDescription(fence)}.\n   Stop working on issue #${options.issue} and exit: another agent owns it. Do not push, do not open a PR.`
+      );
+      process.exit(FENCED_EXIT_CODE);
+    });
+}
+
+/** `check`'s stdout, in whichever mode the caller asked for. */
+function printCheckResult(result: Record<string, unknown>, json?: boolean): void {
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  console.log(`fenced=${result.fenced}`);
+  console.log(`gen=${result.gen}`);
+  console.log(`current_gen=${result.current}`);
+  if (result.takeover !== undefined) console.log(`takeover=${result.takeover}`);
+}
+
+/** Registers the `runstate` command tree (post, last, verify, fence, check, mint, stats). */
 export function registerRunstateCommand(program: Command): void {
   const runstateCmd = program
     .command('runstate')
@@ -794,6 +1034,8 @@ export function registerRunstateCommand(program: Command): void {
   registerPostSubcommand(runstateCmd);
   registerLastSubcommand(runstateCmd);
   registerVerifySubcommand(runstateCmd);
+  registerFenceSubcommand(runstateCmd);
+  registerCheckSubcommand(runstateCmd);
   registerMintSubcommand(runstateCmd);
   registerStatsSubcommand(runstateCmd);
 }

@@ -135,6 +135,37 @@ Two engine-safety policies were explicit product decisions on #464:
 Only `issue:<n>` units are dispatched today — batch member sequencing is a follow-up
 (#464 non-goal).
 
+### Zombie-run fencing (#504)
+
+The ladder redispatches the SAME run, so a takeover inherits the run id and its milestone
+trail. In the #472 race that turned out to be a hole: `enterRecovery` kills the pid it
+knows about, but an agent it cannot see or signal — throttled, cwd outside the worktree —
+survives, and nothing on the trail tells that agent it was replaced. Both runs implemented
+the same issue, and both kept posting milestones on one trail. The doctrine, one step past
+"an agent exiting is not proof of merge": **no visible process is not proof of death.**
+
+A **generation** now fences the trail:
+
+- Before the takeover is spawned, the engine calls `ai-dossier runstate fence`, which
+  posts a `status=superseded` milestone carrying `gen=<n>` and `takeover=<label>`.
+  Written first, on purpose, so it survives the takeover dying too.
+- The takeover is told its generation in its prompt and passes `--gen <n>` to every
+  `runstate post`. **The CLI refuses any post below the trail's fenced generation**, so
+  the superseded agent cannot extend the trail even though it never checks — and an agent
+  running an older dossier implicitly sits at generation 0, fenced out the moment
+  generation 1 exists.
+- `ai-dossier runstate check --issue <n> --run <id> --gen <g>` exits `3` when the caller
+  has been superseded: the checkpoint a workflow runs before implement, review, and ship.
+- A takeover that posts NOTHING is watched on `fence_takeover_timeout_ms` (default 15 min)
+  instead of the phase's full stall allowance, so a takeover that dies at birth re-enters
+  the ladder in minutes; the next fence supersedes it in turn. The first progress signal
+  disarms the short window. `ESCALATION_CAP` still bounds the whole ladder.
+
+Fencing is defense-in-depth, not a precondition: if the fence cannot be written (no run id
+on the trail yet, gh unreachable, no fencer configured) the redispatch proceeds unfenced
+and journals `fence-failed`. Stranding a stalled unit forever would be the worse failure —
+but the unprotected redispatch is never silent.
+
 ## Batch failure recovery (#472)
 
 What happens when a batch's aggregate suite goes red, or its PR will not merge

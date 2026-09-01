@@ -15,6 +15,7 @@ import {
   resolveDispatch,
   type SchedConfig,
   stallTimeoutForPhase,
+  stallTimeoutForSlot,
 } from '../index';
 
 describe('dispatch command building (#464 AC1)', () => {
@@ -270,5 +271,58 @@ describe('background-exit hardening (#497)', () => {
 
   it('the report prompt is deliberately excluded — it never spawns a build/test command', () => {
     expect(DEFAULT_REPORT_PROMPT_TEMPLATE).not.toContain(NO_BACKGROUND_EXIT_INSTRUCTION);
+  });
+});
+
+describe('takeover prompts (#504)', () => {
+  it('leaves a first dispatch prompt untouched', () => {
+    const prompt = buildPrompt('Run the workflow for #{issue}.', 504);
+    expect(prompt).toBe('Run the workflow for #504.');
+    expect(prompt).not.toContain('TAKEOVER');
+  });
+
+  it('appends the takeover instruction for a generation above zero', () => {
+    const prompt = buildPrompt('Run the workflow for #{issue}.', 504, 2);
+    expect(prompt).toContain('Run the workflow for #504.');
+    expect(prompt).toContain('generation 2');
+    expect(prompt).toContain('--gen 2');
+    expect(prompt).toContain('runstate check --issue 504');
+    // It must resume rather than restart — the fence exists because the work is shared.
+    expect(prompt).toContain('Resume the existing work');
+  });
+
+  it('substitutes {gen} for templates that place it themselves', () => {
+    expect(buildPrompt('gen={gen} issue={issue}', 7, 3)).toContain('gen=3 issue=7');
+  });
+});
+
+describe('stallTimeoutForSlot (#504)', () => {
+  const dispatch = resolveDispatch({
+    max_slots: 1,
+    stall_timeout_ms: 60 * 60 * 1000,
+    dispatch: { fence_takeover_timeout_ms: 15 * 60 * 1000 },
+  });
+
+  it('uses the phase allowance when no takeover is pending', () => {
+    expect(stallTimeoutForSlot(dispatch, 'plan', null)).toBe(60 * 60 * 1000);
+  });
+
+  it('shortens to the fence window while a takeover has posted nothing', () => {
+    expect(stallTimeoutForSlot(dispatch, 'plan', '2026-08-29T12:00:00Z')).toBe(15 * 60 * 1000);
+  });
+
+  it('never lengthens a phase whose own allowance is already shorter', () => {
+    // A takeover must not get MORE time than a first dispatch would have had.
+    const tight = resolveDispatch({
+      max_slots: 1,
+      stall_timeout_ms: 5 * 60 * 1000,
+      dispatch: { fence_takeover_timeout_ms: 15 * 60 * 1000 },
+    });
+    expect(stallTimeoutForSlot(tight, 'plan', '2026-08-29T12:00:00Z')).toBe(5 * 60 * 1000);
+  });
+
+  it('defaults the fence window to fifteen minutes', () => {
+    const defaults = resolveDispatch({ max_slots: 1 });
+    expect(defaults.fenceTakeoverTimeoutMs).toBe(15 * 60 * 1000);
   });
 });
