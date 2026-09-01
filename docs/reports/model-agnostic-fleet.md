@@ -5,17 +5,35 @@
 
 ## Recommendation
 
-**Nothing measured here contradicts the model-agnostic promise, and the strongest single piece of
-evidence supports it:** across 14 real `glm-5.3` runs on this repo, the delivery rate was **86%**
-(12/14) against **80%** (16/20) for `claude-sonnet-5` over an adjacent window of the same backlog,
-and the one `blocked` open-weights run was blocked by an **npm publish 404 on a new scope**
+**Nothing measured here contradicts the model-agnostic promise.** Across 14 real `glm-5.3` runs on
+this repo the delivery rate was **86%** (12/14), against **86%** (18/21) for `claude-sonnet-5` over
+an adjacent window of the same backlog — indistinguishable at this sample size. The one `blocked`
+open-weights run was blocked by an **npm publish 404 on a new scope**
 ([#460](https://github.com/imboard-ai/ai-dossier/issues/460),
 `reason=publish-e404-new-scope-package`) — infrastructure, not model competence.
+
+That parity is the claim this report supports. It is **not** a claim that open-weights models are
+as good: glm's median run is roughly twice sonnet's, and neither arm was pre-registered.
 
 This is a **retrospective**, not the controlled experiment [#528](https://github.com/imboard-ai/ai-dossier/issues/528)
 AC1 asks for: the arms were not pre-registered, not cohort-matched, and not run concurrently. Read
 the recommendation below as *provisional and directional*, not as the GO/NO-GO verdict. The
 pre-registered run is specified in §5, together with the one owner decision blocking it.
+
+### Acceptance-criteria scorecard
+
+Verdicts from this run's independent (blind) conformance review, not from the author:
+
+| AC | verdict | why |
+|---|---|---|
+| AC1 — two-arm live cohort, ≥8 issues per arm | **NOT MET** | no live dispatch occurred; only AC1's mode conditional is satisfied (§2.4) |
+| AC2 — per-arm metrics (7 named) | **PARTIAL** | delivery rate + wall-clock delivered; evictions legitimately N/A; escalations/issue, conformance-not-met rate, 7-day regressions, and tokens+$ not measured (§6 items 3–4) |
+| AC3 — per-model breakdown via `runstate stats` buckets | **PARTIAL** | the buckets now aggregate correctly (§3) — but the AC's per-*class* / per-*tier* axis does not exist in the tool |
+| AC4 — tier→model mapping, rescue tier justified by measured escalation frequency | **PARTIAL** | mapping is per project, not per issue class; the rescue-tier justification needs the live run (§4.4) |
+| AC5 — open-weights failures not caught by guardrails get their own issue | **PARTIAL** | none found in the retrospective, and the trails support that — but the exercise that would surface them never ran |
+
+`ac_met=0 ac_total=5`. **#528 stays open.** This report and the CLI fix advance it; they do not
+close it.
 
 **Provisional tier→model mapping** (§4.4 has the reasoning):
 
@@ -72,7 +90,8 @@ The arms were **not** pre-registered. They are the two model populations that th
 Plus the [#471](https://github.com/imboard-ai/ai-dossier/issues/471) parity cohort on
 `imboard-ai/imboard-monorepo`, which is the closest thing to a matched pair that exists today:
 same repo, same scheduler, same dispatch prompt, same warmup path, workloads W1/W2 on claude and
-W3 on open-weights (`docs/reports/sched-parity.md` §2.1).
+W3 on open-weights (`docs/reports/sched-parity.md` §2.2 for the workloads, §4.3 for the per-arm
+model attribution).
 
 ### 2.3 Metric definitions
 
@@ -90,10 +109,10 @@ AC1: *"batch mode if #526 has passed, full-cycle otherwise, stated explicitly."*
 
 **#526 has not passed** — it is OPEN, and its own execution record
 (`docs/reports/batch-pilot-2-execution.md`) reports 0 of ≥3 batches executed against its AC1.
-Two batch defects are open right now:
-[#535](https://github.com/imboard-ai/ai-dossier/issues/535) (batches never seal `forming`→`ready`)
-and [#536](https://github.com/imboard-ai/ai-dossier/issues/536) (batch anchor missing from the
-enqueue path).
+One batch defect is open as of this writing:
+[#535](https://github.com/imboard-ai/ai-dossier/issues/535) (batches never seal `forming`→`ready`);
+[#536](https://github.com/imboard-ai/ai-dossier/issues/536) (batch anchor missing from the enqueue
+path) was open during this run and closed at 21:50Z.
 
 **Therefore the live arms run in full-cycle mode, not batch mode.** Stated explicitly, as AC1
 requires. The AC2 "evictions (batch mode)" metric is consequently **N/A** for this validation.
@@ -103,7 +122,7 @@ requires. The AC2 "evictions (batch mode)" metric is consequently **N/A** for th
 AC3 asks for the per-model breakdown *via* `runstate stats` `model=` buckets. Measured against
 real trails before this PR, those buckets split single models across rows:
 
-| corpus | recorded spellings | actual model |
+| corpus | recorded spellings | what the tool did |
 |---|---|---|
 | ai-dossier #460–#538 | `glm-5.3` (7 runs) **and** `llmgateway/glm-5.3` (7 runs) | one model, two rows — a 14-run sample halved |
 | imboard-monorepo #471 cohort | `z-ai/glm-latest` (2) **and** `~z-ai/glm-latest` (1) | one model, two rows (opencode's `~` gateway-alias marker) |
@@ -129,18 +148,21 @@ The fix (`cli/src/runstate-stats.ts`):
 
 ### 4.1 `imboard-ai/ai-dossier`, issues #460–#538
 
-`ai-dossier runstate stats --issues 460..538`:
+`ai-dossier runstate stats --issues 460..538`, **captured 2026-09-01T22:33Z**. This corpus is
+live: runs in flight at capture time land later, so a re-run gives different `unfinished` and
+`rate` cells (between two captures 50 minutes apart, sonnet moved 20→21 runs and 80%→86%). The
+§4.2 monorepo block below is a closed window and reproduces byte-identically.
 
 ```
-model            runs  done  blocked  open  rate   n     median total             min               max
-claude-opus-5       1     1        0     0  100%   1    1h 8m (4115s)   1h 8m (4115s)     1h 8m (4115s)
-claude-sonnet-5    20    16        0     4   80%  20  43m 23s (2603s)   2m 47s (167s)   2h 47m (10054s)
-glm-5.3            14    12        1     1   86%  14   1h 30m (5419s)  49m 7s (2947s)  20h 56m (75372s)  folded: llmgateway/glm-5.3
-unknown             6     0        0     6    0%   0                -               -                 -
+model            runs  delivered  blocked  unfinished  rate   n     median total              min               max
+<unknown>           6          0        0           6    0%   0                -                -                 -
+claude-opus-5       1          1        0           0  100%   1    1h 8m (4115s)    1h 8m (4115s)     1h 8m (4115s)
+claude-sonnet-5    21         18        0           3   86%  21  44m 55s (2695s)  19m 45s (1185s)   2h 47m (10054s)
+glm-5.3            14         12        1           1   86%  14   1h 30m (5419s)   49m 7s (2947s)  20h 56m (75372s)  folded: llmgateway/glm-5.3
 ```
 
-- **Delivery rate: glm 86% (12/14) vs sonnet 80% (16/20).** The four sonnet "open" runs are live
-  or fenced at the time of reading (#499, #528, #535, #536), not failures; the comparison is
+- **Delivery rate: glm 86% (12/14) and sonnet 86% (18/21) — a dead heat at this sample size.**
+  The three sonnet "unfinished" runs were live at capture time, not failures. The comparison is
   directional, not a controlled result.
 - **The single open-weights `blocked` is not a model failure.** #460 blocked at `ship` with
   `reason=publish-e404-new-scope-package` — an npm 404 publishing a newly scoped package, after
@@ -148,17 +170,19 @@ unknown             6     0        0     6    0%   0                -           
   named an infrastructure cause instead of guessing.
 - **glm's median run is ~2× sonnet's** (1h 30m vs 43m). The 20h 56m maximum is #471 — the parity
   validation itself, a 17-hour ops workload, not a comparable code issue.
-- The `unknown` bucket is 6 `classify` verdict records, which carry no `model=` and are not runs.
+- The `<unknown>` bucket is 6 `classify` verdict records, which carry no `model=` and are not
+  full-cycle runs. The tool now says so itself rather than leaving the `0%` to be misread — it
+  emits `6 run(s) recorded no model= … not attributable to any model` on the warnings channel.
 
 ### 4.2 `imboard-ai/imboard-monorepo`, the #471 parity cohort
 
 `ai-dossier runstate stats --repo imboard-ai/imboard-monorepo --issues 3891,3862,3810,3886,3890,3889,3756,3500,3433,3414,3408,3824`:
 
 ```
-model            runs  done  blocked  open  rate  n     median total              min              max
-claude-sonnet-5     8     5        0     3   63%  8    2h 1m (7290s)    1h 5m (3959s)  7h 39m (27551s)
-glm-latest          3     2        1     0   67%  3   1h 48m (6539s)   13m 46s (826s)  9h 24m (33898s)  folded: z-ai/glm-latest, ~z-ai/glm-latest
-kimi-latest         1     1        0     0  100%  1  8h 47m (31628s)  8h 47m (31628s)  8h 47m (31628s)  folded: openrouter-kimi-latest
+model            runs  delivered  blocked  unfinished  rate  n     median total              min              max
+claude-sonnet-5     8          5        0           3   63%  8    2h 1m (7290s)    1h 5m (3959s)  7h 39m (27551s)
+glm-latest          3          2        1           0   67%  3   1h 48m (6539s)   13m 46s (826s)  9h 24m (33898s)  folded: z-ai/glm-latest, ~z-ai/glm-latest
+kimi-latest         1          1        0           0  100%  1  8h 47m (31628s)  8h 47m (31628s)  8h 47m (31628s)  folded: openrouter-kimi-latest
 ```
 
 This is the same-repo, same-scheduler pairing #528 asks for, at 1/4 the cohort size per arm and
@@ -190,9 +214,12 @@ PR rather than filed.
 Justified by §4.1–§4.3, and provisional pending the live run:
 
 - **`ai-dossier`: glm for mechanical and mid; claude sonnet strong; opus rescue.** 14 glm runs on
-  this repo delivered 86% with zero model-attributable blocks, on a codebase whose work is
-  CLI/TypeScript with dense tests — glm's escalation frequency here does not justify paying for
-  sonnet at the mid tier.
+  this repo delivered 86% with zero model-attributable blocks — the same rate as sonnet's 18/21
+  on an adjacent window of the same backlog. On a codebase whose work is CLI/TypeScript with
+  dense tests, nothing measured justifies paying for sonnet at the mid tier. The cost of the
+  choice is wall-clock, not correctness: glm's median run is ~2× sonnet's, so on a 3-slot
+  scheduler this trades slot occupancy for token price, and that trade is the reason to keep it
+  provisional until the live run measures both.
 - **`imboard-monorepo`: claude sonnet at mid.** The open-weights sample on that repo is 4 runs
   (3 glm + 1 kimi) — too thin to route a production monorepo on, and its median run was long
   enough (1h 48m–8h 47m) that slot cost, not token cost, dominates.
@@ -217,9 +244,28 @@ Specified here so whoever authorizes it executes rather than re-derives:
 
 **Why it was not executed in this run:** it needs an ≥ 8-issue × 2-arm live dispatch against a
 real backlog with real multi-provider billing (the single-arm #471 precedent cost ~$250 in claude
-tokens alone plus glm/kimi spend) and it merges its cohort's PRs into that repo. That is a spend
-and blast-radius commitment, not an implementation detail, and this generation was dispatched by
-the scheduler — no human has read the escalation. It is recorded as an open decision on #528 — with the cohort repo and spend ceiling named — rather than guessed at.
+tokens alone — `sched-parity.md` W1 $111.06 + W2 ≥$141.76 — plus glm/kimi spend) and it merges its
+cohort's PRs into that repo. That is a spend and blast-radius commitment, not an implementation
+detail, and this generation was dispatched by the scheduler — no human has read the escalation.
+
+### 5.1 The decision, with options
+
+**Decision:** authorize the live two-arm run — naming cohort repo, spend ceiling, and sequencing —
+or decline it and re-scope #528's AC1.
+
+| option | pros | cons |
+|---|---|---|
+| **A. `imboard-monorepo`, ~$600 ceiling, run now** *(recommended)* | Both precedents (#471, #526) used it; 118 open issues, so a ≥8-per-arm same-class cohort is actually available; the backlog is where the fleet really runs, so the result generalises | Highest blast radius — 16 agent-authored PRs merge into the production monorepo; ~$600 is ~2.4× the single-arm #471 spend |
+| **B. `ai-dossier` as the cohort repo** | Blast radius contained to this repo; glm's 14-run record here is the strongest evidence we have | **Not viable as specified**: only ~10 non-epic, non-blocked open issues remain and most are large (VS Code extension, website, JetBrains plugin) — a ≥8-per-arm low-risk cohort does not exist |
+| **C. Defer until #535 → #526 close** | AC1's mode conditional would then resolve to *batch*, matching where the system is heading, and §5's protocol would be written once rather than twice | #535 is open with no owner; #526's verdict is itself gated on a 7-day window in #529 — realistically weeks, and #528's evidence stays anecdotal until then |
+| **D. Decline; re-scope AC1 to the retrospective** | Zero spend; this report already shows parity at n=14 vs n=21 | Leaves the core promise resting on a confounded retrospective — exactly the "anecdotal" state #528 was opened to end |
+
+**Why this is escalated rather than defaulted:** every other decision in this run was reversible
+(a code change is a revert away). This one spends real third-party money and merges agent-authored
+PRs into a production repo — neither is undone by `git revert`. Cost of waiting is low: the
+instrument fix in this PR is the prerequisite, and it lands either way.
+
+**Recommendation: option A**, with the ceiling set explicitly and the run stopped at it.
 
 ## 6. Limitations
 
@@ -240,6 +286,15 @@ the scheduler — no human has read the escalation. It is recorded as an open de
    #526's verdict was split into [#529](https://github.com/imboard-ai/ai-dossier/issues/529).
 5. **Sample sizes are small**, especially opus (1 run) and kimi (1 run). Nothing in §4 supports a
    claim about the strong tier.
+6. **A run keeps its FIRST generation's `model=`.** `runstate stats` reads `model=` off the gate
+   milestone, and a takeover reuses the same `run` id — so this very run, whose generation 1 is
+   `claude-opus-5`, is bucketed under generation 0's `claude-sonnet-5`. A mid-run model change is
+   invisible to the per-model table, which also makes "#504 is the only opus run" true only of
+   what the tool can see.
+7. **The per-model table has no class or tier axis.** AC3 and AC4 both ask "which tiers are safe
+   for which *classes*"; `runstate stats` buckets by model only. Answering the class question
+   needs the classifier's `risk=`/class verdict joined onto the trail — capability that does not
+   exist yet, and is not built here.
 
 ## 7. Appendix — evidence
 

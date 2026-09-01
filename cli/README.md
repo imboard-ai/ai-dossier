@@ -589,8 +589,8 @@ resume derives from the full-cycle trail as usual.
 
 A phase may carry keys beyond its required ones, and one is worth knowing about:
 `gate` should also pass `model=<agent model id>`, which is what lets
-[`runstate stats`](#stats) break whole-run durations down by model. Runs whose trail
-carries the key nowhere are bucketed as `unknown`.
+[`runstate stats`](#stats) break whole-run durations and outcomes down by model. Runs whose
+trail carries the key nowhere are bucketed as `<unknown>`.
 
 The `Statuses` column is a closed set: a status not listed for a phase is rejected, so
 `report` cannot be `blocked` and only the ship phases (`ship`, `batch-ship`) may be
@@ -799,12 +799,41 @@ to `gate`, since pairing is by previous milestone; and `batch-*` rows sit after
 
 `--issues` takes a fleet-style selection (`1,2,3`, `1..9`, or mixed `1,2,5..8`, capped at
 200 issues since each costs a `gh` call) and reports the aggregates instead of every
-table: per-phase median/min/max, a per-run total, and a breakdown by the `model=` the gate
-milestone recorded.
+table: per-phase median/min/max, a per-run total, and a per-model breakdown.
 
 ```bash
 ai-dossier runstate stats --issues 440,448,451
 ```
+
+### The per-model breakdown
+
+The `By model:` table answers "which models finish the work", not just "how long they take":
+
+| column | meaning | `--json` field |
+|---|---|---|
+| `delivered` | runs whose LAST milestone is `ship`/`report`/`batch-ship`/`batch-report` at `done` | `delivered` |
+| `blocked` | runs whose last milestone is `blocked`, whatever the phase | `blocked` |
+| `unfinished` | everything else — in flight, parked `awaiting-merge`, `partial`, or fenced | `unfinished` |
+| `rate` | `delivered / runs` | `delivery_rate` |
+
+`rate` is a **floor, not a rate**: every run is in the denominator, including ones still
+running, so a model with work in flight reads low until it lands. `delivered` counts `ship
+done` — not just `report done` — because `ship done` is posted only after the merge *and*
+teardown are confirmed, and the report tail is routinely dispatched as a separate run.
+
+**Model ids are folded into canonical buckets.** Agents record whatever id their CLI was
+invoked with, so one model reaches the trail under several spellings depending on how it
+was routed — `glm-5.3` and `llmgateway/glm-5.3`, or `z-ai/glm-latest` and opencode's
+`~z-ai/glm-latest`. Unbucketed, one model's runs split across rows and the breakdown
+answers nothing. `stats` lowercases, drops a leading `~`, and peels a *known* routing
+prefix (`llmgateway`, `openrouter`, `moonshotai`, `anthropic`, `alibaba`, `google`,
+`openai`, `z-ai`, `zai`) joined by `/`, or by `-` on an id with no `/` left. It is an
+allowlist, never a generic "drop the first segment": an unrecognised leading segment is
+always kept, because merging two genuinely different models is the one error this table
+cannot survive. Every fold is disclosed in the row's trailing note (`folded: …`), and the
+raw spellings stay available as `aliases` in `--json`. A gateway not on that list makes
+one model split into two buckets — `stats` warns when two bucket keys look like that,
+naming `MODEL_ROUTING_PREFIXES` as the place to extend.
 
 Trails are imperfect in practice, and `stats` reports what it could not measure rather
 than guessing:
@@ -818,6 +847,9 @@ than guessing:
   has no total, rather than a fabricated `0s` that would drag every median toward zero.
 - An issue with no runstate comments says so, and an issue that cannot be read at all is
   named and left out while the rest of the selection is still reported.
+- The `<unknown>` model bucket (runs that recorded no `model=`) is named as not
+  attributable to any model whenever a real model bucket sits beside it — its outcome
+  columns are not a model's record.
 
 Warnings go to stderr in both human and `--json` mode, so stdout stays parseable and
 `stats` still exits 0 — a degraded read is not a failure. It exits 1 only when nothing in
@@ -826,7 +858,14 @@ the selection could be read.
 `--json` returns `repo`, `issues`, `runs` (each with `run`, `model`, `last_phase`,
 `last_status`, `total_seconds`, and a `phases` array of
 `{phase, status, started_at, ended_at, seconds}`), `aggregates.phases`,
-`aggregates.models`, `issues_without_trail`, `issues_failed`, and `warnings`.
+`aggregates.models` (each with `model`, `aliases`, `runs`, `samples`,
+`median_total_seconds`, `min_total_seconds`, `max_total_seconds`, `negative_samples`,
+`delivered`, `blocked`, `unfinished`, `delivery_rate`), `issues_without_trail`,
+`issues_failed`, and `warnings`.
+
+From `@ai-dossier/cli` 0.25.0, `aggregates.models[].model` is the **canonical** bucket key
+rather than the raw recorded `model=` — a consumer selecting on a routed spelling such as
+`llmgateway/glm-5.3` should look in that bucket's `aliases` instead.
 
 ---
 
