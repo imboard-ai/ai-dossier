@@ -26,6 +26,7 @@ import {
   EnqueueError,
   type EnqueueInput,
   enqueueEntries,
+  FENCE_TIMEOUT_MS,
   groundTruthExec,
   IllegalTransitionError,
   Journal,
@@ -184,7 +185,21 @@ function renderReport(report: StatusReport): string {
     report.slots.length === 0
       ? '(no slots materialized yet)'
       : renderTable(
-          ['slot', 'status', 'unit', 'pid', 'role', 'phase', 'last-progress', 'recoveries'],
+          [
+            'slot',
+            'status',
+            'unit',
+            'pid',
+            'role',
+            'phase',
+            'last-progress',
+            'recoveries',
+            // #504: "is this slot a takeover, and is it under the short fence watch
+            // rather than its phase allowance?" is the first question anyone asks when
+            // debugging a refused post or a slot that recovered twice in half an hour.
+            'gen',
+            'fenced',
+          ],
           report.slots.map((s) => [
             String(s.id),
             s.status,
@@ -194,6 +209,8 @@ function renderReport(report: StatusReport): string {
             s.phase ?? '-',
             s.last_progress_at !== null ? relativeTime(s.last_progress_at) : '-',
             String(s.recoveries),
+            s.gen > 0 ? String(s.gen) : '-',
+            s.fenced_at !== null ? relativeTime(s.fenced_at) : '-',
           ])
         )
   );
@@ -615,10 +632,18 @@ function registerStartSubcommand(cmd: Command): void {
             ),
         }),
         // #504: the ladder fences a superseded run before respawning its takeover.
-        // Shares the ground-truth exec — same `ai-dossier` binary, same timeout, same
-        // never-throws contract — so a fence failure degrades the redispatch instead of
-        // aborting the tick.
-        fencer: createExecRunFencer(groundTruthExec, { repoDir: process.cwd() }),
+        // Its own exec rather than the ground-truth one: a fence is a WRITE, and
+        // borrowing `groundTruthExec` would file the only diagnostic for a failed write
+        // under `sched ground truth`, where nobody debugging a fence would look.
+        fencer: createExecRunFencer(
+          createExecFn(FENCE_TIMEOUT_MS, {
+            onError: (file, args, err) =>
+              process.stderr.write(
+                `⚠ sched fence: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+              ),
+          }),
+          { repoDir: process.cwd() }
+        ),
       };
 
       const describe = (result: TickResult): string => {

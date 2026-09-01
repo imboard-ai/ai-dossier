@@ -34,10 +34,11 @@ import {
   computeResume,
   DEFAULT_GENERATION,
   FENCE_STATUS,
-  fenceGeneration,
   generationOf,
+  isKnownPhase,
   latestFence,
   MAX_BODY_LENGTH,
+  MAX_GENERATION,
   mintRunId,
   nextFenceGeneration,
   type ParsedMilestone,
@@ -45,6 +46,7 @@ import {
   parseGeneration,
   parseMilestones,
   type ResumeProbe,
+  safeLabel,
   splitPair,
   validateMilestone,
 } from '../runstate';
@@ -86,6 +88,7 @@ interface CheckOptions {
   issue: string;
   run: string;
   gen?: string;
+  comment?: boolean;
   repo?: string;
   json?: boolean;
 }
@@ -367,7 +370,11 @@ function makeProbe(issue: string, repo?: string, warnings: string[] = []): Resum
 /** `--dry-run` and posting are shared with the plan protocol — see `../gh`. */
 
 /** Comment the built milestone body onto the issue and report where it landed. */
-function postMilestone(body: string, options: PostOptions): void {
+function postMilestone(
+  body: string,
+  options: PostOptions,
+  extras: Record<string, unknown> = {}
+): void {
   postIssueComment({
     issue: options.issue,
     repo: options.repo,
@@ -377,7 +384,9 @@ function postMilestone(body: string, options: PostOptions): void {
     json: options.json,
     // The milestone is the only durable record of the phase, so the body is handed back
     // in the JSON result: re-running the phase is far more expensive than a retry.
-    jsonExtras: { body },
+    // `extras` carries the supersession-check outcome (#504) — a post that went out
+    // unchecked must be distinguishable from one that was verified live.
+    jsonExtras: { body, ...extras },
     successLine: (url) => `✅ ${options.phase} ${options.status} → ${url}`,
   });
 }
@@ -404,13 +413,51 @@ function requirePostableBody(body: string, pairs: Array<[string, string]>): void
 // --- Fencing (#504) ---
 
 /**
- * Exit code `check` uses for "this run has been superseded".
+ * Exit code the fence guards use for "this run has been superseded".
  *
  * Distinct from `fail`'s 1 on purpose: a fenced run is a correct, expected answer that a
  * caller should act on by aborting quietly, not a usage error to be retried. A shell
- * `if ! ai-dossier runstate check …` can tell the two apart.
+ * `if ! ai-dossier runstate check …` can tell the two apart — as can a supervisor
+ * distinguishing "you were replaced" from "you called this wrong". Both `check` and a
+ * refused `post` use it, so one exit code means one thing everywhere.
  */
 export const FENCED_EXIT_CODE = 3;
+
+/**
+ * Author associations GitHub reports for an account with write access to the repository.
+ *
+ * `BOT` is included: the workflows that post milestones frequently run as an app token.
+ */
+const WRITE_ACCESS_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR', 'BOT']);
+
+/**
+ * The trail read the FENCE decisions use: only comments from accounts with write access.
+ *
+ * A milestone is an issue comment, and on a public repository anyone can leave one.
+ * Without this filter a single forged `status=superseded` comment from a stranger fences
+ * a live run out of its own trail — every `post` refused, every `check` telling the agent
+ * to stop — which is a one-comment denial of service on any run whose id is visible on
+ * the issue. `groundtruth.ts`'s `parseSetupInfo` already applies exactly this rule for
+ * the same reason, and `gh issue view --json comments` already returns the field.
+ *
+ * Reporting reads (`last`, `verify`, `stats`) deliberately stay unfiltered — they
+ * describe the trail rather than act on it, and hiding comments there would make an
+ * operator's picture disagree with the issue they are looking at.
+ */
+function tryFetchTrustedMilestones(issue: string, repo?: string): TrailResult {
+  const result = tryFetchComments(issue, repo);
+  if (!result.ok) return { ok: false, error: result.error };
+  const bodies = result.comments
+    .filter(
+      (c) =>
+        // An older gh does not report the field at all; trusting it then matches
+        // `parseSetupInfo` and keeps the guard from failing closed on a tooling gap.
+        c?.authorAssociation === undefined ||
+        WRITE_ACCESS_ASSOCIATIONS.has(String(c.authorAssociation))
+    )
+    .map((c) => (typeof c?.body === 'string' ? c.body : ''));
+  return { ok: true, milestones: parseMilestones(bodies) };
+}
 
 /** Read `--gen`, or exit explaining what a generation is. */
 function requireGeneration(raw: string | undefined, flag: string): number {
@@ -424,9 +471,62 @@ function requireGeneration(raw: string | undefined, flag: string): number {
   return parsed;
 }
 
-/** How a fenced run is described wherever one is reported. */
+/** A phase name read off the trail, made safe to display (same rule as {@link safeLabel}). */
+function safePhase(raw: string): string {
+  return isKnownPhase(raw) ? raw : 'an unrecorded phase';
+}
+
+/** A timestamp read off the trail, made safe to display. */
+function safeAt(raw: string): string {
+  return /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(raw) ? raw : 'an unrecorded date';
+}
+
+/**
+ * How a fenced run is described wherever one is reported.
+ *
+ * Every interpolated value comes OFF the trail — i.e. off an issue comment — and lands
+ * in an operator's terminal and in the output an agent acts on, so each is passed
+ * through its own read-path guard rather than quoted raw.
+ */
 function fenceDescription(fence: ParsedMilestone): string {
-  return `generation ${generationOf(fence)} (takeover '${fence.keys.takeover ?? 'unknown'}', fenced at ${fence.phase || 'unknown phase'} on ${fence.at || 'an unrecorded date'})`;
+  return `generation ${generationOf(fence) ?? 'unknown'} (takeover '${safeLabel(fence.keys.takeover)}', fenced at ${safePhase(fence.phase)} on ${safeAt(fence.at)})`;
+}
+
+/** What the trail says about one run's generation, or why it could not say. */
+type FenceView =
+  | { kind: 'unreadable'; error: string }
+  | { kind: 'live'; current: number; knownRun: boolean }
+  | { kind: 'fenced'; current: number; fence: ParsedMilestone; knownRun: boolean };
+
+/**
+ * The single "has this run been superseded?" query — one trail read, one comparison.
+ *
+ * Shared by `post`'s guard and `check` so the rule cannot drift between the command that
+ * enforces it and the command that reports it.
+ */
+function viewFence(issue: string, repo: string | undefined, run: string, gen: number): FenceView {
+  const result = tryFetchTrustedMilestones(issue, repo);
+  if (!result.ok) return { kind: 'unreadable', error: result.error.split('\n')[0] };
+
+  const knownRun = result.milestones.some((m) => m.run === run);
+  const fence = latestFence(result.milestones, run);
+  const current = fence === null ? DEFAULT_GENERATION : (generationOf(fence) ?? DEFAULT_GENERATION);
+  return fence !== null && current > gen
+    ? { kind: 'fenced', current, fence, knownRun }
+    : { kind: 'live', current, knownRun };
+}
+
+/**
+ * A `--run` that appears nowhere on the trail is almost always a typo, and a typo here
+ * fails SILENTLY in the dangerous direction: `fence` announces a takeover of a run that
+ * does not exist while the real one keeps working, and `check` reports "live" forever, so
+ * the checkpoint the whole self-abort story rests on never fires.
+ */
+function warnUnknownRun(knownRun: boolean, issue: string, run: string): void {
+  if (knownRun) return;
+  console.error(
+    `⚠️  No milestone on issue #${issue} carries run ${run} — check the --run value (minted ids look like r-${issue}-<hex>).`
+  );
 }
 
 /**
@@ -436,34 +536,61 @@ function fenceDescription(fence: ParsedMilestone): string {
  * for a fence voluntarily, so the check lives HERE — in the one command that can write to
  * the trail — rather than only in the workflow that is supposed to call it.
  *
- * Two deliberate exemptions:
- * - a {@link FENCE_STATUS} post is the fencing mechanism itself and can never self-reject;
- * - a trail that cannot be READ posts anyway, with a warning. A milestone is a phase's
- *   only durable record, and losing one to a transient gh outage is a worse failure than
- *   the race this prevents.
+ * A trail that cannot be READ posts anyway, with a warning, and says so in the result: a
+ * milestone is a phase's only durable record, and losing one to a transient gh outage is
+ * a worse failure than the race this prevents. The degradation is reported rather than
+ * merely warned about, so a machine consumer can tell a checked post from an unchecked
+ * one after the fact.
+ *
+ * Returns the extras to merge into the posted result.
  */
-function requireNotFenced(options: PostOptions, gen: number): void {
-  if (options.status === FENCE_STATUS) return;
+function requireNotFenced(
+  options: PostOptions,
+  gen: number,
+  body: string
+): Record<string, unknown> {
+  const view = viewFence(options.issue, options.repo, options.run, gen);
 
-  const result = tryFetchMilestones(options.issue, options.repo);
-  if (!result.ok) {
+  if (view.kind === 'unreadable') {
     console.error(
-      `⚠️  Could not read issue #${options.issue} to check whether run ${options.run} was superseded — posting anyway. (${result.error.split('\n')[0]})`
+      `⚠️  Could not read issue #${options.issue} to check whether run ${options.run} was superseded — posting anyway. (${view.error})`
     );
-    return;
+    return { fence_check: 'skipped', fence_check_error: view.error };
+  }
+  if (view.kind === 'live') {
+    warnUnknownRun(view.knownRun, options.issue, options.run);
+    return { fence_check: 'passed', current_gen: view.current };
   }
 
-  const fence = latestFence(result.milestones, options.run);
-  if (fence === null || generationOf(fence) <= gen) return;
-
-  fail([
-    [
-      `Run ${options.run} was SUPERSEDED — refusing to post a ${options.phase}/${options.status} milestone from generation ${gen}.`,
-      `It was fenced at ${fenceDescription(fence)}.`,
-      `This run no longer owns issue #${options.issue}: another agent took it over, and two runs writing one trail is what this check exists to prevent.`,
-      `Fix: stop working on this issue and exit. Do not push, do not open a PR, do not retry — the takeover is doing the work. If you ARE the takeover, pass --gen ${generationOf(fence)}.`,
-    ].join('\n'),
-  ]);
+  const lines = [
+    `Run ${options.run} was SUPERSEDED — refusing to post this ${options.phase}/${options.status} milestone from generation ${gen}.`,
+    `It was fenced at ${fenceDescription(view.fence)}.`,
+    `This run no longer owns issue #${options.issue}: another agent took it over, and two runs writing one trail is what this check exists to prevent.`,
+    `Fix: stop working on this issue and exit. Do not push, do not open a PR, do not retry — the takeover is doing the work. If you ARE the takeover, pass --gen ${view.current}.`,
+  ];
+  for (const [i, line] of lines.entries()) {
+    console.error(i === 0 ? `❌ ${line}` : `   ${line}`);
+  }
+  if (options.json) {
+    // The milestone body rides the failure result for the same reason it rides the
+    // success one: re-running a phase is far more expensive than re-posting it, and a
+    // supervisor may legitimately decide the takeover is the one that should post it.
+    console.log(
+      JSON.stringify(
+        {
+          posted: false,
+          fenced: true,
+          gen,
+          current_gen: view.current,
+          takeover: safeLabel(view.fence.keys.takeover),
+          body,
+        },
+        null,
+        2
+      )
+    );
+  }
+  process.exit(FENCED_EXIT_CODE);
 }
 
 /** `runstate post` — validate a milestone, then comment it onto the issue. */
@@ -476,7 +603,10 @@ function registerPostSubcommand(cmd: Command): void {
       '--phase <phase>',
       `classify, ${[...PHASES].join(', ')}, or a batch phase (${BATCH_PHASES.join(', ')})`
     )
-    .requiredOption('--status <status>', 'done, partial, blocked, or awaiting-merge')
+    .requiredOption(
+      '--status <status>',
+      `done, partial, blocked, or awaiting-merge (a '${FENCE_STATUS}' fence is written by 'runstate fence')`
+    )
     .requiredOption(
       '--run <id>',
       'Run id (r-<issue>-<hex>) — mint one with: runstate mint; full-cycle runs mint it at the gate phase'
@@ -492,6 +622,15 @@ function registerPostSubcommand(cmd: Command): void {
     .option('--json', 'Output the result as JSON')
     .action((options: PostOptions) => {
       requireIssueTarget(options);
+      // `runstate fence` is the ONLY writer of a fence. Allowing `post --status
+      // superseded` would hand a superseded generation the one milestone the guard
+      // below cannot refuse, letting it install a higher generation and re-take the run
+      // it had just lost — the mechanism turned against itself.
+      if (options.status === FENCE_STATUS) {
+        fail([
+          `'post --status ${FENCE_STATUS}' is not allowed — a fence is installed by 'runstate fence', which reads the current generation off the trail and increments it.\nFix: ai-dossier runstate fence --issue ${options.issue} --run ${options.run} --phase ${options.phase} --takeover <label>`,
+        ]);
+      }
       const gen = requireGeneration(options.gen, '--gen');
       const { pairs, errors: kvErrors } = parseKvPairs(options.kv ?? []);
 
@@ -520,8 +659,8 @@ function registerPostSubcommand(cmd: Command): void {
         printDryRun(body, options.json);
         return;
       }
-      requireNotFenced(options, gen);
-      postMilestone(body, options);
+      const fenceExtras = requireNotFenced(options, gen, body);
+      postMilestone(body, options, fenceExtras);
     });
 }
 
@@ -914,10 +1053,24 @@ function registerFenceSubcommand(cmd: Command): void {
     .option('--json', 'Output the result as JSON')
     .action((options: FenceOptions) => {
       requireIssueTarget(options);
-      const milestones = fetchMilestones(options.issue, options.repo);
+      // Trusted read: the generation is read-then-incremented off the trail, so a forged
+      // `superseded` comment claiming a high generation would otherwise dictate what the
+      // legitimate fence installs.
+      const result = tryFetchTrustedMilestones(options.issue, options.repo);
+      if (!result.ok) fail([result.error]);
+      warnUnknownRun(
+        result.milestones.some((m) => m.run === options.run),
+        options.issue,
+        options.run
+      );
       // Read-then-increment off the live trail, so a recovery-of-recovery fences the
       // FIRST takeover too rather than reinstalling the generation it already owns.
-      const gen = nextFenceGeneration(milestones, options.run);
+      const gen = nextFenceGeneration(result.milestones, options.run);
+      if (gen === null) {
+        fail([
+          `Run ${options.run} is already at the maximum generation (${MAX_GENERATION}) — refusing to fence it again.\nThe ladder caps recoveries at two per run, so a trail this deep means a forged or corrupt 'gen=' value. Fix: inspect the superseded milestones on issue #${options.issue} by hand.`,
+        ]);
+      }
 
       const keys: Array<[string, string]> = [
         ['gen', String(gen)],
@@ -956,72 +1109,139 @@ function registerFenceSubcommand(cmd: Command): void {
     });
 }
 
+/** What `check` reports, in either output mode. */
+interface CheckResult {
+  fenced: boolean;
+  /** The generation the caller claimed to own. */
+  gen: number;
+  /** The generation that currently owns the run. */
+  current_gen: number;
+  /** True when the trail could not be read and the run is reported live by default. */
+  degraded?: boolean;
+  /** Why the trail could not be read, when `degraded`. */
+  error?: string;
+  /** Whether any milestone on the issue carries this run id. */
+  known_run?: boolean;
+  takeover?: string;
+  phase?: string;
+  at?: string;
+}
+
+/** The comment a fenced run leaves behind when it aborts (#504 AC2). */
+function abortCommentBody(run: string, gen: number, fence: ParsedMilestone): string {
+  return [
+    `**Run superseded — aborting.** Run \`${run}\` (generation ${gen}) stopped work on this issue at its supersession checkpoint.`,
+    '',
+    `It was fenced at ${fenceDescription(fence)}. The takeover owns the issue from here; this run pushed nothing further and opened no PR.`,
+  ].join('\n');
+}
+
+/**
+ * Whether this run already left an abort comment for this exact fence.
+ *
+ * A workflow checks at several checkpoints (before implement, review, and ship), and a
+ * fenced run that reaches more than one of them must not comment more than once.
+ */
+function alreadyAborted(issue: string, repo: string | undefined, marker: string): boolean {
+  const comments = tryFetchComments(issue, repo);
+  return comments.ok && comments.comments.some((c) => String(c?.body ?? '').includes(marker));
+}
+
 /**
  * `runstate check` — the agent-side checkpoint (#504 AC2): has this run been superseded?
  *
  * Exits {@link FENCED_EXIT_CODE} when it has, so a workflow can run it before implement,
- * before review, and before ship and abort on a non-zero exit. A trail that cannot be
- * read reports live, for the same reason `post` posts anyway: a transient gh outage must
- * not abort a healthy run.
+ * before review, and before ship and abort on a non-zero exit. With `--comment` the abort
+ * is recorded on the issue as well, so a human reading the trail sees why a run stopped
+ * rather than an unexplained silence.
+ *
+ * A trail that cannot be read reports live, for the same reason `post` posts anyway: a
+ * transient gh outage must not abort a healthy run. The degradation is reported in the
+ * result, not only warned about, so the answer is never mistaken for a verified one.
  */
 function registerCheckSubcommand(cmd: Command): void {
   cmd
     .command('check')
     .description(
-      `Check whether a run generation has been superseded (read-only; exits ${FENCED_EXIT_CODE} when fenced)`
+      `Check whether a run generation has been superseded (exits ${FENCED_EXIT_CODE} when fenced)`
     )
     .requiredOption('--issue <number>', 'GitHub issue number')
     .requiredOption('--run <id>', 'Run id to check (r-<issue>-<hex>)')
     .option('--gen <n>', 'Generation this agent owns (default 0)')
+    .option('--comment', 'When fenced, also post one short abort comment on the issue')
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
     .option('--json', 'Output the result as JSON')
     .action((options: CheckOptions) => {
       requireIssueTarget(options);
       const gen = requireGeneration(options.gen, '--gen');
+      const view = viewFence(options.issue, options.repo, options.run, gen);
 
-      const result = tryFetchMilestones(options.issue, options.repo);
-      if (!result.ok) {
+      if (view.kind === 'unreadable') {
         console.error(
-          `⚠️  check could not read issue #${options.issue} — reporting the run as live. (${result.error.split('\n')[0]})`
+          `⚠️  check could not read issue #${options.issue} — reporting the run as live. (${view.error})`
         );
-        printCheckResult({ fenced: false, gen, current: gen }, options.json);
+        printCheckResult(
+          { fenced: false, gen, current_gen: gen, degraded: true, error: view.error },
+          options.json
+        );
         return;
       }
 
-      const current = fenceGeneration(result.milestones, options.run);
-      const fence = latestFence(result.milestones, options.run);
-      if (fence === null || current <= gen) {
-        printCheckResult({ fenced: false, gen, current }, options.json);
+      warnUnknownRun(view.knownRun, options.issue, options.run);
+
+      if (view.kind === 'live') {
+        printCheckResult(
+          { fenced: false, gen, current_gen: view.current, known_run: view.knownRun },
+          options.json
+        );
         return;
+      }
+
+      if (options.comment) {
+        // The marker makes the comment idempotent across a run's several checkpoints,
+        // and identifies exactly which generation of which run gave up.
+        const marker = `<!-- runstate-abort:${options.run}:${gen} -->`;
+        if (!alreadyAborted(options.issue, options.repo, marker)) {
+          postIssueComment({
+            issue: options.issue,
+            repo: options.repo,
+            body: `${marker}\n${abortCommentBody(options.run, gen, view.fence)}`,
+            noun: 'abort comment',
+            action: `Failed to post the abort comment for run ${options.run} to issue #${options.issue}`,
+            successLine: (url) => `📝 abort comment → ${url}`,
+          });
+        }
       }
 
       printCheckResult(
         {
           fenced: true,
           gen,
-          current,
-          takeover: fence.keys.takeover ?? null,
-          phase: fence.phase,
-          at: fence.at,
+          current_gen: view.current,
+          known_run: view.knownRun,
+          takeover: safeLabel(view.fence.keys.takeover),
+          phase: safePhase(view.fence.phase),
+          at: safeAt(view.fence.at),
         },
         options.json
       );
       console.error(
-        `❌ Run ${options.run} was SUPERSEDED at ${fenceDescription(fence)}.\n   Stop working on issue #${options.issue} and exit: another agent owns it. Do not push, do not open a PR.`
+        `❌ Run ${options.run} was SUPERSEDED at ${fenceDescription(view.fence)}.\n   Stop working on issue #${options.issue} and exit: another agent owns it. Do not push, do not open a PR.`
       );
       process.exit(FENCED_EXIT_CODE);
     });
 }
 
 /** `check`'s stdout, in whichever mode the caller asked for. */
-function printCheckResult(result: Record<string, unknown>, json?: boolean): void {
+function printCheckResult(result: CheckResult, json?: boolean): void {
   if (json) {
     console.log(JSON.stringify(result, null, 2));
     return;
   }
   console.log(`fenced=${result.fenced}`);
   console.log(`gen=${result.gen}`);
-  console.log(`current_gen=${result.current}`);
+  console.log(`current_gen=${result.current_gen}`);
+  if (result.degraded === true) console.log('degraded=true');
   if (result.takeover !== undefined) console.log(`takeover=${result.takeover}`);
 }
 

@@ -478,12 +478,18 @@ function spawnReportAgent(ctx: TickCtx, state: SchedState, unit: string): SchedS
   return spawnAndRecord(ctx, state, unit, slot, {
     tier,
     cmd: buildAgentCommand(ctx.dispatch.command, tier, issue, ctx.dispatch.tierModels),
-    prompt: buildReportPrompt(ctx.dispatch.reportPrompt, issue, entry.pr, entry.cleanup),
+    // The generation reaches the report agent exactly as it reaches a cycle agent
+    // (#504): a report slot is fenced by the same ladder, and a report agent that did
+    // not know its generation would have its `report done` milestone refused by the
+    // CLI — recovering forever on a PR that already merged.
+    prompt: buildReportPrompt(ctx.dispatch.reportPrompt, issue, entry.pr, entry.cleanup, slot.gen),
     phase: 'report',
     // Merged-aware: the PR is merged — a report spawn failure never blocks
     // dependents (gating already released at `shipped`).
     failOpts: { merged: true },
-    journalExtra: { detail: 'report agent' },
+    journalExtra: {
+      detail: slot.gen > 0 ? `report agent, takeover gen=${slot.gen}` : 'report agent',
+    },
   });
 }
 
@@ -585,16 +591,32 @@ function blockTransitiveDependents(
 }
 
 /**
+ * A run id, and the issue it must belong to.
+ *
+ * The run id comes off the milestone trail — issue comments, i.e. network data — so a
+ * forged comment could otherwise aim the fence at a well-formed run id for some other
+ * issue. That is WORSE than not fencing: the CLI would accept it, the engine would
+ * journal `fence-written`, and the real zombie would stay free to write.
+ */
+const RUN_ID_FOR_ISSUE_RE = /^r-(\d+)-[0-9a-f]{4,}$/;
+
+/** A phase name safe to hand to the CLI, matching the milestone grammar's shape. */
+const PHASE_TOKEN_RE = /^[a-z][a-z0-9-]{0,31}$/;
+
+/**
  * Post the takeover record for a unit about to be redispatched (#504 AC1), returning the
  * generation the fence installed — or null when no fence could be written.
  *
- * Two ways to get null, both journaled as `fence-failed` and both DEGRADED rather than
- * fatal:
+ * Every null is journaled as `fence-failed` WITH its cause, and every one is DEGRADED
+ * rather than fatal:
  *
- * - **No run id.** The run id lives on the trail, so a unit whose milestones are
- *   unreadable (or that has posted none yet) has nothing to fence. An agent with no
- *   milestone has also written nothing to race over.
- * - **The post failed.** gh auth, a missing binary, a network wall.
+ * - **No fencer configured.** An engine built before #504, or misconfigured.
+ * - **No usable run id.** The run id lives on the trail, so a unit that has posted no
+ *   milestone has nothing to fence — and an agent that has written nothing has also
+ *   written nothing to race over. A run id that does not belong to THIS issue is
+ *   rejected for the reason above.
+ * - **The post failed.** gh auth, a missing binary, a network wall — the fencer's own
+ *   reason says which.
  *
  * The redispatch proceeds either way. Refusing to redispatch would strand a stalled unit
  * forever, which is a worse and more common failure than the race a fence prevents; the
@@ -607,36 +629,44 @@ function writeFence(
   slot: SlotEntry,
   truth: UnitTruth
 ): number | null {
-  const run = truth.milestone?.run ?? '';
-  if (ctx.deps.fencer === undefined || run === '') {
-    journal(ctx, 'fence-failed', unit, {
-      slot: slot.id,
-      detail:
-        ctx.deps.fencer === undefined
-          ? 'no fencer configured — redispatching unfenced'
-          : 'no run id on the trail to fence — redispatching unfenced',
-    });
+  const failed = (detail: string): null => {
+    journal(ctx, 'fence-failed', unit, { slot: slot.id, detail });
     return null;
+  };
+
+  if (ctx.deps.fencer === undefined) {
+    return failed('no fencer configured — redispatching unfenced');
+  }
+
+  const run = truth.milestone?.run ?? '';
+  if (run === '') {
+    return failed('no run id on the trail to fence — redispatching unfenced');
+  }
+  const owner = RUN_ID_FOR_ISSUE_RE.exec(run);
+  if (owner === null || Number(owner[1]) !== issue) {
+    return failed(
+      `trail run id '${run}' is not a run id for issue #${issue} — redispatching unfenced`
+    );
   }
 
   // The phase the superseded agent was IN, as its own last milestone recorded it — the
-  // fence names where the work was taken over, not where it will resume.
-  const phase = truth.milestone?.phase ?? slot.phase ?? 'gate';
+  // fence names where the work was taken over, not where it will resume. A value that is
+  // not a plain phase token would just be rejected by the CLI, so the slot's own record
+  // is preferred over spending the attempt on it.
+  const claimed = truth.milestone?.phase ?? '';
+  const phase = PHASE_TOKEN_RE.test(claimed) ? claimed : (slot.phase ?? 'gate');
   const takeover = `slot-${slot.id}-r${slot.recoveries + 1}`;
-  const gen = ctx.deps.fencer(issue, run, phase, takeover);
-  if (gen === null) {
-    journal(ctx, 'fence-failed', unit, {
-      slot: slot.id,
-      detail: `runstate fence did not report a generation for ${run} — redispatching unfenced`,
-    });
-    return null;
+
+  const outcome = ctx.deps.fencer(issue, run, phase, takeover);
+  if (!outcome.ok) {
+    return failed(`${outcome.reason} — redispatching at gen=${slot.gen}`);
   }
 
   journal(ctx, 'fence-written', unit, {
     slot: slot.id,
-    detail: `${run} gen=${gen} takeover=${takeover}`,
+    detail: `${run} gen=${outcome.gen} takeover=${takeover}`,
   });
-  return gen;
+  return outcome.gen;
 }
 
 /**

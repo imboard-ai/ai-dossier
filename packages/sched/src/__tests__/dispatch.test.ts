@@ -6,6 +6,7 @@ import {
   buildReportPrompt,
   DEFAULT_DISPATCH_COMMAND,
   DEFAULT_FIX_PROMPT_TEMPLATE,
+  DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
   escalateTier,
@@ -324,5 +325,46 @@ describe('stallTimeoutForSlot (#504)', () => {
   it('defaults the fence window to fifteen minutes', () => {
     const defaults = resolveDispatch({ max_slots: 1 });
     expect(defaults.fenceTakeoverTimeoutMs).toBe(15 * 60 * 1000);
+  });
+});
+
+describe('supersession checkpoint in the default prompt (#504 AC2)', () => {
+  it('tells EVERY dispatched run to check, not only takeovers', () => {
+    // The run that gets fenced is the one already running — generation 0, like any first
+    // dispatch. Instructing only takeovers would leave the zombie with no instruction to
+    // stop, which is the whole point of the AC.
+    const prompt = buildPrompt(DEFAULT_PROMPT_TEMPLATE, 504);
+    expect(prompt).toContain('SUPERSESSION CHECKPOINT');
+    expect(prompt).toContain('before implement, before review, and before ship');
+    expect(prompt).toContain('runstate check --issue 504');
+    expect(prompt).toContain('--gen 0');
+    expect(prompt).toContain('--comment');
+  });
+
+  it('substitutes the takeover’s generation into the checkpoint', () => {
+    expect(buildPrompt(DEFAULT_PROMPT_TEMPLATE, 504, 2)).toContain('--gen 2');
+  });
+
+  it('names a refused post as the same stop signal', () => {
+    expect(buildPrompt(DEFAULT_PROMPT_TEMPLATE, 504)).toContain('SUPERSEDED');
+  });
+
+  it('keeps the pre-existing headless instruction', () => {
+    expect(buildPrompt(DEFAULT_PROMPT_TEMPLATE, 504)).toContain(NO_BACKGROUND_EXIT_INSTRUCTION);
+  });
+});
+
+describe('buildReportPrompt generations (#504)', () => {
+  it('leaves a first report dispatch untouched', () => {
+    const prompt = buildReportPrompt(DEFAULT_REPORT_PROMPT_TEMPLATE, 504, 77, 'done');
+    expect(prompt).toContain('#504');
+    expect(prompt).toContain('#77');
+    expect(prompt).not.toContain('TAKEOVER');
+  });
+
+  it('appends the takeover instruction for a fenced report agent', () => {
+    const prompt = buildReportPrompt(DEFAULT_REPORT_PROMPT_TEMPLATE, 504, 77, 'done', 3);
+    expect(prompt).toContain('TAKEOVER');
+    expect(prompt).toContain('--gen 3');
   });
 });

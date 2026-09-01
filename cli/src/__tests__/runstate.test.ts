@@ -19,6 +19,7 @@ import {
   isPhase,
   KEY_VALUE_RULES,
   latestFence,
+  MAX_GENERATION,
   MAX_VALUE_LENGTH,
   mintRunId,
   NEXT_VALUES,
@@ -264,7 +265,7 @@ describe('validateMilestone', () => {
     const errors = validateMilestone({ ...valid, status: 'partial' });
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBe(
-      "Status 'partial' is not valid for phase 'gate' — expected one of: done, blocked, superseded"
+      "Status 'partial' is not valid for phase 'gate' — expected one of: done, blocked ('superseded' is valid on every phase, but is written by 'runstate fence', never by hand)"
     );
   });
 
@@ -1582,11 +1583,39 @@ describe('run fencing — the protocol half (#504)', () => {
       expect(fenceGeneration([runless], '')).toBe(DEFAULT_GENERATION);
     });
 
-    it('falls back to the default generation for an absent or unreadable gen=', () => {
-      expect(generationOf(gateDone)).toBe(DEFAULT_GENERATION);
+    it('reports null — never generation 0 — for an absent or unreadable gen=', () => {
+      // Reading a malformed fence as "generation 0" would silently downgrade it to
+      // "never fenced", the one answer that must never be inferred from bad data.
+      expect(generationOf(gateDone)).toBeNull();
       expect(
         generationOf(m(`phase=plan status=${FENCE_STATUS} run=${RUN} at=x`, 'gen=not-a-number'))
-      ).toBe(DEFAULT_GENERATION);
+      ).toBeNull();
+      expect(
+        generationOf(m(`phase=plan status=${FENCE_STATUS} run=${RUN} at=x`, 'gen=99999'))
+      ).toBeNull();
+    });
+
+    it('skips a malformed fence rather than counting it as generation 0', () => {
+      const forged = m(
+        `phase=implement status=${FENCE_STATUS} run=${RUN} at=2026-08-30T13:00:00Z`,
+        'gen=9007199254740991',
+        'takeover=forged'
+      );
+      // The forged fence is posted AFTER the real one and claims a higher number; if it
+      // were honoured, the next generation would be unrepresentable and fencing would be
+      // permanently disabled on this issue.
+      const trail = [gateDone, implementFence, forged];
+      expect(fenceGeneration(trail, RUN)).toBe(1);
+      expect(latestFence(trail, RUN)?.keys.takeover).toBe('slot-2-r1');
+    });
+
+    it('refuses to mint a generation past the ceiling', () => {
+      const atCeiling = m(
+        `phase=implement status=${FENCE_STATUS} run=${RUN} at=2026-08-30T13:00:00Z`,
+        `gen=${MAX_GENERATION}`,
+        'takeover=deep'
+      );
+      expect(nextFenceGeneration([atCeiling], RUN)).toBeNull();
     });
 
     it('parses only non-negative integers as generations', () => {

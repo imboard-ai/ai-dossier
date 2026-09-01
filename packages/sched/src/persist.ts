@@ -279,7 +279,7 @@ export class SchedStore {
       console.error(
         `⚠ Scheduler config ${this.configPath} is unreadable (${(err as Error).message}) — ` +
           `ALL config (max_slots, stall_timeout_ms, reconcile_interval_ms, pr_poll_interval_ms, ` +
-          `dispatch command/prompt/models/phase-timeouts) reverted to built-in defaults ` +
+          `dispatch command/prompt/models/phase-timeouts/fence-takeover-timeout) reverted to built-in defaults ` +
           `(max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
       );
       return { max_slots: DEFAULT_MAX_SLOTS };
@@ -376,6 +376,9 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
       requirePositiveIntMs(`dispatch.phase_stall_timeout_ms.${phase}`, ms);
     }
   }
+  if (dispatch.fence_takeover_timeout_ms !== undefined) {
+    requirePositiveIntMs('dispatch.fence_takeover_timeout_ms', dispatch.fence_takeover_timeout_ms);
+  }
   const out: DispatchConfig = {};
   if (dispatch.command !== undefined) out.command = dispatch.command as string[];
   if (dispatch.prompt !== undefined) out.prompt = dispatch.prompt as string;
@@ -386,6 +389,9 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   }
   if (dispatch.phase_stall_timeout_ms !== undefined) {
     out.phase_stall_timeout_ms = dispatch.phase_stall_timeout_ms as Record<string, number>;
+  }
+  if (dispatch.fence_takeover_timeout_ms !== undefined) {
+    out.fence_takeover_timeout_ms = dispatch.fence_takeover_timeout_ms as number;
   }
   return out;
 }

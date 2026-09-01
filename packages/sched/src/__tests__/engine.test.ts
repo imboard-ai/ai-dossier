@@ -101,10 +101,10 @@ function harness(
   let fenceFails = false;
   const fencer: RunFencer = (issue, run, phase, takeover) => {
     fenceCalls.push({ issue, run, phase, takeover, spawnsBefore: spawnCalls.length });
-    if (fenceFails) return null;
+    if (fenceFails) return { ok: false, reason: 'fake fencer told to fail' };
     const gen = (fenceGens.get(run) ?? 0) + 1;
     fenceGens.set(run, gen);
-    return gen;
+    return { ok: true, gen };
   };
 
   let clock = new Date('2026-08-29T12:00:00Z');
@@ -183,7 +183,7 @@ function harness(
       milestones.set(issue, {
         phase,
         status,
-        run: `r-${issue}-x`,
+        run: `r-${issue}-ab12`,
         at: at ?? clock.toISOString(),
         keys,
       }),
@@ -1743,7 +1743,7 @@ describe('zombie-run fencing on redispatch (#504)', () => {
     const fence = h.fenceCalls[0];
     expect(fence.issue).toBe(504);
     // The run id and phase come off the polled trail, not from local bookkeeping.
-    expect(fence.run).toBe('r-504-x');
+    expect(fence.run).toBe('r-504-ab12');
     expect(fence.phase).toBe('gate');
     // The ordering is the point: `killUnitAgent` only reaches a pid this process can
     // signal, so the durable record has to exist before the takeover does.
@@ -1853,7 +1853,7 @@ describe('zombie-run fencing on redispatch (#504)', () => {
 
     expect(result.redispatched).toEqual(['issue:504']);
     expect(h.fenceCalls).toHaveLength(1);
-    expect(h.fenceCalls[0].run).toBe('r-504-x');
+    expect(h.fenceCalls[0].run).toBe('r-504-ab12');
   });
 
   it('never fences a unit that fails at the escalation cap', () => {
@@ -1869,6 +1869,74 @@ describe('zombie-run fencing on redispatch (#504)', () => {
 
     expect(result.failed).toEqual(['issue:504']);
     expect(h.fenceCalls).toHaveLength(2);
+  });
+
+  it('refuses to fence a run id that does not belong to this issue', () => {
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 504, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    // A milestone is an issue comment, so its `run=` is network data. Fencing a
+    // well-formed run id belonging to some OTHER issue is worse than not fencing: it
+    // would journal success while the real zombie stayed free to write.
+    h.milestones.set(504, {
+      phase: 'gate',
+      status: 'done',
+      run: 'r-999-dead',
+      at: h.clock().toISOString(),
+      keys: { next: 'setup' },
+    });
+    h.advance(HOUR + 1000);
+
+    expect(h.tick().redispatched).toEqual(['issue:504']);
+    expect(h.fenceCalls).toHaveLength(0);
+    expect(
+      h.events().some((e) => e.event === 'fence-failed' && e.detail?.includes('r-999-dead'))
+    ).toBe(true);
+  });
+
+  it('journals the fencer’s own reason when the fence write fails', () => {
+    const h = stalling();
+    h.setFenceFails(true);
+    h.advance(HOUR + 1000);
+    h.tick();
+
+    const failure = h.events().find((e) => e.event === 'fence-failed');
+    // The cause has to survive into the journal — "it failed" is not something an
+    // operator can act on.
+    expect(failure?.detail).toContain('fake fencer told to fail');
+    expect(failure?.detail).toContain('gen=0');
+  });
+
+  it('hands a fenced report agent its generation too', () => {
+    // A report slot rides the same ladder. Without the generation its `report done`
+    // milestone is refused by the CLI and it recovers to the cap on a merged PR.
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 504, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.milestones.set(504, parkMilestone(77));
+    h.alive.clear();
+    h.tick(); // verified park → entry parked, slot released
+    h.setPr(77, { state: 'MERGED', mergedAt: '2026-08-29T13:00:00Z' });
+    h.closedIssues.add(504);
+    h.setTeardownScript(() => 'ok');
+    h.advance(10 * 60 * 1000);
+    h.tick(); // merge accepted → teardown → report agent dispatched
+
+    const reportSpawn = h.spawnCalls.at(-1);
+    expect(reportSpawn?.prompt).toContain('report phase');
+    // A first report dispatch is generation 0 and reads as it always did.
+    expect(reportSpawn?.prompt).not.toContain('TAKEOVER');
+
+    h.setMilestone(504, 'ship', 'done', undefined, { next: 'report' });
+    h.advance(HOUR + 1000);
+    h.tick(); // the report agent stalls → fenced and redispatched
+
+    expect(h.fenceCalls).toHaveLength(1);
+    const takeoverReport = h.spawnCalls.at(-1);
+    expect(takeoverReport?.prompt).toContain('report phase');
+    expect(takeoverReport?.prompt).toContain('--gen 1');
   });
 
   it('runs the pre-#504 redispatch path when no fencer is configured', () => {

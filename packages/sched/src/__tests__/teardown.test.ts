@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SetupInfo } from '../groundtruth';
-import { type ExecFn, isSafeWorktree, runTeardown } from '../index';
+import { isSafeWorktree, runTeardown } from '../index';
+import { recording } from './helpers/recording-exec';
 
 /**
  * Teardown tests (#468 AC2): every subprocess scripted through a fake exec —
@@ -8,20 +9,6 @@ import { type ExecFn, isSafeWorktree, runTeardown } from '../index';
  * is only claimed `done` when the evidence says so; everything else records
  * `failed-<step>`.
  */
-
-function recording(script: (file: string, args: string[]) => string | null): {
-  exec: ExecFn;
-  calls: Array<{ file: string; args: string[]; cwd?: string }>;
-} {
-  const calls: Array<{ file: string; args: string[]; cwd?: string }> = [];
-  return {
-    calls,
-    exec: (file, args, cwd) => {
-      calls.push({ file, args, cwd });
-      return script(file, args);
-    },
-  };
-}
 
 const REPO = '/repo';
 const WT = '/repo/worktrees/wt-9';

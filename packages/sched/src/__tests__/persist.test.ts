@@ -302,3 +302,36 @@ describe('#495 config: dispatch.fix_prompt (pre-existing gap in the function thi
     );
   });
 });
+
+describe('#504 config: dispatch.fence_takeover_timeout_ms', () => {
+  it('round-trips the fence takeover timeout', () => {
+    // Regression: the key was declared on DispatchConfig, read by resolveDispatch and
+    // documented — but never copied by validateDispatchConfig's allowlist, so an
+    // operator setting it got the default with no error and no warning.
+    const store = new SchedStore(dir);
+    store.saveConfig({ max_slots: 2, dispatch: { fence_takeover_timeout_ms: 60_000 } });
+    expect(store.loadConfig().dispatch?.fence_takeover_timeout_ms).toBe(60_000);
+  });
+
+  it('survives a load alongside the other dispatch keys', () => {
+    const store = new SchedStore(dir);
+    store.saveConfig({
+      max_slots: 2,
+      dispatch: {
+        fence_takeover_timeout_ms: 60_000,
+        phase_stall_timeout_ms: { implement: 5_400_000 },
+      },
+    });
+    const config = store.loadConfig();
+    expect(config.dispatch?.fence_takeover_timeout_ms).toBe(60_000);
+    expect(config.dispatch?.phase_stall_timeout_ms).toEqual({ implement: 5_400_000 });
+  });
+
+  it('rejects a non-positive fence takeover timeout (degrades to defaults, loudly)', () => {
+    expectConfigRejected(
+      { schema_version: '1.2.0', max_slots: 2, dispatch: { fence_takeover_timeout_ms: 0 } },
+      'fence_takeover_timeout_ms',
+      'positive integer'
+    );
+  });
+});

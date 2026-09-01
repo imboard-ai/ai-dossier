@@ -272,7 +272,28 @@ const BATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  * agent name. Loose on purpose (the ladder has no single naming scheme) but still a
  * single flag-safe token, since it is read back out of a comment and shown to an agent.
  */
-const TAKEOVER_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
+export const TAKEOVER_RE = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/;
+
+/** Longest label echoed back out of a comment; a forged one is not a budget. */
+const MAX_LABEL_LENGTH = 120;
+
+/**
+ * A `takeover=` label read OFF the trail, made safe to display.
+ *
+ * `TAKEOVER_RE` is enforced when a milestone is WRITTEN, but a milestone is an issue
+ * comment: anyone who can comment can author one, and the tolerant reader
+ * ({@link parseMilestone}) does not split non-header lines on whitespace, so a
+ * hand-posted `takeover=` can carry spaces, ANSI escapes, and anything else short of a
+ * newline. That string is printed into output an LLM agent with commit rights is
+ * instructed to read and act on, and into an operator's terminal. So a label that does
+ * not match the write-path grammar is DROPPED rather than quoted — the same discipline
+ * as `gh.ts`'s `snippet`/`isSafeArg` and `dispatch.ts`'s prompt flattening.
+ */
+export function safeLabel(raw: string | undefined): string {
+  return raw !== undefined && raw.length <= MAX_LABEL_LENGTH && TAKEOVER_RE.test(raw)
+    ? raw
+    : 'unknown';
+}
 
 /** One rule per enum-valued key; the message lists the closed set verbatim. */
 function enumRule(values: readonly string[]): KeyValueRule {
@@ -358,9 +379,21 @@ export function defaultNext(phase: KnownPhase, status: Status): KnownPhase | 'do
   return idx === PHASES.length - 1 ? 'done' : PHASES[idx + 1];
 }
 
+/**
+ * Every status `phase` may report, including the universally-valid fence status (#504).
+ *
+ * One definition, so the predicate below and the error message in
+ * {@link validateMilestone} can never disagree about the rule — a diagnostic that lists
+ * a status the validator rejects (or omits one it accepts) is the hardest kind of bug to
+ * notice, because the code is right and only the explanation is wrong.
+ */
+export function allowedStatuses(phase: KnownPhase): readonly Status[] {
+  return [...ALL_PHASE_SPECS[phase].statuses, FENCE_STATUS];
+}
+
 /** Whether `phase` may report `status` — the fence status is valid on every phase (#504). */
 export function statusAllowed(phase: KnownPhase, status: Status): boolean {
-  return status === FENCE_STATUS || ALL_PHASE_SPECS[phase].statuses.includes(status);
+  return allowedStatuses(phase).includes(status);
 }
 
 /** The keys `phase` must carry when reporting `status`. */
@@ -439,9 +472,11 @@ export function validateMilestone(input: MilestoneInput): string[] {
   if (!isStatus(status)) {
     errors.push(`Unknown status '${status}' — expected one of: ${STATUSES.join(', ')}`);
   } else if (isKnownPhase(phase) && !statusAllowed(phase, status)) {
-    const allowed = [...ALL_PHASE_SPECS[phase].statuses, FENCE_STATUS];
+    // The message lists the phase's OWN statuses and mentions the fence separately: an
+    // author who mistyped a status must not read `superseded` as an ordinary choice and
+    // hand-post a fence, bypassing the generation arithmetic `runstate fence` owns.
     errors.push(
-      `Status '${status}' is not valid for phase '${phase}' — expected one of: ${allowed.join(', ')}`
+      `Status '${status}' is not valid for phase '${phase}' — expected one of: ${ALL_PHASE_SPECS[phase].statuses.join(', ')} ('${FENCE_STATUS}' is valid on every phase, but is written by 'runstate fence', never by hand)`
     );
   }
 
@@ -599,12 +634,30 @@ export function mintRunId(issue: number | string): string {
  */
 export const DEFAULT_GENERATION = 0;
 
-/** The `gen=` of a milestone, or {@link DEFAULT_GENERATION} when absent or unreadable. */
-export function generationOf(milestone: ParsedMilestone): number {
+/**
+ * Ceiling on a run generation.
+ *
+ * The ladder caps recoveries at two per run, so a real generation is a single digit;
+ * anything near this ceiling is forged or corrupt. The cap exists because generations
+ * are arithmetic on network data: without it a fence claiming `gen=9007199254740991`
+ * makes the NEXT generation unrepresentable, and every downstream parse of it fails —
+ * which would disable fencing on that issue permanently.
+ */
+export const MAX_GENERATION = 1000;
+
+/**
+ * The `gen=` of a milestone, or null when it does not carry a usable one.
+ *
+ * Null rather than {@link DEFAULT_GENERATION}: a milestone whose `gen=` is missing,
+ * unparseable, or past {@link MAX_GENERATION} is MALFORMED, and reading a malformed
+ * fence as "generation 0" would silently downgrade it to "never fenced" — the one answer
+ * that must never be inferred from bad data.
+ */
+export function generationOf(milestone: ParsedMilestone): number | null {
   const raw = milestone.keys.gen;
-  if (raw === undefined) return DEFAULT_GENERATION;
+  if (raw === undefined) return null;
   const parsed = parseGeneration(raw);
-  return parsed ?? DEFAULT_GENERATION;
+  return parsed === null || parsed > MAX_GENERATION ? null : parsed;
 }
 
 /** Read a generation off a flag or a comment value; null when it is not one. */
@@ -631,7 +684,12 @@ export function latestFence(
   let bestGen = -1;
   for (const milestone of milestones) {
     if (milestone.status !== FENCE_STATUS || milestone.run !== run) continue;
+    // A malformed fence is SKIPPED, never counted as generation 0: `FENCE_REQUIRED`
+    // mandates a well-formed `gen=` on the write path, so one without it did not come
+    // from `runstate fence`, and treating it as generation 0 would let it mask a real
+    // fence behind it.
     const gen = generationOf(milestone);
+    if (gen === null) continue;
     if (gen > bestGen) {
       bestGen = gen;
       best = milestone;
@@ -643,7 +701,9 @@ export function latestFence(
 /** The generation that currently owns `run` — 0 when it was never fenced. */
 export function fenceGeneration(milestones: readonly ParsedMilestone[], run: string): number {
   const fence = latestFence(milestones, run);
-  return fence === null ? DEFAULT_GENERATION : generationOf(fence);
+  // `latestFence` already skipped every fence without a usable generation, so the
+  // fallback here only covers "no fence at all".
+  return fence === null ? DEFAULT_GENERATION : (generationOf(fence) ?? DEFAULT_GENERATION);
 }
 
 /**
@@ -661,9 +721,19 @@ export function isFenced(
   return fenceGeneration(milestones, run) > gen;
 }
 
-/** The generation the next fence on `run` should install. */
-export function nextFenceGeneration(milestones: readonly ParsedMilestone[], run: string): number {
-  return fenceGeneration(milestones, run) + 1;
+/**
+ * The generation the next fence on `run` should install, or null at {@link MAX_GENERATION}.
+ *
+ * Null rather than an unbounded increment: emitting a generation nobody can parse back
+ * would break the fence for every later reader, so refusing to fence — loudly — is the
+ * safer end of that trade.
+ */
+export function nextFenceGeneration(
+  milestones: readonly ParsedMilestone[],
+  run: string
+): number | null {
+  const next = fenceGeneration(milestones, run) + 1;
+  return next > MAX_GENERATION ? null : next;
 }
 
 /**
@@ -923,7 +993,12 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
     return {
       ...base,
       resume_from: last.phase || 'none',
-      note: `fenced by '${last.keys.takeover ?? 'unknown'}' at generation ${base.generation} — resume as that generation`,
+      // Deliberately NOT "resume as that generation": `post` accepts an equal
+      // generation, so telling every reader to adopt the takeover's number would invite
+      // a second writer alongside a takeover that is alive and working — the exact race
+      // this mechanism exists to prevent. Only a resumer that installs its own fence has
+      // established that it, and not the takeover, owns the run.
+      note: `fenced by '${safeLabel(last.keys.takeover)}' at generation ${base.generation} — if you are not that takeover, run 'ai-dossier runstate fence' to install generation ${base.generation + 1} before posting`,
     };
   }
 

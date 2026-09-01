@@ -1,21 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createExecRunFencer, parseFenceGeneration } from '../index';
-import type { ExecFn } from '../project';
-
-/** Records every exec call and answers with a scripted stdout. */
-function recordingExec(answer: string | null): {
-  exec: ExecFn;
-  calls: Array<{ file: string; args: string[]; cwd?: string }>;
-} {
-  const calls: Array<{ file: string; args: string[]; cwd?: string }> = [];
-  return {
-    calls,
-    exec: (file, args, cwd) => {
-      calls.push({ file, args: [...args], cwd });
-      return answer;
-    },
-  };
-}
+import { recordingReturns as recordingExec } from './helpers/recording-exec';
 
 describe('parseFenceGeneration', () => {
   it('reads the generation off the human success line', () => {
@@ -49,7 +34,7 @@ describe('createExecRunFencer', () => {
     const { exec, calls } = recordingExec('✅ fenced r-504-fc02 gen=1 takeover=slot-2-r1 → url\n');
     const fencer = createExecRunFencer(exec, { repoDir: '/repo' });
 
-    expect(fencer(504, 'r-504-fc02', 'implement', 'slot-2-r1')).toBe(1);
+    expect(fencer(504, 'r-504-fc02', 'implement', 'slot-2-r1')).toEqual({ ok: true, gen: 1 });
     expect(calls).toHaveLength(1);
     expect(calls[0].file).toBe('ai-dossier');
     expect(calls[0].args).toEqual([
@@ -63,6 +48,9 @@ describe('createExecRunFencer', () => {
       'implement',
       '--takeover',
       'slot-2-r1',
+      // Read the CLI's machine contract, not its display string: a reworded success
+      // line must never silently stop the ladder from fencing.
+      '--json',
     ]);
     expect(calls[0].cwd).toBe('/repo');
   });
@@ -73,10 +61,28 @@ describe('createExecRunFencer', () => {
     expect(calls[0].file).toBe('/opt/ai-dossier');
   });
 
-  it('reports null when the CLI could not fence, rather than guessing a generation', () => {
+  it('reports WHY it could not fence, rather than guessing a generation', () => {
     // A guessed generation is worse than none: the takeover would post at a generation
     // its own fence never installed and be locked out by the CLI.
     const { exec } = recordingExec(null);
-    expect(createExecRunFencer(exec)(504, 'r-504-fc02', 'implement', 'slot-2-r1')).toBeNull();
+    const outcome = createExecRunFencer(exec)(504, 'r-504-fc02', 'implement', 'slot-2-r1');
+    expect(outcome.ok).toBe(false);
+    expect(outcome.ok === false && outcome.reason).toContain('produced no output');
+  });
+
+  it('reads the generation out of the --json payload', () => {
+    const { exec } = recordingExec(JSON.stringify({ posted: true, gen: 4, run: 'r-504-fc02' }));
+    expect(createExecRunFencer(exec)(504, 'r-504-fc02', 'implement', 'slot-2-r4')).toEqual({
+      ok: true,
+      gen: 4,
+    });
+  });
+
+  it('warns that the fence MAY have landed when the output carries no generation', () => {
+    // The fencer times out AFTER `gh issue comment` returns: the trail is fenced but the
+    // engine cannot know it. Asserting "unfenced" there would be a lie in the journal.
+    const { exec } = recordingExec('some unexpected output');
+    const outcome = createExecRunFencer(exec)(504, 'r-504-fc02', 'implement', 'slot-2-r1');
+    expect(outcome.ok === false && outcome.reason).toContain('MAY still have landed');
   });
 });

@@ -346,10 +346,11 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * (pre-#472) entries backfill `failure_evidence` to null and batches backfill
  * the recovery fields (anchor/branch/run_id/eviction_groups/evictions/
  * fix_attempts/rebase_attempts); 1.3.0 (pre-#500) slots backfill `role`;
- * 1.5.0 (pre-#504) slots backfill `gen` (0) and `fenced_at` (null);
  * 1.4.0 (pre-#505) states backfill `consecutive_suspect_dispatches` (0) and
  * `last_suspect_dispatch_unit` (null) — no suspect dispatches were tracked
- * before, so the zero value is exact, not a guess. The
+ * before, so the zero value is exact, not a guess; 1.5.0 (pre-#504) slots
+ * backfill `gen` (0) and `fenced_at` (null) — nothing was fenced before
+ * fencing existed, so those values are exact too. The
  * inference is entry-status-first, not phase-first: `phase === 'report'` is
  * exactly the signal #500 proved unreliable for a LIVE report agent (it
  * drifts to the issue's pre-report milestone under `phase-updated` well
