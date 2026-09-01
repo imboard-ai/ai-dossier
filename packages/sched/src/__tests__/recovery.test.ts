@@ -289,6 +289,27 @@ describe('beginAttribution', () => {
     expect(result.outcome.method).toBe('none');
     expect(result.outcome.bisect?.kind).toBe('unattributable');
   });
+
+  // #503 finding 3 (superseded #472 review, carried into #498's implementation):
+  // a red suite with zero parseable failures must not look identical to a
+  // green one in the journal — `suite-failed`/`attributed` are both emitted
+  // (never silently skipped) and the detail line says explicitly that
+  // nothing could be read out of the report, so an operator (or, once
+  // recovery is wired into tick() — out of scope here per the issue's
+  // Non-goals — a future decision-pending router) can tell the two apart.
+  it('journals an explicit empty-report detail when the suite reports zero failing tests', () => {
+    const state = batchState([201, 202], 'validating');
+    const h = harness();
+    const result = beginAttribution(state, 'b1', { failing: [], footprints: [] }, h.deps);
+
+    expect(result.outcome.offenders).toEqual([]);
+    expect(result.outcome.method).toBe('none');
+    expect(eventNames(h.events)).toEqual(['suite-failed', 'attributed']);
+    const suiteFailed = h.events.find((e) => e.event === 'suite-failed');
+    expect(suiteFailed?.detail).toMatch(/0 failing.*nothing to attribute/);
+    const attributed = h.events.find((e) => e.event === 'attributed');
+    expect(attributed?.detail).toMatch(/method=none offenders=none/);
+  });
 });
 
 // --- AC2: the one bounded fix attempt ---

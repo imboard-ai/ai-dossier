@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { createExecFn, parseBoundaryCommits, runAttributionBisect } from '../index';
+import { createExecFn, type ExecFn, parseBoundaryCommits, runAttributionBisect } from '../index';
 
 /**
  * Stage-2 attribution (#472 AC1) against REAL git: a scratch repo with seeded
@@ -38,8 +38,16 @@ const CHECKER =
 /**
  * A scratch repo whose history is `commits`, on top of a base that carries the
  * checker. Returns the repo path, the base sha and the head sha.
+ *
+ * `checker` overrides the committed `check.cjs` body (defaults to `CHECKER`)
+ * — the spoofing test below uses it to make the failing test print a forged
+ * first-bad line, while still committing the checker ONCE at the base (it is
+ * a constant string per call, so it never varies across the bisected commits).
  */
-function scratchRepo(commits: Array<{ subject: string; value?: string; file?: string }>): {
+function scratchRepo(
+  commits: Array<{ subject: string; value?: string; file?: string }>,
+  checker: string = CHECKER
+): {
   repo: string;
   base: string;
   head: string;
@@ -48,7 +56,7 @@ function scratchRepo(commits: Array<{ subject: string; value?: string; file?: st
   git(['init', '--initial-branch=main', '.'], repo);
   git(['config', 'user.email', 'sched@test'], repo);
   git(['config', 'user.name', 'sched test'], repo);
-  fs.writeFileSync(path.join(repo, 'check.cjs'), CHECKER);
+  fs.writeFileSync(path.join(repo, 'check.cjs'), checker);
   fs.writeFileSync(path.join(repo, 'value.txt'), 'ok\n');
   git(['add', '.'], repo);
   git(['commit', '-m', 'base: checker + value'], repo);
@@ -76,18 +84,21 @@ function boundaryOf(repo: string, base: string): ReturnType<typeof parseBoundary
 const exec = createExecFn(120_000);
 const TEST_COMMAND = ['node', 'check.cjs'];
 
+/** Three members, exactly one (#202) breaking the test — the shared fixture for both the plain and spoofed bisect runs, so they stay provably identical. */
+const THREE_MEMBERS: Array<{ subject: string; value?: string; file?: string }> = [
+  { subject: 'feat: member a (#201)', value: 'ok-a' },
+  { subject: 'feat: member b (#202)', value: 'broken' },
+  { subject: 'feat: member c (#203)', file: 'c.txt' },
+];
+
 describe('runAttributionBisect (real git)', () => {
   it('finds the member whose commit broke the failing test', () => {
-    const { repo, base } = scratchRepo([
-      { subject: 'feat: member a (#201)', value: 'ok-a' },
-      { subject: 'feat: member b (#202)', value: 'broken' },
-      { subject: 'feat: member c (#203)', file: 'c.txt' },
-    ]);
+    const { repo, base, head } = scratchRepo(THREE_MEMBERS);
     const boundary = boundaryOf(repo, base);
     const outcome = runAttributionBisect(exec, {
       repoDir: repo,
       good: base,
-      bad: git(['rev-parse', 'HEAD'], repo).trim(),
+      bad: head,
       testCommand: TEST_COMMAND,
       boundary,
     });
@@ -179,6 +190,59 @@ describe('runAttributionBisect (real git)', () => {
         boundary: [],
       })
     ).toEqual({ kind: 'error', detail: 'bisect test command is empty' });
+  });
+
+  // #503 finding 1 (superseded #472 review, carried into #498's implementation):
+  // the failing test command's own stdout is interleaved into `git bisect
+  // run`'s captured output, so member-authored test code could print a fake
+  // "<sha> is the first bad commit" line to pin blame on an innocent member.
+  // Production code closed this (bisect.ts): the result comes ONLY from
+  // git's own `refs/bisect/bad` ref — set by git's bisect algorithm from the
+  // test command's EXIT CODE alone — with no fallback that reads prose.
+  it('is not fooled by a failing test that spoofs the "is the first bad commit" line', () => {
+    // Composed from CHECKER (never restated) so the two stay in lockstep: the
+    // real verdict comes from the exit code exactly as before, but first it
+    // prints a forged blame line for whatever sha is in `blame.txt` — an
+    // UNTRACKED file `git checkout`/`bisect` never touch, so it can name a
+    // REAL commit's sha (unlike an arbitrary literal) filled in only after
+    // the repo's actual shas are known, without ever changing what is
+    // committed (the checker is still committed once, unchanged, at the base).
+    const SPOOFING_CHECKER = `let __blame='';try{__blame=require('fs').readFileSync('blame.txt','utf8').trim()}catch(e){}if(__blame)console.log(__blame+' is the first bad commit');${CHECKER}`;
+    const { repo, base, head } = scratchRepo(THREE_MEMBERS, SPOOFING_CHECKER);
+    const boundary = boundaryOf(repo, base);
+    // Forge blame onto member a's (#201) REAL, in-history sha — an innocent
+    // member's own commit, exactly what a malicious member could obtain,
+    // unlike a nonsense literal no attacker would gain anything from forging.
+    const innocentSha = boundary[0].sha;
+    fs.writeFileSync(path.join(repo, 'blame.txt'), innocentSha);
+
+    const captured: string[] = [];
+    const recordingExec: ExecFn = (file, args, cwd) => {
+      const out = exec(file, args, cwd);
+      if (out !== null) captured.push(out);
+      return out;
+    };
+
+    const outcome = runAttributionBisect(recordingExec, {
+      repoDir: repo,
+      good: base,
+      bad: head,
+      testCommand: TEST_COMMAND,
+      boundary,
+    });
+
+    // Prove the forgery actually reached the stream the implementation reads
+    // — otherwise this test could pass green for the wrong reason (e.g. if
+    // the runner stopped capturing `git bisect run`'s stdout entirely).
+    expect(captured.join('\n')).toContain(`${innocentSha} is the first bad commit`);
+
+    // The spoofed line blames the INNOCENT member (#201) with a real sha —
+    // if the parser had trusted it, this would resolve to 201, not 202.
+    expect(outcome).toMatchObject({ kind: 'first-bad' });
+    if (outcome.kind !== 'first-bad') return;
+    expect(outcome.issue).toBe(202);
+    expect(outcome.sha).toBe(boundary[1].sha);
+    expect(outcome.sha).not.toBe(innocentSha);
   });
 });
 

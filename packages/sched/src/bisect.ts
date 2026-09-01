@@ -47,9 +47,6 @@ export interface BisectOptions {
   onWarn?: (detail: string) => void;
 }
 
-/** `<sha> is the first bad commit` — the line every git version prints on success. */
-const FIRST_BAD_RE = /^([0-9a-f]{7,40}) is the first bad commit/im;
-
 /**
  * Bisect the batch branch for the commit that broke `testCommand`.
  *
@@ -121,20 +118,20 @@ export function runAttributionBisect(exec: ExecFn, opts: BisectOptions): BisectO
         detail: `git bisect start failed (is ${opts.good} an ancestor of ${opts.bad}?)`,
       };
     }
-    const out = git(['bisect', 'run', ...opts.testCommand]);
-    if (out === null) {
+    if (git(['bisect', 'run', ...opts.testCommand]) === null) {
       return { kind: 'error', detail: 'git bisect run failed' };
     }
     // Ask git for the answer rather than reading its prose: a completed bisect
-    // leaves `refs/bisect/bad` pointing at the first bad commit. The
-    // "<sha> is the first bad commit" line is printed on stdout by some git
-    // versions and stderr by others, so parsing it alone makes the result
-    // depend on which git the machine happens to have — it stays only as the
-    // fallback for a git that somehow leaves no ref.
-    const sha =
-      git(['rev-parse', '--verify', '--quiet', 'refs/bisect/bad'])?.trim() ??
-      FIRST_BAD_RE.exec(out)?.[1] ??
-      '';
+    // leaves `refs/bisect/bad` pointing at the first bad commit — set by git's
+    // own bisect algorithm from the test command's EXIT CODE alone, never from
+    // anything the command prints. There is deliberately no fallback that
+    // parses `git bisect run`'s captured output: that stream interleaves git's
+    // own lines with the failing test command's stdout, so a member-authored
+    // test could forge an "<sha> is the first bad commit" line naming another
+    // member's real commit to shift blame (#503). Every supported git writes
+    // this ref, and the module's contract is "no answer is an error, never a
+    // guess" — so no ref means no answer, not a guess from prose.
+    const sha = git(['rev-parse', '--verify', '--quiet', 'refs/bisect/bad'])?.trim() ?? '';
     if (!SHA_RE.test(sha)) {
       // No answer is an error, never a guess.
       return { kind: 'error', detail: 'git bisect run identified no first-bad commit' };
