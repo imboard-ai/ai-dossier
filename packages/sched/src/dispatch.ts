@@ -21,6 +21,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sanitizeSlug } from './project';
 import {
+  DEFAULT_PHASE_STALL_TIMEOUT_MS,
   DEFAULT_PR_POLL_INTERVAL_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_STALL_TIMEOUT_MS,
@@ -147,6 +148,8 @@ export interface ResolvedDispatch {
   /** Model per tier; null means "no model flag" (the command's `--model {model}` pair drops). */
   tierModels: Record<ModelTier, string | null>;
   stallTimeoutMs: number;
+  /** Per-phase stall timeout overrides (#495), built-in defaults ⊕ operator config. */
+  phaseStallTimeoutMs: Record<string, number>;
   reconcileIntervalMs: number;
   /** Parked-PR poll interval (#468 AC1, default 150 s — "every 2–3 min"). */
   prPollIntervalMs: number;
@@ -167,9 +170,25 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
     fixPrompt: dispatch.fix_prompt ?? DEFAULT_FIX_PROMPT_TEMPLATE,
     tierModels,
     stallTimeoutMs: config.stall_timeout_ms ?? DEFAULT_STALL_TIMEOUT_MS,
+    phaseStallTimeoutMs: { ...DEFAULT_PHASE_STALL_TIMEOUT_MS, ...dispatch.phase_stall_timeout_ms },
     reconcileIntervalMs: config.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS,
     prPollIntervalMs: config.pr_poll_interval_ms ?? DEFAULT_PR_POLL_INTERVAL_MS,
   };
+}
+
+/**
+ * The stall timeout to apply for `phase` (#495): a per-phase override (built-
+ * in default or operator config, `ResolvedDispatch.phaseStallTimeoutMs`) when
+ * one exists for `phase`, else the global `stallTimeoutMs`. `phase` should be
+ * the CURRENTLY RUNNING phase — the last milestone's `next=` — not the last
+ * COMPLETED phase (`slot.phase`), which lags one phase behind.
+ */
+export function stallTimeoutForPhase(dispatch: ResolvedDispatch, phase: string | null): number {
+  if (phase !== null) {
+    const override = dispatch.phaseStallTimeoutMs[phase];
+    if (override !== undefined) return override;
+  }
+  return dispatch.stallTimeoutMs;
 }
 
 /**

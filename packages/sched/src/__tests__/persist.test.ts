@@ -205,3 +205,72 @@ describe('#468 config: pr_poll_interval_ms and dispatch.report_prompt', () => {
     }
   });
 });
+
+describe('#495 config: dispatch.phase_stall_timeout_ms', () => {
+  it('round-trips a per-phase stall timeout override', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-495-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({
+        max_slots: 2,
+        dispatch: { phase_stall_timeout_ms: { implement: 5_400_000 } },
+      });
+      const config = store.loadConfig();
+      expect(config.dispatch?.phase_stall_timeout_ms).toEqual({ implement: 5_400_000 });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-positive phase timeout (degrades to defaults, loudly)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-495-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({
+          schema_version: '1.2.0',
+          max_slots: 2,
+          dispatch: { phase_stall_timeout_ms: { implement: 0 } },
+        })
+      );
+      const err = console.error;
+      const warnings: string[] = [];
+      console.error = (msg: string) => warnings.push(msg);
+      try {
+        expect(store.loadConfig()).toEqual({ max_slots: 3 });
+      } finally {
+        console.error = err;
+      }
+      expect(warnings.some((w) => w.includes('unreadable'))).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-object phase_stall_timeout_ms', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-495-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({
+          schema_version: '1.2.0',
+          max_slots: 2,
+          dispatch: { phase_stall_timeout_ms: 'implement' },
+        })
+      );
+      const err = console.error;
+      const warnings: string[] = [];
+      console.error = (msg: string) => warnings.push(msg);
+      try {
+        expect(store.loadConfig()).toEqual({ max_slots: 3 });
+      } finally {
+        console.error = err;
+      }
+      expect(warnings.some((w) => w.includes('unreadable'))).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

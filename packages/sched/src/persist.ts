@@ -336,12 +336,30 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
       }
     }
   }
+  if (dispatch.phase_stall_timeout_ms !== undefined) {
+    if (
+      dispatch.phase_stall_timeout_ms === null ||
+      typeof dispatch.phase_stall_timeout_ms !== 'object'
+    ) {
+      throw new Error('dispatch.phase_stall_timeout_ms must be an object');
+    }
+    for (const [phase, ms] of Object.entries(dispatch.phase_stall_timeout_ms)) {
+      if (!Number.isInteger(ms) || (ms as number) <= 0) {
+        throw new Error(
+          `dispatch.phase_stall_timeout_ms.${phase} must be a positive integer (milliseconds)`
+        );
+      }
+    }
+  }
   const out: DispatchConfig = {};
   if (dispatch.command !== undefined) out.command = dispatch.command as string[];
   if (dispatch.prompt !== undefined) out.prompt = dispatch.prompt as string;
   if (dispatch.report_prompt !== undefined) out.report_prompt = dispatch.report_prompt as string;
   if (dispatch.tier_models !== undefined) {
     out.tier_models = dispatch.tier_models as Partial<Record<ModelTier, string>>;
+  }
+  if (dispatch.phase_stall_timeout_ms !== undefined) {
+    out.phase_stall_timeout_ms = dispatch.phase_stall_timeout_ms as Record<string, number>;
   }
   return out;
 }

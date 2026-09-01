@@ -34,6 +34,7 @@ export {
   reportTierFor,
   resolveDispatch,
   type SpawnDeps,
+  stallTimeoutForPhase,
   unitLogName,
 } from './dispatch';
 export { type EngineDeps, runLoop, type TickResult, tick } from './engine';
@@ -140,6 +141,7 @@ export {
   CONFIG_SCHEMA_VERSION,
   type CycleMode,
   DEFAULT_MAX_SLOTS,
+  DEFAULT_PHASE_STALL_TIMEOUT_MS,
   DEFAULT_PR_POLL_INTERVAL_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_STALL_TIMEOUT_MS,

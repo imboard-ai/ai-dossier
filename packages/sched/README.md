@@ -81,7 +81,14 @@ where every mechanical supervision decision is code, not remembered prose:
    `stall_timeout_ms` (default 30 min) → kill the agent and redispatch the same unit one
    tier stronger (mechanical → mid → strong; the resume rails carry work forward). Cap 2
    escalations — or a stall at the strongest tier — fails the unit and blocks its
-   TRANSITIVE dependents (`dep-failed:<issue>`).
+   TRANSITIVE dependents (`dep-failed:<issue>`). The timeout is **phase-aware** (#495):
+   the `implement` phase alone can run 1-3h on a large monorepo with zero intermediate
+   milestone or pushed commit, so it gets a longer built-in default (90 min,
+   `DEFAULT_PHASE_STALL_TIMEOUT_MS`) than every other phase's 30-min default — selected by
+   the phase now IN FLIGHT (the last milestone's `next=`, not the last completed phase).
+   Override any phase via `dispatch.phase_stall_timeout_ms: { "<phase>": <ms> }` in
+   `config.json`; a phase not listed keeps its built-in default or falls back to the
+   global `stall_timeout_ms`.
 5. **Immediate refill (AC5)** — a slot freed by a terminal state is refilled in the SAME
    tick; a runnable unit never waits while a slot is idle (pinned by a regression test).
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,

@@ -62,6 +62,7 @@ import {
   type SpawnDeps,
   STOP_POLL_MAX_MS,
   STOP_POLL_MIN_MS,
+  stallTimeoutForPhase,
   unitLogName,
 } from './dispatch';
 import {
@@ -825,8 +826,14 @@ function reconcileRunning(
   const progress = applyProgressSignals(ctx, state, slot, truth, unit);
   if (progress.progressed) return progress.state;
 
-  // No progress: the stall timer (AC4).
-  if (msSinceLastProgress(slot, now) >= ctx.dispatch.stallTimeoutMs) {
+  // No progress: the stall timer (AC4). The phase now IN FLIGHT is the last
+  // milestone's `next=`, not `slot.phase` — `slot.phase` is set to
+  // `truth.milestone.phase`, which names the phase that just COMPLETED, so
+  // using it directly would apply a phase's timeout allowance to the phase
+  // AFTER it (#495). Falls back to `slot.phase` (set to 'gate' at spawn) for
+  // the brief window before any milestone has posted.
+  const activePhase = truth.milestone?.keys.next ?? slot.phase;
+  if (msSinceLastProgress(slot, now) >= stallTimeoutForPhase(ctx.dispatch, activePhase)) {
     return enterRecovery(ctx, progress.state, unit, 'stalled', 'stall');
   }
   return progress.state;

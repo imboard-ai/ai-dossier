@@ -399,6 +399,15 @@ export interface DispatchConfig {
   /** Tier → model id/alias mapping (defaults: haiku / sonnet / opus). */
   tier_models?: Partial<Record<ModelTier, string>>;
   /**
+   * Per-phase stall timeout overrides in ms, keyed by runstate milestone
+   * phase (e.g. `implement`) — falls back to `stall_timeout_ms` (or its own
+   * built-in default, for `implement`) for any phase not listed. Selected by
+   * the CURRENTLY RUNNING phase — the last milestone's `next=` — not the
+   * last COMPLETED phase, since a long phase's progress signals go quiet for
+   * its entire duration (#495).
+   */
+  phase_stall_timeout_ms?: Record<string, number>;
+  /**
    * Prompt template for the report agent dispatched after a merged PR
    * (#468); `{issue}`, `{pr}` and `{cleanup}` substituted. Defaults to
    * `DEFAULT_REPORT_PROMPT_TEMPLATE`.
@@ -443,6 +452,20 @@ export const DISPATCH_UNHEALTHY_THRESHOLD = 2;
 
 /** Default stall timeout: 30 minutes without a milestone or pushed commit (RFC-0001 §C.1). */
 export const DEFAULT_STALL_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * Built-in per-phase stall timeout overrides (#495): the `implement` phase
+ * alone regularly runs 1-3h on a large monorepo (cold worktree warmup +
+ * implement + test suite) with zero intermediate milestone or pushed
+ * commit, so the blanket 30-min default kills healthy agents mid-phase. 90
+ * minutes matches the value operators had already validated as a manual
+ * per-project workaround (W1 fleet-parity evidence) — long enough to cover
+ * a real implement phase, short enough that the ladder still fires on a
+ * genuine hang. Every other phase keeps `DEFAULT_STALL_TIMEOUT_MS`.
+ */
+export const DEFAULT_PHASE_STALL_TIMEOUT_MS: Readonly<Record<string, number>> = {
+  implement: 90 * 60 * 1000,
+};
 
 /** Default reconciliation tick: ~60s (RFC-0001 §C.1). */
 export const DEFAULT_RECONCILE_INTERVAL_MS = 60 * 1000;

@@ -26,7 +26,12 @@ import {
  * teardown exec is a recording fake.
  */
 function harness(
-  opts?: { maxSlots?: number; stallTimeoutMs?: number; prPollIntervalMs?: number },
+  opts?: {
+    maxSlots?: number;
+    stallTimeoutMs?: number;
+    phaseStallTimeoutMs?: Record<string, number>;
+    prPollIntervalMs?: number;
+  },
   existingDir?: string
 ) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'sched-engine-'));
@@ -92,6 +97,9 @@ function harness(
     max_slots: opts?.maxSlots ?? 3,
     ...(opts?.stallTimeoutMs !== undefined ? { stall_timeout_ms: opts.stallTimeoutMs } : {}),
     ...(opts?.prPollIntervalMs !== undefined ? { pr_poll_interval_ms: opts.prPollIntervalMs } : {}),
+    ...(opts?.phaseStallTimeoutMs !== undefined
+      ? { dispatch: { phase_stall_timeout_ms: opts.phaseStallTimeoutMs } }
+      : {}),
   };
 
   return {
@@ -467,6 +475,56 @@ describe('stall/escalation ladder (AC4)', () => {
     const result = h.tick();
     expect(result.failed).toEqual(['issue:101']);
     expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('stall-at-strongest-tier');
+  });
+
+  it('the phase now in flight (via next=) gets its own allowance — implement default is 90 min, not the 30-min global (#495)', () => {
+    const h = stalledHarness(); // global stall_timeout_ms=30min; implement keeps its 90-min built-in default
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(101, 'plan', 'done', undefined, { next: 'implement' });
+    h.advance(1 * 60 * 1000);
+    let result = h.tick(); // registers the milestone as progress; active phase becomes 'implement'
+    expect(result.redispatched).toHaveLength(0);
+
+    h.advance(31 * 60 * 1000); // ~31 min since last progress — past the 30-min global, well under 90 min
+    result = h.tick();
+    expect(result.redispatched).toHaveLength(0);
+
+    h.advance(60 * 60 * 1000); // ~91 min since last progress — past the implement allowance
+    result = h.tick();
+    expect(result.redispatched).toEqual(['issue:101']);
+  });
+
+  it('a phase without a built-in override still stalls at the 30-min global default (no regression)', () => {
+    const h = stalledHarness();
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(101, 'implement', 'done', undefined, { next: 'review' });
+    h.advance(1 * 60 * 1000);
+    let result = h.tick();
+    expect(result.redispatched).toHaveLength(0);
+
+    h.advance(30 * 60 * 1000); // ~31 min since last progress
+    result = h.tick();
+    expect(result.redispatched).toEqual(['issue:101']);
+  });
+
+  it('an operator override via dispatch.phase_stall_timeout_ms wins over the built-in default', () => {
+    const h = harness({
+      stallTimeoutMs: 30 * 60 * 1000,
+      phaseStallTimeoutMs: { implement: 5 * 60 * 1000 },
+    });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(101, 'plan', 'done', undefined, { next: 'implement' });
+    h.advance(1 * 60 * 1000);
+    let result = h.tick();
+    expect(result.redispatched).toHaveLength(0);
+
+    h.advance(5 * 60 * 1000); // ~6 min since last progress — past the 5-min override, well under the 90-min built-in default
+    result = h.tick();
+    expect(result.redispatched).toEqual(['issue:101']);
   });
 });
 
