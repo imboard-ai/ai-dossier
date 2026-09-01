@@ -22,6 +22,7 @@ import {
   CONFIG_SCHEMA_VERSION,
   DEFAULT_MAX_SLOTS,
   type DispatchConfig,
+  EngineTooOldError,
   LEGACY_CONFIG_SCHEMA_VERSIONS,
   MAX_MAX_SLOTS,
   MIN_MAX_SLOTS,
@@ -207,6 +208,10 @@ export class SchedStore {
     try {
       return validateState(JSON.parse(raw));
     } catch (err) {
+      // A newer-than-installed schema is not corruption (#537) — rethrow as
+      // itself so callers (`handleKnownError`) can give the specific
+      // upgrade-the-engine message instead of "rename or remove it".
+      if (err instanceof EngineTooOldError) throw err;
       throw new CorruptStateError(statePath, err);
     }
   }

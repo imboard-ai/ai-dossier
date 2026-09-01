@@ -9,7 +9,7 @@
  * cheap-tier report dispatch.
  */
 
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import type {
   CapOutcome,
@@ -30,13 +30,16 @@ import {
   DEFAULT_RECONCILE_INTERVAL_MS,
   defaultExec,
   type EngineDeps,
+  EngineTooOldError,
   EnqueueError,
   type EnqueueInput,
+  type ExecFn,
   enqueueEntries,
   FENCE_TIMEOUT_MS,
   groundTruthExec,
   IllegalTransitionError,
   Journal,
+  LIVE_SLOT_STATUSES,
   LockTimeoutError,
   labelBlockReason,
   OPENCODE_DISPATCH_COMMAND,
@@ -56,6 +59,7 @@ import {
 import type { Command } from 'commander';
 import { formatCost, formatCount } from '../cost-format';
 import { formatAge, formatDurationMs } from '../duration';
+import { checkEngineStaleness, type EngineStalenessCheck } from '../engine-version';
 import { requireRepoSlug, tryFetchLabels } from '../gh';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
@@ -166,6 +170,7 @@ interface AbandonOptions extends SchedOptions {
 interface StartOptions extends SchedOptions {
   interval?: number;
   once?: boolean;
+  autoUpgrade?: boolean;
 }
 
 function parseMode(raw: string | undefined): 'full' | 'slot' {
@@ -210,7 +215,8 @@ function handleKnownError(err: unknown): never {
     err instanceof LockTimeoutError ||
     err instanceof EnqueueError ||
     err instanceof IllegalTransitionError ||
-    err instanceof SchedNotFoundError
+    err instanceof SchedNotFoundError ||
+    err instanceof EngineTooOldError
   ) {
     fail([err.message]);
   }
@@ -220,13 +226,20 @@ function handleKnownError(err: unknown): never {
 // --- status rendering (the CLI's shared table renderer, like every other
 // table-printing command; the package deliberately has no CLI dependencies) ---
 
-function renderReport(report: StatusReport): string {
+function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): string {
   const lines: string[] = [];
   const state = report.paused ? 'PAUSED' : 'running';
   const runnable = report.runnable_units.length > 0 ? report.runnable_units.join(', ') : 'none';
   lines.push(
     `Scheduler [${report.project}]: ${state} · slots ${report.live_slots}/${report.max_slots} live`
   );
+  if (staleness?.stale) {
+    // #537: mirrors the dispatch-health block below — a status line, not a
+    // block. `stale` is only ever true when both versions are known.
+    lines.push(
+      `⚠ Engine stale: installed @ai-dossier/sched@${staleness.installed}, npm latest ${staleness.latest} — upgrade: npm i -g @ai-dossier/cli@latest`
+    );
+  }
   if (report.dispatch_health.consecutive_suspect > 0) {
     // `report.paused` alone can't prove dispatch-health caused it (a manual
     // `sched pause` looks identical), but a nonzero streak while paused is
@@ -596,14 +609,18 @@ function registerStatusSubcommand(cmd: Command): void {
     .description('Render the queue, slots, batches, and blocked/failed sets')
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output the report as JSON')
-    .action((opts: SchedOptions) => {
+    .action(async (opts: SchedOptions) => {
       const { store, project } = resolveStore(opts);
       try {
         const report = buildStatusReport(store.load(), store.loadConfig(), project);
+        // Cache-only (#537): `status` is a fast, offline-friendly diagnostic
+        // — it reads whatever `sched start` last cached rather than risking
+        // a multi-second hang on an unreachable npm registry.
+        const staleness = await checkEngineStaleness({ noFetch: true });
         if (opts.json) {
-          console.log(JSON.stringify(report, null, 2));
+          console.log(JSON.stringify({ ...report, engine_staleness: staleness }, null, 2));
         } else {
-          console.log(renderReport(report));
+          console.log(renderReport(report, staleness));
         }
       } catch (err) {
         handleKnownError(err);
@@ -760,6 +777,94 @@ function registerAbandonSubcommand(cmd: Command): void {
     });
 }
 
+/** `npm i -g @ai-dossier/cli@latest` can take a while (network + install). */
+const UPGRADE_TIMEOUT_MS = 120_000;
+
+/**
+ * A local `ExecFn` built directly on this file's own `execFileSync` import,
+ * deliberately NOT `@ai-dossier/sched`'s `createExecFn` (used for
+ * `teardownExec`/`fencer`/`batchExec` below): those wrap a call the
+ * *engine* owns, whereas an unattended `npm i -g` is a CLI-only side
+ * effect with real system impact, and `vi.mock('node:child_process')` in
+ * this package's own tests only intercepts `execFileSync` calls made from
+ * CLI source — not calls made from inside `@ai-dossier/sched`'s compiled
+ * dist output, which Vitest's SSR module graph externalizes rather than
+ * transforming (a real cross-package mocking gap this file must not build
+ * on for anything that shells out unattended).
+ */
+function createUpgradeExec(): ExecFn {
+  return (file, args) => {
+    try {
+      return String(
+        execFileSync(file, args, {
+          encoding: 'utf-8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: UPGRADE_TIMEOUT_MS,
+        })
+      ).trim();
+    } catch (err) {
+      process.stderr.write(
+        `⚠ sched auto-upgrade: '${file} ${args.join(' ')}' failed: ${(err as Error).message}\n`
+      );
+      return null;
+    }
+  };
+}
+
+/**
+ * #537: after a tick, compare the installed engine against npm latest;
+ * when behind, journal `engine-stale` once per distinct (installed, latest)
+ * pair (not every tick — a long-running loop would otherwise spam the
+ * journal every reconcile) and warn on stderr. When `autoUpgradeEnabled`
+ * and nothing is mid-dispatch (`LIVE_SLOT_STATUSES` against freshly
+ * re-read state — must reflect what the tick that just ran actually did),
+ * self-upgrade via `upgradeExec`.
+ */
+async function checkAndHandleEngineStaleness(
+  store: SchedStore,
+  journal: Journal,
+  autoUpgradeEnabled: boolean,
+  upgradeExec: ExecFn
+): Promise<void> {
+  const staleness = await checkEngineStaleness();
+  if (!staleness.stale) return;
+  const { installed, latest } = staleness;
+  if (installed === null || latest === null) return; // unreachable when stale=true; keeps TS honest
+
+  const events = journal.read();
+  const lastStale = [...events].reverse().find((e) => e.event === 'engine-stale');
+  const alreadyJournaled =
+    lastStale?.installed_version === installed && lastStale?.latest_version === latest;
+
+  if (!alreadyJournaled) {
+    journal.append({
+      event: 'engine-stale',
+      installed_version: installed,
+      latest_version: latest,
+      detail: `installed @ai-dossier/sched@${installed} behind npm latest ${latest}`,
+    });
+    process.stderr.write(
+      `⚠ Engine stale: installed @ai-dossier/sched@${installed}, npm latest ${latest} — upgrade: npm i -g @ai-dossier/cli@latest\n`
+    );
+  }
+
+  if (!autoUpgradeEnabled) return;
+
+  // Re-read fresh — must reflect what the tick that just ran left behind,
+  // not a pre-tick snapshot (AC2: "only while no unit is mid-dispatch").
+  const state = store.load();
+  const busy = state.slots.some((s) => LIVE_SLOT_STATUSES.has(s.status));
+  if (busy) return;
+
+  process.stderr.write('⚠ sched: auto-upgrading (npm i -g @ai-dossier/cli@latest)…\n');
+  const output = upgradeExec('npm', ['i', '-g', '@ai-dossier/cli@latest']);
+  process.stderr.write(
+    output === null
+      ? '⚠ sched: auto-upgrade failed — see above\n'
+      : '✓ sched: auto-upgrade completed\n'
+  );
+}
+
 function registerStartSubcommand(cmd: Command): void {
   cmd
     .command('start')
@@ -772,6 +877,10 @@ function registerStartSubcommand(cmd: Command): void {
       Number.parseInt
     )
     .option('--once', 'Run a single reconcile+refill tick and exit (cron-style)')
+    .option(
+      '--auto-upgrade',
+      'Self-upgrade (npm i -g @ai-dossier/cli@latest) when the installed engine is behind npm latest and no unit is mid-dispatch'
+    )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output tick results as JSON')
     .action(async (opts: StartOptions) => {
@@ -790,6 +899,11 @@ function registerStartSubcommand(cmd: Command): void {
         }
         config = { ...config, reconcile_interval_ms: opts.interval * 1000 };
       }
+
+      // #537: CLI flag beats config.json beats off-by-default, same
+      // precedence as --interval above.
+      const autoUpgradeEnabled = opts.autoUpgrade ?? config.auto_upgrade ?? false;
+      const upgradeExec = createUpgradeExec();
 
       // Resolve the agent command: config dispatch.command wins; otherwise
       // auto-detect (claude first, opencode fallback — the run machinery's
@@ -897,6 +1011,7 @@ function registerStartSubcommand(cmd: Command): void {
           handleKnownError(err);
           fail([`sched tick failed: ${(err as Error).name}: ${(err as Error).message}`]);
         }
+        await checkAndHandleEngineStaleness(store, deps.journal, autoUpgradeEnabled, upgradeExec);
         if (opts.json) {
           console.log(JSON.stringify(result, null, 2));
         } else {
@@ -922,6 +1037,15 @@ function registerStartSubcommand(cmd: Command): void {
         (result) => {
           if (!opts.json) console.log(`✓ [${new Date().toISOString()}] ${describe(result)}`);
           else console.log(JSON.stringify({ ts: new Date().toISOString(), ...result }));
+          // #537: journal/warn only in the continuous loop — the actual
+          // `npm i -g` shell-out (up to UPGRADE_TIMEOUT_MS) only runs from
+          // the cron-driven --once path below; running it here would stall
+          // reconciliation for however long the install takes. Fire-and-
+          // forget: bounded by the check's own short network timeout, never
+          // blocks the next tick (onTick is synchronous by contract).
+          void checkAndHandleEngineStaleness(store, deps.journal, false, upgradeExec).catch(
+            () => {}
+          );
         }
       );
       console.log('⏹ Engine stopped');

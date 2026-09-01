@@ -14,6 +14,7 @@ import {
   type BatchEntry,
   type BatchStatus,
   type CycleMode,
+  EngineTooOldError,
   type FailureEvidence,
   IllegalTransitionError,
   type IssueStatus,
@@ -29,6 +30,27 @@ import {
   type SlotStatus,
   TERMINAL_ISSUE_STATUSES,
 } from './types';
+
+/**
+ * Dotted-numeric version compare, local to this package (#537). Not imported
+ * from `cli/src/version.ts`'s `compareVersions` — `packages/sched` has zero
+ * runtime dependencies by design (it never invokes an LLM, and sits below
+ * `cli` in the build order per `AGENTS.md`); pulling in a `cli` import for a
+ * 10-line comparator would invert that boundary. Missing segments count as
+ * zero ('1.8' === '1.8.0'). Returns negative if a < b, 0 if equal, positive
+ * if a > b; NaN-safe (a non-numeric segment compares as if absent — used
+ * only to detect "state schema is numerically newer", never for equality).
+ */
+function compareDottedVersions(a: string, b: string): number {
+  const pa = a.split('.').map((p) => Number.parseInt(p, 10) || 0);
+  const pb = b.split('.').map((p) => Number.parseInt(p, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
 
 // --- Transition tables ---
 
@@ -404,6 +426,13 @@ export function validateState(data: unknown): SchedState {
   const obj = data as Record<string, unknown>;
   const version = String(obj.schema_version);
   if (version !== SCHEMA_VERSION && !LEGACY_SCHEMA_VERSIONS.includes(version)) {
+    // A newer-than-installed schema is not corruption — another (newer)
+    // engine wrote this state (#537 AC3). Any other unsupported version
+    // string (garbage, a typo, a version from an unrelated fork) keeps the
+    // generic "unsupported" error below.
+    if (compareDottedVersions(version, SCHEMA_VERSION) > 0) {
+      throw new EngineTooOldError(version, SCHEMA_VERSION);
+    }
     throw new Error(`Unsupported schema version: ${version} (expected ${SCHEMA_VERSION})`);
   }
   if (typeof obj.paused !== 'boolean') {

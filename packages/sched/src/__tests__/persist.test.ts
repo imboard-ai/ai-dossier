@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CorruptStateError,
   createEmptyState,
+  EngineTooOldError,
   enqueueEntries,
+  SCHEMA_VERSION,
   SchedStore,
   transitionIssue,
   validateState,
@@ -87,6 +89,40 @@ describe('SchedStore', () => {
       })
     );
     expect(() => store.load()).toThrow(/Unsupported schema version/);
+  });
+
+  it('#537: a state file written by a newer schema than the installed engine refuses to run with a specific, actionable error — not the generic CorruptStateError', () => {
+    const store = new SchedStore(dir);
+    const [major, minor, patch] = SCHEMA_VERSION.split('.').map(Number);
+    const newerVersion = `${major}.${minor}.${(patch ?? 0) + 1}`;
+    fs.writeFileSync(
+      store.statePath,
+      JSON.stringify({
+        schema_version: newerVersion,
+        paused: false,
+        entries: [],
+        batches: [],
+        slots: [],
+        next_slot_id: 1,
+      })
+    );
+    let caught: unknown;
+    try {
+      store.load();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(EngineTooOldError);
+    expect(caught).not.toBeInstanceOf(CorruptStateError);
+    const err = caught as EngineTooOldError;
+    expect(err.stateVersion).toBe(newerVersion);
+    expect(err.installedVersion).toBe(SCHEMA_VERSION);
+    expect(err.message).toContain(newerVersion);
+    expect(err.message).toContain(SCHEMA_VERSION);
+    expect(err.message).toContain('npm i -g @ai-dossier/cli@latest');
+    // Must NOT carry the "rename or remove it" advice — that's actively
+    // wrong for this case (another engine wrote this state; it isn't corrupt).
+    expect(err.message).not.toMatch(/rename or remove/i);
   });
 
   it('withLock reads, mutates, and saves atomically', () => {

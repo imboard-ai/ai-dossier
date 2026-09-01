@@ -53,9 +53,11 @@ function isPackageInstalled(packageName: string): boolean {
 }
 
 /**
- * Try to read a package's version from its package.json.
+ * Try to read a package's version from its package.json. Exported for reuse
+ * by `engine-version.ts` (#537) — same require.resolve + walk-up-to-package.json
+ * logic, no need to duplicate it.
  */
-function getPackageVersion(packageName: string): string | null {
+export function getPackageVersion(packageName: string): string | null {
   try {
     const entryPath = require.resolve(packageName);
     // Walk up to find the package.json

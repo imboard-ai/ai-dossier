@@ -1001,7 +1001,7 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0 → 1
   it('unknown schema versions are still rejected loudly', () => {
     expect(() =>
       validateState({
-        schema_version: '2.0.0',
+        schema_version: 'not-a-version',
         paused: false,
         entries: [],
         batches: [],
@@ -1009,5 +1009,18 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0 → 1
         next_slot_id: 1,
       })
     ).toThrow(/Unsupported schema version/);
+  });
+
+  it('#537: a numerically newer schema version is rejected with the specific EngineTooOldError, not the generic message', () => {
+    expect(() =>
+      validateState({
+        schema_version: '2.0.0',
+        paused: false,
+        entries: [],
+        batches: [],
+        slots: [],
+        next_slot_id: 1,
+      })
+    ).toThrow(/State file was written by a newer schema/);
   });
 });
