@@ -150,6 +150,25 @@ describe('pause / resume', () => {
     state = setPaused(state, false);
     expect(computeAssignments(state, { max_slots: 3 }, NOW2).assignments).toHaveLength(1);
   });
+
+  it('#505: pausing preserves the dispatch-health streak; resuming clears it', () => {
+    let state: ReturnType<typeof createEmptyState> = {
+      ...createEmptyState(),
+      consecutive_suspect_dispatches: 1,
+      last_suspect_dispatch_unit: 'issue:101',
+    };
+    state = setPaused(state, true);
+    // Pausing is orthogonal to the streak — it may have BEEN what triggered
+    // the pause; a manual `sched pause` must not silently erase evidence.
+    expect(state.consecutive_suspect_dispatches).toBe(1);
+    expect(state.last_suspect_dispatch_unit).toBe('issue:101');
+
+    state = setPaused(state, false);
+    // Resuming is the operator's "I've addressed this" — the streak (and
+    // any `sched status` warning citing it) should not linger afterward.
+    expect(state.consecutive_suspect_dispatches).toBe(0);
+    expect(state.last_suspect_dispatch_unit).toBeNull();
+  });
 });
 
 describe('abandon', () => {

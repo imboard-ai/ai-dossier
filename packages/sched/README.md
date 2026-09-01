@@ -67,8 +67,24 @@ where every mechanical supervision decision is code, not remembered prose:
 5. **Immediate refill (AC5)** — a slot freed by a terminal state is refilled in the SAME
    tick; a runnable unit never waits while a slot is idle (pinned by a regression test).
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,
-   progress, stalled, redispatched, unit-failed, dependents-blocked, …) is appended to
-   `events.jsonl`; `sched status` shows the live phase per unit.
+   progress, stalled, redispatched, unit-failed, dependents-blocked, suspect-dispatch,
+   dispatch-unhealthy, …) is appended to `events.jsonl`; `sched status` shows the live
+   phase per unit.
+7. **Dispatch-health pause (#505)** — an unverified exit within `SUSPECT_DISPATCH_WINDOW_MS`
+   (60s) of a slot's last progress is `suspect-dispatch`: real work rarely produces zero
+   milestones that fast, but an operator-billing quota/auth wall (a Claude Code weekly
+   limit, a provider credit cap, …) that rejects the agent's very first request does,
+   every time. `DISPATCH_UNHEALTHY_THRESHOLD` (2) consecutive suspect-dispatches from
+   DIFFERENT units — the cross-unit correlation that tells a wall apart from one unit's
+   own flakiness — auto-pauses new assignments (`state.paused = true`, journaled
+   `dispatch-unhealthy`) exactly like `sched pause`: already-live slots keep running, only
+   new assignments stop, including report-agent dispatch. The per-unit stall/escalation
+   ladder above is unchanged — this only stops MORE units from being dispatched into a
+   known-bad wall. A healthy dispatch outcome (verified completion or park) resets the
+   streak; the pause itself clears only via `sched resume` (never automatically — an
+   operator's explicit "I've addressed this," not a heuristic that could re-dispatch into
+   a wall that hasn't actually cleared), which also clears the streak so `sched status`'s
+   warning doesn't linger against a wall the operator already acted on.
 
 Two engine-safety policies were explicit product decisions on #464:
 
@@ -168,6 +184,13 @@ a report slot in the first place) with the persisted `phase` as a fallback when 
 matching entry exists. A backfilled role is a best-effort inference, not a guarantee —
 see `validateState` in `state.ts` for the exact rule.
 
+Schema 1.5.0: `SchedState` gains `consecutive_suspect_dispatches` (number) and
+`last_suspect_dispatch_unit` (string or null) — the dispatch-health pause's cross-unit
+suspect-dispatch streak (#505 above). The two fields are a single fact and must agree
+(`0 ⇔ null`); `validateState` rejects a state where they disagree. 1.4.0 states migrate
+on load: no suspect dispatches were ever tracked under them, so `0`/`null` is the exact
+backfill, not a guess.
+
 ## API surface
 
 ```ts
@@ -221,7 +244,7 @@ import {
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
-  validateState,         // strict persisted-state validation (1.0.0-1.3.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.4.0 files migrate)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
 } from '@ai-dossier/sched';
@@ -253,17 +276,22 @@ fake agents and stub ground truth; no LLM calls anywhere.
 - **Corrupt state is loud**: `load()` throws `CorruptStateError` naming the file —
   never a silent queue reset. `state.json` is deletable and rebuildable from GitHub,
   which remains the system of record.
-- **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0) and
-  #472 (1.3.0) load and migrate to 1.4.0 automatically (slot `branch`/`last_head`/
-  `pid_start`, slot `role` (inferred from the unit's queue entry, with the persisted
-  `phase` as a fallback — #500), entry `pr`/`cleanup`/`failure_evidence`, batch
-  `anchor`/`branch`/`run_id`/`eviction_groups`/`evictions`/`fix_attempts`/
-  `rebase_attempts`, and state-level `last_pr_poll_at` backfill to null).
+- **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
+  #472 (1.3.0) and #500 (1.4.0) load and migrate to 1.5.0 automatically (slot
+  `branch`/`last_head`/`pid_start`, slot `role` (inferred from the unit's queue entry,
+  with the persisted `phase` as a fallback — #500), entry `pr`/`cleanup`/
+  `failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/`evictions`/
+  `fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to null, and
+  state-level `consecutive_suspect_dispatches`/`last_suspect_dispatch_unit` backfill to
+  `0`/`null` — #505).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
-- **Pause** stops new assignments only; abandon routes through the typed failure rails
-  (`evicted → requeued{full}` for batch members — nothing green is discarded).
+- **Pause** stops new assignments only (including report-agent dispatch — #505); abandon
+  routes through the typed failure rails (`evicted → requeued{full}` for batch members —
+  nothing green is discarded). A pause can be manual (`sched pause`) or automatic
+  (dispatch-health, #505 above); `sched resume` clears both the flag and the
+  dispatch-health streak.
 
 ## The PR watcher + tail work (#468)
 

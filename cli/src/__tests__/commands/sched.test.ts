@@ -194,6 +194,50 @@ describe('ai-dossier sched status', () => {
     const text = logs.join('\n');
     expect(text).toContain('Dispatch health: 1 consecutive suspect-dispatch exit(s)');
     expect(text).toContain('issue:101');
+    expect(text).toContain('informational, below the auto-pause threshold');
+  });
+
+  it('#505: the dispatch-health warning names the pause as the likely cause once paused', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    const state = readState() as Record<string, unknown>;
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        paused: true,
+        consecutive_suspect_dispatches: 2,
+        last_suspect_dispatch_unit: 'issue:102',
+      })
+    );
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    expect(text).toContain('likely why the scheduler is paused');
+  });
+
+  it('#505: sched resume clears the dispatch-health streak', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    const state = readState() as Record<string, unknown>;
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        paused: true,
+        consecutive_suspect_dispatches: 2,
+        last_suspect_dispatch_unit: 'issue:102',
+      })
+    );
+
+    await runSched(['sched', 'resume', '--project', 'test-proj']);
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    expect(text).not.toContain('Dispatch health:');
+    const resumed = readState() as Record<string, unknown>;
+    expect(resumed.consecutive_suspect_dispatches).toBe(0);
+    expect(resumed.last_suspect_dispatch_unit).toBeNull();
   });
 
   it('renders a corrupt state file as a clean error, not a stack trace', async () => {

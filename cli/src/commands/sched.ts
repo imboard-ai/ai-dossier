@@ -130,8 +130,16 @@ function renderReport(report: StatusReport): string {
     `Scheduler [${report.project}]: ${state} · slots ${report.live_slots}/${report.max_slots} live`
   );
   if (report.dispatch_health.consecutive_suspect > 0) {
+    // `report.paused` alone can't prove dispatch-health caused it (a manual
+    // `sched pause` looks identical), but a nonzero streak while paused is
+    // always at least worth flagging as the likely cause; below that it's
+    // purely informational — `sched resume` clears the streak (#505), so a
+    // reading here always reflects activity since the last resume.
+    const cause = report.paused
+      ? '— likely why the scheduler is paused'
+      : '— informational, below the auto-pause threshold';
     lines.push(
-      `⚠ Dispatch health: ${report.dispatch_health.consecutive_suspect} consecutive suspect-dispatch exit(s) (last: ${report.dispatch_health.last_suspect_unit}) — quota/auth wall suspected`
+      `⚠ Dispatch health: ${report.dispatch_health.consecutive_suspect} consecutive suspect-dispatch exit(s) (last: ${report.dispatch_health.last_suspect_unit}) ${cause}`
     );
   }
   lines.push(`Runnable units: ${runnable}`);

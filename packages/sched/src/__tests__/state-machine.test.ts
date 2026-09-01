@@ -767,6 +767,28 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0 → 1
     );
   });
 
+  it('#505: rejects a nonzero count with no last_suspect_dispatch_unit', () => {
+    const state = seeded();
+    expect(() =>
+      validateState({
+        ...state,
+        consecutive_suspect_dispatches: 1,
+        last_suspect_dispatch_unit: null,
+      })
+    ).toThrow(/zero.*null/);
+  });
+
+  it('#505: rejects a last_suspect_dispatch_unit with a zero count', () => {
+    const state = seeded();
+    expect(() =>
+      validateState({
+        ...state,
+        consecutive_suspect_dispatches: 0,
+        last_suspect_dispatch_unit: 'issue:101',
+      })
+    ).toThrow(/zero.*null/);
+  });
+
   it('rejects a malformed slot role', () => {
     const state = seeded();
     const bad = {

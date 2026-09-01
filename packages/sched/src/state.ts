@@ -502,6 +502,19 @@ export function validateState(data: unknown): SchedState {
   ) {
     throw new Error('last_suspect_dispatch_unit must be a string or null');
   }
+  // The pair is a single fact (#505): zero consecutive suspects has no "last
+  // unit", and a nonzero streak always has one. A legacy state with BOTH
+  // fields absent trivially satisfies this (0 and null are the defaults
+  // below) — the check only rejects a state where the two disagree.
+  {
+    const effectiveCount = (obj.consecutive_suspect_dispatches as number | undefined) ?? 0;
+    const effectiveUnit = (obj.last_suspect_dispatch_unit as string | undefined) ?? null;
+    if ((effectiveCount === 0) !== (effectiveUnit === null)) {
+      throw new Error(
+        'consecutive_suspect_dispatches and last_suspect_dispatch_unit must agree: zero ⇔ null'
+      );
+    }
+  }
 
   // Migration: pre-#464 (1.0.0) slots carry no branch/last_head/pid_start —
   // backfill null so the returned state always has the current shape. Pre-#468
