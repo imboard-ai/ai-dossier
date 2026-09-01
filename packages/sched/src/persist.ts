@@ -274,6 +274,12 @@ export class SchedStore {
       if (parsed.dispatch !== undefined) {
         config.dispatch = validateDispatchConfig(parsed.dispatch);
       }
+      if (parsed.auto_upgrade !== undefined) {
+        if (typeof parsed.auto_upgrade !== 'boolean') {
+          throw new Error('auto_upgrade must be a boolean');
+        }
+        config.auto_upgrade = parsed.auto_upgrade;
+      }
       return config;
     } catch (err) {
       // Deliberate degrade-to-default (unlike state.json, config is re-derivable
@@ -285,8 +291,8 @@ export class SchedStore {
       console.error(
         `⚠ Scheduler config ${this.configPath} is unreadable (${(err as Error).message}) — ` +
           `ALL config (max_slots, stall_timeout_ms, reconcile_interval_ms, pr_poll_interval_ms, ` +
-          `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout) reverted to built-in defaults ` +
-          `(max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
+          `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout, auto_upgrade) ` +
+          `reverted to built-in defaults (max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
       );
       return { max_slots: DEFAULT_MAX_SLOTS };
     }
@@ -306,6 +312,7 @@ export class SchedStore {
         ? { pr_poll_interval_ms: config.pr_poll_interval_ms }
         : {}),
       ...(config.dispatch !== undefined ? { dispatch: config.dispatch } : {}),
+      ...(config.auto_upgrade !== undefined ? { auto_upgrade: config.auto_upgrade } : {}),
     };
     writeAtomic(this.configPath, `${JSON.stringify(file, null, 2)}\n`);
   }

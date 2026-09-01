@@ -60,6 +60,12 @@ const DEFAULT_CONFIG: DossierConfig = {
   auditLog: true,
   schedTelemetry: true,
   'cache.resolutionTtlSeconds': 300,
+  // #537: TTL for the `sched start`/`sched status` npm-latest engine-staleness
+  // check (cli/src/engine-version.ts). Kept in sync with
+  // DEFAULT_ENGINE_VERSION_TTL_SECONDS there — config.ts can't import from
+  // engine-version.ts without a cycle (engine-version.ts already imports
+  // getConfig from here).
+  'cache.engineVersionTtlSeconds': 300,
 };
 
 /**

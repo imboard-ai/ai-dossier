@@ -117,11 +117,14 @@ where every mechanical supervision decision is code, not remembered prose:
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,
    progress, stalled, redispatched, fence-written, fence-failed, unit-failed,
    dependents-blocked, slot-released, suspect-dispatch, dispatch-unhealthy,
-   run-log-recorded, run-log-no-usage, run-log-skipped, run-log-failed, …) is
+   run-log-recorded, run-log-no-usage, run-log-skipped, run-log-failed, engine-stale,
+   engine-auto-upgrade-attempted, engine-auto-upgrade-failed, …) is
    appended to `events.jsonl`; `sched status` shows the live phase per unit, plus each
    slot's `gen` and `fenced` state (#504). `label-blocked`/`label-check-failed` (#507)
-   are the one pair journaled OUTSIDE the engine — `sched enqueue` appends them at
-   enqueue time, before dispatch. `slot-released` (#525) marks the exact tick a held
+   and `engine-stale`/`engine-auto-upgrade-attempted`/`engine-auto-upgrade-failed`
+   (#537) are journaled OUTSIDE the engine — `sched enqueue` appends the label events at
+   enqueue time before dispatch, and `sched start`'s CLI-side staleness check appends
+   the engine-stale events directly, not through `tick()`. `slot-released` (#525) marks the exact tick a held
    slot reaches `idle` on a per-issue dispatch terminal path — verified completion,
    external-advance, a direct failure, a blocked dependent's release, or a
    detached-ship park — carrying the freed `slot` id and a closed `reason`
@@ -459,6 +462,7 @@ import {
   validateState,         // strict persisted-state validation (1.0.0-1.6.0 files migrate)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
+  EngineTooOldError,     // state schema newer than installed engine — not corruption (#537)
   // #524: per-dispatch runs.jsonl telemetry (see "runs.jsonl telemetry" below)
   buildSchedRunLogEntry, // AgentRunUsage-sourced RunLogEntry for one completed dispatch
   appendSchedRunLog,     // JSONL append to ~/.dossier/runs.jsonl, gated by schedTelemetry (not cli's auditLog)
@@ -504,7 +508,8 @@ telemetry" below.
 ├── state.json     # hot operational truth — atomic tmp+fsync+rename writes;
 ├── config.json    # durable intent: max_slots, stall_timeout_ms, reconcile_interval_ms,
 │                  # pr_poll_interval_ms, dispatch (incl. report_prompt,
-│                  # phase_stall_timeout_ms, fence_takeover_timeout_ms, tiers — #527)
+│                  # phase_stall_timeout_ms, fence_takeover_timeout_ms, tiers — #527),
+│                  # auto_upgrade — #537
 ├── events.jsonl   # append-only event journal (the operator's flight recorder)
 ├── runs/          # per-unit agent output logs (issue-<n>.log)
 └── .sched-lock/   # cross-process directory mutex (pid; stolen from dead holders)
@@ -569,7 +574,10 @@ slot without recording, so they are not costed.
   requeued.
 - **Corrupt state is loud**: `load()` throws `CorruptStateError` naming the file —
   never a silent queue reset. `state.json` is deletable and rebuildable from GitHub,
-  which remains the system of record.
+  which remains the system of record. Exception: a `state.json` written by a newer
+  schema than the installed engine is not corruption — `load()` throws the more specific
+  `EngineTooOldError` (#537), pointing at an engine upgrade rather than at deleting real
+  queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0) and #504 (1.6.0) load and migrate to 1.7.0
   automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the

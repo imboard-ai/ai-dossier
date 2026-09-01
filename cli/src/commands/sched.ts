@@ -59,7 +59,11 @@ import {
 import type { Command } from 'commander';
 import { formatCost, formatCount } from '../cost-format';
 import { formatAge, formatDurationMs } from '../duration';
-import { checkEngineStaleness, type EngineStalenessCheck } from '../engine-version';
+import {
+  checkEngineStaleness,
+  type EngineStalenessCheck,
+  formatEngineStaleWarning,
+} from '../engine-version';
 import { requireRepoSlug, tryFetchLabels } from '../gh';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
@@ -233,12 +237,11 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   lines.push(
     `Scheduler [${report.project}]: ${state} · slots ${report.live_slots}/${report.max_slots} live`
   );
-  if (staleness?.stale) {
+  if (staleness?.stale && staleness.installed !== null && staleness.latest !== null) {
     // #537: mirrors the dispatch-health block below — a status line, not a
-    // block. `stale` is only ever true when both versions are known.
-    lines.push(
-      `⚠ Engine stale: installed @ai-dossier/sched@${staleness.installed}, npm latest ${staleness.latest} — upgrade: npm i -g @ai-dossier/cli@latest`
-    );
+    // block. `stale` is only ever true when both versions are known; the
+    // null checks here are for TS, not reachable in practice.
+    lines.push(formatEngineStaleWarning(staleness.installed, staleness.latest));
   }
   if (report.dispatch_health.consecutive_suspect > 0) {
     // `report.paused` alone can't prove dispatch-health caused it (a manual
@@ -843,26 +846,48 @@ async function checkAndHandleEngineStaleness(
       latest_version: latest,
       detail: `installed @ai-dossier/sched@${installed} behind npm latest ${latest}`,
     });
-    process.stderr.write(
-      `⚠ Engine stale: installed @ai-dossier/sched@${installed}, npm latest ${latest} — upgrade: npm i -g @ai-dossier/cli@latest\n`
-    );
+    process.stderr.write(`${formatEngineStaleWarning(installed, latest)}\n`);
   }
 
   if (!autoUpgradeEnabled) return;
 
   // Re-read fresh — must reflect what the tick that just ran left behind,
   // not a pre-tick snapshot (AC2: "only while no unit is mid-dispatch").
-  const state = store.load();
-  const busy = state.slots.some((s) => LIVE_SLOT_STATUSES.has(s.status));
+  // Best-effort like the rest of this function: a failure here (state became
+  // unreadable between the tick that just succeeded and this re-check) must
+  // not crash the `--once` cron path after the tick itself already
+  // completed successfully — never surface as an unhandled rejection.
+  let busy: boolean;
+  try {
+    const state = store.load();
+    busy = state.slots.some((s) => LIVE_SLOT_STATUSES.has(s.status));
+  } catch (err) {
+    process.stderr.write(
+      `⚠ sched auto-upgrade: could not re-read state to confirm no unit is mid-dispatch, skipping upgrade: ${(err as Error).message}\n`
+    );
+    return;
+  }
   if (busy) return;
 
   process.stderr.write('⚠ sched: auto-upgrading (npm i -g @ai-dossier/cli@latest)…\n');
   const output = upgradeExec('npm', ['i', '-g', '@ai-dossier/cli@latest']);
-  process.stderr.write(
-    output === null
-      ? '⚠ sched: auto-upgrade failed — see above\n'
-      : '✓ sched: auto-upgrade completed\n'
-  );
+  if (output === null) {
+    journal.append({
+      event: 'engine-auto-upgrade-failed',
+      installed_version: installed,
+      latest_version: latest,
+      detail: 'npm i -g @ai-dossier/cli@latest failed — see stderr for the npm error',
+    });
+    process.stderr.write('⚠ sched: auto-upgrade failed — see above\n');
+  } else {
+    journal.append({
+      event: 'engine-auto-upgrade-attempted',
+      installed_version: installed,
+      latest_version: latest,
+      detail: 'npm i -g @ai-dossier/cli@latest completed',
+    });
+    process.stderr.write('✓ sched: auto-upgrade completed\n');
+  }
 }
 
 function registerStartSubcommand(cmd: Command): void {

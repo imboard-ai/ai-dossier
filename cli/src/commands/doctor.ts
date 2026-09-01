@@ -13,6 +13,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
+import { getPackageVersion } from '../package-info';
 
 export interface CheckResult {
   name: string;
@@ -50,32 +51,6 @@ function isPackageInstalled(packageName: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * Try to read a package's version from its package.json. Exported for reuse
- * by `engine-version.ts` (#537) — same require.resolve + walk-up-to-package.json
- * logic, no need to duplicate it.
- */
-export function getPackageVersion(packageName: string): string | null {
-  try {
-    const entryPath = require.resolve(packageName);
-    // Walk up to find the package.json
-    let dir = path.dirname(entryPath);
-    for (let i = 0; i < 10; i++) {
-      const pkgFile = path.join(dir, 'package.json');
-      if (fs.existsSync(pkgFile)) {
-        const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'));
-        if (pkg.name === packageName) {
-          return pkg.version ?? null;
-        }
-      }
-      dir = path.dirname(dir);
-    }
-  } catch {
-    // not installed
-  }
-  return null;
 }
 
 export function checkPackageInstalled(packageName: string): CheckResult {

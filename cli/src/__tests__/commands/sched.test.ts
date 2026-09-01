@@ -17,9 +17,17 @@ vi.mock('node:child_process');
 // package's own state, which resolves `os.homedir()` fresh per call).
 vi.mock('../../run-log');
 // `engine-version.ts`'s own cache dir is the same "computed once at import
-// time from os.homedir()" shape (#537) — mock the module directly (like
-// `run-log`) rather than fighting the real path under the stubbed home.
-vi.mock('../../engine-version');
+// time from os.homedir()" shape (#537) — mock `checkEngineStaleness`
+// directly (like `run-log`) rather than fighting the real path under the
+// stubbed home. Keep the real `formatEngineStaleWarning` — it's a pure
+// string formatter with no filesystem/network dependency, and an
+// auto-mocked version silently returns undefined (an empty rendered line,
+// not a thrown error — the kind of failure a test wouldn't defend against
+// without this comment as the tripwire).
+vi.mock('../../engine-version', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../engine-version')>();
+  return { ...actual, checkEngineStaleness: vi.fn() };
+});
 
 let home: string;
 let logs: string[];
@@ -214,13 +222,7 @@ describe('ai-dossier sched enqueue', () => {
       status: 'blocked',
       reason: 'label:decision-pending',
     });
-    const journalPath = path.join(home, '.dossier', 'sched', 'test-proj', 'events.jsonl');
-    const events = fs
-      .readFileSync(journalPath, 'utf-8')
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
-    expect(events).toContainEqual(
+    expect(journalEvents()).toContainEqual(
       expect.objectContaining({
         event: 'label-blocked',
         issue: 9,
@@ -256,13 +258,7 @@ describe('ai-dossier sched enqueue', () => {
     expect(errors.join('\n')).toContain('Could not read labels for issue #11');
     const state = readState() as { entries: Array<Record<string, unknown>> };
     expect(state.entries[0]).toMatchObject({ issue: 11, status: 'queued', reason: null });
-    const journalPath = path.join(home, '.dossier', 'sched', 'test-proj', 'events.jsonl');
-    const events = fs
-      .readFileSync(journalPath, 'utf-8')
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
-    expect(events).toContainEqual(
+    expect(journalEvents()).toContainEqual(
       expect.objectContaining({ event: 'label-check-failed', issue: 11 })
     );
   });

@@ -214,10 +214,14 @@ Carrying forward `batch-pilot.md` §5, with its resolved items dropped and the n
 - [ ] **B2b — the anchor reaches the scheduler.** Add `anchor` to the manifest schema documented in
       `imboard-ai/git/batch-issues-preparation` (the CLI already parses it), and have batch-prep
       Step 8 emit the anchor number it created in Step 6.
-- [ ] **B2c — engine hosts run a current CLI.** #523 was satisfied in the repo and unsatisfied on
+- [x] **B2c — engine hosts run a current CLI.** #523 was satisfied in the repo and unsatisfied on
       the machine for six days without any signal. A version check in the tick, or a
       `sched status` warning when the installed `sched` is older than the state's schema, would
-      have surfaced this immediately.
+      have surfaced this immediately. Fixed in #537: `sched start` compares the installed
+      `@ai-dossier/sched` against npm registry latest every tick (journaled `engine-stale` once
+      per version), and `sched status` surfaces the cached result; a state schema newer than the
+      installed engine now throws the specific `EngineTooOldError` instead of a generic
+      corrupt-state error.
 - [ ] **B1 — a cohort that supports ≥3 batches exists.** At the measured 20.0% hit rate, ≥3 batches
       of N≥3 needs ~45 classified candidates, and the eligible imboard backlog does not contain
       them today. Either the QA-sheet triage pipeline tops up the slot-eligible backlog first, or

@@ -468,3 +468,53 @@ describe('#527 config: dispatch.tiers (mixed agent-CLI escalation ladders)', () 
     expect(config.dispatch?.tiers).toBeUndefined();
   });
 });
+
+describe('#537 config: auto_upgrade', () => {
+  it('round-trips auto_upgrade through save/load', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-537-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({ max_slots: 2, auto_upgrade: true });
+      expect(store.loadConfig().auto_upgrade).toBe(true);
+
+      store.saveConfig({ max_slots: 2, auto_upgrade: false });
+      expect(store.loadConfig().auto_upgrade).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('defaults auto_upgrade to undefined when absent from config.json', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-537-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({ max_slots: 2 });
+      expect(store.loadConfig().auto_upgrade).toBeUndefined();
+      expect(fs.readFileSync(store.configPath, 'utf-8')).not.toContain('auto_upgrade');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-boolean auto_upgrade (degrades to defaults, loudly)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-537-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({ schema_version: '1.4.0', max_slots: 2, auto_upgrade: 'yes' })
+      );
+      const err = console.error;
+      const warnings: string[] = [];
+      console.error = (msg: string) => warnings.push(msg);
+      try {
+        expect(store.loadConfig()).toEqual({ max_slots: 3 });
+      } finally {
+        console.error = err;
+      }
+      expect(warnings[0]).toContain('auto_upgrade');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

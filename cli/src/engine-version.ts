@@ -15,8 +15,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getPackageVersion } from './commands/doctor';
-import { getConfig } from './config';
+import { getPackageVersion } from './package-info';
+import { getConfiguredTtlSeconds, isWithinTtl } from './ttl-cache';
 import { compareVersions } from './version';
 
 const SCHED_PACKAGE_NAME = '@ai-dossier/sched';
@@ -48,17 +48,24 @@ function cachePath(): string {
   return path.join(ENGINE_VERSION_CACHE_DIR, 'sched-latest.json');
 }
 
-function getConfiguredTtlSeconds(): number {
-  const raw = getConfig('cache.engineVersionTtlSeconds');
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return raw;
-  return DEFAULT_ENGINE_VERSION_TTL_SECONDS;
-}
+/**
+ * A plausible dotted-numeric version string (npm's own `valid-semver`-ish
+ * shape, permissive enough for prereleases/build metadata). Guards every
+ * boundary this value crosses — cache file, journal, and stderr/terminal
+ * output — against an oversized or control-character-laden value from a
+ * compromised registry response or a hand-edited cache file (#537 review).
+ */
+const VERSION_FORMAT = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 
 function readCache(): EngineVersionCacheRecord | null {
   try {
     const raw = fs.readFileSync(cachePath(), 'utf8');
     const parsed = JSON.parse(raw);
-    if (typeof parsed?.latest_version === 'string' && typeof parsed?.checked_at === 'string') {
+    if (
+      typeof parsed?.latest_version === 'string' &&
+      VERSION_FORMAT.test(parsed.latest_version) &&
+      typeof parsed?.checked_at === 'string'
+    ) {
       return parsed as EngineVersionCacheRecord;
     }
     return null;
@@ -83,7 +90,8 @@ async function fetchNpmLatest(packageName: string): Promise<string | null> {
     });
     if (!response.ok) return null;
     const body = (await response.json()) as { version?: unknown };
-    return typeof body.version === 'string' ? body.version : null;
+    if (typeof body.version !== 'string' || !VERSION_FORMAT.test(body.version)) return null;
+    return body.version;
   } catch (err) {
     if (process.env.DOSSIER_DEBUG) {
       process.stderr.write(
@@ -110,15 +118,15 @@ export async function checkEngineStaleness(
   opts: { fresh?: boolean; noFetch?: boolean } = {}
 ): Promise<EngineStalenessCheck> {
   const installed = getPackageVersion(SCHED_PACKAGE_NAME);
-  const ttl = getConfiguredTtlSeconds();
+  const ttl = getConfiguredTtlSeconds(
+    'cache.engineVersionTtlSeconds',
+    DEFAULT_ENGINE_VERSION_TTL_SECONDS
+  );
 
   let latest: string | null = null;
   const cached = opts.fresh ? null : readCache();
-  if (cached) {
-    const ageMs = Date.now() - new Date(cached.checked_at).getTime();
-    if (ageMs >= 0 && ageMs < ttl * 1000) {
-      latest = cached.latest_version;
-    }
+  if (cached && isWithinTtl(cached.checked_at, ttl)) {
+    latest = cached.latest_version;
   }
 
   if (latest === null && !opts.noFetch) {
@@ -130,4 +138,12 @@ export async function checkEngineStaleness(
 
   const stale = installed !== null && latest !== null && compareVersions(installed, latest) < 0;
   return { installed, latest, stale };
+}
+
+/**
+ * The engine-stale warning text, shared by `sched status`'s rendered report
+ * and `sched start`'s stderr warning (#537) — one wording to keep in sync.
+ */
+export function formatEngineStaleWarning(installed: string, latest: string): string {
+  return `⚠ Engine stale: installed @ai-dossier/sched@${installed}, npm latest ${latest} — upgrade: npm i -g @ai-dossier/cli@latest`;
 }

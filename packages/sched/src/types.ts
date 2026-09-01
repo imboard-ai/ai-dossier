@@ -860,7 +860,13 @@ export type JournalEventName =
   // by the CLI's `sched start`, process-scoped like `tick-failed` — not
   // unit-scoped). Appended once per distinct (installed, latest) pair, not
   // every tick — see `installed_version`/`latest_version` on `JournalEvent`.
-  | 'engine-stale';
+  | 'engine-stale'
+  // #537: `--auto-upgrade`'s `npm i -g @ai-dossier/cli@latest` outcome —
+  // journaled so an operator whose stderr isn't captured (systemd unit
+  // without journald wiring, redirected to /dev/null) can still answer "was
+  // an upgrade attempted, and did it work?" from events.jsonl alone.
+  | 'engine-auto-upgrade-attempted'
+  | 'engine-auto-upgrade-failed';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —

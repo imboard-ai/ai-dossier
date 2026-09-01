@@ -1,12 +1,12 @@
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getPackageVersion } from '../commands/doctor';
 import * as config from '../config';
 import { checkEngineStaleness } from '../engine-version';
+import { getPackageVersion } from '../package-info';
 
 vi.mock('node:fs');
 vi.mock('../config');
-vi.mock('../commands/doctor');
+vi.mock('../package-info');
 
 const mockedFs = vi.mocked(fs);
 
@@ -159,5 +159,40 @@ describe('checkEngineStaleness (#537)', () => {
     const result = await checkEngineStaleness();
 
     expect(result).toEqual({ installed: null, latest: '0.13.0', stale: false });
+  });
+
+  it('#537 review: rejects a malformed registry response (terminal-escape / oversized-blob defense) instead of trusting it', async () => {
+    vi.mocked(getPackageVersion).mockReturnValue('0.12.1');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ version: '[31mnot-a-real-version' }),
+      })
+    );
+
+    const result = await checkEngineStaleness();
+
+    expect(result).toEqual({ installed: '0.12.1', latest: null, stale: false });
+    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it('#537 review: rejects a malformed cached version instead of trusting it', async () => {
+    vi.mocked(getPackageVersion).mockReturnValue('0.12.1');
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(
+      JSON.stringify({ latest_version: '[31mmalicious', checked_at: new Date().toISOString() })
+    );
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ version: '0.13.0' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await checkEngineStaleness();
+
+    // The malformed cache entry is treated as a miss — falls through to a fetch.
+    expect(fetchMock).toHaveBeenCalled();
+    expect(result.latest).toBe('0.13.0');
   });
 });
