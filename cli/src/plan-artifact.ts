@@ -244,7 +244,7 @@ export const RISK_FLOOR_PATTERNS: readonly RiskFloorPattern[] = [
 ];
 
 /** Every risk-floor pattern a path hits, in pattern order. */
-export function scanRiskFloor(paths: string[]): Array<{ path: string; pattern: string }> {
+export function scanRiskFloor(paths: readonly string[]): Array<{ path: string; pattern: string }> {
   const hits: Array<{ path: string; pattern: string }> = [];
   for (const path of paths) {
     for (const pattern of RISK_FLOOR_PATTERNS) {
