@@ -76,6 +76,25 @@ describe('enqueueEntries', () => {
     expect(() => enqueueEntries(state, [{ issue: 1 }], NOW)).not.toThrow();
   });
 
+  it('replaces the old terminal entry on re-enqueue instead of duplicating it (#502)', () => {
+    let state = createEmptyState();
+    state = enqueueEntries(state, [{ issue: 1 }], NOW);
+    state = {
+      ...state,
+      entries: state.entries.map((e) => (e.issue === 1 ? { ...e, status: 'failed' as const } : e)),
+    };
+    state = enqueueEntries(state, [{ issue: 1 }], NOW);
+
+    // The bug: enqueueEntries appended the fresh entry alongside the old
+    // terminal one, producing a state validateState (and therefore the next
+    // load) rejects with "Duplicate queue entry for issue 1".
+    expect(() => validateState(state)).not.toThrow();
+
+    const matching = state.entries.filter((e) => e.issue === 1);
+    expect(matching).toHaveLength(1);
+    expect(matching[0]).toMatchObject({ issue: 1, status: 'queued' });
+  });
+
   it('rejects dependency cycles across new and existing entries', () => {
     let state = createEmptyState();
     state = enqueueEntries(state, [{ issue: 1, deps: [2] }], NOW);

@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/sched",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Deterministic scheduler core for dossier batch cycles — queue, slots, persistent state machine, dispatch engine with completion verification and stall/escalation ladder, PR watching with script-based teardown, and batch failure recovery (attribution, bisect, eviction, dissolve). The scheduler never invokes an LLM.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

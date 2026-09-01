@@ -390,10 +390,18 @@ export function enqueueEntries(
     }
   }
 
+  // Re-enqueueing a terminal issue (allowed above) must REPLACE its old entry,
+  // not sit alongside it — validateState enforces one entry per issue on load,
+  // so appending here would write a state the very next command can't read
+  // back (#502). Any surviving old entry whose issue matches a fresh one is
+  // guaranteed terminal: the guard above already threw for any active match.
+  const reenqueuedIssues = new Set(entries.map((e) => e.issue));
+  const survivingEntries = state.entries.filter((e) => !reenqueuedIssues.has(e.issue));
+
   // Eviction groups must name members of their own batch: a stray issue number
   // would expand an eviction to a non-member and count against the batch size
   // in the dissolve trigger, dissolving the batch below its real threshold.
-  const combined = { ...state, entries: [...state.entries, ...entries], batches };
+  const combined = { ...state, entries: [...survivingEntries, ...entries], batches };
   for (const batch of batches) {
     for (const group of batch.eviction_groups) {
       const strays = group.filter((issue) => !batch.members.includes(issue));
