@@ -40,7 +40,7 @@ Every subcommand except `stats` takes `--project <slug>` (default: `owner-repo` 
 current directory, falling back to the repo basename — fleet-cycle's convention) and
 `--json`. `stats` reads `~/.dossier/runs.jsonl`, a single global file, not the
 per-project state — it takes `--json` and `--issues` only; see "runs.jsonl telemetry"
-above for the resulting cross-repo caveat (the same issue number in two repos sums
+below for the resulting cross-repo caveat (the same issue number in two repos sums
 together).
 
 Since #507, `enqueue` additionally reads each candidate issue's live GitHub labels (one
@@ -57,7 +57,9 @@ A failed `gh` lookup fails open: the issue enqueues normally, with a warning and
 where every mechanical supervision decision is code, not remembered prose:
 
 1. **Dispatch (AC1)** — a runnable unit is spawned as a detached agent process
-   (`claude -p --output-format json --model <tier model>` by default, opencode fallback;
+   (`claude -p --output-format stream-json --verbose --model <tier model>` by default —
+   `json` buffers the whole session into a single write at exit, which left a 0-byte log
+   for any dispatch killed before a clean exit (#524); opencode fallback;
    command/prompt/tier-models configurable), prompt on stdin, output appended to
    `runs/<unit>.log`. The opencode fallback runs `opencode run --auto …` (#506) — a git
    worktree is an `external_directory` to opencode, whose default `"ask"` policy a headless
@@ -103,7 +105,8 @@ where every mechanical supervision decision is code, not remembered prose:
    tick; a runnable unit never waits while a slot is idle (pinned by a regression test).
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,
    progress, stalled, redispatched, fence-written, fence-failed, unit-failed,
-   dependents-blocked, suspect-dispatch, dispatch-unhealthy, …) is appended to
+   dependents-blocked, suspect-dispatch, dispatch-unhealthy, run-log-recorded,
+   run-log-no-usage, run-log-skipped, run-log-failed, …) is appended to
    `events.jsonl`; `sched status` shows the live phase per unit, plus each slot's `gen`
    and `fenced` state (#504). `label-blocked`/`label-check-failed` (#507) are the one pair journaled
    OUTSIDE the engine — `sched enqueue` appends them at enqueue time, before dispatch.
@@ -350,6 +353,7 @@ import {
   type SuiteRunner,      // re-runs the aggregate suite after a revert or rebase
   type BatchMilestonePoster, // batch-milestone sink (createExecMilestonePoster is default)
   Journal,               // append-only events.jsonl
+  appendJsonl,           // the shared mkdir+append+swallow JSONL write
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
@@ -358,9 +362,10 @@ import {
   SchedNotFoundError,
   // #524: per-dispatch runs.jsonl telemetry (see "runs.jsonl telemetry" below)
   buildSchedRunLogEntry, // AgentRunUsage-sourced RunLogEntry for one completed dispatch
-  appendSchedRunLog,     // JSONL append to ~/.dossier/runs.jsonl, NOT gated by cli's auditLog
+  appendSchedRunLog,     // JSONL append to ~/.dossier/runs.jsonl, gated by schedTelemetry (not cli's auditLog)
   readDispatchLog,       // read a unit's dispatch log, optionally from a byte offset
   schedRunsLogPath,      // ~/.dossier/runs.jsonl (re-export of @ai-dossier/core's runsLogPath)
+  schedTelemetryEnabled, // false when the operator set schedTelemetry:false in ~/.dossier/config.json
   usageParserFor,        // claude/opencode usage-parser selection by spawned binary
   type SchedRunLogInput, // buildSchedRunLogEntry's input shape
   dispatchLogPath,       // <runsDir>/<unit>.log — shared by spawn (offset) and record (read)
@@ -412,6 +417,36 @@ first's, in the SAME file — `SlotEntry.log_offset_at_spawn` (schema 1.7.0, sta
 right before every spawn) is what lets `recordDispatchRunLog` read only the current
 dispatch's own slice, so a redispatch's entry is never corrupted by concatenation
 (claude) or double-counted (opencode) against a prior dispatch's output.
+
+Every dispatch log opens with a `{"type":"sched-dispatch","ts":…,"cmd":[…]}` preamble
+line written at spawn, followed by a `{"type":"sched-dispatch","event":"spawned","pid":…}`
+marker once the child exists — so a log is never 0 bytes for a unit that ran, each
+dispatch's slice is self-describing, and a slice can be joined to its `events.jsonl`
+record by pid rather than by timestamp alone. Every `@ai-dossier/core` usage parser
+skips that `type`.
+
+**Why the default dispatch command streams.** `--output-format json` buffers the entire
+session and writes ONE object at process exit. The batch pilot's six 0-byte logs are
+exactly the six units advanced by ground truth (`external-advance`) and killed while
+still alive — the one-shot write never happened. `--output-format stream-json --verbose`
+fills the log per turn, and `parseAgentUsage` sums per-turn `assistant` usage when a
+dispatch was killed before its final `result` event, so an interrupted run still reports
+real tokens instead of null.
+
+**Opt-out.** Writing is gated by `schedTelemetry` in `~/.dossier/config.json` (default
+**on**), read directly here because `sched` cannot depend on `cli`. This is deliberately
+NOT the CLI's `auditLog`, which scopes `ai-dossier run`'s own entries: honouring it would
+silently leave an opted-out operator with zero scheduler cost visibility, and ignoring it
+would just as silently widen a flag whose documented scope is the audit log. A skipped
+write is journaled `run-log-skipped reason=telemetry-disabled`, so a missing entry is
+never indistinguishable from a lost one.
+
+**Reading the journal when a row is blank.** An entry whose token fields are all null is
+journaled `run-log-no-usage` with a `reason` — `log-unreadable`, `log-empty`, or
+`no-usage-events` — so a row of dashes in `sched stats` can be explained without
+re-deriving it. A successful append is journaled `run-log-recorded`; a failed one,
+`run-log-failed` with the target file. Dispatches ended by `sched abandon` release the
+slot without recording, so they are not costed.
 
 - **Crash safety**: a process killed between writes leaves the previous complete state,
   never a partial file; restart resumes identically (proved by `restart.test.ts`) —

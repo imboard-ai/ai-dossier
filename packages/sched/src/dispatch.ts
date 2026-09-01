@@ -515,7 +515,19 @@ export function dispatchLogPath(runsDir: string, unit: string): string {
 export function fileSizeOrZero(file: string): number {
   try {
     return fs.statSync(file).size;
-  } catch {
+  } catch (err) {
+    // ENOENT genuinely means "no prior bytes". Any OTHER stat error against a
+    // log that may already hold a previous dispatch's output silently
+    // re-enables the corruption the offset exists to prevent (claude:
+    // a prior dispatch's result attributed to this one; opencode: doubled
+    // tokens), so say so rather than degrading in silence.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      process.stderr.write(
+        `⚠ sched: could not stat dispatch log ${file} (${code}); recording from offset 0 ` +
+          `may include a prior dispatch's output\n`
+      );
+    }
     return 0;
   }
 }
@@ -595,8 +607,14 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
             out,
             `${JSON.stringify({ type: SCHED_DISPATCH_EVENT, ts: new Date().toISOString(), cmd })}\n`
           );
-        } catch {
-          // Log unwritable — the spawn below will surface the real problem.
+        } catch (err) {
+          // The fd opened fine, so the spawn below will NOT surface this — and
+          // a failed preamble write (ENOSPC, EDQUOT, EIO) leaves exactly the
+          // 0-byte log the preamble exists to prevent. Warn, matching
+          // `Journal.append`'s convention, rather than failing the dispatch.
+          process.stderr.write(
+            `⚠ sched: could not write dispatch preamble to ${logFile}: ${(err as Error).message}\n`
+          );
         }
         const child = spawn(cmd[0], cmd.slice(1), {
           ...(cwd ? { cwd } : {}),
@@ -613,6 +631,21 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
           child.stdin.on('error', () => {});
           child.stdin.write(prompt);
           child.stdin.end();
+        }
+        // A second marker once the pid is known: `events.jsonl` keys
+        // everything on pid/slot, and without this a log slice can only be
+        // matched to its journal record by timestamp. Parsers skip it by
+        // `type`, same as the preamble.
+        if (child.pid !== undefined) {
+          try {
+            fs.writeSync(
+              out,
+              `${JSON.stringify({ type: SCHED_DISPATCH_EVENT, event: 'spawned', pid: child.pid, ts: new Date().toISOString() })}\n`
+            );
+          } catch {
+            // Best-effort correlation aid; the preamble already guaranteed
+            // the log is non-empty, and its catch above warns on real trouble.
+          }
         }
         child.unref();
         if (child.pid === undefined) {

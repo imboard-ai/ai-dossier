@@ -32,7 +32,10 @@ function sumField(
   let samples = 0;
   for (const entry of entries) {
     const value = entry[field];
-    if (typeof value === 'number' && Number.isFinite(value)) {
+    // A non-finite RUNNING TOTAL would render as `-` and blank the whole
+    // column — including the TOTAL row — hiding every legitimate run beside
+    // it. Skip the addition rather than poisoning the cohort (#524 review).
+    if (typeof value === 'number' && Number.isFinite(value) && Number.isFinite(total + value)) {
       total += value;
       samples += 1;
     }
@@ -68,7 +71,7 @@ const SUM_FIELDS = [
   'cache_read_tokens',
   'total_cost_usd',
   'duration_ms',
-] as const satisfies readonly (keyof RunLogEntry)[];
+] as const satisfies readonly (keyof Omit<IssueCost, 'issue' | 'runs'> & keyof RunLogEntry)[];
 
 /** Sum every `SUM_FIELDS` entry across `entries` — the issue-less half of one row. */
 function aggregate(entries: RunLogEntry[]): Omit<IssueCost, 'issue'> {
@@ -86,10 +89,12 @@ function aggregate(entries: RunLogEntry[]): Omit<IssueCost, 'issue'> {
  *
  * Only entries with an `issue:<n>` `unit` are considered — ordinary
  * `ai-dossier run` entries (no `unit`) and batch entries (`batch:<id>`, not
- * yet dispatched by the engine — see `packages/sched`'s header comment) are
+ * yet dispatched by the engine — see `packages/sched/README.md`'s
+ * dispatch-engine section, "Only `issue:<n>` units are dispatched today") are
  * excluded. `issues`, when given, restricts the report to that set (and
  * includes a zero-run row for any issue with no matching entries, so an
- * operator can tell "no cost recorded" from "not asked about").
+ * operator can tell "no cost recorded" from "not asked about"); duplicates in
+ * it are collapsed, so an issue cannot be counted twice into `totals`.
  */
 export function buildSchedCostReport(
   entries: RunLogEntry[],
@@ -104,7 +109,7 @@ export function buildSchedCostReport(
     else byIssue.set(issue, [entry]);
   }
 
-  const selected = issues ?? [...byIssue.keys()].sort((a, b) => a - b);
+  const selected = issues ? [...new Set(issues)] : [...byIssue.keys()].sort((a, b) => a - b);
   const rows = selected.map((issue) => ({ issue, ...aggregate(byIssue.get(issue) ?? []) }));
   const totals = aggregate(selected.flatMap((issue) => byIssue.get(issue) ?? []));
 

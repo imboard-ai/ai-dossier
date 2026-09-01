@@ -570,25 +570,33 @@ function registerStatsSubcommand(cmd: Command): void {
       const issues = opts.issues ? issueList(opts.issues, 'issues') : undefined;
       const entries = readRunLog();
       const report = buildSchedCostReport(entries, issues);
+      // An empty cohort and a disabled recorder look identical in the log file
+      // (#524, decision 2), and `--issues` synthesizes zero-run rows so the
+      // row count never reaches 0 on that path. Resolve it once, up front, and
+      // surface it on every path — including `--json`.
+      const telemetryOn = schedTelemetryEnabled();
 
       if (opts.json) {
-        console.log(JSON.stringify(report, null, 2));
+        console.log(
+          JSON.stringify(
+            { ...report, telemetry_enabled: telemetryOn, source: RUNS_LOG_FILE },
+            null,
+            2
+          )
+        );
         return;
       }
 
       if (report.issues.length === 0) {
         console.log(`No sched-dispatched runs.jsonl entries found in ${RUNS_LOG_FILE}.`);
-        // An empty cohort and a disabled recorder look identical in the log
-        // file (#524, decision 2). Say which one it is, so an operator does
-        // not read their own opt-out as "the scheduler ran nothing".
-        if (!schedTelemetryEnabled()) {
-          console.log(
-            'Note: sched telemetry is disabled (`schedTelemetry: false` in ~/.dossier/config.json) — ' +
-              'dispatches are not recorded. Re-enable with `dossier config schedTelemetry true`.'
-          );
-        }
-        return;
       }
+      if (!telemetryOn) {
+        console.log(
+          'Note: sched telemetry is disabled (`schedTelemetry: false` in ~/.dossier/config.json) — ' +
+            'dispatches are not recorded. Re-enable with `dossier config schedTelemetry true`.'
+        );
+      }
+      if (report.issues.length === 0) return;
 
       const headers = ['Issue', 'Runs', 'In', 'Out', 'Cache-W', 'Cache-R', 'Cost', 'Duration'];
       const rows = report.issues.map((row) => statsRow(`#${row.issue}`, row));

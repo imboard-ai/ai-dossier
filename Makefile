@@ -13,7 +13,7 @@ help:
 	@echo ""
 	@echo "Build order:"
 	@echo "  1. packages/core (TypeScript → dist/)"
-	@echo "  2. packages/sched (TypeScript → dist/)"
+	@echo "  2. packages/sched (TypeScript → dist/, depends on core)"
 	@echo "  3. mcp-server (TypeScript → dist/, depends on core)"
 	@echo "  4. cli (TypeScript → dist/, depends on core + sched)"
 	@echo "  5. packages/worktree-pool (TypeScript → dist/)"
@@ -57,7 +57,7 @@ build-pool:
 	@echo "✓ packages/worktree-pool built"
 
 ## build-sched: Build @ai-dossier/sched package
-build-sched:
+build-sched: build-core
 	@echo "Building packages/sched..."
 	cd packages/sched && npm run build
 	@echo "✓ packages/sched built"

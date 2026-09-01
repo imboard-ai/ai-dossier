@@ -52,11 +52,25 @@ export function schedTelemetryEnabled(home?: string): boolean {
     const configFile = path.join(home ?? os.homedir(), '.dossier', 'config.json');
     const parsed: unknown = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return true;
-    return (parsed as Record<string, unknown>)[SCHED_TELEMETRY_KEY] !== false;
+    const value = (parsed as Record<string, unknown>)[SCHED_TELEMETRY_KEY];
+    // `'false'` as well as `false`: `dossier config <key> <value>` stores the
+    // raw CLI string, so an operator following the documented opt-out writes
+    // the string. Accepting only the boolean made the advertised command a
+    // silent no-op (#524 review). `cli` coerces at write time now too; this
+    // keeps every config file already on disk working.
+    return !(value === false || value === 'false');
   } catch {
     return true;
   }
 }
+
+/**
+ * Most bytes of a dispatch log read back for usage parsing (#524 review).
+ * The log is agent-controlled and unbounded under `stream-json`; this caps
+ * what the reconcile tick holds in memory. 32 MiB is far more than any real
+ * dispatch's tail needs to reach its `result` event.
+ */
+const MAX_DISPATCH_LOG_BYTES = 32 * 1024 * 1024;
 
 /** `RunLogEntry.dossier` for a sched-dispatched cycle/report agent. */
 function schedDossierLabel(role: string): string {
@@ -197,13 +211,45 @@ export function appendSchedRunLog(
  * under this scheme).
  */
 export function readDispatchLog(logFile: string, offset = 0): string | null {
+  let fd: number | null = null;
   try {
-    // Buffer + byte-offset slice, not a UTF-16 string slice: `offset` comes
-    // from `fs.statSync().size` (bytes), and a string index would misalign
-    // against any multi-byte UTF-8 content written before it.
-    const buffer = fs.readFileSync(logFile);
-    return (offset > 0 ? buffer.subarray(offset) : buffer).toString('utf-8');
+    const size = fs.statSync(logFile).size;
+    // Bounded read (#524 review). A `stream-json` dispatch's log grows with
+    // every turn and tool result, and its size is controlled entirely by the
+    // spawned agent — reading it whole inside the reconcile tick would hold
+    // several times the file size resident and can OOM the long-lived
+    // scheduler. Read at most the last MAX_DISPATCH_LOG_BYTES: the final
+    // `result` event lives at the tail, so the primary path is unaffected and
+    // only the per-turn fallback degrades to a partial sum.
+    const start = Math.max(offset, size - MAX_DISPATCH_LOG_BYTES);
+    const length = size - start;
+    if (length <= 0) return '';
+
+    // Byte offsets, not UTF-16 string indices: `offset` comes from
+    // `fs.statSync().size`, and a string index would misalign against any
+    // multi-byte UTF-8 content written before it.
+    const buffer = Buffer.allocUnsafe(length);
+    fd = fs.openSync(logFile, 'r');
+    const read = fs.readSync(fd, buffer, 0, length, start);
+    const text = buffer.subarray(0, read).toString('utf-8');
+
+    // When the window skipped past `offset`, its first line is almost
+    // certainly a partial one — drop it rather than feeding a truncated
+    // record to a parser.
+    if (start > offset) {
+      const firstBreak = text.indexOf('\n');
+      return firstBreak === -1 ? '' : text.slice(firstBreak + 1);
+    }
+    return text;
   } catch {
     return null;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Already closed / invalid fd — nothing left to release.
+      }
+    }
   }
 }

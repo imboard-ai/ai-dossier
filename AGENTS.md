@@ -41,7 +41,8 @@ make check        # biome format + lint with auto-fix
 
 - Node 20+ required (vitest v4 + vite v7 dropped Node 18)
 - Linter/formatter: **Biome** (not ESLint/Prettier) — `npx biome check --write .`
-- Build order: core first, then sched, then mcp-server and cli (cli depends on core + sched)
+- Build order: core first, then sched, then mcp-server and cli (sched, mcp-server and cli all
+  depend on core; cli also depends on sched)
 - Changing a publishable package's `src/`/`bin/` requires bumping that package's `package.json`
   version — CI's `version-bump` job fails the PR otherwise (label `no-release-needed` opts out)
 - MCP integration: see `mcp-server/README.md`

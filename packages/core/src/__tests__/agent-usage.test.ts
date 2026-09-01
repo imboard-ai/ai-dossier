@@ -472,6 +472,98 @@ describe('parseAgentUsage — stream-json (sched dispatch format, #524)', () => 
   });
 });
 
+/**
+ * #524 review findings — the cost key claude actually writes, and the
+ * hardening around untrusted numbers/strings.
+ */
+describe('parseAgentUsage — review hardening (#524)', () => {
+  it('reads cost from modelUsage `costUSD`, the key claude really emits', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      total_cost_usd: 0.4839,
+      modelUsage: {
+        'claude-haiku-4-5': {
+          inputTokens: 1200,
+          outputTokens: 340,
+          cacheCreationInputTokens: 800,
+          cacheReadInputTokens: 50000,
+          costUSD: 0.4839,
+        },
+      },
+    });
+
+    expect(parseAgentUsage(stdout)).toMatchObject({
+      input_tokens: 1200,
+      output_tokens: 340,
+      total_cost_usd: 0.4839,
+    });
+  });
+
+  it('falls back to the top-level cost when modelUsage reports no cost key at all', () => {
+    // Tokens still come from modelUsage; only the whole-run cost falls back,
+    // so this is not a per-field blend of two disagreeing token blocks.
+    const stdout = JSON.stringify({
+      type: 'result',
+      total_cost_usd: 2.5,
+      modelUsage: { 'claude-sonnet-4-5': { inputTokens: 10, outputTokens: 20 } },
+    });
+
+    expect(parseAgentUsage(stdout)).toMatchObject({
+      input_tokens: 10,
+      output_tokens: 20,
+      total_cost_usd: 2.5,
+    });
+  });
+
+  it('parses a ONE-LINE stream event as a stream, not as a result payload', () => {
+    // A dispatch killed after a single turn, or one whose preamble write
+    // failed, leaves exactly one line. The old fast path reported all-null.
+    const oneLine = JSON.stringify({
+      type: 'assistant',
+      message: { model: 'claude-sonnet-4-5', usage: { input_tokens: 5, output_tokens: 50 } },
+    });
+
+    expect(parseAgentUsage(oneLine)).toMatchObject({ input_tokens: 5, output_tokens: 50 });
+  });
+
+  it('returns null for a lone system event rather than an all-null result object', () => {
+    expect(parseAgentUsage(JSON.stringify({ type: 'system', subtype: 'init' }))).toBeNull();
+  });
+
+  it('rejects absurd token counts and costs instead of letting them reach a cohort total', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      modelUsage: { m: { inputTokens: 1e308, outputTokens: 5, costUSD: 1e308 } },
+    });
+
+    expect(parseAgentUsage(stdout)).toMatchObject({
+      input_tokens: null,
+      output_tokens: 5,
+      total_cost_usd: null,
+    });
+  });
+
+  it('strips C1 control characters, not just C0 and DEL', () => {
+    // U+009B is the 8-bit CSI — a terminal acts on it exactly like ESC[.
+    const usage = parseAgentUsage(
+      JSON.stringify({ type: 'result', model: 'claude\u009b31msonnet' })
+    );
+    expect(usage?.model).toBe('claude31msonnet');
+  });
+
+  it('caps a pathologically long model name without materializing it whole', () => {
+    const usage = parseAgentUsage(JSON.stringify({ type: 'result', model: 'x'.repeat(5_000_000) }));
+    expect(usage?.model?.length).toBe(200);
+  });
+
+  it('bounds the number of model names joined into one model field', () => {
+    const modelUsage: Record<string, unknown> = {};
+    for (let i = 0; i < 100; i += 1) modelUsage[`model-${i}`] = { inputTokens: 1 };
+    const usage = parseAgentUsage(JSON.stringify({ type: 'result', modelUsage }));
+    expect(usage?.model?.split(',')).toHaveLength(16);
+  });
+});
+
 describe('usageParserFor', () => {
   it('routes the opencode binary (any path) to parseOpenCodeUsage', () => {
     expect(usageParserFor('opencode')).toBe(parseOpenCodeUsage);

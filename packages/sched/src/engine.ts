@@ -79,7 +79,13 @@ import {
 import { issueOfUnit, type Journal, unitEvent } from './journal';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
-import { appendSchedRunLog, buildSchedRunLogEntry, readDispatchLog } from './run-log';
+import {
+  appendSchedRunLog,
+  buildSchedRunLogEntry,
+  readDispatchLog,
+  schedRunsLogPath,
+  schedTelemetryEnabled,
+} from './run-log';
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import { findEntry, isReportSlot, transitionIssue, transitionSlot } from './state';
 import { runTeardown, type TeardownResult } from './teardown';
@@ -440,6 +446,10 @@ function spawnAndRecord(
     slot: slot.id,
     cmd: opts.cmd.join(' '),
     log: logFile,
+    // #524: which byte of the append-mode per-unit log this dispatch starts
+    // at — without it, mapping a log slice to this dispatch needs state.json,
+    // and `CLEARED_SLOT_FIELDS` nulls the field when the slot is released.
+    log_offset: logOffset,
     ...(opts.journalExtra ?? {}),
   });
   ctx.result.spawned.push(unit);
@@ -927,12 +937,15 @@ function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
  * Append this dispatch's `runs.jsonl` entry (#524) — one per completed
  * spawn, not per unit: a redispatch/takeover produces another entry, each
  * with its own tokens/duration, never an update to the first. Called from
- * every place a dispatch's exit is first detected and about to be
- * classified: `reconcileRunning`'s dead-pid branch (the agent exited on its
- * own) and its external-advance branch (ground truth says done while the
- * agent was still alive and had to be killed) — each transitions the slot
- * out of `running` exactly once per spawn, so this fires at most once per
- * dispatch from either call site.
+ * every place a dispatch ends: `reconcileRunning`'s dead-pid branch (the
+ * agent exited on its own), its external-advance branch (ground truth says
+ * done while the agent was still alive and had to be killed), the
+ * stall-timeout kill in `enterRecovery`, and the dependents-blocked kill in
+ * `blockTransitiveDependents`.
+ *
+ * Exactly-once per dispatch is enforced by the guard below (slot still
+ * `running` and actually spawned), not by the call sites' ordering — two of
+ * the four reach slots in any non-idle status.
  */
 function recordDispatchRunLog(
   ctx: TickCtx,
@@ -940,6 +953,23 @@ function recordDispatchRunLog(
   slot: SlotEntry,
   unit: string
 ): void {
+  // Enforce the once-per-dispatch invariant HERE rather than restating it in
+  // prose at four call sites (#524 review). `blockTransitiveDependents` and
+  // `enterRecovery` reach slots in any non-idle status: a slot already moved
+  // to `exited`/`verifying` was recorded on the way out, and re-recording it
+  // would append a SECOND entry over the same log slice — doubling that
+  // issue's tokens in `sched stats`, the exact number-fabrication this work
+  // exists to eliminate. A slot that never spawned (`assigned`/`starting`,
+  // `spawned_at` still null) is worse: it would read from offset 0 and
+  // re-attribute every prior dispatch's tokens to a phantom run.
+  if (slot.status !== 'running' || slot.spawned_at === null) {
+    journal(ctx, 'run-log-skipped', unit, {
+      reason: slot.spawned_at === null ? 'never-spawned' : `already-recorded-${slot.status}`,
+      slot: slot.id,
+    });
+    return;
+  }
+
   const issue = issueOfUnit(unit);
   const entry = issue === null ? undefined : findEntry(state, issue);
   if (issue === null || !entry) {
@@ -962,25 +992,61 @@ function recordDispatchRunLog(
   const cmd = buildAgentCommand(ctx.dispatch.command, tier, issue, ctx.dispatch.tierModels);
   const logFile = dispatchLogPath(ctx.deps.store.runsDir, unit);
 
-  appendSchedRunLog(
-    buildSchedRunLogEntry({
-      unit,
-      role: slot.role,
-      cmd0: ctx.dispatch.command[0],
-      cmd,
-      // #524: read only THIS dispatch's slice — the log is per-unit and
-      // append-mode, so the whole file would include every prior dispatch's
-      // output too (claude: unparseable JSON concatenation; opencode: summed
-      // tokens double-counted).
-      logContent: readDispatchLog(logFile, slot.log_offset_at_spawn ?? 0),
-      spawnedAt: slot.spawned_at,
-      completedAt: ctx.deps.now(),
-      configuredModel: ctx.dispatch.tierModels[tier],
-      cwd: ctx.deps.repoDir,
-    }),
-    ctx.deps.homeDir,
-    (err) => journal(ctx, 'run-log-failed', unit, { detail: err.message })
+  // #524: read only THIS dispatch's slice — the log is per-unit and
+  // append-mode, so the whole file would include every prior dispatch's
+  // output too (claude: unparseable JSON concatenation; opencode: summed
+  // tokens double-counted).
+  const offset = slot.log_offset_at_spawn ?? 0;
+  const logContent = readDispatchLog(logFile, offset);
+  const runLogFile = schedRunsLogPath(ctx.deps.homeDir);
+
+  const runEntry = buildSchedRunLogEntry({
+    unit,
+    role: slot.role,
+    cmd0: ctx.dispatch.command[0],
+    cmd,
+    logContent,
+    spawnedAt: slot.spawned_at,
+    completedAt: ctx.deps.now(),
+    configuredModel: ctx.dispatch.tierModels[tier],
+    cwd: ctx.deps.repoDir,
+  });
+
+  // An entry with null tokens has four possible causes that look identical in
+  // `sched stats` (a row of dashes). Journal WHICH one, so an operator can
+  // tell "the agent wrote nothing" from "we couldn't read the log" without
+  // re-deriving it from the log file's mtime.
+  if (runEntry.input_tokens === null && runEntry.output_tokens === null) {
+    journal(ctx, 'run-log-no-usage', unit, {
+      log: logFile,
+      offset,
+      bytes: logContent === null ? null : logContent.length,
+      reason:
+        logContent === null
+          ? 'log-unreadable'
+          : logContent.trim() === ''
+            ? 'log-empty'
+            : 'no-usage-events',
+    });
+  }
+
+  if (!schedTelemetryEnabled(ctx.deps.homeDir)) {
+    // The operator opted out. Journal it: otherwise a missing runs.jsonl entry
+    // is indistinguishable from a lost one.
+    journal(ctx, 'run-log-skipped', unit, { reason: 'telemetry-disabled' });
+    return;
+  }
+
+  const written = appendSchedRunLog(runEntry, ctx.deps.homeDir, (err) =>
+    journal(ctx, 'run-log-failed', unit, { detail: err.message, file: runLogFile })
   );
+  if (written) {
+    journal(ctx, 'run-log-recorded', unit, {
+      file: runLogFile,
+      input_tokens: runEntry.input_tokens,
+      output_tokens: runEntry.output_tokens,
+    });
+  }
 }
 
 /** Reconcile one running slot against its polled ground truth. */

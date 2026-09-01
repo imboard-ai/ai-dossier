@@ -909,7 +909,7 @@ against ground truth.
   line reads `N queued, M blocked-by-label`. The pre-screen is capped at
   `MAX_ISSUE_SELECTION` (200) total issues per call.
 - **`start`** runs the dispatch engine (#464): a runnable unit is spawned as a detached
-  agent process (`claude -p --output-format json --model <tier model>` by default,
+  agent process (`claude -p --output-format stream-json --verbose --model <tier model>` by default,
   auto-falling back to `opencode run`; the command, prompt, and tier→model mapping are
   all configurable in `config.json`'s `dispatch` section) with the prompt on stdin and
   output journaled to `runs/<unit>.log`. On every ~60s tick it reconciles: an agent that
@@ -1047,7 +1047,21 @@ run appends telemetry (capability, outcome, exit code, duration, reason, cwd) to
 
 ## Run History (`history`)
 
-Every `ai-dossier run` appends one JSON line to `~/.dossier/runs.jsonl` (append-only; disable with `dossier config auditLog false`). Since #524, `packages/sched`'s dispatch engine appends its own entries to the SAME file — one per completed scheduler-dispatched agent run (see `ai-dossier sched stats` above). The `auditLog` toggle governs only `ai-dossier run`'s own entries; it does not gate the scheduler's.
+Every `ai-dossier run` appends one JSON line to `~/.dossier/runs.jsonl` (append-only; disable with `dossier config auditLog false`). Since #524, `packages/sched`'s dispatch engine appends its own entries to the SAME file — one per completed scheduler-dispatched agent run (see `ai-dossier sched stats` above). The `auditLog` toggle governs only `ai-dossier run`'s own entries; the scheduler's are gated
+separately by `schedTelemetry` (default `true` — disable with `dossier config schedTelemetry false`).
+Two keys rather than one: `auditLog` covers what the CLI records about your own invocations, while
+the scheduler's entries are what `ai-dossier sched stats` and the RFC-0001 cost gates read, so
+disabling one must not silently disable the other. With `schedTelemetry` off, `sched stats` says so
+rather than reporting an empty cohort as if nothing had run.
+
+**Scheduler dispatch entries** (those with `unit` set) use synthetic values for the fields that
+describe DOSSIER RESOLUTION rather than an agent process: `dossier` is `sched:cycle` / `sched:report`,
+`resolved_version` is `n/a`, `source` is `local`, `verification` is `skipped`, `user` is `sched`,
+`llm` is the spawned binary (`claude` / `opencode`, not the `claude-code` alias), and `exit_code` is
+always `null` — agents are spawned detached and unref'd, so no exit code is observable. Dispatches
+ended by `sched abandon` are not costed. Every dispatch log also opens with a
+`{"type":"sched-dispatch",…}` preamble line written at spawn, so a log is never 0 bytes for a unit
+that ran; all `@ai-dossier/core` usage parsers skip that `type`.
 
 ```bash
 ai-dossier history                     # last 20 runs

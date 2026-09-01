@@ -103,7 +103,7 @@ directly.
 | source | what it gave | completeness |
 |---|---|---|
 | `~/.dossier/sched/imboard-ai-ai-dossier/events.jsonl` (197 events) | slot timing, dispatch, recovery events | 11/11 issues; snapshot committed as [`evidence/batch-pilot-sched-events.jsonl`](./evidence/batch-pilot-sched-events.jsonl) |
-| `~/.dossier/sched/.../runs/issue-<n>.log` | tokens, cost, turns, agent runtime | **5/11** — six logs are 0 bytes |
+| `~/.dossier/sched/.../runs/issue-<n>.log` | tokens, cost, turns, agent runtime | **5/11** — six logs are 0 bytes (root-caused and fixed in #524; see §5.4) |
 | `gh run list --event pull_request` | CI executions per PR | 11/11 |
 | runstate trails on GitHub issues | phases, blocked milestones, tail completeness | 11/11 |
 | `git log origin/main` | reverts/hotfixes | full history |
@@ -324,6 +324,17 @@ not populating tokens for sched-dispatched agents (§2.3), so it needs a new iss
 or amend AC3 to name the scheduler's per-agent logs as the source of record; (b) fix whatever left
 6 of 11 agent logs at 0 bytes in this window; and (c) pin **`modelUsage`**, not the top-level
 `usage` block, as the token accounting on both arms (§3.2) — mixing them fabricates a ~43% "saving".
+
+> **Resolved by #524** (`@ai-dossier/core` 1.5.0 / `@ai-dossier/sched` 0.9.0 / `@ai-dossier/cli`
+> 0.22.0). (a) `packages/sched` now writes one `runs.jsonl` entry per completed dispatch
+> (`unit: issue:<n>`), readable with `ai-dossier sched stats`. (b) The 0-byte logs were
+> `--output-format json` buffering the whole session into a single write at process exit: the six
+> empty logs are exactly the six units advanced by `external-advance` and killed while still alive
+> (495, 496, 497, 499, 501, 505), against the five with a detected exit (500, 502, 503, 506, 507)
+> — the correlation is reproducible from `evidence/batch-pilot-sched-events.jsonl` in this
+> directory. The default dispatch command is now `--output-format stream-json --verbose`, plus a
+> spawn-time preamble line so a log is never 0 bytes for a unit that ran. (c) `modelUsage` is
+> pinned as the source of record in `parseAgentUsage`. **§5.4 no longer gates the retry.**
 
 **5.5 — ≥ 7 days between the pilot cohort's last merge and the report.** §H's hard gate is a 7-day
 revert/hotfix window; it cannot be compressed into the same sitting as the batches. Structure the

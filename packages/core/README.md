@@ -205,6 +205,38 @@ const verifier = registry.get('ed25519');
 const result = await verifier.verify(content, signature);
 ```
 
+### Agent Usage & Run Log
+
+Shared with `packages/sched` so both the `ai-dossier run` headless path and the
+scheduler's detached dispatch path agree on which block of an agent's result is the
+source of record.
+
+```typescript
+import {
+  parseAgentUsage,      // claude: one --output-format json object, OR a stream-json event stream
+  parseOpenCodeUsage,   // opencode: a `run --format json` JSONL event stream
+  usageParserFor,       // pick the parser from the spawned binary's basename
+  runsLogPath,          // ~/.dossier/runs.jsonl
+  SCHED_DISPATCH_EVENT, // the sched dispatch-log preamble `type`, skipped by both parsers
+  type AgentRunUsage,
+  type RunLogEntry,
+} from '@ai-dossier/core';
+
+const usage = parseAgentUsage(stdout);
+// → { model, input_tokens, output_tokens, cache_creation_tokens,
+//     cache_read_tokens, total_cost_usd, result_text } — every field null
+//     when the agent did not report it; values are never fabricated.
+```
+
+`parseAgentUsage` treats the agent's per-model **`modelUsage` map as the source of
+record** whenever it carries at least one object-shaped entry, summed across models. The
+top-level `usage` block is used only when `modelUsage` has no such entry — the two are
+never blended field-by-field, because they have been observed to disagree enough to
+fabricate a ~43% "saving" when mixed (ai-dossier#524). Cost is read from `costUSD` (the
+key claude writes), falling back to the top-level total when `modelUsage` reports no cost
+at all. For a `stream-json` log the final `type:"result"` event wins; with no such event
+(an agent killed mid-run) per-turn `assistant` usage is summed instead.
+
 ## Types
 
 All TypeScript types are exported from the package root:

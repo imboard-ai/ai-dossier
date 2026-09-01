@@ -34,15 +34,60 @@ export interface AgentRunUsage {
   result_text: string | null;
 }
 
-// Token counts and cost are untrusted agent output (#524) — negative or
-// non-finite values are rejected rather than recorded, so a malformed or
-// adversarial result cannot drive a reported cost negative or to Infinity.
+/**
+ * Largest token count accepted from an agent (#524). Well above any real run
+ * (a 1M-token context ×1000 turns), and low enough that summing a cohort of
+ * them in `sched stats` cannot reach Infinity.
+ */
+const MAX_REPORTED_TOKENS = 1e15;
+
+/** Largest cost in USD accepted from an agent (#524) — no real dispatch approaches it. */
+const MAX_REPORTED_COST_USD = 1e6;
+
+/**
+ * Narrow untrusted agent output to a finite, non-negative number within a
+ * sane ceiling (#524). Used for token counts AND for costs — hence the
+ * explicit `max`, since the two have very different plausible ranges.
+ *
+ * The ceiling is not paranoia: `sched stats` sums these across a cohort, and
+ * a single `1e308` entry would carry the whole TOTAL row to Infinity, which
+ * the formatter renders as `-` — silently blanking every legitimate run
+ * alongside it. Out-of-range values are rejected (null = "not reported")
+ * rather than clamped, so a bogus number is never presented as a real one.
+ */
+function toBounded(value: unknown, max: number): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= max
+    ? value
+    : null;
+}
+
+/** Token-count flavour of {@link toBounded}. */
 function toCount(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+  return toBounded(value, MAX_REPORTED_TOKENS);
+}
+
+/** Cost flavour of {@link toBounded} — a USD amount, not a count. */
+function toCost(value: unknown): number | null {
+  return toBounded(value, MAX_REPORTED_COST_USD);
 }
 
 /** Longest `model` value written to `runs.jsonl` before truncation (#524). */
 const MAX_MODEL_LENGTH = 200;
+
+/**
+ * Most model names joined into one `model` value (#524). The map/stream those
+ * names come from is agent-controlled and unbounded, so the join is capped
+ * before {@link sanitizeModel} ever sees it — 16 distinct models in one run
+ * is already far beyond anything real.
+ */
+const MAX_MODELS_JOINED = 16;
+
+/** Join model names for the `model` field, bounded by {@link MAX_MODELS_JOINED}. */
+function joinModels(names: readonly string[]): string | null {
+  if (names.length === 0) return null;
+  if (names.length === 1) return names[0];
+  return names.slice(0, MAX_MODELS_JOINED).join(',');
+}
 
 /**
  * `model` is copied verbatim from untrusted agent JSON into a `runs.jsonl`
@@ -53,11 +98,17 @@ const MAX_MODEL_LENGTH = 200;
 function sanitizeModel(value: string | null): string | null {
   if (value === null) return null;
   let clean = '';
+  // Bound the WORK, not just the result: `value` is agent-controlled and can
+  // be arbitrarily long, so stop as soon as the cap is reached rather than
+  // materializing a sanitized copy of the whole string first.
   for (const char of value) {
+    if (clean.length >= MAX_MODEL_LENGTH) break;
     const code = char.codePointAt(0) ?? 0;
-    if (code >= 0x20 && code !== 0x7f) clean += char;
+    // C0 (< 0x20), DEL (0x7f) and C1 (0x80-0x9f) alike: U+009B is the 8-bit
+    // CSI, which a terminal in a non-UTF-8 locale acts on exactly like ESC[.
+    if (code >= 0x20 && code !== 0x7f && !(code >= 0x80 && code <= 0x9f)) clean += char;
   }
-  return clean.length > MAX_MODEL_LENGTH ? clean.slice(0, MAX_MODEL_LENGTH) : clean;
+  return clean;
 }
 
 /** Narrow an unknown value to a plain-object record; null for anything else. */
@@ -76,6 +127,18 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  */
 export const SCHED_DISPATCH_EVENT = 'sched-dispatch';
 
+/**
+ * Event `type`s that only ever appear INSIDE a stream, never as a whole
+ * `--output-format json` payload. A single such line must be parsed as a
+ * one-line stream, not mistaken for a result object (#524 review).
+ */
+const STREAM_EVENT_TYPES: ReadonlySet<unknown> = new Set([
+  'assistant',
+  'user',
+  'system',
+  SCHED_DISPATCH_EVENT,
+]);
+
 /** Parse one string as a JSON object; null for anything else (array, scalar, malformed). */
 function parseJsonObject(text: string): Record<string, unknown> | null {
   try {
@@ -93,8 +156,8 @@ function parseJsonObject(text: string): Record<string, unknown> | null {
  * `modelUsage` (summed across every model entry) is the source of record for
  * token counts and cost — it is the only block that reflects a multi-model
  * run accurately. The top-level `usage` / `total_cost_usd` (older: `cost_usd`)
- * fields are used ONLY when `modelUsage` is absent entirely: they are never
- * blended field-by-field with `modelUsage`, because the two blocks have been
+ * fields are used ONLY when `modelUsage` has no object-shaped entry at all:
+ * they are never blended field-by-field with it, because the two blocks have been
  * observed to disagree (ai-dossier#524) — picking one field from each would
  * silently produce a number neither block actually reported.
  */
@@ -109,11 +172,19 @@ function extractResultUsage(parsed: Record<string, unknown>): AgentRunUsage {
     : [];
   const hasModelUsage = modelEntries.length > 0;
 
-  const sumFromModelUsage = (camel: string, snake: string): number | null => {
+  /** Sum one field across every model entry, trying each spelling in turn. */
+  const sumFromModelUsage = (
+    keys: readonly string[],
+    narrow: (value: unknown) => number | null = toCount
+  ): number | null => {
     let sum = 0;
     let seen = false;
     for (const [, entry] of modelEntries) {
-      const value = toCount(entry[camel]) ?? toCount(entry[snake]);
+      let value: number | null = null;
+      for (const key of keys) {
+        value = narrow(entry[key]);
+        if (value !== null) break;
+      }
       if (value !== null) {
         sum += value;
         seen = true;
@@ -122,27 +193,37 @@ function extractResultUsage(parsed: Record<string, unknown>): AgentRunUsage {
     return seen ? sum : null;
   };
 
-  // modelUsage wins whenever it is present at all — even if it only answers
-  // some of the fields — so a run's numbers always come from a single,
-  // consistent block rather than a per-field blend with `usage`.
+  // modelUsage wins whenever it carries at least one object-shaped entry —
+  // even if that entry only answers some of the fields — so a run's numbers
+  // always come from a single, consistent block rather than a per-field blend
+  // with `usage`. (`modelUsage: {}`, or a map whose every entry is a scalar,
+  // is malformed rather than present: `usage` is used in that case.)
   const input_tokens = hasModelUsage
-    ? sumFromModelUsage('inputTokens', 'input_tokens')
+    ? sumFromModelUsage(['inputTokens', 'input_tokens'])
     : toCount(usage.input_tokens);
   const output_tokens = hasModelUsage
-    ? sumFromModelUsage('outputTokens', 'output_tokens')
+    ? sumFromModelUsage(['outputTokens', 'output_tokens'])
     : toCount(usage.output_tokens);
   const cache_creation_tokens = hasModelUsage
-    ? sumFromModelUsage('cacheCreationInputTokens', 'cache_creation_input_tokens')
+    ? sumFromModelUsage(['cacheCreationInputTokens', 'cache_creation_input_tokens'])
     : toCount(usage.cache_creation_input_tokens);
   const cache_read_tokens = hasModelUsage
-    ? sumFromModelUsage('cacheReadInputTokens', 'cache_read_input_tokens')
+    ? sumFromModelUsage(['cacheReadInputTokens', 'cache_read_input_tokens'])
     : toCount(usage.cache_read_input_tokens);
-  const total_cost_usd = hasModelUsage
-    ? sumFromModelUsage('totalCostUsd', 'total_cost_usd')
-    : (toCount(parsed.total_cost_usd) ?? toCount(parsed.cost_usd));
+  // `costUSD` FIRST: that is the key claude actually writes inside a
+  // `modelUsage` entry (verified against a live claude stats artifact, #524
+  // review). `totalCostUsd`/`total_cost_usd` are kept as tolerated spellings.
+  // When modelUsage reports no cost key at all, fall back to the top-level
+  // total rather than reporting null — the whole-run cost is not a per-field
+  // blend of two token blocks, it is the one number both shapes agree on, and
+  // dropping it silently regressed `ai-dossier run`'s existing cost recording.
+  const costFromModelUsage = hasModelUsage
+    ? sumFromModelUsage(['costUSD', 'totalCostUsd', 'total_cost_usd'], toCost)
+    : null;
+  const total_cost_usd =
+    costFromModelUsage ?? toCost(parsed.total_cost_usd) ?? toCost(parsed.cost_usd);
 
-  const modelKeys = modelEntries.map(([key]) => key);
-  const modelFromUsage = modelKeys.length > 1 ? modelKeys.join(',') : (modelKeys[0] ?? null);
+  const modelFromUsage = joinModels(modelEntries.map(([key]) => key));
   const rawModel = typeof parsed.model === 'string' && parsed.model ? parsed.model : modelFromUsage;
   const model = sanitizeModel(rawModel);
   const result_text = typeof parsed.result === 'string' ? parsed.result : null;
@@ -214,7 +295,7 @@ function sumAssistantUsage(events: readonly Record<string, unknown>[]): AgentRun
   }
 
   return {
-    model: sanitizeModel(models.size > 0 ? [...models].join(',') : null),
+    model: sanitizeModel(joinModels([...models])),
     input_tokens: sawInput ? input : null,
     output_tokens: sawOutput ? output : null,
     cache_creation_tokens: sawCacheCreation ? cacheCreation : null,
@@ -243,19 +324,22 @@ function sumAssistantUsage(events: readonly Record<string, unknown>[]): AgentRun
  * ({@link SCHED_DISPATCH_EVENT}) sits at the head of every dispatch slice, and
  * an agent killed mid-write leaves a truncated final line.
  *
- * Returns null when nothing usage-bearing was found; individual fields are
- * null when the agent did not report them.
+ * Returns null when the output parses as neither shape (and for a stream
+ * holding no usage-bearing event). A result object that simply reported no
+ * usage yields an entry whose fields are all null, not `null` itself —
+ * "the agent reported nothing" and "there was no agent output" stay distinct.
  */
 export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsage | null {
   if (typeof stdout !== 'string' || stdout.trim() === '') return null;
 
   // `--output-format json`: the whole payload is one object. Checked first so
   // a pretty-printed (multi-line) result is not mistaken for an event stream.
-  // The sched preamble is excluded: a log holding only it means the agent
-  // wrote nothing at all, which must read as null rather than as a result
-  // object whose every field happens to be absent.
+  // Stream event types are excluded, or a stream that happens to hold exactly
+  // ONE line (an agent killed after a single turn, or whose preamble write
+  // failed) would take this path and report all-null instead of falling
+  // through to the per-turn sum below.
   const single = parseJsonObject(stdout);
-  if (single && single.type !== SCHED_DISPATCH_EVENT) return extractResultUsage(single);
+  if (single && !STREAM_EVENT_TYPES.has(single.type)) return extractResultUsage(single);
 
   let lastResult: Record<string, unknown> | null = null;
   const assistants: Record<string, unknown>[] = [];
@@ -303,14 +387,9 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    let event: Record<string, unknown>;
-    try {
-      const value: unknown = JSON.parse(trimmed);
-      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-      event = value as Record<string, unknown>;
-    } catch {
-      return null;
-    }
+    const event = parseJsonObject(trimmed);
+    // Any non-JSON-object line disqualifies the stream as opencode output.
+    if (!event) return null;
     // The sched dispatch preamble (#524) is written by the scheduler, not by
     // opencode: skip it WITHOUT setting `sawEvent`, so a log holding only a
     // preamble still reads as "the agent wrote nothing" (null) rather than an
@@ -337,7 +416,7 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
           sawUsage = true;
         }
       }
-      const cost = toCount(part.cost);
+      const cost = toCost(part.cost);
       if (cost !== null) {
         costUsd += cost;
         sawUsage = true;

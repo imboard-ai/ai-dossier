@@ -448,7 +448,7 @@ export interface SchedConfig {
  * whose tier has no model configured drops together with its flag.
  */
 export interface DispatchConfig {
-  /** Command template, e.g. `['claude','-p','--output-format','json','--model','{model}']`. */
+  /** Command template, e.g. `['claude','-p','--output-format','stream-json','--verbose','--model','{model}']`. */
   command?: string[];
   /** Prompt template sent on the child's stdin; `{issue}` substituted. */
   prompt?: string;
@@ -724,6 +724,8 @@ export type JournalEventName =
   // #524 runs.jsonl telemetry: a dispatch's exit produced no entry (unit left
   // the queue, or is not an `issue:<n>` unit), or the append itself failed.
   | 'run-log-skipped'
+  | 'run-log-recorded'
+  | 'run-log-no-usage'
   | 'run-log-failed';
 
 /** One journaled event. `ts` is stamped by the journal, never by callers. */

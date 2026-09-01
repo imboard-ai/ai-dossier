@@ -232,6 +232,14 @@ describe('schedTelemetryEnabled (#524 decision 2)', () => {
     expect(schedTelemetryEnabled(home)).toBe(false);
   });
 
+  it('honours the STRING "false" that `dossier config schedTelemetry false` used to write', () => {
+    // `setConfig` stored the raw CLI string, so config files already on disk
+    // carry the string form — accepting only the boolean made the documented
+    // opt-out a silent no-op (#524 review).
+    writeConfig({ schedTelemetry: 'false' });
+    expect(schedTelemetryEnabled(home)).toBe(false);
+  });
+
   it('treats a malformed config as not-opted-out rather than silently disabling telemetry', () => {
     fs.mkdirSync(path.join(home, '.dossier'), { recursive: true });
     fs.writeFileSync(path.join(home, '.dossier', 'config.json'), '{ broken');

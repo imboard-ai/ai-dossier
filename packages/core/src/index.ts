@@ -6,6 +6,8 @@
  * - Checksum verification (SHA256 integrity checks)
  * - Signature verification (Minisign and AWS KMS)
  * - Output coherence validation
+ * - Headless-agent usage parsing (token/cost from claude/opencode JSON results)
+ * - runs.jsonl entry schema and path (shared by cli + sched)
  * - TypeScript type definitions
  */
 

@@ -459,10 +459,16 @@ describe('createSpawnDeps — dispatch log is never 0 bytes (#524 AC3)', () => {
     const second = deps.spawn(['node', fixture], 'p', logFile);
     try {
       // The redispatch's own slice starts at its own preamble, so
-      // `log_offset_at_spawn` never replays the first dispatch's bytes.
+      // `log_offset_at_spawn` never replays the first dispatch's bytes. The
+      // slice holds exactly this dispatch's two sched markers (preamble +
+      // the pid marker written once the child exists) and nothing earlier.
       const slice = fs.readFileSync(logFile).subarray(offsetAtSecondSpawn).toString('utf-8');
-      expect(JSON.parse(slice.split('\n')[0]).type).toBe('sched-dispatch');
-      expect(slice.trim().split('\n')).toHaveLength(1);
+      const lines = slice
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(lines.map((line) => line.type)).toEqual(['sched-dispatch', 'sched-dispatch']);
+      expect(lines[1]).toMatchObject({ event: 'spawned', pid: second });
     } finally {
       deps.kill(first);
       deps.kill(second);

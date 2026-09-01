@@ -27,6 +27,11 @@ export function appendJsonl(file: string, entry: unknown, onError?: (err: Error)
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     fs.appendFileSync(file, `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 });
+    // `mode` above applies only when appendFileSync CREATES the file. These
+    // files carry spawned argv and cost data (#524), so a pre-existing
+    // world-readable copy — an older build's umask, a restored archive — must
+    // be tightened rather than silently appended to.
+    if ((fs.statSync(file).mode & 0o077) !== 0) fs.chmodSync(file, 0o600);
     return true;
   } catch (err) {
     onError?.(err as Error);
@@ -59,8 +64,9 @@ export class Journal {
 
 /**
  * Read a JSONL file oldest-first, skipping malformed lines; `[]` when the
- * file is absent or unreadable. Shared by the journal and the CLI's run log
- * so the read-loop exists once.
+ * file is absent or unreadable. `cli/src/run-log.ts` implements the same loop
+ * against `runs.jsonl` — worth unifying in `core` (where `RunLogEntry` and
+ * `runsLogPath` now live) rather than leaving two copies.
  */
 export function readJsonl<T>(file: string): T[] {
   try {
@@ -80,9 +86,17 @@ export function readJsonl<T>(file: string): T[] {
   }
 }
 
-/** `issue:464` → 464; null for batch or malformed unit ids. */
-export function issueOfUnit(unit: string | null | undefined): number | null {
-  if (unit == null || !unit.startsWith('issue:')) return null;
+/**
+ * `issue:464` → 464; null for batch or malformed unit ids.
+ *
+ * Type-guards rather than trusting the declared type: `unit` now reaches here
+ * straight off a `JSON.parse`d `runs.jsonl` line (`buildSchedCostReport`),
+ * which is cast to `RunLogEntry` without validation. A hand-edited or
+ * truncated line carrying `"unit": 5` must skip that row, not crash
+ * `sched stats` with a TypeError (#524 review).
+ */
+export function issueOfUnit(unit: unknown): number | null {
+  if (typeof unit !== 'string' || !unit.startsWith('issue:')) return null;
   const n = Number.parseInt(unit.slice('issue:'.length), 10);
   return Number.isInteger(n) && n > 0 ? n : null;
 }

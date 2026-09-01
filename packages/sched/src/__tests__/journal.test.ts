@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { Journal, unitEvent } from '../index';
+import { issueOfUnit, Journal, unitEvent } from '../index';
 
 const dirs: string[] = [];
 
@@ -79,5 +79,17 @@ describe('Journal (#464 AC6 — all events journaled)', () => {
 
   it('read on a missing file returns an empty list', () => {
     expect(new Journal(tmpDir()).read()).toEqual([]);
+  });
+});
+
+describe('issueOfUnit — untrusted input (#524 review)', () => {
+  it('returns null for a non-string unit instead of throwing', () => {
+    // Reachable from `buildSchedCostReport`, which reads JSON.parse'd
+    // runs.jsonl lines cast to RunLogEntry without validation: one
+    // hand-edited `"unit": 5` must skip the row, not kill `sched stats`.
+    expect(issueOfUnit(5 as unknown as string)).toBeNull();
+    expect(issueOfUnit({} as unknown as string)).toBeNull();
+    expect(issueOfUnit(null)).toBeNull();
+    expect(issueOfUnit(undefined)).toBeNull();
   });
 });
