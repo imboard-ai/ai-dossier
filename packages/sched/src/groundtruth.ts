@@ -194,6 +194,21 @@ export function createExecGroundTruth(
   };
 }
 
+/**
+ * Extract label names from a gh `--json labels` array (`[{name: "..."}]`),
+ * as loosely-typed `unknown` since it is remote data. Non-string/missing
+ * `name` fields are dropped rather than throwing — a malformed entry must
+ * not hide the labels that DID parse (#507).
+ */
+export function labelNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((label) =>
+      label !== null && typeof label === 'object' ? (label as { name?: unknown }).name : undefined
+    )
+    .filter((name): name is string => typeof name === 'string');
+}
+
 /** Parse the stdout of `gh pr view --json state,mergedAt,mergeable,labels`. */
 export function parsePrViewJson(stdout: string | null): PrTruth | null {
   if (stdout === null || stdout.trim() === '') return null;
@@ -210,14 +225,7 @@ export function parsePrViewJson(stdout: string | null): PrTruth | null {
       mergeableRaw === 'MERGEABLE' || mergeableRaw === 'CONFLICTING' || mergeableRaw === 'UNKNOWN'
         ? mergeableRaw
         : null;
-    const blocked = Array.isArray(obj.labels)
-      ? obj.labels.some(
-          (l) =>
-            l !== null &&
-            typeof l === 'object' &&
-            (l as { name?: unknown }).name === 'auto-merge-blocked'
-        )
-      : false;
+    const blocked = labelNames(obj.labels).includes('auto-merge-blocked');
     return { state, mergedAt, mergeable, blocked };
   } catch {
     return null;

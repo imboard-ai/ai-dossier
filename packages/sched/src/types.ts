@@ -534,7 +534,11 @@ export class SchedNotFoundError extends Error {
 
 // --- Dispatch journal events (#464, RFC-0001 §D.4 "Audit") ---
 
-/** Every event the engine journals to `events.jsonl` (append-only). */
+/**
+ * Every event journaled to `events.jsonl` (append-only) — by the engine, and
+ * (since #507) by `sched enqueue` itself, before any dispatch: see the
+ * `label-blocked`/`label-check-failed` group below.
+ */
 export type JournalEventName =
   | 'assigned'
   | 'spawned'
@@ -573,7 +577,12 @@ export type JournalEventName =
   | 'batch-rebased'
   | 'batch-dissolved'
   | 'batch-split'
-  | 'milestone-post-failed';
+  | 'milestone-post-failed'
+  // #507 enqueue-time hard-block label pre-screen (journaled by the CLI,
+  // NOT the engine — sched enqueue appends these before the issue is ever
+  // dispatched)
+  | 'label-blocked'
+  | 'label-check-failed';
 
 /** One journaled event. `ts` is stamped by the journal, never by callers. */
 export interface JournalEvent {
@@ -586,4 +595,13 @@ export interface JournalEvent {
   pid?: number;
   tier?: ModelTier;
   detail?: string;
+  /**
+   * Free-form cause, matching `QueueEntry.reason`'s vocabulary for a
+   * block/failure event (e.g. `unit-failed`, `dependents-blocked`,
+   * `label-blocked`) — declared here so callers get the same excess-property
+   * check `detail` gets, instead of routing through a loosely-typed
+   * `Record<string, unknown>` the way `engine.ts`'s local `journal()`
+   * wrapper already does for every pre-#507 use of this field.
+   */
+  reason?: string;
 }

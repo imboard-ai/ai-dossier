@@ -348,6 +348,45 @@ export function tryFetchComments(issue: string, repo?: string): CommentsResult {
   return { ok: true, comments: parsed.comments as GhComment[] };
 }
 
+/** An issue's label read, or the one reason it could not be read. */
+export type LabelsResult = { ok: true; labels: string[] } | { ok: false; error: string };
+
+/**
+ * Read an issue's label names through gh, reporting WHY rather than exiting —
+ * the same discipline as {@link tryFetchComments} (#507's enqueue-time
+ * hard-block pre-screen is the second consumer). `gh` label objects are
+ * `{name, color, description}`; only `name` is read, and a malformed entry is
+ * dropped rather than failing the whole read.
+ */
+export function tryFetchLabels(issue: string, repo?: string): LabelsResult {
+  const res = exec('gh', ['issue', 'view', issue, '--json', 'labels', ...repoArgs(repo)]);
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: ghFailure(`Could not read labels for issue #${issue}`, res.error, repo),
+    };
+  }
+
+  const parsed = parseGhJson<{ labels?: unknown }>(res.stdout);
+  if (parsed === null || !Array.isArray(parsed?.labels)) {
+    return {
+      ok: false,
+      error: [
+        `Could not read labels for issue #${issue}: gh exited 0 but did not print JSON — no "labels" array.`,
+        `Fix: run 'gh issue view ${issue} --json labels' by hand — a gh older than 2.0 (no --json), or an interactive prompt landing on stdout, both look like this.`,
+        `gh printed: ${snippet(res.stdout)}`,
+      ].join('\n'),
+    };
+  }
+
+  const labels = parsed.labels
+    .map((label) =>
+      label !== null && typeof label === 'object' ? (label as { name?: unknown }).name : undefined
+    )
+    .filter((name): name is string => typeof name === 'string');
+  return { ok: true, labels };
+}
+
 /** `--dry-run` support for comment-posting subcommands: show the body, post nothing. */
 export function printDryRun(body: string, json?: boolean, extra?: Record<string, unknown>): void {
   if (json) {

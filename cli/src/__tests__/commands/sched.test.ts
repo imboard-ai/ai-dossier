@@ -3,7 +3,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerSchedCommand } from '../../commands/sched';
-import { createTestProgram } from '../helpers/test-utils';
+import { createTestProgram, execHandles, execReturns } from '../helpers/test-utils';
+
+vi.mock('node:child_process');
 
 let home: string;
 let logs: string[];
@@ -22,6 +24,9 @@ beforeEach(() => {
   vi.spyOn(console, 'log').mockImplementation((msg) => {
     logs.push(String(msg));
   });
+  // Default: every enqueue-time label lookup ('gh issue view --json labels') finds no
+  // hard-block labels, so existing tests keep their pre-#507 behavior unchanged.
+  execReturns('{"labels":[]}');
 });
 
 afterEach(() => {
@@ -129,6 +134,144 @@ describe('ai-dossier sched enqueue', () => {
     await expect(
       runSched(['sched', 'enqueue', '--issues', '2', '--deps', '1', '--project', 'test-proj'])
     ).rejects.toThrow('process.exit(1)');
+  });
+
+  it('#507: an issue carrying a hard-block label lands blocked, not queued', async () => {
+    execReturns('{"labels":[{"name":"decision-pending"},{"name":"bug"}]}');
+    await runSched(['sched', 'enqueue', '--issues', '9', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain('0 queued, 1 blocked-by-label');
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries[0]).toMatchObject({
+      issue: 9,
+      status: 'blocked',
+      reason: 'label:decision-pending',
+    });
+    const journalPath = path.join(home, '.dossier', 'sched', 'test-proj', 'events.jsonl');
+    const events = fs
+      .readFileSync(journalPath, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: 'label-blocked',
+        issue: 9,
+        reason: 'label:decision-pending',
+      })
+    );
+  });
+
+  it('#507: label matching is case-insensitive', async () => {
+    execReturns('{"labels":[{"name":"Epic"}]}');
+    await runSched(['sched', 'enqueue', '--issues', '13', '--project', 'test-proj']);
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries[0]).toMatchObject({ issue: 13, status: 'blocked', reason: 'label:epic' });
+  });
+
+  it('#507: an issue without a hard-block label enqueues as queued, as before', async () => {
+    execReturns('{"labels":[{"name":"bug"},{"name":"priority-high"}]}');
+    await runSched(['sched', 'enqueue', '--issues', '10', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain('1 queued');
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries[0]).toMatchObject({ issue: 10, status: 'queued', reason: null });
+  });
+
+  it('#507: a failed gh label lookup fails open — enqueues as queued with a warning, and journals it', async () => {
+    execHandles(() => {
+      throw Object.assign(new Error('gh: command not found'), { code: 'ENOENT' });
+    });
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((msg) => {
+      errors.push(String(msg));
+    });
+    await runSched(['sched', 'enqueue', '--issues', '11', '--project', 'test-proj']);
+    expect(errors.join('\n')).toContain('Could not read labels for issue #11');
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries[0]).toMatchObject({ issue: 11, status: 'queued', reason: null });
+    const journalPath = path.join(home, '.dossier', 'sched', 'test-proj', 'events.jsonl');
+    const events = fs
+      .readFileSync(journalPath, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(events).toContainEqual(
+      expect.objectContaining({ event: 'label-check-failed', issue: 11 })
+    );
+  });
+
+  it('#507: --json reports blocked_by_label, label_check_failed, and queued alongside queue_depth', async () => {
+    execReturns('{"labels":[{"name":"epic"}]}');
+    await runSched(['sched', 'enqueue', '--issues', '12', '--project', 'test-proj', '--json']);
+    const parsed = JSON.parse(logs[0]);
+    expect(parsed).toMatchObject({
+      project: 'test-proj',
+      enqueued: 1,
+      queued: 0,
+      blocked_by_label: [{ issue: 12, label: 'epic' }],
+      label_check_failed: [],
+      queue_depth: 1,
+    });
+  });
+
+  it('#507: a mixed enqueue reports the correct per-issue split', async () => {
+    execHandles((_file, args) =>
+      args[2] === '20' ? '{"labels":[{"name":"epic"}]}' : '{"labels":[]}'
+    );
+    await runSched(['sched', 'enqueue', '--issues', '20,21,22', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain('2 queued, 1 blocked-by-label');
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries.find((e) => e.issue === 20)).toMatchObject({ status: 'blocked' });
+    expect(state.entries.find((e) => e.issue === 21)).toMatchObject({ status: 'queued' });
+    expect(state.entries.find((e) => e.issue === 22)).toMatchObject({ status: 'queued' });
+  });
+
+  it('#507: --repo is forwarded to the gh label lookup', async () => {
+    const seenArgs: string[][] = [];
+    execHandles((_file, args) => {
+      seenArgs.push(args);
+      return '{"labels":[]}';
+    });
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '30',
+      '--project',
+      'test-proj',
+      '--repo',
+      'imboard-ai/ai-dossier',
+    ]);
+    expect(seenArgs).toContainEqual(expect.arrayContaining(['--repo', 'imboard-ai/ai-dossier']));
+  });
+
+  it('#507: rejects a malformed --repo before any gh call', async () => {
+    await expect(
+      runSched([
+        'sched',
+        'enqueue',
+        '--issues',
+        '30',
+        '--project',
+        'test-proj',
+        '--repo',
+        'not-a-slug',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+    expect(fs.existsSync(statePath())).toBe(false);
+  });
+
+  it('#507: caps the manifest-path label pre-screen at MAX_ISSUE_SELECTION (uncapped before #507)', async () => {
+    const manifest = path.join(home, 'manifest.json');
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        entries: Array.from({ length: 201 }, (_, i) => ({ issue: i + 1, mode: 'full' })),
+      })
+    );
+    await expect(
+      runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
+    expect(fs.existsSync(statePath())).toBe(false);
   });
 });
 

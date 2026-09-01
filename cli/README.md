@@ -768,8 +768,8 @@ respectively; `get --json` includes the comment's `author`.
 ## Scheduler core (`sched`)
 
 ```bash
-ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--deps 100,104] [--tier mechanical|mid|strong]
-ai-dossier sched enqueue --from-manifest batch-prep.json
+ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--deps 100,104] [--tier mechanical|mid|strong] [--repo owner/name]
+ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
 ai-dossier sched start [--interval <seconds>] [--once] [--json]
 ai-dossier sched status [--json]
 ai-dossier sched pause | resume
@@ -788,7 +788,17 @@ against ground truth.
   flags or a batch-prep manifest (`--from-manifest`, a JSON file of entries — flags and
   manifest can be combined). Invalid input is rejected *before* anything is persisted:
   duplicate active issues, self-dependencies, dependency cycles, `slot` mode without a
-  batch, and conflicting `base_branch` on a joining batch member.
+  batch, and conflicting `base_branch` on a joining batch member. Since #507, it also
+  pre-screens each issue's live GitHub labels (`gh issue view --json labels`, one call per
+  issue, resolved against `--repo owner/name` when passed, else the current directory's
+  repo — pass `--repo` whenever `--project` targets a different repo than the cwd): an
+  issue carrying `decision-pending`, `needs-clarification`, `epic`, or `decomposed` lands as
+  `blocked` (`reason: label:<name>`) instead of `queued`, and a `label-blocked` event is
+  journaled. A failed `gh` lookup fails open — the issue enqueues normally with a stderr
+  warning and a `label-check-failed` journal event. `--json` gains `queued`,
+  `blocked_by_label: [{issue, label}]`, and `label_check_failed: [issue, ...]`; the human
+  line reads `N queued, M blocked-by-label`. The pre-screen is capped at
+  `MAX_ISSUE_SELECTION` (200) total issues per call.
 - **`start`** runs the dispatch engine (#464): a runnable unit is spawned as a detached
   agent process (`claude -p --output-format json --model <tier model>` by default,
   auto-falling back to `opencode run`; the command, prompt, and tier→model mapping are
@@ -818,8 +828,10 @@ against ground truth.
 - **`status`** renders the queue (with `pr` and `cleanup` columns), parked PRs
   (watched, zero slots, with the last poll's age), slots (with pid, live phase,
   last-progress, recoveries), batches, runnable units, and the blocked/failed sets. A blocked entry names every
-  unsatisfied dependency ("dependency #104 not merged (status: dispatched)"), so "why
-  isn't #42 running?" is a read, not an investigation. When suspect-dispatch exits have
+  unsatisfied dependency ("dependency #104 not merged (status: dispatched)") — or, for an
+  entry pre-screened at enqueue time, the hard-block label that stopped it
+  ("label:decision-pending", #507) — so "why isn't #42 running?" is a read, not an
+  investigation. When suspect-dispatch exits have
   been recorded (#505 below), a `⚠ Dispatch health: N consecutive suspect-dispatch
   exit(s) (last: <unit>)` warning line prints too, saying whether it's just informational
   or likely why the scheduler is paused; the same counters ride along in `--json` as
