@@ -23,6 +23,15 @@ export interface DossierConfig {
   defaultLlm: string;
   theme: string;
   auditLog: boolean;
+  /**
+   * Whether `packages/sched` records per-dispatch token/cost telemetry to
+   * `~/.dossier/runs.jsonl` (ai-dossier#524). Separate from `auditLog`, which
+   * covers this CLI's own `ai-dossier run` entries: the scheduler's cost data
+   * is what `ai-dossier sched stats` and the RFC-0001 cost gates read, so the
+   * two are independently controllable rather than one silently widening the
+   * other. Read directly from this file by `sched` (it cannot depend on `cli`).
+   */
+  schedTelemetry: boolean;
   registries?: Record<string, RegistryEntry>;
   defaultRegistry?: string;
   [key: string]: unknown;
@@ -49,6 +58,7 @@ const DEFAULT_CONFIG: DossierConfig = {
   defaultLlm: 'auto',
   theme: 'auto',
   auditLog: true,
+  schedTelemetry: true,
   'cache.resolutionTtlSeconds': 300,
 };
 

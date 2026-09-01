@@ -68,7 +68,27 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * Parse a `claude -p --output-format json` result payload into usage data.
+ * `type` of the preamble line `packages/sched` writes to a dispatch log at
+ * spawn time (ai-dossier#524). It exists so a log is never 0 bytes for a unit
+ * that ran; every parser here skips it rather than counting it as agent
+ * output. Shared from `core` so the writer (`sched`'s `createSpawnDeps`) and
+ * the readers (below) can never drift apart on the sentinel's spelling.
+ */
+export const SCHED_DISPATCH_EVENT = 'sched-dispatch';
+
+/** Parse one string as a JSON object; null for anything else (array, scalar, malformed). */
+function parseJsonObject(text: string): Record<string, unknown> | null {
+  try {
+    return asRecord(JSON.parse(text));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract usage from a claude `result`-shaped object — the payload of
+ * `--output-format json`, and of the final `type:"result"` event of
+ * `--output-format stream-json`. Both carry the same fields.
  *
  * `modelUsage` (summed across every model entry) is the source of record for
  * token counts and cost — it is the only block that reflects a multi-model
@@ -77,22 +97,8 @@ function asRecord(value: unknown): Record<string, unknown> | null {
  * blended field-by-field with `modelUsage`, because the two blocks have been
  * observed to disagree (ai-dossier#524) — picking one field from each would
  * silently produce a number neither block actually reported.
- *
- * Returns null when the output is not a JSON object; individual fields are
- * null when absent.
  */
-export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsage | null {
-  if (typeof stdout !== 'string' || stdout.trim() === '') return null;
-
-  let parsed: Record<string, unknown>;
-  try {
-    const value: unknown = JSON.parse(stdout);
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    parsed = value as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-
+function extractResultUsage(parsed: Record<string, unknown>): AgentRunUsage {
   const usage = asRecord(parsed.usage) ?? {};
   const modelUsage = asRecord(parsed.modelUsage);
   // Keep only object-shaped entries; a scalar entry is malformed, not a model.
@@ -153,6 +159,124 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
 }
 
 /**
+ * Sum per-turn usage from `type:"assistant"` stream events — the fallback for
+ * a run that produced NO final `result` event (ai-dossier#524).
+ *
+ * The scheduler kills an agent that is still alive when ground truth says its
+ * unit is already done (`reconcileRunning`'s external-advance branch), and a
+ * killed agent never emits its `result` event. Before stream-json that meant
+ * zero recoverable tokens for those dispatches — six of the eleven pilot units.
+ * Each `assistant` event carries the usage of the request that produced it, so
+ * summing them recovers what the run actually spent up to the kill.
+ *
+ * `total_cost_usd` stays null: per-turn events do not report cost, and this
+ * path must not fabricate one from token counts.
+ */
+function sumAssistantUsage(events: readonly Record<string, unknown>[]): AgentRunUsage {
+  let input = 0;
+  let output = 0;
+  let cacheCreation = 0;
+  let cacheRead = 0;
+  let sawInput = false;
+  let sawOutput = false;
+  let sawCacheCreation = false;
+  let sawCacheRead = false;
+  const models = new Set<string>();
+
+  for (const event of events) {
+    const message = asRecord(event.message);
+    if (!message) continue;
+    if (typeof message.model === 'string' && message.model) models.add(message.model);
+
+    const usage = asRecord(message.usage);
+    if (!usage) continue;
+
+    const inputTokens = toCount(usage.input_tokens);
+    if (inputTokens !== null) {
+      input += inputTokens;
+      sawInput = true;
+    }
+    const outputTokens = toCount(usage.output_tokens);
+    if (outputTokens !== null) {
+      output += outputTokens;
+      sawOutput = true;
+    }
+    const cacheCreationTokens = toCount(usage.cache_creation_input_tokens);
+    if (cacheCreationTokens !== null) {
+      cacheCreation += cacheCreationTokens;
+      sawCacheCreation = true;
+    }
+    const cacheReadTokens = toCount(usage.cache_read_input_tokens);
+    if (cacheReadTokens !== null) {
+      cacheRead += cacheReadTokens;
+      sawCacheRead = true;
+    }
+  }
+
+  return {
+    model: sanitizeModel(models.size > 0 ? [...models].join(',') : null),
+    input_tokens: sawInput ? input : null,
+    output_tokens: sawOutput ? output : null,
+    cache_creation_tokens: sawCacheCreation ? cacheCreation : null,
+    cache_read_tokens: sawCacheRead ? cacheRead : null,
+    total_cost_usd: null,
+    result_text: null,
+  };
+}
+
+/**
+ * Parse a claude headless result into usage data — both output formats.
+ *
+ * Accepts either shape, because the two consumers spawn claude differently:
+ *
+ * - **A single JSON object** (`--output-format json`, what `ai-dossier run`
+ *   uses): parsed whole.
+ * - **A JSONL event stream** (`--output-format stream-json`, what the
+ *   scheduler dispatches with since ai-dossier#524): the LAST `type:"result"`
+ *   event wins — a per-unit log is append-mode, so a prior dispatch's result
+ *   may precede this one in the same slice. With no `result` event at all (an
+ *   agent killed mid-run), per-turn `assistant` usage is summed instead, so an
+ *   interrupted dispatch still reports the tokens it really spent.
+ *
+ * Lines that do not parse as JSON objects are skipped rather than
+ * disqualifying the stream: the sched dispatch preamble
+ * ({@link SCHED_DISPATCH_EVENT}) sits at the head of every dispatch slice, and
+ * an agent killed mid-write leaves a truncated final line.
+ *
+ * Returns null when nothing usage-bearing was found; individual fields are
+ * null when the agent did not report them.
+ */
+export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsage | null {
+  if (typeof stdout !== 'string' || stdout.trim() === '') return null;
+
+  // `--output-format json`: the whole payload is one object. Checked first so
+  // a pretty-printed (multi-line) result is not mistaken for an event stream.
+  // The sched preamble is excluded: a log holding only it means the agent
+  // wrote nothing at all, which must read as null rather than as a result
+  // object whose every field happens to be absent.
+  const single = parseJsonObject(stdout);
+  if (single && single.type !== SCHED_DISPATCH_EVENT) return extractResultUsage(single);
+
+  let lastResult: Record<string, unknown> | null = null;
+  const assistants: Record<string, unknown>[] = [];
+
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const event = parseJsonObject(trimmed);
+    if (!event || event.type === SCHED_DISPATCH_EVENT) continue;
+
+    if (event.type === 'result') lastResult = event;
+    else if (event.type === 'assistant') assistants.push(event);
+  }
+
+  if (lastResult) return extractResultUsage(lastResult);
+  if (assistants.length > 0) return sumAssistantUsage(assistants);
+  return null;
+}
+
+/**
  * Parse an `opencode run --format json` result stream into usage data (#459).
  *
  * opencode emits one JSON event per line: the assistant's text arrives in
@@ -187,6 +311,11 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
     } catch {
       return null;
     }
+    // The sched dispatch preamble (#524) is written by the scheduler, not by
+    // opencode: skip it WITHOUT setting `sawEvent`, so a log holding only a
+    // preamble still reads as "the agent wrote nothing" (null) rather than an
+    // all-null usage object implying opencode reported no tokens.
+    if (event.type === SCHED_DISPATCH_EVENT) continue;
     sawEvent = true;
 
     const part = asRecord(event.part);

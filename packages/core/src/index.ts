@@ -11,7 +11,12 @@
 
 // Agent usage exports (headless-agent JSON result parsing, shared by cli + sched)
 export type { AgentRunUsage } from './agent-usage';
-export { parseAgentUsage, parseOpenCodeUsage, usageParserFor } from './agent-usage';
+export {
+  parseAgentUsage,
+  parseOpenCodeUsage,
+  SCHED_DISPATCH_EVENT,
+  usageParserFor,
+} from './agent-usage';
 // Checksum exports
 export { calculateChecksum, verifyIntegrity } from './checksum';
 // Coherence validation exports

@@ -10,20 +10,53 @@
  * `ai-dossier run` already writes to, using the shared `RunLogEntry` schema
  * from `@ai-dossier/core`.
  *
- * Deliberately not `cli`'s `appendRunLog` (`cli/src/run-log.ts`): that
- * wrapper is gated by the CLI's `auditLog` user-config flag, a setting that
- * has no equivalent here — sched dispatch telemetry is not an optional
- * feature the way the CLI's own audit log is, and `sched` cannot depend on
- * `cli` (the dependency runs the other way). The write itself is a plain,
- * unconditional JSONL append.
+ * Deliberately not `cli`'s `appendRunLog` (`cli/src/run-log.ts`): `sched`
+ * cannot depend on `cli` (the dependency runs the other way). It is gated by
+ * its own opt-out instead — see {@link schedTelemetryEnabled}.
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { AgentRunUsage, RunLogEntry } from '@ai-dossier/core';
 import { runsLogPath, usageParserFor } from '@ai-dossier/core';
 import { appendJsonl } from './journal';
 
 export { runsLogPath as schedRunsLogPath, usageParserFor };
+
+/**
+ * Config key gating sched dispatch telemetry — read from the same
+ * `~/.dossier/config.json` the CLI writes (`dossier config schedTelemetry
+ * false`), but read directly here because `sched` cannot depend on `cli`.
+ */
+const SCHED_TELEMETRY_KEY = 'schedTelemetry';
+
+/**
+ * Whether to write sched dispatch telemetry to `runs.jsonl`. Defaults to
+ * **on** — `sched stats` and the RFC-0001 cost gates exist because this data
+ * was missing (#524), so an operator who never touched the setting keeps it.
+ *
+ * A SEPARATE key from the CLI's `auditLog` (ai-dossier#524, decision 2).
+ * `auditLog` gates what `ai-dossier run` records about the user's own CLI
+ * invocations; honouring it here would silently give an operator who disabled
+ * it zero scheduler cost visibility, and ignoring it would just as silently
+ * widen a flag whose documented scope is the audit log. Two concerns, two
+ * keys, both honest: a disabled `schedTelemetry` makes `sched stats` say so
+ * rather than report an empty cohort as if nothing had run.
+ *
+ * Unreadable or malformed config is treated as "not opted out" — telemetry is
+ * the default, and a broken config file must not silently disable it.
+ */
+export function schedTelemetryEnabled(home?: string): boolean {
+  try {
+    const configFile = path.join(home ?? os.homedir(), '.dossier', 'config.json');
+    const parsed: unknown = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return true;
+    return (parsed as Record<string, unknown>)[SCHED_TELEMETRY_KEY] !== false;
+  } catch {
+    return true;
+  }
+}
 
 /** `RunLogEntry.dossier` for a sched-dispatched cycle/report agent. */
 function schedDossierLabel(role: string): string {
@@ -136,12 +169,17 @@ export function buildSchedRunLogEntry(input: SchedRunLogInput): RunLogEntry {
  * write must not fail the reconcile tick it runs inside. Returns `false` on
  * failure so the caller can journal it (`recordDispatchRunLog` does) rather
  * than the write vanishing with zero operator-visible signal.
+ *
+ * A no-op returning `true` when {@link schedTelemetryEnabled} is false: the
+ * operator opted out, so writing nothing is the SUCCESSFUL outcome, not a
+ * failure for the caller to journal as a lost entry.
  */
 export function appendSchedRunLog(
   entry: RunLogEntry,
   home?: string,
   onError?: (err: Error) => void
 ): boolean {
+  if (!schedTelemetryEnabled(home)) return true;
   return appendJsonl(runsLogPath(home), entry, onError);
 }
 

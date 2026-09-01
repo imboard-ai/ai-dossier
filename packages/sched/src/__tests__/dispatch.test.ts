@@ -22,7 +22,15 @@ import {
 describe('dispatch command building (#464 AC1)', () => {
   it('substitutes {model} and {issue} from the tier and unit', () => {
     const argv = buildAgentCommand(DEFAULT_DISPATCH_COMMAND, 'mid', 464, DEFAULT_TIER_MODELS);
-    expect(argv).toEqual(['claude', '-p', '--output-format', 'json', '--model', 'sonnet']);
+    expect(argv).toEqual([
+      'claude',
+      '-p',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--model',
+      'sonnet',
+    ]);
   });
 
   it('maps every tier to its configured model', () => {
@@ -398,4 +406,67 @@ describe('the report prompt can recover its generation (#504)', () => {
     expect(prompt).toContain('runstate verify --issue 504 --json');
     expect(prompt).toContain('--gen <n>');
   });
+});
+
+/**
+ * #524 AC3 — "per-agent stdout/stderr logs are never 0 bytes for a unit that
+ * ran". Root cause: `claude -p --output-format json` writes nothing until the
+ * process exits, so any dispatch the scheduler killed on external-advance
+ * left an empty file that was indistinguishable from a spawn that never
+ * happened. The spawn preamble makes a dispatch self-describing from t=0.
+ */
+describe('createSpawnDeps — dispatch log is never 0 bytes (#524 AC3)', () => {
+  it('writes a preamble before the agent produces any output of its own', async () => {
+    const { createSpawnDeps } = await import('../index');
+    const { SCHED_DISPATCH_EVENT } = await import('@ai-dossier/core');
+    const os = await import('node:os');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-preamble-'));
+    const logFile = path.join(dir, 'issue-524.log');
+    // An agent that runs but never writes anything — exactly the shape that
+    // produced the pilot's 0-byte logs.
+    const fixture = path.join(dir, 'silent.mjs');
+    fs.writeFileSync(fixture, 'setTimeout(() => process.exit(0), 5000);\n');
+
+    const deps = createSpawnDeps();
+    const pid = deps.spawn(['node', fixture], 'prompt', logFile);
+    try {
+      expect(fs.statSync(logFile).size).toBeGreaterThan(0);
+      const first = JSON.parse(fs.readFileSync(logFile, 'utf-8').split('\n')[0]);
+      expect(first.type).toBe(SCHED_DISPATCH_EVENT);
+      expect(first.cmd).toEqual(['node', fixture]);
+      expect(typeof first.ts).toBe('string');
+    } finally {
+      deps.kill(pid);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it('appends a fresh preamble per dispatch, after the prior dispatch’s bytes', async () => {
+    const { createSpawnDeps } = await import('../index');
+    const os = await import('node:os');
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-preamble2-'));
+    const logFile = path.join(dir, 'issue-524.log');
+    const fixture = path.join(dir, 'silent.mjs');
+    fs.writeFileSync(fixture, 'setTimeout(() => process.exit(0), 5000);\n');
+
+    const deps = createSpawnDeps();
+    const first = deps.spawn(['node', fixture], 'p', logFile);
+    const offsetAtSecondSpawn = fs.statSync(logFile).size;
+    const second = deps.spawn(['node', fixture], 'p', logFile);
+    try {
+      // The redispatch's own slice starts at its own preamble, so
+      // `log_offset_at_spawn` never replays the first dispatch's bytes.
+      const slice = fs.readFileSync(logFile).subarray(offsetAtSecondSpawn).toString('utf-8');
+      expect(JSON.parse(slice.split('\n')[0]).type).toBe('sched-dispatch');
+      expect(slice.trim().split('\n')).toHaveLength(1);
+    } finally {
+      deps.kill(first);
+      deps.kill(second);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }, 10_000);
 });

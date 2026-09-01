@@ -126,6 +126,7 @@ export {
   readDispatchLog,
   type SchedRunLogInput,
   schedRunsLogPath,
+  schedTelemetryEnabled,
   usageParserFor,
 } from './run-log';
 export {

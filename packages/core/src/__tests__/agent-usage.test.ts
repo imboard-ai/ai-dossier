@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { parseAgentUsage, parseOpenCodeUsage, usageParserFor } from '../agent-usage';
+import {
+  parseAgentUsage,
+  parseOpenCodeUsage,
+  SCHED_DISPATCH_EVENT,
+  usageParserFor,
+} from '../agent-usage';
 
 describe('parseAgentUsage', () => {
   it('parses the classic usage shape (usage + total_cost_usd + model) when no modelUsage is present', () => {
@@ -359,6 +364,111 @@ describe('parseAgentUsage — untrusted-input hardening (#524)', () => {
     expect(usage?.model).not.toBeNull();
     expect(usage?.model?.includes('\x1b')).toBe(false);
     expect(usage?.model?.length).toBeLessThanOrEqual(200);
+  });
+});
+
+/**
+ * #524 root cause: `claude -p --output-format json` buffers the whole session
+ * and writes one object at exit, so a dispatch killed while still running
+ * (the scheduler's external-advance branch) left a 0-byte log and no tokens —
+ * six of the eleven batch-pilot units. The scheduler dispatches with
+ * `stream-json` now; these cases pin the parsing that makes that recoverable.
+ */
+describe('parseAgentUsage — stream-json (sched dispatch format, #524)', () => {
+  const preamble = JSON.stringify({
+    type: SCHED_DISPATCH_EVENT,
+    ts: '2026-09-01T10:00:00.000Z',
+    cmd: ['claude', '-p', '--output-format', 'stream-json', '--verbose'],
+  });
+
+  const assistant = (input: number, output: number, model = 'claude-sonnet-4-5') =>
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        model,
+        usage: {
+          input_tokens: input,
+          output_tokens: output,
+          cache_creation_input_tokens: 10,
+          cache_read_input_tokens: 20,
+        },
+      },
+    });
+
+  const resultEvent = JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    result: 'done',
+    usage: { input_tokens: 999, output_tokens: 999 },
+    modelUsage: {
+      'claude-sonnet-4-5': {
+        inputTokens: 100,
+        outputTokens: 200,
+        cacheCreationInputTokens: 30,
+        cacheReadInputTokens: 40,
+        totalCostUsd: 1.25,
+      },
+    },
+  });
+
+  it('reads the final result event and still lets modelUsage beat the top-level usage block', () => {
+    const log = [preamble, assistant(1, 2), resultEvent].join('\n');
+
+    expect(parseAgentUsage(log)).toMatchObject({
+      input_tokens: 100,
+      output_tokens: 200,
+      cache_creation_tokens: 30,
+      cache_read_tokens: 40,
+      total_cost_usd: 1.25,
+      model: 'claude-sonnet-4-5',
+    });
+  });
+
+  it('sums per-turn assistant usage when the run was KILLED before emitting a result event', () => {
+    // The 6-of-11 case: ground truth said done, the agent was killed, no
+    // result event was ever written. Tokens spent so far must still be
+    // recorded rather than reported as null.
+    const log = [preamble, assistant(5, 50), assistant(7, 70)].join('\n');
+
+    expect(parseAgentUsage(log)).toMatchObject({
+      input_tokens: 12,
+      output_tokens: 120,
+      cache_creation_tokens: 20,
+      cache_read_tokens: 40,
+      // Per-turn events carry no cost — never fabricated from token counts.
+      total_cost_usd: null,
+      model: 'claude-sonnet-4-5',
+    });
+  });
+
+  it('takes the LAST result event, so a prior dispatch in the same append-mode log cannot win', () => {
+    const earlier = JSON.stringify({
+      type: 'result',
+      modelUsage: { 'claude-haiku-4-5': { inputTokens: 1, outputTokens: 1 } },
+    });
+    expect(parseAgentUsage([earlier, preamble, resultEvent].join('\n'))).toMatchObject({
+      input_tokens: 100,
+      output_tokens: 200,
+    });
+  });
+
+  it('survives a truncated final line from an agent killed mid-write', () => {
+    const log = [preamble, assistant(5, 50), '{"type":"assist'].join('\n');
+    expect(parseAgentUsage(log)).toMatchObject({ input_tokens: 5, output_tokens: 50 });
+  });
+
+  it('returns null for a log holding only the sched preamble (the agent wrote nothing)', () => {
+    expect(parseAgentUsage(preamble)).toBeNull();
+    expect(parseOpenCodeUsage(preamble)).toBeNull();
+  });
+
+  it('joins models when a stream ran several, without a result event', () => {
+    const log = [
+      preamble,
+      assistant(1, 2, 'claude-opus-4'),
+      assistant(3, 4, 'claude-haiku-4'),
+    ].join('\n');
+    expect(parseAgentUsage(log)?.model).toBe('claude-opus-4,claude-haiku-4');
   });
 });
 

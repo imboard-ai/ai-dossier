@@ -4,9 +4,12 @@
  * last-progress timestamp tracked in state.json"; RFC-0001 §C.1 "spawns agent
  * processes via the existing `run` machinery").
  *
- * The command is a template (default `claude -p --output-format json --model
- * {model}` — the same headless invocation `ai-dossier run` builds in
- * cli/src/helpers.ts) with `{model}`/`{issue}` placeholders; the prompt
+ * The command is a template (default `claude -p --output-format stream-json
+ * --verbose --model {model}` — `ai-dossier run`'s headless invocation in
+ * cli/src/helpers.ts uses the one-shot `json` form instead, because it
+ * captures stdout in-process from an agent it waits on; a detached dispatch
+ * needs incremental output, see {@link DEFAULT_DISPATCH_COMMAND}) with
+ * `{model}`/`{issue}` placeholders; the prompt
  * travels on stdin exactly like the run machinery's headless path. Children
  * spawn DETACHED and unref'd: an agent must survive a sched crash (RFC F.10 —
  * restart reconciles by pid, it never owns the agent's lifetime).
@@ -19,6 +22,7 @@
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { SCHED_DISPATCH_EVENT } from '@ai-dossier/core';
 import { sanitizeSlug } from './project';
 import {
   DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
@@ -40,12 +44,27 @@ export const DEFAULT_TIER_MODELS: Readonly<Record<ModelTier, string>> = {
   strong: 'opus',
 };
 
-/** Default headless agent command template (claude, the run machinery's first choice). */
+/**
+ * Default headless agent command template (claude, the run machinery's first choice).
+ *
+ * **`stream-json`, not `json` (ai-dossier#524).** `--output-format json`
+ * buffers the entire session and writes ONE object at process exit, so the
+ * dispatch log stays 0 bytes for the whole run and only fills if the agent
+ * exits cleanly. The batch pilot's six 0-byte logs are exactly the six units
+ * that never reached a detected exit — they were advanced by ground truth
+ * (`external-advance`) while their agent was still alive and then killed, so
+ * the one-shot write never happened. `stream-json` emits an event per turn,
+ * so the log fills as the run proceeds and `parseAgentUsage` can recover
+ * per-turn tokens even from a dispatch that was killed mid-flight.
+ * `--verbose` is required by claude whenever `-p` is combined with
+ * `stream-json`.
+ */
 export const DEFAULT_DISPATCH_COMMAND: readonly string[] = [
   'claude',
   '-p',
   '--output-format',
-  'json',
+  'stream-json',
+  '--verbose',
   '--model',
   '{model}',
 ];
@@ -562,6 +581,23 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
       // before this spawn — to read only the current dispatch's own slice.
       const out = fs.openSync(logFile, 'a', 0o600);
       try {
+        // #524: a log must never be 0 bytes for a unit that ran. The agent's
+        // own first write can be seconds (claude) or minutes away, and an
+        // agent killed before it writes anything would otherwise leave an
+        // empty file indistinguishable from "never spawned". This preamble
+        // makes the dispatch self-describing from t=0 and marks the boundary
+        // `log_offset_at_spawn` points at. Every parser in
+        // `@ai-dossier/core`'s agent-usage skips this `type`, so it never
+        // counts as agent output. Best-effort: a telemetry marker must not
+        // stop a dispatch, so a failed write is swallowed.
+        try {
+          fs.writeSync(
+            out,
+            `${JSON.stringify({ type: SCHED_DISPATCH_EVENT, ts: new Date().toISOString(), cmd })}\n`
+          );
+        } catch {
+          // Log unwritable — the spawn below will surface the real problem.
+        }
         const child = spawn(cmd[0], cmd.slice(1), {
           ...(cwd ? { cwd } : {}),
           detached: true,

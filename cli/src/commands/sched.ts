@@ -39,6 +39,7 @@ import {
   SchedNotFoundError,
   SchedStore,
   schedStateDir,
+  schedTelemetryEnabled,
   setPaused,
   TEARDOWN_TIMEOUT_MS,
   tick,
@@ -577,6 +578,15 @@ function registerStatsSubcommand(cmd: Command): void {
 
       if (report.issues.length === 0) {
         console.log(`No sched-dispatched runs.jsonl entries found in ${RUNS_LOG_FILE}.`);
+        // An empty cohort and a disabled recorder look identical in the log
+        // file (#524, decision 2). Say which one it is, so an operator does
+        // not read their own opt-out as "the scheduler ran nothing".
+        if (!schedTelemetryEnabled()) {
+          console.log(
+            'Note: sched telemetry is disabled (`schedTelemetry: false` in ~/.dossier/config.json) — ' +
+              'dispatches are not recorded. Re-enable with `dossier config schedTelemetry true`.'
+          );
+        }
         return;
       }
 
