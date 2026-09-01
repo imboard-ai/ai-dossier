@@ -77,6 +77,24 @@ one.
 | Mean tokens/issue | ~64k | **≤~5.3k** (well under the ≤10k target) |
 | `slot` hit rate | 20.0% (3/15) | unchanged — pre-screen never rejects a real `slot` issue (regression-tested), and the bounded/escalated pass preserves the same E.2/E.3 logic, just cheaper to run |
 
+## AC4's two halves (regression review, conformance verification)
+
+AC4 ("the 3 known `slot` issues still classify `slot`; the 12 known `full` still classify
+`full`") splits the same way AC3 does. The **safety property** — pre-screen must never falsely
+reject a real `slot`-eligible issue — is fully addable and is added:
+`cli/src/__tests__/prescreen.test.ts` runs the real 15-issue fixture through the shipped
+`prescreenIssue` and asserts all 3 known `slot` issues come back `candidate`, plus an aggregate
+assertion pinning the 7-`full`/8-`candidate` split so it cannot silently drift. That is a
+regression-tested, CI-verified fact about the shipped code — met.
+
+The **end-to-end** half — that the classifier's full pipeline (pre-screen + the model-driven
+Steps 4–6) still emits the correct final `mode=slot`/`mode=full` verdict for all 15 — is not
+addable inside this PR for the identical reason AC3's live re-measurement isn't: it requires
+dispatching the *published* `issue-cycle-classifier` dossier (post-publish, since dossiers are
+registry content, not this repo's own code) against real issues in a different, private repo,
+with real model calls. No test in `cli/`'s suite can execute that. This is a structural
+boundary of what a single code PR can verify, not a gap in this PR's own testing.
+
 ## Follow-up: closing the estimate to a measurement
 
 The next live pilot run (successor to #526/#529, once #529's GO/NO-GO gate is reached) should
