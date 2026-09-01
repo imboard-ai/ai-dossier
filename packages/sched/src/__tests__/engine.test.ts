@@ -363,7 +363,65 @@ describe('reconciliation tick (AC3: external advance + orphaned pids after resta
     expect(h.killedPids).toContain(h.spawnCalls[0].pid);
     expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('done');
     expect(h.state().slots.find((s) => s.id === 1)?.status).toBe('idle');
+    // #525: the completion path journals a distinct slot-released event, not just
+    // the completion event itself — a report reading the journal can see the slot
+    // emptied at 11:38:06Z instead of inferring it from the next `assigned`.
+    expect(
+      h.journal
+        .read()
+        .some(
+          (e) => e.event === 'slot-released' && e.issue === 101 && e.reason === 'external-advance'
+        )
+    ).toBe(true);
   });
+
+  it(
+    '#525 regression: three independent units fill max_slots=3; one finishes via ' +
+      'external-advance (issue closed) → a fourth runnable unit is assigned on the very next tick',
+    () => {
+      const h = harness({ maxSlots: 3 });
+      REGISTRIES.push(h.dir);
+      h.enqueue([
+        { issue: 101, mode: 'full' },
+        { issue: 102, mode: 'full' },
+        { issue: 103, mode: 'full' },
+      ]);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(3);
+      expect(h.state().slots.every((s) => s.status === 'running')).toBe(true);
+
+      // A fourth independent, runnable unit shows up once all three slots are full —
+      // it has to wait for capacity (max_slots=3), same as the pilot's dependency-free
+      // dispatch queue.
+      h.enqueue([{ issue: 104, mode: 'full' }]);
+      const waiting = h.tick();
+      expect(waiting.spawned).toHaveLength(0);
+      expect(h.state().entries.find((e) => e.issue === 104)?.status).toBe('queued');
+      expect(h.spawnCalls).toHaveLength(3);
+
+      // #101 reaches a terminal state via external-advance (its issue closed,
+      // mirroring the pilot's #499 "issue closed" event) while its agent still
+      // nominally holds the slot.
+      h.closedIssues.add(101);
+
+      const result = h.tick();
+
+      expect(result.externalAdvances).toEqual(['issue:101']);
+      // The freed slot was reused for #104 in the SAME tick — no 2h44m gap.
+      expect(result.spawned).toEqual(['issue:104']);
+      expect(h.state().entries.find((e) => e.issue === 104)?.status).toBe('dispatched');
+      expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('done');
+      // sched status never shows the terminal unit as still running in a slot.
+      expect(h.state().slots.some((s) => s.unit === 'issue:101')).toBe(false);
+      expect(h.state().slots.filter((s) => s.status === 'running')).toHaveLength(3);
+      const events = h.journal.read();
+      expect(
+        events.some(
+          (e) => e.event === 'slot-released' && e.issue === 101 && e.reason === 'external-advance'
+        )
+      ).toBe(true);
+    }
+  );
 
   it('orphaned pid after a sched restart: dead pid on a running slot → exit rail → verify', () => {
     const h = harness();
@@ -516,6 +574,12 @@ describe('stall/escalation ladder (AC4)', () => {
     expect(state.entries.find((e) => e.issue === 104)?.status).toBe('dispatched');
     expect(state.slots.find((s) => s.unit === 'issue:101')).toBeUndefined();
     expect(h.journal.read().some((e) => e.event === 'dependents-blocked')).toBe(true);
+    // #525: the failure rail journals a distinct slot-released event for #101 itself.
+    expect(
+      h.journal
+        .read()
+        .some((e) => e.event === 'slot-released' && e.issue === 101 && e.reason === 'unit-failed')
+    ).toBe(true);
   });
 
   it('a stall at the strongest tier fails the unit (nowhere stronger to go)', () => {
@@ -928,6 +992,11 @@ describe('spawn failures (supportability)', () => {
     expect(state.entries.find((e) => e.issue === 101)?.reason).toMatch(/spawn-error/);
     expect(state.entries.find((e) => e.issue === 102)?.status).toBe('dispatched');
     expect(h.journal.read().some((e) => e.event === 'unit-failed')).toBe(true);
+    expect(
+      h.journal
+        .read()
+        .some((e) => e.event === 'slot-released' && e.issue === 101 && e.reason === 'unit-failed')
+    ).toBe(true);
   });
 });
 
@@ -1019,6 +1088,12 @@ describe('#468 AC1/AC5: parking and the PR watcher', () => {
     expect(state.slots.every((s) => s.status === 'idle')).toBe(true);
     // the park is journaled
     expect(h.events().some((e) => e.event === 'pr-parked' && e.issue === 101)).toBe(true);
+    // #525: parking under detached ship also journals slot-released.
+    expect(
+      h
+        .events()
+        .some((e) => e.event === 'slot-released' && e.issue === 101 && e.reason === 'parked')
+    ).toBe(true);
   });
 
   it('a parked PR never unblocks dependents; MERGE does (AC4)', () => {

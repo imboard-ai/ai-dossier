@@ -275,19 +275,30 @@ function patchSlot(
   };
 }
 
-/** Walk a slot to `idle` one declared edge per iteration; `step` picks the next status. */
+/**
+ * Walk a slot to `idle` one declared edge per iteration; `step` picks the
+ * next status. Journals exactly one `slot-released` event (#525) when the
+ * walk actually empties a held slot — never for a slot that was already
+ * idle or held no unit — so the release is visible in the journal at the
+ * moment it happens, not inferred later from the next `assigned` event.
+ */
 function walkSlotToIdle(
+  ctx: TickCtx,
   state: SchedState,
   unit: string,
   now: Date,
-  step: (status: SlotStatus) => SlotStatus
+  step: (status: SlotStatus) => SlotStatus,
+  reason: string
 ): SchedState {
   let next = state;
   let slot = slotOf(next, unit);
+  if (!slot || slot.status === 'idle') return next;
+  const slotId = slot.id;
   while (slot && slot.status !== 'idle') {
     next = transitionSlot(next, slot.id, step(slot.status), {}, now);
     slot = slotOf(next, unit);
   }
+  journal(ctx, 'slot-released', unit, { slot: slotId, reason });
   return next;
 }
 
@@ -547,7 +558,7 @@ function failUnit(
   const now = ctx.deps.now();
 
   killUnitAgent(ctx, state, unit);
-  let next = releaseSlotViaFailure(ctx, state, unit);
+  let next = releaseSlotViaFailure(ctx, state, unit, 'unit-failed');
 
   const entry = findEntry(next, issue);
   if (entry && !TERMINAL_ISSUE_STATUSES.has(entry.status)) {
@@ -567,9 +578,19 @@ function failUnit(
 }
 
 /** Release a unit's slot to idle through the failure rail (failed → idle). */
-function releaseSlotViaFailure(ctx: TickCtx, state: SchedState, unit: string): SchedState {
-  return walkSlotToIdle(state, unit, ctx.deps.now(), (status) =>
-    status === 'complete' || status === 'failed' ? 'idle' : 'failed'
+function releaseSlotViaFailure(
+  ctx: TickCtx,
+  state: SchedState,
+  unit: string,
+  reason: string
+): SchedState {
+  return walkSlotToIdle(
+    ctx,
+    state,
+    unit,
+    ctx.deps.now(),
+    (status) => (status === 'complete' || status === 'failed' ? 'idle' : 'failed'),
+    reason
   );
 }
 
@@ -616,7 +637,7 @@ function blockTransitiveDependents(
     // A dependent mid-run is working toward a doomed merge — release its slot.
     const unit = `issue:${issue}`;
     killUnitAgent(ctx, next, unit);
-    next = releaseSlotViaFailure(ctx, next, unit);
+    next = releaseSlotViaFailure(ctx, next, unit, 'dependents-blocked');
 
     next = transitionIssue(next, issue, 'blocked', { reason }, now);
     journal(ctx, 'dependents-blocked', unit, { reason });
@@ -810,7 +831,7 @@ function completeUnit(
   if (issue === null) return state;
   const now = ctx.deps.now();
 
-  const next = walkSlotToIdle(state, unit, now, stepVerifiedExitToIdle);
+  const next = walkSlotToIdle(ctx, state, unit, now, stepVerifiedExitToIdle, via);
 
   let withEntry = next;
   const entry = findEntry(next, issue);
@@ -846,7 +867,7 @@ function parkUnit(
   const pr = prOfMilestone(milestone);
   if (pr === null) return state; // isParkedMilestone guarantees this
 
-  let next = walkSlotToIdle(state, unit, now, stepVerifiedExitToIdle);
+  let next = walkSlotToIdle(ctx, state, unit, now, stepVerifiedExitToIdle, 'parked');
 
   next = transitionIssue(next, issue, 'parked', { pr }, now);
   journal(ctx, 'pr-parked', unit, { pr });

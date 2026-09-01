@@ -706,6 +706,11 @@ export type JournalEventName =
   | 'redispatched'
   | 'unit-failed'
   | 'dependents-blocked'
+  // #525: a slot reaching `idle` on any terminal path (complete, external-
+  // advance, park, failure, dependent-block) — journaled once, at the point
+  // the slot ACTUALLY empties, so a report reading the journal never has to
+  // infer release time from the next `assigned` event on that slot.
+  | 'slot-released'
   | 'requeued'
   | 'ground-truth-unreachable'
   | 'suspect-dispatch'
