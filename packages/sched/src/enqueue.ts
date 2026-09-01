@@ -7,6 +7,7 @@
  */
 
 import { SAFE_REF_RE } from './attribution';
+import { unwrapList } from './json';
 import { createBatch, findBatch } from './state';
 import type { CycleMode, ModelTier, QueueEntry, SchedState } from './types';
 import { TERMINAL_ISSUE_STATUSES } from './types';
@@ -57,11 +58,7 @@ function asPositiveInt(value: unknown, label: string): number {
  * `project` is accepted and ignored — the CLI resolves the project itself).
  */
 export function parseManifest(raw: unknown): EnqueueInput[] {
-  const list = Array.isArray(raw)
-    ? raw
-    : raw && typeof raw === 'object' && Array.isArray((raw as { entries?: unknown }).entries)
-      ? ((raw as { entries: unknown[] }).entries as unknown[])
-      : null;
+  const list = unwrapList(raw, 'entries');
   if (list === null) {
     throw new EnqueueError('Manifest must be a JSON array of entries or { "entries": [...] }');
   }
