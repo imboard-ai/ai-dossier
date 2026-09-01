@@ -8,6 +8,11 @@
  * exec (project.ts, groundtruth.ts) — never an LLM call of its own (AC7).
  */
 
+// `MemberRange` is attribution.ts's own leaf type (it imports nothing), so this
+// is the one place types.ts reaches outward — a `BatchEntry.ranges` value IS a
+// `MemberRange[]`, and duplicating the shape here would let the two drift.
+import type { MemberRange } from './attribution';
+
 // --- Cycle modes and model tiers (RFC-0001 §B model routing) ---
 
 /** Execution mode of a queue entry. `full` runs the unchanged full-cycle; `slot` runs as a batch member. */
@@ -272,17 +277,39 @@ export interface BatchEntry {
    */
   anchor: number | null;
   /**
-   * The batch working branch. Reserved for the batch-setup phase; nothing in
-   * this package writes it yet, and recovery only READS it — to refuse a rebase
-   * when the checkout is on some other branch.
+   * The batch working branch, written by batch-setup dispatch (#523) — the
+   * ONE worktree/branch every member and tail step shares. Null before the
+   * batch has been dispatched a first time; recovery also READS it, to refuse
+   * a rebase when the checkout is on some other branch.
    */
   branch: string | null;
+  /**
+   * Absolute path of the shared worktree batch-setup created (#523) — where
+   * every member's `slot-cycle` run and every tail-phase agent (validate,
+   * review, ship, report) execute. Null until batch-setup lands.
+   */
+  worktree: string | null;
   /**
    * runstate run id of the batch run (`r-<issue>-<hex>`), null until batch-setup
    * mints it. `ai-dossier runstate post` REQUIRES a run id, so a batch without
    * one cannot post milestones at all — recovery journals them instead.
    */
   run_id: string | null;
+  /**
+   * Each member's commit range on the batch branch (#523 AC2), recomputed from
+   * `git log` after every member completes (`attribution.ts`'s `memberRanges`).
+   * The direct input `evictMembers`' `EvictionInput.ranges` expects — kept on
+   * the batch so eviction never needs a live worktree to re-derive it.
+   */
+  ranges: MemberRange[];
+  /**
+   * PR number the batch parked on `auto-merge` (#523, mirrors `QueueEntry.pr`),
+   * from the tail agent's `batch-ship awaiting-merge` milestone (`pr=` key).
+   * Persisted (not held only in memory) so a `sched start` restart mid-watch
+   * still knows which PR to poll — `awaiting-merge` batches hold no live slot
+   * to lose, but a restart with nothing durable would silently stop watching.
+   */
+  pr: number | null;
   /**
    * Members that must revert together when any one of them is evicted
    * (RFC-0001 §E.4 eviction groups — e.g. a member built on another's API).
@@ -477,6 +504,26 @@ export interface DispatchConfig {
    */
   fix_prompt?: string;
   /**
+   * Prompt template for one batch member (#523 AC1) — runs `imboard-ai/git/
+   * slot-cycle` inside the shared batch worktree; `{issue}`, `{batch}` and
+   * `{worktree}` substituted. Defaults to `DEFAULT_MEMBER_PROMPT_TEMPLATE`.
+   */
+  member_prompt?: string;
+  /**
+   * Prompt template for the batch tail agent (#523 AC3) — aggregate review
+   * then batch-mode ship, parking the PR exactly like a full-cycle run;
+   * `{batch}`, `{anchor}`, `{members}` and `{worktree}` substituted. Defaults
+   * to `DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE`.
+   */
+  batch_tail_prompt?: string;
+  /**
+   * Prompt template for the cheap-tier batch report agent (#523 AC3),
+   * dispatched after the batch PR merges — mirrors `report_prompt` at batch
+   * granularity; `{batch}`, `{anchor}`, `{pr}` substituted. Defaults to
+   * `DEFAULT_BATCH_REPORT_PROMPT_TEMPLATE`.
+   */
+  batch_report_prompt?: string;
+  /**
    * How long a freshly-fenced slot may go without any progress signal before the
    * ladder re-enters recovery (#504 AC4). A takeover can die on its own first breath,
    * and waiting out the phase's full stall allowance (90 min for `implement`) to
@@ -605,7 +652,7 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.7.0' as const;
+export const SCHEMA_VERSION = '1.8.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -616,12 +663,13 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.4.0',
   '1.5.0',
   '1.6.0',
+  '1.7.0',
 ];
 
-export const CONFIG_SCHEMA_VERSION = '1.2.0' as const;
+export const CONFIG_SCHEMA_VERSION = '1.3.0' as const;
 
 /** Config schema versions `loadConfig` accepts (older configs carry only max_slots). */
-export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0'];
+export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0', '1.2.0'];
 
 /** Config file shape (schema_version + the config itself). */
 export interface SchedConfigFile {
@@ -716,6 +764,15 @@ export type JournalEventName =
   // respawns, and the degraded path where it could not be written.
   | 'fence-written'
   | 'fence-failed'
+  // #523 batch dispatch: claiming the shared worktree/branch, and advancing
+  // the member pointer between slot-cycle runs. Member/tail-agent spawn,
+  // progress, completion and park events reuse the existing unit-generic
+  // names above (`assigned`/`spawned`/`progress`/`external-advance`/
+  // `verify-complete`/`pr-parked`/`merge-accepted`/`report-dispatched`) —
+  // `unit` is `batch:<id>` and `issueOfUnit` already returns null for it.
+  | 'batch-setup-done'
+  | 'batch-setup-failed'
+  | 'member-advanced'
   // #507 enqueue-time hard-block label pre-screen (journaled by the CLI,
   // NOT the engine — sched enqueue appends these before the issue is ever
   // dispatched)

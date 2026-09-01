@@ -15,15 +15,27 @@ export {
   SAFE_REF_RE,
   SHA_RE,
 } from './attribution';
+export {
+  type BatchDispatchDeps,
+  type BatchTickResult,
+  type CapOutcome,
+  runBatchTick,
+} from './batch-dispatch';
 export { type BisectOptions, type BisectOutcome, runAttributionBisect } from './bisect';
 export {
   buildAgentCommand,
+  buildBatchReportPrompt,
+  buildBatchTailPrompt,
   buildFixPrompt,
+  buildMemberPrompt,
   buildPrompt,
   buildReportPrompt,
   createSpawnDeps,
+  DEFAULT_BATCH_REPORT_PROMPT_TEMPLATE,
+  DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE,
   DEFAULT_DISPATCH_COMMAND,
   DEFAULT_FIX_PROMPT_TEMPLATE,
+  DEFAULT_MEMBER_PROMPT_TEMPLATE,
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
@@ -64,6 +76,10 @@ export {
   type GroundTruth,
   type GroundTruthMilestone,
   groundTruthExec,
+  isBatchPhaseDone,
+  isBatchTailParked,
+  isMemberBlocked,
+  isMemberComplete,
   isParkedMilestone,
   isVerifiedComplete,
   labelNames,
@@ -76,6 +92,7 @@ export {
 } from './groundtruth';
 export {
   appendJsonl,
+  batchOfUnit,
   issueOfUnit,
   JOURNAL_FILE,
   Journal,

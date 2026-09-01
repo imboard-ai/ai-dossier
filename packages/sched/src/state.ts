@@ -190,7 +190,10 @@ export function createBatch(
     executing_member: 0,
     anchor: opts.anchor ?? null,
     branch: null,
+    worktree: null,
     run_id: opts.run_id ?? null,
+    ranges: [],
+    pr: null,
     eviction_groups: (opts.eviction_groups ?? []).map((group) => [...group]),
     evictions: [],
     fix_attempts: [],
@@ -288,10 +291,30 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
   ) {
     throw new Error(`Batch ${id}: anchor must be a positive integer or null`);
   }
-  for (const key of ['branch', 'run_id'] as const) {
+  for (const key of ['branch', 'worktree', 'run_id'] as const) {
     const value = batch[key];
     if (value !== null && value !== undefined && typeof value !== 'string') {
       throw new Error(`Batch ${id}: ${key} must be a string or null`);
+    }
+  }
+  if (batch.ranges !== undefined) {
+    if (!Array.isArray(batch.ranges)) {
+      throw new Error(`Batch ${id}: ranges must be an array`);
+    }
+    for (const range of batch.ranges as unknown[]) {
+      if (range === null || typeof range !== 'object') {
+        throw new Error(`Batch ${id}: each ranges entry must be an object`);
+      }
+      const r = range as Record<string, unknown>;
+      if (!Number.isInteger(r.issue) || (r.issue as number) <= 0) {
+        throw new Error(`Batch ${id}: each ranges entry must carry a positive issue number`);
+      }
+      if (!Array.isArray(r.commits) || r.commits.some((c) => typeof c !== 'string')) {
+        throw new Error(`Batch ${id}: ranges[].commits must be an array of strings`);
+      }
+      if (!Array.isArray(r.positions) || r.positions.some((p) => !Number.isInteger(p))) {
+        throw new Error(`Batch ${id}: ranges[].positions must be an array of integers`);
+      }
     }
   }
   if (batch.eviction_groups !== undefined) {
@@ -328,6 +351,13 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
     }
   }
   if (
+    batch.pr !== null &&
+    batch.pr !== undefined &&
+    (!Number.isInteger(batch.pr) || (batch.pr as number) <= 0)
+  ) {
+    throw new Error(`Batch ${id}: pr must be a positive integer or null`);
+  }
+  if (
     batch.rebase_attempts !== undefined &&
     (!Number.isInteger(batch.rebase_attempts) || (batch.rebase_attempts as number) < 0)
   ) {
@@ -350,11 +380,14 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * `last_suspect_dispatch_unit` (null) — no suspect dispatches were tracked
  * before, so the zero value is exact, not a guess; 1.5.0 (pre-#504) slots
  * backfill `gen` (0) and `fenced_at` (null) — nothing was fenced before
- * fencing existed, so those values are exact too; 1.6.0 (pre-#524) slots
- * backfill `spawned_at` and `log_offset_at_spawn` (both null) — an in-flight
+ * fencing existed, so those values are exact too; 1.6.0 slots backfill
+ * `spawned_at` and `log_offset_at_spawn` (both null, pre-#524) — an in-flight
  * dispatch's start time and log position are unknown, not zero, so its
  * duration and dispatch-log boundary are simply unmeasurable until the next
- * spawn. The inference is entry-status-first, not phase-first: `phase === 'report'` is
+ * spawn — and 1.6.0 batches backfill `worktree` (null) and `ranges` ([],
+ * pre-#523), no batch having been dispatched before the engine drove batch
+ * execution, so those are exact too. The
+ * inference is entry-status-first, not phase-first: `phase === 'report'` is
  * exactly the signal #500 proved unreliable for a LIVE report agent (it
  * drifts to the issue's pre-report milestone under `phase-updated` well
  * before the agent exits), so a slot whose unit's queue entry is `shipped`
@@ -608,7 +641,12 @@ export function validateState(data: unknown): SchedState {
     ...batch,
     anchor: batch.anchor ?? null,
     branch: batch.branch ?? null,
+    // Pre-#523 (1.6.0) batches carry neither field — no batch has ever been
+    // dispatched under them, so null/[] is exact, not a guess.
+    worktree: batch.worktree ?? null,
     run_id: batch.run_id ?? null,
+    ranges: batch.ranges ?? [],
+    pr: batch.pr ?? null,
     eviction_groups: batch.eviction_groups ?? [],
     evictions: batch.evictions ?? [],
     fix_attempts: batch.fix_attempts ?? [],

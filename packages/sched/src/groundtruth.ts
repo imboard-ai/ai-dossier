@@ -13,6 +13,7 @@
 
 import { unwrapList } from './json';
 import { createExecFn, type ExecFn } from './project';
+import type { BatchPhase } from './types';
 
 /** The latest runstate milestone on an issue, as `runstate last --json` reports it. */
 export interface GroundTruthMilestone {
@@ -345,4 +346,50 @@ export function isVerifiedComplete(
 ): boolean {
   if (issueClosed) return true;
   return milestone !== null && milestone.phase === 'report' && milestone.status === 'done';
+}
+
+/**
+ * A batch member's completion signal (#523 AC1): `slot-cycle` posts no phase
+ * of its own past `review` — "ship is batch-owned" — so a member's work is
+ * verified complete when its latest milestone is `phase=review status=done
+ * mode=slot`. `mode=slot` guards against a member issue somehow carrying an
+ * unrelated `review done` from a stray full-cycle run.
+ */
+export function isMemberComplete(milestone: GroundTruthMilestone | null): boolean {
+  return (
+    milestone !== null &&
+    milestone.phase === 'review' &&
+    milestone.status === 'done' &&
+    milestone.keys.mode === 'slot'
+  );
+}
+
+/**
+ * A batch member's blocked signal (#523 AC1/AC2): `slot-cycle` posts
+ * `status=blocked mode=slot` at whichever phase it could not proceed past
+ * (plan/implement/review) — the reason lives in the milestone's `reason=` key.
+ */
+export function isMemberBlocked(milestone: GroundTruthMilestone | null): boolean {
+  return milestone !== null && milestone.status === 'blocked' && milestone.keys.mode === 'slot';
+}
+
+/**
+ * The batch tail's park signal (#523 AC3) — the detached-ship pattern
+ * generalized to batch granularity: the anchor's latest milestone is
+ * `batch-ship awaiting-merge` carrying a `pr=` key. Mirrors `isParkedMilestone`.
+ */
+export function isBatchTailParked(
+  milestone: GroundTruthMilestone | null
+): milestone is GroundTruthMilestone {
+  if (milestone === null) return false;
+  if (milestone.phase !== 'batch-ship' || milestone.status !== 'awaiting-merge') return false;
+  return prOfMilestone(milestone) !== null;
+}
+
+/** Whether the anchor's latest milestone is `<phase> done` (#523 — batch-review / batch-report). */
+export function isBatchPhaseDone(
+  milestone: GroundTruthMilestone | null,
+  phase: BatchPhase
+): boolean {
+  return milestone !== null && milestone.phase === phase && milestone.status === 'done';
 }
