@@ -81,7 +81,19 @@ where every mechanical supervision decision is code, not remembered prose:
    `stall_timeout_ms` (default 30 min) → kill the agent and redispatch the same unit one
    tier stronger (mechanical → mid → strong; the resume rails carry work forward). Cap 2
    escalations — or a stall at the strongest tier — fails the unit and blocks its
-   TRANSITIVE dependents (`dep-failed:<issue>`).
+   TRANSITIVE dependents (`dep-failed:<issue>`). The timeout is **phase-aware** (#495):
+   the `implement` phase alone can run 1-3h on a large monorepo with zero intermediate
+   milestone or pushed commit, so it gets a longer built-in default (90 min,
+   `DEFAULT_PHASE_STALL_TIMEOUT_MS`) than every other phase's 30-min default — selected by
+   the phase now IN FLIGHT (the last milestone's `next=`, not the last completed phase;
+   before any milestone posts it falls back to the slot's own phase). A built-in phase
+   default is a FLOOR against the global `stall_timeout_ms` — raising the global never
+   silently shortens `implement`'s allowance. Override any phase via
+   `dispatch.phase_stall_timeout_ms: { "<phase>": <ms> }` in `config.json` (validated
+   against the known phase vocabulary — an unrecognized key is a config error, not a
+   silent no-op); an explicit override always wins verbatim, even below the built-in
+   default. A phase not listed keeps its built-in default (floored by the global) or
+   falls back to the global `stall_timeout_ms` outright.
 5. **Immediate refill (AC5)** — a slot freed by a terminal state is refilled in the SAME
    tick; a runnable unit never waits while a slot is idle (pinned by a regression test).
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,
@@ -231,6 +243,9 @@ import {
   createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec);
                          //   since #468 also gh pr view PR state + setup info from comments
   resolveDispatch,       // config → resolved command/prompt/report-prompt/tier-models/timers
+  stallTimeoutForPhase,  // the stall allowance for the phase now in flight (#495 per-phase
+                         //   map → global, hardened against a prototype-name phase)
+  DEFAULT_PHASE_STALL_TIMEOUT_MS, // built-in per-phase stall allowances (implement: 90 min)
   buildReportPrompt,     // report-agent prompt ({issue}/{pr}/{cleanup} substituted)
   reportTierFor,         // report (re)dispatch tier after N escalations
   isParkedMilestone,     // ship-phase awaiting-merge + pr= → the park signal
@@ -282,7 +297,7 @@ fake agents and stub ground truth; no LLM calls anywhere.
 ~/.dossier/sched/<project>/
 ├── state.json     # hot operational truth — atomic tmp+fsync+rename writes;
 ├── config.json    # durable intent: max_slots, stall_timeout_ms, reconcile_interval_ms,
-│                  # pr_poll_interval_ms, dispatch (incl. report_prompt)
+│                  # pr_poll_interval_ms, dispatch (incl. report_prompt, phase_stall_timeout_ms)
 ├── events.jsonl   # append-only event journal (the operator's flight recorder)
 ├── runs/          # per-unit agent output logs (issue-<n>.log)
 └── .sched-lock/   # cross-process directory mutex (pid; stolen from dead holders)

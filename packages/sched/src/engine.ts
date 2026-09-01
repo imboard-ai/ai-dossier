@@ -15,8 +15,10 @@
  *    - `assigned` slots (crash between assign and spawn) are spawned/re-attached
  *    - `running` slots: dead pid → exit rail; ground truth says complete →
  *      external advance (kill the leftover agent, complete); new milestone or
- *      pushed commit → progress; no progress for `stall_timeout_ms` →
- *      redispatch one tier stronger (cap 2, then failed)
+ *      pushed commit → progress; no progress for the in-flight phase's
+ *      stall timeout (`stall_timeout_ms`, or a per-phase override —
+ *      `implement` defaults to 90 min, #495) → redispatch one tier
+ *      stronger (cap 2, then failed)
  *    - `exited`/`verifying` slots: the agent exited — completion is verified
  *      against ground truth, never assumed (AC2); an exit whose milestone is
  *      the ship phase's `awaiting-merge` (with `pr=`) is a VERIFIED park:
@@ -62,6 +64,7 @@ import {
   type SpawnDeps,
   STOP_POLL_MAX_MS,
   STOP_POLL_MIN_MS,
+  stallTimeoutForPhase,
   unitLogName,
 } from './dispatch';
 import {
@@ -825,9 +828,20 @@ function reconcileRunning(
   const progress = applyProgressSignals(ctx, state, slot, truth, unit);
   if (progress.progressed) return progress.state;
 
-  // No progress: the stall timer (AC4).
-  if (msSinceLastProgress(slot, now) >= ctx.dispatch.stallTimeoutMs) {
-    return enterRecovery(ctx, progress.state, unit, 'stalled', 'stall');
+  // No progress: the stall timer (AC4). The phase now IN FLIGHT is the last
+  // milestone's `next=`, not `slot.phase` — `slot.phase` is set to
+  // `truth.milestone.phase`, which names the phase that just COMPLETED, so
+  // using it directly would apply a phase's timeout allowance to the phase
+  // AFTER it (#495). Falls back to `slot.phase` (set to 'gate' at spawn,
+  // 'report' for a report agent) for the brief window before any milestone
+  // has posted.
+  const activePhase = truth.milestone?.keys.next ?? slot.phase;
+  const stallTimeoutMs = stallTimeoutForPhase(ctx.dispatch, activePhase);
+  if (msSinceLastProgress(slot, now) >= stallTimeoutMs) {
+    return enterRecovery(ctx, progress.state, unit, 'stalled', 'stall', {
+      active_phase: activePhase,
+      stall_timeout_ms: stallTimeoutMs,
+    });
   }
   return progress.state;
 }

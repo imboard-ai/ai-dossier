@@ -874,10 +874,12 @@ from `state.json` (pre-#464/#468/#472/#500/#505 state files — schema
 error naming the file — never a silent queue reset. Concurrency is serialized by a
 `.sched-lock` directory mutex (stolen from dead holders). `config.json` holds
 `max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default
-1 800 000), `reconcile_interval_ms` (default 60 000), and the optional `dispatch`
-section (including `report_prompt` for the #468 report agent); `pr_poll_interval_ms`
-(default 150 000) sets the parked-PR poll cadence; an issue with an unmerged dependency —
-or a batch behind an unmerged batch — is never runnable.
+1 800 000 — but the `implement` phase defaults to 5 400 000, overridable per phase via
+`dispatch.phase_stall_timeout_ms: {"<phase>": <ms>}`, #495), `reconcile_interval_ms`
+(default 60 000), and the optional `dispatch` section (including `report_prompt` for
+the #468 report agent); `pr_poll_interval_ms` (default 150 000) sets the parked-PR poll
+cadence; an issue with an unmerged dependency — or a batch behind an unmerged batch —
+is never runnable.
 
 Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).
 

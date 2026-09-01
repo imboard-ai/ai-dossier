@@ -21,6 +21,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sanitizeSlug } from './project';
 import {
+  DEFAULT_PHASE_STALL_TIMEOUT_MS,
   DEFAULT_PR_POLL_INTERVAL_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
   DEFAULT_STALL_TIMEOUT_MS,
@@ -146,7 +147,16 @@ export interface ResolvedDispatch {
   fixPrompt: string;
   /** Model per tier; null means "no model flag" (the command's `--model {model}` pair drops). */
   tierModels: Record<ModelTier, string | null>;
+  /** Global stall timeout — the fallback used when the in-flight phase has no entry in `phaseStallTimeoutMs` (#495). */
   stallTimeoutMs: number;
+  /**
+   * Per-phase stall timeout overrides (#495): built-in defaults merged with
+   * (and overridden by) operator config. A built-in phase default is never
+   * silently shortened by a smaller `stallTimeoutMs` (see `resolveDispatch`'s
+   * `Math.max` floor) — only an explicit operator override for that phase
+   * can lower it.
+   */
+  phaseStallTimeoutMs: Readonly<Record<string, number>>;
   reconcileIntervalMs: number;
   /** Parked-PR poll interval (#468 AC1, default 150 s — "every 2–3 min"). */
   prPollIntervalMs: number;
@@ -167,9 +177,53 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
     fixPrompt: dispatch.fix_prompt ?? DEFAULT_FIX_PROMPT_TEMPLATE,
     tierModels,
     stallTimeoutMs: config.stall_timeout_ms ?? DEFAULT_STALL_TIMEOUT_MS,
+    phaseStallTimeoutMs: resolvePhaseStallTimeouts(config),
     reconcileIntervalMs: config.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS,
     prPollIntervalMs: config.pr_poll_interval_ms ?? DEFAULT_PR_POLL_INTERVAL_MS,
   };
+}
+
+/**
+ * Merge the built-in per-phase stall defaults with operator config (#495).
+ * A built-in default (`implement`, 90 min) is a FLOOR against the resolved
+ * global `stallTimeoutMs`, never silently shortened by it: an operator who
+ * already raised the global timeout as a workaround keeps at least that much
+ * for `implement` after upgrading. An explicit `dispatch.phase_stall_timeout_ms`
+ * entry always wins verbatim — an operator narrowing a phase on purpose is
+ * respected, not floored.
+ */
+function resolvePhaseStallTimeouts(config: SchedConfig): Record<string, number> {
+  const globalMs = config.stall_timeout_ms ?? DEFAULT_STALL_TIMEOUT_MS;
+  const builtins = Object.fromEntries(
+    Object.entries(DEFAULT_PHASE_STALL_TIMEOUT_MS).map(([phase, ms]) => [
+      phase,
+      Math.max(ms, globalMs),
+    ])
+  );
+  return { ...builtins, ...config.dispatch?.phase_stall_timeout_ms };
+}
+
+/**
+ * The stall timeout to apply for `phase` (#495): a per-phase override (built-
+ * in default or operator config, `ResolvedDispatch.phaseStallTimeoutMs`) when
+ * one exists for `phase`, else the global `stallTimeoutMs`. `phase` should be
+ * the CURRENTLY RUNNING phase — the last milestone's `next=` — not the last
+ * COMPLETED phase (`slot.phase`), which lags one phase behind. `next=` may
+ * also legally be the terminal sentinel `'done'`, which never matches an
+ * override and therefore uses the global timeout.
+ *
+ * `Object.hasOwn` (not a plain `[]` lookup) guards against `phase` being an
+ * `Object.prototype` member name (`toString`, `constructor`, …): `next=` is
+ * parsed from a GitHub issue comment, which this repo's own threat model
+ * treats as untrusted (anyone who can comment can post a milestone-shaped
+ * comment), so an attacker-chosen `next=toString` must not resolve to a
+ * function and silently disable the stall check via a `NaN` comparison.
+ */
+export function stallTimeoutForPhase(dispatch: ResolvedDispatch, phase: string | null): number {
+  if (phase !== null && Object.hasOwn(dispatch.phaseStallTimeoutMs, phase)) {
+    return dispatch.phaseStallTimeoutMs[phase];
+  }
+  return dispatch.stallTimeoutMs;
 }
 
 /**
