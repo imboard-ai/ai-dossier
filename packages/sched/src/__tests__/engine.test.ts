@@ -613,6 +613,194 @@ describe('ground-truth outage pause (decision 2, option A)', () => {
   });
 });
 
+describe('dispatch-health pause (#505: quota/auth walls never ride the per-unit ladder alone)', () => {
+  it('one instant unverified exit is journaled suspect-dispatch but does not pause', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+
+    // Exits immediately (same tick, zero elapsed) with nothing verifiable —
+    // exactly what a quota wall killing the very first request looks like.
+    h.alive.delete(h.spawnCalls[0].pid);
+    const result = h.tick();
+
+    expect(result.redispatched).toEqual(['issue:101']); // the ladder is unchanged
+    expect(h.journal.read().some((e) => e.event === 'suspect-dispatch')).toBe(true);
+    expect(h.state().paused).toBe(false);
+    expect(h.state().consecutive_suspect_dispatches).toBe(1);
+    expect(h.state().last_suspect_dispatch_unit).toBe('issue:101');
+  });
+
+  it('a slow unverified exit (>= the window) is never flagged suspect', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+
+    h.advance(90 * 1000); // 90s: past SUSPECT_DISPATCH_WINDOW_MS (60s)
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick();
+
+    expect(h.journal.read().some((e) => e.event === 'suspect-dispatch')).toBe(false);
+    expect(h.state().consecutive_suspect_dispatches).toBe(0);
+  });
+
+  it('repeated instant exits of the SAME unit riding its own ladder never pause', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+
+    // mechanical → mid → strong → escalation-cap, every exit instant.
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick();
+    h.alive.delete(h.spawnCalls[1].pid);
+    h.tick();
+    h.alive.delete(h.spawnCalls[2].pid);
+    h.tick();
+
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+    expect(h.state().paused).toBe(false); // same unit throughout — no cross-unit correlation
+    expect(h.state().consecutive_suspect_dispatches).toBe(1);
+    expect(h.state().last_suspect_dispatch_unit).toBe('issue:101');
+  });
+
+  it('two instant unverified exits from DIFFERENT units pause new assignments and journal dispatch-unhealthy', () => {
+    const h = harness({ maxSlots: 2 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([
+      { issue: 101, mode: 'full', tier: 'mechanical' },
+      { issue: 102, mode: 'full', tier: 'mechanical' },
+      { issue: 103, mode: 'full', tier: 'mechanical' }, // queued, waits for a slot
+    ]);
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(2); // 101, 102 — 103 waits (maxSlots: 2)
+
+    h.alive.delete(h.spawnCalls[0].pid); // issue:101 quick-exits
+    h.tick();
+    expect(h.state().paused).toBe(false); // one suspect isn't enough yet
+
+    h.alive.delete(h.spawnCalls[1].pid); // issue:102 quick-exits — a DIFFERENT unit
+    h.tick();
+
+    expect(h.state().paused).toBe(true);
+    expect(h.state().consecutive_suspect_dispatches).toBe(2);
+    const unhealthyEvent = h.journal.read().find((e) => e.event === 'dispatch-unhealthy');
+    expect(unhealthyEvent).toBeDefined();
+    // both units are named — not just the one that tipped the count over.
+    expect(unhealthyEvent?.detail).toContain('issue:101');
+    expect(unhealthyEvent?.detail).toContain('issue:102');
+    // 103 never dispatches while paused, even though a slot is free again.
+    expect(h.state().entries.find((e) => e.issue === 103)?.status).not.toBe('dispatched');
+    // the already-recovering units 101/102 are untouched by the pause.
+    expect(h.state().entries.find((e) => e.issue === 101)?.tier).toBe('mid');
+    expect(h.state().entries.find((e) => e.issue === 102)?.tier).toBe('mid');
+  });
+
+  it('a verified completion resets the consecutive-suspect counter', () => {
+    const h = harness({ maxSlots: 2 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([
+      { issue: 101, mode: 'full', tier: 'mechanical' },
+      { issue: 102, mode: 'full', tier: 'mechanical' },
+    ]);
+    h.tick();
+
+    h.alive.delete(h.spawnCalls[0].pid); // issue:101 suspect-exits
+    h.tick();
+    expect(h.state().consecutive_suspect_dispatches).toBe(1);
+
+    // issue:102 finishes for real (verified) before any second suspect exit.
+    h.alive.delete(h.spawnCalls[1].pid);
+    h.setMilestone(102, 'report', 'done');
+    h.tick();
+
+    expect(h.state().entries.find((e) => e.issue === 102)?.status).toBe('done');
+    expect(h.state().consecutive_suspect_dispatches).toBe(0);
+    expect(h.state().last_suspect_dispatch_unit).toBeNull();
+    expect(h.state().paused).toBe(false);
+  });
+
+  it('already paused: a further suspect exit does not re-journal dispatch-unhealthy', () => {
+    const h = harness({ maxSlots: 3 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([
+      { issue: 101, mode: 'full', tier: 'mechanical' },
+      { issue: 102, mode: 'full', tier: 'mechanical' },
+      { issue: 103, mode: 'full', tier: 'mechanical' },
+    ]);
+    h.tick();
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick();
+    h.alive.delete(h.spawnCalls[1].pid);
+    h.tick();
+    expect(h.state().paused).toBe(true);
+    const unhealthyCount = h.journal.read().filter((e) => e.event === 'dispatch-unhealthy').length;
+    expect(unhealthyCount).toBe(1);
+
+    h.alive.delete(h.spawnCalls[2].pid); // issue:103, a third distinct unit, also suspect
+    h.tick();
+
+    expect(h.state().paused).toBe(true); // still paused, unchanged
+    const unhealthyCountAfter = h.journal
+      .read()
+      .filter((e) => e.event === 'dispatch-unhealthy').length;
+    expect(unhealthyCountAfter).toBe(1); // not re-journaled — already paused
+  });
+
+  it('a verified park also resets the consecutive-suspect counter, same as a completion', () => {
+    const h = harness({ maxSlots: 2 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.alive.delete(h.spawnCalls[0].pid); // issue:101 suspect-exits
+    h.tick();
+    expect(h.state().consecutive_suspect_dispatches).toBe(1);
+
+    parkUnit(h, 102, 77); // issue:102 dispatches and parks cleanly (a healthy dispatch)
+
+    expect(h.state().consecutive_suspect_dispatches).toBe(0);
+    expect(h.state().last_suspect_dispatch_unit).toBeNull();
+  });
+
+  it('report-agent dispatch is also paused — a report is a NEW assignment too', () => {
+    const h = harness({ maxSlots: 3 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([
+      { issue: 101, mode: 'full', tier: 'mechanical' },
+      { issue: 102, mode: 'full', tier: 'mechanical' },
+    ]);
+    h.tick();
+    h.alive.delete(h.spawnCalls[0].pid); // issue:101 suspect-exits
+    h.tick();
+    h.alive.delete(h.spawnCalls[1].pid); // issue:102 suspect-exits — pauses
+    h.tick();
+    expect(h.state().paused).toBe(true);
+
+    // A third, unrelated unit ships and is ready for its report agent.
+    h.enqueue([{ issue: 103, mode: 'full', tier: 'mid' }]);
+    h.store.withLock((state) => ({
+      state: {
+        ...state,
+        entries: state.entries.map((e) =>
+          e.issue === 103
+            ? { ...e, status: 'shipped' as const, pr: 55, cleanup: 'done' as const }
+            : e
+        ),
+      },
+      result: null,
+    }));
+    const spawnCountBefore = h.spawnCalls.length;
+    const result = h.tick();
+
+    expect(result.reportDispatched).toHaveLength(0);
+    expect(h.spawnCalls).toHaveLength(spawnCountBefore); // no new agent spawned
+    expect(result.reportWaiting).toBe(1);
+    expect(h.state().slots.find((s) => s.unit === 'issue:103')).toBeUndefined();
+  });
+});
+
 describe('spawn failures (supportability)', () => {
   it('a throwing spawn fails the unit visibly instead of aborting the whole tick', () => {
     const h = harness();

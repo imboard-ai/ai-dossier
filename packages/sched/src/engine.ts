@@ -20,7 +20,14 @@
  *    - `exited`/`verifying` slots: the agent exited — completion is verified
  *      against ground truth, never assumed (AC2); an exit whose milestone is
  *      the ship phase's `awaiting-merge` (with `pr=`) is a VERIFIED park:
- *      entry → parked, slot released (a parked unit holds no slot — AC5)
+ *      entry → parked, slot released (a parked unit holds no slot — AC5); an
+ *      unverified exit within `SUSPECT_DISPATCH_WINDOW_MS` of the slot's last
+ *      progress is also `suspect-dispatch` (#505) — a quota/auth wall kills
+ *      every unit near-instantly with zero progress, indistinguishable from a
+ *      genuine crash except by this timing; `DISPATCH_UNHEALTHY_THRESHOLD`
+ *      consecutive suspects from DIFFERENT units pauses new assignments
+ *      (`dispatch-unhealthy`, cleared only by an operator's `sched resume`)
+ *      without touching the per-unit ladder or any already-live slot
  *    - `parked` entries: the watcher applies the PR truth — merge accepted
  *      only when state MERGED AND mergedAt non-null AND the issue is closed
  *      (AC1) → shipped (gating on MERGE, never the park — AC4);
@@ -68,10 +75,11 @@ import {
 import { issueOfUnit, type Journal, unitEvent } from './journal';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
-import { assignToIdleSlot, computeAssignments, freeCapacity } from './scheduler';
+import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import { findEntry, isReportSlot, transitionIssue, transitionSlot } from './state';
 import { runTeardown, type TeardownResult } from './teardown';
 import {
+  DISPATCH_UNHEALTHY_THRESHOLD,
   ESCALATION_CAP,
   type JournalEventName,
   type ModelTier,
@@ -80,6 +88,7 @@ import {
   type SchedState,
   type SlotEntry,
   type SlotStatus,
+  SUSPECT_DISPATCH_WINDOW_MS,
   TERMINAL_ISSUE_STATUSES,
 } from './types';
 
@@ -181,6 +190,19 @@ function journal(
 
 function slotOf(state: SchedState, unit: string): SlotEntry | undefined {
   return state.slots.find((s) => s.unit === unit);
+}
+
+/**
+ * Milliseconds since a slot's last known progress, for both the stall timer
+ * (AC4) and the suspect-dispatch check (#505) — a single fallback
+ * convention for the whole file: a null `last_progress_at` reads as
+ * maximally stale (epoch 0), never as "just now", so an unreachable-in-
+ * practice null (see `spawnAndRecord`/`assignToIdleSlot`, which always
+ * stamp it) degrades toward "recover/not-suspect" rather than silently
+ * forcing the opposite verdict.
+ */
+function msSinceLastProgress(slot: SlotEntry, now: Date): number {
+  return now.getTime() - (slot.last_progress_at ? Date.parse(slot.last_progress_at) : 0);
 }
 
 /**
@@ -746,11 +768,66 @@ function reconcileRunning(
   if (progress.progressed) return progress.state;
 
   // No progress: the stall timer (AC4).
-  const lastProgress = slot.last_progress_at ? Date.parse(slot.last_progress_at) : 0;
-  if (now.getTime() - lastProgress >= ctx.dispatch.stallTimeoutMs) {
+  if (msSinceLastProgress(slot, now) >= ctx.dispatch.stallTimeoutMs) {
     return enterRecovery(ctx, progress.state, unit, 'stalled', 'stall');
   }
   return progress.state;
+}
+
+/**
+ * Record one dispatch outcome against the cross-unit `suspect-dispatch`
+ * signal (#505). `suspect === false` (a verified completion, or an
+ * unverified exit that took at least `SUSPECT_DISPATCH_WINDOW_MS`) resets
+ * the streak — that dispatch clearly ran for real, so whatever caused an
+ * earlier suspect exit isn't an ongoing wall. `suspect === true` journals
+ * `suspect-dispatch`; a repeat from the SAME unit updates bookkeeping only
+ * (one flaky unit isn't cross-unit correlation), while a DIFFERENT unit
+ * increments the streak and, at `DISPATCH_UNHEALTHY_THRESHOLD`, pauses new
+ * assignments exactly like `sched pause` — already-live slots are untouched,
+ * only `computeAssignments` stops filling idle ones. The per-unit ladder
+ * this accompanies (`enterRecovery`) is never altered by this function.
+ */
+function recordDispatchOutcome(
+  ctx: TickCtx,
+  state: SchedState,
+  unit: string,
+  slot: SlotEntry,
+  suspect: boolean
+): SchedState {
+  if (!suspect) {
+    if (state.consecutive_suspect_dispatches === 0 && state.last_suspect_dispatch_unit === null) {
+      return state;
+    }
+    return { ...state, consecutive_suspect_dispatches: 0, last_suspect_dispatch_unit: null };
+  }
+
+  journal(ctx, 'suspect-dispatch', unit, {
+    slot: slot.id,
+    detail: `exit within ${SUSPECT_DISPATCH_WINDOW_MS}ms of last progress, unverified`,
+  });
+
+  const previousUnit = state.last_suspect_dispatch_unit;
+  if (previousUnit === unit) {
+    return state;
+  }
+
+  const count = state.consecutive_suspect_dispatches + 1;
+  let next: SchedState = {
+    ...state,
+    consecutive_suspect_dispatches: count,
+    last_suspect_dispatch_unit: unit,
+  };
+  if (count >= DISPATCH_UNHEALTHY_THRESHOLD && !next.paused) {
+    next = setPaused(next, true);
+    // Name both units involved — the current one and the one that carried
+    // the streak into it — so an operator reading `dispatch-unhealthy` in
+    // isolation (without scrolling back through prior `suspect-dispatch`
+    // lines) can already see the cross-unit correlation that triggered it.
+    journal(ctx, 'dispatch-unhealthy', unit, {
+      detail: `${count} consecutive suspect dispatches across different units (${previousUnit ?? 'unknown'} then ${unit}) — new assignments paused; \`sched resume\` once dispatch is healthy`,
+    });
+  }
+  return next;
 }
 
 /**
@@ -793,12 +870,25 @@ function completeUnitOrRecover(
   // takes the unit (AC2's "never inferred from agent exit" cut both ways:
   // the park IS the milestone, the merge is not).
   if (entry !== undefined && entry.status === 'dispatched' && isParkedMilestone(truth.milestone)) {
-    return parkUnit(ctx, next, unit, truth.milestone);
+    // A verified park is also proof dispatch is healthy (#505) — reset the
+    // streak exactly like the sibling `completeUnit` branch below, or a
+    // healthy park sandwiched between two unrelated units' suspect exits
+    // would be invisible to the cross-unit correlation and could still tip
+    // it into a false-positive pause.
+    return parkUnit(
+      ctx,
+      recordDispatchOutcome(ctx, next, unit, slot, false),
+      unit,
+      truth.milestone
+    );
   }
 
   if (isVerifiedComplete(truth.milestone, effectiveClosedSignal(slot, truth))) {
-    return completeUnit(ctx, next, unit, via);
+    return completeUnit(ctx, recordDispatchOutcome(ctx, next, unit, slot, false), unit, via);
   }
+
+  const suspect = msSinceLastProgress(slot, now) < SUSPECT_DISPATCH_WINDOW_MS;
+  next = recordDispatchOutcome(ctx, next, unit, slot, suspect);
   return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', {
     observed: truth.milestone
       ? `milestone ${truth.milestone.phase}/${truth.milestone.status}; closed=${truth.closed}`
@@ -964,8 +1054,23 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
  * spawned with the report prompt. Reports run BEFORE queue refill — a cheap
  * report never queues behind long full-cycle runs. A unit waiting for
  * capacity consumes zero slots (AC5) and is surfaced via `result.reportWaiting`.
+ * When `state.paused`, dispatches nothing (#505) — a report agent is a NEW
+ * assignment into an idle slot exactly like a fresh full-cycle dispatch, so
+ * it rides the same quota/auth wall a dispatch-health (or manual `sched
+ * pause`) pause exists to stop; waiting reports still count toward
+ * `reportWaiting` so the pause's effect stays visible.
  */
 function dispatchReportAgents(ctx: TickCtx, state: SchedState, config: SchedConfig): SchedState {
+  if (state.paused) {
+    ctx.result.reportWaiting = state.entries.filter(
+      (e) =>
+        e.status === 'shipped' &&
+        e.pr !== null &&
+        e.cleanup !== null &&
+        slotOf(state, `issue:${e.issue}`) === undefined
+    ).length;
+    return state;
+  }
   let next = state;
   for (const entry of state.entries) {
     if (entry.status !== 'shipped' || entry.pr === null || entry.cleanup === null) continue;

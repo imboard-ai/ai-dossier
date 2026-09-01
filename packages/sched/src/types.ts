@@ -344,6 +344,20 @@ export interface SchedState {
    * effective cadence); persisted so the cadence survives a sched restart.
    */
   last_pr_poll_at: string | null;
+  /**
+   * Consecutive `suspect-dispatch` exits (#505) from DIFFERENT units — the
+   * dispatch-health signal. A quota/auth wall kills every unit the same way
+   * (instant unverified exit, zero progress), so cross-unit correlation is
+   * what tells it apart from one unit's own genuine failure. Reset to 0 by
+   * any non-suspect dispatch outcome (`recordDispatchOutcome` in engine.ts).
+   */
+  consecutive_suspect_dispatches: number;
+  /**
+   * Unit of the most recent `suspect-dispatch` exit, so a repeat from the
+   * SAME unit's own ladder retries never counts toward the cross-unit
+   * correlation above. Null when the counter is 0.
+   */
+  last_suspect_dispatch_unit: string | null;
 }
 
 /** Durable intent, persisted separately in `config.json` (state.json is rebuildable hot truth). */
@@ -401,6 +415,22 @@ export const TIER_ORDER: readonly ModelTier[] = ['mechanical', 'mid', 'strong'];
 /** Cap on recovery attempts before a unit fails (RFC-0001 §C.1 "cap 2"). */
 export const ESCALATION_CAP = 2;
 
+/**
+ * An unverified exit is `suspect-dispatch` (#505) when it happens within
+ * this many ms of the slot's last progress (spawn or respawn, since
+ * `last_progress_at` is re-stamped on every dispatch): real work rarely
+ * produces zero milestones this fast, but a quota/auth wall that rejects the
+ * agent's very first request does, every time.
+ */
+export const SUSPECT_DISPATCH_WINDOW_MS = 60 * 1000;
+
+/**
+ * Consecutive `suspect-dispatch` exits from DIFFERENT units before dispatch
+ * itself is judged unhealthy and new assignments pause (#505). Two, like
+ * `ESCALATION_CAP` — this codebase's standard bounded-retry number.
+ */
+export const DISPATCH_UNHEALTHY_THRESHOLD = 2;
+
 /** Default stall timeout: 30 minutes without a milestone or pushed commit (RFC-0001 §C.1). */
 export const DEFAULT_STALL_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -447,10 +477,16 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.4.0' as const;
+export const SCHEMA_VERSION = '1.5.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
-export const LEGACY_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'];
+export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
+  '1.0.0',
+  '1.1.0',
+  '1.2.0',
+  '1.3.0',
+  '1.4.0',
+];
 
 export const CONFIG_SCHEMA_VERSION = '1.2.0' as const;
 
@@ -515,6 +551,8 @@ export type JournalEventName =
   | 'dependents-blocked'
   | 'requeued'
   | 'ground-truth-unreachable'
+  | 'suspect-dispatch'
+  | 'dispatch-unhealthy'
   | 'tick-failed'
   | 'pr-parked'
   | 'merge-accepted'

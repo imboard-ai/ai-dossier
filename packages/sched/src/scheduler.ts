@@ -151,10 +151,16 @@ export function assignToIdleSlot(
 
 /**
  * `sched pause` / `sched resume`: toggle the paused flag. Pausing does not
- * touch live units — it only stops new assignments.
+ * touch live units — it only stops new assignments. Resuming also clears the
+ * dispatch-health streak (#505): the operator resuming is a deliberate
+ * "I've addressed this" signal, so `sched status`'s suspect-dispatch warning
+ * should not keep citing a wall the operator just acted on — without this,
+ * the warning lingers verbatim until the next unrelated healthy dispatch
+ * happens to reset it, which can be several ticks later.
  */
 export function setPaused(state: SchedState, paused: boolean): SchedState {
-  return { ...state, paused };
+  if (paused) return { ...state, paused };
+  return { ...state, paused, consecutive_suspect_dispatches: 0, last_suspect_dispatch_unit: null };
 }
 
 /**

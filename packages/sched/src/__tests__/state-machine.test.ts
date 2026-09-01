@@ -438,7 +438,7 @@ describe('validateState', () => {
   });
 });
 
-describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0)', () => {
+describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0 → 1.5.0)', () => {
   it('loads a pre-#464 1.0.0 state and backfills slot branch/last_head as null', () => {
     // Exactly what #460 persisted: no branch/last_head on slots.
     const legacy = {
@@ -739,6 +739,54 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0)', ()
     };
     const migrated = validateState(legacy);
     expect(migrated.slots.find((s) => s.id === 1)?.role).toBe('cycle');
+  });
+
+  it('#505: loads a pre-#505 1.4.0 state and backfills the dispatch-health fields', () => {
+    // Exactly what a 1.4.0 sched persisted: no consecutive_suspect_dispatches
+    // or last_suspect_dispatch_unit — no suspect dispatches were ever tracked,
+    // so 0/null is the exact answer, not a guess.
+    const legacy = {
+      schema_version: '1.4.0',
+      paused: false,
+      entries: [],
+      batches: [],
+      slots: [],
+      next_slot_id: 1,
+      last_pr_poll_at: null,
+    };
+    const migrated = validateState(legacy);
+    expect(migrated.schema_version).toBe(SCHEMA_VERSION);
+    expect(migrated.consecutive_suspect_dispatches).toBe(0);
+    expect(migrated.last_suspect_dispatch_unit).toBeNull();
+  });
+
+  it('#505: rejects a negative consecutive_suspect_dispatches rather than coercing it', () => {
+    const state = seeded();
+    expect(() => validateState({ ...state, consecutive_suspect_dispatches: -1 })).toThrow(
+      /consecutive_suspect_dispatches/
+    );
+  });
+
+  it('#505: rejects a nonzero count with no last_suspect_dispatch_unit', () => {
+    const state = seeded();
+    expect(() =>
+      validateState({
+        ...state,
+        consecutive_suspect_dispatches: 1,
+        last_suspect_dispatch_unit: null,
+      })
+    ).toThrow(/zero.*null/);
+  });
+
+  it('#505: rejects a last_suspect_dispatch_unit with a zero count', () => {
+    const state = seeded();
+    expect(() =>
+      validateState({
+        ...state,
+        consecutive_suspect_dispatches: 0,
+        last_suspect_dispatch_unit: 'issue:101',
+      })
+    ).toThrow(/zero.*null/);
   });
 
   it('rejects a malformed slot role', () => {

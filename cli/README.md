@@ -819,17 +819,26 @@ against ground truth.
   (watched, zero slots, with the last poll's age), slots (with pid, live phase,
   last-progress, recoveries), batches, runnable units, and the blocked/failed sets. A blocked entry names every
   unsatisfied dependency ("dependency #104 not merged (status: dispatched)"), so "why
-  isn't #42 running?" is a read, not an investigation. `--json` emits the same report
-  as data.
-- **`pause`/`resume`** gate *new* assignments only — live units keep running.
+  isn't #42 running?" is a read, not an investigation. When suspect-dispatch exits have
+  been recorded (#505 below), a `⚠ Dispatch health: N consecutive suspect-dispatch
+  exit(s) (last: <unit>)` warning line prints too, saying whether it's just informational
+  or likely why the scheduler is paused; the same counters ride along in `--json` as
+  `dispatch_health.{consecutive_suspect,last_suspect_unit}`. `--json` emits the same
+  report as data.
+- **`pause`/`resume`** gate *new* assignments only — live units keep running. A pause can
+  be manual (`sched pause`) or automatic: `DISPATCH_UNHEALTHY_THRESHOLD` (2) consecutive
+  suspect-dispatch exits from DIFFERENT units — an unverified agent exit within 60s of
+  its last progress, the signature of an operator-billing quota/auth wall rather than a
+  genuine unit failure — auto-pauses the same way (#505). `sched resume` clears both the
+  flag and the dispatch-health streak either way.
 - **`abandon --issue`** fails the entry (recording the reason) and releases its slot;
   **`abandon --batch`** dissolves the batch and requeues every non-terminal member as
   full-cycle — members already shipped keep their outcome.
 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically
-from `state.json` (pre-#464/#468/#472/#500 state files — schema 1.0.0/1.1.0/1.2.0/1.3.0 —
-migrate to 1.4.0 on load). A corrupt state file is a loud
+from `state.json` (pre-#464/#468/#472/#500/#505 state files — schema
+1.0.0/1.1.0/1.2.0/1.3.0/1.4.0 — migrate to 1.5.0 on load). A corrupt state file is a loud
 error naming the file — never a silent queue reset. Concurrency is serialized by a
 `.sched-lock` directory mutex (stolen from dead holders). `config.json` holds
 `max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default

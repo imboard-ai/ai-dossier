@@ -81,6 +81,20 @@ describe('buildStatusReport', () => {
     expect(report.runnable_units).toEqual([]);
   });
 
+  it('#505: surfaces the dispatch-health counters', () => {
+    let state = seeded();
+    state = {
+      ...state,
+      consecutive_suspect_dispatches: 1,
+      last_suspect_dispatch_unit: 'issue:101',
+    };
+    const report = buildStatusReport(state, { max_slots: 3 }, 'p');
+    expect(report.dispatch_health).toEqual({
+      consecutive_suspect: 1,
+      last_suspect_unit: 'issue:101',
+    });
+  });
+
   it('flags entries blocked on deps missing from the queue', () => {
     const state = enqueueEntries(createEmptyState(), [{ issue: 1, deps: [999] }], NOW);
     const report = buildStatusReport(state, { max_slots: 3 }, 'p');
