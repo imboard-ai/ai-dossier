@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "batch-issues-preparation",
   "title": "Batch Issues Preparation — classify, DAG, compose batches, enqueue",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "protocol_version": "1.0",
   "status": "Draft",
   "last_updated": "2026-09-01",
@@ -63,13 +63,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "15ec06ca1b546e5ddb9d548e45f5b0f5dbb67452cf9c23a6c2b5cedc09fe7c5a"
+    "hash": "af3dfeb9aba46d8de94ca2cecb3f8f86cf44fcac997325a7f4f6894d87c4c5de"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "1ZL94U05X573eg59Gyl/la3Xj65yPQp9j4UCUvf9zjd1SAgS6amjYxpAIVWUSjJMz85+zToYNwv165zzOGfICw==",
+    "signature": "vVkVEXbPP4FNj5/zXZpw9zun+KRzD8JMuiaKLIafvknMFekq1gJtaQ512VmiaTWeL/E/ic0jpSZtqU91zERSDw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-01T21:37:25.687Z",
+    "signed_at": "2026-09-01T21:45:11.108Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -183,6 +183,7 @@ For batches Step 5 matched to an existing anchor, skip creation entirely — rec
 
 2. One anchor per batch — title `Batch <batch_id>: #a, #b, #c`, label `batch-epic`, body:
    - task list of members **in execution order**: `- [ ] #N <title> — risk=<r> est_files=<n> est_diff=<n>`
+   - `base_branch: <base_branch>` — read back by Step 5's idempotent-reuse match on future runs
    - the eviction group (or "none")
    - batch-level dependencies (or "none")
    - the audit-file path
@@ -244,7 +245,7 @@ Consumed by `ai-dossier sched enqueue --from-manifest` (#460 — `parseManifest`
 | `issue` | positive integer | required; unique among entries; must not be an active queue entry |
 | `mode` | `full` \| `slot` | default `full`; `slot` requires `batch`; `full` must omit `batch` |
 | `batch` | non-empty string | batch id; all members of a batch share it and one `base_branch`; a batch id only joins while forming |
-| `anchor` | positive integer | required on every `mode: "slot"` entry of a batch — the batch's anchor issue number from Step 6; the first entry `enqueue` processes for a new batch seeds it, later members must supply the same value or omit the field — a conflicting re-supply is rejected (`assertBatchFactsAgree`) |
+| `anchor` | positive integer | optional per `parseManifest` — nothing rejects a `mode: "slot"` entry that omits it. **This dossier's Step 8 nonetheless requires emitting it on every member of a batch** (never omitted), because nothing else does: the first entry `enqueue` processes for a new batch seeds the batch's anchor, later members must supply the same value — a conflicting re-supply is rejected (`assertBatchFactsAgree`) — and if no member ever supplies one, the batch's anchor stays `null` forever and dispatch silently skips the batch rather than erroring (see Troubleshooting) |
 | `deps` | positive integer[] | open issue numbers this entry waits on; merged deps dropped; same-batch member deps omitted (member order encodes them); no self-deps; no cycles — enqueue rejects the whole manifest |
 | `tier` | `mechanical` \| `mid` \| `strong` | default `mid` |
 | `base_branch` | non-empty string | branch the unit works from; must match across a batch's members |
