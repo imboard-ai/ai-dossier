@@ -219,7 +219,10 @@ describe('isParkedMilestone (#468 park detection)', () => {
 });
 
 describe('parseSetupInfo (#468 teardown inputs)', () => {
-  const comments = (bodies: string[]) => JSON.stringify(bodies.map((body) => ({ body })));
+  // gh issue view --json comments always wraps the array — {"comments": [...]}
+  // — never a bare array (#496). This fixture mirrors that real shape.
+  const comments = (bodies: string[]) =>
+    JSON.stringify({ comments: bodies.map((body) => ({ body })) });
 
   it('recovers worktree/pool_claimed from the setup milestone comment', () => {
     const json = comments([
@@ -249,6 +252,7 @@ describe('parseSetupInfo (#468 teardown inputs)', () => {
   it('no setup milestone, no worktree key, or garbage → null', () => {
     expect(parseSetupInfo(null)).toBeNull();
     expect(parseSetupInfo('[]')).toBeNull();
+    expect(parseSetupInfo('{"comments":[]}')).toBeNull();
     expect(parseSetupInfo('not json')).toBeNull();
     expect(
       parseSetupInfo(
@@ -269,6 +273,21 @@ describe('parseSetupInfo (#468 teardown inputs)', () => {
       )
     ).toBeNull();
   });
+
+  it('recovers teardown inputs from gh\'s real {"comments": [...]} wrapper shape (#496 regression)', () => {
+    const wrapped = JSON.stringify({
+      comments: [
+        {
+          body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-3810 at=2026-08-29T23:00:00Z\nbranch=feature/3810-x\nworktree=/repo/worktrees/feature-3810-x\npool_claimed=true\nnext=plan',
+        },
+      ],
+    });
+    expect(parseSetupInfo(wrapped)).toEqual({
+      worktree: '/repo/worktrees/feature-3810-x',
+      poolClaimed: true,
+      branch: 'feature/3810-x',
+    });
+  });
 });
 
 describe('createExecGroundTruth prState/setupInfo (#468)', () => {
@@ -285,11 +304,13 @@ describe('createExecGroundTruth prState/setupInfo (#468)', () => {
         });
       }
       if (file === 'gh' && args[0] === 'issue' && args.includes('comments')) {
-        return JSON.stringify([
-          {
-            body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/wt-9\npool_claimed=true',
-          },
-        ]);
+        return JSON.stringify({
+          comments: [
+            {
+              body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/wt-9\npool_claimed=true',
+            },
+          ],
+        });
       }
       return null;
     };
@@ -320,7 +341,7 @@ describe('createExecGroundTruth prState/setupInfo (#468)', () => {
     expect(gt.prState(55)).toBeUndefined();
     expect(gt.setupInfo(101)).toBeUndefined();
     // a verifiably-empty comment list is known-absent, not unreachable
-    const empty: ExecFn = (_file, args) => (args.includes('comments') ? '[]' : null);
+    const empty: ExecFn = (_file, args) => (args.includes('comments') ? '{"comments":[]}' : null);
     expect(createExecGroundTruth(empty).setupInfo(101)).toBeNull();
   });
 });
@@ -333,22 +354,26 @@ describe('parseSetupInfo author trust (defense-in-depth)', () => {
     });
     // a random commenter's "setup milestone" is not a teardown source
     expect(
-      parseSetupInfo(JSON.stringify([setup('NONE'), setup('FIRST_TIME_CONTRIBUTOR')]))
+      parseSetupInfo(JSON.stringify({ comments: [setup('NONE'), setup('FIRST_TIME_CONTRIBUTOR')] }))
     ).toBeNull();
     // owner/member/collaborator milestones are trusted
     for (const assoc of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
-      expect(parseSetupInfo(JSON.stringify([setup(assoc)]))?.worktree).toBe('/repo/worktrees/evil');
+      expect(parseSetupInfo(JSON.stringify({ comments: [setup(assoc)] }))?.worktree).toBe(
+        '/repo/worktrees/evil'
+      );
     }
     // a trusted setup beats a newer untrusted one
     expect(
       parseSetupInfo(
-        JSON.stringify([
-          {
-            body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/real\npool_claimed=false',
-            authorAssociation: 'OWNER',
-          },
-          setup('NONE'),
-        ])
+        JSON.stringify({
+          comments: [
+            {
+              body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/real\npool_claimed=false',
+              authorAssociation: 'OWNER',
+            },
+            setup('NONE'),
+          ],
+        })
       )?.worktree
     ).toBe('/repo/worktrees/real');
   });
@@ -356,11 +381,13 @@ describe('parseSetupInfo author trust (defense-in-depth)', () => {
   it('comments without authorAssociation (older gh / file fakes) still parse', () => {
     expect(
       parseSetupInfo(
-        JSON.stringify([
-          {
-            body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/wt\npool_claimed=true',
-          },
-        ])
+        JSON.stringify({
+          comments: [
+            {
+              body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/wt\npool_claimed=true',
+            },
+          ],
+        })
       )
     ).toEqual({ worktree: '/repo/worktrees/wt', poolClaimed: true, branch: null });
   });

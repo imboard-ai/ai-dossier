@@ -232,16 +232,27 @@ export function parsePrViewJson(stdout: string | null): PrTruth | null {
  * OWNER/MEMBER/COLLABORATOR) are skipped — teardown inputs feed destructive
  * scripts, so a random commenter cannot supply them. Returns null when no
  * usable setup milestone exists (verifiably).
+ *
+ * `gh issue view --json comments` always wraps the comment list in an object
+ * — `{"comments": [...]}` — never a bare array (#496). A bare array is
+ * accepted too, defensively, in case a caller ever passes the unwrapped form.
  */
 export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
   if (commentsJson === null || commentsJson.trim() === '') return null;
-  let comments: unknown;
+  let parsed: unknown;
   try {
-    comments = JSON.parse(commentsJson);
+    parsed = JSON.parse(commentsJson);
   } catch {
     return null;
   }
-  if (!Array.isArray(comments)) return null;
+  const comments = Array.isArray(parsed)
+    ? parsed
+    : parsed !== null &&
+        typeof parsed === 'object' &&
+        Array.isArray((parsed as { comments?: unknown }).comments)
+      ? (parsed as { comments: unknown[] }).comments
+      : null;
+  if (comments === null) return null;
 
   const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
