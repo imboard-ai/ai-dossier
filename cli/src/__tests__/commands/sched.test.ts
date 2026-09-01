@@ -553,7 +553,9 @@ describe('ai-dossier sched stats (#524: per-issue token/cost from runs.jsonl)', 
   it('prints a table by default and a message when there are no sched entries', async () => {
     mockRunLog([]);
     await runSched(['sched', 'stats']);
-    expect(logs.join('\n')).toContain('No sched-dispatched runs.jsonl entries found.');
+    const out = logs.join('\n');
+    expect(out).toContain('No sched-dispatched runs.jsonl entries found');
+    expect(out).toContain('runs.jsonl'); // the resolved log path, so an operator knows where to look
   });
 
   it('renders a table with a TOTAL row when not --json', async () => {

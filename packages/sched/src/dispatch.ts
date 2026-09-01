@@ -477,6 +477,30 @@ export function unitLogName(unit: string): string {
   return sanitizeSlug(unit);
 }
 
+/**
+ * Path to a unit's dispatch log (`<runsDir>/<unitLogName>.log`) — the single
+ * definition shared by `spawnAndRecord` (which stats it for
+ * `log_offset_at_spawn`, #524) and `recordDispatchRunLog` (which reads it),
+ * so the two can never compute different paths for the same unit.
+ */
+export function dispatchLogPath(runsDir: string, unit: string): string {
+  return path.join(runsDir, `${unitLogName(unit)}.log`);
+}
+
+/**
+ * Byte size of `file`, or 0 when it does not exist yet (#524: the log's
+ * append boundary right before a spawn — `log_offset_at_spawn`). Any other
+ * read error also degrades to 0 rather than throwing, since a spawn must
+ * never fail over a stat call on a debug log.
+ */
+export function fileSizeOrZero(file: string): number {
+  try {
+    return fs.statSync(file).size;
+  } catch {
+    return 0;
+  }
+}
+
 /** Poll cadence bounds for `sleep`'s stop-check interval (engine loop). */
 export const STOP_POLL_MIN_MS = 100;
 export const STOP_POLL_MAX_MS = 1000;
@@ -531,6 +555,11 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
   return {
     spawn(cmd: string[], prompt: string, logFile: string): number {
       fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
+      // Append, not truncate: `logFile` is per-UNIT (dispatchLogPath), so a
+      // redispatch's output lands after any prior dispatch's in the SAME
+      // file. `engine.ts`'s `recordDispatchRunLog` (#524) relies on
+      // `SlotEntry.log_offset_at_spawn` — stamped from this file's size right
+      // before this spawn — to read only the current dispatch's own slice.
       const out = fs.openSync(logFile, 'a', 0o600);
       try {
         const child = spawn(cmd[0], cmd.slice(1), {

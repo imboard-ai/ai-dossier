@@ -13,6 +13,8 @@
  * `cli` already depends on both `core` and `sched`).
  */
 
+import * as path from 'node:path';
+
 /**
  * Usage data extracted from an agent CLI's JSON result output.
  * Every field is null when the CLI did not report it — values are never
@@ -32,8 +34,30 @@ export interface AgentRunUsage {
   result_text: string | null;
 }
 
+// Token counts and cost are untrusted agent output (#524) — negative or
+// non-finite values are rejected rather than recorded, so a malformed or
+// adversarial result cannot drive a reported cost negative or to Infinity.
 function toCount(value: unknown): number | null {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** Longest `model` value written to `runs.jsonl` before truncation (#524). */
+const MAX_MODEL_LENGTH = 200;
+
+/**
+ * `model` is copied verbatim from untrusted agent JSON into a `runs.jsonl`
+ * entry a later command (`ai-dossier history`, `sched stats`) may render.
+ * Strip control characters (the terminal-escape/log-injection risk) and cap
+ * the length, rather than trusting an agent-controlled string unbounded.
+ */
+function sanitizeModel(value: string | null): string | null {
+  if (value === null) return null;
+  let clean = '';
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code >= 0x20 && code !== 0x7f) clean += char;
+  }
+  return clean.length > MAX_MODEL_LENGTH ? clean.slice(0, MAX_MODEL_LENGTH) : clean;
 }
 
 /** Narrow an unknown value to a plain-object record; null for anything else. */
@@ -113,7 +137,8 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
 
   const modelKeys = modelEntries.map(([key]) => key);
   const modelFromUsage = modelKeys.length > 1 ? modelKeys.join(',') : (modelKeys[0] ?? null);
-  const model = typeof parsed.model === 'string' && parsed.model ? parsed.model : modelFromUsage;
+  const rawModel = typeof parsed.model === 'string' && parsed.model ? parsed.model : modelFromUsage;
+  const model = sanitizeModel(rawModel);
   const result_text = typeof parsed.result === 'string' ? parsed.result : null;
 
   return {
@@ -202,4 +227,20 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
     total_cost_usd: sawUsage ? costUsd : null,
     result_text: texts.length > 0 ? texts.join('') : null,
   };
+}
+
+/**
+ * Pick the usage parser for a dispatched agent, keyed off the spawned
+ * binary's basename — `opencode` (any path) routes to
+ * {@link parseOpenCodeUsage}; everything else, including an
+ * operator-configured command this build doesn't specifically recognize,
+ * falls back to {@link parseAgentUsage} (the claude shape). A command this
+ * build doesn't recognize is not guessed at further than that fallback —
+ * its output either parses as a claude-shaped JSON result or the parser
+ * returns null, never a fabricated guess.
+ */
+export function usageParserFor(
+  cmd0: string
+): (stdout: string | null | undefined) => AgentRunUsage | null {
+  return path.basename(cmd0) === 'opencode' ? parseOpenCodeUsage : parseAgentUsage;
 }

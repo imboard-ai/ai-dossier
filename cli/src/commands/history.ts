@@ -3,25 +3,10 @@
  */
 
 import type { Command } from 'commander';
+import { formatCost, formatTokenPair as formatTokens } from '../cost-format';
 import { formatDurationMs } from '../duration';
 import { clearRunLog, readRunLog } from '../run-log';
 import { renderTable } from '../table';
-
-/** Cost display precision: agent-run costs are small, so keep four decimals. */
-const COST_DECIMALS = 4;
-
-const isCount = (value: number | null | undefined): value is number =>
-  typeof value === 'number' && Number.isFinite(value);
-
-/** Token cell as "in/out"; '-' when neither side was reported (old entries). */
-function formatTokens(input: number | null | undefined, output: number | null | undefined): string {
-  if (!isCount(input) && !isCount(output)) return '-';
-  return `${isCount(input) ? input : '-'}/${isCount(output) ? output : '-'}`;
-}
-
-function formatCost(usd: number | null | undefined): string {
-  return isCount(usd) ? `$${usd.toFixed(COST_DECIMALS)}` : '-';
-}
 
 export function registerHistoryCommand(program: Command): void {
   program

@@ -45,11 +45,12 @@ import {
   unitEvent,
 } from '@ai-dossier/sched';
 import type { Command } from 'commander';
+import { formatCost, formatCount } from '../cost-format';
 import { formatAge, formatDurationMs } from '../duration';
 import { requireRepoSlug, tryFetchLabels } from '../gh';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
-import { readRunLog } from '../run-log';
+import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
 import { buildSchedCostReport, type IssueCost } from '../sched-run-stats';
 import { renderTable } from '../table';
 
@@ -533,32 +534,24 @@ function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
     });
 }
 
-interface StatsOptions extends SchedOptions {
+interface StatsOptions {
+  // No --project: `runs.jsonl` is one global file (unlike the other
+  // subcommands' per-project state under `~/.dossier/sched/<project>/`), so
+  // scoping by project isn't meaningful here yet — see the command's
+  // description for the resulting cross-repo caveat (same issue number in
+  // two repos sums together).
   issues?: string;
-}
-
-/** Cost display precision: agent-run costs are small, so keep four decimals — matches `history`. */
-const COST_DECIMALS = 4;
-
-const isCount = (value: number | null): value is number =>
-  typeof value === 'number' && Number.isFinite(value);
-
-function formatTokens(value: number | null): string {
-  return isCount(value) ? String(value) : '-';
-}
-
-function formatCost(usd: number | null): string {
-  return isCount(usd) ? `$${usd.toFixed(COST_DECIMALS)}` : '-';
+  json?: boolean;
 }
 
 function statsRow(label: string, row: Omit<IssueCost, 'issue'>): string[] {
   return [
     label,
     String(row.runs),
-    formatTokens(row.input_tokens),
-    formatTokens(row.output_tokens),
-    formatTokens(row.cache_creation_tokens),
-    formatTokens(row.cache_read_tokens),
+    formatCount(row.input_tokens),
+    formatCount(row.output_tokens),
+    formatCount(row.cache_creation_tokens),
+    formatCount(row.cache_read_tokens),
     formatCost(row.total_cost_usd),
     formatDurationMs(row.duration_ms),
   ];
@@ -568,7 +561,7 @@ function registerStatsSubcommand(cmd: Command): void {
   cmd
     .command('stats')
     .description(
-      'Per-issue token/cost telemetry from sched-dispatched agents (runs.jsonl, #524) — the number pilot/parity gate reports need to baseline cost'
+      'Per-issue token/cost totals for scheduler-dispatched agent runs (from ~/.dossier/runs.jsonl)'
     )
     .option('--issues <selection>', 'Restrict to these issues (e.g. "4,5" or "4..9")')
     .option('--json', 'Output the report as JSON')
@@ -583,7 +576,7 @@ function registerStatsSubcommand(cmd: Command): void {
       }
 
       if (report.issues.length === 0) {
-        console.log('No sched-dispatched runs.jsonl entries found.');
+        console.log(`No sched-dispatched runs.jsonl entries found in ${RUNS_LOG_FILE}.`);
         return;
       }
 

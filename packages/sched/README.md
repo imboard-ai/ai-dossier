@@ -33,10 +33,15 @@ ai-dossier sched pause            # stop NEW assignments; live units keep runnin
 ai-dossier sched resume
 ai-dossier sched abandon --issue 42 --reason "operator abort"
 ai-dossier sched abandon --batch b1   # dissolve; members requeue as full-cycle
+ai-dossier sched stats --issues 4..9  # per-issue tokens/cost from ~/.dossier/runs.jsonl (#524)
 ```
 
-Every subcommand takes `--project <slug>` (default: `owner-repo` of the current directory,
-falling back to the repo basename — fleet-cycle's convention) and `--json`.
+Every subcommand except `stats` takes `--project <slug>` (default: `owner-repo` of the
+current directory, falling back to the repo basename — fleet-cycle's convention) and
+`--json`. `stats` reads `~/.dossier/runs.jsonl`, a single global file, not the
+per-project state — it takes `--json` and `--issues` only; see "runs.jsonl telemetry"
+above for the resulting cross-repo caveat (the same issue number in two repos sums
+together).
 
 Since #507, `enqueue` additionally reads each candidate issue's live GitHub labels (one
 `gh issue view --json labels` call per issue, resolved against the current directory's repo
@@ -270,6 +275,17 @@ suspect-dispatch streak (#505 above). The two fields are a single fact and must 
 on load: no suspect dispatches were ever tracked under them, so `0`/`null` is the exact
 backfill, not a guess.
 
+Schema 1.7.0: `SlotEntry` gains `spawned_at` (ISO string or null — when the CURRENTLY
+held unit was (re)spawned, distinct from `last_progress_at`, which later progress
+signals overwrite) and `log_offset_at_spawn` (number or null — the dispatch log's byte
+size at that same instant). Both feed `runs.jsonl` per-dispatch telemetry (#524): the
+log is per-UNIT and opened in append mode, so a redispatch's output lands after the
+prior dispatch's in the same file — `log_offset_at_spawn` is what lets the engine read
+only the current dispatch's own slice rather than concatenating (claude) or
+double-counting (opencode) a prior one. 1.6.0 states migrate on load, backfilling both
+to `null` — an in-flight dispatch's start time and log position are unknown, not zero.
+Both reset with the slot on release (`CLEARED_SLOT_FIELDS`).
+
 ## API surface
 
 ```ts
@@ -337,17 +353,30 @@ import {
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
-  validateState,         // strict persisted-state validation (1.0.0-1.5.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.6.0 files migrate)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
+  // #524: per-dispatch runs.jsonl telemetry (see "runs.jsonl telemetry" below)
+  buildSchedRunLogEntry, // AgentRunUsage-sourced RunLogEntry for one completed dispatch
+  appendSchedRunLog,     // JSONL append to ~/.dossier/runs.jsonl, NOT gated by cli's auditLog
+  readDispatchLog,       // read a unit's dispatch log, optionally from a byte offset
+  schedRunsLogPath,      // ~/.dossier/runs.jsonl (re-export of @ai-dossier/core's runsLogPath)
+  usageParserFor,        // claude/opencode usage-parser selection by spawned binary
+  type SchedRunLogInput, // buildSchedRunLogEntry's input shape
+  dispatchLogPath,       // <runsDir>/<unit>.log — shared by spawn (offset) and record (read)
+  fileSizeOrZero,        // byte size of the dispatch log at spawn time, or 0
 } from '@ai-dossier/sched';
 ```
 
 All state functions are pure (state in, new state out — the worktree-pool pattern);
 `SchedStore` is the only state-I/O boundary and every mutation runs under its lock. The
 engine polls ground truth OUTSIDE the lock and mutates state under it, so a slow `gh`
-call never blocks other sched commands. All process I/O is injectable — the tests spawn
-fake agents and stub ground truth; no LLM calls anywhere.
+call never blocks other sched commands. Almost all process I/O is injectable — the
+tests spawn fake agents and stub ground truth; no LLM calls anywhere. The one exception
+is `runs.jsonl` telemetry (#524): `appendSchedRunLog`/`readDispatchLog` read/write the
+real filesystem directly rather than going through an injected dependency, with only
+`EngineDeps.homeDir` (a path override, test-only) as a seam — see "runs.jsonl
+telemetry" below.
 
 ## State layout
 
@@ -362,6 +391,28 @@ fake agents and stub ground truth; no LLM calls anywhere.
 └── .sched-lock/   # cross-process directory mutex (pid; stolen from dead holders)
 ```
 
+Sched also writes OUTSIDE this per-project tree: one `runs.jsonl` entry per completed
+dispatch goes to `~/.dossier/runs.jsonl` (#524) — the same global, cross-project file
+`cli`'s `ai-dossier run` already appends to, read by `ai-dossier sched stats` and
+`ai-dossier history` alike. See "runs.jsonl telemetry" below.
+
+### runs.jsonl telemetry (#524)
+
+`packages/sched/src/run-log.ts` closes a gap where scheduler-dispatched agents never
+appeared in `~/.dossier/runs.jsonl` — per-issue cost could not be baselined. One entry
+is appended per completed dispatch (`recordDispatchRunLog` in `engine.ts`, called from
+every place a dispatch's exit is first detected: the dead-pid rail, the
+external-advance rail, a stall-timeout kill, and a dependents-blocked kill), sourced
+from the agent's `modelUsage` map — never blended with the top-level `usage` block,
+the fix for a ~43% fabricated-saving discrepancy the two blocks were found to produce.
+
+The dispatch log (`runs/<unit>.log`) is per-UNIT and opened in append mode
+(`createSpawnDeps`), so a redispatched unit's second agent writes its output AFTER the
+first's, in the SAME file — `SlotEntry.log_offset_at_spawn` (schema 1.7.0, stamped
+right before every spawn) is what lets `recordDispatchRunLog` read only the current
+dispatch's own slice, so a redispatch's entry is never corrupted by concatenation
+(claude) or double-counted (opencode) against a prior dispatch's output.
+
 - **Crash safety**: a process killed between writes leaves the previous complete state,
   never a partial file; restart resumes identically (proved by `restart.test.ts`) —
   running slots with dead pids are re-detected and verified, slots left `assigned` by a
@@ -371,13 +422,14 @@ fake agents and stub ground truth; no LLM calls anywhere.
   never a silent queue reset. `state.json` is deletable and rebuildable from GitHub,
   which remains the system of record.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
-  #472 (1.3.0), #500 (1.4.0) and #505 (1.5.0) load and migrate to 1.6.0 automatically (slot
-  `branch`/`last_head`/`pid_start`, slot `role` (inferred from the unit's queue entry,
-  with the persisted `phase` as a fallback — #500), entry `pr`/`cleanup`/
-  `failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/`evictions`/
-  `fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to null, and
-  state-level `consecutive_suspect_dispatches`/`last_suspect_dispatch_unit` backfill to
-  `0`/`null` — #505, and slot `gen`/`fenced_at` backfill to `0`/`null` — #504).
+  #472 (1.3.0), #500 (1.4.0), #505 (1.5.0) and #504 (1.6.0) load and migrate to 1.7.0
+  automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
+  unit's queue entry, with the persisted `phase` as a fallback — #500), entry
+  `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
+  `evictions`/`fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to
+  null, state-level `consecutive_suspect_dispatches`/`last_suspect_dispatch_unit`
+  backfill to `0`/`null` — #505, slot `gen`/`fenced_at` backfill to `0`/`null` — #504, and
+  slot `spawned_at`/`log_offset_at_spawn` backfill to `null`/`null` — #524).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.

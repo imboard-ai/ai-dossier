@@ -52,12 +52,13 @@
  * member sequencing is a follow-up (#464 non-goal).
  */
 
-import * as path from 'node:path';
 import {
   buildAgentCommand,
   buildPrompt,
   buildReportPrompt,
+  dispatchLogPath,
   escalateTier,
+  fileSizeOrZero,
   type ResolvedDispatch,
   reportTierFor,
   resolveDispatch,
@@ -65,7 +66,6 @@ import {
   STOP_POLL_MAX_MS,
   STOP_POLL_MIN_MS,
   stallTimeoutForSlot,
-  unitLogName,
 } from './dispatch';
 import type { RunFencer } from './fence';
 import {
@@ -114,13 +114,13 @@ export interface EngineDeps {
    */
   fencer?: RunFencer;
   /**
-   * Home directory `runs.jsonl` telemetry (#524) is written under
-   * (`<dossierHome>/.dossier/runs.jsonl` — the same file `cli`'s `ai-dossier
-   * run` writes to). Optional and defaults to `os.homedir()` (via
+   * Home directory `runs.jsonl` telemetry (#524) is written under —
+   * `<homeDir>/.dossier/runs.jsonl`, the same file `cli`'s `ai-dossier run`
+   * writes to. Optional and defaults to `os.homedir()` (via
    * `appendSchedRunLog`'s own default) when absent — override ONLY for
    * tests, so they never touch the real machine's `~/.dossier`.
    */
-  dossierHome?: string;
+  homeDir?: string;
 }
 
 /** What one tick did — surfaced by `sched start`. */
@@ -403,7 +403,12 @@ function spawnAndRecord(
     journalExtra?: Record<string, unknown>;
   }
 ): SchedState {
-  const logFile = path.join(ctx.deps.store.runsDir, `${unitLogName(unit)}.log`);
+  const logFile = dispatchLogPath(ctx.deps.store.runsDir, unit);
+  // #524: the log is per-unit and opened in append mode (createSpawnDeps), so
+  // a redispatch's output lands after any prior dispatch's in the SAME file.
+  // Captured BEFORE spawning — the size at this instant is exactly where
+  // THIS dispatch's own output will start.
+  const logOffset = fileSizeOrZero(logFile);
 
   let pid: number;
   try {
@@ -422,6 +427,7 @@ function spawnAndRecord(
     // overwrite — this is the one field that answers "when did THIS dispatch
     // start", the anchor `runs.jsonl`'s duration_ms is measured from.
     spawned_at: now.toISOString(),
+    log_offset_at_spawn: logOffset,
   };
   const next =
     slot.status === 'assigned' || slot.status === 'recovering'
@@ -593,7 +599,11 @@ function blockTransitiveDependents(
 
     // A dependent mid-run is working toward a doomed merge — release its slot.
     const unit = `issue:${issue}`;
+    const slot = slotOf(next, unit);
     killUnitAgent(ctx, next, unit);
+    // #524: this agent was live and never recorded — same reasoning as the
+    // stall/external-advance kills.
+    if (slot) recordDispatchRunLog(ctx, next, slot, unit);
     next = releaseSlotViaFailure(ctx, next, unit);
 
     next = transitionIssue(next, issue, 'blocked', { reason }, now);
@@ -707,6 +717,14 @@ function enterRecovery(
   if (!entry || !slot) return state;
 
   killUnitAgent(ctx, state, unit);
+  // #524: only the STALL path kills a still-live, not-yet-recorded agent —
+  // `causeEvent === 'verify-incomplete'` arrives from `completeUnitOrRecover`
+  // AFTER the agent's exit was already detected and recorded by the dead-pid
+  // branch of `reconcileRunning`; recording again here would double-count
+  // that same dispatch.
+  if (causeEvent === 'stalled') {
+    recordDispatchRunLog(ctx, state, slot, unit);
+  }
 
   const report = isReportSlot(slot);
   const nextTier = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
@@ -908,11 +926,13 @@ function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
 /**
  * Append this dispatch's `runs.jsonl` entry (#524) — one per completed
  * spawn, not per unit: a redispatch/takeover produces another entry, each
- * with its own tokens/duration, never an update to the first. Called
- * exactly once per dispatch, from the dead-pid branch of `reconcileRunning`
- * below — the single point every dispatch's exit is first detected, guarded
- * by that branch's own `pid !== null && !isAlive` condition (a slot only
- * transitions `running → exited` once per spawn).
+ * with its own tokens/duration, never an update to the first. Called from
+ * every place a dispatch's exit is first detected and about to be
+ * classified: `reconcileRunning`'s dead-pid branch (the agent exited on its
+ * own) and its external-advance branch (ground truth says done while the
+ * agent was still alive and had to be killed) — each transitions the slot
+ * out of `running` exactly once per spawn, so this fires at most once per
+ * dispatch from either call site.
  */
 function recordDispatchRunLog(
   ctx: TickCtx,
@@ -922,10 +942,25 @@ function recordDispatchRunLog(
 ): void {
   const issue = issueOfUnit(unit);
   const entry = issue === null ? undefined : findEntry(state, issue);
-  if (issue === null || !entry) return; // left the queue already — nothing to attribute the run to
+  if (issue === null || !entry) {
+    // Left the queue already, or a batch unit (#464 non-goal: only issue:<n>
+    // units are dispatched) — nothing to attribute the run to. Journaled so
+    // an operator sees WHY a dispatch produced no runs.jsonl entry, rather
+    // than a silent gap next to `exit-detected`.
+    journal(ctx, 'run-log-skipped', unit, {
+      reason: issue === null ? 'not-an-issue-unit' : 'entry-gone',
+    });
+    return;
+  }
 
-  const cmd = buildAgentCommand(ctx.dispatch.command, entry.tier, issue, ctx.dispatch.tierModels);
-  const logFile = path.join(ctx.deps.store.runsDir, `${unitLogName(unit)}.log`);
+  // Report slots ride the same tier the cycle escalation ladder set at
+  // dispatch time, EXCEPT `entry.tier` is deliberately not updated for a
+  // report redispatch (`enterRecovery`'s `if (!report)` guard) — mirror the
+  // spawn-side branch (`spawnReportAgent`) or a report slot's tier/model
+  // here would silently disagree with what was actually spawned.
+  const tier = isReportSlot(slot) ? (reportTierFor(slot.recoveries) ?? entry.tier) : entry.tier;
+  const cmd = buildAgentCommand(ctx.dispatch.command, tier, issue, ctx.dispatch.tierModels);
+  const logFile = dispatchLogPath(ctx.deps.store.runsDir, unit);
 
   appendSchedRunLog(
     buildSchedRunLogEntry({
@@ -933,12 +968,18 @@ function recordDispatchRunLog(
       role: slot.role,
       cmd0: ctx.dispatch.command[0],
       cmd,
-      logContent: readDispatchLog(logFile),
+      // #524: read only THIS dispatch's slice — the log is per-unit and
+      // append-mode, so the whole file would include every prior dispatch's
+      // output too (claude: unparseable JSON concatenation; opencode: summed
+      // tokens double-counted).
+      logContent: readDispatchLog(logFile, slot.log_offset_at_spawn ?? 0),
       spawnedAt: slot.spawned_at,
       completedAt: ctx.deps.now(),
-      configuredModel: ctx.dispatch.tierModels[entry.tier],
+      configuredModel: ctx.dispatch.tierModels[tier],
+      cwd: ctx.deps.repoDir,
     }),
-    ctx.deps.dossierHome
+    ctx.deps.homeDir,
+    (err) => journal(ctx, 'run-log-failed', unit, { detail: err.message })
   );
 }
 

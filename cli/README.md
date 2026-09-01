@@ -882,6 +882,7 @@ ai-dossier sched start [--interval <seconds>] [--once] [--json]
 ai-dossier sched status [--json]
 ai-dossier sched pause | resume
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
+ai-dossier sched stats [--issues 4,5|4..9] [--json]
 ```
 
 The deterministic core of batch cycles (RFC-0001): a queue, worker slots, typed
@@ -967,11 +968,18 @@ against ground truth.
 - **`abandon --issue`** fails the entry (recording the reason) and releases its slot;
   **`abandon --batch`** dissolves the batch and requeues every non-terminal member as
   full-cycle — members already shipped keep their outcome.
+- **`stats`** (#524) prints per-issue token/cost totals from `~/.dossier/runs.jsonl`:
+  `Issue, Runs, In, Out, Cache-W, Cache-R, Cost, Duration`, plus a `TOTAL` row, sourced
+  from the sched dispatch entries `start` now writes (see the `runs.jsonl schema` table
+  below). A field is `-`/null when *no* dispatch reported it — never a fabricated 0.
+  Unlike every other subcommand, `stats` reads the one global `runs.jsonl` file rather
+  than a `--project`-scoped state directory, so it takes only `--issues` and `--json`; the
+  same issue number dispatched from two different repos sums together in this cohort.
 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically
-from `state.json` (pre-#464/#468/#472/#500/#505 state files — schema
-1.0.0/1.1.0/1.2.0/1.3.0/1.4.0/1.5.0 — migrate to 1.6.0 on load). A corrupt state file is a loud
+from `state.json` (pre-#464/#468/#472/#500/#505/#504 state files — schema
+1.0.0/1.1.0/1.2.0/1.3.0/1.4.0/1.5.0/1.6.0 — migrate to 1.7.0 on load). A corrupt state file is a loud
 error naming the file — never a silent queue reset. Concurrency is serialized by a
 `.sched-lock` directory mutex (stolen from dead holders). `config.json` holds
 `max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default
@@ -1039,7 +1047,7 @@ run appends telemetry (capability, outcome, exit code, duration, reason, cwd) to
 
 ## Run History (`history`)
 
-Every `ai-dossier run` appends one JSON line to `~/.dossier/runs.jsonl` (append-only; disable with `dossier config auditLog false`).
+Every `ai-dossier run` appends one JSON line to `~/.dossier/runs.jsonl` (append-only; disable with `dossier config auditLog false`). Since #524, `packages/sched`'s dispatch engine appends its own entries to the SAME file — one per completed scheduler-dispatched agent run (see `ai-dossier sched stats` above). The `auditLog` toggle governs only `ai-dossier run`'s own entries; it does not gate the scheduler's.
 
 ```bash
 ai-dossier history                     # last 20 runs
@@ -1070,8 +1078,12 @@ Headless runs execute `claude -p --output-format json` (claude-code) or `opencod
 | `exit_code` | Spawned agent's exit code, or the CLI action's for early exits; null when killed by a signal (v0.12.0+) |
 | `spawn_error` | Why there is no exit code: spawn error (e.g. ENOENT) or signal. Null when the process exited normally (v0.12.0+) |
 | `input_tokens`, `output_tokens`, `total_cost_usd` | Usage reported by the agent (claude JSON result / opencode JSONL event stream, headless only); null when not reported — never fabricated (v0.12.0+) |
+| `cache_creation_tokens`, `cache_read_tokens` | Cache-write/cache-read input tokens; same modelUsage-sourced rule as `input_tokens`/`output_tokens` — null when not reported (v0.22.0+) |
+| `unit` | Sched dispatch entries only: `issue:<n>` or `batch:<id>` — absent/null for an ordinary `ai-dossier run` entry, which has no unit (v0.22.0+) |
 
-Pre-v0.12.0 entries simply lack the v0.12.0+ fields; consumers must treat them as optional/nullable.
+Pre-v0.12.0 entries simply lack the v0.12.0+ fields, and pre-v0.22.0 entries lack `cache_creation_tokens`/`cache_read_tokens`/`unit`; consumers must treat them as optional/nullable.
+
+**Source of record (#524):** when an agent's JSON result carries a per-model `modelUsage` map, it is authoritative for `input_tokens`/`output_tokens`/cache tokens/cost — summed across every model that ran, and never blended field-by-field with the top-level `usage` block. The two blocks have been observed to disagree enough to fabricate a large "saving" when mixed across a cohort; `usage` is read only when `modelUsage` is absent entirely.
 
 ---
 

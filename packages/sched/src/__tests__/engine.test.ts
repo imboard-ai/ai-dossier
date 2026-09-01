@@ -40,12 +40,12 @@ function harness(
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'sched-engine-'));
   const store = new SchedStore(dir);
   const journal = new Journal(dir);
-  // #524: runs.jsonl telemetry writes under EngineDeps.dossierHome — a fresh
+  // #524: runs.jsonl telemetry writes under EngineDeps.homeDir — a fresh
   // tmp dir per harness, so no test ever touches the real machine's
   // ~/.dossier (every dead-pid/external-advance exit now appends an entry).
   // Registered for cleanup automatically — individual tests don't opt in.
-  const dossierHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-engine-home-'));
-  REGISTRIES.push(dossierHome);
+  const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-engine-home-'));
+  REGISTRIES.push(homeDir);
 
   let pidSeq = 4242;
   const alive = new Set<number>();
@@ -124,7 +124,7 @@ function harness(
     repoDir: dir,
     teardownExec,
     fencer,
-    dossierHome,
+    homeDir,
   };
 
   const config: SchedConfig = {
@@ -147,7 +147,7 @@ function harness(
 
   return {
     dir,
-    dossierHome,
+    homeDir,
     store,
     journal,
     spawnCalls,
@@ -470,6 +470,19 @@ describe('stall/escalation ladder (AC4)', () => {
     expect(h.spawnCalls[1].cmd).toContain('sonnet');
     expect(state.slots.find((s) => s.unit === 'issue:101')?.recoveries).toBe(1);
     expect(h.journal.read().some((e) => e.event === 'stalled')).toBe(true);
+    // #524: a stall-killed dispatch is a real, completed dispatch — it must
+    // get its own runs.jsonl entry, not silently vanish (the stalled agent
+    // never gets a chance to exit on its own, so the dead-pid rail alone
+    // would never record it).
+    const logFile = schedRunsLogPath(h.homeDir);
+    expect(fs.existsSync(logFile)).toBe(true);
+    const entries = fs
+      .readFileSync(logFile, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ unit: 'issue:101' });
   });
 
   it('a new milestone inside the window prevents the stall', () => {
@@ -525,6 +538,15 @@ describe('stall/escalation ladder (AC4)', () => {
     expect(state.entries.find((e) => e.issue === 104)?.status).toBe('dispatched');
     expect(state.slots.find((s) => s.unit === 'issue:101')).toBeUndefined();
     expect(h.journal.read().some((e) => e.event === 'dependents-blocked')).toBe(true);
+    // Note (#524): `blockTransitiveDependents` also records a runs.jsonl
+    // entry when it kills a dependent's LIVE agent — but under the current
+    // dependency gating (`readiness.ts`: an entry with an unsatisfied dep is
+    // never runnable), a dependent can never actually be dispatched while
+    // its dependency is still in flight, so that branch has no reachable
+    // scenario to exercise here. 102/103 above were never dispatched at
+    // all (blocked on the unmet dependency from the start), so this test
+    // does not exercise it — see `recordDispatchRunLog` call in
+    // `blockTransitiveDependents` for the (currently defensive) code path.
   });
 
   it('a stall at the strongest tier fails the unit (nowhere stronger to go)', () => {
@@ -1963,7 +1985,7 @@ describe('zombie-run fencing on redispatch (#504)', () => {
 
 describe('runs.jsonl telemetry (#524: per-dispatch token/cost recorded on exit)', () => {
   function readRunLogEntries(h: ReturnType<typeof harness>): Array<Record<string, unknown>> {
-    const file = schedRunsLogPath(h.dossierHome);
+    const file = schedRunsLogPath(h.homeDir);
     if (!fs.existsSync(file)) return [];
     return fs
       .readFileSync(file, 'utf-8')
@@ -2036,6 +2058,58 @@ describe('runs.jsonl telemetry (#524: per-dispatch token/cost recorded on exit)'
     const entries = readRunLogEntries(h);
     expect(entries).toHaveLength(2);
     expect(entries.every((e) => e.unit === 'issue:101')).toBe(true);
+  });
+
+  it("isolates each dispatch's tokens on redispatch even though the log file is shared and append-only (#524 regression)", () => {
+    // The log file is per-UNIT, not per-dispatch, and dispatch.ts's real
+    // spawn() opens it with 'a' (append) — so a redispatched unit's second
+    // agent writes its JSON result AFTER the first agent's, in the SAME
+    // file. Reading the whole file for the second dispatch would either
+    // throw on `{...}{...}` (claude) or double-count (opencode). This test
+    // writes real content across two dispatches and asserts each entry
+    // reflects ONLY its own dispatch — proving `log_offset_at_spawn`
+    // actually isolates them, not just that two entries exist.
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const firstSpawn = h.spawnCalls[0];
+
+    fs.mkdirSync(path.dirname(firstSpawn.logFile), { recursive: true });
+    fs.writeFileSync(
+      firstSpawn.logFile,
+      JSON.stringify({
+        type: 'result',
+        modelUsage: { 'claude-haiku-4': { inputTokens: 100, outputTokens: 10 } },
+      })
+    );
+    h.alive.delete(firstSpawn.pid);
+    h.tick(); // first dispatch recorded; redispatched to a second agent
+
+    expect(h.spawnCalls).toHaveLength(2);
+    const secondSpawn = h.spawnCalls[1];
+    expect(secondSpawn.logFile).toBe(firstSpawn.logFile); // same per-unit path
+
+    // Second agent's own output is APPENDED after the first agent's — the
+    // real-world shape (createSpawnDeps opens 'a', not 'w').
+    fs.appendFileSync(
+      secondSpawn.logFile,
+      JSON.stringify({
+        type: 'result',
+        modelUsage: { 'claude-sonnet-4': { inputTokens: 9000, outputTokens: 900 } },
+      })
+    );
+    h.alive.delete(secondSpawn.pid);
+    h.setMilestone(101, 'report', 'done');
+    h.tick();
+
+    const entries = readRunLogEntries(h);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ input_tokens: 100, output_tokens: 10 });
+    // The critical assertion: the SECOND entry must show only the SECOND
+    // dispatch's numbers — neither null (concatenation parse failure) nor
+    // 9100/910 (summed with the first dispatch).
+    expect(entries[1]).toMatchObject({ input_tokens: 9000, output_tokens: 900 });
   });
 
   it('records an entry for an external-advance exit too (agent still alive when ground truth completed)', () => {

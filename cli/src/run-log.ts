@@ -4,9 +4,7 @@
  */
 
 import fs from 'node:fs';
-import path from 'node:path';
-import type { RunLogEntry } from '@ai-dossier/core';
-import { CONFIG_DIR } from './config';
+import { type RunLogEntry, runsLogPath } from '@ai-dossier/core';
 import { appendAuditJsonl } from './jsonl-log';
 
 /**
@@ -17,7 +15,13 @@ import { appendAuditJsonl } from './jsonl-log';
  */
 export type { RunLogEntry };
 
-const LOG_FILE = path.join(CONFIG_DIR, 'runs.jsonl');
+/**
+ * `runsLogPath()` (`@ai-dossier/core`) is the single source of truth for
+ * this path (#524) — `packages/sched`'s writer and `ai-dossier sched stats`'
+ * reader both derive it the same way, so the two can never silently drift
+ * apart. Equivalent to the prior `path.join(CONFIG_DIR, 'runs.jsonl')`.
+ */
+const LOG_FILE = runsLogPath();
 
 /**
  * Append one JSONL line to ~/.dossier/runs.jsonl.

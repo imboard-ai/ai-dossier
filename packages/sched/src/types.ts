@@ -369,6 +369,20 @@ export interface SlotEntry {
    * not zero).
    */
   spawned_at: string | null;
+  /**
+   * Byte size of the unit's dispatch log (`dispatchLogPath`) at the moment
+   * THIS spawn started (#524) — the log file is per-unit and opened in
+   * append mode (`createSpawnDeps`), so a redispatch's output lands after
+   * the previous dispatch's in the SAME file. Reading the whole file for a
+   * redispatched unit's `runs.jsonl` entry would concatenate two JSON
+   * results (parse failure for claude) or double-count summed tokens
+   * (opencode) — `recordDispatchRunLog` reads only the bytes from this
+   * offset onward, so each dispatch's entry reflects only its own output.
+   * `null` when the log did not exist yet at spawn time (first dispatch, or
+   * a legacy slot from before this field existed) — treated as offset 0.
+   * Added in schema 1.7.0; 1.6.0 slots backfill null.
+   */
+  log_offset_at_spawn: number | null;
   updated_at: string;
 }
 
@@ -706,7 +720,11 @@ export type JournalEventName =
   // NOT the engine — sched enqueue appends these before the issue is ever
   // dispatched)
   | 'label-blocked'
-  | 'label-check-failed';
+  | 'label-check-failed'
+  // #524 runs.jsonl telemetry: a dispatch's exit produced no entry (unit left
+  // the queue, or is not an `issue:<n>` unit), or the append itself failed.
+  | 'run-log-skipped'
+  | 'run-log-failed';
 
 /** One journaled event. `ts` is stamped by the journal, never by callers. */
 export interface JournalEvent {

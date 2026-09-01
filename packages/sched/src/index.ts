@@ -27,7 +27,9 @@ export {
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
+  dispatchLogPath,
   escalateTier,
+  fileSizeOrZero,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
   type ResolvedDispatch,
@@ -72,7 +74,14 @@ export {
   prOfMilestone,
   type SetupInfo,
 } from './groundtruth';
-export { issueOfUnit, JOURNAL_FILE, Journal, readJsonl, unitEvent } from './journal';
+export {
+  appendJsonl,
+  issueOfUnit,
+  JOURNAL_FILE,
+  Journal,
+  readJsonl,
+  unitEvent,
+} from './journal';
 
 export { CorruptStateError, LockTimeoutError, SchedStore, writeAtomic } from './persist';
 export {

@@ -1,3 +1,6 @@
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 /**
  * The `~/.dossier/runs.jsonl` entry schema (#458, #524).
  *
@@ -75,4 +78,16 @@ export interface RunLogEntry {
    * an ordinary `ai-dossier run` invocation (which has no unit).
    */
   unit?: string | null;
+}
+
+/**
+ * `~/.dossier/runs.jsonl` — the single location both writers (`cli`'s
+ * `ai-dossier run` and `packages/sched`'s dispatch path) append to, and both
+ * readers (`ai-dossier history`, `ai-dossier sched stats`) read from (#524).
+ * Hoisted here so the path is computed in exactly one place; before this,
+ * `cli/src/run-log.ts` and `packages/sched/src/run-log.ts` each built it
+ * independently and agreed only by coincidence. Testable via `home`.
+ */
+export function runsLogPath(home: string = os.homedir()): string {
+  return path.join(home, '.dossier', 'runs.jsonl');
 }

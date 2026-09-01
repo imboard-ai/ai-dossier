@@ -351,10 +351,10 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * before, so the zero value is exact, not a guess; 1.5.0 (pre-#504) slots
  * backfill `gen` (0) and `fenced_at` (null) — nothing was fenced before
  * fencing existed, so those values are exact too; 1.6.0 (pre-#524) slots
- * backfill `spawned_at` (null) — an in-flight dispatch's start time is
- * unknown, not zero, so its duration is simply unmeasurable until the next
- * spawn. The
- * inference is entry-status-first, not phase-first: `phase === 'report'` is
+ * backfill `spawned_at` and `log_offset_at_spawn` (both null) — an in-flight
+ * dispatch's start time and log position are unknown, not zero, so its
+ * duration and dispatch-log boundary are simply unmeasurable until the next
+ * spawn. The inference is entry-status-first, not phase-first: `phase === 'report'` is
  * exactly the signal #500 proved unreliable for a LIVE report agent (it
  * drifts to the issue's pre-report milestone under `phase-updated` well
  * before the agent exits), so a slot whose unit's queue entry is `shipped`
@@ -504,6 +504,15 @@ export function validateState(data: unknown): SchedState {
     ) {
       throw new Error(`Slot ${slot.id}: spawned_at must be an ISO date string or null`);
     }
+    if (
+      slot.log_offset_at_spawn !== null &&
+      slot.log_offset_at_spawn !== undefined &&
+      (!Number.isInteger(slot.log_offset_at_spawn) || (slot.log_offset_at_spawn as number) < 0)
+    ) {
+      throw new Error(
+        `Slot ${slot.id}: log_offset_at_spawn must be a non-negative integer or null`
+      );
+    }
     if (!isIsoDateString(slot.updated_at)) {
       throw new Error(`Slot ${slot.id}: updated_at must be an ISO date string`);
     }
@@ -583,9 +592,11 @@ export function validateState(data: unknown): SchedState {
     // own the unfenced generation and have no takeover pending.
     gen: slot.gen ?? 0,
     fenced_at: slot.fenced_at ?? null,
-    // Pre-#524 (1.6.0) slots carry no spawned_at — their in-flight duration
-    // (if any) is unknown, not zero, so it backfills to null like fenced_at.
+    // Pre-#524 (1.6.0) slots carry no spawned_at/log_offset_at_spawn — their
+    // in-flight duration and log boundary (if any) are unknown, not zero, so
+    // both backfill to null like fenced_at.
     spawned_at: slot.spawned_at ?? null,
+    log_offset_at_spawn: slot.log_offset_at_spawn ?? null,
   }));
   const entries = (obj.entries as QueueEntry[]).map((entry) => ({
     ...entry,
@@ -714,8 +725,9 @@ export const CLEARED_SLOT_FIELDS = {
   // flight — the next unit assigned here starts unfenced at generation 0.
   gen: 0,
   fenced_at: null,
-  // #524: a released slot holds no dispatch — its next spawn stamps this fresh.
+  // #524: a released slot holds no dispatch — its next spawn stamps these fresh.
   spawned_at: null,
+  log_offset_at_spawn: null,
 };
 
 export function transitionSlot(

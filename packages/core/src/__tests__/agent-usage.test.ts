@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseAgentUsage, parseOpenCodeUsage } from '../agent-usage';
+import { parseAgentUsage, parseOpenCodeUsage, usageParserFor } from '../agent-usage';
 
 describe('parseAgentUsage', () => {
   it('parses the classic usage shape (usage + total_cost_usd + model) when no modelUsage is present', () => {
@@ -322,5 +322,54 @@ describe('parseOpenCodeUsage', () => {
       output_tokens: null,
       total_cost_usd: null,
     });
+  });
+});
+
+describe('parseAgentUsage — untrusted-input hardening (#524)', () => {
+  it('rejects negative token/cost values rather than recording them', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      total_cost_usd: -5,
+      usage: { input_tokens: -100, output_tokens: 20 },
+    });
+
+    expect(parseAgentUsage(stdout)).toMatchObject({
+      input_tokens: null,
+      output_tokens: 20,
+      total_cost_usd: null,
+    });
+  });
+
+  it('rejects a negative sum from modelUsage entries', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      modelUsage: { 'claude-opus-4': { inputTokens: -1, outputTokens: 5 } },
+    });
+
+    expect(parseAgentUsage(stdout)).toMatchObject({ input_tokens: null, output_tokens: 5 });
+  });
+
+  it('strips control characters from an untrusted model field and caps its length', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      model: `claude\x1b[31msonnet${'x'.repeat(300)}`,
+    });
+
+    const usage = parseAgentUsage(stdout);
+    expect(usage?.model).not.toBeNull();
+    expect(usage?.model?.includes('\x1b')).toBe(false);
+    expect(usage?.model?.length).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('usageParserFor', () => {
+  it('routes the opencode binary (any path) to parseOpenCodeUsage', () => {
+    expect(usageParserFor('opencode')).toBe(parseOpenCodeUsage);
+    expect(usageParserFor('/usr/local/bin/opencode')).toBe(parseOpenCodeUsage);
+  });
+
+  it('routes claude, and any unrecognized command, to parseAgentUsage', () => {
+    expect(usageParserFor('claude')).toBe(parseAgentUsage);
+    expect(usageParserFor('some-other-agent-cli')).toBe(parseAgentUsage);
   });
 });

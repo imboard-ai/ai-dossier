@@ -12,13 +12,16 @@
  */
 
 import type { RunLogEntry } from '@ai-dossier/core';
+import { issueOfUnit } from '@ai-dossier/sched';
 
-/** `issue:<n>` → `<n>`; null for anything else (a batch unit, or no unit at all). */
-export function issueOfUnit(unit: string | null | undefined): number | null {
-  if (!unit) return null;
-  const match = /^issue:(\d+)$/.exec(unit);
-  return match ? Number.parseInt(match[1], 10) : null;
-}
+/**
+ * `issue:<n>` → `<n>`; null for anything else (a batch unit, or no unit at
+ * all). Re-exported from `@ai-dossier/sched` — that package is both the
+ * writer of the `unit` correlation key and the pre-existing owner of this
+ * exact parse (`packages/sched/src/journal.ts`); a second, independently
+ * maintained regex here was the same class of drift #524 exists to close.
+ */
+export { issueOfUnit };
 
 /** Sum a nullable numeric field across entries, tracking whether any entry actually reported it. */
 function sumField(
@@ -57,26 +60,25 @@ export interface SchedCostReport {
   totals: Omit<IssueCost, 'issue'>;
 }
 
-function aggregate(
-  issue: number | 'totals',
-  entries: RunLogEntry[]
-): IssueCost | Omit<IssueCost, 'issue'> {
-  const fields = (
-    [
-      'input_tokens',
-      'output_tokens',
-      'cache_creation_tokens',
-      'cache_read_tokens',
-      'total_cost_usd',
-      'duration_ms',
-    ] as const
-  ).map((field) => [field, sumField(entries, field)] as const);
-  const values = Object.fromEntries(
-    fields.map(([field, { total, samples }]) => [field, samples > 0 ? total : null])
-  ) as Record<(typeof fields)[number][0], number | null>;
+/** The summable `IssueCost` fields, in table-column order. */
+const SUM_FIELDS = [
+  'input_tokens',
+  'output_tokens',
+  'cache_creation_tokens',
+  'cache_read_tokens',
+  'total_cost_usd',
+  'duration_ms',
+] as const satisfies readonly (keyof RunLogEntry)[];
 
-  const row = { runs: entries.length, ...values };
-  return issue === 'totals' ? row : { issue, ...row };
+/** Sum every `SUM_FIELDS` entry across `entries` — the issue-less half of one row. */
+function aggregate(entries: RunLogEntry[]): Omit<IssueCost, 'issue'> {
+  const runs = entries.length;
+  const totals = {} as Omit<IssueCost, 'issue' | 'runs'>;
+  for (const field of SUM_FIELDS) {
+    const { total, samples } = sumField(entries, field);
+    totals[field] = samples > 0 ? total : null;
+  }
+  return { runs, ...totals };
 }
 
 /**
@@ -103,11 +105,8 @@ export function buildSchedCostReport(
   }
 
   const selected = issues ?? [...byIssue.keys()].sort((a, b) => a - b);
-  const rows = selected.map((issue) => aggregate(issue, byIssue.get(issue) ?? []) as IssueCost);
-  const totals = aggregate(
-    'totals',
-    selected.flatMap((issue) => byIssue.get(issue) ?? [])
-  );
+  const rows = selected.map((issue) => ({ issue, ...aggregate(byIssue.get(issue) ?? []) }));
+  const totals = aggregate(selected.flatMap((issue) => byIssue.get(issue) ?? []));
 
   return { issues: rows, totals };
 }
