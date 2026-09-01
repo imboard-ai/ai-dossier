@@ -54,6 +54,8 @@ import {
   buildStatsReport,
   type FailedIssue,
   type IssueTrail,
+  type ModelAggregate,
+  modelNote,
   type RunStats,
   renderValue,
   type StatsReport,
@@ -112,6 +114,34 @@ interface StatsOptions {
 
 /** Characters kept in a `verify` warning, which is one line among several. */
 const WARNING_SNIPPET_LENGTH = 120;
+
+/** Scale for rendering a 0–1 rate as a percentage. */
+const PERCENT = 100;
+
+/**
+ * The by-model table's columns. Headers match the JSON field names (`delivered`,
+ * `blocked`, `unfinished`) so a reader moving from the table to `--json` does not have to
+ * guess; `rate` is `delivery_rate` and `n` is `samples`, both abbreviated for width.
+ */
+const MODEL_TABLE_HEADERS = [
+  'model',
+  'runs',
+  'delivered',
+  'blocked',
+  'unfinished',
+  'rate',
+  'n',
+  'median total',
+  'min',
+  'max',
+  '',
+];
+
+const MODEL_TABLE_ALIGN: ColumnAlign[] = [
+  'left',
+  ...(Array<ColumnAlign>(9).fill('right') as ColumnAlign[]),
+  'left',
+];
 
 /** Parse `--kv k=v` occurrences into ordered pairs. */
 function parseKvPairs(raw: string[]): { pairs: Array<[string, string]>; errors: string[] } {
@@ -891,21 +921,51 @@ function printAggregates(report: StatsReport, precededByTables: boolean): void {
   );
 
   if (models.length > 0) {
-    section(
-      'By model:',
-      ['model', 'runs', 'n', 'median total', 'min', 'max', ''],
-      models.map((model) => [
-        renderValue(model.model),
-        String(model.runs),
-        String(model.samples),
-        formatDurationCell(model.median_total_seconds),
-        formatDurationCell(model.min_total_seconds),
-        formatDurationCell(model.max_total_seconds),
-        skewCell(model.negative_samples),
-      ]),
-      ['left', 'right', 'right', 'right', 'right', 'right', 'left']
+    section('By model:', MODEL_TABLE_HEADERS, buildModelRows(models), MODEL_TABLE_ALIGN);
+    // `delivered` is not the `done` status: the "Per-run total" table above shows runs ending
+    // `review/done` or `implement/done`, and those are unfinished work, not deliveries.
+    console.log(
+      '  delivered = last milestone is ship/report (or batch-ship/batch-report) at done; rate = delivered/runs, including runs still in flight'
     );
   }
+}
+
+/** One row per model bucket, in `MODEL_TABLE_HEADERS` order. */
+function buildModelRows(models: ModelAggregate[]): string[][] {
+  return models.map((model) => [
+    renderValue(model.model),
+    String(model.runs),
+    String(model.delivered),
+    String(model.blocked),
+    String(model.unfinished),
+    formatRateCell(model.delivery_rate),
+    String(model.samples),
+    formatDurationCell(model.median_total_seconds),
+    formatDurationCell(model.min_total_seconds),
+    formatDurationCell(model.max_total_seconds),
+    modelNoteCell(model),
+  ]);
+}
+
+/** A delivery rate as a whole-percent cell. */
+function formatRateCell(rate: number): string {
+  return `${Math.round(rate * PERCENT)}%`;
+}
+
+/**
+ * The trailing note for a model row: clock skew, and which raw `model=` spellings folded in.
+ *
+ * The fold is disclosed rather than assumed — a reader comparing arms needs to see that
+ * `glm-5.3` and `llmgateway/glm-5.3` were counted as one model before trusting the row.
+ * `modelNote` does the sanitising and capping; this only joins the two notes.
+ */
+function modelNoteCell(model: ModelAggregate): string {
+  const notes: string[] = [];
+  const skew = skewCell(model.negative_samples);
+  if (skew !== '') notes.push(skew);
+  const folded = modelNote(model);
+  if (folded !== null) notes.push(folded);
+  return notes.join(' · ');
 }
 
 /**

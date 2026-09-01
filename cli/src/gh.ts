@@ -216,9 +216,14 @@ export function ghFailure(action: string, err: ExecFailure, repo?: string): stri
   return [cause, fix, `gh said: ${snippet(err.stderr)}`].join('\n');
 }
 
-/** GitHub issue numbers are positive integers; anything else is a caller mistake. */
+/**
+ * GitHub issue numbers are positive integers; anything else is a caller mistake. Capped at 10
+ * digits — real issue numbers never approach that, and without a cap a caller that `Number()`s
+ * the value back out (e.g. for JSON output) can silently get `Infinity` → `null` from an absurd
+ * input instead of a clear validation error.
+ */
 export function isIssueNumber(value: string): boolean {
-  return /^[1-9]\d*$/.test(value);
+  return /^[1-9]\d{0,9}$/.test(value);
 }
 
 /** Reject a non-numeric `--issue` here rather than letting gh (or `mint`) fail obscurely. */
@@ -348,15 +353,27 @@ export function tryFetchComments(issue: string, repo?: string): CommentsResult {
   return { ok: true, comments: parsed.comments as GhComment[] };
 }
 
+/**
+ * Extract label names from a `gh --json labels` field: `{name, color, description}` objects,
+ * only `name` read, a malformed entry dropped rather than failing the whole read. Shared by
+ * every fetcher that reads labels, so the extraction logic can't drift between them.
+ */
+function ghLabelNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((label) =>
+      label !== null && typeof label === 'object' ? (label as { name?: unknown }).name : undefined
+    )
+    .filter((name): name is string => typeof name === 'string');
+}
+
 /** An issue's label read, or the one reason it could not be read. */
 export type LabelsResult = { ok: true; labels: string[] } | { ok: false; error: string };
 
 /**
  * Read an issue's label names through gh, reporting WHY rather than exiting —
  * the same discipline as {@link tryFetchComments} (#507's enqueue-time
- * hard-block pre-screen is the second consumer). `gh` label objects are
- * `{name, color, description}`; only `name` is read, and a malformed entry is
- * dropped rather than failing the whole read.
+ * hard-block pre-screen is the second consumer).
  */
 export function tryFetchLabels(issue: string, repo?: string): LabelsResult {
   const res = exec('gh', ['issue', 'view', issue, '--json', 'labels', ...repoArgs(repo)]);
@@ -379,12 +396,91 @@ export function tryFetchLabels(issue: string, repo?: string): LabelsResult {
     };
   }
 
-  const labels = parsed.labels
-    .map((label) =>
-      label !== null && typeof label === 'object' ? (label as { name?: unknown }).name : undefined
-    )
-    .filter((name): name is string => typeof name === 'string');
-  return { ok: true, labels };
+  return { ok: true, labels: ghLabelNames(parsed.labels) };
+}
+
+/** An issue's title/body/labels/state read, or the one reason it could not be read. */
+export type IssueMetaResult =
+  | { ok: true; title: string; body: string; labels: string[]; state: string }
+  | { ok: false; error: string };
+
+/**
+ * Read an issue's title, body, labels, and state in one `gh` call — the combined fetch the
+ * classify pre-screen (#538) needs (title/body for the text-keyword scan, labels for the
+ * hard-block check, state so a caller can tell CLOSED apart from a read failure).
+ */
+export function tryFetchIssueMeta(issue: string, repo?: string): IssueMetaResult {
+  const res = exec('gh', [
+    'issue',
+    'view',
+    issue,
+    '--json',
+    'title,body,labels,state',
+    ...repoArgs(repo),
+  ]);
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: ghFailure(`Could not read issue #${issue}`, res.error, repo),
+    };
+  }
+
+  const parsed = parseGhJson<{
+    title?: unknown;
+    body?: unknown;
+    labels?: unknown;
+    state?: unknown;
+  }>(res.stdout);
+  if (parsed === null) {
+    return {
+      ok: false,
+      error: [
+        `Could not read issue #${issue}: gh exited 0 but did not print JSON.`,
+        `Fix: run 'gh issue view ${issue} --json title,body,labels,state' by hand — a gh older than 2.0 (no --json), or an interactive prompt landing on stdout, both look like this.`,
+        `gh printed: ${snippet(res.stdout)}`,
+      ].join('\n'),
+    };
+  }
+
+  return {
+    ok: true,
+    title: asString(parsed.title),
+    body: asString(parsed.body),
+    labels: ghLabelNames(parsed.labels),
+    state: asString(parsed.state),
+  };
+}
+
+/** An issue's state read, or the one reason it could not be read. */
+export type IssueStateResult = { ok: true; state: string } | { ok: false; error: string };
+
+/**
+ * Read an issue's `state` (`OPEN`/`CLOSED`) through gh — used to resolve `Depends on #N`
+ * references (#538's classify pre-screen, RFC-0001 E.2 rule 9) without reading anything else
+ * about the dependency issue.
+ */
+export function tryFetchIssueState(issue: string, repo?: string): IssueStateResult {
+  const res = exec('gh', ['issue', 'view', issue, '--json', 'state', ...repoArgs(repo)]);
+  if (!res.ok) {
+    return {
+      ok: false,
+      error: ghFailure(`Could not read the state of issue #${issue}`, res.error, repo),
+    };
+  }
+
+  const parsed = parseGhJson<{ state?: unknown }>(res.stdout);
+  if (parsed === null || typeof parsed.state !== 'string') {
+    return {
+      ok: false,
+      error: [
+        `Could not read the state of issue #${issue}: gh exited 0 but did not print JSON — no "state" field.`,
+        `Fix: run 'gh issue view ${issue} --json state' by hand.`,
+        `gh printed: ${snippet(res.stdout)}`,
+      ].join('\n'),
+    };
+  }
+
+  return { ok: true, state: parsed.state };
 }
 
 /** `--dry-run` support for comment-posting subcommands: show the body, post nothing. */

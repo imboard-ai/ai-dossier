@@ -589,8 +589,8 @@ resume derives from the full-cycle trail as usual.
 
 A phase may carry keys beyond its required ones, and one is worth knowing about:
 `gate` should also pass `model=<agent model id>`, which is what lets
-[`runstate stats`](#stats) break whole-run durations down by model. Runs whose trail
-carries the key nowhere are bucketed as `unknown`.
+[`runstate stats`](#stats) break whole-run durations and outcomes down by model. Runs whose
+trail carries the key nowhere are bucketed as `<unknown>`.
 
 The `Statuses` column is a closed set: a status not listed for a phase is rejected, so
 `report` cannot be `blocked` and only the ship phases (`ship`, `batch-ship`) may be
@@ -799,12 +799,41 @@ to `gate`, since pairing is by previous milestone; and `batch-*` rows sit after
 
 `--issues` takes a fleet-style selection (`1,2,3`, `1..9`, or mixed `1,2,5..8`, capped at
 200 issues since each costs a `gh` call) and reports the aggregates instead of every
-table: per-phase median/min/max, a per-run total, and a breakdown by the `model=` the gate
-milestone recorded.
+table: per-phase median/min/max, a per-run total, and a per-model breakdown.
 
 ```bash
 ai-dossier runstate stats --issues 440,448,451
 ```
+
+### The per-model breakdown
+
+The `By model:` table answers "which models finish the work", not just "how long they take":
+
+| column | meaning | `--json` field |
+|---|---|---|
+| `delivered` | runs whose LAST milestone is `ship`/`report`/`batch-ship`/`batch-report` at `done` | `delivered` |
+| `blocked` | runs whose last milestone is `blocked`, whatever the phase | `blocked` |
+| `unfinished` | everything else — in flight, parked `awaiting-merge`, `partial`, or fenced | `unfinished` |
+| `rate` | `delivered / runs` | `delivery_rate` |
+
+`rate` is a **floor, not a rate**: every run is in the denominator, including ones still
+running, so a model with work in flight reads low until it lands. `delivered` counts `ship
+done` — not just `report done` — because `ship done` is posted only after the merge *and*
+teardown are confirmed, and the report tail is routinely dispatched as a separate run.
+
+**Model ids are folded into canonical buckets.** Agents record whatever id their CLI was
+invoked with, so one model reaches the trail under several spellings depending on how it
+was routed — `glm-5.3` and `llmgateway/glm-5.3`, or `z-ai/glm-latest` and opencode's
+`~z-ai/glm-latest`. Unbucketed, one model's runs split across rows and the breakdown
+answers nothing. `stats` lowercases, drops a leading `~`, and peels a *known* routing
+prefix (`llmgateway`, `openrouter`, `moonshotai`, `anthropic`, `alibaba`, `google`,
+`openai`, `z-ai`, `zai`) joined by `/`, or by `-` on an id with no `/` left. It is an
+allowlist, never a generic "drop the first segment": an unrecognised leading segment is
+always kept, because merging two genuinely different models is the one error this table
+cannot survive. Every fold is disclosed in the row's trailing note (`folded: …`), and the
+raw spellings stay available as `aliases` in `--json`. A gateway not on that list makes
+one model split into two buckets — `stats` warns when two bucket keys look like that,
+naming `MODEL_ROUTING_PREFIXES` as the place to extend.
 
 Trails are imperfect in practice, and `stats` reports what it could not measure rather
 than guessing:
@@ -818,6 +847,9 @@ than guessing:
   has no total, rather than a fabricated `0s` that would drag every median toward zero.
 - An issue with no runstate comments says so, and an issue that cannot be read at all is
   named and left out while the rest of the selection is still reported.
+- The `<unknown>` model bucket (runs that recorded no `model=`) is named as not
+  attributable to any model whenever a real model bucket sits beside it — its outcome
+  columns are not a model's record.
 
 Warnings go to stderr in both human and `--json` mode, so stdout stays parseable and
 `stats` still exits 0 — a degraded read is not a failure. It exits 1 only when nothing in
@@ -826,7 +858,102 @@ the selection could be read.
 `--json` returns `repo`, `issues`, `runs` (each with `run`, `model`, `last_phase`,
 `last_status`, `total_seconds`, and a `phases` array of
 `{phase, status, started_at, ended_at, seconds}`), `aggregates.phases`,
-`aggregates.models`, `issues_without_trail`, `issues_failed`, and `warnings`.
+`aggregates.models` (each with `model`, `aliases`, `runs`, `samples`,
+`median_total_seconds`, `min_total_seconds`, `max_total_seconds`, `negative_samples`,
+`delivered`, `blocked`, `unfinished`, `delivery_rate`), `issues_without_trail`,
+`issues_failed`, and `warnings`.
+
+From `@ai-dossier/cli` 0.25.0, `aggregates.models[].model` is the **canonical** bucket key
+rather than the raw recorded `model=` — a consumer selecting on a routed spelling such as
+`llmgateway/glm-5.3` should look in that bucket's `aliases` instead.
+
+---
+
+## Classify Pre-Screen (`classify`)
+
+The deterministic gate `issue-cycle-classifier` runs **before any model call** (#538).
+`docs/reports/batch-pilot-2-execution.md` §4.1 measured the classifier costing ~64k
+tokens/dispatch at mid tier with full repo exploration — including for issues that hit an
+obvious RFC-0001 E.2 floor rule a deterministic check can catch for free — over the same
+§2.2 15-issue classify set.
+
+```bash
+ai-dossier classify prescreen --issue 538 [--repo owner/name] [--submitted-set 4,5..9]
+```
+
+`--submitted-set` names the issues batched/submitted alongside this one (fleet-style
+selection grammar) — an open `Depends on #N` inside that set does not count toward rule 9.
+
+Prints a single JSON verdict — no model call anywhere, exits 0 for either verdict
+(`verdict` is the payload, not a pass/fail gate); an invalid `--issue`/`--repo`/
+`--submitted-set` still exits 1 before any lookup:
+
+```json
+{
+  "issue": 538,
+  "state": "OPEN",
+  "verdict": "full",
+  "reasons": [
+    { "check": "text-floor", "message": "Title/body/labels match 'rule1-risk-floor-area' (keyword: 'terraform')." }
+  ],
+  "plan_artifact": "absent",
+  "degraded": false,
+  "warnings": [],
+  "checked_at": "2026-09-01T22:00:00.000Z"
+}
+```
+
+`state` lets a consumer tell a CLOSED issue apart from a read failure (`state: null`).
+`plan_artifact` is `present` (path-floor/file-count ran), `absent` (no plan:v1 comment —
+expected, not an error), or `unreadable` (couldn't even check — `path-floor`/`file-count`
+were skipped, not silently passed). `checked_at` is the one non-deterministic field: two
+runs of an unchanged issue can differ only there. `degraded`/`warnings` are the fail-open
+signal — when any lookup couldn't complete (fetching the issue, its comments, or a
+dependency's state), `degraded: true` and `warnings` names exactly what didn't run; the
+verdict still reflects whatever DID complete rather than blocking on the gap:
+
+```json
+{
+  "issue": 538,
+  "state": null,
+  "verdict": "candidate",
+  "reasons": [],
+  "plan_artifact": null,
+  "degraded": true,
+  "warnings": ["Could not read issue #538: gh is not authenticated.\nFix: run 'gh auth login' …"],
+  "checked_at": "2026-09-01T22:00:05.000Z"
+}
+```
+
+`verdict: "full"` means an obvious floor hit was found — the classifier should skip
+straight to posting `mode=full` with the recorded reason, no repo exploration needed.
+`verdict: "candidate"` means proceed to the bounded mechanical-tier classify pass (issue
+text + `reasons`/`warnings` as context, still no repo exploration unless that pass's
+`confidence` lands below 0.6, which triggers the dossier's single mid-tier escalation).
+
+Coverage is deliberately partial — it catches the OBVIOUS floor hits, not all of them:
+
+| Check | What it catches | Source |
+|---|---|---|
+| `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` | same policy as the `sched enqueue` pre-screen (#507), shared via `hard-block-labels.ts` |
+| `text-floor` | A text-keyword approximation of RFC-0001 E.2 rules 1/3/4 (risk-floor area, new package/workspace, deploy pipeline) scanned over title + body + labels | `prescreen.ts`'s `TEXT_FLOOR_PATTERNS`; the matched keyword is named in the reason message |
+| `path-floor` | Rule 1's path-based risk floor, reusing `plan validate`'s `scanRiskFloor` (capped at 8 reasons — a plan:v1 artifact is comment-sourced, untrusted input) | requires a `plan:v1` artifact already on the issue |
+| `file-count` | Rule 5, "Predicted files > 8" | requires a `plan:v1` artifact already on the issue |
+| `open-dependency` | Rule 9, an open `Depends on #N` outside `--submitted-set` (capped at 8 reasons; refs themselves capped at 32 per issue — an issue body is untrusted input) | resolved via `gh issue view <N> --json state` |
+
+What it does NOT catch — rule 2 beyond the bare `migration` keyword, rule 7 (hard
+rollback), rule 8 (visual/browser review), rules 5/6 (file/diff size) when no plan:v1
+artifact exists, and rule 10 (confidence) — is intentional: those need either file-level
+detail no pre-screen has, or judgment. They fall through to `verdict: "candidate"` and are
+exactly what the mechanical-tier classify pass exists to handle instead of a mid-tier,
+repo-exploring one. A text-keyword scan is deliberately conservative about false
+positives: bare words like `auth`/`infra`/`infrastructure` collide with benign phrasing
+(`gh auth`, "test infrastructure") often enough in real issue text that they are excluded
+in favor of more specific compound terms — verified against a real 15-issue regression
+fixture (`cli/src/__tests__/fixtures/prescreen-regression-issues.json`, from
+`docs/reports/batch-pilot-2-execution.md` §2.2's actual classify set). Methodology and the
+measured pre-screen hit rate:
+[docs/reports/issue-538-classifier-cost-methodology.md](../docs/reports/issue-538-classifier-cost-methodology.md).
 
 ---
 

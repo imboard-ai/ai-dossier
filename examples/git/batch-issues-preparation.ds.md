@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "batch-issues-preparation",
   "title": "Batch Issues Preparation — classify, DAG, compose batches, enqueue",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "protocol_version": "1.0",
   "status": "Draft",
   "last_updated": "2026-09-01",
@@ -63,13 +63,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "af3dfeb9aba46d8de94ca2cecb3f8f86cf44fcac997325a7f4f6894d87c4c5de"
+    "hash": "d4dfc4bc7209d40e5cff37cf893752e13a69e487bba69e4eba5254eb4a71ead2"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "vVkVEXbPP4FNj5/zXZpw9zun+KRzD8JMuiaKLIafvknMFekq1gJtaQ512VmiaTWeL/E/ic0jpSZtqU91zERSDw==",
+    "signature": "e5Zt6frvuUBTYrasOY3JKQe/WCdVdJF4jdmxAC/z5TU9HCyb+0MKUWpJAXRjZL9+Sq+tNOvABdPHMi0xTd3gDA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-01T21:45:11.108Z",
+    "signed_at": "2026-09-01T22:48:38.791Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -128,10 +128,10 @@ Detect cycles over the combined graph; a true cycle is **surfaced and STOPS the 
 
 For every edge A→B, resolve B's state: edges to merged/closed deps are **satisfied — drop them** from the manifest-facing graph; open deps outside the submitted set make A un-preparable (Step 5 defers it).
 
-### Step 3: Classify Every Issue (parallel cheap dispatches)
+### Step 3: Classify Every Issue (parallel mechanical-tier dispatches)
 
 1. **Reuse**: if an issue's LATEST runstate milestone is `phase=classify status=done`, take the verdict from that record — do not re-classify (re-posting would bury the trail).
-2. Otherwise dispatch **one cheap-tier agent per issue** (bounded: at most 8 concurrent), each running exactly `ai-dossier run imboard-ai/git/issue-cycle-classifier` for that one issue, **passing the submitted set in the dispatch context** (e.g. `submitted set: 1,2,5..8`) — classifier floor rule 9 ("outside the submitted set") must see open in-set deps as batched-with-this-issue so they do not force `full`. Classification is cheap and safe to parallelize; the classifier posts its own records, labels, and rationale (#465). DAG analysis stays with the orchestrator at the strongest tier (fleet 1b routing: judgment here, mechanical elsewhere).
+2. Otherwise dispatch **one mechanical-tier agent per issue** (bounded: at most 8 concurrent — the `mechanical` `ModelTier`, `packages/sched/src/types.ts`, the same value Step 8's manifest `tier` field carries; `--tier` itself is a `sched enqueue` flag and has no meaning on this ad-hoc `ai-dossier run` dispatch, so choose the mechanical-tier agent/model directly at dispatch time — not the vague "cheap-tier" this line used to say before #538, which in practice ran at mid tier, see `docs/reports/batch-pilot-2-execution.md` §4.1), each running exactly `ai-dossier run imboard-ai/git/issue-cycle-classifier` for that one issue, **passing the submitted set in the dispatch context** (e.g. `submitted set: 1,2,5..8`) — the classifier's Step 3 pre-screen translates that into `ai-dossier classify prescreen --submitted-set <selection>` so an open in-set dep (floor rule 9, "outside the submitted set") is exempted rather than forcing `full`. The classifier's own deterministic pre-screen (#538) rejects obvious `full` cases before spending a single mechanical-tier token, and escalates to mid tier only for the rare issue whose classification confidence genuinely needs a repo probe — mechanical tier is now safe as the default dispatch, not just an aspiration. Classification is cheap and safe to parallelize; the classifier posts its own records, labels, and rationale (#465). DAG analysis stays with the orchestrator at the strongest tier (fleet 1b routing: judgment here, mechanical elsewhere).
 3. Collect each verdict from `ai-dossier runstate last --issue <n> --json`: `mode`, `risk`, `est_files`, `est_diff`, `areas`, `test_scope`, `deps`, `confidence`.
 4. A classifier `blocked` record (e.g. `unreadable-issue`) drops the issue — reported as skipped. One failed dispatch is retried once; a persistent failure skips that issue, never the whole run.
 

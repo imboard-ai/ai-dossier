@@ -46,8 +46,12 @@ export const BATCH_MERGE_WAIT_PHASE = 'batch-merge-wait';
  */
 const SHIP_PHASE: Phase = 'ship';
 const GATE_PHASE: Phase = 'gate';
+const REPORT_PHASE: Phase = 'report';
 const BATCH_SHIP_PHASE: BatchPhase = 'batch-ship';
+const BATCH_REPORT_PHASE: BatchPhase = 'batch-report';
 const AWAITING_MERGE: Status = 'awaiting-merge';
+const DONE: Status = 'done';
+const BLOCKED: Status = 'blocked';
 
 /**
  * Row order for aggregate tables: `ALL_PHASES` order (classify, the full-cycle line,
@@ -63,8 +67,101 @@ export const STATS_PHASE_ORDER: readonly string[] = ALL_PHASES.flatMap((phase) =
       : [phase]
 );
 
-/** The bucket a run lands in when no milestone in the run carries a `model=` key. */
-export const UNKNOWN_MODEL = 'unknown';
+/**
+ * The bucket a run lands in when no milestone in the run carries a `model=` key.
+ *
+ * Angle-bracketed so it cannot be forged: {@link canonicalModel} lowercases and peels routing
+ * prefixes, and no input it accepts produces a leading `<`. A bare `unknown` was reachable from
+ * remote input (`Unknown`, `llmgateway/unknown`, `~~~unknown` all canonicalise to it), which
+ * would let anyone who can comment on an issue steer the "we could not attribute this" row.
+ */
+export const UNKNOWN_MODEL = '<unknown>';
+
+/**
+ * Gateway and provider tokens stripped from a recorded `model=` to find its bucket.
+ *
+ * Agents record whatever id their CLI was invoked with, and the same model reaches the trail
+ * under several spellings depending on how it was routed: `glm-5.3` direct vs
+ * `llmgateway/glm-5.3` through a gateway, `z-ai/glm-latest` vs opencode's `~z-ai/glm-latest`
+ * alias form, `openrouter-kimi-latest` vs `moonshotai/kimi-latest`. Unbucketed, a single
+ * model's runs split across rows and the per-model view — the whole reason the gate records
+ * `model=` — answers a question nobody asked (`imboard-ai/ai-dossier#528`).
+ *
+ * Deliberately an allowlist of *known routing* tokens, never a generic "drop the first
+ * segment" rule: merging two genuinely different models is the one error this table cannot
+ * survive, so an unrecognised leading segment is always kept.
+ */
+export const MODEL_ROUTING_PREFIXES: readonly string[] = [
+  'llmgateway',
+  'openrouter',
+  'moonshotai',
+  'anthropic',
+  'alibaba',
+  'google',
+  'openai',
+  'z-ai',
+  'zai',
+];
+
+/**
+ * Cap on how many routing prefixes are peeled from one id.
+ *
+ * Stripping terminates on its own — every peel returns a strictly shorter string — so this is
+ * not a termination guard. It bounds fold *depth*: an id with a longer prefix chain than this
+ * is left partially stripped and gets its own bucket, which is the safe direction to fail.
+ */
+const MAX_ROUTING_PREFIXES = 4;
+
+/**
+ * The bucket key for a recorded `model=` — the model itself, with routing noise removed.
+ *
+ * Lowercased, any leading `~` (opencode's gateway-alias marker) dropped, then known routing
+ * prefixes peeled off. A value that is *only* routing tokens keeps its identity rather than
+ * collapsing into every other such id — that is the length guard in {@link stripRoutingPrefix},
+ * not the empty-string fallback below, which is reachable only for an id that was empty or
+ * whitespace to begin with.
+ */
+export function canonicalModel(raw: string): string {
+  const lowered = raw.trim().toLowerCase();
+  let value = lowered.replace(/^~+/, '');
+
+  for (let i = 0; i < MAX_ROUTING_PREFIXES; i++) {
+    const stripped = stripRoutingPrefix(value);
+    if (stripped === null) break;
+    value = stripped;
+  }
+
+  return value === '' ? lowered : value;
+}
+
+/**
+ * One routing prefix off the front of `value`, or null when it does not start with one.
+ *
+ * `/` is a routing separator anywhere; `-` is only tried on an id that has no `/` left. A
+ * hyphen is also the ordinary within-segment separator of a provider slug, so peeling it out
+ * of an org-qualified id mangles rather than folds: `zai-org/glm-4.6` (the HuggingFace repo
+ * id) and `zai-coding-plan/glm-4.6` (the OpenRouter slug) would become `org/glm-4.6` and
+ * `coding-plan/glm-4.6` — keys that are not models and fold with nothing. Restricting `-` to
+ * the unqualified tail still folds the form it was added for, `openrouter-kimi-latest`, and
+ * `llmgateway/openrouter-kimi-latest` folds in two passes.
+ */
+function stripRoutingPrefix(value: string): string | null {
+  const separators = value.includes('/') ? SLASH_ONLY : ROUTING_SEPARATORS;
+  for (const prefix of MODEL_ROUTING_PREFIXES) {
+    for (const separator of separators) {
+      const head = `${prefix}${separator}`;
+      // `length >` and not `>=`: a value that is nothing but a prefix keeps its identity.
+      if (value.startsWith(head) && value.length > head.length) return value.slice(head.length);
+    }
+  }
+  return null;
+}
+
+/** Separators a routing prefix is joined to the model id with. */
+const ROUTING_SEPARATORS: readonly string[] = ['/', '-'];
+
+/** The subset tried on an id that still carries a `/` — see {@link stripRoutingPrefix}. */
+const SLASH_ONLY: readonly string[] = ['/'];
 
 /** The group a milestone lands in when it carries no `run=` id. */
 export const UNKNOWN_RUN = 'unknown-run';
@@ -167,9 +264,23 @@ export interface PhaseAggregate {
   negative_samples: number;
 }
 
-/** Per-`model=` view of whole-run totals — the point of recording `model=` at the gate. */
+/**
+ * Per-`model=` view of whole-run totals and outcomes — the point of recording `model=`.
+ *
+ * Duration alone answers "how long", never "which models finish the work". Both are needed
+ * to route a tier at a model with any evidence behind it, so the bucket carries the run's
+ * terminal state alongside its span.
+ */
 export interface ModelAggregate {
+  /** Canonical bucket key — see {@link canonicalModel}. */
   model: string;
+  /**
+   * The distinct raw `model=` spellings that folded into this bucket, sorted.
+   *
+   * Always populated (a bucket with one spelling lists that one), so a fold is visible in
+   * the output rather than silently reshaping someone's cohort.
+   */
+  aliases: string[];
   runs: number;
   /** Runs of this model whose total was measurable; the rest are excluded below. */
   samples: number;
@@ -177,6 +288,24 @@ export interface ModelAggregate {
   min_total_seconds: number | null;
   max_total_seconds: number | null;
   negative_samples: number;
+  /**
+   * Runs whose last milestone was a delivery phase at `done` — see {@link DELIVERED_PHASES}.
+   */
+  delivered: number;
+  /** Runs whose last milestone was `blocked`, whatever the phase. */
+  blocked: number;
+  /** Everything else: still in flight, parked awaiting merge, partial, or fenced. */
+  unfinished: number;
+  /**
+   * `delivered / runs`, in [0, 1] — a **floor**, not a rate.
+   *
+   * Every run is in the denominator, including ones still in flight, parked at
+   * `awaiting-merge`, `partial`, or superseded by a takeover fence. A model whose runs are
+   * mid-flight therefore reads low until they land, and a fenced generation counts against
+   * the same model whose successor delivered the work. Compare buckets over a closed window,
+   * or read `unfinished` alongside this.
+   */
+  delivery_rate: number;
 }
 
 /** The two cross-run rollups: per-phase spread, and whole-run totals bucketed by model. */
@@ -428,14 +557,56 @@ function byStatsPhaseOrder(a: { phase: string }, b: { phase: string }): number {
   return a.phase.localeCompare(b.phase);
 }
 
-/** Whole-run totals bucketed by `model=`, so runs become comparable across models. */
+/**
+ * Phases whose `done` means the work was delivered.
+ *
+ * `report` is the protocol's terminal phase, but `ship done` is posted only after the merge
+ * AND teardown are confirmed — the PR is in the base branch by then. The report tail is
+ * routinely a *separately dispatched* run (the scheduler dispatches a report agent against
+ * a merged PR), so counting `report` alone would score the delivering run as unfinished and
+ * report a completion rate far below what the trail actually shows.
+ */
+const DELIVERED_PHASES: readonly string[] = [
+  SHIP_PHASE,
+  REPORT_PHASE,
+  BATCH_SHIP_PHASE,
+  BATCH_REPORT_PHASE,
+];
+
+/** True when the run's last milestone says the work was delivered, not merely stopped. */
+function isCompleted(run: RunStats): boolean {
+  return run.last_status === DONE && DELIVERED_PHASES.includes(run.last_phase);
+}
+
+/** Whole-run totals and outcomes bucketed by `model=`, so runs become comparable across models. */
 function aggregateModels(runs: RunStats[]): ModelAggregate[] {
-  const buckets = new Map<string, { runs: number; totals: number[] }>();
+  interface Bucket {
+    runs: number;
+    totals: number[];
+    aliases: Set<string>;
+    delivered: number;
+    blocked: number;
+  }
+  const buckets = new Map<string, Bucket>();
+
   for (const run of runs) {
-    const key = run.model ?? UNKNOWN_MODEL;
-    const bucket = buckets.get(key) ?? { runs: 0, totals: [] };
+    const key = run.model === null ? UNKNOWN_MODEL : canonicalModel(run.model);
+    const bucket = buckets.get(key) ?? {
+      runs: 0,
+      totals: [],
+      aliases: new Set<string>(),
+      delivered: 0,
+      blocked: 0,
+    };
     bucket.runs += 1;
+    // Only a spelling someone actually recorded is an alias. The unknown bucket's runs
+    // recorded nothing, so inventing `<unknown>` there would put a value in `aliases` that
+    // appears in no trail — and make a run that literally recorded `model=unknown`
+    // indistinguishable from one with no `model=` at all.
+    if (run.model !== null) bucket.aliases.add(run.model);
     if (run.total_seconds !== null) bucket.totals.push(run.total_seconds);
+    if (isCompleted(run)) bucket.delivered += 1;
+    else if (run.last_status === BLOCKED) bucket.blocked += 1;
     buckets.set(key, bucket);
   }
 
@@ -444,21 +615,90 @@ function aggregateModels(runs: RunStats[]): ModelAggregate[] {
       const measured = bucket.totals.length > 0;
       return {
         model,
+        aliases: [...bucket.aliases].sort(),
         runs: bucket.runs,
         samples: bucket.totals.length,
         median_total_seconds: measured ? median(bucket.totals) : null,
         min_total_seconds: measured ? minOf(bucket.totals) : null,
         max_total_seconds: measured ? maxOf(bucket.totals) : null,
         negative_samples: bucket.totals.filter((v) => v < 0).length,
+        delivered: bucket.delivered,
+        blocked: bucket.blocked,
+        unfinished: bucket.runs - bucket.delivered - bucket.blocked,
+        delivery_rate: bucket.delivered / bucket.runs,
       };
     })
     .sort((a, b) => a.model.localeCompare(b.model));
+}
+
+/**
+ * What the model buckets could not measure, in the module's own `warnings` channel.
+ *
+ * The per-model table is the one an operator reads to decide which tier to route at which
+ * model, and two of its rows lie by omission if nothing says otherwise: a bucket of runs that
+ * recorded no model at all still prints a rate, and a model split across buckets because its
+ * gateway is not in {@link MODEL_ROUTING_PREFIXES} prints as two plausible-looking rows with
+ * no hint that they are one model. Reporting what could not be measured rather than guessing
+ * is this module's contract; these are the two places the new columns could break it.
+ */
+function modelWarnings(models: ModelAggregate[]): string[] {
+  const warnings: string[] = [];
+
+  // Only worth saying when there is an attributed bucket beside it: a table that is ALL
+  // unknown (a trail predating the `model=` key) invites no per-model comparison to misread,
+  // and warning there would fire on most historical trails for nothing.
+  const unknown = models.find((m) => m.model === UNKNOWN_MODEL);
+  if (unknown && models.length > 1) {
+    warnings.push(
+      `${unknown.runs} run(s) recorded no model= — their row is bucketed as ${UNKNOWN_MODEL}, and its outcome columns are not attributable to any model`
+    );
+  }
+
+  // A key that is another key with a leading segment still attached is the signature of a
+  // gateway the allowlist does not know: `qwen/qwen3-coder` beside `qwen3-coder`.
+  for (const outer of models) {
+    for (const inner of models) {
+      if (outer === inner || inner.model === UNKNOWN_MODEL) continue;
+      if (outer.model.endsWith(`/${inner.model}`) || outer.model.endsWith(`-${inner.model}`)) {
+        warnings.push(
+          `'${outer.model}' and '${inner.model}' may be the same model split across buckets — add its routing prefix to MODEL_ROUTING_PREFIXES to fold them`
+        );
+      }
+    }
+  }
+
+  return warnings;
 }
 
 /** One aggregate row's skew note, or null when every sample was forwards. */
 export function skewNote(negativeSamples: number): string | null {
   if (negativeSamples === 0) return null;
   return `${negativeSamples} skewed`;
+}
+
+/**
+ * Most folded spellings named inline on a model row before the rest become a count.
+ *
+ * An attacker who can comment on the issue can post arbitrarily many distinct `model=`
+ * spellings that all canonicalise to one bucket, so an uncapped list is an unbounded cell —
+ * the DoS {@link MAX_CELL_LENGTH} exists to stop, reached by another route.
+ */
+export const MAX_NAMED_ALIASES = 3;
+
+/**
+ * The folded-alias note for a model row, or null when nothing folded.
+ *
+ * Pure and exported (like {@link skewNote}) so the disclosure guarantee — a merge is always
+ * visible, never silent — is testable, rather than living only in a private renderer.
+ * Values are milestone-derived and therefore remote: each is passed through
+ * {@link renderValue} before it can reach a terminal.
+ */
+export function modelNote(model: ModelAggregate): string | null {
+  const folded = model.aliases.filter((alias) => alias !== model.model);
+  if (folded.length === 0) return null;
+  const named = folded.slice(0, MAX_NAMED_ALIASES).map(renderValue);
+  const rest = folded.length - named.length;
+  return `folded: ${named.join(', ')}${rest > 0 ? ` (+${rest} more)` : ''}`;
 }
 
 export interface StatsInput {
@@ -512,6 +752,7 @@ export function buildStatsReport(input: StatsInput): StatsReport {
       );
     }
   }
+  for (const line of modelWarnings(models)) warn(line);
 
   return {
     repo,
