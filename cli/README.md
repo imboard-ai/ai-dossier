@@ -600,15 +600,19 @@ costs far more than retrying the comment.
 ### `verify`
 
 `verify` implements `imboard-ai/git/gate-issue`'s resume table. It never trusts the
-comment alone — each claim is checked against reality (is the branch still on the remote,
-does the worktree still exist, does the planning file exist, has HEAD moved, what is the
-PR's state) before it reports where to resume:
+comment alone — each claim is checked against reality, remote-first (is the branch still
+on `origin`, is the milestone's `head=` present on `origin/<branch>` — fetched, then
+checked by ancestry — what is the PR's state) before it reports where to resume. A local
+worktree is never required: it's reported informationally as `local_worktree=`, but no
+resume decision depends on it — a run can resume on a machine that has never seen the
+worktree (#499):
 
 ```
 $ ai-dossier runstate verify --issue 440
 resume_from=implement
 run_id=r-440-ab56
-verified=branch,worktree,planning
+verified=branch,head
+local_worktree=absent
 resume_context={"branch":"feature/440-runstate","worktree":"/repo/worktrees/feature-440-runstate",...}
 ```
 
@@ -622,9 +626,18 @@ resume_context={"branch":"feature/440-runstate","worktree":"/repo/worktrees/feat
 | `done` | The `report` milestone is posted and the issue is closed (`note=already complete`) |
 
 A failed check sends the resume *backwards*, never forwards: if the branch is gone from
-the remote or the worktree no longer exists, a `plan`/`implement`/`review` milestone
-still yields `resume_from=setup`. A milestone with `status=blocked` resumes at its own
-phase.
+the remote, a `plan`/`implement`/`review` milestone still yields `resume_from=setup`. If
+the branch verifies but the milestone's own `head=` cannot be confirmed on
+`origin/<branch>`, the resume falls back to that milestone's own phase instead (e.g. an
+unverifiable `plan` head still yields `resume_from=plan`) — never to `setup`, and never
+because the local worktree directory happens to be missing on this machine
+(`local_worktree=absent` never changes `resume_from`). A milestone with `status=blocked`
+resumes at its own phase.
+
+`local_worktree` reports whether the worktree path carried in `resume_context` exists on
+*this* machine: `present`, `absent`, or `n/a` when no milestone recorded a `worktree=` at
+all. It is informational only — it never changes `resume_from`, which is decided purely
+from the remote-first checks above.
 
 `resume_context` is merged across the run's milestones (later ones winning), so a resume
 at `plan` still sees `branch`/`worktree` from the `setup` milestone. (The dossier's own
@@ -633,8 +646,9 @@ self-sufficient.) If the last three milestones are all `blocked` on the same pha
 `verify` adds `hard_block=resume-loop` — the run is looping and needs a human.
 
 When a check cannot run at all — `git`/`gh` is missing or the remote is unreachable, or
-the milestone's `branch=`/`worktree=`/`pr=` value is not one `verify` will hand to a
-subprocess — that check degrades to "not verified" and `verify` warns instead of failing.
+the milestone's `branch=`/`head=`/`pr=` value is not one `verify` will hand to a
+subprocess (the `worktree=` path, checked only with `fs.stat`, is exempt) — that check
+degrades to "not verified" and `verify` warns instead of failing.
 It still exits 0, because a conservative `resume_from` is the safe direction (redo a phase
 rather than skip one), but the reader needs to know the answer is conservative *because a
 check could not run*. Warnings go to stderr so stdout stays parseable:
@@ -650,8 +664,8 @@ requires is refused rather than passed to `git`/`gh` — it becomes one of the w
 above.
 
 `--json` returns the same fields as an object (`resume_from`, `run_id`, `verified`,
-`resume_context`, plus `slot_trail`, `hard_block`, `note`, and `warnings` when they
-apply).
+`resume_context`, `local_worktree`, plus `slot_trail`, `hard_block`, `note`, and
+`warnings` when they apply).
 
 ### stats
 

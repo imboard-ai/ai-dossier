@@ -812,6 +812,46 @@ describe('runstate command', () => {
       expect(JSON.parse(logged()[0]).warnings).toBeUndefined();
       expect(errored()).toHaveLength(0);
     });
+
+    it('names a missing git binary distinctly when the head check cannot run', async () => {
+      const setup = [
+        RUNSTATE_MARKER,
+        'phase=setup status=done run=r-440-ab56 at=2026-08-24T10:01:00Z',
+        'branch=feature/440',
+        'worktree=/definitely/not/a/real/path/for/tests',
+        'pool_claimed=false',
+        'base_branch=main',
+        'next=plan',
+        '',
+      ].join('\n');
+      const plan = [
+        RUNSTATE_MARKER,
+        'phase=plan status=done run=r-440-ab56 at=2026-08-24T10:02:00Z',
+        'planning=/definitely/not/a/real/path/for/tests/PLANNING-440.md',
+        'head=abc1234',
+        'open_questions=0',
+        'visual_review=false',
+        'next=implement',
+        '',
+      ].join('\n');
+      execHandles((file, args) => {
+        if (file === 'gh' && args[0] === 'issue')
+          return commentsPayload([GATE_MILESTONE, setup, plan]);
+        if (file === 'git' && args[0] === 'ls-remote') return '';
+        if (file === 'git' && args[0] === 'fetch') {
+          throw Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' });
+        }
+        throw new Error(`unexpected ${file} ${args.join(' ')}`);
+      });
+
+      await run(['runstate', 'verify', '--issue', '440', '--json']);
+
+      const parsed = JSON.parse(logged()[0]);
+      expect(parsed.resume_from).toBe('plan');
+      expect(parsed.warnings.join(' ')).toContain(
+        "git is not installed or not on PATH — could not confirm head 'abc1234'"
+      );
+    });
   });
   // Milestone values come back off a GitHub issue, where anyone with an account can post
   // a `<!-- runstate:v1 -->` comment. They are never shell-interpolated, but they do

@@ -239,14 +239,18 @@ function probeHeadOnRemote(branch: string, head: string, warn: WarnOnce): boolea
   }
   const fetchRes = exec('git', ['fetch', 'origin', branch]);
   if (!fetchRes.ok) {
-    warn(
-      probeFailure(
-        'git',
-        `fetch 'origin/${branch}' to confirm head '${head}'`,
-        fetchRes.error,
-        HEAD_UNVERIFIED
-      )
-    );
+    if (fetchRes.error.notFound) {
+      warn(`git is not installed or not on PATH — could not confirm head '${head}'`);
+    } else {
+      warn(
+        probeFailure(
+          'git',
+          `fetch 'origin/${branch}' to confirm head '${head}'`,
+          fetchRes.error,
+          HEAD_UNVERIFIED
+        )
+      );
+    }
     return false;
   }
   const ancestorRes = exec('git', ['merge-base', '--is-ancestor', head, 'FETCH_HEAD']);

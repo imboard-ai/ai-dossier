@@ -731,6 +731,18 @@ function freshEntry(last: ParsedMilestone): { note: string; slot_trail?: boolean
 }
 
 /**
+ * Whether the `worktree=` path recorded in `context` exists on this machine — `n/a` when
+ * no milestone recorded one. Informational only; see {@link ResumeResult.local_worktree}.
+ */
+function resolveLocalWorktree(
+  context: Record<string, string>,
+  probe: ResumeProbe
+): ResumeResult['local_worktree'] {
+  if (!context.worktree) return 'n/a';
+  return probe.dirExists(context.worktree) ? 'present' : 'absent';
+}
+
+/**
  * Resolve where a run should resume from, implementing the resume verification table in
  * `imboard-ai/git/gate-issue`. Never trusts the milestone alone — every claim is checked
  * against reality through `probe`, and {@link PHASE_RESUMERS} holds the per-phase rules.
@@ -752,11 +764,7 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
 
   const last = milestones[milestones.length - 1];
   const verified: string[] = [];
-  const local_worktree: ResumeResult['local_worktree'] = context.worktree
-    ? probe.dirExists(context.worktree)
-      ? 'present'
-      : 'absent'
-    : 'n/a';
+  const local_worktree = resolveLocalWorktree(context, probe);
   const base = {
     run_id: last.run || null,
     verified,
