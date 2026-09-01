@@ -10,6 +10,7 @@ import {
   DEFAULT_TIER_MODELS,
   escalateTier,
   NO_BACKGROUND_EXIT_INSTRUCTION,
+  OPENCODE_DISPATCH_COMMAND,
   reportTierFor,
   resolveDispatch,
   type SchedConfig,
@@ -45,6 +46,12 @@ describe('dispatch command building (#464 AC1)', () => {
 
   it('builds the stdin prompt with the issue number', () => {
     expect(buildPrompt('Run issue #{issue} now', 464)).toBe('Run issue #464 now');
+  });
+
+  it('opencode template includes --auto so headless dispatch does not auto-reject external_directory prompts (#506)', () => {
+    expect(OPENCODE_DISPATCH_COMMAND).toContain('--auto');
+    const argv = buildAgentCommand(OPENCODE_DISPATCH_COMMAND, 'mid', 506, DEFAULT_TIER_MODELS);
+    expect(argv).toEqual(['opencode', 'run', '--auto', '--format', 'json', '--model', 'sonnet']);
   });
 });
 

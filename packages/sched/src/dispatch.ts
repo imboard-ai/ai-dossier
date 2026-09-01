@@ -52,6 +52,7 @@ export const DEFAULT_DISPATCH_COMMAND: readonly string[] = [
 export const OPENCODE_DISPATCH_COMMAND: readonly string[] = [
   'opencode',
   'run',
+  '--auto',
   '--format',
   'json',
   '--model',
