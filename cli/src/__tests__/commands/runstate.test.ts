@@ -482,7 +482,10 @@ describe('runstate command', () => {
       expect(parsed.resume_context.base_branch).toBe('main');
     });
 
-    it('verifies a setup milestone against git and the filesystem', async () => {
+    // Remote-first (WIP sync rule, issue #499): a recovery run on a machine that has never
+    // seen the worktree must still resume forward from a verified branch — the worktree
+    // directory is reported informationally (`local_worktree=`) and never gates the resume.
+    it('verifies a setup milestone against git, remote-first — no local worktree required', async () => {
       const setup = [
         RUNSTATE_MARKER,
         'phase=setup status=done run=r-440-ab56 at=2026-08-24T10:01:00Z',
@@ -502,11 +505,12 @@ describe('runstate command', () => {
 
       await run(['runstate', 'verify', '--issue', '440', '--json']);
 
-      // Branch verifies (ls-remote succeeds) but the worktree path does not exist,
-      // so the run must fall back to setup rather than trusting the comment.
+      // Branch verifies (ls-remote succeeds); the worktree path does not exist on this
+      // machine, but that is a bonus signal, not a requirement.
       const parsed = JSON.parse(logged()[0]);
-      expect(parsed.resume_from).toBe('setup');
+      expect(parsed.resume_from).toBe('plan');
       expect(parsed.verified).toEqual(['branch']);
+      expect(parsed.local_worktree).toBe('absent');
     });
 
     it('surfaces a resume-loop hard block', async () => {
@@ -808,6 +812,46 @@ describe('runstate command', () => {
       expect(JSON.parse(logged()[0]).warnings).toBeUndefined();
       expect(errored()).toHaveLength(0);
     });
+
+    it('names a missing git binary distinctly when the head check cannot run', async () => {
+      const setup = [
+        RUNSTATE_MARKER,
+        'phase=setup status=done run=r-440-ab56 at=2026-08-24T10:01:00Z',
+        'branch=feature/440',
+        'worktree=/definitely/not/a/real/path/for/tests',
+        'pool_claimed=false',
+        'base_branch=main',
+        'next=plan',
+        '',
+      ].join('\n');
+      const plan = [
+        RUNSTATE_MARKER,
+        'phase=plan status=done run=r-440-ab56 at=2026-08-24T10:02:00Z',
+        'planning=/definitely/not/a/real/path/for/tests/PLANNING-440.md',
+        'head=abc1234',
+        'open_questions=0',
+        'visual_review=false',
+        'next=implement',
+        '',
+      ].join('\n');
+      execHandles((file, args) => {
+        if (file === 'gh' && args[0] === 'issue')
+          return commentsPayload([GATE_MILESTONE, setup, plan]);
+        if (file === 'git' && args[0] === 'ls-remote') return '';
+        if (file === 'git' && args[0] === 'fetch') {
+          throw Object.assign(new Error('spawnSync git ENOENT'), { code: 'ENOENT' });
+        }
+        throw new Error(`unexpected ${file} ${args.join(' ')}`);
+      });
+
+      await run(['runstate', 'verify', '--issue', '440', '--json']);
+
+      const parsed = JSON.parse(logged()[0]);
+      expect(parsed.resume_from).toBe('plan');
+      expect(parsed.warnings.join(' ')).toContain(
+        "git is not installed or not on PATH — could not confirm head 'abc1234'"
+      );
+    });
   });
   // Milestone values come back off a GitHub issue, where anyone with an account can post
   // a `<!-- runstate:v1 -->` comment. They are never shell-interpolated, but they do
@@ -878,16 +922,22 @@ describe('runstate command', () => {
       execHandles((file, args) => {
         if (file === 'gh' && args[0] === 'issue') return commentsPayload([implement]);
         if (file === 'git' && args[0] === 'ls-remote') return '';
+        if (file === 'git' && args[0] === 'fetch') return '';
+        if (file === 'git' && args[0] === 'merge-base') return '';
         throw new Error(`unexpected ${file} ${args.join(' ')}`);
       });
 
       await run(['runstate', 'verify', '--issue', '440', '--json']);
 
+      // The head check is remote-first (fetch + merge-base against origin), so a relative
+      // worktree path never reaches a local `git -C <path>` invocation.
       for (const [, args] of mockedExec.mock.calls) {
         expect((args ?? []) as string[]).not.toContain('-C');
       }
       const parsed = JSON.parse(logged()[0]);
-      expect(parsed.resume_from).toBe('setup');
+      expect(parsed.resume_from).toBe('review');
+      // The worktree path is still reported (informationally) as unusable.
+      expect(parsed.local_worktree).toBe('absent');
       expect(parsed.warnings.join(' ')).toContain('not an absolute path');
     });
 

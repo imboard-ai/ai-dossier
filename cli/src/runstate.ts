@@ -171,9 +171,6 @@ const RUN_ID_RE = /^r-\d+-[0-9a-f]{4,}$/;
 /** Random bytes in a minted run id; 2 bytes renders as the 4 hex chars in `r-440-ab56`. */
 const RUN_ID_RANDOM_BYTES = 2;
 
-/** Characters in the abbreviated SHA `git rev-parse --short HEAD` prints. */
-const SHORT_SHA_LENGTH = 7;
-
 /** Consecutive `blocked` milestones on one phase that mean the run is looping. */
 export const RESUME_LOOP_CAP = 3;
 
@@ -547,16 +544,23 @@ export function mintRunId(issue: number | string): string {
 /**
  * The world-facing checks the resume table needs. Injected so {@link computeResume}
  * stays pure and testable — the command layer supplies the `git`/`gh`/`fs` versions.
+ *
+ * Remote-first: origin/<branch> is the durable copy of the work (WIP sync rule), so every
+ * check that gates a resume decision runs against the remote. A local worktree is a bonus
+ * signal ({@link dirExists}, surfaced as `local_worktree=` — informational only) never a
+ * requirement — a resume verified purely from origin must succeed even when this machine
+ * has never seen the worktree.
  */
 export interface ResumeProbe {
   /** `git ls-remote --exit-code origin <branch>` succeeds. */
   branchOnRemote(branch: string): boolean;
-  /** The worktree directory exists. */
+  /**
+   * `head` is present on `origin/<branch>`: equal to its current tip, or an ancestor of it
+   * (`git fetch origin <branch>` then `git merge-base --is-ancestor <head> FETCH_HEAD`).
+   */
+  headOnRemote(branch: string, head: string): boolean;
+  /** The worktree directory exists on this machine. Informational only — never gates resume. */
   dirExists(path: string): boolean;
-  /** The planning file exists. */
-  fileExists(path: string): boolean;
-  /** `git -C <worktree> rev-parse --short HEAD`, or null if it fails. */
-  headOf(worktree: string): string | null;
   /** `gh pr view <pr> --json state,mergedAt,mergeable`, or null if it fails. */
   prState(pr: string): { state: string; mergedAt: string | null; mergeable: string } | null;
   /** The issue's state is CLOSED. */
@@ -593,6 +597,12 @@ export interface ResumeResult {
   slot_trail?: boolean;
   /** Human-readable note, e.g. "already complete". */
   note?: string;
+  /**
+   * Whether the `worktree=` path carried in `resume_context` exists on this machine —
+   * `n/a` when no milestone recorded one. Bonus signal only: it never changes
+   * `resume_from`, which is decided purely from the remote-first checks above.
+   */
+  local_worktree: 'present' | 'absent' | 'n/a';
 }
 
 /**
@@ -625,16 +635,23 @@ interface ResumeScan {
   probe: ResumeProbe;
   /** Record a check that passed. Idempotent, so a resolver may re-check freely. */
   pass(check: string): void;
-  /** The branch is still on the remote and the worktree directory still exists. */
+  /** The branch named in the recorded setup claims is still on the remote. */
   setupOk(): boolean;
+  /**
+   * `claimedHead` (the last milestone's own `head=`, `-dirty`-stripped) is present on
+   * `origin/<branch>`. Shared by every phase whose milestone carries a `head=`, so the
+   * remote-first ancestry check has one implementation.
+   */
+  headOk(): boolean;
 }
 
 /**
  * Where each phase's run re-enters, given that its own milestone is the latest one.
  *
  * Every phase downstream of `setup` re-checks the setup claims first: a branch deleted on
- * the remote or a reaped worktree invalidates everything recorded after it, so the run
- * has to rebuild the workspace before it can trust its own later milestones.
+ * the remote invalidates everything recorded after it, so the run has to rebuild the
+ * workspace before it can trust its own later milestones. Nothing here requires a local
+ * worktree to exist on this machine — every check runs against origin (WIP sync rule).
  */
 const PHASE_RESUMERS: Record<Phase, (scan: ResumeScan) => ResumeDecision> = {
   gate: () => ({ resume_from: 'setup' }),
@@ -643,28 +660,23 @@ const PHASE_RESUMERS: Record<Phase, (scan: ResumeScan) => ResumeDecision> = {
 
   plan: (scan) => {
     if (!scan.setupOk()) return { resume_from: 'setup' };
-    const planning = scan.context.planning;
-    if (!planning || !scan.probe.fileExists(planning)) return { resume_from: 'plan' };
-    scan.pass('planning');
+    if (!scan.headOk()) return { resume_from: 'plan' };
+    scan.pass('head');
     return { resume_from: 'implement' };
   },
 
   implement: (scan) => {
     if (!scan.setupOk()) return { resume_from: 'setup' };
-    const head = scan.probe.headOf(scan.context.worktree);
-    const claimed = (scan.last.keys.head ?? '').replace(DIRTY_HEAD_SUFFIX_RE, '');
-    // The milestone may record a longer or shorter abbreviation than `--short` prints,
-    // so compare on the short-SHA prefix rather than for equality.
-    if (!head || !claimed || !head.startsWith(claimed.slice(0, SHORT_SHA_LENGTH))) {
-      return { resume_from: 'implement' };
-    }
+    if (!scan.headOk()) return { resume_from: 'implement' };
     scan.pass('head');
     return { resume_from: 'review' };
   },
 
   review: (scan) => {
     if (!scan.setupOk()) return { resume_from: 'setup' };
-    // A `partial` review still has agents left to run.
+    if (!scan.headOk()) return { resume_from: 'review' };
+    scan.pass('head');
+    // A `partial` review still has agents left to run, even once its own head verifies.
     return { resume_from: scan.last.status === 'partial' ? 'review' : 'ship' };
   },
 
@@ -719,13 +731,32 @@ function freshEntry(last: ParsedMilestone): { note: string; slot_trail?: boolean
 }
 
 /**
+ * Whether the `worktree=` path recorded in `context` exists on this machine — `n/a` when
+ * no milestone recorded one. Informational only; see {@link ResumeResult.local_worktree}.
+ */
+function resolveLocalWorktree(
+  context: Record<string, string>,
+  probe: ResumeProbe
+): ResumeResult['local_worktree'] {
+  if (!context.worktree) return 'n/a';
+  return probe.dirExists(context.worktree) ? 'present' : 'absent';
+}
+
+/**
  * Resolve where a run should resume from, implementing the resume verification table in
  * `imboard-ai/git/gate-issue`. Never trusts the milestone alone — every claim is checked
  * against reality through `probe`, and {@link PHASE_RESUMERS} holds the per-phase rules.
  */
 export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe): ResumeResult {
   if (milestones.length === 0) {
-    return { resume_from: 'none', run_id: null, verified: [], resume_context: {}, last: null };
+    return {
+      resume_from: 'none',
+      run_id: null,
+      verified: [],
+      resume_context: {},
+      last: null,
+      local_worktree: 'n/a',
+    };
   }
 
   const context: Record<string, string> = {};
@@ -733,7 +764,14 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
 
   const last = milestones[milestones.length - 1];
   const verified: string[] = [];
-  const base = { run_id: last.run || null, verified, resume_context: context, last };
+  const local_worktree = resolveLocalWorktree(context, probe);
+  const base = {
+    run_id: last.run || null,
+    verified,
+    resume_context: context,
+    last,
+    local_worktree,
+  };
 
   if (hitLoopCap(milestones)) {
     return { ...base, resume_from: last.phase, hard_block: 'resume-loop' };
@@ -759,16 +797,29 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
     if (!verified.includes(check)) verified.push(check);
   };
   const setupOk = (): boolean => {
-    const { branch, worktree } = context;
-    if (!branch || !worktree) return false;
-    let ok = true;
-    if (probe.branchOnRemote(branch)) pass('branch');
-    else ok = false;
-    if (probe.dirExists(worktree)) pass('worktree');
-    else ok = false;
-    return ok;
+    // Remote-first (WIP sync rule): origin/<branch> is the durable copy of the work, so a
+    // resume is valid purely from the remote — the worktree directory (`local_worktree`
+    // above) is a bonus signal, never a requirement.
+    const { branch } = context;
+    if (!branch) return false;
+    if (!probe.branchOnRemote(branch)) return false;
+    pass('branch');
+    return true;
+  };
+  const headOk = (): boolean => {
+    const { branch } = context;
+    const claimed = (last.keys.head ?? '').replace(DIRTY_HEAD_SUFFIX_RE, '');
+    if (!branch || !claimed) return false;
+    return probe.headOnRemote(branch, claimed);
   };
 
-  const { resume_from, note } = PHASE_RESUMERS[last.phase]({ last, context, probe, pass, setupOk });
+  const { resume_from, note } = PHASE_RESUMERS[last.phase]({
+    last,
+    context,
+    probe,
+    pass,
+    setupOk,
+    headOk,
+  });
   return { ...base, resume_from, ...(note ? { note } : {}) };
 }

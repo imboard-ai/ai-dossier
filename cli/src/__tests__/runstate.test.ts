@@ -74,9 +74,8 @@ const DOSSIER_SPEC: Array<{ phase: string; statuses: string[]; keys: Record<stri
 
 const noopProbe: ResumeProbe = {
   branchOnRemote: () => true,
+  headOnRemote: () => true,
   dirExists: () => true,
-  fileExists: () => true,
-  headOf: () => 'abc1234',
   prState: () => null,
   issueClosed: () => false,
 };
@@ -553,14 +552,18 @@ describe('computeResume', () => {
   );
   const planDone = m(
     'phase=plan status=done run=r-440-ab56 at=2026-08-24T10:02:00Z',
-    'planning=/repo/worktrees/feature-440/PLANNING-440.md'
+    'planning=/repo/worktrees/feature-440/PLANNING-440.md',
+    'head=abc1234'
   );
   const implementDone = m(
     'phase=implement status=done run=r-440-ab56 at=2026-08-24T10:03:00Z',
     'head=abc1234'
   );
 
-  const reviewDone = m('phase=review status=done run=r-440-ab56 at=2026-08-24T10:04:00Z');
+  const reviewDone = m(
+    'phase=review status=done run=r-440-ab56 at=2026-08-24T10:04:00Z',
+    'head=abc1234'
+  );
 
   it('reports a fresh run when there are no milestones', () => {
     const result = computeResume([], probe());
@@ -580,7 +583,7 @@ describe('computeResume', () => {
   it('resumes at plan when the setup claims verify', () => {
     const result = computeResume([gateDone, setupDone], probe());
     expect(result.resume_from).toBe('plan');
-    expect(result.verified).toEqual(['branch', 'worktree']);
+    expect(result.verified).toEqual(['branch']);
   });
 
   it('falls back to setup when the branch is gone from the remote', () => {
@@ -588,37 +591,52 @@ describe('computeResume', () => {
     expect(result.resume_from).toBe('setup');
   });
 
-  it('falls back to setup when the worktree directory is gone', () => {
+  // Remote-first (WIP sync rule): a resume that has verified the branch on origin must not
+  // fall back to setup just because this machine has never seen the worktree — issue #499.
+  it('does not fall back to setup when only the local worktree directory is gone', () => {
     const result = computeResume([gateDone, setupDone], probe({ dirExists: () => false }));
-    expect(result.resume_from).toBe('setup');
+    expect(result.resume_from).toBe('plan');
+    expect(result.local_worktree).toBe('absent');
   });
 
-  it('resumes at implement when the planning file exists', () => {
+  it('resumes at implement when the plan head verifies on origin', () => {
     const result = computeResume([gateDone, setupDone, planDone], probe());
     expect(result.resume_from).toBe('implement');
-    expect(result.verified).toContain('planning');
+    expect(result.verified).toContain('head');
   });
 
-  it('falls back to plan when the planning file is missing', () => {
+  it('falls back to plan when the plan head cannot be verified on origin', () => {
     const result = computeResume(
       [gateDone, setupDone, planDone],
-      probe({ fileExists: () => false })
+      probe({ headOnRemote: () => false })
     );
     expect(result.resume_from).toBe('plan');
   });
 
-  it('falls back to setup from plan when the setup checks fail', () => {
+  it('falls back to setup from plan when the branch is gone from the remote', () => {
     const result = computeResume(
       [gateDone, setupDone, planDone],
-      probe({ dirExists: () => false })
+      probe({ branchOnRemote: () => false })
     );
     expect(result.resume_from).toBe('setup');
   });
 
-  it('resumes at review when the worktree HEAD matches the implement milestone', () => {
+  // Cross-machine regression (#499): a recovery run on a machine that has never seen the
+  // worktree must still resume forward — resume verification is remote-first, and a local
+  // worktree is a bonus signal, never a requirement.
+  it('resumes at implement from setup+plan milestones when the worktree does not exist on this machine', () => {
+    const result = computeResume(
+      [gateDone, setupDone, planDone],
+      probe({ dirExists: () => false })
+    );
+    expect(result.resume_from).toBe('implement');
+    expect(result.local_worktree).toBe('absent');
+  });
+
+  it('resumes at review when the implement head verifies on origin', () => {
     const result = computeResume(
       [gateDone, setupDone, planDone, implementDone],
-      probe({ headOf: () => 'abc1234' })
+      probe({ headOnRemote: (_branch, head) => head === 'abc1234' })
     );
     expect(result.resume_from).toBe('review');
     expect(result.verified).toContain('head');
@@ -629,14 +647,17 @@ describe('computeResume', () => {
       'phase=implement status=done run=r-440-ab56 at=2026-08-24T10:03:00Z',
       'head=abc1234-dirty'
     );
-    const result = computeResume([gateDone, setupDone, dirty], probe({ headOf: () => 'abc1234' }));
+    const result = computeResume(
+      [gateDone, setupDone, dirty],
+      probe({ headOnRemote: (_branch, head) => head === 'abc1234' })
+    );
     expect(result.resume_from).toBe('review');
   });
 
-  it('falls back to implement when HEAD moved', () => {
+  it('falls back to implement when the head cannot be verified on origin', () => {
     const result = computeResume(
       [gateDone, setupDone, planDone, implementDone],
-      probe({ headOf: () => 'deadbee' })
+      probe({ headOnRemote: () => false })
     );
     expect(result.resume_from).toBe('implement');
   });
@@ -648,11 +669,33 @@ describe('computeResume', () => {
   it('re-enters review when the review was partial', () => {
     const reviewPartial = m(
       'phase=review status=partial run=r-440-ab56 at=2026-08-24T10:04:00Z',
-      'agents_pending=a11y'
+      'agents_pending=a11y',
+      'head=abc1234'
     );
     const result = computeResume([gateDone, setupDone, reviewPartial], probe());
     expect(result.resume_from).toBe('review');
     expect(result.resume_context.agents_pending).toBe('a11y');
+  });
+
+  it('re-enters review when a partial review head cannot be verified on origin', () => {
+    const reviewPartial = m(
+      'phase=review status=partial run=r-440-ab56 at=2026-08-24T10:04:00Z',
+      'agents_pending=a11y',
+      'head=abc1234'
+    );
+    const result = computeResume(
+      [gateDone, setupDone, reviewPartial],
+      probe({ headOnRemote: () => false })
+    );
+    expect(result.resume_from).toBe('review');
+  });
+
+  it('falls back to review when a completed review head cannot be verified on origin', () => {
+    const result = computeResume(
+      [gateDone, setupDone, reviewDone],
+      probe({ headOnRemote: () => false })
+    );
+    expect(result.resume_from).toBe('review');
   });
 
   it('routes awaiting-merge to ship-teardown once the PR is merged', () => {
@@ -777,7 +820,22 @@ describe('computeResume', () => {
     const { verified } = computeResume(trail, probe());
     expect(verified).toEqual([...new Set(verified)]);
     expect(verified).toContain('branch');
-    expect(verified).toContain('worktree');
+    expect(verified).toContain('head');
+  });
+
+  it("reports local_worktree='n/a' when no milestone recorded a worktree", () => {
+    expect(computeResume([gateDone], probe()).local_worktree).toBe('n/a');
+  });
+
+  it("reports local_worktree='present' when the recorded worktree exists on this machine", () => {
+    const result = computeResume([gateDone, setupDone], probe({ dirExists: () => true }));
+    expect(result.local_worktree).toBe('present');
+  });
+
+  it("reports local_worktree='absent' without changing resume_from", () => {
+    const result = computeResume([gateDone, setupDone], probe({ dirExists: () => false }));
+    expect(result.local_worktree).toBe('absent');
+    expect(result.resume_from).toBe('plan');
   });
 });
 
@@ -1263,13 +1321,17 @@ describe('computeResume — golden regression table for existing phases (#461)',
   );
   const planDone2 = m(
     'phase=plan status=done run=r-440-ab56 at=2026-08-24T10:02:00Z',
-    'planning=/repo/worktrees/feature-440/PLANNING-440.md'
+    'planning=/repo/worktrees/feature-440/PLANNING-440.md',
+    'head=abc1234'
   );
   const implementDone2 = m(
     'phase=implement status=done run=r-440-ab56 at=2026-08-24T10:03:00Z',
     'head=abc1234'
   );
-  const reviewDone2 = m('phase=review status=done run=r-440-ab56 at=2026-08-24T10:04:00Z');
+  const reviewDone2 = m(
+    'phase=review status=done run=r-440-ab56 at=2026-08-24T10:04:00Z',
+    'head=abc1234'
+  );
 
   const mergedPr = () => ({
     state: 'MERGED',
@@ -1281,9 +1343,13 @@ describe('computeResume — golden regression table for existing phases (#461)',
   it.each([
     ['gate done → setup', [gateDone2], 'setup'],
     ['setup done (claims verify) → plan', [gateDone2, setupDone2], 'plan'],
-    ['plan done (file exists) → implement', [gateDone2, setupDone2, planDone2], 'implement'],
     [
-      'implement done (head matches) → review',
+      'plan done (head verifies on origin) → implement',
+      [gateDone2, setupDone2, planDone2],
+      'implement',
+    ],
+    [
+      'implement done (head verifies on origin) → review',
       [gateDone2, setupDone2, planDone2, implementDone2],
       'review',
     ],
