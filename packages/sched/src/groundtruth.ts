@@ -11,6 +11,7 @@
  * and any consumer — supply fake ground truth and no subprocess runs.
  */
 
+import { unwrapList } from './json';
 import { createExecFn, type ExecFn } from './project';
 
 /** The latest runstate milestone on an issue, as `runstate last --json` reports it. */
@@ -234,8 +235,10 @@ export function parsePrViewJson(stdout: string | null): PrTruth | null {
  * usable setup milestone exists (verifiably).
  *
  * `gh issue view --json comments` always wraps the comment list in an object
- * — `{"comments": [...]}` — never a bare array (#496). A bare array is
- * accepted too, defensively, in case a caller ever passes the unwrapped form.
+ * — `{"comments": [...]}` — never a bare array (#496; same shape
+ * `cli/src/gh.ts`'s `tryFetchComments` handles independently — keep both in
+ * sync). A bare array is accepted too, defensively, in case a caller ever
+ * passes the unwrapped form.
  */
 export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
   if (commentsJson === null || commentsJson.trim() === '') return null;
@@ -245,13 +248,7 @@ export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
   } catch {
     return null;
   }
-  const comments = Array.isArray(parsed)
-    ? parsed
-    : parsed !== null &&
-        typeof parsed === 'object' &&
-        Array.isArray((parsed as { comments?: unknown }).comments)
-      ? (parsed as { comments: unknown[] }).comments
-      : null;
+  const comments = unwrapList(parsed, 'comments');
   if (comments === null) return null;
 
   const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);

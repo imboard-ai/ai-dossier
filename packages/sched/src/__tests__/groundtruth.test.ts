@@ -347,6 +347,10 @@ describe('createExecGroundTruth prState/setupInfo (#468)', () => {
 });
 
 describe('parseSetupInfo author trust (defense-in-depth)', () => {
+  /** Build a `gh issue view --json comments` payload (the real wrapper shape). */
+  const commentsPayload = (items: Array<{ body: string; authorAssociation?: string }>) =>
+    JSON.stringify({ comments: items });
+
   it('ignores setup milestones from non-collaborators (destructive-input path)', () => {
     const setup = (assoc: string) => ({
       body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-evil at=x\nworktree=/repo/worktrees/evil\npool_claimed=false',
@@ -354,26 +358,24 @@ describe('parseSetupInfo author trust (defense-in-depth)', () => {
     });
     // a random commenter's "setup milestone" is not a teardown source
     expect(
-      parseSetupInfo(JSON.stringify({ comments: [setup('NONE'), setup('FIRST_TIME_CONTRIBUTOR')] }))
+      parseSetupInfo(commentsPayload([setup('NONE'), setup('FIRST_TIME_CONTRIBUTOR')]))
     ).toBeNull();
     // owner/member/collaborator milestones are trusted
     for (const assoc of ['OWNER', 'MEMBER', 'COLLABORATOR']) {
-      expect(parseSetupInfo(JSON.stringify({ comments: [setup(assoc)] }))?.worktree).toBe(
+      expect(parseSetupInfo(commentsPayload([setup(assoc)]))?.worktree).toBe(
         '/repo/worktrees/evil'
       );
     }
     // a trusted setup beats a newer untrusted one
     expect(
       parseSetupInfo(
-        JSON.stringify({
-          comments: [
-            {
-              body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/real\npool_claimed=false',
-              authorAssociation: 'OWNER',
-            },
-            setup('NONE'),
-          ],
-        })
+        commentsPayload([
+          {
+            body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/real\npool_claimed=false',
+            authorAssociation: 'OWNER',
+          },
+          setup('NONE'),
+        ])
       )?.worktree
     ).toBe('/repo/worktrees/real');
   });
@@ -381,13 +383,11 @@ describe('parseSetupInfo author trust (defense-in-depth)', () => {
   it('comments without authorAssociation (older gh / file fakes) still parse', () => {
     expect(
       parseSetupInfo(
-        JSON.stringify({
-          comments: [
-            {
-              body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/wt\npool_claimed=true',
-            },
-          ],
-        })
+        commentsPayload([
+          {
+            body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/wt\npool_claimed=true',
+          },
+        ])
       )
     ).toEqual({ worktree: '/repo/worktrees/wt', poolClaimed: true, branch: null });
   });
