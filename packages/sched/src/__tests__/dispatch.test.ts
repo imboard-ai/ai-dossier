@@ -93,7 +93,9 @@ describe('resolveDispatch', () => {
     };
     const resolved = resolveDispatch(config);
     expect(resolved.command).toEqual(['opencode', 'run', '--model', '{model}']);
-    expect(resolved.prompt).toBe('do #{issue}');
+    // The configured body is preserved verbatim; #504 appends the supersession
+    // checkpoint on top, so a customised prompt keeps the safety instruction.
+    expect(resolved.prompt).toContain('do #{issue}');
     expect(resolved.tierModels.mid).toBe('custom-model');
     expect(resolved.tierModels.strong).toBe('opus'); // untouched tiers keep defaults
     expect(resolved.stallTimeoutMs).toBe(5_000);
@@ -366,5 +368,34 @@ describe('buildReportPrompt generations (#504)', () => {
     const prompt = buildReportPrompt(DEFAULT_REPORT_PROMPT_TEMPLATE, 504, 77, 'done', 3);
     expect(prompt).toContain('TAKEOVER');
     expect(prompt).toContain('--gen 3');
+  });
+});
+
+describe('the checkpoint survives an operator prompt override (#504)', () => {
+  it('appends the checkpoint to a configured prompt', () => {
+    // A safety instruction that lives only on the built-in constant stops protecting
+    // exactly the deployments that customised their prompt.
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: { prompt: 'Do the thing for #{issue}.' },
+    });
+    expect(resolved.prompt).toContain('SUPERSESSION CHECKPOINT');
+    expect(buildPrompt(resolved.prompt, 504)).toContain('runstate check --issue 504');
+  });
+
+  it('does not append it twice to the default', () => {
+    const resolved = resolveDispatch({ max_slots: 1 });
+    const occurrences = resolved.prompt.split('SUPERSESSION CHECKPOINT').length - 1;
+    expect(occurrences).toBe(1);
+  });
+});
+
+describe('the report prompt can recover its generation (#504)', () => {
+  it('tells a fresh report agent to read the generation off the trail', () => {
+    // A report slot is assigned fresh (generation 0) but reports on the same run id,
+    // which may have been fenced earlier in the cycle.
+    const prompt = buildReportPrompt(DEFAULT_REPORT_PROMPT_TEMPLATE, 504, 77, 'done');
+    expect(prompt).toContain('runstate verify --issue 504 --json');
+    expect(prompt).toContain('--gen <n>');
   });
 });

@@ -105,9 +105,18 @@ export const SUPERSESSION_CHECKPOINT_INSTRUCTION =
   'same applies if `ai-dossier runstate post` ever refuses a milestone as SUPERSEDED: that is ' +
   'not an error to retry or work around.';
 
-/** Append {@link SUPERSESSION_CHECKPOINT_INSTRUCTION} to a prompt template. */
+/**
+ * Append {@link SUPERSESSION_CHECKPOINT_INSTRUCTION} to a prompt template, once.
+ *
+ * Idempotent so it can be applied both to the built-in default and again at resolve
+ * time: an operator who overrides `dispatch.prompt` must not silently lose the
+ * checkpoint, which is exactly how a safety instruction that lives only on a constant
+ * stops protecting the deployments that need it most.
+ */
 function withSupersessionCheckpoint(template: string): string {
-  return `${template}\n\n${SUPERSESSION_CHECKPOINT_INSTRUCTION}`;
+  return template.includes(SUPERSESSION_CHECKPOINT_INSTRUCTION)
+    ? template
+    : `${template}\n\n${SUPERSESSION_CHECKPOINT_INSTRUCTION}`;
 }
 
 /**
@@ -139,7 +148,13 @@ export const DEFAULT_REPORT_PROMPT_TEMPLATE =
   'The work is DONE: pull request #{pr} is merged (merge commit via `gh pr view {pr}`), the issue ' +
   'is closed, and the worktree is already torn down (cleanup status: {cleanup}). Do not ' +
   're-implement, re-review, or re-ship anything — produce the final report for issue #{issue} and ' +
-  'post its runstate milestone.';
+  'post its runstate milestone.\n\n' +
+  // A report slot is assigned fresh, so it starts at generation 0 — but it reports on
+  // the SAME run id, which may have been fenced earlier in the cycle. Without this the
+  // report milestone is refused and the unit recovers to the cap on a merged PR.
+  'This run may have been superseded earlier: read its generation with `ai-dossier runstate ' +
+  'verify --issue {issue} --json` and pass that `generation` value as `--gen <n>` on your ' +
+  '`runstate post`, or the milestone will be refused.';
 
 /**
  * Default prompt for the ONE bounded fix attempt a batch member gets before it
@@ -220,7 +235,9 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
   };
   return {
     command: dispatch.command ?? [...DEFAULT_DISPATCH_COMMAND],
-    prompt: dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE,
+    // Wrapped here, not only on the constant: a configured prompt is still a cycle
+    // agent that can be superseded mid-run.
+    prompt: withSupersessionCheckpoint(dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE),
     reportPrompt: dispatch.report_prompt ?? DEFAULT_REPORT_PROMPT_TEMPLATE,
     fixPrompt: dispatch.fix_prompt ?? DEFAULT_FIX_PROMPT_TEMPLATE,
     tierModels,
