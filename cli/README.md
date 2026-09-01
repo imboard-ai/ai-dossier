@@ -876,7 +876,7 @@ respectively; `get --json` includes the comment's `author`.
 ## Scheduler core (`sched`)
 
 ```bash
-ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--deps 100,104] [--tier mechanical|mid|strong] [--repo owner/name]
+ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--more-members-expected] [--deps 100,104] [--tier mechanical|mid|strong] [--repo owner/name]
 ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
 ai-dossier sched start [--interval <seconds>] [--once] [--json]
 ai-dossier sched status [--json]
@@ -908,6 +908,15 @@ against ground truth.
   `blocked_by_label: [{issue, label}]`, and `label_check_failed: [issue, ...]`; the human
   line reads `N queued, M blocked-by-label`. The pre-screen is capped at
   `MAX_ISSUE_SELECTION` (200) total issues per call.
+- **`enqueue`'s batch sealing (#535)**: a batch's status seals `forming → ready` at the end
+  of the call that completes its composition — the common case, since a single manifest (or
+  `--issues --batch <id>` call) normally declares a batch's full membership at once. Once
+  sealed, no later call can join it (`Batch <id> is ready — members can only join while
+  forming`). If a batch's membership genuinely arrives across several calls — e.g. an
+  oversized manifest split by the `MAX_ISSUE_SELECTION` cap above, or a batch composed
+  incrementally by hand — pass `--more-members-expected` (or a manifest entry's
+  `more_members_expected: true`) on every call except the one landing the last member, so
+  the batch stays `forming` until it is genuinely complete.
 - **`start`** runs the dispatch engine (#464): a runnable unit is spawned as a detached
   agent process (`claude -p --output-format stream-json --verbose --model <tier model>` by default,
   auto-falling back to `opencode run`; the command, prompt, and tier→model mapping are

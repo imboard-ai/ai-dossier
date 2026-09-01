@@ -154,6 +154,7 @@ interface EnqueueOptions extends SchedOptions {
   tier?: string;
   fromManifest?: string;
   repo?: string;
+  moreMembersExpected?: boolean;
 }
 
 interface AbandonOptions extends SchedOptions {
@@ -497,6 +498,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
     .option('--deps <numbers>', 'Comma-separated dependency issue numbers (applied to all)')
     .option('--tier <tier>', 'Model tier: mechanical | mid (default) | strong', 'mid')
     .option('--from-manifest <path>', 'JSON file of entries (batch-prep output)')
+    .option(
+      '--more-members-expected',
+      "With --batch: don't seal this batch yet — more members are coming in a later enqueue call"
+    )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option(
       '--repo <owner/name>',
@@ -547,7 +552,14 @@ function registerEnqueueSubcommand(cmd: Command): void {
         const tier = parseTier(opts.tier);
         const deps = opts.deps ? issueList(opts.deps, 'deps') : [];
         for (const issue of issueList(opts.issues, 'issues')) {
-          inputs.push({ issue, mode, batch: opts.batch ?? null, deps, tier });
+          inputs.push({
+            issue,
+            mode,
+            batch: opts.batch ?? null,
+            deps,
+            tier,
+            ...(opts.moreMembersExpected ? { more_members_expected: true } : {}),
+          });
         }
       }
 
