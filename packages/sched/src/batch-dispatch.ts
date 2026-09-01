@@ -65,10 +65,10 @@ import {
   SHA_RE,
 } from './attribution';
 import {
-  buildAgentCommand,
   buildBatchReportPrompt,
   buildBatchTailPrompt,
   buildMemberPrompt,
+  buildTierCommand,
   type ResolvedDispatch,
   type SpawnDeps,
   unitLogName,
@@ -440,7 +440,8 @@ function spawnMember(
 
   const withStatus = advanceMemberToInWork(state, memberIssue, now);
   const tier: ModelTier = findEntry(withStatus, memberIssue)?.tier ?? 'mid';
-  const cmd = buildAgentCommand(dispatch.command, tier, memberIssue, dispatch.tierModels);
+  const cmd = buildTierCommand(dispatch, tier, memberIssue);
+  const model = dispatch.tiers[tier].model;
   const prompt = buildMemberPrompt(dispatch.memberPrompt, memberIssue, batchId, batch.worktree);
   const logFile = path.join(
     deps.store.runsDir,
@@ -476,6 +477,8 @@ function spawnMember(
       tier,
       slot: slot.id,
       issue: memberIssue,
+      cmd: cmd.join(' '),
+      ...(model !== null ? { model } : {}),
       detail: `member ${batch.executing_member}/${batch.members.length}`,
     }),
     now
@@ -638,7 +641,8 @@ function spawnTailAgent(
       });
       return releaseSlot(state, batchId, now);
     }
-    const cmd = buildAgentCommand(dispatch.command, 'strong', batch.anchor, dispatch.tierModels);
+    const cmd = buildTierCommand(dispatch, 'strong', batch.anchor);
+    const model = dispatch.tiers.strong.model;
     const prompt = buildBatchTailPrompt(
       dispatch.batchTailPrompt,
       batchId,
@@ -666,7 +670,16 @@ function spawnTailAgent(
     };
     const next =
       slot.status === 'assigned' ? transitionSlot(state, slot.id, 'running', patch, now) : state;
-    deps.journal.append(unitEvent('spawned', unit(batchId), { pid, slot: slot.id }), now);
+    deps.journal.append(
+      unitEvent('spawned', unit(batchId), {
+        pid,
+        tier: 'strong',
+        slot: slot.id,
+        cmd: cmd.join(' '),
+        ...(model !== null ? { model } : {}),
+      }),
+      now
+    );
     result.spawned.push(unit(batchId));
     return next;
   });
@@ -695,12 +708,7 @@ function spawnReportAgent(
       });
       return releaseSlot(state, batchId, now);
     }
-    const cmd = buildAgentCommand(
-      dispatch.command,
-      'mechanical',
-      batch.anchor,
-      dispatch.tierModels
-    );
+    const cmd = buildTierCommand(dispatch, 'mechanical', batch.anchor);
     const prompt = buildBatchReportPrompt(
       dispatch.batchReportPrompt,
       batchId,

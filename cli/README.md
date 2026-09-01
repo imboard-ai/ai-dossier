@@ -912,10 +912,17 @@ against ground truth.
   agent process (`claude -p --output-format stream-json --verbose --model <tier model>` by default,
   auto-falling back to `opencode run`; the command, prompt, and tier→model mapping are
   all configurable in `config.json`'s `dispatch` section) with the prompt on stdin and
-  output journaled to `runs/<unit>.log`. On every ~60s tick it reconciles: an agent that
+  output journaled to `runs/<unit>.log`. Since #527 each tier can override the command AND
+  the agent CLI independently via `dispatch.tiers.<tier>` — a mixed-CLI ladder (e.g.
+  `opencode` for `mechanical`/`mid`, `claude` for `strong`), not just a different `--model`
+  on one CLI; auto-detect (claude-first, opencode fallback) is skipped once `dispatch.tiers`
+  is configured, since the operator opted into per-tier commands explicitly. On every ~60s
+  tick it reconciles: an agent that
   exited is **not** complete until `ai-dossier runstate last` / `gh` ground truth confirms
   it (unverified exits and stalls are redispatched one tier stronger — mechanical → mid →
-  strong, cap 2 — then the unit fails and its transitive dependents are blocked). Since
+  strong, cap 2 — then the unit fails and its transitive dependents are blocked); the
+  redispatch spawns with the NEXT tier's own resolved command, so a mixed-CLI ladder
+  rescues on a different agent binary, not just a different model flag. Since
   #504 that redispatch is **fenced**: before the replacement spawns, the engine posts a
   `status=superseded` milestone (`runstate fence`) so the agent it replaced — which may
   still be alive and unreachable — is refused by `runstate post`, and the replacement is
@@ -988,7 +995,10 @@ error naming the file — never a silent queue reset. Concurrency is serialized 
 (default 60 000), and the optional `dispatch` section (including `report_prompt` for
 the #468 report agent and `fence_takeover_timeout_ms`, default 900 000 — the short stall
 allowance for a freshly-fenced takeover that has posted nothing, #504; `dispatch.prompt`
-substitutes `{issue}` and `{gen}`); `pr_poll_interval_ms` (default 150 000) sets the
+substitutes `{issue}` and `{gen}`; `dispatch.tiers.<tier>` — `{command?, model?, prompt?}`
+— overrides the command/model/prompt for one tier only, #527, falling back to the
+top-level `command`/`tier_models`/`prompt` shorthand for any field left unset);
+`pr_poll_interval_ms` (default 150 000) sets the
 parked-PR poll cadence; an issue with an unmerged dependency — or a batch behind an unmerged batch —
 is never runnable.
 

@@ -335,3 +335,100 @@ describe('#504 config: dispatch.fence_takeover_timeout_ms', () => {
     );
   });
 });
+
+describe('#527 config: dispatch.tiers (mixed agent-CLI escalation ladders)', () => {
+  it('round-trips a per-tier full spawn spec', () => {
+    // Regression guard for the #504-documented failure mode: a key declared on
+    // DispatchConfig, read by resolveDispatch, but never copied by
+    // validateDispatchConfig's allowlist silently reverts to the default.
+    const store = new SchedStore(dir);
+    store.saveConfig({
+      max_slots: 2,
+      dispatch: {
+        tiers: {
+          mid: { command: ['opencode', 'run', '--auto', '--model', '{model}'], model: 'glm' },
+          strong: { command: ['claude', '-p', '--model', '{model}'], model: 'opus' },
+        },
+      },
+    });
+    const config = store.loadConfig();
+    expect(config.dispatch?.tiers?.mid).toEqual({
+      command: ['opencode', 'run', '--auto', '--model', '{model}'],
+      model: 'glm',
+    });
+    expect(config.dispatch?.tiers?.strong).toEqual({
+      command: ['claude', '-p', '--model', '{model}'],
+      model: 'opus',
+    });
+  });
+
+  it('a tier spec with only a prompt override round-trips', () => {
+    const store = new SchedStore(dir);
+    store.saveConfig({
+      max_slots: 2,
+      dispatch: { tiers: { mechanical: { prompt: 'cheap-tier prompt #{issue}' } } },
+    });
+    expect(store.loadConfig().dispatch?.tiers?.mechanical).toEqual({
+      prompt: 'cheap-tier prompt #{issue}',
+    });
+  });
+
+  it('rejects an unknown tier name', () => {
+    expectConfigRejected(
+      {
+        schema_version: '1.3.0',
+        max_slots: 2,
+        dispatch: { tiers: { superstrong: { model: 'opus' } } },
+      },
+      'dispatch.tiers',
+      'superstrong'
+    );
+  });
+
+  it('rejects a tier spec with a malformed command', () => {
+    expectConfigRejected(
+      { schema_version: '1.3.0', max_slots: 2, dispatch: { tiers: { mid: { command: [] } } } },
+      'dispatch.tiers.mid.command'
+    );
+  });
+
+  it('rejects a tier spec with a non-string model', () => {
+    expectConfigRejected(
+      { schema_version: '1.3.0', max_slots: 2, dispatch: { tiers: { strong: { model: 42 } } } },
+      'dispatch.tiers.strong.model'
+    );
+  });
+
+  it('rejects a tiers value that is not an object', () => {
+    expectConfigRejected(
+      { schema_version: '1.3.0', max_slots: 2, dispatch: { tiers: ['mid'] } },
+      'dispatch.tiers'
+    );
+  });
+
+  it('a pre-#527 config (schema 1.3.0, top-level command + tier_models, no tiers) still loads — the shorthand migrates transparently', () => {
+    const store = new SchedStore(dir);
+    fs.writeFileSync(
+      store.configPath,
+      JSON.stringify({
+        schema_version: '1.3.0',
+        max_slots: 2,
+        dispatch: {
+          command: ['claude', '-p', '--output-format', 'json', '--model', '{model}'],
+          tier_models: { mid: 'sonnet', strong: 'opus' },
+        },
+      })
+    );
+    const config = store.loadConfig();
+    expect(config.dispatch?.command).toEqual([
+      'claude',
+      '-p',
+      '--output-format',
+      'json',
+      '--model',
+      '{model}',
+    ]);
+    expect(config.dispatch?.tier_models).toEqual({ mid: 'sonnet', strong: 'opus' });
+    expect(config.dispatch?.tiers).toBeUndefined();
+  });
+});

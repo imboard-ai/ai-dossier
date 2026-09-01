@@ -41,12 +41,7 @@ import {
   SHA_RE,
 } from './attribution';
 import { type BisectOutcome, runAttributionBisect } from './bisect';
-import {
-  buildAgentCommand,
-  buildFixPrompt,
-  DEFAULT_TIER_MODELS,
-  resolveDispatch,
-} from './dispatch';
+import { buildFixPrompt, buildTierCommand, resolveDispatch } from './dispatch';
 import { unitEvent } from './journal';
 import type { ExecFn } from './project';
 import {
@@ -444,10 +439,7 @@ export function beginFixAttempt(
   const dispatch: FixDispatch = {
     issue,
     tier,
-    command: buildAgentCommand(resolved.command, tier, issue, {
-      ...DEFAULT_TIER_MODELS,
-      ...resolved.tierModels,
-    }),
+    command: buildTierCommand(resolved, tier, issue),
     prompt: buildFixPrompt(
       resolved.fixPrompt,
       issue,
@@ -462,7 +454,16 @@ export function beginFixAttempt(
     next = transitionBatch(next, batchId, 'fixing', {}, now);
   }
   next = patchBatch(next, batchId, { fix_attempts: [...batch.fix_attempts, record] }, now);
-  journal(deps, unitEvent('fix-dispatched', `batch:${batchId}`, { issue, tier }), now);
+  journal(
+    deps,
+    unitEvent('fix-dispatched', `batch:${batchId}`, {
+      issue,
+      tier,
+      cmd: dispatch.command.join(' '),
+      ...(resolved.tiers[tier].model !== null ? { model: resolved.tiers[tier].model } : {}),
+    }),
+    now
+  );
   return { state: next, dispatch };
 }
 
