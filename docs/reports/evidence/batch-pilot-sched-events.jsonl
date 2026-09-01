@@ -1,0 +1,197 @@
+{"ts":"2026-09-01T04:02:01.938Z","event":"assigned","unit":"issue:496","issue":496,"slot":1}
+{"ts":"2026-09-01T04:02:01.949Z","event":"spawned","unit":"issue:496","issue":496,"pid":1498604,"tier":"mid","slot":1,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-496.log"}
+{"ts":"2026-09-01T04:04:03.353Z","event":"progress","unit":"issue:496","issue":496,"slot":1,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T04:08:04.105Z","event":"phase-updated","unit":"issue:496","issue":496,"phase":"setup","slot":1}
+{"ts":"2026-09-01T04:08:04.106Z","event":"progress","unit":"issue:496","issue":496,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T04:10:04.039Z","event":"progress","unit":"issue:496","issue":496,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T04:12:04.890Z","event":"phase-updated","unit":"issue:496","issue":496,"phase":"plan","slot":1}
+{"ts":"2026-09-01T04:12:04.891Z","event":"progress","unit":"issue:496","issue":496,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T04:16:04.320Z","event":"phase-updated","unit":"issue:496","issue":496,"phase":"implement","slot":1}
+{"ts":"2026-09-01T04:16:04.320Z","event":"progress","unit":"issue:496","issue":496,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T04:24:04.191Z","event":"phase-updated","unit":"issue:496","issue":496,"phase":"review","slot":1}
+{"ts":"2026-09-01T04:24:04.192Z","event":"progress","unit":"issue:496","issue":496,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T04:26:03.991Z","event":"phase-updated","unit":"issue:496","issue":496,"phase":"ship","slot":1}
+{"ts":"2026-09-01T04:26:03.991Z","event":"progress","unit":"issue:496","issue":496,"slot":1,"detail":"milestone ship/awaiting-merge"}
+{"ts":"2026-09-01T04:32:04.215Z","event":"external-advance","unit":"issue:496","issue":496,"pid":1498604,"slot":1,"detail":"issue closed"}
+{"ts":"2026-09-01T04:32:04.217Z","event":"external-advance","unit":"issue:496","issue":496}
+{"ts":"2026-09-01T04:32:04.218Z","event":"assigned","unit":"issue:500","issue":500,"slot":1}
+{"ts":"2026-09-01T04:32:04.225Z","event":"spawned","unit":"issue:500","issue":500,"pid":1534694,"tier":"mid","slot":1,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-500.log"}
+{"ts":"2026-09-01T04:34:03.880Z","event":"progress","unit":"issue:500","issue":500,"slot":1,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T04:40:04.217Z","event":"phase-updated","unit":"issue:500","issue":500,"phase":"setup","slot":1}
+{"ts":"2026-09-01T04:40:04.217Z","event":"progress","unit":"issue:500","issue":500,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T04:42:04.256Z","event":"progress","unit":"issue:500","issue":500,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T04:52:03.933Z","event":"phase-updated","unit":"issue:500","issue":500,"phase":"plan","slot":1}
+{"ts":"2026-09-01T04:52:03.934Z","event":"progress","unit":"issue:500","issue":500,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T04:54:04.811Z","event":"phase-updated","unit":"issue:500","issue":500,"phase":"implement","slot":1}
+{"ts":"2026-09-01T04:54:04.812Z","event":"progress","unit":"issue:500","issue":500,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T05:12:04.515Z","event":"progress","unit":"issue:500","issue":500,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T05:14:04.486Z","event":"phase-updated","unit":"issue:500","issue":500,"phase":"review","slot":1}
+{"ts":"2026-09-01T05:14:04.487Z","event":"progress","unit":"issue:500","issue":500,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T05:16:04.828Z","event":"phase-updated","unit":"issue:500","issue":500,"phase":"ship","slot":1}
+{"ts":"2026-09-01T05:16:04.829Z","event":"progress","unit":"issue:500","issue":500,"slot":1,"detail":"milestone ship/awaiting-merge"}
+{"ts":"2026-09-01T05:24:05.437Z","event":"exit-detected","unit":"issue:500","issue":500,"pid":1534694,"slot":1}
+{"ts":"2026-09-01T05:24:05.441Z","event":"verify-complete","unit":"issue:500","issue":500}
+{"ts":"2026-09-01T05:24:05.444Z","event":"assigned","unit":"issue:505","issue":505,"slot":1}
+{"ts":"2026-09-01T05:24:05.458Z","event":"spawned","unit":"issue:505","issue":505,"pid":1600811,"tier":"mid","slot":1,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-505.log"}
+{"ts":"2026-09-01T05:26:03.550Z","event":"progress","unit":"issue:505","issue":505,"slot":1,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T05:30:03.580Z","event":"phase-updated","unit":"issue:505","issue":505,"phase":"setup","slot":1}
+{"ts":"2026-09-01T05:30:03.580Z","event":"progress","unit":"issue:505","issue":505,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T05:32:03.939Z","event":"progress","unit":"issue:505","issue":505,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T05:38:04.344Z","event":"phase-updated","unit":"issue:505","issue":505,"phase":"plan","slot":1}
+{"ts":"2026-09-01T05:38:04.344Z","event":"progress","unit":"issue:505","issue":505,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T05:46:04.533Z","event":"progress","unit":"issue:505","issue":505,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T05:48:04.708Z","event":"phase-updated","unit":"issue:505","issue":505,"phase":"implement","slot":1}
+{"ts":"2026-09-01T05:48:04.709Z","event":"progress","unit":"issue:505","issue":505,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T06:16:03.782Z","event":"phase-updated","unit":"issue:505","issue":505,"phase":"review","slot":1}
+{"ts":"2026-09-01T06:16:03.782Z","event":"progress","unit":"issue:505","issue":505,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T06:18:04.840Z","event":"progress","unit":"issue:505","issue":505,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T06:20:05.429Z","event":"phase-updated","unit":"issue:505","issue":505,"phase":"ship","slot":1}
+{"ts":"2026-09-01T06:20:05.430Z","event":"progress","unit":"issue:505","issue":505,"slot":1,"detail":"milestone ship/awaiting-merge"}
+{"ts":"2026-09-01T06:24:04.448Z","event":"external-advance","unit":"issue:505","issue":505,"pid":1600811,"slot":1,"detail":"issue closed"}
+{"ts":"2026-09-01T06:24:04.450Z","event":"external-advance","unit":"issue:505","issue":505}
+{"ts":"2026-09-01T06:24:04.451Z","event":"assigned","unit":"issue:507","issue":507,"slot":1}
+{"ts":"2026-09-01T06:24:04.462Z","event":"spawned","unit":"issue:507","issue":507,"pid":1695312,"tier":"mid","slot":1,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-507.log"}
+{"ts":"2026-09-01T06:26:05.326Z","event":"progress","unit":"issue:507","issue":507,"slot":1,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T06:28:04.166Z","event":"phase-updated","unit":"issue:507","issue":507,"phase":"setup","slot":1}
+{"ts":"2026-09-01T06:28:04.167Z","event":"progress","unit":"issue:507","issue":507,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T06:30:04.748Z","event":"progress","unit":"issue:507","issue":507,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T06:34:04.479Z","event":"phase-updated","unit":"issue:507","issue":507,"phase":"plan","slot":1}
+{"ts":"2026-09-01T06:34:04.479Z","event":"progress","unit":"issue:507","issue":507,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T06:42:04.851Z","event":"phase-updated","unit":"issue:507","issue":507,"phase":"implement","slot":1}
+{"ts":"2026-09-01T06:42:04.851Z","event":"progress","unit":"issue:507","issue":507,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T07:06:04.869Z","event":"phase-updated","unit":"issue:507","issue":507,"phase":"review","slot":1}
+{"ts":"2026-09-01T07:06:04.869Z","event":"progress","unit":"issue:507","issue":507,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T07:08:03.913Z","event":"phase-updated","unit":"issue:507","issue":507,"phase":"ship","slot":1}
+{"ts":"2026-09-01T07:08:03.913Z","event":"progress","unit":"issue:507","issue":507,"slot":1,"detail":"milestone ship/awaiting-merge"}
+{"ts":"2026-09-01T07:31:17.470Z","event":"exit-detected","unit":"issue:507","issue":507,"pid":1695312,"slot":1}
+{"ts":"2026-09-01T07:31:17.473Z","event":"verify-complete","unit":"issue:507","issue":507}
+{"ts":"2026-09-01T10:56:37.049Z","event":"assigned","unit":"issue:502","issue":502,"slot":1}
+{"ts":"2026-09-01T10:56:37.058Z","event":"spawned","unit":"issue:502","issue":502,"pid":1825910,"tier":"mid","slot":1,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-502.log"}
+{"ts":"2026-09-01T10:56:37.058Z","event":"assigned","unit":"issue:499","issue":499,"slot":2}
+{"ts":"2026-09-01T10:56:37.061Z","event":"spawned","unit":"issue:499","issue":499,"pid":1825911,"tier":"mid","slot":2,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-499.log"}
+{"ts":"2026-09-01T10:56:37.061Z","event":"assigned","unit":"issue:497","issue":497,"slot":3}
+{"ts":"2026-09-01T10:56:37.065Z","event":"spawned","unit":"issue:497","issue":497,"pid":1825912,"tier":"mid","slot":3,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-497.log"}
+{"ts":"2026-09-01T10:58:07.340Z","event":"progress","unit":"issue:502","issue":502,"slot":1,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T10:58:07.341Z","event":"progress","unit":"issue:499","issue":499,"slot":2,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T10:58:07.342Z","event":"progress","unit":"issue:497","issue":497,"slot":3,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T11:00:10.086Z","event":"phase-updated","unit":"issue:497","issue":497,"phase":"setup","slot":3}
+{"ts":"2026-09-01T11:00:10.087Z","event":"progress","unit":"issue:497","issue":497,"slot":3,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T11:02:07.809Z","event":"phase-updated","unit":"issue:502","issue":502,"phase":"setup","slot":1}
+{"ts":"2026-09-01T11:02:07.810Z","event":"progress","unit":"issue:502","issue":502,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T11:02:07.810Z","event":"phase-updated","unit":"issue:499","issue":499,"phase":"setup","slot":2}
+{"ts":"2026-09-01T11:02:07.810Z","event":"progress","unit":"issue:499","issue":499,"slot":2,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T11:02:07.811Z","event":"progress","unit":"issue:497","issue":497,"slot":3,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T11:04:08.681Z","event":"phase-updated","unit":"issue:502","issue":502,"phase":"plan","slot":1}
+{"ts":"2026-09-01T11:04:08.681Z","event":"progress","unit":"issue:502","issue":502,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T11:04:08.681Z","event":"progress","unit":"issue:499","issue":499,"slot":2,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T11:04:08.682Z","event":"phase-updated","unit":"issue:497","issue":497,"phase":"plan","slot":3}
+{"ts":"2026-09-01T11:04:08.682Z","event":"progress","unit":"issue:497","issue":497,"slot":3,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T11:10:09.403Z","event":"phase-updated","unit":"issue:497","issue":497,"phase":"implement","slot":3}
+{"ts":"2026-09-01T11:10:09.404Z","event":"progress","unit":"issue:497","issue":497,"slot":3,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T11:12:08.745Z","event":"phase-updated","unit":"issue:502","issue":502,"phase":"implement","slot":1}
+{"ts":"2026-09-01T11:12:08.746Z","event":"progress","unit":"issue:502","issue":502,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T11:18:08.826Z","event":"phase-updated","unit":"issue:499","issue":499,"phase":"implement","slot":2}
+{"ts":"2026-09-01T11:18:08.827Z","event":"progress","unit":"issue:499","issue":499,"slot":2,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T11:22:07.692Z","event":"phase-updated","unit":"issue:502","issue":502,"phase":"review","slot":1}
+{"ts":"2026-09-01T11:22:07.692Z","event":"progress","unit":"issue:502","issue":502,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T11:22:07.693Z","event":"phase-updated","unit":"issue:497","issue":497,"phase":"review","slot":3}
+{"ts":"2026-09-01T11:22:07.693Z","event":"progress","unit":"issue:497","issue":497,"slot":3,"detail":"milestone review/done"}
+{"ts":"2026-09-01T11:24:08.969Z","event":"phase-updated","unit":"issue:502","issue":502,"phase":"ship","slot":1}
+{"ts":"2026-09-01T11:24:08.970Z","event":"progress","unit":"issue:502","issue":502,"slot":1,"detail":"milestone ship/awaiting-merge"}
+{"ts":"2026-09-01T11:24:08.970Z","event":"phase-updated","unit":"issue:497","issue":497,"phase":"ship","slot":3}
+{"ts":"2026-09-01T11:24:08.971Z","event":"progress","unit":"issue:497","issue":497,"slot":3,"detail":"milestone ship/awaiting-merge"}
+{"ts":"2026-09-01T11:28:08.710Z","event":"phase-updated","unit":"issue:499","issue":499,"phase":"review","slot":2}
+{"ts":"2026-09-01T11:28:08.711Z","event":"progress","unit":"issue:499","issue":499,"slot":2,"detail":"milestone review/done"}
+{"ts":"2026-09-01T11:28:08.711Z","event":"external-advance","unit":"issue:497","issue":497,"pid":1825912,"slot":3,"detail":"issue closed"}
+{"ts":"2026-09-01T11:28:08.713Z","event":"external-advance","unit":"issue:497","issue":497}
+{"ts":"2026-09-01T11:30:07.478Z","event":"progress","unit":"issue:499","issue":499,"slot":2,"detail":"milestone review/done"}
+{"ts":"2026-09-01T11:32:06.546Z","event":"exit-detected","unit":"issue:502","issue":502,"pid":1825910,"slot":1}
+{"ts":"2026-09-01T11:32:06.548Z","event":"verify-complete","unit":"issue:502","issue":502}
+{"ts":"2026-09-01T11:32:06.550Z","event":"assigned","unit":"issue:506","issue":506,"slot":1}
+{"ts":"2026-09-01T11:32:06.564Z","event":"spawned","unit":"issue:506","issue":506,"pid":1962938,"tier":"mid","slot":1,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-506.log"}
+{"ts":"2026-09-01T11:34:06.279Z","event":"progress","unit":"issue:506","issue":506,"slot":1,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T11:34:06.280Z","event":"progress","unit":"issue:499","issue":499,"slot":2,"detail":"milestone review/done"}
+{"ts":"2026-09-01T11:36:05.952Z","event":"phase-updated","unit":"issue:506","issue":506,"phase":"setup","slot":1}
+{"ts":"2026-09-01T11:36:05.952Z","event":"progress","unit":"issue:506","issue":506,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T11:38:06.400Z","event":"phase-updated","unit":"issue:506","issue":506,"phase":"plan","slot":1}
+{"ts":"2026-09-01T11:38:06.401Z","event":"progress","unit":"issue:506","issue":506,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T11:38:06.401Z","event":"external-advance","unit":"issue:499","issue":499,"pid":1825911,"slot":2,"detail":"issue closed"}
+{"ts":"2026-09-01T11:38:06.402Z","event":"external-advance","unit":"issue:499","issue":499}
+{"ts":"2026-09-01T11:40:04.182Z","event":"phase-updated","unit":"issue:506","issue":506,"phase":"implement","slot":1}
+{"ts":"2026-09-01T11:40:04.183Z","event":"progress","unit":"issue:506","issue":506,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T11:46:03.804Z","event":"phase-updated","unit":"issue:506","issue":506,"phase":"review","slot":1}
+{"ts":"2026-09-01T11:46:03.805Z","event":"progress","unit":"issue:506","issue":506,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T11:48:04.812Z","event":"phase-updated","unit":"issue:506","issue":506,"phase":"ship","slot":1}
+{"ts":"2026-09-01T11:48:04.812Z","event":"progress","unit":"issue:506","issue":506,"slot":1,"detail":"milestone ship/awaiting-merge"}
+{"ts":"2026-09-01T11:54:04.467Z","event":"exit-detected","unit":"issue:506","issue":506,"pid":1962938,"slot":1}
+{"ts":"2026-09-01T11:54:04.469Z","event":"verify-complete","unit":"issue:506","issue":506}
+{"ts":"2026-09-01T11:54:04.470Z","event":"assigned","unit":"issue:501","issue":501,"slot":1}
+{"ts":"2026-09-01T11:54:04.478Z","event":"spawned","unit":"issue:501","issue":501,"pid":1998182,"tier":"mid","slot":1,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-501.log"}
+{"ts":"2026-09-01T11:56:03.819Z","event":"progress","unit":"issue:501","issue":501,"slot":1,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T12:02:04.234Z","event":"phase-updated","unit":"issue:501","issue":501,"phase":"setup","slot":1}
+{"ts":"2026-09-01T12:02:04.235Z","event":"progress","unit":"issue:501","issue":501,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T12:04:04.876Z","event":"progress","unit":"issue:501","issue":501,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T12:10:05.557Z","event":"phase-updated","unit":"issue:501","issue":501,"phase":"plan","slot":1}
+{"ts":"2026-09-01T12:10:05.557Z","event":"progress","unit":"issue:501","issue":501,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T12:16:04.161Z","event":"progress","unit":"issue:501","issue":501,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T12:20:05.041Z","event":"phase-updated","unit":"issue:501","issue":501,"phase":"implement","slot":1}
+{"ts":"2026-09-01T12:20:05.041Z","event":"progress","unit":"issue:501","issue":501,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T12:46:04.187Z","event":"progress","unit":"issue:501","issue":501,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T12:48:04.194Z","event":"phase-updated","unit":"issue:501","issue":501,"phase":"review","slot":1}
+{"ts":"2026-09-01T12:48:04.194Z","event":"progress","unit":"issue:501","issue":501,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T12:50:05.455Z","event":"progress","unit":"issue:501","issue":501,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T12:52:04.607Z","event":"phase-updated","unit":"issue:501","issue":501,"phase":"ship","slot":1}
+{"ts":"2026-09-01T12:52:04.607Z","event":"progress","unit":"issue:501","issue":501,"slot":1,"detail":"milestone ship/awaiting-merge"}
+{"ts":"2026-09-01T12:56:04.408Z","event":"external-advance","unit":"issue:501","issue":501,"pid":1998182,"slot":1,"detail":"issue closed"}
+{"ts":"2026-09-01T12:56:04.412Z","event":"external-advance","unit":"issue:501","issue":501}
+{"ts":"2026-09-01T12:56:04.415Z","event":"assigned","unit":"issue:495","issue":495,"slot":1}
+{"ts":"2026-09-01T12:56:04.429Z","event":"spawned","unit":"issue:495","issue":495,"pid":2266217,"tier":"mid","slot":1,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-495.log"}
+{"ts":"2026-09-01T12:58:04.043Z","event":"progress","unit":"issue:495","issue":495,"slot":1,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T13:02:03.720Z","event":"phase-updated","unit":"issue:495","issue":495,"phase":"setup","slot":1}
+{"ts":"2026-09-01T13:02:03.721Z","event":"progress","unit":"issue:495","issue":495,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T13:04:04.949Z","event":"progress","unit":"issue:495","issue":495,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T13:10:04.133Z","event":"phase-updated","unit":"issue:495","issue":495,"phase":"plan","slot":1}
+{"ts":"2026-09-01T13:10:04.133Z","event":"progress","unit":"issue:495","issue":495,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T13:18:04.216Z","event":"phase-updated","unit":"issue:495","issue":495,"phase":"implement","slot":1}
+{"ts":"2026-09-01T13:18:04.216Z","event":"progress","unit":"issue:495","issue":495,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T13:40:04.818Z","event":"phase-updated","unit":"issue:495","issue":495,"phase":"review","slot":1}
+{"ts":"2026-09-01T13:40:04.818Z","event":"progress","unit":"issue:495","issue":495,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T13:42:04.631Z","event":"phase-updated","unit":"issue:495","issue":495,"phase":"ship","slot":1}
+{"ts":"2026-09-01T13:42:04.631Z","event":"progress","unit":"issue:495","issue":495,"slot":1,"detail":"milestone ship/awaiting-merge"}
+{"ts":"2026-09-01T13:46:04.770Z","event":"external-advance","unit":"issue:495","issue":495,"pid":2266217,"slot":1,"detail":"issue closed"}
+{"ts":"2026-09-01T13:46:04.772Z","event":"external-advance","unit":"issue:495","issue":495}
+{"ts":"2026-09-01T13:46:04.773Z","event":"assigned","unit":"issue:503","issue":503,"slot":1}
+{"ts":"2026-09-01T13:46:04.782Z","event":"spawned","unit":"issue:503","issue":503,"pid":2330885,"tier":"mid","slot":1,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-503.log"}
+{"ts":"2026-09-01T13:48:03.849Z","event":"progress","unit":"issue:503","issue":503,"slot":1,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T13:52:03.760Z","event":"phase-updated","unit":"issue:503","issue":503,"phase":"setup","slot":1}
+{"ts":"2026-09-01T13:52:03.761Z","event":"progress","unit":"issue:503","issue":503,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T13:54:04.036Z","event":"progress","unit":"issue:503","issue":503,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T14:00:06.853Z","event":"phase-updated","unit":"issue:503","issue":503,"phase":"plan","slot":1}
+{"ts":"2026-09-01T14:00:06.853Z","event":"progress","unit":"issue:503","issue":503,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T14:02:04.896Z","event":"phase-updated","unit":"issue:503","issue":503,"phase":"implement","slot":1}
+{"ts":"2026-09-01T14:02:04.897Z","event":"progress","unit":"issue:503","issue":503,"slot":1,"detail":"milestone implement/done"}
+{"ts":"2026-09-01T14:14:04.718Z","event":"phase-updated","unit":"issue:503","issue":503,"phase":"review","slot":1}
+{"ts":"2026-09-01T14:14:04.719Z","event":"progress","unit":"issue:503","issue":503,"slot":1,"detail":"milestone review/done"}
+{"ts":"2026-09-01T14:16:04.637Z","event":"phase-updated","unit":"issue:503","issue":503,"phase":"ship","slot":1}
+{"ts":"2026-09-01T14:16:04.638Z","event":"progress","unit":"issue:503","issue":503,"slot":1,"detail":"milestone ship/awaiting-merge"}
+{"ts":"2026-09-01T14:22:04.760Z","event":"exit-detected","unit":"issue:503","issue":503,"pid":2330885,"slot":1}
+{"ts":"2026-09-01T14:22:04.762Z","event":"verify-complete","unit":"issue:503","issue":503}
+{"ts":"2026-09-01T14:22:04.764Z","event":"assigned","unit":"issue:504","issue":504,"slot":1}
+{"ts":"2026-09-01T14:22:04.779Z","event":"spawned","unit":"issue:504","issue":504,"pid":2383667,"tier":"strong","slot":1,"cmd":"claude -p --output-format json --model opus","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-504.log"}
+{"ts":"2026-09-01T14:22:04.780Z","event":"assigned","unit":"issue:473","issue":473,"slot":2}
+{"ts":"2026-09-01T14:22:04.786Z","event":"spawned","unit":"issue:473","issue":473,"pid":2383668,"tier":"mid","slot":2,"cmd":"claude -p --output-format json --model sonnet","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-473.log"}
+{"ts":"2026-09-01T14:24:05.798Z","event":"progress","unit":"issue:504","issue":504,"slot":1,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T14:24:05.799Z","event":"phase-updated","unit":"issue:473","issue":473,"phase":"classify","slot":2}
+{"ts":"2026-09-01T14:26:06.050Z","event":"phase-updated","unit":"issue:504","issue":504,"phase":"setup","slot":1}
+{"ts":"2026-09-01T14:26:06.051Z","event":"progress","unit":"issue:504","issue":504,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T14:26:06.051Z","event":"exit-detected","unit":"issue:473","issue":473,"pid":2383668,"slot":2}
+{"ts":"2026-09-01T14:26:06.053Z","event":"verify-incomplete","unit":"issue:473","issue":473,"detail":"unverified-exit","slot":2,"last_progress_at":"2026-09-01T14:22:04.785Z","observed":"milestone gate/blocked; closed=false"}
+{"ts":"2026-09-01T14:26:06.053Z","event":"redispatched","unit":"issue:473","issue":473,"tier":"strong","slot":2}
+{"ts":"2026-09-01T14:26:06.063Z","event":"spawned","unit":"issue:473","issue":473,"pid":2387667,"tier":"strong","slot":2,"cmd":"claude -p --output-format json --model opus","log":"/home/yuvaldim/.dossier/sched/imboard-ai-ai-dossier/runs/issue-473.log"}
+{"ts":"2026-09-01T14:28:05.823Z","event":"progress","unit":"issue:504","issue":504,"slot":1,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T14:28:05.824Z","event":"progress","unit":"issue:473","issue":473,"slot":2,"detail":"milestone gate/done"}
+{"ts":"2026-09-01T14:30:06.981Z","event":"phase-updated","unit":"issue:504","issue":504,"phase":"plan","slot":1}
+{"ts":"2026-09-01T14:30:06.981Z","event":"progress","unit":"issue:504","issue":504,"slot":1,"detail":"milestone plan/done"}
+{"ts":"2026-09-01T14:32:06.055Z","event":"phase-updated","unit":"issue:473","issue":473,"phase":"setup","slot":2}
+{"ts":"2026-09-01T14:32:06.056Z","event":"progress","unit":"issue:473","issue":473,"slot":2,"detail":"milestone setup/done"}
+{"ts":"2026-09-01T14:34:09.205Z","event":"progress","unit":"issue:473","issue":473,"slot":2,"detail":"milestone setup/done"}
