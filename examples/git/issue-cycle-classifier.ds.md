@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "issue-cycle-classifier",
   "title": "Issue Cycle Classifier — Structured Full/Slot Verdict",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "protocol_version": "1.0",
   "status": "Draft",
   "last_updated": "2026-09-01",
@@ -56,13 +56,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "7cd0f51424930dffda0c9ce1ab32b6fd896932a27bf90d875bf0df35602ad2ac"
+    "hash": "372e1c267cc2a173857baf1c625568da3f334dcc21f4637728cf1459e489bd95"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "9HfFt/NhyFPpOFdtjmkLdgi/2C6F1EgmX9wOoOmDrNepCsRMQhQSr1uFjpIYsWSTJ223omrg0vkbfG3urrFjAA==",
+    "signature": "KMgM2lrP1Fns6nzTLaZWspSjh1N+MT2UOWGun/BPVnmyhX+T+4j4jmCwG/OvN010JI7vjwyUOjm8Ze6idPGyDw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-01T22:48:38.265Z",
+    "signed_at": "2026-09-01T23:10:56.802Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
