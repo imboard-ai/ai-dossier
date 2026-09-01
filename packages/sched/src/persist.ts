@@ -30,6 +30,7 @@ import {
   type SchedConfig,
   type SchedConfigFile,
   type SchedState,
+  type TierDispatchSpec,
 } from './types';
 
 const LOCK_TIMEOUT_MS = 10_000;
@@ -279,7 +280,7 @@ export class SchedStore {
       console.error(
         `⚠ Scheduler config ${this.configPath} is unreadable (${(err as Error).message}) — ` +
           `ALL config (max_slots, stall_timeout_ms, reconcile_interval_ms, pr_poll_interval_ms, ` +
-          `dispatch command/prompt/models/phase-timeouts/fence-takeover-timeout) reverted to built-in defaults ` +
+          `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout) reverted to built-in defaults ` +
           `(max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
       );
       return { max_slots: DEFAULT_MAX_SLOTS };
@@ -330,17 +331,36 @@ function requirePlainObject(label: string, value: unknown): Record<string, unkno
   return value as Record<string, unknown>;
 }
 
+/** A non-empty array of non-empty strings, validated once and reused by every command-array config key (top-level `dispatch.command` and each `dispatch.tiers.<tier>.command`). */
+function requireNonEmptyStringArray(label: string, value: unknown): void {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((c) => typeof c !== 'string' || c.length === 0)
+  ) {
+    throw new Error(`${label} must be a non-empty array of non-empty strings`);
+  }
+}
+
+/** Strict validation of one `dispatch.tiers[<tier>]` spec (#527). */
+function validateTierDispatchSpec(tier: string, raw: unknown): void {
+  const spec = requirePlainObject(`dispatch.tiers.${tier}`, raw);
+  if (spec.command !== undefined) {
+    requireNonEmptyStringArray(`dispatch.tiers.${tier}.command`, spec.command);
+  }
+  if (spec.model !== undefined && (typeof spec.model !== 'string' || spec.model.length === 0)) {
+    throw new Error(`dispatch.tiers.${tier}.model must be a non-empty string`);
+  }
+  if (spec.prompt !== undefined && (typeof spec.prompt !== 'string' || spec.prompt.length === 0)) {
+    throw new Error(`dispatch.tiers.${tier}.prompt must be a non-empty string`);
+  }
+}
+
 /** Strict validation of the optional `dispatch` section (#464). */
 function validateDispatchConfig(raw: unknown): DispatchConfig {
   const dispatch = requirePlainObject('dispatch', raw);
   if (dispatch.command !== undefined) {
-    if (
-      !Array.isArray(dispatch.command) ||
-      dispatch.command.length === 0 ||
-      dispatch.command.some((c) => typeof c !== 'string' || c.length === 0)
-    ) {
-      throw new Error('dispatch.command must be a non-empty array of non-empty strings');
-    }
+    requireNonEmptyStringArray('dispatch.command', dispatch.command);
   }
   if (dispatch.prompt !== undefined && typeof dispatch.prompt !== 'string') {
     throw new Error('dispatch.prompt must be a string');
@@ -374,6 +394,15 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
       }
     }
   }
+  if (dispatch.tiers !== undefined) {
+    const tiers = requirePlainObject('dispatch.tiers', dispatch.tiers);
+    for (const [tier, spec] of Object.entries(tiers)) {
+      if (!MODEL_TIERS.includes(tier as ModelTier)) {
+        throw new Error(`dispatch.tiers: unknown tier '${tier}'`);
+      }
+      validateTierDispatchSpec(tier, spec);
+    }
+  }
   if (dispatch.phase_stall_timeout_ms !== undefined) {
     const phaseTimeouts = requirePlainObject(
       'dispatch.phase_stall_timeout_ms',
@@ -405,6 +434,9 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   }
   if (dispatch.tier_models !== undefined) {
     out.tier_models = dispatch.tier_models as Partial<Record<ModelTier, string>>;
+  }
+  if (dispatch.tiers !== undefined) {
+    out.tiers = dispatch.tiers as Partial<Record<ModelTier, TierDispatchSpec>>;
   }
   if (dispatch.phase_stall_timeout_ms !== undefined) {
     out.phase_stall_timeout_ms = dispatch.phase_stall_timeout_ms as Record<string, number>;

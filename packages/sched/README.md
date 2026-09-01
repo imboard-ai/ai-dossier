@@ -61,7 +61,13 @@ where every mechanical supervision decision is code, not remembered prose:
    `json` buffers the whole session into a single write at exit, which left a 0-byte log
    for any dispatch killed before a clean exit (#524); opencode fallback;
    command/prompt/tier-models configurable), prompt on stdin, output appended to
-   `runs/<unit>.log`. The opencode fallback runs `opencode run --auto …` (#506) — a git
+   `runs/<unit>.log`. Each tier may fully override the command/model/prompt independently
+   via `dispatch.tiers.<tier>` (#527) — a MIXED agent-CLI ladder, not just a different
+   model on the same CLI: a unit can start on `opencode` for `mechanical`/`mid` and be
+   rescued on `claude` at `strong`. `dispatch.tiers` is additive over the top-level
+   `command`/`tier_models`/`prompt` shorthand — any field a tier leaves unset falls back
+   to the shorthand, so an existing config with no `tiers` resolves exactly as before.
+   The opencode fallback runs `opencode run --auto …` (#506) — a git
    worktree is an `external_directory` to opencode, whose default `"ask"` policy a headless
    session can only auto-reject, killing the agent mid-phase; `--auto` approves any request
    not explicitly denied. pid, phase, role, and last-progress are persisted in `state.json`.
@@ -86,7 +92,10 @@ where every mechanical supervision decision is code, not remembered prose:
    the setup milestone watched via `git ls-remote`).
 4. **Stall/escalation ladder (AC4)** — no new milestone AND no new pushed commit for
    `stall_timeout_ms` (default 30 min) → kill the agent and redispatch the same unit one
-   tier stronger (mechanical → mid → strong; the resume rails carry work forward). Cap 2
+   tier stronger (mechanical → mid → strong; the resume rails carry work forward). The
+   redispatch reads the NEXT tier's own resolved command (#527) — `resolveDispatch`
+   pre-resolves every tier once per tick, so a mixed-CLI ladder rescues on a different
+   agent CLI, not just a different `--model` flag on the same one. Cap 2
    escalations — or a stall at the strongest tier — fails the unit and blocks its
    TRANSITIVE dependents (`dep-failed:<issue>`). The timeout is **phase-aware** (#495):
    the `implement` phase alone can run 1-3h on a large monorepo with zero intermediate
@@ -137,6 +146,12 @@ where every mechanical supervision decision is code, not remembered prose:
    operator's explicit "I've addressed this," not a heuristic that could re-dispatch into
    a wall that hasn't actually cleared), which also clears the streak so `sched status`'s
    warning doesn't linger against a wall the operator already acted on.
+
+Config schema moves to 1.4.0 (#527): `dispatch` gains `tiers` — a per-tier
+`{ command?, model?, prompt? }` spawn spec. `command`/`tier_models`/`prompt` remain valid
+as the shorthand and are the fallback for any field a `tiers` entry leaves unset, so a
+1.3.0 config with no `tiers` at all resolves identically to before — there is no on-disk
+migration, only resolution-time fallback in `resolveDispatch`.
 
 Two engine-safety policies were explicit product decisions on #464:
 
@@ -386,7 +401,14 @@ import {
   createSpawnDeps,       // real detached-spawn process I/O
   createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec);
                          //   since #468 also gh pr view PR state + setup info from comments
-  resolveDispatch,       // config → resolved command/prompt/report-prompt/tier-models/timers
+  resolveDispatch,       // config → resolved command/prompt/report-prompt/tier-models/timers/
+                         //   per-tier spawn specs (tiers — #527)
+  buildTierCommand,      // resolved dispatch + tier + issue → argv, using that tier's OWN
+                         //   command/model (#527) — what the mixed-CLI ladder spawns with
+  resolveTierSpawn,      // resolved dispatch + tier + issue → { cmd, model } together (#527) —
+                         //   the single call every spawn site uses so a journal entry can
+                         //   never disagree with what was actually spawned
+  journalCmdModelFields, // { cmd, model } → spawned/redispatched/fix-dispatched journal fields
   stallTimeoutForPhase,  // the stall allowance for the phase now in flight (#495 per-phase
                          //   map → global, hardened against a prototype-name phase)
   stallTimeoutForSlot,   // #504: that allowance, shortened to fenceTakeoverTimeoutMs while
@@ -482,7 +504,7 @@ telemetry" below.
 ├── state.json     # hot operational truth — atomic tmp+fsync+rename writes;
 ├── config.json    # durable intent: max_slots, stall_timeout_ms, reconcile_interval_ms,
 │                  # pr_poll_interval_ms, dispatch (incl. report_prompt,
-│                  # phase_stall_timeout_ms, fence_takeover_timeout_ms)
+│                  # phase_stall_timeout_ms, fence_takeover_timeout_ms, tiers — #527)
 ├── events.jsonl   # append-only event journal (the operator's flight recorder)
 ├── runs/          # per-unit agent output logs (issue-<n>.log)
 └── .sched-lock/   # cross-process directory mutex (pid; stolen from dead holders)

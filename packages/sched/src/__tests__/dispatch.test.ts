@@ -4,17 +4,21 @@ import {
   buildFixPrompt,
   buildPrompt,
   buildReportPrompt,
+  buildTierCommand,
   DEFAULT_DISPATCH_COMMAND,
   DEFAULT_FIX_PROMPT_TEMPLATE,
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
   escalateTier,
+  journalCmdModelFields,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
   reportTierFor,
   resolveDispatch,
+  resolveTierSpawn,
   type SchedConfig,
+  SUPERSESSION_CHECKPOINT_INSTRUCTION,
   stallTimeoutForPhase,
   stallTimeoutForSlot,
 } from '../index';
@@ -116,6 +120,122 @@ describe('resolveDispatch', () => {
       dispatch: { phase_stall_timeout_ms: { implement: 5_000, review: 10_000 } },
     });
     expect(resolved.phaseStallTimeoutMs).toEqual({ implement: 5_000, review: 10_000 });
+  });
+});
+
+describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () => {
+  it('with no dispatch.tiers configured, every tier falls back to the shorthand (command/tier_models/prompt)', () => {
+    const config: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        command: ['claude', '-p', '--model', '{model}'],
+        tier_models: { mid: 'custom-model' },
+        prompt: 'do #{issue}',
+      },
+    };
+    const resolved = resolveDispatch(config);
+    for (const tier of ['mechanical', 'mid', 'strong'] as const) {
+      expect(resolved.tiers[tier].commandTemplate).toEqual(['claude', '-p', '--model', '{model}']);
+      expect(resolved.tiers[tier].prompt).toContain('do #{issue}');
+    }
+    expect(resolved.tiers.mechanical.model).toBe('haiku'); // default, untouched
+    expect(resolved.tiers.mid.model).toBe('custom-model'); // tier_models override
+    expect(resolved.tiers.strong.model).toBe('opus'); // default, untouched
+  });
+
+  it('an explicit dispatch.tiers entry overrides the shorthand per-field for that tier only', () => {
+    const config: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        command: ['claude', '-p', '--model', '{model}'],
+        tier_models: { mid: 'sonnet', strong: 'opus' },
+        tiers: {
+          mid: { command: ['opencode', 'run', '--auto', '--model', '{model}'], model: 'glm' },
+        },
+      },
+    };
+    const resolved = resolveDispatch(config);
+    // mid: fully overridden by dispatch.tiers.mid
+    expect(resolved.tiers.mid.commandTemplate).toEqual([
+      'opencode',
+      'run',
+      '--auto',
+      '--model',
+      '{model}',
+    ]);
+    expect(resolved.tiers.mid.model).toBe('glm');
+    // strong: no tiers entry — falls back to the shorthand unchanged
+    expect(resolved.tiers.strong.commandTemplate).toEqual(['claude', '-p', '--model', '{model}']);
+    expect(resolved.tiers.strong.model).toBe('opus');
+  });
+
+  it('a tiers entry may override only one field, falling back to the shorthand for the rest', () => {
+    const config: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        command: ['claude', '-p', '--model', '{model}'],
+        tiers: { strong: { model: 'custom-strong-model' } },
+      },
+    };
+    const resolved = resolveDispatch(config);
+    expect(resolved.tiers.strong.commandTemplate).toEqual(['claude', '-p', '--model', '{model}']);
+    expect(resolved.tiers.strong.model).toBe('custom-strong-model');
+  });
+
+  it('buildTierCommand matches buildAgentCommand when no tiers override is set (back-compat parity)', () => {
+    const resolved = resolveDispatch({ max_slots: 1 });
+    expect(buildTierCommand(resolved, 'mid', 464)).toEqual(
+      buildAgentCommand(resolved.command, 'mid', 464, resolved.tierModels)
+    );
+  });
+
+  it('buildTierCommand produces a different argv (different binary) when the tier has its own command', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: {
+        tiers: {
+          mid: { command: ['opencode', 'run', '--auto', '--model', '{model}'], model: 'glm' },
+          strong: { command: ['claude', '-p', '--model', '{model}'], model: 'opus' },
+        },
+      },
+    });
+    expect(buildTierCommand(resolved, 'mid', 527)).toEqual([
+      'opencode',
+      'run',
+      '--auto',
+      '--model',
+      'glm',
+    ]);
+    expect(buildTierCommand(resolved, 'strong', 527)).toEqual(['claude', '-p', '--model', 'opus']);
+  });
+
+  it('an explicit dispatch.tiers.<tier>.prompt override gets the supersession checkpoint too, same as the shorthand', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: { tiers: { strong: { prompt: 'strong-tier custom prompt #{issue}' } } },
+    });
+    expect(resolved.tiers.strong.prompt).toContain('strong-tier custom prompt #{issue}');
+    expect(resolved.tiers.strong.prompt).toContain(SUPERSESSION_CHECKPOINT_INSTRUCTION);
+    // a tier with no override still falls back to the (already-checkpointed) global prompt
+    expect(resolved.tiers.mid.prompt).toContain(SUPERSESSION_CHECKPOINT_INSTRUCTION);
+  });
+
+  it('resolveTierSpawn + journalCmdModelFields resolve cmd/model together and format them for the journal', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: {
+        tiers: { mid: { command: ['opencode', 'run', '--model', '{model}'], model: 'glm' } },
+      },
+    });
+    const spawn = resolveTierSpawn(resolved, 'mid', 527);
+    expect(spawn.cmd).toEqual(['opencode', 'run', '--model', 'glm']);
+    expect(spawn.model).toBe('glm');
+    expect(journalCmdModelFields(spawn)).toEqual({ cmd: 'opencode run --model glm', model: 'glm' });
+  });
+
+  it('journalCmdModelFields omits model when the tier has none', () => {
+    const spawn = { cmd: ['claude', '-p'], model: null };
+    expect(journalCmdModelFields(spawn)).toEqual({ cmd: 'claude -p' });
   });
 });
 

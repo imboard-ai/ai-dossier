@@ -781,10 +781,26 @@ function registerStartSubcommand(cmd: Command): void {
 
       // Resolve the agent command: config dispatch.command wins; otherwise
       // auto-detect (claude first, opencode fallback — the run machinery's
-      // order, #459) and use the matching headless template.
-      const dispatchCommand =
-        config.dispatch?.command ??
-        (detectLlm('auto', true) === 'opencode' ? [...OPENCODE_DISPATCH_COMMAND] : undefined);
+      // order, #459) and use the matching headless template. Skipped
+      // entirely once `dispatch.tiers` is set (#527) — an operator who
+      // configured a mixed agent-CLI ladder opted out of the single-CLI
+      // auto-detect for every tier, not just the ones they overrode.
+      const tiersBypassesAutoDetect = config.dispatch?.tiers !== undefined;
+      if (tiersBypassesAutoDetect && config.dispatch?.command === undefined) {
+        // A tier without its own `dispatch.tiers.<tier>.command` (and no
+        // top-level `dispatch.command`) falls back to the built-in claude
+        // template, not the detected CLI — surface this before a confusing
+        // `spawn-error: ENOENT` shows up deep in the journal instead.
+        console.error(
+          '⚠ dispatch.tiers is set — auto-detect (claude/opencode) is skipped for every tier; ' +
+            'a tier without its own dispatch.tiers.<tier>.command falls back to the built-in ' +
+            'claude template, not the detected CLI.'
+        );
+      }
+      const dispatchCommand = tiersBypassesAutoDetect
+        ? undefined
+        : (config.dispatch?.command ??
+          (detectLlm('auto', true) === 'opencode' ? [...OPENCODE_DISPATCH_COMMAND] : undefined));
       const engineConfig = dispatchCommand
         ? { ...config, dispatch: { ...config.dispatch, command: dispatchCommand } }
         : config;

@@ -10,9 +10,13 @@
  * captures stdout in-process from an agent it waits on; a detached dispatch
  * needs incremental output, see {@link DEFAULT_DISPATCH_COMMAND}) with
  * `{model}`/`{issue}` placeholders; the prompt
- * travels on stdin exactly like the run machinery's headless path. Children
- * spawn DETACHED and unref'd: an agent must survive a sched crash (RFC F.10 —
- * restart reconciles by pid, it never owns the agent's lifetime).
+ * travels on stdin exactly like the run machinery's headless path. Each tier
+ * may override the template AND the agent CLI independently (#527,
+ * `dispatch.tiers`) — a unit can start on `opencode` for the cheap tiers and
+ * be rescued on `claude` at the strong tier; `resolveDispatch` merges the
+ * per-tier override with the top-level `command`/`tier_models` shorthand.
+ * Children spawn DETACHED and unref'd: an agent must survive a sched crash
+ * (RFC F.10 — restart reconciles by pid, it never owns the agent's lifetime).
  *
  * All process I/O is injectable (`SpawnDeps`) so tests spawn fake agents, and
  * the package itself never invokes an LLM — it spawns a process the operator
@@ -35,6 +39,7 @@ import {
   type SchedConfig,
   TIER_LADDER,
   TIER_ORDER,
+  type TierDispatchSpec,
 } from './types';
 
 /** Default tier → model mapping (claude aliases; override in config.json). */
@@ -258,6 +263,16 @@ const MAX_PROMPT_TESTS = 50;
 /** Characters kept per rendered test id. */
 const MAX_PROMPT_TEST_LENGTH = 200;
 
+/** Fully-resolved per-tier spawn spec (#527) — see `ResolvedDispatch.tiers`. */
+export interface ResolvedTierDispatch {
+  /** Command template for this tier; `{model}`/`{issue}` unresolved until `buildTierCommand`. */
+  commandTemplate: readonly string[];
+  /** Model id/alias for this tier; null means "no model flag". */
+  model: string | null;
+  /** Prompt template for this tier; `{issue}` unresolved. */
+  prompt: string;
+}
+
 /** Fully-resolved dispatch settings the engine runs with. */
 export interface ResolvedDispatch {
   /** Command template with `{model}`/`{issue}` placeholders. */
@@ -276,6 +291,15 @@ export interface ResolvedDispatch {
   batchReportPrompt: string;
   /** Model per tier; null means "no model flag" (the command's `--model {model}` pair drops). */
   tierModels: Record<ModelTier, string | null>;
+  /**
+   * Per-tier resolved spawn spec (#527) — the mixed agent-CLI escalation
+   * ladder. Every tier is fully resolved here: an explicit `dispatch.tiers`
+   * entry wins per-field, falling back to `command`/`tierModels`/`prompt`
+   * (the shorthand) for any field it leaves unset. `commandTemplate` still
+   * carries `{issue}`/`{model}` placeholders — `buildTierCommand` performs
+   * the substitution once `issue` is known.
+   */
+  tiers: Record<ModelTier, ResolvedTierDispatch>;
   /** Global stall timeout — the fallback used when the in-flight phase has no entry in `phaseStallTimeoutMs` (#495). */
   stallTimeoutMs: number;
   /**
@@ -305,22 +329,55 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
     mid: dispatch.tier_models?.mid ?? DEFAULT_TIER_MODELS.mid,
     strong: dispatch.tier_models?.strong ?? DEFAULT_TIER_MODELS.strong,
   };
+  const command = dispatch.command ?? [...DEFAULT_DISPATCH_COMMAND];
+  const prompt = withSupersessionCheckpoint(dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE);
+  const tiers = Object.fromEntries(
+    TIER_ORDER.map((tier) => [
+      tier,
+      resolveTierDispatch(dispatch.tiers?.[tier], tier, command, tierModels, prompt),
+    ])
+  ) as Record<ModelTier, ResolvedTierDispatch>;
   return {
-    command: dispatch.command ?? [...DEFAULT_DISPATCH_COMMAND],
+    command,
     // Wrapped here, not only on the constant: a configured prompt is still a cycle
     // agent that can be superseded mid-run.
-    prompt: withSupersessionCheckpoint(dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE),
+    prompt,
     reportPrompt: dispatch.report_prompt ?? DEFAULT_REPORT_PROMPT_TEMPLATE,
     fixPrompt: dispatch.fix_prompt ?? DEFAULT_FIX_PROMPT_TEMPLATE,
     memberPrompt: dispatch.member_prompt ?? DEFAULT_MEMBER_PROMPT_TEMPLATE,
     batchTailPrompt: dispatch.batch_tail_prompt ?? DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE,
     batchReportPrompt: dispatch.batch_report_prompt ?? DEFAULT_BATCH_REPORT_PROMPT_TEMPLATE,
     tierModels,
+    tiers,
     stallTimeoutMs: config.stall_timeout_ms ?? DEFAULT_STALL_TIMEOUT_MS,
     phaseStallTimeoutMs: resolvePhaseStallTimeouts(config),
     reconcileIntervalMs: config.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS,
     prPollIntervalMs: config.pr_poll_interval_ms ?? DEFAULT_PR_POLL_INTERVAL_MS,
     fenceTakeoverTimeoutMs: dispatch.fence_takeover_timeout_ms ?? DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
+  };
+}
+
+/**
+ * Resolve one tier's spawn spec (#527): an explicit `dispatch.tiers[tier]`
+ * entry wins per-field; any field it leaves unset falls back to the
+ * shorthand (`command`/`tierModels[tier]`/`prompt`) — the "migrate
+ * transparently" path for pre-#527 configs, which set no `tiers` at all.
+ */
+function resolveTierDispatch(
+  spec: TierDispatchSpec | undefined,
+  tier: ModelTier,
+  fallbackCommand: readonly string[],
+  fallbackTierModels: Readonly<Record<ModelTier, string | null>>,
+  fallbackPrompt: string
+): ResolvedTierDispatch {
+  return {
+    commandTemplate: spec?.command ?? fallbackCommand,
+    model: spec?.model ?? fallbackTierModels[tier],
+    // An explicit override gets the checkpoint too — `fallbackPrompt` already
+    // carries it (resolveDispatch wraps the top-level prompt once), so a
+    // tier-specific override must not skip the safety instruction just
+    // because it bypassed the fallback.
+    prompt: spec?.prompt !== undefined ? withSupersessionCheckpoint(spec.prompt) : fallbackPrompt,
   };
 }
 
@@ -386,17 +443,16 @@ export function stallTimeoutForSlot(
 
 /**
  * Build the concrete agent argv for one dispatch: substitute `{issue}` and
- * `{model}`. When the tier's model is null, the `{model}` item AND its
- * immediately-preceding flag (e.g. `--model`) drop together — a command never
- * carries a flag whose value is missing.
+ * `{model}` into `template` for a single resolved model. When `model` is
+ * null, the `{model}` item AND its immediately-preceding flag (e.g.
+ * `--model`) drop together — a command never carries a flag whose value is
+ * missing.
  */
-export function buildAgentCommand(
+export function buildCommandForModel(
   template: readonly string[],
-  tier: ModelTier,
-  issue: number,
-  tierModels: Readonly<Record<ModelTier, string | null>>
+  model: string | null,
+  issue: number
 ): string[] {
-  const model = tierModels[tier] ?? null;
   const argv: string[] = [];
   for (const item of template) {
     if (item === '{model}') {
@@ -411,6 +467,58 @@ export function buildAgentCommand(
     argv.push(item.replaceAll('{issue}', String(issue)));
   }
   return argv;
+}
+
+/**
+ * Build the concrete agent argv for one dispatch: substitute `{issue}` and
+ * `{model}`, looking the model up by `tier`. Kept for back-compat (a public
+ * export) — `buildTierCommand` is the #527 replacement callers should use
+ * when a `ResolvedDispatch` is available, since it also picks the tier's own
+ * command template, not just its model.
+ */
+export function buildAgentCommand(
+  template: readonly string[],
+  tier: ModelTier,
+  issue: number,
+  tierModels: Readonly<Record<ModelTier, string | null>>
+): string[] {
+  return buildCommandForModel(template, tierModels[tier] ?? null, issue);
+}
+
+/**
+ * Build the concrete agent argv for one dispatch using the tier's fully
+ * resolved spawn spec (#527) — its own command template (falling back to the
+ * global `command` when unset) and its own model. This is what makes the
+ * escalation ladder mix agent CLIs: `resolved.tiers[tier].commandTemplate`
+ * already reflects any `dispatch.tiers[tier].command` override.
+ */
+export function buildTierCommand(
+  resolved: Pick<ResolvedDispatch, 'tiers'>,
+  tier: ModelTier,
+  issue: number
+): string[] {
+  const tierDispatch = resolved.tiers[tier];
+  return buildCommandForModel(tierDispatch.commandTemplate, tierDispatch.model, issue);
+}
+
+/** A tier's resolved argv + model for one dispatch — kept together so a spawn call and its journal entry can never disagree (#527 review). */
+export interface TierSpawn {
+  cmd: string[];
+  model: string | null;
+}
+
+/** Resolve a tier's argv AND model together for one dispatch — the single call every spawn site should use instead of separately calling `buildTierCommand` and reading `tiers[tier].model`. */
+export function resolveTierSpawn(
+  resolved: Pick<ResolvedDispatch, 'tiers'>,
+  tier: ModelTier,
+  issue: number
+): TierSpawn {
+  return { cmd: buildTierCommand(resolved, tier, issue), model: resolved.tiers[tier].model };
+}
+
+/** A `TierSpawn` as `spawned`/`redispatched`/`fix-dispatched` journal fields — `model` omitted when the tier has none, matching every other optional journal field's convention. */
+export function journalCmdModelFields(spawn: TierSpawn): { cmd: string; model?: string } {
+  return { cmd: spawn.cmd.join(' '), ...(spawn.model !== null ? { model: spawn.model } : {}) };
 }
 
 /**

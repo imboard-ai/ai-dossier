@@ -200,6 +200,68 @@ describe('integration: dispatch → exit → verify against fake milestones', ()
   }, 30_000);
 });
 
+describe('integration: #527 mixed agent-CLI escalation ladder', () => {
+  it('a fake two-CLI ladder: mid tier (cmd A) dies, strong tier (cmd B) completes — real spawn, real redispatch', async () => {
+    const dir = tmpDir('sched-int-tiers-');
+    const store = new SchedStore(dir);
+    const milestonesDir = tmpDir('sched-int-tiers-milestones-');
+    const deps: EngineDeps = {
+      store,
+      journal: new Journal(dir),
+      groundTruth: fileGroundTruth(milestonesDir),
+      spawnDeps: createSpawnDeps(),
+      now: () => new Date(),
+    };
+    // mid and strong each dispatch a DIFFERENT underlying command (not just a
+    // different model on the same CLI) — the AC5 scenario: "mid spawns cmd A,
+    // stall → strong spawns cmd B".
+    const config: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        tiers: {
+          mid: { command: ['node', FAKE_AGENT, '--mode=die', `--milestones-dir=${milestonesDir}`] },
+          strong: {
+            command: ['node', FAKE_AGENT, '--mode=complete', `--milestones-dir=${milestonesDir}`],
+          },
+        },
+        prompt: 'Run the full-cycle workflow for issue #{issue} now.',
+      },
+    };
+    store.withLock((state) => ({
+      state: enqueueEntries(state, [{ issue: 527, mode: 'full', tier: 'mid' }], new Date()),
+      result: null,
+    }));
+
+    tick(deps, config);
+    const firstPid = store.load().slots[0].pid as number;
+    expect(await waitUntilDead(deps.spawnDeps, firstPid)).toBe(true);
+
+    // cmd A (mid, --mode=die) posted nothing verifiable → not complete → redispatched to strong.
+    const result = tick(deps, config);
+    expect(result.completed).toHaveLength(0);
+    expect(result.redispatched).toEqual(['issue:527']);
+    const state2 = store.load();
+    expect(state2.entries[0].tier).toBe('strong');
+    const secondPid = state2.slots[0].pid as number;
+    expect(secondPid).not.toBe(firstPid);
+    procsToKill.push(secondPid);
+
+    // cmd B (strong, --mode=complete) posts report-done and exits → verified complete.
+    expect(await waitUntilDead(deps.spawnDeps, secondPid)).toBe(true);
+    const result2 = tick(deps, config);
+    expect(result2.completed).toEqual(['issue:527']);
+    expect(store.load().entries[0].status).toBe('done');
+
+    // AC3: the journal shows the two DIFFERENT underlying commands, not just two models.
+    const events = deps.journal.read();
+    const spawned = events.filter((e) => e.event === 'spawned' && e.issue === 527);
+    expect(spawned[0]?.cmd).toContain('--mode=die');
+    expect(spawned[1]?.cmd).toContain('--mode=complete');
+    const redispatched = events.find((e) => e.event === 'redispatched' && e.issue === 527);
+    expect(redispatched?.cmd).toContain('--mode=complete');
+  }, 20_000);
+});
+
 describe('integration: real-subprocess ground truth', () => {
   it('reads milestones through a real executable and branch heads through a real scratch git repo', async () => {
     // A "stubbed ai-dossier runstate" as an executable script.

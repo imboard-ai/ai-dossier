@@ -42,10 +42,10 @@ import {
 } from './attribution';
 import { type BisectOutcome, runAttributionBisect } from './bisect';
 import {
-  buildAgentCommand,
   buildFixPrompt,
-  DEFAULT_TIER_MODELS,
+  journalCmdModelFields,
   resolveDispatch,
+  resolveTierSpawn,
 } from './dispatch';
 import { unitEvent } from './journal';
 import type { ExecFn } from './project';
@@ -441,13 +441,11 @@ export function beginFixAttempt(
   // `max_slots` is irrelevant here — only the command/prompt/tier-model parts
   // of the resolved dispatch are used — but SchedConfig requires it.
   const resolved = resolveDispatch(opts.config ?? { max_slots: DEFAULT_MAX_SLOTS });
+  const spawnSpec = resolveTierSpawn(resolved, tier, issue);
   const dispatch: FixDispatch = {
     issue,
     tier,
-    command: buildAgentCommand(resolved.command, tier, issue, {
-      ...DEFAULT_TIER_MODELS,
-      ...resolved.tierModels,
-    }),
+    command: spawnSpec.cmd,
     prompt: buildFixPrompt(
       resolved.fixPrompt,
       issue,
@@ -462,7 +460,15 @@ export function beginFixAttempt(
     next = transitionBatch(next, batchId, 'fixing', {}, now);
   }
   next = patchBatch(next, batchId, { fix_attempts: [...batch.fix_attempts, record] }, now);
-  journal(deps, unitEvent('fix-dispatched', `batch:${batchId}`, { issue, tier }), now);
+  journal(
+    deps,
+    unitEvent('fix-dispatched', `batch:${batchId}`, {
+      issue,
+      tier,
+      ...journalCmdModelFields(spawnSpec),
+    }),
+    now
+  );
   return { state: next, dispatch };
 }
 

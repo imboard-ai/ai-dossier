@@ -470,6 +470,22 @@ export interface SchedConfig {
 }
 
 /**
+ * Full per-tier spawn spec (#527) — lets a tier point at a different agent
+ * CLI, not just a different model within the same one (e.g. `opencode` for
+ * `mid`, `claude` for `strong`). Any field left unset falls back to the
+ * shorthand: `command` → `DispatchConfig.command`, `model` →
+ * `DispatchConfig.tier_models[tier]`, `prompt` → `DispatchConfig.prompt`.
+ */
+export interface TierDispatchSpec {
+  /** Command template for this tier only; same `{model}`/`{issue}` substitution rules as the top-level `command`. */
+  command?: string[];
+  /** Model id/alias for this tier only. */
+  model?: string;
+  /** Prompt template for this tier only; `{issue}` substituted. */
+  prompt?: string;
+}
+
+/**
  * Agent dispatch configuration (#464). The command is a template: `{model}`
  * and `{issue}` placeholders are substituted per dispatch; a `{model}` item
  * whose tier has no model configured drops together with its flag.
@@ -481,6 +497,14 @@ export interface DispatchConfig {
   prompt?: string;
   /** Tier → model id/alias mapping (defaults: haiku / sonnet / opus). */
   tier_models?: Partial<Record<ModelTier, string>>;
+  /**
+   * Per-tier full spawn spec (#527) — the mixed agent-CLI escalation ladder.
+   * A tier without an entry here falls back to `command`/`tier_models`/
+   * `prompt` (the pre-#527 shorthand), so existing configs keep working
+   * unchanged; this is the "migrate transparently" path — there is no
+   * on-disk rewrite, only resolution-time fallback (`resolveDispatch`).
+   */
+  tiers?: Partial<Record<ModelTier, TierDispatchSpec>>;
   /**
    * Per-phase stall timeout overrides in ms, keyed by runstate milestone
    * phase (one of `PHASES`/`BATCH_PHASES` below — an unrecognized key is
@@ -666,10 +690,15 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.7.0',
 ];
 
-export const CONFIG_SCHEMA_VERSION = '1.3.0' as const;
+export const CONFIG_SCHEMA_VERSION = '1.4.0' as const;
 
-/** Config schema versions `loadConfig` accepts (older configs carry only max_slots). */
-export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0', '1.2.0'];
+/** Config schema versions `loadConfig` accepts and migrates transparently on load (fields absent in an older version simply resolve to their defaults). */
+export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
+  '1.0.0',
+  '1.1.0',
+  '1.2.0',
+  '1.3.0',
+];
 
 /** Config file shape (schema_version + the config itself). */
 export interface SchedConfigFile {
@@ -835,4 +864,19 @@ export interface JournalEvent {
    * vocabulary above rather than `QueueEntry.reason`'s.
    */
   reason?: string;
+  /**
+   * Agent command actually spawned, joined with spaces (#527) — declared so
+   * `spawned`/`redispatched` writers get an excess-property check instead of
+   * silently dropping through a loose `Record<string, unknown>` extra bag.
+   */
+  cmd?: string;
+  /**
+   * Model id/alias the spawned tier resolved to (#527) — audit-trail
+   * visibility only (`sched status`/`events.jsonl`). `runstate stats`'s
+   * per-model buckets come independently from `runs.jsonl`'s
+   * `RunLogEntry.model` (`recordDispatchRunLog`'s own tier-model read).
+   */
+  model?: string;
+  /** Absolute path to the spawned process's log file. */
+  log?: string;
 }

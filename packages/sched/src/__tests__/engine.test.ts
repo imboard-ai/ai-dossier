@@ -371,6 +371,68 @@ describe('completion verification (AC2: an agent exiting is never proof of compl
   });
 });
 
+describe('per-tier dispatch commands (#527 — mixed agent-CLI escalation ladders)', () => {
+  it('a fake two-CLI ladder: mid spawns cmd A, an unverified exit escalates and strong spawns cmd B', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    // mid → a cheap fake "opencode" binary with its own model; strong → a
+    // different fake "claude" binary with its own model — the AC2 scenario:
+    // "a unit can start on one CLI+model and be rescued on another".
+    h.config.dispatch = {
+      tiers: {
+        mid: { command: ['fake-opencode', 'run', '--model', '{model}'], model: 'fake-glm' },
+        strong: { command: ['fake-claude', '-p', '--model', '{model}'], model: 'fake-opus' },
+      },
+    };
+    h.enqueue([{ issue: 527, mode: 'full', tier: 'mid' }]);
+    h.tick();
+    const firstPid = h.spawnCalls[0].pid;
+
+    // mid tier spawned cmd A, with cmd A's own model.
+    expect(h.spawnCalls[0].cmd).toEqual(['fake-opencode', 'run', '--model', 'fake-glm']);
+
+    // The agent exits having posted nothing verifiable — exit alone proves nothing,
+    // and the ladder redispatches one tier stronger.
+    h.alive.delete(firstPid);
+    const result = h.tick();
+
+    expect(result.redispatched).toEqual(['issue:527']);
+    expect(h.state().entries.find((e) => e.issue === 527)?.tier).toBe('strong');
+    expect(h.spawnCalls).toHaveLength(2);
+    // strong tier spawned a DIFFERENT binary (cmd B), not cmd A with a new model.
+    expect(h.spawnCalls[1].cmd).toEqual(['fake-claude', '-p', '--model', 'fake-opus']);
+    expect(h.spawnCalls[1].pid).not.toBe(firstPid);
+
+    // AC3: the redispatched journal event records both the agent CLI and the model.
+    const redispatchedEvent = h.events().find((e) => e.event === 'redispatched' && e.issue === 527);
+    expect(redispatchedEvent?.cmd).toBe('fake-claude -p --model fake-opus');
+    expect(redispatchedEvent?.model).toBe('fake-opus');
+
+    // AC3: the spawned event for the mid-tier dispatch also recorded the model.
+    const spawnedEvents = h.events().filter((e) => e.event === 'spawned' && e.issue === 527);
+    expect(spawnedEvents[0]?.model).toBe('fake-glm');
+    expect(spawnedEvents[1]?.model).toBe('fake-opus');
+  });
+
+  it('a per-tier prompt override actually reaches the spawned agent (AC1 — declared+validated+resolved is not enough, it must be consumed)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.config.dispatch = {
+      tiers: { mid: { prompt: 'MID-TIER-CUSTOM-PROMPT for #{issue}' } },
+    };
+    h.enqueue([{ issue: 527, mode: 'full', tier: 'mid' }]);
+    h.tick();
+
+    expect(h.spawnCalls[0].prompt).toContain('MID-TIER-CUSTOM-PROMPT for #527');
+    // a tier without its own override still gets the global default prompt
+    const h2 = harness();
+    REGISTRIES.push(h2.dir);
+    h2.enqueue([{ issue: 528, mode: 'full', tier: 'strong' }]);
+    h2.tick();
+    expect(h2.spawnCalls[0].prompt).not.toContain('MID-TIER-CUSTOM-PROMPT');
+  });
+});
+
 describe('reconciliation tick (AC3: external advance + orphaned pids after restart)', () => {
   it('externally-advanced state completes a unit whose agent is still alive', () => {
     const h = harness();
@@ -1297,6 +1359,26 @@ describe('#468 AC2: teardown + report dispatch on merge', () => {
     const slot = state.slots.find((s) => s.unit === 'issue:101');
     expect(slot?.status).toBe('running');
     expect(slot?.phase).toBe('report');
+  });
+
+  it('#527 AC4: report/mechanical tier can point at a cheaper CLI+model independently of mid/strong', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.config.dispatch = {
+      tiers: {
+        mechanical: { command: ['fake-haiku-cli', '--model', '{model}'], model: 'fake-cheap' },
+      },
+    };
+    mergedUnit(h);
+
+    const result = h.tick();
+    expect(result.reportDispatched).toEqual(['issue:101']);
+
+    const reportSpawn = h.spawnCalls[h.spawnCalls.length - 1];
+    expect(reportSpawn.cmd).toEqual(['fake-haiku-cli', '--model', 'fake-cheap']);
+    // AC3: the spawned event records the model the report agent used.
+    const spawnedEvent = h.events().find((e) => e.event === 'spawned' && e.pid === reportSpawn.pid);
+    expect(spawnedEvent?.model).toBe('fake-cheap');
   });
 
   it('pool-claimed worktrees return to the pool (verified via the pool self-check)', () => {

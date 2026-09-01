@@ -65,11 +65,12 @@ import {
   SHA_RE,
 } from './attribution';
 import {
-  buildAgentCommand,
   buildBatchReportPrompt,
   buildBatchTailPrompt,
   buildMemberPrompt,
+  journalCmdModelFields,
   type ResolvedDispatch,
+  resolveTierSpawn,
   type SpawnDeps,
   unitLogName,
 } from './dispatch';
@@ -440,7 +441,8 @@ function spawnMember(
 
   const withStatus = advanceMemberToInWork(state, memberIssue, now);
   const tier: ModelTier = findEntry(withStatus, memberIssue)?.tier ?? 'mid';
-  const cmd = buildAgentCommand(dispatch.command, tier, memberIssue, dispatch.tierModels);
+  const spawnSpec = resolveTierSpawn(dispatch, tier, memberIssue);
+  const cmd = spawnSpec.cmd;
   const prompt = buildMemberPrompt(dispatch.memberPrompt, memberIssue, batchId, batch.worktree);
   const logFile = path.join(
     deps.store.runsDir,
@@ -476,6 +478,8 @@ function spawnMember(
       tier,
       slot: slot.id,
       issue: memberIssue,
+      ...journalCmdModelFields(spawnSpec),
+      log: logFile,
       detail: `member ${batch.executing_member}/${batch.members.length}`,
     }),
     now
@@ -638,7 +642,8 @@ function spawnTailAgent(
       });
       return releaseSlot(state, batchId, now);
     }
-    const cmd = buildAgentCommand(dispatch.command, 'strong', batch.anchor, dispatch.tierModels);
+    const spawnSpec = resolveTierSpawn(dispatch, 'strong', batch.anchor);
+    const cmd = spawnSpec.cmd;
     const prompt = buildBatchTailPrompt(
       dispatch.batchTailPrompt,
       batchId,
@@ -666,7 +671,16 @@ function spawnTailAgent(
     };
     const next =
       slot.status === 'assigned' ? transitionSlot(state, slot.id, 'running', patch, now) : state;
-    deps.journal.append(unitEvent('spawned', unit(batchId), { pid, slot: slot.id }), now);
+    deps.journal.append(
+      unitEvent('spawned', unit(batchId), {
+        pid,
+        tier: 'strong',
+        slot: slot.id,
+        ...journalCmdModelFields(spawnSpec),
+        log: logFile,
+      }),
+      now
+    );
     result.spawned.push(unit(batchId));
     return next;
   });
@@ -695,12 +709,8 @@ function spawnReportAgent(
       });
       return releaseSlot(state, batchId, now);
     }
-    const cmd = buildAgentCommand(
-      dispatch.command,
-      'mechanical',
-      batch.anchor,
-      dispatch.tierModels
-    );
+    const spawnSpec = resolveTierSpawn(dispatch, 'mechanical', batch.anchor);
+    const cmd = spawnSpec.cmd;
     const prompt = buildBatchReportPrompt(
       dispatch.batchReportPrompt,
       batchId,
@@ -728,7 +738,13 @@ function spawnReportAgent(
       slot.status === 'assigned'
         ? transitionSlot(state, slot.id, 'running', patchState, now)
         : state;
-    journalEvent(deps, 'report-dispatched', unit(batchId), { pid, slot: slot.id, pr: prNumber });
+    journalEvent(deps, 'report-dispatched', unit(batchId), {
+      pid,
+      slot: slot.id,
+      pr: prNumber,
+      ...journalCmdModelFields(spawnSpec),
+      log: logFile,
+    });
     result.spawned.push(unit(batchId));
     return next;
   });
