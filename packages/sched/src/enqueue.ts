@@ -30,6 +30,22 @@ export class EnqueueError extends Error {
  */
 const RUN_ID_RE = /^r-\d+-[0-9a-f]{4,}$/;
 
+/** GitHub label-name grammar: what `blocked_label` (and `EnqueueInput.blocked_label`) may contain. */
+const LABEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,49}$/;
+
+/**
+ * The `reason` prefix a hard-block-labelled entry carries (#507), and the one
+ * place that builds it — the CLI's journal event and the entry's `reason`
+ * must read identically, so both call this rather than templating the string
+ * twice.
+ */
+export const LABEL_BLOCK_REASON_PREFIX = 'label:';
+
+/** `reason`/journal-`reason` value for an entry blocked by GitHub label `label`. */
+export function labelBlockReason(label: string): string {
+  return `${LABEL_BLOCK_REASON_PREFIX}${label}`;
+}
+
 /** One unit of work as provided by flags or a manifest (defaults applied by `enqueueEntries`). */
 export interface EnqueueInput {
   issue: number;
@@ -258,6 +274,20 @@ export function enqueueEntries(
     ) {
       throw new EnqueueError(`Issue ${input.issue}: tier must be mechanical | mid | strong`);
     }
+    if (input.blocked_label !== undefined && input.blocked_label !== null) {
+      if (typeof input.blocked_label !== 'string' || !LABEL_NAME_RE.test(input.blocked_label)) {
+        throw new EnqueueError(`Issue ${input.issue}: blocked_label must be a GitHub label name`);
+      }
+      // A blocked slot-mode member still joins its batch's `members` list
+      // (below) and batch dispatch never consults member status — so it
+      // would ride the batch into work anyway, defeating the pre-screen
+      // entirely (#507). Reject the combination rather than half-apply it.
+      if ((input.mode ?? 'full') === 'slot') {
+        throw new EnqueueError(
+          `Issue ${input.issue}: carries hard-block label '${input.blocked_label}' and cannot be enqueued as a batch member — remove the label, or enqueue it with mode 'full'`
+        );
+      }
+    }
     seen.add(input.issue);
   }
 
@@ -295,6 +325,12 @@ export function enqueueEntries(
         `Issue ${input.issue}: anchor/run_id/eviction_groups describe a batch — they cannot be set on a full-cycle entry`
       );
     }
+    // A `decision-pending` GITHUB LABEL (one of the four hard-block labels
+    // this entry may carry) is deliberately mapped to `status: 'blocked'`
+    // here, NOT to the `decision-pending` IssueStatus of the same name —
+    // that status means a runtime hand-off mid-run; this is an enqueue-time
+    // screen with its own `label:<name>` reason vocabulary, and reusing
+    // `blocked` keeps all four hard-block labels on one uniform path (#507).
     return {
       issue: input.issue,
       mode,
@@ -302,7 +338,7 @@ export function enqueueEntries(
       deps: input.deps ? [...input.deps] : [],
       tier: input.tier ?? 'mid',
       status: input.blocked_label ? 'blocked' : 'queued',
-      reason: input.blocked_label ? `label:${input.blocked_label}` : null,
+      reason: input.blocked_label ? labelBlockReason(input.blocked_label) : null,
       pr: null,
       cleanup: null,
       failure_evidence: null,

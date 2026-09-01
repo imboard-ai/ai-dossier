@@ -41,6 +41,8 @@ export {
   EnqueueError,
   type EnqueueInput,
   enqueueEntries,
+  LABEL_BLOCK_REASON_PREFIX,
+  labelBlockReason,
   parseManifest,
 } from './enqueue';
 export {
@@ -50,6 +52,7 @@ export {
   groundTruthExec,
   isParkedMilestone,
   isVerifiedComplete,
+  labelNames,
   type PrTruth,
   parseMilestoneJson,
   parsePrViewJson,

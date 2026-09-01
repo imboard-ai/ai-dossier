@@ -359,7 +359,7 @@ describe('enqueueEntries — blocked_label (#507)', () => {
     expect(state.entries[0]).toMatchObject({ status: 'queued', reason: null });
   });
 
-  it('a blocked_label entry still participates in dependency-cycle and batch rules', () => {
+  it('a blocked_label entry still participates in dependency-cycle rules', () => {
     expect(() =>
       enqueueEntries(
         createEmptyState(),
@@ -370,13 +370,31 @@ describe('enqueueEntries — blocked_label (#507)', () => {
         NOW
       )
     ).toThrow(/Dependency cycle detected/);
+  });
 
-    const state = enqueueEntries(
-      createEmptyState(),
-      [{ issue: 501, mode: 'slot', batch: 'b2', blocked_label: 'needs-clarification' }],
-      NOW
-    );
-    expect(state.entries[0]).toMatchObject({ status: 'blocked', batch: 'b2' });
-    expect(findBatch(state, 'b2')?.members).toEqual([501]);
+  it('rejects a slot-mode entry carrying blocked_label — it would ride the batch into work anyway', () => {
+    expect(() =>
+      enqueueEntries(
+        createEmptyState(),
+        [{ issue: 501, mode: 'slot', batch: 'b2', blocked_label: 'needs-clarification' }],
+        NOW
+      )
+    ).toThrow(/cannot be enqueued as a batch member/);
+  });
+
+  it('rejects a blocked_label that is not a plausible GitHub label name', () => {
+    expect(() =>
+      enqueueEntries(createEmptyState(), [{ issue: 601, blocked_label: '' }], NOW)
+    ).toThrow(/blocked_label must be a GitHub label name/);
+    expect(() =>
+      enqueueEntries(createEmptyState(), [{ issue: 602, blocked_label: 'has\nnewline' }], NOW)
+    ).toThrow(/blocked_label must be a GitHub label name/);
+  });
+
+  it('accepts every label in HARD_BLOCK_LABELS', () => {
+    for (const label of ['decision-pending', 'needs-clarification', 'epic', 'decomposed']) {
+      const state = enqueueEntries(createEmptyState(), [{ issue: 700, blocked_label: label }], NOW);
+      expect(state.entries[0]).toMatchObject({ status: 'blocked', reason: `label:${label}` });
+    }
   });
 });

@@ -38,6 +38,14 @@ ai-dossier sched abandon --batch b1   # dissolve; members requeue as full-cycle
 Every subcommand takes `--project <slug>` (default: `owner-repo` of the current directory,
 falling back to the repo basename — fleet-cycle's convention) and `--json`.
 
+Since #507, `enqueue` additionally reads each candidate issue's live GitHub labels (one
+`gh issue view --json labels` call per issue, resolved against the current directory's repo
+unless `--repo <owner/name>` is passed) and lands an issue carrying `decision-pending` /
+`needs-clarification` / `epic` / `decomposed` as `blocked` (`reason: label:<name>`) instead
+of `queued` — without spending a slot on an agent that would only rediscover the same block.
+A failed `gh` lookup fails open: the issue enqueues normally, with a warning and a
+`label-check-failed` journal event.
+
 ## The dispatch engine (#464)
 
 `sched start` runs a tick loop (default 60s, `--interval` or `reconcile_interval_ms`)
@@ -69,7 +77,8 @@ where every mechanical supervision decision is code, not remembered prose:
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,
    progress, stalled, redispatched, unit-failed, dependents-blocked, suspect-dispatch,
    dispatch-unhealthy, …) is appended to `events.jsonl`; `sched status` shows the live
-   phase per unit.
+   phase per unit. `label-blocked`/`label-check-failed` (#507) are the one pair journaled
+   OUTSIDE the engine — `sched enqueue` appends them at enqueue time, before dispatch.
 7. **Dispatch-health pause (#505)** — an unverified exit within `SUSPECT_DISPATCH_WINDOW_MS`
    (60s) of a slot's last progress is `suspect-dispatch`: real work rarely produces zero
    milestones that fast, but an operator-billing quota/auth wall (a Claude Code weekly
