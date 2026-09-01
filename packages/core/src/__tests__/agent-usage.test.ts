@@ -249,8 +249,10 @@ describe('parseOpenCodeUsage', () => {
       model: null, // opencode events carry no model id — caller falls back to --model
       input_tokens: 26502,
       output_tokens: 3,
-      cache_creation_tokens: null, // opencode does not report cache tokens separately
-      cache_read_tokens: null,
+      // The fixture's step reports `cache: {write: 0, read: 0}` — a real
+      // reported zero, surfaced as 0 rather than null (#524 review).
+      cache_creation_tokens: 0,
+      cache_read_tokens: 0,
       total_cost_usd: 0.03771504,
       result_text: 'OK',
     });
@@ -573,5 +575,47 @@ describe('usageParserFor', () => {
   it('routes claude, and any unrecognized command, to parseAgentUsage', () => {
     expect(usageParserFor('claude')).toBe(parseAgentUsage);
     expect(usageParserFor('some-other-agent-cli')).toBe(parseAgentUsage);
+  });
+});
+
+/**
+ * #524 review: opencode DOES report cache counts, nested one level down as
+ * `tokens.cache: { write, read }`. Verified against a real 310-event dispatch
+ * log carrying 47,485,120 cache-read tokens that the parser previously
+ * dropped on the mistaken belief they were unavailable.
+ */
+describe('parseOpenCodeUsage — cache tokens (#524 review)', () => {
+  const step = (input: number, output: number, write: number, read: number) =>
+    JSON.stringify({
+      type: 'step_finish',
+      part: {
+        type: 'step-finish',
+        tokens: { total: input + output, input, output, reasoning: 0, cache: { write, read } },
+        cost: 0.5,
+      },
+    });
+
+  it('sums tokens.cache.write / tokens.cache.read across steps', () => {
+    expect(
+      parseOpenCodeUsage([step(100, 10, 5, 64), step(200, 20, 7, 128)].join('\n'))
+    ).toMatchObject({
+      input_tokens: 300,
+      output_tokens: 30,
+      cache_creation_tokens: 12,
+      cache_read_tokens: 192,
+      total_cost_usd: 1,
+    });
+  });
+
+  it('leaves cache fields null when the step genuinely omits the cache block', () => {
+    const noCache = JSON.stringify({
+      type: 'step_finish',
+      part: { type: 'step-finish', tokens: { input: 5, output: 6 }, cost: 0.1 },
+    });
+    expect(parseOpenCodeUsage(noCache)).toMatchObject({
+      input_tokens: 5,
+      cache_creation_tokens: null,
+      cache_read_tokens: null,
+    });
   });
 });

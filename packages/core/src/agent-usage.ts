@@ -365,11 +365,11 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
  *
  * opencode emits one JSON event per line: the assistant's text arrives in
  * `type:"text"` parts, and per-step token/cost totals in `type:"step_finish"`
- * parts (a multi-step run emits several — tokens and cost are summed). The
- * model id is not present in the events, so `model` is null and callers fall
- * back to the requested --model alias. opencode's step_finish payload does
- * not report cache tokens separately, so those fields are always null here —
- * genuinely unavailable, not fabricated as zero. Returns null when the
+ * parts (a multi-step run emits several — tokens and cost are summed), with
+ * cache counts nested as `tokens.cache: { write, read }`. The model id is not
+ * present in the events, so `model` is null and callers fall back to the
+ * requested --model alias — that field, and only that field, is genuinely
+ * unavailable here rather than merely absent. Returns null when the
  * output is not a JSONL event stream (any non-JSON line disqualifies it);
  * individual fields are null when absent.
  */
@@ -380,8 +380,12 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
   const texts: string[] = [];
   let inputTokens = 0;
   let outputTokens = 0;
+  let cacheCreationTokens = 0;
+  let cacheReadTokens = 0;
   let costUsd = 0;
   let sawUsage = false;
+  let sawCacheCreation = false;
+  let sawCacheRead = false;
 
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim();
@@ -415,6 +419,26 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
           outputTokens += output;
           sawUsage = true;
         }
+        // opencode nests cache counts one level down, as
+        // `tokens.cache: { write, read }` — verified against a real 310-event
+        // dispatch log (#524 review). They were previously hardcoded null on
+        // the mistaken belief opencode did not report them, silently dropping
+        // tens of millions of cache-read tokens per run.
+        const cache = asRecord(tokens.cache);
+        if (cache) {
+          const write = toCount(cache.write);
+          if (write !== null) {
+            cacheCreationTokens += write;
+            sawCacheCreation = true;
+            sawUsage = true;
+          }
+          const read = toCount(cache.read);
+          if (read !== null) {
+            cacheReadTokens += read;
+            sawCacheRead = true;
+            sawUsage = true;
+          }
+        }
       }
       const cost = toCost(part.cost);
       if (cost !== null) {
@@ -430,8 +454,8 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
     model: null,
     input_tokens: sawUsage ? inputTokens : null,
     output_tokens: sawUsage ? outputTokens : null,
-    cache_creation_tokens: null,
-    cache_read_tokens: null,
+    cache_creation_tokens: sawCacheCreation ? cacheCreationTokens : null,
+    cache_read_tokens: sawCacheRead ? cacheReadTokens : null,
     total_cost_usd: sawUsage ? costUsd : null,
     result_text: texts.length > 0 ? texts.join('') : null,
   };
