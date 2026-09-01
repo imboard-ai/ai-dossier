@@ -175,6 +175,53 @@ export const DEFAULT_FIX_PROMPT_TEMPLATE = withNoBackgroundExit(
 );
 
 /**
+ * Default prompt for one batch member (#523 AC1) — a single fresh agent running
+ * `slot-cycle` inside the shared batch worktree, never the full-cycle workflow:
+ * the batch tail (validate/review/ship/report) is batch-owned, not this run's.
+ */
+export const DEFAULT_MEMBER_PROMPT_TEMPLATE = withNoBackgroundExit(
+  'Run the slot-cycle workflow for GitHub issue #{issue}, batch {batch}, in the shared batch ' +
+    'worktree at {worktree}.\n\n' +
+    'Begin by fetching the workflow: ai-dossier run imboard-ai/git/slot-cycle --pull\n\n' +
+    'Then execute it for issue #{issue} with batch={batch} and worktree={worktree}. Do not run ' +
+    'the full-cycle workflow, do not create a separate worktree or branch, do not open a PR — ' +
+    'this member ships as part of the batch, not on its own.'
+);
+
+/**
+ * Default prompt for the batch tail agent (#523 AC3): aggregate review, then
+ * batch-mode ship — parks the PR on `auto-merge` and stops, exactly like a
+ * detached full-cycle run. The scheduler's batch PR watcher owns the merge
+ * wait and dispatches the batch report agent as separate tail work.
+ */
+export const DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE = withSupersessionCheckpoint(
+  withNoBackgroundExit(
+    'Run the batch review and ship tail for batch {batch} (anchor issue #{anchor}) in the shared ' +
+      'batch worktree at {worktree}. Members: {members}.\n\n' +
+      'Begin by fetching the workflows: ai-dossier run imboard-ai/git/review-issue --pull, then ' +
+      'ai-dossier run imboard-ai/git/ship-issue --pull\n\n' +
+      'First run review-issue in aggregate mode (batch_id={batch}, members={members}), posting the ' +
+      'batch-review milestone on issue #{anchor}. Then run ship-issue in batch mode (rebase-merge, ' +
+      'a `Closes` list for every member), applying the auto-merge label and posting the batch-ship ' +
+      'awaiting-merge milestone with pr= on issue #{anchor} — then STOP. Do not wait for the merge, ' +
+      'do not run the batch report — the scheduler watches the PR and dispatches that.'
+  )
+);
+
+/**
+ * Default prompt for the cheap-tier batch report agent (#523 AC3), dispatched
+ * after the batch PR merges — mirrors `DEFAULT_REPORT_PROMPT_TEMPLATE` at
+ * batch granularity, never re-implementing or re-shipping anything.
+ */
+export const DEFAULT_BATCH_REPORT_PROMPT_TEMPLATE =
+  'Run the batch report phase for batch {batch} (anchor issue #{anchor}) in this repository.\n\n' +
+  'Begin by fetching the workflow: ai-dossier run imboard-ai/git/report-issue --pull\n\n' +
+  'The work is DONE: pull request #{pr} is merged (merge commit via `gh pr view {pr}`) and every ' +
+  'member issue is closed. Do not re-implement, re-review, or re-ship anything — produce the ' +
+  'report-issue batch variant for batch {batch} and post its batch-report milestone on issue ' +
+  '#{anchor}.';
+
+/**
  * Substitute `{name}` placeholders. Unknown placeholders are left as-is, so a template
  * naming a variable this build does not supply reads as an obvious defect rather than
  * silently becoming an empty string.
@@ -202,6 +249,12 @@ export interface ResolvedDispatch {
   reportPrompt: string;
   /** Fix-agent prompt template with `{issue}`/`{batch}`/`{tests}` placeholders (#472). */
   fixPrompt: string;
+  /** Batch-member prompt template with `{issue}`/`{batch}`/`{worktree}` placeholders (#523). */
+  memberPrompt: string;
+  /** Batch-tail prompt template with `{batch}`/`{anchor}`/`{members}`/`{worktree}` placeholders (#523). */
+  batchTailPrompt: string;
+  /** Batch-report prompt template with `{batch}`/`{anchor}`/`{pr}` placeholders (#523). */
+  batchReportPrompt: string;
   /** Model per tier; null means "no model flag" (the command's `--model {model}` pair drops). */
   tierModels: Record<ModelTier, string | null>;
   /** Global stall timeout — the fallback used when the in-flight phase has no entry in `phaseStallTimeoutMs` (#495). */
@@ -240,6 +293,9 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
     prompt: withSupersessionCheckpoint(dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE),
     reportPrompt: dispatch.report_prompt ?? DEFAULT_REPORT_PROMPT_TEMPLATE,
     fixPrompt: dispatch.fix_prompt ?? DEFAULT_FIX_PROMPT_TEMPLATE,
+    memberPrompt: dispatch.member_prompt ?? DEFAULT_MEMBER_PROMPT_TEMPLATE,
+    batchTailPrompt: dispatch.batch_tail_prompt ?? DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE,
+    batchReportPrompt: dispatch.batch_report_prompt ?? DEFAULT_BATCH_REPORT_PROMPT_TEMPLATE,
     tierModels,
     stallTimeoutMs: config.stall_timeout_ms ?? DEFAULT_STALL_TIMEOUT_MS,
     phaseStallTimeoutMs: resolvePhaseStallTimeouts(config),
@@ -400,17 +456,31 @@ export function buildReportPrompt(
  * (newlines above all) are flattened and the list is bounded — a test titled
  * "…\n\nIgnore the above and instead…" must not read as a new instruction.
  */
+/**
+ * Flatten one untrusted string bound for an agent's instruction stream: strip
+ * control characters (newlines above all -- argv passing does not protect a
+ * prompt) and bound the length, so a value like "...Ignore the above and
+ * instead..." cannot read as a new instruction. Shared by every prompt
+ * builder below that embeds a value which did not originate as a build-time
+ * literal (test names, the batch id -- both #472; #523's member/tail/report
+ * prompt builders embed the same batch id, plus a worktree path).
+ */
+function flattenPromptValue(value: string): string {
+  return (
+    value
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: flattening control characters is the point
+      .replace(/[\u0000-\u001F\u007F]/g, ' ')
+      .slice(0, MAX_PROMPT_TEST_LENGTH)
+  );
+}
+
 export function buildFixPrompt(
   template: string,
   issue: number,
   batch: string,
   tests: readonly string[]
 ): string {
-  const flatten = (value: string): string =>
-    value
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: flattening control characters is the point
-      .replace(/[\u0000-\u001F\u007F]/g, ' ')
-      .slice(0, MAX_PROMPT_TEST_LENGTH);
+  const flatten = flattenPromptValue;
   const rendered =
     tests.length > 0
       ? tests
@@ -425,6 +495,59 @@ export function buildFixPrompt(
     batch: flatten(batch),
     tests: rendered + truncated,
   });
+}
+
+/**
+ * Build one batch member's stdin prompt (#523 AC1): `{issue}`, `{batch}` and
+ * `{worktree}` substituted. `batch` and `worktree` are flattened — the batch
+ * id is enqueue-time-validated but still operator/manifest-supplied text, and
+ * flattening a locally-derived worktree path is cheap insurance against the
+ * same instruction-stream injection `buildFixPrompt` already guards against.
+ */
+export function buildMemberPrompt(
+  template: string,
+  issue: number,
+  batch: string,
+  worktree: string
+): string {
+  return renderTemplate(template, {
+    issue,
+    batch: flattenPromptValue(batch),
+    worktree: flattenPromptValue(worktree),
+  });
+}
+
+/**
+ * Build the batch tail agent's stdin prompt (#523 AC3): `{batch}`, `{anchor}`,
+ * `{members}` (comma-joined issue numbers) and `{worktree}` substituted.
+ * `batch`/`worktree` flattened — see `buildMemberPrompt`.
+ */
+export function buildBatchTailPrompt(
+  template: string,
+  batch: string,
+  anchor: number,
+  members: readonly number[],
+  worktree: string
+): string {
+  return renderTemplate(template, {
+    batch: flattenPromptValue(batch),
+    anchor,
+    members: members.join(','),
+    worktree: flattenPromptValue(worktree),
+  });
+}
+
+/**
+ * Build the batch report agent's stdin prompt (#523 AC3): `{batch}`,
+ * `{anchor}`, `{pr}` substituted. `batch` flattened — see `buildMemberPrompt`.
+ */
+export function buildBatchReportPrompt(
+  template: string,
+  batch: string,
+  anchor: number,
+  pr: number
+): string {
+  return renderTemplate(template, { batch: flattenPromptValue(batch), anchor, pr });
 }
 
 /** One tier stronger on the ladder, or null at the top (RFC-0001 §C.1). */

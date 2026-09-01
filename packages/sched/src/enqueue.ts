@@ -34,6 +34,17 @@ const RUN_ID_RE = /^r-\d+-[0-9a-f]{4,}$/;
 const LABEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,49}$/;
 
 /**
+ * Batch id grammar — deliberately stricter than `SAFE_REF_RE` (which permits
+ * `/` and `..`, both legal in a git ref but not in a filesystem path
+ * component): batch-dispatch.ts (#523) builds a worktree directory name
+ * DIRECTLY from this id (`worktrees/batch-<id>-<date>`), so an id containing
+ * `..` or `/` could otherwise walk the resulting path outside the repo
+ * (CWE-22) before `isSafeWorktree`'s containment check ever runs. No legal
+ * batch id needs either character.
+ */
+const BATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/**
  * The `reason` prefix a hard-block-labelled entry carries (#507), and the one
  * place that builds it — the CLI's journal event and the entry's `reason`
  * must read identically, so both call this rather than templating the string
@@ -266,8 +277,15 @@ export function enqueueEntries(
     }
     // The persistence boundary: enqueue must only ever produce state that
     // validateState (and therefore the next load) accepts.
-    if (input.batch !== undefined && input.batch !== null && input.batch.length === 0) {
-      throw new EnqueueError(`Issue ${input.issue}: batch must be a non-empty string`);
+    if (input.batch !== undefined && input.batch !== null) {
+      if (input.batch.length === 0) {
+        throw new EnqueueError(`Issue ${input.issue}: batch must be a non-empty string`);
+      }
+      if (!BATCH_ID_RE.test(input.batch)) {
+        throw new EnqueueError(
+          `Issue ${input.issue}: batch id '${input.batch}' must match ${BATCH_ID_RE} (used to build a worktree path — no '/' or leading '.')`
+        );
+      }
     }
     if (input.mode !== undefined && input.mode !== 'full' && input.mode !== 'slot') {
       throw new EnqueueError(`Issue ${input.issue}: mode must be 'full' or 'slot'`);
