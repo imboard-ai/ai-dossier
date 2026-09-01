@@ -331,19 +331,22 @@ function requirePlainObject(label: string, value: unknown): Record<string, unkno
   return value as Record<string, unknown>;
 }
 
+/** A non-empty array of non-empty strings, validated once and reused by every command-array config key (top-level `dispatch.command` and each `dispatch.tiers.<tier>.command`). */
+function requireNonEmptyStringArray(label: string, value: unknown): void {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((c) => typeof c !== 'string' || c.length === 0)
+  ) {
+    throw new Error(`${label} must be a non-empty array of non-empty strings`);
+  }
+}
+
 /** Strict validation of one `dispatch.tiers[<tier>]` spec (#527). */
 function validateTierDispatchSpec(tier: string, raw: unknown): void {
   const spec = requirePlainObject(`dispatch.tiers.${tier}`, raw);
   if (spec.command !== undefined) {
-    if (
-      !Array.isArray(spec.command) ||
-      spec.command.length === 0 ||
-      spec.command.some((c) => typeof c !== 'string' || c.length === 0)
-    ) {
-      throw new Error(
-        `dispatch.tiers.${tier}.command must be a non-empty array of non-empty strings`
-      );
-    }
+    requireNonEmptyStringArray(`dispatch.tiers.${tier}.command`, spec.command);
   }
   if (spec.model !== undefined && (typeof spec.model !== 'string' || spec.model.length === 0)) {
     throw new Error(`dispatch.tiers.${tier}.model must be a non-empty string`);
@@ -357,13 +360,7 @@ function validateTierDispatchSpec(tier: string, raw: unknown): void {
 function validateDispatchConfig(raw: unknown): DispatchConfig {
   const dispatch = requirePlainObject('dispatch', raw);
   if (dispatch.command !== undefined) {
-    if (
-      !Array.isArray(dispatch.command) ||
-      dispatch.command.length === 0 ||
-      dispatch.command.some((c) => typeof c !== 'string' || c.length === 0)
-    ) {
-      throw new Error('dispatch.command must be a non-empty array of non-empty strings');
-    }
+    requireNonEmptyStringArray('dispatch.command', dispatch.command);
   }
   if (dispatch.prompt !== undefined && typeof dispatch.prompt !== 'string') {
     throw new Error('dispatch.prompt must be a string');

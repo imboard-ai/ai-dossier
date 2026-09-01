@@ -68,8 +68,9 @@ import {
   buildBatchReportPrompt,
   buildBatchTailPrompt,
   buildMemberPrompt,
-  buildTierCommand,
+  journalCmdModelFields,
   type ResolvedDispatch,
+  resolveTierSpawn,
   type SpawnDeps,
   unitLogName,
 } from './dispatch';
@@ -440,8 +441,8 @@ function spawnMember(
 
   const withStatus = advanceMemberToInWork(state, memberIssue, now);
   const tier: ModelTier = findEntry(withStatus, memberIssue)?.tier ?? 'mid';
-  const cmd = buildTierCommand(dispatch, tier, memberIssue);
-  const model = dispatch.tiers[tier].model;
+  const spawnSpec = resolveTierSpawn(dispatch, tier, memberIssue);
+  const cmd = spawnSpec.cmd;
   const prompt = buildMemberPrompt(dispatch.memberPrompt, memberIssue, batchId, batch.worktree);
   const logFile = path.join(
     deps.store.runsDir,
@@ -477,8 +478,8 @@ function spawnMember(
       tier,
       slot: slot.id,
       issue: memberIssue,
-      cmd: cmd.join(' '),
-      ...(model !== null ? { model } : {}),
+      ...journalCmdModelFields(spawnSpec),
+      log: logFile,
       detail: `member ${batch.executing_member}/${batch.members.length}`,
     }),
     now
@@ -641,8 +642,8 @@ function spawnTailAgent(
       });
       return releaseSlot(state, batchId, now);
     }
-    const cmd = buildTierCommand(dispatch, 'strong', batch.anchor);
-    const model = dispatch.tiers.strong.model;
+    const spawnSpec = resolveTierSpawn(dispatch, 'strong', batch.anchor);
+    const cmd = spawnSpec.cmd;
     const prompt = buildBatchTailPrompt(
       dispatch.batchTailPrompt,
       batchId,
@@ -675,8 +676,8 @@ function spawnTailAgent(
         pid,
         tier: 'strong',
         slot: slot.id,
-        cmd: cmd.join(' '),
-        ...(model !== null ? { model } : {}),
+        ...journalCmdModelFields(spawnSpec),
+        log: logFile,
       }),
       now
     );
@@ -708,7 +709,8 @@ function spawnReportAgent(
       });
       return releaseSlot(state, batchId, now);
     }
-    const cmd = buildTierCommand(dispatch, 'mechanical', batch.anchor);
+    const spawnSpec = resolveTierSpawn(dispatch, 'mechanical', batch.anchor);
+    const cmd = spawnSpec.cmd;
     const prompt = buildBatchReportPrompt(
       dispatch.batchReportPrompt,
       batchId,
@@ -736,7 +738,13 @@ function spawnReportAgent(
       slot.status === 'assigned'
         ? transitionSlot(state, slot.id, 'running', patchState, now)
         : state;
-    journalEvent(deps, 'report-dispatched', unit(batchId), { pid, slot: slot.id, pr: prNumber });
+    journalEvent(deps, 'report-dispatched', unit(batchId), {
+      pid,
+      slot: slot.id,
+      pr: prNumber,
+      ...journalCmdModelFields(spawnSpec),
+      log: logFile,
+    });
     result.spawned.push(unit(batchId));
     return next;
   });

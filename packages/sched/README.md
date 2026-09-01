@@ -405,6 +405,10 @@ import {
                          //   per-tier spawn specs (tiers — #527)
   buildTierCommand,      // resolved dispatch + tier + issue → argv, using that tier's OWN
                          //   command/model (#527) — what the mixed-CLI ladder spawns with
+  resolveTierSpawn,      // resolved dispatch + tier + issue → { cmd, model } together (#527) —
+                         //   the single call every spawn site uses so a journal entry can
+                         //   never disagree with what was actually spawned
+  journalCmdModelFields, // { cmd, model } → spawned/redispatched/fix-dispatched journal fields
   stallTimeoutForPhase,  // the stall allowance for the phase now in flight (#495 per-phase
                          //   map → global, hardened against a prototype-name phase)
   stallTimeoutForSlot,   // #504: that allowance, shortened to fenceTakeoverTimeoutMs while

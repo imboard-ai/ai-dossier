@@ -68,17 +68,19 @@ import { runBatchTick } from './batch-dispatch';
 import {
   buildPrompt,
   buildReportPrompt,
-  buildTierCommand,
   dispatchLogPath,
   escalateTier,
   fileSizeOrZero,
+  journalCmdModelFields,
   type ResolvedDispatch,
   reportTierFor,
   resolveDispatch,
+  resolveTierSpawn,
   type SpawnDeps,
   STOP_POLL_MAX_MS,
   STOP_POLL_MIN_MS,
   stallTimeoutForSlot,
+  type TierSpawn,
 } from './dispatch';
 import type { RunFencer } from './fence';
 import {
@@ -475,8 +477,7 @@ function spawnAndRecord(
   slot: SlotEntry,
   opts: {
     tier: ModelTier;
-    cmd: string[];
-    model: string | null;
+    spawn: TierSpawn;
     prompt: string;
     phase: string;
     failOpts?: { merged?: boolean };
@@ -492,7 +493,7 @@ function spawnAndRecord(
 
   let pid: number;
   try {
-    pid = ctx.deps.spawnDeps.spawn(opts.cmd, opts.prompt, logFile);
+    pid = ctx.deps.spawnDeps.spawn(opts.spawn.cmd, opts.prompt, logFile);
   } catch (err) {
     return failUnit(ctx, state, unit, `spawn-error: ${(err as Error).message}`, opts.failOpts);
   }
@@ -518,8 +519,7 @@ function spawnAndRecord(
     pid,
     tier: opts.tier,
     slot: slot.id,
-    cmd: opts.cmd.join(' '),
-    ...(opts.model !== null ? { model: opts.model } : {}),
+    ...journalCmdModelFields(opts.spawn),
     log: logFile,
     // #524: which byte of the append-mode per-unit log this dispatch starts
     // at — without it, mapping a log slice to this dispatch needs state.json,
@@ -555,12 +555,13 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
 
   return spawnAndRecord(ctx, state, unit, slot, {
     tier: entry.tier,
-    cmd: buildTierCommand(ctx.dispatch, entry.tier, issue),
-    model: ctx.dispatch.tiers[entry.tier].model,
+    spawn: resolveTierSpawn(ctx.dispatch, entry.tier, issue),
     // The slot's generation reaches the agent here (#504): a takeover is told which
     // generation it owns, so its own `runstate post --gen` is accepted while the run it
     // replaced is refused. A first dispatch is generation 0 and reads as it always did.
-    prompt: buildPrompt(ctx.dispatch.prompt, issue, slot.gen),
+    // The tier's own resolved prompt (#527) — falls back to the global
+    // dispatch.prompt when the tier has no override.
+    prompt: buildPrompt(ctx.dispatch.tiers[entry.tier].prompt, issue, slot.gen),
     phase: 'gate',
     ...(slot.gen > 0 ? { journalExtra: { detail: `takeover gen=${slot.gen}` } } : {}),
   });
@@ -582,8 +583,11 @@ function spawnReportAgent(ctx: TickCtx, state: SchedState, unit: string): SchedS
 
   return spawnAndRecord(ctx, state, unit, slot, {
     tier,
-    cmd: buildTierCommand(ctx.dispatch, tier, issue),
-    model: ctx.dispatch.tiers[tier].model,
+    spawn: resolveTierSpawn(ctx.dispatch, tier, issue),
+    // Report agents use the dedicated report-prompt template (`{pr}`/`{cleanup}`
+    // placeholders), never a tier's `prompt` override — that override's fallback
+    // chain is the cycle-agent prompt (a different template family), so wiring
+    // it here would silently substitute the wrong placeholders.
     // The generation reaches the report agent exactly as it reaches a cycle agent
     // (#504): a report slot is fenced by the same ladder, and a report agent that did
     // not know its generation would have its `report done` milestone refused by the
@@ -875,10 +879,7 @@ function enterRecovery(
   journal(ctx, 'redispatched', unit, {
     tier: nextTier,
     slot: slot.id,
-    cmd: buildTierCommand(ctx.dispatch, nextTier, issue).join(' '),
-    ...(ctx.dispatch.tiers[nextTier].model !== null
-      ? { model: ctx.dispatch.tiers[nextTier].model }
-      : {}),
+    ...journalCmdModelFields(resolveTierSpawn(ctx.dispatch, nextTier, issue)),
   });
   ctx.result.redispatched.push(unit);
   // Respawn immediately on the recovering rail — recovering → running. A
@@ -1090,7 +1091,7 @@ function recordDispatchRunLog(
   // #527: the tier's OWN resolved command/model — not the global
   // dispatch.command/tierModels — so a mixed agent-CLI ladder's runs.jsonl
   // entry (AC3) matches what was actually spawned for this dispatch.
-  const cmd = buildTierCommand(ctx.dispatch, tier, issue);
+  const { cmd, model } = resolveTierSpawn(ctx.dispatch, tier, issue);
   const logFile = dispatchLogPath(ctx.deps.store.runsDir, unit);
 
   // #524: read only THIS dispatch's slice — the log is per-unit and
@@ -1109,7 +1110,7 @@ function recordDispatchRunLog(
     logContent,
     spawnedAt: slot.spawned_at,
     completedAt: ctx.deps.now(),
-    configuredModel: ctx.dispatch.tiers[tier].model,
+    configuredModel: model,
     cwd: ctx.deps.repoDir,
   });
 

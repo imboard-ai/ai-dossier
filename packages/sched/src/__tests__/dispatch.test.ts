@@ -11,11 +11,14 @@ import {
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
   escalateTier,
+  journalCmdModelFields,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
   reportTierFor,
   resolveDispatch,
+  resolveTierSpawn,
   type SchedConfig,
+  SUPERSESSION_CHECKPOINT_INSTRUCTION,
   stallTimeoutForPhase,
   stallTimeoutForSlot,
 } from '../index';
@@ -204,6 +207,35 @@ describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () =
       'glm',
     ]);
     expect(buildTierCommand(resolved, 'strong', 527)).toEqual(['claude', '-p', '--model', 'opus']);
+  });
+
+  it('an explicit dispatch.tiers.<tier>.prompt override gets the supersession checkpoint too, same as the shorthand', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: { tiers: { strong: { prompt: 'strong-tier custom prompt #{issue}' } } },
+    });
+    expect(resolved.tiers.strong.prompt).toContain('strong-tier custom prompt #{issue}');
+    expect(resolved.tiers.strong.prompt).toContain(SUPERSESSION_CHECKPOINT_INSTRUCTION);
+    // a tier with no override still falls back to the (already-checkpointed) global prompt
+    expect(resolved.tiers.mid.prompt).toContain(SUPERSESSION_CHECKPOINT_INSTRUCTION);
+  });
+
+  it('resolveTierSpawn + journalCmdModelFields resolve cmd/model together and format them for the journal', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: {
+        tiers: { mid: { command: ['opencode', 'run', '--model', '{model}'], model: 'glm' } },
+      },
+    });
+    const spawn = resolveTierSpawn(resolved, 'mid', 527);
+    expect(spawn.cmd).toEqual(['opencode', 'run', '--model', 'glm']);
+    expect(spawn.model).toBe('glm');
+    expect(journalCmdModelFields(spawn)).toEqual({ cmd: 'opencode run --model glm', model: 'glm' });
+  });
+
+  it('journalCmdModelFields omits model when the tier has none', () => {
+    const spawn = { cmd: ['claude', '-p'], model: null };
+    expect(journalCmdModelFields(spawn)).toEqual({ cmd: 'claude -p' });
   });
 });
 

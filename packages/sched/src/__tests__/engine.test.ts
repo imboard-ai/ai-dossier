@@ -413,6 +413,24 @@ describe('per-tier dispatch commands (#527 — mixed agent-CLI escalation ladder
     expect(spawnedEvents[0]?.model).toBe('fake-glm');
     expect(spawnedEvents[1]?.model).toBe('fake-opus');
   });
+
+  it('a per-tier prompt override actually reaches the spawned agent (AC1 — declared+validated+resolved is not enough, it must be consumed)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.config.dispatch = {
+      tiers: { mid: { prompt: 'MID-TIER-CUSTOM-PROMPT for #{issue}' } },
+    };
+    h.enqueue([{ issue: 527, mode: 'full', tier: 'mid' }]);
+    h.tick();
+
+    expect(h.spawnCalls[0].prompt).toContain('MID-TIER-CUSTOM-PROMPT for #527');
+    // a tier without its own override still gets the global default prompt
+    const h2 = harness();
+    REGISTRIES.push(h2.dir);
+    h2.enqueue([{ issue: 528, mode: 'full', tier: 'strong' }]);
+    h2.tick();
+    expect(h2.spawnCalls[0].prompt).not.toContain('MID-TIER-CUSTOM-PROMPT');
+  });
 });
 
 describe('reconciliation tick (AC3: external advance + orphaned pids after restart)', () => {

@@ -373,7 +373,11 @@ function resolveTierDispatch(
   return {
     commandTemplate: spec?.command ?? fallbackCommand,
     model: spec?.model ?? fallbackTierModels[tier],
-    prompt: spec?.prompt ?? fallbackPrompt,
+    // An explicit override gets the checkpoint too — `fallbackPrompt` already
+    // carries it (resolveDispatch wraps the top-level prompt once), so a
+    // tier-specific override must not skip the safety instruction just
+    // because it bypassed the fallback.
+    prompt: spec?.prompt !== undefined ? withSupersessionCheckpoint(spec.prompt) : fallbackPrompt,
   };
 }
 
@@ -495,6 +499,26 @@ export function buildTierCommand(
 ): string[] {
   const tierDispatch = resolved.tiers[tier];
   return buildCommandForModel(tierDispatch.commandTemplate, tierDispatch.model, issue);
+}
+
+/** A tier's resolved argv + model for one dispatch — kept together so a spawn call and its journal entry can never disagree (#527 review). */
+export interface TierSpawn {
+  cmd: string[];
+  model: string | null;
+}
+
+/** Resolve a tier's argv AND model together for one dispatch — the single call every spawn site should use instead of separately calling `buildTierCommand` and reading `tiers[tier].model`. */
+export function resolveTierSpawn(
+  resolved: Pick<ResolvedDispatch, 'tiers'>,
+  tier: ModelTier,
+  issue: number
+): TierSpawn {
+  return { cmd: buildTierCommand(resolved, tier, issue), model: resolved.tiers[tier].model };
+}
+
+/** A `TierSpawn` as `spawned`/`redispatched`/`fix-dispatched` journal fields — `model` omitted when the tier has none, matching every other optional journal field's convention. */
+export function journalCmdModelFields(spawn: TierSpawn): { cmd: string; model?: string } {
+  return { cmd: spawn.cmd.join(' '), ...(spawn.model !== null ? { model: spawn.model } : {}) };
 }
 
 /**

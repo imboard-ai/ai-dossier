@@ -692,7 +692,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
 
 export const CONFIG_SCHEMA_VERSION = '1.4.0' as const;
 
-/** Config schema versions `loadConfig` accepts (older configs carry only max_slots). */
+/** Config schema versions `loadConfig` accepts and migrates transparently on load (fields absent in an older version simply resolve to their defaults). */
 export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
   '1.0.0',
   '1.1.0',
@@ -870,7 +870,12 @@ export interface JournalEvent {
    * silently dropping through a loose `Record<string, unknown>` extra bag.
    */
   cmd?: string;
-  /** Model id/alias the spawned tier resolved to (#527) — feeds `runstate stats` per-model buckets. */
+  /**
+   * Model id/alias the spawned tier resolved to (#527) — audit-trail
+   * visibility only (`sched status`/`events.jsonl`). `runstate stats`'s
+   * per-model buckets come independently from `runs.jsonl`'s
+   * `RunLogEntry.model` (`recordDispatchRunLog`'s own tier-model read).
+   */
   model?: string;
   /** Absolute path to the spawned process's log file. */
   log?: string;
