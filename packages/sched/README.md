@@ -103,13 +103,25 @@ where every mechanical supervision decision is code, not remembered prose:
    falls back to the global `stall_timeout_ms` outright.
 5. **Immediate refill (AC5)** — a slot freed by a terminal state is refilled in the SAME
    tick; a runnable unit never waits while a slot is idle (pinned by a regression test).
+   Refill was always synchronous; what previously had no journal trace was the release
+   itself — see `slot-released` below (#525).
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,
    progress, stalled, redispatched, fence-written, fence-failed, unit-failed,
-   dependents-blocked, suspect-dispatch, dispatch-unhealthy, run-log-recorded,
-   run-log-no-usage, run-log-skipped, run-log-failed, …) is appended to
-   `events.jsonl`; `sched status` shows the live phase per unit, plus each slot's `gen`
-   and `fenced` state (#504). `label-blocked`/`label-check-failed` (#507) are the one pair journaled
-   OUTSIDE the engine — `sched enqueue` appends them at enqueue time, before dispatch.
+   dependents-blocked, slot-released, suspect-dispatch, dispatch-unhealthy,
+   run-log-recorded, run-log-no-usage, run-log-skipped, run-log-failed, …) is
+   appended to `events.jsonl`; `sched status` shows the live phase per unit, plus each
+   slot's `gen` and `fenced` state (#504). `label-blocked`/`label-check-failed` (#507)
+   are the one pair journaled OUTSIDE the engine — `sched enqueue` appends them at
+   enqueue time, before dispatch. `slot-released` (#525) marks the exact tick a held
+   slot reaches `idle` on a per-issue dispatch terminal path — verified completion,
+   external-advance, a direct failure, a blocked dependent's release, or a
+   detached-ship park — carrying the freed `slot` id and a closed `reason`
+   (`verify-complete` / `external-advance` / `unit-failed` / `report-failed` /
+   `dependents-blocked` / `parked`, the exported `SlotReleaseReason` union), journaled
+   right after that path's own cause event so an occupancy report reads release time
+   directly instead of inferring it from the next `assigned` on that slot. Not yet
+   journaled by `sched abandon` or by batch-slot release, which walk a slot to `idle`
+   through their own copies of the same edge table (tracked as a follow-up).
 7. **Dispatch-health pause (#505)** — an unverified exit within `SUSPECT_DISPATCH_WINDOW_MS`
    (60s) of a slot's last progress is `suspect-dispatch`: real work rarely produces zero
    milestones that fast, but an operator-billing quota/auth wall (a Claude Code weekly
