@@ -352,8 +352,10 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
   ) {
     return state;
   }
-  // Report slots (crash recovery, ladder redispatch) respawn as report agents.
-  if (slot.phase === 'report') {
+  // Report slots (crash recovery, ladder redispatch) respawn as report agents
+  // — keyed off `role`, not `phase` (#500: `phase` can drift back to the
+  // issue's pre-report milestone while the slot is still a report agent).
+  if (slot.role === 'report') {
     return spawnReportAgent(ctx, state, unit);
   }
 
@@ -513,7 +515,7 @@ function enterRecovery(
 
   killUnitAgent(ctx, state, unit);
 
-  const report = slot.phase === 'report';
+  const report = slot.role === 'report';
   const nextTier = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
   if (slot.recoveries >= ESCALATION_CAP || nextTier === null) {
     // Cap reached (2 escalations) or already at the strongest tier — the
@@ -671,11 +673,17 @@ function applyProgressSignals(
 
 /**
  * The issue-closed completion signal for a live unit (#468): a report agent's
- * issue is already closed (closed AT MERGE), so for report-phase slots the
- * closed signal is suppressed — only the report milestone can complete them.
+ * issue is already closed (closed AT MERGE), so for report agents the closed
+ * signal is suppressed — only the report milestone can complete them. Keyed
+ * off `slot.role`, fixed at spawn, never `slot.phase` (#500): `phase` is
+ * resynced from the issue's latest polled milestone on every reconcile tick
+ * (`applyProgressSignals`), and a report agent's issue keeps reporting its
+ * PRE-report milestone (e.g. `ship`) until the report milestone itself lands
+ * — so a phase-keyed check silently re-enables the closed signal mid-run and
+ * completes the unit before any report milestone was ever posted.
  */
 function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
-  return slot.phase === 'report' ? false : truth.closed;
+  return slot.role === 'report' ? false : truth.closed;
 }
 
 /** Reconcile one running slot against its polled ground truth. */

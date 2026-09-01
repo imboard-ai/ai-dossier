@@ -326,8 +326,10 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * `pr`/`cleanup` and the state backfills `last_pr_poll_at` to null; 1.2.0
  * (pre-#472) entries backfill `failure_evidence` to null and batches backfill
  * the recovery fields (anchor/branch/run_id/eviction_groups/evictions/
- * fix_attempts/rebase_attempts). The state upgrades to the current schema on
- * the next save.
+ * fix_attempts/rebase_attempts); 1.3.0 (pre-#500) slots backfill `role` —
+ * `'report'` when the persisted `phase` still reads `'report'` (a live report
+ * agent caught mid-flight by the upgrade), `'cycle'` otherwise. The state
+ * upgrades to the current schema on the next save.
  */
 export function validateState(data: unknown): SchedState {
   if (!data || typeof data !== 'object') {
@@ -431,6 +433,14 @@ export function validateState(data: unknown): SchedState {
     if (slot.phase !== null && typeof slot.phase !== 'string') {
       throw new Error(`Slot ${slot.id}: phase must be a string or null`);
     }
+    if (
+      slot.role !== undefined &&
+      slot.role !== null &&
+      slot.role !== 'cycle' &&
+      slot.role !== 'report'
+    ) {
+      throw new Error(`Slot ${slot.id}: role must be "cycle", "report", or absent (legacy)`);
+    }
     if (slot.last_progress_at !== null && !isIsoDateString(slot.last_progress_at)) {
       throw new Error(`Slot ${slot.id}: last_progress_at must be an ISO string or null`);
     }
@@ -478,6 +488,7 @@ export function validateState(data: unknown): SchedState {
     branch: slot.branch ?? null,
     last_head: slot.last_head ?? null,
     pid_start: slot.pid_start ?? null,
+    role: slot.role ?? (slot.phase === 'report' ? 'report' : 'cycle'),
   }));
   const entries = (obj.entries as QueueEntry[]).map((entry) => ({
     ...entry,
@@ -594,7 +605,15 @@ export function transitionSlot(
   const slots = [...state.slots];
   const clearing =
     to === 'idle'
-      ? { unit: null, pid: null, pid_start: null, phase: null, branch: null, last_head: null }
+      ? {
+          unit: null,
+          pid: null,
+          pid_start: null,
+          phase: null,
+          role: 'cycle' as const,
+          branch: null,
+          last_head: null,
+        }
       : {};
   const resetting = to === 'idle' ? { recoveries: 0 } : {};
   slots[idx] = transition(

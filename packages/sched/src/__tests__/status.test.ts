@@ -31,6 +31,7 @@ function slot(id: number, status: SlotEntry['status'], unit: string | null): Slo
     unit,
     pid: null,
     phase: null,
+    role: 'cycle',
     last_progress_at: null,
     pid_start: null,
     branch: null,

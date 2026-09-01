@@ -299,6 +299,14 @@ export interface SlotEntry {
   pid_start: number | null;
   /** Scheduler phase the unit is in, when running. */
   phase: string | null;
+  /**
+   * The agent's role, fixed at spawn and never touched by `phase-updated`
+   * (#500) — `phase` tracks the LATEST posted milestone, which for a report
+   * agent stays behind the issue's pre-report milestone (e.g. `ship`) until
+   * the report milestone itself lands, so `phase` alone cannot tell a report
+   * agent from a cycle agent mid-run. `role` is the stable answer.
+   */
+  role: 'cycle' | 'report';
   /** Last progress signal (new milestone or pushed commit) — stall-timer anchor. */
   last_progress_at: string | null;
   /** Working branch of the unit, captured from the setup milestone's `branch=` key. */
@@ -430,10 +438,10 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.3.0' as const;
+export const SCHEMA_VERSION = '1.4.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
-export const LEGACY_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0', '1.2.0'];
+export const LEGACY_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'];
 
 export const CONFIG_SCHEMA_VERSION = '1.2.0' as const;
 

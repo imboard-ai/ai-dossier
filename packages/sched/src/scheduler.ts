@@ -105,6 +105,9 @@ export function freeCapacity(state: SchedState, config: SchedConfig): number {
  * a typed `idle → assigned` edge, never a synthetic mid-state) and return the
  * new state plus the slot's id. Shared by queue refill (computeAssignments)
  * and the #468 report dispatch so the slot-invariant shape exists once.
+ * `role` is derived from `phase === 'report'` here, at assignment time, and
+ * then fixed for the slot's lifetime (#500) — unlike `phase`, it is never
+ * resynced from polled milestones.
  */
 export function assignToIdleSlot(
   state: SchedState,
@@ -112,6 +115,7 @@ export function assignToIdleSlot(
   phase: string | null,
   now: Date
 ): { state: SchedState; slotId: number } {
+  const role = phase === 'report' ? ('report' as const) : ('cycle' as const);
   let next = state;
   let idle = next.slots.find((s) => s.status === 'idle');
   if (!idle) {
@@ -122,6 +126,7 @@ export function assignToIdleSlot(
       pid: null,
       pid_start: null,
       phase: null,
+      role: 'cycle' as const,
       last_progress_at: null,
       branch: null,
       last_head: null,
@@ -139,6 +144,7 @@ export function assignToIdleSlot(
       unit,
       pid: null,
       phase,
+      role,
       last_progress_at: now.toISOString(),
     },
     now
