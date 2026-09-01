@@ -54,7 +54,7 @@
   },
   "dependencies": {
     "@ai-dossier/core": "^1.4.1",
-    "@ai-dossier/sched": "^0.7.0",
+    "@ai-dossier/sched": "^0.8.0",
     "commander": "^12.1.0",
     "yaml": "^2.8.3"
   },
