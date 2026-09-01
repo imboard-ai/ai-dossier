@@ -51,6 +51,12 @@ of `queued` — without spending a slot on an agent that would only rediscover t
 A failed `gh` lookup fails open: the issue enqueues normally, with a warning and a
 `label-check-failed` journal event.
 
+During `sched start`, full-cycle entries are checked again before each dispatch
+refill. Removing every hard-block label returns a blocked entry to `queued` and
+journals `label-cleared`; adding one to a queued entry moves it to `blocked` so
+the same tick cannot dispatch it. Label-blocked-only idle queues are rechecked
+at most once every ten minutes per entry.
+
 ## The dispatch engine (#464)
 
 `sched start` runs a tick loop (default 60s, `--interval` or `reconcile_interval_ms`)
@@ -88,8 +94,9 @@ where every mechanical supervision decision is code, not remembered prose:
 3. **Reconciliation tick (AC3)** — every tick detects externally-advanced state (someone
    finished the work outside sched → complete, kill the leftover agent, reclaim the
    slot), orphaned pids after a restart (dead pid on a running slot → exit rail →
-   verify), and progress (a new milestone `at=` or a new pushed commit — the branch from
-   the setup milestone watched via `git ls-remote`).
+   verify), progress (a new milestone `at=` or a new pushed commit — the branch from
+   the setup milestone watched via `git ls-remote`), and hard-block label changes
+   before the dispatch refill.
 4. **Stall/escalation ladder (AC4)** — no new milestone AND no new pushed commit for
    `stall_timeout_ms` (default 30 min) → kill the agent and redispatch the same unit one
    tier stronger (mechanical → mid → strong; the resume rails carry work forward). The
@@ -119,9 +126,10 @@ where every mechanical supervision decision is code, not remembered prose:
    dependents-blocked, slot-released, suspect-dispatch, dispatch-unhealthy,
    run-log-recorded, run-log-no-usage, run-log-skipped, run-log-failed, …) is
    appended to `events.jsonl`; `sched status` shows the live phase per unit, plus each
-   slot's `gen` and `fenced` state (#504). `label-blocked`/`label-check-failed` (#507)
-   are the one pair journaled OUTSIDE the engine — `sched enqueue` appends them at
-   enqueue time, before dispatch. `slot-released` (#525) marks the exact tick a held
+   slot's `gen` and `fenced` state (#504). `label-cleared` records a hard-block label
+   removal that returns an entry to `queued`, while `label-blocked` records a newly
+   detected label before dispatch. `label-check-failed` remains a visible, fail-open
+   signal when GitHub cannot be read. `slot-released` (#525) marks the exact tick a held
    slot reaches `idle` on a per-issue dispatch terminal path — verified completion,
    external-advance, a direct failure, a blocked dependent's release, or a
    detached-ship park — carrying the freed `slot` id and a closed `reason`

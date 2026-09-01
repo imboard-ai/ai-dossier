@@ -141,6 +141,18 @@ describe('SchedStore', () => {
     const onDisk = JSON.parse(fs.readFileSync(store.statePath, 'utf-8'));
     expect(validateState(onDisk)).toEqual(state);
   });
+
+  it('backfills the label-check timestamp when loading a pre-#544 state', () => {
+    const state = enqueueEntries(createEmptyState(), [{ issue: 544 }], NOW);
+    const legacy = JSON.parse(JSON.stringify(state)) as Record<string, unknown>;
+    legacy.schema_version = '1.8.0';
+    delete (legacy.entries as Array<Record<string, unknown>>)[0].last_label_check_at;
+
+    const migrated = validateState(legacy);
+
+    expect(migrated.schema_version).toBe('1.9.0');
+    expect(migrated.entries[0].last_label_check_at).toBeNull();
+  });
 });
 
 describe('#468 config: pr_poll_interval_ms and dispatch.report_prompt', () => {

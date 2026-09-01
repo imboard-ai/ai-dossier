@@ -52,6 +52,24 @@ const BATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
  */
 export const LABEL_BLOCK_REASON_PREFIX = 'label:';
 
+/**
+ * Labels that mean an issue is not ready for an agent to dispatch. Keep this
+ * list in the scheduler package so enqueue-time screening and tick-time
+ * reconciliation cannot drift apart.
+ */
+export const HARD_BLOCK_LABELS = [
+  'decision-pending',
+  'needs-clarification',
+  'epic',
+  'decomposed',
+] as const;
+
+/** The first hard-block label in the configured precedence order, or null. */
+export function pickHardBlockLabel(labels: readonly string[]): string | null {
+  const normalized = labels.map((label) => label.toLowerCase());
+  return HARD_BLOCK_LABELS.find((label) => normalized.includes(label)) ?? null;
+}
+
 /** `reason`/journal-`reason` value for an entry blocked by GitHub label `label`. */
 export function labelBlockReason(label: string): string {
   return `${LABEL_BLOCK_REASON_PREFIX}${label}`;
@@ -386,6 +404,7 @@ export function enqueueEntries(
       tier: input.tier ?? 'mid',
       status: input.blocked_label ? 'blocked' : 'queued',
       reason: input.blocked_label ? labelBlockReason(input.blocked_label) : null,
+      last_label_check_at: null,
       pr: null,
       cleanup: null,
       failure_evidence: null,

@@ -244,6 +244,13 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
     throw new Error(`${label}: reason must be a string or null`);
   }
   if (
+    entry.last_label_check_at !== null &&
+    entry.last_label_check_at !== undefined &&
+    !isIsoDateString(entry.last_label_check_at)
+  ) {
+    throw new Error(`${label}: last_label_check_at must be an ISO date string or null`);
+  }
+  if (
     entry.pr !== null &&
     entry.pr !== undefined &&
     (!Number.isInteger(entry.pr) || (entry.pr as number) <= 0)
@@ -601,6 +608,7 @@ export function validateState(data: unknown): SchedState {
   // recovery fields. Pre-#500 (1.3.0) slots carry no role — inferred below
   // (entry-status first, phase as a fallback; see the function doc comment).
   // Pre-#504 (1.5.0) slots carry no gen/fenced_at — backfilled below.
+  // Pre-#544 (1.9.0) entries carry no last_label_check_at — backfilled below.
   const rawEntries = obj.entries as QueueEntry[];
   const inferSlotRole = (slot: SlotEntry): SlotRole => {
     const issue = issueOfUnit(slot.unit);
@@ -636,6 +644,7 @@ export function validateState(data: unknown): SchedState {
     pr: entry.pr ?? null,
     cleanup: entry.cleanup ?? null,
     failure_evidence: entry.failure_evidence ?? null,
+    last_label_check_at: entry.last_label_check_at ?? null,
   }));
   const batches = (obj.batches as BatchEntry[]).map((batch) => ({
     ...batch,

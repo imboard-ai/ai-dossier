@@ -917,6 +917,8 @@ against ground truth.
   incrementally by hand — pass `--more-members-expected` (or a manifest entry's
   `more_members_expected: true`) on every call except the one landing the last member, so
   the batch stays `forming` until it is genuinely complete.
+  `sched start` re-checks these labels before dispatch: a cleared block returns
+  to `queued`, while a newly blocked queued issue is held and journaled.
 - **`start`** runs the dispatch engine (#464): a runnable unit is spawned as a detached
   agent process (`claude -p --output-format stream-json --verbose --model <tier model>` by default,
   auto-falling back to `opencode run`; the command, prompt, and tier→model mapping are

@@ -102,6 +102,21 @@ describe('createExecGroundTruth', () => {
     expect(calls.some(([f]) => f === 'git')).toBe(true);
   });
 
+  it('reads issue labels through gh for label reconciliation', () => {
+    const calls: Array<[string, string[]]> = [];
+    const exec: ExecFn = (file, args) => {
+      calls.push([file, args]);
+      if (file === 'gh' && args[0] === 'issue' && args.includes('labels')) {
+        return JSON.stringify({ labels: [{ name: 'epic' }, { name: 'triage' }] });
+      }
+      return null;
+    };
+    const gt = createExecGroundTruth(exec, { repoDir: '/repo' });
+
+    expect(gt.issueLabels(544)).toEqual(['epic', 'triage']);
+    expect(calls).toContainEqual(['gh', ['issue', 'view', '544', '--json', 'labels']]);
+  });
+
   it('distinguishes unreachable from known-absent when the subprocess fails (decision 2, option A)', () => {
     const failing: ExecFn = () => null;
     const gt = createExecGroundTruth(failing);

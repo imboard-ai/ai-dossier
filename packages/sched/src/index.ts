@@ -66,9 +66,11 @@ export {
   EnqueueError,
   type EnqueueInput,
   enqueueEntries,
+  HARD_BLOCK_LABELS,
   LABEL_BLOCK_REASON_PREFIX,
   labelBlockReason,
   parseManifest,
+  pickHardBlockLabel,
 } from './enqueue';
 export {
   createExecRunFencer,
@@ -90,6 +92,7 @@ export {
   isVerifiedComplete,
   labelNames,
   type PrTruth,
+  parseIssueLabelsJson,
   parseMilestoneJson,
   parsePrViewJson,
   parseSetupInfo,

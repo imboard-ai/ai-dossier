@@ -62,7 +62,6 @@
  * engine missing either never dispatches a `ready` batch (it stays queued).
  */
 
-import * as path from 'node:path';
 import type { BatchDispatchDeps, BatchTickResult } from './batch-dispatch';
 import { runBatchTick } from './batch-dispatch';
 import {
@@ -82,6 +81,7 @@ import {
   stallTimeoutForSlot,
   type TierSpawn,
 } from './dispatch';
+import { LABEL_BLOCK_REASON_PREFIX, labelBlockReason, pickHardBlockLabel } from './enqueue';
 import type { RunFencer } from './fence';
 import {
   type GroundTruth,
@@ -243,6 +243,21 @@ interface PrPoll {
   closed: Map<number, boolean>;
 }
 
+/** Label truths gathered outside the state lock (#544). */
+interface LabelPoll {
+  /** Timestamp shared by all successful/failed reads made in this poll. */
+  checkedAt: string | null;
+  /** `undefined` means the label lookup failed and must not change status. */
+  labels: Map<number, string[] | undefined>;
+}
+
+const LABEL_RECHECK_INTERVAL_MS = 10 * 60 * 1000;
+const PRE_DISPATCH_LABEL_STATUSES: ReadonlySet<QueueEntry['status']> = new Set([
+  'queued',
+  'classified',
+  'requeued',
+]);
+
 interface TickCtx {
   deps: EngineDeps;
   dispatch: ResolvedDispatch;
@@ -378,6 +393,140 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
     });
   }
   return out;
+}
+
+function isLabelBlockedEntry(entry: QueueEntry): boolean {
+  return entry.status === 'blocked' && entry.reason?.startsWith(LABEL_BLOCK_REASON_PREFIX) === true;
+}
+
+function hasOtherLabelWork(state: SchedState): boolean {
+  if (state.slots.some((slot) => slot.unit !== null)) return true;
+  return state.entries.some(
+    (entry) => !TERMINAL_ISSUE_STATUSES.has(entry.status) && !isLabelBlockedEntry(entry)
+  );
+}
+
+/**
+ * Read labels for full-cycle entries before the dispatch refill. Label-blocked
+ * entries are rate-limited only when they are the scheduler's sole work; a
+ * live/queued item keeps the reconcile tick active and therefore checks them.
+ */
+function pollLabelBlocks(deps: EngineDeps, state: SchedState): LabelPoll {
+  const candidates = state.entries.filter(
+    (entry) =>
+      entry.mode === 'full' &&
+      (isLabelBlockedEntry(entry) || PRE_DISPATCH_LABEL_STATUSES.has(entry.status))
+  );
+  if (candidates.length === 0) return { checkedAt: null, labels: new Map() };
+
+  const otherWork = hasOtherLabelWork(state);
+  const now = deps.now();
+  const labels = new Map<number, string[] | undefined>();
+  let checkedAt: string | null = null;
+  for (const entry of candidates) {
+    const last = entry.last_label_check_at === null ? NaN : Date.parse(entry.last_label_check_at);
+    const recentlyChecked =
+      isLabelBlockedEntry(entry) &&
+      !otherWork &&
+      Number.isFinite(last) &&
+      now.getTime() - last < LABEL_RECHECK_INTERVAL_MS;
+    if (recentlyChecked) continue;
+    checkedAt ??= now.toISOString();
+    labels.set(entry.issue, deps.groundTruth.issueLabels(entry.issue));
+  }
+  return { checkedAt, labels };
+}
+
+function reconcileLabelBlocks(ctx: TickCtx, state: SchedState, poll: LabelPoll): SchedState {
+  if (poll.checkedAt === null) return state;
+  let next = state;
+  for (const [issue, labels] of poll.labels) {
+    const entry = findEntry(next, issue);
+    if (
+      entry === undefined ||
+      entry.mode !== 'full' ||
+      (!isLabelBlockedEntry(entry) && !PRE_DISPATCH_LABEL_STATUSES.has(entry.status))
+    ) {
+      continue;
+    }
+
+    const now = ctx.deps.now();
+    if (labels === undefined) {
+      next = {
+        ...next,
+        entries: next.entries.map((candidate) =>
+          candidate.issue === issue
+            ? { ...candidate, last_label_check_at: poll.checkedAt, updated_at: now.toISOString() }
+            : candidate
+        ),
+      };
+      journal(ctx, 'label-check-failed', `issue:${issue}`, {
+        reason: 'gh label lookup failed — retaining current queue state',
+      });
+      continue;
+    }
+
+    const hit = pickHardBlockLabel(labels);
+    if (isLabelBlockedEntry(entry)) {
+      if (hit === null) {
+        next = transitionIssue(
+          next,
+          issue,
+          'queued',
+          { reason: null, last_label_check_at: poll.checkedAt },
+          now
+        );
+        journal(ctx, 'label-cleared', `issue:${issue}`, {
+          reason: entry.reason,
+          detail: 'hard-block labels cleared; returned to queued for dependency-gated dispatch',
+        });
+      } else {
+        const reason = labelBlockReason(hit);
+        next = {
+          ...next,
+          entries: next.entries.map((candidate) =>
+            candidate.issue === issue
+              ? {
+                  ...candidate,
+                  reason,
+                  last_label_check_at: poll.checkedAt,
+                  updated_at: now.toISOString(),
+                }
+              : candidate
+          ),
+        };
+        if (entry.reason !== reason) {
+          journal(ctx, 'label-blocked', `issue:${issue}`, { reason });
+        }
+      }
+      continue;
+    }
+
+    if (hit !== null) {
+      const reason = labelBlockReason(hit);
+      next = transitionIssue(
+        next,
+        issue,
+        'blocked',
+        { reason, last_label_check_at: poll.checkedAt },
+        now
+      );
+      journal(ctx, 'label-blocked', `issue:${issue}`, {
+        reason,
+        detail: 'hard-block label found before dispatch',
+      });
+    } else {
+      next = {
+        ...next,
+        entries: next.entries.map((candidate) =>
+          candidate.issue === issue
+            ? { ...candidate, last_label_check_at: poll.checkedAt, updated_at: now.toISOString() }
+            : candidate
+        ),
+      };
+    }
+  }
+  return next;
 }
 
 /**
@@ -1771,6 +1920,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const state0 = deps.store.load();
   const polled = pollUnits(deps, state0);
   const prPoll = pollParkedPrs(deps, state0, dispatch);
+  const labelPoll = pollLabelBlocks(deps, state0);
 
   const pass1 = deps.store.withLock((state) => {
     const ctx: TickCtx = { deps, dispatch, result: emptyResult() };
@@ -1778,6 +1928,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     next = reconcileParked(ctx, next, prPoll);
     next = reconcileStaleFailedParks(ctx, next, prPoll);
     next = requeueOrphanedDispatches(ctx, next);
+    next = reconcileLabelBlocks(ctx, next, labelPoll);
     next = dispatchReportAgents(ctx, next, config);
     next = dispatchAssignments(ctx, next, config);
     return {
