@@ -548,6 +548,7 @@ export type JournalEventName =
   | 'stalled'
   | 'redispatched'
   | 'unit-failed'
+  | 'label-blocked'
   | 'dependents-blocked'
   | 'requeued'
   | 'ground-truth-unreachable'

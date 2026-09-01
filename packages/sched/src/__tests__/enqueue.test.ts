@@ -339,3 +339,44 @@ describe('batch-level facts at creation (#472)', () => {
     expect(() => parseManifest([{ issue: 5, eviction_groups: [5] }])).toThrow(/eviction_groups/);
   });
 });
+
+describe('enqueueEntries — blocked_label (#507)', () => {
+  it('lands an entry as blocked with a label: reason when blocked_label is set', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 301, blocked_label: 'decision-pending' }],
+      NOW
+    );
+    expect(state.entries[0]).toMatchObject({
+      issue: 301,
+      status: 'blocked',
+      reason: 'label:decision-pending',
+    });
+  });
+
+  it('leaves status/reason unchanged (queued/null) when blocked_label is absent', () => {
+    const state = enqueueEntries(createEmptyState(), [{ issue: 302 }], NOW);
+    expect(state.entries[0]).toMatchObject({ status: 'queued', reason: null });
+  });
+
+  it('a blocked_label entry still participates in dependency-cycle and batch rules', () => {
+    expect(() =>
+      enqueueEntries(
+        createEmptyState(),
+        [
+          { issue: 401, deps: [402] },
+          { issue: 402, deps: [401], blocked_label: 'epic' },
+        ],
+        NOW
+      )
+    ).toThrow(/Dependency cycle detected/);
+
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 501, mode: 'slot', batch: 'b2', blocked_label: 'needs-clarification' }],
+      NOW
+    );
+    expect(state.entries[0]).toMatchObject({ status: 'blocked', batch: 'b2' });
+    expect(findBatch(state, 'b2')?.members).toEqual([501]);
+  });
+});

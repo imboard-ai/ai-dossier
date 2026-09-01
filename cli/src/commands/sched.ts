@@ -38,9 +38,11 @@ import {
   setPaused,
   TEARDOWN_TIMEOUT_MS,
   tick,
+  unitEvent,
 } from '@ai-dossier/sched';
 import type { Command } from 'commander';
 import { formatAge } from '../duration';
+import { exec, parseGhJson } from '../gh';
 import { detectLlm, fail } from '../helpers';
 import { parseIssueSelection } from '../issue-selection';
 import { renderTable } from '../table';
@@ -230,6 +232,58 @@ function relativeTime(iso: string, now: number = Date.now()): string {
   return formatAge(Math.max(0, now - then), ' ago');
 }
 
+// --- enqueue-time label pre-screen (#507) ---
+
+/**
+ * Labels that mean an issue was already determined undispatchable — by a
+ * prior full-cycle hand-off or by triage — mirroring gate-issue's Step 2 hard
+ * blocks. Enqueueing one of these anyway just re-burns the same block a
+ * dispatched agent (and the escalation ladder behind it) would rediscover on
+ * its own; checking here costs one `gh` call instead of a slot-hour.
+ */
+const HARD_BLOCK_LABELS = [
+  'decision-pending',
+  'needs-clarification',
+  'epic',
+  'decomposed',
+] as const;
+
+/** One label's `name`, as gh reports it; every other field is ignored. */
+interface GhLabel {
+  name?: unknown;
+}
+
+/** The issue's current label names, or `null` when the lookup could not be trusted. */
+function fetchIssueLabels(issue: number): string[] | null {
+  const res = exec('gh', ['issue', 'view', String(issue), '--json', 'labels']);
+  if (!res.ok) return null;
+  const parsed = parseGhJson<{ labels?: unknown }>(res.stdout);
+  if (parsed === null || !Array.isArray(parsed.labels)) return null;
+  return parsed.labels
+    .map((label) => (label && typeof label === 'object' ? (label as GhLabel).name : undefined))
+    .filter((name): name is string => typeof name === 'string');
+}
+
+/**
+ * Mutate `inputs` in place, setting `blocked_label` on any issue that already
+ * carries a hard-block label. Fails open on a `gh` lookup failure (network,
+ * auth, rate limit) — enqueue must never hard-fail because a nice-to-have
+ * check could not run; the issue is enqueued as `queued`, same as today.
+ */
+function screenHardBlockLabels(inputs: EnqueueInput[]): void {
+  for (const input of inputs) {
+    const labels = fetchIssueLabels(input.issue);
+    if (labels === null) {
+      console.error(
+        `⚠ Could not check labels for #${input.issue} (gh lookup failed) — enqueuing normally`
+      );
+      continue;
+    }
+    const hit = HARD_BLOCK_LABELS.find((label) => labels.includes(label));
+    if (hit) input.blocked_label = hit;
+  }
+}
+
 // --- subcommands ---
 
 function registerEnqueueSubcommand(cmd: Command): void {
@@ -295,6 +349,8 @@ function registerEnqueueSubcommand(cmd: Command): void {
         fail(['Nothing to enqueue — pass --issues or --from-manifest']);
       }
 
+      screenHardBlockLabels(inputs);
+
       let enqueued: number;
       try {
         enqueued = store.withLock((state) => {
@@ -305,11 +361,38 @@ function registerEnqueueSubcommand(cmd: Command): void {
         handleKnownError(err);
       }
 
+      const blocked = inputs.filter((input) => input.blocked_label);
+      if (blocked.length > 0) {
+        const journal = new Journal(store.dir);
+        for (const input of blocked) {
+          journal.append(
+            unitEvent('label-blocked', `issue:${input.issue}`, {
+              detail: `label=${input.blocked_label}`,
+            })
+          );
+        }
+      }
+
       if (opts.json) {
-        console.log(JSON.stringify({ project, enqueued: inputs.length, queue_depth: enqueued }));
-      } else {
         console.log(
-          `✓ Enqueued ${inputs.length} issue(s) for ${project} (queue depth: ${enqueued})`
+          JSON.stringify({
+            project,
+            enqueued: inputs.length,
+            queued: inputs.length - blocked.length,
+            blocked_by_label: blocked.map((input) => ({
+              issue: input.issue,
+              label: input.blocked_label,
+            })),
+            queue_depth: enqueued,
+          })
+        );
+      } else {
+        const summary =
+          blocked.length > 0
+            ? `${inputs.length - blocked.length} queued, ${blocked.length} blocked-by-label`
+            : `${inputs.length} queued`;
+        console.log(
+          `✓ Enqueued ${inputs.length} issue(s) for ${project} (${summary}; queue depth: ${enqueued})`
         );
       }
     });

@@ -4,6 +4,10 @@
  * written by batch-prep"). Pure validation + state mutation: rejects duplicate
  * active issues, mode/batch mismatches, self-dependencies, and dependency
  * cycles at enqueue time rather than at assignment time.
+ *
+ * `blocked_label` (#507) lands an entry as `blocked` instead of `queued` — the
+ * CLI resolves it from the issue's actual GitHub labels before calling in
+ * here; this module stays I/O-free and only honors the value it is handed.
  */
 
 import { SAFE_REF_RE } from './attribution';
@@ -43,6 +47,13 @@ export interface EnqueueInput {
   anchor?: number;
   run_id?: string;
   eviction_groups?: number[][];
+  /**
+   * Name of a hard-block GitHub label found on this issue (#507, e.g.
+   * `decision-pending`), resolved by the CLI's pre-screen before calling
+   * `enqueueEntries` — never parsed from a manifest. When set, the entry
+   * lands as `blocked` with `reason: 'label:<name>'` instead of `queued`.
+   */
+  blocked_label?: string | null;
 }
 
 function asPositiveInt(value: unknown, label: string): number {
@@ -290,8 +301,8 @@ export function enqueueEntries(
       batch,
       deps: input.deps ? [...input.deps] : [],
       tier: input.tier ?? 'mid',
-      status: 'queued',
-      reason: null,
+      status: input.blocked_label ? 'blocked' : 'queued',
+      reason: input.blocked_label ? `label:${input.blocked_label}` : null,
       pr: null,
       cleanup: null,
       failure_evidence: null,
