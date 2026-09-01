@@ -39,7 +39,10 @@ const CHECKER =
  * A scratch repo whose history is `commits`, on top of a base that carries the
  * checker. Returns the repo path, the base sha and the head sha.
  */
-function scratchRepo(commits: Array<{ subject: string; value?: string; file?: string }>): {
+function scratchRepo(
+  commits: Array<{ subject: string; value?: string; file?: string }>,
+  checker: string = CHECKER
+): {
   repo: string;
   base: string;
   head: string;
@@ -48,7 +51,7 @@ function scratchRepo(commits: Array<{ subject: string; value?: string; file?: st
   git(['init', '--initial-branch=main', '.'], repo);
   git(['config', 'user.email', 'sched@test'], repo);
   git(['config', 'user.name', 'sched test'], repo);
-  fs.writeFileSync(path.join(repo, 'check.cjs'), CHECKER);
+  fs.writeFileSync(path.join(repo, 'check.cjs'), checker);
   fs.writeFileSync(path.join(repo, 'value.txt'), 'ok\n');
   git(['add', '.'], repo);
   git(['commit', '-m', 'base: checker + value'], repo);
@@ -179,6 +182,50 @@ describe('runAttributionBisect (real git)', () => {
         boundary: [],
       })
     ).toEqual({ kind: 'error', detail: 'bisect test command is empty' });
+  });
+
+  // #503 finding 1 (superseded #472 review, carried into #498's implementation):
+  // the failing test command's own stdout is interleaved into `git bisect
+  // run`'s captured output, so member-authored test code could print a fake
+  // "<sha> is the first bad commit" line to pin blame on an innocent member.
+  // The result is read from git's own `refs/bisect/bad` first — set by git's
+  // bisect algorithm from exit codes alone, never from anything the test
+  // command prints — so a forged line in the test's stdout must not change
+  // the outcome. FIRST_BAD_RE only exists as a fallback for a git that
+  // somehow leaves no ref.
+  it('is not fooled by a failing test that spoofs the "is the first bad commit" line', () => {
+    // Always prints a forged line blaming a fixed, wrong sha — regardless of
+    // which commit is actually checked out — then exits truthfully on
+    // whether this commit is the real culprit.
+    const SPOOFING_CHECKER =
+      "const fs=require('fs');" +
+      "console.log('0000000000000000000000000000000000000000 is the first bad commit');" +
+      "process.exit(fs.readFileSync('value.txt','utf8').trim()==='broken'?1:0)";
+    const { repo, base } = scratchRepo(
+      [
+        { subject: 'feat: member a (#201)', value: 'ok-a' },
+        { subject: 'feat: member b (#202)', value: 'broken' },
+        { subject: 'feat: member c (#203)', file: 'c.txt' },
+      ],
+      SPOOFING_CHECKER
+    );
+    const boundary = boundaryOf(repo, base);
+    const outcome = runAttributionBisect(exec, {
+      repoDir: repo,
+      good: base,
+      bad: git(['rev-parse', 'HEAD'], repo).trim(),
+      testCommand: TEST_COMMAND,
+      boundary,
+    });
+
+    // The spoofed sha (all zeros) is never a real commit — if the parser had
+    // trusted the forged stdout line, this would resolve to 'unattributable'
+    // or 'error', never the true offender.
+    expect(outcome).toMatchObject({ kind: 'first-bad' });
+    if (outcome.kind !== 'first-bad') return;
+    expect(outcome.issue).toBe(202);
+    expect(outcome.sha).toBe(boundary[1].sha);
+    expect(outcome.sha).not.toBe('0000000000000000000000000000000000000000');
   });
 });
 

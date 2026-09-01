@@ -6,6 +6,7 @@ import {
   findEntry,
   IllegalTransitionError,
   type IssueStatus,
+  requeueMember,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
   type SchedState,
@@ -248,6 +249,76 @@ describe('issue state machine (RFC-0001 §D.1)', () => {
     expect(TERMINAL_ISSUE_STATUSES.has('done')).toBe(true);
     expect(TERMINAL_ISSUE_STATUSES.has('failed')).toBe(true);
     expect(TERMINAL_ISSUE_STATUSES.has('dispatched')).toBe(false);
+  });
+});
+
+// #503 finding 2 (superseded #472 review, carried into #498's implementation):
+// `requeued → requeued` is not a declared rail edge (ISSUE_BASE_TRANSITIONS
+// above has `requeued: ['dispatched', 'batched']`), so a requeue loop that
+// re-requeues an already-`requeued` entry would throw IllegalTransitionError
+// if it ever routed through `transitionIssue`. `requeueMember` avoids the
+// edge entirely by retagging metadata in place for queued/classified/requeued
+// entries — this pins that guard so a regression here fails loudly.
+describe('requeueMember (#503: requeued → requeued must not throw)', () => {
+  it('is idempotent on an already-requeued entry — no IllegalTransitionError, metadata retagged', () => {
+    let state = seeded();
+    state = transitionIssue(state, 201, 'classified', {}, NOW);
+    state = transitionIssue(state, 201, 'batched', {}, NOW);
+    state = transitionIssue(state, 201, 'evicted', {}, NOW);
+    state = transitionIssue(state, 201, 'requeued', { mode: 'slot', batch: 'b1' }, NOW);
+    expect(findEntry(state, 201)?.status).toBe('requeued');
+
+    let result: ReturnType<typeof requeueMember> | undefined;
+    expect(() => {
+      result = requeueMember(state, 201, { mode: 'full', batch: null }, 're-requeued', NOW2);
+    }).not.toThrow();
+
+    expect(result?.requeued).toBe(true);
+    const entry = findEntry(result?.state as SchedState, 201);
+    expect(entry?.status).toBe('requeued');
+    expect(entry?.mode).toBe('full');
+    expect(entry?.batch).toBeNull();
+    expect(entry?.reason).toBe('re-requeued');
+    expect(entry?.updated_at).toBe(NOW2.toISOString());
+  });
+
+  it('short-circuits queued/classified entries the same way, without a status edge', () => {
+    const state = seeded();
+    const result = requeueMember(
+      state,
+      101,
+      { mode: 'full', batch: null },
+      'requeue-from-queued',
+      NOW2
+    );
+    expect(result.requeued).toBe(true);
+    expect(findEntry(result.state, 101)?.status).toBe('queued');
+  });
+
+  it('routes an active entry through evicted → requeued', () => {
+    let state = seeded();
+    state = transitionIssue(state, 101, 'classified', {}, NOW);
+    state = transitionIssue(state, 101, 'dispatched', {}, NOW);
+    const result = requeueMember(
+      state,
+      101,
+      { mode: 'full', batch: null },
+      'batch-dissolved',
+      NOW2
+    );
+    expect(result.requeued).toBe(true);
+    expect(findEntry(result.state, 101)?.status).toBe('requeued');
+  });
+
+  it('leaves a preserved (terminal) member alone', () => {
+    let state = seeded();
+    state = transitionIssue(state, 101, 'classified', {}, NOW);
+    state = transitionIssue(state, 101, 'dispatched', {}, NOW);
+    state = transitionIssue(state, 101, 'shipped', {}, NOW);
+    state = transitionIssue(state, 101, 'done', {}, NOW);
+    const result = requeueMember(state, 101, { mode: 'full', batch: null }, 'noop', NOW2);
+    expect(result.requeued).toBe(false);
+    expect(findEntry(result.state, 101)?.status).toBe('done');
   });
 });
 
