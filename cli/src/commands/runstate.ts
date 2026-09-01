@@ -151,7 +151,7 @@ type WarnOnce = (line: string) => void;
  * reader is told stays the same however the check fell over.
  */
 const TREATED_MISSING = 'treating it as missing';
-const IMPLEMENT_UNVERIFIED = 'treating the implement milestone as unverified';
+const HEAD_UNVERIFIED = 'treating the milestone head as unverified';
 const SHIP_UNVERIFIED = `resuming at 'ship' rather than assuming it merged`;
 const RUN_INCOMPLETE = 'treating the run as not yet complete';
 
@@ -200,39 +200,68 @@ function probeBranchOnRemote(branch: string, warn: WarnOnce): boolean {
 }
 
 /**
- * Backs both `dirExists` and `fileExists`, which differ only in the milestone key the
- * path came from (`label`) and the kind of entry they expect.
+ * `dirExists` — whether the recorded worktree directory is present on this machine.
+ * Informational only (`local_worktree=`): no resume decision depends on it.
  */
-function probePathExists(
-  path: string,
-  label: string,
-  kind: 'directory' | 'file',
-  warn: WarnOnce
-): boolean {
+function probeDirExists(path: string, warn: WarnOnce): boolean {
   if (!isSafePath(path)) {
-    warn(`milestone ${label} '${path}' is not an absolute path — ${TREATED_MISSING}`);
+    warn(`milestone worktree '${path}' is not an absolute path — ${TREATED_MISSING}`);
     return false;
   }
   try {
-    const stat = fs.statSync(path);
-    return kind === 'directory' ? stat.isDirectory() : stat.isFile();
+    return fs.statSync(path).isDirectory();
   } catch {
     return false;
   }
 }
 
-function probeHeadOf(worktree: string, warn: WarnOnce): string | null {
-  if (!isSafePath(worktree)) {
+/** `git merge-base --is-ancestor` exits 1 for "not an ancestor" — an answer, not a fault. */
+const GIT_NOT_ANCESTOR = 1;
+
+/**
+ * Remote-first head check (WIP sync rule): `head` counts as present on `origin/<branch>`
+ * when it equals the branch's current tip, or is an ancestor of it. Never touches a local
+ * worktree — this is what lets `plan`/`implement`/`review` milestones resume on a machine
+ * that has never seen the worktree the milestone recorded.
+ */
+function probeHeadOnRemote(branch: string, head: string, warn: WarnOnce): boolean {
+  if (!isSafeArg(branch)) {
     warn(
-      `milestone worktree '${worktree}' is not an absolute path — refusing to run git in it, and ${IMPLEMENT_UNVERIFIED}`
+      `milestone branch '${branch}' is not a usable branch name — refusing to pass it to git, and ${HEAD_UNVERIFIED}`
     );
-    return null;
+    return false;
   }
-  const res = exec('git', ['-C', worktree, 'rev-parse', '--short', 'HEAD']);
-  if (res.ok) return res.stdout;
-  // The worktree directory already passed dirExists, so a failure here is surprising.
-  warn(probeFailure('git', `read HEAD in '${worktree}'`, res.error, IMPLEMENT_UNVERIFIED));
-  return null;
+  if (!isSafeArg(head)) {
+    warn(
+      `milestone head '${head}' is not a usable commit reference — refusing to pass it to git, and ${HEAD_UNVERIFIED}`
+    );
+    return false;
+  }
+  const fetchRes = exec('git', ['fetch', 'origin', branch]);
+  if (!fetchRes.ok) {
+    warn(
+      probeFailure(
+        'git',
+        `fetch 'origin/${branch}' to confirm head '${head}'`,
+        fetchRes.error,
+        HEAD_UNVERIFIED
+      )
+    );
+    return false;
+  }
+  const ancestorRes = exec('git', ['merge-base', '--is-ancestor', head, 'FETCH_HEAD']);
+  if (ancestorRes.ok) return true;
+  if (ancestorRes.error.status !== GIT_NOT_ANCESTOR) {
+    warn(
+      probeFailure(
+        'git',
+        `check whether '${head}' is on 'origin/${branch}'`,
+        ancestorRes.error,
+        HEAD_UNVERIFIED
+      )
+    );
+  }
+  return false;
 }
 
 function probePrState(
@@ -298,9 +327,8 @@ function makeProbe(issue: string, repo?: string, warnings: string[] = []): Resum
 
   return {
     branchOnRemote: (branch) => probeBranchOnRemote(branch, warn),
-    dirExists: (path) => probePathExists(path, 'worktree', 'directory', warn),
-    fileExists: (path) => probePathExists(path, 'planning path', 'file', warn),
-    headOf: (worktree) => probeHeadOf(worktree, warn),
+    headOnRemote: (branch, head) => probeHeadOnRemote(branch, head, warn),
+    dirExists: (path) => probeDirExists(path, warn),
     prState: (pr) => probePrState(pr, repo, warn),
     issueClosed: () => probeIssueClosed(issue, repo, warn),
   };
@@ -450,6 +478,7 @@ function registerVerifySubcommand(cmd: Command): void {
               run_id: result.run_id,
               verified: result.verified,
               resume_context: result.resume_context,
+              local_worktree: result.local_worktree,
               ...(result.slot_trail ? { slot_trail: true } : {}),
               ...(result.hard_block ? { hard_block: result.hard_block } : {}),
               ...(result.note ? { note: result.note } : {}),
@@ -463,6 +492,7 @@ function registerVerifySubcommand(cmd: Command): void {
         console.log(`resume_from=${result.resume_from}`);
         console.log(`run_id=${result.run_id ?? 'none'}`);
         console.log(`verified=${result.verified.length > 0 ? result.verified.join(',') : 'none'}`);
+        console.log(`local_worktree=${result.local_worktree}`);
         if (result.slot_trail) console.log('slot_trail=present');
         if (result.hard_block) console.log(`hard_block=${result.hard_block}`);
         if (result.note) console.log(`note=${result.note}`);
