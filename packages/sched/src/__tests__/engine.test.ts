@@ -71,6 +71,8 @@ function harness(
   const milestones = new Map<number, GroundTruthMilestone | null>();
   const closedIssues = new Set<number>();
   const branchHeads = new Map<string, string>();
+  const issueLabels = new Map<number, string[]>();
+  const labelCalls: number[] = [];
   const unreachable = new Set<number>();
   const prStates = new Map<number, PrTruth | undefined>();
   const prUnreachable = new Set<number>();
@@ -83,6 +85,10 @@ function harness(
     latestMilestone: (issue) =>
       unreachable.has(issue) ? undefined : (milestones.get(issue) ?? null),
     issueClosed: (issue) => closedIssues.has(issue),
+    issueLabels: (issue) => {
+      labelCalls.push(issue);
+      return issueLabels.get(issue) ?? [];
+    },
     branchHead: (branch) => branchHeads.get(branch) ?? null,
     prState: (pr) => (prUnreachable.has(pr) ? undefined : prStates.get(pr)),
     setupInfo: (issue) =>
@@ -158,6 +164,8 @@ function harness(
     milestones,
     closedIssues,
     branchHeads,
+    issueLabels,
+    labelCalls,
     unreachable,
     prStates,
     prUnreachable,
@@ -219,6 +227,76 @@ function harness(
     clock: () => clock,
   };
 }
+
+describe('label-block reconciliation (#544)', () => {
+  it('returns a cleared label-blocked unit to queued and resumes dependency gating', () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 544, deps: [999], blocked_label: 'decision-pending' }]);
+    h.issueLabels.set(544, []);
+
+    const result = h.tick();
+
+    expect(result.spawned).toEqual([]);
+    expect(h.state().entries[0]).toMatchObject({
+      issue: 544,
+      status: 'queued',
+      reason: null,
+    });
+    expect(h.events()).toContainEqual(
+      expect.objectContaining({
+        event: 'label-cleared',
+        unit: 'issue:544',
+        reason: 'label:decision-pending',
+      })
+    );
+  });
+
+  it('blocks a queued unit that gains a hard-block label before dispatch', () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 545 }]);
+    h.issueLabels.set(545, ['epic']);
+
+    const result = h.tick();
+
+    expect(result.spawned).toEqual([]);
+    expect(h.state().entries[0]).toMatchObject({
+      issue: 545,
+      status: 'blocked',
+      reason: 'label:epic',
+    });
+    expect(h.events()).toContainEqual(
+      expect.objectContaining({
+        event: 'label-blocked',
+        unit: 'issue:545',
+        reason: 'label:epic',
+      })
+    );
+  });
+
+  it('limits idle label-blocked rechecks to once per ten minutes', () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([
+      { issue: 546, blocked_label: 'decision-pending' },
+      { issue: 547, blocked_label: 'epic' },
+    ]);
+    h.issueLabels.set(546, ['decision-pending']);
+    h.issueLabels.set(547, ['epic']);
+
+    h.tick();
+    expect(h.labelCalls).toEqual([546, 547]);
+
+    h.advance(9 * 60 * 1000);
+    h.tick();
+    expect(h.labelCalls).toEqual([546, 547]);
+
+    h.advance(60 * 1000);
+    h.tick();
+    expect(h.labelCalls).toEqual([546, 547, 546, 547]);
+  });
+});
 
 /** The milestone shape a detached ship run posts when parking its PR (#468). */
 function parkMilestone(pr: number, at?: string): GroundTruthMilestone {

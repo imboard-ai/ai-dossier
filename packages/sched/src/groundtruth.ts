@@ -5,7 +5,8 @@
  * issue's runstate milestone trail (`ai-dossier runstate last`), GitHub
  * itself (`gh issue view`), and `git ls-remote` for the "new pushed commit"
  * stall signal. #468 adds the parked-PR state (`gh pr view`) and the setup
- * milestone's teardown keys (`gh issue view --json comments`).
+ * milestone's teardown keys (`gh issue view --json comments`); #544 also reads
+ * issue labels before dispatch so enqueue-time hard blocks cannot go stale.
  *
  * Everything is injectable (the `ExecFn` pattern from project.ts): tests —
  * and any consumer — supply fake ground truth and no subprocess runs.
@@ -70,6 +71,8 @@ export interface GroundTruth {
    * which is the only direction this signal is used in.
    */
   issueClosed(issue: number): boolean;
+  /** Current GitHub label names for `issue`, or undefined when the poll failed. */
+  issueLabels(issue: number): string[] | undefined;
   /** Current head sha of `branch` on origin, or null when unknown/absent/unreachable. */
   branchHead(branch: string): string | null;
   /**
@@ -138,6 +141,7 @@ export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone 
  * - `git ls-remote origin <branch>` — branch head
  * - `gh pr view <n> --json state,mergedAt,mergeable,labels` — parked-PR state (#468)
  * - `gh issue view N --json comments` — the setup milestone's teardown keys (#468)
+ * - `gh issue view N --json labels` — hard-block reconciliation before dispatch (#544)
  *
  * `repoDir` is the cwd for git; gh resolves the repo from cwd by default.
  * Every failure degrades safely: a failed milestone/PR poll reports UNREACHABLE
@@ -165,6 +169,11 @@ export function createExecGroundTruth(
         exec('gh', ['issue', 'view', String(issue), '--json', 'state', '--jq', '.state']) ===
         'CLOSED'
       );
+    },
+    issueLabels(issue: number): string[] | undefined {
+      const out = exec('gh', ['issue', 'view', String(issue), '--json', 'labels'], opts.repoDir);
+      if (out === null) return undefined;
+      return parseIssueLabelsJson(out) ?? undefined;
     },
     branchHead(branch: string): string | null {
       // The branch string originates from milestone output written by the
@@ -208,6 +217,19 @@ export function labelNames(value: unknown): string[] {
       label !== null && typeof label === 'object' ? (label as { name?: unknown }).name : undefined
     )
     .filter((name): name is string => typeof name === 'string');
+}
+
+/** Parse the stdout of `gh issue view --json labels`. */
+export function parseIssueLabelsJson(stdout: string | null): string[] | null {
+  if (stdout === null || stdout.trim() === '') return null;
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (parsed === null || typeof parsed !== 'object') return null;
+    const labels = (parsed as { labels?: unknown }).labels;
+    return Array.isArray(labels) ? labelNames(labels) : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Parse the stdout of `gh pr view --json state,mergedAt,mergeable,labels`. */

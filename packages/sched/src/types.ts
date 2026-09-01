@@ -240,6 +240,8 @@ export interface QueueEntry {
   status: IssueStatus;
   /** Free-form reason attached to failure-edge transitions (evicted/blocked/failed). */
   reason: string | null;
+  /** Last GitHub hard-block-label check for this entry; null before any check. */
+  last_label_check_at: string | null;
   /**
    * PR number the unit parked on `auto-merge` (#468), from the ship phase's
    * `awaiting-merge` milestone (`pr=` key). Set when the agent exits parked;
@@ -676,7 +678,7 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.8.0' as const;
+export const SCHEMA_VERSION = '1.9.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -688,6 +690,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.5.0',
   '1.6.0',
   '1.7.0',
+  '1.8.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.4.0' as const;
@@ -814,10 +817,10 @@ export type JournalEventName =
   | 'batch-setup-done'
   | 'batch-setup-failed'
   | 'member-advanced'
-  // #507 enqueue-time hard-block label pre-screen (journaled by the CLI,
-  // NOT the engine — sched enqueue appends these before the issue is ever
-  // dispatched)
+  // #507 enqueue-time hard-block label pre-screen, plus #544 tick-time
+  // reconciliation before dispatch.
   | 'label-blocked'
+  | 'label-cleared'
   | 'label-check-failed'
   // #524 runs.jsonl telemetry: a dispatch's exit produced no entry (unit left
   // the queue, or is not an `issue:<n>` unit), or the append itself failed.
