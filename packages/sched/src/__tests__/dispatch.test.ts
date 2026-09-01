@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildAgentCommand,
+  buildFixPrompt,
   buildPrompt,
   buildReportPrompt,
   DEFAULT_DISPATCH_COMMAND,
+  DEFAULT_FIX_PROMPT_TEMPLATE,
+  DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
   escalateTier,
+  NO_BACKGROUND_EXIT_INSTRUCTION,
   reportTierFor,
   resolveDispatch,
   type SchedConfig,
@@ -185,5 +189,24 @@ describe('report dispatch (#468 AC2)', () => {
     expect(resolveDispatch({ max_slots: 1, pr_poll_interval_ms: 120_000 }).prPollIntervalMs).toBe(
       120_000
     );
+  });
+});
+
+// --- #497: never exit while a background build/test command still runs ---
+
+describe('background-exit hardening (#497)', () => {
+  it('the default full-cycle prompt tells the agent never to exit on a background wait', () => {
+    const resolved = resolveDispatch({ max_slots: 1 });
+    expect(resolved.prompt).toContain(NO_BACKGROUND_EXIT_INSTRUCTION);
+  });
+
+  it('the default fix prompt tells the agent never to exit on a background wait', () => {
+    expect(DEFAULT_FIX_PROMPT_TEMPLATE).toContain(NO_BACKGROUND_EXIT_INSTRUCTION);
+    const out = buildFixPrompt(DEFAULT_FIX_PROMPT_TEMPLATE, 497, 'b1', ['a.test.ts']);
+    expect(out).toContain(NO_BACKGROUND_EXIT_INSTRUCTION);
+  });
+
+  it('the report prompt is deliberately excluded — it never spawns a build/test command', () => {
+    expect(DEFAULT_REPORT_PROMPT_TEMPLATE).not.toContain(NO_BACKGROUND_EXIT_INSTRUCTION);
   });
 });

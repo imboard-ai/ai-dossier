@@ -55,7 +55,14 @@ where every mechanical supervision decision is code, not remembered prose:
    (`claude -p --output-format json --model <tier model>` by default, opencode fallback;
    command/prompt/tier-models configurable), prompt on stdin, output appended to
    `runs/<unit>.log`. pid, phase, role, and last-progress are persisted in `state.json`.
-   Agents are unref'd: they survive a sched crash (restart reconciles by pid).
+   Agents are unref'd: they survive a sched crash (restart reconciles by pid). The default
+   full-cycle and fix prompts (`DEFAULT_PROMPT_TEMPLATE`, `DEFAULT_FIX_PROMPT_TEMPLATE`)
+   append `NO_BACKGROUND_EXIT_INSTRUCTION` (#497) — a headless session ends the instant the
+   model stops responding, so an agent that starts a long build/test command and reports
+   "waiting for it to finish" abandons the run with the subprocess still going; the
+   instruction tells it to run such commands in the foreground and wait, or poll until
+   they finish. `DEFAULT_REPORT_PROMPT_TEMPLATE` is excluded — it never spawns a long
+   command.
 2. **Completion verification (AC2)** — an agent exiting is never proof of completion.
    On exit, the unit completes only when ground truth confirms it: the issue's latest
    runstate milestone is `report done`, or GitHub says the issue is closed — except a
