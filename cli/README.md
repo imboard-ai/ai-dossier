@@ -828,8 +828,8 @@ against ground truth.
 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically
-from `state.json` (pre-#464 and pre-#468 state files — schema 1.0.0/1.1.0 — migrate to
-1.2.0 on load). A corrupt state file is a loud
+from `state.json` (pre-#464/#468/#472/#500 state files — schema 1.0.0/1.1.0/1.2.0/1.3.0 —
+migrate to 1.4.0 on load). A corrupt state file is a loud
 error naming the file — never a silent queue reset. Concurrency is serialized by a
 `.sched-lock` directory mutex (stolen from dead holders). `config.json` holds
 `max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default

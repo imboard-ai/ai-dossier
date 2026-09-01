@@ -1069,6 +1069,61 @@ describe('#468 AC2: teardown + report dispatch on merge', () => {
     expect(slot?.status).toBe('running');
     expect(h.killedPids).toHaveLength(0);
   });
+
+  it('#500: an exit after phase-updated corrupts slot.phase still requires the report milestone (role survives the resync)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    mergedUnit(h); // leaves issue 101's latest milestone at ship/awaiting-merge (the park milestone)
+    h.tick(); // report agent A dispatched — slot.phase = slot.role = 'report'
+
+    // No report milestone is ever posted. A reconcile tick while agent A is
+    // still alive resyncs slot.phase to the issue's latest (still
+    // ship/awaiting-merge) milestone — the `phase-updated` corruption from
+    // the bug report's events.jsonl (`phase-updated issue:3891 phase=ship`).
+    h.tick();
+    expect(h.events().some((e) => e.event === 'phase-updated' && e.issue === 101)).toBe(true);
+    const corrupted = h.state().slots.find((s) => s.unit === 'issue:101');
+    expect(corrupted?.phase).toBe('ship'); // phase drifted off 'report'...
+    expect(corrupted?.role).toBe('report'); // ...but role did not
+
+    // Agent A now exits WITHOUT ever posting a report milestone (crash,
+    // #497-style exit-while-waiting) — exactly `exit-detected (agent B exits
+    // "waiting for the deploy run") → verify-complete` from the bug report.
+    // Completion must still require the report milestone, not silently fall
+    // back to the issue's already-closed status.
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    const result = h.tick();
+    expect(result.completed).toEqual([]);
+    expect(result.externalAdvances).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('shipped'); // not done
+    // unverified exit → redispatched up the report ladder, not silently completed
+    expect(result.redispatched).toEqual(['issue:101']);
+
+    // AC3: the redispatch itself exercises the other two role-vs-phase call
+    // sites (`enterRecovery`'s report ladder, `spawnUnit`'s respawn check) —
+    // both must still recognize this as a report agent despite the phase
+    // corruption. A cycle-path misfire would spawn a full-cycle `gate` agent
+    // with a completely different prompt/tier-selection instead.
+    const respawn = h.spawnCalls[h.spawnCalls.length - 1];
+    expect(respawn.prompt).toContain('report');
+    expect(respawn.cmd.join(' ')).toMatch(/sonnet/); // report ladder: mechanical → mid, not the cycle ladder
+    const redispatchedSlot = h.state().slots.find((s) => s.unit === 'issue:101');
+    expect(redispatchedSlot?.phase).toBe('report'); // respawn re-sets phase to 'report'
+    expect(redispatchedSlot?.role).toBe('report');
+
+    // The real report milestone still completes it normally.
+    h.milestones.set(101, {
+      phase: 'report',
+      status: 'done',
+      run: 'r-101-x',
+      at: h.clock().toISOString(),
+      keys: {},
+    });
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    const final = h.tick();
+    expect(final.completed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('done');
+  });
 });
 
 describe('#468 AC3: watcher failure paths', () => {

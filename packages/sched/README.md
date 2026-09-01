@@ -46,12 +46,14 @@ where every mechanical supervision decision is code, not remembered prose:
 1. **Dispatch (AC1)** — a runnable unit is spawned as a detached agent process
    (`claude -p --output-format json --model <tier model>` by default, opencode fallback;
    command/prompt/tier-models configurable), prompt on stdin, output appended to
-   `runs/<unit>.log`. pid, phase, and last-progress are persisted in `state.json`.
+   `runs/<unit>.log`. pid, phase, role, and last-progress are persisted in `state.json`.
    Agents are unref'd: they survive a sched crash (restart reconciles by pid).
 2. **Completion verification (AC2)** — an agent exiting is never proof of completion.
    On exit, the unit completes only when ground truth confirms it: the issue's latest
-   runstate milestone is `report done`, or GitHub says the issue is closed. An unverified
-   exit rides the recovery ladder like a stall.
+   runstate milestone is `report done`, or GitHub says the issue is closed — except a
+   report-agent slot (`role: 'report'`), whose issue is already closed at merge: the
+   closed signal is suppressed and only a `report done` milestone completes it (#500).
+   An unverified exit rides the recovery ladder like a stall.
 3. **Reconciliation tick (AC3)** — every tick detects externally-advanced state (someone
    finished the work outside sched → complete, kill the leftover agent, reclaim the
    slot), orphaned pids after a restart (dead pid on a running slot → exit rail →
@@ -157,6 +159,15 @@ Schema 1.3.0 carries the new state: `BatchEntry` gains `anchor`, `branch`, `run_
 `eviction_groups`, `evictions`, `fix_attempts` and `rebase_attempts`; `QueueEntry` gains
 `failure_evidence`. 1.2.0 states migrate on load.
 
+Schema 1.4.0: `SlotEntry` gains `role` (`'cycle' | 'report'`) — set when the slot is
+assigned and never resynced from polled milestones the way `phase` is, so a report
+agent's completion-suppression signal survives `phase` drifting back to the issue's
+pre-report milestone mid-run (#500). 1.3.0 states migrate on load: `role` is inferred
+from the unit's queue entry (`shipped` + `pr` + `cleanup` — the same guard that assigns
+a report slot in the first place) with the persisted `phase` as a fallback when no
+matching entry exists. A backfilled role is a best-effort inference, not a guarantee —
+see `validateState` in `state.ts` for the exact rule.
+
 ## API surface
 
 ```ts
@@ -210,7 +221,7 @@ import {
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
-  validateState,         // strict persisted-state validation (1.0.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.3.0 files migrate)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
 } from '@ai-dossier/sched';
@@ -242,11 +253,12 @@ fake agents and stub ground truth; no LLM calls anywhere.
 - **Corrupt state is loud**: `load()` throws `CorruptStateError` naming the file —
   never a silent queue reset. `state.json` is deletable and rebuildable from GitHub,
   which remains the system of record.
-- **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0) and #468 (1.2.0)
-  load and migrate to 1.3.0 automatically (slot `branch`/`last_head`/`pid_start`, entry
-  `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
-  `evictions`/`fix_attempts`/`rebase_attempts`,
-  and state-level `last_pr_poll_at` backfill to null).
+- **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0) and
+  #472 (1.3.0) load and migrate to 1.4.0 automatically (slot `branch`/`last_head`/
+  `pid_start`, slot `role` (inferred from the unit's queue entry, with the persisted
+  `phase` as a fallback — #500), entry `pr`/`cleanup`/`failure_evidence`, batch
+  `anchor`/`branch`/`run_id`/`eviction_groups`/`evictions`/`fix_attempts`/
+  `rebase_attempts`, and state-level `last_pr_poll_at` backfill to null).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -288,7 +300,10 @@ prompt instructs it) and exit. The engine owns everything after the park:
    free — a waiting report consumes zero slots), a **mechanical-tier** report
    agent is spawned with the report-phase prompt (`dispatch.report_prompt`;
    `{issue}`/`{pr}`/`{cleanup}` substituted — the cleanup status rides into
-   the report). It completes like any agent; a report that stalls climbs the
+   the report). The slot records `role: 'report'` at assignment, fixed for the
+   assignment and never resynced by `phase-updated` (#500) — the issue is already
+   closed at merge, so for a report-role slot the closed signal is suppressed and
+   only a `report done` milestone completes the unit. A report that stalls climbs the
    same ladder (mechanical → mid → strong, cap 2), and at the cap the unit
    completes (`done`, reason `report-escalation-cap`) with a `report-failed`
    journal event — the work is merged, so dependents are never re-blocked.

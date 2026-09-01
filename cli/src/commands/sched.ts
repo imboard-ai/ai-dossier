@@ -165,12 +165,13 @@ function renderReport(report: StatusReport): string {
     report.slots.length === 0
       ? '(no slots materialized yet)'
       : renderTable(
-          ['slot', 'status', 'unit', 'pid', 'phase', 'last-progress', 'recoveries'],
+          ['slot', 'status', 'unit', 'pid', 'role', 'phase', 'last-progress', 'recoveries'],
           report.slots.map((s) => [
             String(s.id),
             s.status,
             s.unit ?? '-',
             s.pid !== null ? String(s.pid) : '-',
+            s.role,
             s.phase ?? '-',
             s.last_progress_at !== null ? relativeTime(s.last_progress_at) : '-',
             String(s.recoveries),

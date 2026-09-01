@@ -9,6 +9,7 @@
  * non-terminal issue status rather than repeated per row.
  */
 
+import { issueOfUnit } from './journal';
 import {
   type BatchEntry,
   type BatchStatus,
@@ -22,7 +23,9 @@ import {
   SCHEMA_VERSION,
   SchedNotFoundError,
   type SchedState,
+  SLOT_ROLES,
   type SlotEntry,
+  type SlotRole,
   type SlotStatus,
   TERMINAL_ISSUE_STATUSES,
 } from './types';
@@ -326,8 +329,16 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * `pr`/`cleanup` and the state backfills `last_pr_poll_at` to null; 1.2.0
  * (pre-#472) entries backfill `failure_evidence` to null and batches backfill
  * the recovery fields (anchor/branch/run_id/eviction_groups/evictions/
- * fix_attempts/rebase_attempts). The state upgrades to the current schema on
- * the next save.
+ * fix_attempts/rebase_attempts); 1.3.0 (pre-#500) slots backfill `role`. The
+ * inference is entry-status-first, not phase-first: `phase === 'report'` is
+ * exactly the signal #500 proved unreliable for a LIVE report agent (it
+ * drifts to the issue's pre-report milestone under `phase-updated` well
+ * before the agent exits), so a slot whose unit's queue entry is `shipped`
+ * with `pr`/`cleanup` both set — the same guard `dispatchReportAgents` uses
+ * to assign a report slot in the first place — infers `'report'` regardless
+ * of what `phase` drifted to; `phase === 'report'` is kept only as a
+ * fallback for a slot whose entry can't be found. Otherwise `'cycle'`. The
+ * state upgrades to the current schema on the next save.
  */
 export function validateState(data: unknown): SchedState {
   if (!data || typeof data !== 'object') {
@@ -431,6 +442,11 @@ export function validateState(data: unknown): SchedState {
     if (slot.phase !== null && typeof slot.phase !== 'string') {
       throw new Error(`Slot ${slot.id}: phase must be a string or null`);
     }
+    if (slot.role !== undefined && slot.role !== null && !SLOT_ROLES.has(slot.role as SlotRole)) {
+      throw new Error(
+        `Slot ${slot.id}: role must be "cycle", "report", null, or absent (legacy), got ${JSON.stringify(slot.role)}`
+      );
+    }
     if (slot.last_progress_at !== null && !isIsoDateString(slot.last_progress_at)) {
       throw new Error(`Slot ${slot.id}: last_progress_at must be an ISO string or null`);
     }
@@ -472,12 +488,28 @@ export function validateState(data: unknown): SchedState {
   // backfill null so the returned state always has the current shape. Pre-#468
   // (1.1.0) entries carry no pr/cleanup and the state no last_pr_poll_at.
   // Pre-#472 (1.2.0) entries carry no failure_evidence and batches none of the
-  // recovery fields.
+  // recovery fields. Pre-#500 (1.3.0) slots carry no role — inferred below
+  // (entry-status first, phase as a fallback; see the function doc comment).
+  const rawEntries = obj.entries as QueueEntry[];
+  const inferSlotRole = (slot: SlotEntry): SlotRole => {
+    const issue = issueOfUnit(slot.unit);
+    const entry = issue === null ? undefined : rawEntries.find((e) => e.issue === issue);
+    if (
+      entry !== undefined &&
+      entry.status === 'shipped' &&
+      entry.pr !== null &&
+      entry.cleanup !== null
+    ) {
+      return 'report';
+    }
+    return slot.phase === 'report' ? 'report' : 'cycle';
+  };
   const slots = (obj.slots as SlotEntry[]).map((slot) => ({
     ...slot,
     branch: slot.branch ?? null,
     last_head: slot.last_head ?? null,
     pid_start: slot.pid_start ?? null,
+    role: slot.role ?? inferSlotRole(slot),
   }));
   const entries = (obj.entries as QueueEntry[]).map((entry) => ({
     ...entry,
@@ -580,6 +612,25 @@ export function transitionBatch(
 
 // --- Slot transitions ---
 
+/**
+ * The cleared (unit-less) half of an idle slot — the single definition of
+ * "empty slot" (#500), shared by `transitionSlot`'s `idle` reset and
+ * `assignToIdleSlot`'s lazily-materialized new slot (`scheduler.ts`), so a
+ * field added here cannot be remembered in one and forgotten in the other.
+ * `role` resets to `'cycle'` — a released slot's prior role is recoverable
+ * only from `events.jsonl` (`assigned`/`spawned` carry `detail: 'report
+ * agent'`), never from the idle slot itself.
+ */
+export const CLEARED_SLOT_FIELDS = {
+  unit: null,
+  pid: null,
+  pid_start: null,
+  phase: null,
+  role: 'cycle' as const,
+  branch: null,
+  last_head: null,
+};
+
 export function transitionSlot(
   state: SchedState,
   slotId: number,
@@ -592,10 +643,7 @@ export function transitionSlot(
     throw new SchedNotFoundError(`Slot not found: ${slotId}`);
   }
   const slots = [...state.slots];
-  const clearing =
-    to === 'idle'
-      ? { unit: null, pid: null, pid_start: null, phase: null, branch: null, last_head: null }
-      : {};
+  const clearing = to === 'idle' ? CLEARED_SLOT_FIELDS : {};
   const resetting = to === 'idle' ? { recoveries: 0 } : {};
   slots[idx] = transition(
     'slot',
@@ -617,6 +665,16 @@ export function transitionSlot(
  */
 export function isPreservedMember(entry: QueueEntry): boolean {
   return TERMINAL_ISSUE_STATUSES.has(entry.status) || SATISFIED_ISSUE_STATUSES.has(entry.status);
+}
+
+/**
+ * Whether a slot holds a #468 report agent. The single definition of "is
+ * this a report agent?" (#500) — `spawnUnit`'s respawn check, `enterRecovery`'s
+ * escalation ladder, and `effectiveClosedSignal`'s completion-suppression all
+ * ask this question; two answers to it is exactly how #500 happened.
+ */
+export function isReportSlot(slot: SlotEntry): boolean {
+  return slot.role === 'report';
 }
 
 /**

@@ -18,13 +18,14 @@ import {
   runnableUnits,
 } from './readiness';
 import {
+  CLEARED_SLOT_FIELDS,
   findBatch,
   requeueMember,
   transitionBatch,
   transitionIssue,
   transitionSlot,
 } from './state';
-import type { SchedConfig, SchedState } from './types';
+import type { SchedConfig, SchedState, SlotRole } from './types';
 import {
   LIVE_SLOT_STATUSES,
   SchedNotFoundError,
@@ -105,12 +106,18 @@ export function freeCapacity(state: SchedState, config: SchedConfig): number {
  * a typed `idle → assigned` edge, never a synthetic mid-state) and return the
  * new state plus the slot's id. Shared by queue refill (computeAssignments)
  * and the #468 report dispatch so the slot-invariant shape exists once.
+ * `role` is an explicit caller-stated intent (default `'cycle'`), fixed for
+ * the assignment's lifetime (#500) — unlike `phase`, it is never resynced
+ * from polled milestones, and unlike `phase` it is never inferred by string-
+ * matching (a caller passing a `phase` that merely reads `'report'` for some
+ * other reason must not silently get a report-role slot).
  */
 export function assignToIdleSlot(
   state: SchedState,
   unit: string,
   phase: string | null,
-  now: Date
+  now: Date,
+  role: SlotRole = 'cycle'
 ): { state: SchedState; slotId: number } {
   let next = state;
   let idle = next.slots.find((s) => s.status === 'idle');
@@ -118,13 +125,8 @@ export function assignToIdleSlot(
     const slot = {
       id: next.next_slot_id,
       status: 'idle' as const,
-      unit: null,
-      pid: null,
-      pid_start: null,
-      phase: null,
+      ...CLEARED_SLOT_FIELDS,
       last_progress_at: null,
-      branch: null,
-      last_head: null,
       recoveries: 0,
       updated_at: now.toISOString(),
     };
@@ -139,6 +141,7 @@ export function assignToIdleSlot(
       unit,
       pid: null,
       phase,
+      role,
       last_progress_at: now.toISOString(),
     },
     now

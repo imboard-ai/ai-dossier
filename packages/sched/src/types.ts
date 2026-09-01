@@ -192,6 +192,12 @@ export type SlotStatus =
   | 'recovering'
   | 'failed';
 
+/** Whether a slot's agent is a full-cycle agent or a #468 report agent. */
+export type SlotRole = 'cycle' | 'report';
+
+/** Closed vocabulary for `SlotRole` — the shared validation set (#500). */
+export const SLOT_ROLES: ReadonlySet<SlotRole> = new Set(['cycle', 'report']);
+
 /** Slot statuses that hold a live unit against `max_slots`. */
 export const LIVE_SLOT_STATUSES: ReadonlySet<SlotStatus> = new Set([
   'assigned',
@@ -299,6 +305,17 @@ export interface SlotEntry {
   pid_start: number | null;
   /** Scheduler phase the unit is in, when running. */
   phase: string | null;
+  /**
+   * The agent's role: set when the slot is assigned (`assignToIdleSlot`) and
+   * cleared back to `'cycle'` when the slot returns to `idle` — never
+   * touched by `phase-updated` (#500). `phase` tracks the LATEST posted
+   * milestone, which for a report agent stays behind the issue's pre-report
+   * milestone (e.g. `ship`) until the report milestone itself lands, so
+   * `phase` alone cannot tell a report agent from a cycle agent mid-run.
+   * `role` is the stable answer. Added in schema 1.4.0; 1.3.0 states
+   * backfill it on load (see `validateState`).
+   */
+  role: SlotRole;
   /** Last progress signal (new milestone or pushed commit) — stall-timer anchor. */
   last_progress_at: string | null;
   /** Working branch of the unit, captured from the setup milestone's `branch=` key. */
@@ -430,10 +447,10 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.3.0' as const;
+export const SCHEMA_VERSION = '1.4.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
-export const LEGACY_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0', '1.2.0'];
+export const LEGACY_SCHEMA_VERSIONS: readonly string[] = ['1.0.0', '1.1.0', '1.2.0', '1.3.0'];
 
 export const CONFIG_SCHEMA_VERSION = '1.2.0' as const;
 

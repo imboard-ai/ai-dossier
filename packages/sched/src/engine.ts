@@ -69,7 +69,7 @@ import { issueOfUnit, type Journal, unitEvent } from './journal';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
 import { assignToIdleSlot, computeAssignments, freeCapacity } from './scheduler';
-import { findEntry, transitionIssue, transitionSlot } from './state';
+import { findEntry, isReportSlot, transitionIssue, transitionSlot } from './state';
 import { runTeardown, type TeardownResult } from './teardown';
 import {
   ESCALATION_CAP,
@@ -352,8 +352,10 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
   ) {
     return state;
   }
-  // Report slots (crash recovery, ladder redispatch) respawn as report agents.
-  if (slot.phase === 'report') {
+  // Report slots (crash recovery, ladder redispatch) respawn as report agents
+  // — keyed off `role`, not `phase` (#500: `phase` can drift back to the
+  // issue's pre-report milestone while the slot is still a report agent).
+  if (isReportSlot(slot)) {
     return spawnReportAgent(ctx, state, unit);
   }
 
@@ -513,7 +515,7 @@ function enterRecovery(
 
   killUnitAgent(ctx, state, unit);
 
-  const report = slot.phase === 'report';
+  const report = isReportSlot(slot);
   const nextTier = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
   if (slot.recoveries >= ESCALATION_CAP || nextTier === null) {
     // Cap reached (2 escalations) or already at the strongest tier — the
@@ -550,7 +552,8 @@ function enterRecovery(
   journal(ctx, 'redispatched', unit, { tier: nextTier, slot: slot.id });
   ctx.result.redispatched.push(unit);
   // Respawn immediately on the recovering rail — recovering → running. A
-  // report-phase slot routes to the report agent with its escalated tier.
+  // report-role slot (`role`, never `phase` — #500) routes to the report
+  // agent with its escalated tier.
   return spawnUnit(ctx, next, unit);
 }
 
@@ -671,11 +674,18 @@ function applyProgressSignals(
 
 /**
  * The issue-closed completion signal for a live unit (#468): a report agent's
- * issue is already closed (closed AT MERGE), so for report-phase slots the
- * closed signal is suppressed — only the report milestone can complete them.
+ * issue is already closed (closed AT MERGE), so for report agents the closed
+ * signal is suppressed — only the report milestone can complete them. Keyed
+ * off `slot.role`, set when the slot is assigned, never `slot.phase` (#500):
+ * `phase` is resynced from the issue's latest polled milestone on every
+ * reconcile tick (`applyProgressSignals`), and a report agent's issue keeps
+ * reporting its PRE-report milestone (e.g. `ship`) until the report
+ * milestone itself lands — so a phase-keyed check silently re-enables the
+ * closed signal mid-run and completes the unit before any report milestone
+ * was ever posted.
  */
 function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
-  return slot.phase === 'report' ? false : truth.closed;
+  return isReportSlot(slot) ? false : truth.closed;
 }
 
 /** Reconcile one running slot against its polled ground truth. */
@@ -720,7 +730,12 @@ function reconcileRunning(
     journal(ctx, 'external-advance', unit, {
       pid: slot.pid,
       slot: slot.id,
-      detail: truth.closed ? 'issue closed' : 'report done',
+      // effectiveClosedSignal, not the raw truth.closed, decided this: for a
+      // report-role slot `closed` is suppressed, so `truth.closed` reads true
+      // at completion regardless — the actual signal was the report milestone.
+      detail: effectiveClosedSignal(slot, truth)
+        ? 'issue closed'
+        : `report done (role=${slot.role})`,
     });
     killUnitAgent(ctx, state, unit);
     const exited = transitionSlot(state, slot.id, 'exited', {}, now);
@@ -945,10 +960,10 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
 /**
  * Dispatch report agents for merged units whose teardown is recorded (#468
  * AC2): shipped + pr + cleanup + no live slot + free capacity → a slot is
- * assigned (phase `report`) and a mechanical-tier agent spawned with the
- * report prompt. Reports run BEFORE queue refill — a cheap report never
- * queues behind long full-cycle runs. A unit waiting for capacity consumes
- * zero slots (AC5) and is surfaced via `result.reportWaiting`.
+ * assigned (phase AND role `report` — #500) and a mechanical-tier agent
+ * spawned with the report prompt. Reports run BEFORE queue refill — a cheap
+ * report never queues behind long full-cycle runs. A unit waiting for
+ * capacity consumes zero slots (AC5) and is surfaced via `result.reportWaiting`.
  */
 function dispatchReportAgents(ctx: TickCtx, state: SchedState, config: SchedConfig): SchedState {
   let next = state;
@@ -971,7 +986,7 @@ function dispatchReportAgents(ctx: TickCtx, state: SchedState, config: SchedConf
     }
 
     const now = ctx.deps.now();
-    const assigned = assignToIdleSlot(next, unit, 'report', now);
+    const assigned = assignToIdleSlot(next, unit, 'report', now, 'report');
     next = assigned.state;
     journal(ctx, 'assigned', unit, { slot: assigned.slotId, detail: 'report agent' });
     journal(ctx, 'report-dispatched', unit, {
