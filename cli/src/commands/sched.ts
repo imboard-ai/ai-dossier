@@ -9,8 +9,9 @@
  * cheap-tier report dispatch.
  */
 
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import type { SchedConfig, StatusReport, TickResult } from '@ai-dossier/sched';
+import type { SchedConfig, StatusReport, SuiteResult, TickResult } from '@ai-dossier/sched';
 import {
   abandonBatch,
   abandonIssue,
@@ -34,6 +35,7 @@ import {
   labelBlockReason,
   OPENCODE_DISPATCH_COMMAND,
   parseManifest,
+  parseVitestJson,
   resolveProjectSlug,
   runLoop,
   SchedNotFoundError,
@@ -50,6 +52,37 @@ import { requireRepoSlug, tryFetchLabels } from '../gh';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
 import { renderTable } from '../table';
+
+/** Aggregate suite runs can be minutes long (full workspace test suite, not a focused subset). */
+const BATCH_SUITE_TIMEOUT_MS = 600_000;
+
+/**
+ * Default batch aggregate-suite runner (#523): `npm test` in the batch
+ * worktree, captured regardless of exit code (a red suite is exactly the
+ * case `ExecFn`'s "non-zero exit → null" contract would discard the stdout
+ * we need) and parsed as vitest JSON for the failing-test list attribution
+ * needs. Project-specific test commands are a follow-up — `npm test` matches
+ * this repo's own `make test` convention and every project's `package.json`
+ * `test` script (`warm-worktree`'s own detection table, #523's plan).
+ */
+function createBatchSuiteRunner(): (worktree: string) => SuiteResult {
+  return (worktree) => {
+    const result = spawnSync('npm', ['test', '--', '--reporter=json'], {
+      cwd: worktree,
+      encoding: 'utf-8',
+      timeout: BATCH_SUITE_TIMEOUT_MS,
+    });
+    const failing = parseVitestJson(result.stdout ?? '');
+    const ok = result.status === 0;
+    return {
+      ok,
+      failing,
+      detail: ok
+        ? undefined
+        : `npm test exited ${result.status ?? `signal ${result.signal ?? 'unknown'}`} in ${worktree}`,
+    };
+  };
+}
 
 interface SchedOptions {
   project?: string;
@@ -220,12 +253,18 @@ function renderReport(report: StatusReport): string {
     report.batches.length === 0
       ? '(no batches)'
       : renderTable(
-          ['batch', 'status', 'members', 'member-in-work'],
+          ['batch', 'status', 'members', 'member-in-work', 'anchor', 'worktree', 'evictions', 'pr'],
           report.batches.map((b) => [
             b.id,
             b.status,
             b.members.length > 0 ? b.members.map((m) => `#${m}`).join(',') : '-',
             b.executing_member > 0 ? `${b.executing_member}/${b.members.length}` : '-',
+            b.anchor !== null ? `#${b.anchor}` : '-',
+            b.worktree ?? '-',
+            b.evictions.length > 0
+              ? b.evictions.map((e) => `#${e.issue}(${e.reason})`).join(',')
+              : '-',
+            b.pr !== null ? `#${b.pr}` : '-',
           ])
         )
   );
@@ -644,6 +683,17 @@ function registerStartSubcommand(cmd: Command): void {
           }),
           { repoDir: process.cwd() }
         ),
+        // #523: batch git/milestone-CLI operations (worktree claim, commit-range
+        // recording, milestone posting, PR watch) and the aggregate suite runner
+        // that gates `executing → reviewing`. Reuses the same timeout as teardown
+        // (worktree/git ops) for exec; the suite runner has its own longer budget.
+        batchExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
+          onError: (file, args, err) =>
+            process.stderr.write(
+              `⚠ sched batch: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+            ),
+        }),
+        runBatchSuite: createBatchSuiteRunner(),
       };
 
       const describe = (result: TickResult): string => {

@@ -53,6 +53,8 @@
  */
 
 import * as path from 'node:path';
+import type { BatchDispatchDeps, BatchTickResult } from './batch-dispatch';
+import { runBatchTick } from './batch-dispatch';
 import {
   buildAgentCommand,
   buildPrompt,
@@ -112,6 +114,20 @@ export interface EngineDeps {
    * existed, journaling `fence-failed` so the gap is visible rather than silent.
    */
   fencer?: RunFencer;
+  /**
+   * Exec for batch git/milestone-CLI operations (#523) — worktree claim, member
+   * commit-range recording, milestone posting, PR watch. Optional: an engine
+   * constructed without one never dispatches a `ready` batch (it stays queued,
+   * visible in `sched status`), exactly like `fencer`'s degrade-instead-of-crash
+   * contract.
+   */
+  batchExec?: BatchDispatchDeps['exec'];
+  /**
+   * Runs the aggregate suite inside a batch worktree (#523) — the deterministic
+   * gate between `executing` and `reviewing`. Optional, same degrade contract
+   * as `batchExec`: without one a batch can reach `validating` but never leaves it.
+   */
+  runBatchSuite?: BatchDispatchDeps['runSuite'];
 }
 
 /** What one tick did — surfaced by `sched start`. */
@@ -1131,6 +1147,12 @@ function reconcileSlots(
   for (const slot of state.slots) {
     const unit = slot.unit;
     if (unit === null) continue;
+    // Batch slots (#523) are reconciled entirely by `runBatchTick` — this loop
+    // is issue-dispatch-specific (`pollUnits` never polls a `batch:<id>` unit,
+    // since `issueOfUnit` returns null for it), and falling through to the
+    // synthetic default truth below would read a batch's live agent as
+    // ground-truth-unreachable and kill it out from under the batch pass.
+    if (issueOfUnit(unit) === null) continue;
     const truth: UnitTruth = polled.get(unit) ?? {
       reachable: true,
       milestone: null,
@@ -1516,28 +1538,61 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     };
   });
 
-  if (pass1.teardownPending.length === 0) {
-    return pass1.tick;
+  let result = pass1.tick;
+
+  if (pass1.teardownPending.length > 0) {
+    // Teardown subprocesses (pool return / worktree remove) run OUTSIDE the
+    // lock; results land in a second short lock pass together with the report
+    // dispatch (AC2: teardown, THEN the cheap-tier report agent).
+    const results = new Map<number, TeardownResult>();
+    for (const issue of pass1.teardownPending) {
+      const teardownResult = runTeardownFor(deps, issue);
+      if (teardownResult !== null) results.set(issue, teardownResult);
+    }
+    if (results.size > 0) {
+      result = deps.store.withLock((state) => {
+        const ctx: TickCtx = { deps, dispatch, result };
+        const next = recordTeardowns(ctx, state, results);
+        const withReport = dispatchReportAgents(ctx, next, config);
+        return { state: withReport, result: ctx.result };
+      });
+    }
   }
 
-  // Teardown subprocesses (pool return / worktree remove) run OUTSIDE the
-  // lock; results land in a second short lock pass together with the report
-  // dispatch (AC2: teardown, THEN the cheap-tier report agent).
-  const results = new Map<number, TeardownResult>();
-  for (const issue of pass1.teardownPending) {
-    const result = runTeardownFor(deps, issue);
-    if (result !== null) results.set(issue, result);
-  }
-  if (results.size === 0) {
-    return pass1.tick; // all deferred (setup info unreachable) — retried next tick
+  // Batch dispatch (#523) — a separate pass, deliberately after issue dispatch:
+  // `runnableUnits` already orders issues before batches, so a batch never
+  // takes a slot an issue would otherwise have gotten this same tick. Only
+  // runs when the operator configured batch exec deps; without them a `ready`
+  // batch stays queued (visible in `sched status`) rather than crashing.
+  if (deps.batchExec !== undefined && deps.runBatchSuite !== undefined) {
+    const batchDeps: BatchDispatchDeps = {
+      store: deps.store,
+      journal: deps.journal,
+      groundTruth: deps.groundTruth,
+      spawnDeps: deps.spawnDeps,
+      now: deps.now,
+      repoDir: deps.repoDir,
+      exec: deps.batchExec,
+      runSuite: deps.runBatchSuite,
+    };
+    const batchResult = runBatchTick(batchDeps, config, dispatch);
+    result = mergeBatchResult(result, batchResult);
   }
 
-  return deps.store.withLock((state) => {
-    const ctx: TickCtx = { deps, dispatch, result: pass1.tick };
-    const next = recordTeardowns(ctx, state, results);
-    const withReport = dispatchReportAgents(ctx, next, config);
-    return { state: withReport, result: ctx.result };
-  });
+  return result;
+}
+
+/** Fold a `BatchTickResult` into the issue-oriented `TickResult` — same unit-id-shaped arrays, one extra source. */
+function mergeBatchResult(result: TickResult, batch: BatchTickResult): TickResult {
+  return {
+    ...result,
+    spawned: [...result.spawned, ...batch.spawned],
+    completed: [...result.completed, ...batch.completed],
+    parked: [...result.parked, ...batch.parked],
+    mergeAccepted: [...result.mergeAccepted, ...batch.mergeAccepted],
+    failed: [...result.failed, ...batch.failed],
+    blocked: [...result.blocked, ...batch.blocked],
+  };
 }
 
 /**

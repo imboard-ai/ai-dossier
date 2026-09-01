@@ -351,6 +351,18 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   if (dispatch.fix_prompt !== undefined && typeof dispatch.fix_prompt !== 'string') {
     throw new Error('dispatch.fix_prompt must be a string');
   }
+  if (dispatch.member_prompt !== undefined && typeof dispatch.member_prompt !== 'string') {
+    throw new Error('dispatch.member_prompt must be a string');
+  }
+  if (dispatch.batch_tail_prompt !== undefined && typeof dispatch.batch_tail_prompt !== 'string') {
+    throw new Error('dispatch.batch_tail_prompt must be a string');
+  }
+  if (
+    dispatch.batch_report_prompt !== undefined &&
+    typeof dispatch.batch_report_prompt !== 'string'
+  ) {
+    throw new Error('dispatch.batch_report_prompt must be a string');
+  }
   if (dispatch.tier_models !== undefined) {
     const tierModels = requirePlainObject('dispatch.tier_models', dispatch.tier_models);
     for (const [tier, model] of Object.entries(tierModels)) {
@@ -384,6 +396,13 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   if (dispatch.prompt !== undefined) out.prompt = dispatch.prompt as string;
   if (dispatch.report_prompt !== undefined) out.report_prompt = dispatch.report_prompt as string;
   if (dispatch.fix_prompt !== undefined) out.fix_prompt = dispatch.fix_prompt as string;
+  if (dispatch.member_prompt !== undefined) out.member_prompt = dispatch.member_prompt as string;
+  if (dispatch.batch_tail_prompt !== undefined) {
+    out.batch_tail_prompt = dispatch.batch_tail_prompt as string;
+  }
+  if (dispatch.batch_report_prompt !== undefined) {
+    out.batch_report_prompt = dispatch.batch_report_prompt as string;
+  }
   if (dispatch.tier_models !== undefined) {
     out.tier_models = dispatch.tier_models as Partial<Record<ModelTier, string>>;
   }

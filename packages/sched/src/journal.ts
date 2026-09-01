@@ -72,6 +72,13 @@ export function issueOfUnit(unit: string | null): number | null {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
+/** `batch:b1` → `b1`; null for issue or malformed unit ids (#523). */
+export function batchOfUnit(unit: string | null): string | null {
+  if (unit === null || !unit.startsWith('batch:')) return null;
+  const id = unit.slice('batch:'.length);
+  return id.length > 0 ? id : null;
+}
+
 /** Convenience: build the journaled event for a unit without repeating ids. */
 export function unitEvent(
   event: JournalEventName,
