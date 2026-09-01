@@ -581,28 +581,14 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0)', ()
     expect(batch?.executing_member).toBe(1);
   });
 
-  it('loads a pre-#500 1.3.0 state and backfills slot role from phase', () => {
-    // Exactly what #472 persisted: slots with no role. A slot whose phase
-    // still reads 'report' (a live report agent caught mid-flight by the
-    // upgrade) backfills role='report'; every other slot backfills 'cycle'.
+  it('loads a pre-#500 1.3.0 state and backfills slot role via the phase fallback when no queue entry matches', () => {
+    // A slot whose unit has no queue entry (crash-window orphan, or a unit
+    // parsing edge case) falls back to the phase check: phase 'report'
+    // backfills role='report', anything else backfills 'cycle'.
     const legacy = {
       schema_version: '1.3.0',
       paused: false,
       entries: [
-        {
-          issue: 101,
-          mode: 'full',
-          batch: null,
-          deps: [],
-          tier: 'mid',
-          status: 'shipped',
-          reason: null,
-          pr: 55,
-          cleanup: 'done',
-          failure_evidence: null,
-          enqueued_at: NOW.toISOString(),
-          updated_at: NOW.toISOString(),
-        },
         {
           issue: 102,
           mode: 'full',
@@ -623,7 +609,7 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0)', ()
         {
           id: 1,
           status: 'running',
-          unit: 'issue:101',
+          unit: 'issue:999',
           pid: 4242,
           pid_start: null,
           phase: 'report',
@@ -656,7 +642,103 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0)', ()
     expect(migrated.slots.find((s) => s.id === 2)?.role).toBe('cycle');
     // everything #472 persisted is preserved
     expect(migrated.slots.find((s) => s.id === 1)?.phase).toBe('report');
+  });
+
+  it('#500: recovers role from the queue entry even when phase already drifted off "report" — the exact production scenario', () => {
+    // The production case from the bug report: a live report agent whose
+    // slot.phase drifted to 'ship' (phase-updated resyncing to the issue's
+    // stale pre-report milestone) BEFORE the operator upgraded. A
+    // phase-only backfill would silently produce role='cycle' here,
+    // reopening #500 on the very first tick after migration. The
+    // entry-status check (shipped + pr + cleanup, the same guard
+    // `dispatchReportAgents` used to assign this slot in the first place)
+    // recovers the correct answer regardless of what phase drifted to.
+    const legacy = {
+      schema_version: '1.3.0',
+      paused: false,
+      entries: [
+        {
+          issue: 101,
+          mode: 'full',
+          batch: null,
+          deps: [],
+          tier: 'mid',
+          status: 'shipped',
+          reason: null,
+          pr: 55,
+          cleanup: 'done',
+          failure_evidence: null,
+          enqueued_at: NOW.toISOString(),
+          updated_at: NOW.toISOString(),
+        },
+      ],
+      batches: [],
+      slots: [
+        {
+          id: 1,
+          status: 'running',
+          unit: 'issue:101',
+          pid: 4242,
+          pid_start: null,
+          phase: 'ship', // drifted off 'report' before the upgrade
+          last_progress_at: NOW.toISOString(),
+          branch: null,
+          last_head: null,
+          recoveries: 0,
+          updated_at: NOW.toISOString(),
+        },
+      ],
+      next_slot_id: 2,
+      last_pr_poll_at: null,
+    };
+    const migrated = validateState(legacy);
+    expect(migrated.schema_version).toBe(SCHEMA_VERSION);
+    expect(migrated.slots.find((s) => s.id === 1)?.role).toBe('report');
+    expect(migrated.slots.find((s) => s.id === 1)?.phase).toBe('ship'); // phase itself is untouched by the migration
     expect(migrated.entries[0].pr).toBe(55);
+  });
+
+  it('#500: an entry that is shipped but missing pr or cleanup does not count as a report slot', () => {
+    const legacy = {
+      schema_version: '1.3.0',
+      paused: false,
+      entries: [
+        {
+          issue: 101,
+          mode: 'full',
+          batch: null,
+          deps: [],
+          tier: 'mid',
+          status: 'shipped',
+          reason: null,
+          pr: null,
+          cleanup: null,
+          failure_evidence: null,
+          enqueued_at: NOW.toISOString(),
+          updated_at: NOW.toISOString(),
+        },
+      ],
+      batches: [],
+      slots: [
+        {
+          id: 1,
+          status: 'running',
+          unit: 'issue:101',
+          pid: 4242,
+          pid_start: null,
+          phase: 'ship',
+          last_progress_at: NOW.toISOString(),
+          branch: null,
+          last_head: null,
+          recoveries: 0,
+          updated_at: NOW.toISOString(),
+        },
+      ],
+      next_slot_id: 2,
+      last_pr_poll_at: null,
+    };
+    const migrated = validateState(legacy);
+    expect(migrated.slots.find((s) => s.id === 1)?.role).toBe('cycle');
   });
 
   it('rejects a malformed slot role', () => {

@@ -1099,6 +1099,18 @@ describe('#468 AC2: teardown + report dispatch on merge', () => {
     // unverified exit → redispatched up the report ladder, not silently completed
     expect(result.redispatched).toEqual(['issue:101']);
 
+    // AC3: the redispatch itself exercises the other two role-vs-phase call
+    // sites (`enterRecovery`'s report ladder, `spawnUnit`'s respawn check) —
+    // both must still recognize this as a report agent despite the phase
+    // corruption. A cycle-path misfire would spawn a full-cycle `gate` agent
+    // with a completely different prompt/tier-selection instead.
+    const respawn = h.spawnCalls[h.spawnCalls.length - 1];
+    expect(respawn.prompt).toContain('report');
+    expect(respawn.cmd.join(' ')).toMatch(/sonnet/); // report ladder: mechanical → mid, not the cycle ladder
+    const redispatchedSlot = h.state().slots.find((s) => s.unit === 'issue:101');
+    expect(redispatchedSlot?.phase).toBe('report'); // respawn re-sets phase to 'report'
+    expect(redispatchedSlot?.role).toBe('report');
+
     // The real report milestone still completes it normally.
     h.milestones.set(101, {
       phase: 'report',

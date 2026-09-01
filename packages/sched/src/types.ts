@@ -192,6 +192,12 @@ export type SlotStatus =
   | 'recovering'
   | 'failed';
 
+/** Whether a slot's agent is a full-cycle agent or a #468 report agent. */
+export type SlotRole = 'cycle' | 'report';
+
+/** Closed vocabulary for `SlotRole` — the shared validation set (#500). */
+export const SLOT_ROLES: ReadonlySet<SlotRole> = new Set(['cycle', 'report']);
+
 /** Slot statuses that hold a live unit against `max_slots`. */
 export const LIVE_SLOT_STATUSES: ReadonlySet<SlotStatus> = new Set([
   'assigned',
@@ -300,13 +306,16 @@ export interface SlotEntry {
   /** Scheduler phase the unit is in, when running. */
   phase: string | null;
   /**
-   * The agent's role, fixed at spawn and never touched by `phase-updated`
-   * (#500) — `phase` tracks the LATEST posted milestone, which for a report
-   * agent stays behind the issue's pre-report milestone (e.g. `ship`) until
-   * the report milestone itself lands, so `phase` alone cannot tell a report
-   * agent from a cycle agent mid-run. `role` is the stable answer.
+   * The agent's role: set when the slot is assigned (`assignToIdleSlot`) and
+   * cleared back to `'cycle'` when the slot returns to `idle` — never
+   * touched by `phase-updated` (#500). `phase` tracks the LATEST posted
+   * milestone, which for a report agent stays behind the issue's pre-report
+   * milestone (e.g. `ship`) until the report milestone itself lands, so
+   * `phase` alone cannot tell a report agent from a cycle agent mid-run.
+   * `role` is the stable answer. Added in schema 1.4.0; 1.3.0 states
+   * backfill it on load (see `validateState`).
    */
-  role: 'cycle' | 'report';
+  role: SlotRole;
   /** Last progress signal (new milestone or pushed commit) — stall-timer anchor. */
   last_progress_at: string | null;
   /** Working branch of the unit, captured from the setup milestone's `branch=` key. */
