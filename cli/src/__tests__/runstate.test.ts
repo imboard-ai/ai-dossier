@@ -6,20 +6,29 @@ import {
   buildMilestone,
   CLASSIFY_SPEC,
   computeResume,
+  DEFAULT_GENERATION,
   defaultNext,
+  FENCE_STATUS,
+  fenceGeneration,
+  generationOf,
   hitLoopCap,
   isAcKey,
   isBatchPhase,
+  isFenced,
   isKnownPhase,
   isPhase,
   KEY_VALUE_RULES,
+  latestFence,
+  MAX_GENERATION,
   MAX_VALUE_LENGTH,
   mintRunId,
   NEXT_VALUES,
+  nextFenceGeneration,
   nowStamp,
   type ParsedMilestone,
   PHASE_SPECS,
   PHASES,
+  parseGeneration,
   parseMilestone,
   parseMilestones,
   type ResumeProbe,
@@ -27,6 +36,7 @@ import {
   requiredKeys,
   STATUSES,
   splitPair,
+  statusAllowed,
   validateMilestone,
 } from '../runstate';
 
@@ -100,8 +110,16 @@ describe('runstate spec table', () => {
     expect([...PHASES]).toEqual(['gate', 'setup', 'plan', 'implement', 'review', 'ship', 'report']);
   });
 
-  it('exposes exactly the four protocol statuses', () => {
-    expect([...STATUSES]).toEqual(['done', 'partial', 'blocked', 'awaiting-merge']);
+  it('exposes exactly the five protocol statuses', () => {
+    expect([...STATUSES]).toEqual([
+      'done',
+      'partial',
+      'blocked',
+      'awaiting-merge',
+      // #504's fence. Universally valid rather than per-phase, so it is deliberately
+      // absent from every PHASE_SPECS.statuses below.
+      'superseded',
+    ]);
   });
 
   it.each(DOSSIER_SPEC)('phase $phase allows only its spec statuses', ({ phase, statuses }) => {
@@ -247,7 +265,7 @@ describe('validateMilestone', () => {
     const errors = validateMilestone({ ...valid, status: 'partial' });
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBe(
-      "Status 'partial' is not valid for phase 'gate' — expected one of: done, blocked"
+      "Status 'partial' is not valid for phase 'gate' — expected one of: done, blocked ('superseded' is valid on every phase, but is written by 'runstate fence', never by hand)"
     );
   });
 
@@ -1006,8 +1024,10 @@ describe('runstate spec table — classify and batch phases (#461)', () => {
       'deps',
       'est_diff',
       'est_files',
+      'gen',
       'mode',
       'risk',
+      'takeover',
       'test_scope',
     ]);
   });
@@ -1498,5 +1518,240 @@ describe('computeResume — classify, batch, and slot-mode trails (#461)', () =>
     const result = computeResume([blockedTriage], probe());
     expect(result.resume_from).toBe('none');
     expect(result.note).toContain("unknown phase 'triage'");
+  });
+});
+
+describe('run fencing — the protocol half (#504)', () => {
+  const RUN = 'r-504-fc02';
+  const OTHER_RUN = 'r-504-9999';
+
+  const gateDone = m(
+    `phase=gate status=done run=${RUN} at=2026-08-30T10:00:00Z`,
+    'base_branch=main'
+  );
+  const implementFence = m(
+    `phase=implement status=${FENCE_STATUS} run=${RUN} at=2026-08-30T11:00:00Z`,
+    'gen=1',
+    'takeover=slot-2-r1'
+  );
+  const secondFence = m(
+    `phase=implement status=${FENCE_STATUS} run=${RUN} at=2026-08-30T12:00:00Z`,
+    'gen=2',
+    'takeover=slot-2-r2'
+  );
+
+  describe('generation arithmetic', () => {
+    it('reads a run that was never fenced as the default generation', () => {
+      expect(fenceGeneration([gateDone], RUN)).toBe(DEFAULT_GENERATION);
+      expect(latestFence([gateDone], RUN)).toBeNull();
+      expect(nextFenceGeneration([gateDone], RUN)).toBe(1);
+    });
+
+    it('reads the installed generation off a fence', () => {
+      expect(fenceGeneration([gateDone, implementFence], RUN)).toBe(1);
+      expect(nextFenceGeneration([gateDone, implementFence], RUN)).toBe(2);
+    });
+
+    it('takes the HIGHEST generation, not the last one posted', () => {
+      // The zombie's own late post lands after the fence that superseded it; ordering by
+      // position would read the older fence back and un-fence the trail.
+      const zombieLatePost = m(
+        `phase=implement status=done run=${RUN} at=2026-08-30T12:30:00Z`,
+        'head=abc1234',
+        'files=3',
+        'tests_added=1',
+        'tests_run=4',
+        'ci_parity=pass'
+      );
+      const trail = [gateDone, implementFence, secondFence, zombieLatePost];
+      expect(fenceGeneration(trail, RUN)).toBe(2);
+      expect(latestFence(trail, RUN)?.keys.takeover).toBe('slot-2-r2');
+    });
+
+    it('ignores fences belonging to a different run', () => {
+      const otherFence = m(
+        `phase=plan status=${FENCE_STATUS} run=${OTHER_RUN} at=2026-08-30T11:30:00Z`,
+        'gen=5',
+        'takeover=elsewhere'
+      );
+      expect(fenceGeneration([gateDone, otherFence], RUN)).toBe(DEFAULT_GENERATION);
+    });
+
+    it('never matches an empty run id against a milestone missing its run', () => {
+      const runless = m(`phase=plan status=${FENCE_STATUS} at=2026-08-30T11:00:00Z`, 'gen=1');
+      expect(latestFence([runless], '')).toBeNull();
+      expect(fenceGeneration([runless], '')).toBe(DEFAULT_GENERATION);
+    });
+
+    it('reports null — never generation 0 — for an absent or unreadable gen=', () => {
+      // Reading a malformed fence as "generation 0" would silently downgrade it to
+      // "never fenced", the one answer that must never be inferred from bad data.
+      expect(generationOf(gateDone)).toBeNull();
+      expect(
+        generationOf(m(`phase=plan status=${FENCE_STATUS} run=${RUN} at=x`, 'gen=not-a-number'))
+      ).toBeNull();
+      expect(
+        generationOf(m(`phase=plan status=${FENCE_STATUS} run=${RUN} at=x`, 'gen=99999'))
+      ).toBeNull();
+    });
+
+    it('skips a malformed fence rather than counting it as generation 0', () => {
+      const forged = m(
+        `phase=implement status=${FENCE_STATUS} run=${RUN} at=2026-08-30T13:00:00Z`,
+        'gen=9007199254740991',
+        'takeover=forged'
+      );
+      // The forged fence is posted AFTER the real one and claims a higher number; if it
+      // were honoured, the next generation would be unrepresentable and fencing would be
+      // permanently disabled on this issue.
+      const trail = [gateDone, implementFence, forged];
+      expect(fenceGeneration(trail, RUN)).toBe(1);
+      expect(latestFence(trail, RUN)?.keys.takeover).toBe('slot-2-r1');
+    });
+
+    it('refuses to mint a generation past the ceiling', () => {
+      const atCeiling = m(
+        `phase=implement status=${FENCE_STATUS} run=${RUN} at=2026-08-30T13:00:00Z`,
+        `gen=${MAX_GENERATION}`,
+        'takeover=deep'
+      );
+      expect(nextFenceGeneration([atCeiling], RUN)).toBeNull();
+    });
+
+    it('parses only non-negative integers as generations', () => {
+      expect(parseGeneration('0')).toBe(0);
+      expect(parseGeneration('7')).toBe(7);
+      expect(parseGeneration('-1')).toBeNull();
+      expect(parseGeneration('1.5')).toBeNull();
+      expect(parseGeneration('')).toBeNull();
+    });
+  });
+
+  describe('isFenced', () => {
+    const trail = [gateDone, implementFence];
+
+    it('fences every generation BELOW the installed one', () => {
+      expect(isFenced(trail, RUN, 0)).toBe(true);
+    });
+
+    it('leaves the takeover itself live at exactly the fenced generation', () => {
+      // `>` not `>=`: the takeover posts at the generation its own fence installed.
+      expect(isFenced(trail, RUN, 1)).toBe(false);
+    });
+
+    it('leaves a run that was never fenced live', () => {
+      expect(isFenced([gateDone], RUN, 0)).toBe(false);
+    });
+
+    it('fences generation 1 once a recovery-of-recovery installs generation 2', () => {
+      const twice = [gateDone, implementFence, secondFence];
+      expect(isFenced(twice, RUN, 1)).toBe(true);
+      expect(isFenced(twice, RUN, 2)).toBe(false);
+    });
+  });
+
+  describe('validateMilestone and the phase tables', () => {
+    it.each([...PHASES, 'classify', ...BATCH_PHASES])('accepts a fence on phase %s', (phase) => {
+      expect(statusAllowed(phase as never, FENCE_STATUS)).toBe(true);
+      expect(
+        validateMilestone({
+          phase,
+          status: FENCE_STATUS,
+          run: RUN,
+          keys: [
+            ['gen', '1'],
+            ['takeover', 'slot-2-r1'],
+          ],
+        })
+      ).toEqual([]);
+    });
+
+    it('requires gen and takeover on a fence, not the phase’s ordinary keys', () => {
+      expect(requiredKeys('implement', FENCE_STATUS)).toEqual(['gen', 'takeover']);
+      const errors = validateMilestone({
+        phase: 'implement',
+        status: FENCE_STATUS,
+        run: RUN,
+        keys: [],
+      });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('requires gen= takeover=');
+    });
+
+    it('rejects a non-integer generation with the grammar message', () => {
+      const errors = validateMilestone({
+        phase: 'implement',
+        status: FENCE_STATUS,
+        run: RUN,
+        keys: [
+          ['gen', 'two'],
+          ['takeover', 'slot-2-r1'],
+        ],
+      });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('non-negative integer run generation');
+    });
+
+    it('rejects a takeover label that could be read as a flag', () => {
+      const errors = validateMilestone({
+        phase: 'implement',
+        status: FENCE_STATUS,
+        run: RUN,
+        keys: [
+          ['gen', '1'],
+          ['takeover', '--repo=someone/else'],
+        ],
+      });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('single token naming what took the run over');
+    });
+
+    it('hands the same phase to the takeover via next=', () => {
+      expect(defaultNext('implement', FENCE_STATUS)).toBe('implement');
+      expect(defaultNext('ship', FENCE_STATUS)).toBe('ship');
+      // classify is not a `next=` value — nothing ever transitions INTO it.
+      expect(defaultNext('classify', FENCE_STATUS)).toBe('done');
+      expect(NEXT_VALUES).toContain(defaultNext('implement', FENCE_STATUS));
+    });
+  });
+
+  describe('computeResume', () => {
+    it('resumes a fence-terminated trail at the fenced phase, as the new generation', () => {
+      const result = computeResume([gateDone, implementFence], probe());
+      // AC4: the takeover may itself have died before posting anything, so a fence is a
+      // resumable state — the work is re-entered at the phase it was taken over in.
+      expect(result.resume_from).toBe('implement');
+      expect(result.generation).toBe(1);
+      expect(result.run_id).toBe(RUN);
+      expect(result.note).toContain('slot-2-r1');
+    });
+
+    it('reports the owning generation even when the last milestone is ordinary work', () => {
+      const takeoverProgress = m(
+        `phase=implement status=done run=${RUN} at=2026-08-30T11:30:00Z`,
+        'head=abc1234',
+        'files=3',
+        'tests_added=1',
+        'tests_run=4',
+        'ci_parity=pass',
+        'gen=1'
+      );
+      const setupDone = m(
+        `phase=setup status=done run=${RUN} at=2026-08-30T10:01:00Z`,
+        'branch=feature/504',
+        'worktree=/repo/worktrees/feature-504'
+      );
+      const result = computeResume(
+        [gateDone, setupDone, implementFence, takeoverProgress],
+        probe()
+      );
+      expect(result.resume_from).toBe('review');
+      expect(result.generation).toBe(1);
+    });
+
+    it('reports generation 0 for a trail that was never fenced', () => {
+      expect(computeResume([gateDone], probe()).generation).toBe(DEFAULT_GENERATION);
+      expect(computeResume([], probe()).generation).toBe(DEFAULT_GENERATION);
+    });
   });
 });

@@ -343,6 +343,22 @@ export interface SlotEntry {
   last_head: string | null;
   /** Recovery attempts for the current unit (stall ladder, cap 2 — RFC-0001 §C.1). */
   recoveries: number;
+  /**
+   * Runstate generation the agent in this slot owns (#504). 0 for a first dispatch —
+   * the generation of a run that was never fenced — and the generation the fence
+   * installed for every takeover after that. Handed to the agent in its prompt, which
+   * passes it to `runstate post --gen`; a superseded agent still holding a lower
+   * generation is refused by the CLI. Added in schema 1.6.0; 1.5.0 states backfill 0.
+   */
+  gen: number;
+  /**
+   * When this slot's takeover was fenced, while it has still posted NOTHING (#504 AC4).
+   * Cleared by the first progress signal. Non-null selects the short
+   * `fenceTakeoverTimeoutMs` over the phase's stall allowance, so a takeover that dies
+   * immediately re-enters the ladder in minutes rather than after a full phase timeout.
+   * Added in schema 1.6.0; 1.5.0 states backfill null.
+   */
+  fenced_at: string | null;
   updated_at: string;
 }
 
@@ -436,6 +452,16 @@ export interface DispatchConfig {
    * `DEFAULT_FIX_PROMPT_TEMPLATE`.
    */
   fix_prompt?: string;
+  /**
+   * How long a freshly-fenced slot may go without any progress signal before the
+   * ladder re-enters recovery (#504 AC4). A takeover can die on its own first breath,
+   * and waiting out the phase's full stall allowance (90 min for `implement`) to
+   * discover that wastes the very time the redispatch was meant to save. Applied only
+   * while the takeover has posted nothing at all — the first progress signal clears it
+   * and the ordinary per-phase timeout takes over. Defaults to
+   * {@link DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS}.
+   */
+  fence_takeover_timeout_ms?: number;
 }
 
 /** The escalation ladder: one tier stronger, or null at the top (RFC-0001 §C.1). */
@@ -450,6 +476,16 @@ export const TIER_ORDER: readonly ModelTier[] = ['mechanical', 'mid', 'strong'];
 
 /** Cap on recovery attempts before a unit fails (RFC-0001 §C.1 "cap 2"). */
 export const ESCALATION_CAP = 2;
+
+/**
+ * Default {@link DispatchConfig.fence_takeover_timeout_ms} — 15 minutes.
+ *
+ * Long enough that a takeover doing real work (fetching the workflow, materializing a
+ * worktree, warming it) is never cut off before its gate milestone lands; short enough
+ * that a takeover killed at birth by a quota wall does not sit out an `implement`-length
+ * stall allowance before anyone notices.
+ */
+export const DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
  * An unverified exit is `suspect-dispatch` (#505) when it happens within
@@ -545,7 +581,7 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.5.0' as const;
+export const SCHEMA_VERSION = '1.6.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -554,6 +590,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.2.0',
   '1.3.0',
   '1.4.0',
+  '1.5.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.2.0' as const;
@@ -650,6 +687,10 @@ export type JournalEventName =
   | 'batch-dissolved'
   | 'batch-split'
   | 'milestone-post-failed'
+  // #504 zombie-run fencing: the takeover record written before a redispatch
+  // respawns, and the degraded path where it could not be written.
+  | 'fence-written'
+  | 'fence-failed'
   // #507 enqueue-time hard-block label pre-screen (journaled by the CLI,
   // NOT the engine — sched enqueue appends these before the issue is ever
   // dispatched)

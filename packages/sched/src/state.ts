@@ -348,7 +348,9 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * fix_attempts/rebase_attempts); 1.3.0 (pre-#500) slots backfill `role`;
  * 1.4.0 (pre-#505) states backfill `consecutive_suspect_dispatches` (0) and
  * `last_suspect_dispatch_unit` (null) — no suspect dispatches were tracked
- * before, so the zero value is exact, not a guess. The
+ * before, so the zero value is exact, not a guess; 1.5.0 (pre-#504) slots
+ * backfill `gen` (0) and `fenced_at` (null) — nothing was fenced before
+ * fencing existed, so those values are exact too. The
  * inference is entry-status-first, not phase-first: `phase === 'report'` is
  * exactly the signal #500 proved unreliable for a LIVE report agent (it
  * drifts to the issue's pre-report milestone under `phase-updated` well
@@ -482,6 +484,16 @@ export function validateState(data: unknown): SchedState {
     if (!Number.isInteger(slot.recoveries) || slot.recoveries < 0) {
       throw new Error(`Slot ${slot.id}: recoveries must be a non-negative integer`);
     }
+    if (slot.gen !== undefined && (!Number.isInteger(slot.gen) || (slot.gen as number) < 0)) {
+      throw new Error(`Slot ${slot.id}: gen must be a non-negative integer or absent (legacy)`);
+    }
+    if (
+      slot.fenced_at !== null &&
+      slot.fenced_at !== undefined &&
+      !isIsoDateString(slot.fenced_at)
+    ) {
+      throw new Error(`Slot ${slot.id}: fenced_at must be an ISO date string or null`);
+    }
     if (!isIsoDateString(slot.updated_at)) {
       throw new Error(`Slot ${slot.id}: updated_at must be an ISO date string`);
     }
@@ -536,6 +548,7 @@ export function validateState(data: unknown): SchedState {
   // Pre-#472 (1.2.0) entries carry no failure_evidence and batches none of the
   // recovery fields. Pre-#500 (1.3.0) slots carry no role — inferred below
   // (entry-status first, phase as a fallback; see the function doc comment).
+  // Pre-#504 (1.5.0) slots carry no gen/fenced_at — backfilled below.
   const rawEntries = obj.entries as QueueEntry[];
   const inferSlotRole = (slot: SlotEntry): SlotRole => {
     const issue = issueOfUnit(slot.unit);
@@ -556,6 +569,10 @@ export function validateState(data: unknown): SchedState {
     last_head: slot.last_head ?? null,
     pid_start: slot.pid_start ?? null,
     role: slot.role ?? inferSlotRole(slot),
+    // Pre-#504 (1.5.0) slots ran before fencing existed, so by definition they
+    // own the unfenced generation and have no takeover pending.
+    gen: slot.gen ?? 0,
+    fenced_at: slot.fenced_at ?? null,
   }));
   const entries = (obj.entries as QueueEntry[]).map((entry) => ({
     ...entry,
@@ -680,6 +697,10 @@ export const CLEARED_SLOT_FIELDS = {
   role: 'cycle' as const,
   branch: null,
   last_head: null,
+  // #504: a released slot owns no runstate generation and has no takeover in
+  // flight — the next unit assigned here starts unfenced at generation 0.
+  gen: 0,
+  fenced_at: null,
 };
 
 export function transitionSlot(

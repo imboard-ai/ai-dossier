@@ -360,6 +360,11 @@ ai-dossier runstate last --issue 440 --json
 
 # Ask where a run should resume from
 ai-dossier runstate verify --issue 440
+
+# Supersede a stalled run before redispatching it, then work as the takeover
+ai-dossier runstate fence --issue 440 --run r-440-ab56 \
+  --phase implement --takeover slot-2-r1        # -> gen=1
+ai-dossier runstate check --issue 440 --run r-440-ab56 --gen 1   # exit 3 = superseded
 ```
 
 ### Subcommands
@@ -369,19 +374,23 @@ ai-dossier runstate verify --issue 440
 | `post` | Validates and posts one milestone comment via `gh issue comment` | yes |
 | `last` | Prints the most recent milestone on the issue, parsed | no |
 | `verify` | Runs the gate's resume verification and prints `resume_from` + `resume_context` | no |
+| `fence` | Supersedes a run: posts the takeover record and prints the generation it installed (#504) | yes |
+| `check` | Reports whether a run generation has been superseded; exits `3` when it has (#504) | only with `--comment` |
 | `mint` | Prints a fresh run id (`r-<issue>-<hex>`) | no |
 | `stats` | Reports per-phase durations derived from the trail's `at=` stamps; aggregates across a `--issues` selection | no |
 
-`last`, `verify`, and `stats` are strictly read-only — they only run `gh issue view`,
+`last`, `verify`, and `stats` are strictly read-only (as is `check`, unless `--comment` is passed) — they only run `gh issue view`,
 `gh pr view`, `git ls-remote`/`rev-parse`, and `stat`, so they work fine without push
 access to the repository.
 
 `--issue <n>` (a positive integer — the number only, not a URL or a `#`-prefixed string)
-is required by `post`, `last`, `verify`, and `mint`; `stats` takes either `--issue <n>` or
-`--issues <list>`, exactly one of the two. `post`, `last`, `verify`, and `stats`
-additionally take `--repo <owner/name>` (a bare slug, not a URL; defaults to the
-repository `gh` resolves for the current directory) and `--json`. `mint` takes `--issue`
-and nothing else.
+is required by `post`, `last`, `verify`, `fence`, `check`, and `mint`; `stats` takes
+either `--issue <n>` or `--issues <list>`, exactly one of the two. `post`, `last`,
+`verify`, `fence`, `check`, and `stats` additionally take `--repo <owner/name>` (a bare
+slug, not a URL; defaults to the repository `gh` resolves for the current directory) and
+`--json`; `fence` also takes `--dry-run`. `fence` requires `--run`, `--phase` and
+`--takeover`; `check` requires `--run` and takes `--gen` and `--comment`. `mint` takes
+`--issue` and nothing else.
 
 `last` prints the milestone's own `key=value` lines, so the output is already in the
 shape a shell or a dossier reads:
@@ -408,10 +417,11 @@ prints `No runstate milestones on issue #440.` (or `null` under `--json`) and ex
 |---|---|
 | `--issue <n>` | Issue to comment on (required) |
 | `--phase <p>` | `classify`, `gate`, `setup`, `plan`, `implement`, `review`, `ship`, `report`, or a batch phase — `batch-setup`, `batch-validate`, `batch-review`, `batch-ship`, `batch-report` (required) |
-| `--status <s>` | `done`, `partial`, `blocked`, `awaiting-merge` (required) |
+| `--status <s>` | `done`, `partial`, `blocked`, `awaiting-merge` (required). `superseded` is rejected here — a fence is written by [`runstate fence`](#run-fencing-504) |
 | `--run <id>` | Run id (`r-<issue>-<hex>`) — mint one with `runstate mint`; full-cycle runs mint it at the gate phase (required) |
 | `--kv <key=value...>` | Phase-specific key, repeatable (and variadic: `--kv a=1 b=2` works too) |
 | `--next <phase>` | Override the computed `next=` line — a phase name or `done` |
+| `--gen <n>` | Run generation this agent owns (default 0). A post below the trail's fenced generation is refused — see [Run fencing](#run-fencing-504) |
 | `--repo <owner/name>` | Target repository (defaults to the current one) |
 | `--dry-run` | Print the comment body instead of posting it |
 | `--json` | Machine-readable output |
@@ -496,6 +506,72 @@ batch-report → done.
 > but its `verify` derives a bogus `resume_from` from a *blocked* classify/batch
 > milestone — don't point an old CLI at batch anchor issues.
 
+### Run fencing (#504)
+
+The stall-recovery ladder redispatches the *same* run, so a takeover inherits the run id
+and its trail. Nothing used to tell the run it replaced that it had been replaced — and a
+scheduler can only kill a process it can see. In the #472 race the original agent was
+alive the whole time (throttled, cwd outside the worktree); both runs implemented the
+issue in full and both kept posting to one trail.
+
+A **generation** fences the trail. `runstate fence` posts a `status=superseded` milestone —
+valid on every phase, carrying `gen=<n>` and `takeover=<label>` — and prints the generation
+it installed:
+
+```bash
+$ ai-dossier runstate fence --issue 440 --run r-440-ab56 --phase implement --takeover slot-2-r1
+✅ fenced r-440-ab56 gen=1 takeover=slot-2-r1 → https://github.com/o/r/issues/440#issuecomment-9
+```
+
+From then on `post` refuses anything from a lower generation, **before** writing to the
+issue:
+
+```bash
+$ ai-dossier runstate post --issue 440 --phase implement --status done --run r-440-ab56 …
+❌ Run r-440-ab56 was SUPERSEDED — refusing to post this implement/done milestone from generation 0.
+   It was fenced at generation 1 (takeover 'slot-2-r1', fenced at implement on 2026-08-30T11:00:00Z).
+   …
+   Fix: stop working on this issue and exit. … If you ARE the takeover, pass --gen 1.
+```
+
+Generation 0 is the default, which is what makes this work on a fleet that has not been
+upgraded: an agent that knows nothing about fencing posts at 0 and is locked out the
+moment generation 1 exists. `>` not `>=` — the takeover posting at exactly its own
+generation is live, and a recovery-of-recovery at generation 2 fences the first takeover
+in turn.
+
+`runstate check` is the same question without a write, for a workflow to run before
+implement, review, and ship:
+
+```bash
+$ ai-dossier runstate check --issue 440 --run r-440-ab56 --gen 1
+fenced=false
+gen=1
+current_gen=1
+```
+
+It exits **3** when the caller has been superseded (distinct from `1`, so a script can
+tell "you were replaced" from "you called this wrong"), and a refused `post` uses the same
+code — one exit code means one thing everywhere. `--comment` additionally leaves one short,
+deduplicated abort comment on the issue, so a run that stops mid-cycle is explained rather
+than merely absent. `verify` reports the owning generation as `generation=`.
+
+Both commands harden the read side, because a milestone is an issue comment and anyone who
+can comment can author one: only comments from an account with **write access** count as a
+fence (a stranger must not be able to halt a run), a `takeover=` label that does not match
+the write-path grammar is dropped rather than echoed into an agent's instruction stream,
+and a generation past `1000` is treated as forged rather than honoured.
+
+> **Compatibility.** Posting and reading fences requires CLI ≥ 0.21.0. An older CLI rejects
+> `--status superseded` outright on `post`, has no concept of generations (so it never
+> refuses a superseded post), and its `verify` reads a fence milestone as ordinary progress
+> — with no `head=` to confirm, it derives a bogus `resume_from`, typically all the way back
+> to `setup`. Upgrade the fleet before relying on fencing.
+
+Both `post` and `check` **fail open** if the trail cannot be read: a milestone is a
+phase's only durable record, and losing one to a transient `gh` outage is a worse failure
+than the race this prevents. The degradation is warned about on stderr, never silent.
+
 ### mode=slot and batch= on plan/implement/review
 
 Slot-cycle members post the ordinary `plan`/`implement`/`review` milestones with two
@@ -519,11 +595,16 @@ carries the key nowhere are bucketed as `unknown`.
 The `Statuses` column is a closed set: a status not listed for a phase is rejected, so
 `report` cannot be `blocked` and only the ship phases (`ship`, `batch-ship`) may be
 `awaiting-merge`. Any phase that *can* report `status=blocked` must also carry
-`reason=<short-slug>` when it does.
+`reason=<short-slug>` when it does. One status sits outside the table: `superseded` is
+valid on **every** phase — a takeover can happen anywhere — and requires `gen=` and
+`takeover=`. It is written by [`runstate fence`](#run-fencing-504), never by hand, and
+`post` refuses it.
 
 `next=` is computed for you: the linear order `gate → setup → plan → implement → review →
-ship → report → done`, except that `blocked` ends the run (`next=done`) and the two
-non-terminal statuses stay in their own phase — `ship`/`awaiting-merge` is followed by a
+ship → report → done`, except that `blocked` ends the run (`next=done`) and the three
+non-terminal statuses stay in their own phase — `superseded` points back at its own phase,
+so a takeover that dies leaves a resumable trail rather than a terminal one;
+`ship`/`awaiting-merge` is followed by a
 second `ship` milestone, and a `partial` review still has agents to run. Use `--next` to
 override.
 
@@ -556,6 +637,8 @@ Every `--kv` pair is checked before anything is posted:
   | `test_scope` | one of `focused`, `broad`, `unknown` |
   | `est_files` | non-negative integer, e.g. `3` |
   | `est_diff` | non-negative integer (lines), e.g. `400` |
+  | `gen` | non-negative integer run generation, e.g. `1` — see [Run fencing](#run-fencing-504) |
+  | `takeover` | a single flag-safe token naming what took the run over — letters/digits then `. _ : @ / -`, e.g. `slot-2-r1` or `r-504-fc02` |
   | `confidence` | decimal `0`–`1`, e.g. `0.85` (RFC-0001 E.2 compares it to 0.6) |
   | `areas` | comma-separated lowercase slugs, e.g. `cli,docs` |
   | `deps` | `none`, or comma-separated issue numbers, e.g. `474,480` |
@@ -568,8 +651,11 @@ Every `--kv` pair is checked before anything is posted:
 ### When `gh` or `git` fails
 
 Every subcommand exits **1** on failure with the cause *and its fix* on stderr, so a
-calling dossier can branch on the exit code and an agent knows what to do next. The three
-causes that look identical from the outside are reported as three different things:
+calling dossier can branch on the exit code and an agent knows what to do next. The one
+exception is supersession: `check` — and a `post` refused as superseded — exit **3**, a
+distinct code so a script can tell "you were replaced" from "you called this wrong" (see
+[Run fencing](#run-fencing-504)). The three causes that look identical from the outside
+are reported as three different things:
 
 ```
 $ ai-dossier runstate last --issue 440
@@ -611,6 +697,7 @@ worktree (#499):
 $ ai-dossier runstate verify --issue 440
 resume_from=implement
 run_id=r-440-ab56
+generation=0
 verified=branch,head
 local_worktree=absent
 resume_context={"branch":"feature/440-runstate","worktree":"/repo/worktrees/feature-440-runstate",...}
@@ -624,6 +711,13 @@ resume_context={"branch":"feature/440-runstate","worktree":"/repo/worktrees/feat
 | `ship-wait` | The PR is open and mergeable; re-enter `ship` at the CI wait |
 | `ship-teardown` | The PR is already merged; re-enter `ship` at post-merge cleanup |
 | `done` | The `report` milestone is posted and the issue is closed (`note=already complete`) |
+
+A `superseded` milestone resumes at its **own** phase, with
+`note=fenced by '<takeover>' at generation N …`: the takeover was announced but has posted
+nothing yet, and it may never post, so the state is resumable rather than terminal. The
+note tells a resumer that is *not* that takeover to install generation N+1 with
+`runstate fence` before posting — adopting N would put a second writer alongside a takeover
+that may be alive and working.
 
 A failed check sends the resume *backwards*, never forwards: if the branch is gone from
 the remote, a `plan`/`implement`/`review` milestone still yields `resume_from=setup`. If
@@ -820,7 +914,14 @@ against ground truth.
   output journaled to `runs/<unit>.log`. On every ~60s tick it reconciles: an agent that
   exited is **not** complete until `ai-dossier runstate last` / `gh` ground truth confirms
   it (unverified exits and stalls are redispatched one tier stronger — mechanical → mid →
-  strong, cap 2 — then the unit fails and its transitive dependents are blocked);
+  strong, cap 2 — then the unit fails and its transitive dependents are blocked). Since
+  #504 that redispatch is **fenced**: before the replacement spawns, the engine posts a
+  `status=superseded` milestone (`runstate fence`) so the agent it replaced — which may
+  still be alive and unreachable — is refused by `runstate post`, and the replacement is
+  told its generation in its prompt. A fence that cannot be written journals
+  `fence-failed` with its cause and the redispatch proceeds unfenced, so an unprotected
+  redispatch is degraded but never silent; `sched status` shows each slot's `gen` and
+  `fenced` columns.
   externally-advanced state and orphaned pids after a restart are detected; a freed slot
   is refilled in the same tick. Since #468 the default dispatch prompt is
   detached-ship (the agent parks its PR on `auto-merge` and stops): a parked
@@ -870,15 +971,17 @@ against ground truth.
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically
 from `state.json` (pre-#464/#468/#472/#500/#505 state files — schema
-1.0.0/1.1.0/1.2.0/1.3.0/1.4.0 — migrate to 1.5.0 on load). A corrupt state file is a loud
+1.0.0/1.1.0/1.2.0/1.3.0/1.4.0/1.5.0 — migrate to 1.6.0 on load). A corrupt state file is a loud
 error naming the file — never a silent queue reset. Concurrency is serialized by a
 `.sched-lock` directory mutex (stolen from dead holders). `config.json` holds
 `max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default
 1 800 000 — but the `implement` phase defaults to 5 400 000, overridable per phase via
 `dispatch.phase_stall_timeout_ms: {"<phase>": <ms>}`, #495), `reconcile_interval_ms`
 (default 60 000), and the optional `dispatch` section (including `report_prompt` for
-the #468 report agent); `pr_poll_interval_ms` (default 150 000) sets the parked-PR poll
-cadence; an issue with an unmerged dependency — or a batch behind an unmerged batch —
+the #468 report agent and `fence_takeover_timeout_ms`, default 900 000 — the short stall
+allowance for a freshly-fenced takeover that has posted nothing, #504; `dispatch.prompt`
+substitutes `{issue}` and `{gen}`); `pr_poll_interval_ms` (default 150 000) sets the
+parked-PR poll cadence; an issue with an unmerged dependency — or a batch behind an unmerged batch —
 is never runnable.
 
 Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).

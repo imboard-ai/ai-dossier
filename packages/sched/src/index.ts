@@ -34,7 +34,10 @@ export {
   reportTierFor,
   resolveDispatch,
   type SpawnDeps,
+  SUPERSESSION_CHECKPOINT_INSTRUCTION,
   stallTimeoutForPhase,
+  stallTimeoutForSlot,
+  takeoverInstruction,
   unitLogName,
 } from './dispatch';
 export { type EngineDeps, runLoop, type TickResult, tick } from './engine';
@@ -47,6 +50,13 @@ export {
   labelBlockReason,
   parseManifest,
 } from './enqueue';
+export {
+  createExecRunFencer,
+  FENCE_TIMEOUT_MS,
+  type FenceOutcome,
+  parseFenceGeneration,
+  type RunFencer,
+} from './fence';
 export {
   createExecGroundTruth,
   type GroundTruth,

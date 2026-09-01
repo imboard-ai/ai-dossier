@@ -97,9 +97,10 @@ where every mechanical supervision decision is code, not remembered prose:
 5. **Immediate refill (AC5)** — a slot freed by a terminal state is refilled in the SAME
    tick; a runnable unit never waits while a slot is idle (pinned by a regression test).
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,
-   progress, stalled, redispatched, unit-failed, dependents-blocked, suspect-dispatch,
-   dispatch-unhealthy, …) is appended to `events.jsonl`; `sched status` shows the live
-   phase per unit. `label-blocked`/`label-check-failed` (#507) are the one pair journaled
+   progress, stalled, redispatched, fence-written, fence-failed, unit-failed,
+   dependents-blocked, suspect-dispatch, dispatch-unhealthy, …) is appended to
+   `events.jsonl`; `sched status` shows the live phase per unit, plus each slot's `gen`
+   and `fenced` state (#504). `label-blocked`/`label-check-failed` (#507) are the one pair journaled
    OUTSIDE the engine — `sched enqueue` appends them at enqueue time, before dispatch.
 7. **Dispatch-health pause (#505)** — an unverified exit within `SUSPECT_DISPATCH_WINDOW_MS`
    (60s) of a slot's last progress is `suspect-dispatch`: real work rarely produces zero
@@ -134,6 +135,47 @@ Two engine-safety policies were explicit product decisions on #464:
 
 Only `issue:<n>` units are dispatched today — batch member sequencing is a follow-up
 (#464 non-goal).
+
+### Zombie-run fencing (#504)
+
+The ladder redispatches the SAME run, so a takeover inherits the run id and its milestone
+trail. In the #472 race that turned out to be a hole: `enterRecovery` kills the pid it
+knows about, but an agent it cannot see or signal — throttled, cwd outside the worktree —
+survives, and nothing on the trail tells that agent it was replaced. Both runs implemented
+the same issue, and both kept posting milestones on one trail. The doctrine, one step past
+"an agent exiting is not proof of merge": **no visible process is not proof of death.**
+
+A **generation** now fences the trail:
+
+- Before the takeover is spawned, the engine calls `ai-dossier runstate fence`, which
+  posts a `status=superseded` milestone carrying `gen=<n>` and `takeover=<label>`.
+  Written first, on purpose, so it survives the takeover dying too.
+- The takeover is told its generation in its prompt and passes `--gen <n>` to every
+  `runstate post`. **The CLI refuses any post below the trail's fenced generation**, so
+  the superseded agent cannot extend the trail even though it never checks — and an agent
+  running an older dossier implicitly sits at generation 0, fenced out the moment
+  generation 1 exists.
+- `ai-dossier runstate check --issue <n> --run <id> --gen <g>` exits `3` when the caller
+  has been superseded: the checkpoint a workflow runs before implement, review, and ship.
+- A takeover that posts NOTHING is watched on the **shorter** of
+  `fence_takeover_timeout_ms` (default 15 min) and the phase's own stall allowance — the
+  fence window can only ever bring recovery forward, never delay it — so a takeover that
+  dies at birth re-enters the ladder in minutes and the next fence supersedes it in turn.
+  The first progress signal disarms the short window. `ESCALATION_CAP` still bounds the
+  whole ladder.
+- Report agents ride the same rail: a fenced report slot is told its generation too, or
+  its `report done` milestone would be refused and it would recover to the cap on a PR
+  that already merged.
+- The read side is hardened, because a milestone is an issue comment: only comments from
+  an account with **write access** count as a fence, a forged `takeover=` label is dropped
+  rather than echoed into an agent's prompt, and the engine refuses to fence a run id that
+  does not belong to the issue it is working on (that would journal success while the real
+  zombie stayed free to write).
+
+Fencing is defense-in-depth, not a precondition: if the fence cannot be written (no run id
+on the trail yet, gh unreachable, no fencer configured) the redispatch proceeds unfenced
+and journals `fence-failed`. Stranding a stalled unit forever would be the worse failure —
+but the unprotected redispatch is never silent.
 
 ## Batch failure recovery (#472)
 
@@ -215,6 +257,12 @@ a report slot in the first place) with the persisted `phase` as a fallback when 
 matching entry exists. A backfilled role is a best-effort inference, not a guarantee —
 see `validateState` in `state.ts` for the exact rule.
 
+Schema 1.6.0: `SlotEntry` gains `gen` (number — the runstate generation the slot's agent
+owns, 0 for a first dispatch) and `fenced_at` (ISO string or null — set when a takeover is
+fenced in, cleared by its first progress signal; #504 above). 1.5.0 states migrate on
+load: nothing was fenced before fencing existed, so `0`/`null` is the exact backfill, not
+a guess. Both reset with the slot on release (`CLEARED_SLOT_FIELDS`).
+
 Schema 1.5.0: `SchedState` gains `consecutive_suspect_dispatches` (number) and
 `last_suspect_dispatch_unit` (string or null) — the dispatch-health pause's cross-unit
 suspect-dispatch streak (#505 above). The two fields are a single fact and must agree
@@ -238,15 +286,25 @@ import {
                          //   dependents-unblocked/report-dispatched/teardown/completed/
                          //   redispatched/failed/blocked)
   type EngineDeps,       // inject everything the engine touches (store/journal/spawn/ground
-                         //   truth/clock/repoDir/teardownExec)
+                         //   truth/clock/repoDir/teardownExec/fencer)
   createSpawnDeps,       // real detached-spawn process I/O
   createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec);
                          //   since #468 also gh pr view PR state + setup info from comments
   resolveDispatch,       // config → resolved command/prompt/report-prompt/tier-models/timers
   stallTimeoutForPhase,  // the stall allowance for the phase now in flight (#495 per-phase
                          //   map → global, hardened against a prototype-name phase)
+  stallTimeoutForSlot,   // #504: that allowance, shortened to fenceTakeoverTimeoutMs while
+                         //   a takeover has posted nothing (Math.min — never longer)
+  takeoverInstruction,   // the TAKEOVER prompt suffix appended for gen > 0
+  SUPERSESSION_CHECKPOINT_INSTRUCTION, // the check-before-implement/review/ship clause
+                         //   every dispatch prompt carries
+  createExecRunFencer,   // default fencer: shells `ai-dossier runstate fence --json`
+  parseFenceGeneration,  // fence stdout → the installed generation (null = unfenced)
+  type RunFencer,        // inject the takeover-record writer: (issue, run, phase, takeover)
+  type FenceOutcome,     // {ok, gen} | {ok: false, reason} — a failure carries its cause
+  FENCE_TIMEOUT_MS,      // fence subprocess timeout (60 s — two gh round trips)
   DEFAULT_PHASE_STALL_TIMEOUT_MS, // built-in per-phase stall allowances (implement: 90 min)
-  buildReportPrompt,     // report-agent prompt ({issue}/{pr}/{cleanup} substituted)
+  buildReportPrompt,     // report-agent prompt ({issue}/{pr}/{cleanup}/{gen} substituted)
   reportTierFor,         // report (re)dispatch tier after N escalations
   isParkedMilestone,     // ship-phase awaiting-merge + pr= → the park signal
   prOfMilestone,         // a milestone's pr= key as a positive integer
@@ -279,7 +337,7 @@ import {
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
-  validateState,         // strict persisted-state validation (1.0.0-1.4.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.5.0 files migrate)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
 } from '@ai-dossier/sched';
@@ -297,7 +355,8 @@ fake agents and stub ground truth; no LLM calls anywhere.
 ~/.dossier/sched/<project>/
 ├── state.json     # hot operational truth — atomic tmp+fsync+rename writes;
 ├── config.json    # durable intent: max_slots, stall_timeout_ms, reconcile_interval_ms,
-│                  # pr_poll_interval_ms, dispatch (incl. report_prompt, phase_stall_timeout_ms)
+│                  # pr_poll_interval_ms, dispatch (incl. report_prompt,
+│                  # phase_stall_timeout_ms, fence_takeover_timeout_ms)
 ├── events.jsonl   # append-only event journal (the operator's flight recorder)
 ├── runs/          # per-unit agent output logs (issue-<n>.log)
 └── .sched-lock/   # cross-process directory mutex (pid; stolen from dead holders)
@@ -312,13 +371,13 @@ fake agents and stub ground truth; no LLM calls anywhere.
   never a silent queue reset. `state.json` is deletable and rebuildable from GitHub,
   which remains the system of record.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
-  #472 (1.3.0) and #500 (1.4.0) load and migrate to 1.5.0 automatically (slot
+  #472 (1.3.0), #500 (1.4.0) and #505 (1.5.0) load and migrate to 1.6.0 automatically (slot
   `branch`/`last_head`/`pid_start`, slot `role` (inferred from the unit's queue entry,
   with the persisted `phase` as a fallback — #500), entry `pr`/`cleanup`/
   `failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/`evictions`/
   `fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to null, and
   state-level `consecutive_suspect_dispatches`/`last_suspect_dispatch_unit` backfill to
-  `0`/`null` — #505).
+  `0`/`null` — #505, and slot `gen`/`fenced_at` backfill to `0`/`null` — #504).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.

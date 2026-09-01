@@ -34,6 +34,7 @@ import {
   transitionIssue,
   validateState,
 } from '../index';
+import { recording } from './helpers/recording-exec';
 
 /**
  * Batch failure recovery (#472 AC2–AC5). Reverts run against REAL scratch
@@ -791,14 +792,8 @@ describe('handlePrConflict', () => {
 
 describe('createExecMilestonePoster', () => {
   it('shells the runstate CLI with the phase, status and reason keys', () => {
-    const calls: Array<{ file: string; args: string[] }> = [];
-    const poster = createExecMilestonePoster(
-      (file, args) => {
-        calls.push({ file, args });
-        return '';
-      },
-      { repoDir: '/repo' }
-    );
+    const { exec, calls } = recording(() => '');
+    const poster = createExecMilestonePoster(exec, { repoDir: '/repo' });
 
     const ok = poster(900, 'r-900-aaaa', {
       phase: 'batch-validate',

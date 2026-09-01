@@ -21,6 +21,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { sanitizeSlug } from './project';
 import {
+  DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
   DEFAULT_PHASE_STALL_TIMEOUT_MS,
   DEFAULT_PR_POLL_INTERVAL_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
@@ -83,6 +84,42 @@ function withNoBackgroundExit(template: string): string {
 }
 
 /**
+ * The supersession checkpoint every dispatched run is told to keep (#504 AC2).
+ *
+ * This has to be in the DEFAULT prompt, not only in `takeoverInstruction`: the run that
+ * gets fenced is the one that was already running, and at dispatch time it is generation
+ * 0 like every other first dispatch. Telling only takeovers to check would leave exactly
+ * the agent this mechanism exists to stop — the #472 zombie — with no instruction to
+ * stop, which is the difference between "a fenced run cannot write" and "a fenced run
+ * knows it lost and gets out of the way".
+ *
+ * The checkpoints are the three expensive ones: implement, review, and ship. `--comment`
+ * leaves one short, deduplicated record on the issue, so a run that vanishes mid-cycle
+ * is explained rather than merely absent.
+ */
+export const SUPERSESSION_CHECKPOINT_INSTRUCTION =
+  'SUPERSESSION CHECKPOINT — before implement, before review, and before ship, run ' +
+  '`ai-dossier runstate check --issue {issue} --run <run_id> --gen {gen} --comment`. A non-zero ' +
+  'exit means another agent has taken this issue over while you were working: STOP immediately ' +
+  '— do not push, do not open a PR, do not post another milestone — and end the session. The ' +
+  'same applies if `ai-dossier runstate post` ever refuses a milestone as SUPERSEDED: that is ' +
+  'not an error to retry or work around.';
+
+/**
+ * Append {@link SUPERSESSION_CHECKPOINT_INSTRUCTION} to a prompt template, once.
+ *
+ * Idempotent so it can be applied both to the built-in default and again at resolve
+ * time: an operator who overrides `dispatch.prompt` must not silently lose the
+ * checkpoint, which is exactly how a safety instruction that lives only on a constant
+ * stops protecting the deployments that need it most.
+ */
+function withSupersessionCheckpoint(template: string): string {
+  return template.includes(SUPERSESSION_CHECKPOINT_INSTRUCTION)
+    ? template
+    : `${template}\n\n${SUPERSESSION_CHECKPOINT_INSTRUCTION}`;
+}
+
+/**
  * Default prompt sent on the child's stdin. Detached ship mode (#468): the
  * agent parks the PR on `auto-merge` and STOPS — the scheduler's PR watcher
  * owns the merge wait and dispatches teardown + report as tail work. The
@@ -90,13 +127,15 @@ function withNoBackgroundExit(template: string): string {
  * Operators wanting attached runs (agent drives to the final report itself)
  * override `dispatch.prompt` in config.json.
  */
-export const DEFAULT_PROMPT_TEMPLATE = withNoBackgroundExit(
-  'Run the full-cycle-issue workflow for GitHub issue #{issue} in this repository.\n\n' +
-    'Begin by fetching the workflow: ai-dossier run imboard-ai/git/full-cycle-issue --pull\n\n' +
-    'Then execute it for issue #{issue} in detached ship mode (ship_mode=detached), following every ' +
-    'phase (gate, setup, plan, implement, review) without asking questions, until Phase 5 parks the ' +
-    'PR: apply the auto-merge label, post the awaiting-merge milestone, and STOP. Do not wait for ' +
-    'the merge, do not run teardown or report — the scheduler watches the PR and dispatches those.'
+export const DEFAULT_PROMPT_TEMPLATE = withSupersessionCheckpoint(
+  withNoBackgroundExit(
+    'Run the full-cycle-issue workflow for GitHub issue #{issue} in this repository.\n\n' +
+      'Begin by fetching the workflow: ai-dossier run imboard-ai/git/full-cycle-issue --pull\n\n' +
+      'Then execute it for issue #{issue} in detached ship mode (ship_mode=detached), following every ' +
+      'phase (gate, setup, plan, implement, review) without asking questions, until Phase 5 parks the ' +
+      'PR: apply the auto-merge label, post the awaiting-merge milestone, and STOP. Do not wait for ' +
+      'the merge, do not run teardown or report — the scheduler watches the PR and dispatches those.'
+  )
 );
 
 /**
@@ -109,7 +148,13 @@ export const DEFAULT_REPORT_PROMPT_TEMPLATE =
   'The work is DONE: pull request #{pr} is merged (merge commit via `gh pr view {pr}`), the issue ' +
   'is closed, and the worktree is already torn down (cleanup status: {cleanup}). Do not ' +
   're-implement, re-review, or re-ship anything — produce the final report for issue #{issue} and ' +
-  'post its runstate milestone.';
+  'post its runstate milestone.\n\n' +
+  // A report slot is assigned fresh, so it starts at generation 0 — but it reports on
+  // the SAME run id, which may have been fenced earlier in the cycle. Without this the
+  // report milestone is refused and the unit recovers to the cap on a merged PR.
+  'This run may have been superseded earlier: read its generation with `ai-dossier runstate ' +
+  'verify --issue {issue} --json` and pass that `generation` value as `--gen <n>` on your ' +
+  '`runstate post`, or the milestone will be refused.';
 
 /**
  * Default prompt for the ONE bounded fix attempt a batch member gets before it
@@ -129,6 +174,18 @@ export const DEFAULT_FIX_PROMPT_TEMPLATE = withNoBackgroundExit(
     "member's commits are reverted and it is requeued as a standalone full-cycle run."
 );
 
+/**
+ * Substitute `{name}` placeholders. Unknown placeholders are left as-is, so a template
+ * naming a variable this build does not supply reads as an obvious defect rather than
+ * silently becoming an empty string.
+ */
+function renderTemplate(template: string, vars: Record<string, string | number>): string {
+  return Object.entries(vars).reduce(
+    (out, [key, value]) => out.replaceAll(`{${key}}`, String(value)),
+    template
+  );
+}
+
 /** Failing tests rendered into the fix prompt before it is truncated. */
 const MAX_PROMPT_TESTS = 50;
 
@@ -139,7 +196,7 @@ const MAX_PROMPT_TEST_LENGTH = 200;
 export interface ResolvedDispatch {
   /** Command template with `{model}`/`{issue}` placeholders. */
   command: string[];
-  /** Prompt template with `{issue}` placeholder. */
+  /** Prompt template with `{issue}`/`{gen}` placeholders (`{gen}` since #504). */
   prompt: string;
   /** Report-agent prompt template with `{issue}`/`{pr}`/`{cleanup}` placeholders (#468). */
   reportPrompt: string;
@@ -160,6 +217,12 @@ export interface ResolvedDispatch {
   reconcileIntervalMs: number;
   /** Parked-PR poll interval (#468 AC1, default 150 s — "every 2–3 min"). */
   prPollIntervalMs: number;
+  /**
+   * Stall allowance for a takeover that has posted NOTHING since it was fenced in
+   * (#504 AC4). Selected over the phase timeout only while `SlotEntry.fenced_at` is
+   * set — see `stallTimeoutForSlot`.
+   */
+  fenceTakeoverTimeoutMs: number;
 }
 
 /** Resolve engine dispatch settings from the (possibly sparse) config. */
@@ -172,7 +235,9 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
   };
   return {
     command: dispatch.command ?? [...DEFAULT_DISPATCH_COMMAND],
-    prompt: dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE,
+    // Wrapped here, not only on the constant: a configured prompt is still a cycle
+    // agent that can be superseded mid-run.
+    prompt: withSupersessionCheckpoint(dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE),
     reportPrompt: dispatch.report_prompt ?? DEFAULT_REPORT_PROMPT_TEMPLATE,
     fixPrompt: dispatch.fix_prompt ?? DEFAULT_FIX_PROMPT_TEMPLATE,
     tierModels,
@@ -180,6 +245,7 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
     phaseStallTimeoutMs: resolvePhaseStallTimeouts(config),
     reconcileIntervalMs: config.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS,
     prPollIntervalMs: config.pr_poll_interval_ms ?? DEFAULT_PR_POLL_INTERVAL_MS,
+    fenceTakeoverTimeoutMs: dispatch.fence_takeover_timeout_ms ?? DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
   };
 }
 
@@ -227,6 +293,23 @@ export function stallTimeoutForPhase(dispatch: ResolvedDispatch, phase: string |
 }
 
 /**
+ * The stall allowance for a slot: the phase timeout, shortened to
+ * `fenceTakeoverTimeoutMs` while a takeover has posted nothing at all (#504 AC4).
+ *
+ * `Math.min`, so the short window can only ever bring recovery FORWARD. A phase whose
+ * own allowance is already shorter than the fence window keeps it — a takeover should
+ * never get MORE time than a first dispatch would have had for the same phase.
+ */
+export function stallTimeoutForSlot(
+  dispatch: ResolvedDispatch,
+  phase: string | null,
+  fencedAt: string | null
+): number {
+  const phaseMs = stallTimeoutForPhase(dispatch, phase);
+  return fencedAt === null ? phaseMs : Math.min(phaseMs, dispatch.fenceTakeoverTimeoutMs);
+}
+
+/**
  * Build the concrete agent argv for one dispatch: substitute `{issue}` and
  * `{model}`. When the tier's model is null, the `{model}` item AND its
  * immediately-preceding flag (e.g. `--model`) drop together — a command never
@@ -255,22 +338,55 @@ export function buildAgentCommand(
   return argv;
 }
 
-/** Build the child's stdin prompt for one dispatch. */
-export function buildPrompt(template: string, issue: number): string {
-  return template.replaceAll('{issue}', String(issue));
+/**
+ * What a takeover agent is told about the run it inherited (#504).
+ *
+ * Appended only for `gen > 0`, so an ordinary first dispatch reads exactly as it does
+ * today. Two instructions, both load-bearing: pass `--gen` so the agent's own posts are
+ * accepted (the CLI refuses a lower generation), and CHECK before the expensive phases so
+ * it discovers its own supersession early if it is itself replaced later.
+ */
+export function takeoverInstruction(issue: number, gen: number): string {
+  return (
+    `TAKEOVER — you are generation ${gen} of the run on issue #${issue}: an earlier agent was ` +
+    'superseded and fenced out of the runstate trail. Pass `--gen ' +
+    `${gen}\` on EVERY \`ai-dossier runstate post\` for this issue, or the post is refused. ` +
+    `Before implement, before review, and before ship, run \`ai-dossier runstate check --issue ${issue} ` +
+    `--run <run_id> --gen ${gen}\`; a non-zero exit means YOU have been superseded in turn — stop ` +
+    'immediately, do not push, and do not open a PR. Resume the existing work rather than ' +
+    'restarting it: the trail and the pushed branch are the durable state.'
+  );
 }
 
-/** Build the report agent's stdin prompt (#468): `{issue}`/`{pr}`/`{cleanup}` substituted. */
+/**
+ * Build the child's stdin prompt for one dispatch.
+ *
+ * `gen` is the runstate generation the agent owns; 0 (the default) is a first dispatch
+ * and produces today's prompt unchanged.
+ */
+export function buildPrompt(template: string, issue: number, gen = 0): string {
+  const rendered = renderTemplate(template, { issue, gen });
+  return gen > 0 ? `${rendered}\n\n${takeoverInstruction(issue, gen)}` : rendered;
+}
+
+/**
+ * Build the report agent's stdin prompt (#468): `{issue}`/`{pr}`/`{cleanup}`/`{gen}`
+ * substituted, with the takeover instruction appended for `gen > 0` (#504).
+ *
+ * A report slot rides the same recovery ladder as a cycle slot, so it can be fenced and
+ * respawned as a takeover — and a report agent that did not know its generation would
+ * have its `report done` milestone refused, recovering to the escalation cap on a PR
+ * that already merged.
+ */
 export function buildReportPrompt(
   template: string,
   issue: number,
   pr: number,
-  cleanup: string
+  cleanup: string,
+  gen = 0
 ): string {
-  return template
-    .replaceAll('{issue}', String(issue))
-    .replaceAll('{pr}', String(pr))
-    .replaceAll('{cleanup}', cleanup);
+  const rendered = renderTemplate(template, { issue, pr, cleanup, gen });
+  return gen > 0 ? `${rendered}\n\n${takeoverInstruction(issue, gen)}` : rendered;
 }
 
 /**
@@ -304,10 +420,11 @@ export function buildFixPrompt(
       : '- (none reported)';
   const truncated =
     tests.length > MAX_PROMPT_TESTS ? `\n- …and ${tests.length - MAX_PROMPT_TESTS} more` : '';
-  return template
-    .replaceAll('{issue}', String(issue))
-    .replaceAll('{batch}', flatten(batch))
-    .replaceAll('{tests}', rendered + truncated);
+  return renderTemplate(template, {
+    issue,
+    batch: flatten(batch),
+    tests: rendered + truncated,
+  });
 }
 
 /** One tier stronger on the ladder, or null at the top (RFC-0001 §C.1). */
