@@ -5,7 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CorruptStateError,
   createEmptyState,
+  EngineTooOldError,
   enqueueEntries,
+  SCHEMA_VERSION,
   SchedStore,
   transitionIssue,
   validateState,
@@ -87,6 +89,40 @@ describe('SchedStore', () => {
       })
     );
     expect(() => store.load()).toThrow(/Unsupported schema version/);
+  });
+
+  it('#537: a state file written by a newer schema than the installed engine refuses to run with a specific, actionable error — not the generic CorruptStateError', () => {
+    const store = new SchedStore(dir);
+    const [major, minor, patch] = SCHEMA_VERSION.split('.').map(Number);
+    const newerVersion = `${major}.${minor}.${(patch ?? 0) + 1}`;
+    fs.writeFileSync(
+      store.statePath,
+      JSON.stringify({
+        schema_version: newerVersion,
+        paused: false,
+        entries: [],
+        batches: [],
+        slots: [],
+        next_slot_id: 1,
+      })
+    );
+    let caught: unknown;
+    try {
+      store.load();
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(EngineTooOldError);
+    expect(caught).not.toBeInstanceOf(CorruptStateError);
+    const err = caught as EngineTooOldError;
+    expect(err.stateVersion).toBe(newerVersion);
+    expect(err.installedVersion).toBe(SCHEMA_VERSION);
+    expect(err.message).toContain(newerVersion);
+    expect(err.message).toContain(SCHEMA_VERSION);
+    expect(err.message).toContain('npm i -g @ai-dossier/cli@latest');
+    // Must NOT carry the "rename or remove it" advice — that's actively
+    // wrong for this case (another engine wrote this state; it isn't corrupt).
+    expect(err.message).not.toMatch(/rename or remove/i);
   });
 
   it('withLock reads, mutates, and saves atomically', () => {
@@ -430,5 +466,55 @@ describe('#527 config: dispatch.tiers (mixed agent-CLI escalation ladders)', () 
     ]);
     expect(config.dispatch?.tier_models).toEqual({ mid: 'sonnet', strong: 'opus' });
     expect(config.dispatch?.tiers).toBeUndefined();
+  });
+});
+
+describe('#537 config: auto_upgrade', () => {
+  it('round-trips auto_upgrade through save/load', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-537-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({ max_slots: 2, auto_upgrade: true });
+      expect(store.loadConfig().auto_upgrade).toBe(true);
+
+      store.saveConfig({ max_slots: 2, auto_upgrade: false });
+      expect(store.loadConfig().auto_upgrade).toBe(false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('defaults auto_upgrade to undefined when absent from config.json', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-537-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({ max_slots: 2 });
+      expect(store.loadConfig().auto_upgrade).toBeUndefined();
+      expect(fs.readFileSync(store.configPath, 'utf-8')).not.toContain('auto_upgrade');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-boolean auto_upgrade (degrades to defaults, loudly)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-537-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({ schema_version: '1.4.0', max_slots: 2, auto_upgrade: 'yes' })
+      );
+      const err = console.error;
+      const warnings: string[] = [];
+      console.error = (msg: string) => warnings.push(msg);
+      try {
+        expect(store.loadConfig()).toEqual({ max_slots: 3 });
+      } finally {
+        console.error = err;
+      }
+      expect(warnings[0]).toContain('auto_upgrade');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

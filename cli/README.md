@@ -1005,7 +1005,7 @@ respectively; `get --json` includes the comment's `author`.
 ```bash
 ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--more-members-expected] [--deps 100,104] [--tier mechanical|mid|strong] [--repo owner/name]
 ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
-ai-dossier sched start [--interval <seconds>] [--once] [--json]
+ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--json]
 ai-dossier sched status [--json]
 ai-dossier sched pause | resume
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
@@ -1089,7 +1089,17 @@ against ground truth.
   `/proc` start-times (a reused pid is never signalled; best-effort on macOS/Windows),
   and a FAILED ground-truth poll (gh outage) pauses that unit's stall/verify decisions
   instead of guessing — an outage never kills a healthy agent. All events are journaled
-  to `events.jsonl`, and `status` shows the live phase per unit.
+  to `events.jsonl`, and `status` shows the live phase per unit. Since #537, every tick
+  also checks the installed `@ai-dossier/sched` against npm registry latest (best-effort,
+  cached — `cache.engineVersionTtlSeconds`, default 300s — and non-blocking, never stalls
+  a tick): when behind, it journals `engine-stale` once per distinct (installed, latest)
+  pair and warns on stderr, surfaced again in `status` below. `--auto-upgrade` (or
+  `auto_upgrade: true` in `config.json`, the flag wins when both are set) lets a
+  cron-driven `--once` self-upgrade (`npm i -g @ai-dossier/cli@latest`) once behind, but
+  only after re-confirming no slot is mid-dispatch on a fresh post-tick state read; the
+  continuous (non-`--once`) loop only ever journals/warns, never self-upgrades, since a
+  multi-minute install must not stall reconciliation. The attempt's outcome is journaled
+  too (`engine-auto-upgrade-attempted` / `engine-auto-upgrade-failed`).
 - **`status`** renders the queue (with `pr` and `cleanup` columns), parked PRs
   (watched, zero slots, with the last poll's age), slots (with pid, live phase,
   last-progress, recoveries), batches, runnable units, and the blocked/failed sets. A blocked entry names every
@@ -1100,8 +1110,13 @@ against ground truth.
   been recorded (#505 below), a `⚠ Dispatch health: N consecutive suspect-dispatch
   exit(s) (last: <unit>)` warning line prints too, saying whether it's just informational
   or likely why the scheduler is paused; the same counters ride along in `--json` as
-  `dispatch_health.{consecutive_suspect,last_suspect_unit}`. `--json` emits the same
-  report as data.
+  `dispatch_health.{consecutive_suspect,last_suspect_unit}`. Since #537, a `⚠ Engine
+  stale: installed @ai-dossier/sched@X, npm latest Y — upgrade: npm i -g
+  @ai-dossier/cli@latest` line prints when the engine is behind — read from the same
+  cache `start` writes (`--json`: `engine_staleness: {installed, latest, stale}`), never
+  a live network call, so `status` stays fast and offline-friendly even when `start` has
+  never run or the cache has expired (it just shows nothing in that case). `--json` emits
+  the same report as data.
 - **`pause`/`resume`** gate *new* assignments only — live units keep running. A pause can
   be manual (`sched pause`) or automatic: `DISPATCH_UNHEALTHY_THRESHOLD` (2) consecutive
   suspect-dispatch exits from DIFFERENT units — an unverified agent exit within 60s of
@@ -1123,9 +1138,12 @@ State is written atomically (tmp + fsync + rename), so a process killed between 
 always leaves the previous complete state, and a scheduler restart resumes identically
 from `state.json` (pre-#464/#468/#472/#500/#505/#504 state files — schema
 1.0.0/1.1.0/1.2.0/1.3.0/1.4.0/1.5.0/1.6.0 — migrate to 1.7.0 on load). A corrupt state file is a loud
-error naming the file — never a silent queue reset. Concurrency is serialized by a
-`.sched-lock` directory mutex (stolen from dead holders). `config.json` holds
-`max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default
+error naming the file — never a silent queue reset — except a state file written by a
+newer schema than the installed engine, which is not corruption: `load()` throws the more
+specific `EngineTooOldError` (#537), pointing at an engine upgrade
+(`npm i -g @ai-dossier/cli@latest`) rather than at deleting real queue data. Concurrency is
+serialized by a `.sched-lock` directory mutex (stolen from dead holders). `config.json`
+holds `max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default
 1 800 000 — but the `implement` phase defaults to 5 400 000, overridable per phase via
 `dispatch.phase_stall_timeout_ms: {"<phase>": <ms>}`, #495), `reconcile_interval_ms`
 (default 60 000), and the optional `dispatch` section (including `report_prompt` for
@@ -1135,7 +1153,9 @@ substitutes `{issue}` and `{gen}`; `dispatch.tiers.<tier>` — `{command?, model
 — overrides the command/model/prompt for one tier only, #527, falling back to the
 top-level `command`/`tier_models`/`prompt` shorthand for any field left unset);
 `pr_poll_interval_ms` (default 150 000) sets the
-parked-PR poll cadence; an issue with an unmerged dependency — or a batch behind an unmerged batch —
+parked-PR poll cadence; `auto_upgrade` (default false, #537) lets a cron-driven
+`sched start --once` self-upgrade when behind npm latest — the `--auto-upgrade` CLI flag
+overrides this when passed; an issue with an unmerged dependency — or a batch behind an unmerged batch —
 is never runnable.
 
 Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).

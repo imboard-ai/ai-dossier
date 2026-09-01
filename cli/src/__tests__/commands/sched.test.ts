@@ -1,9 +1,11 @@
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerSchedCommand } from '../../commands/sched';
+import { checkEngineStaleness } from '../../engine-version';
 import { readRunLog } from '../../run-log';
 import { createTestProgram, execHandles, execReturns } from '../helpers/test-utils';
 
@@ -14,6 +16,18 @@ vi.mock('node:child_process');
 // rather than relying on real disk under the stubbed home (unlike the sched
 // package's own state, which resolves `os.homedir()` fresh per call).
 vi.mock('../../run-log');
+// `engine-version.ts`'s own cache dir is the same "computed once at import
+// time from os.homedir()" shape (#537) — mock `checkEngineStaleness`
+// directly (like `run-log`) rather than fighting the real path under the
+// stubbed home. Keep the real `formatEngineStaleWarning` — it's a pure
+// string formatter with no filesystem/network dependency, and an
+// auto-mocked version silently returns undefined (an empty rendered line,
+// not a thrown error — the kind of failure a test wouldn't defend against
+// without this comment as the tripwire).
+vi.mock('../../engine-version', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../engine-version')>();
+  return { ...actual, checkEngineStaleness: vi.fn() };
+});
 
 let home: string;
 let logs: string[];
@@ -35,6 +49,13 @@ beforeEach(() => {
   // Default: every enqueue-time label lookup ('gh issue view --json labels') finds no
   // hard-block labels, so existing tests keep their pre-#507 behavior unchanged.
   execReturns('{"labels":[]}');
+  // Default: not stale, so every pre-#537 test keeps its old behavior
+  // unchanged (no warning line, no journal entry, no auto-upgrade attempt).
+  vi.mocked(checkEngineStaleness).mockResolvedValue({
+    installed: '0.12.1',
+    latest: null,
+    stale: false,
+  });
 });
 
 afterEach(() => {
@@ -49,6 +70,20 @@ function statePath(): string {
 
 function readState(): unknown {
   return JSON.parse(fs.readFileSync(statePath(), 'utf-8'));
+}
+
+function journalPath(): string {
+  return path.join(home, '.dossier', 'sched', 'test-proj', 'events.jsonl');
+}
+
+/** Parsed `events.jsonl` lines, or `[]` if the journal doesn't exist yet. */
+function journalEvents(): Array<Record<string, unknown>> {
+  if (!fs.existsSync(journalPath())) return [];
+  return fs
+    .readFileSync(journalPath(), 'utf-8')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 describe('ai-dossier sched enqueue', () => {
@@ -187,13 +222,7 @@ describe('ai-dossier sched enqueue', () => {
       status: 'blocked',
       reason: 'label:decision-pending',
     });
-    const journalPath = path.join(home, '.dossier', 'sched', 'test-proj', 'events.jsonl');
-    const events = fs
-      .readFileSync(journalPath, 'utf-8')
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
-    expect(events).toContainEqual(
+    expect(journalEvents()).toContainEqual(
       expect.objectContaining({
         event: 'label-blocked',
         issue: 9,
@@ -229,13 +258,7 @@ describe('ai-dossier sched enqueue', () => {
     expect(errors.join('\n')).toContain('Could not read labels for issue #11');
     const state = readState() as { entries: Array<Record<string, unknown>> };
     expect(state.entries[0]).toMatchObject({ issue: 11, status: 'queued', reason: null });
-    const journalPath = path.join(home, '.dossier', 'sched', 'test-proj', 'events.jsonl');
-    const events = fs
-      .readFileSync(journalPath, 'utf-8')
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
-    expect(events).toContainEqual(
+    expect(journalEvents()).toContainEqual(
       expect.objectContaining({ event: 'label-check-failed', issue: 11 })
     );
   });
@@ -313,6 +336,133 @@ describe('ai-dossier sched enqueue', () => {
       runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj'])
     ).rejects.toThrow('process.exit(1)');
     expect(fs.existsSync(statePath())).toBe(false);
+  });
+});
+
+describe('ai-dossier sched start (#537: engine-stale detection)', () => {
+  it('runs a tick cleanly and journals nothing when the engine is not stale', async () => {
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+    expect(journalEvents().some((e) => e.event === 'engine-stale')).toBe(false);
+  });
+
+  it('journals engine-stale once when the installed engine is behind npm latest', async () => {
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.12.1',
+      latest: '0.13.0',
+      stale: true,
+    });
+
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+
+    const staleEvents = journalEvents().filter((e) => e.event === 'engine-stale');
+    expect(staleEvents).toHaveLength(1);
+    expect(staleEvents[0]).toMatchObject({ installed_version: '0.12.1', latest_version: '0.13.0' });
+  });
+
+  it('does not journal a second engine-stale event for the same (installed, latest) pair', async () => {
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.12.1',
+      latest: '0.13.0',
+      stale: true,
+    });
+
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+
+    const staleEvents = journalEvents().filter((e) => e.event === 'engine-stale');
+    expect(staleEvents).toHaveLength(1);
+  });
+
+  it('journals a new engine-stale event once npm latest advances again', async () => {
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.12.1',
+      latest: '0.13.0',
+      stale: true,
+    });
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.12.1',
+      latest: '0.14.0',
+      stale: true,
+    });
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+
+    const staleEvents = journalEvents().filter((e) => e.event === 'engine-stale');
+    expect(staleEvents).toHaveLength(2);
+    expect(staleEvents[1]).toMatchObject({ latest_version: '0.14.0' });
+  });
+
+  it('--auto-upgrade self-upgrades when stale and no unit is mid-dispatch', async () => {
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.12.1',
+      latest: '0.13.0',
+      stale: true,
+    });
+    vi.mocked(execFileSync).mockClear();
+
+    await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+
+    const upgradeCalls = vi
+      .mocked(execFileSync)
+      .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
+    expect(upgradeCalls).toHaveLength(1);
+    expect(upgradeCalls[0][1]).toEqual(['i', '-g', '@ai-dossier/cli@latest']);
+  });
+
+  it('without --auto-upgrade, stale never triggers an upgrade', async () => {
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.12.1',
+      latest: '0.13.0',
+      stale: true,
+    });
+    vi.mocked(execFileSync).mockClear();
+
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+
+    const upgradeCalls = vi
+      .mocked(execFileSync)
+      .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
+    expect(upgradeCalls).toHaveLength(0);
+  });
+
+  it('--auto-upgrade does NOT self-upgrade while a unit is mid-dispatch', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    const state = readState() as Record<string, unknown>;
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        slots: [
+          {
+            id: 1,
+            status: 'running',
+            unit: 'issue:101',
+            pid: null,
+            phase: null,
+            last_progress_at: null,
+            recoveries: 0,
+            updated_at: new Date().toISOString(),
+          },
+        ],
+      })
+    );
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.12.1',
+      latest: '0.13.0',
+      stale: true,
+    });
+    vi.mocked(execFileSync).mockClear();
+
+    await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+
+    const upgradeCalls = vi
+      .mocked(execFileSync)
+      .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
+    expect(upgradeCalls).toHaveLength(0);
+    // The stale signal is still journaled — only the upgrade itself is gated.
+    expect(journalEvents().some((e) => e.event === 'engine-stale')).toBe(true);
   });
 });
 
@@ -430,6 +580,32 @@ describe('ai-dossier sched status', () => {
     await expect(runSched(['sched', 'status', '--project', 'test-proj'])).rejects.toThrow(
       'process.exit(1)'
     );
+  });
+
+  it('#537: renders an engine-stale warning naming both versions and the upgrade command', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.12.1',
+      latest: '0.13.0',
+      stale: true,
+    });
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    expect(text).toContain('Engine stale');
+    expect(text).toContain('0.12.1');
+    expect(text).toContain('0.13.0');
+    expect(text).toContain('npm i -g @ai-dossier/cli@latest');
+  });
+
+  it('#537: no engine-stale warning when the installed engine is current', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    // beforeEach's default mock already reports stale: false.
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    expect(logs.join('\n')).not.toContain('Engine stale');
   });
 });
 

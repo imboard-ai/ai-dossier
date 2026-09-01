@@ -198,6 +198,7 @@ export {
   DEFAULT_STALL_TIMEOUT_MS,
   DISSOLVE_EVICTION_FRACTION,
   type DispatchConfig,
+  EngineTooOldError,
   ESCALATION_CAP,
   type EvictionRecord,
   type FailureEvidence,

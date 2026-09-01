@@ -467,6 +467,12 @@ export interface SchedConfig {
   pr_poll_interval_ms?: number;
   /** Agent dispatch settings (#464); every field optional with engine defaults. */
   dispatch?: DispatchConfig;
+  /**
+   * Let a cron-driven `sched start --once` self-upgrade (`npm i -g
+   * @ai-dossier/cli@latest`) when it detects it is behind npm latest (#537).
+   * The `--auto-upgrade` CLI flag overrides this when passed; default off.
+   */
+  auto_upgrade?: boolean;
 }
 
 /**
@@ -708,6 +714,7 @@ export interface SchedConfigFile {
   reconcile_interval_ms?: number;
   pr_poll_interval_ms?: number;
   dispatch?: DispatchConfig;
+  auto_upgrade?: boolean;
 }
 
 export const DEFAULT_MAX_SLOTS = 3;
@@ -736,6 +743,30 @@ export class SchedNotFoundError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'SchedNotFoundError';
+  }
+}
+
+/**
+ * Thrown when `state.json`'s `schema_version` is numerically NEWER than the
+ * installed engine's `SCHEMA_VERSION` (#537) — a distinct case from a
+ * generically unsupported/garbage version string (`CorruptStateError`
+ * still covers that). This is not corruption: another (newer) engine wrote
+ * this state, and "rename or remove it to reset the queue" would destroy
+ * real queue data the installed engine simply can't read yet. The fix is to
+ * upgrade the installed engine, not the state file.
+ */
+export class EngineTooOldError extends Error {
+  readonly stateVersion: string;
+  readonly installedVersion: string;
+
+  constructor(stateVersion: string, installedVersion: string) {
+    super(
+      `State file was written by a newer schema (${stateVersion}) than the installed ` +
+        `@ai-dossier/sched (${installedVersion}). Upgrade: npm i -g @ai-dossier/cli@latest`
+    );
+    this.name = 'EngineTooOldError';
+    this.stateVersion = stateVersion;
+    this.installedVersion = installedVersion;
   }
 }
 
@@ -824,7 +855,18 @@ export type JournalEventName =
   | 'run-log-skipped'
   | 'run-log-recorded'
   | 'run-log-no-usage'
-  | 'run-log-failed';
+  | 'run-log-failed'
+  // #537: the installed `@ai-dossier/sched` is behind npm latest (journaled
+  // by the CLI's `sched start`, process-scoped like `tick-failed` — not
+  // unit-scoped). Appended once per distinct (installed, latest) pair, not
+  // every tick — see `installed_version`/`latest_version` on `JournalEvent`.
+  | 'engine-stale'
+  // #537: `--auto-upgrade`'s `npm i -g @ai-dossier/cli@latest` outcome —
+  // journaled so an operator whose stderr isn't captured (systemd unit
+  // without journald wiring, redirected to /dev/null) can still answer "was
+  // an upgrade attempted, and did it work?" from events.jsonl alone.
+  | 'engine-auto-upgrade-attempted'
+  | 'engine-auto-upgrade-failed';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —
@@ -879,4 +921,8 @@ export interface JournalEvent {
   model?: string;
   /** Absolute path to the spawned process's log file. */
   log?: string;
+  /** `engine-stale` (#537): the installed `@ai-dossier/sched` version. */
+  installed_version?: string;
+  /** `engine-stale` (#537): npm registry latest at check time. */
+  latest_version?: string;
 }

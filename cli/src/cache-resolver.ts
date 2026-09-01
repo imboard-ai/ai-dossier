@@ -16,10 +16,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getConfig } from './config';
 import { formatAge } from './duration';
 import { safeDossierPath } from './helpers';
 import { multiRegistryGetDossier } from './multi-registry';
+import { getConfiguredTtlSeconds as getConfiguredTtlSecondsShared, isWithinTtl } from './ttl-cache';
 import { compareVersions } from './version';
 
 export const DEFAULT_RESOLUTION_TTL_SECONDS = 300;
@@ -127,9 +127,10 @@ export function highestCachedSemver(dossierName: string): string | null {
 }
 
 function getConfiguredTtlSeconds(): number {
-  const raw = getConfig('cache.resolutionTtlSeconds');
-  if (typeof raw === 'number' && Number.isFinite(raw) && raw >= 0) return raw;
-  return DEFAULT_RESOLUTION_TTL_SECONDS;
+  return getConfiguredTtlSecondsShared(
+    'cache.resolutionTtlSeconds',
+    DEFAULT_RESOLUTION_TTL_SECONDS
+  );
 }
 
 /**
@@ -154,7 +155,7 @@ export async function resolveCachedVersion(
     const cached = readResolution(dossierName);
     if (cached) {
       const ageMs = Date.now() - new Date(cached.resolved_at).getTime();
-      if (ageMs >= 0 && ageMs < ttl * 1000) {
+      if (isWithinTtl(cached.resolved_at, ttl)) {
         if (process.env.DOSSIER_DEBUG) {
           process.stderr.write(
             `[cache-resolver] '${dossierName}' served from resolution cache: ` +
