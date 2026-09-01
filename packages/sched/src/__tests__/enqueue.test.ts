@@ -6,6 +6,7 @@ import {
   enqueueEntries,
   findBatch,
   parseManifest,
+  type SchedState,
   validateState,
 } from '../index';
 
@@ -93,6 +94,45 @@ describe('enqueueEntries', () => {
     const matching = state.entries.filter((e) => e.issue === 1);
     expect(matching).toHaveLength(1);
     expect(matching[0]).toMatchObject({ issue: 1, status: 'queued' });
+  });
+
+  it('drops a re-enqueued terminal member from its OLD batch when it moves elsewhere (#502)', () => {
+    let state = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 1, mode: 'slot', batch: 'b1' },
+        { issue: 2, mode: 'slot', batch: 'b1' },
+      ],
+      NOW
+    );
+    // issue 1 fails without batch b1 sealing or dissolving.
+    state = {
+      ...state,
+      entries: state.entries.map((e) => (e.issue === 1 ? { ...e, status: 'failed' as const } : e)),
+    };
+    // Operator re-enqueues issue 1 standalone, off the batch. Before the fix,
+    // b1.members still named issue 1 even though its entry now points at
+    // batch: null — a stray reverse reference validateState never checks.
+    state = enqueueEntries(state, [{ issue: 1 }], NOW);
+
+    expect(findBatch(state, 'b1')?.members).toEqual([2]);
+    expect(state.entries.find((e) => e.issue === 1)).toMatchObject({ batch: null });
+  });
+
+  it('does not false-positive a cycle from a terminal entry’s stale deps (#502)', () => {
+    let state = enqueueEntries(createEmptyState(), [{ issue: 1, deps: [2] }], NOW);
+    state = {
+      ...state,
+      entries: state.entries.map((e) => (e.issue === 1 ? { ...e, status: 'failed' as const } : e)),
+    };
+    // Re-enqueue issue 1 with no deps, and a fresh issue 2 depending on it —
+    // a valid DAG once issue 1's stale `deps: [2]` is dropped rather than
+    // merged into the cycle-detection graph.
+    let reenqueued: SchedState | undefined;
+    expect(() => {
+      reenqueued = enqueueEntries(state, [{ issue: 1 }, { issue: 2, deps: [1] }], NOW);
+    }).not.toThrow();
+    expect(reenqueued?.entries.find((e) => e.issue === 1)?.deps).toEqual([]);
   });
 
   it('rejects dependency cycles across new and existing entries', () => {
