@@ -359,6 +359,16 @@ export interface SlotEntry {
    * Added in schema 1.6.0; 1.5.0 states backfill null.
    */
   fenced_at: string | null;
+  /**
+   * When the CURRENTLY held unit was (re)spawned (#524) — set in
+   * `spawnAndRecord` on every genuine (re)spawn, distinct from
+   * `last_progress_at` (which advances on every progress signal and so
+   * cannot answer "how long has this dispatch been running"). Used to
+   * compute `duration_ms` for the unit's `runs.jsonl` entry. Added in schema
+   * 1.7.0; 1.6.0 slots backfill null (their in-flight duration is unknown,
+   * not zero).
+   */
+  spawned_at: string | null;
   updated_at: string;
 }
 
@@ -581,7 +591,7 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.6.0' as const;
+export const SCHEMA_VERSION = '1.7.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -591,6 +601,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.3.0',
   '1.4.0',
   '1.5.0',
+  '1.6.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.2.0' as const;

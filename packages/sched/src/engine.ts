@@ -79,6 +79,7 @@ import {
 import { issueOfUnit, type Journal, unitEvent } from './journal';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
+import { appendSchedRunLog, buildSchedRunLogEntry, readDispatchLog } from './run-log';
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import { findEntry, isReportSlot, transitionIssue, transitionSlot } from './state';
 import { runTeardown, type TeardownResult } from './teardown';
@@ -112,6 +113,14 @@ export interface EngineDeps {
    * existed, journaling `fence-failed` so the gap is visible rather than silent.
    */
   fencer?: RunFencer;
+  /**
+   * Home directory `runs.jsonl` telemetry (#524) is written under
+   * (`<dossierHome>/.dossier/runs.jsonl` — the same file `cli`'s `ai-dossier
+   * run` writes to). Optional and defaults to `os.homedir()` (via
+   * `appendSchedRunLog`'s own default) when absent — override ONLY for
+   * tests, so they never touch the real machine's `~/.dossier`.
+   */
+  dossierHome?: string;
 }
 
 /** What one tick did — surfaced by `sched start`. */
@@ -409,6 +418,10 @@ function spawnAndRecord(
     pid_start: ctx.deps.spawnDeps.processStart(pid),
     phase: opts.phase,
     last_progress_at: now.toISOString(),
+    // #524: distinct from last_progress_at, which later progress signals
+    // overwrite — this is the one field that answers "when did THIS dispatch
+    // start", the anchor `runs.jsonl`'s duration_ms is measured from.
+    spawned_at: now.toISOString(),
   };
   const next =
     slot.status === 'assigned' || slot.status === 'recovering'
@@ -892,6 +905,43 @@ function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
   return isReportSlot(slot) ? false : truth.closed;
 }
 
+/**
+ * Append this dispatch's `runs.jsonl` entry (#524) — one per completed
+ * spawn, not per unit: a redispatch/takeover produces another entry, each
+ * with its own tokens/duration, never an update to the first. Called
+ * exactly once per dispatch, from the dead-pid branch of `reconcileRunning`
+ * below — the single point every dispatch's exit is first detected, guarded
+ * by that branch's own `pid !== null && !isAlive` condition (a slot only
+ * transitions `running → exited` once per spawn).
+ */
+function recordDispatchRunLog(
+  ctx: TickCtx,
+  state: SchedState,
+  slot: SlotEntry,
+  unit: string
+): void {
+  const issue = issueOfUnit(unit);
+  const entry = issue === null ? undefined : findEntry(state, issue);
+  if (issue === null || !entry) return; // left the queue already — nothing to attribute the run to
+
+  const cmd = buildAgentCommand(ctx.dispatch.command, entry.tier, issue, ctx.dispatch.tierModels);
+  const logFile = path.join(ctx.deps.store.runsDir, `${unitLogName(unit)}.log`);
+
+  appendSchedRunLog(
+    buildSchedRunLogEntry({
+      unit,
+      role: slot.role,
+      cmd0: ctx.dispatch.command[0],
+      cmd,
+      logContent: readDispatchLog(logFile),
+      spawnedAt: slot.spawned_at,
+      completedAt: ctx.deps.now(),
+      configuredModel: ctx.dispatch.tierModels[entry.tier],
+    }),
+    ctx.deps.dossierHome
+  );
+}
+
 /** Reconcile one running slot against its polled ground truth. */
 function reconcileRunning(
   ctx: TickCtx,
@@ -906,6 +956,7 @@ function reconcileRunning(
   // is DETECTED, never trusted as completion (AC2/AC3).
   if (slot.pid !== null && !ctx.deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
     journal(ctx, 'exit-detected', unit, { pid: slot.pid, slot: slot.id });
+    recordDispatchRunLog(ctx, state, slot, unit);
     const exited = transitionSlot(state, slot.id, 'exited', {}, now);
     return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete');
   }
@@ -942,6 +993,10 @@ function reconcileRunning(
         : `report done (role=${slot.role})`,
     });
     killUnitAgent(ctx, state, unit);
+    // The agent was still alive (that's what "externally-advanced" means) —
+    // log it here too, or an external-advance dispatch would never get a
+    // runs.jsonl entry at all (it never takes the dead-pid branch above).
+    recordDispatchRunLog(ctx, state, slot, unit);
     const exited = transitionSlot(state, slot.id, 'exited', {}, now);
     return completeUnitOrRecover(ctx, exited, unit, truth, 'external-advance');
   }

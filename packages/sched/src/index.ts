@@ -112,6 +112,14 @@ export {
   type SuiteRunner,
 } from './recovery';
 export {
+  appendSchedRunLog,
+  buildSchedRunLogEntry,
+  readDispatchLog,
+  type SchedRunLogInput,
+  schedRunsLogPath,
+  usageParserFor,
+} from './run-log';
+export {
   type Assignment,
   abandonBatch,
   abandonIssue,

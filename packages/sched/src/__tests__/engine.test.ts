@@ -16,6 +16,7 @@ import {
   SchedStore,
   type SetupInfo,
   type SpawnDeps,
+  schedRunsLogPath,
   tick,
 } from '../index';
 
@@ -39,6 +40,12 @@ function harness(
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'sched-engine-'));
   const store = new SchedStore(dir);
   const journal = new Journal(dir);
+  // #524: runs.jsonl telemetry writes under EngineDeps.dossierHome — a fresh
+  // tmp dir per harness, so no test ever touches the real machine's
+  // ~/.dossier (every dead-pid/external-advance exit now appends an entry).
+  // Registered for cleanup automatically — individual tests don't opt in.
+  const dossierHome = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-engine-home-'));
+  REGISTRIES.push(dossierHome);
 
   let pidSeq = 4242;
   const alive = new Set<number>();
@@ -117,6 +124,7 @@ function harness(
     repoDir: dir,
     teardownExec,
     fencer,
+    dossierHome,
   };
 
   const config: SchedConfig = {
@@ -139,6 +147,7 @@ function harness(
 
   return {
     dir,
+    dossierHome,
     store,
     journal,
     spawnCalls,
@@ -1949,5 +1958,116 @@ describe('zombie-run fencing on redispatch (#504)', () => {
     expect(
       h.events().some((e) => e.event === 'fence-failed' && e.detail?.includes('no fencer'))
     ).toBe(true);
+  });
+});
+
+describe('runs.jsonl telemetry (#524: per-dispatch token/cost recorded on exit)', () => {
+  function readRunLogEntries(h: ReturnType<typeof harness>): Array<Record<string, unknown>> {
+    const file = schedRunsLogPath(h.dossierHome);
+    if (!fs.existsSync(file)) return [];
+    return fs
+      .readFileSync(file, 'utf-8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  }
+
+  it('appends one runs.jsonl entry, sourced from modelUsage, when a dispatch exits with a verified milestone', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const spawn = h.spawnCalls[0];
+
+    // The agent wrote its claude JSON result before exiting. The fake spawn
+    // (unlike the real one, dispatch.ts's createSpawnDeps) never creates the
+    // runs dir, so the test does.
+    fs.mkdirSync(path.dirname(spawn.logFile), { recursive: true });
+    fs.writeFileSync(
+      spawn.logFile,
+      JSON.stringify({
+        type: 'result',
+        modelUsage: {
+          'claude-haiku-4': { inputTokens: 500, outputTokens: 80, totalCostUsd: 0.002 },
+        },
+      })
+    );
+    h.alive.delete(spawn.pid);
+    h.setMilestone(101, 'report', 'done');
+
+    h.tick();
+
+    const entries = readRunLogEntries(h);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      unit: 'issue:101',
+      dossier: 'sched:cycle',
+      model: 'claude-haiku-4',
+      input_tokens: 500,
+      output_tokens: 80,
+      total_cost_usd: 0.002,
+    });
+  });
+
+  it('appends a separate entry per dispatch on redispatch — never double-counts the same exit', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const firstPid = h.spawnCalls[0].pid;
+
+    // First dispatch exits unverified → redispatched one tier stronger.
+    h.alive.delete(firstPid);
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(2);
+    expect(readRunLogEntries(h)).toHaveLength(1); // exactly one entry for the first dispatch
+
+    // Ticking again with nothing changed must NOT append another entry for
+    // the same already-recorded exit.
+    h.tick();
+    expect(readRunLogEntries(h)).toHaveLength(1);
+
+    // Second dispatch also exits and completes — its own, separate entry.
+    const secondPid = h.spawnCalls[1].pid;
+    h.alive.delete(secondPid);
+    h.setMilestone(101, 'report', 'done');
+    h.tick();
+
+    const entries = readRunLogEntries(h);
+    expect(entries).toHaveLength(2);
+    expect(entries.every((e) => e.unit === 'issue:101')).toBe(true);
+  });
+
+  it('records an entry for an external-advance exit too (agent still alive when ground truth completed)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    h.tick();
+    // Agent still alive, but ground truth already says the issue is done.
+    h.setMilestone(101, 'report', 'done');
+
+    h.tick();
+
+    expect(readRunLogEntries(h)).toHaveLength(1);
+  });
+
+  it('records null usage (never fabricated) when the dispatch log is missing or unparseable', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    h.tick();
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.setMilestone(101, 'report', 'done');
+    // No log file written at all (simulates the #524 "0 bytes"/missing-log symptom).
+
+    h.tick();
+
+    const entries = readRunLogEntries(h);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      input_tokens: null,
+      output_tokens: null,
+      total_cost_usd: null,
+    });
   });
 });

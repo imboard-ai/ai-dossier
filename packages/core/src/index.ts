@@ -9,6 +9,9 @@
  * - TypeScript type definitions
  */
 
+// Agent usage exports (headless-agent JSON result parsing, shared by cli + sched)
+export type { AgentRunUsage } from './agent-usage';
+export { parseAgentUsage, parseOpenCodeUsage } from './agent-usage';
 // Checksum exports
 export { calculateChecksum, verifyIntegrity } from './checksum';
 // Coherence validation exports
@@ -60,6 +63,8 @@ export type {
 } from './risk-assessment';
 // Risk assessment exports
 export { assessContentRisk, assessVerificationRisk } from './risk-assessment';
+// runs.jsonl entry schema (shared by cli + sched)
+export type { RunLogEntry } from './run-log-entry';
 // Security scanner exports
 export type {
   SecurityCategory,

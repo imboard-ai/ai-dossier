@@ -304,7 +304,10 @@ export function registerRunCommand(program: Command): void {
             exit_code: null,
             input_tokens: null,
             output_tokens: null,
+            cache_creation_tokens: null,
+            cache_read_tokens: null,
             total_cost_usd: null,
+            unit: null,
             ...extra,
           });
         };
@@ -315,6 +318,8 @@ export function registerRunCommand(program: Command): void {
           model: usage?.model ?? options.model ?? null,
           input_tokens: usage?.input_tokens ?? null,
           output_tokens: usage?.output_tokens ?? null,
+          cache_creation_tokens: usage?.cache_creation_tokens ?? null,
+          cache_read_tokens: usage?.cache_read_tokens ?? null,
           total_cost_usd: usage?.total_cost_usd ?? null,
         });
 

@@ -45,10 +45,12 @@ import {
   unitEvent,
 } from '@ai-dossier/sched';
 import type { Command } from 'commander';
-import { formatAge } from '../duration';
+import { formatAge, formatDurationMs } from '../duration';
 import { requireRepoSlug, tryFetchLabels } from '../gh';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
+import { readRunLog } from '../run-log';
+import { buildSchedCostReport, type IssueCost } from '../sched-run-stats';
 import { renderTable } from '../table';
 
 interface SchedOptions {
@@ -531,6 +533,72 @@ function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
     });
 }
 
+interface StatsOptions extends SchedOptions {
+  issues?: string;
+}
+
+/** Cost display precision: agent-run costs are small, so keep four decimals — matches `history`. */
+const COST_DECIMALS = 4;
+
+const isCount = (value: number | null): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
+
+function formatTokens(value: number | null): string {
+  return isCount(value) ? String(value) : '-';
+}
+
+function formatCost(usd: number | null): string {
+  return isCount(usd) ? `$${usd.toFixed(COST_DECIMALS)}` : '-';
+}
+
+function statsRow(label: string, row: Omit<IssueCost, 'issue'>): string[] {
+  return [
+    label,
+    String(row.runs),
+    formatTokens(row.input_tokens),
+    formatTokens(row.output_tokens),
+    formatTokens(row.cache_creation_tokens),
+    formatTokens(row.cache_read_tokens),
+    formatCost(row.total_cost_usd),
+    formatDurationMs(row.duration_ms),
+  ];
+}
+
+function registerStatsSubcommand(cmd: Command): void {
+  cmd
+    .command('stats')
+    .description(
+      'Per-issue token/cost telemetry from sched-dispatched agents (runs.jsonl, #524) — the number pilot/parity gate reports need to baseline cost'
+    )
+    .option('--issues <selection>', 'Restrict to these issues (e.g. "4,5" or "4..9")')
+    .option('--json', 'Output the report as JSON')
+    .action((opts: StatsOptions) => {
+      const issues = opts.issues ? issueList(opts.issues, 'issues') : undefined;
+      const entries = readRunLog();
+      const report = buildSchedCostReport(entries, issues);
+
+      if (opts.json) {
+        console.log(JSON.stringify(report, null, 2));
+        return;
+      }
+
+      if (report.issues.length === 0) {
+        console.log('No sched-dispatched runs.jsonl entries found.');
+        return;
+      }
+
+      const headers = ['Issue', 'Runs', 'In', 'Out', 'Cache-W', 'Cache-R', 'Cost', 'Duration'];
+      const rows = report.issues.map((row) => statsRow(`#${row.issue}`, row));
+      rows.push(statsRow('TOTAL', report.totals));
+      console.log(
+        renderTable(headers, rows, {
+          align: ['left', 'right', 'right', 'right', 'right', 'right', 'right', 'right'],
+          separator: true,
+        })
+      );
+    });
+}
+
 function registerAbandonSubcommand(cmd: Command): void {
   cmd
     .command('abandon')
@@ -730,4 +798,5 @@ export function registerSchedCommand(program: Command): void {
   registerPauseResumeSubcommand(schedCmd, false);
   registerAbandonSubcommand(schedCmd);
   registerStartSubcommand(schedCmd);
+  registerStatsSubcommand(schedCmd);
 }
