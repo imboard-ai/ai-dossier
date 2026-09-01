@@ -108,7 +108,7 @@ The workflow produces three files (not uploaded as artifacts currently):
 
 ### Motivation
 
-Automate the publishing of `@ai-dossier/core`, `@ai-dossier/cli`, `@ai-dossier/mcp-server`, and `@ai-dossier/worktree-pool` npm packages to the public npm registry. This enables:
+Automate the publishing of `@ai-dossier/core`, `@ai-dossier/sched`, `@ai-dossier/cli`, `@ai-dossier/mcp-server`, and `@ai-dossier/worktree-pool` npm packages to the public npm registry. This enables:
 - **Continuous delivery**: Automatic publishing on code changes
 - **Version management**: Centralized version bumping
 - **Consistency**: Same build process every time
