@@ -20,7 +20,14 @@
  *    - `exited`/`verifying` slots: the agent exited — completion is verified
  *      against ground truth, never assumed (AC2); an exit whose milestone is
  *      the ship phase's `awaiting-merge` (with `pr=`) is a VERIFIED park:
- *      entry → parked, slot released (a parked unit holds no slot — AC5)
+ *      entry → parked, slot released (a parked unit holds no slot — AC5); an
+ *      unverified exit within `SUSPECT_DISPATCH_WINDOW_MS` of the slot's last
+ *      progress is also `suspect-dispatch` (#505) — a quota/auth wall kills
+ *      every unit near-instantly with zero progress, indistinguishable from a
+ *      genuine crash except by this timing; `DISPATCH_UNHEALTHY_THRESHOLD`
+ *      consecutive suspects from DIFFERENT units pauses new assignments
+ *      (`dispatch-unhealthy`, cleared only by an operator's `sched resume`)
+ *      without touching the per-unit ladder or any already-live slot
  *    - `parked` entries: the watcher applies the PR truth — merge accepted
  *      only when state MERGED AND mergedAt non-null AND the issue is closed
  *      (AC1) → shipped (gating on MERGE, never the park — AC4);
@@ -68,10 +75,11 @@ import {
 import { issueOfUnit, type Journal, unitEvent } from './journal';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
-import { assignToIdleSlot, computeAssignments, freeCapacity } from './scheduler';
+import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import { findEntry, isReportSlot, transitionIssue, transitionSlot } from './state';
 import { runTeardown, type TeardownResult } from './teardown';
 import {
+  DISPATCH_UNHEALTHY_THRESHOLD,
   ESCALATION_CAP,
   type JournalEventName,
   type ModelTier,
@@ -80,6 +88,7 @@ import {
   type SchedState,
   type SlotEntry,
   type SlotStatus,
+  SUSPECT_DISPATCH_WINDOW_MS,
   TERMINAL_ISSUE_STATUSES,
 } from './types';
 
@@ -754,6 +763,57 @@ function reconcileRunning(
 }
 
 /**
+ * Record one dispatch outcome against the cross-unit `suspect-dispatch`
+ * signal (#505). `suspect === false` (a verified completion, or an
+ * unverified exit that took at least `SUSPECT_DISPATCH_WINDOW_MS`) resets
+ * the streak — that dispatch clearly ran for real, so whatever caused an
+ * earlier suspect exit isn't an ongoing wall. `suspect === true` journals
+ * `suspect-dispatch`; a repeat from the SAME unit updates bookkeeping only
+ * (one flaky unit isn't cross-unit correlation), while a DIFFERENT unit
+ * increments the streak and, at `DISPATCH_UNHEALTHY_THRESHOLD`, pauses new
+ * assignments exactly like `sched pause` — already-live slots are untouched,
+ * only `computeAssignments` stops filling idle ones. The per-unit ladder
+ * this accompanies (`enterRecovery`) is never altered by this function.
+ */
+function recordDispatchOutcome(
+  ctx: TickCtx,
+  state: SchedState,
+  unit: string,
+  slot: SlotEntry,
+  suspect: boolean
+): SchedState {
+  if (!suspect) {
+    if (state.consecutive_suspect_dispatches === 0 && state.last_suspect_dispatch_unit === null) {
+      return state;
+    }
+    return { ...state, consecutive_suspect_dispatches: 0, last_suspect_dispatch_unit: null };
+  }
+
+  journal(ctx, 'suspect-dispatch', unit, {
+    slot: slot.id,
+    detail: `exit within ${SUSPECT_DISPATCH_WINDOW_MS}ms of last progress, unverified`,
+  });
+
+  if (state.last_suspect_dispatch_unit === unit) {
+    return state;
+  }
+
+  const count = state.consecutive_suspect_dispatches + 1;
+  let next: SchedState = {
+    ...state,
+    consecutive_suspect_dispatches: count,
+    last_suspect_dispatch_unit: unit,
+  };
+  if (count >= DISPATCH_UNHEALTHY_THRESHOLD && !next.paused) {
+    next = setPaused(next, true);
+    journal(ctx, 'dispatch-unhealthy', unit, {
+      detail: `${count} consecutive suspect dispatches across different units — new assignments paused; \`sched resume\` once dispatch is healthy`,
+    });
+  }
+  return next;
+}
+
+/**
  * An exited/verifying slot: verify the claimed state against ground truth
  * (AC2). Verified → complete; a ship-phase `awaiting-merge` milestone with
  * `pr=` → parked (the detached-run exit, #468); unverified → the same
@@ -797,8 +857,12 @@ function completeUnitOrRecover(
   }
 
   if (isVerifiedComplete(truth.milestone, effectiveClosedSignal(slot, truth))) {
-    return completeUnit(ctx, next, unit, via);
+    return completeUnit(ctx, recordDispatchOutcome(ctx, next, unit, slot, false), unit, via);
   }
+
+  const elapsedMs = now.getTime() - Date.parse(slot.last_progress_at ?? now.toISOString());
+  const suspect = elapsedMs < SUSPECT_DISPATCH_WINDOW_MS;
+  next = recordDispatchOutcome(ctx, next, unit, slot, suspect);
   return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', {
     observed: truth.milestone
       ? `milestone ${truth.milestone.phase}/${truth.milestone.status}; closed=${truth.closed}`

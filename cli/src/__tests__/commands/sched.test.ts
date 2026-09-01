@@ -177,6 +177,25 @@ describe('ai-dossier sched status', () => {
     expect(parsed.queue).toHaveLength(1);
   });
 
+  it('#505: renders a dispatch-health warning when suspect dispatches are recorded', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    const state = readState() as Record<string, unknown>;
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        consecutive_suspect_dispatches: 1,
+        last_suspect_dispatch_unit: 'issue:101',
+      })
+    );
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    expect(text).toContain('Dispatch health: 1 consecutive suspect-dispatch exit(s)');
+    expect(text).toContain('issue:101');
+  });
+
   it('renders a corrupt state file as a clean error, not a stack trace', async () => {
     await runSched(['sched', 'enqueue', '--issues', '1', '--project', 'test-proj']);
     fs.writeFileSync(statePath(), '{ not json');

@@ -44,6 +44,8 @@ export interface StatusReport {
   parked: ParkedItem[];
   /** When the PR watcher last polled (#468) — null before the first poll. */
   last_pr_poll_at: string | null;
+  /** The dispatch-health signal (#505) — see `SchedState.consecutive_suspect_dispatches`. */
+  dispatch_health: { consecutive_suspect: number; last_suspect_unit: string | null };
   /** How many units are runnable right now. */
   runnable: number;
   /** Which units are runnable (`issue:<n>` / `batch:<id>`), in dispatch order. */
@@ -127,6 +129,10 @@ export function buildStatusReport(
     batches: state.batches,
     parked,
     last_pr_poll_at: state.last_pr_poll_at,
+    dispatch_health: {
+      consecutive_suspect: state.consecutive_suspect_dispatches,
+      last_suspect_unit: state.last_suspect_dispatch_unit,
+    },
     runnable: units.length,
     runnable_units: units.map((u) =>
       u.kind === 'issue' ? `issue:${u.issue}` : `batch:${u.batch}`

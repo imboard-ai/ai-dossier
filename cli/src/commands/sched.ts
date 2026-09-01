@@ -129,6 +129,11 @@ function renderReport(report: StatusReport): string {
   lines.push(
     `Scheduler [${report.project}]: ${state} · slots ${report.live_slots}/${report.max_slots} live`
   );
+  if (report.dispatch_health.consecutive_suspect > 0) {
+    lines.push(
+      `⚠ Dispatch health: ${report.dispatch_health.consecutive_suspect} consecutive suspect-dispatch exit(s) (last: ${report.dispatch_health.last_suspect_unit}) — quota/auth wall suspected`
+    );
+  }
   lines.push(`Runnable units: ${runnable}`);
   lines.push('');
   lines.push('== Queue ==');

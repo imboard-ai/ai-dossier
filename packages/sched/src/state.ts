@@ -151,6 +151,8 @@ export function createEmptyState(): SchedState {
     slots: [],
     next_slot_id: 1,
     last_pr_poll_at: null,
+    consecutive_suspect_dispatches: 0,
+    last_suspect_dispatch_unit: null,
   };
 }
 
@@ -329,7 +331,10 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * `pr`/`cleanup` and the state backfills `last_pr_poll_at` to null; 1.2.0
  * (pre-#472) entries backfill `failure_evidence` to null and batches backfill
  * the recovery fields (anchor/branch/run_id/eviction_groups/evictions/
- * fix_attempts/rebase_attempts); 1.3.0 (pre-#500) slots backfill `role`. The
+ * fix_attempts/rebase_attempts); 1.3.0 (pre-#500) slots backfill `role`;
+ * 1.4.0 (pre-#505) states backfill `consecutive_suspect_dispatches` (0) and
+ * `last_suspect_dispatch_unit` (null) — no suspect dispatches were tracked
+ * before, so the zero value is exact, not a guess. The
  * inference is entry-status-first, not phase-first: `phase === 'report'` is
  * exactly the signal #500 proved unreliable for a LIVE report agent (it
  * drifts to the issue's pre-report milestone under `phase-updated` well
@@ -483,6 +488,20 @@ export function validateState(data: unknown): SchedState {
   ) {
     throw new Error('last_pr_poll_at must be an ISO date string or null');
   }
+  if (
+    obj.consecutive_suspect_dispatches !== undefined &&
+    (!Number.isInteger(obj.consecutive_suspect_dispatches) ||
+      (obj.consecutive_suspect_dispatches as number) < 0)
+  ) {
+    throw new Error('consecutive_suspect_dispatches must be a non-negative integer');
+  }
+  if (
+    obj.last_suspect_dispatch_unit !== null &&
+    obj.last_suspect_dispatch_unit !== undefined &&
+    typeof obj.last_suspect_dispatch_unit !== 'string'
+  ) {
+    throw new Error('last_suspect_dispatch_unit must be a string or null');
+  }
 
   // Migration: pre-#464 (1.0.0) slots carry no branch/last_head/pid_start —
   // backfill null so the returned state always has the current shape. Pre-#468
@@ -535,6 +554,11 @@ export function validateState(data: unknown): SchedState {
     batches,
     slots,
     last_pr_poll_at: obj.last_pr_poll_at ?? null,
+    // Pre-#505 (1.4.0) states carry neither field — no suspect dispatches
+    // have ever been observed under them, so 0/null is exactly correct, not
+    // a lossy guess.
+    consecutive_suspect_dispatches: (obj.consecutive_suspect_dispatches as number | undefined) ?? 0,
+    last_suspect_dispatch_unit: (obj.last_suspect_dispatch_unit as string | undefined) ?? null,
   };
 }
 
