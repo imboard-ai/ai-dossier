@@ -16,7 +16,7 @@ both new, both root-caused below:
 
 | # | blocker | kind | status |
 |---|---|---|---|
-| B1 | The eligible imboard backlog yields 3 slot-eligible issues — enough for exactly **1** batch, not 3 | cohort scarcity | measured, 16 issues classified |
+| B1 | The eligible imboard backlog yields 3 slot-eligible issues — enough for exactly **1** batch, not 3 | cohort scarcity | measured, 15 issues classified |
 | B2 | `@ai-dossier/sched` never transitions a batch `forming → ready`, and never binds its anchor — so an enqueued batch is permanently undispatchable | product bug | root-caused to file/line, reproduced |
 
 Attempt 1's pilot arm was empty because batch units were not executable by the engine (§5.0 → #523).
@@ -43,7 +43,7 @@ never wired up. The fix landed one link short of the chain.
 | time (UTC) | event |
 |---|---|
 | 20:06 | run `r-526-1248` gate; setup; plan (prior session) |
-| 20:17–20:20 | classify wave 1 — 9 issues, 3 `slot` |
+| 20:17–20:20 | classify wave 1 — 9 candidates, 8 classified (#3415 held pending the escalation), 3 `slot` |
 | 20:23 | run blocked, `reason=backlog-scarcity-ac1`; decision escalated on #526 |
 | 20:30–20:38 | classify wave 2 — 7 issues, **0 `slot`** (the bounded top-up the wave-1 escalation pre-declared) |
 | 20:41 | `plan:v1` artifacts posted on #3631, #3820, #3887; anchor imboard-monorepo#3963 created; audit + manifest written |
@@ -59,15 +59,18 @@ Eligible backlog: the 68 open imboard issues remaining after excluding
 Every issue in that backlog whose scope reads as a low-risk candidate was classified — one
 `issue-cycle-classifier` dispatch each, no hand-enqueueing.
 
-**16 issues classified; 3 classified `slot` (18.8%).**
+**15 issues classified; 3 classified `slot` (20.0%).**
 
 | verdict | issues |
 |---|---|
 | `slot` | #3631, #3820, #3887 |
 | `full` | #3839, #3923, #3893, #3632, #3442, #3415, #3403, #3961, #2779, #3858, #3931, #3901 |
 
-Floor rules doing the work on the `full` side: rule 8 (visual/browser review) five times, rules 5/6
-(file and diff size) five times, rule 1 (security / infra risk floor) three times.
+Floor rules doing the work across the 12 `full` verdicts (a verdict may hit several): rule 8
+(visual/browser review) 6 times — #3839, #3893, #3632, #3442, #3858, #3931; rules 5/6 (file and diff
+size) on 4 issues — #3923, #3442, #3858, #3901; rule 1 (security / infra risk floor) 3 times —
+#3415, #3403, #2779; plus rule 4 (deploy pipeline, #3403) and rules 9/10 (open dependency and
+sub-floor confidence, #3961).
 
 Skipped without classifying, with reasons: #3867 (latest runstate milestone is
 `gate/blocked reason=needs-clarification`); #3549 (deliberately excluded — it modifies
@@ -175,7 +178,7 @@ could not measure at all (it had no classifier denominator).
 | slot wall-clock / issue | median 51.0 min, n=10 | not measurable |
 | makespan | 10.24 h / 11 issues = 1.07 issues/h (a floor — §3.4) | not measurable |
 | eviction / dissolve rate | N/A | **0** — no batch reached `executing`, so no member could be evicted |
-| misclassification rate | not computable (0/11 carried a classify record) | **0 / 16 contradicted** — but every verdict is unfalsified, not confirmed: no classified issue was executed, so a `slot` verdict that would have failed at dispatch cannot be detected. The denominator now exists (16); the numerator is untested. |
+| misclassification rate | not computable (0/11 carried a classify record) | **0 / 15 contradicted** — but every verdict is unfalsified, not confirmed: no classified issue was executed, so a `slot` verdict that would have failed at dispatch cannot be detected. The denominator now exists (15); the numerator is untested. |
 | human interventions | 0, n=11 | **2** — one `status=blocked` milestone (`backlog-scarcity-ac1`, wave 1) plus this hand-off |
 | regressions | 0 (0-day window) | N/A — nothing merged |
 
@@ -194,8 +197,8 @@ Wave 2, 7 `issue-cycle-classifier` dispatches at mid tier, run ≤8 concurrent:
 Wave 1's per-dispatch cost was not captured in its session and is not reconstructible from
 `~/.dossier/runs.jsonl` (the null-token gap documented in `batch-pilot.md` §2.3).
 
-This number matters for #529: at ~64k tokens per classify and an 18.8% slot hit rate, cohort
-generation is not free, and a backlog that yields one batch per 16 classifies changes the
+This number matters for #529: at ~64k tokens per classify and a 20.0% slot hit rate, cohort
+generation is not free, and a backlog that yields one batch per 15 classifies changes the
 arithmetic of batching's claimed savings.
 
 ## 5. What must be true before attempt 3
@@ -215,8 +218,8 @@ Carrying forward `batch-pilot.md` §5, with its resolved items dropped and the n
       the machine for six days without any signal. A version check in the tick, or a
       `sched status` warning when the installed `sched` is older than the state's schema, would
       have surfaced this immediately.
-- [ ] **B1 — a cohort that supports ≥3 batches exists.** At the measured 18.8% hit rate, ≥3 batches
-      of N≥3 needs ~48 classified candidates, and the eligible imboard backlog does not contain
+- [ ] **B1 — a cohort that supports ≥3 batches exists.** At the measured 20.0% hit rate, ≥3 batches
+      of N≥3 needs ~45 classified candidates, and the eligible imboard backlog does not contain
       them today. Either the QA-sheet triage pipeline tops up the slot-eligible backlog first, or
       #529's target is restated in terms of what one batch can evidence.
 
@@ -228,9 +231,9 @@ backlog still yields zero executions. Attempt 3 needs both.
 - The pilot arm is empty for the second consecutive attempt, so every §H metric that compares
   batched to unbatched execution remains unmeasured. Nothing here supports or refutes batching's
   claimed savings.
-- The misclassification denominator (16) exists but the numerator is untestable without execution —
+- The misclassification denominator (15) exists but the numerator is untestable without execution —
   a `slot` verdict is only falsified by dispatching it.
-- The 18.8% hit rate is measured over the *low-risk-reading* subset of the eligible backlog, chosen
+- The 20.0% hit rate is measured over the *low-risk-reading* subset of the eligible backlog, chosen
   by title/scope inspection. It is a fair estimate of yield under the current bar, not a census of
   all 68 eligible issues.
 - Comparison caveat carried from #526's decision comment: the attempt-1 baseline arm ran on
@@ -244,7 +247,7 @@ backlog still yields zero executions. Attempt 3 needs both.
 | AC1 — ≥3 batches executed end-to-end | **not met** — 0 executed; 1 composed and enqueued, blocked by B2 |
 | AC2 — batch #490 is batch 1 | **not applicable** — superseded by the owner's 2026-09-01 decision pivoting the cohort source to imboard; #490 (`b-20260829-01`, ai-dossier #487/#488/#489) was never enqueued. Recorded as a deviation, not silently dropped. |
 | AC3 — metrics vs the attempt-1 baseline | **partial** — §4. Baseline column complete; pilot column empty for want of executions; cohort-generation cost is new and complete. |
-| AC4 — execution-only deliverable | **partial** — this report and the anchor/trail links are delivered; "batches merged + deployed" is not, per AC1. |
+| AC4 — execution-only deliverable | **not met** — this report is delivered, and §8 carries the anchor and runstate-trail links; but AC4 asks for those links in a **closing comment** on #526, and #526 does not close on this run (AC1 unmet). "Batches merged + deployed" did not happen, per AC1. |
 
 ## 8. Appendix — evidence
 
