@@ -12,6 +12,23 @@ import {
 
 const NOW = new Date('2026-08-29T12:00:00Z');
 
+/**
+ * enqueueEntries now seals a batch forming → ready in the same call that
+ * completes it (#535), so a batch built by one prior call is no longer
+ * `forming` by the time a test wants to exercise join-time validation
+ * (base_branch conflicts, batch-level fact agreement) against a SECOND call.
+ * Force it back open — these tests are about the join guard's own logic, not
+ * about whether sealing happened.
+ */
+function reopen(state: SchedState, batchId: string): SchedState {
+  return {
+    ...state,
+    batches: state.batches.map((b) =>
+      b.id === batchId ? { ...b, status: 'forming' as const } : b
+    ),
+  };
+}
+
 describe('enqueueEntries', () => {
   it('records issue, mode, batch, deps, and tier on each entry (AC1)', () => {
     const state = enqueueEntries(
@@ -172,6 +189,43 @@ describe('enqueueEntries', () => {
     );
   });
 
+  it('seals a complete batch forming → ready in the same transaction (#535)', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 1, mode: 'slot', batch: 'b1' },
+        { issue: 2, mode: 'slot', batch: 'b1' },
+      ],
+      NOW
+    );
+    expect(findBatch(state, 'b1')?.status).toBe('ready');
+    // Sealed — a later call can no longer join it (composition is frozen).
+    expect(() => enqueueEntries(state, [{ issue: 3, mode: 'slot', batch: 'b1' }], NOW)).toThrow(
+      /only join while forming/
+    );
+  });
+
+  it('seals a batch composed across multiple enqueue calls once the last member lands (#535)', () => {
+    let state = enqueueEntries(createEmptyState(), [{ issue: 1, mode: 'slot', batch: 'b1' }], NOW);
+    // Not partial in this implementation (a single call already seals it) —
+    // reopen to simulate composition genuinely still in progress, then land
+    // the rest of the declared membership in a second call.
+    state = reopen(state, 'b1');
+    expect(findBatch(state, 'b1')?.status).toBe('forming');
+    state = enqueueEntries(state, [{ issue: 2, mode: 'slot', batch: 'b1' }], NOW);
+    expect(findBatch(state, 'b1')?.status).toBe('ready');
+  });
+
+  it('does not seal or touch a batch a call did not enqueue any member into', () => {
+    let state = reopen(
+      enqueueEntries(createEmptyState(), [{ issue: 1, mode: 'slot', batch: 'b1' }], NOW),
+      'b1'
+    );
+    const before = findBatch(state, 'b1');
+    state = enqueueEntries(state, [{ issue: 99, mode: 'full' }], NOW);
+    expect(findBatch(state, 'b1')).toEqual(before);
+  });
+
   it('allows deps pointing outside the queue (they surface as blocked, not cycles)', () => {
     const state = enqueueEntries(createEmptyState(), [{ issue: 1, deps: [999] }], NOW);
     expect(state.entries[0].deps).toEqual([999]);
@@ -213,10 +267,13 @@ describe('enqueueEntries', () => {
   });
 
   it('rejects a base_branch conflict when joining an existing forming batch', () => {
-    const state = enqueueEntries(
-      createEmptyState(),
-      [{ issue: 1, mode: 'slot', batch: 'b1', base_branch: 'develop' }],
-      NOW
+    const state = reopen(
+      enqueueEntries(
+        createEmptyState(),
+        [{ issue: 1, mode: 'slot', batch: 'b1', base_branch: 'develop' }],
+        NOW
+      ),
+      'b1'
     );
     expect(() =>
       enqueueEntries(state, [{ issue: 2, mode: 'slot', batch: 'b1', base_branch: 'main' }], NOW)
@@ -313,20 +370,22 @@ describe('batch-level facts at creation (#472)', () => {
   });
 
   it('lets a later member supply a fact the first one omitted', () => {
-    let state = enqueueEntries(
-      createEmptyState(),
-      [{ issue: 201, mode: 'slot', batch: 'b1' }],
-      NOW
+    let state = reopen(
+      enqueueEntries(createEmptyState(), [{ issue: 201, mode: 'slot', batch: 'b1' }], NOW),
+      'b1'
     );
     state = enqueueEntries(state, [{ issue: 202, mode: 'slot', batch: 'b1', anchor: 900 }], NOW);
     expect(findBatch(state, 'b1')?.anchor).toBe(900);
   });
 
   it('rejects a conflicting re-supply rather than silently keeping the first', () => {
-    const state = enqueueEntries(
-      createEmptyState(),
-      [{ issue: 201, mode: 'slot', batch: 'b1', anchor: 900, run_id: 'r-900-aaaa' }],
-      NOW
+    const state = reopen(
+      enqueueEntries(
+        createEmptyState(),
+        [{ issue: 201, mode: 'slot', batch: 'b1', anchor: 900, run_id: 'r-900-aaaa' }],
+        NOW
+      ),
+      'b1'
     );
     expect(() =>
       enqueueEntries(state, [{ issue: 202, mode: 'slot', batch: 'b1', anchor: 901 }], NOW)
@@ -335,13 +394,16 @@ describe('batch-level facts at creation (#472)', () => {
       enqueueEntries(state, [{ issue: 202, mode: 'slot', batch: 'b1', run_id: 'r-901-bbbb' }], NOW)
     ).toThrow(/refusing to re-point it to 'r-901-bbbb'/);
 
-    const grouped = enqueueEntries(
-      createEmptyState(),
-      [
-        { issue: 201, mode: 'slot', batch: 'b2', eviction_groups: [[201, 202]] },
-        { issue: 202, mode: 'slot', batch: 'b2' },
-      ],
-      NOW
+    const grouped = reopen(
+      enqueueEntries(
+        createEmptyState(),
+        [
+          { issue: 201, mode: 'slot', batch: 'b2', eviction_groups: [[201, 202]] },
+          { issue: 202, mode: 'slot', batch: 'b2' },
+        ],
+        NOW
+      ),
+      'b2'
     );
     expect(() =>
       enqueueEntries(

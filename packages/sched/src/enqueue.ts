@@ -12,7 +12,7 @@
 
 import { SAFE_REF_RE } from './attribution';
 import { unwrapList } from './json';
-import { createBatch, findBatch } from './state';
+import { createBatch, findBatch, transitionBatch } from './state';
 import type { CycleMode, ModelTier, QueueEntry, SchedState } from './types';
 import { TERMINAL_ISSUE_STATUSES } from './types';
 
@@ -459,5 +459,25 @@ export function enqueueEntries(
     }
   }
 
-  return combined;
+  // Seal every batch this call touched (created or joined): composition is
+  // frozen the moment it seals (this comment's own long-standing promise,
+  // previously unenforced — #535). A manifest always declares a batch's full
+  // membership in one `enqueue` call — batch-prep composes the batch before
+  // writing it — so by the time this transaction commits, whatever a batch
+  // received here is everything it is ever getting; the `status !== 'forming'`
+  // check earlier in this function already refuses a later call that tries to
+  // add more. Sealing here, not at dispatch time, is what makes `forming`
+  // batches show up under `sched status`'s Runnable units at all.
+  const touchedBatchIds = new Set(
+    inputs.map((input) => input.batch).filter((id): id is string => id !== null && id !== undefined)
+  );
+  let sealed = combined;
+  for (const batchId of touchedBatchIds) {
+    const batch = findBatch(sealed, batchId);
+    if (batch && batch.status === 'forming') {
+      sealed = transitionBatch(sealed, batchId, 'ready', {}, now);
+    }
+  }
+
+  return sealed;
 }

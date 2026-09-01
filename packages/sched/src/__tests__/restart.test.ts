@@ -10,7 +10,6 @@ import {
   type SchedState,
   SchedStore,
   setPaused,
-  transitionBatch,
   transitionIssue,
   transitionSlot,
 } from '../index';
@@ -84,7 +83,7 @@ function steps(): Step[] {
       },
     },
     { name: 'free slot 1', run: (s) => transitionSlot(s, 1, 'idle', {}, T3) },
-    { name: 'batch seals', run: (s) => transitionBatch(s, 'b1', 'ready', {}, T3) },
+    // batch b1 is already sealed forming → ready by enqueueEntries
     { name: 'reassign', run: (s) => computeAssignments(s, { max_slots: 2 }, T3).state },
     { name: 'abandon 102', run: (s) => abandonIssue(s, 102, 'restart-test', T4).state },
     {

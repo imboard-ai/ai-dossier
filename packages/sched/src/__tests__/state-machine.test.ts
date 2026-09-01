@@ -331,7 +331,6 @@ describe('batch state machine (RFC-0001 §D.2)', () => {
   it('walks the full happy path including merge and report', () => {
     let state = seeded();
     const path = [
-      'ready',
       'executing',
       'validating',
       'reviewing',
@@ -350,7 +349,6 @@ describe('batch state machine (RFC-0001 §D.2)', () => {
 
   it('executing may self-loop (member i/N advance)', () => {
     let state = seeded();
-    state = transitionBatch(state, 'b1', 'ready', { executing_member: 1 }, NOW2);
     state = transitionBatch(state, 'b1', 'executing', { executing_member: 1 }, NOW2);
     state = transitionBatch(state, 'b1', 'executing', { executing_member: 2 }, NOW2);
     expect(findBatch(state, 'b1')?.executing_member).toBe(2);
@@ -358,7 +356,6 @@ describe('batch state machine (RFC-0001 §D.2)', () => {
 
   it('walks the attribute → fix → validate rail', () => {
     let state = seeded();
-    state = transitionBatch(state, 'b1', 'ready', {}, NOW);
     state = transitionBatch(state, 'b1', 'executing', {}, NOW);
     state = transitionBatch(state, 'b1', 'validating', {}, NOW);
     state = transitionBatch(state, 'b1', 'attributing', {}, NOW);
@@ -369,7 +366,6 @@ describe('batch state machine (RFC-0001 §D.2)', () => {
 
   it('walks the eviction and dissolution rails', () => {
     let state = seeded();
-    state = transitionBatch(state, 'b1', 'ready', {}, NOW);
     state = transitionBatch(state, 'b1', 'executing', {}, NOW);
     state = transitionBatch(state, 'b1', 'validating', {}, NOW);
     state = transitionBatch(state, 'b1', 'attributing', {}, NOW);
@@ -383,7 +379,6 @@ describe('batch state machine (RFC-0001 §D.2)', () => {
 
   it('walks the conflict rail (awaiting-merge → rebasing → re-validating → shipping)', () => {
     let state = seeded();
-    state = transitionBatch(state, 'b1', 'ready', {}, NOW);
     state = transitionBatch(state, 'b1', 'executing', {}, NOW);
     state = transitionBatch(state, 'b1', 'validating', {}, NOW);
     state = transitionBatch(state, 'b1', 'reviewing', {}, NOW);
@@ -400,7 +395,7 @@ describe('batch state machine (RFC-0001 §D.2)', () => {
   it('throws IllegalTransitionError on non-declared edges', () => {
     const state = seeded();
     expect(() => transitionBatch(state, 'b1', 'merged')).toThrow(IllegalTransitionError);
-    expect(() => transitionBatch(state, 'b1', 'merged')).toThrow('forming → merged');
+    expect(() => transitionBatch(state, 'b1', 'merged')).toThrow('ready → merged');
     expect(() => transitionBatch(state, 'nope', 'ready')).toThrow('not found');
   });
 });

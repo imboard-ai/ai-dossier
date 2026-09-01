@@ -31,7 +31,6 @@ import {
   SchedStore,
   type SuiteResult,
   tick,
-  transitionBatch,
 } from '../index';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
@@ -191,7 +190,6 @@ interface BatchHarness {
   truthDir: string;
   tick: () => ReturnType<typeof tick>;
   enqueue: (inputs: EnqueueInput[]) => void;
-  seal: (batchId: string) => void;
   state: () => ReturnType<SchedStore['load']>;
 }
 
@@ -250,12 +248,6 @@ function batchHarness(
         state: enqueueEntries(state, inputs, new Date()),
         result: null,
       })),
-    // batch-prep's classification step, stood in for directly: forming → ready.
-    seal: (batchId) =>
-      store.withLock((state) => ({
-        state: transitionBatch(state, batchId, 'ready', {}, new Date()),
-        result: null,
-      })),
     state: () => store.load(),
   };
 }
@@ -274,7 +266,7 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       { issue: 602, mode: 'slot', batch: 'b-happy', tier: 'mid' },
       { issue: 603, mode: 'slot', batch: 'b-happy', tier: 'mid' },
     ]);
-    h.seal('b-happy');
+    // b-happy is already sealed forming → ready by enqueueEntries
 
     // Tick 1: claims the batch, runs REAL batch-setup (branch+worktree+push
     // against the scratch repo), spawns member 1.
@@ -364,7 +356,7 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       { issue: 702, mode: 'slot', batch: 'b-evict', tier: 'mid' },
       { issue: 703, mode: 'slot', batch: 'b-evict', tier: 'mid' },
     ]);
-    h.seal('b-evict');
+    // b-evict is already sealed forming → ready by enqueueEntries
 
     h.tick(); // batch-setup + member 1
     let pid = batchSlotPid(h, 'b-evict') as number;
@@ -411,7 +403,7 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       { issue: 802, mode: 'slot', batch: 'b-dissolve', tier: 'mid' },
       { issue: 803, mode: 'slot', batch: 'b-dissolve', tier: 'mid' },
     ]);
-    h.seal('b-dissolve');
+    // b-dissolve is already sealed forming → ready by enqueueEntries
 
     h.tick(); // batch-setup + member 1 (801, survives)
     let pid = batchSlotPid(h, 'b-dissolve') as number;
@@ -456,7 +448,7 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       { issue: 902, mode: 'slot', batch: 'b-gate', tier: 'mid' },
       { issue: 903, mode: 'slot', batch: 'b-gate', tier: 'mid' },
     ]);
-    h.seal('b-gate');
+    // b-gate is already sealed forming → ready by enqueueEntries
 
     h.tick(); // batch-setup + member 1
     const pid = batchSlotPid(h, 'b-gate') as number;
