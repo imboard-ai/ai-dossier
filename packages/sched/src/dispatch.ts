@@ -4,9 +4,12 @@
  * last-progress timestamp tracked in state.json"; RFC-0001 §C.1 "spawns agent
  * processes via the existing `run` machinery").
  *
- * The command is a template (default `claude -p --output-format json --model
- * {model}` — the same headless invocation `ai-dossier run` builds in
- * cli/src/helpers.ts) with `{model}`/`{issue}` placeholders; the prompt
+ * The command is a template (default `claude -p --output-format stream-json
+ * --verbose --model {model}` — `ai-dossier run`'s headless invocation in
+ * cli/src/helpers.ts uses the one-shot `json` form instead, because it
+ * captures stdout in-process from an agent it waits on; a detached dispatch
+ * needs incremental output, see {@link DEFAULT_DISPATCH_COMMAND}) with
+ * `{model}`/`{issue}` placeholders; the prompt
  * travels on stdin exactly like the run machinery's headless path. Children
  * spawn DETACHED and unref'd: an agent must survive a sched crash (RFC F.10 —
  * restart reconciles by pid, it never owns the agent's lifetime).
@@ -19,6 +22,7 @@
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { SCHED_DISPATCH_EVENT } from '@ai-dossier/core';
 import { sanitizeSlug } from './project';
 import {
   DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
@@ -40,12 +44,27 @@ export const DEFAULT_TIER_MODELS: Readonly<Record<ModelTier, string>> = {
   strong: 'opus',
 };
 
-/** Default headless agent command template (claude, the run machinery's first choice). */
+/**
+ * Default headless agent command template (claude, the run machinery's first choice).
+ *
+ * **`stream-json`, not `json` (ai-dossier#524).** `--output-format json`
+ * buffers the entire session and writes ONE object at process exit, so the
+ * dispatch log stays 0 bytes for the whole run and only fills if the agent
+ * exits cleanly. The batch pilot's six 0-byte logs are exactly the six units
+ * that never reached a detected exit — they were advanced by ground truth
+ * (`external-advance`) while their agent was still alive and then killed, so
+ * the one-shot write never happened. `stream-json` emits an event per turn,
+ * so the log fills as the run proceeds and `parseAgentUsage` can recover
+ * per-turn tokens even from a dispatch that was killed mid-flight.
+ * `--verbose` is required by claude whenever `-p` is combined with
+ * `stream-json`.
+ */
 export const DEFAULT_DISPATCH_COMMAND: readonly string[] = [
   'claude',
   '-p',
   '--output-format',
-  'json',
+  'stream-json',
+  '--verbose',
   '--model',
   '{model}',
 ];
@@ -600,6 +619,42 @@ export function unitLogName(unit: string): string {
   return sanitizeSlug(unit);
 }
 
+/**
+ * Path to a unit's dispatch log (`<runsDir>/<unitLogName>.log`) — the single
+ * definition shared by `spawnAndRecord` (which stats it for
+ * `log_offset_at_spawn`, #524) and `recordDispatchRunLog` (which reads it),
+ * so the two can never compute different paths for the same unit.
+ */
+export function dispatchLogPath(runsDir: string, unit: string): string {
+  return path.join(runsDir, `${unitLogName(unit)}.log`);
+}
+
+/**
+ * Byte size of `file`, or 0 when it does not exist yet (#524: the log's
+ * append boundary right before a spawn — `log_offset_at_spawn`). Any other
+ * read error also degrades to 0 rather than throwing, since a spawn must
+ * never fail over a stat call on a debug log.
+ */
+export function fileSizeOrZero(file: string): number {
+  try {
+    return fs.statSync(file).size;
+  } catch (err) {
+    // ENOENT genuinely means "no prior bytes". Any OTHER stat error against a
+    // log that may already hold a previous dispatch's output silently
+    // re-enables the corruption the offset exists to prevent (claude:
+    // a prior dispatch's result attributed to this one; opencode: doubled
+    // tokens), so say so rather than degrading in silence.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      process.stderr.write(
+        `⚠ sched: could not stat dispatch log ${file} (${code}); recording from offset 0 ` +
+          `may include a prior dispatch's output\n`
+      );
+    }
+    return 0;
+  }
+}
+
 /** Poll cadence bounds for `sleep`'s stop-check interval (engine loop). */
 export const STOP_POLL_MIN_MS = 100;
 export const STOP_POLL_MAX_MS = 1000;
@@ -654,8 +709,36 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
   return {
     spawn(cmd: string[], prompt: string, logFile: string): number {
       fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
+      // Append, not truncate: `logFile` is per-UNIT (dispatchLogPath), so a
+      // redispatch's output lands after any prior dispatch's in the SAME
+      // file. `engine.ts`'s `recordDispatchRunLog` (#524) relies on
+      // `SlotEntry.log_offset_at_spawn` — stamped from this file's size right
+      // before this spawn — to read only the current dispatch's own slice.
       const out = fs.openSync(logFile, 'a', 0o600);
       try {
+        // #524: a log must never be 0 bytes for a unit that ran. The agent's
+        // own first write can be seconds (claude) or minutes away, and an
+        // agent killed before it writes anything would otherwise leave an
+        // empty file indistinguishable from "never spawned". This preamble
+        // makes the dispatch self-describing from t=0 and marks the boundary
+        // `log_offset_at_spawn` points at. Every parser in
+        // `@ai-dossier/core`'s agent-usage skips this `type`, so it never
+        // counts as agent output. Best-effort: a telemetry marker must not
+        // stop a dispatch, so a failed write is swallowed.
+        try {
+          fs.writeSync(
+            out,
+            `${JSON.stringify({ type: SCHED_DISPATCH_EVENT, ts: new Date().toISOString(), cmd })}\n`
+          );
+        } catch (err) {
+          // The fd opened fine, so the spawn below will NOT surface this — and
+          // a failed preamble write (ENOSPC, EDQUOT, EIO) leaves exactly the
+          // 0-byte log the preamble exists to prevent. Warn, matching
+          // `Journal.append`'s convention, rather than failing the dispatch.
+          process.stderr.write(
+            `⚠ sched: could not write dispatch preamble to ${logFile}: ${(err as Error).message}\n`
+          );
+        }
         const child = spawn(cmd[0], cmd.slice(1), {
           ...(cwd ? { cwd } : {}),
           detached: true,
@@ -671,6 +754,21 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
           child.stdin.on('error', () => {});
           child.stdin.write(prompt);
           child.stdin.end();
+        }
+        // A second marker once the pid is known: `events.jsonl` keys
+        // everything on pid/slot, and without this a log slice can only be
+        // matched to its journal record by timestamp. Parsers skip it by
+        // `type`, same as the preamble.
+        if (child.pid !== undefined) {
+          try {
+            fs.writeSync(
+              out,
+              `${JSON.stringify({ type: SCHED_DISPATCH_EVENT, event: 'spawned', pid: child.pid, ts: new Date().toISOString() })}\n`
+            );
+          } catch {
+            // Best-effort correlation aid; the preamble already guaranteed
+            // the log is non-empty, and its catch above warns on real trouble.
+          }
         }
         child.unref();
         if (child.pid === undefined) {

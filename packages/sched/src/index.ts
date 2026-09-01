@@ -39,7 +39,9 @@ export {
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
+  dispatchLogPath,
   escalateTier,
+  fileSizeOrZero,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
   type ResolvedDispatch,
@@ -88,7 +90,15 @@ export {
   prOfMilestone,
   type SetupInfo,
 } from './groundtruth';
-export { batchOfUnit, issueOfUnit, JOURNAL_FILE, Journal, readJsonl, unitEvent } from './journal';
+export {
+  appendJsonl,
+  batchOfUnit,
+  issueOfUnit,
+  JOURNAL_FILE,
+  Journal,
+  readJsonl,
+  unitEvent,
+} from './journal';
 
 export { CorruptStateError, LockTimeoutError, SchedStore, writeAtomic } from './persist';
 export {
@@ -127,6 +137,15 @@ export {
   type SuiteResult,
   type SuiteRunner,
 } from './recovery';
+export {
+  appendSchedRunLog,
+  buildSchedRunLogEntry,
+  readDispatchLog,
+  type SchedRunLogInput,
+  schedRunsLogPath,
+  schedTelemetryEnabled,
+  usageParserFor,
+} from './run-log';
 export {
   type Assignment,
   abandonBatch,

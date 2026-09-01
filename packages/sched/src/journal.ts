@@ -13,6 +13,32 @@ import type { JournalEvent, JournalEventName } from './types';
 /** The journal file name — the single source (persist.ts's journalPath uses it). */
 export const JOURNAL_FILE = 'events.jsonl';
 
+/**
+ * Append one JSON-serializable entry as a line to `file`, creating parent
+ * directories as needed (`0o700`/`0o600`, matching the journal's existing
+ * hardening). Never throws — an append-only debug/telemetry file must not
+ * fail the caller's operation over a write error (permissions, disk full).
+ * `onError`, when given, receives the failure so the caller can signal it
+ * (the journal writes a stderr warning; `packages/sched/src/run-log.ts`'s
+ * `appendSchedRunLog` journals it, #524) — shared by both so the
+ * mkdir+append+swallow sequence exists in exactly one place.
+ */
+export function appendJsonl(file: string, entry: unknown, onError?: (err: Error) => void): boolean {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    fs.appendFileSync(file, `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 });
+    // `mode` above applies only when appendFileSync CREATES the file. These
+    // files carry spawned argv and cost data (#524), so a pre-existing
+    // world-readable copy — an older build's umask, a restored archive — must
+    // be tightened rather than silently appended to.
+    if ((fs.statSync(file).mode & 0o077) !== 0) fs.chmodSync(file, 0o600);
+    return true;
+  } catch (err) {
+    onError?.(err as Error);
+    return false;
+  }
+}
+
 export class Journal {
   readonly filePath: string;
 
@@ -23,17 +49,11 @@ export class Journal {
   /** Append one event, stamping `ts` from the caller's clock. Never throws. */
   append(event: Omit<JournalEvent, 'ts'>, now: Date = new Date()): void {
     const line: JournalEvent = { ts: now.toISOString(), ...event };
-    try {
-      fs.mkdirSync(path.dirname(this.filePath), { recursive: true, mode: 0o700 });
-      fs.appendFileSync(this.filePath, `${JSON.stringify(line)}\n`, {
-        encoding: 'utf8',
-        mode: 0o600,
-      });
-    } catch (err) {
+    appendJsonl(this.filePath, line, (err) => {
       process.stderr.write(
-        `⚠ sched: could not append journal event ${event.event}: ${(err as Error).message}\n`
+        `⚠ sched: could not append journal event ${event.event}: ${err.message}\n`
       );
-    }
+    });
   }
 
   /** Read every event, oldest first; malformed lines are skipped. */
@@ -44,8 +64,9 @@ export class Journal {
 
 /**
  * Read a JSONL file oldest-first, skipping malformed lines; `[]` when the
- * file is absent or unreadable. Shared by the journal and the CLI's run log
- * so the read-loop exists once.
+ * file is absent or unreadable. `cli/src/run-log.ts` implements the same loop
+ * against `runs.jsonl` — worth unifying in `core` (where `RunLogEntry` and
+ * `runsLogPath` now live) rather than leaving two copies.
  */
 export function readJsonl<T>(file: string): T[] {
   try {
@@ -65,9 +86,17 @@ export function readJsonl<T>(file: string): T[] {
   }
 }
 
-/** `issue:464` → 464; null for batch or malformed unit ids. */
-export function issueOfUnit(unit: string | null): number | null {
-  if (unit === null || !unit.startsWith('issue:')) return null;
+/**
+ * `issue:464` → 464; null for batch or malformed unit ids.
+ *
+ * Type-guards rather than trusting the declared type: `unit` now reaches here
+ * straight off a `JSON.parse`d `runs.jsonl` line (`buildSchedCostReport`),
+ * which is cast to `RunLogEntry` without validation. A hand-edited or
+ * truncated line carrying `"unit": 5` must skip that row, not crash
+ * `sched stats` with a TypeError (#524 review).
+ */
+export function issueOfUnit(unit: unknown): number | null {
+  if (typeof unit !== 'string' || !unit.startsWith('issue:')) return null;
   const n = Number.parseInt(unit.slice('issue:'.length), 10);
   return Number.isInteger(n) && n > 0 ? n : null;
 }

@@ -220,11 +220,22 @@ function handleSetConfig(key: string, value: string): void {
     }
   }
 
-  if (!config.setConfig(key, value)) {
+  // Coerce to the type the default declares. `setConfig` stores the raw CLI
+  // string, so without this `dossier config auditLog false` wrote the STRING
+  // "false" and every `=== false` check kept reading as enabled — the
+  // documented opt-out for both `auditLog` and `schedTelemetry` was a silent
+  // no-op (ai-dossier#524 review).
+  const declared = (config.DEFAULT_CONFIG as Record<string, unknown>)[key];
+  const coerced: string | boolean =
+    typeof declared === 'boolean' && (value === 'true' || value === 'false')
+      ? value === 'true'
+      : value;
+
+  if (!config.setConfig(key, coerced)) {
     console.error('❌ Failed to save configuration');
     process.exit(1);
   }
-  console.log(`✅ Configuration updated: ${key} = ${value}`);
+  console.log(`✅ Configuration updated: ${key} = ${String(coerced)}`);
   process.exit(0);
 }
 

@@ -1,11 +1,19 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { RunLogEntry } from '@ai-dossier/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerSchedCommand } from '../../commands/sched';
+import { readRunLog } from '../../run-log';
 import { createTestProgram, execHandles, execReturns } from '../helpers/test-utils';
 
 vi.mock('node:child_process');
+// `cli/src/run-log.ts`'s LOG_FILE is computed once at import time from
+// `os.homedir()` — this file's `vi.stubEnv('HOME', home)` (below) does not
+// retroactively change it, so `sched stats` tests mock `readRunLog` directly
+// rather than relying on real disk under the stubbed home (unlike the sched
+// package's own state, which resolves `os.homedir()` fresh per call).
+vi.mock('../../run-log');
 
 let home: string;
 let logs: string[];
@@ -462,5 +470,110 @@ describe('ai-dossier sched pause/resume/abandon', () => {
     await expect(
       runSched(['sched', 'abandon', '--issue', '404', '--project', 'test-proj'])
     ).rejects.toThrow('process.exit(1)');
+  });
+});
+
+describe('ai-dossier sched stats (#524: per-issue token/cost from runs.jsonl)', () => {
+  function mockRunLog(entries: Array<Partial<RunLogEntry>>): void {
+    vi.mocked(readRunLog).mockReturnValue(entries as RunLogEntry[]);
+  }
+
+  it('aggregates tokens/cost per issue, ignoring entries without a unit', () => {
+    mockRunLog([
+      {
+        timestamp: '2026-09-01T12:00:00Z',
+        unit: 'issue:524',
+        input_tokens: 1000,
+        output_tokens: 200,
+        total_cost_usd: 0.01,
+        duration_ms: 5000,
+      },
+      {
+        timestamp: '2026-09-01T12:10:00Z',
+        unit: 'issue:524',
+        input_tokens: 500,
+        output_tokens: 100,
+        total_cost_usd: 0.005,
+        duration_ms: 3000,
+      },
+      // An ordinary `ai-dossier run` entry — no unit — must be excluded.
+      {
+        timestamp: '2026-09-01T12:20:00Z',
+        dossier: 'imboard-ai/git/gate-issue',
+        input_tokens: 999,
+      },
+      {
+        timestamp: '2026-09-01T12:30:00Z',
+        unit: 'issue:9',
+        input_tokens: 10,
+        output_tokens: 2,
+      },
+    ]);
+
+    return runSched(['sched', 'stats', '--json']).then(() => {
+      const report = JSON.parse(logs.join(''));
+      expect(report.issues).toEqual([
+        {
+          issue: 9,
+          runs: 1,
+          input_tokens: 10,
+          output_tokens: 2,
+          cache_creation_tokens: null,
+          cache_read_tokens: null,
+          total_cost_usd: null,
+          duration_ms: null,
+        },
+        {
+          issue: 524,
+          runs: 2,
+          input_tokens: 1500,
+          output_tokens: 300,
+          cache_creation_tokens: null,
+          cache_read_tokens: null,
+          total_cost_usd: 0.015,
+          duration_ms: 8000,
+        },
+      ]);
+      expect(report.totals).toMatchObject({ runs: 3, input_tokens: 1510, output_tokens: 302 });
+    });
+  });
+
+  it('restricts to --issues when given, including a zero-run row for an unrecorded issue', async () => {
+    mockRunLog([{ timestamp: '2026-09-01T12:00:00Z', unit: 'issue:524', input_tokens: 100 }]);
+
+    await runSched(['sched', 'stats', '--issues', '524,9', '--json']);
+
+    const report = JSON.parse(logs.join(''));
+    // --issues is parsed via parseIssueSelection, which returns issues in
+    // ascending order regardless of the flag's input order.
+    expect(report.issues.map((r: { issue: number }) => r.issue)).toEqual([9, 524]);
+    expect(report.issues[0]).toMatchObject({ issue: 9, runs: 0, input_tokens: null });
+  });
+
+  it('prints a table by default and a message when there are no sched entries', async () => {
+    mockRunLog([]);
+    await runSched(['sched', 'stats']);
+    const out = logs.join('\n');
+    expect(out).toContain('No sched-dispatched runs.jsonl entries found');
+    expect(out).toContain('runs.jsonl'); // the resolved log path, so an operator knows where to look
+  });
+
+  it('renders a table with a TOTAL row when not --json', async () => {
+    mockRunLog([
+      {
+        timestamp: '2026-09-01T12:00:00Z',
+        unit: 'issue:524',
+        input_tokens: 1000,
+        output_tokens: 200,
+        total_cost_usd: 0.01,
+      },
+    ]);
+
+    await runSched(['sched', 'stats']);
+
+    const out = logs.join('\n');
+    expect(out).toContain('#524');
+    expect(out).toContain('TOTAL');
+    expect(out).toContain('$0.0100');
   });
 });

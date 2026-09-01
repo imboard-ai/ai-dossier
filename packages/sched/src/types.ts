@@ -386,6 +386,30 @@ export interface SlotEntry {
    * Added in schema 1.6.0; 1.5.0 states backfill null.
    */
   fenced_at: string | null;
+  /**
+   * When the CURRENTLY held unit was (re)spawned (#524) — set in
+   * `spawnAndRecord` on every genuine (re)spawn, distinct from
+   * `last_progress_at` (which advances on every progress signal and so
+   * cannot answer "how long has this dispatch been running"). Used to
+   * compute `duration_ms` for the unit's `runs.jsonl` entry. Added in schema
+   * 1.7.0; 1.6.0 slots backfill null (their in-flight duration is unknown,
+   * not zero).
+   */
+  spawned_at: string | null;
+  /**
+   * Byte size of the unit's dispatch log (`dispatchLogPath`) at the moment
+   * THIS spawn started (#524) — the log file is per-unit and opened in
+   * append mode (`createSpawnDeps`), so a redispatch's output lands after
+   * the previous dispatch's in the SAME file. Reading the whole file for a
+   * redispatched unit's `runs.jsonl` entry would concatenate two JSON
+   * results (parse failure for claude) or double-count summed tokens
+   * (opencode) — `recordDispatchRunLog` reads only the bytes from this
+   * offset onward, so each dispatch's entry reflects only its own output.
+   * `null` when the log did not exist yet at spawn time (first dispatch, or
+   * a legacy slot from before this field existed) — treated as offset 0.
+   * Added in schema 1.7.0; 1.6.0 slots backfill null.
+   */
+  log_offset_at_spawn: number | null;
   updated_at: string;
 }
 
@@ -451,7 +475,7 @@ export interface SchedConfig {
  * whose tier has no model configured drops together with its flag.
  */
 export interface DispatchConfig {
-  /** Command template, e.g. `['claude','-p','--output-format','json','--model','{model}']`. */
+  /** Command template, e.g. `['claude','-p','--output-format','stream-json','--verbose','--model','{model}']`. */
   command?: string[];
   /** Prompt template sent on the child's stdin; `{issue}` substituted. */
   prompt?: string;
@@ -628,7 +652,7 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.7.0' as const;
+export const SCHEMA_VERSION = '1.8.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -639,6 +663,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.4.0',
   '1.5.0',
   '1.6.0',
+  '1.7.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.3.0' as const;
@@ -764,7 +789,13 @@ export type JournalEventName =
   // NOT the engine — sched enqueue appends these before the issue is ever
   // dispatched)
   | 'label-blocked'
-  | 'label-check-failed';
+  | 'label-check-failed'
+  // #524 runs.jsonl telemetry: a dispatch's exit produced no entry (unit left
+  // the queue, or is not an `issue:<n>` unit), or the append itself failed.
+  | 'run-log-skipped'
+  | 'run-log-recorded'
+  | 'run-log-no-usage'
+  | 'run-log-failed';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —

@@ -47,16 +47,20 @@ import {
   SchedNotFoundError,
   SchedStore,
   schedStateDir,
+  schedTelemetryEnabled,
   setPaused,
   TEARDOWN_TIMEOUT_MS,
   tick,
   unitEvent,
 } from '@ai-dossier/sched';
 import type { Command } from 'commander';
-import { formatAge } from '../duration';
+import { formatCost, formatCount } from '../cost-format';
+import { formatAge, formatDurationMs } from '../duration';
 import { requireRepoSlug, tryFetchLabels } from '../gh';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
+import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
+import { buildSchedCostReport, type IssueCost } from '../sched-run-stats';
 import { renderTable } from '../table';
 
 /** Aggregate suite runs can be minutes long (full workspace test suite, not a focused subset). */
@@ -623,6 +627,81 @@ function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
     });
 }
 
+interface StatsOptions {
+  // No --project: `runs.jsonl` is one global file (unlike the other
+  // subcommands' per-project state under `~/.dossier/sched/<project>/`), so
+  // scoping by project isn't meaningful here yet — see the command's
+  // description for the resulting cross-repo caveat (same issue number in
+  // two repos sums together).
+  issues?: string;
+  json?: boolean;
+}
+
+function statsRow(label: string, row: Omit<IssueCost, 'issue'>): string[] {
+  return [
+    label,
+    String(row.runs),
+    formatCount(row.input_tokens),
+    formatCount(row.output_tokens),
+    formatCount(row.cache_creation_tokens),
+    formatCount(row.cache_read_tokens),
+    formatCost(row.total_cost_usd),
+    formatDurationMs(row.duration_ms),
+  ];
+}
+
+function registerStatsSubcommand(cmd: Command): void {
+  cmd
+    .command('stats')
+    .description(
+      'Per-issue token/cost totals for scheduler-dispatched agent runs (from ~/.dossier/runs.jsonl)'
+    )
+    .option('--issues <selection>', 'Restrict to these issues (e.g. "4,5" or "4..9")')
+    .option('--json', 'Output the report as JSON')
+    .action((opts: StatsOptions) => {
+      const issues = opts.issues ? issueList(opts.issues, 'issues') : undefined;
+      const entries = readRunLog();
+      const report = buildSchedCostReport(entries, issues);
+      // An empty cohort and a disabled recorder look identical in the log file
+      // (#524, decision 2), and `--issues` synthesizes zero-run rows so the
+      // row count never reaches 0 on that path. Resolve it once, up front, and
+      // surface it on every path — including `--json`.
+      const telemetryOn = schedTelemetryEnabled();
+
+      if (opts.json) {
+        console.log(
+          JSON.stringify(
+            { ...report, telemetry_enabled: telemetryOn, source: RUNS_LOG_FILE },
+            null,
+            2
+          )
+        );
+        return;
+      }
+
+      if (report.issues.length === 0) {
+        console.log(`No sched-dispatched runs.jsonl entries found in ${RUNS_LOG_FILE}.`);
+      }
+      if (!telemetryOn) {
+        console.log(
+          'Note: sched telemetry is disabled (`schedTelemetry: false` in ~/.dossier/config.json) — ' +
+            'dispatches are not recorded. Re-enable with `dossier config schedTelemetry true`.'
+        );
+      }
+      if (report.issues.length === 0) return;
+
+      const headers = ['Issue', 'Runs', 'In', 'Out', 'Cache-W', 'Cache-R', 'Cost', 'Duration'];
+      const rows = report.issues.map((row) => statsRow(`#${row.issue}`, row));
+      rows.push(statsRow('TOTAL', report.totals));
+      console.log(
+        renderTable(headers, rows, {
+          align: ['left', 'right', 'right', 'right', 'right', 'right', 'right', 'right'],
+          separator: true,
+        })
+      );
+    });
+}
+
 function registerAbandonSubcommand(cmd: Command): void {
   cmd
     .command('abandon')
@@ -834,4 +913,5 @@ export function registerSchedCommand(program: Command): void {
   registerPauseResumeSubcommand(schedCmd, false);
   registerAbandonSubcommand(schedCmd);
   registerStartSubcommand(schedCmd);
+  registerStatsSubcommand(schedCmd);
 }

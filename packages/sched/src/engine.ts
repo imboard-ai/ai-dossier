@@ -69,7 +69,9 @@ import {
   buildAgentCommand,
   buildPrompt,
   buildReportPrompt,
+  dispatchLogPath,
   escalateTier,
+  fileSizeOrZero,
   type ResolvedDispatch,
   reportTierFor,
   resolveDispatch,
@@ -77,7 +79,6 @@ import {
   STOP_POLL_MAX_MS,
   STOP_POLL_MIN_MS,
   stallTimeoutForSlot,
-  unitLogName,
 } from './dispatch';
 import type { RunFencer } from './fence';
 import {
@@ -91,6 +92,13 @@ import {
 import { issueOfUnit, type Journal, unitEvent } from './journal';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
+import {
+  appendSchedRunLog,
+  buildSchedRunLogEntry,
+  readDispatchLog,
+  schedRunsLogPath,
+  schedTelemetryEnabled,
+} from './run-log';
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import { findEntry, isReportSlot, transitionIssue, transitionSlot } from './state';
 import { runTeardown, type TeardownResult } from './teardown';
@@ -125,6 +133,14 @@ export interface EngineDeps {
    * existed, journaling `fence-failed` so the gap is visible rather than silent.
    */
   fencer?: RunFencer;
+  /**
+   * Home directory `runs.jsonl` telemetry (#524) is written under —
+   * `<homeDir>/.dossier/runs.jsonl`, the same file `cli`'s `ai-dossier run`
+   * writes to. Optional and defaults to `os.homedir()` (via
+   * `appendSchedRunLog`'s own default) when absent — override ONLY for
+   * tests, so they never touch the real machine's `~/.dossier`.
+   */
+  homeDir?: string;
   /**
    * Exec for batch git/milestone-CLI operations (#523) — worktree claim, member
    * commit-range recording, milestone posting, PR watch. Optional, and required
@@ -466,7 +482,12 @@ function spawnAndRecord(
     journalExtra?: Record<string, unknown>;
   }
 ): SchedState {
-  const logFile = path.join(ctx.deps.store.runsDir, `${unitLogName(unit)}.log`);
+  const logFile = dispatchLogPath(ctx.deps.store.runsDir, unit);
+  // #524: the log is per-unit and opened in append mode (createSpawnDeps), so
+  // a redispatch's output lands after any prior dispatch's in the SAME file.
+  // Captured BEFORE spawning — the size at this instant is exactly where
+  // THIS dispatch's own output will start.
+  const logOffset = fileSizeOrZero(logFile);
 
   let pid: number;
   try {
@@ -481,6 +502,11 @@ function spawnAndRecord(
     pid_start: ctx.deps.spawnDeps.processStart(pid),
     phase: opts.phase,
     last_progress_at: now.toISOString(),
+    // #524: distinct from last_progress_at, which later progress signals
+    // overwrite — this is the one field that answers "when did THIS dispatch
+    // start", the anchor `runs.jsonl`'s duration_ms is measured from.
+    spawned_at: now.toISOString(),
+    log_offset_at_spawn: logOffset,
   };
   const next =
     slot.status === 'assigned' || slot.status === 'recovering'
@@ -493,6 +519,10 @@ function spawnAndRecord(
     slot: slot.id,
     cmd: opts.cmd.join(' '),
     log: logFile,
+    // #524: which byte of the append-mode per-unit log this dispatch starts
+    // at — without it, mapping a log slice to this dispatch needs state.json,
+    // and `CLEARED_SLOT_FIELDS` nulls the field when the slot is released.
+    log_offset: logOffset,
     ...(opts.journalExtra ?? {}),
   });
   ctx.result.spawned.push(unit);
@@ -660,7 +690,12 @@ function blockTransitiveDependents(
 
     // A dependent mid-run is working toward a doomed merge — release its slot.
     const unit = `issue:${issue}`;
+    const slot = slotOf(next, unit);
     killUnitAgent(ctx, next, unit);
+    // #524: this agent was live and never recorded — same reasoning as the
+    // stall/external-advance kills. Runs BEFORE the release, since
+    // `recordDispatchRunLog`'s guard requires the slot still be `running`.
+    if (slot) recordDispatchRunLog(ctx, next, slot, unit);
     const released = releaseSlotViaFailure(next, unit, now);
     next = released.state;
 
@@ -776,6 +811,14 @@ function enterRecovery(
   if (!entry || !slot) return state;
 
   killUnitAgent(ctx, state, unit);
+  // #524: only the STALL path kills a still-live, not-yet-recorded agent —
+  // `causeEvent === 'verify-incomplete'` arrives from `completeUnitOrRecover`
+  // AFTER the agent's exit was already detected and recorded by the dead-pid
+  // branch of `reconcileRunning`; recording again here would double-count
+  // that same dispatch.
+  if (causeEvent === 'stalled') {
+    recordDispatchRunLog(ctx, state, slot, unit);
+  }
 
   const report = isReportSlot(slot);
   const nextTier = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
@@ -977,6 +1020,122 @@ function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
   return isReportSlot(slot) ? false : truth.closed;
 }
 
+/**
+ * Append this dispatch's `runs.jsonl` entry (#524) — one per completed
+ * spawn, not per unit: a redispatch/takeover produces another entry, each
+ * with its own tokens/duration, never an update to the first. Called from
+ * every place a dispatch ends: `reconcileRunning`'s dead-pid branch (the
+ * agent exited on its own), its external-advance branch (ground truth says
+ * done while the agent was still alive and had to be killed), the
+ * stall-timeout kill in `enterRecovery`, and the dependents-blocked kill in
+ * `blockTransitiveDependents`.
+ *
+ * Exactly-once per dispatch is enforced by the guard below (slot still
+ * `running` and actually spawned), not by the call sites' ordering — two of
+ * the four reach slots in any non-idle status.
+ */
+function recordDispatchRunLog(
+  ctx: TickCtx,
+  state: SchedState,
+  slot: SlotEntry,
+  unit: string
+): void {
+  // Enforce the once-per-dispatch invariant HERE rather than restating it in
+  // prose at four call sites (#524 review). `blockTransitiveDependents` and
+  // `enterRecovery` reach slots in any non-idle status: a slot already moved
+  // to `exited`/`verifying` was recorded on the way out, and re-recording it
+  // would append a SECOND entry over the same log slice — doubling that
+  // issue's tokens in `sched stats`, the exact number-fabrication this work
+  // exists to eliminate. A slot that never spawned (`assigned`/`starting`,
+  // `spawned_at` still null) is worse: it would read from offset 0 and
+  // re-attribute every prior dispatch's tokens to a phantom run.
+  if (slot.status !== 'running' || slot.spawned_at === null) {
+    journal(ctx, 'run-log-skipped', unit, {
+      reason: slot.spawned_at === null ? 'never-spawned' : `already-recorded-${slot.status}`,
+      slot: slot.id,
+    });
+    return;
+  }
+
+  const issue = issueOfUnit(unit);
+  const entry = issue === null ? undefined : findEntry(state, issue);
+  if (issue === null || !entry) {
+    // Left the queue already, or a batch unit (#464 non-goal: only issue:<n>
+    // units are dispatched) — nothing to attribute the run to. Journaled so
+    // an operator sees WHY a dispatch produced no runs.jsonl entry, rather
+    // than a silent gap next to `exit-detected`.
+    journal(ctx, 'run-log-skipped', unit, {
+      reason: issue === null ? 'not-an-issue-unit' : 'entry-gone',
+    });
+    return;
+  }
+
+  // Report slots ride the same tier the cycle escalation ladder set at
+  // dispatch time, EXCEPT `entry.tier` is deliberately not updated for a
+  // report redispatch (`enterRecovery`'s `if (!report)` guard) — mirror the
+  // spawn-side branch (`spawnReportAgent`) or a report slot's tier/model
+  // here would silently disagree with what was actually spawned.
+  const tier = isReportSlot(slot) ? (reportTierFor(slot.recoveries) ?? entry.tier) : entry.tier;
+  const cmd = buildAgentCommand(ctx.dispatch.command, tier, issue, ctx.dispatch.tierModels);
+  const logFile = dispatchLogPath(ctx.deps.store.runsDir, unit);
+
+  // #524: read only THIS dispatch's slice — the log is per-unit and
+  // append-mode, so the whole file would include every prior dispatch's
+  // output too (claude: unparseable JSON concatenation; opencode: summed
+  // tokens double-counted).
+  const offset = slot.log_offset_at_spawn ?? 0;
+  const logContent = readDispatchLog(logFile, offset);
+  const runLogFile = schedRunsLogPath(ctx.deps.homeDir);
+
+  const runEntry = buildSchedRunLogEntry({
+    unit,
+    role: slot.role,
+    cmd0: ctx.dispatch.command[0],
+    cmd,
+    logContent,
+    spawnedAt: slot.spawned_at,
+    completedAt: ctx.deps.now(),
+    configuredModel: ctx.dispatch.tierModels[tier],
+    cwd: ctx.deps.repoDir,
+  });
+
+  // An entry with null tokens has four possible causes that look identical in
+  // `sched stats` (a row of dashes). Journal WHICH one, so an operator can
+  // tell "the agent wrote nothing" from "we couldn't read the log" without
+  // re-deriving it from the log file's mtime.
+  if (runEntry.input_tokens === null && runEntry.output_tokens === null) {
+    journal(ctx, 'run-log-no-usage', unit, {
+      log: logFile,
+      offset,
+      bytes: logContent === null ? null : logContent.length,
+      reason:
+        logContent === null
+          ? 'log-unreadable'
+          : logContent.trim() === ''
+            ? 'log-empty'
+            : 'no-usage-events',
+    });
+  }
+
+  if (!schedTelemetryEnabled(ctx.deps.homeDir)) {
+    // The operator opted out. Journal it: otherwise a missing runs.jsonl entry
+    // is indistinguishable from a lost one.
+    journal(ctx, 'run-log-skipped', unit, { reason: 'telemetry-disabled' });
+    return;
+  }
+
+  const written = appendSchedRunLog(runEntry, ctx.deps.homeDir, (err) =>
+    journal(ctx, 'run-log-failed', unit, { detail: err.message, file: runLogFile })
+  );
+  if (written) {
+    journal(ctx, 'run-log-recorded', unit, {
+      file: runLogFile,
+      input_tokens: runEntry.input_tokens,
+      output_tokens: runEntry.output_tokens,
+    });
+  }
+}
+
 /** Reconcile one running slot against its polled ground truth. */
 function reconcileRunning(
   ctx: TickCtx,
@@ -991,6 +1150,7 @@ function reconcileRunning(
   // is DETECTED, never trusted as completion (AC2/AC3).
   if (slot.pid !== null && !ctx.deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
     journal(ctx, 'exit-detected', unit, { pid: slot.pid, slot: slot.id });
+    recordDispatchRunLog(ctx, state, slot, unit);
     const exited = transitionSlot(state, slot.id, 'exited', {}, now);
     return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete');
   }
@@ -1027,6 +1187,10 @@ function reconcileRunning(
         : `report done (role=${slot.role})`,
     });
     killUnitAgent(ctx, state, unit);
+    // The agent was still alive (that's what "externally-advanced" means) —
+    // log it here too, or an external-advance dispatch would never get a
+    // runs.jsonl entry at all (it never takes the dead-pid branch above).
+    recordDispatchRunLog(ctx, state, slot, unit);
     const exited = transitionSlot(state, slot.id, 'exited', {}, now);
     return completeUnitOrRecover(ctx, exited, unit, truth, 'external-advance');
   }

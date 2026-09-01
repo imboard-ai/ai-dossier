@@ -538,3 +538,10 @@ interface FormatResult {
 | `getErrorStack(err)` | Extract error stack safely |
 | `readFileIfExists(path)` | Read file or return `undefined` |
 | `createDefaultVerificationResult(file)` | Create a default `VerificationResult` |
+| `parseAgentUsage(stdout)` | Token/cost/model from a claude headless result — one `--output-format json` object or a `stream-json` event stream. `modelUsage` is the source of record, never blended with the top-level `usage` block (#524); returns `AgentRunUsage \| null` |
+| `parseOpenCodeUsage(stdout)` | The same, for an `opencode run --format json` JSONL event stream |
+| `usageParserFor(cmd0)` | Pick the parser for a spawned binary (`opencode` basename → `parseOpenCodeUsage`, else `parseAgentUsage`) |
+| `runsLogPath(home?)` | `~/.dossier/runs.jsonl` — the run log both `cli` and `sched` append to |
+| `SCHED_DISPATCH_EVENT` | The `type` of the scheduler's dispatch-log preamble line; every parser above skips it |
+
+Types: `AgentRunUsage` (all fields nullable — never fabricated) and `RunLogEntry` (one `runs.jsonl` line).
