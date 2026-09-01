@@ -869,6 +869,94 @@ rather than the raw recorded `model=` — a consumer selecting on a routed spell
 
 ---
 
+## Classify Pre-Screen (`classify`)
+
+The deterministic gate `issue-cycle-classifier` runs **before any model call** (#538).
+`docs/reports/batch-pilot-2-execution.md` §4.1 measured the classifier costing ~64k
+tokens/dispatch at mid tier with full repo exploration — including for issues that hit an
+obvious RFC-0001 E.2 floor rule a deterministic check can catch for free — over the same
+§2.2 15-issue classify set.
+
+```bash
+ai-dossier classify prescreen --issue 538 [--repo owner/name] [--submitted-set 4,5..9]
+```
+
+`--submitted-set` names the issues batched/submitted alongside this one (fleet-style
+selection grammar) — an open `Depends on #N` inside that set does not count toward rule 9.
+
+Prints a single JSON verdict — no model call anywhere, exits 0 for either verdict
+(`verdict` is the payload, not a pass/fail gate); an invalid `--issue`/`--repo`/
+`--submitted-set` still exits 1 before any lookup:
+
+```json
+{
+  "issue": 538,
+  "state": "OPEN",
+  "verdict": "full",
+  "reasons": [
+    { "check": "text-floor", "message": "Title/body/labels match 'rule1-risk-floor-area' (keyword: 'terraform')." }
+  ],
+  "plan_artifact": "absent",
+  "degraded": false,
+  "warnings": [],
+  "checked_at": "2026-09-01T22:00:00.000Z"
+}
+```
+
+`state` lets a consumer tell a CLOSED issue apart from a read failure (`state: null`).
+`plan_artifact` is `present` (path-floor/file-count ran), `absent` (no plan:v1 comment —
+expected, not an error), or `unreadable` (couldn't even check — `path-floor`/`file-count`
+were skipped, not silently passed). `checked_at` is the one non-deterministic field: two
+runs of an unchanged issue can differ only there. `degraded`/`warnings` are the fail-open
+signal — when any lookup couldn't complete (fetching the issue, its comments, or a
+dependency's state), `degraded: true` and `warnings` names exactly what didn't run; the
+verdict still reflects whatever DID complete rather than blocking on the gap:
+
+```json
+{
+  "issue": 538,
+  "state": null,
+  "verdict": "candidate",
+  "reasons": [],
+  "plan_artifact": null,
+  "degraded": true,
+  "warnings": ["Could not read issue #538: gh is not authenticated.\nFix: run 'gh auth login' …"],
+  "checked_at": "2026-09-01T22:00:05.000Z"
+}
+```
+
+`verdict: "full"` means an obvious floor hit was found — the classifier should skip
+straight to posting `mode=full` with the recorded reason, no repo exploration needed.
+`verdict: "candidate"` means proceed to the bounded mechanical-tier classify pass (issue
+text + `reasons`/`warnings` as context, still no repo exploration unless that pass's
+`confidence` lands below 0.6, which triggers the dossier's single mid-tier escalation).
+
+Coverage is deliberately partial — it catches the OBVIOUS floor hits, not all of them:
+
+| Check | What it catches | Source |
+|---|---|---|
+| `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` | same policy as the `sched enqueue` pre-screen (#507), shared via `hard-block-labels.ts` |
+| `text-floor` | A text-keyword approximation of RFC-0001 E.2 rules 1/3/4 (risk-floor area, new package/workspace, deploy pipeline) scanned over title + body + labels | `prescreen.ts`'s `TEXT_FLOOR_PATTERNS`; the matched keyword is named in the reason message |
+| `path-floor` | Rule 1's path-based risk floor, reusing `plan validate`'s `scanRiskFloor` (capped at 8 reasons — a plan:v1 artifact is comment-sourced, untrusted input) | requires a `plan:v1` artifact already on the issue |
+| `file-count` | Rule 5, "Predicted files > 8" | requires a `plan:v1` artifact already on the issue |
+| `open-dependency` | Rule 9, an open `Depends on #N` outside `--submitted-set` (capped at 8 reasons; refs themselves capped at 32 per issue — an issue body is untrusted input) | resolved via `gh issue view <N> --json state` |
+
+What it does NOT catch — rule 2 beyond the bare `migration` keyword, rule 7 (hard
+rollback), rule 8 (visual/browser review), rules 5/6 (file/diff size) when no plan:v1
+artifact exists, and rule 10 (confidence) — is intentional: those need either file-level
+detail no pre-screen has, or judgment. They fall through to `verdict: "candidate"` and are
+exactly what the mechanical-tier classify pass exists to handle instead of a mid-tier,
+repo-exploring one. A text-keyword scan is deliberately conservative about false
+positives: bare words like `auth`/`infra`/`infrastructure` collide with benign phrasing
+(`gh auth`, "test infrastructure") often enough in real issue text that they are excluded
+in favor of more specific compound terms — verified against a real 15-issue regression
+fixture (`cli/src/__tests__/fixtures/prescreen-regression-issues.json`, from
+`docs/reports/batch-pilot-2-execution.md` §2.2's actual classify set). Methodology and the
+measured pre-screen hit rate:
+[docs/reports/issue-538-classifier-cost-methodology.md](../docs/reports/issue-538-classifier-cost-methodology.md).
+
+---
+
 ## Plan Artifacts (`plan`) — plan:v1
 
 Issues used to be planned up to three times (triage, batch prep, plan-issue). The
