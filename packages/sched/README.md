@@ -356,12 +356,22 @@ prompt instructs it) and exit. The engine owns everything after the park:
    journal event — the work is merged, so dependents are never re-blocked.
    The full-cycle tail-run pattern (re-dispatching a whole run for
    teardown+report) is retired.
+7. **Stale-failure reconcile (#501)** — a `failed reason=auto-merge-blocked`
+   entry stops being watched the instant it leaves `parked`, but an operator
+   can manually clear the watcher's block and re-queue the same PR outside
+   the engine entirely. `pollParkedPrs` also polls these stale-failed entries
+   (same cadence, no extra GH calls), and once the PR shows `MERGED` with the
+   issue closed, the entry flips `failed → shipped` and re-enters the normal
+   report-dispatch path (AC2 above) — `sched status` and dependents'
+   readiness reflect that the work actually shipped. This does NOT
+   retroactively unblock dependents that were already blocked when the unit
+   first failed; that stays a manual follow-up.
 
 `sched status` shows parked PRs (zero slots, with the last poll's age), a
 `pr` column and a `cleanup` column on the queue; every watcher decision lands
 in `events.jsonl` (`pr-parked`, `merge-accepted`, `pr-watch-failed`,
 `pr-watch-waiting`, `teardown-done`/`teardown-failed`, `report-dispatched`,
-`report-failed`, `ground-truth-unreachable`).
+`report-failed`, `ground-truth-unreachable`, `stale-failure-reconciled`).
 
 ## Development
 

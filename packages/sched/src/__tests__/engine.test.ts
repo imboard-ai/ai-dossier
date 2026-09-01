@@ -1377,6 +1377,69 @@ describe('#468 AC3: watcher failure paths', () => {
   });
 });
 
+describe('#501: stale auto-merge-blocked failures reconcile after a later merge', () => {
+  it('a failed auto-merge-blocked unit reconciles to shipped once the PR merges and the issue closes', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN', blocked: true });
+    h.advance(200_000);
+    let result = h.tick();
+    expect(result.failed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+
+    // Operator re-queues the PR and it merges. No `parked` entries exist any
+    // more at this point — this also proves the pollParkedPrs poll-skip
+    // guard fix, since the poll must still run for a stale-failed-only tick.
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T13:00:00Z' });
+    h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(200_000);
+    result = h.tick();
+
+    expect(result.staleReconciled).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('shipped');
+    expect(h.events().some((e) => e.event === 'stale-failure-reconciled' && e.issue === 101)).toBe(
+      true
+    );
+  });
+
+  it('does not reconcile while the PR merged but the issue is still open', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN', blocked: true });
+    h.advance(200_000);
+    h.tick();
+
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T13:00:00Z' });
+    h.advance(200_000);
+    const result = h.tick();
+
+    expect(result.staleReconciled).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+  });
+
+  it('never reconciles a failed entry for any reason other than auto-merge-blocked', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN', mergeable: 'CONFLICTING' });
+    h.advance(200_000);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('pr-conflicting');
+
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T13:00:00Z' });
+    h.closedIssues.add(101);
+    h.advance(200_000);
+    const result = h.tick();
+
+    expect(result.staleReconciled).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+  });
+});
+
 describe('#468 AC6: restart mid-watch', () => {
   it('a fresh engine instance resumes the watch from state.json alone', () => {
     const first = harness();

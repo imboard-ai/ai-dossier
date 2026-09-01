@@ -582,7 +582,10 @@ export type JournalEventName =
   // NOT the engine — sched enqueue appends these before the issue is ever
   // dispatched)
   | 'label-blocked'
-  | 'label-check-failed';
+  | 'label-check-failed'
+  // #501: a `failed reason=auto-merge-blocked` entry whose PR was later
+  // manually re-queued and merged is reconciled back to `shipped`.
+  | 'stale-failure-reconciled';
 
 /** One journaled event. `ts` is stamped by the journal, never by callers. */
 export interface JournalEvent {

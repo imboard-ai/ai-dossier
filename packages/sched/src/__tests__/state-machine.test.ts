@@ -202,6 +202,22 @@ describe('issue state machine (RFC-0001 §D.1)', () => {
     expect(() => transitionIssue(done, 101, 'failed')).toThrow(IllegalTransitionError);
   });
 
+  it('failed has exactly one outgoing edge, to shipped (#501 stale-failure reconcile)', () => {
+    let state = seeded();
+    state = transitionIssue(state, 101, 'classified', {}, NOW);
+    state = transitionIssue(state, 101, 'dispatched', {}, NOW);
+    state = transitionIssue(state, 101, 'parked', { pr: 55 }, NOW);
+    state = transitionIssue(state, 101, 'failed', { reason: 'auto-merge-blocked' }, NOW2);
+    expect(() => transitionIssue(state, 101, 'shipped', { reason: null }, NOW2)).not.toThrow();
+
+    const stillFailed = state; // re-check the pre-shipped snapshot
+    expect(() => transitionIssue(stillFailed, 101, 'done')).toThrow(IllegalTransitionError);
+    expect(() => transitionIssue(stillFailed, 101, 'blocked')).toThrow(IllegalTransitionError);
+    expect(() => transitionIssue(stillFailed, 101, 'parked', { pr: 55 })).toThrow(
+      IllegalTransitionError
+    );
+  });
+
   it('throws on unknown issue', () => {
     expect(() => transitionIssue(seeded(), 999, 'classified')).toThrow('not found');
   });
