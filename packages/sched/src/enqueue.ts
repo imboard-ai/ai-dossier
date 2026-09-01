@@ -171,12 +171,18 @@ export function parseManifest(raw: unknown): EnqueueInput[] {
  */
 export function assertNoDependencyCycle(state: SchedState, inputs: EnqueueInput[]): void {
   const edges = new Map<number, number[]>();
+  // A re-enqueued issue's fresh deps REPLACE its old entry's deps below (the
+  // entry actually built at ~line 334 carries only `input.deps`, never a
+  // merge) — mirror that here rather than appending, or a stale dep from a
+  // now-terminal entry can produce a cycle error for a manifest that, read on
+  // its own, has none.
+  const reenqueued = new Set(inputs.map((input) => input.issue));
   for (const entry of state.entries) {
+    if (reenqueued.has(entry.issue)) continue;
     edges.set(entry.issue, [...entry.deps]);
   }
   for (const input of inputs) {
-    const existing = edges.get(input.issue) ?? [];
-    edges.set(input.issue, [...existing, ...(input.deps ?? [])]);
+    edges.set(input.issue, [...(input.deps ?? [])]);
   }
 
   const WHITE = 0;
@@ -390,10 +396,40 @@ export function enqueueEntries(
     }
   }
 
+  // Re-enqueueing a terminal issue (allowed above) must REPLACE its old entry,
+  // not sit alongside it — validateState enforces one entry per issue on load,
+  // so appending here would write a state the very next command can't read
+  // back (#502). Any surviving old entry whose issue matches a fresh one is
+  // guaranteed terminal: the guard above already threw for any active match.
+  const survivingEntries = state.entries.filter((e) => !seen.has(e.issue));
+
+  // A terminal member re-enqueued into a different batch (or dropped to
+  // full-cycle, batch null) leaves its OLD batch's `members` still naming the
+  // issue. validateState only checks entry.batch -> batch.members, never the
+  // reverse, so that stray membership sails through validation — then
+  // dissolveBatch/abandonBatch (which trust batch.members blindly) and
+  // batchOf (which returns the first batch whose members include the issue)
+  // would act on the OLD batch for an issue that has actually moved on
+  // (#502). Drop the issue from any batch its fresh entry no longer points at.
+  const freshBatchOf = new Map(entries.map((e) => [e.issue, e.batch]));
+  for (const batch of batches) {
+    const stillMembers = batch.members.filter((issue) => {
+      const target = freshBatchOf.get(issue);
+      return target === undefined || target === batch.id;
+    });
+    if (stillMembers.length !== batch.members.length) {
+      batch.members = stillMembers;
+      batch.eviction_groups = batch.eviction_groups
+        .map((group) => group.filter((issue) => stillMembers.includes(issue)))
+        .filter((group) => group.length > 1);
+      batch.updated_at = timestamp;
+    }
+  }
+
   // Eviction groups must name members of their own batch: a stray issue number
   // would expand an eviction to a non-member and count against the batch size
   // in the dissolve trigger, dissolving the batch below its real threshold.
-  const combined = { ...state, entries: [...state.entries, ...entries], batches };
+  const combined = { ...state, entries: [...survivingEntries, ...entries], batches };
   for (const batch of batches) {
     for (const group of batch.eviction_groups) {
       const strays = group.filter((issue) => !batch.members.includes(issue));
