@@ -11,7 +11,13 @@
 
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import type { SchedConfig, StatusReport, SuiteResult, TickResult } from '@ai-dossier/sched';
+import type {
+  CapOutcome,
+  SchedConfig,
+  StatusReport,
+  SuiteResult,
+  TickResult,
+} from '@ai-dossier/sched';
 import {
   abandonBatch,
   abandonIssue,
@@ -72,6 +78,18 @@ function createBatchSuiteRunner(): (worktree: string) => SuiteResult {
       encoding: 'utf-8',
       timeout: BATCH_SUITE_TIMEOUT_MS,
     });
+    // `result.error` (ENOENT, ETIMEDOUT at the budget above, EACCES) means the
+    // RUNNER never produced a trustworthy report — batch-dispatch.ts's caller
+    // (`beginAttribution`) reads a suite with 0 failing tests as "nothing to
+    // attribute" and dissolves the batch, so a timeout must never look
+    // identical to a genuinely empty/green suite report.
+    if (result.error) {
+      return {
+        ok: false,
+        failing: [],
+        detail: `suite runner failed to run: ${result.error.message} (cwd=${worktree})`,
+      };
+    }
     const failing = parseVitestJson(result.stdout ?? '');
     const ok = result.status === 0;
     return {
@@ -79,8 +97,43 @@ function createBatchSuiteRunner(): (worktree: string) => SuiteResult {
       failing,
       detail: ok
         ? undefined
-        : `npm test exited ${result.status ?? `signal ${result.signal ?? 'unknown'}`} in ${worktree}`,
+        : `npm test exited ${result.status ?? `signal ${result.signal ?? 'unknown'}`} in ${worktree} (${failing.length} failing)`,
     };
+  };
+}
+
+/**
+ * Batch-worktree `ai-dossier cap run <id>` runner for the per-member
+ * incremental gate (#523 AC2). `spawnSync` (not the plain `ExecFn`, which
+ * throws away stdout on a non-zero exit) because `cap run`'s `task-failed`
+ * outcome — a legitimately failing test/typecheck — IS exit code 1, and the
+ * JSON envelope naming which of the four outcomes it was is the LAST stdout
+ * line either way (docs/reference/capabilities.md).
+ */
+function createBatchCapabilityRunner(): (worktree: string, capabilityId: string) => CapOutcome {
+  return (worktree, capabilityId) => {
+    const result = spawnSync('ai-dossier', ['cap', 'run', capabilityId], {
+      cwd: worktree,
+      encoding: 'utf-8',
+      timeout: BATCH_SUITE_TIMEOUT_MS,
+    });
+    if (result.error) return 'automation-broken';
+    const lastLine = (result.stdout ?? '').trim().split('\n').pop() ?? '';
+    try {
+      const envelope = JSON.parse(lastLine) as { outcome?: unknown };
+      const outcome = envelope.outcome;
+      if (
+        outcome === 'ok' ||
+        outcome === 'task-failed' ||
+        outcome === 'automation-broken' ||
+        outcome === 'capability-unavailable'
+      ) {
+        return outcome;
+      }
+      return 'automation-broken';
+    } catch {
+      return 'automation-broken';
+    }
   };
 }
 
@@ -694,6 +747,7 @@ function registerStartSubcommand(cmd: Command): void {
             ),
         }),
         runBatchSuite: createBatchSuiteRunner(),
+        runBatchCapability: createBatchCapabilityRunner(),
       };
 
       const describe = (result: TickResult): string => {

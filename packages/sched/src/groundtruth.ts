@@ -13,6 +13,7 @@
 
 import { unwrapList } from './json';
 import { createExecFn, type ExecFn } from './project';
+import type { BatchPhase } from './types';
 
 /** The latest runstate milestone on an issue, as `runstate last --json` reports it. */
 export interface GroundTruthMilestone {
@@ -386,6 +387,9 @@ export function isBatchTailParked(
 }
 
 /** Whether the anchor's latest milestone is `<phase> done` (#523 — batch-review / batch-report). */
-export function isBatchPhaseDone(milestone: GroundTruthMilestone | null, phase: string): boolean {
+export function isBatchPhaseDone(
+  milestone: GroundTruthMilestone | null,
+  phase: BatchPhase
+): boolean {
   return milestone !== null && milestone.phase === phase && milestone.status === 'done';
 }

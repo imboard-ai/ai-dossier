@@ -17,6 +17,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  type CapOutcome,
   createSpawnDeps,
   type EngineDeps,
   type EnqueueInput,
@@ -197,7 +198,11 @@ interface BatchHarness {
 function batchHarness(
   repoDir: string,
   agentArgs: string[],
-  opts?: { maxSlots?: number; suite?: (worktree: string) => SuiteResult }
+  opts?: {
+    maxSlots?: number;
+    suite?: (worktree: string) => SuiteResult;
+    capability?: (worktree: string, capabilityId: string) => CapOutcome;
+  }
 ): BatchHarness {
   const store = new SchedStore(tmpDir('sched-batch-'));
   const truthDir = tmpDir('sched-batch-truth-');
@@ -224,6 +229,7 @@ function batchHarness(
     teardownExec: realExec,
     batchExec: fakeBatchExec(truthDir, realExec),
     runBatchSuite: opts?.suite ?? (() => ({ ok: true, failing: [] })),
+    ...(opts?.capability ? { runBatchCapability: opts.capability } : {}),
   };
   const config: SchedConfig = {
     max_slots: opts?.maxSlots ?? 2,
@@ -434,5 +440,42 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(entries.find((e) => e.issue === 802)?.mode).toBe('full');
     expect(entries.find((e) => e.issue === 803)?.mode).toBe('full');
     expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
+    // The dissolved batch's shared worktree is torn down for real, not
+    // leaked (it would otherwise never be removed by anything else).
+    expect(batch?.worktree).toBeTruthy();
+    expect(fs.existsSync(batch?.worktree as string)).toBe(false);
+  }, 60_000);
+
+  it('incremental gate (AC2): a member that posts review done but fails cap run test.focused is evicted', async () => {
+    const repo = scratchRepo();
+    const capability: (worktree: string, id: string) => CapOutcome = (_worktree, id) =>
+      id === 'test.focused' ? 'task-failed' : 'ok';
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 901, mode: 'slot', batch: 'b-gate', anchor: 900, tier: 'mid' },
+      { issue: 902, mode: 'slot', batch: 'b-gate', tier: 'mid' },
+      { issue: 903, mode: 'slot', batch: 'b-gate', tier: 'mid' },
+    ]);
+    h.seal('b-gate');
+
+    h.tick(); // batch-setup + member 1
+    const pid = batchSlotPid(h, 'b-gate') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+
+    // Member 1 posts `review done` for real, but the incremental gate
+    // (test.focused) reports `task-failed` — evicted directly, same rail as
+    // a self-reported block, never reaching attribution/revert.
+    const result = h.tick();
+    const batch = findBatch(h.state(), 'b-gate');
+    expect(batch?.evictions).toHaveLength(1);
+    expect(batch?.evictions[0]).toMatchObject({
+      issue: 901,
+      reason: 'incremental-gate-failed:test.focused',
+    });
+    expect(h.state().entries.find((e) => e.issue === 901)?.mode).toBe('full');
+    // Only one member left — batch continues to it rather than wedging.
+    expect(batch?.status).toBe('executing');
+    expect(batch?.executing_member).toBe(2);
+    expect(result.spawned).toContain('batch:b-gate');
   }, 60_000);
 });

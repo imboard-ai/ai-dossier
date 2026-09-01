@@ -46,10 +46,20 @@
  *    and run pool return / worktree remove, VERIFIED before claimed
  *    (`cleanup=failed-<step>` on mismatch, AC2). Results land in a second
  *    short lock pass together with the report dispatch.
+ * 4. **Batch pass** (#523, only when `batchExec`/`runBatchSuite` are both
+ *    configured): `batch-dispatch.ts`'s `runBatchTick` — a self-contained
+ *    reconcile+refill for every `batch:<id>` unit, run after steps 1-3 so a
+ *    batch never takes a slot an issue would otherwise have gotten this tick.
  *
+
  * Everything that touches the world (processes, GitHub, git) is injected;
- * the state machine is pure. Only `issue:<n>` units are dispatched — batch
- * member sequencing is a follow-up (#464 non-goal).
+ * the state machine is pure. This file dispatches `issue:<n>` units only —
+ * since #523, `tick()` also runs a second pass (`batch-dispatch.ts`'s
+ * `runBatchTick`) that drives every `batch:<id>` unit (serial slot-cycle
+ * members, the aggregate suite, the tail agent, the PR watch, the report
+ * agent), merging its result into this tick's `TickResult`. That pass runs
+ * only when `EngineDeps.batchExec`/`runBatchSuite` are both supplied — an
+ * engine missing either never dispatches a `ready` batch (it stays queued).
  */
 
 import * as path from 'node:path';
@@ -116,18 +126,27 @@ export interface EngineDeps {
   fencer?: RunFencer;
   /**
    * Exec for batch git/milestone-CLI operations (#523) — worktree claim, member
-   * commit-range recording, milestone posting, PR watch. Optional: an engine
-   * constructed without one never dispatches a `ready` batch (it stays queued,
-   * visible in `sched status`), exactly like `fencer`'s degrade-instead-of-crash
-   * contract.
+   * commit-range recording, milestone posting, PR watch. Optional, and required
+   * TOGETHER with `runBatchSuite`: the batch pass (`runBatchTick`) runs only
+   * when BOTH are supplied — an engine missing either never dispatches a
+   * `ready` batch at all (it stays queued, visible in `sched status`), rather
+   * than half-driving a batch it could not validate.
    */
   batchExec?: BatchDispatchDeps['exec'];
   /**
    * Runs the aggregate suite inside a batch worktree (#523) — the deterministic
-   * gate between `executing` and `reviewing`. Optional, same degrade contract
-   * as `batchExec`: without one a batch can reach `validating` but never leaves it.
+   * gate between `executing` and `reviewing`. Optional; see `batchExec`'s doc
+   * for the paired-requirement contract.
    */
   runBatchSuite?: BatchDispatchDeps['runSuite'];
+  /**
+   * Runs one `ai-dossier cap run <id>` in a batch worktree for the per-member
+   * incremental gate (#523 AC2). Fully optional — independently of
+   * `batchExec`/`runBatchSuite` — since it is itself a "when available" fast
+   * path: without it the gate is simply skipped, exactly as if the repo had no
+   * `.dossier/automation/` manifest.
+   */
+  runBatchCapability?: BatchDispatchDeps['runCapability'];
 }
 
 /** What one tick did — surfaced by `sched start`. */
@@ -1560,10 +1579,15 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   }
 
   // Batch dispatch (#523) — a separate pass, deliberately after issue dispatch:
-  // `runnableUnits` already orders issues before batches, so a batch never
-  // takes a slot an issue would otherwise have gotten this same tick. Only
-  // runs when the operator configured batch exec deps; without them a `ready`
-  // batch stays queued (visible in `sched status`) rather than crashing.
+  // `runBatchTick` never goes through `computeAssignments`/`runnableUnits` at
+  // all (batch-dispatch.ts's own bespoke free-capacity-gated claim, mirroring
+  // `dispatchReportAgents`) — the ordering guarantee here comes from PASS
+  // ORDERING plus that per-claim `freeCapacity` gate: this pass runs strictly
+  // after `dispatchAssignments` already filled every slot it could, so a
+  // batch never takes a slot an issue would otherwise have gotten this same
+  // tick. Only runs when the operator configured batch exec deps; without
+  // them a `ready` batch stays queued (visible in `sched status`) rather than
+  // crashing.
   if (deps.batchExec !== undefined && deps.runBatchSuite !== undefined) {
     const batchDeps: BatchDispatchDeps = {
       store: deps.store,
@@ -1574,6 +1598,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
       repoDir: deps.repoDir,
       exec: deps.batchExec,
       runSuite: deps.runBatchSuite,
+      ...(deps.runBatchCapability !== undefined ? { runCapability: deps.runBatchCapability } : {}),
     };
     const batchResult = runBatchTick(batchDeps, config, dispatch);
     result = mergeBatchResult(result, batchResult);

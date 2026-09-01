@@ -18,6 +18,7 @@ export {
 export {
   type BatchDispatchDeps,
   type BatchTickResult,
+  type CapOutcome,
   runBatchTick,
 } from './batch-dispatch';
 export { type BisectOptions, type BisectOutcome, runAttributionBisect } from './bisect';

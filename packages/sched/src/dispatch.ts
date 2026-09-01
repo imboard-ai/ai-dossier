@@ -456,17 +456,31 @@ export function buildReportPrompt(
  * (newlines above all) are flattened and the list is bounded — a test titled
  * "…\n\nIgnore the above and instead…" must not read as a new instruction.
  */
+/**
+ * Flatten one untrusted string bound for an agent's instruction stream: strip
+ * control characters (newlines above all -- argv passing does not protect a
+ * prompt) and bound the length, so a value like "...Ignore the above and
+ * instead..." cannot read as a new instruction. Shared by every prompt
+ * builder below that embeds a value which did not originate as a build-time
+ * literal (test names, the batch id -- both #472; #523's member/tail/report
+ * prompt builders embed the same batch id, plus a worktree path).
+ */
+function flattenPromptValue(value: string): string {
+  return (
+    value
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: flattening control characters is the point
+      .replace(/[\u0000-\u001F\u007F]/g, ' ')
+      .slice(0, MAX_PROMPT_TEST_LENGTH)
+  );
+}
+
 export function buildFixPrompt(
   template: string,
   issue: number,
   batch: string,
   tests: readonly string[]
 ): string {
-  const flatten = (value: string): string =>
-    value
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: flattening control characters is the point
-      .replace(/[\u0000-\u001F\u007F]/g, ' ')
-      .slice(0, MAX_PROMPT_TEST_LENGTH);
+  const flatten = flattenPromptValue;
   const rendered =
     tests.length > 0
       ? tests
@@ -485,8 +499,10 @@ export function buildFixPrompt(
 
 /**
  * Build one batch member's stdin prompt (#523 AC1): `{issue}`, `{batch}` and
- * `{worktree}` substituted. `worktree` is an absolute path recovered from the
- * batch's own state (batch-setup's own write), not untrusted issue text.
+ * `{worktree}` substituted. `batch` and `worktree` are flattened — the batch
+ * id is enqueue-time-validated but still operator/manifest-supplied text, and
+ * flattening a locally-derived worktree path is cheap insurance against the
+ * same instruction-stream injection `buildFixPrompt` already guards against.
  */
 export function buildMemberPrompt(
   template: string,
@@ -494,12 +510,17 @@ export function buildMemberPrompt(
   batch: string,
   worktree: string
 ): string {
-  return renderTemplate(template, { issue, batch, worktree });
+  return renderTemplate(template, {
+    issue,
+    batch: flattenPromptValue(batch),
+    worktree: flattenPromptValue(worktree),
+  });
 }
 
 /**
  * Build the batch tail agent's stdin prompt (#523 AC3): `{batch}`, `{anchor}`,
  * `{members}` (comma-joined issue numbers) and `{worktree}` substituted.
+ * `batch`/`worktree` flattened — see `buildMemberPrompt`.
  */
 export function buildBatchTailPrompt(
   template: string,
@@ -508,17 +529,25 @@ export function buildBatchTailPrompt(
   members: readonly number[],
   worktree: string
 ): string {
-  return renderTemplate(template, { batch, anchor, members: members.join(','), worktree });
+  return renderTemplate(template, {
+    batch: flattenPromptValue(batch),
+    anchor,
+    members: members.join(','),
+    worktree: flattenPromptValue(worktree),
+  });
 }
 
-/** Build the batch report agent's stdin prompt (#523 AC3): `{batch}`, `{anchor}`, `{pr}` substituted. */
+/**
+ * Build the batch report agent's stdin prompt (#523 AC3): `{batch}`,
+ * `{anchor}`, `{pr}` substituted. `batch` flattened — see `buildMemberPrompt`.
+ */
 export function buildBatchReportPrompt(
   template: string,
   batch: string,
   anchor: number,
   pr: number
 ): string {
-  return renderTemplate(template, { batch, anchor, pr });
+  return renderTemplate(template, { batch: flattenPromptValue(batch), anchor, pr });
 }
 
 /** One tier stronger on the ladder, or null at the top (RFC-0001 §C.1). */

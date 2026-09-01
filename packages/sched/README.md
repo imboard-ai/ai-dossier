@@ -133,8 +133,9 @@ Two engine-safety policies were explicit product decisions on #464:
   an outage holds in `verifying` until truth returns. Each pause is journaled as
   `ground-truth-unreachable`.
 
-Only `issue:<n>` units are dispatched today — batch member sequencing is a follow-up
-(#464 non-goal).
+This applies to `issue:<n>` unit dispatch (`dispatchAssignments`). `batch:<id>` units run
+through a separate pass with its own claim/reconcile logic — see
+[Batch dispatch (#523)](#batch-dispatch-523) below.
 
 ### Zombie-run fencing (#504)
 
@@ -182,9 +183,13 @@ but the unprotected redispatch is never silent.
 What happens when a batch's aggregate suite goes red, or its PR will not merge
 (RFC-0001 §F.2/F.8/F.9).
 
-**Not yet wired into `sched start`** — `tick()` still dispatches only `issue:<n>` units
-(the batch execution loop is a follow-up, see above). These modules are the library
-surface that loop will call, and they are tested standalone against real scratch repos.
+**Wired into `sched start` since #523** — the `validating → attributing → fixing/evicting`
+rail below is called directly from `batch-dispatch.ts`'s `runValidate`/`evictOffender`
+(a red AGGREGATE suite, after every member individually went green). A member that never
+went green in the first place (its own gate failed) evicts through a separate, simpler
+rail that never touches this module — see
+[Batch dispatch (#523)](#batch-dispatch-523). These modules remain independently tested
+against real scratch repos.
 
 ```
 validating → attributing → fixing (ONE bounded attempt) → validating
@@ -270,6 +275,64 @@ suspect-dispatch streak (#505 above). The two fields are a single fact and must 
 on load: no suspect dispatches were ever tracked under them, so `0`/`null` is the exact
 backfill, not a guess.
 
+## Batch dispatch (#523)
+
+`batch-dispatch.ts`'s `runBatchTick` — called from `tick()` after the issue-level pass,
+only when `batchExec`/`runBatchSuite` are both configured on `EngineDeps` — drives every
+`batch:<id>` unit through:
+
+```
+ready → executing(member i/N) ⟲ → validating → reviewing → shipping
+  → awaiting-merge → merged → deployed → reported → done
+failure rails: executing → dissolving (a member self-reports blocked)
+               validating → attributing → (fixing | evicting) → validating → dissolving
+```
+
+- **One shared worktree/branch per batch**, claimed once by a deterministic (no LLM)
+  `batch-setup` step: `git branch`/`push`/`worktree add` off `base_branch`, named
+  `batch/<id>-<date>`, plus a fresh `ai-dossier runstate mint` against the anchor issue.
+- **Members run serially, one fresh `slot-cycle` agent at a time**, in the shared
+  worktree. A member's completion signal is `phase=review status=done mode=slot` on its
+  OWN issue (`slot-cycle` posts no phase of its own past `review` — ship is batch-owned);
+  its commit range on the batch branch is recomputed (`git log`) after every member and
+  kept on `BatchEntry.ranges` for eviction. An incremental gate (`ai-dossier cap run
+  typecheck.run` / `test.focused`, when the repo has a manifest) runs after each member
+  before advancing — a second, independent check that the member's self-reported "done"
+  is real.
+- **The batch's single slot is claimed FRESH for each live step** (a member, the tail
+  agent, the report agent, a bounded fix agent) — never held across a wait. The aggregate
+  suite itself runs with NO slot claimed at all (deterministic engine work, not an LLM
+  step).
+- **Two failure rails.** A member that never went green evicts directly (nothing to
+  attribute — see the #472 section above for what "directly" skips). A red AGGREGATE
+  suite (every member individually green, but integration-level conflict) routes through
+  the #472 attribution/fix/evict library.
+- **The tail**, after the last member: the aggregate suite runs deterministically; green
+  spawns ONE bounded strong-tier agent that runs `review-issue` aggregate mode then
+  `ship-issue` batch mode (rebase-merge, a `Closes` list) and parks the PR exactly like a
+  detached full-cycle run; the engine's own PR watcher (a batch-granularity mirror of the
+  per-issue one) accepts the merge and dispatches a cheap mechanical-tier agent for
+  `report-issue`'s batch variant.
+- **Scope cuts, recorded rather than discovered later:** no `git bisect` stage for an
+  ambiguous aggregate failure (an unattributable red suite dissolves instead); no
+  worktree-pool integration for batch-setup (cold `git worktree add` only); no per-phase
+  stall/escalation ladder for batch sub-agents (a dead-without-verification agent is
+  treated as blocked, not redispatched stronger).
+
+Schema 1.7.0: `BatchEntry` gains `worktree` (absolute path of the shared batch worktree,
+null until batch-setup lands), `ranges` (`MemberRange[]` — each member's commit range,
+recomputed after every member completes) and `pr` (the batch PR parked on auto-merge,
+persisted so a restart mid-watch still knows what to poll). 1.6.0 states migrate on load:
+no batch was ever dispatched under them, so `null`/`[]`/`null` is the exact backfill, not
+a guess. Config schema moves to 1.3.0: `dispatch` gains `member_prompt`,
+`batch_tail_prompt` and `batch_report_prompt` (the three new agent prompt templates).
+
+New journal events: `batch-setup-done`, `batch-setup-failed`, `member-advanced`. Member/
+tail/report/fix-agent spawn, progress, completion and park events reuse the existing
+unit-generic names (`assigned`/`spawned`/`unit-failed`/`external-advance`/`pr-parked`/
+`merge-accepted`/`report-dispatched`/`teardown-done`/`teardown-failed`) with
+`unit = batch:<id>`.
+
 ## API surface
 
 ```ts
@@ -284,9 +347,11 @@ import {
   runLoop,               // the sched start loop (tick, sleep, repeat)
   type TickResult,       // what one tick did (spawned/parked/merge-accepted/stale-reconciled/
                          //   dependents-unblocked/report-dispatched/teardown/completed/
-                         //   redispatched/failed/blocked)
+                         //   redispatched/failed/blocked) — since #523 also carries
+                         //   `batch:<id>` unit ids (issue numbers for `blocked`)
   type EngineDeps,       // inject everything the engine touches (store/journal/spawn/ground
-                         //   truth/clock/repoDir/teardownExec/fencer)
+                         //   truth/clock/repoDir/teardownExec/fencer/batchExec/runBatchSuite/
+                         //   runBatchCapability — #523)
   createSpawnDeps,       // real detached-spawn process I/O
   createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec);
                          //   since #468 also gh pr view PR state + setup info from comments
@@ -337,9 +402,24 @@ import {
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
-  validateState,         // strict persisted-state validation (1.0.0-1.5.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.6.0 files migrate)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
+  runBatchTick,          // #523: one batch reconcile+refill pass; called by tick() after
+                         //   the issue pass — loads/saves state itself, holds no lock
+                         //   across the call
+  type BatchDispatchDeps, // inject store/journal/groundTruth/spawnDeps/exec/runSuite/
+                         //   runCapability(optional)/fsExists(optional)
+  type BatchTickResult,  // spawned/completed/parked/mergeAccepted/failed (batch:<id> ids)
+                         //   + blocked (issue numbers, dissolve-requeued)
+  type CapOutcome,       // ok | task-failed | automation-broken | capability-unavailable
+  buildMemberPrompt, buildBatchTailPrompt, buildBatchReportPrompt, // #523 prompt builders
+  DEFAULT_MEMBER_PROMPT_TEMPLATE, DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE,
+  DEFAULT_BATCH_REPORT_PROMPT_TEMPLATE,
+  isMemberComplete, isMemberBlocked, // member milestone predicates (mode=slot gated)
+  isBatchTailParked,     // batch-ship awaiting-merge + pr= — the batch park signal
+  isBatchPhaseDone,      // <phase> done on the anchor (batch-review/batch-report)
+  batchOfUnit,           // batch:<id> → <id>; null for issue units or malformed ids
 } from '@ai-dossier/sched';
 ```
 
