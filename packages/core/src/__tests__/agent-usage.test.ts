@@ -304,9 +304,20 @@ describe('parseOpenCodeUsage', () => {
     expect(parseOpenCodeUsage(stdout)).toMatchObject({ result_text: null });
   });
 
-  it('returns null when any line is not JSON (not an opencode event stream)', () => {
+  it('skips a non-JSON line mid-stream rather than discarding the run (#524 review)', () => {
+    // Was: "any non-JSON line disqualifies the stream". That asserted exactly
+    // the silent-null AC2 forbids — the scheduler merges stderr into the same
+    // fd, so one warning line is normal, not a format mismatch.
     const stdout = [stepStart, 'plain text', stepFinish(1, 1, 0.1)].join('\n');
-    expect(parseOpenCodeUsage(stdout)).toBeNull();
+    expect(parseOpenCodeUsage(stdout)).toMatchObject({
+      input_tokens: 1,
+      output_tokens: 1,
+      total_cost_usd: 0.1,
+    });
+  });
+
+  it('returns null when NO line is a valid opencode event (a genuine format mismatch)', () => {
+    expect(parseOpenCodeUsage(['plain text', 'more text'].join('\n'))).toBeNull();
   });
 
   it('returns null for empty or undefined stdout', () => {
@@ -617,5 +628,41 @@ describe('parseOpenCodeUsage — cache tokens (#524 review)', () => {
       cache_creation_tokens: null,
       cache_read_tokens: null,
     });
+  });
+});
+
+/**
+ * #524 review: `createSpawnDeps` merges stderr into the dispatch log's fd, so
+ * opencode's ANSI-coloured warnings land between JSON events. One such line
+ * used to null out an entire run's tokens and cost.
+ */
+describe('parseOpenCodeUsage - stderr interleaved with the event stream (#524 review)', () => {
+  const step = (input: number, output: number) =>
+    JSON.stringify({
+      type: 'step_finish',
+      part: {
+        type: 'step-finish',
+        tokens: { input, output, cache: { write: 0, read: 100 } },
+        cost: 1.5,
+      },
+    });
+  // The real shape observed in two dispatch logs on the pilot host.
+  const stderrWarning =
+    '\u001b[93m\u001b[1m! \u001b[0mpermission requested: external_directory (/tmp); auto-rejecting';
+
+  it('skips a non-JSON stderr line instead of discarding the whole run', () => {
+    const stdout = [step(1000, 100), stderrWarning, step(2000, 200)].join('\n');
+
+    expect(parseOpenCodeUsage(stdout)).toMatchObject({
+      input_tokens: 3000,
+      output_tokens: 300,
+      cache_read_tokens: 200,
+      total_cost_usd: 3,
+    });
+  });
+
+  it('still returns null when the output holds no opencode event at all', () => {
+    // Format-mismatch detection must survive the change above.
+    expect(parseOpenCodeUsage([stderrWarning, 'not json either'].join('\n'))).toBeNull();
   });
 });

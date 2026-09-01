@@ -369,9 +369,10 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
  * cache counts nested as `tokens.cache: { write, read }`. The model id is not
  * present in the events, so `model` is null and callers fall back to the
  * requested --model alias — that field, and only that field, is genuinely
- * unavailable here rather than merely absent. Returns null when the
- * output is not a JSONL event stream (any non-JSON line disqualifies it);
- * individual fields are null when absent.
+ * unavailable here rather than merely absent. Returns null when the output
+ * holds no opencode event at all; individual non-JSON lines (stderr warnings
+ * interleaved by the scheduler's merged stdout/stderr fd) are skipped, not
+ * treated as disqualifying.
  */
 export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunUsage | null {
   if (typeof stdout !== 'string' || stdout.trim() === '') return null;
@@ -392,8 +393,15 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
     if (!trimmed) continue;
 
     const event = parseJsonObject(trimmed);
-    // Any non-JSON-object line disqualifies the stream as opencode output.
-    if (!event) return null;
+    // Skip an unparseable line rather than discarding the whole stream
+    // (#524 review). `createSpawnDeps` merges stderr into the SAME fd as
+    // stdout, and opencode writes ANSI-coloured warnings there ("permission
+    // requested: ... auto-rejecting"), so ONE such line in a 1,600-line log
+    // used to null out the entire run — ~$28 and ~97M cache-read tokens
+    // across two real logs on a six-run cohort, recorded as indistinguishable
+    // nulls. Format-mismatch detection is preserved by `sawEvent` below: a
+    // stream with no valid opencode event at all still returns null.
+    if (!event) continue;
     // The sched dispatch preamble (#524) is written by the scheduler, not by
     // opencode: skip it WITHOUT setting `sawEvent`, so a log holding only a
     // preamble still reads as "the agent wrote nothing" (null) rather than an
