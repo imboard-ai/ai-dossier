@@ -706,10 +706,17 @@ export type JournalEventName =
   | 'redispatched'
   | 'unit-failed'
   | 'dependents-blocked'
-  // #525: a slot reaching `idle` on any terminal path (complete, external-
-  // advance, park, failure, dependent-block) — journaled once, at the point
-  // the slot ACTUALLY empties, so a report reading the journal never has to
-  // infer release time from the next `assigned` event on that slot.
+  // #525: a slot reaching `idle` on a per-issue dispatch terminal path
+  // (verified completion, external-advance, a detached-ship park, a direct
+  // failure, or a dependent released by `blockTransitiveDependents`) —
+  // journaled once, right after that path's own cause event, at the point
+  // the slot ACTUALLY empties. A report reading the journal never has to
+  // infer release time from the next `assigned` event on that slot. Not yet
+  // journaled by `sched abandon` (`scheduler.ts`'s `abandonIssue`) or by
+  // batch-slot release (`batch-dispatch.ts`'s `releaseSlot`) — both walk a
+  // slot to `idle` through their own copy of this same edge table, but
+  // neither is wired to this event (tracked as a follow-up, not this issue's
+  // scope: #525's own Scope section names only `scheduler.ts`/`state.ts`).
   | 'slot-released'
   | 'requeued'
   | 'ground-truth-unreachable'
@@ -759,6 +766,22 @@ export type JournalEventName =
   | 'label-blocked'
   | 'label-check-failed';
 
+/**
+ * The closed `reason` vocabulary a `slot-released` event carries (#525) —
+ * one entry per per-issue terminal path `walkSlotToIdle` can be released
+ * from, matching the cause event journaled immediately before it
+ * (`verify-complete`/`external-advance` for a completion, `unit-failed` or
+ * `report-failed` for a failure, `dependents-blocked` for a released
+ * dependent, `parked` for a detached-ship park).
+ */
+export type SlotReleaseReason =
+  | 'verify-complete'
+  | 'external-advance'
+  | 'unit-failed'
+  | 'report-failed'
+  | 'dependents-blocked'
+  | 'parked';
+
 /** One journaled event. `ts` is stamped by the journal, never by callers. */
 export interface JournalEvent {
   ts: string;
@@ -776,7 +799,9 @@ export interface JournalEvent {
    * `label-blocked`) — declared here so callers get the same excess-property
    * check `detail` gets, instead of routing through a loosely-typed
    * `Record<string, unknown>` the way `engine.ts`'s local `journal()`
-   * wrapper already does for every pre-#507 use of this field.
+   * wrapper already does for every pre-#507 use of this field. Since #525
+   * `slot-released` also uses this field, for the closed `SlotReleaseReason`
+   * vocabulary above rather than `QueueEntry.reason`'s.
    */
   reason?: string;
 }

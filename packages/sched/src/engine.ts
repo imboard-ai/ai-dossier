@@ -103,6 +103,7 @@ import {
   type SchedConfig,
   type SchedState,
   type SlotEntry,
+  type SlotReleaseReason,
   type SlotStatus,
   SUSPECT_DISPATCH_WINDOW_MS,
   TERMINAL_ISSUE_STATUSES,
@@ -277,29 +278,54 @@ function patchSlot(
 
 /**
  * Walk a slot to `idle` one declared edge per iteration; `step` picks the
- * next status. Journals exactly one `slot-released` event (#525) when the
- * walk actually empties a held slot — never for a slot that was already
- * idle or held no unit — so the release is visible in the journal at the
- * moment it happens, not inferred later from the next `assigned` event.
+ * next status. Returns the released slot id — non-null only when the walk
+ * actually emptied a held slot, never for a slot that was already idle or
+ * held no unit. Journals nothing itself (#525): each caller journals its own
+ * cause event first, then `slot-released`, so the trail reads cause-then-
+ * release rather than the reverse.
+ *
+ * Bounded at 8 iterations — mirroring `batch-dispatch.ts`'s `releaseSlot` —
+ * though the longest real walk (`running` → `exited` → `verifying` →
+ * `complete` → `idle`, or `recovering` → `failed` → `idle`) is 4 hops. A
+ * non-converging `step` leaves the slot on whatever status it last reached
+ * rather than spinning forever inside the state lock; `releasedSlotId` stays
+ * null in that case, so no `slot-released` is journaled for a release that
+ * did not actually happen.
  */
 function walkSlotToIdle(
-  ctx: TickCtx,
   state: SchedState,
   unit: string,
   now: Date,
-  step: (status: SlotStatus) => SlotStatus,
-  reason: string
-): SchedState {
+  step: (status: SlotStatus) => SlotStatus
+): { state: SchedState; releasedSlotId: number | null } {
   let next = state;
   let slot = slotOf(next, unit);
-  if (!slot || slot.status === 'idle') return next;
+  if (!slot || slot.status === 'idle') return { state: next, releasedSlotId: null };
   const slotId = slot.id;
-  while (slot && slot.status !== 'idle') {
+  // Look the slot back up by id, not by `unit`, on every iteration: the
+  // `idle` transition clears `unit` (CLEARED_SLOT_FIELDS), so `slotOf(next,
+  // unit)` can no longer find it the instant it actually empties.
+  for (let i = 0; i < 8 && slot && slot.status !== 'idle'; i++) {
     next = transitionSlot(next, slot.id, step(slot.status), {}, now);
-    slot = slotOf(next, unit);
+    slot = next.slots.find((s) => s.id === slotId);
   }
-  journal(ctx, 'slot-released', unit, { slot: slotId, reason });
-  return next;
+  return { state: next, releasedSlotId: slot?.status === 'idle' ? slotId : null };
+}
+
+/**
+ * Journal `slot-released` (#525) when `walkSlotToIdle` actually freed a
+ * slot. Callers invoke this AFTER journaling their own cause event, so the
+ * trail reads cause-then-release, never the reverse.
+ */
+function journalSlotReleased(
+  ctx: TickCtx,
+  unit: string,
+  releasedSlotId: number | null,
+  reason: SlotReleaseReason
+): void {
+  if (releasedSlotId !== null) {
+    journal(ctx, 'slot-released', unit, { slot: releasedSlotId, reason });
+  }
 }
 
 /** Kill the agent holding `unit`'s slot, if it is alive. */
@@ -558,7 +584,9 @@ function failUnit(
   const now = ctx.deps.now();
 
   killUnitAgent(ctx, state, unit);
-  let next = releaseSlotViaFailure(ctx, state, unit, 'unit-failed');
+  const released = releaseSlotViaFailure(state, unit, now);
+  let next = released.state;
+  let releaseReason: SlotReleaseReason = 'unit-failed';
 
   const entry = findEntry(next, issue);
   if (entry && !TERMINAL_ISSUE_STATUSES.has(entry.status)) {
@@ -566,6 +594,7 @@ function failUnit(
     if (opts.merged === true && entry.status === 'shipped') {
       next = transitionIssue(next, issue, 'done', { reason }, now);
       journal(ctx, 'report-failed', unit, { reason });
+      releaseReason = 'report-failed';
     } else {
       next = transitionIssue(next, issue, 'failed', { reason }, now);
       journal(ctx, 'unit-failed', unit, { reason });
@@ -574,23 +603,18 @@ function failUnit(
       ctx.result.blocked.push(...blocked.issues);
     }
   }
+  journalSlotReleased(ctx, unit, released.releasedSlotId, releaseReason);
   return next;
 }
 
 /** Release a unit's slot to idle through the failure rail (failed → idle). */
 function releaseSlotViaFailure(
-  ctx: TickCtx,
   state: SchedState,
   unit: string,
-  reason: string
-): SchedState {
-  return walkSlotToIdle(
-    ctx,
-    state,
-    unit,
-    ctx.deps.now(),
-    (status) => (status === 'complete' || status === 'failed' ? 'idle' : 'failed'),
-    reason
+  now: Date
+): { state: SchedState; releasedSlotId: number | null } {
+  return walkSlotToIdle(state, unit, now, (status) =>
+    status === 'complete' || status === 'failed' ? 'idle' : 'failed'
   );
 }
 
@@ -637,10 +661,12 @@ function blockTransitiveDependents(
     // A dependent mid-run is working toward a doomed merge — release its slot.
     const unit = `issue:${issue}`;
     killUnitAgent(ctx, next, unit);
-    next = releaseSlotViaFailure(ctx, next, unit, 'dependents-blocked');
+    const released = releaseSlotViaFailure(next, unit, now);
+    next = released.state;
 
     next = transitionIssue(next, issue, 'blocked', { reason }, now);
     journal(ctx, 'dependents-blocked', unit, { reason });
+    journalSlotReleased(ctx, unit, released.releasedSlotId, 'dependents-blocked');
     blockedIssues.push(issue);
   }
   return { state: next, issues: blockedIssues };
@@ -831,7 +857,7 @@ function completeUnit(
   if (issue === null) return state;
   const now = ctx.deps.now();
 
-  const next = walkSlotToIdle(ctx, state, unit, now, stepVerifiedExitToIdle, via);
+  const { state: next, releasedSlotId } = walkSlotToIdle(state, unit, now, stepVerifiedExitToIdle);
 
   let withEntry = next;
   const entry = findEntry(next, issue);
@@ -846,6 +872,7 @@ function completeUnit(
   journal(ctx, via, unit);
   if (via === 'external-advance') ctx.result.externalAdvances.push(unit);
   else ctx.result.completed.push(unit);
+  journalSlotReleased(ctx, unit, releasedSlotId, via);
   return withEntry;
 }
 
@@ -867,11 +894,13 @@ function parkUnit(
   const pr = prOfMilestone(milestone);
   if (pr === null) return state; // isParkedMilestone guarantees this
 
-  let next = walkSlotToIdle(ctx, state, unit, now, stepVerifiedExitToIdle, 'parked');
+  const walked = walkSlotToIdle(state, unit, now, stepVerifiedExitToIdle);
+  let next = walked.state;
 
   next = transitionIssue(next, issue, 'parked', { pr }, now);
   journal(ctx, 'pr-parked', unit, { pr });
   ctx.result.parked.push(unit);
+  journalSlotReleased(ctx, unit, walked.releasedSlotId, 'parked');
   return next;
 }
 

@@ -290,7 +290,12 @@ const NEXT_TOWARD_IDLE: Readonly<Record<SlotStatus, SlotStatus | null>> = {
   failed: 'idle',
 };
 
-/** Release a batch's slot to idle, whatever status it currently holds (mirrors `walkSlotToIdle`). */
+/**
+ * Release a batch's slot to idle, whatever status it currently holds (mirrors
+ * `engine.ts`'s `walkSlotToIdle` walk). Unlike that walk, this one does not
+ * journal `slot-released` (#525) — batch-slot release is not yet wired to
+ * that event, tracked as a follow-up.
+ */
 function releaseSlot(state: SchedState, batchId: string, now: Date): SchedState {
   let next = state;
   let slot = slotFor(next, batchId);

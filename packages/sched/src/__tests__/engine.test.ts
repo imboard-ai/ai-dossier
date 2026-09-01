@@ -10,11 +10,13 @@ import {
   type GroundTruth,
   type GroundTruthMilestone,
   Journal,
+  type JournalEvent,
   type PrTruth,
   type RunFencer,
   type SchedConfig,
   SchedStore,
   type SetupInfo,
+  type SlotReleaseReason,
   type SpawnDeps,
   tick,
 } from '../index';
@@ -173,6 +175,14 @@ function harness(
     tick: () => tick(deps, config),
     state: () => store.load(),
     events: () => journal.read(),
+    /** #525: whether a `slot-released` event for `issue` with `reason` was journaled. */
+    hasSlotReleased: (issue: number, reason: SlotReleaseReason) =>
+      journal
+        .read()
+        .some(
+          (e: JournalEvent) =>
+            e.event === 'slot-released' && e.issue === issue && e.reason === reason
+        ),
     setMilestone: (
       issue: number,
       phase: string,
@@ -302,6 +312,11 @@ describe('completion verification (AC2: an agent exiting is never proof of compl
     const slot = state.slots.find((s) => s.id === 1);
     expect(slot?.status).toBe('idle');
     expect(slot?.unit).toBeNull();
+    // #525: the most common release path — verified completion via a report-done
+    // milestone (not external-advance) — journals `slot-released` with reason
+    // 'verify-complete', matching the sibling `verify-complete` event, not 'completed'.
+    expect(h.events().some((e) => e.event === 'verify-complete' && e.issue === 101)).toBe(true);
+    expect(h.hasSlotReleased(101, 'verify-complete')).toBe(true);
   });
 
   it('exit WITHOUT a verified milestone → unit NOT complete → redispatched one tier stronger', () => {
@@ -366,13 +381,14 @@ describe('reconciliation tick (AC3: external advance + orphaned pids after resta
     // #525: the completion path journals a distinct slot-released event, not just
     // the completion event itself — a report reading the journal can see the slot
     // emptied at 11:38:06Z instead of inferring it from the next `assigned`.
-    expect(
-      h.journal
-        .read()
-        .some(
-          (e) => e.event === 'slot-released' && e.issue === 101 && e.reason === 'external-advance'
-        )
-    ).toBe(true);
+    expect(h.hasSlotReleased(101, 'external-advance')).toBe(true);
+    // #525: the cause event is journaled before its release, not after — a reader
+    // scanning the trail forward sees why the slot emptied before seeing that it did.
+    const events = h.events();
+    const causeIdx = events.findIndex((e) => e.event === 'external-advance' && e.issue === 101);
+    const releasedIdx = events.findIndex((e) => e.event === 'slot-released' && e.issue === 101);
+    expect(causeIdx).toBeGreaterThanOrEqual(0);
+    expect(releasedIdx).toBeGreaterThan(causeIdx);
   });
 
   it(
@@ -414,12 +430,7 @@ describe('reconciliation tick (AC3: external advance + orphaned pids after resta
       // sched status never shows the terminal unit as still running in a slot.
       expect(h.state().slots.some((s) => s.unit === 'issue:101')).toBe(false);
       expect(h.state().slots.filter((s) => s.status === 'running')).toHaveLength(3);
-      const events = h.journal.read();
-      expect(
-        events.some(
-          (e) => e.event === 'slot-released' && e.issue === 101 && e.reason === 'external-advance'
-        )
-      ).toBe(true);
+      expect(h.hasSlotReleased(101, 'external-advance')).toBe(true);
     }
   );
 
@@ -575,11 +586,13 @@ describe('stall/escalation ladder (AC4)', () => {
     expect(state.slots.find((s) => s.unit === 'issue:101')).toBeUndefined();
     expect(h.journal.read().some((e) => e.event === 'dependents-blocked')).toBe(true);
     // #525: the failure rail journals a distinct slot-released event for #101 itself.
-    expect(
-      h.journal
-        .read()
-        .some((e) => e.event === 'slot-released' && e.issue === 101 && e.reason === 'unit-failed')
-    ).toBe(true);
+    // 102/103 never held a slot (blocked before ever being dispatched — a dependent
+    // can only run once its dependency is SATISFIED, so `blockTransitiveDependents`'s
+    // own slot-release branch is a defensive guard, not reachable via a simple chain
+    // like this one): confirm no phantom `slot-released` was journaled for them.
+    expect(h.hasSlotReleased(101, 'unit-failed')).toBe(true);
+    const events = h.events().filter((e) => e.event === 'slot-released');
+    expect(events.every((e) => e.issue === 101)).toBe(true);
   });
 
   it('a stall at the strongest tier fails the unit (nowhere stronger to go)', () => {
@@ -992,11 +1005,7 @@ describe('spawn failures (supportability)', () => {
     expect(state.entries.find((e) => e.issue === 101)?.reason).toMatch(/spawn-error/);
     expect(state.entries.find((e) => e.issue === 102)?.status).toBe('dispatched');
     expect(h.journal.read().some((e) => e.event === 'unit-failed')).toBe(true);
-    expect(
-      h.journal
-        .read()
-        .some((e) => e.event === 'slot-released' && e.issue === 101 && e.reason === 'unit-failed')
-    ).toBe(true);
+    expect(h.hasSlotReleased(101, 'unit-failed')).toBe(true);
   });
 });
 
@@ -1089,11 +1098,7 @@ describe('#468 AC1/AC5: parking and the PR watcher', () => {
     // the park is journaled
     expect(h.events().some((e) => e.event === 'pr-parked' && e.issue === 101)).toBe(true);
     // #525: parking under detached ship also journals slot-released.
-    expect(
-      h
-        .events()
-        .some((e) => e.event === 'slot-released' && e.issue === 101 && e.reason === 'parked')
-    ).toBe(true);
+    expect(h.hasSlotReleased(101, 'parked')).toBe(true);
   });
 
   it('a parked PR never unblocks dependents; MERGE does (AC4)', () => {

@@ -202,6 +202,7 @@ export {
   type SchedState,
   SLOT_ROLES,
   type SlotEntry,
+  type SlotReleaseReason,
   type SlotRole,
   type SlotStatus,
   TERMINAL_BATCH_STATUSES,
