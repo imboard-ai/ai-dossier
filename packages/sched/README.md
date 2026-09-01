@@ -54,7 +54,10 @@ where every mechanical supervision decision is code, not remembered prose:
 1. **Dispatch (AC1)** — a runnable unit is spawned as a detached agent process
    (`claude -p --output-format json --model <tier model>` by default, opencode fallback;
    command/prompt/tier-models configurable), prompt on stdin, output appended to
-   `runs/<unit>.log`. pid, phase, role, and last-progress are persisted in `state.json`.
+   `runs/<unit>.log`. The opencode fallback runs `opencode run --auto …` (#506) — a git
+   worktree is an `external_directory` to opencode, whose default `"ask"` policy a headless
+   session can only auto-reject, killing the agent mid-phase; `--auto` approves any request
+   not explicitly denied. pid, phase, role, and last-progress are persisted in `state.json`.
    Agents are unref'd: they survive a sched crash (restart reconciles by pid). The default
    full-cycle and fix prompts (`DEFAULT_PROMPT_TEMPLATE`, `DEFAULT_FIX_PROMPT_TEMPLATE`)
    append `NO_BACKGROUND_EXIT_INSTRUCTION` (#497) — a headless session ends the instant the
