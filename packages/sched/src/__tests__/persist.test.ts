@@ -374,6 +374,43 @@ describe('#504 config: dispatch.fence_takeover_timeout_ms', () => {
   });
 });
 
+describe('#591 config: dispatch.disallowed_tools', () => {
+  it('round-trips a custom disallowed-tools list', () => {
+    const store = new SchedStore(dir);
+    store.saveConfig({ max_slots: 2, dispatch: { disallowed_tools: ['Monitor', 'Other'] } });
+    expect(store.loadConfig().dispatch?.disallowed_tools).toEqual(['Monitor', 'Other']);
+  });
+
+  it('round-trips the empty-array opt-out', () => {
+    // [] is the documented way to disable --disallowedTools entirely — must not be
+    // rejected the way an empty dispatch.command would be (that key requires non-empty).
+    const store = new SchedStore(dir);
+    store.saveConfig({ max_slots: 2, dispatch: { disallowed_tools: [] } });
+    expect(store.loadConfig().dispatch?.disallowed_tools).toEqual([]);
+  });
+
+  it('rejects a non-array disallowed_tools', () => {
+    expectConfigRejected(
+      { schema_version: '1.2.0', max_slots: 2, dispatch: { disallowed_tools: 'Monitor' } },
+      'disallowed_tools'
+    );
+  });
+
+  it('rejects an array containing a non-string entry', () => {
+    expectConfigRejected(
+      { schema_version: '1.2.0', max_slots: 2, dispatch: { disallowed_tools: ['Monitor', 42] } },
+      'disallowed_tools'
+    );
+  });
+
+  it('rejects an array containing an empty string', () => {
+    expectConfigRejected(
+      { schema_version: '1.2.0', max_slots: 2, dispatch: { disallowed_tools: [''] } },
+      'disallowed_tools'
+    );
+  });
+});
+
 describe('#562 config: dispatch.suite_command', () => {
   it('round-trips an explicit aggregate suite command', () => {
     const store = new SchedStore(dir);

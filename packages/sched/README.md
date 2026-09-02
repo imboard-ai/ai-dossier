@@ -82,7 +82,15 @@ where every mechanical supervision decision is code, not remembered prose:
    "waiting for it to finish" abandons the run with the subprocess still going; the
    instruction tells it to run such commands in the foreground and wait, or poll until
    they finish. `DEFAULT_REPORT_PROMPT_TEMPLATE` is excluded — it never spawns a long
-   command.
+   command. The prompt instruction alone was not enough (#591): agents kept arming the
+   `Monitor` tool to wait on a background command and ending their turn anyway, which the
+   engine can only see as an unverified exit. Every `claude`-family command template
+   (top-level `command` and each tier's own `commandTemplate`, #527) gets
+   `--disallowedTools Monitor` appended automatically — set `dispatch.disallowed_tools: []`
+   in `config.json` to opt out, or list your own tools to deny instead of the default
+   `["Monitor"]`. Matched on the binary's basename, so an absolute or wrapper path
+   (`/usr/local/bin/claude`) still gets it; never applied to a non-`claude` command or one
+   that already carries the flag itself, so an `opencode` tier is unaffected.
 2. **Completion verification (AC2)** — an agent exiting is never proof of completion.
    On exit, the unit completes only when ground truth confirms it: the issue's latest
    runstate milestone is `report done`, or GitHub says the issue is closed — except a
@@ -676,7 +684,7 @@ telemetry" below.
 ├── config.json    # durable intent: max_slots, stall_timeout_ms, reconcile_interval_ms,
 │                  # pr_poll_interval_ms, dispatch (incl. report_prompt,
 │                  # phase_stall_timeout_ms, fence_takeover_timeout_ms, tiers — #527,
-│                  # suite_command — #562), auto_upgrade — #537,
+│                  # suite_command — #562, disallowed_tools — #591), auto_upgrade — #537,
 │                  # dissolve_policy — #563
 ├── events.jsonl   # append-only event journal (the operator's flight recorder)
 ├── runs/          # per-unit agent output logs (issue-<n>.log)
@@ -697,6 +705,14 @@ every place a dispatch's exit is first detected: the dead-pid rail, the
 external-advance rail, a stall-timeout kill, and a dependents-blocked kill), sourced
 from the agent's `modelUsage` map — never blended with the top-level `usage` block,
 the fix for a ~43% fabricated-saving discrepancy the two blocks were found to produce.
+`recordDispatchRunLog`/`recordMemberRunLog` also return the last tool the dispatch called
+(`parseLastToolUse`, `@ai-dossier/core`, #591), when the log yielded one — the exit itself
+attributes to a concrete cause (e.g. `Monitor`) without opening the transcript. It rides the
+non-terminal `verify-incomplete` event on every unverified exit and, once the escalation
+ladder is exhausted, the terminal `unit-failed` (`agent-exited-unverified` /
+`unverified-exit-at-strongest-tier`) as `last_tool`; a stall-timeout kill carries it too. Only
+the dead-pid detection rail and the stall kill record a fresh log slice in the same tick —
+a slot already `exited`/`verifying` when reconciled again has none to attribute.
 
 The dispatch log (`runs/<unit>.log`) is per-UNIT and opened in append mode
 (`createSpawnDeps`), so a redispatched unit's second agent writes its output AFTER the

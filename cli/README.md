@@ -1303,6 +1303,11 @@ middle tier of `cap run test.full` (manifest) → `dispatch.suite_command` → a
 safe default; run exactly as given, never with extra flags appended — set this when the
 repo's `test` script delegates to something that cannot take a reporter flag and there is
 no `.dossier/automation/` manifest to declare `test.full` in instead);
+`dispatch.disallowed_tools` — tool names appended as `--disallowedTools <a,b>` to every
+`claude`-family dispatch argv, #591; defaults to `["Monitor"]` because an agent that arms
+`Monitor` to wait on a background command and ends its turn abandons the run as an
+unverified exit — set `[]` to opt out, never applied when the command's binary isn't
+`claude` (an `opencode` tier has no such flag) or already carries the flag itself;
 `pr_poll_interval_ms` (default 150 000) sets the
 parked-PR poll cadence; `auto_upgrade` (default false, #537) lets a cron-driven
 `sched start --once` self-upgrade when behind npm latest — the `--auto-upgrade` CLI flag

@@ -5,6 +5,7 @@ import {
   buildPrompt,
   buildReportPrompt,
   buildTierCommand,
+  DEFAULT_DISALLOWED_TOOLS,
   DEFAULT_DISPATCH_COMMAND,
   DEFAULT_FIX_PROMPT_TEMPLATE,
   DEFAULT_PROMPT_TEMPLATE,
@@ -81,7 +82,12 @@ describe('tier ladder (RFC-0001 §C.1)', () => {
 describe('resolveDispatch', () => {
   it('defaults: claude headless, haiku/sonnet/opus, 30-minute stall, 60s tick', () => {
     const resolved = resolveDispatch({ max_slots: 3 });
-    expect(resolved.command).toEqual([...DEFAULT_DISPATCH_COMMAND]);
+    // #591: --disallowedTools Monitor is appended by default for claude-family commands.
+    expect(resolved.command).toEqual([
+      ...DEFAULT_DISPATCH_COMMAND,
+      '--disallowedTools',
+      DEFAULT_DISALLOWED_TOOLS.join(','),
+    ]);
     expect(resolved.tierModels).toEqual({
       mechanical: 'haiku',
       mid: 'sonnet',
@@ -123,6 +129,126 @@ describe('resolveDispatch', () => {
   });
 });
 
+describe('--disallowedTools hardening (#591 — a headless exit must never hide behind an armed Monitor)', () => {
+  it('appends --disallowedTools Monitor to the default claude command', () => {
+    const resolved = resolveDispatch({ max_slots: 1 });
+    expect(resolved.command).toEqual([
+      ...DEFAULT_DISPATCH_COMMAND,
+      '--disallowedTools',
+      DEFAULT_DISALLOWED_TOOLS.join(','),
+    ]);
+  });
+
+  it('appends --disallowedTools Monitor to every tier resolved from the claude shorthand', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: { command: ['claude', '-p', '--model', '{model}'] },
+    });
+    for (const tier of ['mechanical', 'mid', 'strong'] as const) {
+      expect(resolved.tiers[tier].commandTemplate).toEqual([
+        'claude',
+        '-p',
+        '--model',
+        '{model}',
+        '--disallowedTools',
+        DEFAULT_DISALLOWED_TOOLS.join(','),
+      ]);
+    }
+  });
+
+  it('dispatch.disallowed_tools: [] opts out on the top-level command and every tier', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: { command: ['claude', '-p', '--model', '{model}'], disallowed_tools: [] },
+    });
+    expect(resolved.command).toEqual(['claude', '-p', '--model', '{model}']);
+    for (const tier of ['mechanical', 'mid', 'strong'] as const) {
+      expect(resolved.tiers[tier].commandTemplate).toEqual(['claude', '-p', '--model', '{model}']);
+    }
+  });
+
+  it('a custom disallowed_tools list joins with a comma', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: { disallowed_tools: ['Monitor', 'SomeOtherTool'] },
+    });
+    expect(resolved.command).toEqual([
+      ...DEFAULT_DISPATCH_COMMAND,
+      '--disallowedTools',
+      'Monitor,SomeOtherTool',
+    ]);
+  });
+
+  it('never applied to a non-claude command, even when a tier overrides to opencode', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: {
+        tiers: {
+          strong: { command: ['opencode', 'run', '--auto', '--model', '{model}'], model: 'glm' },
+        },
+      },
+    });
+    expect(resolved.tiers.strong.commandTemplate).toEqual([
+      'opencode',
+      'run',
+      '--auto',
+      '--model',
+      '{model}',
+    ]);
+    // untouched tiers still fall back to the claude default and get the flag
+    expect(resolved.tiers.mid.commandTemplate).toContain('--disallowedTools');
+  });
+
+  it('an explicit claude tier override also gets the flag (not only the shorthand fallback)', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: {
+        tiers: { strong: { command: ['claude', '-p', '--model', '{model}'], model: 'opus' } },
+      },
+    });
+    expect(resolved.tiers.strong.commandTemplate).toEqual([
+      'claude',
+      '-p',
+      '--model',
+      '{model}',
+      '--disallowedTools',
+      DEFAULT_DISALLOWED_TOOLS.join(','),
+    ]);
+  });
+
+  it('still applies to an absolute-path or wrapper claude binary, matched on basename', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: { command: ['/usr/local/bin/claude', '-p', '--model', '{model}'] },
+    });
+    expect(resolved.command).toEqual([
+      '/usr/local/bin/claude',
+      '-p',
+      '--model',
+      '{model}',
+      '--disallowedTools',
+      DEFAULT_DISALLOWED_TOOLS.join(','),
+    ]);
+  });
+
+  it('does not double-append when the operator already hand-wrote --disallowedTools', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: {
+        command: ['claude', '-p', '--disallowedTools', 'WebSearch', '--model', '{model}'],
+      },
+    });
+    expect(resolved.command).toEqual([
+      'claude',
+      '-p',
+      '--disallowedTools',
+      'WebSearch',
+      '--model',
+      '{model}',
+    ]);
+  });
+});
+
 describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () => {
   it('with no dispatch.tiers configured, every tier falls back to the shorthand (command/tier_models/prompt)', () => {
     const config: SchedConfig = {
@@ -131,6 +257,7 @@ describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () =
         command: ['claude', '-p', '--model', '{model}'],
         tier_models: { mid: 'custom-model' },
         prompt: 'do #{issue}',
+        disallowed_tools: [], // #591: opt out — this test is about tier fallback, not the flag
       },
     };
     const resolved = resolveDispatch(config);
@@ -152,6 +279,7 @@ describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () =
         tiers: {
           mid: { command: ['opencode', 'run', '--auto', '--model', '{model}'], model: 'glm' },
         },
+        disallowed_tools: [], // #591: opt out — this test is about tier override, not the flag
       },
     };
     const resolved = resolveDispatch(config);
@@ -175,6 +303,7 @@ describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () =
       dispatch: {
         command: ['claude', '-p', '--model', '{model}'],
         tiers: { strong: { model: 'custom-strong-model' } },
+        disallowed_tools: [], // #591: opt out — this test is about tier override, not the flag
       },
     };
     const resolved = resolveDispatch(config);
@@ -197,6 +326,7 @@ describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () =
           mid: { command: ['opencode', 'run', '--auto', '--model', '{model}'], model: 'glm' },
           strong: { command: ['claude', '-p', '--model', '{model}'], model: 'opus' },
         },
+        disallowed_tools: [], // #591: opt out — this test is about mixed-CLI resolution, not the flag
       },
     });
     expect(buildTierCommand(resolved, 'mid', 527)).toEqual([

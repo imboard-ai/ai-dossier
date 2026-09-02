@@ -699,6 +699,18 @@ export interface DispatchConfig {
    * {@link DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS}.
    */
   fence_takeover_timeout_ms?: number;
+  /**
+   * Tool names to deny on every `claude`-family dispatch via `--disallowedTools` (#591).
+   * Defaults to `['Monitor']` — a headless `claude -p` session ends the instant the model
+   * stops responding, so an agent that arms `Monitor` to wait on a background command (e.g.
+   * `ci-parity.sh`) and then ends its turn abandons the run with the subprocess still going;
+   * the engine can only see this as an unverified exit (`agent-exited-unverified` /
+   * `unverified-exit-at-strongest-tier`). `NO_BACKGROUND_EXIT_INSTRUCTION` asks the model not
+   * to do this; this flag makes it structurally impossible for `claude`-family CLIs. Set `[]`
+   * to opt out entirely. Never applied to a non-`claude` command (e.g. `opencode`), which has
+   * no such flag.
+   */
+  disallowed_tools?: string[];
 }
 
 /** The escalation ladder: one tier stronger, or null at the top (RFC-0001 §C.1). */
@@ -1191,4 +1203,11 @@ export interface JournalEvent {
   latest_version?: string;
   /** The unit's `priority` at assignment time (#565 AC2 — "journaled on each assignment"). */
   priority?: number;
+  /**
+   * Last tool the exited dispatch called (#591) — attributes an unverified exit
+   * (`verify-incomplete`, and the terminal `unit-failed` reasons `agent-exited-unverified` /
+   * `unverified-exit-at-strongest-tier`) to a concrete cause (e.g. `Monitor`) without opening
+   * the transcript. Absent when the dispatch log yielded no `tool_use` block.
+   */
+  last_tool?: string;
 }

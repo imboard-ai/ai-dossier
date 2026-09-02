@@ -68,6 +68,7 @@
  */
 
 import * as path from 'node:path';
+import { parseLastToolUse } from '@ai-dossier/core';
 import type { BatchDispatchDeps, BatchTickResult } from './batch-dispatch';
 import { runBatchTick } from './batch-dispatch';
 import {
@@ -846,7 +847,7 @@ function failUnit(
   state: SchedState,
   unit: string,
   reason: string,
-  opts: { merged?: boolean } = {}
+  opts: { merged?: boolean; extra?: Record<string, unknown> } = {}
 ): SchedState {
   const issue = issueOfUnit(unit);
   if (issue === null) return state;
@@ -862,11 +863,11 @@ function failUnit(
     ctx.result.failed.push(unit);
     if (opts.merged === true && entry.status === 'shipped') {
       next = transitionIssue(next, issue, 'done', { reason }, now);
-      journal(ctx, 'report-failed', unit, { reason });
+      journal(ctx, 'report-failed', unit, { reason, ...opts.extra });
       releaseReason = 'report-failed';
     } else {
       next = transitionIssue(next, issue, 'failed', { reason }, now);
-      journal(ctx, 'unit-failed', unit, { reason });
+      journal(ctx, 'unit-failed', unit, { reason, ...opts.extra });
       const blocked = blockTransitiveDependents(ctx, next, issue);
       next = blocked.state;
       ctx.result.blocked.push(...blocked.issues);
@@ -1054,9 +1055,12 @@ function enterRecovery(
   // `causeEvent === 'verify-incomplete'` arrives from `completeUnitOrRecover`
   // AFTER the agent's exit was already detected and recorded by the dead-pid
   // branch of `reconcileRunning`; recording again here would double-count
-  // that same dispatch.
+  // that same dispatch. #591: a stall kill still has a fresh log slice worth
+  // reading for `last_tool` — a hung agent's last tool is exactly what tells
+  // an operator what it hung in.
   if (causeEvent === 'stalled') {
-    recordDispatchRunLog(ctx, state, slot, unit);
+    const stallLastTool = recordDispatchRunLog(ctx, state, slot, unit);
+    if (stallLastTool !== null) evidence = { ...evidence, last_tool: stallLastTool };
   }
 
   const report = isReportSlot(slot);
@@ -1069,7 +1073,12 @@ function enterRecovery(
       : slot.recoveries >= ESCALATION_CAP
         ? 'escalation-cap'
         : `${cause}-at-strongest-tier`;
-    return failUnit(ctx, state, unit, reason, { merged: report });
+    // #591: surface `last_tool` on the terminal `unit-failed` journal entry too — the
+    // `evidence` object already carries it (added above by `completeUnitOrRecover`)
+    // for the non-terminal `verify-incomplete` journal event.
+    const extra =
+      typeof evidence.last_tool === 'string' ? { last_tool: evidence.last_tool } : undefined;
+    return failUnit(ctx, state, unit, reason, { merged: report, extra });
   }
 
   // Fence BEFORE the respawn (#504 AC1/AC4): `killUnitAgent` above only reaches a pid
@@ -1311,7 +1320,7 @@ function recordDispatchRunLog(
   state: SchedState,
   slot: SlotEntry,
   unit: string
-): void {
+): string | null {
   // Enforce the once-per-dispatch invariant HERE rather than restating it in
   // prose at four call sites (#524 review). `blockTransitiveDependents` and
   // `enterRecovery` reach slots in any non-idle status: a slot already moved
@@ -1326,7 +1335,7 @@ function recordDispatchRunLog(
       reason: slot.spawned_at === null ? 'never-spawned' : `already-recorded-${slot.status}`,
       slot: slot.id,
     });
-    return;
+    return null;
   }
 
   const issue = issueOfUnit(unit);
@@ -1339,7 +1348,7 @@ function recordDispatchRunLog(
     journal(ctx, 'run-log-skipped', unit, {
       reason: issue === null ? 'not-an-issue-unit' : 'entry-gone',
     });
-    return;
+    return null;
   }
 
   // Report slots ride the same tier the cycle escalation ladder set at
@@ -1381,6 +1390,10 @@ function recordDispatchRunLog(
     (event, extra) => journal(ctx, event, unit, extra),
     { log: logFile, offset }
   );
+
+  // #591: the last tool this dispatch called, so an unverified exit attributes to a
+  // concrete cause (e.g. `Monitor`) without opening the transcript — see `enterRecovery`.
+  return parseLastToolUse(logContent);
 }
 
 /** Reconcile one running slot against its polled ground truth. */
@@ -1397,9 +1410,9 @@ function reconcileRunning(
   // is DETECTED, never trusted as completion (AC2/AC3).
   if (slot.pid !== null && !ctx.deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
     journal(ctx, 'exit-detected', unit, { pid: slot.pid, slot: slot.id });
-    recordDispatchRunLog(ctx, state, slot, unit);
+    const lastTool = recordDispatchRunLog(ctx, state, slot, unit);
     const exited = transitionSlot(state, slot.id, 'exited', {}, now);
-    return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete');
+    return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete', lastTool);
   }
 
   // The milestone poll FAILED (gh outage, missing binary) — unreachable is NOT
@@ -1537,7 +1550,13 @@ function completeUnitOrRecover(
   state: SchedState,
   unit: string,
   truth: UnitTruth,
-  via: 'verify-complete' | 'external-advance'
+  via: 'verify-complete' | 'external-advance',
+  // #591: the last tool this dispatch called (from `recordDispatchRunLog`'s dead-pid
+  // reading), threaded through to `enterRecovery`'s `unverified-exit` evidence. The
+  // `external-advance` caller passes none — it DOES record a run log (`reconcileRunning`,
+  // #524), but ground truth already confirmed completion, so this path never reaches the
+  // `unverified-exit` branch and the tool name has nothing to attribute.
+  lastTool: string | null = null
 ): SchedState {
   const now = ctx.deps.now();
   let next = state;
@@ -1595,6 +1614,9 @@ function completeUnitOrRecover(
     observed: truth.milestone
       ? `milestone ${truth.milestone.phase}/${truth.milestone.status}; closed=${truth.closed}`
       : `no milestone; closed=${truth.closed}`,
+    // #591: attributes the unverified exit to a concrete cause (e.g. `Monitor`)
+    // without opening the transcript. Omitted when the log yielded no tool_use.
+    ...(lastTool !== null ? { last_tool: lastTool } : {}),
   });
 }
 

@@ -90,25 +90,31 @@ function joinModels(names: readonly string[]): string | null {
 }
 
 /**
- * `model` is copied verbatim from untrusted agent JSON into a `runs.jsonl`
- * entry a later command (`ai-dossier history`, `sched stats`) may render.
- * Strip control characters (the terminal-escape/log-injection risk) and cap
- * the length, rather than trusting an agent-controlled string unbounded.
+ * Strip control characters (the terminal-escape/log-injection risk) and cap the length of a
+ * string copied verbatim from untrusted agent JSON before it reaches a persisted file (`runs
+ * .jsonl`, `events.jsonl`) a later command may render (`ai-dossier history`, `sched stats`,
+ * `sched status`). Shared by every agent-controlled string field this module parses —
+ * originally written for `model` (#524), reused for `parseLastToolUse`'s tool name (#591).
  */
-function sanitizeModel(value: string | null): string | null {
+function sanitizeAgentText(value: string | null, maxLength: number): string | null {
   if (value === null) return null;
   let clean = '';
   // Bound the WORK, not just the result: `value` is agent-controlled and can
   // be arbitrarily long, so stop as soon as the cap is reached rather than
   // materializing a sanitized copy of the whole string first.
   for (const char of value) {
-    if (clean.length >= MAX_MODEL_LENGTH) break;
+    if (clean.length >= maxLength) break;
     const code = char.codePointAt(0) ?? 0;
     // C0 (< 0x20), DEL (0x7f) and C1 (0x80-0x9f) alike: U+009B is the 8-bit
     // CSI, which a terminal in a non-UTF-8 locale acts on exactly like ESC[.
     if (code >= 0x20 && code !== 0x7f && !(code >= 0x80 && code <= 0x9f)) clean += char;
   }
   return clean;
+}
+
+/** `model` is copied verbatim from untrusted agent JSON — see {@link sanitizeAgentText}. */
+function sanitizeModel(value: string | null): string | null {
+  return sanitizeAgentText(value, MAX_MODEL_LENGTH);
 }
 
 /** Narrow an unknown value to a plain-object record; null for anything else. */
@@ -358,6 +364,49 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
   if (lastResult) return extractResultUsage(lastResult);
   if (assistants.length > 0) return sumAssistantUsage(assistants);
   return null;
+}
+
+/** Longest `last_tool` value written to `events.jsonl` before truncation (#591) — real tool names (`Bash`, `Monitor`, `mcp__server__tool`) are a fraction of this. */
+const MAX_TOOL_NAME_LENGTH = 100;
+
+/**
+ * Find the last tool a `claude`-family agent called before its stream ended (#591).
+ *
+ * Attributes an unverified exit (`agent-exited-unverified` / `unverified-exit-at-
+ * strongest-tier`) to a concrete cause without opening the transcript: scans every
+ * `assistant` event's `message.content[]` array (the stream-json shape, one event per
+ * turn) for `type:"tool_use"` blocks and remembers the last one's `name` — JSONL is
+ * append-order, so the last one found across the whole stream is the last tool called.
+ * Mirrors {@link parseAgentUsage}'s line-by-line tolerance: unparseable lines and the
+ * {@link SCHED_DISPATCH_EVENT} preamble are skipped rather than disqualifying the scan.
+ * Returns `null` when no `tool_use` block is found anywhere (including malformed or
+ * empty input) — "no tool was called" and "the log couldn't be read" are not
+ * distinguished here because both mean the same thing to a caller attributing a failure.
+ *
+ * The returned name is agent-controlled and goes straight into a persisted, later-rendered
+ * journal entry (`events.jsonl`, `sched status`) — sanitized via {@link sanitizeAgentText}
+ * the same way `model` is, rather than trusted verbatim.
+ */
+export function parseLastToolUse(stdout: string | null | undefined): string | null {
+  if (typeof stdout !== 'string' || stdout.trim() === '') return null;
+
+  let lastTool: string | null = null;
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const event = parseJsonObject(trimmed);
+    if (!event || event.type === SCHED_DISPATCH_EVENT || event.type !== 'assistant') continue;
+
+    const content = asRecord(event.message)?.content;
+    if (!Array.isArray(content)) continue;
+
+    for (const raw of content) {
+      const block = asRecord(raw);
+      if (block?.type === 'tool_use' && typeof block.name === 'string') lastTool = block.name;
+    }
+  }
+  return sanitizeAgentText(lastTool, MAX_TOOL_NAME_LENGTH);
 }
 
 /**

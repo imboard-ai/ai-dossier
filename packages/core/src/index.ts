@@ -15,6 +15,7 @@
 export type { AgentRunUsage } from './agent-usage';
 export {
   parseAgentUsage,
+  parseLastToolUse,
   parseOpenCodeUsage,
   SCHED_DISPATCH_EVENT,
   usageParserFor,
