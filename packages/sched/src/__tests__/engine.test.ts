@@ -788,6 +788,72 @@ describe('slot refill (AC5: immediate and automatic)', () => {
   });
 });
 
+describe('unit priority (#565): a ready batch reserves its slot over a competing issue', () => {
+  it('reserves the sole free slot for the higher-priority ready batch WHEN the batch pass can actually claim it', () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    // Wire minimal batchExec/runBatchSuite stubs so the reservation gate
+    // (engine.ts's `batchPassWillRun`) sees the batch pass as configured —
+    // without this, reserving the slot would starve #101 forever, since
+    // nothing would ever be able to claim it (the bug this test guards).
+    h.deps.batchExec = () => null;
+    h.deps.runBatchSuite = () => ({ ok: true, failing: [] });
+    // #101 (full-cycle, default priority 0) enqueued first — older, but
+    // lower priority than the batch's default (10).
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+    h.enqueue([{ issue: 102, mode: 'slot', batch: 'b1', tier: 'mid' }]);
+    expect(h.state().batches.find((b) => b.id === 'b1')?.status).toBe('ready');
+
+    h.tick();
+
+    // dispatchAssignments (issue-only) must NOT have spawned #101 — the dry
+    // run over both kinds ranked the ready batch first and the reservation
+    // left the slot free rather than handing it to the lower-priority issue.
+    expect(h.spawnCalls).toHaveLength(0);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('queued');
+  });
+
+  it('does NOT reserve a slot for a ready batch when batch dispatch is not configured — the issue dispatches instead (no permanent starvation)', () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    // This harness configures no batchExec/runBatchSuite (the common case
+    // for an engine that only drives full-cycle issues) — a ready batch
+    // that nothing can ever claim must not withdraw capacity from issues
+    // forever. Regression test for the bug the review of #565 found: the
+    // reservation originally fired unconditionally.
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+    h.enqueue([{ issue: 102, mode: 'slot', batch: 'b1', tier: 'mid' }]);
+    expect(h.state().batches.find((b) => b.id === 'b1')?.status).toBe('ready');
+
+    h.tick();
+
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('dispatched');
+  });
+
+  it('with no competing batch, the issue is dispatched as before (no regression)', () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+
+    h.tick();
+
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('dispatched');
+  });
+
+  it('journals the priority on each issue assignment', () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid', priority: 3 }]);
+
+    h.tick();
+
+    const assigned = h.events().find((e) => e.event === 'assigned' && e.unit === 'issue:101');
+    expect(assigned?.priority).toBe(3);
+  });
+});
+
 describe('restart self-healing', () => {
   it('a slot left assigned by a crash between assign and spawn is spawned on the next tick', () => {
     const h = harness();

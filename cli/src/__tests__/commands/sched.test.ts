@@ -337,6 +337,152 @@ describe('ai-dossier sched enqueue', () => {
     ).rejects.toThrow('process.exit(1)');
     expect(fs.existsSync(statePath())).toBe(false);
   });
+
+  it('#565: --priority sets a full-cycle entry priority; omitted defaults to 0', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '101',
+      '--priority',
+      '7',
+      '--project',
+      'test-proj',
+    ]);
+    await runSched(['sched', 'enqueue', '--issues', '102', '--project', 'test-proj']);
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries.find((e) => e.issue === 101)?.priority).toBe(7);
+    expect(state.entries.find((e) => e.issue === 102)?.priority).toBe(0);
+  });
+
+  it('#565: a --mode slot batch defaults to priority 10, and --priority overrides it', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '201',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--project',
+      'test-proj',
+    ]);
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '202',
+      '--mode',
+      'slot',
+      '--batch',
+      'b2',
+      '--priority',
+      '99',
+      '--project',
+      'test-proj',
+    ]);
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches.find((b) => b.id === 'b1')?.priority).toBe(10);
+    expect(state.batches.find((b) => b.id === 'b2')?.priority).toBe(99);
+  });
+
+  it('#565: --priority rejects a non-integer', async () => {
+    await expect(
+      runSched([
+        'sched',
+        'enqueue',
+        '--issues',
+        '101',
+        '--priority',
+        'high',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+  });
+
+  it('#565: --priority is rejected with --from-manifest (would otherwise be silently discarded)', async () => {
+    const manifest = path.join(home, 'manifest.json');
+    fs.writeFileSync(manifest, JSON.stringify({ entries: [{ issue: 1, mode: 'full' }] }));
+    await expect(
+      runSched([
+        'sched',
+        'enqueue',
+        '--from-manifest',
+        manifest,
+        '--priority',
+        '5',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+    expect(fs.existsSync(statePath())).toBe(false);
+  });
+
+  it('#565: a second enqueue call joining an existing batch does not re-point its priority (review regression)', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '201',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--priority',
+      '99',
+      '--more-members-expected',
+      '--project',
+      'test-proj',
+    ]);
+    // No --priority on the second call — the CLI must NOT inject the
+    // configured default (10) here, or enqueue.ts's assertBatchFactsAgree
+    // rejects the call as "refusing to re-point" a priority the operator
+    // never touched.
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '202',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--project',
+      'test-proj',
+    ]);
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches.find((b) => b.id === 'b1')).toMatchObject({
+      priority: 99,
+      status: 'ready',
+      members: [201, 202],
+    });
+  });
+
+  it('#565: --mode slot --priority sets the batch priority; the member entry keeps the default and status shows "-"', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '201',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--priority',
+      '77',
+      '--project',
+      'test-proj',
+    ]);
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries[0]).toMatchObject({ issue: 201, priority: 0 });
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const queueSection = logs.join('\n').split('== Batches ==')[0];
+    expect(queueSection).toMatch(/#201\s+slot\s+b1\s+-/);
+  });
 });
 
 describe('ai-dossier sched start (#537: engine-stale detection)', () => {
@@ -708,6 +854,173 @@ describe('ai-dossier sched pause/resume/abandon', () => {
     await expect(
       runSched(['sched', 'abandon', '--issue', '404', '--project', 'test-proj'])
     ).rejects.toThrow('process.exit(1)');
+  });
+});
+
+describe('ai-dossier sched reprioritize (#565)', () => {
+  it('adjusts a queued issue in place, without abandon/re-enqueue', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    await runSched([
+      'sched',
+      'reprioritize',
+      '--issue',
+      '101',
+      '--priority',
+      '42',
+      '--project',
+      'test-proj',
+    ]);
+    expect(logs.join('\n')).toContain('Issue #101 priority set to 42');
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries[0]).toMatchObject({ issue: 101, priority: 42, status: 'queued' });
+  });
+
+  it('adjusts a batch in place', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '201',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--project',
+      'test-proj',
+    ]);
+    await runSched([
+      'sched',
+      'reprioritize',
+      '--batch',
+      'b1',
+      '--priority',
+      '99',
+      '--project',
+      'test-proj',
+    ]);
+    expect(logs.join('\n')).toContain('Batch b1 priority set to 99');
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b1', priority: 99 });
+  });
+
+  it('reprioritize --json reports the outcome', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    logs.length = 0;
+    await runSched([
+      'sched',
+      'reprioritize',
+      '--issue',
+      '101',
+      '--priority',
+      '5',
+      '--project',
+      'test-proj',
+      '--json',
+    ]);
+    expect(JSON.parse(logs.join(''))).toEqual({ reprioritized: 'issue:101', priority: 5 });
+  });
+
+  it('rejects reprioritizing with both --issue and --batch', async () => {
+    await expect(
+      runSched([
+        'sched',
+        'reprioritize',
+        '--issue',
+        '1',
+        '--batch',
+        'b',
+        '--priority',
+        '1',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+  });
+
+  it('rejects reprioritizing an unknown issue', async () => {
+    await expect(
+      runSched([
+        'sched',
+        'reprioritize',
+        '--issue',
+        '404',
+        '--priority',
+        '1',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+  });
+
+  it('rejects a non-integer --priority', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    await expect(
+      runSched([
+        'sched',
+        'reprioritize',
+        '--issue',
+        '101',
+        '--priority',
+        'high',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+  });
+
+  it('requires --priority', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    await expect(
+      runSched(['sched', 'reprioritize', '--issue', '101', '--project', 'test-proj'])
+    ).rejects.toThrow();
+  });
+
+  it('#565 review: rejects a multi-issue --issue selection rather than silently reprioritizing only the first', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '4,5', '--project', 'test-proj']);
+    await expect(
+      runSched([
+        'sched',
+        'reprioritize',
+        '--issue',
+        '4,5',
+        '--priority',
+        '10',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries.every((e) => e.priority === 0)).toBe(true);
+  });
+
+  it('#565 review: journals a reprioritized event with the new and previous priority', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '101',
+      '--priority',
+      '3',
+      '--project',
+      'test-proj',
+    ]);
+    await runSched([
+      'sched',
+      'reprioritize',
+      '--issue',
+      '101',
+      '--priority',
+      '42',
+      '--project',
+      'test-proj',
+    ]);
+    const events = fs
+      .readFileSync(journalPath(), 'utf-8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const event = events.find((e) => e.event === 'reprioritized' && e.unit === 'issue:101');
+    expect(event).toMatchObject({ priority: 42, detail: 'was 3' });
   });
 });
 

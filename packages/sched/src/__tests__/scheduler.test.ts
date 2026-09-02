@@ -5,6 +5,8 @@ import {
   computeAssignments,
   createEmptyState,
   enqueueEntries,
+  reprioritizeBatch,
+  reprioritizeIssue,
   runnableUnits,
   setPaused,
   transitionBatch,
@@ -243,5 +245,130 @@ describe('abandon', () => {
       NOW
     );
     expect(() => abandonBatch(state, 'nope')).toThrow(/not found/);
+  });
+});
+
+describe('unit priority (#565)', () => {
+  it('runnableUnits: a ready batch (default priority 10) beats an older full-cycle issue (default 0)', () => {
+    // #1 enqueued first, at NOW — genuinely older by readiness age (`updated_at`).
+    // Batch b1 enqueued second, at NOW2 (10 minutes later) — younger, but its
+    // default priority still wins: this is priority beating AGE, not merely
+    // beating the numeric tiebreak (a same-timestamp test would prove only that).
+    let state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
+    state = enqueueEntries(state, [{ issue: 2, mode: 'slot', batch: 'b1' }], NOW2);
+    expect(runnableUnits(state)).toEqual([
+      { kind: 'batch', batch: 'b1' },
+      { kind: 'issue', issue: 1 },
+    ]);
+  });
+
+  it('runnableUnits: equal priority keeps FIFO (older issue first)', () => {
+    let state = enqueueEntries(createEmptyState(), [{ issue: 1, priority: 5 }], NOW);
+    state = enqueueEntries(state, [{ issue: 2, priority: 5 }], NOW2);
+    expect(runnableUnits(state)).toEqual([
+      { kind: 'issue', issue: 1 },
+      { kind: 'issue', issue: 2 },
+    ]);
+  });
+
+  it('runnableUnits: an explicit low-priority issue sorts after the default (0)', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1, priority: -5 }, { issue: 2 }],
+      NOW
+    );
+    expect(runnableUnits(state)).toEqual([
+      { kind: 'issue', issue: 2 },
+      { kind: 'issue', issue: 1 },
+    ]);
+  });
+
+  it('computeAssignments: a higher-priority batch is offered the free slot ahead of a same-tick issue', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1 }, { issue: 2, mode: 'slot', batch: 'b1' }],
+      NOW
+    );
+    const { assignments } = computeAssignments(state, { max_slots: 1 }, NOW2, ['issue', 'batch']);
+    expect(assignments).toEqual([{ slot: expect.any(Number), kind: 'batch', batch: 'b1' }]);
+  });
+
+  it('sched enqueue --priority sets a full-cycle entry priority (default 0 otherwise)', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1, priority: 7 }, { issue: 2 }],
+      NOW
+    );
+    expect(state.entries.find((e) => e.issue === 1)?.priority).toBe(7);
+    expect(state.entries.find((e) => e.issue === 2)?.priority).toBe(0);
+  });
+
+  it('a batch defaults to DEFAULT_BATCH_PRIORITY (10) and honors an explicit batch_priority', () => {
+    let state = enqueueEntries(createEmptyState(), [{ issue: 1, mode: 'slot', batch: 'b1' }], NOW);
+    expect(state.batches.find((b) => b.id === 'b1')?.priority).toBe(10);
+
+    state = enqueueEntries(
+      state,
+      [{ issue: 2, mode: 'slot', batch: 'b2', batch_priority: 20 }],
+      NOW
+    );
+    expect(state.batches.find((b) => b.id === 'b2')?.priority).toBe(20);
+  });
+
+  it('a later member cannot silently re-point an already-set batch priority', () => {
+    let state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1, mode: 'slot', batch: 'b1', batch_priority: 20, more_members_expected: true }],
+      NOW
+    );
+    expect(() =>
+      enqueueEntries(state, [{ issue: 2, mode: 'slot', batch: 'b1', batch_priority: 30 }], NOW2)
+    ).toThrow(/refusing to re-point/);
+    // agreeing (or omitting) is fine
+    state = enqueueEntries(
+      state,
+      [{ issue: 2, mode: 'slot', batch: 'b1', batch_priority: 20 }],
+      NOW2
+    );
+    expect(state.batches.find((b) => b.id === 'b1')?.priority).toBe(20);
+  });
+
+  it('reprioritizeIssue adjusts a queued entry in place, no abandon/re-enqueue', () => {
+    const state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
+    const next = reprioritizeIssue(state, 1, 42);
+    const entry = next.entries.find((e) => e.issue === 1);
+    expect(entry?.priority).toBe(42);
+    expect(entry?.status).toBe('queued'); // untouched — no abandon edge taken
+  });
+
+  it('reprioritizeIssue refuses a terminal or missing entry, and a non-integer priority', () => {
+    const state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
+    expect(() => reprioritizeIssue(state, 99, 1)).toThrow(/not found/);
+    expect(() => reprioritizeIssue(state, 1, 1.5)).toThrow(/integer/);
+    const failed = abandonIssue(state, 1).state;
+    expect(() => reprioritizeIssue(failed, 1, 1)).toThrow(/already/);
+  });
+
+  it('reprioritizeBatch adjusts a batch in place, no abandon/re-enqueue', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1, mode: 'slot', batch: 'b1' }],
+      NOW
+    );
+    const next = reprioritizeBatch(state, 'b1', 99);
+    const batch = next.batches.find((b) => b.id === 'b1');
+    expect(batch?.priority).toBe(99);
+    expect(batch?.status).toBe('ready'); // untouched
+  });
+
+  it('reprioritizeBatch refuses a terminal or missing batch', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1, mode: 'slot', batch: 'b1' }],
+      NOW
+    );
+    expect(() => reprioritizeBatch(state, 'nope', 1)).toThrow(/not found/);
+    const dissolved = abandonBatch(state, 'b1').state;
+    expect(() => reprioritizeBatch(dissolved, 'b1', 1)).toThrow(/already/);
   });
 });

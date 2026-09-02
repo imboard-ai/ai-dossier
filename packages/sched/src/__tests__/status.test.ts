@@ -48,7 +48,9 @@ describe('buildStatusReport', () => {
 
     const report = buildStatusReport(state, { max_slots: 3 }, 'test-proj');
     expect(report.runnable).toBe(2);
-    expect(report.runnable_units).toEqual(['issue:101', 'batch:b1']);
+    // #565: runnable_units is priority-ordered, not queue-insertion-ordered —
+    // a batch's default priority (10) outranks a full-cycle entry's (0).
+    expect(report.runnable_units).toEqual(['batch:b1', 'issue:101']);
     expect(report.blocked.map((b) => b.issue)).toEqual([102]);
     expect(report.blocked[0].reason).toContain('#101');
     expect(report.failed).toEqual([]);
