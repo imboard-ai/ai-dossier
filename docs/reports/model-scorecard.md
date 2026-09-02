@@ -1,6 +1,6 @@
 # Model Scorecard
 
-Generated: 2026-09-02T11:47:03.973Z | Window: 2026-08-25 → 2026-09-02
+Generated: 2026-09-02T11:57:51.293Z | Window: 2026-08-25 → 2026-09-02
 
 Cost, quality, and speed per LLM, joined from runstate trails (GitHub), `runs.jsonl`
 (token/cost telemetry), and `events.jsonl` (dispatch tier, stall/escalation counts).
@@ -16,15 +16,15 @@ a trend. Read `cost/delivered` and `delivery rate` alongside `n`, never alone.
 | `<unknown>` | imboard-ai/ai-dossier | <unknown> | unknown | 8 | 0 | 0% | N/A | N/A | N/A | N/A | N/A | 0 | 0 | 0 |
 | `<unknown>` | imboard-ai/imboard-monorepo | <unknown> | unknown | 13 | 1 | 8% | 100% (n=1) | N/A | N/A | 118.2 | 1.0 (n=1) | 0 | 0 | 0 |
 | `claude-opus-5` | imboard-ai/ai-dossier | <unknown> | unknown | 1 | 1 | 100% | 100% (n=1) | N/A | N/A | 48.6 | 27.0 (n=1) | 0 | 0 | 0 |
-| `claude-opus-5` | imboard-ai/ai-dossier | strong | claude | 1 | 1 | 100% | 100% (n=1) | N/A | N/A | 68.6 | 31.0 (n=1) | 0 | 0 | 0 |
+| `claude-opus-5` | imboard-ai/ai-dossier | strong | claude | 1 | 1 | 100% | 100% (n=1) | $58.724 (n=1) | 69.8 | 68.6 | 31.0 (n=1) | 0 | 0 | 0 |
 | `claude-opus-5` | imboard-ai/imboard-monorepo | <unknown> | unknown | 25 | 25 | 100% | 100% (n=17) | N/A | N/A | 128.2 | 17.1 (n=25) | 0 | 0 | 0 |
 | `claude-opus-5[1m]` | imboard-ai/imboard-monorepo | <unknown> | unknown | 1 | 1 | 100% | N/A | N/A | N/A | 106.3 | 22.0 (n=1) | 0 | 0 | 0 |
 | `claude-sonnet-5` | imboard-ai/ai-dossier | <unknown> | unknown | 1 | 1 | 100% | N/A | N/A | N/A | 29.1 | 8.0 (n=1) | 0 | 0 | 0 |
 | `claude-sonnet-5` | imboard-ai/ai-dossier | mechanical | claude | 1 | 1 | 100% | 100% (n=1) | $4.793 (n=1) | 20.0 | 19.7 | 2.0 (n=1) | 0 | 0 | 0 |
-| `claude-sonnet-5` | imboard-ai/ai-dossier | mid | claude | 30 | 27 | 90% | 97% (n=29) | $23.298 (n=5) | 48.0 | 48.7 | 13.0 (n=30) | 0 | 0 | 0 |
-| `claude-sonnet-5` | imboard-ai/ai-dossier | strong | claude | 7 | 6 | 86% | 62% (n=5) | $25.060 (n=3) | 82.0 | 65.9 | 20.5 (n=6) | 0 | 7 | 4 |
+| `claude-sonnet-5` | imboard-ai/ai-dossier | mid | claude | 30 | 28 | 93% | 97% (n=29) | $17.703 (n=13) | 30.0 | 48.9 | 13.0 (n=30) | 0 | 0 | 0 |
+| `claude-sonnet-5` | imboard-ai/ai-dossier | strong | claude | 7 | 6 | 86% | 62% (n=5) | $21.383 (n=6) | 55.9 | 65.9 | 20.5 (n=6) | 0 | 7 | 4 |
 | `claude-sonnet-5` | imboard-ai/imboard-monorepo | <unknown> | unknown | 22 | 20 | 91% | 98% (n=21) | N/A | N/A | 188.9 | 9.2 (n=22) | 0 | 0 | 0 |
-| `claude-sonnet-5` | imboard-ai/imboard-monorepo | mechanical | claude,opencode | 9 | 8 | 89% | 94% (n=9) | $6.745 (n=3) | 41.0 | 283.9 | 13.4 (n=9) | 0 | 9 | 0 |
+| `claude-sonnet-5` | imboard-ai/imboard-monorepo | mechanical | claude,opencode | 9 | 8 | 89% | 94% (n=9) | $17.567 (n=8) | 42.1 | 283.9 | 13.4 (n=9) | 0 | 9 | 0 |
 | `claude-sonnet-5` | imboard-ai/imboard-monorepo | mid | claude | 1 | 0 | 0% | 100% (n=1) | N/A | N/A | N/A | 3.0 (n=1) | 0 | 1 | 0 |
 | `claude-sonnet-5` | imboard-ai/imboard-monorepo | strong | claude | 2 | 0 | 0% | 100% (n=1) | N/A | N/A | N/A | 12.0 (n=2) | 0 | 2 | 1 |
 | `glm-5.3` | imboard-ai/ai-dossier | <unknown> | unknown | 16 | 14 | 88% | 100% (n=15) | N/A | N/A | 67.1 | 15.7 (n=16) | 0 | 0 | 0 |
@@ -46,9 +46,9 @@ hide a gateway costing more or delivering less than the same weights elsewhere.
 | Model | Provider | Agent CLI | n | Delivered | Delivery rate | Δ vs prev | AC met | Cost/delivered | Billable tokens/delivered | Median API-min | Median wall-clock-min | Review fixed/issue | Stalls | Escalations | Unverified exits |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `<unknown>` | direct | unknown | 21 | 1 | 5% | — | 100% (n=1) | N/A | N/A | N/A | 118.2 | 1.0 (n=1) | 0 | 0 | 0 |
-| `claude-opus-5` | direct | claude | 27 | 27 | 100% | — | 100% (n=19) | N/A | N/A | N/A | 123.5 | 18.0 (n=27) | 0 | 0 | 0 |
+| `claude-opus-5` | direct | claude | 27 | 27 | 100% | — | 100% (n=19) | $58.724 (n=1) | 182,797 (n=1) | 69.8 | 123.5 | 18.0 (n=27) | 0 | 0 | 0 |
 | `claude-opus-5[1m]` | direct | unknown | 1 | 1 | 100% | — | N/A | N/A | N/A | N/A | 106.3 | 22.0 (n=1) | 0 | 0 | 0 |
-| `claude-sonnet-5` | direct | claude,opencode | 73 | 63 | 86% | — | 94% (n=67) | $18.058 (n=12) | 159,278 (n=12) | 48.0 | 72.9 | 12.1 (n=72) | 0 | 19 | 5 |
+| `claude-sonnet-5` | direct | claude,opencode | 73 | 64 | 88% | — | 94% (n=67) | $17.992 (n=28) | 94,177 (n=28) | 41.8 | 72.6 | 12.1 (n=72) | 0 | 19 | 5 |
 | `glm-5.3` | 4 providers ↓ | opencode | 45 | 39 | 87% | — | 99% (n=39) | N/A | N/A | N/A | 139.3 | 11.5 (n=42) | 1 | 6 | 0 |
 | ↳ | direct | unknown | 33 | 29 | 88% | — | 99% (n=30) | N/A | N/A | N/A | 139.3 | 11.8 (n=31) | 0 | 0 | 0 |
 | ↳ | llmgateway | unknown | 8 | 7 | 88% | — | 100% (n=7) | N/A | N/A | N/A | 103.4 | 12.1 (n=8) | 0 | 0 | 0 |
@@ -63,7 +63,11 @@ hide a gateway costing more or delivering less than the same weights elsewhere.
 | `kimi-k3` | direct | unknown | 1 | 0 | 0% | — | N/A | N/A | N/A | N/A | N/A | N/A | 0 | 0 | 0 |
 | `kimi-k3-fast` | direct | unknown | 9 | 8 | 89% | — | 97% (n=9) | N/A | N/A | N/A | 353.7 | 4.8 (n=9) | 0 | 0 | 0 |
 | `kimi-latest` | openrouter | opencode | 1 | 1 | 100% | — | 100% (n=1) | N/A | N/A | N/A | 527.1 | 15.0 (n=1) | 0 | 0 | 0 |
-| **TOTAL** | — | claude,opencode | 187 | 146 | 78% | — | 97% (n=139) | $18.058 (n=12) | 159,278 (n=12) | 48.0 | 103.9 | 12.1 (n=159) | 1 | 25 | 5 |
+| **TOTAL** | — | claude,opencode | 187 | 147 | 79% | — | 97% (n=139) | $19.396 (n=29) | 97,233 (n=29) | 42.6 | 103.6 | 12.1 (n=159) | 1 | 25 | 5 |
+
+Of the 29 delivered issues with a cost figure, 17 were
+recovered from the dispatch's own agent log because `runs.jsonl` recorded none — see
+Limitations.
 
 ## Wall-clock per phase (all models)
 
@@ -77,7 +81,7 @@ that usually spans several phases (see Limitations).
 | batch-validate | 3 | 28.0m |
 | review | 160 | 24.4m |
 | implement | 159 | 20.3m |
-| merge-wait | 113 | 13.7m |
+| merge-wait | 114 | 13.7m |
 | plan | 165 | 5.7m |
 | setup | 164 | 2.7m |
 | ship | 156 | 2.5m |
@@ -110,6 +114,12 @@ not expected to match exactly.
   written (`gate` records the bare model id), but 1M-context is billed differently, so
   folding it would blend two cost profiles to fix a formatting slip. Read the two rows
   together when judging quality, separately when judging cost.
+- **Cost comes from two sources, and the column says which.** `~/.dossier/runs.jsonl`
+  is authoritative; where a dispatch predates the telemetry fix (#564) and left it null,
+  the figure is recovered from that dispatch's own agent log under
+  `~/.dossier/sched/<slug>/runs/`. Both are on-host only — a dispatch run from another
+  machine has neither, and its row reads `N/A` because the data is elsewhere, not
+  because it was free.
 - **Cost per phase is not separable.** A dispatch is usually one continuous agent
   session covering several phases, so `runs.jsonl` records cost per issue, not per
   phase — so the per-phase section above reports wall-clock only. For a per-phase

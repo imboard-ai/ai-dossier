@@ -31,7 +31,7 @@
 // ------------------------------------------------------------------
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -155,6 +155,89 @@ export function buildDispatchInfo(events, sinceIso, untilIso) {
   return info;
 }
 
+/**
+ * The per-dispatch agent logs under `~/.dossier/sched/<slug>/runs/`, the third source AC1
+ * names — and the one `runs.jsonl` cannot replace.
+ *
+ * `runs.jsonl` is written by the `ai-dossier` wrapper, so a dispatch the wrapper did not
+ * observe (or observed before #564 fixed its telemetry) records `total_cost_usd: null`
+ * while the agent CLI's own `result` record, appended to the run log, has the real figure.
+ * On this host that gap covers most of the historical cohort, so without this source the
+ * cost column is `N/A` for whole models and the report reads as "no telemetry exists" when
+ * it does. Used strictly as a per-field FALLBACK (see `mergeCost`) — `runs.jsonl` stays
+ * authoritative wherever it reported a value, so nothing already attributed moves.
+ */
+const RUN_LOG_DIR = 'runs';
+
+/** `issue-526.log`, `batch-b-20260901-02-m2-542.log` -> the issue number they belong to. */
+export function issueFromRunLogName(name) {
+  const match = /-(\d+)\.log$/.exec(name);
+  return match ? Number(match[1]) : null;
+}
+
+/** Sum of `values`' non-null entries, or null when none of them reported anything. */
+function sumOrNull(values) {
+  const present = values.filter((v) => typeof v === 'number' && Number.isFinite(v));
+  return present.length > 0 ? sum(present) : null;
+}
+
+/**
+ * One run log's `result` records rolled into the same field shape `buildSchedCostReport`
+ * produces, so the two are mergeable without a translation layer.
+ *
+ * A log accumulates across redispatches (the engine appends rather than truncating), so
+ * every `result` record in it is summed — that is the issue's whole dispatch cost, which is
+ * what `runs.jsonl` reports too.
+ */
+export function aggregateAgentRunLog(text) {
+  const results = [];
+  for (const line of text.split('\n')) {
+    // Prefilter before parsing: these logs carry megabytes of streamed agent events, and
+    // only the `result` record (the one line that carries a cost) is worth JSON.parse.
+    if (!line.includes('"total_cost_usd"')) continue;
+    try {
+      const record = JSON.parse(line);
+      if (record?.type === 'result') results.push(record);
+    } catch {
+      // A truncated final line (the engine was killed mid-write) is not a parse failure
+      // worth reporting — the rest of the log still aggregates.
+    }
+  }
+  if (results.length === 0) return null;
+  const usage = (key) => results.map((r) => r.usage?.[key]);
+  return {
+    runs: results.length,
+    total_cost_usd: sumOrNull(results.map((r) => r.total_cost_usd)),
+    input_tokens: sumOrNull(usage('input_tokens')),
+    output_tokens: sumOrNull(usage('output_tokens')),
+    cache_creation_tokens: sumOrNull(usage('cache_creation_input_tokens')),
+    cache_read_tokens: sumOrNull(usage('cache_read_input_tokens')),
+    duration_ms: sumOrNull(results.map((r) => r.duration_ms)),
+  };
+}
+
+/**
+ * `runs.jsonl`'s figure per field, falling back to the agent log's where it reported none.
+ *
+ * Per FIELD, not per source: a dispatch can land a duration in `runs.jsonl` and its cost
+ * only in the agent log. `source` records what actually supplied the cost, so the report
+ * can disclose the fallback rather than presenting both as one telemetry stream.
+ */
+export function mergeCost(primary, fallback) {
+  if (!primary && !fallback) return null;
+  const pick = (field) => primary?.[field] ?? fallback?.[field] ?? null;
+  const costFromFallback = primary?.total_cost_usd == null && fallback?.total_cost_usd != null;
+  return {
+    total_cost_usd: pick('total_cost_usd'),
+    input_tokens: pick('input_tokens'),
+    output_tokens: pick('output_tokens'),
+    duration_ms: pick('duration_ms'),
+    tier: primary?.tier ?? null,
+    costSource:
+      pick('total_cost_usd') == null ? null : costFromFallback ? 'agent-log' : 'runs.jsonl',
+  };
+}
+
 /** Every `key=value` a review-phase milestone records that this scorecard reads. */
 function reviewFieldsOf(milestones) {
   // `batch-review` posts the same keys on a batch anchor, with `ac_met`/`ac_total` rolled
@@ -204,6 +287,7 @@ export function joinRepoRows({
   trails,
   statsReport,
   schedCost,
+  runLogCost = new Map(),
   dispatchInfo,
   canonicalModelFn,
   providerOfFn,
@@ -222,7 +306,7 @@ export function joinRepoRows({
   for (const [issue, runs] of runsByIssue) {
     const run = pickCanonicalRun(runs, deliveredPhases);
     if (!run) continue;
-    const cost = costByIssue.get(issue);
+    const cost = mergeCost(costByIssue.get(issue), runLogCost.get(issue));
     const dispatch = dispatchInfo.get(issue) ?? emptyDispatchEntry();
     const { fixed, escalated, acMet, acTotal } = reviewFieldsOf(milestonesByIssue.get(issue) ?? []);
 
@@ -240,6 +324,7 @@ export function joinRepoRows({
       inputTokens: cost?.input_tokens ?? null,
       outputTokens: cost?.output_tokens ?? null,
       apiMinutes: cost?.duration_ms != null ? cost.duration_ms / 60000 : null,
+      costSource: cost?.costSource ?? null,
       stalls: dispatch.stalls,
       escalations: dispatch.escalations,
       unverifiedExits: dispatch.unverifiedExits,
@@ -325,6 +410,11 @@ function bucketFrom(rows) {
     costPerDeliveredUsd:
       deliveredCosts.length > 0 ? sum(deliveredCosts) / deliveredCosts.length : null,
     costSamples: deliveredCosts.length,
+    // Disclosed separately so a reader can tell an `ai-dossier`-observed figure from one
+    // recovered out of the agent's own log — same arithmetic, different provenance.
+    costFromRunLogSamples: delivered.filter(
+      (r) => r.costUsd != null && r.costSource === 'agent-log'
+    ).length,
     medianApiMinutes: deliveredApiMinutes.length > 0 ? median(deliveredApiMinutes) : null,
     billableTokensPerDeliveredIssue:
       tokenRows.length > 0
@@ -648,6 +738,14 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
   }
   const g = scorecard.grandTotal;
   lines.push(`| **TOTAL** | — | ${totalCells(g)} |`);
+  if (g.costFromRunLogSamples > 0) {
+    lines.push(
+      '',
+      `Of the ${g.costSamples} delivered issues with a cost figure, ${g.costFromRunLogSamples} were`,
+      "recovered from the dispatch's own agent log because `runs.jsonl` recorded none — see",
+      'Limitations.'
+    );
+  }
 
   lines.push(
     '',
@@ -702,6 +800,12 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     '  written (`gate` records the bare model id), but 1M-context is billed differently, so',
     '  folding it would blend two cost profiles to fix a formatting slip. Read the two rows',
     '  together when judging quality, separately when judging cost.',
+    '- **Cost comes from two sources, and the column says which.** `~/.dossier/runs.jsonl`',
+    '  is authoritative; where a dispatch predates the telemetry fix (#564) and left it null,',
+    "  the figure is recovered from that dispatch's own agent log under",
+    '  `~/.dossier/sched/<slug>/runs/`. Both are on-host only — a dispatch run from another',
+    '  machine has neither, and its row reads `N/A` because the data is elsewhere, not',
+    '  because it was free.',
     '- **Cost per phase is not separable.** A dispatch is usually one continuous agent',
     '  session covering several phases, so `runs.jsonl` records cost per issue, not per',
     '  phase — so the per-phase section above reports wall-clock only. For a per-phase',
@@ -850,6 +954,38 @@ function ghIssueListWithComments(repo, since, execFile) {
     throw new ScorecardError(`gh issue list failed for ${repo}: ${err.stderr || err.message}`);
   }
   return JSON.parse(out);
+}
+
+/**
+ * Per-issue cost recovered from `<sched state>/runs/*.log`, keyed by issue number.
+ *
+ * Best-effort by design: a missing directory, an unreadable file, or a log with no `result`
+ * record all mean "nothing to recover here", never a failed run — this source only ever
+ * fills gaps `runs.jsonl` left, so it must not be able to break a report that was fine
+ * without it.
+ */
+function readRunLogCosts(runLogDir) {
+  const byIssue = new Map();
+  if (!existsSync(runLogDir)) return byIssue;
+  let names;
+  try {
+    names = readdirSync(runLogDir);
+  } catch {
+    return byIssue;
+  }
+  for (const name of names) {
+    if (!name.endsWith('.log')) continue;
+    const issue = issueFromRunLogName(name);
+    if (issue === null) continue;
+    let aggregate;
+    try {
+      aggregate = aggregateAgentRunLog(readFileSync(join(runLogDir, name), 'utf8'));
+    } catch {
+      continue;
+    }
+    if (aggregate) byIssue.set(issue, aggregate);
+  }
+  return byIssue;
 }
 
 function loadCliDist(repoRoot, name, expected = []) {
@@ -1012,6 +1148,14 @@ export function main({
 
       const schedCost = buildSchedCostReport(runsEntries, issueNumbers);
 
+      const runLogDir = join(schedStateDir(repo, home), RUN_LOG_DIR);
+      const runLogCost = readRunLogCosts(runLogDir);
+      if (runLogCost.size === 0) {
+        warnings.push(
+          `${repo}: no per-dispatch agent logs at ${runLogDir} — cost recovered from them is unavailable for this repo on this host.`
+        );
+      }
+
       const eventsPath = join(schedStateDir(repo, home), JOURNAL_FILE);
       const events = readJsonl(eventsPath);
       if (events.length === 0) {
@@ -1026,6 +1170,7 @@ export function main({
         trails,
         statsReport,
         schedCost,
+        runLogCost,
         dispatchInfo,
         canonicalModelFn: canonicalModel,
         providerOfFn: providerOf,
@@ -1033,7 +1178,11 @@ export function main({
       });
       allRows.push(...rows);
       anyRepoSucceeded = true;
-      log(`scorecard: ${repo} — ${issuesWithComments.length} issue(s) read, ${rows.length} scored`);
+      const recovered = rows.filter((r) => r.costSource === 'agent-log').length;
+      log(
+        `scorecard: ${repo} — ${issuesWithComments.length} issue(s) read, ${rows.length} scored` +
+          (recovered > 0 ? `, ${recovered} cost figure(s) recovered from agent run logs` : '')
+      );
     } catch (err) {
       const message = err instanceof ScorecardError ? err.message : (err?.message ?? String(err));
       warnings.push(`${repo}: skipped — ${message}`);

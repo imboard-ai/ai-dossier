@@ -5,11 +5,14 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
+  aggregateAgentRunLog,
   aggregateScorecard,
   attachDeliveryRateDeltas,
   buildDispatchInfo,
+  issueFromRunLogName,
   joinRepoRows,
   main,
+  mergeCost,
   parseArgs,
   pickCanonicalRun,
   projectSlug,
@@ -1274,5 +1277,139 @@ describe('main — guards against writing a snapshot that is not evidence', () =
     expect(() => main(opts({ repoRoot: staleRoot }))).toThrow(/does not export parseMilestones/);
     expect(() => main(opts({ repoRoot: staleRoot }))).toThrow(/make build-all/);
     rmSync(staleRoot, { recursive: true, force: true });
+  });
+});
+
+describe('per-dispatch agent run logs — the third source AC1 names', () => {
+  const resultLine = (over = {}) =>
+    `${JSON.stringify({
+      type: 'result',
+      total_cost_usd: 1.5,
+      duration_ms: 60_000,
+      usage: {
+        input_tokens: 10,
+        output_tokens: 20,
+        cache_creation_input_tokens: 30,
+        cache_read_input_tokens: 40,
+      },
+      ...over,
+    })}\n`;
+
+  describe('issueFromRunLogName', () => {
+    it('reads the issue off both the solo and the batch-member naming', () => {
+      expect(issueFromRunLogName('issue-526.log')).toBe(526);
+      expect(issueFromRunLogName('batch-b-20260901-02-m2-542.log')).toBe(542);
+    });
+
+    it('ignores a file it cannot attribute to an issue', () => {
+      expect(issueFromRunLogName('notes.txt')).toBeNull();
+      expect(issueFromRunLogName('issue-.log')).toBeNull();
+      expect(issueFromRunLogName('engine.log')).toBeNull();
+    });
+  });
+
+  describe('aggregateAgentRunLog', () => {
+    it('sums every result record — a log accumulates across redispatches', () => {
+      const text =
+        resultLine() + resultLine({ total_cost_usd: 2.5, duration_ms: 30_000 }) + resultLine();
+      const agg = aggregateAgentRunLog(text);
+      expect(agg.runs).toBe(3);
+      expect(agg.total_cost_usd).toBe(5.5);
+      expect(agg.duration_ms).toBe(150_000);
+      expect(agg.input_tokens).toBe(30);
+      expect(agg.cache_read_tokens).toBe(120);
+    });
+
+    it('ignores streamed agent events and keeps only the result record', () => {
+      const text = `${JSON.stringify({ type: 'assistant', total_cost_usd: 999 })}\n${resultLine()}`;
+      expect(aggregateAgentRunLog(text).total_cost_usd).toBe(1.5);
+    });
+
+    it('survives a truncated final line from a killed engine', () => {
+      expect(aggregateAgentRunLog(`${resultLine()}{"type":"result","total_cost_usd":`).runs).toBe(
+        1
+      );
+    });
+
+    it('returns null for a log with nothing to recover', () => {
+      expect(aggregateAgentRunLog('')).toBeNull();
+      expect(aggregateAgentRunLog('not json at all\n')).toBeNull();
+    });
+
+    it('reports null for a field no result record carried, never a fabricated 0', () => {
+      const agg = aggregateAgentRunLog(resultLine({ total_cost_usd: null, usage: {} }));
+      expect(agg.total_cost_usd).toBeNull();
+      expect(agg.input_tokens).toBeNull();
+      expect(agg.duration_ms).toBe(60_000);
+    });
+  });
+
+  describe('mergeCost', () => {
+    it('keeps runs.jsonl authoritative wherever it reported a value', () => {
+      const merged = mergeCost(
+        { total_cost_usd: 4.173, duration_ms: 600_000, tier: 'mid' },
+        { total_cost_usd: 99, duration_ms: 1 }
+      );
+      // The #540/#542 reconciliation depends on this: a recovered figure must not move a
+      // number that runs.jsonl already attributed.
+      expect(merged.total_cost_usd).toBe(4.173);
+      expect(merged.costSource).toBe('runs.jsonl');
+    });
+
+    it('fills per field, not per source', () => {
+      const merged = mergeCost(
+        { total_cost_usd: null, duration_ms: 600_000, tier: 'strong' },
+        { total_cost_usd: 58.72, input_tokens: 7 }
+      );
+      expect(merged.total_cost_usd).toBe(58.72);
+      expect(merged.duration_ms).toBe(600_000);
+      expect(merged.input_tokens).toBe(7);
+      expect(merged.tier).toBe('strong');
+      expect(merged.costSource).toBe('agent-log');
+    });
+
+    it('never invents a tier from the agent log — only runs.jsonl records one', () => {
+      expect(mergeCost(null, { total_cost_usd: 1, tier: 'forged' }).tier).toBeNull();
+    });
+
+    it('reports no source when neither side has a cost', () => {
+      expect(mergeCost({ total_cost_usd: null }, null).costSource).toBeNull();
+      expect(mergeCost(null, null)).toBeNull();
+    });
+  });
+
+  it('discloses how many cost figures were recovered rather than blending them in', () => {
+    const row = (over) => ({
+      repo: 'o/r',
+      model: 'opus',
+      tier: 'mid',
+      provider: null,
+      delivered: true,
+      blocked: false,
+      inputTokens: null,
+      outputTokens: null,
+      apiMinutes: null,
+      wallClockMinutes: null,
+      phaseSeconds: {},
+      stalls: 0,
+      escalations: 0,
+      unverifiedExits: 0,
+      reviewFixed: null,
+      reviewEscalated: null,
+      acMet: null,
+      acTotal: null,
+      ...over,
+    });
+    const sc = aggregateScorecard(
+      [
+        row({ costUsd: 4, costSource: 'runs.jsonl' }),
+        row({ costUsd: 58, costSource: 'agent-log' }),
+        row({ costUsd: null, costSource: null }),
+      ],
+      { windowStart: '2026-08-25', windowEnd: '2026-09-02', generatedAt: '2026-09-02T00:00:00Z' }
+    );
+    expect(sc.grandTotal.costSamples).toBe(2);
+    expect(sc.grandTotal.costFromRunLogSamples).toBe(1);
+    expect(renderMarkdown(sc)).toContain('1 were');
   });
 });
