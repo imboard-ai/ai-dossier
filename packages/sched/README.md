@@ -88,7 +88,13 @@ where every mechanical supervision decision is code, not remembered prose:
    runstate milestone is `report done`, or GitHub says the issue is closed — except a
    report-agent slot (`role: 'report'`), whose issue is already closed at merge: the
    closed signal is suppressed and only a `report done` milestone completes it (#500).
-   An unverified exit rides the recovery ladder like a stall.
+   An unverified exit rides the recovery ladder like a stall. A `report done` milestone
+   must also postdate the slot's own `spawned_at` (±60s clock-skew tolerance, #575) — a
+   re-enqueued issue's PREVIOUS run's report milestone is ignored (journaled
+   `stale-milestone-ignored`) rather than instantly completing a freshly-spawned agent on
+   its first reconcile tick; a legacy slot with no `spawned_at` degrades to the old,
+   unfenced check. Batch members get the same fence on their own completion signal
+   (`isMemberComplete`, `phase=review status=done mode=slot`).
 3. **Reconciliation tick (AC3)** — every tick detects externally-advanced state (someone
    finished the work outside sched → complete, kill the leftover agent, reclaim the
    slot), orphaned pids after a restart (dead pid on a running slot → exit rail →
@@ -122,7 +128,7 @@ where every mechanical supervision decision is code, not remembered prose:
    progress, stalled, redispatched, fence-written, fence-failed, unit-failed,
    dependents-blocked, slot-released, suspect-dispatch, dispatch-unhealthy,
    run-log-recorded, run-log-no-usage, run-log-skipped, run-log-failed, engine-stale,
-   engine-auto-upgrade-attempted, engine-auto-upgrade-failed, …) is
+   engine-auto-upgrade-attempted, engine-auto-upgrade-failed, stale-milestone-ignored, …) is
    appended to `events.jsonl`; `sched status` shows the live phase per unit, plus each
    slot's `gen` and `fenced` state (#504).
    `engine-stale`/`engine-auto-upgrade-attempted`/`engine-auto-upgrade-failed`
@@ -207,6 +213,13 @@ Two engine-safety policies were explicit product decisions on #464:
   never kill a healthy agent or fail a unit as "unverified". An agent that exits during
   an outage holds in `verifying` until truth returns. Each pause is journaled as
   `ground-truth-unreachable`.
+- **A completion milestone is fenced to its own dispatch (#575).** `isVerifiedComplete`
+  (issues) and `isMemberComplete` (batch members) both accept the current dispatch's
+  `SlotEntry.spawned_at` and reject a `report done` / `review done mode=slot` milestone
+  that predates it (±60s clock-skew tolerance) — a re-enqueued issue or a member re-added
+  to a fresh batch run must not read as instantly complete against a PREVIOUS run's
+  milestone. The rejection is journaled as `stale-milestone-ignored`; `spawned_at=null`
+  (a legacy slot) degrades to the old, unfenced check.
 
 This applies to `issue:<n>` unit dispatch (`dispatchAssignments`). `batch:<id>` units run
 through a separate pass with its own claim/reconcile logic — see

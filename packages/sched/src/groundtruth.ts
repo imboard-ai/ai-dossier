@@ -381,6 +381,22 @@ export function isParkedMilestone(
 const DISPATCH_FENCE_TOLERANCE_MS = 60_000;
 
 /**
+ * #575: whether `milestoneAt` postdates `dispatchedAt`, within clock-skew
+ * tolerance — the dispatch fence shared by `isVerifiedComplete` and
+ * `isMemberComplete`. `dispatchedAt === null` (no fence available: a legacy
+ * slot predating the field that stamps it, or a genuinely omitted argument)
+ * and an unparseable timestamp both degrade to "not gated" (`true`) — see
+ * `isVerifiedComplete`'s doc comment for why.
+ */
+function postdatesDispatch(milestoneAt: string, dispatchedAt: string | null): boolean {
+  if (dispatchedAt === null) return true;
+  const parsedMilestoneAt = Date.parse(milestoneAt);
+  const parsedDispatchedAt = Date.parse(dispatchedAt);
+  if (Number.isNaN(parsedMilestoneAt) || Number.isNaN(parsedDispatchedAt)) return true;
+  return parsedMilestoneAt >= parsedDispatchedAt - DISPATCH_FENCE_TOLERANCE_MS;
+}
+
+/**
  * Completion rule (AC2): a unit's work is verified complete when the issue's
  * latest milestone is the final `report done` — the full-cycle trail's last
  * phase — or when GitHub itself says the issue is closed (a merged PR
@@ -393,8 +409,8 @@ const DISPATCH_FENCE_TOLERANCE_MS = 60_000;
  * report milestone, and the fresh agent is killed as a leftover on the first
  * reconcile tick. `dispatchedAt` is optional and `null` degrades to the old
  * permissive check — a legacy slot spawned before #524 added `spawned_at`
- * (backfilled `null`) or an unparseable `milestone.at` has no fence to check
- * against, so age is not gated for it.
+ * (backfilled `null`) has no fence to check against, so age is not gated for
+ * it.
  */
 export function isVerifiedComplete(
   milestone: GroundTruthMilestone | null,
@@ -405,11 +421,7 @@ export function isVerifiedComplete(
   if (milestone === null || milestone.phase !== 'report' || milestone.status !== 'done') {
     return false;
   }
-  if (dispatchedAt === null) return true;
-  const milestoneAt = Date.parse(milestone.at);
-  const dispatched = Date.parse(dispatchedAt);
-  if (Number.isNaN(milestoneAt) || Number.isNaN(dispatched)) return true;
-  return milestoneAt >= dispatched - DISPATCH_FENCE_TOLERANCE_MS;
+  return postdatesDispatch(milestone.at, dispatchedAt);
 }
 
 /**
@@ -418,14 +430,27 @@ export function isVerifiedComplete(
  * verified complete when its latest milestone is `phase=review status=done
  * mode=slot`. `mode=slot` guards against a member issue somehow carrying an
  * unrelated `review done` from a stray full-cycle run.
+ *
+ * #575: the same dispatch fence as `isVerifiedComplete` — a member issue
+ * re-added to a fresh batch run after a PREVIOUS batch already posted its
+ * `review done mode=slot` milestone (pilot re-run, requeue-with-context) must
+ * not read as instantly complete against that stale milestone. `dispatchedAt`
+ * is the member slot's `SlotEntry.spawned_at`, stamped fresh on every
+ * `spawnMember` call (`batch-dispatch.ts`) exactly like the per-issue path.
  */
-export function isMemberComplete(milestone: GroundTruthMilestone | null): boolean {
-  return (
-    milestone !== null &&
-    milestone.phase === 'review' &&
-    milestone.status === 'done' &&
-    milestone.keys.mode === 'slot'
-  );
+export function isMemberComplete(
+  milestone: GroundTruthMilestone | null,
+  dispatchedAt: string | null = null
+): boolean {
+  if (
+    milestone === null ||
+    milestone.phase !== 'review' ||
+    milestone.status !== 'done' ||
+    milestone.keys.mode !== 'slot'
+  ) {
+    return false;
+  }
+  return postdatesDispatch(milestone.at, dispatchedAt);
 }
 
 /**

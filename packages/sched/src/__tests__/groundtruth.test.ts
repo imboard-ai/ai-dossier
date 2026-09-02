@@ -4,6 +4,7 @@ import {
   type ExecFn,
   type GroundTruthMilestone,
   groundTruthExec,
+  isMemberComplete,
   isParkedMilestone,
   isVerifiedComplete,
   parseIssueLabelsJson,
@@ -50,11 +51,15 @@ describe('parseMilestoneJson', () => {
 });
 
 describe('isVerifiedComplete (AC2 completion rule)', () => {
-  const done = (phase: string, status: string): GroundTruthMilestone => ({
+  const done = (
+    phase: string,
+    status: string,
+    at = '2026-08-29T12:00:00Z'
+  ): GroundTruthMilestone => ({
     phase,
     status,
     run: 'r',
-    at: '2026-08-29T12:00:00Z',
+    at,
     keys: {},
   });
 
@@ -72,55 +77,109 @@ describe('isVerifiedComplete (AC2 completion rule)', () => {
   });
 
   describe('#575 dispatch fence (dispatchedAt)', () => {
-    const at = (iso: string): GroundTruthMilestone => ({
-      phase: 'report',
-      status: 'done',
-      run: 'r',
-      at: iso,
-      keys: {},
-    });
-
     it('a report/done milestone that predates dispatchedAt does NOT verify completion', () => {
       // Milestone posted 3 hours before this dispatch spawned — the issue's
       // PREVIOUS run's report, not this one's.
-      expect(isVerifiedComplete(at('2026-09-02T05:00:00Z'), false, '2026-09-02T08:00:00Z')).toBe(
-        false
-      );
+      expect(
+        isVerifiedComplete(
+          done('report', 'done', '2026-09-02T05:00:00Z'),
+          false,
+          '2026-09-02T08:00:00Z'
+        )
+      ).toBe(false);
     });
 
     it('a report/done milestone posted at or after dispatchedAt verifies completion', () => {
-      expect(isVerifiedComplete(at('2026-09-02T08:00:00Z'), false, '2026-09-02T08:00:00Z')).toBe(
-        true
-      );
-      expect(isVerifiedComplete(at('2026-09-02T09:00:00Z'), false, '2026-09-02T08:00:00Z')).toBe(
-        true
-      );
+      expect(
+        isVerifiedComplete(
+          done('report', 'done', '2026-09-02T08:00:00Z'),
+          false,
+          '2026-09-02T08:00:00Z'
+        )
+      ).toBe(true);
+      expect(
+        isVerifiedComplete(
+          done('report', 'done', '2026-09-02T09:00:00Z'),
+          false,
+          '2026-09-02T08:00:00Z'
+        )
+      ).toBe(true);
     });
 
     it('tolerates small clock skew (60s) between milestone.at and dispatchedAt', () => {
-      expect(isVerifiedComplete(at('2026-09-02T07:59:31Z'), false, '2026-09-02T08:00:00Z')).toBe(
-        true
-      );
-      expect(isVerifiedComplete(at('2026-09-02T07:58:00Z'), false, '2026-09-02T08:00:00Z')).toBe(
-        false
-      );
+      expect(
+        isVerifiedComplete(
+          done('report', 'done', '2026-09-02T07:59:31Z'),
+          false,
+          '2026-09-02T08:00:00Z'
+        )
+      ).toBe(true);
+      expect(
+        isVerifiedComplete(
+          done('report', 'done', '2026-09-02T07:58:00Z'),
+          false,
+          '2026-09-02T08:00:00Z'
+        )
+      ).toBe(false);
     });
 
     it('dispatchedAt=null (legacy pre-#524 slot) degrades to the old permissive check', () => {
-      expect(isVerifiedComplete(at('2026-08-29T12:00:00Z'), false, null)).toBe(true);
-      expect(isVerifiedComplete(at('2026-08-29T12:00:00Z'), false)).toBe(true);
+      expect(isVerifiedComplete(done('report', 'done'), false, null)).toBe(true);
+      expect(isVerifiedComplete(done('report', 'done'), false)).toBe(true);
     });
 
     it('an unparseable milestone.at is not gated by the fence', () => {
-      expect(isVerifiedComplete(at('not-a-date'), false, '2026-09-02T08:00:00Z')).toBe(true);
+      expect(
+        isVerifiedComplete(done('report', 'done', 'not-a-date'), false, '2026-09-02T08:00:00Z')
+      ).toBe(true);
     });
 
     it('a closed issue still completes regardless of milestone age (AC3)', () => {
-      expect(isVerifiedComplete(at('2026-08-29T12:00:00Z'), true, '2026-09-02T08:00:00Z')).toBe(
-        true
-      );
+      expect(isVerifiedComplete(done('report', 'done'), true, '2026-09-02T08:00:00Z')).toBe(true);
       expect(isVerifiedComplete(null, true, '2026-09-02T08:00:00Z')).toBe(true);
     });
+  });
+});
+
+describe('isMemberComplete (#523 AC1) with the #575 dispatch fence', () => {
+  const memberDone = (at: string): GroundTruthMilestone => ({
+    phase: 'review',
+    status: 'done',
+    run: 'r',
+    at,
+    keys: { mode: 'slot' },
+  });
+
+  it('only phase=review status=done mode=slot verifies member completion', () => {
+    expect(isMemberComplete(memberDone('2026-08-29T12:00:00Z'))).toBe(true);
+    expect(
+      isMemberComplete({
+        phase: 'review',
+        status: 'done',
+        run: 'r',
+        at: '2026-08-29T12:00:00Z',
+        keys: {},
+      })
+    ).toBe(false);
+    expect(isMemberComplete(null)).toBe(false);
+  });
+
+  it('a review/done member milestone that predates dispatchedAt does NOT verify completion', () => {
+    // A member re-added to a fresh batch run after a PREVIOUS batch already
+    // shipped it — its stale `review done mode=slot` must not instantly
+    // complete the fresh member dispatch.
+    expect(isMemberComplete(memberDone('2026-09-02T05:00:00Z'), '2026-09-02T08:00:00Z')).toBe(
+      false
+    );
+  });
+
+  it('a review/done member milestone posted at or after dispatchedAt verifies completion', () => {
+    expect(isMemberComplete(memberDone('2026-09-02T08:00:00Z'), '2026-09-02T08:00:00Z')).toBe(true);
+  });
+
+  it('dispatchedAt=null degrades to the old permissive check', () => {
+    expect(isMemberComplete(memberDone('2026-08-29T12:00:00Z'), null)).toBe(true);
+    expect(isMemberComplete(memberDone('2026-08-29T12:00:00Z'))).toBe(true);
   });
 });
 
