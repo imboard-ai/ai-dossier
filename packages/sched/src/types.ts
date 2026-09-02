@@ -1055,7 +1055,14 @@ export type JournalEventName =
   // reset a long-waiting unit's queue position), so without this event there
   // is no way to answer "when did this unit's priority change, and to what"
   // after the fact. `priority` carries the new value, `detail` the previous.
-  | 'reprioritized';
+  | 'reprioritized'
+  // #575: `reconcileRunning` saw a `report/done` milestone that would have
+  // externally-advanced the unit under the old rule, but it predates this
+  // dispatch's `spawned_at` (a stale milestone from a PREVIOUS completed run
+  // on a re-enqueued issue) — the dispatch fence in `isVerifiedComplete`
+  // ignored it and the fresh agent keeps running. Journaled per-tick while
+  // the condition holds, same convention as `ground-truth-unreachable`.
+  | 'stale-milestone-ignored';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —

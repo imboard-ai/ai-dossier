@@ -1354,7 +1354,28 @@ function reconcileMemberSlot(
   const milestone = deps.groundTruth.latestMilestone(memberIssue);
   if (milestone === undefined) return; // unreachable — pause this batch's decisions
 
-  if (isMemberComplete(milestone)) {
+  // #575: fence to THIS member dispatch's `spawned_at` — a member re-added to
+  // a fresh batch run after a PREVIOUS batch already posted its
+  // `review done mode=slot` milestone (pilot re-run, requeue-with-context)
+  // must not read as instantly complete against that stale milestone. Mirrors
+  // the per-issue fence in `engine.ts`'s `reconcileRunning`/
+  // `completeUnitOrRecover` — same bug class, same fix, different completion
+  // predicate (`isMemberComplete` vs `isVerifiedComplete`).
+  if (
+    milestone !== null &&
+    !isMemberComplete(milestone, slot.spawned_at) &&
+    isMemberComplete(milestone)
+  ) {
+    journalEvent(deps, 'stale-milestone-ignored', unit(batchId), {
+      issue: memberIssue,
+      slot: slot.id,
+      run: milestone.run,
+      at: milestone.at,
+      detail: `predates dispatch spawned_at=${slot.spawned_at}`,
+    });
+  }
+
+  if (isMemberComplete(milestone, slot.spawned_at)) {
     deps.journal.append(
       unitEvent('external-advance', unit(batchId), {
         issue: memberIssue,

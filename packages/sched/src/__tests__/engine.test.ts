@@ -393,6 +393,55 @@ describe('completion verification (AC2: an agent exiting is never proof of compl
     expect(result.completed).toEqual(['issue:101']);
     expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('done');
   });
+
+  it('#575: a report/done milestone from a PREVIOUS run (predates this dispatch) does not external-advance — agent keeps running until a fresh report/done posts', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    h.tick(); // spawns; slot.spawned_at = current clock (T)
+    const pid = h.spawnCalls[0].pid;
+
+    // Re-enqueue scenario: the issue's latest milestone is its PREVIOUS run's
+    // report/done, posted 3 hours before THIS dispatch spawned.
+    const staleAt = new Date(h.clock().getTime() - 3 * 60 * 60 * 1000).toISOString();
+    h.setMilestone(101, 'report', 'done', staleAt);
+
+    const result = h.tick();
+    expect(result.completed).toHaveLength(0);
+    expect(h.alive.has(pid)).toBe(true); // the fresh agent was NOT killed
+    expect(h.state().slots.find((s) => s.unit === 'issue:101')?.status).toBe('running');
+    expect(h.events().some((e) => e.event === 'external-advance' && e.issue === 101)).toBe(false);
+    expect(h.events().some((e) => e.event === 'stale-milestone-ignored' && e.issue === 101)).toBe(
+      true
+    );
+
+    // A fresh report/done, posted at/after dispatch, DOES complete it.
+    h.alive.delete(pid);
+    h.setMilestone(101, 'report', 'done'); // at = current clock, >= spawned_at
+    const result2 = h.tick();
+    expect(result2.completed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('done');
+  });
+
+  it('#575: agent exits with only a stale pre-dispatch report/done milestone → recovers via the escalation ladder (unverified exit), not done', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const firstPid = h.spawnCalls[0].pid;
+
+    const staleAt = new Date(h.clock().getTime() - 3 * 60 * 60 * 1000).toISOString();
+    h.setMilestone(101, 'report', 'done', staleAt);
+    h.alive.delete(firstPid);
+
+    const result = h.tick();
+    expect(result.completed).toHaveLength(0);
+    expect(result.redispatched).toEqual(['issue:101']);
+    const events = h.journal.read().map((e) => e.event);
+    expect(events).toContain('exit-detected');
+    expect(events).toContain('verify-incomplete');
+    expect(events).toContain('redispatched');
+  });
 });
 
 describe('per-tier dispatch commands (#527 — mixed agent-CLI escalation ladders)', () => {

@@ -1264,6 +1264,35 @@ function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
 }
 
 /**
+ * #575: journal the ignored stale milestone — shared by `reconcileRunning`'s
+ * external-advance check and `completeUnitOrRecover`'s verify-complete check,
+ * the two call sites `isVerifiedComplete`'s dispatch fence guards. Fires only
+ * when the raw milestone WOULD have completed the unit under the old,
+ * unfenced rule (`isVerifiedComplete(milestone, false)`, `dispatchedAt`
+ * omitted) but the fenced check just rejected it — i.e. a `report/done`
+ * milestone that predates this dispatch's `spawned_at`. Journaled per-tick
+ * while the condition holds, same convention as `ground-truth-unreachable`.
+ */
+function journalStaleMilestoneIfIgnored(
+  ctx: TickCtx,
+  unit: string,
+  slot: SlotEntry,
+  truth: UnitTruth,
+  verifiedComplete: boolean,
+  closedSignal: boolean
+): void {
+  const { milestone } = truth;
+  if (verifiedComplete || closedSignal || milestone === null) return;
+  if (!isVerifiedComplete(milestone, false)) return;
+  journal(ctx, 'stale-milestone-ignored', unit, {
+    slot: slot.id,
+    run: milestone.run,
+    at: milestone.at,
+    detail: `predates dispatch spawned_at=${slot.spawned_at}`,
+  });
+}
+
+/**
  * Append this dispatch's `runs.jsonl` entry (#524) — one per completed
  * spawn, not per unit: a redispatch/takeover produces another entry, each
  * with its own tokens/duration, never an update to the first. Called from
@@ -1390,19 +1419,20 @@ function reconcileRunning(
   // A parked milestone is deliberately NOT an advance: a detached run parks
   // and stops — the watcher owns the tail (#468); the exit/stall rails take
   // the agent from here.
-  if (
-    isVerifiedComplete(truth.milestone, effectiveClosedSignal(slot, truth)) &&
-    !isParkedMilestone(truth.milestone)
-  ) {
+  const closedSignal = effectiveClosedSignal(slot, truth);
+  // #575: `slot.spawned_at` fences a `report/done` milestone to THIS dispatch
+  // — a re-enqueued issue's PREVIOUS run's report milestone must not read as
+  // "complete" the moment the fresh agent's first tick polls it.
+  const verifiedComplete = isVerifiedComplete(truth.milestone, closedSignal, slot.spawned_at);
+  journalStaleMilestoneIfIgnored(ctx, unit, slot, truth, verifiedComplete, closedSignal);
+  if (verifiedComplete && !isParkedMilestone(truth.milestone)) {
     journal(ctx, 'external-advance', unit, {
       pid: slot.pid,
       slot: slot.id,
-      // effectiveClosedSignal, not the raw truth.closed, decided this: for a
+      // closedSignal, not the raw truth.closed, decided this: for a
       // report-role slot `closed` is suppressed, so `truth.closed` reads true
       // at completion regardless — the actual signal was the report milestone.
-      detail: effectiveClosedSignal(slot, truth)
-        ? 'issue closed'
-        : `report done (role=${slot.role})`,
+      detail: closedSignal ? 'issue closed' : `report done (role=${slot.role})`,
     });
     killUnitAgent(ctx, state, unit);
     // The agent was still alive (that's what "externally-advanced" means) —
@@ -1548,7 +1578,14 @@ function completeUnitOrRecover(
     );
   }
 
-  if (isVerifiedComplete(truth.milestone, effectiveClosedSignal(slot, truth))) {
+  // #575: fence to THIS dispatch's `spawned_at` — an agent that exited having
+  // posted nothing new must not read as complete against the issue's
+  // PREVIOUS run's report milestone; it falls through to the recovery ladder
+  // below (`unverified-exit`) instead.
+  const closedSignal = effectiveClosedSignal(slot, truth);
+  const verifiedComplete = isVerifiedComplete(truth.milestone, closedSignal, slot.spawned_at);
+  journalStaleMilestoneIfIgnored(ctx, unit, slot, truth, verifiedComplete, closedSignal);
+  if (verifiedComplete) {
     return completeUnit(ctx, recordDispatchOutcome(ctx, next, unit, slot, false), unit, via);
   }
 
