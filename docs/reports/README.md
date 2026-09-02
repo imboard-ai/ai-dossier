@@ -11,3 +11,5 @@ Gate reports and validation records produced for [RFC-0001](../../rfcs/0001-batc
 | [`issue-538-classifier-cost-methodology.md`](./issue-538-classifier-cost-methodology.md) | #538 AC3 cost methodology | PARTIAL — pre-screen hit rate measured on the 15-issue fixture set (7/15 rejected, 0 tokens); post-#538 per-issue cost is still an estimate — live re-measurement pending an ops dispatch run | 2026-09-02 |
 
 Raw evidence backing these reports (baseline tables, agent-log summaries, scheduler event journals, captured corrupt-state files) lives in [`evidence/`](./evidence/).
+
+Not a gate report, but standing alongside them: [`model-scorecard.md`](./model-scorecard.md) is a recurring cost/quality/speed tab per LLM ([#566](https://github.com/imboard-ai/ai-dossier/issues/566)), regenerated weekly (`npm run scorecard`) rather than produced once per gate. Its JSON sidecar lives at [`evidence/model-scorecard.json`](./evidence/model-scorecard.json).

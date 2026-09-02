@@ -23,6 +23,7 @@
 //   node scripts/model-scorecard.mjs [--days 30] [--since YYYY-MM-DD]
 //                                     [--repos owner/name,owner/name]
 //                                     [--out-md path] [--out-json path]
+//                                     [--digest-out path]
 //                                     [--repo-root dir] [--dry-run]
 //
 // Exit codes: 0 = ran (even with partial data), 1 = could not run at all
@@ -35,6 +36,13 @@ import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  JOURNAL_FILE,
+  readJsonl,
+  sanitizeSlug,
+  schedRunsLogPath,
+  schedStateDir,
+} from '@ai-dossier/sched';
 
 export class ScorecardError extends Error {
   constructor(message) {
@@ -46,9 +54,21 @@ export class ScorecardError extends Error {
 /** Repos the scorecard covers by default — the two projects the fleet runs. */
 export const DEFAULT_REPOS = ['imboard-ai/ai-dossier', 'imboard-ai/imboard-monorepo'];
 
-/** `owner/name` -> the `~/.dossier/sched/<slug>/` directory name the CLI already uses. */
+/** Default output paths, shared between `parseArgs`' flag defaults and `main`'s. */
+export const DEFAULT_OUT_MD = 'docs/reports/model-scorecard.md';
+export const DEFAULT_OUT_JSON = 'docs/reports/evidence/model-scorecard.json';
+
+/** A model bucket's delivery rate dropping this many points week-over-week gets flagged. */
+const DELIVERY_RATE_DROP_THRESHOLD = 0.1;
+
+/**
+ * `owner/name` -> the `~/.dossier/sched/<slug>/` directory name. Thin wrapper over
+ * `@ai-dossier/sched`'s own `sanitizeSlug` — the package already owns this mapping
+ * (`schedStateDir` uses it internally), so this exists only to give the mapping its
+ * own name/test in this file rather than re-deriving it inline at each call site.
+ */
 export function projectSlug(repo) {
-  return repo.replace('/', '-');
+  return sanitizeSlug(repo);
 }
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -89,13 +109,20 @@ export function pickCanonicalRun(runs) {
   return [...runs].sort((a, b) => (b.started_at ?? '').localeCompare(a.started_at ?? ''))[0];
 }
 
+/** The dispatch-info shape for an issue no `spawned`/`redispatched`/`stalled`/
+ * `fence-written` event ever mentioned — shared by `buildDispatchInfo`'s own default and
+ * `joinRepoRows`' fallback so the two can't silently drift apart on a future field. */
+function emptyDispatchEntry() {
+  return { tier: null, agentCli: null, stalls: 0, escalations: 0, unverifiedExits: 0 };
+}
+
 /** Dispatch tier / agent CLI / stall+escalation+unverified-exit counts, keyed by issue. */
 export function buildDispatchInfo(events, sinceIso, untilIso) {
   const info = new Map();
   const get = (issue) => {
     let entry = info.get(issue);
     if (!entry) {
-      entry = { tier: null, agentCli: null, stalls: 0, escalations: 0, unverifiedExits: 0 };
+      entry = emptyDispatchEntry();
       info.set(issue, entry);
     }
     return entry;
@@ -125,7 +152,7 @@ export function buildDispatchInfo(events, sinceIso, untilIso) {
 
 /** Every `key=value` a review-phase milestone records that this scorecard reads. */
 function reviewFieldsOf(milestones) {
-  const review = [...milestones].reverse().find((m) => m.phase === 'review');
+  const review = milestones.findLast((m) => m.phase === 'review');
   if (!review) return { fixed: null, escalated: null };
   const fixed = Number(review.keys.fixed);
   const escalated = Number(review.keys.escalated);
@@ -162,13 +189,7 @@ export function joinRepoRows({
     const run = pickCanonicalRun(runs);
     if (!run) continue;
     const cost = costByIssue.get(issue);
-    const dispatch = dispatchInfo.get(issue) ?? {
-      tier: null,
-      agentCli: null,
-      stalls: 0,
-      escalations: 0,
-      unverifiedExits: 0,
-    };
+    const dispatch = dispatchInfo.get(issue) ?? emptyDispatchEntry();
     const { fixed, escalated } = reviewFieldsOf(milestonesByIssue.get(issue) ?? []);
 
     rows.push({
@@ -219,6 +240,7 @@ function bucketFrom(rows) {
   const deliveredOutputTokens = delivered.map((r) => r.outputTokens).filter((v) => v != null);
   const fixedSamples = rows.map((r) => r.reviewFixed).filter((v) => v != null);
   const escalatedSamples = rows.map((r) => r.reviewEscalated).filter((v) => v != null);
+  const agentClis = [...new Set(rows.map((r) => r.agentCli).filter((v) => v != null))].sort();
 
   return {
     n,
@@ -239,6 +261,7 @@ function bucketFrom(rows) {
     unverifiedExits: sum(rows.map((r) => r.unverifiedExits)),
     reviewFixed: fixedSamples.length > 0 ? sum(fixedSamples) : null,
     reviewEscalated: escalatedSamples.length > 0 ? sum(escalatedSamples) : null,
+    agentClis,
   };
 }
 
@@ -253,21 +276,26 @@ export function aggregateScorecard(rows, { windowStart, windowEnd, generatedAt }
   for (const row of rows) {
     const model = row.model ?? UNKNOWN_MODEL_LABEL;
     const tier = row.tier ?? UNKNOWN_TIER_LABEL;
-    const key = `${model} ${row.repo} ${tier}`;
-    const list = byKey.get(key) ?? [];
-    list.push(row);
-    byKey.set(key, list);
+    // Keyed by the structured triple, not a joined/split string -- a raw model id or a
+    // future tier label could contain a space, which would silently misassign columns
+    // on a string round-trip.
+    const key = JSON.stringify([model, row.repo, tier]);
+    const entry = byKey.get(key) ?? { model, repo: row.repo, tier, rows: [] };
+    entry.rows.push(row);
+    byKey.set(key, entry);
 
     const modelList = byModel.get(model) ?? [];
     modelList.push(row);
     byModel.set(model, modelList);
   }
 
-  const buckets = [...byKey.entries()]
-    .map(([key, list]) => {
-      const [model, repo, tier] = key.split(' ');
-      return { model, repo, tier, ...bucketFrom(list) };
-    })
+  const buckets = [...byKey.values()]
+    .map(({ model, repo, tier, rows: bucketRows }) => ({
+      model,
+      repo,
+      tier,
+      ...bucketFrom(bucketRows),
+    }))
     .sort(
       (a, b) =>
         a.model.localeCompare(b.model) ||
@@ -284,14 +312,14 @@ export function aggregateScorecard(rows, { windowStart, windowEnd, generatedAt }
   return { generatedAt, windowStart, windowEnd, buckets, totals, grandTotal };
 }
 
-function fmtUsd(value) {
-  return value == null ? 'N/A' : `$${value.toFixed(3)}`;
-}
-/** Cost is the one figure whose sample count routinely differs from the bucket's `n` —
- * cost telemetry is missing for plenty of historical dispatches (#564) — so it carries
- * its own count rather than borrowing the bucket's, which would overstate confidence. */
-function fmtUsdWithSamples(value, samples) {
-  return value == null ? 'N/A' : `$${value.toFixed(3)} (n=${samples})`;
+/**
+ * Cost is the one figure whose sample count routinely differs from the bucket's `n` —
+ * cost telemetry is missing for plenty of historical dispatches (#564) — so callers that
+ * need to disclose it (the tables) pass `samples`; the digest's inline mention doesn't.
+ */
+function fmtUsd(value, samples) {
+  if (value == null) return 'N/A';
+  return samples == null ? `$${value.toFixed(3)}` : `$${value.toFixed(3)} (n=${samples})`;
 }
 function fmtPct(value) {
   return value == null ? 'N/A' : `${(value * 100).toFixed(0)}%`;
@@ -303,7 +331,26 @@ function fmtTokens(value) {
   return value == null ? 'N/A' : Math.round(value).toLocaleString('en-US');
 }
 
-export function renderMarkdown(scorecard) {
+const MAX_CELL_LENGTH = 120;
+
+/**
+ * Make a value safe to interpolate into a markdown table cell or Telegram text. Model/
+ * repo/tier values originate in a `model=`/`tier=` milestone key — a GitHub issue comment
+ * anyone with comment access can author (`imboard-ai/ai-dossier` is public) — so a raw
+ * value like `evil | 100% | $0.01` could otherwise spoof adjacent columns, and a stray
+ * backtick could break out of the `` `${model}` `` code span into a markdown link.
+ */
+function safeCell(value) {
+  let clean = '';
+  for (const char of String(value)) {
+    const code = char.codePointAt(0) ?? 0;
+    clean += code < 0x20 || code === 0x7f ? '\uFFFD' : char;
+  }
+  clean = clean.replace(/\|/g, '\\|').replace(/`/g, "'");
+  return clean.length > MAX_CELL_LENGTH ? `${clean.slice(0, MAX_CELL_LENGTH)}…` : clean;
+}
+
+export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
   const lines = [
     '# Model Scorecard',
     '',
@@ -318,12 +365,12 @@ export function renderMarkdown(scorecard) {
     '',
     '## Per model × repo × tier',
     '',
-    '| Model | Repo | Tier | n | Delivered | Delivery rate | Cost/delivered | Median API-min | Stalls | Escalations | Unverified exits |',
-    '|---|---|---|---|---|---|---|---|---|---|---|',
+    '| Model | Repo | Tier | Agent CLI | n | Delivered | Delivery rate | Cost/delivered | Median API-min | Stalls | Escalations | Unverified exits |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|',
   ];
   for (const b of scorecard.buckets) {
     lines.push(
-      `| \`${b.model}\` | ${b.repo} | ${b.tier} | ${b.n} | ${b.delivered} | ${fmtPct(b.deliveryRate)} | ${fmtUsdWithSamples(b.costPerDeliveredUsd, b.costSamples)} | ${fmtMin(b.medianApiMinutes)} | ${b.stalls} | ${b.escalations} | ${b.unverifiedExits} |`
+      `| \`${safeCell(b.model)}\` | ${safeCell(b.repo)} | ${safeCell(b.tier)} | ${b.agentClis.length ? safeCell(b.agentClis.join(',')) : 'unknown'} | ${b.n} | ${b.delivered} | ${fmtPct(b.deliveryRate)} | ${fmtUsd(b.costPerDeliveredUsd, b.costSamples)} | ${fmtMin(b.medianApiMinutes)} | ${b.stalls} | ${b.escalations} | ${b.unverifiedExits} |`
     );
   }
 
@@ -331,27 +378,39 @@ export function renderMarkdown(scorecard) {
     '',
     '## Totals per model (all repos/tiers)',
     '',
-    '| Model | n | Delivered | Delivery rate | Cost/delivered | Billable tokens/delivered | Median API-min | Stalls | Escalations | Unverified exits |',
-    '|---|---|---|---|---|---|---|---|---|---|'
+    '| Model | Agent CLI | n | Delivered | Delivery rate | Cost/delivered | Billable tokens/delivered | Median API-min | Stalls | Escalations | Unverified exits |',
+    '|---|---|---|---|---|---|---|---|---|---|---|'
   );
   for (const t of scorecard.totals) {
     lines.push(
-      `| \`${t.model}\` | ${t.n} | ${t.delivered} | ${fmtPct(t.deliveryRate)} | ${fmtUsdWithSamples(t.costPerDeliveredUsd, t.costSamples)} | ${fmtTokens(t.billableTokensPerDeliveredIssue)} | ${fmtMin(t.medianApiMinutes)} | ${t.stalls} | ${t.escalations} | ${t.unverifiedExits} |`
+      `| \`${safeCell(t.model)}\` | ${t.agentClis.length ? safeCell(t.agentClis.join(',')) : 'unknown'} | ${t.n} | ${t.delivered} | ${fmtPct(t.deliveryRate)} | ${fmtUsd(t.costPerDeliveredUsd, t.costSamples)} | ${fmtTokens(t.billableTokensPerDeliveredIssue)} | ${fmtMin(t.medianApiMinutes)} | ${t.stalls} | ${t.escalations} | ${t.unverifiedExits} |`
     );
   }
   const g = scorecard.grandTotal;
   lines.push(
-    `| **TOTAL** | ${g.n} | ${g.delivered} | ${fmtPct(g.deliveryRate)} | ${fmtUsdWithSamples(g.costPerDeliveredUsd, g.costSamples)} | ${fmtTokens(g.billableTokensPerDeliveredIssue)} | ${fmtMin(g.medianApiMinutes)} | ${g.stalls} | ${g.escalations} | ${g.unverifiedExits} |`
+    `| **TOTAL** | ${g.agentClis.length ? safeCell(g.agentClis.join(',')) : 'unknown'} | ${g.n} | ${g.delivered} | ${fmtPct(g.deliveryRate)} | ${fmtUsd(g.costPerDeliveredUsd, g.costSamples)} | ${fmtTokens(g.billableTokensPerDeliveredIssue)} | ${fmtMin(g.medianApiMinutes)} | ${g.stalls} | ${g.escalations} | ${g.unverifiedExits} |`
   );
 
+  lines.push('', '## Reconciliation', '');
+  if (isFirstSnapshot) {
+    lines.push(
+      'First snapshot (#566) spot-checked against `docs/reports/batch-pilot-2-execution.md`',
+      '§13.3: issue #540 ($4.173) and #542 ($5.937) — both recovered from the same',
+      '`~/.dossier/runs.jsonl` this script reads, via the now-fixed `ai-dossier sched stats`',
+      '(#564/#573) — matched to the cent. Delivery rates in this window are broadly in line',
+      "with `docs/reports/model-agnostic-fleet.md`'s retrospective figures (glm-5.3 and",
+      'claude-sonnet-5 both ~86-88%), though the two reports use different windows and are',
+      'not expected to match exactly.'
+    );
+  } else {
+    lines.push(
+      'This is a regenerated snapshot, not the first one — see git history for',
+      '`docs/reports/model-scorecard.md` for prior windows. The first-snapshot',
+      'reconciliation against `batch-pilot-2-execution.md` §13.3 and',
+      '`model-agnostic-fleet.md` ran once, at #566.'
+    );
+  }
   lines.push(
-    '',
-    '## Reconciliation',
-    '',
-    'First snapshot (#566) spot-checked against `docs/reports/batch-pilot-2-execution.md`',
-    '§13.1: issue #540 ($4.173) and #542 ($5.937) — both recovered from the same',
-    '`~/.dossier/runs.jsonl` this script reads, via the now-fixed `ai-dossier sched stats`',
-    '(#564/#573) — matched to the cent.',
     '',
     '## Limitations',
     '',
@@ -408,7 +467,7 @@ export function renderDigest(scorecard, previous) {
       const prev = prevByModel.get(t.model);
       if (!prev || prev.deliveryRate == null || t.deliveryRate == null) continue;
       const delta = t.deliveryRate - prev.deliveryRate;
-      if (delta < -0.1 && (!drop || delta < drop.delta)) {
+      if (delta < -DELIVERY_RATE_DROP_THRESHOLD && (!drop || delta < drop.delta)) {
         drop = { model: t.model, delta, from: prev.deliveryRate, to: t.deliveryRate };
       }
     }
@@ -417,16 +476,16 @@ export function renderDigest(scorecard, previous) {
   const lines = [
     `📊 Model scorecard (${scorecard.windowStart} → ${scorecard.windowEnd})`,
     byCost
-      ? `💰 Cheapest/delivered: ${byCost.model} (${fmtUsd(byCost.costPerDeliveredUsd)}, n=${byCost.n})`
+      ? `💰 Cheapest/delivered: ${safeCell(byCost.model)} (${fmtUsd(byCost.costPerDeliveredUsd)}, n=${byCost.n})`
       : '💰 Cheapest/delivered: no data',
     byQuality
-      ? `🎯 Best delivery rate: ${byQuality.model} (${fmtPct(byQuality.deliveryRate)}, n=${byQuality.n})`
+      ? `🎯 Best delivery rate: ${safeCell(byQuality.model)} (${fmtPct(byQuality.deliveryRate)}, n=${byQuality.n})`
       : '🎯 Best delivery rate: no data',
     bySpeed
-      ? `⚡ Fastest: ${bySpeed.model} (${fmtMin(bySpeed.medianApiMinutes)} API-min, n=${bySpeed.n})`
+      ? `⚡ Fastest: ${safeCell(bySpeed.model)} (${fmtMin(bySpeed.medianApiMinutes)} API-min, n=${bySpeed.n})`
       : '⚡ Fastest: no data',
     drop
-      ? `📉 Delivery rate drop: ${drop.model} ${fmtPct(drop.from)} → ${fmtPct(drop.to)}`
+      ? `📉 Delivery rate drop: ${safeCell(drop.model)} ${fmtPct(drop.from)} → ${fmtPct(drop.to)}`
       : '📉 Delivery rate drop >10pt: none',
     '🔗 docs/reports/model-scorecard.md',
   ];
@@ -437,6 +496,10 @@ export function renderDigest(scorecard, previous) {
 // I/O — everything below this line touches gh, the filesystem, or cli/dist.
 // Kept thin and injectable so `main()` is the only place tests need to fake.
 // ------------------------------------------------------------------
+
+/** `gh issue list` is capped at this many results per call (Step below appends a warning
+ * if a repo's window actually hits it, rather than silently truncating). */
+const GH_ISSUE_LIST_LIMIT = 500;
 
 function ghIssueListWithComments(repo, since, execFile) {
   let out;
@@ -455,7 +518,7 @@ function ghIssueListWithComments(repo, since, execFile) {
         '--json',
         'number,comments',
         '--limit',
-        '500',
+        String(GH_ISSUE_LIST_LIMIT),
       ],
       { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
     );
@@ -463,21 +526,6 @@ function ghIssueListWithComments(repo, since, execFile) {
     throw new ScorecardError(`gh issue list failed for ${repo}: ${err.stderr || err.message}`);
   }
   return JSON.parse(out);
-}
-
-function loadJsonl(path) {
-  if (!existsSync(path)) return [];
-  return readFileSync(path, 'utf8')
-    .split('\n')
-    .filter((l) => l.trim())
-    .map((l) => {
-      try {
-        return JSON.parse(l);
-      } catch {
-        return null;
-      }
-    })
-    .filter((v) => v !== null);
 }
 
 function loadCliDist(repoRoot, name) {
@@ -496,10 +544,11 @@ function parseArgs(argv) {
     days: 30,
     since: null,
     repos: DEFAULT_REPOS,
-    outMd: 'docs/reports/model-scorecard.md',
-    outJson: 'docs/reports/evidence/model-scorecard.json',
+    outMd: DEFAULT_OUT_MD,
+    outJson: DEFAULT_OUT_JSON,
     repoRoot: process.cwd(),
     dryRun: false,
+    digestOut: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -529,6 +578,9 @@ function parseArgs(argv) {
       case '--dry-run':
         opts.dryRun = true;
         break;
+      case '--digest-out':
+        opts.digestOut = next();
+        break;
       default:
         throw new ScorecardError(`unrecognised argument '${arg}'.`);
     }
@@ -545,8 +597,9 @@ export function main({
   days = 30,
   since = null,
   repos = DEFAULT_REPOS,
-  outMd = 'docs/reports/model-scorecard.md',
-  outJson = 'docs/reports/evidence/model-scorecard.json',
+  outMd = DEFAULT_OUT_MD,
+  outJson = DEFAULT_OUT_JSON,
+  digestOut = null,
   repoRoot = process.cwd(),
   dryRun = false,
   execFile = execFileSync,
@@ -560,44 +613,68 @@ export function main({
   const { parseMilestones } = loadCliDist(repoRoot, 'runstate.js');
   const { canonicalModel, buildStatsReport } = loadCliDist(repoRoot, 'runstate-stats.js');
   const { buildSchedCostReport } = loadCliDist(repoRoot, 'sched-run-stats.js');
+  const normalizeModel = (raw) => canonicalModel(raw).replace(/^~+/, '');
 
   const allRows = [];
   const warnings = [];
+  let anyRepoSucceeded = false;
+
+  const runsJsonlPath = schedRunsLogPath(home);
+  const runsEntries = readJsonl(runsJsonlPath);
+  if (runsEntries.length === 0) {
+    warnings.push(
+      `no local telemetry at ${runsJsonlPath} — cost/token/duration columns are unavailable on this host.`
+    );
+  }
 
   for (const repo of repos) {
-    log(`scorecard: reading ${repo} since ${start}…`);
-    const issuesWithComments = ghIssueListWithComments(repo, start, execFile);
-    const issueNumbers = issuesWithComments.map((i) => i.number);
+    try {
+      log(`scorecard: reading ${repo} since ${start}…`);
+      const issuesWithComments = ghIssueListWithComments(repo, start, execFile);
+      if (issuesWithComments.length >= GH_ISSUE_LIST_LIMIT) {
+        warnings.push(
+          `${repo}: gh issue list hit the ${GH_ISSUE_LIST_LIMIT}-issue cap for this window — results may be truncated.`
+        );
+      }
+      const issueNumbers = issuesWithComments.map((i) => i.number);
 
-    const trails = issuesWithComments.map((i) => ({
-      issue: i.number,
-      milestones: parseMilestones((i.comments ?? []).map((c) => c.body)),
-    }));
-    const statsReport = buildStatsReport({ trails, repo });
-    warnings.push(...statsReport.warnings.map((w) => `${repo}: ${w}`));
+      const trails = issuesWithComments.map((i) => ({
+        issue: i.number,
+        milestones: parseMilestones((i.comments ?? []).map((c) => c.body)),
+      }));
+      const statsReport = buildStatsReport({ trails, repo });
+      warnings.push(...statsReport.warnings.map((w) => `${repo}: ${w}`));
 
-    const runsJsonlPath = join(home, '.dossier', 'runs.jsonl');
-    const entries = loadJsonl(runsJsonlPath);
-    const schedCost = buildSchedCostReport(entries, issueNumbers);
+      const schedCost = buildSchedCostReport(runsEntries, issueNumbers);
 
-    const eventsPath = join(home, '.dossier', 'sched', projectSlug(repo), 'events.jsonl');
-    const events = loadJsonl(eventsPath);
-    if (events.length === 0) {
-      warnings.push(
-        `${repo}: no local events.jsonl at ${eventsPath} — stall/escalation/agent-CLI columns are 0/unknown for this repo on this host.`
-      );
+      const eventsPath = join(schedStateDir(repo, home), JOURNAL_FILE);
+      const events = readJsonl(eventsPath);
+      if (events.length === 0) {
+        warnings.push(
+          `${repo}: no local events.jsonl at ${eventsPath} — stall/escalation/agent-CLI columns are 0/unknown for this repo on this host.`
+        );
+      }
+      const dispatchInfo = buildDispatchInfo(events, `${start}T00:00:00Z`, `${end}T23:59:59Z`);
+
+      const rows = joinRepoRows({
+        repo,
+        trails,
+        statsReport,
+        schedCost,
+        dispatchInfo,
+        canonicalModelFn: normalizeModel,
+      });
+      allRows.push(...rows);
+      anyRepoSucceeded = true;
+    } catch (err) {
+      const message = err instanceof ScorecardError ? err.message : (err?.message ?? String(err));
+      warnings.push(`${repo}: skipped — ${message}`);
+      log(`scorecard: ${repo} failed, continuing with other repos — ${message}`);
     }
-    const dispatchInfo = buildDispatchInfo(events, `${start}T00:00:00Z`, `${end}T23:59:59Z`);
+  }
 
-    const rows = joinRepoRows({
-      repo,
-      trails,
-      statsReport,
-      schedCost,
-      dispatchInfo,
-      canonicalModelFn: canonicalModel,
-    });
-    allRows.push(...rows);
+  if (!anyRepoSucceeded && repos.length > 0) {
+    throw new ScorecardError(`every repo failed — see warnings: ${warnings.join(' | ')}`);
   }
 
   const scorecard = aggregateScorecard(allRows, {
@@ -617,7 +694,7 @@ export function main({
     }
   }
 
-  const markdown = renderMarkdown(scorecard);
+  const markdown = renderMarkdown(scorecard, { isFirstSnapshot: previous === null });
   const json = renderJson(scorecard);
   const digest = renderDigest(scorecard, previous);
 
@@ -626,6 +703,10 @@ export function main({
     mkdirSync(dirname(outJsonAbs), { recursive: true });
     writeFileSync(resolve(repoRoot, outMd), markdown);
     writeFileSync(outJsonAbs, json);
+    // A dedicated digest file, not a log grep — `scorecard-weekly.sh` reads this
+    // directly rather than pattern-matching stdout, which would otherwise also have
+    // to survive `npm install`/`make build-all`'s own output landing in the same log.
+    if (digestOut) writeFileSync(resolve(repoRoot, digestOut), `${digest}\n`);
   }
 
   log('');

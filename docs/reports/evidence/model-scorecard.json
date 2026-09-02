@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-02T10:10:44.874Z",
+  "generatedAt": "2026-09-02T10:59:22.341Z",
   "windowStart": "2026-08-25",
   "windowEnd": "2026-09-02",
   "buckets": [
@@ -19,7 +19,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": null,
-      "reviewEscalated": null
+      "reviewEscalated": null,
+      "agentClis": []
     },
     {
       "model": "<unknown>",
@@ -37,7 +38,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 1,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "claude-opus-5",
@@ -55,7 +57,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 27,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "claude-opus-5",
@@ -73,7 +76,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 31,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["claude"]
     },
     {
       "model": "claude-opus-5",
@@ -91,7 +95,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 427,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "claude-opus-5[1m]",
@@ -109,7 +114,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 22,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "claude-sonnet-5",
@@ -127,7 +133,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 8,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "claude-sonnet-5",
@@ -145,25 +152,27 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 2,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["claude"]
     },
     {
       "model": "claude-sonnet-5",
       "repo": "imboard-ai/ai-dossier",
       "tier": "mid",
-      "n": 30,
-      "delivered": 26,
+      "n": 31,
+      "delivered": 27,
       "blocked": 0,
-      "deliveryRate": 0.8666666666666667,
+      "deliveryRate": 0.8709677419354839,
       "costPerDeliveredUsd": 23.29758590000001,
       "costSamples": 5,
-      "medianApiMinutes": 45.304066666666664,
+      "medianApiMinutes": 47.9721,
       "billableTokensPerDeliveredIssue": 203100,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
-      "reviewFixed": 357,
-      "reviewEscalated": 0
+      "reviewFixed": 382,
+      "reviewEscalated": 0,
+      "agentClis": ["claude"]
     },
     {
       "model": "claude-sonnet-5",
@@ -181,7 +190,8 @@
       "escalations": 6,
       "unverifiedExits": 3,
       "reviewFixed": 123,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["claude"]
     },
     {
       "model": "claude-sonnet-5",
@@ -199,7 +209,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 202,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "claude-sonnet-5",
@@ -217,7 +228,8 @@
       "escalations": 9,
       "unverifiedExits": 0,
       "reviewFixed": 121,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["claude", "opencode"]
     },
     {
       "model": "claude-sonnet-5",
@@ -235,7 +247,8 @@
       "escalations": 1,
       "unverifiedExits": 0,
       "reviewFixed": 3,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["claude"]
     },
     {
       "model": "claude-sonnet-5",
@@ -253,7 +266,8 @@
       "escalations": 2,
       "unverifiedExits": 1,
       "reviewFixed": 24,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["claude"]
     },
     {
       "model": "glm-5.3",
@@ -271,7 +285,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 251,
-      "reviewEscalated": 2
+      "reviewEscalated": 2,
+      "agentClis": []
     },
     {
       "model": "glm-5.3",
@@ -289,7 +304,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 211,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "glm-latest",
@@ -307,7 +323,8 @@
       "escalations": 4,
       "unverifiedExits": 0,
       "reviewFixed": 19,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["opencode"]
     },
     {
       "model": "glm-latest",
@@ -325,7 +342,8 @@
       "escalations": 2,
       "unverifiedExits": 0,
       "reviewFixed": null,
-      "reviewEscalated": null
+      "reviewEscalated": null,
+      "agentClis": ["opencode"]
     },
     {
       "model": "gpt-5.6-luna",
@@ -343,7 +361,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 6,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "gpt-5.6-terra",
@@ -361,7 +380,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 1,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "kimi-k3",
@@ -379,7 +399,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": null,
-      "reviewEscalated": null
+      "reviewEscalated": null,
+      "agentClis": []
     },
     {
       "model": "kimi-k3-fast",
@@ -397,7 +418,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 43,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "kimi-latest",
@@ -415,7 +437,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 15,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["opencode"]
     },
     {
       "model": "zai-coding-plan/glm-5.3",
@@ -433,7 +456,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 2,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     }
   ],
   "totals": [
@@ -451,7 +475,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 1,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "claude-opus-5",
@@ -467,7 +492,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 485,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["claude"]
     },
     {
       "model": "claude-opus-5[1m]",
@@ -483,23 +509,25 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 22,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "claude-sonnet-5",
-      "n": 72,
-      "delivered": 62,
+      "n": 73,
+      "delivered": 63,
       "blocked": 0,
-      "deliveryRate": 0.8611111111111112,
+      "deliveryRate": 0.863013698630137,
       "costPerDeliveredUsd": 18.057901837500005,
       "costSamples": 12,
-      "medianApiMinutes": 47.93170833333333,
+      "medianApiMinutes": 47.9721,
       "billableTokensPerDeliveredIssue": 159278.25,
       "stalls": 0,
       "escalations": 18,
       "unverifiedExits": 4,
-      "reviewFixed": 840,
-      "reviewEscalated": 0
+      "reviewFixed": 865,
+      "reviewEscalated": 0,
+      "agentClis": ["claude", "opencode"]
     },
     {
       "model": "glm-5.3",
@@ -515,7 +543,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 462,
-      "reviewEscalated": 2
+      "reviewEscalated": 2,
+      "agentClis": []
     },
     {
       "model": "glm-latest",
@@ -531,7 +560,8 @@
       "escalations": 6,
       "unverifiedExits": 0,
       "reviewFixed": 19,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["opencode"]
     },
     {
       "model": "gpt-5.6-luna",
@@ -547,7 +577,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 6,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "gpt-5.6-terra",
@@ -563,7 +594,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 1,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "kimi-k3",
@@ -579,7 +611,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": null,
-      "reviewEscalated": null
+      "reviewEscalated": null,
+      "agentClis": []
     },
     {
       "model": "kimi-k3-fast",
@@ -595,7 +628,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 43,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     },
     {
       "model": "kimi-latest",
@@ -611,7 +645,8 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 15,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": ["opencode"]
     },
     {
       "model": "zai-coding-plan/glm-5.3",
@@ -627,24 +662,26 @@
       "escalations": 0,
       "unverifiedExits": 0,
       "reviewFixed": 2,
-      "reviewEscalated": 0
+      "reviewEscalated": 0,
+      "agentClis": []
     }
   ],
   "grandTotal": {
     "model": "TOTAL",
-    "n": 185,
-    "delivered": 145,
+    "n": 186,
+    "delivered": 146,
     "blocked": 9,
-    "deliveryRate": 0.7837837837837838,
+    "deliveryRate": 0.7849462365591398,
     "costPerDeliveredUsd": 18.057901837500005,
     "costSamples": 12,
-    "medianApiMinutes": 47.93170833333333,
+    "medianApiMinutes": 47.9721,
     "billableTokensPerDeliveredIssue": 159278.25,
     "stalls": 1,
     "escalations": 24,
     "unverifiedExits": 4,
-    "reviewFixed": 1896,
-    "reviewEscalated": 2
+    "reviewFixed": 1921,
+    "reviewEscalated": 2,
+    "agentClis": ["claude", "opencode"]
   },
   "warnings": [
     "imboard-ai/ai-dossier: 23 run(s) recorded no model= — their row is bucketed as <unknown>, and its outcome columns are not attributable to any model",

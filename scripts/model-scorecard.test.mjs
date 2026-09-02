@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -335,6 +335,34 @@ describe('aggregateScorecard', () => {
     expect(sc.grandTotal.delivered).toBe(3);
   });
 
+  it('does not misassign columns when a raw model id contains a space', () => {
+    const rows = [
+      {
+        repo: 'imboard-ai/ai-dossier',
+        model: 'weird model with spaces',
+        tier: 'mid',
+        delivered: true,
+        blocked: false,
+        costUsd: 1,
+        inputTokens: 1,
+        outputTokens: 1,
+        apiMinutes: 1,
+        stalls: 0,
+        escalations: 0,
+        unverifiedExits: 0,
+        reviewFixed: 0,
+        reviewEscalated: 0,
+      },
+    ];
+    const sc = aggregateScorecard(rows, meta);
+    expect(sc.buckets).toHaveLength(1);
+    expect(sc.buckets[0]).toMatchObject({
+      model: 'weird model with spaces',
+      repo: 'imboard-ai/ai-dossier',
+      tier: 'mid',
+    });
+  });
+
   it('reports null cost/speed when no delivered row measured them', () => {
     const rows = [
       {
@@ -399,6 +427,78 @@ describe('renderMarkdown / renderJson', () => {
     const parsed = JSON.parse(json);
     expect(parsed.windowStart).toBe('2026-08-25');
     expect(parsed.totals[0].model).toBe('sonnet');
+  });
+
+  it('sanitizes a model/tier value that would otherwise break out of its table cell', () => {
+    const hostile = aggregateScorecard(
+      [
+        {
+          repo: 'r1',
+          model: 'evil | 100% | $0.001 (n=1',
+          tier: 'sneaky`](https://phish.example',
+          delivered: true,
+          blocked: false,
+          costUsd: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          apiMinutes: 1,
+          stalls: 0,
+          escalations: 0,
+          unverifiedExits: 0,
+          reviewFixed: 0,
+          reviewEscalated: 0,
+        },
+      ],
+      { windowStart: '2026-08-25', windowEnd: '2026-09-02', generatedAt: '2026-09-02T00:00:00Z' }
+    );
+    const md = renderMarkdown(hostile);
+    const bucketLine = md.split('\n').find((l) => l.includes('evil'));
+    expect(bucketLine).toBeDefined();
+    // The forged pipes are markdown-escaped (`\|`), so a markdown renderer treats them as
+    // literal text inside the cell rather than as column separators.
+    expect(bucketLine).toContain('evil \\| 100% \\| $0.001 (n=1');
+    // The stray backtick that would otherwise close the `${model}` code span early and
+    // open a markdown link is replaced, so it can't break out of the code span.
+    expect(bucketLine).not.toContain('`](https://phish.example');
+  });
+
+  it('renders "first snapshot" reconciliation text only when isFirstSnapshot is true', () => {
+    const first = renderMarkdown(scorecard, { isFirstSnapshot: true });
+    expect(first).toContain('First snapshot (#566)');
+
+    const regenerated = renderMarkdown(scorecard, { isFirstSnapshot: false });
+    expect(regenerated).not.toContain('First snapshot (#566)');
+    expect(regenerated).toContain('regenerated snapshot');
+  });
+
+  it('renders the Agent CLI column from the bucket/total agentClis field', () => {
+    const withCli = aggregateScorecard(
+      [
+        {
+          repo: 'r1',
+          model: 'sonnet',
+          tier: 'mid',
+          agentCli: 'claude',
+          delivered: true,
+          blocked: false,
+          costUsd: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          apiMinutes: 1,
+          stalls: 0,
+          escalations: 0,
+          unverifiedExits: 0,
+          reviewFixed: 0,
+          reviewEscalated: 0,
+        },
+      ],
+      { windowStart: '2026-08-25', windowEnd: '2026-09-02', generatedAt: '2026-09-02T00:00:00Z' }
+    );
+    expect(withCli.buckets[0].agentClis).toEqual(['claude']);
+    expect(withCli.totals[0].agentClis).toEqual(['claude']);
+    const md = renderMarkdown(withCli);
+    expect(md).toContain('Agent CLI');
+    expect(md.split('\n').find((l) => l.includes('`sonnet`'))).toContain('claude');
   });
 });
 
@@ -566,5 +666,131 @@ describe('main (integration, fixture gh + fixture ~/.dossier)', () => {
     expect(scorecard.totals[0].delivered).toBe(1);
     expect(scorecard.totals[0].costPerDeliveredUsd).toBeCloseTo(3.5);
     expect(digest.split('\n')).toHaveLength(6);
+  });
+
+  it('normalizes a routing-prefixed, opencode-alias-marked model id (AC2)', () => {
+    mkdirSync(join(home, '.dossier'), { recursive: true });
+    const gateComment =
+      '<!-- runstate:v1 -->\nphase=gate status=done run=r-1-aaaa at=2026-08-26T00:00:00Z model=openrouter/~z-ai/glm-latest next=setup\n';
+    const shipComment =
+      '<!-- runstate:v1 -->\nphase=ship status=done run=r-1-aaaa at=2026-08-26T02:00:00Z next=report\n';
+    const execFile = (cmd) => {
+      if (cmd === 'gh') {
+        return JSON.stringify([
+          { number: 1, comments: [{ body: gateComment }, { body: shipComment }] },
+        ]);
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    };
+
+    const { scorecard } = main({
+      repoRoot: REPO_ROOT,
+      repos: ['imboard-ai/ai-dossier'],
+      dryRun: true,
+      execFile,
+      home,
+      now: new Date('2026-09-02T00:00:00Z'),
+      log: () => {},
+    });
+
+    // canonicalModel alone leaves a stray leading '~' ('~z-ai/glm-latest'); main()'s
+    // normalizeModel wrapper strips it so the bucket key doesn't carry the alias marker.
+    expect(scorecard.totals[0].model).toBe('z-ai/glm-latest');
+  });
+
+  it('continues with other repos when one gh call fails, and records a warning', () => {
+    mkdirSync(join(home, '.dossier'), { recursive: true });
+    const gateComment =
+      '<!-- runstate:v1 -->\nphase=gate status=done run=r-2-bbbb at=2026-08-26T00:00:00Z model=claude-opus-5 next=setup\n';
+    const shipComment =
+      '<!-- runstate:v1 -->\nphase=ship status=done run=r-2-bbbb at=2026-08-26T02:00:00Z next=report\n';
+    const execFile = (cmd, args) => {
+      if (cmd === 'gh' && args.includes('imboard-ai/ai-dossier')) {
+        throw Object.assign(new Error('gh: rate limited'), { stderr: 'rate limited' });
+      }
+      if (cmd === 'gh') {
+        return JSON.stringify([
+          { number: 2, comments: [{ body: gateComment }, { body: shipComment }] },
+        ]);
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    };
+
+    const { scorecard } = main({
+      repoRoot: REPO_ROOT,
+      repos: ['imboard-ai/ai-dossier', 'imboard-ai/imboard-monorepo'],
+      dryRun: true,
+      execFile,
+      home,
+      now: new Date('2026-09-02T00:00:00Z'),
+      log: () => {},
+    });
+
+    expect(scorecard.totals).toHaveLength(1);
+    expect(scorecard.totals[0].model).toBe('claude-opus-5');
+    expect(scorecard.warnings.some((w) => w.includes('imboard-ai/ai-dossier: skipped'))).toBe(true);
+  });
+
+  it('throws only when every repo fails', () => {
+    const execFile = () => {
+      throw Object.assign(new Error('gh: not found'), { stderr: 'not found' });
+    };
+    expect(() =>
+      main({
+        repoRoot: REPO_ROOT,
+        repos: ['imboard-ai/ai-dossier'],
+        dryRun: true,
+        execFile,
+        home,
+        now: new Date('2026-09-02T00:00:00Z'),
+        log: () => {},
+      })
+    ).toThrow(ScorecardError);
+  });
+
+  it('warns when ~/.dossier/runs.jsonl is absent on this host', () => {
+    const gateComment =
+      '<!-- runstate:v1 -->\nphase=gate status=done run=r-3-cccc at=2026-08-26T00:00:00Z model=sonnet next=setup\n';
+    const execFile = () => JSON.stringify([{ number: 3, comments: [{ body: gateComment }] }]);
+
+    const { scorecard } = main({
+      repoRoot: REPO_ROOT,
+      repos: ['imboard-ai/ai-dossier'],
+      dryRun: true,
+      execFile,
+      home,
+      now: new Date('2026-09-02T00:00:00Z'),
+      log: () => {},
+    });
+
+    expect(scorecard.warnings.some((w) => w.includes('no local telemetry'))).toBe(true);
+  });
+
+  it('writes the digest to --digest-out when requested', () => {
+    mkdirSync(join(home, '.dossier'), { recursive: true });
+    const outDir = mkdtempSync(join(tmpdir(), 'model-scorecard-out-'));
+    const gateComment =
+      '<!-- runstate:v1 -->\nphase=gate status=done run=r-4-dddd at=2026-08-26T00:00:00Z model=sonnet next=setup\n';
+    const shipComment =
+      '<!-- runstate:v1 -->\nphase=ship status=done run=r-4-dddd at=2026-08-26T02:00:00Z next=report\n';
+    const execFile = () =>
+      JSON.stringify([{ number: 4, comments: [{ body: gateComment }, { body: shipComment }] }]);
+
+    const digestOut = join(outDir, 'digest.txt');
+    main({
+      repoRoot: REPO_ROOT,
+      repos: ['imboard-ai/ai-dossier'],
+      outMd: join(outDir, 'scorecard.md'),
+      outJson: join(outDir, 'scorecard.json'),
+      digestOut,
+      execFile,
+      home,
+      now: new Date('2026-09-02T00:00:00Z'),
+      log: () => {},
+    });
+
+    const written = readFileSync(digestOut, 'utf8');
+    expect(written.split('\n').filter(Boolean)).toHaveLength(6);
+    rmSync(outDir, { recursive: true, force: true });
   });
 });
