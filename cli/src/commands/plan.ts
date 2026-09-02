@@ -3,8 +3,8 @@
  *
  * One canonical per-issue plan (#462, RFC-0001 C.6): posting is append-only (a new post
  * supersedes — readers always take the LAST plan:v1 comment), reading is `get`, and
- * `validate` runs the deterministic checks — referenced files exist at HEAD, head-distance,
- * risk-floor path scan — with no model call anywhere.
+ * `validate` runs the deterministic checks — referenced files exist at HEAD (unless marked
+ * `(new)`), head-distance, risk-floor path scan — with no model call anywhere.
  */
 
 import fs from 'node:fs';
@@ -29,6 +29,7 @@ import {
   PLAN_SECTIONS,
   type PlanArtifact,
   type PlanSection,
+  parsePredictedFileBullets,
   scanRiskFloor,
   validateArtifactBody,
 } from '../plan-artifact';
@@ -56,7 +57,14 @@ interface ValidateOptions {
 /** One finding of `validate`, machine-parseable by design. */
 export interface PlanValidationReason {
   /** Which check produced the finding. */
-  check: 'artifact' | 'sections' | 'missing-file' | 'head-distance' | 'risk-floor' | 'git';
+  check:
+    | 'artifact'
+    | 'sections'
+    | 'missing-file'
+    | 'stale-plan'
+    | 'head-distance'
+    | 'risk-floor'
+    | 'git';
   /** `error` fails validity; `warn`/`info` are carried for the caller to act on. */
   severity: 'error' | 'warn' | 'info';
   message: string;
@@ -74,8 +82,30 @@ const SECTION_JSON_KEYS: Record<Exclude<PlanSection, 'Predicted Files'>, string>
   'Test Scope': 'test_scope',
 };
 
-/** `git cat-file -e` exits 1 for "no such object at HEAD" — an answer, not a fault. */
+/** `git cat-file -e` exits 1 when the raw object id itself is absent — a defensive fallback for git forms that use this exit code rather than 128 (below), which is what `HEAD:<path>` actually exits with. */
 const GIT_NO_SUCH_OBJECT = 1;
+
+/**
+ * `git cat-file -e HEAD:<path>` exits 128 both when `<path>` is not present at HEAD (the
+ * common case) and when HEAD itself does not resolve (no commits yet, corrupt ref, not a
+ * repo) — the exit code alone cannot distinguish them. An earlier version of this check
+ * tried to tell them apart by matching git's stderr wording (#579's original bug fix),
+ * but that wording is gettext-translated and has changed across git versions — e.g. an
+ * untracked path's "exists on disk, but not in 'HEAD'" never matched at all, silently
+ * reproducing the original bug for that case. {@link headResolves} answers the same
+ * question structurally instead: if HEAD resolves to a real commit, ANY 128 from the
+ * `HEAD:<path>` probe can only mean the path is absent — regardless of git's wording.
+ */
+const GIT_FATAL = 128;
+
+/**
+ * Whether HEAD resolves to a real commit — the fact that disambiguates a 128 exit from
+ * {@link fileExistsAtHead}'s probe. Only interesting on the failure path (`res.ok` is
+ * `false`), and cheap enough to call once per path without memoizing.
+ */
+function headResolves(): boolean {
+  return exec('git', ['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']).ok;
+}
 
 /** Characters kept when quoting a network-derived path inside an error message. */
 const PATH_SNIPPET_LENGTH = 80;
@@ -222,6 +252,7 @@ function fileExistsAtHead(
   const res = exec('git', ['cat-file', '-e', `HEAD:${path}`]);
   if (res.ok) return { ok: true, exists: true };
   if (res.error.status === GIT_NO_SUCH_OBJECT) return { ok: true, exists: false };
+  if (res.error.status === GIT_FATAL && headResolves()) return { ok: true, exists: false };
   return { ok: false, error: gitFailure(res.error) };
 }
 
@@ -267,19 +298,29 @@ function artifactReasons(artifact: PlanArtifact): PlanValidationReason[] {
         "Predicted Files section produced no paths — expected one '- `path`' bullet per file.",
     });
   }
-  for (const path of artifact.predictedFiles) {
-    const exists = fileExistsAtHead(path);
+  // Iterate parsed bullets, not `artifact.predictedFiles` + a path-keyed Set lookup — two
+  // bullets naming the same path (one marked `(new)`, one not) would otherwise alias
+  // through the Set and give both occurrences the same (wrong, for one of them) verdict.
+  for (const bullet of parsePredictedFileBullets(artifact.sections['Predicted Files'])) {
+    const path = snippet(bullet.path, PATH_SNIPPET_LENGTH);
+    const exists = fileExistsAtHead(bullet.path);
     if (!exists.ok) {
       reasons.push({
         check: 'git',
         severity: 'error',
         message: `Cannot verify '${path}' at HEAD: ${exists.error} — run from inside the repository the plan targets.`,
       });
-    } else if (!exists.exists) {
+    } else if (!exists.exists && !bullet.isNew) {
       reasons.push({
         check: 'missing-file',
         severity: 'error',
-        message: `Predicted file '${path}' does not exist at current HEAD.`,
+        message: `Predicted file '${path}' does not exist at current HEAD. If this issue creates it, mark the bullet '(new)' — e.g. '- \`${path}\` (new) — why'.`,
+      });
+    } else if (exists.exists && bullet.isNew) {
+      reasons.push({
+        check: 'stale-plan',
+        severity: 'warn',
+        message: `Predicted file '${path}' is marked '(new)' but already exists at current HEAD — the plan may be stale.`,
       });
     }
   }
@@ -343,6 +384,7 @@ function registerGetSubcommand(cmd: Command): void {
               head: artifact.head,
               ...sections,
               predicted_files: artifact.predictedFiles,
+              new_files: [...artifact.newFiles],
               url,
               created_at: createdAt,
               author,

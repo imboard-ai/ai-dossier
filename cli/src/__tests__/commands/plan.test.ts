@@ -275,6 +275,24 @@ describe('plan get', () => {
     expect(parsed.url).toContain('comment-1');
     expect(parsed.created_at).toBe('2026-08-29T10:00:00Z');
     expect(parsed.author).toBe('yuvaldim');
+    expect(parsed.new_files).toEqual([]);
+  });
+
+  it('includes new_files in JSON mode so a refine round-trip does not lose the (new) marker (#579)', async () => {
+    const artifact = POSTED_ARTIFACT.replace(
+      '- `docs/reference/plan-artifact.md` — the spec',
+      '- `docs/reference/plan-artifact.md` (new) — the spec'
+    );
+    execReturns(ghCommentsJson([artifact]));
+
+    const code = await run(['plan', 'get', '--issue', '1', '--json']);
+    expect(code).toBeUndefined();
+    const parsed = JSON.parse(logged()[0]);
+    expect(parsed.predicted_files).toEqual([
+      'cli/src/plan-artifact.ts',
+      'docs/reference/plan-artifact.md',
+    ]);
+    expect(parsed.new_files).toEqual(['docs/reference/plan-artifact.md']);
   });
 
   it('exits 1 distinguishably when no plan exists', async () => {
@@ -341,6 +359,170 @@ describe('plan validate', () => {
         (r) => r.check === 'missing-file' && r.message.includes('docs/reference/plan-artifact.md')
       )
     ).toBe(true);
+  });
+
+  /**
+   * Stub git for the exit-128 disambiguation: `cat-file -e HEAD:<path>` fails for every
+   * path not in `existing`, at the real exit code (128, not the legacy 1), and
+   * `headResolves()`'s `rev-parse --verify --quiet HEAD^{commit}` probe succeeds or fails
+   * per `headResolves`. The exact stderr wording is deliberately arbitrary — the fix under
+   * test no longer parses it (#579).
+   */
+  function gitExit128(options: {
+    artifact?: string;
+    existing?: Set<string>;
+    headResolves?: boolean;
+    distance?: string;
+  }): void {
+    const {
+      artifact = POSTED_ARTIFACT,
+      existing = new Set(['cli/src/plan-artifact.ts']),
+      headResolves = true,
+      distance = '0',
+    } = options;
+    execHandles((file, args) => {
+      if (file === 'gh') return ghCommentsJson([artifact]);
+      if (file === 'git' && args[0] === 'cat-file') {
+        const path = args[2].slice('HEAD:'.length);
+        if (existing.has(path)) return '';
+        const err = new Error('missing') as Error & { status: number; stderr: string };
+        err.status = 128;
+        err.stderr = `fatal: path '${path}' does not exist in 'HEAD'`;
+        throw err;
+      }
+      if (file === 'git' && args[0] === 'rev-parse' && args[1] === '--verify') {
+        if (headResolves) return 'abc1234deadbeef';
+        const err = new Error('unborn') as Error & { status: number; stderr: string };
+        err.status = 1;
+        err.stderr = '';
+        throw err;
+      }
+      if (file === 'git' && args[0] === 'rev-list') return distance;
+      throw new Error(`unexpected: ${file} ${args.join(' ')}`);
+    });
+  }
+
+  it('reports missing-file (not git) when git exits 128 for a path absent at HEAD (#579)', async () => {
+    // Real git exits 128, not 1, for "the path is not present at this ref" — the exit
+    // code the earlier gitHasFiles() stub used only approximates it.
+    gitExit128({ headResolves: true });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBe(1);
+    const v = verdict();
+    expect(v.valid).toBe(false);
+    expect(
+      v.reasons.some(
+        (r) => r.check === 'missing-file' && r.message.includes('docs/reference/plan-artifact.md')
+      )
+    ).toBe(true);
+    expect(v.reasons.some((r) => r.check === 'git')).toBe(false);
+  });
+
+  it('emits no reason for a missing path whose bullet is marked (new) (#579)', async () => {
+    const artifact = POSTED_ARTIFACT.replace(
+      '- `docs/reference/plan-artifact.md` — the spec',
+      '- `docs/reference/plan-artifact.md` (new) — the spec'
+    );
+    gitExit128({ artifact, headResolves: true });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBeUndefined();
+    const v = verdict();
+    expect(v.valid).toBe(true);
+    expect(
+      v.reasons.some(
+        (r) => r.check === 'missing-file' || r.check === 'stale-plan' || r.check === 'git'
+      )
+    ).toBe(false);
+  });
+
+  it('warns (does not error) under check: stale-plan when a (new)-marked path already exists at HEAD (#579)', async () => {
+    const artifact = POSTED_ARTIFACT.replace(
+      '- `docs/reference/plan-artifact.md` — the spec',
+      '- `docs/reference/plan-artifact.md` (new) — the spec'
+    );
+    execHandles((file, args) => {
+      if (file === 'gh') return ghCommentsJson([artifact]);
+      if (file === 'git' && args[0] === 'cat-file') return '';
+      if (file === 'git' && args[0] === 'rev-list') return '0';
+      throw new Error(`unexpected: ${file} ${args.join(' ')}`);
+    });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBeUndefined();
+    const v = verdict();
+    expect(v.valid).toBe(true);
+    expect(
+      v.reasons.some(
+        (r) =>
+          r.check === 'stale-plan' &&
+          r.severity === 'warn' &&
+          r.message.includes('docs/reference/plan-artifact.md')
+      )
+    ).toBe(true);
+    expect(v.reasons.some((r) => r.check === 'missing-file')).toBe(false);
+  });
+
+  it('still reports check: git for a genuine repo/HEAD failure at exit 128, unmarked (#579)', async () => {
+    gitExit128({ existing: new Set(), headResolves: false });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBe(1);
+    const v = verdict();
+    expect(v.valid).toBe(false);
+    expect(v.reasons.some((r) => r.check === 'git')).toBe(true);
+    expect(v.reasons.some((r) => r.check === 'missing-file')).toBe(false);
+  });
+
+  it('reports missing-file for an untracked path (exists on disk, not in HEAD) — the wording the original regex missed (#579)', async () => {
+    // git's real wording for this case ("exists on disk, but not in 'HEAD'") never
+    // matched the old stderr regex at all; the headResolves()-based check does not care
+    // about wording, so this passes without a dedicated regex alternative.
+    execHandles((file, args) => {
+      if (file === 'gh') return ghCommentsJson([POSTED_ARTIFACT]);
+      if (file === 'git' && args[0] === 'cat-file') {
+        const path = args[2].slice('HEAD:'.length);
+        if (path === 'cli/src/plan-artifact.ts') return '';
+        const err = new Error('untracked') as Error & { status: number; stderr: string };
+        err.status = 128;
+        err.stderr = `fatal: path '${path}' exists on disk, but not in 'HEAD'`;
+        throw err;
+      }
+      if (file === 'git' && args[0] === 'rev-parse' && args[1] === '--verify') return 'abc1234';
+      if (file === 'git' && args[0] === 'rev-list') return '0';
+      throw new Error(`unexpected: ${file} ${args.join(' ')}`);
+    });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBe(1);
+    const v = verdict();
+    expect(
+      v.reasons.some(
+        (r) => r.check === 'missing-file' && r.message.includes('docs/reference/plan-artifact.md')
+      )
+    ).toBe(true);
+  });
+
+  it('gives each duplicate-path bullet its own verdict instead of aliasing through a Set (#579)', async () => {
+    // Two bullets for the SAME path, one marked (new) and one not — a plan-authoring
+    // mistake, but the marker must not leak from one bullet to the other.
+    const artifact = POSTED_ARTIFACT.replace(
+      '- `docs/reference/plan-artifact.md` — the spec',
+      [
+        '- `docs/reference/plan-artifact.md` (new) — first mention',
+        '- `docs/reference/plan-artifact.md` — second mention, unmarked',
+      ].join('\n')
+    );
+    gitExit128({ artifact, existing: new Set(['cli/src/plan-artifact.ts']), headResolves: true });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBe(1);
+    const v = verdict();
+    expect(v.valid).toBe(false);
+    const missingFileReasons = v.reasons.filter((r) => r.check === 'missing-file');
+    expect(missingFileReasons).toHaveLength(1);
+    expect(missingFileReasons[0].message).toContain('docs/reference/plan-artifact.md');
   });
 
   it('reports head-distance as info when HEAD moved past the plan head', async () => {
