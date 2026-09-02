@@ -13,10 +13,10 @@ help:
 	@echo ""
 	@echo "Build order:"
 	@echo "  1. packages/core (TypeScript → dist/)"
-	@echo "  2. packages/sched (TypeScript → dist/, depends on core)"
-	@echo "  3. mcp-server (TypeScript → dist/, depends on core)"
-	@echo "  4. cli (TypeScript → dist/, depends on core + sched)"
-	@echo "  5. packages/worktree-pool (TypeScript → dist/)"
+	@echo "  2. packages/worktree-pool (TypeScript → dist/)"
+	@echo "  3. packages/sched (TypeScript → dist/, depends on core + worktree-pool)"
+	@echo "  4. mcp-server (TypeScript → dist/, depends on core)"
+	@echo "  5. cli (TypeScript → dist/, depends on core + sched)"
 	@echo "  6. registry (TypeScript, deployed via Vercel, depends on core)"
 
 ## install: Install all npm dependencies
@@ -29,7 +29,7 @@ install:
 build: lint build-all
 
 ## build-all: Build all packages in dependency order (no lint)
-build-all: build-core build-sched build-mcp build-cli build-pool
+build-all: build-core build-pool build-sched build-mcp build-cli
 	@echo "✓ All packages built successfully"
 
 ## build-core: Build @ai-dossier/core package
@@ -57,7 +57,7 @@ build-pool:
 	@echo "✓ packages/worktree-pool built"
 
 ## build-sched: Build @ai-dossier/sched package
-build-sched: build-core
+build-sched: build-core build-pool
 	@echo "Building packages/sched..."
 	cd packages/sched && npm run build
 	@echo "✓ packages/sched built"

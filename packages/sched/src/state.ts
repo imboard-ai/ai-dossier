@@ -222,6 +222,7 @@ export function createBatch(
     anchor: opts.anchor ?? null,
     branch: null,
     worktree: null,
+    pool_claimed: false,
     run_id: opts.run_id ?? null,
     ranges: [],
     pr: null,

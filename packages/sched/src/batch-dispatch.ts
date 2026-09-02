@@ -47,15 +47,27 @@
  * an ambiguous aggregate failure (bisect needs a per-project "run only these
  * tests" command this module has no generic way to construct) — an
  * unattributable red aggregate suite dissolves the batch rather than
- * bisecting, which `attributing → dissolving` already models. No worktree-pool
- * integration for batch-setup — cold `git worktree add` only, mirroring
- * `teardown.ts`'s cold path. No per-phase stall/escalation ladder for batch
- * sub-agents — a dead-without-verification agent is treated as blocked and
- * evicted/reported rather than redispatched stronger. Both are documented
- * follow-ups, not gaps discovered later.
+ * bisecting, which `attributing → dissolving` already models. No per-phase
+ * stall/escalation ladder for batch sub-agents — a dead-without-verification
+ * agent is treated as blocked and evicted/reported rather than redispatched
+ * stronger. Both are documented follow-ups, not gaps discovered later.
+ *
+ * `runBatchSetup` (#561) tries a pool claim first (already warm, mirroring
+ * `teardown.ts`'s `poolReturn` — same `npx`-through-`deps.exec` pattern, never
+ * a direct in-process `claim()` import, which resolves its git root from
+ * `process.cwd()` and would break this module's `deps.repoDir` testability
+ * contract); on the cold `git worktree add` path it warms the worktree itself
+ * before returning, so a member's first command is never the one that
+ * discovers `node_modules` is missing (`env-cold`, `docs/agent-traps.md`).
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+  readPoolFileConfig,
+  resolveProjectDir,
+  resolveWarmCommands,
+} from '@ai-dossier/worktree-pool';
 import {
   type BoundaryCommit,
   type MemberFootprint,
@@ -108,7 +120,7 @@ import {
   transitionIssue,
   transitionSlot,
 } from './state';
-import { type FsExists, isSafeWorktree, runTeardown } from './teardown';
+import { type FsExists, isSafeWorktree, POOL_ARGS_PREFIX, POOL_BIN, runTeardown } from './teardown';
 import type {
   AttributionMethod,
   BatchEntry,
@@ -317,18 +329,84 @@ function releaseSlot(state: SchedState, batchId: string, now: Date): SchedState 
 // --- Batch setup (ready → executing, member 1) ---
 
 /**
- * `batch/<id>-<YYYYMMDD>` off `base_branch`, a worktree at
- * `<repoDir>/worktrees/batch-<id>-<YYYYMMDD>` (cold git only — no pool
- * integration in this version, see the module doc), and a fresh runstate run
- * id minted against the anchor. All-or-nothing: any failed step reports the
- * step name and nothing is partially recorded on the batch.
+ * A pool claim already returns a warm worktree (deps installed, built), so
+ * only the cold `git worktree add` path needs its own warm step (#561). Tries
+ * `worktree.prepare` via the optional `runCapability` hook first (a repo that
+ * declares it in its manifest knows its own warm-up best); falls back to
+ * `@ai-dossier/worktree-pool`'s package-manager detection otherwise, guarded
+ * on `package.json` actually being present — `npm install` (and the
+ * pnpm/yarn/bun equivalents) hard-fail with no `package.json` at all, so an
+ * unguarded call would turn "nothing to warm" into a false failure for every
+ * non-Node repo. Journals `batch-warmup-done`/`batch-warmup-failed` with the
+ * elapsed time either way, satisfying AC1 even on the no-op branch.
+ */
+function warmColdBatchWorktree(
+  deps: BatchDispatchDeps,
+  batch: BatchEntry,
+  worktree: string,
+  now: Date
+): { ok: true } | { ok: false; reason: string } {
+  const warmStart = deps.now();
+  const elapsedMs = () => deps.now().getTime() - warmStart.getTime();
+  const fail = (detail: string): { ok: false; reason: string } => {
+    deps.journal.append(
+      unitEvent('batch-warmup-failed', unit(batch.id), { detail: `${detail} ${elapsedMs()}ms` }),
+      now
+    );
+    return { ok: false, reason: 'warmup-failed' };
+  };
+
+  const capOutcome = deps.runCapability?.(worktree, 'worktree.prepare');
+  if (capOutcome !== undefined && capOutcome !== 'capability-unavailable') {
+    if (capOutcome !== 'ok') return fail(`cap:worktree.prepare:${capOutcome}`);
+    deps.journal.append(
+      unitEvent('batch-warmup-done', unit(batch.id), {
+        detail: `cap:worktree.prepare ${elapsedMs()}ms`,
+      }),
+      now
+    );
+    return { ok: true };
+  }
+
+  const cfg = readPoolFileConfig(deps.repoDir);
+  const projectDir = resolveProjectDir(worktree, cfg.project_subdir);
+  const hasExplicitWarmCommands = (cfg.warm_commands?.length ?? 0) > 0;
+  if (!hasExplicitWarmCommands && !fs.existsSync(path.join(projectDir, 'package.json'))) {
+    deps.journal.append(
+      unitEvent('batch-warmup-done', unit(batch.id), {
+        detail: `skipped:no-package-json ${elapsedMs()}ms`,
+      }),
+      now
+    );
+    return { ok: true };
+  }
+
+  const commands = resolveWarmCommands(projectDir, cfg);
+  for (const [bin, ...args] of commands) {
+    if (bin === undefined) continue;
+    if (deps.exec(bin, args, projectDir) === null) return fail(`pm:${bin}`);
+  }
+  deps.journal.append(
+    unitEvent('batch-warmup-done', unit(batch.id), { detail: `pm ${elapsedMs()}ms` }),
+    now
+  );
+  return { ok: true };
+}
+
+/**
+ * `batch/<id>-<YYYYMMDD>` off `base_branch`, and a fresh runstate run id
+ * minted against the anchor. The worktree is either a pool claim (already
+ * warm) or a cold `git worktree add` that this function then warms itself
+ * (#561, see the module doc) — either way, the worktree is warm before this
+ * returns `ok: true`. All-or-nothing: any failed step reports the step name
+ * and nothing is partially recorded on the batch.
  */
 function runBatchSetup(
   deps: BatchDispatchDeps,
   batch: BatchEntry,
   now: Date
 ):
-  | { ok: true; branch: string; worktree: string; runId: string }
+  | { ok: true; branch: string; worktree: string; runId: string; poolClaimed: boolean }
   // `runId`, when the mint step succeeded before a LATER step failed — so the
   // caller can still post the `batch-setup blocked` milestone to a real run
   // id rather than silently skipping the post (a batch without ANY posted
@@ -358,6 +436,23 @@ function runBatchSetup(
   if (runId === null || runId.trim() === '') return { ok: false, reason: 'runstate-mint-failed' };
   const mintedRunId = runId.trim();
 
+  // Pool claim first — a claimed worktree is already warm by construction, so
+  // no separate warm step runs for it (AC2). `claim()` itself never pushes
+  // the branch (mirrors setup-issue-workflow's per-issue pool-claim step),
+  // so that still happens here on success.
+  const claimed = deps.exec(
+    POOL_BIN,
+    [...POOL_ARGS_PREFIX, 'claim', '--issue', String(batch.anchor), '--branch', branch],
+    deps.repoDir
+  );
+  const claimedWorktree = claimed?.trim();
+  if (claimedWorktree && path.isAbsolute(claimedWorktree)) {
+    if (deps.exec('git', ['push', '-u', 'origin', '--', branch], claimedWorktree) === null) {
+      return { ok: false, reason: 'branch-push-failed', runId: mintedRunId };
+    }
+    return { ok: true, branch, worktree: claimedWorktree, runId: mintedRunId, poolClaimed: true };
+  }
+
   if (deps.exec('git', ['fetch', 'origin', '--', batch.base_branch], deps.repoDir) === null) {
     return { ok: false, reason: 'fetch-failed', runId: mintedRunId };
   }
@@ -370,7 +465,9 @@ function runBatchSetup(
   if (deps.exec('git', ['worktree', 'add', '--', worktree, branch], deps.repoDir) === null) {
     return { ok: false, reason: 'worktree-add-failed', runId: mintedRunId };
   }
-  return { ok: true, branch, worktree, runId: mintedRunId };
+  const warmed = warmColdBatchWorktree(deps, batch, worktree, now);
+  if (!warmed.ok) return { ok: false, reason: warmed.reason, runId: mintedRunId };
+  return { ok: true, branch, worktree, runId: mintedRunId, poolClaimed: false };
 }
 
 /** Spawn one batch member's `slot-cycle` agent into the slot batch-setup (or a prior member) just released. */
@@ -553,7 +650,12 @@ function claimAndSetup(
   poster(batch.anchor as number, setup.runId, {
     phase: 'batch-setup',
     status: 'done',
-    kv: { branch: setup.branch, worktree: setup.worktree, base_branch: batch.base_branch },
+    kv: {
+      branch: setup.branch,
+      worktree: setup.worktree,
+      base_branch: batch.base_branch,
+      pool_claimed: setup.poolClaimed ? 'true' : 'false',
+    },
   });
   deps.journal.append(
     unitEvent('batch-setup-done', unit(batchId), { detail: setup.worktree }),
@@ -578,7 +680,12 @@ function claimAndSetup(
     let next = patchBatch(
       s,
       batchId,
-      { branch: setup.branch, worktree: setup.worktree, run_id: setup.runId },
+      {
+        branch: setup.branch,
+        worktree: setup.worktree,
+        run_id: setup.runId,
+        pool_claimed: setup.poolClaimed,
+      },
       now
     );
     next = transitionBatch(next, batchId, 'executing', { executing_member: 1 }, now);
@@ -1456,7 +1563,7 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
   const result = runTeardown(
     deps.exec,
     deps.repoDir,
-    { worktree: batch.worktree, poolClaimed: false, branch: batch.branch },
+    { worktree: batch.worktree, poolClaimed: batch.pool_claimed === true, branch: batch.branch },
     deps.fsExists
   );
   journalEvent(
