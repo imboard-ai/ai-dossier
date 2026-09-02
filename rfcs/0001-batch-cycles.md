@@ -11,6 +11,7 @@
 - **2026-09-01** — pilot attempt 1 [`docs/reports/batch-pilot.md`](../docs/reports/batch-pilot.md): NO-GO — batches not executable (zero batches ever dispatched).
 - **2026-09-01** — pilot attempt 2 [`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md): 0 of ≥3 batches executed end-to-end — two independent blockers: seal bug #535 (closed 2026-09-01) and a cohort too small to compose 3 batches.
 - **2026-09-02** — status raised to Accepted (in rollout) ([#542](https://github.com/imboard-ai/ai-dossier/issues/542)); tracked in epic [#474](https://github.com/imboard-ai/ai-dossier/issues/474).
+
 **Rollout position (§G):** Step 1's machinery shipped and its exit gate passed. Step 0's telemetry shipped (#458/#524/#531), but the baseline measurement itself is still outstanding. Step 2's classifier and batch-prep shipped, but its exit criterion is not yet met — 20.0% slot rate measured against a ~50% target, misclassification rate not yet computable ([`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md)). Step 3 (first real batches) has not yet executed a batch end-to-end — its GO/NO-GO is [#529](https://github.com/imboard-ai/ai-dossier/issues/529). Step 4 (widen) is not started.
 
 
