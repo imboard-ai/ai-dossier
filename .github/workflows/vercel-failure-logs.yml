@@ -249,18 +249,24 @@ jobs:
 
             // deployment_status runs with a write-capable GITHUB_TOKEN even for a
             // fork-originated deployment (see the header comment). Only spend the
-            // retry budget and only write a comment for a SHA that is actually
-            // reachable from a branch in this repo — a fork PR head or a deleted
-            // branch's SHA never will be, and never had a same-repo PR to find.
+            // retry budget and only write a comment for a SHA this repo actually
+            // knows about. getCommit resolves any SHA reachable from a ref in this
+            // repo — not just current branch tips — so a commit superseded by a
+            // later push in a rapid sequence (PR #554's pattern: three pushes in
+            // ~10 min) still passes; listBranchesForHeadCommit would not, since it
+            // only matches a SHA that is presently a branch HEAD.
             let inThisRepo = true;
             try {
-              const { data: branches } = await github.rest.repos.listBranchesForHeadCommit({ ...repoRef, commit_sha: sha });
-              inThisRepo = branches.length > 0;
+              await github.rest.repos.getCommit({ ...repoRef, ref: sha });
             } catch (err) {
-              core.warning(`Could not verify ${sha} is on a branch of this repo (${err.message}) — proceeding as if it is.`);
+              if (err.status === 404) {
+                inThisRepo = false;
+              } else {
+                core.warning(`Could not verify ${sha} is known to this repo (${err.message}) — proceeding as if it is.`);
+              }
             }
             if (!inThisRepo) {
-              core.info(`${sha} is not on any branch of this repo (fork PR or deleted branch) — logging only.`);
+              core.info(`${sha} is not a commit this repo knows about (fork PR or deleted branch) — logging only.`);
               core.info(tail);
               return;
             }
