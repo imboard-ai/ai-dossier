@@ -1,9 +1,16 @@
 # RFC-0001: Batch Cycles — Deterministic Scheduling and Batched Issue Execution
 
-- **Status**: Proposal
+- **Status**: Accepted (in rollout)
 - **Author(s)**: Yuval Dimnik
 - **Created**: 2026-08-29
 - **Related**: Epic #474 (implementation tracking, issues #458–#473) · full-cycle-issue v3.14.1, fleet-cycle v1.7.0 (registry: imboard-ai/git/*) · Progressive Determinism brief
+
+### Status log
+
+- **2026-08-30** — parity gate [`docs/reports/sched-parity.md`](../docs/reports/sched-parity.md): Conditional GO, contingent on #496/#500 — conditions cleared 2026-09-01.
+- **2026-09-01** — pilot attempt 1 [`docs/reports/batch-pilot.md`](../docs/reports/batch-pilot.md): NO-GO — batches not executable (zero batches ever dispatched).
+- **2026-09-01** — pilot attempt 2 [`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md): 0 of ≥3 batches executed end-to-end — root-caused to seal bug #535 (closed 2026-09-01).
+- **2026-09-01** — status raised to Accepted (in rollout); tracked in epic #474.
 
 
 ## Executive summary
@@ -43,7 +50,7 @@ LLM orchestrator: resolves set → builds dependency DAG (serialize-when-unsure)
 
 ### Supporting machinery (this repo, confirmed)
 
-- **CLI 0.11.0** (`main/cli/`): `run` (verify → spawn `claude -p` headless; no opencode support in `helpers.ts` auto-detection — relevant given fleet's OpenCode/Kimi failures), `runstate mint|post|last|verify|stats`, registry ops. Run audit: `~/.dossier/runs.jsonl` — timestamps/dossier/source only, **no tokens, no durations, no commands**.
+- **CLI 0.11.0** (`main/cli/`): `run` (verify → spawn `claude -p` headless; no opencode support in `helpers.ts` auto-detection — relevant given fleet's OpenCode/Kimi failures), `runstate mint|post|last|verify|stats`, registry ops. Run audit: `~/.dossier/runs.jsonl` — timestamps/dossier/source only, **no tokens, no durations, no commands** (as of RFC authoring; since fixed — duration/cost/tokens per run by #458, and per-issue telemetry for scheduler-dispatched agents by #524/#531).
 - **worktree-pool** (`main/packages/worktree-pool/`): `status|claim|return|replenish|refresh|gc|init|detect`; config `.worktree-pool.json` (`base_ref`, `warm_commands`, `target_spares`, `max_pool_size`); pool warm-up is now package-manager-aware (#433).
 - **mcp-server orchestration** (`main/mcp-server/src/orchestration/`): graph/journey machinery (`buildExecutionPlan`, `startJourney`/`stepComplete`) — exists but is **not used** by the issue-workflow family. Its granularity is dossier-dependency graphs, not issue scheduling; reviewed and set aside (see C.7 rejected alternatives).
 - **Repo-local scripts** (imboard): `scripts/ci-parity.sh`, `scripts/ensure-test-env.sh` — proto-capabilities per the Progressive Determinism brief.
@@ -62,7 +69,7 @@ LLM orchestrator: resolves set → builds dependency DAG (serialize-when-unsure)
 | Fleet supervision tokens (LLM polling/dispatching) | per fleet | yes — becomes code ($0) |
 | Implementation reasoning; focused tests; per-issue conformance | yes | **no — must stay per-issue** |
 
-No token telemetry exists; `runstate stats` gives phase durations only. **Phase 0 must add measurement before we can claim numbers.**
+No token telemetry exists; `runstate stats` gives phase durations only. **Phase 0 must add measurement before we can claim numbers.** (Since addressed: `ai-dossier run` records duration/cost/tokens per run (#458); scheduler-dispatched agents get per-issue telemetry via `ai-dossier sched stats` (#524/#531).)
 
 ### Q3 — Where the latency actually is
 
