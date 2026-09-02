@@ -22,6 +22,11 @@ export {
   type CapOutcome,
   runBatchTick,
 } from './batch-dispatch';
+export {
+  type BatchLogEntry,
+  buildBatchRunLogEntries,
+  listBatchDispatchLogs,
+} from './batch-stats';
 export { type BisectOptions, type BisectOutcome, runAttributionBisect } from './bisect';
 export {
   buildAgentCommand,

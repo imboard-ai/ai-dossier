@@ -2098,6 +2098,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
       repoDir: deps.repoDir,
       exec: deps.batchExec,
       runSuite: deps.runBatchSuite,
+      homeDir: deps.homeDir,
       ...(deps.runBatchCapability !== undefined ? { runCapability: deps.runBatchCapability } : {}),
       ...(deps.batchWarmExec !== undefined ? { warmExec: deps.batchWarmExec } : {}),
     };

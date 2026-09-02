@@ -15,6 +15,7 @@ import type { CapOutcome, SchedConfig, StatusReport, TickResult } from '@ai-doss
 import {
   abandonBatch,
   abandonIssue,
+  buildBatchRunLogEntries,
   buildStatusReport,
   CorruptStateError,
   createExecFn,
@@ -604,12 +605,14 @@ function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
 }
 
 interface StatsOptions {
-  // No --project: `runs.jsonl` is one global file (unlike the other
-  // subcommands' per-project state under `~/.dossier/sched/<project>/`), so
-  // scoping by project isn't meaningful here yet — see the command's
-  // description for the resulting cross-repo caveat (same issue number in
-  // two repos sums together).
+  // `--project` only matters for `--batch` (a batch id is scoped to a
+  // project's `~/.dossier/sched/<project>/runs/`, unlike `runs.jsonl`, which
+  // is one global file — see the command's description for the resulting
+  // cross-repo caveat when `--batch` is absent: same issue number in two
+  // repos sums together).
+  project?: string;
   issues?: string;
+  batch?: string;
   json?: boolean;
 }
 
@@ -623,18 +626,110 @@ function statsRow(label: string, row: Omit<IssueCost, 'issue'>): string[] {
     formatCount(row.cache_read_tokens),
     formatCost(row.total_cost_usd),
     formatDurationMs(row.duration_ms),
+    row.usage,
   ];
+}
+
+const STATS_HEADERS = [
+  'Issue',
+  'Runs',
+  'In',
+  'Out',
+  'Cache-W',
+  'Cache-R',
+  'Cost',
+  'Duration',
+  'Usage',
+];
+const STATS_ALIGN = [
+  'left',
+  'right',
+  'right',
+  'right',
+  'right',
+  'right',
+  'right',
+  'right',
+  'left',
+] as const;
+
+/**
+ * `--batch <id>` mode (#564): batch members/tail/report/fix agents never go
+ * through `engine.ts`'s per-issue dispatch/record path — `runs.jsonl` alone
+ * cannot answer "what did this batch cost", live or historical. Reconstruct
+ * directly from the raw per-unit logs on disk instead (same source a human
+ * previously hand-parsed, `docs/reports/batch-pilot-2-execution.md` §13).
+ */
+function runBatchStats(opts: StatsOptions & { batch: string }): void {
+  const { store, project } = resolveStore(opts);
+  const entries = buildBatchRunLogEntries(store.runsDir, opts.batch);
+  const memberIssues = [
+    ...new Set(
+      entries
+        .map((e) => e.unit)
+        .filter((u): u is string => typeof u === 'string' && u.startsWith('issue:'))
+    ),
+  ]
+    .map((u) => Number.parseInt(u.slice('issue:'.length), 10))
+    .sort((a, b) => a - b);
+  const report = buildSchedCostReport(entries, memberIssues);
+  // Tail/report agents carry no issue — `buildSchedCostReport` already
+  // excludes them from per-issue rows (same `issueOfUnit`-based filtering as
+  // the default path); fold them into one visible line so nothing about the
+  // batch's actual spend is silently dropped (AC2).
+  const overhead = entries.filter((e) => e.unit === `batch:${opts.batch}`);
+
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          ...report,
+          batch: opts.batch,
+          project,
+          overhead_runs: overhead.length,
+          source: store.runsDir,
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
+
+  if (entries.length === 0) {
+    console.log(`No dispatch logs found for batch '${opts.batch}' under ${store.runsDir}.`);
+    return;
+  }
+
+  const rows = report.issues.map((row) => statsRow(`#${row.issue}`, row));
+  rows.push(statsRow('TOTAL (members)', report.totals));
+  if (overhead.length > 0) {
+    const overheadReport = buildSchedCostReport(overhead);
+    rows.push(statsRow('batch-overhead (tail+report)', overheadReport.totals));
+  }
+  console.log(`Batch ${opts.batch} [${project}]:`);
+  console.log(renderTable(STATS_HEADERS, rows, { align: [...STATS_ALIGN], separator: true }));
 }
 
 function registerStatsSubcommand(cmd: Command): void {
   cmd
     .command('stats')
     .description(
-      'Per-issue token/cost totals for scheduler-dispatched agent runs (from ~/.dossier/runs.jsonl)'
+      'Per-issue token/cost totals for scheduler-dispatched agent runs (from ~/.dossier/runs.jsonl; --batch reads batch member/tail/report/fix logs directly)'
     )
+    .option('--project <slug>', 'Project slug — required for --batch (default: repo owner-repo)')
     .option('--issues <selection>', 'Restrict to these issues (e.g. "4,5" or "4..9")')
+    .option(
+      '--batch <id>',
+      "Report a batch's member/tail/report/fix dispatch costs directly from its raw logs"
+    )
     .option('--json', 'Output the report as JSON')
     .action((opts: StatsOptions) => {
+      if (opts.batch) {
+        if (opts.issues) fail(['--issues cannot be combined with --batch']);
+        runBatchStats(opts as StatsOptions & { batch: string });
+        return;
+      }
       const issues = opts.issues ? issueList(opts.issues, 'issues') : undefined;
       const entries = readRunLog();
       const report = buildSchedCostReport(entries, issues);
@@ -666,15 +761,9 @@ function registerStatsSubcommand(cmd: Command): void {
       }
       if (report.issues.length === 0) return;
 
-      const headers = ['Issue', 'Runs', 'In', 'Out', 'Cache-W', 'Cache-R', 'Cost', 'Duration'];
       const rows = report.issues.map((row) => statsRow(`#${row.issue}`, row));
       rows.push(statsRow('TOTAL', report.totals));
-      console.log(
-        renderTable(headers, rows, {
-          align: ['left', 'right', 'right', 'right', 'right', 'right', 'right', 'right'],
-          separator: true,
-        })
-      );
+      console.log(renderTable(STATS_HEADERS, rows, { align: [...STATS_ALIGN], separator: true }));
     });
 }
 

@@ -110,6 +110,13 @@ import {
   resolveFixAttempt,
   type SuiteResult,
 } from './recovery';
+import {
+  appendSchedRunLog,
+  buildSchedRunLogEntry,
+  readDispatchLog,
+  schedRunsLogPath,
+  schedTelemetryEnabled,
+} from './run-log';
 import { assignToIdleSlot, freeCapacity } from './scheduler';
 import {
   findBatch,
@@ -180,6 +187,11 @@ export interface BatchDispatchDeps {
    */
   runCapability?: (worktree: string, capabilityId: string) => CapOutcome;
   fsExists?: FsExists;
+  /**
+   * Home directory for `~/.dossier/runs.jsonl` (#564) — mirrors `EngineDeps.homeDir`.
+   * Undefined defers to `appendSchedRunLog`'s own `os.homedir()` default.
+   */
+  homeDir?: string;
 }
 
 /** What one `runBatchTick` call did, merged into `engine.ts`'s `TickResult` by the caller. */
@@ -649,6 +661,10 @@ function spawnMember(
     pid_start: deps.spawnDeps.processStart(pid),
     phase: 'member',
     last_progress_at: now.toISOString(),
+    // #564: `engine.ts`'s own `spawnUnit` stamps this at spawn time
+    // (line ~745) — `spawnMember` never did, so `recordMemberRunLog`'s
+    // `slot.spawned_at === null` guard silently skipped every member.
+    spawned_at: now.toISOString(),
   };
   const next =
     slot.status === 'assigned' || slot.status === 'recovering'
@@ -1236,6 +1252,103 @@ function evictMemberAndContinue(
   );
 }
 
+/**
+ * Record one member dispatch's tokens/cost to `runs.jsonl` (#564) — the
+ * `batch-dispatch.ts` analogue of `engine.ts`'s `recordDispatchRunLog`.
+ * Batch members never go through `engine.ts`'s per-unit spawn/record path
+ * (`spawnMember` calls `deps.spawnDeps.spawn()` directly), so #524's capture
+ * never covered them; this closes that gap using the exact same
+ * `buildSchedRunLogEntry`/`appendSchedRunLog` machinery, attributed to
+ * `issue:<memberIssue>` — the SAME unit scheme ordinary issue dispatches use,
+ * so a member's cost shows up in the default `sched stats` view with no new
+ * unit format for the read side to special-case.
+ *
+ * Exactly-once per dispatch, mirroring `recordDispatchRunLog`'s own
+ * invariant: called from both of `reconcileMemberSlot`'s exit branches
+ * (member complete, member blocked/dead) — a batch never redispatches the
+ * same member slot (eviction requeues it as an independent full-cycle run
+ * instead), so unlike `engine.ts`'s per-unit log, a member's log file is
+ * always one-shot and reading from offset 0 is always correct.
+ */
+function recordMemberRunLog(
+  deps: BatchDispatchDeps,
+  dispatch: ResolvedDispatch,
+  state: SchedState,
+  batchId: string,
+  batch: BatchEntry,
+  memberIssue: number,
+  slot: SlotEntry,
+  now: Date
+): void {
+  if (slot.status !== 'running' || slot.spawned_at === null) {
+    journalEvent(deps, 'run-log-skipped', unit(batchId), {
+      issue: memberIssue,
+      reason: slot.spawned_at === null ? 'never-spawned' : `already-recorded-${slot.status}`,
+      slot: slot.id,
+    });
+    return;
+  }
+
+  const tier: ModelTier = findEntry(state, memberIssue)?.tier ?? 'mid';
+  const { cmd, model } = resolveTierSpawn(dispatch, tier, memberIssue);
+  const logFile = path.join(
+    deps.store.runsDir,
+    `${unitLogName(unit(batchId))}-m${batch.executing_member}-${memberIssue}.log`
+  );
+  const logContent = readDispatchLog(logFile, 0);
+
+  const runEntry = buildSchedRunLogEntry({
+    unit: `issue:${memberIssue}`,
+    role: 'batch-member',
+    cmd0: cmd[0],
+    cmd,
+    logContent,
+    spawnedAt: slot.spawned_at,
+    completedAt: now,
+    configuredModel: model,
+    cwd: deps.repoDir,
+  });
+
+  if (runEntry.input_tokens === null && runEntry.output_tokens === null) {
+    journalEvent(deps, 'run-log-no-usage', unit(batchId), {
+      issue: memberIssue,
+      log: logFile,
+      bytes: logContent === null ? null : logContent.length,
+      reason:
+        logContent === null
+          ? 'log-unreadable'
+          : logContent.trim() === ''
+            ? 'log-empty'
+            : 'no-usage-events',
+    });
+  }
+
+  if (!schedTelemetryEnabled(deps.homeDir)) {
+    journalEvent(deps, 'run-log-skipped', unit(batchId), {
+      issue: memberIssue,
+      reason: 'telemetry-disabled',
+    });
+    return;
+  }
+
+  const runLogFile = schedRunsLogPath(deps.homeDir);
+  const written = appendSchedRunLog(runEntry, deps.homeDir, (err) =>
+    journalEvent(deps, 'run-log-failed', unit(batchId), {
+      issue: memberIssue,
+      detail: err.message,
+      file: runLogFile,
+    })
+  );
+  if (written) {
+    journalEvent(deps, 'run-log-recorded', unit(batchId), {
+      issue: memberIssue,
+      file: runLogFile,
+      input_tokens: runEntry.input_tokens,
+      output_tokens: runEntry.output_tokens,
+    });
+  }
+}
+
 function reconcileMemberSlot(
   deps: BatchDispatchDeps,
   config: SchedConfig,
@@ -1263,6 +1376,10 @@ function reconcileMemberSlot(
       }),
       now
     );
+    // The member's own agent process is done regardless of what the
+    // incremental gate below decides — record its telemetry once here (#564)
+    // rather than at each of this branch's two later exit points.
+    recordMemberRunLog(deps, dispatch, state0, batchId, batch, memberIssue, slot, now);
 
     // Incremental gate (#523 AC2): typecheck + focused tests via `cap run`,
     // when the repo has a manifest for them — a second, independent check
@@ -1336,6 +1453,7 @@ function reconcileMemberSlot(
         : dead
           ? 'agent-exited-unverified'
           : 'member-blocked';
+    recordMemberRunLog(deps, dispatch, state0, batchId, batch, memberIssue, slot, now);
     journalEvent(deps, 'unit-failed', unit(batchId), {
       issue: memberIssue,
       reason,

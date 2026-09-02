@@ -55,6 +55,14 @@ export interface IssueCost {
   cache_read_tokens: number | null;
   total_cost_usd: number | null;
   duration_ms: number | null;
+  /**
+   * `'missing'` when at least one dispatch happened (`runs > 0`) but NONE of
+   * them reported token usage — a dispatch log existed but yielded nothing
+   * parseable (#564 AC2). Distinguishes "we saw the dispatch, its cost is
+   * unknown" from `runs === 0` ("nothing dispatched"), which the caller
+   * already renders as a zero-run row rather than a cost row at all.
+   */
+  usage: 'ok' | 'missing';
 }
 
 /** The whole cohort: per-issue rows plus a totals row. */
@@ -76,12 +84,14 @@ const SUM_FIELDS = [
 /** Sum every `SUM_FIELDS` entry across `entries` — the issue-less half of one row. */
 function aggregate(entries: RunLogEntry[]): Omit<IssueCost, 'issue'> {
   const runs = entries.length;
-  const totals = {} as Omit<IssueCost, 'issue' | 'runs'>;
+  const totals = {} as Omit<IssueCost, 'issue' | 'runs' | 'usage'>;
   for (const field of SUM_FIELDS) {
     const { total, samples } = sumField(entries, field);
     totals[field] = samples > 0 ? total : null;
   }
-  return { runs, ...totals };
+  const usage: IssueCost['usage'] =
+    runs > 0 && totals.input_tokens === null && totals.output_tokens === null ? 'missing' : 'ok';
+  return { runs, ...totals, usage };
 }
 
 /**
