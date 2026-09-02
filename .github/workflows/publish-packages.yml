@@ -88,9 +88,12 @@ jobs:
           CORE_TGZ=$(ls /tmp/tarballs/ai-dossier-core-*.tgz | head -1)
           SCHED_TGZ=$(ls /tmp/tarballs/ai-dossier-sched-*.tgz | head -1)
           CLI_TGZ=$(ls /tmp/tarballs/ai-dossier-cli-*.tgz | head -1)
-          # cli depends on @ai-dossier/core and @ai-dossier/sched; install via
-          # file: so npm resolves the peers locally without needing registry
-          # versions.
+          POOL_TGZ=$(ls /tmp/tarballs/ai-dossier-worktree-pool-*.tgz | head -1)
+          # cli depends on @ai-dossier/core, @ai-dossier/sched and
+          # @ai-dossier/worktree-pool (#561); sched also depends on
+          # @ai-dossier/worktree-pool. Install every one of them via file: so
+          # npm resolves the peers locally without needing registry versions
+          # that this same workflow run hasn't published yet.
           cat > package.json <<EOF
           {
             "name": "smoke-fixture",
@@ -98,6 +101,7 @@ jobs:
             "private": true,
             "dependencies": {
               "@ai-dossier/core": "file:$CORE_TGZ",
+              "@ai-dossier/worktree-pool": "file:$POOL_TGZ",
               "@ai-dossier/sched": "file:$SCHED_TGZ",
               "@ai-dossier/cli":  "file:$CLI_TGZ"
             }
@@ -229,6 +233,28 @@ jobs:
           cd packages/core
           npm publish --provenance --access public
 
+      # Before sched/cli: both depend on @ai-dossier/worktree-pool (#561), so
+      # the registry must have it first or their installs break for users —
+      # same reasoning as sched-before-cli below.
+      - name: Check if @ai-dossier/worktree-pool needs publishing
+        id: check-pool
+        run: |
+          CURRENT=$(node -p "require('./packages/worktree-pool/package.json').version")
+          PUBLISHED=$(npm view @ai-dossier/worktree-pool version 2>/dev/null || echo "0.0.0")
+          if [ "$CURRENT" = "$PUBLISHED" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Worktree-pool $CURRENT already published, skipping"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "Publishing worktree-pool $CURRENT (current published: $PUBLISHED)"
+          fi
+
+      - name: Publish @ai-dossier/worktree-pool
+        if: steps.check-pool.outputs.skip != 'true'
+        run: |
+          cd packages/worktree-pool
+          npm publish --provenance --access public
+
       - name: Check if @ai-dossier/sched needs publishing
         id: check-sched
         run: |
@@ -286,25 +312,6 @@ jobs:
         if: steps.check-mcp.outputs.skip != 'true'
         run: |
           cd mcp-server
-          npm publish --provenance --access public
-
-      - name: Check if @ai-dossier/worktree-pool needs publishing
-        id: check-pool
-        run: |
-          CURRENT=$(node -p "require('./packages/worktree-pool/package.json').version")
-          PUBLISHED=$(npm view @ai-dossier/worktree-pool version 2>/dev/null || echo "0.0.0")
-          if [ "$CURRENT" = "$PUBLISHED" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-            echo "Worktree-pool $CURRENT already published, skipping"
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-            echo "Publishing worktree-pool $CURRENT (current published: $PUBLISHED)"
-          fi
-
-      - name: Publish @ai-dossier/worktree-pool
-        if: steps.check-pool.outputs.skip != 'true'
-        run: |
-          cd packages/worktree-pool
           npm publish --provenance --access public
 
   verify:
