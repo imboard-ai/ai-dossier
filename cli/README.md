@@ -1169,7 +1169,12 @@ the #468 report agent and `fence_takeover_timeout_ms`, default 900 000 — the s
 allowance for a freshly-fenced takeover that has posted nothing, #504; `dispatch.prompt`
 substitutes `{issue}` and `{gen}`; `dispatch.tiers.<tier>` — `{command?, model?, prompt?}`
 — overrides the command/model/prompt for one tier only, #527, falling back to the
-top-level `command`/`tier_models`/`prompt` shorthand for any field left unset);
+top-level `command`/`tier_models`/`prompt` shorthand for any field left unset;
+`dispatch.suite_command` — an argv array for the aggregate batch-suite command, #562, the
+middle tier of `cap run test.full` (manifest) → `dispatch.suite_command` → a repo-detected
+safe default; run exactly as given, never with extra flags appended — set this when the
+repo's `test` script delegates to something that cannot take a reporter flag and there is
+no `.dossier/automation/` manifest to declare `test.full` in instead);
 `pr_poll_interval_ms` (default 150 000) sets the
 parked-PR poll cadence; `auto_upgrade` (default false, #537) lets a cron-driven
 `sched start --once` self-upgrade when behind npm latest — the `--auto-upgrade` CLI flag

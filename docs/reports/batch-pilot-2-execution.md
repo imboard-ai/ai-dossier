@@ -294,7 +294,7 @@ reading.
 | # | defect | kind | evidence |
 |---|---|---|---|
 | B3a | `batch-setup` creates the batch worktree but never warms it — no `node_modules`, so every member hard-blocks `env-cold` before doing any work | product bug | 2/2 members bailed in <1.2 min; **proven** by a warm workaround that made 3/3 members succeed |
-| B3b | The aggregate-suite runner shells `npm test -- --reporter=json`; in a repo whose `test` script delegates to `make`, `make` aborts on the unknown option, so the suite is read as red with 0 parseable failures → `unattributable-suite-failure` dissolves a fully-green batch | product bug | **reproduced by hand**, deterministic |
+| B3b | The aggregate-suite runner shells `npm test -- --reporter=json`; in a repo whose `test` script delegates to `make`, `make` aborts on the unknown option, so the suite is read as red with 0 parseable failures → `unattributable-suite-failure` dissolves a fully-green batch | product bug | **reproduced by hand**, deterministic — **fixed by #562** (§12) |
 | B3c | `DISSOLVE_EVICTION_FRACTION = 1/3` dissolves a 3- or 4-member batch on its **second** eviction — one member failure is the entire tolerance | design parameter | `packages/sched/src/types.ts:663` (applied at `packages/sched/src/recovery.ts:851`) |
 | B3d | Per-issue token/cost telemetry (#524, precondition `batch-pilot.md` §5.4) writes null usage for scheduler-dispatched agents; the data exists in the dispatch logs but never reaches the source of record | product bug | `sched stats` returns empty for every issue in this run |
 
@@ -402,6 +402,12 @@ presence of `node_modules`, and nothing else. This is an operator intervention a
 in §13.
 
 ## 12. B3b — a green batch is dissolved by a suite command that cannot run
+
+> **Fixed by #562** (`@ai-dossier/sched` 0.15.0 / `@ai-dossier/cli` 0.29.0). The suite runner
+> named below moved to `cli/src/batch-suite-runner.ts` with a 3-tier command resolution order
+> (`cap run test.full` → `dispatch.suite_command` → repo-detected safe default) and a new
+> `SuiteResult.readable` field so an unreadable report blocks the batch (`blocked` status)
+> instead of being read as an attributable red suite. See `docs/agent-traps.md`.
 
 With B3a worked around, `b-20260901-02` reached aggregate validate for the first time. All three
 members had completed and committed:

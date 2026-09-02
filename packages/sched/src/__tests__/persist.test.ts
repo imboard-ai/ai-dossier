@@ -374,6 +374,28 @@ describe('#504 config: dispatch.fence_takeover_timeout_ms', () => {
   });
 });
 
+describe('#562 config: dispatch.suite_command', () => {
+  it('round-trips an explicit aggregate suite command', () => {
+    const store = new SchedStore(dir);
+    store.saveConfig({ max_slots: 2, dispatch: { suite_command: ['make', 'test'] } });
+    expect(store.loadConfig().dispatch?.suite_command).toEqual(['make', 'test']);
+  });
+
+  it('rejects an empty argv', () => {
+    expectConfigRejected(
+      { schema_version: '1.2.0', max_slots: 2, dispatch: { suite_command: [] } },
+      'suite_command'
+    );
+  });
+
+  it('rejects a non-array value', () => {
+    expectConfigRejected(
+      { schema_version: '1.2.0', max_slots: 2, dispatch: { suite_command: 'make test' } },
+      'suite_command'
+    );
+  });
+});
+
 describe('#527 config: dispatch.tiers (mixed agent-CLI escalation ladders)', () => {
   it('round-trips a per-tier full spawn spec', () => {
     // Regression guard for the #504-documented failure mode: a key declared on

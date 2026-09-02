@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   attributeByOverlap,
   failingTest,
+  isReadableVitestReport,
   type MemberFootprint,
   memberOfCommit,
   memberRanges,
@@ -128,6 +129,27 @@ describe('parseVitestJson', () => {
     expect(parseVitestJson('not json at all')).toEqual([]);
     expect(parseVitestJson('{"testResults": "wrong shape"}')).toEqual([]);
     expect(parseVitestJson('{"testResults": [{"assertionResults": []}]}')).toEqual([]);
+  });
+
+  describe('isReadableVitestReport (#562)', () => {
+    it('is true for a parseable report, whether or not it names any failures', () => {
+      expect(isReadableVitestReport(JSON.stringify(report))).toBe(true);
+      expect(isReadableVitestReport('{"testResults": []}')).toBe(true);
+    });
+
+    it('finds the report inside a runner banner, same as parseVitestJson', () => {
+      const noisy = `RUN v4.0.9\n${JSON.stringify(report)}\nDuration 1.2s\n`;
+      expect(isReadableVitestReport(noisy)).toBe(true);
+    });
+
+    it('is false for exactly the inputs parseVitestJson silently degrades on — the ambiguity #562 exists to remove', () => {
+      expect(isReadableVitestReport(null)).toBe(false);
+      expect(isReadableVitestReport('')).toBe(false);
+      // A make-delegated wrapper's plain-text abort (the #562 bug): no JSON
+      // document at all, not a report naming zero failures.
+      expect(isReadableVitestReport("make: unrecognized option '--reporter=json'\n")).toBe(false);
+      expect(isReadableVitestReport('{"testResults": "wrong shape"}')).toBe(false);
+    });
   });
 });
 

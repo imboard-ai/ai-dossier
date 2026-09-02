@@ -168,6 +168,23 @@ export function parseVitestJson(stdout: string | null): FailingTest[] {
   return out;
 }
 
+/**
+ * Whether `stdout` contains a parseable vitest JSON report (a `{ testResults:
+ * [...] }` document) — independent of whether any test in it failed (#562).
+ * `parseVitestJson` returns `[]` both for "found a report, zero failures" and
+ * "found no report at all" (an empty string, a wrapper script's plain-text
+ * abort message, a make error): those two are NOT the same thing to a caller
+ * deciding whether to trust a red exit code's failing-test list, or a green
+ * exit code that happens to carry no parseable body.
+ */
+export function isReadableVitestReport(stdout: string | null): boolean {
+  if (stdout === null) return false;
+  const parsed = extractJsonObject(stdout);
+  if (parsed === null) return false;
+  const results = (parsed as { testResults?: unknown }).testResults;
+  return Array.isArray(results);
+}
+
 /** The first balanced `{...}` document in `text`, parsed; null when there is none. */
 function extractJsonObject(text: string): unknown {
   const start = text.indexOf('{');

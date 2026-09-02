@@ -377,6 +377,17 @@ describe('batch state machine (RFC-0001 §D.2)', () => {
     expect(() => transitionBatch(state, 'b1', 'ready')).toThrow(IllegalTransitionError);
   });
 
+  it('walks the unreadable-suite rail (#562): validating → blocked → validating resumes, or → dissolving abandons', () => {
+    let state = seeded();
+    state = transitionBatch(state, 'b1', 'executing', {}, NOW);
+    state = transitionBatch(state, 'b1', 'validating', {}, NOW);
+    state = transitionBatch(state, 'b1', 'blocked', {}, NOW);
+    const resumed = transitionBatch(state, 'b1', 'validating', {}, NOW);
+    expect(findBatch(resumed, 'b1')?.status).toBe('validating');
+    const abandoned = transitionBatch(state, 'b1', 'dissolving', {}, NOW);
+    expect(findBatch(abandoned, 'b1')?.status).toBe('dissolving');
+  });
+
   it('walks the conflict rail (awaiting-merge → rebasing → re-validating → shipping)', () => {
     let state = seeded();
     state = transitionBatch(state, 'b1', 'executing', {}, NOW);

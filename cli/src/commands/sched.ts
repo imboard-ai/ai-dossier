@@ -11,13 +11,7 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import type {
-  CapOutcome,
-  SchedConfig,
-  StatusReport,
-  SuiteResult,
-  TickResult,
-} from '@ai-dossier/sched';
+import type { CapOutcome, SchedConfig, StatusReport, TickResult } from '@ai-dossier/sched';
 import {
   abandonBatch,
   abandonIssue,
@@ -44,7 +38,6 @@ import {
   labelOfBlockReason,
   OPENCODE_DISPATCH_COMMAND,
   parseManifest,
-  parseVitestJson,
   resolveProjectSlug,
   runLoop,
   SchedNotFoundError,
@@ -57,6 +50,7 @@ import {
   unitEvent,
 } from '@ai-dossier/sched';
 import type { Command } from 'commander';
+import { BATCH_SUITE_TIMEOUT_MS, createBatchSuiteRunner } from '../batch-suite-runner';
 import { formatCost, formatCount } from '../cost-format';
 import { formatAge, formatDurationMs } from '../duration';
 import {
@@ -72,56 +66,15 @@ import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
 import { buildSchedCostReport, type IssueCost } from '../sched-run-stats';
 import { renderTable } from '../table';
 
-/** Aggregate suite runs can be minutes long (full workspace test suite, not a focused subset). */
-const BATCH_SUITE_TIMEOUT_MS = 600_000;
-
-/**
- * Default batch aggregate-suite runner (#523): `npm test` in the batch
- * worktree, captured regardless of exit code (a red suite is exactly the
- * case `ExecFn`'s "non-zero exit → null" contract would discard the stdout
- * we need) and parsed as vitest JSON for the failing-test list attribution
- * needs. Project-specific test commands are a follow-up — `npm test` matches
- * this repo's own `make test` convention and every project's `package.json`
- * `test` script (`warm-worktree`'s own detection table, #523's plan).
- */
-function createBatchSuiteRunner(): (worktree: string) => SuiteResult {
-  return (worktree) => {
-    const result = spawnSync('npm', ['test', '--', '--reporter=json'], {
-      cwd: worktree,
-      encoding: 'utf-8',
-      timeout: BATCH_SUITE_TIMEOUT_MS,
-    });
-    // `result.error` (ENOENT, ETIMEDOUT at the budget above, EACCES) means the
-    // RUNNER never produced a trustworthy report — batch-dispatch.ts's caller
-    // (`beginAttribution`) reads a suite with 0 failing tests as "nothing to
-    // attribute" and dissolves the batch, so a timeout must never look
-    // identical to a genuinely empty/green suite report.
-    if (result.error) {
-      return {
-        ok: false,
-        failing: [],
-        detail: `suite runner failed to run: ${result.error.message} (cwd=${worktree})`,
-      };
-    }
-    const failing = parseVitestJson(result.stdout ?? '');
-    const ok = result.status === 0;
-    return {
-      ok,
-      failing,
-      detail: ok
-        ? undefined
-        : `npm test exited ${result.status ?? `signal ${result.signal ?? 'unknown'}`} in ${worktree} (${failing.length} failing)`,
-    };
-  };
-}
-
 /**
  * Batch-worktree `ai-dossier cap run <id>` runner for the per-member
  * incremental gate (#523 AC2). `spawnSync` (not the plain `ExecFn`, which
  * throws away stdout on a non-zero exit) because `cap run`'s `task-failed`
  * outcome — a legitimately failing test/typecheck — IS exit code 1, and the
  * JSON envelope naming which of the four outcomes it was is the LAST stdout
- * line either way (docs/reference/capabilities.md).
+ * line either way (docs/reference/capabilities.md). Reuses the aggregate
+ * suite's timeout budget (`BATCH_SUITE_TIMEOUT_MS`) — both are batch-worktree
+ * subprocess calls with no reason to disagree on how long is too long.
  */
 function createBatchCapabilityRunner(): (worktree: string, capabilityId: string) => CapOutcome {
   return (worktree, capabilityId) => {
@@ -982,7 +935,7 @@ function registerStartSubcommand(cmd: Command): void {
               `⚠ sched batch: '${file} ${args.join(' ')}' failed: ${err.message}\n`
             ),
         }),
-        runBatchSuite: createBatchSuiteRunner(),
+        runBatchSuite: createBatchSuiteRunner(config),
         runBatchCapability: createBatchCapabilityRunner(),
       };
 

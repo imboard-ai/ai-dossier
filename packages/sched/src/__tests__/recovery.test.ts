@@ -7,6 +7,7 @@ import {
   type BatchMilestone,
   beginAttribution,
   beginFixAttempt,
+  blockBatch,
   checkDissolveTrigger,
   createEmptyState,
   createExecFn,
@@ -691,6 +692,59 @@ describe('dissolveBatch', () => {
     expect(() =>
       dissolveBatch(once.state, 'b1', { strategy: 'full', reason: 'x' }, h.deps)
     ).toThrow(IllegalTransitionError);
+  });
+});
+
+// --- #562: block on an unreadable suite report ---
+
+describe('blockBatch', () => {
+  it('moves the batch to blocked without touching any member', () => {
+    const state = batchState([201, 202, 203], 'validating');
+    const h = harness();
+
+    const result = blockBatch(state, 'b1', { reason: 'suite-unreadable' }, h.deps);
+
+    expect(findBatch(result.state, 'b1')?.status).toBe('blocked');
+    // Unlike dissolveBatch: no member entry is touched — nothing requeued,
+    // nothing reverted, the failure was in the suite report, not the code.
+    for (const issue of [201, 202, 203]) {
+      expect(findEntry(result.state, issue)?.mode).toBe('slot');
+      expect(findEntry(result.state, issue)?.batch).toBe('b1');
+    }
+  });
+
+  it('journals the block and posts a blocked milestone carrying the reason', () => {
+    const state = batchState([201], 'validating');
+    const h = harness();
+
+    blockBatch(state, 'b1', { reason: 'suite-unreadable' }, h.deps);
+
+    expect(eventNames(h.events)).toContain('batch-blocked');
+    expect(h.milestones.at(-1)?.milestone).toMatchObject({
+      phase: 'batch-validate',
+      status: 'blocked',
+      kv: { reason: 'suite-unreadable', dissolved: 'false' },
+    });
+  });
+
+  it('refuses to block an already-terminal batch', () => {
+    const state = batchState([201], 'validating');
+    const h = harness();
+    const dissolved = dissolveBatch(state, 'b1', { strategy: 'full', reason: 'x' }, h.deps);
+    expect(() => blockBatch(dissolved.state, 'b1', { reason: 'suite-unreadable' }, h.deps)).toThrow(
+      IllegalTransitionError
+    );
+  });
+
+  it('a blocked batch can resume to validating or be abandoned', () => {
+    const state = batchState([201], 'validating');
+    const h = harness();
+    const blocked = blockBatch(state, 'b1', { reason: 'suite-unreadable' }, h.deps);
+
+    // Both are legal edges out of `blocked` (state.ts's BATCH_TRANSITIONS) —
+    // an operator fixes the suite command and resumes, or gives up.
+    expect(() => transitionBatch(blocked.state, 'b1', 'validating', {}, NOW)).not.toThrow();
+    expect(() => transitionBatch(blocked.state, 'b1', 'dissolving', {}, NOW)).not.toThrow();
   });
 });
 

@@ -1,0 +1,23 @@
+# Capability manifest (docs/reference/capabilities.md).
+#
+# `test.full` exists so the batch scheduler's aggregate-suite runner
+# (cli/src/batch-suite-runner.ts, #562) has a trustworthy tier-1 command for
+# this repo: the root `test` script delegates to `make test`, which aborts on
+# an unrecognized `--reporter=json` flag — declaring the real command here,
+# with no flags appended, is what lets `cap run test.full` report the suite's
+# TRUE exit status instead of a wrapper's flag-parsing error.
+version: 1
+
+capabilities:
+  test.full:
+    command: make test
+    lifecycle: active
+    description: Full workspace test suite (all workspaces + repo scripts)
+    # Must match cli/src/batch-suite-runner.ts's BATCH_SUITE_TIMEOUT_MS (the
+    # caller's own budget) — cap's own default is 5 min, which would time
+    # this out and report automation-broken well before a real 10-min-budget
+    # run legitimately finishes.
+    timeout_ms: 600000
+    assumptions:
+      - file-exists: Makefile
+      - tool-version: node>=20

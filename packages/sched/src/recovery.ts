@@ -85,6 +85,17 @@ export interface SuiteResult {
   ok: boolean;
   /** Failing tests when `ok` is false (empty when the suite passed). */
   failing: FailingTest[];
+  /**
+   * Whether the runner could actually parse a report out of the suite run
+   * (#562) — irrelevant when `ok` is true. `false` means the report itself
+   * was empty, unparseable, or never produced at all (spawn error, timeout),
+   * which is NOT the same as a parseable report naming zero failures: a
+   * caller that dissolves a batch on "0 failing tests to attribute" must be
+   * able to tell those two apart first. Omitted defaults to `true` — runners
+   * written before this field existed keep going through the ordinary
+   * attribution path unchanged.
+   */
+  readable?: boolean;
   detail?: string;
 }
 
@@ -196,7 +207,9 @@ function runSuite(deps: RecoveryDeps, batchId: string, now: Date): SuiteResult |
   } catch (err) {
     const detail = `suite runner threw: ${(err as Error).message}`;
     journal(deps, unitEvent('suite-failed', `batch:${batchId}`, { detail }), now);
-    return { ok: false, failing: [], detail };
+    // Consistent with SuiteResult.readable's contract (#562): a throw is "no
+    // report produced", not a parseable report naming zero failures.
+    return { ok: false, failing: [], readable: false, detail };
   }
 }
 
@@ -1028,6 +1041,54 @@ export function dissolveBatch(
   return { state: next, requeued, preserved, newBatches };
 }
 
+export interface BlockOptions {
+  reason: string;
+  /** Milestone phase to report under (default `batch-validate`). */
+  milestonePhase?: BatchPhase;
+}
+
+/**
+ * Block a batch on an unreadable suite report (#562) — unlike `dissolveBatch`,
+ * nothing is requeued and nothing is reverted. The failure here is in the
+ * SUITE REPORT, not in any member's code: `runValidate` reaches this only
+ * after the resolved suite command came back unreadable (and, when the
+ * resolved primary tier was cap/config, its one fallback retry too — a
+ * repo-detected primary has no further fallback and blocks on its first
+ * unreadable report), so there is no failing-test list to attribute and no
+ * member to blame. The branch, every member commit, and the worktree are left
+ * exactly as they are (the caller must not tear the worktree down) so a human
+ * can inspect why the suite command failed to produce a report — dissolving
+ * here would discard a possibly-green batch's work to "fix" a problem in
+ * tooling, not in the code (docs/agent-traps.md). The `validating` transition
+ * below is where a future resume verb would land once the suite command is
+ * fixed; today's only real exit from `blocked` is `sched abandon --batch`.
+ */
+export function blockBatch(
+  state: SchedState,
+  batchId: string,
+  opts: BlockOptions,
+  deps: RecoveryDeps
+): { state: SchedState } {
+  const now = clock(deps);
+  const batch = batchOrThrow(state, batchId);
+  if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
+    throw new IllegalTransitionError('batch', batch.status, 'blocked');
+  }
+  const next = transitionBatch(state, batchId, 'blocked', {}, now);
+  journal(deps, unitEvent('batch-blocked', `batch:${batchId}`, { detail: opts.reason }), now);
+  post(
+    deps,
+    batchOrThrow(next, batchId),
+    {
+      phase: opts.milestonePhase ?? 'batch-validate',
+      status: 'blocked',
+      kv: { reason: opts.reason, dissolved: 'false' },
+    },
+    now
+  );
+  return { state: next };
+}
+
 // --- AC4: the batch PR conflict path ---
 
 export type PrConflictAction = 'reship' | 'dissolved';
@@ -1129,6 +1190,13 @@ export function handlePrConflict(
 
   next = transitionBatch(next, batchId, 're-validating', {}, now);
   const suite = runSuite(deps, batchId, now);
+  // NOTE (#562 scope boundary): unlike `runValidate`'s primary gate, this
+  // post-rebase re-validate does not yet consult `suite.readable` — an
+  // unreadable report here still halves rather than blocks. `handlePrConflict`
+  // already dissolves by design on ANY red suite after its one rebase attempt
+  // (docstring above), a different, narrower recovery policy than the primary
+  // `validating` rail; giving it its own unreadable→blocked branch is a
+  // follow-up, not part of this issue's stated scope (#562).
   if (suite !== null && !suite.ok) {
     return bailToHalves(next, 'rebase-suite-red', true, suite);
   }
