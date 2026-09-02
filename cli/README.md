@@ -388,7 +388,8 @@ is required by `post`, `last`, `verify`, `fence`, `check`, and `mint`; `stats` t
 either `--issue <n>` or `--issues <list>`, exactly one of the two. `post`, `last`,
 `verify`, `fence`, `check`, and `stats` additionally take `--repo <owner/name>` (a bare
 slug, not a URL; defaults to the repository `gh` resolves for the current directory) and
-`--json`; `fence` also takes `--dry-run`. `fence` requires `--run`, `--phase` and
+`--json`; `fence` also takes `--dry-run`, and `verify` also takes `--dispatched-at <iso>`
+(see [`verify`](#verify)). `fence` requires `--run`, `--phase` and
 `--takeover`; `check` requires `--run` and takes `--gen` and `--comment`. `mint` takes
 `--issue` and nothing else.
 
@@ -707,7 +708,7 @@ resume_context={"branch":"feature/440-runstate","worktree":"/repo/worktrees/feat
 
 | Value | Meaning |
 |---|---|
-| `none` | No milestones on the issue — a fresh run. Also returned when the latest milestone is slot-mode (`slot_trail=present`), a `classify` record, or a batch-phase trail: full-cycle always enters fresh from those (see [classify and batch phases](#classify-and-batch-phases-rfc-0001-batch-cycles)) |
+| `none` | No milestones on the issue — a fresh run. Also returned when the latest milestone is slot-mode (`slot_trail=present`), a `classify` record, or a batch-phase trail: full-cycle always enters fresh from those (see [classify and batch phases](#classify-and-batch-phases-rfc-0001-batch-cycles)) — or when the latest milestone is `report/done` on a still-OPEN issue that predates `--dispatched-at` (a stale prior attempt, #582): `run_id` is then a freshly minted id, `prior_run` carries the old one, and `note=stale-report-trail` |
 | `ship-wait` | The PR is open and mergeable; re-enter `ship` at the CI wait |
 | `ship-teardown` | The PR is already merged; re-enter `ship` at post-merge cleanup |
 | `done` | The `report` milestone is posted and the issue is closed (`note=already complete`) |
@@ -757,9 +758,31 @@ would be read as a flag (leading `-`) or that is not the absolute path the proto
 requires is refused rather than passed to `git`/`gh` — it becomes one of the warnings
 above.
 
-`--json` returns the same fields as an object (`resume_from`, `run_id`, `verified`,
-`resume_context`, `local_worktree`, plus `slot_trail`, `hard_block`, `note`, and
-`warnings` when they apply).
+`--json` returns the same fields as an object (`resume_from`, `run_id`, `generation`,
+`verified`, `resume_context`, `local_worktree`, plus `slot_trail`, `hard_block`, `note`,
+`prior_run`, `dispatched_at`, and `warnings` when they apply).
+
+**`--dispatched-at <iso>`** — the time THIS run was dispatched. A `report/done`
+milestone on a still-OPEN issue is ambiguous without it: it may be this run's own
+report (crashed between reporting and closing → resume at `report`, as always), or a
+completed PRIOR attempt that a deliberate re-enqueue (a pilot re-run, `sched abandon` +
+re-enqueue, an issue left open on purpose because its ACs were not met) needs full-cycle
+to redo, not silently re-report over (#582 — the gate/CLI twin of #575/#576's engine-side
+`dispatched_at` fence, `packages/sched/src/groundtruth.ts`). With the flag, a milestone
+whose `at=` predates it (±60s clock-skew tolerance) resumes `resume_from=none` with a
+freshly minted `run_id` and `prior_run=<old run id>` (`note=stale-report-trail`) — enter
+FRESH, do not resume into `report`. Without it, `verify` keeps the old
+`resume_from=report` answer but says so in `note` instead of asserting it silently. The
+value must be an ISO-8601 instant with an explicit zone (e.g. `2026-09-02T10:00:00Z`) — a
+zone-less value would be read as local time and could shift the staleness fence by the
+host's UTC offset, so it is rejected rather than guessed at; a value `Date.parse` cannot
+read at all exits 1 with the expected shape.
+
+> **Compatibility.** `--dispatched-at` requires CLI ≥ 0.33.0. An older CLI rejects it
+> outright (`error: unknown option '--dispatched-at'`, exit 1), so a dossier step passing
+> it fails hard rather than degrading — upgrade the fleet before the dossier starts
+> passing it. Omitting the flag on any version is safe: `verify` falls back to
+> `resume_from=report` with the ambiguity noted in `note`.
 
 ### stats
 

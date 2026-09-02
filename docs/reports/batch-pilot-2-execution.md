@@ -965,9 +965,10 @@ Down from 6 in run 2. The three that run 2 spent forcing batch ordering by hand 
 
 **0 met, 2 partial, 1 not met, 1 not achievable.** The counts moved from run 2 (§15: 1 met, 2 partial,
 1 not met) and so did the substance: run 2 could not warm a worktree, and run 3 executed members. The
-remaining blockers are **#583** (with its script-side half, imboard-monorepo#3982) and **#582** — #579
-was fixed mid-run by PR #581, and #580 was closed as a duplicate of #583. Both carry reproductions and
-acceptance criteria and are full-cycle ready.
+remaining blocker is **#583** (with its script-side half, imboard-monorepo#3982) — #579
+was fixed mid-run by PR #581, #580 was closed as a duplicate of #583, and #582 was fixed by a
+later full-cycle run (PR TBD). #583 carries a reproduction and acceptance criteria and is
+full-cycle ready.
 
 ## 24. Appendix — evidence (run 3)
 
@@ -995,5 +996,5 @@ acceptance criteria and are full-cycle ready.
   was the duplicate filed minutes apart and closed into it; script-side half
   [imboard-monorepo#3982](https://github.com/imboard-ai/imboard-monorepo/issues/3982)) ·
   [#582](https://github.com/imboard-ai/ai-dossier/issues/582) — `runstate verify` resumes into `report`
-  on a completed prior run (open) · [#579](https://github.com/imboard-ai/ai-dossier/issues/579) —
+  on a completed prior run (**fixed**, PR TBD) · [#579](https://github.com/imboard-ai/ai-dossier/issues/579) —
   `plan validate` misread exit 128 as a git failure (**fixed mid-run**, PR #581 `c4a4740`).

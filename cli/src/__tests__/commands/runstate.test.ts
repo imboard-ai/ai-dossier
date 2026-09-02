@@ -539,12 +539,12 @@ describe('runstate command', () => {
     });
 
     describe('--dispatched-at (#582)', () => {
-      const staleReport = [
-        RUNSTATE_MARKER,
-        'phase=report status=done run=r-440-ab56 at=2026-08-24T07:00:00Z', // T-3h
-        'next=done',
-        '',
-      ].join('\n');
+      const staleReport = milestoneBody(
+        'report',
+        'done',
+        'r-440-ab56',
+        '2026-08-24T07:00:00Z' // T-3h
+      );
 
       function mockOpenIssue(): void {
         execHandles((file, args) => {
@@ -572,9 +572,10 @@ describe('runstate command', () => {
         expect(parsed.run_id).not.toBe('r-440-ab56');
         expect(parsed.prior_run).toBe('r-440-ab56');
         expect(parsed.note).toBe('stale-report-trail');
+        expect(parsed.dispatched_at).toBe('2026-08-24T10:00:00.000Z');
       });
 
-      it('prints prior_run in text mode too', async () => {
+      it('prints prior_run and dispatched_at in text mode too', async () => {
         mockOpenIssue();
 
         await run([
@@ -588,6 +589,7 @@ describe('runstate command', () => {
 
         expect(logged()).toContain('resume_from=none');
         expect(logged()).toContain('prior_run=r-440-ab56');
+        expect(logged()).toContain('dispatched_at=2026-08-24T10:00:00.000Z');
       });
 
       it('falls back to resume_from=report with an ambiguity note when the flag is omitted', async () => {
@@ -599,6 +601,7 @@ describe('runstate command', () => {
         expect(parsed.resume_from).toBe('report');
         expect(parsed.note).toContain('no --dispatched-at supplied');
         expect(parsed.prior_run).toBeUndefined();
+        expect(parsed.dispatched_at).toBeUndefined();
       });
 
       it('rejects an unparseable --dispatched-at with an actionable error', async () => {
@@ -615,6 +618,51 @@ describe('runstate command', () => {
         expect(errored().some((l) => l.includes("Invalid --dispatched-at 'not-a-date'"))).toBe(
           true
         );
+      });
+
+      it('rejects a zone-less --dispatched-at (would be read as local time)', async () => {
+        const code = await run([
+          'runstate',
+          'verify',
+          '--issue',
+          '440',
+          '--dispatched-at',
+          '2026-08-24T10:00:00',
+        ]);
+
+        expect(code).toBe(1);
+        expect(errored().some((l) => l.includes('explicit timezone'))).toBe(true);
+      });
+
+      it('does not mint a fresh run when the gh issue-state read fails — asks only once', async () => {
+        let stateCalls = 0;
+        execHandles((file, args) => {
+          if (file === 'gh' && args.includes('comments')) return commentsPayload([staleReport]);
+          if (file === 'gh' && args.includes('state')) {
+            stateCalls += 1;
+            throw new Error('gh: rate limited');
+          }
+          throw new Error(`unexpected ${file} ${args.join(' ')}`);
+        });
+
+        await run([
+          'runstate',
+          'verify',
+          '--issue',
+          '440',
+          '--dispatched-at',
+          '2026-08-24T10:00:00Z',
+          '--json',
+        ]);
+
+        const parsed = JSON.parse(logged()[0]);
+        expect(parsed.resume_from).toBe('report');
+        expect(parsed.run_id).toBe('r-440-ab56');
+        expect(parsed.note).toContain('could not be read');
+        expect(parsed.prior_run).toBeUndefined();
+        // Both the new stale-report check and the pre-existing `report` resolver ask
+        // "is the issue closed?" — memoized in `makeProbe` down to one `gh` call.
+        expect(stateCalls).toBe(1);
       });
     });
 

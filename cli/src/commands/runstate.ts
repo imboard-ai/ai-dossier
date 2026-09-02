@@ -41,6 +41,7 @@ import {
   MAX_GENERATION,
   mintRunId,
   nextFenceGeneration,
+  nowStamp,
   type ParsedMilestone,
   PHASES,
   parseDispatchedAt,
@@ -367,16 +368,22 @@ function probePrState(
   };
 }
 
-function probeIssueClosed(issue: string, repo: string | undefined, warn: WarnOnce): boolean {
+/**
+ * `null` means the read failed or returned non-JSON — genuinely unknown, not "open".
+ * Distinct from `false` (confirmed open) because #582's stale-report check must not
+ * treat "gh unreachable" the same as "issue is open" — that would mint a fresh run (and
+ * potentially a duplicate PR) for an issue that might already be closed and merged.
+ */
+function probeIssueClosed(issue: string, repo: string | undefined, warn: WarnOnce): boolean | null {
   const res = exec('gh', ['issue', 'view', issue, '--json', 'state', ...repoArgs(repo)]);
   if (!res.ok) {
     warn(probeFailure('gh', `read the state of issue #${issue}`, res.error, RUN_INCOMPLETE));
-    return false;
+    return null;
   }
   const data = parseGhJson<GhIssueStateJson>(res.stdout);
   if (data === null) {
     warn(nonJsonFailure(`the state of issue #${issue}`, res.stdout, RUN_INCOMPLETE));
-    return false;
+    return null;
   }
   return asString(data.state) === GH_STATE_CLOSED;
 }
@@ -392,13 +399,25 @@ function makeProbe(issue: string, repo?: string, warnings: string[] = []): Resum
   const warn: WarnOnce = (line) => {
     if (!warnings.includes(line)) warnings.push(line);
   };
+  // Memoized: `report`'s resolver and #582's stale-report check both ask "is the issue
+  // closed?" on the same trail, and without caching that was two `gh` round-trips per
+  // `verify` call for one answer. A plain `??=` would re-fetch forever on a `null`
+  // (unknown) result, so the cache needs its own "have we asked" flag.
+  let closed: boolean | null = null;
+  let closedRead = false;
 
   return {
     branchOnRemote: (branch) => probeBranchOnRemote(branch, warn),
     headOnRemote: (branch, head) => probeHeadOnRemote(branch, head, warn),
     dirExists: (path) => probeDirExists(path, warn),
     prState: (pr) => probePrState(pr, repo, warn),
-    issueClosed: () => probeIssueClosed(issue, repo, warn),
+    issueClosed: () => {
+      if (!closedRead) {
+        closed = probeIssueClosed(issue, repo, warn);
+        closedRead = true;
+      }
+      return closed;
+    },
   };
 }
 
@@ -512,7 +531,7 @@ function requireDispatchedAt(raw: string | undefined): string | null {
   const parsed = parseDispatchedAt(raw);
   if (parsed === null) {
     fail([
-      `Invalid --dispatched-at '${raw}' — expected an ISO timestamp.\nFix: pass the time this run was dispatched, e.g. --dispatched-at ${new Date().toISOString()}.`,
+      `Invalid --dispatched-at '${snippet(raw)}' — expected an ISO-8601 timestamp with an explicit timezone (e.g. ${nowStamp()}). A value with no zone would be read as local time and could shift the #582 staleness fence by the host's UTC offset.\nFix: pass the time this run was dispatched, e.g. --dispatched-at ${nowStamp()}.`,
     ]);
   }
   return parsed;
@@ -759,7 +778,7 @@ function registerVerifySubcommand(cmd: Command): void {
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
     .option(
       '--dispatched-at <iso>',
-      "ISO timestamp this run was dispatched at — distinguishes a stale prior report/done milestone from this run's own (#582)"
+      "ISO timestamp this run was dispatched at — distinguishes a stale prior report/done milestone from this run's own"
     )
     .option('--json', 'Output the result as JSON')
     .action((options: VerifyOptions) => {
@@ -787,6 +806,7 @@ function registerVerifySubcommand(cmd: Command): void {
               ...(result.hard_block ? { hard_block: result.hard_block } : {}),
               ...(result.note ? { note: result.note } : {}),
               ...(result.prior_run ? { prior_run: result.prior_run } : {}),
+              ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
               ...(warnings.length > 0 ? { warnings } : {}),
             },
             null,
@@ -803,6 +823,7 @@ function registerVerifySubcommand(cmd: Command): void {
         if (result.hard_block) console.log(`hard_block=${result.hard_block}`);
         if (result.note) console.log(`note=${result.note}`);
         if (result.prior_run) console.log(`prior_run=${result.prior_run}`);
+        if (dispatchedAt) console.log(`dispatched_at=${dispatchedAt}`);
         console.log(`resume_context=${JSON.stringify(result.resume_context)}`);
       }
 

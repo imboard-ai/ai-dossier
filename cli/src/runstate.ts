@@ -667,9 +667,23 @@ export function parseGeneration(raw: string): number | null {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
-/** Read a `--dispatched-at` flag value; null when it is not a parseable timestamp. */
+/**
+ * An ISO-8601 date-time with an explicit zone — `Date.parse` alone is too permissive
+ * (it also accepts locale-dependent forms like `"Aug 24 2026"`, and reads a
+ * zone-less value as LOCAL time while every milestone `at=` is UTC, which would shift
+ * the #582 staleness fence by the host's UTC offset).
+ */
+const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Read a `--dispatched-at` flag value; null when it is not an ISO-8601 instant with an
+ * explicit zone. Normalizes to a canonical `Date#toISOString()` form so it compares
+ * cleanly against milestone `at=` values regardless of the offset it was given in.
+ */
 export function parseDispatchedAt(raw: string): string | null {
-  return Number.isNaN(Date.parse(raw)) ? null : raw;
+  if (!ISO_INSTANT_RE.test(raw)) return null;
+  const parsed = Date.parse(raw);
+  return Number.isNaN(parsed) ? null : new Date(parsed).toISOString();
 }
 
 /**
@@ -763,14 +777,24 @@ export interface ResumeProbe {
   dirExists(path: string): boolean;
   /** `gh pr view <pr> --json state,mergedAt,mergeable`, or null if it fails. */
   prState(pr: string): { state: string; mergedAt: string | null; mergeable: string } | null;
-  /** The issue's state is CLOSED. */
-  issueClosed(): boolean;
+  /**
+   * The issue's state is CLOSED, or null if it could not be determined (a failed or
+   * non-JSON `gh` read). Callers that only care about "definitely closed" can treat
+   * `null` the same as `false` (`!issueClosed()` is truthy for both) — but
+   * {@link reportTrailVerdict} distinguishes them, since minting a fresh run on an
+   * unknown-state issue risks a duplicate PR for one that was actually already merged.
+   */
+  issueClosed(): boolean | null;
 }
 
 export interface ResumeResult {
   /** Phase to resume from: a phase name, `ship-wait`, `ship-teardown`, `done`, or `none`. */
   resume_from: string;
-  /** The run id to reuse, or null on a fresh run. */
+  /**
+   * The run id to reuse, or null on an empty trail. Exception: on a stale `report/done`
+   * trail (#582) this is a freshly minted id for a fresh entry — it must NOT be reused;
+   * the prior run's id is carried separately in {@link prior_run}.
+   */
   run_id: string | null;
   /** Checks that passed, for the gate milestone's `verified=` key. */
   verified: string[];
@@ -979,11 +1003,14 @@ function postdatesDispatch(milestoneAt: string, dispatchedAt: string | null): bo
  * this function only ever returns non-null for an OPEN issue.
  *
  * Returns:
- * - `null` — issue closed, or the milestone postdates the dispatch (or no dispatch time
- *   was supplied): defer to the normal `report` resolver, unchanged.
- * - `{ note }` only — no `--dispatched-at` was supplied, so staleness cannot be
- *   determined: still resumes into `report` (the safe default), but flags the
- *   ambiguity rather than silently asserting it.
+ * - `null` — issue closed (definitely — see the `issueClosed()` tri-state note below), or
+ *   the milestone postdates the dispatch (or no dispatch time was supplied): defer to the
+ *   normal `report` resolver, unchanged.
+ * - `{ note }` only — staleness could not be determined (no `--dispatched-at`, the issue's
+ *   open/closed state could not be read, or the milestone's own `at=` does not parse):
+ *   still resumes into `report` (the safe default — never mint a fresh run, and never
+ *   redo the whole pipeline, on an unanswerable check), but flags why rather than
+ *   silently asserting it.
  * - `{ run_id, prior_run, note }` — the milestone predates the dispatch: a stale prior
  *   attempt. Mint a fresh run id (the old one belongs to a finished run) and carry the
  *   old one forward as `prior_run` for the caller's milestone.
@@ -994,7 +1021,19 @@ function reportTrailVerdict(
   dispatchedAt: string | null
 ): { run_id: string; prior_run: string; note: string } | { note: string } | null {
   if (last.phase !== 'report' || last.status !== 'done') return null;
-  if (probe.issueClosed()) return null;
+
+  // Tri-state on purpose: `true` (confirmed closed) defers to the resolver below, which
+  // already handles it correctly. `null` (gh failed / unreadable) must NOT fall through
+  // to the staleness check below — treating "unknown" as "open" here would mint a fresh
+  // run, and potentially a duplicate PR, for an issue that might already be closed and
+  // merged. Only a confirmed `false` (genuinely open) proceeds.
+  const closed = probe.issueClosed();
+  if (closed === true) return null;
+  if (closed === null) {
+    return {
+      note: 'issue open/closed state could not be read — cannot tell whether this report/done milestone is stale; resuming at report',
+    };
+  }
 
   if (dispatchedAt === null) {
     return {
@@ -1002,10 +1041,21 @@ function reportTrailVerdict(
     };
   }
 
+  if (Number.isNaN(Date.parse(last.at))) {
+    return {
+      note: `report/done milestone has no parseable at= ('${last.at}') — cannot compare it to --dispatched-at; resuming at report`,
+    };
+  }
+
   if (postdatesDispatch(last.at, dispatchedAt)) return null;
 
-  const issue = last.run.split('-')[1] ?? 'unknown';
-  return { run_id: mintRunId(issue), prior_run: last.run, note: 'stale-report-trail' };
+  const runMatch = RUN_ID_RE.test(last.run) ? /^r-(\d+)-/.exec(last.run) : null;
+  if (runMatch === null) {
+    return {
+      note: `report/done milestone carries an unusable run id ('${last.run}') — cannot mint a successor; resuming at report`,
+    };
+  }
+  return { run_id: mintRunId(runMatch[1]), prior_run: last.run, note: 'stale-report-trail' };
 }
 
 /**
@@ -1024,6 +1074,11 @@ function resolveLocalWorktree(
  * Resolve where a run should resume from, implementing the resume verification table in
  * `imboard-ai/git/gate-issue`. Never trusts the milestone alone — every claim is checked
  * against reality through `probe`, and {@link PHASE_RESUMERS} holds the per-phase rules.
+ *
+ * `dispatchedAt` — the ISO time THIS run was dispatched — is what lets a `report/done`
+ * milestone left by a prior attempt be told apart from this run's own
+ * ({@link reportTrailVerdict}, #582). Omitting it (the default `null`) degrades to the
+ * old, unfenced answer (`resume_from=report`), with the ambiguity reported in `note`.
  */
 export function computeResume(
   milestones: ParsedMilestone[],
@@ -1068,7 +1123,11 @@ export function computeResume(
 
   const reportVerdict = reportTrailVerdict(last, probe, dispatchedAt);
   if (reportVerdict && 'run_id' in reportVerdict) {
-    return { ...base, resume_from: 'none', ...reportVerdict };
+    // `base.generation` was computed from the OLD run's fence trail (`fenceGeneration`
+    // above) — but `run_id` here is a brand-new, never-fenced id, so the generation must
+    // reset to match it. Without this a fenced prior run (e.g. `generation=2`) would
+    // hand a fresh, unfenced run a stale generation number to post under.
+    return { ...base, resume_from: 'none', generation: DEFAULT_GENERATION, ...reportVerdict };
   }
   const ambiguousReportNote = reportVerdict?.note;
 
