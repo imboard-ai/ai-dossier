@@ -152,17 +152,30 @@ export interface BatchDispatchDeps {
   repoDir: string;
   /** Exec for batch git/milestone-CLI operations (never throws — the `ExecFn` contract). */
   exec: ExecFn;
+  /**
+   * Exec for the cold-path warm-up install/build (#561), on its own budget —
+   * a real `npm ci` + build routinely exceeds the git-op timeout `exec` is
+   * tuned for. Falls back to `exec` when not supplied (existing callers/tests
+   * are unaffected; production wiring should still give this its own longer
+   * timeout, e.g. `@ai-dossier/worktree-pool`'s `WARM_COMMAND_TIMEOUT_MS`).
+   */
+  warmExec?: ExecFn;
   /** Runs the aggregate suite inside a batch worktree; batches never leave `validating` without one. */
   runSuite: (worktree: string) => SuiteResult;
   /**
-   * Runs one `ai-dossier cap run <capabilityId>` in a batch worktree for the
-   * per-member incremental gate (#523 AC2 — "typecheck + focused tests via
-   * `cap run test.focused` when available"). Optional and degrade-not-crash,
-   * like `batchExec`/`runBatchSuite`: without it, or on `automation-broken`/
-   * `capability-unavailable`, the gate is skipped — the member's own
-   * `slot-cycle` run already attempted this fast path (with its own reasoning
-   * fallback) before ever posting `review done`, so a repo with no manifest
-   * loses nothing but the engine's independent re-check.
+   * Runs one `ai-dossier cap run <capabilityId>` in a batch worktree. Two call
+   * sites, different degrade contracts:
+   * - the per-member incremental gate (#523 AC2 — "typecheck + focused tests
+   *   via `cap run test.focused` when available"): degrade-not-crash — without
+   *   this hook, or on `automation-broken`/`capability-unavailable`, the gate
+   *   is skipped (the member's own `slot-cycle` run already attempted this
+   *   fast path before ever posting `review done`, so a repo with no manifest
+   *   loses nothing but the engine's independent re-check).
+   * - batch-setup's `worktree.prepare` warm step (#561, `warmColdBatchWorktree`):
+   *   `undefined`/`capability-unavailable`/`automation-broken` fall through to
+   *   package-manager detection, but a declared-and-`task-failed` capability
+   *   hard-fails the whole batch setup — a repo that owns its warm-up should
+   *   never be silently second-guessed by a fallback underneath it.
    */
   runCapability?: (worktree: string, capabilityId: string) => CapOutcome;
   fsExists?: FsExists;
@@ -330,67 +343,95 @@ function releaseSlot(state: SchedState, batchId: string, now: Date): SchedState 
 
 /**
  * A pool claim already returns a warm worktree (deps installed, built), so
- * only the cold `git worktree add` path needs its own warm step (#561). Tries
- * `worktree.prepare` via the optional `runCapability` hook first (a repo that
- * declares it in its manifest knows its own warm-up best); falls back to
- * `@ai-dossier/worktree-pool`'s package-manager detection otherwise, guarded
- * on `package.json` actually being present — `npm install` (and the
- * pnpm/yarn/bun equivalents) hard-fail with no `package.json` at all, so an
- * unguarded call would turn "nothing to warm" into a false failure for every
- * non-Node repo. Journals `batch-warmup-done`/`batch-warmup-failed` with the
- * elapsed time either way, satisfying AC1 even on the no-op branch.
+ * only the cold `git worktree add` path needs its own warm step (#561).
+ *
+ * Tries `worktree.prepare` via the optional `runCapability` hook first (a
+ * repo that declares it in its manifest knows its own warm-up best) — a
+ * declared-and-`task-failed` capability hard-fails the whole batch setup
+ * (deliberately NOT degrade-not-crash, unlike every other `runCapability`
+ * call site in this file: a repo that owns `worktree.prepare` should never
+ * be silently second-guessed by falling back underneath it). `undefined`,
+ * `capability-unavailable` (no such id declared) AND `automation-broken`
+ * (broken manifest, missing tool, timeout — "do not trust the machinery",
+ * not "the task failed") all fall through to the generic path below.
+ *
+ * The generic path reuses `@ai-dossier/worktree-pool`'s package-manager
+ * detection, guarded on `package.json` actually being present — `npm
+ * install` (and the pnpm/yarn/bun equivalents) hard-fail with no
+ * `package.json` at all, so an unguarded call would turn "nothing to warm"
+ * into a false failure for every non-Node repo. The guard is bypassed when
+ * `.worktree-pool.json` declares explicit `warm_commands` — the escape hatch
+ * for a repo whose warm-up isn't `npm install`-shaped at all.
+ *
+ * Warm commands run on `deps.warmExec ?? deps.exec` — a separate, longer
+ * budget than the git/milestone calls `deps.exec` is tuned for (a cold
+ * install+build routinely exceeds a git-op timeout; see `BatchDispatchDeps`).
+ *
+ * Journals `batch-warmup-done`/`batch-warmup-failed` with the elapsed time
+ * appended to `detail` either way (satisfying AC1 even on the no-op branch —
+ * `JournalEvent` has no dedicated `duration_ms` field).
  */
 function warmColdBatchWorktree(
   deps: BatchDispatchDeps,
   batch: BatchEntry,
   worktree: string,
-  now: Date
+  now: Date,
+  /** Prefixed onto the journaled detail — e.g. `pool-claim-invalid:` when the cold path was taken because a pool claim returned unusable output, rather than the ordinary "no warm spares" case. */
+  poolNote = ''
 ): { ok: true } | { ok: false; reason: string } {
   const warmStart = deps.now();
   const elapsedMs = () => deps.now().getTime() - warmStart.getTime();
-  const fail = (detail: string): { ok: false; reason: string } => {
+  const fail = (tag: string): { ok: false; reason: string } => {
     deps.journal.append(
-      unitEvent('batch-warmup-failed', unit(batch.id), { detail: `${detail} ${elapsedMs()}ms` }),
+      unitEvent('batch-warmup-failed', unit(batch.id), {
+        detail: `${poolNote}${tag} ${elapsedMs()}ms`,
+      }),
       now
     );
-    return { ok: false, reason: 'warmup-failed' };
+    return { ok: false, reason: `warmup-failed:${tag}` };
+  };
+  const done = (tag: string): { ok: true } => {
+    deps.journal.append(
+      unitEvent('batch-warmup-done', unit(batch.id), {
+        detail: `${poolNote}${tag} ${elapsedMs()}ms`,
+      }),
+      now
+    );
+    return { ok: true };
   };
 
   const capOutcome = deps.runCapability?.(worktree, 'worktree.prepare');
-  if (capOutcome !== undefined && capOutcome !== 'capability-unavailable') {
-    if (capOutcome !== 'ok') return fail(`cap:worktree.prepare:${capOutcome}`);
-    deps.journal.append(
-      unitEvent('batch-warmup-done', unit(batch.id), {
-        detail: `cap:worktree.prepare ${elapsedMs()}ms`,
-      }),
-      now
-    );
-    return { ok: true };
-  }
+  if (capOutcome === 'ok') return done('cap:worktree.prepare');
+  if (capOutcome === 'task-failed') return fail('cap:worktree.prepare:task-failed');
+  // `undefined` (no hook injected) / `capability-unavailable` (not declared)
+  // / `automation-broken` (declared but the machinery itself is untrustworthy)
+  // all fall through to the generic package-manager path below.
 
+  const fsExists = deps.fsExists ?? ((p: string) => fs.existsSync(p));
   const cfg = readPoolFileConfig(deps.repoDir);
   const projectDir = resolveProjectDir(worktree, cfg.project_subdir);
+  // `.worktree-pool.json`'s `project_subdir` is repo config, not attacker
+  // input, but a `../`-shaped value would otherwise run install/build
+  // OUTSIDE the batch worktree entirely — skip rather than warm the wrong
+  // directory (or fail the whole batch over a misconfigured pool file).
+  if (projectDir !== worktree && !projectDir.startsWith(worktree + path.sep)) {
+    return done('skipped:project-dir-outside-worktree');
+  }
   const hasExplicitWarmCommands = (cfg.warm_commands?.length ?? 0) > 0;
-  if (!hasExplicitWarmCommands && !fs.existsSync(path.join(projectDir, 'package.json'))) {
-    deps.journal.append(
-      unitEvent('batch-warmup-done', unit(batch.id), {
-        detail: `skipped:no-package-json ${elapsedMs()}ms`,
-      }),
-      now
-    );
-    return { ok: true };
+  if (!hasExplicitWarmCommands && !fsExists(path.join(projectDir, 'package.json'))) {
+    return done('skipped:no-package-json');
   }
 
   const commands = resolveWarmCommands(projectDir, cfg);
-  for (const [bin, ...args] of commands) {
-    if (bin === undefined) continue;
-    if (deps.exec(bin, args, projectDir) === null) return fail(`pm:${bin}`);
+  for (const [i, cmd] of commands.entries()) {
+    const [bin, ...args] = cmd;
+    if (bin === undefined) return fail(`pm:${i + 1}/${commands.length}:empty-command`);
+    if ((deps.warmExec ?? deps.exec)(bin, args, projectDir) === null) {
+      return fail(`pm:${i + 1}/${commands.length}:${bin}`);
+    }
   }
-  deps.journal.append(
-    unitEvent('batch-warmup-done', unit(batch.id), { detail: `pm ${elapsedMs()}ms` }),
-    now
-  );
-  return { ok: true };
+  const pm = commands[0]?.[0] ?? 'none';
+  return done(`pm:${pm}:${commands.length}cmds`);
 }
 
 /**
@@ -446,12 +487,35 @@ function runBatchSetup(
     deps.repoDir
   );
   const claimedWorktree = claimed?.trim();
-  if (claimedWorktree && path.isAbsolute(claimedWorktree)) {
+  // Same hardening `teardown.ts`'s destructive sinks apply to a worktree path
+  // (no NUL/newline, no unresolved `..`) — this one is our own CLI's stdout,
+  // not attacker input, but garbage here would otherwise be trusted verbatim
+  // as `BatchEntry.worktree` and used as a spawn/exec cwd for every member.
+  const claimIsUsable =
+    !!claimedWorktree &&
+    !claimedWorktree.includes('\0') &&
+    !claimedWorktree.includes('\n') &&
+    path.isAbsolute(claimedWorktree) &&
+    path.resolve(claimedWorktree) === claimedWorktree &&
+    (deps.fsExists ?? ((p: string) => fs.existsSync(p)))(claimedWorktree);
+  if (claimedWorktree && claimIsUsable) {
     if (deps.exec('git', ['push', '-u', 'origin', '--', branch], claimedWorktree) === null) {
+      // Return the claim rather than leaking a permanently `assigned` pool
+      // entry nothing else will ever reference — `BatchEntry` only records
+      // `worktree`/`pool_claimed` on the `ok: true` path below.
+      deps.exec(
+        POOL_BIN,
+        [...POOL_ARGS_PREFIX, 'return', '--path', claimedWorktree, '--json'],
+        deps.repoDir
+      );
       return { ok: false, reason: 'branch-push-failed', runId: mintedRunId };
     }
     return { ok: true, branch, worktree: claimedWorktree, runId: mintedRunId, poolClaimed: true };
   }
+  // A non-null, non-empty, unusable claim response (rather than a plain "no
+  // warm spares" null/empty) is unusual enough to note on the batch that
+  // otherwise cold-builds silently.
+  const poolNote = claimedWorktree ? 'pool-claim-invalid:' : '';
 
   if (deps.exec('git', ['fetch', 'origin', '--', batch.base_branch], deps.repoDir) === null) {
     return { ok: false, reason: 'fetch-failed', runId: mintedRunId };
@@ -465,8 +529,19 @@ function runBatchSetup(
   if (deps.exec('git', ['worktree', 'add', '--', worktree, branch], deps.repoDir) === null) {
     return { ok: false, reason: 'worktree-add-failed', runId: mintedRunId };
   }
-  const warmed = warmColdBatchWorktree(deps, batch, worktree, now);
-  if (!warmed.ok) return { ok: false, reason: warmed.reason, runId: mintedRunId };
+  const warmed = warmColdBatchWorktree(deps, batch, worktree, now, poolNote);
+  if (!warmed.ok) {
+    // Restore the "all-or-nothing" contract this function documents: a warm
+    // failure otherwise leaves the branch pushed and the worktree on disk,
+    // so the NEXT tick's retry dies at `branch-create-failed` forever
+    // instead of ever reaching warm-up again. Best-effort — a failed cleanup
+    // here just means the next retry's `worktree-add-failed`/`branch-create-failed`
+    // surfaces the leftover instead, no worse than before this cleanup existed.
+    deps.exec('git', ['worktree', 'remove', '--force', '--', worktree], deps.repoDir);
+    deps.exec('git', ['branch', '-D', branch], deps.repoDir);
+    deps.exec('git', ['push', 'origin', '--delete', branch], deps.repoDir);
+    return { ok: false, reason: warmed.reason, runId: mintedRunId };
+  }
   return { ok: true, branch, worktree, runId: mintedRunId, poolClaimed: false };
 }
 
@@ -1553,7 +1628,11 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
   const batch = findBatch(state, batchId);
   if (!batch || batch.worktree === null) return;
   const root = deps.exec('git', ['rev-parse', '--show-toplevel'], deps.repoDir) ?? deps.repoDir;
-  if (!isSafeWorktree(path.resolve(root), batch.worktree)) {
+  // Pool-claimed worktrees are validated by the pool's own `return` (it only
+  // accepts paths in pool state) and can legitimately live outside either
+  // `isSafeWorktree` root when `.worktree-pool.json` configures a custom
+  // `pool_dir` — mirrors `runTeardown`'s own internal skip for `poolClaimed`.
+  if (batch.pool_claimed !== true && !isSafeWorktree(path.resolve(root), batch.worktree)) {
     journalEvent(deps, 'teardown-failed', unit(batchId), {
       reason: 'unsafe-worktree-path',
       detail: batch.worktree,

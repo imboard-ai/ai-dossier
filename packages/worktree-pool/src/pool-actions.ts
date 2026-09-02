@@ -37,7 +37,8 @@ import {
 
 const LOCK_TIMEOUT_MS = 10_000;
 const LOCK_RETRY_MS = 200;
-const WARM_COMMAND_TIMEOUT_MS = 300_000;
+/** Per-command budget for a warm-up install/build (#561: also the floor `packages/sched`'s batch-setup warm step should give its own exec). */
+export const WARM_COMMAND_TIMEOUT_MS = 300_000;
 const POOL_CONFIG_FILE = '.worktree-pool.json';
 
 // --- Git helpers ---

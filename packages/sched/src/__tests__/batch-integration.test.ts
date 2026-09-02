@@ -137,6 +137,15 @@ function scratchRepo(): string {
   return work;
 }
 
+/** `git add . && git commit -m <message> && git push origin main` against a `scratchRepo()`'s `work` dir — shared tail every seeder function below repeats otherwise. */
+function commitAllAndPush(work: string, message: string): void {
+  const git = (args: string[]) =>
+    execFileSync('git', args, { cwd: work, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  git(['add', '.']);
+  git(['commit', '-m', message]);
+  git(['push', 'origin', 'main']);
+}
+
 /**
  * AC5 (#562): a scratch repo seeded with a REAL `.dossier/automation/manifest.yaml`
  * declaring `test.full` — same shape as this repo's own manifest — so a batch
@@ -154,11 +163,7 @@ function scratchRepoWithRealSuite(): string {
     path.join(work, 'Makefile'),
     'test:\n\t@echo "Running tests..."\n\t@echo "OK"\n'
   );
-  const git = (args: string[]) =>
-    execFileSync('git', args, { cwd: work, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  git(['add', '.']);
-  git(['commit', '-m', 'seed real cap manifest + Makefile']);
-  git(['push', 'origin', 'main']);
+  commitAllAndPush(work, 'seed real cap manifest + Makefile');
   return work;
 }
 
@@ -185,11 +190,7 @@ function scratchRepoWithPackageJson(): string {
       dependencies: { 'dummy-dep': 'file:vendor/dummy-dep' },
     })
   );
-  const git = (args: string[]) =>
-    execFileSync('git', args, { cwd: work, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-  git(['add', '.']);
-  git(['commit', '-m', 'seed package.json for batch-warmup regression test']);
-  git(['push', 'origin', 'main']);
+  commitAllAndPush(work, 'seed package.json for batch-warmup regression test');
   return work;
 }
 
@@ -226,11 +227,22 @@ function realCapRunSuite(worktree: string): SuiteResult {
 function fakeBatchExec(
   milestonesDir: string,
   realExec: ExecFn,
-  poolClaimPath: string | null = null
+  poolClaimPath: string | null = null,
+  /** #561: force this bin (e.g. `npm`) to report failure — for the `batch-warmup-failed` regression case, without depending on some real npm invocation's exact failure conditions. */
+  failCommand: string | null = null
 ): ExecFn {
   return (file, args, cwd) => {
-    if (file === 'npx' && args.includes('claim')) {
+    if (failCommand && file === failCommand) return null;
+    // Argv position, not `includes` — a branch/path argument could otherwise
+    // coincidentally equal 'claim'/'status'/'return' and misroute.
+    if (file === 'npx' && args[2] === 'claim') {
       return poolClaimPath;
+    }
+    if (file === 'npx' && args[2] === 'status' && poolClaimPath) {
+      return JSON.stringify({ worktrees: [] });
+    }
+    if (file === 'npx' && args[2] === 'return' && poolClaimPath) {
+      return JSON.stringify({ verification: { entry_status: 'warm' } });
     }
     if (file === 'ai-dossier') {
       if (args[0] === 'runstate' && args[1] === 'mint') {
@@ -287,6 +299,8 @@ function batchHarness(
     capability?: (worktree: string, capabilityId: string) => CapOutcome;
     /** #561: simulated `npx worktree-pool claim` result — null = no warm spares (default, matches every scratch repo's real state). */
     poolClaimPath?: string | null;
+    /** #561: force this bin to fail — for the `batch-warmup-failed` regression case. */
+    failWarmupCommand?: string;
   }
 ): BatchHarness {
   const store = new SchedStore(tmpDir('sched-batch-'));
@@ -312,7 +326,12 @@ function batchHarness(
     now: () => new Date(),
     repoDir,
     teardownExec: realExec,
-    batchExec: fakeBatchExec(truthDir, realExec, opts?.poolClaimPath ?? null),
+    batchExec: fakeBatchExec(
+      truthDir,
+      realExec,
+      opts?.poolClaimPath ?? null,
+      opts?.failWarmupCommand ?? null
+    ),
     runBatchSuite: opts?.suite ?? (() => ({ ok: true, failing: [] })),
     ...(opts?.capability ? { runBatchCapability: opts.capability } : {}),
   };
@@ -638,7 +657,11 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
 
   it('#561 AC1/AC3: a cold batch worktree is warmed (node_modules present) before member 1 dispatches', async () => {
     const repo = scratchRepoWithPackageJson();
-    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1 });
+    // `--require-dep=dummy-dep`: member 1's FIRST action resolves
+    // `node_modules/dummy-dep` under the worktree the prompt names — AC3's
+    // "a member's first command depends on `node_modules` and passes",
+    // literally, not just a precondition check from outside the member.
+    const h = batchHarness(repo, ['--mode=batch', '--require-dep=dummy-dep'], { maxSlots: 1 });
     h.enqueue([{ issue: 1101, mode: 'slot', batch: 'b-warm', anchor: 1100, tier: 'mid' }]);
     // b-warm is already sealed forming → ready by enqueueEntries
 
@@ -653,9 +676,51 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(fs.existsSync(path.join(batch?.worktree as string, 'node_modules', 'dummy-dep'))).toBe(
       true
     );
+    // AC1: the warm step is journaled with the elapsed time appended to `detail`.
+    const events = h.deps.journal.read();
+    const warmupDone = events.find(
+      (e) => e.event === 'batch-warmup-done' && e.unit === 'batch:b-warm'
+    );
+    expect(warmupDone?.detail).toMatch(/^pm:npm:1cmds \d+ms$/);
 
     const pid = batchSlotPid(h, 'b-warm') as number;
     expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    // The member's own first-command dependency check passed — it posted
+    // `review done`, not a died-before-doing-anything env-cold exit (AC3/AC4).
+    const milestone = JSON.parse(fs.readFileSync(path.join(h.truthDir, '1101.json'), 'utf8'));
+    expect(milestone).toMatchObject({ phase: 'review', status: 'done' });
+  }, 60_000);
+
+  it('#561: a failed warm command blocks batch-setup (reason names the failing step) and cleans up the branch/worktree', async () => {
+    const repo = scratchRepoWithPackageJson();
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, failWarmupCommand: 'npm' });
+    h.enqueue([{ issue: 1301, mode: 'slot', batch: 'b-warmfail', anchor: 1300, tier: 'mid' }]);
+    // b-warmfail is already sealed forming → ready by enqueueEntries
+
+    const result = h.tick(); // batch-setup: cold path, `npm install` forced to fail
+    expect(result.failed).toContain('batch:b-warmfail');
+    const batch = findBatch(h.state(), 'b-warmfail');
+    expect(batch?.status).toBe('ready'); // never left `ready` — setup did not land
+    expect(batch?.worktree).toBeNull();
+
+    const events = h.deps.journal.read();
+    const warmupFailed = events.find(
+      (e) => e.event === 'batch-warmup-failed' && e.unit === 'batch:b-warmfail'
+    );
+    expect(warmupFailed?.detail).toMatch(/^pm:1\/1:npm \d+ms$/);
+    const setupFailed = events.find(
+      (e) => e.event === 'batch-setup-failed' && e.unit === 'batch:b-warmfail'
+    );
+    expect(setupFailed?.detail).toBe('warmup-failed:pm:1/1:npm');
+
+    // Cleanup restores the "all-or-nothing" contract: the branch pushed and
+    // worktree created before the warm step ran are both gone, so a retry
+    // does not deterministically die at `branch-create-failed` forever.
+    const branch = `batch/b-warmfail-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}`;
+    const remoteBranches = execFileSync('git', ['branch', '-r'], { cwd: repo, encoding: 'utf8' });
+    expect(remoteBranches).not.toContain(branch);
+    const worktreeList = execFileSync('git', ['worktree', 'list'], { cwd: repo, encoding: 'utf8' });
+    expect(worktreeList).not.toContain(`batch-b-warmfail`);
   }, 60_000);
 
   it('#561 AC2: a pool-claimed batch worktree skips the warm step (already warm)', async () => {
@@ -684,8 +749,59 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     // history (same as the AC1/AC3 repo), so if the warm step had run
     // `node_modules` would exist — it does not, because a pool claim skips it.
     expect(fs.existsSync(path.join(poolWorktree, 'node_modules'))).toBe(false);
+    // No warmup event at all — the claim path never calls `warmColdBatchWorktree`.
+    expect(
+      h.deps.journal
+        .read()
+        .some((e) => e.event === 'batch-warmup-done' || e.event === 'batch-warmup-failed')
+    ).toBe(false);
 
-    const pid = batchSlotPid(h, batchId) as number;
+    let pid = batchSlotPid(h, batchId) as number;
     expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+
+    // Drive the single-member batch to `done` — this is the regression case
+    // for `teardownBatch`'s containment check (#561): `poolWorktree` lives
+    // under `os.tmpdir()`, outside BOTH roots `isSafeWorktree` accepts
+    // (`<repo>/worktrees`, `<repo>/../worktrees`), exactly like a real pool
+    // configured with a non-default `pool_dir` — teardown must skip that
+    // check for a pool-claimed batch rather than reject the path and leak
+    // the pool entry forever.
+    h.tick(); // member 1 (last) green → aggregate suite → reviewing → tail spawned
+    pid = batchSlotPid(h, batchId) as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    const parked = h.tick(); // tail posts batch-review done + batch-ship awaiting-merge
+    expect(parked.parked).toEqual([`batch:${batchId}`]);
+
+    fs.writeFileSync(
+      path.join(h.truthDir, '9000.pr.json'),
+      JSON.stringify({ state: 'MERGED', mergedAt: new Date().toISOString() })
+    );
+    h.tick(); // merge accepted → deployed
+    expect(findBatch(h.state(), batchId)?.status).toBe('deployed');
+
+    h.tick(); // report agent dispatched
+    pid = batchSlotPid(h, batchId) as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+
+    const result = h.tick(); // batch-report done → reported → done → teardown
+    expect(result.completed).toEqual([`batch:${batchId}`]);
+    const finalBatch = findBatch(h.state(), batchId);
+    expect(finalBatch?.status).toBe('done');
+    // The containment check did NOT reject the pool-claimed path (it would
+    // have, pre-fix, since `poolWorktree` lives outside both roots
+    // `isSafeWorktree` accepts) — teardown reached the pool `return` path and
+    // the (mocked) pool self-check reported `warm`. A pool return recycles
+    // the directory rather than deleting it, unlike the cold `git worktree
+    // remove` path, so the worktree still existing on disk is expected here.
+    expect(
+      h.deps.journal
+        .read()
+        .some((e) => e.event === 'teardown-failed' && e.unit === `batch:${batchId}`)
+    ).toBe(false);
+    expect(
+      h.deps.journal
+        .read()
+        .some((e) => e.event === 'teardown-done' && e.unit === `batch:${batchId}`)
+    ).toBe(true);
   }, 60_000);
 });

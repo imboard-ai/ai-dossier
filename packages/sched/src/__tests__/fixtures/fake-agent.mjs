@@ -16,11 +16,18 @@
  *              agent, the fix agent and the report agent, so this mode
  *              decides its behavior from the PROMPT TEXT (mirroring `tail`'s
  *              own report-vs-park detection):
- *                - "slot-cycle workflow" → a batch MEMBER. Posts `review done
- *                  mode=slot batch=<id>` UNLESS this member's issue is listed
- *                  in --evict-members (comma-separated), in which case it
- *                  posts `status=blocked mode=slot` with --evict-reason
- *                  (default `test-failures`) instead.
+ *                - "slot-cycle workflow" → a batch MEMBER. Its FIRST action,
+ *                  when --require-dep=<name> is set (#561 AC3 — opt-in so
+ *                  every other test's cwd-less batch worktree is unaffected),
+ *                  is to resolve `node_modules/<name>` under the worktree the
+ *                  prompt names (`worktree=...`, same as a real agent `cd`ing
+ *                  in as its first tool call) — a member whose worktree is
+ *                  cold dies exactly as `env-cold` would, before posting
+ *                  anything. Otherwise posts `review done mode=slot
+ *                  batch=<id>` UNLESS this member's issue is listed in
+ *                  --evict-members (comma-separated), in which case it posts
+ *                  `status=blocked mode=slot` with --evict-reason (default
+ *                  `test-failures`) instead.
  *                - "batch review and ship tail" → the TAIL agent. Posts
  *                  `batch-review done` then the batch-ship park
  *                  (`awaiting-merge` with `pr=` from --pr=, default 9000) on
@@ -86,6 +93,18 @@ process.stdin.on('end', () => {
   }
   if (mode === 'batch' && dir) {
     if (/slot-cycle workflow/i.test(input)) {
+      const requireDep = opt('require-dep');
+      if (requireDep) {
+        const worktreeMatch = input.match(/worktree=(\S+)/);
+        const worktree = worktreeMatch ? worktreeMatch[1].replace(/[.,]+$/, '') : null;
+        const depPath = worktree ? path.join(worktree, 'node_modules', requireDep) : null;
+        if (!depPath || !fs.existsSync(depPath)) {
+          console.error(
+            `fake batch member: env-cold — ${depPath ?? '<no worktree in prompt>'} not found, dying before doing any work`
+          );
+          process.exit(1);
+        }
+      }
       const batchMatch = input.match(/batch=(\S+)/);
       const batchId = batchMatch ? batchMatch[1].replace(/[.,]+$/, '') : 'unknown';
       const evictMembers = (opt('evict-members') ?? '')

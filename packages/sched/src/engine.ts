@@ -158,6 +158,12 @@ export interface EngineDeps {
    */
   batchExec?: BatchDispatchDeps['exec'];
   /**
+   * Exec for batch-setup's cold-path warm-up install/build (#561), on its own
+   * (longer) budget than `batchExec` — falls back to `batchExec` when not
+   * supplied. Optional independently of `batchExec`/`runBatchSuite`.
+   */
+  batchWarmExec?: BatchDispatchDeps['warmExec'];
+  /**
    * Runs the aggregate suite inside a batch worktree (#523) — the deterministic
    * gate between `executing` and `reviewing`. Optional; see `batchExec`'s doc
    * for the paired-requirement contract.
@@ -2093,6 +2099,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
       exec: deps.batchExec,
       runSuite: deps.runBatchSuite,
       ...(deps.runBatchCapability !== undefined ? { runCapability: deps.runBatchCapability } : {}),
+      ...(deps.batchWarmExec !== undefined ? { warmExec: deps.batchWarmExec } : {}),
     };
     const batchResult = runBatchTick(batchDeps, config, dispatch);
     result = mergeBatchResult(result, batchResult);

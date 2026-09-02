@@ -310,7 +310,10 @@ export interface BatchEntry {
    * cold `git worktree add` that batch-setup then warmed itself (#561).
    * Teardown reads this to decide `worktree-pool return` vs `git worktree
    * remove` — mirrors `SetupInfo.poolClaimed` (`groundtruth.ts`) at batch
-   * granularity. Always `false` until batch-setup lands.
+   * granularity. `false` until batch-setup lands; a state file written before
+   * #561 carries no such key at all — `state.ts`'s load-time normalization
+   * backfills it to `false` (batches from before this field existed were
+   * never pool-claimed, since batch-setup had no pool integration yet).
    */
   pool_claimed: boolean;
   /**
@@ -913,8 +916,11 @@ export type JournalEventName =
   | 'batch-setup-done'
   | 'batch-setup-failed'
   // #561: the cold-path warm step (pool-claimed worktrees skip it — already
-  // warm) — journaled with `duration_ms` and a `detail` naming which path ran
-  // (`cap:worktree.prepare` / `pm:<npm|pnpm|yarn|bun>` / `skipped:...`), even
+  // warm) — `JournalEvent` has no `duration_ms` field, so the elapsed time is
+  // appended to `detail` instead (`<tag> <n>ms`), alongside which path ran
+  // (`cap:worktree.prepare` / `pm:<npm|pnpm|yarn|bun>:<n>cmds` / `skipped:...`
+  // / a `pool-claim-invalid:` prefix when the cold path was taken because a
+  // pool claim returned unusable output rather than "no warm spares"), even
   // when there was nothing to warm.
   | 'batch-warmup-done'
   | 'batch-warmup-failed'

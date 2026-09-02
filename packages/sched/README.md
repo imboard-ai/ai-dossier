@@ -365,8 +365,14 @@ failure rails: executing → dissolving (a member self-reports blocked)
 ```
 
 - **One shared worktree/branch per batch**, claimed once by a deterministic (no LLM)
-  `batch-setup` step: `git branch`/`push`/`worktree add` off `base_branch`, named
-  `batch/<id>-<date>`, plus a fresh `ai-dossier runstate mint` against the anchor issue.
+  `batch-setup` step, named `batch/<id>-<date>`, plus a fresh `ai-dossier runstate mint`
+  against the anchor issue. Tries a pool claim first (`npx worktree-pool claim` —
+  already warm by construction, `BatchEntry.pool_claimed`); on the cold `git branch`/
+  `push`/`worktree add` path, batch-setup warms the worktree itself before returning
+  (#561) — `cap run worktree.prepare` when the repo's manifest declares it, else
+  package-manager-detected install/build (`@ai-dossier/worktree-pool`'s command
+  resolution — respects the repo's `.worktree-pool.json` `project_subdir`/
+  `warm_commands` even in repos that never use the pool for anything else).
 - **Members run serially, one fresh `slot-cycle` agent at a time**, in the shared
   worktree. A member's completion signal is `phase=review status=done mode=slot` on its
   OWN issue (`slot-cycle` posts no phase of its own past `review` — ship is batch-owned);
@@ -391,23 +397,26 @@ failure rails: executing → dissolving (a member self-reports blocked)
   `report-issue`'s batch variant.
 - **Scope cuts, recorded rather than discovered later:** no `git bisect` stage for an
   ambiguous aggregate failure (an unattributable red suite dissolves instead); no
-  worktree-pool integration for batch-setup (cold `git worktree add` only); no per-phase
-  stall/escalation ladder for batch sub-agents (a dead-without-verification agent is
-  treated as blocked, not redispatched stronger).
+  per-phase stall/escalation ladder for batch sub-agents (a dead-without-verification
+  agent is treated as blocked, not redispatched stronger).
 
 Schema 1.7.0: `BatchEntry` gains `worktree` (absolute path of the shared batch worktree,
 null until batch-setup lands), `ranges` (`MemberRange[]` — each member's commit range,
 recomputed after every member completes) and `pr` (the batch PR parked on auto-merge,
 persisted so a restart mid-watch still knows what to poll). 1.6.0 states migrate on load:
 no batch was ever dispatched under them, so `null`/`[]`/`null` is the exact backfill, not
-a guess. Config schema moves to 1.3.0: `dispatch` gains `member_prompt`,
-`batch_tail_prompt` and `batch_report_prompt` (the three new agent prompt templates).
+a guess. `BatchEntry` also gains `pool_claimed` (#561) — pre-#561 states carry no such
+key at all, and backfill it to `false` on load (no batch was ever pool-claimed before
+batch-setup had pool integration). Config schema moves to 1.3.0: `dispatch` gains
+`member_prompt`, `batch_tail_prompt` and `batch_report_prompt` (the three new agent
+prompt templates).
 
-New journal events: `batch-setup-done`, `batch-setup-failed`, `member-advanced`. Member/
-tail/report/fix-agent spawn, progress, completion and park events reuse the existing
-unit-generic names (`assigned`/`spawned`/`unit-failed`/`external-advance`/`pr-parked`/
-`merge-accepted`/`report-dispatched`/`teardown-done`/`teardown-failed`) with
-`unit = batch:<id>`.
+New journal events: `batch-setup-done`, `batch-setup-failed`, `member-advanced`,
+`batch-warmup-done`, `batch-warmup-failed` (#561 — the cold-path warm step only; a pool
+claim emits neither). Member/tail/report/fix-agent spawn, progress, completion and park
+events reuse the existing unit-generic names (`assigned`/`spawned`/`unit-failed`/
+`external-advance`/`pr-parked`/`merge-accepted`/`report-dispatched`/`teardown-done`/
+`teardown-failed`) with `unit = batch:<id>`.
 
 ## API surface
 

@@ -40,7 +40,7 @@ future agent should search for first.
 | `packages/worktree-pool/` | Pre-warmed git worktree management |
 
 ```bash
-make build-all    # build core → mcp-server + cli (skip lint)
+make build-all    # build core → worktree-pool → sched → mcp-server + cli (skip lint)
 make build        # lint then build
 make test         # test all workspaces + repo scripts (scripts/*.test.mjs)
 make check        # biome format + lint with auto-fix
@@ -48,8 +48,8 @@ make check        # biome format + lint with auto-fix
 
 - Node 20+ required (vitest v4 + vite v7 dropped Node 18)
 - Linter/formatter: **Biome** (not ESLint/Prettier) — `npx biome check --write .`
-- Build order: core first, then sched, then mcp-server and cli (sched, mcp-server and cli all
-  depend on core; cli also depends on sched)
+- Build order: core → worktree-pool → sched → mcp-server + cli (sched depends on core +
+  worktree-pool; cli depends on core + sched)
 - Changing a publishable package's `src/`/`bin/` requires bumping that package's `package.json`
   version — CI's `version-bump` job fails the PR otherwise (label `no-release-needed` opts out)
 - MCP integration: see `mcp-server/README.md`
