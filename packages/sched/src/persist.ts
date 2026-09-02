@@ -399,6 +399,9 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   if (dispatch.batch_tail_prompt !== undefined && typeof dispatch.batch_tail_prompt !== 'string') {
     throw new Error('dispatch.batch_tail_prompt must be a string');
   }
+  if (dispatch.suite_command !== undefined) {
+    requireNonEmptyStringArray('dispatch.suite_command', dispatch.suite_command);
+  }
   if (
     dispatch.batch_report_prompt !== undefined &&
     typeof dispatch.batch_report_prompt !== 'string'
@@ -450,6 +453,9 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   if (dispatch.member_prompt !== undefined) out.member_prompt = dispatch.member_prompt as string;
   if (dispatch.batch_tail_prompt !== undefined) {
     out.batch_tail_prompt = dispatch.batch_tail_prompt as string;
+  }
+  if (dispatch.suite_command !== undefined) {
+    out.suite_command = dispatch.suite_command as string[];
   }
   if (dispatch.batch_report_prompt !== undefined) {
     out.batch_report_prompt = dispatch.batch_report_prompt as string;

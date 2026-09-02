@@ -118,7 +118,10 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   ready: ['executing', 'dissolving'],
   // executing → executing advances the member pointer (i/N); the ⟲ in RFC-0001 §D.2.
   executing: ['executing', 'validating', 'dissolving'],
-  validating: ['attributing', 'reviewing', 'dissolving'],
+  // `blocked` (#562): the suite REPORT was unreadable even after a fallback
+  // retry — distinct from `dissolving`, which is for a red suite that WAS
+  // read but named no offender. Nothing is requeued or reverted for `blocked`.
+  validating: ['attributing', 'reviewing', 'dissolving', 'blocked'],
   // `dissolving` because attribution can legitimately name nobody (bisect
   // absent, errored, or unattributable) — without the edge, an unattributable
   // red suite is a dead end with no way out but fixing or evicting a member the
@@ -137,6 +140,10 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   done: [],
   dissolving: ['dissolved'],
   dissolved: [],
+  // An operator fixes the suite command (config or manifest) and resumes the
+  // batch, or gives up and abandons it (`sched abandon --batch`, which routes
+  // through `dissolving` like every other non-terminal batch state).
+  blocked: ['validating', 'dissolving'],
 };
 
 const SLOT_BASE_TRANSITIONS: Record<SlotStatus, SlotStatus[]> = {

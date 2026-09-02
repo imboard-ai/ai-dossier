@@ -436,6 +436,46 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(fs.existsSync(batch?.worktree as string)).toBe(false);
   }, 60_000);
 
+  it('#562: an unreadable suite report blocks the batch rather than dissolving it — nothing requeued, worktree preserved', async () => {
+    const repo = scratchRepo();
+    // Simulates the make-delegated-script bug (#562): the runner never got a
+    // parseable report at all, distinct from a genuinely red, PARSEABLE
+    // suite. `beginAttribution` would read `failing: []` as "nothing to
+    // attribute" and dissolve — `readable: false` must route elsewhere.
+    const h = batchHarness(repo, ['--mode=batch'], {
+      maxSlots: 1,
+      suite: () => ({
+        ok: false,
+        failing: [],
+        readable: false,
+        detail: "make: unrecognized option '--reporter=json'",
+      }),
+    });
+    h.enqueue([{ issue: 901, mode: 'slot', batch: 'b-unreadable', anchor: 900, tier: 'mid' }]);
+    // b-unreadable is already sealed forming → ready by enqueueEntries
+
+    h.tick(); // batch-setup + the (only) member
+    const pid = batchSlotPid(h, 'b-unreadable') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+
+    // The member is the last one — completing it runs the (fake, injected)
+    // unreadable suite inline. Blocked, not dissolved: no requeue, no revert.
+    const result = h.tick();
+    const batch = findBatch(h.state(), 'b-unreadable');
+    expect(batch?.status).toBe('blocked');
+    expect(result.failed).toContain('batch:b-unreadable');
+    expect(result.blocked).toEqual([]); // nothing requeued — the whole point of #562
+
+    const entry = h.state().entries.find((e) => e.issue === 901);
+    expect(entry?.mode).toBe('slot'); // never flipped to 'full' (no requeue)
+    expect(entry?.batch).toBe('b-unreadable'); // still owned by the batch
+
+    // The worktree is preserved (never torn down) — unlike a dissolve, which
+    // tears it down — so an operator can fix the suite command and resume.
+    expect(batch?.worktree).toBeTruthy();
+    expect(fs.existsSync(batch?.worktree as string)).toBe(true);
+  }, 60_000);
+
   it('incremental gate (AC2): a member that posts review done but fails cap run test.focused is evicted', async () => {
     const repo = scratchRepo();
     const capability: (worktree: string, id: string) => CapOutcome = (_worktree, id) =>

@@ -158,6 +158,15 @@ as the shorthand and are the fallback for any field a `tiers` entry leaves unset
 1.3.0 config with no `tiers` at all resolves identically to before — there is no on-disk
 migration, only resolution-time fallback in `resolveDispatch`.
 
+Config schema moves to 1.6.0 (#562): `dispatch` gains `suite_command` — an explicit argv
+override for the aggregate batch-suite command, the middle tier of the new resolution
+order (`cap run test.full` manifest → `dispatch.suite_command` → a repo-detected safe
+default that never forwards extra flags through an unrecognized wrapper script). Also new:
+the `blocked` `BatchStatus` and `batch-blocked` journal event — an unreadable suite report
+blocks the batch (worktree and every member commit preserved) instead of dissolving it,
+distinct from `dissolving`'s "a red suite named no offender." Neither is a persisted-field
+addition, so no `state.json` migration; only the config schema bump.
+
 Two engine-safety policies were explicit product decisions on #464:
 
 - **Pid identity is hybrid-verified (decision 1, option C).** Every spawn records the

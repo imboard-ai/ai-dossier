@@ -89,6 +89,7 @@ import type { ExecFn } from './project';
 import {
   beginAttribution,
   beginFixAttempt,
+  blockBatch,
   checkDissolveTrigger,
   createExecMilestonePoster,
   dissolveBatch,
@@ -810,7 +811,7 @@ function runValidate(
       poster(batch.anchor, batch.run_id, { phase: 'batch-validate', status: 'done', kv: {} });
     }
     deps.journal.append(
-      unitEvent('verify-complete', unit(batchId), { detail: 'suite green' }),
+      unitEvent('verify-complete', unit(batchId), { detail: suite.detail ?? 'suite green' }),
       now
     );
     deps.store.withLock((s) => {
@@ -819,6 +820,28 @@ function runValidate(
       return { state: transitionBatch(s, batchId, 'reviewing', {}, now), result: undefined };
     });
     spawnTailAgent(deps, config, dispatch, batchId, now, result);
+    return;
+  }
+
+  // #562: the suite report itself was unreadable (empty, unparseable, a
+  // spawn/timeout error) even after the runner's own fallback retry — NOT the
+  // same as a parseable report naming zero failures. Attribution would read
+  // `suite.failing` as "nothing to attribute" and dissolve a batch that may
+  // be fully green; block instead, preserving every member commit and the
+  // worktree, for an operator to fix the suite command and resume.
+  if (suite.readable === false) {
+    deps.journal.append(
+      unitEvent('suite-failed', unit(batchId), {
+        detail: suite.detail ?? 'suite report unreadable',
+      }),
+      now
+    );
+    const blocked = blockBatch(state, batchId, { reason: 'suite-unreadable' }, rDeps);
+    deps.store.withLock((s) => ({
+      state: applyBatchAndIssues(s, blocked.state, batchId, []),
+      result: undefined,
+    }));
+    result.failed.push(unit(batchId));
     return;
   }
 

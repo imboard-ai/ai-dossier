@@ -147,6 +147,9 @@ export interface FixAttemptRecord {
  *   validating → attributing → fixing(1 bounded attempt) → validating
  *              → evicting(revert range) → validating
  *   evictions > ⅓ OR revert-conflict → dissolving → members requeued
+ *   validating → blocked(suite-unreadable, after one fallback retry) → validating
+ *              (nothing requeued or reverted — an operator fixes the suite
+ *              command and the batch resumes; #562)
  *   awaiting-merge: CONFLICTING | auto-merge-blocked → rebasing → re-validating → shipping
  *                   (2nd failure → dissolved)
  * ```
@@ -169,7 +172,16 @@ export type BatchStatus =
   | 'reported'
   | 'done'
   | 'dissolving'
-  | 'dissolved';
+  | 'dissolved'
+  /**
+   * The suite report itself could not be trusted (empty, unparseable, or a
+   * spawn/timeout error) even after one fallback-runner retry (#562) — never
+   * reached for a genuinely red suite with a parseable failing-test list,
+   * which still goes through `attributing`. Nothing is requeued or reverted;
+   * an operator fixes the suite command (config or manifest) and resumes the
+   * batch from `validating`.
+   */
+  | 'blocked';
 
 /** Batch statuses that cannot transition further. */
 export const TERMINAL_BATCH_STATUSES: ReadonlySet<BatchStatus> = new Set(['done', 'dissolved']);
@@ -553,6 +565,16 @@ export interface DispatchConfig {
    */
   fix_prompt?: string;
   /**
+   * Aggregate batch-suite command, argv form (#562) — the middle tier of the
+   * suite-command resolution order (`cap run test.full` manifest → this →
+   * repo-detected safe default). Set this when the repo's `test` script
+   * delegates to something that cannot take extra reporter flags (a
+   * Makefile, a shell wrapper) and there is no `.dossier/automation/`
+   * manifest to declare `test.full` in instead. Never appended with extra
+   * flags — argv exactly as given.
+   */
+  suite_command?: string[];
+  /**
    * Prompt template for one batch member (#523 AC1) — runs `imboard-ai/git/
    * slot-cycle` inside the shared batch worktree; `{issue}`, `{batch}` and
    * `{worktree}` substituted. Defaults to `DEFAULT_MEMBER_PROMPT_TEMPLATE`.
@@ -722,7 +744,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.8.0',
 ];
 
-export const CONFIG_SCHEMA_VERSION = '1.5.0' as const;
+export const CONFIG_SCHEMA_VERSION = '1.6.0' as const;
 
 /** Config schema versions `loadConfig` accepts and migrates transparently on load (fields absent in an older version simply resolve to their defaults). */
 export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
@@ -731,6 +753,7 @@ export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
   '1.2.0',
   '1.3.0',
   '1.4.0',
+  '1.5.0',
 ];
 
 /** Config file shape (schema_version + the config itself). */
@@ -859,6 +882,11 @@ export type JournalEventName =
   | 'batch-rebased'
   | 'batch-dissolved'
   | 'batch-split'
+  // #562: the aggregate suite report was unreadable even after the one
+  // fallback-runner retry — the batch blocks (no requeue, no revert) rather
+  // than dissolving on an "unattributable" red suite that was never really
+  // parsed at all.
+  | 'batch-blocked'
   | 'milestone-post-failed'
   // #504 zombie-run fencing: the takeover record written before a redispatch
   // respawns, and the degraded path where it could not be written.
