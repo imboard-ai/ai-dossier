@@ -48,8 +48,11 @@ the next tick picks it up — there is no reload command.
 `tick.sh` does three things every 2 minutes:
 
 1. **Engine freshness.** Compares the installed `ai-dossier` CLI version against npm
-   latest and self-upgrades when no unit is mid-dispatch on any project — the engine
-   only ever runs code from a version an operator has actually npm-published.
+   latest and, if npm has a newer release, upgrades unconditionally — before ticking
+   any project, with no mid-dispatch check. (`ai-dossier sched start --auto-upgrade`
+   is the separate, safer in-engine equivalent that *does* gate on no unit being
+   mid-dispatch; `tick.sh` does not pass that flag.) Either way, the engine only ever
+   runs code from a version an operator has actually npm-published.
 2. **Tick every project.** For each slug in `~/.dossier/reset-fleet/projects.txt`, runs
    `ai-dossier sched start --once --project <slug>` (one reconcile+refill pass: spawn
    runnable units, verify completions against ground truth, detect stalls, watch parked
@@ -66,21 +69,29 @@ the next tick picks it up — there is no reload command.
 
 The Telegram channel (`~/.dossier/reset-fleet/telegram.env` holds the bot token and chat
 id, sourced by every script here) is the one place an operator watches instead of
-tailing logs: every sched journal event, every tracked-issue closure, and the
-end-of-pipeline summary land there.
+tailing logs — but it is a filtered, capped view, not the full journal: `fmt_events.py`
+forwards only `spawned`, `stalled`, `redispatched`, `unit-failed`, and `teardown-failed`
+events, at most 8 lines per tick. Every event (including `label-blocked`/`label-cleared`,
+`pr-parked`, `merge-accepted`, `report-*`) is still recorded in full in each project's
+`events.jsonl` — check that file directly for anything not in the whitelist above, plus
+tracked-issue closures and the end-of-pipeline summary, both of which Telegram does get.
 
 ## Stall detection and escalation
 
 Within a project, `sched start`'s reconcile tick detects a unit with no new runstate
 milestone AND no new pushed commit for `stall_timeout_ms` (the per-project default
-above), or the phase-specific default when one applies — `implement` gets a longer
-built-in allowance (90 min) than other phases because it can run 1-3h on a large repo
-with no intermediate signal. A stalled unit is killed and redispatched on the SAME
-issue, one tier stronger (`mechanical → mid → strong`), reading that tier's own
-resolved command/model. Two escalations (or a stall at `strong`) fails the unit and
-blocks anything that transitively depends on it — the operator sees `unit-failed` and
-`dependents-blocked` in the Telegram feed, not a silently stuck slot. An agent exiting
-is never itself proof of completion — the engine only marks a unit done when the
+above), or a phase-specific timeout when one applies. `implement` carries a built-in
+90-minute **floor** (#495) — `max(90 min, stall_timeout_ms)`, never a shorter allowance
+than the project global — because it can run 1-3h on a large repo with no intermediate
+signal: 90 min on `imboard-ai-ai-dossier` (1h global), 3h on `imboard-ai-imboard-monorepo`
+(3h global, so the floor doesn't change it there). An explicit
+`dispatch.phase_stall_timeout_ms` entry in config overrides both. A stalled unit is
+killed and redispatched on the SAME issue, one tier stronger (`mechanical → mid →
+strong`), reading that tier's own resolved command/model. Two escalations (or a stall at
+`strong`) fails the unit and blocks anything that transitively depends on it — the
+operator sees `unit-failed` in the Telegram feed (`dependents-blocked` is recorded in
+`events.jsonl` but is not in the Telegram whitelist above), not a silently stuck slot.
+An agent exiting is never itself proof of completion — the engine only marks a unit done when the
 issue's `runstate` trail shows a terminal milestone or GitHub shows the issue closed —
 so a unit that exits early without a real milestone rides the same stall ladder as one
 that hangs.
@@ -99,9 +110,13 @@ Nothing sched-specific has to happen. The only durable state is:
 So the pipeline self-resumes on the next tick after boot. If it doesn't — check
 `crontab -l` for the `tick.sh` line first (it self-removes once every tracked issue is
 closed, which is correct behavior, not a bug, if that already happened) and confirm
-`~/.dossier/reset-fleet/telegram.env` is still present (a missing env file fails the
-`source` at the top of the script, and the script has no fallback for that). Neither
-`state.json` nor `events.jsonl` needs manual repair after a clean reboot.
+`~/.dossier/reset-fleet/telegram.env` is still present. `tick.sh` runs with `set -u` but
+not `set -e`, so a missing env file does not stop it at the `source` line — it keeps
+going, ticks the first project, then dies on the first Telegram send (unbound bot
+token/chat id variable). That means partial progress, not a clean stop: the first
+project in `projects.txt` gets ticked but later projects and the closure/report-arming
+checks never run that cycle. Neither `state.json` nor `events.jsonl` needs manual repair
+after a clean reboot.
 
 ## The two human checkpoints
 
@@ -114,7 +129,10 @@ The pipeline is designed to stop and hand off rather than guess, in exactly two 
    correctly, not failing. `sched enqueue` also pre-screens for issues already labeled
    `decision-pending` / `needs-clarification` / `epic` / `decomposed` and lands them as
    `blocked` instead of spending a slot dispatching an agent that would only rediscover
-   the same block. An operator resolves the question on the issue and re-enqueues.
+   the same block. An operator resolves the question and removes the label — the engine
+   re-reads hard-block labels every tick (#544) and returns the entry to `queued`
+   (`label-cleared`) by itself; no re-enqueue is needed. (Batch members and batch anchors
+   are not re-screened this way — see the scope note in the sched README.)
 2. **Filing Step-4 widening from a gate report.** The batch-cycles rollout (RFC-0001)
    is staged — Step 4 ("Widen": more issue classes, more concurrent batches) only
    starts once a pilot's regression window has actually elapsed clean. `tick.sh` arms
@@ -122,19 +140,26 @@ The pipeline is designed to stop and hand off rather than guess, in exactly two 
    report issue (`#529`) and, once the pipeline finishes, its completion message names
    the next step explicitly ("file Step-4 widening from #529's verdict"). Filing that
    Step-4 issue, reading the gate report's verdict, is a human action — see
-   [`docs/reports/`](../reports/) for the existing gate reports (`batch-pilot.md`,
-   `batch-pilot-2-execution.md`, `sched-parity.md`, `model-agnostic-fleet.md`) this
-   report joins.
+   [`docs/reports/`](../reports/) for the gate reports #529's report will join
+   (`batch-pilot.md`, `batch-pilot-2-execution.md`, `sched-parity.md`,
+   `model-agnostic-fleet.md`; that directory also holds other non-gate reports).
 
 ## Runbook
 
-All commands run from inside the target repo (or pass `--project <slug>`); most also
-take `--json` for machine-readable output.
+Run every command from inside the target repo — `--project <slug>` only selects which
+`~/.dossier/sched/<project>/` state directory to act on, it does NOT change repo
+context: `start` resolves git/`gh` ground truth from the current directory regardless of
+`--project`, and `enqueue` needs an explicit `--repo <owner/name>` when `--project`
+targets a different repo than the one you're in (`tick.sh` always `cd`s into the target
+repo first for exactly this reason). `stats` is the one exception — it has no
+`--project` at all, since `~/.dossier/runs.jsonl` is a single global file, not
+per-project. Most subcommands also take `--json` for machine-readable output.
 
 | Task | Command |
 |---|---|
 | Enqueue issues (full-cycle) | `ai-dossier sched enqueue --issues 101,105..109 --deps 100 --tier mid` |
 | Enqueue a batch (slot mode) | `ai-dossier sched enqueue --issues 540,542,543 --mode slot --batch b1` |
+| Enqueue a batch, more members to follow | `ai-dossier sched enqueue --issues 540,542 --mode slot --batch b1 --more-members-expected` |
 | Enqueue from a batch-prep manifest | `ai-dossier sched enqueue --from-manifest batch-prep.json` |
 | Check queue/slots/batches/blocked/failed | `ai-dossier sched status` |
 | Stop new assignments (live units keep running) | `ai-dossier sched pause` |
@@ -143,6 +168,7 @@ take `--json` for machine-readable output.
 | Dissolve a batch (members requeue full-cycle) | `ai-dossier sched abandon --batch b1` |
 | Run the engine continuously | `ai-dossier sched start` (Ctrl-C stops it; live agents keep running) |
 | Run one reconcile+refill tick (what cron does) | `ai-dossier sched start --once` |
-| Per-issue token/cost totals | `ai-dossier sched stats --issues 4..9` |
+| Run one tick, self-upgrading the CLI first (gated on no mid-dispatch unit) | `ai-dossier sched start --once --auto-upgrade` |
+| Per-issue token/cost totals (global, not per-project) | `ai-dossier sched stats --issues 4..9` |
 | Re-arm the tick cron (if it self-removed after all-done) | `(crontab -l 2>/dev/null; echo "*/2 * * * * $HOME/.dossier/reset-fleet/tick.sh >> $HOME/.dossier/reset-fleet/tick.log 2>&1") \| crontab -` |
 | Re-schedule the 7-day report by hand | `ai-dossier sched enqueue --project imboard-ai-ai-dossier --issues 529 --tier strong` (what `enqueue-report.sh` does; only needed if the automatic cron-arming step in `tick.sh` was skipped or missed) |
