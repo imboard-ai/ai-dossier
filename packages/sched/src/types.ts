@@ -147,9 +147,11 @@ export interface FixAttemptRecord {
  *   validating → attributing → fixing(1 bounded attempt) → validating
  *              → evicting(revert range) → validating
  *   evictions > ⅓ OR revert-conflict → dissolving → members requeued
- *   validating → blocked(suite-unreadable, after one fallback retry) → validating
- *              (nothing requeued or reverted — an operator fixes the suite
- *              command and the batch resumes; #562)
+ *   validating → blocked(suite-unreadable, after the fallback retry when one
+ *              applied) → validating (nothing requeued or reverted; the
+ *              `validating` edge exists for a future `sched resume`-style
+ *              verb — not yet implemented, so `sched abandon --batch` is
+ *              today's only real exit from `blocked`; #562)
  *   awaiting-merge: CONFLICTING | auto-merge-blocked → rebasing → re-validating → shipping
  *                   (2nd failure → dissolved)
  * ```
@@ -175,11 +177,13 @@ export type BatchStatus =
   | 'dissolved'
   /**
    * The suite report itself could not be trusted (empty, unparseable, or a
-   * spawn/timeout error) even after one fallback-runner retry (#562) — never
+   * spawn/timeout error) even after the fallback-runner retry, when the
+   * resolved primary tier was cap/config (#562) — a repo-detected primary has
+   * no further fallback and blocks on its first unreadable report. Never
    * reached for a genuinely red suite with a parseable failing-test list,
-   * which still goes through `attributing`. Nothing is requeued or reverted;
-   * an operator fixes the suite command (config or manifest) and resumes the
-   * batch from `validating`.
+   * which still goes through `attributing`. Nothing is requeued or reverted.
+   * The `validating` edge below is where a future resume verb would land;
+   * today `sched abandon --batch` is the only real exit from this status.
    */
   | 'blocked';
 

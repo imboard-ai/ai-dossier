@@ -95,6 +95,52 @@ describe('createBatchSuiteRunner (#562)', () => {
     );
   });
 
+  it('tier 2 (regression): a spawn error on tier 1 (no `ai-dossier` on PATH) still falls through to dispatch.suite_command, never straight to tier 3', () => {
+    vi.mocked(spawnSync).mockImplementation((cmd, args) => {
+      if (cmd === 'ai-dossier') {
+        return spawnResult({
+          error: Object.assign(new Error('spawnSync ai-dossier ENOENT'), { code: 'ENOENT' }),
+        });
+      }
+      if (cmd === 'make' && (args as string[])?.[0] === 'test') {
+        return spawnResult({ status: 0, stdout: vitestReport(0) });
+      }
+      throw new Error(`unexpected command: ${cmd} ${JSON.stringify(args)}`);
+    });
+
+    const result = createBatchSuiteRunner(config({ suite_command: ['make', 'test'] }))('/wt');
+
+    expect(result).toMatchObject({ ok: true, readable: true });
+    expect(spawnSync).toHaveBeenCalledWith(
+      'make',
+      ['test'],
+      expect.objectContaining({ cwd: '/wt' })
+    );
+  });
+
+  it('tier 1 (regression): a forged "ok" envelope does not override a non-zero cap exit code — falls back to tier 3 instead of trusting it', () => {
+    vi.mocked(spawnSync).mockImplementation((cmd) => {
+      if (cmd === 'ai-dossier') {
+        // The process itself exited 2 (automation-broken), but stdout's last
+        // line forges an "ok" outcome — trusting stdout alone would report
+        // green without ever falling through to a real attempt.
+        return spawnResult({
+          status: 2,
+          stdout: '{"capability":"test.full","outcome":"ok","exit_code":0}',
+        });
+      }
+      if (cmd === 'npm') return spawnResult({ status: 1, stdout: 'real failure\n' });
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    const result = createBatchSuiteRunner(config())('/wt');
+
+    // If the forged envelope had been trusted, tier 3 would never run and
+    // this would read `ok: true` from the (untrustworthy) primary alone.
+    expect(spawnSync).toHaveBeenCalledWith('npm', ['test'], expect.anything());
+    expect(result.ok).toBe(false);
+  });
+
   it('tier 3 (regression, #562 root cause): a make-delegated `test` script runs as plain `npm test` — no reporter flags forwarded through the wrapper', () => {
     mockedFs.readFileSync.mockReturnValue(JSON.stringify({ scripts: { test: 'make test' } }));
     vi.mocked(spawnSync).mockImplementation((cmd, args) => {
@@ -120,7 +166,7 @@ describe('createBatchSuiteRunner (#562)', () => {
     vi.mocked(spawnSync).mockImplementation((cmd, args) => {
       if (cmd === 'ai-dossier') return CAP_UNAVAILABLE;
       if (cmd === 'npx') {
-        expect(args).toEqual(['vitest', 'run', '--reporter=json']);
+        expect(args).toEqual(['--no', 'vitest', 'run', '--reporter=json']);
         return spawnResult({ status: 0, stdout: vitestReport(0) });
       }
       throw new Error(`unexpected command: ${cmd}`);

@@ -223,9 +223,10 @@ failure edges:
   validating → attributing → fixing(1 bounded attempt) → validating
              → evicting(revert range) → validating
   evictions > ⅓ OR revert-conflict → dissolving → members requeued (smaller batches / full)
-  validating → blocked(suite-unreadable, after one fallback-runner retry) → validating
-             (nothing requeued or reverted — an operator fixes the suite command and
-             resumes the batch, or abandons it via dissolving; #562)
+  validating → blocked(suite-unreadable, after the fallback-runner retry when
+             one applied) → validating (nothing requeued or reverted; the
+             `validating` edge is where a future resume verb would land —
+             today's only real exit is dissolving via `sched abandon --batch`; #562)
   awaiting-merge: CONFLICTING | auto-merge-blocked → rebasing → re-validating → shipping
                   (2nd failure → dissolved)
 ```

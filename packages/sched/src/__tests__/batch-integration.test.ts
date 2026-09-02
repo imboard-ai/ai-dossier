@@ -10,7 +10,7 @@
  * to `done`, one member evicted (batch still ships with the survivors), and a
  * dissolve (>⅓ evicted, no ship).
  */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -135,6 +135,47 @@ function scratchRepo(): string {
   git(['commit', '-m', 'init'], work);
   git(['push', '-u', 'origin', 'main'], work);
   return work;
+}
+
+/**
+ * AC5 (#562): a scratch repo seeded with a REAL `.dossier/automation/manifest.yaml`
+ * declaring `test.full` — same shape as this repo's own manifest — so a batch
+ * worktree branched off it can run a genuine `ai-dossier cap run test.full`
+ * (no mocking of `spawnSync`, `cap`, or the manifest parser).
+ */
+function scratchRepoWithRealSuite(): string {
+  const work = scratchRepo();
+  fs.mkdirSync(path.join(work, '.dossier', 'automation'), { recursive: true });
+  fs.writeFileSync(
+    path.join(work, '.dossier', 'automation', 'manifest.yaml'),
+    'version: 1\ncapabilities:\n  test.full:\n    command: make test\n    lifecycle: active\n'
+  );
+  fs.writeFileSync(
+    path.join(work, 'Makefile'),
+    'test:\n\t@echo "Running tests..."\n\t@echo "OK"\n'
+  );
+  const git = (args: string[]) =>
+    execFileSync('git', args, { cwd: work, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  git(['add', '.']);
+  git(['commit', '-m', 'seed real cap manifest + Makefile']);
+  git(['push', 'origin', 'main']);
+  return work;
+}
+
+/**
+ * A real `runBatchSuite` (AC5, #562) — shells the actual `ai-dossier cap run
+ * test.full` in the batch worktree, exactly what `cli/src/batch-suite-runner.ts`'s
+ * tier 1 does, rather than a canned mock result.
+ */
+function realCapRunSuite(worktree: string): SuiteResult {
+  const spawned = spawnSync('ai-dossier', ['cap', 'run', 'test.full'], {
+    cwd: worktree,
+    encoding: 'utf-8',
+    timeout: 60_000,
+  });
+  const lastLine = (spawned.stdout ?? '').trim().split('\n').pop() ?? '';
+  const envelope = JSON.parse(lastLine) as { outcome?: string };
+  return { ok: envelope.outcome === 'ok', failing: [], readable: true, detail: lastLine };
 }
 
 /**
@@ -474,6 +515,44 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     // tears it down — so an operator can fix the suite command and resume.
     expect(batch?.worktree).toBeTruthy();
     expect(fs.existsSync(batch?.worktree as string)).toBe(true);
+  }, 60_000);
+
+  it('#562 AC5: a 2-member docs batch ships green end-to-end via a REAL `ai-dossier cap run test.full` (no mocked suite result)', async () => {
+    const repo = scratchRepoWithRealSuite();
+    // Unlike every other test in this file, `suite` is not a canned result —
+    // it shells the real `ai-dossier` binary against the batch worktree,
+    // which really does have the manifest+Makefile seeded above (a git
+    // worktree of the branch `scratchRepoWithRealSuite` pushed). This is
+    // tier 1 of `cli/src/batch-suite-runner.ts`'s resolution order, run for
+    // real — the same mechanism that fixes THIS repo's own batch path.
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, suite: realCapRunSuite });
+    h.enqueue([
+      { issue: 1001, mode: 'slot', batch: 'b-ac5', anchor: 1000, tier: 'mid' },
+      { issue: 1002, mode: 'slot', batch: 'b-ac5', tier: 'mid' },
+    ]);
+    // b-ac5 is already sealed forming → ready by enqueueEntries
+
+    h.tick(); // batch-setup + member 1
+    let pid = batchSlotPid(h, 'b-ac5') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // member 1 green → member 2
+
+    // Member 2 (the last): completing it runs the REAL `cap run test.full`
+    // inline against the real batch worktree — green — and spawns the tail.
+    pid = batchSlotPid(h, 'b-ac5') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    const result = h.tick();
+    const batch = findBatch(h.state(), 'b-ac5');
+    expect(batch?.status).toBe('reviewing');
+    expect(result.spawned).toEqual(['batch:b-ac5']); // the tail agent
+
+    // The tail agent parks the PR — the batch ships with both members,
+    // driven by a real green suite run, not a test fixture.
+    pid = batchSlotPid(h, 'b-ac5') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    const parked = h.tick();
+    expect(parked.parked).toEqual(['batch:b-ac5']);
+    expect(findBatch(h.state(), 'b-ac5')?.status).toBe('awaiting-merge');
   }, 60_000);
 
   it('incremental gate (AC2): a member that posts review done but fails cap run test.focused is evicted', async () => {

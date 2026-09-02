@@ -164,8 +164,13 @@ order (`cap run test.full` manifest → `dispatch.suite_command` → a repo-dete
 default that never forwards extra flags through an unrecognized wrapper script). Also new:
 the `blocked` `BatchStatus` and `batch-blocked` journal event — an unreadable suite report
 blocks the batch (worktree and every member commit preserved) instead of dissolving it,
-distinct from `dissolving`'s "a red suite named no offender." Neither is a persisted-field
-addition, so no `state.json` migration; only the config schema bump.
+distinct from `dissolving`'s "a red suite named no offender." `blocked` is a new
+persisted-field *value*, not a new field, so no `state.json` schema-version bump or
+backfill is needed on load — but it is NOT downgrade-safe: an older build's
+`BATCH_STATUSES` (derived from its own `BATCH_TRANSITIONS`) will reject a `state.json`
+containing a `blocked` batch with "unknown batch status", bricking that project's whole
+`SchedStore.load()`. Resume or abandon any blocked batch before downgrading past this
+version.
 
 Two engine-safety policies were explicit product decisions on #464:
 
@@ -244,6 +249,8 @@ against real scratch repos.
 validating → attributing → fixing (ONE bounded attempt) → validating
                          → evicting (revert the member's commits) → validating
   > ⅓ of members evicted, or a revert conflict → dissolving → members requeued
+  suite report unreadable, after the fallback retry when one applied
+                         → blocked → validating (nothing requeued/reverted; #562)
 awaiting-merge (CONFLICTING | auto-merge-blocked)
                          → rebasing → re-validating → shipping
                          → (2nd occurrence) dissolving into two half-batches
@@ -292,11 +299,12 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    with no `anchor` or no `run_id` cannot post — the CLI requires both — so the milestone
    it could not post is journaled in full instead of vanishing.
 
-Ten journal events carry the detail: `suite-failed`, `attributed`, `fix-dispatched`,
+Eleven journal events carry the detail: `suite-failed`, `attributed`, `fix-dispatched`,
 `fix-resolved`, `member-evicted`, `revert-conflict`, `batch-rebased`, `batch-dissolved`,
-`batch-split` and `milestone-post-failed`, plus `git-failed` for any git command that
-returned non-zero (the injected `ExecFn` collapses every git failure into `null`, so the
-command that produced one is always recorded).
+`batch-blocked` (#562 — the suite report was unreadable), `batch-split` and
+`milestone-post-failed`, plus `git-failed` for any git command that returned non-zero (the
+injected `ExecFn` collapses every git failure into `null`, so the command that produced one
+is always recorded).
 
 Schema 1.3.0 carries the new state: `BatchEntry` gains `anchor`, `branch`, `run_id`,
 `eviction_groups`, `evictions`, `fix_attempts` and `rebase_attempts`; `QueueEntry` gains
@@ -353,6 +361,7 @@ ready → executing(member i/N) ⟲ → validating → reviewing → shipping
   → awaiting-merge → merged → deployed → reported → done
 failure rails: executing → dissolving (a member self-reports blocked)
                validating → attributing → (fixing | evicting) → validating → dissolving
+               validating → blocked (suite report unreadable, #562) → validating
 ```
 
 - **One shared worktree/branch per batch**, claimed once by a deterministic (no LLM)
@@ -456,6 +465,8 @@ import {
   TEARDOWN_TIMEOUT_MS,   // teardown subprocess timeout (120 s)
   attributeByOverlap,    // #472 pure stage-1 attribution: failing tests → members
   parseVitestJson,       // vitest --reporter=json → failing tests
+  isReadableVitestReport, // #562: a parseable { testResults: [...] } document exists —
+                          //   distinct from "zero failures"
   parseBoundaryCommits,  // git log → issue-boundary commits via the (#N) trailer
   memberRanges,          // boundary commits → each member's commit list
   runAttributionBisect,  // stage-2: real git bisect over the failing tests only
@@ -465,6 +476,8 @@ import {
   evictMembers,          // revert + requeue with evidence + suite re-run + dissolve check
   checkDissolveTrigger,  // pure: > ⅓ of members evicted
   dissolveBatch,         // full or halved dissolve; preserves everything green
+  blockBatch,            // #562: unreadable suite report → blocked; no requeue, no revert
+  type BlockOptions,     // { reason, milestonePhase? } for blockBatch
   handlePrConflict,      // rebase + re-ship once, then dissolve into halves
   createExecMilestonePoster, // batch milestones via `ai-dossier runstate post`
   expandEvictionGroups,  // members that must revert together (§E.4 eviction groups)
@@ -528,8 +541,8 @@ telemetry" below.
 ├── state.json     # hot operational truth — atomic tmp+fsync+rename writes;
 ├── config.json    # durable intent: max_slots, stall_timeout_ms, reconcile_interval_ms,
 │                  # pr_poll_interval_ms, dispatch (incl. report_prompt,
-│                  # phase_stall_timeout_ms, fence_takeover_timeout_ms, tiers — #527),
-│                  # auto_upgrade — #537
+│                  # phase_stall_timeout_ms, fence_takeover_timeout_ms, tiers — #527,
+│                  # suite_command — #562), auto_upgrade — #537
 ├── events.jsonl   # append-only event journal (the operator's flight recorder)
 ├── runs/          # per-unit agent output logs (issue-<n>.log)
 └── .sched-lock/   # cross-process directory mutex (pid; stolen from dead holders)

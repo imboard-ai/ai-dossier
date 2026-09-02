@@ -140,9 +140,10 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   done: [],
   dissolving: ['dissolved'],
   dissolved: [],
-  // An operator fixes the suite command (config or manifest) and resumes the
-  // batch, or gives up and abandons it (`sched abandon --batch`, which routes
-  // through `dissolving` like every other non-terminal batch state).
+  // `validating` is where a future resume verb would land once an operator
+  // fixes the suite command — no such CLI command exists yet, so today's only
+  // real exit is giving up (`sched abandon --batch`, which routes through
+  // `dissolving` like every other non-terminal batch state).
   blocked: ['validating', 'dissolving'],
 };
 

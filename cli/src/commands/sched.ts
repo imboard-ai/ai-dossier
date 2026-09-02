@@ -50,7 +50,7 @@ import {
   unitEvent,
 } from '@ai-dossier/sched';
 import type { Command } from 'commander';
-import { createBatchSuiteRunner } from '../batch-suite-runner';
+import { BATCH_SUITE_TIMEOUT_MS, createBatchSuiteRunner } from '../batch-suite-runner';
 import { formatCost, formatCount } from '../cost-format';
 import { formatAge, formatDurationMs } from '../duration';
 import {
@@ -66,16 +66,15 @@ import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
 import { buildSchedCostReport, type IssueCost } from '../sched-run-stats';
 import { renderTable } from '../table';
 
-/** Aggregate suite runs can be minutes long (full workspace test suite, not a focused subset). */
-const BATCH_SUITE_TIMEOUT_MS = 600_000;
-
 /**
  * Batch-worktree `ai-dossier cap run <id>` runner for the per-member
  * incremental gate (#523 AC2). `spawnSync` (not the plain `ExecFn`, which
  * throws away stdout on a non-zero exit) because `cap run`'s `task-failed`
  * outcome — a legitimately failing test/typecheck — IS exit code 1, and the
  * JSON envelope naming which of the four outcomes it was is the LAST stdout
- * line either way (docs/reference/capabilities.md).
+ * line either way (docs/reference/capabilities.md). Reuses the aggregate
+ * suite's timeout budget (`BATCH_SUITE_TIMEOUT_MS`) — both are batch-worktree
+ * subprocess calls with no reason to disagree on how long is too long.
  */
 function createBatchCapabilityRunner(): (worktree: string, capabilityId: string) => CapOutcome {
   return (worktree, capabilityId) => {

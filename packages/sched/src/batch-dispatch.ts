@@ -260,7 +260,9 @@ function safeSuite(deps: BatchDispatchDeps, batchId: string, worktree: string): 
   } catch (err) {
     const detail = `suite runner threw: ${(err as Error).message}`;
     journalEvent(deps, 'suite-failed', unit(batchId), { detail });
-    return { ok: false, failing: [], detail };
+    // A throw is exactly "no trustworthy report" (#562) — must not default to
+    // `readable: true` and look like a parseable report naming zero failures.
+    return { ok: false, failing: [], readable: false, detail };
   }
 }
 
@@ -787,8 +789,11 @@ function boundaryCommits(deps: BatchDispatchDeps, batch: BatchEntry): BoundaryCo
 /**
  * `validating`, no live slot: run the aggregate suite (deterministic — no
  * agent, no slot claimed, matching AC5's "member or batch-LLM-step" wording).
- * Green proceeds to the tail; red attributes and either fixes one offender or
- * dissolves when nothing could be attributed (RFC F.2/F.8).
+ * Green proceeds to the tail; an unreadable report (never got a parseable
+ * report at all, distinct from a parseable one naming zero failures) blocks
+ * the batch instead of attributing (#562); a genuinely red, parseable report
+ * attributes and either fixes one offender or dissolves when nothing could be
+ * attributed (RFC F.2/F.8).
  */
 function runValidate(
   deps: BatchDispatchDeps,
@@ -828,7 +833,8 @@ function runValidate(
   // same as a parseable report naming zero failures. Attribution would read
   // `suite.failing` as "nothing to attribute" and dissolve a batch that may
   // be fully green; block instead, preserving every member commit and the
-  // worktree, for an operator to fix the suite command and resume.
+  // worktree, for an operator to inspect. `blocked` has no CLI resume verb
+  // yet — `sched abandon --batch` is today's only real exit.
   if (suite.readable === false) {
     deps.journal.append(
       unitEvent('suite-failed', unit(batchId), {
@@ -841,6 +847,9 @@ function runValidate(
       state: applyBatchAndIssues(s, blocked.state, batchId, []),
       result: undefined,
     }));
+    // `result.blocked` is "issue numbers requeued full-cycle by a dissolve"
+    // (see `BatchTickResult`'s field doc) — a blocked batch requeues nothing,
+    // so it is reported only under `failed`, not under `blocked`.
     result.failed.push(unit(batchId));
     return;
   }

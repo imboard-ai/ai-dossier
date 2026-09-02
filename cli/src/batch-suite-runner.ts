@@ -42,6 +42,24 @@ import {
 /** Aggregate suite runs can be minutes long (full workspace test suite, not a focused subset). */
 export const BATCH_SUITE_TIMEOUT_MS = 600_000;
 
+/**
+ * `spawnSync`'s default `maxBuffer` is 1 MB — a full-workspace vitest JSON
+ * report routinely exceeds that, and a truncated buffer surfaces as
+ * `spawned.error` (ENOBUFS), which every batch would then read as an
+ * unreadable report and block on (mirrors `cli/src/commands/run.ts`'s own
+ * `maxBuffer` budget for the same reason).
+ */
+const MAX_BUFFER_BYTES = 32 * 1024 * 1024;
+
+/** Tail of stderr appended to a failure `detail` — enough to show the real cause (e.g. `make: unrecognized option '--reporter=json'`, which goes to stderr) without unbounded log growth. */
+const STDERR_TAIL_CHARS = 500;
+
+function stderrTail(stderr: string | null | undefined): string {
+  const trimmed = (stderr ?? '').trim();
+  if (trimmed.length === 0) return '';
+  return ` — stderr: ${trimmed.slice(-STDERR_TAIL_CHARS)}`;
+}
+
 interface RunOutcome {
   source: string;
   result: SuiteResult;
@@ -54,15 +72,24 @@ function runCommand(
   source: string,
   timeoutMs: number
 ): SuiteResult {
+  if (argv.length === 0) {
+    return {
+      ok: false,
+      failing: [],
+      readable: false,
+      detail: `${source}: empty command — nothing to run`,
+    };
+  }
   const [cmd, ...args] = argv;
   const spawned = spawnSync(cmd, args, {
     cwd: worktree,
     encoding: 'utf-8',
     timeout: timeoutMs,
+    maxBuffer: MAX_BUFFER_BYTES,
   });
-  // `spawned.error` (ENOENT, ETIMEDOUT at the budget above, EACCES) means the
-  // command never produced a trustworthy report — this must never look like a
-  // parseable report naming zero failures.
+  // `spawned.error` (ENOENT, ETIMEDOUT at the budget above, EACCES, ENOBUFS)
+  // means the command never produced a trustworthy report — this must never
+  // look like a parseable report naming zero failures.
   if (spawned.error) {
     return {
       ok: false,
@@ -82,15 +109,19 @@ function runCommand(
     detail: ok
       ? `${source}: ${argv.join(' ')} — ok`
       : `${source}: ${argv.join(' ')} exited ${spawned.status ?? `signal ${spawned.signal ?? 'unknown'}`}` +
-        (readable ? ` (${failing.length} failing)` : ' (report unreadable)'),
+        (readable ? ` (${failing.length} failing)` : ' (report unreadable)') +
+        (readable ? '' : stderrTail(spawned.stderr)),
   };
 }
 
 /**
  * Tier 1: `ai-dossier cap run test.full`. Returns `'unavailable'` when the
  * repo has no manifest, no `test.full` entry, or it is `lifecycle: shadow` —
- * the capability layer's own `capability-unavailable` outcome — so the
- * caller falls through to tier 2 without treating that as a failed suite run.
+ * the capability layer's own `capability-unavailable` outcome — or when the
+ * capability layer could not even be invoked (no `ai-dossier` on `PATH`, a
+ * stale shadow copy, a timeout) — either way "no trustworthy tier-1 answer
+ * here", so the caller falls through to tier 2 (AC1's resolution order)
+ * rather than skipping straight past a configured `dispatch.suite_command`.
  */
 function runCapabilityTestFull(worktree: string, timeoutMs: number): RunOutcome | 'unavailable' {
   const source = 'cap run test.full';
@@ -98,28 +129,22 @@ function runCapabilityTestFull(worktree: string, timeoutMs: number): RunOutcome 
     cwd: worktree,
     encoding: 'utf-8',
     timeout: timeoutMs,
+    maxBuffer: MAX_BUFFER_BYTES,
   });
-  if (spawned.error) {
-    return {
-      source,
-      result: {
-        ok: false,
-        failing: [],
-        readable: false,
-        detail: `${source} failed to run: ${spawned.error.message} (cwd=${worktree})`,
-      },
-    };
-  }
+  if (spawned.error) return 'unavailable';
   const stdout = spawned.stdout ?? '';
   const lastLine = stdout.trim().split('\n').pop() ?? '';
-  let envelope: { outcome?: string; exit_code?: number } | null = null;
+  let envelope: { outcome?: string; exit_code?: number; reason?: string } | null = null;
   try {
-    envelope = JSON.parse(lastLine) as { outcome?: string; exit_code?: number };
+    envelope = JSON.parse(lastLine) as { outcome?: string; exit_code?: number; reason?: string };
   } catch {
     envelope = null;
   }
   if (envelope?.outcome === 'capability-unavailable') return 'unavailable';
-  const ok = envelope?.outcome === 'ok';
+  // The exit code is `cap run`'s own — it cannot be forged by anything the
+  // capability's command writes to stdout, unlike the envelope's `outcome`
+  // field. Both must agree before this is trusted as green (#562 review).
+  const ok = envelope?.outcome === 'ok' && spawned.status === 0;
   const readable = isReadableVitestReport(stdout);
   const failing = readable ? parseVitestJson(stdout) : [];
   return {
@@ -131,8 +156,10 @@ function runCapabilityTestFull(worktree: string, timeoutMs: number): RunOutcome 
       detail:
         envelope !== null
           ? `${source}: outcome=${envelope.outcome} exit_code=${envelope.exit_code ?? 'unknown'}` +
-            (!ok && readable ? ` (${failing.length} failing)` : '')
-          : `${source}: no envelope line — treating as unreadable`,
+            (envelope.reason ? ` reason=${envelope.reason}` : '') +
+            (!ok && readable ? ` (${failing.length} failing)` : '') +
+            (!ok && !readable ? stderrTail(spawned.stderr) : '')
+          : `${source}: no envelope line — treating as unreadable${stderrTail(spawned.stderr)}`,
     },
   };
 }
@@ -149,15 +176,24 @@ function detectSuiteCommand(worktree: string): string[] {
   let script: string | undefined;
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(worktree, 'package.json'), 'utf-8')) as {
-      scripts?: Record<string, string>;
+      scripts?: Record<string, unknown>;
     };
-    script = pkg.scripts?.test;
+    const raw = pkg.scripts?.test;
+    // `scripts.test` is repo-controlled content (a batch member's own
+    // package.json) — a non-string value must degrade to "no script found",
+    // never throw out of this function and back into `safeSuite`'s
+    // less-specific catch.
+    script = typeof raw === 'string' ? raw : undefined;
   } catch {
     script = undefined;
   }
   const head = script?.trim().split(/\s+/)[0];
-  if (head === 'vitest') return ['npx', 'vitest', 'run', '--reporter=json'];
-  if (head === 'jest') return ['npx', 'jest', '--json'];
+  if (head === 'vitest') return ['npx', '--no', 'vitest', 'run', '--reporter=json'];
+  if (head === 'jest') return ['npx', '--no', 'jest', '--json'];
+  // pytest's output is never a parseable vitest JSON report — a red pytest
+  // suite is always `readable: false` here and blocks the batch rather than
+  // attributing (set `dispatch.suite_command` to a JSON-reporting invocation,
+  // e.g. `pytest --json-report`, to keep attribution available for a Python repo).
   if (head === 'pytest') return ['pytest', '--tb=short'];
   return ['npm', 'test'];
 }
@@ -171,9 +207,10 @@ function runDetected(worktree: string, timeoutMs: number): SuiteResult {
  * three-tier order, retrying once with the tier-3 safe default when the
  * resolved primary tier's report is unreadable.
  *
- * `timeoutMs` defaults to `BATCH_SUITE_TIMEOUT_MS` — overridable so a test
- * can exercise the "runner never produced a trustworthy report" path
- * (`spawned.error` / ETIMEDOUT) without waiting ten minutes for it.
+ * `timeoutMs` defaults to `BATCH_SUITE_TIMEOUT_MS` — overridable so a future
+ * test can exercise a REAL `spawnSync` timeout (ETIMEDOUT) against a
+ * deliberately slow fixture command without waiting ten minutes for it; this
+ * module's own tests mock `spawnSync` directly instead and don't need it.
  */
 export function createBatchSuiteRunner(
   config: SchedConfig,
