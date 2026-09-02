@@ -1160,6 +1160,8 @@ describe('runstate spec table — classify and batch phases (#461)', () => {
 
   it('pins the #465-facing value-grammar key set', () => {
     expect(Object.keys(KEY_VALUE_RULES).sort()).toEqual([
+      'ac_met',
+      'ac_total',
       'areas',
       'batch',
       'confidence',

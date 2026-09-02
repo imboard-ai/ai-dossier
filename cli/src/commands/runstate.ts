@@ -54,10 +54,12 @@ import {
 } from '../runstate';
 import {
   buildStatsReport,
+  type ClassAggregate,
   type FailedIssue,
   type IssueTrail,
   type ModelAggregate,
   modelNote,
+  PERCENT,
   type RunStats,
   renderValue,
   type StatsReport,
@@ -121,13 +123,12 @@ interface StatsOptions {
 /** Characters kept in a `verify` warning, which is one line among several. */
 const WARNING_SNIPPET_LENGTH = 120;
 
-/** Scale for rendering a 0–1 rate as a percentage. */
-const PERCENT = 100;
-
 /**
  * The by-model table's columns. Headers match the JSON field names (`delivered`,
  * `blocked`, `unfinished`) so a reader moving from the table to `--json` does not have to
- * guess; `rate` is `delivery_rate` and `n` is `samples`, both abbreviated for width.
+ * guess; the abbreviated ones are `rate` = `delivery_rate`, `n` = `samples`,
+ * `esc/run` = `escalations_per_run`, and `not-met` = `conformance_not_met` over
+ * `conformance_criteria`.
  */
 const MODEL_TABLE_HEADERS = [
   'model',
@@ -136,6 +137,8 @@ const MODEL_TABLE_HEADERS = [
   'blocked',
   'unfinished',
   'rate',
+  'esc/run',
+  'not-met',
   'n',
   'median total',
   'min',
@@ -143,11 +146,41 @@ const MODEL_TABLE_HEADERS = [
   '',
 ];
 
-const MODEL_TABLE_ALIGN: ColumnAlign[] = [
-  'left',
-  ...(Array<ColumnAlign>(9).fill('right') as ColumnAlign[]),
-  'left',
+/**
+ * Right-align every column except the leading label columns and an optional trailing note.
+ *
+ * Derived from the header list rather than hand-counted: the model table's count had to move
+ * 9 → 11 when two columns were added, and a miscount silently misaligns the whole table.
+ */
+function tableAlign(headers: string[], labelCols: number, trailingNote: boolean): ColumnAlign[] {
+  return headers.map((_, i) =>
+    i < labelCols || (trailingNote && i === headers.length - 1) ? 'left' : 'right'
+  );
+}
+
+const MODEL_TABLE_ALIGN: ColumnAlign[] = tableAlign(MODEL_TABLE_HEADERS, 1, true);
+
+/**
+ * The by-model-and-class table's columns (`imboard-ai/ai-dossier#528` AC3).
+ *
+ * Durations are deliberately absent: this table exists to answer "is this model safe for
+ * this class of work", and splitting an already-thin corpus by class leaves medians with
+ * one or two samples — a number that looks like a measurement and is not one. Speed stays
+ * in the by-model table, where the samples are.
+ */
+const CLASS_TABLE_HEADERS = [
+  'model',
+  'class',
+  'runs',
+  'delivered',
+  'blocked',
+  'unfinished',
+  'rate',
+  'esc',
+  'not-met',
 ];
+
+const CLASS_TABLE_ALIGN: ColumnAlign[] = tableAlign(CLASS_TABLE_HEADERS, 2, false);
 
 /** Parse `--kv k=v` occurrences into ordered pairs. */
 function parseKvPairs(raw: string[]): { pairs: Array<[string, string]>; errors: string[] } {
@@ -937,7 +970,7 @@ function skewCell(negativeSamples: number): string {
 
 /** The cross-run aggregates: per-phase spread, per-run totals, and totals by model. */
 function printAggregates(report: StatsReport, precededByTables: boolean): void {
-  const { phases, models } = report.aggregates;
+  const { phases, models, classes } = report.aggregates;
   const section = makeSectionPrinter(precededByTables);
 
   if (phases.length > 0) {
@@ -976,6 +1009,20 @@ function printAggregates(report: StatsReport, precededByTables: boolean): void {
     console.log(
       '  delivered = last milestone is ship/report (or batch-ship/batch-report) at done; rate = delivered/runs, including runs still in flight'
     );
+    console.log(
+      '  esc/run = escalated= summed over the runs that reported it (a run that reviewed under a dossier without the key is not counted); not-met = criteria scored not met, over criteria judged'
+    );
+    console.log("  '-' means never measured, which is not the same claim as a measured 0");
+  }
+
+  if (classes.length > 0) {
+    section('By model x class:', CLASS_TABLE_HEADERS, buildClassRows(classes), CLASS_TABLE_ALIGN);
+    console.log(
+      "  class = the classifier's risk= verdict for the issue; classify dispatches are excluded from both tables"
+    );
+    console.log(
+      "  esc = escalations over the runs that reported them — a total, NOT the adjacent table's per-run mean; not-met and '-' read as above"
+    );
   }
 }
 
@@ -988,6 +1035,8 @@ function buildModelRows(models: ModelAggregate[]): string[][] {
     String(model.blocked),
     String(model.unfinished),
     formatRateCell(model.delivery_rate),
+    formatMeanCell(model.escalations_per_run),
+    formatConformanceCell(model.conformance_not_met, model.conformance_criteria),
     String(model.samples),
     formatDurationCell(model.median_total_seconds),
     formatDurationCell(model.min_total_seconds),
@@ -996,9 +1045,57 @@ function buildModelRows(models: ModelAggregate[]): string[][] {
   ]);
 }
 
+/** One row per `model × class` bucket, in `CLASS_TABLE_HEADERS` order. */
+function buildClassRows(classes: ClassAggregate[]): string[][] {
+  return classes.map((bucket) => [
+    renderValue(bucket.model),
+    renderValue(bucket.risk_class),
+    String(bucket.runs),
+    String(bucket.delivered),
+    String(bucket.blocked),
+    String(bucket.unfinished),
+    formatRateCell(bucket.delivery_rate),
+    formatRatioCell(bucket.escalations, bucket.escalation_runs),
+    formatConformanceCell(bucket.conformance_not_met, bucket.conformance_criteria),
+  ]);
+}
+
 /** A delivery rate as a whole-percent cell. */
 function formatRateCell(rate: number): string {
   return `${Math.round(rate * PERCENT)}%`;
+}
+
+/**
+ * A per-run mean, to one decimal — or `-` when nothing was measured.
+ *
+ * `-` and `0.0` are different claims and are rendered differently: the first is "no run of
+ * this model reached review", the second is "runs reached review and escalated nothing".
+ */
+function formatMeanCell(mean: number | null): string {
+  return mean === null ? '-' : mean.toFixed(1);
+}
+
+/**
+ * Criteria scored not-met, shown as `notMet/criteria` rather than a bare percentage.
+ *
+ * A percentage over four criteria and one over two hundred read identically and mean very
+ * different things; carrying the denominator into the cell keeps the sample size in front of
+ * whoever is about to route a tier from it.
+ */
+function formatConformanceCell(notMet: number, criteria: number): string {
+  return formatRatioCell(notMet, criteria);
+}
+
+/**
+ * `value/denominator`, or `-` when the denominator is zero.
+ *
+ * The one place the "measured zero vs never measured" rule lives for a counted cell, so the
+ * class table's `esc` and both tables' `not-met` cannot drift apart on it. Carrying the
+ * denominator into the cell also keeps the sample size in front of whoever is about to route
+ * a tier from it — `3/32` and `3/2` are very different claims that a bare `3` hides.
+ */
+function formatRatioCell(value: number, denominator: number): string {
+  return denominator === 0 ? '-' : `${value}/${denominator}`;
 }
 
 /**

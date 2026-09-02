@@ -252,8 +252,15 @@ interface KeyValueRule {
   expects: string;
 }
 
-/** `est_files`/`est_diff`: a count or a size, never signed, fractional, or descriptive. */
-const NON_NEGATIVE_INT_RE = /^\d+$/;
+/**
+ * `est_files`/`est_diff`: a count or a size, never signed, fractional, or descriptive.
+ *
+ * Exported because the READ side needs the same grammar. `parseMilestone` is tolerant by
+ * design, so a count key reaching a reader can be `''`, `0x1f`, `1e3` or `+7` — all of which
+ * `Number()` happily accepts, and the first of which silently turns "never reported" into a
+ * measured zero. Readers test against this before coercing.
+ */
+export const NON_NEGATIVE_INT_RE = /^\d+$/;
 
 /** `confidence`: the RFC-0001 E.2 floor compares it to 0.6, so it is a 0–1 decimal. */
 const CONFIDENCE_RE = /^(?:0(?:\.\d+)?|1(?:\.0+)?)$/;
@@ -303,9 +310,20 @@ function enumRule(values: readonly string[]): KeyValueRule {
   };
 }
 
+/**
+ * The classifier's closed risk set, ordered least- to most-severe.
+ *
+ * Exported so the write-path rule below and every reader bucket on the SAME list. A reader
+ * that hard-codes its own copy silently disagrees the day a fourth level is added here.
+ */
+export const RISK_LEVELS = ['low', 'med', 'high'] as const;
+
+/** The classifier's closed mode set — which cycle shape the issue was routed to. */
+export const CLASSIFY_MODES = ['full', SLOT_MODE] as const;
+
 export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
-  mode: enumRule(['full', SLOT_MODE]),
-  risk: enumRule(['low', 'med', 'high']),
+  mode: enumRule(CLASSIFY_MODES),
+  risk: enumRule(RISK_LEVELS),
   test_scope: enumRule(['focused', 'broad', 'unknown']),
   est_files: {
     test: (v) => NON_NEGATIVE_INT_RE.test(v),
@@ -314,6 +332,17 @@ export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
   est_diff: {
     test: (v) => NON_NEGATIVE_INT_RE.test(v),
     expects: 'expected a non-negative integer diff size (lines), e.g. 400',
+  },
+  // `review` reports blind conformance as met-of-judged. Declared here so the write path
+  // validates them and `PHASE_SPECS` is not the only place the contract is discoverable —
+  // `runstate stats`' conformance columns are read straight off these two keys.
+  ac_met: {
+    test: (v) => NON_NEGATIVE_INT_RE.test(v),
+    expects: 'expected a non-negative integer count of acceptance criteria met, e.g. 4',
+  },
+  ac_total: {
+    test: (v) => NON_NEGATIVE_INT_RE.test(v),
+    expects: 'expected a non-negative integer count of acceptance criteria judged, e.g. 6',
   },
   confidence: {
     test: (v) => CONFIDENCE_RE.test(v),
