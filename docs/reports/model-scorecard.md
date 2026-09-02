@@ -1,6 +1,6 @@
 # Model Scorecard
 
-Generated: 2026-09-02T12:09:54.409Z | Window: 2026-08-25 → 2026-09-02
+Generated: 2026-09-02T12:18:59.189Z | Window: 2026-08-25 → 2026-09-02
 
 Cost, quality, and speed per LLM, joined from runstate trails (GitHub), `runs.jsonl`
 (token/cost telemetry), and `events.jsonl` (dispatch tier, stall/escalation counts).
@@ -85,7 +85,7 @@ attributed to a phase (see Limitations).
 | gate | 54 | 32.5m |
 | batch-validate | 3 | 28.0m |
 | review | 160 | 24.4m |
-| implement | 159 | 20.3m |
+| implement | 160 | 20.5m |
 | merge-wait | 114 | 13.7m |
 | plan | 165 | 5.7m |
 | setup | 164 | 2.7m |
@@ -127,6 +127,16 @@ not expected to match exactly.
   `~/.dossier/sched/<slug>/runs/`. Both are on-host only — a dispatch run from another
   machine has neither, and its row reads `N/A` because the data is elsewhere, not
   because it was free.
+- **The window selects ISSUES by last update, not runs by date.** The trail read is
+  `gh issue list --search "updated:>=<start>"`, and a matched issue contributes its
+  whole dispatch history — so an old run on an issue merely touched inside the window
+  counts in full. Read the window as "every run on an issue active in the last N days",
+  not "every run started in the last N days".
+- **A `<unknown>` tier is usually an artifact of that mismatch, not an untiered
+  dispatch.** Tier and agent CLI come from `events.jsonl` events *inside* the window,
+  while the trail data behind the same row is not time-filtered — so a run whose
+  dispatch event predates the window keeps its outcome columns and loses its tier. The
+  per-model totals fold tiers away and are unaffected; only the per-tier rows split.
 - **Cost and API-minutes per phase are not separable.** A dispatch is usually one
   continuous agent session covering several phases, so both are recorded per issue, not
   per phase — the per-phase section above reports wall-clock only, which the milestone

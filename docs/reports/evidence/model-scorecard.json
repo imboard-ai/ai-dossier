@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-02T12:09:54.409Z",
+  "generatedAt": "2026-09-02T12:18:59.189Z",
   "windowStart": "2026-08-25",
   "windowEnd": "2026-09-02",
   "windowDays": null,
@@ -1378,7 +1378,7 @@
         },
         {
           "phase": "implement",
-          "n": 2,
+          "n": 3,
           "medianSeconds": 2
         }
       ],
@@ -2804,7 +2804,7 @@
         },
         {
           "phase": "implement",
-          "n": 2,
+          "n": 3,
           "medianSeconds": 2
         }
       ],
@@ -2908,6 +2908,11 @@
           "reviewEscalatedPerIssue": null,
           "reviewSamples": 0,
           "phaseMedians": [
+            {
+              "phase": "implement",
+              "n": 1,
+              "medianSeconds": 3967
+            },
             {
               "phase": "plan",
               "n": 1,
@@ -4060,7 +4065,7 @@
         },
         {
           "phase": "implement",
-          "n": 2,
+          "n": 3,
           "medianSeconds": 2
         }
       ],
@@ -4298,8 +4303,8 @@
       },
       {
         "phase": "implement",
-        "n": 159,
-        "medianSeconds": 1217
+        "n": 160,
+        "medianSeconds": 1228
       },
       {
         "phase": "merge-wait",
@@ -4350,8 +4355,8 @@
     },
     {
       "phase": "implement",
-      "n": 159,
-      "medianSeconds": 1217
+      "n": 160,
+      "medianSeconds": 1228
     },
     {
       "phase": "merge-wait",

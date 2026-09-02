@@ -64,6 +64,9 @@ const DELIVERY_RATE_DROP_THRESHOLD = 0.1;
 /** Rolling window, in days, when neither `--days` nor `--since` is given. */
 export const DEFAULT_WINDOW_DAYS = 30;
 
+/** How many regressing models the digest names before it starts counting the rest. */
+const MAX_NAMED_DROPS = 3;
+
 /**
  * `owner/name` -> the `~/.dossier/sched/<slug>/` directory name. Thin wrapper over
  * `@ai-dossier/sched`'s own `sanitizeSlug` — the package already owns this mapping
@@ -837,6 +840,16 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     '  `~/.dossier/sched/<slug>/runs/`. Both are on-host only — a dispatch run from another',
     '  machine has neither, and its row reads `N/A` because the data is elsewhere, not',
     '  because it was free.',
+    '- **The window selects ISSUES by last update, not runs by date.** The trail read is',
+    '  `gh issue list --search "updated:>=<start>"`, and a matched issue contributes its',
+    '  whole dispatch history — so an old run on an issue merely touched inside the window',
+    '  counts in full. Read the window as "every run on an issue active in the last N days",',
+    '  not "every run started in the last N days".',
+    '- **A `<unknown>` tier is usually an artifact of that mismatch, not an untiered',
+    '  dispatch.** Tier and agent CLI come from `events.jsonl` events *inside* the window,',
+    '  while the trail data behind the same row is not time-filtered — so a run whose',
+    '  dispatch event predates the window keeps its outcome columns and loses its tier. The',
+    '  per-model totals fold tiers away and are unaffected; only the per-tier rows split.',
     '- **Cost and API-minutes per phase are not separable.** A dispatch is usually one',
     '  continuous agent session covering several phases, so both are recorded per issue, not',
     '  per phase — the per-phase section above reports wall-clock only, which the milestone',
@@ -915,18 +928,30 @@ export function renderDigest(scorecard, previous) {
 
   // The drop check stays on the repo-folded totals: it answers "did this MODEL regress",
   // and splitting it per repo would halve every already-small sample.
-  let drop = null;
+  // EVERY model that dropped, not just the worst: a single-slot variable reported one
+  // regression and gave no sign the others existed, which is the opposite of what a
+  // routing alert is for. Same one-line-many-values shape as the per-repo lines above.
+  const drops = [];
   if (previous && Array.isArray(previous.totals)) {
     const prevByModel = new Map(previous.totals.map((t) => [t.model, t]));
-    for (const t of scorecard.totals.filter((t) => t.n > 0)) {
-      const prev = prevByModel.get(t.model);
-      if (!prev || prev.deliveryRate == null || t.deliveryRate == null) continue;
-      const delta = t.deliveryRate - prev.deliveryRate;
-      if (delta < -DELIVERY_RATE_DROP_THRESHOLD && (!drop || delta < drop.delta)) {
-        drop = { model: t.model, delta, from: prev.deliveryRate, to: t.deliveryRate };
+    for (const total of scorecard.totals.filter((t) => t.n > 0)) {
+      const prev = prevByModel.get(total.model);
+      if (!prev || prev.deliveryRate == null || total.deliveryRate == null) continue;
+      const delta = total.deliveryRate - prev.deliveryRate;
+      if (delta < -DELIVERY_RATE_DROP_THRESHOLD) {
+        drops.push({ model: total.model, delta, from: prev.deliveryRate, to: total.deliveryRate });
       }
     }
+    drops.sort((a, b) => a.delta - b.delta);
   }
+  // Worst first, and the tail counted rather than dropped — a truncated alert that says so
+  // still tells the operator to open the report; one that stays silent does not.
+  const namedDrops = drops
+    .slice(0, MAX_NAMED_DROPS)
+    .map((d) => `${safeCell(d.model)} ${fmtPct(d.from)} → ${fmtPct(d.to)}`)
+    .join(' · ');
+  const dropOverflow =
+    drops.length > MAX_NAMED_DROPS ? ` (+${drops.length - MAX_NAMED_DROPS} more)` : '';
 
   const dropThresholdPoints = Math.round(DELIVERY_RATE_DROP_THRESHOLD * 100);
   const warningCount = scorecard.warnings?.length ?? 0;
@@ -935,8 +960,8 @@ export function renderDigest(scorecard, previous) {
     byCost ? `💰 Cheapest/delivered: ${byCost}` : '💰 Cheapest/delivered: no data',
     byQuality ? `🎯 Best delivery rate: ${byQuality}` : '🎯 Best delivery rate: no data',
     bySpeed ? `⚡ Fastest: ${bySpeed}` : '⚡ Fastest: no data',
-    drop
-      ? `📉 Delivery rate drop: ${safeCell(drop.model)} ${fmtPct(drop.from)} → ${fmtPct(drop.to)}`
+    drops.length > 0
+      ? `📉 Delivery rate drop >${dropThresholdPoints}pt: ${namedDrops}${dropOverflow}`
       : `📉 Delivery rate drop >${dropThresholdPoints}pt: none`,
     warningCount > 0
       ? `🔗 docs/reports/model-scorecard.md — ⚠️ ${warningCount} data warning(s)`

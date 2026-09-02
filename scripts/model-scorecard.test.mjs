@@ -1501,3 +1501,63 @@ describe('billable tokens count the cache halves (#566 AC1)', () => {
     expect(renderMarkdown(sc)).toContain('4 (2.00/issue)');
   });
 });
+
+describe('renderDigest — every regressing model, not just the worst (#566 AC4)', () => {
+  const meta = {
+    windowStart: '2026-08-25',
+    windowEnd: '2026-09-02',
+    generatedAt: '2026-09-02T00:00:00Z',
+  };
+  const rowFor = (model, delivered) => ({
+    repo: 'o/r',
+    model,
+    tier: 'mid',
+    provider: null,
+    delivered,
+    blocked: !delivered,
+    costUsd: null,
+    inputTokens: null,
+    outputTokens: null,
+    cacheCreationTokens: null,
+    cacheReadTokens: null,
+    apiMinutes: null,
+    wallClockMinutes: null,
+    phaseSeconds: {},
+    stalls: 0,
+    escalations: 0,
+    unverifiedExits: 0,
+    reviewFixed: null,
+    reviewEscalated: null,
+    acMet: null,
+    acTotal: null,
+  });
+  // Four models, each 1 of 2 delivered this window (50%), all previously at 100%.
+  const sc = aggregateScorecard(
+    ['a', 'b', 'c', 'd'].flatMap((m) => [rowFor(m, true), rowFor(m, false)]),
+    meta
+  );
+  const previous = {
+    windowEnd: '2026-08-26',
+    totals: ['a', 'b', 'c', 'd'].map((model) => ({ model, deliveryRate: 1 })),
+  };
+
+  it('names more than one regression on the drop line', () => {
+    const dropLine = renderDigest(sc, previous).split('\n')[4];
+    expect(dropLine).toContain('a 100% → 50%');
+    expect(dropLine).toContain('b 100% → 50%');
+  });
+
+  it('counts the regressions it could not name rather than hiding them', () => {
+    const dropLine = renderDigest(sc, previous).split('\n')[4];
+    expect(dropLine).toContain('(+1 more)');
+  });
+
+  it('stays six lines with every model regressing at once', () => {
+    expect(renderDigest(sc, previous).split('\n')).toHaveLength(6);
+  });
+
+  it('ignores a drop that did not clear the threshold', () => {
+    const shallow = { windowEnd: '2026-08-26', totals: [{ model: 'a', deliveryRate: 0.55 }] };
+    expect(renderDigest(sc, shallow)).toContain('drop >10pt: none');
+  });
+});
