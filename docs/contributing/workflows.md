@@ -157,6 +157,7 @@ Actions → Publish Packages to npm → Run workflow
 5. Bump version (if requested)
    - Update version in packages/core/package.json
    - Update version in cli/package.json
+   - Update version in mcp-server/package.json
    - Update CLI dependency on core
    ↓
 6. Commit version bump (if bumped)
@@ -167,7 +168,7 @@ Actions → Publish Packages to npm → Run workflow
    - Publish to https://registry.npmjs.org with --provenance
    - Includes: dist/, package.json, README
    ↓
-8. Publish @ai-dossier/cli, @ai-dossier/mcp-server, @ai-dossier/worktree-pool
+8. Publish @ai-dossier/sched, @ai-dossier/cli, @ai-dossier/mcp-server, @ai-dossier/worktree-pool
    - Publish to https://registry.npmjs.org with --provenance
    - Each package skipped if version already published
    ↓
@@ -195,6 +196,7 @@ Actions → Publish Packages to npm → Run workflow
 
 **Published Packages:**
 - `@ai-dossier/core` → https://www.npmjs.com/package/@ai-dossier/core
+- `@ai-dossier/sched` → https://www.npmjs.com/package/@ai-dossier/sched
 - `@ai-dossier/cli` → https://www.npmjs.com/package/@ai-dossier/cli
 - `@ai-dossier/mcp-server` → https://www.npmjs.com/package/@ai-dossier/mcp-server
 - `@ai-dossier/worktree-pool` → https://www.npmjs.com/package/@ai-dossier/worktree-pool
@@ -233,16 +235,16 @@ git push origin main
 **Automatic (workflow manages it):**
 ```
 Input: patch
-Before: @ai-dossier/cli@0.1.0, @ai-dossier/core@1.0.0
-After:  @ai-dossier/cli@0.1.1, @ai-dossier/core@1.0.1
+Before: @ai-dossier/cli@0.1.0, @ai-dossier/core@1.0.0, @ai-dossier/mcp-server@0.1.0
+After:  @ai-dossier/cli@0.1.1, @ai-dossier/core@1.0.1, @ai-dossier/mcp-server@0.1.1
 
-- Both packages bumped to same version
+- core, cli, and mcp-server bumped to the same version
 - CLI dependency updated: "@ai-dossier/core": "^1.0.1"
 - Commit: "chore: bump version to 0.1.1"
 - Tag: v0.1.1
 ```
 
-**Why bump both packages together?**
+**Why bump these packages together?**
 - Keeps version numbers in sync
 - Simplifies dependency management
 - Clear release history
