@@ -10,7 +10,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildBatchRunLogEntries, listBatchDispatchLogs } from '../batch-stats';
 
 const dirs: string[] = [];
@@ -86,8 +86,25 @@ describe('listBatchDispatchLogs', () => {
     });
   });
 
-  it('returns an empty list for an unreadable/missing runs directory', () => {
+  it('returns an empty list for a missing (ENOENT) runs directory, silently', () => {
     expect(listBatchDispatchLogs('/nonexistent/path/xyz', 'b1')).toEqual([]);
+  });
+
+  it('warns to stderr (but still returns []) for a non-ENOENT read error (#564 review)', () => {
+    // A real, unmocked ENOTDIR: `runsDir` names a FILE, not a directory —
+    // `fs.readdirSync` throws with `code: 'ENOTDIR'`, a real non-ENOENT
+    // error, without needing to spy on `node:fs` (unsupported under ESM —
+    // "Module namespace is not configurable").
+    const notADir = tmpDir();
+    const filePath = path.join(notADir, 'not-a-directory');
+    fs.writeFileSync(filePath, '');
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    expect(listBatchDispatchLogs(filePath, 'b1')).toEqual([]);
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('ENOTDIR'));
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining(filePath));
+
+    stderr.mockRestore();
   });
 });
 

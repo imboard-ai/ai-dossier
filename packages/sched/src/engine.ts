@@ -99,13 +99,7 @@ import { labelBlockReason, labelOfBlockReason, pickHardBlockLabel } from './labe
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
-import {
-  appendSchedRunLog,
-  buildSchedRunLogEntry,
-  readDispatchLog,
-  schedRunsLogPath,
-  schedTelemetryEnabled,
-} from './run-log';
+import { buildSchedRunLogEntry, finalizeRunLogEntry, readDispatchLog } from './run-log';
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import { findEntry, isReportSlot, transitionIssue, transitionSlot } from './state';
 import { runTeardown, type TeardownResult } from './teardown';
@@ -1335,7 +1329,6 @@ function recordDispatchRunLog(
   // tokens double-counted).
   const offset = slot.log_offset_at_spawn ?? 0;
   const logContent = readDispatchLog(logFile, offset);
-  const runLogFile = schedRunsLogPath(ctx.deps.homeDir);
 
   const runEntry = buildSchedRunLogEntry({
     unit,
@@ -1347,43 +1340,16 @@ function recordDispatchRunLog(
     completedAt: ctx.deps.now(),
     configuredModel: model,
     cwd: ctx.deps.repoDir,
+    tier,
   });
 
-  // An entry with null tokens has four possible causes that look identical in
-  // `sched stats` (a row of dashes). Journal WHICH one, so an operator can
-  // tell "the agent wrote nothing" from "we couldn't read the log" without
-  // re-deriving it from the log file's mtime.
-  if (runEntry.input_tokens === null && runEntry.output_tokens === null) {
-    journal(ctx, 'run-log-no-usage', unit, {
-      log: logFile,
-      offset,
-      bytes: logContent === null ? null : logContent.length,
-      reason:
-        logContent === null
-          ? 'log-unreadable'
-          : logContent.trim() === ''
-            ? 'log-empty'
-            : 'no-usage-events',
-    });
-  }
-
-  if (!schedTelemetryEnabled(ctx.deps.homeDir)) {
-    // The operator opted out. Journal it: otherwise a missing runs.jsonl entry
-    // is indistinguishable from a lost one.
-    journal(ctx, 'run-log-skipped', unit, { reason: 'telemetry-disabled' });
-    return;
-  }
-
-  const written = appendSchedRunLog(runEntry, ctx.deps.homeDir, (err) =>
-    journal(ctx, 'run-log-failed', unit, { detail: err.message, file: runLogFile })
+  finalizeRunLogEntry(
+    runEntry,
+    logContent,
+    ctx.deps.homeDir,
+    (event, extra) => journal(ctx, event, unit, extra),
+    { log: logFile, offset }
   );
-  if (written) {
-    journal(ctx, 'run-log-recorded', unit, {
-      file: runLogFile,
-      input_tokens: runEntry.input_tokens,
-      output_tokens: runEntry.output_tokens,
-    });
-  }
 }
 
 /** Reconcile one running slot against its polled ground truth. */

@@ -65,7 +65,7 @@ import { pickHardBlockLabel } from '../hard-block-labels';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
 import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
-import { buildSchedCostReport, type IssueCost } from '../sched-run-stats';
+import { aggregateRunLogEntries, buildSchedCostReport, type IssueCost } from '../sched-run-stats';
 import { renderTable } from '../table';
 
 /**
@@ -604,16 +604,14 @@ function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
     });
 }
 
-interface StatsOptions {
+interface StatsOptions extends SchedOptions {
   // `--project` only matters for `--batch` (a batch id is scoped to a
   // project's `~/.dossier/sched/<project>/runs/`, unlike `runs.jsonl`, which
   // is one global file — see the command's description for the resulting
   // cross-repo caveat when `--batch` is absent: same issue number in two
   // repos sums together).
-  project?: string;
   issues?: string;
   batch?: string;
-  json?: boolean;
 }
 
 function statsRow(label: string, row: Omit<IssueCost, 'issue'>): string[] {
@@ -626,6 +624,8 @@ function statsRow(label: string, row: Omit<IssueCost, 'issue'>): string[] {
     formatCount(row.cache_read_tokens),
     formatCost(row.total_cost_usd),
     formatDurationMs(row.duration_ms),
+    row.model ?? '-',
+    row.tier ?? '-',
     row.usage,
   ];
 }
@@ -639,6 +639,8 @@ const STATS_HEADERS = [
   'Cache-R',
   'Cost',
   'Duration',
+  'Model',
+  'Tier',
   'Usage',
 ];
 const STATS_ALIGN = [
@@ -650,6 +652,8 @@ const STATS_ALIGN = [
   'right',
   'right',
   'right',
+  'left',
+  'left',
   'left',
 ] as const;
 
@@ -676,8 +680,11 @@ function runBatchStats(opts: StatsOptions & { batch: string }): void {
   // Tail/report agents carry no issue — `buildSchedCostReport` already
   // excludes them from per-issue rows (same `issueOfUnit`-based filtering as
   // the default path); fold them into one visible line so nothing about the
-  // batch's actual spend is silently dropped (AC2).
+  // batch's actual spend is silently dropped (AC2). `aggregateRunLogEntries`
+  // (not `buildSchedCostReport`, which filters to `issue:<n>` units only —
+  // #564 review) sums these `batch:<id>`-unit entries directly.
   const overhead = entries.filter((e) => e.unit === `batch:${opts.batch}`);
+  const overheadTotals = aggregateRunLogEntries(overhead);
 
   if (opts.json) {
     console.log(
@@ -686,6 +693,7 @@ function runBatchStats(opts: StatsOptions & { batch: string }): void {
           ...report,
           batch: opts.batch,
           project,
+          overhead: overhead.length > 0 ? overheadTotals : null,
           overhead_runs: overhead.length,
           source: store.runsDir,
         },
@@ -704,8 +712,7 @@ function runBatchStats(opts: StatsOptions & { batch: string }): void {
   const rows = report.issues.map((row) => statsRow(`#${row.issue}`, row));
   rows.push(statsRow('TOTAL (members)', report.totals));
   if (overhead.length > 0) {
-    const overheadReport = buildSchedCostReport(overhead);
-    rows.push(statsRow('batch-overhead (tail+report)', overheadReport.totals));
+    rows.push(statsRow('batch-overhead (tail+report)', overheadTotals));
   }
   console.log(`Batch ${opts.batch} [${project}]:`);
   console.log(renderTable(STATS_HEADERS, rows, { align: [...STATS_ALIGN], separator: true }));
@@ -717,7 +724,10 @@ function registerStatsSubcommand(cmd: Command): void {
     .description(
       'Per-issue token/cost totals for scheduler-dispatched agent runs (from ~/.dossier/runs.jsonl; --batch reads batch member/tail/report/fix logs directly)'
     )
-    .option('--project <slug>', 'Project slug — required for --batch (default: repo owner-repo)')
+    .option(
+      '--project <slug>',
+      "Project slug (default: owner-repo of the current directory) — scopes --batch to that project's runs dir"
+    )
     .option('--issues <selection>', 'Restrict to these issues (e.g. "4,5" or "4..9")')
     .option(
       '--batch <id>',

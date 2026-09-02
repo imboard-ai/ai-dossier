@@ -21,6 +21,7 @@ import * as path from 'node:path';
 import type { AgentRunUsage, RunLogEntry } from '@ai-dossier/core';
 import { runsLogPath, usageParserFor } from '@ai-dossier/core';
 import { appendJsonl } from './journal';
+import type { JournalEventName } from './types';
 
 export { runsLogPath as schedRunsLogPath, usageParserFor };
 
@@ -120,6 +121,8 @@ export interface SchedRunLogInput {
   /** Process exit/signal info, when the engine has it — usually not: see the field's own doc. */
   exitCode?: number | null;
   spawnError?: string | null;
+  /** The escalation-ladder tier this dispatch ran at (#564), e.g. `mid`/`strong`. Null/omitted for a reconstructed entry, where the historical tier isn't recoverable. */
+  tier?: string | null;
 }
 
 /** Whole milliseconds between `spawnedAt` and `completedAt`, or null when unmeasurable. */
@@ -175,6 +178,7 @@ export function buildSchedRunLogEntry(input: SchedRunLogInput): RunLogEntry {
     cache_read_tokens: usage?.cache_read_tokens ?? null,
     total_cost_usd: usage?.total_cost_usd ?? null,
     unit: input.unit,
+    tier: input.tier ?? null,
   };
 }
 
@@ -251,5 +255,61 @@ export function readDispatchLog(logFile: string, offset = 0): string | null {
         // Already closed / invalid fd — nothing left to release.
       }
     }
+  }
+}
+
+/**
+ * Finalize one dispatch's `runs.jsonl` write: journal WHY an entry has no
+ * usage (an entry with null tokens has several possible causes that look
+ * identical in `sched stats` — a row of dashes; #524), honor
+ * {@link schedTelemetryEnabled}, then append + journal the outcome.
+ *
+ * Shared by `engine.ts`'s `recordDispatchRunLog` (per-issue dispatch) and
+ * `batch-dispatch.ts`'s `recordMemberRunLog` (batch member dispatch, #564)
+ * — the two independently duplicated this ~30-line tail nearly verbatim.
+ * `journal` abstracts each caller's own journal-append shape (`journal(ctx,
+ * event, unit, extra)` vs `journalEvent(deps, event, unit(batchId), extra)`)
+ * so this function stays agnostic to which; `extraFields` carries whatever
+ * per-call context each caller wants on every event it journals here (e.g.
+ * `log`/`offset` for engine.ts, `issue` for batch-dispatch.ts).
+ */
+export function finalizeRunLogEntry(
+  runEntry: RunLogEntry,
+  logContent: string | null,
+  homeDir: string | undefined,
+  journal: (event: JournalEventName, extra: Record<string, unknown>) => void,
+  extraFields: Record<string, unknown> = {}
+): void {
+  if (runEntry.input_tokens === null && runEntry.output_tokens === null) {
+    journal('run-log-no-usage', {
+      ...extraFields,
+      bytes: logContent === null ? null : logContent.length,
+      reason:
+        logContent === null
+          ? 'log-unreadable'
+          : logContent.trim() === ''
+            ? 'log-empty'
+            : 'no-usage-events',
+    });
+  }
+
+  if (!schedTelemetryEnabled(homeDir)) {
+    // The operator opted out. Journal it: otherwise a missing runs.jsonl entry
+    // is indistinguishable from a lost one.
+    journal('run-log-skipped', { ...extraFields, reason: 'telemetry-disabled' });
+    return;
+  }
+
+  const runLogFile = runsLogPath(homeDir);
+  const written = appendSchedRunLog(runEntry, homeDir, (err) =>
+    journal('run-log-failed', { ...extraFields, detail: err.message, file: runLogFile })
+  );
+  if (written) {
+    journal('run-log-recorded', {
+      ...extraFields,
+      file: runLogFile,
+      input_tokens: runEntry.input_tokens,
+      output_tokens: runEntry.output_tokens,
+    });
   }
 }

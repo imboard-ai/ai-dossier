@@ -77,6 +77,10 @@ import {
   SHA_RE,
 } from './attribution';
 import {
+  batchFixLogPath,
+  batchMemberLogPath,
+  batchReportLogPath,
+  batchTailLogPath,
   buildBatchReportPrompt,
   buildBatchTailPrompt,
   buildMemberPrompt,
@@ -84,7 +88,6 @@ import {
   type ResolvedDispatch,
   resolveTierSpawn,
   type SpawnDeps,
-  unitLogName,
 } from './dispatch';
 import {
   type GroundTruth,
@@ -110,13 +113,7 @@ import {
   resolveFixAttempt,
   type SuiteResult,
 } from './recovery';
-import {
-  appendSchedRunLog,
-  buildSchedRunLogEntry,
-  readDispatchLog,
-  schedRunsLogPath,
-  schedTelemetryEnabled,
-} from './run-log';
+import { buildSchedRunLogEntry, finalizeRunLogEntry, readDispatchLog } from './run-log';
 import { assignToIdleSlot, freeCapacity } from './scheduler';
 import {
   findBatch,
@@ -638,9 +635,11 @@ function spawnMember(
   const spawnSpec = resolveTierSpawn(dispatch, tier, memberIssue);
   const cmd = spawnSpec.cmd;
   const prompt = buildMemberPrompt(dispatch.memberPrompt, memberIssue, batchId, batch.worktree);
-  const logFile = path.join(
+  const logFile = batchMemberLogPath(
     deps.store.runsDir,
-    `${unitLogName(unit(batchId))}-m${batch.executing_member}-${memberIssue}.log`
+    batchId,
+    batch.executing_member,
+    memberIssue
   );
 
   let pid: number;
@@ -833,6 +832,18 @@ function spawnMemberContinuation(
   );
 }
 
+/**
+ * Tail/report/fix dispatches (this function, `spawnReportAgent`,
+ * `reconcileFixSlot`) are NOT recorded live to `runs.jsonl` — only member
+ * dispatches got that treatment in #564 (`spawnMember`'s call into
+ * `recordMemberRunLog`). `sched stats --batch <id>` (`batch-stats.ts`) is
+ * the only way to see their cost today, reconstructed from the raw log
+ * after the fact. Wiring in live recording for these later means repeating
+ * `spawnMember`'s own #564 fix first: none of these three spawn functions'
+ * patches stamp `SlotEntry.spawned_at` either, so a `recordXRunLog` guarded
+ * on `spawned_at !== null` (mirroring `recordMemberRunLog`) would silently
+ * no-op forever, exactly like the original bug.
+ */
 function spawnTailAgent(
   deps: BatchDispatchDeps,
   config: SchedConfig,
@@ -859,7 +870,7 @@ function spawnTailAgent(
       batch.members,
       batch.worktree
     );
-    const logFile = path.join(deps.store.runsDir, `${unitLogName(unit(batchId))}-tail.log`);
+    const logFile = batchTailLogPath(deps.store.runsDir, batchId);
     let pid: number;
     try {
       pid = deps.spawnDeps.spawn(cmd, prompt, logFile);
@@ -925,7 +936,7 @@ function spawnReportAgent(
       batch.anchor,
       prNumber
     );
-    const logFile = path.join(deps.store.runsDir, `${unitLogName(unit(batchId))}-report.log`);
+    const logFile = batchReportLogPath(deps.store.runsDir, batchId);
     let pid: number;
     try {
       pid = deps.spawnDeps.spawn(cmd, prompt, logFile);
@@ -1103,10 +1114,7 @@ function runValidate(
   }
 
   claimAndSpawn(deps, config, batchId, 'fixing', now, (s, slot) => {
-    const logFile = path.join(
-      deps.store.runsDir,
-      `${unitLogName(unit(batchId))}-fix-${offender}.log`
-    );
+    const logFile = batchFixLogPath(deps.store.runsDir, batchId, offender);
     let pid: number;
     try {
       pid = deps.spawnDeps.spawn(fixDispatch.command, fixDispatch.prompt, logFile);
@@ -1291,9 +1299,11 @@ function recordMemberRunLog(
 
   const tier: ModelTier = findEntry(state, memberIssue)?.tier ?? 'mid';
   const { cmd, model } = resolveTierSpawn(dispatch, tier, memberIssue);
-  const logFile = path.join(
+  const logFile = batchMemberLogPath(
     deps.store.runsDir,
-    `${unitLogName(unit(batchId))}-m${batch.executing_member}-${memberIssue}.log`
+    batchId,
+    batch.executing_member,
+    memberIssue
   );
   const logContent = readDispatchLog(logFile, 0);
 
@@ -1307,46 +1317,16 @@ function recordMemberRunLog(
     completedAt: now,
     configuredModel: model,
     cwd: deps.repoDir,
+    tier,
   });
 
-  if (runEntry.input_tokens === null && runEntry.output_tokens === null) {
-    journalEvent(deps, 'run-log-no-usage', unit(batchId), {
-      issue: memberIssue,
-      log: logFile,
-      bytes: logContent === null ? null : logContent.length,
-      reason:
-        logContent === null
-          ? 'log-unreadable'
-          : logContent.trim() === ''
-            ? 'log-empty'
-            : 'no-usage-events',
-    });
-  }
-
-  if (!schedTelemetryEnabled(deps.homeDir)) {
-    journalEvent(deps, 'run-log-skipped', unit(batchId), {
-      issue: memberIssue,
-      reason: 'telemetry-disabled',
-    });
-    return;
-  }
-
-  const runLogFile = schedRunsLogPath(deps.homeDir);
-  const written = appendSchedRunLog(runEntry, deps.homeDir, (err) =>
-    journalEvent(deps, 'run-log-failed', unit(batchId), {
-      issue: memberIssue,
-      detail: err.message,
-      file: runLogFile,
-    })
+  finalizeRunLogEntry(
+    runEntry,
+    logContent,
+    deps.homeDir,
+    (event, extra) => journalEvent(deps, event, unit(batchId), extra),
+    { issue: memberIssue, log: logFile }
   );
-  if (written) {
-    journalEvent(deps, 'run-log-recorded', unit(batchId), {
-      issue: memberIssue,
-      file: runLogFile,
-      input_tokens: runEntry.input_tokens,
-      output_tokens: runEntry.output_tokens,
-    });
-  }
 }
 
 function reconcileMemberSlot(

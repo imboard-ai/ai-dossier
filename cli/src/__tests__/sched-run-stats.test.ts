@@ -50,6 +50,8 @@ describe('buildSchedCostReport', () => {
         cache_read_tokens: null,
         total_cost_usd: null,
         duration_ms: null,
+        model: null,
+        tier: null,
         usage: 'ok',
       },
       {
@@ -61,6 +63,8 @@ describe('buildSchedCostReport', () => {
         cache_read_tokens: null,
         total_cost_usd: 0.015,
         duration_ms: null,
+        model: null,
+        tier: null,
         usage: 'ok',
       },
     ]);
@@ -88,6 +92,32 @@ describe('buildSchedCostReport', () => {
       output_tokens: null,
       total_cost_usd: null,
       duration_ms: null,
+    });
+  });
+
+  describe('model/tier fields (#564 AC1)', () => {
+    it('surfaces a single model/tier reported by one dispatch', () => {
+      const report = buildSchedCostReport([
+        entry({ unit: 'issue:1', model: 'claude-sonnet-5', tier: 'mid' }),
+      ]);
+      expect(report.issues[0]).toMatchObject({ model: 'claude-sonnet-5', tier: 'mid' });
+    });
+
+    it('dedupes and sorts distinct models/tiers across an escalated redispatch', () => {
+      const report = buildSchedCostReport([
+        entry({ unit: 'issue:1', model: 'claude-sonnet-5', tier: 'mid' }),
+        entry({ unit: 'issue:1', model: 'claude-opus-5', tier: 'strong' }),
+        entry({ unit: 'issue:1', model: 'claude-sonnet-5', tier: 'mid' }), // duplicate
+      ]);
+      expect(report.issues[0]).toMatchObject({
+        model: 'claude-opus-5,claude-sonnet-5',
+        tier: 'mid,strong',
+      });
+    });
+
+    it('is null when no dispatch reported a model/tier', () => {
+      const report = buildSchedCostReport([entry({ unit: 'issue:1' })]);
+      expect(report.issues[0]).toMatchObject({ model: null, tier: null });
     });
   });
 

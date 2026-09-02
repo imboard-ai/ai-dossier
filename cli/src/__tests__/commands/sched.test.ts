@@ -760,6 +760,8 @@ describe('ai-dossier sched stats (#524: per-issue token/cost from runs.jsonl)', 
           cache_read_tokens: null,
           total_cost_usd: null,
           duration_ms: null,
+          model: null,
+          tier: null,
           usage: 'ok',
         },
         {
@@ -771,6 +773,8 @@ describe('ai-dossier sched stats (#524: per-issue token/cost from runs.jsonl)', 
           cache_read_tokens: null,
           total_cost_usd: 0.015,
           duration_ms: 8000,
+          model: null,
+          tier: null,
           usage: 'ok',
         },
       ]);
@@ -858,6 +862,27 @@ describe('ai-dossier sched stats --batch (#564: reconstructed directly from raw 
       input_tokens: 6_214_824,
     });
     expect(report.overhead_runs).toBe(1); // the tail log
+    // #564 review: the overhead totals must reflect the tail log's ACTUAL
+    // cost, not an all-null row from round-tripping `batch:<id>`-unit
+    // entries through `buildSchedCostReport` (which only aggregates
+    // `issue:<n>` units and silently zeroes anything else).
+    expect(report.overhead).toMatchObject({ runs: 1, total_cost_usd: 0.5, input_tokens: 100_000 });
+  });
+
+  it('the table also shows the batch-overhead row with real, non-zero totals (not an all-null round-trip bug)', async () => {
+    const dir = batchRunsDir();
+    fs.writeFileSync(
+      path.join(dir, 'batch-b1-m1-540.log'),
+      fakeResultJson(2.518, 6_214_824, 47_071)
+    );
+    fs.writeFileSync(path.join(dir, 'batch-b1-tail.log'), fakeResultJson(0.5, 100_000, 5_000));
+
+    await runSched(['sched', 'stats', '--batch', 'b1', '--project', 'test-proj']);
+
+    const out = logs.join('\n');
+    expect(out).toContain('batch-overhead');
+    expect(out).toContain('$0.5000');
+    expect(out).toContain('100000');
   });
 
   it('renders a table with a batch-overhead row and usage=missing for an unparseable log', async () => {

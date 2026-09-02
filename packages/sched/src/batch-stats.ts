@@ -18,7 +18,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
-import { unitLogName } from './dispatch';
+import {
+  batchFixLogPath,
+  batchMemberLogPath,
+  batchReportLogPath,
+  batchTailLogPath,
+} from './dispatch';
 import { buildSchedRunLogEntry, readDispatchLog } from './run-log';
 
 /** One raw dispatch log discovered for a batch, parsed from its filename. */
@@ -28,48 +33,70 @@ export type BatchLogEntry =
   | { role: 'report'; file: string }
   | { role: 'fix'; offender: number; file: string };
 
-const MEMBER_RE = /^(.+)-m(\d+)-(\d+)\.log$/;
-const FIX_RE = /^(.+)-fix-(\d+)\.log$/;
+/** Loosely extracts the numbers from a member/fix filename shape — verified below by rebuilding the exact path from the same builder `batch-dispatch.ts` used to construct it. */
+const MEMBER_RE = /-m(\d+)-(\d+)\.log$/;
+const FIX_RE = /-fix-(\d+)\.log$/;
 
 /**
  * Every raw dispatch log on disk for `batchId`, parsed from the filename
  * convention `batch-dispatch.ts`'s spawn functions already use
  * (`spawnMember`, `spawnTailAgent`, `spawnReportAgent`, `reconcileFixSlot`).
- * Never throws — an unreadable runs directory yields an empty list.
+ * Every match is verified by REBUILDING the exact path via the same
+ * `batchMemberLogPath`/`batchTailLogPath`/`batchReportLogPath`/
+ * `batchFixLogPath` builders those spawn functions call to construct it
+ * (`./dispatch`) — construction and parsing can never silently diverge,
+ * because parsing IS construction run in reverse (#564 review).
+ *
+ * Never throws — an unreadable runs directory yields an empty list. `ENOENT`
+ * degrades silently (a directory that never existed legitimately has no
+ * logs); any OTHER error (permissions, a bad mount) warns to stderr instead
+ * of looking identical to "this batch simply never ran" — mirrors
+ * `dispatch.ts`'s `fileSizeOrZero` (#524 review), the same class of gap.
  */
 export function listBatchDispatchLogs(runsDir: string, batchId: string): BatchLogEntry[] {
-  const prefix = unitLogName(`batch:${batchId}`);
   let names: string[];
   try {
     names = fs.readdirSync(runsDir);
-  } catch {
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      process.stderr.write(
+        `⚠ sched: could not read runs directory ${runsDir} (${code}); batch '${batchId}' stats will be incomplete\n`
+      );
+    }
     return [];
   }
+
+  const tailFile = batchTailLogPath(runsDir, batchId);
+  const reportFile = batchReportLogPath(runsDir, batchId);
+
   const entries: BatchLogEntry[] = [];
   for (const name of names) {
-    if (!name.startsWith(`${prefix}-`) || !name.endsWith('.log')) continue;
+    if (!name.endsWith('.log')) continue;
     const file = path.join(runsDir, name);
-    if (name === `${prefix}-tail.log`) {
+    if (file === tailFile) {
       entries.push({ role: 'tail', file });
       continue;
     }
-    if (name === `${prefix}-report.log`) {
+    if (file === reportFile) {
       entries.push({ role: 'report', file });
       continue;
     }
     const fixMatch = name.match(FIX_RE);
-    if (fixMatch && fixMatch[1] === prefix) {
-      entries.push({ role: 'fix', offender: Number.parseInt(fixMatch[2], 10), file });
-      continue;
+    if (fixMatch) {
+      const offender = Number.parseInt(fixMatch[1], 10);
+      if (batchFixLogPath(runsDir, batchId, offender) === file) {
+        entries.push({ role: 'fix', offender, file });
+        continue;
+      }
     }
     const memberMatch = name.match(MEMBER_RE);
-    if (memberMatch && memberMatch[1] === prefix) {
-      entries.push({
-        role: 'member',
-        member: Number.parseInt(memberMatch[2], 10),
-        issue: Number.parseInt(memberMatch[3], 10),
-        file,
-      });
+    if (memberMatch) {
+      const member = Number.parseInt(memberMatch[1], 10);
+      const issue = Number.parseInt(memberMatch[2], 10);
+      if (batchMemberLogPath(runsDir, batchId, member, issue) === file) {
+        entries.push({ role: 'member', member, issue, file });
+      }
     }
   }
   return entries;
