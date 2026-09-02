@@ -13,8 +13,8 @@ invokes an LLM** — it spawns the agent process the operator configured and rec
 the durable record (`ai-dossier runstate` / `gh` / `git`) that the spawned run leaves
 behind.
 
-Design: RFC-0001 *Batch Cycles* §B/C.1/D (the RFC lives on branch `docs/batch-cycles-rfc`,
-not yet merged to `main`; the §D state machines are frozen verbatim into the types below).
+Design: RFC-0001 *Batch Cycles* ([`rfcs/0001-batch-cycles.md`](../../rfcs/0001-batch-cycles.md))
+§B/C.1/D — the §D state machines are frozen verbatim into the types below.
 This package is the deterministic replacement for fleet-cycle's LLM-prose supervision,
 whose named failure — slots sitting idle after a subagent finished — is a scheduling bug
 this state machine makes impossible to forget.

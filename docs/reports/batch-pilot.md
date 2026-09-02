@@ -25,7 +25,7 @@ They are called out here rather than buried so this is not filed as a passed gat
 
 ## 1. What this gate decides
 
-RFC-0001 (`rfcs/0001-batch-cycles.md`, on branch `docs/batch-cycles-rfc` — it is not on `main`)
+RFC-0001 (`rfcs/0001-batch-cycles.md`; on branch `docs/batch-cycles-rfc` at the time of this run, since merged to `main`)
 Migration Step 3 + §H. Step 3 asks for the first real batches on the lowest-risk classes
 (docs/chore/config/test-only), N ≤ 4 members, `max_slots = 3`, one batch at a time, and a
 committable report carrying the go/no-go for widening.

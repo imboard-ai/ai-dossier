@@ -1,9 +1,18 @@
 # RFC-0001: Batch Cycles — Deterministic Scheduling and Batched Issue Execution
 
-- **Status**: Proposal
+- **Status**: Accepted (in rollout)
 - **Author(s)**: Yuval Dimnik
 - **Created**: 2026-08-29
-- **Related**: Epic #474 (implementation tracking, issues #458–#473) · full-cycle-issue v3.14.1, fleet-cycle v1.7.0 (registry: imboard-ai/git/*) · Progressive Determinism brief
+- **Related**: Epic [#474](https://github.com/imboard-ai/ai-dossier/issues/474) (implementation tracking: #458–#473, Step-3 retry #523–#538, model-agnosticism #527/#528, pilot batch 3 anchor [#549](https://github.com/imboard-ai/ai-dossier/issues/549): #540, #542, #543) · full-cycle-issue v3.14.1, fleet-cycle v1.7.0 (registry: imboard-ai/git/*) · Progressive Determinism brief
+
+## Status log
+
+- **2026-08-30** — parity gate [`docs/reports/sched-parity.md`](../docs/reports/sched-parity.md): Conditional GO, contingent on #496/#500 — conditions cleared 2026-09-01.
+- **2026-09-01** — pilot attempt 1 [`docs/reports/batch-pilot.md`](../docs/reports/batch-pilot.md): NO-GO — batches not executable (zero batches ever dispatched).
+- **2026-09-01** — pilot attempt 2 [`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md): 0 of ≥3 batches executed end-to-end — two independent blockers: seal bug #535 (closed 2026-09-01) and a cohort too small to compose 3 batches.
+- **2026-09-02** — status raised to Accepted (in rollout) ([#542](https://github.com/imboard-ai/ai-dossier/issues/542)); tracked in epic [#474](https://github.com/imboard-ai/ai-dossier/issues/474).
+
+**Rollout position (§G):** Step 1's machinery shipped and its exit gate passed. Step 0's telemetry shipped (#458/#524/#531), but the baseline measurement itself is still outstanding. Step 2's classifier and batch-prep shipped, but its exit criterion is not yet met — 20.0% slot rate measured against a ~50% target, misclassification rate not yet computable ([`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md)). Step 3 (first real batches) has not yet executed a batch end-to-end — its GO/NO-GO is [#529](https://github.com/imboard-ai/ai-dossier/issues/529). Step 4 (widen) is not started.
 
 
 ## Executive summary
@@ -15,7 +24,7 @@ The proposal is worth implementing, with four structural changes:
 3. **Keep per-issue blind conformance inside the batch path.** It is the family's trust anchor, it is cheap (one agent), and sharing it would trade exactly the confidence the batch path must preserve. Share the *lifecycle* (setup, full suite, CI, ship, deploy), never the *per-issue verification*.
 4. **Batch PRs cannot squash-merge.** Squash collapses per-issue commits into one, destroying issue-level attribution in main history and breaking eviction/bisect. Batch PRs need rebase-merge (repo setting + auto-merge watcher change). This is a small external change with a long lead time — start it first.
 
-Expected steady-state effect for slot-eligible issues: **~2–4× token reduction, CI executions from N per N issues to ~1 + focused runs, throughput bounded by real capacity instead of supervision reliability.** Per-issue *latency* may increase slightly (issues wait for batch-mates); throughput and cost improve. Numbers must be validated against a measured baseline (Phase 0) because today nothing records tokens.
+Expected steady-state effect for slot-eligible issues: **~2–4× token reduction, CI executions from N per N issues to ~1 + focused runs, throughput bounded by real capacity instead of supervision reliability.** Per-issue *latency* may increase slightly (issues wait for batch-mates); throughput and cost improve. Numbers must be validated against a measured baseline (Phase 0) — at RFC authoring nothing recorded tokens. (Since addressed: `ai-dossier run` records duration/cost/tokens per run (#458) and scheduler-dispatched agents get per-issue telemetry via `ai-dossier sched stats` (#524/#531); the baseline measurement itself is still outstanding.)
 
 ---
 
@@ -27,13 +36,15 @@ Seven composed sub-dossiers, each an independently versioned, signed registry un
 
 | Phase | Dossier | Size | What it does |
 |---|---|---|---|
-| gate | gate-issue v1.5.2 | 12.4 KB | blocks closed/epic/vague/dup issues; mints `run_id`; derives `resume_from` via `ai-dossier runstate verify` |
-| setup | setup-issue-workflow v1.13.1 | 18.9 KB | branch `{type}/{n}-{slug}`; worktree via pool claim (~2 s) or cold (3–5 min + warm-worktree v1.2.0); immediate push |
-| plan | plan-issue v1.6.0 | 11.6 KB | PLANNING-{n}-{slug}.md; ACs into the `phase=plan` milestone (`ac<n>=`); prod reachability check |
-| implement | implement-issue v1.7.2 | 11.9 KB | code; lint cascade (ci-parity.sh → project script → toolchain detect); diff-scoped tests; pre-existing-failure discrimination |
-| review | review-issue v1.11.1 | 23.4 KB | risk floor + per-dimension tier (micro/docs/small/full); 1–7 report-only agents incl. blind conformance (strongest model); serial apply |
-| ship | ship-issue v1.11.1 | 27.5 KB | CI-trigger gate (`[skip ci]` head defense ×3); PR; attached = drive merge + deploy-confirm + teardown; detached = park on `auto-merge`, stop |
-| report | report-issue v1.6.1 | 11.0 KB | honesty-gated report (`MERGE_COMMIT`, `Shipped`/`DEPLOYED`); agent-traps write-back |
+| gate | gate-issue v1.5.2 (now 1.6.1) | 12.4 KB | blocks closed/epic/vague/dup issues; mints `run_id`; derives `resume_from` via `ai-dossier runstate verify` |
+| setup | setup-issue-workflow v1.13.1 (now 1.14.1) | 18.9 KB | branch `{type}/{n}-{slug}`; worktree via pool claim (~2 s) or cold (3–5 min + warm-worktree v1.2.0); immediate push |
+| plan | plan-issue v1.6.0 (now 1.7.1) | 11.6 KB | PLANNING-{n}-{slug}.md; ACs into the `phase=plan` milestone (`ac<n>=`); prod reachability check |
+| implement | implement-issue v1.7.2 (now 1.7.3) | 11.9 KB | code; lint cascade (ci-parity.sh → project script → toolchain detect); diff-scoped tests; pre-existing-failure discrimination |
+| review | review-issue v1.11.1 (now 1.12.1) | 23.4 KB | risk floor + per-dimension tier (micro/docs/small/full); 1–7 report-only agents incl. blind conformance (strongest model); serial apply |
+| ship | ship-issue v1.11.1 (now 1.12.1) | 27.5 KB | CI-trigger gate (`[skip ci]` head defense ×3); PR; attached = drive merge + deploy-confirm + teardown; detached = park on `auto-merge`, stop |
+| report | report-issue v1.6.1 (now 1.7.1) | 11.0 KB | honesty-gated report (`MERGE_COMMIT`, `Shipped`/`DEPLOYED`); agent-traps write-back |
+
+Dossier versions and sizes in the table are those at RFC authoring (2026-08-29); parenthesised `now` values are current as of 2026-09-02. `full-cycle-issue v3.14.1` and `fleet-cycle v1.7.0` above are still the current versions.
 
 State model: **origin/<branch> is the durable work copy; append-only `<!-- runstate:v1 -->` issue comments are the durable state copy** (WIP Sync Rule). Any machine can resume any phase (gate → `runstate verify`). Model routing is role-based (mechanical/generation/judgment) with a 2-step escalation ladder.
 
@@ -43,11 +54,11 @@ LLM orchestrator: resolves set → builds dependency DAG (serialize-when-unsure)
 
 ### Supporting machinery (this repo, confirmed)
 
-- **CLI 0.11.0** (`main/cli/`): `run` (verify → spawn `claude -p` headless; no opencode support in `helpers.ts` auto-detection — relevant given fleet's OpenCode/Kimi failures), `runstate mint|post|last|verify|stats`, registry ops. Run audit: `~/.dossier/runs.jsonl` — timestamps/dossier/source only, **no tokens, no durations, no commands**.
+- **CLI 0.11.0 at RFC authoring, now 0.27.0** (`main/cli/`): `run` (verify → spawn `claude -p` headless; no opencode support in `helpers.ts` auto-detection at authoring — relevant given fleet's OpenCode/Kimi failures; since added, `helpers.ts` auto-detection now falls back to `opencode`, #476), `runstate mint|post|last|verify|stats`, registry ops. Run audit: `~/.dossier/runs.jsonl` — timestamps/dossier/source only, **no tokens, no durations, no commands** (as of RFC authoring; since fixed — duration/cost/tokens per run by #458, and per-issue telemetry for scheduler-dispatched agents by #524/#531).
 - **worktree-pool** (`main/packages/worktree-pool/`): `status|claim|return|replenish|refresh|gc|init|detect`; config `.worktree-pool.json` (`base_ref`, `warm_commands`, `target_spares`, `max_pool_size`); pool warm-up is now package-manager-aware (#433).
 - **mcp-server orchestration** (`main/mcp-server/src/orchestration/`): graph/journey machinery (`buildExecutionPlan`, `startJourney`/`stepComplete`) — exists but is **not used** by the issue-workflow family. Its granularity is dossier-dependency graphs, not issue scheduling; reviewed and set aside (see C.7 rejected alternatives).
 - **Repo-local scripts** (imboard): `scripts/ci-parity.sh`, `scripts/ensure-test-env.sh` — proto-capabilities per the Progressive Determinism brief.
-- **External:** auto-merge watcher Action (imboard repo; the presence-of-checks gap (issue #3799 — the watcher merged PR #3797 with zero check-runs) was fixed for default-branch PRs by imboard PR #3803, merged 2026-08-26. Remaining gaps for this plan — no rebase-merge support, and no presence floor for PRs targeting non-default branches — are covered by imboard#3902, in progress).
+- **External:** auto-merge watcher Action (imboard repo; the presence-of-checks gap (issue #3799 — the watcher merged PR #3797 with zero check-runs) was fixed for default-branch PRs by imboard PR #3803, merged 2026-08-26. Remaining gaps for this plan at authoring — no rebase-merge support, and no presence floor for PRs targeting non-default branches — were covered by imboard#3902, which shipped 2026-08-29 (imboard PR #3905): rebase-merge for `batch-epic`-labelled PRs, and the presence-of-checks floor extended to every PR. The §G Step 3 external prerequisite is therefore cleared).
 
 ### Q2 — Where the cost actually is (per issue, today)
 
@@ -62,7 +73,7 @@ LLM orchestrator: resolves set → builds dependency DAG (serialize-when-unsure)
 | Fleet supervision tokens (LLM polling/dispatching) | per fleet | yes — becomes code ($0) |
 | Implementation reasoning; focused tests; per-issue conformance | yes | **no — must stay per-issue** |
 
-No token telemetry exists; `runstate stats` gives phase durations only. **Phase 0 must add measurement before we can claim numbers.**
+No token telemetry exists; `runstate stats` gives phase durations only. **Phase 0 must add measurement before we can claim numbers.** (Since addressed: `ai-dossier run` records duration/cost/tokens per run (#458); scheduler-dispatched agents get per-issue telemetry via `ai-dossier sched stats` (#524/#531).)
 
 ### Q3 — Where the latency actually is
 
