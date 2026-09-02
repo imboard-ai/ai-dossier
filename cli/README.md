@@ -1009,8 +1009,10 @@ ai-dossier plan validate --issue 462
 | `validate` | Deterministic checks against the local clone; prints a `{valid, reasons[]}` JSON verdict; exits 1 when invalid | no |
 
 `validate` runs the deterministic checks — all five sections present, every Predicted
-Files path exists at current HEAD (`git cat-file -e HEAD:<path>`), head-distance (commits
-on HEAD since the plan's `head=` — an info reason when non-zero), and a risk-floor scan of
+Files path not marked `(new)` exists at current HEAD (`git cat-file -e HEAD:<path>`) — a
+path marked `(new)` (the issue's scope is to create it) is exempt, and warns instead if it
+already exists — head-distance (commits on HEAD since the plan's `head=` — an info reason
+when non-zero), and a risk-floor scan of
 Predicted Files (auth/secrets, payments/billing, migrations/schema, protocol surfaces are
 flagged as elevated-risk, info severity) — reporting `{check, severity, message}` reasons
 (full check/severity table in [docs/reference/plan-artifact.md](../docs/reference/plan-artifact.md)).

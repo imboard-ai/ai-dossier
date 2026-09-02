@@ -106,8 +106,11 @@ function extractSection(markdown: string, name: PlanSection): string | null {
   return collected.join('\n').trim();
 }
 
-/** One parsed Predicted Files bullet: its path, and whether it carries the `(new)` marker. */
-interface PredictedFileBullet {
+/**
+ * One parsed Predicted Files bullet: its path, and whether it carries the `(new)` marker
+ * — see {@link parsePredictedFileBullets} for the bullet grammar.
+ */
+export interface PredictedFileBullet {
   path: string;
   isNew: boolean;
 }
@@ -119,10 +122,11 @@ interface PredictedFileBullet {
  * The format (pinned in docs/reference/plan-artifact.md) is a bullet whose path is either
  * backticked — `- `path/to/file.ts` — why` — or the first bare token — `- path/to/file.ts
  * — why`. Backticks win when present so a reason containing slashes cannot masquerade as
- * a path. A path immediately followed by `(new)` (before the `—`/`-` separator, case
- * insensitive) declares the file does not exist yet — the issue's scope is to create it.
+ * a path. A path immediately followed by `(new)` (case-insensitive, before the `—`/`-`
+ * separator if any) declares the file does not exist yet — the issue's scope is to create
+ * it — e.g. `- \`path/to/new-file.ts\` (new) — why`.
  */
-function parsePredictedFileBullet(line: string): PredictedFileBullet | null {
+function parseOneBullet(line: string): PredictedFileBullet | null {
   const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
   if (!bullet) return null;
   const item = bullet[1].trim();
@@ -139,33 +143,38 @@ function parsePredictedFileBullet(line: string): PredictedFileBullet | null {
 }
 
 /**
- * Repo-relative paths from the Predicted Files section, one per bullet.
- *
- * The format (pinned in docs/reference/plan-artifact.md) is a bullet whose path is either
- * backticked — `- `path/to/file.ts` — why` — or the first bare token — `- path/to/file.ts
- * — why`. Backticks win when present so a reason containing slashes cannot masquerade as
- * a path.
+ * Every Predicted Files bullet, one per line — see {@link parseOneBullet} for the bullet
+ * grammar. The single parse pass `extractPredictedFiles`, `extractNewPredictedFiles`, and
+ * `plan validate`'s per-file loop all derive their answer from, so the section is only
+ * ever split and matched once.
  */
-export function extractPredictedFiles(sectionBody: string): string[] {
-  const paths: string[] = [];
+export function parsePredictedFileBullets(sectionBody: string): PredictedFileBullet[] {
+  const bullets: PredictedFileBullet[] = [];
   for (const line of sectionBody.split('\n')) {
-    const bullet = parsePredictedFileBullet(line);
-    if (bullet) paths.push(bullet.path);
+    const bullet = parseOneBullet(line);
+    if (bullet) bullets.push(bullet);
   }
-  return paths;
+  return bullets;
+}
+
+/** Repo-relative paths from the Predicted Files section, one per bullet — see {@link parsePredictedFileBullets}. */
+export function extractPredictedFiles(sectionBody: string): string[] {
+  return parsePredictedFileBullets(sectionBody).map((b) => b.path);
 }
 
 /**
- * Predicted-file paths whose bullet carries the `(new)` marker — see
- * {@link parsePredictedFileBullet}.
+ * Paths whose Predicted Files bullet carries the `(new)` marker — see
+ * {@link parsePredictedFileBullets}. These declare a file the issue's scope is to CREATE,
+ * so `plan validate` skips the missing-at-HEAD check for exactly these paths and instead
+ * warns when one already exists. Never a superset of {@link extractPredictedFiles}'s
+ * result.
  */
 export function extractNewPredictedFiles(sectionBody: string): Set<string> {
-  const paths = new Set<string>();
-  for (const line of sectionBody.split('\n')) {
-    const bullet = parsePredictedFileBullet(line);
-    if (bullet?.isNew) paths.add(bullet.path);
-  }
-  return paths;
+  return new Set(
+    parsePredictedFileBullets(sectionBody)
+      .filter((b) => b.isNew)
+      .map((b) => b.path)
+  );
 }
 
 /**
@@ -200,13 +209,14 @@ export function parsePlanArtifact(body: string): PlanArtifact | null {
   for (const section of PLAN_SECTIONS) {
     sections[section] = extractSection(markdown, section) ?? '';
   }
+  const predictedFileBullets = parsePredictedFileBullets(sections['Predicted Files']);
   return {
     head: marker.head,
     raw: body,
     markdown,
     sections,
-    predictedFiles: extractPredictedFiles(sections['Predicted Files']),
-    newFiles: extractNewPredictedFiles(sections['Predicted Files']),
+    predictedFiles: predictedFileBullets.map((b) => b.path),
+    newFiles: new Set(predictedFileBullets.filter((b) => b.isNew).map((b) => b.path)),
   };
 }
 
