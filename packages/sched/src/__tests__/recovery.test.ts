@@ -27,6 +27,7 @@ import {
   type MemberRange,
   memberRanges,
   parseBoundaryCommits,
+  patchBatch,
   type RecoveryDeps,
   resolveFixAttempt,
   type SchedState,
@@ -759,6 +760,134 @@ describe('dissolveBatch', () => {
     });
   });
 
+  // #563: `strategy: 'partial'` — a distinct code path with its own edge cases.
+  const evictionRecord = (issue: number) => ({
+    issue,
+    reason: 'suite-red',
+    attribution: 'overlap' as const,
+    reverted_commits: [`c${issue}`],
+    group: [],
+    at: NOW.toISOString(),
+  });
+
+  it('preserves the survivor and trims the batch (no requeue — the caller already did that)', () => {
+    let state = batchState([201, 202, 203], 'validating');
+    state = patchBatch(state, 'b1', { evictions: [evictionRecord(201), evictionRecord(202)] }, NOW);
+    const h = harness();
+
+    const result = dissolveBatch(
+      state,
+      'b1',
+      { strategy: 'partial', reason: 'eviction-threshold' },
+      h.deps
+    );
+
+    expect(result.requeued).toEqual([]); // this call requeues nothing — see the function's own doc
+    expect(result.preserved).toEqual([203]);
+    expect(result.newBatches).toEqual([]);
+    expect(findBatch(result.state, 'b1')?.status).toBe('reviewing');
+    expect(findBatch(result.state, 'b1')?.members).toEqual([203]);
+    expect(eventNames(h.events)).toContain('batch-preserved');
+    expect(h.milestones.at(-1)?.milestone.kv).toMatchObject({
+      strategy: 'partial',
+      dissolved: 'false',
+      requeued: 'none',
+      evicted_total: '201,202',
+      preserved: '203',
+    });
+  });
+
+  it('drops stale eviction_groups and ranges naming a member that is no longer in the batch', () => {
+    let state = batchState([201, 202, 203], 'validating', { groups: [[202, 203]] });
+    state = patchBatch(
+      state,
+      'b1',
+      {
+        evictions: [evictionRecord(201)],
+        ranges: [201, 202, 203].map((issue) => ({
+          issue,
+          from: 'a',
+          to: 'b',
+          commits: [`c${issue}`],
+          positions: [0],
+        })),
+      },
+      NOW
+    );
+    const h = harness();
+
+    const result = dissolveBatch(
+      state,
+      'b1',
+      { strategy: 'partial', reason: 'eviction-threshold' },
+      h.deps
+    );
+
+    // 202/203 both survive, so the group is untouched here — but 201's own
+    // range must not linger and name a non-member (`enqueue.ts` throws on
+    // exactly that shape for eviction_groups; ranges follow the same rule).
+    expect(findBatch(result.state, 'b1')?.eviction_groups).toEqual([[202, 203]]);
+    expect(
+      findBatch(result.state, 'b1')
+        ?.ranges.map((r) => r.issue)
+        .sort()
+    ).toEqual([202, 203]);
+  });
+
+  it('falls through to a full dissolve when every member has been evicted — never ships an empty batch (#563)', () => {
+    let state = batchState([201, 202], 'validating');
+    state = patchBatch(state, 'b1', { evictions: [evictionRecord(201), evictionRecord(202)] }, NOW);
+    const h = harness();
+
+    const result = dissolveBatch(
+      state,
+      'b1',
+      { strategy: 'partial', reason: 'eviction-threshold' },
+      h.deps
+    );
+
+    expect(findBatch(result.state, 'b1')?.status).toBe('dissolved');
+    expect(findBatch(result.state, 'b1')?.members.length).toBeGreaterThan(0); // membership list is untouched, not emptied
+    expect(result.requeued.sort()).toEqual([201, 202]);
+    expect(eventNames(h.events)).toContain('batch-dissolved');
+    expect(eventNames(h.events)).not.toContain('batch-preserved');
+    // The milestone reports the strategy actually taken (full), not the one requested (partial).
+    expect(h.milestones.at(-1)?.milestone.kv).toMatchObject({
+      strategy: 'full',
+      dissolved: 'true',
+    });
+  });
+
+  it('`partial` on a 1-member batch dissolves rather than shipping an empty batch (N=1 threshold clamp)', () => {
+    let state = batchState([201], 'validating');
+    state = patchBatch(state, 'b1', { evictions: [evictionRecord(201)] }, NOW);
+    const h = harness();
+
+    // checkDissolveTrigger itself must agree the batch crossed the threshold
+    // before a caller would ever request 'partial' here — verify the clamp
+    // that makes that possible (pre-clamp, N=1's threshold equaled N and this
+    // was never true).
+    expect(
+      checkDissolveTrigger(findBatch(state, 'b1') as NonNullable<ReturnType<typeof findBatch>>)
+    ).toBe(true);
+
+    const result = dissolveBatch(
+      state,
+      'b1',
+      { strategy: 'partial', reason: 'eviction-threshold' },
+      h.deps
+    );
+    expect(findBatch(result.state, 'b1')?.status).toBe('dissolved');
+  });
+
+  it('rejects `partial` from a status other than validating, naming the correct target', () => {
+    const state = batchState([201, 202], 'awaiting-merge');
+    const h = harness();
+    expect(() => dissolveBatch(state, 'b1', { strategy: 'partial', reason: 'x' }, h.deps)).toThrow(
+      IllegalTransitionError
+    );
+  });
+
   it('refuses to dissolve a batch that is already dissolved', () => {
     const state = batchState([201], 'validating');
     const h = harness();
@@ -1115,6 +1244,44 @@ describe('eviction integrity (regressions)', () => {
     expect(result.reverted).toEqual([]);
     expect(h.milestones.at(-1)?.milestone.kv).toMatchObject({ no_commits: '201' });
     expect(h.events.some((e) => e.detail?.includes('was NOT reverted'))).toBe(true);
+  });
+
+  it('never partial-preserves when an evicted member has no commits on the branch, even with a green suite (#563)', () => {
+    // 201 was already evicted (no commits found — nothing to revert, matching
+    // the test above); this eviction of 202 (also no commits — `ranges: []`)
+    // is what crosses the N=3 threshold (2 evictions). The suite comes back
+    // green by default, but 202's "eviction" never actually removed anything
+    // from the branch — shipping the survivor would ship 202's code too.
+    let state = batchState([201, 202, 203], 'attributing');
+    state = patchBatch(
+      state,
+      'b1',
+      {
+        evictions: [
+          {
+            issue: 201,
+            reason: 'suite-red',
+            attribution: 'overlap',
+            reverted_commits: [],
+            group: [],
+            at: NOW.toISOString(),
+          },
+        ],
+      },
+      NOW
+    );
+    const h = harness(); // default suite: { ok: true }
+
+    const result = evictMembers(
+      state,
+      'b1',
+      { issues: [202], reason: 'suite-red', attribution: 'overlap', ranges: [] },
+      h.deps
+    );
+
+    expect(result.dissolved).toBe(true);
+    expect(findBatch(result.state, 'b1')?.status).toBe('dissolved');
+    expect(eventNames(h.events)).not.toContain('batch-preserved');
   });
 
   it('ignores an eviction group member that is not in the batch', () => {

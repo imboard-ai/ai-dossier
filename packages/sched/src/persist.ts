@@ -333,30 +333,24 @@ export class SchedStore {
   }
 }
 
-/** Validates `dissolve_policy` (#563): a strictly-positive fraction, and a positive-integer floor. */
+/** Validates `dissolve_policy` (#563): a fraction in (0, 1], and a positive-integer floor. */
 function validateDissolvePolicy(raw: unknown): DissolvePolicy {
-  if (typeof raw !== 'object' || raw === null) {
-    throw new Error('dissolve_policy must be an object');
-  }
-  const policy = raw as Record<string, unknown>;
+  const policy = requirePlainObject('dissolve_policy', raw);
   if (
     typeof policy.fraction !== 'number' ||
     !Number.isFinite(policy.fraction) ||
     policy.fraction <= 0 ||
     policy.fraction > 1
   ) {
-    throw new Error('dissolve_policy.fraction must be a number in (0, 1]');
+    throw new Error(
+      `dissolve_policy.fraction must be a number in (0, 1]; got ${JSON.stringify(policy.fraction)}`
+    );
   }
-  if (
-    !Number.isInteger(policy.min_evictions_before_dissolve) ||
-    (policy.min_evictions_before_dissolve as number) < 1
-  ) {
-    throw new Error('dissolve_policy.min_evictions_before_dissolve must be an integer >= 1');
-  }
-  return {
-    fraction: policy.fraction,
-    min_evictions_before_dissolve: policy.min_evictions_before_dissolve as number,
-  };
+  const minEvictions = requirePositiveInt(
+    'dissolve_policy.min_evictions_before_dissolve',
+    policy.min_evictions_before_dissolve
+  );
+  return { fraction: policy.fraction, min_evictions_before_dissolve: minEvictions };
 }
 
 const MODEL_TIERS: readonly ModelTier[] = ['mechanical', 'mid', 'strong'];
@@ -364,14 +358,19 @@ const MODEL_TIERS: readonly ModelTier[] = ['mechanical', 'mid', 'strong'];
 /** Every phase name a `dispatch.phase_stall_timeout_ms` key may legally name (#495). */
 const STALL_PHASES: readonly string[] = [...PHASES, ...BATCH_PHASES];
 
-/** A positive-integer-milliseconds field, validated once and reused by every `*_ms` config key. */
-function requirePositiveIntMs(label: string, value: unknown): number {
+/** A positive-integer field, validated once and reused by every integer-floor config key. */
+function requirePositiveInt(label: string, value: unknown, unitSuffix = ''): number {
   if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
     throw new Error(
-      `${label} must be a positive integer (milliseconds); got ${JSON.stringify(value)}`
+      `${label} must be a positive integer${unitSuffix}; got ${JSON.stringify(value)}`
     );
   }
   return value;
+}
+
+/** A positive-integer-milliseconds field, validated once and reused by every `*_ms` config key. */
+function requirePositiveIntMs(label: string, value: unknown): number {
+  return requirePositiveInt(label, value, ' (milliseconds)');
 }
 
 /** A plain (non-array, non-null) object field, validated once and reused by every map-shaped config key. */

@@ -73,6 +73,7 @@ import {
   MAX_FIX_ATTEMPTS_PER_MEMBER,
   MAX_REBASE_ATTEMPTS,
   type ModelTier,
+  resolveDissolvePolicy,
   type SchedConfig,
   SchedNotFoundError,
   type SchedState,
@@ -553,7 +554,15 @@ export interface EvictionOutcome {
   reverted: string[];
   /** True when a revert conflicted — the batch dissolves instead. */
   conflict: boolean;
+  /**
+   * True only when the batch actually reached `dissolved`. `false` covers
+   * two different cases: the dissolve threshold was never crossed (`dissolve`
+   * below is `undefined`), OR it was crossed but `strategy: 'partial'`
+   * (#563) preserved the survivors instead — the batch is then already in
+   * `reviewing`, not untouched. Check `dissolve` for which case applies.
+   */
   dissolved: boolean;
+  /** Set whenever `dissolveBatch` was invoked at all, regardless of whether it dissolved or preserved. */
   dissolve?: DissolveOutcome;
   /** The post-eviction suite re-run, when a runner was supplied. */
   suite: SuiteResult | null;
@@ -605,8 +614,12 @@ function orderRevertCommits(ranges: readonly MemberRange[], targets: readonly nu
 
 /**
  * `attributing → evicting`: revert the offending members' commits, requeue them
- * as full-cycle with their failure evidence, re-run the suite, and dissolve if
- * the batch has now lost more than a third of its members (AC2/AC3/AC5).
+ * as full-cycle with their failure evidence, re-run the suite, and check the
+ * batch's configurable dissolve threshold (`DissolvePolicy`, AC2/AC3/AC5).
+ * Crossing it has two outcomes (#563): if the re-run suite came back green
+ * for the survivors, the batch is PRESERVED — trimmed to its survivors and
+ * carried straight to `reviewing`, only the evicted members requeue; a red
+ * or unreadable re-run dissolves the batch in full, as before.
  *
  * A conflicting revert aborts and dissolves immediately — a half-reverted
  * worktree is not a state any later step can reason about.
@@ -782,19 +795,38 @@ export function evictMembers(
   const suite = runSuite(deps, batchId, now);
   next = transitionBatch(next, batchId, 'validating', {}, now);
 
-  const dissolvePolicy = deps.dissolvePolicy ?? DEFAULT_DISSOLVE_POLICY;
+  const dissolvePolicy = resolveDissolvePolicy(deps.dissolvePolicy);
   if (checkDissolveTrigger(batchOrThrow(next, batchId), dissolvePolicy)) {
     // A fresh green suite for the survivors (#563) means their work is still
     // safe to ship as-is — dissolve only the evicted members, not the whole
     // batch. A red or unreadable suite means the survivors themselves cannot
-    // be trusted, so the batch dissolves in full, as before.
-    const survivorsGreen = suite !== null && suite.ok === true;
+    // be trusted, so the batch dissolves in full, as before. A member with
+    // NO commits found on the branch (`withoutCommits`, computed above) was
+    // never actually removed from the branch despite being marked evicted —
+    // shipping the "survivors" would ship its un-reverted work too, so that
+    // also forces `full`.
+    const survivorsGreen = suite !== null && suite.ok === true && withoutCommits.length === 0;
+    // Why `full` was chosen over `partial` (or why `partial` was still safe) —
+    // distinct from a green suite, since "no suite runner configured" and "a
+    // genuinely red suite" both fall to `full` but mean very different things
+    // to an operator reading the journal.
+    const reason = survivorsGreen
+      ? 'eviction-threshold'
+      : withoutCommits.length > 0
+        ? 'eviction-threshold-unreverted-member'
+        : suite === null
+          ? 'eviction-threshold-suite-unavailable'
+          : 'eviction-threshold-suite-red';
     const dissolve = dissolveBatch(
       next,
       batchId,
-      { strategy: survivorsGreen ? 'partial' : 'full', reason: 'eviction-threshold' },
+      { strategy: survivorsGreen ? 'partial' : 'full', reason },
       deps
     );
+    // Not simply `!survivorsGreen`: `dissolveBatch` itself falls through to a
+    // full dissolve when `partial` finds zero survivors (every member
+    // evicted), so the actual batch status is the only reliable signal.
+    const dissolved = findBatch(dissolve.state, batchId)?.status === 'dissolved';
     return {
       state: dissolve.state,
       evicted: targets,
@@ -803,7 +835,7 @@ export function evictMembers(
       requeued: [...new Set([...requeued, ...dissolve.requeued])].sort((a, b) => a - b),
       reverted,
       conflict: false,
-      dissolved: !survivorsGreen,
+      dissolved,
       dissolve,
       suite,
     };
@@ -875,14 +907,36 @@ export function checkDissolveTrigger(
   policy: DissolvePolicy = DEFAULT_DISSOLVE_POLICY
 ): boolean {
   if (batch.members.length === 0) return false;
-  const evicted = new Set(batch.evictions.map((e) => e.issue)).size;
   const threshold = dissolveThreshold(batch.members.length, policy);
-  return evicted > threshold;
+  return evictedMemberIds(batch).size > threshold;
 }
 
-/** `max(ceil(N × fraction), min_evictions_before_dissolve)` — the shared threshold math. */
+/**
+ * `max(ceil(N × fraction), min_evictions_before_dissolve)` — the shared
+ * threshold math, clamped below `N` so a batch that loses every member is
+ * always reachable-dissolvable regardless of the configured floor. Without
+ * the clamp, N=1 is a degenerate case: `ceil(1 × ⅓) = 1` already equals `N`,
+ * so `evicted > threshold` can never be true — a 1-member batch's only
+ * member could be evicted and the batch would never dissolve. The clamp
+ * also caps a `min_evictions_before_dissolve` a project configured too high
+ * for a given batch size, rather than letting it disable dissolution outright.
+ */
 function dissolveThreshold(memberCount: number, policy: DissolvePolicy): number {
-  return Math.max(Math.ceil(memberCount * policy.fraction), policy.min_evictions_before_dissolve);
+  const threshold = Math.max(
+    Math.ceil(memberCount * policy.fraction),
+    policy.min_evictions_before_dissolve
+  );
+  return Math.min(threshold, memberCount - 1);
+}
+
+/**
+ * Distinct evicted member ids, however many times each was recorded — the
+ * one definition of "which members are out" that `checkDissolveTrigger`,
+ * `dissolveBatch`'s policy-input count, and `preserveSurvivors`'s survivor
+ * computation all share.
+ */
+function evictedMemberIds(batch: BatchEntry): Set<number> {
+  return new Set(batch.evictions.map((e) => e.issue));
 }
 
 // --- AC3: dissolve ---
@@ -938,6 +992,13 @@ export function dissolveBatch(
 ): DissolveOutcome {
   const now = clock(deps);
   const batch = batchOrThrow(state, batchId);
+  // `partial`'s target is `reviewing` (only legal from `validating`), never
+  // `dissolving` — naming the wrong target here would blame a transition
+  // `partial` never attempts. Checked before the generic terminal guard so a
+  // terminal batch gets this message too when the caller asked for `partial`.
+  if (opts.strategy === 'partial' && batch.status !== 'validating') {
+    throw new IllegalTransitionError('batch', batch.status, 'reviewing');
+  }
   if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
     // The batch WAS found — this is an illegal edge, not a missing id, and a
     // caller catching SchedNotFoundError to mean "unknown batch" would misroute it.
@@ -947,16 +1008,22 @@ export function dissolveBatch(
   // Policy inputs recorded on every dissolve decision (AC3), regardless of
   // which strategy or reason drove it — "what did the batch look like when
   // this was decided?" is always answerable from the journal/milestone.
-  const dissolvePolicy = deps.dissolvePolicy ?? DEFAULT_DISSOLVE_POLICY;
+  const dissolvePolicy = resolveDissolvePolicy(deps.dissolvePolicy);
   const policyInputs = {
     memberCount: batch.members.length,
-    evictedCount: new Set(batch.evictions.map((e) => e.issue)).size,
+    evictedCount: evictedMemberIds(batch).size,
     threshold: dissolveThreshold(batch.members.length, dissolvePolicy),
   };
 
   if (opts.strategy === 'partial') {
-    return preserveSurvivors(state, batch, opts, deps, now, policyInputs);
+    const outcome = preserveSurvivors(state, batch, opts, deps, now, policyInputs);
+    // `null` means every member was evicted — there is nothing "partial"
+    // about that, so fall through to an ordinary full dissolve below
+    // (`strategy` is downgraded to `full` for the rest of this call; `opts`
+    // itself is left untouched since it may be shared with the caller).
+    if (outcome) return outcome;
   }
+  const strategy: 'full' | 'halved' = opts.strategy === 'halved' ? 'halved' : 'full';
 
   const unshipped: number[] = [];
   const preserved: number[] = [];
@@ -985,7 +1052,7 @@ export function dissolveBatch(
   const newBatches: string[] = [];
   const requeued: number[] = [];
 
-  if (opts.strategy === 'halved' && unshipped.length > 0) {
+  if (strategy === 'halved' && unshipped.length > 0) {
     // Split by POSITION, not by coupling: the halves are the first and second
     // half of `unshipped` in member order. A coupled eviction group straddling
     // the pivot is therefore broken up — accepted, because both halves re-run
@@ -1062,7 +1129,7 @@ export function dissolveBatch(
       // result; N/evictions/threshold (AC3) are the policy inputs behind the
       // decision itself, so a dissolve is explainable without re-deriving it.
       detail:
-        `${opts.reason} strategy=${opts.strategy} N=${policyInputs.memberCount} ` +
+        `${opts.reason} strategy=${strategy} N=${policyInputs.memberCount} ` +
         `evictions=${policyInputs.evictedCount} threshold=${policyInputs.threshold} ` +
         `requeued=${requeued.join(',') || 'none'} preserved=${preserved.join(',') || 'none'}` +
         (newBatches.length > 0 ? ` split_into=${newBatches.join(',')}` : ''),
@@ -1078,7 +1145,7 @@ export function dissolveBatch(
       kv: {
         reason: opts.reason,
         dissolved: 'true',
-        strategy: opts.strategy,
+        strategy,
         requeued: requeued.join(',') || 'none',
         preserved: preserved.join(',') || 'none',
         ...(newBatches.length > 0 ? { split_into: newBatches.join(',') } : {}),
@@ -1095,11 +1162,20 @@ export function dissolveBatch(
  * survivors are green — a fresh suite re-run came back `ok` right before this
  * was called. Requeue nothing here: the members THIS round evicted were
  * already requeued by the caller's own eviction loop before `dissolveBatch`
- * was invoked, so re-requeuing them would double the bookkeeping. The only
- * work left is to trim them out of `batch.members` (so the batch that ships
- * reports only the survivors it actually contains) and carry the batch
- * forward exactly like the ordinary all-green path does: straight to
- * `reviewing`, never through `dissolving`/`dissolved` at all.
+ * was invoked, so re-requeuing them would double the bookkeeping — this
+ * function's own `requeued` is therefore always `[]`; the evicted ids are
+ * reported separately (`evicted_total=`) so the milestone/journal can still
+ * show them without claiming this call put them on the queue. The remaining
+ * work is to trim them out of `batch.members` (and the `eviction_groups` /
+ * `ranges` that name them — `enqueue.ts` throws on a group or range naming a
+ * non-member) so the batch that ships reports only the survivors it actually
+ * contains, and carry the batch forward exactly like the ordinary all-green
+ * path does: straight to `reviewing`, never through `dissolving`/`dissolved`
+ * at all.
+ *
+ * Returns `null` when every member has been evicted across the batch's
+ * history — there are no survivors to preserve, so the caller falls through
+ * to an ordinary full dissolve instead of shipping an empty batch.
  */
 function preserveSurvivors(
   state: SchedState,
@@ -1108,14 +1184,26 @@ function preserveSurvivors(
   deps: RecoveryDeps,
   now: Date,
   policyInputs: { memberCount: number; evictedCount: number; threshold: number }
-): DissolveOutcome {
+): DissolveOutcome | null {
   // Cumulative across every eviction round this batch has had, not just this
   // one — a member evicted two rounds ago is still not a survivor.
-  const evictedIds = new Set(batch.evictions.map((e) => e.issue));
+  const evictedIds = evictedMemberIds(batch);
   const survivors = batch.members.filter((issue) => !evictedIds.has(issue));
-  const requeued = [...evictedIds].sort((a, b) => a - b);
+  if (survivors.length === 0) return null;
+  const evictedTotal = [...evictedIds].sort((a, b) => a - b);
 
-  let next = patchBatch(state, batch.id, { members: survivors }, now);
+  let next = patchBatch(
+    state,
+    batch.id,
+    {
+      members: survivors,
+      eviction_groups: batch.eviction_groups
+        .map((group) => group.filter((m) => survivors.includes(m)))
+        .filter((group) => group.length > 1),
+      ranges: batch.ranges.filter((r) => survivors.includes(r.issue)),
+    },
+    now
+  );
   next = transitionBatch(next, batch.id, 'reviewing', {}, now);
 
   journal(
@@ -1124,7 +1212,8 @@ function preserveSurvivors(
       detail:
         `${opts.reason} strategy=partial N=${policyInputs.memberCount} ` +
         `evictions=${policyInputs.evictedCount} threshold=${policyInputs.threshold} ` +
-        `requeued=${requeued.join(',') || 'none'} preserved=${survivors.join(',') || 'none'}`,
+        `requeued=none evicted_total=${evictedTotal.join(',') || 'none'} ` +
+        `preserved=${survivors.join(',') || 'none'}`,
     }),
     now
   );
@@ -1138,14 +1227,17 @@ function preserveSurvivors(
         reason: opts.reason,
         dissolved: 'false',
         strategy: 'partial',
-        requeued: requeued.join(',') || 'none',
+        requeued: 'none',
+        evicted_total: evictedTotal.join(',') || 'none',
         preserved: survivors.join(',') || 'none',
       },
     },
     now
   );
 
-  return { state: next, requeued, preserved: survivors, newBatches: [] };
+  // This call requeued nothing — the caller's own eviction loop already
+  // requeued this round's evicted members before invoking dissolveBatch.
+  return { state: next, requeued: [], preserved: survivors, newBatches: [] };
 }
 
 export interface BlockOptions {

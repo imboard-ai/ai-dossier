@@ -131,7 +131,7 @@ import type {
   SlotEntry,
   SlotStatus,
 } from './types';
-import { DEFAULT_DISSOLVE_POLICY } from './types';
+import { resolveDissolvePolicy } from './types';
 
 /**
  * The four `ai-dossier cap run` outcomes (docs/reference/capabilities.md):
@@ -304,7 +304,7 @@ function recoveryDeps(
     journal: deps.journal,
     postMilestone: createExecMilestonePoster(deps.exec, { repoDir: deps.repoDir }),
     runSuite: batch.worktree !== null ? () => deps.runSuite(batch.worktree as string) : undefined,
-    dissolvePolicy: config.dissolve_policy ?? DEFAULT_DISSOLVE_POLICY,
+    dissolvePolicy: resolveDissolvePolicy(config.dissolve_policy),
     now: () => now,
   };
 }
@@ -1380,7 +1380,7 @@ function evictMemberDirectly(
   reason: string,
   now: Date
 ): boolean {
-  const dissolvePolicy = config.dissolve_policy ?? DEFAULT_DISSOLVE_POLICY;
+  const dissolvePolicy = resolveDissolvePolicy(config.dissolve_policy);
   // Pass 1 (pure — requeue + record the eviction): safe to run entirely
   // inside the lock, unlike `dissolveBatch` below, which shells out
   // (`deps.exec`/`postMilestone`) and so must NOT hold the lock while it runs.
