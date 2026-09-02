@@ -431,6 +431,16 @@ export interface SchedState {
    */
   last_pr_poll_at: string | null;
   /**
+   * When the engine last re-read hard-block labels (#544). The label
+   * re-check runs on every tick that has work; on a tick with nothing else
+   * to do it is throttled to `LABEL_POLL_IDLE_INTERVAL_MS` since this
+   * timestamp, so an idle fleet does not spend a `gh issue view` per blocked
+   * unit per tick forever. Persisted — like `last_pr_poll_at` — so the
+   * throttle survives a `sched` restart rather than resetting to "poll now"
+   * on every crash loop.
+   */
+  last_label_poll_at: string | null;
+  /**
    * Consecutive `suspect-dispatch` exits (#505) from DIFFERENT units — the
    * dispatch-health signal. A quota/auth wall kills every unit the same way
    * (instant unverified exit, zero progress), so cross-unit correlation is
@@ -465,6 +475,15 @@ export interface SchedConfig {
    * Checked on each reconcile tick when due; see `SchedState.last_pr_poll_at`.
    */
   pr_poll_interval_ms?: number;
+  /**
+   * Hard-block label re-read interval in ms for an IDLE tick (#544, default
+   * 600 000 — 10 min). A tick with work re-reads every tick regardless; this
+   * only bounds the cost of a fleet parked entirely on human decisions. Every
+   * other poll cadence here is operator-tunable, and an operator hitting a
+   * `gh` rate wall — or babysitting a hand-off they want picked up faster —
+   * needs the same lever. See `SchedState.last_label_poll_at`.
+   */
+  label_poll_interval_ms?: number;
   /** Agent dispatch settings (#464); every field optional with engine defaults. */
   dispatch?: DispatchConfig;
   /**
@@ -632,6 +651,12 @@ export const DEFAULT_RECONCILE_INTERVAL_MS = 60 * 1000;
 export const DEFAULT_PR_POLL_INTERVAL_MS = 150 * 1000;
 
 /**
+ * Default idle-tick hard-block label re-read interval (#544): 10 min. Only a
+ * tick with nothing else to do waits this long — see `pollLabels`.
+ */
+export const DEFAULT_LABEL_POLL_INTERVAL_MS = 10 * 60 * 1000;
+
+/**
  * Fraction of a batch's members whose eviction dissolves it: STRICTLY more
  * than a third (RFC-0001 §F.8 "> ⅓ evicted → dissolve").
  */
@@ -682,7 +707,7 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.8.0' as const;
+export const SCHEMA_VERSION = '1.9.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -694,9 +719,10 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.5.0',
   '1.6.0',
   '1.7.0',
+  '1.8.0',
 ];
 
-export const CONFIG_SCHEMA_VERSION = '1.4.0' as const;
+export const CONFIG_SCHEMA_VERSION = '1.5.0' as const;
 
 /** Config schema versions `loadConfig` accepts and migrates transparently on load (fields absent in an older version simply resolve to their defaults). */
 export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
@@ -704,6 +730,7 @@ export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
   '1.1.0',
   '1.2.0',
   '1.3.0',
+  '1.4.0',
 ];
 
 /** Config file shape (schema_version + the config itself). */
@@ -713,6 +740,7 @@ export interface SchedConfigFile {
   stall_timeout_ms?: number;
   reconcile_interval_ms?: number;
   pr_poll_interval_ms?: number;
+  label_poll_interval_ms?: number;
   dispatch?: DispatchConfig;
   auto_upgrade?: boolean;
 }
@@ -850,6 +878,17 @@ export type JournalEventName =
   // dispatched)
   | 'label-blocked'
   | 'label-check-failed'
+  // #544 per-tick hard-block label re-check (journaled by the ENGINE, unlike
+  // the two above): a `label:<name>`-blocked entry whose label the operator
+  // has since removed, returned to `queued`. Its `reason` is the block that
+  // was CLEARED (`label:<name>`), not one now in force — the one place in this
+  // vocabulary where `reason` names a past state, so that the removed label is
+  // recoverable from the journal at all. The engine also re-uses
+  // `label-blocked` (a dispatchable entry that GAINED a hard-block label
+  // mid-wave, or a blocked entry whose label CHANGED — the latter carries
+  // `previous_reason`) and `label-check-failed` (an unreachable label read,
+  // which decides nothing) — one event vocabulary across both screens.
+  | 'label-cleared'
   // #524 runs.jsonl telemetry: a dispatch's exit produced no entry (unit left
   // the queue, or is not an `issue:<n>` unit), or the append itself failed.
   | 'run-log-skipped'
@@ -906,6 +945,15 @@ export interface JournalEvent {
    * vocabulary above rather than `QueueEntry.reason`'s.
    */
   reason?: string;
+  /**
+   * The `reason` an event REPLACED, in the same vocabulary as `reason` (#544's
+   * `label-blocked` on a changed label: `reason` is the label now in force,
+   * `previous_reason` the one it displaced). Without it the old value is
+   * unrecoverable from `events.jsonl` — the entry's `reason` is overwritten in
+   * place — and "was this relabelled, or did the policy order change under
+   * me?" becomes unanswerable.
+   */
+  previous_reason?: string;
   /**
    * Agent command actually spawned, joined with spaces (#527) — declared so
    * `spawned`/`redispatched` writers get an excess-property check instead of

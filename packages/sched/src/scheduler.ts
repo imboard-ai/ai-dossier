@@ -56,12 +56,19 @@ function unitId(unit: RunnableUnit): string {
  * #464 engine dispatches `issue` units only — batch member sequencing is a
  * follow-up — so it passes `['issue']` and a `ready` batch never occupies a
  * slot it cannot run on yet.
+ *
+ * `exclude` holds unit ids that must not be placed on this call, even though
+ * they are runnable. #544's label screen uses it: an issue whose hard-block
+ * labels were not confirmed clear by THIS tick's read is deferred rather than
+ * dispatched, which is the only way the pre-lock label snapshot can bound a
+ * dispatch set that in-lock reconciliation may have grown.
  */
 export function computeAssignments(
   state: SchedState,
   config: SchedConfig,
   now: Date = new Date(),
-  kinds: readonly ('issue' | 'batch')[] = ['issue', 'batch']
+  kinds: readonly ('issue' | 'batch')[] = ['issue', 'batch'],
+  exclude: ReadonlySet<string> = new Set()
 ): { state: SchedState; assignments: Assignment[] } {
   if (state.paused) {
     return { state, assignments: [] };
@@ -74,7 +81,8 @@ export function computeAssignments(
   const held = new Set(state.slots.map((s) => s.unit).filter((u): u is string => u !== null));
   const candidates = runnableUnits(state)
     .filter((unit) => kinds.includes(unit.kind))
-    .filter((unit) => !held.has(unitId(unit)));
+    .filter((unit) => !held.has(unitId(unit)))
+    .filter((unit) => !exclude.has(unitId(unit)));
   const taken = candidates.slice(0, freeCapacity(state, config));
   if (taken.length === 0) {
     return { state, assignments: [] };

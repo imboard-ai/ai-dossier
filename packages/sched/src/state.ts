@@ -187,6 +187,7 @@ export function createEmptyState(): SchedState {
     slots: [],
     next_slot_id: 1,
     last_pr_poll_at: null,
+    last_label_poll_at: null,
     consecutive_suspect_dispatches: 0,
     last_suspect_dispatch_unit: null,
   };
@@ -408,7 +409,10 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * duration and dispatch-log boundary are simply unmeasurable until the next
  * spawn — and 1.6.0 batches backfill `worktree` (null) and `ranges` ([],
  * pre-#523), no batch having been dispatched before the engine drove batch
- * execution, so those are exact too. The
+ * execution, so those are exact too; 1.8.0 (pre-#544) states backfill
+ * `last_label_poll_at` (null) — no hard-block label re-check ever ran under
+ * them, so the first tick after the upgrade polls immediately instead of
+ * waiting out a throttle window it has no evidence for. The
  * inference is entry-status-first, not phase-first: `phase === 'report'` is
  * exactly the signal #500 proved unreliable for a LIVE report agent (it
  * drifts to the issue's pre-report milestone under `phase-updated` well
@@ -596,6 +600,13 @@ export function validateState(data: unknown): SchedState {
     throw new Error('last_pr_poll_at must be an ISO date string or null');
   }
   if (
+    obj.last_label_poll_at !== null &&
+    obj.last_label_poll_at !== undefined &&
+    !isIsoDateString(obj.last_label_poll_at)
+  ) {
+    throw new Error('last_label_poll_at must be an ISO date string or null');
+  }
+  if (
     obj.consecutive_suspect_dispatches !== undefined &&
     (!Number.isInteger(obj.consecutive_suspect_dispatches) ||
       (obj.consecutive_suspect_dispatches as number) < 0)
@@ -689,6 +700,11 @@ export function validateState(data: unknown): SchedState {
     batches,
     slots,
     last_pr_poll_at: obj.last_pr_poll_at ?? null,
+    // Pre-#544 (1.8.0) states carry no label-poll timestamp. Null is exact:
+    // no label re-check has ever run under them, so the first tick after the
+    // upgrade should poll immediately rather than wait out a throttle window
+    // it has no evidence for.
+    last_label_poll_at: (obj.last_label_poll_at as string | undefined) ?? null,
     // Pre-#505 (1.4.0) states carry neither field — no suspect dispatches
     // have ever been observed under them, so 0/null is exactly correct, not
     // a lossy guess.

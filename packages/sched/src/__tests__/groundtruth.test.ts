@@ -6,6 +6,7 @@ import {
   groundTruthExec,
   isParkedMilestone,
   isVerifiedComplete,
+  parseIssueLabelsJson,
   parseMilestoneJson,
   parsePrViewJson,
   parseSetupInfo,
@@ -390,5 +391,52 @@ describe('parseSetupInfo author trust (defense-in-depth)', () => {
         ])
       )
     ).toEqual({ worktree: '/repo/worktrees/wt', poolClaimed: true, branch: null });
+  });
+});
+
+describe('issueLabels (#544)', () => {
+  it('reads label names through the exec fn, asking gh for exactly the labels field', () => {
+    const calls: Array<[string, string[]]> = [];
+    const exec: ExecFn = (file, args) => {
+      calls.push([file, args]);
+      return JSON.stringify({ labels: [{ name: 'bug' }, { name: 'decision-pending' }] });
+    };
+
+    expect(createExecGroundTruth(exec, { repoDir: '/repo' }).issueLabels(544)).toEqual([
+      'bug',
+      'decision-pending',
+    ]);
+    expect(calls).toEqual([['gh', ['issue', 'view', '544', '--json', 'labels']]]);
+  });
+
+  it('reports UNREACHABLE (undefined) when the read fails — never an empty label set', () => {
+    // The distinction is load-bearing: [] unblocks a `label:`-blocked unit.
+    expect(createExecGroundTruth(() => null).issueLabels(544)).toBeUndefined();
+  });
+
+  it('reports UNREACHABLE when gh exits 0 with a non-JSON body', () => {
+    expect(createExecGroundTruth(() => 'not json at all').issueLabels(544)).toBeUndefined();
+  });
+});
+
+describe('parseIssueLabelsJson', () => {
+  it('parses the gh --json labels shape', () => {
+    expect(parseIssueLabelsJson(JSON.stringify({ labels: [{ name: 'epic' }] }))).toEqual(['epic']);
+  });
+
+  it('parses an issue with no labels as an empty array, not unreachable', () => {
+    expect(parseIssueLabelsJson(JSON.stringify({ labels: [] }))).toEqual([]);
+  });
+
+  it('drops malformed label entries but keeps the ones that parsed', () => {
+    const stdout = JSON.stringify({ labels: [{ name: 'bug' }, {}, null, { name: 42 }] });
+    expect(parseIssueLabelsJson(stdout)).toEqual(['bug']);
+  });
+
+  it('returns undefined for empty, non-JSON, and labels-less payloads', () => {
+    expect(parseIssueLabelsJson('')).toBeUndefined();
+    expect(parseIssueLabelsJson(null)).toBeUndefined();
+    expect(parseIssueLabelsJson('{')).toBeUndefined();
+    expect(parseIssueLabelsJson(JSON.stringify({ state: 'OPEN' }))).toBeUndefined();
   });
 });

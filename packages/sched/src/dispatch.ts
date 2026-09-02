@@ -30,6 +30,7 @@ import { SCHED_DISPATCH_EVENT } from '@ai-dossier/core';
 import { sanitizeSlug } from './project';
 import {
   DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
+  DEFAULT_LABEL_POLL_INTERVAL_MS,
   DEFAULT_PHASE_STALL_TIMEOUT_MS,
   DEFAULT_PR_POLL_INTERVAL_MS,
   DEFAULT_RECONCILE_INTERVAL_MS,
@@ -313,6 +314,8 @@ export interface ResolvedDispatch {
   reconcileIntervalMs: number;
   /** Parked-PR poll interval (#468 AC1, default 150 s — "every 2–3 min"). */
   prPollIntervalMs: number;
+  /** Idle-tick hard-block label re-read interval (#544, `label_poll_interval_ms`). */
+  labelPollIntervalMs: number;
   /**
    * Stall allowance for a takeover that has posted NOTHING since it was fenced in
    * (#504 AC4). Selected over the phase timeout only while `SlotEntry.fenced_at` is
@@ -353,6 +356,7 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
     phaseStallTimeoutMs: resolvePhaseStallTimeouts(config),
     reconcileIntervalMs: config.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS,
     prPollIntervalMs: config.pr_poll_interval_ms ?? DEFAULT_PR_POLL_INTERVAL_MS,
+    labelPollIntervalMs: config.label_poll_interval_ms ?? DEFAULT_LABEL_POLL_INTERVAL_MS,
     fenceTakeoverTimeoutMs: dispatch.fence_takeover_timeout_ms ?? DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
   };
 }

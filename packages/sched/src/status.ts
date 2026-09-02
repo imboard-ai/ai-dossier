@@ -44,6 +44,13 @@ export interface StatusReport {
   parked: ParkedItem[];
   /** When the PR watcher last polled (#468) — null before the first poll. */
   last_pr_poll_at: string | null;
+  /**
+   * When the engine last re-read hard-block labels (#544) — null before the
+   * first read. Surfaced next to `last_pr_poll_at` so an operator who removed
+   * a `decision-pending` label can tell "the engine has not looked yet" apart
+   * from "the engine looked and the label is still there".
+   */
+  last_label_poll_at: string | null;
   /** The dispatch-health signal (#505) — see `SchedState.consecutive_suspect_dispatches`. */
   dispatch_health: { consecutive_suspect: number; last_suspect_unit: string | null };
   /** How many units are runnable right now. */
@@ -129,6 +136,7 @@ export function buildStatusReport(
     batches: state.batches,
     parked,
     last_pr_poll_at: state.last_pr_poll_at,
+    last_label_poll_at: state.last_label_poll_at,
     dispatch_health: {
       consecutive_suspect: state.consecutive_suspect_dispatches,
       last_suspect_unit: state.last_suspect_dispatch_unit,

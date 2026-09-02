@@ -32,6 +32,7 @@ import {
   type SuiteResult,
   tick,
 } from '../index';
+import { stubGroundTruth } from './helpers/ground-truth';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
 const FAKE_AGENT = path.join(FIXTURES, 'fake-agent.mjs');
@@ -87,7 +88,7 @@ function fileBatchGroundTruth(dir: string): GroundTruth {
       return undefined;
     }
   };
-  return {
+  return stubGroundTruth({
     latestMilestone: (issue) => {
       const raw = readJson(`${issue}.json`);
       if (raw === undefined || raw === null || typeof raw !== 'object') return null;
@@ -100,8 +101,6 @@ function fileBatchGroundTruth(dir: string): GroundTruth {
       };
       return { phase: m.phase, status: m.status, run: m.run, at: m.at, keys: m.keys ?? {} };
     },
-    issueClosed: () => false,
-    branchHead: () => null,
     prState: (pr) => {
       const raw = readJson(`${pr}.pr.json`);
       if (raw === undefined || raw === null || typeof raw !== 'object') return undefined;
@@ -114,8 +113,7 @@ function fileBatchGroundTruth(dir: string): GroundTruth {
         blocked: t.blocked ?? false,
       };
     },
-    setupInfo: () => null,
-  };
+  });
 }
 
 /** A scratch repo (bare origin + main worktree) with one pushed commit — batch-setup's real `git` target. */

@@ -41,6 +41,7 @@ import {
   LIVE_SLOT_STATUSES,
   LockTimeoutError,
   labelBlockReason,
+  labelOfBlockReason,
   OPENCODE_DISPATCH_COMMAND,
   parseManifest,
   parseVitestJson,
@@ -344,6 +345,19 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   );
   lines.push('');
   lines.push('== Blocked ==');
+  // #544: label-blocked entries are re-checked by the engine each tick, so say
+  // when it last looked — "the label is still there" reads very differently
+  // from "the engine has not looked since you removed it". Its own line, not
+  // part of the `== X ==` delimiter (every section header here is a fixed
+  // marker things grep for), and only when a LABEL block is actually present:
+  // a dependency block or `auto-merge-blocked` has nothing to do with labels.
+  if (report.blocked.some((b) => labelOfBlockReason(b.reason) !== null)) {
+    lines.push(
+      report.last_label_poll_at
+        ? `(labels last checked ${relativeTime(report.last_label_poll_at)})`
+        : '(labels never checked)'
+    );
+  }
   lines.push(
     report.blocked.length > 0
       ? report.blocked.map((b) => `#${b.issue} [${b.status}] — ${b.reason}`).join('\n')
@@ -982,6 +996,12 @@ function registerStartSubcommand(cmd: Command): void {
           parts.push(`stale failure reconciled ${result.staleReconciled.join(', ')}`);
         if (result.dependentsUnblocked.length > 0)
           parts.push(`dependents unblocked ${result.dependentsUnblocked.join(', ')}`);
+        if (result.labelCleared.length > 0)
+          parts.push(`label cleared ${result.labelCleared.join(', ')}`);
+        if (result.labelBlocked.length > 0)
+          parts.push(`label blocked ${result.labelBlocked.join(', ')}`);
+        if (result.labelCheckFailed.length > 0)
+          parts.push(`label check unreachable ${result.labelCheckFailed.join(', ')}`);
         if (result.teardownDone.length > 0)
           parts.push(`teardown done ${result.teardownDone.join(', ')}`);
         if (result.teardownFailed.length > 0)

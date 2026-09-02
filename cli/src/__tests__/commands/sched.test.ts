@@ -479,6 +479,35 @@ describe('ai-dossier sched status', () => {
     expect(text).toContain('(none)');
   });
 
+  it('#544: a label-blocked entry reports when the engine last re-read labels', async () => {
+    execReturns('{"labels":[{"name":"decision-pending"}]}');
+    await runSched(['sched', 'enqueue', '--issues', '9', '--project', 'test-proj']);
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    // The section delimiter stays a fixed marker; the timestamp is its own line.
+    expect(text).toContain('== Blocked ==');
+    expect(text).toContain('(labels never checked)');
+    expect(text).toContain('#9 [blocked] — label:decision-pending');
+  });
+
+  it('#544: a non-label block does not claim anything about labels', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '101',
+      '--deps',
+      '100',
+      '--project',
+      'test-proj',
+    ]);
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    expect(text).toContain('== Blocked ==');
+    expect(text).not.toContain('labels never checked');
+    expect(text).not.toContain('labels last checked');
+  });
+
   it('names deps that are not in the queue as blocked, not runnable', async () => {
     await runSched([
       'sched',

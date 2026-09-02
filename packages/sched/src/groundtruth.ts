@@ -82,6 +82,16 @@ export interface GroundTruth {
    * issue verifiably has no setup milestone; `undefined` = poll FAILED.
    */
   setupInfo(issue: number): SetupInfo | null | undefined;
+  /**
+   * The issue's current GitHub label names (#544) — what the engine's
+   * per-tick hard-block re-check screens. Same tri-state as the polls above:
+   * an array = the labels (`[]` = verifiably no labels); `undefined` = the
+   * poll FAILED (unreachable). The distinction is load-bearing here, not
+   * cosmetic: `[]` unblocks a `label:`-blocked unit, so a failed read must
+   * never be flattened into it — that would dispatch an agent straight over
+   * a live human hand-off whenever gh is down.
+   */
+  issueLabels(issue: number): string[] | undefined;
 }
 
 /** Subprocess timeout: a hung gh/git call must not stall a tick. */
@@ -192,7 +202,35 @@ export function createExecGroundTruth(
       if (out === null) return undefined; // poll failed — unreachable
       return parseSetupInfo(out);
     },
+    issueLabels(issue: number): string[] | undefined {
+      const out = exec('gh', ['issue', 'view', String(issue), '--json', 'labels'], opts.repoDir);
+      if (out === null) return undefined; // poll failed — unreachable
+      return parseIssueLabelsJson(out);
+    },
   };
+}
+
+/**
+ * Parse the stdout of `gh issue view --json labels` into label names (#544).
+ * Returns `undefined` — unreachable, NOT "no labels" — when the payload is
+ * unusable (empty, not JSON, or missing the `labels` array): gh exiting 0
+ * with a non-JSON body (an older gh, an interactive prompt on stdout) is a
+ * failed read wearing a success exit code, and treating it as an empty label
+ * set would unblock a `label:`-blocked unit on garbage.
+ */
+export function parseIssueLabelsJson(stdout: string | null): string[] | undefined {
+  if (stdout === null || stdout.trim() === '') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  // Same `{ "<key>": [...] }` unwrap `parseSetupInfo` uses for `--json comments`
+  // — one helper for one gh output shape, defensively accepting a bare array too.
+  const labels = unwrapList(parsed, 'labels');
+  if (labels === null) return undefined;
+  return labelNames(labels);
 }
 
 /**

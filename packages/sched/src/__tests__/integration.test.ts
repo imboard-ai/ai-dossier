@@ -24,6 +24,7 @@ import {
   SchedStore,
   tick,
 } from '../index';
+import { stubGroundTruth } from './helpers/ground-truth';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
 const FAKE_AGENT = path.join(FIXTURES, 'fake-agent.mjs');
@@ -52,7 +53,7 @@ afterEach(() => {
 
 /** File-backed ground truth: the fake agents "post milestones" by writing files. */
 function fileGroundTruth(milestonesDir: string): GroundTruth {
-  return {
+  return stubGroundTruth({
     latestMilestone: (issue) => {
       const file = path.join(milestonesDir, `${issue}.json`);
       if (!fs.existsSync(file)) return null;
@@ -64,9 +65,7 @@ function fileGroundTruth(milestonesDir: string): GroundTruth {
       };
       return { phase: raw.phase, status: raw.status, run: raw.run, at: raw.at, keys: {} };
     },
-    issueClosed: () => false,
-    branchHead: () => null,
-  };
+  });
 }
 
 interface IntegrationHarness {
@@ -347,7 +346,7 @@ function fileTailGroundTruth(dir: string): GroundTruth {
       return undefined;
     }
   };
-  return {
+  return stubGroundTruth({
     latestMilestone: (issue) => {
       const raw = readJson(`${issue}.json`);
       if (raw === undefined) return null;
@@ -368,7 +367,6 @@ function fileTailGroundTruth(dir: string): GroundTruth {
       };
     },
     issueClosed: (issue) => fs.existsSync(path.join(dir, `${issue}.closed`)),
-    branchHead: () => null,
     prState: (pr) => {
       const raw = readJson(`${pr}.pr.json`);
       if (raw === undefined || raw === null || typeof raw !== 'object') return undefined;
@@ -392,7 +390,7 @@ function fileTailGroundTruth(dir: string): GroundTruth {
         branch: s.branch ?? null,
       };
     },
-  };
+  });
 }
 
 interface TailHarness {

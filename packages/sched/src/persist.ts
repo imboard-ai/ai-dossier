@@ -271,6 +271,12 @@ export class SchedStore {
           parsed.pr_poll_interval_ms
         );
       }
+      if (parsed.label_poll_interval_ms !== undefined) {
+        config.label_poll_interval_ms = requirePositiveIntMs(
+          'label_poll_interval_ms',
+          parsed.label_poll_interval_ms
+        );
+      }
       if (parsed.dispatch !== undefined) {
         config.dispatch = validateDispatchConfig(parsed.dispatch);
       }
@@ -291,6 +297,7 @@ export class SchedStore {
       console.error(
         `⚠ Scheduler config ${this.configPath} is unreadable (${(err as Error).message}) — ` +
           `ALL config (max_slots, stall_timeout_ms, reconcile_interval_ms, pr_poll_interval_ms, ` +
+          `label_poll_interval_ms, ` +
           `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout, auto_upgrade) ` +
           `reverted to built-in defaults (max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
       );
@@ -310,6 +317,9 @@ export class SchedStore {
         : {}),
       ...(config.pr_poll_interval_ms !== undefined
         ? { pr_poll_interval_ms: config.pr_poll_interval_ms }
+        : {}),
+      ...(config.label_poll_interval_ms !== undefined
+        ? { label_poll_interval_ms: config.label_poll_interval_ms }
         : {}),
       ...(config.dispatch !== undefined ? { dispatch: config.dispatch } : {}),
       ...(config.auto_upgrade !== undefined ? { auto_upgrade: config.auto_upgrade } : {}),

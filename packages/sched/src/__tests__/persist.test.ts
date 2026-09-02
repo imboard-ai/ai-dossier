@@ -5,8 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CorruptStateError,
   createEmptyState,
+  DEFAULT_LABEL_POLL_INTERVAL_MS,
   EngineTooOldError,
   enqueueEntries,
+  resolveDispatch,
   SCHEMA_VERSION,
   SchedStore,
   transitionIssue,
@@ -513,6 +515,58 @@ describe('#537 config: auto_upgrade', () => {
         console.error = err;
       }
       expect(warnings[0]).toContain('auto_upgrade');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('#544 config: label_poll_interval_ms', () => {
+  it('round-trips the label re-read cadence', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-544-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({ max_slots: 2, label_poll_interval_ms: 90_000 });
+      expect(store.loadConfig().label_poll_interval_ms).toBe(90_000);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('loads a pre-#544 1.4.0 config, leaving the cadence at the engine default', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-544-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({ schema_version: '1.4.0', max_slots: 2, pr_poll_interval_ms: 120_000 })
+      );
+      const config = store.loadConfig();
+      expect(config.max_slots).toBe(2);
+      expect(config.label_poll_interval_ms).toBeUndefined();
+      expect(resolveDispatch(config).labelPollIntervalMs).toBe(DEFAULT_LABEL_POLL_INTERVAL_MS);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-positive label_poll_interval_ms (degrades to defaults, loudly)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-544-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({ schema_version: '1.5.0', max_slots: 2, label_poll_interval_ms: -1 })
+      );
+      const err = console.error;
+      const warnings: string[] = [];
+      console.error = (msg: string) => warnings.push(msg);
+      try {
+        expect(store.loadConfig()).toEqual({ max_slots: 3 });
+      } finally {
+        console.error = err;
+      }
+      expect(warnings.join('\n')).toContain('label_poll_interval_ms');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
