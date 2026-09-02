@@ -137,8 +137,9 @@ if command -v jq >/dev/null 2>&1 \
     && jq -S "$_strip" docs/reports/evidence/model-scorecard.json >"$TMPD/new.norm" 2>>"$LOG" \
     && cmp -s "$TMPD/prev.norm" "$TMPD/new.norm"; then
     log "run end: no payload change this week"
-    TG "$DIGEST
-(no changes this week)"
+    # Appended to the digest's last line, not added as a seventh: the 6-line shape is the
+    # contract this message is read against, and a stray line breaks a skim.
+    TG "$(printf '%s' "$DIGEST" | sed '$ s/$/ — (no changes this week)/')"
     exit 0
   fi
 fi

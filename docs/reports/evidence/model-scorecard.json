@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-02T12:18:59.189Z",
+  "generatedAt": "2026-09-02T12:28:26.540Z",
   "windowStart": "2026-08-25",
   "windowEnd": "2026-09-02",
   "windowDays": null,
@@ -49,10 +49,10 @@
       "model": "<unknown>",
       "repo": "imboard-ai/imboard-monorepo",
       "tier": "<unknown>",
-      "n": 13,
+      "n": 14,
       "delivered": 1,
       "blocked": 1,
-      "deliveryRate": 0.07692307692307693,
+      "deliveryRate": 0.07142857142857142,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -119,6 +119,42 @@
         }
       ],
       "agentClis": []
+    },
+    {
+      "model": "<unknown>",
+      "repo": "imboard-ai/imboard-monorepo",
+      "tier": "mid",
+      "n": 2,
+      "delivered": 0,
+      "blocked": 1,
+      "deliveryRate": 0,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": null,
+      "billableTokensPerDeliveredIssue": null,
+      "tokenSamples": 0,
+      "cacheTokenSamples": 0,
+      "medianWallClockMinutes": null,
+      "acMet": null,
+      "acTotal": null,
+      "conformanceRate": null,
+      "conformanceSamples": 0,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": null,
+      "reviewEscalated": null,
+      "reviewFixedPerIssue": null,
+      "reviewEscalatedPerIssue": null,
+      "reviewSamples": 0,
+      "phaseMedians": [],
+      "agentClis": [
+        "claude"
+      ]
     },
     {
       "model": "claude-opus-5",
@@ -845,7 +881,7 @@
       "model": "claude-sonnet-5",
       "repo": "imboard-ai/imboard-monorepo",
       "tier": "mid",
-      "n": 1,
+      "n": 2,
       "delivered": 0,
       "blocked": 0,
       "deliveryRate": 0,
@@ -865,7 +901,7 @@
       "escalations": 1,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
-      "escalationsPerIssue": 1,
+      "escalationsPerIssue": 0.5,
       "unverifiedExitsPerIssue": 0,
       "reviewFixed": 3,
       "reviewEscalated": 0,
@@ -890,8 +926,8 @@
         },
         {
           "phase": "setup",
-          "n": 1,
-          "medianSeconds": 86
+          "n": 2,
+          "medianSeconds": 73.5
         },
         {
           "phase": "implement",
@@ -1330,21 +1366,21 @@
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
       "medianWallClockMinutes": 119.30833333333334,
-      "acMet": null,
-      "acTotal": null,
-      "conformanceRate": null,
-      "conformanceSamples": 0,
+      "acMet": 4,
+      "acTotal": 4,
+      "conformanceRate": 1,
+      "conformanceSamples": 1,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 1,
+      "reviewFixed": 2,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 0.5,
+      "reviewFixedPerIssue": 0.6666666666666666,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 2,
+      "reviewSamples": 3,
       "phaseMedians": [
         {
           "phase": "merge-wait",
@@ -1363,8 +1399,8 @@
         },
         {
           "phase": "review",
-          "n": 2,
-          "medianSeconds": 363
+          "n": 3,
+          "medianSeconds": 296
         },
         {
           "phase": "setup",
@@ -1575,10 +1611,10 @@
   "totals": [
     {
       "model": "<unknown>",
-      "n": 21,
+      "n": 24,
       "delivered": 1,
-      "blocked": 3,
-      "deliveryRate": 0.047619047619047616,
+      "blocked": 4,
+      "deliveryRate": 0.041666666666666664,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -1644,14 +1680,16 @@
           "medianSeconds": 62
         }
       ],
-      "agentClis": [],
+      "agentClis": [
+        "claude"
+      ],
       "providers": [
         {
           "provider": "direct",
-          "n": 21,
+          "n": 24,
           "delivered": 1,
-          "blocked": 3,
-          "deliveryRate": 0.047619047619047616,
+          "blocked": 4,
+          "deliveryRate": 0.041666666666666664,
           "costPerDeliveredUsd": null,
           "costSamples": 0,
           "costFromRunLogSamples": 0,
@@ -1717,7 +1755,9 @@
               "medianSeconds": 62
             }
           ],
-          "agentClis": []
+          "agentClis": [
+            "claude"
+          ]
         }
       ]
     },
@@ -2013,10 +2053,10 @@
     },
     {
       "model": "claude-sonnet-5",
-      "n": 73,
+      "n": 74,
       "delivered": 64,
       "blocked": 0,
-      "deliveryRate": 0.8767123287671232,
+      "deliveryRate": 0.8648648648648649,
       "costPerDeliveredUsd": 17.991599442857144,
       "costSamples": 28,
       "costFromRunLogSamples": 16,
@@ -2033,8 +2073,8 @@
       "escalations": 19,
       "unverifiedExits": 5,
       "stallsPerIssue": 0,
-      "escalationsPerIssue": 0.2602739726027397,
-      "unverifiedExitsPerIssue": 0.0684931506849315,
+      "escalationsPerIssue": 0.25675675675675674,
+      "unverifiedExitsPerIssue": 0.06756756756756757,
       "reviewFixed": 873,
       "reviewEscalated": 0,
       "reviewFixedPerIssue": 12.125,
@@ -2068,8 +2108,8 @@
         },
         {
           "phase": "setup",
-          "n": 72,
-          "medianSeconds": 166.5
+          "n": 73,
+          "medianSeconds": 166
         },
         {
           "phase": "ship",
@@ -2089,10 +2129,10 @@
       "providers": [
         {
           "provider": "direct",
-          "n": 73,
+          "n": 74,
           "delivered": 64,
           "blocked": 0,
-          "deliveryRate": 0.8767123287671232,
+          "deliveryRate": 0.8648648648648649,
           "costPerDeliveredUsd": 17.991599442857144,
           "costSamples": 28,
           "costFromRunLogSamples": 16,
@@ -2109,8 +2149,8 @@
           "escalations": 19,
           "unverifiedExits": 5,
           "stallsPerIssue": 0,
-          "escalationsPerIssue": 0.2602739726027397,
-          "unverifiedExitsPerIssue": 0.0684931506849315,
+          "escalationsPerIssue": 0.25675675675675674,
+          "unverifiedExitsPerIssue": 0.06756756756756757,
           "reviewFixed": 873,
           "reviewEscalated": 0,
           "reviewFixedPerIssue": 12.125,
@@ -2144,8 +2184,8 @@
             },
             {
               "phase": "setup",
-              "n": 72,
-              "medianSeconds": 166.5
+              "n": 73,
+              "medianSeconds": 166
             },
             {
               "phase": "ship",
@@ -2756,21 +2796,21 @@
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
       "medianWallClockMinutes": 119.30833333333334,
-      "acMet": null,
-      "acTotal": null,
-      "conformanceRate": null,
-      "conformanceSamples": 0,
+      "acMet": 4,
+      "acTotal": 4,
+      "conformanceRate": 1,
+      "conformanceSamples": 1,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 1,
+      "reviewFixed": 2,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 0.5,
+      "reviewFixedPerIssue": 0.6666666666666666,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 2,
+      "reviewSamples": 3,
       "phaseMedians": [
         {
           "phase": "merge-wait",
@@ -2789,8 +2829,8 @@
         },
         {
           "phase": "review",
-          "n": 2,
-          "medianSeconds": 363
+          "n": 3,
+          "medianSeconds": 296
         },
         {
           "phase": "setup",
@@ -2892,26 +2932,31 @@
           "tokenSamples": 0,
           "cacheTokenSamples": 0,
           "medianWallClockMinutes": null,
-          "acMet": null,
-          "acTotal": null,
-          "conformanceRate": null,
-          "conformanceSamples": 0,
+          "acMet": 4,
+          "acTotal": 4,
+          "conformanceRate": 1,
+          "conformanceSamples": 1,
           "stalls": 0,
           "escalations": 0,
           "unverifiedExits": 0,
           "stallsPerIssue": 0,
           "escalationsPerIssue": 0,
           "unverifiedExitsPerIssue": 0,
-          "reviewFixed": null,
-          "reviewEscalated": null,
-          "reviewFixedPerIssue": null,
-          "reviewEscalatedPerIssue": null,
-          "reviewSamples": 0,
+          "reviewFixed": 1,
+          "reviewEscalated": 0,
+          "reviewFixedPerIssue": 1,
+          "reviewEscalatedPerIssue": 0,
+          "reviewSamples": 1,
           "phaseMedians": [
             {
               "phase": "implement",
               "n": 1,
               "medianSeconds": 3967
+            },
+            {
+              "phase": "review",
+              "n": 1,
+              "medianSeconds": 296
             },
             {
               "phase": "plan",
@@ -3561,10 +3606,10 @@
     {
       "repo": "imboard-ai/imboard-monorepo",
       "model": "<unknown>",
-      "n": 13,
+      "n": 16,
       "delivered": 1,
-      "blocked": 1,
-      "deliveryRate": 0.07692307692307693,
+      "blocked": 2,
+      "deliveryRate": 0.0625,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -3630,7 +3675,9 @@
           "medianSeconds": 62
         }
       ],
-      "agentClis": []
+      "agentClis": [
+        "claude"
+      ]
     },
     {
       "repo": "imboard-ai/imboard-monorepo",
@@ -3778,10 +3825,10 @@
     {
       "repo": "imboard-ai/imboard-monorepo",
       "model": "claude-sonnet-5",
-      "n": 34,
+      "n": 35,
       "delivered": 28,
       "blocked": 0,
-      "deliveryRate": 0.8235294117647058,
+      "deliveryRate": 0.8,
       "costPerDeliveredUsd": 17.56723330625,
       "costSamples": 8,
       "costFromRunLogSamples": 5,
@@ -3798,8 +3845,8 @@
       "escalations": 12,
       "unverifiedExits": 1,
       "stallsPerIssue": 0,
-      "escalationsPerIssue": 0.35294117647058826,
-      "unverifiedExitsPerIssue": 0.029411764705882353,
+      "escalationsPerIssue": 0.34285714285714286,
+      "unverifiedExitsPerIssue": 0.02857142857142857,
       "reviewFixed": 350,
       "reviewEscalated": 0,
       "reviewFixedPerIssue": 10.294117647058824,
@@ -3838,8 +3885,8 @@
         },
         {
           "phase": "setup",
-          "n": 34,
-          "medianSeconds": 112
+          "n": 35,
+          "medianSeconds": 110
         },
         {
           "phase": "report",
@@ -4017,21 +4064,21 @@
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
       "medianWallClockMinutes": 119.30833333333334,
-      "acMet": null,
-      "acTotal": null,
-      "conformanceRate": null,
-      "conformanceSamples": 0,
+      "acMet": 4,
+      "acTotal": 4,
+      "conformanceRate": 1,
+      "conformanceSamples": 1,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 1,
+      "reviewFixed": 2,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 0.5,
+      "reviewFixedPerIssue": 0.6666666666666666,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 2,
+      "reviewSamples": 3,
       "phaseMedians": [
         {
           "phase": "merge-wait",
@@ -4050,8 +4097,8 @@
         },
         {
           "phase": "review",
-          "n": 2,
-          "medianSeconds": 363
+          "n": 3,
+          "medianSeconds": 296
         },
         {
           "phase": "setup",
@@ -4258,10 +4305,10 @@
   ],
   "grandTotal": {
     "model": "TOTAL",
-    "n": 187,
+    "n": 191,
     "delivered": 147,
-    "blocked": 10,
-    "deliveryRate": 0.786096256684492,
+    "blocked": 11,
+    "deliveryRate": 0.7696335078534031,
     "costPerDeliveredUsd": 19.396177212068967,
     "costSamples": 29,
     "costFromRunLogSamples": 17,
@@ -4270,21 +4317,21 @@
     "tokenSamples": 29,
     "cacheTokenSamples": 29,
     "medianWallClockMinutes": 103.63333333333334,
-    "acMet": 614,
-    "acTotal": 633,
-    "conformanceRate": 0.9699842022116903,
-    "conformanceSamples": 139,
+    "acMet": 618,
+    "acTotal": 637,
+    "conformanceRate": 0.9701726844583988,
+    "conformanceSamples": 140,
     "stalls": 1,
     "escalations": 25,
     "unverifiedExits": 5,
-    "stallsPerIssue": 0.0053475935828877,
-    "escalationsPerIssue": 0.13368983957219252,
-    "unverifiedExitsPerIssue": 0.026737967914438502,
-    "reviewFixed": 1929,
+    "stallsPerIssue": 0.005235602094240838,
+    "escalationsPerIssue": 0.13089005235602094,
+    "unverifiedExitsPerIssue": 0.02617801047120419,
+    "reviewFixed": 1930,
     "reviewEscalated": 2,
-    "reviewFixedPerIssue": 12.132075471698114,
-    "reviewEscalatedPerIssue": 0.012578616352201259,
-    "reviewSamples": 159,
+    "reviewFixedPerIssue": 12.0625,
+    "reviewEscalatedPerIssue": 0.0125,
+    "reviewSamples": 160,
     "phaseMedians": [
       {
         "phase": "gate",
@@ -4298,8 +4345,8 @@
       },
       {
         "phase": "review",
-        "n": 160,
-        "medianSeconds": 1464.5
+        "n": 161,
+        "medianSeconds": 1460
       },
       {
         "phase": "implement",
@@ -4318,8 +4365,8 @@
       },
       {
         "phase": "setup",
-        "n": 164,
-        "medianSeconds": 160.5
+        "n": 165,
+        "medianSeconds": 160
       },
       {
         "phase": "ship",
@@ -4350,8 +4397,8 @@
     },
     {
       "phase": "review",
-      "n": 160,
-      "medianSeconds": 1464.5
+      "n": 161,
+      "medianSeconds": 1460
     },
     {
       "phase": "implement",
@@ -4370,8 +4417,8 @@
     },
     {
       "phase": "setup",
-      "n": 164,
-      "medianSeconds": 160.5
+      "n": 165,
+      "medianSeconds": 160
     },
     {
       "phase": "ship",
@@ -4386,7 +4433,7 @@
   ],
   "warnings": [
     "imboard-ai/ai-dossier: 23 run(s) recorded no model= — their row is bucketed as <unknown>, and its outcome columns are not attributable to any model",
-    "imboard-ai/imboard-monorepo: 19 run(s) recorded no model= — their row is bucketed as <unknown>, and its outcome columns are not attributable to any model",
+    "imboard-ai/imboard-monorepo: 24 run(s) recorded no model= — their row is bucketed as <unknown>, and its outcome columns are not attributable to any model",
     "imboard-ai/imboard-monorepo: 'kimi-latest' is a moving version tag with no declared pin — its 1 run(s) sit in their own row, apart from whatever pinned version the tag resolves to; add it to MODEL_ALIASES to fold them"
   ]
 }

@@ -126,7 +126,10 @@ the script exits with a Telegram error if the path is missing. It takes a `flock
 than run concurrently against the same worktree.
 
 Note the window: the script uses the script's default **30-day rolling** window, so this is
-a weekly *regeneration* of a 30-day view, not a 7-day report. Each snapshot's header prints
+a weekly *regeneration* of a 30-day view, not a 7-day report. The digest's "best" lines
+apply no minimum-sample floor, so a model with one dispatch can win one — every line prints
+its `n` for exactly that reason; treat `n=1` as an invitation to open the report, not as a
+routing signal. Each snapshot's header prints
 the exact command that reproduces its own window.
 
 It never merges the PR it opens — this repo has no auto-merge watcher (unlike the
