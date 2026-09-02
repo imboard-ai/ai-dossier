@@ -61,6 +61,9 @@ export const DEFAULT_OUT_JSON = 'docs/reports/evidence/model-scorecard.json';
 /** A model bucket's delivery rate dropping this many points week-over-week gets flagged. */
 const DELIVERY_RATE_DROP_THRESHOLD = 0.1;
 
+/** Rolling window, in days, when neither `--days` nor `--since` is given. */
+export const DEFAULT_WINDOW_DAYS = 30;
+
 /**
  * `owner/name` -> the `~/.dossier/sched/<slug>/` directory name. Thin wrapper over
  * `@ai-dossier/sched`'s own `sanitizeSlug` — the package already owns this mapping
@@ -81,14 +84,16 @@ export function windowStartDate(days, now = new Date()) {
 /**
  * Phases whose `done` means the issue was delivered.
  *
- * Mirrors `DELIVERED_PHASES` in `cli/src/runstate-stats.ts` (not exported — see the
- * module comment). Keep in sync if that list changes: `ship`/`report` are full-cycle's
- * terminal phases, `batch-ship`/`batch-report` are the batch anchor's.
+ * Injected from `cli/dist/runstate-stats.js`'s own `DELIVERED_PHASES` (see `main`) rather
+ * than copied: delivery rate is the column a routing decision turns on, and a local copy
+ * that drifted from the CLI's would report a different rate than `ai-dossier runstate
+ * stats` for the same trail with nothing to flag the disagreement. This fallback is only
+ * for direct unit calls that pass no list.
  */
-const DELIVERED_PHASES = ['ship', 'report', 'batch-ship', 'batch-report'];
+const FALLBACK_DELIVERED_PHASES = ['ship', 'report', 'batch-ship', 'batch-report'];
 
-function isDelivered(run) {
-  return run.last_status === 'done' && DELIVERED_PHASES.includes(run.last_phase);
+function isDelivered(run, deliveredPhases = FALLBACK_DELIVERED_PHASES) {
+  return run.last_status === 'done' && deliveredPhases.includes(run.last_phase);
 }
 
 function isBlocked(run) {
@@ -102,9 +107,9 @@ function isBlocked(run) {
  * the issue is actually scored on; otherwise the most recently started run stands in for
  * "where this issue currently sits".
  */
-export function pickCanonicalRun(runs) {
+export function pickCanonicalRun(runs, deliveredPhases = FALLBACK_DELIVERED_PHASES) {
   if (runs.length === 0) return null;
-  const delivered = runs.find(isDelivered);
+  const delivered = runs.find((run) => isDelivered(run, deliveredPhases));
   if (delivered) return delivered;
   return [...runs].sort((a, b) => (b.started_at ?? '').localeCompare(a.started_at ?? ''))[0];
 }
@@ -152,14 +157,41 @@ export function buildDispatchInfo(events, sinceIso, untilIso) {
 
 /** Every `key=value` a review-phase milestone records that this scorecard reads. */
 function reviewFieldsOf(milestones) {
-  const review = milestones.findLast((m) => m.phase === 'review');
-  if (!review) return { fixed: null, escalated: null };
-  const fixed = Number(review.keys.fixed);
-  const escalated = Number(review.keys.escalated);
-  return {
-    fixed: Number.isFinite(fixed) ? fixed : null,
-    escalated: Number.isFinite(escalated) ? escalated : null,
+  // `batch-review` posts the same keys on a batch anchor, with `ac_met`/`ac_total` rolled
+  // up across members -- so an anchor's conformance counts toward its model exactly like a
+  // full-cycle run's, rather than reading as a run that was never conformance-checked.
+  const review = milestones.findLast((m) => m.phase === 'review' || m.phase === 'batch-review');
+  if (!review) return { fixed: null, escalated: null, acMet: null, acTotal: null };
+  const numeric = (key) => {
+    const value = Number(review.keys[key]);
+    return Number.isFinite(value) ? value : null;
   };
+  const acMet = numeric('ac_met');
+  const acTotal = numeric('ac_total');
+  return {
+    fixed: numeric('fixed'),
+    escalated: numeric('escalated'),
+    // Both or neither: a met count without a total is not a conformance rate, and a zero
+    // total would divide by zero downstream.
+    acMet: acTotal !== null && acTotal > 0 ? acMet : null,
+    acTotal: acMet !== null && acTotal !== null && acTotal > 0 ? acTotal : null,
+  };
+}
+
+/**
+ * A run's per-phase wall-clock, in seconds, keyed by phase.
+ *
+ * `buildStatsReport` already derives these spans from the milestones' `at=` stamps; this
+ * only reshapes them. Phases repeat within a run (ship posts twice, a resumed run repeats
+ * earlier phases), so spans are summed per phase rather than last-write-wins.
+ */
+function phaseSecondsOf(run) {
+  const byPhase = {};
+  for (const phase of run.phases ?? []) {
+    if (phase.seconds == null || phase.seconds < 0) continue;
+    byPhase[phase.phase] = (byPhase[phase.phase] ?? 0) + phase.seconds;
+  }
+  return byPhase;
 }
 
 /**
@@ -175,6 +207,7 @@ export function joinRepoRows({
   dispatchInfo,
   canonicalModelFn,
   providerOfFn,
+  deliveredPhases,
 }) {
   const runsByIssue = new Map();
   for (const run of statsReport.runs) {
@@ -187,11 +220,11 @@ export function joinRepoRows({
 
   const rows = [];
   for (const [issue, runs] of runsByIssue) {
-    const run = pickCanonicalRun(runs);
+    const run = pickCanonicalRun(runs, deliveredPhases);
     if (!run) continue;
     const cost = costByIssue.get(issue);
     const dispatch = dispatchInfo.get(issue) ?? emptyDispatchEntry();
-    const { fixed, escalated } = reviewFieldsOf(milestonesByIssue.get(issue) ?? []);
+    const { fixed, escalated, acMet, acTotal } = reviewFieldsOf(milestonesByIssue.get(issue) ?? []);
 
     rows.push({
       repo,
@@ -201,7 +234,7 @@ export function joinRepoRows({
       provider: run.model === null ? null : providerOfFn(run.model),
       tier: dispatch.tier ?? cost?.tier ?? null,
       agentCli: dispatch.agentCli,
-      delivered: isDelivered(run),
+      delivered: isDelivered(run, deliveredPhases),
       blocked: isBlocked(run),
       costUsd: cost?.total_cost_usd ?? null,
       inputTokens: cost?.input_tokens ?? null,
@@ -212,6 +245,12 @@ export function joinRepoRows({
       unverifiedExits: dispatch.unverifiedExits,
       reviewFixed: fixed,
       reviewEscalated: escalated,
+      acMet,
+      acTotal,
+      // Wall-clock, from the milestone `at=` stamps -- distinct from `apiMinutes`, which is
+      // the agent's billed session time. A run that stalled overnight shows the gap here.
+      wallClockMinutes: run.total_seconds != null ? run.total_seconds / 60 : null,
+      phaseSeconds: phaseSecondsOf(run),
     });
   }
   return rows;
@@ -238,6 +277,25 @@ function sum(values) {
   return values.reduce((a, b) => a + b, 0);
 }
 
+/**
+ * Median wall-clock seconds per phase across a bucket's rows — the "speed … per phase"
+ * half of AC1. Cost has no per-phase equivalent: `runs.jsonl` bills a whole agent session,
+ * which usually spans several phases (see the report's Limitations).
+ */
+function phaseMediansOf(rows) {
+  const byPhase = new Map();
+  for (const row of rows) {
+    for (const [phase, seconds] of Object.entries(row.phaseSeconds ?? {})) {
+      const list = byPhase.get(phase) ?? [];
+      list.push(seconds);
+      byPhase.set(phase, list);
+    }
+  }
+  return [...byPhase.entries()]
+    .map(([phase, samples]) => ({ phase, n: samples.length, medianSeconds: median(samples) }))
+    .sort((a, b) => b.medianSeconds - a.medianSeconds);
+}
+
 /** One bucket's rollup: cost/quality/speed over its rows, plus the confidence count. */
 function bucketFrom(rows) {
   const n = rows.length;
@@ -245,11 +303,19 @@ function bucketFrom(rows) {
   const blocked = rows.filter((r) => r.blocked);
   const deliveredCosts = delivered.map((r) => r.costUsd).filter((v) => v != null);
   const deliveredApiMinutes = delivered.map((r) => r.apiMinutes).filter((v) => v != null);
-  const deliveredInputTokens = delivered.map((r) => r.inputTokens).filter((v) => v != null);
-  const deliveredOutputTokens = delivered.map((r) => r.outputTokens).filter((v) => v != null);
   const fixedSamples = rows.map((r) => r.reviewFixed).filter((v) => v != null);
   const escalatedSamples = rows.map((r) => r.reviewEscalated).filter((v) => v != null);
   const agentClis = [...new Set(rows.map((r) => r.agentCli).filter((v) => v != null))].sort();
+  // Conformance: summed met/total across the runs that recorded a verdict, so the rate is
+  // AC-weighted (a 1-of-8 run counts eight criteria), not an average of per-run averages.
+  const conformanceRows = rows.filter((r) => r.acTotal != null && r.acMet != null);
+  const acMet = sum(conformanceRows.map((r) => r.acMet));
+  const acTotal = sum(conformanceRows.map((r) => r.acTotal));
+  const deliveredWallClock = delivered.map((r) => r.wallClockMinutes).filter((v) => v != null);
+  // Tokens only from rows carrying BOTH halves: averaging input and output over separately
+  // filtered sample sets produced a figure that was not any real issue's token count, and
+  // silently contributed a 0 term whenever one side was missing.
+  const tokenRows = delivered.filter((r) => r.inputTokens != null && r.outputTokens != null);
 
   return {
     n,
@@ -261,15 +327,27 @@ function bucketFrom(rows) {
     costSamples: deliveredCosts.length,
     medianApiMinutes: deliveredApiMinutes.length > 0 ? median(deliveredApiMinutes) : null,
     billableTokensPerDeliveredIssue:
-      deliveredInputTokens.length > 0 || deliveredOutputTokens.length > 0
-        ? sum(deliveredInputTokens) / Math.max(deliveredInputTokens.length, 1) +
-          sum(deliveredOutputTokens) / Math.max(deliveredOutputTokens.length, 1)
+      tokenRows.length > 0
+        ? sum(tokenRows.map((r) => r.inputTokens + r.outputTokens)) / tokenRows.length
         : null,
+    tokenSamples: tokenRows.length,
+    medianWallClockMinutes: deliveredWallClock.length > 0 ? median(deliveredWallClock) : null,
+    acMet: conformanceRows.length > 0 ? acMet : null,
+    acTotal: conformanceRows.length > 0 ? acTotal : null,
+    conformanceRate: acTotal > 0 ? acMet / acTotal : null,
+    conformanceSamples: conformanceRows.length,
     stalls: sum(rows.map((r) => r.stalls)),
     escalations: sum(rows.map((r) => r.escalations)),
     unverifiedExits: sum(rows.map((r) => r.unverifiedExits)),
     reviewFixed: fixedSamples.length > 0 ? sum(fixedSamples) : null,
     reviewEscalated: escalatedSamples.length > 0 ? sum(escalatedSamples) : null,
+    // Per issue, not a bucket sum: the AC asks for "review findings fixed per issue", and a
+    // raw sum makes a big bucket look worse than a small one purely for being bigger.
+    reviewFixedPerIssue: fixedSamples.length > 0 ? sum(fixedSamples) / fixedSamples.length : null,
+    reviewEscalatedPerIssue:
+      escalatedSamples.length > 0 ? sum(escalatedSamples) / escalatedSamples.length : null,
+    reviewSamples: fixedSamples.length,
+    phaseMedians: phaseMediansOf(rows),
     agentClis,
   };
 }
@@ -300,7 +378,10 @@ function providerBreakdown(rows) {
  * Group joined rows into per (model × repo × tier) buckets, per-model totals (all
  * repos/tiers folded), and a grand total — the "Per model × repo × tier (and totals)" AC.
  */
-export function aggregateScorecard(rows, { windowStart, windowEnd, generatedAt }) {
+export function aggregateScorecard(
+  rows,
+  { windowStart, windowEnd, generatedAt, windowDays = null, since = null }
+) {
   const byKey = new Map();
   const byModel = new Map();
 
@@ -340,7 +421,58 @@ export function aggregateScorecard(rows, { windowStart, windowEnd, generatedAt }
 
   const grandTotal = { model: 'TOTAL', ...bucketFrom(rows) };
 
-  return { generatedAt, windowStart, windowEnd, buckets, totals, grandTotal };
+  // Per (repo x model), folding tiers away: AC4 asks the digest for the best cost/quality/
+  // speed model PER REPO, and `totals` has already folded the repos together.
+  const byRepoModel = new Map();
+  for (const row of rows) {
+    const key = JSON.stringify([row.repo, row.model ?? UNKNOWN_MODEL_LABEL]);
+    const entry = byRepoModel.get(key) ?? {
+      repo: row.repo,
+      model: row.model ?? UNKNOWN_MODEL_LABEL,
+      rows: [],
+    };
+    entry.rows.push(row);
+    byRepoModel.set(key, entry);
+  }
+  const repoTotals = [...byRepoModel.values()]
+    .map(({ repo, model, rows: repoRows }) => ({ repo, model, ...bucketFrom(repoRows) }))
+    .sort((a, b) => a.repo.localeCompare(b.repo) || a.model.localeCompare(b.model));
+
+  return {
+    generatedAt,
+    windowStart,
+    windowEnd,
+    // How the window was selected, so the report can print a command that reproduces it --
+    // the header said "regenerate with `npm run scorecard`", which defaults to 30 days and
+    // does not reproduce a `--since` snapshot.
+    windowDays,
+    since,
+    buckets,
+    totals,
+    repoTotals,
+    grandTotal,
+    phases: phaseMediansOf(rows),
+  };
+}
+
+/**
+ * Attach each model's delivery-rate change against the previous snapshot — AC1's "7-day
+ * regressions where known", and the input to the digest's drop line.
+ *
+ * Separate from {@link aggregateScorecard} because the previous sidecar is I/O: this stays
+ * a pure function over two already-parsed scorecards, and a run with no prior snapshot
+ * simply attaches nothing rather than inventing a baseline.
+ */
+export function attachDeliveryRateDeltas(scorecard, previous) {
+  if (!previous || !Array.isArray(previous.totals)) return scorecard;
+  const prevByModel = new Map(previous.totals.map((t) => [t.model, t]));
+  for (const total of scorecard.totals) {
+    const prior = prevByModel.get(total.model);
+    if (!prior || prior.deliveryRate == null || total.deliveryRate == null) continue;
+    total.deliveryRateDelta = total.deliveryRate - prior.deliveryRate;
+    total.deliveryRateBaselineWindowEnd = previous.windowEnd ?? null;
+  }
+  return scorecard;
 }
 
 /**
@@ -358,8 +490,26 @@ function fmtPct(value) {
 function fmtMin(value) {
   return value == null ? 'N/A' : value.toFixed(1);
 }
-function fmtTokens(value) {
-  return value == null ? 'N/A' : Math.round(value).toLocaleString('en-US');
+function fmtTokens(value, samples) {
+  if (value == null) return 'N/A';
+  const rendered = Math.round(value).toLocaleString('en-US');
+  return samples == null ? rendered : `${rendered} (n=${samples})`;
+}
+function fmtRatio(value, samples) {
+  if (value == null) return 'N/A';
+  return `${(value * 100).toFixed(0)}% (n=${samples})`;
+}
+function fmtPerIssue(value, samples) {
+  return value == null ? 'N/A' : `${value.toFixed(1)} (n=${samples})`;
+}
+function fmtDelta(value) {
+  if (value == null) return '—';
+  const points = value * 100;
+  return `${points >= 0 ? '+' : ''}${points.toFixed(0)}pt`;
+}
+function fmtSeconds(value) {
+  if (value == null) return 'N/A';
+  return value >= 60 ? `${(value / 60).toFixed(1)}m` : `${Math.round(value)}s`;
 }
 
 const MAX_CELL_LENGTH = 120;
@@ -371,6 +521,30 @@ const MAX_CELL_LENGTH = 120;
  * value like `evil | 100% | $0.01` could otherwise spoof adjacent columns, and a stray
  * backtick could break out of the `` `${model}` `` code span into a markdown link.
  */
+/**
+ * Cap on a rendered warning. Longer than a table cell (a warning is a sentence, not a
+ * column) but still bounded — warning text embeds `model=` values read off public issue
+ * comments, and the write-path length check lives in the CLI, not here.
+ */
+const MAX_WARNING_LENGTH = 300;
+
+/**
+ * A data warning, made safe to render as a markdown bullet.
+ *
+ * Warnings carry untrusted model ids, so they get the same control-character scrub as a
+ * table cell plus markdown-link neutralisation: this file is committed to a PUBLIC repo,
+ * where `[click here](https://evil.example)` in a warning would render as a live link.
+ */
+function safeWarning(value) {
+  let clean = '';
+  for (const char of String(value)) {
+    const code = char.codePointAt(0) ?? 0;
+    clean += code < 0x20 || code === 0x7f ? '\uFFFD' : char;
+  }
+  clean = clean.replace(/[[\]]/g, (bracket) => (bracket === '[' ? '&#91;' : '&#93;'));
+  return clean.length > MAX_WARNING_LENGTH ? `${clean.slice(0, MAX_WARNING_LENGTH)}…` : clean;
+}
+
 function safeCell(value) {
   let clean = '';
   for (const char of String(value)) {
@@ -388,13 +562,42 @@ function totalCells(bucket) {
     bucket.n,
     bucket.delivered,
     fmtPct(bucket.deliveryRate),
+    fmtDelta(bucket.deliveryRateDelta),
+    fmtRatio(bucket.conformanceRate, bucket.conformanceSamples),
     fmtUsd(bucket.costPerDeliveredUsd, bucket.costSamples),
-    fmtTokens(bucket.billableTokensPerDeliveredIssue),
+    fmtTokens(bucket.billableTokensPerDeliveredIssue, bucket.tokenSamples),
     fmtMin(bucket.medianApiMinutes),
+    fmtMin(bucket.medianWallClockMinutes),
+    fmtPerIssue(bucket.reviewFixedPerIssue, bucket.reviewSamples),
     bucket.stalls,
     bucket.escalations,
     bucket.unverifiedExits,
   ].join(' | ');
+}
+
+/** The bucket table's metric cells — same rollup, without the tokens/delta columns. */
+function bucketCells(bucket) {
+  return [
+    bucket.agentClis.length ? safeCell(bucket.agentClis.join(',')) : 'unknown',
+    bucket.n,
+    bucket.delivered,
+    fmtPct(bucket.deliveryRate),
+    fmtRatio(bucket.conformanceRate, bucket.conformanceSamples),
+    fmtUsd(bucket.costPerDeliveredUsd, bucket.costSamples),
+    fmtMin(bucket.medianApiMinutes),
+    fmtMin(bucket.medianWallClockMinutes),
+    fmtPerIssue(bucket.reviewFixedPerIssue, bucket.reviewSamples),
+    bucket.stalls,
+    bucket.escalations,
+    bucket.unverifiedExits,
+  ].join(' | ');
+}
+
+/** The exact command that reproduces this snapshot's window. */
+function regenerateCommand(scorecard) {
+  if (scorecard.since) return `npm run scorecard -- --since ${scorecard.since}`;
+  if (scorecard.windowDays) return `npm run scorecard -- --days ${scorecard.windowDays}`;
+  return 'npm run scorecard';
 }
 
 export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
@@ -405,19 +608,19 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     '',
     'Cost, quality, and speed per LLM, joined from runstate trails (GitHub), `runs.jsonl`',
     '(token/cost telemetry), and `events.jsonl` (dispatch tier, stall/escalation counts).',
-    'Regenerate with `npm run scorecard`. See #566.',
+    `Regenerate with \`${regenerateCommand(scorecard)}\`. See #566.`,
     '',
     '**`n` is a confidence column, not a metric** — a row with `n=1` is one data point, not',
     'a trend. Read `cost/delivered` and `delivery rate` alongside `n`, never alone.',
     '',
     '## Per model × repo × tier',
     '',
-    '| Model | Repo | Tier | Agent CLI | n | Delivered | Delivery rate | Cost/delivered | Median API-min | Stalls | Escalations | Unverified exits |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|',
+    '| Model | Repo | Tier | Agent CLI | n | Delivered | Delivery rate | AC met | Cost/delivered | Median API-min | Median wall-clock-min | Review fixed/issue | Stalls | Escalations | Unverified exits |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
   ];
   for (const b of scorecard.buckets) {
     lines.push(
-      `| \`${safeCell(b.model)}\` | ${safeCell(b.repo)} | ${safeCell(b.tier)} | ${b.agentClis.length ? safeCell(b.agentClis.join(',')) : 'unknown'} | ${b.n} | ${b.delivered} | ${fmtPct(b.deliveryRate)} | ${fmtUsd(b.costPerDeliveredUsd, b.costSamples)} | ${fmtMin(b.medianApiMinutes)} | ${b.stalls} | ${b.escalations} | ${b.unverifiedExits} |`
+      `| \`${safeCell(b.model)}\` | ${safeCell(b.repo)} | ${safeCell(b.tier)} | ${bucketCells(b)} |`
     );
   }
 
@@ -429,8 +632,8 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     'there is more than one — the fold that makes the model row readable would otherwise',
     'hide a gateway costing more or delivering less than the same weights elsewhere.',
     '',
-    '| Model | Provider | Agent CLI | n | Delivered | Delivery rate | Cost/delivered | Billable tokens/delivered | Median API-min | Stalls | Escalations | Unverified exits |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|'
+    '| Model | Provider | Agent CLI | n | Delivered | Delivery rate | Δ vs prev | AC met | Cost/delivered | Billable tokens/delivered | Median API-min | Median wall-clock-min | Review fixed/issue | Stalls | Escalations | Unverified exits |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
   );
   for (const t of scorecard.totals) {
     const providers = t.providers ?? [];
@@ -445,6 +648,21 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
   }
   const g = scorecard.grandTotal;
   lines.push(`| **TOTAL** | — | ${totalCells(g)} |`);
+
+  lines.push(
+    '',
+    '## Wall-clock per phase (all models)',
+    '',
+    "Median seconds between a phase's milestone and the previous one, from the trails' own",
+    '`at=` stamps. Cost has no per-phase equivalent — a dispatch bills one agent session',
+    'that usually spans several phases (see Limitations).',
+    '',
+    '| Phase | n | Median |',
+    '|---|---|---|'
+  );
+  for (const phase of scorecard.phases ?? []) {
+    lines.push(`| ${safeCell(phase.phase)} | ${phase.n} | ${fmtSeconds(phase.medianSeconds)} |`);
+  }
 
   lines.push('', '## Reconciliation', '');
   if (isFirstSnapshot) {
@@ -479,11 +697,16 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     '  (`kimi-latest`, which has both `kimi-k3` and `kimi-k3-fast` as plausible pins) keep',
     '  their own row and are named in Data warnings — a guessed alias misattributes cost',
     '  and quality silently, a missing one only splits a row.',
+    '- **A context-window variant keeps its own row.** `claude-opus-5[1m]` does not fold',
+    '  into `claude-opus-5`: the milestone protocol says the suffix should never have been',
+    '  written (`gate` records the bare model id), but 1M-context is billed differently, so',
+    '  folding it would blend two cost profiles to fix a formatting slip. Read the two rows',
+    '  together when judging quality, separately when judging cost.',
     '- **Cost per phase is not separable.** A dispatch is usually one continuous agent',
     '  session covering several phases, so `runs.jsonl` records cost per issue, not per',
-    '  phase. Wall-clock per phase exists (via `ai-dossier runstate stats`) but is not',
-    '  joined here to keep this table to one row per bucket; run that command directly',
-    '  for a phase breakdown.',
+    '  phase — so the per-phase section above reports wall-clock only. For a per-phase',
+    '  breakdown of a single run rather than a median across many, run',
+    '  `ai-dossier runstate stats` directly.',
     '- **Stall/escalation/unverified-exit counts are a per-host gap.** They come from',
     '  `~/.dossier/sched/<project>/events.jsonl`, which only exists on the machine that',
     '  ran the dispatch. A run dispatched from another host reports 0 for these columns',
@@ -497,7 +720,7 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
 
   if (scorecard.warnings?.length) {
     lines.push('## Data warnings', '');
-    for (const w of scorecard.warnings) lines.push(`- ${w}`);
+    for (const w of scorecard.warnings) lines.push(`- ${safeWarning(w)}`);
     lines.push('');
   }
 
@@ -514,21 +737,53 @@ export function renderJson(scorecard) {
  * prior week's JSON sidecar, or null on the first run / when unavailable).
  */
 export function renderDigest(scorecard, previous) {
-  const ranked = scorecard.totals.filter((t) => t.n > 0);
-  const byCost = [...ranked]
-    .filter((t) => t.costPerDeliveredUsd != null)
-    .sort((a, b) => a.costPerDeliveredUsd - b.costPerDeliveredUsd)[0];
-  const byQuality = [...ranked]
-    .filter((t) => t.deliveryRate != null)
-    .sort((a, b) => b.deliveryRate - a.deliveryRate)[0];
-  const bySpeed = [...ranked]
-    .filter((t) => t.medianApiMinutes != null)
-    .sort((a, b) => a.medianApiMinutes - b.medianApiMinutes)[0];
+  const best = (rows, pick, better) => {
+    const eligible = rows.filter((r) => r.n > 0 && pick(r) != null);
+    if (eligible.length === 0) return null;
+    return eligible.reduce((a, b) => (better(pick(b), pick(a)) ? b : a));
+  };
+  const lower = (a, b) => a < b;
+  const higher = (a, b) => a > b;
 
+  // AC4 asks for the best model PER REPO, but the message must stay six lines whatever the
+  // repo count -- so each dimension is one line listing every repo's winner, rather than
+  // one line per repo.
+  const repos = [...new Set(scorecard.repoTotals?.map((r) => r.repo) ?? [])].sort();
+  const perRepo = (pick, better, format) => {
+    const parts = [];
+    for (const repo of repos) {
+      const rows = scorecard.repoTotals.filter((r) => r.repo === repo);
+      const winner = best(rows, pick, better);
+      if (winner)
+        parts.push(
+          `${safeCell(shortRepo(repo))} ${safeCell(winner.model)} (${format(winner)}, n=${winner.n})`
+        );
+    }
+    return parts.length > 0 ? parts.join(' · ') : null;
+  };
+
+  const byCost = perRepo(
+    (r) => r.costPerDeliveredUsd,
+    lower,
+    (r) => fmtUsd(r.costPerDeliveredUsd)
+  );
+  const byQuality = perRepo(
+    (r) => r.deliveryRate,
+    higher,
+    (r) => fmtPct(r.deliveryRate)
+  );
+  const bySpeed = perRepo(
+    (r) => r.medianApiMinutes,
+    lower,
+    (r) => `${fmtMin(r.medianApiMinutes)} API-min`
+  );
+
+  // The drop check stays on the repo-folded totals: it answers "did this MODEL regress",
+  // and splitting it per repo would halve every already-small sample.
   let drop = null;
-  if (previous) {
+  if (previous && Array.isArray(previous.totals)) {
     const prevByModel = new Map(previous.totals.map((t) => [t.model, t]));
-    for (const t of ranked) {
+    for (const t of scorecard.totals.filter((t) => t.n > 0)) {
       const prev = prevByModel.get(t.model);
       if (!prev || prev.deliveryRate == null || t.deliveryRate == null) continue;
       const delta = t.deliveryRate - prev.deliveryRate;
@@ -538,23 +793,27 @@ export function renderDigest(scorecard, previous) {
     }
   }
 
+  const dropThresholdPoints = Math.round(DELIVERY_RATE_DROP_THRESHOLD * 100);
+  const warningCount = scorecard.warnings?.length ?? 0;
   const lines = [
     `📊 Model scorecard (${scorecard.windowStart} → ${scorecard.windowEnd})`,
-    byCost
-      ? `💰 Cheapest/delivered: ${safeCell(byCost.model)} (${fmtUsd(byCost.costPerDeliveredUsd)}, n=${byCost.n})`
-      : '💰 Cheapest/delivered: no data',
-    byQuality
-      ? `🎯 Best delivery rate: ${safeCell(byQuality.model)} (${fmtPct(byQuality.deliveryRate)}, n=${byQuality.n})`
-      : '🎯 Best delivery rate: no data',
-    bySpeed
-      ? `⚡ Fastest: ${safeCell(bySpeed.model)} (${fmtMin(bySpeed.medianApiMinutes)} API-min, n=${bySpeed.n})`
-      : '⚡ Fastest: no data',
+    byCost ? `💰 Cheapest/delivered: ${byCost}` : '💰 Cheapest/delivered: no data',
+    byQuality ? `🎯 Best delivery rate: ${byQuality}` : '🎯 Best delivery rate: no data',
+    bySpeed ? `⚡ Fastest: ${bySpeed}` : '⚡ Fastest: no data',
     drop
       ? `📉 Delivery rate drop: ${safeCell(drop.model)} ${fmtPct(drop.from)} → ${fmtPct(drop.to)}`
-      : '📉 Delivery rate drop >10pt: none',
-    '🔗 docs/reports/model-scorecard.md',
+      : `📉 Delivery rate drop >${dropThresholdPoints}pt: none`,
+    warningCount > 0
+      ? `🔗 docs/reports/model-scorecard.md — ⚠️ ${warningCount} data warning(s)`
+      : '🔗 docs/reports/model-scorecard.md',
   ];
   return lines.join('\n');
+}
+
+/** `owner/name` -> `name`, so three repo-qualified winners still fit one digest line. */
+function shortRepo(repo) {
+  const slash = repo.lastIndexOf('/');
+  return slash === -1 ? repo : repo.slice(slash + 1);
 }
 
 // ------------------------------------------------------------------
@@ -593,20 +852,30 @@ function ghIssueListWithComments(repo, since, execFile) {
   return JSON.parse(out);
 }
 
-function loadCliDist(repoRoot, name) {
+function loadCliDist(repoRoot, name, expected = []) {
   const require = createRequire(import.meta.url);
   const path = resolve(repoRoot, 'cli', 'dist', name);
   if (!existsSync(path)) {
     throw new ScorecardError(
-      `cli/dist/${name} not found — run 'make build-all' before the scorecard (needs the built CLI for milestone parsing).`
+      `cli/dist/${name} not found — run 'make build-all' in ${repoRoot} before the scorecard (it needs the built CLI and packages/sched/dist).`
     );
   }
-  return require(path);
+  const loaded = require(path);
+  // A `cli/dist` built before this script's dependencies existed is present but incomplete,
+  // and the missing export only surfaces later as `<name> is not a function` inside a
+  // per-repo catch -- reported as "every repo failed", which points at gh, not the build.
+  const missing = expected.filter((key) => loaded[key] === undefined);
+  if (missing.length > 0) {
+    throw new ScorecardError(
+      `cli/dist/${name} does not export ${missing.join(', ')} — the built CLI is stale; run 'make build-all' in ${repoRoot} and retry.`
+    );
+  }
+  return loaded;
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const opts = {
-    days: 30,
+    days: DEFAULT_WINDOW_DAYS,
     since: null,
     repos: DEFAULT_REPOS,
     outMd: DEFAULT_OUT_MD,
@@ -617,20 +886,46 @@ function parseArgs(argv) {
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    const next = () => argv[++i];
+    // A flag whose value is missing used to read as `undefined` and fail much later --
+    // `--days` with no operand died in `Date.toISOString` with a bare `RangeError`, and
+    // `--repos` with none threw a `TypeError` on `.split`. Fail at the flag instead.
+    const next = () => {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith('--')) {
+        throw new ScorecardError(`${arg} needs a value.`);
+      }
+      return value;
+    };
     switch (arg) {
-      case '--days':
-        opts.days = Number(next());
+      case '--days': {
+        const raw = next();
+        opts.days = Number(raw);
+        if (!Number.isFinite(opts.days) || opts.days <= 0) {
+          throw new ScorecardError(`--days must be a positive number, got '${raw}'.`);
+        }
         break;
-      case '--since':
-        opts.since = next();
+      }
+      case '--since': {
+        const raw = next();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+          throw new ScorecardError(`--since must be YYYY-MM-DD, got '${raw}'.`);
+        }
+        opts.since = raw;
         break;
-      case '--repos':
-        opts.repos = next()
+      }
+      case '--repos': {
+        const raw = next();
+        opts.repos = raw
           .split(',')
           .map((r) => r.trim())
           .filter(Boolean);
+        // An empty list is not "every repo" -- it silently produced an empty scorecard and
+        // exited 0, which the weekly cron would have committed as that week's data.
+        if (opts.repos.length === 0) {
+          throw new ScorecardError(`--repos needs at least one owner/name, got '${raw}'.`);
+        }
         break;
+      }
       case '--out-md':
         opts.outMd = next();
         break;
@@ -659,7 +954,7 @@ function parseArgs(argv) {
  * against fixtures, never a live `gh` or `~/.dossier`.
  */
 export function main({
-  days = 30,
+  days = DEFAULT_WINDOW_DAYS,
   since = null,
   repos = DEFAULT_REPOS,
   outMd = DEFAULT_OUT_MD,
@@ -675,12 +970,15 @@ export function main({
   const start = since ?? windowStartDate(days, now);
   const end = now.toISOString().slice(0, 10);
 
-  const { parseMilestones } = loadCliDist(repoRoot, 'runstate.js');
-  const { canonicalModel, buildStatsReport, providerOf } = loadCliDist(
+  const { parseMilestones } = loadCliDist(repoRoot, 'runstate.js', ['parseMilestones']);
+  const { canonicalModel, buildStatsReport, providerOf, DELIVERED_PHASES } = loadCliDist(
     repoRoot,
-    'runstate-stats.js'
+    'runstate-stats.js',
+    ['canonicalModel', 'buildStatsReport', 'providerOf', 'DELIVERED_PHASES']
   );
-  const { buildSchedCostReport } = loadCliDist(repoRoot, 'sched-run-stats.js');
+  const { buildSchedCostReport } = loadCliDist(repoRoot, 'sched-run-stats.js', [
+    'buildSchedCostReport',
+  ]);
 
   const allRows = [];
   const warnings = [];
@@ -731,9 +1029,11 @@ export function main({
         dispatchInfo,
         canonicalModelFn: canonicalModel,
         providerOfFn: providerOf,
+        deliveredPhases: DELIVERED_PHASES,
       });
       allRows.push(...rows);
       anyRepoSucceeded = true;
+      log(`scorecard: ${repo} — ${issuesWithComments.length} issue(s) read, ${rows.length} scored`);
     } catch (err) {
       const message = err instanceof ScorecardError ? err.message : (err?.message ?? String(err));
       warnings.push(`${repo}: skipped — ${message}`);
@@ -745,22 +1045,62 @@ export function main({
     throw new ScorecardError(`every repo failed — see warnings: ${warnings.join(' | ')}`);
   }
 
-  const scorecard = aggregateScorecard(allRows, {
-    windowStart: start,
-    windowEnd: end,
-    generatedAt: now.toISOString(),
-  });
-  scorecard.warnings = warnings;
-
   const outJsonAbs = resolve(repoRoot, outJson);
   let previous = null;
   if (existsSync(outJsonAbs)) {
     try {
-      previous = JSON.parse(readFileSync(outJsonAbs, 'utf8'));
-    } catch {
-      previous = null;
+      const parsed = JSON.parse(readFileSync(outJsonAbs, 'utf8'));
+      // Shape-check, not just parse-check: a sidecar that is valid JSON but has no `totals`
+      // (an older schema, a hand-edit, a truncated write) crashed the whole run inside the
+      // digest's week-over-week comparison.
+      if (Array.isArray(parsed?.totals)) {
+        previous = parsed;
+      } else {
+        warnings.push(
+          `previous sidecar at ${outJson} has no 'totals' array — week-over-week comparison is disabled for this run.`
+        );
+      }
+    } catch (err) {
+      warnings.push(
+        `previous sidecar at ${outJson} is unreadable (${err?.message ?? err}) — week-over-week comparison is disabled for this run.`
+      );
     }
   }
+
+  // The baseline is whatever sidecar is on the base branch. This script never merges its own
+  // PR, so an unmerged week leaves a baseline older than the window while the drop line still
+  // reads as week-over-week.
+  if (previous?.windowEnd) {
+    const baselineAgeDays = (Date.parse(end) - Date.parse(previous.windowEnd)) / MS_PER_DAY;
+    if (Number.isFinite(baselineAgeDays) && baselineAgeDays > days) {
+      warnings.push(
+        `week-over-week baseline is the ${previous.windowEnd} snapshot (${Math.round(baselineAgeDays)} days old, window is ${days}) — the previous scorecard PR may not have merged; read the Δ column and the drop line accordingly.`
+      );
+    }
+  }
+
+  const scorecard = attachDeliveryRateDeltas(
+    aggregateScorecard(allRows, {
+      windowStart: start,
+      windowEnd: end,
+      generatedAt: now.toISOString(),
+      windowDays: since ? null : days,
+      since,
+    }),
+    previous
+  );
+  scorecard.warnings = warnings;
+
+  // An empty result is indistinguishable from a healthy one downstream: `gh` exits 0 with
+  // zero issues on a search outage or a token that lost `repo` scope, and the cron would
+  // commit the emptied report as that week's data.
+  if (allRows.length === 0 && !dryRun && existsSync(outJsonAbs)) {
+    throw new ScorecardError(
+      `joined 0 issue rows for ${start} → ${end} across ${repos.join(', ')} — refusing to overwrite the existing snapshot with an empty one. Re-run with --dry-run to inspect. Warnings: ${warnings.join(' | ') || '(none)'}`
+    );
+  }
+
+  for (const warning of warnings) log(`scorecard: warning — ${warning}`);
 
   const markdown = renderMarkdown(scorecard, { isFirstSnapshot: previous === null });
   const json = renderJson(scorecard);

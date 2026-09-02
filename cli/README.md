@@ -825,9 +825,10 @@ teardown are confirmed, and the report tail is routinely dispatched as a separat
 invoked with, so one model reaches the trail under several spellings depending on how it
 was routed — `glm-5.3` and `llmgateway/glm-5.3`, or `z-ai/glm-latest` and opencode's
 `~z-ai/glm-latest`. Unbucketed, one model's runs split across rows and the breakdown
-answers nothing. `stats` lowercases, drops a leading `~`, and peels a *known* routing
-prefix (`llmgateway`, `openrouter`, `moonshotai`, `anthropic`, `alibaba`, `google`,
-`openai`, `z-ai`, `zai`) joined by `/`, or by `-` on an id with no `/` left. It is an
+answers nothing. `stats` lowercases, drops opencode's `~` alias marker, and peels a *known* routing
+prefix (`zai-coding-plan`, `llmgateway`, `openrouter`, `moonshotai`, `anthropic`,
+`alibaba`, `google`, `openai`, `z-ai`, `zai` — code order, longest first) joined by `/`,
+or by `-` on an id with no `/` left. It is an
 allowlist, never a generic "drop the first segment": an unrecognised leading segment is
 always kept, because merging two genuinely different models is the one error this table
 cannot survive. The list is ordered longest-prefix-first, so a shorter entry (`zai`)
@@ -870,6 +871,8 @@ than guessing:
 - The `<unknown>` model bucket (runs that recorded no `model=`) is named as not
   attributable to any model whenever a real model bucket sits beside it — its outcome
   columns are not a model's record.
+- A bucket whose id ends in `-latest` with no entry in `MODEL_ALIASES` is named as a moving
+  tag sitting apart from whatever pin it resolves to — one model read as two rows.
 
 Warnings go to stderr in both human and `--json` mode, so stdout stays parseable and
 `stats` still exits 0 — a degraded read is not a failure. It exits 1 only when nothing in

@@ -126,6 +126,9 @@ export const MODEL_ALIASES: Readonly<Record<string, string>> = {
   'glm-latest': 'glm-5.3',
 };
 
+/** The suffix that marks a model id as a moving pointer rather than a pinned version. */
+const MOVING_TAG_SUFFIX = '-latest';
+
 /**
  * Cap on how many routing prefixes are peeled from one id.
  *
@@ -143,24 +146,16 @@ const MAX_ROUTING_PREFIXES = 4;
  * its declared pin. A value that is *only* routing tokens keeps its identity rather than
  * collapsing into every other such id — that is the length guard in {@link stripRoutingPrefix},
  * not the empty-string fallback below, which is reachable only for an id that was empty or
- * whitespace to begin with.
+ * whitespace, or nothing but `~` markers to begin with.
  */
 export function canonicalModel(raw: string): string {
-  const lowered = raw.trim().toLowerCase();
-  let value = stripAliasMarker(lowered);
-
-  for (let i = 0; i < MAX_ROUTING_PREFIXES; i++) {
-    const stripped = stripRoutingPrefix(value);
-    if (stripped === null) break;
-    // Re-strip per peel, not once up front: opencode writes its alias marker on the
-    // segment it aliases, not on the whole id, so `openrouter/~z-ai/glm-latest` carries
-    // the `~` mid-string. Peeling only at the front left `z-ai/` unmatched on the next
-    // pass and stranded the id in its own bucket -- the exact split #566's AC2 names.
-    value = stripAliasMarker(stripped.rest);
-  }
-
+  const { lowered, value } = peelRouting(raw);
   if (value === '') return lowered;
-  return MODEL_ALIASES[value] ?? value;
+  // `Object.hasOwn`, never a bare index: `value` is a `model=` read off a public issue
+  // comment, and `MODEL_ALIASES.constructor` resolves through the prototype to a function,
+  // which `??` does not treat as absent. That returned a non-string from a `: string`
+  // function and crashed every consumer that called a string method on it.
+  return Object.hasOwn(MODEL_ALIASES, value) ? MODEL_ALIASES[value] : value;
 }
 
 /**
@@ -172,7 +167,27 @@ export function canonicalModel(raw: string): string {
  * provider served each run survives the fold as a sub-row.
  */
 export function providerOf(raw: string): string | null {
-  let value = stripAliasMarker(raw.trim().toLowerCase());
+  const { chain } = peelRouting(raw);
+  return chain.length > 0 ? chain.join('/') : null;
+}
+
+/**
+ * The one peel pass both {@link canonicalModel} and {@link providerOf} read from: the
+ * lowercased input, the id left after every known routing prefix is removed, and the
+ * prefixes removed, in order.
+ *
+ * One loop rather than two copies, because the two answers must agree: a change to peeling
+ * that landed in only one of them would put a run's model key and its provider chain out of
+ * step, which is precisely the mis-attribution the fold exists to prevent.
+ *
+ * The alias marker is re-stripped at every peel, not once up front: opencode writes it on
+ * the segment it aliases, not on the whole id, so `openrouter/~z-ai/glm-latest` carries the
+ * `~` mid-string. Peeling only at the front left `z-ai/` unmatched on the next pass and
+ * stranded the id in its own bucket -- the exact split #566's AC2 names.
+ */
+function peelRouting(raw: string): { lowered: string; value: string; chain: string[] } {
+  const lowered = raw.trim().toLowerCase();
+  let value = stripAliasMarker(lowered);
   const chain: string[] = [];
 
   for (let i = 0; i < MAX_ROUTING_PREFIXES; i++) {
@@ -182,7 +197,7 @@ export function providerOf(raw: string): string | null {
     value = stripAliasMarker(stripped.rest);
   }
 
-  return chain.length > 0 ? chain.join('/') : null;
+  return { lowered, value, chain };
 }
 
 /** Drop opencode's leading gateway-alias marker. */
@@ -624,7 +639,7 @@ function byStatsPhaseOrder(a: { phase: string }, b: { phase: string }): number {
  * a merged PR), so counting `report` alone would score the delivering run as unfinished and
  * report a completion rate far below what the trail actually shows.
  */
-const DELIVERED_PHASES: readonly string[] = [
+export const DELIVERED_PHASES: readonly string[] = [
   SHIP_PHASE,
   REPORT_PHASE,
   BATCH_SHIP_PHASE,
@@ -719,7 +734,7 @@ function modelWarnings(models: ModelAggregate[]): string[] {
       if (outer === inner || inner.model === UNKNOWN_MODEL) continue;
       if (outer.model.endsWith(`/${inner.model}`) || outer.model.endsWith(`-${inner.model}`)) {
         warnings.push(
-          `'${outer.model}' and '${inner.model}' may be the same model split across buckets — add its routing prefix to MODEL_ROUTING_PREFIXES to fold them`
+          `'${renderValue(outer.model)}' and '${renderValue(inner.model)}' may be the same model split across buckets — add its routing prefix to MODEL_ROUTING_PREFIXES to fold them`
         );
       }
     }
@@ -732,15 +747,12 @@ function modelWarnings(models: ModelAggregate[]): string[] {
   for (const model of models) {
     if (model.model === UNKNOWN_MODEL || !model.model.endsWith(MOVING_TAG_SUFFIX)) continue;
     warnings.push(
-      `'${model.model}' is a moving version tag with no declared pin — its ${model.runs} run(s) sit in their own row, apart from whatever pinned version the tag resolves to; add it to MODEL_ALIASES to fold them`
+      `'${renderValue(model.model)}' is a moving version tag with no declared pin — its ${model.runs} run(s) sit in their own row, apart from whatever pinned version the tag resolves to; add it to MODEL_ALIASES to fold them`
     );
   }
 
   return warnings;
 }
-
-/** The suffix that marks a model id as a moving pointer rather than a pinned version. */
-const MOVING_TAG_SUFFIX = '-latest';
 
 /** One aggregate row's skew note, or null when every sample was forwards. */
 export function skewNote(negativeSamples: number): string | null {

@@ -72,6 +72,9 @@ web_modules/
 
 # sched-fleet real credentials (not dot-prefixed, so the .env rules above miss it)
 scripts/sched-fleet/telegram.env
+# sched-fleet run artifacts, when the fleet home IS this checkout's scripts/sched-fleet/
+scripts/sched-fleet/scorecard-weekly-digest.txt
+scripts/sched-fleet/.scorecard-weekly.lock
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache

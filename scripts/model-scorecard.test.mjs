@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   aggregateScorecard,
+  attachDeliveryRateDeltas,
   buildDispatchInfo,
   joinRepoRows,
   main,
+  parseArgs,
   pickCanonicalRun,
   projectSlug,
   renderDigest,
@@ -917,5 +919,360 @@ describe('main (integration, fixture gh + fixture ~/.dossier)', () => {
     const written = readFileSync(digestOut, 'utf8');
     expect(written.split('\n').filter(Boolean)).toHaveLength(6);
     rmSync(outDir, { recursive: true, force: true });
+  });
+});
+
+describe('conformance, per-issue review rate, and per-phase wall-clock (#566 AC1)', () => {
+  const meta = {
+    windowStart: '2026-08-25',
+    windowEnd: '2026-09-02',
+    generatedAt: '2026-09-02T00:00:00Z',
+  };
+  const trailFor = (keys) => [
+    { phase: 'review', keys },
+    // A later non-review milestone must not shadow the review one.
+    { phase: 'ship', keys: {} },
+  ];
+
+  const joined = (milestones, runOverrides = {}) =>
+    joinRepoRows({
+      repo: 'o/r',
+      trails: [{ issue: 1, milestones }],
+      statsReport: { runs: [run('sonnet', runOverrides)] },
+      schedCost: { issues: [] },
+      dispatchInfo: new Map(),
+      canonicalModelFn,
+      providerOfFn,
+    })[0];
+
+  it('joins ac_met/ac_total off the review milestone', () => {
+    const row = joined(trailFor({ ac_met: '4', ac_total: '5', fixed: '19', escalated: '1' }));
+    expect(row.acMet).toBe(4);
+    expect(row.acTotal).toBe(5);
+  });
+
+  it('reads a batch-review milestone too — an anchor is conformance-checked per member', () => {
+    const row = joined([{ phase: 'batch-review', keys: { ac_met: '9', ac_total: '12' } }]);
+    expect([row.acMet, row.acTotal]).toEqual([9, 12]);
+  });
+
+  it('drops a half-recorded verdict rather than reporting a rate it cannot compute', () => {
+    expect(joined(trailFor({ ac_met: '4' })).acTotal).toBeNull();
+    expect(joined(trailFor({ ac_total: '5' })).acMet).toBeNull();
+    // ac_total=0 would divide by zero and is not a conformance verdict either.
+    expect(joined(trailFor({ ac_met: '0', ac_total: '0' })).acMet).toBeNull();
+  });
+
+  it('weights the conformance rate by criteria, not by run', () => {
+    const rows = [
+      { ...joined(trailFor({ ac_met: '1', ac_total: '8' })), model: 'sonnet' },
+      { ...joined(trailFor({ ac_met: '1', ac_total: '1' })), model: 'sonnet' },
+    ];
+    const sc = aggregateScorecard(rows, meta);
+    // 2 of 9 criteria, not the 56% an average-of-averages would report.
+    expect(sc.totals[0].conformanceRate).toBeCloseTo(2 / 9);
+    expect(sc.totals[0].conformanceSamples).toBe(2);
+  });
+
+  it('reports review findings per issue, not as a bucket sum', () => {
+    const rows = [
+      { ...joined(trailFor({ fixed: '10' })), model: 'sonnet' },
+      { ...joined(trailFor({ fixed: '2' })), model: 'sonnet' },
+    ];
+    const sc = aggregateScorecard(rows, meta);
+    expect(sc.totals[0].reviewFixed).toBe(12);
+    expect(sc.totals[0].reviewFixedPerIssue).toBe(6);
+  });
+
+  it('derives per-phase wall-clock medians from the trail spans', () => {
+    const rows = [
+      {
+        ...joined([], {
+          phases: [
+            { phase: 'implement', seconds: 100 },
+            { phase: 'review', seconds: 50 },
+            // A phase can repeat within a run (ship posts twice, a resume re-runs earlier
+            // phases) — the spans sum rather than last-write-wins.
+            { phase: 'implement', seconds: 40 },
+            // Clock skew produces negatives upstream; they are not a duration.
+            { phase: 'ship', seconds: -5 },
+          ],
+        }),
+        model: 'sonnet',
+      },
+    ];
+    const sc = aggregateScorecard(rows, meta);
+    expect(sc.phases).toEqual([
+      { phase: 'implement', n: 1, medianSeconds: 140 },
+      { phase: 'review', n: 1, medianSeconds: 50 },
+    ]);
+    expect(renderMarkdown(sc)).toContain('## Wall-clock per phase');
+  });
+
+  it('counts billable tokens only from rows carrying both halves', () => {
+    const base = { ...joined([]), model: 'sonnet', delivered: true };
+    const sc = aggregateScorecard(
+      [
+        { ...base, inputTokens: 100, outputTokens: 50 },
+        // Half-recorded: previously contributed a silent 0 to the output average.
+        { ...base, inputTokens: 900, outputTokens: null },
+      ],
+      meta
+    );
+    expect(sc.totals[0].billableTokensPerDeliveredIssue).toBe(150);
+    expect(sc.totals[0].tokenSamples).toBe(1);
+  });
+});
+
+describe('attachDeliveryRateDeltas (#566 AC1 — 7-day regressions where known)', () => {
+  const meta = {
+    windowStart: '2026-08-25',
+    windowEnd: '2026-09-02',
+    generatedAt: '2026-09-02T00:00:00Z',
+  };
+  const rowFor = (model, delivered) => ({
+    repo: 'o/r',
+    model,
+    tier: 'mid',
+    provider: null,
+    delivered,
+    blocked: !delivered,
+    costUsd: null,
+    inputTokens: null,
+    outputTokens: null,
+    apiMinutes: null,
+    wallClockMinutes: null,
+    phaseSeconds: {},
+    stalls: 0,
+    escalations: 0,
+    unverifiedExits: 0,
+    reviewFixed: null,
+    reviewEscalated: null,
+    acMet: null,
+    acTotal: null,
+  });
+
+  it('records the change against the previous snapshot and renders it', () => {
+    const sc = aggregateScorecard([rowFor('glm-5.3', true), rowFor('glm-5.3', false)], meta);
+    const previous = { windowEnd: '2026-08-26', totals: [{ model: 'glm-5.3', deliveryRate: 1 }] };
+    attachDeliveryRateDeltas(sc, previous);
+    expect(sc.totals[0].deliveryRateDelta).toBeCloseTo(-0.5);
+    expect(renderMarkdown(sc)).toContain('-50pt');
+  });
+
+  it('attaches nothing when there is no comparable prior snapshot', () => {
+    const sc = aggregateScorecard([rowFor('glm-5.3', true)], meta);
+    attachDeliveryRateDeltas(sc, null);
+    attachDeliveryRateDeltas(sc, { totals: 'not-an-array' });
+    attachDeliveryRateDeltas(sc, { totals: [{ model: 'other', deliveryRate: 1 }] });
+    expect(sc.totals[0].deliveryRateDelta).toBeUndefined();
+    expect(renderMarkdown(sc)).toContain('| — |');
+  });
+});
+
+describe('parseArgs', () => {
+  it('defaults to the shared 30-day window', () => {
+    expect(parseArgs([]).days).toBe(30);
+  });
+
+  it('rejects a flag whose value is missing instead of failing much later', () => {
+    // `--days` with no operand used to reach Date.toISOString and die with a bare RangeError.
+    expect(() => parseArgs(['--days'])).toThrow(ScorecardError);
+    expect(() => parseArgs(['--days', '--dry-run'])).toThrow(/--days needs a value/);
+    expect(() => parseArgs(['--repos'])).toThrow(ScorecardError);
+  });
+
+  it('rejects a non-positive or non-numeric window', () => {
+    expect(() => parseArgs(['--days', 'abc'])).toThrow(/--days must be a positive number/);
+    expect(() => parseArgs(['--days', '0'])).toThrow(/--days must be a positive number/);
+  });
+
+  it('rejects a --since that is not a date', () => {
+    // An unvalidated value went straight into `updated:>=…` and produced an empty report.
+    expect(() => parseArgs(['--since', 'notadate'])).toThrow(/--since must be YYYY-MM-DD/);
+    expect(parseArgs(['--since', '2026-08-25']).since).toBe('2026-08-25');
+  });
+
+  it('rejects an empty --repos list rather than scoring nothing', () => {
+    expect(() => parseArgs(['--repos', ' , '])).toThrow(/at least one owner\/name/);
+  });
+});
+
+describe('renderDigest — best model per repo (#566 AC4)', () => {
+  const meta = {
+    windowStart: '2026-08-25',
+    windowEnd: '2026-09-02',
+    generatedAt: '2026-09-02T00:00:00Z',
+  };
+  const row = (repo, model, over = {}) => ({
+    repo,
+    model,
+    tier: 'mid',
+    provider: null,
+    delivered: true,
+    blocked: false,
+    costUsd: 5,
+    inputTokens: null,
+    outputTokens: null,
+    apiMinutes: 30,
+    wallClockMinutes: null,
+    phaseSeconds: {},
+    stalls: 0,
+    escalations: 0,
+    unverifiedExits: 0,
+    reviewFixed: null,
+    reviewEscalated: null,
+    acMet: null,
+    acTotal: null,
+    ...over,
+  });
+
+  const sc = aggregateScorecard(
+    [
+      row('imboard-ai/ai-dossier', 'glm-5.3', { costUsd: 2, apiMinutes: 40 }),
+      row('imboard-ai/ai-dossier', 'sonnet', { costUsd: 9, apiMinutes: 10 }),
+      row('imboard-ai/monorepo', 'glm-5.3', { costUsd: 8, apiMinutes: 15 }),
+      row('imboard-ai/monorepo', 'sonnet', { costUsd: 3, apiMinutes: 50 }),
+    ],
+    meta
+  );
+
+  it("names each repo's own winner per dimension, still in six lines", () => {
+    const lines = renderDigest(sc, null).split('\n');
+    expect(lines).toHaveLength(6);
+    // Cheapest differs by repo — a repo-folded ranking would report only one of these.
+    expect(lines[1]).toContain('ai-dossier glm-5.3');
+    expect(lines[1]).toContain('monorepo sonnet');
+    // Fastest is the other way round, so the two lines cannot both be a global winner.
+    expect(lines[3]).toContain('ai-dossier sonnet');
+    expect(lines[3]).toContain('monorepo glm-5.3');
+  });
+
+  it('stays six lines when a repo has no measurable data at all', () => {
+    const sparse = aggregateScorecard(
+      [row('o/a', 'sonnet', { costUsd: null, apiMinutes: null, delivered: false, blocked: true })],
+      meta
+    );
+    expect(renderDigest(sparse, null).split('\n')).toHaveLength(6);
+  });
+
+  it('states the configured drop threshold rather than a hardcoded 10', () => {
+    expect(renderDigest(sc, null)).toContain('drop >10pt: none');
+  });
+
+  it('surfaces the data-warning count on the link line', () => {
+    sc.warnings = ['a', 'b'];
+    const lines = renderDigest(sc, null).split('\n');
+    expect(lines).toHaveLength(6);
+    expect(lines[5]).toContain('2 data warning(s)');
+    sc.warnings = [];
+  });
+});
+
+describe('renderMarkdown — warnings are untrusted text', () => {
+  const meta = {
+    windowStart: '2026-08-25',
+    windowEnd: '2026-09-02',
+    generatedAt: '2026-09-02T00:00:00Z',
+  };
+
+  it('neutralises a markdown link and control characters in a data warning', () => {
+    // Warning text embeds `model=` values read off a PUBLIC repo's issue comments, and this
+    // report is committed — an unescaped link would render as live in the shipped file.
+    const sc = aggregateScorecard([], meta);
+    sc.warnings = ['o/r: [click here](https://evil.example)\u001b[31m-latest is a moving tag'];
+    const md = renderMarkdown(sc);
+    expect(md).not.toContain('[click here](');
+    expect(md).not.toContain('\u001b');
+    expect(md).toContain('&#91;click here&#93;');
+  });
+
+  it('caps a warning long enough to bury the rest of the report', () => {
+    const sc = aggregateScorecard([], meta);
+    sc.warnings = [`o/r: ${'x'.repeat(5000)}`];
+    const line = renderMarkdown(sc)
+      .split('\n')
+      .find((l) => l.startsWith('- o/r:'));
+    expect(line.length).toBeLessThan(320);
+    expect(line.endsWith('…')).toBe(true);
+  });
+});
+
+describe('main — guards against writing a snapshot that is not evidence', () => {
+  let home;
+  let outDir;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'model-scorecard-home-'));
+    outDir = mkdtempSync(join(tmpdir(), 'model-scorecard-out-'));
+    mkdirSync(join(home, '.dossier'), { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  const emptyGh = () => JSON.stringify([]);
+  const opts = (over = {}) => ({
+    repoRoot: REPO_ROOT,
+    repos: ['imboard-ai/ai-dossier'],
+    execFile: emptyGh,
+    home,
+    now: new Date('2026-09-02T00:00:00Z'),
+    log: () => {},
+    outMd: join(outDir, 'model-scorecard.md'),
+    outJson: join(outDir, 'model-scorecard.json'),
+    ...over,
+  });
+
+  it('refuses to replace an existing snapshot with a zero-row one', () => {
+    // `gh` exits 0 with zero issues on a search outage or a token that lost `repo` scope;
+    // without this the weekly cron would commit the emptied report as that week's data.
+    writeFileSync(join(outDir, 'model-scorecard.json'), JSON.stringify({ totals: [] }));
+    expect(() => main(opts())).toThrow(/refusing to overwrite the existing snapshot/);
+  });
+
+  it('still writes a zero-row first snapshot, when there is nothing to lose', () => {
+    expect(() => main(opts())).not.toThrow();
+  });
+
+  it('never blocks a --dry-run inspection of the empty result', () => {
+    writeFileSync(join(outDir, 'model-scorecard.json'), JSON.stringify({ totals: [] }));
+    expect(() => main(opts({ dryRun: true }))).not.toThrow();
+  });
+
+  it('warns and carries on when the previous sidecar has the wrong shape', () => {
+    writeFileSync(join(outDir, 'model-scorecard.json'), JSON.stringify({ nope: true }));
+    const { scorecard } = main(opts({ dryRun: true }));
+    expect(scorecard.warnings.some((w) => w.includes("has no 'totals' array"))).toBe(true);
+  });
+
+  it('warns and carries on when the previous sidecar is unparseable', () => {
+    writeFileSync(join(outDir, 'model-scorecard.json'), '{ not json');
+    const { scorecard } = main(opts({ dryRun: true }));
+    expect(scorecard.warnings.some((w) => w.includes('is unreadable'))).toBe(true);
+  });
+
+  it('warns when the week-over-week baseline is older than the window', () => {
+    // The script never merges its own PR, so an unmerged week silently ages the baseline
+    // while the drop line still reads as week-over-week.
+    writeFileSync(
+      join(outDir, 'model-scorecard.json'),
+      JSON.stringify({ windowEnd: '2026-06-01', totals: [] })
+    );
+    const { scorecard } = main(opts({ dryRun: true }));
+    expect(scorecard.warnings.some((w) => w.includes('week-over-week baseline'))).toBe(true);
+  });
+
+  it('names a stale cli/dist rather than blaming the repos', () => {
+    // A dist built before this script's dependencies existed is present but incomplete; the
+    // missing export used to surface as "every repo failed", which points at gh, not the build.
+    const staleRoot = mkdtempSync(join(tmpdir(), 'model-scorecard-stale-'));
+    mkdirSync(join(staleRoot, 'cli', 'dist'), { recursive: true });
+    writeFileSync(join(staleRoot, 'cli', 'dist', 'runstate.js'), 'module.exports = {};');
+    expect(() => main(opts({ repoRoot: staleRoot }))).toThrow(/does not export parseMilestones/);
+    expect(() => main(opts({ repoRoot: staleRoot }))).toThrow(/make build-all/);
+    rmSync(staleRoot, { recursive: true, force: true });
   });
 });

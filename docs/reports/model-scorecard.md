@@ -1,41 +1,41 @@
 # Model Scorecard
 
-Generated: 2026-09-02T11:19:56.233Z | Window: 2026-08-25 → 2026-09-02
+Generated: 2026-09-02T11:47:03.973Z | Window: 2026-08-25 → 2026-09-02
 
 Cost, quality, and speed per LLM, joined from runstate trails (GitHub), `runs.jsonl`
 (token/cost telemetry), and `events.jsonl` (dispatch tier, stall/escalation counts).
-Regenerate with `npm run scorecard`. See #566.
+Regenerate with `npm run scorecard -- --since 2026-08-25`. See #566.
 
 **`n` is a confidence column, not a metric** — a row with `n=1` is one data point, not
 a trend. Read `cost/delivered` and `delivery rate` alongside `n`, never alone.
 
 ## Per model × repo × tier
 
-| Model | Repo | Tier | Agent CLI | n | Delivered | Delivery rate | Cost/delivered | Median API-min | Stalls | Escalations | Unverified exits |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| `<unknown>` | imboard-ai/ai-dossier | <unknown> | unknown | 8 | 0 | 0% | N/A | N/A | 0 | 0 | 0 |
-| `<unknown>` | imboard-ai/imboard-monorepo | <unknown> | unknown | 13 | 1 | 8% | N/A | N/A | 0 | 0 | 0 |
-| `claude-opus-5` | imboard-ai/ai-dossier | <unknown> | unknown | 1 | 1 | 100% | N/A | N/A | 0 | 0 | 0 |
-| `claude-opus-5` | imboard-ai/ai-dossier | strong | claude | 1 | 1 | 100% | N/A | N/A | 0 | 0 | 0 |
-| `claude-opus-5` | imboard-ai/imboard-monorepo | <unknown> | unknown | 25 | 25 | 100% | N/A | N/A | 0 | 0 | 0 |
-| `claude-opus-5[1m]` | imboard-ai/imboard-monorepo | <unknown> | unknown | 1 | 1 | 100% | N/A | N/A | 0 | 0 | 0 |
-| `claude-sonnet-5` | imboard-ai/ai-dossier | <unknown> | unknown | 1 | 1 | 100% | N/A | N/A | 0 | 0 | 0 |
-| `claude-sonnet-5` | imboard-ai/ai-dossier | mechanical | claude | 1 | 1 | 100% | $4.793 (n=1) | 20.0 | 0 | 0 | 0 |
-| `claude-sonnet-5` | imboard-ai/ai-dossier | mid | claude | 30 | 27 | 90% | $23.298 (n=5) | 48.0 | 0 | 0 | 0 |
-| `claude-sonnet-5` | imboard-ai/ai-dossier | strong | claude | 7 | 6 | 86% | $25.060 (n=3) | 82.0 | 0 | 7 | 4 |
-| `claude-sonnet-5` | imboard-ai/imboard-monorepo | <unknown> | unknown | 22 | 20 | 91% | N/A | N/A | 0 | 0 | 0 |
-| `claude-sonnet-5` | imboard-ai/imboard-monorepo | mechanical | claude,opencode | 9 | 8 | 89% | $6.745 (n=3) | 41.0 | 0 | 9 | 0 |
-| `claude-sonnet-5` | imboard-ai/imboard-monorepo | mid | claude | 1 | 0 | 0% | N/A | N/A | 0 | 1 | 0 |
-| `claude-sonnet-5` | imboard-ai/imboard-monorepo | strong | claude | 2 | 0 | 0% | N/A | N/A | 0 | 2 | 1 |
-| `glm-5.3` | imboard-ai/ai-dossier | <unknown> | unknown | 16 | 14 | 88% | N/A | N/A | 0 | 0 | 0 |
-| `glm-5.3` | imboard-ai/imboard-monorepo | <unknown> | unknown | 26 | 23 | 88% | N/A | N/A | 0 | 0 | 0 |
-| `glm-5.3` | imboard-ai/imboard-monorepo | mechanical | opencode | 2 | 2 | 100% | N/A | N/A | 1 | 4 | 0 |
-| `glm-5.3` | imboard-ai/imboard-monorepo | strong | opencode | 1 | 0 | 0% | N/A | N/A | 0 | 2 | 0 |
-| `gpt-5.6-luna` | imboard-ai/imboard-monorepo | <unknown> | unknown | 5 | 4 | 80% | N/A | N/A | 0 | 0 | 0 |
-| `gpt-5.6-terra` | imboard-ai/imboard-monorepo | <unknown> | unknown | 4 | 2 | 50% | N/A | N/A | 0 | 0 | 0 |
-| `kimi-k3` | imboard-ai/imboard-monorepo | <unknown> | unknown | 1 | 0 | 0% | N/A | N/A | 0 | 0 | 0 |
-| `kimi-k3-fast` | imboard-ai/imboard-monorepo | <unknown> | unknown | 9 | 8 | 89% | N/A | N/A | 0 | 0 | 0 |
-| `kimi-latest` | imboard-ai/imboard-monorepo | mechanical | opencode | 1 | 1 | 100% | N/A | N/A | 0 | 0 | 0 |
+| Model | Repo | Tier | Agent CLI | n | Delivered | Delivery rate | AC met | Cost/delivered | Median API-min | Median wall-clock-min | Review fixed/issue | Stalls | Escalations | Unverified exits |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `<unknown>` | imboard-ai/ai-dossier | <unknown> | unknown | 8 | 0 | 0% | N/A | N/A | N/A | N/A | N/A | 0 | 0 | 0 |
+| `<unknown>` | imboard-ai/imboard-monorepo | <unknown> | unknown | 13 | 1 | 8% | 100% (n=1) | N/A | N/A | 118.2 | 1.0 (n=1) | 0 | 0 | 0 |
+| `claude-opus-5` | imboard-ai/ai-dossier | <unknown> | unknown | 1 | 1 | 100% | 100% (n=1) | N/A | N/A | 48.6 | 27.0 (n=1) | 0 | 0 | 0 |
+| `claude-opus-5` | imboard-ai/ai-dossier | strong | claude | 1 | 1 | 100% | 100% (n=1) | N/A | N/A | 68.6 | 31.0 (n=1) | 0 | 0 | 0 |
+| `claude-opus-5` | imboard-ai/imboard-monorepo | <unknown> | unknown | 25 | 25 | 100% | 100% (n=17) | N/A | N/A | 128.2 | 17.1 (n=25) | 0 | 0 | 0 |
+| `claude-opus-5[1m]` | imboard-ai/imboard-monorepo | <unknown> | unknown | 1 | 1 | 100% | N/A | N/A | N/A | 106.3 | 22.0 (n=1) | 0 | 0 | 0 |
+| `claude-sonnet-5` | imboard-ai/ai-dossier | <unknown> | unknown | 1 | 1 | 100% | N/A | N/A | N/A | 29.1 | 8.0 (n=1) | 0 | 0 | 0 |
+| `claude-sonnet-5` | imboard-ai/ai-dossier | mechanical | claude | 1 | 1 | 100% | 100% (n=1) | $4.793 (n=1) | 20.0 | 19.7 | 2.0 (n=1) | 0 | 0 | 0 |
+| `claude-sonnet-5` | imboard-ai/ai-dossier | mid | claude | 30 | 27 | 90% | 97% (n=29) | $23.298 (n=5) | 48.0 | 48.7 | 13.0 (n=30) | 0 | 0 | 0 |
+| `claude-sonnet-5` | imboard-ai/ai-dossier | strong | claude | 7 | 6 | 86% | 62% (n=5) | $25.060 (n=3) | 82.0 | 65.9 | 20.5 (n=6) | 0 | 7 | 4 |
+| `claude-sonnet-5` | imboard-ai/imboard-monorepo | <unknown> | unknown | 22 | 20 | 91% | 98% (n=21) | N/A | N/A | 188.9 | 9.2 (n=22) | 0 | 0 | 0 |
+| `claude-sonnet-5` | imboard-ai/imboard-monorepo | mechanical | claude,opencode | 9 | 8 | 89% | 94% (n=9) | $6.745 (n=3) | 41.0 | 283.9 | 13.4 (n=9) | 0 | 9 | 0 |
+| `claude-sonnet-5` | imboard-ai/imboard-monorepo | mid | claude | 1 | 0 | 0% | 100% (n=1) | N/A | N/A | N/A | 3.0 (n=1) | 0 | 1 | 0 |
+| `claude-sonnet-5` | imboard-ai/imboard-monorepo | strong | claude | 2 | 0 | 0% | 100% (n=1) | N/A | N/A | N/A | 12.0 (n=2) | 0 | 2 | 1 |
+| `glm-5.3` | imboard-ai/ai-dossier | <unknown> | unknown | 16 | 14 | 88% | 100% (n=15) | N/A | N/A | 67.1 | 15.7 (n=16) | 0 | 0 | 0 |
+| `glm-5.3` | imboard-ai/imboard-monorepo | <unknown> | unknown | 26 | 23 | 88% | 98% (n=22) | N/A | N/A | 152.8 | 8.9 (n=24) | 0 | 0 | 0 |
+| `glm-5.3` | imboard-ai/imboard-monorepo | mechanical | opencode | 2 | 2 | 100% | 100% (n=2) | N/A | N/A | 337.0 | 9.5 (n=2) | 1 | 4 | 0 |
+| `glm-5.3` | imboard-ai/imboard-monorepo | strong | opencode | 1 | 0 | 0% | N/A | N/A | N/A | N/A | N/A | 0 | 2 | 0 |
+| `gpt-5.6-luna` | imboard-ai/imboard-monorepo | <unknown> | unknown | 5 | 4 | 80% | 100% (n=3) | N/A | N/A | 255.3 | 1.5 (n=4) | 0 | 0 | 0 |
+| `gpt-5.6-terra` | imboard-ai/imboard-monorepo | <unknown> | unknown | 4 | 2 | 50% | N/A | N/A | N/A | 119.3 | 0.5 (n=2) | 0 | 0 | 0 |
+| `kimi-k3` | imboard-ai/imboard-monorepo | <unknown> | unknown | 1 | 0 | 0% | N/A | N/A | N/A | N/A | N/A | 0 | 0 | 0 |
+| `kimi-k3-fast` | imboard-ai/imboard-monorepo | <unknown> | unknown | 9 | 8 | 89% | 97% (n=9) | N/A | N/A | 353.7 | 4.8 (n=9) | 0 | 0 | 0 |
+| `kimi-latest` | imboard-ai/imboard-monorepo | mechanical | opencode | 1 | 1 | 100% | 100% (n=1) | N/A | N/A | 527.1 | 15.0 (n=1) | 0 | 0 | 0 |
 
 ## Totals per model (all repos/tiers)
 
@@ -43,34 +43,55 @@ One row per model, with the gateways it was served through as `↳` sub-rows whe
 there is more than one — the fold that makes the model row readable would otherwise
 hide a gateway costing more or delivering less than the same weights elsewhere.
 
-| Model | Provider | Agent CLI | n | Delivered | Delivery rate | Cost/delivered | Billable tokens/delivered | Median API-min | Stalls | Escalations | Unverified exits |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| `<unknown>` | direct | unknown | 21 | 1 | 5% | N/A | N/A | N/A | 0 | 0 | 0 |
-| `claude-opus-5` | direct | claude | 27 | 27 | 100% | N/A | N/A | N/A | 0 | 0 | 0 |
-| `claude-opus-5[1m]` | direct | unknown | 1 | 1 | 100% | N/A | N/A | N/A | 0 | 0 | 0 |
-| `claude-sonnet-5` | direct | claude,opencode | 73 | 63 | 86% | $18.058 (n=12) | 159,278 | 48.0 | 0 | 19 | 5 |
-| `glm-5.3` | 4 providers ↓ | opencode | 45 | 39 | 87% | N/A | N/A | N/A | 1 | 6 | 0 |
-| ↳ | direct | unknown | 33 | 29 | 88% | N/A | N/A | N/A | 0 | 0 | 0 |
-| ↳ | llmgateway | unknown | 8 | 7 | 88% | N/A | N/A | N/A | 0 | 0 | 0 |
-| ↳ | z-ai | opencode | 3 | 2 | 67% | N/A | N/A | N/A | 1 | 6 | 0 |
-| ↳ | zai-coding-plan | unknown | 1 | 1 | 100% | N/A | N/A | N/A | 0 | 0 | 0 |
-| `gpt-5.6-luna` | 2 providers ↓ | unknown | 5 | 4 | 80% | N/A | N/A | N/A | 0 | 0 | 0 |
-| ↳ | direct | unknown | 2 | 2 | 100% | N/A | N/A | N/A | 0 | 0 | 0 |
-| ↳ | openai | unknown | 3 | 2 | 67% | N/A | N/A | N/A | 0 | 0 | 0 |
-| `gpt-5.6-terra` | 2 providers ↓ | unknown | 4 | 2 | 50% | N/A | N/A | N/A | 0 | 0 | 0 |
-| ↳ | llmgateway | unknown | 3 | 2 | 67% | N/A | N/A | N/A | 0 | 0 | 0 |
-| ↳ | openai | unknown | 1 | 0 | 0% | N/A | N/A | N/A | 0 | 0 | 0 |
-| `kimi-k3` | direct | unknown | 1 | 0 | 0% | N/A | N/A | N/A | 0 | 0 | 0 |
-| `kimi-k3-fast` | direct | unknown | 9 | 8 | 89% | N/A | N/A | N/A | 0 | 0 | 0 |
-| `kimi-latest` | openrouter | opencode | 1 | 1 | 100% | N/A | N/A | N/A | 0 | 0 | 0 |
-| **TOTAL** | — | claude,opencode | 187 | 146 | 78% | $18.058 (n=12) | 159,278 | 48.0 | 1 | 25 | 5 |
+| Model | Provider | Agent CLI | n | Delivered | Delivery rate | Δ vs prev | AC met | Cost/delivered | Billable tokens/delivered | Median API-min | Median wall-clock-min | Review fixed/issue | Stalls | Escalations | Unverified exits |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `<unknown>` | direct | unknown | 21 | 1 | 5% | — | 100% (n=1) | N/A | N/A | N/A | 118.2 | 1.0 (n=1) | 0 | 0 | 0 |
+| `claude-opus-5` | direct | claude | 27 | 27 | 100% | — | 100% (n=19) | N/A | N/A | N/A | 123.5 | 18.0 (n=27) | 0 | 0 | 0 |
+| `claude-opus-5[1m]` | direct | unknown | 1 | 1 | 100% | — | N/A | N/A | N/A | N/A | 106.3 | 22.0 (n=1) | 0 | 0 | 0 |
+| `claude-sonnet-5` | direct | claude,opencode | 73 | 63 | 86% | — | 94% (n=67) | $18.058 (n=12) | 159,278 (n=12) | 48.0 | 72.9 | 12.1 (n=72) | 0 | 19 | 5 |
+| `glm-5.3` | 4 providers ↓ | opencode | 45 | 39 | 87% | — | 99% (n=39) | N/A | N/A | N/A | 139.3 | 11.5 (n=42) | 1 | 6 | 0 |
+| ↳ | direct | unknown | 33 | 29 | 88% | — | 99% (n=30) | N/A | N/A | N/A | 139.3 | 11.8 (n=31) | 0 | 0 | 0 |
+| ↳ | llmgateway | unknown | 8 | 7 | 88% | — | 100% (n=7) | N/A | N/A | N/A | 103.4 | 12.1 (n=8) | 0 | 0 | 0 |
+| ↳ | z-ai | opencode | 3 | 2 | 67% | — | 100% (n=2) | N/A | N/A | N/A | 337.0 | 9.5 (n=2) | 1 | 6 | 0 |
+| ↳ | zai-coding-plan | unknown | 1 | 1 | 100% | — | N/A | N/A | N/A | N/A | 139.3 | 2.0 (n=1) | 0 | 0 | 0 |
+| `gpt-5.6-luna` | 2 providers ↓ | unknown | 5 | 4 | 80% | — | 100% (n=3) | N/A | N/A | N/A | 255.3 | 1.5 (n=4) | 0 | 0 | 0 |
+| ↳ | direct | unknown | 2 | 2 | 100% | — | 100% (n=2) | N/A | N/A | N/A | 364.6 | 1.0 (n=2) | 0 | 0 | 0 |
+| ↳ | openai | unknown | 3 | 2 | 67% | — | 100% (n=1) | N/A | N/A | N/A | 165.0 | 2.0 (n=2) | 0 | 0 | 0 |
+| `gpt-5.6-terra` | 2 providers ↓ | unknown | 4 | 2 | 50% | — | N/A | N/A | N/A | N/A | 119.3 | 0.5 (n=2) | 0 | 0 | 0 |
+| ↳ | llmgateway | unknown | 3 | 2 | 67% | — | N/A | N/A | N/A | N/A | 119.3 | 0.5 (n=2) | 0 | 0 | 0 |
+| ↳ | openai | unknown | 1 | 0 | 0% | — | N/A | N/A | N/A | N/A | N/A | N/A | 0 | 0 | 0 |
+| `kimi-k3` | direct | unknown | 1 | 0 | 0% | — | N/A | N/A | N/A | N/A | N/A | N/A | 0 | 0 | 0 |
+| `kimi-k3-fast` | direct | unknown | 9 | 8 | 89% | — | 97% (n=9) | N/A | N/A | N/A | 353.7 | 4.8 (n=9) | 0 | 0 | 0 |
+| `kimi-latest` | openrouter | opencode | 1 | 1 | 100% | — | 100% (n=1) | N/A | N/A | N/A | 527.1 | 15.0 (n=1) | 0 | 0 | 0 |
+| **TOTAL** | — | claude,opencode | 187 | 146 | 78% | — | 97% (n=139) | $18.058 (n=12) | 159,278 (n=12) | 48.0 | 103.9 | 12.1 (n=159) | 1 | 25 | 5 |
+
+## Wall-clock per phase (all models)
+
+Median seconds between a phase's milestone and the previous one, from the trails' own
+`at=` stamps. Cost has no per-phase equivalent — a dispatch bills one agent session
+that usually spans several phases (see Limitations).
+
+| Phase | n | Median |
+|---|---|---|
+| gate | 54 | 32.5m |
+| batch-validate | 3 | 28.0m |
+| review | 160 | 24.4m |
+| implement | 159 | 20.3m |
+| merge-wait | 113 | 13.7m |
+| plan | 165 | 5.7m |
+| setup | 164 | 2.7m |
+| ship | 156 | 2.5m |
+| report | 130 | 53s |
 
 ## Reconciliation
 
-This is a regenerated snapshot, not the first one — see git history for
-`docs/reports/model-scorecard.md` for prior windows. The first-snapshot
-reconciliation against `batch-pilot-2-execution.md` §13.3 and
-`model-agnostic-fleet.md` ran once, at #566.
+First snapshot (#566) spot-checked against `docs/reports/batch-pilot-2-execution.md`
+§13.3: issue #540 ($4.173) and #542 ($5.937) — both recovered from the same
+`~/.dossier/runs.jsonl` this script reads, via the now-fixed `ai-dossier sched stats`
+(#564/#573) — matched to the cent. Delivery rates in this window are broadly in line
+with `docs/reports/model-agnostic-fleet.md`'s retrospective figures (glm-5.3 and
+claude-sonnet-5 both ~86-88%), though the two reports use different windows and are
+not expected to match exactly.
 
 ## Limitations
 
@@ -84,11 +105,16 @@ reconciliation against `batch-pilot-2-execution.md` §13.3 and
   (`kimi-latest`, which has both `kimi-k3` and `kimi-k3-fast` as plausible pins) keep
   their own row and are named in Data warnings — a guessed alias misattributes cost
   and quality silently, a missing one only splits a row.
+- **A context-window variant keeps its own row.** `claude-opus-5[1m]` does not fold
+  into `claude-opus-5`: the milestone protocol says the suffix should never have been
+  written (`gate` records the bare model id), but 1M-context is billed differently, so
+  folding it would blend two cost profiles to fix a formatting slip. Read the two rows
+  together when judging quality, separately when judging cost.
 - **Cost per phase is not separable.** A dispatch is usually one continuous agent
   session covering several phases, so `runs.jsonl` records cost per issue, not per
-  phase. Wall-clock per phase exists (via `ai-dossier runstate stats`) but is not
-  joined here to keep this table to one row per bucket; run that command directly
-  for a phase breakdown.
+  phase — so the per-phase section above reports wall-clock only. For a per-phase
+  breakdown of a single run rather than a median across many, run
+  `ai-dossier runstate stats` directly.
 - **Stall/escalation/unverified-exit counts are a per-host gap.** They come from
   `~/.dossier/sched/<project>/events.jsonl`, which only exists on the machine that
   ran the dispatch. A run dispatched from another host reports 0 for these columns

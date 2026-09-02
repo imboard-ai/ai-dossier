@@ -9,6 +9,7 @@ import {
   MAX_NAMED_ALIASES,
   MERGE_WAIT_PHASE,
   MODEL_ALIASES,
+  MODEL_ROUTING_PREFIXES,
   type ModelAggregate,
   median,
   modelNote,
@@ -837,6 +838,48 @@ describe('canonicalModel — declared moving tags fold onto their pin (#566 AC2)
     for (const [tag, pin] of Object.entries(MODEL_ALIASES)) {
       expect(canonicalModel(tag)).toBe(pin);
       expect(canonicalModel(pin)).toBe(pin);
+    }
+  });
+
+  it('does not resolve an inherited Object key through the alias table', () => {
+    // `model=` is read off a public issue comment. A bare `MODEL_ALIASES[value]` returned
+    // `Object`'s own members for these ids -- and `??` does not treat a function as absent
+    // -- so `canonicalModel` returned a non-string and every caller that used a string
+    // method on it crashed, taking the whole stats report down with it.
+    for (const key of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      expect(canonicalModel(key)).toBe(key.toLowerCase());
+      expect(typeof canonicalModel(key)).toBe('string');
+    }
+  });
+
+  it('survives a forged model= end to end rather than throwing', () => {
+    const trail: IssueTrail = {
+      issue: 1,
+      milestones: parseMilestones([
+        `${RUNSTATE_MARKER}\nphase=gate status=done run=r-1-aaaa at=2026-08-26T00:00:00Z model=constructor next=setup`,
+        `${RUNSTATE_MARKER}\nphase=ship status=done run=r-1-aaaa at=2026-08-26T02:00:00Z next=report`,
+      ]),
+    };
+    const report = buildStatsReport({ trails: [trail], repo: 'o/r' });
+    expect(report.aggregates.models.map((m) => m.model)).toContain('constructor');
+  });
+});
+
+describe('MODEL_ROUTING_PREFIXES — ordering invariant', () => {
+  it('never lists a prefix after one that is a prefix of it', () => {
+    // `stripRoutingPrefix` takes the FIRST match, so a shorter entry listed ahead of a
+    // longer one that starts with it peels the short form and mangles the id
+    // (`zai-` off `zai-coding-plan/glm-5.3` leaves `coding-plan/glm-5.3`, which folds with
+    // nothing). Asserted rather than left to the comment, since the list is hand-edited.
+    for (let i = 0; i < MODEL_ROUTING_PREFIXES.length; i++) {
+      for (let j = i + 1; j < MODEL_ROUTING_PREFIXES.length; j++) {
+        const earlier = MODEL_ROUTING_PREFIXES[i];
+        const later = MODEL_ROUTING_PREFIXES[j];
+        expect(
+          later.startsWith(earlier),
+          `'${earlier}' is listed before '${later}', which it would shadow`
+        ).toBe(false);
+      }
     }
   });
 });
