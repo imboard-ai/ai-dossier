@@ -5,11 +5,12 @@ import { describe, expect, it } from 'vitest';
 
 const SCRIPT_PATH = fileURLToPath(new URL('./fmt_events.py', import.meta.url));
 
+function runRaw(input) {
+  return execFileSync('python3', [SCRIPT_PATH], { input, encoding: 'utf8' });
+}
+
 function run(lines) {
-  return execFileSync('python3', [SCRIPT_PATH], {
-    input: lines.map((l) => JSON.stringify(l)).join('\n'),
-    encoding: 'utf8',
-  });
+  return runRaw(lines.map((l) => JSON.stringify(l)).join('\n'));
 }
 
 describe('fmt_events.py', () => {
@@ -34,10 +35,7 @@ describe('fmt_events.py', () => {
   });
 
   it('skips unparseable lines without crashing', () => {
-    const out = execFileSync('python3', [SCRIPT_PATH], {
-      input: 'not json\n' + JSON.stringify({ event: 'stalled', issue: 9 }),
-      encoding: 'utf8',
-    });
+    const out = runRaw(`not json\n${JSON.stringify({ event: 'stalled', issue: 9 })}`);
     expect(out.trim()).toBe('stalled #9');
   });
 

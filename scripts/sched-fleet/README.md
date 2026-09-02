@@ -30,16 +30,17 @@ per deployment, not something to run as-is against your own issues.
 | `tick.sh` | Cron job, every 2 min: ticks every project in `projects.txt` once, Telegram-reports new scheduler events, watches `issues.txt` for closures, arms the 7-day report hook, self-upgrades the CLI when idle, self-removes its own cron line once every tracked issue is closed |
 | `bootstrap.sh` | One-shot: fires at a weekly reset, writes a sched `config.json`, enqueues a fixed dependency chain of issues, arms `tick.sh`'s cron line. **hcc2-specific — edit before reuse.** |
 | `enqueue-report.sh` | Dated one-shot, installed by `tick.sh`: fires once 7 days after a tracked issue closes, enqueues the follow-up report issue, then removes its own cron line |
-| `fmt_events.py` | Reads scheduler `events.jsonl` lines from stdin, filters to the reportable event types, formats up to 8 lines for a Telegram message |
-| `allow-sched.py` | One-off fixer for `~/.claude/settings.json` — normalizes malformed `Bash(ai-dossier sched ...)` permission rules |
-| `projects.txt.example` | Template: one sched project slug per line |
-| `issues.txt.example` | Template: one `owner/repo#N` issue ref per line |
-| `telegram.env.example` | Template: the two env vars every script `source`s for Telegram reporting |
+| `fmt_events.py` | Reads scheduler `events.jsonl` lines from stdin, filters to the reportable event types, formats up to 8 lines for a Telegram message. Invoked as `python3 fmt_events.py` (no shebang, not directly executable — matches the hcc2 source file exactly) |
+| `allow-sched.py` | One-off fixer for `~/.claude/settings.json` — normalizes malformed `Bash(ai-dossier sched ...)` permission rules. Run it as `python3 allow-sched.py` (no shebang, not directly executable — matches the hcc2 source file exactly) |
+| `projects.txt.example` | Template: one sched project slug per line, no comments (see Known Limitations — the real `tick.sh` loop is not comment-tolerant) |
+| `issues.txt.example` | Template: one `owner/repo#N` issue ref per line, no comments (see Known Limitations) |
+| `telegram.env.example` | Template: the two env vars `tick.sh`, `bootstrap.sh`, and `enqueue-report.sh` `source` for Telegram reporting |
 
 ## Setup
 
 ```bash
-# From wherever you want the fleet to live, e.g. ~/.dossier/sched-fleet/
+# From wherever you want the fleet to live — the hcc2 reference install uses
+# ~/.dossier/reset-fleet/; pick any directory, e.g. ~/.dossier/sched-fleet/
 cp scripts/sched-fleet/{tick.sh,bootstrap.sh,enqueue-report.sh,fmt_events.py,allow-sched.py} .
 cp scripts/sched-fleet/projects.txt.example projects.txt      # edit to your projects
 cp scripts/sched-fleet/issues.txt.example issues.txt          # edit to your tracked issues
@@ -64,9 +65,12 @@ The hcc2 reference install runs:
 0 4 1 9 *  /path/to/bootstrap.sh >> /path/to/bootstrap.log 2>&1
 ```
 
-(fires once at a specific weekly Claude-usage reset — adjust the schedule to your own
-reset cadence). `bootstrap.sh` then arms `tick.sh`'s own cron line
-(`*/2 * * * * .../tick.sh`) itself; you never install that one by hand.
+`0 4 1 9 *` is standard 5-field cron (`minute hour day-of-month month day-of-week`) —
+this fires once a year, at 04:00 on September 1, not weekly. It's timed to hcc2's
+specific annual Claude-usage reset date; adjust both the date and cadence to your own
+reset schedule (a genuinely weekly reset would use something like `0 4 * * 1`).
+`bootstrap.sh` then arms `tick.sh`'s own cron line (`*/2 * * * * .../tick.sh`) itself;
+you never install that one by hand.
 
 ### The `crontab -l` / empty-crontab trap
 
@@ -89,10 +93,12 @@ message per project with new events.
 
 ## Telegram reporting
 
-Every script sources `telegram.env` for `HANEST_TELEGRAM_BOT_TOKEN` and
-`HANEST_TELEGRAM_CHAT_ID`, and calls a local `TG()` helper that POSTs to the Telegram
-Bot API `sendMessage` endpoint. Failures are swallowed (`>/dev/null 2>&1`) — Telegram
-reporting is best-effort, never a gate on the pipeline itself.
+`tick.sh`, `bootstrap.sh`, and `enqueue-report.sh` (not `fmt_events.py` or
+`allow-sched.py` — neither touches Telegram) source `telegram.env` for
+`HANEST_TELEGRAM_BOT_TOKEN` and `HANEST_TELEGRAM_CHAT_ID`, and call a local `TG()`
+helper that POSTs to the Telegram Bot API `sendMessage` endpoint. Failures are
+swallowed (`>/dev/null 2>&1`) — Telegram reporting is best-effort, never a gate on the
+pipeline itself.
 
 ## 7-day report scheduling hook
 
@@ -107,7 +113,71 @@ their first action, so a delayed re-run (e.g. after a reboot) can't double-fire.
 
 Step 0 of every `tick.sh` run compares `npm view @ai-dossier/cli version` against the
 installed `ai-dossier --version` and upgrades in place when npm has a strictly newer
-release — but only opportunistically, on a normal tick, never mid-dispatch.
+release. This runs **unconditionally at the top of every tick** — the script has no
+check for whether a unit dispatched by a previous tick is still running in the
+background (see Known Limitations).
+
+## Logs
+
+| File | Written by | Contents |
+|---|---|---|
+| `<D>/tick.log` | `tick.sh`'s own cron redirect (installed by `bootstrap.sh`) | `tick.sh`'s stdout/stderr each run |
+| `<D>/engine-<slug>.log` | `ai-dossier sched start --once` per project (`tick.sh`) | scheduler engine output for that project |
+| `<D>/enqueue.log` | `bootstrap.sh`'s `Q()` helper | output of each `ai-dossier sched enqueue` call |
+| `<D>/enqueue-report.log` | `enqueue-report.sh`'s cron redirect (installed by `tick.sh`) | `enqueue-report.sh`'s stdout/stderr |
+| `<D>/bootstrap.log` | `bootstrap.sh`'s own cron redirect (user-installed) | `bootstrap.sh`'s stdout/stderr |
+
+## Known Limitations
+
+These scripts are committed **verbatim** from the live hcc2 deployment (AC1 for this
+change) — only the `D=` path-resolution line was generalized. The items below are real,
+pre-existing behaviors of the running hcc2 pipeline, disclosed here rather than fixed in
+the committed copy, so this versioning change carries zero behavior change for hcc2 (AC3)
+and the committed scripts stay an honest reference of what's actually deployed. Fix them
+in a follow-up change if/when this is promoted beyond a single-operator reference install.
+
+- **`issues.txt`/`projects.txt` loops are not comment-tolerant.** `tick.sh`'s issue-closure
+  loop (`for REF in $(cat "$D/issues.txt")`) and its project loop both word-split on
+  whitespace with no blank/comment-line handling. The `.example` files in this repo are
+  deliberately plain data (no `#` comment lines) so copying them verbatim into
+  `issues.txt`/`projects.txt` is safe — do not add comment lines to the real data files.
+- **Telegram credentials are visible in the process list.** `TG()` passes the bot token
+  (in the URL) and chat ID (in a `-d` argument) as literal `curl` argv, visible to any
+  other local account via `ps`/`/proc/<pid>/cmdline` for the life of the request. Low risk
+  on a single-user host; harden with `curl -K -` (config-from-stdin) before reusing this
+  on a shared host.
+- **Self-removal `crontab -l | grep -v ... | crontab -` pipelines have no fallback.**
+  (`bootstrap.sh`, `tick.sh`, `enqueue-report.sh`, each removing their own cron line as a
+  first/last action.) If `crontab -l` fails transiently (not just "no crontab exists" —
+  the case the `2>/dev/null` already handles safely), the empty result still gets piped
+  into `crontab -`, installing an empty crontab and silently dropping every other cron job
+  on the host. This is the same class of incident as `docs/agent-traps.md`'s `no crontab
+  for` row, one step further than that row's already-fixed case.
+- **`tick.sh`'s self-upgrade duplicates the CLI's own `--auto-upgrade` flag** (see
+  `cli/src/engine-version.ts`/`cli/src/commands/sched.ts`), which additionally gates on no
+  unit being mid-dispatch — a check this hand-rolled version's own comment claims but does
+  not actually implement. A future non-verbatim revision should delegate to
+  `ai-dossier sched start --once --project "$P" --auto-upgrade` instead.
+- **Silent failure paths**: an unmapped `projects.txt` slug in `repo_dir()` returns empty
+  and `cd ""` succeeds (bash quirk), so the tick silently runs against whatever directory
+  the previous project left the shell in, not "skipped"; `gh issue view` failures
+  (auth/network) are indistinguishable from "issue still open"; the self-upgrade block and
+  the enqueue chains in `bootstrap.sh`/`enqueue-report.sh` report Telegram "success"
+  regardless of whether the underlying command actually succeeded. None of these have been
+  hit in the hcc2 pilot's actual run history, but they are real gaps in a script meant to
+  run unattended for weeks.
+
+## `package.json`'s `fleet:tick` script
+
+`npm run fleet:tick` runs `bash scripts/sched-fleet/tick.sh` directly from this repo
+checkout — **only useful once you've completed Setup above** (real `projects.txt`,
+`issues.txt`, `telegram.env` in place, `SCHED_FLEET_HOME` pointed at that directory if
+they don't sit next to the script). Run bare from a fresh checkout with no
+`SCHED_FLEET_HOME` and no example files copied into place, `tick.sh` degrades: the
+missing `issues.txt` makes the closure loop a no-op, so `ALLDONE` stays at its initial
+value of `1` and the script reaches its "pipeline complete" branch, which then touches
+`crontab` — do not run `npm run fleet:tick` against a real crontab you care about
+without configuring a real deployment directory first.
 
 ## No behaviour change for hcc2
 

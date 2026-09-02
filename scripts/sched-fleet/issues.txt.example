@@ -1,5 +1,2 @@
-# One repo-qualified issue ref per line: owner/repo#N
-# tick.sh watches each for closure, Telegram-reports it, and (for the ref hardcoded
-# in tick.sh's own 7-day-report hook) schedules the follow-up report enqueue.
 imboard-ai/ai-dossier#523
 imboard-ai/ai-dossier#524
