@@ -174,6 +174,7 @@ export function joinRepoRows({
   schedCost,
   dispatchInfo,
   canonicalModelFn,
+  providerOfFn,
 }) {
   const runsByIssue = new Map();
   for (const run of statsReport.runs) {
@@ -197,6 +198,7 @@ export function joinRepoRows({
       issue,
       model: run.model === null ? null : canonicalModelFn(run.model),
       rawModel: run.model,
+      provider: run.model === null ? null : providerOfFn(run.model),
       tier: dispatch.tier ?? cost?.tier ?? null,
       agentCli: dispatch.agentCli,
       delivered: isDelivered(run),
@@ -217,6 +219,13 @@ export function joinRepoRows({
 
 const UNKNOWN_MODEL_LABEL = '<unknown>';
 const UNKNOWN_TIER_LABEL = '<unknown>';
+
+/**
+ * The provider label for a model id that named no gateway — the run went straight to the
+ * vendor. Spelled as a word rather than left blank so a sub-row is never mistaken for a
+ * missing value.
+ */
+const DIRECT_PROVIDER_LABEL = 'direct';
 
 function median(values) {
   if (values.length === 0) return null;
@@ -266,6 +275,28 @@ function bucketFrom(rows) {
 }
 
 /**
+ * The gateways one model's runs were served through, each with its own rollup.
+ *
+ * Normalization folds `llmgateway/glm-5.3`, `zai-coding-plan/glm-5.3`, and
+ * `openrouter/~z-ai/glm-latest` into one `glm-5.3` row — which is what makes the row
+ * readable, and also what would erase the only signal that says whether a gateway is
+ * costing more or delivering less than the same weights served elsewhere. This puts that
+ * back underneath the row it was folded into (#566 AC2).
+ */
+function providerBreakdown(rows) {
+  const byProvider = new Map();
+  for (const row of rows) {
+    const provider = row.provider ?? DIRECT_PROVIDER_LABEL;
+    const list = byProvider.get(provider) ?? [];
+    list.push(row);
+    byProvider.set(provider, list);
+  }
+  return [...byProvider.entries()]
+    .map(([provider, list]) => ({ provider, ...bucketFrom(list) }))
+    .sort((a, b) => a.provider.localeCompare(b.provider));
+}
+
+/**
  * Group joined rows into per (model × repo × tier) buckets, per-model totals (all
  * repos/tiers folded), and a grand total — the "Per model × repo × tier (and totals)" AC.
  */
@@ -304,7 +335,7 @@ export function aggregateScorecard(rows, { windowStart, windowEnd, generatedAt }
     );
 
   const totals = [...byModel.entries()]
-    .map(([model, list]) => ({ model, ...bucketFrom(list) }))
+    .map(([model, list]) => ({ model, ...bucketFrom(list), providers: providerBreakdown(list) }))
     .sort((a, b) => a.model.localeCompare(b.model));
 
   const grandTotal = { model: 'TOTAL', ...bucketFrom(rows) };
@@ -350,6 +381,22 @@ function safeCell(value) {
   return clean.length > MAX_CELL_LENGTH ? `${clean.slice(0, MAX_CELL_LENGTH)}…` : clean;
 }
 
+/** The metric cells shared by a model row, a provider sub-row, and the grand total. */
+function totalCells(bucket) {
+  return [
+    bucket.agentClis.length ? safeCell(bucket.agentClis.join(',')) : 'unknown',
+    bucket.n,
+    bucket.delivered,
+    fmtPct(bucket.deliveryRate),
+    fmtUsd(bucket.costPerDeliveredUsd, bucket.costSamples),
+    fmtTokens(bucket.billableTokensPerDeliveredIssue),
+    fmtMin(bucket.medianApiMinutes),
+    bucket.stalls,
+    bucket.escalations,
+    bucket.unverifiedExits,
+  ].join(' | ');
+}
+
 export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
   const lines = [
     '# Model Scorecard',
@@ -378,18 +425,26 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     '',
     '## Totals per model (all repos/tiers)',
     '',
-    '| Model | Agent CLI | n | Delivered | Delivery rate | Cost/delivered | Billable tokens/delivered | Median API-min | Stalls | Escalations | Unverified exits |',
-    '|---|---|---|---|---|---|---|---|---|---|---|'
+    'One row per model, with the gateways it was served through as `↳` sub-rows whenever',
+    'there is more than one — the fold that makes the model row readable would otherwise',
+    'hide a gateway costing more or delivering less than the same weights elsewhere.',
+    '',
+    '| Model | Provider | Agent CLI | n | Delivered | Delivery rate | Cost/delivered | Billable tokens/delivered | Median API-min | Stalls | Escalations | Unverified exits |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|'
   );
   for (const t of scorecard.totals) {
-    lines.push(
-      `| \`${safeCell(t.model)}\` | ${t.agentClis.length ? safeCell(t.agentClis.join(',')) : 'unknown'} | ${t.n} | ${t.delivered} | ${fmtPct(t.deliveryRate)} | ${fmtUsd(t.costPerDeliveredUsd, t.costSamples)} | ${fmtTokens(t.billableTokensPerDeliveredIssue)} | ${fmtMin(t.medianApiMinutes)} | ${t.stalls} | ${t.escalations} | ${t.unverifiedExits} |`
-    );
+    const providers = t.providers ?? [];
+    const providerCell =
+      providers.length === 1 ? safeCell(providers[0].provider) : `${providers.length} providers ↓`;
+    lines.push(`| \`${safeCell(t.model)}\` | ${providerCell} | ${totalCells(t)} |`);
+    if (providers.length > 1) {
+      for (const provider of providers) {
+        lines.push(`| ↳ | ${safeCell(provider.provider)} | ${totalCells(provider)} |`);
+      }
+    }
   }
   const g = scorecard.grandTotal;
-  lines.push(
-    `| **TOTAL** | ${g.agentClis.length ? safeCell(g.agentClis.join(',')) : 'unknown'} | ${g.n} | ${g.delivered} | ${fmtPct(g.deliveryRate)} | ${fmtUsd(g.costPerDeliveredUsd, g.costSamples)} | ${fmtTokens(g.billableTokensPerDeliveredIssue)} | ${fmtMin(g.medianApiMinutes)} | ${g.stalls} | ${g.escalations} | ${g.unverifiedExits} |`
-  );
+  lines.push(`| **TOTAL** | — | ${totalCells(g)} |`);
 
   lines.push('', '## Reconciliation', '');
   if (isFirstSnapshot) {
@@ -414,13 +469,16 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     '',
     '## Limitations',
     '',
-    '- **A moving version tag (e.g. `glm-latest`) is never folded into a pinned version',
-    '  (e.g. `glm-5.3`), even when they are currently the same weights.** Routing-prefix',
-    '  and opencode `~`-alias folding both work (see Data warnings below for what *did*',
-    '  fold); collapsing a `-latest` tag into a specific pin is a claim about the',
-    "  provider's current state that this script has no way to verify and that goes stale",
-    '  the moment the provider ships a new version under the same tag — decision-pending,',
-    '  see #566.',
+    '- **A moving version tag folds onto its pin only where someone declared the mapping.**',
+    '  `glm-latest → glm-5.3` is declared (`MODEL_ALIASES` in `cli/src/runstate-stats.ts`,',
+    '  the mapping #566 states) and folds, along with every routed spelling of it. Which',
+    "  pin a `-latest` tag points at is a fact about the provider's state, not about the",
+    '  string, so it cannot be derived here and it goes stale the moment the provider ships',
+    '  a new version under the same tag — when that happens, update the value in',
+    '  `MODEL_ALIASES` rather than reading the row as one version. Undeclared tags',
+    '  (`kimi-latest`, which has both `kimi-k3` and `kimi-k3-fast` as plausible pins) keep',
+    '  their own row and are named in Data warnings — a guessed alias misattributes cost',
+    '  and quality silently, a missing one only splits a row.',
     '- **Cost per phase is not separable.** A dispatch is usually one continuous agent',
     '  session covering several phases, so `runs.jsonl` records cost per issue, not per',
     '  phase. Wall-clock per phase exists (via `ai-dossier runstate stats`) but is not',
@@ -618,9 +676,11 @@ export function main({
   const end = now.toISOString().slice(0, 10);
 
   const { parseMilestones } = loadCliDist(repoRoot, 'runstate.js');
-  const { canonicalModel, buildStatsReport } = loadCliDist(repoRoot, 'runstate-stats.js');
+  const { canonicalModel, buildStatsReport, providerOf } = loadCliDist(
+    repoRoot,
+    'runstate-stats.js'
+  );
   const { buildSchedCostReport } = loadCliDist(repoRoot, 'sched-run-stats.js');
-  const normalizeModel = (raw) => canonicalModel(raw).replace(/^~+/, '');
 
   const allRows = [];
   const warnings = [];
@@ -669,7 +729,8 @@ export function main({
         statsReport,
         schedCost,
         dispatchInfo,
-        canonicalModelFn: normalizeModel,
+        canonicalModelFn: canonicalModel,
+        providerOfFn: providerOf,
       });
       allRows.push(...rows);
       anyRepoSucceeded = true;

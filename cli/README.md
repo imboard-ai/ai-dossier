@@ -830,10 +830,30 @@ prefix (`llmgateway`, `openrouter`, `moonshotai`, `anthropic`, `alibaba`, `googl
 `openai`, `z-ai`, `zai`) joined by `/`, or by `-` on an id with no `/` left. It is an
 allowlist, never a generic "drop the first segment": an unrecognised leading segment is
 always kept, because merging two genuinely different models is the one error this table
-cannot survive. Every fold is disclosed in the row's trailing note (`folded: …`), and the
-raw spellings stay available as `aliases` in `--json`. A gateway not on that list makes
-one model split into two buckets — `stats` warns when two bucket keys look like that,
-naming `MODEL_ROUTING_PREFIXES` as the place to extend.
+cannot survive. The list is ordered longest-prefix-first, so a shorter entry (`zai`)
+cannot shadow a longer one that starts with it (`zai-coding-plan`, OpenRouter's z.ai
+coding-plan slug). The `~` is dropped at *every* peel, not once at the front: opencode
+writes the marker on the segment it aliases, so `openrouter/~z-ai/glm-latest` carries it
+mid-id, and stripping only the front left `z-ai/` unmatched on the next pass. Every fold
+is disclosed in the row's trailing note (`folded: …`), and the raw spellings stay
+available as `aliases` in `--json`. A gateway not on that list makes one model split into
+two buckets — `stats` warns when two bucket keys look like that, naming
+`MODEL_ROUTING_PREFIXES` as the place to extend.
+
+A **moving version tag** (`glm-latest`) is the one split the strings cannot resolve: which
+pin it currently points at is a fact about the provider, not about the id. From 0.30.0
+those folds come from a declared, owner-maintained table, `MODEL_ALIASES`, applied after
+prefix peeling so every routed spelling of a tag folds with the bare one. It ships with
+the single mapping stated in #566 (`glm-latest → glm-5.3`); when z.ai ships a new pin under
+that tag, change the value there rather than reading one row as two versions. A tag nobody
+has declared keeps its own row and raises its own warning naming the split — a guessed
+alias misattributes cost and quality silently, a missing one only splits a row.
+
+Folding a model's spellings together also erases which gateway served each run, which is
+exactly the comparison a routing decision needs. `providerOf(raw)` (0.30.0) recovers it:
+the routing chain `canonicalModel` peeled, joined by `/` (`openrouter/~z-ai/glm-latest` →
+`openrouter/z-ai`), or `null` when the id named no gateway. `scripts/model-scorecard.mjs`
+renders it as `↳` sub-rows under any model row that folded more than one provider.
 
 Trails are imperfect in practice, and `stats` reports what it could not measure rather
 than guessing:

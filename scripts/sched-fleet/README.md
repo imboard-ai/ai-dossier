@@ -121,6 +121,12 @@ per-issue full-cycle pipeline `tick.sh` drives), so review and merge is manual.
 `npm run scorecard` regenerates the snapshot on demand, outside of cron, from any
 checkout with a built `cli/dist` (`make build-all`).
 
+The JSON sidecar it writes (`docs/reports/evidence/model-scorecard.json`) is
+`JSON.stringify(_, null, 2)` output, which Biome's formatter would reflow — so
+`biome.json` turns the formatter off for `docs/reports/evidence/**`. Without that, every
+weekly regeneration would open a PR that fails `make check` until a human ran
+`biome check --write` on generated data, which is a CI trap, not a review signal.
+
 ## 7-day report scheduling hook
 
 When `tick.sh` sees a specific tracked issue (hardcoded in the script — the pilot's

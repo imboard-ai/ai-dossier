@@ -138,6 +138,9 @@ const canonicalModelFn = (raw) =>
     .toLowerCase()
     .replace(/^llmgateway\//, '');
 
+const providerOfFn = (raw) =>
+  raw.trim().toLowerCase().startsWith('llmgateway/') ? 'llmgateway' : null;
+
 describe('joinRepoRows', () => {
   it('joins trail, cost, and dispatch data by issue, canonicalizing the model', () => {
     const trails = [
@@ -183,6 +186,7 @@ describe('joinRepoRows', () => {
       schedCost,
       dispatchInfo,
       canonicalModelFn,
+      providerOfFn,
     });
 
     expect(rows).toHaveLength(1);
@@ -213,6 +217,7 @@ describe('joinRepoRows', () => {
       schedCost,
       dispatchInfo: new Map(),
       canonicalModelFn,
+      providerOfFn,
     });
     expect(rows[0].tier).toBe('strong');
     expect(rows[0].costUsd).toBeNull();
@@ -237,6 +242,7 @@ describe('joinRepoRows', () => {
       schedCost,
       dispatchInfo: new Map(),
       canonicalModelFn,
+      providerOfFn,
     });
     expect(rows[0].reviewFixed).toBe(4);
     expect(rows[0].reviewEscalated).toBe(0);
@@ -387,6 +393,64 @@ describe('aggregateScorecard', () => {
     expect(sc.buckets[0].medianApiMinutes).toBeNull();
     expect(sc.buckets[0].deliveryRate).toBe(0);
   });
+
+  describe('provider sub-rows (#566 AC2)', () => {
+    const row = (over) => ({
+      repo: 'r1',
+      model: 'glm-5.3',
+      tier: 'mid',
+      provider: null,
+      delivered: true,
+      blocked: false,
+      costUsd: null,
+      inputTokens: null,
+      outputTokens: null,
+      apiMinutes: null,
+      stalls: 0,
+      escalations: 0,
+      unverifiedExits: 0,
+      reviewFixed: null,
+      reviewEscalated: null,
+      ...over,
+    });
+
+    it('splits a folded model row by the gateway that served each run', () => {
+      const sc = aggregateScorecard(
+        [
+          row({ provider: 'llmgateway', costUsd: 2 }),
+          row({ provider: 'llmgateway', costUsd: 4 }),
+          row({ provider: 'openrouter/z-ai', costUsd: 9 }),
+        ],
+        meta
+      );
+      // One model row -- the fold AC2 asks for -- with the providers still legible under it.
+      expect(sc.totals).toHaveLength(1);
+      expect(sc.totals[0].n).toBe(3);
+      expect(sc.totals[0].providers.map((p) => [p.provider, p.n, p.costPerDeliveredUsd])).toEqual([
+        ['llmgateway', 2, 3],
+        ['openrouter/z-ai', 1, 9],
+      ]);
+    });
+
+    it('labels a run whose model id named no gateway rather than leaving it blank', () => {
+      const sc = aggregateScorecard([row({ provider: null })], meta);
+      expect(sc.totals[0].providers.map((p) => p.provider)).toEqual(['direct']);
+    });
+
+    it("a provider's sub-row metrics sum back to the model row", () => {
+      const sc = aggregateScorecard(
+        [
+          row({ provider: 'llmgateway', delivered: true, stalls: 1 }),
+          row({ provider: 'openrouter', delivered: false, blocked: true, stalls: 2 }),
+        ],
+        meta
+      );
+      const providers = sc.totals[0].providers;
+      expect(providers.reduce((acc, p) => acc + p.n, 0)).toBe(sc.totals[0].n);
+      expect(providers.reduce((acc, p) => acc + p.delivered, 0)).toBe(sc.totals[0].delivered);
+      expect(providers.reduce((acc, p) => acc + p.stalls, 0)).toBe(sc.totals[0].stalls);
+    });
+  });
 });
 
 describe('renderMarkdown / renderJson', () => {
@@ -427,6 +491,64 @@ describe('renderMarkdown / renderJson', () => {
     const parsed = JSON.parse(json);
     expect(parsed.windowStart).toBe('2026-08-25');
     expect(parsed.totals[0].model).toBe('sonnet');
+  });
+
+  describe('provider sub-rows (#566 AC2)', () => {
+    const row = (provider, over = {}) => ({
+      repo: 'r1',
+      model: 'glm-5.3',
+      tier: 'mid',
+      provider,
+      delivered: true,
+      blocked: false,
+      costUsd: 3,
+      inputTokens: 10,
+      outputTokens: 20,
+      apiMinutes: 5,
+      stalls: 0,
+      escalations: 0,
+      unverifiedExits: 0,
+      reviewFixed: null,
+      reviewEscalated: null,
+      ...over,
+    });
+    const meta = {
+      windowStart: '2026-08-25',
+      windowEnd: '2026-09-02',
+      generatedAt: '2026-09-02T00:00:00Z',
+    };
+
+    it('names the single provider inline and emits no sub-row', () => {
+      const md = renderMarkdown(aggregateScorecard([row('llmgateway')], meta));
+      expect(md).toContain('| `glm-5.3` | llmgateway |');
+      expect(md).not.toContain('| ↳ |');
+    });
+
+    it('emits one sub-row per provider when a model row folded more than one', () => {
+      const md = renderMarkdown(
+        aggregateScorecard([row('llmgateway'), row('openrouter/z-ai')], meta)
+      );
+      expect(md).toContain('| `glm-5.3` | 2 providers ↓ |');
+      expect(md).toContain('| ↳ | llmgateway |');
+      expect(md).toContain('| ↳ | openrouter/z-ai |');
+    });
+
+    it('keeps the sub-rows in the JSON sidecar so #528 can cite them', () => {
+      const parsed = JSON.parse(
+        renderJson(aggregateScorecard([row('llmgateway'), row('openrouter/z-ai')], meta))
+      );
+      expect(parsed.totals[0].providers.map((p) => p.provider)).toEqual([
+        'llmgateway',
+        'openrouter/z-ai',
+      ]);
+    });
+
+    it('sanitizes a forged provider the same way as a forged model', () => {
+      const md = renderMarkdown(
+        aggregateScorecard([row('evil | 100% | $0.001'), row('llmgateway')], meta)
+      );
+      expect(md).toContain('| ↳ | evil \\| 100% \\| $0.001 |');
+    });
   });
 
   it('sanitizes a model/tier value that would otherwise break out of its table cell', () => {
@@ -693,9 +815,12 @@ describe('main (integration, fixture gh + fixture ~/.dossier)', () => {
       log: () => {},
     });
 
-    // canonicalModel alone leaves a stray leading '~' ('~z-ai/glm-latest'); main()'s
-    // normalizeModel wrapper strips it so the bucket key doesn't carry the alias marker.
-    expect(scorecard.totals[0].model).toBe('z-ai/glm-latest');
+    // AC2's own example, end to end: the mid-id `~` no longer blocks the second peel, and
+    // the declared `glm-latest -> glm-5.3` alias lands it on the pinned row -- while the
+    // gateway that served it survives the fold as the row's provider sub-row.
+    expect(scorecard.totals).toHaveLength(1);
+    expect(scorecard.totals[0].model).toBe('glm-5.3');
+    expect(scorecard.totals[0].providers.map((p) => p.provider)).toEqual(['openrouter/z-ai']);
   });
 
   it('continues with other repos when one gh call fails, and records a warning', () => {
