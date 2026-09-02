@@ -519,6 +519,12 @@ export interface SchedConfig {
    * The `--auto-upgrade` CLI flag overrides this when passed; default off.
    */
   auto_upgrade?: boolean;
+  /**
+   * Per-project override of the batch dissolve threshold (#563). Unset
+   * fields fall back to `DEFAULT_DISSOLVE_POLICY` at the point of use —
+   * never eagerly merged into config at load time.
+   */
+  dissolve_policy?: DissolvePolicy;
 }
 
 /**
@@ -695,9 +701,37 @@ export const DEFAULT_LABEL_POLL_INTERVAL_MS = 10 * 60 * 1000;
 
 /**
  * Fraction of a batch's members whose eviction dissolves it: STRICTLY more
- * than a third (RFC-0001 §F.8 "> ⅓ evicted → dissolve").
+ * than a third (RFC-0001 §F.8 "> ⅓ evicted → dissolve"). Kept as the default
+ * `DissolvePolicy.fraction` below — see that type for how it combines with
+ * `min_evictions_before_dissolve` into the actual threshold.
  */
 export const DISSOLVE_EVICTION_FRACTION = 1 / 3;
+
+/**
+ * Dissolve threshold policy (#563) — how many evictions a batch tolerates
+ * before it dissolves. The threshold is `max(ceil(N × fraction),
+ * min_evictions_before_dissolve)`; a batch dissolves once evictions exceed
+ * it. A raw `evicted > N × fraction` float comparison (the pre-#563
+ * behavior) rounds down for small N — at N=4 it dissolves on the 2nd
+ * eviction, the same as N=3, leaving one member's failure as the entire
+ * tolerance at the batch sizes the pilot actually uses. Taking `ceil` of the
+ * fraction term alone fixes N=4 (dissolves on the 3rd eviction instead)
+ * while leaving N=3 and N≥6 behavior unchanged (`docs/reports/batch-pilot-2-execution.md` B3c).
+ * `min_evictions_before_dissolve` is a floor a project can raise further,
+ * independent of the fraction.
+ */
+export interface DissolvePolicy {
+  /** Fraction of members lost that contributes to the threshold (RFC-0001 §F.8 default: 1/3). */
+  fraction: number;
+  /** Floor on the threshold, regardless of what the fraction alone would compute. */
+  min_evictions_before_dissolve: number;
+}
+
+/** Default dissolve policy — RFC-0001 §F.8's fraction, no floor beyond `ceil(N × fraction)` itself. */
+export const DEFAULT_DISSOLVE_POLICY: DissolvePolicy = {
+  fraction: DISSOLVE_EVICTION_FRACTION,
+  min_evictions_before_dissolve: 1,
+};
 
 /** Bounded fix attempts per member before it is evicted (§F.2 "one bounded attempt"). */
 export const MAX_FIX_ATTEMPTS_PER_MEMBER = 1;
@@ -781,6 +815,7 @@ export interface SchedConfigFile {
   label_poll_interval_ms?: number;
   dispatch?: DispatchConfig;
   auto_upgrade?: boolean;
+  dissolve_policy?: DissolvePolicy;
 }
 
 export const DEFAULT_MAX_SLOTS = 3;
@@ -896,6 +931,10 @@ export type JournalEventName =
   | 'revert-conflict'
   | 'batch-rebased'
   | 'batch-dissolved'
+  // #563: the dissolve threshold was crossed, but a fresh suite re-run
+  // confirmed the survivors are green — they stay in the batch and ship
+  // together; only the evicted members requeue. Never `dissolved`.
+  | 'batch-preserved'
   | 'batch-split'
   // #562: the aggregate suite report was unreadable even after the one
   // fallback-runner retry — the batch blocks (no requeue, no revert) rather

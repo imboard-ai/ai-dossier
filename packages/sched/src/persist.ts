@@ -22,6 +22,7 @@ import {
   CONFIG_SCHEMA_VERSION,
   DEFAULT_MAX_SLOTS,
   type DispatchConfig,
+  type DissolvePolicy,
   EngineTooOldError,
   LEGACY_CONFIG_SCHEMA_VERSIONS,
   MAX_MAX_SLOTS,
@@ -286,6 +287,9 @@ export class SchedStore {
         }
         config.auto_upgrade = parsed.auto_upgrade;
       }
+      if (parsed.dissolve_policy !== undefined) {
+        config.dissolve_policy = validateDissolvePolicy(parsed.dissolve_policy);
+      }
       return config;
     } catch (err) {
       // Deliberate degrade-to-default (unlike state.json, config is re-derivable
@@ -298,8 +302,8 @@ export class SchedStore {
         `⚠ Scheduler config ${this.configPath} is unreadable (${(err as Error).message}) — ` +
           `ALL config (max_slots, stall_timeout_ms, reconcile_interval_ms, pr_poll_interval_ms, ` +
           `label_poll_interval_ms, ` +
-          `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout, auto_upgrade) ` +
-          `reverted to built-in defaults (max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
+          `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout, auto_upgrade, ` +
+          `dissolve_policy) reverted to built-in defaults (max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
       );
       return { max_slots: DEFAULT_MAX_SLOTS };
     }
@@ -323,9 +327,36 @@ export class SchedStore {
         : {}),
       ...(config.dispatch !== undefined ? { dispatch: config.dispatch } : {}),
       ...(config.auto_upgrade !== undefined ? { auto_upgrade: config.auto_upgrade } : {}),
+      ...(config.dissolve_policy !== undefined ? { dissolve_policy: config.dissolve_policy } : {}),
     };
     writeAtomic(this.configPath, `${JSON.stringify(file, null, 2)}\n`);
   }
+}
+
+/** Validates `dissolve_policy` (#563): a strictly-positive fraction, and a positive-integer floor. */
+function validateDissolvePolicy(raw: unknown): DissolvePolicy {
+  if (typeof raw !== 'object' || raw === null) {
+    throw new Error('dissolve_policy must be an object');
+  }
+  const policy = raw as Record<string, unknown>;
+  if (
+    typeof policy.fraction !== 'number' ||
+    !Number.isFinite(policy.fraction) ||
+    policy.fraction <= 0 ||
+    policy.fraction > 1
+  ) {
+    throw new Error('dissolve_policy.fraction must be a number in (0, 1]');
+  }
+  if (
+    !Number.isInteger(policy.min_evictions_before_dissolve) ||
+    (policy.min_evictions_before_dissolve as number) < 1
+  ) {
+    throw new Error('dissolve_policy.min_evictions_before_dissolve must be an integer >= 1');
+  }
+  return {
+    fraction: policy.fraction,
+    min_evictions_before_dissolve: policy.min_evictions_before_dissolve as number,
+  };
 }
 
 const MODEL_TIERS: readonly ModelTier[] = ['mechanical', 'mid', 'strong'];

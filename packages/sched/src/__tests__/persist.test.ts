@@ -543,6 +543,64 @@ describe('#537 config: auto_upgrade', () => {
   });
 });
 
+describe('#563 config: dissolve_policy', () => {
+  it('round-trips dissolve_policy through save/load', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-563-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({
+        max_slots: 2,
+        dissolve_policy: { fraction: 1 / 4, min_evictions_before_dissolve: 2 },
+      });
+      expect(store.loadConfig().dissolve_policy).toEqual({
+        fraction: 1 / 4,
+        min_evictions_before_dissolve: 2,
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('defaults dissolve_policy to undefined when absent from config.json', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-563-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({ max_slots: 2 });
+      expect(store.loadConfig().dissolve_policy).toBeUndefined();
+      expect(fs.readFileSync(store.configPath, 'utf-8')).not.toContain('dissolve_policy');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [{ fraction: 0, min_evictions_before_dissolve: 1 }, 'fraction'],
+    [{ fraction: 1.5, min_evictions_before_dissolve: 1 }, 'fraction'],
+    [{ fraction: 1 / 3, min_evictions_before_dissolve: 0 }, 'min_evictions_before_dissolve'],
+    [{ fraction: 1 / 3, min_evictions_before_dissolve: 1.5 }, 'min_evictions_before_dissolve'],
+  ])('rejects an invalid dissolve_policy %j (degrades to defaults, loudly)', (bad, badKey) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-563-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({ schema_version: '1.4.0', max_slots: 2, dissolve_policy: bad })
+      );
+      const err = console.error;
+      const warnings: string[] = [];
+      console.error = (msg: string) => warnings.push(msg);
+      try {
+        expect(store.loadConfig()).toEqual({ max_slots: 3 });
+      } finally {
+        console.error = err;
+      }
+      expect(warnings[0]).toContain(badKey);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('#544 config: label_poll_interval_ms', () => {
   it('round-trips the label re-read cadence', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-544-'));
