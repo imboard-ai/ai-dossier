@@ -88,8 +88,9 @@ where every mechanical supervision decision is code, not remembered prose:
    (top-level `command` and each tier's own `commandTemplate`, #527) gets
    `--disallowedTools Monitor` appended automatically — set `dispatch.disallowed_tools: []`
    in `config.json` to opt out, or list your own tools to deny instead of the default
-   `["Monitor"]`. Never applied to a non-`claude` command (`cmd[0] !== 'claude'`), so an
-   `opencode` tier is unaffected.
+   `["Monitor"]`. Matched on the binary's basename, so an absolute or wrapper path
+   (`/usr/local/bin/claude`) still gets it; never applied to a non-`claude` command or one
+   that already carries the flag itself, so an `opencode` tier is unaffected.
 2. **Completion verification (AC2)** — an agent exiting is never proof of completion.
    On exit, the unit completes only when ground truth confirms it: the issue's latest
    runstate milestone is `report done`, or GitHub says the issue is closed — except a
