@@ -29,7 +29,7 @@ Developer documentation for contributors including development setup, workflows,
 Project roadmaps, planning documents, and development notes.
 
 ### 📊 [Reports](reports/)
-Gate reports and validation records for in-flight RFCs (currently RFC-0001 Batch Cycles).
+Gate reports, validation records, and raw evidence for the RFC-0001 (Batch Cycles) rollout.
 
 ---
 
@@ -75,4 +75,4 @@ This documentation follows the [Diataxis framework](https://diataxis.fr/):
 
 ---
 
-**License**: [AGPL-3.0](LICENSE) | **Maintained by**: Imboard AI
+**License**: [AGPL-3.0](../LICENSE) | **Maintained by**: Imboard AI
