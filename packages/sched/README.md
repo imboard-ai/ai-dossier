@@ -187,6 +187,12 @@ strategy and the `batch-preserved` journal event (see Batch failure recovery abo
 are behavioral, not persisted-shape changes, so they carry no schema-version bump of their
 own.
 
+Config schema moves to 1.8.0 (#565): a new top-level `default_batch_priority` key
+(integer) — the `BatchEntry.priority` a batch gets when created with no explicit
+`batch_priority` (see Unit priority below). Absent → `DEFAULT_BATCH_PRIORITY` (10); an
+invalid value degrades the whole config file to built-in defaults, same contract as every
+other field.
+
 Two engine-safety policies were explicit product decisions on #464:
 
 - **Pid identity is hybrid-verified (decision 1, option C).** Every spawn records the
@@ -381,6 +387,49 @@ load, backfilling `null`: no label re-check ever ran under them, so the first ti
 the upgrade polls immediately rather than waiting out a throttle window it has no
 evidence for — the exact backfill, not a guess.
 
+Schema 1.10.0 (#565): `QueueEntry` gains `priority` (integer, default 0) and `BatchEntry`
+gains `priority` (integer, default `DEFAULT_BATCH_PRIORITY` = 10) — see Unit priority
+below. 1.9.0 and earlier states migrate on load, backfilling absent OR explicit `null` to
+those same defaults: nothing before this field existed was ever weighted differently, so
+the backfill is exact, not a guess.
+
+## Unit priority (#565)
+
+`readiness.ts`'s `runnableUnits` ranks EVERY candidate — issues and batches together — by
+`priority` desc, then readiness age (`updated_at`) asc, then a numeric tiebreak (an
+issue's own number, or a batch's anchor issue) asc, via the exported `compareByPriority`
+comparator and its `entryRank`/`batchRank` helpers. A batch's default priority
+(`DEFAULT_BATCH_PRIORITY`, 10, or the configured `default_batch_priority`) outranks a
+full-cycle entry's default (0) so a ready batch is offered a free slot before a
+same-readiness issue competing for it — closing the gap
+`docs/reports/batch-pilot-2-execution.md` §13.4 found (an operator manually deferring
+full-cycle entries by hand so a batch could claim its slot).
+
+Applying that ordering to who actually DISPATCHES took more than sorting: `engine.ts`'s
+`dispatchAssignments` (the issue-only dispatch pass) now runs `computeAssignments` as a
+READ-ONLY dry run over both kinds each tick, discards the returned state, and applies
+only the issue winners — reserving a free slot for a higher-priority ready batch instead
+of handing it to a same-tick issue. `batch-dispatch.ts`'s own ready-batch claim loop
+(which never goes through `computeAssignments`/`runnableUnits` itself) later that same
+tick claims the capacity the reservation left free, sorted by the same comparator when
+more than one batch is ready. The reservation is gated on the batch pass actually being
+configured (`batchExec`/`runBatchSuite`) — without that gate, a `ready` batch with
+nothing able to claim it would withdraw capacity from issues forever instead of one tick.
+
+`sched enqueue --priority <n>` sets a full-cycle entry's own priority; with `--mode slot`
+it instead sets the BATCH's priority — a batch-level fact like `anchor`/`run_id`,
+agreement-checked on a later join (an incremental `--more-members-expected` call, or a
+manifest split across `--from-manifest` calls, must never silently re-point it). `sched
+reprioritize --issue <n>|--batch <id> --priority <n>` adjusts a queued unit's weight in
+place — no abandon/re-enqueue round trip, which would also reset every other field
+`enqueueEntries` does not accept as a re-supply — and deliberately does not bump
+`updated_at` (the readiness-age tiebreak), journaling a `reprioritized` event with the
+previous value instead. `sched status`'s Queue and Batches tables both show a `priority`
+column; a slot-mode member's own priority is never read by the scheduler (only the BATCH
+row governs assignment), so the Queue table renders `-` for it rather than a number that
+looks load-bearing but is not. A batch dissolve (`recovery.ts`'s `dissolveBatch`) carries
+the parent batch's priority forward onto both split halves.
+
 ## Batch dispatch (#523)
 
 `batch-dispatch.ts`'s `runBatchTick` — called from `tick()` after the issue-level pass,
@@ -457,7 +506,13 @@ import {
   enqueueEntries,        // validated queue appends (cycles, dupes, mode/batch rules)
   parseManifest,         // batch-prep JSON → EnqueueInput[]
   computeAssignments,    // pure: fill idle slots with runnable units, bounded by max_slots
-  runnableUnits,         // pure: which units may run right now (dep-gated)
+  runnableUnits,         // pure: which units may run right now (dep-gated), in assignment
+                         //   order — priority desc → readiness age → issue/anchor (#565)
+  compareByPriority,     // the priority/age/tiebreak comparator runnableUnits sorts with —
+                         //   also used directly by batch-dispatch.ts's ready-batch claim loop
+  entryRank, batchRank,  // PriorityRank of a QueueEntry / BatchEntry (#565)
+  reprioritizeIssue,     // sched reprioritize --issue: adjust priority in place, no
+  reprioritizeBatch,     //   abandon/re-enqueue round trip; refuses a terminal unit
   tick,                  // one engine cycle: reconcile + verify + refill + spawn,
                          //   and since #468: park-watch, teardown, report dispatch
   runLoop,               // the sched start loop (tick, sleep, repeat)
@@ -532,7 +587,8 @@ import {
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
-  validateState,         // strict persisted-state validation (1.0.0-1.8.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.9.0 files migrate)
+  DEFAULT_ISSUE_PRIORITY, DEFAULT_BATCH_PRIORITY, // priority defaults (0 / 10, #565)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
   EngineTooOldError,     // state schema newer than installed engine — not corruption (#537)

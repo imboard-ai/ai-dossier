@@ -860,7 +860,16 @@ export interface SchedConfigFile {
 
 export const DEFAULT_MAX_SLOTS = 3;
 
-/** Default `BatchEntry.priority` (#565) — see `SchedConfig.default_batch_priority`. */
+/**
+ * Default `QueueEntry.priority` for a full-cycle entry (#565). Named
+ * alongside `DEFAULT_BATCH_PRIORITY` because the two only make sense
+ * relative to each other — the whole point of the feature is
+ * `DEFAULT_BATCH_PRIORITY > DEFAULT_ISSUE_PRIORITY`, so a ready batch is
+ * assigned before a same-readiness issue by default.
+ */
+export const DEFAULT_ISSUE_PRIORITY = 0;
+
+/** Default `BatchEntry.priority` (#565) — see `SchedConfig.default_batch_priority`. Must stay > `DEFAULT_ISSUE_PRIORITY`. */
 export const DEFAULT_BATCH_PRIORITY = 10;
 
 /** Bounds for `max_slots` when reading `config.json` (named — not magic numbers in persist.ts). */
@@ -1039,7 +1048,14 @@ export type JournalEventName =
   // without journald wiring, redirected to /dev/null) can still answer "was
   // an upgrade attempted, and did it work?" from events.jsonl alone.
   | 'engine-auto-upgrade-attempted'
-  | 'engine-auto-upgrade-failed';
+  | 'engine-auto-upgrade-failed'
+  // #565: `sched reprioritize` mutates state.json directly with no other
+  // trace — `updated_at` is deliberately NOT bumped (it is the readiness-age
+  // tiebreak in `compareByPriority`, and a manual priority edit must not also
+  // reset a long-waiting unit's queue position), so without this event there
+  // is no way to answer "when did this unit's priority change, and to what"
+  // after the fact. `priority` carries the new value, `detail` the previous.
+  | 'reprioritized';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —

@@ -109,6 +109,30 @@ export function compareByPriority(a: PriorityRank, b: PriorityRank): number {
   return a.tiebreak - b.tiebreak;
 }
 
+/** `PriorityRank` of a full-cycle `QueueEntry` — the issue number is the final tiebreak. */
+export function entryRank(entry: QueueEntry): PriorityRank {
+  return { priority: entry.priority, updated_at: entry.updated_at, tiebreak: entry.issue };
+}
+
+/**
+ * `PriorityRank` of a `BatchEntry` — its anchor issue is the final tiebreak.
+ * A finite sentinel, not `POSITIVE_INFINITY`, when the anchor is unset — two
+ * anchorless batches tied on priority and age would otherwise compare via
+ * `Infinity - Infinity` (NaN), leaving their relative order
+ * implementation-defined. No real anchor gets remotely close to this value,
+ * so it still sorts an anchorless batch last. Shared by `runnableUnits`
+ * (below) and `batch-dispatch.ts`'s ready-batch claim loop, which applies
+ * `compareByPriority` directly since that pass never goes through
+ * `computeAssignments`/`runnableUnits` itself.
+ */
+export function batchRank(batch: BatchEntry): PriorityRank {
+  return {
+    priority: batch.priority,
+    updated_at: batch.updated_at,
+    tiebreak: batch.anchor ?? Number.MAX_SAFE_INTEGER,
+  };
+}
+
 /**
  * All runnable units, in assignment order (#565 AC2: priority desc →
  * readiness age → issue number). Issues and batches are ranked on the SAME
@@ -124,21 +148,14 @@ export function runnableUnits(state: SchedState): RunnableUnit[] {
     if (entry.mode !== 'full') continue;
     if (!DISPATCHABLE_ISSUE_STATUSES.has(entry.status)) continue;
     if (dependencyBlockers(state, entry).length > 0) continue;
-    ranked.push({
-      unit: { kind: 'issue', issue: entry.issue },
-      rank: { priority: entry.priority, updated_at: entry.updated_at, tiebreak: entry.issue },
-    });
+    ranked.push({ unit: { kind: 'issue', issue: entry.issue }, rank: entryRank(entry) });
   }
   for (const batch of state.batches) {
     if (batch.status !== 'ready') continue;
     if (batchBlockers(state, batch).length > 0) continue;
     ranked.push({
       unit: { kind: 'batch', batch: batch.id },
-      rank: {
-        priority: batch.priority,
-        updated_at: batch.updated_at,
-        tiebreak: batch.anchor ?? Number.POSITIVE_INFINITY,
-      },
+      rank: batchRank(batch),
     });
   }
   ranked.sort((a, b) => compareByPriority(a.rank, b.rank));

@@ -250,13 +250,12 @@ describe('abandon', () => {
 
 describe('unit priority (#565)', () => {
   it('runnableUnits: a ready batch (default priority 10) beats an older full-cycle issue (default 0)', () => {
-    // #1 enqueued first (older), batch b1 enqueued second (younger) — priority
-    // still wins over age.
-    const state = enqueueEntries(
-      createEmptyState(),
-      [{ issue: 1 }, { issue: 2, mode: 'slot', batch: 'b1' }],
-      NOW
-    );
+    // #1 enqueued first, at NOW — genuinely older by readiness age (`updated_at`).
+    // Batch b1 enqueued second, at NOW2 (10 minutes later) — younger, but its
+    // default priority still wins: this is priority beating AGE, not merely
+    // beating the numeric tiebreak (a same-timestamp test would prove only that).
+    let state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
+    state = enqueueEntries(state, [{ issue: 2, mode: 'slot', batch: 'b1' }], NOW2);
     expect(runnableUnits(state)).toEqual([
       { kind: 'batch', batch: 'b1' },
       { kind: 'issue', issue: 1 },

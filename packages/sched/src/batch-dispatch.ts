@@ -101,7 +101,7 @@ import {
 import { type Journal, unitEvent } from './journal';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
-import { compareByPriority } from './readiness';
+import { batchRank, compareByPriority } from './readiness';
 import {
   beginAttribution,
   beginFixAttempt,
@@ -1801,29 +1801,20 @@ export function runBatchTick(
   // the same priority order `runnableUnits` would (desc priority → asc
   // readiness age → anchor) — this loop never goes through
   // `computeAssignments`/`runnableUnits` itself (see the module doc), so it
-  // applies the comparator directly to a snapshot taken once up front; each
-  // iteration still re-checks `slotFor` against fresh state in case an
-  // earlier claim in this same pass changed things.
+  // applies the shared comparator/rank helpers directly. The ORDER and
+  // MEMBERSHIP of `readyOrder` are frozen from a snapshot taken once up
+  // front — a batch that becomes `ready` mid-pass waits for the next tick;
+  // only the per-batch `slotFor`/`status` re-check inside the loop reads
+  // fresh state (one `store.load()` per iteration, in case an earlier claim
+  // in this same pass changed things).
   const readyOrder = [...deps.store.load().batches]
     .filter((b) => b.status === 'ready')
-    .sort((a, b) =>
-      compareByPriority(
-        {
-          priority: a.priority,
-          updated_at: a.updated_at,
-          tiebreak: a.anchor ?? Number.POSITIVE_INFINITY,
-        },
-        {
-          priority: b.priority,
-          updated_at: b.updated_at,
-          tiebreak: b.anchor ?? Number.POSITIVE_INFINITY,
-        }
-      )
-    )
+    .sort((a, b) => compareByPriority(batchRank(a), batchRank(b)))
     .map((b) => b.id);
   for (const batchId of readyOrder) {
-    const batch = findBatch(deps.store.load(), batchId);
-    if (batch && batch.status === 'ready' && slotFor(deps.store.load(), batchId) === undefined) {
+    const state = deps.store.load();
+    const batch = findBatch(state, batchId);
+    if (batch && batch.status === 'ready' && slotFor(state, batchId) === undefined) {
       claimAndSetup(deps, config, dispatch, batchId, now, result);
     }
   }

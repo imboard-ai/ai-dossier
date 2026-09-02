@@ -15,7 +15,7 @@ import { unwrapList } from './json';
 import { labelBlockReason } from './labels';
 import { createBatch, findBatch, transitionBatch } from './state';
 import type { CycleMode, ModelTier, QueueEntry, SchedState } from './types';
-import { TERMINAL_ISSUE_STATUSES } from './types';
+import { DEFAULT_ISSUE_PRIORITY, TERMINAL_ISSUE_STATUSES } from './types';
 
 export class EnqueueError extends Error {
   constructor(message: string) {
@@ -113,8 +113,14 @@ function asPositiveInt(value: unknown, label: string): number {
   return value as number;
 }
 
-/** Unlike `asPositiveInt`: a priority may legitimately be 0 or negative (deprioritized below the default). */
-function asInt(value: unknown, label: string): number {
+/**
+ * Unlike `asPositiveInt`: a priority may legitimately be 0 or negative
+ * (deprioritized below the default). Exported so `scheduler.ts`'s
+ * `reprioritizeIssue`/`reprioritizeBatch` share this exact check instead of
+ * re-implementing it (#565 review) — both are input-boundary validators for
+ * the same `priority` concept, just reached from a different entry point.
+ */
+export function asInt(value: unknown, label: string): number {
   if (!Number.isInteger(value)) {
     throw new EnqueueError(`${label} must be an integer, got ${String(value)}`);
   }
@@ -357,11 +363,9 @@ export function enqueueEntries(
     ) {
       throw new EnqueueError(`Issue ${input.issue}: tier must be mechanical | mid | strong`);
     }
-    if (input.priority !== undefined && !Number.isInteger(input.priority)) {
-      throw new EnqueueError(`Issue ${input.issue}: priority must be an integer`);
-    }
-    if (input.batch_priority !== undefined && !Number.isInteger(input.batch_priority)) {
-      throw new EnqueueError(`Issue ${input.issue}: batch_priority must be an integer`);
+    if (input.priority !== undefined) asInt(input.priority, `Issue ${input.issue}: priority`);
+    if (input.batch_priority !== undefined) {
+      asInt(input.batch_priority, `Issue ${input.issue}: batch_priority`);
     }
     if (input.blocked_label !== undefined && input.blocked_label !== null) {
       if (typeof input.blocked_label !== 'string' || !LABEL_NAME_RE.test(input.blocked_label)) {
@@ -426,7 +430,7 @@ export function enqueueEntries(
       mode,
       batch,
       deps: input.deps ? [...input.deps] : [],
-      priority: input.priority ?? 0,
+      priority: input.priority ?? DEFAULT_ISSUE_PRIORITY,
       tier: input.tier ?? 'mid',
       status: input.blocked_label ? 'blocked' : 'queued',
       reason: input.blocked_label ? labelBlockReason(input.blocked_label) : null,

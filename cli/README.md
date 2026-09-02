@@ -1003,12 +1003,13 @@ respectively; `get --json` includes the comment's `author`.
 ## Scheduler core (`sched`)
 
 ```bash
-ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--more-members-expected] [--deps 100,104] [--tier mechanical|mid|strong] [--repo owner/name]
+ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--more-members-expected] [--deps 100,104] [--tier mechanical|mid|strong] [--priority <n>] [--repo owner/name]
 ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
 ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--json]
 ai-dossier sched status [--json]
 ai-dossier sched pause | resume
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
+ai-dossier sched reprioritize --issue 42 --priority 20 | --batch b1 --priority 20 [--json]
 ai-dossier sched stats [--issues 4,5|4..9] [--batch b1 --project owner-repo] [--json]
 ```
 
@@ -1036,7 +1037,13 @@ against ground truth.
   line reads `N queued, M blocked-by-label`. The pre-screen is capped at
   `MAX_ISSUE_SELECTION` (200) total issues per call. Since #544 this screen is no longer
   the last word — the engine re-reads the same labels every tick, so a label removed
-  after enqueue unblocks the entry without a re-enqueue (see `start` below).
+  after enqueue unblocks the entry without a re-enqueue (see `start` below). Since #565,
+  `--priority <n>` applies to `--issues` only (a manifest entry carries its own
+  `priority`/`batch_priority` field instead) — for `--mode full` it sets the entry's own
+  weight (default 0); for `--mode slot` it sets the BATCH's weight (default
+  `default_batch_priority`, see `config.json` below) as a batch-level fact like
+  `anchor`/`run_id` — a later member joining the same batch must agree or omit it, never
+  silently re-point it.
 - **`enqueue`'s batch sealing (#535)**: a batch's status seals `forming → ready` at the end
   of the call that completes its composition — the common case, since a single manifest (or
   `--issues --batch <id>` call) normally declares a batch's full membership at once. Once
@@ -1113,9 +1120,13 @@ against ground truth.
   continuous (non-`--once`) loop only ever journals/warns, never self-upgrades, since a
   multi-minute install must not stall reconciliation. The attempt's outcome is journaled
   too (`engine-auto-upgrade-attempted` / `engine-auto-upgrade-failed`).
-- **`status`** renders the queue (with `pr` and `cleanup` columns), parked PRs
-  (watched, zero slots, with the last poll's age), slots (with pid, live phase,
-  last-progress, recoveries), batches, runnable units, and the blocked/failed sets. A blocked entry names every
+- **`status`** renders the queue (with `priority`, `pr`, and `cleanup` columns — a
+  slot-mode member's own `priority` cell reads `-`, since the scheduler never reads it;
+  the BATCH's `priority` in the batches table below is what governs assignment, #565),
+  parked PRs (watched, zero slots, with the last poll's age), slots (with pid, live
+  phase, last-progress, recoveries), batches (also with a `priority` column), runnable
+  units — in assignment order, priority desc → readiness age → issue/anchor — and the
+  blocked/failed sets. A blocked entry names every
   unsatisfied dependency ("dependency #104 not merged (status: dispatched)") — or, for an
   entry stopped by a hard-block label, the label itself ("label:decision-pending"),
   applied either by the enqueue pre-screen (#507) or by the engine's per-tick re-check
@@ -1144,6 +1155,14 @@ against ground truth.
 - **`abandon --issue`** fails the entry (recording the reason) and releases its slot;
   **`abandon --batch`** dissolves the batch and requeues every non-terminal member as
   full-cycle — members already shipped keep their outcome.
+- **`reprioritize --issue <n>|--batch <id> --priority <n>`** (#565) adjusts a queued
+  unit's assignment weight in place — no abandon/re-enqueue round trip, which would also
+  reset every other field `enqueue` does not accept as a re-supply (deps, tier, ...).
+  Exactly one of `--issue`/`--batch`; `--priority` must be an integer. A terminal
+  entry/batch is rejected ("nothing to reprioritize"). Deliberately does not reset the
+  unit's readiness age, so a manual priority bump does not also send it to the back of
+  the FIFO queue at that priority; a `reprioritized` journal event records the previous
+  value. `--json` emits `{reprioritized: "issue:<n>"|"batch:<id>", priority}`.
 - **`stats`** (#524, `--batch` #564) prints per-issue token/cost totals:
   `Issue, Runs, In, Out, Cache-W, Cache-R, Cost, Duration, Model, Tier, Usage`, plus a
   `TOTAL` row. A numeric field is `-`/null when *no* dispatch reported it — never a
@@ -1195,8 +1214,12 @@ overrides this when passed; `dissolve_policy` — `{ fraction, min_evictions_bef
 #563, overrides the batch dissolve threshold `max(ceil(N × fraction),
 min_evictions_before_dissolve)` (default `{ fraction: 1/3, min_evictions_before_dissolve: 1 }`);
 both fields are required when the key is present, and an invalid value degrades the WHOLE
-config file to built-in defaults, same as every other config field; an issue with an unmerged
-dependency — or a batch behind an unmerged batch —
+config file to built-in defaults, same as every other config field; `default_batch_priority`
+(default `DEFAULT_BATCH_PRIORITY` = 10, #565) — the `BatchEntry.priority` a batch gets when
+`sched enqueue --mode slot` creates it with no explicit `--priority`; a full-cycle entry's
+own default is 0, so a ready batch is assigned ahead of a same-readiness issue unless the
+operator says otherwise (`sched reprioritize` adjusts either after the fact); an issue with
+an unmerged dependency — or a batch behind an unmerged batch —
 is never runnable.
 
 Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).

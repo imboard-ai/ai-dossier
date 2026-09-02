@@ -15,6 +15,7 @@ import {
   type BatchStatus,
   type CycleMode,
   DEFAULT_BATCH_PRIORITY,
+  DEFAULT_ISSUE_PRIORITY,
   EngineTooOldError,
   type FailureEvidence,
   IllegalTransitionError,
@@ -273,9 +274,14 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   if (!MODEL_TIERS.has(String(entry.tier))) {
     throw new Error(`${label}: tier must be mechanical | mid | strong`);
   }
-  // Absent on a pre-#565 (1.9.0) entry — backfilled to 0 by the migration below.
-  if (entry.priority !== undefined && !Number.isInteger(entry.priority)) {
-    throw new Error(`${label}: priority must be an integer`);
+  // Absent (pre-#565/1.9.0) OR explicit null (a hand-edited state.json's
+  // natural spelling of "unset") — both backfilled by the migration below.
+  if (
+    entry.priority !== undefined &&
+    entry.priority !== null &&
+    !Number.isInteger(entry.priority)
+  ) {
+    throw new Error(`${label}: priority must be an integer, got ${String(entry.priority)}`);
   }
   if (!ISSUE_STATUSES.has(String(entry.status))) {
     throw new Error(`${label}: unknown issue status ${String(entry.status)}`);
@@ -504,9 +510,16 @@ export function validateState(data: unknown): SchedState {
     if (!Number.isInteger(batch.executing_member) || batch.executing_member < 0) {
       throw new Error(`Batch ${batch.id}: executing_member must be a non-negative integer`);
     }
-    // Absent on a pre-#565 (1.9.0) batch — backfilled to DEFAULT_BATCH_PRIORITY below.
-    if (batch.priority !== undefined && !Number.isInteger(batch.priority)) {
-      throw new Error(`Batch ${batch.id}: priority must be an integer`);
+    // Absent (pre-#565/1.9.0) OR explicit null — both backfilled to
+    // DEFAULT_BATCH_PRIORITY below, same as a QueueEntry's priority above.
+    if (
+      batch.priority !== undefined &&
+      batch.priority !== null &&
+      !Number.isInteger(batch.priority)
+    ) {
+      throw new Error(
+        `Batch ${batch.id}: priority must be an integer, got ${String(batch.priority)}`
+      );
     }
     validateBatchRecovery(batch as unknown as Record<string, unknown>, batch.id);
     if (!isIsoDateString(batch.created_at) || !isIsoDateString(batch.updated_at)) {
@@ -700,10 +713,12 @@ export function validateState(data: unknown): SchedState {
     pr: entry.pr ?? null,
     cleanup: entry.cleanup ?? null,
     failure_evidence: entry.failure_evidence ?? null,
-    // Pre-#565 (1.9.0) entries carry no priority — 0 is the current default
-    // for a fresh entry, so it is exact, not a guess: nothing before this
-    // field existed was ever weighted differently.
-    priority: entry.priority ?? 0,
+    // Pre-#565 (1.9.0) entries carry no priority — DEFAULT_ISSUE_PRIORITY is
+    // the current default for a fresh entry, so it is exact, not a guess:
+    // nothing before this field existed was ever weighted differently. `??`
+    // also backfills an explicit `null` (a hand-edited state.json's natural
+    // spelling of "no priority set") the same as a genuinely absent key.
+    priority: entry.priority ?? DEFAULT_ISSUE_PRIORITY,
   }));
   const batches = (obj.batches as BatchEntry[]).map((batch) => ({
     ...batch,

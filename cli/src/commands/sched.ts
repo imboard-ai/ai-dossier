@@ -23,6 +23,7 @@ import {
   createExecRunFencer,
   createSpawnDeps,
   DEFAULT_BATCH_PRIORITY,
+  DEFAULT_ISSUE_PRIORITY,
   DEFAULT_RECONCILE_INTERVAL_MS,
   defaultExec,
   type EngineDeps,
@@ -156,11 +157,11 @@ function parseTier(raw: string | undefined): 'mechanical' | 'mid' | 'strong' {
 }
 
 /** `--priority <n>` (#565): any integer, undefined when the flag was omitted (the caller resolves the default). */
-function parsePriority(raw: string | undefined, flag = 'priority'): number | undefined {
+function parsePriority(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
   const n = Number.parseInt(raw, 10);
   if (!Number.isInteger(n) || String(n) !== raw.trim()) {
-    fail([`--${flag} must be an integer, got '${raw}'`]);
+    fail([`--priority must be an integer, got '${raw}'`]);
   }
   return n;
 }
@@ -242,7 +243,10 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
         `#${e.issue}`,
         e.mode,
         e.batch ?? '-',
-        String(e.priority),
+        // A slot-mode member's own priority is never read by the scheduler
+        // (the BATCH's priority governs, in the table below) — render '-'
+        // rather than a number that looks load-bearing but is not.
+        e.mode === 'slot' ? '-' : String(e.priority),
         e.tier,
         e.deps.length > 0 ? e.deps.map((d) => `#${d}`).join(',') : '-',
         e.status,
@@ -545,6 +549,15 @@ function registerEnqueueSubcommand(cmd: Command): void {
       }
 
       const explicitPriority = parsePriority(opts.priority);
+      // #565: --priority is only ever consumed inside the --issues branch
+      // below — silently accepting it alongside a manifest-only call would
+      // validate the flag and then discard it. A manifest supplies priority
+      // per entry via its own `priority`/`batch_priority` fields instead.
+      if (explicitPriority !== undefined && !opts.issues) {
+        fail([
+          '--priority applies to --issues only — a manifest entry sets its own "priority"/"batch_priority" field',
+        ]);
+      }
 
       if (opts.issues) {
         const mode = parseMode(opts.mode);
@@ -557,7 +570,16 @@ function registerEnqueueSubcommand(cmd: Command): void {
             batch: opts.batch ?? null,
             deps,
             tier,
-            priority: explicitPriority ?? 0,
+            // #565: for a slot-mode entry, --priority addresses the BATCH
+            // (batch_priority below) — the member's own priority is never
+            // read by the scheduler (only `mode: 'full'` entries compete for
+            // a slot directly), so it stays at the default rather than
+            // showing a number in `sched status` that looks load-bearing
+            // but is not.
+            priority:
+              mode === 'slot'
+                ? DEFAULT_ISSUE_PRIORITY
+                : (explicitPriority ?? DEFAULT_ISSUE_PRIORITY),
             ...(mode === 'slot' && explicitPriority !== undefined
               ? { batch_priority: explicitPriority }
               : {}),
@@ -578,13 +600,25 @@ function registerEnqueueSubcommand(cmd: Command): void {
       // #565: a batch-mode entry with no explicit batch_priority (neither
       // --priority on the CLI nor a manifest field) gets the configurable
       // default here — `enqueueEntries`/`createBatch` stay config-free, same
-      // as the label pre-screen's resolution one field over.
+      // as the label pre-screen's resolution one field over. Applied ONLY to
+      // batches this call is actually CREATING — a member joining a batch
+      // that already exists (an incremental `--more-members-expected` call,
+      // or a later manifest split) must never inject a value, or
+      // `assertBatchFactsAgree` rejects the whole enqueue for "re-pointing"
+      // a priority the operator never asked to change.
       const defaultBatchPriority =
         store.loadConfig().default_batch_priority ?? DEFAULT_BATCH_PRIORITY;
+      const existingBatchIds = new Set(store.load().batches.map((b) => b.id));
+      const batchPrioritySeeded = new Set<string>();
       for (const input of inputs) {
-        if ((input.mode ?? 'full') === 'slot' && input.batch_priority === undefined) {
-          input.batch_priority = defaultBatchPriority;
+        if ((input.mode ?? 'full') !== 'slot' || input.batch == null) continue;
+        if (input.batch_priority !== undefined) {
+          batchPrioritySeeded.add(input.batch);
+          continue;
         }
+        if (existingBatchIds.has(input.batch) || batchPrioritySeeded.has(input.batch)) continue;
+        input.batch_priority = defaultBatchPriority;
+        batchPrioritySeeded.add(input.batch);
       }
 
       const failed = screenHardBlockLabels(inputs, opts.repo);
@@ -892,15 +926,23 @@ function registerReprioritizeSubcommand(cmd: Command): void {
       if ((opts.issue ? 1 : 0) + (opts.batch ? 1 : 0) !== 1) {
         fail(['Pass exactly one of --issue <number> or --batch <id>']);
       }
-      const priority = parsePriority(opts.priority) as number; // requiredOption guarantees presence
+      const priority = parsePriority(opts.priority);
+      if (priority === undefined) fail(['--priority is required']);
       const { store } = resolveStore(opts);
       try {
         if (opts.issue) {
-          const issue = issueList(opts.issue, 'issue')[0];
-          store.withLock((state) => ({
-            state: reprioritizeIssue(state, issue, priority),
-            result: null,
-          }));
+          const issues = issueList(opts.issue, 'issue');
+          if (issues.length !== 1) {
+            fail([`--issue takes a single issue number, got '${opts.issue}'`]);
+          }
+          const issue = issues[0];
+          const previous = store.withLock((state) => {
+            const before = state.entries.find((e) => e.issue === issue)?.priority ?? null;
+            return { state: reprioritizeIssue(state, issue, priority), result: before };
+          });
+          new Journal(store.dir).append(
+            unitEvent('reprioritized', `issue:${issue}`, { priority, detail: `was ${previous}` })
+          );
           if (opts.json) {
             console.log(JSON.stringify({ reprioritized: `issue:${issue}`, priority }));
           } else {
@@ -908,10 +950,13 @@ function registerReprioritizeSubcommand(cmd: Command): void {
           }
         } else if (opts.batch) {
           const batchId = opts.batch;
-          store.withLock((state) => ({
-            state: reprioritizeBatch(state, batchId, priority),
-            result: null,
-          }));
+          const previous = store.withLock((state) => {
+            const before = state.batches.find((b) => b.id === batchId)?.priority ?? null;
+            return { state: reprioritizeBatch(state, batchId, priority), result: before };
+          });
+          new Journal(store.dir).append(
+            unitEvent('reprioritized', `batch:${batchId}`, { priority, detail: `was ${previous}` })
+          );
           if (opts.json) {
             console.log(JSON.stringify({ reprioritized: `batch:${batchId}`, priority }));
           } else {

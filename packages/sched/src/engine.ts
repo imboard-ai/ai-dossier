@@ -1949,7 +1949,17 @@ function dispatchAssignments(
   // against the ORIGINAL `state` — the batch-dispatch pass later this same
   // tick claims the capacity this reservation left free (module doc: batch
   // claims never go through `computeAssignments` themselves).
-  const { assignments } = computeAssignments(state, config, now, ['issue', 'batch'], exclude);
+  //
+  // The reservation is gated on the batch pass actually running this tick
+  // (`batchExec`/`runBatchSuite` both configured, mirroring the guard at the
+  // batch-pass call site below): without that gate, a `ready` batch with
+  // nothing ever able to claim it would reserve a slot every tick forever —
+  // not a one-tick wait, a permanent one, contradicting the batch pass's own
+  // documented fallback ("a `ready` batch stays queued", never "queued AND
+  // blocks other work").
+  const batchPassWillRun = ctx.deps.batchExec !== undefined && ctx.deps.runBatchSuite !== undefined;
+  const dryRunKinds = batchPassWillRun ? (['issue', 'batch'] as const) : (['issue'] as const);
+  const { assignments } = computeAssignments(state, config, now, dryRunKinds, exclude);
   let next = state;
   for (const assignment of assignments) {
     if (assignment.kind !== 'issue') continue;

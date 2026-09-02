@@ -126,8 +126,10 @@ export {
   schedStateDir,
 } from './project';
 export {
+  batchRank,
   compareByPriority,
   DISPATCHABLE_ISSUE_STATUSES,
+  entryRank,
   type PriorityRank,
 } from './readiness';
 export {
@@ -211,6 +213,7 @@ export {
   type CycleMode,
   DEFAULT_BATCH_PRIORITY,
   DEFAULT_DISSOLVE_POLICY,
+  DEFAULT_ISSUE_PRIORITY,
   DEFAULT_LABEL_POLL_INTERVAL_MS,
   DEFAULT_MAX_SLOTS,
   DEFAULT_PHASE_STALL_TIMEOUT_MS,
