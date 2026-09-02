@@ -78,6 +78,7 @@ import {
 } from './attribution';
 import {
   batchFixLogPath,
+  batchGateLogPath,
   batchMemberLogPath,
   batchReportLogPath,
   batchTailLogPath,
@@ -129,6 +130,7 @@ import { type FsExists, isSafeWorktree, POOL_ARGS_PREFIX, POOL_BIN, runTeardown 
 import type {
   AttributionMethod,
   BatchEntry,
+  CapabilityGateResult,
   JournalEventName,
   ModelTier,
   SchedConfig,
@@ -136,16 +138,12 @@ import type {
   SlotEntry,
   SlotStatus,
 } from './types';
-import { resolveDissolvePolicy } from './types';
+import { IllegalTransitionError, resolveDissolvePolicy, SchedNotFoundError } from './types';
 
-/**
- * The four `ai-dossier cap run` outcomes (docs/reference/capabilities.md):
- * `ok` = the capability ran and passed; `task-failed` = it ran and the TASK
- * itself failed (trust the result); `automation-broken` = do not trust the
- * machinery (missing tool, timeout, bad manifest); `capability-unavailable` =
- * no manifest / no such id / `lifecycle: shadow` — no fast path here.
- */
-export type CapOutcome = 'ok' | 'task-failed' | 'automation-broken' | 'capability-unavailable';
+// `CapOutcome` moved to `types.ts` (#583, so `BatchEntry.member_gates` can use
+// it without an import cycle) — re-exported here so `index.ts`'s existing
+// `import { type CapOutcome } from './batch-dispatch'` keeps working.
+export type { CapOutcome } from './types';
 
 /** Everything batch dispatch needs from the outside world. */
 export interface BatchDispatchDeps {
@@ -171,19 +169,24 @@ export interface BatchDispatchDeps {
   /**
    * Runs one `ai-dossier cap run <capabilityId>` in a batch worktree. Two call
    * sites, different degrade contracts:
-   * - the per-member incremental gate (#523 AC2 — "typecheck + focused tests
-   *   via `cap run test.focused` when available"): degrade-not-crash — without
-   *   this hook, or on `automation-broken`/`capability-unavailable`, the gate
-   *   is skipped (the member's own `slot-cycle` run already attempted this
-   *   fast path before ever posting `review done`, so a repo with no manifest
-   *   loses nothing but the engine's independent re-check).
+   * - the per-member incremental gate (#523 AC2, revised #583): without this
+   *   hook, the gate is skipped entirely (the member's own `slot-cycle` run
+   *   already attempted this fast path before ever posting `review done`, so
+   *   a repo with no manifest loses nothing but the engine's independent
+   *   re-check). With the hook: `ok` advances, `task-failed` evicts,
+   *   `automation-broken`/`capability-unavailable` BLOCK the batch
+   *   (`gate-inconclusive`) rather than silently proceeding — #583 found the
+   *   old "proceed on anything but task-failed" policy let a script's own
+   *   "I could not run this" signal (a non-zero exit reporting it never
+   *   really tested anything) masquerade as either a pass or a real failure.
    * - batch-setup's `worktree.prepare` warm step (#561, `warmColdBatchWorktree`):
-   *   `undefined`/`capability-unavailable`/`automation-broken` fall through to
-   *   package-manager detection, but a declared-and-`task-failed` capability
-   *   hard-fails the whole batch setup — a repo that owns its warm-up should
-   *   never be silently second-guessed by a fallback underneath it.
+   *   unaffected by #583's gate policy change — `undefined`/
+   *   `capability-unavailable`/`automation-broken` still fall through to
+   *   package-manager detection, and a declared-and-`task-failed` capability
+   *   still hard-fails the whole batch setup (a repo that owns its warm-up
+   *   should never be silently second-guessed by a fallback underneath it).
    */
-  runCapability?: (worktree: string, capabilityId: string) => CapOutcome;
+  runCapability?: (worktree: string, capabilityId: string) => CapabilityGateResult;
   fsExists?: FsExists;
   /**
    * Home directory for `~/.dossier/runs.jsonl` (#564) — mirrors `EngineDeps.homeDir`.
@@ -242,6 +245,34 @@ function journalEvent(
   extra: Record<string, unknown> = {}
 ): void {
   deps.journal.append(unitEvent(event, unitId, extra), deps.now());
+}
+
+/** First ~500 chars of a gate's output tail (#583 AC1) — journal details stay compact; the full tail lives in the per-gate log file. */
+function gateDetailExcerpt(outputTail: string | null | undefined): string | undefined {
+  if (!outputTail) return undefined;
+  return outputTail.length > 500 ? outputTail.slice(-500) : outputTail;
+}
+
+/**
+ * Best-effort per-gate diagnostic log (#583 AC1) — mirrors `appendCapLog`'s
+ * never-crash contract: a log-write failure must not interrupt the gate
+ * decision itself.
+ */
+function writeGateLog(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  capabilityId: string,
+  issue: number,
+  outputTail: string | null | undefined
+): void {
+  if (!outputTail) return;
+  try {
+    const logPath = batchGateLogPath(deps.store.runsDir, batchId, capabilityId, issue);
+    fs.mkdirSync(path.dirname(logPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(logPath, outputTail, { mode: 0o600 });
+  } catch {
+    // diagnostic only — never fail the gate decision over a log write
+  }
 }
 
 function slotFor(state: SchedState, batchId: string): SlotEntry | undefined {
@@ -417,7 +448,7 @@ function warmColdBatchWorktree(
     return { ok: true };
   };
 
-  const capOutcome = deps.runCapability?.(worktree, 'worktree.prepare');
+  const capOutcome = deps.runCapability?.(worktree, 'worktree.prepare')?.outcome;
   if (capOutcome === 'ok') return done('cap:worktree.prepare');
   if (capOutcome === 'task-failed') return fail('cap:worktree.prepare:task-failed');
   // `undefined` (no hook injected) / `capability-unavailable` (not declared)
@@ -1267,6 +1298,146 @@ function evictMemberAndContinue(
 }
 
 /**
+ * The member is verifiably done — self-reported complete AND (when checked)
+ * the incremental gate agrees. Recompute the member's commit range, mark it
+ * validated, and advance the batch. Shared by `reconcileMemberSlot`'s
+ * immediate "both gate checks ok" fallthrough and `resumeBlockedGate` (#583)
+ * — a member confirmed complete via a delayed `sched resume --batch` recheck
+ * gets exactly the same treatment as one confirmed complete on the first try.
+ * `releaseSlot` is idempotent (a no-op once the slot is already idle), so
+ * this is safe to call whether or not the caller already released it.
+ */
+function completeMemberGate(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  batch: BatchEntry,
+  memberIssue: number,
+  now: Date,
+  result: BatchTickResult
+): void {
+  // The commit-range recompute (`git log`) is a blocking subprocess call — it
+  // must run OUTSIDE the lock, like every other exec in this module; the
+  // result then lands as a pure data patch under the lock (Convention review:
+  // `recordRanges` used to run `git log` INSIDE the withLock mutator, which
+  // is exactly what `engine.ts`'s own "a slow git call never holds the lock"
+  // invariant exists to prevent).
+  const ranges = memberRanges(boundaryCommits(deps, batch));
+  deps.store.withLock((s) => {
+    let n = releaseSlot(s, batchId, now);
+    n = patchBatch(n, batchId, { ranges }, now);
+    n = advanceMemberToValidated(n, memberIssue, now);
+    return { state: n, result: undefined };
+  });
+  result.completed.push(unit(batchId));
+  advanceMemberOrValidate(
+    deps,
+    config,
+    dispatch,
+    batchId,
+    batch.members.length,
+    batch.executing_member,
+    memberIssue,
+    now,
+    result
+  );
+}
+
+/**
+ * `sched resume --batch <id>` (#583 AC4): an operator-triggered, synchronous
+ * one-shot recheck of a batch blocked on `gate-inconclusive:<capabilityId>`
+ * — re-runs exactly that capability against the current member and resolves
+ * the block:
+ *
+ * - still `automation-broken`/`capability-unavailable` → stays `blocked`,
+ *   no state change (the capability still isn't fixed).
+ * - `task-failed` → the member really is broken; evict via the same rail
+ *   the live gate uses.
+ * - `ok` → the member really was fine; complete it via the same rail the
+ *   live gate uses.
+ *
+ * Deliberately NOT a generic engine tick: `runBatchTick`'s own "executing
+ * with no live slot" wedge-recovery path (`spawnMemberContinuation`,
+ * unconditional) exists for a dispatch that never happened — reusing it here
+ * would redispatch a fresh agent for a member whose work is already
+ * committed and reviewed. This function transitions `blocked → executing`
+ * and immediately, synchronously, calls the same completion/eviction
+ * functions the live gate calls — no intervening tick ever sees the batch
+ * `executing` with nothing in flight.
+ */
+export function resumeBlockedGate(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  now: Date
+): { outcome: 'still-blocked' | 'evicted' | 'completed'; capability: string; detail?: string } {
+  const state = deps.store.load();
+  const batch = findBatch(state, batchId);
+  if (!batch) throw new SchedNotFoundError(`Batch not found: ${batchId}`);
+  if (batch.status !== 'blocked' || !batch.blocked_reason?.startsWith('gate-inconclusive:')) {
+    throw new IllegalTransitionError('batch', batch.status, 'executing');
+  }
+  const capabilityId = batch.blocked_reason.slice('gate-inconclusive:'.length);
+  const memberIssue = batch.members[batch.executing_member - 1];
+  if (batch.worktree === null || !deps.runCapability || memberIssue === undefined) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId} has no worktree/current member/gate hook to recheck`
+    );
+  }
+  const recheck = deps.runCapability(batch.worktree, capabilityId);
+  const result = emptyResult();
+
+  if (recheck.outcome === 'automation-broken' || recheck.outcome === 'capability-unavailable') {
+    return {
+      outcome: 'still-blocked',
+      capability: capabilityId,
+      detail: recheck.outputTail ?? undefined,
+    };
+  }
+
+  deps.store.withLock((s) => ({
+    state: patchBatch(
+      transitionBatch(s, batchId, 'executing', {}, now),
+      batchId,
+      { blocked_reason: null },
+      now
+    ),
+    result: undefined,
+  }));
+
+  if (recheck.outcome === 'task-failed') {
+    const reason = `incremental-gate-failed:${capabilityId}`;
+    writeGateLog(deps, batchId, capabilityId, memberIssue, recheck.outputTail);
+    journalEvent(deps, 'unit-failed', unit(batchId), {
+      issue: memberIssue,
+      reason,
+      detail: `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck`,
+    });
+    evictMemberAndContinue(
+      deps,
+      config,
+      dispatch,
+      batchId,
+      batch,
+      memberIssue,
+      reason,
+      now,
+      result
+    );
+    return { outcome: 'evicted', capability: capabilityId };
+  }
+
+  journalEvent(deps, 'external-advance', unit(batchId), {
+    issue: memberIssue,
+    detail: `sched resume --batch: cap run ${capabilityId} reported ok on recheck`,
+  });
+  completeMemberGate(deps, config, dispatch, batchId, batch, memberIssue, now, result);
+  return { outcome: 'completed', capability: capabilityId };
+}
+
+/**
  * Record one member dispatch's tokens/cost to `runs.jsonl` (#564) — the
  * `batch-dispatch.ts` analogue of `engine.ts`'s `recordDispatchRunLog`.
  * Batch members never go through `engine.ts`'s per-unit spawn/record path
@@ -1388,23 +1559,61 @@ function reconcileMemberSlot(
     // rather than at each of this branch's two later exit points.
     recordMemberRunLog(deps, dispatch, state0, batchId, batch, memberIssue, slot, now);
 
-    // Incremental gate (#523 AC2): typecheck + focused tests via `cap run`,
-    // when the repo has a manifest for them — a second, independent check
-    // that the member's own self-reported "done" is real, matching this
-    // codebase's "never trust a claimed completion" ethos (AC2/#464's
-    // `isVerifiedComplete`). `task-failed` evicts the member directly, same
-    // rail as a self-reported block (RFC F.1) — no aggregate suite has run
-    // yet, so there is nothing to attribute.
+    // Incremental gate (#523 AC2, revised #583): typecheck + focused tests
+    // via `cap run`, when the repo has a manifest for them — a second,
+    // independent check that the member's own self-reported "done" is real,
+    // matching this codebase's "never trust a claimed completion" ethos
+    // (AC2/#464's `isVerifiedComplete`). Three-way policy: `task-failed`
+    // evicts the member directly, same rail as a self-reported block (RFC
+    // F.1) — no aggregate suite has run yet, so there is nothing to
+    // attribute. `automation-broken`/`capability-unavailable` — the gate
+    // itself could not reach a verdict — BLOCK the batch instead of silently
+    // proceeding (#583: a script that legitimately could not run its suite
+    // must not be read as either a pass or a real failure). Only both `ok`
+    // falls through to normal advancement.
     if (batch.worktree !== null && deps.runCapability) {
-      const gateFailure = ['typecheck.run', 'test.focused']
-        .map((id) => ({ id, outcome: deps.runCapability?.(batch.worktree as string, id) }))
-        .find((r) => r.outcome === 'task-failed');
+      const worktree = batch.worktree;
+      const runCapability = deps.runCapability;
+      const gateResults = ['typecheck.run', 'test.focused'].map((id) => ({
+        id,
+        ...runCapability(worktree, id),
+      }));
+      const gateFailure = gateResults.find((r) => r.outcome === 'task-failed');
+      const gateInconclusive = gateResults.find(
+        (r) => r.outcome === 'automation-broken' || r.outcome === 'capability-unavailable'
+      );
+      const worstGate = gateFailure ?? gateInconclusive;
+      if (worstGate) {
+        deps.store.withLock((s) => ({
+          state: patchBatch(
+            s,
+            batchId,
+            {
+              member_gates: {
+                ...batch.member_gates,
+                [String(memberIssue)]: {
+                  capability: worstGate.id,
+                  outcome: worstGate.outcome,
+                  output_tail: worstGate.outputTail ?? null,
+                  at: now.toISOString(),
+                },
+              },
+            },
+            now
+          ),
+          result: undefined,
+        }));
+      }
       if (gateFailure) {
         const reason = `incremental-gate-failed:${gateFailure.id}`;
+        writeGateLog(deps, batchId, gateFailure.id, memberIssue, gateFailure.outputTail);
+        const excerpt = gateDetailExcerpt(gateFailure.outputTail);
         journalEvent(deps, 'unit-failed', unit(batchId), {
           issue: memberIssue,
           reason,
-          detail: `cap run ${gateFailure.id} reported task-failed after member review done`,
+          detail: excerpt
+            ? `cap run ${gateFailure.id} reported task-failed after member review done: ${excerpt}`
+            : `cap run ${gateFailure.id} reported task-failed after member review done`,
         });
         deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
         evictMemberAndContinue(
@@ -1420,35 +1629,36 @@ function reconcileMemberSlot(
         );
         return;
       }
-      // `ok` / `automation-broken` / `capability-unavailable` all proceed —
-      // only a definite task failure blocks a member here.
+      if (gateInconclusive) {
+        const reason = `gate-inconclusive:${gateInconclusive.id}`;
+        writeGateLog(deps, batchId, gateInconclusive.id, memberIssue, gateInconclusive.outputTail);
+        const excerpt = gateDetailExcerpt(gateInconclusive.outputTail);
+        journalEvent(deps, 'gate-inconclusive', unit(batchId), {
+          issue: memberIssue,
+          reason,
+          detail:
+            excerpt ??
+            `cap run ${gateInconclusive.id} reported ${gateInconclusive.outcome} after member review done`,
+        });
+        deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
+        const stateNow = deps.store.load();
+        const rDeps = recoveryDeps(deps, config, batch, now);
+        const blocked = blockBatch(
+          stateNow,
+          batchId,
+          { reason, milestonePhase: 'batch-review' },
+          rDeps
+        );
+        deps.store.withLock((s) => ({
+          state: applyBatchAndIssues(s, blocked.state, batchId, []),
+          result: undefined,
+        }));
+        result.failed.push(unit(batchId));
+        return;
+      }
     }
 
-    // The commit-range recompute (`git log`) is a blocking subprocess call —
-    // it must run OUTSIDE the lock, like every other exec in this module;
-    // the result then lands as a pure data patch under the lock (Convention
-    // review: `recordRanges` used to run `git log` INSIDE the withLock
-    // mutator, which is exactly what `engine.ts`'s own "a slow git call never
-    // holds the lock" invariant exists to prevent).
-    const ranges = memberRanges(boundaryCommits(deps, batch));
-    deps.store.withLock((s) => {
-      let n = releaseSlot(s, batchId, now);
-      n = patchBatch(n, batchId, { ranges }, now);
-      n = advanceMemberToValidated(n, memberIssue, now);
-      return { state: n, result: undefined };
-    });
-    result.completed.push(unit(batchId));
-    advanceMemberOrValidate(
-      deps,
-      config,
-      dispatch,
-      batchId,
-      batch.members.length,
-      batch.executing_member,
-      memberIssue,
-      now,
-      result
-    );
+    completeMemberGate(deps, config, dispatch, batchId, batch, memberIssue, now, result);
     return;
   }
 

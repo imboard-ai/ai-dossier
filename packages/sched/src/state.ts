@@ -119,7 +119,12 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   forming: ['ready', 'dissolving'],
   ready: ['executing', 'dissolving'],
   // executing → executing advances the member pointer (i/N); the ⟲ in RFC-0001 §D.2.
-  executing: ['executing', 'validating', 'dissolving'],
+  // → blocked (#583): the per-member incremental gate came back inconclusive
+  // (automation-broken/capability-unavailable) — the gate itself, not any
+  // member, is untrustworthy, so the batch blocks rather than evicting on a
+  // false signal. `sched resume --batch` re-runs the gate and transitions
+  // straight back to `executing` on success (see `blocked`'s edge below).
+  executing: ['executing', 'validating', 'dissolving', 'blocked'],
   // `blocked` (#562): the suite REPORT was unreadable even after a fallback
   // retry — distinct from `dissolving`, which is for a red suite that WAS
   // read but named no offender. Nothing is requeued or reverted for `blocked`.
@@ -146,7 +151,11 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   // fixes the suite command — no such CLI command exists yet, so today's only
   // real exit is giving up (`sched abandon --batch`, which routes through
   // `dissolving` like every other non-terminal batch state).
-  blocked: ['validating', 'dissolving'],
+  // → executing (#583): `sched resume --batch <id>` re-runs the incremental
+  // gate that blocked it; a passing recheck resumes the member loop exactly
+  // where it left off (the SAME `executing`-guarded advance/evict functions
+  // the original gate uses).
+  blocked: ['validating', 'dissolving', 'executing'],
 };
 
 const SLOT_BASE_TRANSITIONS: Record<SlotStatus, SlotStatus[]> = {
@@ -235,6 +244,8 @@ export function createBatch(
     evictions: [],
     fix_attempts: [],
     rebase_attempts: 0,
+    member_gates: {},
+    blocked_reason: null,
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -741,6 +752,11 @@ export function validateState(data: unknown): SchedState {
     evictions: batch.evictions ?? [],
     fix_attempts: batch.fix_attempts ?? [],
     rebase_attempts: batch.rebase_attempts ?? 0,
+    // Pre-#583 batches carry neither field — the incremental gate never
+    // produced a non-ok verdict under them (or the field simply didn't
+    // exist yet), so `{}`/`null` are exact, not guesses.
+    member_gates: batch.member_gates ?? {},
+    blocked_reason: batch.blocked_reason ?? null,
   }));
 
   return {

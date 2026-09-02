@@ -117,6 +117,30 @@ describe('buildStatusReport', () => {
     expect(report.blocked[0].reason).toContain('#901');
     expect(report.blocked[0].reason).toContain('#902');
   });
+
+  it('#583 AC4: a blocked batch (gate-inconclusive) surfaces under `blocked` with its reason', () => {
+    let state = seeded();
+    state = {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id === 'b1'
+          ? {
+              ...b,
+              status: 'blocked' as const,
+              blocked_reason: 'gate-inconclusive:test.focused',
+              anchor: 200,
+            }
+          : b
+      ),
+    };
+    const report = buildStatusReport(state, { max_slots: 3 }, 'p');
+    const batchBlocked = report.blocked.find((b) => b.status === 'batch-blocked');
+    expect(batchBlocked).toMatchObject({
+      issue: 200,
+      status: 'batch-blocked',
+      reason: 'gate-inconclusive:test.focused',
+    });
+  });
 });
 
 describe('#468: parked units in the status report', () => {

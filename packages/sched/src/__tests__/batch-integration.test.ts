@@ -17,7 +17,8 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  type CapOutcome,
+  type BatchDispatchDeps,
+  type CapabilityGateResult,
   createSpawnDeps,
   type EngineDeps,
   type EnqueueInput,
@@ -27,6 +28,8 @@ import {
   type GroundTruth,
   Journal,
   type PrTruth,
+  resolveDispatch,
+  resumeBlockedGate,
   type SchedConfig,
   SchedStore,
   type SuiteResult,
@@ -298,7 +301,7 @@ function batchHarness(
   opts?: {
     maxSlots?: number;
     suite?: (worktree: string) => SuiteResult;
-    capability?: (worktree: string, capabilityId: string) => CapOutcome;
+    capability?: (worktree: string, capabilityId: string) => CapabilityGateResult;
     /** #561: simulated `npx worktree-pool claim` result — null = no warm spares (default, matches every scratch repo's real state). */
     poolClaimPath?: string | null;
     /** #561: force this bin to fail — for the `batch-warmup-failed` regression case. */
@@ -665,8 +668,8 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
 
   it('incremental gate (AC2): a member that posts review done but fails cap run test.focused is evicted', async () => {
     const repo = scratchRepo();
-    const capability: (worktree: string, id: string) => CapOutcome = (_worktree, id) =>
-      id === 'test.focused' ? 'task-failed' : 'ok';
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused' ? { outcome: 'task-failed' } : { outcome: 'ok' };
     const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
     h.enqueue([
       { issue: 901, mode: 'slot', batch: 'b-gate', anchor: 900, tier: 'mid' },
@@ -694,6 +697,149 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(batch?.status).toBe('executing');
     expect(batch?.executing_member).toBe(2);
     expect(result.spawned).toContain('batch:b-gate');
+  }, 60_000);
+
+  it('#583 AC1: an automation-broken gate outcome blocks the batch instead of evicting the member', async () => {
+    const repo = scratchRepo();
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused'
+        ? { outcome: 'automation-broken', outputTail: 'pnpm filter matched zero projects' }
+        : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 2001, mode: 'slot', batch: 'b-inconclusive', anchor: 2000, tier: 'mid' },
+      { issue: 2002, mode: 'slot', batch: 'b-inconclusive', tier: 'mid' },
+    ]);
+
+    h.tick(); // batch-setup + member 1
+    const pid = batchSlotPid(h, 'b-inconclusive') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+
+    const result = h.tick();
+    const batch = findBatch(h.state(), 'b-inconclusive');
+    // Not evicted: the member's commit/review stands, nothing requeued.
+    expect(batch?.evictions).toHaveLength(0);
+    expect(h.state().entries.find((e) => e.issue === 2001)?.mode).toBe('slot');
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('gate-inconclusive:test.focused');
+    expect(batch?.member_gates?.['2001']).toMatchObject({
+      capability: 'test.focused',
+      outcome: 'automation-broken',
+      output_tail: 'pnpm filter matched zero projects',
+    });
+    // The slot is released — the batch is not silently wedged.
+    expect(h.state().slots.find((s) => s.unit === 'batch:b-inconclusive')).toBeUndefined();
+    expect(result.failed).toContain('batch:b-inconclusive');
+
+    const events = h.deps.journal.read();
+    const inconclusive = events.find(
+      (e) => e.event === 'gate-inconclusive' && e.unit === 'batch:b-inconclusive'
+    );
+    expect(inconclusive?.detail).toContain('pnpm filter matched zero projects');
+  }, 60_000);
+
+  it('#583 AC1: capability-unavailable also blocks the batch (same rail as automation-broken)', async () => {
+    const repo = scratchRepo();
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused' ? { outcome: 'capability-unavailable' } : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([{ issue: 2101, mode: 'slot', batch: 'b-unavail', anchor: 2100, tier: 'mid' }]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-unavail') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+
+    const batch = findBatch(h.state(), 'b-unavail');
+    expect(batch?.evictions).toHaveLength(0);
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('gate-inconclusive:test.focused');
+  }, 60_000);
+
+  it('#583 AC4: sched resume --batch re-runs the gate — still inconclusive stays blocked, then a passing recheck completes the member', async () => {
+    const repo = scratchRepo();
+    let testFocusedOutcome: CapabilityGateResult = { outcome: 'automation-broken' };
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused' ? testFocusedOutcome : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 2201, mode: 'slot', batch: 'b-resume', anchor: 2200, tier: 'mid' },
+      { issue: 2202, mode: 'slot', batch: 'b-resume', tier: 'mid' },
+    ]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-resume') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+    expect(findBatch(h.state(), 'b-resume')?.status).toBe('blocked');
+
+    const batchDeps: BatchDispatchDeps = {
+      store: h.deps.store,
+      journal: h.deps.journal,
+      groundTruth: h.deps.groundTruth,
+      spawnDeps: h.deps.spawnDeps,
+      now: h.deps.now,
+      repoDir: h.deps.repoDir,
+      exec: h.deps.batchExec as ExecFn,
+      runSuite: h.deps.runBatchSuite as (worktree: string) => SuiteResult,
+      runCapability: capability,
+    };
+    const dispatch = resolveDispatch(h.config);
+
+    const stillBlocked = resumeBlockedGate(batchDeps, h.config, dispatch, 'b-resume', new Date());
+    expect(stillBlocked).toMatchObject({ outcome: 'still-blocked', capability: 'test.focused' });
+    expect(findBatch(h.state(), 'b-resume')?.status).toBe('blocked');
+
+    testFocusedOutcome = { outcome: 'ok' };
+    const resumed = resumeBlockedGate(batchDeps, h.config, dispatch, 'b-resume', new Date());
+    expect(resumed).toMatchObject({ outcome: 'completed', capability: 'test.focused' });
+    const batch = findBatch(h.state(), 'b-resume');
+    expect(batch?.blocked_reason).toBeNull();
+    expect(batch?.status).toBe('executing');
+    expect(batch?.executing_member).toBe(2);
+  }, 60_000);
+
+  it('#583 AC4: sched resume --batch evicts the member when the recheck confirms a real task-failed', async () => {
+    const repo = scratchRepo();
+    let testFocusedOutcome: CapabilityGateResult = { outcome: 'automation-broken' };
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused' ? testFocusedOutcome : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 2301, mode: 'slot', batch: 'b-resume-evict', anchor: 2300, tier: 'mid' },
+      { issue: 2302, mode: 'slot', batch: 'b-resume-evict', tier: 'mid' },
+    ]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-resume-evict') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+    expect(findBatch(h.state(), 'b-resume-evict')?.status).toBe('blocked');
+
+    const batchDeps: BatchDispatchDeps = {
+      store: h.deps.store,
+      journal: h.deps.journal,
+      groundTruth: h.deps.groundTruth,
+      spawnDeps: h.deps.spawnDeps,
+      now: h.deps.now,
+      repoDir: h.deps.repoDir,
+      exec: h.deps.batchExec as ExecFn,
+      runSuite: h.deps.runBatchSuite as (worktree: string) => SuiteResult,
+      runCapability: capability,
+    };
+    const dispatch = resolveDispatch(h.config);
+
+    testFocusedOutcome = { outcome: 'task-failed' };
+    const resumed = resumeBlockedGate(batchDeps, h.config, dispatch, 'b-resume-evict', new Date());
+    expect(resumed).toMatchObject({ outcome: 'evicted', capability: 'test.focused' });
+    const batch = findBatch(h.state(), 'b-resume-evict');
+    expect(batch?.blocked_reason).toBeNull();
+    expect(batch?.evictions).toHaveLength(1);
+    expect(batch?.evictions[0]).toMatchObject({
+      issue: 2301,
+      reason: 'incremental-gate-failed:test.focused',
+    });
+    expect(batch?.status).toBe('executing');
   }, 60_000);
 
   it('#561 AC1/AC3: a cold batch worktree is warmed (node_modules present) before member 1 dispatches', async () => {

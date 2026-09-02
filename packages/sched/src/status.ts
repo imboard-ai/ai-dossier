@@ -120,6 +120,23 @@ export function buildStatusReport(
     }
   }
 
+  // #583 AC4: a blocked BATCH (e.g. `gate-inconclusive`, or #562's
+  // `suite-unreadable`) is otherwise invisible to `blocked` — every entry
+  // above comes from `state.entries` (per-issue), and a blocked batch's
+  // member entries stay `slot`-mode `executing`/whatever they were, not
+  // `blocked`. Reuses `BlockedItem`'s shape so the CLI's existing
+  // "== Blocked ==" renderer needs no changes; `anchor` is set by the time
+  // any gate can block a batch (batch-setup already ran), so the `-1`
+  // fallback is defensive, not expected in practice.
+  for (const batch of state.batches) {
+    if (batch.status !== 'blocked') continue;
+    blocked.push({
+      issue: batch.anchor ?? batch.members[batch.executing_member - 1] ?? -1,
+      status: 'batch-blocked',
+      reason: batch.blocked_reason ?? 'unknown',
+    });
+  }
+
   const units = state.paused ? [] : runnableUnits(state);
 
   const parked: ParkedItem[] = state.entries

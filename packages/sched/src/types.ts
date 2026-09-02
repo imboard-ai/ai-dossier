@@ -83,6 +83,25 @@ export const SATISFIED_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set([
 /** Teardown outcome values (#468): verified cleanup or a failed step. */
 export type CleanupStatus = 'done' | `failed-${string}`;
 
+/**
+ * The four `ai-dossier cap run` outcomes (docs/reference/capabilities.md):
+ * `ok` = the capability ran and passed; `task-failed` = it ran and the TASK
+ * itself failed (trust the result); `automation-broken` = do not trust the
+ * machinery (missing tool, timeout, bad manifest); `capability-unavailable` =
+ * no manifest / no such id / `lifecycle: shadow` — no fast path here.
+ */
+export type CapOutcome = 'ok' | 'task-failed' | 'automation-broken' | 'capability-unavailable';
+
+/**
+ * One `deps.runCapability` result (#583) — the bare outcome plus, on a
+ * non-`ok` result, the tail of the capability's combined stdout+stderr for
+ * attribution (journal detail, `sched status`, the per-gate log file).
+ */
+export interface CapabilityGateResult {
+  outcome: CapOutcome;
+  outputTail?: string | null;
+}
+
 // --- F.2/F.8/F.9 batch failure recovery records (#472) ---
 
 /**
@@ -365,6 +384,28 @@ export interface BatchEntry {
   fix_attempts: FixAttemptRecord[];
   /** Rebases of the batch branch after a PR conflict (§F.9, capped at `MAX_REBASE_ATTEMPTS`). */
   rebase_attempts: number;
+  /**
+   * Most recent incremental-gate result per member (#583), keyed by issue
+   * number as a string (JSON object keys are always strings). Populated on
+   * every gate run that produces a non-`ok` verdict for at least one checked
+   * capability (`typecheck.run`/`test.focused`) — `outcome`/`output_tail`
+   * describe whichever capability was "worst" (task-failed beats
+   * inconclusive). `sched status --json` surfaces this for free via the raw
+   * `BatchEntry`. `{}` for a batch created before this field existed
+   * (`state.ts` load-time backfill) or one whose gate never ran/never failed.
+   */
+  member_gates: Record<
+    string,
+    { capability: string; outcome: CapOutcome; output_tail: string | null; at: string }
+  >;
+  /**
+   * Reason the batch is `blocked`, set by `blockBatch` (#583 — `blockBatch`
+   * previously journaled/posted its reason but never persisted it on the
+   * entry itself, so `sched status` had nothing to read back for the #562
+   * suite-unreadable case either). Cleared back to `null` on any transition
+   * out of `blocked`. `null` when the batch has never been blocked.
+   */
+  blocked_reason: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -993,6 +1034,15 @@ export type JournalEventName =
   // than dissolving on an "unattributable" red suite that was never really
   // parsed at all.
   | 'batch-blocked'
+  // #583: the per-member incremental gate (`typecheck.run`/`test.focused`
+  // via `cap run`) came back `automation-broken`/`capability-unavailable`
+  // rather than a definite `ok`/`task-failed` — the gate itself could not
+  // reach a verdict, so the batch blocks (member's commit stays on the
+  // branch, nothing requeued/reverted) instead of evicting a possibly-good
+  // member on a false signal. Mirrors `batch-blocked`'s "block, don't
+  // dissolve" precedent one level down, at the per-member gate rather than
+  // the aggregate suite.
+  | 'gate-inconclusive'
   | 'milestone-post-failed'
   // #504 zombie-run fencing: the takeover record written before a redispatch
   // respawns, and the degraded path where it could not be written.

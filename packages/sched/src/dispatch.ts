@@ -763,6 +763,21 @@ export function batchTailLogPath(runsDir: string, batchId: string): string {
   return path.join(runsDir, `${unitLogName(`batch:${batchId}`)}-tail.log`);
 }
 
+/**
+ * Per-gate diagnostic log (#583 AC1) — the full captured output of one
+ * `cap run <capabilityId>` invocation of the incremental member gate, written
+ * on any non-`ok` outcome (task-failed or inconclusive) for attribution
+ * beyond the truncated `output_tail` that lands in the journal/caps.jsonl.
+ */
+export function batchGateLogPath(
+  runsDir: string,
+  batchId: string,
+  capabilityId: string,
+  issue: number
+): string {
+  return path.join(runsDir, `${unitLogName(`batch:${batchId}`)}-gate-${capabilityId}-${issue}.log`);
+}
+
 export function batchReportLogPath(runsDir: string, batchId: string): string {
   return path.join(runsDir, `${unitLogName(`batch:${batchId}`)}-report.log`);
 }

@@ -20,6 +20,7 @@ export {
   type BatchDispatchDeps,
   type BatchTickResult,
   type CapOutcome,
+  resumeBlockedGate,
   runBatchTick,
 } from './batch-dispatch';
 export {
@@ -208,6 +209,7 @@ export {
   type BatchEntry,
   type BatchPhase,
   type BatchStatus,
+  type CapabilityGateResult,
   type CleanupStatus,
   CONFIG_SCHEMA_VERSION,
   type CycleMode,

@@ -377,6 +377,185 @@ capabilities:
   });
 });
 
+describe('cap run — output_tail (#583 AC1/AC3)', () => {
+  let tmpDir: string;
+  let originalCwd: string;
+
+  beforeEach(() => {
+    originalCwd = process.cwd();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-tail-test-'));
+    process.chdir(tmpDir);
+    mockedAppendCapLog.mockClear();
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const writeManifest = (yaml: string): string => {
+    const dir = path.join(tmpDir, '.dossier', 'automation');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'manifest.yaml');
+    fs.writeFileSync(file, yaml);
+    return file;
+  };
+
+  it('omits output_tail on an ok outcome', async () => {
+    writeManifest(`
+capabilities:
+  echo.ok:
+    command: node -e "console.log('hello'); process.exit(0)"
+`);
+    await expect(runCap('run', 'echo.ok')).rejects.toThrow('process.exit(0)');
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('ok');
+    expect('output_tail' in envelope).toBe(false);
+    expect(mockedAppendCapLog.mock.calls[0][0].output_tail).toBeUndefined();
+  });
+
+  it('captures combined stdout+stderr as output_tail on task-failed, and still prints it to the console', async () => {
+    writeManifest(`
+capabilities:
+  red.tests:
+    command: node -e "console.log('out-line'); console.error('err-line'); process.exit(1)"
+`);
+    // Output is re-emitted (buffered, not streamed live — Risk Areas), not
+    // dropped, once `runCapability` switches from `stdio: 'inherit'` to
+    // captured output.
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    await expect(runCap('run', 'red.tests')).rejects.toThrow('process.exit(1)');
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('task-failed');
+    expect(envelope.output_tail).toContain('out-line');
+    expect(envelope.output_tail).toContain('err-line');
+    expect(mockedAppendCapLog.mock.calls[0][0].output_tail).toContain('out-line');
+
+    const stdoutWrites = stdoutSpy.mock.calls.map((c) => String(c[0]));
+    expect(stdoutWrites.join('')).toContain('out-line');
+  });
+
+  it('--tail-bytes keeps the LAST N bytes, UTF-8-safe (never splits a multi-byte char)', async () => {
+    // Multi-byte content leads, ASCII trails — the tail (last 10 bytes) lands
+    // entirely inside the unambiguous ASCII suffix, so the exact expected
+    // content is a straightforward last-10-chars slice.
+    writeManifest(`
+capabilities:
+  long.output:
+    command: node -e "process.stdout.write('日本語' + 'a'.repeat(200)); process.exit(1)"
+`);
+    await expect(runCap('run', 'long.output', '--tail-bytes', '10')).rejects.toThrow(
+      'process.exit(1)'
+    );
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(Buffer.byteLength(envelope.output_tail, 'utf-8')).toBeLessThanOrEqual(10);
+    expect(envelope.output_tail).toBe('a'.repeat(10));
+  });
+
+  it('defaults to 8192 bytes when --tail-bytes is not given', async () => {
+    writeManifest(`
+capabilities:
+  very.long.output:
+    command: node -e "process.stdout.write('x'.repeat(20000)); process.exit(1)"
+`);
+    await expect(runCap('run', 'very.long.output')).rejects.toThrow('process.exit(1)');
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(Buffer.byteLength(envelope.output_tail, 'utf-8')).toBe(8192);
+  });
+});
+
+describe('cap run — min_duration_ms floor (#583 AC2)', () => {
+  let tmpDir: string;
+  let originalCwd: string;
+
+  beforeEach(() => {
+    originalCwd = process.cwd();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-floor-test-'));
+    process.chdir(tmpDir);
+    mockedAppendCapLog.mockClear();
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  const writeManifest = (yaml: string): string => {
+    const dir = path.join(tmpDir, '.dossier', 'automation');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'manifest.yaml');
+    fs.writeFileSync(file, yaml);
+    return file;
+  };
+
+  it('reclassifies a fast non-zero exit as automation-broken when below min_duration_ms', async () => {
+    writeManifest(`
+capabilities:
+  fast.fail:
+    command: node -e "process.exit(1)"
+    min_duration_ms: 60000
+`);
+    await expect(runCap('run', 'fast.fail')).rejects.toThrow('process.exit(2)');
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('automation-broken');
+    expect(envelope.reason).toContain('min_duration_ms=60000ms');
+    expect(mockedAppendCapLog.mock.calls[0][0]).toMatchObject({
+      capability: 'fast.fail',
+      outcome: 'automation-broken',
+    });
+  });
+
+  it('keeps task-failed when no min_duration_ms is declared (regression guard — unset default is 0)', async () => {
+    writeManifest(`
+capabilities:
+  fast.fail.no.floor:
+    command: node -e "process.exit(1)"
+`);
+    await expect(runCap('run', 'fast.fail.no.floor')).rejects.toThrow('process.exit(1)');
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('task-failed');
+  });
+
+  it('keeps task-failed when the command runs past the floor', async () => {
+    writeManifest(`
+capabilities:
+  slow.fail:
+    command: node -e "setTimeout(() => process.exit(1), 50)"
+    min_duration_ms: 10
+`);
+    await expect(runCap('run', 'slow.fail')).rejects.toThrow('process.exit(1)');
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('task-failed');
+  });
+
+  it('rejects a negative min_duration_ms at manifest-parse time', async () => {
+    writeManifest(`
+capabilities:
+  bad.floor:
+    command: node -e "process.exit(0)"
+    min_duration_ms: -1
+`);
+    await expect(runCap('list')).rejects.toThrow('process.exit(1)');
+    expect(vi.mocked(console.error).mock.calls.flat().join('\n')).toContain(
+      'min_duration_ms must be a non-negative number'
+    );
+  });
+});
+
 describe('capability engine (pure)', () => {
   describe('parseCapabilityManifest', () => {
     it('parses entries with defaults and probes', () => {
