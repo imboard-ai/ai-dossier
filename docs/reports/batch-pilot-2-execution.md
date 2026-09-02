@@ -4,9 +4,12 @@ Execution-only record for [#526](https://github.com/imboard-ai/ai-dossier/issues
 here** — the GO/NO-GO gate with the 7-day regression window is
 [#529](https://github.com/imboard-ai/ai-dossier/issues/529), enqueued 7 days after #526 closes.
 
-This file covers **both runs of attempt 2**: Part I is run `r-526-1248` (blocked before any batch
+This file covers **all three runs of attempt 2**: Part I is run `r-526-1248` (blocked before any batch
 could dispatch); [Part II](#part-ii--run-r-526-9313-2026-09-01-2257--2026-09-02-hcc2) is run
-`r-526-9313`, which dispatched three batches and is where the execution data lives.
+`r-526-9313`, which dispatched three batches and is where the bulk of the execution data lives;
+[Part III](#part-iii--run-r-526-eba7-2026-09-02-1214--hcc2) is run `r-526-eba7`, the first run whose
+batch actually reached execution — a warm worktree in under a second and both members' agents run —
+before dissolving on two newly-found gate defects.
 
 Companion to [`batch-pilot.md`](./batch-pilot.md) (attempt 1, NO-GO) and
 [`sched-parity.md`](./sched-parity.md) (RFC-0001 Step-1 exit gate). Metric definitions are reused
@@ -604,3 +607,331 @@ so even those are a missing-feature workaround rather than a product judgement.
   `.../imboard-ai-imboard-monorepo/` (hcc2, machine-local)
 - Scheduler journals: `~/.dossier/sched/<project>/events.jsonl`; raw dispatch logs with the
   `modelUsage` this report's numbers were parsed from: `~/.dossier/sched/<project>/runs/*.log`
+
+---
+
+# Part III — run `r-526-eba7` (2026-09-02 12:14 → hcc2)
+
+Attempt 3. Dispatched by the scheduler as a strong-tier `full` unit on
+`imboard-ai-ai-dossier` slot 1 after its blockers (#561, #562, #563, #564, #565, #575) merged.
+
+**Headline: the batch pipeline reached execution for the first time, and died at a new gate.**
+`b-20260902-01` sealed `ready` with a bound anchor, was claimed by the engine, got a **warm worktree in
+under a second**, and ran both of its members' agents — every failure mode that stopped runs 1 and 2 is
+gone. Both members were then evicted on two *different* defects, neither previously known, and the
+batch dissolved 21 minutes after it was enqueued. **Zero batches completed. AC1 is still not met.**
+
+The two defects are #579 and #580; a third, #582, was found in the gate rail on the way in. All three
+are filed with reproductions and acceptance criteria.
+
+## 17. Environment (run 3)
+
+| | |
+|---|---|
+| host | hcc2 (this box) |
+| `@ai-dossier/cli` | 0.30.0 (npm latest at dispatch) |
+| `@ai-dossier/sched` | 0.19.0 (npm latest; the tick's step-0b nested-dependency upgrade had already run) |
+| pilot project | `imboard-ai-imboard-monorepo`, `max_slots=3`, `stall_timeout_ms=10800000` |
+| tier models | `mechanical→haiku`, `mid→sonnet`, `strong→opus` |
+| engine tick | `~/.dossier/reset-fleet/tick.sh`, cron `*/2` |
+
+**Model parity was already satisfied.** The 2026-09-01 owner note required switching the imboard sched
+project off the parity-W3 openrouter glm/kimi mapping back to claude tiers before the pilot. The config
+read at dispatch already carried the claude mapping above, so no change was needed and the token
+comparison isolates batching rather than the model.
+
+## 18. What ran
+
+### 18.1 Getting in — the gate rail (defect #582)
+
+#526's trail ended with attempt 2's `phase=report status=done run=r-526-9313 at=2026-09-02T01:56:46Z`.
+`ai-dossier runstate verify --issue 526 --json` returned `resume_from=report`, reusing the finished
+run's id: obeying it would have posted a second report milestone for work never done and exited, and
+attempt 3 would silently not have happened.
+
+The engine no longer believes that milestone — #576 made `isVerifiedComplete` refuse a `report/done`
+older than the slot's dispatch time, which is why this agent survived its first reconcile tick instead
+of being killed two minutes in as the 08:32Z dispatch was (#575). But `runstate verify` — the thing
+`gate-issue` Step 1.5 instructs every run to trust — never got the equivalent rule
+(`cli/src/runstate.ts:898`: `report/done` + issue OPEN → `report`, unconditionally). The two rails
+disagree. The run entered FRESH by operator override, minting `r-526-eba7` and carrying
+`prior_run=r-526-9313`. Filed as **#582**.
+
+### 18.2 Cohort generation (§5.3 — routed through the classifier)
+
+The submitted set was three issues, and its narrowness is a finding rather than a shortcut. The
+ai-dossier backlog is exhausted of batchable work — every open issue is an epic, a batch anchor, an ops
+issue, `decision-pending`, or already labelled `cycle:full` — matching the independent 2026-09-02
+candidate review on #526 ("0 additional batchable batches exist; 2 net-new imboard slot hits"). On the
+imboard side, 115 open issues filtered by the §5.3 exclusion set leave a backlog dominated by
+already-`cycle:full` work; submitting those would have enqueued eleven concurrent full-cycle runs and
+destroyed the makespan measurement. #3968 and #3549 were excluded before submission (see the audit
+file: #3968 needs an unlanded helper plus an unanswered baseline decision; #3549 modifies the very
+`auto-merge-watcher` the pilot needs to merge its own PR).
+
+`ai-dossier classify prescreen --submitted-set 1026,2687,3966` returned `candidate` for all three with
+zero floor reasons. Three mechanical-tier (haiku) `issue-cycle-classifier` dispatches then ran
+concurrently:
+
+| issue | mode | risk | est_files | est_diff | areas | confidence | record |
+|---|---|---|---|---|---|---|---|
+| #1026 | slot | low | 1 | 80 | documentation | 0.95 | `r-1026-a195` |
+| #2687 | slot | low | 3 | 95 | frontend,monitor | 0.80 | `r-2687-42fb` |
+| #3966 | **full** | low | 2 | 80 | frontend | 0.85 | `r-3966-2b7f` |
+
+#3966's `full` is floor rule 8 (visual/browser review required — its ACs demand re-measuring four route
+layout findings in a browser against a live backend). The floor is correct; this is a real
+classification, not a miss.
+
+**Cohort-generation cost, against §4.1's attempt-2 figures:**
+
+| | attempt 2 wave 2 (mid tier) | attempt 3 (mechanical tier) |
+|---|---|---|
+| dispatches | 7 | 3 |
+| total agent tokens | ~448,000 | **96,449** |
+| mean per classify | ~64,000 | **32,150** |
+| mean duration | 311 s | **99.5 s** |
+| wall-clock (parallel) | ~8 min | **~2 min** |
+| slot yield | 0 / 7 | **2 / 3** |
+
+#538's move of the classifier to mechanical tier halved the per-classify token cost and cut its
+duration to a third. The 2/3 yield is not comparable to attempt 2's 0/7 — this set was hand-narrowed to
+likely candidates first, so it measures the classifier's agreement with a human pre-filter, not a
+backlog hit rate.
+
+### 18.3 The batch
+
+`b-20260902-01`, anchor [imboard-monorepo#3976](https://github.com/imboard-ai/imboard-monorepo/issues/3976),
+base `main`, members in order **#1026 → #2687** (no deps, both `risk=low`, so issue number decides).
+Eviction groups: **none** — predicted paths are disjoint. Σ `est_diff` = 175.
+
+Both members were enqueued at `tier=mid`. Step 8's tier rule maps `documentation` + `risk=low` to
+`mechanical`, which would have put #1026 on haiku; the owner's model-parity clause requires the pilot
+arm to run at the baseline's sonnet mid tier so the comparison isolates batching. Overriding it is
+counted as a human intervention (§21).
+
+`#3966` was enqueued as an independent `full` entry rather than deferred. `sched` gives batches
+dispatch priority (#565) and `max_slots=3`, so it could not delay the batch, and it supplies the
+contemporaneous same-repo, same-window, same-tier full-cycle control that §13.2 records as missing from
+every prior attempt.
+
+### 18.4 Timeline (UTC, 2026-09-02)
+
+| time | event |
+|---|---|
+| 12:18 | prescreen: 3/3 `candidate` |
+| 12:19–12:20 | 3 classify dispatches complete (parallel) |
+| 12:23:27 | audit file + manifest written |
+| 12:23:35 | `sched enqueue --from-manifest` → **`b-20260902-01` sealed `ready`, `anchor=3976`** |
+| 12:24:10 | engine tick assigns the batch; **`batch-setup-done` in the same second — pool claim, `pool_claimed=true`**; member 1/2 (#1026) spawned; #3966 spawned in parallel |
+| 12:28:11 | member #1026 hands back blocked → evicted `git-unavailable`; requeued full-cycle |
+| 12:28:11 | member 2/2 (#2687) spawned |
+| 12:44:14 | #2687 posts `review done` (4/4 ACs met, 17 tests run, 3 added, commit `4c505523c` pushed) |
+| 12:44:14 | incremental gate `cap run test.focused` → `task-failed` → evicted `incremental-gate-failed:test.focused` |
+| 12:44:14 | `batch-dissolved eviction-threshold strategy=full N=2 evictions=2 threshold=1 requeued=1026,2687 preserved=none` |
+| 12:46:15 | `teardown-done` — batch worktree returned to the pool as a warm spare |
+| 12:54:36 | control #3966 merged — PR [imboard#3978](https://github.com/imboard-ai/imboard-monorepo/pull/3978) `b33684f43` |
+| 13:01:06 | #1026 full-cycle re-run merged — PR [imboard#3979](https://github.com/imboard-ai/imboard-monorepo/pull/3979) `5bfa183f5` |
+| 13:26:21 | #2687 full-cycle re-run exits unverified → fenced `gen=0`, redispatched `gen=1` |
+
+**Enqueue to dissolve: 21 minutes.**
+
+## 19. What is now fixed — verified by execution, not by reading
+
+Run 2's five blockers all held up. This is the run's most durable result and it should not be lost
+behind the dissolve:
+
+| blocker | fix | evidence from this run |
+|---|---|---|
+| #545 — batches never seal `forming → ready` | seal at enqueue | batch was `status=ready` immediately after `sched enqueue` |
+| #536 / #539 — anchor never bound (`anchor: null`) | anchor on every manifest member | `anchor: 3976` on the batch record; the engine dispatched it |
+| **#561 — batch worktree never warmed (`env-cold`)** | pool-claim-first in `runBatchSetup` | `batch-setup-done` in the **same second** as `assigned`, `pool_claimed=true`. **Zero `env-cold` hand-backs.** Attempt 2 lost two members and a whole batch to this in ~4 minutes |
+| #565 — batches do not outrank full-cycle entries | unit priority | batch dispatched at `priority=10` against the `#3966` entry's `0`; §13.4's interventions 2–4 (hand-deferring competitors) were **not needed** |
+| #564 — `sched stats` empty for batch members | direct log reads | `sched stats --batch b-20260902-01` returned real per-member figures; §13's hand-parsing of `runs/*.log` was not needed |
+| #575 — re-enqueued issue completes on its previous run's milestone | dispatch-time check in `isVerifiedComplete` (#576) | this agent survived its first reconcile tick; the 08:32Z dispatch had been killed 2 minutes in |
+
+#562's aggregate-suite fix is **untested by this run** — the batch never reached `validating`.
+
+## 20. B4 — the two new defects
+
+### 20.1 B4a — `plan validate` cannot express a file that is new by design (#579)
+
+Member #1026's whole deliverable is one new file. Its `plan:v1` artifact's Predicted Files therefore
+names a path that does not exist at HEAD — correctly, and matching the issue's own AC1 verbatim
+(*"A runbook exists at `main/docs/runbooks/investor-intelligence-hook-quarterly-review.md`"*).
+
+`ai-dossier plan validate --issue 1026` runs its predicted-file existence check as
+`git show HEAD:<path>`, which exits 128 for a missing path. That is reported as a git-probe failure
+rather than "path absent", so the member's slot-cycle blocked at Step 1 with `reason=git-unavailable`
+and was evicted having implemented nothing. The member verified it was not transient (re-run from two
+directories) and correctly declined to paper over it.
+
+**Any issue whose deliverable is a new file is unrunnable as a batch member today.** Already filed as
+**#579**; this run is its second sighting.
+
+### 20.2 B4b — the incremental member gate reads INCONCLUSIVE as a member failure (#580)
+
+This is the one that matters, because it is deterministic and it kills every imboard batch.
+
+#2687 completed its slot-cycle cleanly: 4/4 acceptance criteria met with file:line citations, 17 tests
+run and 3 added, commit `4c505523c` pushed to `batch/b-20260902-01-20260902` — **the commit is still on
+origin.** The engine then ran its independent re-check (`batch-dispatch.ts` ~L1399, the #523 AC2
+incremental gate) and evicted the member.
+
+Reproduced by checking `4c505523c` into a fresh linked worktree and running the gate's own command:
+
+```
+$ ai-dossier cap run test.focused
+cap-test-focused: testing scope = merge-base 31b2a52adbac304e2efcb4ad2f980fdcd1a71757
+No projects matched the filters in ".../worktrees/tmp-2687-gate-repro/main"
+
+cap-test-focused: pnpm's git-diff filter matched nothing despite a real
+main/packages/** diff — known pnpm-in-linked-worktree limitation (see
+scripts/ci-parity.sh's header). Treating as inconclusive, not a pass.
+
+{"capability":"test.focused","outcome":"task-failed","exit_code":1,...}
+```
+
+**The suite never ran.** The script says so in words, and its own header explains why it must still
+exit non-zero:
+
+> the engine's outcome classification is purely exit-code-mechanical, so a script cannot itself request
+> "automation-broken"; non-zero is the signal that matters
+
+The engine's gate then evicts on any `task-failed`, immediately below a comment stating the intended
+contract — *"`ok` / `automation-broken` / `capability-unavailable` all proceed — only a definite task
+failure blocks a member here."* The contract is right; **"inconclusive" simply has no channel to reach
+it**, because `CapOutcome` is derived from the exit code alone.
+
+A batch worktree is by construction a **linked git worktree** — that is the design. pnpm's
+`--filter "...[<ref>]"` selector matching nothing inside a linked worktree is a documented bug in this
+exact repo shape (`scripts/ci-parity.sh` header). So `cap run test.focused` returns `task-failed` for
+**every** imboard batch member regardless of its diff or its quality. Every member is evicted; every
+batch dissolves. Two for two across two attempts (#3631 in attempt 2, #2687 here), and deterministic.
+
+This is #562's defect class on the gate #562 did not cover: #562 gave the **aggregate** validate gate
+`SuiteResult.readable` to separate "ran, zero failures" from "never got a readable report", and made the
+latter block rather than dissolve. The **incremental per-member** gate never got that distinction.
+`docs/agent-traps.md` rows 14–15 describe the aggregate half. Filed as **#580**.
+
+### 20.3 The dissolve was correct given its inputs, and still lost the work
+
+`threshold=1` for `N=2` — `max(ceil(N × fraction), min_evictions_before_dissolve)` clamped to `N−1`, so
+a 2-member batch structurally tolerates exactly one eviction whatever #563's floor is set to. The first
+eviction was survived; the second dissolved the batch.
+
+`strategy=full`, `preserved=none`: #563's partial-preserve had nothing to preserve, because the only
+member that produced work was the one the gate had just (wrongly) declared failed. So #2687's completed
+change was requeued to be written again from scratch — **$3.54 of member work discarded**, even though
+the commit itself still sits on `origin/batch/b-20260902-01-20260902`. Nothing is wrong with the
+dissolve logic here; it is downstream of B4b and inherits its false input.
+
+## 21. Metrics (run 3)
+
+Same definitions as `batch-pilot.md` §2.2. Figures from `ai-dossier sched stats` (#564) — this run did
+**not** need §13's hand-parsing of `runs/*.log`.
+
+### 21.1 Per-dispatch cost
+
+| dispatch | arm | billable in | out | cache-read | cost |
+|---|---|---|---|---|---|
+| #1026 as batch member (evicted at plan, `git-unavailable`) | pilot | 24 | 8,268 | 760,281 | **$0.464** |
+| #2687 as batch member (reached `review done`, evicted at gate) | pilot | 170 | 45,382 | 10,526,314 | **$3.540** |
+| **batch total (`sched stats --batch b-20260902-01`)** | | 194 | 53,650 | 11,286,595 | **$4.003** |
+| #3966 full-cycle control (merged, same repo/window/tier) | baseline | 318 | 73,379 | 18,961,097 | **$6.533** |
+| #1026 full-cycle re-run + classify + report (5 runs total) | baseline | 462 | 104,590 | 27,419,027 | **$10.939** |
+
+The #1026 row aggregates its classify dispatch, its evicted batch-member dispatch, its full-cycle
+re-run and its report agent — `sched stats` sums per issue, and the re-run's own share is not
+separable from the total without hand-parsing, which #564 exists to avoid.
+
+### 21.2 Against the attempt-1 baseline
+
+| metric | baseline arm (attempt 1, n as noted) | pilot arm (run 3) |
+|---|---|---|
+| batches executed end-to-end | N/A | **0 of 1 dispatched** |
+| batch members completing their slot-cycle | N/A | **1 of 2** (#2687 reached `review done`; #1026 blocked at plan) |
+| batch members surviving the gates | N/A | **0 of 2** |
+| billable input / issue | 47,105,733 | not comparable — no member finished a full unit of work |
+| cost / issue | $16.00 | **$2.00** mean across the 2 dispatched members, but 1 of the 2 did no work — the only member that produced a change cost **$3.54** |
+| eviction rate | N/A | **2 / 2 members = 100%** |
+| dissolve rate | N/A | **1 of 1 batch (100%)** |
+| CI executions / issue | 2.73 | **0** on the pilot arm — the batch never opened a PR. The control #3966 took **8** workflow runs on its head sha; the #1026 re-run took **9** |
+| makespan | 1.07 issues/h | not measurable — no batch completed |
+| batch setup time | N/A | **< 1 s** (pool claim). Attempt 2: fatal `env-cold` |
+| enqueue → dissolve | N/A | **21 min** |
+| misclassification | not computable | **0 of 3 contradicted.** #1026 and #2687 both classified `slot` and both behaved like slot work — neither eviction was a classification error (one is a validator gap, one a gate gap). #3966's `full` was confirmed by execution: it merged as a full-cycle run |
+| human interventions | 0 (n=11) | **3** — see §21.3 |
+| regressions | 0 | N/A on the pilot arm; the two merged control/re-run PRs are inside #529's 7-day window |
+
+**No cost claim is made from this run.** The pilot arm produced one member's work and then threw it
+away; there is no batch tail (shared PR, shared CI, shared merge) to measure, so the §13.3 ceiling
+caveat applies here even more strongly. §13.3's **−49% on member work, with the shared tail unmeasured**
+remains the defensible figure the pilot has produced. #529 owns the verdict.
+
+### 21.3 Human interventions (3)
+
+| # | intervention | why it was needed |
+|---|---|---|
+| 1 | Entered FRESH over `runstate verify`'s `resume_from=report` | #582 — obeying `verify` would have made attempt 3 a no-op that reported success |
+| 2 | Added `dispatch.suite_command = ["ai-dossier","cap","run","test.focused"]` to the imboard sched config | imboard's `test.full` capability is confirmed slower than the runner's 10-minute `BATCH_SUITE_TIMEOUT_MS`, so the aggregate gate would have timed out into `suite-unreadable` and blocked the batch — a state with no CLI resume verb. **Never exercised: the batch died before `validating`.** |
+| 3 | Overrode #1026's tier `mechanical → mid` | the owner's model-parity clause; dispatching one member on haiku would have measured the model, not the batch |
+
+Down from 6 in run 2. The three that run 2 spent forcing batch ordering by hand (§13.4 interventions
+2–4) were made unnecessary by #565.
+
+## 22. Limitations (run 3)
+
+- **Two members is a thin batch.** The 2-member size is what the backlog allowed, and it makes the
+  dissolve threshold structurally 1 (`N−1` clamp) — a larger batch would have tolerated the first
+  eviction with more headroom. The eviction *causes* are size-independent, but the dissolve timing is not.
+- **#562's aggregate-suite fix is still unexercised.** No batch has reached `validating` in any attempt.
+  Intervention 2 was pre-emptive and remains unvalidated.
+- **The cross-repo caveat stands.** The pilot arm ran in imboard; attempt 1's baseline ran in
+  ai-dossier. The imboard-side baseline is `sched-parity.md` §3's fleet arm. #3966 is the first
+  same-repo, same-window, same-tier full-cycle control the pilot has, and it is n=1.
+- **The reproduction of B4b was run with hardlinked `node_modules`** (`cp -al` from a warm pool spare)
+  rather than a fresh `pnpm install`. That affects nothing in the finding — pnpm's filter matched zero
+  projects before any test could run — but it is not a pristine environment.
+- **#2687's full-cycle re-run had not merged when this record was written**, so the cleanest available
+  comparison (the same issue as a batch member and as a full-cycle run, §13.3's shape) is incomplete
+  for this run. Its first attempt exited unverified and was fenced/redispatched at `gen=1` — the same
+  `agent-exited-unverified` failure mode that hit #3820 and #542 in run 2, and, as §13.3 notes, a
+  general dispatch failure mode rather than a batch defect.
+
+## 23. Acceptance criteria (attempt 2 overall, after run 3)
+
+| AC | status |
+|---|---|
+| **AC1** — ≥ 1 batch executed end-to-end | **NOT MET.** `b-20260902-01` prepared, sealed, anchored, dispatched, warmed and executed both members' agents — then dissolved on #579 and #580. Zero batches have completed across three runs. |
+| **AC2** — "Batch #490 is batch 1" | **NOT ACHIEVABLE.** `b-20260829-01` dissolved in run 2 and its members #487/#488/#489 shipped through the full-cycle fallback. Recorded rather than dropped. |
+| **AC3** — metrics vs the attempt-1 baseline | **MET, with the pilot column mostly empty and honestly so** — §21. Tokens/cost, CI executions, eviction/dissolve rate, misclassification and interventions are all measured; makespan is not, because no batch completed. |
+| **AC4** — execution only: batches merged + deployed, anchors and trails linked, record in this file | **PARTIALLY MET.** This record and the anchor/trail links exist (§24); no batch merged, so nothing was deployed from the pilot arm. |
+
+**1 of 4 met, 1 partially, 1 not achievable** — unchanged in count from run 2, but not in substance: run
+2 could not warm a worktree, and run 3 executed members. The remaining blockers are #579, #580 and #582,
+all filed with reproductions and acceptance criteria, all full-cycle ready.
+
+## 24. Appendix — evidence (run 3)
+
+- Batch anchor: [imboard-monorepo#3976](https://github.com/imboard-ai/imboard-monorepo/issues/3976) —
+  `b-20260902-01`, run id `r-3976-ba75`
+- Surviving member work: `origin/batch/b-20260902-01-20260902` @ `4c505523c` (#2687's complete change,
+  discarded by the dissolve but never deleted)
+- Merged this run: PR [imboard#3978](https://github.com/imboard-ai/imboard-monorepo/pull/3978) `b33684f43`
+  (#3966, the full-cycle control) · PR [imboard#3979](https://github.com/imboard-ai/imboard-monorepo/pull/3979)
+  `5bfa183f5` (#1026, the re-run after eviction)
+- Runstate trail for this run: `r-526-eba7` on [#526](https://github.com/imboard-ai/ai-dossier/issues/526)
+  (`prior_run=r-526-9313`)
+- Member slot-cycle trails: `r-1026-95f7` and `r-2687-*` (`mode=slot batch=b-20260902-01-20260902`);
+  full-cycle re-runs `r-1026-*`, `r-2687-2724` (fenced `gen=0`) and its `gen=1` takeover
+- Classify records: `r-1026-a195`, `r-2687-42fb`, `r-3966-2b7f` (all fresh, mechanical tier)
+- `plan:v1` artifacts posted by this run: imboard #1026, #2687, #3966
+- Batch-prep audit + manifest: `~/.dossier/logs/batch-prep/imboard-ai-imboard-monorepo/BATCH-PLAN-20260902-122327.md.gz`
+  and `manifest-20260902-122327.json` (hcc2, machine-local)
+- Raw dispatch logs: `~/.dossier/sched/imboard-ai-imboard-monorepo/runs/batch-b-20260902-01-m1-1026.log`,
+  `...-m2-2687.log`; journal `~/.dossier/sched/imboard-ai-imboard-monorepo/events.jsonl`
+- Blockers filed by this run: [#580](https://github.com/imboard-ai/ai-dossier/issues/580) (incremental
+  gate reads inconclusive as failure), [#582](https://github.com/imboard-ai/ai-dossier/issues/582)
+  (`runstate verify` resumes into `report` on a completed prior run). Sibling, filed independently
+  during the same window: [#579](https://github.com/imboard-ai/ai-dossier/issues/579).
