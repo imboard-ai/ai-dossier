@@ -306,6 +306,17 @@ export interface BatchEntry {
    */
   worktree: string | null;
   /**
+   * Whether `worktree` came from a pool claim (already warm) rather than a
+   * cold `git worktree add` that batch-setup then warmed itself (#561).
+   * Teardown reads this to decide `worktree-pool return` vs `git worktree
+   * remove` — mirrors `SetupInfo.poolClaimed` (`groundtruth.ts`) at batch
+   * granularity. `false` until batch-setup lands; a state file written before
+   * #561 carries no such key at all — `state.ts`'s load-time normalization
+   * backfills it to `false` (batches from before this field existed were
+   * never pool-claimed, since batch-setup had no pool integration yet).
+   */
+  pool_claimed: boolean;
+  /**
    * runstate run id of the batch run (`r-<issue>-<hex>`), null until batch-setup
    * mints it. `ai-dossier runstate post` REQUIRES a run id, so a batch without
    * one cannot post milestones at all — recovery journals them instead.
@@ -904,6 +915,15 @@ export type JournalEventName =
   // `unit` is `batch:<id>` and `issueOfUnit` already returns null for it.
   | 'batch-setup-done'
   | 'batch-setup-failed'
+  // #561: the cold-path warm step (pool-claimed worktrees skip it — already
+  // warm) — `JournalEvent` has no `duration_ms` field, so the elapsed time is
+  // appended to `detail` instead (`<tag> <n>ms`), alongside which path ran
+  // (`cap:worktree.prepare` / `pm:<npm|pnpm|yarn|bun>:<n>cmds` / `skipped:...`
+  // / a `pool-claim-invalid:` prefix when the cold path was taken because a
+  // pool claim returned unusable output rather than "no warm spares"), even
+  // when there was nothing to warm.
+  | 'batch-warmup-done'
+  | 'batch-warmup-failed'
   | 'member-advanced'
   // #507 enqueue-time hard-block label pre-screen (journaled by the CLI,
   // NOT the engine — sched enqueue appends these before the issue is ever

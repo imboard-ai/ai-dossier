@@ -12,6 +12,7 @@ export {
   resolvePoolDir,
   returnWorktree,
   status,
+  WARM_COMMAND_TIMEOUT_MS,
 } from './pool-actions';
 export * from './pool-state';
 export * from './project-env';

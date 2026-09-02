@@ -49,6 +49,7 @@ import {
   tick,
   unitEvent,
 } from '@ai-dossier/sched';
+import { WARM_COMMAND_TIMEOUT_MS } from '@ai-dossier/worktree-pool';
 import type { Command } from 'commander';
 import { BATCH_SUITE_TIMEOUT_MS, createBatchSuiteRunner } from '../batch-suite-runner';
 import { formatCost, formatCount } from '../cost-format';
@@ -928,11 +929,23 @@ function registerStartSubcommand(cmd: Command): void {
         // #523: batch git/milestone-CLI operations (worktree claim, commit-range
         // recording, milestone posting, PR watch) and the aggregate suite runner
         // that gates `executing → reviewing`. Reuses the same timeout as teardown
-        // (worktree/git ops) for exec; the suite runner has its own longer budget.
+        // (worktree/git ops). The cold-path warm-up install/build (#561) does
+        // NOT reuse this — see `batchWarmExec` below — a real `npm ci`+build
+        // routinely exceeds this budget.
         batchExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
           onError: (file, args, err) =>
             process.stderr.write(
               `⚠ sched batch: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+            ),
+        }),
+        // #561: batch-setup's cold-path warm-up (install + build) on its own
+        // budget, matching `@ai-dossier/worktree-pool`'s own per-issue warm-up
+        // budget for the identical work (`WARM_COMMAND_TIMEOUT_MS`) rather than
+        // the git-op-tuned `batchExec` above.
+        batchWarmExec: createExecFn(WARM_COMMAND_TIMEOUT_MS, {
+          onError: (file, args, err) =>
+            process.stderr.write(
+              `⚠ sched batch warm-up: '${file} ${args.join(' ')}' failed: ${err.message}\n`
             ),
         }),
         runBatchSuite: createBatchSuiteRunner(config),

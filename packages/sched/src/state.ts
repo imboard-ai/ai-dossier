@@ -222,6 +222,7 @@ export function createBatch(
     anchor: opts.anchor ?? null,
     branch: null,
     worktree: null,
+    pool_claimed: false,
     run_id: opts.run_id ?? null,
     ranges: [],
     pr: null,
@@ -692,6 +693,9 @@ export function validateState(data: unknown): SchedState {
     // Pre-#523 (1.6.0) batches carry neither field — no batch has ever been
     // dispatched under them, so null/[] is exact, not a guess.
     worktree: batch.worktree ?? null,
+    // Pre-#561 batches carry no `pool_claimed` key at all — batch-setup had
+    // no pool integration yet, so `false` (cold-only) is exact, not a guess.
+    pool_claimed: batch.pool_claimed ?? false,
     run_id: batch.run_id ?? null,
     ranges: batch.ranges ?? [],
     pr: batch.pr ?? null,

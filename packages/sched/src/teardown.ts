@@ -37,9 +37,12 @@ export const TEARDOWN_TIMEOUT_MS = 120_000;
  * `^0.5.1` (which resolves to ≤0.5.3) cannot ever satisfy the JSON contract
  * and every pool teardown would record `failed-pool-return`. Versions ≤0.5.0
  * additionally carry the data-loss `gc` bug — never pin lower.
+ *
+ * Exported so `batch-dispatch.ts`'s pool-claim attempt (#561) shares this
+ * exact pin instead of duplicating it.
  */
-const POOL_BIN = 'npx';
-const POOL_ARGS_PREFIX = ['-y', '@ai-dossier/worktree-pool@^0.6.0'];
+export const POOL_BIN = 'npx';
+export const POOL_ARGS_PREFIX = ['-y', '@ai-dossier/worktree-pool@^0.6.0'];
 
 /** The outcome recorded on the entry's `cleanup` and in the journal. */
 export interface TeardownResult {
