@@ -7,7 +7,12 @@ name: Surface Vercel Build Failures
 #   caused by the PR or is pre-existing, which turns a two-minute question into a
 #   guessing game.
 #
-#   This posts the failing build's error lines directly onto the pull request.
+#   This posts the failing build's error lines directly onto the pull request. If no
+#   PR exists yet for the commit — a fleet/batch push can precede `gh pr create` by
+#   seconds to minutes — the job retries the PR lookup for a few minutes and then
+#   falls back to a commit comment on the SHA, so the diagnosis is never stranded in
+#   the Action log (imboard-ai/ai-dossier#567). See
+#   docs/explanation/infrastructure-lessons.md → Neon for the most common cause.
 #
 # The token lives in SSM Parameter Store, not a GitHub secret, so it rotates in the
 # same place as everything else. CI reads it via OIDC — no static AWS credentials.
@@ -23,6 +28,13 @@ name: Surface Vercel Build Failures
 # Trusting it on github-dossier-oidc would expose the official KMS dossier signing
 # key to any fork PR. This role trusts that exact claim (StringEquals, not
 # StringLike) and can do exactly one thing: read /dossier/vercel_token.
+#
+# The job also holds `contents: write` (below) purely for the commit-comment
+# fallback — `createCommitComment` has no narrower scope. `deployment_status` runs
+# with a write-capable GITHUB_TOKEN even for a fork-originated deployment (same
+# fork-reachability note as above), so the script checks the SHA is reachable from a
+# branch in THIS repo before it retries or writes anything, and posts only a
+# comment — it never checks out or executes repository content.
 #
 # Setup:
 #   1. Store the token:  chamber write dossier vercel_token "<token>"
@@ -52,6 +64,7 @@ jobs:
   report:
     if: github.event.deployment_status.state == 'failure'
     runs-on: ubuntu-latest
+    timeout-minutes: 10   # the PR-lookup retry loop below can hold the runner for several minutes
     steps:
       - name: Configure AWS creds via OIDC
         id: aws
@@ -122,6 +135,8 @@ jobs:
               return res;
             };
 
+            const repoRef = { owner: context.repo.owner, repo: context.repo.repo };
+
             // The events endpoint has returned both a JSON array and NDJSON across
             // API versions, and event shapes vary (payload.text vs text). Parse
             // defensively and keep every text line, so a shape change degrades to
@@ -129,11 +144,30 @@ jobs:
             const stripAnsi = (t) => t.replace(/\u001b\[[0-9;]*m/g, '');
             const ERROR_RE = /error|failed|cannot find|not found|exit code|fatal/i;
 
+            // Vercel build logs routinely echo environment values — most relevantly
+            // a Neon connection string in exactly the provisioning-failure case this
+            // job now detects. Redact before anything is posted to a public comment.
+            const redact = (s) => String(s)
+              .replace(/\b(postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|https?):\/\/[^:@\s/]+:[^@\s]+@/gi, '$1://***:***@')
+              .replace(/\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, '$1****************')
+              .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, 'gh*_***')
+              .replace(/\b(bearer|token|api[-_]?key|secret|password)\b(\s*[:=]\s*)\S+/gi, '$1$2***');
+
+            // A fenced code block breaks if the fenced content itself contains a run
+            // of backticks as long as the fence — and build output / errorMessage
+            // here are fully attacker-controlled (any fork PR can trigger a failing
+            // preview). Use a fence longer than the longest backtick run present.
+            const fenceFor = (s) => {
+              const runs = [...String(s).matchAll(/`+/g)].map((m) => m[0].length);
+              return '`'.repeat(Math.max(3, ...runs, 0) + 1);
+            };
+
             // Resolve whatever reference we have (hostname or id) to a canonical
             // dpl_ id; the events endpoint only answers for the latter.
             let failureSummary = '';
+            let meta = null;
             try {
-              const meta = await (await api(`/v13/deployments/${deploymentId}`)).json();
+              meta = await (await api(`/v13/deployments/${deploymentId}`)).json();
               if (meta?.id) {
                 core.info(`resolved ${deploymentId} → ${meta.id} (state=${meta.readyState ?? '?'})`);
                 deploymentId = meta.id;
@@ -148,7 +182,7 @@ jobs:
                 meta?.errorStep && `errorStep: ${meta.errorStep}`,
               ].filter(Boolean);
               if (bits.length) {
-                failureSummary = bits.join('\n');
+                failureSummary = redact(bits.join('\n'));
                 core.info(`deployment failure summary:\n${failureSummary}`);
               }
             } catch (err) {
@@ -156,6 +190,7 @@ jobs:
             }
 
             let all = [];
+            let eventsError = null;
             try {
               const res = await api(`/v3/deployments/${deploymentId}/events?builds=1&limit=500`);
               const text = await res.text();
@@ -177,8 +212,11 @@ jobs:
                 if (t) all.push({ type: ev.type ?? '', text: stripAnsi(String(t)).trimEnd() });
               }
             } catch (err) {
+              // Do not bail here — failureSummary (from the metadata call above) may
+              // still carry the Neon-quota diagnosis even though the build-log fetch
+              // itself failed, and that is worth posting on its own.
               core.warning(`Could not read deployment events: ${err.message}`);
-              return;
+              eventsError = err.message;
             }
 
             const errors = all.filter(
@@ -191,12 +229,13 @@ jobs:
 
             const zeroBuildEvents = lines.length === 0;
             if (zeroBuildEvents) {
-              lines = [
-                'No build log events — the build itself did not fail.',
-                'The deployment errored after building, so the reason is in the summary above.',
-              ];
+              lines = eventsError
+                ? [`Build log unavailable — Vercel events API request failed: ${eventsError}`,
+                   'The deployment status summary above (if any) is the only signal.']
+                : ['No build log events — the build itself did not fail.',
+                   'The deployment errored after building, so the reason is in the summary above.'];
             }
-            const tail = lines.slice(-40).join('\n').slice(-6000);
+            const tail = redact(lines.slice(-40).join('\n').slice(-6000));
 
             // The exact signature of "Neon preview branch quota exhausted" —
             // see docs/explanation/infrastructure-lessons.md → Neon. Flagging
@@ -204,26 +243,52 @@ jobs:
             const isNeonQuotaSignature = zeroBuildEvents
               && meta?.errorCode === 'BUILD_FAILED'
               && /resource provisioning failed/i.test(meta?.errorMessage || '');
+            core.info(`neon-quota signature: ${isNeonQuotaSignature} (zeroBuildEvents=${zeroBuildEvents} errorCode=${meta?.errorCode ?? 'n/a'} errorMessage=${JSON.stringify(meta?.errorMessage ?? null)})`);
 
-            // Find the PR for this SHA. Under fleet cadence the branch push
-            // (which triggers this deployment_status event) can precede
-            // `gh pr create` by anywhere from seconds to minutes, so a PR
-            // that doesn't exist yet on the first check may exist shortly
-            // after — retry before giving up (imboard-ai/ai-dossier#567).
             const sha = context.payload.deployment.sha;
+
+            // deployment_status runs with a write-capable GITHUB_TOKEN even for a
+            // fork-originated deployment (see the header comment). Only spend the
+            // retry budget and only write a comment for a SHA that is actually
+            // reachable from a branch in this repo — a fork PR head or a deleted
+            // branch's SHA never will be, and never had a same-repo PR to find.
+            let inThisRepo = true;
+            try {
+              const { data: branches } = await github.rest.repos.listBranchesForHeadCommit({ ...repoRef, commit_sha: sha });
+              inThisRepo = branches.length > 0;
+            } catch (err) {
+              core.warning(`Could not verify ${sha} is on a branch of this repo (${err.message}) — proceeding as if it is.`);
+            }
+            if (!inThisRepo) {
+              core.info(`${sha} is not on any branch of this repo (fork PR or deleted branch) — logging only.`);
+              core.info(tail);
+              return;
+            }
+
+            // Find the PR for this SHA. Under fleet cadence the branch push (which
+            // triggers this deployment_status event) can precede `gh pr create` by
+            // seconds to minutes — up to ~5 min observed (imboard-ai/ai-dossier#567)
+            // — so a PR that doesn't exist yet on the first check may exist shortly
+            // after. Budget ~5 min total (10 lookups, 30s apart) with margin over
+            // that observed gap; a lookup error counts as "not found yet", not a
+            // reason to stop retrying.
             const findOpenPr = async () => {
-              const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-                owner: context.repo.owner, repo: context.repo.repo, commit_sha: sha,
-              });
-              return prs.find((p) => p.state === 'open');
+              try {
+                const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({ ...repoRef, commit_sha: sha });
+                return prs.find((p) => p.state === 'open');
+              } catch (err) {
+                core.warning(`PR lookup failed for ${sha} (${err.message}) — treating as not-found.`);
+                return undefined;
+              }
             };
-            const PR_LOOKUP_ATTEMPTS = 6;
+            const PR_LOOKUP_ATTEMPTS = 10;
             const PR_LOOKUP_DELAY_MS = 30_000;
-            let pr = await findOpenPr();
-            for (let attempt = 1; !pr && attempt < PR_LOOKUP_ATTEMPTS; attempt++) {
+            let pr;
+            for (let attempt = 1; attempt <= PR_LOOKUP_ATTEMPTS; attempt++) {
+              pr = await findOpenPr();
+              if (pr || attempt === PR_LOOKUP_ATTEMPTS) break;
               core.info(`No open PR for ${sha} yet (attempt ${attempt}/${PR_LOOKUP_ATTEMPTS}) — retrying in ${PR_LOOKUP_DELAY_MS / 1000}s.`);
               await new Promise((resolve) => setTimeout(resolve, PR_LOOKUP_DELAY_MS));
-              pr = await findOpenPr();
             }
 
             const body = [
@@ -232,26 +297,32 @@ jobs:
               `Deployment: ${targetUrl}`,
               '',
               ...(isNeonQuotaSignature ? ['**Likely cause:** `neon-quota` — see docs/explanation/infrastructure-lessons.md → Neon.', ''] : []),
-              ...(failureSummary ? ['**Deployment status**', '', '```', failureSummary, '```', ''] : []),
+              ...(failureSummary ? ['**Deployment status**', '', fenceFor(failureSummary), failureSummary, fenceFor(failureSummary), ''] : []),
               'Build output:',
               '',
-              '```',
+              fenceFor(tail),
               tail,
-              '```',
+              fenceFor(tail),
               '',
               '<sub>Posted automatically so the failure is readable without a Vercel login.</sub>',
             ].join('\n');
 
+            const post = async (what, fn) => {
+              try {
+                await fn();
+                core.info(`posted report via ${what}`);
+              } catch (err) {
+                core.warning(`Failed to post report via ${what}: ${err.message}`);
+                core.info(`--- report body (unposted) ---\n${body}`);
+              }
+            };
+
             if (!pr) {
               core.info(`No open PR found for ${sha} after ${PR_LOOKUP_ATTEMPTS} attempts — posting a commit comment instead.`);
-              await github.rest.repos.createCommitComment({
-                owner: context.repo.owner, repo: context.repo.repo,
-                commit_sha: sha, body,
-              });
+              const waitedSec = Math.round((PR_LOOKUP_ATTEMPTS - 1) * PR_LOOKUP_DELAY_MS / 1000);
+              const fallbackBody = `${body}\n\n<sub>No open PR was associated with \`${sha}\` after ${PR_LOOKUP_ATTEMPTS} attempts over ~${waitedSec}s, so this is posted on the commit instead.</sub>`;
+              await post(`commit comment on ${sha}`, () => github.rest.repos.createCommitComment({ ...repoRef, commit_sha: sha, body: fallbackBody }));
               return;
             }
 
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: pr.number, body,
-            });
+            await post(`PR #${pr.number} comment`, () => github.rest.issues.createComment({ ...repoRef, issue_number: pr.number, body }));
