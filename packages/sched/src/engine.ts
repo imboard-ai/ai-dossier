@@ -1390,19 +1390,33 @@ function reconcileRunning(
   // A parked milestone is deliberately NOT an advance: a detached run parks
   // and stops — the watcher owns the tail (#468); the exit/stall rails take
   // the agent from here.
+  const closedSignal = effectiveClosedSignal(slot, truth);
+  // #575: `slot.spawned_at` fences a `report/done` milestone to THIS dispatch
+  // — a re-enqueued issue's PREVIOUS run's report milestone must not read as
+  // "complete" the moment the fresh agent's first tick polls it.
+  const verifiedComplete = isVerifiedComplete(truth.milestone, closedSignal, slot.spawned_at);
   if (
-    isVerifiedComplete(truth.milestone, effectiveClosedSignal(slot, truth)) &&
-    !isParkedMilestone(truth.milestone)
+    !verifiedComplete &&
+    !closedSignal &&
+    truth.milestone !== null &&
+    truth.milestone.phase === 'report' &&
+    truth.milestone.status === 'done'
   ) {
+    journal(ctx, 'stale-milestone-ignored', unit, {
+      slot: slot.id,
+      run: truth.milestone.run,
+      at: truth.milestone.at,
+      detail: `predates dispatch spawned_at=${slot.spawned_at}`,
+    });
+  }
+  if (verifiedComplete && !isParkedMilestone(truth.milestone)) {
     journal(ctx, 'external-advance', unit, {
       pid: slot.pid,
       slot: slot.id,
-      // effectiveClosedSignal, not the raw truth.closed, decided this: for a
+      // closedSignal, not the raw truth.closed, decided this: for a
       // report-role slot `closed` is suppressed, so `truth.closed` reads true
       // at completion regardless — the actual signal was the report milestone.
-      detail: effectiveClosedSignal(slot, truth)
-        ? 'issue closed'
-        : `report done (role=${slot.role})`,
+      detail: closedSignal ? 'issue closed' : `report done (role=${slot.role})`,
     });
     killUnitAgent(ctx, state, unit);
     // The agent was still alive (that's what "externally-advanced" means) —
@@ -1548,7 +1562,11 @@ function completeUnitOrRecover(
     );
   }
 
-  if (isVerifiedComplete(truth.milestone, effectiveClosedSignal(slot, truth))) {
+  // #575: fence to THIS dispatch's `spawned_at` — an agent that exited having
+  // posted nothing new must not read as complete against the issue's
+  // PREVIOUS run's report milestone; it falls through to the recovery ladder
+  // below (`unverified-exit`) instead.
+  if (isVerifiedComplete(truth.milestone, effectiveClosedSignal(slot, truth), slot.spawned_at)) {
     return completeUnit(ctx, recordDispatchOutcome(ctx, next, unit, slot, false), unit, via);
   }
 

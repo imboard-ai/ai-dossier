@@ -373,17 +373,43 @@ export function isParkedMilestone(
 }
 
 /**
+ * #575: tolerance for clock skew between the machine that posted a milestone
+ * (an agent process, possibly on a different host in fleet mode) and the
+ * scheduler's own `now()` when comparing `milestone.at` against a slot's
+ * `dispatchedAt` fence.
+ */
+const DISPATCH_FENCE_TOLERANCE_MS = 60_000;
+
+/**
  * Completion rule (AC2): a unit's work is verified complete when the issue's
  * latest milestone is the final `report done` — the full-cycle trail's last
  * phase — or when GitHub itself says the issue is closed (a merged PR
  * auto-closes it, which is ground truth no milestone can contradict).
+ *
+ * #575: a `report done` milestone alone is not enough — it must also postdate
+ * `dispatchedAt` (the current dispatch's `SlotEntry.spawned_at`), or a
+ * re-enqueued issue (pilot re-run, `abandon` + `enqueue`, #544-style label
+ * re-evaluation) reads as instantly "complete" against its PREVIOUS run's
+ * report milestone, and the fresh agent is killed as a leftover on the first
+ * reconcile tick. `dispatchedAt` is optional and `null` degrades to the old
+ * permissive check — a legacy slot spawned before #524 added `spawned_at`
+ * (backfilled `null`) or an unparseable `milestone.at` has no fence to check
+ * against, so age is not gated for it.
  */
 export function isVerifiedComplete(
   milestone: GroundTruthMilestone | null,
-  issueClosed: boolean
+  issueClosed: boolean,
+  dispatchedAt: string | null = null
 ): boolean {
   if (issueClosed) return true;
-  return milestone !== null && milestone.phase === 'report' && milestone.status === 'done';
+  if (milestone === null || milestone.phase !== 'report' || milestone.status !== 'done') {
+    return false;
+  }
+  if (dispatchedAt === null) return true;
+  const milestoneAt = Date.parse(milestone.at);
+  const dispatched = Date.parse(dispatchedAt);
+  if (Number.isNaN(milestoneAt) || Number.isNaN(dispatched)) return true;
+  return milestoneAt >= dispatched - DISPATCH_FENCE_TOLERANCE_MS;
 }
 
 /**

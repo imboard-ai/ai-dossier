@@ -70,6 +70,58 @@ describe('isVerifiedComplete (AC2 completion rule)', () => {
     expect(isVerifiedComplete(null, true)).toBe(true);
     expect(isVerifiedComplete(done('gate', 'done'), true)).toBe(true);
   });
+
+  describe('#575 dispatch fence (dispatchedAt)', () => {
+    const at = (iso: string): GroundTruthMilestone => ({
+      phase: 'report',
+      status: 'done',
+      run: 'r',
+      at: iso,
+      keys: {},
+    });
+
+    it('a report/done milestone that predates dispatchedAt does NOT verify completion', () => {
+      // Milestone posted 3 hours before this dispatch spawned — the issue's
+      // PREVIOUS run's report, not this one's.
+      expect(isVerifiedComplete(at('2026-09-02T05:00:00Z'), false, '2026-09-02T08:00:00Z')).toBe(
+        false
+      );
+    });
+
+    it('a report/done milestone posted at or after dispatchedAt verifies completion', () => {
+      expect(isVerifiedComplete(at('2026-09-02T08:00:00Z'), false, '2026-09-02T08:00:00Z')).toBe(
+        true
+      );
+      expect(isVerifiedComplete(at('2026-09-02T09:00:00Z'), false, '2026-09-02T08:00:00Z')).toBe(
+        true
+      );
+    });
+
+    it('tolerates small clock skew (60s) between milestone.at and dispatchedAt', () => {
+      expect(isVerifiedComplete(at('2026-09-02T07:59:31Z'), false, '2026-09-02T08:00:00Z')).toBe(
+        true
+      );
+      expect(isVerifiedComplete(at('2026-09-02T07:58:00Z'), false, '2026-09-02T08:00:00Z')).toBe(
+        false
+      );
+    });
+
+    it('dispatchedAt=null (legacy pre-#524 slot) degrades to the old permissive check', () => {
+      expect(isVerifiedComplete(at('2026-08-29T12:00:00Z'), false, null)).toBe(true);
+      expect(isVerifiedComplete(at('2026-08-29T12:00:00Z'), false)).toBe(true);
+    });
+
+    it('an unparseable milestone.at is not gated by the fence', () => {
+      expect(isVerifiedComplete(at('not-a-date'), false, '2026-09-02T08:00:00Z')).toBe(true);
+    });
+
+    it('a closed issue still completes regardless of milestone age (AC3)', () => {
+      expect(isVerifiedComplete(at('2026-08-29T12:00:00Z'), true, '2026-09-02T08:00:00Z')).toBe(
+        true
+      );
+      expect(isVerifiedComplete(null, true, '2026-09-02T08:00:00Z')).toBe(true);
+    });
+  });
 });
 
 describe('createExecGroundTruth', () => {
