@@ -10,6 +10,9 @@ New to Dossier? Start here to learn how to install and use the tools.
 ### 📚 [Guides](guides/)
 Task-oriented guides for common workflows like creating dossiers, signing them, and publishing packages.
 
+### 🔧 [How-To](how-to/)
+Operator runbooks for running infrastructure day to day, like the [autonomous issue pipeline](how-to/autonomous-pipeline.md).
+
 ### 🎓 [Tutorials](tutorials/)
 Step-by-step learning experiences to help you master Dossier.
 
