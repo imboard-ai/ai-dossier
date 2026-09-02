@@ -51,8 +51,10 @@
  *    short lock pass together with the report dispatch.
  * 4. **Batch pass** (#523, only when `batchExec`/`runBatchSuite` are both
  *    configured): `batch-dispatch.ts`'s `runBatchTick` — a self-contained
- *    reconcile+refill for every `batch:<id>` unit, run after steps 1-3 so a
- *    batch never takes a slot an issue would otherwise have gotten this tick.
+ *    reconcile+refill for every `batch:<id>` unit, run after steps 1-3. Step
+ *    2's refill already reserved capacity for any ready batch that outranks
+ *    a competing issue in `runnableUnits`' priority order (#565) — this pass
+ *    never takes a slot an issue actually won.
  *
 
  * Everything that touches the world (processes, GitHub, git) is injected;
@@ -1935,20 +1937,38 @@ function dispatchAssignments(
             .map((entry) => `issue:${entry.issue}`)
         )
       : new Set<string>();
-  const { state: assigned, assignments } = computeAssignments(
-    state,
-    config,
-    now,
-    ['issue'],
-    exclude
-  );
-  let next = assigned;
+  // #565: decide who wins each free slot over BOTH kinds — a ready batch
+  // outranking a same-readiness issue (priority desc → readiness age → issue
+  // number, `runnableUnits`) must not lose its capacity to an issue dispatch
+  // pass that never looked at it. This is a READ-ONLY dry run: `assigned`
+  // (the mutated state) is discarded — applying its batch-kind assignment
+  // would leave a slot permanently `assigned` to `batch:<id>` with no agent
+  // ever spawned, since only `batch-dispatch.ts`'s own `claimAndSetup` does
+  // the actual worktree/branch setup, and it skips a batch that already
+  // holds a slot (`slotFor`). Only the ISSUE winners are applied below,
+  // against the ORIGINAL `state` — the batch-dispatch pass later this same
+  // tick claims the capacity this reservation left free (module doc: batch
+  // claims never go through `computeAssignments` themselves).
+  //
+  // The reservation is gated on the batch pass actually running this tick
+  // (`batchExec`/`runBatchSuite` both configured, mirroring the guard at the
+  // batch-pass call site below): without that gate, a `ready` batch with
+  // nothing ever able to claim it would reserve a slot every tick forever —
+  // not a one-tick wait, a permanent one, contradicting the batch pass's own
+  // documented fallback ("a `ready` batch stays queued", never "queued AND
+  // blocks other work").
+  const batchPassWillRun = ctx.deps.batchExec !== undefined && ctx.deps.runBatchSuite !== undefined;
+  const dryRunKinds = batchPassWillRun ? (['issue', 'batch'] as const) : (['issue'] as const);
+  const { assignments } = computeAssignments(state, config, now, dryRunKinds, exclude);
+  let next = state;
   for (const assignment of assignments) {
     if (assignment.kind !== 'issue') continue;
     const unit = `issue:${assignment.issue}`;
-    journal(ctx, 'assigned', unit, { slot: assignment.slot });
     const entry = findEntry(next, assignment.issue);
     if (!entry) continue;
+    const { state: withSlot, slotId } = assignToIdleSlot(next, unit, null, now);
+    next = withSlot;
+    journal(ctx, 'assigned', unit, { slot: slotId, priority: entry.priority });
     if (entry.status === 'queued') {
       next = transitionIssue(next, assignment.issue, 'classified', {}, now);
     }
@@ -2045,14 +2065,21 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   }
 
   // Batch dispatch (#523) — a separate pass, deliberately after issue dispatch:
-  // `runBatchTick` never goes through `computeAssignments`/`runnableUnits` at
-  // all (batch-dispatch.ts's own bespoke free-capacity-gated claim, mirroring
-  // `dispatchReportAgents`) — the ordering guarantee here comes from PASS
-  // ORDERING plus that per-claim `freeCapacity` gate: this pass runs strictly
-  // after `dispatchAssignments` already filled every slot it could, so a
-  // batch never takes a slot an issue would otherwise have gotten this same
-  // tick. Only runs when the operator configured batch exec deps; without
-  // them a `ready` batch stays queued (visible in `sched status`) rather than
+  // `runBatchTick` never goes through `computeAssignments`/`runnableUnits` for
+  // its OWN claim (batch-dispatch.ts's own bespoke free-capacity-gated claim,
+  // mirroring `dispatchReportAgents`) — a batch's worktree/branch setup has
+  // no per-issue equivalent, so its claim stays a distinct code path. The
+  // capacity split between the two passes is no longer pure PASS ORDERING,
+  // though (#565): `dispatchAssignments` above already consulted
+  // `computeAssignments` over BOTH kinds and applied only the issue winners,
+  // reserving a free slot here for any ready batch that outranked a
+  // same-readiness issue in that ordering — so a higher-priority batch is
+  // NOT starved by issue dispatch this same tick, closing the gap
+  // `docs/reports/batch-pilot-2-execution.md` §13.4 found. What IS still
+  // true: this pass never claims a slot `dispatchAssignments` already gave to
+  // an issue — the reservation is the only coupling between the two passes.
+  // Only runs when the operator configured batch exec deps; without them a
+  // `ready` batch stays queued (visible in `sched status`) rather than
   // crashing.
   if (deps.batchExec !== undefined && deps.runBatchSuite !== undefined) {
     const batchDeps: BatchDispatchDeps = {

@@ -10,6 +10,7 @@
  * assignments are made at all (`sched pause`).
  */
 
+import { asInt } from './enqueue';
 import {
   batchBlockers,
   type DependencyBlocker,
@@ -52,16 +53,25 @@ function unitId(unit: RunnableUnit): string {
  * materialized lazily (as `idle`, then transitioned `idle → assigned` — a
  * typed edge, never a synthetic mid-state).
  *
- * `kinds` restricts which unit kinds may be assigned (default: both). The
- * #464 engine dispatches `issue` units only — batch member sequencing is a
- * follow-up — so it passes `['issue']` and a `ready` batch never occupies a
- * slot it cannot run on yet.
+ * `kinds` restricts which unit kinds may be assigned (default: both).
  *
  * `exclude` holds unit ids that must not be placed on this call, even though
  * they are runnable. #544's label screen uses it: an issue whose hard-block
  * labels were not confirmed clear by THIS tick's read is deferred rather than
  * dispatched, which is the only way the pre-lock label snapshot can bound a
  * dispatch set that in-lock reconciliation may have grown.
+ *
+ * #565 — `engine.ts`'s `dispatchAssignments` is this function's sole
+ * production caller for a MIXED-kind call, and it uses it as a READ-ONLY
+ * oracle: it runs this with `['issue', 'batch']` purely to learn which units
+ * would win each free slot under priority ordering, then discards the
+ * returned `state` and re-derives its own slot ids for the issue winners
+ * only. Applying a `batch`-kind assignment here for real would strand a slot
+ * permanently `assigned` to `batch:<id>` with no agent ever spawned — only
+ * `batch-dispatch.ts`'s own `claimAndSetup` performs the actual worktree/
+ * branch setup for a batch claim, and it skips a batch that already holds a
+ * slot. Do not assume the returned `state` or `Assignment.slot` reach
+ * persistence for a batch-kind entry.
  */
 export function computeAssignments(
   state: SchedState,
@@ -238,4 +248,60 @@ export function abandonBatch(
     if (result.requeued) requeued.push(issue);
   }
   return { state: next, requeued };
+}
+
+/**
+ * `sched reprioritize --issue N --priority P` (#565): adjust a queued unit's
+ * assignment weight in place — no abandon/re-enqueue round trip, which would
+ * also reset every other field `enqueueEntries` does not accept as a
+ * re-supply (deps, tier, ...). Terminal entries cannot be reprioritized —
+ * mirrors `abandonIssue`'s same guard, since there is nothing left to
+ * schedule differently.
+ *
+ * Deliberately does NOT bump `updated_at` — that field is the readiness-age
+ * tiebreak in `compareByPriority`, so bumping it would reset a long-waiting
+ * unit's queue position as a side effect of a priority edit. That is why
+ * this function (unlike its neighbors) takes no `now`.
+ */
+export function reprioritizeIssue(state: SchedState, issue: number, priority: number): SchedState {
+  const entry = state.entries.find((e) => e.issue === issue);
+  if (!entry) {
+    throw new SchedNotFoundError(`Queue entry not found: ${issue}`);
+  }
+  if (TERMINAL_ISSUE_STATUSES.has(entry.status)) {
+    throw new SchedNotFoundError(
+      `Issue ${issue} is already ${entry.status} — nothing to reprioritize`
+    );
+  }
+  // Validated last, after the lookups, so a rejection names the unit it
+  // failed for (`asInt` — the same check `enqueue.ts` applies to a fresh
+  // entry's `priority`/`batch_priority`, reused here rather than
+  // reimplemented, #565 review).
+  asInt(priority, `Issue ${issue}`);
+  return {
+    ...state,
+    entries: state.entries.map((e) => (e.issue === issue ? { ...e, priority } : e)),
+  };
+}
+
+/** `sched reprioritize --batch B --priority P` (#565): the batch analog of `reprioritizeIssue`. */
+export function reprioritizeBatch(
+  state: SchedState,
+  batchId: string,
+  priority: number
+): SchedState {
+  const batch = findBatch(state, batchId);
+  if (!batch) {
+    throw new SchedNotFoundError(`Batch not found: ${batchId}`);
+  }
+  if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId} is already ${batch.status} — nothing to reprioritize`
+    );
+  }
+  asInt(priority, `Batch ${batchId}`);
+  return {
+    ...state,
+    batches: state.batches.map((b) => (b.id === batchId ? { ...b, priority } : b)),
+  };
 }

@@ -290,6 +290,14 @@ export class SchedStore {
       if (parsed.dissolve_policy !== undefined) {
         config.dissolve_policy = validateDissolvePolicy(parsed.dissolve_policy);
       }
+      if (parsed.default_batch_priority !== undefined) {
+        if (!Number.isInteger(parsed.default_batch_priority)) {
+          throw new Error(
+            `default_batch_priority must be an integer, got ${JSON.stringify(parsed.default_batch_priority)}`
+          );
+        }
+        config.default_batch_priority = parsed.default_batch_priority;
+      }
       return config;
     } catch (err) {
       // Deliberate degrade-to-default (unlike state.json, config is re-derivable
@@ -303,7 +311,7 @@ export class SchedStore {
           `ALL config (max_slots, stall_timeout_ms, reconcile_interval_ms, pr_poll_interval_ms, ` +
           `label_poll_interval_ms, ` +
           `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout, auto_upgrade, ` +
-          `dissolve_policy) reverted to built-in defaults (max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
+          `dissolve_policy, default_batch_priority) reverted to built-in defaults (max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
       );
       return { max_slots: DEFAULT_MAX_SLOTS };
     }
@@ -328,6 +336,9 @@ export class SchedStore {
       ...(config.dispatch !== undefined ? { dispatch: config.dispatch } : {}),
       ...(config.auto_upgrade !== undefined ? { auto_upgrade: config.auto_upgrade } : {}),
       ...(config.dissolve_policy !== undefined ? { dissolve_policy: config.dissolve_policy } : {}),
+      ...(config.default_batch_priority !== undefined
+        ? { default_batch_priority: config.default_batch_priority }
+        : {}),
     };
     writeAtomic(this.configPath, `${JSON.stringify(file, null, 2)}\n`);
   }

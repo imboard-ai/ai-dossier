@@ -1084,6 +1084,11 @@ export function dissolveBatch(
             base_branch: batch.base_branch,
             anchor: batch.anchor ?? undefined,
             run_id: batch.run_id ?? undefined,
+            // #565: a dissolve split is not a fresh batch — carry the
+            // parent's priority forward, or an operator's `--priority`
+            // (or `reprioritize`) is silently lost the moment a batch
+            // dissolves into halves.
+            priority: batch.priority,
             // Groups survive the split, restricted to the members that landed
             // in this half — a group spanning both halves is no longer a group.
             eviction_groups: batch.eviction_groups

@@ -493,6 +493,53 @@ describe('#527 config: dispatch.tiers (mixed agent-CLI escalation ladders)', () 
   });
 });
 
+describe('#565 config: default_batch_priority', () => {
+  it('round-trips default_batch_priority through save/load', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-565-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({ max_slots: 2, default_batch_priority: 25 });
+      expect(store.loadConfig().default_batch_priority).toBe(25);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('defaults default_batch_priority to undefined when absent from config.json', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-565-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({ max_slots: 2 });
+      expect(store.loadConfig().default_batch_priority).toBeUndefined();
+      expect(fs.readFileSync(store.configPath, 'utf-8')).not.toContain('default_batch_priority');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-integer default_batch_priority (degrades to defaults, loudly)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-565-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({ schema_version: '1.4.0', max_slots: 2, default_batch_priority: 'high' })
+      );
+      const err = console.error;
+      const warnings: string[] = [];
+      console.error = (msg: string) => warnings.push(msg);
+      try {
+        expect(store.loadConfig()).toEqual({ max_slots: 3 });
+      } finally {
+        console.error = err;
+      }
+      expect(warnings[0]).toContain('default_batch_priority');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('#537 config: auto_upgrade', () => {
   it('round-trips auto_upgrade through save/load', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-537-'));

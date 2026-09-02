@@ -15,7 +15,7 @@ import { unwrapList } from './json';
 import { labelBlockReason } from './labels';
 import { createBatch, findBatch, transitionBatch } from './state';
 import type { CycleMode, ModelTier, QueueEntry, SchedState } from './types';
-import { TERMINAL_ISSUE_STATUSES } from './types';
+import { DEFAULT_ISSUE_PRIORITY, TERMINAL_ISSUE_STATUSES } from './types';
 
 export class EnqueueError extends Error {
   constructor(message: string) {
@@ -60,7 +60,21 @@ export interface EnqueueInput {
   batch?: string | null;
   deps?: number[];
   tier?: ModelTier;
+  /**
+   * Assignment weight for a full-cycle entry (#565, default 0). Ignored for
+   * a slot-mode member — see `batch_priority` for the BATCH's own weight.
+   */
+  priority?: number;
   base_branch?: string;
+  /**
+   * Assignment weight for the BATCH this entry joins/creates (#565), a
+   * batch-level fact like `anchor`/`run_id`: every member of one batch must
+   * supply the same value, or none. Resolved to `DEFAULT_BATCH_PRIORITY` (or
+   * `SchedConfig.default_batch_priority`) by the caller when omitted — this
+   * module stays config-free, same as `blocked_label`'s resolution one field
+   * over.
+   */
+  batch_priority?: number;
   /**
    * Batch-level facts batch-prep knows at composition time (#472). They
    * describe the BATCH, not the entry, so every member of one batch must
@@ -95,6 +109,20 @@ export interface EnqueueInput {
 function asPositiveInt(value: unknown, label: string): number {
   if (!Number.isInteger(value) || (value as number) <= 0) {
     throw new EnqueueError(`${label} must be a positive integer, got ${String(value)}`);
+  }
+  return value as number;
+}
+
+/**
+ * Unlike `asPositiveInt`: a priority may legitimately be 0 or negative
+ * (deprioritized below the default). Exported so `scheduler.ts`'s
+ * `reprioritizeIssue`/`reprioritizeBatch` share this exact check instead of
+ * re-implementing it (#565 review) — both are input-boundary validators for
+ * the same `priority` concept, just reached from a different entry point.
+ */
+export function asInt(value: unknown, label: string): number {
+  if (!Number.isInteger(value)) {
+    throw new EnqueueError(`${label} must be an integer, got ${String(value)}`);
   }
   return value as number;
 }
@@ -140,6 +168,12 @@ export function parseManifest(raw: unknown): EnqueueInput[] {
         throw new EnqueueError(`Manifest entry [${i}]: tier must be mechanical | mid | strong`);
       }
       input.tier = obj.tier;
+    }
+    if (obj.priority !== undefined) {
+      input.priority = asInt(obj.priority, `Manifest entry [${i}]: priority`);
+    }
+    if (obj.batch_priority !== undefined) {
+      input.batch_priority = asInt(obj.batch_priority, `Manifest entry [${i}]: batch_priority`);
     }
     if (obj.base_branch !== undefined) {
       // A ref name, not merely a non-empty string: this value ends up in
@@ -245,7 +279,12 @@ export function assertNoDependencyCycle(state: SchedState, inputs: EnqueueInput[
  */
 function assertBatchFactsAgree(
   batchId: string,
-  existing: { anchor: number | null; run_id: string | null; eviction_groups: number[][] },
+  existing: {
+    anchor: number | null;
+    run_id: string | null;
+    eviction_groups: number[][];
+    priority: number;
+  },
   input: EnqueueInput
 ): void {
   if (input.anchor !== undefined && existing.anchor !== null && existing.anchor !== input.anchor) {
@@ -256,6 +295,14 @@ function assertBatchFactsAgree(
   if (input.run_id !== undefined && existing.run_id !== null && existing.run_id !== input.run_id) {
     throw new EnqueueError(
       `Batch ${batchId} was enqueued with run_id '${existing.run_id}' — refusing to re-point it to '${input.run_id}'`
+    );
+  }
+  // Unlike anchor/run_id, `priority` is never left unset once a batch exists
+  // (createBatch always resolves it) — so agreement is the only check
+  // needed, never a fill-in-if-absent.
+  if (input.batch_priority !== undefined && existing.priority !== input.batch_priority) {
+    throw new EnqueueError(
+      `Batch ${batchId} was enqueued with priority ${existing.priority} — refusing to re-point it to ${input.batch_priority}`
     );
   }
   if (input.eviction_groups !== undefined && existing.eviction_groups.length > 0) {
@@ -315,6 +362,10 @@ export function enqueueEntries(
       input.tier !== 'strong'
     ) {
       throw new EnqueueError(`Issue ${input.issue}: tier must be mechanical | mid | strong`);
+    }
+    if (input.priority !== undefined) asInt(input.priority, `Issue ${input.issue}: priority`);
+    if (input.batch_priority !== undefined) {
+      asInt(input.batch_priority, `Issue ${input.issue}: batch_priority`);
     }
     if (input.blocked_label !== undefined && input.blocked_label !== null) {
       if (typeof input.blocked_label !== 'string' || !LABEL_NAME_RE.test(input.blocked_label)) {
@@ -379,6 +430,7 @@ export function enqueueEntries(
       mode,
       batch,
       deps: input.deps ? [...input.deps] : [],
+      priority: input.priority ?? DEFAULT_ISSUE_PRIORITY,
       tier: input.tier ?? 'mid',
       status: input.blocked_label ? 'blocked' : 'queued',
       reason: input.blocked_label ? labelBlockReason(input.blocked_label) : null,
@@ -436,6 +488,7 @@ export function enqueueEntries(
           anchor: input.anchor,
           run_id: input.run_id,
           eviction_groups: input.eviction_groups,
+          priority: input.batch_priority,
         })
       );
     }

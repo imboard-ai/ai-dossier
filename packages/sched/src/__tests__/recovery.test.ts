@@ -29,6 +29,7 @@ import {
   parseBoundaryCommits,
   patchBatch,
   type RecoveryDeps,
+  reprioritizeBatch,
   resolveFixAttempt,
   type SchedState,
   type SuiteResult,
@@ -741,6 +742,15 @@ describe('dissolveBatch', () => {
     const result = dissolveBatch(state, 'b1', { strategy: 'halved', reason: 'x' }, h.deps);
     expect(result.newBatches).toEqual(['b1-a']);
     expect(findEntry(result.state, 201)?.batch).toBe('b1-a');
+  });
+
+  it('#565: carries the parent batch priority forward onto both split halves', () => {
+    let state = batchState([201, 202, 203, 204], 'validating');
+    state = reprioritizeBatch(state, 'b1', 50);
+    const h = harness();
+    const result = dissolveBatch(state, 'b1', { strategy: 'halved', reason: 'x' }, h.deps);
+    expect(findBatch(result.state, 'b1-a')?.priority).toBe(50);
+    expect(findBatch(result.state, 'b1-b')?.priority).toBe(50);
   });
 
   it('reports what was preserved on the milestone', () => {
