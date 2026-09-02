@@ -28,6 +28,9 @@ Developer documentation for contributors including development setup, workflows,
 ### 📋 [Planning](planning/)
 Project roadmaps, planning documents, and development notes.
 
+### 📊 [Reports](reports/)
+Gate reports and validation records for in-flight RFCs (currently RFC-0001 Batch Cycles).
+
 ---
 
 ## What is Dossier?
