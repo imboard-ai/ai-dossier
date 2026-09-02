@@ -1413,3 +1413,91 @@ describe('per-dispatch agent run logs — the third source AC1 names', () => {
     expect(renderMarkdown(sc)).toContain('1 were');
   });
 });
+
+describe('billable tokens count the cache halves (#566 AC1)', () => {
+  const meta = {
+    windowStart: '2026-08-25',
+    windowEnd: '2026-09-02',
+    generatedAt: '2026-09-02T00:00:00Z',
+  };
+  const row = (over) => ({
+    repo: 'o/r',
+    model: 'opus',
+    tier: 'mid',
+    provider: null,
+    delivered: true,
+    blocked: false,
+    costUsd: 4.173,
+    costSource: 'runs.jsonl',
+    apiMinutes: null,
+    wallClockMinutes: null,
+    phaseSeconds: {},
+    stalls: 0,
+    escalations: 0,
+    unverifiedExits: 0,
+    reviewFixed: null,
+    reviewEscalated: null,
+    acMet: null,
+    acTotal: null,
+    ...over,
+  });
+
+  it("reproduces batch-pilot-2-execution.md §13.3's published token figure for #540", () => {
+    // 262 uncached + 244,886 cache-creation + 13,378,921 cache-read = 13,624,069 input,
+    // which is what §13.3 publishes. Counting only the uncached term reported 262.
+    const sc = aggregateScorecard(
+      [
+        row({
+          inputTokens: 262,
+          cacheCreationTokens: 244_886,
+          cacheReadTokens: 13_378_921,
+          outputTokens: 48_049,
+        }),
+      ],
+      meta
+    );
+    expect(sc.totals[0].billableTokensPerDeliveredIssue).toBe(13_624_069 + 48_049);
+    expect(sc.totals[0].tokenSamples).toBe(1);
+    expect(sc.totals[0].cacheTokenSamples).toBe(1);
+  });
+
+  it('discloses a row that reported no cache fields rather than silently equating it', () => {
+    const sc = aggregateScorecard(
+      [
+        row({ inputTokens: 10, outputTokens: 20, cacheCreationTokens: 30, cacheReadTokens: 40 }),
+        row({
+          inputTokens: 10,
+          outputTokens: 20,
+          cacheCreationTokens: null,
+          cacheReadTokens: null,
+        }),
+      ],
+      meta
+    );
+    expect(sc.totals[0].tokenSamples).toBe(2);
+    expect(sc.totals[0].cacheTokenSamples).toBe(1);
+    // (100 + 30) / 2 — the cache-less row contributes its uncached tokens, not a guess.
+    expect(sc.totals[0].billableTokensPerDeliveredIssue).toBe(65);
+  });
+
+  it('carries the cache halves through the runs.jsonl / agent-log merge', () => {
+    const merged = mergeCost(
+      { total_cost_usd: 1, cache_creation_tokens: null, cache_read_tokens: null },
+      { cache_creation_tokens: 5, cache_read_tokens: 7 }
+    );
+    expect([merged.cache_creation_tokens, merged.cache_read_tokens]).toEqual([5, 7]);
+  });
+
+  it('reports escalations and unverified exits per issue as well as in total', () => {
+    const sc = aggregateScorecard(
+      [
+        row({ inputTokens: null, outputTokens: null, escalations: 3, unverifiedExits: 1 }),
+        row({ inputTokens: null, outputTokens: null, escalations: 1, unverifiedExits: 0 }),
+      ],
+      meta
+    );
+    expect(sc.totals[0].escalationsPerIssue).toBe(2);
+    expect(sc.totals[0].unverifiedExitsPerIssue).toBe(0.5);
+    expect(renderMarkdown(sc)).toContain('4 (2.00/issue)');
+  });
+});

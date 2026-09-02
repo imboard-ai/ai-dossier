@@ -231,6 +231,8 @@ export function mergeCost(primary, fallback) {
     total_cost_usd: pick('total_cost_usd'),
     input_tokens: pick('input_tokens'),
     output_tokens: pick('output_tokens'),
+    cache_creation_tokens: pick('cache_creation_tokens'),
+    cache_read_tokens: pick('cache_read_tokens'),
     duration_ms: pick('duration_ms'),
     tier: primary?.tier ?? null,
     costSource:
@@ -323,6 +325,11 @@ export function joinRepoRows({
       costUsd: cost?.total_cost_usd ?? null,
       inputTokens: cost?.input_tokens ?? null,
       outputTokens: cost?.output_tokens ?? null,
+      // Cache tokens are billed, and on this fleet they dominate: issue #540's published
+      // 13,624,069 input tokens is 262 uncached + 244,886 cache-creation + 13,378,921
+      // cache-read. Counting only the uncached term understated the column ~280x.
+      cacheCreationTokens: cost?.cache_creation_tokens ?? null,
+      cacheReadTokens: cost?.cache_read_tokens ?? null,
       apiMinutes: cost?.duration_ms != null ? cost.duration_ms / 60000 : null,
       costSource: cost?.costSource ?? null,
       stalls: dispatch.stalls,
@@ -401,6 +408,13 @@ function bucketFrom(rows) {
   // filtered sample sets produced a figure that was not any real issue's token count, and
   // silently contributed a 0 term whenever one side was missing.
   const tokenRows = delivered.filter((r) => r.inputTokens != null && r.outputTokens != null);
+  // A row that reported no cache fields at all contributes its uncached tokens only; the
+  // count is disclosed so a bucket where that happened is not read as a like-for-like total.
+  const cacheTokenRows = tokenRows.filter(
+    (r) => r.cacheCreationTokens != null || r.cacheReadTokens != null
+  );
+  const billableTokensOf = (r) =>
+    r.inputTokens + r.outputTokens + (r.cacheCreationTokens ?? 0) + (r.cacheReadTokens ?? 0);
 
   return {
     n,
@@ -417,10 +431,9 @@ function bucketFrom(rows) {
     ).length,
     medianApiMinutes: deliveredApiMinutes.length > 0 ? median(deliveredApiMinutes) : null,
     billableTokensPerDeliveredIssue:
-      tokenRows.length > 0
-        ? sum(tokenRows.map((r) => r.inputTokens + r.outputTokens)) / tokenRows.length
-        : null,
+      tokenRows.length > 0 ? sum(tokenRows.map(billableTokensOf)) / tokenRows.length : null,
     tokenSamples: tokenRows.length,
+    cacheTokenSamples: cacheTokenRows.length,
     medianWallClockMinutes: deliveredWallClock.length > 0 ? median(deliveredWallClock) : null,
     acMet: conformanceRows.length > 0 ? acMet : null,
     acTotal: conformanceRows.length > 0 ? acTotal : null,
@@ -429,6 +442,12 @@ function bucketFrom(rows) {
     stalls: sum(rows.map((r) => r.stalls)),
     escalations: sum(rows.map((r) => r.escalations)),
     unverifiedExits: sum(rows.map((r) => r.unverifiedExits)),
+    // AC1 asks for these per issue. The raw sums stay in the sidecar (they are what the
+    // journal actually counted); the tables show both, since a sum alone makes a large
+    // bucket look worse than a small one purely for being large.
+    stallsPerIssue: n > 0 ? sum(rows.map((r) => r.stalls)) / n : null,
+    escalationsPerIssue: n > 0 ? sum(rows.map((r) => r.escalations)) / n : null,
+    unverifiedExitsPerIssue: n > 0 ? sum(rows.map((r) => r.unverifiedExits)) / n : null,
     reviewFixed: fixedSamples.length > 0 ? sum(fixedSamples) : null,
     reviewEscalated: escalatedSamples.length > 0 ? sum(escalatedSamples) : null,
     // Per issue, not a bucket sum: the AC asks for "review findings fixed per issue", and a
@@ -597,6 +616,11 @@ function fmtDelta(value) {
   const points = value * 100;
   return `${points >= 0 ? '+' : ''}${points.toFixed(0)}pt`;
 }
+/** A journal count with its per-issue rate — AC1 asks for the rate, the sum is the evidence. */
+function fmtCount(total, perIssue) {
+  if (perIssue == null || total === 0) return String(total ?? 0);
+  return `${total} (${perIssue.toFixed(2)}/issue)`;
+}
 function fmtSeconds(value) {
   if (value == null) return 'N/A';
   return value >= 60 ? `${(value / 60).toFixed(1)}m` : `${Math.round(value)}s`;
@@ -659,9 +683,9 @@ function totalCells(bucket) {
     fmtMin(bucket.medianApiMinutes),
     fmtMin(bucket.medianWallClockMinutes),
     fmtPerIssue(bucket.reviewFixedPerIssue, bucket.reviewSamples),
-    bucket.stalls,
-    bucket.escalations,
-    bucket.unverifiedExits,
+    fmtCount(bucket.stalls, bucket.stallsPerIssue),
+    fmtCount(bucket.escalations, bucket.escalationsPerIssue),
+    fmtCount(bucket.unverifiedExits, bucket.unverifiedExitsPerIssue),
   ].join(' | ');
 }
 
@@ -677,9 +701,9 @@ function bucketCells(bucket) {
     fmtMin(bucket.medianApiMinutes),
     fmtMin(bucket.medianWallClockMinutes),
     fmtPerIssue(bucket.reviewFixedPerIssue, bucket.reviewSamples),
-    bucket.stalls,
-    bucket.escalations,
-    bucket.unverifiedExits,
+    fmtCount(bucket.stalls, bucket.stallsPerIssue),
+    fmtCount(bucket.escalations, bucket.escalationsPerIssue),
+    fmtCount(bucket.unverifiedExits, bucket.unverifiedExitsPerIssue),
   ].join(' | ');
 }
 
@@ -722,6 +746,10 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     'there is more than one — the fold that makes the model row readable would otherwise',
     'hide a gateway costing more or delivering less than the same weights elsewhere.',
     '',
+    'Billable tokens count **uncached input + cache-creation + cache-read + output** — cache',
+    'reads are billed and, on this fleet, are the dominant term (issue #540: 262 uncached vs',
+    '13.4M cache-read). That is the same total `batch-pilot-2-execution.md` §13 publishes.',
+    '',
     '| Model | Provider | Agent CLI | n | Delivered | Delivery rate | Δ vs prev | AC met | Cost/delivered | Billable tokens/delivered | Median API-min | Median wall-clock-min | Review fixed/issue | Stalls | Escalations | Unverified exits |',
     '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|'
   );
@@ -752,8 +780,9 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     '## Wall-clock per phase (all models)',
     '',
     "Median seconds between a phase's milestone and the previous one, from the trails' own",
-    '`at=` stamps. Cost has no per-phase equivalent — a dispatch bills one agent session',
-    'that usually spans several phases (see Limitations).',
+    '`at=` stamps. Wall-clock is the only per-phase measure available: cost AND API-minutes',
+    'both come from one agent session that usually spans several phases, so neither can be',
+    'attributed to a phase (see Limitations).',
     '',
     '| Phase | n | Median |',
     '|---|---|---|'
@@ -768,7 +797,9 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
       'First snapshot (#566) spot-checked against `docs/reports/batch-pilot-2-execution.md`',
       '§13.3: issue #540 ($4.173) and #542 ($5.937) — both recovered from the same',
       '`~/.dossier/runs.jsonl` this script reads, via the now-fixed `ai-dossier sched stats`',
-      '(#564/#573) — matched to the cent. Delivery rates in this window are broadly in line',
+      "(#564/#573) — matched to the cent, and #540's 13,624,069 input / 48,049 output tokens",
+      'matched exactly once cache-creation and cache-read were counted as billable (they are',
+      '~99.98% of that input figure). Delivery rates in this window are broadly in line',
       "with `docs/reports/model-agnostic-fleet.md`'s retrospective figures (glm-5.3 and",
       'claude-sonnet-5 both ~86-88%), though the two reports use different windows and are',
       'not expected to match exactly.'
@@ -806,11 +837,11 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     '  `~/.dossier/sched/<slug>/runs/`. Both are on-host only — a dispatch run from another',
     '  machine has neither, and its row reads `N/A` because the data is elsewhere, not',
     '  because it was free.',
-    '- **Cost per phase is not separable.** A dispatch is usually one continuous agent',
-    '  session covering several phases, so `runs.jsonl` records cost per issue, not per',
-    '  phase — so the per-phase section above reports wall-clock only. For a per-phase',
-    '  breakdown of a single run rather than a median across many, run',
-    '  `ai-dossier runstate stats` directly.',
+    '- **Cost and API-minutes per phase are not separable.** A dispatch is usually one',
+    '  continuous agent session covering several phases, so both are recorded per issue, not',
+    '  per phase — the per-phase section above reports wall-clock only, which the milestone',
+    '  `at=` stamps do carry. For a per-phase breakdown of a single run rather than a median',
+    '  across many, run `ai-dossier runstate stats` directly.',
     '- **Stall/escalation/unverified-exit counts are a per-host gap.** They come from',
     '  `~/.dossier/sched/<project>/events.jsonl`, which only exists on the machine that',
     '  ran the dispatch. A run dispatched from another host reports 0 for these columns',
