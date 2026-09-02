@@ -35,6 +35,7 @@ per deployment, not something to run as-is against your own issues.
 | `projects.txt.example` | Template: one sched project slug per line, no comments (see Known Limitations — the real `tick.sh` loop is not comment-tolerant) |
 | `issues.txt.example` | Template: one `owner/repo#N` issue ref per line, no comments (see Known Limitations) |
 | `telegram.env.example` | Template: the two env vars `tick.sh`, `bootstrap.sh`, and `enqueue-report.sh` `source` for Telegram reporting |
+| `scorecard-weekly.sh` | Weekly cron ([#566](https://github.com/imboard-ai/ai-dossier/issues/566)): regenerates `docs/reports/model-scorecard.md` + its JSON sidecar in a dedicated worktree, opens/refreshes a PR with the snapshot, and Telegram-reports the 6-line digest. Never merges — this repo has no auto-merge watcher |
 
 ## Setup
 
@@ -99,6 +100,26 @@ message per project with new events.
 helper that POSTs to the Telegram Bot API `sendMessage` endpoint. Failures are
 swallowed (`>/dev/null 2>&1`) — Telegram reporting is best-effort, never a gate on the
 pipeline itself.
+
+## Model scorecard (weekly)
+
+`scorecard-weekly.sh` is the one script here that does NOT tick the scheduler — it
+regenerates the [model scorecard](../model-scorecard.mjs) (cost/quality/speed per LLM,
+joined from runstate trails, `runs.jsonl`, and `events.jsonl`; see #566) and opens a PR
+with the refreshed snapshot. It runs in a dedicated worktree
+(`worktrees/chore-model-scorecard-weekly`, rewritten from scratch each run — like
+`refresh-examples-snapshot.mjs`'s PR branch) rather than the main checkout, because
+this repo's `AGENTS.md` forbids checking out branches there while other agents are
+running. Cron install (weekly, Monday 05:00):
+
+```cron
+0 5 * * 1  /path/to/scorecard-weekly.sh >> /path/to/scorecard-weekly.log 2>&1
+```
+
+It never merges the PR it opens — this repo has no auto-merge watcher (unlike the
+per-issue full-cycle pipeline `tick.sh` drives), so review and merge is manual.
+`npm run scorecard` regenerates the snapshot on demand, outside of cron, from any
+checkout with a built `cli/dist` (`make build-all`).
 
 ## 7-day report scheduling hook
 
