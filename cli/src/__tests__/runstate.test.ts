@@ -28,6 +28,7 @@ import {
   type ParsedMilestone,
   PHASE_SPECS,
   PHASES,
+  parseDispatchedAt,
   parseGeneration,
   parseMilestone,
   parseMilestones,
@@ -783,6 +784,147 @@ describe('computeResume', () => {
     expect(
       computeResume([gateDone, reportDone], probe({ issueClosed: () => false })).resume_from
     ).toBe('report');
+  });
+
+  describe('#582 stale report/done trail (dispatchedAt)', () => {
+    const openProbe = probe({ issueClosed: () => false });
+    const closedProbe = probe({ issueClosed: () => true });
+
+    it('enters fresh with a new run id and prior_run when the milestone predates dispatch (AC1)', () => {
+      const reportDone = m(
+        'phase=report status=done run=r-440-ab56 at=2026-08-24T07:00:00Z' // T-3h
+      );
+      const result = computeResume(
+        [gateDone, reportDone],
+        openProbe,
+        '2026-08-24T10:00:00Z' // T
+      );
+      expect(result.resume_from).toBe('none');
+      expect(result.run_id).not.toBeNull();
+      expect(result.run_id).not.toBe('r-440-ab56');
+      expect(result.prior_run).toBe('r-440-ab56');
+      expect(result.note).toBe('stale-report-trail');
+    });
+
+    it("resumes into report as today when the milestone is this run's own (AC2)", () => {
+      const reportDone = m(
+        'phase=report status=done run=r-440-ab56 at=2026-08-24T10:01:00Z' // T+1m
+      );
+      const result = computeResume(
+        [gateDone, reportDone],
+        openProbe,
+        '2026-08-24T10:00:00Z' // T
+      );
+      expect(result.resume_from).toBe('report');
+      expect(result.run_id).toBe('r-440-ab56');
+      expect(result.prior_run).toBeUndefined();
+    });
+
+    it('resumes done when the issue is closed regardless of milestone age (AC3)', () => {
+      const reportDone = m(
+        'phase=report status=done run=r-440-ab56 at=2026-08-24T07:00:00Z' // T-3h
+      );
+      const result = computeResume(
+        [gateDone, reportDone],
+        closedProbe,
+        '2026-08-24T10:00:00Z' // T
+      );
+      expect(result.resume_from).toBe('done');
+      expect(result.note).toBe('already complete');
+      expect(result.prior_run).toBeUndefined();
+    });
+
+    it('flags the ambiguity instead of silently asserting report when no dispatch time is given', () => {
+      const reportDone = m('phase=report status=done run=r-440-ab56 at=2026-08-24T07:00:00Z');
+      const result = computeResume([gateDone, reportDone], openProbe);
+      expect(result.resume_from).toBe('report');
+      expect(result.note).toContain('no --dispatched-at supplied');
+      expect(result.prior_run).toBeUndefined();
+    });
+
+    it('tolerates a 60s clock skew as "not stale"', () => {
+      const reportDone = m(
+        'phase=report status=done run=r-440-ab56 at=2026-08-24T09:59:30Z' // 30s before T
+      );
+      const result = computeResume(
+        [gateDone, reportDone],
+        openProbe,
+        '2026-08-24T10:00:00Z' // T
+      );
+      expect(result.resume_from).toBe('report');
+      expect(result.prior_run).toBeUndefined();
+    });
+
+    it('resets generation to 0 for the freshly minted run, even when the OLD run was fenced', () => {
+      const fence = m(
+        `phase=implement status=${FENCE_STATUS} run=r-440-ab56 at=2026-08-24T08:00:00Z`,
+        'gen=2',
+        'takeover=slot-2-r1'
+      );
+      const reportDone = m('phase=report status=done run=r-440-ab56 at=2026-08-24T07:00:00Z');
+      const result = computeResume(
+        [gateDone, fence, reportDone],
+        openProbe,
+        '2026-08-24T10:00:00Z'
+      );
+      expect(result.resume_from).toBe('none');
+      expect(result.note).toBe('stale-report-trail');
+      expect(result.generation).toBe(DEFAULT_GENERATION);
+    });
+
+    it('does not mint a fresh run when the issue state could not be read (probe returns null)', () => {
+      const unknownProbe = probe({ issueClosed: () => null });
+      const reportDone = m('phase=report status=done run=r-440-ab56 at=2026-08-24T07:00:00Z');
+      const result = computeResume([gateDone, reportDone], unknownProbe, '2026-08-24T10:00:00Z');
+      expect(result.resume_from).toBe('report');
+      expect(result.run_id).toBe('r-440-ab56');
+      expect(result.note).toContain('could not be read');
+      expect(result.prior_run).toBeUndefined();
+    });
+
+    it('falls back to report instead of minting a poisoned run id from a malformed run=', () => {
+      const reportDone = m(
+        'phase=report status=done run=not-a-real-run-id at=2026-08-24T07:00:00Z'
+      );
+      const result = computeResume([gateDone, reportDone], openProbe, '2026-08-24T10:00:00Z');
+      expect(result.resume_from).toBe('report');
+      expect(result.note).toContain('unusable run id');
+      expect(result.prior_run).toBeUndefined();
+    });
+
+    it('flags the ambiguity instead of treating an unparseable at= as stale', () => {
+      const reportDone = m('phase=report status=done run=r-440-ab56 at=not-a-date');
+      const result = computeResume([gateDone, reportDone], openProbe, '2026-08-24T10:00:00Z');
+      expect(result.resume_from).toBe('report');
+      expect(result.note).toContain('no parseable at=');
+      expect(result.prior_run).toBeUndefined();
+    });
+  });
+
+  describe('#582 parseDispatchedAt strictness', () => {
+    it('accepts a well-formed ISO instant with a Z suffix', () => {
+      expect(parseDispatchedAt('2026-08-24T10:00:00Z')).toBe('2026-08-24T10:00:00.000Z');
+    });
+
+    it('accepts an ISO instant with an explicit numeric offset', () => {
+      expect(parseDispatchedAt('2026-08-24T10:00:00+02:00')).toBe('2026-08-24T08:00:00.000Z');
+    });
+
+    it('rejects a locale-formatted date with no explicit zone', () => {
+      expect(parseDispatchedAt('Aug 24 2026')).toBeNull();
+    });
+
+    it('rejects a zone-less date-time (would be read as local time)', () => {
+      expect(parseDispatchedAt('2026-08-24T10:00:00')).toBeNull();
+    });
+
+    it('rejects a bare year', () => {
+      expect(parseDispatchedAt('2026')).toBeNull();
+    });
+
+    it('rejects garbage', () => {
+      expect(parseDispatchedAt('not-a-date')).toBeNull();
+    });
   });
 
   it('resumes a blocked phase at that same phase', () => {

@@ -41,8 +41,10 @@ import {
   MAX_GENERATION,
   mintRunId,
   nextFenceGeneration,
+  nowStamp,
   type ParsedMilestone,
   PHASES,
+  parseDispatchedAt,
   parseGeneration,
   parseMilestones,
   type ResumeProbe,
@@ -99,6 +101,10 @@ interface ReadOptions {
   issue: string;
   repo?: string;
   json?: boolean;
+}
+
+interface VerifyOptions extends ReadOptions {
+  dispatchedAt?: string;
 }
 
 interface MintOptions {
@@ -362,16 +368,22 @@ function probePrState(
   };
 }
 
-function probeIssueClosed(issue: string, repo: string | undefined, warn: WarnOnce): boolean {
+/**
+ * `null` means the read failed or returned non-JSON — genuinely unknown, not "open".
+ * Distinct from `false` (confirmed open) because #582's stale-report check must not
+ * treat "gh unreachable" the same as "issue is open" — that would mint a fresh run (and
+ * potentially a duplicate PR) for an issue that might already be closed and merged.
+ */
+function probeIssueClosed(issue: string, repo: string | undefined, warn: WarnOnce): boolean | null {
   const res = exec('gh', ['issue', 'view', issue, '--json', 'state', ...repoArgs(repo)]);
   if (!res.ok) {
     warn(probeFailure('gh', `read the state of issue #${issue}`, res.error, RUN_INCOMPLETE));
-    return false;
+    return null;
   }
   const data = parseGhJson<GhIssueStateJson>(res.stdout);
   if (data === null) {
     warn(nonJsonFailure(`the state of issue #${issue}`, res.stdout, RUN_INCOMPLETE));
-    return false;
+    return null;
   }
   return asString(data.state) === GH_STATE_CLOSED;
 }
@@ -387,13 +399,25 @@ function makeProbe(issue: string, repo?: string, warnings: string[] = []): Resum
   const warn: WarnOnce = (line) => {
     if (!warnings.includes(line)) warnings.push(line);
   };
+  // Memoized: `report`'s resolver and #582's stale-report check both ask "is the issue
+  // closed?" on the same trail, and without caching that was two `gh` round-trips per
+  // `verify` call for one answer. A plain `??=` would re-fetch forever on a `null`
+  // (unknown) result, so the cache needs its own "have we asked" flag.
+  let closed: boolean | null = null;
+  let closedRead = false;
 
   return {
     branchOnRemote: (branch) => probeBranchOnRemote(branch, warn),
     headOnRemote: (branch, head) => probeHeadOnRemote(branch, head, warn),
     dirExists: (path) => probeDirExists(path, warn),
     prState: (pr) => probePrState(pr, repo, warn),
-    issueClosed: () => probeIssueClosed(issue, repo, warn),
+    issueClosed: () => {
+      if (!closedRead) {
+        closed = probeIssueClosed(issue, repo, warn);
+        closedRead = true;
+      }
+      return closed;
+    },
   };
 }
 
@@ -496,6 +520,18 @@ function requireGeneration(raw: string | undefined, flag: string): number {
   if (parsed === null) {
     fail([
       `Invalid ${flag} '${raw}' — expected a non-negative integer run generation.\nFix: pass the generation this run owns, e.g. ${flag} 1 (a run that was never fenced is ${DEFAULT_GENERATION}).`,
+    ]);
+  }
+  return parsed;
+}
+
+/** Read `--dispatched-at`, or exit explaining what a valid value looks like. */
+function requireDispatchedAt(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  const parsed = parseDispatchedAt(raw);
+  if (parsed === null) {
+    fail([
+      `Invalid --dispatched-at '${snippet(raw)}' — expected an ISO-8601 timestamp with an explicit timezone (e.g. ${nowStamp()}). A value with no zone would be read as local time and could shift the #582 staleness fence by the host's UTC offset.\nFix: pass the time this run was dispatched, e.g. --dispatched-at ${nowStamp()}.`,
     ]);
   }
   return parsed;
@@ -740,12 +776,21 @@ function registerVerifySubcommand(cmd: Command): void {
     .description("Run the gate's resume verification and print resume_from (read-only)")
     .requiredOption('--issue <number>', 'GitHub issue number')
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
+    .option(
+      '--dispatched-at <iso>',
+      "ISO timestamp this run was dispatched at — distinguishes a stale prior report/done milestone from this run's own"
+    )
     .option('--json', 'Output the result as JSON')
-    .action((options: ReadOptions) => {
+    .action((options: VerifyOptions) => {
       requireIssueTarget(options);
+      const dispatchedAt = requireDispatchedAt(options.dispatchedAt);
       const milestones = fetchMilestones(options.issue, options.repo);
       const warnings: string[] = [];
-      const result = computeResume(milestones, makeProbe(options.issue, options.repo, warnings));
+      const result = computeResume(
+        milestones,
+        makeProbe(options.issue, options.repo, warnings),
+        dispatchedAt
+      );
 
       if (options.json) {
         console.log(
@@ -760,6 +805,8 @@ function registerVerifySubcommand(cmd: Command): void {
               ...(result.slot_trail ? { slot_trail: true } : {}),
               ...(result.hard_block ? { hard_block: result.hard_block } : {}),
               ...(result.note ? { note: result.note } : {}),
+              ...(result.prior_run ? { prior_run: result.prior_run } : {}),
+              ...(dispatchedAt ? { dispatched_at: dispatchedAt } : {}),
               ...(warnings.length > 0 ? { warnings } : {}),
             },
             null,
@@ -775,6 +822,8 @@ function registerVerifySubcommand(cmd: Command): void {
         if (result.slot_trail) console.log('slot_trail=present');
         if (result.hard_block) console.log(`hard_block=${result.hard_block}`);
         if (result.note) console.log(`note=${result.note}`);
+        if (result.prior_run) console.log(`prior_run=${result.prior_run}`);
+        if (dispatchedAt) console.log(`dispatched_at=${dispatchedAt}`);
         console.log(`resume_context=${JSON.stringify(result.resume_context)}`);
       }
 
