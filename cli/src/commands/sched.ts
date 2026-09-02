@@ -343,7 +343,13 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
         )
   );
   lines.push('');
-  lines.push('== Blocked ==');
+  // #544: label-blocked entries are re-checked by the engine each tick, so
+  // the header says when it last looked — "the label is still there" reads
+  // very differently from "the engine has not looked since you removed it".
+  const lastLabelPoll = report.last_label_poll_at
+    ? `; labels last checked ${relativeTime(report.last_label_poll_at)}`
+    : '; labels never checked';
+  lines.push(`== Blocked${report.blocked.length > 0 ? lastLabelPoll : ''} ==`);
   lines.push(
     report.blocked.length > 0
       ? report.blocked.map((b) => `#${b.issue} [${b.status}] — ${b.reason}`).join('\n')
@@ -982,6 +988,10 @@ function registerStartSubcommand(cmd: Command): void {
           parts.push(`stale failure reconciled ${result.staleReconciled.join(', ')}`);
         if (result.dependentsUnblocked.length > 0)
           parts.push(`dependents unblocked ${result.dependentsUnblocked.join(', ')}`);
+        if (result.labelCleared.length > 0)
+          parts.push(`label cleared ${result.labelCleared.join(', ')}`);
+        if (result.labelBlocked.length > 0)
+          parts.push(`label blocked ${result.labelBlocked.join(', ')}`);
         if (result.teardownDone.length > 0)
           parts.push(`teardown done ${result.teardownDone.join(', ')}`);
         if (result.teardownFailed.length > 0)

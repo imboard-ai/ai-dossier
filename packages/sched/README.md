@@ -120,11 +120,13 @@ where every mechanical supervision decision is code, not remembered prose:
    run-log-recorded, run-log-no-usage, run-log-skipped, run-log-failed, engine-stale,
    engine-auto-upgrade-attempted, engine-auto-upgrade-failed, …) is
    appended to `events.jsonl`; `sched status` shows the live phase per unit, plus each
-   slot's `gen` and `fenced` state (#504). `label-blocked`/`label-check-failed` (#507)
-   and `engine-stale`/`engine-auto-upgrade-attempted`/`engine-auto-upgrade-failed`
-   (#537) are journaled OUTSIDE the engine — `sched enqueue` appends the label events at
-   enqueue time before dispatch, and `sched start`'s CLI-side staleness check appends
-   the engine-stale events directly, not through `tick()`. `slot-released` (#525) marks the exact tick a held
+   slot's `gen` and `fenced` state (#504).
+   `engine-stale`/`engine-auto-upgrade-attempted`/`engine-auto-upgrade-failed`
+   (#537) are journaled OUTSIDE the engine — `sched start`'s CLI-side staleness check
+   appends them directly, not through `tick()`. The label events
+   (`label-blocked`/`label-check-failed`/`label-cleared`) come from BOTH sides: `sched
+   enqueue` appends the first two at enqueue time before dispatch (#507), and since #544
+   the engine appends all three from its own per-tick label re-check. `slot-released` (#525) marks the exact tick a held
    slot reaches `idle` on a per-issue dispatch terminal path — verified completion,
    external-advance, a direct failure, a blocked dependent's release, or a
    detached-ship park — carrying the freed `slot` id and a closed `reason`
@@ -579,14 +581,15 @@ slot without recording, so they are not costed.
   `EngineTooOldError` (#537), pointing at an engine upgrade rather than at deleting real
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
-  #472 (1.3.0), #500 (1.4.0), #505 (1.5.0) and #504 (1.6.0) load and migrate to 1.7.0
-  automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
+  #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0) and #524/#523 (1.8.0) load and
+  migrate to 1.9.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
   `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
   `evictions`/`fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to
   null, state-level `consecutive_suspect_dispatches`/`last_suspect_dispatch_unit`
   backfill to `0`/`null` — #505, slot `gen`/`fenced_at` backfill to `0`/`null` — #504, and
-  slot `spawned_at`/`log_offset_at_spawn` backfill to `null`/`null` — #524).
+  slot `spawned_at`/`log_offset_at_spawn` backfill to `null`/`null` — #524, and
+  state-level `last_label_poll_at` backfill to `null` — #544).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -595,6 +598,34 @@ slot without recording, so they are not costed.
   nothing green is discarded). A pause can be manual (`sched pause`) or automatic
   (dispatch-health, #505 above); `sched resume` clears both the flag and the
   dispatch-health streak.
+
+## Hard-block labels are re-read every tick (#544)
+
+#507's enqueue pre-screen resolves an issue's GitHub labels in the CLI and lands the
+entry as `blocked reason=label:<name>`. That screen runs once, at enqueue time — so
+before #544 a decision the human resolved never reached the queue: the entry stayed
+blocked forever and `sched status` kept printing a stale reason. The engine now re-reads
+the labels itself, on both sides of the same check:
+
+- A `label:<name>`-blocked entry whose label is gone returns to `queued` (`label-cleared`),
+  and normal dependency gating takes it from there — a free slot can pick it up in the
+  same tick.
+- A **dispatchable** entry that GAINED a hard-block label moves to `blocked`
+  (`label-blocked`) before the dispatch pass, so a fresh human hand-off is never
+  dispatched over. An already-`dispatched` unit is left alone: a late label must not
+  abandon a live agent's work.
+- A blocked entry whose label CHANGED gets its reason refreshed in place.
+- An unreachable read (`gh` down, auth expired) journals `label-check-failed` and decides
+  NOTHING. `issueLabels` returns `undefined` for a failed read and `[]` for a verifiably
+  unlabelled issue — flattening the two would dispatch over a live hand-off whenever
+  GitHub is flaky.
+
+The watch set is every label-blocked entry plus every runnable issue unit. A tick with
+work re-reads every tick; a tick with nothing else to do (no live slot, nothing runnable)
+re-reads at most every 10 minutes, from the persisted `last_label_poll_at` — so an idle
+fleet parked on human decisions stays cheap. `HARD_BLOCK_LABELS` lives in `labels.ts`
+and is re-exported by `cli/src/hard-block-labels.ts`, so the enqueue screen (#507), the
+classify screen (#538) and this one cannot drift apart.
 
 ## The PR watcher + tail work (#468)
 

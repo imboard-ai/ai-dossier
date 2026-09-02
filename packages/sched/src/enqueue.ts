@@ -12,6 +12,7 @@
 
 import { SAFE_REF_RE } from './attribution';
 import { unwrapList } from './json';
+import { labelBlockReason } from './labels';
 import { createBatch, findBatch, transitionBatch } from './state';
 import type { CycleMode, ModelTier, QueueEntry, SchedState } from './types';
 import { TERMINAL_ISSUE_STATUSES } from './types';
@@ -45,17 +46,12 @@ const LABEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,49}$/;
 const BATCH_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /**
- * The `reason` prefix a hard-block-labelled entry carries (#507), and the one
- * place that builds it — the CLI's journal event and the entry's `reason`
- * must read identically, so both call this rather than templating the string
- * twice.
+ * The `label:<name>` reason vocabulary moved to `labels.ts` (#544) so the
+ * engine's per-tick re-check and this enqueue-time screen share one
+ * definition. Re-exported here because `LABEL_BLOCK_REASON_PREFIX` /
+ * `labelBlockReason` were part of this module's public surface first.
  */
-export const LABEL_BLOCK_REASON_PREFIX = 'label:';
-
-/** `reason`/journal-`reason` value for an entry blocked by GitHub label `label`. */
-export function labelBlockReason(label: string): string {
-  return `${LABEL_BLOCK_REASON_PREFIX}${label}`;
-}
+export { LABEL_BLOCK_REASON_PREFIX, labelBlockReason } from './labels';
 
 /** One unit of work as provided by flags or a manifest (defaults applied by `enqueueEntries`). */
 export interface EnqueueInput {

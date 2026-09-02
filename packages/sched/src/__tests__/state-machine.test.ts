@@ -637,6 +637,23 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0 → 1
     expect(migrated.entries[0].status).toBe('dispatched');
   });
 
+  it('loads a pre-#544 1.8.0 state and backfills last_label_poll_at as null', () => {
+    // Null is exact, not a guess: no label re-check has ever run under a
+    // pre-#544 engine, so the first tick after the upgrade should poll
+    // immediately rather than wait out a throttle window it has no evidence
+    // for.
+    const legacy = { ...seeded(), schema_version: '1.8.0' } as Record<string, unknown>;
+    delete legacy.last_label_poll_at;
+
+    const migrated = validateState(legacy);
+
+    expect(migrated.schema_version).toBe(SCHEMA_VERSION);
+    expect(migrated.last_label_poll_at).toBeNull();
+    // everything the 1.8.0 engine persisted is preserved
+    expect(migrated.last_pr_poll_at).toBe(seeded().last_pr_poll_at);
+    expect(migrated.entries).toHaveLength(seeded().entries.length);
+  });
+
   it('loads a pre-#472 1.2.0 state and backfills the recovery fields', () => {
     // Exactly what #468 persisted: entries with pr/cleanup but no
     // failure_evidence, batches with none of the recovery fields.
@@ -962,6 +979,12 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0 → 1
     const state = seeded();
     const bad = { ...state, last_pr_poll_at: 'yesterday' };
     expect(() => validateState(bad)).toThrow(/last_pr_poll_at/);
+  });
+
+  it('rejects a malformed last_label_poll_at (#544)', () => {
+    const state = seeded();
+    const bad = { ...state, last_label_poll_at: 'ten minutes ago' };
+    expect(() => validateState(bad)).toThrow(/last_label_poll_at/);
   });
 
   it('current-schema states round-trip unchanged', () => {

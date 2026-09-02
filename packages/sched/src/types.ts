@@ -431,6 +431,16 @@ export interface SchedState {
    */
   last_pr_poll_at: string | null;
   /**
+   * When the engine last re-read hard-block labels (#544). The label
+   * re-check runs on every tick that has work; on a tick with nothing else
+   * to do it is throttled to `LABEL_POLL_IDLE_INTERVAL_MS` since this
+   * timestamp, so an idle fleet does not spend a `gh issue view` per blocked
+   * unit per tick forever. Persisted — like `last_pr_poll_at` — so the
+   * throttle survives a `sched` restart rather than resetting to "poll now"
+   * on every crash loop.
+   */
+  last_label_poll_at: string | null;
+  /**
    * Consecutive `suspect-dispatch` exits (#505) from DIFFERENT units — the
    * dispatch-health signal. A quota/auth wall kills every unit the same way
    * (instant unverified exit, zero progress), so cross-unit correlation is
@@ -682,7 +692,7 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.8.0' as const;
+export const SCHEMA_VERSION = '1.9.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -694,6 +704,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.5.0',
   '1.6.0',
   '1.7.0',
+  '1.8.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.4.0' as const;
@@ -850,6 +861,14 @@ export type JournalEventName =
   // dispatched)
   | 'label-blocked'
   | 'label-check-failed'
+  // #544 per-tick hard-block label re-check (journaled by the ENGINE, unlike
+  // the two above): a `label:<name>`-blocked entry whose label the operator
+  // has since removed, returned to `queued`. The engine also re-uses
+  // `label-blocked` (a dispatchable entry that GAINED a hard-block label
+  // mid-wave, or a blocked entry whose label CHANGED) and
+  // `label-check-failed` (an unreachable label read, which decides nothing)
+  // — one event vocabulary across both screens.
+  | 'label-cleared'
   // #524 runs.jsonl telemetry: a dispatch's exit produced no entry (unit left
   // the queue, or is not an `issue:<n>` unit), or the append itself failed.
   | 'run-log-skipped'

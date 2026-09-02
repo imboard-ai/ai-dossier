@@ -66,6 +66,7 @@ function fileGroundTruth(milestonesDir: string): GroundTruth {
     },
     issueClosed: () => false,
     branchHead: () => null,
+    issueLabels: () => [],
   };
 }
 
@@ -369,6 +370,7 @@ function fileTailGroundTruth(dir: string): GroundTruth {
     },
     issueClosed: (issue) => fs.existsSync(path.join(dir, `${issue}.closed`)),
     branchHead: () => null,
+    issueLabels: () => [],
     prState: (pr) => {
       const raw = readJson(`${pr}.pr.json`);
       if (raw === undefined || raw === null || typeof raw !== 'object') return undefined;

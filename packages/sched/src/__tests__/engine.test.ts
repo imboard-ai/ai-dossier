@@ -20,6 +20,7 @@ import {
   type SpawnDeps,
   schedRunsLogPath,
   tick,
+  transitionIssue,
 } from '../index';
 
 /**
@@ -76,6 +77,10 @@ function harness(
   const prUnreachable = new Set<number>();
   const setupInfos = new Map<number, SetupInfo | null | undefined>();
   const setupUnreachable = new Set<number>();
+  /** #544: hard-block labels per issue (absent = no labels), and the read log. */
+  const labelsByIssue = new Map<number, string[]>();
+  const labelUnreachable = new Set<number>();
+  const labelReads: number[] = [];
   const teardownCalls: Array<{ file: string; args: string[]; cwd?: string }> = [];
   /** Scriptable teardown subprocess behavior (default: every call fails). */
   let teardownScript: (file: string, args: string[]) => string | null = () => null;
@@ -87,6 +92,10 @@ function harness(
     prState: (pr) => (prUnreachable.has(pr) ? undefined : prStates.get(pr)),
     setupInfo: (issue) =>
       setupUnreachable.has(issue) ? undefined : (setupInfos.get(issue) ?? null),
+    issueLabels: (issue) => {
+      labelReads.push(issue);
+      return labelUnreachable.has(issue) ? undefined : (labelsByIssue.get(issue) ?? []);
+    },
   };
   const teardownExec = (file: string, args: string[], cwd?: string): string | null => {
     teardownCalls.push({ file, args, cwd });
@@ -163,6 +172,9 @@ function harness(
     prUnreachable,
     setupInfos,
     setupUnreachable,
+    labelsByIssue,
+    labelUnreachable,
+    labelReads,
     teardownCalls,
     fenceCalls,
     setFenceFails: (fails: boolean) => {
@@ -2299,5 +2311,178 @@ describe('runs.jsonl telemetry (#524: per-dispatch token/cost recorded on exit)'
       output_tokens: null,
       total_cost_usd: null,
     });
+  });
+});
+
+describe('#544: hard-block labels are re-evaluated each tick', () => {
+  /** The state #507's enqueue pre-screen produces: blocked with a `label:<name>` reason. */
+  const enqueueLabelBlocked = (h: ReturnType<typeof harness>, issue: number, label: string) => {
+    h.enqueue([{ issue, mode: 'full', blocked_label: label }]);
+    h.labelsByIssue.set(issue, [label]);
+    const entry = h.state().entries.find((e) => e.issue === issue);
+    expect(entry).toMatchObject({ status: 'blocked', reason: `label:${label}` });
+  };
+
+  it('AC1: a cleared label returns the unit to queued and dispatches it the same tick', () => {
+    const h = harness();
+    enqueueLabelBlocked(h, 101, 'decision-pending');
+
+    // The human resolves the decision and removes the label.
+    h.labelsByIssue.set(101, ['bug']);
+    const result = h.tick();
+
+    expect(result.labelCleared).toEqual(['issue:101']);
+    expect(h.state().entries[0]).toMatchObject({ status: 'dispatched', reason: null });
+    expect(result.spawned).toEqual(['issue:101']);
+    expect(h.events().some((e) => e.event === 'label-cleared' && e.issue === 101)).toBe(true);
+  });
+
+  it('AC1: a unit whose label is still there stays blocked and is not journaled as cleared', () => {
+    const h = harness();
+    enqueueLabelBlocked(h, 101, 'decision-pending');
+
+    const result = h.tick();
+
+    expect(result.labelCleared).toEqual([]);
+    expect(result.spawned).toEqual([]);
+    expect(h.state().entries[0]).toMatchObject({
+      status: 'blocked',
+      reason: 'label:decision-pending',
+    });
+    expect(h.events().some((e) => e.event === 'label-cleared')).toBe(false);
+  });
+
+  it('AC1: a blocked unit whose label CHANGED gets its stale reason refreshed', () => {
+    const h = harness();
+    enqueueLabelBlocked(h, 101, 'decision-pending');
+
+    h.labelsByIssue.set(101, ['epic']);
+    const result = h.tick();
+
+    expect(result.labelBlocked).toEqual(['issue:101']);
+    expect(h.state().entries[0]).toMatchObject({ status: 'blocked', reason: 'label:epic' });
+    expect(result.spawned).toEqual([]);
+  });
+
+  it('AC1: dependency gating still applies to a just-unblocked unit', () => {
+    const h = harness();
+    h.enqueue([{ issue: 100, mode: 'full' }]);
+    h.enqueue([{ issue: 101, mode: 'full', deps: [100], blocked_label: 'decision-pending' }]);
+    h.labelsByIssue.set(101, ['bug']); // label already gone
+
+    const result = h.tick();
+
+    expect(result.labelCleared).toEqual(['issue:101']);
+    // Back to `queued`, but #100 has not merged — so it is NOT dispatched.
+    expect(h.state().entries.find((e) => e.issue === 101)).toMatchObject({ status: 'queued' });
+    expect(result.spawned).toEqual(['issue:100']);
+  });
+
+  it('AC2: a queued unit that gains a hard-block label is blocked, not dispatched over', () => {
+    const h = harness();
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    // A full-cycle hand-off labels the issue between enqueue and dispatch.
+    h.labelsByIssue.set(101, ['bug', 'decision-pending']);
+
+    const result = h.tick();
+
+    expect(result.labelBlocked).toEqual(['issue:101']);
+    expect(result.spawned).toEqual([]);
+    expect(h.spawnCalls).toHaveLength(0);
+    expect(h.state().entries[0]).toMatchObject({
+      status: 'blocked',
+      reason: 'label:decision-pending',
+    });
+    expect(h.events().some((e) => e.event === 'label-blocked' && e.issue === 101)).toBe(true);
+  });
+
+  it('AC2: a unit already dispatched is left alone — a late label never abandons a live agent', () => {
+    const h = harness();
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    h.tick();
+    expect(h.state().entries[0].status).toBe('dispatched');
+
+    h.labelsByIssue.set(101, ['decision-pending']);
+    const result = h.tick();
+
+    expect(result.labelBlocked).toEqual([]);
+    expect(h.state().entries[0].status).toBe('dispatched');
+  });
+
+  it('AC3: an idle tick re-reads at most every 10 minutes, and the timestamp is persisted', () => {
+    const h = harness();
+    enqueueLabelBlocked(h, 101, 'decision-pending');
+
+    h.tick();
+    const firstPoll = h.state().last_label_poll_at;
+    expect(firstPoll).toBe(h.clock().toISOString());
+    const readsAfterFirst = h.labelReads.length;
+    expect(readsAfterFirst).toBe(1);
+
+    // Nothing else to do (no live slot, nothing runnable) — throttled.
+    h.advance(60_000);
+    h.tick();
+    expect(h.labelReads).toHaveLength(readsAfterFirst);
+    expect(h.state().last_label_poll_at).toBe(firstPoll);
+
+    // Past the window — reads again.
+    h.advance(10 * 60_000);
+    h.tick();
+    expect(h.labelReads).toHaveLength(readsAfterFirst + 1);
+    expect(h.state().last_label_poll_at).toBe(h.clock().toISOString());
+  });
+
+  it('AC3: a tick that HAS work re-reads every tick, throttle notwithstanding', () => {
+    const h = harness();
+    enqueueLabelBlocked(h, 101, 'decision-pending');
+    h.enqueue([{ issue: 102, mode: 'full' }]); // runnable → the tick has work
+
+    h.tick();
+    const reads = h.labelReads.length;
+    expect(reads).toBe(2); // one per watched unit: the blocked one and the runnable one
+
+    // #102 is now running, so the tick still has work one minute later.
+    h.advance(60_000);
+    h.tick();
+    expect(h.labelReads.length).toBeGreaterThan(reads);
+  });
+
+  it('an unreachable label read decides nothing and journals label-check-failed', () => {
+    const h = harness();
+    enqueueLabelBlocked(h, 101, 'decision-pending');
+    h.labelUnreachable.add(101);
+
+    const result = h.tick();
+
+    expect(result.labelCleared).toEqual([]);
+    expect(result.labelBlocked).toEqual([]);
+    expect(h.state().entries[0]).toMatchObject({
+      status: 'blocked',
+      reason: 'label:decision-pending',
+    });
+    expect(h.events().some((e) => e.event === 'label-check-failed' && e.issue === 101)).toBe(true);
+  });
+
+  it('a unit blocked for a NON-label reason is never unblocked by a clean label read', () => {
+    const h = harness();
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    h.store.withLock((state) => ({
+      state: transitionIssue(state, 101, 'blocked', { reason: 'dep-failed:100' }, h.clock()),
+      result: null,
+    }));
+
+    const result = h.tick();
+
+    expect(result.labelCleared).toEqual([]);
+    expect(h.state().entries[0]).toMatchObject({ status: 'blocked', reason: 'dep-failed:100' });
+  });
+
+  it('no label read happens at all when nothing is blocked or runnable', () => {
+    const h = harness();
+
+    h.tick();
+
+    expect(h.labelReads).toEqual([]);
+    expect(h.state().last_label_poll_at).toBeNull();
   });
 });

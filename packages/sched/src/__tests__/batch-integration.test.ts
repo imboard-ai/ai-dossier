@@ -102,6 +102,7 @@ function fileBatchGroundTruth(dir: string): GroundTruth {
     },
     issueClosed: () => false,
     branchHead: () => null,
+    issueLabels: () => [],
     prState: (pr) => {
       const raw = readJson(`${pr}.pr.json`);
       if (raw === undefined || raw === null || typeof raw !== 'object') return undefined;

@@ -90,6 +90,7 @@ export {
   isVerifiedComplete,
   labelNames,
   type PrTruth,
+  parseIssueLabelsJson,
   parseMilestoneJson,
   parsePrViewJson,
   parseSetupInfo,
@@ -105,7 +106,10 @@ export {
   readJsonl,
   unitEvent,
 } from './journal';
-
+// `LABEL_BLOCK_REASON_PREFIX` / `labelBlockReason` also live in `labels.ts`
+// since #544, but stay exported through `./enqueue` above — that is where
+// they were first public, and re-exporting them twice would collide.
+export { HARD_BLOCK_LABELS, labelOfBlockReason, pickHardBlockLabel } from './labels';
 export { CorruptStateError, LockTimeoutError, SchedStore, writeAtomic } from './persist';
 export {
   createExecFn,

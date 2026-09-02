@@ -11,6 +11,9 @@
  *    the state lock (gh/git subprocesses are slow; the lock must never wait
  *    on a network call). Parked PRs poll on their own cadence
  *    (`pr_poll_interval_ms`, persisted `last_pr_poll_at`) — every 2–3 min.
+ *    Hard-block labels (#544) are re-read in the same outside-the-lock phase,
+ *    every tick that has work and at most every 10 min on a tick that does
+ *    not (persisted `last_label_poll_at`).
  * 2. **Apply** under `SchedStore.withLock`:
  *    - `assigned` slots (crash between assign and spawn) are spawned/re-attached
  *    - `running` slots: dead pid → exit rail; ground truth says complete →
@@ -92,8 +95,10 @@ import {
   prOfMilestone,
 } from './groundtruth';
 import { issueOfUnit, type Journal, unitEvent } from './journal';
+import { labelBlockReason, labelOfBlockReason, pickHardBlockLabel } from './labels';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
+import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
 import {
   appendSchedRunLog,
   buildSchedRunLogEntry,
@@ -203,6 +208,14 @@ export interface TickResult {
   failed: string[];
   /** Issues blocked transitively by a failure. */
   blocked: number[];
+  /** Units returned to `queued` this tick because their hard-block label was removed (#544). */
+  labelCleared: string[];
+  /**
+   * Units moved to `blocked` this tick by a hard-block label the engine
+   * re-read (#544) — a dispatchable entry that gained one mid-wave, or a
+   * blocked entry whose label changed under it.
+   */
+  labelBlocked: string[];
 }
 
 function emptyResult(): TickResult {
@@ -221,6 +234,8 @@ function emptyResult(): TickResult {
     redispatched: [],
     failed: [],
     blocked: [],
+    labelCleared: [],
+    labelBlocked: [],
   };
 }
 
@@ -241,6 +256,22 @@ interface PrPoll {
   truths: Map<number, PrTruth | undefined>;
   /** Issue-closed signal per parked issue (the merge-acceptance gate, AC1). */
   closed: Map<number, boolean>;
+}
+
+/**
+ * Hard-block label truths gathered outside the lock (#544) — what
+ * `reconcileLabelBlocks` decides on.
+ */
+interface LabelPoll {
+  /** Whether a label read actually ran this tick (watch set non-empty AND not throttled). */
+  ran: boolean;
+  /**
+   * Per watched issue: the hard-block label it currently carries, `null` when
+   * it carries none, `undefined` when the read FAILED (unreachable). The
+   * `null`/`undefined` split is the whole safety property — `null` unblocks a
+   * unit, `undefined` must decide nothing.
+   */
+  blocks: Map<number, string | null | undefined>;
 }
 
 interface TickCtx {
@@ -458,6 +489,130 @@ function pollParkedPrs(deps: EngineDeps, state: SchedState, dispatch: ResolvedDi
     closed.set(entry.issue, deps.groundTruth.issueClosed(entry.issue));
   }
   return { ran: true, truths, closed };
+}
+
+/**
+ * #544: how long a tick with NOTHING else to do waits between hard-block
+ * label re-reads. A tick that has work (a live slot, or a unit it could
+ * dispatch) re-reads every tick — that is what makes AC1's "cleared label →
+ * queued in the same tick" and AC2's "never dispatched over" true. This
+ * throttle exists only so a fleet parked entirely on human decisions does
+ * not burn a `gh issue view` per blocked unit per tick indefinitely.
+ */
+const LABEL_POLL_IDLE_INTERVAL_MS = 10 * 60 * 1000;
+
+/**
+ * Re-read hard-block labels outside the lock (#544), mirroring
+ * `pollParkedPrs`' shape (cadence check, `ran: false` early return, every
+ * subprocess outside the lock).
+ *
+ * The watch set is deliberately two-sided, because the bug is two-sided:
+ *
+ * - Entries `blocked` with a `label:<name>` reason — #507's enqueue screen
+ *   ran ONCE, in the CLI, so without this read a decision resolved by a human
+ *   never reaches the queue and `sched status` keeps printing a stale reason.
+ * - Every runnable ISSUE unit (`runnableUnits`) — an entry the engine could
+ *   dispatch this tick, which is exactly where AC2's "a fresh human hand-off
+ *   is never dispatched over" has to bite.
+ *
+ * The second half is the whole runnable set rather than just the assignments
+ * this tick's `computeAssignments` would make: slots free INSIDE the lock
+ * (completions, parks, failures all land before `dispatchAssignments`), so
+ * the real dispatch set is a superset of anything computable out here. Paying
+ * one label read per runnable unit is the price of the guarantee; the
+ * dependency-blocked backlog is excluded for free, since it is not runnable.
+ */
+function pollLabels(deps: EngineDeps, state: SchedState): LabelPoll {
+  const watched = new Set<number>();
+  for (const entry of state.entries) {
+    if (entry.status === 'blocked' && labelOfBlockReason(entry.reason) !== null) {
+      watched.add(entry.issue);
+    }
+  }
+  const dispatchable = runnableUnits(state).filter(
+    (unit): unit is { kind: 'issue'; issue: number } => unit.kind === 'issue'
+  );
+  for (const unit of dispatchable) watched.add(unit.issue);
+  if (watched.size === 0) return { ran: false, blocks: new Map() };
+
+  // "Nothing else to do" (AC3) = no live slot to reconcile AND nothing to
+  // dispatch. A fleet in that shape is waiting on a human, so a 10-minute
+  // re-read is responsive enough; anything busier re-reads every tick.
+  const nowMs = deps.now().getTime();
+  const idle = !state.slots.some((slot) => slot.status !== 'idle') && dispatchable.length === 0;
+  if (idle) {
+    const last = state.last_label_poll_at !== null ? Date.parse(state.last_label_poll_at) : 0;
+    if (Number.isFinite(last) && nowMs - last < LABEL_POLL_IDLE_INTERVAL_MS) {
+      return { ran: false, blocks: new Map() };
+    }
+  }
+
+  const blocks = new Map<number, string | null | undefined>();
+  for (const issue of watched) {
+    const labels = deps.groundTruth.issueLabels(issue);
+    blocks.set(issue, labels === undefined ? undefined : pickHardBlockLabel(labels));
+  }
+  return { ran: true, blocks };
+}
+
+/**
+ * Apply this tick's label read (#544) — the reconcile half of the fix, run
+ * immediately before `dispatchAssignments` so both directions land in the
+ * SAME tick they were observed in:
+ *
+ * - blocked by a label that is now gone → `queued`, `reason` cleared,
+ *   `label-cleared` journaled; normal dependency gating takes over from
+ *   there, and a free slot picks it up later this same tick.
+ * - blocked by a label that CHANGED (`decision-pending` → `epic`) → reason
+ *   refreshed in place. `sched status` printing a reason that no longer
+ *   matches the issue is the same defect as never unblocking at all.
+ * - dispatchable and now carrying a hard-block label → `blocked`, so the
+ *   dispatch pass below can no longer see it (`runnableUnits` gates on
+ *   `DISPATCHABLE_ISSUE_STATUSES`, which excludes `blocked`).
+ * - unreachable read → `label-check-failed` and NOTHING else. An unreachable
+ *   poll can never be evidence that a hand-off was resolved.
+ */
+function reconcileLabelBlocks(ctx: TickCtx, state: SchedState, poll: LabelPoll): SchedState {
+  if (!poll.ran) return state;
+  const now = ctx.deps.now();
+  let next: SchedState = { ...state, last_label_poll_at: now.toISOString() };
+
+  for (const [issue, block] of poll.blocks) {
+    const entry = findEntry(next, issue);
+    if (entry === undefined) continue; // left the queue between the poll and the lock
+    const unit = `issue:${issue}`;
+
+    if (block === undefined) {
+      journal(ctx, 'label-check-failed', unit, { reason: 'unreachable' });
+      continue;
+    }
+
+    const blockedBy = entry.status === 'blocked' ? labelOfBlockReason(entry.reason) : null;
+    if (blockedBy !== null) {
+      if (block === null) {
+        next = transitionIssue(next, issue, 'queued', { reason: null }, now);
+        journal(ctx, 'label-cleared', unit, { reason: labelBlockReason(blockedBy) });
+        ctx.result.labelCleared.push(unit);
+      } else if (block !== blockedBy) {
+        next = transitionIssue(next, issue, 'blocked', { reason: labelBlockReason(block) }, now);
+        journal(ctx, 'label-blocked', unit, { reason: labelBlockReason(block) });
+        ctx.result.labelBlocked.push(unit);
+      }
+      continue;
+    }
+
+    // Not label-blocked today. Only a dispatchable entry can be blocked from
+    // here: a `dispatched`/`parked`/`shipped` unit is already past the point
+    // where a hand-off label could stop it, and blocking it mid-flight would
+    // abandon a live agent's work.
+    if (block !== null && DISPATCHABLE_ISSUE_STATUSES.has(entry.status)) {
+      next = transitionIssue(next, issue, 'blocked', { reason: labelBlockReason(block) }, now);
+      journal(ctx, 'label-blocked', unit, { reason: labelBlockReason(block) });
+      ctx.result.labelBlocked.push(unit);
+    }
+  }
+
+  return next;
 }
 
 // --- Spawn / fail / complete / park ---
@@ -1771,6 +1926,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const state0 = deps.store.load();
   const polled = pollUnits(deps, state0);
   const prPoll = pollParkedPrs(deps, state0, dispatch);
+  const labelPoll = pollLabels(deps, state0);
 
   const pass1 = deps.store.withLock((state) => {
     const ctx: TickCtx = { deps, dispatch, result: emptyResult() };
@@ -1779,6 +1935,9 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     next = reconcileStaleFailedParks(ctx, next, prPoll);
     next = requeueOrphanedDispatches(ctx, next);
     next = dispatchReportAgents(ctx, next, config);
+    // #544: immediately before the dispatch pass, so a cleared label can be
+    // dispatched this same tick and a fresh one can never be dispatched over.
+    next = reconcileLabelBlocks(ctx, next, labelPoll);
     next = dispatchAssignments(ctx, next, config);
     return {
       state: next,
