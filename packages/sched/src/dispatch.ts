@@ -87,6 +87,31 @@ export const OPENCODE_DISPATCH_COMMAND: readonly string[] = [
 ];
 
 /**
+ * Default `--disallowedTools` value for `claude`-family dispatches (#591).
+ *
+ * `Monitor` is the tool an agent reaches for to "wait for this log line" — exactly the
+ * move that turns a headless run's turn-end into an unverified exit (see
+ * {@link NO_BACKGROUND_EXIT_INSTRUCTION}). The prompt instruction alone was not enough
+ * (imboard#2687 lost two generations, #3820, #3631 the same day); this makes it
+ * structurally impossible for `claude`-family CLIs instead of merely discouraged.
+ */
+export const DEFAULT_DISALLOWED_TOOLS: readonly string[] = ['Monitor'];
+
+/**
+ * Append `--disallowedTools <tools>` to a `claude`-family command template (#591).
+ *
+ * A no-op when `tools` is empty (the documented `dispatch.disallowed_tools: []` opt-out)
+ * or when `template[0]` is not `claude` — a mixed-CLI escalation ladder (#527) can route a
+ * tier to `opencode`, which has no such flag and must never receive it. `claude --help`
+ * documents `--disallowedTools, --disallowed-tools <tools...>` as accepting a comma- or
+ * space-separated list, so the tools join into a single argv element.
+ */
+function withDisallowedTools(template: readonly string[], tools: readonly string[]): string[] {
+  if (tools.length === 0 || template[0] !== 'claude') return [...template];
+  return [...template, '--disallowedTools', tools.join(',')];
+}
+
+/**
  * Shared hardening sentence appended to any dispatch prompt that runs a
  * build/test/lint command (#497): a headless `claude -p` session ends the
  * instant the model stops responding, so an agent that starts a long command
@@ -332,12 +357,21 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
     mid: dispatch.tier_models?.mid ?? DEFAULT_TIER_MODELS.mid,
     strong: dispatch.tier_models?.strong ?? DEFAULT_TIER_MODELS.strong,
   };
-  const command = dispatch.command ?? [...DEFAULT_DISPATCH_COMMAND];
+  const disallowedTools = dispatch.disallowed_tools ?? [...DEFAULT_DISALLOWED_TOOLS];
+  const rawCommand = dispatch.command ?? [...DEFAULT_DISPATCH_COMMAND];
+  const command = withDisallowedTools(rawCommand, disallowedTools);
   const prompt = withSupersessionCheckpoint(dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE);
   const tiers = Object.fromEntries(
     TIER_ORDER.map((tier) => [
       tier,
-      resolveTierDispatch(dispatch.tiers?.[tier], tier, command, tierModels, prompt),
+      resolveTierDispatch(
+        dispatch.tiers?.[tier],
+        tier,
+        rawCommand,
+        tierModels,
+        prompt,
+        disallowedTools
+      ),
     ])
   ) as Record<ModelTier, ResolvedTierDispatch>;
   return {
@@ -372,10 +406,14 @@ function resolveTierDispatch(
   tier: ModelTier,
   fallbackCommand: readonly string[],
   fallbackTierModels: Readonly<Record<ModelTier, string | null>>,
-  fallbackPrompt: string
+  fallbackPrompt: string,
+  disallowedTools: readonly string[]
 ): ResolvedTierDispatch {
   return {
-    commandTemplate: spec?.command ?? fallbackCommand,
+    // Applied per-tier, not once on `fallbackCommand`, because an explicit
+    // `spec.command` (#527's mixed-CLI ladder) can point this tier at a different
+    // agent CLI (`opencode`) that must never receive `--disallowedTools` (#591).
+    commandTemplate: withDisallowedTools(spec?.command ?? fallbackCommand, disallowedTools),
     model: spec?.model ?? fallbackTierModels[tier],
     // An explicit override gets the checkpoint too — `fallbackPrompt` already
     // carries it (resolveDispatch wraps the top-level prompt once), so a

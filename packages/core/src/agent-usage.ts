@@ -361,6 +361,49 @@ export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsag
 }
 
 /**
+ * Find the last tool a `claude`-family agent called before its stream ended (#591).
+ *
+ * Attributes an unverified exit (`agent-exited-unverified` / `unverified-exit-at-
+ * strongest-tier`) to a concrete cause without opening the transcript: scans every
+ * `assistant` event's `message.content[]` array (the stream-json shape, one event per
+ * turn) for `type:"tool_use"` blocks and remembers the last one's `name` — JSONL is
+ * append-order, so the last one found across the whole stream is the last tool called.
+ * Mirrors {@link parseAgentUsage}'s line-by-line tolerance: unparseable lines and the
+ * {@link SCHED_DISPATCH_EVENT} preamble are skipped rather than disqualifying the scan.
+ * Returns `null` when no `tool_use` block is found anywhere (including malformed or
+ * empty input) — "no tool was called" and "the log couldn't be read" are not
+ * distinguished here because both mean the same thing to a caller attributing a failure.
+ */
+export function parseLastToolUse(stdout: string | null | undefined): string | null {
+  if (typeof stdout !== 'string' || stdout.trim() === '') return null;
+
+  let lastTool: string | null = null;
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const event = parseJsonObject(trimmed);
+    if (!event || event.type !== 'assistant') continue;
+
+    const message = event.message as Record<string, unknown> | undefined;
+    const content = message?.content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (
+        block &&
+        typeof block === 'object' &&
+        (block as Record<string, unknown>).type === 'tool_use' &&
+        typeof (block as Record<string, unknown>).name === 'string'
+      ) {
+        lastTool = (block as Record<string, unknown>).name as string;
+      }
+    }
+  }
+  return lastTool;
+}
+
+/**
  * Parse an `opencode run --format json` result stream into usage data (#459).
  *
  * opencode emits one JSON event per line: the assistant's text arrives in

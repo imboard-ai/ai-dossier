@@ -82,7 +82,14 @@ where every mechanical supervision decision is code, not remembered prose:
    "waiting for it to finish" abandons the run with the subprocess still going; the
    instruction tells it to run such commands in the foreground and wait, or poll until
    they finish. `DEFAULT_REPORT_PROMPT_TEMPLATE` is excluded — it never spawns a long
-   command.
+   command. The prompt instruction alone was not enough (#591): agents kept arming the
+   `Monitor` tool to wait on a background command and ending their turn anyway, which the
+   engine can only see as an unverified exit. Every `claude`-family command template
+   (top-level `command` and each tier's own `commandTemplate`, #527) gets
+   `--disallowedTools Monitor` appended automatically — set `dispatch.disallowed_tools: []`
+   in `config.json` to opt out, or list your own tools to deny instead of the default
+   `["Monitor"]`. Never applied to a non-`claude` command (`cmd[0] !== 'claude'`), so an
+   `opencode` tier is unaffected.
 2. **Completion verification (AC2)** — an agent exiting is never proof of completion.
    On exit, the unit completes only when ground truth confirms it: the issue's latest
    runstate milestone is `report done`, or GitHub says the issue is closed — except a
@@ -697,6 +704,11 @@ every place a dispatch's exit is first detected: the dead-pid rail, the
 external-advance rail, a stall-timeout kill, and a dependents-blocked kill), sourced
 from the agent's `modelUsage` map — never blended with the top-level `usage` block,
 the fix for a ~43% fabricated-saving discrepancy the two blocks were found to produce.
+`recordDispatchRunLog`/`recordMemberRunLog` also return the last tool the dispatch called
+(`parseLastToolUse`, `@ai-dossier/core`, #591) — an unverified exit's terminal `unit-failed`
+journal entry (`agent-exited-unverified` / `unverified-exit-at-strongest-tier`) carries it
+as `last_tool` when the log yielded one, so the failure attributes to a concrete cause (e.g.
+`Monitor`) without opening the transcript.
 
 The dispatch log (`runs/<unit>.log`) is per-UNIT and opened in append mode
 (`createSpawnDeps`), so a redispatched unit's second agent writes its output AFTER the

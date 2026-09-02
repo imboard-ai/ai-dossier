@@ -63,6 +63,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { parseLastToolUse } from '@ai-dossier/core';
 import {
   readPoolFileConfig,
   resolveProjectDir,
@@ -1630,14 +1631,14 @@ function recordMemberRunLog(
   memberIssue: number,
   slot: SlotEntry,
   now: Date
-): void {
+): string | null {
   if (slot.status !== 'running' || slot.spawned_at === null) {
     journalEvent(deps, 'run-log-skipped', unit(batchId), {
       issue: memberIssue,
       reason: slot.spawned_at === null ? 'never-spawned' : `already-recorded-${slot.status}`,
       slot: slot.id,
     });
-    return;
+    return null;
   }
 
   const tier: ModelTier = findEntry(state, memberIssue)?.tier ?? 'mid';
@@ -1670,6 +1671,10 @@ function recordMemberRunLog(
     (event, extra) => journalEvent(deps, event, unit(batchId), extra),
     { issue: memberIssue, log: logFile }
   );
+
+  // #591: the last tool this member dispatch called — attributes an
+  // `agent-exited-unverified` failure to a concrete cause without opening the transcript.
+  return parseLastToolUse(logContent);
 }
 
 function reconcileMemberSlot(
@@ -1746,11 +1751,25 @@ function reconcileMemberSlot(
         : dead
           ? 'agent-exited-unverified'
           : 'member-blocked';
-    recordMemberRunLog(deps, dispatch, state0, batchId, batch, memberIssue, slot, now);
+    const lastTool = recordMemberRunLog(
+      deps,
+      dispatch,
+      state0,
+      batchId,
+      batch,
+      memberIssue,
+      slot,
+      now
+    );
     journalEvent(deps, 'unit-failed', unit(batchId), {
       issue: memberIssue,
       reason,
       detail: 'member blocked',
+      // #591: attributes an unverified member exit to a concrete cause (e.g.
+      // `Monitor`) without opening the transcript. Only meaningful for the dead-agent
+      // case — a milestone-carried `reason` (a real block, not an exit) has no log to
+      // attribute.
+      ...(dead && lastTool !== null ? { last_tool: lastTool } : {}),
     });
     deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
 

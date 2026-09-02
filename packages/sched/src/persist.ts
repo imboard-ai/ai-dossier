@@ -486,6 +486,16 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   if (dispatch.fence_takeover_timeout_ms !== undefined) {
     requirePositiveIntMs('dispatch.fence_takeover_timeout_ms', dispatch.fence_takeover_timeout_ms);
   }
+  if (dispatch.disallowed_tools !== undefined) {
+    // Not `requireNonEmptyStringArray` — an empty array is the documented opt-out (#591), so
+    // only the element shape is checked, not the array's length.
+    if (
+      !Array.isArray(dispatch.disallowed_tools) ||
+      dispatch.disallowed_tools.some((t) => typeof t !== 'string' || t.length === 0)
+    ) {
+      throw new Error('dispatch.disallowed_tools must be an array of non-empty strings');
+    }
+  }
   const out: DispatchConfig = {};
   if (dispatch.command !== undefined) out.command = dispatch.command as string[];
   if (dispatch.prompt !== undefined) out.prompt = dispatch.prompt as string;
@@ -512,6 +522,9 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   }
   if (dispatch.fence_takeover_timeout_ms !== undefined) {
     out.fence_takeover_timeout_ms = dispatch.fence_takeover_timeout_ms as number;
+  }
+  if (dispatch.disallowed_tools !== undefined) {
+    out.disallowed_tools = dispatch.disallowed_tools as string[];
   }
   return out;
 }

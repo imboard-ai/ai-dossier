@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseAgentUsage,
+  parseLastToolUse,
   parseOpenCodeUsage,
   SCHED_DISPATCH_EVENT,
   usageParserFor,
@@ -664,5 +665,72 @@ describe('parseOpenCodeUsage - stderr interleaved with the event stream (#524 re
   it('still returns null when the output holds no opencode event at all', () => {
     // Format-mismatch detection must survive the change above.
     expect(parseOpenCodeUsage([stderrWarning, 'not json either'].join('\n'))).toBeNull();
+  });
+});
+
+/**
+ * #591 — attributes an unverified exit (`agent-exited-unverified` /
+ * `unverified-exit-at-strongest-tier`) to the last tool the agent called, without
+ * opening the transcript.
+ */
+describe('parseLastToolUse', () => {
+  const assistantWithTools = (...toolNames: string[]) =>
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [
+          { type: 'text', text: 'thinking...' },
+          ...toolNames.map((name) => ({ type: 'tool_use', id: 't1', name, input: {} })),
+        ],
+      },
+    });
+
+  const assistantTextOnly = JSON.stringify({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: 'no tools this turn' }] },
+  });
+
+  it('returns null for null/undefined/empty input', () => {
+    expect(parseLastToolUse(null)).toBeNull();
+    expect(parseLastToolUse(undefined)).toBeNull();
+    expect(parseLastToolUse('')).toBeNull();
+    expect(parseLastToolUse('   ')).toBeNull();
+  });
+
+  it('returns the only tool_use name in a single-turn stream', () => {
+    const stdout = assistantWithTools('Bash');
+    expect(parseLastToolUse(stdout)).toBe('Bash');
+  });
+
+  it('returns the LAST tool_use across multiple turns, not the first', () => {
+    const stdout = [assistantWithTools('Bash'), assistantWithTools('Monitor')].join('\n');
+    expect(parseLastToolUse(stdout)).toBe('Monitor');
+  });
+
+  it('a later turn with no tool_use does not erase an earlier one', () => {
+    const stdout = [assistantWithTools('Monitor'), assistantTextOnly].join('\n');
+    expect(parseLastToolUse(stdout)).toBe('Monitor');
+  });
+
+  it('returns the last of several tool_use blocks within the SAME turn', () => {
+    const stdout = assistantWithTools('Read', 'Bash', 'Monitor');
+    expect(parseLastToolUse(stdout)).toBe('Monitor');
+  });
+
+  it('returns null when no tool_use block appears anywhere', () => {
+    const stdout = [assistantTextOnly, assistantTextOnly].join('\n');
+    expect(parseLastToolUse(stdout)).toBeNull();
+  });
+
+  it('skips the SCHED_DISPATCH_EVENT preamble and unparseable lines, like parseAgentUsage', () => {
+    const preamble = JSON.stringify({ type: SCHED_DISPATCH_EVENT, ts: '2026-09-02T10:00:00Z' });
+    const stdout = [preamble, 'not json', assistantWithTools('Monitor'), ''].join('\n');
+    expect(parseLastToolUse(stdout)).toBe('Monitor');
+  });
+
+  it('ignores non-assistant events (e.g. the terminal result event)', () => {
+    const resultEvent = JSON.stringify({ type: 'result', subtype: 'success', result: 'done' });
+    const stdout = [assistantWithTools('Monitor'), resultEvent].join('\n');
+    expect(parseLastToolUse(stdout)).toBe('Monitor');
   });
 });

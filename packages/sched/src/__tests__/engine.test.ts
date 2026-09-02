@@ -766,6 +766,34 @@ describe('stall/escalation ladder (AC4)', () => {
     expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('stall-at-strongest-tier');
   });
 
+  it('an unverified exit at the strongest tier fails the unit and attributes last_tool from the dispatch log (#591)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'strong' }]);
+    h.tick();
+    const spawn = h.spawnCalls[0];
+
+    // The agent armed Monitor to wait on a background command, then ended its
+    // turn — exactly the #591 trap. The fake spawn never creates the runs dir.
+    fs.mkdirSync(path.dirname(spawn.logFile), { recursive: true });
+    fs.writeFileSync(
+      spawn.logFile,
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 't1', name: 'Monitor', input: {} }] },
+      })
+    );
+    h.alive.delete(spawn.pid);
+
+    const result = h.tick();
+    expect(result.failed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe(
+      'unverified-exit-at-strongest-tier'
+    );
+    const failedEvent = h.journal.read().find((e) => e.event === 'unit-failed' && e.issue === 101);
+    expect(failedEvent?.last_tool).toBe('Monitor');
+  });
+
   it('the phase now in flight (via next=) gets its own allowance — implement default is 90 min, not the 30-min global (#495)', () => {
     const h = stalledHarness(); // global stall_timeout_ms=30min; implement keeps its 90-min built-in default
     startInPhase(h, 'plan', 'implement');
@@ -1260,11 +1288,14 @@ describe('tier progression across the ladder', () => {
     h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
     h.tick();
 
-    const models: string[] = [h.spawnCalls[0].cmd[h.spawnCalls[0].cmd.length - 1]];
+    // The model follows `--model`, not the last argv element — #591 appends
+    // `--disallowedTools Monitor` after it by default.
+    const modelOf = (cmd: string[]): string => cmd[cmd.indexOf('--model') + 1];
+    const models: string[] = [modelOf(h.spawnCalls[0].cmd)];
     for (let i = 0; i < 2; i++) {
       h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid); // agent exits, nothing done
       h.tick();
-      models.push(h.spawnCalls[h.spawnCalls.length - 1].cmd[h.spawnCalls[0].cmd.length - 1]);
+      models.push(modelOf(h.spawnCalls[h.spawnCalls.length - 1].cmd));
     }
     expect(models).toEqual(['haiku', 'sonnet', 'opus']);
 
