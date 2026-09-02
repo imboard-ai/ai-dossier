@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildPlanComment,
+  extractNewPredictedFiles,
   extractPredictedFiles,
   findLatestPlan,
   isHeadSha,
@@ -110,6 +111,42 @@ describe('extractPredictedFiles', () => {
   it('returns [] for an empty section', () => {
     expect(extractPredictedFiles('')).toEqual([]);
   });
+
+  it('keeps the path when the bullet carries a (new) marker', () => {
+    expect(extractPredictedFiles('- `docs/new-runbook.md` (new) — created by this issue')).toEqual([
+      'docs/new-runbook.md',
+    ]);
+  });
+});
+
+describe('extractNewPredictedFiles', () => {
+  it('returns the path of a bullet marked (new)', () => {
+    const section = ['- `docs/new-runbook.md` (new) — created by this issue'].join('\n');
+    expect(extractNewPredictedFiles(section)).toEqual(new Set(['docs/new-runbook.md']));
+  });
+
+  it('is case-insensitive on the marker', () => {
+    expect(extractNewPredictedFiles('- `a.ts` (NEW) — x')).toEqual(new Set(['a.ts']));
+  });
+
+  it('recognizes the marker on a bare (unbacktracked) path too', () => {
+    expect(extractNewPredictedFiles('- docs/new.md (new) — x')).toEqual(new Set(['docs/new.md']));
+  });
+
+  it('does not mark a bullet with no (new) suffix', () => {
+    expect(extractNewPredictedFiles('- `a.ts` — x')).toEqual(new Set());
+  });
+
+  it('does not match "(new)" appearing only in the reason, after the separator', () => {
+    // The marker must immediately follow the path — "(new)" later in the bullet text
+    // (e.g. inside the reason) does not count, so a reason cannot accidentally suppress
+    // the missing-file check.
+    expect(extractNewPredictedFiles('- `a.ts` — see the (new) design doc')).toEqual(new Set());
+  });
+
+  it('returns an empty set for an empty section', () => {
+    expect(extractNewPredictedFiles('')).toEqual(new Set());
+  });
 });
 
 describe('buildPlanComment / parsePlanArtifact round-trip', () => {
@@ -122,6 +159,7 @@ describe('buildPlanComment / parsePlanArtifact round-trip', () => {
     expect(artifact?.sections.Problem).toBe('It is broken.');
     expect(artifact?.sections['Test Scope']).toBe('- unit tests');
     expect(artifact?.predictedFiles).toEqual(['src/foo.ts', 'docs/foo.md']);
+    expect(artifact?.newFiles).toEqual(new Set());
   });
 
   it('parses an artifact with missing sections so readers can report it', () => {

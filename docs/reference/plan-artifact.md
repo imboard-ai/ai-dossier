@@ -54,6 +54,7 @@ What is wrong or needed, synthesized from the issue.
 ## Predicted Files
 - `cli/src/foo.ts` — what changes and why
 - `docs/foo.md` — what changes and why
+- `cli/src/new-thing.ts` (new) — a file this issue creates
 
 ## Approach
 1. First change — what and why
@@ -75,12 +76,21 @@ present, so a reason containing slashes cannot masquerade as a path; a single tr
 `validate` checks them with `git cat-file -e HEAD:<path>` against the current clone's
 HEAD.
 
+A path the issue's scope is to CREATE — it does not exist at HEAD yet, by design — is
+marked `(new)` (matched case-insensitively — `(New)`/`(NEW)` are accepted) immediately
+after the path — i.e. before the reason text, if any: `` - `path/to/new-file.ts` (new) — why ``
+(a bare `` - `path/to/new-file.ts` (new) `` with no reason also parses).
+`validate` skips the missing-at-HEAD check for a path marked this way; an unmarked path
+absent at HEAD is a `missing-file` error, and a path marked `(new)` that already exists at
+HEAD is a `stale-plan` warn (the plan is stale — the file it predicted to create already
+exists).
+
 ## Commands
 
 | Command | Behavior |
 |---|---|
 | `ai-dossier plan post --issue <n> --file <md>` | Validates the five sections, stamps `head=` (or takes `--head <sha>`, 7-40 lowercase hex — validated), comments the artifact. `--dry-run` prints the body; `--json` prints `{posted: false, dryRun: true, head, body}` (dry-run) or `{posted: true, head, url}`; refuses a body over 60000 characters pre-flight. |
-| `ai-dossier plan get --issue <n> [--json]` | Text mode prints the artifact comment verbatim (terminal-control characters stripped on a TTY). `--json` prints `{head, problem, acceptance_criteria, predicted_files, approach, test_scope, url, created_at, author}` (section names snake_cased, `predicted_files` the extracted path array). No plan → stderr message + **exit 1**. |
+| `ai-dossier plan get --issue <n> [--json]` | Text mode prints the artifact comment verbatim (terminal-control characters stripped on a TTY). `--json` prints `{head, problem, acceptance_criteria, predicted_files, new_files, approach, test_scope, url, created_at, author}` (section names snake_cased, `predicted_files` the extracted path array including `(new)`-marked paths, `new_files` the subset of those marked `(new)`). No plan → stderr message + **exit 1**. |
 | `ai-dossier plan validate --issue <n>` | Runs the deterministic checks below and prints `{valid, reasons[]}`. Exits 0 when valid, 1 when invalid. |
 
 All three accept `--repo <owner/name>` (target repository when running outside it).
@@ -95,10 +105,11 @@ reported as a named failure rather than hanging the command.
 | `artifact` | warn | The latest plan was posted by an account without write access to the repository (association is not MEMBER/OWNER/COLLABORATOR/BOT) — verify authorship before trusting it. Selection stays last-plan-wins; this is a signal, not a gate. |
 | `sections` | error | A required `## ` section is missing from the artifact. |
 | `sections` | warn | Predicted Files produced no paths (empty or no bullets). |
-| `missing-file` | error | A predicted path does not exist at current HEAD. |
+| `missing-file` | error | A predicted path does not exist at current HEAD and its bullet is not marked `(new)`. |
+| `stale-plan` | warn | A predicted path is marked `(new)` but already exists at current HEAD — the plan may be stale. |
 | `head-distance` | info | N > 0 commits on HEAD since the plan's `head=` — the plan may be stale. |
 | `risk-floor` | info | A predicted path touches an elevated-risk surface (see below). |
-| `git` | error / warn | git could not answer a file-existence (error) or head-distance (warn) probe — e.g. run outside a repository, git missing, or a stalled call. |
+| `git` | error / warn | git could not answer a file-existence (error) or head-distance (warn) probe — e.g. run outside a repository, no commits yet, git missing, or a stalled call. Disambiguated structurally (whether HEAD resolves to a real commit), never by matching git's stderr wording, which is locale- and version-dependent. |
 
 `valid` is true iff no reason has `severity: "error"`. A consumer that needs a stronger
 signal (semantic sanity) dispatches its own model pass on top; `validate` is deliberately
