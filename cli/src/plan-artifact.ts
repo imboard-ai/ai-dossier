@@ -69,6 +69,11 @@ export interface PlanArtifact {
   sections: Record<PlanSection, string>;
   /** Repo-relative paths extracted from the Predicted Files section. */
   predictedFiles: string[];
+  /**
+   * Predicted-file paths whose bullet carries the `(new)` marker — the issue's scope is to
+   * create them, so `validate` skips the missing-at-HEAD check for exactly these paths.
+   */
+  newFiles: Set<string>;
 }
 
 /**
@@ -101,6 +106,38 @@ function extractSection(markdown: string, name: PlanSection): string | null {
   return collected.join('\n').trim();
 }
 
+/** One parsed Predicted Files bullet: its path, and whether it carries the `(new)` marker. */
+interface PredictedFileBullet {
+  path: string;
+  isNew: boolean;
+}
+
+/**
+ * Parse one Predicted Files bullet line, or `null` when the line is not a bullet / has no
+ * path.
+ *
+ * The format (pinned in docs/reference/plan-artifact.md) is a bullet whose path is either
+ * backticked — `- `path/to/file.ts` — why` — or the first bare token — `- path/to/file.ts
+ * — why`. Backticks win when present so a reason containing slashes cannot masquerade as
+ * a path. A path immediately followed by `(new)` (before the `—`/`-` separator, case
+ * insensitive) declares the file does not exist yet — the issue's scope is to create it.
+ */
+function parsePredictedFileBullet(line: string): PredictedFileBullet | null {
+  const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
+  if (!bullet) return null;
+  const item = bullet[1].trim();
+  if (item === '') return null;
+
+  const codeSpan = /^`([^`]+)`/.exec(item);
+  const candidate = codeSpan ? codeSpan[1] : item.split(/\s+/)[0];
+  const path = candidate.replace(/[,;:]$/, '').trim();
+  if (path === '') return null;
+
+  const rest = item.slice(codeSpan ? codeSpan[0].length : candidate.length);
+  const isNew = /^\s*\(new\)/i.test(rest);
+  return { path, isNew };
+}
+
 /**
  * Repo-relative paths from the Predicted Files section, one per bullet.
  *
@@ -112,15 +149,21 @@ function extractSection(markdown: string, name: PlanSection): string | null {
 export function extractPredictedFiles(sectionBody: string): string[] {
   const paths: string[] = [];
   for (const line of sectionBody.split('\n')) {
-    const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
-    if (!bullet) continue;
-    const item = bullet[1].trim();
-    if (item === '') continue;
+    const bullet = parsePredictedFileBullet(line);
+    if (bullet) paths.push(bullet.path);
+  }
+  return paths;
+}
 
-    const codeSpan = /^`([^`]+)`/.exec(item);
-    const candidate = codeSpan ? codeSpan[1] : item.split(/\s+/)[0];
-    const path = candidate.replace(/[,;:]$/, '').trim();
-    if (path !== '') paths.push(path);
+/**
+ * Predicted-file paths whose bullet carries the `(new)` marker — see
+ * {@link parsePredictedFileBullet}.
+ */
+export function extractNewPredictedFiles(sectionBody: string): Set<string> {
+  const paths = new Set<string>();
+  for (const line of sectionBody.split('\n')) {
+    const bullet = parsePredictedFileBullet(line);
+    if (bullet?.isNew) paths.add(bullet.path);
   }
   return paths;
 }
@@ -163,6 +206,7 @@ export function parsePlanArtifact(body: string): PlanArtifact | null {
     markdown,
     sections,
     predictedFiles: extractPredictedFiles(sections['Predicted Files']),
+    newFiles: extractNewPredictedFiles(sections['Predicted Files']),
   };
 }
 

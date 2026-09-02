@@ -343,6 +343,110 @@ describe('plan validate', () => {
     ).toBe(true);
   });
 
+  it('reports missing-file (not git) when git exits 128 for a path absent at HEAD (#579)', async () => {
+    // Real git exits 128, not 1, for "the path is not present at this ref" — the exit
+    // code the earlier gitHasFiles() stub used only approximates it.
+    execHandles((file, args) => {
+      if (file === 'gh') return ghCommentsJson([POSTED_ARTIFACT]);
+      if (file === 'git' && args[0] === 'cat-file') {
+        const path = args[2].slice('HEAD:'.length);
+        if (path === 'cli/src/plan-artifact.ts') return '';
+        const err = new Error('missing') as Error & { status: number; stderr: string };
+        err.status = 128;
+        err.stderr = `fatal: path '${path}' does not exist in 'HEAD'`;
+        throw err;
+      }
+      if (file === 'git' && args[0] === 'rev-list') return '0';
+      throw new Error(`unexpected: ${file} ${args.join(' ')}`);
+    });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBe(1);
+    const v = verdict();
+    expect(v.valid).toBe(false);
+    expect(
+      v.reasons.some(
+        (r) => r.check === 'missing-file' && r.message.includes('docs/reference/plan-artifact.md')
+      )
+    ).toBe(true);
+    expect(v.reasons.some((r) => r.check === 'git')).toBe(false);
+  });
+
+  it('emits no reason for a missing path whose bullet is marked (new) (#579)', async () => {
+    const artifact = POSTED_ARTIFACT.replace(
+      '- `docs/reference/plan-artifact.md` — the spec',
+      '- `docs/reference/plan-artifact.md` (new) — the spec'
+    );
+    execHandles((file, args) => {
+      if (file === 'gh') return ghCommentsJson([artifact]);
+      if (file === 'git' && args[0] === 'cat-file') {
+        const path = args[2].slice('HEAD:'.length);
+        if (path === 'cli/src/plan-artifact.ts') return '';
+        const err = new Error('missing') as Error & { status: number; stderr: string };
+        err.status = 128;
+        err.stderr = `fatal: path '${path}' does not exist in 'HEAD'`;
+        throw err;
+      }
+      if (file === 'git' && args[0] === 'rev-list') return '0';
+      throw new Error(`unexpected: ${file} ${args.join(' ')}`);
+    });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBeUndefined();
+    const v = verdict();
+    expect(v.valid).toBe(true);
+    expect(v.reasons.some((r) => r.check === 'missing-file' || r.check === 'git')).toBe(false);
+  });
+
+  it('warns (does not error) when a (new)-marked path already exists at HEAD (#579)', async () => {
+    const artifact = POSTED_ARTIFACT.replace(
+      '- `docs/reference/plan-artifact.md` — the spec',
+      '- `docs/reference/plan-artifact.md` (new) — the spec'
+    );
+    execHandles((file, args) => {
+      if (file === 'gh') return ghCommentsJson([artifact]);
+      if (file === 'git' && args[0] === 'cat-file') return '';
+      if (file === 'git' && args[0] === 'rev-list') return '0';
+      throw new Error(`unexpected: ${file} ${args.join(' ')}`);
+    });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBeUndefined();
+    const v = verdict();
+    expect(v.valid).toBe(true);
+    expect(
+      v.reasons.some(
+        (r) =>
+          r.check === 'missing-file' &&
+          r.severity === 'warn' &&
+          r.message.includes('docs/reference/plan-artifact.md')
+      )
+    ).toBe(true);
+  });
+
+  it('still reports check: git for a genuine repo/HEAD failure at exit 128, unmarked (#579)', async () => {
+    execHandles((file, args) => {
+      if (file === 'gh') return ghCommentsJson([POSTED_ARTIFACT]);
+      if (file === 'git' && args[0] === 'cat-file') {
+        const err = new Error('not a repo') as Error & { status: number; stderr: string };
+        err.status = 128;
+        err.stderr = 'fatal: not a git repository (or any of the parent directories): .git';
+        throw err;
+      }
+      if (file === 'git' && args[0] === 'rev-list') return '0';
+      throw new Error(`unexpected: ${file} ${args.join(' ')}`);
+    });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBe(1);
+    const v = verdict();
+    expect(v.valid).toBe(false);
+    expect(
+      v.reasons.some((r) => r.check === 'git' && r.message.includes('not a git repository'))
+    ).toBe(true);
+    expect(v.reasons.some((r) => r.check === 'missing-file')).toBe(false);
+  });
+
   it('reports head-distance as info when HEAD moved past the plan head', async () => {
     gitHasFiles('7');
     await run(['plan', 'validate', '--issue', '1']);

@@ -75,6 +75,13 @@ present, so a reason containing slashes cannot masquerade as a path; a single tr
 `validate` checks them with `git cat-file -e HEAD:<path>` against the current clone's
 HEAD.
 
+A path the issue's scope is to CREATE — it does not exist at HEAD yet, by design — is
+marked `(new)` immediately after the path, before the `—`/`-` separator: `` - `path/to/new-file.ts` (new) — why ``.
+`validate` skips the missing-at-HEAD check for a path marked this way; an unmarked path
+absent at HEAD is a `missing-file` error, and a path marked `(new)` that already exists at
+HEAD is a `missing-file` warn (the plan is stale — the file it predicted to create already
+exists).
+
 ## Commands
 
 | Command | Behavior |
@@ -95,7 +102,8 @@ reported as a named failure rather than hanging the command.
 | `artifact` | warn | The latest plan was posted by an account without write access to the repository (association is not MEMBER/OWNER/COLLABORATOR/BOT) — verify authorship before trusting it. Selection stays last-plan-wins; this is a signal, not a gate. |
 | `sections` | error | A required `## ` section is missing from the artifact. |
 | `sections` | warn | Predicted Files produced no paths (empty or no bullets). |
-| `missing-file` | error | A predicted path does not exist at current HEAD. |
+| `missing-file` | error | A predicted path does not exist at current HEAD and its bullet is not marked `(new)`. |
+| `missing-file` | warn | A predicted path is marked `(new)` but already exists at current HEAD — the plan may be stale. |
 | `head-distance` | info | N > 0 commits on HEAD since the plan's `head=` — the plan may be stale. |
 | `risk-floor` | info | A predicted path touches an elevated-risk surface (see below). |
 | `git` | error / warn | git could not answer a file-existence (error) or head-distance (warn) probe — e.g. run outside a repository, git missing, or a stalled call. |

@@ -77,6 +77,19 @@ const SECTION_JSON_KEYS: Record<Exclude<PlanSection, 'Predicted Files'>, string>
 /** `git cat-file -e` exits 1 for "no such object at HEAD" — an answer, not a fault. */
 const GIT_NO_SUCH_OBJECT = 1;
 
+/**
+ * `git cat-file -e HEAD:<path>` exits 128 (not 1) when `<path>` is not present at HEAD but
+ * HEAD itself resolves — "not a valid object name" / "does not exist in 'HEAD'" depending
+ * on git version. 128 is ALSO what git exits for a genuine repo/HEAD failure ("not a git
+ * repository", "invalid object name 'HEAD'" with no commits yet), so the exit code alone
+ * cannot distinguish "missing file" from "git couldn't answer" — only the stderr wording
+ * can (#579).
+ */
+const GIT_INVALID_OBJECT_NAME = 128;
+
+/** Stderr wording git uses for "the path is not present at this ref" (as opposed to "I couldn't resolve the ref at all"). */
+const MISSING_AT_HEAD_RE = /does not exist in ['"]HEAD['"]|not a valid object name/i;
+
 /** Characters kept when quoting a network-derived path inside an error message. */
 const PATH_SNIPPET_LENGTH = 80;
 
@@ -222,6 +235,9 @@ function fileExistsAtHead(
   const res = exec('git', ['cat-file', '-e', `HEAD:${path}`]);
   if (res.ok) return { ok: true, exists: true };
   if (res.error.status === GIT_NO_SUCH_OBJECT) return { ok: true, exists: false };
+  if (res.error.status === GIT_INVALID_OBJECT_NAME && MISSING_AT_HEAD_RE.test(res.error.stderr)) {
+    return { ok: true, exists: false };
+  }
   return { ok: false, error: gitFailure(res.error) };
 }
 
@@ -268,6 +284,7 @@ function artifactReasons(artifact: PlanArtifact): PlanValidationReason[] {
     });
   }
   for (const path of artifact.predictedFiles) {
+    const markedNew = artifact.newFiles.has(path);
     const exists = fileExistsAtHead(path);
     if (!exists.ok) {
       reasons.push({
@@ -275,11 +292,17 @@ function artifactReasons(artifact: PlanArtifact): PlanValidationReason[] {
         severity: 'error',
         message: `Cannot verify '${path}' at HEAD: ${exists.error} — run from inside the repository the plan targets.`,
       });
-    } else if (!exists.exists) {
+    } else if (!exists.exists && !markedNew) {
       reasons.push({
         check: 'missing-file',
         severity: 'error',
-        message: `Predicted file '${path}' does not exist at current HEAD.`,
+        message: `Predicted file '${path}' does not exist at current HEAD. If this issue creates it, mark the bullet '(new)' — e.g. '- \`${path}\` (new) — why'.`,
+      });
+    } else if (exists.exists && markedNew) {
+      reasons.push({
+        check: 'missing-file',
+        severity: 'warn',
+        message: `Predicted file '${path}' is marked '(new)' but already exists at current HEAD — the plan may be stale.`,
       });
     }
   }
