@@ -659,7 +659,10 @@ their spawn functions to stamp `SlotEntry.spawned_at` first, same as the origina
 member bug); `sched stats --batch <id>` (`packages/sched/src/batch-stats.ts`) instead
 recovers their cost — and any historical batch's, predating #564 or already torn down —
 by reading the raw dispatch logs on disk directly, the same recovery a human previously
-did by hand (`docs/reports/batch-pilot-2-execution.md` §13).
+did by hand (`docs/reports/batch-pilot-2-execution.md` §13). Tokens/cost/model reproduce
+exactly; `Duration`/`Tier` are always `-` for a `--batch`-reconstructed row (a raw log
+carries neither the dispatch's spawn time nor its tier) — a structural limit of
+after-the-fact recovery, not a missing-data bug.
 
 - **Crash safety**: a process killed between writes leaves the previous complete state,
   never a partial file; restart resumes identically (proved by `restart.test.ts`) —

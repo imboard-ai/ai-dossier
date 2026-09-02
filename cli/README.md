@@ -1159,7 +1159,11 @@ against ground truth.
     for a batch whose scheduler state was already torn down, and is how batch member
     costs (never in `runs.jsonl` before #564) become visible. Tail/report costs, which
     carry no issue number, appear as one `batch-overhead (tail+report)` row rather than
-    being silently dropped.
+    being silently dropped. **`Duration` and `Tier` are always `-` under `--batch`** —
+    unlike the default path, these are RECONSTRUCTED from a raw log after the fact, and
+    a dispatch's spawn time and model tier are not recoverable from the log content
+    itself; this is a structural limit, not a missing-data bug (a live member dispatch
+    going forward through the default path DOES get real `Duration`/`Tier`).
 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically

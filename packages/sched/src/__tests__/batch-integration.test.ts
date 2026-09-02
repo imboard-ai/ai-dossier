@@ -469,11 +469,17 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       .readFileSync(runsLog, 'utf-8')
       .trim()
       .split('\n')
-      .map((l) => JSON.parse(l) as { unit: string; input_tokens: number | null });
+      .map(
+        (l) => JSON.parse(l) as { unit: string; input_tokens: number | null; tier: string | null }
+      );
     for (const issue of [601, 602, 603]) {
       const entry = lines.find((l) => l.unit === `issue:${issue}`);
       expect(entry).toBeTruthy();
       expect(entry?.input_tokens).toBeNull();
+      // #564 AC1 re-verification: `tier` (enqueued as 'mid' for all three
+      // members) must reach the written entry, not just the in-memory
+      // `RunLogEntry` a unit test hand-builds — this is the actual write path.
+      expect(entry?.tier).toBe('mid');
     }
   }, 60_000);
 
