@@ -295,7 +295,7 @@ reading.
 |---|---|---|---|
 | B3a | `batch-setup` creates the batch worktree but never warms it — no `node_modules`, so every member hard-blocks `env-cold` before doing any work | product bug | 2/2 members bailed in <1.2 min; **proven** by a warm workaround that made 3/3 members succeed |
 | B3b | The aggregate-suite runner shells `npm test -- --reporter=json`; in a repo whose `test` script delegates to `make`, `make` aborts on the unknown option, so the suite is read as red with 0 parseable failures → `unattributable-suite-failure` dissolves a fully-green batch | product bug | **reproduced by hand**, deterministic — **fixed by #562** (§12) |
-| B3c | `DISSOLVE_EVICTION_FRACTION = 1/3` dissolves a 3- or 4-member batch on its **second** eviction — one member failure is the entire tolerance | design parameter | `packages/sched/src/types.ts:663` (applied at `packages/sched/src/recovery.ts:851`) |
+| B3c | `DISSOLVE_EVICTION_FRACTION = 1/3` dissolves a 3- or 4-member batch on its **second** eviction — one member failure is the entire tolerance | design parameter | **fixed by #563** — threshold is now `max(ceil(N × fraction), min_evictions_before_dissolve)` (configurable `dissolve_policy`), and a green-survivor batch is preserved rather than dissolved (`packages/sched/src/types.ts:723-734`, `packages/sched/src/recovery.ts:880-900`) |
 | B3d | Per-issue token/cost telemetry (#524, precondition `batch-pilot.md` §5.4) writes null usage for scheduler-dispatched agents; the data exists in the dispatch logs but never reaches the source of record | product bug | `sched stats` returns empty for every issue in this run |
 
 ## 9. Environment (run 2)

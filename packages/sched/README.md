@@ -172,6 +172,17 @@ containing a `blocked` batch with "unknown batch status", bricking that project'
 `SchedStore.load()`. Resume or abandon any blocked batch before downgrading past this
 version.
 
+Config schema moves to 1.7.0 (#563): a new top-level `dissolve_policy` key —
+`{ fraction, min_evictions_before_dissolve }`, both required when the key is present —
+overrides the batch dissolve threshold (default `{ fraction: 1/3,
+min_evictions_before_dissolve: 1 }`, RFC-0001 §F.8's ⅓ with no additional floor). An
+absent key falls back wholesale to the default; an invalid one degrades the WHOLE config
+file to built-in defaults, same as every other config field (`loadConfig`'s
+degrade-to-defaults contract). This release also adds the `partial` `dissolveBatch`
+strategy and the `batch-preserved` journal event (see Batch failure recovery above) — both
+are behavioral, not persisted-shape changes, so they carry no schema-version bump of their
+own.
+
 Two engine-safety policies were explicit product decisions on #464:
 
 - **Pid identity is hybrid-verified (decision 1, option C).** Every spawn records the
@@ -248,7 +259,11 @@ against real scratch repos.
 ```
 validating → attributing → fixing (ONE bounded attempt) → validating
                          → evicting (revert the member's commits) → validating
-  > ⅓ of members evicted, or a revert conflict → dissolving → members requeued
+  evictions > max(ceil(N × fraction), min_evictions_before_dissolve), or a
+  revert conflict → dissolving → members requeued (`dissolve_policy`, #563)
+  same threshold crossed, but the survivors' re-run suite came back green
+                         → reviewing (batch preserved; only the evicted
+                           members requeue — strategy=partial, #563)
   suite report unreadable, after the fallback retry when one applied
                          → blocked → validating (nothing requeued/reverted; #562)
 awaiting-merge (CONFLICTING | auto-merge-blocked)
@@ -280,13 +295,24 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    aborted so the worktree is clean and the batch dissolves — the reverts that already
    landed ride along on the abandoned branch, which is why it is abandoned rather than
    reused. An eviction group that reaches an already-shipped member dissolves instead of
-   reverting merged work.
+   reverting merged work. Crossing the dissolve trigger no longer always dissolves (#563):
+   if the re-run suite came back green for the survivors — and every evicted member's
+   commits were actually found and reverted — the batch is PRESERVED instead: trimmed to
+   its survivors and carried straight to `reviewing`, only the evicted members requeue. A
+   red or unreadable re-run, or an evicted member whose commits were never found on the
+   branch, still dissolves in full.
 4. **Dissolve (AC3)** — `dissolveBatch` marks the batch `dissolved` and requeues every
-   UNSHIPPED member: `full` (each as its own full-cycle run) or `halved` (one or two fresh
+   UNSHIPPED member: `full` (each as its own full-cycle run), `halved` (one or two fresh
    `forming` half-batches — a single remaining member yields one — entries retagged,
-   eviction groups inherited where they survive the split). Shipped and terminal members
-   keep their outcome; nothing green is discarded, and no git runs — the batch branch is
-   simply left behind unmerged, since sched deletes nothing.
+   eviction groups inherited where they survive the split), or `partial` (#563 — never
+   marks the batch `dissolved` at all: drops the evicted members from `batch.members` and
+   its `eviction_groups`/`ranges`, transitions `validating → reviewing`, and requeues
+   nothing itself, since the caller's eviction loop already did; falls through to `full`
+   if that would leave zero survivors, so an empty batch never ships). Shipped and
+   terminal members keep their outcome; nothing green is discarded, and no git runs — the
+   batch branch is simply left behind unmerged, since sched deletes nothing. Every dissolve
+   decision — all three strategies — journals its policy inputs (`N=`, `evictions=`,
+   `threshold=`), so it is explainable without re-deriving the formula.
 5. **PR conflict (AC4)** — `handlePrConflict` rebases the batch branch, re-runs the suite
    and re-ships ONCE. A second occurrence, a conflicting rebase, a failed fetch, an
    unusable `base_branch`, a checkout that is not on the batch branch, or a red suite
@@ -299,12 +325,13 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    with no `anchor` or no `run_id` cannot post — the CLI requires both — so the milestone
    it could not post is journaled in full instead of vanishing.
 
-Eleven journal events carry the detail: `suite-failed`, `attributed`, `fix-dispatched`,
+Twelve journal events carry the detail: `suite-failed`, `attributed`, `fix-dispatched`,
 `fix-resolved`, `member-evicted`, `revert-conflict`, `batch-rebased`, `batch-dissolved`,
-`batch-blocked` (#562 — the suite report was unreadable), `batch-split` and
-`milestone-post-failed`, plus `git-failed` for any git command that returned non-zero (the
-injected `ExecFn` collapses every git failure into `null`, so the command that produced one
-is always recorded).
+`batch-preserved` (#563 — the dissolve threshold was crossed but the survivors' re-run
+suite came back green, so the batch ships them instead of dissolving), `batch-blocked`
+(#562 — the suite report was unreadable), `batch-split` and `milestone-post-failed`, plus
+`git-failed` for any git command that returned non-zero (the injected `ExecFn` collapses
+every git failure into `null`, so the command that produced one is always recorded).
 
 Schema 1.3.0 carries the new state: `BatchEntry` gains `anchor`, `branch`, `run_id`,
 `eviction_groups`, `evictions`, `fix_attempts` and `rebase_attempts`; `QueueEntry` gains
@@ -483,8 +510,8 @@ import {
   beginFixAttempt,       // the ONE bounded mid-tier fix dispatch instruction
   resolveFixAttempt,     // record its outcome, back to validating
   evictMembers,          // revert + requeue with evidence + suite re-run + dissolve check
-  checkDissolveTrigger,  // pure: > ⅓ of members evicted
-  dissolveBatch,         // full or halved dissolve; preserves everything green
+  checkDissolveTrigger,  // pure: evicted > max(ceil(N × fraction), min floor) — dissolve_policy, #563
+  dissolveBatch,         // full | halved | partial (#563); preserves everything green
   blockBatch,            // #562: unreadable suite report → blocked; no requeue, no revert
   type BlockOptions,     // { reason, milestonePhase? } for blockBatch
   handlePrConflict,      // rebase + re-ship once, then dissolve into halves
@@ -551,7 +578,8 @@ telemetry" below.
 ├── config.json    # durable intent: max_slots, stall_timeout_ms, reconcile_interval_ms,
 │                  # pr_poll_interval_ms, dispatch (incl. report_prompt,
 │                  # phase_stall_timeout_ms, fence_takeover_timeout_ms, tiers — #527,
-│                  # suite_command — #562), auto_upgrade — #537
+│                  # suite_command — #562), auto_upgrade — #537,
+│                  # dissolve_policy — #563
 ├── events.jsonl   # append-only event journal (the operator's flight recorder)
 ├── runs/          # per-unit agent output logs (issue-<n>.log)
 └── .sched-lock/   # cross-process directory mutex (pid; stolen from dead holders)

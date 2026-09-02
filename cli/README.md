@@ -1178,7 +1178,12 @@ no `.dossier/automation/` manifest to declare `test.full` in instead);
 `pr_poll_interval_ms` (default 150 000) sets the
 parked-PR poll cadence; `auto_upgrade` (default false, #537) lets a cron-driven
 `sched start --once` self-upgrade when behind npm latest — the `--auto-upgrade` CLI flag
-overrides this when passed; an issue with an unmerged dependency — or a batch behind an unmerged batch —
+overrides this when passed; `dissolve_policy` — `{ fraction, min_evictions_before_dissolve }`,
+#563, overrides the batch dissolve threshold `max(ceil(N × fraction),
+min_evictions_before_dissolve)` (default `{ fraction: 1/3, min_evictions_before_dissolve: 1 }`);
+both fields are required when the key is present, and an invalid value degrades the WHOLE
+config file to built-in defaults, same as every other config field; an issue with an unmerged
+dependency — or a batch behind an unmerged batch —
 is never runnable.
 
 Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).

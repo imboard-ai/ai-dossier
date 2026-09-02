@@ -519,6 +519,14 @@ export interface SchedConfig {
    * The `--auto-upgrade` CLI flag overrides this when passed; default off.
    */
   auto_upgrade?: boolean;
+  /**
+   * Per-project override of the batch dissolve threshold (#563). Both
+   * `fraction` and `min_evictions_before_dissolve` are required when this
+   * key is present — there is no per-field merge with the default. An
+   * absent `dissolve_policy` falls back wholesale to `DEFAULT_DISSOLVE_POLICY`
+   * at the point of use, never eagerly merged into config at load time.
+   */
+  dissolve_policy?: DissolvePolicy;
 }
 
 /**
@@ -695,9 +703,47 @@ export const DEFAULT_LABEL_POLL_INTERVAL_MS = 10 * 60 * 1000;
 
 /**
  * Fraction of a batch's members whose eviction dissolves it: STRICTLY more
- * than a third (RFC-0001 §F.8 "> ⅓ evicted → dissolve").
+ * than a third (RFC-0001 §F.8 "> ⅓ evicted → dissolve"). Kept as the default
+ * `DissolvePolicy.fraction` below — see that type for how it combines with
+ * `min_evictions_before_dissolve` into the actual threshold.
  */
 export const DISSOLVE_EVICTION_FRACTION = 1 / 3;
+
+/**
+ * Dissolve threshold policy (#563) — how many evictions a batch tolerates
+ * before it dissolves. The threshold is `max(ceil(N × fraction),
+ * min_evictions_before_dissolve)`, clamped below `N` (see `dissolveThreshold`
+ * in recovery.ts) so a batch that loses every member always dissolves
+ * regardless of the floor; a batch dissolves once evictions exceed the
+ * (clamped) threshold. A raw `evicted > N × fraction` float comparison (the
+ * pre-#563 behavior) rounds down for small N — at N=4 it dissolves on the
+ * 2nd eviction, the same as N=3, leaving one member's failure as the entire
+ * tolerance at the batch sizes the pilot actually uses (`docs/reports/batch-pilot-2-execution.md` B3c).
+ * Taking `ceil` of the fraction term fixes N=4 (dissolves on the 3rd
+ * eviction instead of the 2nd) — and, more generally, tolerates one more
+ * eviction than before for every N that is NOT a multiple of the fraction's
+ * denominator (with the default ⅓: every N except 3, 6, 9, …). A caller
+ * relying on dissolve timing for a specific N should verify it against this
+ * formula rather than assume only N=4 changed. `min_evictions_before_dissolve`
+ * is a floor a project can raise further, independent of the fraction.
+ */
+export interface DissolvePolicy {
+  /** Fraction of members lost that contributes to the threshold (RFC-0001 §F.8 default: 1/3). */
+  fraction: number;
+  /** Floor on the threshold, regardless of what the fraction alone would compute. */
+  min_evictions_before_dissolve: number;
+}
+
+/** Default dissolve policy — RFC-0001 §F.8's fraction, no floor beyond `ceil(N × fraction)` itself. */
+export const DEFAULT_DISSOLVE_POLICY: DissolvePolicy = {
+  fraction: DISSOLVE_EVICTION_FRACTION,
+  min_evictions_before_dissolve: 1,
+};
+
+/** The one `?? DEFAULT_DISSOLVE_POLICY` fallback, shared by every site that resolves a policy from an optional source (`SchedConfig.dissolve_policy`, `RecoveryDeps.dissolvePolicy`). */
+export function resolveDissolvePolicy(policy: DissolvePolicy | undefined): DissolvePolicy {
+  return policy ?? DEFAULT_DISSOLVE_POLICY;
+}
 
 /** Bounded fix attempts per member before it is evicted (§F.2 "one bounded attempt"). */
 export const MAX_FIX_ATTEMPTS_PER_MEMBER = 1;
@@ -759,7 +805,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.8.0',
 ];
 
-export const CONFIG_SCHEMA_VERSION = '1.6.0' as const;
+export const CONFIG_SCHEMA_VERSION = '1.7.0' as const;
 
 /** Config schema versions `loadConfig` accepts and migrates transparently on load (fields absent in an older version simply resolve to their defaults). */
 export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
@@ -769,6 +815,7 @@ export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
   '1.3.0',
   '1.4.0',
   '1.5.0',
+  '1.6.0',
 ];
 
 /** Config file shape (schema_version + the config itself). */
@@ -781,6 +828,7 @@ export interface SchedConfigFile {
   label_poll_interval_ms?: number;
   dispatch?: DispatchConfig;
   auto_upgrade?: boolean;
+  dissolve_policy?: DissolvePolicy;
 }
 
 export const DEFAULT_MAX_SLOTS = 3;
@@ -896,6 +944,10 @@ export type JournalEventName =
   | 'revert-conflict'
   | 'batch-rebased'
   | 'batch-dissolved'
+  // #563: the dissolve threshold was crossed, but a fresh suite re-run
+  // confirmed the survivors are green — they stay in the batch and ship
+  // together; only the evicted members requeue. Never `dissolved`.
+  | 'batch-preserved'
   | 'batch-split'
   // #562: the aggregate suite report was unreadable even after the one
   // fallback-runner retry — the batch blocks (no requeue, no revert) rather

@@ -131,6 +131,7 @@ import type {
   SlotEntry,
   SlotStatus,
 } from './types';
+import { resolveDissolvePolicy } from './types';
 
 /**
  * The four `ai-dossier cap run` outcomes (docs/reference/capabilities.md):
@@ -291,13 +292,19 @@ function safeSuite(deps: BatchDispatchDeps, batchId: string, worktree: string): 
   }
 }
 
-function recoveryDeps(deps: BatchDispatchDeps, batch: BatchEntry, now: Date): RecoveryDeps {
+function recoveryDeps(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  batch: BatchEntry,
+  now: Date
+): RecoveryDeps {
   return {
     exec: deps.exec,
     repoDir: batch.worktree ?? deps.repoDir,
     journal: deps.journal,
     postMilestone: createExecMilestonePoster(deps.exec, { repoDir: deps.repoDir }),
     runSuite: batch.worktree !== null ? () => deps.runSuite(batch.worktree as string) : undefined,
+    dissolvePolicy: resolveDissolvePolicy(config.dissolve_policy),
     now: () => now,
   };
 }
@@ -990,7 +997,7 @@ function runValidate(
   if (!batch || batch.worktree === null) return;
 
   const suite = safeSuite(deps, batchId, batch.worktree);
-  const rDeps = recoveryDeps(deps, batch, now);
+  const rDeps = recoveryDeps(deps, config, batch, now);
   const poster = createExecMilestonePoster(deps.exec, { repoDir: deps.repoDir });
 
   if (suite.ok) {
@@ -1114,7 +1121,7 @@ function runValidate(
 
 function evictOffender(
   deps: BatchDispatchDeps,
-  _config: SchedConfig,
+  config: SchedConfig,
   batchId: string,
   offender: number,
   attribution: AttributionMethod,
@@ -1124,7 +1131,7 @@ function evictOffender(
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
   if (!batch) return;
-  const rDeps = recoveryDeps(deps, batch, now);
+  const rDeps = recoveryDeps(deps, config, batch, now);
   const outcome = evictMembers(
     state,
     batchId,
@@ -1211,7 +1218,7 @@ function evictMemberAndContinue(
   now: Date,
   result: BatchTickResult
 ): void {
-  const dissolved = evictMemberDirectly(deps, batchId, memberIssue, reason, now);
+  const dissolved = evictMemberDirectly(deps, config, batchId, memberIssue, reason, now);
   if (dissolved) {
     result.failed.push(unit(batchId));
     return;
@@ -1367,11 +1374,13 @@ function reconcileMemberSlot(
  */
 function evictMemberDirectly(
   deps: BatchDispatchDeps,
+  config: SchedConfig,
   batchId: string,
   memberIssue: number,
   reason: string,
   now: Date
 ): boolean {
+  const dissolvePolicy = resolveDissolvePolicy(config.dissolve_policy);
   // Pass 1 (pure — requeue + record the eviction): safe to run entirely
   // inside the lock, unlike `dissolveBatch` below, which shells out
   // (`deps.exec`/`postMilestone`) and so must NOT hold the lock while it runs.
@@ -1414,7 +1423,10 @@ function evictMemberDirectly(
       now
     );
     const updated = findBatch(next, batchId);
-    return { state: next, result: updated !== undefined && checkDissolveTrigger(updated) };
+    return {
+      state: next,
+      result: updated !== undefined && checkDissolveTrigger(updated, dissolvePolicy),
+    };
   });
   if (!triggered) return false;
 
@@ -1424,7 +1436,7 @@ function evictMemberDirectly(
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
   if (!batch) return false;
-  const rDeps = recoveryDeps(deps, batch, now);
+  const rDeps = recoveryDeps(deps, config, batch, now);
   const outcome = dissolveBatch(
     state,
     batchId,
@@ -1458,7 +1470,7 @@ function reconcileFixSlot(
   deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
 
   const suite = safeSuite(deps, batchId, batch.worktree);
-  const rDeps = recoveryDeps(deps, batch, now);
+  const rDeps = recoveryDeps(deps, config, batch, now);
   const { state: resolved } = resolveFixAttempt(
     deps.store.load(),
     batchId,
@@ -1726,7 +1738,7 @@ export function runBatchTick(
         ? [...b.fix_attempts].reverse().find((a) => a.outcome === 'dispatched')
         : undefined;
       if (b && offenderRecord) {
-        const rDeps = recoveryDeps(deps, b, now);
+        const rDeps = recoveryDeps(deps, config, b, now);
         const { state: resolved } = resolveFixAttempt(
           state,
           batch.id,
