@@ -1257,6 +1257,7 @@ Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).
 ai-dossier cap list [--json]       # inspect .dossier/automation/manifest.yaml
 ai-dossier cap run test.focused    # execute one capability
 ai-dossier cap run test.focused -- --grep auth   # extra args are shell-quoted and appended
+ai-dossier cap run test.focused --tail-bytes 4096   # bytes of output captured on a non-ok outcome (default 8192)
 ```
 
 A repo declares its deterministic, recurring operations — tests, lint, build, deps
@@ -1294,8 +1295,9 @@ stdout line**, and the exit code matches:
 | `capability-unavailable` | 3 | Id not in manifest (or `shadow`) — no fast path |
 
 A repo without `.dossier/automation/` is normal: `cap list` is empty and exits 0. Every
-run appends telemetry (capability, outcome, exit code, duration, reason, cwd) to
-`~/.dossier/caps.jsonl`. Full spec and the capability id vocabulary:
+run appends telemetry (capability, outcome, exit code, duration, reason, cwd, and —
+non-`ok` outcomes only — `output_tail`, the last `--tail-bytes` of combined stdout+stderr)
+to `~/.dossier/caps.jsonl`. Full spec and the capability id vocabulary:
 [docs/reference/capabilities.md](../docs/reference/capabilities.md).
 
 ---

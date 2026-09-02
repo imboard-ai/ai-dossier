@@ -50,6 +50,7 @@ capabilities:
 | entry `.assumptions` | list of probes | no | Preconditions checked **before** the command runs |
 | entry `.description` | string | no | What the capability does (shown by `cap list`) |
 | entry `.timeout_ms` | number | no | Per-entry command timeout in ms (default 5 min; a timeout is `automation-broken`) |
+| entry `.min_duration_ms` | number | no | Sanity floor (#583): a non-zero exit that finishes faster than this is reclassified `automation-broken` instead of `task-failed` — "this probably didn't really run", not a genuine failure. Default 0 (no floor) |
 
 Capability ids are dotted lowercase words (`test.focused`, `worktree.prepare`).
 
@@ -86,7 +87,7 @@ first — consumers read the final line):
 |---|---|---|
 | `ok` | 0 | Command ran and exited 0 |
 | `task-failed` | 1 | Command ran and legitimately failed (e.g. red tests) — *the operation's* failure, not the automation's |
-| `automation-broken` | 2 | Assumption probe failed · command missing/not executable (shell 126/127) · abnormal termination (signal / exit > 128) · timeout · manifest invalid |
+| `automation-broken` | 2 | Assumption probe failed · command missing/not executable (shell 126/127) · abnormal termination (signal / exit > 128) · timeout · manifest invalid · a non-zero exit faster than the entry's `min_duration_ms` (#583 — "this probably didn't really run") |
 | `capability-unavailable` | 3 | Id not in the manifest, no manifest at all, or `lifecycle: shadow` |
 
 The distinction matters to callers: `task-failed` means "trust the result — the task
@@ -97,10 +98,24 @@ reasoning"; `capability-unavailable` means "no fast path here — reason from sc
 > consumers should read the envelope's last stdout line — present for every `cap run`
 > outcome — rather than the exit code alone, and check stderr for usage errors.
 
+**On any non-`ok` outcome, the envelope also carries `output_tail`** (#583 AC1/AC3) —
+the last `--tail-bytes` (default 8192) bytes of the command's combined stdout+stderr,
+UTF-8-safe (never splits a multi-byte character). Omitted entirely on `ok`, so a
+passing run's envelope stays small. The batch engine's incremental gate uses this for
+attribution — a per-gate log file under the project's `runs/` directory and the last
+~500 bytes in the journal `unit-failed`/`gate-inconclusive` event detail — rather than
+requiring a human to grep the raw agent transcript to find out why a gate blocked or
+evicted a member.
+
+Capturing this output changes how `cap run` behaves for a human running it directly:
+output is now buffered and re-emitted after the command finishes, rather than streamed
+live via `stdio: 'inherit'` as before #583 — a long-running command shows nothing until
+it completes, instead of showing progress incrementally.
+
 Envelope example:
 
 ```json
-{"capability":"test.focused","outcome":"task-failed","command":"npm test -- --silent","exit_code":1,"signal":null,"duration_ms":8421,"reason":null}
+{"capability":"test.focused","outcome":"task-failed","command":"npm test -- --silent","exit_code":1,"signal":null,"duration_ms":8421,"reason":null,"output_tail":"FAIL src/foo.test.ts\n  ✗ should do the thing\n"}
 ```
 
 ## Telemetry
@@ -108,9 +123,9 @@ Envelope example:
 Every `cap run` — all four outcomes included — appends one JSON line to
 `~/.dossier/caps.jsonl` (append-only, mode 0600; disable with
 `dossier config auditLog false`), recording `capability`, `outcome`, `exit_code`,
-`duration_ms`, `reason` (why a non-ok outcome happened), `signal`, `cwd`, and
-`timestamp`. This mirrors the `runs.jsonl` dossier telemetry but stays a separate file
-because a capability execution is not a dossier run.
+`duration_ms`, `reason` (why a non-ok outcome happened), `signal`, `cwd`, `timestamp`,
+and (non-`ok` outcomes only, #583) `output_tail`. This mirrors the `runs.jsonl` dossier
+telemetry but stays a separate file because a capability execution is not a dossier run.
 
 ## Capability id vocabulary
 

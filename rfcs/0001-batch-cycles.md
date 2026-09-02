@@ -224,9 +224,14 @@ failure edges:
              → evicting(revert range) → validating
   evictions > ⅓ OR revert-conflict → dissolving → members requeued (smaller batches / full)
   validating → blocked(suite-unreadable, after the fallback-runner retry when
-             one applied) → validating (nothing requeued or reverted; the
-             `validating` edge is where a future resume verb would land —
-             today's only real exit is dissolving via `sched abandon --batch`; #562)
+             one applied) → validating (nothing requeued or reverted; today's
+             only real exit for THIS blocked case is still dissolving via
+             `sched abandon --batch` — a resume verb exists for the
+             executing→blocked case below (#583, F.11), not yet for this
+             validating→blocked one; #562)
+  executing → blocked(gate-inconclusive:<cap>, #583 F.11) → executing
+             (nothing requeued or reverted; `sched resume --batch <id>`
+             re-runs the gate and resolves the block)
   awaiting-merge: CONFLICTING | auto-merge-blocked → rebasing → re-validating → shipping
                   (2nd failure → dissolved)
 ```
@@ -301,6 +306,7 @@ Not context (fresh agent per member) and not issue count per se. The binding con
 | F.8 | **Partial batch success** (Q13) | The default outcome, not an exception: batch ships whatever survived; evicted members requeue individually; nothing green is discarded. A dissolved batch loses only uncommitted in-progress work (bounded by F.5's issue-boundary pushes). |
 | F.9 | **Batch PR conflicts / auto-merge-blocked** (base moved) | Scheduler rebases the batch branch, re-runs the suite (changed base = changed world), re-ships. Second occurrence → dissolve into two half-batches (conflict probability ∝ batch width × base drift). Never self-merge around the watcher (kept). |
 | F.10 | **Interrupted/stalled batch, scheduler death** (Q14) | `sched start` → load state.json → reconcile vs GitHub → re-arm. No state.json (new machine): rebuild from anchors + runstate + `cycle:*` labels; batches resume at last batch milestone; members at last pushed issue boundary. |
+| F.11 | **Incremental gate itself is inconclusive** (#583 — the gate check F.1 references, `cap run typecheck.run`/`test.focused` after `review done`, comes back `automation-broken`/`capability-unavailable` rather than a definite `ok`/`task-failed`) | Do **not** evict on a signal the gate can't stand behind — the same "block, don't discard work on a tooling failure" principle F.2's `suite-unreadable` case applies to the aggregate suite, one level down at the per-member gate. Batch blocks (member's commit stays on the branch, nothing requeued/reverted), slot released, `sched status` shows the reason. `sched resume --batch <id>` re-runs the gate once the capability is fixed and resolves the block (still inconclusive → stays blocked; `task-failed` → evict per F.1; `ok` → member completes normally). |
 
 ### Q19 — genuinely new failure modes batching introduces
 

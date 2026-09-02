@@ -57,6 +57,16 @@ const PROBE_TIMEOUT_MS = 10_000;
 /** Default per-entry command timeout when the manifest does not set `timeout_ms`. */
 const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60_000;
 
+/**
+ * Default byte length of `output_tail` (issue #583 AC1) — the last N bytes of
+ * a non-`ok` run's combined stdout+stderr, captured for attribution. Override
+ * per invocation with `cap run --tail-bytes <n>`.
+ */
+export const DEFAULT_OUTPUT_TAIL_BYTES = 8192;
+
+/** `spawnSync`'s own default `maxBuffer` (1 MiB) is too small for a real test/build command's combined stdout+stderr — raised so output volume alone never causes a false `automation-broken` (#583 review). */
+const MAX_CAPABILITY_OUTPUT_BYTES = 64 * 1024 * 1024;
+
 /** Supported tool-version comparison operators (single source of truth). */
 const TOOL_VERSION_OPS = ['>=', '>', '<=', '<', '==', '='] as const;
 type ToolVersionOp = (typeof TOOL_VERSION_OPS)[number];
@@ -98,6 +108,14 @@ export interface CapabilityEntry {
   description?: string;
   /** Per-entry command timeout in ms (default 5 min; timeout → automation-broken). */
   timeoutMs?: number;
+  /**
+   * Sanity floor (issue #583 AC2): a non-zero exit that finished faster than
+   * this many ms is reclassified `automation-broken` instead of `task-failed`
+   * — a fast non-zero exit is more likely "the automation didn't really run"
+   * (e.g. a filter matched zero projects) than a genuine test failure.
+   * Default 0 (no floor) — opt in per capability.
+   */
+  minDurationMs?: number;
 }
 
 export interface CapabilityManifest {
@@ -233,6 +251,20 @@ function parseCapabilityEntry(id: string, raw: unknown): CapabilityEntry {
     timeoutMs = entry.timeout_ms;
   }
 
+  let minDurationMs: number | undefined;
+  if (entry.min_duration_ms !== undefined) {
+    if (
+      typeof entry.min_duration_ms !== 'number' ||
+      !Number.isFinite(entry.min_duration_ms) ||
+      entry.min_duration_ms < 0
+    ) {
+      throw new CapManifestError(
+        `capability '${id}': min_duration_ms must be a non-negative number of milliseconds`
+      );
+    }
+    minDurationMs = entry.min_duration_ms;
+  }
+
   let assumptions: CapabilityAssumption[] | undefined;
   if (entry.assumptions !== undefined) {
     if (!Array.isArray(entry.assumptions)) {
@@ -241,7 +273,7 @@ function parseCapabilityEntry(id: string, raw: unknown): CapabilityEntry {
     assumptions = entry.assumptions.map((probe, i) => parseAssumption(id, i, probe));
   }
 
-  return { command: entry.command, lifecycle, assumptions, description, timeoutMs };
+  return { command: entry.command, lifecycle, assumptions, description, timeoutMs, minDurationMs };
 }
 
 function parseAssumption(id: string, index: number, raw: unknown): CapabilityAssumption {
@@ -367,6 +399,14 @@ export interface CapRunResult {
   duration_ms: number;
   /** Why a non-ok outcome happened (probe output, missing command, …). */
   reason: string | null;
+  /**
+   * Last `tailBytes` of the combined stdout+stderr (issue #583 AC1/AC3),
+   * present only for non-`ok` outcomes that actually spawned a process.
+   * `undefined` for `ok` (keeps the success envelope small) and for outcomes
+   * classified before any subprocess ran (unknown id, shadow lifecycle,
+   * failed assumption probe).
+   */
+  output_tail?: string;
 }
 
 /**
@@ -378,13 +418,25 @@ export function shellQuote(arg: string): string {
   return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
+/** Last `maxBytes` bytes of `text`, UTF-8-safe (never splits by char count). */
+export function truncateTailBytes(text: string, maxBytes: number): string {
+  const buf = Buffer.from(text, 'utf-8');
+  if (buf.length <= maxBytes) return text;
+  return buf.subarray(buf.length - maxBytes).toString('utf-8');
+}
+
 /**
  * Resolve and execute one capability for a directory. Never throws for
  * manifest/permission/exec problems — they are reported as outcomes — but a
  * malformed manifest still surfaces as `automation-broken`, not a crash, so
  * callers (the scheduler) can fall back to reasoning.
  */
-export function runCapabilityFromCwd(id: string, args: string[], cwd: string): CapRunResult {
+export function runCapabilityFromCwd(
+  id: string,
+  args: string[],
+  cwd: string,
+  tailBytes: number = DEFAULT_OUTPUT_TAIL_BYTES
+): CapRunResult {
   let manifest: CapabilityManifest;
   try {
     manifest = loadCapabilityManifest(cwd);
@@ -394,7 +446,7 @@ export function runCapabilityFromCwd(id: string, args: string[], cwd: string): C
     }
     throw err;
   }
-  return runCapability(manifest, id, args, cwd);
+  return runCapability(manifest, id, args, cwd, tailBytes);
 }
 
 /** Execute a capability from an already-loaded manifest. */
@@ -402,7 +454,8 @@ export function runCapability(
   manifest: CapabilityManifest,
   id: string,
   args: string[],
-  cwd: string
+  cwd: string,
+  tailBytes: number = DEFAULT_OUTPUT_TAIL_BYTES
 ): CapRunResult {
   const start = Date.now();
   const entry = manifest.capabilities[id];
@@ -447,13 +500,38 @@ export function runCapability(
 
   const commandLine = [entry.command, ...args.map(shellQuote)].join(' ');
   const timeoutMs = entry.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  // Captured (not `stdio: 'inherit'`) so a non-ok outcome can carry an
+  // `output_tail` (issue #583 AC1) — re-emitted below so a human running
+  // `cap run` directly still sees it (buffered, not streamed live).
+  // `maxBuffer` explicit: `spawnSync`'s default is 1 MiB, and a chatty test
+  // suite or verbose build legitimately exceeds that — without raising it,
+  // an otherwise-passing command hits `res.error` (ENOBUFS) and gets
+  // misclassified `automation-broken`, which the batch gate would then read
+  // as a genuine inconclusive result rather than "the command produced a lot
+  // of output" (review finding on #583).
   const res = spawnSync(commandLine, {
     shell: true,
     cwd,
-    stdio: 'inherit',
+    encoding: 'utf-8',
     timeout: timeoutMs,
+    maxBuffer: MAX_CAPABILITY_OUTPUT_BYTES,
   });
-  return classifySpawnResult(res, id, commandLine, Date.now() - start, cwd, timeoutMs);
+  if (res.stdout) process.stdout.write(res.stdout);
+  if (res.stderr) process.stderr.write(res.stderr);
+  const durationMs = Date.now() - start;
+  const classified = classifySpawnResult(
+    res,
+    id,
+    commandLine,
+    durationMs,
+    cwd,
+    timeoutMs,
+    entry.minDurationMs ?? 0
+  );
+  if (classified.outcome !== 'ok') {
+    classified.output_tail = truncateTailBytes(`${res.stdout ?? ''}${res.stderr ?? ''}`, tailBytes);
+  }
+  return classified;
 }
 
 /** Map a finished spawn to one of the three executed outcomes (ok / task-failed / automation-broken). */
@@ -463,7 +541,8 @@ function classifySpawnResult(
   commandLine: string,
   durationMs: number,
   cwd: string,
-  timeoutMs: number
+  timeoutMs: number,
+  minDurationMs = 0
 ): CapRunResult {
   if (res.error) {
     const code = (res.error as NodeJS.ErrnoException).code;
@@ -528,6 +607,21 @@ function classifySpawnResult(
       signal: null,
       duration_ms: durationMs,
       reason: null,
+    };
+  }
+  // #583 AC2: a non-zero exit that finished faster than the capability's
+  // declared floor is more likely "the automation didn't really run" than a
+  // genuine task failure — reclassify rather than hand the caller a false
+  // task-failed.
+  if (minDurationMs > 0 && durationMs < minDurationMs) {
+    return {
+      outcome: 'automation-broken',
+      capability: id,
+      command: commandLine,
+      exit_code: res.status,
+      signal: null,
+      duration_ms: durationMs,
+      reason: `exited ${res.status} after ${durationMs}ms — below min_duration_ms=${minDurationMs}ms; treated as automation-broken, not task-failed`,
     };
   }
   return {

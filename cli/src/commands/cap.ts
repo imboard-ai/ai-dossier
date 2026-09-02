@@ -17,6 +17,7 @@ import {
   type CapabilityManifest,
   CapManifestError,
   type CapRunResult,
+  DEFAULT_OUTPUT_TAIL_BYTES,
   loadCapabilityManifest,
   MANIFEST_FILE,
   runCapabilityFromCwd,
@@ -26,6 +27,10 @@ import { renderTable } from '../table';
 
 interface ListOptions {
   json?: boolean;
+}
+
+interface RunOptions {
+  tailBytes?: string;
 }
 
 function loadOrFail(): CapabilityManifest {
@@ -39,7 +44,12 @@ function loadOrFail(): CapabilityManifest {
   }
 }
 
-/** The JSON envelope for `cap run` — nulls, never undefined, for a stable shape. */
+/**
+ * The JSON envelope for `cap run` — nulls, never undefined, for a stable
+ * shape. `output_tail` is the one exception: omitted entirely on `ok` (issue
+ * #583 AC1) rather than null, so a passing run's envelope stays small; a
+ * consumer (e.g. the batch engine) checks for the key's presence.
+ */
 function envelope(result: CapRunResult): string {
   return JSON.stringify({
     capability: result.capability,
@@ -49,6 +59,7 @@ function envelope(result: CapRunResult): string {
     signal: result.signal,
     duration_ms: result.duration_ms,
     reason: result.reason,
+    ...(result.output_tail !== undefined ? { output_tail: result.output_tail } : {}),
   });
 }
 
@@ -109,10 +120,18 @@ export function registerCapCommand(program: Command): void {
       'Execute one capability; extra args after -- are shell-quoted and appended to the command. ' +
         'Exit codes: 0 ok, 1 task-failed, 2 automation-broken, 3 capability-unavailable'
     )
+    .option(
+      '--tail-bytes <n>',
+      `Bytes of combined stdout+stderr to capture on a non-ok outcome (default ${DEFAULT_OUTPUT_TAIL_BYTES})`
+    )
     .allowUnknownOption(true)
-    .action((id: string, args: string[]) => {
+    .action((id: string, args: string[], opts: RunOptions) => {
       const cwd = process.cwd();
-      const result = runCapabilityFromCwd(id, args, cwd);
+      const tailBytes = opts.tailBytes ? Number(opts.tailBytes) : DEFAULT_OUTPUT_TAIL_BYTES;
+      if (!Number.isFinite(tailBytes) || tailBytes < 0) {
+        fail([`--tail-bytes must be a non-negative number, got '${opts.tailBytes}'`]);
+      }
+      const result = runCapabilityFromCwd(id, args, cwd, tailBytes);
 
       appendCapLog({
         timestamp: new Date().toISOString(),
@@ -123,6 +142,7 @@ export function registerCapCommand(program: Command): void {
         reason: result.reason,
         signal: result.signal,
         cwd,
+        ...(result.output_tail !== undefined ? { output_tail: result.output_tail } : {}),
       });
 
       // Leading newline: a child whose last write had no trailing newline must

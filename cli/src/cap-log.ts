@@ -25,6 +25,8 @@ export interface CapLogEntry {
   /** Signal that killed the command, when abnormal termination occurred. */
   signal: string | null;
   cwd: string;
+  /** Last bytes of combined stdout+stderr on a non-ok outcome (#583 AC1/AC3). */
+  output_tail?: string;
 }
 
 const CAP_LOG_FILE = path.join(CONFIG_DIR, 'caps.jsonl');

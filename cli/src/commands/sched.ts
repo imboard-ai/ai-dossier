@@ -11,7 +11,13 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import type { CapOutcome, SchedConfig, StatusReport, TickResult } from '@ai-dossier/sched';
+import type {
+  BatchDispatchDeps,
+  CapabilityGateResult,
+  SchedConfig,
+  StatusReport,
+  TickResult,
+} from '@ai-dossier/sched';
 import {
   abandonBatch,
   abandonIssue,
@@ -43,7 +49,9 @@ import {
   parseManifest,
   reprioritizeBatch,
   reprioritizeIssue,
+  resolveDispatch,
   resolveProjectSlug,
+  resumeBlockedGate,
   runLoop,
   SchedNotFoundError,
   SchedStore,
@@ -81,30 +89,47 @@ import { renderTable } from '../table';
  * line either way (docs/reference/capabilities.md). Reuses the aggregate
  * suite's timeout budget (`BATCH_SUITE_TIMEOUT_MS`) — both are batch-worktree
  * subprocess calls with no reason to disagree on how long is too long.
+ *
+ * `output_tail` (#583 AC1/AC3) rides on the same envelope `cap run` already
+ * prints — this function's own `spawnSync` call already captures the whole
+ * subprocess's stdout (no `stdio: 'inherit'` here), so no extra plumbing is
+ * needed beyond reading the field off the parsed envelope.
  */
-function createBatchCapabilityRunner(): (worktree: string, capabilityId: string) => CapOutcome {
+function createBatchCapabilityRunner(): (
+  worktree: string,
+  capabilityId: string
+) => CapabilityGateResult {
   return (worktree, capabilityId) => {
     const result = spawnSync('ai-dossier', ['cap', 'run', capabilityId], {
       cwd: worktree,
       encoding: 'utf-8',
       timeout: BATCH_SUITE_TIMEOUT_MS,
     });
-    if (result.error) return 'automation-broken';
+    if (result.error) return { outcome: 'automation-broken' };
     const lastLine = (result.stdout ?? '').trim().split('\n').pop() ?? '';
     try {
-      const envelope = JSON.parse(lastLine) as { outcome?: unknown };
+      const envelope = JSON.parse(lastLine) as {
+        outcome?: unknown;
+        output_tail?: unknown;
+        reason?: unknown;
+      };
       const outcome = envelope.outcome;
+      const outputTail = typeof envelope.output_tail === 'string' ? envelope.output_tail : null;
+      // `reason` (#583 review) is the only explanation available when no
+      // subprocess ran at all — `capability-unavailable`, or `automation-broken`
+      // from a failed assumption probe — since `output_tail` is unset there.
+      const reason = typeof envelope.reason === 'string' ? envelope.reason : null;
       if (
         outcome === 'ok' ||
         outcome === 'task-failed' ||
         outcome === 'automation-broken' ||
         outcome === 'capability-unavailable'
       ) {
-        return outcome;
+        return { outcome, outputTail, reason };
       }
-      return 'automation-broken';
+      return { outcome: 'automation-broken' };
     } catch {
-      return 'automation-broken';
+      return { outcome: 'automation-broken' };
     }
   };
 }
@@ -321,7 +346,7 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
           ],
           report.batches.map((b) => [
             b.id,
-            b.status,
+            b.status === 'blocked' && b.blocked_reason ? `blocked (${b.blocked_reason})` : b.status,
             String(b.priority),
             b.members.length > 0 ? b.members.map((m) => `#${m}`).join(',') : '-',
             b.executing_member > 0 ? `${b.executing_member}/${b.members.length}` : '-',
@@ -664,32 +689,110 @@ function registerStatusSubcommand(cmd: Command): void {
     });
 }
 
+interface PauseResumeOptions extends SchedOptions {
+  /** Resume-only (#583): a batch id blocked on `gate-inconclusive:<cap>` — re-run that gate for its current member instead of the global pause toggle. */
+  batch?: string;
+}
+
+/**
+ * `sched resume --batch <id>` (#583 AC4) — re-runs the incremental gate that
+ * blocked `<id>` and resolves it, using the SAME `BatchDispatchDeps` shape
+ * `sched start` builds (see `registerStartSubcommand`'s `deps` object /
+ * `engine.ts`'s `EngineDeps → BatchDispatchDeps` mapping), scoped down to
+ * just what `resumeBlockedGate` needs — no teardown/fence/report machinery,
+ * since this never touches those phases.
+ */
+function resumeBatchGate(opts: PauseResumeOptions): void {
+  const { store } = resolveStore(opts);
+  let config: SchedConfig;
+  try {
+    config = store.loadConfig();
+  } catch (err) {
+    handleKnownError(err);
+  }
+  const deps: BatchDispatchDeps = {
+    store,
+    journal: new Journal(store.dir),
+    groundTruth: createExecGroundTruth(undefined, { repoDir: process.cwd() }),
+    spawnDeps: createSpawnDeps(process.cwd()),
+    now: () => new Date(),
+    repoDir: process.cwd(),
+    exec: createExecFn(TEARDOWN_TIMEOUT_MS, {
+      onError: (file, args, err) =>
+        process.stderr.write(
+          `⚠ sched resume --batch: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+        ),
+    }),
+    runSuite: createBatchSuiteRunner(config),
+    runCapability: createBatchCapabilityRunner(),
+  };
+  try {
+    const result = resumeBlockedGate(
+      deps,
+      config,
+      resolveDispatch(config),
+      opts.batch as string,
+      new Date()
+    );
+    if (opts.json) {
+      console.log(JSON.stringify({ batch: opts.batch, ...result }));
+      return;
+    }
+    if (result.outcome === 'still-blocked') {
+      console.log(
+        `⏸ Batch ${opts.batch} still blocked — cap run ${result.capability} is still inconclusive.` +
+          (result.detail ? `\n  ${result.detail}` : '')
+      );
+    } else if (result.outcome === 'evicted') {
+      console.log(
+        `✗ Batch ${opts.batch}: cap run ${result.capability} now reports task-failed — member evicted, batch continues.`
+      );
+    } else {
+      console.log(
+        `✓ Batch ${opts.batch}: cap run ${result.capability} now reports ok — member completed, batch continues.`
+      );
+    }
+  } catch (err) {
+    handleKnownError(err);
+  }
+}
+
 function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
-  cmd
+  const sub = cmd
     .command(pause ? 'pause' : 'resume')
     .description(
       pause
         ? 'Stop making new slot assignments (live units keep running)'
-        : 'Resume making new slot assignments'
+        : 'Resume making new slot assignments; with --batch <id>, re-run the incremental gate for a batch blocked on gate-inconclusive instead (#583)'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
-    .option('--json', 'Output the result as JSON')
-    .action((opts: SchedOptions) => {
-      const { store, project } = resolveStore(opts);
-      try {
-        const paused = store.withLock((state) => ({
-          state: setPaused(state, pause),
-          result: pause,
-        }));
-        if (opts.json) {
-          console.log(JSON.stringify({ project, paused }));
-        } else {
-          console.log(paused ? '⏸ Scheduler paused' : '▶ Scheduler resumed');
-        }
-      } catch (err) {
-        handleKnownError(err);
+    .option('--json', 'Output the result as JSON');
+  if (!pause) {
+    sub.option(
+      '--batch <id>',
+      'Batch id blocked on gate-inconclusive:<cap> — re-run that gate for its current member'
+    );
+  }
+  sub.action((opts: PauseResumeOptions) => {
+    if (!pause && opts.batch) {
+      resumeBatchGate(opts);
+      return;
+    }
+    const { store, project } = resolveStore(opts);
+    try {
+      const paused = store.withLock((state) => ({
+        state: setPaused(state, pause),
+        result: pause,
+      }));
+      if (opts.json) {
+        console.log(JSON.stringify({ project, paused }));
+      } else {
+        console.log(paused ? '⏸ Scheduler paused' : '▶ Scheduler resumed');
       }
-    });
+    } catch (err) {
+      handleKnownError(err);
+    }
+  });
 }
 
 interface StatsOptions extends SchedOptions {

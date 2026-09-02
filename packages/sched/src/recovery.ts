@@ -1278,7 +1278,10 @@ export function blockBatch(
   if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
     throw new IllegalTransitionError('batch', batch.status, 'blocked');
   }
-  const next = transitionBatch(state, batchId, 'blocked', {}, now);
+  // #583: persist the reason on the entry itself — previously only the
+  // journal/runstate milestone carried it, so `sched status` had nothing to
+  // read back for a blocked batch (including the pre-existing #562 case).
+  const next = transitionBatch(state, batchId, 'blocked', { blocked_reason: opts.reason }, now);
   journal(deps, unitEvent('batch-blocked', `batch:${batchId}`, { detail: opts.reason }), now);
   post(
     deps,
