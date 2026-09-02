@@ -485,9 +485,9 @@ comparison.** The attempt-1 baseline is 5 sched/CLI *code* issues at mid/strong 
 three are *docs* issues at mid tier. Docs issues are cheaper however they are executed. The
 contemporaneous same-repo full-cycle control in §13.1 (#544, a code issue, $1.19) shows the spread
 within full-cycle is itself wider than the gap being claimed. **The only clean comparison available
-is the same three issues re-run as full-cycle after the dissolve** — #540/#542/#543 were requeued
-and are executing as this is written; §13.3 records the result. Until that lands, treat −85% as
-suggestive and uncontrolled, not as a measured saving. #529 owns the verdict.
+is the same three issues re-run as full-cycle after the dissolve** — #540/#542/#543 were requeued,
+ran, and merged; §13.3 records that controlled result (**−49%**, with a stated ceiling). Treat the
+−85% headline as uncontrolled and the −49% as the defensible figure. #529 owns the verdict.
 
 ### 13.3 The controlled comparison — the same issues, both ways
 
@@ -496,7 +496,34 @@ Because `unattributable-suite-failure` requeues members as full-cycle, #540, #54
 Same issues, same repo, same model tier, same day. This is the cleanest batch-vs-full-cycle
 measurement the pilot has produced, and it exists only because the batch was thrown away.
 
-<!-- CONTROL-TABLE -->
+| issue | as a **batch member** (`b-20260901-02`) | as a **full-cycle run** (after the dissolve) |
+|---|---|---|
+| #540 | $2.518 · 6,214,824 in · 47,071 out · 11.5 API-min | $4.173 · 13,624,069 in · 48,049 out · 10.0 API-min → PR [#552](https://github.com/imboard-ai/ai-dossier/pull/552) merged `eeaf070` |
+| #542 | $2.606 · 6,573,453 in · 49,888 out · 2.9 API-min | $5.937 · 10,863,226 in · 83,468 out · 22.1 API-min → PR [#555](https://github.com/imboard-ai/ai-dossier/pull/555) merged `02bd7c6` |
+| #543 | $2.091 · 6,073,627 in · 33,061 out · 10.2 API-min | cost unrecoverable — the dispatch log holds only its header (B3d again) → PR [#554](https://github.com/imboard-ai/ai-dossier/pull/554) merged `6ed7366` |
+| **mean (n=2 with both sides)** | **$2.562 · 6,394,139 in** | **$5.055 · 12,243,648 in** |
+
+On the two issues where both sides are recoverable, the batch member cost **49% less** and consumed
+**48% fewer billable input tokens** than the same issue executed as its own full-cycle run. Serial
+wall-clock: the three members took **34 minutes** inside the batch; the three full-cycle re-runs took
+**86 minutes** (17 + 44 + 25).
+
+**Read this table with its ceiling stated.** The batch-member column is *not* the cost of finishing
+the issue. A batch member stops at `review done` and hands back to the batch; the batch's shared
+tail — aggregate validate, batch review, one PR for all three members, CI, merge, deploy, report —
+never ran, because B3b dissolved the batch before it started. The full-cycle column *includes* all of
+that. So the comparison is "member work" against "member work + ship tail", and it therefore
+**overstates** batching's advantage by exactly the tail it omits.
+
+The batching thesis is precisely that the omitted tail is shared — one PR and one CI run for three
+issues instead of three of each — so the true figure could land either side of the 49%. Nothing in
+this run measures it. `#542`'s full-cycle column also carries one `agent-exited-unverified` fence
+and an opus takeover at generation 1 (§13.4), which inflates its $5.937 above a clean run.
+
+That failure mode is worth separating from batching: `agent-exited-unverified` killed imboard batch
+member #3820 **and** the #542 full-cycle run. It is a general dispatch failure mode, not a batch
+defect, and it should not be scored against the batch arm.
+
 
 ### 13.4 Human interventions (6)
 
