@@ -290,6 +290,12 @@ export class SchedStore {
       if (parsed.dissolve_policy !== undefined) {
         config.dissolve_policy = validateDissolvePolicy(parsed.dissolve_policy);
       }
+      if (parsed.default_batch_priority !== undefined) {
+        if (!Number.isInteger(parsed.default_batch_priority)) {
+          throw new Error('default_batch_priority must be an integer');
+        }
+        config.default_batch_priority = parsed.default_batch_priority;
+      }
       return config;
     } catch (err) {
       // Deliberate degrade-to-default (unlike state.json, config is re-derivable
@@ -328,6 +334,9 @@ export class SchedStore {
       ...(config.dispatch !== undefined ? { dispatch: config.dispatch } : {}),
       ...(config.auto_upgrade !== undefined ? { auto_upgrade: config.auto_upgrade } : {}),
       ...(config.dissolve_policy !== undefined ? { dissolve_policy: config.dissolve_policy } : {}),
+      ...(config.default_batch_priority !== undefined
+        ? { default_batch_priority: config.default_batch_priority }
+        : {}),
     };
     writeAtomic(this.configPath, `${JSON.stringify(file, null, 2)}\n`);
   }

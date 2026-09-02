@@ -84,24 +84,63 @@ export function batchBlockers(state: SchedState, batch: BatchEntry): DependencyB
   return blockers;
 }
 
+/** One candidate's sort key for `compareByPriority` (#565). */
+export interface PriorityRank {
+  priority: number;
+  /** Readiness age — the entry/batch's `updated_at` (a status transition bumps it, so a fresh `ready`/`requeued` reads as newly-aged, not stale). */
+  updated_at: string;
+  /** Final, deterministic tiebreak once priority and age both tie — an issue number, or a batch's anchor issue (or `+Infinity` when anchor is unset). */
+  tiebreak: number;
+}
+
 /**
- * All runnable units in stable dispatch order: issues in queue order, then
- * batches in creation order. A batch unit unlocks ALL its members' execution,
- * so batches are listed after issues only for stability — the caller slices to
- * free capacity either way.
+ * Total order for assignment (#565 AC2): priority desc, then readiness age
+ * (older first) asc, then the numeric tiebreak asc. Shared by `runnableUnits`
+ * (issues and batches competing for the SAME free slot within
+ * `computeAssignments`) and `batch-dispatch.ts`'s own ready-batch claim loop
+ * (batches competing against EACH OTHER — that pass never goes through
+ * `computeAssignments`, so it applies this comparator directly instead).
+ */
+export function compareByPriority(a: PriorityRank, b: PriorityRank): number {
+  if (a.priority !== b.priority) return b.priority - a.priority;
+  const ageA = Date.parse(a.updated_at);
+  const ageB = Date.parse(b.updated_at);
+  if (ageA !== ageB) return ageA - ageB;
+  return a.tiebreak - b.tiebreak;
+}
+
+/**
+ * All runnable units, in assignment order (#565 AC2: priority desc →
+ * readiness age → issue number). Issues and batches are ranked on the SAME
+ * scale — a batch's default priority (`DEFAULT_BATCH_PRIORITY`, 10) outranks
+ * a full-cycle entry's default (0) precisely so a ready batch is offered a
+ * free slot before a same-readiness issue unit competing for it
+ * (`docs/reports/batch-pilot-2-execution.md` §13.4). `computeAssignments`
+ * slices this list to free capacity; nothing here itself claims a slot.
  */
 export function runnableUnits(state: SchedState): RunnableUnit[] {
-  const units: RunnableUnit[] = [];
+  const ranked: { unit: RunnableUnit; rank: PriorityRank }[] = [];
   for (const entry of state.entries) {
     if (entry.mode !== 'full') continue;
     if (!DISPATCHABLE_ISSUE_STATUSES.has(entry.status)) continue;
     if (dependencyBlockers(state, entry).length > 0) continue;
-    units.push({ kind: 'issue', issue: entry.issue });
+    ranked.push({
+      unit: { kind: 'issue', issue: entry.issue },
+      rank: { priority: entry.priority, updated_at: entry.updated_at, tiebreak: entry.issue },
+    });
   }
   for (const batch of state.batches) {
     if (batch.status !== 'ready') continue;
     if (batchBlockers(state, batch).length > 0) continue;
-    units.push({ kind: 'batch', batch: batch.id });
+    ranked.push({
+      unit: { kind: 'batch', batch: batch.id },
+      rank: {
+        priority: batch.priority,
+        updated_at: batch.updated_at,
+        tiebreak: batch.anchor ?? Number.POSITIVE_INFINITY,
+      },
+    });
   }
-  return units;
+  ranked.sort((a, b) => compareByPriority(a.rank, b.rank));
+  return ranked.map((r) => r.unit);
 }

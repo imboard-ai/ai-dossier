@@ -10,6 +10,7 @@
  * assignments are made at all (`sched pause`).
  */
 
+import { EnqueueError } from './enqueue';
 import {
   batchBlockers,
   type DependencyBlocker,
@@ -238,4 +239,57 @@ export function abandonBatch(
     if (result.requeued) requeued.push(issue);
   }
   return { state: next, requeued };
+}
+
+function assertValidPriority(priority: number): void {
+  if (!Number.isInteger(priority)) {
+    throw new EnqueueError(`priority must be an integer, got ${String(priority)}`);
+  }
+}
+
+/**
+ * `sched reprioritize --issue N --priority P` (#565): adjust a queued unit's
+ * assignment weight in place — no abandon/re-enqueue round trip, which would
+ * also reset every other field `enqueueEntries` does not accept as a
+ * re-supply (deps, tier, ...). Terminal entries cannot be reprioritized —
+ * mirrors `abandonIssue`'s same guard, since there is nothing left to
+ * schedule differently.
+ */
+export function reprioritizeIssue(state: SchedState, issue: number, priority: number): SchedState {
+  assertValidPriority(priority);
+  const entry = state.entries.find((e) => e.issue === issue);
+  if (!entry) {
+    throw new SchedNotFoundError(`Queue entry not found: ${issue}`);
+  }
+  if (TERMINAL_ISSUE_STATUSES.has(entry.status)) {
+    throw new SchedNotFoundError(
+      `Issue ${issue} is already ${entry.status} — nothing to reprioritize`
+    );
+  }
+  return {
+    ...state,
+    entries: state.entries.map((e) => (e.issue === issue ? { ...e, priority } : e)),
+  };
+}
+
+/** `sched reprioritize --batch B --priority P` (#565): the batch analog of `reprioritizeIssue`. */
+export function reprioritizeBatch(
+  state: SchedState,
+  batchId: string,
+  priority: number
+): SchedState {
+  assertValidPriority(priority);
+  const batch = findBatch(state, batchId);
+  if (!batch) {
+    throw new SchedNotFoundError(`Batch not found: ${batchId}`);
+  }
+  if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId} is already ${batch.status} — nothing to reprioritize`
+    );
+  }
+  return {
+    ...state,
+    batches: state.batches.map((b) => (b.id === batchId ? { ...b, priority } : b)),
+  };
 }

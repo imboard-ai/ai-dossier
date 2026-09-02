@@ -101,6 +101,7 @@ import {
 import { type Journal, unitEvent } from './journal';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
+import { compareByPriority } from './readiness';
 import {
   beginAttribution,
   beginFixAttempt,
@@ -715,6 +716,11 @@ function claimAndSetup(
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
   if (!batch) return;
+  // #565 AC2: "journaled on each assignment" — the issue-dispatch path
+  // (`engine.ts`'s `dispatchAssignments`) already does this on its own
+  // 'assigned' event; mirrored here so a batch's claim carries the same
+  // audit trail.
+  journalEvent(deps, 'assigned', unit(batchId), { slot: claimedSlot, priority: batch.priority });
   const setup = runBatchSetup(deps, batch, now);
   const poster = createExecMilestonePoster(deps.exec, { repoDir: deps.repoDir });
 
@@ -1771,14 +1777,17 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
 
 /**
  * One batch reconcile+refill pass. Called from `engine.ts`'s `tick()` after
- * the issue-level pass — batches never compete with issues for a slot within
- * the same tick because this pass runs strictly after `dispatchAssignments`
- * already filled every slot it could (see the module doc: batch claims never
- * go through `computeAssignments`/`runnableUnits` at all). Loads and saves
- * state itself via `deps.store.withLock` — the caller holds no lock across
- * this call. `deps.exec` and `deps.runSuite` are mandatory; `deps.
- * runCapability` is independently optional (AC2's incremental gate is itself
- * a "when available" fast path).
+ * the issue-level pass — this pass never claims a slot the issue pass already
+ * gave to an issue (see the module doc: a batch's OWN claim never goes
+ * through `computeAssignments`/`runnableUnits`). It is not, however, run on
+ * leftovers: `dispatchAssignments` (#565) reserves capacity ahead of time for
+ * any ready batch that outranks a competing issue in `runnableUnits`'
+ * priority order, so a higher-priority batch is not starved by same-tick
+ * issue dispatch — see that function's doc for the reservation mechanics.
+ * Loads and saves state itself via `deps.store.withLock` — the caller holds
+ * no lock across this call. `deps.exec` and `deps.runSuite` are mandatory;
+ * `deps.runCapability` is independently optional (AC2's incremental gate is
+ * itself a "when available" fast path).
  */
 export function runBatchTick(
   deps: BatchDispatchDeps,
@@ -1788,9 +1797,34 @@ export function runBatchTick(
   const result = emptyResult();
   const now = deps.now();
 
-  for (const batch of deps.store.load().batches) {
-    if (batch.status === 'ready' && slotFor(deps.store.load(), batch.id) === undefined) {
-      claimAndSetup(deps, config, dispatch, batch.id, now, result);
+  // #565: when more ready batches exist than free capacity, claim them in
+  // the same priority order `runnableUnits` would (desc priority → asc
+  // readiness age → anchor) — this loop never goes through
+  // `computeAssignments`/`runnableUnits` itself (see the module doc), so it
+  // applies the comparator directly to a snapshot taken once up front; each
+  // iteration still re-checks `slotFor` against fresh state in case an
+  // earlier claim in this same pass changed things.
+  const readyOrder = [...deps.store.load().batches]
+    .filter((b) => b.status === 'ready')
+    .sort((a, b) =>
+      compareByPriority(
+        {
+          priority: a.priority,
+          updated_at: a.updated_at,
+          tiebreak: a.anchor ?? Number.POSITIVE_INFINITY,
+        },
+        {
+          priority: b.priority,
+          updated_at: b.updated_at,
+          tiebreak: b.anchor ?? Number.POSITIVE_INFINITY,
+        }
+      )
+    )
+    .map((b) => b.id);
+  for (const batchId of readyOrder) {
+    const batch = findBatch(deps.store.load(), batchId);
+    if (batch && batch.status === 'ready' && slotFor(deps.store.load(), batchId) === undefined) {
+      claimAndSetup(deps, config, dispatch, batchId, now, result);
     }
   }
 

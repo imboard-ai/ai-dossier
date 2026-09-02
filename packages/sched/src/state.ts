@@ -14,6 +14,7 @@ import {
   type BatchEntry,
   type BatchStatus,
   type CycleMode,
+  DEFAULT_BATCH_PRIORITY,
   EngineTooOldError,
   type FailureEvidence,
   IllegalTransitionError,
@@ -210,7 +211,9 @@ export function createBatch(
   id: string,
   members: readonly number[],
   now: Date,
-  opts: Partial<Pick<BatchEntry, 'base_branch' | 'anchor' | 'run_id' | 'eviction_groups'>> = {}
+  opts: Partial<
+    Pick<BatchEntry, 'base_branch' | 'anchor' | 'run_id' | 'eviction_groups' | 'priority'>
+  > = {}
 ): BatchEntry {
   const timestamp = now.toISOString();
   return {
@@ -218,6 +221,7 @@ export function createBatch(
     status: 'forming',
     members: [...members],
     base_branch: opts.base_branch ?? 'main',
+    priority: opts.priority ?? DEFAULT_BATCH_PRIORITY,
     executing_member: 0,
     anchor: opts.anchor ?? null,
     branch: null,
@@ -268,6 +272,10 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   }
   if (!MODEL_TIERS.has(String(entry.tier))) {
     throw new Error(`${label}: tier must be mechanical | mid | strong`);
+  }
+  // Absent on a pre-#565 (1.9.0) entry — backfilled to 0 by the migration below.
+  if (entry.priority !== undefined && !Number.isInteger(entry.priority)) {
+    throw new Error(`${label}: priority must be an integer`);
   }
   if (!ISSUE_STATUSES.has(String(entry.status))) {
     throw new Error(`${label}: unknown issue status ${String(entry.status)}`);
@@ -421,7 +429,10 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * execution, so those are exact too; 1.8.0 (pre-#544) states backfill
  * `last_label_poll_at` (null) — no hard-block label re-check ever ran under
  * them, so the first tick after the upgrade polls immediately instead of
- * waiting out a throttle window it has no evidence for. The
+ * waiting out a throttle window it has no evidence for. 1.9.0 (pre-#565)
+ * entries backfill `priority` (0) and batches backfill `priority`
+ * (`DEFAULT_BATCH_PRIORITY`) — both are the current defaults, so exact, not a
+ * guess. The
  * inference is entry-status-first, not phase-first: `phase === 'report'` is
  * exactly the signal #500 proved unreliable for a LIVE report agent (it
  * drifts to the issue's pre-report milestone under `phase-updated` well
@@ -492,6 +503,10 @@ export function validateState(data: unknown): SchedState {
     }
     if (!Number.isInteger(batch.executing_member) || batch.executing_member < 0) {
       throw new Error(`Batch ${batch.id}: executing_member must be a non-negative integer`);
+    }
+    // Absent on a pre-#565 (1.9.0) batch — backfilled to DEFAULT_BATCH_PRIORITY below.
+    if (batch.priority !== undefined && !Number.isInteger(batch.priority)) {
+      throw new Error(`Batch ${batch.id}: priority must be an integer`);
     }
     validateBatchRecovery(batch as unknown as Record<string, unknown>, batch.id);
     if (!isIsoDateString(batch.created_at) || !isIsoDateString(batch.updated_at)) {
@@ -685,11 +700,19 @@ export function validateState(data: unknown): SchedState {
     pr: entry.pr ?? null,
     cleanup: entry.cleanup ?? null,
     failure_evidence: entry.failure_evidence ?? null,
+    // Pre-#565 (1.9.0) entries carry no priority — 0 is the current default
+    // for a fresh entry, so it is exact, not a guess: nothing before this
+    // field existed was ever weighted differently.
+    priority: entry.priority ?? 0,
   }));
   const batches = (obj.batches as BatchEntry[]).map((batch) => ({
     ...batch,
     anchor: batch.anchor ?? null,
     branch: batch.branch ?? null,
+    // Pre-#565 (1.9.0) batches carry no priority — DEFAULT_BATCH_PRIORITY is
+    // the value a batch created under this feature with no explicit
+    // `batch_priority` gets, so backfilling to it is exact, not a guess.
+    priority: batch.priority ?? DEFAULT_BATCH_PRIORITY,
     // Pre-#523 (1.6.0) batches carry neither field — no batch has ever been
     // dispatched under them, so null/[] is exact, not a guess.
     worktree: batch.worktree ?? null,

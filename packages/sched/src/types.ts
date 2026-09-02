@@ -250,6 +250,12 @@ export interface QueueEntry {
   batch: string | null;
   /** Issue numbers this entry depends on (edges gate readiness). */
   deps: number[];
+  /**
+   * Assignment weight (#565): higher dispatches first. Default 0 for a
+   * full-cycle entry; unused for a slot-mode member (the BATCH's own
+   * `BatchEntry.priority` governs assignment — see `runnableUnits`).
+   */
+  priority: number;
   /** Model tier the entry is dispatched at. */
   tier: ModelTier;
   /** Current D.1 state. */
@@ -284,6 +290,16 @@ export interface BatchEntry {
   /** Member issue numbers, in dispatch order. */
   members: number[];
   base_branch: string;
+  /**
+   * Assignment weight (#565): higher dispatches first, same scale as
+   * `QueueEntry.priority`. Set once at creation (`DEFAULT_BATCH_PRIORITY`,
+   * or `SchedConfig.default_batch_priority` when the operator configured
+   * one) — a batch above the default full-cycle entry's priority (0) is
+   * what lets a ready batch claim a free slot ahead of a same-readiness
+   * issue, closing the gap `docs/reports/batch-pilot-2-execution.md` §13.4
+   * found (an operator manually deferring full-cycle entries by hand).
+   */
+  priority: number;
   /** Index of the member currently in work, when status is `executing` (1-based member pointer). */
   executing_member: number;
   /**
@@ -527,6 +543,14 @@ export interface SchedConfig {
    * at the point of use, never eagerly merged into config at load time.
    */
   dissolve_policy?: DissolvePolicy;
+  /**
+   * Default `BatchEntry.priority` for a batch created with no explicit
+   * `batch_priority` (#565, e.g. `sched enqueue --mode slot --batch <id>`
+   * with no `--priority`). Default `DEFAULT_BATCH_PRIORITY` (10) — above the
+   * default full-cycle entry priority (0), so a ready batch is assigned
+   * ahead of same-readiness issue units unless the operator says otherwise.
+   */
+  default_batch_priority?: number;
 }
 
 /**
@@ -790,7 +814,7 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.9.0' as const;
+export const SCHEMA_VERSION = '1.10.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -803,9 +827,10 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.6.0',
   '1.7.0',
   '1.8.0',
+  '1.9.0',
 ];
 
-export const CONFIG_SCHEMA_VERSION = '1.7.0' as const;
+export const CONFIG_SCHEMA_VERSION = '1.8.0' as const;
 
 /** Config schema versions `loadConfig` accepts and migrates transparently on load (fields absent in an older version simply resolve to their defaults). */
 export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
@@ -816,6 +841,7 @@ export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
   '1.4.0',
   '1.5.0',
   '1.6.0',
+  '1.7.0',
 ];
 
 /** Config file shape (schema_version + the config itself). */
@@ -829,9 +855,13 @@ export interface SchedConfigFile {
   dispatch?: DispatchConfig;
   auto_upgrade?: boolean;
   dissolve_policy?: DissolvePolicy;
+  default_batch_priority?: number;
 }
 
 export const DEFAULT_MAX_SLOTS = 3;
+
+/** Default `BatchEntry.priority` (#565) — see `SchedConfig.default_batch_priority`. */
+export const DEFAULT_BATCH_PRIORITY = 10;
 
 /** Bounds for `max_slots` when reading `config.json` (named — not magic numbers in persist.ts). */
 export const MIN_MAX_SLOTS = 1;
@@ -1077,4 +1107,6 @@ export interface JournalEvent {
   installed_version?: string;
   /** `engine-stale` (#537): npm registry latest at check time. */
   latest_version?: string;
+  /** The unit's `priority` at assignment time (#565 AC2 — "journaled on each assignment"). */
+  priority?: number;
 }

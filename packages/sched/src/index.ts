@@ -125,7 +125,11 @@ export {
   sanitizeSlug,
   schedStateDir,
 } from './project';
-export { DISPATCHABLE_ISSUE_STATUSES } from './readiness';
+export {
+  compareByPriority,
+  DISPATCHABLE_ISSUE_STATUSES,
+  type PriorityRank,
+} from './readiness';
 export {
   type AttributionInput,
   type AttributionOutcome,
@@ -175,6 +179,8 @@ export {
   dependencyBlockers,
   freeCapacity,
   type RunnableUnit,
+  reprioritizeBatch,
+  reprioritizeIssue,
   runnableUnits,
   setPaused,
 } from './scheduler';
@@ -203,6 +209,7 @@ export {
   type CleanupStatus,
   CONFIG_SCHEMA_VERSION,
   type CycleMode,
+  DEFAULT_BATCH_PRIORITY,
   DEFAULT_DISSOLVE_POLICY,
   DEFAULT_LABEL_POLL_INTERVAL_MS,
   DEFAULT_MAX_SLOTS,
