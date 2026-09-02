@@ -226,9 +226,10 @@ export function parseIssueLabelsJson(stdout: string | null): string[] | undefine
   } catch {
     return undefined;
   }
-  if (parsed === null || typeof parsed !== 'object') return undefined;
-  const labels = (parsed as { labels?: unknown }).labels;
-  if (!Array.isArray(labels)) return undefined;
+  // Same `{ "<key>": [...] }` unwrap `parseSetupInfo` uses for `--json comments`
+  // — one helper for one gh output shape, defensively accepting a bare array too.
+  const labels = unwrapList(parsed, 'labels');
+  if (labels === null) return undefined;
   return labelNames(labels);
 }
 

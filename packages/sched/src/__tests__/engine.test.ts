@@ -19,6 +19,7 @@ import {
   type SlotReleaseReason,
   type SpawnDeps,
   schedRunsLogPath,
+  setPaused,
   tick,
   transitionIssue,
 } from '../index';
@@ -36,6 +37,7 @@ function harness(
     stallTimeoutMs?: number;
     phaseStallTimeoutMs?: Record<string, number>;
     prPollIntervalMs?: number;
+    labelPollIntervalMs?: number;
     fenceTakeoverTimeoutMs?: number;
   },
   existingDir?: string
@@ -81,6 +83,7 @@ function harness(
   const labelsByIssue = new Map<number, string[]>();
   const labelUnreachable = new Set<number>();
   const labelReads: number[] = [];
+  let onLabelRead: ((issue: number) => void) | undefined;
   const teardownCalls: Array<{ file: string; args: string[]; cwd?: string }> = [];
   /** Scriptable teardown subprocess behavior (default: every call fails). */
   let teardownScript: (file: string, args: string[]) => string | null = () => null;
@@ -94,6 +97,9 @@ function harness(
       setupUnreachable.has(issue) ? undefined : (setupInfos.get(issue) ?? null),
     issueLabels: (issue) => {
       labelReads.push(issue);
+      // #544: `pollLabels` runs OUTSIDE the lock, so a test needs a way to
+      // mutate state between the read and the lock pass that consumes it.
+      onLabelRead?.(issue);
       return labelUnreachable.has(issue) ? undefined : (labelsByIssue.get(issue) ?? []);
     },
   };
@@ -142,6 +148,9 @@ function harness(
     max_slots: opts?.maxSlots ?? 3,
     ...(opts?.stallTimeoutMs !== undefined ? { stall_timeout_ms: opts.stallTimeoutMs } : {}),
     ...(opts?.prPollIntervalMs !== undefined ? { pr_poll_interval_ms: opts.prPollIntervalMs } : {}),
+    ...(opts?.labelPollIntervalMs !== undefined
+      ? { label_poll_interval_ms: opts.labelPollIntervalMs }
+      : {}),
     ...(opts?.phaseStallTimeoutMs !== undefined || opts?.fenceTakeoverTimeoutMs !== undefined
       ? {
           dispatch: {
@@ -175,6 +184,9 @@ function harness(
     labelsByIssue,
     labelUnreachable,
     labelReads,
+    setOnLabelRead: (hook: (issue: number) => void) => {
+      onLabelRead = hook;
+    },
     teardownCalls,
     fenceCalls,
     setFenceFails: (fails: boolean) => {
@@ -2396,17 +2408,52 @@ describe('#544: hard-block labels are re-evaluated each tick', () => {
     expect(h.events().some((e) => e.event === 'label-blocked' && e.issue === 101)).toBe(true);
   });
 
-  it('AC2: a unit already dispatched is left alone — a late label never abandons a live agent', () => {
+  it('AC2: a dispatched unit is not even watched — a late label costs no read', () => {
     const h = harness();
     h.enqueue([{ issue: 101, mode: 'full' }]);
     h.tick();
     expect(h.state().entries[0].status).toBe('dispatched');
+    const readsBefore = h.labelReads.length;
 
     h.labelsByIssue.set(101, ['decision-pending']);
     const result = h.tick();
 
+    expect(h.labelReads).toHaveLength(readsBefore);
     expect(result.labelBlocked).toEqual([]);
     expect(h.state().entries[0].status).toBe('dispatched');
+  });
+
+  it('AC2: a unit requeued mid-tick is screened before it can be re-dispatched', () => {
+    // The poll runs OUTSIDE the lock, so state can move under it. Here the
+    // entry is dispatched-with-no-slot at read time (the crash window
+    // `requeueOrphanedDispatches` recovers), so it lands back in `queued`
+    // INSIDE the lock — and the label screen, which runs after that pass and
+    // before dispatch, still catches it rather than letting the recovery path
+    // walk it straight past the hand-off.
+    const h = harness();
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    h.labelsByIssue.set(101, ['decision-pending']);
+    h.setOnLabelRead(() => {
+      h.store.withLock((state) => ({
+        state: transitionIssue(
+          transitionIssue(state, 101, 'classified', {}, h.clock()),
+          101,
+          'dispatched',
+          {},
+          h.clock()
+        ),
+        result: null,
+      }));
+    });
+
+    const result = h.tick();
+
+    expect(result.labelBlocked).toEqual(['issue:101']);
+    expect(result.spawned).toEqual([]);
+    expect(h.state().entries[0]).toMatchObject({
+      status: 'blocked',
+      reason: 'label:decision-pending',
+    });
   });
 
   it('AC3: an idle tick re-reads at most every 10 minutes, and the timestamp is persisted', () => {
@@ -2484,5 +2531,156 @@ describe('#544: hard-block labels are re-evaluated each tick', () => {
 
     expect(h.labelReads).toEqual([]);
     expect(h.state().last_label_poll_at).toBeNull();
+  });
+});
+
+describe('#544 review hardening: paused fleets, evidence, and read cost', () => {
+  it('a paused fleet does not re-read its backlog every tick', () => {
+    // `runnableUnits` does not consider `paused`, so without the guard a paused
+    // fleet with a backlog would burn one `gh issue view` per runnable unit per
+    // tick forever while dispatching nothing — and the dispatch-health auto-pause
+    // fires exactly when gh is already walled.
+    const h = harness();
+    h.enqueue([
+      { issue: 101, mode: 'full' },
+      { issue: 102, mode: 'full' },
+    ]);
+    h.store.withLock((state) => ({ state: setPaused(state, true, h.clock()), result: null }));
+
+    h.tick();
+    expect(h.labelReads).toEqual([]);
+
+    // Still throttled a minute later; nothing is dispatchable, so the tick is idle.
+    h.advance(60_000);
+    h.tick();
+    expect(h.labelReads).toEqual([]);
+  });
+
+  it('the runnable half of the watch set is capped at max_slots, not the backlog', () => {
+    const h = harness({ maxSlots: 2 });
+    h.enqueue([
+      { issue: 101, mode: 'full' },
+      { issue: 102, mode: 'full' },
+      { issue: 103, mode: 'full' },
+      { issue: 104, mode: 'full' },
+    ]);
+
+    h.tick();
+
+    // Two slots ⇒ at most two units can be placed ⇒ at most two label reads.
+    expect(h.labelReads).toEqual([101, 102]);
+    expect(h.spawnCalls).toHaveLength(2);
+  });
+
+  it('a unit outside the read window is deferred one tick when this tick blocked something', () => {
+    // The cap is exact only while nothing is blocked. Blocking #101 slides #103
+    // into range unread, so it waits for the next tick's read rather than being
+    // dispatched on information nobody gathered.
+    const h = harness({ maxSlots: 2 });
+    h.enqueue([
+      { issue: 101, mode: 'full' },
+      { issue: 102, mode: 'full' },
+      { issue: 103, mode: 'full' },
+    ]);
+    h.labelsByIssue.set(101, ['decision-pending']);
+
+    const first = h.tick();
+
+    expect(first.labelBlocked).toEqual(['issue:101']);
+    expect(first.spawned).toEqual(['issue:102']);
+
+    // Next tick #103 is inside the window, read, and dispatched.
+    h.advance(60_000);
+    const second = h.tick();
+    expect(second.spawned).toEqual(['issue:103']);
+  });
+
+  it('a block reason outside HARD_BLOCK_LABELS is only cleared when that label is really gone', () => {
+    // `enqueue` accepts any GitHub label name as `blocked_label`, so a
+    // policy-list test would report "cleared" for a label still on the issue.
+    const h = harness();
+    h.enqueue([{ issue: 101, mode: 'full', blocked_label: 'needs-security-signoff' }]);
+    h.labelsByIssue.set(101, ['needs-security-signoff']);
+
+    const first = h.tick();
+
+    expect(first.labelCleared).toEqual([]);
+    expect(h.state().entries[0]).toMatchObject({
+      status: 'blocked',
+      reason: 'label:needs-security-signoff',
+    });
+
+    // Removed for real → cleared.
+    h.labelsByIssue.set(101, []);
+    h.advance(11 * 60_000);
+    expect(h.tick().labelCleared).toEqual(['issue:101']);
+  });
+
+  it('a second hard-block label keeps the unit blocked when the first is removed', () => {
+    const h = harness();
+    h.enqueue([{ issue: 101, mode: 'full', blocked_label: 'decision-pending' }]);
+    h.labelsByIssue.set(101, ['epic']); // decision-pending resolved, epic remains
+
+    const result = h.tick();
+
+    expect(result.labelCleared).toEqual([]);
+    expect(result.labelBlocked).toEqual(['issue:101']);
+    expect(h.state().entries[0]).toMatchObject({ status: 'blocked', reason: 'label:epic' });
+    expect(
+      h
+        .events()
+        .some(
+          (e) =>
+            e.event === 'label-blocked' &&
+            e.issue === 101 &&
+            e.previous_reason === 'label:decision-pending'
+        )
+    ).toBe(true);
+  });
+
+  it('an unreachable read is surfaced in the tick result, not only the journal', () => {
+    const h = harness();
+    h.enqueue([{ issue: 101, mode: 'full', blocked_label: 'decision-pending' }]);
+    h.labelUnreachable.add(101);
+
+    const result = h.tick();
+
+    expect(result.labelCheckFailed).toEqual(['issue:101']);
+  });
+
+  it('a tick where every read failed does not stamp last_label_poll_at', () => {
+    // Otherwise `sched status` reports "labels last checked 30s ago" through a
+    // gh outage — asserting exactly what the timestamp exists to deny — and an
+    // idle fleet burns a full throttle window on a poll that learned nothing.
+    const h = harness();
+    h.enqueue([{ issue: 101, mode: 'full', blocked_label: 'decision-pending' }]);
+    h.labelUnreachable.add(101);
+
+    h.tick();
+
+    expect(h.state().last_label_poll_at).toBeNull();
+
+    // gh recovers: the next attempt is not throttled out, and now it stamps.
+    h.labelUnreachable.delete(101);
+    h.advance(60_000);
+    h.tick();
+    expect(h.state().last_label_poll_at).toBe(h.clock().toISOString());
+  });
+
+  it('label_poll_interval_ms overrides the 10-minute idle default', () => {
+    const h = harness({ labelPollIntervalMs: 60_000 });
+    h.enqueue([{ issue: 101, mode: 'full', blocked_label: 'decision-pending' }]);
+    h.labelsByIssue.set(101, ['decision-pending']);
+
+    h.tick();
+    expect(h.labelReads).toHaveLength(1);
+
+    h.advance(30_000);
+    h.tick();
+    expect(h.labelReads).toHaveLength(1); // still inside the configured window
+
+    h.advance(31_000);
+    h.tick();
+    expect(h.labelReads).toHaveLength(2);
   });
 });

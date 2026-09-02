@@ -935,7 +935,7 @@ Coverage is deliberately partial — it catches the OBVIOUS floor hits, not all 
 
 | Check | What it catches | Source |
 |---|---|---|
-| `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` | same policy as the `sched enqueue` pre-screen (#507), shared via `hard-block-labels.ts` |
+| `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` | same policy as the `sched enqueue` pre-screen (#507) and the engine's per-tick re-check (#544), shared via `@ai-dossier/sched`'s `labels.ts` (re-exported by `cli/src/hard-block-labels.ts`) |
 | `text-floor` | A text-keyword approximation of RFC-0001 E.2 rules 1/3/4 (risk-floor area, new package/workspace, deploy pipeline) scanned over title + body + labels | `prescreen.ts`'s `TEXT_FLOOR_PATTERNS`; the matched keyword is named in the reason message |
 | `path-floor` | Rule 1's path-based risk floor, reusing `plan validate`'s `scanRiskFloor` (capped at 8 reasons — a plan:v1 artifact is comment-sourced, untrusted input) | requires a `plan:v1` artifact already on the issue |
 | `file-count` | Rule 5, "Predicted files > 8" | requires a `plan:v1` artifact already on the issue |
@@ -1034,7 +1034,9 @@ against ground truth.
   warning and a `label-check-failed` journal event. `--json` gains `queued`,
   `blocked_by_label: [{issue, label}]`, and `label_check_failed: [issue, ...]`; the human
   line reads `N queued, M blocked-by-label`. The pre-screen is capped at
-  `MAX_ISSUE_SELECTION` (200) total issues per call.
+  `MAX_ISSUE_SELECTION` (200) total issues per call. Since #544 this screen is no longer
+  the last word — the engine re-reads the same labels every tick, so a label removed
+  after enqueue unblocks the entry without a re-enqueue (see `start` below).
 - **`enqueue`'s batch sealing (#535)**: a batch's status seals `forming → ready` at the end
   of the call that completes its composition — the common case, since a single manifest (or
   `--issues --batch <id>` call) normally declares a batch's full membership at once. Once
@@ -1089,7 +1091,18 @@ against ground truth.
   `/proc` start-times (a reused pid is never signalled; best-effort on macOS/Windows),
   and a FAILED ground-truth poll (gh outage) pauses that unit's stall/verify decisions
   instead of guessing — an outage never kills a healthy agent. All events are journaled
-  to `events.jsonl`, and `status` shows the live phase per unit. Since #537, every tick
+  to `events.jsonl`, and `status` shows the live phase per unit. Since #544 every tick
+  also re-reads hard-block labels — for each label-blocked entry and for the runnable
+  issues a dispatch could place this tick (`gh issue view --json labels`, outside the
+  state lock): a label the operator removed returns the unit to `queued`
+  (`label-cleared`) and a free slot can take it in the same tick, a hard-block label
+  that appeared on a still-dispatchable unit blocks it before the dispatch pass
+  (`label-blocked`), a changed label refreshes the stale reason in place, and an
+  unreachable read journals `label-check-failed` and decides nothing. A tick with
+  nothing else to do (no live slot, nothing runnable) throttles the re-read to
+  `config.json`'s `label_poll_interval_ms` (default 10 min), persisted as
+  `last_label_poll_at`. The tick summary line gains `label cleared <units>` /
+  `label blocked <units>` / `label check unreachable <units>`. Since #537, every tick
   also checks the installed `@ai-dossier/sched` against npm registry latest (best-effort,
   cached — `cache.engineVersionTtlSeconds`, default 300s — and non-blocking, never stalls
   a tick): when behind, it journals `engine-stale` once per distinct (installed, latest)
@@ -1104,9 +1117,14 @@ against ground truth.
   (watched, zero slots, with the last poll's age), slots (with pid, live phase,
   last-progress, recoveries), batches, runnable units, and the blocked/failed sets. A blocked entry names every
   unsatisfied dependency ("dependency #104 not merged (status: dispatched)") — or, for an
-  entry pre-screened at enqueue time, the hard-block label that stopped it
-  ("label:decision-pending", #507) — so "why isn't #42 running?" is a read, not an
-  investigation. When suspect-dispatch exits have
+  entry stopped by a hard-block label, the label itself ("label:decision-pending"),
+  applied either by the enqueue pre-screen (#507) or by the engine's per-tick re-check
+  (#544) — so "why isn't #42 running?" is a read, not an investigation. When a label
+  block is present, the `== Blocked ==` section also reports when the engine last
+  re-read labels ("(labels last checked 4 minutes ago)", or "(labels never checked)"),
+  so a `decision-pending` you removed but the engine has not looked at yet is
+  distinguishable from one that is still there; `--json` carries the same timestamp as
+  `last_label_poll_at`. When suspect-dispatch exits have
   been recorded (#505 below), a `⚠ Dispatch health: N consecutive suspect-dispatch
   exit(s) (last: <unit>)` warning line prints too, saying whether it's just informational
   or likely why the scheduler is paused; the same counters ride along in `--json` as

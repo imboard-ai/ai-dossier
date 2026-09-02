@@ -326,6 +326,13 @@ double-counting (opencode) a prior one. 1.6.0 states migrate on load, backfillin
 to `null` — an in-flight dispatch's start time and log position are unknown, not zero —
 as do 1.7.0 states (#523 took 1.7.0 for the batch fields; these two landed after it).
 Both reset with the slot on release (`CLEARED_SLOT_FIELDS`).
+
+Schema 1.9.0: `SchedState` gains `last_label_poll_at` (ISO string or null — when the
+engine last re-read hard-block labels, #544 below). 1.8.0 and earlier states migrate on
+load, backfilling `null`: no label re-check ever ran under them, so the first tick after
+the upgrade polls immediately rather than waiting out a throttle window it has no
+evidence for — the exact backfill, not a guess.
+
 ## Batch dispatch (#523)
 
 `batch-dispatch.ts`'s `runBatchTick` — called from `tick()` after the issue-level pass,
@@ -398,7 +405,9 @@ import {
   runLoop,               // the sched start loop (tick, sleep, repeat)
   type TickResult,       // what one tick did (spawned/parked/merge-accepted/stale-reconciled/
                          //   dependents-unblocked/report-dispatched/teardown/completed/
-                         //   redispatched/failed/blocked) — since #523 also carries
+                         //   redispatched/failed/blocked, and since #544
+                         //   label-cleared/label-blocked/label-check-failed)
+                         //   — since #523 also carries
                          //   `batch:<id>` unit ids (issue numbers for `blocked`)
   type EngineDeps,       // inject everything the engine touches (store/journal/spawn/ground
                          //   truth/clock/repoDir/teardownExec/fencer/batchExec/runBatchSuite/
@@ -461,7 +470,7 @@ import {
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
-  validateState,         // strict persisted-state validation (1.0.0-1.6.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.8.0 files migrate)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
   EngineTooOldError,     // state schema newer than installed engine — not corruption (#537)
@@ -581,8 +590,8 @@ slot without recording, so they are not costed.
   `EngineTooOldError` (#537), pointing at an engine upgrade rather than at deleting real
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
-  #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0) and #524/#523 (1.8.0) load and
-  migrate to 1.9.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
+  #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
+  load and migrate to 1.9.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
   `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
   `evictions`/`fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to
@@ -620,12 +629,34 @@ the labels itself, on both sides of the same check:
   unlabelled issue — flattening the two would dispatch over a live hand-off whenever
   GitHub is flaky.
 
-The watch set is every label-blocked entry plus every runnable issue unit. A tick with
-work re-reads every tick; a tick with nothing else to do (no live slot, nothing runnable)
-re-reads at most every 10 minutes, from the persisted `last_label_poll_at` — so an idle
-fleet parked on human decisions stays cheap. `HARD_BLOCK_LABELS` lives in `labels.ts`
-and is re-exported by `cli/src/hard-block-labels.ts`, so the enqueue screen (#507), the
-classify screen (#538) and this one cannot drift apart.
+The watch set is every label-blocked entry plus the runnable issue units a dispatch
+could actually place this tick — the latter capped at `max_slots`, so the per-tick `gh`
+cost tracks the SLOT count rather than the backlog, and skipped entirely while the
+scheduler is paused. A tick with work re-reads every tick; a tick with nothing else to
+do (no live slot, nothing runnable) re-reads at most every `label_poll_interval_ms`
+(default 10 min), from the persisted `last_label_poll_at` — so an idle fleet parked on
+human decisions stays cheap. The timestamp advances only when a read actually returned
+something, so `sched status` never claims a check that a `gh` outage prevented.
+`HARD_BLOCK_LABELS` lives in `labels.ts` and is re-exported by
+`cli/src/hard-block-labels.ts`, so the enqueue screen (#507), the classify screen (#538)
+and this one cannot drift apart.
+
+The `max_slots` cap is exact while nothing is blocked (`freeCapacity <= max_slots`, and
+blocking nothing preserves candidate order, so every unit dispatched below was read). On
+a tick that DID block something, units outside the read window are deferred for one tick
+rather than dispatched on information nobody gathered — which costs nothing in the common
+case, so #525 AC5's same-tick refill is untouched whenever no label moved.
+
+**Scope note.** Per-issue dispatch only. Batch members (`mode: 'slot'`) and batch anchors
+are not re-screened — `runnableUnits` filters to `mode: 'full'`, and `runBatchTick` has
+its own claim path — so a hard-block label landing on a batch member mid-wave is not
+caught here; `enqueue` still refuses to enqueue an already-labelled issue as a batch
+member. Nor does the screen cover a unit that becomes dispatchable INSIDE the tick's lock
+(its dependency shipped this very tick, or `requeueOrphanedDispatches` returned it to the
+queue) and is dispatched before the next snapshot reads it: closing that would mean
+deferring every in-lock arrival by a tick, which is exactly the guarantee #525 exists to
+provide. Both are narrower than the gap this section closes — before #544 nothing was
+re-screened at all — but neither is closed by it.
 
 ## The PR watcher + tail work (#468)
 

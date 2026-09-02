@@ -149,3 +149,16 @@ describe('#468: parked units in the status report', () => {
     expect(report.blocked.some((b) => b.issue === 102)).toBe(false);
   });
 });
+
+describe('#544: the label-poll timestamp is reported', () => {
+  it('carries last_label_poll_at through to the report', () => {
+    const state: SchedState = { ...seeded(), last_label_poll_at: NOW.toISOString() };
+    expect(buildStatusReport(state, { max_slots: 3 }, 'proj').last_label_poll_at).toBe(
+      NOW.toISOString()
+    );
+  });
+
+  it('reports null before the engine has ever re-read labels', () => {
+    expect(buildStatusReport(seeded(), { max_slots: 3 }, 'proj').last_label_poll_at).toBeNull();
+  });
+});
