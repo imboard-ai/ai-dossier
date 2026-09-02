@@ -102,10 +102,15 @@ reasoning"; `capability-unavailable` means "no fast path here — reason from sc
 the last `--tail-bytes` (default 8192) bytes of the command's combined stdout+stderr,
 UTF-8-safe (never splits a multi-byte character). Omitted entirely on `ok`, so a
 passing run's envelope stays small. The batch engine's incremental gate uses this for
-attribution — a per-gate log file under the project's `runs/` directory and the first
-~500 chars in the journal `unit-failed`/`gate-inconclusive` event detail — rather than
+attribution — a per-gate log file under the project's `runs/` directory and the last
+~500 bytes in the journal `unit-failed`/`gate-inconclusive` event detail — rather than
 requiring a human to grep the raw agent transcript to find out why a gate blocked or
 evicted a member.
+
+Capturing this output changes how `cap run` behaves for a human running it directly:
+output is now buffered and re-emitted after the command finishes, rather than streamed
+live via `stdio: 'inherit'` as before #583 — a long-running command shows nothing until
+it completes, instead of showing progress incrementally.
 
 Envelope example:
 

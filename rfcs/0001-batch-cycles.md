@@ -224,9 +224,14 @@ failure edges:
              → evicting(revert range) → validating
   evictions > ⅓ OR revert-conflict → dissolving → members requeued (smaller batches / full)
   validating → blocked(suite-unreadable, after the fallback-runner retry when
-             one applied) → validating (nothing requeued or reverted; the
-             `validating` edge is where a future resume verb would land —
-             today's only real exit is dissolving via `sched abandon --batch`; #562)
+             one applied) → validating (nothing requeued or reverted; today's
+             only real exit for THIS blocked case is still dissolving via
+             `sched abandon --batch` — a resume verb exists for the
+             executing→blocked case below (#583, F.11), not yet for this
+             validating→blocked one; #562)
+  executing → blocked(gate-inconclusive:<cap>, #583 F.11) → executing
+             (nothing requeued or reverted; `sched resume --batch <id>`
+             re-runs the gate and resolves the block)
   awaiting-merge: CONFLICTING | auto-merge-blocked → rebasing → re-validating → shipping
                   (2nd failure → dissolved)
 ```

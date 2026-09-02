@@ -455,6 +455,8 @@ ready → executing(member i/N) ⟲ → validating → reviewing → shipping
 failure rails: executing → dissolving (a member self-reports blocked)
                validating → attributing → (fixing | evicting) → validating → dissolving
                validating → blocked (suite report unreadable, #562) → validating
+               executing → blocked (gate-inconclusive:<cap>, #583) → executing
+                 (`sched resume --batch <id>` re-runs the gate; nothing requeued/reverted)
 ```
 
 - **One shared worktree/branch per batch**, claimed once by a deterministic (no LLM)
@@ -473,7 +475,12 @@ failure rails: executing → dissolving (a member self-reports blocked)
   kept on `BatchEntry.ranges` for eviction. An incremental gate (`ai-dossier cap run
   typecheck.run` / `test.focused`, when the repo has a manifest) runs after each member
   before advancing — a second, independent check that the member's self-reported "done"
-  is real.
+  is real. Three-way outcome policy (#583): `task-failed` evicts the member (same rail
+  as a self-reported block); `automation-broken`/`capability-unavailable` — the gate
+  itself couldn't reach a verdict — block the batch instead of silently proceeding
+  (`gate-inconclusive:<cap>`, `member_gates`/`blocked_reason` on `BatchEntry`, surfaced
+  in `sched status`); `sched resume --batch <id>` re-runs the gate later to resolve the
+  block once the capability is fixed.
 - **The batch's single slot is claimed FRESH for each live step** (a member, the tail
   agent, the report agent, a bounded fix agent) — never held across a wait. The aggregate
   suite itself runs with NO slot claimed at all (deterministic engine work, not an LLM
@@ -504,10 +511,21 @@ batch-setup had pool integration). Config schema moves to 1.3.0: `dispatch` gain
 `member_prompt`, `batch_tail_prompt` and `batch_report_prompt` (the three new agent
 prompt templates).
 
+Schema 1.11.0 (#583): `BatchEntry` gains `member_gates` (most recent incremental-gate
+result per member, keyed by issue number as a string — `{capability, outcome,
+output_tail, at}`) and `blocked_reason` (why the batch is `blocked` — persisted so
+`sched status` can show it; previously `blockBatch` only journaled/posted the reason,
+never stored it on the entry, so this also retroactively covers the #562 case). 1.10.0
+states migrate on load: no gate has ever produced a non-`ok` verdict, and no batch has
+ever been blocked, under them, so `{}`/`null` is the exact backfill, not a guess.
+
 New journal events: `batch-setup-done`, `batch-setup-failed`, `member-advanced`,
 `batch-warmup-done`, `batch-warmup-failed` (#561 — the cold-path warm step only; a pool
-claim emits neither). Member/tail/report/fix-agent spawn, progress, completion and park
-events reuse the existing unit-generic names (`assigned`/`spawned`/`unit-failed`/
+claim emits neither). `gate-inconclusive` (#583 — the incremental gate came back
+`automation-broken`/`capability-unavailable` rather than a definite `ok`/`task-failed`;
+sits alongside `batch-blocked` as the per-member analogue of the aggregate suite's
+"block, don't dissolve" precedent). Member/tail/report/fix-agent spawn, progress,
+completion and park events reuse the existing unit-generic names (`assigned`/`spawned`/`unit-failed`/
 `external-advance`/`pr-parked`/`merge-accepted`/`report-dispatched`/`teardown-done`/
 `teardown-failed`) with `unit = batch:<id>`.
 
@@ -624,10 +642,12 @@ import {
                          //   the issue pass — loads/saves state itself, holds no lock
                          //   across the call
   type BatchDispatchDeps, // inject store/journal/groundTruth/spawnDeps/exec/runSuite/
-                         //   runCapability(optional)/fsExists(optional)
+                         //   runCapability(optional, returns CapabilityGateResult)/fsExists(optional)
   type BatchTickResult,  // spawned/completed/parked/mergeAccepted/failed (batch:<id> ids)
                          //   + blocked (issue numbers, dissolve-requeued)
   type CapOutcome,       // ok | task-failed | automation-broken | capability-unavailable
+  type CapabilityGateResult, // {outcome: CapOutcome, outputTail?, reason?} — runCapability's return shape (#583)
+  resumeBlockedGate,     // #583: sched resume --batch <id> — re-run the gate that blocked a batch
   buildMemberPrompt, buildBatchTailPrompt, buildBatchReportPrompt, // #523 prompt builders
   DEFAULT_MEMBER_PROMPT_TEMPLATE, DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE,
   DEFAULT_BATCH_REPORT_PROMPT_TEMPLATE,

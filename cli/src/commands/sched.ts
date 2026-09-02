@@ -108,16 +108,24 @@ function createBatchCapabilityRunner(): (
     if (result.error) return { outcome: 'automation-broken' };
     const lastLine = (result.stdout ?? '').trim().split('\n').pop() ?? '';
     try {
-      const envelope = JSON.parse(lastLine) as { outcome?: unknown; output_tail?: unknown };
+      const envelope = JSON.parse(lastLine) as {
+        outcome?: unknown;
+        output_tail?: unknown;
+        reason?: unknown;
+      };
       const outcome = envelope.outcome;
       const outputTail = typeof envelope.output_tail === 'string' ? envelope.output_tail : null;
+      // `reason` (#583 review) is the only explanation available when no
+      // subprocess ran at all — `capability-unavailable`, or `automation-broken`
+      // from a failed assumption probe — since `output_tail` is unset there.
+      const reason = typeof envelope.reason === 'string' ? envelope.reason : null;
       if (
         outcome === 'ok' ||
         outcome === 'task-failed' ||
         outcome === 'automation-broken' ||
         outcome === 'capability-unavailable'
       ) {
-        return { outcome, outputTail };
+        return { outcome, outputTail, reason };
       }
       return { outcome: 'automation-broken' };
     } catch {
@@ -338,7 +346,7 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
           ],
           report.batches.map((b) => [
             b.id,
-            b.status,
+            b.status === 'blocked' && b.blocked_reason ? `blocked (${b.blocked_reason})` : b.status,
             String(b.priority),
             b.members.length > 0 ? b.members.map((m) => `#${m}`).join(',') : '-',
             b.executing_member > 0 ? `${b.executing_member}/${b.members.length}` : '-',
@@ -732,7 +740,8 @@ function resumeBatchGate(opts: PauseResumeOptions): void {
     }
     if (result.outcome === 'still-blocked') {
       console.log(
-        `⏸ Batch ${opts.batch} still blocked — cap run ${result.capability} is still inconclusive.`
+        `⏸ Batch ${opts.batch} still blocked — cap run ${result.capability} is still inconclusive.` +
+          (result.detail ? `\n  ${result.detail}` : '')
       );
     } else if (result.outcome === 'evicted') {
       console.log(

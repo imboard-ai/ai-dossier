@@ -64,6 +64,9 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60_000;
  */
 export const DEFAULT_OUTPUT_TAIL_BYTES = 8192;
 
+/** `spawnSync`'s own default `maxBuffer` (1 MiB) is too small for a real test/build command's combined stdout+stderr — raised so output volume alone never causes a false `automation-broken` (#583 review). */
+const MAX_CAPABILITY_OUTPUT_BYTES = 64 * 1024 * 1024;
+
 /** Supported tool-version comparison operators (single source of truth). */
 const TOOL_VERSION_OPS = ['>=', '>', '<=', '<', '==', '='] as const;
 type ToolVersionOp = (typeof TOOL_VERSION_OPS)[number];
@@ -500,11 +503,18 @@ export function runCapability(
   // Captured (not `stdio: 'inherit'`) so a non-ok outcome can carry an
   // `output_tail` (issue #583 AC1) — re-emitted below so a human running
   // `cap run` directly still sees it (buffered, not streamed live).
+  // `maxBuffer` explicit: `spawnSync`'s default is 1 MiB, and a chatty test
+  // suite or verbose build legitimately exceeds that — without raising it,
+  // an otherwise-passing command hits `res.error` (ENOBUFS) and gets
+  // misclassified `automation-broken`, which the batch gate would then read
+  // as a genuine inconclusive result rather than "the command produced a lot
+  // of output" (review finding on #583).
   const res = spawnSync(commandLine, {
     shell: true,
     cwd,
     encoding: 'utf-8',
     timeout: timeoutMs,
+    maxBuffer: MAX_CAPABILITY_OUTPUT_BYTES,
   });
   if (res.stdout) process.stdout.write(res.stdout);
   if (res.stderr) process.stderr.write(res.stderr);

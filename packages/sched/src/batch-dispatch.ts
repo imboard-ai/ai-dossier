@@ -131,6 +131,7 @@ import type {
   AttributionMethod,
   BatchEntry,
   CapabilityGateResult,
+  CapOutcome,
   JournalEventName,
   ModelTier,
   SchedConfig,
@@ -247,10 +248,23 @@ function journalEvent(
   deps.journal.append(unitEvent(event, unitId, extra), deps.now());
 }
 
-/** First ~500 chars of a gate's output tail (#583 AC1) — journal details stay compact; the full tail lives in the per-gate log file. */
-function gateDetailExcerpt(outputTail: string | null | undefined): string | undefined {
-  if (!outputTail) return undefined;
-  return outputTail.length > 500 ? outputTail.slice(-500) : outputTail;
+/**
+ * Last ~500 bytes of a gate's output tail, falling back to the envelope's
+ * `reason` when no subprocess ran (#583 AC1/AC3 review: `capability-unavailable`
+ * and a failed assumption probe carry no output_tail — `reason` is the only
+ * explanation available for those) — journal details stay compact; the full
+ * tail lives in the per-gate log file. UTF-8-safe (never splits a multi-byte
+ * character) — chars would risk exactly that, hence `Buffer`, matching
+ * `cli/src/capability.ts`'s `truncateTailBytes`.
+ */
+function gateDetailExcerpt(
+  outputTail: string | null | undefined,
+  reason?: string | null
+): string | undefined {
+  const text = outputTail || reason;
+  if (!text) return undefined;
+  const buf = Buffer.from(text, 'utf-8');
+  return buf.length > 500 ? buf.subarray(buf.length - 500).toString('utf-8') : text;
 }
 
 /**
@@ -273,6 +287,44 @@ function writeGateLog(
   } catch {
     // diagnostic only — never fail the gate decision over a log write
   }
+}
+
+/**
+ * Persist the incremental gate's most recent verdict for a member on
+ * `BatchEntry.member_gates` (#583 AC4) — shared by the live gate
+ * (`reconcileMemberSlot`) and `sched resume --batch`'s recheck
+ * (`resumeBlockedGate`), so a resumed batch's status never shows a stale
+ * outcome from before the recheck ran.
+ */
+function recordMemberGate(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  memberIssue: number,
+  gate: { id: string; outcome: CapOutcome; outputTail?: string | null },
+  now: Date
+): void {
+  deps.store.withLock((s) => {
+    const b = findBatch(s, batchId);
+    return {
+      state: patchBatch(
+        s,
+        batchId,
+        {
+          member_gates: {
+            ...(b?.member_gates ?? {}),
+            [String(memberIssue)]: {
+              capability: gate.id,
+              outcome: gate.outcome,
+              output_tail: gate.outputTail ?? null,
+              at: now.toISOString(),
+            },
+          },
+        },
+        now
+      ),
+      result: undefined,
+    };
+  });
 }
 
 function slotFor(state: SchedState, batchId: string): SlotEntry | undefined {
@@ -1388,12 +1440,26 @@ export function resumeBlockedGate(
   }
   const recheck = deps.runCapability(batch.worktree, capabilityId);
   const result = emptyResult();
+  const excerpt = gateDetailExcerpt(recheck.outputTail, recheck.reason);
+  recordMemberGate(deps, batchId, memberIssue, { id: capabilityId, ...recheck }, now);
 
   if (recheck.outcome === 'automation-broken' || recheck.outcome === 'capability-unavailable') {
+    // Still inconclusive: leave an audit trail (log + journal) exactly like
+    // the live gate does, even though the batch stays `blocked` — otherwise
+    // a repeated `sched resume --batch` leaves no record of when it was last
+    // checked or what it said (#583 review).
+    writeGateLog(deps, batchId, capabilityId, memberIssue, recheck.outputTail);
+    journalEvent(deps, 'gate-inconclusive', unit(batchId), {
+      issue: memberIssue,
+      reason: `gate-inconclusive:${capabilityId}`,
+      detail: excerpt
+        ? `sched resume --batch: cap run ${capabilityId} still reports ${recheck.outcome} on recheck: ${excerpt}`
+        : `sched resume --batch: cap run ${capabilityId} still reports ${recheck.outcome} on recheck`,
+    });
     return {
       outcome: 'still-blocked',
       capability: capabilityId,
-      detail: recheck.outputTail ?? undefined,
+      detail: excerpt,
     };
   }
 
@@ -1413,7 +1479,9 @@ export function resumeBlockedGate(
     journalEvent(deps, 'unit-failed', unit(batchId), {
       issue: memberIssue,
       reason,
-      detail: `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck`,
+      detail: excerpt
+        ? `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck: ${excerpt}`
+        : `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck`,
     });
     evictMemberAndContinue(
       deps,
@@ -1426,7 +1494,7 @@ export function resumeBlockedGate(
       now,
       result
     );
-    return { outcome: 'evicted', capability: capabilityId };
+    return { outcome: 'evicted', capability: capabilityId, detail: excerpt };
   }
 
   journalEvent(deps, 'external-advance', unit(batchId), {
@@ -1584,30 +1652,12 @@ function reconcileMemberSlot(
       );
       const worstGate = gateFailure ?? gateInconclusive;
       if (worstGate) {
-        deps.store.withLock((s) => ({
-          state: patchBatch(
-            s,
-            batchId,
-            {
-              member_gates: {
-                ...batch.member_gates,
-                [String(memberIssue)]: {
-                  capability: worstGate.id,
-                  outcome: worstGate.outcome,
-                  output_tail: worstGate.outputTail ?? null,
-                  at: now.toISOString(),
-                },
-              },
-            },
-            now
-          ),
-          result: undefined,
-        }));
+        recordMemberGate(deps, batchId, memberIssue, worstGate, now);
       }
       if (gateFailure) {
         const reason = `incremental-gate-failed:${gateFailure.id}`;
         writeGateLog(deps, batchId, gateFailure.id, memberIssue, gateFailure.outputTail);
-        const excerpt = gateDetailExcerpt(gateFailure.outputTail);
+        const excerpt = gateDetailExcerpt(gateFailure.outputTail, gateFailure.reason);
         journalEvent(deps, 'unit-failed', unit(batchId), {
           issue: memberIssue,
           reason,
@@ -1632,13 +1682,13 @@ function reconcileMemberSlot(
       if (gateInconclusive) {
         const reason = `gate-inconclusive:${gateInconclusive.id}`;
         writeGateLog(deps, batchId, gateInconclusive.id, memberIssue, gateInconclusive.outputTail);
-        const excerpt = gateDetailExcerpt(gateInconclusive.outputTail);
+        const excerpt = gateDetailExcerpt(gateInconclusive.outputTail, gateInconclusive.reason);
         journalEvent(deps, 'gate-inconclusive', unit(batchId), {
           issue: memberIssue,
           reason,
-          detail:
-            excerpt ??
-            `cap run ${gateInconclusive.id} reported ${gateInconclusive.outcome} after member review done`,
+          detail: excerpt
+            ? `cap run ${gateInconclusive.id} reported ${gateInconclusive.outcome} after member review done: ${excerpt}`
+            : `cap run ${gateInconclusive.id} reported ${gateInconclusive.outcome} after member review done`,
         });
         deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
         const stateNow = deps.store.load();

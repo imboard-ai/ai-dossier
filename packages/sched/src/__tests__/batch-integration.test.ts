@@ -371,6 +371,24 @@ function batchSlotPid(h: BatchHarness, batchId: string): number | undefined {
   return slot?.pid ?? undefined;
 }
 
+/** `BatchDispatchDeps` sliced from a `batchHarness`'s `EngineDeps` (#583 `sched resume --batch` tests) — mirrors `engine.ts`'s own `EngineDeps → BatchDispatchDeps` mapping. */
+function batchDispatchDepsFrom(
+  h: BatchHarness,
+  capability: (worktree: string, id: string) => CapabilityGateResult
+): BatchDispatchDeps {
+  return {
+    store: h.deps.store,
+    journal: h.deps.journal,
+    groundTruth: h.deps.groundTruth,
+    spawnDeps: h.deps.spawnDeps,
+    now: h.deps.now,
+    repoDir: h.deps.repoDir,
+    exec: h.deps.batchExec as ExecFn,
+    runSuite: h.deps.runBatchSuite as (worktree: string) => SuiteResult,
+    runCapability: capability,
+  };
+}
+
 describe('integration #523: batch dispatch (real git worktree, real spawned fake agents)', () => {
   it('3-member happy path: setup → 3 serial members → validate → tail → merge → report → done', async () => {
     const repo = scratchRepo();
@@ -773,22 +791,25 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     h.tick();
     expect(findBatch(h.state(), 'b-resume')?.status).toBe('blocked');
 
-    const batchDeps: BatchDispatchDeps = {
-      store: h.deps.store,
-      journal: h.deps.journal,
-      groundTruth: h.deps.groundTruth,
-      spawnDeps: h.deps.spawnDeps,
-      now: h.deps.now,
-      repoDir: h.deps.repoDir,
-      exec: h.deps.batchExec as ExecFn,
-      runSuite: h.deps.runBatchSuite as (worktree: string) => SuiteResult,
-      runCapability: capability,
-    };
+    const batchDeps = batchDispatchDepsFrom(h, capability);
     const dispatch = resolveDispatch(h.config);
 
+    testFocusedOutcome = { outcome: 'automation-broken', outputTail: 'still cannot run the suite' };
     const stillBlocked = resumeBlockedGate(batchDeps, h.config, dispatch, 'b-resume', new Date());
     expect(stillBlocked).toMatchObject({ outcome: 'still-blocked', capability: 'test.focused' });
     expect(findBatch(h.state(), 'b-resume')?.status).toBe('blocked');
+    // A still-blocked recheck is not silent (#583 review) — it leaves the
+    // same audit trail (journal + member_gates) the live gate does.
+    expect(findBatch(h.state(), 'b-resume')?.member_gates?.['2201']).toMatchObject({
+      capability: 'test.focused',
+      outcome: 'automation-broken',
+      output_tail: 'still cannot run the suite',
+    });
+    const inconclusiveEvents = h.deps.journal
+      .read()
+      .filter((e) => e.event === 'gate-inconclusive' && e.unit === 'batch:b-resume');
+    // The resume recheck's own event, not the original live-gate block.
+    expect(inconclusiveEvents.at(-1)?.detail).toContain('still cannot run the suite');
 
     testFocusedOutcome = { outcome: 'ok' };
     const resumed = resumeBlockedGate(batchDeps, h.config, dispatch, 'b-resume', new Date());
@@ -797,6 +818,11 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(batch?.blocked_reason).toBeNull();
     expect(batch?.status).toBe('executing');
     expect(batch?.executing_member).toBe(2);
+    // member_gates reflects the resolution, not the stale pre-resume verdict.
+    expect(batch?.member_gates?.['2201']).toMatchObject({
+      capability: 'test.focused',
+      outcome: 'ok',
+    });
   }, 60_000);
 
   it('#583 AC4: sched resume --batch evicts the member when the recheck confirms a real task-failed', async () => {
@@ -816,17 +842,7 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     h.tick();
     expect(findBatch(h.state(), 'b-resume-evict')?.status).toBe('blocked');
 
-    const batchDeps: BatchDispatchDeps = {
-      store: h.deps.store,
-      journal: h.deps.journal,
-      groundTruth: h.deps.groundTruth,
-      spawnDeps: h.deps.spawnDeps,
-      now: h.deps.now,
-      repoDir: h.deps.repoDir,
-      exec: h.deps.batchExec as ExecFn,
-      runSuite: h.deps.runBatchSuite as (worktree: string) => SuiteResult,
-      runCapability: capability,
-    };
+    const batchDeps = batchDispatchDepsFrom(h, capability);
     const dispatch = resolveDispatch(h.config);
 
     testFocusedOutcome = { outcome: 'task-failed' };
@@ -840,6 +856,12 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       reason: 'incremental-gate-failed:test.focused',
     });
     expect(batch?.status).toBe('executing');
+    // member_gates reflects the recheck's task-failed verdict, not the
+    // stale automation-broken it was blocked on.
+    expect(batch?.member_gates?.['2301']).toMatchObject({
+      capability: 'test.focused',
+      outcome: 'task-failed',
+    });
   }, 60_000);
 
   it('#561 AC1/AC3: a cold batch worktree is warmed (node_modules present) before member 1 dispatches', async () => {

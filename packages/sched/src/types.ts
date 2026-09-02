@@ -100,6 +100,13 @@ export type CapOutcome = 'ok' | 'task-failed' | 'automation-broken' | 'capabilit
 export interface CapabilityGateResult {
   outcome: CapOutcome;
   outputTail?: string | null;
+  /**
+   * The `cap run` envelope's own `reason` (#583 review) — the only
+   * explanation available when no subprocess ran at all (`capability-unavailable`,
+   * or `automation-broken` from a failed assumption probe), since `outputTail`
+   * is unset in those cases.
+   */
+  reason?: string | null;
 }
 
 // --- F.2/F.8/F.9 batch failure recovery records (#472) ---
@@ -855,7 +862,8 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-export const SCHEMA_VERSION = '1.10.0' as const;
+/** 1.11.0 (#583): `BatchEntry` gains `member_gates` and `blocked_reason`. */
+export const SCHEMA_VERSION = '1.11.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -869,6 +877,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.7.0',
   '1.8.0',
   '1.9.0',
+  '1.10.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.8.0' as const;

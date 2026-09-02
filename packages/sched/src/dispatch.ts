@@ -768,6 +768,11 @@ export function batchTailLogPath(runsDir: string, batchId: string): string {
  * `cap run <capabilityId>` invocation of the incremental member gate, written
  * on any non-`ok` outcome (task-failed or inconclusive) for attribution
  * beyond the truncated `output_tail` that lands in the journal/caps.jsonl.
+ * `capabilityId` runs through `sanitizeSlug` like every other identifier
+ * interpolated into a `runsDir` path here (CWE-22 defense in depth) — not
+ * reachable today (only the two hardcoded gate ids ever flow through this),
+ * but the gate's capability list is a plausible future manifest-configurable
+ * surface, and this path builder should not be the one place that trusts it.
  */
 export function batchGateLogPath(
   runsDir: string,
@@ -775,7 +780,10 @@ export function batchGateLogPath(
   capabilityId: string,
   issue: number
 ): string {
-  return path.join(runsDir, `${unitLogName(`batch:${batchId}`)}-gate-${capabilityId}-${issue}.log`);
+  return path.join(
+    runsDir,
+    `${unitLogName(`batch:${batchId}`)}-gate-${sanitizeSlug(capabilityId)}-${issue}.log`
+  );
 }
 
 export function batchReportLogPath(runsDir: string, batchId: string): string {
