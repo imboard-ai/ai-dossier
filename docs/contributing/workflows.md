@@ -157,6 +157,7 @@ Actions → Publish Packages to npm → Run workflow
 5. Bump version (if requested)
    - Update version in packages/core/package.json
    - Update version in cli/package.json
+   - Update version in mcp-server/package.json
    - Update CLI dependency on core
    ↓
 6. Commit version bump (if bumped)
@@ -167,7 +168,7 @@ Actions → Publish Packages to npm → Run workflow
    - Publish to https://registry.npmjs.org with --provenance
    - Includes: dist/, package.json, README
    ↓
-8. Publish @ai-dossier/cli, @ai-dossier/mcp-server, @ai-dossier/worktree-pool
+8. Publish @ai-dossier/sched, @ai-dossier/cli, @ai-dossier/mcp-server, @ai-dossier/worktree-pool
    - Publish to https://registry.npmjs.org with --provenance
    - Each package skipped if version already published
    ↓
