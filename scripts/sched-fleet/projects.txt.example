@@ -1,0 +1,5 @@
+# One sched project slug per line — must match a directory under ~/.dossier/sched/<slug>/
+# and be handled by the repo_dir() case statement in tick.sh (each slug maps to an
+# absolute checkout path there; add a case arm per project before ticking it).
+imboard-ai-ai-dossier
+imboard-ai-imboard-monorepo
