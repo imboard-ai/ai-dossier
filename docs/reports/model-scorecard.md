@@ -1,6 +1,6 @@
 # Model Scorecard
 
-Generated: 2026-09-02T10:59:22.341Z | Window: 2026-08-25 → 2026-09-02
+Generated: 2026-09-02T11:05:33.895Z | Window: 2026-08-25 → 2026-09-02
 
 Cost, quality, and speed per LLM, joined from runstate trails (GitHub), `runs.jsonl`
 (token/cost telemetry), and `events.jsonl` (dispatch tier, stall/escalation counts).
@@ -32,7 +32,7 @@ a trend. Read `cost/delivered` and `delivery rate` alongside `n`, never alone.
 | `glm-latest` | imboard-ai/imboard-monorepo | mechanical | opencode | 2 | 2 | 100% | N/A | N/A | 1 | 4 | 0 |
 | `glm-latest` | imboard-ai/imboard-monorepo | strong | opencode | 1 | 0 | 0% | N/A | N/A | 0 | 2 | 0 |
 | `gpt-5.6-luna` | imboard-ai/imboard-monorepo | <unknown> | unknown | 5 | 4 | 80% | N/A | N/A | 0 | 0 | 0 |
-| `gpt-5.6-terra` | imboard-ai/imboard-monorepo | <unknown> | unknown | 3 | 2 | 67% | N/A | N/A | 0 | 0 | 0 |
+| `gpt-5.6-terra` | imboard-ai/imboard-monorepo | <unknown> | unknown | 4 | 2 | 50% | N/A | N/A | 0 | 0 | 0 |
 | `kimi-k3` | imboard-ai/imboard-monorepo | <unknown> | unknown | 1 | 0 | 0% | N/A | N/A | 0 | 0 | 0 |
 | `kimi-k3-fast` | imboard-ai/imboard-monorepo | <unknown> | unknown | 9 | 8 | 89% | N/A | N/A | 0 | 0 | 0 |
 | `kimi-latest` | imboard-ai/imboard-monorepo | mechanical | opencode | 1 | 1 | 100% | N/A | N/A | 0 | 0 | 0 |
@@ -49,12 +49,12 @@ a trend. Read `cost/delivered` and `delivery rate` alongside `n`, never alone.
 | `glm-5.3` | unknown | 41 | 36 | 88% | N/A | N/A | N/A | 0 | 0 | 0 |
 | `glm-latest` | opencode | 3 | 2 | 67% | N/A | N/A | N/A | 1 | 6 | 0 |
 | `gpt-5.6-luna` | unknown | 5 | 4 | 80% | N/A | N/A | N/A | 0 | 0 | 0 |
-| `gpt-5.6-terra` | unknown | 3 | 2 | 67% | N/A | N/A | N/A | 0 | 0 | 0 |
+| `gpt-5.6-terra` | unknown | 4 | 2 | 50% | N/A | N/A | N/A | 0 | 0 | 0 |
 | `kimi-k3` | unknown | 1 | 0 | 0% | N/A | N/A | N/A | 0 | 0 | 0 |
 | `kimi-k3-fast` | unknown | 9 | 8 | 89% | N/A | N/A | N/A | 0 | 0 | 0 |
 | `kimi-latest` | opencode | 1 | 1 | 100% | N/A | N/A | N/A | 0 | 0 | 0 |
 | `zai-coding-plan/glm-5.3` | unknown | 1 | 1 | 100% | N/A | N/A | N/A | 0 | 0 | 0 |
-| **TOTAL** | claude,opencode | 186 | 146 | 78% | $18.058 (n=12) | 159,278 | 48.0 | 1 | 24 | 4 |
+| **TOTAL** | claude,opencode | 187 | 146 | 78% | $18.058 (n=12) | 159,278 | 48.0 | 1 | 24 | 4 |
 
 ## Reconciliation
 
@@ -68,6 +68,13 @@ not expected to match exactly.
 
 ## Limitations
 
+- **A moving version tag (e.g. `glm-latest`) is never folded into a pinned version
+  (e.g. `glm-5.3`), even when they are currently the same weights.** Routing-prefix
+  and opencode `~`-alias folding both work (see Data warnings below for what *did*
+  fold); collapsing a `-latest` tag into a specific pin is a claim about the
+  provider's current state that this script has no way to verify and that goes stale
+  the moment the provider ships a new version under the same tag — decision-pending,
+  see #566.
 - **Cost per phase is not separable.** A dispatch is usually one continuous agent
   session covering several phases, so `runs.jsonl` records cost per issue, not per
   phase. Wall-clock per phase exists (via `ai-dossier runstate stats`) but is not
