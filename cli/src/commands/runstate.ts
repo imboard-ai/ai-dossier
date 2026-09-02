@@ -57,6 +57,7 @@ import {
   type IssueTrail,
   type ModelAggregate,
   modelNote,
+  PERCENT,
   type RunStats,
   renderValue,
   type StatsReport,
@@ -116,13 +117,12 @@ interface StatsOptions {
 /** Characters kept in a `verify` warning, which is one line among several. */
 const WARNING_SNIPPET_LENGTH = 120;
 
-/** Scale for rendering a 0–1 rate as a percentage. */
-const PERCENT = 100;
-
 /**
  * The by-model table's columns. Headers match the JSON field names (`delivered`,
  * `blocked`, `unfinished`) so a reader moving from the table to `--json` does not have to
- * guess; `rate` is `delivery_rate` and `n` is `samples`, both abbreviated for width.
+ * guess; the abbreviated ones are `rate` = `delivery_rate`, `n` = `samples`,
+ * `esc/run` = `escalations_per_run`, and `not-met` = `conformance_not_met` over
+ * `conformance_criteria`.
  */
 const MODEL_TABLE_HEADERS = [
   'model',
@@ -140,11 +140,19 @@ const MODEL_TABLE_HEADERS = [
   '',
 ];
 
-const MODEL_TABLE_ALIGN: ColumnAlign[] = [
-  'left',
-  ...(Array<ColumnAlign>(11).fill('right') as ColumnAlign[]),
-  'left',
-];
+/**
+ * Right-align every column except the leading label columns and an optional trailing note.
+ *
+ * Derived from the header list rather than hand-counted: the model table's count had to move
+ * 9 → 11 when two columns were added, and a miscount silently misaligns the whole table.
+ */
+function tableAlign(headers: string[], labelCols: number, trailingNote: boolean): ColumnAlign[] {
+  return headers.map((_, i) =>
+    i < labelCols || (trailingNote && i === headers.length - 1) ? 'left' : 'right'
+  );
+}
+
+const MODEL_TABLE_ALIGN: ColumnAlign[] = tableAlign(MODEL_TABLE_HEADERS, 1, true);
 
 /**
  * The by-model-and-class table's columns (`imboard-ai/ai-dossier#528` AC3).
@@ -166,11 +174,7 @@ const CLASS_TABLE_HEADERS = [
   'not-met',
 ];
 
-const CLASS_TABLE_ALIGN: ColumnAlign[] = [
-  'left',
-  'left',
-  ...(Array<ColumnAlign>(7).fill('right') as ColumnAlign[]),
-];
+const CLASS_TABLE_ALIGN: ColumnAlign[] = tableAlign(CLASS_TABLE_HEADERS, 2, false);
 
 /** Parse `--kv k=v` occurrences into ordered pairs. */
 function parseKvPairs(raw: string[]): { pairs: Array<[string, string]>; errors: string[] } {
@@ -957,14 +961,18 @@ function printAggregates(report: StatsReport, precededByTables: boolean): void {
       '  delivered = last milestone is ship/report (or batch-ship/batch-report) at done; rate = delivered/runs, including runs still in flight'
     );
     console.log(
-      '  esc/run = escalated= per run that reached review; not-met = acceptance criteria scored not met, over criteria judged'
+      '  esc/run = escalated= summed over the runs that reported it (a run that reviewed under a dossier without the key is not counted); not-met = criteria scored not met, over criteria judged'
     );
+    console.log("  '-' means never measured, which is not the same claim as a measured 0");
   }
 
   if (classes.length > 0) {
     section('By model x class:', CLASS_TABLE_HEADERS, buildClassRows(classes), CLASS_TABLE_ALIGN);
     console.log(
       "  class = the classifier's risk= verdict for the issue; classify dispatches are excluded from both tables"
+    );
+    console.log(
+      "  esc = escalations over the runs that reported them — a total, NOT the adjacent table's per-run mean; not-met and '-' read as above"
     );
   }
 }
@@ -978,7 +986,7 @@ function buildModelRows(models: ModelAggregate[]): string[][] {
     String(model.blocked),
     String(model.unfinished),
     formatRateCell(model.delivery_rate),
-    formatMeanCell(model.escalation_rate),
+    formatMeanCell(model.escalations_per_run),
     formatConformanceCell(model.conformance_not_met, model.conformance_criteria),
     String(model.samples),
     formatDurationCell(model.median_total_seconds),
@@ -998,7 +1006,7 @@ function buildClassRows(classes: ClassAggregate[]): string[][] {
     String(bucket.blocked),
     String(bucket.unfinished),
     formatRateCell(bucket.delivery_rate),
-    bucket.escalation_runs === 0 ? '-' : String(bucket.escalations),
+    formatRatioCell(bucket.escalations, bucket.escalation_runs),
     formatConformanceCell(bucket.conformance_not_met, bucket.conformance_criteria),
   ]);
 }
@@ -1026,7 +1034,19 @@ function formatMeanCell(mean: number | null): string {
  * whoever is about to route a tier from it.
  */
 function formatConformanceCell(notMet: number, criteria: number): string {
-  return criteria === 0 ? '-' : `${notMet}/${criteria}`;
+  return formatRatioCell(notMet, criteria);
+}
+
+/**
+ * `value/denominator`, or `-` when the denominator is zero.
+ *
+ * The one place the "measured zero vs never measured" rule lives for a counted cell, so the
+ * class table's `esc` and both tables' `not-met` cannot drift apart on it. Carrying the
+ * denominator into the cell also keeps the sample size in front of whoever is about to route
+ * a tier from it — `3/32` and `3/2` are very different claims that a bare `3` hides.
+ */
+function formatRatioCell(value: number, denominator: number): string {
+  return denominator === 0 ? '-' : `${value}/${denominator}`;
 }
 
 /**

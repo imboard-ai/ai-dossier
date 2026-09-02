@@ -815,6 +815,22 @@ The `By model:` table answers "which models finish the work", not just "how long
 | `blocked` | runs whose last milestone is `blocked`, whatever the phase | `blocked` |
 | `unfinished` | everything else — in flight, parked `awaiting-merge`, `partial`, or fenced | `unfinished` |
 | `rate` | `delivered / runs` | `delivery_rate` |
+| `esc/run` | `escalated=` summed over the runs that reported it, divided by that count | `escalations_per_run` |
+| `not-met` | acceptance criteria scored NOT met, over criteria judged | `conformance_not_met` / `conformance_criteria` |
+
+A `-` in `esc/run` or `not-met` means **never measured**, which is not the same claim as a
+measured `0`: a model whose runs all blocked before review has not demonstrated a zero
+escalation rate, it has demonstrated nothing. `esc/run` is a mean, not a fraction — it is the
+one column on this table that is not bounded by 1 — and its denominator is the runs that
+actually carried `escalated=`, so a run that reviewed under a dossier predating the key is
+excluded rather than counted as a zero. `not-met` is weighted by criteria rather than by run,
+and carries its denominator into the cell so `0/4` and `0/200` cannot read alike.
+
+A run whose milestones are **all** `classify` is the classifier's own dispatch, not a cycle
+run: it records no `model=` and never ships, so counting it would add an `<unknown>` row that
+never delivered for every issue the classifier has touched. Those runs are excluded from both
+breakdowns — disclosed in a warning, and still present in the per-run table and in `--json`
+`runs[]` with `classify_only: true`.
 
 `rate` is a **floor, not a rate**: every run is in the denominator, including ones still
 running, so a model with work in flight reads low until it lands. `delivered` counts `ship
@@ -874,17 +890,49 @@ than guessing:
 - A bucket whose id ends in `-latest` with no entry in `MODEL_ALIASES` is named as a moving
   tag sitting apart from whatever pin it resolves to — one model read as two rows.
 
+### The per-model x class breakdown
+
+The `By model x class:` table splits the same buckets again by the classifier's own `risk=`
+verdict, so the answer is *which tiers are safe for which classes* rather than one number per
+model — a model's runs over docs chores and over protocol changes otherwise land in one row
+and average each other out.
+
+The class is an **issue-level** attribute, read from the issue's `classify` milestone (the
+last one, if an issue was re-classified). The classifier dispatches under its own `run=`, so
+the class is attached to every cycle run of that issue rather than looked up per run. Only the
+protocol's own levels are accepted — `low`, `med`, `high`, case-folded; anything else, and any
+issue with no classify milestone, buckets as `<unclassified>`, which is its own visible row
+rather than being folded into `low`. Rows sort worst-class-first (`high`, `med`, `low`,
+`<unclassified>`), then by model.
+
+The cells are the same counters as the by-model table, with two differences: `esc` is a raw
+`escalations/escalation_runs` pair rather than the adjacent table's per-run mean (splitting a
+thin corpus by class leaves most cells at n ≤ 2, where a mean reads like a measurement and is
+not one), and durations are absent for the same reason. When some but not all runs are
+classified, a warning states the unclassified share — the one thing the rows cannot show is
+how thin the axis is.
+
 Warnings go to stderr in both human and `--json` mode, so stdout stays parseable and
 `stats` still exits 0 — a degraded read is not a failure. It exits 1 only when nothing in
 the selection could be read.
 
-`--json` returns `repo`, `issues`, `runs` (each with `run`, `model`, `last_phase`,
+`--json` returns `repo`, `issues`, `runs` (each with `run`, `model`, `risk_class`,
+`classified_mode`, `classify_only`, `escalated`, `ac_met`, `ac_total`, `last_phase`,
 `last_status`, `total_seconds`, and a `phases` array of
 `{phase, status, started_at, ended_at, seconds}`), `aggregates.phases`,
 `aggregates.models` (each with `model`, `aliases`, `runs`, `samples`,
 `median_total_seconds`, `min_total_seconds`, `max_total_seconds`, `negative_samples`,
-`delivered`, `blocked`, `unfinished`, `delivery_rate`), `issues_without_trail`,
+`delivered`, `blocked`, `unfinished`, `delivery_rate`, `escalation_runs`, `escalations`,
+`escalations_per_run`, `conformance_runs`, `conformance_criteria`, `conformance_not_met`,
+`conformance_not_met_rate`), `aggregates.classes` (each with `model`, `risk_class`, `runs`,
+`delivered`, `blocked`, `unfinished`, `delivery_rate`, `escalation_runs`, `escalations`,
+`conformance_runs`, `conformance_criteria`, `conformance_not_met`), `issues_without_trail`,
 `issues_failed`, and `warnings`.
+
+From `@ai-dossier/cli` 0.33.0, `aggregates.classes` and the counter fields above are additive
+— no existing field changed shape — but `aggregates.models[].runs` no longer counts classify
+dispatches, so a consumer reconciling it against `runs.length` must subtract the entries with
+`classify_only: true`.
 
 From `@ai-dossier/cli` 0.25.0, `aggregates.models[].model` is the **canonical** bucket key
 rather than the raw recorded `model=` — a consumer selecting on a routed spelling such as

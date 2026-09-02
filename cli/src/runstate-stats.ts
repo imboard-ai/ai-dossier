@@ -15,9 +15,12 @@ import { MILLIS_PER_SECOND } from './duration';
 import {
   ALL_PHASES,
   type BatchPhase,
+  CLASSIFY_MODES,
   CLASSIFY_PHASE,
+  NON_NEGATIVE_INT_RE,
   type ParsedMilestone,
   type Phase,
+  RISK_LEVELS,
   type Status,
 } from './runstate';
 
@@ -49,6 +52,7 @@ const SHIP_PHASE: Phase = 'ship';
 const GATE_PHASE: Phase = 'gate';
 const REPORT_PHASE: Phase = 'report';
 const REVIEW_PHASE: Phase = 'review';
+const BATCH_REVIEW_PHASE: BatchPhase = 'batch-review';
 const BATCH_SHIP_PHASE: BatchPhase = 'batch-ship';
 const BATCH_REPORT_PHASE: BatchPhase = 'batch-report';
 const AWAITING_MERGE: Status = 'awaiting-merge';
@@ -82,13 +86,26 @@ export const UNKNOWN_MODEL = '<unknown>';
 /**
  * The class bucket for a run whose issue carries no classifier verdict.
  *
- * Bracketed like {@link UNKNOWN_MODEL} and for the same reason: `risk=` is a closed
- * enum (`low`/`med`/`high`), so no real verdict can collide with this key, and an issue
- * that was never classified is reported as its own row rather than folded into `low`.
- * On this repo the unclassified row is the *majority* today — the classifier is newer
- * than most of the corpus — so hiding it would overstate the class axis's coverage.
+ * Bracketed like {@link UNKNOWN_MODEL}, and unforgeable for the same *mechanical* reason
+ * rather than by appeal to the write-path contract: {@link classificationOf} accepts only
+ * the closed {@link ./runstate!RISK_LEVELS} set, and none of those values starts with `<`.
+ * Without that read-side check a comment carrying `risk=<unclassified>` would fold forged
+ * runs into this bucket and skew {@link classWarnings}' coverage share — the one number
+ * telling a reader how thin the axis is.
+ *
+ * An issue that was never classified gets its own row rather than being folded into `low`.
+ * On this repo that row is the *majority* today — the classifier is newer than most of the
+ * corpus — so hiding it would overstate the class axis's coverage.
  */
 export const UNCLASSIFIED_CLASS = '<unclassified>';
+
+/**
+ * Scale for turning a fraction in [0, 1] into a whole-percent figure.
+ *
+ * Exported so this module's warning text and the command layer's table cells cannot drift
+ * onto two different constants.
+ */
+export const PERCENT = 100;
 
 /**
  * Gateway and provider tokens stripped from a recorded `model=` to find its bucket.
@@ -283,6 +300,26 @@ const MAX_CELL_LENGTH = 120;
 const CONTROL_REPLACEMENT = '�';
 
 /**
+ * Code points a milestone value must never carry into a rendered table cell.
+ *
+ * C0 and DEL are the obvious ones. C1 (`0x80`–`0x9f`) matters just as much on an 8-bit-clean
+ * terminal, where `U+009B` IS the CSI introducer — `\u009b[2K` erases a row exactly like
+ * `\u001b[2K` does. The bidi and zero-width ranges are the other half: they leave `.length`
+ * unchanged while visually reordering the drawn line, which defeats the column alignment this
+ * function exists to guarantee.
+ */
+function isUnsafeCodePoint(code: number): boolean {
+  return (
+    code < 0x20 ||
+    code === 0x7f ||
+    (code >= 0x80 && code <= 0x9f) ||
+    (code >= 0x200b && code <= 0x200f) ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
+  );
+}
+
+/**
  * Make a milestone-derived value safe to print.
  *
  * Control characters are the real hazard, not merely a cosmetic one: `parseMilestone` is
@@ -295,7 +332,7 @@ export function renderValue(value: string): string {
   let clean = '';
   for (const char of value) {
     const code = char.codePointAt(0) ?? 0;
-    clean += code < 0x20 || code === 0x7f ? CONTROL_REPLACEMENT : char;
+    clean += isUnsafeCodePoint(code) ? CONTROL_REPLACEMENT : char;
   }
   return clean.length > MAX_CELL_LENGTH ? `${clean.slice(0, MAX_CELL_LENGTH)}…` : clean;
 }
@@ -421,12 +458,20 @@ export interface ModelAggregate {
   /**
    * `escalations / escalation_runs`, or null when no run of this model reached review.
    *
+   * A **mean, not a rate** — unbounded above, unlike every `*_rate` on this interface, which
+   * is a fraction in [0, 1] rendered as a percentage. Named for what it is so the next reader
+   * does not format it with `formatRateCell` and print `10%` for one escalation per ten runs.
+   *
    * Null rather than `0` on purpose: a model whose runs all blocked before review has not
    * demonstrated a zero escalation rate, it has demonstrated nothing, and the two must not
    * render identically in the table an operator routes a tier from.
    */
-  escalation_rate: number | null;
-  /** Runs of this model whose review reported an `ac_total=` greater than zero. */
+  escalations_per_run: number | null;
+  /**
+   * Runs of this model whose review reported an `ac_total=` greater than zero **and** a
+   * readable `ac_met=` — a run that judged criteria without reporting how many were met
+   * contributes nothing, because its not-met count is unknowable.
+   */
   conformance_runs: number;
   /** Acceptance criteria those runs were judged against, summed. */
   conformance_criteria: number;
@@ -451,23 +496,36 @@ export interface ModelAggregate {
  * bucket contract by the classifier's own `risk=` verdict is what makes a tier→class routing
  * recommendation evidence-backed rather than a guess.
  *
- * Deliberately mirrors {@link ModelAggregate}'s counters and reuses {@link isCompleted}, so a
- * class row can never disagree with the model row it sums into about what "delivered" means.
+ * Mirrors {@link ModelAggregate}'s counters and reuses {@link isCompleted}, so a class row can
+ * never disagree with the model row it sums into about what "delivered" means. It deliberately
+ * omits `escalations_per_run`: splitting an already-thin corpus by class leaves most cells at
+ * n ≤ 2, where a mean reads like a measurement and is not one. The raw count is reported
+ * instead, with `escalation_runs` as the "was this measured at all" denominator.
  */
 export interface ClassAggregate {
   /** Canonical bucket key — see {@link canonicalModel}. */
   model: string;
   /** The issue's `risk=` verdict, or {@link UNCLASSIFIED_CLASS}. */
   risk_class: string;
+  /** Cycle runs in this cell — classify dispatches are excluded, as in {@link ModelAggregate}. */
   runs: number;
+  /** Runs whose last milestone was a delivery phase at `done` — see {@link DELIVERED_PHASES}. */
   delivered: number;
+  /** Runs whose last milestone was `blocked`, whatever the phase. */
   blocked: number;
+  /** Everything else: in flight, parked awaiting merge, partial, or fenced. */
   unfinished: number;
   /** `delivered / runs` — the same floor, with the same caveats, as {@link ModelAggregate}. */
   delivery_rate: number;
+  /** Runs in this cell that reported `escalated=` — zero means "never measured", not "zero". */
   escalation_runs: number;
+  /** Findings handed back to a human, summed over those runs. A total, never a mean. */
   escalations: number;
+  /** Runs whose review reported a usable `ac_total=`/`ac_met=` pair. */
+  conformance_runs: number;
+  /** Acceptance criteria those runs were judged against, summed. */
   conformance_criteria: number;
+  /** Of those criteria, the ones blind conformance scored NOT met. */
   conformance_not_met: number;
 }
 
@@ -662,6 +720,24 @@ function timePhases(
 
   const last = milestones[milestones.length - 1];
   const review = lastReviewOf(milestones);
+  // Dropping a malformed counter silently would break the module's contract exactly where
+  // the numbers feed a tier-routing decision: the run vanishes from the denominator with no
+  // trace. Warn once per unreadable key, naming the value that could not be read.
+  for (const key of REVIEW_COUNTER_KEYS) {
+    const raw = review?.keys[key];
+    if (raw !== undefined && countKey(review, key) === null) {
+      warn(
+        `${where}: review milestone has ${key}='${renderValue(raw)}' — expected a non-negative integer of at most ${MAX_COUNT}, so this run is left out of the ${key === 'escalated' ? 'escalation' : 'conformance'} figures`
+      );
+    }
+  }
+  const acMet = countKey(review, 'ac_met');
+  const acTotal = countKey(review, 'ac_total');
+  if (acMet !== null && acTotal !== null && acMet > acTotal) {
+    warn(
+      `${where}: review milestone reports ac_met=${acMet} above ac_total=${acTotal} — counted as 0 criteria not met, which is the floor, not a measurement`
+    );
+  }
   return {
     issue,
     run,
@@ -670,8 +746,8 @@ function timePhases(
     classified_mode: classification.mode,
     classify_only: milestones.every((m) => m.phase === CLASSIFY_PHASE),
     escalated: countKey(review, 'escalated'),
-    ac_met: countKey(review, 'ac_met'),
-    ac_total: countKey(review, 'ac_total'),
+    ac_met: acMet,
+    ac_total: acTotal,
     phases,
     last_phase: last?.phase ?? '',
     last_status: last?.status ?? '',
@@ -715,9 +791,33 @@ function classificationOf(milestones: ParsedMilestone[]): {
   risk: string | null;
   mode: string | null;
 } {
-  const classify = milestones.find((m) => m.phase === CLASSIFY_PHASE && m.keys.risk);
-  const source = classify ?? milestones.find((m) => m.keys.risk);
-  return { risk: source?.keys.risk ?? null, mode: source?.keys.mode ?? null };
+  const hasRisk = (m: ParsedMilestone) => riskOf(m) !== null;
+  const classify = milestones.filter((m) => m.phase === CLASSIFY_PHASE && hasRisk(m)).at(-1);
+  const source = classify ?? milestones.filter(hasRisk).at(-1);
+  return { risk: source === undefined ? null : riskOf(source), mode: modeOf(source) };
+}
+
+/**
+ * A milestone's `risk=`, accepted only if it is one of the classifier's own levels.
+ *
+ * `parseMilestone` is tolerant by design and {@link ./runstate!KEY_VALUE_RULES} runs on the
+ * WRITE path, so a value reaching this reader is whatever someone typed into a comment.
+ * Unvalidated it becomes a bucket key: `risk=CRITICAL` invents a row in the table an
+ * operator routes tiers from, and `risk=<unclassified>` forges the sentinel. Values are
+ * lowercased first so `LOW` folds onto `low` instead of splitting the row — the same
+ * canonicalisation {@link canonicalModel} applies for the same reason.
+ */
+function riskOf(milestone: ParsedMilestone): string | null {
+  const value = milestone.keys.risk?.trim().toLowerCase();
+  return value !== undefined && (RISK_LEVELS as readonly string[]).includes(value) ? value : null;
+}
+
+/** The same closed-set treatment for `mode=`, which `--json` exposes as `classified_mode`. */
+function modeOf(milestone: ParsedMilestone | undefined): string | null {
+  const value = milestone?.keys.mode?.trim().toLowerCase();
+  return value !== undefined && (CLASSIFY_MODES as readonly string[]).includes(value)
+    ? value
+    : null;
 }
 
 /**
@@ -729,19 +829,42 @@ function classificationOf(milestones: ParsedMilestone[]): {
  */
 function countKey(milestone: ParsedMilestone | undefined, key: string): number | null {
   const raw = milestone?.keys[key];
-  if (raw === undefined) return null;
+  // `Number()` is not a grammar: it reads '' as 0 (turning "never reported" into a measured
+  // zero, the exact collapse this function exists to prevent), and accepts '0x1f', '1e3',
+  // '+7' and ' 12 '. The protocol's own count grammar is the gate.
+  if (raw === undefined || !NON_NEGATIVE_INT_RE.test(raw)) return null;
   const value = Number(raw);
-  return Number.isInteger(value) && value >= 0 ? value : null;
+  return value <= MAX_COUNT ? value : null;
 }
+
+/**
+ * Upper bound on a milestone count, above which the value is treated as unreadable.
+ *
+ * `NON_NEGATIVE_INT_RE` admits any number of digits, and a 21-digit `ac_total=` would
+ * silently make every sum it feeds lossy past 2^53 and render as `0/1e+21`. No real review
+ * judges ten thousand criteria; a value that claims to is data corruption, not a measurement.
+ */
+const MAX_COUNT = 10_000;
+
+/** The review counters this module reads — listed once so the warning loop cannot drift. */
+const REVIEW_COUNTER_KEYS = ['escalated', 'ac_met', 'ac_total'] as const;
 
 /**
  * The run's last `review` milestone — the one whose counters are current.
  *
  * Review can post twice on one run (`partial`, then `done` after the pending agents finish),
  * and only the later comment carries the settled `escalated=`/`ac_met=` figures.
+ *
+ * `batch-review` counts too: it posts the SAME keys on a batch anchor, and {@link isCompleted}
+ * already scores a delivered anchor via {@link DELIVERED_PHASES}. Reading only `review` would
+ * put every batch anchor in the model table as a delivered run whose conformance was never
+ * checked — and make this module disagree with `scripts/model-scorecard.mjs`, which reads both
+ * phases, about the same trail.
  */
 function lastReviewOf(milestones: ParsedMilestone[]): ParsedMilestone | undefined {
-  return milestones.filter((m) => m.phase === REVIEW_PHASE).at(-1);
+  return milestones
+    .filter((m) => m.phase === REVIEW_PHASE || m.phase === BATCH_REVIEW_PHASE)
+    .at(-1);
 }
 
 /** Per-phase median/min/max across every run in the report. */
@@ -898,7 +1021,7 @@ function aggregateModels(runs: RunStats[]): ModelAggregate[] {
         delivery_rate: bucket.delivered / bucket.runs,
         escalation_runs: bucket.escalationRuns,
         escalations: bucket.escalations,
-        escalation_rate:
+        escalations_per_run:
           bucket.escalationRuns > 0 ? bucket.escalations / bucket.escalationRuns : null,
         conformance_runs: bucket.conformanceRuns,
         conformance_criteria: bucket.conformanceCriteria,
@@ -917,8 +1040,22 @@ function aggregateModels(runs: RunStats[]): ModelAggregate[] {
  *
  * `high` before `med` before `low` before unclassified, because "is this model safe for the
  * risky class" is the routing decision; alphabetical order would bury it under `low`.
+ *
+ * Derived from {@link ./runstate!RISK_LEVELS} rather than restated, so a fourth level added to
+ * the protocol sorts into its severity position here instead of silently into the unclassified
+ * tail with no test failing.
  */
-const CLASS_ORDER: readonly string[] = ['high', 'med', 'low'];
+const CLASS_ORDER: readonly string[] = [...RISK_LEVELS].reverse();
+
+/**
+ * Separator for the `model × class` composite key.
+ *
+ * NUL cannot survive {@link canonicalModel} or {@link riskOf}, so `glm x/low` and `glm/x` +
+ * `low` cannot collide on one key the way a space separator lets them. Written as an escape
+ * on purpose: a literal NUL byte in the source is invisible in a diff and makes the whole
+ * file binary to `grep`/`rg` — which is how this was found.
+ */
+const CLASS_KEY_SEP = '\u0000';
 
 function byClassOrder(a: ClassAggregate, b: ClassAggregate): number {
   const ai = CLASS_ORDER.indexOf(a.risk_class);
@@ -945,7 +1082,7 @@ function aggregateClasses(runs: RunStats[]): ClassAggregate[] {
   for (const run of cycleRuns(runs)) {
     const model = run.model === null ? UNKNOWN_MODEL : canonicalModel(run.model);
     const risk_class = run.risk_class ?? UNCLASSIFIED_CLASS;
-    const key = `${model} ${risk_class}`;
+    const key = `${model}${CLASS_KEY_SEP}${risk_class}`;
     const bucket = buckets.get(key) ?? { ...emptyCounters(), model, risk_class };
     countRun(bucket, run);
     buckets.set(key, bucket);
@@ -962,6 +1099,7 @@ function aggregateClasses(runs: RunStats[]): ClassAggregate[] {
       delivery_rate: bucket.delivered / bucket.runs,
       escalation_runs: bucket.escalationRuns,
       escalations: bucket.escalations,
+      conformance_runs: bucket.conformanceRuns,
       conformance_criteria: bucket.conformanceCriteria,
       conformance_not_met: bucket.conformanceNotMet,
     }))
@@ -1018,9 +1156,6 @@ function modelWarnings(models: ModelAggregate[]): string[] {
   return warnings;
 }
 
-/** Rates are fractions in [0, 1]; this is the only place they become percentages. */
-const PERCENT = 100;
-
 /**
  * What the class table could not measure — the same contract as {@link modelWarnings}.
  *
@@ -1029,6 +1164,21 @@ const PERCENT = 100;
  * another class rather than "most of this table has no class at all". Stating the share makes
  * a thin axis obvious instead of letting a two-run `low` row read as a verdict on `low`.
  */
+/**
+ * The runs excluded from both tables, disclosed rather than quietly dropped.
+ *
+ * Without this the by-model row counts cannot be reconciled against `runs.length`, and in the
+ * all-classify case both tables vanish with no explanation at all — the exclusion is only
+ * mentioned in the class table's footnote, which is not printed when there is no class table.
+ */
+function exclusionWarnings(runs: RunStats[]): string[] {
+  const excluded = runs.length - cycleRuns(runs).length;
+  if (excluded === 0) return [];
+  return [
+    `${excluded} of ${runs.length} run(s) are classifier dispatches (classify milestones only) — excluded from the by-model and by-class tables, since they record no model= and never ship`,
+  ];
+}
+
 function classWarnings(classes: ClassAggregate[]): string[] {
   const total = classes.reduce((sum, c) => sum + c.runs, 0);
   if (total === 0) return [];
@@ -1138,6 +1288,7 @@ export function buildStatsReport(input: StatsInput): StatsReport {
     }
   }
   for (const line of modelWarnings(models)) warn(line);
+  for (const line of exclusionWarnings(runs)) warn(line);
   for (const line of classWarnings(classes)) warn(line);
 
   return {
