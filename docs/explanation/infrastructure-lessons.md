@@ -115,6 +115,24 @@ Note the build itself reports `readyState: READY` — nothing is wrong with your
 and the `BUILD_FAILED` error code is misleading. Check Neon → Branches before
 suspecting anything in the repo.
 
+**It isn't only concurrent human PRs that exhaust the cap.** Fleet/batch
+*throughput* does too: the full-cycle scheduler merging ~15 PRs in a ~6h overnight
+window provisions a preview branch per push, and cleanup-on-close cannot keep pace
+even though no two humans were ever working in parallel. Four previews failed with
+this exact signature on 2026-09-02 from fleet cadence alone
+(imboard-ai/ai-dossier#567); the failures self-healed within ~10–45 min once `Neon
+Branch Cleanup` ran.
+
+`.github/workflows/vercel-failure-logs.yml`'s `report` job is meant to post this
+diagnosis onto the PR automatically, but it resolves the PR from the commit SHA at
+the moment the `deployment_status` event fires — and under fleet cadence the branch
+push (which triggers that event) can precede `gh pr create` by seconds to minutes.
+Before #567 this raced silently: no PR yet ⇒ `No open PR for this commit; logging
+only.` and the diagnosis never left the Action run. If a fleet-triggered preview
+fails and the PR never got a comment, check the failed run's `report` job logs for
+that line, or look for the commit-comment fallback the job now posts when no PR is
+found after retrying.
+
 ### Overriding `DATABASE_URL` does not stop branch creation
 
 Tempting theory: point Preview's `DATABASE_URL` at a shared branch and the integration

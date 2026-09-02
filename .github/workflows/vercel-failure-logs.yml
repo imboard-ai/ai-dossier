@@ -39,7 +39,7 @@ on:
 permissions:
   id-token: write        # required to assume the OIDC role
   pull-requests: write
-  contents: read
+  contents: write        # createCommitComment fallback when no PR exists yet
   deployments: read
 
 env:
@@ -189,7 +189,8 @@ jobs:
               core.info('no error-classified lines; falling back to the build output tail');
             }
 
-            if (lines.length === 0) {
+            const zeroBuildEvents = lines.length === 0;
+            if (zeroBuildEvents) {
               lines = [
                 'No build log events — the build itself did not fail.',
                 'The deployment errored after building, so the reason is in the summary above.',
@@ -197,19 +198,40 @@ jobs:
             }
             const tail = lines.slice(-40).join('\n').slice(-6000);
 
-            // Find the PR for this SHA.
+            // The exact signature of "Neon preview branch quota exhausted" —
+            // see docs/explanation/infrastructure-lessons.md → Neon. Flagging
+            // it here saves a human from chasing a build error that isn't one.
+            const isNeonQuotaSignature = zeroBuildEvents
+              && meta?.errorCode === 'BUILD_FAILED'
+              && /resource provisioning failed/i.test(meta?.errorMessage || '');
+
+            // Find the PR for this SHA. Under fleet cadence the branch push
+            // (which triggers this deployment_status event) can precede
+            // `gh pr create` by anywhere from seconds to minutes, so a PR
+            // that doesn't exist yet on the first check may exist shortly
+            // after — retry before giving up (imboard-ai/ai-dossier#567).
             const sha = context.payload.deployment.sha;
-            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
-              owner: context.repo.owner, repo: context.repo.repo, commit_sha: sha,
-            });
-            const pr = prs.find((p) => p.state === 'open');
-            if (!pr) { core.info('No open PR for this commit; logging only.'); core.info(tail); return; }
+            const findOpenPr = async () => {
+              const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner: context.repo.owner, repo: context.repo.repo, commit_sha: sha,
+              });
+              return prs.find((p) => p.state === 'open');
+            };
+            const PR_LOOKUP_ATTEMPTS = 6;
+            const PR_LOOKUP_DELAY_MS = 30_000;
+            let pr = await findOpenPr();
+            for (let attempt = 1; !pr && attempt < PR_LOOKUP_ATTEMPTS; attempt++) {
+              core.info(`No open PR for ${sha} yet (attempt ${attempt}/${PR_LOOKUP_ATTEMPTS}) — retrying in ${PR_LOOKUP_DELAY_MS / 1000}s.`);
+              await new Promise((resolve) => setTimeout(resolve, PR_LOOKUP_DELAY_MS));
+              pr = await findOpenPr();
+            }
 
             const body = [
               '### ❌ Vercel preview deployment failed',
               '',
               `Deployment: ${targetUrl}`,
               '',
+              ...(isNeonQuotaSignature ? ['**Likely cause:** `neon-quota` — see docs/explanation/infrastructure-lessons.md → Neon.', ''] : []),
               ...(failureSummary ? ['**Deployment status**', '', '```', failureSummary, '```', ''] : []),
               'Build output:',
               '',
@@ -219,6 +241,15 @@ jobs:
               '',
               '<sub>Posted automatically so the failure is readable without a Vercel login.</sub>',
             ].join('\n');
+
+            if (!pr) {
+              core.info(`No open PR found for ${sha} after ${PR_LOOKUP_ATTEMPTS} attempts — posting a commit comment instead.`);
+              await github.rest.repos.createCommitComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                commit_sha: sha, body,
+              });
+              return;
+            }
 
             await github.rest.issues.createComment({
               owner: context.repo.owner, repo: context.repo.repo,
