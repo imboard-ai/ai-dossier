@@ -285,6 +285,8 @@ interface BatchHarness {
   store: SchedStore;
   spawnDeps: EngineDeps['spawnDeps'];
   truthDir: string;
+  /** Isolated `~/.dossier` stand-in (#564) — without this, `recordMemberRunLog` would append to the REAL user's `~/.dossier/runs.jsonl`. */
+  homeDir: string;
   tick: () => ReturnType<typeof tick>;
   enqueue: (inputs: EnqueueInput[]) => void;
   state: () => ReturnType<SchedStore['load']>;
@@ -305,6 +307,7 @@ function batchHarness(
 ): BatchHarness {
   const store = new SchedStore(tmpDir('sched-batch-'));
   const truthDir = tmpDir('sched-batch-truth-');
+  const homeDir = tmpDir('sched-batch-home-');
   const realExec: ExecFn = (file, args, cwd) => {
     try {
       return execFileSync(file, args, {
@@ -325,6 +328,7 @@ function batchHarness(
     spawnDeps: createSpawnDeps(),
     now: () => new Date(),
     repoDir,
+    homeDir,
     teardownExec: realExec,
     batchExec: fakeBatchExec(
       truthDir,
@@ -348,6 +352,7 @@ function batchHarness(
     store,
     spawnDeps: deps.spawnDeps,
     truthDir,
+    homeDir,
     tick: () => tick(deps, config),
     enqueue: (inputs) =>
       store.withLock((state) => ({
@@ -452,6 +457,30 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     batch = findBatch(h.state(), 'b-happy');
     expect(batch?.status).toBe('done');
     expect(fs.existsSync(batch?.worktree as string)).toBe(false);
+
+    // #564: every completed member recorded its OWN runs.jsonl entry,
+    // attributed to `issue:<memberIssue>` — the same unit scheme ordinary
+    // engine-dispatched issues use, so it shows up in the default `sched
+    // stats` view with no batch-aware read-side needed. The fake agent's
+    // stdout isn't Claude-CLI-shaped JSON, so tokens degrade to null
+    // (`usage=missing`, #564 AC2) rather than a thrown error or a dropped row.
+    const runsLog = path.join(h.homeDir, '.dossier', 'runs.jsonl');
+    const lines = fs
+      .readFileSync(runsLog, 'utf-8')
+      .trim()
+      .split('\n')
+      .map(
+        (l) => JSON.parse(l) as { unit: string; input_tokens: number | null; tier: string | null }
+      );
+    for (const issue of [601, 602, 603]) {
+      const entry = lines.find((l) => l.unit === `issue:${issue}`);
+      expect(entry).toBeTruthy();
+      expect(entry?.input_tokens).toBeNull();
+      // #564 AC1 re-verification: `tier` (enqueued as 'mid' for all three
+      // members) must reach the written entry, not just the in-memory
+      // `RunLogEntry` a unit test hand-builds — this is the actual write path.
+      expect(entry?.tier).toBe('mid');
+    }
   }, 60_000);
 
   it('one member evicted (RFC F.1): batch continues with the survivors and still ships', async () => {
@@ -485,6 +514,18 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(result.spawned).toContain('batch:b-evict'); // member 3 dispatched
     expect(h.state().entries.find((e) => e.issue === 702)?.mode).toBe('full'); // requeued full-cycle
     expect(h.state().entries.find((e) => e.issue === 702)?.batch).toBeNull();
+
+    // #564: a blocked/evicted member still recorded its own dispatch cost —
+    // it consumed real tokens before self-reporting blocked, so its entry
+    // must exist same as a completed member's (AC2: never silently omitted).
+    const runsLog = path.join(h.homeDir, '.dossier', 'runs.jsonl');
+    const evictedEntry = fs
+      .readFileSync(runsLog, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { unit: string })
+      .find((l) => l.unit === 'issue:702');
+    expect(evictedEntry).toBeTruthy();
 
     // Member 3 green — last member — validate (green) → tail.
     pid = batchSlotPid(h, 'b-evict') as number;

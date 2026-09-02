@@ -2208,6 +2208,9 @@ describe('runs.jsonl telemetry (#524: per-dispatch token/cost recorded on exit)'
       input_tokens: 500,
       output_tokens: 80,
       total_cost_usd: 0.002,
+      // #564 AC1: the queue entry's tier reaches the written record, not
+      // just the in-memory RunLogEntry a unit-level fixture hand-builds.
+      tier: 'mechanical',
     });
   });
 

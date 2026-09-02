@@ -34,14 +34,18 @@ ai-dossier sched resume
 ai-dossier sched abandon --issue 42 --reason "operator abort"
 ai-dossier sched abandon --batch b1   # dissolve; members requeue as full-cycle
 ai-dossier sched stats --issues 4..9  # per-issue tokens/cost from ~/.dossier/runs.jsonl (#524)
+ai-dossier sched stats --batch b1 --project owner-repo  # batch member/tail/report/fix costs from raw dispatch logs (#564)
 ```
 
-Every subcommand except `stats` takes `--project <slug>` (default: `owner-repo` of the
-current directory, falling back to the repo basename — fleet-cycle's convention) and
-`--json`. `stats` reads `~/.dossier/runs.jsonl`, a single global file, not the
-per-project state — it takes `--json` and `--issues` only; see "runs.jsonl telemetry"
-below for the resulting cross-repo caveat (the same issue number in two repos sums
-together).
+Every subcommand except `stats` (without `--batch`) takes `--project <slug>` (default:
+`owner-repo` of the current directory, falling back to the repo basename — fleet-cycle's
+convention) and `--json`. `stats` without `--batch` reads `~/.dossier/runs.jsonl`, a
+single global file, not the per-project state — it takes `--json` and `--issues` only;
+see "runs.jsonl telemetry" below for the resulting cross-repo caveat (the same issue
+number in two repos sums together). `stats --batch <id>` instead takes `--project` like
+every other subcommand and reads that project's `~/.dossier/sched/<project>/runs/`
+directory directly, reconstructing costs from the raw dispatch logs rather than
+`runs.jsonl` (#564) — see "Batch members (#564)" below.
 
 Since #507, `enqueue` additionally reads each candidate issue's live GitHub labels (one
 `gh issue view --json labels` call per issue, resolved against the current directory's repo
@@ -542,6 +546,11 @@ import {
   type SchedRunLogInput, // buildSchedRunLogEntry's input shape
   dispatchLogPath,       // <runsDir>/<unit>.log — shared by spawn (offset) and record (read)
   fileSizeOrZero,        // byte size of the dispatch log at spawn time, or 0
+  // #564: reconstruct a batch's dispatch costs from raw per-unit logs on
+  // disk, for batches with no runs.jsonl coverage (pre-#564, or torn down)
+  listBatchDispatchLogs,   // every raw dispatch log found for a batch id, parsed from its filename
+  buildBatchRunLogEntries, // ...to RunLogEntry rows, same shape a live dispatch produces
+  type BatchLogEntry,      // one parsed log entry (member/tail/report/fix)
   runBatchTick,          // #523: one batch reconcile+refill pass; called by tick() after
                          //   the issue pass — loads/saves state itself, holds no lock
                          //   across the call
@@ -635,7 +644,25 @@ journaled `run-log-no-usage` with a `reason` — `log-unreadable`, `log-empty`, 
 `no-usage-events` — so a row of dashes in `sched stats` can be explained without
 re-deriving it. A successful append is journaled `run-log-recorded`; a failed one,
 `run-log-failed` with the target file. Dispatches ended by `sched abandon` release the
-slot without recording, so they are not costed.
+slot without recording, so they are not costed. (`finalizeRunLogEntry` in `run-log.ts`
+is the single implementation of this journal-then-append tail, shared by
+`recordDispatchRunLog` here and batch dispatch's `recordMemberRunLog` below — #564.)
+
+**Batch members (#564).** `batch-dispatch.ts` spawns members/tail/report/fix agents
+directly (`deps.spawnDeps.spawn()`), bypassing `recordDispatchRunLog` above entirely —
+`runs.jsonl` had zero coverage for batches even after #524/#531 shipped the per-issue
+capture. `recordMemberRunLog` (`batch-dispatch.ts`) closes that gap for MEMBER
+dispatches, attributed to the same `issue:<n>` unit scheme ordinary dispatches use, so a
+member's cost shows up in the default `sched stats` view with no new read-side logic.
+Tail/report/fix agents still never write to `runs.jsonl` (wiring that in needs each of
+their spawn functions to stamp `SlotEntry.spawned_at` first, same as the original
+member bug); `sched stats --batch <id>` (`packages/sched/src/batch-stats.ts`) instead
+recovers their cost — and any historical batch's, predating #564 or already torn down —
+by reading the raw dispatch logs on disk directly, the same recovery a human previously
+did by hand (`docs/reports/batch-pilot-2-execution.md` §13). Tokens/cost/model reproduce
+exactly; `Duration`/`Tier` are always `-` for a `--batch`-reconstructed row (a raw log
+carries neither the dispatch's spawn time nor its tier) — a structural limit of
+after-the-fact recovery, not a missing-data bug.
 
 - **Crash safety**: a process killed between writes leaves the previous complete state,
   never a partial file; restart resumes identically (proved by `restart.test.ts`) —

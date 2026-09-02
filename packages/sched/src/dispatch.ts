@@ -742,6 +742,36 @@ export function dispatchLogPath(runsDir: string, unit: string): string {
 }
 
 /**
+ * Batch dispatch log path builders (#564 review) — the single definition
+ * shared by `batch-dispatch.ts`'s spawn functions (which write these paths)
+ * and `recordMemberRunLog`/`batch-stats.ts`'s `listBatchDispatchLogs` (which
+ * read/re-derive them), so construction and parsing can never silently
+ * diverge — the same rationale as `dispatchLogPath` above, at batch-member
+ * granularity. `listBatchDispatchLogs`'s regexes must stay pinned to these
+ * suffixes (`-m<n>-<issue>`, `-tail`, `-report`, `-fix-<issue>`).
+ */
+export function batchMemberLogPath(
+  runsDir: string,
+  batchId: string,
+  member: number,
+  issue: number
+): string {
+  return path.join(runsDir, `${unitLogName(`batch:${batchId}`)}-m${member}-${issue}.log`);
+}
+
+export function batchTailLogPath(runsDir: string, batchId: string): string {
+  return path.join(runsDir, `${unitLogName(`batch:${batchId}`)}-tail.log`);
+}
+
+export function batchReportLogPath(runsDir: string, batchId: string): string {
+  return path.join(runsDir, `${unitLogName(`batch:${batchId}`)}-report.log`);
+}
+
+export function batchFixLogPath(runsDir: string, batchId: string, offender: number): string {
+  return path.join(runsDir, `${unitLogName(`batch:${batchId}`)}-fix-${offender}.log`);
+}
+
+/**
  * Byte size of `file`, or 0 when it does not exist yet (#524: the log's
  * append boundary right before a spawn — `log_offset_at_spawn`). Any other
  * read error also degrades to 0 rather than throwing, since a spawn must

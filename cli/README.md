@@ -1009,7 +1009,7 @@ ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--json]
 ai-dossier sched status [--json]
 ai-dossier sched pause | resume
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
-ai-dossier sched stats [--issues 4,5|4..9] [--json]
+ai-dossier sched stats [--issues 4,5|4..9] [--batch b1 --project owner-repo] [--json]
 ```
 
 The deterministic core of batch cycles (RFC-0001): a queue, worker slots, typed
@@ -1144,13 +1144,26 @@ against ground truth.
 - **`abandon --issue`** fails the entry (recording the reason) and releases its slot;
   **`abandon --batch`** dissolves the batch and requeues every non-terminal member as
   full-cycle — members already shipped keep their outcome.
-- **`stats`** (#524) prints per-issue token/cost totals from `~/.dossier/runs.jsonl`:
-  `Issue, Runs, In, Out, Cache-W, Cache-R, Cost, Duration`, plus a `TOTAL` row, sourced
-  from the sched dispatch entries `start` now writes (see the `runs.jsonl schema` table
-  below). A field is `-`/null when *no* dispatch reported it — never a fabricated 0.
-  Unlike every other subcommand, `stats` reads the one global `runs.jsonl` file rather
-  than a `--project`-scoped state directory, so it takes only `--issues` and `--json`; the
-  same issue number dispatched from two different repos sums together in this cohort.
+- **`stats`** (#524, `--batch` #564) prints per-issue token/cost totals:
+  `Issue, Runs, In, Out, Cache-W, Cache-R, Cost, Duration, Model, Tier, Usage`, plus a
+  `TOTAL` row. A numeric field is `-`/null when *no* dispatch reported it — never a
+  fabricated 0; `Usage` reads `missing` (not blank) when a dispatch happened but reported
+  no tokens at all, distinct from `runs=0` ("nothing dispatched"). Two modes:
+  - **Default / `--issues`** reads the one global `~/.dossier/runs.jsonl` file (not a
+    `--project`-scoped state directory — the same issue number dispatched from two
+    different repos sums together in this cohort), sourced from the sched dispatch
+    entries `start` writes (see the `runs.jsonl schema` table below).
+  - **`--batch <id>`** (needs `--project`, like every other subcommand) reads that
+    project's `~/.dossier/sched/<project>/runs/` directory directly and reconstructs
+    member/tail/report/fix dispatch costs from the raw per-unit logs — this works even
+    for a batch whose scheduler state was already torn down, and is how batch member
+    costs (never in `runs.jsonl` before #564) become visible. Tail/report costs, which
+    carry no issue number, appear as one `batch-overhead (tail+report)` row rather than
+    being silently dropped. **`Duration` and `Tier` are always `-` under `--batch`** —
+    unlike the default path, these are RECONSTRUCTED from a raw log after the fact, and
+    a dispatch's spawn time and model tier are not recoverable from the log content
+    itself; this is a structural limit, not a missing-data bug (a live member dispatch
+    going forward through the default path DOES get real `Duration`/`Tier`).
 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically

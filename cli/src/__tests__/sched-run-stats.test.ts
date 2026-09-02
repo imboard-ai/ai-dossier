@@ -50,6 +50,9 @@ describe('buildSchedCostReport', () => {
         cache_read_tokens: null,
         total_cost_usd: null,
         duration_ms: null,
+        model: null,
+        tier: null,
+        usage: 'ok',
       },
       {
         issue: 524,
@@ -60,6 +63,9 @@ describe('buildSchedCostReport', () => {
         cache_read_tokens: null,
         total_cost_usd: 0.015,
         duration_ms: null,
+        model: null,
+        tier: null,
+        usage: 'ok',
       },
     ]);
     expect(report.totals).toMatchObject({ runs: 3, input_tokens: 155, output_tokens: 31 });
@@ -86,6 +92,49 @@ describe('buildSchedCostReport', () => {
       output_tokens: null,
       total_cost_usd: null,
       duration_ms: null,
+    });
+  });
+
+  describe('model/tier fields (#564 AC1)', () => {
+    it('surfaces a single model/tier reported by one dispatch', () => {
+      const report = buildSchedCostReport([
+        entry({ unit: 'issue:1', model: 'claude-sonnet-5', tier: 'mid' }),
+      ]);
+      expect(report.issues[0]).toMatchObject({ model: 'claude-sonnet-5', tier: 'mid' });
+    });
+
+    it('dedupes and sorts distinct models/tiers across an escalated redispatch', () => {
+      const report = buildSchedCostReport([
+        entry({ unit: 'issue:1', model: 'claude-sonnet-5', tier: 'mid' }),
+        entry({ unit: 'issue:1', model: 'claude-opus-5', tier: 'strong' }),
+        entry({ unit: 'issue:1', model: 'claude-sonnet-5', tier: 'mid' }), // duplicate
+      ]);
+      expect(report.issues[0]).toMatchObject({
+        model: 'claude-opus-5,claude-sonnet-5',
+        tier: 'mid,strong',
+      });
+    });
+
+    it('is null when no dispatch reported a model/tier', () => {
+      const report = buildSchedCostReport([entry({ unit: 'issue:1' })]);
+      expect(report.issues[0]).toMatchObject({ model: null, tier: null });
+    });
+  });
+
+  describe('usage field (#564 AC2)', () => {
+    it('flags a row usage=missing when a dispatch happened but reported no tokens', () => {
+      const report = buildSchedCostReport([entry({ unit: 'issue:1' })]);
+      expect(report.issues[0].usage).toBe('missing');
+    });
+
+    it('flags a row usage=ok when at least one dispatch reported tokens', () => {
+      const report = buildSchedCostReport([entry({ unit: 'issue:1', input_tokens: 10 })]);
+      expect(report.issues[0].usage).toBe('ok');
+    });
+
+    it('a zero-run synthesized row (issue asked about, no entries) is usage=ok, not missing', () => {
+      const report = buildSchedCostReport([], [1]);
+      expect(report.issues[0]).toMatchObject({ runs: 0, usage: 'ok' });
     });
   });
 

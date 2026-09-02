@@ -78,6 +78,15 @@ export interface RunLogEntry {
    * an ordinary `ai-dossier run` invocation (which has no unit).
    */
   unit?: string | null;
+  /**
+   * The escalation-ladder model tier this dispatch ran at (#564), e.g.
+   * `mechanical` | `mid` | `strong` — set by `packages/sched` dispatch
+   * entries (the queue entry's resolved tier at spawn time); null/absent for
+   * an ordinary `ai-dossier run` invocation and for reconstructed entries
+   * (`sched stats --batch`'s raw-log recovery) where the tier that spawned a
+   * historical dispatch is no longer recorded anywhere.
+   */
+  tier?: string | null;
 }
 
 /**

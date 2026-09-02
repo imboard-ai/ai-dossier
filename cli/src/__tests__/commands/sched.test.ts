@@ -760,6 +760,9 @@ describe('ai-dossier sched stats (#524: per-issue token/cost from runs.jsonl)', 
           cache_read_tokens: null,
           total_cost_usd: null,
           duration_ms: null,
+          model: null,
+          tier: null,
+          usage: 'ok',
         },
         {
           issue: 524,
@@ -770,6 +773,9 @@ describe('ai-dossier sched stats (#524: per-issue token/cost from runs.jsonl)', 
           cache_read_tokens: null,
           total_cost_usd: 0.015,
           duration_ms: 8000,
+          model: null,
+          tier: null,
+          usage: 'ok',
         },
       ]);
       expect(report.totals).toMatchObject({ runs: 3, input_tokens: 1510, output_tokens: 302 });
@@ -813,5 +819,93 @@ describe('ai-dossier sched stats (#524: per-issue token/cost from runs.jsonl)', 
     expect(out).toContain('#524');
     expect(out).toContain('TOTAL');
     expect(out).toContain('$0.0100');
+  });
+});
+
+describe('ai-dossier sched stats --batch (#564: reconstructed directly from raw dispatch logs)', () => {
+  function batchRunsDir(project = 'test-proj'): string {
+    const dir = path.join(home, '.dossier', 'sched', project, 'runs');
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  function fakeResultJson(costUsd: number, inputTokens: number, outputTokens: number): string {
+    return JSON.stringify({
+      type: 'result',
+      total_cost_usd: costUsd,
+      modelUsage: {
+        'claude-sonnet-5': { inputTokens, outputTokens, costUSD: costUsd },
+      },
+    });
+  }
+
+  it('reports per-member costs reconstructed from raw logs, plus a batch-overhead line for tail/report', async () => {
+    const dir = batchRunsDir();
+    fs.writeFileSync(
+      path.join(dir, 'batch-b1-m1-540.log'),
+      fakeResultJson(2.518, 6_214_824, 47_071)
+    );
+    fs.writeFileSync(
+      path.join(dir, 'batch-b1-m2-542.log'),
+      fakeResultJson(2.606, 6_573_453, 49_888)
+    );
+    fs.writeFileSync(path.join(dir, 'batch-b1-tail.log'), fakeResultJson(0.5, 100_000, 5_000));
+
+    await runSched(['sched', 'stats', '--batch', 'b1', '--project', 'test-proj', '--json']);
+
+    const report = JSON.parse(logs.join(''));
+    expect(report.batch).toBe('b1');
+    expect(report.project).toBe('test-proj');
+    expect(report.issues.map((r: { issue: number }) => r.issue)).toEqual([540, 542]);
+    expect(report.issues.find((r: { issue: number }) => r.issue === 540)).toMatchObject({
+      total_cost_usd: 2.518,
+      input_tokens: 6_214_824,
+    });
+    expect(report.overhead_runs).toBe(1); // the tail log
+    // #564 review: the overhead totals must reflect the tail log's ACTUAL
+    // cost, not an all-null row from round-tripping `batch:<id>`-unit
+    // entries through `buildSchedCostReport` (which only aggregates
+    // `issue:<n>` units and silently zeroes anything else).
+    expect(report.overhead).toMatchObject({ runs: 1, total_cost_usd: 0.5, input_tokens: 100_000 });
+  });
+
+  it('the table also shows the batch-overhead row with real, non-zero totals (not an all-null round-trip bug)', async () => {
+    const dir = batchRunsDir();
+    fs.writeFileSync(
+      path.join(dir, 'batch-b1-m1-540.log'),
+      fakeResultJson(2.518, 6_214_824, 47_071)
+    );
+    fs.writeFileSync(path.join(dir, 'batch-b1-tail.log'), fakeResultJson(0.5, 100_000, 5_000));
+
+    await runSched(['sched', 'stats', '--batch', 'b1', '--project', 'test-proj']);
+
+    const out = logs.join('\n');
+    expect(out).toContain('batch-overhead');
+    expect(out).toContain('$0.5000');
+    expect(out).toContain('100000');
+  });
+
+  it('renders a table with a batch-overhead row and usage=missing for an unparseable log', async () => {
+    const dir = batchRunsDir();
+    fs.writeFileSync(path.join(dir, 'batch-b1-m1-540.log'), 'plain text, no modelUsage JSON here');
+
+    await runSched(['sched', 'stats', '--batch', 'b1', '--project', 'test-proj']);
+
+    const out = logs.join('\n');
+    expect(out).toContain('#540');
+    expect(out).toContain('missing');
+    expect(out).toContain('TOTAL (members)');
+  });
+
+  it('prints a message and no table when no logs exist for the batch', async () => {
+    batchRunsDir();
+    await runSched(['sched', 'stats', '--batch', 'nonexistent', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain("No dispatch logs found for batch 'nonexistent'");
+  });
+
+  it('rejects combining --batch with --issues', async () => {
+    await expect(
+      runSched(['sched', 'stats', '--batch', 'b1', '--issues', '5', '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
   });
 });
