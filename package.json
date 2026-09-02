@@ -21,6 +21,7 @@
     "format": "biome format --write .",
     "fleet:cli-audit": "bash scripts/fleet-cli-audit.sh",
     "fleet:tick": "bash scripts/sched-fleet/tick.sh",
+    "scorecard": "node scripts/model-scorecard.mjs",
     "check": "biome check --write .",
     "prepare": "husky",
     "publish:core": "cd packages/core && npm run build && npm publish",

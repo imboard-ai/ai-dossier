@@ -25,6 +25,10 @@
   },
   "overrides": [
     {
+      "includes": ["docs/reports/evidence/**"],
+      "formatter": { "enabled": false }
+    },
+    {
       "includes": ["**/*.test.ts", "**/*.test.js"],
       "linter": {
         "rules": {

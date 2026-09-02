@@ -8,9 +8,12 @@ import {
   isUsableTimestamp,
   MAX_NAMED_ALIASES,
   MERGE_WAIT_PHASE,
+  MODEL_ALIASES,
+  MODEL_ROUTING_PREFIXES,
   type ModelAggregate,
   median,
   modelNote,
+  providerOf,
   renderValue,
   STATS_PHASE_ORDER,
   skewNote,
@@ -773,7 +776,21 @@ describe('canonicalModel — routing prefixes folded into one bucket', () => {
   });
 
   it('strips the gateway alias marker and lowercases', () => {
-    expect(canonicalModel('~z-ai/GLM-Latest')).toBe('glm-latest');
+    expect(canonicalModel('~z-ai/GLM-5.3')).toBe('glm-5.3');
+  });
+
+  it('strips a gateway alias marker that sits mid-id, not just at the front', () => {
+    // opencode writes the `~` on the segment it aliases. Peeling it only at the front left
+    // `z-ai/` unmatched on the next pass, so AC2's own example stranded itself in a
+    // `z-ai/glm-latest` bucket instead of folding (imboard-ai/ai-dossier#566).
+    expect(canonicalModel('openrouter/~z-ai/glm-5.3')).toBe('glm-5.3');
+    expect(canonicalModel('openrouter/~z-ai/glm-latest')).toBe(canonicalModel('glm-5.3'));
+  });
+
+  it("peels OpenRouter's z.ai coding-plan slug", () => {
+    // The split this prefix was added for: a real trail carried `zai-coding-plan/glm-5.3`
+    // beside 41 runs of bare `glm-5.3`, and the near-duplicate warning named it.
+    expect(canonicalModel('zai-coding-plan/glm-5.3')).toBe('glm-5.3');
   });
 
   it('peels a chain of routing prefixes', () => {
@@ -792,7 +809,101 @@ describe('canonicalModel — routing prefixes folded into one bucket', () => {
   });
 
   it('keeps distinct model versions distinct', () => {
-    expect(canonicalModel('llmgateway/glm-5.3')).not.toBe(canonicalModel('z-ai/glm-latest'));
+    expect(canonicalModel('llmgateway/glm-5.3')).not.toBe(canonicalModel('z-ai/glm-4.6'));
+  });
+});
+
+describe('canonicalModel — declared moving tags fold onto their pin (#566 AC2)', () => {
+  it('folds every routed spelling of a declared tag onto one key', () => {
+    // AC2 states the mapping verbatim: glm-5.3 = llmgateway/glm-5.3 = openrouter/~z-ai/glm-latest.
+    const keys = new Set(
+      ['glm-5.3', 'llmgateway/glm-5.3', 'openrouter/~z-ai/glm-latest'].map(canonicalModel)
+    );
+    expect([...keys]).toEqual(['glm-5.3']);
+  });
+
+  it('resolves the alias after routing prefixes are peeled, not before', () => {
+    expect(canonicalModel('llmgateway/glm-latest')).toBe('glm-5.3');
+  });
+
+  it('leaves an undeclared moving tag alone rather than guessing its pin', () => {
+    // kimi-latest has two plausible pins in the fleet (kimi-k3, kimi-k3-fast). A guessed
+    // alias misattributes cost and quality silently; a missing one only splits a row.
+    expect(canonicalModel('kimi-latest')).toBe('kimi-latest');
+    expect(MODEL_ALIASES['kimi-latest']).toBeUndefined();
+  });
+
+  it('never lets an alias value be reached by remote input', () => {
+    // Alias keys are matched post-fold, so a milestone cannot smuggle in a mapping.
+    for (const [tag, pin] of Object.entries(MODEL_ALIASES)) {
+      expect(canonicalModel(tag)).toBe(pin);
+      expect(canonicalModel(pin)).toBe(pin);
+    }
+  });
+
+  it('does not resolve an inherited Object key through the alias table', () => {
+    // `model=` is read off a public issue comment. A bare `MODEL_ALIASES[value]` returned
+    // `Object`'s own members for these ids -- and `??` does not treat a function as absent
+    // -- so `canonicalModel` returned a non-string and every caller that used a string
+    // method on it crashed, taking the whole stats report down with it.
+    for (const key of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      expect(canonicalModel(key)).toBe(key.toLowerCase());
+      expect(typeof canonicalModel(key)).toBe('string');
+    }
+  });
+
+  it('survives a forged model= end to end rather than throwing', () => {
+    const trail: IssueTrail = {
+      issue: 1,
+      milestones: parseMilestones([
+        `${RUNSTATE_MARKER}\nphase=gate status=done run=r-1-aaaa at=2026-08-26T00:00:00Z model=constructor next=setup`,
+        `${RUNSTATE_MARKER}\nphase=ship status=done run=r-1-aaaa at=2026-08-26T02:00:00Z next=report`,
+      ]),
+    };
+    const report = buildStatsReport({ trails: [trail], repo: 'o/r' });
+    expect(report.aggregates.models.map((m) => m.model)).toContain('constructor');
+  });
+});
+
+describe('MODEL_ROUTING_PREFIXES — ordering invariant', () => {
+  it('never lists a prefix after one that is a prefix of it', () => {
+    // `stripRoutingPrefix` takes the FIRST match, so a shorter entry listed ahead of a
+    // longer one that starts with it peels the short form and mangles the id
+    // (`zai-` off `zai-coding-plan/glm-5.3` leaves `coding-plan/glm-5.3`, which folds with
+    // nothing). Asserted rather than left to the comment, since the list is hand-edited.
+    for (let i = 0; i < MODEL_ROUTING_PREFIXES.length; i++) {
+      for (let j = i + 1; j < MODEL_ROUTING_PREFIXES.length; j++) {
+        const earlier = MODEL_ROUTING_PREFIXES[i];
+        const later = MODEL_ROUTING_PREFIXES[j];
+        expect(
+          later.startsWith(earlier),
+          `'${earlier}' is listed before '${later}', which it would shadow`
+        ).toBe(false);
+      }
+    }
+  });
+});
+
+describe('providerOf — which gateway served the run (#566 AC2 sub-row)', () => {
+  it('reports the routing chain in the order it appears', () => {
+    expect(providerOf('llmgateway/glm-5.3')).toBe('llmgateway');
+    expect(providerOf('openrouter/~z-ai/glm-latest')).toBe('openrouter/z-ai');
+    expect(providerOf('llmgateway/openrouter-kimi-latest')).toBe('llmgateway/openrouter');
+  });
+
+  it('reports null for a bare model id — no provider was named', () => {
+    expect(providerOf('claude-opus-5')).toBeNull();
+    expect(providerOf('glm-5.3')).toBeNull();
+  });
+
+  it('does not invent a provider from an unrecognised leading segment', () => {
+    expect(providerOf('acme/glm-5.3')).toBeNull();
+  });
+
+  it('survives the fold: one model key, two providers', () => {
+    const ids = ['llmgateway/glm-5.3', 'zai-coding-plan/glm-5.3'];
+    expect(new Set(ids.map(canonicalModel)).size).toBe(1);
+    expect(ids.map(providerOf)).toEqual(['llmgateway', 'zai-coding-plan']);
   });
 });
 
