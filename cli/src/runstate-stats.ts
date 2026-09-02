@@ -15,6 +15,7 @@ import { MILLIS_PER_SECOND } from './duration';
 import {
   ALL_PHASES,
   type BatchPhase,
+  CLASSIFY_PHASE,
   type ParsedMilestone,
   type Phase,
   type Status,
@@ -47,6 +48,7 @@ export const BATCH_MERGE_WAIT_PHASE = 'batch-merge-wait';
 const SHIP_PHASE: Phase = 'ship';
 const GATE_PHASE: Phase = 'gate';
 const REPORT_PHASE: Phase = 'report';
+const REVIEW_PHASE: Phase = 'review';
 const BATCH_SHIP_PHASE: BatchPhase = 'batch-ship';
 const BATCH_REPORT_PHASE: BatchPhase = 'batch-report';
 const AWAITING_MERGE: Status = 'awaiting-merge';
@@ -76,6 +78,17 @@ export const STATS_PHASE_ORDER: readonly string[] = ALL_PHASES.flatMap((phase) =
  * would let anyone who can comment on an issue steer the "we could not attribute this" row.
  */
 export const UNKNOWN_MODEL = '<unknown>';
+
+/**
+ * The class bucket for a run whose issue carries no classifier verdict.
+ *
+ * Bracketed like {@link UNKNOWN_MODEL} and for the same reason: `risk=` is a closed
+ * enum (`low`/`med`/`high`), so no real verdict can collide with this key, and an issue
+ * that was never classified is reported as its own row rather than folded into `low`.
+ * On this repo the unclassified row is the *majority* today — the classifier is newer
+ * than most of the corpus — so hiding it would overstate the class axis's coverage.
+ */
+export const UNCLASSIFIED_CLASS = '<unclassified>';
 
 /**
  * Gateway and provider tokens stripped from a recorded `model=` to find its bucket.
@@ -306,6 +319,28 @@ export interface RunStats {
   run: string;
   /** The `model=` recorded by the run (see {@link modelOf}), or null. */
   model: string | null;
+  /**
+   * The classifier's `risk=` verdict for this run's ISSUE (see {@link classificationOf}), or
+   * null when the issue was never classified. Issue-level: every run of one issue shares it.
+   */
+  risk_class: string | null;
+  /** The classifier's `mode=` verdict for this run's issue (`slot`/`full`), or null. */
+  classified_mode: string | null;
+  /**
+   * True when this run is the classifier's own dispatch and nothing else.
+   *
+   * A classify run posts one milestone, records no `model=`, and never ships — so counted as
+   * a cycle run it reads as an `<unknown>`-model run that failed to deliver, dragging that
+   * bucket's rate down by however many issues the classifier has touched. It is a different
+   * kind of work, so the model and class tables exclude it and say so.
+   */
+  classify_only: boolean;
+  /** The run's settled `escalated=` count from its last `review` milestone, or null. */
+  escalated: number | null;
+  /** The run's `ac_met=` from its last `review` milestone, or null. */
+  ac_met: number | null;
+  /** The run's `ac_total=` from its last `review` milestone, or null. */
+  ac_total: number | null;
   phases: PhaseTiming[];
   /** The last milestone's phase — how far the run actually got. */
   last_phase: string;
@@ -379,12 +414,71 @@ export interface ModelAggregate {
    * or read `unfinished` alongside this.
    */
   delivery_rate: number;
+  /** Runs of this model that reported `escalated=` at all — the rate's denominator. */
+  escalation_runs: number;
+  /** Total findings this model's runs handed back to a human, summed over those runs. */
+  escalations: number;
+  /**
+   * `escalations / escalation_runs`, or null when no run of this model reached review.
+   *
+   * Null rather than `0` on purpose: a model whose runs all blocked before review has not
+   * demonstrated a zero escalation rate, it has demonstrated nothing, and the two must not
+   * render identically in the table an operator routes a tier from.
+   */
+  escalation_rate: number | null;
+  /** Runs of this model whose review reported an `ac_total=` greater than zero. */
+  conformance_runs: number;
+  /** Acceptance criteria those runs were judged against, summed. */
+  conformance_criteria: number;
+  /** Of those criteria, the ones blind conformance scored NOT met. */
+  conformance_not_met: number;
+  /**
+   * `conformance_not_met / conformance_criteria`, or null when no criteria were judged.
+   *
+   * Weighted by criteria rather than by run, so a 6-AC issue counts for six times a 1-AC
+   * one — the question is how often this model leaves a requirement unmet, not how often it
+   * happens to have a bad day.
+   */
+  conformance_not_met_rate: number | null;
 }
 
-/** The two cross-run rollups: per-phase spread, and whole-run totals bucketed by model. */
+/**
+ * One `model × class` cell — the axis AC3 of `imboard-ai/ai-dossier#528` asks for.
+ *
+ * The per-model table answers "which models finish the work"; it cannot answer "which tiers
+ * are safe for WHICH CLASSES", because a model's runs over trivial docs issues and over
+ * high-risk protocol changes land in one row and average each other out. Splitting the same
+ * bucket contract by the classifier's own `risk=` verdict is what makes a tier→class routing
+ * recommendation evidence-backed rather than a guess.
+ *
+ * Deliberately mirrors {@link ModelAggregate}'s counters and reuses {@link isCompleted}, so a
+ * class row can never disagree with the model row it sums into about what "delivered" means.
+ */
+export interface ClassAggregate {
+  /** Canonical bucket key — see {@link canonicalModel}. */
+  model: string;
+  /** The issue's `risk=` verdict, or {@link UNCLASSIFIED_CLASS}. */
+  risk_class: string;
+  runs: number;
+  delivered: number;
+  blocked: number;
+  unfinished: number;
+  /** `delivered / runs` — the same floor, with the same caveats, as {@link ModelAggregate}. */
+  delivery_rate: number;
+  escalation_runs: number;
+  escalations: number;
+  conformance_criteria: number;
+  conformance_not_met: number;
+}
+
+/**
+ * The cross-run rollups: per-phase spread, whole-run totals by model, and those totals
+ * split again by the classifier's risk verdict.
+ */
 export interface StatsAggregates {
   phases: PhaseAggregate[];
   models: ModelAggregate[];
+  classes: ClassAggregate[];
 }
 
 /** An issue in the selection that could not be read at all, and why. */
@@ -522,6 +616,7 @@ function timePhases(
   issue: number,
   run: string,
   milestones: ParsedMilestone[],
+  classification: { risk: string | null; mode: string | null },
   warn: Warn
 ): RunStats {
   const phases: PhaseTiming[] = [];
@@ -566,10 +661,17 @@ function timePhases(
   }
 
   const last = milestones[milestones.length - 1];
+  const review = lastReviewOf(milestones);
   return {
     issue,
     run,
     model: modelOf(milestones),
+    risk_class: classification.risk,
+    classified_mode: classification.mode,
+    classify_only: milestones.every((m) => m.phase === CLASSIFY_PHASE),
+    escalated: countKey(review, 'escalated'),
+    ac_met: countKey(review, 'ac_met'),
+    ac_total: countKey(review, 'ac_total'),
     phases,
     last_phase: last?.phase ?? '',
     last_status: last?.status ?? '',
@@ -594,6 +696,52 @@ function modelOf(milestones: ParsedMilestone[]): string | null {
   const gate = milestones.find((m) => m.phase === GATE_PHASE && m.keys.model);
   if (gate) return gate.keys.model;
   return milestones.find((m) => m.keys.model)?.keys.model ?? null;
+}
+
+/**
+ * The classifier's verdict for an issue — the class axis's key.
+ *
+ * An issue-level attribute, not a run-level one, and that distinction is the whole reason
+ * this function takes the trail rather than a run's milestones. The classifier posts its
+ * verdict under its **own** `run=` (`r-540-edcf` classifies what `r-540-…` then implements),
+ * so a per-run lookup would find `risk=` on the classify run and nothing on the cycle run
+ * that actually did the work — the one run the class axis exists to bucket.
+ *
+ * Same precedence shape as {@link modelOf}: the `classify` milestone is authoritative, and
+ * any other milestone carrying the key is a fallback rather than reporting a trail that
+ * plainly states its class as unclassified.
+ */
+function classificationOf(milestones: ParsedMilestone[]): {
+  risk: string | null;
+  mode: string | null;
+} {
+  const classify = milestones.find((m) => m.phase === CLASSIFY_PHASE && m.keys.risk);
+  const source = classify ?? milestones.find((m) => m.keys.risk);
+  return { risk: source?.keys.risk ?? null, mode: source?.keys.mode ?? null };
+}
+
+/**
+ * A milestone key read as a non-negative count, or null when it is absent or unreadable.
+ *
+ * Null and zero mean different things here and must not collapse: `escalated=0` is a run
+ * that reviewed and escalated nothing, while a missing key is a run that never reported.
+ * Averaging the second as a zero would silently reward runs that skipped review.
+ */
+function countKey(milestone: ParsedMilestone | undefined, key: string): number | null {
+  const raw = milestone?.keys[key];
+  if (raw === undefined) return null;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+/**
+ * The run's last `review` milestone — the one whose counters are current.
+ *
+ * Review can post twice on one run (`partial`, then `done` after the pending agents finish),
+ * and only the later comment carries the settled `escalated=`/`ac_met=` figures.
+ */
+function lastReviewOf(milestones: ParsedMilestone[]): ParsedMilestone | undefined {
+  return milestones.filter((m) => m.phase === REVIEW_PHASE).at(-1);
 }
 
 /** Per-phase median/min/max across every run in the report. */
@@ -651,35 +799,84 @@ function isCompleted(run: RunStats): boolean {
   return run.last_status === DONE && DELIVERED_PHASES.includes(run.last_phase);
 }
 
+/**
+ * The runs the model and class tables are built from.
+ *
+ * A classify run is the classifier's own dispatch — one milestone, no `model=`, no ship — so
+ * it is not a cycle run and counting it as one would report the classifier's every verdict as
+ * an `<unknown>`-model run that failed to deliver.
+ */
+function cycleRuns(runs: RunStats[]): RunStats[] {
+  return runs.filter((run) => !run.classify_only);
+}
+
+/** The counters both tables share, accumulated the same way so their rows always agree. */
+interface OutcomeCounters {
+  runs: number;
+  delivered: number;
+  blocked: number;
+  escalationRuns: number;
+  escalations: number;
+  conformanceRuns: number;
+  conformanceCriteria: number;
+  conformanceNotMet: number;
+}
+
+function emptyCounters(): OutcomeCounters {
+  return {
+    runs: 0,
+    delivered: 0,
+    blocked: 0,
+    escalationRuns: 0,
+    escalations: 0,
+    conformanceRuns: 0,
+    conformanceCriteria: 0,
+    conformanceNotMet: 0,
+  };
+}
+
+function countRun(counters: OutcomeCounters, run: RunStats): void {
+  counters.runs += 1;
+  if (isCompleted(run)) counters.delivered += 1;
+  else if (run.last_status === BLOCKED) counters.blocked += 1;
+
+  if (run.escalated !== null) {
+    counters.escalationRuns += 1;
+    counters.escalations += run.escalated;
+  }
+  // `ac_total=0` is a review that judged nothing, not a run with a perfect record — it
+  // contributes no criteria and must not enter the denominator.
+  if (run.ac_total !== null && run.ac_total > 0 && run.ac_met !== null) {
+    counters.conformanceRuns += 1;
+    counters.conformanceCriteria += run.ac_total;
+    // Clamped: a malformed trail claiming more met than total would otherwise subtract
+    // from the not-met total and understate every bucket it lands in.
+    counters.conformanceNotMet += Math.max(0, run.ac_total - run.ac_met);
+  }
+}
+
 /** Whole-run totals and outcomes bucketed by `model=`, so runs become comparable across models. */
 function aggregateModels(runs: RunStats[]): ModelAggregate[] {
-  interface Bucket {
-    runs: number;
+  interface Bucket extends OutcomeCounters {
     totals: number[];
     aliases: Set<string>;
-    delivered: number;
-    blocked: number;
   }
   const buckets = new Map<string, Bucket>();
 
-  for (const run of runs) {
+  for (const run of cycleRuns(runs)) {
     const key = run.model === null ? UNKNOWN_MODEL : canonicalModel(run.model);
     const bucket = buckets.get(key) ?? {
-      runs: 0,
+      ...emptyCounters(),
       totals: [],
       aliases: new Set<string>(),
-      delivered: 0,
-      blocked: 0,
     };
-    bucket.runs += 1;
+    countRun(bucket, run);
     // Only a spelling someone actually recorded is an alias. The unknown bucket's runs
     // recorded nothing, so inventing `<unknown>` there would put a value in `aliases` that
     // appears in no trail — and make a run that literally recorded `model=unknown`
     // indistinguishable from one with no `model=` at all.
     if (run.model !== null) bucket.aliases.add(run.model);
     if (run.total_seconds !== null) bucket.totals.push(run.total_seconds);
-    if (isCompleted(run)) bucket.delivered += 1;
-    else if (run.last_status === BLOCKED) bucket.blocked += 1;
     buckets.set(key, bucket);
   }
 
@@ -699,9 +896,76 @@ function aggregateModels(runs: RunStats[]): ModelAggregate[] {
         blocked: bucket.blocked,
         unfinished: bucket.runs - bucket.delivered - bucket.blocked,
         delivery_rate: bucket.delivered / bucket.runs,
+        escalation_runs: bucket.escalationRuns,
+        escalations: bucket.escalations,
+        escalation_rate:
+          bucket.escalationRuns > 0 ? bucket.escalations / bucket.escalationRuns : null,
+        conformance_runs: bucket.conformanceRuns,
+        conformance_criteria: bucket.conformanceCriteria,
+        conformance_not_met: bucket.conformanceNotMet,
+        conformance_not_met_rate:
+          bucket.conformanceCriteria > 0
+            ? bucket.conformanceNotMet / bucket.conformanceCriteria
+            : null,
       };
     })
     .sort((a, b) => a.model.localeCompare(b.model));
+}
+
+/**
+ * Order the class rows put the operator's question first: worst class, then worst model.
+ *
+ * `high` before `med` before `low` before unclassified, because "is this model safe for the
+ * risky class" is the routing decision; alphabetical order would bury it under `low`.
+ */
+const CLASS_ORDER: readonly string[] = ['high', 'med', 'low'];
+
+function byClassOrder(a: ClassAggregate, b: ClassAggregate): number {
+  const ai = CLASS_ORDER.indexOf(a.risk_class);
+  const bi = CLASS_ORDER.indexOf(b.risk_class);
+  if (ai !== bi) {
+    if (ai === -1) return 1;
+    if (bi === -1) return -1;
+    return ai - bi;
+  }
+  if (a.risk_class !== b.risk_class) return a.risk_class.localeCompare(b.risk_class);
+  return a.model.localeCompare(b.model);
+}
+
+/**
+ * The same whole-run outcomes, split again by the issue's classifier verdict (AC3).
+ *
+ * Keyed on the canonical model so PR #546's alias fold is not undone here — a class table
+ * that re-split `glm-5.3` from `llmgateway/glm-5.3` would reintroduce the exact defect the
+ * model table was fixed for, one axis over.
+ */
+function aggregateClasses(runs: RunStats[]): ClassAggregate[] {
+  const buckets = new Map<string, OutcomeCounters & { model: string; risk_class: string }>();
+
+  for (const run of cycleRuns(runs)) {
+    const model = run.model === null ? UNKNOWN_MODEL : canonicalModel(run.model);
+    const risk_class = run.risk_class ?? UNCLASSIFIED_CLASS;
+    const key = `${model} ${risk_class}`;
+    const bucket = buckets.get(key) ?? { ...emptyCounters(), model, risk_class };
+    countRun(bucket, run);
+    buckets.set(key, bucket);
+  }
+
+  return [...buckets.values()]
+    .map((bucket) => ({
+      model: bucket.model,
+      risk_class: bucket.risk_class,
+      runs: bucket.runs,
+      delivered: bucket.delivered,
+      blocked: bucket.blocked,
+      unfinished: bucket.runs - bucket.delivered - bucket.blocked,
+      delivery_rate: bucket.delivered / bucket.runs,
+      escalation_runs: bucket.escalationRuns,
+      escalations: bucket.escalations,
+      conformance_criteria: bucket.conformanceCriteria,
+      conformance_not_met: bucket.conformanceNotMet,
+    }))
+    .sort(byClassOrder);
 }
 
 /**
@@ -752,6 +1016,38 @@ function modelWarnings(models: ModelAggregate[]): string[] {
   }
 
   return warnings;
+}
+
+/** Rates are fractions in [0, 1]; this is the only place they become percentages. */
+const PERCENT = 100;
+
+/**
+ * What the class table could not measure — the same contract as {@link modelWarnings}.
+ *
+ * The class axis is only as good as the classifier's coverage of the corpus, and coverage is
+ * the one thing a reader cannot see from the rows: an `<unclassified>` row looks like just
+ * another class rather than "most of this table has no class at all". Stating the share makes
+ * a thin axis obvious instead of letting a two-run `low` row read as a verdict on `low`.
+ */
+function classWarnings(classes: ClassAggregate[]): string[] {
+  const total = classes.reduce((sum, c) => sum + c.runs, 0);
+  if (total === 0) return [];
+
+  const unclassified = classes
+    .filter((c) => c.risk_class === UNCLASSIFIED_CLASS)
+    .reduce((sum, c) => sum + c.runs, 0);
+
+  // Same rule the unknown-model bucket follows, for the same reason: a table that is ALL
+  // unclassified offers no class comparison to misread — it visibly has one row per model —
+  // and warning there would fire on almost every historical trail, since the classifier is
+  // newer than the corpus. The misreadable case is the MIXED one, where a two-run `low` row
+  // sits beside a large unclassified row and looks like a verdict on `low`.
+  if (unclassified === 0 || unclassified === total) return [];
+
+  const share = Math.round((unclassified / total) * PERCENT);
+  return [
+    `${unclassified} of ${total} run(s) (${share}%) carry no classifier risk= verdict — they are bucketed as ${UNCLASSIFIED_CLASS}, so the class rows describe only the classified remainder`,
+  ];
 }
 
 /** One aggregate row's skew note, or null when every sample was forwards. */
@@ -817,18 +1113,23 @@ export function buildStatsReport(input: StatsInput): StatsReport {
       withoutTrail.push(trail.issue);
       continue;
     }
+    // Read once per ISSUE, before the runs are split: the classifier posts its verdict under
+    // its own run= id, so the cycle run that did the work never carries it (see
+    // classificationOf) and a per-run lookup would find nothing to bucket on.
+    const classification = classificationOf(trail.milestones);
     for (const [run, milestones] of groupByRun(trail.milestones)) {
       if (run === UNKNOWN_RUN) {
         warn(
           `issue ${issueRef(repo, trail.issue)}: ${milestones.length} milestone(s) carry no run= id — grouped together as '${UNKNOWN_RUN}', so their durations may span unrelated runs`
         );
       }
-      runs.push(timePhases(repo, trail.issue, run, milestones, warn));
+      runs.push(timePhases(repo, trail.issue, run, milestones, classification, warn));
     }
   }
 
   const phases = aggregatePhases(runs);
   const models = aggregateModels(runs);
+  const classes = aggregateClasses(runs);
   for (const phase of phases) {
     if (phase.negative_samples > 0) {
       warn(
@@ -837,12 +1138,13 @@ export function buildStatsReport(input: StatsInput): StatsReport {
     }
   }
   for (const line of modelWarnings(models)) warn(line);
+  for (const line of classWarnings(classes)) warn(line);
 
   return {
     repo,
     issues: trails.map((t) => t.issue),
     runs,
-    aggregates: { phases, models },
+    aggregates: { phases, models, classes },
     issues_without_trail: withoutTrail,
     issues_failed: failed,
     warnings: [...counts.entries()].map(([line, n]) => (n > 1 ? `${line} (×${n})` : line)),

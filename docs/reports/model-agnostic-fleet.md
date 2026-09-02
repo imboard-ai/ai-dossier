@@ -1,7 +1,17 @@
 # Model-agnostic fleet validation — claude arm vs open-weights arm
 
-**Status: PARTIAL — instrument fixed, retrospective measured, pre-registered live run NOT executed.**
-**Run:** `r-528-655b` (generation 1) · issue [#528](https://github.com/imboard-ai/ai-dossier/issues/528) · executing host: `hcc2` · 2026-09-01
+**Status: PARTIAL — instrument fixed, class axis built, retrospective measured, pre-registered live run NOT executed.**
+
+| part | run | date | what it did |
+|---|---|---|---|
+| Part I (§1–§7) | `r-528-655b` (gen 1) | 2026-09-01 | fixed the `model=` bucketing defect; wrote the retrospective and the §5 protocol; escalated the live-run decision |
+| [Part II](#part-ii--run-r-528-8ccf-2026-09-02-hcc2) (§8–§12) | `r-528-8ccf` (gen 0, slot 1) | 2026-09-02 | built AC3's missing `model × class` axis and AC2's two guardrail metrics; re-read the corpus through them; **re-escalated AC1 — option C's premise did not survive** |
+
+Executing host for both: `hcc2`. Issue: [#528](https://github.com/imboard-ai/ai-dossier/issues/528).
+
+> **Part I's §1–§7 are left as generation 1 wrote them.** Where Part II supersedes a figure or a
+> verdict it says so and cites the row; nothing in Part I is edited after the fact, so the two runs
+> stay independently auditable. The scorecard immediately below is Part II's, and is the current one.
 
 ## Recommendation
 
@@ -22,7 +32,23 @@ pre-registered run is specified in §5, together with the one owner decision blo
 
 ### Acceptance-criteria scorecard
 
-Verdicts from this run's independent (blind) conformance review, not from the author:
+**Current, as of Part II (`r-528-8ccf`, 2026-09-02).** Generation 1's scorecard is preserved
+verbatim below it, so the movement between the two runs is visible rather than overwritten.
+
+| AC | Part I | Part II | why it moved |
+|---|---|---|---|
+| AC1 — two-arm live cohort, ≥8 issues per arm | NOT MET | **NOT MET** | still no live dispatch — and the deferral that was supposed to unblock it did not hold (§9) |
+| AC2 — per-arm metrics (7 named) | PARTIAL | **PARTIAL** | escalations/issue and conformance-not-met rate are now measured per model and per class (§10); tokens+$ and the 7-day window remain out of the trail |
+| AC3 — per-model breakdown, "which tiers are safe for which classes" | PARTIAL | **PARTIAL** | the per-class axis now exists and is populated (§10, §11) — still PARTIAL because the classifier covers only 23% of this corpus, so the axis is real but thin |
+| AC4 — tier→model mapping, rescue justified by measured escalation frequency | PARTIAL | **PARTIAL** | the mapping is now per class, not just per project (§11.3); the rescue-tier justification still needs the live run |
+| AC5 — open-weights failures not caught by guardrails get their own issue | PARTIAL | **PARTIAL** | unchanged — the exercise that would surface them still has not run |
+
+`ac_met=0 ac_total=5` remains the honest score: every AC has moved, none has closed.
+**#528 stays open**, and §12 restates the one decision that closes AC1.
+
+---
+
+Generation 1's scorecard, from that run's independent (blind) conformance review:
 
 | AC | verdict | why |
 |---|---|---|
@@ -305,3 +331,258 @@ instrument fix in this PR is the prerequisite, and it lands either way.
 - Prior reports: `docs/reports/sched-parity.md` (#471), `docs/reports/batch-pilot-2-execution.md` (#526).
 - Trails cited: #460 (`reason=publish-e404-new-scope-package`), #472 (`tier=full`, `escalated=1`,
   `ac_met=6/6`), imboard-monorepo #3414 (`plan`, `decision-pending`).
+
+---
+
+# Part II — run `r-528-8ccf` (2026-09-02, hcc2)
+
+Dispatched by the scheduler as a strong-tier `full` unit on `imboard-ai-ai-dossier` slot 1 at
+14:30:12Z, four minutes after its dependency #526 closed. Generation 0 of a fresh run id — not a
+resume of `r-528-655b`; §8.1 explains why that distinction was the first decision of the run.
+
+**Headline: the class axis AC3 asks for now exists and is populated — and the deferral that was
+supposed to unblock AC1 did not survive contact with what #526 actually delivered.**
+
+## 8. Environment and entry
+
+| | |
+|---|---|
+| host | `hcc2` (16 vCPU / 30 GB) |
+| `@ai-dossier/cli` | 0.32.0 at dispatch → 0.33.0 in this PR |
+| base | `7cccbb5` (`docs(reports): batch pilot attempt 3 — execution record (#584)`) |
+| slot | `imboard-ai-ai-dossier` slot 1, pid 1637242, `claude -p --model opus` |
+| model | `claude-opus-5` |
+
+### 8.1 Entry mode — the run did not resume into `report` (trap #582)
+
+`ai-dossier runstate verify --issue 528 --json` returned `resume_from=report`, reusing the finished
+`r-528-655b`. Obeying it would have posted a second report milestone for work never done and exited
+reporting success. That is `docs/agent-traps.md`'s open row for **#582**, and the same rail that
+nearly lost #526's attempt 3 (`batch-pilot-2-execution.md` §18.1) six hours earlier.
+
+The run entered **FRESH** instead — `r-528-8ccf`, `prior_run=r-528-655b`, gen 0 — after
+cross-checking the slot's `spawned_at` (14:30:12Z) against the report milestone's `at=`
+(2026-09-01T22:55:23Z). #576 already taught the *engine* rail this rule (`isVerifiedComplete`
+refuses a `report/done` older than the slot's dispatch); `runstate verify` still disagrees with it.
+**Second independent sighting of #582 in one day, on a different issue** — the defect is not
+specific to #526's re-enqueue, and the gate rail should be brought in line with the engine rail.
+
+## 9. AC1 — the deferral's premise did not hold
+
+Part I §5.1 escalated one decision. The owner answered it on 2026-09-02T04:42Z:
+
+> **option C — defer the live two-arm run until #526's batch path is proven**, so one experiment
+> answers both mode and model. Re-enqueued on hcc2 behind #526 (tier strong). Spend ceiling when it
+> runs: the run's own recommended **~$600**, stop-at-ceiling; owner may adjust before dispatch.
+
+Option C's stated pay-off was that AC1's mode conditional would then resolve to **batch**. It does
+not, and the reason is that #526 closed on paper rather than in substance:
+
+| what option C assumed | what actually happened |
+|---|---|
+| #526 closing means the batch path is proven | #526's own execution record (PR #584, merged 14:26Z): *"Both members were then evicted on two different defects and the batch dissolved 21 minutes after it was enqueued. **Zero batches completed. AC1 is still not met.**"* |
+| the mode conditional resolves to batch | it resolves to **full-cycle** — #526 has not passed, so AC1's `otherwise` branch applies, exactly as in Part I §2.4 |
+| the dependency gate releasing means the condition is met | #526 was auto-closed by its PR merge with `ac_met=0 ac_total=4`; #529's guard banner already warns about precisely this premature-close pattern, and #583 — one of the two defects that evicted the members — is open and in flight |
+
+So the scheduler's dependency released for the wrong reason, and running the ~$600 dispatch on it
+would have been substituting **option A** (which the owner declined) for **option C**, spending real
+third-party money and merging up to 16 agent-authored PRs into the production monorepo. Both are
+outside what a `git revert` undoes. **AC1 is therefore re-escalated (§12), not attempted.**
+
+### 9.1 Cohort availability, measured rather than asserted
+
+Part I's option B was rejected on the claim that this repo has no ≥8-per-arm low-risk cohort. That
+claim is now measured, since it is a precondition of any re-decision:
+
+| repo | open | after exclusions¹ | not already `cycle:full` | verdict |
+|---|---|---|---|---|
+| `imboard-ai/ai-dossier` | 19 | 18 | 13 | **no cohort** — 5 of the 18 are the ops/meta issues driving this work (#526, #528, #529, #582, #583) and the remaining 13 are large product epics (VS Code extension, JetBrains plugin, website, playground, standalone binaries) |
+| `imboard-ai/imboard-monorepo` | 112 | 93 | 82 | **cohort available** — option A's ≥8-per-arm requirement is satisfiable |
+
+¹ excluding `epic`, `decomposed`, `needs-clarification`, `decision-pending`, `batch-epic`, `blocked`.
+
+Option B stays non-viable. What option A lacks is authorisation, not issues.
+
+## 10. AC3/AC2 — the missing axis, built
+
+Part I's own scorecard named the gap: *"the AC's per-class / per-tier axis does not exist in the
+tool"*. AC3's text is **"which tiers are safe for which classes, not one number"**, and until the
+axis exists the live run — whenever it is authorised — produces data the tool cannot answer AC3 or
+AC4 with. That is the same failure mode as the broken `model=` bucketing Part I fixed, one axis over.
+
+The data was already being written and read by nothing:
+
+- The **classifier** posts `phase=classify` with `risk=` (`low`/`med`/`high`), `mode=` and `areas=`
+  — verified live on #540–#543 here and on #1026/#2687/#3966 in imboard-monorepo.
+- **Review** posts `escalated=`, `ac_met=` and `ac_total=` on every run that reaches it — AC2's
+  "escalations per issue" and "conformance not-met rate", already on the wire.
+
+This PR joins them into `runstate stats`:
+
+1. **The classifier verdict is an ISSUE attribute, not a run attribute.** The classifier dispatches
+   under its own `run=` (`r-540-edcf` classifies what `r-540-…` implements), so a per-run lookup
+   finds `risk=` on the classify run and nothing on the cycle run that did the work. The join reads
+   it once per trail and attaches it to every run of that issue.
+2. **Classify dispatches are excluded from both tables.** A classify run posts one milestone,
+   records no `model=` and never ships — counted as a cycle run it became an `<unknown>`-model run
+   that "failed to deliver", once per issue the classifier had touched. It stays in the per-run
+   evidence table, flagged `classify_only`.
+3. **New `By model × class` table**, mirroring the model table's bucket contract and reusing the
+   same `delivered` predicate, so a class row can never disagree with the model row it sums into.
+   Rows sort worst-class-first (`high` → `med` → `low` → `<unclassified>`).
+4. **Guardrail columns on the model table** — `esc/run` and `not-met`. Both distinguish "measured
+   zero" from "never measured": a model whose runs all blocked before review renders `-`, not
+   `0.0`, because it has not demonstrated a zero escalation rate, it has demonstrated nothing.
+   Conformance is weighted by criteria rather than by run and carries its denominator into the cell
+   (`8/150`), so a rate over four criteria cannot read like one over two hundred.
+5. **Coverage is reported, not assumed.** `<unclassified>` is its own visible row, and a *mixed*
+   table warns with the share. An all-unclassified table stays quiet — the same rule the
+   `<unknown>` model bucket already follows, because otherwise the warning fires on nearly every
+   trail predating the classifier and drowns the ones that matter.
+
+## 11. What the corpus says through the new axis
+
+### 11.1 `imboard-ai/ai-dossier`, issues #460–#584
+
+`ai-dossier runstate stats --repo imboard-ai/ai-dossier --issues 460..584` (65 runs; #575 dropped on
+a GitHub 503):
+
+```
+By model:
+  model            runs  delivered  blocked  unfinished  rate  esc/run  not-met   n     median total
+  <unknown>           7          0        4           3    0%      0.0        -   5    3m 57s (237s)
+  claude-opus-5       4          3        0           1   75%      0.0     7/13   4   1h 44m (6290s)
+  claude-sonnet-5    40         36        0           4   90%      0.1    8/150  40  48m 52s (2932s)
+  glm-5.3            14         12        1           1   86%      0.1     0/73  14   1h 30m (5419s)   folded: llmgateway/glm-5.3
+
+By model x class:
+  model            class           runs  delivered  blocked  unfinished  rate  esc  not-met
+  claude-sonnet-5  med                1          1        0           0  100%    0        -
+  glm-5.3          med                2          1        0           1   50%    1     0/11
+  <unknown>        low                5          0        2           3    0%    0        -
+  claude-sonnet-5  low                7          7        0           0  100%    0     0/16
+  <unknown>        <unclassified>     2          0        2           0    0%    -        -
+  claude-opus-5    <unclassified>     4          3        0           1   75%    0     7/13
+  claude-sonnet-5  <unclassified>    32         28        0           4   88%    3    8/134
+  glm-5.3          <unclassified>    12         11        1           0   92%    1     0/62
+```
+
+Read carefully, because the sample sizes are small and the axis is new:
+
+- **The guardrail columns support the model-agnostic promise more directly than the delivery rate
+  did.** `glm-5.3` scored **0 of 73** acceptance criteria not-met, against **8 of 150** for
+  `claude-sonnet-5` and **7 of 13** for `claude-opus-5`. Escalation rates are indistinguishable
+  (0.1/run each). This is *not* "glm is better": opus's 7/13 is dominated by #528's own two runs,
+  which were scored against five deliberately un-dischargeable ops criteria — an artefact of what
+  opus was pointed at, and precisely the kind of confound the class axis exists to expose and the
+  pre-registered run exists to eliminate.
+- **The class rows are real but thin.** Only **15 of 65 runs (23%)** carry a classifier verdict, so
+  every class row is n ≤ 7 and none of them is a verdict. The tool says so in its own warning.
+- **The one visible class signal is a hypothesis, not a finding:** glm delivers 92% on
+  `<unclassified>` (mostly older, self-selected work) but 50% on `med` (n=2, 1 escalation), while
+  sonnet is 100% on both `low` (7/7) and `med` (1/1). If it survives the live run at n≥8, it is
+  exactly the "safe for low, escalate on med+" boundary AC4 asks for. At n=2 it is noise.
+- **`<unknown>` is a data-quality finding.** 7 runs recorded no `model=`, 5 of them classified
+  `low`. These are separately-dispatched review/report tail agents that never post a gate milestone,
+  so they inherit no `model=`. They score 0% delivered by construction and are not attributable to
+  any model. Worth fixing at the source (have tail dispatches record `model=`), not in the reader.
+
+### 11.2 `imboard-ai/imboard-monorepo`, the #471 cohort plus attempt 3's members
+
+```
+By model:
+  model            runs  delivered  blocked  unfinished  rate  esc/run  not-met   n     median total
+  claude-sonnet-5    12          8        0           4   67%      0.0     1/36  12   1h 58m (7091s)
+  glm-5.3             3          2        1           0   67%      0.0      0/9   3   1h 48m (6539s)   folded: z-ai/glm-latest, ~z-ai/glm-latest
+  kimi-latest         1          1        0           0  100%      0.0      0/4   1  8h 47m (31628s)  folded: openrouter-kimi-latest
+
+By model x class:
+  model            class           runs  delivered  blocked  unfinished  rate  esc  not-met
+  <unknown>        low                2          0        1           1    0%    0        -
+  claude-sonnet-5  low                4          3        0           1   75%    0     1/11
+  claude-sonnet-5  <unclassified>     8          5        0           3   63%    0     0/25
+  glm-5.3          <unclassified>     3          2        1           0   67%    0      0/9
+  kimi-latest      <unclassified>     1          1        0           0  100%    0      0/4
+```
+
+The open-weights arm on this repo has **no classified runs at all** — every glm and kimi run
+predates the classifier. The class axis therefore cannot compare arms here yet, which is itself the
+argument for pre-registering the live cohort *through* the classifier, as §5's protocol already
+specifies.
+
+### 11.3 Tier→model mapping (AC4), now per class
+
+Supersedes Part I §4.4's per-project table. Still provisional — the live run is what would make it
+otherwise.
+
+| project | class | recommended | evidence | confidence |
+|---|---|---|---|---|
+| `ai-dossier` | `low` | glm at mid | 0/73 criteria not-met over 14 runs; 86% delivery | moderate — delivery and conformance both measured, class coverage thin |
+| `ai-dossier` | `med` | claude sonnet at mid, glm allowed with opus rescue | glm 1/2 on `med` with 1 escalation vs sonnet 1/1 | **low — n=2.** The live run's job |
+| `ai-dossier` | `high` | claude sonnet mid, opus strong | no `high`-class run exists in the corpus | none — no evidence either way |
+| `imboard-monorepo` | all | claude sonnet at mid | open-weights sample is 4 runs, none classified | low, unchanged from Part I |
+| both | rescue | claude opus | AC4 asks for the rescue tier to be justified by *measured escalation frequency*; measured frequency is 0.1/run and indistinguishable across models, which justifies nothing either way | none — needs the live run |
+
+**The honest summary of AC4 is that the class axis now makes the recommendation falsifiable.**
+Before this run it was one number per model per project; it is now a claim per class that the live
+run can contradict.
+
+## 12. The decision, restated
+
+Unchanged in shape from Part I §5.1 — changed in that option C has been tried and its premise did
+not hold. §5's pre-registered protocol is still the executable spec; nothing about it needs rewriting.
+
+**The decision:** whether to run the pre-registered two-arm cohort now in **full-cycle** mode
+(batch is not available and will not be until #583 and #529 close), on which repo, and at what
+ceiling.
+
+| option | pros | cons |
+|---|---|---|
+| **A′. `imboard-monorepo`, full-cycle, ~$600 ceiling, run now** *(recommended)* | The cohort exists and is measured (§9.1: 82 eligible issues). The instrument is now complete — §10's axis means the result can actually answer AC3/AC4 rather than needing a third instrument run. Every hour of delay is another day of the core promise resting on a 23%-classified retrospective | ~$600 of third-party spend and up to 16 agent-authored PRs into the production monorepo — the same blast radius that was escalated the first time, and it has not shrunk |
+| **C′. Defer again, until #583 closes and #529's 7-day verdict lands** | Preserves option C's original pay-off — one experiment answering both mode and model | #529 cannot start for 7 days by its own AC1, and #583 is one defect of two. This is a ≥1-week deferral whose end condition has already slipped once, in exactly this way |
+| **D. Re-scope AC1 to the retrospective and close #528** | Zero spend. §11's conformance columns are materially stronger evidence than Part I had — 0/73 vs 8/150 criteria not-met is a sharper parity signal than 86% vs 86% | Leaves the core promise resting on a corpus that is 23% classified, with the one class-level signal (glm 50% on `med`) at n=2 and unresolved. That is the "anecdotal" state #528 exists to end |
+| **E. Half-cohort pilot on `imboard-monorepo`: 4 issues per arm, ~$150 ceiling** *(new)* | Buys the pre-registered, classifier-routed, concurrent design at a quarter of the spend and blast radius; would settle whether the `med` boundary in §11.1 is real | Underpowered for AC1 as written (≥8 per arm), so it advances AC1 without closing it — a third partial rather than a verdict |
+
+**Why this is escalated rather than defaulted, again:** the run had a live dependency gate that
+released and a pre-authorised ceiling, so proceeding was mechanically available. It was declined
+because the *substance* of the owner's condition was not met, and because the spend and the merges
+are the two things in this workflow that a revert does not undo. Everything else in this run was
+reversible and was simply done.
+
+**Recommendation: A′.** The reason option C was chosen — get both answers from one experiment — is
+no longer purchasable at the price quoted: batch mode needs #583 fixed and #529's window elapsed,
+which is a week away with an end condition that has already slipped once. The model question is
+answerable today, the cohort exists today, and as of this PR the instrument can finally answer it
+per class. If the ~$600 is the sticking point rather than the timing, **E** buys the pre-registered
+design at ~$150 and settles §11.1's `med` hypothesis; it does not close AC1.
+
+Two follow-ups are implied and deliberately **not** filed as issues here, per the one-issue-in rule:
+the gate rail's disagreement with the engine rail is already open as **#582** and now has a second
+independent sighting (§8.1); and the `<unknown>`-model tail dispatches (§11.1) want `model=` recorded
+at the source, which belongs to whoever owns the report/review dispatch path.
+
+## 13. Limitations (Part II)
+
+1. **The class axis is 23% covered on this repo and 0% on the open-weights arm of imboard-monorepo.**
+   Every class row here is n ≤ 7. The axis is built and correct; it is not yet evidence.
+2. **AC2's tokens/$ are still not in this report.** They live in `ai-dossier sched stats`
+   (`modelUsage`, #524), not in the runstate trail, and #524 landed on 2026-09-01 — so the cost
+   series is prospective, not retrospective. Joining the two sources is a real piece of work and was
+   not attempted here rather than half-done.
+3. **The 7-day regression window is not measured** and cannot be from within a single run. It
+   belongs to a follow-up window issue, the #526→#529 pattern.
+4. **`claude-opus-5`'s 7/13 not-met is a confound, not a measurement** (§11.1) — it is #528's own
+   ops criteria, scored against runs that were never going to discharge them.
+5. **No live dispatch happened**, so AC5 remains untestable: the exercise designed to surface
+   open-weights-specific guardrail escapes still has not been run.
+
+## 14. Appendix — evidence (Part II)
+
+- Runstate trail: [#528](https://github.com/imboard-ai/ai-dossier/issues/528) — run `r-528-8ccf`,
+  gen 0, `prior_run=r-528-655b`
+- Owner decision (option C): [#528 comment, 2026-09-02T04:42Z](https://github.com/imboard-ai/ai-dossier/issues/528#issuecomment-5502983793)
+- #526's execution record: `docs/reports/batch-pilot-2-execution.md` Part III (PR
+  [#584](https://github.com/imboard-ai/ai-dossier/pull/584), merge `7cccbb5`)
+- Trap sighting: `docs/agent-traps.md`, the `resume_from=report` row — issue
+  [#582](https://github.com/imboard-ai/ai-dossier/issues/582)
+- Numbers in §11 are the verbatim output of `ai-dossier runstate stats` built from this PR

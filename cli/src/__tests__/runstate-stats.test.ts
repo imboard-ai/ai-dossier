@@ -17,6 +17,7 @@ import {
   renderValue,
   STATS_PHASE_ORDER,
   skewNote,
+  UNCLASSIFIED_CLASS,
   UNKNOWN_MODEL,
   UNKNOWN_RUN,
 } from '../runstate-stats';
@@ -302,6 +303,13 @@ describe('buildStatsReport — AC1: multi-run trails', () => {
         blocked: 0,
         unfinished: 0,
         delivery_rate: 1,
+        escalation_runs: 0,
+        escalations: 0,
+        escalation_rate: null,
+        conformance_runs: 0,
+        conformance_criteria: 0,
+        conformance_not_met: 0,
+        conformance_not_met_rate: null,
       },
       {
         model: 'claude-sonnet-5',
@@ -316,6 +324,13 @@ describe('buildStatsReport — AC1: multi-run trails', () => {
         blocked: 1,
         unfinished: 0,
         delivery_rate: 0,
+        escalation_runs: 0,
+        escalations: 0,
+        escalation_rate: null,
+        conformance_runs: 0,
+        conformance_criteria: 0,
+        conformance_not_met: 0,
+        conformance_not_met_rate: null,
       },
     ]);
   });
@@ -645,7 +660,7 @@ describe('buildStatsReport — AC3: imperfect trails', () => {
       repo: null,
       issues: [],
       runs: [],
-      aggregates: { phases: [], models: [] },
+      aggregates: { phases: [], models: [], classes: [] },
       issues_without_trail: [],
       issues_failed: [],
       warnings: [],
@@ -1096,5 +1111,270 @@ describe('modelNote — the fold is always disclosed, and always safe to print',
     const note = modelNote(bucket('glm-5.3', aliases));
     expect(note).toContain(`(+${12 - MAX_NAMED_ALIASES} more)`);
     expect(note?.split(', ')).toHaveLength(MAX_NAMED_ALIASES);
+  });
+});
+
+/**
+ * The `model × class` axis (`imboard-ai/ai-dossier#528` AC3).
+ *
+ * AC3 asks for "which tiers are safe for which classes, not one number". The per-model
+ * table can only produce the one number: a model's runs over docs chores and over protocol
+ * changes land in the same row and average each other out. These cases pin the join that
+ * splits them, and the two guardrail counters AC2 asks for per arm.
+ */
+describe('buildStatsReport — model x class buckets (#528 AC3)', () => {
+  /**
+   * The join's whole difficulty in one fixture: the classifier posts under `r-91-clas`,
+   * the cycle that does the work under `r-91-aaaa`. Shaped after the real trails on
+   * ai-dossier#540 and imboard-monorepo#1026, where exactly that split is what a naive
+   * per-run lookup gets wrong.
+   */
+  const CLASSIFIED_ELSEWHERE = [
+    trail(91, [
+      milestone('classify', 'done', 'r-91-clas', '2026-09-01T09:00:00Z', {
+        mode: 'slot',
+        risk: 'low',
+        confidence: '0.95',
+      }),
+      milestone('gate', 'done', 'r-91-aaaa', '2026-09-01T10:00:00Z', { model: 'glm-5.3' }),
+      milestone('review', 'done', 'r-91-aaaa', '2026-09-01T10:30:00Z', {
+        escalated: '0',
+        ac_met: '3',
+        ac_total: '3',
+      }),
+      milestone('ship', 'done', 'r-91-aaaa', '2026-09-01T11:00:00Z', { merge_commit: 'abc1234' }),
+    ]),
+  ];
+
+  it('buckets the cycle run under the class the classifier posted on a different run', () => {
+    const report = buildStatsReport({ trails: CLASSIFIED_ELSEWHERE });
+    const cycle = report.runs.find((r) => r.run === 'r-91-aaaa');
+    expect(cycle).toMatchObject({ risk_class: 'low', classified_mode: 'slot' });
+  });
+
+  it('excludes the classifier dispatch from both tables rather than scoring it as a failed run', () => {
+    // A classify run records no model= and never ships. Counted as a cycle run it becomes
+    // an <unknown> row that never delivered, once per issue the classifier has touched.
+    const report = buildStatsReport({ trails: CLASSIFIED_ELSEWHERE });
+    expect(report.aggregates.models.map((m) => m.model)).toEqual(['glm-5.3']);
+    expect(report.aggregates.models[0].runs).toBe(1);
+    expect(report.aggregates.classes).toHaveLength(1);
+    expect(report.aggregates.classes[0]).toMatchObject({
+      model: 'glm-5.3',
+      risk_class: 'low',
+      runs: 1,
+      delivered: 1,
+      delivery_rate: 1,
+    });
+    // …but the classify run stays in the evidence trail, marked for what it is.
+    expect(report.runs.find((r) => r.run === 'r-91-clas')?.classify_only).toBe(true);
+  });
+
+  it('splits one model into per-class rows, which is the whole point of the axis', () => {
+    const report = buildStatsReport({
+      trails: [
+        ...CLASSIFIED_ELSEWHERE,
+        trail(92, [
+          milestone('classify', 'done', 'r-92-clas', '2026-09-01T09:00:00Z', { risk: 'high' }),
+          milestone('gate', 'done', 'r-92-bbbb', '2026-09-01T10:00:00Z', { model: 'glm-5.3' }),
+          milestone('implement', 'blocked', 'r-92-bbbb', '2026-09-01T10:20:00Z', {
+            reason: 'conflict',
+          }),
+        ]),
+      ],
+    });
+
+    // One model row says 50%; the class rows say "fine on low, zero on high" — which is the
+    // routing answer, and is invisible in the single number.
+    expect(report.aggregates.models[0].delivery_rate).toBe(1 / 2);
+    expect(report.aggregates.classes.map((c) => [c.risk_class, c.delivered, c.blocked])).toEqual([
+      ['high', 0, 1],
+      ['low', 1, 0],
+    ]);
+  });
+
+  it('orders class rows worst-first so the risky class is not buried under low', () => {
+    const report = buildStatsReport({
+      trails: [
+        trail(93, [
+          milestone('classify', 'done', 'r-93-c', '2026-09-01T09:00:00Z', { risk: 'low' }),
+          milestone('gate', 'done', 'r-93-a', '2026-09-01T09:01:00Z', { model: 'm' }),
+        ]),
+        trail(94, [
+          milestone('classify', 'done', 'r-94-c', '2026-09-01T09:00:00Z', { risk: 'high' }),
+          milestone('gate', 'done', 'r-94-a', '2026-09-01T09:01:00Z', { model: 'm' }),
+        ]),
+        trail(95, [
+          milestone('classify', 'done', 'r-95-c', '2026-09-01T09:00:00Z', { risk: 'med' }),
+          milestone('gate', 'done', 'r-95-a', '2026-09-01T09:01:00Z', { model: 'm' }),
+        ]),
+        trail(96, [milestone('gate', 'done', 'r-96-a', '2026-09-01T09:01:00Z', { model: 'm' })]),
+      ],
+    });
+    expect(report.aggregates.classes.map((c) => c.risk_class)).toEqual([
+      'high',
+      'med',
+      'low',
+      UNCLASSIFIED_CLASS,
+    ]);
+  });
+
+  it('gives unclassified runs their own row instead of folding them into low', () => {
+    const report = buildStatsReport({
+      trails: [
+        trail(97, [
+          milestone('gate', 'done', 'r-97-a', '2026-09-01T09:00:00Z', { model: 'glm-5.3' }),
+        ]),
+      ],
+    });
+    expect(report.aggregates.classes[0].risk_class).toBe(UNCLASSIFIED_CLASS);
+  });
+
+  it('keys class rows on the canonical model, so #546 fold is not undone one axis over', () => {
+    const report = buildStatsReport({
+      trails: [
+        trail(98, [
+          milestone('classify', 'done', 'r-98-c', '2026-09-01T09:00:00Z', { risk: 'low' }),
+          milestone('gate', 'done', 'r-98-a', '2026-09-01T09:01:00Z', { model: 'glm-5.3' }),
+        ]),
+        trail(99, [
+          milestone('classify', 'done', 'r-99-c', '2026-09-01T09:00:00Z', { risk: 'low' }),
+          milestone('gate', 'done', 'r-99-a', '2026-09-01T09:01:00Z', {
+            model: 'llmgateway/glm-5.3',
+          }),
+        ]),
+      ],
+    });
+    expect(report.aggregates.classes).toHaveLength(1);
+    expect(report.aggregates.classes[0]).toMatchObject({ model: 'glm-5.3', runs: 2 });
+  });
+
+  it('warns only on the mixed table, where a thin class row can be misread as a verdict', () => {
+    const mixed = buildStatsReport({
+      trails: [
+        ...CLASSIFIED_ELSEWHERE,
+        trail(100, [milestone('gate', 'done', 'r-100-a', '2026-09-01T09:00:00Z', { model: 'x' })]),
+        trail(101, [milestone('gate', 'done', 'r-101-a', '2026-09-01T09:00:00Z', { model: 'x' })]),
+      ],
+    });
+    expect(mixed.warnings.some((w) => w.includes('carry no classifier risk= verdict'))).toBe(true);
+    expect(mixed.warnings.some((w) => w.includes('2 of 3 run(s) (67%)'))).toBe(true);
+
+    // All-unclassified is the historical norm and invites no class comparison to misread —
+    // warning there would fire on nearly every trail predating the classifier.
+    const none = buildStatsReport({
+      trails: [trail(102, [milestone('gate', 'done', 'r-102-a', '2026-09-01T09:00:00Z')])],
+    });
+    expect(none.warnings.some((w) => w.includes('classifier risk='))).toBe(false);
+  });
+});
+
+/**
+ * The two guardrail metrics `#528` AC2 asks for per arm — escalations per issue and the
+ * conformance not-met rate. Both were already written to every review milestone and read
+ * by nothing.
+ */
+describe('buildStatsReport — guardrail counters per model (#528 AC2)', () => {
+  const GUARDRAILS = [
+    trail(200, [
+      milestone('gate', 'done', 'r-200-a', '2026-09-01T09:00:00Z', { model: 'kimi-latest' }),
+      milestone('review', 'done', 'r-200-a', '2026-09-01T09:30:00Z', {
+        escalated: '2',
+        ac_met: '4',
+        ac_total: '6',
+      }),
+    ]),
+    trail(201, [
+      milestone('gate', 'done', 'r-201-a', '2026-09-01T09:00:00Z', { model: 'kimi-latest' }),
+      milestone('review', 'done', 'r-201-a', '2026-09-01T09:30:00Z', {
+        escalated: '0',
+        ac_met: '2',
+        ac_total: '2',
+      }),
+    ]),
+  ];
+
+  it('sums escalations and weights conformance by criteria, not by run', () => {
+    const [bucket] = buildStatsReport({ trails: GUARDRAILS }).aggregates.models;
+    expect(bucket).toMatchObject({
+      escalation_runs: 2,
+      escalations: 2,
+      escalation_rate: 1,
+      conformance_runs: 2,
+      conformance_criteria: 8,
+      conformance_not_met: 2,
+      conformance_not_met_rate: 2 / 8,
+    });
+  });
+
+  it('takes the settled figures from the LAST review milestone of a resumed run', () => {
+    // Review posts `partial` first, then `done` once the pending agents land; only the
+    // second carries the counters anyone should read.
+    const [bucket] = reportFor(202, [
+      milestone('gate', 'done', 'r-202-a', '2026-09-01T09:00:00Z', { model: 'sonnet' }),
+      milestone('review', 'partial', 'r-202-a', '2026-09-01T09:20:00Z', {
+        escalated: '3',
+        ac_met: '1',
+        ac_total: '5',
+      }),
+      milestone('review', 'done', 'r-202-a', '2026-09-01T09:40:00Z', {
+        escalated: '1',
+        ac_met: '5',
+        ac_total: '5',
+      }),
+    ]).aggregates.models;
+    expect(bucket).toMatchObject({ escalations: 1, conformance_not_met: 0 });
+  });
+
+  it('reports null, not zero, for a model whose runs never reached review', () => {
+    // A model that blocked before review has not demonstrated a zero escalation rate; it
+    // has demonstrated nothing, and the table must not render the two the same way.
+    const [bucket] = reportFor(203, [
+      milestone('gate', 'done', 'r-203-a', '2026-09-01T09:00:00Z', { model: 'glm-5.3' }),
+      milestone('implement', 'blocked', 'r-203-a', '2026-09-01T09:10:00Z', { reason: 'quota' }),
+    ]).aggregates.models;
+    expect(bucket.escalation_rate).toBeNull();
+    expect(bucket.conformance_not_met_rate).toBeNull();
+    expect(bucket.escalation_runs).toBe(0);
+  });
+
+  it('keeps ac_total=0 out of the denominator — a review that judged nothing is not a clean sheet', () => {
+    const [bucket] = reportFor(204, [
+      milestone('gate', 'done', 'r-204-a', '2026-09-01T09:00:00Z', { model: 'glm-5.3' }),
+      milestone('review', 'done', 'r-204-a', '2026-09-01T09:30:00Z', {
+        escalated: '0',
+        ac_met: '0',
+        ac_total: '0',
+      }),
+    ]).aggregates.models;
+    expect(bucket.conformance_runs).toBe(0);
+    expect(bucket.conformance_not_met_rate).toBeNull();
+    // The escalation counter still applies: this run DID review.
+    expect(bucket.escalation_rate).toBe(0);
+  });
+
+  it('ignores unreadable counters rather than coercing them to a number', () => {
+    // Milestone values are issue comments — anyone who can comment can write `escalated=lots`.
+    const [bucket] = reportFor(205, [
+      milestone('gate', 'done', 'r-205-a', '2026-09-01T09:00:00Z', { model: 'glm-5.3' }),
+      milestone('review', 'done', 'r-205-a', '2026-09-01T09:30:00Z', {
+        escalated: 'lots',
+        ac_met: '-3',
+        ac_total: '2',
+      }),
+    ]).aggregates.models;
+    expect(bucket.escalation_runs).toBe(0);
+    expect(bucket.conformance_runs).toBe(0);
+  });
+
+  it('never lets ac_met greater than ac_total subtract from the not-met total', () => {
+    const [bucket] = reportFor(206, [
+      milestone('gate', 'done', 'r-206-a', '2026-09-01T09:00:00Z', { model: 'glm-5.3' }),
+      milestone('review', 'done', 'r-206-a', '2026-09-01T09:30:00Z', {
+        ac_met: '9',
+        ac_total: '3',
+      }),
+    ]).aggregates.models;
+    expect(bucket.conformance_not_met).toBe(0);
   });
 });

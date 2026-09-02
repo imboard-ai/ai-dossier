@@ -52,6 +52,7 @@ import {
 } from '../runstate';
 import {
   buildStatsReport,
+  type ClassAggregate,
   type FailedIssue,
   type IssueTrail,
   type ModelAggregate,
@@ -130,6 +131,8 @@ const MODEL_TABLE_HEADERS = [
   'blocked',
   'unfinished',
   'rate',
+  'esc/run',
+  'not-met',
   'n',
   'median total',
   'min',
@@ -139,8 +142,34 @@ const MODEL_TABLE_HEADERS = [
 
 const MODEL_TABLE_ALIGN: ColumnAlign[] = [
   'left',
-  ...(Array<ColumnAlign>(9).fill('right') as ColumnAlign[]),
+  ...(Array<ColumnAlign>(11).fill('right') as ColumnAlign[]),
   'left',
+];
+
+/**
+ * The by-model-and-class table's columns (`imboard-ai/ai-dossier#528` AC3).
+ *
+ * Durations are deliberately absent: this table exists to answer "is this model safe for
+ * this class of work", and splitting an already-thin corpus by class leaves medians with
+ * one or two samples — a number that looks like a measurement and is not one. Speed stays
+ * in the by-model table, where the samples are.
+ */
+const CLASS_TABLE_HEADERS = [
+  'model',
+  'class',
+  'runs',
+  'delivered',
+  'blocked',
+  'unfinished',
+  'rate',
+  'esc',
+  'not-met',
+];
+
+const CLASS_TABLE_ALIGN: ColumnAlign[] = [
+  'left',
+  'left',
+  ...(Array<ColumnAlign>(7).fill('right') as ColumnAlign[]),
 ];
 
 /** Parse `--kv k=v` occurrences into ordered pairs. */
@@ -888,7 +917,7 @@ function skewCell(negativeSamples: number): string {
 
 /** The cross-run aggregates: per-phase spread, per-run totals, and totals by model. */
 function printAggregates(report: StatsReport, precededByTables: boolean): void {
-  const { phases, models } = report.aggregates;
+  const { phases, models, classes } = report.aggregates;
   const section = makeSectionPrinter(precededByTables);
 
   if (phases.length > 0) {
@@ -927,6 +956,16 @@ function printAggregates(report: StatsReport, precededByTables: boolean): void {
     console.log(
       '  delivered = last milestone is ship/report (or batch-ship/batch-report) at done; rate = delivered/runs, including runs still in flight'
     );
+    console.log(
+      '  esc/run = escalated= per run that reached review; not-met = acceptance criteria scored not met, over criteria judged'
+    );
+  }
+
+  if (classes.length > 0) {
+    section('By model x class:', CLASS_TABLE_HEADERS, buildClassRows(classes), CLASS_TABLE_ALIGN);
+    console.log(
+      "  class = the classifier's risk= verdict for the issue; classify dispatches are excluded from both tables"
+    );
   }
 }
 
@@ -939,6 +978,8 @@ function buildModelRows(models: ModelAggregate[]): string[][] {
     String(model.blocked),
     String(model.unfinished),
     formatRateCell(model.delivery_rate),
+    formatMeanCell(model.escalation_rate),
+    formatConformanceCell(model.conformance_not_met, model.conformance_criteria),
     String(model.samples),
     formatDurationCell(model.median_total_seconds),
     formatDurationCell(model.min_total_seconds),
@@ -947,9 +988,45 @@ function buildModelRows(models: ModelAggregate[]): string[][] {
   ]);
 }
 
+/** One row per `model × class` bucket, in `CLASS_TABLE_HEADERS` order. */
+function buildClassRows(classes: ClassAggregate[]): string[][] {
+  return classes.map((bucket) => [
+    renderValue(bucket.model),
+    renderValue(bucket.risk_class),
+    String(bucket.runs),
+    String(bucket.delivered),
+    String(bucket.blocked),
+    String(bucket.unfinished),
+    formatRateCell(bucket.delivery_rate),
+    bucket.escalation_runs === 0 ? '-' : String(bucket.escalations),
+    formatConformanceCell(bucket.conformance_not_met, bucket.conformance_criteria),
+  ]);
+}
+
 /** A delivery rate as a whole-percent cell. */
 function formatRateCell(rate: number): string {
   return `${Math.round(rate * PERCENT)}%`;
+}
+
+/**
+ * A per-run mean, to one decimal — or `-` when nothing was measured.
+ *
+ * `-` and `0.0` are different claims and are rendered differently: the first is "no run of
+ * this model reached review", the second is "runs reached review and escalated nothing".
+ */
+function formatMeanCell(mean: number | null): string {
+  return mean === null ? '-' : mean.toFixed(1);
+}
+
+/**
+ * Criteria scored not-met, shown as `notMet/criteria` rather than a bare percentage.
+ *
+ * A percentage over four criteria and one over two hundred read identically and mean very
+ * different things; carrying the denominator into the cell keeps the sample size in front of
+ * whoever is about to route a tier from it.
+ */
+function formatConformanceCell(notMet: number, criteria: number): string {
+  return criteria === 0 ? '-' : `${notMet}/${criteria}`;
 }
 
 /**
