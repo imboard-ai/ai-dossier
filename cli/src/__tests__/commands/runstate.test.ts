@@ -538,6 +538,86 @@ describe('runstate command', () => {
       expect(parsed.local_worktree).toBe('absent');
     });
 
+    describe('--dispatched-at (#582)', () => {
+      const staleReport = [
+        RUNSTATE_MARKER,
+        'phase=report status=done run=r-440-ab56 at=2026-08-24T07:00:00Z', // T-3h
+        'next=done',
+        '',
+      ].join('\n');
+
+      function mockOpenIssue(): void {
+        execHandles((file, args) => {
+          if (file === 'gh' && args.includes('comments')) return commentsPayload([staleReport]);
+          if (file === 'gh' && args.includes('state')) return JSON.stringify({ state: 'OPEN' });
+          throw new Error(`unexpected ${file} ${args.join(' ')}`);
+        });
+      }
+
+      it('enters fresh with prior_run when the milestone predates --dispatched-at', async () => {
+        mockOpenIssue();
+
+        await run([
+          'runstate',
+          'verify',
+          '--issue',
+          '440',
+          '--dispatched-at',
+          '2026-08-24T10:00:00Z', // T
+          '--json',
+        ]);
+
+        const parsed = JSON.parse(logged()[0]);
+        expect(parsed.resume_from).toBe('none');
+        expect(parsed.run_id).not.toBe('r-440-ab56');
+        expect(parsed.prior_run).toBe('r-440-ab56');
+        expect(parsed.note).toBe('stale-report-trail');
+      });
+
+      it('prints prior_run in text mode too', async () => {
+        mockOpenIssue();
+
+        await run([
+          'runstate',
+          'verify',
+          '--issue',
+          '440',
+          '--dispatched-at',
+          '2026-08-24T10:00:00Z',
+        ]);
+
+        expect(logged()).toContain('resume_from=none');
+        expect(logged()).toContain('prior_run=r-440-ab56');
+      });
+
+      it('falls back to resume_from=report with an ambiguity note when the flag is omitted', async () => {
+        mockOpenIssue();
+
+        await run(['runstate', 'verify', '--issue', '440', '--json']);
+
+        const parsed = JSON.parse(logged()[0]);
+        expect(parsed.resume_from).toBe('report');
+        expect(parsed.note).toContain('no --dispatched-at supplied');
+        expect(parsed.prior_run).toBeUndefined();
+      });
+
+      it('rejects an unparseable --dispatched-at with an actionable error', async () => {
+        const code = await run([
+          'runstate',
+          'verify',
+          '--issue',
+          '440',
+          '--dispatched-at',
+          'not-a-date',
+        ]);
+
+        expect(code).toBe(1);
+        expect(errored().some((l) => l.includes("Invalid --dispatched-at 'not-a-date'"))).toBe(
+          true
+        );
+      });
+    });
+
     it('surfaces a resume-loop hard block', async () => {
       const blocked = [
         RUNSTATE_MARKER,

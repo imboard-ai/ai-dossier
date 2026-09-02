@@ -43,6 +43,7 @@ import {
   nextFenceGeneration,
   type ParsedMilestone,
   PHASES,
+  parseDispatchedAt,
   parseGeneration,
   parseMilestones,
   type ResumeProbe,
@@ -99,6 +100,10 @@ interface ReadOptions {
   issue: string;
   repo?: string;
   json?: boolean;
+}
+
+interface VerifyOptions extends ReadOptions {
+  dispatchedAt?: string;
 }
 
 interface MintOptions {
@@ -501,6 +506,18 @@ function requireGeneration(raw: string | undefined, flag: string): number {
   return parsed;
 }
 
+/** Read `--dispatched-at`, or exit explaining what a valid value looks like. */
+function requireDispatchedAt(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  const parsed = parseDispatchedAt(raw);
+  if (parsed === null) {
+    fail([
+      `Invalid --dispatched-at '${raw}' — expected an ISO timestamp.\nFix: pass the time this run was dispatched, e.g. --dispatched-at ${new Date().toISOString()}.`,
+    ]);
+  }
+  return parsed;
+}
+
 /** A phase name read off the trail, made safe to display (same rule as {@link safeLabel}). */
 function safePhase(raw: string): string {
   return isKnownPhase(raw) ? raw : 'an unrecorded phase';
@@ -740,12 +757,21 @@ function registerVerifySubcommand(cmd: Command): void {
     .description("Run the gate's resume verification and print resume_from (read-only)")
     .requiredOption('--issue <number>', 'GitHub issue number')
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
+    .option(
+      '--dispatched-at <iso>',
+      "ISO timestamp this run was dispatched at — distinguishes a stale prior report/done milestone from this run's own (#582)"
+    )
     .option('--json', 'Output the result as JSON')
-    .action((options: ReadOptions) => {
+    .action((options: VerifyOptions) => {
       requireIssueTarget(options);
+      const dispatchedAt = requireDispatchedAt(options.dispatchedAt);
       const milestones = fetchMilestones(options.issue, options.repo);
       const warnings: string[] = [];
-      const result = computeResume(milestones, makeProbe(options.issue, options.repo, warnings));
+      const result = computeResume(
+        milestones,
+        makeProbe(options.issue, options.repo, warnings),
+        dispatchedAt
+      );
 
       if (options.json) {
         console.log(
@@ -760,6 +786,7 @@ function registerVerifySubcommand(cmd: Command): void {
               ...(result.slot_trail ? { slot_trail: true } : {}),
               ...(result.hard_block ? { hard_block: result.hard_block } : {}),
               ...(result.note ? { note: result.note } : {}),
+              ...(result.prior_run ? { prior_run: result.prior_run } : {}),
               ...(warnings.length > 0 ? { warnings } : {}),
             },
             null,
@@ -775,6 +802,7 @@ function registerVerifySubcommand(cmd: Command): void {
         if (result.slot_trail) console.log('slot_trail=present');
         if (result.hard_block) console.log(`hard_block=${result.hard_block}`);
         if (result.note) console.log(`note=${result.note}`);
+        if (result.prior_run) console.log(`prior_run=${result.prior_run}`);
         console.log(`resume_context=${JSON.stringify(result.resume_context)}`);
       }
 

@@ -667,6 +667,11 @@ export function parseGeneration(raw: string): number | null {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+/** Read a `--dispatched-at` flag value; null when it is not a parseable timestamp. */
+export function parseDispatchedAt(raw: string): string | null {
+  return Number.isNaN(Date.parse(raw)) ? null : raw;
+}
+
 /**
  * The highest-generation fence on `run`'s trail, or null when the run was never fenced.
  *
@@ -792,6 +797,13 @@ export interface ResumeResult {
   slot_trail?: boolean;
   /** Human-readable note, e.g. "already complete". */
   note?: string;
+  /**
+   * Set only for a stale `report/done` trail (#582): the OLD run id, carried forward so
+   * the caller (gate-issue's milestone) can record where this fresh attempt's
+   * predecessor left off. `run_id` on this same result is a newly minted id, not this
+   * one — see {@link reportTrailVerdict}.
+   */
+  prior_run?: string;
   /**
    * The generation that owns this run (#504) — 0 for a run that was never fenced. A
    * resuming agent passes it to `runstate post --gen`; posting below it is rejected,
@@ -932,6 +944,71 @@ function freshEntry(last: ParsedMilestone): { note: string; slot_trail?: boolean
 }
 
 /**
+ * A milestone predates a dispatch if it is more than this much before `dispatchedAt` —
+ * a small clock-skew tolerance, not a meaningful staleness window. Mirrors
+ * `packages/sched/src/groundtruth.ts`'s `DISPATCH_FENCE_TOLERANCE_MS` (#575/#576) exactly;
+ * kept as a local copy rather than an import because this module is dependency-free by
+ * design (see the module docstring).
+ */
+const DISPATCH_FENCE_TOLERANCE_MS = 60_000;
+
+/**
+ * True when `milestoneAt` is at-or-after `dispatchedAt` (within the clock-skew
+ * tolerance) — i.e. the milestone could belong to THIS dispatch. Fails open (`true`,
+ * "not stale") when there is no dispatch time to compare against, or either timestamp
+ * is unparseable: an unanswerable check must never manufacture staleness that was never
+ * there. Same shape as `groundtruth.ts`'s `postdatesDispatch` (#575/#576) — the engine
+ * rail's precedent for this exact check, applied here to the gate/CLI rail (#582).
+ */
+function postdatesDispatch(milestoneAt: string, dispatchedAt: string | null): boolean {
+  if (dispatchedAt === null) return true;
+  const parsedMilestoneAt = Date.parse(milestoneAt);
+  const parsedDispatchedAt = Date.parse(dispatchedAt);
+  if (Number.isNaN(parsedMilestoneAt) || Number.isNaN(parsedDispatchedAt)) return true;
+  return parsedMilestoneAt >= parsedDispatchedAt - DISPATCH_FENCE_TOLERANCE_MS;
+}
+
+/**
+ * A `report/done` milestone on a still-OPEN issue is ambiguous without knowing when
+ * THIS run was dispatched: it might be this run's own report (crashed between reporting
+ * and closing — resume into `report` as today), or a completed PRIOR attempt that a
+ * deliberate re-enqueue (pilot re-run, `sched abandon` + re-enqueue, ACs left unmet on
+ * purpose) now needs full-cycle to redo (#582 — the gate/CLI twin of #575/#576's engine
+ * check). The CLOSED case is left to {@link PHASE_RESUMERS}'s `report` resolver, which
+ * already handles it correctly regardless of age (#576's closed-at-merge carve-out) —
+ * this function only ever returns non-null for an OPEN issue.
+ *
+ * Returns:
+ * - `null` — issue closed, or the milestone postdates the dispatch (or no dispatch time
+ *   was supplied): defer to the normal `report` resolver, unchanged.
+ * - `{ note }` only — no `--dispatched-at` was supplied, so staleness cannot be
+ *   determined: still resumes into `report` (the safe default), but flags the
+ *   ambiguity rather than silently asserting it.
+ * - `{ run_id, prior_run, note }` — the milestone predates the dispatch: a stale prior
+ *   attempt. Mint a fresh run id (the old one belongs to a finished run) and carry the
+ *   old one forward as `prior_run` for the caller's milestone.
+ */
+function reportTrailVerdict(
+  last: ParsedMilestone,
+  probe: ResumeProbe,
+  dispatchedAt: string | null
+): { run_id: string; prior_run: string; note: string } | { note: string } | null {
+  if (last.phase !== 'report' || last.status !== 'done') return null;
+  if (probe.issueClosed()) return null;
+
+  if (dispatchedAt === null) {
+    return {
+      note: 'report/done on an open issue with no --dispatched-at supplied — cannot tell whether this is a stale prior attempt; pass --dispatched-at to disambiguate (defaulting to resume_from=report)',
+    };
+  }
+
+  if (postdatesDispatch(last.at, dispatchedAt)) return null;
+
+  const issue = last.run.split('-')[1] ?? 'unknown';
+  return { run_id: mintRunId(issue), prior_run: last.run, note: 'stale-report-trail' };
+}
+
+/**
  * Whether the `worktree=` path recorded in `context` exists on this machine — `n/a` when
  * no milestone recorded one. Informational only; see {@link ResumeResult.local_worktree}.
  */
@@ -948,7 +1025,11 @@ function resolveLocalWorktree(
  * `imboard-ai/git/gate-issue`. Never trusts the milestone alone — every claim is checked
  * against reality through `probe`, and {@link PHASE_RESUMERS} holds the per-phase rules.
  */
-export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe): ResumeResult {
+export function computeResume(
+  milestones: ParsedMilestone[],
+  probe: ResumeProbe,
+  dispatchedAt: string | null = null
+): ResumeResult {
   if (milestones.length === 0) {
     return {
       resume_from: 'none',
@@ -984,6 +1065,12 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
   if (fresh) {
     return { ...base, resume_from: 'none', ...fresh };
   }
+
+  const reportVerdict = reportTrailVerdict(last, probe, dispatchedAt);
+  if (reportVerdict && 'run_id' in reportVerdict) {
+    return { ...base, resume_from: 'none', ...reportVerdict };
+  }
+  const ambiguousReportNote = reportVerdict?.note;
 
   // A fence is the last thing on the trail: the takeover was announced but has not
   // posted yet (#504). It may never post — the takeover can die too — so this is a
@@ -1041,5 +1128,6 @@ export function computeResume(milestones: ParsedMilestone[], probe: ResumeProbe)
     setupOk,
     headOk,
   });
-  return { ...base, resume_from, ...(note ? { note } : {}) };
+  const finalNote = note ?? ambiguousReportNote;
+  return { ...base, resume_from, ...(finalNote ? { note: finalNote } : {}) };
 }

@@ -785,6 +785,76 @@ describe('computeResume', () => {
     ).toBe('report');
   });
 
+  describe('#582 stale report/done trail (dispatchedAt)', () => {
+    const openProbe = probe({ issueClosed: () => false });
+    const closedProbe = probe({ issueClosed: () => true });
+
+    it('enters fresh with a new run id and prior_run when the milestone predates dispatch (AC1)', () => {
+      const reportDone = m(
+        'phase=report status=done run=r-440-ab56 at=2026-08-24T07:00:00Z' // T-3h
+      );
+      const result = computeResume(
+        [gateDone, reportDone],
+        openProbe,
+        '2026-08-24T10:00:00Z' // T
+      );
+      expect(result.resume_from).toBe('none');
+      expect(result.run_id).not.toBeNull();
+      expect(result.run_id).not.toBe('r-440-ab56');
+      expect(result.prior_run).toBe('r-440-ab56');
+      expect(result.note).toBe('stale-report-trail');
+    });
+
+    it("resumes into report as today when the milestone is this run's own (AC2)", () => {
+      const reportDone = m(
+        'phase=report status=done run=r-440-ab56 at=2026-08-24T10:01:00Z' // T+1m
+      );
+      const result = computeResume(
+        [gateDone, reportDone],
+        openProbe,
+        '2026-08-24T10:00:00Z' // T
+      );
+      expect(result.resume_from).toBe('report');
+      expect(result.run_id).toBe('r-440-ab56');
+      expect(result.prior_run).toBeUndefined();
+    });
+
+    it('resumes done when the issue is closed regardless of milestone age (AC3)', () => {
+      const reportDone = m(
+        'phase=report status=done run=r-440-ab56 at=2026-08-24T07:00:00Z' // T-3h
+      );
+      const result = computeResume(
+        [gateDone, reportDone],
+        closedProbe,
+        '2026-08-24T10:00:00Z' // T
+      );
+      expect(result.resume_from).toBe('done');
+      expect(result.note).toBe('already complete');
+      expect(result.prior_run).toBeUndefined();
+    });
+
+    it('flags the ambiguity instead of silently asserting report when no dispatch time is given', () => {
+      const reportDone = m('phase=report status=done run=r-440-ab56 at=2026-08-24T07:00:00Z');
+      const result = computeResume([gateDone, reportDone], openProbe);
+      expect(result.resume_from).toBe('report');
+      expect(result.note).toContain('no --dispatched-at supplied');
+      expect(result.prior_run).toBeUndefined();
+    });
+
+    it('tolerates a 60s clock skew as "not stale"', () => {
+      const reportDone = m(
+        'phase=report status=done run=r-440-ab56 at=2026-08-24T09:59:30Z' // 30s before T
+      );
+      const result = computeResume(
+        [gateDone, reportDone],
+        openProbe,
+        '2026-08-24T10:00:00Z' // T
+      );
+      expect(result.resume_from).toBe('report');
+      expect(result.prior_run).toBeUndefined();
+    });
+  });
+
   it('resumes a blocked phase at that same phase', () => {
     const blocked = m(
       'phase=implement status=blocked run=r-440-ab56 at=2026-08-24T10:08:00Z',
