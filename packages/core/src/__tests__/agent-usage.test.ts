@@ -722,6 +722,17 @@ describe('parseLastToolUse', () => {
     expect(parseLastToolUse(stdout)).toBeNull();
   });
 
+  it('strips control characters from an adversarial tool name (#591 — CWE-117/150 parity with sanitizeModel)', () => {
+    const adversarial = `Monitor${String.fromCharCode(0x1b)}[2K${String.fromCharCode(0x0d)}<forged line>`;
+    const stdout = assistantWithTools(adversarial);
+    expect(parseLastToolUse(stdout)).toBe('Monitor[2K<forged line>');
+  });
+
+  it('caps an unbounded tool name at MAX_TOOL_NAME_LENGTH (100 chars)', () => {
+    const stdout = assistantWithTools('x'.repeat(500));
+    expect(parseLastToolUse(stdout)).toHaveLength(100);
+  });
+
   it('skips the SCHED_DISPATCH_EVENT preamble and unparseable lines, like parseAgentUsage', () => {
     const preamble = JSON.stringify({ type: SCHED_DISPATCH_EVENT, ts: '2026-09-02T10:00:00Z' });
     const stdout = [preamble, 'not json', assistantWithTools('Monitor'), ''].join('\n');

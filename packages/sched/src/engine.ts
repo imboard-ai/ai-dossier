@@ -1055,9 +1055,12 @@ function enterRecovery(
   // `causeEvent === 'verify-incomplete'` arrives from `completeUnitOrRecover`
   // AFTER the agent's exit was already detected and recorded by the dead-pid
   // branch of `reconcileRunning`; recording again here would double-count
-  // that same dispatch.
+  // that same dispatch. #591: a stall kill still has a fresh log slice worth
+  // reading for `last_tool` — a hung agent's last tool is exactly what tells
+  // an operator what it hung in.
   if (causeEvent === 'stalled') {
-    recordDispatchRunLog(ctx, state, slot, unit);
+    const stallLastTool = recordDispatchRunLog(ctx, state, slot, unit);
+    if (stallLastTool !== null) evidence = { ...evidence, last_tool: stallLastTool };
   }
 
   const report = isReportSlot(slot);
@@ -1549,8 +1552,10 @@ function completeUnitOrRecover(
   truth: UnitTruth,
   via: 'verify-complete' | 'external-advance',
   // #591: the last tool this dispatch called (from `recordDispatchRunLog`'s dead-pid
-  // reading), threaded through to `enterRecovery`'s `unverified-exit` evidence — null
-  // for the `external-advance` caller, which never recorded a run log for this exit.
+  // reading), threaded through to `enterRecovery`'s `unverified-exit` evidence. The
+  // `external-advance` caller passes none — it DOES record a run log (`reconcileRunning`,
+  // #524), but ground truth already confirmed completion, so this path never reaches the
+  // `unverified-exit` branch and the tool name has nothing to attribute.
   lastTool: string | null = null
 ): SchedState {
   const now = ctx.deps.now();

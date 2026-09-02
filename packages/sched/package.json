@@ -41,6 +41,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
+    "@ai-dossier/core": "^1.6.0",
     "@ai-dossier/worktree-pool": "^0.6.0"
   },
   "devDependencies": {

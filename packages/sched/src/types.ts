@@ -1203,4 +1203,11 @@ export interface JournalEvent {
   latest_version?: string;
   /** The unit's `priority` at assignment time (#565 AC2 — "journaled on each assignment"). */
   priority?: number;
+  /**
+   * Last tool the exited dispatch called (#591) — attributes an unverified exit
+   * (`verify-incomplete`, and the terminal `unit-failed` reasons `agent-exited-unverified` /
+   * `unverified-exit-at-strongest-tier`) to a concrete cause (e.g. `Monitor`) without opening
+   * the transcript. Absent when the dispatch log yielded no `tool_use` block.
+   */
+  last_tool?: string;
 }

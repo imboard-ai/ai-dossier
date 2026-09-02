@@ -683,7 +683,7 @@ telemetry" below.
 ├── config.json    # durable intent: max_slots, stall_timeout_ms, reconcile_interval_ms,
 │                  # pr_poll_interval_ms, dispatch (incl. report_prompt,
 │                  # phase_stall_timeout_ms, fence_takeover_timeout_ms, tiers — #527,
-│                  # suite_command — #562), auto_upgrade — #537,
+│                  # suite_command — #562, disallowed_tools — #591), auto_upgrade — #537,
 │                  # dissolve_policy — #563
 ├── events.jsonl   # append-only event journal (the operator's flight recorder)
 ├── runs/          # per-unit agent output logs (issue-<n>.log)
@@ -705,10 +705,13 @@ external-advance rail, a stall-timeout kill, and a dependents-blocked kill), sou
 from the agent's `modelUsage` map — never blended with the top-level `usage` block,
 the fix for a ~43% fabricated-saving discrepancy the two blocks were found to produce.
 `recordDispatchRunLog`/`recordMemberRunLog` also return the last tool the dispatch called
-(`parseLastToolUse`, `@ai-dossier/core`, #591) — an unverified exit's terminal `unit-failed`
-journal entry (`agent-exited-unverified` / `unverified-exit-at-strongest-tier`) carries it
-as `last_tool` when the log yielded one, so the failure attributes to a concrete cause (e.g.
-`Monitor`) without opening the transcript.
+(`parseLastToolUse`, `@ai-dossier/core`, #591), when the log yielded one — the exit itself
+attributes to a concrete cause (e.g. `Monitor`) without opening the transcript. It rides the
+non-terminal `verify-incomplete` event on every unverified exit and, once the escalation
+ladder is exhausted, the terminal `unit-failed` (`agent-exited-unverified` /
+`unverified-exit-at-strongest-tier`) as `last_tool`; a stall-timeout kill carries it too. Only
+the dead-pid detection rail and the stall kill record a fresh log slice in the same tick —
+a slot already `exited`/`verifying` when reconciled again has none to attribute.
 
 The dispatch log (`runs/<unit>.log`) is per-UNIT and opened in append mode
 (`createSpawnDeps`), so a redispatched unit's second agent writes its output AFTER the

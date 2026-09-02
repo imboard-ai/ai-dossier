@@ -91,23 +91,34 @@ export const OPENCODE_DISPATCH_COMMAND: readonly string[] = [
  *
  * `Monitor` is the tool an agent reaches for to "wait for this log line" — exactly the
  * move that turns a headless run's turn-end into an unverified exit (see
- * {@link NO_BACKGROUND_EXIT_INSTRUCTION}). The prompt instruction alone was not enough
- * (imboard#2687 lost two generations, #3820, #3631 the same day); this makes it
- * structurally impossible for `claude`-family CLIs instead of merely discouraged.
+ * {@link NO_BACKGROUND_EXIT_INSTRUCTION}). The prompt instruction alone was not enough —
+ * imboard#2687 lost both full-cycle generations to this in batch-pilot attempt 3, and
+ * imboard#3820 and ai-dossier#542 died the same way in attempt 2
+ * (docs/reports/batch-pilot-2-execution.md §21.1a) — this makes it structurally
+ * impossible for `claude`-family CLIs instead of merely discouraged.
  */
 export const DEFAULT_DISALLOWED_TOOLS: readonly string[] = ['Monitor'];
 
 /**
  * Append `--disallowedTools <tools>` to a `claude`-family command template (#591).
  *
- * A no-op when `tools` is empty (the documented `dispatch.disallowed_tools: []` opt-out)
- * or when `template[0]` is not `claude` — a mixed-CLI escalation ladder (#527) can route a
- * tier to `opencode`, which has no such flag and must never receive it. `claude --help`
- * documents `--disallowedTools, --disallowed-tools <tools...>` as accepting a comma- or
- * space-separated list, so the tools join into a single argv element.
+ * A no-op when `tools` is empty (the documented `dispatch.disallowed_tools: []` opt-out),
+ * when the template already carries `--disallowedTools`/`--disallowed-tools` (an operator's
+ * own hand-written flag is authoritative — a second occurrence's precedence would depend on
+ * the `claude` CLI's own arg parser, not on this code), or when the binary's basename isn't
+ * `claude` — matched on `path.basename`, not an exact string, so an absolute or `npx`-style
+ * path (`/usr/local/bin/claude`, `~/.local/bin/claude`) still gets the flag; a mixed-CLI
+ * escalation ladder (#527) can route a tier to `opencode`, which has no such flag and must
+ * never receive it. `claude --help` documents `--disallowedTools, --disallowed-tools
+ * <tools...>` as accepting a comma- or space-separated list, so the tools join into a single
+ * argv element.
  */
 function withDisallowedTools(template: readonly string[], tools: readonly string[]): string[] {
-  if (tools.length === 0 || template[0] !== 'claude') return [...template];
+  const isClaude = path.basename(template[0] ?? '') === 'claude';
+  const alreadySet = template.some(
+    (arg) => arg === '--disallowedTools' || arg === '--disallowed-tools'
+  );
+  if (tools.length === 0 || !isClaude || alreadySet) return [...template];
   return [...template, '--disallowedTools', tools.join(',')];
 }
 

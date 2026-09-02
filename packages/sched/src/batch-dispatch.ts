@@ -1766,10 +1766,11 @@ function reconcileMemberSlot(
       reason,
       detail: 'member blocked',
       // #591: attributes an unverified member exit to a concrete cause (e.g.
-      // `Monitor`) without opening the transcript. Only meaningful for the dead-agent
-      // case — a milestone-carried `reason` (a real block, not an exit) has no log to
-      // attribute.
-      ...(dead && lastTool !== null ? { last_tool: lastTool } : {}),
+      // `Monitor`) without opening the transcript. Gated on the RESOLVED reason, not
+      // `dead` — a member can be simultaneously `dead` AND carry a milestone-posted
+      // `reason` (it posted `blocked` and then exited), and that real block has no
+      // log-derived cause to attribute; only `agent-exited-unverified` does.
+      ...(reason === 'agent-exited-unverified' && lastTool !== null ? { last_tool: lastTool } : {}),
     });
     deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
 

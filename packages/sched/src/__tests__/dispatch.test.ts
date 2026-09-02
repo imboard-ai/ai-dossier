@@ -5,6 +5,7 @@ import {
   buildPrompt,
   buildReportPrompt,
   buildTierCommand,
+  DEFAULT_DISALLOWED_TOOLS,
   DEFAULT_DISPATCH_COMMAND,
   DEFAULT_FIX_PROMPT_TEMPLATE,
   DEFAULT_PROMPT_TEMPLATE,
@@ -82,7 +83,11 @@ describe('resolveDispatch', () => {
   it('defaults: claude headless, haiku/sonnet/opus, 30-minute stall, 60s tick', () => {
     const resolved = resolveDispatch({ max_slots: 3 });
     // #591: --disallowedTools Monitor is appended by default for claude-family commands.
-    expect(resolved.command).toEqual([...DEFAULT_DISPATCH_COMMAND, '--disallowedTools', 'Monitor']);
+    expect(resolved.command).toEqual([
+      ...DEFAULT_DISPATCH_COMMAND,
+      '--disallowedTools',
+      DEFAULT_DISALLOWED_TOOLS.join(','),
+    ]);
     expect(resolved.tierModels).toEqual({
       mechanical: 'haiku',
       mid: 'sonnet',
@@ -127,7 +132,11 @@ describe('resolveDispatch', () => {
 describe('--disallowedTools hardening (#591 — a headless exit must never hide behind an armed Monitor)', () => {
   it('appends --disallowedTools Monitor to the default claude command', () => {
     const resolved = resolveDispatch({ max_slots: 1 });
-    expect(resolved.command).toEqual([...DEFAULT_DISPATCH_COMMAND, '--disallowedTools', 'Monitor']);
+    expect(resolved.command).toEqual([
+      ...DEFAULT_DISPATCH_COMMAND,
+      '--disallowedTools',
+      DEFAULT_DISALLOWED_TOOLS.join(','),
+    ]);
   });
 
   it('appends --disallowedTools Monitor to every tier resolved from the claude shorthand', () => {
@@ -142,7 +151,7 @@ describe('--disallowedTools hardening (#591 — a headless exit must never hide 
         '--model',
         '{model}',
         '--disallowedTools',
-        'Monitor',
+        DEFAULT_DISALLOWED_TOOLS.join(','),
       ]);
     }
   });
@@ -203,7 +212,39 @@ describe('--disallowedTools hardening (#591 — a headless exit must never hide 
       '--model',
       '{model}',
       '--disallowedTools',
-      'Monitor',
+      DEFAULT_DISALLOWED_TOOLS.join(','),
+    ]);
+  });
+
+  it('still applies to an absolute-path or wrapper claude binary, matched on basename', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: { command: ['/usr/local/bin/claude', '-p', '--model', '{model}'] },
+    });
+    expect(resolved.command).toEqual([
+      '/usr/local/bin/claude',
+      '-p',
+      '--model',
+      '{model}',
+      '--disallowedTools',
+      DEFAULT_DISALLOWED_TOOLS.join(','),
+    ]);
+  });
+
+  it('does not double-append when the operator already hand-wrote --disallowedTools', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: {
+        command: ['claude', '-p', '--disallowedTools', 'WebSearch', '--model', '{model}'],
+      },
+    });
+    expect(resolved.command).toEqual([
+      'claude',
+      '-p',
+      '--disallowedTools',
+      'WebSearch',
+      '--model',
+      '{model}',
     ]);
   });
 });

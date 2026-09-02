@@ -310,7 +310,7 @@ export class SchedStore {
         `⚠ Scheduler config ${this.configPath} is unreadable (${(err as Error).message}) — ` +
           `ALL config (max_slots, stall_timeout_ms, reconcile_interval_ms, pr_poll_interval_ms, ` +
           `label_poll_interval_ms, ` +
-          `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout, auto_upgrade, ` +
+          `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout/disallowed-tools, auto_upgrade, ` +
           `dissolve_policy, default_batch_priority) reverted to built-in defaults (max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
       );
       return { max_slots: DEFAULT_MAX_SLOTS };
@@ -493,7 +493,9 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
       !Array.isArray(dispatch.disallowed_tools) ||
       dispatch.disallowed_tools.some((t) => typeof t !== 'string' || t.length === 0)
     ) {
-      throw new Error('dispatch.disallowed_tools must be an array of non-empty strings');
+      throw new Error(
+        `dispatch.disallowed_tools must be an array of non-empty strings; got ${JSON.stringify(dispatch.disallowed_tools)}`
+      );
     }
   }
   const out: DispatchConfig = {};
