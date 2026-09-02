@@ -1350,6 +1350,104 @@ function evictMemberAndContinue(
 }
 
 /**
+ * The incremental gate (#523 AC2, revised #583): typecheck + focused tests
+ * via `cap run`, when the repo has a manifest for them — a second,
+ * independent check that the member's own self-reported "done" is real,
+ * matching this codebase's "never trust a claimed completion" ethos
+ * (AC2/#464's `isVerifiedComplete`). Three-way policy: `task-failed` evicts
+ * the member directly, same rail as a self-reported block (RFC F.1) — no
+ * aggregate suite has run yet, so there is nothing to attribute.
+ * `automation-broken`/`capability-unavailable` — the gate itself could not
+ * reach a verdict — BLOCK the batch instead of silently proceeding (#583: a
+ * script that legitimately could not run its suite must not be read as
+ * either a pass or a real failure). Only both `ok` falls through.
+ *
+ * Returns `true` when the gate already decided the member's fate (evicted or
+ * blocked, both of which `return` from the caller); `false` when no hook is
+ * configured or both checks came back `ok`, meaning the caller should treat
+ * the member as genuinely complete.
+ */
+function runIncrementalGate(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  batch: BatchEntry,
+  memberIssue: number,
+  now: Date,
+  result: BatchTickResult
+): boolean {
+  if (batch.worktree === null || !deps.runCapability) return false;
+  const worktree = batch.worktree;
+  const runCapability = deps.runCapability;
+  const gateResults = ['typecheck.run', 'test.focused'].map((id) => ({
+    id,
+    ...runCapability(worktree, id),
+  }));
+  const gateFailure = gateResults.find((r) => r.outcome === 'task-failed');
+  const gateInconclusive = gateResults.find(
+    (r) => r.outcome === 'automation-broken' || r.outcome === 'capability-unavailable'
+  );
+  const worstGate = gateFailure ?? gateInconclusive;
+  if (worstGate) {
+    recordMemberGate(deps, batchId, memberIssue, worstGate, now);
+  }
+  if (gateFailure) {
+    const reason = `incremental-gate-failed:${gateFailure.id}`;
+    writeGateLog(deps, batchId, gateFailure.id, memberIssue, gateFailure.outputTail);
+    const excerpt = gateDetailExcerpt(gateFailure.outputTail, gateFailure.reason);
+    journalEvent(deps, 'unit-failed', unit(batchId), {
+      issue: memberIssue,
+      reason,
+      detail: excerpt
+        ? `cap run ${gateFailure.id} reported task-failed after member review done: ${excerpt}`
+        : `cap run ${gateFailure.id} reported task-failed after member review done`,
+    });
+    deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
+    evictMemberAndContinue(
+      deps,
+      config,
+      dispatch,
+      batchId,
+      batch,
+      memberIssue,
+      reason,
+      now,
+      result
+    );
+    return true;
+  }
+  if (gateInconclusive) {
+    const reason = `gate-inconclusive:${gateInconclusive.id}`;
+    writeGateLog(deps, batchId, gateInconclusive.id, memberIssue, gateInconclusive.outputTail);
+    const excerpt = gateDetailExcerpt(gateInconclusive.outputTail, gateInconclusive.reason);
+    journalEvent(deps, 'gate-inconclusive', unit(batchId), {
+      issue: memberIssue,
+      reason,
+      detail: excerpt
+        ? `cap run ${gateInconclusive.id} reported ${gateInconclusive.outcome} after member review done: ${excerpt}`
+        : `cap run ${gateInconclusive.id} reported ${gateInconclusive.outcome} after member review done`,
+    });
+    deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
+    const stateNow = deps.store.load();
+    const rDeps = recoveryDeps(deps, config, batch, now);
+    const blocked = blockBatch(
+      stateNow,
+      batchId,
+      { reason, milestonePhase: 'batch-review' },
+      rDeps
+    );
+    deps.store.withLock((s) => ({
+      state: applyBatchAndIssues(s, blocked.state, batchId, []),
+      result: undefined,
+    }));
+    result.failed.push(unit(batchId));
+    return true;
+  }
+  return false;
+}
+
+/**
  * The member is verifiably done — self-reported complete AND (when checked)
  * the incremental gate agrees. Recompute the member's commit range, mark it
  * validated, and advance the batch. Shared by `reconcileMemberSlot`'s
@@ -1627,85 +1725,13 @@ function reconcileMemberSlot(
     // rather than at each of this branch's two later exit points.
     recordMemberRunLog(deps, dispatch, state0, batchId, batch, memberIssue, slot, now);
 
-    // Incremental gate (#523 AC2, revised #583): typecheck + focused tests
-    // via `cap run`, when the repo has a manifest for them — a second,
-    // independent check that the member's own self-reported "done" is real,
-    // matching this codebase's "never trust a claimed completion" ethos
-    // (AC2/#464's `isVerifiedComplete`). Three-way policy: `task-failed`
-    // evicts the member directly, same rail as a self-reported block (RFC
-    // F.1) — no aggregate suite has run yet, so there is nothing to
-    // attribute. `automation-broken`/`capability-unavailable` — the gate
-    // itself could not reach a verdict — BLOCK the batch instead of silently
-    // proceeding (#583: a script that legitimately could not run its suite
-    // must not be read as either a pass or a real failure). Only both `ok`
-    // falls through to normal advancement.
-    if (batch.worktree !== null && deps.runCapability) {
-      const worktree = batch.worktree;
-      const runCapability = deps.runCapability;
-      const gateResults = ['typecheck.run', 'test.focused'].map((id) => ({
-        id,
-        ...runCapability(worktree, id),
-      }));
-      const gateFailure = gateResults.find((r) => r.outcome === 'task-failed');
-      const gateInconclusive = gateResults.find(
-        (r) => r.outcome === 'automation-broken' || r.outcome === 'capability-unavailable'
-      );
-      const worstGate = gateFailure ?? gateInconclusive;
-      if (worstGate) {
-        recordMemberGate(deps, batchId, memberIssue, worstGate, now);
-      }
-      if (gateFailure) {
-        const reason = `incremental-gate-failed:${gateFailure.id}`;
-        writeGateLog(deps, batchId, gateFailure.id, memberIssue, gateFailure.outputTail);
-        const excerpt = gateDetailExcerpt(gateFailure.outputTail, gateFailure.reason);
-        journalEvent(deps, 'unit-failed', unit(batchId), {
-          issue: memberIssue,
-          reason,
-          detail: excerpt
-            ? `cap run ${gateFailure.id} reported task-failed after member review done: ${excerpt}`
-            : `cap run ${gateFailure.id} reported task-failed after member review done`,
-        });
-        deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
-        evictMemberAndContinue(
-          deps,
-          config,
-          dispatch,
-          batchId,
-          batch,
-          memberIssue,
-          reason,
-          now,
-          result
-        );
-        return;
-      }
-      if (gateInconclusive) {
-        const reason = `gate-inconclusive:${gateInconclusive.id}`;
-        writeGateLog(deps, batchId, gateInconclusive.id, memberIssue, gateInconclusive.outputTail);
-        const excerpt = gateDetailExcerpt(gateInconclusive.outputTail, gateInconclusive.reason);
-        journalEvent(deps, 'gate-inconclusive', unit(batchId), {
-          issue: memberIssue,
-          reason,
-          detail: excerpt
-            ? `cap run ${gateInconclusive.id} reported ${gateInconclusive.outcome} after member review done: ${excerpt}`
-            : `cap run ${gateInconclusive.id} reported ${gateInconclusive.outcome} after member review done`,
-        });
-        deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
-        const stateNow = deps.store.load();
-        const rDeps = recoveryDeps(deps, config, batch, now);
-        const blocked = blockBatch(
-          stateNow,
-          batchId,
-          { reason, milestonePhase: 'batch-review' },
-          rDeps
-        );
-        deps.store.withLock((s) => ({
-          state: applyBatchAndIssues(s, blocked.state, batchId, []),
-          result: undefined,
-        }));
-        result.failed.push(unit(batchId));
-        return;
-      }
+    // Incremental gate (#523 AC2, revised #583) — see `runIncrementalGate`'s
+    // own doc comment for the three-way policy. A `true` return means the
+    // gate already decided the member's fate (evicted or blocked) and
+    // returned early; `false` means both checks were `ok` and the member is
+    // genuinely done.
+    if (runIncrementalGate(deps, config, dispatch, batchId, batch, memberIssue, now, result)) {
+      return;
     }
 
     completeMemberGate(deps, config, dispatch, batchId, batch, memberIssue, now, result);
