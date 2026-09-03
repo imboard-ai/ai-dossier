@@ -14,7 +14,7 @@ batch actually reached execution — a warm worktree in under a second and both 
 before both members were evicted, one by a `plan validate` gap (#579, fixed mid-run by PR #581) and
 one by the incremental member gate (#583, fixed by #585).
 
-[Part IV](#part-iv--run-r-590-84e0-2026-09-03-05000700z-hcc2) is attempt 4, run `r-590-84e0` under
+[Part IV](#part-iv--run-r-590-84e0-2026-09-03-04090720z-hcc2) is attempt 4, run `r-590-84e0` under
 the fresh issue #590 — the first run to dispatch **three** batches at once, all warmed in the same
 second, and the run that root-causes why no batch has ever completed: the incremental member gate is a
 constant function in this environment (#594, imboard-monorepo#3996).
@@ -1007,7 +1007,7 @@ full-cycle ready.
   `plan validate` misread exit 128 as a git failure (**fixed mid-run**, PR #581 `c4a4740`).
 
 
-# Part IV — run `r-590-84e0` (2026-09-03 05:00→07:00Z, hcc2)
+# Part IV — run `r-590-84e0` (2026-09-03 04:09→07:20Z, hcc2)
 
 Attempt 4, run under a **fresh issue** — [#590](https://github.com/imboard-ai/ai-dossier/issues/590)
 supersedes the closed #526, whose trail was three completed runs deep and whose every re-enqueue
@@ -1046,13 +1046,21 @@ tier mapping above, so the token comparison isolates batching rather than the mo
 where the mapping had to be checked against a parity-W3 openrouter override.
 
 **`--disallowedTools Monitor` is live** (#591/#593) and **no batch member exited unverified**, across
-7 member dispatches. The mode is not extinct, though: it recurred **once, on a full-cycle fallback** —
-`issue:3985` at `06:40:16.780Z` journalled `verify-incomplete detail=unverified-exit`, was fenced
-`gen=1` (`r-3985-53f6`, `takeover=slot-1-r1`) and re-dispatched at **strong**. That is the strong
-re-dispatch §26.3 records at 06:04→. `--disallowedTools Monitor` was present on that dispatch, so an
-armed `Monitor` is not the residual cause; check the entry's `last_tool` (#591) before assuming
-otherwise. Attempt 3 lost both #2687 generations and $20.06 to this mode; one fenced-and-recovered
-occurrence is a large improvement, not a clean sheet.
+7 member dispatches. **The mode is not extinct — it recurred on every long-running full-cycle
+fallback this run**, all three of them, despite `--disallowedTools Monitor` being present on each
+dispatch:
+
+| unit | `verify-incomplete unverified-exit` | fence | outcome |
+|---|---|---|---|
+| `issue:3985` | 06:40:16.780Z | `r-3985-53f6 gen=1 takeover=slot-1-r1` | re-dispatched strong; opened PR [imboard#3999](https://github.com/imboard-ai/imboard-monorepo/pull/3999), then **`unit-failed unverified-exit-at-strongest-tier`** at 07:10:17 with the PR open and unmerged |
+| `issue:826` | 06:50:18.477Z | `r-826-a38b gen=1 takeover=slot-2-r1` | re-dispatched strong |
+| `issue:340` | 07:06:22.641Z | `r-340-d602 gen=1 takeover=slot-3-r1` | re-dispatched strong |
+
+Because the flag was present on all three, **an armed `Monitor` is not the residual cause** — check the
+entry's `last_tool` (#591) before assuming otherwise. #3985's terminal failure is the same shape that
+cost attempt 3 both #2687 generations and $20.06: a green-but-unmerged PR and a dead unit. #593
+narrowed the mode (zero occurrences among batch members) without closing it; filed as
+[#596](https://github.com/imboard-ai/ai-dossier/issues/596).
 
 ## 26. What ran
 
@@ -1141,9 +1149,10 @@ Timestamps are from `events.jsonl` unless marked, because two clocks are in play
 
 | time | event |
 |---|---|
-| 05:0x–05:23 | prescreen ×68, then 33 classifier dispatches (throttled to ≤4 concurrent — see §30) |
+| 04:09:04 | gate milestone — run `r-590-84e0` opens |
+| 04:10–05:19 | prescreen ×68, then 33 classifier dispatches (first record 04:18:24Z, last 05:19:07Z; throttled to ≤4 concurrent — see §30) |
 | 05:23 | 7 `plan:v1` artifacts posted (none existed) |
-| 05:25 | anchors #3993/#3994/#3995 created; audit file + manifest written; readiness prediction posted (05:25:06Z) |
+| 05:24:03–05 | anchors #3993/#3994/#3995 created; audit file + manifest written; readiness prediction posted 05:25:06Z |
 | 05:25:5x | `sched enqueue --from-manifest` → **all three batches sealed `ready` with bound anchors** |
 | 05:26:07.532 | **`batch-setup-done` for all three** — warm pool claims, zero `env-cold`; members 1/N spawned |
 | 05:26:07.538 / :15.630 / :22.930 | b-01 / b-02 / b-03 `assigned` (setup is stamped at pool claim, *ahead* of two of the three assignments) |
@@ -1157,10 +1166,14 @@ Timestamps are from `events.jsonl` unless marked, because two clocks are in play
 | 05:58:09.027 | **`b-20260903-03` dissolved** — `N=1 evictions=1 threshold=0 requeued=3416 preserved=none` |
 | 05:58:10 | #1512 `unit-failed unrefinable-plan` |
 | 06:00:07 | #3416 `unit-failed incremental-gate-failed:test.focused` (journalled after its batch's dissolve — §27.2) |
-| 06:04→ | requeued members run as full-cycle: #3985, #340, #826, #1512, #3416 |
-| 06:40:16.780 | full-cycle `issue:3985` `verify-incomplete unverified-exit` → fenced `gen=1`, re-dispatched at **strong** (§25) |
+| 06:00:09.88 | #3985 and #47 assigned as full-cycle fallbacks (#47 `verify-complete` 06:04:13, now `done`); #340 assigned 06:04:13 |
+| 06:48:13 | #826 assigned as a full-cycle fallback |
+| 06:40:16.780 / 06:50:18.477 / 07:06:22.641 | full-cycle fallbacks `issue:3985` / `issue:826` / `issue:340` each `verify-incomplete unverified-exit` → fenced `gen=1`, re-dispatched at **strong** (§25) |
 | 06:46:14.760 | **`b-20260903-02` dissolved** — `N=2 evictions=2 threshold=1 requeued=3985,3393 preserved=none` |
 | 06:46:15.927 | #3393 `unit-failed spec-not-met` |
+| 07:08:37 | #3985's fallback posts `ship awaiting-merge` — PR [imboard#3999](https://github.com/imboard-ai/imboard-monorepo/pull/3999) opened |
+| 07:10:17.579 | #3985 `unit-failed unverified-exit-at-strongest-tier` — PR #3999 left open and unmerged |
+| 07:20 | record cutoff (§30) |
 
 **Enqueue → first two dissolves: 32 minutes. Enqueue → all three: 80 minutes.**
 
@@ -1292,7 +1305,7 @@ Every blocker attempts 1–3 root-caused is gone, and this run is the evidence:
 | #564 — `sched stats` empty for batch members | `sched stats --batch <id> --project imboard-ai-imboard-monorepo` returned real per-member cost for all three batches (§29.1) — no hand-parsing of `runs/*.log` |
 | #579 / #581 — `plan validate` misreads a by-design-new file as `git-unavailable` | **zero `git-unavailable` evictions**, across 7 members whose plan artifacts predict 6 files that do not exist at HEAD. Attempt 3 lost #1026 to exactly this |
 | #583 / #585 — the gate's output was not captured | the `unit-failed` detail now carries the gate's actual stdout — the entire root cause in §27.1 came from that field |
-| #591 / #593 — `agent-exited-unverified` | `--disallowedTools Monitor` present on every dispatch; **zero unverified exits among the 7 batch members**, one on a full-cycle fallback that was fenced and recovered (§25). Attempt 3 lost both #2687 generations and $20.06 to this |
+| #591 / #593 — `agent-exited-unverified` | `--disallowedTools Monitor` present on every dispatch; **zero unverified exits among the 7 batch members** — a real narrowing. But it recurred on **all three** long-running full-cycle fallbacks, one of them terminally (§25) — narrowed, not closed (#596) |
 | #575 / #582 / #586 — stale `report/done` resumes | #590 is a fresh issue with a clean trail; `runstate verify` returned `resume_from=none` and the run entered fresh with no operator override. Attempt 3 needed one |
 
 ## 29. Metrics (run 4)
@@ -1317,8 +1330,8 @@ batch …`, which reads like data loss.
 | `b-03` | #3416 | 266 | 71,676 | 330,530 | 17,652,202 | **$5.7960** | opus[1m], sonnet |
 
 **$21.34 across 7 member dispatches, zero merged.** Cost per merged member: undefined — the denominator
-is zero for the fourth attempt running. This excludes the five full-cycle fallback runs the dissolves
-requeued, which were still in flight when this record was written.
+is zero for the fourth attempt running. This excludes the full-cycle fallback runs the dissolves
+requeued; their state at the 07:20Z cutoff is in §30.
 
 Note the `opus[1m]` entries: members dispatched at `mid`/sonnet still show opus usage, because the
 slot-cycle's own internal sub-dispatches (review agents) run at their own tier. The `tier` column is
@@ -1391,9 +1404,13 @@ attempt 3's §21.3 interventions 2–4 (hand-deferring competitors) were not nee
   third" escape hatch no longer exists; a future attempt short of three imboard batches has no fallback.
 - **The 7-day regression window (§5.5) is untouched** — nothing merged, so there is nothing to observe.
   #529 stays unarmed.
-- **The five full-cycle fallback runs were still in flight** when this record was written, so their
-  outcomes and cost are not included in §29.1. They are ordinary full-cycle runs and their results
-  belong to their own issues, not to the batched arm.
+- **The full-cycle fallback runs are recorded only up to a 07:20Z cutoff** and are not included in
+  §29.1 — they are ordinary full-cycle runs whose results belong to their own issues, not to the
+  batched arm. State at the cutoff: **#47** completed (`verify-complete` 06:04:13, `done`); **#3985**
+  opened PR [imboard#3999](https://github.com/imboard-ai/imboard-monorepo/pull/3999) and then failed
+  `unverified-exit-at-strongest-tier`, leaving it open and unmerged; **#826** and **#340** in flight at
+  `gen=1`; **#1512** dispatched 07:10:17; **#3416** and **#3393** still `requeued`, never dispatched.
+  Anything after 07:20Z belongs to a later record, not this one.
 
 ## 31. Acceptance criteria (attempt 4)
 
@@ -1444,7 +1461,10 @@ merges, never on issue closure.
   member (open) · [#595](https://github.com/imboard-ai/ai-dossier/issues/595) — eviction bookkeeping
   double-counts one member and loses another, and the dissolve threshold reads from it (open) ·
   [imboard-monorepo#3996](https://github.com/imboard-ai/imboard-monorepo/issues/3996) — `tee /dev/stderr`
-  under `pipefail` fabricates exit 1 from a green run and empties the buffer #3982's retry greps (open)
+  under `pipefail` fabricates exit 1 from a green run and empties the buffer #3982's retry greps (open) ·
+  [#596](https://github.com/imboard-ai/ai-dossier/issues/596) — `unverified-exit` still fires on every
+  long-running full-cycle unit despite `--disallowedTools Monitor`; it stranded PR imboard-monorepo#3999
+  open and unmerged (open)
 
 ### 32.1 Before the next attempt
 
