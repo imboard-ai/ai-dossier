@@ -60,10 +60,17 @@ the next tick picks it up — there is no reload command.
    `events.jsonl` lines to the Telegram channel.
 3. **Closures.** For each `owner/repo#N` in `~/.dossier/reset-fleet/issues.txt`, checks
    whether GitHub shows it closed and — the first time it sees that — posts the closing
-   PR number to Telegram. When the pilot's tracked execution issue
-   (`imboard-ai/ai-dossier#526`) closes, it additionally arms a one-shot cron
-   (`enqueue-report.sh`) to enqueue the 7-day regression report issue (`#529`) and
-   appends it to `issues.txt` so it gets watched too. When every tracked issue is
+   PR number to Telegram. It also carries a one-shot cron arming step
+   (`enqueue-report.sh`) keyed on the pilot's tracked execution issue
+   (`imboard-ai/ai-dossier#526`) closing, which enqueues the 7-day regression report
+   issue (`#529`) and appends it to `issues.txt`. **That trigger is superseded and must
+   not be relied on**: #526 is closed and its successor is
+   [`#590`](https://github.com/imboard-ai/ai-dossier/issues/590), which states that #529
+   is armed **manually by the supervisor after the first batch PR merges — never on
+   issue closure**. No batch PR has merged yet (see
+   [`docs/reports/batch-pilot-2-execution.md`](../reports/batch-pilot-2-execution.md)
+   Part IV), so #529 stays unarmed; arm it by hand with the command in the
+   troubleshooting table below. When every tracked issue is
    closed, it posts a completion summary and removes its own cron line — the pipeline
    stops polling once there is nothing left to watch.
 
@@ -135,10 +142,10 @@ The pipeline is designed to stop and hand off rather than guess, in exactly two 
    are not re-screened this way — see the scope note in the sched README.)
 2. **Filing Step-4 widening from a gate report.** The batch-cycles rollout (RFC-0001)
    is staged — Step 4 ("Widen": more issue classes, more concurrent batches) only
-   starts once a pilot's regression window has actually elapsed clean. `tick.sh` arms
-   this automatically: when the pilot execution issue closes, it schedules the 7-day
-   report issue (`#529`) and, once the pipeline finishes, its completion message names
-   the next step explicitly ("file Step-4 widening from #529's verdict"). Filing that
+   starts once a pilot's regression window has actually elapsed clean. `tick.sh` has a
+   close-triggered arming step for the 7-day report issue (`#529`), but per #590 that
+   report is armed **manually** after the first batch PR merges; once the pipeline
+   finishes, its completion message names the next step explicitly ("file Step-4 widening from #529's verdict"). Filing that
    Step-4 issue, reading the gate report's verdict, is a human action — see
    [`docs/reports/`](../reports/) for the gate reports #529's report will join
    (`batch-pilot.md`, `batch-pilot-2-execution.md`, `sched-parity.md`,
