@@ -21,3 +21,64 @@ capabilities:
     assumptions:
       - file-exists: Makefile
       - tool-version: node>=20
+
+  # --- The batch incremental member gate (#594 dogfood) ------------------
+  #
+  # `runIncrementalGate` (packages/sched/src/batch-dispatch.ts) runs a FIXED
+  # pair — `typecheck.run` then `test.focused` — after every batch member
+  # reports review-done, and branches three ways: `task-failed` evicts the
+  # member, `automation-broken`/`capability-unavailable` BLOCK the whole batch
+  # (#583/#585), only both-`ok` lets the member complete. Until this repo
+  # declared these two ids, every member's gate returned
+  # capability-unavailable and any batch enqueued here blocked on member 1 —
+  # `test.full` above is the AGGREGATE suite runner's capability (#562), a
+  # different call site, and it never satisfied the per-member gate.
+  #
+  # Order matters and is load-bearing: the gate evaluates the pair in the
+  # literal array order above, so `typecheck.run`'s build runs BEFORE
+  # `test.focused`. That is not incidental — `make test` on a worktree with
+  # stale workspace dists fails wholesale with
+  # `usageParserFor is not a function` (packages/sched's vitest resolves
+  # @ai-dossier/core through node_modules' built dist, not its src), which
+  # would read as a red suite and evict a member whose diff was fine. The
+  # build is the gate's own precondition, declared as the first half of it.
+
+  typecheck.run:
+    command: make build-all
+    lifecycle: active
+    description: >-
+      Typecheck via the real build (core → worktree-pool → sched →
+      mcp-server + cli). This repo has no separate `typecheck` script in any
+      workspace — tsc runs as part of `build`, so the build IS the
+      typecheck, and `build-all` is the variant that skips lint (`make
+      build` = lint + build-all; lint is a separate concern and must not
+      fail a member on formatting).
+    timeout_ms: 600000
+    assumptions:
+      - file-exists: Makefile
+      - tool-version: node>=20
+
+  test.focused:
+    command: make test
+    lifecycle: active
+    description: >-
+      Per-member gate suite. Deliberately the FULL suite, not a diff-scoped
+      one, and deliberately NOT a bespoke shell script.
+    # Why not diff-scoped: imboard-monorepo's `scripts/cap-test-focused.sh`
+    # is the single defect that killed every batch member across pilot
+    # attempts 2-4 (five members for five). Its `tee /dev/stderr` under
+    # `set -o pipefail` fabricated exit 1 out of a green run AND emptied the
+    # buffer its own no-projects-matched retry greps (imboard-monorepo#3996,
+    # fixed 2026-09-03 in imboard#4009). The scope-narrowing machinery — a
+    # pnpm --filter over a merge-base diff — is what needed the script in
+    # the first place. This repo's suite is small enough that scoping buys
+    # seconds and costs a class of bug that has already cost four pilot
+    # attempts, so the honest full suite runs instead: a slower gate that
+    # cannot lie about its own exit status.
+    # Budget: the suite's own worst case here is the worktree-pool CLI tests
+    # (~50 s, they create real worktrees), inside a total well under 5 min;
+    # 10 min matches test.full above rather than inventing a second number.
+    timeout_ms: 600000
+    assumptions:
+      - file-exists: Makefile
+      - tool-version: node>=20
