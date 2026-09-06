@@ -305,6 +305,29 @@ export interface QueueEntry {
    * requeue (#472). Null for every entry that never rode the eviction rail.
    */
   failure_evidence: FailureEvidence | null;
+  /**
+   * ISO time this entry's current `ground-truth-unreachable` streak began
+   * (#632, mirrors #630's `pr_watch_failed_since` on `BatchEntry`) — null
+   * whenever ground truth answered cleanly the last time it was checked for
+   * this unit. Shared by every `ground-truth-unreachable` site in
+   * `engine.ts`: a unit is in exactly one of running/verifying/parked/
+   * stale-failed at a time, so only one site is ever live for a given issue
+   * on a given tick, and `QueueEntry` — unlike `SlotEntry` — exists for a
+   * unit regardless of whether it currently holds a slot.
+   */
+  ground_truth_unreachable_since: string | null;
+  /**
+   * Ticks this entry's current `ground-truth-unreachable` streak has
+   * persisted (#632), including ticks the dedup kept silent — lets the
+   * journal re-announce a still-unreachable streak periodically instead of
+   * only once, ever (AC4: "unreachable for 40 minutes" legible from one
+   * line). Reset to `0` whenever `ground_truth_unreachable_since` is `null`.
+   */
+  ground_truth_unreachable_ticks: number;
+  /** Same shape as the two fields above, for `pr-watch-waiting` (#632) — a
+   * merge GitHub has recorded but not yet reflected as the issue closing. */
+  pr_watch_waiting_since: string | null;
+  pr_watch_waiting_ticks: number;
   enqueued_at: string;
   updated_at: string;
 }
@@ -913,8 +936,11 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-/** 1.13.0 (#630): `BatchEntry` gains `pr_watch_failed_reason`/`_since`/`_ticks`. */
-export const SCHEMA_VERSION = '1.13.0' as const;
+/**
+ * 1.14.0 (#632): `QueueEntry` gains `ground_truth_unreachable_since`/`_ticks`
+ * and `pr_watch_waiting_since`/`_ticks`.
+ */
+export const SCHEMA_VERSION = '1.14.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -931,6 +957,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.10.0',
   '1.11.0',
   '1.12.0',
+  '1.13.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.8.0' as const;

@@ -733,6 +733,13 @@ export function validateState(data: unknown): SchedState {
     // also backfills an explicit `null` (a hand-edited state.json's natural
     // spelling of "no priority set") the same as a genuinely absent key.
     priority: entry.priority ?? DEFAULT_ISSUE_PRIORITY,
+    // Pre-#632 (1.13.0) entries carry none of these four — no dedup marker
+    // was ever recorded under the old once-per-tick behavior, so null/0 is
+    // exact, not a guess.
+    ground_truth_unreachable_since: entry.ground_truth_unreachable_since ?? null,
+    ground_truth_unreachable_ticks: entry.ground_truth_unreachable_ticks ?? 0,
+    pr_watch_waiting_since: entry.pr_watch_waiting_since ?? null,
+    pr_watch_waiting_ticks: entry.pr_watch_waiting_ticks ?? 0,
   }));
   const batches = (obj.batches as BatchEntry[]).map((batch) => ({
     ...batch,
@@ -958,6 +965,41 @@ export function patchBatch(
 }
 
 /**
+ * Patch a `QueueEntry`'s METADATA (the ground-truth-unreachable/pr-watch-
+ * waiting dedup markers, #632) without a status change — mirrors
+ * `patchBatch`/`patchSlot`. `status` and `issue` are excluded on purpose:
+ * every status change goes through `transitionIssue`'s typed rails, never a
+ * hand-written assignment.
+ *
+ * `touchUpdatedAt` defaults to `true` to match `patchBatch`/`patchSlot`, but
+ * the dedup markers' own writes pass `false`: unlike a batch or a slot,
+ * `QueueEntry.updated_at` is already load-bearing elsewhere as a meaningful
+ * clock — `isStaleFailedPark`'s 7-day reconcile window, `status.ts`'s
+ * "parked since" display, `readiness.ts`'s dispatch-order tiebreak. A silent
+ * dedup tick (no journal line, marker only incremented) bumping it would
+ * make a 7-day-stale failed park look freshly-failed forever for as long as
+ * its ground-truth poll kept failing, and would reset "parked since" on
+ * every merge-not-closed re-poll — both regressions this flag exists to
+ * avoid.
+ */
+export function patchEntry(
+  state: SchedState,
+  issue: number,
+  patch: Omit<Partial<QueueEntry>, 'issue' | 'status'>,
+  now: Date = new Date(),
+  touchUpdatedAt = true
+): SchedState {
+  return {
+    ...state,
+    entries: state.entries.map((e) =>
+      e.issue === issue
+        ? { ...e, ...patch, ...(touchUpdatedAt ? { updated_at: now.toISOString() } : {}) }
+        : e
+    ),
+  };
+}
+
+/**
  * Patch a slot's METADATA (pid/phase/branch/last_head/last_progress/the
  * stale-milestone marker) without a status change — mirrors `patchBatch`.
  * These fields are data, not machine states — RFC-0001 §D.3 keeps them
@@ -1089,7 +1131,20 @@ export function requeueMember(
   if (isPreservedMember(entry)) {
     return { state, requeued: false };
   }
-  const patch = { ...target, reason, ...extra };
+  // #632: a requeue is a fresh attempt — a dedup streak recorded against the
+  // PREVIOUS run must not suppress that same condition's first occurrence on
+  // this one (`requeueMember` reuses the entry object rather than creating a
+  // fresh one, so without this reset a stale marker would silently carry
+  // over).
+  const patch = {
+    ...target,
+    reason,
+    ground_truth_unreachable_since: null,
+    ground_truth_unreachable_ticks: 0,
+    pr_watch_waiting_since: null,
+    pr_watch_waiting_ticks: 0,
+    ...extra,
+  };
   if (entry.status === 'queued' || entry.status === 'classified' || entry.status === 'requeued') {
     return {
       state: {

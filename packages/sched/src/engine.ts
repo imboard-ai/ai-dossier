@@ -103,7 +103,14 @@ import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
 import { buildSchedRunLogEntry, finalizeRunLogEntry, readDispatchLog } from './run-log';
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
-import { findEntry, isReportSlot, patchSlot, transitionIssue, transitionSlot } from './state';
+import {
+  findEntry,
+  isReportSlot,
+  patchEntry,
+  patchSlot,
+  transitionIssue,
+  transitionSlot,
+} from './state';
 import { runTeardown, type TeardownResult } from './teardown';
 import {
   DISPATCH_UNHEALTHY_THRESHOLD,
@@ -1053,6 +1060,13 @@ function failOrAdoptOpenPr(
         });
       }
       prCheck = openPr === undefined ? 'unreachable' : 'none';
+      // #632: confirmed NOT one of the per-tick re-emit sites — this
+      // function always ends by either parking the unit (the branch above)
+      // or falling through to the unconditional `failUnit` below, so the
+      // unit is terminal (or parked) by the time this call returns. There is
+      // no "next tick" on which the SAME dispatch reaches this check again,
+      // so no dedup marker is needed here; the line fires exactly once, on
+      // the one terminal decision it accompanies.
       if (prCheck === 'unreachable') {
         journal(ctx, 'ground-truth-unreachable', unit, {
           slot: slot.id,
@@ -1335,6 +1349,153 @@ function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
 }
 
 /**
+ * Ticks a still-unreachable/still-waiting streak goes silent before
+ * re-announcing (#632, the #630 idiom — `PR_WATCH_FAILED_REANNOUNCE_TICKS`
+ * on the batch-member rail — applied here per-issue instead of per-batch).
+ * Same 20-tick window, same rationale: wide enough that a short-lived blip
+ * never re-announces, narrow enough that a genuinely stuck condition
+ * resurfaces well inside "still unreachable after 40 minutes" at the
+ * standard ~2-minute reconcile cadence.
+ */
+const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
+
+/**
+ * Journal `event` for `unit` on the first tick of a new streak, then again
+ * only every `JOURNAL_DEDUP_REANNOUNCE_TICKS` ticks while it persists (#632)
+ * — `ground-truth-unreachable` and `pr-watch-waiting` were previously
+ * journaled every tick the condition held, for as long as it lasted (an
+ * outage produced one entry every reconcile interval, per affected unit, for
+ * up to `max_slots` units at once).
+ *
+ * `sinceOf`/`ticksOf` read the entry's marker for THIS event family and
+ * `withMarker` writes it back — `ground-truth-unreachable` and
+ * `pr-watch-waiting` dedup independently via two separate marker pairs on
+ * `QueueEntry` (mirrors #630's `pr_watch_failed_*` on `BatchEntry`, scoped
+ * to the issue instead of the batch: these sites span both slot-held units
+ * and parked/stale-failed ones with no live slot, and `QueueEntry` is the
+ * one record every unit has either way).
+ *
+ * A caller with no `QueueEntry` to key on (should not happen for a real
+ * issue-dispatch unit) journals unconditionally rather than silently drop
+ * the line — the pre-#632 behavior, and safe: it can only make the journal
+ * more verbose, never hide a real condition.
+ *
+ * Returns the patched state — callers must thread it, or the marker is lost
+ * and the event re-fires next tick as if nothing had been recorded.
+ */
+function journalConditionIfDue(
+  ctx: TickCtx,
+  state: SchedState,
+  unit: string,
+  event: 'ground-truth-unreachable' | 'pr-watch-waiting',
+  sinceOf: (entry: QueueEntry) => string | null,
+  ticksOf: (entry: QueueEntry) => number,
+  withMarker: (since: string | null, ticks: number) => Partial<QueueEntry>,
+  extra: Record<string, unknown>
+): SchedState {
+  const issue = issueOfUnit(unit);
+  const entry = issue === null ? undefined : findEntry(state, issue);
+  if (issue === null || entry === undefined) {
+    journal(ctx, event, unit, extra);
+    return state;
+  }
+  const isNewStreak = sinceOf(entry) === null;
+  const ticks = isNewStreak ? 1 : ticksOf(entry) + 1;
+  const now = ctx.deps.now();
+  if (isNewStreak || ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0) {
+    journal(ctx, event, unit, { ...extra, at: now.toISOString(), ticks_persisted: ticks });
+  }
+  // `touchUpdatedAt: false` — this marker is dedup bookkeeping, not a
+  // substantive change to the entry; `QueueEntry.updated_at` is relied on
+  // elsewhere (`isStaleFailedPark`'s window, `status.ts`'s "since" display,
+  // `readiness.ts`'s dispatch tiebreak) as a clock that must not reset on a
+  // silent tick.
+  return patchEntry(
+    state,
+    issue,
+    withMarker(isNewStreak ? now.toISOString() : sinceOf(entry), ticks),
+    now,
+    false
+  );
+}
+
+function journalGroundTruthUnreachableIfDue(
+  ctx: TickCtx,
+  state: SchedState,
+  unit: string,
+  extra: Record<string, unknown>
+): SchedState {
+  return journalConditionIfDue(
+    ctx,
+    state,
+    unit,
+    'ground-truth-unreachable',
+    (e) => e.ground_truth_unreachable_since,
+    (e) => e.ground_truth_unreachable_ticks,
+    (since, ticks) => ({
+      ground_truth_unreachable_since: since,
+      ground_truth_unreachable_ticks: ticks,
+    }),
+    extra
+  );
+}
+
+function journalPrWatchWaitingIfDue(
+  ctx: TickCtx,
+  state: SchedState,
+  unit: string,
+  extra: Record<string, unknown>
+): SchedState {
+  return journalConditionIfDue(
+    ctx,
+    state,
+    unit,
+    'pr-watch-waiting',
+    (e) => e.pr_watch_waiting_since,
+    (e) => e.pr_watch_waiting_ticks,
+    (since, ticks) => ({ pr_watch_waiting_since: since, pr_watch_waiting_ticks: ticks }),
+    extra
+  );
+}
+
+/**
+ * Clear a `QueueEntry`'s `ground-truth-unreachable` marker once truth
+ * answers again (#632) — a no-op when nothing was set, so callers can call
+ * this unconditionally on every tick truth is healthy without churning
+ * `updated_at` for entries that were never in a streak.
+ */
+function clearGroundTruthUnreachable(state: SchedState, unit: string, now: Date): SchedState {
+  const issue = issueOfUnit(unit);
+  const entry = issue === null ? undefined : findEntry(state, issue);
+  if (issue === null || entry === undefined || entry.ground_truth_unreachable_since === null) {
+    return state;
+  }
+  return patchEntry(
+    state,
+    issue,
+    { ground_truth_unreachable_since: null, ground_truth_unreachable_ticks: 0 },
+    now,
+    false
+  );
+}
+
+/** Same as `clearGroundTruthUnreachable`, for the `pr-watch-waiting` marker. */
+function clearPrWatchWaiting(state: SchedState, unit: string, now: Date): SchedState {
+  const issue = issueOfUnit(unit);
+  const entry = issue === null ? undefined : findEntry(state, issue);
+  if (issue === null || entry === undefined || entry.pr_watch_waiting_since === null) {
+    return state;
+  }
+  return patchEntry(
+    state,
+    issue,
+    { pr_watch_waiting_since: null, pr_watch_waiting_ticks: 0 },
+    now,
+    false
+  );
+}
+
+/**
  * #575: journal the ignored stale milestone — shared by `reconcileRunning`'s
  * external-advance check and `completeUnitOrRecover`'s verify-complete check,
  * the two call sites `isVerifiedComplete`'s dispatch fence guards. Fires only
@@ -1537,12 +1698,14 @@ function reconcileRunning(
   // this unit until truth returns. The dead-pid rail above still ran — local
   // truth needs no network.
   if (!truth.reachable) {
-    journal(ctx, 'ground-truth-unreachable', unit, {
+    return journalGroundTruthUnreachableIfDue(ctx, state, unit, {
       slot: slot.id,
       detail: 'stall/advance decisions paused until truth returns',
     });
-    return state;
   }
+  // #632: truth answered this tick — any unreachable streak recorded against
+  // a PREVIOUS tick is over.
+  const reachable = clearGroundTruthUnreachable(state, unit, now);
 
   // Ground truth says the unit is DONE while the agent still holds the slot —
   // externally-advanced state (AC3): reclaim the slot, kill the leftover agent.
@@ -1558,7 +1721,7 @@ function reconcileRunning(
   // this returns.
   const marked = journalStaleMilestoneIfIgnored(
     ctx,
-    state,
+    reachable,
     unit,
     slot,
     truth,
@@ -1706,11 +1869,10 @@ function completeUnitOrRecover(
   // hold the exit in `verifying` until truth returns, then decide. The agent
   // is already gone; no slot work is lost by waiting.
   if (!truth.reachable) {
-    journal(ctx, 'ground-truth-unreachable', unit, {
+    return journalGroundTruthUnreachableIfDue(ctx, next, unit, {
       slot: slot.id,
       detail: 'exit verification paused until truth returns',
     });
-    return next;
   }
 
   const issue = issueOfUnit(unit);
@@ -1732,15 +1894,25 @@ function completeUnitOrRecover(
       // journaled leaves it re-deciding the same way every tick, forever,
       // against an empty trail. Return the recorded state (the pre-#596 form
       // did — `parkUnit`'s internal guard returned the state it was handed),
-      // not the un-recorded `next`.
-      journal(ctx, 'ground-truth-unreachable', unit, {
+      // not the un-recorded `next`. #632: dedup like the sibling check above
+      // — same marker, since only one of the two can be live for this unit
+      // on a given tick (this branch is reached only after `truth.reachable`
+      // already held).
+      return journalGroundTruthUnreachableIfDue(ctx, parked, unit, {
         slot: slot.id,
         detail: `parked milestone (run=${truth.milestone?.run ?? 'unknown'}) carries no parseable pr= key — holding in verifying`,
       });
-      return parked;
     }
-    return parkUnit(ctx, parked, unit, pr);
+    // #632: a pr= key was found — both flavors of this unit's
+    // ground-truth-unreachable streak (unreachable poll, unparseable pr=)
+    // are resolved.
+    return parkUnit(ctx, clearGroundTruthUnreachable(parked, unit, now), unit, pr);
   }
+
+  // #632: truth answered this tick and this unit isn't stuck on the
+  // missing-pr= edge above — any streak recorded against a PREVIOUS tick
+  // (either flavor) is over.
+  next = clearGroundTruthUnreachable(next, unit, now);
 
   // #575: fence to THIS dispatch's `spawned_at` — an agent that exited having
   // posted nothing new must not read as complete against the issue's
@@ -1899,15 +2071,19 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
       if (!prPoll.truths.has(issue)) {
         continue; // parked AFTER the poll ran (this tick) — next cadence picks it up
       }
-      journal(ctx, 'ground-truth-unreachable', unit, {
+      next = journalGroundTruthUnreachableIfDue(ctx, next, unit, {
         detail: 'pr watch paused until truth returns',
       });
       continue;
     }
+    // #632: truth answered this tick — any unreachable streak recorded
+    // against a PREVIOUS tick is over.
+    next = clearGroundTruthUnreachable(next, unit, ctx.deps.now());
 
     const failWatch = (reason: string): SchedState => {
       journal(ctx, 'pr-watch-failed', unit, { reason, pr: entry.pr });
-      return failUnit(ctx, next, unit, reason);
+      // #632: the watch is ending (terminal failure) — no more "waiting".
+      return clearPrWatchWaiting(failUnit(ctx, next, unit, reason), unit, ctx.deps.now());
     };
 
     // #501: MERGED is checked FIRST, before any failure rail. A PR that is
@@ -1922,7 +2098,7 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
       // AC1: the issue must ALSO be closed (a merged PR auto-closes it) —
       // until GitHub propagates, the unit stays parked and keeps watching.
       if (prPoll.closed.get(issue) !== true) {
-        journal(ctx, 'pr-watch-waiting', unit, {
+        next = journalPrWatchWaitingIfDue(ctx, next, unit, {
           pr: entry.pr,
           mergedAt: truth.mergedAt,
           detail: 'merge seen but issue not closed — keep watching',
@@ -1930,6 +2106,7 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
         continue;
       }
       next = transitionIssue(next, issue, 'shipped', { reason: null }, ctx.deps.now());
+      next = clearPrWatchWaiting(next, unit, ctx.deps.now());
       journal(ctx, 'merge-accepted', unit, { pr: entry.pr, mergedAt: truth.mergedAt });
       ctx.result.mergeAccepted.push(unit);
       continue;
@@ -1944,8 +2121,12 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
     }
     if (truth.state === 'CLOSED' && truth.mergedAt === null) {
       next = failWatch('pr-closed-unmerged');
+    } else {
+      // OPEN (or mergeable UNKNOWN) — keep watching. #632: this tick's truth
+      // is NOT "merge seen but not closed", so a waiting streak from an
+      // earlier tick's merge-then-reverted flicker is over.
+      next = clearPrWatchWaiting(next, unit, ctx.deps.now());
     }
-    // OPEN (or mergeable UNKNOWN) — keep watching.
   }
   return next;
 }
@@ -1982,16 +2163,25 @@ function reconcileStaleFailedParks(ctx: TickCtx, state: SchedState, prPoll: PrPo
       if (!prPoll.truths.has(issue)) {
         continue; // failed AFTER the poll ran this tick — next cadence picks it up
       }
-      journal(ctx, 'ground-truth-unreachable', unit, {
+      next = journalGroundTruthUnreachableIfDue(ctx, next, unit, {
         detail: 'stale-failure reconcile paused until truth returns',
       });
       continue;
     }
+    // #632: truth answered this tick — any unreachable streak recorded
+    // against a PREVIOUS tick is over.
+    next = clearGroundTruthUnreachable(next, unit, ctx.deps.now());
 
-    if (!isPrMerged(truth)) continue; // still blocked/open/conflicting — stays failed
+    if (!isPrMerged(truth)) {
+      // Still blocked/open/conflicting — stays failed. #632: not "merge seen
+      // but not closed" either, so a waiting streak from an earlier tick's
+      // merge-then-reverted flicker is over.
+      next = clearPrWatchWaiting(next, unit, ctx.deps.now());
+      continue;
+    }
 
     if (prPoll.closed.get(issue) !== true) {
-      journal(ctx, 'pr-watch-waiting', unit, {
+      next = journalPrWatchWaitingIfDue(ctx, next, unit, {
         pr: entry.pr,
         mergedAt: truth.mergedAt,
         reason: AUTO_MERGE_BLOCKED_REASON,
@@ -2002,6 +2192,7 @@ function reconcileStaleFailedParks(ctx: TickCtx, state: SchedState, prPoll: PrPo
 
     const failedAt = entry.updated_at;
     next = transitionIssue(next, issue, 'shipped', { reason: null }, ctx.deps.now());
+    next = clearPrWatchWaiting(next, unit, ctx.deps.now());
     journal(ctx, 'stale-failure-reconciled', unit, {
       pr: entry.pr,
       mergedAt: truth.mergedAt,

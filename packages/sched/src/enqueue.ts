@@ -437,6 +437,10 @@ export function enqueueEntries(
       pr: null,
       cleanup: null,
       failure_evidence: null,
+      ground_truth_unreachable_since: null,
+      ground_truth_unreachable_ticks: 0,
+      pr_watch_waiting_since: null,
+      pr_watch_waiting_ticks: 0,
       enqueued_at: timestamp,
       updated_at: timestamp,
     };
