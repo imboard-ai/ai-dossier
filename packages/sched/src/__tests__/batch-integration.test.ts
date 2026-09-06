@@ -23,6 +23,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 // fresh from the store).
 import { type BatchTickResult, evictMemberAndContinue } from '../batch-dispatch';
 import {
+  assignToIdleSlot,
   type BatchDispatchDeps,
   type CapabilityGateResult,
   createSpawnDeps,
@@ -32,14 +33,20 @@ import {
   enqueueEntries,
   findBatch,
   type GroundTruth,
+  type GroundTruthMilestone,
   Journal,
   type PrTruth,
+  patchSlot,
   resolveDispatch,
   resumeBlockedGate,
+  runBatchTick,
   type SchedConfig,
   SchedStore,
+  type SpawnDeps,
   type SuiteResult,
   tick,
+  transitionBatch,
+  transitionSlot,
 } from '../index';
 import { stubGroundTruth } from './helpers/ground-truth';
 
@@ -1349,4 +1356,149 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
         .some((e) => e.event === 'teardown-done' && e.unit === `batch:${batchId}`)
     ).toBe(true);
   }, 60_000);
+});
+
+/**
+ * #610: a lightweight harness for `reconcileMemberSlot`'s stale-milestone
+ * dedup, deliberately WITHOUT `batchHarness`'s real git worktree / real
+ * spawned fake-agent process. The scenario under test — a leftover terminal
+ * milestone from a PREVIOUS batch run of this member reads as stale against
+ * the CURRENT dispatch's `spawned_at` — starts mid-run (batch already
+ * `executing`, slot already `running`), and the real fake-agent posts a
+ * FRESH milestone the instant it is spawned, racing out any hand-written
+ * stale one before a tick could ever observe it. Placing the batch/slot
+ * directly with `assignToIdleSlot`/`transitionBatch` and driving
+ * `runBatchTick` (not the full `tick()`) skips `claimAndSetup` entirely, so
+ * no worktree, `exec`, or suite ever needs to be real.
+ */
+function staleMilestoneHarness(memberIssue: number, batchId: string, anchor: number) {
+  const store = new SchedStore(tmpDir('sched-batch-stale-'));
+  const journal = new Journal(store.dir);
+  const setupAt = new Date('2026-09-06T12:00:00.000Z');
+  let currentNow = setupAt;
+
+  let state = enqueueEntries(
+    store.load(),
+    [{ issue: memberIssue, mode: 'slot', batch: batchId, anchor, tier: 'mid' }],
+    setupAt
+  );
+  // enqueueEntries already seals a fresh batch forming → ready.
+  state = transitionBatch(state, batchId, 'executing', { executing_member: 1 }, setupAt);
+  const assigned = assignToIdleSlot(state, `batch:${batchId}`, 'member', setupAt);
+  state = assigned.state;
+  const slotId = assigned.slotId;
+  state = transitionSlot(state, slotId, 'running', { pid: 4242, pid_start: null }, setupAt);
+  store.withLock(() => ({ state, result: undefined }));
+
+  let milestone: GroundTruthMilestone | null = null;
+  const groundTruth = stubGroundTruth({ latestMilestone: () => milestone });
+  const spawnDeps: SpawnDeps = {
+    spawn: () => {
+      throw new Error('must not spawn in this test');
+    },
+    kill: () => true,
+    isAlive: () => true, // the member's agent is genuinely still running
+    processStart: () => null,
+  };
+  const config: SchedConfig = { max_slots: 1 };
+  const dispatch = resolveDispatch(config);
+  const deps: BatchDispatchDeps = {
+    store,
+    journal,
+    groundTruth,
+    spawnDeps,
+    now: () => currentNow,
+    repoDir: store.dir,
+    exec: () => {
+      throw new Error('must not exec in this test');
+    },
+    runSuite: () => {
+      throw new Error('must not run the aggregate suite in this test');
+    },
+  };
+
+  return {
+    journal,
+    slotId,
+    setMilestone: (m: GroundTruthMilestone | null) => {
+      milestone = m;
+    },
+    /** Advances the tick clock (`deps.now()`), independent of `spawned_at`. */
+    advanceNow: (at: string) => {
+      currentNow = new Date(at);
+    },
+    /** Simulates a fresh dispatch of the SAME member (new spawn, same slot). */
+    setSpawnedAt: (at: string) => {
+      store.withLock((s) => ({
+        state: patchSlot(s, slotId, { spawned_at: at }, currentNow),
+        result: undefined,
+      }));
+    },
+    tick: () => runBatchTick(deps, config, dispatch),
+  };
+}
+
+describe('#610: stale-milestone-ignored journals once per dispatch, not once per tick', () => {
+  it('AC4: three consecutive ticks against one stale milestone produce exactly one journal entry', () => {
+    const h = staleMilestoneHarness(610, 'b-stale', 609);
+    h.advanceNow('2026-09-06T12:10:00.000Z');
+    h.setSpawnedAt('2026-09-06T12:05:00.000Z');
+    // A `review done mode=slot` milestone from a PREVIOUS batch run — well
+    // before this dispatch's spawned_at, and well past the 60s dispatch-fence
+    // tolerance (`postdatesDispatch`).
+    const staleMilestone: GroundTruthMilestone = {
+      phase: 'review',
+      status: 'done',
+      run: 'r-610-old',
+      at: '2026-09-06T11:00:00.000Z',
+      keys: { mode: 'slot', batch: 'b-stale' },
+    };
+    h.setMilestone(staleMilestone);
+
+    h.tick();
+    h.tick();
+    h.tick();
+
+    const events = h.journal.read().filter((e) => e.event === 'stale-milestone-ignored');
+    expect(events).toHaveLength(1);
+    expect(events[0]?.issue).toBe(610);
+    // AC2: the event's own `at` is the engine's decision time — NOT the
+    // milestone's — with the milestone's own timestamp kept as a separate field.
+    // Neither key is declared on `JournalEvent` (a loosely-typed `extra` bag,
+    // same as `run`/`detail` on this event historically), hence the cast.
+    const [entry] = events as unknown as { at: string; milestone_at: string }[];
+    expect(entry?.at).not.toBe(staleMilestone.at);
+    expect(entry?.milestone_at).toBe(staleMilestone.at);
+  });
+
+  it('AC5: a second, later dispatch that also sees a stale milestone produces its own entry — dedup is per dispatch, not per member', () => {
+    const h = staleMilestoneHarness(610, 'b-stale2', 609);
+    h.advanceNow('2026-09-06T12:10:00.000Z');
+    h.setSpawnedAt('2026-09-06T12:05:00.000Z');
+    const staleMilestone: GroundTruthMilestone = {
+      phase: 'review',
+      status: 'done',
+      run: 'r-610-old',
+      at: '2026-09-06T11:00:00.000Z',
+      keys: { mode: 'slot', batch: 'b-stale2' },
+    };
+    h.setMilestone(staleMilestone);
+
+    h.tick();
+    h.tick();
+    expect(h.journal.read().filter((e) => e.event === 'stale-milestone-ignored')).toHaveLength(1);
+
+    // A fresh dispatch of the SAME member (e.g. a requeue-with-context
+    // re-batch) — the milestone is unchanged and still stale relative to the
+    // NEW spawned_at, so the dedup marker (keyed on the OLD spawned_at) must
+    // not suppress this dispatch's own entry.
+    h.advanceNow('2026-09-06T13:10:00.000Z');
+    h.setSpawnedAt('2026-09-06T13:05:00.000Z');
+    h.tick();
+    h.tick();
+
+    const events = h.journal.read().filter((e) => e.event === 'stale-milestone-ignored');
+    expect(events).toHaveLength(2);
+    expect(events.every((e) => e.issue === 610)).toBe(true);
+  });
 });

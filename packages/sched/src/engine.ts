@@ -104,7 +104,7 @@ import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
 import { buildSchedRunLogEntry, finalizeRunLogEntry, readDispatchLog } from './run-log';
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
-import { findEntry, isReportSlot, transitionIssue, transitionSlot } from './state';
+import { findEntry, isReportSlot, patchSlot, transitionIssue, transitionSlot } from './state';
 import { runTeardown, type TeardownResult } from './teardown';
 import {
   DISPATCH_UNHEALTHY_THRESHOLD,
@@ -321,25 +321,6 @@ function slotOf(state: SchedState, unit: string): SlotEntry | undefined {
  */
 function msSinceLastProgress(slot: SlotEntry, now: Date): number {
   return now.getTime() - (slot.last_progress_at ? Date.parse(slot.last_progress_at) : 0);
-}
-
-/**
- * Metadata patch on a slot WITHOUT a status transition (pid/phase/branch/
- * last_head/last_progress are data, not machine states — RFC-0001 §D.3 keeps
- * them alongside the status, and the transition tables stay pure).
- */
-function patchSlot(
-  state: SchedState,
-  slotId: number,
-  patch: Partial<SlotEntry>,
-  now: Date
-): SchedState {
-  return {
-    ...state,
-    slots: state.slots.map((s) =>
-      s.id === slotId ? { ...s, ...patch, updated_at: now.toISOString() } : s
-    ),
-  };
 }
 
 /**
