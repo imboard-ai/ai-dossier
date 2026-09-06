@@ -50,6 +50,7 @@ import {
 import { unitEvent } from './journal';
 import type { ExecFn } from './project';
 import {
+  appendEvictions,
   createBatch,
   findBatch,
   isPreservedMember,
@@ -771,7 +772,18 @@ export function evictMembers(
     );
   }
 
-  next = patchBatch(next, batchId, { evictions: [...batch.evictions, ...records] }, now);
+  const { evictions, duplicate } = appendEvictions(batch, records);
+  next = patchBatch(next, batchId, { evictions }, now);
+  for (const dup of duplicate) {
+    journal(
+      deps,
+      unitEvent('eviction-duplicate', `batch:${batchId}`, {
+        issue: dup.issue,
+        detail: `${dup.reason} — issue #${dup.issue} is already recorded as evicted; no second record written`,
+      }),
+      now
+    );
+  }
   const withoutCommits = targets.filter((t) => (revertedByMember.get(t) ?? []).length === 0);
   post(
     deps,

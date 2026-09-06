@@ -1133,7 +1133,11 @@ export type JournalEventName =
   // on a re-enqueued issue) — the dispatch fence in `isVerifiedComplete`
   // ignored it and the fresh agent keeps running. Journaled per-tick while
   // the condition holds, same convention as `ground-truth-unreachable`.
-  | 'stale-milestone-ignored';
+  | 'stale-milestone-ignored'
+  // #595: a second eviction call named a member already in `batch.evictions`
+  // — the append is a no-op (never a second `EvictionRecord`), journaled here
+  // instead of silently dropped so the duplicate attempt is still visible.
+  | 'eviction-duplicate';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —

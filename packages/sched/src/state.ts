@@ -17,6 +17,7 @@ import {
   DEFAULT_BATCH_PRIORITY,
   DEFAULT_ISSUE_PRIORITY,
   EngineTooOldError,
+  type EvictionRecord,
   type FailureEvidence,
   IllegalTransitionError,
   type IssueStatus,
@@ -943,6 +944,33 @@ export function patchBatch(
       b.id === batchId ? { ...b, ...patch, updated_at: now.toISOString() } : b
     ),
   };
+}
+
+/**
+ * Merge new eviction records into a batch's `evictions[]`, skipping any whose
+ * `issue` is already recorded (#595) — the one place that appends to
+ * `evictions[]`, shared by `recovery.ts`'s `evictMembers` and
+ * `batch-dispatch.ts`'s `evictMemberDirectly` so neither call site can
+ * duplicate a member's eviction record no matter how many times it is asked
+ * to evict the same issue. `duplicate` is returned so the caller can journal
+ * an explicit warning instead of silently dropping the second attempt.
+ */
+export function appendEvictions(
+  batch: BatchEntry,
+  records: readonly EvictionRecord[]
+): { evictions: EvictionRecord[]; appended: EvictionRecord[]; duplicate: EvictionRecord[] } {
+  const seen = new Set(batch.evictions.map((e) => e.issue));
+  const appended: EvictionRecord[] = [];
+  const duplicate: EvictionRecord[] = [];
+  for (const record of records) {
+    if (seen.has(record.issue)) {
+      duplicate.push(record);
+      continue;
+    }
+    seen.add(record.issue);
+    appended.push(record);
+  }
+  return { evictions: [...batch.evictions, ...appended], appended, duplicate };
 }
 
 /**

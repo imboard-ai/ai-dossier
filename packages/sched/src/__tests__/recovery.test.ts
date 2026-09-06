@@ -426,6 +426,36 @@ describe('evictMembers (real git reverts)', () => {
     expect(findBatch(result.state, 'b1')?.evictions).toHaveLength(1);
   });
 
+  it('a second eviction call for the same member is a no-op — one record, one journaled warning, no extra dissolve count (#595)', () => {
+    const { repo, base } = twoMembers();
+    const state = batchState([201, 202, 203]);
+    const h = harness({ exec: createExecFn(60_000) });
+    h.deps.repoDir = repo;
+    const input = {
+      issues: [201],
+      reason: 'suite-red',
+      attribution: 'overlap' as const,
+      ranges: rangesOf(repo, base),
+    };
+
+    const first = evictMembers(state, 'b1', input, h.deps);
+    expect(findBatch(first.state, 'b1')?.evictions).toHaveLength(1);
+
+    // A real second eviction round re-enters via `attributing`, same as the
+    // caller's normal validating → attributing → evicting cycle.
+    const restarted = transitionBatch(first.state, 'b1', 'attributing', {}, NOW);
+    const second = evictMembers(restarted, 'b1', input, h.deps);
+
+    const batch = findBatch(second.state, 'b1');
+    if (!batch) throw new Error('batch b1 not found');
+    expect(batch.evictions).toHaveLength(1);
+    expect(batch.evictions.filter((e) => e.issue === 201)).toHaveLength(1);
+    expect(eventNames(h.events)).toContain('eviction-duplicate');
+    // 1 of 3 members evicted stays well under the dissolve threshold either way.
+    expect(checkDissolveTrigger(batch)).toBe(false);
+    expect(second.dissolved).toBe(false);
+  });
+
   it('evicts an eviction group together', () => {
     const { repo, base } = twoMembers();
     const state = batchState([201, 202, 203, 204], 'attributing', { groups: [[201, 202]] });
