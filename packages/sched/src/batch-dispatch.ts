@@ -94,6 +94,7 @@ import {
 } from './dispatch';
 import {
   type GroundTruth,
+  type GroundTruthMilestone,
   isBatchPhaseDone,
   isBatchTailParked,
   isMemberBlocked,
@@ -1847,6 +1848,49 @@ function recordMemberRunLog(
   return parseLastToolUse(logContent);
 }
 
+/**
+ * #622: the milestone a member dispatch's fate is read from.
+ *
+ * Returns the LAST milestone this dispatch posted that is terminal for a
+ * member — complete (`review/done mode=slot`) or blocked (`blocked
+ * mode=slot`) — falling back to the newest milestone when the dispatch
+ * produced no terminal one, and to `latestMilestone` entirely when the
+ * ground truth cannot enumerate a window.
+ *
+ * "Last terminal" rather than "last": a member may post a non-terminal
+ * catch-up milestone after finishing (the observed case: `review done` then
+ * `implement done` fifteen seconds later), and a reader that takes the
+ * newest concludes the unit never finished. It is also "last" rather than
+ * "first" so a member that posts `blocked` and then genuinely completes, or
+ * vice versa, is judged on its final word.
+ *
+ * The tri-state contract is preserved exactly: `undefined` still means the
+ * poll failed and the caller must pause.
+ */
+function terminalMilestoneForDispatch(
+  deps: BatchDispatchDeps,
+  memberIssue: number,
+  slot: SlotEntry
+): GroundTruthMilestone | null | undefined {
+  const latest = deps.groundTruth.latestMilestone(memberIssue);
+  if (latest === undefined) return undefined; // unreachable — pause
+  const since = slot.spawned_at;
+  if (since === null || deps.groundTruth.milestonesSince === undefined) return latest;
+
+  const window = deps.groundTruth.milestonesSince(memberIssue, since);
+  // A failed enumeration is NOT fatal here — the caller already has a usable
+  // answer from `latestMilestone`. Degrade to it rather than pausing the
+  // batch on a secondary read.
+  if (window === undefined) return latest;
+
+  for (let i = window.length - 1; i >= 0; i--) {
+    const m = window[i];
+    if (m === undefined) continue;
+    if (isMemberComplete(m, since) || isMemberBlocked(m, since)) return m;
+  }
+  return latest;
+}
+
 function reconcileMemberSlot(
   deps: BatchDispatchDeps,
   config: SchedConfig,
@@ -1863,7 +1907,22 @@ function reconcileMemberSlot(
   if (memberIssue === undefined) return;
 
   const dead = slot.pid !== null && !deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined);
-  const milestone = deps.groundTruth.latestMilestone(memberIssue);
+  // #622: the milestone this DISPATCH's fate should be read from — the last
+  // TERMINAL one it posted, not merely the newest one on the issue.
+  //
+  // `latestMilestone` alone gets this wrong in a way that evicts finished
+  // work: a member posted `review done` at 12:52:37 and a catch-up
+  // `implement done` at 12:52:52, and the engine — seeing only the newest —
+  // concluded the unit never finished and evicted it, despite a pushed
+  // commit and 7/7 conformance. `review done` satisfied every condition
+  // `isMemberComplete` checks except being last.
+  //
+  // Searching the dispatch's own milestones does NOT weaken #575/#605's
+  // fence: the window starts at `spawned_at`, so a previous run's terminal
+  // milestone is excluded by construction rather than by predicate. When the
+  // ground truth cannot answer (older implementation, or an unreachable
+  // poll) this degrades to the previous latest-only behaviour.
+  const milestone = terminalMilestoneForDispatch(deps, memberIssue, slot);
   if (milestone === undefined) return; // unreachable — pause this batch's decisions
 
   // #575 / #605: fence to THIS member dispatch's `spawned_at` — a member

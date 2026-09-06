@@ -105,6 +105,11 @@ interface ReadOptions {
   json?: boolean;
 }
 
+/** `runstate list` — every milestone, optionally bounded to one dispatch (#622). */
+interface ListOptions extends ReadOptions {
+  since?: string;
+}
+
 interface VerifyOptions extends ReadOptions {
   dispatchedAt?: string;
 }
@@ -763,8 +768,71 @@ function registerPostSubcommand(cmd: Command): void {
     });
 }
 
-/** `runstate last` — print the most recent milestone on an issue. */
-function registerLastSubcommand(cmd: Command): void {
+/**
+ * `runstate list` — every milestone (optionally since a dispatch, #622) — and
+ * `runstate last`, the most recent one. Registered together because they read
+ * the same trail and differ only in how much of it they hand back.
+ */
+function registerReadSubcommands(cmd: Command): void {
+  cmd
+    .command('list')
+    .description("Print an issue's runstate milestones, oldest first (read-only)")
+    .requiredOption('--issue <number>', 'GitHub issue number')
+    .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
+    .option(
+      '--since <iso>',
+      "Only milestones at or after this ISO-8601 timestamp — e.g. a dispatch's spawned_at"
+    )
+    .option('--json', 'Output the parsed milestones as a JSON array')
+    .action((options: ListOptions) => {
+      requireIssueTarget(options);
+      let milestones = fetchMilestones(options.issue, options.repo);
+
+      // #622: `last` is not enough for a consumer that must decide what a
+      // DISPATCH produced. A member posting `review done` and then a
+      // catch-up `implement done` fifteen seconds later buries its own
+      // completion signal, and a reader that only sees the newest milestone
+      // concludes the unit never finished. Bounding by `--since` lets the
+      // caller ask the question it actually has: what did this run post?
+      if (options.since !== undefined) {
+        const since = Date.parse(options.since);
+        if (Number.isNaN(since)) {
+          fail([`--since must be an ISO-8601 timestamp, got '${options.since}'`]);
+        }
+        // An unparseable milestone timestamp is KEPT, never silently dropped:
+        // losing a terminal milestone to a formatting quirk is the failure
+        // mode this flag exists to prevent.
+        milestones = milestones.filter((m) => {
+          const at = Date.parse(m.at);
+          return Number.isNaN(at) || at >= since;
+        });
+      }
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            milestones.map((m) => ({
+              phase: m.phase,
+              status: m.status,
+              run: m.run,
+              at: m.at,
+              ...m.keys,
+            })),
+            null,
+            2
+          )
+        );
+        return;
+      }
+      if (milestones.length === 0) {
+        console.log(`No runstate milestones on issue #${options.issue}.`);
+        return;
+      }
+      for (const m of milestones) {
+        console.log(`${m.at}  phase=${m.phase} status=${m.status} run=${m.run}`);
+      }
+    });
+
   cmd
     .command('last')
     .description('Print the most recent runstate milestone on an issue (read-only)')
@@ -1458,7 +1526,7 @@ export function registerRunstateCommand(program: Command): void {
     .description('Post, read, and verify runstate:v1 workflow milestones on a GitHub issue');
 
   registerPostSubcommand(runstateCmd);
-  registerLastSubcommand(runstateCmd);
+  registerReadSubcommands(runstateCmd);
   registerVerifySubcommand(runstateCmd);
   registerFenceSubcommand(runstateCmd);
   registerCheckSubcommand(runstateCmd);
