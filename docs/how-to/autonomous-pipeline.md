@@ -4,6 +4,13 @@ How issues move from "queued" to "merged" on hcc2 without a human in the loop fo
 common case — the scheduler, the tick cron, the Telegram channel, and the two points
 where it deliberately stops and asks a human instead of guessing.
 
+> **The pipeline is currently HALTED** (since 2026-09-03 10:42Z — owner token budget, not a
+> fault). Both projects are `PAUSED` and the tick cron is uninstalled, so nothing below runs
+> until someone restarts it. Read
+> [`docs/reports/batch-cycles-checkpoint.md`](../reports/batch-cycles-checkpoint.md) before
+> restarting — it carries the resume recipe, the open findings, and one hazard that bites an
+> operator who just runs `sched resume` (see "Restarting after a halt" below).
+
 ## Concepts
 
 - **`ai-dossier sched`** (`packages/sched/`) is the deterministic engine: a queue, worker
@@ -125,6 +132,37 @@ project in `projects.txt` gets ticked but later projects and the closure/report-
 checks never run that cycle. Neither `state.json` nor `events.jsonl` needs manual repair
 after a clean reboot.
 
+## Restarting after a halt
+
+A **halt** is not a reboot. After a reboot the pipeline self-resumes (above); after a halt
+someone paused the projects and removed the tick cron on purpose, and both have to be undone by
+hand, in this order:
+
+```bash
+ai-dossier sched resume --project imboard-ai-ai-dossier
+ai-dossier sched resume --project imboard-ai-imboard-monorepo
+ai-dossier sched start --once --project imboard-ai-imboard-monorepo   # reconcile BEFORE the cron
+ai-dossier sched status --project imboard-ai-imboard-monorepo         # confirm slots are as expected
+(crontab -l 2>/dev/null; cat ~/.dossier/reset-fleet/tick.cron.saved) | crontab -
+crontab -l                                                            # tick line AND scorecard line
+```
+
+Two things go wrong here often enough to be worth naming:
+
+- **Slots held by dead pids.** `sched status` reports a slot `running` from the last state it
+  wrote. While a project is paused with no tick, nothing reconciles that record, so a unit whose
+  agent exited days ago still shows `running` with a stale pid — on this host, two of three slots
+  did, for three days, on issues that had both already closed. That is why the reconcile pass
+  (`sched start --once`) comes *before* restoring the cron: it re-detects running slots by pid
+  identity and frees the stale ones. Never edit `state.json` to clear them.
+- **The `crontab -l` guard.** `crontab -l` exits non-zero on a host with no crontab. Without
+  `2>/dev/null` (and outside `set -e`, without `|| true`), the pipeline captures nothing and
+  installs an **empty** crontab, dropping every job the host had. See the `no crontab for` row in
+  [`docs/agent-traps.md`](../agent-traps.md).
+
+The state the halt left behind — which units failed and why, which fixes are still open, what to
+do first — is in [`batch-cycles-checkpoint.md`](../reports/batch-cycles-checkpoint.md), not here.
+
 ## The two human checkpoints
 
 The pipeline is designed to stop and hand off rather than guess, in exactly two places:
@@ -177,5 +215,6 @@ per-project. Most subcommands also take `--json` for machine-readable output.
 | Run one reconcile+refill tick (what cron does) | `ai-dossier sched start --once` |
 | Run one tick, self-upgrading the CLI first (gated on no mid-dispatch unit) | `ai-dossier sched start --once --auto-upgrade` |
 | Per-issue token/cost totals (global, not per-project) | `ai-dossier sched stats --issues 4..9` |
+| Restart after a deliberate halt | see [Restarting after a halt](#restarting-after-a-halt) — resume, reconcile, *then* cron |
 | Re-arm the tick cron (if it self-removed after all-done) | `(crontab -l 2>/dev/null; echo "*/2 * * * * $HOME/.dossier/reset-fleet/tick.sh >> $HOME/.dossier/reset-fleet/tick.log 2>&1") \| crontab -` |
 | Re-schedule the 7-day report by hand | `ai-dossier sched enqueue --project imboard-ai-ai-dossier --issues 529 --tier strong` (what `enqueue-report.sh` does; only needed if the automatic cron-arming step in `tick.sh` was skipped or missed) |
