@@ -4,6 +4,13 @@ How issues move from "queued" to "merged" on hcc2 without a human in the loop fo
 common case — the scheduler, the tick cron, the Telegram channel, and the two points
 where it deliberately stops and asks a human instead of guessing.
 
+> **The pipeline is currently HALTED** (since 2026-09-03 10:42Z — owner token budget, not a
+> fault). Both projects are `PAUSED` and the tick cron is uninstalled, so nothing below runs
+> until someone restarts it. Read
+> [`docs/reports/batch-cycles-checkpoint.md`](../reports/batch-cycles-checkpoint.md) before
+> restarting — it carries the resume recipe, the open findings, and one hazard that bites an
+> operator who just runs `sched resume` (see "Restarting after a halt" below).
+
 ## Concepts
 
 - **`ai-dossier sched`** (`packages/sched/`) is the deterministic engine: a queue, worker
@@ -125,6 +132,84 @@ project in `projects.txt` gets ticked but later projects and the closure/report-
 checks never run that cycle. Neither `state.json` nor `events.jsonl` needs manual repair
 after a clean reboot.
 
+## Restarting after a halt
+
+A **halt** is not a reboot. After a reboot the pipeline self-resumes (above); after a halt
+someone paused the projects and removed the tick cron on purpose, and both have to be undone by
+hand. This is the canonical procedure — the programme checkpoint links here rather than carrying
+its own copy.
+
+**Order matters: reconcile while still paused, and only then un-pause.** `paused` gates the
+dispatch half only (`const dispatchable = state.paused ? [] : runnableUnits(state)`,
+`packages/sched/src/engine.ts`); the reconcile half — including the dead-pid rail that frees stale
+slots — runs either way. So a paused `start --once` does exactly the cleanup you want with no
+chance of spawning into the slots it just freed. Un-pausing first re-arms spawning for that same
+pass, and the dead-pid branch can route an already-shipped unit into recovery, i.e. redispatch a
+fresh agent onto a closed issue.
+
+```bash
+# 1. Reconcile FIRST, still paused — frees stale slots, cannot spawn
+for p in $(cat ~/.dossier/reset-fleet/projects.txt); do
+  ai-dossier sched start --once --project "$p"
+done
+
+# 2. Read the result before un-pausing
+ai-dossier sched status --project imboard-ai-ai-dossier
+ai-dossier sched status --project imboard-ai-imboard-monorepo
+tail -20 ~/.dossier/sched/imboard-ai-imboard-monorepo/events.jsonl
+
+# 3. Un-pause
+ai-dossier sched resume --project imboard-ai-ai-dossier
+ai-dossier sched resume --project imboard-ai-imboard-monorepo
+
+# 4. Refresh the tracked-issue list BEFORE restoring the cron (see below)
+$EDITOR ~/.dossier/reset-fleet/issues.txt
+
+# 5. Restore the tick cron — back up, eyeball the saved line, never install it twice
+crontab -l > ~/.dossier/reset-fleet/crontab.bak.$(date +%s) 2>/dev/null || true
+test -s ~/.dossier/reset-fleet/tick.cron.saved && cat ~/.dossier/reset-fleet/tick.cron.saved
+if crontab -l 2>/dev/null | grep -qF 'reset-fleet/tick.sh'; then
+  echo "tick already installed — nothing to do"
+else
+  (crontab -l 2>/dev/null || true; cat ~/.dossier/reset-fleet/tick.cron.saved) | crontab -
+fi
+crontab -l   # expect EXACTLY one tick line and one scorecard line
+
+# 6. Prove it actually runs — installed is not the same as executing
+ls -l ~/.dossier/reset-fleet/tick.sh          # the +x bit must be present
+sleep 180 && tail -5 ~/.dossier/reset-fleet/tick.log
+```
+
+What each step is guarding against:
+
+- **Step 2 — how you know the reconcile worked.** Expect `exit-detected` then `verify-complete`
+  for each stale unit in `events.jsonl`, and its queue row moving `dispatched` → `done`. A slot
+  still `running` means the pid is genuinely alive — identify it with
+  `ps -p <pid> -o pid,lstart,args` before touching anything. If an entry instead lands in recovery
+  (`verify-incomplete` / `unverified-exit`) **stop**: check whether the issue is already closed and
+  shipped, and if it is, `ai-dossier sched abandon --issue <n> --project <slug>` rather than
+  letting the fleet redispatch it. Never edit `state.json` to clear a slot.
+- **Step 4 — the cron uninstalls itself when the tracked list is exhausted.** `tick.sh` pages
+  *Pipeline COMPLETE* and runs `crontab -l | grep -v reset-fleet/tick.sh | crontab -` on the first
+  tick where every ref in `issues.txt` is CLOSED. As of 2026-09-06 that list is 31 refs of which
+  only `imboard-ai/ai-dossier#590` is open — so restoring the cron without refreshing the list
+  first can have it vanish two minutes later, presenting exactly like a silently dead cron.
+- **Step 5 — `|| true`, not `2>/dev/null`, is what saves the crontab.** Redirecting stderr does
+  not change the exit status, so under `set -e` a `crontab -l` on a host with no crontab still
+  aborts the subshell and installs an **empty** crontab, dropping every job. See the
+  `no crontab for` row in [`docs/agent-traps.md`](../agent-traps.md). The duplicate guard matters
+  too: re-running this step is the natural response to a failed attempt, and `tick.sh` has no
+  lockfile, so two `*/2` lines means two ticks racing on one `state.json`.
+- **Step 6 — `crontab -l` proves installed, not executing.** A rewritten script that lost its `+x`
+  bit gives a valid crontab line, no error anywhere, and a log that simply stops growing — a 3.5 h
+  outage here, and `tick.log` still ends in its `Permission denied` lines. The exec bit and a
+  freshly-growing log are the only proof.
+
+The state a halt left behind — which units failed and why, which fixes are still open, what to do
+first — is in [`batch-cycles-checkpoint.md`](../reports/batch-cycles-checkpoint.md), not here. When
+the fleet is running again, retire the HALTED banner at the top of this file and flip `State:` at
+the top of the checkpoint, in the same commit as the restart.
+
 ## The two human checkpoints
 
 The pipeline is designed to stop and hand off rather than guess, in exactly two places:
@@ -177,5 +262,6 @@ per-project. Most subcommands also take `--json` for machine-readable output.
 | Run one reconcile+refill tick (what cron does) | `ai-dossier sched start --once` |
 | Run one tick, self-upgrading the CLI first (gated on no mid-dispatch unit) | `ai-dossier sched start --once --auto-upgrade` |
 | Per-issue token/cost totals (global, not per-project) | `ai-dossier sched stats --issues 4..9` |
-| Re-arm the tick cron (if it self-removed after all-done) | `(crontab -l 2>/dev/null; echo "*/2 * * * * $HOME/.dossier/reset-fleet/tick.sh >> $HOME/.dossier/reset-fleet/tick.log 2>&1") \| crontab -` |
-| Re-schedule the 7-day report by hand | `ai-dossier sched enqueue --project imboard-ai-ai-dossier --issues 529 --tier strong` (what `enqueue-report.sh` does; only needed if the automatic cron-arming step in `tick.sh` was skipped or missed) |
+| Restart after a deliberate halt | see [Restarting after a halt](#restarting-after-a-halt) — resume, reconcile, *then* cron |
+| Re-arm the tick cron (if it self-removed after all-done) | `(crontab -l 2>/dev/null \|\| true; echo "*/2 * * * * $HOME/.dossier/reset-fleet/tick.sh >> $HOME/.dossier/reset-fleet/tick.log 2>&1") \| crontab -` — the `\|\| true` is what stops a missing crontab from installing an empty one |
+| Re-schedule the 7-day report by hand | `ai-dossier sched enqueue --project imboard-ai-ai-dossier --repo imboard-ai/ai-dossier --issues 529 --tier strong` (what `enqueue-report.sh` does. `--repo` is required whenever you are not standing in that repo — `--project` does not change repo context. The close-triggered arming in `tick.sh` is **superseded**: always arm this by hand after the first batch PR merges — see [The tick loop](#the-tick-loop)) |

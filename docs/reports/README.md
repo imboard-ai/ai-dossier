@@ -2,6 +2,8 @@
 
 Gate reports and validation records produced for [RFC-0001](../../rfcs/0001-batch-cycles.md) (Batch Cycles), tracked under epic [#474](https://github.com/imboard-ai/ai-dossier/issues/474).
 
+**Picking the programme back up? Start with [`batch-cycles-checkpoint.md`](./batch-cycles-checkpoint.md)** — the standing checkpoint: why Batch Cycles exists, what has landed, what is still open, the halted state of the scheduler on hcc2, and the resume recipe. The gate reports below are the evidence it summarises.
+
 | Report | Gate | Verdict | Date |
 |---|---|---|---|
 | [`sched-parity.md`](./sched-parity.md) | RFC-0001 Step 1 exit gate (issue #471) | Conditional GO — conditions (#496, #500) cleared 2026-09-01 | 2026-08-30 |
@@ -12,4 +14,4 @@ Gate reports and validation records produced for [RFC-0001](../../rfcs/0001-batc
 
 Raw evidence backing these reports (baseline tables, agent-log summaries, scheduler event journals, captured corrupt-state files) lives in [`evidence/`](./evidence/).
 
-Not a gate report, but standing alongside them: [`model-scorecard.md`](./model-scorecard.md) is a recurring cost/quality/speed tab per LLM ([#566](https://github.com/imboard-ai/ai-dossier/issues/566)), regenerated weekly (`npm run scorecard`) rather than produced once per gate. Its JSON sidecar lives at [`evidence/model-scorecard.json`](./evidence/model-scorecard.json).
+Two documents here are not gate reports and are not expected to stay frozen. [`batch-cycles-checkpoint.md`](./batch-cycles-checkpoint.md) is the programme checkpoint described above ([#598](https://github.com/imboard-ai/ai-dossier/issues/598)); it date-stamps every claim and names the command that re-derives it, so update it in place whenever the programme moves rather than filing a new one. [`model-scorecard.md`](./model-scorecard.md) is a recurring cost/quality/speed tab per LLM ([#566](https://github.com/imboard-ai/ai-dossier/issues/566)), regenerated weekly (`npm run scorecard`) rather than produced once per gate. Its JSON sidecar lives at [`evidence/model-scorecard.json`](./evidence/model-scorecard.json).
