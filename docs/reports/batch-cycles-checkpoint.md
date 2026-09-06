@@ -6,7 +6,7 @@ Nothing is running; nothing will start on its own.
 | | |
 |---|---|
 | Programme | [RFC-0001 Batch Cycles](../../rfcs/0001-batch-cycles.md), epic [#474](https://github.com/imboard-ai/ai-dossier/issues/474) |
-| Halted at | 2026-09-03 10:42Z — owner out of subscription tokens; the work is not urgent |
+| Halted at | 2026-09-03 10:42Z — owner out of subscription tokens; the work is not urgent (*Verify:* `ls -l ~/.dossier/reset-fleet/engine-*.log` — both stamped 10:42. `tick.log` is **not** the witness: it stops at 2026-09-02 20:00 for an unrelated reason, the exec-bit incident below) |
 | Hand-off issue | [#598](https://github.com/imboard-ai/ai-dossier/issues/598) (this document is its durable form) |
 | Facts below verified | 2026-09-06, against `ai-dossier sched status`, `gh`, `git log`, `ps`, `crontab -l`, `~/.dossier/reset-fleet/` |
 | Host | hcc2 |
@@ -15,10 +15,10 @@ This is the document to read first when picking the programme back up. It exists
 checkpoint previously lived only in a GitHub issue body, where nothing in this repo reads it —
 every other artefact of this programme is a document here (see [`README.md`](./README.md)).
 
-> **Every claim in this file is date-stamped and names the command that re-derives it.** A
-> checkpoint that rots silently is worse than no checkpoint. Before acting on anything below,
-> re-run the command in the "Verify" column; the programme moved four times in the three days
-> between the halt and this document being written.
+> **Claims here are dated, and every claim carrying a *Verify:* line names the command that
+> re-derives it.** The rest are dated judgements, not facts to act on blind. This matters: the
+> programme moved four times in the three days between the halt and this document being written,
+> and a checkpoint that rots silently is worse than no checkpoint.
 
 ## 1. Motivation — why Batch Cycles exists
 
@@ -62,8 +62,9 @@ a weekly model scorecard cron (#566/#577), and the model-agnostic retrospective 
 sonnet 86% delivery, n=14/21 — [`model-agnostic-fleet.md`](./model-agnostic-fleet.md)).
 
 **Operator documentation** — [`docs/how-to/autonomous-pipeline.md`](../how-to/autonomous-pipeline.md)
-(the runbook) and [`docs/agent-traps.md`](../agent-traps.md) (the grep-first trap index that
-`AGENTS.md` makes mandatory reading before planning).
+(the runbook, and the home of the executable restart procedure) and
+[`docs/agent-traps.md`](../agent-traps.md) (the grep-first trap index that `AGENTS.md` makes
+mandatory reading before planning).
 
 ## 3. Pilot history
 
@@ -74,18 +75,36 @@ Full execution records: [`batch-pilot.md`](./batch-pilot.md) and
 |---|---|---|
 | 1 (#473) | NO-GO — the engine never dispatched a batch unit at all | #523, #525 |
 | 2 run 1 | 0 batches — seal/anchor bugs; backlog yield was 3 slot issues | #535, #536, #537, #538 |
-| 2 run 2 | 3 batches executed, all dissolved. **First controlled economy signal: batch member work $2.56 vs $5.06 (−49%), 34 vs 86 min for the same 3 issues** — a ceiling, since the batch tail never ran | #561 (env-cold), #562 (suite runner), #563 (dissolve fraction), #564 (stats), #565 (priority) |
+| 2 run 2 | 3 batches executed, all dissolved. **First controlled economy signal: batch member work $2.56 vs $5.06 (−49%) — a mean over n=2 issues with both arms measured — and 34 vs 86 min across the 3 members.** A ceiling either way, since the batch tail never ran | #561 (env-cold), #562 (suite runner), #563 (dissolve fraction), #564 (stats), #565 (priority) |
 | 3 (#526) | 1 batch; both evictions were infrastructure, not code | #579 (`plan validate` exit-128 misread), imboard-monorepo#3982 + #583 (`test.focused`), #575/#582/#586 (re-enqueue rails), #591 (`--disallowedTools Monitor`) |
-| 4 (#590) | Full backlog sweep 111 → 68 → 33 classified → **7 slot (6.3%)**; 3 concurrent batches in warm worktrees, all dissolved | The single blocking defect (below), plus #594, #595, #596 |
+| 4 (#590) | Full backlog sweep 111 → 68 → 33 classified → **7 slot (6.3%)**; 3 concurrent batches in warm worktrees, all dissolved | The single blocking defect (§4.1), plus #594, #595, #596 |
 
-**Attempt 4's real outcome, reconciled 2026-09-06.** The supervisor pre-registered that only
-imboard-monorepo#3985 was truly implementable; the other six carried readiness blockers that
-classification §E.2 has no rule for. The readiness prediction held (#47 misclassified, #1512
-unrefinable plan, #3393 spec-not-met). But **one of the seven did ship**: imboard-monorepo#3416
-landed via PR imboard-monorepo#4001 on the full-cycle fallback after its batch dissolved, and
-imboard-monorepo#3985 landed via PR imboard-monorepo#3999 (merged 2026-09-03T07:19:58Z) even
-though its sched unit failed `unverified-exit-at-strongest-tier`. **Zero batch PRs have merged.
-The fallback, not the batch, is what delivered.**
+**Attempt 4's real outcome, reconciled 2026-09-06 — the fallback delivered, the batches did not.**
+The supervisor pre-registered that only imboard-monorepo#3985 was truly implementable; the other
+six carried readiness blockers that classification §E.2 has no rule for. That prediction held for
+imboard-monorepo#47 (misclassified — a marketing issue) and imboard-monorepo#1512 (unrefinable
+plan), but **not** for imboard-monorepo#3393, which was evicted `spec-not-met` and then shipped
+the same day.
+
+Every batch dissolved, and **zero batch PRs have ever merged**. But the full-cycle fallback that
+picked up the dissolved members shipped **four of the seven** within hours:
+
+| Issue | PR | Merged |
+|---|---|---|
+| imboard-monorepo#3985 | imboard-monorepo#3999 | 2026-09-03T07:19:58Z |
+| imboard-monorepo#3416 | imboard-monorepo#4001 | 2026-09-03T10:20:41Z |
+| imboard-monorepo#340 | imboard-monorepo#4003 | 2026-09-03T11:43:47Z |
+| imboard-monorepo#3393 | imboard-monorepo#4004 | 2026-09-03T13:08:59Z |
+
+imboard-monorepo#47 also closed (`COMPLETED`, 06:02:26Z) without a PR. Only
+imboard-monorepo#826 and #1512 are still open.
+
+*Verify:* `gh pr view <n> --repo imboard-ai/imboard-monorepo --json state,mergedAt` ·
+`gh issue view <n> --repo imboard-ai/imboard-monorepo --json state,stateReason`
+
+This is the single most important correction to the attempt-4 record, because §4.2's argument
+rests on it: the cohort was **not** mostly unimplementable. Five of seven reached a terminal
+state within a day. What failed was the batch path, not the issue selection.
 
 ## 4. Open findings
 
@@ -95,48 +114,77 @@ Priority order, each with its status as of 2026-09-06.
 
 *Was #598's open question 1 and its stated gate on attempt 5.*
 
-`scripts/cap-test-focused.sh` pipes through `tee /dev/stderr`. Under `sched` dispatch, stderr is a
-redirected log file, not a device `tee` can reopen, so `tee` fails; with `set -uo pipefail` that
-(a) fabricates a non-zero exit from a `pnpm` run that exited **0**, and (b) leaves the capture
-buffer empty, so the `No projects matched the filters` guard added by imboard-monorepo#3982 never
-matches and its name-filter retry never runs. Three members in three different batches produced
-**byte-identical 765-byte gate logs** — the gate was a constant function, evicting every member
-regardless of its diff (5 members for 5, attempts 2–4).
+`scripts/cap-test-focused.sh` pipes through `tee /dev/stderr`. The gate runs that script through
+`ai-dossier cap run`, which captures the child's output with `spawnSync` (`cli/src/capability.ts`)
+— and Node/libuv implements a captured stdio stream as a **socketpair**, not a pipe or a file. So
+`/dev/stderr` (i.e. `/proc/self/fd/2`) points at a socket, and reopening a socket that way returns
+`ENXIO` — `tee: /dev/stderr: No such device or address`. Under `set -uo pipefail` that (a)
+fabricates a non-zero exit from a `pnpm` run that exited **0**, and (b) leaves the capture buffer
+empty, so the `No projects matched the filters` guard added by imboard-monorepo#3982 never matches
+and its name-filter retry never runs. Three members in three different batches produced 765-byte
+gate logs differing only in the batch id inside one path — the gate was a constant function,
+evicting every member regardless of its diff (5 members for 5, attempts 2–4).
+
+**Reproducing it needs a socket, not a file.** `cmd 2>somefile` passes; so does a plain pipe. Only
+a captured (socketpair) stderr fails:
+
+```bash
+# fails — this is what `cap run` does
+node -e 'require("child_process").spawnSync("bash",["-c","echo hi | tee /dev/stderr"],{encoding:"utf8"})'
+# passes — do NOT use this to check whether the trap applies
+bash -c 'echo hi | tee /dev/stderr' 2>/tmp/x
+```
 
 Recorded in [`docs/agent-traps.md`](../agent-traps.md) (`tee: /dev/stderr` row) and
 [`batch-pilot-2-execution.md`](./batch-pilot-2-execution.md), landed in `81b14fb` (#597).
+
 Fixes were split in two. **imboard-monorepo#3996** (the script half) is **CLOSED** — the
-`tee`/`pipefail` construct is gone. **#594** (the sched half: the gate must read `task-failed` with
-an empty result body as *capability broken*, taking #585's block-the-batch path rather than
+`tee`/`pipefail` construct is gone. **#594** (the sched half: the gate must read `task-failed`
+with an empty result body as *capability broken*, taking #585's block-the-batch path rather than
 evicting) is **still OPEN**. Until #594 lands, any capability that reports a definite failure it
 did not earn still evicts the member, so the class of defect survives its first instance.
 
-*Verify:* `gh issue view 594 --json state` · `gh issue view 3996 --repo imboard-ai/imboard-monorepo --json state`
+*Verify:* `gh issue view 594 --repo imboard-ai/ai-dossier --json state` ·
+`gh issue view 3996 --repo imboard-ai/imboard-monorepo --json state`
 
 ### 4.2 Readiness floor for classification (RFC §E.2) — **OPEN, unstarted**
 
-The classifier finds "small", not "ready". Six of attempt 4's seven `slot` issues carried a
-readiness blocker — an open product decision, a gated dependency, an absent deliverable file —
-that no classification rule looks for. Deterministic rules are wanted (body mentions a product
+The classifier finds "small", not "ready". Deterministic rules are wanted (body mentions a product
 decision · depends on an open issue · the named deliverable file does not exist) so that `slot`
-requires readiness, not just size. Expected to raise true slot yield above the observed 1/7.
+requires readiness, not just size.
+
+**Size the expected gain honestly against §3's corrected record.** The pre-registered claim was
+that six of attempt 4's seven carried a readiness blocker; the outcome was that five of seven
+reached a terminal state within a day and four shipped merged PRs. A readiness floor is still
+worth having — imboard-monorepo#47 was a genuine misclassification and #1512 a genuinely
+unrefinable plan — but it should be justified by *those two*, not by a 1-in-7 yield figure the
+data does not support.
 
 This is a feature with its own design and tests, not a documentation change.
 
 ### 4.3 Attempt 5 — **NOT FILED** (deliberate)
 
-Cohort: the attempt-4 survivors, after 4.1 and 4.2 land. Success condition: **≥1 batch PR merged**
-— the one thing four attempts have never produced. Then arm #529 by hand and enqueue #592.
+Cohort: the attempt-4 survivors (imboard-monorepo#826, #1512) plus fresh candidates, after 4.1 and
+4.2 land. Success condition: **≥1 batch PR merged** — the one thing four attempts have never
+produced.
 
 File it as a **fresh issue**. Never re-enqueue a completed ops issue: #575/#582/#586 fixed the
 re-enqueue rails, but a trail carrying three completed runs still misleads a fresh agent into
-resuming at `report`. Do not re-enqueue #526, #528 or #590.
+resuming at `report`.
 
 ### 4.4 #529 — 7-day regression report — **UNARMED, by design**
 
 Armed **manually** after the first batch PR merges; the tick's close-triggered arming step is
-superseded and must not be relied on (see the runbook). No batch PR has merged, so it stays
-unarmed. Command: `ai-dossier sched enqueue --project imboard-ai-ai-dossier --issues 529 --tier strong`.
+superseded and must not be relied on. No batch PR has merged, so it stays unarmed.
+
+```bash
+ai-dossier sched enqueue --project imboard-ai-ai-dossier --repo imboard-ai/ai-dossier \
+  --issues 529 --tier strong
+```
+
+`--repo` is not optional here: `--project` selects the state directory, it does not change repo
+context, so run from an imboard-monorepo checkout without it and the label pre-screen queries the
+wrong repository.
 
 ### 4.5 #592 — live two-arm model validation — **GATED** (owner spend decision)
 
@@ -145,8 +193,8 @@ option 3.
 
 ### 4.6 Ship guard for `Closes #N` — **OPEN**
 
-Two PRs (imboard-monorepo#3958 and #3982) merged without the trailer, leaving their sched units
-parked for 8 h each. Wanted: a check in `ship-issue` or the auto-merge watcher.
+The PRs that closed imboard-monorepo#3958 and #3982 merged without the trailer, leaving their sched
+units parked for 8 h each. Wanted: a check in `ship-issue` or the auto-merge watcher.
 
 ### 4.7 Pager threshold — **OPEN**
 
@@ -156,19 +204,42 @@ self-resolved. Consider ignoring exit-2 unless repeated.
 ### 4.8 Eviction double-count — **OPEN (#595), reproducible right now**
 
 `sched` can evict the same member twice and the dissolve decision counts eviction *events*, not
-distinct members. Live on this host: `b-20260903-01` records `#826` twice, so `evictions=3` over
-**two** distinct members against `threshold=2` — a batch that was *at* the threshold died as
-though it were past it.
+distinct members. Live on this host: **at the dissolve decision instant**, `b-20260903-01` had
+recorded 3 eviction events over **2** distinct members against `threshold=2` — it was *at* the
+threshold, not past it, and died anyway.
 
-*Verify:* `ai-dossier sched status --project imboard-ai-imboard-monorepo` — read the `evictions`
-column of the Batches table, not the `batch-dissolved` event (whose `requeued=` list is already
-de-duplicated, which is why the bug is invisible where you would naturally look).
+Read the raw array, not the queue table: the batch's stored `evictions` grows afterwards (it now
+holds four entries over three members), so `sched status` shows the post-dissolve array, not the
+decision input.
+
+*Verify:*
+
+```bash
+jq '.batches[] | select(.id=="b-20260903-01") | .evictions | group_by(.issue)
+    | map({issue: .[0].issue, n: length})' ~/.dossier/sched/imboard-ai-imboard-monorepo/state.json
+grep batch-dissolved ~/.dossier/sched/imboard-ai-imboard-monorepo/events.jsonl
+```
+
+The journal line reads `eviction-threshold strategy=full N=4 evictions=3 threshold=2
+requeued=47,826,340,1512` — `evictions=3` next to four requeued issues is the discrepancy in plain
+sight. Note `.batches` is an **array**: `.batches["<id>"]` errors.
 
 ### 4.9 Host hygiene — **OPEN**
 
-One broken pool entry and a leftover worktree from imboard-monorepo#3958's failed return, plus the
-three dissolved batch worktrees `b-20260903-0[1-3]`. Note that
-`@ai-dossier/worktree-pool`'s `gc` / `refresh` must **never** be run by an agent (ai-dossier#438).
+- **Two broken pool entries** — `pool-1788415097038-3141172` and `pool-1788417983326-3354528`,
+  both `broken_step=verify` ("post-return self-check failed: … is not clean"), left by the
+  2026-09-03 batch worktree returns. There is no pool entry for imboard-monorepo#3958.
+- **One leftover batch worktree** — `worktrees/batch-b-20260903-01-20260903`. The `-02` and `-03`
+  trees are already gone.
+- **Three open batch anchors** — imboard-monorepo#3993, #3994 and #3995, all still `OPEN` with
+  their batches dissolved. Close them before the next backlog sweep or the classifier re-ingests
+  them.
+
+`@ai-dossier/worktree-pool`'s `gc` / `refresh` must **never** be run by an agent (ai-dossier#438);
+pool maintenance is a human task.
+
+*Verify:* `jq '[.worktrees[]|select(.status=="broken")|.id]' <imboard-repo>/worktrees/.pool-state.json` ·
+`ls -d <imboard-repo>/worktrees/batch-*` · `gh issue view 3993 --repo imboard-ai/imboard-monorepo --json state`
 
 ### 4.10 Cross-project dependencies — **OPEN (by design, for now)**
 
@@ -177,9 +248,11 @@ sched dependencies are per project. An ai-dossier issue that depends on an imboa
 
 ### 4.11 Near-miss backlog
 
-Each blocked on a one-line owner decision: imboard-monorepo#340, #2711, #1021, #1022, #2567, and
-ai-dossier#18. **imboard-monorepo#3416 has since shipped** (PR imboard-monorepo#4001) and is no
-longer on this list.
+Each blocked on a one-line owner decision: imboard-monorepo#2711, #1021, #1022, #2567, and
+ai-dossier#18 (all verified `OPEN` 2026-09-06). imboard-monorepo#3416 and #340 have since shipped
+(PRs imboard-monorepo#4001 and #4003) and are no longer on this list.
+
+*Verify:* `gh issue view <n> --repo imboard-ai/imboard-monorepo --json state`
 
 ## 5. Halt state on hcc2
 
@@ -190,82 +263,78 @@ Verified 2026-09-06. What #598 recorded at the halt is marked where it has moved
 | `imboard-ai-ai-dossier` | `PAUSED`, 0/3 slots live | `ai-dossier sched status --project imboard-ai-ai-dossier` |
 | `imboard-ai-imboard-monorepo` | `PAUSED`, **2/3 slots still marked live — both stale** (see below) | `ai-dossier sched status --project imboard-ai-imboard-monorepo` |
 | Tick cron | Removed. The line is saved verbatim at `~/.dossier/reset-fleet/tick.cron.saved` | `crontab -l` — only the weekly scorecard job should remain |
-| Weekly model scorecard cron | Still installed and firing (Mondays 05:00) | `crontab -l` |
-| Tracked-issue list | `~/.dossier/reset-fleet/issues.txt` (31 entries) | `wc -l ~/.dossier/reset-fleet/issues.txt` |
-| Telegram | `@ImboardBot` → owner DM; token in `~/.dossier/reset-fleet/telegram.env` | `ls ~/.dossier/reset-fleet/telegram.env` |
+| Weekly model scorecard cron | Installed (Mondays 05:00) but has **never fired** — it was installed 2026-09-02 and its append-target `~/.dossier/reset-fleet/scorecard-weekly.log` does not exist. First due 2026-09-07 | `crontab -l && ls -l ~/.dossier/reset-fleet/scorecard-weekly.log` |
+| Tracked-issue list | `~/.dossier/reset-fleet/issues.txt` — 31 entries, of which only `imboard-ai/ai-dossier#590` is still open | `wc -l ~/.dossier/reset-fleet/issues.txt` |
+| Telegram | The fleet bot → owner DM; token and chat id in `~/.dossier/reset-fleet/telegram.env` | `ls ~/.dossier/reset-fleet/telegram.env` |
 | Model routing | mechanical=haiku, mid=sonnet, strong=opus on both projects | `~/.dossier/sched/<project>/config.json` |
 | Dispatch command | ends with `--disallowedTools Monitor` (#591) | same file |
 | ai-dossier `phase_stall_timeout_ms.implement` | 4 h — supervisor issues sit idle while polling | same file |
 
-### The stale slots — read this before `sched resume`
+### The stale slots — read this before restarting
 
 `imboard-ai-imboard-monorepo` shows slots 2 and 3 `running`, on `issue:3393` (pid 3675888) and
 `issue:340` (pid 3442401), phase `implement`, `last-progress 3d ago`. #598 recorded these as "two
 full-cycle fallbacks left running to finish on their own."
 
-**They finished. Both processes are dead and both issues are CLOSED.** The scheduler has not
-noticed because it is paused and the tick cron is gone, so no reconcile pass has run since the
-halt. An operator who follows the resume recipe verbatim resumes into a project that appears to
-have only one free slot.
+**They finished. Both processes are dead, both issues are CLOSED, and both shipped** (PRs
+imboard-monorepo#4004 and #4003). The scheduler has not noticed because it is paused and the tick
+cron is gone, so no reconcile pass has run since the halt.
 
 *Verify:* `ps -p 3675888 -o pid=` and `ps -p 3442401 -o pid=` print nothing;
 `gh issue view 340 --repo imboard-ai/imboard-monorepo --json state` → `CLOSED` (same for #3393).
 
-The reconcile pass in `sched start --once` re-detects running slots by pid (with a hybrid
-pid-identity check, so a reused pid post-reboot is never mistaken for the old agent) and should
-free both. Confirm it did before enqueueing anything — see step 4 of the recipe.
+Clearing them is a reconcile pass, not a state-file edit — see
+[Restarting after a halt](../how-to/autonomous-pipeline.md#restarting-after-a-halt), which also
+explains why that pass must run *before* un-pausing. Never edit `state.json` by hand.
 
 ### Failed units carried into the halt
 
 `imboard-ai-imboard-monorepo`: #3631, #826, #1512, #3985 — all
-`unverified-exit-at-strongest-tier`. `imboard-ai-ai-dossier`: #528, same reason. Note that #3985's
-PR merged anyway; a failed unit does not imply unshipped work, which is exactly why the engine
-verifies against `runstate` and GitHub rather than against agent exit. See #596 — the
-`--disallowedTools Monitor` mitigation narrowed this failure mode but did not close it, and the
-surviving correlation is unit **duration**, not the tool.
+`unverified-exit-at-strongest-tier`. `imboard-ai-ai-dossier`: #528, same reason.
 
-## 6. Resume recipe
+Note that #3985's PR merged anyway. The engine is meant to verify against `runstate` and GitHub
+rather than against agent exit; here it failed the unit regardless, which is part of what #596 is
+about — the mitigation (`--disallowedTools Monitor`) narrowed this failure mode but did not close
+it, and the surviving correlation is unit **duration**, not the tool. Always `gh pr view` before
+writing off a failed unit's output.
 
-Run on hcc2, from inside the target repo (`--project` selects the state directory; it does not
-change repo context).
+## 6. Resuming
 
-```bash
-# 1. Un-pause both projects
-ai-dossier sched resume --project imboard-ai-ai-dossier
-ai-dossier sched resume --project imboard-ai-imboard-monorepo
+**The executable procedure lives in one place:**
+[Restarting after a halt](../how-to/autonomous-pipeline.md#restarting-after-a-halt) in the operator
+runbook — reconcile while still paused, verify, un-pause, refresh the tracked-issue list, then
+restore the cron and prove it actually runs. Follow it there rather than a second copy here; the
+two copies of this recipe had already diverged once.
 
-# 2. Reconcile ONCE by hand, before restoring the cron — this is what clears the stale slots
-ai-dossier sched start --once --project imboard-ai-imboard-monorepo
+What belongs to *this programme*, once the fleet is running again, in order:
 
-# 3. Confirm the reconcile freed slots 2 and 3 and that nothing else is live
-ai-dossier sched status --project imboard-ai-imboard-monorepo
-ai-dossier sched status --project imboard-ai-ai-dossier
-
-# 4. Only then restore the tick cron
-(crontab -l 2>/dev/null; cat ~/.dossier/reset-fleet/tick.cron.saved) | crontab -
-crontab -l    # verify BOTH the tick line and the weekly scorecard line are present
-```
-
-Step 4's `crontab -l 2>/dev/null` guard is not optional: under `set -e`, `crontab -l` on a host
-with no crontab exits non-zero and the pipeline installs an *empty* crontab, silently dropping
-every existing job. That is a real outage this programme has already paid for once — see the
-`no crontab for` row in [`docs/agent-traps.md`](../agent-traps.md).
-
-Then, in order:
-
-1. Land **#594** (4.1's remaining half — imboard-monorepo#3996 is already in). Re-run one batch
+1. Land **#594** (§4.1's remaining half — imboard-monorepo#3996 is already in). Re-run one batch
    before trusting the gate: the script fix removes the constant-function behaviour on imboard, but
    nothing yet stops the *next* broken capability from evicting members the same way.
-2. Land **4.2**'s readiness floor, or accept a ~1/7 true-slot yield.
-3. File **attempt 5** as a fresh issue (4.3) and enqueue it at `strong`.
-4. On the first merged batch PR: arm #529 (4.4), then #592 (4.5).
+2. Land **§4.2**'s readiness floor, sized against §3's corrected record rather than the
+   pre-registered prediction.
+3. Close the three open batch anchors and clear the broken pool entries (§4.9) so the next backlog
+   sweep is clean.
+4. File **attempt 5** as a fresh issue (§4.3) and enqueue it at `strong`. Do **not** re-enqueue
+   #526, #528 or #590.
+5. On the first merged batch PR: arm #529 (§4.4), then #592 (§4.5).
 
-Do **not** re-enqueue #526, #528 or #590.
+**When the fleet is running again, retire the halt banners in the same commit** — delete the HALTED
+note at the top of [`docs/how-to/autonomous-pipeline.md`](../how-to/autonomous-pipeline.md) and
+flip `State:` at the top of this file. Two documents an operator is told to read first must not
+keep asserting the fleet is stopped while it dispatches.
 
 ## 7. Traps
 
 Everything this programme has learned the hard way is in
-[`docs/agent-traps.md`](../agent-traps.md), which is the grep-first index `AGENTS.md` requires
-every planning run to read. The ops traps from the halt week are the `no crontab for`,
-`os.replace` / exec bit, `sched abandon`, `pkill -f` over ssh, `no visible process`, and
-`sched done row + OPEN issue` rows. Append there, not here.
+[`docs/agent-traps.md`](../agent-traps.md), the grep-first index `AGENTS.md` requires every
+planning run to read. The ops traps from the halt week are, by their literal symptom text:
+
+- `no crontab for`
+- `cron` job stopped firing after a script was rewritten
+- `sched abandon` returned success but the agent is still running
+- your ssh session dies the instant you run `pkill -f <pattern>` on a remote host
+- no `claude` / agent process visible in `ps`
+- a `sched status` queue row reads `done` but the issue is still OPEN
+
+Append there, not here.
