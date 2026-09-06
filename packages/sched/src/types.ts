@@ -413,6 +413,30 @@ export interface BatchEntry {
    * out of `blocked`. `null` when the batch has never been blocked.
    */
   blocked_reason: string | null;
+  /**
+   * The reason already journalled for this batch's current `pr-watch-failed`
+   * streak (#630) — `null` when the PR watch is healthy. Compared against
+   * the freshly observed reason each tick so an unchanged condition doesn't
+   * re-journal (mirrors #610's `stale_milestone_ignored_for` dedup), while a
+   * different reason, or the same reason recurring after the condition
+   * cleared (reset to `null` first), always journals a fresh entry.
+   */
+  pr_watch_failed_reason: string | null;
+  /**
+   * ISO time `pr_watch_failed_reason`'s current streak began (#630) — lets a
+   * reader compute how long the condition has persisted without the journal
+   * re-emitting an entry every tick. `null` whenever `pr_watch_failed_reason`
+   * is `null`.
+   */
+  pr_watch_failed_since: string | null;
+  /**
+   * Ticks `pr_watch_failed_reason`'s current streak has persisted (#630),
+   * including ticks that stayed silent under the dedup — this is what lets
+   * `reconcilePrWatch` re-announce a still-failing watch every
+   * `PR_WATCH_FAILED_REANNOUNCE_TICKS` ticks instead of only once, ever.
+   * Reset to `0` whenever `pr_watch_failed_reason` is `null`.
+   */
+  pr_watch_failed_ticks: number;
   created_at: string;
   updated_at: string;
 }
@@ -889,8 +913,8 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-/** 1.12.0 (#610): `SlotEntry` gains `stale_milestone_ignored_for`. */
-export const SCHEMA_VERSION = '1.12.0' as const;
+/** 1.13.0 (#630): `BatchEntry` gains `pr_watch_failed_reason`/`_since`/`_ticks`. */
+export const SCHEMA_VERSION = '1.13.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -906,6 +930,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.9.0',
   '1.10.0',
   '1.11.0',
+  '1.12.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.8.0' as const;

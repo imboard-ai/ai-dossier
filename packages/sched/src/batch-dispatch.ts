@@ -2363,6 +2363,16 @@ function reconcileReportSlot(
 
 // --- PR watch for `awaiting-merge` batches (mirrors `pollParkedPrs`/`reconcileParked`) ---
 
+/**
+ * #630: how many ticks an unchanged `pr-watch-failed` streak goes silent
+ * before it re-announces itself. Wide enough that AC5's 3-tick regression
+ * (and any ordinarily short-lived watch failure) never sees a second entry,
+ * but narrow enough that a genuinely stuck PR surfaces again well inside the
+ * "still blocked after 40 minutes" window the issue names — the standard
+ * ~2-minute reconcile cadence puts the first re-announcement at ~40 minutes.
+ */
+const PR_WATCH_FAILED_REANNOUNCE_TICKS = 20;
+
 function reconcilePrWatch(deps: BatchDispatchDeps, now: Date, result: BatchTickResult): void {
   const state = deps.store.load();
   for (const batch of state.batches) {
@@ -2396,13 +2406,57 @@ function reconcilePrWatch(deps: BatchDispatchDeps, now: Date, result: BatchTickR
       continue;
     }
     if (truth.blocked || truth.mergeable === 'CONFLICTING') {
-      journalEvent(deps, 'pr-watch-failed', unit(batch.id), {
-        reason: truth.blocked ? 'auto-merge-blocked' : 'pr-conflicting',
-        pr,
-      });
+      const reason = truth.blocked ? 'auto-merge-blocked' : 'pr-conflicting';
+      const isNewStreak = batch.pr_watch_failed_reason !== reason;
+      const ticks = isNewStreak ? 1 : batch.pr_watch_failed_ticks + 1;
+      // #630: journal on the streak's first tick, then again only every
+      // PR_WATCH_FAILED_REANNOUNCE_TICKS — never every tick — mirrors #610's
+      // `stale_milestone_ignored_for` dedup for the "distinct condition"
+      // half, while still giving a still-blocked streak a later line an
+      // operator can read "still blocked, Nth check" off (a single onset
+      // entry never updates, so "after 40 minutes" would otherwise never be
+      // legible from any journal line at all). `at` is the engine's OWN
+      // decision time, never copied from `truth` (which carries no
+      // timestamp of its own).
+      if (isNewStreak || ticks % PR_WATCH_FAILED_REANNOUNCE_TICKS === 0) {
+        const at = now.toISOString();
+        journalEvent(deps, 'pr-watch-failed', unit(batch.id), {
+          reason,
+          pr,
+          at,
+          ticks_persisted: ticks,
+        });
+      }
+      deps.store.withLock((s) => ({
+        state: patchBatch(
+          s,
+          batch.id,
+          {
+            pr_watch_failed_reason: reason,
+            pr_watch_failed_since: isNewStreak ? now.toISOString() : batch.pr_watch_failed_since,
+            pr_watch_failed_ticks: ticks,
+          },
+          now
+        ),
+        result: undefined,
+      }));
       // #472's own rebase-and-reship path (RFC F.9) is a documented follow-up
       // for the batch PR-conflict rail; for now the batch stays parked and
       // the block is visible via the journal + `sched status`.
+    } else if (batch.pr_watch_failed_reason !== null) {
+      // #630: the condition cleared — reset the marker so a future
+      // re-occurrence (even the SAME reason) journals its own fresh entry.
+      // This is de-duplication, not suppression: only an UNCHANGED streak
+      // stays silent.
+      deps.store.withLock((s) => ({
+        state: patchBatch(
+          s,
+          batch.id,
+          { pr_watch_failed_reason: null, pr_watch_failed_since: null, pr_watch_failed_ticks: 0 },
+          now
+        ),
+        result: undefined,
+      }));
     }
   }
 }

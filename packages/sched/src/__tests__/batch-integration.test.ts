@@ -49,6 +49,7 @@ import {
   type SuiteResult,
   tick,
   transitionBatch,
+  transitionIssue,
   transitionSlot,
 } from '../index';
 import { writeToolUseLog } from './helpers/dispatch-log';
@@ -1606,5 +1607,170 @@ describe('#610: stale-milestone-ignored journals once per dispatch, not once per
     const events = h.journal.read().filter((e) => e.event === 'stale-milestone-ignored');
     expect(events).toHaveLength(2);
     expect(events.every((e) => e.issue === 610)).toBe(true);
+  });
+});
+
+/**
+ * #630: a lightweight harness for `reconcilePrWatch`'s per-batch dedup —
+ * deliberately WITHOUT `batchHarness`'s real git worktree / spawned
+ * fake-agent process, same rationale as `staleMilestoneHarness` above. An
+ * `awaiting-merge` batch holds no live slot (`BatchEntry.pr`'s own doc
+ * comment), so `runBatchTick`'s PR-watch pass is reachable with no slot at
+ * all — placing the batch directly at `awaiting-merge` via the real
+ * transition rail and stubbing `groundTruth.prState` is enough.
+ */
+function prWatchHarness(memberIssue: number, batchId: string, anchor: number, pr: number) {
+  const store = new SchedStore(tmpDir('sched-batch-prwatch-'));
+  const journal = new Journal(store.dir);
+  const setupAt = new Date('2026-09-06T12:00:00.000Z');
+  let currentNow = setupAt;
+
+  let state = enqueueEntries(
+    store.load(),
+    [{ issue: memberIssue, mode: 'slot', batch: batchId, anchor }],
+    setupAt
+  );
+  for (const to of ['classified', 'batched', 'waiting', 'in-work', 'committed'] as const) {
+    state = transitionIssue(state, memberIssue, to, {}, setupAt);
+  }
+  state = transitionBatch(state, batchId, 'executing', {}, setupAt);
+  state = transitionBatch(state, batchId, 'validating', {}, setupAt);
+  state = transitionBatch(state, batchId, 'reviewing', {}, setupAt);
+  state = transitionBatch(state, batchId, 'shipping', {}, setupAt);
+  state = transitionBatch(state, batchId, 'awaiting-merge', { pr }, setupAt);
+  store.withLock(() => ({ state, result: undefined }));
+
+  let truth: PrTruth | undefined;
+  const groundTruth = stubGroundTruth({ prState: () => truth });
+  const spawnDeps: SpawnDeps = {
+    spawn: () => {
+      throw new Error('must not spawn in this test');
+    },
+    kill: () => true,
+    isAlive: () => true,
+    processStart: () => null,
+  };
+  const config: SchedConfig = { max_slots: 1 };
+  const dispatch = resolveDispatch(config);
+  const deps: BatchDispatchDeps = {
+    store,
+    journal,
+    groundTruth,
+    spawnDeps,
+    now: () => currentNow,
+    repoDir: store.dir,
+    exec: () => {
+      throw new Error('must not exec in this test');
+    },
+    runSuite: () => {
+      throw new Error('must not run the aggregate suite in this test');
+    },
+  };
+
+  return {
+    journal,
+    setTruth: (t: PrTruth | undefined) => {
+      truth = t;
+    },
+    advanceNow: (at: string) => {
+      currentNow = new Date(at);
+    },
+    batch: () => findBatch(store.load(), batchId),
+    tick: () => runBatchTick(deps, config, dispatch),
+  };
+}
+
+const BLOCKED_TRUTH: PrTruth = {
+  state: 'OPEN',
+  mergedAt: null,
+  mergeable: 'MERGEABLE',
+  blocked: true,
+};
+
+const CONFLICTING_TRUTH: PrTruth = {
+  state: 'OPEN',
+  mergedAt: null,
+  mergeable: 'CONFLICTING',
+  blocked: false,
+};
+
+const HEALTHY_TRUTH: PrTruth = {
+  state: 'OPEN',
+  mergedAt: null,
+  mergeable: 'MERGEABLE',
+  blocked: false,
+};
+
+describe('#630: pr-watch-failed journals once per distinct condition, not once per tick', () => {
+  it('AC1/AC5: three consecutive ticks against one unchanged watch failure produce exactly one entry; changing the reason produces a second', () => {
+    const h = prWatchHarness(630, 'b-prwatch', 629, 4069);
+    h.setTruth(BLOCKED_TRUTH);
+
+    h.tick();
+    h.tick();
+    h.tick();
+
+    let events = h.journal.read().filter((e) => e.event === 'pr-watch-failed');
+    expect(events).toHaveLength(1);
+    expect(events[0]?.issue).toBeUndefined(); // batch-scoped, not issue-scoped
+    expect((events[0] as unknown as { reason: string }).reason).toBe('auto-merge-blocked');
+
+    // A genuine first occurrence is still reported immediately (Test Scope) —
+    // and a DIFFERENT reason is a distinct condition (AC1), so it reports too.
+    h.setTruth(CONFLICTING_TRUTH);
+    h.tick();
+
+    events = h.journal.read().filter((e) => e.event === 'pr-watch-failed');
+    expect(events).toHaveLength(2);
+    expect((events[1] as unknown as { reason: string }).reason).toBe('pr-conflicting');
+  });
+
+  it('AC2: the condition clearing and re-occurring produces a new entry — dedup, not suppression', () => {
+    const h = prWatchHarness(630, 'b-prwatch2', 629, 4070);
+    h.setTruth(BLOCKED_TRUTH);
+    h.tick();
+    h.tick();
+    expect(h.journal.read().filter((e) => e.event === 'pr-watch-failed')).toHaveLength(1);
+
+    h.setTruth(HEALTHY_TRUTH);
+    h.tick(); // clears — no merge, PR just healthy again
+    expect(h.batch()?.pr_watch_failed_reason).toBeNull();
+
+    h.setTruth(BLOCKED_TRUTH);
+    h.tick();
+    h.tick();
+
+    const events = h.journal.read().filter((e) => e.event === 'pr-watch-failed');
+    expect(events).toHaveLength(2);
+  });
+
+  it('AC3: the entry’s `at` is the engine’s clock, not a value copied from the observed condition, and carries `ticks_persisted`', () => {
+    const h = prWatchHarness(630, 'b-prwatch3', 629, 4071);
+    h.advanceNow('2026-09-06T21:15:08.000Z');
+    h.setTruth(BLOCKED_TRUTH);
+    h.tick();
+
+    const [entry] = h.journal.read().filter((e) => e.event === 'pr-watch-failed') as unknown as {
+      at: string;
+      ticks_persisted: number;
+    }[];
+    expect(entry?.at).toBe('2026-09-06T21:15:08.000Z');
+    expect(entry?.ticks_persisted).toBe(1);
+    expect(h.batch()?.pr_watch_failed_since).toBe('2026-09-06T21:15:08.000Z');
+  });
+
+  it('AC3: a still-blocked streak re-announces every 20 ticks, so "still blocked after 40 minutes" is legible from the journal — without breaking AC5’s 3-tick dedup', () => {
+    const h = prWatchHarness(630, 'b-prwatch4', 629, 4072);
+    h.setTruth(BLOCKED_TRUTH);
+
+    for (let i = 0; i < 19; i++) h.tick(); // ticks 1-19: onset (tick 1) journals, 2-19 stay silent
+    let events = h.journal.read().filter((e) => e.event === 'pr-watch-failed');
+    expect(events).toHaveLength(1);
+
+    h.tick(); // tick 20 — re-announcement threshold
+    events = h.journal.read().filter((e) => e.event === 'pr-watch-failed');
+    expect(events).toHaveLength(2);
+    expect((events[1] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(20);
+    expect(h.batch()?.pr_watch_failed_ticks).toBe(20);
   });
 });

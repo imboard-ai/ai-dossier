@@ -247,6 +247,9 @@ export function createBatch(
     rebase_attempts: 0,
     member_gates: {},
     blocked_reason: null,
+    pr_watch_failed_reason: null,
+    pr_watch_failed_since: null,
+    pr_watch_failed_ticks: 0,
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -757,6 +760,12 @@ export function validateState(data: unknown): SchedState {
     // exist yet), so `{}`/`null` are exact, not guesses.
     member_gates: batch.member_gates ?? {},
     blocked_reason: batch.blocked_reason ?? null,
+    // Pre-#630 (1.12.0) batches carry neither field — `pr-watch-failed` was
+    // journalled with no dedup marker at all, so null (no streak recorded)
+    // is exact, not a guess.
+    pr_watch_failed_reason: batch.pr_watch_failed_reason ?? null,
+    pr_watch_failed_since: batch.pr_watch_failed_since ?? null,
+    pr_watch_failed_ticks: batch.pr_watch_failed_ticks ?? 0,
   }));
 
   return {
