@@ -3063,3 +3063,156 @@ describe('#544 review hardening: paused fleets, evidence, and read cost', () => 
     expect(h.labelReads).toHaveLength(2);
   });
 });
+
+describe('#632: ground-truth-unreachable / pr-watch-waiting dedup once per streak, not per tick', () => {
+  it('AC1/AC6: three consecutive ticks against one unchanged unreachable condition produce exactly one entry, carrying ticks_persisted', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+    h.tick(); // spawn
+
+    h.unreachable.add(101);
+    h.tick();
+    h.tick();
+    h.tick();
+
+    const events = h.journal
+      .read()
+      .filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
+    expect(events).toHaveLength(1);
+    expect((events[0] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+  });
+
+  it('AC1: the condition clearing and recurring produces a second entry — dedup, not suppression', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+    h.tick(); // spawn
+
+    h.unreachable.add(101);
+    h.tick();
+    h.tick();
+    expect(
+      h.journal.read().filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101)
+    ).toHaveLength(1);
+
+    // Truth returns — the streak is over. Progress reported so the unit
+    // stays healthy rather than stalling on the next check.
+    h.unreachable.delete(101);
+    h.setMilestone(101, 'implement', 'done');
+    h.tick();
+
+    // Fails anew — a fresh streak, reported immediately, not silenced by the
+    // earlier (now-cleared) marker.
+    h.unreachable.add(101);
+    h.tick();
+
+    const events = h.journal
+      .read()
+      .filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
+    expect(events).toHaveLength(2);
+    expect((events[1] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+  });
+
+  it('AC4: a still-unreachable streak re-announces every 20 ticks, so "unreachable after N ticks" is legible from the journal', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+    h.tick(); // spawn
+
+    h.unreachable.add(101);
+    for (let i = 0; i < 19; i++) h.tick(); // ticks 1-19: onset (tick 1) journals, 2-19 stay silent
+    let events = h.journal
+      .read()
+      .filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
+    expect(events).toHaveLength(1);
+
+    h.tick(); // tick 20 — re-announcement threshold
+    events = h.journal
+      .read()
+      .filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
+    expect(events).toHaveLength(2);
+    expect((events[1] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(20);
+  });
+
+  it('AC2/AC6: three consecutive polls of one unchanged pr-watch-waiting condition produce exactly one entry', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.advance(200_000);
+    h.tick();
+    h.advance(200_000);
+    h.tick();
+    h.advance(200_000);
+    h.tick();
+
+    const events = h.events().filter((e) => e.event === 'pr-watch-waiting' && e.issue === 101);
+    expect(events).toHaveLength(1);
+    expect((events[0] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+  });
+
+  it('AC2: the wait condition clearing and recurring produces a second pr-watch-waiting entry', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.advance(200_000);
+    h.tick();
+    expect(
+      h.events().filter((e) => e.event === 'pr-watch-waiting' && e.issue === 101)
+    ).toHaveLength(1);
+
+    // Truth flickers back to OPEN (no longer "merged but not closed") — the
+    // wait is over.
+    h.setPr(55, { state: 'OPEN' });
+    h.advance(200_000);
+    h.tick();
+
+    // Merged-but-not-closed again — a fresh streak.
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T12:35:00Z' });
+    h.advance(200_000);
+    h.tick();
+
+    const events = h.events().filter((e) => e.event === 'pr-watch-waiting' && e.issue === 101);
+    expect(events).toHaveLength(2);
+    expect((events[1] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+  });
+
+  it("the dedup marker never refreshes updated_at — a stale-failed entry's 7-day reconcile window still elapses on schedule", () => {
+    // Regression: an early cut of this fix bumped QueueEntry.updated_at on
+    // every dedup tick (even the silent ones), which is also the clock
+    // `isStaleFailedPark` reads for its 7-day window (engine.ts) — an
+    // unreachable-poll streak on a stale-failed entry would have kept
+    // refreshing it, making the entry look freshly-failed forever.
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.setPr(55, { state: 'OPEN', blocked: true });
+    h.advance(200_000);
+    h.tick(); // 101 fails, auto-merge-blocked
+
+    // Ground truth stays unreachable for a couple of polls WITHIN the
+    // reconcile window — each is dedup bookkeeping only (one journal line,
+    // then silence), not a substantive change to the entry.
+    h.prUnreachable.add(55);
+    h.advance(200_000);
+    h.tick();
+    h.advance(200_000);
+    h.tick();
+    h.prUnreachable.delete(55);
+
+    // Exactly 8 days after the ORIGINAL failure the window is closed —
+    // unaffected by the unreachable-streak bookkeeping in between.
+    h.advance(8 * 24 * 60 * 60 * 1000 - 400_000);
+    h.setPr(55, { state: 'MERGED', mergedAt: '2026-09-06T13:00:00Z' });
+    h.closedIssues.add(101);
+    const result = h.tick();
+
+    expect(result.staleReconciled).toEqual([]);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+  });
+});

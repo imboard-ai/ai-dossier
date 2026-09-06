@@ -1528,6 +1528,14 @@ function runIncrementalGate(
     // Journalled per member: a gate that silently does not run is its own
     // trap (#594's shape — absence reading as a verdict). Silence must never
     // be mistaken for a pass.
+    //
+    // #632: confirmed this fires once per member, not once per tick.
+    // `runIncrementalGate` is called only from the `isMemberComplete` branch
+    // of `reconcileMemberSlot`, and both of that branch's callees
+    // (`completeMemberGate`, `evictMemberAndContinue`) advance
+    // `batch.executing_member` before returning — so the very next tick
+    // reads a DIFFERENT `memberIssue` from `batch.members[executing_member -
+    // 1]`, and this gate never runs twice against the same member.
     journalEvent(deps, 'gate-skipped', unit(batchId), {
       issue: memberIssue,
       reason: `gate-skipped:${skipped.id}`,
