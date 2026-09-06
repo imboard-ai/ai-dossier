@@ -4,6 +4,8 @@ import {
   type ExecFn,
   type GroundTruthMilestone,
   groundTruthExec,
+  isBatchPhaseDone,
+  isMemberBlocked,
   isMemberComplete,
   isParkedMilestone,
   isVerifiedComplete,
@@ -180,6 +182,91 @@ describe('isMemberComplete (#523 AC1) with the #575 dispatch fence', () => {
   it('dispatchedAt=null degrades to the old permissive check', () => {
     expect(isMemberComplete(memberDone('2026-08-29T12:00:00Z'), null)).toBe(true);
     expect(isMemberComplete(memberDone('2026-08-29T12:00:00Z'))).toBe(true);
+  });
+});
+
+describe('isMemberBlocked (#523 AC1/AC2) with the #605 dispatch fence', () => {
+  const memberBlocked = (at: string, reason = 'no-plan-artifact'): GroundTruthMilestone => ({
+    phase: 'plan',
+    status: 'blocked',
+    run: 'r',
+    at,
+    keys: { mode: 'slot', reason },
+  });
+
+  it('only status=blocked mode=slot signals a blocked member', () => {
+    expect(isMemberBlocked(memberBlocked('2026-08-29T12:00:00Z'))).toBe(true);
+    expect(
+      isMemberBlocked({
+        phase: 'plan',
+        status: 'blocked',
+        run: 'r',
+        at: '2026-08-29T12:00:00Z',
+        keys: {},
+      })
+    ).toBe(false);
+    expect(isMemberBlocked(null)).toBe(false);
+  });
+
+  it('#605: a blocked milestone that predates dispatchedAt does NOT block the member', () => {
+    // The regression this fix exists for: RFC-0001 F.8 requeues every member
+    // of a dissolved batch, so a member re-added to a fresh batch carries the
+    // hand-back that caused the dissolve. Read unfenced, it evicted the fresh
+    // agent mid-run and the journal reported the OLD run's reason=.
+    expect(isMemberBlocked(memberBlocked('2026-09-06T07:56:11Z'), '2026-09-06T08:02:00Z')).toBe(
+      false
+    );
+  });
+
+  it('a blocked milestone posted at or after dispatchedAt still blocks the member', () => {
+    expect(isMemberBlocked(memberBlocked('2026-09-06T08:02:00Z'), '2026-09-06T08:02:00Z')).toBe(
+      true
+    );
+  });
+
+  it('dispatchedAt=null degrades to the old permissive check', () => {
+    expect(isMemberBlocked(memberBlocked('2026-08-29T12:00:00Z'), null)).toBe(true);
+    expect(isMemberBlocked(memberBlocked('2026-08-29T12:00:00Z'))).toBe(true);
+  });
+
+  it('is fenced with the same signature shape as isMemberComplete (the #575 asymmetry)', () => {
+    // #575 fenced one terminal predicate and not the other; keep them paired.
+    const at = '2026-09-06T05:00:00Z';
+    const dispatchedAt = '2026-09-06T08:00:00Z';
+    expect(
+      isMemberComplete(
+        { phase: 'review', status: 'done', run: 'r', at, keys: { mode: 'slot' } },
+        dispatchedAt
+      )
+    ).toBe(false);
+    expect(isMemberBlocked(memberBlocked(at), dispatchedAt)).toBe(false);
+  });
+});
+
+describe('isBatchPhaseDone (#605 audit) with the dispatch fence', () => {
+  const anchorDone = (at: string): GroundTruthMilestone => ({
+    phase: 'batch-review',
+    status: 'done',
+    run: 'r',
+    at,
+    keys: {},
+  });
+
+  it('matches the named phase only', () => {
+    expect(isBatchPhaseDone(anchorDone('2026-09-06T08:00:00Z'), 'batch-review')).toBe(true);
+    expect(isBatchPhaseDone(anchorDone('2026-09-06T08:00:00Z'), 'batch-report')).toBe(false);
+    expect(isBatchPhaseDone(null, 'batch-review')).toBe(false);
+  });
+
+  it('a done milestone predating dispatchedAt does not advance the batch', () => {
+    // An anchor is per-batch by convention only; a re-enqueue against an
+    // existing anchor would otherwise skip the new batch's own review.
+    expect(
+      isBatchPhaseDone(anchorDone('2026-09-06T05:00:00Z'), 'batch-review', '2026-09-06T08:00:00Z')
+    ).toBe(false);
+    expect(
+      isBatchPhaseDone(anchorDone('2026-09-06T08:00:00Z'), 'batch-review', '2026-09-06T08:00:00Z')
+    ).toBe(true);
   });
 });
 

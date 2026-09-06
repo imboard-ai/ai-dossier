@@ -457,9 +457,29 @@ export function isMemberComplete(
  * A batch member's blocked signal (#523 AC1/AC2): `slot-cycle` posts
  * `status=blocked mode=slot` at whichever phase it could not proceed past
  * (plan/implement/review) — the reason lives in the milestone's `reason=` key.
+ *
+ * #605: the SAME dispatch fence as `isMemberComplete`, and for the same
+ * reason at the opposite end of the state machine. #575 fenced the complete
+ * half of this bug class and left the blocked half reading raw, so a member
+ * re-added to a fresh batch after a PREVIOUS batch posted `blocked mode=slot`
+ * — which is precisely what RFC-0001 F.8 does, requeuing every member of a
+ * dissolved batch — read as instantly blocked against that stale milestone.
+ * Its agent was evicted mid-run, and the journal named the OLD run's `reason=`
+ * on a run where that reason no longer applied. Worse than one lost member: a
+ * dissolved batch's members became permanently un-batchable, because every
+ * retry re-read the hand-back that caused the dissolve and dissolved again.
+ *
+ * `dispatchedAt` is the member slot's `SlotEntry.spawned_at`; `null` degrades
+ * to the old permissive check exactly as it does for the complete path.
  */
-export function isMemberBlocked(milestone: GroundTruthMilestone | null): boolean {
-  return milestone !== null && milestone.status === 'blocked' && milestone.keys.mode === 'slot';
+export function isMemberBlocked(
+  milestone: GroundTruthMilestone | null,
+  dispatchedAt: string | null = null
+): boolean {
+  if (milestone === null || milestone.status !== 'blocked' || milestone.keys.mode !== 'slot') {
+    return false;
+  }
+  return postdatesDispatch(milestone.at, dispatchedAt);
 }
 
 /**
@@ -475,10 +495,26 @@ export function isBatchTailParked(
   return prOfMilestone(milestone) !== null;
 }
 
-/** Whether the anchor's latest milestone is `<phase> done` (#523 — batch-review / batch-report). */
+/**
+ * Whether the anchor's latest milestone is `<phase> done` (#523 — batch-review / batch-report).
+ *
+ * #605 (audit): fenced on the same rail as `isMemberComplete`/`isMemberBlocked`,
+ * because an anchor is only per-batch by CONVENTION — nothing stops an operator
+ * re-enqueuing a dissolved batch against the anchor it already has, and then a
+ * previous run's `batch-review done` would advance the new batch straight past
+ * its own review. The fence can only make the predicate stricter: a milestone
+ * this tail dispatch actually posted always postdates its `spawned_at` (within
+ * `DISPATCH_FENCE_TOLERANCE_MS`), and `null` degrades to the old permissive
+ * check. Fenced by construction rather than by regression test — the batch tail
+ * has not yet executed end-to-end on any repo.
+ */
 export function isBatchPhaseDone(
   milestone: GroundTruthMilestone | null,
-  phase: BatchPhase
+  phase: BatchPhase,
+  dispatchedAt: string | null = null
 ): boolean {
-  return milestone !== null && milestone.phase === phase && milestone.status === 'done';
+  if (milestone === null || milestone.phase !== phase || milestone.status !== 'done') {
+    return false;
+  }
+  return postdatesDispatch(milestone.at, dispatchedAt);
 }
