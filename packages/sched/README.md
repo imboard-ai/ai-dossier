@@ -331,7 +331,13 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    commits were actually found and reverted — the batch is PRESERVED instead: trimmed to
    its survivors and carried straight to `reviewing`, only the evicted members requeue. A
    red or unreadable re-run, or an evicted member whose commits were never found on the
-   branch, still dissolves in full.
+   branch, still dissolves in full. A member already named in `batch.evictions` is never
+   recorded twice (#595): `appendEvictions` (the one place either eviction rail —
+   `evictMembers` here or `evictMemberDirectly`'s no-commits path in
+   [Batch dispatch (#523)](#batch-dispatch-523) — appends to `evictions[]`) is a no-op
+   for a repeat issue and journals `eviction-duplicate` instead, so a member evicted
+   twice can never inflate the dissolve trigger's distinct-member count or double up in
+   `sched status`'s eviction column.
 4. **Dissolve (AC3)** — `dissolveBatch` marks the batch `dissolved` and requeues every
    UNSHIPPED member: `full` (each as its own full-cycle run), `halved` (one or two fresh
    `forming` half-batches — a single remaining member yields one — entries retagged,

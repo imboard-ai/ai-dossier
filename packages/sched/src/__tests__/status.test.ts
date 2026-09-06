@@ -141,6 +141,42 @@ describe('buildStatusReport', () => {
       reason: 'gate-inconclusive:test.focused',
     });
   });
+
+  it("#595: dedupes a batch's evictions by issue, first occurrence kept — both for the table and --json readers", () => {
+    let state = seeded();
+    state = {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id === 'b1'
+          ? {
+              ...b,
+              evictions: [
+                {
+                  issue: 201,
+                  reason: 'suite-red',
+                  attribution: 'overlap' as const,
+                  reverted_commits: ['a'],
+                  group: [],
+                  at: NOW.toISOString(),
+                },
+                {
+                  issue: 201,
+                  reason: 'incremental-gate-failed:test.focused',
+                  attribution: 'none' as const,
+                  reverted_commits: [],
+                  group: [],
+                  at: NOW.toISOString(),
+                },
+              ],
+            }
+          : b
+      ),
+    };
+    const report = buildStatusReport(state, { max_slots: 3 }, 'p');
+    const batch = report.batches.find((b) => b.id === 'b1');
+    expect(batch?.evictions).toHaveLength(1);
+    expect(batch?.evictions[0].reason).toBe('suite-red');
+  });
 });
 
 describe('#468: parked units in the status report', () => {

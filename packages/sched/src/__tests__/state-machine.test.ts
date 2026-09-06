@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  appendEvictions,
+  createBatch,
   createEmptyState,
   enqueueEntries,
   findBatch,
@@ -324,6 +326,47 @@ describe('requeueMember (regressions)', () => {
     const result = requeueMember(state, 101, TO_FULL, 'noop', NOW2);
     expect(result.requeued).toBe(false);
     expect(findEntry(result.state, 101)?.status).toBe('done');
+  });
+});
+
+describe('appendEvictions (#595)', () => {
+  const record = (issue: number, reason = 'suite-red') => ({
+    issue,
+    reason,
+    attribution: 'overlap' as const,
+    reverted_commits: [],
+    group: [],
+    at: NOW.toISOString(),
+  });
+
+  it('appends a fresh record for a member with no prior eviction', () => {
+    const batch = createBatch('b1', [201, 202], NOW);
+    const { evictions, appended, duplicate } = appendEvictions(batch, [record(201)]);
+    expect(evictions).toHaveLength(1);
+    expect(appended).toEqual([record(201)]);
+    expect(duplicate).toEqual([]);
+  });
+
+  it('is a no-op for a member already recorded as evicted — never a second record', () => {
+    const batch = { ...createBatch('b1', [201, 202], NOW), evictions: [record(201)] };
+    const second = record(201, 'incremental-gate-failed:test.focused');
+
+    const { evictions, appended, duplicate } = appendEvictions(batch, [second]);
+
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0]).toEqual(record(201));
+    expect(appended).toEqual([]);
+    expect(duplicate).toEqual([second]);
+  });
+
+  it('handles a mixed batch: one fresh member appends, one already-evicted member does not', () => {
+    const batch = { ...createBatch('b1', [201, 202, 203], NOW), evictions: [record(201)] };
+
+    const { evictions, appended, duplicate } = appendEvictions(batch, [record(201), record(202)]);
+
+    expect(evictions.map((e) => e.issue).sort()).toEqual([201, 202]);
+    expect(appended).toEqual([record(202)]);
+    expect(duplicate).toEqual([record(201)]);
   });
 });
 

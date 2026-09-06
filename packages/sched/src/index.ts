@@ -190,6 +190,7 @@ export {
   setPaused,
 } from './scheduler';
 export {
+  appendEvictions,
   createBatch,
   createEmptyState,
   findBatch,

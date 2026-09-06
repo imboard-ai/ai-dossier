@@ -12,7 +12,14 @@ import {
   dependencyBlockers,
   runnableUnits,
 } from './readiness';
-import type { BatchEntry, QueueEntry, SchedConfig, SchedState, SlotEntry } from './types';
+import type {
+  BatchEntry,
+  EvictionRecord,
+  QueueEntry,
+  SchedConfig,
+  SchedState,
+  SlotEntry,
+} from './types';
 import { LIVE_SLOT_STATUSES, SATISFIED_ISSUE_STATUSES, TERMINAL_ISSUE_STATUSES } from './types';
 
 /** An entry that cannot progress, with the human reason. */
@@ -59,6 +66,22 @@ export interface StatusReport {
   runnable_units: string[];
   blocked: BlockedItem[];
   failed: QueueEntry[];
+}
+
+/**
+ * One record per distinct evicted issue, first occurrence kept (#595). Belt
+ * and suspenders alongside `appendEvictions` in `state.ts` — a `state.json`
+ * persisted before that fix shipped can still carry duplicate records for one
+ * member, and the report (both `sched status`'s table and its `--json`
+ * output) is the one place either is read back by a human or a script.
+ */
+function distinctEvictions(evictions: readonly EvictionRecord[]): EvictionRecord[] {
+  const seen = new Set<number>();
+  return evictions.filter((e) => {
+    if (seen.has(e.issue)) return false;
+    seen.add(e.issue);
+    return true;
+  });
 }
 
 export function buildStatusReport(
@@ -150,7 +173,7 @@ export function buildStatusReport(
     live_slots: state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length,
     queue: state.entries,
     slots: state.slots,
-    batches: state.batches,
+    batches: state.batches.map((b) => ({ ...b, evictions: distinctEvictions(b.evictions) })),
     parked,
     last_pr_poll_at: state.last_pr_poll_at,
     last_label_poll_at: state.last_label_poll_at,

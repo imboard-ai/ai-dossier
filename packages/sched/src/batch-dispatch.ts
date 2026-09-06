@@ -120,6 +120,7 @@ import {
 import { buildSchedRunLogEntry, finalizeRunLogEntry, readDispatchLog } from './run-log';
 import { assignToIdleSlot, freeCapacity } from './scheduler';
 import {
+  appendEvictions,
   findBatch,
   findEntry,
   patchBatch,
@@ -1862,9 +1863,9 @@ function evictMemberDirectly(
   // Pass 1 (pure — requeue + record the eviction): safe to run entirely
   // inside the lock, unlike `dissolveBatch` below, which shells out
   // (`deps.exec`/`postMilestone`) and so must NOT hold the lock while it runs.
-  const triggered = deps.store.withLock((s) => {
+  const { triggered, duplicate } = deps.store.withLock((s) => {
     const b = findBatch(s, batchId);
-    if (!b) return { state: s, result: false };
+    if (!b) return { state: s, result: { triggered: false, duplicate: false } };
     const evidence = {
       batch: batchId,
       reason,
@@ -1882,30 +1883,32 @@ function evictMemberDirectly(
       { failure_evidence: evidence }
     );
     let next = requeueResult.state;
-    next = patchBatch(
-      next,
-      batchId,
+    const { evictions, duplicate } = appendEvictions(b, [
       {
-        evictions: [
-          ...b.evictions,
-          {
-            issue: memberIssue,
-            reason,
-            attribution: 'none',
-            reverted_commits: [],
-            group: [],
-            at: now.toISOString(),
-          },
-        ],
+        issue: memberIssue,
+        reason,
+        attribution: 'none',
+        reverted_commits: [],
+        group: [],
+        at: now.toISOString(),
       },
-      now
-    );
+    ]);
+    next = patchBatch(next, batchId, { evictions }, now);
     const updated = findBatch(next, batchId);
     return {
       state: next,
-      result: updated !== undefined && checkDissolveTrigger(updated, dissolvePolicy),
+      result: {
+        triggered: updated !== undefined && checkDissolveTrigger(updated, dissolvePolicy),
+        duplicate: duplicate.length > 0,
+      },
     };
   });
+  if (duplicate) {
+    journalEvent(deps, 'eviction-duplicate', unit(batchId), {
+      issue: memberIssue,
+      detail: `${reason} — issue #${memberIssue} is already recorded as evicted; no second record written`,
+    });
+  }
   if (!triggered) return false;
 
   // Pass 2 (outside the lock — dissolveBatch shells out): re-load fresh
