@@ -72,10 +72,11 @@ import {
   type EngineStalenessCheck,
   formatEngineStaleWarning,
 } from '../engine-version';
-import { requireRepoSlug, tryFetchLabels } from '../gh';
+import { requireRepoSlug, tryFetchComments, tryFetchLabels } from '../gh';
 import { pickHardBlockLabel } from '../hard-block-labels';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
+import { findLatestPlan } from '../plan-artifact';
 import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
 import { aggregateRunLogEntries, buildSchedCostReport, type IssueCost } from '../sched-run-stats';
 import { renderTable } from '../table';
@@ -149,6 +150,8 @@ interface EnqueueOptions extends SchedOptions {
   repo?: string;
   moreMembersExpected?: boolean;
   priority?: string;
+  /** #603: bypass the slot-member plan:v1 pre-screen. */
+  skipPlanCheck?: boolean;
 }
 
 interface AbandonOptions extends SchedOptions {
@@ -454,6 +457,76 @@ function screenHardBlockLabels(inputs: EnqueueInput[], repo?: string): number[] 
   return failed;
 }
 
+/**
+ * #603: refuse to seal a `mode=slot` batch whose members have no `plan:v1`
+ * artifact. `slot-cycle` Step 0 precondition 5 requires one and forbids the
+ * member from authoring its own (that is batch-prep's contract), so such a
+ * member ALWAYS posts `blocked reason=no-plan-artifact` and hands back. Every
+ * step between here and that discovery — seal, anchor bind, `git worktree
+ * add`, a full dependency warm, the member spawn — is knowable-in-advance
+ * waste, and once enough members hand back the batch dissolves and requeues
+ * all of them at full-cycle cost.
+ *
+ * Observed, not hypothesized: batch `b-20260906-01` (anchor #600) spent a
+ * 30-second cold warm and two member dispatches to rediscover a precondition
+ * two `gh` calls would have caught here.
+ *
+ * Unlike `screenHardBlockLabels`, a MISSING plan is a hard failure rather
+ * than a `blocked` entry: a hard-block label is a state the issue may leave
+ * on its own (#553 re-evaluates each tick), whereas a batch member with no
+ * plan can never become runnable inside the batch. A failed LOOKUP still
+ * fails open, on the same reasoning as the label screen — enqueue must never
+ * hard-fail because a nice-to-have check could not run.
+ *
+ * `--skip-plan-check` is the escape hatch for the deliberate case (posting
+ * the plan between enqueue and dispatch, or a manifest whose prep step is
+ * known to have run).
+ *
+ * Only `mode=slot` inputs are screened: a `full` entry runs `full-cycle-issue`,
+ * which plans for itself.
+ */
+function screenSlotPlanArtifacts(inputs: EnqueueInput[], repo?: string): void {
+  const missing: number[] = [];
+  const checked = new Map<number, boolean>();
+  for (const input of inputs) {
+    if ((input.mode ?? 'full') !== 'slot') continue;
+    if (!checked.has(input.issue)) {
+      if (!Number.isSafeInteger(input.issue)) {
+        console.error(
+          `⚠ Issue ${input.issue} is not a safe integer — skipping the plan pre-screen.`
+        );
+        checked.set(input.issue, true);
+      } else {
+        const result = tryFetchComments(String(input.issue), repo);
+        if (!result.ok) {
+          console.error(
+            `⚠ ${result.error}\n  Enqueuing #${input.issue} normally (plan pre-screen skipped).`
+          );
+          checked.set(input.issue, true);
+        } else {
+          const bodies = result.comments.map((c) => (typeof c?.body === 'string' ? c.body : ''));
+          checked.set(input.issue, findLatestPlan(bodies) !== null);
+        }
+      }
+    }
+    if (checked.get(input.issue) === false) missing.push(input.issue);
+  }
+  if (missing.length === 0) return;
+  const list = missing.map((n) => `#${n}`).join(', ');
+  fail([
+    [
+      `Cannot enqueue as batch members — no plan:v1 artifact on ${list}.`,
+      `slot-cycle requires one before any implementation work and will not author its own, so ${missing.length === 1 ? 'this member' : 'these members'} would hand back with reason=no-plan-artifact.`,
+      '',
+      'Fix (either):',
+      '  ai-dossier run imboard-ai/git/batch-issues-preparation   # composes the cohort AND posts the plans',
+      '  ai-dossier plan post --issue <n> --file <plan.md>        # per issue, then re-run this enqueue',
+      '',
+      'Override with --skip-plan-check if the plans are posted between enqueue and dispatch.',
+    ].join('\n'),
+  ]);
+}
+
 /** Append one `label-blocked`/`label-check-failed` journal event per outcome (#507 AC3). */
 function journalLabelScreen(store: SchedStore, blocked: EnqueueInput[], failed: number[]): void {
   if (blocked.length === 0 && failed.length === 0) return;
@@ -527,6 +600,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
     .option(
       '--priority <n>',
       "Assignment weight: for --mode full, the issue's own priority (default 0); for --mode slot, the BATCH's priority (default 10, or config's default_batch_priority) — higher dispatches first"
+    )
+    .option(
+      '--skip-plan-check',
+      'Enqueue slot members even when they carry no plan:v1 artifact (they will hand back with reason=no-plan-artifact unless a plan is posted before dispatch)'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option(
@@ -645,6 +722,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
         input.batch_priority = defaultBatchPriority;
         batchPrioritySeeded.add(input.batch);
       }
+
+      // #603: before the store lock and before any batch is created, so a
+      // rejected enqueue leaves no batch, no anchor binding and no worktree.
+      if (!opts.skipPlanCheck) screenSlotPlanArtifacts(inputs, opts.repo);
 
       const failed = screenHardBlockLabels(inputs, opts.repo);
 

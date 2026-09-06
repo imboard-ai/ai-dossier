@@ -1696,24 +1696,30 @@ function reconcileMemberSlot(
   const milestone = deps.groundTruth.latestMilestone(memberIssue);
   if (milestone === undefined) return; // unreachable — pause this batch's decisions
 
-  // #575: fence to THIS member dispatch's `spawned_at` — a member re-added to
-  // a fresh batch run after a PREVIOUS batch already posted its
-  // `review done mode=slot` milestone (pilot re-run, requeue-with-context)
-  // must not read as instantly complete against that stale milestone. Mirrors
+  // #575 / #605: fence to THIS member dispatch's `spawned_at` — a member
+  // re-added to a fresh batch run after a PREVIOUS batch already posted a
+  // terminal `mode=slot` milestone (pilot re-run, requeue-with-context, and
+  // above all RFC-0001 F.8's requeue of every member of a dissolved batch)
+  // must not read as instantly finished against that stale milestone. Mirrors
   // the per-issue fence in `engine.ts`'s `reconcileRunning`/
-  // `completeUnitOrRecover` — same bug class, same fix, different completion
-  // predicate (`isMemberComplete` vs `isVerifiedComplete`).
-  if (
+  // `completeUnitOrRecover` — same bug class, same fix, different predicates
+  // (`isMemberComplete`/`isMemberBlocked` vs `isVerifiedComplete`).
+  //
+  // BOTH terminal predicates are fenced, and it took losing a batch to learn
+  // why: #575 fenced only `isMemberComplete`, so a stale `blocked mode=slot`
+  // still evicted a healthy member mid-run and the journal reported the OLD
+  // run's `reason=`, naming a precondition that had already been fixed.
+  const staleTerminal =
     milestone !== null &&
-    !isMemberComplete(milestone, slot.spawned_at) &&
-    isMemberComplete(milestone)
-  ) {
+    ((isMemberComplete(milestone) && !isMemberComplete(milestone, slot.spawned_at)) ||
+      (isMemberBlocked(milestone) && !isMemberBlocked(milestone, slot.spawned_at)));
+  if (staleTerminal) {
     journalEvent(deps, 'stale-milestone-ignored', unit(batchId), {
       issue: memberIssue,
       slot: slot.id,
       run: milestone.run,
       at: milestone.at,
-      detail: `predates dispatch spawned_at=${slot.spawned_at}`,
+      detail: `${milestone.status === 'blocked' ? 'blocked' : 'complete'} milestone predates dispatch spawned_at=${slot.spawned_at}`,
     });
   }
 
@@ -1743,8 +1749,15 @@ function reconcileMemberSlot(
     return;
   }
 
-  if (isMemberBlocked(milestone) || dead) {
-    const rawReason = milestone?.keys.reason;
+  const blockedNow = isMemberBlocked(milestone, slot.spawned_at);
+  if (blockedNow || dead) {
+    // #605: only a milestone THIS dispatch posted may name the reason. A dead
+    // agent whose issue carries only a stale `blocked` milestone is an
+    // unverified exit, not a re-run of the previous run's block — reporting
+    // the old `reason=` here is what made the journal misdirect, naming a
+    // precondition that had already been fixed on a run where it no longer
+    // applied.
+    const rawReason = blockedNow ? milestone?.keys.reason : undefined;
     const reason =
       typeof rawReason === 'string' && rawReason.length > 0
         ? sanitizeUntrustedText(rawReason)
@@ -1939,7 +1952,10 @@ function reconcileTailSlot(
   const milestone = deps.groundTruth.latestMilestone(batch.anchor);
   if (milestone === undefined) return;
 
-  if (batch.status === 'reviewing' && isBatchPhaseDone(milestone, 'batch-review')) {
+  if (
+    batch.status === 'reviewing' &&
+    isBatchPhaseDone(milestone, 'batch-review', slot.spawned_at)
+  ) {
     deps.store.withLock((s) => {
       const b = findBatch(s, batchId);
       if (!b || b.status !== 'reviewing') return { state: s, result: undefined };
@@ -1987,7 +2003,7 @@ function reconcileReportSlot(
   const milestone = deps.groundTruth.latestMilestone(batch.anchor);
   if (milestone === undefined) return;
 
-  if (isBatchPhaseDone(milestone, 'batch-report')) {
+  if (isBatchPhaseDone(milestone, 'batch-report', slot.spawned_at)) {
     deps.journal.append(
       unitEvent('external-advance', unit(batchId), { detail: 'batch report done' }),
       now
