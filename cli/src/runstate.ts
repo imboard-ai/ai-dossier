@@ -645,6 +645,25 @@ export function parseMilestones(bodies: string[]): ParsedMilestone[] {
   return out;
 }
 
+/**
+ * #616: `slot-cycle` Step 0 precondition 6, as a pure predicate over an
+ * issue's comment bodies — the LATEST runstate milestone must carry
+ * `mode=slot`.
+ *
+ * "Latest" is load-bearing and is exactly what `runstate last` reports. An
+ * older `phase=classify` record buried under a newer non-slot milestone does
+ * NOT satisfy it, which is how an evicted member requeued as full-cycle
+ * becomes un-re-batchable the moment its new unit posts a single `gate` line.
+ * Accepting a buried classify record here would let `sched enqueue` wave
+ * through a member that `slot-cycle` then rejects — the exact class of waste
+ * this preflight exists to prevent.
+ */
+export function hasSlotModeLatestMilestone(bodies: readonly string[]): boolean {
+  const milestones = parseMilestones([...bodies]);
+  const latest = milestones[milestones.length - 1];
+  return latest !== undefined && latest.keys.mode === 'slot';
+}
+
 /** Mint a fresh run id: `r-<issue>-<4 hex>`. */
 export function mintRunId(issue: number | string): string {
   return `r-${issue}-${randomBytes(RUN_ID_RANDOM_BYTES).toString('hex')}`;

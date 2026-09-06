@@ -11,6 +11,7 @@ import {
   FENCE_STATUS,
   fenceGeneration,
   generationOf,
+  hasSlotModeLatestMilestone,
   hitLoopCap,
   isAcKey,
   isBatchPhase,
@@ -1897,5 +1898,42 @@ describe('run fencing — the protocol half (#504)', () => {
       expect(computeResume([gateDone], probe()).generation).toBe(DEFAULT_GENERATION);
       expect(computeResume([], probe()).generation).toBe(DEFAULT_GENERATION);
     });
+  });
+});
+
+describe('hasSlotModeLatestMilestone (#616 — slot-cycle Step 0 precondition 6)', () => {
+  const ms = (kv: string) => `<!-- runstate:v1 -->\n${kv}\n`;
+  const classify = ms('phase=classify status=done run=r-1-a at=2026-09-06T10:00:00Z\nmode=slot');
+  const slotReview = ms('phase=review status=done run=r-1-b at=2026-09-06T11:00:00Z\nmode=slot');
+  const fullGate = ms('phase=gate status=blocked run=r-1-c at=2026-09-06T12:00:00Z');
+
+  it('accepts a classify record carrying mode=slot', () => {
+    expect(hasSlotModeLatestMilestone([classify])).toBe(true);
+  });
+
+  it('accepts a prior slot-mode milestone — a re-dispatch or re-batch resumes on it', () => {
+    // Precondition 6 accepts EITHER form; rejecting this would refuse every
+    // legitimate crash-restart re-dispatch.
+    expect(hasSlotModeLatestMilestone([classify, slotReview])).toBe(true);
+  });
+
+  it('rejects a classify record BURIED under a later non-slot milestone', () => {
+    // The #610 shape: an evicted member requeues as full-cycle, its new unit
+    // posts one `gate` line, and the issue becomes un-re-batchable. Accepting
+    // the buried record here would wave through a member slot-cycle rejects.
+    expect(hasSlotModeLatestMilestone([classify, fullGate])).toBe(false);
+  });
+
+  it('rejects an issue with no milestones at all', () => {
+    expect(hasSlotModeLatestMilestone([])).toBe(false);
+    expect(hasSlotModeLatestMilestone(['just a comment', '<!-- plan:v1 head=abc1234 -->'])).toBe(
+      false
+    );
+  });
+
+  it('ignores non-runstate comments interleaved with milestones', () => {
+    expect(hasSlotModeLatestMilestone(['chatter', classify, '<!-- plan:v1 head=abc1234 -->'])).toBe(
+      true
+    );
   });
 });

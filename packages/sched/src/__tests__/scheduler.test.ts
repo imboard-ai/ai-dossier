@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   abandonBatch,
   abandonIssue,
+  assignToIdleSlot,
   computeAssignments,
   createEmptyState,
   enqueueEntries,
+  LIVE_SLOT_STATUSES,
   reprioritizeBatch,
   reprioritizeIssue,
   runnableUnits,
@@ -215,6 +217,42 @@ describe('abandon', () => {
       expect(entry?.batch).toBeNull();
       expect(['requeued', 'queued']).toContain(entry?.status);
     }
+  });
+
+  it('#609: abandonBatch releases the slot the batch was holding', () => {
+    let state = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 1, mode: 'slot', batch: 'b1' },
+        { issue: 2, mode: 'slot', batch: 'b1' },
+      ],
+      NOW
+    );
+    state = transitionBatch(state, 'b1', 'executing', {}, NOW);
+    // Give the batch a live slot, the way claimAndSetup would.
+    const assigned = assignToIdleSlot(state, 'batch:b1', 'member', NOW);
+    state = transitionSlot(assigned.state, assigned.slotId, 'running', { pid: 4242 }, NOW);
+    expect(state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status))).toHaveLength(1);
+
+    const out = abandonBatch(state, 'b1', 'operator dissolve', NOW2);
+
+    // Before #609 the slot stayed `running` against a dead pid forever: the
+    // batch is terminal, and runBatchTick's reconcile has no arm for that, so
+    // nothing could ever release it.
+    expect(out.state.batches.find((b) => b.id === 'b1')?.status).toBe('dissolved');
+    const slot = out.state.slots.find((s) => s.id === assigned.slotId);
+    expect(slot?.status).toBe('idle');
+    expect(slot?.unit).toBeNull();
+    expect(slot?.pid).toBeNull();
+    expect(out.state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status))).toHaveLength(0);
+  });
+
+  it('#609: abandonBatch on a batch holding no slot is unaffected', () => {
+    let state = enqueueEntries(createEmptyState(), [{ issue: 1, mode: 'slot', batch: 'b1' }], NOW);
+    state = transitionBatch(state, 'b1', 'executing', {}, NOW);
+    const out = abandonBatch(state, 'b1', 'no slot held', NOW2);
+    expect(out.state.batches.find((b) => b.id === 'b1')?.status).toBe('dissolved');
+    expect(out.state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status))).toHaveLength(0);
   });
 
   it('abandonBatch leaves shipped members untouched', () => {

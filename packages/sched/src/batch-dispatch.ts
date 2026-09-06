@@ -125,7 +125,9 @@ import {
   findBatch,
   findEntry,
   patchBatch,
+  releaseBatchSlot,
   requeueMember,
+  slotForBatch,
   transitionBatch,
   transitionIssue,
   transitionSlot,
@@ -143,7 +145,12 @@ import type {
   SlotEntry,
   SlotStatus,
 } from './types';
-import { IllegalTransitionError, resolveDissolvePolicy, SchedNotFoundError } from './types';
+import {
+  IllegalTransitionError,
+  resolveDissolvePolicy,
+  SchedNotFoundError,
+  TERMINAL_BATCH_STATUSES,
+} from './types';
 
 // `CapOutcome` moved to `types.ts` (#583, so `BatchEntry.member_gates` can use
 // it without an import cycle) — re-exported here so `index.ts`'s existing
@@ -355,8 +362,15 @@ function recordMemberGate(
   });
 }
 
+/**
+ * #609: the lookup and the release walk both moved to `state.ts`
+ * (`slotForBatch` / `releaseBatchSlot`). They have a second caller that must
+ * not disagree with this one — `scheduler.ts`'s `abandonBatch`, which
+ * dissolved a batch without releasing its slot and leaked it permanently.
+ * These thin aliases keep this module's call sites reading as they did.
+ */
 function slotFor(state: SchedState, batchId: string): SlotEntry | undefined {
-  return state.slots.find((s) => s.unit === unit(batchId));
+  return slotForBatch(state, batchId);
 }
 
 /**
@@ -430,41 +444,8 @@ function recoveryDeps(
   };
 }
 
-/**
- * The declared edge one step closer to `idle` from each `SlotStatus`
- * (`state.ts`'s `SLOT_BASE_TRANSITIONS`) — `recovering` has no direct edge to
- * `idle`, only `running`/`failed`, so it routes through `failed` first;
- * getting this wrong throws `IllegalTransitionError` inside a lock.
- */
-const NEXT_TOWARD_IDLE: Readonly<Record<SlotStatus, SlotStatus | null>> = {
-  idle: null,
-  assigned: 'idle',
-  running: 'exited',
-  exited: 'verifying',
-  verifying: 'complete',
-  complete: 'idle',
-  recovering: 'failed',
-  failed: 'idle',
-};
-
-/**
- * Release a batch's slot to idle, whatever status it currently holds (mirrors
- * `engine.ts`'s `walkSlotToIdle` walk). Unlike that walk, this one does not
- * journal `slot-released` (#525) — batch-slot release is not yet wired to
- * that event, tracked as a follow-up.
- */
 function releaseSlot(state: SchedState, batchId: string, now: Date): SchedState {
-  let next = state;
-  let slot = slotFor(next, batchId);
-  // Bounded: the longest real walk (recovering → failed → idle, or
-  // running → exited → verifying → complete → idle) is 4 hops.
-  for (let i = 0; i < 8 && slot && slot.status !== 'idle'; i++) {
-    const to = NEXT_TOWARD_IDLE[slot.status];
-    if (to === null) break;
-    next = transitionSlot(next, slot.id, to, {}, now);
-    slot = slotFor(next, batchId);
-  }
-  return next;
+  return releaseBatchSlot(state, batchId, now);
 }
 
 // --- Batch setup (ready → executing, member 1) ---
@@ -2274,6 +2255,27 @@ export function runBatchTick(
 
   for (const batch of deps.store.load().batches) {
     const slot = slotFor(deps.store.load(), batch.id);
+    // #609: a TERMINAL batch (`done`/`dissolved`) still holding a slot matches
+    // none of the status arms below and would fall through their `continue`,
+    // so nothing ever looks at that slot again — not even the orphaned-pid
+    // rail that would otherwise notice its dead process. It leaked for the
+    // life of the state file, with no CLI lever to recover it.
+    //
+    // This arm is the safety net, deliberately independent of the fix in
+    // `abandonBatch` that stops one from being created: it also REPAIRS state
+    // files that already carry a leaked slot, which is the only way an
+    // operator gets those three hours of held capacity back.
+    if (slot && TERMINAL_BATCH_STATUSES.has(batch.status)) {
+      deps.store.withLock((s) => ({
+        state: releaseBatchSlot(s, batch.id, now),
+        result: undefined,
+      }));
+      journalEvent(deps, 'slot-released', unit(batch.id), {
+        slot: slot.id,
+        detail: `terminal batch (${batch.status}) held slot ${slot.id}`,
+      });
+      continue;
+    }
     if (slot && (slot.status === 'running' || slot.status === 'assigned')) {
       if (batch.status === 'executing') {
         reconcileMemberSlot(deps, config, dispatch, batch.id, slot, now, result);
