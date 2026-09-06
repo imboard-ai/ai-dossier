@@ -11,6 +11,7 @@ import {
   isVerifiedComplete,
   parseIssueLabelsJson,
   parseMilestoneJson,
+  parseOpenPrListJson,
   parsePrViewJson,
   parseSetupInfo,
 } from '../index';
@@ -342,6 +343,55 @@ describe('createExecGroundTruth', () => {
 
   it('groundTruthExec is the default exec (injectable boundary exists)', () => {
     expect(typeof groundTruthExec).toBe('function');
+  });
+
+  it('#596: openPrForBranch reads the first open PR for a branch, or null when there is none', () => {
+    const calls: Array<[string, string[]]> = [];
+    const exec: ExecFn = (file, args) => {
+      calls.push([file, args]);
+      if (file !== 'gh') return null;
+      return args.includes('has-pr') ? JSON.stringify([{ number: 3999 }]) : '[]';
+    };
+    const gt = createExecGroundTruth(exec);
+    expect(gt.openPrForBranch('no-pr-branch')).toBeNull();
+    expect(gt.openPrForBranch('has-pr')).toBe(3999);
+    expect(
+      calls.some(([f, a]) => f === 'gh' && a[0] === 'pr' && a[1] === 'list' && a.includes('has-pr'))
+    ).toBe(true);
+  });
+
+  it('#596: openPrForBranch is unreachable when the poll fails, and rejects crafted branch names (CWE-88)', () => {
+    const failing: ExecFn = () => null;
+    expect(createExecGroundTruth(failing).openPrForBranch('some-branch')).toBeUndefined();
+
+    const calls: Array<[string, string[]]> = [];
+    const exec: ExecFn = (file, args) => {
+      calls.push([file, args]);
+      return '[]';
+    };
+    const gt = createExecGroundTruth(exec);
+    expect(gt.openPrForBranch('--upload-pack=evil')).toBeNull();
+    expect(calls).toHaveLength(0); // rejected before any subprocess ran
+  });
+});
+
+describe('parseOpenPrListJson (#596)', () => {
+  it('returns the first open PR number', () => {
+    expect(parseOpenPrListJson(JSON.stringify([{ number: 3999 }, { number: 1 }]))).toBe(3999);
+  });
+
+  it('an empty result is a verified "no open PR"', () => {
+    expect(parseOpenPrListJson('[]')).toBeNull();
+  });
+
+  it('null / empty / garbage / malformed entries degrade to null, never a false PR', () => {
+    expect(parseOpenPrListJson(null)).toBeNull();
+    expect(parseOpenPrListJson('')).toBeNull();
+    expect(parseOpenPrListJson('not json')).toBeNull();
+    expect(parseOpenPrListJson('[{"number":"55"}]')).toBeNull(); // string, not number
+    expect(parseOpenPrListJson('[{}]')).toBeNull();
+    expect(parseOpenPrListJson('[null]')).toBeNull();
+    expect(parseOpenPrListJson('[{"number":0}]')).toBeNull(); // not positive
   });
 });
 

@@ -1047,6 +1047,20 @@ function enterRecovery(
   const report = isReportSlot(slot);
   const nextTier = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
   if (slot.recoveries >= ESCALATION_CAP || nextTier === null) {
+    // #596: before failing a unit terminally for an UNVERIFIED EXIT (never a
+    // stall — a stalled agent never had the chance to open anything), check
+    // whether its branch already produced an open PR the milestone trail
+    // never recorded. Report slots are unaffected (AC7): a report agent has
+    // no branch of its own to check. Fails closed (AC5) — no branch known,
+    // or the lookup itself is unreachable — falls straight through to
+    // today's terminal path; only a confirmed open PR number parks (AC4).
+    if (!report && causeEvent === 'verify-incomplete' && slot.branch !== null) {
+      const openPr = ctx.deps.groundTruth.openPrForBranch(slot.branch);
+      if (typeof openPr === 'number') {
+        return parkUnit(ctx, state, unit, openPr, { detail: 'unverified-exit-recovered-open-pr' });
+      }
+    }
+
     // Cap reached (2 escalations) or already at the strongest tier — the
     // designed signal that a human, not a stronger model, is next.
     const reason = report
@@ -1153,28 +1167,31 @@ function completeUnit(
 }
 
 /**
- * Park a unit whose agent exited after parking its PR on auto-merge (#468):
- * the exit is VERIFIED (the ship phase's `awaiting-merge` milestone with
- * `pr=`), entry → parked (pr recorded), slot released — a waiting unit
- * consumes zero slots (AC5) and the watcher owns it from here.
+ * Park a unit whose agent exited having already produced an open PR — the
+ * ship phase's `awaiting-merge` milestone with `pr=` (#468), or (#596) a
+ * terminal unverified exit whose branch ground truth found one the milestone
+ * trail never recorded: entry → parked (pr recorded), slot released — a
+ * waiting unit consumes zero slots (AC5) and the watcher owns it from here.
+ * `detail` names WHICH path adopted the PR, so an operator reading
+ * `pr-parked` alone can tell a milestone-verified park from a
+ * recovery-adopted one (#596 AC3).
  */
 function parkUnit(
   ctx: TickCtx,
   state: SchedState,
   unit: string,
-  milestone: GroundTruthMilestone
+  pr: number,
+  detail: Record<string, unknown> = {}
 ): SchedState {
   const issue = issueOfUnit(unit);
   if (issue === null) return state;
   const now = ctx.deps.now();
-  const pr = prOfMilestone(milestone);
-  if (pr === null) return state; // isParkedMilestone guarantees this
 
   const walked = walkSlotToIdle(state, unit, now, stepVerifiedExitToIdle);
   let next = walked.state;
 
   next = transitionIssue(next, issue, 'parked', { pr }, now);
-  journal(ctx, 'pr-parked', unit, { pr });
+  journal(ctx, 'pr-parked', unit, { pr, ...detail });
   ctx.result.parked.push(unit);
   journalSlotReleased(ctx, unit, walked.releasedSlotId, 'parked');
   return next;
@@ -1570,12 +1587,9 @@ function completeUnitOrRecover(
     // healthy park sandwiched between two unrelated units' suspect exits
     // would be invisible to the cross-unit correlation and could still tip
     // it into a false-positive pause.
-    return parkUnit(
-      ctx,
-      recordDispatchOutcome(ctx, next, unit, slot, false),
-      unit,
-      truth.milestone
-    );
+    const pr = prOfMilestone(truth.milestone); // non-null: isParkedMilestone guarantees it
+    if (pr === null) return next;
+    return parkUnit(ctx, recordDispatchOutcome(ctx, next, unit, slot, false), unit, pr);
   }
 
   // #575: fence to THIS dispatch's `spawned_at` — an agent that exited having
