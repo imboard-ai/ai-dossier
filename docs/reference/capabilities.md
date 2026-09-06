@@ -94,6 +94,16 @@ The distinction matters to callers: `task-failed` means "trust the result — th
 itself failed"; `automation-broken` means "do not trust the machinery — fall back to
 reasoning"; `capability-unavailable` means "no fast path here — reason from scratch".
 
+One caller qualifies the first of those, and it is worth knowing about before you write
+a capability script (#594): the scheduler's per-member incremental gate only treats a
+`task-failed` as a red suite when `output_tail` carries evidence the run EARNED it —
+failing-test output for a `test.*` capability, compiler errors for the others. A
+capability that exits non-zero having produced no such output is routed to the
+block-the-batch path instead of evicting a member, because a wrapper that fabricates its
+exit code is otherwise indistinguishable from a genuinely red suite. Practical
+consequence: make sure a failing capability lets its runner's own output through, rather
+than swallowing it and printing only its own framing.
+
 > Exit 1 is also the CLI's generic usage-error exit (e.g. a typo'd command). Machine
 > consumers should read the envelope's last stdout line — present for every `cap run`
 > outcome — rather than the exit code alone, and check stderr for usage errors.

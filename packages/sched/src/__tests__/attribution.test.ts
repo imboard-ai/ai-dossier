@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   attributeByOverlap,
   failingTest,
+  hasEarnedFailureEvidence,
   hasFailingTestEvidence,
   isReadableVitestReport,
   type MemberFootprint,
@@ -165,18 +166,86 @@ describe('parseVitestJson', () => {
       expect(hasFailingTestEvidence(framing)).toBe(false);
     });
 
+    // The VERBATIM body from docs/reports/batch-pilot-2-execution.md — the one
+    // that evicted a member in three consecutive batches. Its last line says
+    // "real test failure", so an unanchored /fail/i accepts it and #594 becomes
+    // a no-op on the exact case it was written for. Pinned here as real
+    // evidence, not a hand-written stand-in.
+    it('is false for the recorded pilot attempt-4 gate log, whose framing says "failure"', () => {
+      const recorded = [
+        'cap-test-focused: testing scope = merge-base b572910d27115d821465f68dbbd53f7d2eaae952',
+        'cap-test-focused: running: pnpm --filter "...[b572910d2]" ... run test (cwd: .../main)',
+        'tee: /dev/stderr: No such device or address',
+        'cap-test-focused: pnpm --filter "...[b572910d2]" ... run test exited 1 — real test failure.',
+        '',
+      ].join('\n');
+      expect(hasFailingTestEvidence(recorded)).toBe(false);
+    });
+
+    it("is false for a package manager's own lifecycle error — no suite ran", () => {
+      expect(hasFailingTestEvidence('ELIFECYCLE  Command failed with exit code 1.\n')).toBe(false);
+      expect(hasFailingTestEvidence('npm error Lifecycle script `test` failed with error\n')).toBe(
+        false
+      );
+      expect(hasFailingTestEvidence('make: *** [Makefile:12: test] Error 2\n')).toBe(false);
+    });
+
     it('is true for a body with real failing-test output', () => {
       expect(hasFailingTestEvidence('FAIL src/foo.test.ts\n  ✗ should do the thing\n')).toBe(true);
       expect(hasFailingTestEvidence('1 failing\n  1) should do the thing\n')).toBe(true);
+      expect(hasFailingTestEvidence('Tests  3 failed | 40 passed (43)\n')).toBe(true);
+      expect(hasFailingTestEvidence('not ok 4 - adds two numbers\n')).toBe(true);
     });
 
-    it('is true for a parseable vitest JSON report, same as isReadableVitestReport', () => {
+    it('is true for a vitest JSON report naming a failed assertion', () => {
       expect(hasFailingTestEvidence(JSON.stringify(report))).toBe(true);
+    });
+
+    // A wrapper that emits a GREEN report and then exits 1 is the
+    // fabricated-exit-code shape itself — readable is not the same as red.
+    it('is false for a readable but green vitest JSON report', () => {
+      const green = {
+        testResults: [
+          {
+            name: 'src/__tests__/a.test.ts',
+            assertionResults: [{ status: 'passed', fullName: 'a > passes' }],
+          },
+        ],
+      };
+      expect(isReadableVitestReport(JSON.stringify(green))).toBe(true);
+      expect(hasFailingTestEvidence(JSON.stringify(green))).toBe(false);
     });
 
     it('is true when no capture exists at all — nothing to second-guess an earned exit code with', () => {
       expect(hasFailingTestEvidence(null)).toBe(true);
       expect(hasFailingTestEvidence(undefined)).toBe(true);
+    });
+  });
+
+  // The gate runs typecheck.run alongside test.focused. Holding a compiler to
+  // test-shaped evidence would block the batch on every genuine build break and
+  // wedge it there, since the resume recheck re-runs the same failing command.
+  describe('hasEarnedFailureEvidence (#594)', () => {
+    const tsc = "src/a.ts(12,3): error TS2322: Type 'string' is not assignable to type 'number'.\n";
+
+    it('accepts compiler output for a non-test capability', () => {
+      expect(hasEarnedFailureEvidence('typecheck.run', tsc)).toBe(true);
+      expect(hasEarnedFailureEvidence('typecheck.run', 'Found 3 errors in 1 file.\n')).toBe(true);
+    });
+
+    it('does not accept compiler output as proof a test suite went red', () => {
+      expect(hasEarnedFailureEvidence('test.focused', tsc)).toBe(false);
+    });
+
+    it('still rejects a framing-only body for either capability', () => {
+      const framing = 'cap: running ...\ntee: /dev/stderr: No such device or address\nexit 1\n';
+      expect(hasEarnedFailureEvidence('typecheck.run', framing)).toBe(false);
+      expect(hasEarnedFailureEvidence('test.focused', framing)).toBe(false);
+      expect(hasEarnedFailureEvidence('typecheck.run', '')).toBe(false);
+    });
+
+    it('accepts failing-test output for any capability', () => {
+      expect(hasEarnedFailureEvidence('typecheck.run', 'FAIL src/foo.test.ts\n')).toBe(true);
     });
   });
 });

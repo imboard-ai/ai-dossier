@@ -797,6 +797,72 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(result.spawned).toContain('batch:b-earned');
   }, 60_000);
 
+  // #594 review: the evidence bar is per capability. A compiler cannot print
+  // `FAIL`/`✗`, so holding `typecheck.run` to test-shaped output would route
+  // every genuine build break to the block path — and `sched resume --batch`
+  // re-runs the same deterministically failing typecheck, so the batch would
+  // wedge there with no automated exit, on a failure the member really caused.
+  it('#594: a typecheck failure with compiler output evicts the member — the gate does not wedge on a real build break', async () => {
+    const repo = scratchRepo();
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'typecheck.run'
+        ? {
+            outcome: 'task-failed',
+            outputTail:
+              "src/a.ts(12,3): error TS2322: Type 'string' is not assignable to type 'number'.\nFound 1 error in 1 file.\n",
+          }
+        : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 2601, mode: 'slot', batch: 'b-tsc', anchor: 2600, tier: 'mid' },
+      { issue: 2602, mode: 'slot', batch: 'b-tsc', tier: 'mid' },
+    ]);
+
+    h.tick(); // batch-setup + member 1
+    const pid = batchSlotPid(h, 'b-tsc') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+
+    h.tick();
+    const batch = findBatch(h.state(), 'b-tsc');
+    expect(batch?.evictions).toHaveLength(1);
+    expect(batch?.evictions[0]).toMatchObject({
+      issue: 2601,
+      reason: 'incremental-gate-failed:typecheck.run',
+    });
+    expect(batch?.status).toBe('executing');
+  }, 60_000);
+
+  // #594 review: `member_gates` must name the gate the batch was ROUTED on.
+  // Recording the raw failure instead would show a `task-failed` member on a
+  // batch blocked as inconclusive — and name a different capability than
+  // `blocked_reason`, which is the one `sched resume --batch` rechecks.
+  it('#594: member_gates records the deciding gate, not the unevidenced failure beside it', async () => {
+    const repo = scratchRepo();
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'typecheck.run'
+        ? { outcome: 'task-failed', outputTail: 'build wrapper: exited 1\n' }
+        : { outcome: 'automation-broken', outputTail: 'pnpm filter matched zero projects' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 2701, mode: 'slot', batch: 'b-decisive', anchor: 2700, tier: 'mid' },
+      { issue: 2702, mode: 'slot', batch: 'b-decisive', tier: 'mid' },
+    ]);
+
+    h.tick(); // batch-setup + member 1
+    const pid = batchSlotPid(h, 'b-decisive') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+
+    h.tick();
+    const batch = findBatch(h.state(), 'b-decisive');
+    expect(batch?.evictions).toHaveLength(0);
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('gate-inconclusive:test.focused');
+    expect(batch?.member_gates?.['2701']).toMatchObject({
+      capability: 'test.focused',
+      outcome: 'automation-broken',
+    });
+  }, 60_000);
+
   it('#583 AC1: an automation-broken gate outcome blocks the batch instead of evicting the member', async () => {
     const repo = scratchRepo();
     const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
@@ -876,7 +942,14 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
 
     testFocusedOutcome = { outcome: 'automation-broken', outputTail: 'still cannot run the suite' };
     const stillBlocked = resumeBlockedGate(batchDeps, h.config, dispatch, 'b-resume', new Date());
-    expect(stillBlocked).toMatchObject({ outcome: 'still-blocked', capability: 'test.focused' });
+    expect(stillBlocked).toMatchObject({
+      outcome: 'still-blocked',
+      capability: 'test.focused',
+      // Which branch blocked it: the capability could not reach a verdict —
+      // distinct from a task-failed it could not evidence (#594), which needs
+      // a different fix from the operator.
+      blockedBy: 'inconclusive',
+    });
     expect(findBatch(h.state(), 'b-resume')?.status).toBe('blocked');
     // A still-blocked recheck is not silent (#583 review) — it leaves the
     // same audit trail (journal + member_gates) the live gate does.

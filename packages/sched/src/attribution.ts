@@ -186,30 +186,91 @@ export function isReadableVitestReport(stdout: string | null): boolean {
 }
 
 /**
+ * Markers a test runner prints only when a suite actually ran and went red.
+ *
+ * Every one is anchored to the start of a line (or to a digit-led count), which
+ * is the whole point: an unanchored `/fail/i` also matches a wrapper script's
+ * own prose about the run. The recorded pilot attempt-4 body ends
+ * `... run test exited 1 — real test failure.` — "failure" is a substring
+ * match, so a bare `/fail/i` accepts the exact 765-byte capture that carries
+ * zero test output (`docs/reports/batch-pilot-2-execution.md`), which is the
+ * body #594 exists to reject. Same for pnpm's universal
+ * `ELIFECYCLE  Command failed with exit code 1.` and npm's
+ * `Lifecycle script \`test\` failed`.
+ */
+const FAILING_TEST_MARKERS: readonly RegExp[] = [
+  /^\s*(?:❯\s*)?FAIL(?:ED)?\b/m, // vitest/jest per-file line
+  /^\s*[✗×✕●]\s/m, // vitest / jest / mocha per-test bullet
+  /^not ok \d+/m, // TAP
+  /^\s*\d+\s+(?:tests?|specs?|assertions?|examples?)?\s*fail(?:ed|ing|ures?)\b/im, // "1 failing", "2 tests failed"
+  /^[\s=]*(?:Tests?|Test Files|Specs?|Examples?)\b[^\n]*?\b\d+\s+fail(?:ed|ing|ures?)\b/im, // runner summary line
+];
+
+/** Markers a compiler / build tool prints for a genuine build failure. */
+const BUILD_FAILURE_MARKERS: readonly RegExp[] = [
+  /^[^\n]*\berror TS\d+/m, // tsc
+  /^[^\n]*\(\d+,\d+\):\s*error\b/m, // tsc / msbuild positional form
+  /^[^\n]*?:\d+:\d+:\s*error\b/im, // gcc/clang/esbuild/swc positional form
+  /^\s*Found \d+ errors?\b/im, // tsc / mypy summary
+  /^\s*error\[?[A-Z]?\d*\]?:/im, // rustc / generic "error: ..."
+];
+
+/**
  * `isReadableVitestReport` generalized to the per-member incremental gate's
  * `output_tail` (#594) — a free-form capture of a capability's combined
  * stdout+stderr, not necessarily a `--reporter=json` document (`test.focused`
  * commonly runs a runner's default text reporter, or a wrapper script's own
  * framing around one). A `task-failed` outcome is only as trustworthy as the
- * evidence behind it: a parseable vitest JSON report, or the failure markers
- * a default text reporter prints (`FAIL`, `✗`/`×`), means a suite genuinely
- * ran and found something red. Anything else — an empty capture, or a body
- * that is only a script's own framing (the pilot attempt 4 shape: 765 bytes
- * of wrapper output and a `tee: /dev/stderr` error, zero test output) — is
+ * evidence behind it: a vitest JSON report **naming at least one failed
+ * assertion**, or one of `FAILING_TEST_MARKERS`, means a suite genuinely ran
+ * and found something red. Anything else — an empty capture, or a body that is
+ * only a script's own framing (the pilot attempt 4 shape: 765 bytes of wrapper
+ * output and a `tee: /dev/stderr` error, zero test output) — is
  * indistinguishable from a capability that fabricated its exit code.
+ *
+ * A *readable but green* JSON report is deliberately not evidence: a wrapper
+ * that emits a passing `--reporter=json` document and then exits 1 is the
+ * fabricated-exit-code shape itself, so `isReadableVitestReport` (which is
+ * true for zero failures by design, #562) is the wrong test here.
  *
  * `outputTail` absent entirely (`null`/`undefined`) is NOT the same as
  * "captured and empty": some callers never populate it at all, and a caller
  * that never tried to capture output has no basis to second-guess an earned
  * exit code — this returns `true` (trust the outcome) in that case, matching
- * every `runIncrementalGate` caller that predates `output_tail` (#583).
+ * every `runIncrementalGate` caller that predates `output_tail` (#583). The
+ * production runner never reaches that branch: it falls back to the
+ * subprocess's own captured output when the envelope omits `output_tail`
+ * (`cli/src/commands/sched.ts`), so a stale capability build cannot silently
+ * buy back the pre-#594 evict-on-any-`task-failed` behaviour.
  */
 export function hasFailingTestEvidence(outputTail: string | null | undefined): boolean {
   if (outputTail === null || outputTail === undefined) return true;
   const text = outputTail.trim();
   if (text.length === 0) return false;
-  if (isReadableVitestReport(text)) return true;
-  return /fail/i.test(text) || /[✗×]/.test(text);
+  if (isReadableVitestReport(text)) return parseVitestJson(text).length > 0;
+  return FAILING_TEST_MARKERS.some((re) => re.test(text));
+}
+
+/**
+ * The evidence bar for a `task-failed` from capability `capabilityId` (#594).
+ *
+ * The incremental gate runs `typecheck.run` alongside `test.focused`, and a
+ * real type error carries none of `FAILING_TEST_MARKERS` — gating it on
+ * test-shaped evidence would route every genuine build break to the
+ * block-the-batch path and wedge the batch there, since `sched resume --batch`
+ * would re-run the same deterministically failing typecheck forever. So a
+ * non-test capability may prove itself with compiler markers too; only a test
+ * capability is held to test output, which is where the fabricated exit codes
+ * were observed.
+ */
+export function hasEarnedFailureEvidence(
+  capabilityId: string,
+  outputTail: string | null | undefined
+): boolean {
+  if (hasFailingTestEvidence(outputTail)) return true;
+  if (capabilityId.startsWith('test.')) return false;
+  if (outputTail === null || outputTail === undefined) return true;
+  return BUILD_FAILURE_MARKERS.some((re) => re.test(outputTail.trim()));
 }
 
 /** The first balanced `{...}` document in `text`, parsed; null when there is none. */

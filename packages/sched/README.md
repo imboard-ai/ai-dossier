@@ -335,9 +335,16 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    recorded twice (#595): `appendEvictions` (the one place either eviction rail —
    `evictMembers` here or `evictMemberDirectly`'s no-commits path in
    [Batch dispatch (#523)](#batch-dispatch-523) — appends to `evictions[]`) is a no-op
-   for a repeat issue and journals `eviction-duplicate` instead, so a member evicted
-   twice can never inflate the dissolve trigger's distinct-member count or double up in
-   `sched status`'s eviction column.
+   for a repeat issue and journals `eviction-duplicate` instead; the repeat requeue is
+   skipped with it, so a second call cannot overwrite the first eviction's
+   `failure_evidence` or kill a live re-dispatch of that member. **Read
+   `docs/agent-traps.md` before "fixing" the dissolve rule:** the dissolve trigger has
+   counted DISTINCT member ids since #572 (`evictedMemberIds`) and was never inflatable
+   by a duplicate. What a duplicate did inflate is the raw `evictions[]` array itself —
+   any eviction-RATE metric derived from it (RFC-0001 §E.5) and `sched status`'s eviction
+   column. `buildStatusReport` de-dups on read as well (`distinctEvictions`), so a
+   `state.json` persisted before this fix shows one row per member in both `sched status`
+   and `sched status --json`; the stored array is left as written.
 4. **Dissolve (AC3)** — `dissolveBatch` marks the batch `dissolved` and requeues every
    UNSHIPPED member: `full` (each as its own full-cycle run), `halved` (one or two fresh
    `forming` half-batches — a single remaining member yields one — entries retagged,
@@ -362,8 +369,11 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    with no `anchor` or no `run_id` cannot post — the CLI requires both — so the milestone
    it could not post is journaled in full instead of vanishing.
 
-Twelve journal events carry the detail: `suite-failed`, `attributed`, `fix-dispatched`,
-`fix-resolved`, `member-evicted`, `revert-conflict`, `batch-rebased`, `batch-dissolved`,
+Thirteen journal events carry the detail: `suite-failed`, `attributed`, `fix-dispatched`,
+`fix-resolved`, `member-evicted`, `eviction-duplicate` (#595 — a second eviction call
+named a member already in `evictions[]`; the append and the requeue are both no-ops and
+the attempt is journaled rather than dropped), `revert-conflict`, `batch-rebased`,
+`batch-dissolved`,
 `batch-preserved` (#563 — the dissolve threshold was crossed but the survivors' re-run
 suite came back green, so the batch ships them instead of dissolving), `batch-blocked`
 (#562 — the suite report was unreadable), `batch-split` and `milestone-post-failed`, plus
@@ -489,12 +499,18 @@ failure rails: executing → dissolving (a member self-reports blocked)
   kept on `BatchEntry.ranges` for eviction. An incremental gate (`ai-dossier cap run
   typecheck.run` / `test.focused`, when the repo has a manifest) runs after each member
   before advancing — a second, independent check that the member's self-reported "done"
-  is real. Three-way outcome policy (#583): `task-failed` evicts the member (same rail
-  as a self-reported block); `automation-broken`/`capability-unavailable` — the gate
-  itself couldn't reach a verdict — block the batch instead of silently proceeding
-  (`gate-inconclusive:<cap>`, `member_gates`/`blocked_reason` on `BatchEntry`, surfaced
-  in `sched status`); `sched resume --batch <id>` re-runs the gate later to resolve the
-  block once the capability is fixed.
+  is real. Four-way outcome policy (#583, split further by #594): a `task-failed` whose
+  `output_tail` carries recognizable evidence that the capability EARNED it — failing-test
+  output for a `test.*` capability, compiler/build errors for the others
+  (`hasEarnedFailureEvidence`) — evicts the member (same rail as a self-reported block);
+  a `task-failed` with an empty or framing-only capture proves nothing and joins
+  `automation-broken`/`capability-unavailable` — the gate itself couldn't reach a verdict
+  — on the block-the-batch path instead of silently proceeding (`gate-inconclusive:<cap>`,
+  `member_gates`/`blocked_reason` on `BatchEntry`, surfaced in `sched status`; the journal
+  detail names WHICH of the two branches fired). `sched resume --batch <id>` re-runs the
+  gate later to resolve the block once the capability is fixed, and applies the same
+  evidence bar on the recheck — a still-unevidenced `task-failed` stays blocked rather
+  than evicting on a resume.
 - **The batch's single slot is claimed FRESH for each live step** (a member, the tail
   agent, the report agent, a bounded fix agent) — never held across a wait. The aggregate
   suite itself runs with NO slot claimed at all (deterministic engine work, not an LLM
@@ -538,7 +554,9 @@ New journal events: `batch-setup-done`, `batch-setup-failed`, `member-advanced`,
 claim emits neither). `gate-inconclusive` (#583 — the incremental gate came back
 `automation-broken`/`capability-unavailable` rather than a definite `ok`/`task-failed`;
 sits alongside `batch-blocked` as the per-member analogue of the aggregate suite's
-"block, don't dissolve" precedent). Member/tail/report/fix-agent spawn, progress,
+"block, don't dissolve" precedent; #594 routes an unevidenced `task-failed` here too).
+`eviction-duplicate` (#595 — `evictMemberDirectly` and `evictMembers` both emit it when
+asked to evict a member already in `evictions[]`). Member/tail/report/fix-agent spawn, progress,
 completion and park events reuse the existing unit-generic names (`assigned`/`spawned`/`unit-failed`/
 `external-advance`/`pr-parked`/`merge-accepted`/`report-dispatched`/`teardown-done`/
 `teardown-failed`) with `unit = batch:<id>`.
@@ -607,6 +625,11 @@ import {
   parseVitestJson,       // vitest --reporter=json → failing tests
   isReadableVitestReport, // #562: a parseable { testResults: [...] } document exists —
                           //   distinct from "zero failures"
+  hasFailingTestEvidence, // #594: an output_tail that PROVES a suite ran and went red —
+                          //   an empty/framing-only capture, or a green report, is not
+                          //   a real task-failed
+  hasEarnedFailureEvidence, // #594: the same bar per capability — test.* is held to
+                          //   failing-test output, others may prove it with compiler errors
   parseBoundaryCommits,  // git log → issue-boundary commits via the (#N) trailer
   memberRanges,          // boundary commits → each member's commit list
   runAttributionBisect,  // stage-2: real git bisect over the failing tests only
@@ -622,6 +645,10 @@ import {
   createExecMilestonePoster, // batch milestones via `ai-dossier runstate post`
   expandEvictionGroups,  // members that must revert together (§E.4 eviction groups)
   requeueMember,         // the one requeue path abandon/evict/dissolve all take
+  appendEvictions,       // #595: the one evictions[] append — skips an issue already
+                         //   recorded, returns the duplicates so the caller can journal
+  distinctEvictions,     // #595 read side: one record per member for a legacy state.json
+  duplicateEvictionDetail, // the one eviction-duplicate wording, shared by both rails
   isPreservedMember,     // the single definition of "already green"
   createBatch,           // the single BatchEntry constructor
   type RecoveryDeps,     // inject exec/repoDir/journal/milestone-poster/suite-runner/clock
