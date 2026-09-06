@@ -1068,9 +1068,11 @@ function enterRecovery(
       : slot.recoveries >= ESCALATION_CAP
         ? 'escalation-cap'
         : `${cause}-at-strongest-tier`;
-    // #591: surface `last_tool` on the terminal `unit-failed` journal entry too — the
-    // `evidence` object already carries it (added above by `completeUnitOrRecover`)
-    // for the non-terminal `verify-incomplete` journal event.
+    // #591/#620: surface `last_tool` on the terminal `unit-failed` journal entry too — the
+    // `evidence` object already carries it for the non-terminal `verify-incomplete` journal
+    // event, since every `causeEvent === 'verify-incomplete'` call now arrives via
+    // `completeUnitOrRecover` with `last_tool` freshly read from the dispatch log
+    // (`readLastToolForSlot`), regardless of which tick actually reaches this decision.
     const extra =
       typeof evidence.last_tool === 'string' ? { last_tool: evidence.last_tool } : undefined;
     return failUnit(ctx, state, unit, reason, { merged: report, extra });
@@ -1297,6 +1299,25 @@ function journalStaleMilestoneIfIgnored(
     at: milestone.at,
     detail: `predates dispatch spawned_at=${slot.spawned_at}`,
   });
+}
+
+/**
+ * Read THIS dispatch's last tool call from its log slice (#591, #620) — a
+ * pure, side-effect-free parse, safe to call from any slot status and any
+ * number of times: unlike `recordDispatchRunLog` below, it writes nothing to
+ * `runs.jsonl`, so it carries no exactly-once constraint. Exists because a
+ * `verify-incomplete`/`unit-failed` decision can land on a LATER tick than
+ * the one that detected the dead pid (e.g. ground truth was unreachable in
+ * between) — by then the slot has moved past `running` and
+ * `recordDispatchRunLog`'s guard refuses to re-read, but the dispatch's log
+ * file is static once the agent has exited, so re-parsing it here yields the
+ * same answer every time.
+ */
+function readLastToolForSlot(ctx: TickCtx, slot: SlotEntry, unit: string): string | null {
+  if (slot.spawned_at === null) return null;
+  const logFile = dispatchLogPath(ctx.deps.store.runsDir, unit);
+  const offset = slot.log_offset_at_spawn ?? 0;
+  return parseLastToolUse(readDispatchLog(logFile, offset));
 }
 
 /**
@@ -1673,7 +1694,21 @@ function reconcileSlots(
         break;
       case 'exited':
       case 'verifying':
-        next = completeUnitOrRecover(ctx, next, unit, truth, 'verify-complete');
+        // #620: this branch is reached on a LATER tick than the one that
+        // detected the dead pid whenever the first attempt's ground truth
+        // was unreachable (`completeUnitOrRecover` returns early in that
+        // case, before consuming the lastTool `reconcileRunning` already
+        // read). Re-read it here rather than losing it — the log itself is
+        // static once the agent has exited, so this always agrees with
+        // whatever `reconcileRunning` saw.
+        next = completeUnitOrRecover(
+          ctx,
+          next,
+          unit,
+          truth,
+          'verify-complete',
+          readLastToolForSlot(ctx, slot, unit)
+        );
         break;
       case 'recovering':
         next = reconcileRecovering(ctx, next, unit);
