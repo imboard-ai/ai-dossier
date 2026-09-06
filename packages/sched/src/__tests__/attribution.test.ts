@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   attributeByOverlap,
   failingTest,
+  hasFailingTestEvidence,
   isReadableVitestReport,
   type MemberFootprint,
   memberOfCommit,
@@ -149,6 +150,33 @@ describe('parseVitestJson', () => {
       // document at all, not a report naming zero failures.
       expect(isReadableVitestReport("make: unrecognized option '--reporter=json'\n")).toBe(false);
       expect(isReadableVitestReport('{"testResults": "wrong shape"}')).toBe(false);
+    });
+  });
+
+  describe('hasFailingTestEvidence (#594)', () => {
+    it('is false for an empty or whitespace-only capture — captured and proved nothing', () => {
+      expect(hasFailingTestEvidence('')).toBe(false);
+      expect(hasFailingTestEvidence('   \n  ')).toBe(false);
+    });
+
+    it('is false for a framing-only body — the pilot attempt-4 shape (docs/agent-traps.md)', () => {
+      const framing =
+        'Running focused suite...\ntee: /dev/stderr: No such device or address\nexit 1\n';
+      expect(hasFailingTestEvidence(framing)).toBe(false);
+    });
+
+    it('is true for a body with real failing-test output', () => {
+      expect(hasFailingTestEvidence('FAIL src/foo.test.ts\n  ✗ should do the thing\n')).toBe(true);
+      expect(hasFailingTestEvidence('1 failing\n  1) should do the thing\n')).toBe(true);
+    });
+
+    it('is true for a parseable vitest JSON report, same as isReadableVitestReport', () => {
+      expect(hasFailingTestEvidence(JSON.stringify(report))).toBe(true);
+    });
+
+    it('is true when no capture exists at all — nothing to second-guess an earned exit code with', () => {
+      expect(hasFailingTestEvidence(null)).toBe(true);
+      expect(hasFailingTestEvidence(undefined)).toBe(true);
     });
   });
 });

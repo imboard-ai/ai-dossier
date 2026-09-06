@@ -717,6 +717,86 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(result.spawned).toContain('batch:b-gate');
   }, 60_000);
 
+  it('#594 AC4: a task-failed gate outcome with zero test output blocks the batch and does not evict the member', async () => {
+    const repo = scratchRepo();
+    // The pilot attempt-4 shape (docs/agent-traps.md): a `task-failed` whose
+    // captured output is only a wrapper script's own framing plus a `tee`
+    // error — no test names, no failure markers.
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused'
+        ? {
+            outcome: 'task-failed',
+            outputTail: 'Running focused suite...\ntee: /dev/stderr: No such device or address\n',
+          }
+        : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 2401, mode: 'slot', batch: 'b-unreadable', anchor: 2400, tier: 'mid' },
+      { issue: 2402, mode: 'slot', batch: 'b-unreadable', tier: 'mid' },
+    ]);
+
+    h.tick(); // batch-setup + member 1
+    const pid = batchSlotPid(h, 'b-unreadable') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+
+    const result = h.tick();
+    const batch = findBatch(h.state(), 'b-unreadable');
+    // Not evicted: the member's commit/review stands, nothing requeued —
+    // exactly #585's block-the-batch path, joined by an evidence-free
+    // task-failed rather than only automation-broken/capability-unavailable.
+    expect(batch?.evictions).toHaveLength(0);
+    expect(h.state().entries.find((e) => e.issue === 2401)?.mode).toBe('slot');
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('gate-inconclusive:test.focused');
+    expect(batch?.member_gates?.['2401']).toMatchObject({
+      capability: 'test.focused',
+      outcome: 'task-failed',
+    });
+    expect(h.state().slots.find((s) => s.unit === 'batch:b-unreadable')).toBeUndefined();
+    expect(result.failed).toContain('batch:b-unreadable');
+
+    const events = h.deps.journal.read();
+    const inconclusive = events.find(
+      (e) => e.event === 'gate-inconclusive' && e.unit === 'batch:b-unreadable'
+    );
+    // The journal names which of the two branches fired (AC3) — the detail
+    // says `task-failed`, not `automation-broken`/`capability-unavailable`,
+    // so a later run does not have to re-derive it from the gate log.
+    expect(inconclusive?.detail).toContain('reported task-failed');
+  }, 60_000);
+
+  it('#594 AC5: a task-failed gate outcome with real failing-test output still evicts the member', async () => {
+    const repo = scratchRepo();
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused'
+        ? {
+            outcome: 'task-failed',
+            outputTail: 'FAIL src/foo.test.ts\n  ✗ should do the thing\n',
+          }
+        : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 2501, mode: 'slot', batch: 'b-earned', anchor: 2500, tier: 'mid' },
+      { issue: 2502, mode: 'slot', batch: 'b-earned', tier: 'mid' },
+    ]);
+
+    h.tick(); // batch-setup + member 1
+    const pid = batchSlotPid(h, 'b-earned') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+
+    const result = h.tick();
+    const batch = findBatch(h.state(), 'b-earned');
+    expect(batch?.evictions).toHaveLength(1);
+    expect(batch?.evictions[0]).toMatchObject({
+      issue: 2501,
+      reason: 'incremental-gate-failed:test.focused',
+    });
+    expect(h.state().entries.find((e) => e.issue === 2501)?.mode).toBe('full');
+    expect(batch?.status).toBe('executing');
+    expect(batch?.executing_member).toBe(2);
+    expect(result.spawned).toContain('batch:b-earned');
+  }, 60_000);
+
   it('#583 AC1: an automation-broken gate outcome blocks the batch instead of evicting the member', async () => {
     const repo = scratchRepo();
     const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>

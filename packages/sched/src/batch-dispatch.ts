@@ -71,6 +71,7 @@ import {
 } from '@ai-dossier/worktree-pool';
 import {
   type BoundaryCommit,
+  hasFailingTestEvidence,
   type MemberFootprint,
   memberRanges,
   parseBoundaryCommits,
@@ -1363,6 +1364,13 @@ function evictMemberAndContinue(
  * script that legitimately could not run its suite must not be read as
  * either a pass or a real failure). Only both `ok` falls through.
  *
+ * A `task-failed` is itself split in two (#594): its `outputTail` must carry
+ * recognizable evidence of a failing test (`hasFailingTestEvidence`) before
+ * it is trusted as a red suite. A `task-failed` whose output proves nothing —
+ * empty, or only a wrapper script's own framing — did not earn its exit
+ * code, and joins the inconclusive case on the block-the-batch path instead
+ * of evicting a member for a failure that never happened.
+ *
  * Returns `true` when the gate already decided the member's fate (evicted or
  * blocked, both of which `return` from the caller); `false` when no hook is
  * configured or both checks came back `ok`, meaning the caller should treat
@@ -1385,24 +1393,27 @@ function runIncrementalGate(
     id,
     ...runCapability(worktree, id),
   }));
-  const gateFailure = gateResults.find((r) => r.outcome === 'task-failed');
+  const rawFailure = gateResults.find((r) => r.outcome === 'task-failed');
   const gateInconclusive = gateResults.find(
     (r) => r.outcome === 'automation-broken' || r.outcome === 'capability-unavailable'
   );
-  const worstGate = gateFailure ?? gateInconclusive;
+  const earnedFailure =
+    rawFailure && hasFailingTestEvidence(rawFailure.outputTail) ? rawFailure : undefined;
+  const unreadableFailure = rawFailure && !earnedFailure ? rawFailure : undefined;
+  const worstGate = rawFailure ?? gateInconclusive;
   if (worstGate) {
     recordMemberGate(deps, batchId, memberIssue, worstGate, now);
   }
-  if (gateFailure) {
-    const reason = `incremental-gate-failed:${gateFailure.id}`;
-    writeGateLog(deps, batchId, gateFailure.id, memberIssue, gateFailure.outputTail);
-    const excerpt = gateDetailExcerpt(gateFailure.outputTail, gateFailure.reason);
+  if (earnedFailure) {
+    const reason = `incremental-gate-failed:${earnedFailure.id}`;
+    writeGateLog(deps, batchId, earnedFailure.id, memberIssue, earnedFailure.outputTail);
+    const excerpt = gateDetailExcerpt(earnedFailure.outputTail, earnedFailure.reason);
     journalEvent(deps, 'unit-failed', unit(batchId), {
       issue: memberIssue,
       reason,
       detail: excerpt
-        ? `cap run ${gateFailure.id} reported task-failed after member review done: ${excerpt}`
-        : `cap run ${gateFailure.id} reported task-failed after member review done`,
+        ? `cap run ${earnedFailure.id} reported task-failed after member review done: ${excerpt}`
+        : `cap run ${earnedFailure.id} reported task-failed after member review done`,
     });
     deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
     evictMemberAndContinue(
@@ -1418,16 +1429,17 @@ function runIncrementalGate(
     );
     return true;
   }
-  if (gateInconclusive) {
-    const reason = `gate-inconclusive:${gateInconclusive.id}`;
-    writeGateLog(deps, batchId, gateInconclusive.id, memberIssue, gateInconclusive.outputTail);
-    const excerpt = gateDetailExcerpt(gateInconclusive.outputTail, gateInconclusive.reason);
+  const inconclusive = gateInconclusive ?? unreadableFailure;
+  if (inconclusive) {
+    const reason = `gate-inconclusive:${inconclusive.id}`;
+    writeGateLog(deps, batchId, inconclusive.id, memberIssue, inconclusive.outputTail);
+    const excerpt = gateDetailExcerpt(inconclusive.outputTail, inconclusive.reason);
     journalEvent(deps, 'gate-inconclusive', unit(batchId), {
       issue: memberIssue,
       reason,
       detail: excerpt
-        ? `cap run ${gateInconclusive.id} reported ${gateInconclusive.outcome} after member review done: ${excerpt}`
-        : `cap run ${gateInconclusive.id} reported ${gateInconclusive.outcome} after member review done`,
+        ? `cap run ${inconclusive.id} reported ${inconclusive.outcome} after member review done: ${excerpt}`
+        : `cap run ${inconclusive.id} reported ${inconclusive.outcome} after member review done`,
     });
     deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
     const stateNow = deps.store.load();
@@ -1503,8 +1515,10 @@ function completeMemberGate(
  *
  * - still `automation-broken`/`capability-unavailable` → stays `blocked`,
  *   no state change (the capability still isn't fixed).
- * - `task-failed` → the member really is broken; evict via the same rail
- *   the live gate uses.
+ * - `task-failed` with recognizable failing-test evidence (#594,
+ *   `hasFailingTestEvidence`) → the member really is broken; evict via the
+ *   same rail the live gate uses. `task-failed` with no evidence stays
+ *   `blocked`, same as the still-inconclusive case above.
  * - `ok` → the member really was fine; complete it via the same rail the
  *   live gate uses.
  *
@@ -1554,6 +1568,26 @@ export function resumeBlockedGate(
       detail: excerpt
         ? `sched resume --batch: cap run ${capabilityId} still reports ${recheck.outcome} on recheck: ${excerpt}`
         : `sched resume --batch: cap run ${capabilityId} still reports ${recheck.outcome} on recheck`,
+    });
+    return {
+      outcome: 'still-blocked',
+      capability: capabilityId,
+      detail: excerpt,
+    };
+  }
+
+  // A recheck can still come back `task-failed` with no evidence behind it
+  // (#594) — the same routing the live gate applies, so a resumed batch
+  // never evicts a member for a failure `hasFailingTestEvidence` cannot
+  // confirm.
+  if (recheck.outcome === 'task-failed' && !hasFailingTestEvidence(recheck.outputTail)) {
+    writeGateLog(deps, batchId, capabilityId, memberIssue, recheck.outputTail);
+    journalEvent(deps, 'gate-inconclusive', unit(batchId), {
+      issue: memberIssue,
+      reason: `gate-inconclusive:${capabilityId}`,
+      detail: excerpt
+        ? `sched resume --batch: cap run ${capabilityId} still reports task-failed with no failing-test evidence on recheck: ${excerpt}`
+        : `sched resume --batch: cap run ${capabilityId} still reports task-failed with no failing-test evidence on recheck`,
     });
     return {
       outcome: 'still-blocked',

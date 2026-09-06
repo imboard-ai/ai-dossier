@@ -185,6 +185,33 @@ export function isReadableVitestReport(stdout: string | null): boolean {
   return Array.isArray(results);
 }
 
+/**
+ * `isReadableVitestReport` generalized to the per-member incremental gate's
+ * `output_tail` (#594) — a free-form capture of a capability's combined
+ * stdout+stderr, not necessarily a `--reporter=json` document (`test.focused`
+ * commonly runs a runner's default text reporter, or a wrapper script's own
+ * framing around one). A `task-failed` outcome is only as trustworthy as the
+ * evidence behind it: a parseable vitest JSON report, or the failure markers
+ * a default text reporter prints (`FAIL`, `✗`/`×`), means a suite genuinely
+ * ran and found something red. Anything else — an empty capture, or a body
+ * that is only a script's own framing (the pilot attempt 4 shape: 765 bytes
+ * of wrapper output and a `tee: /dev/stderr` error, zero test output) — is
+ * indistinguishable from a capability that fabricated its exit code.
+ *
+ * `outputTail` absent entirely (`null`/`undefined`) is NOT the same as
+ * "captured and empty": some callers never populate it at all, and a caller
+ * that never tried to capture output has no basis to second-guess an earned
+ * exit code — this returns `true` (trust the outcome) in that case, matching
+ * every `runIncrementalGate` caller that predates `output_tail` (#583).
+ */
+export function hasFailingTestEvidence(outputTail: string | null | undefined): boolean {
+  if (outputTail === null || outputTail === undefined) return true;
+  const text = outputTail.trim();
+  if (text.length === 0) return false;
+  if (isReadableVitestReport(text)) return true;
+  return /fail/i.test(text) || /[✗×]/.test(text);
+}
+
 /** The first balanced `{...}` document in `text`, parsed; null when there is none. */
 function extractJsonObject(text: string): unknown {
   const start = text.indexOf('{');
