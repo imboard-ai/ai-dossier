@@ -310,13 +310,15 @@ export function scanRiskFloor(paths: readonly string[]): Array<{ path: string; p
 
 /**
  * Whether a comment body IS an artifact comment (`plan:v1` or `runstate:v1`) rather than
- * discussion (#611). Structural, by the opening marker — the same rule {@link
- * parsePlanMarker} and the runstate reader apply — so a plan or runstate comment quoted
- * inside another comment (lines starting `>`) does not open the body and is NOT excluded:
- * it counts as discussion, same as a human's own words would.
+ * discussion (#611). Structural, by a **well-formed** opening marker — a plan body must
+ * parse under {@link parsePlanMarker}, not merely start with its prefix, so a comment
+ * opening `<!-- plan:v1 spoof -->` is discussion (which is what a reader would call it)
+ * rather than something the drift check silently skips. A plan or runstate comment quoted
+ * inside another comment (lines starting `>`) does not open the body and is likewise NOT
+ * excluded: it counts as discussion, same as a human's own words would.
  */
 export function isArtifactComment(body: string): boolean {
-  return body.startsWith(PLAN_MARKER_PREFIX) || body.startsWith(RUNSTATE_MARKER);
+  return parsePlanMarker(body) !== null || body.startsWith(RUNSTATE_MARKER);
 }
 
 /** One issue comment as needed to compare it against the plan's own timestamp. */
@@ -325,13 +327,7 @@ export interface TimestampedComment {
   createdAt: string;
 }
 
-/**
- * Non-artifact comments on the issue, split by whether they predate or postdate the plan
- * comment itself (#611). `head-distance` measures the plan's drift against the
- * **repository**; this measures its drift against the **issue's own discussion** — the one
- * place a human posts a correction. A comment whose timestamp cannot be parsed, or ties the
- * plan's own timestamp exactly, counts as neither (there is nothing actionable to report).
- */
+/** The two buckets {@link discussionDrift} splits an issue's non-artifact comments into. */
 export interface DiscussionDrift {
   /** Discussion older than the plan — comments the plan should already reflect. */
   predating: TimestampedComment[];
@@ -339,6 +335,17 @@ export interface DiscussionDrift {
   postdating: TimestampedComment[];
 }
 
+/**
+ * Non-artifact comments on the issue, split by whether they predate or postdate the plan
+ * comment itself (#611). `head-distance` measures the plan's drift against the
+ * **repository**; this measures its drift against the **issue's own discussion** — the one
+ * place a human posts a correction. A comment whose timestamp cannot be parsed, or ties the
+ * plan's own timestamp exactly, counts as neither (there is nothing actionable to report);
+ * {@link unreadableCommentCount} reports the former separately so they are not silently
+ * dropped. An unparseable `planCreatedAt` yields both buckets empty — with no plan
+ * timestamp there is nothing to compare against, which callers must report rather than
+ * mistake for "this issue has no discussion".
+ */
 export function discussionDrift(
   comments: readonly TimestampedComment[],
   planCreatedAt: string
@@ -356,6 +363,20 @@ export function discussionDrift(
     else if (time > planTime) postdating.push(comment);
   }
   return { predating, postdating };
+}
+
+/**
+ * How many non-artifact comments carry a `createdAt` {@link discussionDrift} could not
+ * parse, and so placed in neither bucket. Reported rather than dropped: an under-count is
+ * indistinguishable from a quiet issue otherwise (#611).
+ */
+export function unreadableCommentCount(comments: readonly TimestampedComment[]): number {
+  let unreadable = 0;
+  for (const comment of comments) {
+    if (isArtifactComment(comment.body)) continue;
+    if (Number.isNaN(Date.parse(comment.createdAt))) unreadable += 1;
+  }
+  return unreadable;
 }
 
 /** The most recent `createdAt` among a set of comments, or `null` when the set is empty or every timestamp is unparseable. */

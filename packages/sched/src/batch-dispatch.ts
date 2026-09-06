@@ -136,8 +136,10 @@ import { type FsExists, isSafeWorktree, POOL_ARGS_PREFIX, POOL_BIN, runTeardown 
 import type {
   AttributionMethod,
   BatchEntry,
+  BatchStatus,
   CapabilityGateResult,
   CapOutcome,
+  EvictionRecord,
   JournalEventName,
   ModelTier,
   SchedConfig,
@@ -218,11 +220,20 @@ export interface BatchTickResult {
   blocked: number[];
 }
 
-/** Exported for #613's regression test — a duplicate/re-entrant eviction resolve
- * against one stale `BatchEntry` snapshot cannot be produced through the public
- * `runBatchTick`/`resumeBlockedGate` entry points (each reads state fresh), so
- * proving the guard in `advanceMemberOrValidate` requires calling this directly. */
-export function emptyResult(): BatchTickResult {
+/**
+ * Why a member is being evicted: the `reason` recorded in `evictions[]` and the operator-
+ * facing `detail`/`extraKv` journaled alongside it. One object rather than three adjacent
+ * positional arguments — `reason` and `detail` are both strings, and transposing them
+ * compiles cleanly while writing a prose sentence into the eviction record's `reason`,
+ * corrupting exactly the field #613 exists to keep trustworthy.
+ */
+export interface MemberFailure {
+  reason: string;
+  detail: string;
+  extraKv?: Record<string, string>;
+}
+
+function emptyResult(): BatchTickResult {
   return { spawned: [], completed: [], parked: [], mergeAccepted: [], failed: [], blocked: [] };
 }
 
@@ -1289,6 +1300,66 @@ function evictOffender(
  * `validating` and run the aggregate suite. Shared by every exit from
  * `reconcileMemberSlot` so the pointer-advance rail exists once.
  */
+/** The outcome of a one-shot claim on a member's resolution (#613). */
+interface MemberClaim {
+  claimed: boolean;
+  observed: number | null;
+  status: BatchStatus | null;
+}
+
+/**
+ * The one-shot claim on resolving `currentMember` (#613). Transitions the batch only while
+ * it is still `executing` on exactly that member; `false` means another call already
+ * claimed it (a duplicate dispatch of the same eviction/completion, or a re-entrant tick)
+ * and this caller must journal nothing and spawn nothing. Advancing anyway would validate a
+ * batch that already validated, or skip past a member that has not run at all — which is
+ * precisely how one member's eviction record ends up naming the member the batch already
+ * advanced past while the next member gets no record.
+ *
+ * Written once and called from both arms so the two can never drift apart: they are the
+ * same claim, differing only in what they transition to.
+ */
+function claimMemberResolution(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  currentMember: number,
+  now: Date,
+  next: (b: BatchEntry) => { to: BatchStatus; patch: Partial<BatchEntry> }
+): MemberClaim {
+  return deps.store.withLock<MemberClaim>((s) => {
+    const b = findBatch(s, batchId);
+    if (!b || b.status !== 'executing' || b.executing_member !== currentMember) {
+      return {
+        state: s,
+        result: {
+          claimed: false,
+          observed: b?.executing_member ?? null,
+          status: b?.status ?? null,
+        },
+      };
+    }
+    const { to, patch } = next(b);
+    return {
+      state: transitionBatch(s, batchId, to, patch, now),
+      result: { claimed: true, observed: b.executing_member, status: b.status },
+    };
+  });
+}
+
+/** Journal a lost claim so a batch that stops advancing never does so silently (#613). */
+function journalAdvanceSkipped(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  memberIssue: number,
+  currentMember: number,
+  claim: { observed: number | null; status: BatchStatus | null }
+): void {
+  journalEvent(deps, 'member-advance-skipped', unit(batchId), {
+    issue: memberIssue,
+    detail: `another resolution already advanced past member ${currentMember} (batch is now executing_member=${claim.observed ?? 'gone'}, status=${claim.status ?? 'gone'}) — no second member-advanced and no second continuation`,
+  });
+}
+
 function advanceMemberOrValidate(
   deps: BatchDispatchDeps,
   config: SchedConfig,
@@ -1302,44 +1373,25 @@ function advanceMemberOrValidate(
 ): void {
   const isLast = currentMember >= memberCount;
   if (isLast) {
-    const advanced = deps.store.withLock((s) => {
-      const b = findBatch(s, batchId);
-      // `b.executing_member !== currentMember` means another call already
-      // resolved this exact member (a duplicate dispatch of the same
-      // eviction/completion, or a re-entrant tick) — advancing again here
-      // would validate a batch that already validated, or skip past a member
-      // that hasn't run at all. Resolving `currentMember` is a one-shot: the
-      // first caller to observe the match wins, everyone else is a no-op.
-      if (!b || b.status !== 'executing' || b.executing_member !== currentMember) {
-        return { state: s, result: false };
-      }
-      return { state: transitionBatch(s, batchId, 'validating', {}, now), result: true };
-    });
-    if (!advanced) return;
+    const claim = claimMemberResolution(deps, batchId, currentMember, now, () => ({
+      to: 'validating',
+      patch: {},
+    }));
+    if (!claim.claimed) {
+      journalAdvanceSkipped(deps, batchId, memberIssue, currentMember, claim);
+      return;
+    }
     runValidate(deps, config, dispatch, batchId, now, result);
     return;
   }
-  const advanced = deps.store.withLock((s) => {
-    const b = findBatch(s, batchId);
-    if (!b || b.status !== 'executing' || b.executing_member !== currentMember) {
-      return { state: s, result: false };
-    }
-    return {
-      state: transitionBatch(
-        s,
-        batchId,
-        'executing',
-        { executing_member: b.executing_member + 1 },
-        now
-      ),
-      result: true,
-    };
-  });
-  // A duplicate/re-entrant call for the SAME member must never journal a
-  // second `member-advanced` or spawn a second continuation — that is
-  // precisely the pattern that leaves one member's eviction record naming
-  // the member advanced past twice while the next member gets none (#613).
-  if (!advanced) return;
+  const claim = claimMemberResolution(deps, batchId, currentMember, now, (b) => ({
+    to: 'executing',
+    patch: { executing_member: b.executing_member + 1 },
+  }));
+  if (!claim.claimed) {
+    journalAdvanceSkipped(deps, batchId, memberIssue, currentMember, claim);
+    return;
+  }
   journalEvent(deps, 'member-advanced', unit(batchId), { issue: memberIssue });
   spawnMemberContinuation(deps, config, dispatch, batchId, now, result);
 }
@@ -1351,13 +1403,16 @@ function advanceMemberOrValidate(
  *
  * #613: `evictMemberDirectly`'s duplicate check (#595) is the one atomic,
  * lock-protected claim on "did THIS member's eviction already happen" — so
- * the `unit-failed` journal is emitted HERE, gated on that claim succeeding,
+ * the `unit-failed` journal is emitted inside `evictMemberDirectly`, the
+ * moment that claim succeeds and BEFORE the dissolve that claim may trigger,
  * rather than by each caller before it ever calls this function. A caller
  * that journaled `unit-failed` unconditionally, before the claim, could fire
  * it twice for one member (and once for the next member never at all) under
  * a duplicate/re-entrant resolve — the record and the journal must share the
  * same gate or they can disagree about which member the batch is advancing
- * past.
+ * past. Emitting it inside also keeps cause before effect in the journal and
+ * survives a kill during the dissolve's shell-outs, which would otherwise
+ * leave the eviction record on disk with no line saying why.
  *
  * Exported (not part of the package's `index.ts` public surface — imported
  * directly by `batch-integration.test.ts`) so #613's regression test can
@@ -1373,27 +1428,19 @@ export function evictMemberAndContinue(
   batchId: string,
   batch: BatchEntry,
   memberIssue: number,
-  reason: string,
-  detail: string,
+  failure: MemberFailure,
   now: Date,
-  result: BatchTickResult,
-  extraKv?: Record<string, string>
+  result: BatchTickResult
 ): void {
   const { dissolved, duplicate } = evictMemberDirectly(
     deps,
     config,
     batchId,
     memberIssue,
-    reason,
+    failure,
     now
   );
   if (duplicate) return;
-  journalEvent(deps, 'unit-failed', unit(batchId), {
-    issue: memberIssue,
-    reason,
-    detail,
-    ...(extraKv ?? {}),
-  });
   if (dissolved) {
     result.failed.push(unit(batchId));
     return;
@@ -1484,11 +1531,13 @@ function runIncrementalGate(
       batchId,
       batch,
       memberIssue,
-      reason,
-      withExcerpt(
-        `cap run ${earnedFailure.id} reported task-failed with failing-test evidence after member review done`,
-        excerpt
-      ),
+      {
+        reason,
+        detail: withExcerpt(
+          `cap run ${earnedFailure.id} reported task-failed with failing-test evidence after member review done`,
+          excerpt
+        ),
+      },
       now,
       result
     );
@@ -1704,11 +1753,13 @@ export function resumeBlockedGate(
       batchId,
       batch,
       memberIssue,
-      reason,
-      withExcerpt(
-        `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck`,
-        excerpt
-      ),
+      {
+        reason,
+        detail: withExcerpt(
+          `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck`,
+          excerpt
+        ),
+      },
       now,
       result
     );
@@ -1910,18 +1961,27 @@ function reconcileMemberSlot(
       batchId,
       batch,
       memberIssue,
-      reason,
-      'member blocked',
+      {
+        reason,
+        // This rail covers a self-reported block AND a member that simply died, so the
+        // detail must follow the RESOLVED reason — `member blocked` on an
+        // `agent-exited-unverified` eviction contradicts the reason on its own journal line.
+        detail:
+          reason === 'agent-exited-unverified'
+            ? 'member agent exited without posting a terminal milestone'
+            : 'member blocked',
+        // #591: attributes an unverified member exit to a concrete cause (e.g.
+        // `Monitor`) without opening the transcript. Gated on the RESOLVED reason, not
+        // `dead` — a member can be simultaneously `dead` AND carry a milestone-posted
+        // `reason` (it posted `blocked` and then exited), and that real block has no
+        // log-derived cause to attribute; only `agent-exited-unverified` does.
+        extraKv:
+          reason === 'agent-exited-unverified' && lastTool !== null
+            ? { last_tool: lastTool }
+            : undefined,
+      },
       now,
-      result,
-      // #591: attributes an unverified member exit to a concrete cause (e.g.
-      // `Monitor`) without opening the transcript. Gated on the RESOLVED reason, not
-      // `dead` — a member can be simultaneously `dead` AND carry a milestone-posted
-      // `reason` (it posted `blocked` and then exited), and that real block has no
-      // log-derived cause to attribute; only `agent-exited-unverified` does.
-      reason === 'agent-exited-unverified' && lastTool !== null
-        ? { last_tool: lastTool }
-        : undefined
+      result
     );
   }
 }
@@ -1939,26 +1999,45 @@ function reconcileMemberSlot(
  * and the queue entry disagreeing about why the member was evicted — and, if
  * the member has since been re-dispatched full-cycle, would take the
  * `executing → evicted → requeued` rail and kill that live run.
+ *
+ * Returns `{ dissolved, duplicate }`: `dissolved` is whether this eviction tipped the batch
+ * past its threshold and the batch is gone; `duplicate: true` means another resolution had
+ * already claimed this member's eviction, and the caller must journal nothing and advance
+ * nothing on top of it (#613 — that is exactly how a record ends up naming the member the
+ * batch already advanced past).
  */
 function evictMemberDirectly(
   deps: BatchDispatchDeps,
   config: SchedConfig,
   batchId: string,
   memberIssue: number,
-  reason: string,
+  failure: MemberFailure,
   now: Date
 ): { dissolved: boolean; duplicate: boolean } {
+  const { reason } = failure;
   const dissolvePolicy = resolveDissolvePolicy(config.dissolve_policy);
   // Pass 1 (pure — requeue + record the eviction): safe to run entirely
   // inside the lock, unlike `dissolveBatch` below, which shells out
   // (`deps.exec`/`postMilestone`) and so must NOT hold the lock while it runs.
-  const { triggered, duplicate } = deps.store.withLock((s) => {
+  const { triggered, duplicate, prior } = deps.store.withLock<{
+    triggered: boolean;
+    duplicate: boolean;
+    prior: EvictionRecord | undefined;
+  }>((s) => {
     const b = findBatch(s, batchId);
-    if (!b) return { state: s, result: { triggered: false, duplicate: false } };
-    if (b.evictions.some((e) => e.issue === memberIssue)) {
+    if (!b) {
+      return { state: s, result: { triggered: false, duplicate: false, prior: undefined } };
+    }
+    const priorRecord = b.evictions.find((e) => e.issue === memberIssue);
+    if (priorRecord) {
+      // A duplicate never re-evaluates the dissolve threshold: the resolution that WROTE
+      // this record already did, under this same lock. (#595: a duplicate must not count
+      // twice; #613: it must not act on the batch at all.) Note this also means a dissolve
+      // interrupted between pass 1 and pass 2 is not retried here — re-entering
+      // `dissolveBatch` on an already-terminal batch throws `IllegalTransitionError`.
       return {
         state: s,
-        result: { triggered: checkDissolveTrigger(b, dissolvePolicy), duplicate: true },
+        result: { triggered: false, duplicate: true, prior: priorRecord },
       };
     }
     const evidence = {
@@ -1997,13 +2076,14 @@ function evictMemberDirectly(
       result: {
         triggered: updated !== undefined && checkDissolveTrigger(updated, dissolvePolicy),
         duplicate: duplicateRecords.length > 0,
+        prior: undefined,
       },
     };
   });
   if (duplicate) {
     journalEvent(deps, 'eviction-duplicate', unit(batchId), {
       issue: memberIssue,
-      detail: duplicateEvictionDetail(memberIssue, reason),
+      detail: duplicateEvictionDetail(memberIssue, reason, prior),
     });
     // Another resolution already claimed this member's eviction record — the
     // caller must not journal its own `unit-failed`/advance the batch again
@@ -2011,6 +2091,18 @@ function evictMemberDirectly(
     // the member the batch already advanced past).
     return { dissolved: false, duplicate: true };
   }
+  // This call owns the member's resolution, so it owns recording WHY — before pass 2 below
+  // can dissolve, tear the worktree down, or be killed mid-shell-out and leave the eviction
+  // record on disk with no journal line naming its cause (#613). The caller's extras go
+  // first so the authoritative keys always win: `extraKv` is a wide Record, and a future
+  // caller passing `reason`/`detail`/`issue` must not be able to rewrite the record's own
+  // identity.
+  journalEvent(deps, 'unit-failed', unit(batchId), {
+    ...(failure.extraKv ?? {}),
+    issue: memberIssue,
+    reason,
+    detail: failure.detail,
+  });
   if (!triggered) return { dissolved: false, duplicate: false };
 
   // Pass 2 (outside the lock — dissolveBatch shells out): re-load fresh

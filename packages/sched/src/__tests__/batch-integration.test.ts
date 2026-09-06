@@ -21,7 +21,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 // stale `BatchEntry` snapshot, a condition the public `runBatchTick`/
 // `resumeBlockedGate` entry points cannot reproduce (both always read state
 // fresh from the store).
-import { emptyResult, evictMemberAndContinue } from '../batch-dispatch';
+import { type BatchTickResult, evictMemberAndContinue } from '../batch-dispatch';
 import {
   type BatchDispatchDeps,
   type CapabilityGateResult,
@@ -201,6 +201,20 @@ function scratchRepoWithPackageJson(): string {
   );
   commitAllAndPush(work, 'seed package.json for batch-warmup regression test');
   return work;
+}
+
+/**
+ * The default gate stub: `test.focused` reports task-failed, every other capability passes
+ * — the shape every incremental-gate test in this file needs.
+ */
+const FOCUSED_GATE_FAILS: (worktree: string, id: string) => CapabilityGateResult = (
+  _worktree,
+  id
+) => (id === 'test.focused' ? { outcome: 'task-failed' } : { outcome: 'ok' });
+
+/** An empty `BatchTickResult`, for the tests that call the eviction rail directly. */
+function noResult(): BatchTickResult {
+  return { spawned: [], completed: [], parked: [], mergeAccepted: [], failed: [], blocked: [] };
 }
 
 /**
@@ -644,10 +658,9 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       'b-race',
       staleBatch,
       941,
-      'test-failures',
-      'first resolution',
+      { reason: 'test-failures', detail: 'first resolution' },
       new Date(),
-      emptyResult()
+      noResult()
     );
     // Second resolution of the SAME member, against the SAME stale snapshot
     // (executing_member still reads 1 here) — what a racing second process
@@ -659,10 +672,9 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       'b-race',
       staleBatch,
       941,
-      'test-failures',
-      'second (racing) resolution',
+      { reason: 'test-failures', detail: 'second (racing) resolution' },
       new Date(),
-      emptyResult()
+      noResult()
     );
 
     const batch = findBatch(h.state(), 'b-race');
@@ -719,8 +731,14 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     h.tick(); // 912 evicted (2/4 — not over threshold) → member 4 (913, also evicted)
     batch = findBatch(h.state(), 'b-misattrib');
     expect(batch?.evictions).toHaveLength(2);
-    // #613: pre-fix code names this record #911 again (the PREVIOUSLY evicted
-    // member), never #912 — the third member ends the run with no record at all.
+    // #613: each record names its OWN member. Note this tick-driven test does NOT
+    // fail against pre-fix code and is not the regression guard — `reconcileMemberSlot`
+    // re-derives `memberIssue` from freshly loaded state on every tick, so sequential
+    // eviction was already attributed correctly through the public API. The defect is a
+    // cross-process race between two ticks that each read `executing_member` before
+    // either advance lands; the test above ('two resolutions of the same member against
+    // one stale batch snapshot') is the one that encodes it and the one that fails
+    // pre-fix. This test guards the ordinary path against a regression in the new claim.
     expect(batch?.evictions[1]).toMatchObject({ issue: 912 });
     expect(batch?.executing_member).toBe(4);
 
@@ -734,9 +752,10 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
 
   it('#613: sequential incremental-gate evictions across a 4-member batch each name their own member', async () => {
     const repo = scratchRepo();
-    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
-      id === 'test.focused' ? { outcome: 'task-failed' } : { outcome: 'ok' };
-    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    const h = batchHarness(repo, ['--mode=batch'], {
+      maxSlots: 1,
+      capability: FOCUSED_GATE_FAILS,
+    });
     h.enqueue([
       { issue: 921, mode: 'slot', batch: 'b-gate-misattrib', anchor: 920, tier: 'mid' },
       { issue: 922, mode: 'slot', batch: 'b-gate-misattrib', tier: 'mid' },
@@ -849,9 +868,10 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
 
   it('incremental gate (AC2): a member that posts review done but fails cap run test.focused is evicted', async () => {
     const repo = scratchRepo();
-    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
-      id === 'test.focused' ? { outcome: 'task-failed' } : { outcome: 'ok' };
-    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    const h = batchHarness(repo, ['--mode=batch'], {
+      maxSlots: 1,
+      capability: FOCUSED_GATE_FAILS,
+    });
     h.enqueue([
       { issue: 901, mode: 'slot', batch: 'b-gate', anchor: 900, tier: 'mid' },
       { issue: 902, mode: 'slot', batch: 'b-gate', tier: 'mid' },

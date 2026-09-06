@@ -26,6 +26,7 @@ import {
   buildPlanComment,
   discussionDrift,
   findLatestPlan,
+  isArtifactComment,
   isHeadSha,
   MAX_ARTIFACT_BODY_LENGTH,
   newestTimestamp,
@@ -34,6 +35,8 @@ import {
   type PlanSection,
   parsePredictedFileBullets,
   scanRiskFloor,
+  type TimestampedComment,
+  unreadableCommentCount,
   validateArtifactBody,
 } from '../plan-artifact';
 
@@ -124,9 +127,9 @@ interface FetchedPlan {
   /** gh's authorAssociation for the comment (MEMBER/OWNER/COLLABORATOR/BOT/…). */
   authorAssociation: string;
   /**
-   * Every comment gh returned for the issue, oldest first — the same read `validate`'s
-   * discussion-drift check (#611) reuses, so it never issues a second `gh` call for data
-   * already in hand.
+   * Every comment gh returned for the issue — the same read `validate`'s discussion-drift
+   * check (#611) reuses, so it never issues a second `gh` call for data already in hand.
+   * Order is gh's own and is not relied on: the drift check filters and scans.
    */
   comments: GhComment[];
 }
@@ -166,7 +169,7 @@ function fetchLatestPlan(issue: string, repo?: string): FetchedPlan | null {
   const result = tryFetchComments(issue, repo);
   if (!result.ok) fail([result.error]);
 
-  const bodies = result.comments.map((c) => (typeof c?.body === 'string' ? c.body : ''));
+  const bodies = result.comments.map((c) => asString(c?.body));
   const latest = findLatestPlan(bodies);
   if (latest === null) return null;
 
@@ -190,7 +193,7 @@ function fetchLatestPlan(issue: string, repo?: string): FetchedPlan | null {
  */
 const DISCUSSION_DISCLOSURE =
   "Note: 'plan post' does not read the issue's comment thread — only the file you gave it. " +
-  "If the issue has comments since its body was written, re-check them before treating this plan as complete ('plan validate' flags any it does not reflect).";
+  "If the issue has comments since its body was written, re-check them before treating this plan as complete ('plan validate' reports a 'discussion' reason for every non-artifact comment on the issue, before or after the plan — it cannot tell which ones the plan already reflects).";
 
 /** `plan post` — validate a markdown file, stamp it with head=, comment it onto the issue. */
 function registerPostSubcommand(cmd: Command): void {
@@ -382,29 +385,60 @@ function artifactReasons(artifact: PlanArtifact): PlanValidationReason[] {
  * comments never count as discussion. A signal, not a gate — `valid` stays keyed off
  * `severity: "error"` only, so neither case fails validity.
  */
+function discussionReason(
+  severity: 'warn' | 'info',
+  comments: readonly TimestampedComment[],
+  when: 'before' | 'after',
+  advice: string
+): PlanValidationReason[] {
+  if (comments.length === 0) return [];
+  return [
+    {
+      check: 'discussion',
+      severity,
+      message: `${comments.length} issue comment(s) posted ${when} this plan, newest at ${newestTimestamp(comments) ?? 'an unreadable time'} — ${advice}.`,
+    },
+  ];
+}
+
 function discussionReasons(comments: GhComment[], planCreatedAt: string): PlanValidationReason[] {
   const timestamped = comments.map((c) => ({
-    body: typeof c?.body === 'string' ? c.body : '',
+    body: asString(c?.body),
     createdAt: asString(c?.createdAt),
   }));
-  const { predating, postdating } = discussionDrift(timestamped, planCreatedAt);
 
-  const reasons: PlanValidationReason[] = [];
-  if (predating.length > 0) {
-    reasons.push({
-      check: 'discussion',
-      severity: 'warn',
-      message: `${predating.length} issue comment(s) posted before this plan, newest at ${newestTimestamp(predating)} — the plan may not reflect them.`,
-    });
+  // The plan's own timestamp is the only thing every comment is compared against. Without a
+  // readable one `discussionDrift` returns two empty buckets, which would render as "this
+  // issue has no discussion" — the one conclusion that is certainly wrong. Report the gap
+  // instead (#611), as a warn so `valid` is unaffected like every other discussion reason.
+  if (Number.isNaN(Date.parse(planCreatedAt))) {
+    const discussion = timestamped.filter((c) => !isArtifactComment(c.body));
+    if (discussion.length === 0) return [];
+    return [
+      {
+        check: 'discussion',
+        severity: 'warn',
+        message: `Could not compare this plan against ${discussion.length} issue comment(s): the plan comment's own createdAt is missing or unreadable ('${planCreatedAt || 'absent'}'). Read the thread by hand — 'gh issue view <number> --json comments'.`,
+      },
+    ];
   }
-  if (postdating.length > 0) {
-    reasons.push({
-      check: 'discussion',
-      severity: 'info',
-      message: `${postdating.length} issue comment(s) posted after this plan, newest at ${newestTimestamp(postdating)} — re-check the plan against them.`,
-    });
-  }
-  return reasons;
+
+  const { predating, postdating } = discussionDrift(timestamped, planCreatedAt);
+  const unreadable = unreadableCommentCount(timestamped);
+
+  return [
+    ...discussionReason('warn', predating, 'before', 'the plan may not reflect them'),
+    ...discussionReason('info', postdating, 'after', 're-check the plan against them'),
+    ...(unreadable > 0
+      ? [
+          {
+            check: 'discussion' as const,
+            severity: 'warn' as const,
+            message: `${unreadable} issue comment(s) carry an unreadable createdAt and were not compared against this plan — read them by hand.`,
+          },
+        ]
+      : []),
+  ];
 }
 
 /** `plan get` — print the latest artifact; exit 1 distinguishably when none exists. */
