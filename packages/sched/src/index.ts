@@ -4,6 +4,7 @@ export {
   type BoundaryCommit,
   type FailingTest,
   failingTest,
+  hasFailingTestEvidence,
   isReadableVitestReport,
   type MemberFootprint,
   type MemberRange,
