@@ -1135,7 +1135,13 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(inconclusive?.detail).toContain('pnpm filter matched zero projects');
   }, 60_000);
 
-  it('#583 AC1: capability-unavailable also blocks the batch (same rail as automation-broken)', async () => {
+  it('#625: an UNDECLARED capability does NOT block — the batch proceeds on the checks that exist', async () => {
+    // REVERSES this test's original assertion (#583 AC1, "capability-unavailable
+    // also blocks the batch"). #583's block-the-batch rail is for a DECLARED
+    // capability whose machinery could not be trusted; an id nobody wrote down
+    // is not a verdict at all, it is a repo that has not opted into this half
+    // of the gate. Blocking on it made batching opt-in per repo behind an
+    // undocumented, source-only requirement.
     const repo = scratchRepo();
     const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
       id === 'test.focused' ? { outcome: 'capability-unavailable' } : { outcome: 'ok' };
@@ -1149,8 +1155,65 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
 
     const batch = findBatch(h.state(), 'b-unavail');
     expect(batch?.evictions).toHaveLength(0);
+    expect(batch?.status).not.toBe('blocked');
+    expect(batch?.blocked_reason).toBeNull();
+
+    // The skip is journalled per member: a gate that silently does not run is
+    // its own trap (#594's shape), so silence must never read as a pass.
+    const skipped = h.deps.journal
+      .read()
+      .filter((e) => e.event === 'gate-skipped' && e.issue === 2101);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]?.reason).toBe('gate-skipped:test.focused');
+  }, 60_000);
+
+  it('#625: a repo declaring NEITHER gate capability still runs the batch', async () => {
+    const repo = scratchRepo();
+    const capability: (worktree: string, id: string) => CapabilityGateResult = () => ({
+      outcome: 'capability-unavailable',
+    });
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([{ issue: 2111, mode: 'slot', batch: 'b-none', anchor: 2110, tier: 'mid' }]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-none') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+
+    const batch = findBatch(h.state(), 'b-none');
+    expect(batch?.status).not.toBe('blocked');
+    expect(batch?.evictions).toHaveLength(0);
+    // Both halves skipped, both journalled.
+    const skipped = h.deps.journal
+      .read()
+      .filter((e) => e.event === 'gate-skipped' && e.issue === 2111);
+    expect(skipped.map((e) => e.reason).sort()).toEqual([
+      'gate-skipped:test.focused',
+      'gate-skipped:typecheck.run',
+    ]);
+  }, 60_000);
+
+  it('#625: a DECLARED capability reporting automation-broken still blocks (#583/#585 intact)', async () => {
+    const repo = scratchRepo();
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused'
+        ? { outcome: 'automation-broken', reason: 'pnpm not found' }
+        : { outcome: 'capability-unavailable' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([{ issue: 2121, mode: 'slot', batch: 'b-broken', anchor: 2120, tier: 'mid' }]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-broken') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+
+    // The undeclared typecheck.run is skipped; the DECLARED-but-broken
+    // test.focused still blocks. Mixed repos get per-capability treatment
+    // rather than all-or-nothing.
+    const batch = findBatch(h.state(), 'b-broken');
     expect(batch?.status).toBe('blocked');
     expect(batch?.blocked_reason).toBe('gate-inconclusive:test.focused');
+    expect(batch?.evictions).toHaveLength(0);
   }, 60_000);
 
   it('#583 AC4: sched resume --batch re-runs the gate — still inconclusive stays blocked, then a passing recheck completes the member', async () => {

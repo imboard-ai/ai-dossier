@@ -1087,6 +1087,13 @@ export type JournalEventName =
   // dissolve" precedent one level down, at the per-member gate rather than
   // the aggregate suite.
   | 'gate-inconclusive'
+  // #625: a gate capability this repo never DECLARED, so that half of the
+  // member gate did not run. Distinct from `gate-inconclusive`, which means a
+  // declared capability could not be trusted: an undeclared id is not a
+  // verdict, it is a repo that has not opted into the capability layer.
+  // Journalled per member because a gate that silently does not run is its
+  // own trap — silence must never read as a pass.
+  | 'gate-skipped'
   | 'milestone-post-failed'
   // #504 zombie-run fencing: the takeover record written before a redispatch
   // respawns, and the degraded path where it could not be written.

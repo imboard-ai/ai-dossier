@@ -155,6 +155,30 @@ but use these when they fit):
 | `environment.start` | Start dev servers / containers |
 | `environment.stop` | Stop dev servers / containers |
 
+## How the batch member gate consumes these (#625)
+
+`sched`'s per-member gate runs `typecheck.run` then `test.focused` after every batch
+member reports review-done. It degrades exactly as the vocabulary above implies —
+**declaring them is an optimization, never a prerequisite**:
+
+| Outcome | Gate behaviour |
+|---|---|
+| `ok` | the member passes that half |
+| `task-failed` **with** failing-test evidence | the member is evicted (#594) |
+| `task-failed` with no evidence | the batch BLOCKS — a capability that produced nothing did not earn a failure (#594) |
+| `automation-broken` | the batch BLOCKS — declared, but its machinery could not be trusted (#583/#585) |
+| `capability-unavailable` | **the check is skipped** and journalled `gate-skipped:<id>`; the member is judged on whatever else is available (#625) |
+
+A repo that declares neither id runs batches end to end. Skipping costs *early*
+detection — a bad member's commit may be built on before anyone notices — but not
+correctness: the aggregate `test.full` gate still runs before ship, CI still runs on
+the batch PR, and #562's attribution still pins a red suite to the member that caused
+it. Declaring the two ids buys earlier, cheaper failure, which is the whole point of
+progressive determinism.
+
+The skip is always journalled. A gate that silently does not run is its own trap, and
+silence must never read as a pass.
+
 ## Non-goals (per #463)
 
 Automation mining, shadow-compare execution, and generated-automation lifecycle

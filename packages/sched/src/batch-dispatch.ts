@@ -1502,9 +1502,38 @@ function runIncrementalGate(
     ...runCapability(worktree, id),
   }));
   const rawFailure = gateResults.find((r) => r.outcome === 'task-failed');
-  const gateInconclusive = gateResults.find(
-    (r) => r.outcome === 'automation-broken' || r.outcome === 'capability-unavailable'
-  );
+  // #625: `capability-unavailable` is NOT an inconclusive verdict — it means
+  // the repo never declared this id, i.e. it has not opted into this half of
+  // the gate. Blocking on it made batching opt-in per repo behind an
+  // undocumented, source-only requirement: a repo declaring neither capability
+  // blocked on member 1 with `gate-inconclusive:typecheck.run` and no way to
+  // discover why. That is the opposite of the capability layer's contract —
+  // declare more, spend fewer tokens; declare nothing, it still works.
+  //
+  // #583/#585's block-the-batch rail is for `automation-broken`: a DECLARED
+  // capability whose machinery could not be trusted. That reasoning does not
+  // extend to an id nobody wrote down.
+  //
+  // `warmColdBatchWorktree` in this same file already draws exactly this
+  // distinction for `worktree.prepare`, and `slot-cycle`'s own Step 4/5 fall
+  // back to reasoning on `capability-unavailable`. This was the one place that
+  // treated it as fatal.
+  //
+  // Skipping costs EARLY detection, not correctness: the aggregate `test.full`
+  // gate still runs before ship, CI still runs on the batch PR, and #562's
+  // attribution still pins a red suite to the member that caused it.
+  const gateInconclusive = gateResults.find((r) => r.outcome === 'automation-broken');
+  const undeclared = gateResults.filter((r) => r.outcome === 'capability-unavailable');
+  for (const skipped of undeclared) {
+    // Journalled per member: a gate that silently does not run is its own
+    // trap (#594's shape — absence reading as a verdict). Silence must never
+    // be mistaken for a pass.
+    journalEvent(deps, 'gate-skipped', unit(batchId), {
+      issue: memberIssue,
+      reason: `gate-skipped:${skipped.id}`,
+      detail: `cap run ${skipped.id} is not declared by this repo — member judged on the checks that ARE available`,
+    });
+  }
   const earnedFailure =
     rawFailure && hasEarnedFailureEvidence(rawFailure.id, rawFailure.outputTail)
       ? rawFailure
