@@ -1071,6 +1071,55 @@ export function findBatch(state: SchedState, batchId: string): BatchEntry | unde
   return state.batches.find((b) => b.id === batchId);
 }
 
+/** The `unit` string a batch's slot carries. */
+export function batchUnit(batchId: string): string {
+  return `batch:${batchId}`;
+}
+
+/** The slot currently holding a batch's unit, if any. */
+export function slotForBatch(state: SchedState, batchId: string): SlotEntry | undefined {
+  return state.slots.find((s) => s.unit === batchUnit(batchId));
+}
+
+/** Slot statuses, in the order a walk toward `idle` passes through them. */
+const NEXT_TOWARD_IDLE: Record<SlotStatus, SlotStatus | null> = {
+  idle: null,
+  assigned: 'idle',
+  running: 'exited',
+  exited: 'verifying',
+  verifying: 'complete',
+  complete: 'idle',
+  recovering: 'failed',
+  failed: 'idle',
+};
+
+/**
+ * Release a batch's slot to idle, whatever status it currently holds (mirrors
+ * `engine.ts`'s `walkSlotToIdle`).
+ *
+ * #609: this lives here, not in `batch-dispatch.ts`, because it has two
+ * callers that must not disagree — the batch tick's own release path, and
+ * `scheduler.ts`'s `abandonBatch`. `abandonBatch` dissolved a batch WITHOUT
+ * releasing its slot, and because `runBatchTick`'s reconcile loop has no arm
+ * for a terminal batch, nothing afterwards could ever release it: the slot
+ * leaked for the life of the state file, with no CLI lever to recover it. One
+ * operator `abandon --batch` per leaked slot, against a `max_slots` typically
+ * of 3, and the scheduler starves showing nothing but a dead pid.
+ */
+export function releaseBatchSlot(state: SchedState, batchId: string, now: Date): SchedState {
+  let next = state;
+  let slot = slotForBatch(next, batchId);
+  // Bounded: the longest real walk (recovering → failed → idle, or
+  // running → exited → verifying → complete → idle) is 4 hops.
+  for (let i = 0; i < 8 && slot && slot.status !== 'idle'; i++) {
+    const to = NEXT_TOWARD_IDLE[slot.status];
+    if (to === null) break;
+    next = transitionSlot(next, slot.id, to, {}, now);
+    slot = slotForBatch(next, batchId);
+  }
+  return next;
+}
+
 /**
  * All transition tables, exposed as public API — future consumers (#464's
  * dispatcher, status previews) render next-state choices from here instead of

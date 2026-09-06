@@ -21,6 +21,7 @@ import {
 import {
   CLEARED_SLOT_FIELDS,
   findBatch,
+  releaseBatchSlot,
   requeueMember,
   transitionBatch,
   transitionIssue,
@@ -237,6 +238,18 @@ export function abandonBatch(
   }
   let next = transitionBatch(state, batchId, 'dissolving', {}, now);
   next = transitionBatch(next, batchId, 'dissolved', {}, now);
+
+  // #609: release the slot as part of the dissolve. The batch tick's reconcile
+  // loop branches on `executing`/`fixing`/`reviewing`/`shipping`/`deployed` and
+  // then `continue`s, so a batch that reaches a TERMINAL status while still
+  // holding a slot matches no arm and is never looked at again — the slot
+  // leaked for the life of the state file, with no CLI lever to recover it.
+  // The normal dissolve path never hit this because it runs from inside the
+  // member reconcile, which releases first; only an operator
+  // `abandon --batch` did, which is exactly the command reached for when a
+  // pilot batch goes wrong. Observed: one slot held by a dissolved batch for
+  // over three hours, a `max_slots=3` project down to two.
+  next = releaseBatchSlot(next, batchId, now);
 
   // Nothing green is discarded (F.8): terminal or already-shipped members keep
   // their outcome; only active members requeue, each through the one shared
