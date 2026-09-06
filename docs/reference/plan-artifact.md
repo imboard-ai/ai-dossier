@@ -89,7 +89,7 @@ exists).
 
 | Command | Behavior |
 |---|---|
-| `ai-dossier plan post --issue <n> --file <md>` | Validates the five sections, stamps `head=` (or takes `--head <sha>`, 7-40 lowercase hex — validated), comments the artifact. `--dry-run` prints the body; `--json` prints `{posted: false, dryRun: true, head, body}` (dry-run) or `{posted: true, head, url}`; refuses a body over 60000 characters pre-flight. |
+| `ai-dossier plan post --issue <n> --file <md>` | Validates the five sections, stamps `head=` (or takes `--head <sha>`, 7-40 lowercase hex — validated), comments the artifact. `--dry-run` prints the body; `--json` prints `{posted: false, dryRun: true, head, body}` (dry-run) or `{posted: true, head, url}`; refuses a body over 60000 characters pre-flight. `post` never reads the issue's comment thread — only the file it is given — so it prints a stderr disclosure to that effect every run (dry-run and real), rather than leaving `validate`'s `valid: true` to imply the plan reflects discussion it never saw. |
 | `ai-dossier plan get --issue <n> [--json]` | Text mode prints the artifact comment verbatim (terminal-control characters stripped on a TTY). `--json` prints `{head, problem, acceptance_criteria, predicted_files, new_files, approach, test_scope, url, created_at, author}` (section names snake_cased, `predicted_files` the extracted path array including `(new)`-marked paths, `new_files` the subset of those marked `(new)`). No plan → stderr message + **exit 1**. |
 | `ai-dossier plan validate --issue <n>` | Runs the deterministic checks below and prints `{valid, reasons[]}`. Exits 0 when valid, 1 when invalid. |
 
@@ -108,6 +108,8 @@ reported as a named failure rather than hanging the command.
 | `missing-file` | error | A predicted path does not exist at current HEAD and its bullet is not marked `(new)`. |
 | `stale-plan` | warn | A predicted path is marked `(new)` but already exists at current HEAD — the plan may be stale. |
 | `head-distance` | info | N > 0 commits on HEAD since the plan's `head=` — the plan may be stale. |
+| `discussion` | warn | N > 0 issue comments predate the plan (posted before it) — the plan may not reflect them. `plan:v1`/`runstate:v1` artifact comments never count. Names the count and the newest predating comment's timestamp. |
+| `discussion` | info | N > 0 issue comments postdate the plan (posted after it) — genuine drift since, the direct analogue of `head-distance`. `plan:v1`/`runstate:v1` artifact comments never count. Names the count and the newest postdating comment's timestamp. |
 | `risk-floor` | info | A predicted path touches an elevated-risk surface (see below). |
 | `git` | error / warn | git could not answer a file-existence (error) or head-distance (warn) probe — e.g. run outside a repository, no commits yet, git missing, or a stalled call. Disambiguated structurally (whether HEAD resolves to a real commit), never by matching git's stderr wording, which is locale- and version-dependent. |
 

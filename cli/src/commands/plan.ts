@@ -13,6 +13,7 @@ import {
   asString,
   exec,
   fail,
+  type GhComment,
   gitFailure,
   isSafeArg,
   postIssueComment,
@@ -23,9 +24,11 @@ import {
 } from '../gh';
 import {
   buildPlanComment,
+  discussionDrift,
   findLatestPlan,
   isHeadSha,
   MAX_ARTIFACT_BODY_LENGTH,
+  newestTimestamp,
   PLAN_SECTIONS,
   type PlanArtifact,
   type PlanSection,
@@ -63,6 +66,7 @@ export interface PlanValidationReason {
     | 'missing-file'
     | 'stale-plan'
     | 'head-distance'
+    | 'discussion'
     | 'risk-floor'
     | 'git';
   /** `error` fails validity; `warn`/`info` are carried for the caller to act on. */
@@ -119,6 +123,12 @@ interface FetchedPlan {
   author: string;
   /** gh's authorAssociation for the comment (MEMBER/OWNER/COLLABORATOR/BOT/…). */
   authorAssociation: string;
+  /**
+   * Every comment gh returned for the issue, oldest first — the same read `validate`'s
+   * discussion-drift check (#611) reuses, so it never issues a second `gh` call for data
+   * already in hand.
+   */
+  comments: GhComment[];
 }
 
 /** Author associations GitHub treats as having write access to the repository. */
@@ -167,8 +177,20 @@ function fetchLatestPlan(issue: string, repo?: string): FetchedPlan | null {
     createdAt: asString(comment?.createdAt),
     author: asString(comment?.author?.login),
     authorAssociation: asString(comment?.authorAssociation),
+    comments: result.comments,
   };
 }
+
+/**
+ * AC4 of #611: `post` takes a file, not the issue's comment thread — it never reads
+ * comments, so it cannot itself detect a correction posted there. Rather than let
+ * `validate`'s `valid: true` imply the plan is complete, `post` discloses the gap at write
+ * time, every time (dry-run and real): the operator posting a plan is the one positioned to
+ * know whether the issue has discussion since its body was written.
+ */
+const DISCUSSION_DISCLOSURE =
+  "Note: 'plan post' does not read the issue's comment thread — only the file you gave it. " +
+  "If the issue has comments since its body was written, re-check them before treating this plan as complete ('plan validate' flags any it does not reflect).";
 
 /** `plan post` — validate a markdown file, stamp it with head=, comment it onto the issue. */
 function registerPostSubcommand(cmd: Command): void {
@@ -215,6 +237,8 @@ function registerPostSubcommand(cmd: Command): void {
           ].join('\n'),
         ]);
       }
+
+      console.error(DISCUSSION_DISCLOSURE);
 
       if (options.dryRun) {
         printDryRun(body, options.json, { head });
@@ -351,6 +375,38 @@ function artifactReasons(artifact: PlanArtifact): PlanValidationReason[] {
   return reasons;
 }
 
+/**
+ * `head-distance`'s analogue against the issue's own discussion instead of the repository
+ * (#611): comments the plan predates (a `warn` — the planner should have read them) and
+ * comments postdating it (an `info`, genuine drift since). `plan:v1`/`runstate:v1` artifact
+ * comments never count as discussion. A signal, not a gate — `valid` stays keyed off
+ * `severity: "error"` only, so neither case fails validity.
+ */
+function discussionReasons(comments: GhComment[], planCreatedAt: string): PlanValidationReason[] {
+  const timestamped = comments.map((c) => ({
+    body: typeof c?.body === 'string' ? c.body : '',
+    createdAt: asString(c?.createdAt),
+  }));
+  const { predating, postdating } = discussionDrift(timestamped, planCreatedAt);
+
+  const reasons: PlanValidationReason[] = [];
+  if (predating.length > 0) {
+    reasons.push({
+      check: 'discussion',
+      severity: 'warn',
+      message: `${predating.length} issue comment(s) posted before this plan, newest at ${newestTimestamp(predating)} — the plan may not reflect them.`,
+    });
+  }
+  if (postdating.length > 0) {
+    reasons.push({
+      check: 'discussion',
+      severity: 'info',
+      message: `${postdating.length} issue comment(s) posted after this plan, newest at ${newestTimestamp(postdating)} — re-check the plan against them.`,
+    });
+  }
+  return reasons;
+}
+
 /** `plan get` — print the latest artifact; exit 1 distinguishably when none exists. */
 function registerGetSubcommand(cmd: Command): void {
   cmd
@@ -424,6 +480,7 @@ function registerValidateSubcommand(cmd: Command): void {
         });
       } else {
         reasons.push(...artifactReasons(found.artifact));
+        reasons.push(...discussionReasons(found.comments, found.createdAt));
         // Authorship signal, not a gate: selection is last-plan-wins by design (the
         // runstate:v1 convention), but a canonical plan from an account without write
         // access deserves a flag a consumer can act on.

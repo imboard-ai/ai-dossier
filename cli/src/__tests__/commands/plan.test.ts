@@ -215,6 +215,30 @@ describe('plan post', () => {
     expect(parsed.body.startsWith('<!-- plan:v1 head=abc1234 -->')).toBe(true);
   });
 
+  it('discloses at write time that it does not read the issue comment thread — dry-run (#611 AC4)', async () => {
+    planFile(VALID_PLAN_FILE);
+    execHandles((file) => {
+      if (file === 'git') return 'abc1234';
+      throw new Error(`gh must not be called: ${file}`);
+    });
+
+    await run(['plan', 'post', '--issue', '1', '--file', 'plan.md', '--dry-run']);
+    expect(errored().join('\n')).toContain("does not read the issue's comment thread");
+  });
+
+  it('discloses at write time that it does not read the issue comment thread — real post (#611 AC4)', async () => {
+    planFile(VALID_PLAN_FILE);
+    execHandles((file, args) => {
+      if (file === 'git' && args[0] === 'rev-parse') return 'abc1234';
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'comment')
+        return 'https://github.com/o/r/issues/1#comment-9';
+      throw new Error(`unexpected call: ${file} ${args.join(' ')}`);
+    });
+
+    await run(['plan', 'post', '--issue', '1', '--file', 'plan.md']);
+    expect(errored().join('\n')).toContain("does not read the issue's comment thread");
+  });
+
   it('names the cause and hands the body to a temp file when gh fails to post', async () => {
     planFile(VALID_PLAN_FILE);
     execHandles((file) => {
@@ -675,5 +699,79 @@ describe('plan validate', () => {
     expect(
       v.reasons.some((r) => r.check === 'git' && r.message.includes('non-numeric count'))
     ).toBe(true);
+  });
+
+  /** One raw gh comment object, shaped like `ghCommentsJson` but with an explicit createdAt. */
+  function comment(body: string, createdAt: string, id = 1): object {
+    return {
+      body,
+      url: `https://github.com/o/r/issues/1#comment-${id}`,
+      createdAt,
+      author: { login: 'yuvaldim' },
+      authorAssociation: 'MEMBER',
+    };
+  }
+
+  function anyFileExistsAtHead(
+    rest: () => void = () => {}
+  ): (file: string, args: string[]) => string {
+    return (file, args) => {
+      if (file === 'git' && args[0] === 'cat-file') return '';
+      if (file === 'git' && args[0] === 'rev-list') return '0';
+      rest();
+      throw new Error(`unexpected: ${file} ${args.join(' ')}`);
+    };
+  }
+
+  it('discussion: warns with count and newest timestamp for a comment predating the plan (#611 AC1-AC3)', async () => {
+    const older = comment('actually, the framing above is incomplete', '2026-09-03T07:02:15Z', 1);
+    const plan = comment(POSTED_ARTIFACT, '2026-09-06T08:00:23Z', 2);
+    execHandles((file, args) => {
+      if (file === 'gh') return JSON.stringify({ comments: [older, plan] });
+      return anyFileExistsAtHead()(file, args);
+    });
+
+    await run(['plan', 'validate', '--issue', '1']);
+    const v = verdict();
+    expect(v.valid).toBe(true);
+    const reason = v.reasons.find((r) => r.check === 'discussion');
+    expect(reason?.severity).toBe('warn');
+    expect(reason?.message).toContain('1 issue comment');
+    expect(reason?.message).toContain('2026-09-03T07:02:15Z');
+  });
+
+  it('discussion: reports info (not warn) for a comment postdating the plan (#611 AC2)', async () => {
+    const plan = comment(POSTED_ARTIFACT, '2026-09-06T08:00:23Z', 1);
+    const newer = comment('one more correction', '2026-09-07T00:00:00Z', 2);
+    execHandles((file, args) => {
+      if (file === 'gh') return JSON.stringify({ comments: [plan, newer] });
+      return anyFileExistsAtHead()(file, args);
+    });
+
+    await run(['plan', 'validate', '--issue', '1']);
+    const v = verdict();
+    expect(v.valid).toBe(true);
+    const reason = v.reasons.find((r) => r.check === 'discussion');
+    expect(reason?.severity).toBe('info');
+    expect(reason?.message).toContain('1 issue comment');
+    expect(reason?.message).toContain('2026-09-07T00:00:00Z');
+  });
+
+  it('discussion: produces no reason when the only comments are plan:v1/runstate:v1 artifacts (#611 AC6)', async () => {
+    const runstate = comment(
+      '<!-- runstate:v1 -->\nphase=gate\nstatus=done',
+      '2026-09-01T00:00:00Z',
+      1
+    );
+    const plan = comment(POSTED_ARTIFACT, '2026-09-06T08:00:23Z', 2);
+    execHandles((file, args) => {
+      if (file === 'gh') return JSON.stringify({ comments: [runstate, plan] });
+      return anyFileExistsAtHead()(file, args);
+    });
+
+    await run(['plan', 'validate', '--issue', '1']);
+    const v = verdict();
+    expect(v.valid).toBe(true);
+    expect(v.reasons.some((r) => r.check === 'discussion')).toBe(false);
   });
 });
