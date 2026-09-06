@@ -605,19 +605,14 @@ export function validateState(data: unknown): SchedState {
     if (slot.gen !== undefined && (!Number.isInteger(slot.gen) || (slot.gen as number) < 0)) {
       throw new Error(`Slot ${slot.id}: gen must be a non-negative integer or absent (legacy)`);
     }
-    if (
-      slot.fenced_at !== null &&
-      slot.fenced_at !== undefined &&
-      !isIsoDateString(slot.fenced_at)
-    ) {
-      throw new Error(`Slot ${slot.id}: fenced_at must be an ISO date string or null`);
-    }
-    if (
-      slot.spawned_at !== null &&
-      slot.spawned_at !== undefined &&
-      !isIsoDateString(slot.spawned_at)
-    ) {
-      throw new Error(`Slot ${slot.id}: spawned_at must be an ISO date string or null`);
+    // Three slot fields share one shape — optional (absent on a legacy slot),
+    // nullable, otherwise an ISO date. One check rather than three copies of
+    // the same six lines, so the fourth such field is a list entry.
+    for (const field of ['fenced_at', 'spawned_at', 'stale_milestone_ignored_for'] as const) {
+      const value = slot[field];
+      if (value !== null && value !== undefined && !isIsoDateString(value)) {
+        throw new Error(`Slot ${slot.id}: ${field} must be an ISO date string or null`);
+      }
     }
     if (
       slot.log_offset_at_spawn !== null &&
@@ -626,15 +621,6 @@ export function validateState(data: unknown): SchedState {
     ) {
       throw new Error(
         `Slot ${slot.id}: log_offset_at_spawn must be a non-negative integer or null`
-      );
-    }
-    if (
-      slot.stale_milestone_ignored_for !== null &&
-      slot.stale_milestone_ignored_for !== undefined &&
-      !isIsoDateString(slot.stale_milestone_ignored_for)
-    ) {
-      throw new Error(
-        `Slot ${slot.id}: stale_milestone_ignored_for must be an ISO date string or null`
       );
     }
     if (!isIsoDateString(slot.updated_at)) {
@@ -965,12 +951,18 @@ export function patchBatch(
 /**
  * Patch a slot's METADATA (pid/phase/branch/last_head/last_progress/the
  * stale-milestone marker) without a status change — mirrors `patchBatch`.
- * `status` and `id` are excluded on purpose: every status change goes
- * through `transitionSlot`'s typed rails, never a hand-written assignment.
+ * These fields are data, not machine states — RFC-0001 §D.3 keeps them
+ * alongside the status so the transition tables stay pure. `status` and `id`
+ * are excluded on purpose: every status change goes through
+ * `transitionSlot`'s typed rails, never a hand-written assignment.
  * Was `engine.ts`'s own private `patchSlot` (#524); moved here (#610) so
  * `batch-dispatch.ts` — a deliberately separate dispatcher (RFC-0001 §C.4)
  * that never imports from `engine.ts` — can patch a slot in place too,
  * without a second hand-rolled copy of the same three-line mutation.
+ *
+ * `now` defaults to the wall clock to match `patchBatch`, but every caller
+ * on the tick path must pass the injected `deps.now()`: an `updated_at` from
+ * a different clock than the tick's journal entries de-correlates the two.
  */
 export function patchSlot(
   state: SchedState,
@@ -978,10 +970,17 @@ export function patchSlot(
   patch: Omit<Partial<SlotEntry>, 'id' | 'status'>,
   now: Date = new Date()
 ): SchedState {
+  // A runtime rail, not just a type-level one: TypeScript's excess-property
+  // check fires for object LITERALS only, so an `Omit` cannot stop a patch
+  // that arrives as a `Partial<SlotEntry>` variable from carrying `status`
+  // and writing a slot state the `TRANSITIONS` table never allowed. Now that
+  // this is exported (`index.ts`), that path is reachable from outside the
+  // package.
+  const { id: _id, status: _status, ...safe } = patch as Partial<SlotEntry>;
   return {
     ...state,
     slots: state.slots.map((s) =>
-      s.id === slotId ? { ...s, ...patch, updated_at: now.toISOString() } : s
+      s.id === slotId ? { ...s, ...safe, updated_at: now.toISOString() } : s
     ),
   };
 }

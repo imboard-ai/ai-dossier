@@ -508,6 +508,10 @@ export interface SlotEntry {
    * boolean: a fresh dispatch stamps a NEW `spawned_at`, so the marker goes
    * stale automatically (no explicit reset needed at any spawn site) and the
    * event is keyed on the dispatch it was decided for, never on the member.
+   * Written by BOTH rails that journal the event — the batch member rail
+   * (`reconcileMemberSlot`, `batch-dispatch.ts`) and the issue rail
+   * (`journalStaleMilestoneIfIgnored`, `engine.ts`) — so the cadence is the
+   * same whichever kind of unit holds the slot.
    * Added in schema 1.12.0; 1.11.0 slots backfill null (nothing was
    * journalled yet under the old once-per-tick behavior).
    */
@@ -1230,7 +1234,37 @@ export interface JournalEvent {
    * Last tool the exited dispatch called (#591) — attributes an unverified exit
    * (`verify-incomplete`, and the terminal `unit-failed` reasons `agent-exited-unverified` /
    * `unverified-exit-at-strongest-tier`) to a concrete cause (e.g. `Monitor`) without opening
-   * the transcript. Absent when the dispatch log yielded no `tool_use` block.
+   * the transcript. Absent when the tool name could not be established at
+   * all — the dispatch log yielded no `tool_use` block, OR it was
+   * unreadable, OR the slot never spawned. The three are not distinguished:
+   * the field is omitted rather than guessed.
    */
   last_tool?: string;
+  /**
+   * `stale-milestone-ignored` (#610): the ignored milestone's OWN timestamp.
+   * The entry's `ts` (and `at`) is the time the ENGINE made the decision;
+   * this is how old the milestone it ignored actually was. Declared here so
+   * both emitters — `engine.ts`'s `journalStaleMilestoneIfIgnored` and
+   * `batch-dispatch.ts`'s `reconcileMemberSlot` — get the same
+   * excess-property check, and so `events.jsonl` consumers have one shape to
+   * read rather than one per rail.
+   */
+  milestone_at?: string;
+  /**
+   * `unit-failed` (#596): what the open-PR ground-truth check concluded
+   * before this unit was failed terminally — `none` (checked, no PR to
+   * adopt), `unreachable` (`gh` failed; the unit may have shipped work
+   * nobody owns now), `no-branch` (no branch was ever recorded to check), or
+   * absent when the check does not apply (a stall, or a report slot).
+   * Without it all four are the same `unit-failed` line, which is the
+   * ambiguity that stranded imboard-monorepo#3999.
+   */
+  pr_check?: 'no-branch' | 'unreachable' | 'none';
+  /**
+   * `pr-parked` (#596): the branch the adopted PR was found on. `slot.branch`
+   * is captured from whichever milestone first carried one and is not
+   * re-derived between recovery redispatches, so without it "why is this
+   * unit parked on PR N?" has nothing to correlate against.
+   */
+  branch?: string;
 }

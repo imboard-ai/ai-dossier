@@ -67,7 +67,6 @@
  * engine missing either never dispatches a `ready` batch (it stays queued).
  */
 
-import * as path from 'node:path';
 import { parseLastToolUse } from '@ai-dossier/core';
 import type { BatchDispatchDeps, BatchTickResult } from './batch-dispatch';
 import { runBatchTick } from './batch-dispatch';
@@ -1008,6 +1007,90 @@ function writeFence(
 }
 
 /**
+ * The end of the ladder: the unit has no stronger tier left, so it fails —
+ * UNLESS ground truth says its branch already carries an open PR the
+ * milestone trail never recorded (#596), in which case it parks and the
+ * watcher owns it. Extracted from `enterRecovery` so the terminal decision,
+ * which now has four distinct outcomes, is readable on its own.
+ *
+ * Fails closed (AC5): a report slot (no branch of its own — AC7), a stall
+ * (a hung agent never had the chance to open anything), an unknown branch,
+ * or an unreachable lookup all take the terminal path. Only a confirmed open
+ * PR number parks (AC4). Which of those four it was is journaled as
+ * `pr_check`, because "we checked and there was none" and "`gh` was down and
+ * we failed a unit whose PR may have been mergeable" are the same
+ * `unit-failed` line otherwise — and that indistinguishability is exactly
+ * what cost imboard-monorepo#3999 (docs/agent-traps.md).
+ */
+function failOrAdoptOpenPr(
+  ctx: TickCtx,
+  state: SchedState,
+  unit: string,
+  slot: SlotEntry,
+  report: boolean,
+  causeEvent: 'stalled' | 'verify-incomplete',
+  cause: string,
+  evidence: Record<string, unknown>
+): SchedState {
+  let prCheck: 'skipped' | 'no-branch' | 'unreachable' | 'none' = 'skipped';
+  if (!report && causeEvent === 'verify-incomplete') {
+    if (slot.branch === null) {
+      prCheck = 'no-branch';
+    } else {
+      const openPr = ctx.deps.groundTruth.openPrForBranch(slot.branch);
+      if (typeof openPr === 'number') {
+        // A unit that demonstrably opened a PR is proof this dispatch was
+        // healthy, whatever its exit looked like — reset the suspect streak
+        // exactly like the milestone-verified park in `completeUnitOrRecover`
+        // (#505), or a rescued unit still counts toward a false-positive
+        // `dispatch-unhealthy` pause. `completeUnitOrRecover` has already
+        // journaled this tick's `suspect-dispatch`; the reset following it is
+        // the correct record of a classification made on incomplete evidence
+        // and then retracted.
+        return parkUnit(ctx, recordDispatchOutcome(ctx, state, unit, slot, false), unit, openPr, {
+          detail: 'unverified-exit-recovered-open-pr',
+          branch: slot.branch,
+        });
+      }
+      prCheck = openPr === undefined ? 'unreachable' : 'none';
+      if (prCheck === 'unreachable') {
+        journal(ctx, 'ground-truth-unreachable', unit, {
+          slot: slot.id,
+          detail: `open-PR check for branch ${slot.branch} unreachable — failing closed; re-check with \`gh pr list --head ${slot.branch} --state open\` before writing this unit off`,
+        });
+      }
+    }
+  }
+
+  // Cap reached (2 escalations) or already at the strongest tier — the
+  // designed signal that a human, not a stronger model, is next.
+  const reason = report
+    ? 'report-escalation-cap'
+    : slot.recoveries >= ESCALATION_CAP
+      ? 'escalation-cap'
+      : `${cause}-at-strongest-tier`;
+  // #591/#620: surface `last_tool` on the terminal `unit-failed` journal
+  // entry too — the `evidence` object already carries it for the non-terminal
+  // `verify-incomplete` journal event, because BOTH rails that reach here
+  // with `causeEvent === 'verify-incomplete'` thread it through
+  // `completeUnitOrRecover`: `reconcileRunning`'s dead-pid rail, from
+  // `recordDispatchRunLog`'s own read, and (since #620) `reconcileSlots`'
+  // `exited`/`verifying` rail, from `readLastToolForSlot`. The two agree —
+  // the dispatch log is static once the agent has exited — so the tool name
+  // survives regardless of which tick reaches this decision. It stays
+  // OPTIONAL: a slice with no parseable `tool_use` yields null, hence the
+  // guard below.
+  const extra = {
+    ...(typeof evidence.last_tool === 'string' ? { last_tool: evidence.last_tool } : {}),
+    ...(prCheck !== 'skipped' ? { pr_check: prCheck } : {}),
+  };
+  return failUnit(ctx, state, unit, reason, {
+    merged: report,
+    extra: Object.keys(extra).length > 0 ? extra : undefined,
+  });
+}
+
+/**
  * The recovery decision for a unit that must be redispatched one tier
  * stronger (stall or unverified exit, AC4). At the escalation cap or the
  * strongest tier, the unit fails instead — the designed signal that a human,
@@ -1047,35 +1130,7 @@ function enterRecovery(
   const report = isReportSlot(slot);
   const nextTier = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
   if (slot.recoveries >= ESCALATION_CAP || nextTier === null) {
-    // #596: before failing a unit terminally for an UNVERIFIED EXIT (never a
-    // stall — a stalled agent never had the chance to open anything), check
-    // whether its branch already produced an open PR the milestone trail
-    // never recorded. Report slots are unaffected (AC7): a report agent has
-    // no branch of its own to check. Fails closed (AC5) — no branch known,
-    // or the lookup itself is unreachable — falls straight through to
-    // today's terminal path; only a confirmed open PR number parks (AC4).
-    if (!report && causeEvent === 'verify-incomplete' && slot.branch !== null) {
-      const openPr = ctx.deps.groundTruth.openPrForBranch(slot.branch);
-      if (typeof openPr === 'number') {
-        return parkUnit(ctx, state, unit, openPr, { detail: 'unverified-exit-recovered-open-pr' });
-      }
-    }
-
-    // Cap reached (2 escalations) or already at the strongest tier — the
-    // designed signal that a human, not a stronger model, is next.
-    const reason = report
-      ? 'report-escalation-cap'
-      : slot.recoveries >= ESCALATION_CAP
-        ? 'escalation-cap'
-        : `${cause}-at-strongest-tier`;
-    // #591/#620: surface `last_tool` on the terminal `unit-failed` journal entry too — the
-    // `evidence` object already carries it for the non-terminal `verify-incomplete` journal
-    // event, since every `causeEvent === 'verify-incomplete'` call now arrives via
-    // `completeUnitOrRecover` with `last_tool` freshly read from the dispatch log
-    // (`readLastToolForSlot`), regardless of which tick actually reaches this decision.
-    const extra =
-      typeof evidence.last_tool === 'string' ? { last_tool: evidence.last_tool } : undefined;
-    return failUnit(ctx, state, unit, reason, { merged: report, extra });
+    return failOrAdoptOpenPr(ctx, state, unit, slot, report, causeEvent, cause, evidence);
   }
 
   // Fence BEFORE the respawn (#504 AC1/AC4): `killUnitAgent` above only reaches a pid
@@ -1174,16 +1229,23 @@ function completeUnit(
  * terminal unverified exit whose branch ground truth found one the milestone
  * trail never recorded: entry → parked (pr recorded), slot released — a
  * waiting unit consumes zero slots (AC5) and the watcher owns it from here.
- * `detail` names WHICH path adopted the PR, so an operator reading
+ * `extra.detail` names WHICH path adopted the PR, so an operator reading
  * `pr-parked` alone can tell a milestone-verified park from a
- * recovery-adopted one (#596 AC3).
+ * recovery-adopted one (#596 AC3); `extra.branch` names the ref the PR was
+ * found on, without which "why is this unit parked on PR N?" has nothing to
+ * correlate against — `slot.branch` is captured from whichever milestone
+ * first carried one and is not re-derived between recovery redispatches.
+ *
+ * Typed rather than a `Record<string, unknown>` bag: both keys are declared
+ * `JournalEvent` fields, and routing them through an open record would
+ * discard the excess-property check they exist to get.
  */
 function parkUnit(
   ctx: TickCtx,
   state: SchedState,
   unit: string,
   pr: number,
-  detail: Record<string, unknown> = {}
+  extra: { detail?: string; branch?: string } = {}
 ): SchedState {
   const issue = issueOfUnit(unit);
   if (issue === null) return state;
@@ -1193,7 +1255,7 @@ function parkUnit(
   let next = walked.state;
 
   next = transitionIssue(next, issue, 'parked', { pr }, now);
-  journal(ctx, 'pr-parked', unit, { pr, ...detail });
+  journal(ctx, 'pr-parked', unit, { pr, ...extra });
   ctx.result.parked.push(unit);
   journalSlotReleased(ctx, unit, walked.releasedSlotId, 'parked');
   return next;
@@ -1279,26 +1341,49 @@ function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
  * when the raw milestone WOULD have completed the unit under the old,
  * unfenced rule (`isVerifiedComplete(milestone, false)`, `dispatchedAt`
  * omitted) but the fenced check just rejected it — i.e. a `report/done`
- * milestone that predates this dispatch's `spawned_at`. Journaled per-tick
- * while the condition holds, same convention as `ground-truth-unreachable`.
+ * milestone that predates this dispatch's `spawned_at`.
+ *
+ * #610 fixed this event on the batch member rail (`reconcileMemberSlot`,
+ * `batch-dispatch.ts`) and the same two defects were live here, on the rail
+ * that fires far more often:
+ *
+ *  - CADENCE. It was journaled per-tick while the condition held, so a unit
+ *    carrying one stale milestone emitted an identical line every reconcile
+ *    interval for its whole run — roughly twenty for a 40-minute unit, which
+ *    `tick.sh` then forwards to Telegram one by one. It is now gated on the
+ *    same `SlotEntry.stale_milestone_ignored_for` marker: at most once per
+ *    DISPATCH. The marker holds the `spawned_at` it was decided for, so a
+ *    redispatch's new `spawned_at` re-arms it with no reset site.
+ *  - PAYLOAD. `at` was the MILESTONE's timestamp here and the engine's
+ *    decision time on the batch rail — one event name, two meanings, and
+ *    nothing in the line to say which. Both rails now agree: `at` is the
+ *    decision time, `milestone_at` is how old the ignored milestone is.
+ *
+ * Returns the patched state (the marker is persisted) — callers must thread
+ * it, or the event re-fires next tick as if nothing had been recorded.
  */
 function journalStaleMilestoneIfIgnored(
   ctx: TickCtx,
+  state: SchedState,
   unit: string,
   slot: SlotEntry,
   truth: UnitTruth,
   verifiedComplete: boolean,
   closedSignal: boolean
-): void {
+): SchedState {
   const { milestone } = truth;
-  if (verifiedComplete || closedSignal || milestone === null) return;
-  if (!isVerifiedComplete(milestone, false)) return;
+  if (verifiedComplete || closedSignal || milestone === null) return state;
+  if (!isVerifiedComplete(milestone, false)) return state;
+  if (slot.stale_milestone_ignored_for === slot.spawned_at) return state;
+  const now = ctx.deps.now();
   journal(ctx, 'stale-milestone-ignored', unit, {
     slot: slot.id,
     run: milestone.run,
-    at: milestone.at,
+    at: now.toISOString(),
+    milestone_at: milestone.at,
     detail: `predates dispatch spawned_at=${slot.spawned_at}`,
   });
+  return patchSlot(state, slot.id, { stale_milestone_ignored_for: slot.spawned_at }, now);
 }
 
 /**
@@ -1315,9 +1400,28 @@ function journalStaleMilestoneIfIgnored(
  */
 function readLastToolForSlot(ctx: TickCtx, slot: SlotEntry, unit: string): string | null {
   if (slot.spawned_at === null) return null;
+  return parseLastToolUse(dispatchLogSlice(ctx, slot, unit).content);
+}
+
+/**
+ * THIS dispatch's slice of the per-unit log: path, start offset, contents.
+ *
+ * #524: the log is per-unit and append-mode, so reading from byte 0 would
+ * include every PRIOR dispatch's output too (claude: unparseable JSON
+ * concatenation; opencode: summed tokens double-counted). One reader so the
+ * `?? 0` legacy default (a pre-1.7.0 slot has no recorded offset) cannot
+ * drift between the two callers — `readLastToolForSlot`'s "always agrees
+ * with whatever `reconcileRunning` saw" guarantee is exactly the claim that
+ * a second copy of this derivation would quietly break.
+ */
+function dispatchLogSlice(
+  ctx: TickCtx,
+  slot: SlotEntry,
+  unit: string
+): { logFile: string; offset: number; content: string | null } {
   const logFile = dispatchLogPath(ctx.deps.store.runsDir, unit);
   const offset = slot.log_offset_at_spawn ?? 0;
-  return parseLastToolUse(readDispatchLog(logFile, offset));
+  return { logFile, offset, content: readDispatchLog(logFile, offset) };
 }
 
 /**
@@ -1380,14 +1484,8 @@ function recordDispatchRunLog(
   // dispatch.command/tierModels — so a mixed agent-CLI ladder's runs.jsonl
   // entry (AC3) matches what was actually spawned for this dispatch.
   const { cmd, model } = resolveTierSpawn(ctx.dispatch, tier, issue);
-  const logFile = dispatchLogPath(ctx.deps.store.runsDir, unit);
-
-  // #524: read only THIS dispatch's slice — the log is per-unit and
-  // append-mode, so the whole file would include every prior dispatch's
-  // output too (claude: unparseable JSON concatenation; opencode: summed
-  // tokens double-counted).
-  const offset = slot.log_offset_at_spawn ?? 0;
-  const logContent = readDispatchLog(logFile, offset);
+  // #524: read only THIS dispatch's slice — see `dispatchLogSlice`.
+  const { logFile, offset, content: logContent } = dispatchLogSlice(ctx, slot, unit);
 
   const runEntry = buildSchedRunLogEntry({
     unit,
@@ -1456,7 +1554,17 @@ function reconcileRunning(
   // — a re-enqueued issue's PREVIOUS run's report milestone must not read as
   // "complete" the moment the fresh agent's first tick polls it.
   const verifiedComplete = isVerifiedComplete(truth.milestone, closedSignal, slot.spawned_at);
-  journalStaleMilestoneIfIgnored(ctx, unit, slot, truth, verifiedComplete, closedSignal);
+  // Threaded, not discarded: the once-per-dispatch marker lives in the state
+  // this returns.
+  const marked = journalStaleMilestoneIfIgnored(
+    ctx,
+    state,
+    unit,
+    slot,
+    truth,
+    verifiedComplete,
+    closedSignal
+  );
   if (verifiedComplete && !isParkedMilestone(truth.milestone)) {
     journal(ctx, 'external-advance', unit, {
       pid: slot.pid,
@@ -1466,16 +1574,16 @@ function reconcileRunning(
       // at completion regardless — the actual signal was the report milestone.
       detail: closedSignal ? 'issue closed' : `report done (role=${slot.role})`,
     });
-    killUnitAgent(ctx, state, unit);
+    killUnitAgent(ctx, marked, unit);
     // The agent was still alive (that's what "externally-advanced" means) —
     // log it here too, or an external-advance dispatch would never get a
     // runs.jsonl entry at all (it never takes the dead-pid branch above).
-    recordDispatchRunLog(ctx, state, slot, unit);
-    const exited = transitionSlot(state, slot.id, 'exited', {}, now);
+    recordDispatchRunLog(ctx, marked, slot, unit);
+    const exited = transitionSlot(marked, slot.id, 'exited', {}, now);
     return completeUnitOrRecover(ctx, exited, unit, truth, 'external-advance');
   }
 
-  const progress = applyProgressSignals(ctx, state, slot, truth, unit);
+  const progress = applyProgressSignals(ctx, marked, slot, truth, unit);
   if (progress.progressed) return progress.state;
 
   // No progress: the stall timer (AC4). The phase now IN FLIGHT is the last
@@ -1575,7 +1683,15 @@ function completeUnitOrRecover(
   // `external-advance` caller passes none — it DOES record a run log (`reconcileRunning`,
   // #524), but ground truth already confirmed completion, so this path never reaches the
   // `unverified-exit` branch and the tool name has nothing to attribute.
-  lastTool: string | null = null
+  //
+  // #620: a THUNK, not a value, for the deferred `exited`/`verifying` rail — that caller
+  // has no read of its own to hand over and would otherwise have to read the dispatch log
+  // eagerly on every tick, including the majority that return early (ground truth
+  // unreachable) or complete the unit, discarding it. The log is bounded at
+  // MAX_DISPATCH_LOG_BYTES (32 MiB) and its size is set by the spawned agent, so an
+  // eager read is up to 32 MiB per slot per tick for as long as an outage holds slots in
+  // `verifying`. Resolved once, only on the branch that consumes it.
+  lastTool: string | null | (() => string | null) = null
 ): SchedState {
   const now = ctx.deps.now();
   let next = state;
@@ -1608,9 +1724,22 @@ function completeUnitOrRecover(
     // healthy park sandwiched between two unrelated units' suspect exits
     // would be invisible to the cross-unit correlation and could still tip
     // it into a false-positive pause.
+    const parked = recordDispatchOutcome(ctx, next, unit, slot, false);
     const pr = prOfMilestone(truth.milestone); // non-null: isParkedMilestone guarantees it
-    if (pr === null) return next;
-    return parkUnit(ctx, recordDispatchOutcome(ctx, next, unit, slot, false), unit, pr);
+    if (pr === null) {
+      // Structurally unreachable, and deliberately not silent if it ever is:
+      // the slot is already in `verifying`, so an early return with nothing
+      // journaled leaves it re-deciding the same way every tick, forever,
+      // against an empty trail. Return the recorded state (the pre-#596 form
+      // did — `parkUnit`'s internal guard returned the state it was handed),
+      // not the un-recorded `next`.
+      journal(ctx, 'ground-truth-unreachable', unit, {
+        slot: slot.id,
+        detail: `parked milestone (run=${truth.milestone?.run ?? 'unknown'}) carries no parseable pr= key — holding in verifying`,
+      });
+      return parked;
+    }
+    return parkUnit(ctx, parked, unit, pr);
   }
 
   // #575: fence to THIS dispatch's `spawned_at` — an agent that exited having
@@ -1619,20 +1748,29 @@ function completeUnitOrRecover(
   // below (`unverified-exit`) instead.
   const closedSignal = effectiveClosedSignal(slot, truth);
   const verifiedComplete = isVerifiedComplete(truth.milestone, closedSignal, slot.spawned_at);
-  journalStaleMilestoneIfIgnored(ctx, unit, slot, truth, verifiedComplete, closedSignal);
+  next = journalStaleMilestoneIfIgnored(
+    ctx,
+    next,
+    unit,
+    slot,
+    truth,
+    verifiedComplete,
+    closedSignal
+  );
   if (verifiedComplete) {
     return completeUnit(ctx, recordDispatchOutcome(ctx, next, unit, slot, false), unit, via);
   }
 
   const suspect = msSinceLastProgress(slot, now) < SUSPECT_DISPATCH_WINDOW_MS;
   next = recordDispatchOutcome(ctx, next, unit, slot, suspect);
+  const resolvedLastTool = typeof lastTool === 'function' ? lastTool() : lastTool;
   return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', truth, {
     observed: truth.milestone
       ? `milestone ${truth.milestone.phase}/${truth.milestone.status}; closed=${truth.closed}`
       : `no milestone; closed=${truth.closed}`,
     // #591: attributes the unverified exit to a concrete cause (e.g. `Monitor`)
     // without opening the transcript. Omitted when the log yielded no tool_use.
-    ...(lastTool !== null ? { last_tool: lastTool } : {}),
+    ...(resolvedLastTool !== null ? { last_tool: resolvedLastTool } : {}),
   });
 }
 
@@ -1700,13 +1838,10 @@ function reconcileSlots(
         // case, before consuming the lastTool `reconcileRunning` already
         // read). Re-read it here rather than losing it — the log itself is
         // static once the agent has exited, so this always agrees with
-        // whatever `reconcileRunning` saw.
-        next = completeUnitOrRecover(
-          ctx,
-          next,
-          unit,
-          truth,
-          'verify-complete',
+        // whatever `reconcileRunning` saw. Passed as a thunk so the read
+        // happens only on the tick that actually reaches the unverified-exit
+        // decision, not on every tick an outage holds the slot here.
+        next = completeUnitOrRecover(ctx, next, unit, truth, 'verify-complete', () =>
           readLastToolForSlot(ctx, slot, unit)
         );
         break;

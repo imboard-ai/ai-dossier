@@ -15,6 +15,17 @@ import { unwrapList } from './json';
 import { createExecFn, type ExecFn } from './project';
 import type { BatchPhase } from './types';
 
+/**
+ * A git ref name safe to pass as a literal CLI argument (CWE-88). Branch
+ * strings originate from milestone output written by the spawned agent, so
+ * they are untrusted: the leading alphanumeric anchor is what stops a crafted
+ * "branch" (`--upload-pack=…`, `--repo=…`) from being read as an option, and
+ * the body allows only the characters a real ref can carry. One constant
+ * rather than a copy per call site — a security predicate that exists twice
+ * is one that gets tightened once.
+ */
+const SAFE_REF_NAME = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
 /** The latest runstate milestone on an issue, as `runstate last --json` reports it. */
 export interface GroundTruthMilestone {
   phase: string;
@@ -78,12 +89,16 @@ export interface GroundTruth {
    */
   prState(pr: number): PrTruth | undefined;
   /**
-   * The number of an OPEN pull request whose head is `branch`, or `null`
-   * when none exists (#596): the terminal recovery branch's ground-truth
-   * check — a unit that exited unverified may have already opened a PR the
-   * milestone trail never recorded. Same tri-state as `prState`: `undefined`
-   * = poll FAILED (unreachable — the caller must fail closed, never park on
-   * an unconfirmed guess).
+   * The number of an OPEN pull request the fleet opened from `branch`, or
+   * `null` when none exists (#596): the terminal recovery branch's
+   * ground-truth check — a unit that exited unverified may have already
+   * opened a PR the milestone trail never recorded. Same tri-state as
+   * `prState`: `undefined` = poll FAILED (unreachable — the caller must fail
+   * closed, never park on an unconfirmed guess), and an unusable payload or
+   * a branch name that fails ref validation counts as unreachable too, since
+   * `null` is a positive claim the caller is entitled to act on. PRs from
+   * forks that reuse the branch name are excluded — see
+   * `parseOpenPrListJson`.
    */
   openPrForBranch(branch: string): number | null | undefined;
   /**
@@ -187,11 +202,11 @@ export function createExecGroundTruth(
     },
     branchHead(branch: string): string | null {
       // The branch string originates from milestone output written by the
-      // spawned agent — validate it as a ref name and end git's option
-      // parsing with `--` so a crafted "branch" (e.g. `--upload-pack=…`)
-      // can never become a git option (CWE-88). A rejected ref degrades to
-      // null head: the pushed-commit progress signal just doesn't fire.
-      if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch)) return null;
+      // spawned agent — validate it as a ref name (`SAFE_REF_NAME`, CWE-88)
+      // and end git's option parsing with `--` as well. A rejected ref
+      // degrades to null head: the pushed-commit progress signal just
+      // doesn't fire, which is this method's documented "unknown" answer.
+      if (!SAFE_REF_NAME.test(branch)) return null;
       const out = exec('git', ['ls-remote', 'origin', '--', branch], opts.repoDir);
       if (out === null || out === '') return null;
       const sha = out.split('\t')[0]?.trim();
@@ -207,16 +222,34 @@ export function createExecGroundTruth(
       return parsePrViewJson(out) ?? undefined;
     },
     openPrForBranch(branch: string): number | null | undefined {
-      // Same ref-name validation as `branchHead` (CWE-88): the branch string
-      // is milestone-derived, never trusted as a literal CLI argument.
-      if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch)) return null;
+      // Same `SAFE_REF_NAME` validation as `branchHead` (CWE-88): the branch
+      // string is milestone-derived, never trusted as a literal CLI
+      // argument. Unlike `branchHead`, a rejection degrades to `undefined`,
+      // not `null`: `null` here is a POSITIVE claim ("verifiably no open
+      // PR") that a terminal fail/park decision is made on, and we verified
+      // nothing — we refused to ask.
+      if (!SAFE_REF_NAME.test(branch)) return undefined;
       const out = exec(
         'gh',
-        ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'number'],
+        [
+          'pr',
+          'list',
+          '--head',
+          branch,
+          '--state',
+          'open',
+          '--json',
+          // `headRefName`/`isCrossRepository` are not decoration: `--head`
+          // filters on the head ref NAME only, so it also matches a PR
+          // opened from a FORK whose branch happens to share the name. The
+          // parser needs them to prove the PR is ours before the engine
+          // parks a unit on it.
+          'number,headRefName,isCrossRepository',
+        ],
         opts.repoDir
       );
       if (out === null) return undefined; // poll failed — unreachable
-      return parseOpenPrListJson(out);
+      return parseOpenPrListJson(out, branch);
     },
     setupInfo(issue: number): SetupInfo | null | undefined {
       const out = exec('gh', ['issue', 'view', String(issue), '--json', 'comments'], opts.repoDir);
@@ -293,24 +326,56 @@ export function parsePrViewJson(stdout: string | null): PrTruth | null {
 }
 
 /**
- * Parse the stdout of `gh pr list --head <branch> --state open --json number`
- * (#596) into the first open PR's number, or `null` when none exists (a
- * verified `[]`) or the payload is unusable. A branch can have at most one
- * open PR against it, so the first entry is the only one that matters.
+ * Parse the stdout of
+ * `gh pr list --head <branch> --state open --json number,headRefName,isCrossRepository`
+ * (#596) into the number of an open PR the fleet itself opened from `branch`.
+ *
+ * Tri-state, matching `GroundTruth.openPrForBranch` and `prState`:
+ * `number` = a confirmed PR, `null` = VERIFIED none (an empty list, or a list
+ * with no entry we can claim), `undefined` = the payload was unusable, so
+ * nothing was verified. The distinction is load-bearing rather than tidy:
+ * `null` is what lets the engine fail a unit terminally, and a `gh` version
+ * change or an auth banner on stdout must not be able to manufacture that
+ * claim. (`prState` degrades the same way — an unusable `gh pr view` payload
+ * becomes `undefined`, never a verified state.)
+ *
+ * Ownership filter: `--head` matches on the head ref NAME alone, so the list
+ * can contain a PR opened from a FORK that happens to use the same branch
+ * name — adopting one would park a unit on, and later certify, work the
+ * fleet never did. Cross-repository entries and any whose `headRefName` does
+ * not match are dropped before a number is taken.
+ *
+ * Contrary to this function's first version, GitHub does NOT guarantee at
+ * most one open PR per head branch — the constraint is one per head/base
+ * pair, so a branch targeting two bases yields two. The first surviving
+ * entry is taken: the caller only needs A live PR to hand to the watcher,
+ * and refusing to choose would strand both.
  */
-export function parseOpenPrListJson(stdout: string | null): number | null {
-  if (stdout === null || stdout.trim() === '') return null;
+export function parseOpenPrListJson(
+  stdout: string | null,
+  branch?: string
+): number | null | undefined {
+  if (stdout === null || stdout.trim() === '') return undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
   } catch {
-    return null;
+    return undefined;
   }
-  if (!Array.isArray(parsed) || parsed.length === 0) return null;
-  const first = parsed[0];
-  if (first === null || typeof first !== 'object') return null;
-  const num = (first as Record<string, unknown>).number;
-  return typeof num === 'number' && Number.isInteger(num) && num > 0 ? num : null;
+  // `unwrapList` accepts gh's `{ "<key>": [...] }` wrapper as well as the
+  // bare array (#496) — the same shape tolerance every other gh-list parser
+  // in this file already has.
+  const list = unwrapList(parsed, 'pullRequests');
+  if (list === null) return undefined;
+  for (const item of list) {
+    if (item === null || typeof item !== 'object') continue;
+    const pr = item as Record<string, unknown>;
+    if (pr.isCrossRepository === true) continue; // a fork's PR — not ours
+    if (branch !== undefined && pr.headRefName !== undefined && pr.headRefName !== branch) continue;
+    const num = pr.number;
+    if (typeof num === 'number' && Number.isInteger(num) && num > 0) return num;
+  }
+  return null; // verified: nothing on this branch we can claim
 }
 
 /**

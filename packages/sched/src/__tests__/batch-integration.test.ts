@@ -51,6 +51,7 @@ import {
   transitionBatch,
   transitionSlot,
 } from '../index';
+import { writeToolUseLog } from './helpers/dispatch-log';
 import { stubGroundTruth } from './helpers/ground-truth';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
@@ -617,14 +618,7 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     // the same shape a real headless agent's dispatch log carries, mirroring
     // exactly what `engine.ts`'s equivalent regression test does for the
     // full-cycle path.
-    const logFile = batchMemberLogPath(h.deps.store.runsDir, 'b-unverified', 1, 901);
-    fs.appendFileSync(
-      logFile,
-      `${JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', id: 't1', name: 'Monitor', input: {} }] },
-      })}\n`
-    );
+    writeToolUseLog(batchMemberLogPath(h.deps.store.runsDir, 'b-unverified', 1, 901));
 
     const result = h.tick(); // reconciles the dead member: no milestone → agent-exited-unverified
     expect(result.failed).toContain('batch:b-unverified');
