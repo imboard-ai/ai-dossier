@@ -337,7 +337,12 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    [Batch dispatch (#523)](#batch-dispatch-523) — appends to `evictions[]`) is a no-op
    for a repeat issue and journals `eviction-duplicate` instead; the repeat requeue is
    skipped with it, so a second call cannot overwrite the first eviction's
-   `failure_evidence` or kill a live re-dispatch of that member. **Read
+   `failure_evidence` or kill a live re-dispatch of that member. Since #613 the duplicate
+   is a no-op for the CALLER too, not just for the append: `evictMemberDirectly` returns
+   `{ dissolved, duplicate }` and, on `duplicate: true`, `evictMemberAndContinue` journals
+   no `unit-failed` and does not advance the batch — record and journal share one
+   lock-protected claim, so they can never disagree about which member the batch advanced
+   past. **Read
    `docs/agent-traps.md` before "fixing" the dissolve rule:** the dissolve trigger has
    counted DISTINCT member ids since #572 (`evictedMemberIds`) and was never inflatable
    by a duplicate. What a duplicate did inflate is the raw `evictions[]` array itself —
@@ -371,8 +376,9 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
 
 Thirteen journal events carry the detail: `suite-failed`, `attributed`, `fix-dispatched`,
 `fix-resolved`, `member-evicted`, `eviction-duplicate` (#595 — a second eviction call
-named a member already in `evictions[]`; the append and the requeue are both no-ops and
-the attempt is journaled rather than dropped), `revert-conflict`, `batch-rebased`,
+named a member already in `evictions[]`; the append, the requeue, the caller's own
+`unit-failed` and the batch advance are ALL no-ops — since #613 the duplicate claim is the
+single gate on all four — and the attempt is journaled rather than dropped), `revert-conflict`, `batch-rebased`,
 `batch-dissolved`,
 `batch-preserved` (#563 — the dissolve threshold was crossed but the survivors' re-run
 suite came back green, so the batch ships them instead of dissolving), `batch-blocked`
@@ -556,7 +562,12 @@ claim emits neither). `gate-inconclusive` (#583 — the incremental gate came ba
 sits alongside `batch-blocked` as the per-member analogue of the aggregate suite's
 "block, don't dissolve" precedent; #594 routes an unevidenced `task-failed` here too).
 `eviction-duplicate` (#595 — `evictMemberDirectly` and `evictMembers` both emit it when
-asked to evict a member already in `evictions[]`). Member/tail/report/fix-agent spawn, progress,
+asked to evict a member already in `evictions[]`; since #613 it also suppresses the caller's
+`unit-failed`/`member-advanced` pair and the member advance, so the pair is emitted exactly
+once per member and names the member the batch is advancing FROM) and
+`member-advance-skipped` (#613 — a resolution that lost the one-shot claim on
+`executing_member` and so advanced nothing; journaled rather than dropped, so a batch that
+stops advancing never does so silently). Member/tail/report/fix-agent spawn, progress,
 completion and park events reuse the existing unit-generic names (`assigned`/`spawned`/`unit-failed`/
 `external-advance`/`pr-parked`/`merge-accepted`/`report-dispatched`/`teardown-done`/
 `teardown-failed`) with `unit = batch:<id>`.

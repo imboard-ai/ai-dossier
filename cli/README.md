@@ -1075,7 +1075,7 @@ ai-dossier plan validate --issue 462
 
 | Command | What it does | Writes? |
 |---|---|---|
-| `post` | Validates the file's five sections, stamps `head=`, comments it via `gh issue comment` | yes |
+| `post` | Validates the file's five sections, stamps `head=`, comments it via `gh issue comment`; always discloses on stderr that it reads only the given file, never the issue's comment thread | yes |
 | `get` | Prints the latest artifact (raw in text mode, parsed fields with `--json`); exits 1 when no plan exists | no |
 | `validate` | Deterministic checks against the local clone; prints a `{valid, reasons[]}` JSON verdict; exits 1 when invalid | no |
 
@@ -1083,7 +1083,10 @@ ai-dossier plan validate --issue 462
 Files path not marked `(new)` exists at current HEAD (`git cat-file -e HEAD:<path>`) — a
 path marked `(new)` (the issue's scope is to create it) is exempt, and warns instead if it
 already exists — head-distance (commits on HEAD since the plan's `head=` — an info reason
-when non-zero), and a risk-floor scan of
+when non-zero), discussion drift against the issue itself (non-artifact comments predating
+the plan are a `warn`, comments postdating it an `info`; `plan:v1`/`runstate:v1` comments
+never count, and the check reports rather than disappears when a timestamp is unreadable),
+and a risk-floor scan of
 Predicted Files (auth/secrets, payments/billing, migrations/schema, protocol surfaces are
 flagged as elevated-risk, info severity) — reporting `{check, severity, message}` reasons
 (full check/severity table in [docs/reference/plan-artifact.md](../docs/reference/plan-artifact.md)).

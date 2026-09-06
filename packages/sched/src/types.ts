@@ -1005,6 +1005,13 @@ export type JournalEventName =
   | 'stalled'
   | 'redispatched'
   | 'unit-failed'
+  // #613: a member resolution that lost the one-shot claim on
+  // `executing_member` and therefore advanced nothing. Journaled rather than
+  // dropped, for the same reason `eviction-duplicate` is (#595): a batch that
+  // stops advancing must say so, otherwise an operator sees a clean
+  // `verify-complete` and then silence, with no way to tell a benign duplicate
+  // from a batch stuck on a member nobody will spawn.
+  | 'member-advance-skipped'
   | 'dependents-blocked'
   // #525: a slot reaching `idle` on a per-issue dispatch terminal path
   // (verified completion, external-advance, a detached-ship park, a direct

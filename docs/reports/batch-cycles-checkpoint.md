@@ -208,7 +208,7 @@ units parked for 8 h each. Wanted: a check in `ship-issue` or the auto-merge wat
 The scheduled-controls sweep paged on a single blind (exit-2) CI Health run on 2026-09-02, which
 self-resolved. Consider ignoring exit-2 unless repeated.
 
-### 4.8 Eviction bookkeeping (#595) — **dissolve rule was right; duplicate fixed; mis-attribution still OPEN**
+### 4.8 Eviction bookkeeping (#595, #613) — **dissolve rule was right; duplicate fixed (#595); mis-attribution fixed (#613)**
 
 #598 carried, from the pre-existing trap row, the claim that `b-20260903-01` "dissolved at `N=4
 evictions=3 threshold=2` where two of the three were the same issue — by distinct member it was AT
@@ -261,18 +261,23 @@ a real defect in that member's path would be invisible. This was first establish
 sequence in the [2026-09-03 analysis on
 #595](https://github.com/imboard-ai/ai-dossier/issues/595#issuecomment-5521881175).
 
-**#595's fix does not close this half.** `appendEvictions` skips a record whose `issue` is already
-present, so the mis-attributed 05:54:28 record is now dropped rather than corrected — #340 still
-ends with no eviction record naming it. De-duplicating an append cannot make a record name the
-right member. "An eviction record names the member the batch is advancing *from*" remains an open
-requirement; whoever picks it up should assert on **which** members the records name, since a
-count-only regression test passes on exactly this failure.
+**#595's fix did not close this half; #613 does.** `appendEvictions` skips a record whose `issue`
+is already present, so the mis-attributed 05:54:28 record was dropped rather than corrected — #340
+still ended with no eviction record naming it. De-duplicating an append cannot make a record name
+the right member. **Fixed in #613** (`@ai-dossier/sched` >= 0.22.2): resolving a member is now a
+one-shot claim — `advanceMemberOrValidate` advances only while `executing_member` still equals the
+member the caller resolved, and `evictMemberDirectly` reports `duplicate: true` to a caller that
+lost the race, which then journals no `unit-failed` and does not advance. A second resolution of
+#826 can therefore no longer consume #340's place in the sequence, and a lost claim journals
+`member-advance-skipped` rather than returning silently. The regression test asserts on **which**
+members the records name, since a count-only test passes on exactly this failure.
 
 **What is still true.** The stored `evictions` array does retain the duplicate — `[47, 826, 826,
 1512]`, four entries over three members — because #826 was evicted twice, ~2 min apart. That no
 longer moves the dissolve trigger, but any eviction-**rate** metric computed from raw event counts
 (RFC-0001 §E.5 reads one, to decide whether the 4-member cap can be raised) is still inflated by
-it — one of two residual defects, the other being the mis-attribution above.
+it — the last residual defect of this batch's bookkeeping, the mis-attribution above having been
+fixed in #613.
 
 **#595 was re-scoped on exactly this basis and shipped** (`@ai-dossier/sched` >= 0.22.0): it
 fixed the record and display layers, and left the dissolve rule alone. `appendEvictions`
