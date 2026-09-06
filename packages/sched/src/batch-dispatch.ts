@@ -125,6 +125,7 @@ import {
   findBatch,
   findEntry,
   patchBatch,
+  patchSlot,
   releaseBatchSlot,
   requeueMember,
   slotForBatch,
@@ -1883,14 +1884,27 @@ function reconcileMemberSlot(
     milestone !== null &&
     ((isMemberComplete(milestone) && !isMemberComplete(milestone, slot.spawned_at)) ||
       (isMemberBlocked(milestone) && !isMemberBlocked(milestone, slot.spawned_at)));
-  if (staleTerminal) {
+  // #610: this dispatch's own spawned_at IS the fence value the two
+  // predicates above already key on — reusing it here as the "already
+  // journalled" marker means a fresh dispatch (new spawned_at) invalidates
+  // the marker for free, with no reset needed at any spawn site. Without the
+  // gate this re-fired every tick for as long as the stale milestone stayed
+  // latest — once every reconcile interval for the member's whole run.
+  if (staleTerminal && slot.stale_milestone_ignored_for !== slot.spawned_at) {
     journalEvent(deps, 'stale-milestone-ignored', unit(batchId), {
       issue: memberIssue,
       slot: slot.id,
       run: milestone.run,
-      at: milestone.at,
+      // The engine's OWN decision time — `milestone.at` is kept separately so
+      // an operator can still see how old the stale milestone actually is.
+      at: now.toISOString(),
+      milestone_at: milestone.at,
       detail: `${milestone.status === 'blocked' ? 'blocked' : 'complete'} milestone predates dispatch spawned_at=${slot.spawned_at}`,
     });
+    deps.store.withLock((s) => ({
+      state: patchSlot(s, slot.id, { stale_milestone_ignored_for: slot.spawned_at }, now),
+      result: undefined,
+    }));
   }
 
   if (isMemberComplete(milestone, slot.spawned_at)) {

@@ -628,6 +628,15 @@ export function validateState(data: unknown): SchedState {
         `Slot ${slot.id}: log_offset_at_spawn must be a non-negative integer or null`
       );
     }
+    if (
+      slot.stale_milestone_ignored_for !== null &&
+      slot.stale_milestone_ignored_for !== undefined &&
+      !isIsoDateString(slot.stale_milestone_ignored_for)
+    ) {
+      throw new Error(
+        `Slot ${slot.id}: stale_milestone_ignored_for must be an ISO date string or null`
+      );
+    }
     if (!isIsoDateString(slot.updated_at)) {
       throw new Error(`Slot ${slot.id}: updated_at must be an ISO date string`);
     }
@@ -719,6 +728,10 @@ export function validateState(data: unknown): SchedState {
     // both backfill to null like fenced_at.
     spawned_at: slot.spawned_at ?? null,
     log_offset_at_spawn: slot.log_offset_at_spawn ?? null,
+    // Pre-#610 (1.11.0) slots journalled `stale-milestone-ignored` once per
+    // tick with no per-dispatch marker at all — null is exact, not a guess:
+    // nothing was ever recorded for any dispatch under the old behavior.
+    stale_milestone_ignored_for: slot.stale_milestone_ignored_for ?? null,
   }));
   const entries = (obj.entries as QueueEntry[]).map((entry) => ({
     ...entry,
@@ -878,6 +891,9 @@ export const CLEARED_SLOT_FIELDS = {
   // #524: a released slot holds no dispatch — its next spawn stamps these fresh.
   spawned_at: null,
   log_offset_at_spawn: null,
+  // #610: a released slot owns no dispatch to have journalled a stale
+  // milestone for.
+  stale_milestone_ignored_for: null,
 };
 
 export function transitionSlot(
@@ -942,6 +958,30 @@ export function patchBatch(
     ...state,
     batches: state.batches.map((b) =>
       b.id === batchId ? { ...b, ...patch, updated_at: now.toISOString() } : b
+    ),
+  };
+}
+
+/**
+ * Patch a slot's METADATA (pid/phase/branch/last_head/last_progress/the
+ * stale-milestone marker) without a status change — mirrors `patchBatch`.
+ * `status` and `id` are excluded on purpose: every status change goes
+ * through `transitionSlot`'s typed rails, never a hand-written assignment.
+ * Was `engine.ts`'s own private `patchSlot` (#524); moved here (#610) so
+ * `batch-dispatch.ts` — a deliberately separate dispatcher (RFC-0001 §C.4)
+ * that never imports from `engine.ts` — can patch a slot in place too,
+ * without a second hand-rolled copy of the same three-line mutation.
+ */
+export function patchSlot(
+  state: SchedState,
+  slotId: number,
+  patch: Omit<Partial<SlotEntry>, 'id' | 'status'>,
+  now: Date = new Date()
+): SchedState {
+  return {
+    ...state,
+    slots: state.slots.map((s) =>
+      s.id === slotId ? { ...s, ...patch, updated_at: now.toISOString() } : s
     ),
   };
 }

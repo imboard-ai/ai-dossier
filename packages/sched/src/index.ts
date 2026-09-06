@@ -200,6 +200,7 @@ export {
   findEntry,
   isPreservedMember,
   patchBatch,
+  patchSlot,
   requeueMember,
   TRANSITIONS,
   transitionBatch,

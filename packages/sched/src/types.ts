@@ -501,6 +501,17 @@ export interface SlotEntry {
    * Added in schema 1.7.0; 1.6.0 slots backfill null.
    */
   log_offset_at_spawn: number | null;
+  /**
+   * The `spawned_at` value already covered by a `stale-milestone-ignored`
+   * journal entry (#610) — `null` until the first stale-milestone decision
+   * this dispatch makes. Compared against `spawned_at` itself rather than a
+   * boolean: a fresh dispatch stamps a NEW `spawned_at`, so the marker goes
+   * stale automatically (no explicit reset needed at any spawn site) and the
+   * event is keyed on the dispatch it was decided for, never on the member.
+   * Added in schema 1.12.0; 1.11.0 slots backfill null (nothing was
+   * journalled yet under the old once-per-tick behavior).
+   */
+  stale_milestone_ignored_for: string | null;
   updated_at: string;
 }
 
@@ -874,8 +885,8 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 /** Rebases of a conflicting batch PR before dissolving into halves (§F.9 "re-ship once"). */
 export const MAX_REBASE_ATTEMPTS = 1;
 
-/** 1.11.0 (#583): `BatchEntry` gains `member_gates` and `blocked_reason`. */
-export const SCHEMA_VERSION = '1.11.0' as const;
+/** 1.12.0 (#610): `SlotEntry` gains `stale_milestone_ignored_for`. */
+export const SCHEMA_VERSION = '1.12.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -890,6 +901,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.8.0',
   '1.9.0',
   '1.10.0',
+  '1.11.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.8.0' as const;
