@@ -801,6 +801,91 @@ describe('stall/escalation ladder (AC4)', () => {
     expect(failedEvent?.last_tool).toBe('Monitor');
   });
 
+  it('a same-tick verify-incomplete (ground truth reachable immediately) attributes last_tool (#591/#620 AC1)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const spawn = h.spawnCalls[0];
+
+    fs.mkdirSync(path.dirname(spawn.logFile), { recursive: true });
+    fs.writeFileSync(
+      spawn.logFile,
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 't1', name: 'Monitor', input: {} }] },
+      })
+    );
+    h.alive.delete(spawn.pid); // ground truth stays reachable — no outage this time
+
+    const result = h.tick();
+    expect(result.redispatched).toEqual(['issue:101']);
+    const viEvent = h.journal
+      .read()
+      .find((e) => e.event === 'verify-incomplete' && e.issue === 101);
+    expect(viEvent?.last_tool).toBe('Monitor');
+  });
+
+  it('a verify-incomplete decision delayed by a ground-truth outage still attributes last_tool (#620)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const spawn = h.spawnCalls[0];
+
+    // The agent armed Monitor, then exited — but this time ground truth is
+    // ALSO unreachable at the exact moment the dead pid is detected (a `gh`
+    // outage overlapping the exit, not a hypothetical). #596/#524 already
+    // proved this combination happens; #620's bug was that the tool name
+    // read on THIS tick was silently dropped when the decision deferred.
+    fs.mkdirSync(path.dirname(spawn.logFile), { recursive: true });
+    fs.writeFileSync(
+      spawn.logFile,
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 't1', name: 'Monitor', input: {} }] },
+      })
+    );
+    h.alive.delete(spawn.pid);
+    h.unreachable.add(101);
+
+    const first = h.tick();
+    expect(first.redispatched).toHaveLength(0);
+    expect(
+      h.journal.read().some((e) => e.event === 'ground-truth-unreachable' && e.issue === 101)
+    ).toBe(true);
+    expect(h.state().slots.find((s) => s.unit === 'issue:101')?.status).toBe('verifying');
+
+    // Truth returns on a LATER tick — the slot is no longer `running`, so
+    // `recordDispatchRunLog`'s exactly-once guard would refuse to re-read;
+    // the fix re-derives it independently instead of losing it.
+    h.unreachable.delete(101);
+    const second = h.tick();
+    expect(second.redispatched).toEqual(['issue:101']);
+    const viEvent = h.journal
+      .read()
+      .find((e) => e.event === 'verify-incomplete' && e.issue === 101);
+    expect(viEvent?.last_tool).toBe('Monitor');
+  });
+
+  it('a verify-incomplete with no parseable tool omits last_tool rather than defaulting it (#620 AC2)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const spawn = h.spawnCalls[0];
+    // No dispatch log at all — nothing to parse.
+    h.alive.delete(spawn.pid);
+
+    const result = h.tick();
+    expect(result.redispatched).toEqual(['issue:101']);
+    const viEvent = h.journal
+      .read()
+      .find((e) => e.event === 'verify-incomplete' && e.issue === 101);
+    expect(viEvent).toBeDefined();
+    expect(viEvent?.last_tool).toBeUndefined();
+  });
+
   it('a strongest-tier unverified exit whose branch already has an open PR parks instead of failing (#596 AC2/AC3/AC6)', () => {
     const h = harness();
     REGISTRIES.push(h.dir);

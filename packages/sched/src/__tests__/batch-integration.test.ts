@@ -22,6 +22,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 // `resumeBlockedGate` entry points cannot reproduce (both always read state
 // fresh from the store).
 import { type BatchTickResult, evictMemberAndContinue } from '../batch-dispatch';
+// Same rationale as the `evictMemberAndContinue` import above: a test-only
+// path builder, not part of the package's public `index.ts` surface.
+import { batchMemberLogPath } from '../dispatch';
 import {
   assignToIdleSlot,
   type BatchDispatchDeps,
@@ -588,6 +591,52 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     const parked = h.tick();
     expect(parked.parked).toEqual(['batch:b-evict']);
     expect(findBatch(h.state(), 'b-evict')?.status).toBe('awaiting-merge');
+  }, 60_000);
+
+  it('a member that exits with no milestone at all (agent-exited-unverified) is evicted with last_tool attributed (#591/#620 AC4)', async () => {
+    const repo = scratchRepo();
+    // No package.json, so batch-setup's warmup step never creates
+    // `node_modules/<require-dep>` — the member's first action (resolving it
+    // under the worktree) fails and it `process.exit(1)`s having posted NO
+    // milestone at all: the `dead && !blockedNow` branch of
+    // `reconcileMemberSlot`, distinct from every other eviction test in this
+    // file (which all evict via a SELF-REPORTED `blocked` milestone).
+    const h = batchHarness(repo, ['--mode=batch', '--require-dep=totally-missing-pkg-620'], {
+      maxSlots: 1,
+    });
+    h.enqueue([{ issue: 901, mode: 'slot', batch: 'b-unverified', anchor: 900, tier: 'mid' }]);
+    // b-unverified is already sealed forming → ready by enqueueEntries
+
+    h.tick(); // batch-setup + member 1 spawns, then dies before posting anything
+    const pid = batchSlotPid(h, 'b-unverified') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    expect(fs.existsSync(path.join(h.truthDir, '901.json'))).toBe(false); // no milestone posted
+
+    // The agent's own log has no Claude-CLI-shaped output (it's a plain
+    // stderr line), so nothing is parseable yet — append one tool_use event
+    // the same shape a real headless agent's dispatch log carries, mirroring
+    // exactly what `engine.ts`'s equivalent regression test does for the
+    // full-cycle path.
+    const logFile = batchMemberLogPath(h.deps.store.runsDir, 'b-unverified', 1, 901);
+    fs.appendFileSync(
+      logFile,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 't1', name: 'Monitor', input: {} }] },
+      })}\n`
+    );
+
+    const result = h.tick(); // reconciles the dead member: no milestone → agent-exited-unverified
+    expect(result.failed).toContain('batch:b-unverified');
+    const batch = findBatch(h.state(), 'b-unverified');
+    expect(batch?.evictions).toHaveLength(1);
+    expect(batch?.evictions[0]).toMatchObject({ issue: 901, reason: 'agent-exited-unverified' });
+
+    const failedEvent = h.deps.journal
+      .read()
+      .find((e) => e.event === 'unit-failed' && e.issue === 901);
+    expect(failedEvent?.reason).toBe('agent-exited-unverified');
+    expect(failedEvent?.last_tool).toBe('Monitor');
   }, 60_000);
 
   it('dissolve (RFC F.8): >⅓ evicted requeues every unshipped member, batch never ships', async () => {
