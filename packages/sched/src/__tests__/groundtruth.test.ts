@@ -11,6 +11,7 @@ import {
   isVerifiedComplete,
   parseIssueLabelsJson,
   parseMilestoneJson,
+  parseMilestoneListJson,
   parseOpenPrListJson,
   parsePrViewJson,
   parseSetupInfo,
@@ -734,5 +735,76 @@ describe('parseIssueLabelsJson', () => {
     expect(parseIssueLabelsJson(null)).toBeUndefined();
     expect(parseIssueLabelsJson('{')).toBeUndefined();
     expect(parseIssueLabelsJson(JSON.stringify({ state: 'OPEN' }))).toBeUndefined();
+  });
+});
+
+describe('parseMilestoneListJson (#622 — the milestones one dispatch posted)', () => {
+  const row = (phase: string, status: string, at: string, mode = 'slot') => ({
+    phase,
+    status,
+    run: 'r-596-a39e',
+    at,
+    mode,
+  });
+
+  it('parses the runstate list --json array, oldest first', () => {
+    const out = parseMilestoneListJson(
+      JSON.stringify([
+        row('plan', 'done', '2026-09-06T12:42:30Z'),
+        row('review', 'done', '2026-09-06T12:52:37Z'),
+        row('implement', 'done', '2026-09-06T12:52:52Z'),
+      ])
+    );
+    expect(out).toHaveLength(3);
+    expect(out?.[1]?.phase).toBe('review');
+    expect(out?.[1]?.keys.mode).toBe('slot');
+  });
+
+  it('skips a malformed element rather than losing the whole read', () => {
+    // Losing a well-formed terminal milestone to a malformed neighbour is
+    // exactly the failure this call exists to prevent.
+    const out = parseMilestoneListJson(
+      JSON.stringify([{ nonsense: true }, row('review', 'done', '2026-09-06T12:52:37Z')])
+    );
+    expect(out).toHaveLength(1);
+    expect(out?.[0]?.phase).toBe('review');
+  });
+
+  it('is tri-state: null stdout is unreachable, empty is verifiably none', () => {
+    expect(parseMilestoneListJson(null)).toBeUndefined();
+    expect(parseMilestoneListJson('')).toEqual([]);
+    expect(parseMilestoneListJson('[]')).toEqual([]);
+    expect(parseMilestoneListJson('not json')).toBeUndefined();
+    expect(parseMilestoneListJson('{"phase":"review"}')).toBeUndefined(); // object, not array
+  });
+
+  it("#622: the real trail — a catch-up milestone buries the dispatch's completion", () => {
+    // #596's member, verbatim. `review/done` is complete and fresh; the
+    // `implement/done` posted 15s later is what `latestMilestone` returns,
+    // and reading only that evicted a member with pushed, conformant work.
+    const window = parseMilestoneListJson(
+      JSON.stringify([
+        row('plan', 'done', '2026-09-06T12:42:30Z'),
+        row('review', 'done', '2026-09-06T12:52:37Z'),
+        row('implement', 'done', '2026-09-06T12:52:52Z'),
+      ])
+    );
+    const spawnedAt = '2026-09-06T12:40:00Z';
+    const newest = window?.[window.length - 1];
+    expect(isMemberComplete(newest ?? null, spawnedAt)).toBe(false); // the bug
+
+    const lastTerminal = [...(window ?? [])]
+      .reverse()
+      .find((m) => isMemberComplete(m, spawnedAt) || isMemberBlocked(m, spawnedAt));
+    expect(lastTerminal?.phase).toBe('review'); // the fix
+    expect(isMemberComplete(lastTerminal ?? null, spawnedAt)).toBe(true);
+  });
+
+  it("#622 keeps #605's fence: a PREVIOUS run's terminal milestone is out of the window", () => {
+    const spawnedAt = '2026-09-06T12:40:00Z';
+    const stale = row('review', 'done', '2026-09-06T08:15:56Z');
+    expect(
+      isMemberComplete(parseMilestoneListJson(JSON.stringify([stale]))?.[0] ?? null, spawnedAt)
+    ).toBe(false);
   });
 });

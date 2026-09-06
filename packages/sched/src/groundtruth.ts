@@ -76,6 +76,20 @@ export interface GroundTruth {
    */
   latestMilestone(issue: number): GroundTruthMilestone | null | undefined;
   /**
+   * #622: every milestone posted at or after `since`, oldest first — the
+   * milestones ONE dispatch produced.
+   *
+   * `latestMilestone` cannot answer what a dispatch achieved: a member that
+   * posts `review done` and then a catch-up `implement done` fifteen seconds
+   * later buries its own completion signal, and a reader seeing only the
+   * newest milestone concludes the unit never finished and evicts it.
+   *
+   * OPTIONAL on the interface so existing implementations (and every test
+   * double) stay valid; callers fall back to `latestMilestone` when it is
+   * absent. Same tri-state as its siblings: `undefined` = poll failed.
+   */
+  milestonesSince?(issue: number, since: string): GroundTruthMilestone[] | undefined;
+  /**
    * Whether the GitHub issue is CLOSED (a merged PR auto-closes it). False
    * when unreachable — an unreachable poll can never *confirm* completion,
    * which is the only direction this signal is used in.
@@ -136,6 +150,33 @@ export const groundTruthExec: ExecFn = createExecFn(GROUND_TRUTH_TIMEOUT_MS, {
 });
 
 /** Parse the stdout of `ai-dossier runstate last --issue N --json`. */
+/**
+ * #622: `runstate list --json`'s array form. Same tolerance as
+ * {@link parseMilestoneJson} per element — an entry missing the three
+ * required fields is skipped rather than failing the whole read, because
+ * losing a well-formed terminal milestone to a malformed neighbour is the
+ * exact failure this call exists to prevent.
+ *
+ * Tri-state like its sibling: `undefined` = the poll failed (unreachable),
+ * `[]` = verifiably no milestones.
+ */
+export function parseMilestoneListJson(stdout: string | null): GroundTruthMilestone[] | undefined {
+  if (stdout === null) return undefined;
+  if (stdout.trim() === '') return [];
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (!Array.isArray(parsed)) return undefined;
+    const out: GroundTruthMilestone[] = [];
+    for (const item of parsed) {
+      const one = parseMilestoneJson(JSON.stringify(item));
+      if (one !== null) out.push(one);
+    }
+    return out;
+  } catch {
+    return undefined;
+  }
+}
+
 export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone | null {
   if (stdout === null || stdout.trim() === '' || stdout.trim() === 'null') return null;
   try {
@@ -193,6 +234,14 @@ export function createExecGroundTruth(
       );
       if (out === null) return undefined; // subprocess failed — unreachable, NOT known-absent
       return parseMilestoneJson(out); // 'null' output → null (verifiably no milestone)
+    },
+    milestonesSince(issue: number, since: string): GroundTruthMilestone[] | undefined {
+      const out = exec(
+        runstateBin,
+        ['runstate', 'list', '--issue', String(issue), '--since', since, '--json'],
+        opts.repoDir
+      );
+      return parseMilestoneListJson(out);
     },
     issueClosed(issue: number): boolean {
       return (

@@ -102,6 +102,7 @@ export {
   type PrTruth,
   parseIssueLabelsJson,
   parseMilestoneJson,
+  parseMilestoneListJson,
   parseOpenPrListJson,
   parsePrViewJson,
   parseSetupInfo,
