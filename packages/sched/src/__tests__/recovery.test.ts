@@ -454,6 +454,20 @@ describe('evictMembers (real git reverts)', () => {
     // 1 of 3 members evicted stays well under the dissolve threshold either way.
     expect(checkDissolveTrigger(batch)).toBe(false);
     expect(second.dissolved).toBe(false);
+
+    // The whole second call is a no-op, not just the record (#595 review): a
+    // repeat requeue would overwrite the first eviction's `failure_evidence`
+    // — leaving the queue entry and `evictions[]` disagreeing about why the
+    // member went — and would take the `executing → evicted → requeued` rail
+    // if the member had since been re-dispatched, killing that live run. So no
+    // second `member-evicted` either: one eviction, one event.
+    expect(second.requeued).toEqual([]);
+    expect(h.events.filter((e) => e.event === 'member-evicted')).toHaveLength(1);
+    const duplicate = h.events.find((e) => e.event === 'eviction-duplicate');
+    // The warning names the record that already exists, so the operator does
+    // not have to go read state.json to find out why the member first went.
+    expect(duplicate?.detail).toContain('already recorded as evicted');
+    expect(duplicate?.detail).toContain('first: suite-red');
   });
 
   it('evicts an eviction group together', () => {

@@ -52,6 +52,7 @@ import type { ExecFn } from './project';
 import {
   appendEvictions,
   createBatch,
+  duplicateEvictionDetail,
   findBatch,
   isPreservedMember,
   patchBatch,
@@ -729,9 +730,31 @@ export function evictMembers(
   }
 
   // Requeue every reverted member with its evidence attached (AC2).
+  //
+  // A member already in `evictions[]` is skipped entirely (#595 AC1): the
+  // reverts above are idempotent (each checks the branch history first), but a
+  // second `requeueMember` would overwrite the first eviction's
+  // `failure_evidence` — leaving the queue entry and `evictions[]` disagreeing
+  // about why the member was evicted — and would take the
+  // `executing → evicted → requeued` rail if the member has since been
+  // re-dispatched full-cycle, killing that live run. The attempt is journaled,
+  // never silently dropped.
+  const alreadyEvicted = new Map(batch.evictions.map((e) => [e.issue, e]));
   const requeued: number[] = [];
   const records: EvictionRecord[] = [];
   for (const issue of targets) {
+    const prior = alreadyEvicted.get(issue);
+    if (prior) {
+      journal(
+        deps,
+        unitEvent('eviction-duplicate', `batch:${batchId}`, {
+          issue,
+          detail: duplicateEvictionDetail(issue, input.reason, prior),
+        }),
+        now
+      );
+      continue;
+    }
     const tests = input.failingByMember?.get(issue) ?? [];
     const memberCommits = revertedByMember.get(issue) ?? [];
     const evidence: FailureEvidence = {
@@ -772,6 +795,8 @@ export function evictMembers(
     );
   }
 
+  // `appendEvictions` stays the state-level backstop; the loop above already
+  // filtered the duplicates, so `duplicate` is normally empty here.
   const { evictions, duplicate } = appendEvictions(batch, records);
   next = patchBatch(next, batchId, { evictions }, now);
   for (const dup of duplicate) {
@@ -779,7 +804,7 @@ export function evictMembers(
       deps,
       unitEvent('eviction-duplicate', `batch:${batchId}`, {
         issue: dup.issue,
-        detail: `${dup.reason} — issue #${dup.issue} is already recorded as evicted; no second record written`,
+        detail: duplicateEvictionDetail(dup.issue, dup.reason, alreadyEvicted.get(dup.issue)),
       }),
       now
     );

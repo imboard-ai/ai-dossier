@@ -141,8 +141,15 @@ Recorded in [`docs/agent-traps.md`](../agent-traps.md) (`tee: /dev/stderr` row) 
 Fixes were split in two. **imboard-monorepo#3996** (the script half) is **CLOSED** — the
 `tee`/`pipefail` construct is gone. **#594** (the sched half: the gate must read `task-failed`
 with an empty result body as *capability broken*, taking #585's block-the-batch path rather than
-evicting) is **still OPEN**. Until #594 lands, any capability that reports a definite failure it
-did not earn still evicts the member, so the class of defect survives its first instance.
+evicting) is **now CLOSED too** (`@ai-dossier/sched` >= 0.22.0). `hasEarnedFailureEvidence`
+(`packages/sched/src/attribution.ts`) requires the capability to have EARNED its `task-failed` —
+failing-test output for a `test.*` capability, compiler errors for the others — before the gate
+evicts; an empty or framing-only capture takes the block path on the live gate and on the
+`sched resume --batch` recheck alike, and the journal detail names which branch fired. Caveat for
+whoever reads this next: the bar is a marker match over the capture, so it rejects a wrapper's own
+prose about a failure (the recorded 765-byte body ends `... exited 1 — real test failure.`, which
+an unanchored `/fail/i` accepted — the first cut of #594 shipped exactly that hole) but would not
+catch a script that fabricates a `FAIL` line.
 
 *Verify:* `gh issue view 594 --repo imboard-ai/ai-dossier --json state` ·
 `gh issue view 3996 --repo imboard-ai/imboard-monorepo --json state`
@@ -201,7 +208,7 @@ units parked for 8 h each. Wanted: a check in `ship-issue` or the auto-merge wat
 The scheduled-controls sweep paged on a single blind (exit-2) CI Health run on 2026-09-02, which
 self-resolved. Consider ignoring exit-2 unless repeated.
 
-### 4.8 Eviction bookkeeping (#595) — **claim corrected; the dissolve itself was right**
+### 4.8 Eviction bookkeeping (#595) — **claim corrected; the dissolve itself was right; shipped as re-scoped**
 
 #598 carried, from the pre-existing trap row, the claim that `b-20260903-01` "dissolved at `N=4
 evictions=3 threshold=2` where two of the three were the same issue — by distinct member it was AT
@@ -237,7 +244,14 @@ longer moves the dissolve trigger, but any eviction-**rate** metric computed fro
 (RFC-0001 §E.5 reads one, to decide whether the 4-member cap can be raised) is still inflated by
 it. That is the real residual defect, and it is narrower than #595 currently describes.
 
-**#595 should be re-scoped or closed on this basis** before anyone spends a run on it.
+**#595 was re-scoped on exactly this basis and shipped** (`@ai-dossier/sched` >= 0.22.0): it
+fixed the record and display layers, and left the dissolve rule alone. `appendEvictions`
+(`packages/sched/src/state.ts`) is the single `evictions[]` append and is a no-op for a member
+already recorded — as is the repeat requeue that used to run with it, which could otherwise
+overwrite the first eviction's `failure_evidence` or kill a live re-dispatch — journaling
+`eviction-duplicate` instead; `buildStatusReport` de-dups on read so a `state.json` written before
+the fix reports one row per member in `sched status` and `--json`. A legacy stored array is left as
+written, so the `jq` recipe below still shows the historical duplicates.
 
 *Verify:*
 
@@ -334,9 +348,11 @@ two copies of this recipe had already diverged once.
 
 What belongs to *this programme*, once the fleet is running again, in order:
 
-1. Land **#594** (§4.1's remaining half — imboard-monorepo#3996 is already in). Re-run one batch
-   before trusting the gate: the script fix removes the constant-function behaviour on imboard, but
-   nothing yet stops the *next* broken capability from evicting members the same way.
+1. ~~Land **#594**~~ — **done** (§4.1; shipped with #595 in the `b-20260906-03` batch). Still
+   re-run one batch before trusting the gate end-to-end: the script fix removed the
+   constant-function behaviour on imboard and the sched fix stops the *next* broken capability from
+   evicting members the same way, but neither has been exercised against a real broken capability
+   since.
 2. Land **§4.2**'s readiness floor, sized against §3's corrected record rather than the
    pre-registered prediction.
 3. Close the three open batch anchors and clear the broken pool entries (§4.9) so the next backlog

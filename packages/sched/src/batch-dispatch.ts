@@ -71,7 +71,7 @@ import {
 } from '@ai-dossier/worktree-pool';
 import {
   type BoundaryCommit,
-  hasFailingTestEvidence,
+  hasEarnedFailureEvidence,
   type MemberFootprint,
   memberRanges,
   parseBoundaryCommits,
@@ -121,6 +121,7 @@ import { buildSchedRunLogEntry, finalizeRunLogEntry, readDispatchLog } from './r
 import { assignToIdleSlot, freeCapacity } from './scheduler';
 import {
   appendEvictions,
+  duplicateEvictionDetail,
   findBatch,
   findEntry,
   patchBatch,
@@ -268,6 +269,30 @@ function gateDetailExcerpt(
   if (!text) return undefined;
   const buf = Buffer.from(text, 'utf-8');
   return buf.length > 500 ? buf.subarray(buf.length - 500).toString('utf-8') : text;
+}
+
+/** A journal detail with the gate's output excerpt appended when there is one. */
+function withExcerpt(message: string, excerpt: string | undefined): string {
+  return excerpt ? `${message}: ${excerpt}` : message;
+}
+
+/**
+ * Which block-the-batch branch a gate result took (#594 AC3). Both an
+ * `automation-broken`/`capability-unavailable` result and a `task-failed` the
+ * gate could not evidence land on `gate-inconclusive:<cap>`; only the detail
+ * distinguishes "the capability is broken" from "the capability claimed a
+ * failure it did not prove", and those need different operator responses.
+ */
+function describeInconclusive(gate: {
+  id: string;
+  outcome: string;
+  outputTail?: string | null;
+}): string {
+  if (gate.outcome !== 'task-failed') return `reported ${gate.outcome}`;
+  const captured = gate.outputTail?.trim();
+  return captured
+    ? `reported task-failed with no failing-test evidence in its ${Buffer.byteLength(captured, 'utf-8')}-byte capture`
+    : 'reported task-failed with an empty capture — no evidence at all';
 }
 
 /**
@@ -1399,11 +1424,19 @@ function runIncrementalGate(
     (r) => r.outcome === 'automation-broken' || r.outcome === 'capability-unavailable'
   );
   const earnedFailure =
-    rawFailure && hasFailingTestEvidence(rawFailure.outputTail) ? rawFailure : undefined;
-  const unreadableFailure = rawFailure && !earnedFailure ? rawFailure : undefined;
-  const worstGate = rawFailure ?? gateInconclusive;
-  if (worstGate) {
-    recordMemberGate(deps, batchId, memberIssue, worstGate, now);
+    rawFailure && hasEarnedFailureEvidence(rawFailure.id, rawFailure.outputTail)
+      ? rawFailure
+      : undefined;
+  const unevidencedFailure = rawFailure && !earnedFailure ? rawFailure : undefined;
+  // Record the gate the batch is actually routed on, not merely the worst
+  // outcome: an unevidenced `task-failed` alongside a genuine
+  // `automation-broken` blocks on the LATTER, and `member_gates` naming the
+  // former would contradict `blocked_reason` in `sched status` — and would
+  // name a different capability than `resumeBlockedGate` rechecks, since that
+  // parses `blocked_reason`.
+  const decisiveGate = earnedFailure ?? gateInconclusive ?? unevidencedFailure;
+  if (decisiveGate) {
+    recordMemberGate(deps, batchId, memberIssue, decisiveGate, now);
   }
   if (earnedFailure) {
     const reason = `incremental-gate-failed:${earnedFailure.id}`;
@@ -1412,9 +1445,10 @@ function runIncrementalGate(
     journalEvent(deps, 'unit-failed', unit(batchId), {
       issue: memberIssue,
       reason,
-      detail: excerpt
-        ? `cap run ${earnedFailure.id} reported task-failed after member review done: ${excerpt}`
-        : `cap run ${earnedFailure.id} reported task-failed after member review done`,
+      detail: withExcerpt(
+        `cap run ${earnedFailure.id} reported task-failed with failing-test evidence after member review done`,
+        excerpt
+      ),
     });
     deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
     evictMemberAndContinue(
@@ -1430,17 +1464,22 @@ function runIncrementalGate(
     );
     return true;
   }
-  const inconclusive = gateInconclusive ?? unreadableFailure;
+  const inconclusive = gateInconclusive ?? unevidencedFailure;
   if (inconclusive) {
     const reason = `gate-inconclusive:${inconclusive.id}`;
     writeGateLog(deps, batchId, inconclusive.id, memberIssue, inconclusive.outputTail);
     const excerpt = gateDetailExcerpt(inconclusive.outputTail, inconclusive.reason);
+    // #594 AC3: say WHICH of the two block-the-batch branches fired. Both land
+    // on `gate-inconclusive:<cap>`, and a later run must not have to re-derive
+    // "the capability was broken" from "the capability reported a failure it
+    // could not evidence" — the operator's next action differs.
     journalEvent(deps, 'gate-inconclusive', unit(batchId), {
       issue: memberIssue,
       reason,
-      detail: excerpt
-        ? `cap run ${inconclusive.id} reported ${inconclusive.outcome} after member review done: ${excerpt}`
-        : `cap run ${inconclusive.id} reported ${inconclusive.outcome} after member review done`,
+      detail: withExcerpt(
+        `cap run ${inconclusive.id} ${describeInconclusive(inconclusive)} after member review done`,
+        excerpt
+      ),
     });
     deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
     const stateNow = deps.store.load();
@@ -1538,7 +1577,18 @@ export function resumeBlockedGate(
   dispatch: ResolvedDispatch,
   batchId: string,
   now: Date
-): { outcome: 'still-blocked' | 'evicted' | 'completed'; capability: string; detail?: string } {
+): {
+  outcome: 'still-blocked' | 'evicted' | 'completed';
+  capability: string;
+  /**
+   * Why the batch is still blocked, when it is. Both branches land on
+   * `gate-inconclusive:<cap>`, but the operator's next action differs — fix
+   * the capability's availability, or fix the wrapper that reports a failure
+   * it cannot evidence — so the caller must not have to guess from the detail.
+   */
+  blockedBy?: 'inconclusive' | 'unevidenced-failure';
+  detail?: string;
+} {
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
   if (!batch) throw new SchedNotFoundError(`Batch not found: ${batchId}`);
@@ -1566,13 +1616,15 @@ export function resumeBlockedGate(
     journalEvent(deps, 'gate-inconclusive', unit(batchId), {
       issue: memberIssue,
       reason: `gate-inconclusive:${capabilityId}`,
-      detail: excerpt
-        ? `sched resume --batch: cap run ${capabilityId} still reports ${recheck.outcome} on recheck: ${excerpt}`
-        : `sched resume --batch: cap run ${capabilityId} still reports ${recheck.outcome} on recheck`,
+      detail: withExcerpt(
+        `sched resume --batch: cap run ${capabilityId} still reports ${recheck.outcome} on recheck`,
+        excerpt
+      ),
     });
     return {
       outcome: 'still-blocked',
       capability: capabilityId,
+      blockedBy: 'inconclusive',
       detail: excerpt,
     };
   }
@@ -1581,18 +1633,23 @@ export function resumeBlockedGate(
   // (#594) — the same routing the live gate applies, so a resumed batch
   // never evicts a member for a failure `hasFailingTestEvidence` cannot
   // confirm.
-  if (recheck.outcome === 'task-failed' && !hasFailingTestEvidence(recheck.outputTail)) {
+  if (
+    recheck.outcome === 'task-failed' &&
+    !hasEarnedFailureEvidence(capabilityId, recheck.outputTail)
+  ) {
     writeGateLog(deps, batchId, capabilityId, memberIssue, recheck.outputTail);
     journalEvent(deps, 'gate-inconclusive', unit(batchId), {
       issue: memberIssue,
       reason: `gate-inconclusive:${capabilityId}`,
-      detail: excerpt
-        ? `sched resume --batch: cap run ${capabilityId} still reports task-failed with no failing-test evidence on recheck: ${excerpt}`
-        : `sched resume --batch: cap run ${capabilityId} still reports task-failed with no failing-test evidence on recheck`,
+      detail: withExcerpt(
+        `sched resume --batch: cap run ${capabilityId} still reports task-failed with no failing-test evidence on recheck`,
+        excerpt
+      ),
     });
     return {
       outcome: 'still-blocked',
       capability: capabilityId,
+      blockedBy: 'unevidenced-failure',
       detail: excerpt,
     };
   }
@@ -1613,9 +1670,10 @@ export function resumeBlockedGate(
     journalEvent(deps, 'unit-failed', unit(batchId), {
       issue: memberIssue,
       reason,
-      detail: excerpt
-        ? `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck: ${excerpt}`
-        : `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck`,
+      detail: withExcerpt(
+        `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck`,
+        excerpt
+      ),
     });
     evictMemberAndContinue(
       deps,
@@ -1846,10 +1904,17 @@ function reconcileMemberSlot(
 
 /**
  * Requeue a member full-cycle, record the eviction, and dissolve if this tips
- * the batch past the ⅓ threshold (RFC F.1/F.8) — WITHOUT going through
- * `recovery.ts`'s `evictMembers` (which needs `attributing`/`evicting` status
- * and a commit range to revert; a member evicted here has neither). Returns
- * whether the batch dissolved.
+ * the batch past its `dissolve_policy` threshold (#563; RFC F.1/F.8) — WITHOUT
+ * going through `recovery.ts`'s `evictMembers` (which needs
+ * `attributing`/`evicting` status and a commit range to revert; a member
+ * evicted here has neither). Returns whether the batch dissolved.
+ *
+ * A member already in `evictions[]` is a NO-OP here, not merely a skipped
+ * record (#595 AC1): the requeue must not run a second time either. It would
+ * overwrite the first eviction's `failure_evidence` — leaving `evictions[]`
+ * and the queue entry disagreeing about why the member was evicted — and, if
+ * the member has since been re-dispatched full-cycle, would take the
+ * `executing → evicted → requeued` rail and kill that live run.
  */
 function evictMemberDirectly(
   deps: BatchDispatchDeps,
@@ -1866,6 +1931,12 @@ function evictMemberDirectly(
   const { triggered, duplicate } = deps.store.withLock((s) => {
     const b = findBatch(s, batchId);
     if (!b) return { state: s, result: { triggered: false, duplicate: false } };
+    if (b.evictions.some((e) => e.issue === memberIssue)) {
+      return {
+        state: s,
+        result: { triggered: checkDissolveTrigger(b, dissolvePolicy), duplicate: true },
+      };
+    }
     const evidence = {
       batch: batchId,
       reason,
@@ -1883,7 +1954,9 @@ function evictMemberDirectly(
       { failure_evidence: evidence }
     );
     let next = requeueResult.state;
-    const { evictions, duplicate } = appendEvictions(b, [
+    // `appendEvictions` stays the state-level backstop even though the
+    // duplicate is already short-circuited above — it is the one append path.
+    const { evictions, duplicate: duplicateRecords } = appendEvictions(b, [
       {
         issue: memberIssue,
         reason,
@@ -1899,14 +1972,14 @@ function evictMemberDirectly(
       state: next,
       result: {
         triggered: updated !== undefined && checkDissolveTrigger(updated, dissolvePolicy),
-        duplicate: duplicate.length > 0,
+        duplicate: duplicateRecords.length > 0,
       },
     };
   });
   if (duplicate) {
     journalEvent(deps, 'eviction-duplicate', unit(batchId), {
       issue: memberIssue,
-      detail: `${reason} — issue #${memberIssue} is already recorded as evicted; no second record written`,
+      detail: duplicateEvictionDetail(memberIssue, reason),
     });
   }
   if (!triggered) return false;

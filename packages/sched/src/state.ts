@@ -959,7 +959,39 @@ export function appendEvictions(
   batch: BatchEntry,
   records: readonly EvictionRecord[]
 ): { evictions: EvictionRecord[]; appended: EvictionRecord[]; duplicate: EvictionRecord[] } {
-  const seen = new Set(batch.evictions.map((e) => e.issue));
+  const { appended, duplicate } = partitionByIssue(
+    new Set(batch.evictions.map((e) => e.issue)),
+    records
+  );
+  return { evictions: [...batch.evictions, ...appended], appended, duplicate };
+}
+
+/**
+ * One record per distinct evicted issue, first occurrence kept (#595) — the
+ * read-side half of `appendEvictions`, for a `state.json` persisted before
+ * that fix shipped and still carrying duplicate records for one member.
+ * Shares `partitionByIssue` with the append path so "which record is the
+ * member's eviction" has exactly one definition.
+ */
+export function distinctEvictions(records: readonly EvictionRecord[]): EvictionRecord[] {
+  return partitionByIssue(new Set<number>(), records).appended;
+}
+
+/** The `eviction-duplicate` journal detail — one wording for both eviction rails (#595). */
+export function duplicateEvictionDetail(
+  issue: number,
+  reason: string,
+  prior?: EvictionRecord
+): string {
+  const first = prior ? ` (first: ${prior.reason} at ${prior.at})` : '';
+  return `${reason} — issue #${issue} is already recorded as evicted${first}; no second record written and no second requeue`;
+}
+
+/** Split `records` into first-seen and repeat by `issue`, growing `seen` as it goes. */
+function partitionByIssue(
+  seen: Set<number>,
+  records: readonly EvictionRecord[]
+): { appended: EvictionRecord[]; duplicate: EvictionRecord[] } {
   const appended: EvictionRecord[] = [];
   const duplicate: EvictionRecord[] = [];
   for (const record of records) {
@@ -970,7 +1002,7 @@ export function appendEvictions(
     seen.add(record.issue);
     appended.push(record);
   }
-  return { evictions: [...batch.evictions, ...appended], appended, duplicate };
+  return { appended, duplicate };
 }
 
 /**

@@ -115,7 +115,15 @@ function createBatchCapabilityRunner(): (
         reason?: unknown;
       };
       const outcome = envelope.outcome;
-      const outputTail = typeof envelope.output_tail === 'string' ? envelope.output_tail : null;
+      // Fall back to the subprocess's own capture when the envelope omits
+      // `output_tail` (a capability build predating #583, or a non-string
+      // field). Passing `null` through would read as "nobody tried to capture
+      // output" to `hasEarnedFailureEvidence`, which trusts the exit code in
+      // that case — silently buying back the pre-#594 evict-on-any-
+      // `task-failed` behaviour on the exact path #594 closes.
+      const captured = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+      const outputTail =
+        typeof envelope.output_tail === 'string' ? envelope.output_tail : captured || null;
       // `reason` (#583 review) is the only explanation available when no
       // subprocess ran at all — `capability-unavailable`, or `automation-broken`
       // from a failed assumption probe — since `output_tail` is unset there.
@@ -821,7 +829,9 @@ function resumeBatchGate(opts: PauseResumeOptions): void {
     }
     if (result.outcome === 'still-blocked') {
       console.log(
-        `⏸ Batch ${opts.batch} still blocked — cap run ${result.capability} is still inconclusive.` +
+        (result.blockedBy === 'unevidenced-failure'
+          ? `⏸ Batch ${opts.batch} still blocked — cap run ${result.capability} reports task-failed but produced no evidence it earned one (#594).`
+          : `⏸ Batch ${opts.batch} still blocked — cap run ${result.capability} is still inconclusive.`) +
           (result.detail ? `\n  ${result.detail}` : '')
       );
     } else if (result.outcome === 'evicted') {
