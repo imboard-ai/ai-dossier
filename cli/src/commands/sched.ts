@@ -11,7 +11,6 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import path from 'node:path';
 import type {
   BatchDispatchDeps,
   CapabilityGateResult,
@@ -562,43 +561,6 @@ function screenSlotPreconditions(inputs: EnqueueInput[], repo?: string): void {
   fail([lines.join('\n')]);
 }
 
-/**
- * #616: the repo-level half of the same preflight. `runIncrementalGate` runs a
- * FIXED pair — `typecheck.run` then `test.focused` — after every member, and a
- * repo declaring neither returns `capability-unavailable` for both, which
- * #583/#585 route to BLOCK the whole batch. Unlike the per-issue checks this
- * is one local read with no network cost, and it is upstream of every member:
- * before #599 this very repo declared only `test.full`, and any batch enqueued
- * here would have blocked on member 1 with nothing warning at enqueue time.
- *
- * Warn rather than hard-fail: a repo may legitimately declare these later, and
- * unlike a missing plan the batch BLOCKS (worktree preserved, resumable via
- * `sched resume --batch`) rather than dissolving — so the cost of being wrong
- * here is lower than the cost of refusing a valid enqueue.
- */
-function screenGateCapabilities(inputs: EnqueueInput[]): void {
-  if (!inputs.some((i) => (i.mode ?? 'full') === 'slot')) return;
-  const manifest = path.join(process.cwd(), '.dossier', 'automation', 'manifest.yaml');
-  let declared = '';
-  try {
-    declared = fs.readFileSync(manifest, 'utf8');
-  } catch {
-    return; // fail open: no manifest readable from here is not proof of absence
-  }
-  const missing = ['typecheck.run', 'test.focused'].filter(
-    (id) => !new RegExp(`^\\s*${id.replace('.', '\\.')}\\s*:`, 'm').test(declared)
-  );
-  if (missing.length === 0) return;
-  console.error(
-    [
-      `⚠ This repo's capability manifest declares neither ${missing.join(' nor ')}.`,
-      '  The batch member gate runs both after every member; undeclared ids report',
-      '  capability-unavailable, which BLOCKS the batch on member 1 (#583/#585).',
-      '  See docs/reference/capabilities.md. Enqueuing anyway.',
-    ].join('\n')
-  );
-}
-
 /** Append one `label-blocked`/`label-check-failed` journal event per outcome (#507 AC3). */
 function journalLabelScreen(store: SchedStore, blocked: EnqueueInput[], failed: number[]): void {
   if (blocked.length === 0 && failed.length === 0) return;
@@ -799,7 +761,6 @@ function registerEnqueueSubcommand(cmd: Command): void {
       // rejected enqueue leaves no batch, no anchor binding and no worktree.
       if (!opts.skipPlanCheck) {
         screenSlotPreconditions(inputs, opts.repo);
-        screenGateCapabilities(inputs);
       }
 
       const failed = screenHardBlockLabels(inputs, opts.repo);
