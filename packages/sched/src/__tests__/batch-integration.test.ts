@@ -16,6 +16,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+// #613: not part of the package's public `index.ts` surface — imported
+// directly because the regression test below must call it twice against one
+// stale `BatchEntry` snapshot, a condition the public `runBatchTick`/
+// `resumeBlockedGate` entry points cannot reproduce (both always read state
+// fresh from the store).
+import { emptyResult, evictMemberAndContinue } from '../batch-dispatch';
 import {
   type BatchDispatchDeps,
   type CapabilityGateResult,
@@ -604,6 +610,163 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     // leaked (it would otherwise never be removed by anything else).
     expect(batch?.worktree).toBeTruthy();
     expect(fs.existsSync(batch?.worktree as string)).toBe(false);
+  }, 60_000);
+
+  it('#613: two resolutions of the same member against one stale batch snapshot never double-advance or double-journal', async () => {
+    // The production defect (#613) is a cross-process race: two scheduler
+    // ticks each read `executing_member` before either one's advance lands,
+    // so both resolve the SAME member. `runBatchTick`/`resumeBlockedGate`
+    // always read state fresh, so the public API cannot reproduce this —
+    // proving the guard requires calling the eviction rail directly, twice,
+    // against one captured pre-advance snapshot (exactly what two racing
+    // reads would each see).
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1 });
+    h.enqueue([
+      { issue: 941, mode: 'slot', batch: 'b-race', anchor: 940, tier: 'mid' },
+      { issue: 942, mode: 'slot', batch: 'b-race', tier: 'mid' },
+      { issue: 943, mode: 'slot', batch: 'b-race', tier: 'mid' },
+    ]);
+
+    h.tick(); // batch-setup + member 1 (941) spawned
+    const staleBatch = findBatch(h.state(), 'b-race');
+    if (!staleBatch) throw new Error('b-race not found after setup');
+    expect(staleBatch.executing_member).toBe(1);
+    expect(staleBatch.evictions).toHaveLength(0);
+
+    const dispatch = resolveDispatch(h.config);
+
+    // First resolution of member 941 — a genuine eviction.
+    evictMemberAndContinue(
+      h.deps,
+      h.config,
+      dispatch,
+      'b-race',
+      staleBatch,
+      941,
+      'test-failures',
+      'first resolution',
+      new Date(),
+      emptyResult()
+    );
+    // Second resolution of the SAME member, against the SAME stale snapshot
+    // (executing_member still reads 1 here) — what a racing second process
+    // would attempt before ever seeing the first process's write.
+    evictMemberAndContinue(
+      h.deps,
+      h.config,
+      dispatch,
+      'b-race',
+      staleBatch,
+      941,
+      'test-failures',
+      'second (racing) resolution',
+      new Date(),
+      emptyResult()
+    );
+
+    const batch = findBatch(h.state(), 'b-race');
+    // Pre-fix: the second call re-reads `executing_member` (already advanced
+    // to 2 by the first call) and advances it AGAIN to 3 — skipping member
+    // 942 entirely without it ever getting its own record — and journals a
+    // second `unit-failed`/`member-advanced` naming 941 again. Post-fix: the
+    // second resolution is a no-op once `evictMemberDirectly` reports
+    // `duplicate: true`.
+    expect(batch?.executing_member).toBe(2);
+    expect(batch?.evictions).toHaveLength(1);
+    expect(batch?.evictions[0]).toMatchObject({ issue: 941, reason: 'test-failures' });
+
+    const events = h.deps.journal.read();
+    const unitFailed = events.filter((e) => e.event === 'unit-failed' && e.unit === 'batch:b-race');
+    const memberAdvanced = events.filter(
+      (e) => e.event === 'member-advanced' && e.unit === 'batch:b-race'
+    );
+    expect(unitFailed).toHaveLength(1);
+    expect(unitFailed[0]?.issue).toBe(941);
+    expect(memberAdvanced).toHaveLength(1);
+    expect(memberAdvanced[0]?.issue).toBe(941);
+  }, 30_000);
+
+  it('#613 AC4: a 4-member batch evicting members 1-3 in sequence names each record after its OWN member, never the previously evicted one', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--evict-members=911,912,913'], {
+      maxSlots: 1,
+    });
+    h.enqueue([
+      { issue: 910, mode: 'slot', batch: 'b-misattrib', anchor: 909, tier: 'mid' },
+      { issue: 911, mode: 'slot', batch: 'b-misattrib', tier: 'mid' },
+      { issue: 912, mode: 'slot', batch: 'b-misattrib', tier: 'mid' },
+      { issue: 913, mode: 'slot', batch: 'b-misattrib', tier: 'mid' },
+    ]);
+
+    h.tick(); // batch-setup + member 1 (910, survives)
+    let pid = batchSlotPid(h, 'b-misattrib') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // member 1 green → member 2 (911, will be evicted)
+    expect(findBatch(h.state(), 'b-misattrib')?.executing_member).toBe(2);
+
+    pid = batchSlotPid(h, 'b-misattrib') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // 911 evicted (1/4 — not over threshold) → member 3 (912, also evicted)
+    let batch = findBatch(h.state(), 'b-misattrib');
+    expect(batch?.status).toBe('executing');
+    expect(batch?.evictions).toHaveLength(1);
+    expect(batch?.evictions[0]).toMatchObject({ issue: 911 });
+    expect(batch?.executing_member).toBe(3);
+
+    pid = batchSlotPid(h, 'b-misattrib') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // 912 evicted (2/4 — not over threshold) → member 4 (913, also evicted)
+    batch = findBatch(h.state(), 'b-misattrib');
+    expect(batch?.evictions).toHaveLength(2);
+    // #613: pre-fix code names this record #911 again (the PREVIOUSLY evicted
+    // member), never #912 — the third member ends the run with no record at all.
+    expect(batch?.evictions[1]).toMatchObject({ issue: 912 });
+    expect(batch?.executing_member).toBe(4);
+
+    pid = batchSlotPid(h, 'b-misattrib') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // 913 evicted (3/4 > ⅓) → dissolve
+    batch = findBatch(h.state(), 'b-misattrib');
+    expect(batch?.evictions).toHaveLength(3);
+    expect(batch?.evictions.map((e) => e.issue)).toEqual([911, 912, 913]);
+  }, 60_000);
+
+  it('#613: sequential incremental-gate evictions across a 4-member batch each name their own member', async () => {
+    const repo = scratchRepo();
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused' ? { outcome: 'task-failed' } : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 921, mode: 'slot', batch: 'b-gate-misattrib', anchor: 920, tier: 'mid' },
+      { issue: 922, mode: 'slot', batch: 'b-gate-misattrib', tier: 'mid' },
+      { issue: 923, mode: 'slot', batch: 'b-gate-misattrib', tier: 'mid' },
+      { issue: 924, mode: 'slot', batch: 'b-gate-misattrib', tier: 'mid' },
+    ]);
+
+    h.tick(); // batch-setup + member 1 (921)
+    let pid = batchSlotPid(h, 'b-gate-misattrib') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // 921 posts review done, gate fails → evicted (1/4) → member 2 (922) spawned
+    let batch = findBatch(h.state(), 'b-gate-misattrib');
+    expect(batch?.evictions).toHaveLength(1);
+    expect(batch?.evictions[0]).toMatchObject({ issue: 921 });
+    expect(batch?.executing_member).toBe(2);
+
+    pid = batchSlotPid(h, 'b-gate-misattrib') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // 922 posts review done, gate fails → evicted (2/4) → member 3 (923) spawned
+    batch = findBatch(h.state(), 'b-gate-misattrib');
+    expect(batch?.evictions).toHaveLength(2);
+    expect(batch?.evictions[1]).toMatchObject({ issue: 922 });
+    expect(batch?.executing_member).toBe(3);
+
+    pid = batchSlotPid(h, 'b-gate-misattrib') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // 923 posts review done, gate fails → evicted (3/4 > ⅓) → dissolve
+    batch = findBatch(h.state(), 'b-gate-misattrib');
+    expect(batch?.evictions).toHaveLength(3);
+    expect(batch?.evictions.map((e) => e.issue)).toEqual([921, 922, 923]);
   }, 60_000);
 
   it('#562: an unreadable suite report blocks the batch rather than dissolving it — nothing requeued, worktree preserved', async () => {

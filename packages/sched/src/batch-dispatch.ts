@@ -218,7 +218,11 @@ export interface BatchTickResult {
   blocked: number[];
 }
 
-function emptyResult(): BatchTickResult {
+/** Exported for #613's regression test — a duplicate/re-entrant eviction resolve
+ * against one stale `BatchEntry` snapshot cannot be produced through the public
+ * `runBatchTick`/`resumeBlockedGate` entry points (each reads state fresh), so
+ * proving the guard in `advanceMemberOrValidate` requires calling this directly. */
+export function emptyResult(): BatchTickResult {
   return { spawned: [], completed: [], parked: [], mergeAccepted: [], failed: [], blocked: [] };
 }
 
@@ -1298,17 +1302,28 @@ function advanceMemberOrValidate(
 ): void {
   const isLast = currentMember >= memberCount;
   if (isLast) {
-    deps.store.withLock((s) => {
+    const advanced = deps.store.withLock((s) => {
       const b = findBatch(s, batchId);
-      if (!b || b.status !== 'executing') return { state: s, result: undefined };
-      return { state: transitionBatch(s, batchId, 'validating', {}, now), result: undefined };
+      // `b.executing_member !== currentMember` means another call already
+      // resolved this exact member (a duplicate dispatch of the same
+      // eviction/completion, or a re-entrant tick) — advancing again here
+      // would validate a batch that already validated, or skip past a member
+      // that hasn't run at all. Resolving `currentMember` is a one-shot: the
+      // first caller to observe the match wins, everyone else is a no-op.
+      if (!b || b.status !== 'executing' || b.executing_member !== currentMember) {
+        return { state: s, result: false };
+      }
+      return { state: transitionBatch(s, batchId, 'validating', {}, now), result: true };
     });
+    if (!advanced) return;
     runValidate(deps, config, dispatch, batchId, now, result);
     return;
   }
-  deps.store.withLock((s) => {
+  const advanced = deps.store.withLock((s) => {
     const b = findBatch(s, batchId);
-    if (!b || b.status !== 'executing') return { state: s, result: undefined };
+    if (!b || b.status !== 'executing' || b.executing_member !== currentMember) {
+      return { state: s, result: false };
+    }
     return {
       state: transitionBatch(
         s,
@@ -1317,9 +1332,14 @@ function advanceMemberOrValidate(
         { executing_member: b.executing_member + 1 },
         now
       ),
-      result: undefined,
+      result: true,
     };
   });
+  // A duplicate/re-entrant call for the SAME member must never journal a
+  // second `member-advanced` or spawn a second continuation — that is
+  // precisely the pattern that leaves one member's eviction record naming
+  // the member advanced past twice while the next member gets none (#613).
+  if (!advanced) return;
   journalEvent(deps, 'member-advanced', unit(batchId), { issue: memberIssue });
   spawnMemberContinuation(deps, config, dispatch, batchId, now, result);
 }
@@ -1328,8 +1348,25 @@ function advanceMemberOrValidate(
  * Evict the current member and either dissolve, or continue the batch via
  * `advanceMemberOrValidate` — the shared tail of both member-failure rails
  * (self-reported blocked, and the incremental gate below).
+ *
+ * #613: `evictMemberDirectly`'s duplicate check (#595) is the one atomic,
+ * lock-protected claim on "did THIS member's eviction already happen" — so
+ * the `unit-failed` journal is emitted HERE, gated on that claim succeeding,
+ * rather than by each caller before it ever calls this function. A caller
+ * that journaled `unit-failed` unconditionally, before the claim, could fire
+ * it twice for one member (and once for the next member never at all) under
+ * a duplicate/re-entrant resolve — the record and the journal must share the
+ * same gate or they can disagree about which member the batch is advancing
+ * past.
+ *
+ * Exported (not part of the package's `index.ts` public surface — imported
+ * directly by `batch-integration.test.ts`) so #613's regression test can
+ * call it twice with one stale `BatchEntry` snapshot: the exact "another
+ * resolution already claimed this member" condition, which the public
+ * `runBatchTick`/`resumeBlockedGate` entry points cannot reproduce since
+ * both always read state fresh.
  */
-function evictMemberAndContinue(
+export function evictMemberAndContinue(
   deps: BatchDispatchDeps,
   config: SchedConfig,
   dispatch: ResolvedDispatch,
@@ -1337,10 +1374,26 @@ function evictMemberAndContinue(
   batch: BatchEntry,
   memberIssue: number,
   reason: string,
+  detail: string,
   now: Date,
-  result: BatchTickResult
+  result: BatchTickResult,
+  extraKv?: Record<string, string>
 ): void {
-  const dissolved = evictMemberDirectly(deps, config, batchId, memberIssue, reason, now);
+  const { dissolved, duplicate } = evictMemberDirectly(
+    deps,
+    config,
+    batchId,
+    memberIssue,
+    reason,
+    now
+  );
+  if (duplicate) return;
+  journalEvent(deps, 'unit-failed', unit(batchId), {
+    issue: memberIssue,
+    reason,
+    detail,
+    ...(extraKv ?? {}),
+  });
   if (dissolved) {
     result.failed.push(unit(batchId));
     return;
@@ -1423,14 +1476,6 @@ function runIncrementalGate(
     const reason = `incremental-gate-failed:${earnedFailure.id}`;
     writeGateLog(deps, batchId, earnedFailure.id, memberIssue, earnedFailure.outputTail);
     const excerpt = gateDetailExcerpt(earnedFailure.outputTail, earnedFailure.reason);
-    journalEvent(deps, 'unit-failed', unit(batchId), {
-      issue: memberIssue,
-      reason,
-      detail: withExcerpt(
-        `cap run ${earnedFailure.id} reported task-failed with failing-test evidence after member review done`,
-        excerpt
-      ),
-    });
     deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
     evictMemberAndContinue(
       deps,
@@ -1440,6 +1485,10 @@ function runIncrementalGate(
       batch,
       memberIssue,
       reason,
+      withExcerpt(
+        `cap run ${earnedFailure.id} reported task-failed with failing-test evidence after member review done`,
+        excerpt
+      ),
       now,
       result
     );
@@ -1648,14 +1697,6 @@ export function resumeBlockedGate(
   if (recheck.outcome === 'task-failed') {
     const reason = `incremental-gate-failed:${capabilityId}`;
     writeGateLog(deps, batchId, capabilityId, memberIssue, recheck.outputTail);
-    journalEvent(deps, 'unit-failed', unit(batchId), {
-      issue: memberIssue,
-      reason,
-      detail: withExcerpt(
-        `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck`,
-        excerpt
-      ),
-    });
     evictMemberAndContinue(
       deps,
       config,
@@ -1664,6 +1705,10 @@ export function resumeBlockedGate(
       batch,
       memberIssue,
       reason,
+      withExcerpt(
+        `sched resume --batch: cap run ${capabilityId} reported task-failed on recheck`,
+        excerpt
+      ),
       now,
       result
     );
@@ -1848,17 +1893,6 @@ function reconcileMemberSlot(
       slot,
       now
     );
-    journalEvent(deps, 'unit-failed', unit(batchId), {
-      issue: memberIssue,
-      reason,
-      detail: 'member blocked',
-      // #591: attributes an unverified member exit to a concrete cause (e.g.
-      // `Monitor`) without opening the transcript. Gated on the RESOLVED reason, not
-      // `dead` — a member can be simultaneously `dead` AND carry a milestone-posted
-      // `reason` (it posted `blocked` and then exited), and that real block has no
-      // log-derived cause to attribute; only `agent-exited-unverified` does.
-      ...(reason === 'agent-exited-unverified' && lastTool !== null ? { last_tool: lastTool } : {}),
-    });
     deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
 
     // A member that never went green (RFC F.1) evicts DIRECTLY — no aggregate
@@ -1877,8 +1911,17 @@ function reconcileMemberSlot(
       batch,
       memberIssue,
       reason,
+      'member blocked',
       now,
-      result
+      result,
+      // #591: attributes an unverified member exit to a concrete cause (e.g.
+      // `Monitor`) without opening the transcript. Gated on the RESOLVED reason, not
+      // `dead` — a member can be simultaneously `dead` AND carry a milestone-posted
+      // `reason` (it posted `blocked` and then exited), and that real block has no
+      // log-derived cause to attribute; only `agent-exited-unverified` does.
+      reason === 'agent-exited-unverified' && lastTool !== null
+        ? { last_tool: lastTool }
+        : undefined
     );
   }
 }
@@ -1904,7 +1947,7 @@ function evictMemberDirectly(
   memberIssue: number,
   reason: string,
   now: Date
-): boolean {
+): { dissolved: boolean; duplicate: boolean } {
   const dissolvePolicy = resolveDissolvePolicy(config.dissolve_policy);
   // Pass 1 (pure — requeue + record the eviction): safe to run entirely
   // inside the lock, unlike `dissolveBatch` below, which shells out
@@ -1962,15 +2005,20 @@ function evictMemberDirectly(
       issue: memberIssue,
       detail: duplicateEvictionDetail(memberIssue, reason),
     });
+    // Another resolution already claimed this member's eviction record — the
+    // caller must not journal its own `unit-failed`/advance the batch again
+    // on top of that one (#613: that is exactly how a record ends up naming
+    // the member the batch already advanced past).
+    return { dissolved: false, duplicate: true };
   }
-  if (!triggered) return false;
+  if (!triggered) return { dissolved: false, duplicate: false };
 
   // Pass 2 (outside the lock — dissolveBatch shells out): re-load fresh
   // (pass 1's write already landed), dissolve, then re-apply just this
   // batch's + the requeued members' state under a fresh lock.
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
-  if (!batch) return false;
+  if (!batch) return { dissolved: false, duplicate: false };
   const rDeps = recoveryDeps(deps, config, batch, now);
   const outcome = dissolveBatch(
     state,
@@ -1983,7 +2031,7 @@ function evictMemberDirectly(
     result: undefined,
   }));
   teardownBatch(deps, batchId);
-  return true;
+  return { dissolved: true, duplicate: false };
 }
 
 function reconcileFixSlot(
