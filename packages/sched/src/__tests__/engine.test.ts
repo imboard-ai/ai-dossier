@@ -77,6 +77,9 @@ function harness(
   const unreachable = new Set<number>();
   const prStates = new Map<number, PrTruth | undefined>();
   const prUnreachable = new Set<number>();
+  /** #596: open-PR-by-branch lookup — the terminal recovery check's ground truth. */
+  const openPrs = new Map<string, number | null>();
+  const openPrUnreachable = new Set<string>();
   const setupInfos = new Map<number, SetupInfo | null | undefined>();
   const setupUnreachable = new Set<number>();
   /** #544: hard-block labels per issue (absent = no labels), and the read log. */
@@ -93,6 +96,8 @@ function harness(
     issueClosed: (issue) => closedIssues.has(issue),
     branchHead: (branch) => branchHeads.get(branch) ?? null,
     prState: (pr) => (prUnreachable.has(pr) ? undefined : prStates.get(pr)),
+    openPrForBranch: (branch) =>
+      openPrUnreachable.has(branch) ? undefined : (openPrs.get(branch) ?? null),
     setupInfo: (issue) =>
       setupUnreachable.has(issue) ? undefined : (setupInfos.get(issue) ?? null),
     issueLabels: (issue) => {
@@ -179,6 +184,8 @@ function harness(
     unreachable,
     prStates,
     prUnreachable,
+    openPrs,
+    openPrUnreachable,
     setupInfos,
     setupUnreachable,
     labelsByIssue,
@@ -792,6 +799,66 @@ describe('stall/escalation ladder (AC4)', () => {
     );
     const failedEvent = h.journal.read().find((e) => e.event === 'unit-failed' && e.issue === 101);
     expect(failedEvent?.last_tool).toBe('Monitor');
+  });
+
+  it('a strongest-tier unverified exit whose branch already has an open PR parks instead of failing (#596 AC2/AC3/AC6)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'strong' }]);
+    h.tick();
+    // The setup milestone records the branch (captured into slot.branch).
+    h.setMilestone(101, 'setup', 'done', undefined, { branch: 'feature/101-x' });
+    h.tick();
+    // The agent opened a PR but exited without posting the park milestone —
+    // the #3985 shape: ground truth (branch → open PR) is the only record.
+    h.openPrs.set('feature/101-x', 3999);
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+
+    const result = h.tick();
+    expect(result.failed).toHaveLength(0);
+    expect(result.parked).toEqual(['issue:101']);
+    const entry = h.state().entries.find((e) => e.issue === 101);
+    expect(entry?.status).toBe('parked');
+    expect(entry?.pr).toBe(3999);
+    const parkedEvent = h.journal.read().find((e) => e.event === 'pr-parked' && e.issue === 101);
+    expect(parkedEvent?.pr).toBe(3999);
+    expect(parkedEvent?.detail).toBe('unverified-exit-recovered-open-pr');
+    expect(h.hasSlotReleased(101, 'parked')).toBe(true);
+  });
+
+  it('a strongest-tier unverified exit with a known branch but NO open PR still fails terminally (#596 AC4)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'strong' }]);
+    h.tick();
+    h.setMilestone(101, 'setup', 'done', undefined, { branch: 'feature/101-x' });
+    h.tick();
+    // No entry in h.openPrs for this branch: a verified "no open PR".
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+
+    const result = h.tick();
+    expect(result.failed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe(
+      'unverified-exit-at-strongest-tier'
+    );
+  });
+
+  it('a strongest-tier unverified exit fails closed when the open-PR lookup is unreachable (#596 AC5)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'strong' }]);
+    h.tick();
+    h.setMilestone(101, 'setup', 'done', undefined, { branch: 'feature/101-x' });
+    h.tick();
+    h.openPrUnreachable.add('feature/101-x'); // gh unreachable — never park on a guess
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+
+    const result = h.tick();
+    expect(result.failed).toEqual(['issue:101']);
+    expect(result.parked).toHaveLength(0);
+    expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe(
+      'unverified-exit-at-strongest-tier'
+    );
   });
 
   it('the phase now in flight (via next=) gets its own allowance — implement default is 90 min, not the 30-min global (#495)', () => {

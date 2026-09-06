@@ -78,6 +78,15 @@ export interface GroundTruth {
    */
   prState(pr: number): PrTruth | undefined;
   /**
+   * The number of an OPEN pull request whose head is `branch`, or `null`
+   * when none exists (#596): the terminal recovery branch's ground-truth
+   * check — a unit that exited unverified may have already opened a PR the
+   * milestone trail never recorded. Same tri-state as `prState`: `undefined`
+   * = poll FAILED (unreachable — the caller must fail closed, never park on
+   * an unconfirmed guess).
+   */
+  openPrForBranch(branch: string): number | null | undefined;
+  /**
    * Teardown inputs from the issue's `setup` milestone (#468): `null` = the
    * issue verifiably has no setup milestone; `undefined` = poll FAILED.
    */
@@ -197,6 +206,18 @@ export function createExecGroundTruth(
       if (out === null) return undefined; // poll failed — unreachable
       return parsePrViewJson(out) ?? undefined;
     },
+    openPrForBranch(branch: string): number | null | undefined {
+      // Same ref-name validation as `branchHead` (CWE-88): the branch string
+      // is milestone-derived, never trusted as a literal CLI argument.
+      if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch)) return null;
+      const out = exec(
+        'gh',
+        ['pr', 'list', '--head', branch, '--state', 'open', '--json', 'number'],
+        opts.repoDir
+      );
+      if (out === null) return undefined; // poll failed — unreachable
+      return parseOpenPrListJson(out);
+    },
     setupInfo(issue: number): SetupInfo | null | undefined {
       const out = exec('gh', ['issue', 'view', String(issue), '--json', 'comments'], opts.repoDir);
       if (out === null) return undefined; // poll failed — unreachable
@@ -269,6 +290,27 @@ export function parsePrViewJson(stdout: string | null): PrTruth | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Parse the stdout of `gh pr list --head <branch> --state open --json number`
+ * (#596) into the first open PR's number, or `null` when none exists (a
+ * verified `[]`) or the payload is unusable. A branch can have at most one
+ * open PR against it, so the first entry is the only one that matters.
+ */
+export function parseOpenPrListJson(stdout: string | null): number | null {
+  if (stdout === null || stdout.trim() === '') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const first = parsed[0];
+  if (first === null || typeof first !== 'object') return null;
+  const num = (first as Record<string, unknown>).number;
+  return typeof num === 'number' && Number.isInteger(num) && num > 0 ? num : null;
 }
 
 /**
