@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildPlanComment,
+  discussionDrift,
   extractNewPredictedFiles,
   extractPredictedFiles,
   findLatestPlan,
+  isArtifactComment,
   isHeadSha,
   MAX_ARTIFACT_BODY_LENGTH,
+  newestTimestamp,
   PLAN_SECTIONS,
   parsePlanArtifact,
   parsePlanMarker,
@@ -265,5 +268,75 @@ describe('buildPlanComment', () => {
 
   it('documents the cap the command enforces', () => {
     expect(MAX_ARTIFACT_BODY_LENGTH).toBeLessThan(65536);
+  });
+});
+
+describe('isArtifactComment', () => {
+  it('recognizes a plan:v1 body', () => {
+    expect(isArtifactComment('<!-- plan:v1 head=abc1234 -->\n\n# plan')).toBe(true);
+  });
+
+  it('recognizes a runstate:v1 body', () => {
+    expect(isArtifactComment('<!-- runstate:v1 -->\nphase=gate\nstatus=done')).toBe(true);
+  });
+
+  it('does not count a quoted plan (lines starting `>`) as an artifact', () => {
+    expect(isArtifactComment('> <!-- plan:v1 head=abc1234 -->\nquoting the plan above')).toBe(
+      false
+    );
+  });
+
+  it('does not count ordinary discussion', () => {
+    expect(isArtifactComment('actually, the framing above is incomplete')).toBe(false);
+  });
+});
+
+describe('discussionDrift (#611)', () => {
+  const PLAN_AT = '2026-09-06T08:00:23Z';
+
+  it('classifies a comment older than the plan as predating', () => {
+    const older = { body: 'the original framing is incomplete', createdAt: '2026-09-03T07:02:15Z' };
+    const { predating, postdating } = discussionDrift([older], PLAN_AT);
+    expect(predating).toEqual([older]);
+    expect(postdating).toEqual([]);
+  });
+
+  it('classifies a comment newer than the plan as postdating', () => {
+    const newer = { body: 'one more thing', createdAt: '2026-09-07T00:00:00Z' };
+    const { predating, postdating } = discussionDrift([newer], PLAN_AT);
+    expect(predating).toEqual([]);
+    expect(postdating).toEqual([newer]);
+  });
+
+  it('excludes plan:v1 and runstate:v1 comments regardless of timestamp', () => {
+    const comments = [
+      { body: '<!-- plan:v1 head=abc1234 -->\n\n# plan', createdAt: '2026-09-03T07:02:15Z' },
+      { body: '<!-- runstate:v1 -->\nphase=gate', createdAt: '2026-09-07T00:00:00Z' },
+    ];
+    expect(discussionDrift(comments, PLAN_AT)).toEqual({ predating: [], postdating: [] });
+  });
+
+  it('produces neither for an issue with no discussion', () => {
+    expect(discussionDrift([], PLAN_AT)).toEqual({ predating: [], postdating: [] });
+  });
+
+  it('does not classify a comment tied exactly to the plan timestamp', () => {
+    const tied = { body: 'noise', createdAt: PLAN_AT };
+    expect(discussionDrift([tied], PLAN_AT)).toEqual({ predating: [], postdating: [] });
+  });
+});
+
+describe('newestTimestamp', () => {
+  it('picks the latest createdAt among comments', () => {
+    const comments = [
+      { body: 'a', createdAt: '2026-09-03T07:02:15Z' },
+      { body: 'b', createdAt: '2026-09-05T00:00:00Z' },
+      { body: 'c', createdAt: '2026-09-04T00:00:00Z' },
+    ];
+    expect(newestTimestamp(comments)).toBe('2026-09-05T00:00:00Z');
+  });
+
+  it('returns null for an empty list', () => {
+    expect(newestTimestamp([])).toBeNull();
   });
 });

@@ -12,7 +12,7 @@
  * command layer (`commands/plan.ts`).
  */
 
-import { MAX_BODY_LENGTH } from './runstate';
+import { MAX_BODY_LENGTH, RUNSTATE_MARKER } from './runstate';
 
 /**
  * Opens every plan artifact comment. Unlike the runstate marker, it carries `head=` — the
@@ -306,4 +306,65 @@ export function scanRiskFloor(paths: readonly string[]): Array<{ path: string; p
     }
   }
   return hits;
+}
+
+/**
+ * Whether a comment body IS an artifact comment (`plan:v1` or `runstate:v1`) rather than
+ * discussion (#611). Structural, by the opening marker — the same rule {@link
+ * parsePlanMarker} and the runstate reader apply — so a plan or runstate comment quoted
+ * inside another comment (lines starting `>`) does not open the body and is NOT excluded:
+ * it counts as discussion, same as a human's own words would.
+ */
+export function isArtifactComment(body: string): boolean {
+  return body.startsWith(PLAN_MARKER_PREFIX) || body.startsWith(RUNSTATE_MARKER);
+}
+
+/** One issue comment as needed to compare it against the plan's own timestamp. */
+export interface TimestampedComment {
+  body: string;
+  createdAt: string;
+}
+
+/**
+ * Non-artifact comments on the issue, split by whether they predate or postdate the plan
+ * comment itself (#611). `head-distance` measures the plan's drift against the
+ * **repository**; this measures its drift against the **issue's own discussion** — the one
+ * place a human posts a correction. A comment whose timestamp cannot be parsed, or ties the
+ * plan's own timestamp exactly, counts as neither (there is nothing actionable to report).
+ */
+export interface DiscussionDrift {
+  /** Discussion older than the plan — comments the plan should already reflect. */
+  predating: TimestampedComment[];
+  /** Discussion newer than the plan — drift since the plan was written. */
+  postdating: TimestampedComment[];
+}
+
+export function discussionDrift(
+  comments: readonly TimestampedComment[],
+  planCreatedAt: string
+): DiscussionDrift {
+  const planTime = Date.parse(planCreatedAt);
+  const predating: TimestampedComment[] = [];
+  const postdating: TimestampedComment[] = [];
+  if (Number.isNaN(planTime)) return { predating, postdating };
+
+  for (const comment of comments) {
+    if (isArtifactComment(comment.body)) continue;
+    const time = Date.parse(comment.createdAt);
+    if (Number.isNaN(time)) continue;
+    if (time < planTime) predating.push(comment);
+    else if (time > planTime) postdating.push(comment);
+  }
+  return { predating, postdating };
+}
+
+/** The most recent `createdAt` among a set of comments, or `null` when the set is empty or every timestamp is unparseable. */
+export function newestTimestamp(comments: readonly TimestampedComment[]): string | null {
+  let newest: { at: string; time: number } | null = null;
+  for (const comment of comments) {
+    const time = Date.parse(comment.createdAt);
+    if (Number.isNaN(time)) continue;
+    if (newest === null || time > newest.time) newest = { at: comment.createdAt, time };
+  }
+  return newest?.at ?? null;
 }
