@@ -208,7 +208,7 @@ units parked for 8 h each. Wanted: a check in `ship-issue` or the auto-merge wat
 The scheduled-controls sweep paged on a single blind (exit-2) CI Health run on 2026-09-02, which
 self-resolved. Consider ignoring exit-2 unless repeated.
 
-### 4.8 Eviction bookkeeping (#595) — **claim corrected; the dissolve itself was right; shipped as re-scoped**
+### 4.8 Eviction bookkeeping (#595) — **dissolve rule was right; duplicate fixed; mis-attribution still OPEN**
 
 #598 carried, from the pre-existing trap row, the claim that `b-20260903-01` "dissolved at `N=4
 evictions=3 threshold=2` where two of the three were the same issue — by distinct member it was AT
@@ -233,16 +233,46 @@ So `evictions=3` meant **three distinct members** — imboard-monorepo#47 (miscl
 (gate-failed), #1512 (unrefinable-plan) — against `threshold=2`. Three exceeds two. The batch was
 past the threshold and the dissolve was correct under the intended rule.
 
-Two related readings that also do not hold: `requeued=47,826,340,1512` listing #340, which has no
-eviction record, is **not** a lost eviction — `strategy=full` requeues every unshipped member from
-`batch.members`, evicted or not. And the raw array does not grow after the decision: #1512's
+One related reading also does not hold: the raw array does not grow after the decision — #1512's
 eviction is stamped `05:58:09.027Z`, the same millisecond as the `batch-dissolved` event.
+
+**But a second member WAS lost, and this document previously dismissed that too quickly.** The
+earlier text argued that #340 appearing in `requeued=47,826,340,1512` without an eviction record
+proves nothing, because `requeued` is built from `batch.members` and `strategy=full` requeues every
+unshipped member, evicted or not. That is a true statement about how `requeued=` is constructed,
+and it is an answer to the wrong question. Whether #340 was evicted is settled by the **journal**,
+not by `requeued=`, and the journal is unambiguous:
+
+```
+05:50:09.352  spawned        issue=340    member 3/4
+05:53:28.334  unit-failed    issue=826                 <- #826 fails and advances
+05:53:28.350  member-advanced issue=826
+05:54:28.176  unit-failed    issue=826                 <- names #826 again, but #340 was in flight
+05:54:28.189  member-advanced issue=826
+05:52:11.467  spawned        issue=1512   member 4/4
+```
+
+#340 appears in exactly two lines of the whole journal — its own `spawned`, and the `requeued=`
+list. It ran as member 3/4, it ended (the batch advanced past it), and **no event anywhere names
+it as failing**. The 05:54:28 pair is credited to #826, which had already failed and advanced a
+minute earlier. So the eviction was not merely duplicated; it was **mis-attributed**, and #340's
+actual failure mode is unrecoverable from the record — which matters more than the count, because
+a real defect in that member's path would be invisible. This was first established from the spawn
+sequence in the [2026-09-03 analysis on
+#595](https://github.com/imboard-ai/ai-dossier/issues/595#issuecomment-5521881175).
+
+**#595's fix does not close this half.** `appendEvictions` skips a record whose `issue` is already
+present, so the mis-attributed 05:54:28 record is now dropped rather than corrected — #340 still
+ends with no eviction record naming it. De-duplicating an append cannot make a record name the
+right member. "An eviction record names the member the batch is advancing *from*" remains an open
+requirement; whoever picks it up should assert on **which** members the records name, since a
+count-only regression test passes on exactly this failure.
 
 **What is still true.** The stored `evictions` array does retain the duplicate — `[47, 826, 826,
 1512]`, four entries over three members — because #826 was evicted twice, ~2 min apart. That no
 longer moves the dissolve trigger, but any eviction-**rate** metric computed from raw event counts
 (RFC-0001 §E.5 reads one, to decide whether the 4-member cap can be raised) is still inflated by
-it. That is the real residual defect, and it is narrower than #595 currently describes.
+it — one of two residual defects, the other being the mis-attribution above.
 
 **#595 was re-scoped on exactly this basis and shipped** (`@ai-dossier/sched` >= 0.22.0): it
 fixed the record and display layers, and left the dissolve rule alone. `appendEvictions`
