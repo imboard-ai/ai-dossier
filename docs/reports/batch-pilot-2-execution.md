@@ -1461,10 +1461,12 @@ merges, never on issue closure.
   member (open) · [#595](https://github.com/imboard-ai/ai-dossier/issues/595) — eviction bookkeeping
   double-counts one member and loses another, and the dissolve threshold reads from it (open) ·
   [imboard-monorepo#3996](https://github.com/imboard-ai/imboard-monorepo/issues/3996) — `tee /dev/stderr`
-  under `pipefail` fabricates exit 1 from a green run and empties the buffer #3982's retry greps (open) ·
+  under `pipefail` fabricates exit 1 from a green run and empties the buffer #3982's retry greps (CLOSED 2026-09-03) ·
   [#596](https://github.com/imboard-ai/ai-dossier/issues/596) — `unverified-exit` still fires on every
-  long-running full-cycle unit despite `--disallowedTools Monitor`; it stranded PR imboard-monorepo#3999
-  open and unmerged (open)
+  long-running full-cycle unit despite `--disallowedTools Monitor` (open). It failed the #3985 unit at
+  the strongest tier, but did NOT strand its work: PR imboard-monorepo#3999 merged anyway at
+  2026-09-03T07:19:58Z — a failed unit is a statement about the agent's exit, not about whether the
+  work shipped
 
 ### 32.1 Before the next attempt
 

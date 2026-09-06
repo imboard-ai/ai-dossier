@@ -201,16 +201,43 @@ units parked for 8 h each. Wanted: a check in `ship-issue` or the auto-merge wat
 The scheduled-controls sweep paged on a single blind (exit-2) CI Health run on 2026-09-02, which
 self-resolved. Consider ignoring exit-2 unless repeated.
 
-### 4.8 Eviction double-count — **OPEN (#595), reproducible right now**
+### 4.8 Eviction bookkeeping (#595) — **claim corrected; the dissolve itself was right**
 
-`sched` can evict the same member twice and the dissolve decision counts eviction *events*, not
-distinct members. Live on this host: **at the dissolve decision instant**, `b-20260903-01` had
-recorded 3 eviction events over **2** distinct members against `threshold=2` — it was *at* the
-threshold, not past it, and died anyway.
+#598 carried, from the pre-existing trap row, the claim that `b-20260903-01` "dissolved at `N=4
+evictions=3 threshold=2` where two of the three were the same issue — by distinct member it was AT
+the threshold, not past it, so a batch that should have survived died instead." **That is false at
+HEAD**, and it is worth correcting carefully because it is the kind of error that gets a correct
+mechanism 'fixed'.
 
-Read the raw array, not the queue table: the batch's stored `evictions` grows afterwards (it now
-holds four entries over three members), so `sched status` shows the post-dissolve array, not the
-decision input.
+The dissolve trigger already de-duplicates, and has since #572 (`cfdc2bf`, 2026-09-02):
+
+```ts
+// packages/sched/src/recovery.ts — checkDissolveTrigger
+return evictedMemberIds(batch).size > threshold;   // evictedMemberIds = new Set(evictions.map(e => e.issue))
+```
+
+It is the only dissolve trigger, `evictions.length` appears nowhere in `packages/sched/src/`, and
+the journal's `evictions=` field is that same de-duplicated count (`evictedCount:
+evictedMemberIds(batch).size`). hcc2's deployed `@ai-dossier/sched` was 0.21.0, published
+2026-09-02T21:32:25Z — before the 05:58 dissolve — and its `dist/recovery.js` carries the
+de-duplicating form.
+
+So `evictions=3` meant **three distinct members** — imboard-monorepo#47 (misclassified), #826
+(gate-failed), #1512 (unrefinable-plan) — against `threshold=2`. Three exceeds two. The batch was
+past the threshold and the dissolve was correct under the intended rule.
+
+Two related readings that also do not hold: `requeued=47,826,340,1512` listing #340, which has no
+eviction record, is **not** a lost eviction — `strategy=full` requeues every unshipped member from
+`batch.members`, evicted or not. And the raw array does not grow after the decision: #1512's
+eviction is stamped `05:58:09.027Z`, the same millisecond as the `batch-dissolved` event.
+
+**What is still true.** The stored `evictions` array does retain the duplicate — `[47, 826, 826,
+1512]`, four entries over three members — because #826 was evicted twice, ~2 min apart. That no
+longer moves the dissolve trigger, but any eviction-**rate** metric computed from raw event counts
+(RFC-0001 §E.5 reads one, to decide whether the 4-member cap can be raised) is still inflated by
+it. That is the real residual defect, and it is narrower than #595 currently describes.
+
+**#595 should be re-scoped or closed on this basis** before anyone spends a run on it.
 
 *Verify:*
 
@@ -218,11 +245,10 @@ decision input.
 jq '.batches[] | select(.id=="b-20260903-01") | .evictions | group_by(.issue)
     | map({issue: .[0].issue, n: length})' ~/.dossier/sched/imboard-ai-imboard-monorepo/state.json
 grep batch-dissolved ~/.dossier/sched/imboard-ai-imboard-monorepo/events.jsonl
+grep -n 'evictedMemberIds(batch).size > threshold' packages/sched/src/recovery.ts
 ```
 
-The journal line reads `eviction-threshold strategy=full N=4 evictions=3 threshold=2
-requeued=47,826,340,1512` — `evictions=3` next to four requeued issues is the discrepancy in plain
-sight. Note `.batches` is an **array**: `.batches["<id>"]` errors.
+Note `.batches` is an **array**: `.batches["<id>"]` errors with `Cannot index array with string`.
 
 ### 4.9 Host hygiene — **OPEN**
 
