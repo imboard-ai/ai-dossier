@@ -4,6 +4,7 @@ import {
   extractDependencyRefs,
   MAX_DEPENDENCY_REFS,
   prescreenIssue,
+  stripQuotedSpans,
   TEXT_FLOOR_PATTERNS,
 } from '../prescreen';
 import regressionFixtures from './fixtures/prescreen-regression-issues.json';
@@ -258,6 +259,56 @@ describe('prescreenIssue — open dependencies', () => {
  *   AC2's bounded mechanical-tier classify pass exists to catch instead of a mid-tier
  *   repo-exploring one.
  */
+describe('prescreenIssue — quoted spans are not the change surface (#627)', () => {
+  it('a risk keyword inside a quoted UI string does not force full', () => {
+    // imboard#4036, verbatim: a `test(e2e)` spec that CLICKS a button labelled
+    // "Set up payment". The change adds a Playwright file; the keyword is the
+    // label it asserts on.
+    const result = prescreenIssue({
+      ...baseInput,
+      title: 'test(e2e): @smoke CTA-effect spec — click "Set up payment" and a Guide Me row',
+    });
+    expect(result.verdict).toBe('candidate');
+    expect(result.reasons).toHaveLength(0);
+  });
+
+  it('a backticked identifier is treated the same as a quoted string', () => {
+    const result = prescreenIssue({
+      ...baseInput,
+      title: 'refactor: rename `paymentIntentId` in the fixture builder',
+    });
+    expect(result.verdict).toBe('candidate');
+  });
+
+  it('the SAME keyword unquoted still forces full', () => {
+    // The narrowing must not disarm the rule — this is the case it exists for.
+    const result = prescreenIssue({
+      ...baseInput,
+      title: 'feat: rewrite the payment capture flow',
+    });
+    expect(result.verdict).toBe('full');
+    expect(result.reasons[0]?.check).toBe('text-floor');
+  });
+
+  it('an unbalanced quote blanks nothing', () => {
+    const result = prescreenIssue({ ...baseInput, title: 'fix: the " in our terraform output' });
+    expect(result.verdict).toBe('full');
+  });
+
+  it('a quote spanning more than MAX_QUOTED_SPAN is treated as prose, not stripped', () => {
+    // Bound: a body full of unbalanced quotes must not let one span swallow the
+    // text and blank every keyword.
+    const long = 'x'.repeat(200);
+    const result = prescreenIssue({ ...baseInput, title: `fix: "${long} terraform ${long}"` });
+    expect(result.verdict).toBe('full');
+  });
+
+  it('stripQuotedSpans leaves unquoted text byte-identical', () => {
+    const t = 'feat: rewrite the payment capture flow';
+    expect(stripQuotedSpans(t)).toBe(t);
+  });
+});
+
 describe('prescreenIssue — regression fixture (imboard-monorepo pilot attempt 2, 15 issues)', () => {
   interface Fixture {
     number: number;

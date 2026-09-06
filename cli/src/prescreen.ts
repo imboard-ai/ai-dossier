@@ -103,6 +103,45 @@ export const TEXT_FLOOR_PATTERNS: readonly TextFloorPattern[] = [
   },
 ];
 
+/**
+ * Longest quoted span stripped before keyword matching — a bound so a body full
+ * of unbalanced quotes cannot make one span swallow the whole text and blank
+ * every keyword. Beyond this the quote is treated as prose and still matched.
+ */
+const MAX_QUOTED_SPAN = 120;
+
+/**
+ * #627: blank out double- and backtick-quoted spans before the text floor runs.
+ *
+ * A quoted span in an issue is overwhelmingly a UI string, a code identifier, a
+ * log line or a filename — something the change REFERS to, not the risk surface
+ * it touches. imboard#4036, a `test(e2e)` spec, was forced `full` because it
+ * clicks a button labelled "Set up payment": the word lives inside the quotes,
+ * the change adds a Playwright file.
+ *
+ * Deliberately narrow. The obvious broader fix — make every `text-floor` hit
+ * advisory and let the model pass decide — was measured against the pilot's
+ * 15-issue regression fixture and rejected: SEVEN of the twelve known-`full`
+ * issues are rejected by text-floor alone, including genuine risk-floor cases
+ * (#3403 `terraform`, #3901 `authorization`). That change would have gutted the
+ * deterministic rejection rate the pre-screen exists to provide, and #538's
+ * cost saving with it.
+ *
+ * Stripping quoted spans, by contrast, leaves all 15 fixture verdicts
+ * unchanged — the true positives name their risk surface in prose, not in
+ * quotes. Same spirit as the vocabulary curation above (dropping bare
+ * `auth`/`infra` after they collided with benign text): reduce false positives
+ * without touching what the rules genuinely catch.
+ *
+ * Unbalanced quotes are left alone — the regexes require a closing delimiter on
+ * the same line, so a lone `"` blanks nothing.
+ */
+export function stripQuotedSpans(text: string): string {
+  return text
+    .replace(new RegExp(`"[^"\\n]{0,${MAX_QUOTED_SPAN}}"`, 'g'), ' ')
+    .replace(new RegExp(`\`[^\`\\n]{0,${MAX_QUOTED_SPAN}}\``, 'g'), ' ');
+}
+
 /** `Depends on #N` references resolved per issue; each costs a `gh` call downstream (command layer), same rationale as `MAX_ISSUE_SELECTION` (`issue-selection.ts`). */
 export const MAX_DEPENDENCY_REFS = 32;
 
@@ -199,7 +238,7 @@ export function prescreenIssue(input: PrescreenInput): PrescreenVerdict {
     });
   }
 
-  const text = `${input.title}\n${input.body}\n${input.labels.join(' ')}`;
+  const text = stripQuotedSpans(`${input.title}\n${input.body}\n${input.labels.join(' ')}`);
   for (const pattern of TEXT_FLOOR_PATTERNS) {
     const hit = pattern.match(text);
     if (hit !== null) {
