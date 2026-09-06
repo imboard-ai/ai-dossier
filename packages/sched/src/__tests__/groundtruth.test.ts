@@ -370,7 +370,10 @@ describe('createExecGroundTruth', () => {
       return '[]';
     };
     const gt = createExecGroundTruth(exec);
-    expect(gt.openPrForBranch('--upload-pack=evil')).toBeNull();
+    // `undefined`, not `null`: a rejected ref means we refused to ask, and
+    // `null` is the positive claim ("verifiably no open PR") the engine is
+    // entitled to fail a unit terminally on.
+    expect(gt.openPrForBranch('--upload-pack=evil')).toBeUndefined();
     expect(calls).toHaveLength(0); // rejected before any subprocess ran
   });
 });
@@ -384,14 +387,59 @@ describe('parseOpenPrListJson (#596)', () => {
     expect(parseOpenPrListJson('[]')).toBeNull();
   });
 
-  it('null / empty / garbage / malformed entries degrade to null, never a false PR', () => {
-    expect(parseOpenPrListJson(null)).toBeNull();
-    expect(parseOpenPrListJson('')).toBeNull();
-    expect(parseOpenPrListJson('not json')).toBeNull();
+  it('an unusable payload is UNREACHABLE, not a verified "no open PR"', () => {
+    // The distinction the engine acts on: `null` lets it fail a unit
+    // terminally, so a gh version change or an auth banner on stdout must
+    // not be able to manufacture that claim.
+    expect(parseOpenPrListJson(null)).toBeUndefined();
+    expect(parseOpenPrListJson('')).toBeUndefined();
+    expect(parseOpenPrListJson('not json')).toBeUndefined();
+    expect(parseOpenPrListJson('{"unexpected":"shape"}')).toBeUndefined();
+  });
+
+  it('entries present but none usable is a verified "no open PR"', () => {
     expect(parseOpenPrListJson('[{"number":"55"}]')).toBeNull(); // string, not number
     expect(parseOpenPrListJson('[{}]')).toBeNull();
     expect(parseOpenPrListJson('[null]')).toBeNull();
     expect(parseOpenPrListJson('[{"number":0}]')).toBeNull(); // not positive
+  });
+
+  it("accepts gh's single-key wrapper shape as well as a bare array (#496)", () => {
+    expect(parseOpenPrListJson('{"pullRequests":[{"number":3999}]}')).toBe(3999);
+  });
+
+  it('skips a FORK PR that merely reuses the branch name — never park on work the fleet did not do', () => {
+    // `gh pr list --head` filters on the head ref NAME only, so anyone with
+    // fork access can put a same-named branch in this list. Adopting it would
+    // park a unit on, and on merge certify, work the fleet never produced.
+    const out = JSON.stringify([
+      { number: 4242, headRefName: 'issue-596', isCrossRepository: true },
+      { number: 3999, headRefName: 'issue-596', isCrossRepository: false },
+    ]);
+    expect(parseOpenPrListJson(out, 'issue-596')).toBe(3999);
+
+    const forkOnly = JSON.stringify([
+      { number: 4242, headRefName: 'issue-596', isCrossRepository: true },
+    ]);
+    expect(parseOpenPrListJson(forkOnly, 'issue-596')).toBeNull();
+  });
+
+  it('skips an entry whose headRefName does not match the branch asked about', () => {
+    const out = JSON.stringify([
+      { number: 4242, headRefName: 'some-other-branch', isCrossRepository: false },
+    ]);
+    expect(parseOpenPrListJson(out, 'issue-596')).toBeNull();
+  });
+
+  it('takes the first of several same-head PRs rather than refusing to choose', () => {
+    // GitHub allows one open PR per head/BASE pair, not one per head — a
+    // branch targeting two bases yields two. The caller needs A live PR to
+    // hand the watcher; refusing would strand both.
+    const out = JSON.stringify([
+      { number: 3999, headRefName: 'issue-596', isCrossRepository: false },
+      { number: 4000, headRefName: 'issue-596', isCrossRepository: false },
+    ]);
+    expect(parseOpenPrListJson(out, 'issue-596')).toBe(3999);
   });
 });
 

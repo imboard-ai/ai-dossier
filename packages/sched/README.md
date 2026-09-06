@@ -99,7 +99,8 @@ where every mechanical supervision decision is code, not remembered prose:
    An unverified exit rides the recovery ladder like a stall. A `report done` milestone
    must also postdate the slot's own `spawned_at` (±60s clock-skew tolerance, #575) — a
    re-enqueued issue's PREVIOUS run's report milestone is ignored (journaled
-   `stale-milestone-ignored`) rather than instantly completing a freshly-spawned agent on
+   `stale-milestone-ignored`, at most once per dispatch since #610) rather than instantly
+   completing a freshly-spawned agent on
    its first reconcile tick; a legacy slot with no `spawned_at` degrades to the old,
    unfenced check. Batch members get the same fence on their own completion signal
    (`isMemberComplete`, `phase=review status=done mode=slot`).
@@ -115,7 +116,18 @@ where every mechanical supervision decision is code, not remembered prose:
    pre-resolves every tier once per tick, so a mixed-CLI ladder rescues on a different
    agent CLI, not just a different `--model` flag on the same one. Cap 2
    escalations — or a stall at the strongest tier — fails the unit and blocks its
-   TRANSITIVE dependents (`dep-failed:<issue>`). The timeout is **phase-aware** (#495):
+   TRANSITIVE dependents (`dep-failed:<issue>`). One exception (#596): before failing
+   terminally for an UNVERIFIED EXIT (never a stall — a hung agent never had the chance
+   to open anything), the engine asks ground truth whether the slot's branch already
+   carries an open PR the milestone trail never recorded
+   (`GroundTruth.openPrForBranch` → `gh pr list --head <branch> --state open`). A
+   confirmed number parks the unit instead and the watcher owns it from there. It fails
+   closed: a report slot (no branch of its own), an unknown branch, an unusable payload
+   or an unreachable lookup all take the terminal path — only a confirmed PR the fleet
+   itself opened parks. Which of those it was is recorded on the `unit-failed` entry as
+   `pr_check=none|unreachable|no-branch`, so "we checked, there was nothing" is
+   distinguishable from "`gh` was down and we wrote off a unit whose PR may have been
+   mergeable" — the ambiguity that stranded imboard-monorepo#3999. The timeout is **phase-aware** (#495):
    the `implement` phase alone can run 1-3h on a large monorepo with zero intermediate
    milestone or pushed commit, so it gets a longer built-in default (90 min,
    `DEFAULT_PHASE_STALL_TIMEOUT_MS`) than every other phase's 30-min default — selected by
@@ -228,6 +240,17 @@ Two engine-safety policies were explicit product decisions on #464:
   to a fresh batch run must not read as instantly complete against a PREVIOUS run's
   milestone. The rejection is journaled as `stale-milestone-ignored`; `spawned_at=null`
   (a legacy slot) degrades to the old, unfenced check.
+
+  #610: the event is emitted at most ONCE PER DISPATCH, on both rails. The decision is
+  stamped on `SlotEntry.stale_milestone_ignored_for` and compared against `spawned_at`
+  itself, so a redispatch's new `spawned_at` re-arms it for free — no reset at any spawn
+  site. Previously it re-fired every reconcile tick for as long as the stale milestone
+  stayed latest (~20 identical lines for a 40-minute unit, each forwarded to Telegram by
+  `tick.sh`, burying the events an operator is actually watching for). The entry's `at`
+  is the time the ENGINE made the decision and `milestone_at` is the ignored milestone's
+  own timestamp — one vocabulary for both emitters (`journalStaleMilestoneIfIgnored` in
+  `engine.ts`, `reconcileMemberSlot` in `batch-dispatch.ts`), so nothing reading
+  `events.jsonl` has to know which rail produced a line to know what `at` means.
 
 This applies to `issue:<n>` unit dispatch (`dispatchAssignments`). `batch:<id>` units run
 through a separate pass with its own claim/reconcile logic — see
@@ -555,6 +578,15 @@ never stored it on the entry, so this also retroactively covers the #562 case). 
 states migrate on load: no gate has ever produced a non-`ok` verdict, and no batch has
 ever been blocked, under them, so `{}`/`null` is the exact backfill, not a guess.
 
+Schema 1.12.0 (#610): `SlotEntry` gains `stale_milestone_ignored_for` (ISO string or
+null — the `spawned_at` already covered by a `stale-milestone-ignored` journal entry, so
+the event fires once per dispatch rather than once per reconcile tick). Held as the
+timestamp rather than a boolean: a fresh dispatch stamps a NEW `spawned_at`, so the
+marker goes stale automatically and needs no explicit reset at any spawn site. 1.11.0
+states migrate on load, backfilling `null` — nothing was ever recorded per-dispatch
+under the old once-per-tick behavior, so null is exact, not a guess. Resets with the
+slot on release (`CLEARED_SLOT_FIELDS`).
+
 New journal events: `batch-setup-done`, `batch-setup-failed`, `member-advanced`,
 `batch-warmup-done`, `batch-warmup-failed` (#561 — the cold-path warm step only; a pool
 claim emits neither). `gate-inconclusive` (#583 — the incremental gate came back
@@ -628,6 +660,7 @@ import {
   isParkedMilestone,     // ship-phase awaiting-merge + pr= → the park signal
   prOfMilestone,         // a milestone's pr= key as a positive integer
   parsePrViewJson,       // gh pr view --json → PR truth (mergedAt/mergeable/blocked label)
+  parseOpenPrListJson,   // gh pr list --head <b> --state open → the open PR we opened (#596)
   parseSetupInfo,        // gh issue view --json comments → teardown inputs
   runTeardown,           // #468 script teardown for a merged unit (pool return / worktree remove)
   isSafeWorktree,        // worktree-path containment check (CWE-22)
@@ -668,9 +701,13 @@ import {
   Journal,               // append-only events.jsonl
   appendJsonl,           // the shared mkdir+append+swallow JSONL write
   transitionIssue, transitionBatch, transitionSlot,  // typed §D transitions
+  patchSlot, patchBatch, // §D.3 METADATA patches without a status change — `id`/`status`
+                         //   excluded (and stripped at runtime): status goes through the
+                         //   typed rails above. patchSlot moved out of engine.ts in #610
+                         //   so batch-dispatch.ts can share it.
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
-  validateState,         // strict persisted-state validation (1.0.0-1.9.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.11.0 files migrate)
   DEFAULT_ISSUE_PRIORITY, DEFAULT_BATCH_PRIORITY, // priority defaults (0 / 10, #565)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
@@ -755,8 +792,16 @@ attributes to a concrete cause (e.g. `Monitor`) without opening the transcript. 
 non-terminal `verify-incomplete` event on every unverified exit and, once the escalation
 ladder is exhausted, the terminal `unit-failed` (`agent-exited-unverified` /
 `unverified-exit-at-strongest-tier`) as `last_tool`; a stall-timeout kill carries it too. Only
-the dead-pid detection rail and the stall kill record a fresh log slice in the same tick —
-a slot already `exited`/`verifying` when reconciled again has none to attribute.
+the dead-pid detection rail and the stall kill RECORD a fresh log slice (a `runs.jsonl`
+entry) in the same tick — `recordDispatchRunLog` is once-per-dispatch and refuses to
+append a second entry over the same slice. Since #620 a slot already `exited`/`verifying`
+when reconciled again still ATTRIBUTES one: `readLastToolForSlot` re-parses the same
+static slice for the tool name alone, writing nothing, so it carries no exactly-once
+constraint. That matters because the verify decision lands on a LATER tick than the
+dead-pid detection whenever ground truth was unreachable in between — previously the
+tool name was simply lost on exactly the runs hardest to diagnose. The read is deferred
+behind a thunk so only the tick that reaches the unverified-exit decision pays for it,
+never the ticks that return early on an outage.
 
 The dispatch log (`runs/<unit>.log`) is per-UNIT and opened in append mode
 (`createSpawnDeps`), so a redispatched unit's second agent writes its output AFTER the
@@ -826,14 +871,16 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to 1.9.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
+  load and migrate to 1.12.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
   `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
   `evictions`/`fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to
   null, state-level `consecutive_suspect_dispatches`/`last_suspect_dispatch_unit`
   backfill to `0`/`null` — #505, slot `gen`/`fenced_at` backfill to `0`/`null` — #504, and
-  slot `spawned_at`/`log_offset_at_spawn` backfill to `null`/`null` — #524, and
-  state-level `last_label_poll_at` backfill to `null` — #544).
+  slot `spawned_at`/`log_offset_at_spawn` backfill to `null`/`null` — #524,
+  state-level `last_label_poll_at` backfill to `null` — #544, entry `priority` and batch
+  `member_gates`/`blocked_reason` — #565/#583, and slot
+  `stale_milestone_ignored_for` backfill to `null` — #610).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -902,6 +949,14 @@ prompt instructs it) and exit. The engine owns everything after the park:
    phase's `awaiting-merge` (with `pr=`) is a VERIFIED park, not an unverified
    exit: the entry moves to `parked`, the slot is released (a waiting unit
    consumes zero slots), and the watcher takes over.
+1b. **Recovery-adopted park (#596)** — a unit about to fail TERMINALLY for an
+   unverified exit, whose branch ground truth reports an open PR, parks on
+   that PR instead of dying as `unverified-exit-at-strongest-tier`. The
+   `pr-parked` event carries `detail: "unverified-exit-recovered-open-pr"`
+   and the `branch` the PR was found on, so a milestone-verified park (no
+   `detail`) and a recovery-adopted one are distinguishable in
+   `events.jsonl` without cross-referencing the ladder. Report slots are
+   excluded — a report agent has no branch of its own.
 2. **PR watching (AC1)** — parked PRs are polled every `pr_poll_interval_ms`
    (default 150 s — "every 2–3 min", persisted `last_pr_poll_at` so a restart
    honors the cadence; checked on each reconcile tick when due, so a
@@ -958,7 +1013,8 @@ prompt instructs it) and exit. The engine owns everything after the park:
 
 `sched status` shows parked PRs (zero slots, with the last poll's age), a
 `pr` column and a `cleanup` column on the queue; every watcher decision lands
-in `events.jsonl` (`pr-parked`, `merge-accepted`, `pr-watch-failed`,
+in `events.jsonl` (`pr-parked` — two paths, see 1 and 1b above,
+`merge-accepted`, `pr-watch-failed`,
 `pr-watch-waiting`, `teardown-done`/`teardown-failed`, `report-dispatched`,
 `report-failed`, `ground-truth-unreachable`, `stale-failure-reconciled`).
 

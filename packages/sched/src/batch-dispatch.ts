@@ -146,7 +146,6 @@ import type {
   SchedConfig,
   SchedState,
   SlotEntry,
-  SlotStatus,
 } from './types';
 import {
   IllegalTransitionError,

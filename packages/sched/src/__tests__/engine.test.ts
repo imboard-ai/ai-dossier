@@ -23,6 +23,7 @@ import {
   tick,
   transitionIssue,
 } from '../index';
+import { writeToolUseLog } from './helpers/dispatch-log';
 
 /**
  * Engine harness: a real SchedStore on a temp dir, fully fake process I/O
@@ -80,6 +81,8 @@ function harness(
   /** #596: open-PR-by-branch lookup — the terminal recovery check's ground truth. */
   const openPrs = new Map<string, number | null>();
   const openPrUnreachable = new Set<string>();
+  /** Every branch the engine asked about — proves the guards that SKIP the lookup. */
+  const openPrLookups: string[] = [];
   const setupInfos = new Map<number, SetupInfo | null | undefined>();
   const setupUnreachable = new Set<number>();
   /** #544: hard-block labels per issue (absent = no labels), and the read log. */
@@ -96,8 +99,10 @@ function harness(
     issueClosed: (issue) => closedIssues.has(issue),
     branchHead: (branch) => branchHeads.get(branch) ?? null,
     prState: (pr) => (prUnreachable.has(pr) ? undefined : prStates.get(pr)),
-    openPrForBranch: (branch) =>
-      openPrUnreachable.has(branch) ? undefined : (openPrs.get(branch) ?? null),
+    openPrForBranch: (branch) => {
+      openPrLookups.push(branch);
+      return openPrUnreachable.has(branch) ? undefined : (openPrs.get(branch) ?? null);
+    },
     setupInfo: (issue) =>
       setupUnreachable.has(issue) ? undefined : (setupInfos.get(issue) ?? null),
     issueLabels: (issue) => {
@@ -186,6 +191,7 @@ function harness(
     prUnreachable,
     openPrs,
     openPrUnreachable,
+    openPrLookups,
     setupInfos,
     setupUnreachable,
     labelsByIssue,
@@ -401,6 +407,38 @@ describe('completion verification (AC2: an agent exiting is never proof of compl
     expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('done');
   });
 
+  it('#610: the issue rail journals stale-milestone-ignored once per DISPATCH, not once per tick', () => {
+    // The batch member rail was fixed in #610; the issue rail ran the same
+    // per-tick emitter and fires far more often — a 40-minute unit carrying
+    // one stale milestone emitted ~20 identical lines, each forwarded to
+    // Telegram by tick.sh, burying the events an operator is watching for.
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    h.tick(); // dispatch 1
+    const staleAt = new Date(h.clock().getTime() - 3 * 60 * 60 * 1000).toISOString();
+    h.setMilestone(101, 'report', 'done', staleAt);
+
+    h.tick();
+    h.tick();
+    h.tick();
+    const perDispatch = () =>
+      h.events().filter((e) => e.event === 'stale-milestone-ignored' && e.issue === 101);
+    expect(perDispatch()).toHaveLength(1);
+
+    // A FRESH dispatch re-arms it: the marker holds the `spawned_at` it was
+    // decided for, so a new spawn invalidates it with no reset site. The unit
+    // is redispatched by killing the agent and letting the ladder respawn it.
+    // The clock must move first — the marker compares timestamps, so two
+    // dispatches sharing one frozen test clock are indistinguishable.
+    h.advance(60 * 1000);
+    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    h.tick(); // unverified exit → redispatch (new spawned_at)
+    h.tick();
+    h.tick();
+    expect(perDispatch()).toHaveLength(2);
+  });
+
   it('#575: a report/done milestone from a PREVIOUS run (predates this dispatch) does not external-advance — agent keeps running until a fresh report/done posts', () => {
     const h = harness();
     REGISTRIES.push(h.dir);
@@ -421,6 +459,13 @@ describe('completion verification (AC2: an agent exiting is never proof of compl
     expect(h.events().some((e) => e.event === 'stale-milestone-ignored' && e.issue === 101)).toBe(
       true
     );
+    // #610: the event's `at` is the ENGINE's decision time, and the ignored
+    // milestone's own timestamp is carried separately — the same shape the
+    // batch member rail emits, so `events.jsonl` has one vocabulary, not one
+    // per rail.
+    const ignored = h.events().find((e) => e.event === 'stale-milestone-ignored');
+    expect(ignored?.milestone_at).toBe(staleAt);
+    expect(ignored?.at).not.toBe(staleAt);
 
     // A fresh report/done, posted at/after dispatch, DOES complete it.
     h.alive.delete(pid);
@@ -782,14 +827,7 @@ describe('stall/escalation ladder (AC4)', () => {
 
     // The agent armed Monitor to wait on a background command, then ended its
     // turn — exactly the #591 trap. The fake spawn never creates the runs dir.
-    fs.mkdirSync(path.dirname(spawn.logFile), { recursive: true });
-    fs.writeFileSync(
-      spawn.logFile,
-      JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', id: 't1', name: 'Monitor', input: {} }] },
-      })
-    );
+    writeToolUseLog(spawn.logFile);
     h.alive.delete(spawn.pid);
 
     const result = h.tick();
@@ -808,14 +846,7 @@ describe('stall/escalation ladder (AC4)', () => {
     h.tick();
     const spawn = h.spawnCalls[0];
 
-    fs.mkdirSync(path.dirname(spawn.logFile), { recursive: true });
-    fs.writeFileSync(
-      spawn.logFile,
-      JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', id: 't1', name: 'Monitor', input: {} }] },
-      })
-    );
+    writeToolUseLog(spawn.logFile);
     h.alive.delete(spawn.pid); // ground truth stays reachable — no outage this time
 
     const result = h.tick();
@@ -838,14 +869,7 @@ describe('stall/escalation ladder (AC4)', () => {
     // outage overlapping the exit, not a hypothetical). #596/#524 already
     // proved this combination happens; #620's bug was that the tool name
     // read on THIS tick was silently dropped when the decision deferred.
-    fs.mkdirSync(path.dirname(spawn.logFile), { recursive: true });
-    fs.writeFileSync(
-      spawn.logFile,
-      JSON.stringify({
-        type: 'assistant',
-        message: { content: [{ type: 'tool_use', id: 't1', name: 'Monitor', input: {} }] },
-      })
-    );
+    writeToolUseLog(spawn.logFile);
     h.alive.delete(spawn.pid);
     h.unreachable.add(101);
 
@@ -886,18 +910,32 @@ describe('stall/escalation ladder (AC4)', () => {
     expect(viEvent?.last_tool).toBeUndefined();
   });
 
-  it('a strongest-tier unverified exit whose branch already has an open PR parks instead of failing (#596 AC2/AC3/AC6)', () => {
+  /**
+   * #596's arrange: a strong-tier (= strongest, no escalation left) unit with
+   * a branch recorded in slot.branch, whose agent has just exited unverified.
+   * `kill()` last so a test can script ground truth in between.
+   */
+  function strongTierUnverifiedExit(branch = 'feature/101-x') {
     const h = harness();
     REGISTRIES.push(h.dir);
     h.enqueue([{ issue: 101, mode: 'full', tier: 'strong' }]);
     h.tick();
     // The setup milestone records the branch (captured into slot.branch).
-    h.setMilestone(101, 'setup', 'done', undefined, { branch: 'feature/101-x' });
+    h.setMilestone(101, 'setup', 'done', undefined, { branch });
     h.tick();
+    return {
+      h,
+      branch,
+      kill: () => h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid),
+    };
+  }
+
+  it('a strongest-tier unverified exit whose branch already has an open PR parks instead of failing (#596 AC2/AC3/AC6)', () => {
+    const { h, kill } = strongTierUnverifiedExit();
     // The agent opened a PR but exited without posting the park milestone —
     // the #3985 shape: ground truth (branch → open PR) is the only record.
     h.openPrs.set('feature/101-x', 3999);
-    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    kill();
 
     const result = h.tick();
     expect(result.failed).toHaveLength(0);
@@ -908,35 +946,34 @@ describe('stall/escalation ladder (AC4)', () => {
     const parkedEvent = h.journal.read().find((e) => e.event === 'pr-parked' && e.issue === 101);
     expect(parkedEvent?.pr).toBe(3999);
     expect(parkedEvent?.detail).toBe('unverified-exit-recovered-open-pr');
+    expect(parkedEvent?.branch).toBe('feature/101-x'); // which ref produced the PR
     expect(h.hasSlotReleased(101, 'parked')).toBe(true);
+    // A unit that demonstrably opened a PR is proof the dispatch was healthy —
+    // it must not be left counting toward a `dispatch-unhealthy` auto-pause,
+    // exactly as the milestone-verified park resets the streak (#505).
+    expect(h.state().consecutive_suspect_dispatches).toBe(0);
   });
 
   it('a strongest-tier unverified exit with a known branch but NO open PR still fails terminally (#596 AC4)', () => {
-    const h = harness();
-    REGISTRIES.push(h.dir);
-    h.enqueue([{ issue: 101, mode: 'full', tier: 'strong' }]);
-    h.tick();
-    h.setMilestone(101, 'setup', 'done', undefined, { branch: 'feature/101-x' });
-    h.tick();
     // No entry in h.openPrs for this branch: a verified "no open PR".
-    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    const { h, kill } = strongTierUnverifiedExit();
+    kill();
 
     const result = h.tick();
     expect(result.failed).toEqual(['issue:101']);
     expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe(
       'unverified-exit-at-strongest-tier'
     );
+    // "we checked and there was none" is recorded, so it is distinguishable
+    // from the unreachable case below on the SAME unit-failed reason.
+    const failed = h.events().find((e) => e.event === 'unit-failed' && e.issue === 101);
+    expect(failed?.pr_check).toBe('none');
   });
 
   it('a strongest-tier unverified exit fails closed when the open-PR lookup is unreachable (#596 AC5)', () => {
-    const h = harness();
-    REGISTRIES.push(h.dir);
-    h.enqueue([{ issue: 101, mode: 'full', tier: 'strong' }]);
-    h.tick();
-    h.setMilestone(101, 'setup', 'done', undefined, { branch: 'feature/101-x' });
-    h.tick();
+    const { h, kill } = strongTierUnverifiedExit();
     h.openPrUnreachable.add('feature/101-x'); // gh unreachable — never park on a guess
-    h.alive.delete(h.spawnCalls[h.spawnCalls.length - 1].pid);
+    kill();
 
     const result = h.tick();
     expect(result.failed).toEqual(['issue:101']);
@@ -944,6 +981,41 @@ describe('stall/escalation ladder (AC4)', () => {
     expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe(
       'unverified-exit-at-strongest-tier'
     );
+    // Failing closed is correct, but silently failing closed is what stranded
+    // imboard-monorepo#3999: the operator must be able to tell "we checked,
+    // there was no PR" from "gh was down and we wrote this unit off anyway".
+    const failed = h.events().find((e) => e.event === 'unit-failed' && e.issue === 101);
+    expect(failed?.pr_check).toBe('unreachable');
+    expect(
+      h
+        .events()
+        .some(
+          (e) =>
+            e.event === 'ground-truth-unreachable' &&
+            e.issue === 101 &&
+            String(e.detail).includes('open-PR check')
+        )
+    ).toBe(true);
+  });
+
+  it('a STALLED unit at the strongest tier never adopts an open PR — the rescue is unverified-exit only (#596)', () => {
+    // A hung agent never had the chance to open anything; a PR on its branch
+    // belongs to an earlier dispatch. Widening the cause guard would silently
+    // convert every strongest-tier stall into a park.
+    const h = harness({ stallTimeoutMs: 1000 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'strong' }]);
+    h.tick();
+    h.setMilestone(101, 'setup', 'done', undefined, { branch: 'feature/101-x' });
+    h.tick();
+    h.openPrs.set('feature/101-x', 3999);
+    h.advance(60 * 60 * 1000); // well past the stall allowance; the agent stays ALIVE
+
+    const result = h.tick();
+    expect(result.parked).toHaveLength(0);
+    expect(result.failed).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('stall-at-strongest-tier');
+    expect(h.openPrLookups).toHaveLength(0); // never even asked
   });
 
   it('the phase now in flight (via next=) gets its own allowance — implement default is 90 min, not the 30-min global (#495)', () => {
@@ -1849,6 +1921,12 @@ describe('#468 AC2: teardown + report dispatch on merge', () => {
     expect(entry101?.reason).toBe('report-escalation-cap');
     // 102 was never blocked by the report failure — it dispatches against the merged dep
     expect(h.state().entries.find((e) => e.issue === 102)?.status).toBe('dispatched');
+    // #596 AC7: a report agent has no branch of its own and its unit's PR is
+    // already merged — the open-PR rescue must never fire here, or
+    // `report-escalation-cap` stops meaning what it says.
+    expect(h.openPrLookups).toHaveLength(0);
+    const reportFailed = h.events().find((e) => e.event === 'unit-failed' && e.issue === 101);
+    expect(reportFailed?.pr_check).toBeUndefined(); // the check does not apply
   });
 
   it('a running report agent is never killed by the already-closed issue (report completion is milestone-only)', () => {
