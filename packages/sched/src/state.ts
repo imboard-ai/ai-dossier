@@ -265,6 +265,44 @@ function isIsoDateString(value: unknown): value is string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
 }
 
+/**
+ * One journal-dedup marker pair (#630/#632): an optional (absent on a legacy
+ * state), nullable ISO `*_since` and an optional non-negative-integer
+ * `*_ticks`.
+ *
+ * Validated rather than coerced (#633) because the migration below backfills
+ * with `??`, which only fills `null`/`undefined` — any other JSON value passes
+ * straight through to an engine that does `ticks + 1` and
+ * `ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0` on it. A string `"5"` makes
+ * that `+` a concatenation, so the modulo test is never true and the
+ * condition the marker exists to surface is suppressed FOREVER — silence read
+ * as health, which is the exact failure mode #610/#630/#632 were filed for. A
+ * float or an object gives the same permanent suppression via `NaN`.
+ *
+ * The pair-agreement check follows #505's precedent
+ * (`consecutive_suspect_dispatches` ⇔ `last_suspect_dispatch_unit`): the two
+ * fields are a single fact, so only a state where they disagree is rejected.
+ * A legacy state with both keys absent satisfies it trivially.
+ */
+function validateDedupMarker(
+  record: Record<string, unknown>,
+  label: string,
+  sinceKey: string,
+  ticksKey: string
+): void {
+  const since = record[sinceKey] ?? null;
+  const ticks = record[ticksKey] ?? 0;
+  if (since !== null && !isIsoDateString(since)) {
+    throw new Error(`${label}: ${sinceKey} must be an ISO date string or null`);
+  }
+  if (!Number.isInteger(ticks) || (ticks as number) < 0) {
+    throw new Error(`${label}: ${ticksKey} must be a non-negative integer`);
+  }
+  if ((since === null) !== (ticks === 0)) {
+    throw new Error(`${label}: ${sinceKey} and ${ticksKey} must agree — null iff zero`);
+  }
+}
+
 function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
     throw new Error(`${where(0)}: entry must be an object`);
@@ -333,6 +371,13 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
       throw new Error(`${label}: failure_evidence.reverted_commits must be an array of strings`);
     }
   }
+  validateDedupMarker(
+    entry,
+    label,
+    'ground_truth_unreachable_since',
+    'ground_truth_unreachable_ticks'
+  );
+  validateDedupMarker(entry, label, 'pr_watch_waiting_since', 'pr_watch_waiting_ticks');
   if (!isIsoDateString(entry.enqueued_at) || !isIsoDateString(entry.updated_at)) {
     throw new Error(`${label}: enqueued_at/updated_at must be ISO date strings`);
   }
@@ -423,6 +468,22 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
     (!Number.isInteger(batch.rebase_attempts) || (batch.rebase_attempts as number) < 0)
   ) {
     throw new Error(`Batch ${id}: rebase_attempts must be a non-negative integer`);
+  }
+  if (
+    batch.pr_watch_failed_reason !== null &&
+    batch.pr_watch_failed_reason !== undefined &&
+    typeof batch.pr_watch_failed_reason !== 'string'
+  ) {
+    throw new Error(`Batch ${id}: pr_watch_failed_reason must be a string or null`);
+  }
+  validateDedupMarker(batch, `Batch ${id}`, 'pr_watch_failed_since', 'pr_watch_failed_ticks');
+  if (
+    ((batch.pr_watch_failed_reason ?? null) === null) !==
+    ((batch.pr_watch_failed_since ?? null) === null)
+  ) {
+    throw new Error(
+      `Batch ${id}: pr_watch_failed_reason and pr_watch_failed_since must agree — null iff null`
+    );
   }
 }
 
@@ -767,9 +828,9 @@ export function validateState(data: unknown): SchedState {
     // exist yet), so `{}`/`null` are exact, not guesses.
     member_gates: batch.member_gates ?? {},
     blocked_reason: batch.blocked_reason ?? null,
-    // Pre-#630 (1.12.0) batches carry neither field — `pr-watch-failed` was
-    // journalled with no dedup marker at all, so null (no streak recorded)
-    // is exact, not a guess.
+    // Pre-#630 (1.12.0) batches carry none of these three — `pr-watch-failed`
+    // was journalled with no dedup marker at all, so null/null/0 (no streak
+    // recorded) is exact, not a guess.
     pr_watch_failed_reason: batch.pr_watch_failed_reason ?? null,
     pr_watch_failed_since: batch.pr_watch_failed_since ?? null,
     pr_watch_failed_ticks: batch.pr_watch_failed_ticks ?? 0,
@@ -878,6 +939,26 @@ export function transitionBatch(
  * only from `events.jsonl` (`assigned`/`spawned` carry `detail: 'report
  * agent'`), never from the idle slot itself.
  */
+/**
+ * The `QueueEntry` journal-dedup markers (#632), zeroed. Follows
+ * `CLEARED_SLOT_FIELDS`' precedent for the same reason (#633): these values
+ * are restated at every entry-creation and requeue site, and a fifth marker
+ * added later must not be remembered in one and forgotten in another.
+ */
+export const CLEARED_ENTRY_DEDUP_MARKERS = {
+  ground_truth_unreachable_since: null,
+  ground_truth_unreachable_ticks: 0,
+  pr_watch_waiting_since: null,
+  pr_watch_waiting_ticks: 0,
+} as const;
+
+/** The `BatchEntry` `pr-watch-failed` dedup marker (#630), zeroed. */
+export const CLEARED_PR_WATCH_FIELDS = {
+  pr_watch_failed_reason: null,
+  pr_watch_failed_since: null,
+  pr_watch_failed_ticks: 0,
+} as const;
+
 export const CLEARED_SLOT_FIELDS = {
   unit: null,
   pid: null,
@@ -949,17 +1030,27 @@ export function isReportSlot(slot: SlotEntry): boolean {
  * without a status change. `status` and `id` are excluded on purpose: every
  * status change goes through `transitionBatch`'s typed rails, never a
  * hand-written assignment.
+ *
+ * `touchUpdatedAt` defaults to `true`, but `reconcilePrWatch`'s dedup writes
+ * pass `false` for the same reason `patchEntry`'s do (#633): a silent tick
+ * that only increments `pr_watch_failed_ticks` is bookkeeping, not activity,
+ * and bumping `updated_at` on every reconcile makes a batch that has been
+ * blocked for hours read as freshly-touched in `sched status --json` and in
+ * `readiness.ts`'s age tiebreak.
  */
 export function patchBatch(
   state: SchedState,
   batchId: string,
   patch: Omit<Partial<BatchEntry>, 'id' | 'status'>,
-  now: Date = new Date()
+  now: Date = new Date(),
+  touchUpdatedAt = true
 ): SchedState {
   return {
     ...state,
     batches: state.batches.map((b) =>
-      b.id === batchId ? { ...b, ...patch, updated_at: now.toISOString() } : b
+      b.id === batchId
+        ? { ...b, ...patch, ...(touchUpdatedAt ? { updated_at: now.toISOString() } : {}) }
+        : b
     ),
   };
 }
@@ -989,11 +1080,18 @@ export function patchEntry(
   now: Date = new Date(),
   touchUpdatedAt = true
 ): SchedState {
+  // The same runtime rail `patchSlot` carries, for the same reason (#633):
+  // TypeScript's excess-property check fires for object LITERALS only, so an
+  // `Omit` cannot stop a patch that arrives as a `Partial<QueueEntry>`
+  // variable — which is precisely how `journalConditionIfDue`'s `withMarker`
+  // callback returns its patch — from carrying `status` and writing an issue
+  // state behind `transitionIssue`'s back.
+  const { issue: _issue, status: _status, ...safe } = patch as Partial<QueueEntry>;
   return {
     ...state,
     entries: state.entries.map((e) =>
       e.issue === issue
-        ? { ...e, ...patch, ...(touchUpdatedAt ? { updated_at: now.toISOString() } : {}) }
+        ? { ...e, ...safe, ...(touchUpdatedAt ? { updated_at: now.toISOString() } : {}) }
         : e
     ),
   };
@@ -1139,22 +1237,11 @@ export function requeueMember(
   const patch = {
     ...target,
     reason,
-    ground_truth_unreachable_since: null,
-    ground_truth_unreachable_ticks: 0,
-    pr_watch_waiting_since: null,
-    pr_watch_waiting_ticks: 0,
+    ...CLEARED_ENTRY_DEDUP_MARKERS,
     ...extra,
   };
   if (entry.status === 'queued' || entry.status === 'classified' || entry.status === 'requeued') {
-    return {
-      state: {
-        ...state,
-        entries: state.entries.map((e) =>
-          e.issue === issue ? { ...e, ...patch, updated_at: now.toISOString() } : e
-        ),
-      },
-      requeued: true,
-    };
+    return { state: patchEntry(state, issue, patch, now), requeued: true };
   }
   let next = state;
   if (entry.status !== 'evicted') {

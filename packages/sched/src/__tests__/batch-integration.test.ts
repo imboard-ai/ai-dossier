@@ -37,6 +37,7 @@ import {
   findBatch,
   type GroundTruth,
   type GroundTruthMilestone,
+  JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
   type PrTruth,
   patchSlot,
@@ -1669,6 +1670,7 @@ function prWatchHarness(memberIssue: number, batchId: string, anchor: number, pr
 
   return {
     journal,
+    store,
     setTruth: (t: PrTruth | undefined) => {
       truth = t;
     },
@@ -1750,27 +1752,66 @@ describe('#630: pr-watch-failed journals once per distinct condition, not once p
     h.setTruth(BLOCKED_TRUTH);
     h.tick();
 
-    const [entry] = h.journal.read().filter((e) => e.event === 'pr-watch-failed') as unknown as {
-      at: string;
-      ticks_persisted: number;
-    }[];
+    const [entry] = h.journal.read().filter((e) => e.event === 'pr-watch-failed');
     expect(entry?.at).toBe('2026-09-06T21:15:08.000Z');
     expect(entry?.ticks_persisted).toBe(1);
+    // #633: `ticks_persisted` is a tick count against an operator-tunable
+    // interval, so `since` is what actually makes the duration legible.
+    expect(entry?.since).toBe('2026-09-06T21:15:08.000Z');
     expect(h.batch()?.pr_watch_failed_since).toBe('2026-09-06T21:15:08.000Z');
   });
 
-  it('AC3: a still-blocked streak re-announces every 20 ticks, so "still blocked after 40 minutes" is legible from the journal — without breaking AC5’s 3-tick dedup', () => {
+  it('AC3: a still-blocked streak re-announces every JOURNAL_DEDUP_REANNOUNCE_TICKS ticks, so "still blocked after N checks" is legible from the journal — without breaking AC5’s 3-tick dedup', () => {
     const h = prWatchHarness(630, 'b-prwatch4', 629, 4072);
     h.setTruth(BLOCKED_TRUTH);
 
-    for (let i = 0; i < 19; i++) h.tick(); // ticks 1-19: onset (tick 1) journals, 2-19 stay silent
+    // Driven off the constant, not a literal: a retune must fail on the
+    // assertion it invalidates, not on an opaque `expected 1 to be 2`.
+    for (let i = 0; i < JOURNAL_DEDUP_REANNOUNCE_TICKS - 1; i++) h.tick();
     let events = h.journal.read().filter((e) => e.event === 'pr-watch-failed');
     expect(events).toHaveLength(1);
 
-    h.tick(); // tick 20 — re-announcement threshold
+    h.tick(); // re-announcement threshold
     events = h.journal.read().filter((e) => e.event === 'pr-watch-failed');
     expect(events).toHaveLength(2);
-    expect((events[1] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(20);
-    expect(h.batch()?.pr_watch_failed_ticks).toBe(20);
+    expect(events[1]?.ticks_persisted).toBe(JOURNAL_DEDUP_REANNOUNCE_TICKS);
+    // The re-announcement still points at the streak's ORIGINAL onset.
+    expect(events[1]?.since).toBe(events[0]?.since);
+    expect(h.batch()?.pr_watch_failed_ticks).toBe(JOURNAL_DEDUP_REANNOUNCE_TICKS);
+  });
+
+  it('#633: a silent dedup tick does not bump the batch’s `updated_at`', () => {
+    const h = prWatchHarness(630, 'b-prwatch5', 629, 4073);
+    h.setTruth(BLOCKED_TRUTH);
+    h.advanceNow('2026-09-06T21:15:00.000Z');
+    h.tick(); // onset — journals
+    const afterOnset = h.batch()?.updated_at;
+
+    h.advanceNow('2026-09-06T21:16:00.000Z');
+    h.tick(); // silent: counter only
+    expect(h.batch()?.pr_watch_failed_ticks).toBe(2);
+    expect(h.journal.read().filter((e) => e.event === 'pr-watch-failed')).toHaveLength(1);
+    // A batch blocked for hours must not read as freshly-touched in
+    // `sched status --json` or in `readiness.ts`'s age tiebreak.
+    expect(h.batch()?.updated_at).toBe(afterOnset);
+  });
+
+  it('#633: the marker is cleared when the batch leaves `awaiting-merge`, so the same reason after a re-ship journals afresh', () => {
+    const h = prWatchHarness(630, 'b-prwatch6', 629, 4074);
+    h.setTruth(BLOCKED_TRUTH);
+    h.tick();
+    expect(h.batch()?.pr_watch_failed_reason).toBe('auto-merge-blocked');
+
+    // `BATCH_TRANSITIONS` permits awaiting-merge → rebasing on the same id
+    // (`recovery.ts`'s `handlePrConflict`); the streak belongs to the stretch
+    // that just ended, not to the next one.
+    h.store.withLock((s) => ({
+      state: transitionBatch(s, 'b-prwatch6', 'rebasing', {}, new Date()),
+      result: undefined,
+    }));
+    h.tick();
+    expect(h.batch()?.pr_watch_failed_reason).toBeNull();
+    expect(h.batch()?.pr_watch_failed_since).toBeNull();
+    expect(h.batch()?.pr_watch_failed_ticks).toBe(0);
   });
 });

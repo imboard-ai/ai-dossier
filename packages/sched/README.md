@@ -232,7 +232,12 @@ Two engine-safety policies were explicit product decisions on #464:
   network down), stall and verify-fail decisions pause for that unit — an outage can
   never kill a healthy agent or fail a unit as "unverified". An agent that exits during
   an outage holds in `verifying` until truth returns. Each pause is journaled as
-  `ground-truth-unreachable`.
+  `ground-truth-unreachable` — since #632 once per unbroken streak (carrying `since` and
+  `ticks_persisted`) rather than once per tick, re-announced every 20 ticks and re-armed
+  when truth recovers and fails anew, so an outage across `max_slots` units no longer
+  emits one line per unit per reconcile interval. Two sites are deliberately undeduped:
+  `failOrAdoptOpenPr`, which is terminal and so fires at most once per dispatch, and
+  `runTeardownFor`, which is audited but not yet fixed (#636).
 - **A completion milestone is fenced to its own dispatch (#575).** `isVerifiedComplete`
   (issues) and `isMemberComplete` (batch members) both accept the current dispatch's
   `SlotEntry.spawned_at` and reject a `report done` / `review done mode=slot` milestone
@@ -587,6 +592,31 @@ states migrate on load, backfilling `null` — nothing was ever recorded per-dis
 under the old once-per-tick behavior, so null is exact, not a guess. Resets with the
 slot on release (`CLEARED_SLOT_FIELDS`).
 
+Schema 1.13.0 (#630): `BatchEntry` gains `pr_watch_failed_reason` (the reason already
+journalled for the batch's current `pr-watch-failed` streak, null when the watch is
+healthy), `pr_watch_failed_since` (ISO, when the streak began) and
+`pr_watch_failed_ticks` (ticks the streak has persisted, silent ones included) — so
+`pr-watch-failed` fires once per distinct condition rather than once per reconcile tick,
+re-announcing every `JOURNAL_DEDUP_REANNOUNCE_TICKS` (20) ticks. 1.12.0 states migrate on
+load, backfilling `null`/`null`/`0` — no dedup marker was ever recorded under the old
+once-per-tick behavior, so it is exact, not a guess. Cleared whenever the batch leaves
+`awaiting-merge` (`CLEARED_PR_WATCH_FIELDS`), since the marker is scoped to one
+awaiting-merge stretch and a batch can return to that status on the same id via
+rebase-and-reship.
+
+Schema 1.14.0 (#632): `QueueEntry` gains `ground_truth_unreachable_since`/`_ticks` and
+`pr_watch_waiting_since`/`_ticks` — the same dedup scoped to the issue rather than the
+batch, because these sites span slot-held, parked and stale-failed units alike and
+`QueueEntry` is the one record every unit has either way. 1.13.0 and earlier states
+migrate on load, backfilling `null`/`0` — exact, not a guess. Reset on every requeue
+(`CLEARED_ENTRY_DEDUP_MARKERS`, applied by `requeueMember`,
+`requeueOrphanedDispatches` and the label-cleared path): a requeue is a fresh attempt,
+and a streak from the previous run must not silence this one's first occurrence. Written
+with `touchUpdatedAt: false` — `QueueEntry.updated_at` is load-bearing for
+`isStaleFailedPark`'s 7-day window, `status.ts`'s "parked since" and `readiness.ts`'s
+tiebreak, and a silent dedup tick must not reset them. `patchBatch` takes the same flag
+for the same reason on the batch rail.
+
 New journal events: `batch-setup-done`, `batch-setup-failed`, `member-advanced`,
 `batch-warmup-done`, `batch-warmup-failed` (#561 — the cold-path warm step only; a pool
 claim emits neither). `gate-inconclusive` (#583 — the incremental gate came back
@@ -707,7 +737,7 @@ import {
                          //   so batch-dispatch.ts can share it.
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
-  validateState,         // strict persisted-state validation (1.0.0-1.11.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.13.0 files migrate)
   DEFAULT_ISSUE_PRIORITY, DEFAULT_BATCH_PRIORITY, // priority defaults (0 / 10, #565)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
@@ -871,7 +901,7 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to 1.12.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
+  load and migrate to 1.14.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
   `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
   `evictions`/`fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to
@@ -1017,6 +1047,16 @@ in `events.jsonl` (`pr-parked` — two paths, see 1 and 1b above,
 `merge-accepted`, `pr-watch-failed`,
 `pr-watch-waiting`, `teardown-done`/`teardown-failed`, `report-dispatched`,
 `report-failed`, `ground-truth-unreachable`, `stale-failure-reconciled`).
+
+Since #610/#630/#632, `pr-watch-failed`, `pr-watch-waiting` and
+`ground-truth-unreachable` are emitted **once per unbroken streak** of the condition, not
+once per tick, re-announcing every `JOURNAL_DEDUP_REANNOUNCE_TICKS` (20) ticks. Each
+entry carries `at` (the engine's decision clock), `since` (the streak's onset) and
+`ticks_persisted` (ticks the streak has run, silent ones included). Read `since`, not the
+tick count, for duration: 20 ticks is ~20 min on the per-reconcile sites
+(`reconcile_interval_ms`, default 60 s) and ~50 min on the sites gated on the parked-PR
+poll (`pr_poll_interval_ms`, default 150 s), and both are operator-tunable. A count of
+these events is therefore a count of streaks and re-announcements, not of ticks.
 
 ## Development
 

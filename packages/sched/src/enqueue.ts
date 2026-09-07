@@ -13,7 +13,7 @@
 import { SAFE_REF_RE } from './attribution';
 import { unwrapList } from './json';
 import { labelBlockReason } from './labels';
-import { createBatch, findBatch, transitionBatch } from './state';
+import { CLEARED_ENTRY_DEDUP_MARKERS, createBatch, findBatch, transitionBatch } from './state';
 import type { CycleMode, ModelTier, QueueEntry, SchedState } from './types';
 import { DEFAULT_ISSUE_PRIORITY, TERMINAL_ISSUE_STATUSES } from './types';
 
@@ -437,10 +437,7 @@ export function enqueueEntries(
       pr: null,
       cleanup: null,
       failure_evidence: null,
-      ground_truth_unreachable_since: null,
-      ground_truth_unreachable_ticks: 0,
-      pr_watch_waiting_since: null,
-      pr_watch_waiting_ticks: 0,
+      ...CLEARED_ENTRY_DEDUP_MARKERS,
       enqueued_at: timestamp,
       updated_at: timestamp,
     };

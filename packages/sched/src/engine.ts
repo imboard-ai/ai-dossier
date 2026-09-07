@@ -104,6 +104,7 @@ import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
 import { buildSchedRunLogEntry, finalizeRunLogEntry, readDispatchLog } from './run-log';
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import {
+  CLEARED_ENTRY_DEDUP_MARKERS,
   findEntry,
   isReportSlot,
   patchEntry,
@@ -115,6 +116,7 @@ import { runTeardown, type TeardownResult } from './teardown';
 import {
   DISPATCH_UNHEALTHY_THRESHOLD,
   ESCALATION_CAP,
+  JOURNAL_DEDUP_REANNOUNCE_TICKS,
   type JournalEventName,
   type ModelTier,
   type QueueEntry,
@@ -651,7 +653,15 @@ function reconcileLabelBlocks(ctx: TickCtx, state: SchedState, poll: LabelPoll):
       const ownStillPresent = labels.some((name) => name.toLowerCase() === blockedBy.toLowerCase());
       const current = pickHardBlockLabel(labels);
       if (!ownStillPresent && current === null) {
-        next = transitionIssue(next, issue, 'queued', { reason: null }, now);
+        // #633: an unblocked entry is a fresh attempt too — see
+        // `requeueOrphanedDispatches`.
+        next = transitionIssue(
+          next,
+          issue,
+          'queued',
+          { reason: null, ...CLEARED_ENTRY_DEDUP_MARKERS },
+          now
+        );
         journal(ctx, 'label-cleared', unit, { reason: labelBlockReason(blockedBy) });
         ctx.result.labelCleared.push(unit);
       } else if (current !== null && current !== blockedBy) {
@@ -1349,19 +1359,13 @@ function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
 }
 
 /**
- * Ticks a still-unreachable/still-waiting streak goes silent before
- * re-announcing (#632, the #630 idiom — `PR_WATCH_FAILED_REANNOUNCE_TICKS`
- * on the batch-member rail — applied here per-issue instead of per-batch).
- * Same 20-tick window, same rationale: wide enough that a short-lived blip
- * never re-announces, narrow enough that a genuinely stuck condition
- * resurfaces well inside "still unreachable after 40 minutes" at the
- * standard ~2-minute reconcile cadence.
- */
-const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
-
-/**
  * Journal `event` for `unit` on the first tick of a new streak, then again
- * only every `JOURNAL_DEDUP_REANNOUNCE_TICKS` ticks while it persists (#632)
+ * only every `JOURNAL_DEDUP_REANNOUNCE_TICKS` ticks while it persists (#632).
+ * That window is a TICK count, not a duration: the sites reached every
+ * reconcile re-announce at ~20 min on the default 60 s interval, while
+ * `reconcileParked`/`reconcileStaleFailedParks` are gated on `prPoll.ran` and
+ * so advance once per 150 s PR poll, ~50 min. Both intervals are
+ * operator-tunable — which is why each entry also carries `since`
  * — `ground-truth-unreachable` and `pr-watch-waiting` were previously
  * journaled every tick the condition held, for as long as it lasted (an
  * outage produced one entry every reconcile interval, per affected unit, for
@@ -1402,21 +1406,24 @@ function journalConditionIfDue(
   const isNewStreak = sinceOf(entry) === null;
   const ticks = isNewStreak ? 1 : ticksOf(entry) + 1;
   const now = ctx.deps.now();
+  const since = isNewStreak ? now.toISOString() : (sinceOf(entry) as string);
   if (isNewStreak || ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0) {
-    journal(ctx, event, unit, { ...extra, at: now.toISOString(), ticks_persisted: ticks });
+    // `at` is the decision clock (AC3); `since` is the streak's onset. Both
+    // are needed: `ticks_persisted` is a TICK count, and the two rails tick at
+    // different, operator-tunable rates, so it maps to no fixed wall-clock.
+    journal(ctx, event, unit, {
+      ...extra,
+      at: now.toISOString(),
+      since,
+      ticks_persisted: ticks,
+    });
   }
   // `touchUpdatedAt: false` — this marker is dedup bookkeeping, not a
   // substantive change to the entry; `QueueEntry.updated_at` is relied on
   // elsewhere (`isStaleFailedPark`'s window, `status.ts`'s "since" display,
   // `readiness.ts`'s dispatch tiebreak) as a clock that must not reset on a
   // silent tick.
-  return patchEntry(
-    state,
-    issue,
-    withMarker(isNewStreak ? now.toISOString() : sinceOf(entry), ticks),
-    now,
-    false
-  );
+  return patchEntry(state, issue, withMarker(since, ticks), now, false);
 }
 
 function journalGroundTruthUnreachableIfDue(
@@ -1705,7 +1712,9 @@ function reconcileRunning(
   }
   // #632: truth answered this tick — any unreachable streak recorded against
   // a PREVIOUS tick is over.
-  const reachable = clearGroundTruthUnreachable(state, unit, now);
+  // Named for what it holds — a SchedState with the streak cleared — not for
+  // `truth.reachable`, the boolean five lines up.
+  const cleared = clearGroundTruthUnreachable(state, unit, now);
 
   // Ground truth says the unit is DONE while the agent still holds the slot —
   // externally-advanced state (AC3): reclaim the slot, kill the leftover agent.
@@ -1721,7 +1730,7 @@ function reconcileRunning(
   // this returns.
   const marked = journalStaleMilestoneIfIgnored(
     ctx,
-    reachable,
+    cleared,
     unit,
     slot,
     truth,
@@ -2035,7 +2044,18 @@ function requeueOrphanedDispatches(ctx: TickCtx, state: SchedState): SchedState 
     if (entry.status !== 'dispatched' || held.has(`issue:${entry.issue}`)) continue;
     const now = ctx.deps.now();
     next = transitionIssue(next, entry.issue, 'blocked', { reason: 'orphaned-dispatch' }, now);
-    next = transitionIssue(next, entry.issue, 'queued', { reason: null }, now);
+    // #633: same rule as `requeueMember` — a requeue is a fresh attempt, so a
+    // dedup streak recorded against the PREVIOUS dispatch must not suppress
+    // that condition's first occurrence on this one. Without it, a crash
+    // during an outage leaves `ground_truth_unreachable_ticks` mid-streak and
+    // the redispatched unit stays silent until the next re-announcement.
+    next = transitionIssue(
+      next,
+      entry.issue,
+      'queued',
+      { reason: null, ...CLEARED_ENTRY_DEDUP_MARKERS },
+      now
+    );
     journal(ctx, 'requeued', `issue:${entry.issue}`, {
       detail: 'orphaned dispatch requeued after restart',
     });
@@ -2307,6 +2327,17 @@ function runTeardownFor(deps: EngineDeps, issue: number): TeardownResult | null 
   const info = deps.groundTruth.setupInfo(issue);
   const unit = `issue:${issue}`;
   if (info === undefined) {
+    // #633: AUDITED, NOT DEDUPED. This is a tenth site with #632's shape —
+    // `teardownPendingIssues` reaches it every tick and a `null` return leaves
+    // `cleanup` unset, so an unreachable `setupInfo` re-emits this line once
+    // per reconcile interval for as long as the outage lasts.
+    //
+    // Left as-is deliberately: #632 enumerated nine sites and its plan makes
+    // the boundary load-bearing ("a site outside the table is a NEW issue, not
+    // a reason to widen this one") — widening is what dissolved b-07. The fix
+    // is tracked in #636, and is not a one-liner here: `runTeardownFor` runs
+    // OUTSIDE the store lock and has no `SchedState` to patch, so the marker
+    // has to be threaded through the caller's second lock pass.
     deps.journal.append(
       unitEvent('ground-truth-unreachable', unit, {
         detail: 'teardown paused until truth returns',
