@@ -242,6 +242,7 @@ export {
   type FixAttemptRecord,
   IllegalTransitionError,
   type IssueStatus,
+  JOURNAL_DEDUP_REANNOUNCE_TICKS,
   type JournalEvent,
   type JournalEventName,
   LEGACY_CONFIG_SCHEMA_VERSIONS,

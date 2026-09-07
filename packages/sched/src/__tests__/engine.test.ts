@@ -9,6 +9,7 @@ import {
   enqueueEntries,
   type GroundTruth,
   type GroundTruthMilestone,
+  JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
   type JournalEvent,
   type PrTruth,
@@ -22,6 +23,7 @@ import {
   setPaused,
   tick,
   transitionIssue,
+  transitionSlot,
 } from '../index';
 import { writeToolUseLog } from './helpers/dispatch-log';
 
@@ -3080,7 +3082,7 @@ describe('#632: ground-truth-unreachable / pr-watch-waiting dedup once per strea
       .read()
       .filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
     expect(events).toHaveLength(1);
-    expect((events[0] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+    expect(events[0]?.ticks_persisted).toBe(1);
   });
 
   it('AC1: the condition clearing and recurring produces a second entry — dedup, not suppression', () => {
@@ -3111,17 +3113,19 @@ describe('#632: ground-truth-unreachable / pr-watch-waiting dedup once per strea
       .read()
       .filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
     expect(events).toHaveLength(2);
-    expect((events[1] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+    expect(events[1]?.ticks_persisted).toBe(1);
   });
 
-  it('AC4: a still-unreachable streak re-announces every 20 ticks, so "unreachable after N ticks" is legible from the journal', () => {
+  it('AC4: a still-unreachable streak re-announces every JOURNAL_DEDUP_REANNOUNCE_TICKS ticks, so "unreachable after N ticks" is legible from the journal', () => {
     const h = harness();
     REGISTRIES.push(h.dir);
     h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
     h.tick(); // spawn
 
     h.unreachable.add(101);
-    for (let i = 0; i < 19; i++) h.tick(); // ticks 1-19: onset (tick 1) journals, 2-19 stay silent
+    // Driven off the constant, not a literal: onset journals, the rest stay
+    // silent until the threshold.
+    for (let i = 0; i < JOURNAL_DEDUP_REANNOUNCE_TICKS - 1; i++) h.tick();
     let events = h.journal
       .read()
       .filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
@@ -3132,7 +3136,7 @@ describe('#632: ground-truth-unreachable / pr-watch-waiting dedup once per strea
       .read()
       .filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
     expect(events).toHaveLength(2);
-    expect((events[1] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(20);
+    expect(events[1]?.ticks_persisted).toBe(JOURNAL_DEDUP_REANNOUNCE_TICKS);
   });
 
   it('AC2/AC6: three consecutive polls of one unchanged pr-watch-waiting condition produce exactly one entry', () => {
@@ -3150,7 +3154,7 @@ describe('#632: ground-truth-unreachable / pr-watch-waiting dedup once per strea
 
     const events = h.events().filter((e) => e.event === 'pr-watch-waiting' && e.issue === 101);
     expect(events).toHaveLength(1);
-    expect((events[0] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+    expect(events[0]?.ticks_persisted).toBe(1);
     expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
   });
 
@@ -3179,7 +3183,7 @@ describe('#632: ground-truth-unreachable / pr-watch-waiting dedup once per strea
 
     const events = h.events().filter((e) => e.event === 'pr-watch-waiting' && e.issue === 101);
     expect(events).toHaveLength(2);
-    expect((events[1] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+    expect(events[1]?.ticks_persisted).toBe(1);
   });
 
   it("the dedup marker never refreshes updated_at — a stale-failed entry's 7-day reconcile window still elapses on schedule", () => {
@@ -3214,5 +3218,51 @@ describe('#632: ground-truth-unreachable / pr-watch-waiting dedup once per strea
 
     expect(result.staleReconciled).toEqual([]);
     expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+  });
+
+  it('#633: an orphaned dispatch requeued after a restart reports the condition afresh', () => {
+    // `requeueMember` resets the markers because "a requeue is a fresh
+    // attempt"; `requeueOrphanedDispatches` did not, so a streak recorded
+    // against the PREVIOUS dispatch silenced the new one's first occurrence
+    // until the next re-announcement.
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+    h.tick(); // spawn
+
+    h.unreachable.add(101);
+    h.tick(); // onset — journals
+    h.tick(); // silent
+    expect(
+      h.journal.read().filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101)
+    ).toHaveLength(1);
+    expect(
+      h.state().entries.find((e) => e.issue === 101)?.ground_truth_unreachable_ticks
+    ).toBeGreaterThan(0);
+
+    // Crash window: the slot is released but the entry is still `dispatched`
+    // — the exact state `requeueOrphanedDispatches` self-heals.
+    h.store.withLock((state) => ({
+      state: state.slots.reduce(
+        (acc, sl) =>
+          sl.status === 'idle'
+            ? acc
+            : transitionSlot(
+                transitionSlot(acc, sl.id, 'failed', {}, h.clock()),
+                sl.id,
+                'idle',
+                {},
+                h.clock()
+              ),
+        state
+      ),
+      result: null,
+    }));
+    h.tick(); // requeueOrphanedDispatches recovers it
+
+    const entry = h.state().entries.find((e) => e.issue === 101);
+    expect(entry?.ground_truth_unreachable_since).toBeNull();
+    expect(entry?.ground_truth_unreachable_ticks).toBe(0);
+    expect(entry?.pr_watch_waiting_since).toBeNull();
   });
 });

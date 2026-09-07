@@ -314,19 +314,36 @@ export interface QueueEntry {
    * stale-failed at a time, so only one site is ever live for a given issue
    * on a given tick, and `QueueEntry` — unlike `SlotEntry` — exists for a
    * unit regardless of whether it currently holds a slot.
+   *
+   * Streak identity here is PRESENCE-ONLY: unlike `BatchEntry`'s
+   * `pr_watch_failed_reason`, a changed `detail` does not start a new streak.
+   * Every site journalling this event must therefore be a flavour of the same
+   * underlying condition — a site whose `detail` describes a materially
+   * different failure would be silently folded into a running streak (#637).
    */
   ground_truth_unreachable_since: string | null;
   /**
    * Ticks this entry's current `ground-truth-unreachable` streak has
    * persisted (#632), including ticks the dedup kept silent — lets the
-   * journal re-announce a still-unreachable streak periodically instead of
-   * only once, ever (AC4: "unreachable for 40 minutes" legible from one
-   * line). Reset to `0` whenever `ground_truth_unreachable_since` is `null`.
+   * journal re-announce a still-unreachable streak every
+   * `JOURNAL_DEDUP_REANNOUNCE_TICKS` ticks instead of only once, ever, so
+   * "unreachable for 40 minutes" is legible from one line. Reset to `0`
+   * whenever `ground_truth_unreachable_since` is `null`.
    */
   ground_truth_unreachable_ticks: number;
-  /** Same shape as the two fields above, for `pr-watch-waiting` (#632) — a
-   * merge GitHub has recorded but not yet reflected as the issue closing. */
+  /**
+   * ISO time this entry's current `pr-watch-waiting` streak began (#632) — a
+   * merge GitHub has recorded but not yet reflected as the issue closing.
+   * Same shape and same presence-only streak identity as
+   * `ground_truth_unreachable_since` above; `null` whenever the wait is not
+   * currently live.
+   */
   pr_watch_waiting_since: string | null;
+  /**
+   * Ticks this entry's current `pr-watch-waiting` streak has persisted
+   * (#632), silent ticks included. Reset to `0` whenever
+   * `pr_watch_waiting_since` is `null`.
+   */
   pr_watch_waiting_ticks: number;
   enqueued_at: string;
   updated_at: string;
@@ -456,7 +473,7 @@ export interface BatchEntry {
    * Ticks `pr_watch_failed_reason`'s current streak has persisted (#630),
    * including ticks that stayed silent under the dedup — this is what lets
    * `reconcilePrWatch` re-announce a still-failing watch every
-   * `PR_WATCH_FAILED_REANNOUNCE_TICKS` ticks instead of only once, ever.
+   * `JOURNAL_DEDUP_REANNOUNCE_TICKS` ticks instead of only once, ever.
    * Reset to `0` whenever `pr_watch_failed_reason` is `null`.
    */
   pr_watch_failed_ticks: number;
@@ -937,6 +954,23 @@ export type BatchPhase = (typeof BATCH_PHASES)[number];
 export const MAX_REBASE_ATTEMPTS = 1;
 
 /**
+ * Ticks a still-live durable condition stays silent before the journal
+ * re-announces it (#610/#630/#632). One policy, one definition: `engine.ts`
+ * and `batch-dispatch.ts` are duplicate, independently-maintained state
+ * machines by design (see `docs/agent-traps.md`), which is exactly why this
+ * tunable must not be declared once per rail — a retune of one copy would
+ * silently not apply to the other.
+ *
+ * It is a TICK count, not a duration, and the two rails tick at different
+ * rates: at the default intervals it is ~20 min for the per-reconcile sites
+ * (`DEFAULT_RECONCILE_INTERVAL_MS`) and ~50 min for the sites gated on the
+ * parked-PR poll (`DEFAULT_PR_POLL_INTERVAL_MS`). Both intervals are
+ * operator-tunable, which is why every deduped entry also carries `since`.
+ */
+export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
+
+/**
+ * 1.13.0 (#630): `BatchEntry` gains `pr_watch_failed_reason`/`_since`/`_ticks`.
  * 1.14.0 (#632): `QueueEntry` gains `ground_truth_unreachable_since`/`_ticks`
  * and `pr_watch_waiting_since`/`_ticks`.
  */
@@ -1326,4 +1360,26 @@ export interface JournalEvent {
    * unit parked on PR N?" has nothing to correlate against.
    */
   branch?: string;
+  /**
+   * `pr-watch-failed` (#630), `ground-truth-unreachable` and
+   * `pr-watch-waiting` (#632): the time the ENGINE made this decision.
+   * Distinct from `milestone_at`, which is a foreign timestamp.
+   */
+  at?: string;
+  /**
+   * The deduped events above: ISO onset of the streak this entry reports.
+   * `ticks_persisted` is a tick count, and both tick cadences are
+   * operator-tunable, so this is the only field that answers "since when?"
+   * off a single line without assuming an interval.
+   */
+  since?: string;
+  /**
+   * The deduped events above: how many consecutive ticks the streak has
+   * persisted, counting the ticks the dedup suppressed. `1` on a streak's
+   * onset entry, then a multiple of `JOURNAL_DEDUP_REANNOUNCE_TICKS` on each
+   * re-announcement. Declared here — like `milestone_at` — so both emitters
+   * get the same excess-property check and `events.jsonl` consumers have one
+   * shape to read rather than one per rail.
+   */
+  ticks_persisted?: number;
 }
