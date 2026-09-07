@@ -25,7 +25,7 @@ import {
   transitionIssue,
   transitionSlot,
 } from '../index';
-import { writeToolUseLog } from './helpers/dispatch-log';
+import { writeApiErrorLog, writeToolUseLog } from './helpers/dispatch-log';
 
 /**
  * Engine harness: a real SchedStore on a temp dir, fully fake process I/O
@@ -1454,6 +1454,179 @@ describe('dispatch-health pause (#505: quota/auth walls never ride the per-unit 
     expect(h.spawnCalls).toHaveLength(spawnCountBefore); // no new agent spawned
     expect(result.reportWaiting).toBe(1);
     expect(h.state().slots.find((s) => s.unit === 'issue:103')).toBeUndefined();
+  });
+});
+
+describe('confirmed dispatch failures (#629: a 429 spend/rate wall is not an unverified exit)', () => {
+  it('a 429 result does not escalate the tier or consume a recovery, and journals dispatch-failure not verify-incomplete', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const spawn = h.spawnCalls[0];
+
+    writeApiErrorLog(spawn.logFile);
+    h.alive.delete(spawn.pid); // exits instantly, exactly like the real incident
+
+    const result = h.tick();
+
+    expect(result.redispatched).toEqual(['issue:101']); // still respawned...
+    // ...but WITHOUT escalating: tier and recoveries both unchanged.
+    expect(h.state().entries.find((e) => e.issue === 101)?.tier).toBe('mechanical');
+    expect(h.state().slots.find((s) => s.unit === 'issue:101')?.recoveries).toBe(0);
+
+    const events = h.journal.read();
+    expect(events.some((e) => e.event === 'dispatch-failure')).toBe(true);
+    expect(events.some((e) => e.event === 'verify-incomplete')).toBe(false);
+    expect(events.some((e) => e.event === 'suspect-dispatch')).toBe(false);
+    const failureEvent = events.find((e) => e.event === 'dispatch-failure');
+    expect(failureEvent?.detail).toContain('spend limit');
+    expect(failureEvent?.api_error_status).toBe(429);
+    expect(failureEvent?.terminal_reason).toBe('api_error');
+
+    // Never touches the timing-based suspect-dispatch streak.
+    expect(h.state().consecutive_suspect_dispatches).toBe(0);
+    expect(h.state().consecutive_dispatch_api_errors).toBe(1);
+  });
+
+  it('three consecutive 429s from the SAME unit pause the project (AC6) and STOP respawning — unlike suspect-dispatch, no cross-unit correlation is required', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+
+    writeApiErrorLog(h.spawnCalls[0].logFile);
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick();
+    expect(h.state().paused).toBe(false);
+    expect(h.state().consecutive_dispatch_api_errors).toBe(1);
+    expect(h.spawnCalls).toHaveLength(2); // held below false so far — respawned once already
+
+    writeApiErrorLog(h.spawnCalls[1].logFile);
+    h.alive.delete(h.spawnCalls[1].pid);
+    h.tick();
+    expect(h.state().paused).toBe(true); // threshold (2) reached — the SAME unit both times
+    expect(h.state().consecutive_dispatch_api_errors).toBe(2);
+    expect(h.journal.read().some((e) => e.event === 'dispatch-unhealthy')).toBe(true);
+
+    // #629: the pause must actually STOP the respawn loop, not just report it —
+    // the exact incident (nine respawns against a spend wall) reproduced one
+    // rail over if this doesn't hold. The slot parks in `recovering`;
+    // `spawnCalls` never grows a third entry no matter how many more ticks run.
+    const spawnCountAtPause = h.spawnCalls.length;
+    h.tick();
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(spawnCountAtPause);
+    expect(h.state().slots.find((s) => s.unit === 'issue:101')?.status).toBe('recovering');
+    // Never rode the per-unit escalation ladder — same tier throughout, and
+    // never failed the issue (ESCALATION_CAP is 2 for `mechanical`, which a
+    // normal unverified exit would have hit).
+    expect(h.state().entries.find((e) => e.issue === 101)?.tier).toBe('mechanical');
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).not.toBe('failed');
+
+    // `sched resume` is the unwedge path: the held unit respawns on the very
+    // next tick once the pause clears (via `reconcileRecovering`'s own
+    // `spawnUnit` call, not `enterRecovery` — the unit was already parked in
+    // `recovering`, so this is a plain respawn, not a fresh redispatch).
+    h.store.withLock((state) => ({ state: setPaused(state, false), result: null }));
+    const resumed = h.tick();
+    expect(resumed.spawned).toEqual(['issue:101']);
+    expect(h.spawnCalls).toHaveLength(spawnCountAtPause + 1);
+    expect(h.state().slots.find((s) => s.unit === 'issue:101')?.status).toBe('running');
+  });
+
+  it('a healthy dispatch after a 429 resets the confirmed-failure streak', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+
+    writeApiErrorLog(h.spawnCalls[0].logFile);
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick();
+    expect(h.state().consecutive_dispatch_api_errors).toBe(1);
+
+    h.alive.delete(h.spawnCalls[1].pid); // exits with a genuine verified completion
+    h.setMilestone(101, 'report', 'done');
+    h.tick();
+
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('done');
+    expect(h.state().consecutive_dispatch_api_errors).toBe(0);
+    expect(h.state().dispatch_pause_reset_at).toBeNull();
+  });
+
+  it('`modelUsage: {}` + `is_error` alone, with no api_error_status/terminal_reason, does NOT classify as a dispatch failure (AC5)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const spawn = h.spawnCalls[0];
+
+    writeApiErrorLog(spawn.logFile, {
+      api_error_status: undefined,
+      terminal_reason: undefined,
+    });
+    h.alive.delete(spawn.pid);
+    h.tick();
+
+    // Falls through to the ordinary unverified-exit path instead.
+    expect(h.journal.read().some((e) => e.event === 'dispatch-failure')).toBe(false);
+    expect(h.journal.read().some((e) => e.event === 'verify-incomplete')).toBe(true);
+    expect(h.state().consecutive_dispatch_api_errors).toBe(0);
+  });
+
+  it('a genuine unverified exit (agent ran, non-empty modelUsage, no api error) still rides the escalation ladder exactly as today (AC1 negative case)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const spawn = h.spawnCalls[0];
+
+    writeToolUseLog(spawn.logFile);
+    h.alive.delete(spawn.pid);
+    h.tick();
+
+    expect(h.state().entries.find((e) => e.issue === 101)?.tier).toBe('mid'); // escalated
+    expect(h.state().slots.find((s) => s.unit === 'issue:101')?.recoveries).toBe(1);
+    expect(h.journal.read().some((e) => e.event === 'verify-incomplete')).toBe(true);
+    expect(h.journal.read().some((e) => e.event === 'dispatch-failure')).toBe(false);
+    expect(h.state().consecutive_dispatch_api_errors).toBe(0);
+  });
+
+  it('records the reset time when the provider supplies one (AC4)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    const spawn = h.spawnCalls[0];
+
+    writeApiErrorLog(spawn.logFile, { reset_at: '2026-09-06T20:40:00Z' });
+    h.alive.delete(spawn.pid);
+    h.tick();
+
+    expect(h.state().dispatch_pause_reset_at).toBe('2026-09-06T20:40:00Z');
+    const failureEvent = h.journal.read().find((e) => e.event === 'dispatch-failure');
+    expect(failureEvent?.reset_at).toBe('2026-09-06T20:40:00Z');
+  });
+
+  it('`sched resume` clears the confirmed-failure streak, mirroring the suspect-dispatch reset (#505)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    writeApiErrorLog(h.spawnCalls[0].logFile);
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick();
+    writeApiErrorLog(h.spawnCalls[1].logFile);
+    h.alive.delete(h.spawnCalls[1].pid);
+    h.tick();
+    expect(h.state().paused).toBe(true);
+
+    h.store.withLock((state) => ({ state: setPaused(state, false), result: null }));
+
+    expect(h.state().paused).toBe(false);
+    expect(h.state().consecutive_dispatch_api_errors).toBe(0);
+    expect(h.state().dispatch_pause_reset_at).toBeNull();
   });
 });
 

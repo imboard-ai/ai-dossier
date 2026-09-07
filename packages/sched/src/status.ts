@@ -52,8 +52,19 @@ export interface StatusReport {
    * from "the engine looked and the label is still there".
    */
   last_label_poll_at: string | null;
-  /** The dispatch-health signal (#505) — see `SchedState.consecutive_suspect_dispatches`. */
-  dispatch_health: { consecutive_suspect: number; last_suspect_unit: string | null };
+  /**
+   * The dispatch-health signal — see `SchedState.consecutive_suspect_dispatches`
+   * (#505, a timing heuristic) and `SchedState.consecutive_dispatch_api_errors`
+   * (#629, a confirmed provider error). A pause can be caused by either
+   * independently — an operator reading `consecutive_suspect: 0` alone while
+   * `paused` is true would see no explanation for a #629 pause at all.
+   */
+  dispatch_health: {
+    consecutive_suspect: number;
+    last_suspect_unit: string | null;
+    consecutive_api_errors: number;
+    pause_reset_at: string | null;
+  };
   /** How many units are runnable right now. */
   runnable: number;
   /** Which units are runnable (`issue:<n>` / `batch:<id>`), in dispatch order. */
@@ -163,6 +174,8 @@ export function buildStatusReport(
     dispatch_health: {
       consecutive_suspect: state.consecutive_suspect_dispatches,
       last_suspect_unit: state.last_suspect_dispatch_unit,
+      consecutive_api_errors: state.consecutive_dispatch_api_errors,
+      pause_reset_at: state.dispatch_pause_reset_at,
     },
     runnable: units.length,
     runnable_units: units.map((u) =>

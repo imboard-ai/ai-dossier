@@ -63,7 +63,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { parseLastToolUse } from '@ai-dossier/core';
+import { type DispatchApiError, parseDispatchApiError, parseLastToolUse } from '@ai-dossier/core';
 import {
   readPoolFileConfig,
   resolveProjectDir,
@@ -87,11 +87,13 @@ import {
   buildBatchReportPrompt,
   buildBatchTailPrompt,
   buildMemberPrompt,
+  fileSizeOrZero,
   journalCmdModelFields,
   type ResolvedDispatch,
   resolveTierSpawn,
   type SpawnDeps,
 } from './dispatch';
+import { recordDispatchApiError, resetDispatchApiErrorStreak } from './dispatch-health';
 import {
   type GroundTruth,
   type GroundTruthMilestone,
@@ -275,6 +277,67 @@ function journalEvent(
   extra: Record<string, unknown> = {}
 ): void {
   deps.journal.append(unitEvent(event, unitId, extra), deps.now());
+}
+
+/**
+ * Read a dead batch dispatch's own log and classify it (#629 AC3) — tail,
+ * member, fix and report all reach a `dead` agent the same way (`pid` no
+ * longer alive), and every one of them previously treated that exit as a
+ * real failure (`tail-agent-exited-unverified`, member eviction,
+ * `report-failed`, a red fix-attempt resolution) with no way to tell a
+ * confirmed provider API error apart from an agent that actually ran.
+ *
+ * `offset` fences this read to THIS dispatch's slice, mirroring the
+ * per-issue path's `dispatchLogSlice`/`log_offset_at_spawn` (#524): these
+ * batch log paths are per-ROLE, not per-dispatch, and opened in append mode
+ * (`dispatch.ts`'s `openLogForAppend`), so a byte-0 read would keep
+ * classifying a LATER dead exit — one that itself wrote no `result` event at
+ * all (killed, OOM, an operator killing the tick — the #629 incident itself)
+ * — against a STALE `result` line from an earlier dispatch, permanently
+ * suppressing genuine failures and re-arming the pause on every reconcile
+ * (#629 review). Each batch spawn function stamps `log_offset_at_spawn` on
+ * its slot patch, exactly like the per-issue spawn path already does.
+ */
+function readDispatchApiError(logFile: string, offset: number): DispatchApiError | null {
+  return parseDispatchApiError(readDispatchLog(logFile, offset));
+}
+
+/**
+ * Classify a dead batch dispatch and, if it is a confirmed provider API
+ * error, record it against the shared #505/#629 pause (the same mechanism
+ * `engine.ts`'s `completeUnitOrRecover` uses — see `dispatch-health.ts`) and
+ * release the slot, all inside ONE lock (a crash between recording and
+ * releasing would otherwise leave the counter incremented with the slot
+ * still held by a dead pid — #629 review). Returns whether it classified as
+ * an API error — the caller's cue to skip its normal failure handling
+ * (eviction, `tail-agent-exited-unverified`, `report-failed`, a red
+ * fix-attempt resolution) entirely.
+ *
+ * `release: false` (the fix-agent caller) records without releasing — that
+ * caller has its own release a few lines later, after also deciding whether
+ * to resolve the fix attempt.
+ */
+function handleDeadDispatchApiError(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  logFile: string,
+  offset: number,
+  now: Date,
+  options: { release?: boolean } = {}
+): boolean {
+  const apiError = readDispatchApiError(logFile, offset);
+  if (!apiError) return false;
+  deps.store.withLock((s) => {
+    let n = recordDispatchApiError(
+      (event, unitId, extra) => journalEvent(deps, event, unitId, extra),
+      s,
+      unit(batchId),
+      apiError
+    );
+    if (options.release ?? true) n = releaseSlot(n, batchId, now);
+    return { state: n, result: undefined };
+  });
+  return true;
 }
 
 /**
@@ -752,6 +815,11 @@ function spawnMember(
     batch.executing_member,
     memberIssue
   );
+  // #629: captured BEFORE spawning, mirroring `engine.ts`'s own
+  // `spawnAndRecord` — the log is per-role and append-mode, so the size at
+  // this instant is exactly where THIS dispatch's own output starts. Fences
+  // `handleDeadDispatchApiError`'s classification to this dispatch's slice.
+  const logOffset = fileSizeOrZero(logFile);
 
   let pid: number;
   try {
@@ -775,6 +843,7 @@ function spawnMember(
     // (line ~745) — `spawnMember` never did, so `recordMemberRunLog`'s
     // `slot.spawned_at === null` guard silently skipped every member.
     spawned_at: now.toISOString(),
+    log_offset_at_spawn: logOffset,
   };
   const next =
     slot.status === 'assigned' || slot.status === 'recovering'
@@ -987,6 +1056,9 @@ function spawnTailAgent(
       batch.worktree
     );
     const logFile = batchTailLogPath(deps.store.runsDir, batchId);
+    // #629: fences `handleDeadDispatchApiError`'s classification to this
+    // dispatch's slice — see `spawnMember`'s identical comment.
+    const logOffset = fileSizeOrZero(logFile);
     let pid: number;
     try {
       pid = deps.spawnDeps.spawn(cmd, prompt, logFile);
@@ -1003,6 +1075,7 @@ function spawnTailAgent(
       pid_start: deps.spawnDeps.processStart(pid),
       phase: 'reviewing',
       last_progress_at: now.toISOString(),
+      log_offset_at_spawn: logOffset,
     };
     const next =
       slot.status === 'assigned' ? transitionSlot(state, slot.id, 'running', patch, now) : state;
@@ -1053,6 +1126,9 @@ function spawnReportAgent(
       prNumber
     );
     const logFile = batchReportLogPath(deps.store.runsDir, batchId);
+    // #629: fences `handleDeadDispatchApiError`'s classification to this
+    // dispatch's slice — see `spawnMember`'s identical comment.
+    const logOffset = fileSizeOrZero(logFile);
     let pid: number;
     try {
       pid = deps.spawnDeps.spawn(cmd, prompt, logFile);
@@ -1068,6 +1144,7 @@ function spawnReportAgent(
       pid_start: deps.spawnDeps.processStart(pid),
       phase: 'report',
       last_progress_at: now.toISOString(),
+      log_offset_at_spawn: logOffset,
     };
     const next =
       slot.status === 'assigned'
@@ -1231,6 +1308,9 @@ function runValidate(
 
   claimAndSpawn(deps, config, batchId, 'fixing', now, (s, slot) => {
     const logFile = batchFixLogPath(deps.store.runsDir, batchId, offender);
+    // #629: fences `handleDeadDispatchApiError`'s classification to this
+    // dispatch's slice — see `spawnMember`'s identical comment.
+    const logOffset = fileSizeOrZero(logFile);
     let pid: number;
     try {
       pid = deps.spawnDeps.spawn(fixDispatch.command, fixDispatch.prompt, logFile);
@@ -1252,6 +1332,7 @@ function runValidate(
       pid_start: deps.spawnDeps.processStart(pid),
       phase: 'fixing',
       last_progress_at: now.toISOString(),
+      log_offset_at_spawn: logOffset,
     };
     const next = slot.status === 'assigned' ? transitionSlot(s, slot.id, 'running', patch, now) : s;
     result.spawned.push(unit(batchId));
@@ -1647,7 +1728,13 @@ function completeMemberGate(
   // invariant exists to prevent).
   const ranges = memberRanges(boundaryCommits(deps, batch));
   deps.store.withLock((s) => {
-    let n = releaseSlot(s, batchId, now);
+    // #629: a verified member completion is proof dispatch is healthy —
+    // reset the confirmed-failure streak, mirroring the per-issue path's
+    // `resetDispatchApiErrorStreak` on its own verified-complete branch, or a
+    // healthy member sandwiched between two unrelated api-error hits (this
+    // one and a later one on the tail/report agent) would be invisible to
+    // the streak and could still tip it into a false-positive pause.
+    let n = resetDispatchApiErrorStreak(releaseSlot(s, batchId, now));
     n = patchBatch(n, batchId, { ranges }, now);
     n = advanceMemberToValidated(n, memberIssue, now);
     return { state: n, result: undefined };
@@ -1859,7 +1946,15 @@ function recordMemberRunLog(
     batch.executing_member,
     memberIssue
   );
-  const logContent = readDispatchLog(logFile, 0);
+  // #629: fenced to THIS dispatch's slice (`log_offset_at_spawn`, stamped by
+  // `spawnMember`/`spawnMemberContinuation` at spawn time) rather than a
+  // fixed byte-0 read. Before #629 a member log never outlived one attempt
+  // (eviction was the only exit besides completion), so byte-0 was safe; a
+  // confirmed-API-error hold now retries the SAME member in place, appending
+  // a SECOND attempt to the same file — an unfenced read would double-count
+  // the first attempt's tokens into the second's `runs.jsonl` entry, exactly
+  // the #524 divergence this telemetry system exists to prevent.
+  const logContent = readDispatchLog(logFile, slot.log_offset_at_spawn ?? 0);
 
   const runEntry = buildSchedRunLogEntry({
     unit: `issue:${memberIssue}`,
@@ -2031,6 +2126,24 @@ function reconcileMemberSlot(
   }
 
   const blockedNow = isMemberBlocked(milestone, slot.spawned_at);
+  if (
+    dead &&
+    !blockedNow &&
+    handleDeadDispatchApiError(
+      deps,
+      batchId,
+      batchMemberLogPath(deps.store.runsDir, batchId, batch.executing_member, memberIssue),
+      slot.log_offset_at_spawn ?? 0,
+      now
+    )
+  ) {
+    // #629: a confirmed provider API error is not a real member failure —
+    // evicting the member for an account-wide spend wall would silently
+    // throw away real, correct work. `runBatchTick`'s "same wedge" retry
+    // (`spawnMemberContinuation`, now pause-gated) retries the SAME member in
+    // place, keeping its position.
+    return;
+  }
   if (blockedNow || dead) {
     // #605: only a milestone THIS dispatch posted may name the reason. A dead
     // agent whose issue carries only a stale `blocked` milestone is an
@@ -2253,6 +2366,27 @@ function reconcileFixSlot(
   const offenderRecord = [...batch.fix_attempts].reverse().find((a) => a.outcome === 'dispatched');
   if (!offenderRecord) return;
 
+  // #629: a confirmed provider API error means the fix agent never got a
+  // real chance to fix anything — record it against the shared pause (AC1/
+  // AC2/AC3) so an operator reads "spend limit", not a fix that failed on
+  // its merits. `release: false`: this function releases the slot itself a
+  // few lines below, after also deciding whether to resolve the fix attempt
+  // — one release, not two. The one-shot fix-attempt model has no existing
+  // "retry the same attempt" primitive (unlike tail/member/report, which the
+  // tick loop itself retries), so the suite still runs and resolves the
+  // attempt below exactly as today: the member's one fix attempt is consumed
+  // and resolves per the suite's real result. An operator who wants it back
+  // must re-trigger the fix after `sched resume` — see
+  // packages/sched/README.md's dispatch-health section.
+  handleDeadDispatchApiError(
+    deps,
+    batchId,
+    batchFixLogPath(deps.store.runsDir, batchId, offenderRecord.issue),
+    slot.log_offset_at_spawn ?? 0,
+    now,
+    { release: false }
+  );
+
   deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
 
   const suite = safeSuite(deps, batchId, batch.worktree);
@@ -2310,7 +2444,10 @@ function reconcileTailSlot(
     const pr = prOfMilestone(milestone);
     journalEvent(deps, 'pr-parked', unit(batchId), { pr: pr ?? undefined });
     deps.store.withLock((s) => {
-      let n = releaseSlot(s, batchId, now);
+      // #629: a verified park is proof dispatch is healthy — reset the
+      // confirmed-failure streak, mirroring the per-issue path's own parked
+      // branch.
+      let n = resetDispatchApiErrorStreak(releaseSlot(s, batchId, now));
       const b = findBatch(n, batchId);
       if (!b) return { state: n, result: undefined };
       n = b.status === 'reviewing' ? transitionBatch(n, batchId, 'shipping', {}, now) : n;
@@ -2322,6 +2459,21 @@ function reconcileTailSlot(
   }
 
   if (dead) {
+    // #629: a confirmed provider API error is not a real tail-agent failure —
+    // record it against the shared pause and let `runBatchTick`'s "same
+    // wedge" retry (`spawnTailAgent`, now pause-gated) respawn it, instead of
+    // journaling a failure that will never stop respawning on its own.
+    if (
+      handleDeadDispatchApiError(
+        deps,
+        batchId,
+        batchTailLogPath(deps.store.runsDir, batchId),
+        slot.log_offset_at_spawn ?? 0,
+        now
+      )
+    ) {
+      return;
+    }
     deps.journal.append(
       unitEvent('unit-failed', unit(batchId), { reason: 'tail-agent-exited-unverified' }),
       now
@@ -2351,7 +2503,10 @@ function reconcileReportSlot(
       now
     );
     deps.store.withLock((s) => {
-      let n = releaseSlot(s, batchId, now);
+      // #629: a verified report completion is proof dispatch is healthy —
+      // reset the confirmed-failure streak, mirroring the per-issue path's
+      // own verified-complete branch.
+      let n = resetDispatchApiErrorStreak(releaseSlot(s, batchId, now));
       const b = findBatch(n, batchId);
       if (!b || b.status !== 'deployed') return { state: n, result: undefined };
       n = transitionBatch(n, batchId, 'reported', {}, now);
@@ -2363,6 +2518,21 @@ function reconcileReportSlot(
     return;
   }
   if (dead) {
+    // #629: same reasoning as `reconcileTailSlot` — a confirmed API error is
+    // not a real report-agent failure; record it and let the `deployed`
+    // branch's `spawnReportAgent` retry (now pause-gated) instead of
+    // journaling `report-failed` for a wall that will keep respawning anyway.
+    if (
+      handleDeadDispatchApiError(
+        deps,
+        batchId,
+        batchReportLogPath(deps.store.runsDir, batchId),
+        slot.log_offset_at_spawn ?? 0,
+        now
+      )
+    ) {
+      return;
+    }
     deps.journal.append(
       unitEvent('report-failed', unit(batchId), { detail: 'unverified exit' }),
       now
@@ -2559,10 +2729,23 @@ export function runBatchTick(
   // only the per-batch `slotFor`/`status` re-check inside the loop reads
   // fresh state (one `store.load()` per iteration, in case an earlier claim
   // in this same pass changed things).
-  const readyOrder = [...deps.store.load().batches]
-    .filter((b) => b.status === 'ready')
-    .sort((a, b) => compareByPriority(batchRank(a), batchRank(b)))
-    .map((b) => b.id);
+  // #629: dispatch-health pause (#505, and now the confirmed-api-error
+  // streak) stops NEW per-issue assignments via `computeAssignments` — but
+  // nothing in this function ever read `paused` before #629, so claiming a
+  // `ready` batch here (a provider dispatch, `batch-setup`, the most literal
+  // "new assignment" there is) or a respawn wedge in the second loop below
+  // would keep happening every tick regardless, making the pause cosmetic
+  // for the exact incident (a batch tail respawning against a spend wall)
+  // that motivated it. Read once — every use below in this same tick must
+  // agree, and re-reading per iteration only risks a pause landing mid-loop
+  // and gating some batches but not others in one pass.
+  const paused = deps.store.load().paused;
+  const readyOrder = paused
+    ? []
+    : [...deps.store.load().batches]
+        .filter((b) => b.status === 'ready')
+        .sort((a, b) => compareByPriority(batchRank(a), batchRank(b)))
+        .map((b) => b.id);
   for (const batchId of readyOrder) {
     const state = deps.store.load();
     const batch = findBatch(state, batchId);
@@ -2608,8 +2791,15 @@ export function runBatchTick(
     }
     if (slot) continue; // live but neither running/assigned (e.g. mid-verify) — next tick
     if (batch.status === 'validating') {
+      // A local suite run, not a provider dispatch — unaffected by `paused`.
       runValidate(deps, config, dispatch, batch.id, now, result);
-    } else if (batch.status === 'deployed') {
+      continue;
+    }
+    // #629: every branch below spawns a provider agent — hold the wedge
+    // until `sched resume` (see the top of this function for why `paused`
+    // is read once, up front, rather than per iteration).
+    if (paused) continue;
+    if (batch.status === 'deployed') {
       spawnReportAgent(deps, config, dispatch, batch.id, now, result);
     } else if (batch.status === 'executing') {
       // A prior spawn threw, or `claimAndSpawn` found zero free capacity —

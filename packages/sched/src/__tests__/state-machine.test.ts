@@ -969,6 +969,54 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0 → 1
     ).toThrow(/zero.*null/);
   });
 
+  it('#629: loads a pre-#629 1.12.0 state and backfills the confirmed-dispatch-failure fields', () => {
+    // Exactly what a 1.12.0 sched persisted: no consecutive_dispatch_api_errors
+    // or dispatch_pause_reset_at — no confirmed dispatch failures were ever
+    // tracked, so 0/null is the exact answer, not a guess.
+    const legacy = {
+      schema_version: '1.12.0',
+      paused: false,
+      entries: [],
+      batches: [],
+      slots: [],
+      next_slot_id: 1,
+      last_pr_poll_at: null,
+    };
+    const migrated = validateState(legacy);
+    expect(migrated.schema_version).toBe(SCHEMA_VERSION);
+    expect(migrated.consecutive_dispatch_api_errors).toBe(0);
+    expect(migrated.dispatch_pause_reset_at).toBeNull();
+  });
+
+  it('#629: rejects a negative consecutive_dispatch_api_errors rather than coercing it', () => {
+    const state = seeded();
+    expect(() => validateState({ ...state, consecutive_dispatch_api_errors: -1 })).toThrow(
+      /consecutive_dispatch_api_errors/
+    );
+  });
+
+  it('#629: rejects a dispatch_pause_reset_at with a zero count', () => {
+    const state = seeded();
+    expect(() =>
+      validateState({
+        ...state,
+        consecutive_dispatch_api_errors: 0,
+        dispatch_pause_reset_at: '2026-09-06T20:40:00Z',
+      })
+    ).toThrow(/dispatch_pause_reset_at/);
+  });
+
+  it('#629: accepts a nonzero consecutive_dispatch_api_errors with a null reset time — the pair is deliberately NOT a single fact', () => {
+    const state = seeded();
+    expect(() =>
+      validateState({
+        ...state,
+        consecutive_dispatch_api_errors: 2,
+        dispatch_pause_reset_at: null,
+      })
+    ).not.toThrow();
+  });
+
   it('rejects a malformed slot role', () => {
     const state = seeded();
     const bad = {

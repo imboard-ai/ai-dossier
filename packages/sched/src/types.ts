@@ -624,6 +624,32 @@ export interface SchedState {
    * correlation above. Null when the counter is 0.
    */
   last_suspect_dispatch_unit: string | null;
+  /**
+   * Consecutive CONFIRMED dispatch failures (#629) — a result carrying
+   * `api_error_status`/`terminal_reason: "api_error"` (see
+   * `parseDispatchApiError` in `@ai-dossier/core`). Unlike
+   * `consecutive_suspect_dispatches`, this counts a repeat from the SAME
+   * unit: the classification is deterministic (a parsed provider error), not
+   * a timing heuristic, so no cross-unit correlation is needed to rule out
+   * one unit's own flakiness — a spend/rate wall hits whichever unit
+   * happens to be running, repeatedly, and the real incident (#629) was the
+   * SAME batch-tail unit nine times. Both dispatch paths RECORD into it
+   * (`recordDispatchApiError` in `dispatch-health.ts`, shared by `engine.ts`
+   * and every batch reconciler) and both RESET it on a healthy dispatch
+   * (`resetDispatchApiErrorStreak` — a verified completion/park on the
+   * per-issue path, a successful member/tail/report on the batch path) or on
+   * `sched resume` (`setPaused` in scheduler.ts) — NOT exactly like the
+   * suspect-dispatch pair above, which also resets on a plain (non-suspect)
+   * unverified exit; this counter deliberately does not, since an unverified
+   * exit is not evidence the provider wall cleared.
+   */
+  consecutive_dispatch_api_errors: number;
+  /**
+   * The provider's own rate-limit reset time (#629 AC4), when the most
+   * recent confirmed dispatch failure supplied one. Null when none was
+   * reported, or once the streak above resets.
+   */
+  dispatch_pause_reset_at: string | null;
 }
 
 /** Durable intent, persisted separately in `config.json` (state.json is rebuildable hot truth). */
@@ -973,8 +999,10 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * 1.13.0 (#630): `BatchEntry` gains `pr_watch_failed_reason`/`_since`/`_ticks`.
  * 1.14.0 (#632): `QueueEntry` gains `ground_truth_unreachable_since`/`_ticks`
  * and `pr_watch_waiting_since`/`_ticks`.
+ * 1.15.0 (#629): `SchedState` gains `consecutive_dispatch_api_errors` +
+ * `dispatch_pause_reset_at`.
  */
-export const SCHEMA_VERSION = '1.14.0' as const;
+export const SCHEMA_VERSION = '1.15.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -992,6 +1020,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.11.0',
   '1.12.0',
   '1.13.0',
+  '1.14.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.8.0' as const;
@@ -1131,6 +1160,9 @@ export type JournalEventName =
   | 'ground-truth-unreachable'
   | 'suspect-dispatch'
   | 'dispatch-unhealthy'
+  // #629: a dispatch result carrying `api_error_status`/`terminal_reason:
+  // "api_error"` — a confirmed provider-side wall, never an agent that ran.
+  | 'dispatch-failure'
   | 'tick-failed'
   | 'pr-parked'
   | 'merge-accepted'
@@ -1382,4 +1414,21 @@ export interface JournalEvent {
    * shape to read rather than one per rail.
    */
   ticks_persisted?: number;
+  /**
+   * `dispatch-failure` / `dispatch-unhealthy` (#629): the provider's own HTTP
+   * status from a confirmed dispatch failure (e.g. `429`). Declared here so
+   * BOTH emitters — `dispatch-health.ts`'s `recordDispatchApiError` and
+   * `engine.ts`'s `enterRecovery` evidence — get the same excess-property
+   * check (`dispatchApiErrorFields` in `dispatch-health.ts` builds this
+   * object for both), rather than one hand-written shape per rail.
+   */
+  api_error_status?: number;
+  /** `dispatch-failure` (#629): e.g. `"api_error"` — the provider's own terminal-reason field. */
+  terminal_reason?: string;
+  /** `dispatch-failure` / `dispatch-unhealthy` (#629): the provider's own rate-limit reset time, when it supplied one (AC4). */
+  reset_at?: string;
+  /** `dispatch-failure` (#629): `modelUsage` was present and empty — corroboration (AC5) that no tokens were spent, never the classification signal. */
+  empty_model_usage?: boolean;
+  /** `dispatch-failure` (#629): the result's own `is_error` flag — corroboration (AC5) only. */
+  is_error?: boolean;
 }

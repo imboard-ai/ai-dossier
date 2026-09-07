@@ -24,3 +24,30 @@ export function writeToolUseLog(logFile: string, tool = 'Monitor'): void {
     })}\n`
   );
 }
+
+/**
+ * Write a `type:"result"` line carrying a confirmed provider API error
+ * (ai-dossier#629) — the shape a headless agent's `stream-json` output
+ * carries when the PROVIDER rejects a dispatch (e.g. a 429 spend/rate wall),
+ * never an agent that ran. Mirrors the real incident's own log line. Shared
+ * between `engine.test.ts` (per-issue units) and `batch-integration.test.ts`
+ * (batch tail/member/report/fix) for the same reason `writeToolUseLog` is:
+ * both rails must read the same shape.
+ */
+export function writeApiErrorLog(logFile: string, overrides: Record<string, unknown> = {}): void {
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  fs.appendFileSync(
+    logFile,
+    `${JSON.stringify({
+      type: 'result',
+      api_error_status: 429,
+      terminal_reason: 'api_error',
+      is_error: true,
+      num_turns: 1,
+      duration_ms: 718,
+      modelUsage: {},
+      result: "You've hit your monthly spend limit · your session limit resets 8:40pm (UTC)",
+      ...overrides,
+    })}\n`
+  );
+}

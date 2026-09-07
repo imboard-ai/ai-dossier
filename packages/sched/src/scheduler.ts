@@ -179,7 +179,17 @@ export function assignToIdleSlot(
  */
 export function setPaused(state: SchedState, paused: boolean): SchedState {
   if (paused) return { ...state, paused };
-  return { ...state, paused, consecutive_suspect_dispatches: 0, last_suspect_dispatch_unit: null };
+  return {
+    ...state,
+    paused,
+    consecutive_suspect_dispatches: 0,
+    last_suspect_dispatch_unit: null,
+    // #629: the confirmed-dispatch-failure streak is the same kind of fact —
+    // an operator resuming has addressed it, so the warning should not keep
+    // citing a wall already acted on.
+    consecutive_dispatch_api_errors: 0,
+    dispatch_pause_reset_at: null,
+  };
 }
 
 /**

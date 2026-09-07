@@ -146,7 +146,7 @@ where every mechanical supervision decision is code, not remembered prose:
    itself — see `slot-released` below (#525).
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,
    progress, stalled, redispatched, fence-written, fence-failed, unit-failed,
-   dependents-blocked, slot-released, suspect-dispatch, dispatch-unhealthy,
+   dependents-blocked, slot-released, suspect-dispatch, dispatch-unhealthy, dispatch-failure,
    run-log-recorded, run-log-no-usage, run-log-skipped, run-log-failed, engine-stale,
    engine-auto-upgrade-attempted, engine-auto-upgrade-failed, stale-milestone-ignored, …) is
    appended to `events.jsonl`; `sched status` shows the live phase per unit, plus each
@@ -181,6 +181,33 @@ where every mechanical supervision decision is code, not remembered prose:
    operator's explicit "I've addressed this," not a heuristic that could re-dispatch into
    a wall that hasn't actually cleared), which also clears the streak so `sched status`'s
    warning doesn't linger against a wall the operator already acted on.
+
+   **Confirmed dispatch failures (#629)** are a SEPARATE, deterministic signal alongside
+   the timing heuristic above: a dispatch result carrying `api_error_status` or
+   `terminal_reason: "api_error"` (`parseDispatchApiError`, `@ai-dossier/core`) is a
+   confirmed provider wall — a 429 spend/rate limit, an auth failure the provider itself
+   rejected — never an agent that ran, journaled **`dispatch-failure`** with the
+   provider's own status/reason/message and reset time (when supplied). Unlike
+   `suspect-dispatch`, a repeat from the SAME unit COUNTS toward its own
+   `consecutive_dispatch_api_errors` counter — no cross-unit correlation is needed when
+   the classification is a parsed field rather than a timing inference, and the incident
+   that motivated this (a batch tail respawning nine times in 33 minutes) was the SAME
+   unit throughout. At the same `DISPATCH_UNHEALTHY_THRESHOLD` it reuses `setPaused`/
+   `dispatch-unhealthy`. The redispatch itself does NOT escalate — same tier,
+   `recoveries` unchanged, `ESCALATION_CAP` never consumed, since a spend wall is not the
+   issue's fault — so once paused, BOTH the per-issue rail (`enterRecovery`/
+   `reconcileRecovering`, held in `recovering` until `sched resume`) and every batch
+   respawn wedge in `runBatchTick` (tail, member continuation, fix, report, and the
+   `ready` → `claimAndSetup` claim — `runValidate`'s local suite run is unaffected) stop
+   respawning into the wall, which previously ignored `paused` entirely. `dispatch-
+   health.ts` is its own module (not `engine.ts`) specifically so it is shared by BOTH
+   dispatch paths without `engine.ts` and `batch-dispatch.ts` importing each other.
+   Batch dispatch logs (per-role, append-mode) are fenced to `log_offset_at_spawn`,
+   stamped by each batch spawn function — a later dispatch that dies with NO result event
+   at all is never misclassified against a stale `api_error` result left in the same log
+   file by an earlier attempt. A verified completion/park resets the streak on the
+   per-issue path; a successful member/tail/report resets it on the batch path; `sched
+   resume` resets it on both.
 
 Config schema moves to 1.4.0 (#527): `dispatch` gains `tiers` — a per-tier
 `{ command?, model?, prompt? }` spawn spec. `command`/`tier_models`/`prompt` remain valid
@@ -616,6 +643,14 @@ with `touchUpdatedAt: false` — `QueueEntry.updated_at` is load-bearing for
 `isStaleFailedPark`'s 7-day window, `status.ts`'s "parked since" and `readiness.ts`'s
 tiebreak, and a silent dedup tick must not reset them. `patchBatch` takes the same flag
 for the same reason on the batch rail.
+Schema 1.13.0 (#629): `SchedState` gains `consecutive_dispatch_api_errors` (number) and
+`dispatch_pause_reset_at` (string or null) — the confirmed-dispatch-failure streak and
+the provider's own reset time. Unlike the #505 suspect-dispatch pair these are NOT a
+single fact: a provider that reports no reset time leaves `dispatch_pause_reset_at`
+null while the counter is nonzero (`validateState` only enforces the reverse — a reset
+time can never outlive a streak that has already cleared to zero). 1.12.0 states
+migrate on load, backfilling `0`/`null` — no confirmed dispatch failures were ever
+tracked under them, so those values are exact, not a guess.
 
 New journal events: `batch-setup-done`, `batch-setup-failed`, `member-advanced`,
 `batch-warmup-done`, `batch-warmup-failed` (#561 — the cold-path warm step only; a pool
@@ -825,9 +860,10 @@ ladder is exhausted, the terminal `unit-failed` (`agent-exited-unverified` /
 the dead-pid detection rail and the stall kill RECORD a fresh log slice (a `runs.jsonl`
 entry) in the same tick — `recordDispatchRunLog` is once-per-dispatch and refuses to
 append a second entry over the same slice. Since #620 a slot already `exited`/`verifying`
-when reconciled again still ATTRIBUTES one: `readLastToolForSlot` re-parses the same
-static slice for the tool name alone, writing nothing, so it carries no exactly-once
-constraint. That matters because the verify decision lands on a LATER tick than the
+when reconciled again still ATTRIBUTES one: `readDispatchSignalsForSlot` re-parses the
+same static slice (since #629, for the last-tool-call AND API-error-classification
+signals together — see the dispatch-health section above), writing nothing, so it
+carries no exactly-once constraint. That matters because the verify decision lands on a LATER tick than the
 dead-pid detection whenever ground truth was unreachable in between — previously the
 tool name was simply lost on exactly the runs hardest to diagnose. The read is deferred
 behind a thunk so only the tick that reaches the unverified-exit decision pays for it,
@@ -902,6 +938,7 @@ after-the-fact recovery, not a missing-data bug.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
   load and migrate to 1.14.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
+  load and migrate to 1.13.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
   `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
   `evictions`/`fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to
@@ -909,16 +946,22 @@ after-the-fact recovery, not a missing-data bug.
   backfill to `0`/`null` — #505, slot `gen`/`fenced_at` backfill to `0`/`null` — #504, and
   slot `spawned_at`/`log_offset_at_spawn` backfill to `null`/`null` — #524,
   state-level `last_label_poll_at` backfill to `null` — #544, entry `priority` and batch
-  `member_gates`/`blocked_reason` — #565/#583, and slot
-  `stale_milestone_ignored_for` backfill to `null` — #610).
+  `member_gates`/`blocked_reason` — #565/#583, slot
+  `stale_milestone_ignored_for` backfill to `null` — #610, and state-level
+  `consecutive_dispatch_api_errors`/`dispatch_pause_reset_at` backfill to `0`/`null` —
+  #629).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
-- **Pause** stops new assignments only (including report-agent dispatch — #505); abandon
-  routes through the typed failure rails (`evicted → requeued{full}` for batch members —
-  nothing green is discarded). A pause can be manual (`sched pause`) or automatic
-  (dispatch-health, #505 above); `sched resume` clears both the flag and the
-  dispatch-health streak.
+- **Pause** stops new assignments only (including report-agent dispatch — #505) and,
+  since #629, every batch respawn wedge in `runBatchTick` — tail, member continuation,
+  fix, report, and the `ready` → `claimAndSetup` claim, which previously ignored `paused`
+  entirely (`runValidate` is excepted: a local suite run, not a dispatch) — and an
+  unescalated per-issue redispatch (`enterRecovery`/`reconcileRecovering`, held in
+  `recovering` until resumed). Abandon routes through the typed failure rails
+  (`evicted → requeued{full}` for batch members — nothing green is discarded). A pause
+  can be manual (`sched pause`) or automatic (dispatch-health, #505/#629 above); `sched
+  resume` clears the flag and both dispatch-health streaks.
 
 ## Hard-block labels are re-read every tick (#544)
 
