@@ -15,7 +15,7 @@
 - **2026-09-03** — pilot attempts 3 and 4 [`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md) Parts III-IV: 0 of 7 dispatched batches end-to-end across four runs; the single blocking defect isolated (the incremental member gate is a constant function — imboard-monorepo#3996, closed; sched-side [#594](https://github.com/imboard-ai/ai-dossier/issues/594), open). Attempt 4's full-cycle fallback shipped 4 of the 7 slot issues within hours, so the cohort was implementable — the batch path was not.
 - **2026-09-03** — programme **HALTED** at 10:42Z (owner token budget, not a fault). Current state, open findings and the resume recipe: [`docs/reports/batch-cycles-checkpoint.md`](../docs/reports/batch-cycles-checkpoint.md).
 - **2026-09-06** — programme resumed; batch path reached `done` end-to-end for the first time (five batches, first batch PRs merged in two repos, member gate 6.7 s on imboard-monorepo). Fourteen defects closed (#599-#639).
-- **2026-09-07** — **§J amendment**: the end-to-end blocker was never mechanical. `mode` conflated implementation risk with CI-sharing eligibility, so §E.2 admitted 6.3% of a real backlog (#590/#598) and the amortization was structurally unavailable to the issues worth most. §J splits `mode` into `impl_tier` and `share_ci`, replaces the serial shared worktree with parallel worktrees on an integration branch, and makes the parent orchestrator fix failures rather than evict them. Supersedes §C.4, §F.2, the batch arms of §D.1/§D.2, and §E.2/§E.3 *as membership rules*.
+- **2026-09-07** — **§J amendment**: the end-to-end blocker was never mechanical. `mode` conflated implementation risk with CI-sharing eligibility, so §E.2 admitted 6.3% of a real backlog (#590/#598) and the amortization was structurally unavailable to the issues worth most. §J splits `mode` into `impl_tier` and `share_ci`, replaces the serial shared worktree with parallel worktrees on an integration branch, and makes the parent orchestrator fix failures rather than evict them. Supersedes §C.4, §F.2, the batch arms of §D.1/§D.2, and §E.2/§E.3 *as membership rules*. Measurement (§J.12, same day): a green ci-parity run reaching the integration stage costs a median **52.5 min** (p90 89) and its 107-112 integration suites run **regardless of diff size** — a fixed cost, so batching saves `(N-1) ×` an hour rather than shared overhead only. §J.11 item 1 is closed; the premise held.
 
 **Rollout position (§G):** Step 1's machinery shipped and its exit gate passed. Step 0's telemetry shipped (#458/#524/#531), but the baseline measurement itself is still outstanding. Step 2's classifier and batch-prep shipped, but its exit criterion is not yet met — 20.0% slot rate measured against a ~50% target; a misclassification denominator now exists (run 2 contradicted 1 of 4 hand-applied `cycle:slot` labels) ([`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md)). Step 3 (first real batches) has dispatched batches across four attempts but never carried one end-to-end — its GO/NO-GO is [#529](https://github.com/imboard-ai/ai-dossier/issues/529), which stays unarmed until the first batch PR merges. Step 4 (widen) is not started. **As of the §J amendment (2026-09-07) Step 2's exit criterion is retired rather than met:** the slot rate it measured is an artifact of using §E.2 as a membership gate, which §J.2 replaces — the criterion to measure now is §J.11's effective `share_ci` rate. Steps 3 and 4 re-enter against the §J dispatch model; Step 0's baseline measurement remains outstanding and §J.11 makes it decisive.
 
@@ -430,7 +430,9 @@ Of §E.2's nine floor rules, one is a genuine reason to keep a change on its own
 | unresolved dependency outside set | ordering | no — batch DAG already handles it |
 | **hard rollback** (data mutation, published API contract) | **revert granularity in production** | **yes** |
 
-`share_ci=false` iff: hard-rollback, or a different `base_branch`, or an explicit `no-batch` label. Everything else batches.
+`share_ci=false` iff: hard-rollback, or a different `base_branch`, or an explicit `no-batch` label. Everything else is **eligible** to share a run.
+
+**Eligibility is not enrolment.** `share_ci=true` means "may join a batch if one is being formed", never "will be batched". Nothing batches implicitly — see §J.13.
 
 The `> 8 files` rule deserves naming plainly: it was never about risk. It exists because §C.4 dispatches members **serially into one shared worktree**, so a large member stalls every member behind it. It is a latency workaround that became a risk rule, and §J.3 removes its cause.
 
@@ -472,7 +474,7 @@ The capability contract changes meaning under §J.4 and this is a live defect, n
 
 Under this amendment that is backwards: every member would pay the full suite, N times, which is precisely the cost being eliminated. **`test.focused` must map changed paths to the tests that cover them.** It is repo-owned, which is correct — only the repo knows its own test topology — and it is the seam the entire economics runs through. imboard-monorepo's declaration matters most, since that is where the ~75 min lives.
 
-Both repos' declarations are now work items, not settled configuration.
+**Measured correction (§J.12):** this applies to imboard-monorepo, *not* to this repo. ai-dossier's full suite runs in under 5 minutes and the manifest's own reasoning — a slower gate that cannot lie about its exit status beats a scoping script that has already cost four pilot attempts — stands. `make test` is the right declaration here. The imboard work item is specific: the member gate must exclude the integration/e2e stage, which is where the fixed hour lives (§J.12).
 
 ### J.6 The parent fixes first
 
@@ -536,6 +538,76 @@ Step 0's baseline is still outstanding and this amendment makes it decisive, bec
 4. **Merge-conflict rate on the integration branch**, against the file-disjointness the packer predicted.
 
 §H's validation plan and #529's GO/NO-GO apply to this model unchanged.
+
+---
+
+### J.12 Measured 2026-09-07 — §J.11 item 1 answered
+
+§J.11 named one measurement that could invalidate the rest: whether imboard's ci-parity cost is real, and whether imboard#4064's per-suite caching had already shrunk it. Measured against 124 historical local runs recorded in `worktrees/*/.ci-parity/run-<ISO>Z-<pid>.log` (start time from the filename, end time from mtime).
+
+**The premise holds, and the prize is larger than §J.0 assumed.**
+
+| Population | n | median | p90 | max |
+|---|---|---|---|---|
+| Green, reached the integration/e2e stage | 40 | **52.5 min** | **89.0 min** | 120.5 min |
+| Green, skipped it (no app-code change) | 45 | ~8 min | — | — |
+| Failed early at a gate | 39 | 6.0 min | 76.4 min | 102.5 min |
+
+**The expensive stage is a fixed cost, not a function of the diff.** Runs that reach it name **107-112 integration suites regardless of what changed** — two runs over the *same 13-file diff* produced 0 suites and 107 suites respectively, the first having failed at the hygiene gate before reaching them. Affected-package scoping (`#3683`) governs the *package* gates; it does not scope the integration stage.
+
+That is the strongest form of the §J argument. If the ~1 hour is paid per PR regardless of change size, then N issues shipped separately pay it N times:
+
+| | 5 issues today | 5 issues under §J |
+|---|---|---|
+| ci-parity | 5 × ~52-89 min = **4.3-7.4 h** | 1 × ~52-89 min |
+
+Amortization is near-perfect — `(N-1) ×` the full fixed cost — rather than the "shared overhead only" outcome that would have followed if the stage were diff-proportional. This is what §J.2 unlocks and what §E.2-as-membership-gate withheld from 93.7% of the backlog.
+
+**imboard#4064's caching: not yet measurable.** Only 5 runs postdate its 2026-09-06T18:53Z merge, 3 of them in the deep population at 79.6 / 89.6 / 55.5 min — no improvement detectable against the 52.5 min pre-merge median, but n=5 drawn from one night's batch work cannot support a conclusion either way. Re-measure after ~20 more runs before crediting or discounting it.
+
+**Remote CI is a different, much smaller number.** The GitHub Actions "Build & Test" workflow runs **10-11 min** on pull requests. The hour being amortized is the *local* `scripts/ci-parity.sh` gate that runs before push — so §J's saving is agent wall-clock, not Actions minutes.
+
+**Methodology trap, recorded because it inverts the answer:** the naive median over all 124 runs is 7.4 min, which would have read as "ci-parity is cheap, §J is not worth building." That median is dominated by runs that **failed at an early gate and exited before the expensive stage**. Cost distributions over gate runs must be split by outcome — and by whether the run reached the stage in question — or early failures silently masquerade as fast successes.
+
+---
+
+### J.13 How a batch is formed, and what still runs alone
+
+§J.2 defines who *may* share a run. This defines who *does* — the question §J left unanswered, and the one a reader is most likely to get wrong.
+
+**Nothing batches implicitly.** An issue submitted on its own runs full-cycle, alone, on its own PR, paying its own ci-parity hour — exactly as today. §J changes nothing about that path, and §G's "Full Cycle untouched throughout" still holds.
+
+A batch is formed one of two ways:
+
+A batch forms **only** when an operator submits a set:
+
+```
+ai-dossier sched enqueue 101..105 --batch
+```
+
+**Auto-packing is out of scope (owner decision, 2026-09-07)** — the scheduler never enrols a queued issue into a batch on its own, and §E.4's "dispatch when full OR after a wait window" *formation* trigger is dropped, not deferred. It existed to make batching the eventual default without the operator thinking about it; the owner expects to reach that by habit instead, the way fleet became reflex. A habit costs nothing to build, cannot surprise an urgent fix with a wait for batch-mates it was never promised, and cannot silently enrol an issue the operator wanted shipped alone.
+
+Do not reintroduce it as a convenience. The convenience it buys is already available by typing `--batch`.
+
+**Two windows, only one of which survives.** §E.4's sentence conflates them:
+
+| Window | Purpose | Status |
+|---|---|---|
+| *formation* — wait for more members to enrol | made auto-packing possible | **dropped** |
+| *straggler* — how long the parent waits for a slow member before verifying what has landed | needed in explicit mode too: 4 of 5 members done and one wedged must not hold the batch forever | **kept**, per §F.8 (partial batch success is the default outcome) |
+
+**Consequence for prep.** With no queue-wide enrolment, `share_ci` is a **validation over a submitted set**, not a classification the engine runs against every queued issue: prep checks the set the operator handed it, drops any `share_ci=false` member out to its own full-cycle with the reason stated on the anchor, and composes from what remains. Cheaper than §E.1's per-issue pass and it fails loudly on the operator's actual intent rather than quietly declining to enrol something.
+
+**Who does what, once a batch is formed:**
+
+| Actor | Kind | Responsibility |
+|---|---|---|
+| batch-prep | one LLM run | classify `impl_tier` + `share_ci`, drop ineligible issues to their own full-cycle, open the `batch-epic` anchor, write the queue manifest |
+| scheduler | **code, no LLM** | create the integration branch, dispatch members in parallel, track landings, run the deterministic gates, watch the PR, teardown |
+| member | one agent per issue, at its own `impl_tier` | full-cycle *minus* gate/setup/ship/report — plan, implement, write and run relevant tests, blind conformance, one commit, handover (§J.7) |
+| parent orchestrator | one agent per batch, terminal phase only | full suite + ci-parity + one browser pass, fix what breaks (§J.6), aggregate review, ship one PR |
+
+The parent is the only genuinely new actor, and it is live only for the terminal phase — not a supervisor loop polling members, which is the failure §B's scheduler exists to eliminate. Member dispatch stays deterministic.
 
 ---
 
