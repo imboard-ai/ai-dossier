@@ -430,7 +430,9 @@ Of §E.2's nine floor rules, one is a genuine reason to keep a change on its own
 | unresolved dependency outside set | ordering | no — batch DAG already handles it |
 | **hard rollback** (data mutation, published API contract) | **revert granularity in production** | **yes** |
 
-`share_ci=false` iff: hard-rollback, or a different `base_branch`, or an explicit `no-batch` label. Everything else batches.
+`share_ci=false` iff: hard-rollback, or a different `base_branch`, or an explicit `no-batch` label. Everything else is **eligible** to share a run.
+
+**Eligibility is not enrolment.** `share_ci=true` means "may join a batch if one is being formed", never "will be batched". Nothing batches implicitly — see §J.13.
 
 The `> 8 files` rule deserves naming plainly: it was never about risk. It exists because §C.4 dispatches members **serially into one shared worktree**, so a large member stalls every member behind it. It is a latency workaround that became a risk rule, and §J.3 removes its cause.
 
@@ -566,6 +568,34 @@ Amortization is near-perfect — `(N-1) ×` the full fixed cost — rather than 
 **Remote CI is a different, much smaller number.** The GitHub Actions "Build & Test" workflow runs **10-11 min** on pull requests. The hour being amortized is the *local* `scripts/ci-parity.sh` gate that runs before push — so §J's saving is agent wall-clock, not Actions minutes.
 
 **Methodology trap, recorded because it inverts the answer:** the naive median over all 124 runs is 7.4 min, which would have read as "ci-parity is cheap, §J is not worth building." That median is dominated by runs that **failed at an early gate and exited before the expensive stage**. Cost distributions over gate runs must be split by outcome — and by whether the run reached the stage in question — or early failures silently masquerade as fast successes.
+
+---
+
+### J.13 How a batch is formed, and what still runs alone
+
+§J.2 defines who *may* share a run. This defines who *does* — the question §J left unanswered, and the one a reader is most likely to get wrong.
+
+**Nothing batches implicitly.** An issue submitted on its own runs full-cycle, alone, on its own PR, paying its own ci-parity hour — exactly as today. §J changes nothing about that path, and §G's "Full Cycle untouched throughout" still holds.
+
+A batch is formed one of two ways:
+
+| | Trigger | When to use it |
+|---|---|---|
+| **Explicit** (default) | an operator submits a set: `sched enqueue 101..105 --batch` | the normal path; nothing waits for batch-mates it was not promised |
+| **Auto-packing** (opt-in) | §E.4's existing dispatch trigger — the scheduler packs `share_ci=true` queue entries and dispatches when a batch is full **or** its members have waited past a window (default 30 min) | backlog burn-down, where the savings scale with volume |
+
+Auto-packing is where a large backlog's economics live, but it costs every enrolled issue up to the wait window in added latency, so it is a queue policy an operator turns on — not the default. An urgent single fix must never silently acquire a 30-minute wait for batch-mates.
+
+**Who does what, once a batch is formed:**
+
+| Actor | Kind | Responsibility |
+|---|---|---|
+| batch-prep | one LLM run | classify `impl_tier` + `share_ci`, drop ineligible issues to their own full-cycle, open the `batch-epic` anchor, write the queue manifest |
+| scheduler | **code, no LLM** | create the integration branch, dispatch members in parallel, track landings, run the deterministic gates, watch the PR, teardown |
+| member | one agent per issue, at its own `impl_tier` | full-cycle *minus* gate/setup/ship/report — plan, implement, write and run relevant tests, blind conformance, one commit, handover (§J.7) |
+| parent orchestrator | one agent per batch, terminal phase only | full suite + ci-parity + one browser pass, fix what breaks (§J.6), aggregate review, ship one PR |
+
+The parent is the only genuinely new actor, and it is live only for the terminal phase — not a supervisor loop polling members, which is the failure §B's scheduler exists to eliminate. Member dispatch stays deterministic.
 
 ---
 
