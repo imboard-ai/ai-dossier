@@ -579,12 +579,24 @@ Amortization is near-perfect — `(N-1) ×` the full fixed cost — rather than 
 
 A batch is formed one of two ways:
 
-| | Trigger | When to use it |
-|---|---|---|
-| **Explicit** (default) | an operator submits a set: `sched enqueue 101..105 --batch` | the normal path; nothing waits for batch-mates it was not promised |
-| **Auto-packing** (opt-in) | §E.4's existing dispatch trigger — the scheduler packs `share_ci=true` queue entries and dispatches when a batch is full **or** its members have waited past a window (default 30 min) | backlog burn-down, where the savings scale with volume |
+A batch forms **only** when an operator submits a set:
 
-Auto-packing is where a large backlog's economics live, but it costs every enrolled issue up to the wait window in added latency, so it is a queue policy an operator turns on — not the default. An urgent single fix must never silently acquire a 30-minute wait for batch-mates.
+```
+ai-dossier sched enqueue 101..105 --batch
+```
+
+**Auto-packing is out of scope (owner decision, 2026-09-07)** — the scheduler never enrols a queued issue into a batch on its own, and §E.4's "dispatch when full OR after a wait window" *formation* trigger is dropped, not deferred. It existed to make batching the eventual default without the operator thinking about it; the owner expects to reach that by habit instead, the way fleet became reflex. A habit costs nothing to build, cannot surprise an urgent fix with a wait for batch-mates it was never promised, and cannot silently enrol an issue the operator wanted shipped alone.
+
+Do not reintroduce it as a convenience. The convenience it buys is already available by typing `--batch`.
+
+**Two windows, only one of which survives.** §E.4's sentence conflates them:
+
+| Window | Purpose | Status |
+|---|---|---|
+| *formation* — wait for more members to enrol | made auto-packing possible | **dropped** |
+| *straggler* — how long the parent waits for a slow member before verifying what has landed | needed in explicit mode too: 4 of 5 members done and one wedged must not hold the batch forever | **kept**, per §F.8 (partial batch success is the default outcome) |
+
+**Consequence for prep.** With no queue-wide enrolment, `share_ci` is a **validation over a submitted set**, not a classification the engine runs against every queued issue: prep checks the set the operator handed it, drops any `share_ci=false` member out to its own full-cycle with the reason stated on the anchor, and composes from what remains. Cheaper than §E.1's per-issue pass and it fails loudly on the operator's actual intent rather than quietly declining to enrol something.
 
 **Who does what, once a batch is formed:**
 
