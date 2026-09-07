@@ -474,7 +474,7 @@ The capability contract changes meaning under §J.4 and this is a live defect, n
 
 Under this amendment that is backwards: every member would pay the full suite, N times, which is precisely the cost being eliminated. **`test.focused` must map changed paths to the tests that cover them.** It is repo-owned, which is correct — only the repo knows its own test topology — and it is the seam the entire economics runs through. imboard-monorepo's declaration matters most, since that is where the ~75 min lives.
 
-**Measured correction (§J.12):** this applies to imboard-monorepo, *not* to this repo. ai-dossier's full suite runs in under 5 minutes and the manifest's own reasoning — a slower gate that cannot lie about its exit status beats a scoping script that has already cost four pilot attempts — stands. `make test` is the right declaration here. The imboard work item is specific: the member gate must exclude the integration/e2e stage, which is where the fixed hour lives (§J.12).
+**Measured correction (§J.12):** this applies to imboard-monorepo, *not* to this repo. ai-dossier's full suite runs in under 5 minutes and the manifest's own reasoning — a slower gate that cannot lie about its exit status beats a scoping script that has already cost four pilot attempts — stands. `make test` is the right declaration here. The work item is specific but **not repo-local**: the member gate must exclude the integration/e2e stage, which is where the fixed hour lives (§J.12) — implemented once in the CLI and declared per repo, per §J.14.
 
 ### J.6 The parent fixes first
 
@@ -608,6 +608,45 @@ Do not reintroduce it as a convenience. The convenience it buys is already avail
 | parent orchestrator | one agent per batch, terminal phase only | full suite + ci-parity + one browser pass, fix what breaks (§J.6), aggregate review, ship one PR |
 
 The parent is the only genuinely new actor, and it is live only for the terminal phase — not a supervisor loop polling members, which is the failure §B's scheduler exists to eliminate. Member dispatch stays deterministic.
+
+---
+
+### J.14 What is general, what is repo-specific
+
+§J described the parent orchestrator as "one agent per batch" and the member gate as work to be done "in imboard". Both framings are wrong in the same direction: they treat as repo-local something that is identical on every repo. The dossier family exists so that batching works on any repo without per-repo code, and §J must hold that line.
+
+| Layer | Kind | Where | Status |
+|---|---|---|---|
+| scheduler — queue, slots, integration branch, dispatch, landings, PR watch, teardown | code | `packages/sched` | exists |
+| affected-test resolution (`test.focused`) | code | CLI capability implementation | **missing — see below** |
+| classify | dossier | registry | exists |
+| batch prep | dossier | registry | exists |
+| member (`slot-cycle`, §J.4) | dossier | registry | exists |
+| **parent integrate-and-fix (§J.6)** | **dossier** | **registry** | **missing** |
+| which stages are expensive *here*; base ref | declaration | `.dossier/automation/manifest.yaml` | per repo |
+
+Only the last row is legitimately repo-specific, and it is configuration, not code.
+
+**The parent orchestrator is a dossier.** §J.6 introduced it without saying what kind of thing it is. It is judgment work with a defined procedure — run the aggregate verification, read the failures, repair within budget, decide fix-vs-evict against each member's conformance verdict, aggregate review, ship one PR — and that procedure is identical on every repo. §C.7 rejected "`batch-cycles` as a dossier" and that rejection stands for the *deterministic* layer, but it was reasoning about a scheduler; §J introduced an LLM actor C.7 never considered, and the rejection does not reach it. Publishing it to the registry is what makes §J work on a repo nobody has touched, the way `fleet-cycle` does today.
+
+**`test.focused` is a CLI capability, not a per-repo script.** §J.5 correctly identified that the declaration must become diff-scoped; §J.12 then named "imboard's diff-scoped member gate" as the next build step. That is a one-off, and this programme has already paid for exactly this one-off: imboard's hand-written `scripts/cap-test-focused.sh` is the single defect that evicted five batch members across pilot attempts 2-4, and this repo's manifest declines to write its own equivalent in a comment that says why. Writing a second bespoke scoping script per repo repeats a documented failure.
+
+The general implementation is available and has precedent here. `@ai-dossier/worktree-pool`'s `resolveWarmCommands` → `detectProjectEnv` already resolves install and build commands from the detected package manager (`packageManager` field, then lockfile probe) with an explicit-config escape hatch. Affected-test resolution is the same shape:
+
+1. changed paths — `git diff` against a base ref. Universal.
+2. paths → affected workspaces — per package manager, and pnpm/turbo/nx already expose this as a first-class selector; prefer theirs over a re-implementation.
+3. workspaces → filtered test invocation, with declared stages excluded.
+
+declared as:
+
+```yaml
+test.focused:
+  strategy: affected        # CLI-provided
+  base: origin/main
+  exclude_stages: [integration, e2e]
+```
+
+A repo keeps the `command:` form as the escape hatch when its topology genuinely defies detection — the same relationship `warm_commands` has to `detectProjectEnv`. What changes is the default: scoping is something the CLI does, and the repo declares only what is expensive locally.
 
 ---
 
