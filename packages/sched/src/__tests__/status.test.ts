@@ -100,6 +100,24 @@ describe('buildStatusReport', () => {
     expect(report.dispatch_health).toEqual({
       consecutive_suspect: 1,
       last_suspect_unit: 'issue:101',
+      consecutive_api_errors: 0,
+      pause_reset_at: null,
+    });
+  });
+
+  it('#629: surfaces the confirmed-dispatch-failure counter and reset time independently of the suspect-dispatch pair', () => {
+    let state = seeded();
+    state = {
+      ...state,
+      consecutive_dispatch_api_errors: 2,
+      dispatch_pause_reset_at: '2026-09-06T20:40:00Z',
+    };
+    const report = buildStatusReport(state, { max_slots: 3 }, 'p');
+    expect(report.dispatch_health).toEqual({
+      consecutive_suspect: 0,
+      last_suspect_unit: null,
+      consecutive_api_errors: 2,
+      pause_reset_at: '2026-09-06T20:40:00Z',
     });
   });
 

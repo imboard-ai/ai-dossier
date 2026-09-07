@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseAgentUsage,
+  parseDispatchApiError,
   parseLastToolUse,
   parseOpenCodeUsage,
   SCHED_DISPATCH_EVENT,
@@ -743,5 +744,177 @@ describe('parseLastToolUse', () => {
     const resultEvent = JSON.stringify({ type: 'result', subtype: 'success', result: 'done' });
     const stdout = [assistantWithTools('Monitor'), resultEvent].join('\n');
     expect(parseLastToolUse(stdout)).toBe('Monitor');
+  });
+});
+
+describe('parseDispatchApiError (#629)', () => {
+  const spendLimitResult = {
+    type: 'result',
+    api_error_status: 429,
+    terminal_reason: 'api_error',
+    is_error: true,
+    num_turns: 1,
+    duration_ms: 718,
+    modelUsage: {},
+    result: "You've hit your monthly spend limit · your session limit resets 8:40pm (UTC)",
+  };
+
+  it('classifies a single-JSON-object 429 result (the real #629 incident shape)', () => {
+    const stdout = JSON.stringify(spendLimitResult);
+    expect(parseDispatchApiError(stdout)).toEqual({
+      apiErrorStatus: 429,
+      terminalReason: 'api_error',
+      isError: true,
+      emptyModelUsage: true,
+      message: "You've hit your monthly spend limit · your session limit resets 8:40pm (UTC)",
+      resetAt: null,
+    });
+  });
+
+  it('classifies the same shape as the LAST type:"result" event in a stream-json log', () => {
+    const preamble = JSON.stringify({ type: SCHED_DISPATCH_EVENT, ts: '2026-09-06T20:05:32Z' });
+    const assistantTurn = JSON.stringify({
+      type: 'assistant',
+      message: { model: 'claude-opus-4', content: [] },
+    });
+    const stdout = [preamble, assistantTurn, JSON.stringify(spendLimitResult)].join('\n');
+    const parsed = parseDispatchApiError(stdout);
+    expect(parsed?.apiErrorStatus).toBe(429);
+    expect(parsed?.terminalReason).toBe('api_error');
+  });
+
+  it('classifies on terminal_reason alone, with no api_error_status', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      terminal_reason: 'api_error',
+      is_error: true,
+      modelUsage: {},
+      result: 'auth rejected',
+    });
+    const parsed = parseDispatchApiError(stdout);
+    expect(parsed?.apiErrorStatus).toBeNull();
+    expect(parsed?.terminalReason).toBe('api_error');
+  });
+
+  it('classifies on api_error_status alone, with no terminal_reason', () => {
+    const stdout = JSON.stringify({ type: 'result', api_error_status: 529, result: 'overloaded' });
+    const parsed = parseDispatchApiError(stdout);
+    expect(parsed?.apiErrorStatus).toBe(529);
+    expect(parsed?.terminalReason).toBeNull();
+  });
+
+  it('returns null for a normal successful result (AC1 negative case)', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      modelUsage: { 'claude-opus-4': { inputTokens: 100, outputTokens: 50 } },
+      result: 'done',
+    });
+    expect(parseDispatchApiError(stdout)).toBeNull();
+  });
+
+  it('returns null for `is_error: true` alone — corroboration is not a substitute for the primary signal (AC5)', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      is_error: true,
+      modelUsage: {},
+      result: 'the agent reported an error, but not an API-level one',
+    });
+    expect(parseDispatchApiError(stdout)).toBeNull();
+  });
+
+  it('returns null for `modelUsage: {}` alone, with no is_error and no api_error_status', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      modelUsage: {},
+      result: 'ran and did nothing',
+    });
+    expect(parseDispatchApiError(stdout)).toBeNull();
+  });
+
+  it('returns null for a stream with no result event at all (agent killed mid-run)', () => {
+    const assistantTurn = (model: string) =>
+      JSON.stringify({ type: 'assistant', message: { model, content: [] } });
+    const stdout = [assistantTurn('claude-opus-4'), assistantTurn('claude-opus-4')].join('\n');
+    expect(parseDispatchApiError(stdout)).toBeNull();
+  });
+
+  it('returns null for empty/null/undefined input', () => {
+    expect(parseDispatchApiError('')).toBeNull();
+    expect(parseDispatchApiError('   ')).toBeNull();
+    expect(parseDispatchApiError(null)).toBeNull();
+    expect(parseDispatchApiError(undefined)).toBeNull();
+  });
+
+  it('does not classify a `terminal_reason` that merely contains "api_error" as a substring', () => {
+    const stdout = JSON.stringify({ type: 'result', terminal_reason: 'not_an_api_error_at_all' });
+    expect(parseDispatchApiError(stdout)).toBeNull();
+  });
+
+  it('reports a structured reset_at field when the provider supplies one (AC4)', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      api_error_status: 429,
+      reset_at: '2026-09-06T20:40:00Z',
+      result: 'spend limit',
+    });
+    expect(parseDispatchApiError(stdout)?.resetAt).toBe('2026-09-06T20:40:00Z');
+  });
+
+  it('never derives resetAt by parsing the free-text message', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      api_error_status: 429,
+      result: 'your session limit resets 8:40pm (UTC)',
+    });
+    expect(parseDispatchApiError(stdout)?.resetAt).toBeNull();
+  });
+
+  it('does not treat retry_after as a reset time — it is a duration, not an instant (#629 review)', () => {
+    const stdout = JSON.stringify({ type: 'result', api_error_status: 429, retry_after: 3600 });
+    expect(parseDispatchApiError(stdout)?.resetAt).toBeNull();
+  });
+
+  it('rejects an out-of-range or non-integer api_error_status (#629 review)', () => {
+    expect(
+      parseDispatchApiError(JSON.stringify({ type: 'result', api_error_status: 0.5 }))
+    ).toBeNull();
+    expect(
+      parseDispatchApiError(JSON.stringify({ type: 'result', api_error_status: 1e308 }))
+    ).toBeNull();
+    expect(
+      parseDispatchApiError(JSON.stringify({ type: 'result', api_error_status: -1 }))
+    ).toBeNull();
+  });
+
+  it('rejects an out-of-range numeric reset_at (#629 review)', () => {
+    const stdout = JSON.stringify({ type: 'result', api_error_status: 429, reset_at: 1e308 });
+    expect(parseDispatchApiError(stdout)?.resetAt).toBeNull();
+  });
+
+  it('strips Unicode bidi/format controls from the message, not just C0/C1 (#629 security review)', () => {
+    const rlo = String.fromCharCode(0x202e);
+    const zwsp = String.fromCharCode(0x200b);
+    const stdout = JSON.stringify({
+      type: 'result',
+      api_error_status: 429,
+      result: `spend${rlo}limit${zwsp}hit`,
+    });
+    const message = parseDispatchApiError(stdout)?.message;
+    expect(message).not.toContain(rlo);
+    expect(message).not.toContain(zwsp);
+    expect(message).toBe('spendlimithit');
+  });
+
+  it('caps and sanitizes the message like every other agent-controlled string field', () => {
+    const stdout = JSON.stringify({
+      type: 'result',
+      api_error_status: 429,
+      result: `x${String.fromCharCode(0x1b)}[2K${'y'.repeat(600)}`,
+    });
+    const parsed = parseDispatchApiError(stdout);
+    expect(parsed?.message).not.toContain('\x1b');
+    expect(parsed?.message?.length).toBeLessThanOrEqual(500);
   });
 });

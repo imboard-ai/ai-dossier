@@ -67,7 +67,7 @@
  * engine missing either never dispatches a `ready` batch (it stays queued).
  */
 
-import { parseLastToolUse } from '@ai-dossier/core';
+import { type DispatchApiError, parseDispatchApiError, parseLastToolUse } from '@ai-dossier/core';
 import type { BatchDispatchDeps, BatchTickResult } from './batch-dispatch';
 import { runBatchTick } from './batch-dispatch';
 import {
@@ -87,6 +87,12 @@ import {
   stallTimeoutForSlot,
   type TierSpawn,
 } from './dispatch';
+import {
+  dispatchApiErrorDetail,
+  dispatchApiErrorFields,
+  recordDispatchApiError,
+  resetDispatchApiErrorStreak,
+} from './dispatch-health';
 import type { RunFencer } from './fence';
 import {
   type GroundTruth,
@@ -1045,6 +1051,12 @@ function failOrAdoptOpenPr(
   unit: string,
   slot: SlotEntry,
   report: boolean,
+  // #629: never `'dispatch-failure'` in practice — `enterRecovery` only
+  // reaches this function under `escalate: true` (its cap-check is itself
+  // gated on `escalate`), and a `dispatch-failure` cause always passes
+  // `escalate: false`. Kept as the two-member union `enterRecovery` uses
+  // before its escalate check, so a maintainer reading this signature does
+  // not read "a spend wall can terminally fail a unit" as a live path.
   causeEvent: 'stalled' | 'verify-incomplete',
   cause: string,
   evidence: Record<string, unknown>
@@ -1099,7 +1111,7 @@ function failOrAdoptOpenPr(
   // with `causeEvent === 'verify-incomplete'` thread it through
   // `completeUnitOrRecover`: `reconcileRunning`'s dead-pid rail, from
   // `recordDispatchRunLog`'s own read, and (since #620) `reconcileSlots`'
-  // `exited`/`verifying` rail, from `readLastToolForSlot`. The two agree —
+  // `exited`/`verifying` rail, from `readDispatchSignalsForSlot`. The two agree —
   // the dispatch log is static once the agent has exited — so the tool name
   // survives regardless of which tick reaches this decision. It stays
   // OPTIONAL: a slice with no parseable `tool_use` yields null, hence the
@@ -1126,11 +1138,18 @@ function enterRecovery(
   ctx: TickCtx,
   state: SchedState,
   unit: string,
-  causeEvent: 'stalled' | 'verify-incomplete',
+  causeEvent: 'stalled' | 'verify-incomplete' | 'dispatch-failure',
   cause: string,
   truth: UnitTruth,
-  evidence: Record<string, unknown> = {}
+  evidence: Record<string, unknown> = {},
+  // #629: `escalate: false` for a CONFIRMED provider API error — it must
+  // never consume the per-unit escalation ladder or the ESCALATION_CAP
+  // (a spend/rate wall is not the issue's fault), so the respawn keeps the
+  // slot's CURRENT tier and `recoveries` count unchanged. Every other caller
+  // keeps the default (`true`), unaffected.
+  options: { escalate?: boolean } = {}
 ): SchedState {
+  const escalate = options.escalate ?? true;
   const issue = issueOfUnit(unit);
   if (issue === null) return state;
   const now = ctx.deps.now();
@@ -1140,21 +1159,44 @@ function enterRecovery(
 
   killUnitAgent(ctx, state, unit);
   // #524: only the STALL path kills a still-live, not-yet-recorded agent —
-  // `causeEvent === 'verify-incomplete'` arrives from `completeUnitOrRecover`
-  // AFTER the agent's exit was already detected and recorded by the dead-pid
-  // branch of `reconcileRunning`; recording again here would double-count
-  // that same dispatch. #591: a stall kill still has a fresh log slice worth
-  // reading for `last_tool` — a hung agent's last tool is exactly what tells
-  // an operator what it hung in.
+  // `causeEvent === 'verify-incomplete'`/`'dispatch-failure'` arrive from
+  // `completeUnitOrRecover` AFTER the agent's exit was already detected and
+  // recorded by the dead-pid branch of `reconcileRunning`; recording again
+  // here would double-count that same dispatch. #591: a stall kill still has
+  // a fresh log slice worth reading for `last_tool` — a hung agent's last
+  // tool is exactly what tells an operator what it hung in.
   if (causeEvent === 'stalled') {
-    const stallLastTool = recordDispatchRunLog(ctx, state, slot, unit);
+    const stallLastTool = recordDispatchRunLog(ctx, state, slot, unit).lastTool;
     if (stallLastTool !== null) evidence = { ...evidence, last_tool: stallLastTool };
   }
 
   const report = isReportSlot(slot);
-  const nextTier = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
-  if (slot.recoveries >= ESCALATION_CAP || nextTier === null) {
-    return failOrAdoptOpenPr(ctx, state, unit, slot, report, causeEvent, cause, evidence);
+  let resolvedTier: ModelTier;
+  if (escalate) {
+    const escalated = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
+    if (slot.recoveries >= ESCALATION_CAP || escalated === null) {
+      // #629: unreachable with `causeEvent === 'dispatch-failure'` — that
+      // cause always passes `escalate: false` above, so this branch (and the
+      // narrower `causeEvent` type `failOrAdoptOpenPr` declares) is never
+      // actually asked to terminally fail a unit over a provider wall.
+      return failOrAdoptOpenPr(
+        ctx,
+        state,
+        unit,
+        slot,
+        report,
+        causeEvent as 'stalled' | 'verify-incomplete',
+        cause,
+        evidence
+      );
+    }
+    resolvedTier = escalated;
+  } else {
+    // An unescalated redispatch keeps the CURRENT tier — `reportTierFor`
+    // evaluated at the unchanged `slot.recoveries` for a report slot (mirrors
+    // `recordDispatchRunLog`'s own tier expression), `entry.tier` verbatim
+    // otherwise — never `escalateTier`/`recoveries + 1`.
+    resolvedTier = report ? (reportTierFor(slot.recoveries) ?? entry.tier) : entry.tier;
   }
 
   // Fence BEFORE the respawn (#504 AC1/AC4): `killUnitAgent` above only reaches a pid
@@ -1169,7 +1211,7 @@ function enterRecovery(
     'recovering',
     {
       pid: null,
-      recoveries: slot.recoveries + 1,
+      recoveries: escalate ? slot.recoveries + 1 : slot.recoveries,
       gen: fenced ?? slot.gen,
       // Only a fence that actually landed starts the short takeover watch: an
       // unfenced redispatch is already degraded, and cutting its allowance down
@@ -1178,11 +1220,11 @@ function enterRecovery(
     },
     now
   );
-  if (!report) {
+  if (!report && escalate) {
     next = {
       ...next,
       entries: next.entries.map((e) =>
-        e.issue === issue ? { ...e, tier: nextTier, updated_at: now.toISOString() } : e
+        e.issue === issue ? { ...e, tier: resolvedTier, updated_at: now.toISOString() } : e
       ),
     };
   }
@@ -1192,10 +1234,24 @@ function enterRecovery(
     ...(slot.last_progress_at !== null ? { last_progress_at: slot.last_progress_at } : {}),
     ...evidence,
   });
+
+  // #629: an UNESCALATED redispatch (a confirmed provider API error) has no
+  // natural bound — `recoveries`/`ESCALATION_CAP` never advance for it — so
+  // once the dispatch-health pause has fired, respawning it every tick would
+  // reproduce the exact incident this fix exists to stop, just on the
+  // per-issue rail instead of the batch one (`runBatchTick` gets the
+  // equivalent gate below). Hold the slot in `recovering`, unspawned, until
+  // `sched resume`: `reconcileRecovering` (below) is what retries it once the
+  // pause clears — no separate re-classification happens while parked, since
+  // this function is reached exactly once per dead dispatch.
+  if (!escalate && next.paused) {
+    return next;
+  }
+
   journal(ctx, 'redispatched', unit, {
-    tier: nextTier,
+    tier: resolvedTier,
     slot: slot.id,
-    ...journalCmdModelFields(resolveTierSpawn(ctx.dispatch, nextTier, issue)),
+    ...journalCmdModelFields(resolveTierSpawn(ctx.dispatch, resolvedTier, issue)),
   });
   ctx.result.redispatched.push(unit);
   // Respawn immediately on the recovering rail — recovering → running. A
@@ -1555,20 +1611,35 @@ function journalStaleMilestoneIfIgnored(
 }
 
 /**
- * Read THIS dispatch's last tool call from its log slice (#591, #620) — a
- * pure, side-effect-free parse, safe to call from any slot status and any
- * number of times: unlike `recordDispatchRunLog` below, it writes nothing to
- * `runs.jsonl`, so it carries no exactly-once constraint. Exists because a
- * `verify-incomplete`/`unit-failed` decision can land on a LATER tick than
- * the one that detected the dead pid (e.g. ground truth was unreachable in
- * between) — by then the slot has moved past `running` and
- * `recordDispatchRunLog`'s guard refuses to re-read, but the dispatch's log
- * file is static once the agent has exited, so re-parsing it here yields the
- * same answer every time.
+ * Both signals a completed dispatch's log can yield — the last tool called
+ * (#591) and, since #629, whether the exit was a confirmed provider API
+ * error rather than an agent that ran. Read together from the SAME log slice
+ * so `completeUnitOrRecover`'s two branches can never derive them from
+ * different content.
  */
-function readLastToolForSlot(ctx: TickCtx, slot: SlotEntry, unit: string): string | null {
-  if (slot.spawned_at === null) return null;
-  return parseLastToolUse(dispatchLogSlice(ctx, slot, unit).content);
+interface DispatchSignals {
+  lastTool: string | null;
+  apiError: DispatchApiError | null;
+}
+
+const NO_DISPATCH_SIGNALS: DispatchSignals = { lastTool: null, apiError: null };
+
+/**
+ * Read THIS dispatch's last tool call and API-error classification (#591,
+ * #620, #629) from its log slice — a pure, side-effect-free parse, safe to
+ * call from any slot status and any number of times: unlike
+ * `recordDispatchRunLog` below, it writes nothing to `runs.jsonl`, so it
+ * carries no exactly-once constraint. Exists because a `verify-incomplete`/
+ * `dispatch-failure` decision can land on a LATER tick than the one that
+ * detected the dead pid (e.g. ground truth was unreachable in between) — by
+ * then the slot has moved past `running` and `recordDispatchRunLog`'s guard
+ * refuses to re-read, but the dispatch's log file is static once the agent
+ * has exited, so re-parsing it here yields the same answer every time.
+ */
+function readDispatchSignalsForSlot(ctx: TickCtx, slot: SlotEntry, unit: string): DispatchSignals {
+  if (slot.spawned_at === null) return NO_DISPATCH_SIGNALS;
+  const { content } = dispatchLogSlice(ctx, slot, unit);
+  return { lastTool: parseLastToolUse(content), apiError: parseDispatchApiError(content) };
 }
 
 /**
@@ -1611,7 +1682,7 @@ function recordDispatchRunLog(
   state: SchedState,
   slot: SlotEntry,
   unit: string
-): string | null {
+): DispatchSignals {
   // Enforce the once-per-dispatch invariant HERE rather than restating it in
   // prose at four call sites (#524 review). `blockTransitiveDependents` and
   // `enterRecovery` reach slots in any non-idle status: a slot already moved
@@ -1626,7 +1697,7 @@ function recordDispatchRunLog(
       reason: slot.spawned_at === null ? 'never-spawned' : `already-recorded-${slot.status}`,
       slot: slot.id,
     });
-    return null;
+    return NO_DISPATCH_SIGNALS;
   }
 
   const issue = issueOfUnit(unit);
@@ -1639,7 +1710,7 @@ function recordDispatchRunLog(
     journal(ctx, 'run-log-skipped', unit, {
       reason: issue === null ? 'not-an-issue-unit' : 'entry-gone',
     });
-    return null;
+    return NO_DISPATCH_SIGNALS;
   }
 
   // Report slots ride the same tier the cycle escalation ladder set at
@@ -1678,7 +1749,9 @@ function recordDispatchRunLog(
 
   // #591: the last tool this dispatch called, so an unverified exit attributes to a
   // concrete cause (e.g. `Monitor`) without opening the transcript — see `enterRecovery`.
-  return parseLastToolUse(logContent);
+  // #629: whether this SAME dispatch was a confirmed provider API error — see
+  // `completeUnitOrRecover`.
+  return { lastTool: parseLastToolUse(logContent), apiError: parseDispatchApiError(logContent) };
 }
 
 /** Reconcile one running slot against its polled ground truth. */
@@ -1695,9 +1768,9 @@ function reconcileRunning(
   // is DETECTED, never trusted as completion (AC2/AC3).
   if (slot.pid !== null && !ctx.deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
     journal(ctx, 'exit-detected', unit, { pid: slot.pid, slot: slot.id });
-    const lastTool = recordDispatchRunLog(ctx, state, slot, unit);
+    const signals = recordDispatchRunLog(ctx, state, slot, unit);
     const exited = transitionSlot(state, slot.id, 'exited', {}, now);
-    return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete', lastTool);
+    return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete', signals);
   }
 
   // The milestone poll FAILED (gh outage, missing binary) — unreachable is NOT
@@ -1850,11 +1923,13 @@ function completeUnitOrRecover(
   unit: string,
   truth: UnitTruth,
   via: 'verify-complete' | 'external-advance',
-  // #591: the last tool this dispatch called (from `recordDispatchRunLog`'s dead-pid
-  // reading), threaded through to `enterRecovery`'s `unverified-exit` evidence. The
-  // `external-advance` caller passes none — it DOES record a run log (`reconcileRunning`,
-  // #524), but ground truth already confirmed completion, so this path never reaches the
-  // `unverified-exit` branch and the tool name has nothing to attribute.
+  // #591/#629: the last tool called AND whether the exit was a confirmed
+  // provider API error (from `recordDispatchRunLog`'s dead-pid reading),
+  // threaded through to the unverified-exit decision below. The
+  // `external-advance` caller passes none — it DOES record a run log
+  // (`reconcileRunning`, #524), but ground truth already confirmed
+  // completion, so this path never reaches that decision and neither signal
+  // has anything to attribute.
   //
   // #620: a THUNK, not a value, for the deferred `exited`/`verifying` rail — that caller
   // has no read of its own to hand over and would otherwise have to read the dispatch log
@@ -1863,7 +1938,7 @@ function completeUnitOrRecover(
   // MAX_DISPATCH_LOG_BYTES (32 MiB) and its size is set by the spawned agent, so an
   // eager read is up to 32 MiB per slot per tick for as long as an outage holds slots in
   // `verifying`. Resolved once, only on the branch that consumes it.
-  lastTool: string | null | (() => string | null) = null
+  dispatchSignals: DispatchSignals | (() => DispatchSignals) = NO_DISPATCH_SIGNALS
 ): SchedState {
   const now = ctx.deps.now();
   let next = state;
@@ -1890,12 +1965,12 @@ function completeUnitOrRecover(
   // takes the unit (AC2's "never inferred from agent exit" cut both ways:
   // the park IS the milestone, the merge is not).
   if (entry !== undefined && entry.status === 'dispatched' && isParkedMilestone(truth.milestone)) {
-    // A verified park is also proof dispatch is healthy (#505) — reset the
-    // streak exactly like the sibling `completeUnit` branch below, or a
-    // healthy park sandwiched between two unrelated units' suspect exits
-    // would be invisible to the cross-unit correlation and could still tip
-    // it into a false-positive pause.
-    const parked = recordDispatchOutcome(ctx, next, unit, slot, false);
+    // A verified park is also proof dispatch is healthy (#505/#629) — reset
+    // both streaks exactly like the sibling `completeUnit` branch below, or a
+    // healthy park sandwiched between two unrelated units' suspect/api-error
+    // exits would be invisible to the correlation and could still tip it
+    // into a false-positive pause.
+    const parked = resetDispatchApiErrorStreak(recordDispatchOutcome(ctx, next, unit, slot, false));
     const pr = prOfMilestone(truth.milestone); // non-null: isParkedMilestone guarantees it
     if (pr === null) {
       // Structurally unreachable, and deliberately not silent if it ever is:
@@ -1939,19 +2014,50 @@ function completeUnitOrRecover(
     closedSignal
   );
   if (verifiedComplete) {
-    return completeUnit(ctx, recordDispatchOutcome(ctx, next, unit, slot, false), unit, via);
+    const completed = resetDispatchApiErrorStreak(
+      recordDispatchOutcome(ctx, next, unit, slot, false)
+    );
+    return completeUnit(ctx, completed, unit, via);
+  }
+
+  const resolved = typeof dispatchSignals === 'function' ? dispatchSignals() : dispatchSignals;
+
+  // #629: a CONFIRMED provider API error is a dispatch failure, never an
+  // unverified exit — it skips `recordDispatchOutcome`'s timing-based
+  // suspect check entirely (the classification is deterministic, not a
+  // heuristic) and never reaches `enterRecovery`'s escalation.
+  if (resolved.apiError) {
+    // `journalFailure: false` — `enterRecovery` journals its own `causeEvent`
+    // (`'dispatch-failure'`) with this same evidence immediately below; without
+    // the flag this rail double-journals every confirmed error (#629 review).
+    const recorded = recordDispatchApiError(
+      (event, u, extra) => journal(ctx, event, u, extra),
+      next,
+      unit,
+      resolved.apiError,
+      { journalFailure: false }
+    );
+    return enterRecovery(
+      ctx,
+      recorded,
+      unit,
+      'dispatch-failure',
+      dispatchApiErrorDetail(resolved.apiError),
+      truth,
+      dispatchApiErrorFields(resolved.apiError),
+      { escalate: false }
+    );
   }
 
   const suspect = msSinceLastProgress(slot, now) < SUSPECT_DISPATCH_WINDOW_MS;
   next = recordDispatchOutcome(ctx, next, unit, slot, suspect);
-  const resolvedLastTool = typeof lastTool === 'function' ? lastTool() : lastTool;
   return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', truth, {
     observed: truth.milestone
       ? `milestone ${truth.milestone.phase}/${truth.milestone.status}; closed=${truth.closed}`
       : `no milestone; closed=${truth.closed}`,
     // #591: attributes the unverified exit to a concrete cause (e.g. `Monitor`)
     // without opening the transcript. Omitted when the log yielded no tool_use.
-    ...(resolvedLastTool !== null ? { last_tool: resolvedLastTool } : {}),
+    ...(resolved.lastTool !== null ? { last_tool: resolved.lastTool } : {}),
   });
 }
 
@@ -1977,6 +2083,13 @@ function reconcileAssigned(
 
 /** Reconcile a `recovering` slot: respawn with the escalated tier. */
 function reconcileRecovering(ctx: TickCtx, state: SchedState, unit: string): SchedState {
+  // #629: while paused, do not resume a `recovering` slot's respawn — this is
+  // the crash-recovery rail (a sched restart caught a slot between
+  // `enterRecovery`'s transition and its own `spawnUnit` call, OR `enterRecovery`
+  // itself deliberately parked an unescalated redispatch here, see its own
+  // pause check). Either way, `sched resume` is what lets the tick loop reach
+  // this function again and actually respawn.
+  if (state.paused) return state;
   return spawnUnit(ctx, state, unit);
 }
 
@@ -2023,7 +2136,7 @@ function reconcileSlots(
         // happens only on the tick that actually reaches the unverified-exit
         // decision, not on every tick an outage holds the slot here.
         next = completeUnitOrRecover(ctx, next, unit, truth, 'verify-complete', () =>
-          readLastToolForSlot(ctx, slot, unit)
+          readDispatchSignalsForSlot(ctx, slot, unit)
         );
         break;
       case 'recovering':

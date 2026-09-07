@@ -48,12 +48,13 @@ import {
   SchedStore,
   type SpawnDeps,
   type SuiteResult,
+  setPaused,
   tick,
   transitionBatch,
   transitionIssue,
   transitionSlot,
 } from '../index';
-import { writeToolUseLog } from './helpers/dispatch-log';
+import { writeApiErrorLog, writeToolUseLog } from './helpers/dispatch-log';
 import { stubGroundTruth } from './helpers/ground-truth';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
@@ -633,6 +634,125 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       .find((e) => e.event === 'unit-failed' && e.issue === 901);
     expect(failedEvent?.reason).toBe('agent-exited-unverified');
     expect(failedEvent?.last_tool).toBe('Monitor');
+  }, 60_000);
+
+  it('#629: a member dying on a confirmed provider API error is NOT evicted — it is recorded against the shared pause and retried in place', async () => {
+    const repo = scratchRepo();
+    // Same dead-before-any-milestone shape as the test above (a missing
+    // require-dep kills the member before it can post anything) — the only
+    // difference is what the member's own log says about WHY it died.
+    const h = batchHarness(repo, ['--mode=batch', '--require-dep=totally-missing-pkg-629'], {
+      maxSlots: 1,
+    });
+    h.enqueue([{ issue: 901, mode: 'slot', batch: 'b-api-error', anchor: 900, tier: 'mid' }]);
+
+    h.tick(); // batch-setup + member 1 spawns, then dies before posting anything
+    const pid = batchSlotPid(h, 'b-api-error') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    expect(fs.existsSync(path.join(h.truthDir, '901.json'))).toBe(false);
+
+    // A confirmed 429, not a real crash — the exact shape #629's own incident
+    // captured.
+    writeApiErrorLog(batchMemberLogPath(h.deps.store.runsDir, 'b-api-error', 1, 901));
+
+    const result = h.tick(); // reconciles the dead member: confirmed API error, not agent-exited-unverified
+    const batch = findBatch(h.state(), 'b-api-error');
+    expect(batch?.evictions).toHaveLength(0); // NEVER evicted — real work is not thrown away for a wall
+    expect(result.failed).not.toContain('batch:b-api-error');
+
+    const failureEvent = h.deps.journal
+      .read()
+      .find((e) => e.event === 'dispatch-failure' && e.unit === 'batch:b-api-error');
+    expect(failureEvent).toBeDefined();
+    expect(failureEvent?.detail).toContain('spend limit');
+    expect(h.state().consecutive_dispatch_api_errors).toBe(1);
+    expect(h.deps.journal.read().some((e) => e.event === 'unit-failed' && e.issue === 901)).toBe(
+      false
+    );
+
+    // The member keeps its position — `runBatchTick`'s "same wedge" retry
+    // (`spawnMemberContinuation`) respawns it in place on the next tick.
+    const retryResult = h.tick();
+    expect(retryResult.spawned).toEqual(['batch:b-api-error']);
+    expect(findBatch(h.state(), 'b-api-error')?.executing_member).toBe(1);
+  }, 60_000);
+
+  it("#629: a SECOND dead exit with no result event is NOT misclassified against the first attempt's stale 429 — log_offset_at_spawn fences the classification", async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--require-dep=totally-missing-pkg-629b'], {
+      maxSlots: 1,
+    });
+    h.enqueue([{ issue: 902, mode: 'slot', batch: 'b-api-error-2', anchor: 900, tier: 'mid' }]);
+
+    // First attempt: dies, gets classified as a confirmed API error (as above).
+    h.tick();
+    let pid = batchSlotPid(h, 'b-api-error-2') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    writeApiErrorLog(batchMemberLogPath(h.deps.store.runsDir, 'b-api-error-2', 1, 902));
+    h.tick();
+    expect(h.state().consecutive_dispatch_api_errors).toBe(1);
+    expect(findBatch(h.state(), 'b-api-error-2')?.evictions).toHaveLength(0);
+
+    // Second attempt (the retry `runBatchTick` dispatched): dies again, but
+    // THIS time writes nothing at all — a genuine crash, exactly the
+    // #629-incident shape (killed, OOM, no result event). Without offset
+    // fencing, `readDispatchApiError` would re-read the FIRST attempt's
+    // 429 result (still the last `type:"result"` line in the append-mode
+    // file) and wrongly classify this as a SECOND confirmed API error
+    // instead of evicting a member that never posted anything.
+    h.tick();
+    pid = batchSlotPid(h, 'b-api-error-2') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    const result = h.tick();
+
+    expect(result.failed).toContain('batch:b-api-error-2');
+    const batch = findBatch(h.state(), 'b-api-error-2');
+    expect(batch?.evictions).toHaveLength(1);
+    expect(batch?.evictions[0]).toMatchObject({ issue: 902, reason: 'agent-exited-unverified' });
+    // The confirmed-api-error streak was NOT incremented a second time —
+    // this exit correctly read as "no signal", not "another 429".
+    expect(h.state().consecutive_dispatch_api_errors).toBe(1);
+  }, 60_000);
+
+  it('#629: while paused, runBatchTick does not claim a READY batch or respawn a wedge — sched resume unwedges it', async () => {
+    const repo = scratchRepo();
+    // maxSlots: 2 — both the held retry and the other ready batch have their
+    // OWN slot once resumed, so this test's assertion isolates "did the
+    // pause hold them" from "did they have to wait a tick for capacity".
+    const h = batchHarness(repo, ['--mode=batch', '--require-dep=totally-missing-pkg-629c'], {
+      maxSlots: 2,
+    });
+    h.enqueue([{ issue: 903, mode: 'slot', batch: 'b-api-error-3', anchor: 900, tier: 'mid' }]);
+
+    h.tick();
+    let pid = batchSlotPid(h, 'b-api-error-3') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    writeApiErrorLog(batchMemberLogPath(h.deps.store.runsDir, 'b-api-error-3', 1, 903));
+    h.tick(); // count=1, not yet paused — slot released, no respawn THIS tick
+    expect(h.state().consecutive_dispatch_api_errors).toBe(1);
+    expect(h.state().paused).toBe(false);
+
+    h.tick(); // `runBatchTick`'s "same wedge" retry spawns attempt 2
+    pid = batchSlotPid(h, 'b-api-error-3') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    writeApiErrorLog(batchMemberLogPath(h.deps.store.runsDir, 'b-api-error-3', 1, 903));
+    h.tick(); // dead again — count=2, threshold reached, paused
+
+    expect(h.state().paused).toBe(true);
+    expect(h.state().consecutive_dispatch_api_errors).toBe(2);
+
+    // A second, unrelated ready batch must not be claimed while paused
+    // either — `claimAndSetup` is a provider dispatch (`batch-setup`) too.
+    h.enqueue([{ issue: 950, mode: 'slot', batch: 'b-other', anchor: 951, tier: 'mid' }]);
+    const heldResult = h.tick();
+    expect(findBatch(h.state(), 'b-other')?.status).toBe('ready'); // never claimed
+    expect(heldResult.spawned).not.toContain('batch:b-other');
+    expect(heldResult.spawned).not.toContain('batch:b-api-error-3');
+
+    // `sched resume` is the unwedge path for both.
+    h.store.withLock((s) => ({ state: setPaused(s, false), result: null }));
+    const resumed = h.tick();
+    expect(resumed.spawned).toContain('batch:b-api-error-3');
   }, 60_000);
 
   it('dissolve (RFC F.8): >⅓ evicted requeues every unshipped member, batch never ships', async () => {

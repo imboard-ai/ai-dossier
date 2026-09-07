@@ -270,6 +270,22 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
       `⚠ Dispatch health: ${report.dispatch_health.consecutive_suspect} consecutive suspect-dispatch exit(s) (last: ${report.dispatch_health.last_suspect_unit}) ${cause}`
     );
   }
+  if (report.dispatch_health.consecutive_api_errors > 0) {
+    // #629: a DIFFERENT signal from the suspect-dispatch block above — a
+    // confirmed provider API error (a 429 spend/rate wall), not a timing
+    // inference. Without this line a #629 pause reports `consecutive_suspect:
+    // 0` and looks identical to a manual `sched pause`, which is the exact
+    // ambiguity this counter exists to remove.
+    const cause = report.paused
+      ? '— likely why the scheduler is paused'
+      : '— informational, below the auto-pause threshold';
+    const resetNote = report.dispatch_health.pause_reset_at
+      ? ` (provider reset at ${report.dispatch_health.pause_reset_at})`
+      : '';
+    lines.push(
+      `⚠ Dispatch health: ${report.dispatch_health.consecutive_api_errors} consecutive confirmed dispatch failure(s) — a provider wall, not an agent exit${resetNote} ${cause}`
+    );
+  }
   lines.push(`Runnable units: ${runnable}`);
   lines.push('');
   lines.push('== Queue ==');

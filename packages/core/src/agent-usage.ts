@@ -96,6 +96,28 @@ function joinModels(names: readonly string[]): string | null {
  * `sched status`). Shared by every agent-controlled string field this module parses —
  * originally written for `model` (#524), reused for `parseLastToolUse`'s tool name (#591).
  */
+/**
+ * Unicode bidi/format control code points (#629 security review) — invisible
+ * or reordering characters (Trojan-Source-style: RLO/LRO/embeddings/isolates,
+ * zero-width joiners, soft hyphen, BOM, line/paragraph separators) that pass
+ * the plain C0/C1 filter below but can make a persisted journal line RENDER
+ * differently from what was written. Immaterial for `model`/`last_tool`
+ * (machine-shaped values) but material once this filter also sanitizes
+ * free-text provider prose (`message`, up to 500 chars — #629).
+ */
+function isFormatOrBidiControl(code: number): boolean {
+  return (
+    code === 0x00ad ||
+    code === 0xfeff ||
+    (code >= 0x200b && code <= 0x200f) ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2060 && code <= 0x2064) ||
+    (code >= 0x2066 && code <= 0x206f) ||
+    code === 0x2028 ||
+    code === 0x2029
+  );
+}
+
 function sanitizeAgentText(value: string | null, maxLength: number): string | null {
   if (value === null) return null;
   let clean = '';
@@ -107,7 +129,14 @@ function sanitizeAgentText(value: string | null, maxLength: number): string | nu
     const code = char.codePointAt(0) ?? 0;
     // C0 (< 0x20), DEL (0x7f) and C1 (0x80-0x9f) alike: U+009B is the 8-bit
     // CSI, which a terminal in a non-UTF-8 locale acts on exactly like ESC[.
-    if (code >= 0x20 && code !== 0x7f && !(code >= 0x80 && code <= 0x9f)) clean += char;
+    if (
+      code >= 0x20 &&
+      code !== 0x7f &&
+      !(code >= 0x80 && code <= 0x9f) &&
+      !isFormatOrBidiControl(code)
+    ) {
+      clean += char;
+    }
   }
   return clean;
 }
@@ -312,6 +341,42 @@ function sumAssistantUsage(events: readonly Record<string, unknown>[]): AgentRun
 }
 
 /**
+ * Find the JSON object a claude dispatch's usage/error signal should be read
+ * from: either the whole payload (`--output-format json`) or the last
+ * `type:"result"` event in a `--output-format stream-json` stream. Checked as
+ * a single object first so a pretty-printed (multi-line) result is not
+ * mistaken for an event stream; stream event types are excluded there, or a
+ * stream that happens to hold exactly ONE line (an agent killed after a
+ * single turn, or whose preamble write failed) would take that path and
+ * report all-null instead of falling through to the line-by-line scan.
+ *
+ * Shared by {@link parseAgentUsage} and {@link parseDispatchApiError} so the
+ * two can never disagree about WHICH object is authoritative — the exact
+ * `usage`/`modelUsage` divergence shape that caused ai-dossier#609,
+ * generalized to every field read from this object (ai-dossier#629).
+ *
+ * Returns null when no `result` event exists at all (an agent killed
+ * mid-run): {@link parseAgentUsage} falls back to summing `assistant` events
+ * in that case; {@link parseDispatchApiError} has nothing to fall back to,
+ * since an API-error result IS a result event.
+ */
+function findLastResultEvent(stdout: string): Record<string, unknown> | null {
+  const single = parseJsonObject(stdout);
+  if (single && !STREAM_EVENT_TYPES.has(single.type)) return single;
+
+  let lastResult: Record<string, unknown> | null = null;
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const event = parseJsonObject(trimmed);
+    if (!event || event.type === SCHED_DISPATCH_EVENT) continue;
+    if (event.type === 'result') lastResult = event;
+  }
+  return lastResult;
+}
+
+/**
  * Parse a claude headless result into usage data — both output formats.
  *
  * Accepts either shape, because the two consumers spawn claude differently:
@@ -319,11 +384,10 @@ function sumAssistantUsage(events: readonly Record<string, unknown>[]): AgentRun
  * - **A single JSON object** (`--output-format json`, what `ai-dossier run`
  *   uses): parsed whole.
  * - **A JSONL event stream** (`--output-format stream-json`, what the
- *   scheduler dispatches with since ai-dossier#524): the LAST `type:"result"`
- *   event wins — a per-unit log is append-mode, so a prior dispatch's result
- *   may precede this one in the same slice. With no `result` event at all (an
- *   agent killed mid-run), per-turn `assistant` usage is summed instead, so an
- *   interrupted dispatch still reports the tokens it really spent.
+ *   scheduler dispatches with since ai-dossier#524): the last `type:"result"`
+ *   event wins ({@link findLastResultEvent}). With no `result` event at all
+ *   (an agent killed mid-run), per-turn `assistant` usage is summed instead,
+ *   so an interrupted dispatch still reports the tokens it really spent.
  *
  * Lines that do not parse as JSON objects are skipped rather than
  * disqualifying the stream: the sched dispatch preamble
@@ -338,32 +402,150 @@ function sumAssistantUsage(events: readonly Record<string, unknown>[]): AgentRun
 export function parseAgentUsage(stdout: string | null | undefined): AgentRunUsage | null {
   if (typeof stdout !== 'string' || stdout.trim() === '') return null;
 
-  // `--output-format json`: the whole payload is one object. Checked first so
-  // a pretty-printed (multi-line) result is not mistaken for an event stream.
-  // Stream event types are excluded, or a stream that happens to hold exactly
-  // ONE line (an agent killed after a single turn, or whose preamble write
-  // failed) would take this path and report all-null instead of falling
-  // through to the per-turn sum below.
-  const single = parseJsonObject(stdout);
-  if (single && !STREAM_EVENT_TYPES.has(single.type)) return extractResultUsage(single);
+  const result = findLastResultEvent(stdout);
+  if (result) return extractResultUsage(result);
 
-  let lastResult: Record<string, unknown> | null = null;
+  // No terminal `result` event anywhere in the stream (agent killed
+  // mid-run): sum per-turn `assistant` usage instead, so an interrupted
+  // dispatch still reports the tokens it really spent.
   const assistants: Record<string, unknown>[] = [];
-
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
     const event = parseJsonObject(trimmed);
     if (!event || event.type === SCHED_DISPATCH_EVENT) continue;
-
-    if (event.type === 'result') lastResult = event;
-    else if (event.type === 'assistant') assistants.push(event);
+    if (event.type === 'assistant') assistants.push(event);
   }
 
-  if (lastResult) return extractResultUsage(lastResult);
   if (assistants.length > 0) return sumAssistantUsage(assistants);
   return null;
+}
+
+/** Longest free-text provider message copied into a journal entry (#629) — generous enough for a full spend-limit sentence, capped like every other agent-controlled string this module handles. */
+const MAX_DISPATCH_MESSAGE_LENGTH = 500;
+
+/** Longest `terminal_reason` / structured reset-time string accepted (#629) — machine-shaped values, same cap as {@link MAX_TOOL_NAME_LENGTH} but named separately since the two mean different things. */
+const MAX_DISPATCH_REASON_LENGTH = 100;
+
+/**
+ * Structured, ABSOLUTE reset-time keys checked defensively (#629 AC4) — none
+ * observed in real claude CLI output as of this writing (a live 429 capture
+ * carried only the free-text `result` message); wired for whenever the
+ * provider adds one. Deliberately never derived by parsing the free-text
+ * message itself — provider wording is not a contract (see
+ * {@link parseDispatchApiError}).
+ *
+ * `retry_after` is excluded: by every provider convention it is a DURATION in
+ * seconds, not an instant, and rendering a bare duration next to an ISO-8601
+ * `reset_at` value (`dispatch-health.ts`'s "provider reset at …" message) is
+ * actively misleading without a clock to add it to `now`. Only accepted here
+ * once a caller can convert it to an absolute instant.
+ */
+const RESET_AT_KEYS = ['reset_at', 'resets_at'] as const;
+
+/** Widest plausible epoch-seconds reset time accepted from `reset_at`/`resets_at` (#629) — one century out, well past any real rate-limit window, so a bogus huge number cannot render as a plausible-looking date. */
+const MAX_RESET_AT_EPOCH_SECONDS = 60 * 60 * 24 * 365 * 100;
+
+function toResetAt(parsed: Record<string, unknown>): string | null {
+  for (const key of RESET_AT_KEYS) {
+    const value = parsed[key];
+    if (typeof value === 'string' && value.length > 0) {
+      return sanitizeAgentText(value, MAX_DISPATCH_REASON_LENGTH);
+    }
+    if (
+      typeof value === 'number' &&
+      Number.isFinite(value) &&
+      value >= 0 &&
+      value <= MAX_RESET_AT_EPOCH_SECONDS
+    ) {
+      return String(value);
+    }
+  }
+  return null;
+}
+
+/**
+ * A dispatch result classified as an API-error dispatch FAILURE, not an agent
+ * that ran (ai-dossier#629). See {@link parseDispatchApiError}.
+ */
+export interface DispatchApiError {
+  /** The provider's HTTP status, e.g. 429. Null when absent even though `terminalReason === 'api_error'` reported the failure some other way. */
+  apiErrorStatus: number | null;
+  /** e.g. `"api_error"` — together with `apiErrorStatus`, the field whose presence IS the classification signal (never the free-text `message`). */
+  terminalReason: string | null;
+  /** The result's own `is_error` flag — corroboration only (AC5), never the primary signal. */
+  isError: boolean;
+  /** `modelUsage` was present and empty — corroboration that no tokens were spent (AC5), never the primary signal. */
+  emptyModelUsage: boolean;
+  /** The provider's human-readable message (`result`), sanitized and capped — for surfacing in a journal, never for classification. */
+  message: string | null;
+  /** A structured rate-limit reset time, when the provider supplies one (AC4) — never parsed out of `message`. */
+  resetAt: string | null;
+}
+
+/**
+ * Classify a dispatch result as a confirmed provider-side API error (a 429
+ * spend/rate wall, an auth failure the provider itself rejected outright) —
+ * distinct from an agent that started, ran, and exited without posting a
+ * milestone (ai-dossier#629). Both shapes surface identically to a caller
+ * that only checks "did the process exit without a verified milestone"; this
+ * function lets a caller tell them apart BEFORE that check, so a confirmed
+ * wall never consumes that caller's per-unit retry/escalation budget.
+ *
+ * Classification is `api_error_status` (a finite, positive, HTTP-status-
+ * shaped number) or `terminal_reason === 'api_error'` — deliberately never
+ * the free-text `result` message, which is not a contract the provider owes
+ * callers (mirrors the `usage`/`modelUsage` lesson of ai-dossier#609: read
+ * only the field actually documented to mean the thing, never a string that
+ * happens to look right today). `modelUsage: {}` + `is_error` are read as
+ * corroboration (AC5) but never gate the return value on their own — an
+ * agent that ran, did nothing, and reported no usage is a real (if
+ * unproductive) dispatch, not a wall.
+ *
+ * Shares {@link findLastResultEvent} with {@link parseAgentUsage} so the two
+ * can never disagree about which JSON object in the log is authoritative.
+ */
+export function parseDispatchApiError(stdout: string | null | undefined): DispatchApiError | null {
+  if (typeof stdout !== 'string' || stdout.trim() === '') return null;
+  const parsed = findLastResultEvent(stdout);
+  if (!parsed) return null;
+
+  const rawStatus = parsed.api_error_status;
+  // HTTP-status-shaped: an integer in the standard 100-599 range. Rejects
+  // `0.5`, `1e308`, and other values that would parse as a "status" but
+  // render as display noise wherever this field is surfaced (#629 security
+  // review) — the value is untrusted subprocess output, not a validated API
+  // response.
+  const apiErrorStatus =
+    typeof rawStatus === 'number' &&
+    Number.isInteger(rawStatus) &&
+    rawStatus >= 100 &&
+    rawStatus <= 599
+      ? rawStatus
+      : null;
+  const terminalReason =
+    typeof parsed.terminal_reason === 'string'
+      ? sanitizeAgentText(parsed.terminal_reason, MAX_DISPATCH_REASON_LENGTH)
+      : null;
+
+  if (apiErrorStatus === null && terminalReason !== 'api_error') return null;
+
+  const modelUsage = asRecord(parsed.modelUsage);
+  const emptyModelUsage = modelUsage !== null && Object.keys(modelUsage).length === 0;
+  const message =
+    typeof parsed.result === 'string'
+      ? sanitizeAgentText(parsed.result, MAX_DISPATCH_MESSAGE_LENGTH)
+      : null;
+
+  return {
+    apiErrorStatus,
+    terminalReason,
+    isError: parsed.is_error === true,
+    emptyModelUsage,
+    message,
+    resetAt: toResetAt(parsed),
+  };
 }
 
 /** Longest `last_tool` value written to `events.jsonl` before truncation (#591) — real tool names (`Bash`, `Monitor`, `mcp__server__tool`) are a fraction of this. */

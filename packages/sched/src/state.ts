@@ -210,6 +210,8 @@ export function createEmptyState(): SchedState {
     last_label_poll_at: null,
     consecutive_suspect_dispatches: 0,
     last_suspect_dispatch_unit: null,
+    consecutive_dispatch_api_errors: 0,
+    dispatch_pause_reset_at: null,
   };
 }
 
@@ -522,7 +524,10 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * with `pr`/`cleanup` both set — the same guard `dispatchReportAgents` uses
  * to assign a report slot in the first place — infers `'report'` regardless
  * of what `phase` drifted to; `phase === 'report'` is kept only as a
- * fallback for a slot whose entry can't be found. Otherwise `'cycle'`. The
+ * fallback for a slot whose entry can't be found. Otherwise `'cycle'`. 1.13.0
+ * (pre-#629) states backfill `consecutive_dispatch_api_errors` (0) and
+ * `dispatch_pause_reset_at` (null) — no confirmed dispatch failures were
+ * tracked before, so the zero/null values are exact, not a guess. The
  * state upgrades to the current schema on the next save.
  */
 export function validateState(data: unknown): SchedState {
@@ -741,6 +746,34 @@ export function validateState(data: unknown): SchedState {
       );
     }
   }
+  if (
+    obj.consecutive_dispatch_api_errors !== undefined &&
+    (!Number.isInteger(obj.consecutive_dispatch_api_errors) ||
+      (obj.consecutive_dispatch_api_errors as number) < 0)
+  ) {
+    throw new Error('consecutive_dispatch_api_errors must be a non-negative integer');
+  }
+  if (
+    obj.dispatch_pause_reset_at !== null &&
+    obj.dispatch_pause_reset_at !== undefined &&
+    typeof obj.dispatch_pause_reset_at !== 'string'
+  ) {
+    throw new Error('dispatch_pause_reset_at must be a string or null');
+  }
+  // One-directional, unlike the suspect-dispatch pair's "zero ⇔ null"
+  // agreement (#629 review): a confirmed failure with no reset time is valid
+  // (`count > 0, resetAt === null` — the provider didn't supply one), so only
+  // the reverse is checked — a reset time can never outlive a streak that has
+  // already cleared to zero.
+  if (
+    obj.dispatch_pause_reset_at !== null &&
+    obj.dispatch_pause_reset_at !== undefined &&
+    ((obj.consecutive_dispatch_api_errors as number | undefined) ?? 0) === 0
+  ) {
+    throw new Error(
+      'dispatch_pause_reset_at must be null when consecutive_dispatch_api_errors is 0'
+    );
+  }
 
   // Migration: pre-#464 (1.0.0) slots carry no branch/last_head/pid_start —
   // backfill null so the returned state always has the current shape. Pre-#468
@@ -853,6 +886,11 @@ export function validateState(data: unknown): SchedState {
     // a lossy guess.
     consecutive_suspect_dispatches: (obj.consecutive_suspect_dispatches as number | undefined) ?? 0,
     last_suspect_dispatch_unit: (obj.last_suspect_dispatch_unit as string | undefined) ?? null,
+    // Pre-#629 states carry neither field — no confirmed dispatch failures
+    // have ever been observed under them, so 0/null is exactly correct.
+    consecutive_dispatch_api_errors:
+      (obj.consecutive_dispatch_api_errors as number | undefined) ?? 0,
+    dispatch_pause_reset_at: (obj.dispatch_pause_reset_at as string | undefined) ?? null,
   };
 }
 

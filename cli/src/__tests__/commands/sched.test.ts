@@ -706,6 +706,29 @@ describe('ai-dossier sched status', () => {
     expect(text).toContain('informational, below the auto-pause threshold');
   });
 
+  it('#629: renders a separate dispatch-health warning for confirmed dispatch failures, naming the provider reset time', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    const state = readState() as Record<string, unknown>;
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        paused: true,
+        consecutive_dispatch_api_errors: 2,
+        dispatch_pause_reset_at: '2026-09-06T20:40:00Z',
+      })
+    );
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    expect(text).toContain('2 consecutive confirmed dispatch failure(s)');
+    expect(text).toContain('provider reset at 2026-09-06T20:40:00Z');
+    expect(text).toContain('likely why the scheduler is paused');
+    // A #629 pause reports consecutive_suspect: 0 — no suspect-dispatch line.
+    expect(text).not.toContain('suspect-dispatch exit(s)');
+  });
+
   it('#505: the dispatch-health warning names the pause as the likely cause once paused', async () => {
     await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
     const state = readState() as Record<string, unknown>;
