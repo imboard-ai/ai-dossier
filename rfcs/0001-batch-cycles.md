@@ -1,6 +1,6 @@
 # RFC-0001: Batch Cycles — Deterministic Scheduling and Batched Issue Execution
 
-- **Status**: Accepted (in rollout) — **halted 2026-09-03**, see [`docs/reports/batch-cycles-checkpoint.md`](../docs/reports/batch-cycles-checkpoint.md)
+- **Status**: Accepted (in rollout) — halted 2026-09-03, resumed 2026-09-06, **amended 2026-09-07 (§J)**; see [`docs/reports/batch-cycles-checkpoint.md`](../docs/reports/batch-cycles-checkpoint.md)
 - **Author(s)**: Yuval Dimnik
 - **Created**: 2026-08-29
 - **Related**: Epic [#474](https://github.com/imboard-ai/ai-dossier/issues/474) (implementation tracking: #458–#473, Step-3 retry #523–#538, model-agnosticism #527/#528, pilot batch 3 anchor [#549](https://github.com/imboard-ai/ai-dossier/issues/549): #540, #542, #543) · full-cycle-issue v3.14.1, fleet-cycle v1.7.0 (registry: imboard-ai/git/*) · Progressive Determinism brief
@@ -14,8 +14,10 @@
 - **2026-09-02** — status raised to Accepted (in rollout) ([#542](https://github.com/imboard-ai/ai-dossier/issues/542)); tracked in epic [#474](https://github.com/imboard-ai/ai-dossier/issues/474).
 - **2026-09-03** — pilot attempts 3 and 4 [`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md) Parts III-IV: 0 of 7 dispatched batches end-to-end across four runs; the single blocking defect isolated (the incremental member gate is a constant function — imboard-monorepo#3996, closed; sched-side [#594](https://github.com/imboard-ai/ai-dossier/issues/594), open). Attempt 4's full-cycle fallback shipped 4 of the 7 slot issues within hours, so the cohort was implementable — the batch path was not.
 - **2026-09-03** — programme **HALTED** at 10:42Z (owner token budget, not a fault). Current state, open findings and the resume recipe: [`docs/reports/batch-cycles-checkpoint.md`](../docs/reports/batch-cycles-checkpoint.md).
+- **2026-09-06** — programme resumed; batch path reached `done` end-to-end for the first time (five batches, first batch PRs merged in two repos, member gate 6.7 s on imboard-monorepo). Fourteen defects closed (#599-#639).
+- **2026-09-07** — **§J amendment**: the end-to-end blocker was never mechanical. `mode` conflated implementation risk with CI-sharing eligibility, so §E.2 admitted 6.3% of a real backlog (#590/#598) and the amortization was structurally unavailable to the issues worth most. §J splits `mode` into `impl_tier` and `share_ci`, replaces the serial shared worktree with parallel worktrees on an integration branch, and makes the parent orchestrator fix failures rather than evict them. Supersedes §C.4, §F.2, the batch arms of §D.1/§D.2, and §E.2/§E.3 *as membership rules*.
 
-**Rollout position (§G):** Step 1's machinery shipped and its exit gate passed. Step 0's telemetry shipped (#458/#524/#531), but the baseline measurement itself is still outstanding. Step 2's classifier and batch-prep shipped, but its exit criterion is not yet met — 20.0% slot rate measured against a ~50% target; a misclassification denominator now exists (run 2 contradicted 1 of 4 hand-applied `cycle:slot` labels) ([`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md)). Step 3 (first real batches) has dispatched batches across four attempts but never carried one end-to-end — its GO/NO-GO is [#529](https://github.com/imboard-ai/ai-dossier/issues/529), which stays unarmed until the first batch PR merges. Step 4 (widen) is not started. The programme is **halted** as of 2026-09-03 — see the checkpoint linked above before resuming.
+**Rollout position (§G):** Step 1's machinery shipped and its exit gate passed. Step 0's telemetry shipped (#458/#524/#531), but the baseline measurement itself is still outstanding. Step 2's classifier and batch-prep shipped, but its exit criterion is not yet met — 20.0% slot rate measured against a ~50% target; a misclassification denominator now exists (run 2 contradicted 1 of 4 hand-applied `cycle:slot` labels) ([`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md)). Step 3 (first real batches) has dispatched batches across four attempts but never carried one end-to-end — its GO/NO-GO is [#529](https://github.com/imboard-ai/ai-dossier/issues/529), which stays unarmed until the first batch PR merges. Step 4 (widen) is not started. **As of the §J amendment (2026-09-07) Step 2's exit criterion is retired rather than met:** the slot rate it measured is an artifact of using §E.2 as a membership gate, which §J.2 replaces — the criterion to measure now is §J.11's effective `share_ci` rate. Steps 3 and 4 re-enter against the §J dispatch model; Step 0's baseline measurement remains outstanding and §J.11 makes it decisive.
 
 
 ## Executive summary
@@ -171,6 +173,8 @@ Reused with modification: setup-issue-workflow (batch mode), review-issue (aggre
 
 ### C.4 `slot-cycle` (new dossier; generation tier by issue risk)
 
+> **Superseded by §J.3/§J.4.** The member is still per-issue and still runs blind conformance, but it gets its own worktree in parallel rather than sharing one serially, and its test scope is bounded by *relevance* rather than by issue size. Non-responsibilities below are unchanged.
+
 - **Precondition (provided by scheduler):** worktree exists, batch branch checked out, environment warm, issue's plan artifact + classify record available. **No gate, no setup, no ship, no report phases.**
 - **Steps:** (1) *plan-validate*: check the plan artifact against HEAD — referenced files exist, ACs still coherent, no floor-area surprise; deterministic checks + one cheap model sanity pass; refine incrementally, never recreate wholesale. **Misclassification tripwire lives here** (see F.7). (2) *implement*: per implement-issue discipline minus repo-wide ceremony — changed-file lint, typecheck, **focused tests** (capability `test.focused` when available). (3) *conformance*: the blind AC check, per-issue, strongest tier — unchanged from review-issue Agent 7, diff scoped to this issue's changes. (4) *commit*: exactly one commit `<type>: <title> (#N)` at the issue boundary, pushed. (5) milestone: existing phases with `--kv mode=slot batch=<id>` so `runstate verify` and the resume tooling work unchanged.
 - **Non-responsibilities:** full suite, CI, PR, merge, deploy, teardown, aggregate review, cross-issue anything.
@@ -203,6 +207,8 @@ One canonical per-issue plan, stored **on the issue** as a marked comment (`<!--
 ---
 
 ## D. State machines
+
+> **Batch arms of D.1/D.2 amended by §J.8** (parallel members; parent-fixes-first).
 
 ### D.1 Issue
 
@@ -274,9 +280,13 @@ Labels; title/body/comment keywords; the plan artifact's predicted file list (or
 
 ### E.2 Full-cycle floor (any ⇒ `cycle:full`)
 
+> **Retained as a tier rule; superseded as a membership rule by §J.1/§J.2.** Every rule below still decides `impl_tier`. Only hard-rollback also blocks `share_ci`.
+
 Risk-floor areas (auth, payments/billing, migrations, `.github/**`, security/crypto/secrets, infra/terraform — same list as review-issue Stage 1) · schema or data migrations · new package/workspace · deploy-pipeline changes · predicted files > 8 or predicted diff > 400 lines · hard rollback (data mutation, published API contract) · needs visual/browser review · unresolved dependency outside the submitted set · classifier confidence < 0.6. **Uncertainty ⇒ full** — but instrument the slot-rate; if a typical backlog classifies < 40% slot, the floor is too wide and the batch path won't pay for itself (tune in Phase 2 shadow mode against actual diffs).
 
 ### E.3 Slot eligibility (all of)
+
+> **Superseded as a membership rule by §J.2.** Retained as the `impl_tier=mechanical` signal.
 
 No floor hit · predictable test scope (`test_scope=focused`) · single area or few related files · issue text implies bounded change (bug fix, copy, config, small feature, test addition, docs, refactor-in-place).
 
@@ -295,6 +305,8 @@ Not context (fresh agent per member) and not issue count per se. The binding con
 ---
 
 ## F. Failure and recovery model
+
+> **F.2 is superseded by §J.6** — the parent orchestrator repairs failures directly; attribution and bisect demote to the eviction path. All other rows stand.
 
 | # | Failure | Handling |
 |---|---|---|
@@ -371,6 +383,159 @@ Rollback at every step = stop enqueueing that class; full-cycle path is never mo
 **Deprecated:** fleet-cycle (→ alias over sched, after Step 1 parity ×3 fleets); full-cycle tail-run pattern (→ sched scripts).
 
 **Step/issue breakdown** (roughly one issue each, dependencies noted): 1. telemetry (—) · 2. sched core: queue/slots/dispatch/state (—) · 3. sched reconcile+stall+PR watch (2) · 4. tail-work scripts (3) · 5. fleet parity validation ×3 (3,4) · 6. watcher rebase-merge + checks-presence fix (—, external) · 7. classifier dossier + runstate classify (1) · 8. batch-prep dossier + enqueue manifest (7) · 9. shadow-mode calibration (5,8) · 10. plan-artifact format + plan-issue consumption (7) · 11. slot-cycle dossier (10) · 12. batch modes: setup/review/ship/report (6) · 13. eviction/bisect machinery (2,12) · 14. first-batches pilot (9,11,12,13) · 15. widen + fleet-cycle deprecation (14).
+
+---
+
+## J. Amendment 2026-09-07 — CI amortization is independent of issue size
+
+**Status:** supersedes §E.2/§E.3 *as membership rules* (they survive as tier rules), §C.4, §F.2, and the batch arms of §D.1/§D.2. §A, §B, the scheduler, telemetry, attribution and the capability model are unchanged.
+
+### J.0 What forced this
+
+By 2026-09-06 the batch path worked end-to-end: five batches carried to `done`, the first batch PRs merged in two repos, the incremental member gate passing in 6.7 s on imboard-monorepo. The mechanical blockers that killed pilot attempts 1–4 are closed.
+
+It still did not pay, and the reason is not mechanical. Attempt 4's backlog sweep (#590, recorded in #598): **111 issues → 33 classified → 7 `slot` (6.3% of backlog)**, of which the supervisor pre-registered exactly **one** as truly implementable. Step 2's own exit criterion — a ~50% slot rate — measured **20.0%** on a hand-picked cohort and 6.3% on a real backlog.
+
+The programme has been reading that as a calibration problem: the floor is too wide, tune it (§E.2's own "if a typical backlog classifies < 40% slot, the floor is too wide"). That framing is wrong, and #598 finding 2 gets closer to it — *"the classifier finds 'small', not 'ready'"*. This amendment names the actual defect:
+
+> **`mode: 'slot' | 'full'` is a single field carrying two orthogonal decisions.**
+> How carefully an issue must be *implemented*, and whether it may *share a verification run*.
+
+Those have nothing to do with each other, and welding them means the amortization is structurally unavailable to exactly the issues where it is worth most. A migration and an auth change each pay their own full CI and ci-parity run — on imboard, ~75 min apiece — because they are risky to *write*. Nothing about writing them carefully requires testing them separately.
+
+The measured prize makes the cost concrete. Full-cycle baseline is **$16 and ~86 min per issue** (#598 §1). Five such issues today: five suites, five ci-parity runs, five PRs. There is no arrangement of §E.2 under which those five are batchable, because §E.2's job is to detect that they are hard — which they are, and which is irrelevant to whether they can share a test run.
+
+### J.1 Split `mode` into two fields
+
+| Field | Decided by | Values | Governs |
+|---|---|---|---|
+| `impl_tier` | §E.2 floor + §E.3, unchanged | `mechanical \| mid \| strong` | how the member is implemented and reviewed |
+| `share_ci` | §J.2 | `true \| false` | whether it joins an integration branch |
+
+§E.2 is retained **verbatim** and keeps its job: it is a good risk classifier. It stops being a membership veto. An issue touching auth becomes `impl_tier=strong, share_ci=true` — implemented by the strongest tier with the fullest review, and verified alongside its batch-mates.
+
+### J.2 What actually disqualifies an issue from sharing a run
+
+Of §E.2's nine floor rules, one is a genuine reason to keep a change on its own PR:
+
+| §E.2 rule | Real concern | Blocks `share_ci`? |
+|---|---|---|
+| risk-floor areas (auth, payments, migrations, infra…) | implementation risk | no → `impl_tier=strong` |
+| schema or data migrations | implementation risk | no → `impl_tier=strong` |
+| new package/workspace | implementation risk | no → `impl_tier=strong` |
+| deploy-pipeline changes | implementation risk | no → `impl_tier=strong` |
+| predicted files > 8 / diff > 400 | serial-worktree latency (§J.3) | **no — artifact of the old dispatch model** |
+| needs visual/browser review | per-change verification | no → batch-level browser pass (§J.4) |
+| classifier confidence < 0.6 | implementation risk | no → `impl_tier=strong` |
+| unresolved dependency outside set | ordering | no — batch DAG already handles it |
+| **hard rollback** (data mutation, published API contract) | **revert granularity in production** | **yes** |
+
+`share_ci=false` iff: hard-rollback, or a different `base_branch`, or an explicit `no-batch` label. Everything else batches.
+
+The `> 8 files` rule deserves naming plainly: it was never about risk. It exists because §C.4 dispatches members **serially into one shared worktree**, so a large member stalls every member behind it. It is a latency workaround that became a risk rule, and §J.3 removes its cause.
+
+### J.3 Dispatch: parallel worktrees on a shared integration branch
+
+**Replaces** §C.4's precondition and the §B walkthrough step 3 (*"slot-cycle agents one at a time, a fresh agent per issue, in the same worktree"*).
+
+- The scheduler creates the integration branch `batch/<id>-<date>` from the base, and nothing else claims it.
+- Each member gets **its own worktree**, branched from the integration branch, dispatched **in parallel** up to `max_slots` — the same dispatch full-cycle already uses.
+- A member lands its commit onto the integration branch when its own verification passes (§J.4), rebasing onto whatever landed before it. First-come-first-served; no member waits on another's implementation.
+- When all members have landed (or the batch's time window closes), the parent runs the expensive verification **once**.
+
+This reintroduces merge conflicts, which §E.4 chose the shared worktree specifically to eliminate. That trade is now clearly wrong: a rebase conflict costs mechanical minutes, a duplicated ci-parity run costs ~75. §E.4's file-disjointness packing preference is retained and becomes the mitigation rather than a nicety.
+
+### J.4 Division of verification — each level verifies what only it can see
+
+This is the load-bearing principle and the one most easily got wrong in both directions.
+
+**The member is thorough.** It writes tests, runs them, iterates, and builds genuine confidence in its own change. It is not a code generator handing off unverified work. What bounds it is **relevance, not volume**:
+
+- tests it authored for this change
+- existing tests covering the files and modules it changed
+- tests for direct consumers, one hop out
+- typecheck and lint over the changed surface
+
+It does **not** run: the repo-wide suite, ci-parity, full e2e matrices, cross-package integration, deploy. Not because thoroughness is unwanted, but because those are the shared expensive resources this whole design exists to pay for once.
+
+**The parent runs, once, over the integration branch:** full suite, ci-parity, one browser/visual pass covering every UI change in the batch, aggregate review, ship.
+
+The two reinforce each other rather than trading off. **Thorough members are what make a single expensive run viable.** If members hand over code they have not convinced themselves of, the one shared run fails constantly and the batch serializes on the parent untangling N entangled changes — spending more than the runs saved. Pushing verification down to where it is cheap *is* the efficiency; the expensive run is the last line of defence, not the first.
+
+**Per-issue blind conformance stays with the member**, at the member's `impl_tier`. It costs no CI and no ci-parity — it reads a diff, it does not run a suite — so it is not the duplication this amendment removes, and it is the one judgment that needs the issue's own context. This preserves executive-summary change 3 verbatim: *share the lifecycle, never the per-issue verification*. It is also the signal that tells the parent **fix this** (tests red, ACs met) from **evict this** (ACs not met — the member misunderstood the issue), which §J.5 depends on.
+
+### J.5 `test.focused` must actually be focused
+
+The capability contract changes meaning under §J.4 and this is a live defect, not a future one.
+
+`test.focused` was introduced as an *interference check* run after each member in a shared worktree, so declaring it as the full suite was defensible. This repo's `.dossier/automation/manifest.yaml` does exactly that — `test.focused: make test`, deliberately the whole suite.
+
+Under this amendment that is backwards: every member would pay the full suite, N times, which is precisely the cost being eliminated. **`test.focused` must map changed paths to the tests that cover them.** It is repo-owned, which is correct — only the repo knows its own test topology — and it is the seam the entire economics runs through. imboard-monorepo's declaration matters most, since that is where the ~75 min lives.
+
+Both repos' declarations are now work items, not settled configuration.
+
+### J.6 The parent fixes first
+
+**Replaces** §F.2's ladder (*attribute → bisect → one bounded fix by a fresh agent → revert → evict → requeue as full-cycle*).
+
+The parent holds the integration branch, the failure output, and every member's handover. It repairs breakage directly, the way a human integrator does. Attribution (`attribution.ts`) and deterministic bisect (`bisect.ts`) **survive unchanged and demote to the escalation path**: consulted when the parent decides something must be *discarded* rather than repaired, which is where knowing whose commit to revert actually matters.
+
+- Parent's fix budget is bounded per member — reuse §F.2's existing two-attempt number, change the actor.
+- Beyond budget, or when conformance says the member did not meet its ACs: evict via the existing revert-range machinery, requeue with context. §F.8 (partial batch success is the default outcome) is unchanged.
+- The parent's own repair commits are batch-level, attributable to no member, and visible in the aggregate review — `unattributable` in bisect terms, which that module already handles.
+
+§F.1, §F.3–§F.7, §F.9–§F.11 are unchanged.
+
+### J.7 The handover artifact
+
+New, and the design turns on it: the parent's ability to fix depends entirely on what the member tells it. A member that lands a commit and says nothing forces the parent to debug blind.
+
+Posted at the member's issue boundary, on the member's issue, as a `handover:v1` block (same shape and untrusted-input discipline as `plan:v1`):
+
+| Field | Why the parent needs it |
+|---|---|
+| files changed, and why | orients the parent in a diff it did not write |
+| tests written, tests run, results | tells the parent what is already covered |
+| **what was deliberately not verified** | names the blast radius the parent must cover |
+| assumptions and points of uncertainty | where a failure is most likely to be genuine |
+| conformance verdict | fix-vs-evict, per §J.4 |
+
+The third and fourth rows are the ones that make the difference between a parent that repairs in minutes and one that re-derives the member's reasoning from scratch.
+
+### J.8 State machine deltas
+
+**§D.1 Issue** — `classified{full|slot}` becomes `classified{impl_tier, share_ci}`. The `slot` arm's `batched(b) → waiting → in-work` no longer implies waiting for a worktree turn; members are dispatched in parallel and `waiting` covers only batch formation.
+
+**§D.2 Batch** — `executing(member i/N) ⟲` becomes `executing(k of N in flight)`, concurrent, terminating when all members have landed or been evicted. `validating → attributing → fixing(1 bounded attempt)` becomes `validating → fixing(parent, bounded) → validating`, with `attributing` reached only on the eviction path.
+
+**§D.3 Worker slot** — unchanged. A batch now consumes one slot per in-flight member rather than one per batch; `max_slots` continues to bound live agent processes, which is what it was always for.
+
+### J.9 What this obsoletes, honestly
+
+**Survives and is needed:** the scheduler core, worktree-pool, capability manifests and the four-way outcome, `attribution.ts`, `bisect.ts`, dissolve/eviction, `ranges` and per-issue commit attribution, rebase-merge-never-squash, anchor issues, the runstate milestone rails, batch-mode ship/review/report, every defect fixed in #599–#639.
+
+**Replaced:** the serial shared-worktree member loop in `batch-dispatch.ts`, and the member-advance state machine built around "one member at a time." Real work, merged 2026-09-05/06, and the design it implemented is the one being changed. The bugs found while building it (#605, #609, #610, #622, #625, #629, #630, #632) were genuine and their fixes are mostly in shared code that survives.
+
+**Demoted:** §E.2 as a membership gate — retained in full as a tier rule.
+
+### J.10 Risks this introduces
+
+- **An LLM returns to the integration layer.** §Q2 counts "fleet supervision tokens → becomes code ($0)" as a win, and a parent that *fixes* must be an agent, not a script. The trade is judged worth it — one integration agent per batch is far cheaper than the per-issue ship/review ceremony it replaces, and repairing a real failure is a better use of a model than polling — but it must be bounded (§J.6) or a parent can spend hours repairing a member that should have been evicted in minutes.
+- **Merge conflicts return** (§J.3). Mitigated by file-disjoint packing, not eliminated.
+- **A parent that fixes can mask a bad implementation** — making tests green over a change that does not do what the issue asked. This is why per-member conformance is non-negotiable (§J.4) and why the parent's repair commits must be visible to the aggregate review.
+- **Aggregate review dilution grows** with batch size now that members may be large (§Q19). Scope the aggregate pass to cross-member interaction; per-issue ACs are already verified per-member.
+- **Deploy coupling grows** with batch size (§Q19). Per-issue commits under rebase-merge keep selective revert available; `share_ci=false` for hard-rollback changes (§J.2) is the deliberate escape hatch.
+
+### J.11 What must be measured before widening
+
+Step 0's baseline is still outstanding and this amendment makes it decisive, because the whole case rests on an arithmetic nobody has yet measured end-to-end:
+
+1. **ci-parity and full-suite wall-clock per repo.** The ~75 min figure is the owner's, unverified here. If imboard's per-suite test caching (imboard#4064, #4048) has already cut it materially, the prize shrinks and the amendment should be re-argued, not assumed.
+2. **Effective slot rate under `share_ci`.** Expected to approach 100% of ready issues, against 6.3% today. If it does not, the split did not do what §J.0 claims.
+3. **Parent fix-budget consumption.** How often the parent repairs vs. evicts. High eviction means members are not thorough enough (§J.4) or `test.focused` is not actually focused (§J.5).
+4. **Merge-conflict rate on the integration branch**, against the file-disjointness the packer predicted.
+
+§H's validation plan and #529's GO/NO-GO apply to this model unchanged.
 
 ---
 
