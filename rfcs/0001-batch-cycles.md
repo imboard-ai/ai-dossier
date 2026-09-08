@@ -15,7 +15,7 @@
 - **2026-09-03** — pilot attempts 3 and 4 [`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md) Parts III-IV: 0 of 7 dispatched batches end-to-end across four runs; the single blocking defect isolated (the incremental member gate is a constant function — imboard-monorepo#3996, closed; sched-side [#594](https://github.com/imboard-ai/ai-dossier/issues/594), open). Attempt 4's full-cycle fallback shipped 4 of the 7 slot issues within hours, so the cohort was implementable — the batch path was not.
 - **2026-09-03** — programme **HALTED** at 10:42Z (owner token budget, not a fault). Current state, open findings and the resume recipe: [`docs/reports/batch-cycles-checkpoint.md`](../docs/reports/batch-cycles-checkpoint.md).
 - **2026-09-06** — programme resumed; batch path reached `done` end-to-end for the first time (five batches, first batch PRs merged in two repos, member gate 6.7 s on imboard-monorepo). Fourteen defects closed (#599-#639).
-- **2026-09-07** — **§J amendment**: the end-to-end blocker was never mechanical. `mode` conflated implementation risk with CI-sharing eligibility, so §E.2 admitted 6.3% of a real backlog (#590/#598) and the amortization was structurally unavailable to the issues worth most. §J splits `mode` into `impl_tier` and `share_ci`, replaces the serial shared worktree with parallel worktrees on an integration branch, and makes the parent orchestrator fix failures rather than evict them. Supersedes §C.4, §F.2, the batch arms of §D.1/§D.2, and §E.2/§E.3 *as membership rules*. Measurement (§J.12, same day): a green ci-parity run reaching the integration stage costs a median **52.5 min** (p90 89) and its 107-112 integration suites run **regardless of diff size** — a fixed cost, so batching saves `(N-1) ×` an hour rather than shared overhead only. §J.11 item 1 is closed; the premise held.
+- **2026-09-07** — **§J amendment**: the end-to-end blocker was never mechanical. `mode` conflated implementation risk with CI-sharing eligibility, so §E.2 admitted 6.3% of a real backlog (#590/#598) and the amortization was structurally unavailable to the issues worth most. §J splits `mode` into `impl_tier` and `share_ci`, replaces the serial shared worktree with parallel worktrees on an integration branch, and makes the parent orchestrator fix failures rather than evict them. Supersedes §C.4, §F.2, the batch arms of §D.1/§D.2, and §E.2/§E.3 *as membership rules*. Measurement (§J.12, same day): a green ci-parity run reaching the integration stage costs a median **52.5 min** (p90 89) and its 107-112 integration suites run **regardless of diff size** — a fixed cost, so batching saves `(N-1) ×` an hour rather than shared overhead only. §J.11 item 1 is closed; the premise held. **2026-09-08 — M1 executed** ([`docs/reports/rfc-0001-m1-execution.md`](../docs/reports/rfc-0001-m1-execution.md), shipped as imboard-monorepo#4113): amortization confirmed at **1.9x-3.3x** (one 81m26s run replacing 3 x 52.5-89m), parallel members did NOT conflict, big issues batched fine. Corrections in §J.15: the prize is wall-clock not tokens (~20%, not 2-4x); the parent needs §F.11's four-way verdict, not repair-or-evict; §F.2's bounded escalation stays.
 
 **Rollout position (§G):** Step 1's machinery shipped and its exit gate passed. Step 0's telemetry shipped (#458/#524/#531), but the baseline measurement itself is still outstanding. Step 2's classifier and batch-prep shipped, but its exit criterion is not yet met — 20.0% slot rate measured against a ~50% target; a misclassification denominator now exists (run 2 contradicted 1 of 4 hand-applied `cycle:slot` labels) ([`docs/reports/batch-pilot-2-execution.md`](../docs/reports/batch-pilot-2-execution.md)). Step 3 (first real batches) has dispatched batches across four attempts but never carried one end-to-end — its GO/NO-GO is [#529](https://github.com/imboard-ai/ai-dossier/issues/529), which stays unarmed until the first batch PR merges. Step 4 (widen) is not started. **As of the §J amendment (2026-09-07) Step 2's exit criterion is retired rather than met:** the slot rate it measured is an artifact of using §E.2 as a membership gate, which §J.2 replaces — the criterion to measure now is §J.11's effective `share_ci` rate. Steps 3 and 4 re-enter against the §J dispatch model; Step 0's baseline measurement remains outstanding and §J.11 makes it decisive.
 
@@ -478,6 +478,8 @@ Under this amendment that is backwards: every member would pay the full suite, N
 
 ### J.6 The parent fixes first
 
+> **Amended by §J.15.2 and §J.15.3 after M1.** The parent's verdict is FOUR-way, not repair-or-evict — infra failures are `automation-broken` and must block, never evict. And §F.2's bounded member-tier escalation is RETAINED, not replaced: the parent owns mechanical and cross-member failures, a member-tier agent owns semantic ones. The split is authority, not difficulty.
+
 **Replaces** §F.2's ladder (*attribute → bisect → one bounded fix by a fresh agent → revert → evict → requeue as full-cycle*).
 
 The parent holds the integration branch, the failure output, and every member's handover. It repairs breakage directly, the way a human integrator does. Attribution (`attribution.ts`) and deterministic bisect (`bisect.ts`) **survive unchanged and demote to the escalation path**: consulted when the parent decides something must be *discarded* rather than repaired, which is where knowing whose commit to revert actually matters.
@@ -553,7 +555,7 @@ Step 0's baseline is still outstanding and this amendment makes it decisive, bec
 | Green, skipped it (no app-code change) | 45 | ~8 min | — | — |
 | Failed early at a gate | 39 | 6.0 min | 76.4 min | 102.5 min |
 
-**The expensive stage is a fixed cost, not a function of the diff.** Runs that reach it name **107-112 integration suites regardless of what changed** — two runs over the *same 13-file diff* produced 0 suites and 107 suites respectively, the first having failed at the hygiene gate before reaching them. Affected-package scoping (`#3683`) governs the *package* gates; it does not scope the integration stage.
+**The expensive stage is dominated by a large fixed floor** (refined to "sublinear, not flat" by §J.15.4). Runs that reach it name **107-112 integration suites regardless of what changed** — two runs over the *same 13-file diff* produced 0 suites and 107 suites respectively, the first having failed at the hygiene gate before reaching them. Affected-package scoping (`#3683`) governs the *package* gates; it does not scope the integration stage.
 
 That is the strongest form of the §J argument. If the ~1 hour is paid per PR regardless of change size, then N issues shipped separately pay it N times:
 
@@ -647,6 +649,57 @@ test.focused:
 ```
 
 A repo keeps the `command:` form as the escape hatch when its topology genuinely defies detection — the same relationship `warm_commands` has to `detectProjectEnv`. What changes is the default: scoping is something the CLI does, and the repo declares only what is expensive locally.
+
+---
+
+### J.15 Amendment 2026-09-08 — corrections from the M1 execution
+
+§J was written from reasoning. **M1** executed it by hand on imboard-monorepo (#3415, #4062, #3893; shipped as imboard-monorepo#4113) with the supervisor standing in for the unbuilt parent orchestrator. Full record: [`docs/reports/rfc-0001-m1-execution.md`](../docs/reports/rfc-0001-m1-execution.md). Total cost **$63.91**.
+
+**What held:** members skip the expensive suite when told (0/3 ran ci-parity); big issues batch fine (a 605-line and a 46-file member, both past §E.2's veto); parallel members on one integration branch **did not conflict** (3/3 clean merges, 3,761 lines — §E.4 chose the serial worktree specifically to avoid a cost that did not materialise); and the amortization is real — **one 81m26s run over 117 suites replacing 3 × 52.5-89 min, a 1.9x-3.3x saving.**
+
+Four corrections follow.
+
+#### J.15.1 The prize is wall-clock, not tokens
+
+The executive summary's *"~2-4x token reduction"* does not survive. Measured against scheduler telemetry (`~/.dossier/sched/<project>/runs/issue-*.log`), real imboard full-cycle runs cost a median **~$26**; three would be ~$78 against M1's $62.14 — **~20%**, not 2-4x.
+
+§Q2's table assumed non-implementation overhead dominates. It does not: implementation is the bulk and is irreducible, because **a batch member does exactly the same implementation work a full-cycle does.** Batching removes review fan-out N→1, ship/report ceremony N→1, runbook loading, and the ci-parity hour N→1. Only the last is large. Restate the prize accordingly.
+
+*(Methodology, twice load-bearing: the naive median over all 24 telemetry runs is **$0.14**, because 18 are fast failures. Split every cost/duration statistic by outcome before quoting it — the same trap §J.12 records for ci-parity.)*
+
+#### J.15.2 §J.6 needs the four-way verdict — repair-or-evict is not enough
+
+**Amends §J.6.** M1's largest failure was 11 red integration suites, all `MongoOperationTimeoutError`, traced to a *neighbouring branch holding one of imboard's four shared pool databases*. No assertion failed. `invite.test.ts`'s 57 failures were 100% infra with zero assertions.
+
+A parent holding only *repair | evict* either burns hours "repairing" a flaky database or reverts three members' work over it. §F.11 already solved this one level down — `automation-broken` must never be read as `task-failed`, and #583/#594 exist because a gate that cannot stand behind its verdict must **block**. §J.6 lifted the fix-vs-evict decision to the aggregate suite without lifting that discipline with it.
+
+The parent's verdict is four-way: `ok` | `task-failed` (repair, then evict on budget exhaustion) | `automation-broken` (**block, change nothing, retry**) | `capability-unavailable`. Infra-category failures — connection timeouts, pool-lease failures, runner crashes — are `automation-broken`. On shared infrastructure this is **routine, not an edge case.**
+
+#### J.15.3 Keep §F.2's bounded escalation — it is a different actor, not a fallback
+
+**Amends §J.6.** §J.6 proposed the parent repairing in place of §F.2's bounded mid-tier fix attempt. M1 shows both are needed, divided by **authority, not difficulty**:
+
+| actor | question it answers |
+|---|---|
+| parent | mechanical, cross-member, integration-level |
+| member-tier | semantic, single-issue, requires the issue's intent |
+
+The parent repaired a Prettier failure and a mongoose `create()` needing `ordered: true` trivially — the latter from a stack trace alone. It then **correctly refused** `Expected 8, Received 9` on #4062's own feature, because answering it means deciding what that feature should do. A parent that repairs its way to green through a semantic failure does exactly what §J.4 warns of.
+
+The escalation resolved it for **$1.77 in 8 minutes**, and outperformed the supervisor's judgement: it instrumented the assertion to dump each row's dashboard, found the ninth row was a legitimate second dashboard, and **explicitly refused the obvious 8→9 fix** because nine would stop detecting a missing quarter *and* let two rows share the latest anchor date, making the following assertion depend on a Mongo sort tie-break that passes today only by coincidence. The lazy fix would have planted a latent flake.
+
+#### J.15.4 §J.12's "fixed cost" is slightly too strong
+
+**Amends §J.12.** The batch run named **117** integration suites against 107-112 for single-issue diffs, and took 81m26s against a 52.5m single-issue median. The stage is **sublinear, dominated by a large fixed floor** — not flat. The amortization survives comfortably; the wording should not overclaim.
+
+Two measurement notes for anyone repeating this: single-issue runs really do pay the floor (verified: two historical runs executed 107/107 and 106/106 suites at Progress 4/4), and **group progress must never be extrapolated linearly** — M1 saw 2/4 at 78m, 3/4 at 79m, 4/4 at 81m. One group took ~73 minutes, another one.
+
+#### J.15.5 Two additions
+
+**Member relevance scoping was too narrow (§J.4).** #4062 changed `composeBoardDeps.ts` and never ran `demo-cedar-hollow-year.test.ts` — the pre-existing integration test that exercises it, squarely "direct consumers, one hop out". The omission cost an 81-minute gate run to discover. The member contract must require naming **the tests run and the consumers considered**, so a gap is visible in the handover rather than found by the parent.
+
+**Batch concurrency is bounded by test infrastructure, not agent slots (§J.13).** imboard has exactly four pool databases. Two concurrent batches — or one batch plus any other test workload on the machine — exhaust them, and the symptom is indistinguishable from a code failure. §J.13's "available parallelism" bound is about the test pool, not `max_slots`.
 
 ---
 
