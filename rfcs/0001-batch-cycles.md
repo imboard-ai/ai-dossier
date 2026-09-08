@@ -703,6 +703,43 @@ Two measurement notes for anyone repeating this: single-issue runs really do pay
 
 ---
 
+### J.16 Signal discipline — normative for the parent orchestrator (#648)
+
+**The parent's entire job is reading signals about work it did not do.** Is the suite still running? Did it finish? Did it pass? Whose change broke it? Is this infrastructure or code? Every one of those is an inference from an artifact, and each has an expensive wrong answer: a false DONE ships against a partial result, a false RUNNING hangs the batch, a false `task-failed` reverts good work.
+
+This is not defensive polish. During M1 the supervisor — standing in for the parent, knowing the design, having written the warnings — got this wrong **seven times in one session**, in four distinct mechanisms and three separate statistics. The failure rate of an unaided actor at this task is empirically high, so the rules below are **normative for #648**, not advice.
+
+Every instance had one shape: **a signal read as meaning something it does not mean.**
+
+| # | What was read | What it actually meant |
+|---|---|---|
+| 1 | `pgrep -f "ci-parity.sh"` finding nothing ⇒ process ended | the pattern matched the **observer's own command line**, so it could never go false |
+| 2 | log quiet for 150s ⇒ finished | a jest suite running `--silent` at 25% |
+| 3 | no `[FAIL] gate` in the log ⇒ no failure | the runner emits `✗ ci-parity: gate '<x>' failed` |
+| 4 | `gh pr checks` non-zero exit ⇒ error | it means "something is pending or failing" — a status, not an error |
+| 5 | ci-parity median 7.4 min ⇒ the gate is cheap | early failures counted as fast successes; real cost 52.5 min (§J.12) |
+| 6 | full-cycle median $0.14 ⇒ runs are cheap | 18 of 24 were fast failures; real median ~$26 (§J.15.1) |
+| 7 | local suite green ⇒ the fix ships | verified against an **uncommitted working tree**; CI ran code without the fix |
+
+#### The rules
+
+1. **Liveness is proven, never inferred.** Use process identity (a captured pid, `/proc/<pid>`), never a pattern match — any pattern specific enough to name the target also matches the observer's own command line. This is the trap `docs/agent-traps.md` already records for `pkill -f`, and it recurs in every `pgrep`-style guard.
+2. **Completion requires an explicit terminal marker emitted by the runner.** Output silence is not completion. If the runner emits no terminal marker, that is a defect in the runner to fix, not a gap to paper over with a timeout.
+3. **A failure filter must enumerate every terminal spelling the runner uses.** A filter matching only the happy path stays silent through a crash. When unsure, widen the alternation — noise is cheaper than a missed failure.
+4. **A non-zero exit code is a status, not an error.** Read the tool's contract before treating it as one.
+5. **Absence of a result is not a result.** `Tests: 0 total` is a suite that never ran, not a pass. An empty gate capture is not a verdict — this is #594's `hasEarnedFailureEvidence` rule, and it generalizes: a signal that cannot stand behind itself is `automation-broken` (§J.15.2), never `task-failed`.
+6. **Split every cost, duration and outcome statistic by outcome before quoting it.** A median over mixed populations inverted the conclusion twice in one day, in opposite directions, and both times the naive number argued against building the thing that turned out to be worth building.
+7. **Verify against what will ship, not against your working tree.** Commit and push, then verify the pushed state — or verify the committed tree explicitly. Diagnostic when local-green meets CI-red: **a stack trace naming pre-patch line numbers means the running code does not contain your patch.**
+8. **Never extrapolate progress linearly.** M1 saw 2/4 at 78 min, 3/4 at 79 min, 4/4 at 81 min — one group took ~73 minutes, another one minute.
+
+#### Why this is the parent's problem specifically
+
+Members are largely insulated from this: a member runs its own tests in its own worktree and reads its own output. The parent is the only actor whose every input is second-hand. It is also the only actor that can destroy work — reverting a member's commits — which makes a misread signal there uniquely costly.
+
+The remote batch-PR CI is **not redundant** with the parent's local run either. M1's PR CI caught a suite (`Cedar Hollow knowledge graph`, shard 2/3) that the parent's own 81-minute local ci-parity did not run at all, on the same root-cause defect. The parent's job is not finished when its local gate is green.
+
+---
+
 ## Recommendation
 
 **Implement it — in the order above, not the brief's order.** The brief's largest single win is disguised as a supporting requirement: the deterministic scheduler. It fixes Fleet's real, named reliability failure with no batching risk, deletes the tail-run ceremony, removes LLM supervision tokens entirely, and is the host every later piece needs. Batching is genuinely valuable (the `N×lifecycle → 1×lifecycle` arithmetic is sound, and in-batch accumulation even *eliminates* the cross-PR merge-conflict class fleet serializes around) — but its ROI depends on measured classification accuracy and eviction rates, which is why it follows the shadow phase rather than leading.
