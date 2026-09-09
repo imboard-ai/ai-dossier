@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "ship-issue",
   "title": "Ship Issue — Commit, PR, Merge, Deploy, Teardown",
-  "version": "1.13.0",
+  "version": "1.13.1",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch",
@@ -107,13 +107,13 @@
   "last_updated": "2026-09-09",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "1beec75105c349ecc00a851f5ad5ccfe9d936597513f4732e3cd899732e70157"
+    "hash": "697e68efd7d4bb47274b754ec850dc27ecd401da5f914de5fac5f67d882201bf"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "s3y9KA1JAud8S3XW7ustCG8X+vMi2eZ1FEaBux/CXIG2+Wahvktx9sVm4pg2DWPKDXhL+BjKme0+a9Wnhn6kCQ==",
+    "signature": "dm39ZIH+Phlh4pt58qQCfmgxnznsdNZv04TSVRdELB+HAUAQpR4rsjsxHry1QYRe1AkqL6Zr6dUeRj0HVHjXDQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T06:39:50.928Z",
+    "signed_at": "2026-09-09T06:46:58.639Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -433,8 +433,8 @@ The gate is defined once here and runs before **every** merge authorization — 
    ```bash
    VERDICT_HEAD=$(gh issue view <issue_number> --json comments \
      --jq '[.comments[]
-            | select((.authorAssociation == null)
-                     or (["OWNER","MEMBER","COLLABORATOR","BOT"] | index(.authorAssociation)))
+            | select((.authorAssociation // "OWNER") as $a
+                     | ["OWNER","MEMBER","COLLABORATOR","BOT"] | index($a))
             | .body
             | select(startswith("<!-- runstate:v1 -->"))
             | select(test("(?m)^phase=review status=done\\b"))] | last // empty' \
