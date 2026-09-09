@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "full-cycle-issue",
   "title": "Full Cycle Issue Workflow",
-  "version": "3.15.0",
+  "version": "3.15.1",
   "protocol_version": "1.0",
   "status": "Draft",
   "last_updated": "2026-09-09",
@@ -74,13 +74,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "fdb977d45a4bab04ce750432930d083ed9f75c7e2487d189f00a758d3d09c587"
+    "hash": "bb9c77f1840d51cd4828db2d24e98eb5343cc2995f386caf9c266b48d226a74c"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "UDers/vLuAoLZTHYHA5iiejfKtaaVl7s/fcc/bp8Wfu/kkryQst2fWCxvcd1CRfxxBLVMgRloBCd3ERtNuLHCg==",
+    "signature": "UJvNe/bIccdlHWwqH69iSmla+RLTlgx5xLh+ajWBC1lUPA+P7HFFDtbUXglgZnSlQpRLyI6P4Tjv9jzAP8rABQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T06:47:15.854Z",
+    "signed_at": "2026-09-09T06:54:21.986Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -103,9 +103,8 @@ Stop and hand off when: the issue is too vague to implement · a business/produc
 **How to hand off** (same procedure every time, whichever phase triggers it):
 
 **Step 0 — Classify the question (plan/implement ambiguity only).** Applies only when the trigger is a genuinely ambiguous business/product/design decision surfaced during Phase 2 (Plan) or Phase 3 (Implement) — NOT a reachability escalation (plan-issue's rule stays a hand-off), a Phase 4 review escalation, a Phase 5 CI/merge blocker, or an issue too vague to implement; those skip straight to Step 1.
-- **Observable** — a fact some run could produce: runtime behaviour, output, timing, layout, whether a path is reachable, whether two approaches actually differ. Answer it with a throwaway sketch: work in a scratch dir OUTSIDE the worktree and the repo (`TMPDIR/probe-<issue>-<slug>`), one attempt, ≤ 15 minutes wall clock, no network writes, no external side effects (no PRs, comments, deploys, DB writes) — never committed, never pushed, removed when done. Record the result in the planning document's Open Questions as `Q: <question> → observed: <result> (command: <command run>)`, then continue the run — this resolved the ambiguity; it is not a hand-off.
+- **Observable** — a fact some run could produce: runtime behaviour, output, timing, layout, whether a code path is reachable for a given input (a control-flow fact verifiable by a sketch — distinct from plan-issue's production-occurrence reachability check, which is carved out above and always hands off), whether two approaches actually differ. Answer it with a throwaway sketch: work in a scratch dir OUTSIDE the worktree and the repo (`$TMPDIR/probe-<issue>-<slug>`), one attempt, ≤ 15 minutes wall clock, no network writes, no external side effects (no PRs, comments, deploys, DB writes) — never committed, never pushed, removed when done. Record the result in the planning document's Open Questions as `Q: <question> → observed: <result> (command: <command run>)`, then continue the run — this resolved the ambiguity; it is not a hand-off. If the sketch is inconclusive after its one bounded attempt: hand off — go to Step 1, and paste the sketch's command and output into the Step 3 comment.
 - **Preference** — product direction, scope, taste, a business rule, or anything irreversible. Hand off: go to Step 1.
-- **Sketch inconclusive** after its one bounded attempt. Hand off: go to Step 1, and paste the sketch's command and output into the Step 3 comment.
 
 1. Push whatever work exists so nothing is lost; note the branch name in the comment (Step 2).
 2. `gh label create decision-pending --color "5319E7" --description "Blocked on a human decision" --force` then `gh issue edit <number> --add-label "decision-pending" --remove-label "in-progress"`.
