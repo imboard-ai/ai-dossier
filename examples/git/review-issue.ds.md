@@ -2,11 +2,11 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Review Issue — Parallel Code Review",
-  "version": "1.12.3",
+  "version": "1.13.0",
   "protocol_version": "1.0",
   "status": "Stable",
   "last_updated": "2026-09-09",
-  "objective": "Run a tiered set of report-only review agents (DRY, Security, Supportability, Maintainability, Documentation, Convention/Contract, Conformance) on the branch diff, then dedupe their findings and apply the fixes serially; in aggregate mode (batch_id set): review the combined batch diff once on the batch anchor, with per-member conformance already produced per-issue by slot-cycles",
+  "objective": "Run a tiered set of report-only review agents (DRY, Security, Supportability, Maintainability, Documentation, Convention/Contract, Conformance) on the branch diff, then run a validity gate before dedupe and apply the surviving fixes serially; in aggregate mode (batch_id set): review the combined batch diff once on the batch anchor, with per-member conformance already produced per-issue by slot-cycles",
   "category": [
     "development"
   ],
@@ -72,13 +72,13 @@
   "name": "review-issue",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "3cc870f85e4e6d8d28687cd51d324add5818f7c447be7dc48b02d5f047978769"
+    "hash": "9301eb6a87e53fc18ac0a41c0f99a9b6b03f1ba632aa9af0d9eab8cdc50dc53b"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "DA8tWBHluPUxPuCAdMgDvxLVHCe+fMiOWKqVCjOz2Stl0Oz8Wu8qFD4gJEaHWQ2CMNkyaa/YGj5g3XFQRaLoCA==",
+    "signature": "5pgQ2T//wDacV9mZ+AhDdVzuK2y5lD76FeDRpmJ7w75weBFCh3AHveJzPgnWm4jUxVn0/ts5hQ/lkUdw4FFlDw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T06:34:15.869Z",
+    "signed_at": "2026-09-09T07:11:47.524Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -90,7 +90,7 @@
 
 ## Objective
 
-Run a tier-appropriate set of focused review agents in parallel on the branch diff. Each agent reviews from a different quality dimension and **reports** findings — it does not edit. After all agents complete, this phase dedupes their findings and applies the fixes itself, serially, then re-runs tests and lint once.
+Run a tier-appropriate set of focused review agents in parallel on the branch diff. Each agent reviews from a different quality dimension and **reports** findings — it does not edit. After all agents complete, this phase runs a validity gate, dedupes what survives, and applies the fixes itself, serially, then re-runs tests and lint once.
 
 ## Prerequisites
 
@@ -156,7 +156,7 @@ Launch the tier's agents in parallel, unnamed, in a single batch — the per-iss
 
 ### Aggregate Step 4: Dedupe, Apply Serially, ONE Clean Commit
 
-Per-issue Step 4 items 1–3 and 5–6 apply verbatim (item 4 is vacuous in this mode — Agent 7 never runs, and `member_verdicts` pass through untouched): collect, dedupe, apply all "Fix now" findings serially as the single writer, re-run the batch's test suite ONCE after all fixes (the scheduler's batch-validate already ran it green before review — a review fix invalidates that, so this re-run is required; a fix that breaks the suite is reverted and reclassified as Escalate), then the lint auto-fixer once. Then the batch-specific commit discipline:
+Per-issue Step 4 items 1, 1b, 2–3 and 5–6 apply verbatim (item 4 is vacuous in this mode — Agent 7 never runs, and `member_verdicts` pass through untouched): collect, run the validity gate, dedupe what survives, apply all "Fix now" findings serially as the single writer, re-run the batch's test suite ONCE after all fixes (the scheduler's batch-validate already ran it green before review — a review fix invalidates that, so this re-run is required; a fix that breaks the suite is reverted and reclassified as Escalate), then the lint auto-fixer once. Then the batch-specific commit discipline:
 
 - **ONE batch-level fix commit, clean message, NO `[skip ci]` marker and no wip prefix**: `chore: address aggregate review findings (batch <batch_id>)`. Rebase-merge (ship-issue batch mode) replays branch commits to the base branch VERBATIM — whatever this commit carries lands on main. A skip marker landing as the base branch's push head would silence every push-triggered workflow (publishes, deploys) — the exact failure that stalled two npm releases.
 - **Never amend, squash, or reorder member boundary commits** — eviction, bisect, and traceability key on them; batch-level fixes land strictly on top.
@@ -174,6 +174,7 @@ ai-dossier runstate post --issue <anchor_number> --phase batch-review --status d
   --kv batch=<batch_id> \
   --kv head=<pushed sha> \
   --kv fixed=<n> \
+  --kv dismissed=<n> \
   --kv escalated=<n> \
   --kv tier=micro|docs|small|full \
   --kv max_risk=<low|med|high> \
@@ -182,10 +183,11 @@ ai-dossier runstate post --issue <anchor_number> --phase batch-review --status d
   --kv members=<comma list> \
   --kv ac_met=<n> \
   --kv ac_total=<n> \
-  --kv review_redone=<true|false>
+  --kv review_redone=<true|false> \
+  --kv validity_recalibrated=<true|false>
 ```
 
-The CLI stamps `at=` and computes `next=batch-ship` — do not pass either. `review_redone=` only when Aggregate Step 2d triggered a redo. `max_risk=` records the max member risk that fed the tier (auditability: "why did this batch run full?" must be answerable from the trail). `agents_done`/`agents_pending` list only the tier's dimension agents (1–6); conformance never appears. **There is no `partial` for `batch-review`** (the CLI rejects it) — a tier agent that cannot finish is handled per the stuck-agents Troubleshooting row (redispatch unnamed; or substitute yourself and record `review_substituted=dispatch-nonresponsive` on this milestone), and only if the review cannot be completed at all, post `--status blocked --kv reason=agents-incomplete` instead. Post `--status blocked --kv reason=<slug>` for Aggregate Step 1 aborts as well.
+The CLI stamps `at=` and computes `next=batch-ship` — do not pass either. `review_redone=` only when Aggregate Step 2d triggered a redo. `validity_recalibrated=` only when the validity gate's calibration rule fired (Step 1b). `dismissed=` is the validity gate's dismissal count over the combined diff (Step 1b, inherited via "items 1, 1b apply verbatim"). `max_risk=` records the max member risk that fed the tier (auditability: "why did this batch run full?" must be answerable from the trail). `agents_done`/`agents_pending` list only the tier's dimension agents (1–6); conformance never appears. **There is no `partial` for `batch-review`** (the CLI rejects it) — a tier agent that cannot finish is handled per the stuck-agents Troubleshooting row (redispatch unnamed; or substitute yourself and record `review_substituted=dispatch-nonresponsive` on this milestone), and only if the review cannot be completed at all, post `--status blocked --kv reason=agents-incomplete` instead. Post `--status blocked --kv reason=<slug>` for Aggregate Step 1 aborts as well.
 
 ## Actions to Perform
 
@@ -369,7 +371,22 @@ Run this agent on the strongest available model — it is the run's trust anchor
 The agents reported; you apply. **You are the only writer in this worktree** — parallel writers produce duplicate helpers that ship uncalled (ai-dossier#447).
 
 1. **Collect** every finding from the tier's agents into one list.
-2. **Dedupe** before touching anything:
+1b. **Validity gate** — before dedupe, classify every collected finding from Agents 1–6 (Agent 7's per-AC verdicts are not collected here; item 4 below routes them directly) as `valid` or `dismissed`. A `dismissed` finding requires exactly one reason from this fixed list, cited alongside it:
+    - `hypothetical-not-reachable` — no call path shown that reaches the flagged condition
+    - `taste` — an equivalent alternative with no defect (style, layout, "I would have done it differently")
+    - `premature-abstraction` — the proposed fix generalizes beyond what the current diff needs
+    - `out-of-diff` — pre-existing code the diff did not touch, unless the issue itself asked for it
+    - `duplicate-of-<n>` — the same root cause as another already-collected finding (cite it)
+    - `contradicts-project-rule` — the fix would violate a documented project rule (name the rule, e.g. keep-as-inert-fallback, minimal-edit)
+
+    Anything not dismissed is `valid` and proceeds to item 2 (Dedupe) and item 3 (Apply) unchanged — this gate only removes findings; it never edits, escalates, or re-classifies one.
+
+    **Uncertainty raises, never lowers** (same posture as Step 2b/2c): a finding you cannot classify with a cited reason stays `valid`. **Security findings (Agent 2) and Contract violations (Agent 6) are never dismissed as `taste` or `hypothetical-not-reachable`** — the other four reasons (`premature-abstraction`, `out-of-diff`, `duplicate-of-<n>`, `contradicts-project-rule`) still apply to them where genuinely true.
+
+    **Calibration**: if more than **8** valid non-security findings survive on a `small` tier, or more than **15** on `full`, re-read your dismissals once, looking specifically for under-filtering (a dismissal that does not actually meet its cited reason) — record `validity_recalibrated=true` on the milestone if this fires. Never dismiss a finding just to get under the threshold; the recalibration pass may reverse a wrong dismissal, it never invents a new one to hit the number.
+
+    This gate runs inline, in this phase's own turn — it is not a dispatched Agent tool call. Record every dismissed finding (with its reason) for Step 5's output and the milestone's `dismissed=` count.
+2. **Dedupe the valid findings** (Step 1b) before touching anything:
    - Same `file:line`, or the same root cause reported from two angles → ONE finding.
    - Two agents proposing different fixes for one problem → pick the better fix, apply only that one, and note in the summary which was chosen and why.
    - A finding whose proposed fix is already implied by another finding's fix → drop it.
@@ -391,12 +408,17 @@ Report the review results:
 Review complete.
 Tier: <micro|docs|small|full> — <one-line reason>
 Fixed: <count> deduped findings from <agent_count> agents
+Dismissed: <count> findings (see details below)
 Escalated: <count> findings (see details below)
 Clean: <list of agents with no findings>
 
 Acceptance Criteria: <ac_met>/<ac_total> met
 - AC1 <criterion> — met <file:line> | not-met <why> | unverifiable <what test would prove it>
 - AC2 <criterion> — met <file:line> | not-met <why> | unverifiable <what test would prove it>
+
+[If dismissed items exist:]
+Dismissed findings (validity gate — override by re-opening if this call was wrong):
+- [Agent]: <description> — Reason: <hypothetical-not-reachable|taste|premature-abstraction|out-of-diff|duplicate-of-<n>|contradicts-project-rule>
 
 [If escalated items exist:]
 Escalated findings:
@@ -411,27 +433,30 @@ Post the phase milestone to the issue. This is the last step of the phase — if
 ai-dossier runstate post --issue <issue_number> --phase review --status done --run <run_id> \
   --kv head=<short sha of HEAD> \
   --kv fixed=<n> \
+  --kv dismissed=<n> \
   --kv escalated=<n> \
   --kv tier=micro|docs|small|full \
   --kv agents_done=<comma list of the tier's agents that finished> \
   --kv agents_pending=<comma list or none> \
   --kv ac_met=<n> \
   --kv ac_total=<n> \
-  --kv review_redone=<true|false>
+  --kv review_redone=<true|false> \
+  --kv validity_recalibrated=<true|false>
 ```
 
-Let the CLI stamp `at=` and compute `next=ship` — do not pass either; never hand-write the comment. `agents_done`/`agents_pending` cover only the tier's agent set (Step 2c), not all 7. `head=` is the pushed sha from Step 4 item 7 (`git rev-parse --short HEAD` after the push, or current `HEAD` if there was nothing to commit). `review_redone=` is optional — pass it only when Step 2d's duration floor triggered a redo.
+Let the CLI stamp `at=` and compute `next=ship` — do not pass either; never hand-write the comment. `agents_done`/`agents_pending` cover only the tier's agent set (Step 2c), not all 7. `head=` is the pushed sha from Step 4 item 7 (`git rev-parse --short HEAD` after the push, or current `HEAD` if there was nothing to commit). `dismissed=` is the validity gate's dismissal count (Step 4 item 1b) — always present, `0` on a clean gate pass. `review_redone=` and `validity_recalibrated=` are both optional — pass each only when its trigger fired (Step 2d's duration floor, item 1b's calibration rule, respectively).
 
 ## Output
 
 - `review_tier`: `micro` | `docs` | `small` | `full` — which agent set ran, and why (Step 2c)
 - `review_fixed`: number of deduped findings applied
+- `review_dismissed`: number of findings the validity gate dismissed before dedupe/apply (each with its one-line reason, listed in Step 5's output for human or report-phase override)
 - `review_escalated`: number of findings escalated to the user (ideally 0)
 - `review_clean`: list of agent names that found no issues
 - `ac_met` / `ac_total`: acceptance criteria met vs. total (0/0 when Agent 7 was skipped — no AC list found)
 - `ac_results`: the per-AC checklist (criterion, verdict, file:line or reason) from Agent 7 — pass through to ship-issue for the PR body's Acceptance Criteria section
-- Aggregate mode: `member_verdicts` passed through unchanged, `ac_met`/`ac_total` rolled up across members, `members` list, and the one batch-level fix commit's sha (absent on a clean review — `head=` is then the last member boundary commit)
-- Posts runstate milestone to the issue (`phase=review`, including `tier` and `ac_met`/`ac_total`; `phase=batch-review` on the ANCHOR in aggregate mode, including `batch=` and `members=`)
+- Aggregate mode: `member_verdicts` passed through unchanged, `ac_met`/`ac_total` rolled up across members, `review_dismissed` rolled up across the combined diff, `members` list, and the one batch-level fix commit's sha (absent on a clean review — `head=` is then the last member boundary commit)
+- Posts runstate milestone to the issue (`phase=review`, including `tier`, `dismissed`, and `ac_met`/`ac_total`; `phase=batch-review` on the ANCHOR in aggregate mode, including `batch=`, `dismissed=`, and `members=`)
 
 ## Validation
 
@@ -442,6 +467,8 @@ Let the CLI stamp `at=` and compute `next=ship` — do not pass either; never ha
 - [ ] Agent 7 (Conformance) ran on the strongest available model
 - [ ] Exactly the tier's agents were launched in parallel (Agent 7 skipped only when no AC list was found)
 - [ ] Every agent was report-only — no agent edited a file — and classified findings using the Classification Criteria
+- [ ] Every collected finding from Agents 1–6 passed the validity gate (Step 4 item 1b) before dedupe — each `dismissed` finding carries exactly one cited reason from the fixed list; an unclassifiable finding stayed `valid`; Security (Agent 2) and Contract (Agent 6) findings were never dismissed as `taste`/`hypothetical-not-reachable`; the gate ran inline in this phase's turn, not as a dispatched agent
+- [ ] Calibration checked: > 8 valid non-security findings on `small` or > 15 on `full` triggered one re-read of the dismissals for under-filtering, with `validity_recalibrated=true` recorded if it fired; no finding was dismissed just to hit the threshold
 - [ ] Findings deduped (same file:line / same root cause collapsed; competing fixes resolved to one), then all "Fix now" findings applied serially by this phase via the Edit tool
 - [ ] A new/changed backend registry route in the diff was checked against the route-coverage mapper; any uncovered route was flagged (and its integration test added)
 - [ ] Every `not-met` AC went through one bounded fix loop + a re-run of Agent 7 alone; a second `not-met` on the same AC was escalated
@@ -449,10 +476,10 @@ Let the CLI stamp `at=` and compute `next=ship` — do not pass either; never ha
 - [ ] `met` citations without a `file:line` were treated as `unverifiable`, not accepted
 - [ ] Tests re-run once after all fixes (no regressions); lint auto-fixer run once, after the tests passed
 - [ ] Escalated findings (if any) each satisfy all three escalation criteria, and no more than 2 were escalated total (re-evaluated if exceeded)
-- [ ] Final output includes the tier and counts for fixed, escalated, clean, and `ac_met`/`ac_total`
+- [ ] Final output includes the tier and counts for fixed, dismissed, escalated, clean, and `ac_met`/`ac_total`
 - [ ] Any changes were committed and pushed to origin (`wip(review): ...` — per-issue mode; aggregate mode uses the batch-level fix commit per Aggregate Step 4) before the milestone — on `done` and `partial` alike — and milestone `head=` is the pushed sha
-- [ ] Runstate milestone was posted via `ai-dossier runstate post`, including `tier=`
-- Aggregate mode: preconditions asserted before any work (batch branch, members, verdicts, clean tree); tier = combined-diff floor scan RAISED to max member risk; Agent 7 never ran; findings applied serially by the single writer as ONE clean batch-level commit with no `[skip ci]` marker (rebase-merge replays it to main) and no member commit amended; the batch's test suite re-ran once after fixes; milestone posted as `phase=batch-review` on the ANCHOR with `batch=` `members=` `ac_met=` `ac_total=`; an escalated finding halted the batch with the hand-off on the anchor
+- [ ] Runstate milestone was posted via `ai-dossier runstate post`, including `tier=` and `dismissed=`
+- Aggregate mode: preconditions asserted before any work (batch branch, members, verdicts, clean tree); tier = combined-diff floor scan RAISED to max member risk; Agent 7 never ran; the validity gate (item 1b) ran over the combined diff before dedupe, inherited via "items 1, 1b apply verbatim"; findings applied serially by the single writer as ONE clean batch-level commit with no `[skip ci]` marker (rebase-merge replays it to main) and no member commit amended; the batch's test suite re-ran once after fixes; milestone posted as `phase=batch-review` on the ANCHOR with `batch=` `members=` `dismissed=` `ac_met=` `ac_total=`; an escalated finding halted the batch with the hand-off on the anchor
 
 ## Troubleshooting
 
