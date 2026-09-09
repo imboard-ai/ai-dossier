@@ -154,6 +154,7 @@ but use these when they fit):
 | `build.run` | Build the project |
 | `environment.start` | Start dev servers / containers |
 | `environment.stop` | Stop dev servers / containers |
+| `verify.ui` | Launch, health-check and drive the app in a browser for a live UI verification pass — `imboard-ai/git/review-issue`'s Agent 8 (Visual Conformance), from 1.14.0, resolves its runtime here first. Its doctor command MUST assert the app is pointed at a scratch/test data store; without that assertion every mutating flow is reported `unverifiable` rather than driven. |
 
 ## How the batch member gate consumes these (#625)
 
