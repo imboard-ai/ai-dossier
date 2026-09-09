@@ -154,6 +154,27 @@ but use these when they fit):
 | `build.run` | Build the project |
 | `environment.start` | Start dev servers / containers |
 | `environment.stop` | Stop dev servers / containers |
+| `verify.ui` | Health-check a running app before a live UI verification pass drives it |
+
+### `verify.ui` and the live UI pass
+
+`verify.ui` is a doctor, not a launcher — `environment.start` and `environment.stop` already own the
+runtime, and `cap run` buffers a command's output and re-emits it after the child exits, so a command
+that never returns would simply time out as `automation-broken`.
+
+Its consumer today is `imboard-ai/git/review-issue`'s Visual Conformance agent, which drives the app in
+a headless browser on issues the plan phase flagged `visual_review=true`. That agent needs one thing a
+`0` exit cannot express — whether writing to this app is safe — so the contract is a **token on the last
+stdout line**:
+
+> `verify.ui` exits 0 and prints `SCRATCH-DB-OK` as its last stdout line when the app answers, its data
+> store is a scratch or test instance, and the outbound side-effect sinks its flows can reach (email,
+> SMS, payments, webhooks, third-party APIs) are sandboxed or disabled.
+
+Anything else — absent capability, non-zero exit, any other last line — and the consumer drives no
+mutating flow at all. A token is required rather than a convention because the alternative is an agent
+reading the doctor's source and forming an opinion about it, and judging a script instead of reading a
+signal is exactly the substitution a live verification pass exists to remove.
 
 ## How the batch member gate consumes these (#625)
 

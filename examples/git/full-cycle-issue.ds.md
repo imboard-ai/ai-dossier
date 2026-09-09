@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "full-cycle-issue",
   "title": "Full Cycle Issue Workflow",
-  "version": "3.15.1",
+  "version": "3.15.3",
   "protocol_version": "1.0",
   "status": "Draft",
   "last_updated": "2026-09-09",
@@ -25,7 +25,9 @@
     "modifies_files",
     "network_access",
     "creates_pull_request",
-    "merges_code"
+    "merges_code",
+    "database_operations",
+    "executes_external_code"
   ],
   "requires_approval": false,
   "destructive_operations": [
@@ -33,7 +35,8 @@
     "Creates new git worktree",
     "Pushes branch to remote",
     "Creates pull request and applies the `auto-merge` label (a server-side watcher performs the merge — see Phase 5)",
-    "Deletes branch after merge (performed by the auto-merge watcher)"
+    "Deletes branch after merge (performed by the auto-merge watcher)",
+    "Phase 4 transitively launches the project's app and drives it in a headless browser (review-issue Agent 8), writing to the data store only when that phase's scratch-store assertion passed"
   ],
   "inputs": {
     "optional": [
@@ -74,13 +77,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "bb9c77f1840d51cd4828db2d24e98eb5343cc2995f386caf9c266b48d226a74c"
+    "hash": "7ea66af4885aebe1d442d029f5f9e9b2b9a7aad9857539c7822a49f309678281"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "UJvNe/bIccdlHWwqH69iSmla+RLTlgx5xLh+ajWBC1lUPA+P7HFFDtbUXglgZnSlQpRLyI6P4Tjv9jzAP8rABQ==",
+    "signature": "nmLF0hR0ohi2p53IqncnvtDuyakfoOEkY+TL4pBCtMzpiig/27yR7y1sTWiVW4oY+2LMZGDmQzwJN9KAqQU4CQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T06:54:21.986Z",
+    "signed_at": "2026-09-09T08:11:46.315Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -123,7 +126,7 @@ Do NOT ask about (just proceed): file names, branch names, commit messages, PR d
 |---|---|---|
 | Mechanical | gate, setup, ship tail (teardown/merge-confirm), report, fleet supervision | cheapest available — CLI calls and templates |
 | Generation | plan, implement, review agents 1–6, ship (commit/PR/CI-fix) | by issue risk: docs/chore → cheap; standard bug/feature → mid-tier; security, payments/billing, migrations, auth, protocol/schema changes → strong |
-| Judgment | conformance review agent, escalation decisions, fleet dependency/DAG planning | ALWAYS the strongest available — the trust anchor, a small fraction of total tokens |
+| Judgment | conformance and visual-conformance review agents, escalation decisions, fleet dependency/DAG planning | ALWAYS the strongest available — the trust anchor, a small fraction of total tokens |
 
 **Escalation ladder.** Dispatch at the tier above; redispatch the SAME run one tier stronger (resume protocol carries the work forward) on any of: milestone non-compliance (a phase finished without its milestone and the milestone gate had to backfill) · a stall (no new milestone and no new pushed commit for 30+ minutes) · conformance `not-met` on the same AC twice · an implausible review (review-issue's duration floor). Cap: two escalations per run, then `status=blocked reason=escalation-cap` and hand off. (Rationale and tuning cadence: `imboard-ai/git/issue-workflows-guide`.)
 
@@ -154,7 +157,7 @@ Per-phase `--kv` keys:
 | setup | done / blocked | `branch=` `worktree=<abs path>` `pool_claimed=true\|false` `base_branch=` `remote=pushed` |
 | plan | done / blocked | `planning=<abs path>` `head=<short sha of base at plan time>` `open_questions=<n>` `visual_review=true\|false` |
 | implement | done / blocked | `head=<short sha>` `files=<n>` `tests_added=<n>` `tests_run=<n>` `ci_parity=pass\|fail-then-fixed\|blocked-external\|skipped` |
-| review | done / partial / blocked | `head=` `fixed=<n>` `escalated=<n>` `tier=micro\|docs\|small\|full` `agents_done=<comma list>` `agents_pending=<comma list or none>` (lists cover only the tier's agents) |
+| review | done / partial / blocked | `head=` `fixed=<n>` `escalated=<n>` `tier=micro\|docs\|small\|full` `agents_done=<comma list>` `agents_pending=<comma list or none>` (lists cover only the tier's agents) `live=pass\|fail\|unverifiable\|n/a` `live_flows=<n>` (always present; `n/a`/`0` when Agent 8 did not run) `live_note=<slug>` (only when one applied) |
 | ship (1st, BEFORE the CI/merge wait) | awaiting-merge | `pr=<n>` `head=<pushed sha>` `ci_fix_attempts=0` |
 | ship (2nd, after merge + teardown) | done / blocked | `pr=` `merge_commit=` `ci_fix_attempts=<n>` `cleanup=pool_returned\|worktree_removed\|skipped` |
 | report | done | `pr=` `traps_added=<n>` |
@@ -229,8 +232,8 @@ Always runs — it determines `resume_from`.
 **Skip if `resume_from` is later than this phase.**
 
 1. Run `ai-dossier run imboard-ai/git/review-issue`, passing the issue number and `run_id`.
-2. **This is a tiered review (1–7 report-only agents + serial apply), not a fixed parallel fan-out.** review-issue applies a risk floor then per-dimension relevance (`micro`/`docs`/`small`/`full`) and applies fixes itself; no agent edits files. Expect `tier=` and agent lists covering only that tier in the milestone.
-3. Collect `review_tier`, `review_fixed`, `review_escalated`, `review_clean`, `ac_results` (per-AC checklist — pass through to Ship for the PR body).
+2. **This is a tiered review (1–8 report-only agents + serial apply), not a fixed parallel fan-out.** review-issue applies a risk floor then per-dimension relevance (`micro`/`docs`/`small`/`full`) and applies fixes itself; no agent edits files. Expect `tier=` and agent lists covering only that tier in the milestone. **Agent 8 (Visual Conformance) sits outside the tier**: it runs iff the plan milestone this run posted in Phase 2 carries `visual_review=true`, and it drives the app in a real browser. That is the only place on this path where a UI change is checked by rendering it rather than by reading it — a `visual_review=true` issue whose review milestone comes back `live=n/a` means the agent did not run, and the review is incomplete, not clean.
+3. Collect `review_tier`, `review_fixed`, `review_escalated`, `review_clean`, `ac_results` (per-AC checklist — pass through to Ship for the PR body), and `live`, `live_flows`, `live_note`, `live_results` (Agent 8's roll-up, flow count, the reason nothing could be verified when there is one, and the per-flow checklist — all passed through to Ship). `live=n/a` with `live_flows=0` is the correct reading when Phase 2 recorded `visual_review=false`; carry it forward rather than dropping the keys.
 4. **If `review_escalated` is non-empty: apply the Guiding Principle hand-off and STOP — do not proceed to Phase 5.** review-issue restricts escalation to findings that genuinely need a product/business decision, so reaching this step means a real decision is needed, not a fan-out of side issues. List each escalated finding in the comment (file/lines, description, why it needs a human call), grouped by category if more than one.
 
 ### Phase 5: Ship
@@ -240,7 +243,8 @@ Always runs — it determines `resume_from`.
 **Only reached when `review_escalated` was empty at the end of Phase 4** — ship-issue's own prerequisites assume this and do not create GitHub issues for anything.
 
 1. Run `ai-dossier run imboard-ai/git/ship-issue`.
-2. Pass through: issue number, base_branch, worktree_path, original_dir, pool_claimed, `run_id`, `ship_mode`, `ac_results` (from Phase 4 — builds the PR body's Acceptance Criteria section).
+2. Pass through: issue number, base_branch, worktree_path, original_dir, pool_claimed, `run_id`, `ship_mode`, `ac_results` (from Phase 4 — builds the PR body's Acceptance Criteria section), and `live_results` with `live`/`live_flows`/`live_note`.
+2a. **The PR body carries a `Visual verification` line built from `live_results`**, immediately after the Acceptance Criteria section: the verdict per touched UI flow with its evidence path for `met`, or the reason for `not-met`/`unverifiable`, plus `live_note=` when one was recorded. Omit the line entirely only when `live=n/a`, mirroring how ship-issue omits the Acceptance Criteria section on an empty `ac_results`. This is what puts browser evidence in front of the human reading the PR; a `pass` with no paths, or an `unverifiable` with no reason, is not the line.
 2b. **`ship_mode=detached` ends the run here** (ship-issue Step 3c): PR opened, parked on a confirmed `auto-merge` label, `awaiting-merge` milestone posted, run STOPS — no CI wait, no merge, no teardown, **no Phase 6**. The worktree is left in place (work already pushed). gate-issue maps a merged PR on that milestone to `resume_from=ship-teardown`, so a later `full cycle issue <n>` re-enters at teardown and runs Phase 6. Items 3–7 are the **attached** path (and what that tail run executes).
 3. **Opening a PR is NOT completion, and neither is merging it. You are done when the merge has REACHED PRODUCTION** (or you have a hard blocker you escalated). A PR left green-but-unmerged is a FAILED run; a PR merged but never deployed is code live to nobody — see ship-issue Step 6c.
 **Merge authority**: items 4–5 apply ONLY when the repo has an auto-merge watcher (`.github/workflows/auto-merge-watcher.yml` exists). Without one, attached mode self-merges per ship-issue Step 6 and these items are moot.
@@ -266,6 +270,7 @@ Orchestration-level only — each sub-dossier validates its own phase.
 - [ ] Phase 0 gate passed (no hard blocks); issue claimed with in-progress label
 - [ ] Branch and worktree created (pool claim or cold), and verified in worktree before proceeding
 - [ ] Review tier selected and stated; only that tier's agents ran, all report-only; findings deduped, then applied serially by the review phase (no agent edited files)
+- [ ] Agent 8 (Visual Conformance) ran iff Phase 2's plan milestone carried `visual_review=true`; the review milestone carries `live=` and `live_flows=` either way, and `live_results` reached Ship so the PR body's **Visual verification** line shows the evidence paths (or the `unverifiable` reason)
 - [ ] PR created targeting correct base_branch
 - [ ] Zero escalated findings reached Ship — any escalation stopped the run at Phase 4 with a decision-pending hand-off on the issue (Guiding Principle), not a new GH issue
 - [ ] A Phase 2/3 ambiguity was classified observable-vs-preference first (Guiding Principle Step 0); an observable question got one bounded ≤ 15-minute throwaway sketch outside the worktree and repo, recorded in the planning doc's Open Questions, before the run proceeded or (if inconclusive) handed off — reachability, review, and CI/merge-blocker escalations skip this step and hand off directly

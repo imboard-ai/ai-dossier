@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "ship-issue",
   "title": "Ship Issue — Commit, PR, Merge, Deploy, Teardown",
-  "version": "1.13.3",
+  "version": "1.14.0",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch",
@@ -83,6 +83,11 @@
         "type": "string"
       },
       {
+        "name": "live_results",
+        "description": "Per-touched-UI-flow verdict list from review-issue's Agent 8 (Visual Conformance) — flow, the AC it bears on, verdict, and either the evidence path plus the observed state that proved it or the reason it was not met / could not be driven. Arrives with live (pass|fail|unverifiable|n/a), live_flows and, when one was recorded, live_note. Populates the PR body's Visual verification section; omitted entirely when live=n/a. Per-issue mode only.",
+        "type": "string"
+      },
+      {
         "name": "batch_id",
         "description": "Batch id slug (e.g. b-2026-08-29-01). When set, run BATCH MODE: ship the batch PR from the batch branch against the batch ANCHOR issue (issue_number is the anchor number) — per-member PR sections, Closes #N per member, rebase-merge. Unset = ordinary per-issue ship.",
         "type": "string"
@@ -107,13 +112,13 @@
   "last_updated": "2026-09-09",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "41ce63850ca7f4dcf8064859605c1b4684aed19d616c163e4f1d69c7cc30536a"
+    "hash": "1469054fab8b902401cb060fb42455bef13f4c189f2c818e17997f4ad7f923eb"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "Fx6XZuiOdZXVrxLMV373rBh3ItP8St1++xMrGn13xY3jPzOWCafhxuAiYdT08ITa8I5+my764tKxiH+Vf7vCCQ==",
+    "signature": "NWV9teaSMjK4lyHy8tJ9oUDPbnD5al+nCLn4kKWwq3AentApHAnU0V1cc/8adCEutXjEnLGmGyWvqRjqXl47Aw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T07:39:48.083Z",
+    "signed_at": "2026-09-09T08:11:48.076Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -396,6 +401,10 @@ Closes #<issue_number>
 - [x] AC1 <criterion> — <file:line>
 - [ ] AC2 <criterion> — not met / unverifiable: <reason>
 
+## Visual verification
+<verdict> — <n> flow(s)[, <live_note>]
+- <flow> (AC<n>) — met <evidence path>: <observed state> | not-met <expected vs observed> | unverifiable <why the surface could not be driven>
+
 ## Test plan
 - <how to verify>
 
@@ -405,6 +414,8 @@ EOF
 ```
 
 The Acceptance Criteria boxes come from `ac_results` (review-issue's Agent 7 output, passed through by full-cycle-issue): a checked box with `file:line` for each `met` AC, an unchecked box with the reason for `not-met`/`unverifiable`. If `ac_results` is empty (Agent 7 was skipped — no AC list existed), omit this section.
+
+The **Visual verification** section comes from `live_results` (review-issue's Agent 8 output, passed through by full-cycle-issue), headed by `live` and `live_flows` and by `live_note` when one was recorded: one line per touched UI flow with its verdict, and for a `met` flow both its evidence path and the one-line observed state that proved it — the path is host-local provenance, so the sentence beside it is the part a reader can actually check. If `live` is `n/a` (Agent 8 did not run — the plan phase recorded `visual_review=false`), omit this section, exactly as an empty `ac_results` omits the one above. Never render `live=pass` with `live_flows=0`: a pass over zero flows verified nothing, and review-issue reports that case as `unverifiable`.
 
 ### Step 3a: Confirm CI Actually Triggered
 
@@ -747,6 +758,7 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 - [ ] Step 3a confirmed >= 1 `pull_request`-triggered workflow run exists for the PR head sha (or the repo provably has no `pull_request` workflow) — checked BEFORE the `auto-merge` label / `awaiting-merge` milestone / detached handoff
 - [ ] PR created targeting correct base_branch
 - [ ] PR body includes the Acceptance Criteria section from `ac_results` (when non-empty)
+- [ ] PR body includes the Visual verification section from `live_results` (omitted only when `live=n/a`), each `met` flow carrying its evidence path and the observed state that proved it
 - [ ] Verdict-freshness gate (Step 3a.5) ran before every merge authorization — the `auto-merge` label on the detached park and on the attached-with-watcher hand-off, and the Step 6 self-merge after the CI-fix loop settled: `verdict_head` recorded on the run's final milestone — a prefix of the head that actually merged under `verdict_check=sha-fallback`, or (under `verdict_check=patch-id`) the reviewed head whose diff patch-id matched the merged head's, which need not itself be a prefix of it; freshness decided by patch-id equality when `VERDICT_HEAD` was fetchable, sha equality otherwise — `verdict_check` recorded alongside `verdict_head`/`verdict_refreshed` on every milestone that carries them (omitted only on the `verdict-head-unreadable` blocked shape, where item 2 never ran); on a mismatch Agent 7 re-ran before any merge authorization, and a `not-met` blocked with `reason=verdict-stale-not-met` instead of merging; the Step 8 parked-PR drift check compares the merged head against that milestone's `head=`, never `verdict_head=`
 - [ ] `ship_mode` was honored: `detached` stopped after the label + `awaiting-merge` milestone with the handoff line printed (no CI wait, no merge, no teardown, no report); `attached` ran through to the final milestone
 - [ ] Detached only: the `auto-merge` label was applied and confirmed present, and the worktree was left in place
