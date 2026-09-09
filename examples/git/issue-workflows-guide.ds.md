@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "issue-workflows-guide",
   "title": "Issue Workflows Guide",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Reference guide for the issue workflow family — explains when to use each workflow, how they compose from shared sub-dossiers, and available flags",
@@ -25,16 +25,16 @@
       "name": "Yuval Dimnik"
     }
   ],
-  "last_updated": "2026-08-29",
+  "last_updated": "2026-09-09",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "874e600aaa78321a6c00cc73a2a1a25c38e5d3d75de68f7f55232b21cec5046c"
+    "hash": "543dbd9a1d46f82199aa22cfe2feac7e9586572006cc82f2a86b102460a4ca64"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "V8Ngrmr9Z/ng5Vz+2i7GT3S65C5WahfPnsb/F1LxyhEEc6M7K2OHACbTOmzpQIVVSmf7CxQghWP+q9zDSTq2Cg==",
+    "signature": "RQfXr59uhVD0/aLzSfCrsM9TL4G9zw3ynESmL71cDFflLpRv/ehTDlGuUy2FiLoNZ4GEZ6QRH54ZfHHZ9V0YDg==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T18:21:28.724Z",
+    "signed_at": "2026-09-09T08:11:49.811Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -84,7 +84,7 @@ All three skills support:
                         │           │
                  implement-issue ───┘
                         │
-                 [visual review?]     ← guided only, auto-detect FE
+                 [visual review?]     ← guided: human checkpoint; full-cycle: review-issue Agent 8
                         │
                   review-issue
                         │
@@ -101,7 +101,7 @@ All three skills support:
 | `setup-issue-workflow` | `imboard-ai/git/setup-issue-workflow` | Branch + worktree (pool or cold) + warmup | all three |
 | `plan-issue` | `imboard-ai/git/plan-issue` | Read issue + comments + explore code → write rich `PLANNING-{N}-{slug}.md` | all three |
 | `implement-issue` | `imboard-ai/git/implement-issue` | Implement per plan + affected-scoped tests + `scripts/ci-parity.sh` when the repo has it | guided, full-cycle |
-| `review-issue` | `imboard-ai/git/review-issue` | 7 parallel review agents (DRY, Security, Supportability, Maintainability, Docs, Convention, **blind Conformance vs the issue's Acceptance Criteria**) + fix findings | guided, full-cycle |
+| `review-issue` | `imboard-ai/git/review-issue` | Tiered report-only review agents (DRY, Security, Supportability, Maintainability, Docs, Convention, **blind Conformance vs the issue's Acceptance Criteria**, and **Visual Conformance — drives the app in a headless browser when the plan flagged `visual_review=true`**) + validity gate + fix findings | guided, full-cycle |
 | `ship-issue` | `imboard-ai/git/ship-issue` | ci-parity → commit → push → PR (with AC checklist) → `awaiting-merge` milestone → CI/merge → teardown (incl. `ensure-test-env.sh --teardown`) | guided, full-cycle |
 | `report-issue` | `imboard-ai/git/report-issue` | Rich summary → conversation + PR comment; mechanical trap write-back to `docs/agent-traps.md` when a CI fix was needed; deletes the PLANNING file | guided, full-cycle |
 | `watch-task` | `imboard-ai/git/watch-task` | Armed-watchdog discipline for every long wait: blocking poll loop / harness monitor / verified scheduled wakeup, stall detection on progress signals, bounded recovery — kills the "waiting with nothing armed" lost-time failure | full-cycle (merge confirm), fleet-cycle (all supervision) |
@@ -124,19 +124,30 @@ Every phase of a full-cycle run appends a `<!-- runstate:v1 -->` comment to the 
   phase (`resume_from=`). Ship posts `status=awaiting-merge` BEFORE the CI wait — the likeliest
   death point — so even a mid-merge death resumes in seconds.
 - **Spec conformance**: plan extracts Acceptance Criteria; review's blind Conformance agent checks
-  the diff against them (`met <file:line>` required); the PR body carries the checked list.
+  the diff against them (`met <file:line>` required); the PR body carries the checked list. When the
+  plan set `visual_review=true`, a second blind agent drives those same criteria in a real browser and
+  the review milestone carries `live=`/`live_flows=`.
 - **Knowledge**: repos may provide `scripts/ci-parity.sh` (exact CI gates, run locally),
   `scripts/ensure-test-env.sh` (remote Atlas/S3 test env, per-worktree isolation + teardown), and
   `docs/agent-traps.md` (grep-first symptom→trap→fix index; plan reads it, report writes it).
 - **Fleet prewarm**: fleet-cycle replenishes the worktree pool once per wave via
   `npx -y @ai-dossier/worktree-pool@^0.5.1`; agents never run pool `gc`/`refresh`.
 
-## Visual Review Checkpoint (guided-cycle only)
+## Visual Review — Two Different Things
 
-After implementation, the guided-cycle skill checks if visual review is needed:
+**guided-cycle: a human checkpoint.** After implementation, the guided-cycle skill checks if visual review is needed:
 1. **Force flag** (`--review` / `--no-review`): always wins
 2. **Auto-detect**: If any `.tsx`, `.jsx`, `.css`, `.scss`, `.vue`, `.svelte` files were changed → review required
 3. At the checkpoint: agent presents changes, user iterates until satisfied
+
+**full-cycle: an automated browser pass.** There is no checkpoint — nobody is present to iterate with.
+Instead review-issue's **Agent 8 (Visual Conformance)** drives the running app in headless chromium when
+the plan milestone carried `visual_review=true`, reports `met`/`not-met`/`unverifiable` per touched UI
+flow, and puts its evidence on the PR body's Visual verification line. It needs the project to declare
+`environment.start`/`environment.stop` and a `verify.ui` doctor in `.dossier/automation/manifest.yaml`;
+without them every flow comes back `unverifiable` rather than silently passing.
+**On the batch path there is no visual verification at all** — slot-cycle posts `visual_review=false`
+unconditionally and aggregate review never runs Agent 8, so UI-bearing issues should not be batched.
 
 ## Rich Report Format
 
