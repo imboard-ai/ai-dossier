@@ -2,10 +2,10 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Implement Issue — Code and Test",
-  "version": "1.7.3",
+  "version": "1.8.0",
   "protocol_version": "1.0",
   "status": "Stable",
-  "last_updated": "2026-08-29",
+  "last_updated": "2026-09-09",
   "objective": "Implement the solution described in the planning document, run tests, and auto-fix lint issues",
   "category": [
     "development"
@@ -53,13 +53,13 @@
   "name": "implement-issue",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "f6b3769ecd76e49fcfab7a3d73e665fc4082e8234cff0a130e4a0340b00bb545"
+    "hash": "bbdc06b2a02aad730223f28c39b11a340ad725abb09e989a0b2c6104508af9a8"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "+i4dVrHMfzo/R95J7mP88J0vsVb6xHSztSVrLM/nhuojQcmoiEYkFMdPjMavYmjZJN276iK5zYB0pk4tYfbwBQ==",
+    "signature": "aUS3ZILCYb4+ACBFqb8Mn9a4RqIZoqWqlVsXT/T1AR2fwB+mO95Ej8fvhQtihlGpY3cmDVx0lOb6zGke4nuSDg==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T20:06:14.352Z",
+    "signed_at": "2026-09-09T06:24:28.651Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -118,6 +118,25 @@ Check config files to identify the toolchain: `biome.json`, `.eslintrc*` / `esli
    - Cover happy path + key edge cases + error paths
    - Follow existing test patterns and conventions in the repo
    - Place tests where the project convention expects them (e.g., `__tests__/`, `*.test.ts`, `*.spec.ts`)
+3b. **Bug issues only — red-before-green evidence (REQUIRED).** Bug-detection rule, stated once: the issue carries the `bug` label, OR its gate/classify runstate record carries `type=bug`, OR the planning document's Problem section names a defect being reproduced. Anything else is not a bug issue — record `repro=n/a` on the Step 7 milestone and skip the rest of this item.
+
+   For a bug issue, before trusting the targeted test (existing from item 2, or newly written in item 3) as evidence the bug is fixed, first run it against the **base branch state**, isolated from the live worktree:
+   ```bash
+   TMP=$(mktemp -d)
+   git worktree add "$TMP" <base_branch>
+   cp <targeted-test-file(s)> "$TMP"/<same-relative-path>
+   (cd "$TMP" && <test command scoped to the targeted file(s)>)
+   BASE_RESULT=$?
+   git worktree remove "$TMP" --force
+   ```
+   Use this mechanism, not `git stash push --keep-index` — stash loses the staged/unstaged distinction and pops back into the live worktree, risking the in-progress change; a throwaway `git worktree add` against `<base_branch>` runs fully isolated and a single `git worktree remove` cleans it up with nothing to lose.
+
+   Record the outcome (used in Step 7's `repro=` key):
+   - Base run failed (`BASE_RESULT != 0`) and the same test passes once run against HEAD in item 4 → `repro=red-then-green`.
+   - Base run passed (`BASE_RESULT == 0`) — the test does not prove the bug existed. Strengthen the test until it fails on base, or record `repro_note=<short-reason>` naming why no executable repro is possible; this is a REQUIRED companion, not optional prose (see the Validation contract below), and is surfaced to the review phase as an input → `repro=green-on-base`.
+   - No executable test could be constructed at all (e.g. the bug needs infra unavailable in this environment) → `repro=no-repro-<reason>`, naming the reason.
+
+   **Cost guard**: scope the base-branch run to the targeted test file(s) only — never the full suite. If it exceeds ~5 minutes, abandon it and record `repro=no-repro-timeout`.
 4. **Run tests scoped to what changed** — a full-suite run on a large monorepo costs minutes and buys little:
    - pnpm: `pnpm --filter "...[<base_branch>]" run test`
    - npm/yarn workspaces: run `test` in each workspace whose files appear in `git diff --name-only <base_branch>`
@@ -127,7 +146,7 @@ Check config files to identify the toolchain: `biome.json`, `.eslintrc*` / `esli
    ```bash
    git stash && git checkout <base_branch> && npm test 2>&1 | tail -5 && git checkout - && git stash pop
    ```
-   If the same tests fail on `base_branch`, they are pre-existing — ignore them and proceed. Only fix failures caused by your changes (max 2 attempts).
+   If the same tests fail on `base_branch`, they are pre-existing — ignore them and proceed. Only fix failures caused by your changes (max 2 attempts). This is a distinct check from item 3b: item 3b decides whether the targeted bug-fix test is real evidence (`repro=`); this item decides whether a *currently failing* test on HEAD is pre-existing noise or a regression you must fix.
 
 > **Backend registry routes require an integration test (this repo).** If this change adds or modifies a route under `packages/backend/src/api/v1/registry/routes/`, it MUST ship with an integration test that exercises that route in the same PR. A new route without one fails the route-coverage ratchet (`pnpm --filter imboard_be test:route-coverage:check`) in CI — the baseline may only shrink, never grow. Add the test under `tests/integration/` following the existing supertest specs, then confirm the route is now covered with `pnpm --filter imboard_be test:route-coverage`. The human reviews the PR; the agent authors the coverage.
 
@@ -175,10 +194,12 @@ ai-dossier runstate post --issue <issue_number> --phase implement --status done 
   --kv files=<n> \
   --kv tests_added=<n> \
   --kv tests_run=<n> \
-  --kv ci_parity=pass|fail-then-fixed|blocked-external|skipped
+  --kv ci_parity=pass|fail-then-fixed|blocked-external|skipped \
+  --kv repro=n/a|red-then-green|green-on-base|no-repro-<reason> \
+  --kv repro_note=<short-reason, only when repro=green-on-base>
 ```
 
-Let the CLI stamp `at=` and compute `next=review` — do not pass either; never hand-write the comment. `head=` is the pushed sha from Step 6b (`git rev-parse --short HEAD` after the push) — never a `-dirty` suffix; by protocol there is no uncommitted work left when this milestone posts.
+Let the CLI stamp `at=` and compute `next=review` — do not pass either; never hand-write the comment. `head=` is the pushed sha from Step 6b (`git rev-parse --short HEAD` after the push) — never a `-dirty` suffix; by protocol there is no uncommitted work left when this milestone posts. `repro=` is set from item 3b's outcome on every run — `n/a` for a non-bug issue, never omitted. `repro_note=` is REQUIRED alongside `repro=green-on-base` (see Validation) and omitted otherwise.
 
 ## Output
 
@@ -187,6 +208,7 @@ Let the CLI stamp `at=` and compute `next=review` — do not pass either; never 
 - `tests_run`: number of test files executed
 - `pre_existing_failures`: count of ignored pre-existing test failures
 - `ci_parity`: pass | fail-then-fixed | skipped
+- `repro`: n/a | red-then-green | green-on-base | no-repro-<reason> — item 3b's bug-issue base-branch repro outcome
 - Posts runstate milestone to the issue (`phase=implement`)
 
 ## Validation
@@ -195,6 +217,7 @@ Let the CLI stamp `at=` and compute `next=review` — do not pass either; never 
 - [ ] Existing code patterns were followed; reusable code from the plan was leveraged (not re-implemented)
 - [ ] Lint auto-fixer was run before AND after testing
 - [ ] Tests exist and pass for changed code (created if missing)
+- [ ] On a bug issue (item 3b's rule), the targeted test was run against an isolated base-branch worktree before item 4, and `repro=` was recorded — never omitted. `repro=green-on-base` without an accompanying `repro_note=` is a milestone contract violation: the phase must NOT post `status=done` until the test is strengthened or `repro_note=` is added
 - [ ] Any new/changed backend registry route ships with an integration test in the same PR (route-coverage ratchet stays green)
 - [ ] Tests scoped to the diff were run, plus the full suite when an escape hatch applies
 - [ ] Pre-existing failures were verified against base branch (not blindly fixed)
