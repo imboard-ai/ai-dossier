@@ -2,7 +2,7 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Review Issue — Parallel Code Review",
-  "version": "1.12.2",
+  "version": "1.12.3",
   "protocol_version": "1.0",
   "status": "Stable",
   "last_updated": "2026-09-09",
@@ -72,13 +72,13 @@
   "name": "review-issue",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "5c94b6fd6694a3d804e0a470ed87ba45a0a6f5b129fa8603a3ad8cc188c23510"
+    "hash": "3cc870f85e4e6d8d28687cd51d324add5818f7c447be7dc48b02d5f047978769"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "nFeYjX2Eu0H0trSHL1vZyzkT2Rpt8ShcKqhKh8p+IzSSh6xrkCYz85NFCV79F4KoD+jDbx5NHHCn9vv5lqjOBQ==",
+    "signature": "DA8tWBHluPUxPuCAdMgDvxLVHCe+fMiOWKqVCjOz2Stl0Oz8Wu8qFD4gJEaHWQ2CMNkyaa/YGj5g3XFQRaLoCA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T06:23:54.456Z",
+    "signed_at": "2026-09-09T06:34:15.869Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -307,9 +307,9 @@ improvements, minor bugs, "consider doing X" opinions. Report them as "Fix now" 
 > - Logging: Are key operations logged? Can you trace a request through the system?
 > - Error handling: Are errors caught with useful context, or do they bubble as cryptic stack traces?
 > - Failure modes: What happens when external calls fail? Is there graceful degradation?
-> - Idempotency: what happens if this operation runs twice (retry, duplicate webhook, re-run)?
-> - Crash-halfway: if this crashes mid-operation, what state is left, and how is it reconciled?
-> - Concurrency: is access to any shared file/branch/key/object serialized structurally (a lock, a queue, a unique constraint), or only by convention?
+> - Idempotency: What happens if this operation runs twice (retry, duplicate webhook, re-run)?
+> - Crash-halfway: If this crashes mid-operation, what state is left, and how is it reconciled?
+> - Concurrency: Is access to any shared file/branch/key/object serialized structurally (a lock, a queue, a unique constraint), or only by convention?
 >
 > [+ Reporting contract]
 
@@ -324,8 +324,8 @@ improvements, minor bugs, "consider doing X" opinions. Report them as "Fix now" 
 > - Dead code, unused imports, unreachable branches
 > - Leftover console.log / debugger statements
 > - TODO/FIXME/HACK without issue references
-> - Root cause vs symptom: does the fix address the root cause, or patch a symptom — a guard clause masking an invariant violation, retry logic hiding a broken contract, a cast silencing a modelling error, or a fix that belongs in the callee's contract rather than the caller?
-> - Where a comment says "do not do X" instead of enforcing it: could that instruction be a type constraint, lint rule, or runtime check instead?
+> - Root cause vs symptom — a guard clause masking an invariant violation, retry logic hiding a broken contract, a cast silencing a modelling error, or a fix that belongs in the callee's contract rather than the caller
+> - A "do not do X" comment that could instead be a type constraint, lint rule, or runtime check
 >
 > [+ Reporting contract]
 
