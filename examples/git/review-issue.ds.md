@@ -2,10 +2,10 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Review Issue — Parallel Code Review",
-  "version": "1.12.1",
+  "version": "1.12.2",
   "protocol_version": "1.0",
   "status": "Stable",
-  "last_updated": "2026-08-29",
+  "last_updated": "2026-09-09",
   "objective": "Run a tiered set of report-only review agents (DRY, Security, Supportability, Maintainability, Documentation, Convention/Contract, Conformance) on the branch diff, then dedupe their findings and apply the fixes serially; in aggregate mode (batch_id set): review the combined batch diff once on the batch anchor, with per-member conformance already produced per-issue by slot-cycles",
   "category": [
     "development"
@@ -72,13 +72,13 @@
   "name": "review-issue",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "73d1062d7633a5da8b3c488af4742aa30e3e8594cffd87ceb0a9955942752df9"
+    "hash": "5c94b6fd6694a3d804e0a470ed87ba45a0a6f5b129fa8603a3ad8cc188c23510"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "zDv6D7O5r9/09o84hPKk9YnOCIcv+Si4s7UNGY3032Gd3ViNxGnT+uY02d+61P7wU2crviNLs06tYZt7YdhXDw==",
+    "signature": "nFeYjX2Eu0H0trSHL1vZyzkT2Rpt8ShcKqhKh8p+IzSSh6xrkCYz85NFCV79F4KoD+jDbx5NHHCn9vv5lqjOBQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T19:30:16.390Z",
+    "signed_at": "2026-09-09T06:23:54.456Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -307,6 +307,9 @@ improvements, minor bugs, "consider doing X" opinions. Report them as "Fix now" 
 > - Logging: Are key operations logged? Can you trace a request through the system?
 > - Error handling: Are errors caught with useful context, or do they bubble as cryptic stack traces?
 > - Failure modes: What happens when external calls fail? Is there graceful degradation?
+> - Idempotency: what happens if this operation runs twice (retry, duplicate webhook, re-run)?
+> - Crash-halfway: if this crashes mid-operation, what state is left, and how is it reconciled?
+> - Concurrency: is access to any shared file/branch/key/object serialized structurally (a lock, a queue, a unique constraint), or only by convention?
 >
 > [+ Reporting contract]
 
@@ -321,6 +324,8 @@ improvements, minor bugs, "consider doing X" opinions. Report them as "Fix now" 
 > - Dead code, unused imports, unreachable branches
 > - Leftover console.log / debugger statements
 > - TODO/FIXME/HACK without issue references
+> - Root cause vs symptom: does the fix address the root cause, or patch a symptom — a guard clause masking an invariant violation, retry logic hiding a broken contract, a cast silencing a modelling error, or a fix that belongs in the callee's contract rather than the caller?
+> - Where a comment says "do not do X" instead of enforcing it: could that instruction be a type constraint, lint rule, or runtime check instead?
 >
 > [+ Reporting contract]
 
@@ -343,6 +348,7 @@ improvements, minor bugs, "consider doing X" opinions. Report them as "Fix now" 
 > 2. For each changed file, check it against those documented contracts. Common classes: API request/response envelopes consumed through the shared helper (not ad-hoc destructuring of response bodies); data-access conventions (where indexes are declared, reference-field shape); shared error/response wrappers; module-boundary and naming rules the project documents.
 > 3. Flag any touched code that bypasses a documented contract, citing the convention source (file + rule).
 > 4. **New backend route without an integration test.** If the diff added or modified a route under `packages/backend/src/api/v1/registry/routes/`, run the route-coverage mapper (`pnpm --filter imboard_be test:route-coverage`) and check whether any route in the diff is reported as uncovered. A new uncovered route is a contract violation — this is an agents-driven repo, so an agent-authored route MUST land with its integration test, not a human-authored follow-up. Flag it as a finding. (If this project has no such routes/mapper, skip this check.)
+> 5. **Legacy dual-paths.** Does the diff add a new API/branch/path beside an existing one that now has zero remaining callers? Flag "old path still present with zero callers" as a finding whose proposed fix names the callers to migrate — never propose deleting the old path itself; respect the project's keep-as-inert-fallback rule where documented.
 >
 > A contract violation is verifiable and is not a product decision — classify it "Fix now" per the Classification Criteria (for an uncovered route, the proposed fix is the integration test under `tests/integration/`). If the project documents no such conventions, report "No documented conventions to enforce."
 >
