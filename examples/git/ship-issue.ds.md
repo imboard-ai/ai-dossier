@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "ship-issue",
   "title": "Ship Issue — Commit, PR, Merge, Deploy, Teardown",
-  "version": "1.13.1",
+  "version": "1.13.2",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch",
@@ -107,13 +107,13 @@
   "last_updated": "2026-09-09",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "697e68efd7d4bb47274b754ec850dc27ecd401da5f914de5fac5f67d882201bf"
+    "hash": "44e06d0dc2e1c299e217f0250092e6b74bac3f0f17f4c2b8a36ef2a265ac6f6c"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "dm39ZIH+Phlh4pt58qQCfmgxnznsdNZv04TSVRdELB+HAUAQpR4rsjsxHry1QYRe1AkqL6Zr6dUeRj0HVHjXDQ==",
+    "signature": "7w+WlS+1uuYQ4dvZddqK0mosXAhIkL88O5E/xEkurSMArbR9nrhbydouaOviptpfdz1rDf1h2LuFarOoKgHyBA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T06:46:58.639Z",
+    "signed_at": "2026-09-09T07:17:01.762Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -236,12 +236,13 @@ Same proof (≥1 `pull_request`-triggered run for the head sha, or the repo prov
 
 ### Batch Step 3a.5: Verdict-Freshness Gate — VERBATIM (against `phase=batch-review`)
 
-Same gate, same two run points (here before Batch Step 3b's milestone and before `auto-merge`; again at Batch Step 6 if Batch Step 5 moved the head), same blocked shape — posted on the ANCHOR with `--phase batch-ship --kv batch=<batch_id> --kv pr=<pr-number>`. Four batch deviations:
+Same gate, same two run points (here before Batch Step 3b's milestone and before `auto-merge`; again at Batch Step 6 if Batch Step 5 moved the head), same blocked shape — posted on the ANCHOR with `--phase batch-ship --kv batch=<batch_id> --kv pr=<pr-number>`. Same freshness mechanism too — patch-id equality (`verdict_check=patch-id`) when the anchor's verdict head is fetchable, sha equality otherwise (`verdict_check=sha-fallback`), both diffed from each head's own merge-base with `origin/<base_branch>` — recorded on Batch Step 3b's and Batch Step 8's milestones alongside `verdict_head=`/`verdict_refreshed=`. Five batch deviations:
 
 1. **The verdict head is the anchor's last trusted `phase=batch-review status=done` milestone's `head=`** (`contains("phase=batch-review")` in the item-1 idiom; note `phase=review` and `phase=batch-review` are distinct markers).
-2. **That head is an aggregate head, not a conformance head** — review-issue's aggregate mode never runs Agent 7, because each member's slot-cycle already produced its own blind per-issue verdict. So `fresh` here means "the batch head is the one the aggregate review read", and the per-member conformance verdicts it stands on were produced earlier, on member heads. Record that honestly: it is the strongest freshness claim the batch trail supports.
-3. **A stale head re-runs conformance PER MEMBER** — the one place batch mode does run Agent 7 — each scoped to that member's issue plus the combined batch diff (member commits are not isolated on a rebased batch branch). Each member's criteria come from `member_verdicts` (its `ACn <criterion>` text) when present, else the anchor's per-member verdict comment, else that member's own last `phase=plan` milestone. Criteria unrecoverable for any member → `reason=verdict-acs-unreadable`; never fall through to the no-criteria branch, which would authorize an N-issue rebase-merge unverified.
-4. **The hand-off goes on the ANCHOR**, naming the member and its `not-met` AC — never fanned out onto member issues.
+2. **That head is an aggregate head, not a conformance head** — review-issue's aggregate mode never runs Agent 7, because each member's slot-cycle already produced its own blind per-issue verdict. So `fresh` here means "the batch head's diff patch-id (or sha, on fallback) matches the one the aggregate review read", and the per-member conformance verdicts it stands on were produced earlier, on member heads. Record that honestly: it is the strongest freshness claim the batch trail supports.
+3. **The compared diff is the combined batch diff**, not a per-issue diff — the merge-base for both the verdict head and the PR head is `origin/<base_branch>` against the batch branch, exactly as per-issue Step 3a.5 item 2 computes it for the issue branch.
+4. **A stale head re-runs conformance PER MEMBER** — the one place batch mode does run Agent 7 — each scoped to that member's issue plus the combined batch diff (member commits are not isolated on a rebased batch branch). Each member's criteria come from `member_verdicts` (its `ACn <criterion>` text) when present, else the anchor's per-member verdict comment, else that member's own last `phase=plan` milestone. Criteria unrecoverable for any member → `reason=verdict-acs-unreadable`; never fall through to the no-criteria branch, which would authorize an N-issue rebase-merge unverified.
+5. **The hand-off goes on the ANCHOR**, naming the member and its `not-met` AC — never fanned out onto member issues.
 
 ### Batch Step 3b: Runstate Milestone (awaiting-merge) — on the ANCHOR
 
@@ -255,10 +256,11 @@ ai-dossier runstate post --issue <anchor_number> --phase batch-ship --status awa
   --kv strategy=rebase \
   --kv verdict_head=<short sha the last conformance verdict covered|none> \
   --kv verdict_refreshed=<true|false> \
+  --kv verdict_check=<patch-id|sha-fallback> \
   --next batch-ship
 ```
 
-`--next batch-ship` is the mid-phase override (same purpose as per-issue's `--next ship`): the milestone is mid-phase, so the next phase is still batch-ship. The CLI stamps `at=` itself. `verdict_head=`/`verdict_refreshed=` carry Batch Step 3a.5's result — which is why that gate runs before this milestone on both batch paths; Batch Step 8 posts whatever Batch Step 6's re-check produced.
+`--next batch-ship` is the mid-phase override (same purpose as per-issue's `--next ship`): the milestone is mid-phase, so the next phase is still batch-ship. The CLI stamps `at=` itself. `verdict_head=`/`verdict_refreshed=`/`verdict_check=` carry Batch Step 3a.5's result — which is why that gate runs before this milestone on both batch paths; Batch Step 8 posts whatever Batch Step 6's re-check produced.
 
 ### Batch Step 3c: ship_mode — attached or detached
 
@@ -326,7 +328,8 @@ ai-dossier runstate post --issue <anchor_number> --phase batch-ship --status don
   --kv members=<comma list> \
   --kv strategy=rebase \
   --kv verdict_head=<short sha the last conformance verdict covered|none> \
-  --kv verdict_refreshed=<true|false>
+  --kv verdict_refreshed=<true|false> \
+  --kv verdict_check=<patch-id|sha-fallback>
 ```
 
 The CLI computes `next=batch-report` — report-issue's batch variant continues from this milestone (it reads the trail for traps evidence and takes the merge head from the PR itself). `merge_commit=` empty is the same failure it is per-issue: a batch report over an unmerged PR is a failed run, never a clean one.
@@ -447,9 +450,37 @@ The gate is defined once here and runs before **every** merge authorization — 
 
    **A failed read is not a pass.** If `PR_HEAD` is not 40 hex characters, retry once; still not → post the blocked milestone below with `--kv reason=verdict-head-unreadable` and STOP. Never enter item 2 or 3 without a `PR_HEAD`.
 
-2. **Fresh** — `VERDICT_HEAD` is non-empty and `PR_HEAD` starts with it: `[[ -n "$VERDICT_HEAD" && "$PR_HEAD" == "$VERDICT_HEAD"* ]]`, with the non-empty test guarded first or two empty values compare as a match. Proceed, carrying `verdict_head=<the VERDICT_HEAD the snippet printed, written literally — `--kv` rejects a value containing `$`>` and `verdict_refreshed=false`. This is deliberately an equality test and NOT gate-issue's `merge-base --is-ancestor` check: the review head is an ancestor of every commit pushed after it, which is exactly the case this gate must reject.
+2. **Determine freshness — patch-id first, sha equality as the documented fallback.** What must stay unchanged is the diff a conformance verdict actually covered, not its sha: ship's own Step 1 commit, Step 2.5's CI-enable empty commit, and Step 5's CI-fix pushes all move the sha even when they leave the reviewed content untouched, which is exactly why a sha test re-runs Agent 7 on nearly every ship. `git patch-id --stable` over the diff from each head's own merge-base with `origin/<base_branch>` is invariant under an empty commit and under a squash/rebase-only rewrap (same tree, new sha), and changes the instant any reviewed line changes:
 
-3. **Stale** — anything else. Before authorizing anything, re-run **Agent 7 (Conformance) ALONE** against `PR_HEAD`: no other review agent, report-only, editing nothing. Confirm the worktree is at `PR_HEAD` first (`git fetch origin && git rev-parse HEAD`) — a verdict produced against a different tree proves nothing. Its acceptance criteria are the `ac<n>=` lines of the last trusted `phase=plan` milestone (item 1's idiom with `phase=plan`, without the `status=done` narrowing). review-issue's Agent 7 prompt, quoted here so ship needs no cross-dossier fetch:
+   ```bash
+   git fetch origin "$VERDICT_HEAD" 2>/dev/null   # best-effort; a plain fetch of an arbitrary sha can itself fail silently
+   if [ -n "$VERDICT_HEAD" ] && git cat-file -e "$VERDICT_HEAD^{commit}" 2>/dev/null; then
+     VERDICT_CHECK=patch-id
+     VERDICT_BASE=$(git merge-base "origin/<base_branch>" "$VERDICT_HEAD")
+     PR_BASE=$(git merge-base "origin/<base_branch>" "$PR_HEAD")
+     VERDICT_PID=$(git diff "$VERDICT_BASE".."$VERDICT_HEAD" | git patch-id --stable | cut -d' ' -f1)
+     PR_PID=$(git diff "$PR_BASE".."$PR_HEAD" | git patch-id --stable | cut -d' ' -f1)
+     [ -n "$VERDICT_PID" ] && [ "$VERDICT_PID" = "$PR_PID" ] && FRESH=true || FRESH=false
+   else
+     VERDICT_CHECK=sha-fallback
+     [[ -n "$VERDICT_HEAD" && "$PR_HEAD" == "$VERDICT_HEAD"* ]] && FRESH=true || FRESH=false
+   fi
+   echo "verdict_check=$VERDICT_CHECK fresh=$FRESH"
+   ```
+
+   `$VERDICT_HEAD` unfetchable — `git cat-file -e` still fails after the fetch attempt, whether because it was force-pushed away or was never present on origin — is the ONLY trigger for `verdict_check=sha-fallback`; every other path is `verdict_check=patch-id`. `cut -d' ' -f1` is load-bearing: `git patch-id`'s second column is a commit-id hint that a plain `git diff` stream (unlike `git log -p`/`git show`) does not reliably populate, so only the first field is a stable id.
+
+   **One-command proof that an empty commit or a same-content rewrap never flips this to stale** (AC3) — the reviewed diff's patch-id and the candidate head's patch-id, compared directly:
+   ```bash
+   diff <(git diff "$(git merge-base origin/<base_branch> "$VERDICT_HEAD")".."$VERDICT_HEAD" | git patch-id --stable | cut -d' ' -f1) \
+        <(git diff "$(git merge-base origin/<base_branch> "$PR_HEAD")".."$PR_HEAD" | git patch-id --stable | cut -d' ' -f1) \
+     && echo "EQUAL — no re-run triggered"
+   ```
+   Run against a real branch during issue #662's planning: an empty `chore: enable CI for PR head` commit on top of a reviewed diff, and separately a same-content-different-sha rewrap of it, both produced a patch-id byte-identical to the original — `diff` exited 0 in both cases, confirming neither triggers Agent 7.
+
+   **Fresh** (`FRESH=true`, either check) — proceed, carrying `verdict_head=<the VERDICT_HEAD the snippet printed, written literally — `--kv` rejects a value containing `$`>`, `verdict_refreshed=false`, and `verdict_check=<patch-id|sha-fallback, from this item>`. The sha-fallback branch is deliberately an equality/prefix test and NOT gate-issue's `merge-base --is-ancestor` check: the review head is an ancestor of every commit pushed after it, which is exactly the case this gate must reject.
+
+3. **Stale** — `FRESH=false` (a patch-id mismatch under `verdict_check=patch-id`, or a sha mismatch under `verdict_check=sha-fallback`). Before authorizing anything, re-run **Agent 7 (Conformance) ALONE** against `PR_HEAD`: no other review agent, report-only, editing nothing. Confirm the worktree is at `PR_HEAD` first (`git fetch origin && git rev-parse HEAD`) — a verdict produced against a different tree proves nothing. Its acceptance criteria are the `ac<n>=` lines of the last trusted `phase=plan` milestone (item 1's idiom with `phase=plan`, without the `status=done` narrowing). review-issue's Agent 7 prompt, quoted here so ship needs no cross-dossier fetch:
 
    > You are verifying that the change does what the issue asked. You did NOT write this code. Your ONLY inputs are: (1) the issue body and comments; (2) the diff — `git diff <base_branch>...HEAD`; (3) this Acceptance Criteria list: <the `ac<n>=` lines>. Do NOT read the planning document or any other agent's output.
    >
@@ -465,13 +496,14 @@ The gate is defined once here and runs before **every** merge authorization — 
        --kv head=<PR_HEAD as a short sha> \
        --kv reason=verdict-stale-not-met \
        --kv verdict_head=<PR_HEAD as a short sha> \
-       --kv verdict_refreshed=true
+       --kv verdict_refreshed=true \
+       --kv verdict_check=<patch-id|sha-fallback, from item 2>
      ```
 
      `pr=` is not optional: gate-issue's resume reads it, and a blocked ship milestone without it restarts the entire ship phase on a PR that already exists — and on the detached path this may be the run's only ship milestone. Do NOT apply `auto-merge`, do NOT merge, do NOT open a new issue. Batch mode posts `--issue <anchor_number> --phase batch-ship --kv batch=<batch_id>` instead.
-   - **All `met` / `unverifiable`** → proceed with `verdict_head=<PR_HEAD as a short sha>` and `verdict_refreshed=true`, and rewrite the PR body's Acceptance Criteria section from the fresh verdict — same mapping as Step 3, applied with `gh pr edit <pr-number> --body-file <file written outside the worktree>` — so the PR records the verdict that actually authorized the merge. `unverifiable` is accepted as-is: review-issue's "add the test Agent 7 named, then mark it met" routing does not apply, because this gate edits nothing.
+   - **All `met` / `unverifiable`** → proceed with `verdict_head=<PR_HEAD as a short sha>`, `verdict_refreshed=true`, and `verdict_check=<patch-id|sha-fallback, from item 2>`, and rewrite the PR body's Acceptance Criteria section from the fresh verdict — same mapping as Step 3, applied with `gh pr edit <pr-number> --body-file <file written outside the worktree>` — so the PR records the verdict that actually authorized the merge. `unverifiable` is accepted as-is: review-issue's "add the test Agent 7 named, then mark it met" routing does not apply, because this gate edits nothing.
    - **The re-run itself fails** — it errors, times out, or returns no parseable verdict for some AC → same blocked shape with `--kv reason=verdict-refresh-failed`, same hand-off. An unanswered gate is never a pass.
-   - **The issue genuinely has no acceptance criteria** — the trusted `phase=review` milestone reports `ac_total=0`, so Agent 7 never ran in review either → there is nothing to refresh: proceed with `verdict_head=none` and `verdict_refreshed=false`. Positive evidence only: a `phase=plan` milestone that cannot be read is `verdict-refresh-failed`, never "no criteria".
+   - **The issue genuinely has no acceptance criteria** — the trusted `phase=review` milestone reports `ac_total=0`, so Agent 7 never ran in review either → there is nothing to refresh: proceed with `verdict_head=none` and `verdict_refreshed=false` (`verdict_check` still recorded from item 2 — the fetchability/comparison ran before this branch was known). Positive evidence only: a `phase=plan` milestone that cannot be read is `verdict-refresh-failed`, never "no criteria".
 
 ### Step 3b: Runstate Milestone (awaiting-merge)
 
@@ -484,12 +516,13 @@ ai-dossier runstate post --issue <issue_number> --phase ship --status awaiting-m
   --kv ci_fix_attempts=0 \
   --kv verdict_head=<short sha the last conformance verdict covered|none> \
   --kv verdict_refreshed=<true|false> \
+  --kv verdict_check=<patch-id|sha-fallback> \
   --next ship
 ```
 
 The CLI stamps `at=` itself; never hand-write the comment. `--next ship` is the one place a dossier overrides the computed `next=` — this milestone is mid-phase, so the next phase is still ship.
 
-`verdict_head=`/`verdict_refreshed=` carry Step 3a.5's result, which is why that gate runs before this milestone on every path: this is the detached run's LAST milestone and comments are append-only, so a result produced after it could never be recorded. On the attached self-merge path Step 8 posts whatever Step 6's re-check produced, which is these same values unless Step 5 moved the head.
+`verdict_head=`/`verdict_refreshed=`/`verdict_check=` carry Step 3a.5's result, which is why that gate runs before this milestone on every path: this is the detached run's LAST milestone and comments are append-only, so a result produced after it could never be recorded. On the attached self-merge path Step 8 posts whatever Step 6's re-check produced, which is these same values unless Step 5 moved the head.
 
 In `ship_mode=detached` this is the run's LAST milestone (Step 3c) — it is what a later gate reads to resume at `ship-teardown`.
 
@@ -683,10 +716,11 @@ ai-dossier runstate post --issue <issue_number> --phase ship --status done --run
   --kv cleanup=pool_returned|worktree_removed|skipped \
   --kv test_env=torn-down|none \
   --kv verdict_head=<short sha the last conformance verdict covered|none> \
-  --kv verdict_refreshed=<true|false>
+  --kv verdict_refreshed=<true|false> \
+  --kv verdict_check=<patch-id|sha-fallback>
 ```
 
-`verdict_head=`/`verdict_refreshed=` are the verdict-freshness result (Step 3a.5) for the head this merge actually landed. A tail run resuming at `ship-teardown` did not authorize the merge — the detached run's gate did — so it carries that run's `awaiting-merge` values forward rather than inventing new ones, **after confirming the head did not drift while the PR sat parked**: compare the merged head (`gh pr view <pr-number> --json mergeCommit,headRefOid`) against that milestone's `verdict_head=`, and on a mismatch post `--status blocked --kv reason=verdict-head-drifted` with the Guiding Principle hand-off instead of reporting a clean run. Parking a PR hands the merge timing to the watcher; nothing stops a push landing in between, and this is the only place that can catch it.
+`verdict_head=`/`verdict_refreshed=`/`verdict_check=` are the verdict-freshness result (Step 3a.5) for the head this merge actually landed. A tail run resuming at `ship-teardown` did not authorize the merge — the detached run's gate did — so it carries that run's `awaiting-merge` values forward rather than inventing new ones, **after confirming the head did not drift while the PR sat parked**: compare the merged head (`gh pr view <pr-number> --json mergeCommit,headRefOid`) against that milestone's `verdict_head=`, and on a mismatch post `--status blocked --kv reason=verdict-head-drifted` with the Guiding Principle hand-off instead of reporting a clean run. Parking a PR hands the merge timing to the watcher; nothing stops a push landing in between, and this is the only place that can catch it.
 
 Let the CLI stamp `at=` and compute `next=report` — do not pass either; never hand-write the comment. `ci_fix_attempts` is how many Step 5 fix-and-push cycles ran (0 if CI was green first time).
 
@@ -700,7 +734,8 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 - `cleanup`: pool_returned | worktree_removed | skipped
 - `ci_fix_attempts`: number of CI fix-and-push cycles run in Step 5
 - `verdict_head`: the short sha the conformance verdict that authorized the merge actually covered (`none` when the issue carries no acceptance criteria)
-- `verdict_refreshed`: true | false — whether Step 3a.5 had to re-run Agent 7 because the review's head was stale
+- `verdict_refreshed`: true | false — whether Step 3a.5 had to re-run Agent 7 because the reviewed diff was stale
+- `verdict_check`: patch-id | sha-fallback — which comparison Step 3a.5 used to decide freshness
 - Batch mode: `merge_commit` = the rebase merge head (N member commits landed individually), `members`, `strategy=rebase`
 - Posts TWO runstate milestones to the issue (`phase=ship`: `awaiting-merge` before the CI wait, then `done`) — in `detached` mode only the first, and the tail run posts the second. Batch mode posts `phase=batch-ship` milestones on the ANCHOR with the same two-step shape.
 
@@ -711,7 +746,7 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 - [ ] Step 3a confirmed >= 1 `pull_request`-triggered workflow run exists for the PR head sha (or the repo provably has no `pull_request` workflow) — checked BEFORE the `auto-merge` label / `awaiting-merge` milestone / detached handoff
 - [ ] PR created targeting correct base_branch
 - [ ] PR body includes the Acceptance Criteria section from `ac_results` (when non-empty)
-- [ ] Verdict-freshness gate (Step 3a.5) ran before every merge authorization — the `auto-merge` label on the detached park and on the attached-with-watcher hand-off, and the Step 6 self-merge after the CI-fix loop settled: `verdict_head` recorded on the run's final milestone and a prefix of the head that actually merged; on mismatch Agent 7 re-ran before any merge authorization, and a `not-met` blocked with `reason=verdict-stale-not-met` instead of merging
+- [ ] Verdict-freshness gate (Step 3a.5) ran before every merge authorization — the `auto-merge` label on the detached park and on the attached-with-watcher hand-off, and the Step 6 self-merge after the CI-fix loop settled: `verdict_head` recorded on the run's final milestone and a prefix of the head that actually merged; freshness decided by patch-id equality when `VERDICT_HEAD` was fetchable (`verdict_check=patch-id`), sha equality otherwise (`verdict_check=sha-fallback`) — `verdict_check` recorded alongside `verdict_head`/`verdict_refreshed` on every milestone that carries them; on a mismatch Agent 7 re-ran before any merge authorization, and a `not-met` blocked with `reason=verdict-stale-not-met` instead of merging
 - [ ] `ship_mode` was honored: `detached` stopped after the label + `awaiting-merge` milestone with the handoff line printed (no CI wait, no merge, no teardown, no report); `attached` ran through to the final milestone
 - [ ] Detached only: the `auto-merge` label was applied and confirmed present, and the worktree was left in place
 - [ ] CI passed (or failures fixed within 2 attempts), confirmed green on two consecutive stable polls — not a single transient success
@@ -723,7 +758,7 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 - [ ] Worktree returned to pool or removed; returned to original directory
 - [ ] `scripts/ci-parity.sh` was run before committing when present
 - [ ] Runstate milestones were posted via `ai-dossier runstate post` (`awaiting-merge` before the CI wait — with `--next ship` — and, on the attached/tail path, the final one after teardown)
-- Batch mode: rebase prerequisites asserted BEFORE the PR (repo `allow_rebase_merge`, watcher batch-epic rebase support when a watcher exists, watcher presence for detached) — each failure posted `phase=batch-ship status=blocked reason=rebase-not-allowed|watcher-no-rebase|no-watcher` and stopped; PR body has one section per member with its AC checkboxes (from `member_verdicts`) and `Closes #N` per member (never the anchor); `batch-epic` applied and confirmed at PR creation (`auto-merge` applied and confirmed only when parking on or handing the merge to the watcher — never on the attached-no-watcher self-merge path); merged with `--rebase` (never `--squash`); `MERGE_COMMIT` = the merge head, deploy confirmed via the unchanged containment check; teardown returned/removed the BATCH worktree and deleted the batch branch; both milestones posted on the ANCHOR (`batch-ship` awaiting-merge with `--next batch-ship`, then done with `batch=` `pr=` `merge_commit=` `deploy=` `cleanup=` `test_env=` `members=` `strategy=rebase` `verdict_head=` `verdict_refreshed=`); Batch Step 3a.5's gate cleared before each batch merge authorization (the `auto-merge` park and the Batch Step 6 merge)
+- Batch mode: rebase prerequisites asserted BEFORE the PR (repo `allow_rebase_merge`, watcher batch-epic rebase support when a watcher exists, watcher presence for detached) — each failure posted `phase=batch-ship status=blocked reason=rebase-not-allowed|watcher-no-rebase|no-watcher` and stopped; PR body has one section per member with its AC checkboxes (from `member_verdicts`) and `Closes #N` per member (never the anchor); `batch-epic` applied and confirmed at PR creation (`auto-merge` applied and confirmed only when parking on or handing the merge to the watcher — never on the attached-no-watcher self-merge path); merged with `--rebase` (never `--squash`); `MERGE_COMMIT` = the merge head, deploy confirmed via the unchanged containment check; teardown returned/removed the BATCH worktree and deleted the batch branch; both milestones posted on the ANCHOR (`batch-ship` awaiting-merge with `--next batch-ship`, then done with `batch=` `pr=` `merge_commit=` `deploy=` `cleanup=` `test_env=` `members=` `strategy=rebase` `verdict_head=` `verdict_refreshed=` `verdict_check=`); Batch Step 3a.5's gate cleared before each batch merge authorization (the `auto-merge` park and the Batch Step 6 merge)
 
 ## Troubleshooting
 
