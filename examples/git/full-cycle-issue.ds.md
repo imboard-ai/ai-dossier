@@ -3,10 +3,10 @@
   "dossier_schema_version": "1.0.0",
   "name": "full-cycle-issue",
   "title": "Full Cycle Issue Workflow",
-  "version": "3.14.1",
+  "version": "3.15.1",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-08-26",
+  "last_updated": "2026-09-09",
   "objective": "Take a GitHub issue from start to merged PR autonomously — composed from shared sub-dossiers: gate, setup, plan, implement, review, ship, and report",
   "category": [
     "development"
@@ -74,13 +74,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "5698bcd7df81a6b1f98232e676ac9256c504c17f76719b197472c0995e09e598"
+    "hash": "bb9c77f1840d51cd4828db2d24e98eb5343cc2995f386caf9c266b48d226a74c"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "LZs1JBp4VDULtSfP1HMZhRnUi5horYA6beDv1VRAqivJbW4kx3LZ6EtMie6FB7dE1BY2RvgjJmzouMpkwC0YAw==",
+    "signature": "UJvNe/bIccdlHWwqH69iSmla+RLTlgx5xLh+ajWBC1lUPA+P7HFFDtbUXglgZnSlQpRLyI6P4Tjv9jzAP8rABQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-26T10:41:17.483Z",
+    "signed_at": "2026-09-09T06:54:21.986Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -101,6 +101,11 @@ Take a GitHub issue from start to merged PR autonomously. For small-to-medium is
 Stop and hand off when: the issue is too vague to implement · a business/product/design decision is genuinely ambiguous, including anything review escalates (Phase 4) or a CI/merge blocker needing judgment (Phase 5) · tests fail after 2 fix attempts with no clear path · merge conflicts require human judgment.
 
 **How to hand off** (same procedure every time, whichever phase triggers it):
+
+**Step 0 — Classify the question (plan/implement ambiguity only).** Applies only when the trigger is a genuinely ambiguous business/product/design decision surfaced during Phase 2 (Plan) or Phase 3 (Implement) — NOT a reachability escalation (plan-issue's rule stays a hand-off), a Phase 4 review escalation, a Phase 5 CI/merge blocker, or an issue too vague to implement; those skip straight to Step 1.
+- **Observable** — a fact some run could produce: runtime behaviour, output, timing, layout, whether a code path is reachable for a given input (a control-flow fact verifiable by a sketch — distinct from plan-issue's production-occurrence reachability check, which is carved out above and always hands off), whether two approaches actually differ. Answer it with a throwaway sketch: work in a scratch dir OUTSIDE the worktree and the repo (`$TMPDIR/probe-<issue>-<slug>`), one attempt, ≤ 15 minutes wall clock, no network writes, no external side effects (no PRs, comments, deploys, DB writes) — never committed, never pushed, removed when done. Record the result in the planning document's Open Questions as `Q: <question> → observed: <result> (command: <command run>)`, then continue the run — this resolved the ambiguity; it is not a hand-off. If the sketch is inconclusive after its one bounded attempt: hand off — go to Step 1, and paste the sketch's command and output into the Step 3 comment.
+- **Preference** — product direction, scope, taste, a business rule, or anything irreversible. Hand off: go to Step 1.
+
 1. Push whatever work exists so nothing is lost; note the branch name in the comment (Step 2).
 2. `gh label create decision-pending --color "5319E7" --description "Blocked on a human decision" --force` then `gh issue edit <number> --add-label "decision-pending" --remove-label "in-progress"`.
 3. Post ONE comment on the ORIGINAL issue — never a new issue — stating exactly what decision is needed: file/line references, the options, and enough context that a human (or a future run) can act without re-deriving your reasoning.
@@ -263,6 +268,7 @@ Orchestration-level only — each sub-dossier validates its own phase.
 - [ ] Review tier selected and stated; only that tier's agents ran, all report-only; findings deduped, then applied serially by the review phase (no agent edited files)
 - [ ] PR created targeting correct base_branch
 - [ ] Zero escalated findings reached Ship — any escalation stopped the run at Phase 4 with a decision-pending hand-off on the issue (Guiding Principle), not a new GH issue
+- [ ] A Phase 2/3 ambiguity was classified observable-vs-preference first (Guiding Principle Step 0); an observable question got one bounded ≤ 15-minute throwaway sketch outside the worktree and repo, recorded in the planning doc's Open Questions, before the run proceeded or (if inconclusive) handed off — reachability, review, and CI/merge-blocker escalations skip this step and hand off directly
 - [ ] `auto-merge` label applied to PR and confirmed present
 - [ ] Every in-run wait (CI, merge confirm, deploy) ran as an armed watch per `imboard-ai/git/watch-task` — blocking loop or monitor call, never a turn ended with nothing armed
 - [ ] PR merged by the watcher — `MERGE_COMMIT` captured (`mergedAt` non-null, ship Step 6b). Empty `MERGE_COMMIT` = FAILED run unless a hard blocker was escalated
