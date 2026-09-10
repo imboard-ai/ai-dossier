@@ -107,6 +107,14 @@ export interface CapabilityGateResult {
    * is unset in those cases.
    */
   reason?: string | null;
+  /**
+   * The `cap run` envelope's `duration_ms` (#681) — how long the capability
+   * actually ran before reaching its verdict. `null` when unknown (an older
+   * capability build whose envelope omits the field, or no subprocess ran).
+   * Recorded on `member_gates` so the gate's cost is measurable per member —
+   * the raw material for reporting gate savings per change shape (AC4).
+   */
+  durationMs?: number | null;
 }
 
 // --- F.2/F.8/F.9 batch failure recovery records (#472) ---
@@ -440,10 +448,23 @@ export interface BatchEntry {
    * inconclusive). `sched status --json` surfaces this for free via the raw
    * `BatchEntry`. `{}` for a batch created before this field existed
    * (`state.ts` load-time backfill) or one whose gate never ran/never failed.
+   *
+   * #681: a timeout-shaped `automation-broken` (reason `command timed out
+   * after <N>ms`) is recorded as `capability-unavailable` — the gate
+   * DECLINED the member (skip; the parent's expensive stage covers it), it
+   * did not reach a machinery-failure verdict. `duration_ms` (#681) is the
+   * capability's own runtime, the per-member denominator for gate-cost
+   * reporting per change shape; `null` on records from before it existed.
    */
   member_gates: Record<
     string,
-    { capability: string; outcome: CapOutcome; output_tail: string | null; at: string }
+    {
+      capability: string;
+      outcome: CapOutcome;
+      output_tail: string | null;
+      duration_ms: number | null;
+      at: string;
+    }
   >;
   /**
    * Reason the batch is `blocked`, set by `blockBatch` (#583 — `blockBatch`

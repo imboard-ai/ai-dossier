@@ -188,6 +188,7 @@ member reports review-done. It degrades exactly as the vocabulary above implies 
 | `task-failed` **with** failing-test evidence | the member is evicted (#594) |
 | `task-failed` with no evidence | the batch BLOCKS — a capability that produced nothing did not earn a failure (#594) |
 | `automation-broken` | the batch BLOCKS — declared, but its machinery could not be trusted (#583/#585) |
+| `automation-broken` whose reason is `command timed out after <N>ms` | **the gate declines the member** — recorded `capability-unavailable` and journalled `gate-skipped-timeout:<id>`; the parent's expensive stage covers it (#681). A timeout is a statement about duration, not about the harness's reliability — and a member touching two workspace roots selects a dependents closure that approaches the whole workspace, so the gate was never "focused" there. The resolved package selection (the capability's own output) is preserved in the per-gate log and `member_gates.output_tail`, with the capability's `duration_ms` beside it |
 | `capability-unavailable` | **the check is skipped** and journalled `gate-skipped:<id>`; the member is judged on whatever else is available (#625) |
 
 A repo that declares neither id runs batches end to end. Skipping costs *early*
