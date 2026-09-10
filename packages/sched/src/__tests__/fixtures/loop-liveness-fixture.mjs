@@ -71,8 +71,3 @@ try {
   process.exit(1);
 }
 console.log(`stopped after ${tickCount} ticks`);
-
-// Prove the loop exited because of the signal, not because the event loop
-// drained: a signal-driven stop must show at least one tick; the #679 bug
-// showed exactly one tick and a self-exit with no signal at all.
-if (process.exitCode === undefined) process.exitCode = 0;
