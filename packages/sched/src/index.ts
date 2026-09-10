@@ -58,6 +58,7 @@ export {
   journalCmdModelFields,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
+  procStartTime,
   type ResolvedDispatch,
   type ResolvedTierDispatch,
   reportTierFor,

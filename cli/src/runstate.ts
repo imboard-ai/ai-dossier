@@ -803,6 +803,126 @@ export function nextFenceGeneration(
   return next > MAX_GENERATION ? null : next;
 }
 
+// --- Fence lifecycle (#683): release records, bind records, stale-on-read ---
+
+/**
+ * The fence key that marks a fence RELEASE (#683): a `status=superseded` milestone
+ * carrying `released=true` at `gen=<n>` means "every fence of this run up to generation
+ * n is released — its owning run has ended". The engine posts one when it detects the
+ * owning run's exit, so a fence never outlives a run the engine saw end.
+ */
+export const FENCE_RELEASED_KEY = 'released';
+
+/**
+ * The fence keys that mark a fence BIND (#683): a `status=superseded` milestone carrying
+ * `bound=true` at the fence's own generation, plus `pid`/`pid_start`, names the live
+ * process the fence granted ownership to. Readers use it to tell a live owner from a
+ * ghost: a bound fence whose pid is gone is STALE and fences nobody.
+ */
+export const FENCE_BOUND_KEY = 'bound';
+export const FENCE_PID_KEY = 'pid';
+export const FENCE_PID_START_KEY = 'pid_start';
+
+/**
+ * The highest generation a release record on `run`'s trail releases, or 0 when none.
+ *
+ * Release records share their `gen` with the fence they release, so they never raise the
+ * generation arithmetic ({@link fenceGeneration} keeps counting them through
+ * {@link latestFence}) — this function exists for the ENFORCEMENT read only: a fence at
+ * or below the released ceiling fences nobody (#683 AC1).
+ */
+export function releasedUpTo(milestones: readonly ParsedMilestone[], run: string): number {
+  if (run === '') return DEFAULT_GENERATION;
+  let ceiling = DEFAULT_GENERATION;
+  for (const milestone of milestones) {
+    if (milestone.status !== FENCE_STATUS || milestone.run !== run) continue;
+    if (milestone.keys[FENCE_RELEASED_KEY] !== 'true') continue;
+    const gen = generationOf(milestone);
+    // A malformed released gen is skipped, never read as 0: reading one as 0 would
+    // silently UNRELEASE everything below the malformed record — the same
+    // fail-closed rule `latestFence` applies to malformed fences.
+    if (gen === null) continue;
+    if (gen > ceiling) ceiling = gen;
+  }
+  return ceiling;
+}
+
+/**
+ * The highest-generation fence on `run`'s trail that still fences anyone (#683).
+ *
+ * A fence is dead when a release record covers it (`gen` ≤ {@link releasedUpTo}'s
+ * ceiling). Scanned by highest generation, same as {@link latestFence} — a zombie can
+ * post after the release that covers it, and reading fences by position would let a
+ * lower one mask the ceiling.
+ *
+ * This is the ENFORCEMENT read: `check` and `post`'s guard decide on it, while
+ * generation arithmetic stays on {@link latestFence} so released generations are never
+ * reused (a takeover of a takeover must not collide with the generation that was
+ * released — the owner may be #472-style "mostly dead").
+ */
+export function activeFence(
+  milestones: readonly ParsedMilestone[],
+  run: string
+): ParsedMilestone | null {
+  const ceiling = releasedUpTo(milestones, run);
+  if (run === '') return null;
+  let best: ParsedMilestone | null = null;
+  let bestGen = ceiling;
+  for (const milestone of milestones) {
+    if (milestone.status !== FENCE_STATUS || milestone.run !== run) continue;
+    if (milestone.keys[FENCE_RELEASED_KEY] === 'true') continue;
+    const gen = generationOf(milestone);
+    if (gen === null) continue;
+    if (gen > bestGen) {
+      bestGen = gen;
+      best = milestone;
+    }
+  }
+  return best;
+}
+
+/** A parsed bind record: the live process a fence granted ownership to (#683). */
+export interface FenceBind {
+  /** The bound process id (always ≥ 1 — pid 0/negative is never a bound owner). */
+  pid: number;
+  /** The process's `/proc` start-time at bind time, or null when unrecorded. */
+  pidStart: number | null;
+  /** The takeover label the bind was posted with (same label as its fence). */
+  takeover: string;
+}
+
+/**
+ * The latest bind record for `run` at exactly `gen`, or null when the fence was never
+ * bound (spawn or bind-post missed — the fence then reads fail-closed, as before #683).
+ *
+ * Matched on the fence's exact generation: a bind for an older generation describes a
+ * fence that no longer governs anything and must not speak for the active one.
+ */
+export function fenceBind(
+  milestones: readonly ParsedMilestone[],
+  run: string,
+  gen: number
+): FenceBind | null {
+  if (run === '') return null;
+  let best: FenceBind | null = null;
+  for (const milestone of milestones) {
+    if (milestone.status !== FENCE_STATUS || milestone.run !== run) continue;
+    if (milestone.keys[FENCE_BOUND_KEY] !== 'true') continue;
+    if (generationOf(milestone) !== gen) continue;
+    const pidRaw = milestone.keys[FENCE_PID_KEY];
+    const pid = pidRaw !== undefined ? parseGeneration(pidRaw) : null;
+    if (pid === null || pid < 1) continue;
+    const startRaw = milestone.keys[FENCE_PID_START_KEY];
+    const pidStart = startRaw !== undefined ? parseGeneration(startRaw) : null;
+    best = {
+      pid,
+      pidStart,
+      takeover: milestone.keys.takeover ?? '',
+    };
+  }
+  return best;
+}
+
 /**
  * The world-facing checks the resume table needs. Injected so {@link computeResume}
  * stays pure and testable — the command layer supplies the `git`/`gh`/`fs` versions.

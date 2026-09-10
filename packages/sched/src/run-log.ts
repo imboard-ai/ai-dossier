@@ -259,6 +259,55 @@ export function readDispatchLog(logFile: string, offset = 0): string | null {
 }
 
 /**
+ * Evidence that THIS dispatch ended because a fence told it to (#683 AC3).
+ *
+ * Both shapes come from `runstate check`'s own output — the human stderr line and the
+ * dedup marker of the abort comment it posted — so the parse key on the CLI's exact
+ * wording, never on an agent's prose about being superseded.
+ */
+export interface FenceAbortEvidence {
+  /** The generation that fenced this dispatch out. */
+  gen: number;
+  /** The takeover label the fence named, when the log carried it. */
+  takeover: string | null;
+}
+
+/** `❌ Run <run> was SUPERSEDED at generation <n>` — `runstate check`'s stderr verdict. */
+const FENCE_STDERR_RE = /❌\s*Run\s+(r-\d+-[0-9a-f]{4,})\s+was SUPERSEDED at generation (\d+)/;
+
+/** `<!-- runstate-abort:<run>:<gen> -->` — the dedup marker of the abort comment. */
+const FENCE_ABORT_MARKER_RE = /runstate-abort:(r-\d+-[0-9a-f]{4,}):(\d+)/;
+
+/** The takeover label `fenceDescription` puts inside both shapes above. */
+const FENCE_TAKEOVER_RE = /takeover '([^']+)'/;
+
+/**
+ * Detect a fence-driven abort in one dispatch's log slice (#683 AC3).
+ *
+ * `run` is the trail run id this dispatch was working under; a line naming ANY OTHER
+ * run id is not this dispatch's checkpoint — docs and trap tables quote historical
+ * incidents, and an agent that merely READ such text must not be classified as having
+ * deferred (a false defer would skip escalation forever, a worse failure than the
+ * livelock this fixes). Returns the first match's evidence, or null.
+ *
+ * Exported because #685 (background-exit enforcement) builds its own classification on
+ * the same dispatch-log evidence — extend this shape rather than re-parsing the log.
+ */
+export function parseFenceAbort(logContent: string | null, run: string): FenceAbortEvidence | null {
+  if (logContent === null || run === '') return null;
+  for (const re of [FENCE_STDERR_RE, FENCE_ABORT_MARKER_RE]) {
+    const match = re.exec(logContent);
+    if (match === null) continue;
+    if (match[1] !== run) continue;
+    const gen = Number.parseInt(match[2], 10);
+    if (!Number.isSafeInteger(gen) || gen < 0) continue;
+    const takeover = FENCE_TAKEOVER_RE.exec(logContent);
+    return { gen, takeover: takeover === null ? null : takeover[1] };
+  }
+  return null;
+}
+
+/**
  * Finalize one dispatch's `runs.jsonl` write: journal WHY an entry has no
  * usage (an entry with null tokens has several possible causes that look
  * identical in `sched stats` — a row of dashes; #524), honor

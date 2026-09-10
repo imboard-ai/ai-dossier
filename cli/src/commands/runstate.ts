@@ -8,6 +8,7 @@
  */
 
 import fs from 'node:fs';
+import { procStartTime } from '@ai-dossier/sched';
 import type { Command } from 'commander';
 import { formatDurationCell } from '../duration';
 import {
@@ -29,14 +30,21 @@ import {
 } from '../gh';
 import { parseIssueSelection } from '../issue-selection';
 import {
+  activeFence,
   BATCH_PHASES,
   buildMilestone,
   computeResume,
   DEFAULT_GENERATION,
+  FENCE_BOUND_KEY,
+  FENCE_PID_KEY,
+  FENCE_PID_START_KEY,
+  FENCE_RELEASED_KEY,
   FENCE_STATUS,
+  type FenceBind,
+  fenceBind,
+  fenceGeneration,
   generationOf,
   isKnownPhase,
-  latestFence,
   MAX_BODY_LENGTH,
   MAX_GENERATION,
   mintRunId,
@@ -48,6 +56,7 @@ import {
   parseGeneration,
   parseMilestones,
   type ResumeProbe,
+  releasedUpTo,
   safeLabel,
   splitPair,
   validateMilestone,
@@ -85,6 +94,21 @@ interface FenceOptions {
   phase: string;
   run: string;
   takeover: string;
+  gen?: string;
+  release?: boolean;
+  repo?: string;
+  dryRun?: boolean;
+  json?: boolean;
+}
+
+interface FenceBindOptions {
+  issue: string;
+  phase: string;
+  run: string;
+  takeover: string;
+  gen: string;
+  pid: string;
+  pidStart?: string;
   repo?: string;
   dryRun?: boolean;
   json?: boolean;
@@ -596,28 +620,151 @@ function fenceDescription(fence: ParsedMilestone): string {
   return `generation ${generationOf(fence) ?? 'unknown'} (takeover '${safeLabel(fence.keys.takeover)}', fenced at ${safePhase(fence.phase)} on ${safeAt(fence.at)})`;
 }
 
+/**
+ * Whether the pid a fence is bound to still names the process that was bound (#683).
+ *
+ * Mirrors the engine's `isAlive(pid, expectedStart)` exactly (`packages/sched`'s
+ * `createSpawnDeps`): `kill(pid, 0)` decides existence (EPERM = alive — a process we
+ * cannot signal is still running), then the recorded `/proc` start-time rules out a
+ * REUSED pid, the #472 lesson. `/proc` unreadable while `kill` succeeded is
+ * best-effort-ALIVE, never dead — a non-Linux reader must not un-fence a live owner.
+ *
+ * Returns null when there is no meaningful answer: no pid (unbound fence).
+ */
+function boundPidAlive(pid: number, pidStart: number | null): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+  if (pidStart === null) return true;
+  const current = procStartTime(pid);
+  if (current === null) return true;
+  return current === pidStart;
+}
+
+/** How the fence's owning run is described to a human, with its liveness (#683 AC4). */
+function ownerDescription(
+  fence: ParsedMilestone,
+  bind: FenceBind | null,
+  alive: boolean | null
+): string {
+  const run = safeLabel(fence.run);
+  const gen = generationOf(fence) ?? 'unknown';
+  const takeover = safeLabel(fence.keys.takeover);
+  if (bind === null) {
+    return `run \`${run}\` generation ${gen} (takeover '${takeover}') — NO owner pid is bound to this fence (the bind was missed, or the writing engine predates #683). Verify the owner is real before treating this fence as authoritative.`;
+  }
+  const pid = `pid ${bind.pid}`;
+  if (alive === true)
+    return `run \`${run}\` generation ${gen} (takeover '${takeover}') is ALIVE (${pid})`;
+  if (alive === false)
+    return `run \`${run}\` generation ${gen} (takeover '${takeover}') is NOT RUNNING (${pid} is gone)`;
+  return `run \`${run}\` generation ${gen} (takeover '${takeover}') — liveness of ${pid} could not be determined`;
+}
+
 /** What the trail says about one run's generation, or why it could not say. */
 type FenceView =
   | { kind: 'unreadable'; error: string }
-  | { kind: 'live'; current: number; knownRun: boolean }
-  | { kind: 'fenced'; current: number; fence: ParsedMilestone; knownRun: boolean };
+  | {
+      kind: 'live';
+      current: number;
+      knownRun: boolean;
+      /** True when an active fence was ignored because its bound owner is gone (#683 AC2). */
+      stale?: boolean;
+      /** The generation whose release made the run live, when a release was on the trail. */
+      released_up_to?: number;
+      /** Present with `stale`: the fence that WAS governing, for reporting. */
+      stale_fence?: ParsedMilestone;
+      owner_pid?: number;
+    }
+  | {
+      kind: 'fenced';
+      current: number;
+      fence: ParsedMilestone;
+      knownRun: boolean;
+      /** Whether the governing fence carries a bind record (#683). */
+      bound: boolean;
+      /** The bind record itself, for human-readable owner reporting (#683 AC4). */
+      owner_bind: FenceBind | null;
+      /** The bound owner pid, or null when unbound. */
+      owner_pid: number | null;
+      /** The bound owner's liveness, or null when it could not be determined. */
+      owner_alive: boolean | null;
+    };
+
+/** A pid-liveness predicate, injected so {@link viewFence} stays testable (#683 AC2). */
+type PidLiveness = (pid: number, pidStart: number | null) => boolean;
 
 /**
  * The single "has this run been superseded?" query — one trail read, one comparison.
  *
  * Shared by `post`'s guard and `check` so the rule cannot drift between the command that
  * enforces it and the command that reports it.
+ *
+ * #683 changed what counts as superseded. The decision reads {@link activeFence} — the
+ * highest fence not covered by a release record — and an active fence whose bound owner
+ * pid is DEAD is STALE: it fences nobody, and the run reads as live with `stale: true`.
+ * An UNBOUND fence still fences (fail-closed): with no pid on record, a reader cannot
+ * tell a live owner from a ghost, and failing open would let two agents write one trail.
  */
-function viewFence(issue: string, repo: string | undefined, run: string, gen: number): FenceView {
+function viewFence(
+  issue: string,
+  repo: string | undefined,
+  run: string,
+  gen: number,
+  liveness?: PidLiveness
+): FenceView {
   const result = tryFetchTrustedMilestones(issue, repo);
   if (!result.ok) return { kind: 'unreadable', error: result.error.split('\n')[0] };
 
   const knownRun = result.milestones.some((m) => m.run === run);
-  const fence = latestFence(result.milestones, run);
-  const current = fence === null ? DEFAULT_GENERATION : (generationOf(fence) ?? DEFAULT_GENERATION);
-  return fence !== null && current > gen
-    ? { kind: 'fenced', current, fence, knownRun }
-    : { kind: 'live', current, knownRun };
+  const current = fenceGeneration(result.milestones, run);
+  const active = activeFence(result.milestones, run);
+  if (active === null) {
+    const released = releasedUpTo(result.milestones, run);
+    return released > 0
+      ? { kind: 'live', current, knownRun, released_up_to: released }
+      : { kind: 'live', current, knownRun };
+  }
+
+  const activeGen = generationOf(active) ?? DEFAULT_GENERATION;
+  if (activeGen <= gen) return { kind: 'live', current, knownRun };
+
+  const bind = fenceBind(result.milestones, run, activeGen);
+  if (bind !== null && liveness !== undefined) {
+    const alive = liveness(bind.pid, bind.pidStart);
+    if (!alive) {
+      return {
+        kind: 'live',
+        current,
+        knownRun,
+        stale: true,
+        stale_fence: active,
+        owner_pid: bind.pid,
+      };
+    }
+    return {
+      kind: 'fenced',
+      current,
+      fence: active,
+      knownRun,
+      bound: true,
+      owner_bind: bind,
+      owner_pid: bind.pid,
+      owner_alive: alive,
+    };
+  }
+  return {
+    kind: 'fenced',
+    current,
+    fence: active,
+    knownRun,
+    bound: bind !== null,
+    owner_bind: bind,
+    owner_pid: bind?.pid ?? null,
+    owner_alive: bind !== null && liveness !== undefined ? true : null,
+  };
 }
 
 /**
@@ -663,12 +810,30 @@ function requireNotFenced(
   }
   if (view.kind === 'live') {
     warnUnknownRun(view.knownRun, options.issue, options.run);
+    if (view.stale === true && view.stale_fence !== undefined) {
+      // A ghost's fence does not gate a post (#683 AC2) — but the write must SAY it
+      // decided on a stale fence, or a reader of the trail cannot tell a checked post
+      // from one that ignored an apparently-active fence.
+      console.error(
+        `⚠️  Fence ${fenceDescription(view.stale_fence)} was STALE — its owner pid ${view.owner_pid} is not running — so run ${options.run} reads as live.`
+      );
+      return {
+        fence_check: 'passed',
+        current_gen: view.current,
+        fence_stale: true,
+        owner_pid: view.owner_pid,
+      };
+    }
     return { fence_check: 'passed', current_gen: view.current };
   }
 
+  const ownerLine =
+    view.bound && view.owner_pid !== null
+      ? `Its owning run is bound to pid ${view.owner_pid}, which IS running — the owner is real.`
+      : `No owner pid is bound to this fence (bind missed, or an engine predating #683) — verify the owner is real before acting.`;
   const lines = [
     `Run ${options.run} was SUPERSEDED — refusing to post this ${options.phase}/${options.status} milestone from generation ${gen}.`,
-    `It was fenced at ${fenceDescription(view.fence)}.`,
+    `It was fenced at ${fenceDescription(view.fence)}. ${ownerLine}`,
     `This run no longer owns issue #${options.issue}: another agent took it over, and two runs writing one trail is what this check exists to prevent.`,
     `Fix: stop working on this issue and exit. Do not push, do not open a PR, do not retry — the takeover is doing the work. If you ARE the takeover, pass --gen ${view.current}.`,
   ];
@@ -1310,6 +1475,12 @@ function registerMintSubcommand(cmd: Command): void {
  *
  * Called by the stall-recovery ladder BEFORE the replacement agent is spawned, so the
  * fence is durable even if the takeover dies on its first breath.
+ *
+ * With `--release --gen <n>` (#683 AC1) it posts the opposite record: "every fence of
+ * this run up to generation n is released". The engine calls this when it detects the
+ * owning run's exit, so a fence never outlives a run the engine saw end. Release records
+ * share their generation with the fence they release — the generation arithmetic never
+ * walks back, so a released generation is never handed out again.
  */
 function registerFenceSubcommand(cmd: Command): void {
   cmd
@@ -1320,13 +1491,25 @@ function registerFenceSubcommand(cmd: Command): void {
     .requiredOption('--phase <phase>', 'Phase the superseded run was in when it was taken over')
     .requiredOption(
       '--takeover <label>',
-      'What is taking the run over (a run id, slot id, or agent name)'
+      'What is taking the run over (a run id, slot id, or agent name); with --release, the owner being released'
+    )
+    .option(
+      '--release',
+      'Post a RELEASE record instead of a fence: every fence of this run up to --gen is released (#683)'
+    )
+    .option(
+      '--gen <n>',
+      'With --release: the generation to release up to (required; the owning run must have ended)'
     )
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
     .option('--dry-run', 'Print the comment body without posting it')
     .option('--json', 'Output the result as JSON')
     .action((options: FenceOptions) => {
       requireIssueTarget(options);
+      if (options.release === true) {
+        fenceRelease(options);
+        return;
+      }
       // Trusted read: the generation is read-then-incremented off the trail, so a forged
       // `superseded` comment claiming a high generation would otherwise dictate what the
       // legitimate fence installs.
@@ -1381,6 +1564,151 @@ function registerFenceSubcommand(cmd: Command): void {
           `✅ fenced ${options.run} gen=${gen} takeover=${options.takeover} → ${url}`,
       });
     });
+
+  cmd
+    .command('fence-bind')
+    .description(
+      'Bind a fence to its owning process: post pid + /proc start-time so readers can tell a live owner from a ghost (#683)'
+    )
+    .requiredOption('--issue <number>', 'GitHub issue number')
+    .requiredOption('--run <id>', 'The fenced run id (r-<issue>-<hex>)')
+    .requiredOption('--phase <phase>', 'The phase the fence was written at')
+    .requiredOption('--takeover <label>', 'The takeover label of the fence being bound')
+    .requiredOption('--gen <n>', 'The generation of the fence being bound (its current top)')
+    .requiredOption('--pid <n>', "The owning process's pid")
+    .option('--pid-start <n>', "The owning process's /proc start-time (pid identity, #472)")
+    .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
+    .option('--dry-run', 'Print the comment body without posting it')
+    .option('--json', 'Output the result as JSON')
+    .action((options: FenceBindOptions) => {
+      requireIssueTarget(options);
+      const gen = requireGeneration(options.gen, '--gen');
+      if (gen < 1) {
+        fail([
+          `Invalid --gen '${options.gen}' — a bind describes a fence, and generation 0 means "never fenced".\nFix: pass the generation 'runstate fence' installed (its success line prints gen=<n>).`,
+        ]);
+      }
+      const pid = parseGeneration(options.pid);
+      if (pid === null || pid < 1) {
+        fail([
+          `Invalid --pid '${options.pid}' — expected the owning process's pid (a positive integer).\nFix: pass the pid the engine's spawn returned.`,
+        ]);
+      }
+      let pidStart: number | null = null;
+      if (options.pidStart !== undefined) {
+        pidStart = parseGeneration(options.pidStart);
+        if (pidStart === null) {
+          fail([
+            `Invalid --pid-start '${options.pidStart}' — expected the process's /proc start-time (a non-negative integer).\nFix: pass the value the engine's processStart(pid) returned.`,
+          ]);
+        }
+      }
+
+      // The bind must describe the trail's CURRENT top fence: a bind for an older
+      // generation is stale on arrival (a newer fence supersedes it) and would only
+      // muddle the read path, and a bind for a gen the run never reached is a caller bug.
+      const trusted = tryFetchTrustedMilestones(options.issue, options.repo);
+      if (!trusted.ok) fail([trusted.error]);
+      const trailGen = fenceGeneration(trusted.milestones, options.run);
+      if (gen !== trailGen) {
+        fail([
+          `Refusing to bind generation ${gen} — the trail's top fence for run ${options.run} is generation ${trailGen}.\nFix: bind immediately after spawning the takeover, with the gen the fence installed.`,
+        ]);
+      }
+
+      const keys: Array<[string, string]> = [
+        ['gen', String(gen)],
+        ['takeover', options.takeover],
+        [FENCE_BOUND_KEY, 'true'],
+        [FENCE_PID_KEY, String(pid)],
+        ...(pidStart !== null ? [[FENCE_PID_START_KEY, String(pidStart)] as [string, string]] : []),
+      ];
+      const input = {
+        phase: options.phase,
+        status: FENCE_STATUS,
+        run: options.run,
+        keys,
+      };
+      const errors = validateMilestone(input);
+      if (errors.length > 0) fail(errors);
+
+      const body = buildMilestone(input);
+      requirePostableBody(body, keys);
+
+      if (options.dryRun) {
+        printDryRun(body, options.json, { gen, pid });
+        return;
+      }
+
+      postIssueComment({
+        issue: options.issue,
+        repo: options.repo,
+        body,
+        noun: 'fence bind',
+        action: `Failed to bind the fence for run ${options.run} on issue #${options.issue}`,
+        json: options.json,
+        jsonExtras: { body, gen, pid, pid_start: pidStart, run: options.run },
+        successLine: (url) => `✅ bound ${options.run} gen=${gen} owner pid=${pid} → ${url}`,
+      });
+    });
+}
+
+/** The `--release` half of `runstate fence` (#683 AC1). Split out to keep the action flat. */
+function fenceRelease(options: FenceOptions): void {
+  const genRaw = options.gen;
+  if (genRaw === undefined) {
+    fail([
+      `--release requires --gen <n> — the generation to release up to.\nFix: pass the owning run's generation (the engine's slot gen) so the record says exactly how far the release reaches.`,
+    ]);
+  }
+  const gen = requireGeneration(genRaw, '--gen');
+  if (gen < 1) {
+    fail([
+      `Invalid --gen '${genRaw}' for --release — generation 0 means "never fenced"; there is nothing to release.\nFix: pass the owning run's generation (≥ 1).`,
+    ]);
+  }
+
+  const result = tryFetchTrustedMilestones(options.issue, options.repo);
+  if (!result.ok) fail([result.error]);
+  const trailGen = fenceGeneration(result.milestones, options.run);
+  if (gen > trailGen) {
+    fail([
+      `Refusing to release up to generation ${gen} — the highest fence on run ${options.run}'s trail is generation ${trailGen}.\nA release must not claim more than was fenced; pass the owning run's own generation.`,
+    ]);
+  }
+
+  const keys: Array<[string, string]> = [
+    ['gen', String(gen)],
+    ['takeover', options.takeover],
+    [FENCE_RELEASED_KEY, 'true'],
+  ];
+  const input = {
+    phase: options.phase,
+    status: FENCE_STATUS,
+    run: options.run,
+    keys,
+  };
+  const errors = validateMilestone(input);
+  if (errors.length > 0) fail(errors);
+
+  const body = buildMilestone(input);
+  requirePostableBody(body, keys);
+
+  if (options.dryRun) {
+    printDryRun(body, options.json, { gen, released: true });
+    return;
+  }
+
+  postIssueComment({
+    issue: options.issue,
+    repo: options.repo,
+    body,
+    noun: 'fence release',
+    action: `Failed to release the fence for run ${options.run} on issue #${options.issue}`,
+    json: options.json,
+    jsonExtras: { body, gen, released: true, run: options.run },
+    successLine: (url) => `✅ released ${options.run} fences up to gen=${gen} → ${url}`,
+  });
 }
 
 /** What `check` reports, in either output mode. */
@@ -1399,14 +1727,47 @@ interface CheckResult {
   takeover?: string;
   phase?: string;
   at?: string;
+  /** True when a fence was ignored because its bound owner pid is gone (#683 AC2). */
+  stale?: boolean;
+  /** The generation of the released ceiling, when a release record was on the trail. */
+  released_up_to?: number;
+  /** The governing fence's bound owner pid (#683), when fenced. */
+  owner_pid?: number | null;
+  /** The bound owner's liveness (#683 AC4), when fenced and bound. */
+  owner_alive?: boolean | null;
 }
 
-/** The comment a fenced run leaves behind when it aborts (#504 AC2). */
-function abortCommentBody(run: string, gen: number, fence: ParsedMilestone): string {
+/**
+ * The comment a fenced run leaves behind when it aborts (#504 AC2, #683 AC4).
+ *
+ * `owner` names the owning run's liveness so a human reading the issue can tell a live
+ * owner from a ghost: a bound pid that IS running, an unbound fence that proves nothing,
+ * or (unreachable through `check`, kept for safety) a bound pid that is gone.
+ */
+function abortCommentBody(
+  run: string,
+  gen: number,
+  fence: ParsedMilestone,
+  owner: { pid: number | null; alive: boolean | null } = { pid: null, alive: null }
+): string {
+  const genLabel = generationOf(fence) ?? 'unknown';
+  const takeover = safeLabel(fence.keys.takeover);
+  let liveness: string;
+  if (owner.pid === null) {
+    liveness =
+      'No owner pid is bound to this fence (the bind was missed, or the writing engine predates #683) — its liveness could not be confirmed here.';
+  } else if (owner.alive === true) {
+    liveness = `The owning run is ALIVE (pid ${owner.pid}) — this defer is a deliberate, correct no-op.`;
+  } else if (owner.alive === false) {
+    liveness = `The owning run is NOT RUNNING (pid ${owner.pid} is gone) — if you are reading this, the fence was treated as authoritative anyway; the engine should have released it (#683).`;
+  } else {
+    liveness = `Liveness of the owning run (pid ${owner.pid}) could not be determined.`;
+  }
   return [
     `**Run superseded — aborting.** Run \`${run}\` (generation ${gen}) stopped work on this issue at its supersession checkpoint.`,
     '',
-    `It was fenced at ${fenceDescription(fence)}. The takeover owns the issue from here; this run pushed nothing further and opened no PR.`,
+    `It was fenced at ${fenceDescription(fence)}. The owning run \`${run}\` generation ${genLabel} (takeover '${takeover}') owns the issue from here. ${liveness}`,
+    `This run pushed nothing further and opened no PR.`,
   ].join('\n');
 }
 
@@ -1448,7 +1809,7 @@ function registerCheckSubcommand(cmd: Command): void {
     .action((options: CheckOptions) => {
       requireIssueTarget(options);
       const gen = requireGeneration(options.gen, '--gen');
-      const view = viewFence(options.issue, options.repo, options.run, gen);
+      const view = viewFence(options.issue, options.repo, options.run, gen, boundPidAlive);
 
       if (view.kind === 'unreadable') {
         console.error(
@@ -1464,8 +1825,23 @@ function registerCheckSubcommand(cmd: Command): void {
       warnUnknownRun(view.knownRun, options.issue, options.run);
 
       if (view.kind === 'live') {
+        if (view.stale === true && view.stale_fence !== undefined) {
+          // A ghost's fence must not stop a successor (#683 AC2): report live, and say
+          // WHY the apparently-active fence was ignored, on stderr so a human running
+          // this by hand sees the decision instead of an unexplained pass.
+          console.error(
+            `⚠️  Fence ${fenceDescription(view.stale_fence)} is STALE — its bound owner pid ${view.owner_pid} is not running — so run ${options.run} is treated as live.`
+          );
+        }
         printCheckResult(
-          { fenced: false, gen, current_gen: view.current, known_run: view.knownRun },
+          {
+            fenced: false,
+            gen,
+            current_gen: view.current,
+            known_run: view.knownRun,
+            ...(view.stale === true ? { stale: true, owner_pid: view.owner_pid } : {}),
+            ...(view.released_up_to !== undefined ? { released_up_to: view.released_up_to } : {}),
+          },
           options.json
         );
         return;
@@ -1479,7 +1855,10 @@ function registerCheckSubcommand(cmd: Command): void {
           postIssueComment({
             issue: options.issue,
             repo: options.repo,
-            body: `${marker}\n${abortCommentBody(options.run, gen, view.fence)}`,
+            body: `${marker}\n${abortCommentBody(options.run, gen, view.fence, {
+              pid: view.owner_pid,
+              alive: view.owner_alive,
+            })}`,
             noun: 'abort comment',
             action: `Failed to post the abort comment for run ${options.run} to issue #${options.issue}`,
             successLine: (url) => `📝 abort comment → ${url}`,
@@ -1496,11 +1875,13 @@ function registerCheckSubcommand(cmd: Command): void {
           takeover: safeLabel(view.fence.keys.takeover),
           phase: safePhase(view.fence.phase),
           at: safeAt(view.fence.at),
+          owner_pid: view.owner_pid,
+          owner_alive: view.owner_alive,
         },
         options.json
       );
       console.error(
-        `❌ Run ${options.run} was SUPERSEDED at ${fenceDescription(view.fence)}.\n   Stop working on issue #${options.issue} and exit: another agent owns it. Do not push, do not open a PR.`
+        `❌ Run ${options.run} was SUPERSEDED at ${fenceDescription(view.fence)}.\n   The owning run: ${ownerDescription(view.fence, view.owner_bind, view.owner_alive)}.\n   Stop working on issue #${options.issue} and exit: another agent owns it. Do not push, do not open a PR.`
       );
       process.exit(FENCED_EXIT_CODE);
     });
@@ -1516,7 +1897,11 @@ function printCheckResult(result: CheckResult, json?: boolean): void {
   console.log(`gen=${result.gen}`);
   console.log(`current_gen=${result.current_gen}`);
   if (result.degraded === true) console.log('degraded=true');
+  if (result.stale === true) console.log(`stale=true (owner pid ${result.owner_pid} not running)`);
+  if (result.released_up_to !== undefined) console.log(`released_up_to=${result.released_up_to}`);
   if (result.takeover !== undefined) console.log(`takeover=${result.takeover}`);
+  if (result.owner_pid != null) console.log(`owner_pid=${result.owner_pid}`);
+  if (result.owner_alive != null) console.log(`owner_alive=${result.owner_alive}`);
 }
 
 /** Registers the `runstate` command tree (post, last, verify, fence, check, mint, stats). */

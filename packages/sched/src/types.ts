@@ -628,6 +628,24 @@ export interface SlotEntry {
    * Reset to `0` whenever `progress_milestone_for` is `null`.
    */
   progress_milestone_ticks: number;
+  /**
+   * The trail run id the slot's active fence was written for (#683) — captured at
+   * fence-write time because the bind posted right after the takeover's spawn needs it
+   * (the spawn path has no ground-truth read of its own), and the release posted at the
+   * `exit-detected` hook needs it after the slot's own milestone may have moved on.
+   * `null` when the slot holds no fence (a gen-0 dispatch never fenced). Never used to
+   * MATCH identity — fence ownership is run id + generation (#683 AC7); this only names
+   * WHICH trail the slot's fence lives on. Added in schema 1.17.0; 1.16.0 slots
+   * backfill null.
+   */
+  run_id: string | null;
+  /**
+   * The phase token the slot's active fence was written under (#683) — the bind and
+   * release records must read coherently with their fence on the trail, and the spawn
+   * and exit paths have no trail read to re-derive it. `null` whenever `run_id` is.
+   * Added in schema 1.17.0; 1.16.0 slots backfill null.
+   */
+  fence_phase: string | null;
   updated_at: string;
 }
 
@@ -1050,8 +1068,11 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * 1.15.0 (#629): `SchedState` gains `consecutive_dispatch_api_errors` +
  * `dispatch_pause_reset_at`.
  * 1.16.0 (#682): `SlotEntry` gains `progress_milestone_for`/`_since`/`_ticks`.
+ * 1.17.0 (#683): `SlotEntry` gains `run_id`/`fence_phase` — the fence's trail
+ * coordinates, captured at write time so the spawn-path bind and the
+ * `exit-detected`-hook release can name the same record without a trail read.
  */
-export const SCHEMA_VERSION = '1.16.0' as const;
+export const SCHEMA_VERSION = '1.17.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1071,6 +1092,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.13.0',
   '1.14.0',
   '1.15.0',
+  '1.16.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.8.0' as const;
@@ -1267,6 +1289,17 @@ export type JournalEventName =
   // respawns, and the degraded path where it could not be written.
   | 'fence-written'
   | 'fence-failed'
+  // #683 fence lifecycle: the takeover's spawn bound its pid to the fence (so
+  // readers can tell a live owner from a ghost), and the owning dispatch's
+  // `exit-detected` released the fence — plus the degraded path of either.
+  | 'fence-bound'
+  | 'fence-bind-failed'
+  | 'fence-released'
+  | 'fence-release-failed'
+  // #683: an agent that exited BECAUSE a fence told it to — a deliberate,
+  // correct no-op, never an unverified failure. Redispatched at the same tier
+  // without consuming an escalation rung.
+  | 'deferred-to-owner'
   // #523 batch dispatch: claiming the shared worktree/branch, and advancing
   // the member pointer between slot-cycle runs. Member/tail-agent spawn,
   // progress, completion and park events reuse the existing unit-generic
@@ -1481,4 +1514,17 @@ export interface JournalEvent {
   empty_model_usage?: boolean;
   /** `dispatch-failure` (#629): the result's own `is_error` flag — corroboration (AC5) only. */
   is_error?: boolean;
+  /**
+   * `fence-bound`/`fence-bind-failed`/`fence-released`/`fence-release-failed` and
+   * `deferred-to-owner` (#683): the generation the record describes — the fence a bind
+   * or release lands at, or the fence that made a dispatched agent defer.
+   */
+  fence_gen?: number;
+  /**
+   * `deferred-to-owner` (#683 AC3): the takeover label the deferring agent's fence
+   * named, when the dispatch log carried it. The label is descriptive only — fence
+   * ownership is run id + generation (#683 AC7) — so this exists for the human reading
+   * `events.jsonl`, never for a decision.
+   */
+  fence_takeover?: string;
 }

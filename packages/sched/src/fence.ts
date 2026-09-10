@@ -134,3 +134,149 @@ export function createExecRunFencer(
     return { ok: true, gen };
   };
 }
+
+/**
+ * The takeover label for a dispatch: slot `N`, recovery attempt `r`.
+ *
+ * The single spelling of the label so the fence that ANNOUNCES a takeover, the bind that
+ * names the takeover's process, and the prompt that tells the agent its identity cannot
+ * drift apart. The label is descriptive only (#683 AC7): fence ownership is decided by
+ * run id + generation, never by matching labels — slot rotation makes a label an unsafe
+ * identity.
+ */
+export function takeoverLabelFor(slotId: number, recoveries: number): string {
+  return `slot-${slotId}-r${recoveries}`;
+}
+
+/**
+ * Bind one fence to its owning process (#683 AC2), or report why it could not.
+ *
+ * The engine calls this right after spawning the takeover, while it knows the pid and
+ * its `/proc` start-time: the bind is what lets every later reader of the trail —
+ * `runstate check`, `post`'s guard — tell a LIVE owner from a ghost whose release was
+ * missed. Without it a fence is unreadable on liveness and fails closed (still fences),
+ * so a missed bind degrades to today's behavior rather than to an unfenced trail.
+ */
+export type RunFenceBinder = (
+  issue: number,
+  run: string,
+  phase: string,
+  takeover: string,
+  gen: number,
+  pid: number,
+  pidStart: number | null
+) => FenceOutcome;
+
+/**
+ * The default binder: shells `ai-dossier runstate fence-bind`. Same `ExecFn` contract as
+ * the fencer — never throws, every failure carries its reason.
+ */
+export function createExecRunFenceBinder(
+  exec: ExecFn,
+  opts: { bin?: string; repoDir?: string } = {}
+): RunFenceBinder {
+  const bin = opts.bin ?? 'ai-dossier';
+  return (issue, run, phase, takeover, gen, pid, pidStart) => {
+    const args = [
+      bin,
+      'runstate',
+      'fence-bind',
+      '--issue',
+      String(issue),
+      '--run',
+      run,
+      '--phase',
+      phase,
+      '--takeover',
+      takeover,
+      '--gen',
+      String(gen),
+      '--pid',
+      String(pid),
+      // The start-time is the pid-identity half (#472): without it a reused pid would
+      // read as a live owner. Omitted only when the engine itself could not read it —
+      // the CLI then binds without identity and liveness degrades to best-effort-alive.
+      ...(pidStart !== null ? ['--pid-start', String(pidStart)] : []),
+      '--json',
+    ];
+    const stdout = exec(args[0], args.slice(1), opts.repoDir);
+    if (stdout === null) {
+      return { ok: false, reason: `'${bin} runstate fence-bind' produced no output (see stderr)` };
+    }
+    // The CLI's success line carries `gen=` in both its JSON and human forms, so the
+    // same parse the fencer uses confirms the bind landed at the requested generation.
+    const landed = parseFenceGeneration(stdout);
+    if (landed !== gen) {
+      return {
+        ok: false,
+        reason: `bind did not land at gen=${gen} (output: ${stdout.slice(0, STDOUT_SNIPPET_LENGTH).replace(/\s+/g, ' ').trim()})`,
+      };
+    }
+    return { ok: true, gen };
+  };
+}
+
+/**
+ * Release the fences of a run whose owning dispatch has ENDED (#683 AC1), or report why
+ * it could not.
+ *
+ * The engine calls this at its `exit-detected` hook — the one place it already learns
+ * "this run's owner just ended, abnormally or not". A release is best-effort by design:
+ * when it cannot land (gh down, binary gone), the trail keeps the fence and every reader
+ * falls back to the bind-based stale-on-read check, which is exactly the belt-and-
+ * suspenders the issue asks for.
+ */
+export type RunFenceReleaser = (
+  issue: number,
+  run: string,
+  phase: string,
+  takeover: string,
+  gen: number
+) => FenceOutcome;
+
+/**
+ * The default releaser: shells `ai-dossier runstate fence --release --gen <n>`. Same
+ * `ExecFn` contract as the fencer — never throws, every failure carries its reason.
+ */
+export function createExecRunFenceReleaser(
+  exec: ExecFn,
+  opts: { bin?: string; repoDir?: string } = {}
+): RunFenceReleaser {
+  const bin = opts.bin ?? 'ai-dossier';
+  return (issue, run, phase, takeover, gen) => {
+    const stdout = exec(
+      bin,
+      [
+        'runstate',
+        'fence',
+        '--release',
+        '--issue',
+        String(issue),
+        '--run',
+        run,
+        '--phase',
+        phase,
+        '--takeover',
+        takeover,
+        '--gen',
+        String(gen),
+        '--json',
+      ],
+      opts.repoDir
+    );
+    if (stdout === null) {
+      return {
+        ok: false,
+        reason: `'${bin} runstate fence --release' produced no output (see stderr)`,
+      };
+    }
+    const landed = parseFenceGeneration(stdout);
+    if (landed !== gen) {
+      return {
+        ok: false,
+        reason: `release did not land at gen=${gen} (output: ${stdout.slice(0, STDOUT_SNIPPET_LENGTH).replace(/\s+/g, ' ').trim()})`,
+      };
+    }
+    return { ok: true, gen };
+  };
+}

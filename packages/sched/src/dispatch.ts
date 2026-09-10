@@ -627,14 +627,19 @@ export function journalCmdModelFields(spawn: TierSpawn): { cmd: string; model?: 
  * accepted (the CLI refuses a lower generation), and CHECK before the expensive phases so
  * it discovers its own supersession early if it is itself replaced later.
  */
-export function takeoverInstruction(issue: number, gen: number): string {
+export function takeoverInstruction(issue: number, gen: number, slotLabel?: string): string {
+  const identity = slotLabel !== undefined ? ` (your takeover label is '${slotLabel}')` : '';
   return (
-    `TAKEOVER — you are generation ${gen} of the run on issue #${issue}: an earlier agent was ` +
+    `TAKEOVER — you are generation ${gen} of the run on issue #${issue}${identity}: an earlier agent was ` +
     'superseded and fenced out of the runstate trail. Pass `--gen ' +
     `${gen}\` on EVERY \`ai-dossier runstate post\` for this issue, or the post is refused. ` +
     `Before implement, before review, and before ship, run \`ai-dossier runstate check --issue ${issue} ` +
     `--run <run_id> --gen ${gen}\`; a non-zero exit means YOU have been superseded in turn — stop ` +
-    'immediately, do not push, and do not open a PR. Resume the existing work rather than ' +
+    'immediately, do not push, and do not open a PR. ' +
+    `A fence at YOUR generation (${gen}) is your own — only a HIGHER generation fences you, never ` +
+    'a lower one and never a slot label (#683: owners are identified by run id + generation, and a ' +
+    'fence whose owner is dead is reported stale and does not block you). ' +
+    'Resume the existing work rather than ' +
     'restarting it: the trail and the pushed branch are the durable state.'
   );
 }
@@ -645,9 +650,9 @@ export function takeoverInstruction(issue: number, gen: number): string {
  * `gen` is the runstate generation the agent owns; 0 (the default) is a first dispatch
  * and produces today's prompt unchanged.
  */
-export function buildPrompt(template: string, issue: number, gen = 0): string {
+export function buildPrompt(template: string, issue: number, gen = 0, slotLabel?: string): string {
   const rendered = renderTemplate(template, { issue, gen });
-  return gen > 0 ? `${rendered}\n\n${takeoverInstruction(issue, gen)}` : rendered;
+  return gen > 0 ? `${rendered}\n\n${takeoverInstruction(issue, gen, slotLabel)}` : rendered;
 }
 
 /**
@@ -664,10 +669,11 @@ export function buildReportPrompt(
   issue: number,
   pr: number,
   cleanup: string,
-  gen = 0
+  gen = 0,
+  slotLabel?: string
 ): string {
   const rendered = renderTemplate(template, { issue, pr, cleanup, gen });
-  return gen > 0 ? `${rendered}\n\n${takeoverInstruction(issue, gen)}` : rendered;
+  return gen > 0 ? `${rendered}\n\n${takeoverInstruction(issue, gen, slotLabel)}` : rendered;
 }
 
 /**
