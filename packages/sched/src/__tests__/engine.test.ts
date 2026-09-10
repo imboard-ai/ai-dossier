@@ -13,6 +13,8 @@ import {
   Journal,
   type JournalEvent,
   type PrTruth,
+  type RunFenceBinder,
+  type RunFenceReleaser,
   type RunFencer,
   type SchedConfig,
   SchedStore,
@@ -25,7 +27,7 @@ import {
   transitionIssue,
   transitionSlot,
 } from '../index';
-import { writeApiErrorLog, writeToolUseLog } from './helpers/dispatch-log';
+import { writeApiErrorLog, writeFenceAbortLog, writeToolUseLog } from './helpers/dispatch-log';
 
 /**
  * Engine harness: a real SchedStore on a temp dir, fully fake process I/O
@@ -143,6 +145,44 @@ function harness(
     return { ok: true, gen };
   };
 
+  /**
+   * Recording fake binder (#683 AC2): the spawn-path pid bind. Fails on demand so the
+   * degraded unbound-fence path is exercised.
+   */
+  const bindCalls: Array<{
+    issue: number;
+    run: string;
+    phase: string;
+    takeover: string;
+    gen: number;
+    pid: number;
+    pidStart: number | null;
+  }> = [];
+  let bindFails = false;
+  const fenceBinder: RunFenceBinder = (issue, run, phase, takeover, gen, pid, pidStart) => {
+    bindCalls.push({ issue, run, phase, takeover, gen, pid, pidStart });
+    if (bindFails) return { ok: false, reason: 'fake binder told to fail' };
+    return { ok: true, gen };
+  };
+
+  /**
+   * Recording fake releaser (#683 AC1): the exit-detected release. Fails on demand so
+   * the stale-on-read backstop stays the only path that clears a ghost.
+   */
+  const releaseCalls: Array<{
+    issue: number;
+    run: string;
+    phase: string;
+    takeover: string;
+    gen: number;
+  }> = [];
+  let releaseFails = false;
+  const fenceReleaser: RunFenceReleaser = (issue, run, phase, takeover, gen) => {
+    releaseCalls.push({ issue, run, phase, takeover, gen });
+    if (releaseFails) return { ok: false, reason: 'fake releaser told to fail' };
+    return { ok: true, gen };
+  };
+
   let clock = new Date('2026-08-29T12:00:00Z');
   const deps: EngineDeps = {
     store,
@@ -153,6 +193,8 @@ function harness(
     repoDir: dir,
     teardownExec,
     fencer,
+    fenceBinder,
+    fenceReleaser,
     homeDir,
   };
 
@@ -206,6 +248,22 @@ function harness(
     fenceCalls,
     setFenceFails: (fails: boolean) => {
       fenceFails = fails;
+    },
+    bindCalls,
+    releaseCalls,
+    setBindFails: (fails: boolean) => {
+      bindFails = fails;
+    },
+    setReleaseFails: (fails: boolean) => {
+      releaseFails = fails;
+    },
+    /** Drop the binder entirely — an engine built before #683. */
+    removeFenceBinder: () => {
+      deps.fenceBinder = undefined;
+    },
+    /** Drop the releaser entirely — an engine built before #683. */
+    removeFenceReleaser: () => {
+      deps.fenceReleaser = undefined;
     },
     /** Drop the fencer entirely — an engine built before #504, or misconfigured. */
     removeFencer: () => {
@@ -2839,6 +2897,223 @@ describe('zombie-run fencing on redispatch (#504)', () => {
     expect(
       h.events().some((e) => e.event === 'fence-failed' && e.detail?.includes('no fencer'))
     ).toBe(true);
+  });
+});
+
+describe('#683: fence lifecycle — write → bind → release, and the defer classification', () => {
+  const HOUR = 60 * 60 * 1000;
+  const RUN = 'r-683-ab12';
+
+  /** A takeover in flight: dispatched, one milestone posted, stalled, re-fenced at gen 1. */
+  function takeover() {
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 683, mode: 'full', tier: 'mechanical' }]);
+    h.tick(); // gen-0 dispatch
+    h.setMilestone(683, 'gate', 'done', undefined, { next: 'setup' });
+    h.advance(HOUR + 1000);
+    h.tick(); // stall → fence gen 1 → takeover spawned (bound, since the fencer ran)
+    return h;
+  }
+
+  it('binds the takeover’s fence to its spawned pid right after the spawn (AC2)', () => {
+    const h = takeover();
+
+    expect(h.bindCalls).toHaveLength(1);
+    const bind = h.bindCalls[0];
+    expect(bind.issue).toBe(683);
+    // The fence the bind describes is the one the recovery just wrote — same run,
+    // same generation, same label the fence announced.
+    expect(bind.run).toBe(RUN);
+    expect(bind.gen).toBe(1);
+    expect(bind.takeover).toBe('slot-1-r1');
+    expect(bind.pid).toBe(h.spawnCalls[1].pid);
+    expect(h.events().some((e) => e.event === 'fence-bound' && e.fence_gen === 1)).toBe(true);
+  });
+
+  it('journals fence-bind-failed and dispatches anyway when the bind cannot land', () => {
+    // Degraded, never blocked: an unbound fence reads fail-closed (still fences), which
+    // is exactly the pre-#683 behavior — the spawn must not be held hostage by gh.
+    const h = takeover();
+    expect(h.state().slots.find((s) => s.unit === 'issue:683')?.status).toBe('running');
+    expect(h.spawnCalls).toHaveLength(2);
+
+    const h2 = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h2.dir);
+    h2.enqueue([{ issue: 683, mode: 'full', tier: 'mechanical' }]);
+    h2.tick();
+    h2.setMilestone(683, 'gate', 'done', undefined, { next: 'setup' });
+    h2.setBindFails(true);
+    h2.advance(HOUR + 1000);
+    h2.tick();
+
+    expect(h2.spawnCalls).toHaveLength(2);
+    const failure = h2.events().find((e) => e.event === 'fence-bind-failed');
+    expect(failure?.detail).toContain('fake binder told to fail');
+  });
+
+  it('releases the fence at the exit-detected hook when the owning dispatch dies (AC1)', () => {
+    const h = takeover();
+    const takeoverSpawn = h.spawnCalls[1];
+    h.alive.delete(takeoverSpawn.pid); // abnormal end — the exact shape that stranded fences
+
+    const result = h.tick();
+
+    // The exit is still an unverified exit (the agent posted nothing) — but the fence
+    // did not outlive its owner.
+    expect(result.redispatched).toEqual(['issue:683']);
+    expect(h.releaseCalls).toHaveLength(1);
+    const release = h.releaseCalls[0];
+    expect(release.issue).toBe(683);
+    expect(release.run).toBe(RUN);
+    expect(release.gen).toBe(1);
+    expect(release.takeover).toBe('slot-1-r1');
+    expect(h.events().some((e) => e.event === 'fence-released' && e.fence_gen === 1)).toBe(true);
+    // Ordering is the point of the hook: the release lands BEFORE the classification's
+    // own re-fence, so no path leaves a dead run's fence governing the trail.
+    expect(h.fenceCalls).toHaveLength(2);
+    expect(h.fenceCalls[1].spawnsBefore).toBe(2);
+  });
+
+  it('never releases for a gen-0 dispatch — it never held a fence', () => {
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 683, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(683, 'gate', 'done');
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick();
+
+    expect(h.releaseCalls).toHaveLength(0);
+    expect(h.events().some((e) => e.event.startsWith('fence-release'))).toBe(false);
+  });
+
+  it('journals fence-release-failed and still recovers when the release cannot land', () => {
+    const h = takeover();
+    h.setReleaseFails(true);
+    h.alive.delete(h.spawnCalls[1].pid);
+
+    const result = h.tick();
+
+    // The release is best-effort: the trail keeps the fence and every reader falls back
+    // to the bind-based stale-on-read check — but the recovery itself is never blocked.
+    expect(result.redispatched).toEqual(['issue:683']);
+    expect(h.events().some((e) => e.event === 'fence-release-failed')).toBe(true);
+    expect(h.spawnCalls).toHaveLength(3);
+  });
+
+  it('works without a binder or releaser — an engine predating #683 degrades to today’s behavior', () => {
+    const h = takeover();
+    h.removeFenceBinder();
+    h.removeFenceReleaser();
+    h.alive.delete(h.spawnCalls[1].pid);
+
+    const result = h.tick();
+
+    expect(result.redispatched).toEqual(['issue:683']);
+    expect(h.bindCalls).toHaveLength(0);
+    expect(h.releaseCalls).toHaveLength(0);
+    expect(
+      h
+        .events()
+        .some((e) => e.event.startsWith('fence-bind') || e.event.startsWith('fence-release'))
+    ).toBe(false);
+  });
+
+  it('tells the takeover its slot identity and the own-generation rule (AC6/AC7)', () => {
+    const h = takeover();
+
+    const prompt = h.spawnCalls[1].prompt;
+    expect(prompt).toContain("your takeover label is 'slot-1-r1'");
+    expect(prompt).toContain('A fence at YOUR generation (1) is your own');
+    expect(prompt).toContain('never a slot label');
+  });
+
+  it('classifies a gen-0 dispatch’s fence defer as deferred-to-owner — same tier, no rung (AC3)', () => {
+    // The #4153 shape: a fresh re-enqueued dispatch (generation 0) reads the fence a
+    // PREVIOUS engine's recovery left on the trail, correctly steps aside, and exits
+    // cleanly. Its log carries its own supersession-checkpoint verdict for the trail run.
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 683, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(683, 'gate', 'done');
+    writeFenceAbortLog(h.spawnCalls[0].logFile, RUN, 3, 'slot-1-r1');
+    h.alive.delete(h.spawnCalls[0].pid);
+
+    const result = h.tick();
+
+    expect(result.redispatched).toEqual(['issue:683']);
+    const defer = h.events().find((e) => e.event === 'deferred-to-owner');
+    expect(defer).toBeDefined();
+    expect(defer?.fence_gen).toBe(3);
+    expect(defer?.fence_takeover).toBe('slot-1-r1');
+    // Never an unverified failure, never a suspect dispatch, never an API-error rail.
+    expect(h.events().some((e) => e.event === 'verify-incomplete')).toBe(false);
+    expect(h.events().some((e) => e.event === 'suspect-dispatch')).toBe(false);
+    // Zero rungs consumed: tier and recoveries both unchanged...
+    expect(h.state().entries.find((e) => e.issue === 683)?.tier).toBe('mechanical');
+    expect(h.state().slots.find((s) => s.unit === 'issue:683')?.recoveries).toBe(0);
+    // ...and the recovery still re-fences: the successor owns the NEXT generation, so
+    // the ghost the defer stepped aside for cannot be resurrected by a stale record.
+    expect(h.fenceCalls).toHaveLength(1);
+    expect(h.fenceCalls[0].gen).toBe(1);
+    expect(h.spawnCalls[1].prompt).toContain('--gen 1');
+  });
+
+  it('breaks the exact #683 livelock: a takeover deferring to a ghost is not failed at the cap (AC3/AC5)', () => {
+    // mechanical → mid → strong, each recovery re-fencing. The gen-2 takeover then
+    // DEFERS (its log carries the checkpoint verdict for the trail run). Before #683
+    // this defer read as a third unverified exit — `unverified-exit-at-strongest-tier`,
+    // unit failed, the issue's work untouched. Now it is a no-op that redispatches.
+    const h = takeover(); // recoveries=1, tier=mid, fence gen 1, takeover bound
+    h.advance(HOUR + 1000);
+    h.tick(); // recovery 2: fence gen 2, tier strong, recoveries 2
+    expect(h.state().entries.find((e) => e.issue === 683)?.tier).toBe('strong');
+
+    const deferringTakeover = h.spawnCalls[2];
+    writeFenceAbortLog(deferringTakeover.logFile, RUN, 2, 'slot-1-r2');
+    h.alive.delete(deferringTakeover.pid);
+
+    const result = h.tick();
+
+    // Proceeds — redispatched, not failed.
+    expect(result.failed).toEqual([]);
+    expect(result.redispatched).toEqual(['issue:683']);
+    expect(h.events().some((e) => e.detail === 'unverified-exit-at-strongest-tier')).toBe(false);
+    expect(h.events().some((e) => e.event === 'deferred-to-owner')).toBe(true);
+    // The defer consumed NO rung: still strong, still 2 recoveries — the ladder the
+    // issue watched climb to its cap never moved.
+    expect(h.state().entries.find((e) => e.issue === 683)?.tier).toBe('strong');
+    expect(h.state().slots.find((s) => s.unit === 'issue:683')?.recoveries).toBe(2);
+    // The successor owns generation 3 and is bound to its own pid — the loop cannot
+    // recur on this trail (AC8: the takeover for the new fence proceeds).
+    expect(h.fenceCalls).toHaveLength(3);
+    expect(h.fenceCalls[2].takeover).toBe('slot-1-r3');
+    expect(h.bindCalls).toHaveLength(3);
+    expect(h.bindCalls[2].gen).toBe(3);
+    expect(h.spawnCalls[3].prompt).toContain('--gen 3');
+  });
+
+  it('does not fake a defer off text naming ANOTHER run — an unverified exit still escalates (AC3 guard)', () => {
+    // The classification keys on the dispatch's OWN checkpoint output. An agent that
+    // merely read a historical incident (docs quote `r-999-dead`, not this trail's run)
+    // must keep riding the ordinary unverified-exit ladder — a false defer would skip
+    // escalation forever, the worse direction to fail in.
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 683, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(683, 'gate', 'done');
+    writeFenceAbortLog(h.spawnCalls[0].logFile, 'r-999-dead', 3, 'slot-1-r1');
+    h.alive.delete(h.spawnCalls[0].pid);
+
+    const result = h.tick();
+
+    expect(result.redispatched).toEqual(['issue:683']);
+    expect(h.events().some((e) => e.event === 'deferred-to-owner')).toBe(false);
+    expect(h.events().some((e) => e.event === 'verify-incomplete')).toBe(true);
+    expect(h.state().entries.find((e) => e.issue === 683)?.tier).toBe('mid');
   });
 });
 

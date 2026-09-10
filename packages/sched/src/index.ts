@@ -85,11 +85,16 @@ export {
   parseManifest,
 } from './enqueue';
 export {
+  createExecRunFenceBinder,
+  createExecRunFenceReleaser,
   createExecRunFencer,
   FENCE_TIMEOUT_MS,
   type FenceOutcome,
   parseFenceGeneration,
+  type RunFenceBinder,
+  type RunFenceReleaser,
   type RunFencer,
+  takeoverLabelFor,
 } from './fence';
 export {
   createExecGroundTruth,

@@ -1283,10 +1283,11 @@ function enterRecovery(
   if (escalate) {
     const escalated = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
     if (slot.recoveries >= ESCALATION_CAP || escalated === null) {
-      // #629: unreachable with `causeEvent === 'dispatch-failure'` — that
-      // cause always passes `escalate: false` above, so this branch (and the
-      // narrower `causeEvent` type `failOrAdoptOpenPr` declares) is never
-      // actually asked to terminally fail a unit over a provider wall.
+      // #629: unreachable with `causeEvent === 'dispatch-failure'` or
+      // `'deferred-to-owner'` (#683) — both causes always pass
+      // `escalate: false` above, so this branch (and the narrower
+      // `causeEvent` type `failOrAdoptOpenPr` declares) is never actually
+      // asked to terminally fail a unit over a provider wall or a defer.
       return failOrAdoptOpenPr(
         ctx,
         state,
@@ -2038,7 +2039,14 @@ function reconcileRunning(
     // no path can leave a dead run's fence governing the trail. A recovery re-fences
     // at gen+1 right after, which dominates the released generation as before.
     releaseFenceOnExit(ctx, unit, issueOfUnit(unit) ?? 0, slot);
-    const signals = recordDispatchRunLog(ctx, state, slot, unit);
+    // #683 AC3: the defer classification must recognize THIS dispatch's own
+    // checkpoint output. A gen>0 takeover's slot carries its fence's run_id; a
+    // gen-0 dispatch (re-enqueued fresh, fenced out by an earlier recovery —
+    // the #4153 shape) carries none, so the trail's current run — the run id
+    // the checkpoint instruction tells every dispatch to check under — is the
+    // match key. Wrong-run markers never match (docs quote historical ids),
+    // which is what keeps the classification unfakeable by read text alone.
+    const signals = recordDispatchRunLog(ctx, state, slot, unit, truth.milestone?.run ?? '');
     const exited = transitionSlot(state, slot.id, 'exited', {}, now);
     return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete', signals);
   }
@@ -2320,6 +2328,38 @@ function completeUnitOrRecover(
   }
 
   const suspect = msSinceLastProgress(slot, now) < SUSPECT_DISPATCH_WINDOW_MS;
+
+  // #683 AC3: the dispatch's own log carries its supersession-checkpoint
+  // verdict for THIS trail run — the agent checked, found an owner, and
+  // stepped aside. That is a deliberate, CORRECT no-op: never an
+  // `unverified-exit`, never an escalation rung. Classified deterministically
+  // off the CLI's exact output (the #629 lesson — never a heuristic on exit
+  // codes), recorded as a HEALTHY dispatch (no `suspect-dispatch`), and
+  // redispatched at the same tier via the #629 unescalated rail — the fence
+  // `enterRecovery` writes lands at the next generation and its takeover gets
+  // the pid bind, so the #4153 livelock self-heals in one step instead of
+  // climbing to `unverified-exit-at-strongest-tier`. Checked AFTER
+  // `recordDispatchApiError`'s branch: a confirmed provider wall (num_turns 1,
+  // no check output) cannot also be a defer, and its rail owns that shape.
+  if (resolved.fenceAbort !== null) {
+    const recorded = recordDispatchOutcome(ctx, next, unit, slot, false);
+    return enterRecovery(
+      ctx,
+      recorded,
+      unit,
+      'deferred-to-owner',
+      'deferred to the fence owner — deliberate supersession-checkpoint abort, no escalation rung consumed',
+      truth,
+      {
+        fence_gen: resolved.fenceAbort.gen,
+        ...(resolved.fenceAbort.takeover !== null
+          ? { fence_takeover: resolved.fenceAbort.takeover }
+          : {}),
+      },
+      { escalate: false }
+    );
+  }
+
   next = recordDispatchOutcome(ctx, next, unit, slot, suspect);
   return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', truth, {
     observed: truth.milestone
@@ -2406,7 +2446,7 @@ function reconcileSlots(
         // happens only on the tick that actually reaches the unverified-exit
         // decision, not on every tick an outage holds the slot here.
         next = completeUnitOrRecover(ctx, next, unit, truth, 'verify-complete', () =>
-          readDispatchSignalsForSlot(ctx, slot, unit)
+          readDispatchSignalsForSlot(ctx, slot, unit, truth.milestone?.run ?? '')
         );
         break;
       case 'recovering':

@@ -403,6 +403,52 @@ on the trail yet, gh unreachable, no fencer configured) the redispatch proceeds 
 and journals `fence-failed`. Stranding a stalled unit forever would be the worse failure —
 but the unprotected redispatch is never silent.
 
+### Fence lifecycle: write → bind → release (#683)
+
+A fence used to outlive its owner. A run killed abnormally (engine kill, #679's cgroup
+teardown, reboot, OOM) left its fence standing, and every successor dispatched to that
+issue then read the fence, correctly stepped aside to avoid duplicating the owner's work,
+and was classified `unverified-exit` — escalating a tier for being polite, until
+`unverified-exit-at-strongest-tier`. The fence was doing its job; the only broken part was
+that it outlived the run it granted ownership to. Three records on the trail now close
+that loop, and a fourth classification keeps the ladder honest:
+
+- **Write** — unchanged (#504): `runstate fence` posts the `status=superseded` milestone
+  with `gen=<n>` and `takeover=<label>`. The label comes from one helper
+  (`takeoverLabelFor`), is descriptive only, and is **never matched**: ownership is
+  decided by run id + generation, because slot labels rotate.
+- **Bind** — right after spawning the takeover, the engine calls
+  `runstate fence-bind --pid <pid> --pid-start <start>`, posting a `bound=true` record at
+  the fence's own generation. The pid + `/proc` start-time pair is what lets every later
+  reader (`runstate check`, `post`'s guard) tell a **live owner from a ghost** using the
+  same identity rule the engine itself uses (#472: a reused pid is not the old process).
+  A fence with no bind still fences — fail-closed, exactly as before #683; the bind is a
+  liveness witness, never the fence itself.
+- **Release** — when the engine's `exit-detected` hook sees the owning dispatch end
+  (abnormally or not), it calls `runstate fence --release --gen <n>`, posting a
+  `released=true` record: every fence of that run up to generation n is lifted. Release
+  is best-effort (gh down → `fence-release-failed`, and the stale-on-read backstop below
+  still unblocks successors). Released generations are never reused — the generation
+  arithmetic keeps counting them — so a takeover of a takeover cannot collide with a
+  released fence.
+- **Stale on read** — the backstop for a release that was missed: an active fence whose
+  bound pid is dead is STALE. `runstate check` reports the run as live (exit 0) with a
+  stderr note naming the ignored fence, and `post`'s guard passes while saying why. An
+  **unbound** fence never reads as stale — with no pid on record, no reader can tell a
+  live owner from a ghost, so it keeps fencing.
+
+The fence-driven abort itself is reclassified: an agent whose dispatch log carries its own
+supersession-checkpoint verdict (`runstate check`'s `SUPERSEDED` output for the trail's
+run id) is journalled **`deferred-to-owner`**, not `unverified-exit` — a deliberate,
+correct no-op that counts as a healthy dispatch and redispatches at the **same tier
+without consuming an escalation rung** (the #629 unescalated rail). The
+`runstate check --comment` abort comment names the owning run, its generation, its
+takeover label, its bound pid, and that pid's liveness, so a human reading the issue can
+tell a live owner from a ghost. Distinct from #679: those agents died with
+`run-log-no-usage` before doing anything, while a deferring agent ran, recorded, and
+exited cleanly — and `KillMode=process` fixes neither the stranded fence nor the
+misclassification.
+
 ## Batch failure recovery (#472)
 
 What happens when a batch's aggregate suite goes red, or its PR will not merge
