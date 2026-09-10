@@ -1251,6 +1251,99 @@ describe('stall/escalation ladder (AC4)', () => {
   });
 });
 
+describe('pushed-commit stall signal for a slot no milestone ever named (#684)', () => {
+  // The issue:4156 shape: the slot's `branch` was never captured because the
+  // setup milestone was no longer the LATEST milestone during any poll of this
+  // slot's life (a redispatch, or a re-run of an issue with an existing
+  // trail). Only the issue's setup milestone — via ground-truth `setupInfo` —
+  // still knows the branch.
+  function noBranchCapturedHarness() {
+    const h = harness({ stallTimeoutMs: 30 * 60 * 1000 });
+    REGISTRIES.push(h.dir);
+    return h;
+  }
+
+  it('AC5/AC1: a unit that pushes a commit inside the window and posts no milestone is not stalled', () => {
+    const h = noBranchCapturedHarness();
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'bug/101-x' });
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'strong' }]);
+    h.tick();
+    // Latest milestone: implement/done, `next=review` — a long review phase
+    // legitimately posts nothing more until it ends.
+    h.setMilestone(101, 'implement', 'done', undefined, { next: 'review' });
+
+    // 20 min in, the agent pushes review WIP commits. No new milestone.
+    h.advance(20 * 60 * 1000);
+    h.branchHeads.set('bug/101-x', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    expect(h.tick().redispatched).toHaveLength(0);
+
+    // 40 min without a milestone — but the branch advanced on the remote
+    // 20 min ago, inside the window: the AND of the documented rule holds.
+    h.advance(20 * 60 * 1000);
+    const result = h.tick();
+    expect(result.redispatched).toHaveLength(0);
+    expect(h.journal.read().some((e) => e.event === 'stalled')).toBe(false);
+    expect(h.alive.size).toBe(1); // the working agent was NOT killed
+  });
+
+  it('AC2: the recovered branch is persisted and last_head is populated — None was "not yet observed"', () => {
+    const h = noBranchCapturedHarness();
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'bug/101-x' });
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+    h.tick();
+
+    // First observation with the branch already on the remote (a previous
+    // dispatch pushed it): the slot records what it sees.
+    h.branchHeads.set('bug/101-x', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+    h.tick();
+    let slot = h.state().slots.find((s) => s.unit === 'issue:101');
+    expect(slot?.branch).toBe('bug/101-x');
+    expect(slot?.last_head).toBe('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
+
+    // A second push advances the signal; the progress journal names the push.
+    h.advance(60_000);
+    h.branchHeads.set('bug/101-x', 'cccccccccccccccccccccccccccccccccccccccc');
+    h.tick();
+    slot = h.state().slots.find((s) => s.unit === 'issue:101');
+    expect(slot?.last_head).toBe('cccccccccccccccccccccccccccccccccccccccc');
+    const progress = h.journal
+      .read()
+      .filter((e) => e.event === 'progress')
+      .at(-1);
+    expect(progress?.detail).toBe('new pushed commit');
+    expect(progress?.head).toBe('cccccccccccccccccccccccccccccccccccccccc');
+  });
+
+  it('AC3: a stall verdict records what it checked — last milestone time, last observed head, head at decision time', () => {
+    const h = noBranchCapturedHarness(); // no setupInfo branch anywhere
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'strong' }]);
+    h.tick();
+    h.setMilestone(101, 'implement', 'done');
+    h.advance(31 * 60 * 1000);
+
+    const result = h.tick();
+    expect(result.failed).toEqual(['issue:101']); // strongest tier: terminal — the issue:4156 kill shape
+    const failed = h.journal.read().find((e) => e.event === 'unit-failed' && e.issue === 101);
+    expect(failed?.last_milestone_at).toBe(h.milestones.get(101)?.at);
+    expect(failed?.last_head).toBeNull(); // the head was never observed — the #4156 signature
+    expect(failed?.decision_head).toBeNull(); // and no head existed at decision time either
+  });
+
+  it('AC3: the same verdict evidence rides the non-terminal stalled event on a lower rung', () => {
+    const h = noBranchCapturedHarness();
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+    h.tick();
+    h.advance(31 * 60 * 1000);
+
+    const result = h.tick();
+    expect(result.redispatched).toEqual(['issue:101']);
+    const stalled = h.journal.read().find((e) => e.event === 'stalled');
+    expect(stalled?.last_milestone_at).toBeNull(); // no milestone had ever posted
+    expect(stalled?.last_head).toBeNull();
+    expect(stalled?.decision_head).toBeNull();
+  });
+});
+
 describe('slot refill (AC5: immediate and automatic)', () => {
   it('regression: a freed slot is refilled by the SAME tick — no runnable unit waits', () => {
     const h = harness({ maxSlots: 1 });
