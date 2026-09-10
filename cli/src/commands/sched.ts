@@ -67,6 +67,7 @@ import {
 import { WARM_COMMAND_TIMEOUT_MS } from '@ai-dossier/worktree-pool';
 import type { Command } from 'commander';
 import { BATCH_SUITE_TIMEOUT_MS, createBatchSuiteRunner } from '../batch-suite-runner';
+import { timeoutReasonSpent } from '../capability';
 import { formatCost, formatCount } from '../cost-format';
 import { formatAge, formatDurationMs } from '../duration';
 import {
@@ -123,7 +124,7 @@ export function createBatchCapabilityRunner(opts?: {
       if ((result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
         return {
           outcome: 'automation-broken',
-          reason: `command timed out after ${timeoutMs}ms`,
+          reason: timeoutReasonSpent(timeoutMs),
           outputTail: `${result.stdout ?? ''}${result.stderr ?? ''}` || null,
         };
       }

@@ -859,7 +859,15 @@ export function validateState(data: unknown): SchedState {
     // Pre-#583 batches carry neither field — the incremental gate never
     // produced a non-ok verdict under them (or the field simply didn't
     // exist yet), so `{}`/`null` are exact, not guesses.
-    member_gates: batch.member_gates ?? {},
+    // #681: records written between #583 and #681 lack `duration_ms` —
+    // normalized to `null` here so the record type (`number | null`) is
+    // truthful about every persisted shape, not just freshly written ones.
+    member_gates: Object.fromEntries(
+      Object.entries(batch.member_gates ?? {}).map(([issue, gate]) => [
+        issue,
+        { ...gate, duration_ms: gate.duration_ms ?? null },
+      ])
+    ),
     blocked_reason: batch.blocked_reason ?? null,
     // Pre-#630 (1.12.0) batches carry none of these three — `pr-watch-failed`
     // was journalled with no dedup marker at all, so null/null/0 (no streak

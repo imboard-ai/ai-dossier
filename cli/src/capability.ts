@@ -64,6 +64,18 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60_000;
  */
 export const DEFAULT_OUTPUT_TAIL_BYTES = 8192;
 
+/**
+ * The reason string a timeout produces (#681) — single source of truth for
+ * both cli producers (`classifySpawnResult`'s ETIMEDOUT branch and the batch
+ * capability runner's own `spawnSync` timeout). The sched gate classifies on
+ * this exact shape (`GATE_TIMEOUT_REASON`, packages/sched/src/batch-dispatch.ts)
+ * to tell "needed more time" apart from a genuine machinery failure, so both
+ * timeout layers must emit it identically; the shape is pinned by tests on
+ * both sides of the contract.
+ */
+export const timeoutReasonSpent = (timeoutMs: number): string =>
+  `command timed out after ${timeoutMs}ms`;
+
 /** `spawnSync`'s own default `maxBuffer` (1 MiB) is too small for a real test/build command's combined stdout+stderr — raised so output volume alone never causes a false `automation-broken` (#583 review). */
 const MAX_CAPABILITY_OUTPUT_BYTES = 64 * 1024 * 1024;
 
@@ -547,7 +559,7 @@ function classifySpawnResult(
   if (res.error) {
     const code = (res.error as NodeJS.ErrnoException).code;
     if (code === 'ETIMEDOUT') {
-      return broken(id, commandLine, `command timed out after ${timeoutMs}ms`, durationMs);
+      return broken(id, commandLine, timeoutReasonSpent(timeoutMs), durationMs);
     }
     const hint = code === 'ENOENT' ? ' — is the command on PATH from that directory?' : '';
     return broken(
