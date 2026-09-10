@@ -39,6 +39,51 @@ export const ESCAPE_LABEL = 'no-release-needed';
 /** Directories inside a package whose contents ship to npm consumers. */
 const RELEASE_DIRS = ['src', 'bin'];
 
+/**
+ * Scope whose dependency ranges are release-relevant on their own (#692).
+ *
+ * A package's own `src` is not the only thing that decides what a user
+ * installs: the range it pins on a workspace sibling does too. `cli` shipping
+ * `^0.24.0` and `cli` shipping `^0.27.0` are different artifacts even when
+ * every byte of `cli/src` is identical — the second one carries four sched
+ * fixes and the first does not.
+ *
+ * Missing this cost four stranded releases: sched 0.25.0-0.27.0 published with
+ * fixes for #678/#679/#680/#681, `cli/package.json` was updated to pin
+ * `^0.27.0`, and `cli`'s own version was left at 0.34.5 — which npm already
+ * had. `publish-packages` skipped it as already-published, so the pin bump
+ * merged and never shipped, and `npm i -g @ai-dossier/cli@latest` stayed on
+ * sched 0.24.0 on every host.
+ */
+const WORKSPACE_DEP_SCOPE = '@ai-dossier/';
+
+/**
+ * The workspace-sibling dependency ranges declared by a parsed package.json,
+ * as a plain sorted object. `dependencies` only: devDependencies do not ship
+ * to consumers, so changing one does not change the published artifact.
+ */
+export function workspaceDeps(pkgJson) {
+  const deps = pkgJson?.dependencies ?? {};
+  const out = {};
+  for (const name of Object.keys(deps).sort()) {
+    if (name.startsWith(WORKSPACE_DEP_SCOPE)) out[name] = deps[name];
+  }
+  return out;
+}
+
+/**
+ * Names whose range differs between two `workspaceDeps()` results, including
+ * ones added or removed. Returns [] when they are equivalent.
+ */
+export function changedWorkspaceDeps(before, after) {
+  const names = new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})]);
+  const changed = [];
+  for (const name of [...names].sort()) {
+    if (before?.[name] !== after?.[name]) changed.push(name);
+  }
+  return changed;
+}
+
 /** How many changed paths to list per violating package before truncating. */
 const MAX_LISTED_FILES = 5;
 
@@ -220,7 +265,7 @@ export function discoverPackages(repoRoot) {
       continue;
     }
 
-    packages.push({ dir, name: pkg.name, version: pkg.version });
+    packages.push({ dir, name: pkg.name, version: pkg.version, deps: workspaceDeps(pkg) });
   }
 
   if (packages.length === 0) {
@@ -249,16 +294,33 @@ export function discoverPackages(repoRoot) {
  * name exactly which packages the label waived instead of printing an opaque
  * "skipped".
  */
-export function analyze({ changedFiles, packages, baseVersions, labels = [] }) {
+export function analyze({
+  changedFiles,
+  packages,
+  baseVersions,
+  baseWorkspaceDeps = {},
+  labels = [],
+}) {
   const violations = [];
   const checked = [];
 
   for (const pkg of packages) {
     const touched = changedFiles.filter((f) => isReleaseRelevant(f, pkg.dir));
-    if (touched.length === 0) continue;
+
+    // A changed pin on a workspace sibling changes the published artifact even
+    // when no source file did (#692). `baseWorkspaceDeps[pkg.dir] === null`
+    // means the package did not exist on the base ref, which the version check
+    // below already handles as a new package.
+    const basePins = baseWorkspaceDeps[pkg.dir];
+    const pinChanges =
+      basePins === null || basePins === undefined
+        ? []
+        : changedWorkspaceDeps(basePins, pkg.deps ?? {});
+
+    if (touched.length === 0 && pinChanges.length === 0) continue;
 
     const baseVersion = baseVersions[pkg.dir];
-    checked.push({ ...pkg, baseVersion, touched });
+    checked.push({ ...pkg, baseVersion, touched, pinChanges });
 
     // New package on this branch — nothing to bump against.
     if (baseVersion === null || baseVersion === undefined) continue;
@@ -269,6 +331,7 @@ export function analyze({ changedFiles, packages, baseVersions, labels = [] }) {
         name: pkg.name,
         version: pkg.version,
         touched,
+        pinChanges,
       });
     }
   }
@@ -329,7 +392,10 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
     const state = bumped
       ? `OK (${pkg.baseVersion ?? 'new package'} -> ${pkg.version})`
       : `NOT BUMPED (still ${pkg.version})`;
-    lines.push(`  ${pkg.name} [${pkg.dir}] — ${pkg.touched.length} file(s) changed — ${state}`);
+    const pins = pkg.pinChanges?.length ? `, ${pkg.pinChanges.length} pin(s) changed` : '';
+    lines.push(
+      `  ${pkg.name} [${pkg.dir}] — ${pkg.touched.length} file(s) changed${pins} — ${state}`
+    );
   }
 
   if (violations.length === 0) {
@@ -340,14 +406,29 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
   lines.push('', 'Version-bump check FAILED.');
   lines.push('');
   for (const v of violations) {
+    const what =
+      v.touched.length > 0 && v.pinChanges?.length
+        ? 'source and a workspace dependency pin changed'
+        : v.touched.length > 0
+          ? 'source changed'
+          : 'a workspace dependency pin changed';
     lines.push(
-      `${v.name}: source changed but the version is unchanged (${v.version} on both this ` +
+      `${v.name}: ${what} but the version is unchanged (${v.version} on both this ` +
         'branch and the base branch).'
     );
-    lines.push(
-      `  Changed: ${v.touched.slice(0, MAX_LISTED_FILES).join(', ')}` +
-        `${v.touched.length > MAX_LISTED_FILES ? ', ...' : ''}`
-    );
+    if (v.touched.length > 0) {
+      lines.push(
+        `  Changed: ${v.touched.slice(0, MAX_LISTED_FILES).join(', ')}` +
+          `${v.touched.length > MAX_LISTED_FILES ? ', ...' : ''}`
+      );
+    }
+    if (v.pinChanges?.length) {
+      lines.push(`  Repinned: ${v.pinChanges.join(', ')}`);
+      lines.push(
+        '  A repin changes what users install even when no source did — the published ' +
+          'artifact carries different dependency versions.'
+      );
+    }
     lines.push(`  Fix: bump ${v.name} version`);
     lines.push(`       cd ${v.dir} && npm version patch --no-git-tag-version`);
     lines.push('');
@@ -469,6 +550,43 @@ export function versionAtRef(repoRoot, ref, packageDir) {
   }
 }
 
+/**
+ * The workspace-sibling dependency ranges for `packageDir` at `ref`, or null
+ * when the package does not exist there. Mirrors versionAtRef()'s failure
+ * handling: every unreadable case throws rather than returning an empty object,
+ * because "no deps" and "could not read the deps" must not look alike.
+ */
+export function workspaceDepsAtRef(repoRoot, ref, packageDir) {
+  const path = `${packageDir}/package.json`;
+
+  let listed;
+  try {
+    listed = git(['ls-tree', '-r', '--name-only', ref, '--', path], repoRoot);
+  } catch (err) {
+    throw new CheckUnavailableError(
+      `cannot list '${path}' at ref '${ref}' (${gitError(err)}).\n` +
+        '  Fix: make sure the base ref is fetched (in CI: actions/checkout with fetch-depth: 0).'
+    );
+  }
+  if (!listed) return null;
+
+  let raw;
+  try {
+    raw = git(['show', `${ref}:${path}`], repoRoot);
+  } catch (err) {
+    throw new CheckUnavailableError(`cannot read '${path}' at ref '${ref}' (${gitError(err)}).`);
+  }
+
+  try {
+    return workspaceDeps(JSON.parse(raw));
+  } catch (err) {
+    throw new CheckUnavailableError(
+      `'${path}' at ref '${ref}' is not valid JSON (${err.message}).\n` +
+        `  Fix: the base branch has a broken ${path}; repair it there.`
+    );
+  }
+}
+
 export function run(argv, { log = console.log, error = console.error } = {}) {
   try {
     const opts = parseArgs(argv);
@@ -503,11 +621,19 @@ export function run(argv, { log = console.log, error = console.error } = {}) {
 
     const packages = discoverPackages(repoRoot);
     const baseVersions = {};
+    const baseWorkspaceDeps = {};
     for (const pkg of packages) {
       baseVersions[pkg.dir] = versionAtRef(repoRoot, mergeBase, pkg.dir);
+      baseWorkspaceDeps[pkg.dir] = workspaceDepsAtRef(repoRoot, mergeBase, pkg.dir);
     }
 
-    const result = analyze({ changedFiles, packages, baseVersions, labels: opts.labels });
+    const result = analyze({
+      changedFiles,
+      packages,
+      baseVersions,
+      baseWorkspaceDeps,
+      labels: opts.labels,
+    });
     const report = formatReport({
       ...result,
       context: {

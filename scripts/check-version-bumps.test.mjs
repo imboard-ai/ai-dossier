@@ -8,12 +8,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   analyze,
   CheckUnavailableError,
+  changedWorkspaceDeps,
   discoverPackages,
   ESCAPE_LABEL,
   formatReport,
   isReleaseRelevant,
   run,
   versionAtRef,
+  workspaceDeps,
 } from './check-version-bumps.mjs';
 
 const SCRIPT_PATH = fileURLToPath(new URL('./check-version-bumps.mjs', import.meta.url));
@@ -607,5 +609,156 @@ describe('never fails open — a check that cannot run exits 2, not 0', () => {
     expect(versionAtRef(repo, 'base-ref', 'cli')).toBe('1.0.0');
     expect(versionAtRef(repo, 'base-ref', 'packages/never-existed')).toBe(null);
     expect(() => versionAtRef(repo, 'no-such-ref', 'cli')).toThrow(CheckUnavailableError);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #692 — a workspace dependency repin is release-relevant on its own.
+//
+// The regression these cover really happened: sched 0.25.0-0.27.0 published
+// with the #678/#679/#680/#681 fixes, `cli/package.json` was repinned from
+// `^0.24.0` to `^0.27.0`, and `cli`'s own version stayed at 0.34.5 — a version
+// npm already had. `publish-packages` skipped it as already-published, so four
+// fixes merged and never reached any machine.
+// ---------------------------------------------------------------------------
+
+describe('workspaceDeps', () => {
+  it('keeps only workspace-scoped runtime deps, sorted', () => {
+    expect(
+      workspaceDeps({
+        dependencies: {
+          zod: '^3.0.0',
+          '@ai-dossier/sched': '^0.27.0',
+          '@ai-dossier/core': '^1.6.0',
+        },
+      })
+    ).toEqual({ '@ai-dossier/core': '^1.6.0', '@ai-dossier/sched': '^0.27.0' });
+  });
+
+  it('ignores devDependencies — they do not ship to consumers', () => {
+    expect(workspaceDeps({ devDependencies: { '@ai-dossier/core': '^1.6.0' } })).toEqual({});
+  });
+
+  it('tolerates a package.json with no dependencies at all', () => {
+    expect(workspaceDeps({})).toEqual({});
+    expect(workspaceDeps(null)).toEqual({});
+  });
+});
+
+describe('changedWorkspaceDeps', () => {
+  it('reports a changed range', () => {
+    expect(
+      changedWorkspaceDeps({ '@ai-dossier/sched': '^0.24.0' }, { '@ai-dossier/sched': '^0.27.0' })
+    ).toEqual(['@ai-dossier/sched']);
+  });
+
+  it('reports an added and a removed dependency', () => {
+    expect(changedWorkspaceDeps({}, { '@ai-dossier/sched': '^0.27.0' })).toEqual([
+      '@ai-dossier/sched',
+    ]);
+    expect(changedWorkspaceDeps({ '@ai-dossier/sched': '^0.27.0' }, {})).toEqual([
+      '@ai-dossier/sched',
+    ]);
+  });
+
+  it('is empty when the pins are identical', () => {
+    const pins = { '@ai-dossier/core': '^1.6.0', '@ai-dossier/sched': '^0.27.0' };
+    expect(changedWorkspaceDeps(pins, { ...pins })).toEqual([]);
+  });
+});
+
+describe('analyze — a repin without a version bump fails', () => {
+  const pkg = (deps) => ({
+    dir: 'cli',
+    name: '@ai-dossier/cli',
+    version: '0.34.5',
+    deps,
+  });
+
+  it('fails when only the pin moved (the #692 regression)', () => {
+    const result = analyze({
+      changedFiles: ['cli/package.json'],
+      packages: [pkg({ '@ai-dossier/sched': '^0.27.0' })],
+      baseVersions: { cli: '0.34.5' },
+      baseWorkspaceDeps: { cli: { '@ai-dossier/sched': '^0.24.0' } },
+    });
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0].pinChanges).toEqual(['@ai-dossier/sched']);
+    expect(result.violations[0].touched).toEqual([]);
+  });
+
+  it('passes when the pin moved and the version was bumped', () => {
+    const result = analyze({
+      changedFiles: ['cli/package.json'],
+      packages: [{ ...pkg({ '@ai-dossier/sched': '^0.27.0' }), version: '0.34.6' }],
+      baseVersions: { cli: '0.34.5' },
+      baseWorkspaceDeps: { cli: { '@ai-dossier/sched': '^0.24.0' } },
+    });
+    expect(result.violations).toEqual([]);
+  });
+
+  it('ignores an unrelated package.json edit that leaves the pins alone', () => {
+    const pins = { '@ai-dossier/sched': '^0.27.0' };
+    const result = analyze({
+      changedFiles: ['cli/package.json'],
+      packages: [pkg(pins)],
+      baseVersions: { cli: '0.34.5' },
+      baseWorkspaceDeps: { cli: { ...pins } },
+    });
+    expect(result.violations).toEqual([]);
+    expect(result.checked).toEqual([]);
+  });
+
+  it('treats a package absent from the base ref as new, not as a repin', () => {
+    const result = analyze({
+      changedFiles: ['cli/package.json'],
+      packages: [pkg({ '@ai-dossier/sched': '^0.27.0' })],
+      baseVersions: { cli: null },
+      baseWorkspaceDeps: { cli: null },
+    });
+    expect(result.violations).toEqual([]);
+  });
+
+  it('still honours the escape label', () => {
+    const result = analyze({
+      changedFiles: ['cli/package.json'],
+      packages: [pkg({ '@ai-dossier/sched': '^0.27.0' })],
+      baseVersions: { cli: '0.34.5' },
+      baseWorkspaceDeps: { cli: { '@ai-dossier/sched': '^0.24.0' } },
+      labels: [ESCAPE_LABEL],
+    });
+    expect(result.skipped).toBe(true);
+    expect(result.waived).toHaveLength(1);
+  });
+});
+
+describe('formatReport — a pin-only violation says so', () => {
+  it('names the repinned dependency and does not claim source changed', () => {
+    const report = formatReport({
+      skipped: false,
+      checked: [
+        {
+          dir: 'cli',
+          name: '@ai-dossier/cli',
+          version: '0.34.5',
+          baseVersion: '0.34.5',
+          touched: [],
+          pinChanges: ['@ai-dossier/sched'],
+        },
+      ],
+      violations: [
+        {
+          dir: 'cli',
+          name: '@ai-dossier/cli',
+          version: '0.34.5',
+          touched: [],
+          pinChanges: ['@ai-dossier/sched'],
+        },
+      ],
+    });
+    expect(report).toContain('a workspace dependency pin changed');
+    expect(report).toContain('Repinned: @ai-dossier/sched');
+    expect(report).not.toContain('source changed but');
+    expect(report).toContain('cd cli && npm version patch --no-git-tag-version');
   });
 });
