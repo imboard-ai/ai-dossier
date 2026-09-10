@@ -93,7 +93,8 @@ import {
   recordDispatchApiError,
   resetDispatchApiErrorStreak,
 } from './dispatch-health';
-import type { RunFencer } from './fence';
+import type { RunFenceBinder, RunFenceReleaser, RunFencer } from './fence';
+import { takeoverLabelFor } from './fence';
 import {
   type GroundTruth,
   type GroundTruthMilestone,
@@ -107,7 +108,13 @@ import { labelBlockReason, labelOfBlockReason, pickHardBlockLabel } from './labe
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
-import { buildSchedRunLogEntry, finalizeRunLogEntry, readDispatchLog } from './run-log';
+import {
+  buildSchedRunLogEntry,
+  type FenceAbortEvidence,
+  finalizeRunLogEntry,
+  parseFenceAbort,
+  readDispatchLog,
+} from './run-log';
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import {
   CLEARED_ENTRY_DEDUP_MARKERS,
@@ -151,6 +158,21 @@ export interface EngineDeps {
    * existed, journaling `fence-failed` so the gap is visible rather than silent.
    */
   fencer?: RunFencer;
+  /**
+   * Binds a just-written fence to the takeover's spawned process (#683 AC2) — pid +
+   * `/proc` start-time, so every later reader of the trail can tell a live owner from a
+   * ghost whose release was missed. Optional like `fencer`: an engine without one
+   * leaves its fences unbound, which reads fail-closed (an unbound fence still fences),
+   * and journals `fence-bind-failed` so the gap is visible.
+   */
+  fenceBinder?: RunFenceBinder;
+  /**
+   * Releases a run's fences when the engine detects the owning dispatch's exit
+   * (#683 AC1) — the `exit-detected` hook. Optional like `fencer`: an engine without
+   * one never releases, and successors then rely on the bind-based stale-on-read
+   * backstop; failures journal `fence-release-failed`.
+   */
+  fenceReleaser?: RunFenceReleaser;
   /**
    * Home directory `runs.jsonl` telemetry (#524) is written under —
    * `<homeDir>/.dossier/runs.jsonl`, the same file `cli`'s `ai-dossier run`
@@ -734,9 +756,15 @@ function spawnAndRecord(
   }
 
   const now = ctx.deps.now();
+  const pidStart = ctx.deps.spawnDeps.processStart(pid);
+  // #683 AC2: the takeover owns a fence from the moment it was fenced in — bind the
+  // fence to this process so later reads can verify the owner is real. Runs BEFORE the
+  // patch/transition below (which don't touch run_id/fence_phase), against the
+  // PRE-spawn slot snapshot that already carries this dispatch's fence coordinates.
+  bindFenceToSpawn(ctx, unit, issueOfUnit(unit) ?? 0, slot, pid, pidStart);
   const patch = {
     pid,
-    pid_start: ctx.deps.spawnDeps.processStart(pid),
+    pid_start: pidStart,
     phase: opts.phase,
     last_progress_at: now.toISOString(),
     // #524: distinct from last_progress_at, which later progress signals
@@ -796,7 +824,16 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
     // replaced is refused. A first dispatch is generation 0 and reads as it always did.
     // The tier's own resolved prompt (#527) — falls back to the global
     // dispatch.prompt when the tier has no override.
-    prompt: buildPrompt(ctx.dispatch.tiers[entry.tier].prompt, issue, slot.gen),
+    prompt: buildPrompt(
+      ctx.dispatch.tiers[entry.tier].prompt,
+      issue,
+      slot.gen,
+      // #683 AC6: the takeover is told its slot identity alongside the generation —
+      // the same label the fence announced and the bind names (one spelling,
+      // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
+      // generation, never by matching this label (AC7).
+      slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined
+    ),
     phase: 'gate',
     ...(slot.gen > 0 ? { journalExtra: { detail: `takeover gen=${slot.gen}` } } : {}),
   });
@@ -827,7 +864,15 @@ function spawnReportAgent(ctx: TickCtx, state: SchedState, unit: string): SchedS
     // (#504): a report slot is fenced by the same ladder, and a report agent that did
     // not know its generation would have its `report done` milestone refused by the
     // CLI — recovering forever on a PR that already merged.
-    prompt: buildReportPrompt(ctx.dispatch.reportPrompt, issue, entry.pr, entry.cleanup, slot.gen),
+    prompt: buildReportPrompt(
+      ctx.dispatch.reportPrompt,
+      issue,
+      entry.pr,
+      entry.cleanup,
+      slot.gen,
+      // #683 AC6, same rule as the cycle-agent prompt above.
+      slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined
+    ),
     phase: 'report',
     // Merged-aware: the PR is merged — a report spawn failure never blocks
     // dependents (gating already released at `shipped`).
@@ -964,8 +1009,21 @@ const RUN_ID_FOR_ISSUE_RE = /^r-(\d+)-[0-9a-f]{4,}$/;
 const PHASE_TOKEN_RE = /^[a-z][a-z0-9-]{0,31}$/;
 
 /**
+ * A fence that actually landed (#683): the generation it installed AND the trail
+ * coordinates it was written under. The slot records all four (gen was already there;
+ * `run_id`/`fence_phase` are new) so the spawn-path bind and the exit-path release can
+ * name the same record without a ground-truth read.
+ */
+interface WrittenFence {
+  gen: number;
+  run: string;
+  phase: string;
+  takeover: string;
+}
+
+/**
  * Post the takeover record for a unit about to be redispatched (#504 AC1), returning the
- * generation the fence installed — or null when no fence could be written.
+ * fence it installed — or null when no fence could be written.
  *
  * Every null is journaled as `fence-failed` WITH its cause, and every one is DEGRADED
  * rather than fatal:
@@ -988,7 +1046,7 @@ function writeFence(
   issue: number,
   slot: SlotEntry,
   truth: UnitTruth
-): number | null {
+): WrittenFence | null {
   const failed = (detail: string): null => {
     journal(ctx, 'fence-failed', unit, { slot: slot.id, detail });
     return null;
@@ -1015,7 +1073,11 @@ function writeFence(
   // is preferred over spending the attempt on it.
   const claimed = truth.milestone?.phase ?? '';
   const phase = PHASE_TOKEN_RE.test(claimed) ? claimed : (slot.phase ?? 'gate');
-  const takeover = `slot-${slot.id}-r${slot.recoveries + 1}`;
+  // The label of the dispatch ABOUT to spawn: `recoveries + 1` here, because the
+  // slot's counter is bumped by this recovery's transition right after. Every later
+  // reader of the same dispatch (the spawn-path bind, the exit-path release) derives
+  // the label from the BUMPED counter via `takeoverLabelFor`, so both spellings agree.
+  const takeover = takeoverLabelFor(slot.id, slot.recoveries + 1);
 
   const outcome = ctx.deps.fencer(issue, run, phase, takeover);
   if (!outcome.ok) {
@@ -1026,7 +1088,67 @@ function writeFence(
     slot: slot.id,
     detail: `${run} gen=${outcome.gen} takeover=${takeover}`,
   });
-  return outcome.gen;
+  return { gen: outcome.gen, run, phase, takeover };
+}
+
+/**
+ * Bind the slot's fence to the process just spawned for its takeover (#683 AC2).
+ *
+ * Called from `spawnAndRecord` right after the spawn resolved, while pid and
+ * `/proc` start-time are in hand: the bind is what lets every later READER of the trail
+ * (`runstate check`, `post`'s guard) tell a live owner from a ghost whose release was
+ * missed. Best-effort by design — no binder configured (an older engine), no fence on
+ * this slot (`gen === 0`), or a failed post all degrade to an UNBOUND fence, which
+ * reads fail-closed (still fences) exactly as fences did before #683; a failure
+ * journals `fence-bind-failed` so the gap is visible.
+ */
+function bindFenceToSpawn(
+  ctx: TickCtx,
+  unit: string,
+  issue: number,
+  slot: SlotEntry,
+  pid: number,
+  pidStart: number | null
+): void {
+  const binder = ctx.deps.fenceBinder;
+  if (binder === undefined || slot.gen <= 0 || slot.run_id === null) return;
+  const phase = slot.fence_phase ?? slot.phase ?? 'gate';
+  const takeover = takeoverLabelFor(slot.id, slot.recoveries);
+  const outcome = binder(issue, slot.run_id, phase, takeover, slot.gen, pid, pidStart);
+  journal(ctx, outcome.ok ? 'fence-bound' : 'fence-bind-failed', unit, {
+    slot: slot.id,
+    pid,
+    fence_gen: slot.gen,
+    detail: outcome.ok
+      ? `${slot.run_id} gen=${slot.gen} owner pid=${pid}${pidStart !== null ? ` pid_start=${pidStart}` : ''}`
+      : outcome.reason,
+  });
+}
+
+/**
+ * Release the slot's fence because its owning dispatch ENDED (#683 AC1) — the
+ * `exit-detected` hook, called only from `reconcileRunning`'s dead-pid branch, the one
+ * place the engine already learns "this run's owner just ended", abnormally or not.
+ *
+ * Best-effort like the bind: no releaser configured, no fence on the slot, or a failed
+ * post all leave the fence on the trail, and successors then fall back to the
+ * bind-based stale-on-read check — the belt-and-suspenders the issue asks for. A
+ * failure journals `fence-release-failed`; a success journals the release so the trail
+ * reads "owner ended, fence lifted" without diffing comments.
+ */
+function releaseFenceOnExit(ctx: TickCtx, unit: string, issue: number, slot: SlotEntry): void {
+  const releaser = ctx.deps.fenceReleaser;
+  if (releaser === undefined || slot.gen <= 0 || slot.run_id === null) return;
+  const phase = slot.fence_phase ?? slot.phase ?? 'gate';
+  const takeover = takeoverLabelFor(slot.id, slot.recoveries);
+  const outcome = releaser(issue, slot.run_id, phase, takeover, slot.gen);
+  journal(ctx, outcome.ok ? 'fence-released' : 'fence-release-failed', unit, {
+    slot: slot.id,
+    fence_gen: slot.gen,
+    detail: outcome.ok
+      ? `${slot.run_id} gen=${slot.gen} released — owner exit detected`
+      : outcome.reason,
+  });
 }
 
 /**
@@ -1138,7 +1260,7 @@ function enterRecovery(
   ctx: TickCtx,
   state: SchedState,
   unit: string,
-  causeEvent: 'stalled' | 'verify-incomplete' | 'dispatch-failure',
+  causeEvent: 'stalled' | 'verify-incomplete' | 'dispatch-failure' | 'deferred-to-owner',
   cause: string,
   truth: UnitTruth,
   evidence: Record<string, unknown> = {},
@@ -1157,6 +1279,9 @@ function enterRecovery(
   const slot = slotOf(state, unit);
   if (!entry || !slot) return state;
 
+  // #683 AC3: a `deferred-to-owner` cause arrives AFTER the agent's exit was
+  // already detected and recorded by the dead-pid branch of `reconcileRunning`
+  // — same contract as `verify-incomplete` (#524), never re-recorded here.
   killUnitAgent(ctx, state, unit);
   // #524: only the STALL path kills a still-live, not-yet-recorded agent —
   // `causeEvent === 'verify-incomplete'`/`'dispatch-failure'` arrive from
@@ -1175,10 +1300,11 @@ function enterRecovery(
   if (escalate) {
     const escalated = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
     if (slot.recoveries >= ESCALATION_CAP || escalated === null) {
-      // #629: unreachable with `causeEvent === 'dispatch-failure'` — that
-      // cause always passes `escalate: false` above, so this branch (and the
-      // narrower `causeEvent` type `failOrAdoptOpenPr` declares) is never
-      // actually asked to terminally fail a unit over a provider wall.
+      // #629: unreachable with `causeEvent === 'dispatch-failure'` or
+      // `'deferred-to-owner'` (#683) — both causes always pass
+      // `escalate: false` above, so this branch (and the narrower
+      // `causeEvent` type `failOrAdoptOpenPr` declares) is never actually
+      // asked to terminally fail a unit over a provider wall or a defer.
       return failOrAdoptOpenPr(
         ctx,
         state,
@@ -1212,11 +1338,17 @@ function enterRecovery(
     {
       pid: null,
       recoveries: escalate ? slot.recoveries + 1 : slot.recoveries,
-      gen: fenced ?? slot.gen,
+      gen: fenced !== null ? fenced.gen : slot.gen,
       // Only a fence that actually landed starts the short takeover watch: an
       // unfenced redispatch is already degraded, and cutting its allowance down
       // would compound one failure with another.
       fenced_at: fenced === null ? null : now.toISOString(),
+      // #683: record the fence's trail coordinates so the spawn-path bind and the
+      // exit-path release can name the same record without a trail read. A degraded
+      // fence keeps whatever the slot already recorded (the same run's earlier fence,
+      // if any — the coordinates are per-dispatch, and the spawn that follows an
+      // unfenced recovery is not bound to anything).
+      ...(fenced !== null ? { run_id: fenced.run, fence_phase: fenced.phase } : {}),
     },
     now
   );
@@ -1732,13 +1864,24 @@ function journalStaleMilestoneIfIgnored(
 interface DispatchSignals {
   lastTool: string | null;
   apiError: DispatchApiError | null;
+  /**
+   * Evidence this dispatch ended because a fence told it to (#683 AC3) — the deciding
+   * input for the `deferred-to-owner` classification. Null when the log slice carries
+   * no fence-abort marker for this unit's trail run id.
+   */
+  fenceAbort: FenceAbortEvidence | null;
 }
 
-const NO_DISPATCH_SIGNALS: DispatchSignals = { lastTool: null, apiError: null };
+const NO_DISPATCH_SIGNALS: DispatchSignals = {
+  lastTool: null,
+  apiError: null,
+  fenceAbort: null,
+};
 
 /**
- * Read THIS dispatch's last tool call and API-error classification (#591,
- * #620, #629) from its log slice — a pure, side-effect-free parse, safe to
+ * Read THIS dispatch's last tool call, API-error classification (#591,
+ * #620, #629), and fence-abort evidence (#683 AC3) from its log slice — a
+ * pure, side-effect-free parse, safe to
  * call from any slot status and any number of times: unlike
  * `recordDispatchRunLog` below, it writes nothing to `runs.jsonl`, so it
  * carries no exactly-once constraint. Exists because a `verify-incomplete`/
@@ -1747,11 +1890,27 @@ const NO_DISPATCH_SIGNALS: DispatchSignals = { lastTool: null, apiError: null };
  * then the slot has moved past `running` and `recordDispatchRunLog`'s guard
  * refuses to re-read, but the dispatch's log file is static once the agent
  * has exited, so re-parsing it here yields the same answer every time.
+ *
+ * `run` is the trail run id the fence check must name to count as THIS
+ * dispatch's checkpoint: the slot's own `run_id` when it holds one, else the
+ * trail's current run (a gen-0 dispatch fenced out by a recovery's fence —
+ * the #4153 shape). Doc text quoting HISTORICAL run ids never matches, which
+ * is what keeps the defer classification from being faked by an agent that
+ * merely read `docs/agent-traps.md`.
  */
-function readDispatchSignalsForSlot(ctx: TickCtx, slot: SlotEntry, unit: string): DispatchSignals {
+function readDispatchSignalsForSlot(
+  ctx: TickCtx,
+  slot: SlotEntry,
+  unit: string,
+  run: string
+): DispatchSignals {
   if (slot.spawned_at === null) return NO_DISPATCH_SIGNALS;
   const { content } = dispatchLogSlice(ctx, slot, unit);
-  return { lastTool: parseLastToolUse(content), apiError: parseDispatchApiError(content) };
+  return {
+    lastTool: parseLastToolUse(content),
+    apiError: parseDispatchApiError(content),
+    fenceAbort: parseFenceAbort(content, run),
+  };
 }
 
 /**
@@ -1793,7 +1952,12 @@ function recordDispatchRunLog(
   ctx: TickCtx,
   state: SchedState,
   slot: SlotEntry,
-  unit: string
+  unit: string,
+  // #683 AC3: the trail run id a fence-abort marker in THIS dispatch's log slice must
+  // name to count as evidence (callers with a polled truth pass its run; a kill whose
+  // signals are discarded passes ''). Doc text quotes historical run ids, so without
+  // this match an agent that merely READ docs could be classified as having deferred.
+  run = ''
 ): DispatchSignals {
   // Enforce the once-per-dispatch invariant HERE rather than restating it in
   // prose at four call sites (#524 review). `blockTransitiveDependents` and
@@ -1862,8 +2026,15 @@ function recordDispatchRunLog(
   // #591: the last tool this dispatch called, so an unverified exit attributes to a
   // concrete cause (e.g. `Monitor`) without opening the transcript — see `enterRecovery`.
   // #629: whether this SAME dispatch was a confirmed provider API error — see
-  // `completeUnitOrRecover`.
-  return { lastTool: parseLastToolUse(logContent), apiError: parseDispatchApiError(logContent) };
+  // `completeUnitOrRecover`. #683 AC3: whether it ended because a fence told it to —
+  // `run` names the trail run id the fence check must have answered to; with no run
+  // known, no fence-abort evidence can be this dispatch's own and the parse is skipped.
+  const fenceRun = run !== '' ? run : (slot.run_id ?? '');
+  return {
+    lastTool: parseLastToolUse(logContent),
+    apiError: parseDispatchApiError(logContent),
+    fenceAbort: parseFenceAbort(logContent, fenceRun),
+  };
 }
 
 /** Reconcile one running slot against its polled ground truth. */
@@ -1880,7 +2051,19 @@ function reconcileRunning(
   // is DETECTED, never trusted as completion (AC2/AC3).
   if (slot.pid !== null && !ctx.deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
     journal(ctx, 'exit-detected', unit, { pid: slot.pid, slot: slot.id });
-    const signals = recordDispatchRunLog(ctx, state, slot, unit);
+    // #683 AC1: the owning run just ended — release its fence here, BEFORE the
+    // classification below decides between completion and a (re-fencing) recovery, so
+    // no path can leave a dead run's fence governing the trail. A recovery re-fences
+    // at gen+1 right after, which dominates the released generation as before.
+    releaseFenceOnExit(ctx, unit, issueOfUnit(unit) ?? 0, slot);
+    // #683 AC3: the defer classification must recognize THIS dispatch's own
+    // checkpoint output. A gen>0 takeover's slot carries its fence's run_id; a
+    // gen-0 dispatch (re-enqueued fresh, fenced out by an earlier recovery —
+    // the #4153 shape) carries none, so the trail's current run — the run id
+    // the checkpoint instruction tells every dispatch to check under — is the
+    // match key. Wrong-run markers never match (docs quote historical ids),
+    // which is what keeps the classification unfakeable by read text alone.
+    const signals = recordDispatchRunLog(ctx, state, slot, unit, truth.milestone?.run ?? '');
     const exited = transitionSlot(state, slot.id, 'exited', {}, now);
     return completeUnitOrRecover(ctx, exited, unit, truth, 'verify-complete', signals);
   }
@@ -2162,6 +2345,38 @@ function completeUnitOrRecover(
   }
 
   const suspect = msSinceLastProgress(slot, now) < SUSPECT_DISPATCH_WINDOW_MS;
+
+  // #683 AC3: the dispatch's own log carries its supersession-checkpoint
+  // verdict for THIS trail run — the agent checked, found an owner, and
+  // stepped aside. That is a deliberate, CORRECT no-op: never an
+  // `unverified-exit`, never an escalation rung. Classified deterministically
+  // off the CLI's exact output (the #629 lesson — never a heuristic on exit
+  // codes), recorded as a HEALTHY dispatch (no `suspect-dispatch`), and
+  // redispatched at the same tier via the #629 unescalated rail — the fence
+  // `enterRecovery` writes lands at the next generation and its takeover gets
+  // the pid bind, so the #4153 livelock self-heals in one step instead of
+  // climbing to `unverified-exit-at-strongest-tier`. Checked AFTER
+  // `recordDispatchApiError`'s branch: a confirmed provider wall (num_turns 1,
+  // no check output) cannot also be a defer, and its rail owns that shape.
+  if (resolved.fenceAbort !== null) {
+    const recorded = recordDispatchOutcome(ctx, next, unit, slot, false);
+    return enterRecovery(
+      ctx,
+      recorded,
+      unit,
+      'deferred-to-owner',
+      'deferred to the fence owner — deliberate supersession-checkpoint abort, no escalation rung consumed',
+      truth,
+      {
+        fence_gen: resolved.fenceAbort.gen,
+        ...(resolved.fenceAbort.takeover !== null
+          ? { fence_takeover: resolved.fenceAbort.takeover }
+          : {}),
+      },
+      { escalate: false }
+    );
+  }
+
   next = recordDispatchOutcome(ctx, next, unit, slot, suspect);
   return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', truth, {
     observed: truth.milestone
@@ -2248,7 +2463,7 @@ function reconcileSlots(
         // happens only on the tick that actually reaches the unverified-exit
         // decision, not on every tick an outage holds the slot here.
         next = completeUnitOrRecover(ctx, next, unit, truth, 'verify-complete', () =>
-          readDispatchSignalsForSlot(ctx, slot, unit)
+          readDispatchSignalsForSlot(ctx, slot, unit, truth.milestone?.run ?? '')
         );
         break;
       case 'recovering':

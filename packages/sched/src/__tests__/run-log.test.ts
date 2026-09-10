@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   appendSchedRunLog,
   buildSchedRunLogEntry,
+  parseFenceAbort,
   readDispatchLog,
   schedRunsLogPath,
   schedTelemetryEnabled,
@@ -24,6 +25,44 @@ afterEach(() => {
 describe('schedRunsLogPath', () => {
   it('resolves to ~/.dossier/runs.jsonl under the given home — the same file cli writes to', () => {
     expect(schedRunsLogPath(home)).toBe(path.join(home, '.dossier', 'runs.jsonl'));
+  });
+});
+
+describe('parseFenceAbort (#683 AC3 — the defer classification evidence)', () => {
+  const RUN = 'r-4153-2957';
+
+  it('reads the stderr verdict runstate check prints when a dispatch is fenced out', () => {
+    const log = `some work\n❌ Run ${RUN} was SUPERSEDED at generation 3 (takeover 'slot-3-r1', fenced at implement on 2026-09-09T15:16:33Z).\n`;
+    expect(parseFenceAbort(log, RUN)).toEqual({ gen: 3, takeover: 'slot-3-r1' });
+  });
+
+  it('reads the abort comment’s dedup marker when the stderr line is not in the slice', () => {
+    const log = `worked on it\n<!-- runstate-abort:${RUN}:2 -->\n`;
+    expect(parseFenceAbort(log, RUN)).toEqual({ gen: 2, takeover: null });
+  });
+
+  it('requires the marker to name THIS dispatch’s trail run — doc text never defers', () => {
+    // A false defer would skip escalation forever — worse than the livelock. The run id
+    // in the checkpoint output must be the run the dispatch was working under, so an
+    // agent that merely READ a historical incident (docs, trap tables, issue bodies)
+    // cannot classify itself as having deferred.
+    const historical = `#683 cites: ❌ Run r-999-abcd was SUPERSEDED at generation 3 (takeover 'slot-3-r1').\n`;
+    expect(parseFenceAbort(historical, RUN)).toBeNull();
+  });
+
+  it('never matches an empty run id — a caller that cannot name the run gets no evidence', () => {
+    const log = `❌ Run ${RUN} was SUPERSEDED at generation 3 (takeover 'slot-3-r1').\n`;
+    expect(parseFenceAbort(log, '')).toBeNull();
+  });
+
+  it('returns null for a log with no fence output, or no log at all', () => {
+    expect(parseFenceAbort('nothing here\n', RUN)).toBeNull();
+    expect(parseFenceAbort(null, RUN)).toBeNull();
+  });
+
+  it('skips a malformed generation rather than reading it as a defer', () => {
+    const log = `❌ Run ${RUN} was SUPERSEDED at generation -7 (takeover 'slot-3-r1').\n`;
+    expect(parseFenceAbort(log, RUN)).toBeNull();
   });
 });
 

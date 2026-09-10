@@ -697,6 +697,15 @@ export function validateState(data: unknown): SchedState {
         `Slot ${slot.id}: progress_milestone_ticks must be a non-negative integer or absent (legacy)`
       );
     }
+    // #683: the fence's trail coordinates are plain strings or null — never
+    // used for identity matching (run id + generation decides that), only to
+    // NAME the trail record the bind/release posts describe.
+    for (const field of ['run_id', 'fence_phase'] as const) {
+      const value = slot[field];
+      if (value !== null && value !== undefined && typeof value !== 'string') {
+        throw new Error(`Slot ${slot.id}: ${field} must be a string or null`);
+      }
+    }
     if (
       slot.log_offset_at_spawn !== null &&
       slot.log_offset_at_spawn !== undefined &&
@@ -835,6 +844,12 @@ export function validateState(data: unknown): SchedState {
     progress_milestone_for: slot.progress_milestone_for ?? null,
     progress_milestone_since: slot.progress_milestone_since ?? null,
     progress_milestone_ticks: slot.progress_milestone_ticks ?? 0,
+    // Pre-#683 (1.16.0) slots recorded no fence trail coordinates — a legacy
+    // fence-holding slot's bind/release then cannot name its trail, which
+    // degrades to today's behavior (no bind, no release; stale-on-read still
+    // unblocks successors), so null/null is the honest backfill.
+    run_id: slot.run_id ?? null,
+    fence_phase: slot.fence_phase ?? null,
   }));
   const entries = (obj.entries as QueueEntry[]).map((entry) => ({
     ...entry,
@@ -1048,6 +1063,10 @@ export const CLEARED_SLOT_FIELDS = {
   progress_milestone_for: null,
   progress_milestone_since: null,
   progress_milestone_ticks: 0,
+  // #683: a released slot holds no fence — the next takeover's fence stamps
+  // these fresh at write time.
+  run_id: null,
+  fence_phase: null,
 };
 
 export function transitionSlot(

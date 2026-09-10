@@ -51,3 +51,27 @@ export function writeApiErrorLog(logFile: string, overrides: Record<string, unkn
     })}\n`
   );
 }
+
+/**
+ * Write the supersession-checkpoint verdict a DEFERRING dispatch carries (#683 AC3) —
+ * the exact `runstate check` output shapes the dispatch log captures when an agent
+ * finds an owner and steps aside: the human stderr line, and the dedup marker of the
+ * abort comment the CLI posted. `parseFenceAbort` keys on these wordings, so the
+ * fixture must not drift from the CLI's own strings.
+ *
+ * Appends, like its siblings, and creates the runs directory.
+ */
+export function writeFenceAbortLog(
+  logFile: string,
+  run: string,
+  gen: number,
+  takeover: string
+): void {
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  fs.appendFileSync(
+    logFile,
+    `❌ Run ${run} was SUPERSEDED at generation ${gen} (takeover '${takeover}', fenced at implement on 2026-09-09T15:16:33Z).\n` +
+      `   Stop working on the issue and exit: another agent owns it. Do not push, do not open a PR.\n` +
+      `<!-- runstate-abort:${run}:${gen} -->\n`
+  );
+}

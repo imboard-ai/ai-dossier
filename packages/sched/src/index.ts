@@ -58,6 +58,7 @@ export {
   journalCmdModelFields,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
+  procStartTime,
   type ResolvedDispatch,
   type ResolvedTierDispatch,
   reportTierFor,
@@ -84,11 +85,16 @@ export {
   parseManifest,
 } from './enqueue';
 export {
+  createExecRunFenceBinder,
+  createExecRunFenceReleaser,
   createExecRunFencer,
   FENCE_TIMEOUT_MS,
   type FenceOutcome,
   parseFenceGeneration,
+  type RunFenceBinder,
+  type RunFenceReleaser,
   type RunFencer,
+  takeoverLabelFor,
 } from './fence';
 export {
   createExecGroundTruth,
@@ -173,6 +179,8 @@ export {
 export {
   appendSchedRunLog,
   buildSchedRunLogEntry,
+  type FenceAbortEvidence,
+  parseFenceAbort,
   readDispatchLog,
   type SchedRunLogInput,
   schedRunsLogPath,
