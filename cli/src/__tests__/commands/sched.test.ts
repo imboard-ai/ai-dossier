@@ -1245,3 +1245,20 @@ describe('ai-dossier sched stats --batch (#564: reconstructed directly from raw 
     ).rejects.toThrow('process.exit(1)');
   });
 });
+
+describe('#680: the configured dispatch agent is visible (status line + startup banner)', () => {
+  it('sched status renders a Dispatch line with the resolved per-tier agent/models', async () => {
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain(
+      'Dispatch: mechanical=claude/haiku · mid=claude/sonnet · strong=claude/opus'
+    );
+  });
+
+  it('sched start --once logs the dispatch banner exactly once, before the tick result', async () => {
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+    const banners = logs.filter((l) => l.includes('sched dispatch:'));
+    expect(banners).toHaveLength(1);
+    expect(banners[0]).toContain('mechanical=claude/haiku');
+    expect(banners[0]).toContain('strong=claude/opus');
+  });
+});

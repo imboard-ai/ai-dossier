@@ -52,6 +52,7 @@ export {
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
   dispatchLogPath,
+  dispatchSummary,
   escalateTier,
   fileSizeOrZero,
   journalCmdModelFields,

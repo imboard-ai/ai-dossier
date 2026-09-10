@@ -11,6 +11,7 @@ import {
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
+  dispatchSummary,
   escalateTier,
   journalCmdModelFields,
   NO_BACKGROUND_EXIT_INSTRUCTION,
@@ -725,4 +726,43 @@ describe('createSpawnDeps — dispatch log is never 0 bytes (#524 AC3)', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }, 10_000);
+});
+
+describe('dispatchSummary (#680 — the configured executor, visible without reading the journal)', () => {
+  it('renders agent/model per tier with the built-in defaults', () => {
+    expect(dispatchSummary(resolveDispatch({}))).toBe(
+      'mechanical=claude/haiku mid=claude/sonnet strong=claude/opus'
+    );
+  });
+
+  it('renders a mixed agent-CLI ladder and `-` for a modelless tier', () => {
+    const resolved = resolveDispatch({
+      dispatch: {
+        tiers: {
+          mechanical: {
+            command: ['opencode', 'run', '--auto', '--model', '{model}'],
+            model: 'glm-5.3-flash',
+          },
+          mid: { command: ['opencode', 'run', '--auto', '--model', '{model}'], model: 'glm-5.3' },
+        },
+      },
+    });
+    expect(dispatchSummary(resolved)).toBe(
+      'mechanical=opencode/glm-5.3-flash mid=opencode/glm-5.3 strong=claude/opus'
+    );
+  });
+
+  it('renders `-` for a tier whose resolved model is null', () => {
+    // Hand-built: the config types never produce a null model, but the
+    // resolved shape (`ResolvedTierDispatch.model: string | null`) allows one.
+    expect(
+      dispatchSummary({
+        tiers: {
+          mechanical: { commandTemplate: ['agent-bin'], model: null },
+          mid: { commandTemplate: ['claude'], model: 'sonnet' },
+          strong: { commandTemplate: ['claude'], model: 'opus' },
+        },
+      })
+    ).toBe('mechanical=agent-bin/- mid=claude/sonnet strong=claude/opus');
+  });
 });

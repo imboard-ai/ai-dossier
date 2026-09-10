@@ -569,6 +569,23 @@ export function resolveTierSpawn(
   return { cmd: buildTierCommand(resolved, tier, issue), model: resolved.tiers[tier].model };
 }
 
+/**
+ * One-line summary of the configured executor per tier (#680): `tier=agent/model`.
+ * The agent is the command template's binary basename (the same identification
+ * `withDisallowedTools` uses), the model the RESOLVED per-tier model — so an
+ * operator sees `claude/sonnet` vs `opencode/glm-5.3` at a glance, on
+ * `sched status` and in the engine's startup banner, instead of digging the
+ * dispatch command out of `events.jsonl`. A tier with no model renders `-`.
+ */
+export function dispatchSummary(resolved: Pick<ResolvedDispatch, 'tiers'>): string {
+  return TIER_ORDER.map((tier) => {
+    const tierDispatch = resolved.tiers[tier];
+    const agent = path.basename(tierDispatch.commandTemplate[0] ?? '');
+    const model = tierDispatch.model ?? '-';
+    return `${tier}=${agent}/${model}`;
+  }).join(' ');
+}
+
 /** A `TierSpawn` as `spawned`/`redispatched`/`fix-dispatched` journal fields — `model` omitted when the tier has none, matching every other optional journal field's convention. */
 export function journalCmdModelFields(spawn: TierSpawn): { cmd: string; model?: string } {
   return { cmd: spawn.cmd.join(' '), ...(spawn.model !== null ? { model: spawn.model } : {}) };

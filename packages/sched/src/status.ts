@@ -6,6 +6,8 @@
  * utilities.
  */
 
+import * as path from 'node:path';
+import { resolveDispatch } from './dispatch';
 import {
   batchBlockers,
   DISPATCHABLE_ISSUE_STATUSES,
@@ -13,7 +15,14 @@ import {
   runnableUnits,
 } from './readiness';
 import { distinctEvictions } from './state';
-import type { BatchEntry, QueueEntry, SchedConfig, SchedState, SlotEntry } from './types';
+import type {
+  BatchEntry,
+  ModelTier,
+  QueueEntry,
+  SchedConfig,
+  SchedState,
+  SlotEntry,
+} from './types';
 import { LIVE_SLOT_STATUSES, SATISFIED_ISSUE_STATUSES, TERMINAL_ISSUE_STATUSES } from './types';
 
 /** An entry that cannot progress, with the human reason. */
@@ -21,6 +30,14 @@ export interface BlockedItem {
   issue: number;
   status: string;
   reason: string;
+}
+
+/** One tier's resolved executor (#680) — the agent CLI and model a unit on this tier will actually spawn. */
+export interface TierExecutor {
+  /** The agent CLI — the command template's binary basename (e.g. `claude`, `opencode`). */
+  agent: string;
+  /** The resolved per-tier model; null means the tier's command has no model flag. */
+  model: string | null;
 }
 
 /** A parked unit awaiting its PR merge (#468). */
@@ -69,6 +86,16 @@ export interface StatusReport {
   runnable: number;
   /** Which units are runnable (`issue:<n>` / `batch:<id>`), in dispatch order. */
   runnable_units: string[];
+  /**
+   * The configured executor per tier (#680) — which agent CLI and model each
+   * tier actually dispatches, resolved exactly as the engine resolves them
+   * (`resolveDispatch`). Exists because the operator's choice of agent/model
+   * at the top of a session stops at the prep boundary: an operator running
+   * the batch from opencode/GLM otherwise has no signal that every dispatched
+   * unit is still the default `claude` template, without reading
+   * `events.jsonl`. Surfaces the mixed `dispatch.tiers` ladder too.
+   */
+  dispatch: { tiers: Record<ModelTier, TierExecutor> };
   blocked: BlockedItem[];
   failed: QueueEntry[];
 }
@@ -151,6 +178,22 @@ export function buildStatusReport(
 
   const units = state.paused ? [] : runnableUnits(state);
 
+  // #680: resolve the dispatch config the way the engine does, so the report
+  // can never disagree with what actually spawns. The agent shown is the
+  // command template's binary basename (e.g. `claude`, `opencode`).
+  const resolved = resolveDispatch(config);
+  const dispatch = {
+    tiers: Object.fromEntries(
+      (Object.keys(resolved.tiers) as ModelTier[]).map((tier) => [
+        tier,
+        {
+          agent: path.basename(resolved.tiers[tier].commandTemplate[0] ?? ''),
+          model: resolved.tiers[tier].model,
+        },
+      ])
+    ) as Record<ModelTier, TierExecutor>,
+  };
+
   const parked: ParkedItem[] = state.entries
     .filter((e): e is QueueEntry & { pr: number } => e.status === 'parked' && e.pr !== null)
     .map((e) => ({ issue: e.issue, pr: e.pr, since: e.updated_at }));
@@ -181,6 +224,7 @@ export function buildStatusReport(
     runnable_units: units.map((u) =>
       u.kind === 'issue' ? `issue:${u.issue}` : `batch:${u.batch}`
     ),
+    dispatch,
     blocked,
     failed,
   };
