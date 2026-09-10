@@ -32,6 +32,7 @@ import {
   DEFAULT_ISSUE_PRIORITY,
   DEFAULT_RECONCILE_INTERVAL_MS,
   defaultExec,
+  dispatchSummary,
   type EngineDeps,
   EngineTooOldError,
   EnqueueError,
@@ -60,6 +61,7 @@ import {
   setPaused,
   TEARDOWN_TIMEOUT_MS,
   tick,
+  tierExecutors,
   unitEvent,
 } from '@ai-dossier/sched';
 import { WARM_COMMAND_TIMEOUT_MS } from '@ai-dossier/worktree-pool';
@@ -250,6 +252,18 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   const runnable = report.runnable_units.length > 0 ? report.runnable_units.join(', ') : 'none';
   lines.push(
     `Scheduler [${report.project}]: ${state} · slots ${report.live_slots}/${report.max_slots} live`
+  );
+  // #680: the configured executor, visible without reading the journal — an
+  // operator driving a session from opencode/GLM sees here that every tier
+  // still dispatches the default claude template (or that a mixed
+  // `dispatch.tiers` ladder is in effect).
+  lines.push(
+    `Dispatch: ${(Object.keys(report.dispatch.tiers) as Array<keyof typeof report.dispatch.tiers>)
+      .map((tier) => {
+        const t = report.dispatch.tiers[tier];
+        return `${tier}=${t.agent}/${t.model ?? '-'}`;
+      })
+      .join(' · ')}`
   );
   if (staleness?.stale && staleness.installed !== null && staleness.latest !== null) {
     // #537: mirrors the dispatch-health block below — a status line, not a
@@ -1382,6 +1396,19 @@ function registerStartSubcommand(cmd: Command): void {
       const engineConfig = dispatchCommand
         ? { ...config, dispatch: { ...config.dispatch, command: dispatchCommand } }
         : config;
+
+      // #680: log the executor the engine will actually use — agent + model
+      // per tier, resolved AFTER the auto-detect above so the banner matches
+      // real spawns. Once per start (both --once and the continuous loop):
+      // the operator's prep-session choice of agent/model stops here, and
+      // this line is where that becomes visible. Suppressed on the one
+      // machine-consumed path (`--once --json`, the cron/automation output)
+      // so stdout stays pure JSON there — every human-facing path sees it.
+      if (!(opts.once && opts.json)) {
+        console.log(
+          `▶ sched dispatch: ${dispatchSummary(tierExecutors(resolveDispatch(engineConfig)))}`
+        );
+      }
 
       const deps: EngineDeps = {
         store,

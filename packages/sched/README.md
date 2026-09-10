@@ -71,6 +71,31 @@ where every mechanical supervision decision is code, not remembered prose:
    rescued on `claude` at `strong`. `dispatch.tiers` is additive over the top-level
    `command`/`tier_models`/`prompt` shorthand — any field a tier leaves unset falls back
    to the shorthand, so an existing config with no `tiers` resolves exactly as before.
+   The intended arrangement (#680) is cheap open-weights for member implementation and a
+   stronger model for the judgment steps that actually need it. Worked example —
+   opencode/GLM for the implementing tiers, claude/opus kept for `strong`:
+
+   ```json
+   {
+     "dispatch": {
+       "tiers": {
+         "mechanical": { "command": ["opencode", "run", "--auto", "--format", "json", "--model", "{model}"], "model": "glm-5.3-flash" },
+         "mid":        { "command": ["opencode", "run", "--auto", "--format", "json", "--model", "{model}"], "model": "glm-5.3" },
+         "strong":     { "model": "opus" }
+       }
+     }
+   }
+   ```
+
+   (`strong` sets only `model`, so its command falls back to the default claude template.)
+   What an engine is ACTUALLY running is always visible in two places, added in #680: the
+   `Dispatch: …` line in `sched status` (and its `--json` `dispatch` field), and the
+   `▶ sched dispatch: …` banner `sched start` prints once at startup — both show
+   `tier=agent/model` resolved exactly as spawns resolve. Note the inverse trap: running
+   the batch FROM opencode/GLM does not make it run ON opencode/GLM — without a
+   `dispatch.tiers` override every tier dispatches the default claude template regardless
+   of which agent CLI drove the prep, so a run intended as an open-weights arm must
+   assert its dispatch config before it starts (see #592).
    The opencode fallback runs `opencode run --auto …` (#506) — a git
    worktree is an `external_directory` to opencode, whose default `"ask"` policy a headless
    session can only auto-reject, killing the agent mid-phase; `--auto` approves any request

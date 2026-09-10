@@ -242,3 +242,41 @@ describe('#544: the label-poll timestamp is reported', () => {
     expect(buildStatusReport(seeded(), { max_slots: 3 }, 'proj').last_label_poll_at).toBeNull();
   });
 });
+
+describe('#680: the configured dispatch agent + resolved per-tier models are visible', () => {
+  it('defaults to the claude CLI with haiku/sonnet/opus', () => {
+    const report = buildStatusReport(seeded(), { max_slots: 3 }, 'proj');
+    expect(report.dispatch).toEqual({
+      tiers: {
+        mechanical: { agent: 'claude', model: 'haiku' },
+        mid: { agent: 'claude', model: 'sonnet' },
+        strong: { agent: 'claude', model: 'opus' },
+      },
+    });
+  });
+
+  it('reflects tier_models overrides and a mixed dispatch.tiers ladder', () => {
+    const report = buildStatusReport(
+      seeded(),
+      {
+        max_slots: 3,
+        dispatch: {
+          tier_models: { mid: 'glm-5.3' },
+          tiers: {
+            mechanical: {
+              command: ['opencode', 'run', '--auto', '--model', '{model}'],
+              model: 'glm-5.3-flash',
+            },
+          },
+        },
+      },
+      'proj'
+    );
+    expect(report.dispatch.tiers.mechanical).toEqual({
+      agent: 'opencode',
+      model: 'glm-5.3-flash',
+    });
+    expect(report.dispatch.tiers.mid).toEqual({ agent: 'claude', model: 'glm-5.3' });
+    expect(report.dispatch.tiers.strong).toEqual({ agent: 'claude', model: 'opus' });
+  });
+});

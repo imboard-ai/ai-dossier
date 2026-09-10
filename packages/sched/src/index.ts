@@ -52,6 +52,7 @@ export {
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
   dispatchLogPath,
+  dispatchSummary,
   escalateTier,
   fileSizeOrZero,
   journalCmdModelFields,
@@ -66,8 +67,10 @@ export {
   SUPERSESSION_CHECKPOINT_INSTRUCTION,
   stallTimeoutForPhase,
   stallTimeoutForSlot,
+  type TierExecutor,
   type TierSpawn,
   takeoverInstruction,
+  tierExecutors,
   unitLogName,
 } from './dispatch';
 export { type EngineDeps, runLoop, type TickResult, tick } from './engine';

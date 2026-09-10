@@ -198,6 +198,17 @@ wrong repository.
 claude vs open-weights, ~$600 ceiling, gated on the first clean batch. Owner decision 2026-09-02:
 option 3.
 
+**Dispatch assertion gate (added by #680, blocking for any arm).** A run intended as EITHER arm
+must assert its dispatch config BEFORE it starts, not after: the scheduler dispatches what its
+config says, and nothing else — driving the batch from opencode/GLM does not make it run ON
+GLM (`#680`: every tier silently dispatched the default claude template at Claude prices). The
+assertion is now one glance: the `Dispatch: tier=agent/model` line in `sched status` (or the
+`▶ sched dispatch: …` banner `sched start` prints at startup) must show the arm's intended
+agent/model per tier — `opencode/glm-*` for the open-weights arm (set via `dispatch.tiers`,
+README has the worked example), `claude/*` for the Claude arm — before any unit is enqueued.
+An arm discovered to have run the wrong config after the fact invalidates the experiment (#592's
+two-arm comparison cannot use it for either side).
+
 ### 4.6 Ship guard for `Closes #N` — **OPEN**
 
 The PRs that closed imboard-monorepo#3958 and #3982 merged without the trailer, leaving their sched
