@@ -708,6 +708,31 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0 → 1
     expect(migrated.entries).toHaveLength(seeded().entries.length);
   });
 
+  it('loads a pre-#682 1.15.0 state and backfills the progress dedup marker', () => {
+    // Exactly what the 1.15.0 engine persisted: slots with no
+    // progress_milestone_* fields at all. Null/null/0 is exact, not a guess:
+    // no milestone-progress streak was ever recorded under the old
+    // journal-every-transition behavior, so the first tick after the upgrade
+    // starts each streak fresh.
+    const legacy = { ...seeded(), schema_version: '1.15.0' } as Record<string, unknown>;
+    for (const slot of legacy.slots as Record<string, unknown>[]) {
+      delete slot.progress_milestone_for;
+      delete slot.progress_milestone_since;
+      delete slot.progress_milestone_ticks;
+    }
+
+    const migrated = validateState(legacy);
+
+    expect(migrated.schema_version).toBe(SCHEMA_VERSION);
+    for (const slot of migrated.slots) {
+      expect(slot.progress_milestone_for).toBeNull();
+      expect(slot.progress_milestone_since).toBeNull();
+      expect(slot.progress_milestone_ticks).toBe(0);
+    }
+    // everything the 1.15.0 engine persisted is preserved
+    expect(migrated.entries).toHaveLength(seeded().entries.length);
+  });
+
   it('loads a pre-#472 1.2.0 state and backfills the recovery fields', () => {
     // Exactly what #468 persisted: entries with pr/cleanup but no
     // failure_evidence, batches with none of the recovery fields.

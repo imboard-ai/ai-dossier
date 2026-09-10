@@ -696,6 +696,134 @@ describe('reconciliation tick (AC3: external advance + orphaned pids after resta
   });
 });
 
+describe('#682: progress journals once per distinct milestone (dedup + trigger attribution)', () => {
+  function progressHarness() {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    h.tick();
+    return h;
+  }
+
+  const progressEvents = (h: ReturnType<typeof harness>) =>
+    h.journal.read().filter((e) => e.event === 'progress');
+
+  it('AC5: three consecutive ticks against one unchanged milestone produce exactly one entry; a new milestone produces a second', () => {
+    const h = progressHarness();
+
+    h.advance(60_000);
+    h.setMilestone(101, 'setup', 'done', h.clock().toISOString());
+    h.tick();
+    const firstProgressStamp = h.clock().toISOString();
+    h.advance(60_000);
+    h.tick();
+    h.advance(60_000);
+    h.tick();
+
+    let prog = progressEvents(h);
+    expect(prog).toHaveLength(1);
+    expect(prog[0]?.detail).toBe('milestone setup/done');
+
+    // the stall anchor still advanced on the milestone signal — the dedup is
+    // journal-only, it must never mask a live unit from the stall ladder
+    expect(h.state().slots.find((s) => s.unit === 'issue:101')?.last_progress_at).toBe(
+      firstProgressStamp
+    );
+
+    h.advance(60_000);
+    h.setMilestone(101, 'plan', 'done', h.clock().toISOString());
+    h.tick();
+
+    prog = progressEvents(h);
+    expect(prog).toHaveLength(2);
+    expect(prog[1]?.detail).toBe('milestone plan/done');
+  });
+
+  it('AC2: the same phase/status re-reached under a NEW run id journals a fresh entry', () => {
+    const h = progressHarness();
+
+    h.advance(60_000);
+    h.milestones.set(101, {
+      phase: 'setup',
+      status: 'done',
+      run: 'r-101-first',
+      at: h.clock().toISOString(),
+      keys: {},
+    });
+    h.tick();
+    expect(progressEvents(h)).toHaveLength(1);
+
+    // a resumed/redispatched run legitimately re-reaches setup/done under a
+    // new run id — de-duplication, not suppression
+    h.advance(60_000);
+    h.milestones.set(101, {
+      phase: 'setup',
+      status: 'done',
+      run: 'r-101-second',
+      at: h.clock().toISOString(),
+      keys: {},
+    });
+    h.tick();
+
+    const prog = progressEvents(h);
+    expect(prog).toHaveLength(2);
+    expect(prog[1]?.run).toBe('r-101-second');
+    expect(prog[1]?.detail).toBe('milestone setup/done');
+  });
+
+  it('AC3: a persisting milestone re-announces every JOURNAL_DEDUP_REANNOUNCE_TICKS ticks with since/ticks_persisted, so "still at X after N ticks" is legible from one line', () => {
+    const h = progressHarness();
+
+    h.advance(60_000);
+    h.setMilestone(101, 'implement', 'done', h.clock().toISOString());
+    h.tick(); // streak tick 1 — journals
+    for (let i = 0; i < JOURNAL_DEDUP_REANNOUNCE_TICKS - 1; i++) {
+      h.advance(60_000);
+      h.tick(); // silent under the dedup — except the window tick, which re-announces
+    }
+
+    const prog = progressEvents(h);
+    expect(prog).toHaveLength(2);
+    expect(prog[1]?.detail).toBe('milestone implement/done');
+    expect(prog[1]?.since).toBe(prog[0]?.since);
+    expect(prog[1]?.ticks_persisted).toBe(JOURNAL_DEDUP_REANNOUNCE_TICKS);
+    // the marker persists: no third entry until the window elapses again
+    h.advance(60_000);
+    h.tick();
+    expect(progressEvents(h)).toHaveLength(2);
+  });
+
+  it('a push-driven signal journals as "new pushed commit" with the head — never labelled with the unchanged milestone', () => {
+    const h = progressHarness();
+
+    h.advance(60_000);
+    h.milestones.set(101, {
+      phase: 'setup',
+      status: 'done',
+      run: 'r-101-ab12',
+      at: h.clock().toISOString(),
+      keys: { branch: 'feature/101-x' },
+    });
+    h.tick();
+    expect(progressEvents(h)).toHaveLength(1);
+
+    // a WIP push with NO new milestone: real motion, but the milestone did
+    // not move — the old code labelled this entry "milestone setup/done"
+    h.advance(60_000);
+    h.branchHeads.set('feature/101-x', 'aaabbb111');
+    h.tick();
+
+    const prog = progressEvents(h);
+    expect(prog).toHaveLength(2);
+    expect(prog[1]?.detail).toBe('new pushed commit');
+    expect(prog[1]?.head).toBe('aaabbb111');
+    // and the stall anchor advanced — the dedup never touches it
+    expect(h.state().slots.find((s) => s.unit === 'issue:101')?.last_progress_at).toBe(
+      h.clock().toISOString()
+    );
+  });
+});
+
 describe('stall/escalation ladder (AC4)', () => {
   function stalledHarness() {
     const h = harness({ stallTimeoutMs: 30 * 60 * 1000 });

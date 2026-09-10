@@ -1354,6 +1354,7 @@ function applyProgressSignals(
   const now = ctx.deps.now();
   let next = state;
   let progressed = false;
+  let milestoneAdvanced = false;
 
   if (truth.milestone !== null) {
     // Live phase per unit (AC6).
@@ -1368,6 +1369,7 @@ function applyProgressSignals(
     }
     if (Date.parse(truth.milestone.at) > Date.parse(slot.last_progress_at ?? '')) {
       progressed = true;
+      milestoneAdvanced = true;
     }
   }
 
@@ -1388,14 +1390,124 @@ function applyProgressSignals(
       },
       now
     );
-    journal(ctx, 'progress', unit, {
-      slot: slot.id,
-      detail: truth.milestone
-        ? `milestone ${truth.milestone.phase}/${truth.milestone.status}`
-        : 'new pushed commit',
-    });
+    // The journal entry names the TRIGGER, not whichever truth happened to be
+    // present (#682): before, a push-driven signal was labelled with the
+    // unchanged milestone whenever one existed — 30% of all `progress`
+    // entries read as a re-journal of a milestone that had not moved, and a
+    // repeated `progress` is indistinguishable from real forward motion at a
+    // glance. A milestone advance and a push in the same tick journal once,
+    // as the milestone (the stronger signal); the push is still visible in
+    // `last_head` and any later push re-fires with its own sha.
+    if (milestoneAdvanced && truth.milestone !== null) {
+      next = journalMilestoneProgressIfDue(ctx, next, slot.id, truth.milestone, unit, now, true);
+    } else {
+      journal(ctx, 'progress', unit, {
+        slot: slot.id,
+        detail: 'new pushed commit',
+        // Same `at` contract as the milestone-driven branch: the decision
+        // clock, not a truth's own timestamp (#610's one-event-one-meaning
+        // rule for the `at` field).
+        at: now.toISOString(),
+        ...(truth.head !== null ? { head: truth.head } : {}),
+      });
+    }
+  }
+  // Persistence counting (#682): every tick the unit is still seen at the SAME
+  // milestone advances the streak — silent unless the re-announce window
+  // elapses — so "still at implement/done after 40 min" is legible from one
+  // line without a journal entry per tick. It runs even when nothing
+  // progressed; it never STARTS a streak (that happens only on a real
+  // milestone advance above) and never journals one.
+  if (truth.milestone !== null && !milestoneAdvanced) {
+    next = journalMilestoneProgressIfDue(ctx, next, slot.id, truth.milestone, unit, now, false);
   }
   return { state: next, progressed };
+}
+
+/**
+ * Journal (or silently count, AC3) the milestone-driven `progress` signal for
+ * `slotId` under the shared dedup idiom (#682): once per distinct milestone
+ * per unit — keyed on `` `${run}:${phase}/${status}` ``, so a NEW milestone
+ * (different phase/status, or the same one re-reached under a NEW run id by a
+ * resumed or redispatched run) always journals, while an unchanged one stays
+ * silent — and then re-announced only every `JOURNAL_DEDUP_REANNOUNCE_TICKS`
+ * ticks while it persists, carrying `since` + `ticks_persisted` so "still at
+ * implement/done after 40 min" is legible from one line. Mirrors #630's
+ * `pr_watch_failed_*` triple scoped to the slot rail (#610's
+ * `stale_milestone_ignored_for` precedent) and #632's
+ * `journalConditionIfDue` cadence — no third mechanism.
+ *
+ * `advanced=false` is a persistence tick: the streak is only counted (and
+ * re-announced on the window), never started — a streak begins exclusively
+ * on a real milestone advance, so a unit seen carrying a milestone that
+ * predates its own dispatch (a redispatch's stale `implement/done`) journals
+ * nothing.
+ *
+ * The streak is keyed on the milestone, not the dispatch: pushes during a
+ * milestone ("new pushed commit" entries) are real motion and journal
+ * freely, but they do not reset the "still at X" clock — a unit that pushed
+ * four times during `implement/done` is still legibly AT `implement/done`.
+ *
+ * Returns the patched state — callers must thread it, or the marker is lost
+ * and the event re-fires next tick as if nothing had been recorded.
+ */
+function journalMilestoneProgressIfDue(
+  ctx: TickCtx,
+  state: SchedState,
+  slotId: number,
+  milestone: NonNullable<UnitTruth['milestone']>,
+  unit: string,
+  now: Date,
+  advanced: boolean
+): SchedState {
+  const key = `${milestone.run}:${milestone.phase}/${milestone.status}`;
+  // Read the CURRENT marker from `state`, not a captured slot — the caller
+  // may have patched the slot earlier in the same tick (last_head,
+  // last_progress_at) and the persisted marker is what the streak continues.
+  const cur = state.slots.find((s) => s.id === slotId);
+  if (cur === undefined) return state;
+  let ticks: number;
+  let since: string;
+  let journalNow: boolean;
+  if (advanced) {
+    const isNewStreak = cur.progress_milestone_for !== key;
+    ticks = isNewStreak ? 1 : cur.progress_milestone_ticks + 1;
+    since = isNewStreak ? now.toISOString() : (cur.progress_milestone_since ?? now.toISOString());
+    journalNow = isNewStreak || ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0;
+  } else {
+    // A persistence tick never STARTS a streak: a unit seen carrying a
+    // milestone it did not advance (a redispatch's stale milestone) counts
+    // nothing and journals nothing.
+    if (cur.progress_milestone_for !== key || cur.progress_milestone_since === null) return state;
+    ticks = cur.progress_milestone_ticks + 1;
+    since = cur.progress_milestone_since;
+    journalNow = ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0;
+  }
+  if (journalNow) {
+    // `at` is the decision clock; `since` is the streak's onset. Both are
+    // needed: `ticks_persisted` is a TICK count, which maps to no fixed
+    // wall-clock across operator-tunable tick intervals.
+    journal(ctx, 'progress', unit, {
+      slot: slotId,
+      detail: `milestone ${milestone.phase}/${milestone.status}`,
+      run: milestone.run,
+      at: now.toISOString(),
+      since,
+      ticks_persisted: ticks,
+    });
+  }
+  return patchSlot(
+    state,
+    slotId,
+    advanced
+      ? {
+          progress_milestone_for: key,
+          progress_milestone_since: since,
+          progress_milestone_ticks: ticks,
+        }
+      : { progress_milestone_ticks: ticks },
+    now
+  );
 }
 
 /**

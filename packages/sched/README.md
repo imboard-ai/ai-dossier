@@ -725,6 +725,25 @@ null while the counter is nonzero (`validateState` only enforces the reverse —
 time can never outlive a streak that has already cleared to zero). 1.12.0 states
 migrate on load, backfilling `0`/`null` — no confirmed dispatch failures were ever
 tracked under them, so those values are exact, not a guess.
+Schema 1.16.0 (#682): `SlotEntry` gains `progress_milestone_for` (the milestone key
+`` `${run}:${phase}/${status}` `` already covered by a milestone-driven `progress`
+entry), `progress_milestone_since` (ISO, when the streak began) and
+`progress_milestone_ticks` (ticks the streak has persisted, silent ones included) —
+the #630/#632 dedup idiom scoped to the slot rail. A milestone-driven `progress`
+entry journals once per distinct milestone: a NEW milestone — different
+phase/status, or the same one re-reached under a NEW run id (a resumed or
+redispatched run legitimately re-reaching `setup/done`) — always journals, while an
+unchanged one stays silent and re-announces only every
+`JOURNAL_DEDUP_REANNOUNCE_TICKS` (20) ticks, carrying `since` + `ticks_persisted` so
+"still at implement/done after 40 min" is legible from one line. The same fix
+attributes the entry to its real trigger: a push-driven signal now reads
+`detail: "new pushed commit"` with the head sha — previously it was labelled with
+the unchanged milestone whenever one existed, which is how ~29% of all `progress`
+entries came to read as repeats of a milestone that had not moved. 1.15.0 states
+migrate on load, backfilling `null`/`null`/`0` — no progress streak was ever
+recorded under the old behavior, so those values are exact, not a guess. Cleared
+with the slot on release (`CLEARED_SLOT_FIELDS`), so the next unit assigned there
+journals its first milestone fresh.
 
 New journal events: `batch-setup-done`, `batch-setup-failed`, `member-advanced`,
 `batch-warmup-done`, `batch-warmup-failed` (#561 — the cold-path warm step only; a pool
