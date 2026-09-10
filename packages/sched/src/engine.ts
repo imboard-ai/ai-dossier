@@ -2719,7 +2719,13 @@ function sleep(ms: number, shouldStop: () => boolean): Promise<void> {
       },
       Math.min(STOP_POLL_MAX_MS, Math.max(STOP_POLL_MIN_MS, Math.floor(ms / 10)))
     );
-    if (typeof timer.unref === 'function') timer.unref();
-    if (typeof stopCheck.unref === 'function') stopCheck.unref();
+    // NEVER unref these handles (#679). They are what holds the event loop
+    // open between ticks: spawned agents are detached and unref'd on purpose
+    // (dispatch.ts), so if the sleep timers are unref'd too, nothing keeps
+    // the process alive once a tick's async work settles — the loop drains
+    // and `sched start` exits cleanly after its first tick, silently
+    // behaving like `--once`. Ref'd timers cost nothing here: SIGINT still
+    // stops the engine promptly, because the ref'd stop-check polls
+    // shouldStop() and resolves this sleep early.
   });
 }
