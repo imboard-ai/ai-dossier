@@ -1261,4 +1261,10 @@ describe('#680: the configured dispatch agent is visible (status line + startup 
     expect(banners[0]).toContain('mechanical=claude/haiku');
     expect(banners[0]).toContain('strong=claude/opus');
   });
+
+  it('suppresses the banner on the machine-consumed --once --json path', async () => {
+    await runSched(['sched', 'start', '--once', '--json', '--project', 'test-proj']);
+    expect(logs.filter((l) => l.includes('sched dispatch:'))).toHaveLength(0);
+    expect(() => JSON.parse(logs.join('\n'))).not.toThrow();
+  });
 });

@@ -6,8 +6,7 @@
  * utilities.
  */
 
-import * as path from 'node:path';
-import { resolveDispatch } from './dispatch';
+import { resolveDispatch, type TierExecutor, tierExecutors } from './dispatch';
 import {
   batchBlockers,
   DISPATCHABLE_ISSUE_STATUSES,
@@ -30,14 +29,6 @@ export interface BlockedItem {
   issue: number;
   status: string;
   reason: string;
-}
-
-/** One tier's resolved executor (#680) — the agent CLI and model a unit on this tier will actually spawn. */
-export interface TierExecutor {
-  /** The agent CLI — the command template's binary basename (e.g. `claude`, `opencode`). */
-  agent: string;
-  /** The resolved per-tier model; null means the tier's command has no model flag. */
-  model: string | null;
 }
 
 /** A parked unit awaiting its PR merge (#468). */
@@ -179,20 +170,10 @@ export function buildStatusReport(
   const units = state.paused ? [] : runnableUnits(state);
 
   // #680: resolve the dispatch config the way the engine does, so the report
-  // can never disagree with what actually spawns. The agent shown is the
-  // command template's binary basename (e.g. `claude`, `opencode`).
+  // can never disagree with what actually spawns (`tierExecutors` is the one
+  // conversion, shared with the startup banner).
   const resolved = resolveDispatch(config);
-  const dispatch = {
-    tiers: Object.fromEntries(
-      (Object.keys(resolved.tiers) as ModelTier[]).map((tier) => [
-        tier,
-        {
-          agent: path.basename(resolved.tiers[tier].commandTemplate[0] ?? ''),
-          model: resolved.tiers[tier].model,
-        },
-      ])
-    ) as Record<ModelTier, TierExecutor>,
-  };
+  const dispatch = { tiers: tierExecutors(resolved) };
 
   const parked: ParkedItem[] = state.entries
     .filter((e): e is QueueEntry & { pr: number } => e.status === 'parked' && e.pr !== null)

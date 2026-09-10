@@ -570,20 +570,48 @@ export function resolveTierSpawn(
 }
 
 /**
+ * One tier's resolved executor (#680) — the agent CLI and model a unit on
+ * this tier will actually spawn. Single conversion point for the display
+ * surfaces (`sched status`'s report field and the startup banner).
+ */
+export interface TierExecutor {
+  /** The agent CLI — the command template's binary basename (e.g. `claude`, `opencode`). */
+  agent: string;
+  /** The resolved per-tier model; null means the tier's command has no model flag. */
+  model: string | null;
+}
+
+/**
+ * The resolved executor per tier (#680): the agent CLI (the command template's
+ * binary basename — the same identification `withDisallowedTools` uses) and
+ * the RESOLVED per-tier model. The one conversion from `ResolvedDispatch`'s
+ * spawn-shaped tiers to the display shape, so `sched status` and the startup
+ * banner can never disagree with each other or with what actually spawns.
+ */
+export function tierExecutors(
+  resolved: Pick<ResolvedDispatch, 'tiers'>
+): Record<ModelTier, TierExecutor> {
+  return Object.fromEntries(
+    TIER_ORDER.map((tier) => [
+      tier,
+      {
+        agent: path.basename(resolved.tiers[tier].commandTemplate[0] ?? ''),
+        model: resolved.tiers[tier].model,
+      },
+    ])
+  ) as Record<ModelTier, TierExecutor>;
+}
+
+/**
  * One-line summary of the configured executor per tier (#680): `tier=agent/model`.
- * The agent is the command template's binary basename (the same identification
- * `withDisallowedTools` uses), the model the RESOLVED per-tier model — so an
- * operator sees `claude/sonnet` vs `opencode/glm-5.3` at a glance, on
+ * An operator sees `claude/sonnet` vs `opencode/glm-5.3` at a glance, on
  * `sched status` and in the engine's startup banner, instead of digging the
  * dispatch command out of `events.jsonl`. A tier with no model renders `-`.
  */
-export function dispatchSummary(resolved: Pick<ResolvedDispatch, 'tiers'>): string {
-  return TIER_ORDER.map((tier) => {
-    const tierDispatch = resolved.tiers[tier];
-    const agent = path.basename(tierDispatch.commandTemplate[0] ?? '');
-    const model = tierDispatch.model ?? '-';
-    return `${tier}=${agent}/${model}`;
-  }).join(' ');
+export function dispatchSummary(tiers: Record<ModelTier, TierExecutor>): string {
+  return TIER_ORDER.map((tier) => `${tier}=${tiers[tier].agent}/${tiers[tier].model ?? '-'}`).join(
+    ' '
+  );
 }
 
 /** A `TierSpawn` as `spawned`/`redispatched`/`fix-dispatched` journal fields — `model` omitted when the tier has none, matching every other optional journal field's convention. */

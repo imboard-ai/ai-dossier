@@ -61,6 +61,7 @@ import {
   setPaused,
   TEARDOWN_TIMEOUT_MS,
   tick,
+  tierExecutors,
   unitEvent,
 } from '@ai-dossier/sched';
 import { WARM_COMMAND_TIMEOUT_MS } from '@ai-dossier/worktree-pool';
@@ -1400,8 +1401,14 @@ function registerStartSubcommand(cmd: Command): void {
       // per tier, resolved AFTER the auto-detect above so the banner matches
       // real spawns. Once per start (both --once and the continuous loop):
       // the operator's prep-session choice of agent/model stops here, and
-      // this line is where that becomes visible.
-      console.log(`▶ sched dispatch: ${dispatchSummary(resolveDispatch(engineConfig))}`);
+      // this line is where that becomes visible. Suppressed on the one
+      // machine-consumed path (`--once --json`, the cron/automation output)
+      // so stdout stays pure JSON there — every human-facing path sees it.
+      if (!(opts.once && opts.json)) {
+        console.log(
+          `▶ sched dispatch: ${dispatchSummary(tierExecutors(resolveDispatch(engineConfig)))}`
+        );
+      }
 
       const deps: EngineDeps = {
         store,

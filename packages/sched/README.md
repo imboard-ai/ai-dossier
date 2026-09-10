@@ -79,8 +79,8 @@ where every mechanical supervision decision is code, not remembered prose:
    {
      "dispatch": {
        "tiers": {
-         "mechanical": { "command": ["opencode", "run", "--auto", "--model", "{model}"], "model": "glm-5.3-flash" },
-         "mid":        { "command": ["opencode", "run", "--auto", "--model", "{model}"], "model": "glm-5.3" },
+         "mechanical": { "command": ["opencode", "run", "--auto", "--format", "json", "--model", "{model}"], "model": "glm-5.3-flash" },
+         "mid":        { "command": ["opencode", "run", "--auto", "--format", "json", "--model", "{model}"], "model": "glm-5.3" },
          "strong":     { "model": "opus" }
        }
      }
