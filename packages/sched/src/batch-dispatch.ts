@@ -384,6 +384,23 @@ function describeInconclusive(gate: {
 }
 
 /**
+ * The `command timed out after <N>ms` reason shape (#681) — produced ONLY by
+ * this repo's own machinery, at exactly two sites: `cli/src/capability.ts`'s
+ * `classifySpawnResult` (the capability entry's own `timeout_ms`) and
+ * `cli/src/commands/sched.ts`'s `createBatchCapabilityRunner` (the runner's
+ * own `spawnSync` timeout, `BATCH_SUITE_TIMEOUT_MS`). The gate classifies on
+ * it to tell "the harness needed more time than it was given" (#681 — a
+ * statement about DURATION, not about the harness's reliability) apart from a
+ * genuine machinery failure (missing tool, broken manifest, evidence-free
+ * spawn error), which must keep blocking (#583/#585/#625 rails intact).
+ */
+const GATE_TIMEOUT_REASON = /^command timed out after \d+ms$/;
+
+function isGateTimeout(gate: { outcome: string; reason?: string | null }): boolean {
+  return gate.outcome === 'automation-broken' && GATE_TIMEOUT_REASON.test(gate.reason ?? '');
+}
+
+/**
  * Best-effort per-gate diagnostic log (#583 AC1) — mirrors `appendCapLog`'s
  * never-crash contract: a log-write failure must not interrupt the gate
  * decision itself.
@@ -416,7 +433,7 @@ function recordMemberGate(
   deps: BatchDispatchDeps,
   batchId: string,
   memberIssue: number,
-  gate: { id: string; outcome: CapOutcome; outputTail?: string | null },
+  gate: { id: string; outcome: CapOutcome; outputTail?: string | null; durationMs?: number | null },
   now: Date
 ): void {
   deps.store.withLock((s) => {
@@ -432,6 +449,7 @@ function recordMemberGate(
               capability: gate.id,
               outcome: gate.outcome,
               output_tail: gate.outputTail ?? null,
+              duration_ms: gate.durationMs ?? null,
               at: now.toISOString(),
             },
           },
@@ -1555,6 +1573,12 @@ export function evictMemberAndContinue(
  * script that legitimately could not run its suite must not be read as
  * either a pass or a real failure). Only both `ok` falls through.
  *
+ * Two carve-outs from that block rail: an UNDECLARED id skips (#625 — not a
+ * verdict, a repo that has not opted in), and a TIMEOUT-shaped
+ * `automation-broken` skips too (#681 — the capability ran and needed more
+ * time than it was given; recorded `capability-unavailable`, the parent's
+ * expensive stage covers the member).
+ *
  * A `task-failed` is itself split in two (#594): its `outputTail` must carry
  * recognizable evidence of a failing test (`hasFailingTestEvidence`) before
  * it is trusted as a red suite. A `task-failed` whose output proves nothing —
@@ -1605,7 +1629,17 @@ function runIncrementalGate(
   // Skipping costs EARLY detection, not correctness: the aggregate `test.full`
   // gate still runs before ship, CI still runs on the batch PR, and #562's
   // attribution still pins a red suite to the member that caused it.
-  const gateInconclusive = gateResults.find((r) => r.outcome === 'automation-broken');
+  // #681: a timeout is a statement about DURATION, not about the harness's
+  // reliability — the capability ran correctly and simply needed more time
+  // than it was given (a member touching two workspace roots selects a
+  // dependents closure that approaches the whole workspace). It therefore
+  // joins #625's skip rail, not the block rail: the gate DECLINES the member
+  // (recorded `capability-unavailable` — skip, parent covers it) instead of
+  // blocking the batch on `automation-broken`.
+  const timedOut = gateResults.filter(isGateTimeout);
+  const gateInconclusive = gateResults.find(
+    (r) => r.outcome === 'automation-broken' && !isGateTimeout(r)
+  );
   const undeclared = gateResults.filter((r) => r.outcome === 'capability-unavailable');
   for (const skipped of undeclared) {
     // Journalled per member: a gate that silently does not run is its own
@@ -1624,6 +1658,41 @@ function runIncrementalGate(
       reason: `gate-skipped:${skipped.id}`,
       detail: `cap run ${skipped.id} is not declared by this repo — member judged on the checks that ARE available`,
     });
+  }
+  for (const declined of timedOut) {
+    // Journalled per member with a DISTINCT reason slug (`gate-skipped-timeout`
+    // vs #625's `gate-skipped`): an operator reading the journal must see
+    // "the gate declined — needed more time" as different from "the gate was
+    // never declared", and neither may read as a pass (#594's shape).
+    // AC2/AC4: the capability's own output — which carries the resolved
+    // package selection (e.g. the `pnpm --filter ...` line) — is what makes
+    // the selection breadth visible; it goes to the per-gate log in full,
+    // into the journal excerpt, and onto `member_gates.output_tail` with the
+    // capability's `duration_ms`, the per-shape gate-cost recording.
+    writeGateLog(deps, batchId, declined.id, memberIssue, declined.outputTail);
+    journalEvent(deps, 'gate-skipped', unit(batchId), {
+      issue: memberIssue,
+      reason: `gate-skipped-timeout:${declined.id}`,
+      detail: withExcerpt(
+        `cap run ${declined.id} ${declined.reason ?? 'timed out'} after member review done — a statement about duration, not the harness's reliability; the parent's expensive stage (aggregate suite + CI) covers this member (#681)`,
+        gateDetailExcerpt(declined.outputTail, declined.reason)
+      ),
+    });
+    recordMemberGate(
+      deps,
+      batchId,
+      memberIssue,
+      {
+        id: declined.id,
+        // #681 AC3: record the DECLINE, not a machinery failure — the batch
+        // outcome for an ungateable member is `capability-unavailable` (skip,
+        // parent covers it), never `automation-broken` (block).
+        outcome: 'capability-unavailable',
+        outputTail: declined.outputTail,
+        durationMs: declined.durationMs,
+      },
+      now
+    );
   }
   const earnedFailure =
     rawFailure && hasEarnedFailureEvidence(rawFailure.id, rawFailure.outputTail)
@@ -1761,6 +1830,10 @@ function completeMemberGate(
  *
  * - still `automation-broken`/`capability-unavailable` → stays `blocked`,
  *   no state change (the capability still isn't fixed).
+ * - a TIMEOUT-shaped `automation-broken` (#681) → the block dissolves: the
+ *   gate declines the member (`capability-unavailable`, skip — the parent's
+ *   expensive stage covers it) and the member completes via the same rail an
+ *   `ok` recheck uses. Returns `outcome: 'skipped'`.
  * - `task-failed` with recognizable failing-test evidence (#594,
  *   `hasFailingTestEvidence`) → the member really is broken; evict via the
  *   same rail the live gate uses. `task-failed` with no evidence stays
@@ -1784,7 +1857,7 @@ export function resumeBlockedGate(
   batchId: string,
   now: Date
 ): {
-  outcome: 'still-blocked' | 'evicted' | 'completed';
+  outcome: 'still-blocked' | 'evicted' | 'completed' | 'skipped';
   capability: string;
   /**
    * Why the batch is still blocked, when it is. Both branches land on
@@ -1811,6 +1884,50 @@ export function resumeBlockedGate(
   const recheck = deps.runCapability(batch.worktree, capabilityId);
   const result = emptyResult();
   const excerpt = gateDetailExcerpt(recheck.outputTail, recheck.reason);
+
+  // #681: a recheck can classify what the batch blocked on as a TIMEOUT —
+  // the capability ran correctly and needed more time than it was given,
+  // which is a statement about duration, not about the harness's
+  // reliability. That is not a verdict the batch may stay blocked on:
+  // unblock and complete the member via the same rail an `ok` recheck uses,
+  // recording the decline (`capability-unavailable` — skip, the parent's
+  // expensive stage covers it) so the batch outcome never reads as a
+  // machinery failure that never existed.
+  if (isGateTimeout(recheck)) {
+    writeGateLog(deps, batchId, capabilityId, memberIssue, recheck.outputTail);
+    journalEvent(deps, 'gate-skipped', unit(batchId), {
+      issue: memberIssue,
+      reason: `gate-skipped-timeout:${capabilityId}`,
+      detail: withExcerpt(
+        `sched resume --batch: cap run ${capabilityId} ${recheck.reason ?? 'timed out'} on recheck — gate declines, member stands; the parent's expensive stage (aggregate suite + CI) covers it (#681)`,
+        excerpt
+      ),
+    });
+    deps.store.withLock((s) => ({
+      state: patchBatch(
+        transitionBatch(s, batchId, 'executing', {}, now),
+        batchId,
+        { blocked_reason: null },
+        now
+      ),
+      result: undefined,
+    }));
+    recordMemberGate(
+      deps,
+      batchId,
+      memberIssue,
+      {
+        id: capabilityId,
+        outcome: 'capability-unavailable',
+        outputTail: recheck.outputTail,
+        durationMs: recheck.durationMs,
+      },
+      now
+    );
+    completeMemberGate(deps, config, dispatch, batchId, batch, memberIssue, now, result);
+    return { outcome: 'skipped', capability: capabilityId, detail: excerpt };
+  }
+
   recordMemberGate(deps, batchId, memberIssue, { id: capabilityId, ...recheck }, now);
 
   if (recheck.outcome === 'automation-broken' || recheck.outcome === 'capability-unavailable') {

@@ -1338,6 +1338,139 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(batch?.evictions).toHaveLength(0);
   }, 60_000);
 
+  it('#681: a timeout-shaped automation-broken SKIPS — recorded capability-unavailable, batch proceeds', async () => {
+    // A member touching two workspace roots selects a dependents closure that
+    // approaches the whole workspace; test.focused cannot finish inside its
+    // deadline and is killed. That is a statement about DURATION, not about
+    // the harness's reliability — the gate declines the member (skip; the
+    // parent's expensive stage covers it) instead of blocking the batch on a
+    // machinery-failure verdict the harness never earned.
+    const repo = scratchRepo();
+    const selection = 'pnpm --filter ...imboard_be --filter ...@imboard/docs run test';
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused'
+        ? {
+            outcome: 'automation-broken',
+            reason: 'command timed out after 900000ms',
+            outputTail: selection,
+            durationMs: 901102,
+          }
+        : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([{ issue: 2131, mode: 'slot', batch: 'b-timeout', anchor: 2130, tier: 'mid' }]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-timeout') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+
+    const batch = findBatch(h.state(), 'b-timeout');
+    expect(batch?.status).not.toBe('blocked');
+    expect(batch?.blocked_reason).toBeNull();
+    expect(batch?.evictions).toHaveLength(0);
+    // AC1/AC2: the recorded outcome names the DECLINE, and the resolved
+    // selection + duration ride beside it so breadth and cost are visible —
+    // this record IS the unfavourable change-shape case, recorded.
+    expect(batch?.member_gates?.['2131']).toMatchObject({
+      capability: 'test.focused',
+      outcome: 'capability-unavailable',
+      output_tail: selection,
+      duration_ms: 901102,
+    });
+    // The skip is journalled under a DISTINCT slug — "the gate declined, it
+    // needed more time" must not read as #625's "never declared", and neither
+    // may read as a pass (#594's shape).
+    const skipped = h.deps.journal
+      .read()
+      .filter((e) => e.event === 'gate-skipped' && e.issue === 2131);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]?.reason).toBe('gate-skipped-timeout:test.focused');
+    expect(skipped[0]?.detail).toContain('command timed out after 900000ms');
+  }, 60_000);
+
+  it('#681: a genuine automation-broken beside a timeout still blocks — on the genuine one', async () => {
+    const repo = scratchRepo();
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'typecheck.run'
+        ? { outcome: 'automation-broken', reason: 'pnpm not found' }
+        : {
+            outcome: 'automation-broken',
+            reason: 'command timed out after 900000ms',
+            durationMs: 901102,
+          };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([{ issue: 2141, mode: 'slot', batch: 'b-mixed', anchor: 2140, tier: 'mid' }]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-mixed') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+
+    // The timeout half skips; the genuine machinery failure still blocks —
+    // and #594's invariant holds: member_gates names the gate the batch was
+    // ROUTED on (typecheck.run), not the timed-out one beside it.
+    const batch = findBatch(h.state(), 'b-mixed');
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('gate-inconclusive:typecheck.run');
+    expect(batch?.member_gates?.['2141']).toMatchObject({
+      capability: 'typecheck.run',
+      outcome: 'automation-broken',
+    });
+  }, 60_000);
+
+  it('#681: sched resume --batch dissolves the block when the recheck classifies a timeout', async () => {
+    const repo = scratchRepo();
+    // Blocked by the OLD verdict logic on an automation-broken whose shape a
+    // newer build can classify as a timeout.
+    let testFocusedOutcome: CapabilityGateResult = { outcome: 'automation-broken' };
+    const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
+      id === 'test.focused' ? testFocusedOutcome : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 2151, mode: 'slot', batch: 'b-resume-timeout', anchor: 2150, tier: 'mid' },
+      { issue: 2152, mode: 'slot', batch: 'b-resume-timeout', tier: 'mid' },
+    ]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-resume-timeout') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+    expect(findBatch(h.state(), 'b-resume-timeout')?.status).toBe('blocked');
+
+    const batchDeps = batchDispatchDepsFrom(h, capability);
+    const dispatch = resolveDispatch(h.config);
+
+    testFocusedOutcome = {
+      outcome: 'automation-broken',
+      reason: 'command timed out after 900000ms',
+      outputTail: 'pnpm --filter ...imboard_be run test',
+      durationMs: 901102,
+    };
+    const resumed = resumeBlockedGate(
+      batchDeps,
+      h.config,
+      dispatch,
+      'b-resume-timeout',
+      new Date()
+    );
+    expect(resumed).toMatchObject({ outcome: 'skipped', capability: 'test.focused' });
+    const batch = findBatch(h.state(), 'b-resume-timeout');
+    // The block dissolves: the gate declines, the member's own review stands,
+    // and the batch advances exactly as an `ok` recheck would advance it.
+    expect(batch?.blocked_reason).toBeNull();
+    expect(batch?.status).toBe('executing');
+    expect(batch?.executing_member).toBe(2);
+    expect(batch?.member_gates?.['2151']).toMatchObject({
+      capability: 'test.focused',
+      outcome: 'capability-unavailable',
+      duration_ms: 901102,
+    });
+    const skipped = h.deps.journal
+      .read()
+      .filter((e) => e.event === 'gate-skipped' && e.issue === 2151);
+    expect(skipped.at(-1)?.reason).toBe('gate-skipped-timeout:test.focused');
+  }, 60_000);
+
   it('#583 AC4: sched resume --batch re-runs the gate — still inconclusive stays blocked, then a passing recheck completes the member', async () => {
     const repo = scratchRepo();
     let testFocusedOutcome: CapabilityGateResult = { outcome: 'automation-broken' };

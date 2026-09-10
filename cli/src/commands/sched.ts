@@ -67,6 +67,7 @@ import {
 import { WARM_COMMAND_TIMEOUT_MS } from '@ai-dossier/worktree-pool';
 import type { Command } from 'commander';
 import { BATCH_SUITE_TIMEOUT_MS, createBatchSuiteRunner } from '../batch-suite-runner';
+import { timeoutReasonSpent } from '../capability';
 import { formatCost, formatCount } from '../cost-format';
 import { formatAge, formatDurationMs } from '../duration';
 import {
@@ -99,23 +100,43 @@ import { renderTable } from '../table';
  * subprocess's stdout (no `stdio: 'inherit'` here), so no extra plumbing is
  * needed beyond reading the field off the parsed envelope.
  */
-function createBatchCapabilityRunner(): (
-  worktree: string,
-  capabilityId: string
-) => CapabilityGateResult {
+export function createBatchCapabilityRunner(opts?: {
+  /** Overridable so tests can exercise the ETIMEDOUT branch cheaply (mirrors `createBatchSuiteRunner`). */
+  timeoutMs?: number;
+}): (worktree: string, capabilityId: string) => CapabilityGateResult {
+  const timeoutMs = opts?.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
   return (worktree, capabilityId) => {
     const result = spawnSync('ai-dossier', ['cap', 'run', capabilityId], {
       cwd: worktree,
       encoding: 'utf-8',
-      timeout: BATCH_SUITE_TIMEOUT_MS,
+      timeout: timeoutMs,
     });
-    if (result.error) return { outcome: 'automation-broken' };
+    if (result.error) {
+      // #681: this runner's OWN timeout (spawnSync's, `BATCH_SUITE_TIMEOUT_MS`)
+      // must be distinguishable from a genuine machinery failure — before, it
+      // collapsed into the evidence-free `{outcome: 'automation-broken'}`
+      // below, byte-for-byte the #679 shape. Emit the same
+      // `command timed out after <N>ms` reason `cli/src/capability.ts`'s
+      // `classifySpawnResult` emits for its ETIMEDOUT, so the gate's
+      // `isGateTimeout` classifier sees both timeout layers identically.
+      // Any OTHER spawn error keeps the evidence-free `automation-broken` —
+      // a genuine machinery failure, which still blocks (#583/#585).
+      if ((result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+        return {
+          outcome: 'automation-broken',
+          reason: timeoutReasonSpent(timeoutMs),
+          outputTail: `${result.stdout ?? ''}${result.stderr ?? ''}` || null,
+        };
+      }
+      return { outcome: 'automation-broken' };
+    }
     const lastLine = (result.stdout ?? '').trim().split('\n').pop() ?? '';
     try {
       const envelope = JSON.parse(lastLine) as {
         outcome?: unknown;
         output_tail?: unknown;
         reason?: unknown;
+        duration_ms?: unknown;
       };
       const outcome = envelope.outcome;
       // Fall back to the subprocess's own capture when the envelope omits
@@ -131,13 +152,16 @@ function createBatchCapabilityRunner(): (
       // subprocess ran at all — `capability-unavailable`, or `automation-broken`
       // from a failed assumption probe — since `output_tail` is unset there.
       const reason = typeof envelope.reason === 'string' ? envelope.reason : null;
+      // `duration_ms` (#681) rides to `member_gates` — the gate's cost per
+      // member, the raw material for per-change-shape savings reporting.
+      const durationMs = typeof envelope.duration_ms === 'number' ? envelope.duration_ms : null;
       if (
         outcome === 'ok' ||
         outcome === 'task-failed' ||
         outcome === 'automation-broken' ||
         outcome === 'capability-unavailable'
       ) {
-        return { outcome, outputTail, reason };
+        return { outcome, outputTail, reason, durationMs };
       }
       return { outcome: 'automation-broken' };
     } catch {
@@ -895,6 +919,10 @@ function resumeBatchGate(opts: PauseResumeOptions): void {
     } else if (result.outcome === 'evicted') {
       console.log(
         `✗ Batch ${opts.batch}: cap run ${result.capability} now reports task-failed — member evicted, batch continues.`
+      );
+    } else if (result.outcome === 'skipped') {
+      console.log(
+        `⏭ Batch ${opts.batch}: cap run ${result.capability} timed out on recheck — gate declines (#681), member stands, batch continues.`
       );
     } else {
       console.log(
