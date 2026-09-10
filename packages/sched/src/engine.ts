@@ -293,6 +293,13 @@ interface UnitTruth {
   milestone: GroundTruthMilestone | null;
   closed: boolean;
   head: string | null;
+  /**
+   * The unit's effective working branch — the slot's own when it captured one
+   * from a milestone, else the branch recovered from the issue's setup
+   * milestone while the slot's is still unknown (#684). Null when neither
+   * source answered, which is also "no head was polled this tick".
+   */
+  branch: string | null;
 }
 
 /** Parked-PR truths gathered outside the lock (#468). */
@@ -435,11 +442,22 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
     const issue = issueOfUnit(slot.unit);
     if (issue === null || out.has(slot.unit)) continue;
     const milestone = deps.groundTruth.latestMilestone(issue);
+    // #684: a slot whose branch no milestone ever named — every redispatch,
+    // since `CLEARED_SLOT_FIELDS` nulls `branch` on release and only the
+    // setup milestone carries `branch=`, which is never the LATEST milestone
+    // again — recovers the branch from the issue's setup milestone here, so
+    // the pushed-commit stall signal has a ref to watch. Consulted only while
+    // the slot's own is unknown (one successful read persists it below), and
+    // only for running slots — exited/verifying slots never consume a head.
+    const branch =
+      slot.branch ??
+      (slot.status === 'running' ? (deps.groundTruth.setupInfo(issue)?.branch ?? null) : null);
     out.set(slot.unit, {
       reachable: milestone !== undefined,
       milestone: milestone ?? null,
       closed: deps.groundTruth.issueClosed(issue),
-      head: slot.branch !== null ? deps.groundTruth.branchHead(slot.branch) : null,
+      head: branch !== null ? deps.groundTruth.branchHead(branch) : null,
+      branch,
     });
   }
   return out;
@@ -1241,6 +1259,16 @@ function failOrAdoptOpenPr(
   const extra = {
     ...(typeof evidence.last_tool === 'string' ? { last_tool: evidence.last_tool } : {}),
     ...(prCheck !== 'skipped' ? { pr_check: prCheck } : {}),
+    // #684 AC3: the terminal stall verdict keeps what it checked — last
+    // milestone time, last observed head, head at decision time — so a false
+    // `stall-at-strongest-tier` (the issue:4156 kill, `last_head` never
+    // populated) is diagnosable from the `unit-failed` entry alone. The keys
+    // are present only when the caller supplied them: a stall passes all
+    // three (nulls included — `last_head: null` IS the diagnostic), while a
+    // `verify-incomplete` exit passes none.
+    ...('last_milestone_at' in evidence ? { last_milestone_at: evidence.last_milestone_at } : {}),
+    ...('last_head' in evidence ? { last_head: evidence.last_head } : {}),
+    ...('decision_head' in evidence ? { decision_head: evidence.decision_head } : {}),
   };
   return failUnit(ctx, state, unit, reason, {
     merged: report,
@@ -1487,6 +1515,17 @@ function applyProgressSignals(
   let next = state;
   let progressed = false;
   let milestoneAdvanced = false;
+
+  // #684: persist the branch recovered at poll time (the issue's setup
+  // milestone), so the recovery runs once per slot-life instead of every
+  // tick and `last_head` starts flowing for a slot no milestone ever named —
+  // INCLUDING a tick with no milestone at all, which is the long-review
+  // window the pushed-commit signal exists to cover. With the branch known,
+  // the head comparison below is the unchanged pushed-commit signal — a slot
+  // whose branch advanced on the remote within the window is not stalled.
+  if (slot.branch === null && truth.branch !== null) {
+    next = patchSlot(next, slot.id, { branch: truth.branch }, now);
+  }
 
   if (truth.milestone !== null) {
     // Live phase per unit (AC6).
@@ -2143,6 +2182,14 @@ function reconcileRunning(
     return enterRecovery(ctx, progress.state, unit, 'stalled', 'stall', truth, {
       active_phase: activePhase,
       stall_timeout_ms: stallTimeoutMs,
+      // #684 AC3: record what the verdict checked, so a false stall is
+      // diagnosable from the journal alone — `last_head: null` here is the
+      // signature of a slot whose pushed-commit signal never had a head to
+      // compare (the issue:4156 failure), distinguishable from a head that
+      // was observed and simply had not moved.
+      last_milestone_at: truth.milestone?.at ?? null,
+      last_head: slot.last_head,
+      decision_head: truth.head,
       ...(slot.fenced_at !== null ? { fenced_at: slot.fenced_at } : {}),
     });
   }
@@ -2443,6 +2490,7 @@ function reconcileSlots(
       milestone: null,
       closed: false,
       head: null,
+      branch: null,
     };
     switch (slot.status) {
       case 'assigned':
