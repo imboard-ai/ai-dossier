@@ -677,11 +677,25 @@ export function validateState(data: unknown): SchedState {
     // Three slot fields share one shape — optional (absent on a legacy slot),
     // nullable, otherwise an ISO date. One check rather than three copies of
     // the same six lines, so the fourth such field is a list entry.
-    for (const field of ['fenced_at', 'spawned_at', 'stale_milestone_ignored_for'] as const) {
+    for (const field of [
+      'fenced_at',
+      'spawned_at',
+      'stale_milestone_ignored_for',
+      'progress_milestone_since',
+    ] as const) {
       const value = slot[field];
       if (value !== null && value !== undefined && !isIsoDateString(value)) {
         throw new Error(`Slot ${slot.id}: ${field} must be an ISO date string or null`);
       }
+    }
+    if (
+      slot.progress_milestone_ticks !== undefined &&
+      (!Number.isInteger(slot.progress_milestone_ticks) ||
+        (slot.progress_milestone_ticks as number) < 0)
+    ) {
+      throw new Error(
+        `Slot ${slot.id}: progress_milestone_ticks must be a non-negative integer or absent (legacy)`
+      );
     }
     if (
       slot.log_offset_at_spawn !== null &&
@@ -815,6 +829,12 @@ export function validateState(data: unknown): SchedState {
     // tick with no per-dispatch marker at all — null is exact, not a guess:
     // nothing was ever recorded for any dispatch under the old behavior.
     stale_milestone_ignored_for: slot.stale_milestone_ignored_for ?? null,
+    // Pre-#682 (1.16.0) slots carried no milestone-progress dedup marker —
+    // no progress streak was ever recorded under the old behavior, so
+    // null/null/0 is exact, not a guess.
+    progress_milestone_for: slot.progress_milestone_for ?? null,
+    progress_milestone_since: slot.progress_milestone_since ?? null,
+    progress_milestone_ticks: slot.progress_milestone_ticks ?? 0,
   }));
   const entries = (obj.entries as QueueEntry[]).map((entry) => ({
     ...entry,
@@ -1023,6 +1043,11 @@ export const CLEARED_SLOT_FIELDS = {
   // #610: a released slot owns no dispatch to have journalled a stale
   // milestone for.
   stale_milestone_ignored_for: null,
+  // #682: a released slot holds no unit whose milestone streak could persist —
+  // the next unit assigned here journals its first milestone fresh.
+  progress_milestone_for: null,
+  progress_milestone_since: null,
+  progress_milestone_ticks: 0,
 };
 
 export function transitionSlot(

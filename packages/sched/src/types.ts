@@ -596,11 +596,38 @@ export interface SlotEntry {
    * Written by BOTH rails that journal the event — the batch member rail
    * (`reconcileMemberSlot`, `batch-dispatch.ts`) and the issue rail
    * (`journalStaleMilestoneIfIgnored`, `engine.ts`) — so the cadence is the
-   * same whichever kind of unit holds the slot.
-   * Added in schema 1.12.0; 1.11.0 slots backfill null (nothing was
-   * journalled yet under the old once-per-tick behavior).
+   * same whichever kind of unit holds the slot. Added in schema 1.12.0; 1.11.0
+   * slots backfill null (nothing was journalled yet under the old
+   * once-per-tick behavior).
    */
   stale_milestone_ignored_for: string | null;
+  /**
+   * The milestone key already covered by a milestone-driven `progress` journal
+   * entry (#682) — `` `${run}:${phase}/${status}` ``, `null` until the first
+   * milestone-driven progress signal this slot holds. Compared against the
+   * freshly observed key each tick so an UNCHANGED milestone doesn't
+   * re-journal (the #630 idiom, scoped to the slot rail like #610's
+   * `stale_milestone_ignored_for`), while a new milestone — a different
+   * phase/status, or the same one under a NEW run id (a resumed or
+   * redispatched run legitimately re-reaching `setup/done`) — always journals
+   * a fresh entry: de-duplication, not suppression.
+   */
+  progress_milestone_for: string | null;
+  /**
+   * ISO time `progress_milestone_for`'s current streak began (#682) — lets a
+   * reader answer "still at implement/done after 40 min" from one journal
+   * line instead of counting duplicates. `null` whenever
+   * `progress_milestone_for` is `null`.
+   */
+  progress_milestone_since: string | null;
+  /**
+   * Ticks `progress_milestone_for`'s current streak has persisted (#682),
+   * including ticks that stayed silent under the dedup — this is what lets
+   * the milestone-driven progress entry re-announce every
+   * `JOURNAL_DEDUP_REANNOUNCE_TICKS` ticks instead of only once, ever.
+   * Reset to `0` whenever `progress_milestone_for` is `null`.
+   */
+  progress_milestone_ticks: number;
   updated_at: string;
 }
 
@@ -1022,8 +1049,9 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * and `pr_watch_waiting_since`/`_ticks`.
  * 1.15.0 (#629): `SchedState` gains `consecutive_dispatch_api_errors` +
  * `dispatch_pause_reset_at`.
+ * 1.16.0 (#682): `SlotEntry` gains `progress_milestone_for`/`_since`/`_ticks`.
  */
-export const SCHEMA_VERSION = '1.15.0' as const;
+export const SCHEMA_VERSION = '1.16.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1042,6 +1070,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.12.0',
   '1.13.0',
   '1.14.0',
+  '1.15.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.8.0' as const;
