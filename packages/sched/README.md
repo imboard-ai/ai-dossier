@@ -288,6 +288,55 @@ This applies to `issue:<n>` unit dispatch (`dispatchAssignments`). `batch:<id>` 
 through a separate pass with its own claim/reconcile logic — see
 [Batch dispatch (#523)](#batch-dispatch-523) below.
 
+### Supervised deployment (#679)
+
+Two supported shapes, one rule: **dispatched agents must outlive the tick or engine that
+spawned them.** Agents are spawned detached and unref'd precisely so they survive a sched
+crash or restart (restart reconciles by pid) — any supervisor that tears down the process
+tree on exit defeats that by construction. The symptom when it happens is cruelly
+misleading: agents die with zero usage events, get classified `unverified-exit`, and walk
+up the escalation ladder to `unverified-exit-at-strongest-tier` — a failure reason that
+reads as a model-capability verdict when the strongest tier was never given a chance to
+run.
+
+**Long-running engine** — `Type=simple` user service:
+
+```ini
+# ~/.config/systemd/user/dossier-sched-<project>.service
+[Unit]
+Description=dossier sched engine (<project>)
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/ai-dossier sched start --project <project>
+Restart=on-failure
+# Kill ONLY the engine process on stop/restart. The default (control-group)
+# kills every dispatched agent with it — the engine's own restart would then
+# read those deaths as failed runs and escalate the units (see above).
+KillMode=process
+
+[Install]
+WantedBy=default.target
+```
+
+**One-shot tick** — cron or a `Type=oneshot` unit running `sched start --once` needs the
+same rule: the tick exits immediately after dispatching, so under the default
+`KillMode=control-group` the control group is torn down while every freshly spawned agent
+is still starting — EVERY tick kills EVERY agent it dispatched. `KillMode=process` on the
+unit (or spawning each agent into its own transient scope,
+`systemd-run --user --scope --collect …`) is required, not cosmetic.
+
+Verify a deployment survives its own ticks: dispatch one unit, let the tick or engine
+process that spawned it exit, and confirm the agent process is still alive 60 seconds
+later (`ps -p <agent-pid>`), with `run-log-no-usage` absent from the project's
+`events.jsonl` for that unit.
+
+Note the engine's own log (redirected stdout) carries one `✓ [ts] …` line per tick even
+when a tick does nothing (`nothing to do`) — a log that stops growing while
+`systemctl status` still says `active (running)` means the loop died silently, which is
+the failure mode #679 fixed: the engine exited cleanly after its first tick because its
+inter-tick sleep handles were unref'd.
+
 ### Zombie-run fencing (#504)
 
 The ladder redispatches the SAME run, so a takeover inherits the run id and its milestone
