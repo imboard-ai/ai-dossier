@@ -133,15 +133,20 @@ function harness(
     run: string;
     phase: string;
     takeover: string;
+    /** The generation the fence installed — null when the fencer was told to fail. */
+    gen: number | null;
     spawnsBefore: number;
   }> = [];
   const fenceGens = new Map<string, number>();
   let fenceFails = false;
   const fencer: RunFencer = (issue, run, phase, takeover) => {
-    fenceCalls.push({ issue, run, phase, takeover, spawnsBefore: spawnCalls.length });
-    if (fenceFails) return { ok: false, reason: 'fake fencer told to fail' };
+    if (fenceFails) {
+      fenceCalls.push({ issue, run, phase, takeover, gen: null, spawnsBefore: spawnCalls.length });
+      return { ok: false, reason: 'fake fencer told to fail' };
+    }
     const gen = (fenceGens.get(run) ?? 0) + 1;
     fenceGens.set(run, gen);
+    fenceCalls.push({ issue, run, phase, takeover, gen, spawnsBefore: spawnCalls.length });
     return { ok: true, gen };
   };
 
@@ -3003,9 +3008,18 @@ describe('#683: fence lifecycle — write → bind → release, and the defer cl
   });
 
   it('works without a binder or releaser — an engine predating #683 degrades to today’s behavior', () => {
-    const h = takeover();
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    // Dropped BEFORE the recovery runs: this engine predates #683, so neither the
+    // spawn-path bind nor the exit-path release can ever fire.
     h.removeFenceBinder();
     h.removeFenceReleaser();
+    h.enqueue([{ issue: 683, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(683, 'gate', 'done', undefined, { next: 'setup' });
+    h.advance(HOUR + 1000);
+    h.tick(); // stall → fence gen 1 → takeover spawned, UNBOUND (no binder)
+    expect(h.spawnCalls).toHaveLength(2);
     h.alive.delete(h.spawnCalls[1].pid);
 
     const result = h.tick();

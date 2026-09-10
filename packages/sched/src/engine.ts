@@ -824,7 +824,16 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
     // replaced is refused. A first dispatch is generation 0 and reads as it always did.
     // The tier's own resolved prompt (#527) — falls back to the global
     // dispatch.prompt when the tier has no override.
-    prompt: buildPrompt(ctx.dispatch.tiers[entry.tier].prompt, issue, slot.gen),
+    prompt: buildPrompt(
+      ctx.dispatch.tiers[entry.tier].prompt,
+      issue,
+      slot.gen,
+      // #683 AC6: the takeover is told its slot identity alongside the generation —
+      // the same label the fence announced and the bind names (one spelling,
+      // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
+      // generation, never by matching this label (AC7).
+      slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined
+    ),
     phase: 'gate',
     ...(slot.gen > 0 ? { journalExtra: { detail: `takeover gen=${slot.gen}` } } : {}),
   });
@@ -855,7 +864,15 @@ function spawnReportAgent(ctx: TickCtx, state: SchedState, unit: string): SchedS
     // (#504): a report slot is fenced by the same ladder, and a report agent that did
     // not know its generation would have its `report done` milestone refused by the
     // CLI — recovering forever on a PR that already merged.
-    prompt: buildReportPrompt(ctx.dispatch.reportPrompt, issue, entry.pr, entry.cleanup, slot.gen),
+    prompt: buildReportPrompt(
+      ctx.dispatch.reportPrompt,
+      issue,
+      entry.pr,
+      entry.cleanup,
+      slot.gen,
+      // #683 AC6, same rule as the cycle-agent prompt above.
+      slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined
+    ),
     phase: 'report',
     // Merged-aware: the PR is merged — a report spawn failure never blocks
     // dependents (gating already released at `shipped`).

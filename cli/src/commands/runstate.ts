@@ -800,7 +800,12 @@ function requireNotFenced(
   gen: number,
   body: string
 ): Record<string, unknown> {
-  const view = viewFence(options.issue, options.repo, options.run, gen);
+  // Liveness-aware, same as `check` (#683 AC2): a ghost's fence must not block the
+  // successor HERE either — a post that only passed `check` to be refused at the trail
+  // write would resurrect the #4153 livelock one step later. `boundPidAlive` fails
+  // closed (unreadable /proc reads best-effort-alive), so the write stays gated on a
+  // fence whose owner might still be running.
+  const view = viewFence(options.issue, options.repo, options.run, gen, boundPidAlive);
 
   if (view.kind === 'unreadable') {
     console.error(

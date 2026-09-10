@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { procStartTime } from '@ai-dossier/sched';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FENCED_EXIT_CODE, registerRunstateCommand } from '../../commands/runstate';
 import { buildMilestone, FENCE_STATUS, RUNSTATE_MARKER } from '../../runstate';
 import {
@@ -2127,5 +2128,292 @@ describe('run fencing — trust and hardening on the read path (#504)', () => {
     ]);
 
     expect(postedBody()).toContain('gen=1');
+  });
+});
+
+describe('#683: fence lifecycle — release, bind, stale-on-read (AC1–AC4)', () => {
+  const RUN = 'r-683-fc83';
+
+  /** A fence comment body, as `runstate fence` posts it. */
+  function fenceBody(gen: number, takeover: string, phase = 'implement'): string {
+    return milestoneBody(phase, FENCE_STATUS, RUN, '2026-08-30T11:00:00Z', {
+      gen: String(gen),
+      takeover,
+    });
+  }
+
+  /** A bind comment body, as `runstate fence-bind` posts it. */
+  function bindBody(
+    gen: number,
+    takeover: string,
+    pid: number,
+    pidStart: number | null,
+    phase = 'implement'
+  ): string {
+    return milestoneBody(phase, FENCE_STATUS, RUN, '2026-08-30T11:01:00Z', {
+      gen: String(gen),
+      takeover,
+      bound: 'true',
+      pid: String(pid),
+      ...(pidStart !== null ? { pid_start: String(pidStart) } : {}),
+    });
+  }
+
+  /** A release comment body, as `runstate fence --release` posts it. */
+  function releaseBody(gen: number, takeover: string, phase = 'implement'): string {
+    return milestoneBody(phase, FENCE_STATUS, RUN, '2026-08-30T11:02:00Z', {
+      gen: String(gen),
+      takeover,
+      released: 'true',
+    });
+  }
+
+  const FENCE_ARGS = [
+    'runstate',
+    'fence',
+    '--issue',
+    '683',
+    '--run',
+    RUN,
+    '--phase',
+    'implement',
+    '--takeover',
+    'slot-1-r1',
+  ];
+
+  const BIND_ARGS = [
+    'runstate',
+    'fence-bind',
+    '--issue',
+    '683',
+    '--run',
+    RUN,
+    '--phase',
+    'implement',
+    '--takeover',
+    'slot-1-r1',
+  ];
+
+  /** gh answering the trail read with `payload`; every other call succeeds. */
+  function ghWith(payload: string): void {
+    execHandles((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'view') {
+        return JSON.stringify({
+          comments: payload === '' ? [] : [{ body: payload, authorAssociation: 'OWNER' }],
+        });
+      }
+      return 'https://github.com/o/r/issues/683#issuecomment-9\n';
+    });
+  }
+
+  function ghWithTrail(bodies: string[]): void {
+    ghWith(bodies.join('\n'));
+  }
+
+  /** A full implement post — the key set `post` validates for the phase. */
+  const IMPLEMENT_ARGS = [
+    'runstate',
+    'post',
+    '--issue',
+    '683',
+    '--phase',
+    'implement',
+    '--status',
+    'done',
+    '--run',
+    RUN,
+    '--kv',
+    'head=abc1234',
+    '--kv',
+    'files=3',
+    '--kv',
+    'tests_added=1',
+    '--kv',
+    'tests_run=4',
+    '--kv',
+    'ci_parity=pass',
+  ];
+
+  /** Make `boundPidAlive`'s `kill(pid, 0)` report the pid as gone (ESRCH). */
+  function killReportsPidGone(): void {
+    vi.spyOn(process, 'kill').mockImplementation((() => {
+      const err = new Error('no such process') as NodeJS.ErrnoException;
+      err.code = 'ESRCH';
+      throw err;
+    }) as unknown as typeof process.kill);
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reports a released fence as live, naming how far the release reaches (AC1)', async () => {
+    ghWithTrail([fenceBody(1, 'slot-1-r1'), releaseBody(1, 'slot-1-r1')]);
+
+    const code = await run(['runstate', 'check', '--issue', '683', '--run', RUN, '--json']);
+
+    expect(code).toBeUndefined();
+    const parsed = JSON.parse(logged().join('\n'));
+    expect(parsed).toMatchObject({ fenced: false, current_gen: 1, released_up_to: 1 });
+  });
+
+  it('lets a post through once the fence above it was released (AC1)', async () => {
+    ghWithTrail([fenceBody(1, 'slot-1-r1'), releaseBody(1, 'slot-1-r1')]);
+
+    const code = await run([...IMPLEMENT_ARGS, '--gen', '0', '--json']);
+
+    expect(code).toBeUndefined();
+    const parsed = JSON.parse(logged().join('\n'));
+    expect(parsed.posted).toBe(true);
+    expect(parsed.fence_check).toBe('passed');
+  });
+
+  it('treats a bound-to-dead-pid fence as STALE: live, with stale=true (AC2)', async () => {
+    killReportsPidGone();
+    ghWithTrail([fenceBody(1, 'slot-1-r1'), bindBody(1, 'slot-1-r1', 4242, 1830)]);
+
+    const code = await run(['runstate', 'check', '--issue', '683', '--run', RUN, '--json']);
+
+    // The successor is NOT blocked by a ghost: exit 0 (live), stale recorded.
+    expect(code).toBeUndefined();
+    const parsed = JSON.parse(logged().join('\n'));
+    expect(parsed).toMatchObject({ fenced: false, stale: true, owner_pid: 4242 });
+    expect(errored().join('\n')).toContain('STALE');
+  });
+
+  it('lets a post through a stale fence, recording that the guard decided on one (AC2)', async () => {
+    killReportsPidGone();
+    ghWithTrail([fenceBody(1, 'slot-1-r1'), bindBody(1, 'slot-1-r1', 4242, 1830)]);
+
+    const code = await run([...IMPLEMENT_ARGS, '--gen', '0', '--json']);
+
+    expect(code).toBeUndefined();
+    const parsed = JSON.parse(logged().join('\n'));
+    expect(parsed.posted).toBe(true);
+    expect(parsed.fence_stale).toBe(true);
+    expect(parsed.owner_pid).toBe(4242);
+  });
+
+  it('still fences for a bound-to-LIVE-pid owner, reporting its liveness (AC2/AC4)', async () => {
+    // This test process is alive by definition, and its real /proc start-time makes the
+    // identity check exact — the same rule the engine's isAlive applies.
+    const liveStart = procStartTime(process.pid);
+    ghWithTrail([fenceBody(1, 'slot-1-r1'), bindBody(1, 'slot-1-r1', process.pid, liveStart)]);
+
+    const code = await run(['runstate', 'check', '--issue', '683', '--run', RUN, '--json']);
+
+    expect(code).toBe(FENCED_EXIT_CODE);
+    const parsed = JSON.parse(logged().join('\n'));
+    expect(parsed).toMatchObject({ fenced: true, owner_pid: process.pid, owner_alive: true });
+    expect(errored().join('\n')).toContain('is ALIVE');
+  });
+
+  it('keeps an UNBOUND fence authoritative — fail-closed, as before #683', async () => {
+    ghWithTrail([fenceBody(1, 'slot-1-r1')]);
+
+    const code = await run(['runstate', 'check', '--issue', '683', '--run', RUN, '--json']);
+
+    expect(code).toBe(FENCED_EXIT_CODE);
+    const parsed = JSON.parse(logged().join('\n'));
+    expect(parsed).toMatchObject({ fenced: true, owner_pid: null, owner_alive: null });
+    expect(errored().join('\n')).toContain('NO owner pid is bound');
+  });
+
+  it('names the owning run and its liveness in the abort comment (AC4)', async () => {
+    const liveStart = procStartTime(process.pid);
+    ghWithTrail([fenceBody(1, 'slot-1-r1'), bindBody(1, 'slot-1-r1', process.pid, liveStart)]);
+
+    await run(['runstate', 'check', '--issue', '683', '--run', RUN, '--gen', '0', '--comment']);
+
+    const body = (commentCall() as [string, string[]])[1][4];
+    expect(body).toContain('Run superseded — aborting');
+    expect(body).toContain(`run \`${RUN}\``);
+    expect(body).toContain(`ALIVE (pid ${process.pid})`);
+    expect(body).toContain("takeover 'slot-1-r1'");
+  });
+
+  it('says the bind was missed in the abort comment when no pid is bound (AC4)', async () => {
+    ghWithTrail([fenceBody(1, 'slot-1-r1')]);
+
+    await run(['runstate', 'check', '--issue', '683', '--run', RUN, '--gen', '0', '--comment']);
+
+    const body = (commentCall() as [string, string[]])[1][4];
+    expect(body).toContain('No owner pid is bound to this fence');
+  });
+
+  it('posts a release record via fence --release (AC1)', async () => {
+    ghWithTrail([fenceBody(1, 'slot-1-r1')]);
+
+    const code = await run([...FENCE_ARGS, '--release', '--gen', '1', '--json']);
+
+    expect(code).toBeUndefined();
+    expect(postedBody()).toContain('released=true');
+    expect(postedBody()).toContain('gen=1');
+    const parsed = JSON.parse(logged().join('\n'));
+    expect(parsed).toMatchObject({ released: true, gen: 1 });
+  });
+
+  it('refuses a release above the trail’s top fence', async () => {
+    ghWithTrail([fenceBody(1, 'slot-1-r1')]);
+
+    const code = await run([...FENCE_ARGS, '--release', '--gen', '2']);
+
+    expect(code).toBe(1);
+    expect(commentCall()).toBeUndefined();
+    expect(errored().join('\n')).toContain('must not claim more than was fenced');
+  });
+
+  it('never reuses a released generation: fence after release installs top+1', async () => {
+    // Generation arithmetic keeps counting release records, so a takeover of a takeover
+    // cannot collide with a generation whose owner may be "mostly dead" (#472).
+    ghWithTrail([fenceBody(1, 'slot-1-r1'), releaseBody(1, 'slot-1-r1')]);
+
+    await run([...FENCE_ARGS, '--takeover', 'slot-1-r2']);
+
+    expect(postedBody()).toContain('gen=2');
+  });
+
+  it('binds the fence to its owning pid at the trail’s top generation (AC2)', async () => {
+    ghWithTrail([fenceBody(1, 'slot-1-r1')]);
+
+    const code = await run([...BIND_ARGS, '--gen', '1', '--pid', '4242', '--json']);
+
+    expect(code).toBeUndefined();
+    expect(postedBody()).toContain('bound=true');
+    expect(postedBody()).toContain('pid=4242');
+    expect(postedBody()).toContain('gen=1');
+    const parsed = JSON.parse(logged().join('\n'));
+    expect(parsed).toMatchObject({ gen: 1, pid: 4242, run: RUN });
+  });
+
+  it('binds without --pid-start when the engine could not read one (liveness degrades to best-effort)', async () => {
+    ghWithTrail([fenceBody(1, 'slot-1-r1')]);
+
+    const code = await run([...BIND_ARGS, '--gen', '1', '--pid', '4242', '--json']);
+
+    expect(code).toBeUndefined();
+    expect(postedBody()).not.toContain('pid_start=');
+  });
+
+  it('refuses to bind a generation that is not the trail’s top fence', async () => {
+    // A bind for an older gen is stale on arrival; a bind for a gen the run never
+    // reached is a caller bug — the engine binds right after spawning the takeover.
+    ghWithTrail([fenceBody(1, 'slot-1-r1')]);
+
+    const code = await run([...BIND_ARGS, '--gen', '2', '--pid', '4242']);
+
+    expect(code).toBe(1);
+    expect(commentCall()).toBeUndefined();
+    expect(errored().join('\n')).toContain('top fence for run');
+  });
+
+  it('refuses to bind generation 0 — a bind describes a fence, and 0 means never fenced', async () => {
+    execReturns('');
+
+    const code = await run([...BIND_ARGS, '--gen', '0', '--pid', '4242']);
+
+    expect(code).toBe(1);
+    expect(mockedExec).not.toHaveBeenCalled();
+    expect(errored().join('\n')).toContain('generation 0 means');
   });
 });

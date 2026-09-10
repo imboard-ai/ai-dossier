@@ -179,6 +179,8 @@ export {
 export {
   appendSchedRunLog,
   buildSchedRunLogEntry,
+  type FenceAbortEvidence,
+  parseFenceAbort,
   readDispatchLog,
   type SchedRunLogInput,
   schedRunsLogPath,
