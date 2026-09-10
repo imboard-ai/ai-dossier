@@ -258,7 +258,7 @@ per-project. Most subcommands also take `--json` for machine-readable output.
 | Resume assignments | `ai-dossier sched resume` |
 | Fail one issue | `ai-dossier sched abandon --issue 42 --reason "operator abort"` |
 | Dissolve a batch (members requeue full-cycle) | `ai-dossier sched abandon --batch b1` |
-| Run the engine continuously | `ai-dossier sched start` (Ctrl-C stops it; live agents keep running) |
+| Run the engine continuously (a human at a terminal ONLY — never inside an agent tool call) | `ai-dossier sched start` (Ctrl-C stops it; live agents keep running). An agent's bash call must not hold a foreground engine: the process dies with the call's process group the moment the call ends (`nohup` without `&` backgrounds nothing — see the trap row in [`docs/agent-traps.md`](../agent-traps.md)). Agents get engine progress from the tick cron, or run exactly one tick themselves: `ai-dossier sched start --once` |
 | Run one reconcile+refill tick (what cron does) | `ai-dossier sched start --once` |
 | Run one tick, self-upgrading the CLI first (gated on no mid-dispatch unit) | `ai-dossier sched start --once --auto-upgrade` |
 | Per-issue token/cost totals (global, not per-project) | `ai-dossier sched stats --issues 4..9` |
