@@ -1404,6 +1404,10 @@ function applyProgressSignals(
       journal(ctx, 'progress', unit, {
         slot: slot.id,
         detail: 'new pushed commit',
+        // Same `at` contract as the milestone-driven branch: the decision
+        // clock, not a truth's own timestamp (#610's one-event-one-meaning
+        // rule for the `at` field).
+        at: now.toISOString(),
         ...(truth.head !== null ? { head: truth.head } : {}),
       });
     }
@@ -1462,49 +1466,48 @@ function journalMilestoneProgressIfDue(
   // last_progress_at) and the persisted marker is what the streak continues.
   const cur = state.slots.find((s) => s.id === slotId);
   if (cur === undefined) return state;
+  let ticks: number;
+  let since: string;
+  let journalNow: boolean;
   if (advanced) {
     const isNewStreak = cur.progress_milestone_for !== key;
-    const ticks = isNewStreak ? 1 : cur.progress_milestone_ticks + 1;
-    const since = isNewStreak
-      ? now.toISOString()
-      : (cur.progress_milestone_since ?? now.toISOString());
-    if (isNewStreak || ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0) {
-      // `at` is the decision clock; `since` is the streak's onset. Both are
-      // needed: `ticks_persisted` is a TICK count, which maps to no fixed
-      // wall-clock across operator-tunable tick intervals.
-      journal(ctx, 'progress', unit, {
-        slot: slotId,
-        detail: `milestone ${milestone.phase}/${milestone.status}`,
-        run: milestone.run,
-        at: now.toISOString(),
-        since,
-        ticks_persisted: ticks,
-      });
-    }
-    return patchSlot(
-      state,
-      slotId,
-      {
-        progress_milestone_for: key,
-        progress_milestone_since: since,
-        progress_milestone_ticks: ticks,
-      },
-      now
-    );
+    ticks = isNewStreak ? 1 : cur.progress_milestone_ticks + 1;
+    since = isNewStreak ? now.toISOString() : (cur.progress_milestone_since ?? now.toISOString());
+    journalNow = isNewStreak || ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0;
+  } else {
+    // A persistence tick never STARTS a streak: a unit seen carrying a
+    // milestone it did not advance (a redispatch's stale milestone) counts
+    // nothing and journals nothing.
+    if (cur.progress_milestone_for !== key || cur.progress_milestone_since === null) return state;
+    ticks = cur.progress_milestone_ticks + 1;
+    since = cur.progress_milestone_since;
+    journalNow = ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0;
   }
-  if (cur.progress_milestone_for !== key || cur.progress_milestone_since === null) return state;
-  const ticks = cur.progress_milestone_ticks + 1;
-  if (ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0) {
+  if (journalNow) {
+    // `at` is the decision clock; `since` is the streak's onset. Both are
+    // needed: `ticks_persisted` is a TICK count, which maps to no fixed
+    // wall-clock across operator-tunable tick intervals.
     journal(ctx, 'progress', unit, {
       slot: slotId,
       detail: `milestone ${milestone.phase}/${milestone.status}`,
       run: milestone.run,
       at: now.toISOString(),
-      since: cur.progress_milestone_since,
+      since,
       ticks_persisted: ticks,
     });
   }
-  return patchSlot(state, slotId, { progress_milestone_ticks: ticks }, now);
+  return patchSlot(
+    state,
+    slotId,
+    advanced
+      ? {
+          progress_milestone_for: key,
+          progress_milestone_since: since,
+          progress_milestone_ticks: ticks,
+        }
+      : { progress_milestone_ticks: ticks },
+    now
+  );
 }
 
 /**
