@@ -75,3 +75,52 @@ export function writeFenceAbortLog(
       `<!-- runstate-abort:${run}:${gen} -->\n`
   );
 }
+
+/**
+ * Write the announce-then-exit signature (#685) — the shape the issue's three
+ * incidents (~$52 of discarded work) share: the agent starts (optionally) a
+ * background command, its FINAL assistant text announces a wait, and the
+ * session ends with a CLEAN `result` event (`is_error: false`,
+ * `subtype: "success"`). `parseAnnouncedWait` keys on both halves — the clean
+ * exit and the wait announcement in the last text block — so the fixture must
+ * carry both. Appends, like its siblings, and creates the runs directory.
+ */
+export function writeAnnouncedWaitLog(
+  logFile: string,
+  message: string,
+  opts: { backgroundToolUse?: boolean; isError?: boolean } = {}
+): void {
+  fs.mkdirSync(path.dirname(logFile), { recursive: true });
+  const lines: string[] = [];
+  if (opts.backgroundToolUse) {
+    lines.push(
+      JSON.stringify({
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 't1',
+              name: 'Bash',
+              input: { command: 'bash scripts/ci-parity.sh', run_in_background: true },
+            },
+          ],
+        },
+      })
+    );
+  }
+  lines.push(
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: message }] } })
+  );
+  lines.push(
+    JSON.stringify({
+      type: 'result',
+      subtype: 'success',
+      is_error: opts.isError ?? false,
+      num_turns: 4,
+      duration_ms: 25 * 60 * 1000,
+      result: message,
+    })
+  );
+  fs.appendFileSync(logFile, `${lines.join('\n')}\n`);
+}

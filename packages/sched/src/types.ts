@@ -1300,6 +1300,11 @@ export type JournalEventName =
   // correct no-op, never an unverified failure. Redispatched at the same tier
   // without consuming an escalation rung.
   | 'deferred-to-owner'
+  // #685: the announce-then-exit signature — a CLEAN exit whose final message
+  // announces a wait on background work (true interactively, false under
+  // `-p`). A known-recoverable condition, never an unverified failure:
+  // redispatched at the same tier without consuming an escalation rung.
+  | 'announced-wait'
   // #523 batch dispatch: claiming the shared worktree/branch, and advancing
   // the member pointer between slot-cycle runs. Member/tail-agent spawn,
   // progress, completion and park events reuse the existing unit-generic

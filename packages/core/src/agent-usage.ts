@@ -591,6 +591,114 @@ export function parseLastToolUse(stdout: string | null | undefined): string | nu
   return sanitizeAgentText(lastTool, MAX_TOOL_NAME_LENGTH);
 }
 
+/** Longest announced-wait excerpt kept from the final assistant message (#685) — capped like {@link MAX_DISPATCH_MESSAGE_LENGTH}. */
+const MAX_ANNOUNCED_WAIT_EXCERPT_LENGTH = 500;
+
+/** Longest wait-signal phrase written to a journal entry (#685) — machine-shaped, same cap as {@link MAX_TOOL_NAME_LENGTH}. */
+const MAX_WAIT_SIGNAL_LENGTH = 100;
+
+/**
+ * The announce-then-exit signature (#685): a headless agent's final message
+ * announcing that it is WAITING on background work. Anchored on the three real
+ * incidents the issue files (`Waiting for ci-parity.sh to finish.` / `Waiting
+ * now for either the background task notification or the scheduled fallback
+ * wakeup.` / `I'll wait for the ci-parity.sh background task to complete
+ * (notification will arrive automatically) ...`) plus the explicit poll/sleep
+ * and `in the background` wordings the dispatch prompt itself teaches.
+ * Deliberately conservative in what it does NOT try to do: no tense or
+ * completion analysis — a final message that merely REFERENCES a finished
+ * wait (`The wait for CI finished`) also matches, but a false positive only
+ * downgrades an escalation into a cheap same-tier redispatch, while a false
+ * negative burns a tier. The classification is only ever consulted for
+ * UNVERIFIED exits (a fresh milestone short-circuits to completion first),
+ * which bounds the blast radius of that tradeoff.
+ */
+const ANNOUNCED_WAIT_RE =
+  /\b(waiting (?:for|on|now)|wait (?:for|until|now)|notification will arrive|notification arrives|poll(?:s|ing)? (?:with|until)|sleep loops? (?:until|for)|in the background|while (?:it|that|this) (?:finishes|runs|completes))\b/i;
+
+/**
+ * Evidence that THIS dispatch ended with the announce-then-exit signature
+ * (ai-dossier#685): a CLEAN exit whose final assistant message announces a
+ * wait on background work. See {@link parseAnnouncedWait}.
+ */
+export interface AnnouncedWaitEvidence {
+  /** The matched wait phrase (sanitized, capped) — the journal's `wait_signal` evidence. */
+  signal: string;
+  /** The final assistant message the phrase was found in (sanitized, capped) — the journal's `wait_excerpt` evidence. */
+  excerpt: string;
+}
+
+/**
+ * Detect the announce-then-exit signature in one dispatch's log (ai-dossier#685).
+ *
+ * The issue's three incidents (~$52 of discarded work) all exited CLEANLY
+ * (`is_error: false`, `subtype: "success"`) after announcing a wait their
+ * headless session could never satisfy — in `-p` mode there is no next turn
+ * for a background-notification to arrive on. This parse lets the engine
+ * classify that shape as a cheap same-tier redispatch instead of an
+ * escalation rung, and it is only consulted AFTER the api-error (#629) and
+ * fence-abort (#683) rails: those read exact CLI output, which outranks
+ * prose.
+ *
+ * BOTH conditions must hold:
+ * 1. **A clean exit.** The stream carries a final `result` event (shared
+ *    authority: {@link findLastResultEvent}) whose `is_error` is not true.
+ *    An agent killed mid-run has no result event; an errored exit rides the
+ *    existing rails. Either way the signature cannot fire.
+ * 2. **A final message announcing the wait.** The LAST text block across the
+ *    stream (claude: `assistant` message text blocks; opencode: `type:"text"`
+ *    parts) matches {@link ANNOUNCED_WAIT_RE}. Mid-run mentions don't count —
+ *    only what the agent said as it ended.
+ *
+ * Mirrors {@link parseLastToolUse}'s line tolerance (unparseable lines and the
+ * sched preamble skipped, never disqualifying). Returns null when either
+ * condition fails, when no assistant text exists, or on empty/malformed input.
+ */
+export function parseAnnouncedWait(
+  stdout: string | null | undefined
+): AnnouncedWaitEvidence | null {
+  if (typeof stdout !== 'string' || stdout.trim() === '') return null;
+
+  // Condition 1 — a clean exit. No result event at all means the agent was
+  // killed mid-run (or never finished a turn): not an announce-then-exit.
+  const result = findLastResultEvent(stdout);
+  if (!result || result.is_error === true) return null;
+
+  // Condition 2 — the FINAL assistant text announces the wait. Last one wins
+  // (JSONL is append-order): an agent that announced a wait mid-run but kept
+  // going is judged by what it said when it actually stopped.
+  let lastText: string | null = null;
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    const event = parseJsonObject(trimmed);
+    if (!event || event.type === SCHED_DISPATCH_EVENT) continue;
+
+    if (event.type === 'assistant') {
+      const content = asRecord(event.message)?.content;
+      if (!Array.isArray(content)) continue;
+      for (const raw of content) {
+        const block = asRecord(raw);
+        if (block?.type === 'text' && typeof block.text === 'string') lastText = block.text;
+      }
+    }
+    // opencode shape: the assistant's text arrives in `type:"text"` parts.
+    if (event.type === 'text') {
+      const part = asRecord(event.part);
+      if (part && typeof part.text === 'string') lastText = part.text;
+    }
+  }
+  if (lastText === null) return null;
+
+  const match = ANNOUNCED_WAIT_RE.exec(lastText);
+  if (match === null) return null;
+  const excerpt = sanitizeAgentText(lastText, MAX_ANNOUNCED_WAIT_EXCERPT_LENGTH);
+  const signal = sanitizeAgentText(match[0], MAX_WAIT_SIGNAL_LENGTH);
+  if (excerpt === null || signal === null) return null;
+  return { signal, excerpt };
+}
+
 /**
  * Parse an `opencode run --format json` result stream into usage data (#459).
  *

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   parseAgentUsage,
+  parseAnnouncedWait,
   parseDispatchApiError,
   parseLastToolUse,
   parseOpenCodeUsage,
@@ -916,5 +917,123 @@ describe('parseDispatchApiError (#629)', () => {
     const parsed = parseDispatchApiError(stdout);
     expect(parsed?.message).not.toContain('\x1b');
     expect(parsed?.message?.length).toBeLessThanOrEqual(500);
+  });
+});
+
+describe('parseAnnouncedWait (#685 — the announce-then-exit signature)', () => {
+  // A minimal `stream-json` dispatch slice: assistant turn(s) then the final
+  // `result` event, the shape `createSpawnDeps` captures from a claude -p run.
+  const claudeStream = (
+    texts: string[],
+    result: Record<string, unknown> = { subtype: 'success', is_error: false }
+  ) =>
+    [
+      ...texts.map((text) =>
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text }] } })
+      ),
+      JSON.stringify({ type: 'result', num_turns: 4, ...result }),
+    ].join('\n');
+
+  it('matches all three real incident messages from the issue (~$52 of discarded work)', () => {
+    const incidents = [
+      'Waiting for `ci-parity.sh` to finish.',
+      'Waiting now for either the background task notification or the scheduled fallback wakeup.',
+      "I'll wait for the ci-parity.sh background task to complete (notification will arrive " +
+        'automatically) before continuing to Steps 1–3c of Ship.',
+    ];
+    for (const message of incidents) {
+      const parsed = parseAnnouncedWait(claudeStream(['Worked on the plan.', message]));
+      expect(parsed, message).not.toBeNull();
+      expect(parsed?.excerpt).toBe(message);
+    }
+  });
+
+  it('returns the first matched phrase as the signal', () => {
+    const parsed = parseAnnouncedWait(
+      claudeStream(['Waiting now for either the background task notification or the fallback.'])
+    );
+    expect(parsed?.signal).toBe('Waiting now');
+  });
+
+  it('reads the opencode text-part shape too', () => {
+    const stdout = [
+      JSON.stringify({
+        type: 'text',
+        part: { text: 'Polling with sleep loops until ci-parity ends.' },
+      }),
+      JSON.stringify({ type: 'step_finish', part: { tokens: { input: 1, output: 2 } } }),
+      JSON.stringify({ type: 'result', is_error: false }),
+    ].join('\n');
+    expect(parseAnnouncedWait(stdout)?.signal).toBe('Polling with');
+  });
+
+  it('judges by the FINAL text only — a mid-run mention with a normal ending does not classify', () => {
+    const parsed = parseAnnouncedWait(
+      claudeStream([
+        'Starting ci-parity in the background now.',
+        'All steps completed successfully and the PR is parked on auto-merge.',
+      ])
+    );
+    expect(parsed).toBeNull();
+  });
+
+  it('does not classify when the log has no result event (agent killed mid-run)', () => {
+    const stdout = JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'Waiting for the background task.' }] },
+    });
+    expect(parseAnnouncedWait(stdout)).toBeNull();
+  });
+
+  it('does not classify an errored exit — that rides the existing rails', () => {
+    const parsed = parseAnnouncedWait(
+      claudeStream(['Waiting for the background task.'], { is_error: true })
+    );
+    expect(parsed).toBeNull();
+  });
+
+  it('does not classify a final message that announces no wait', () => {
+    expect(parseAnnouncedWait(claudeStream(['Implemented the fix; tests pass. Done.']))).toBeNull();
+  });
+
+  it('a wait reference in a COMPLETED final message still matches — accepted tradeoff (#685)', () => {
+    // The classification only ever runs for UNVERIFIED exits (a fresh milestone
+    // short-circuits to completion first), so this false-positive direction is
+    // bounded: it downgrades an escalation into a cheap same-tier retry.
+    const parsed = parseAnnouncedWait(
+      claudeStream(['The wait for CI finished; everything is green.'])
+    );
+    expect(parsed?.signal).toBe('wait for');
+  });
+
+  it('skips the sched preamble and unparseable lines without disqualifying the stream', () => {
+    const stdout = [
+      JSON.stringify({ type: SCHED_DISPATCH_EVENT, ts: '2026-09-10T00:00:00Z', cmd: ['claude'] }),
+      '<<<truncated>>>',
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'text', text: 'Waiting for ci-parity.sh to finish.' }] },
+      }),
+      JSON.stringify({ type: 'result', is_error: false }),
+    ].join('\n');
+    expect(parseAnnouncedWait(stdout)?.signal).toBe('Waiting for');
+  });
+
+  it('sanitizes and caps the excerpt like every other agent-controlled string', () => {
+    const esc = String.fromCharCode(0x1b);
+    const parsed = parseAnnouncedWait(
+      claudeStream([`Waiting for the build.${esc}[2K${'x'.repeat(600)}`])
+    );
+    expect(parsed?.excerpt).not.toContain(esc);
+    expect(parsed?.excerpt.length).toBeLessThanOrEqual(500);
+    expect(parsed?.signal.length).toBeLessThanOrEqual(100);
+  });
+
+  it('returns null on empty, null, or malformed input', () => {
+    expect(parseAnnouncedWait(null)).toBeNull();
+    expect(parseAnnouncedWait(undefined)).toBeNull();
+    expect(parseAnnouncedWait('')).toBeNull();
+    expect(parseAnnouncedWait('   ')).toBeNull();
+    expect(parseAnnouncedWait('not json at all')).toBeNull();
   });
 });

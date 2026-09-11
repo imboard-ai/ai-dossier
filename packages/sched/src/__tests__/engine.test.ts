@@ -27,7 +27,12 @@ import {
   transitionIssue,
   transitionSlot,
 } from '../index';
-import { writeApiErrorLog, writeFenceAbortLog, writeToolUseLog } from './helpers/dispatch-log';
+import {
+  writeAnnouncedWaitLog,
+  writeApiErrorLog,
+  writeFenceAbortLog,
+  writeToolUseLog,
+} from './helpers/dispatch-log';
 
 /**
  * Engine harness: a real SchedStore on a temp dir, fully fake process I/O
@@ -3221,6 +3226,135 @@ describe('#683: fence lifecycle — write → bind → release, and the defer cl
     expect(h.events().some((e) => e.event === 'deferred-to-owner')).toBe(false);
     expect(h.events().some((e) => e.event === 'verify-incomplete')).toBe(true);
     expect(h.state().entries.find((e) => e.issue === 683)?.tier).toBe('mid');
+  });
+});
+
+describe('#685: the announce-then-exit signature — a cheap retry, never a capability failure', () => {
+  const HOUR = 60 * 60 * 1000;
+  // harness setMilestone derives the trail run id as `r-${issue}-ab12`.
+  const RUN = 'r-685-ab12';
+  // The exact wording of incident `issue:4156` — at the ship step after a clean review.
+  const INCIDENT_MESSAGE =
+    "I'll wait for the ci-parity.sh background task to complete (notification will arrive " +
+    'automatically) before continuing to Steps 1–3c of Ship.';
+
+  function waitingAgent(h: ReturnType<typeof harness>, backgroundToolUse = false) {
+    h.enqueue([{ issue: 685, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(685, 'gate', 'done');
+    writeAnnouncedWaitLog(h.spawnCalls[0].logFile, INCIDENT_MESSAGE, { backgroundToolUse });
+    h.alive.delete(h.spawnCalls[0].pid);
+  }
+
+  it('classifies a clean announce-then-exit as announced-wait — same tier, no rung (AC2)', () => {
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    waitingAgent(h);
+
+    const result = h.tick();
+
+    expect(result.redispatched).toEqual(['issue:685']);
+    const wait = h.events().find((e) => e.event === 'announced-wait');
+    expect(wait).toBeDefined();
+    expect(wait?.wait_signal).toBe('wait for');
+    expect(wait?.wait_excerpt).toBe(INCIDENT_MESSAGE);
+    // Never an unverified failure, never a suspect dispatch, never an API-error rail.
+    expect(h.events().some((e) => e.event === 'verify-incomplete')).toBe(false);
+    expect(h.events().some((e) => e.event === 'unit-failed')).toBe(false);
+    expect(h.events().some((e) => e.event === 'suspect-dispatch')).toBe(false);
+    // Zero rungs consumed: tier and recoveries both unchanged.
+    expect(h.state().entries.find((e) => e.issue === 685)?.tier).toBe('mechanical');
+    expect(h.state().slots.find((s) => s.unit === 'issue:685')?.recoveries).toBe(0);
+  });
+
+  it('REGRESSION (AC4): an agent that starts a long background command and returns is not failed', () => {
+    // The issue's ask verbatim: dispatch a headless agent that starts a long
+    // background command and returns; the run must not be classified as a
+    // capability failure — it is redispatched at the same tier instead.
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    waitingAgent(h, true);
+
+    const result = h.tick();
+
+    expect(result.failed).toEqual([]);
+    expect(result.redispatched).toEqual(['issue:685']);
+    expect(h.events().some((e) => e.event === 'unit-failed')).toBe(false);
+    expect(h.events().some((e) => e.detail === 'unverified-exit-at-strongest-tier')).toBe(false);
+    expect(h.state().entries.find((e) => e.issue === 685)?.tier).toBe('mechanical');
+  });
+
+  it('preserves and resumes partial work: the recovery re-fences and the successor is told to resume (AC3)', () => {
+    // No new mechanism — the generation/fence machinery #504/#683 built already
+    // does this; the test pins it so the cheap-retry path can never silently
+    // abandon the abandoned run's work.
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    waitingAgent(h);
+
+    h.tick();
+
+    expect(h.fenceCalls).toHaveLength(1);
+    expect(h.fenceCalls[0].gen).toBe(1);
+    const successor = h.spawnCalls[1];
+    expect(successor.prompt).toContain('--gen 1');
+    // The takeover instruction resumes rather than restarts: the trail and the
+    // pushed branch are the durable state.
+    expect(successor.prompt).toContain('Resume the existing work');
+  });
+
+  it('a clean exit that announces NO wait still escalates (the classification does not swallow real failures)', () => {
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 685, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(685, 'gate', 'done');
+    writeAnnouncedWaitLog(h.spawnCalls[0].logFile, 'All steps completed and verified.');
+    h.alive.delete(h.spawnCalls[0].pid);
+
+    h.tick();
+
+    expect(h.events().some((e) => e.event === 'announced-wait')).toBe(false);
+    expect(h.events().some((e) => e.event === 'verify-incomplete')).toBe(true);
+    expect(h.state().entries.find((e) => e.issue === 685)?.tier).toBe('mid');
+  });
+
+  it('a confirmed provider API error wins over a wait announcement (deterministic rails first)', () => {
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 685, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(685, 'gate', 'done');
+    writeAnnouncedWaitLog(h.spawnCalls[0].logFile, INCIDENT_MESSAGE);
+    // The wall's result event lands AFTER the announcement — the last result is
+    // the authoritative one, and a 429 is not a clean exit.
+    writeApiErrorLog(h.spawnCalls[0].logFile);
+    h.alive.delete(h.spawnCalls[0].pid);
+
+    h.tick();
+
+    expect(h.events().some((e) => e.event === 'announced-wait')).toBe(false);
+    expect(h.events().some((e) => e.event === 'dispatch-failure')).toBe(true);
+  });
+
+  it('a fence defer wins over a wait announcement (exact CLI evidence outranks prose)', () => {
+    const h = harness({ stallTimeoutMs: HOUR });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 685, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.setMilestone(685, 'gate', 'done');
+    writeAnnouncedWaitLog(h.spawnCalls[0].logFile, INCIDENT_MESSAGE);
+    // The agent ALSO answered its supersession checkpoint — the defer is the
+    // more specific (and unfakeable) classification for the same exit.
+    writeFenceAbortLog(h.spawnCalls[0].logFile, RUN, 3, 'slot-1-r1');
+    h.alive.delete(h.spawnCalls[0].pid);
+
+    h.tick();
+
+    expect(h.events().some((e) => e.event === 'announced-wait')).toBe(false);
+    const defer = h.events().find((e) => e.event === 'deferred-to-owner');
+    expect(defer).toBeDefined();
+    expect(defer?.fence_gen).toBe(3);
   });
 });
 
