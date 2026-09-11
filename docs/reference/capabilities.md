@@ -5,8 +5,8 @@ dossiers and workflows need (run focused tests, lint, build, install dependencie
 prepare a worktree) expressed as named commands instead of re-reasoned by an agent on
 every use. Per the Progressive Determinism brief (RFC-0001), repos should accumulate
 these deterministic implementations and use them as the fast path, with reasoning as
-the fallback. The scheduler's slot-cycle (`test.focused` / `lint.run`) is planned to
-consume this manifest as its fast path (follow-up #464).
+the fallback. The scheduler's batch member gate consumes `typecheck.run` /
+`test.focused` from this manifest today (the per-member incremental gate, #583/#625).
 
 - **Where it lives**: `.dossier/automation/manifest.yaml` in the repo (resolved from the
   directory you run `ai-dossier` in).
@@ -147,9 +147,9 @@ but use these when they fit):
 | `worktree.prepare` | Create/warm a git worktree for development |
 | `worktree.cleanup` | Clean up / return a worktree |
 | `dependencies.install` | Install project dependencies (npm/pnpm/uv/…) |
-| `test.focused` | Fast, targeted test suite (slot-cycle fast path) |
+| `test.focused` | Fast, targeted test suite (batch member gate fast path) |
 | `test.full` | Complete test suite |
-| `lint.run` | Linter/formatter check (slot-cycle fast path) |
+| `lint.run` | Linter/formatter check (batch member gate fast path) |
 | `typecheck.run` | Type checking (tsc / mypy / …) |
 | `build.run` | Build the project |
 | `environment.start` | Start dev servers / containers |

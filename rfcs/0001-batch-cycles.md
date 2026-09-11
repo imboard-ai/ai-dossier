@@ -255,7 +255,7 @@ stall: running[30 min no progress] → recovering(redispatch tier+1, ≤2) → r
 crash (sched restart): state.json + reconcile → re-arm timers, re-attach or redispatch
 ```
 
-Concurrency semantics (Q15): `max_slots` bounds **live agent processes** (full-cycle runs, slot-cycle members, prep, fix attempts, report agents). A batch consumes one slot *while a member or batch-LLM-step runs*, zero while the scheduler is doing deterministic work (suite runs, CI waits, PR watches) — the detached-ship economics ("a parked PR costs nothing; a waiting agent costs a slot") generalized to every wait. Worktree-pool capacity is the second bound, checked at claim time; parked/batch worktrees still hold pool slots until teardown (today's rule, kept).
+Concurrency semantics (Q15): `max_slots` bounds **live agent processes** (full-cycle runs, member-cycle members, prep, fix attempts, report agents). A batch consumes one slot *while a member or batch-LLM-step runs*, zero while the scheduler is doing deterministic work (suite runs, CI waits, PR watches) — the detached-ship economics ("a parked PR costs nothing; a waiting agent costs a slot") generalized to every wait. Worktree-pool capacity is the second bound, checked at claim time; parked/batch worktrees still hold pool slots until teardown (today's rule, kept).
 
 ### D.4 What is persisted where (Q16)
 
@@ -623,7 +623,7 @@ The parent is the only genuinely new actor, and it is live only for the terminal
 | affected-test resolution (`test.focused`) | code | CLI capability implementation | **missing — see below** |
 | classify | dossier | registry | exists |
 | batch prep | dossier | registry | exists |
-| member (`slot-cycle`, §J.4) | dossier | registry | exists |
+| member (`member-cycle`, §J.4) | dossier | registry | exists |
 | **parent integrate-and-fix (§J.6)** | **dossier** | **registry** | **missing** |
 | which stages are expensive *here*; base ref | declaration | `.dossier/automation/manifest.yaml` | per repo |
 

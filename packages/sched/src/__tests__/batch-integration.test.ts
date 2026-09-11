@@ -21,7 +21,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 // stale `BatchEntry` snapshot, a condition the public `runBatchTick`/
 // `resumeBlockedGate` entry points cannot reproduce (both always read state
 // fresh from the store).
-import { type BatchTickResult, evictMemberAndContinue } from '../batch-dispatch';
+import { type BatchTickResult, evictMemberAndContinue, memberBranchFor } from '../batch-dispatch';
 // Same rationale as the `evictMemberAndContinue` import above: a test-only
 // path builder, not part of the package's public `index.ts` surface.
 import { batchMemberLogPath } from '../dispatch';
@@ -161,6 +161,11 @@ function scratchRepo(): string {
   return work;
 }
 
+/** Read-only git probe used by the #677 member-worktree tests (and reusable by any test that needs a `git` answer as a string). */
+function gitAt(args: string[], cwd: string): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+}
+
 /** `git add . && git commit -m <message> && git push origin main` against a `scratchRepo()`'s `work` dir — shared tail every seeder function below repeats otherwise. */
 function commitAllAndPush(work: string, message: string): void {
   const git = (args: string[]) =>
@@ -269,12 +274,17 @@ function fakeBatchExec(
   /** #561: force this bin (e.g. `npm`) to report failure — for the `batch-warmup-failed` regression case, without depending on some real npm invocation's exact failure conditions. */
   failCommand: string | null = null
 ): ExecFn {
+  // #677: claims are STATEFUL — a real pool never hands the same warm spare
+  // to two callers, so only the FIRST claim (batch-setup's) gets
+  // `poolClaimPath`; later claims (member-worktree prep) read as "no warm
+  // spares" and take the cold path, exactly like a real single-spare pool.
+  let claimsServed = 0;
   return (file, args, cwd) => {
     if (failCommand && file === failCommand) return null;
     // Argv position, not `includes` — a branch/path argument could otherwise
     // coincidentally equal 'claim'/'status'/'return' and misroute.
     if (file === 'npx' && args[2] === 'claim') {
-      return poolClaimPath;
+      return ++claimsServed === 1 ? poolClaimPath : null;
     }
     if (file === 'npx' && args[2] === 'status' && poolClaimPath) {
       return JSON.stringify({ worktrees: [] });
@@ -823,9 +833,15 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
 
     const dispatch = resolveDispatch(h.config);
 
+    // #677: the eviction rail now tears the member worktree down (real git
+    // exec), so the call needs the BatchDispatchDeps slice with `exec` —
+    // `h.deps` (EngineDeps) carries batchExec, which is exactly the mapping
+    // `engine.ts` uses.
+    const dispatchDeps = batchDispatchDepsFrom(h, () => ({ outcome: 'ok' }));
+
     // First resolution of member 941 — a genuine eviction.
     evictMemberAndContinue(
-      h.deps,
+      dispatchDeps,
       h.config,
       dispatch,
       'b-race',
@@ -839,7 +855,7 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     // (executing_member still reads 1 here) — what a racing second process
     // would attempt before ever seeing the first process's write.
     evictMemberAndContinue(
-      h.deps,
+      dispatchDeps,
       h.config,
       dispatch,
       'b-race',
@@ -1637,6 +1653,218 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(worktreeList).not.toContain(`batch-b-warmfail`);
   }, 60_000);
 
+  // --- #677: per-member worktrees off the integration branch (RFC-0001 §J.3) ---
+
+  it('#677 AC5: each member is dispatched into its OWN worktree on its OWN branch off the integration branch, and lands there when verified', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=member-work.txt'], {
+      maxSlots: 1,
+    });
+    h.enqueue([
+      { issue: 1501, mode: 'slot', batch: 'b-members', anchor: 1500, tier: 'mid' },
+      { issue: 1502, mode: 'slot', batch: 'b-members', tier: 'mid' },
+    ]);
+
+    // Tick 1: batch-setup + member 1 dispatched into its OWN worktree.
+    h.tick();
+    let batch = findBatch(h.state(), 'b-members');
+    expect(batch?.status).toBe('executing');
+    const integrationBranch = batch?.branch as string;
+    const m1Worktree = batch?.member_worktree as string;
+    const m1Branch = batch?.member_branch as string;
+    // The member branch is per-member and NOT the integration branch.
+    expect(m1Branch).toBe(memberBranchFor('b-members', 1, 1501));
+    expect(m1Branch).not.toBe(integrationBranch);
+    // The worktree exists, is ON the member branch, and is clean — the three
+    // git preconditions member-cycle's Step 0 asserts.
+    expect(fs.existsSync(m1Worktree)).toBe(true);
+    expect(gitAt(['branch', '--show-current'], m1Worktree).trim()).toBe(m1Branch);
+    expect(gitAt(['status', '--porcelain'], m1Worktree).trim()).toBe('');
+    // The member branch was cut OFF the integration branch (identical tip at
+    // spawn time — the serial model's cut-from-tip invariant), and was pushed
+    // so the member can commit to it.
+    const integrationTip = gitAt(['rev-parse', integrationBranch], repo).trim();
+    expect(gitAt(['rev-parse', m1Branch], repo).trim()).toBe(integrationTip);
+    expect(gitAt(['ls-remote', 'origin', m1Branch], repo)).toContain(m1Branch);
+
+    // The member agent commits INTO THE WORKTREE THE PROMPT NAMED (the fake
+    // agent parses `worktree=` from its prompt, exactly like a real agent
+    // cd-ing in) — on the member branch, never the integration branch.
+    let pid = batchSlotPid(h, 'b-members') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    expect(fs.existsSync(path.join(m1Worktree, 'member-work.txt'))).toBe(true);
+    expect(gitAt(['log', '--format=%s', '-1', m1Branch], m1Worktree)).toContain('(#1501)');
+
+    // Member 1 completes → its work LANDS on the integration branch
+    // (fast-forward) → member 2 dispatched into a DIFFERENT worktree.
+    h.tick();
+    batch = findBatch(h.state(), 'b-members');
+    expect(batch?.executing_member).toBe(2);
+    const integrationLog = gitAt(['log', '--format=%s', `origin/main..${integrationBranch}`], repo);
+    expect(integrationLog).toContain('(#1501)');
+    // Member 1's own tree is gone (landed → torn down, fields cleared).
+    expect(fs.existsSync(m1Worktree)).toBe(false);
+    // Member 2's context is already recorded by its spawn.
+    const m2Worktree = batch?.member_worktree as string;
+    const m2Branch = batch?.member_branch as string;
+    expect(m2Worktree).not.toBe(m1Worktree);
+    expect(fs.existsSync(m2Worktree)).toBe(true);
+    expect(m2Branch).toBe(memberBranchFor('b-members', 2, 1502));
+    // Member 2 branched off the INTEGRATION TIP THAT INCLUDES member 1 — the
+    // serial model's "members see prior members' work" invariant.
+    expect(gitAt(['rev-parse', m2Branch], repo).trim()).toBe(
+      gitAt(['rev-parse', integrationBranch], repo).trim()
+    );
+
+    // Member 2 (the last) completes → lands → aggregate suite → tail.
+    pid = batchSlotPid(h, 'b-members') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+    batch = findBatch(h.state(), 'b-members');
+    expect(batch?.status).toBe('reviewing');
+    const finalLog = gitAt(['log', '--format=%s', `origin/main..${integrationBranch}`], repo);
+    expect(finalLog).toContain('(#1501)');
+    expect(finalLog).toContain('(#1502)');
+    expect(fs.existsSync(m2Worktree)).toBe(false);
+
+    // The batch still ships end-to-end on the integration branch.
+    pid = batchSlotPid(h, 'b-members') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    const parked = h.tick();
+    expect(parked.parked).toEqual(['batch:b-members']);
+  }, 60_000);
+
+  it('#677: a gate-blocked member LANDS before the batch blocks (F.11: the commit stays on the branch)', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=blocked-work.txt'], {
+      maxSlots: 1,
+      // #594's unevidenced-failure shape: the gate cannot reach a verdict.
+      capability: UNEVIDENCED_GATE_FAILS,
+    });
+    h.enqueue([{ issue: 1511, mode: 'slot', batch: 'b-blocked', anchor: 1510, tier: 'mid' }]);
+
+    h.tick(); // batch-setup + member 1 (into its own worktree)
+    const pid = batchSlotPid(h, 'b-blocked') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // gate blocks → member lands FIRST, then the batch blocks
+
+    const batch = findBatch(h.state(), 'b-blocked');
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('gate-inconclusive:test.focused');
+    // The member's verified-shape work is on the INTEGRATION branch — the
+    // operator-facing surface — even though the gate never said ok.
+    const log = gitAt(['log', '--format=%s', `origin/main..${batch?.branch as string}`], repo);
+    expect(log).toContain('(#1511)');
+    // The member worktree SURVIVES the block — `sched resume --batch`'s
+    // recheck runs against the member's tree.
+    expect(fs.existsSync(batch?.member_worktree as string)).toBe(true);
+  }, 60_000);
+
+  it("#677: an evicted member's commits NEVER land — its worktree is torn down and the batch continues", async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=doomed-work.txt', '--evict-members=1521'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([
+      { issue: 1521, mode: 'slot', batch: 'b-evict', anchor: 1520, tier: 'mid' },
+      { issue: 1522, mode: 'slot', batch: 'b-evict', tier: 'mid' },
+    ]);
+
+    h.tick(); // batch-setup + member 1 (1521 — will self-report blocked)
+    let pid = batchSlotPid(h, 'b-evict') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    // The fake agent commits BEFORE posting blocked — the worktree holds a
+    // real commit that must never reach the integration branch.
+    const batch1 = findBatch(h.state(), 'b-evict');
+    expect(fs.existsSync(path.join(batch1?.member_worktree as string, 'doomed-work.txt'))).toBe(
+      true
+    );
+
+    h.tick(); // reconcile: self-blocked → evict directly → NO landing
+    let batch = findBatch(h.state(), 'b-evict');
+    expect(batch?.evictions.map((e) => e.issue)).toEqual([1521]);
+    const log = gitAt(['log', '--format=%s', `origin/main..${batch?.branch as string}`], repo);
+    expect(log).not.toContain('(#1521)');
+    // The evicted member's tree is gone; the local branch (unmerged) is gone.
+    expect(fs.existsSync(batch1?.member_worktree as string)).toBe(false);
+    expect(gitAt(['branch', '--list', memberBranchFor('b-evict', 1, 1521)], repo).trim()).toBe('');
+
+    // The batch continues: member 2 dispatches, completes, lands.
+    pid = batchSlotPid(h, 'b-evict') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+    batch = findBatch(h.state(), 'b-evict');
+    const log2 = gitAt(['log', '--format=%s', `origin/main..${batch?.branch as string}`], repo);
+    expect(log2).toContain('(#1522)');
+    expect(log2).not.toContain('(#1521)');
+  }, 60_000);
+
+  it('#677: a takeover redispatch resumes in the SAME member worktree (state, not re-derivation)', async () => {
+    const repo = scratchRepo();
+    // require-dep makes attempt 1 die with NO milestone (exit 1) — the
+    // precondition for the #629 api-error classification and the in-place
+    // retry this test exists to pin.
+    const h = batchHarness(repo, ['--mode=batch', '--require-dep=dep-1531'], { maxSlots: 1 });
+    h.enqueue([{ issue: 1531, mode: 'slot', batch: 'b-takeover', anchor: 1530, tier: 'mid' }]);
+
+    h.tick(); // batch-setup + member 1
+    const first = findBatch(h.state(), 'b-takeover');
+    const worktree = first?.member_worktree as string;
+    // The naming convention the whole recovery surface re-derives from.
+    expect(first?.member_branch).toBe('batch/b-takeover-m1-1531');
+
+    // Member 1 dies on a confirmed provider API error (the #629 shape) —
+    // classified, NOT evicted; a later tick's "same wedge" retry
+    // (spawnMemberContinuation) redispatches it in place.
+    let pid = batchSlotPid(h, 'b-takeover') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    writeApiErrorLog(batchMemberLogPath(h.deps.store.runsDir, 'b-takeover', 1, 1531));
+    h.tick(); // classifies the 429 — no eviction
+    expect(findBatch(h.state(), 'b-takeover')?.evictions).toHaveLength(0);
+
+    // "Fix the env" so attempt 2 gets past the dep check: the marker goes
+    // into the SAME member worktree the retry will reuse.
+    fs.mkdirSync(path.join(worktree, 'node_modules'), { recursive: true });
+    fs.writeFileSync(path.join(worktree, 'node_modules', 'dep-1531'), 'fixed\n');
+
+    // Drive until the member has been spawned a SECOND time (the in-place
+    // retry — one tick classifies the 429, the next wedge-retries; the fake
+    // agent may then complete within that same tick). Member dispatches only
+    // (the tail agent's own `spawned` event has no issue and fires later).
+    // The durable evidence of the in-place resume is the journal: BOTH
+    // member attempts name the SAME worktree — the retry reused the tree
+    // instead of re-branching.
+    const memberSpawns = (): unknown[] =>
+      h.deps.journal
+        .read()
+        .filter((e) => e.event === 'spawned' && e.unit === 'batch:b-takeover' && e.issue === 1531);
+    let guard = 0;
+    while (memberSpawns().length < 2 && guard < 4) {
+      h.tick();
+      guard++;
+    }
+    expect(findBatch(h.state(), 'b-takeover')?.evictions).toHaveLength(0);
+    const spawnedEvents = memberSpawns();
+    expect(spawnedEvents.length).toBe(2);
+    for (const evt of spawnedEvents) {
+      expect((evt as unknown as { worktree: string }).worktree).toBe(worktree);
+    }
+
+    // Drive to the tail: the retried member completed → landed → reviewing.
+    guard = 0;
+    while (findBatch(h.state(), 'b-takeover')?.status !== 'reviewing' && guard < 4) {
+      pid = batchSlotPid(h, 'b-takeover') as number | undefined;
+      if (pid !== undefined) await waitUntilDead(h.spawnDeps, pid);
+      h.tick();
+      guard++;
+    }
+    const done = findBatch(h.state(), 'b-takeover');
+    expect(done?.status).toBe('reviewing');
+    expect(fs.existsSync(worktree)).toBe(false);
+  }, 60_000);
+
   it('#561 AC2: a pool-claimed batch worktree skips the warm step (already warm)', async () => {
     const repo = scratchRepoWithPackageJson();
     const date = new Date().toISOString().slice(0, 10).replaceAll('-', '');
@@ -1659,16 +1887,15 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     const batch = findBatch(h.state(), batchId);
     expect(batch?.pool_claimed).toBe(true);
     expect(batch?.worktree).toBe(poolWorktree);
-    // No warm step ran: `package.json`/`vendor/dummy-dep` came from `main`'s
-    // history (same as the AC1/AC3 repo), so if the warm step had run
-    // `node_modules` would exist — it does not, because a pool claim skips it.
+    // No warm step ran for the BATCH tree: `package.json`/`vendor/dummy-dep`
+    // came from `main`'s history (same as the AC1/AC3 repo), so if the warm
+    // step had run `node_modules` would exist — it does not, because a pool
+    // claim skips it. (#677: the MEMBER worktree legitimately takes the cold
+    // path — the stateful claim fake gives the batch the only warm spare —
+    // so a `batch-warmup-done` event may exist; what must never happen is a
+    // warm FAILURE.)
     expect(fs.existsSync(path.join(poolWorktree, 'node_modules'))).toBe(false);
-    // No warmup event at all — the claim path never calls `warmColdBatchWorktree`.
-    expect(
-      h.deps.journal
-        .read()
-        .some((e) => e.event === 'batch-warmup-done' || e.event === 'batch-warmup-failed')
-    ).toBe(false);
+    expect(h.deps.journal.read().some((e) => e.event === 'batch-warmup-failed')).toBe(false);
 
     let pid = batchSlotPid(h, batchId) as number;
     expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);

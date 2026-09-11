@@ -315,17 +315,60 @@ export const DEFAULT_FIX_PROMPT_TEMPLATE = withNoBackgroundExit(
 );
 
 /**
- * Default prompt for one batch member (#523 AC1) — a single fresh agent running
- * `slot-cycle` inside the shared batch worktree, never the full-cycle workflow:
- * the batch tail (validate/review/ship/report) is batch-owned, not this run's.
+ * Default prompt for one batch member (#523 AC1, repointed by #677) — a single
+ * fresh agent running `member-cycle` (RFC-0001 §J) in its OWN member worktree
+ * off the integration branch, never the full-cycle workflow: the batch tail
+ * (validate/review/ship/report) is batch-owned, not this run's.
+ *
+ * The template carries member-cycle's ACTUAL contract, not a name swap on the
+ * old slot-cycle prose (ai-dossier#677 AC2): the scheduler prepares the member
+ * worktree and branch (`{worktree}` off `{integration_branch}` — the agent
+ * never creates either), tests are scoped by RELEVANCE (the parent runs the
+ * expensive suites once for the whole batch), the run ends with a
+ * `## handover:v1` issue comment the parent depends on, and the agent is told
+ * the scheduler's four-way post-handover gate outcomes (ok / task-failed →
+ * evict / inconclusive → block / timeout → decline) so handing over — not
+ * waiting on integration — is the terminal act.
+ *
+ * The wire contract (mint a run id; terminal milestones `review done` /
+ * `blocked` carrying `mode=slot` + `batch=<batch>`) is stated in the prompt
+ * because `groundtruth.ts`'s completion predicates read that vocabulary: it is
+ * the scheduler's dispatch format, deliberately unchanged from the slot-cycle
+ * era so every trail reader keeps working.
  */
 export const DEFAULT_MEMBER_PROMPT_TEMPLATE = withNoBackgroundExit(
-  'Run the slot-cycle workflow for GitHub issue #{issue}, batch {batch}, in the shared batch ' +
-    'worktree at {worktree}.\n\n' +
-    'Begin by fetching the workflow: ai-dossier run imboard-ai/git/slot-cycle --pull\n\n' +
-    'Then execute it for issue #{issue} with batch={batch} and worktree={worktree}. Do not run ' +
-    'the full-cycle workflow, do not create a separate worktree or branch, do not open a PR — ' +
-    'this member ships as part of the batch, not on its own.'
+  'Run the member-cycle workflow for GitHub issue #{issue}, batch {batch}, in YOUR OWN member ' +
+    'worktree at {worktree}, whose branch is off the integration branch {integration_branch}.\n\n' +
+    'Begin by fetching the workflow: ai-dossier run imboard-ai/git/member-cycle --pull\n\n' +
+    'Then execute it for issue #{issue} with batch={batch}, worktree={worktree}, and ' +
+    'integration_branch={integration_branch}. The scheduler created this worktree and member ' +
+    'branch for you — do not create a worktree or branch, do not touch the integration branch or ' +
+    'the default branch, and do not open a PR: this member ships as part of the batch, and the ' +
+    'parent orchestrator owns integration, revert, and eviction.\n\n' +
+    'Scheduler contract, on top of the workflow:\n' +
+    '- Mint your runstate run id once (ai-dossier runstate mint --issue {issue}) and carry it on ' +
+    'every milestone.\n' +
+    '- When implementation and your relevance-scoped verification are done, post ai-dossier ' +
+    'runstate post --issue {issue} --phase implement --status done --run <run_id> --kv mode=slot ' +
+    '--kv batch={batch}.\n' +
+    '- Commit and push to YOUR member branch only, with the (#<issue>) trailer in the commit ' +
+    'subject — the parent attributes your work by it.\n' +
+    '- Verify by RELEVANCE, not volume: your own tests, existing tests covering what you changed, ' +
+    'direct consumers one hop out, typecheck and lint over the changed surface. Never run the ' +
+    'repo-wide suite, any CI-parity or full-gate script, or e2e matrices — the parent runs those ' +
+    'ONCE for the whole batch.\n' +
+    '- Post ## handover:v1 on the issue (files changed and why, exact test commands and results, ' +
+    'what you deliberately did NOT verify, assumptions, your conformance verdict), THEN post ' +
+    'ai-dossier runstate post --issue {issue} --phase review --status done --run <run_id> --kv ' +
+    'mode=slot --kv batch={batch} and END your run.\n' +
+    '- If you cannot proceed (preconditions fail, issue not implementable, ACs not met), post ' +
+    'ai-dossier runstate post --issue {issue} --phase <phase> --status blocked --run <run_id> ' +
+    '--kv reason=<slug> --kv mode=slot --kv batch={batch}, leave the tree clean, and end your ' +
+    'run — a member that hands back is a valued outcome; a member that forces a green is not.\n' +
+    '- After your handover the scheduler runs a four-way incremental gate on your work: ok → ' +
+    'your branch lands on the integration branch; task-failed with failing-test evidence → you ' +
+    'are evicted; inconclusive → the batch blocks for an operator; timeout → the gate declines ' +
+    'and the parent covers you. None of that is yours to wait on.'
 );
 
 /**
@@ -399,7 +442,7 @@ export interface ResolvedDispatch {
   reportPrompt: string;
   /** Fix-agent prompt template with `{issue}`/`{batch}`/`{tests}` placeholders (#472). */
   fixPrompt: string;
-  /** Batch-member prompt template with `{issue}`/`{batch}`/`{worktree}` placeholders (#523). */
+  /** Batch-member prompt template with `{issue}`/`{batch}`/`{worktree}`/`{integration_branch}` placeholders (#523, #677). */
   memberPrompt: string;
   /** Batch-tail prompt template with `{batch}`/`{anchor}`/`{members}`/`{worktree}` placeholders (#523). */
   batchTailPrompt: string;
@@ -814,22 +857,25 @@ export function buildFixPrompt(
 }
 
 /**
- * Build one batch member's stdin prompt (#523 AC1): `{issue}`, `{batch}` and
- * `{worktree}` substituted. `batch` and `worktree` are flattened — the batch
- * id is enqueue-time-validated but still operator/manifest-supplied text, and
- * flattening a locally-derived worktree path is cheap insurance against the
- * same instruction-stream injection `buildFixPrompt` already guards against.
+ * Build one batch member's stdin prompt (#523 AC1, #677): `{issue}`, `{batch}`,
+ * `{worktree}` and `{integration_branch}` substituted. `batch`, `worktree` and
+ * `integration_branch` are flattened — the batch id is enqueue-time-validated
+ * but still operator/manifest-supplied text, and flattening locally-derived
+ * worktree/branch values is cheap insurance against the same
+ * instruction-stream injection `buildFixPrompt` already guards against.
  */
 export function buildMemberPrompt(
   template: string,
   issue: number,
   batch: string,
-  worktree: string
+  worktree: string,
+  integrationBranch: string
 ): string {
   return renderTemplate(template, {
     issue,
     batch: flattenPromptValue(batch),
     worktree: flattenPromptValue(worktree),
+    integration_branch: flattenPromptValue(integrationBranch),
   });
 }
 

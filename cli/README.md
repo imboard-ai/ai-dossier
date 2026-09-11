@@ -575,8 +575,8 @@ than the race this prevents. The degradation is warned about on stderr, never si
 
 ### mode=slot and batch= on plan/implement/review
 
-Slot-cycle members post the ordinary `plan`/`implement`/`review` milestones with two
-extra keys: `mode=slot` and `batch=<id>`. Both are accepted on any phase, and
+Batch members (`member-cycle`, #677) post the ordinary `plan`/`implement`/`review`
+milestones with the member-trail keys: `mode=slot` and/or `batch=<id>`. Both are accepted on any phase, and
 `runstate verify` treats a trail whose **latest** milestone is a full-cycle-line phase
 carrying either key — or a `classify` verdict with `mode=slot` — as slot-mode:
 `resume_from=none` — an evicted member re-enters full-cycle fresh (the batch worktree is
@@ -1342,7 +1342,7 @@ ai-dossier cap run test.focused --tail-bytes 4096   # bytes of output captured o
 A repo declares its deterministic, recurring operations — tests, lint, build, deps
 install, worktree prep — in `.dossier/automation/manifest.yaml` so agents execute them
 directly instead of re-reasoning (Progressive Determinism, RFC-0001; the scheduler's
-slot-cycle fast path will consume the same manifest, #464). Entries should mostly
+batch member gate consumes the same manifest today, #464/#677). Entries should mostly
 reference existing repo tooling (package scripts, Makefile targets):
 
 ```yaml

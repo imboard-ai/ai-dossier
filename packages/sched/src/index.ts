@@ -22,6 +22,7 @@ export {
   type BatchDispatchDeps,
   type BatchTickResult,
   type CapOutcome,
+  memberBranchFor,
   resumeBlockedGate,
   runBatchTick,
 } from './batch-dispatch';

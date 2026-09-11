@@ -248,6 +248,9 @@ export function createBatch(
     branch: null,
     worktree: null,
     pool_claimed: false,
+    member_branch: null,
+    member_worktree: null,
+    member_pool_claimed: false,
     run_id: opts.run_id ?? null,
     ranges: [],
     pr: null,
@@ -892,6 +895,12 @@ export function validateState(data: unknown): SchedState {
     // Pre-#561 batches carry no `pool_claimed` key at all — batch-setup had
     // no pool integration yet, so `false` (cold-only) is exact, not a guess.
     pool_claimed: batch.pool_claimed ?? false,
+    // 1.17.0 → 1.18.0 (#677): batches written before member worktrees carry
+    // neither field — members ran in the shared batch worktree (§C.4), so
+    // `null`/`null`/`false` are exact, not guesses.
+    member_branch: batch.member_branch ?? null,
+    member_worktree: batch.member_worktree ?? null,
+    member_pool_claimed: batch.member_pool_claimed ?? false,
     run_id: batch.run_id ?? null,
     ranges: batch.ranges ?? [],
     pr: batch.pr ?? null,

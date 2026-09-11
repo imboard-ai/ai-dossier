@@ -191,7 +191,7 @@ export interface BatchDispatchDeps {
    * Runs one `ai-dossier cap run <capabilityId>` in a batch worktree. Two call
    * sites, different degrade contracts:
    * - the per-member incremental gate (#523 AC2, revised #583): without this
-   *   hook, the gate is skipped entirely (the member's own `slot-cycle` run
+   *   hook, the gate is skipped entirely (the member's own member-cycle run
    *   already attempted this fast path before ever posting `review done`, so
    *   a repo with no manifest loses nothing but the engine's independent
    *   re-check). With the hook: `ok` advances, `task-failed` evicts,
@@ -755,7 +755,403 @@ function runBatchSetup(
   return { ok: true, branch, worktree, runId: mintedRunId, poolClaimed: false };
 }
 
-/** Spawn one batch member's `slot-cycle` agent into the slot batch-setup (or a prior member) just released. */
+// --- Member worktrees (#677, RFC-0001 §J.3) ---
+
+/**
+ * The current member's own branch: `batch/<id>-m<n>-<issue>` (#677) — member
+ * index and issue both in the name, and deterministic from persisted state,
+ * so a takeover redispatch, a `sched resume --batch` recheck, and teardown
+ * all re-derive the same string without a lookup table. Distinct from the
+ * integration branch (`batch/<id>-<date>`): the member commits here, the
+ * scheduler lands it there.
+ */
+export function memberBranchFor(batchId: string, memberIndex: number, issue: number): string {
+  return `batch/${batchId}-m${memberIndex}-${issue}`;
+}
+
+/** The worktree path a cold member-worktree prep creates for one member. */
+function memberWorktreePathFor(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  memberIndex: number,
+  issue: number
+): string {
+  return path.join(deps.repoDir, 'worktrees', `batch-${batchId}-m${memberIndex}-${issue}`);
+}
+
+/** What {@link prepareMemberWorktree} hands the spawn site. */
+interface MemberWorktree {
+  branch: string;
+  worktree: string;
+  poolClaimed: boolean;
+}
+
+/**
+ * Prepare the CURRENT member's own worktree and branch (#677, AC5): a
+ * worktree whose checked-out branch is `memberBranchFor(...)` created OFF the
+ * integration branch, warm before the member's first command, and pushed so
+ * the member agent can commit and push to it — `member-cycle`'s Step 0
+ * preconditions (inside a worktree, on YOUR member branch, clean, env warm).
+ * The agent never creates either; a prompt change without this preparation
+ * fails every member on precondition 2 (the reason #677 exists).
+ *
+ * Pool claim first — warm by construction, mirroring `runBatchSetup`. A pool
+ * spare sits on the default branch, so the claimed tree is re-pointed at the
+ * member branch off the INTEGRATION branch (`git checkout -B` against the
+ * `origin/<integration>` ref `runBatchSetup`'s push already created
+ * repo-wide); checkout preserves the installed `node_modules`. Cold fallback:
+ * `git worktree add` at the integration branch tip + `warmColdBatchWorktree`
+ * (#561 — a cold member is an evicted member).
+ *
+ * An on-disk worktree for the SAME member is reused as-is (takeover
+ * redispatch, api-error hold retry): the branch is already checked out, the
+ * tree already warm, and a takeover agent resumes in place — possibly dirty,
+ * which is the parent's state to reason about, not something to reset.
+ *
+ * All-or-nothing like `runBatchSetup`; the exec calls run OUTSIDE any store
+ * lock (the caller's contract), with results landed as pure data.
+ */
+/**
+ * The pool CLI's stdout hardening shared by `runBatchSetup` and the member
+ * prep (no NUL/newline, absolute, resolved, on disk) — our own CLI's
+ * output, but garbage would otherwise be trusted as a `BatchEntry`
+ * worktree path and used as a spawn/exec cwd.
+ */
+function usablePoolClaim(deps: BatchDispatchDeps, w: string | undefined): w is string {
+  return (
+    !!w &&
+    !w.includes('\0') &&
+    !w.includes('\n') &&
+    path.isAbsolute(w) &&
+    path.resolve(w) === w &&
+    (deps.fsExists ?? ((p: string) => fs.existsSync(p)))(w)
+  );
+}
+
+function prepareMemberWorktree(
+  deps: BatchDispatchDeps,
+  batch: BatchEntry,
+  memberIndex: number,
+  issue: number,
+  now: Date
+): ({ ok: true } & MemberWorktree) | { ok: false; reason: string } {
+  if (batch.branch === null) return { ok: false, reason: 'no-integration-branch' };
+  const branch = memberBranchFor(batch.id, memberIndex, issue);
+  const worktree = memberWorktreePathFor(deps, batch.id, memberIndex, issue);
+  if (!SAFE_REF_RE.test(branch)) return { ok: false, reason: 'invalid-member-branch-name' };
+  const fsExists = deps.fsExists ?? ((p: string) => fs.existsSync(p));
+  const root = deps.exec('git', ['rev-parse', '--show-toplevel'], deps.repoDir) ?? deps.repoDir;
+  if (!isSafeWorktree(path.resolve(root), worktree)) {
+    return { ok: false, reason: 'invalid-member-worktree-path' };
+  }
+
+  // All-or-nothing rollback for the cold path (same contract as
+  // `runBatchSetup`): a warm or push failure otherwise leaves a cold
+  // worktree the NEXT retry's exists-check reuses forever cold — exactly
+  // the env-cold eviction #561 removed.
+  const rollbackColdPrep = () => {
+    deps.exec('git', ['worktree', 'remove', '--force', '--', worktree], deps.repoDir);
+    deps.exec('git', ['branch', '-D', branch], deps.repoDir);
+  };
+
+  const exists = fsExists(worktree);
+  if (exists) {
+    // Crash-window reuse: the derived-path tree exists on disk but the
+    // spawn never landed (fields null) — OR a pool-claimed tree whose
+    // directory name equals the derived slug (the pool renames claims to
+    // the branch slug, so a pool tree CAN sit at the derived path; the
+    // persisted `member_pool_claimed` is the only record of which). In
+    // either case the on-disk tree wins: reuse it rather than re-branching.
+    // #632: fires once per crash window, not per tick — the call sites run
+    // at spawn time (a transition point), and `claimMemberResolution`
+    // gates the member advance; the capacity pre-check in
+    // `spawnMemberContinuation` keeps the wedge path from re-entering
+    // while no slot is free.
+    deps.journal.append(
+      unitEvent('member-worktree-reused', unit(batch.id), {
+        issue,
+        detail: worktree,
+      }),
+      now
+    );
+    return {
+      ok: true,
+      branch: batch.member_branch ?? branch,
+      worktree: batch.member_worktree ?? worktree,
+      poolClaimed: batch.member_pool_claimed,
+    };
+  }
+
+  const claimed = deps.exec(
+    POOL_BIN,
+    [...POOL_ARGS_PREFIX, 'claim', '--issue', String(issue), '--branch', branch],
+    deps.repoDir
+  );
+  const claimedWorktree = claimed?.trim();
+  if (claimedWorktree && usablePoolClaim(deps, claimedWorktree)) {
+    // Re-point the warm spare at the member branch off the integration
+    // branch — `origin/<integration>` exists repo-wide (runBatchSetup pushed
+    // it), and `checkout -B` preserves the installed node_modules.
+    if (
+      deps.exec('git', ['checkout', '-B', branch, `origin/${batch.branch}`], claimedWorktree) ===
+      null
+    ) {
+      deps.exec(
+        POOL_BIN,
+        [...POOL_ARGS_PREFIX, 'return', '--path', claimedWorktree, '--json'],
+        deps.repoDir
+      );
+      return { ok: false, reason: 'member-branch-checkout-failed' };
+    }
+    if (deps.exec('git', ['push', '-u', 'origin', '--', branch], claimedWorktree) === null) {
+      deps.exec(
+        POOL_BIN,
+        [...POOL_ARGS_PREFIX, 'return', '--path', claimedWorktree, '--json'],
+        deps.repoDir
+      );
+      return { ok: false, reason: 'member-branch-push-failed' };
+    }
+    return { ok: true, branch, worktree: claimedWorktree, poolClaimed: true };
+  }
+  const poolNote = claimedWorktree ? 'pool-claim-invalid:' : '';
+
+  const added =
+    deps.exec(
+      'git',
+      ['worktree', 'add', '-b', branch, worktree, batch.branch as string],
+      deps.repoDir
+    ) !== null;
+  if (!added) {
+    // Self-heal the crash window a teardown died in (branch kept, tree
+    // gone): `worktree add -b` fails while the stale branch exists. The
+    // member branch is disposable by construction — a member whose branch
+    // still matters is CURRENT, and a current member's tree is reused by
+    // the exists-check above, never re-added. Force-delete the stale ref
+    // and retry the add once.
+    if (deps.exec('git', ['branch', '-D', branch], deps.repoDir) === null) {
+      return { ok: false, reason: 'member-worktree-add-failed' };
+    }
+    if (
+      deps.exec(
+        'git',
+        ['worktree', 'add', '-b', branch, worktree, batch.branch as string],
+        deps.repoDir
+      ) === null
+    ) {
+      return { ok: false, reason: 'member-worktree-add-failed' };
+    }
+  }
+  const warmed = warmColdBatchWorktree(deps, batch, worktree, now, poolNote);
+  if (!warmed.ok) {
+    rollbackColdPrep();
+    return { ok: false, reason: warmed.reason };
+  }
+  if (deps.exec('git', ['push', '-u', 'origin', '--', branch], worktree) === null) {
+    rollbackColdPrep();
+    return { ok: false, reason: 'member-branch-push-failed' };
+  }
+  return { ok: true, branch, worktree, poolClaimed: false };
+}
+
+/**
+ * Land the CURRENT member's work on the integration branch (#677, §J.3: "a
+ * member lands its commit onto the integration branch when its own
+ * verification passes"): `git merge --ff-only <member_branch>` in the shared
+ * batch worktree (which holds the integration branch), then push.
+ *
+ * Fast-forward is always available under the SERIAL dispatch model — only
+ * the member moved its branch since it was cut, and nothing else moves the
+ * integration branch mid-`executing` (fix agents only run from the
+ * post-last-member aggregate validation). A failed merge therefore means the
+ * serial invariant broke, not a conflict to resolve: the batch BLOCKS for an
+ * operator instead of silently merging or reverting. Linear history is also
+ * what `boundaryCommits`/`memberRanges` attribution expects — the member's
+ * `(#<issue>)`-trailed subjects stay first-parent-readable after the landing.
+ */
+function landMemberBranch(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  now: Date
+): { ok: true } | { ok: false; reason: string } {
+  const state = deps.store.load();
+  const batch = findBatch(state, batchId);
+  if (!batch || batch.worktree === null || batch.branch === null || batch.member_branch === null) {
+    return { ok: true };
+  }
+  const memberIssue = batch.members[batch.executing_member - 1];
+  // #677 review (defense in depth, matching `branchMergedIntoBase`'s bar):
+  // the persisted ref reaches git argv below — re-validate its shape.
+  if (!SAFE_REF_RE.test(batch.member_branch) || !SAFE_REF_RE.test(batch.branch)) {
+    journalEvent(deps, 'landing-failed', unit(batchId), {
+      issue: memberIssue,
+      reason: 'invalid-branch-name',
+      detail: `persisted member/integration branch failed SAFE_REF_RE: ${batch.member_branch} → ${batch.branch}`,
+    });
+    return { ok: false, reason: 'invalid-branch-name' };
+  }
+  if (deps.exec('git', ['merge', '--ff-only', batch.member_branch], batch.worktree) === null) {
+    journalEvent(deps, 'landing-failed', unit(batchId), {
+      issue: memberIssue,
+      reason: 'landing-merge-failed',
+      detail: `git merge --ff-only ${batch.member_branch} into ${batch.branch} failed — serial-landing invariant broken; blocking for an operator`,
+    });
+    return { ok: false, reason: 'landing-merge-failed' };
+  }
+  if (deps.exec('git', ['push', 'origin', '--', batch.branch], batch.worktree) === null) {
+    journalEvent(deps, 'landing-failed', unit(batchId), {
+      issue: memberIssue,
+      reason: 'landing-push-failed',
+      detail: `landed ${batch.member_branch} on ${batch.branch} locally but the push failed — blocking so origin stays the durable copy`,
+    });
+    return { ok: false, reason: 'landing-push-failed' };
+  }
+  deps.journal.append(
+    unitEvent('member-landed', unit(batchId), {
+      issue: memberIssue,
+      detail: `${batch.member_branch} fast-forwarded onto ${batch.branch}`,
+    }),
+    now
+  );
+  return { ok: true };
+}
+
+/**
+ * Tear the CURRENT member's worktree down and clear the member fields
+ * (#677): pool-claimed trees are RETURNED to the pool (a raw remove leaves a
+ * dangling pool entry — the corrupted-entry state `worktree-pool status`
+ * reports), cold trees are removed. The member branch is deleted locally —
+ * `-d` after a landing (fully merged into the integration branch), `-D` on
+ * the eviction path (its commits never landed; the requeue carries the work
+ * forward). The REMOTE member branch is deleted only on the landed path, and
+ * deliberately KEPT on eviction — the pushed sha is the evicted work's only
+ * recoverable copy.
+ *
+ * Best-effort and idempotent: null fields are a no-op, and a failed cleanup
+ * journals `teardown-failed` rather than throwing into the caller's
+ * advance/dissolve path.
+ */
+function teardownMemberWorktree(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  now: Date,
+  /** Whether the member's branch was ff-landed onto the integration branch. Passed explicitly by the callers that KNOW — deriving it from `batch.ranges` would silently force-delete a merged branch if a caller ever reached teardown after the member pointer advanced. */
+  landed: boolean
+): void {
+  const state = deps.store.load();
+  const batch = findBatch(state, batchId);
+  if (!batch || batch.member_worktree === null) return;
+  const worktree = batch.member_worktree;
+  const branch = batch.member_branch;
+  // #677 review (defense in depth, matching `branchMergedIntoBase`'s bar):
+  // persisted state reaches git argv here — re-validate the ref shape before
+  // interpolating it.
+  if (branch !== null && !SAFE_REF_RE.test(branch)) {
+    journalEvent(deps, 'teardown-failed', unit(batchId), {
+      cleanup: 'failed-invalid-branch-name',
+      detail: branch,
+    });
+    return;
+  }
+  // Route through `runTeardown` for the same guarantees `teardownBatch`
+  // gets: pool returns are verify-first idempotent and refuse to claim
+  // success unless the pool's own self-check reports the entry `warm`;
+  // cold removes post-verify the path is gone and unlisted. Nulls first —
+  // clear the fields BEFORE the exec so a crash mid-teardown doesn't retry
+  // into a half-cleaned tree (the re-derived path is deterministic if a
+  // leftover does survive).
+  deps.store.withLock((s) => {
+    const b = findBatch(s, batchId);
+    if (!b) return { state: s, result: undefined };
+    return {
+      state: patchBatch(
+        s,
+        batchId,
+        { member_branch: null, member_worktree: null, member_pool_claimed: false },
+        now
+      ),
+      result: undefined,
+    };
+  });
+  const t = runTeardown(
+    deps.exec,
+    deps.repoDir,
+    { worktree, poolClaimed: batch.member_pool_claimed === true, branch },
+    deps.fsExists
+  );
+  const treeCleared = !t.cleanup.startsWith('failed');
+  let branchCleanup = 'skipped';
+  if (branch !== null && treeCleared) {
+    // `-d` refuses an unmerged branch; the eviction path forces it
+    // deliberately (see doc). Run from repoDir — the worktree is gone.
+    const flag = landed ? '-d' : '-D';
+    branchCleanup =
+      deps.exec('git', ['branch', flag, branch], deps.repoDir) === null
+        ? `failed-branch-delete-${flag}`
+        : `branch-deleted-${flag}`;
+    if (landed) {
+      deps.exec('git', ['push', 'origin', '--delete', branch], deps.repoDir);
+    }
+  }
+  const failed = !treeCleared || branchCleanup.startsWith('failed');
+  journalEvent(deps, failed ? 'teardown-failed' : 'member-worktree-torn-down', unit(batchId), {
+    cleanup: t.cleanup,
+    branch_cleanup: branchCleanup,
+    detail: t.detail,
+    worktree,
+  });
+}
+
+/**
+ * The shared "block the batch for an operator" tail (#677 review — the same
+ * load → `recoveryDeps` → `blockBatch` → re-apply sequence
+ * `runValidate`'s suite-unreadable path and `runIncrementalGate`'s
+ * inconclusive path each grew): releases nothing itself — callers release
+ * their own slot first — and always reports the unit under `failed`.
+ */
+function blockBatchForOperator(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  batchId: string,
+  opts: { reason: string; milestonePhase?: 'batch-validate' | 'batch-review' },
+  now: Date,
+  result: BatchTickResult
+): void {
+  const stateNow = deps.store.load();
+  const fresh = findBatch(stateNow, batchId);
+  if (!fresh) return;
+  const blocked = blockBatch(stateNow, batchId, opts, recoveryDeps(deps, config, fresh, now));
+  deps.store.withLock((s) => ({
+    state: applyBatchAndIssues(s, blocked.state, batchId, []),
+    result: undefined,
+  }));
+  result.failed.push(unit(batchId));
+}
+
+/**
+ * Block the batch on a mechanical landing failure (#677): release the slot,
+ * persist `blocked_reason`, and journal — the same operator-inspection path
+ * `suite-unreadable` uses. The member's work is safe (its branch is pushed);
+ * only the integration step failed.
+ */
+function blockLandingFailure(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  batch: BatchEntry,
+  reason: string,
+  now: Date,
+  result: BatchTickResult
+): void {
+  deps.store.withLock((s) => ({ state: releaseSlot(s, batch.id, now), result: undefined }));
+  blockBatchForOperator(deps, config, batch.id, { reason }, now, result);
+}
+
+/**
+ * Spawn one batch member's member-cycle agent (#677) into the slot a prior
+ * member (or batch-setup) just released — each member in its OWN worktree
+ * off the integration branch, dispatched serially as before. Prepared by
+ * {@link prepareMemberWorktree} at the spawn site (outside the lock); this
+ * function only patches state and spawns.
+ */
 /**
  * Drive a member's `QueueEntry` through the D.1 slot-line states it must pass
  * through before `shipped-in-batch` becomes a legal edge (`validated` is the
@@ -802,16 +1198,17 @@ function spawnMember(
   slot: SlotEntry,
   batchId: string,
   now: Date,
-  result: BatchTickResult
+  result: BatchTickResult,
+  member: MemberWorktree
 ): SchedState {
   const batch = findBatch(state, batchId);
-  if (!batch || batch.worktree === null) {
+  if (!batch || batch.worktree === null || batch.branch === null) {
     // A leaked `assigned` slot with `pid: null` is invisible to `dead`
     // detection (nothing ever kills/reclaims it) — release it here rather
     // than leaving the batch permanently down one slot of capacity.
     journalEvent(deps, 'unit-failed', unit(batchId), {
       reason: 'no-worktree',
-      detail: 'spawnMember: batch has no worktree — batch-setup has not landed',
+      detail: 'spawnMember: batch has no worktree/branch — batch-setup has not landed',
     });
     return releaseSlot(state, batchId, now);
   }
@@ -828,7 +1225,16 @@ function spawnMember(
   const tier: ModelTier = findEntry(withStatus, memberIssue)?.tier ?? 'mid';
   const spawnSpec = resolveTierSpawn(dispatch, tier, memberIssue);
   const cmd = spawnSpec.cmd;
-  const prompt = buildMemberPrompt(dispatch.memberPrompt, memberIssue, batchId, batch.worktree);
+  // #677: the prompt carries THIS member's own worktree and the integration
+  // branch it was cut from — `member-cycle`'s `worktree`/`integration_branch`
+  // inputs. The shared batch worktree is no longer a member surface at all.
+  const prompt = buildMemberPrompt(
+    dispatch.memberPrompt,
+    memberIssue,
+    batchId,
+    member.worktree,
+    batch.branch
+  );
   const logFile = batchMemberLogPath(
     deps.store.runsDir,
     batchId,
@@ -865,10 +1271,24 @@ function spawnMember(
     spawned_at: now.toISOString(),
     log_offset_at_spawn: logOffset,
   };
-  const next =
+  let next =
     slot.status === 'assigned' || slot.status === 'recovering'
       ? transitionSlot(withStatus, slot.id, 'running', patch, now)
       : withStatus;
+  // #677: persist the member's worktree context — a takeover redispatch or a
+  // `sched resume --batch` recheck after an engine restart must land in the
+  // SAME worktree/branch this prompt names, not re-derive (or worse,
+  // re-create) it.
+  next = patchBatch(
+    next,
+    batchId,
+    {
+      member_branch: member.branch,
+      member_worktree: member.worktree,
+      member_pool_claimed: member.poolClaimed,
+    },
+    now
+  );
   deps.journal.append(
     unitEvent('spawned', unit(batchId), {
       pid,
@@ -877,6 +1297,7 @@ function spawnMember(
       issue: memberIssue,
       ...journalCmdModelFields(spawnSpec),
       log: logFile,
+      worktree: member.worktree,
       detail: `member ${batch.executing_member}/${batch.members.length}`,
     }),
     now
@@ -964,6 +1385,53 @@ function claimAndSetup(
     now
   );
 
+  // #677: prepare member 1's OWN worktree before claiming the spawn — real
+  // git/network work, so OUTSIDE the store lock (the same contract
+  // `runBatchSetup` just followed). All-or-nothing: a failed prep posts the
+  // blocked milestone and releases the slot rather than spawning into a
+  // worktree that does not exist (every member would fail Step 0).
+  const firstIssue = batch.members[0];
+  // Shared abort tail of every setup-stage failure (#677 review): post the
+  // blocked milestone when a run id exists, journal, report, release.
+  const abortSetup = (kvReason: string, detail: string): void => {
+    if (batch.anchor !== null && setup.runId !== null) {
+      poster(batch.anchor, setup.runId, {
+        phase: 'batch-setup',
+        status: 'blocked',
+        kv: { reason: kvReason },
+      });
+    } else {
+      journalEvent(deps, 'milestone-post-failed', unit(batchId), {
+        detail: `batch-setup blocked (${kvReason}) — no run id to post to yet`,
+      });
+    }
+    deps.journal.append(unitEvent('batch-setup-failed', unit(batchId), { detail }), now);
+    result.failed.push(unit(batchId));
+    deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
+  };
+  if (firstIssue === undefined) {
+    abortSetup('no-member', 'claimAndSetup: batch has no members');
+    return;
+  }
+  const freshForPrep = findBatch(deps.store.load(), batchId);
+  const memberPrep = prepareMemberWorktree(
+    deps,
+    // The setup patch (branch/worktree/run_id) lands under the lock BELOW —
+    // prep needs the integration branch, so overlay `setup.branch` on the
+    // fresh state rather than waiting for the patch.
+    { ...(freshForPrep ?? batch), branch: setup.branch },
+    1,
+    firstIssue,
+    now
+  );
+  if (!memberPrep.ok) {
+    abortSetup(
+      `member-worktree-prep-failed:${memberPrep.reason}`,
+      `member worktree prep failed: ${memberPrep.reason} (member 1 #${firstIssue}, branch ${memberBranchFor(batchId, 1, firstIssue)})`
+    );
+    return;
+  }
+
   deps.store.withLock((s) => {
     const b = findBatch(s, batchId);
     if (!b || b.status !== 'ready') {
@@ -992,7 +1460,7 @@ function claimAndSetup(
     );
     next = transitionBatch(next, batchId, 'executing', { executing_member: 1 }, now);
     const slot = slotFor(next, batchId);
-    if (slot) next = spawnMember(deps, dispatch, next, slot, batchId, now, result);
+    if (slot) next = spawnMember(deps, dispatch, next, slot, batchId, now, result, memberPrep);
     return { state: next, result: undefined };
   });
 }
@@ -1032,8 +1500,63 @@ function spawnMemberContinuation(
   now: Date,
   result: BatchTickResult
 ): void {
-  claimAndSpawn(deps, config, batchId, 'member', now, (state, slot) =>
-    spawnMember(deps, dispatch, state, slot, batchId, now, result)
+  // #677: make sure the current member's worktree exists before claiming a
+  // slot for the redispatch — git exec work, so OUTSIDE the store lock (the
+  // contract `prepareMemberWorktree` documents). The wedge arm of
+  // `runBatchTick` calls this EVERY tick while the batch is `executing`
+  // with no slot, so the cheap gates run first:
+  // - capacity: prep before the free-capacity check would do pool/git/npm
+  //   work (and journal) per tick against a full scheduler — the #610/#630/
+  //   #632 per-tick emission trap. `claimAndSpawn` re-checks under the lock;
+  //   this pre-check only avoids wasted prep, it is not the gate.
+  // - identity: persisted member fields are reused only when they belong to
+  //   the CURRENT member (they can be stale after a failed teardown that
+  //   kept them, or a crash between an eviction and its teardown) and the
+  //   tree still EXISTS on disk (state-first, because a pool-claimed path
+  //   is not re-derivable from batchId+index+issue).
+  const state = deps.store.load();
+  const batch = findBatch(state, batchId);
+  if (!batch || batch.status !== 'executing' || batch.worktree === null) return;
+  const memberIssue = batch.members[batch.executing_member - 1];
+  if (memberIssue === undefined) return;
+  if (freeCapacity(state, config) === 0) return;
+  const expectedBranch = memberBranchFor(batchId, batch.executing_member, memberIssue);
+  const fsExists = deps.fsExists ?? ((p: string) => fs.existsSync(p));
+  const reusable =
+    batch.member_worktree !== null &&
+    batch.member_branch === expectedBranch &&
+    fsExists(batch.member_worktree);
+  let member: MemberWorktree;
+  if (reusable) {
+    member = {
+      branch: batch.member_branch as string,
+      worktree: batch.member_worktree as string,
+      poolClaimed: batch.member_pool_claimed,
+    };
+  } else {
+    if (batch.member_worktree !== null) {
+      // Stale context for a DIFFERENT member (or a vanished tree): journal
+      // it before overwriting — the disposition of that tree is the
+      // operator's to inspect if it was real.
+      journalEvent(deps, 'stale-member-worktree', unit(batchId), {
+        issue: memberIssue,
+        detail: `persisted ${batch.member_branch ?? '?'} @ ${batch.member_worktree} does not match expected ${expectedBranch} (or tree gone) — preparing fresh`,
+      });
+    }
+    const prep = prepareMemberWorktree(deps, batch, batch.executing_member, memberIssue, now);
+    if (!prep.ok) {
+      journalEvent(deps, 'unit-failed', unit(batchId), {
+        issue: memberIssue,
+        reason: 'member-worktree-prep-failed',
+        detail: `member worktree prep failed on continuation: ${prep.reason} (branch ${expectedBranch})`,
+      });
+      result.failed.push(unit(batchId));
+      return;
+    }
+    member = prep;
+  }
+  claimAndSpawn(deps, config, batchId, 'member', now, (nextState, slot) =>
+    spawnMember(deps, dispatch, nextState, slot, batchId, now, result, member)
   );
 }
 
@@ -1549,6 +2072,12 @@ export function evictMemberAndContinue(
     result.failed.push(unit(batchId));
     return;
   }
+  // #677: the evicted member's commits never landed (eviction is the
+  // pre-landing rail), so there is nothing to revert on the integration
+  // branch — but its worktree/branch must go, or the next tick's prep for
+  // the NEXT member collides with a stale tree. `teardownBatch` already
+  // handled it on the dissolved path (the fields are cleared there).
+  teardownMemberWorktree(deps, batchId, now, false);
   advanceMemberOrValidate(
     deps,
     config,
@@ -1604,7 +2133,11 @@ function runIncrementalGate(
   result: BatchTickResult
 ): boolean {
   if (batch.worktree === null || !deps.runCapability) return false;
-  const worktree = batch.worktree;
+  // #677: the gate judges the member's OWN work — pre-landing, its diff
+  // exists only in the member worktree/branch. The shared batch worktree is
+  // the fallback for a batch dispatched before member worktrees existed (its
+  // members' commits landed directly on the integration branch).
+  const worktree = batch.member_worktree ?? batch.worktree;
   const runCapability = deps.runCapability;
   const gateResults = ['typecheck.run', 'test.focused'].map((id) => ({
     id,
@@ -1624,9 +2157,9 @@ function runIncrementalGate(
   // extend to an id nobody wrote down.
   //
   // `warmColdBatchWorktree` in this same file already draws exactly this
-  // distinction for `worktree.prepare`, and `slot-cycle`'s own Step 4/5 fall
-  // back to reasoning on `capability-unavailable`. This was the one place that
-  // treated it as fatal.
+  // distinction for `worktree.prepare`, and the member workflow (member-cycle,
+  // #677) runs its own relevance-scoped tests rather than treating a broken
+  // capability as fatal. This was the one place that treated it as fatal.
   //
   // Skipping costs EARLY detection, not correctness: the aggregate `test.full`
   // gate still runs before ship, CI still runs on the batch PR, and #562's
@@ -1753,19 +2286,26 @@ function runIncrementalGate(
       ),
     });
     deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
-    const stateNow = deps.store.load();
-    const rDeps = recoveryDeps(deps, config, batch, now);
-    const blocked = blockBatch(
-      stateNow,
+    // #677: F.11's block semantics are "the member's commit stays on the
+    // branch, nothing requeued/reverted" — under member worktrees that is
+    // true only if the member LANDS before the batch blocks. The block means
+    // the gate could not reach a verdict, not that the work is bad, so the
+    // verified member joins the integration branch and is there for an
+    // operator (or the #686 out-of-band reconcile) to act on. A landing
+    // failure blocks the batch with its own reason — same operator outcome.
+    const landed = landMemberBranch(deps, batchId, now);
+    if (!landed.ok) {
+      blockLandingFailure(deps, config, batch, landed.reason, now, result);
+      return true;
+    }
+    blockBatchForOperator(
+      deps,
+      config,
       batchId,
       { reason, milestonePhase: 'batch-review' },
-      rDeps
+      now,
+      result
     );
-    deps.store.withLock((s) => ({
-      state: applyBatchAndIssues(s, blocked.state, batchId, []),
-      result: undefined,
-    }));
-    result.failed.push(unit(batchId));
     return true;
   }
   return false;
@@ -1791,6 +2331,16 @@ function completeMemberGate(
   now: Date,
   result: BatchTickResult
 ): void {
+  // #677 (§J.3): land the member's verified work on the integration branch
+  // BEFORE anything reads it — the range recompute below runs `git log` on
+  // the batch branch, which only sees the member's commits once landed. The
+  // exec calls run OUTSIDE the lock (same invariant as the range recompute's
+  // own comment below).
+  const landed = landMemberBranch(deps, batchId, now);
+  if (!landed.ok) {
+    blockLandingFailure(deps, config, batch, landed.reason, now, result);
+    return;
+  }
   // The commit-range recompute (`git log`) is a blocking subprocess call — it
   // must run OUTSIDE the lock, like every other exec in this module; the
   // result then lands as a pure data patch under the lock (Convention review:
@@ -1811,6 +2361,10 @@ function completeMemberGate(
     return { state: n, result: undefined };
   });
   result.completed.push(unit(batchId));
+  // #677: the member's tree is done serving — landed, ranges recomputed.
+  // Teardown before the advance so the next member's prep cannot collide
+  // with this tree's cleanup.
+  teardownMemberWorktree(deps, batchId, now, true);
   advanceMemberOrValidate(
     deps,
     config,
@@ -1874,6 +2428,14 @@ export function resumeBlockedGate(
   const batch = findBatch(state, batchId);
   if (!batch) throw new SchedNotFoundError(`Batch not found: ${batchId}`);
   if (batch.status !== 'blocked' || !batch.blocked_reason?.startsWith('gate-inconclusive:')) {
+    // #677 review: the landing-failure blocks have no resume verb (same as
+    // `suite-unreadable`) — name the actual reason and the operator path
+    // instead of a bare illegal-transition error that reads like a bug.
+    if (batch.status === 'blocked') {
+      throw new SchedNotFoundError(
+        `Batch ${batchId} is blocked on '${batch.blocked_reason ?? '?'}', which has no gate recheck: inspect the batch worktree/state named in its journal, then \`sched abandon --batch ${batchId}\` if it is a dead end`
+      );
+    }
     throw new IllegalTransitionError('batch', batch.status, 'executing');
   }
   const capabilityId = batch.blocked_reason.slice('gate-inconclusive:'.length);
@@ -1883,7 +2445,15 @@ export function resumeBlockedGate(
       `Batch ${batchId} has no worktree/current member/gate hook to recheck`
     );
   }
-  const recheck = deps.runCapability(batch.worktree, capabilityId);
+  const recheck = deps.runCapability(
+    // #677: recheck the member's OWN tree — pre-landing, the member's diff
+    // exists only in its worktree; a batch-worktree recheck would test a
+    // tree missing the change and trivially pass it. The fallback preserves
+    // the pre-#677 behavior for a batch blocked before member worktrees
+    // existed (its member's commits were already on the integration branch).
+    batch.member_worktree ?? batch.worktree,
+    capabilityId
+  );
   const result = emptyResult();
   const excerpt = gateDetailExcerpt(recheck.outputTail, recheck.reason);
 
@@ -3010,6 +3580,18 @@ function reconcileStaleBlockedBatches(
  * left on disk forever, since nothing else ever calls this for it.
  */
 function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
+  // #677: the current member's worktree goes first — it is batch-owned
+  // state on the same teardown path as the shared tree, and a blocked or
+  // dissolved batch must not leak a member tree (its branch/fields are
+  // cleared by the helper; a gate-inconclusive BLOCK that intends to resume
+  // never reaches this function). The batch is terminal here, so the
+  // ranges-recorded membership of the last current member is a safe landed
+  // signal (a range exists only for a member whose verified work landed).
+  const terminal = findBatch(deps.store.load(), batchId);
+  const lastMemberLanded =
+    terminal?.ranges.some((r) => r.issue === terminal.members[terminal.executing_member - 1]) ===
+    true;
+  teardownMemberWorktree(deps, batchId, deps.now(), lastMemberLanded);
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
   if (!batch || batch.worktree === null) return;
@@ -3153,8 +3735,11 @@ export function runBatchTick(
       // A prior spawn threw, or `claimAndSpawn` found zero free capacity —
       // either way the batch is stuck mid-member with no slot and nothing
       // else will ever retry it (Conformance review AC5 caveat; Supportability
-      // review #12). Retrying every tick is safe: `claimAndSpawn` itself is
-      // the capacity gate, so this is a no-op until a slot actually frees up.
+      // review #12). Retrying every tick is cheap-by-contract (#677 review):
+      // `spawnMemberContinuation` runs the free-capacity and member-identity
+      // pre-checks BEFORE any pool/git work, so a full scheduler (or stale
+      // member context) exits here without exec'ing, and `claimAndSpawn`
+      // remains the authoritative capacity gate.
       spawnMemberContinuation(deps, config, dispatch, batch.id, now, result);
     } else if (batch.status === 'reviewing' || batch.status === 'shipping') {
       // Same wedge, for a dead-or-never-claimed tail agent.

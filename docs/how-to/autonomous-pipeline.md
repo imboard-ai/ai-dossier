@@ -27,9 +27,10 @@ where it deliberately stops and asks a human instead of guessing.
   that has to be running for the pipeline to make progress. It ticks every project's
   engine once, reports new events to Telegram, and watches a fixed list of tracked
   issues for closure.
-- **A batch** (`batch=<id>`) groups several small issues onto one shared worktree and
-  branch, landing one commit per member (`mode=slot`, driven by the `slot-cycle`
-  dossier) and paying for the full suite, PR, and review once at the end instead of
+- **A batch** (`batch=<id>`) groups several small issues onto one integration branch,
+  giving each member its OWN worktree and branch off it (RFC-0001 §J.3, #677: the
+  `member-cycle` dossier) and landing each verified member back onto the integration
+  branch, paying for the full suite, PR, and review once at the end instead of
   per issue. A `full`-mode issue gets its own worktree, branch, and PR from
   `full-cycle-issue` instead.
 
