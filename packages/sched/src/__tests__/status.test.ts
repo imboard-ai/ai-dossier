@@ -252,6 +252,8 @@ describe('#680: the configured dispatch agent + resolved per-tier models are vis
         mid: { agent: 'claude', model: 'sonnet' },
         strong: { agent: 'claude', model: 'opus' },
       },
+      // #707: no profiles configured — the named set is empty, not absent
+      profiles: {},
     });
   });
 
@@ -278,5 +280,37 @@ describe('#680: the configured dispatch agent + resolved per-tier models are vis
     });
     expect(report.dispatch.tiers.mid).toEqual({ agent: 'claude', model: 'glm-5.3' });
     expect(report.dispatch.tiers.strong).toEqual({ agent: 'claude', model: 'opus' });
+  });
+});
+
+describe('#707 status: dispatch profiles are named, not just the models', () => {
+  it('surfaces each configured profile with its resolved tier executors', () => {
+    const report = buildStatusReport(
+      seeded(),
+      {
+        max_slots: 2,
+        dispatch: {
+          dispatch_profiles: {
+            glm: {
+              command: ['opencode', 'run', '-m', '{model}', '--format', 'json', '--'],
+              tier_models: { mechanical: 'glm-flash', mid: 'glm-5.3', strong: 'glm-5.2' },
+            },
+          },
+        },
+      },
+      'test-project'
+    );
+    expect(report.dispatch.profiles.glm).toBeDefined();
+    expect(report.dispatch.profiles.glm.mechanical).toEqual({
+      agent: 'opencode',
+      model: 'glm-flash',
+    });
+    // batches carry their own assignment (null = default here)
+    expect(report.batches.every((b) => b.dispatch_profile === null)).toBe(true);
+  });
+
+  it('reports no profiles when none are configured (AC1)', () => {
+    const report = buildStatusReport(seeded(), { max_slots: 2 }, 'test-project');
+    expect(report.dispatch.profiles).toEqual({});
   });
 });

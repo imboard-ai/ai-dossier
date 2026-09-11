@@ -11,6 +11,7 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import * as path from 'node:path';
 import type {
   BatchDispatchDeps,
   CapabilityGateResult,
@@ -31,6 +32,7 @@ import {
   DEFAULT_BATCH_PRIORITY,
   DEFAULT_ISSUE_PRIORITY,
   DEFAULT_RECONCILE_INTERVAL_MS,
+  DISPATCH_PROFILE_RE,
   defaultExec,
   dispatchSummary,
   type EngineDeps,
@@ -51,6 +53,7 @@ import {
   reprioritizeBatch,
   reprioritizeIssue,
   resolveDispatch,
+  resolveProfiledDispatch,
   resolveProjectSlug,
   resumeBlockedGate,
   runLoop,
@@ -60,6 +63,7 @@ import {
   schedTelemetryEnabled,
   setPaused,
   TEARDOWN_TIMEOUT_MS,
+  TIER_ORDER,
   tick,
   tierExecutors,
   unitEvent,
@@ -69,6 +73,7 @@ import type { Command } from 'commander';
 import { BATCH_SUITE_TIMEOUT_MS, createBatchSuiteRunner } from '../batch-suite-runner';
 import { timeoutReasonSpent } from '../capability';
 import { formatCost, formatCount } from '../cost-format';
+import { detectDispatchProfile, type ProfileCandidate } from '../dispatch-detect';
 import { formatAge, formatDurationMs } from '../duration';
 import {
   checkEngineStaleness,
@@ -187,6 +192,8 @@ interface EnqueueOptions extends SchedOptions {
   priority?: string;
   /** #603: bypass the slot-member plan:v1 pre-screen. */
   skipPlanCheck?: boolean;
+  /** #707: the dispatch profile the batch records — overrides detection. */
+  dispatch?: string;
 }
 
 interface AbandonOptions extends SchedOptions {
@@ -282,13 +289,25 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   // still dispatches the default claude template (or that a mixed
   // `dispatch.tiers` ladder is in effect).
   lines.push(
-    `Dispatch: ${(Object.keys(report.dispatch.tiers) as Array<keyof typeof report.dispatch.tiers>)
+    `Dispatch (default): ${(
+      Object.keys(report.dispatch.tiers) as Array<keyof typeof report.dispatch.tiers>
+    )
       .map((tier) => {
         const t = report.dispatch.tiers[tier];
         return `${tier}=${t.agent}/${t.model ?? '-'}`;
       })
       .join(' · ')}`
   );
+  // #707: configured dispatch profiles, each named with the tier ladder it
+  // will actually spawn — what a `--dispatch <name>` batch inherits. Which
+  // batch uses which profile shows in the Batches table's profile column.
+  for (const [name, tiers] of Object.entries(report.dispatch.profiles)) {
+    lines.push(
+      `Profile ${name}: ${(Object.keys(tiers) as Array<keyof typeof tiers>)
+        .map((tier) => `${tier}=${tiers[tier].agent}/${tiers[tier].model ?? '-'}`)
+        .join(' · ')}`
+    );
+  }
   if (staleness?.stale && staleness.installed !== null && staleness.latest !== null) {
     // #537: mirrors the dispatch-health block below — a status line, not a
     // block. `stale` is only ever true when both versions are known; the
@@ -407,6 +426,7 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
             'member-in-work',
             'anchor',
             'worktree',
+            'profile',
             'evictions',
             'pr',
           ],
@@ -418,6 +438,9 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
             b.executing_member > 0 ? `${b.executing_member}/${b.members.length}` : '-',
             b.anchor !== null ? `#${b.anchor}` : '-',
             b.worktree ?? '-',
+            // #707: the dispatch family this batch recorded at enqueue —
+            // `-` = the config's default profile.
+            b.dispatch_profile ?? '-',
             b.evictions.length > 0
               ? b.evictions.map((e) => `#${e.issue}(${e.reason})`).join(',')
               : '-',
@@ -635,6 +658,150 @@ function journalLabelScreen(store: SchedStore, blocked: EnqueueInput[], failed: 
   }
 }
 
+/**
+ * Resolve the dispatch profile a batch enqueue records (#707), mutating the
+ * slot-mode inputs in place. Explicit is the mechanism, detection the
+ * convenience (#707):
+ *
+ * - `--dispatch <name>` wins outright — validated against the project's
+ *   configured `dispatch_profiles` (a typo must fail here, naming the
+ *   available profiles, never silently enqueue the default).
+ * - No flag + profiles configured → detect (CLAUDECODE / parent-chain) and
+ *   print the verdict WITH its method.
+ * - No flag + profiles configured + detection inconclusive → FAIL naming the
+ *   available profiles. The silent fallback to the configured default is
+ *   exactly what produced #680 (a run that looked like an open-weights arm,
+ *   executed as the Claude arm).
+ * - No profiles configured → nothing to inherit; behavior is byte-identical
+ *   to pre-#707 (AC1). A `--dispatch` value here is an error, not a no-op.
+ *
+ * Detection/refusal only applies to batches this call CREATES — an
+ * incremental join (`--more-members-expected`) to a batch whose family is
+ * already recorded (or deliberately default) has nothing left to decide.
+ * Applied to flag-built AND manifest entries; a manifest entry's own
+ * `dispatch` field wins per entry, and a cross-entry conflict is rejected by
+ * `assertBatchFactsAgree` rather than silently resolved.
+ */
+function resolveEnqueueDispatchProfile(
+  store: SchedStore,
+  opts: EnqueueOptions,
+  inputs: EnqueueInput[]
+): void {
+  const config = store.loadConfig();
+  const profiles = config.dispatch?.dispatch_profiles ?? {};
+  const names = Object.keys(profiles).sort();
+  const slotInputs = inputs.filter((input) => (input.mode ?? 'full') === 'slot');
+  const manifestProfilesByBatch = new Map<string, Set<string>>();
+  for (const input of slotInputs) {
+    if (input.dispatch === undefined) continue;
+    if (!DISPATCH_PROFILE_RE.test(input.dispatch)) {
+      fail([`manifest dispatch must match ${DISPATCH_PROFILE_RE}, got '${input.dispatch}'`]);
+    }
+    if (names.length === 0) {
+      fail([
+        `manifest dispatch '${input.dispatch}' was given, but no dispatch_profiles are configured for this project`,
+      ]);
+    }
+    if (!names.includes(input.dispatch)) {
+      fail([
+        `manifest dispatch '${input.dispatch}' is not a configured profile — available: ${names.join(', ')}`,
+      ]);
+    }
+    if (input.batch !== undefined && input.batch !== null) {
+      const batchProfiles = manifestProfilesByBatch.get(input.batch) ?? new Set<string>();
+      batchProfiles.add(input.dispatch);
+      manifestProfilesByBatch.set(input.batch, batchProfiles);
+    }
+  }
+
+  if (opts.dispatch !== undefined) {
+    if (!DISPATCH_PROFILE_RE.test(opts.dispatch)) {
+      fail([`--dispatch must match ${DISPATCH_PROFILE_RE}, got '${opts.dispatch}'`]);
+    }
+    if (slotInputs.length === 0) {
+      fail([
+        "--dispatch applies to batch (--mode slot) enqueues only — dispatch profiles are batch-scoped; full-cycle entries always dispatch the config's default",
+      ]);
+    }
+    if (names.length === 0) {
+      fail([
+        `--dispatch '${opts.dispatch}' was given, but no dispatch_profiles are configured for this project`,
+        '',
+        'Fix: add them to the sched config, e.g.',
+        '  { "dispatch": { "dispatch_profiles": {',
+        '    "claude": { "command": ["claude","-p","--output-format","json","--model","{model}"], "tier_models": { "mechanical": "haiku", "mid": "sonnet", "strong": "opus" } },',
+        '    "glm":    { "command": ["opencode","run","-m","{model}","--format","json","--"], "tier_models": { "mechanical": "zai-coding-plan/glm-5.3-flash", "mid": "zai-coding-plan/glm-5.3", "strong": "zai-coding-plan/glm-5.2" } }',
+        '  } } }',
+      ]);
+    }
+    if (!names.includes(opts.dispatch)) {
+      fail([
+        `--dispatch '${opts.dispatch}' is not a configured profile — available: ${names.join(', ')}`,
+      ]);
+    }
+    for (const input of slotInputs) {
+      if (input.dispatch === undefined) input.dispatch = opts.dispatch;
+    }
+    console.log(`Dispatch profile: ${opts.dispatch} (explicit)`);
+    return;
+  }
+
+  if (names.length === 0) return; // AC1: no profiles configured — legacy behavior, unchanged.
+  if (slotInputs.length === 0) return; // full-cycle only — nothing to inherit into.
+
+  // Only batches this call CREATES need their family decided now. A manifest
+  // that already names a valid profile made that decision at composition time;
+  // never replace it with (or reject it for lack of) ambient detection.
+  const existingBatches = new Set(store.load().batches.map((b) => b.id));
+  const bornBatches = new Set(
+    slotInputs
+      .filter((input) => input.batch != null && !existingBatches.has(input.batch))
+      .map((input) => input.batch as string)
+  );
+  const undecidedBornBatches = new Set(
+    [...bornBatches].filter((batchId) => !manifestProfilesByBatch.has(batchId))
+  );
+  if (undecidedBornBatches.size === 0) return;
+
+  const candidates: ProfileCandidate[] = names.map((name) => {
+    const binaries = new Set<string>();
+    const resolved = resolveProfiledDispatch(config, name);
+    for (const tier of TIER_ORDER) {
+      const command = resolved.tiers[tier].commandTemplate[0];
+      if (command !== undefined) binaries.add(path.basename(command));
+    }
+    return { name, binaries: [...binaries] };
+  });
+  const detected = detectDispatchProfile({ env: process.env, candidates });
+  if (detected === null) {
+    fail([
+      'Cannot determine which dispatch profile to inherit — detection was inconclusive and no --dispatch was given.',
+      '',
+      `Available profiles: ${names.join(', ')}`,
+      '',
+      'Detection knows CLAUDECODE (Claude Code) and process ancestry (best-effort — nohup/systemd/detached wrappers break it).',
+      'Fix: pass --dispatch <profile> explicitly (the batch-cycle skill does this automatically).',
+    ]);
+  }
+  for (const input of slotInputs) {
+    if (
+      input.dispatch === undefined &&
+      input.batch !== undefined &&
+      input.batch !== null &&
+      undecidedBornBatches.has(input.batch)
+    ) {
+      input.dispatch = detected.profile;
+    }
+  }
+  console.log(
+    `Dispatch profile: ${detected.profile} (${
+      detected.method === 'claudecode-env'
+        ? 'inherited via CLAUDECODE'
+        : 'inherited via parent chain'
+    })`
+  );
+}
+
 /** Print the enqueue result — human summary, or `--json`. */
 function reportEnqueue(
   opts: EnqueueOptions,
@@ -692,6 +859,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
     .option(
       '--skip-plan-check',
       'Enqueue slot members even when they carry no plan:v1 artifact (they will hand back with reason=no-plan-artifact unless a plan is posted before dispatch)'
+    )
+    .option(
+      '--dispatch <profile>',
+      '#707: name the dispatch profile this batch records (a dispatch_profiles key) — overrides CLAUDECODE/parent-chain detection; with no flag and inconclusive detection the enqueue FAILS rather than guessing the default'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option(
@@ -786,6 +957,11 @@ function registerEnqueueSubcommand(cmd: Command): void {
           `Cannot enqueue ${inputs.length} issues — the label pre-screen costs one gh call each, past the ${MAX_ISSUE_SELECTION} cap.\nFix: split the manifest into batches of at most ${MAX_ISSUE_SELECTION}.`,
         ]);
       }
+
+      // #707: resolve the dispatch profile (explicit flag → detection →
+      // refuse) BEFORE any state mutation, so a refused enqueue leaves no
+      // batch and no partially-applied batch fact.
+      resolveEnqueueDispatchProfile(store, opts, inputs);
 
       // #565: a batch-mode entry with no explicit batch_priority (neither
       // --priority on the CLI nor a manifest field) gets the configurable
@@ -1434,8 +1610,15 @@ function registerStartSubcommand(cmd: Command): void {
       // so stdout stays pure JSON there — every human-facing path sees it.
       if (!(opts.once && opts.json)) {
         console.log(
-          `▶ sched dispatch: ${dispatchSummary(tierExecutors(resolveDispatch(engineConfig)))}`
+          `▶ sched dispatch (default): ${dispatchSummary(tierExecutors(resolveDispatch(engineConfig)))}`
         );
+        // #707: name every configured profile and the tier ladder it spawns —
+        // what a `--dispatch <name>` batch inherits, visible at engine start.
+        for (const name of Object.keys(engineConfig.dispatch?.dispatch_profiles ?? {}).sort()) {
+          console.log(
+            `▶ sched profile ${name}: ${dispatchSummary(tierExecutors(resolveProfiledDispatch(engineConfig, name)))}`
+          );
+        }
       }
 
       const deps: EngineDeps = {

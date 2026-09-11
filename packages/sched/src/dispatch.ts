@@ -482,6 +482,75 @@ export interface ResolvedDispatch {
   fenceTakeoverTimeoutMs: number;
 }
 
+/**
+ * Dispatch profile name grammar (#707) — what `--dispatch`, a manifest's
+ * `dispatch` field, and `BatchEntry.dispatch_profile` may contain. Same shape
+ * as the batch-id grammar's intent: the name is persisted in `state.json` and
+ * surfaced in journal lines, so no whitespace, no path separators, no leading
+ * dot. Lowercase keeps the name/lookup comparison trivially exact.
+ */
+export const DISPATCH_PROFILE_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/** A batch carries a `dispatch_profile` that the CURRENT config does not define (#707). */
+export class DispatchProfileError extends Error {
+  constructor(
+    message: string,
+    readonly profile: string
+  ) {
+    super(message);
+    this.name = 'DispatchProfileError';
+  }
+}
+
+/**
+ * Resolve the dispatch settings for ONE named profile (#707), or the config's
+ * default when `profile` is null/undefined. A profile is a named bundle of
+ * the spawn-shaping fields (`command`/`prompt`/`tier_models`/`tiers`) merged
+ * OVER the config's own `dispatch` section — every non-spawn setting (stall
+ * timeouts, the other agents' prompt templates, `disallowed_tools`) is
+ * inherited unchanged, so a profile swaps WHO dispatches, never HOW the
+ * engine babysits the run. An unknown name throws `DispatchProfileError`
+ * naming the available profiles: silently falling back to the default is
+ * precisely the #680 incident shape (a run that looked like one arm,
+ * executed as another), so resolution fails loudly instead.
+ */
+export function resolveProfiledDispatch(
+  config: SchedConfig,
+  profile: string | null | undefined
+): ResolvedDispatch {
+  if (profile === null || profile === undefined) {
+    return resolveDispatch(config);
+  }
+  const profiles = config.dispatch?.dispatch_profiles ?? {};
+  const named = profiles[profile];
+  if (named === undefined) {
+    const available = Object.keys(profiles);
+    throw new DispatchProfileError(
+      available.length > 0
+        ? `dispatch profile '${profile}' is not configured — available profiles: ${available.join(', ')}`
+        : `dispatch profile '${profile}' is not configured — no dispatch_profiles are configured at all`,
+      profile
+    );
+  }
+  const { command, prompt, tier_models: tierModels, tiers: profileTiers } = named;
+  const mergedTiers = { ...config.dispatch?.tiers };
+  for (const tier of TIER_ORDER) {
+    if (profileTiers?.[tier] !== undefined) {
+      mergedTiers[tier] = { ...mergedTiers[tier], ...profileTiers[tier] };
+    }
+  }
+  return resolveDispatch({
+    ...config,
+    dispatch: {
+      ...config.dispatch,
+      ...(command !== undefined ? { command } : {}),
+      ...(prompt !== undefined ? { prompt } : {}),
+      ...(tierModels !== undefined ? { tier_models: tierModels } : {}),
+      ...(Object.keys(mergedTiers).length > 0 ? { tiers: mergedTiers } : {}),
+    },
+  });
+}
+
 /** Resolve engine dispatch settings from the (possibly sparse) config. */
 export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
   const dispatch: DispatchConfig = config.dispatch ?? {};

@@ -52,6 +52,8 @@ export {
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
+  DISPATCH_PROFILE_RE,
+  DispatchProfileError,
   dispatchLogPath,
   dispatchSummary,
   escalateTier,
@@ -66,6 +68,7 @@ export {
   type ResolvedTierDispatch,
   reportTierFor,
   resolveDispatch,
+  resolveProfiledDispatch,
   resolveTierSpawn,
   type SpawnDeps,
   SUPERSESSION_CHECKPOINT_INSTRUCTION,
@@ -207,6 +210,7 @@ export {
   setPaused,
 } from './scheduler';
 export {
+  allowedBatchTransitions,
   appendEvictions,
   createBatch,
   createEmptyState,
@@ -247,6 +251,7 @@ export {
   DEFAULT_STALL_TIMEOUT_MS,
   DISSOLVE_EVICTION_FRACTION,
   type DispatchConfig,
+  type DispatchProfile,
   type DissolvePolicy,
   EngineTooOldError,
   ESCALATION_CAP,

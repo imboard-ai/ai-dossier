@@ -44,6 +44,7 @@ import { type BisectOutcome, runAttributionBisect } from './bisect';
 import {
   buildFixPrompt,
   journalCmdModelFields,
+  type ResolvedDispatch,
   resolveDispatch,
   resolveTierSpawn,
 } from './dispatch';
@@ -436,7 +437,7 @@ export function beginFixAttempt(
   batchId: string,
   issue: number,
   deps: RecoveryDeps,
-  opts: { config?: SchedConfig; tests?: readonly FailingTest[] } = {}
+  opts: { config?: SchedConfig; tests?: readonly FailingTest[]; dispatch?: ResolvedDispatch } = {}
 ): { state: SchedState; dispatch: FixDispatch | null } {
   const now = clock(deps);
   const batch = batchOrThrow(state, batchId);
@@ -459,7 +460,11 @@ export function beginFixAttempt(
   const tier = FIX_ATTEMPT_TIER;
   // `max_slots` is irrelevant here — only the command/prompt/tier-model parts
   // of the resolved dispatch are used — but SchedConfig requires it.
-  const resolved = resolveDispatch(opts.config ?? { max_slots: DEFAULT_MAX_SLOTS });
+  // #707: a batch with a recorded dispatch profile fixes through the SAME
+  // family it implemented with — the caller (batch-dispatch.ts) passes the
+  // batch's own resolved dispatch; unset falls back to the config default.
+  const resolved =
+    opts.dispatch ?? resolveDispatch(opts.config ?? { max_slots: DEFAULT_MAX_SLOTS });
   const spawnSpec = resolveTierSpawn(resolved, tier, issue);
   const dispatch: FixDispatch = {
     issue,

@@ -42,6 +42,7 @@ import {
   type PrTruth,
   patchBatch,
   patchSlot,
+  readJsonl,
   resolveDispatch,
   resumeBlockedGate,
   runBatchTick,
@@ -351,6 +352,16 @@ function batchHarness(
     poolClaimPath?: string | null;
     /** #561: force this bin to fail — for the `batch-warmup-failed` regression case. */
     failWarmupCommand?: string;
+    /**
+     * #707: named dispatch profiles merged under
+     * `config.dispatch.dispatch_profiles`. A factory of the harness's
+     * truthDir so profile commands can include the fake agent's
+     * `--milestones-dir` (a profile REPLACES the default template — it must
+     * stay runnable end-to-end).
+     */
+    profiles?: (
+      truthDir: string
+    ) => Record<string, { command?: string[]; tier_models?: Record<string, string> }>;
   }
 ): BatchHarness {
   const store = new SchedStore(tmpDir('sched-batch-'));
@@ -392,6 +403,7 @@ function batchHarness(
     dispatch: {
       command: ['node', FAKE_AGENT, ...agentArgs, `--milestones-dir=${truthDir}`],
       prompt: 'placeholder — every builder below (member/tail/report/fix) renders its own prompt',
+      ...(opts?.profiles !== undefined ? { dispatch_profiles: opts.profiles(truthDir) } : {}),
     },
   };
   return {
@@ -2472,5 +2484,132 @@ describe('#686: a blocked batch whose work merged out of band reconciles (ground
     // the never-dispatched one stays `queued`. NEITHER may be declared done.
     expect(h.state().entries.find((e) => e.issue === 6820)?.status).toBe('in-work');
     expect(h.state().entries.find((e) => e.issue === 6821)?.status).toBe('queued');
+  }, 60_000);
+});
+
+describe('integration #707: a batch dispatches through its recorded profile', () => {
+  const GLM_PROFILES = (truthDir: string) => ({
+    glm: {
+      // The SAME fake agent — runnable end-to-end (the profile REPLACES the
+      // default template, so it must carry the milestones dir) — but
+      // distinguishable by the extra marker arg AND the per-tier models.
+      command: [
+        'node',
+        FAKE_AGENT,
+        '--mode=batch',
+        '--profile-member=glm',
+        `--milestones-dir=${truthDir}`,
+      ],
+      tier_models: { mechanical: 'glm-flash', mid: 'glm-5.3', strong: 'glm-strong' },
+    },
+  });
+
+  function readSpawned(
+    storeDir: string
+  ): Array<{ event: string; unit: string; cmd?: string; model?: string }> {
+    return readJsonl(path.join(storeDir, 'events.jsonl')).filter(
+      (e) => (e as { event: string }).event === 'spawned'
+    ) as Array<{ event: string; unit: string; cmd?: string; model?: string }>;
+  }
+
+  it('member, tail, and report agents all spawn the PROFILE command + model (AC2)', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], {
+      maxSlots: 1,
+      profiles: GLM_PROFILES,
+    });
+    h.enqueue([
+      { issue: 611, mode: 'slot', batch: 'b-prof', anchor: 610, tier: 'mid', dispatch: 'glm' },
+    ]);
+
+    // Tick 1: real batch-setup, then member 1 — through the profile.
+    let result = h.tick();
+    expect(result.spawned).toEqual(['batch:b-prof']);
+    let spawned = readSpawned(h.deps.store.dir);
+    expect(spawned.length).toBeGreaterThanOrEqual(1);
+    // batch-setup AND the member both rode the profile command + its tier model.
+    for (const event of spawned) {
+      // the PROFILE template (its marker arg), not the harness default
+      expect(event.cmd).toContain('--profile-member=glm');
+    }
+    const memberSpawn = spawned[spawned.length - 1];
+    expect(memberSpawn.model).toBe('glm-5.3'); // the profile's own mid tier
+
+    // Member completes; the last member means validate → tail spawn.
+    const pid = batchSlotPid(h, 'b-prof') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    result = h.tick();
+    expect(result.spawned).toEqual(['batch:b-prof']); // the tail agent
+    const batch = findBatch(h.state(), 'b-prof');
+    expect(batch?.status).toBe('reviewing');
+    spawned = readSpawned(h.deps.store.dir);
+    const tailSpawn = spawned[spawned.length - 1];
+    expect(tailSpawn.cmd).toContain('--profile-member=glm');
+    // the tail integrator runs at the strong tier — the PROFILE's strong model
+    expect(tailSpawn.model).toBe('glm-strong');
+  }, 60_000);
+
+  it('a batch whose profile no longer resolves pre-merge DISSOLVES loudly instead of falling back (AC5 spirit, engine side)', async () => {
+    const repo = scratchRepo();
+    // Config knows NO profiles at all; the batch records one anyway (a
+    // config edit between enqueue and the first tick).
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1 });
+    h.enqueue([{ issue: 621, mode: 'slot', batch: 'b-gone', anchor: 620, tier: 'mid' }]);
+    // Retro-record the profile the config no longer carries.
+    h.store.withLock((state) => ({
+      state: patchBatch(state, 'b-gone', { dispatch_profile: 'ghost' }, new Date()),
+      result: null,
+    }));
+
+    const result = h.tick();
+    const batch = findBatch(h.state(), 'b-gone');
+    // Pre-merge, the batch is DISSOLVED (a legal edge from `ready`) with the
+    // reason on the journal — never a silent default-dispatch continuation.
+    expect(batch?.status).toBe('dissolved');
+    expect(result.failed).toContain('batch:b-gone');
+    // The member requeued as a full-cycle unit carrying the reason.
+    const entry = h.state().entries.find((e) => e.issue === 621);
+    expect(entry?.mode).toBe('full');
+    expect(entry?.failure_evidence?.reason).toContain('dispatch-profile-missing:ghost');
+    // Nothing was spawned this tick.
+    expect(result.spawned).toEqual([]);
+    // The requeued full-cycle member DOES spawn next tick — on the DEFAULT
+    // dispatch (no profile), the coherent recovery the dissolve exists for.
+    const next = h.tick();
+    expect(next.spawned).toEqual(['issue:621']);
+    const memberSpawn = readSpawned(h.deps.store.dir).at(-1);
+    expect(memberSpawn?.cmd).not.toContain('--PROF'); // default template, not the ghost profile
+  }, 60_000);
+
+  it('terminates a live member before dissolving after its profile disappears', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], {
+      maxSlots: 1,
+      profiles: (truthDir) => ({
+        glm: {
+          command: [
+            'node',
+            FAKE_AGENT,
+            '--mode=sleep',
+            '--sleep-ms=30000',
+            `--milestones-dir=${truthDir}`,
+          ],
+        },
+      }),
+    });
+    h.enqueue([{ issue: 631, mode: 'slot', batch: 'b-live-gone', anchor: 630, dispatch: 'glm' }]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-live-gone');
+    expect(pid).toBeDefined();
+    if (pid === undefined) throw new Error('expected a live batch slot');
+    expect(h.spawnDeps.isAlive(pid)).toBe(true);
+
+    if (h.config.dispatch === undefined) throw new Error('expected dispatch config');
+    h.config.dispatch.dispatch_profiles = {};
+    h.tick();
+
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    expect(findBatch(h.state(), 'b-live-gone')?.status).toBe('dissolved');
   }, 60_000);
 });

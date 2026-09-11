@@ -15,6 +15,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { DISPATCH_PROFILE_RE } from './dispatch';
 import { JOURNAL_FILE } from './journal';
 import { createEmptyState, validateState } from './state';
 import {
@@ -22,6 +23,7 @@ import {
   CONFIG_SCHEMA_VERSION,
   DEFAULT_MAX_SLOTS,
   type DispatchConfig,
+  type DispatchProfile,
   type DissolvePolicy,
   EngineTooOldError,
   LEGACY_CONFIG_SCHEMA_VERSIONS,
@@ -419,6 +421,51 @@ function validateTierDispatchSpec(tier: string, raw: unknown): void {
   }
 }
 
+/** Strict validation of one `dispatch.dispatch_profiles[<name>]` entry (#707). */
+function validateDispatchProfile(name: string, raw: unknown): void {
+  const profile = requirePlainObject(`dispatch.dispatch_profiles.${name}`, raw);
+  const allowedKeys = new Set(['command', 'prompt', 'tier_models', 'tiers']);
+  for (const key of Object.keys(profile)) {
+    if (!allowedKeys.has(key)) {
+      throw new Error(`dispatch.dispatch_profiles.${name}: unknown key '${key}'`);
+    }
+  }
+  if (profile.command !== undefined) {
+    requireNonEmptyStringArray(`dispatch.dispatch_profiles.${name}.command`, profile.command);
+  }
+  if (
+    profile.prompt !== undefined &&
+    (typeof profile.prompt !== 'string' || profile.prompt.length === 0)
+  ) {
+    throw new Error(`dispatch.dispatch_profiles.${name}.prompt must be a non-empty string`);
+  }
+  if (profile.tier_models !== undefined) {
+    const tierModels = requirePlainObject(
+      `dispatch.dispatch_profiles.${name}.tier_models`,
+      profile.tier_models
+    );
+    for (const [tier, model] of Object.entries(tierModels)) {
+      if (!MODEL_TIERS.includes(tier as ModelTier)) {
+        throw new Error(`dispatch.dispatch_profiles.${name}.tier_models: unknown tier '${tier}'`);
+      }
+      if (typeof model !== 'string' || model.length === 0) {
+        throw new Error(
+          `dispatch.dispatch_profiles.${name}.tier_models.${tier} must be a non-empty string`
+        );
+      }
+    }
+  }
+  if (profile.tiers !== undefined) {
+    const tiers = requirePlainObject(`dispatch.dispatch_profiles.${name}.tiers`, profile.tiers);
+    for (const [tier, spec] of Object.entries(tiers)) {
+      if (!MODEL_TIERS.includes(tier as ModelTier)) {
+        throw new Error(`dispatch.dispatch_profiles.${name}.tiers: unknown tier '${tier}'`);
+      }
+      validateTierDispatchSpec(tier, spec);
+    }
+  }
+}
+
 /** Strict validation of the optional `dispatch` section (#464). */
 function validateDispatchConfig(raw: unknown): DispatchConfig {
   const dispatch = requirePlainObject('dispatch', raw);
@@ -467,6 +514,22 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
         throw new Error(`dispatch.tiers: unknown tier '${tier}'`);
       }
       validateTierDispatchSpec(tier, spec);
+    }
+  }
+  if (dispatch.dispatch_profiles !== undefined) {
+    const profiles = requirePlainObject('dispatch.dispatch_profiles', dispatch.dispatch_profiles);
+    for (const [name, profile] of Object.entries(profiles)) {
+      // The name is persisted on `BatchEntry.dispatch_profile` and printed in
+      // journal/status lines, so it must match the same grammar the enqueue
+      // path enforces (`DISPATCH_PROFILE_RE`) — an unloadable name would
+      // otherwise only fail at profile-resolution time, far from the config
+      // that caused it.
+      if (!DISPATCH_PROFILE_RE.test(name)) {
+        throw new Error(
+          `dispatch.dispatch_profiles: profile name '${name}' must match ${DISPATCH_PROFILE_RE} (lowercase, no whitespace or path separators)`
+        );
+      }
+      validateDispatchProfile(name, profile);
     }
   }
   if (dispatch.phase_stall_timeout_ms !== undefined) {
@@ -518,6 +581,13 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
   }
   if (dispatch.tiers !== undefined) {
     out.tiers = dispatch.tiers as Partial<Record<ModelTier, TierDispatchSpec>>;
+  }
+  // #707: copied through the allowlist EXPLICITLY — the trap this function's
+  // own regression test documents is a field declared on `DispatchConfig`,
+  // read by `resolveDispatch`, and never copied here, silently reverting to
+  // the default on every load.
+  if (dispatch.dispatch_profiles !== undefined) {
+    out.dispatch_profiles = dispatch.dispatch_profiles as Record<string, DispatchProfile>;
   }
   if (dispatch.phase_stall_timeout_ms !== undefined) {
     out.phase_stall_timeout_ms = dispatch.phase_stall_timeout_ms as Record<string, number>;

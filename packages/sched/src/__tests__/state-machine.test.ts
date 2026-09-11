@@ -1174,3 +1174,27 @@ describe('schema migrations (1.0.0 → 1.1.0 → 1.2.0 → 1.3.0 → 1.4.0 → 1
     ).toThrow(/State file was written by a newer schema/);
   });
 });
+
+describe('#707 state migration: dispatch_profile', () => {
+  it('loads a pre-#707 1.18.0 state and backfills batch dispatch_profile as null', () => {
+    // Null is exact, not a guess: no batch before profiles existed ever
+    // dispatched anything but the config's default profile.
+    const legacy = { ...seeded(), schema_version: '1.18.0' } as Record<string, unknown>;
+    for (const batch of legacy.batches as Record<string, unknown>[]) {
+      delete batch.dispatch_profile;
+    }
+
+    const migrated = validateState(legacy);
+
+    expect(migrated.schema_version).toBe(SCHEMA_VERSION);
+    for (const batch of migrated.batches) {
+      expect(batch.dispatch_profile).toBeNull();
+    }
+  });
+
+  it('rejects a batch whose dispatch_profile violates the name grammar', () => {
+    const bad = seeded();
+    const batches = bad.batches.map((b) => ({ ...b, dispatch_profile: '../escape' }));
+    expect(() => validateState({ ...bad, batches })).toThrow(/dispatch_profile must match/);
+  });
+});

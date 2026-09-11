@@ -89,8 +89,8 @@ where every mechanical supervision decision is code, not remembered prose:
 
    (`strong` sets only `model`, so its command falls back to the default claude template.)
    What an engine is ACTUALLY running is always visible in two places, added in #680: the
-   `Dispatch: …` line in `sched status` (and its `--json` `dispatch` field), and the
-   `▶ sched dispatch: …` banner `sched start` prints once at startup — both show
+    `Dispatch (default): …` line in `sched status` (and its `--json` `dispatch` field), and the
+    `▶ sched dispatch (default): …` banner `sched start` prints once at startup — both show
    `tier=agent/model` resolved exactly as spawns resolve. Note the inverse trap: running
    the batch FROM opencode/GLM does not make it run ON opencode/GLM — without a
    `dispatch.tiers` override every tier dispatches the default claude template regardless
@@ -282,6 +282,30 @@ Config schema moves to 1.8.0 (#565): a new top-level `default_batch_priority` ke
 `batch_priority` (see Unit priority below). Absent → `DEFAULT_BATCH_PRIORITY` (10); an
 invalid value degrades the whole config file to built-in defaults, same contract as every
 other field.
+
+Config schema moves to 1.9.0 (#707): `dispatch.dispatch_profiles` names complete
+dispatch configurations for batch runs. A profile has the same `command`, `tier_models`,
+`prompt`, and optional per-tier `tiers` overrides as `dispatch`; the batch records the
+profile name at enqueue time, and every member, tail, report, and recovery agent resolves
+through that profile. For example:
+
+```json
+{
+  "dispatch": {
+    "dispatch_profiles": {
+      "claude": { "command": ["claude", "-p", "--model", "{model}"], "tier_models": { "mechanical": "haiku", "mid": "sonnet", "strong": "opus" } },
+      "glm": { "command": ["opencode", "run", "-m", "{model}", "--"], "tier_models": { "mechanical": "glm-flash", "mid": "glm", "strong": "glm-strong" } }
+    }
+  }
+}
+```
+
+Use `sched enqueue --mode slot --batch <id> --dispatch glm` to select a profile
+explicitly. Without `--dispatch`, a new batch detects Claude Code from `CLAUDECODE` or a
+configured agent binary in its parent process chain. Detection is convenience only: if
+profiles exist and detection is inconclusive, enqueue fails and names the available
+profiles rather than silently choosing the default. `--dispatch` is intentionally rejected
+for full-cycle entries; no profiles means legacy dispatch behavior remains unchanged.
 
 Two engine-safety policies were explicit product decisions on #464:
 

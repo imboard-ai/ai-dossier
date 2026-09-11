@@ -6,7 +6,12 @@
  * utilities.
  */
 
-import { resolveDispatch, type TierExecutor, tierExecutors } from './dispatch';
+import {
+  resolveDispatch,
+  resolveProfiledDispatch,
+  type TierExecutor,
+  tierExecutors,
+} from './dispatch';
 import {
   batchBlockers,
   DISPATCHABLE_ISSUE_STATUSES,
@@ -85,8 +90,16 @@ export interface StatusReport {
    * the batch from opencode/GLM otherwise has no signal that every dispatched
    * unit is still the default `claude` template, without reading
    * `events.jsonl`. Surfaces the mixed `dispatch.tiers` ladder too.
+   *
+   * #707: `profiles` names every configured dispatch profile with its own
+   * resolved per-tier executors, so `sched status` can say what a
+   * `--dispatch glm` batch WILL spawn before it spawns. Which batch uses
+   * which profile rides on each `BatchEntry.dispatch_profile`.
    */
-  dispatch: { tiers: Record<ModelTier, TierExecutor> };
+  dispatch: {
+    tiers: Record<ModelTier, TierExecutor>;
+    profiles: Record<string, Record<ModelTier, TierExecutor>>;
+  };
   blocked: BlockedItem[];
   failed: QueueEntry[];
 }
@@ -173,7 +186,15 @@ export function buildStatusReport(
   // can never disagree with what actually spawns (`tierExecutors` is the one
   // conversion, shared with the startup banner).
   const resolved = resolveDispatch(config);
-  const dispatch = { tiers: tierExecutors(resolved) };
+  // #707: every configured profile, resolved the way `dispatchFor` resolves
+  // it for a batch — so the display can never disagree with what spawns.
+  const profiles = Object.fromEntries(
+    Object.keys(config.dispatch?.dispatch_profiles ?? {}).map((name) => [
+      name,
+      tierExecutors(resolveProfiledDispatch(config, name)),
+    ])
+  ) as Record<string, Record<ModelTier, TierExecutor>>;
+  const dispatch = { tiers: tierExecutors(resolved), profiles };
 
   const parked: ParkedItem[] = state.entries
     .filter((e): e is QueueEntry & { pr: number } => e.status === 'parked' && e.pr !== null)
