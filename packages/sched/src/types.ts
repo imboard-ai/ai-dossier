@@ -444,6 +444,23 @@ export interface BatchEntry {
    */
   member_pool_claimed: boolean;
   /**
+   * Name of the dispatch profile this batch resolved at ENQUEUE time (#707),
+   * null for "the config's default (unnamed) profile". A batch-level fact
+   * like `anchor`/`run_id`: resolved once when the first member enqueues,
+   * agreed across members, and used for EVERY unit under the batch —
+   * batch-setup, each member, the tail integrator, the fix agent, the report
+   * agent — regardless of which session ticks the engine. Persisted (not
+   * re-derived) so a tick from any session dispatches the same family. A
+   * name that no longer resolves against the CURRENT config never silently
+   * falls back — the silent fallback is the #680 incident shape: pre-merge
+   * the batch DISSOLVES with reason `dispatch-profile-missing:<name>`
+   * (members requeue as full-cycle units on the config default), post-merge
+   * the remaining tail work runs on the default with a journaled
+   * `dispatch-profile-missing` event. Added in schema 1.19.0; 1.18.0
+   * batches backfill to null.
+   */
+  dispatch_profile: string | null;
+  /**
    * runstate run id of the batch run (`r-<issue>-<hex>`), null until batch-setup
    * mints it. `ai-dossier runstate post` REQUIRES a run id, so a batch without
    * one cannot post milestones at all — recovery journals them instead.
@@ -826,6 +843,25 @@ export interface TierDispatchSpec {
 }
 
 /**
+ * A named dispatch profile (#707) — the spawn-shaping subset of
+ * {@link DispatchConfig}, bundled under one name so a batch can record and
+ * inherit a whole agent FAMILY (command + per-tier model ladder) instead of
+ * the config's default. Fields left unset fall back to the config's own
+ * values at resolution time (`resolveProfiledDispatch`), so a profile may
+ * carry as little as a `tier_models` ladder.
+ */
+export interface DispatchProfile {
+  /** Command template; same `{model}`/`{issue}` substitution rules as `DispatchConfig.command`. */
+  command?: string[];
+  /** Prompt template sent on the child's stdin; `{issue}` substituted. */
+  prompt?: string;
+  /** The profile's own per-tier ladder — "GLM family" is flash/mid/strong GLMs, not one model everywhere (#707 AC8). */
+  tier_models?: Partial<Record<ModelTier, string>>;
+  /** Per-tier full spawn spec (#527), same fallback rules as the top-level `tiers`. */
+  tiers?: Partial<Record<ModelTier, TierDispatchSpec>>;
+}
+
+/**
  * Agent dispatch configuration (#464). The command is a template: `{model}`
  * and `{issue}` placeholders are substituted per dispatch; a `{model}` item
  * whose tier has no model configured drops together with its flag.
@@ -837,6 +873,16 @@ export interface DispatchConfig {
   prompt?: string;
   /** Tier → model id/alias mapping (defaults: haiku / sonnet / opus). */
   tier_models?: Partial<Record<ModelTier, string>>;
+  /**
+   * Named dispatch profiles (#707) — the resolution target for
+   * `sched enqueue --dispatch <name>` and `BatchEntry.dispatch_profile`. The
+   * top-level `command`/`tier_models`/`tiers`/`prompt` above remain the
+   * DEFAULT (unnamed) profile, so an unconfigured or unprofiled batch
+   * dispatches exactly as before. A profile must carry its own per-tier
+   * ladder; a profile whose tiers all name one model is expressible but is
+   * never a default (#707).
+   */
+  dispatch_profiles?: Record<string, DispatchProfile>;
   /**
    * Per-tier full spawn spec (#527) — the mixed agent-CLI escalation ladder.
    * A tier without an entry here falls back to `command`/`tier_models`/
@@ -1113,8 +1159,11 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * 1.18.0 (#677): `BatchEntry` gains `member_branch`/`member_worktree`/
  * `member_pool_claimed` — the current member's own worktree/branch context
  * (RFC-0001 §J.3); `null`/`null`/`false` backfilled on load.
+ * 1.19.0 (#707): `BatchEntry` gains `dispatch_profile` — the named dispatch
+ * profile resolved at enqueue (null = the config's default); `null`
+ * backfilled on load.
  */
-export const SCHEMA_VERSION = '1.18.0' as const;
+export const SCHEMA_VERSION = '1.19.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1136,9 +1185,10 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.15.0',
   '1.16.0',
   '1.17.0',
+  '1.18.0',
 ];
 
-export const CONFIG_SCHEMA_VERSION = '1.8.0' as const;
+export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
 
 /** Config schema versions `loadConfig` accepts and migrates transparently on load (fields absent in an older version simply resolve to their defaults). */
 export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
@@ -1150,6 +1200,7 @@ export const LEGACY_CONFIG_SCHEMA_VERSIONS: readonly string[] = [
   '1.5.0',
   '1.6.0',
   '1.7.0',
+  '1.8.0',
 ];
 
 /** Config file shape (schema_version + the config itself). */
@@ -1259,6 +1310,13 @@ export type JournalEventName =
   // from a batch stuck on a member nobody will spawn.
   | 'member-advance-skipped'
   | 'dependents-blocked'
+  // #707: a batch's recorded dispatch profile no longer resolves against the
+  // current config, and the batch is POST-merge (its product already shipped)
+  // — the remaining tail work falls back to the default dispatch, loudly.
+  // Pre-merge the same condition dissolves the batch instead (a state
+  // transition, journaled once), so this event is bounded by the report
+  // phase's own lifetime and cannot flood a reconcile loop.
+  | 'dispatch-profile-missing'
   // #525: a slot reaching `idle` on a per-issue dispatch terminal path
   // (verified completion, external-advance, a detached-ship park, a direct
   // failure, or a dependent released by `blockTransitiveDependents`) —

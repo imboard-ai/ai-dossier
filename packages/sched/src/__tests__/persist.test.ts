@@ -736,3 +736,104 @@ describe('#544 config: label_poll_interval_ms', () => {
     }
   });
 });
+
+describe('#707 config: dispatch.dispatch_profiles', () => {
+  const GLM_CONFIG = {
+    schema_version: '1.9.0',
+    max_slots: 2,
+    dispatch: {
+      command: ['claude', '-p', '--model', '{model}'],
+      tier_models: { mechanical: 'haiku', mid: 'sonnet', strong: 'opus' },
+      dispatch_profiles: {
+        glm: {
+          command: ['opencode', 'run', '-m', '{model}', '--format', 'json', '--'],
+          tier_models: {
+            mechanical: 'zai-coding-plan/glm-5.3-flash',
+            mid: 'zai-coding-plan/glm-5.3',
+            strong: 'zai-coding-plan/glm-5.2',
+          },
+        },
+      },
+    },
+  };
+
+  it('round-trips dispatch_profiles through save/load — the allowlist must copy the key (the persist.test.ts:346 regression class)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-707-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig(GLM_CONFIG);
+      const config = store.loadConfig();
+      expect(config.dispatch?.dispatch_profiles?.glm).toBeDefined();
+      expect(config.dispatch?.dispatch_profiles?.glm?.tier_models?.mid).toBe(
+        'zai-coding-plan/glm-5.3'
+      );
+      expect(config.dispatch?.dispatch_profiles?.glm?.command).toEqual([
+        'opencode',
+        'run',
+        '-m',
+        '{model}',
+        '--format',
+        'json',
+        '--',
+      ]);
+      // the default profile survives untouched beside the named ones
+      expect(config.dispatch?.tier_models).toEqual({
+        mechanical: 'haiku',
+        mid: 'sonnet',
+        strong: 'opus',
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects an invalid profile shape loudly', () => {
+    expectConfigRejected(
+      {
+        schema_version: '1.9.0',
+        max_slots: 2,
+        dispatch: { dispatch_profiles: { glm: { command: ['opencode', 7] } } },
+      },
+      'dispatch.dispatch_profiles.glm.command'
+    );
+    expectConfigRejected(
+      {
+        schema_version: '1.9.0',
+        max_slots: 2,
+        dispatch: { dispatch_profiles: { glm: { tier_models: { worst: 'x' } } } },
+      },
+      'dispatch.dispatch_profiles.glm.tier_models'
+    );
+    expectConfigRejected(
+      {
+        schema_version: '1.9.0',
+        max_slots: 2,
+        dispatch: { dispatch_profiles: { 'Big Model': { command: ['x'] } } },
+      },
+      "profile name 'Big Model'"
+    );
+    expectConfigRejected(
+      {
+        schema_version: '1.9.0',
+        max_slots: 2,
+        dispatch: { dispatch_profiles: { glm: { disallowed_tools: [] } } },
+      },
+      "dispatch.dispatch_profiles.glm: unknown key 'disallowed_tools'"
+    );
+  });
+
+  it('loads a legacy 1.8.0 config carrying dispatch_profiles (fields absent in older versions resolve to defaults)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-707-legacy-'));
+    try {
+      const store = new SchedStore(dir);
+      const legacy = { ...GLM_CONFIG, schema_version: '1.8.0' };
+      fs.writeFileSync(store.configPath, JSON.stringify(legacy));
+      const config = store.loadConfig();
+      expect(config.dispatch?.dispatch_profiles?.glm?.tier_models?.mechanical).toBe(
+        'zai-coding-plan/glm-5.3-flash'
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -14,6 +14,8 @@ import {
   DEFAULT_PROMPT_TEMPLATE,
   DEFAULT_REPORT_PROMPT_TEMPLATE,
   DEFAULT_TIER_MODELS,
+  DISPATCH_PROFILE_RE,
+  DispatchProfileError,
   dispatchSummary,
   escalateTier,
   HEADLESS_BACKGROUND_GUARD_SETTINGS,
@@ -22,6 +24,7 @@ import {
   OPENCODE_DISPATCH_COMMAND,
   reportTierFor,
   resolveDispatch,
+  resolveProfiledDispatch,
   resolveTierSpawn,
   type SchedConfig,
   SUPERSESSION_CHECKPOINT_INSTRUCTION,
@@ -1001,5 +1004,131 @@ describe('background-execution guard (#685 AC1 — the tool cannot be background
 
   it('the hook tolerates non-JSON stdin (fail-open, exit 0)', () => {
     expect(runHook('<<<truncated>>>')).toBe(0);
+  });
+});
+
+describe('resolveProfiledDispatch (#707 — a batch inherits the family it was triggered from)', () => {
+  const GLM_PROFILE = {
+    command: ['opencode', 'run', '-m', '{model}', '--format', 'json', '--'],
+    tier_models: {
+      mechanical: 'zai-coding-plan/glm-5.3-flash',
+      mid: 'zai-coding-plan/glm-5.3',
+      strong: 'zai-coding-plan/glm-5.2',
+    },
+  };
+  const config: SchedConfig = {
+    max_slots: 3,
+    stall_timeout_ms: 5_000,
+    dispatch: {
+      command: ['claude', '-p', '--model', '{model}'],
+      tier_models: { mechanical: 'haiku', mid: 'sonnet', strong: 'opus' },
+      report_prompt: 'report {issue}',
+      dispatch_profiles: { glm: GLM_PROFILE },
+    },
+  };
+
+  it('null resolves to the base config — the default (unnamed) profile', () => {
+    const profiled = resolveProfiledDispatch(config, null);
+    expect(profiled.command).toEqual(resolveDispatch(config).command);
+    expect(profiled.tierModels.mechanical).toBe('haiku');
+    // undefined behaves identically (the engine never has to special-case it)
+    expect(resolveProfiledDispatch(config, undefined).tierModels.mid).toBe('sonnet');
+  });
+
+  it('a profile overrides the spawn shape: command and its own per-tier ladder', () => {
+    const profiled = resolveProfiledDispatch(config, 'glm');
+    expect(profiled.command).toEqual(GLM_PROFILE.command);
+    expect(profiled.tierModels.mechanical).toBe('zai-coding-plan/glm-5.3-flash');
+    expect(profiled.tierModels.mid).toBe('zai-coding-plan/glm-5.3');
+    expect(profiled.tierModels.strong).toBe('zai-coding-plan/glm-5.2');
+    // The #591 hardening and #504 checkpoint apply to profiled commands too —
+    // a profile changes WHO dispatches, never the safety rails.
+    expect(profiled.command.join(' ')).toContain('--');
+    expect(profiled.prompt).toMatch(/SUPERSESSION CHECKPOINT/i);
+  });
+
+  it('non-spawn settings are inherited, not overridden (stall timeouts, report prompt)', () => {
+    const profiled = resolveProfiledDispatch(config, 'glm');
+    expect(profiled.stallTimeoutMs).toBe(5_000);
+    expect(profiled.reportPrompt).toBe('report {issue}');
+    expect(profiled.phaseStallTimeoutMs).toEqual(resolveDispatch(config).phaseStallTimeoutMs);
+  });
+
+  it('an unknown profile throws naming the available profiles — never a silent fallback', () => {
+    expect(() => resolveProfiledDispatch(config, 'mistral')).toThrow(DispatchProfileError);
+    expect(() => resolveProfiledDispatch(config, 'mistral')).toThrow(/available profiles: glm/);
+  });
+
+  it('an unknown profile with NO profiles configured says so', () => {
+    expect(() => resolveProfiledDispatch({ max_slots: 1 }, 'glm')).toThrow(
+      /no dispatch_profiles are configured at all/
+    );
+  });
+
+  it('a profile may carry its own full tiers ladder (#707 AC8)', () => {
+    const mixed: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        dispatch_profiles: {
+          mixed: {
+            tiers: {
+              strong: { command: ['claude', '-p', '--model', '{model}'], model: 'opus' },
+            },
+          },
+        },
+      },
+    };
+    const profiled = resolveProfiledDispatch(mixed, 'mixed');
+    // mechanical/mid fall back to the base shorthand (built-in defaults here);
+    // strong uses its own command. #591/#685: an explicit claude-family tier
+    // command still gets the hardening appended — assert on the head only.
+    expect(profiled.tiers.strong.commandTemplate.slice(0, 4)).toEqual([
+      'claude',
+      '-p',
+      '--model',
+      '{model}',
+    ]);
+    expect(profiled.tiers.strong.model).toBe('opus');
+  });
+
+  it('a profile tier override merges per tier instead of discarding default tier overrides', () => {
+    const mixed: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        tiers: {
+          mechanical: { command: ['opencode', 'run', '-m', '{model}'], model: 'base-flash' },
+          strong: { command: ['claude', '-p', '--model', '{model}'], model: 'base-opus' },
+        },
+        dispatch_profiles: {
+          glm: { tiers: { mechanical: { model: 'profile-flash' } } },
+        },
+      },
+    };
+    const profiled = resolveProfiledDispatch(mixed, 'glm');
+    expect(profiled.tiers.mechanical.commandTemplate.slice(0, 2)).toEqual(['opencode', 'run']);
+    expect(profiled.tiers.mechanical.model).toBe('profile-flash');
+    expect(profiled.tiers.strong.commandTemplate.slice(0, 2)).toEqual(['claude', '-p']);
+    expect(profiled.tiers.strong.model).toBe('base-opus');
+  });
+
+  it('a single-model profile is expressible — every tier names the same model (#707 AC8)', () => {
+    const flat: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        dispatch_profiles: {
+          flat: { tier_models: { mechanical: 'glm-5.3', mid: 'glm-5.3', strong: 'glm-5.3' } },
+        },
+      },
+    };
+    const profiled = resolveProfiledDispatch(flat, 'flat');
+    expect(new Set(Object.values(profiled.tierModels)).size).toBe(1);
+  });
+
+  it('profile names match the shared grammar (#707)', () => {
+    expect(DISPATCH_PROFILE_RE.test('glm')).toBe(true);
+    expect(DISPATCH_PROFILE_RE.test('claude-code.2')).toBe(true);
+    expect(DISPATCH_PROFILE_RE.test('Big Model')).toBe(false);
+    expect(DISPATCH_PROFILE_RE.test('.hidden')).toBe(false);
+    expect(DISPATCH_PROFILE_RE.test('a/b')).toBe(false);
   });
 });

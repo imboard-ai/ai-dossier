@@ -87,9 +87,11 @@ import {
   buildBatchReportPrompt,
   buildBatchTailPrompt,
   buildMemberPrompt,
+  DispatchProfileError,
   fileSizeOrZero,
   journalCmdModelFields,
   type ResolvedDispatch,
+  resolveProfiledDispatch,
   resolveTierSpawn,
   type SpawnDeps,
 } from './dispatch';
@@ -123,6 +125,7 @@ import {
 import { buildSchedRunLogEntry, finalizeRunLogEntry, readDispatchLog } from './run-log';
 import { assignToIdleSlot, freeCapacity } from './scheduler';
 import {
+  allowedBatchTransitions,
   appendEvictions,
   CLEARED_PR_WATCH_FIELDS,
   duplicateEvictionDetail,
@@ -1836,7 +1839,9 @@ function runValidate(
     batchId,
     offender,
     rDeps,
-    { config, tests: outcome.attributed.get(offender) ?? [] }
+    // #707: `dispatch` is the batch's own (profile-resolved) dispatch — the
+    // fix agent rides the same family the members ran on.
+    { config, tests: outcome.attributed.get(offender) ?? [], dispatch }
   );
   deps.store.withLock((s) => ({
     state: applyBatchAndIssues(s, fixing, batchId, []),
@@ -3649,6 +3654,71 @@ export function runBatchTick(
   const result = emptyResult();
   const now = deps.now();
 
+  // #707: each batch dispatches through ITS OWN recorded profile, not the
+  // engine's default. Resolution is cached per tick (per runBatchTick call):
+  // within one pass a profile resolves at most once, and a failed resolution
+  // reacts at most once. A profile that no longer resolves (config edited
+  // mid-run) never silently falls back — the silent fallback is precisely
+  // the #680 incident shape (a run that looked like one agent family,
+  // executed as another). The reaction depends on how far the batch got:
+  // - pre-merge (`dissolving` is a legal edge): DISSOLVE with reason
+  //   `dispatch-profile-missing:<name>` — loud, deterministic, one-shot, and
+  //   the members requeue as full-cycle units on the config default, which is
+  //   a coherent recovery rather than a mislabelled continuation.
+  // - post-merge (PR parked/merged — the product already shipped): dissolving
+  //   would discard a landed PR's bookkeeping, so the remaining dispatch (the
+  //   report agent) runs on the default and journals
+  //   `dispatch-profile-missing` every tick it holds the decision open — a
+  //   bounded phase (deployed → reported), so the event cannot flood.
+  const profileCache = new Map<string, ResolvedDispatch>();
+  const dispatchFor = (batch: BatchEntry): ResolvedDispatch => {
+    if (batch.dispatch_profile === null) return dispatch;
+    const cached = profileCache.get(batch.dispatch_profile);
+    if (cached !== undefined) return cached;
+    let resolved: ResolvedDispatch;
+    try {
+      resolved = resolveProfiledDispatch(config, batch.dispatch_profile);
+    } catch (err) {
+      if (!(err instanceof DispatchProfileError)) throw err;
+      const current = deps.store.load();
+      const fresh = findBatch(current, batch.id);
+      const dissolvable =
+        fresh !== undefined && allowedBatchTransitions(fresh.status).includes('dissolving');
+      if (dissolvable) {
+        const liveSlot = slotFor(current, batch.id);
+        if (
+          liveSlot !== undefined &&
+          liveSlot.pid !== null &&
+          deps.spawnDeps.isAlive(liveSlot.pid, liveSlot.pid_start ?? undefined)
+        ) {
+          deps.spawnDeps.kill(liveSlot.pid, liveSlot.pid_start ?? undefined);
+        }
+        const outcome = dissolveBatch(
+          current,
+          batch.id,
+          { strategy: 'full', reason: `dispatch-profile-missing:${batch.dispatch_profile}` },
+          recoveryDeps(deps, config, fresh, now)
+        );
+        deps.store.withLock((s) => ({
+          state: applyBatchAndIssues(s, outcome.state, batch.id, outcome.requeued),
+          result: undefined,
+        }));
+        result.failed.push(unit(batch.id));
+        // Resolution failed: skip this batch for the rest of the pass with the
+        // base dispatch as a harmless placeholder — the batch is dissolved, so
+        // no further arm can claim a slot for it this tick.
+        resolved = dispatch;
+      } else {
+        journalEvent(deps, 'dispatch-profile-missing', unit(batch.id), {
+          detail: `profile '${batch.dispatch_profile}' is no longer configured; the post-merge tail runs on the default dispatch`,
+        });
+        resolved = dispatch;
+      }
+    }
+    profileCache.set(batch.dispatch_profile, resolved);
+    return resolved;
+  };
+
   // #565: when more ready batches exist than free capacity, claim them in
   // the same priority order `runnableUnits` would (desc priority → asc
   // readiness age → anchor) — this loop never goes through
@@ -3680,11 +3750,16 @@ export function runBatchTick(
     const state = deps.store.load();
     const batch = findBatch(state, batchId);
     if (batch && batch.status === 'ready' && slotFor(state, batchId) === undefined) {
-      claimAndSetup(deps, config, dispatch, batchId, now, result);
+      // #707: batch-setup dispatches through the batch's own profile too — it
+      // is the batch's first agent, not an engine-internal step.
+      claimAndSetup(deps, config, dispatchFor(batch), batchId, now, result);
     }
   }
 
   for (const batch of deps.store.load().batches) {
+    // #707: resolve this batch's profile once per pass — or dissolve/fall
+    // back loudly when it no longer resolves (see `dispatchFor` above).
+    const batchDispatch = dispatchFor(batch);
     const slot = slotFor(deps.store.load(), batch.id);
     // #609: a TERMINAL batch (`done`/`dissolved`) still holding a slot matches
     // none of the status arms below and would fall through their `continue`,
@@ -3709,7 +3784,7 @@ export function runBatchTick(
     }
     if (slot && (slot.status === 'running' || slot.status === 'assigned')) {
       if (batch.status === 'executing') {
-        reconcileMemberSlot(deps, config, dispatch, batch.id, slot, now, result);
+        reconcileMemberSlot(deps, config, batchDispatch, batch.id, slot, now, result);
       } else if (batch.status === 'fixing') {
         reconcileFixSlot(deps, config, batch.id, slot, now, result);
       } else if (batch.status === 'reviewing' || batch.status === 'shipping') {
@@ -3722,7 +3797,7 @@ export function runBatchTick(
     if (slot) continue; // live but neither running/assigned (e.g. mid-verify) — next tick
     if (batch.status === 'validating') {
       // A local suite run, not a provider dispatch — unaffected by `paused`.
-      runValidate(deps, config, dispatch, batch.id, now, result);
+      runValidate(deps, config, batchDispatch, batch.id, now, result);
       continue;
     }
     // #629: every branch below spawns a provider agent — hold the wedge
@@ -3730,7 +3805,7 @@ export function runBatchTick(
     // is read once, up front, rather than per iteration).
     if (paused) continue;
     if (batch.status === 'deployed') {
-      spawnReportAgent(deps, config, dispatch, batch.id, now, result);
+      spawnReportAgent(deps, config, batchDispatch, batch.id, now, result);
     } else if (batch.status === 'executing') {
       // A prior spawn threw, or `claimAndSpawn` found zero free capacity —
       // either way the batch is stuck mid-member with no slot and nothing
@@ -3740,10 +3815,10 @@ export function runBatchTick(
       // pre-checks BEFORE any pool/git work, so a full scheduler (or stale
       // member context) exits here without exec'ing, and `claimAndSpawn`
       // remains the authoritative capacity gate.
-      spawnMemberContinuation(deps, config, dispatch, batch.id, now, result);
+      spawnMemberContinuation(deps, config, batchDispatch, batch.id, now, result);
     } else if (batch.status === 'reviewing' || batch.status === 'shipping') {
       // Same wedge, for a dead-or-never-claimed tail agent.
-      spawnTailAgent(deps, config, dispatch, batch.id, now, result);
+      spawnTailAgent(deps, config, batchDispatch, batch.id, now, result);
     } else if (batch.status === 'fixing') {
       // `beginFixAttempt` already recorded this member's ONE attempt as
       // `dispatched` before `claimAndSpawn` could find capacity — retrying the

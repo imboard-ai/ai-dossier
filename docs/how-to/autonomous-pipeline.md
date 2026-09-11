@@ -252,6 +252,7 @@ per-project. Most subcommands also take `--json` for machine-readable output.
 |---|---|
 | Enqueue issues (full-cycle) | `ai-dossier sched enqueue --issues 101,105..109 --deps 100 --tier mid` |
 | Enqueue a batch (slot mode) | `ai-dossier sched enqueue --issues 540,542,543 --mode slot --batch b1` |
+| Enqueue a batch with a named dispatch profile | `ai-dossier sched enqueue --issues 540,542,543 --mode slot --batch b1 --dispatch glm` |
 | Enqueue a batch, more members to follow | `ai-dossier sched enqueue --issues 540,542 --mode slot --batch b1 --more-members-expected` |
 | Enqueue from a batch-prep manifest | `ai-dossier sched enqueue --from-manifest batch-prep.json` |
 | Check queue/slots/batches/blocked/failed | `ai-dossier sched status` |

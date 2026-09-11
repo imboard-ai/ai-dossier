@@ -539,3 +539,77 @@ describe('enqueueEntries — blocked_label (#507)', () => {
     }
   });
 });
+
+describe('dispatch profile as a batch-level fact (#707)', () => {
+  it('records the profile on the batch at creation', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 211, mode: 'slot', batch: 'b-glm', dispatch: 'glm' },
+        { issue: 212, mode: 'slot', batch: 'b-glm' },
+      ],
+      NOW
+    );
+    expect(findBatch(state, 'b-glm')?.dispatch_profile).toBe('glm');
+    expect(() => validateState(state)).not.toThrow();
+  });
+
+  it('defaults to null — the config default profile (AC1: unprofiled batches unchanged)', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 211, mode: 'slot', batch: 'b1' }],
+      NOW
+    );
+    expect(findBatch(state, 'b1')?.dispatch_profile).toBeNull();
+  });
+
+  it('rejects a conflicting re-supply rather than re-pointing the family', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 211, mode: 'slot', batch: 'b1', dispatch: 'glm', more_members_expected: true }],
+      NOW
+    );
+    expect(() =>
+      enqueueEntries(state, [{ issue: 212, mode: 'slot', batch: 'b1', dispatch: 'claude' }], NOW)
+    ).toThrow(/was enqueued with dispatch profile 'glm' — refusing to re-point it to 'claude'/);
+  });
+
+  it('lets a later member supply the profile the first omitted', () => {
+    let state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 211, mode: 'slot', batch: 'b1', more_members_expected: true }],
+      NOW
+    );
+    state = enqueueEntries(
+      state,
+      [{ issue: 212, mode: 'slot', batch: 'b1', dispatch: 'glm' }],
+      NOW
+    );
+    expect(findBatch(state, 'b1')?.dispatch_profile).toBe('glm');
+  });
+
+  it('rejects a dispatch profile on a full-cycle entry — profiles are batch-scoped', () => {
+    expect(() =>
+      enqueueEntries(createEmptyState(), [{ issue: 213, dispatch: 'glm' }], NOW)
+    ).toThrow(/dispatch profiles are batch-scoped/);
+  });
+
+  it('rejects a name outside the grammar', () => {
+    expect(() =>
+      enqueueEntries(
+        createEmptyState(),
+        [{ issue: 214, mode: 'slot', batch: 'b1', dispatch: 'Big Model' }],
+        NOW
+      )
+    ).toThrow(/must match/);
+  });
+
+  it('parseManifest accepts a dispatch field and rejects a malformed one', () => {
+    expect(parseManifest([{ issue: 1, mode: 'slot', batch: 'b1', dispatch: 'glm' }])).toEqual([
+      expect.objectContaining({ dispatch: 'glm' }),
+    ]);
+    expect(() => parseManifest([{ issue: 1, mode: 'slot', batch: 'b1', dispatch: 7 }])).toThrow(
+      /dispatch must match/
+    );
+  });
+});

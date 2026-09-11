@@ -11,6 +11,7 @@
  */
 
 import { SAFE_REF_RE } from './attribution';
+import { DISPATCH_PROFILE_RE } from './dispatch';
 import { unwrapList } from './json';
 import { labelBlockReason } from './labels';
 import { CLEARED_ENTRY_DEDUP_MARKERS, createBatch, findBatch, transitionBatch } from './state';
@@ -84,6 +85,18 @@ export interface EnqueueInput {
   anchor?: number;
   run_id?: string;
   eviction_groups?: number[][];
+  /**
+   * Name of the dispatch profile for the BATCH (#707) — a batch-level fact
+   * like `anchor`/`run_id`: every member of one batch must supply the same
+   * value (or none), the first supply wins, and the batch's every unit —
+   * members, tail, fix, report — dispatches through it. The CLI resolves
+   * detection/override and validates the name against the project config
+   * BEFORE calling in here; this module stays config-free, same as
+   * `blocked_label`'s resolution. Slot-mode only: a full-cycle entry has no
+   * batch to record it on, so supplying one there is rejected rather than
+   * silently dropped.
+   */
+  dispatch?: string;
   /**
    * Declares that MORE members for this entry's batch will land in a LATER
    * `enqueue` call — set by a caller who knows composition isn't finished yet
@@ -214,6 +227,14 @@ export function parseManifest(raw: unknown): EnqueueInput[] {
         );
       });
     }
+    if (obj.dispatch !== undefined) {
+      if (typeof obj.dispatch !== 'string' || !DISPATCH_PROFILE_RE.test(obj.dispatch)) {
+        throw new EnqueueError(
+          `Manifest entry [${i}]: dispatch must match ${DISPATCH_PROFILE_RE} (a configured dispatch_profiles name, e.g. 'glm')`
+        );
+      }
+      input.dispatch = obj.dispatch;
+    }
     if (obj.more_members_expected !== undefined) {
       if (typeof obj.more_members_expected !== 'boolean') {
         throw new EnqueueError(`Manifest entry [${i}]: more_members_expected must be a boolean`);
@@ -284,6 +305,7 @@ function assertBatchFactsAgree(
     run_id: string | null;
     eviction_groups: number[][];
     priority: number;
+    dispatch_profile: string | null;
   },
   input: EnqueueInput
 ): void {
@@ -295,6 +317,20 @@ function assertBatchFactsAgree(
   if (input.run_id !== undefined && existing.run_id !== null && existing.run_id !== input.run_id) {
     throw new EnqueueError(
       `Batch ${batchId} was enqueued with run_id '${existing.run_id}' — refusing to re-point it to '${input.run_id}'`
+    );
+  }
+  // #707: the whole point of recording the profile on the batch is that every
+  // unit under it dispatches the SAME family — a later call re-pointing it
+  // (or an incremental manifest half-supplying a different name) would split
+  // the batch across agent families, the exact incoherence this feature
+  // exists to prevent.
+  if (
+    input.dispatch !== undefined &&
+    existing.dispatch_profile !== null &&
+    existing.dispatch_profile !== input.dispatch
+  ) {
+    throw new EnqueueError(
+      `Batch ${batchId} was enqueued with dispatch profile '${existing.dispatch_profile}' — refusing to re-point it to '${input.dispatch}'`
     );
   }
   // Unlike anchor/run_id, `priority` is never left unset once a batch exists
@@ -381,6 +417,11 @@ export function enqueueEntries(
         );
       }
     }
+    if (input.dispatch !== undefined && !DISPATCH_PROFILE_RE.test(input.dispatch)) {
+      throw new EnqueueError(
+        `Issue ${input.issue}: dispatch must match ${DISPATCH_PROFILE_RE} (a configured dispatch_profiles name, e.g. 'glm')`
+      );
+    }
     seen.add(input.issue);
   }
 
@@ -413,10 +454,11 @@ export function enqueueEntries(
       (input.anchor !== undefined ||
         input.run_id !== undefined ||
         input.eviction_groups !== undefined ||
-        input.more_members_expected !== undefined)
+        input.more_members_expected !== undefined ||
+        input.dispatch !== undefined)
     ) {
       throw new EnqueueError(
-        `Issue ${input.issue}: anchor/run_id/eviction_groups/more_members_expected describe a batch — they cannot be set on a full-cycle entry`
+        `Issue ${input.issue}: anchor/run_id/eviction_groups/more_members_expected/dispatch describe a batch — they cannot be set on a full-cycle entry (dispatch profiles are batch-scoped: full-cycle dispatches the config's default)`
       );
     }
     // A `decision-pending` GITHUB LABEL (one of the four hard-block labels
@@ -476,6 +518,7 @@ export function enqueueEntries(
       // must agree (assertBatchFactsAgree) or say nothing.
       existing.anchor = existing.anchor ?? input.anchor ?? null;
       existing.run_id = existing.run_id ?? input.run_id ?? null;
+      existing.dispatch_profile = existing.dispatch_profile ?? input.dispatch ?? null;
       if (existing.eviction_groups.length === 0 && input.eviction_groups !== undefined) {
         existing.eviction_groups = input.eviction_groups.map((g) => [...g]);
       }
@@ -490,6 +533,7 @@ export function enqueueEntries(
           run_id: input.run_id,
           eviction_groups: input.eviction_groups,
           priority: input.batch_priority,
+          dispatch_profile: input.dispatch,
         })
       );
     }

@@ -9,6 +9,7 @@
  * non-terminal issue status rather than repeated per row.
  */
 
+import { DISPATCH_PROFILE_RE } from './dispatch';
 import { issueOfUnit } from './journal';
 import {
   type BatchEntry,
@@ -203,6 +204,17 @@ function allowedSlotTransitions(from: SlotStatus): SlotStatus[] {
   return base;
 }
 
+/**
+ * The legal edges OUT of a batch status (RFC-0001 §D.2) — exported for callers
+ * that must decide whether a transition is legal BEFORE doing the work that
+ * precedes it (#707: a missing dispatch profile dissolves a batch, but only
+ * from a status where `dissolving` is a legal edge; post-merge statuses fall
+ * back loudly instead, since their product already shipped).
+ */
+export function allowedBatchTransitions(from: BatchStatus): BatchStatus[] {
+  return BATCH_TRANSITIONS[from];
+}
+
 // --- Construction and validation ---
 
 /** An empty state carries no timestamps — nothing exists yet to stamp. */
@@ -233,7 +245,10 @@ export function createBatch(
   members: readonly number[],
   now: Date,
   opts: Partial<
-    Pick<BatchEntry, 'base_branch' | 'anchor' | 'run_id' | 'eviction_groups' | 'priority'>
+    Pick<
+      BatchEntry,
+      'base_branch' | 'anchor' | 'run_id' | 'eviction_groups' | 'priority' | 'dispatch_profile'
+    >
   > = {}
 ): BatchEntry {
   const timestamp = now.toISOString();
@@ -251,6 +266,7 @@ export function createBatch(
     member_branch: null,
     member_worktree: null,
     member_pool_claimed: false,
+    dispatch_profile: opts.dispatch_profile ?? null,
     run_id: opts.run_id ?? null,
     ranges: [],
     pr: null,
@@ -599,6 +615,20 @@ export function validateState(data: unknown): SchedState {
     if (typeof batch.base_branch !== 'string' || batch.base_branch.length === 0) {
       throw new Error(`Batch ${batch.id}: base_branch must be a non-empty string`);
     }
+    // #707: null (or absent, backfilled below) is the default profile; a
+    // present value must match the same grammar the config validator and the
+    // enqueue path enforce, so a state file can never carry a profile name
+    // that only fails later, at resolution time.
+    if (
+      batch.dispatch_profile !== undefined &&
+      batch.dispatch_profile !== null &&
+      (typeof batch.dispatch_profile !== 'string' ||
+        !DISPATCH_PROFILE_RE.test(batch.dispatch_profile))
+    ) {
+      throw new Error(
+        `Batch ${batch.id}: dispatch_profile must match ${DISPATCH_PROFILE_RE} or be null, got ${String(batch.dispatch_profile)}`
+      );
+    }
     if (!Number.isInteger(batch.executing_member) || batch.executing_member < 0) {
       throw new Error(`Batch ${batch.id}: executing_member must be a non-negative integer`);
     }
@@ -901,6 +931,10 @@ export function validateState(data: unknown): SchedState {
     member_branch: batch.member_branch ?? null,
     member_worktree: batch.member_worktree ?? null,
     member_pool_claimed: batch.member_pool_claimed ?? false,
+    // 1.18.0 → 1.19.0 (#707): batches written before dispatch profiles carry
+    // no such key — they always dispatched the config's default profile, so
+    // `null` is exact, not a guess.
+    dispatch_profile: batch.dispatch_profile ?? null,
     run_id: batch.run_id ?? null,
     ranges: batch.ranges ?? [],
     pr: batch.pr ?? null,

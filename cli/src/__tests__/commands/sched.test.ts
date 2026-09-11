@@ -68,6 +68,10 @@ function statePath(): string {
   return path.join(home, '.dossier', 'sched', 'test-proj', 'state.json');
 }
 
+function configPath(): string {
+  return path.join(home, '.dossier', 'sched', 'test-proj', 'config.json');
+}
+
 function readState(): unknown {
   return JSON.parse(fs.readFileSync(statePath(), 'utf-8'));
 }
@@ -1250,13 +1254,13 @@ describe('#680: the configured dispatch agent is visible (status line + startup 
   it('sched status renders a Dispatch line with the resolved per-tier agent/models', async () => {
     await runSched(['sched', 'status', '--project', 'test-proj']);
     expect(logs.join('\n')).toContain(
-      'Dispatch: mechanical=claude/haiku · mid=claude/sonnet · strong=claude/opus'
+      'Dispatch (default): mechanical=claude/haiku · mid=claude/sonnet · strong=claude/opus'
     );
   });
 
   it('sched start --once logs the dispatch banner exactly once, before the tick result', async () => {
     await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
-    const banners = logs.filter((l) => l.includes('sched dispatch:'));
+    const banners = logs.filter((l) => l.includes('sched dispatch (default):'));
     expect(banners).toHaveLength(1);
     expect(banners[0]).toContain('mechanical=claude/haiku');
     expect(banners[0]).toContain('strong=claude/opus');
@@ -1266,5 +1270,252 @@ describe('#680: the configured dispatch agent is visible (status line + startup 
     await runSched(['sched', 'start', '--once', '--json', '--project', 'test-proj']);
     expect(logs.filter((l) => l.includes('sched dispatch:'))).toHaveLength(0);
     expect(() => JSON.parse(logs.join('\n'))).not.toThrow();
+  });
+});
+
+describe('#707: sched enqueue --dispatch (named dispatch profiles)', () => {
+  const GLM_CONFIG = {
+    schema_version: '1.9.0',
+    max_slots: 2,
+    dispatch: {
+      dispatch_profiles: {
+        claude: { command: ['claude', '-p', '--model', '{model}'] },
+        glm: {
+          command: ['opencode', 'run', '-m', '{model}', '--format', 'json', '--'],
+          tier_models: {
+            mechanical: 'zai-coding-plan/glm-5.3-flash',
+            mid: 'zai-coding-plan/glm-5.3',
+            strong: 'zai-coding-plan/glm-5.2',
+          },
+        },
+      },
+    },
+  };
+
+  function writeConfig(config: unknown): void {
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+    fs.writeFileSync(configPath(), JSON.stringify(config));
+  }
+
+  it('records the explicit --dispatch profile on the batch (AC3: overrides detection)', async () => {
+    writeConfig(GLM_CONFIG);
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '301,302',
+      '--mode',
+      'slot',
+      '--batch',
+      'b-glm',
+      '--dispatch',
+      'glm',
+      '--project',
+      'test-proj',
+    ]);
+    expect(logs.join('\n')).toContain('Dispatch profile: glm (explicit)');
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b-glm', dispatch_profile: 'glm' });
+  });
+
+  it('rejects --dispatch when no profiles are configured — never a silent no-op (AC1 boundary)', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(
+      runSched([
+        'sched',
+        'enqueue',
+        '--issues',
+        '303',
+        '--mode',
+        'slot',
+        '--batch',
+        'b-x',
+        '--dispatch',
+        'glm',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+    expect(err.mock.calls.map((c) => String(c[0])).join('\n')).toContain(
+      'no dispatch_profiles are configured'
+    );
+    err.mockRestore();
+    expect(fs.existsSync(statePath())).toBe(false); // nothing was enqueued
+  });
+
+  it('rejects an unknown profile, naming the available ones', async () => {
+    writeConfig(GLM_CONFIG);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(
+      runSched([
+        'sched',
+        'enqueue',
+        '--issues',
+        '304',
+        '--mode',
+        'slot',
+        '--batch',
+        'b-y',
+        '--dispatch',
+        'mistral',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+    expect(err.mock.calls.map((c) => String(c[0])).join('\n')).toContain('available: claude, glm');
+    err.mockRestore();
+  });
+
+  it('rejects --dispatch on a full-cycle enqueue — profiles are batch-scoped', async () => {
+    writeConfig(GLM_CONFIG);
+    await expect(
+      runSched([
+        'sched',
+        'enqueue',
+        '--issues',
+        '305',
+        '--dispatch',
+        'glm',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+  });
+
+  it('no profiles configured + no flag → legacy behavior, no detection, no failure (AC1)', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '306',
+      '--mode',
+      'slot',
+      '--batch',
+      'b-legacy',
+      '--project',
+      'test-proj',
+    ]);
+    expect(logs.join('\n')).not.toContain('Dispatch profile');
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b-legacy', dispatch_profile: null });
+  });
+
+  it('detection via CLAUDECODE supplies the default and prints its method (AC4)', async () => {
+    writeConfig(GLM_CONFIG);
+    vi.stubEnv('CLAUDECODE', '1');
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '307',
+      '--mode',
+      'slot',
+      '--batch',
+      'b-claude',
+      '--project',
+      'test-proj',
+    ]);
+    expect(logs.join('\n')).toContain('Dispatch profile: claude (inherited via CLAUDECODE)');
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b-claude', dispatch_profile: 'claude' });
+  });
+
+  it('a manifest-supplied profile is validated and bypasses ambient detection', async () => {
+    writeConfig(GLM_CONFIG);
+    vi.stubEnv('CLAUDECODE', '');
+    const manifest = path.join(home, 'profiled-manifest.json');
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        entries: [{ issue: 311, mode: 'slot', batch: 'b-manifest', dispatch: 'claude' }],
+      })
+    );
+    await runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj']);
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b-manifest', dispatch_profile: 'claude' });
+  });
+
+  it('rejects a manifest profile that is not configured', async () => {
+    writeConfig(GLM_CONFIG);
+    const manifest = path.join(home, 'unknown-profile-manifest.json');
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({
+        entries: [{ issue: 312, mode: 'slot', batch: 'b-unknown', dispatch: 'mistral' }],
+      })
+    );
+    await expect(
+      runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
+    expect(fs.existsSync(statePath())).toBe(false);
+  });
+
+  it('profiles configured + inconclusive detection + new batch → the enqueue FAILS naming them (AC5)', async () => {
+    writeConfig({
+      ...GLM_CONFIG,
+      dispatch: {
+        dispatch_profiles: {
+          alpha: { command: ['profile-alpha', '--model', '{model}'] },
+          beta: { command: ['profile-beta', '--model', '{model}'] },
+        },
+      },
+    });
+    vi.stubEnv('CLAUDECODE', '');
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(
+      runSched([
+        'sched',
+        'enqueue',
+        '--issues',
+        '308',
+        '--mode',
+        'slot',
+        '--batch',
+        'b-z',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+    const printed = err.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(printed).toContain('Cannot determine which dispatch profile to inherit');
+    expect(printed).toContain('Available profiles: alpha, beta');
+    err.mockRestore();
+    expect(fs.existsSync(statePath())).toBe(false); // refused, not silently defaulted
+  });
+
+  it('an incremental join to an EXISTING batch never fails on detection (the family is already decided)', async () => {
+    writeConfig(GLM_CONFIG);
+    vi.stubEnv('CLAUDECODE', '');
+    // First call creates the batch under an explicit profile.
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '309',
+      '--mode',
+      'slot',
+      '--batch',
+      'b-inc',
+      '--dispatch',
+      'glm',
+      '--more-members-expected',
+      '--project',
+      'test-proj',
+    ]);
+    // Second call joins with NO flag and NO detectable session — allowed.
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '310',
+      '--mode',
+      'slot',
+      '--batch',
+      'b-inc',
+      '--project',
+      'test-proj',
+    ]);
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b-inc', dispatch_profile: 'glm' });
   });
 });
