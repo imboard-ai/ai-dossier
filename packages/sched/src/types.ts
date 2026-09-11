@@ -184,8 +184,8 @@ export interface FixAttemptRecord {
  *   validating → blocked(suite-unreadable, after the fallback retry when one
  *              applied) → validating (nothing requeued or reverted; the
  *              `validating` edge exists for a future `sched resume`-style
- *              verb — not yet implemented, so `sched abandon --batch` is
- *              today's only real exit from `blocked`; #562)
+ *              verb; exits today: `sched abandon --batch` (#562) or #686's
+ *              stale-blocked reconcile when the work demonstrably shipped)
  *   awaiting-merge: CONFLICTING | auto-merge-blocked → rebasing → re-validating → shipping
  *                   (2nd failure → dissolved)
  * ```
@@ -216,8 +216,10 @@ export type BatchStatus =
    * no further fallback and blocks on its first unreadable report. Never
    * reached for a genuinely red suite with a parseable failing-test list,
    * which still goes through `attributing`. Nothing is requeued or reverted.
-   * The `validating` edge below is where a future resume verb would land;
-   * today `sched abandon --batch` is the only real exit from this status.
+   * The `validating` edge below is where a future resume verb would land.
+   * Exits today: `sched abandon --batch` (#562), `sched resume --batch`
+   * (#583, a passing gate recheck), or #686's stale-blocked reconcile
+   * (ground truth says the work shipped anyway).
    */
   | 'blocked';
 

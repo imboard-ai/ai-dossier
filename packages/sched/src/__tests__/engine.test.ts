@@ -2577,7 +2577,7 @@ describe('#501: stale auto-merge-blocked failures reconcile after a later merge'
     expect(h.events().some((e) => e.event === 'pr-watch-waiting' && e.issue === 101)).toBe(true);
   });
 
-  it('never reconciles a failed entry for any reason other than auto-merge-blocked', () => {
+  it('#686: reconciles a failed entry for ANY stale verdict once its PR merges — the reason gate is gone (ground truth beats the ledger)', () => {
     const h = harness();
     REGISTRIES.push(h.dir);
     parkUnit(h, 101, 55);
@@ -2588,11 +2588,16 @@ describe('#501: stale auto-merge-blocked failures reconcile after a later merge'
 
     h.setPr(55, { state: 'MERGED', mergedAt: '2026-08-29T13:00:00Z' });
     h.closedIssues.add(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
     h.advance(200_000);
     const result = h.tick();
 
-    expect(result.staleReconciled).toEqual([]);
-    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('failed');
+    expect(result.staleReconciled).toEqual(['issue:101']);
+    expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('shipped');
+    // The journal names the verdict that WAS stale — not a constant.
+    const ev = h.events().find((e) => e.event === 'stale-failure-reconciled' && e.issue === 101);
+    expect(ev).toMatchObject({ issue: 101, pr: 55, reason: 'pr-conflicting' });
   });
 
   it('an unreachable PR poll on a stale-failed entry journals ground-truth-unreachable, not silence', () => {

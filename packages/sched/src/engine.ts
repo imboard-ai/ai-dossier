@@ -471,11 +471,11 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
 
 /**
  * The `QueueEntry.reason` written when the watcher sees the `auto-merge-blocked`
- * label (#468 AC3) — the ONLY reason #501's stale-failure reconcile is
- * eligible for. Written in `reconcileParked`, read by `pollParkedPrs` and
- * `reconcileStaleFailedParks`; conceptually distinct from (but happens to
- * share the string with) the GitHub label name matched in
- * `groundtruth.ts`'s `parsePrViewJson`.
+ * label (#468 AC3) — historically the ONLY reason #501's stale-failure
+ * reconcile was eligible for, until #686 widened the gate to any stale
+ * verdict (ground truth beats the ledger). Still written in `reconcileParked`
+ * and matched in `groundtruth.ts`'s `parsePrViewJson`; conceptually distinct
+ * from (but happens to share the string with) the GitHub label name.
  */
 const AUTO_MERGE_BLOCKED_REASON = 'auto-merge-blocked';
 
@@ -494,11 +494,17 @@ const STALE_RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  * (`reconcileStaleFailedParks`, including its mid-loop re-check). Duplicating
  * this predicate is exactly how a poll set and a reconcile set can silently
  * drift out of sync.
+ *
+ * #686: the reason gate is GONE — the reconciler's principle is *ground truth
+ * beats the ledger* for ANY stale verdict, not just `auto-merge-blocked`
+ * (a `pr-conflicting` failure whose PR later merges is exactly as stale).
+ * What still bounds eligibility: the entry carries a PR to check, and the
+ * failure is inside `STALE_RECONCILE_WINDOW_MS` so an abandoned entry is not
+ * polled forever.
  */
 function isStaleFailedPark(e: QueueEntry, nowMs: number): e is QueueEntry & { pr: number } {
   return (
     e.status === 'failed' &&
-    e.reason === AUTO_MERGE_BLOCKED_REASON &&
     e.pr !== null &&
     nowMs - Date.parse(e.updated_at) < STALE_RECONCILE_WINDOW_MS
   );
@@ -2697,20 +2703,20 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
 }
 
 /**
- * #501: reconcile `failed reason=auto-merge-blocked` entries whose PR later
- * merged after an operator manually re-queued it (removed
- * `auto-merge-blocked`, re-added `auto-merge`) — outside the engine's own
- * watch, since `reconcileParked` stops watching an entry the instant it
- * leaves `parked`, including into `failed`. Flips it to `shipped` so
- * `sched status` and `dispatchReportAgents` treat it exactly like a
- * normally-watched merge, and unblocks dependents wedged on the original
- * (now-reversed) failure; ground truth comes from `pollParkedPrs`, which
- * this piggybacks — no separate poll pass, though each watched entry still
- * costs its own `gh pr view`/`gh issue view`.
+ * #501: reconcile `failed` entries whose PR later merged after an operator
+ * manually re-queued it (removed `auto-merge-blocked`, re-added
+ * `auto-merge`) — outside the engine's own watch, since `reconcileParked`
+ * stops watching an entry the instant it leaves `parked`, including into
+ * `failed`. Flips it to `shipped` so `sched status` and `dispatchReportAgents`
+ * treat it exactly like a normally-watched merge, and unblocks dependents
+ * wedged on the original (now-reversed) failure; ground truth comes from
+ * `pollParkedPrs`, which this piggybacks — no separate poll pass, though each
+ * watched entry still costs its own `gh pr view`/`gh issue view`.
  *
- * Deliberately narrow: only `isStaleFailedPark` entries are eligible (AC3) —
- * a `failed` entry for any other reason, or one whose PR has sat blocked
- * past `STALE_RECONCILE_WINDOW_MS`, is never touched.
+ * #686: deliberately reason-AGNOSTIC (see `isStaleFailedPark`) — ground truth
+ * beats the ledger for any stale verdict. Only the entry set
+ * `isStaleFailedPark` returns is eligible: a `failed` entry without a PR, or
+ * one whose failure sat past `STALE_RECONCILE_WINDOW_MS`, is never touched.
  */
 function reconcileStaleFailedParks(ctx: TickCtx, state: SchedState, prPoll: PrPoll): SchedState {
   if (!prPoll.ran) return state;
@@ -2749,7 +2755,7 @@ function reconcileStaleFailedParks(ctx: TickCtx, state: SchedState, prPoll: PrPo
       next = journalPrWatchWaitingIfDue(ctx, next, unit, {
         pr: entry.pr,
         mergedAt: truth.mergedAt,
-        reason: AUTO_MERGE_BLOCKED_REASON,
+        reason: entry.reason,
         detail: 'stale-failed PR merged but the issue is still open — keep watching',
       });
       continue;
@@ -2761,9 +2767,9 @@ function reconcileStaleFailedParks(ctx: TickCtx, state: SchedState, prPoll: PrPo
     journal(ctx, 'stale-failure-reconciled', unit, {
       pr: entry.pr,
       mergedAt: truth.mergedAt,
-      reason: AUTO_MERGE_BLOCKED_REASON,
+      reason: entry.reason,
       failedAt,
-      detail: `PR #${entry.pr} is MERGED and the issue is closed — ledger reconciled failed to shipped (failed at ${failedAt}); teardown and report will now dispatch`,
+      detail: `PR #${entry.pr} is MERGED and the issue is closed — ledger reconciled failed (reason: ${entry.reason}) to shipped (failed at ${failedAt}); teardown and report will now dispatch`,
     });
     ctx.result.staleReconciled.push(unit);
 
