@@ -21,7 +21,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 // stale `BatchEntry` snapshot, a condition the public `runBatchTick`/
 // `resumeBlockedGate` entry points cannot reproduce (both always read state
 // fresh from the store).
-import { type BatchTickResult, evictMemberAndContinue } from '../batch-dispatch';
+import { type BatchTickResult, evictMemberAndContinue, memberBranchFor } from '../batch-dispatch';
 // Same rationale as the `evictMemberAndContinue` import above: a test-only
 // path builder, not part of the package's public `index.ts` surface.
 import { batchMemberLogPath } from '../dispatch';
@@ -159,6 +159,11 @@ function scratchRepo(): string {
   git(['commit', '-m', 'init'], work);
   git(['push', '-u', 'origin', 'main'], work);
   return work;
+}
+
+/** Read-only git probe used by the #677 member-worktree tests (and reusable by any test that needs a `git` answer as a string). */
+function gitAt(args: string[], cwd: string): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
 }
 
 /** `git add . && git commit -m <message> && git push origin main` against a `scratchRepo()`'s `work` dir — shared tail every seeder function below repeats otherwise. */
@@ -1668,13 +1673,11 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     const m1Worktree = batch?.member_worktree as string;
     const m1Branch = batch?.member_branch as string;
     // The member branch is per-member and NOT the integration branch.
-    expect(m1Branch).toBe(`batch/b-members-m1-1501`);
+    expect(m1Branch).toBe(memberBranchFor('b-members', 1, 1501));
     expect(m1Branch).not.toBe(integrationBranch);
     // The worktree exists, is ON the member branch, and is clean — the three
     // git preconditions member-cycle's Step 0 asserts.
     expect(fs.existsSync(m1Worktree)).toBe(true);
-    const gitAt = (args: string[], cwd: string): string =>
-      execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     expect(gitAt(['branch', '--show-current'], m1Worktree).trim()).toBe(m1Branch);
     expect(gitAt(['status', '--porcelain'], m1Worktree).trim()).toBe('');
     // The member branch was cut OFF the integration branch (identical tip at
@@ -1706,7 +1709,7 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     const m2Branch = batch?.member_branch as string;
     expect(m2Worktree).not.toBe(m1Worktree);
     expect(fs.existsSync(m2Worktree)).toBe(true);
-    expect(m2Branch).toBe(`batch/b-members-m2-1502`);
+    expect(m2Branch).toBe(memberBranchFor('b-members', 2, 1502));
     // Member 2 branched off the INTEGRATION TIP THAT INCLUDES member 1 — the
     // serial model's "members see prior members' work" invariant.
     expect(gitAt(['rev-parse', m2Branch], repo).trim()).toBe(
@@ -1750,8 +1753,6 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(batch?.blocked_reason).toBe('gate-inconclusive:test.focused');
     // The member's verified-shape work is on the INTEGRATION branch — the
     // operator-facing surface — even though the gate never said ok.
-    const gitAt = (args: string[], cwd: string): string =>
-      execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const log = gitAt(['log', '--format=%s', `origin/main..${batch?.branch as string}`], repo);
     expect(log).toContain('(#1511)');
     // The member worktree SURVIVES the block — `sched resume --batch`'s
@@ -1784,13 +1785,11 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     h.tick(); // reconcile: self-blocked → evict directly → NO landing
     let batch = findBatch(h.state(), 'b-evict');
     expect(batch?.evictions.map((e) => e.issue)).toEqual([1521]);
-    const gitAt = (args: string[], cwd: string): string =>
-      execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const log = gitAt(['log', '--format=%s', `origin/main..${batch?.branch as string}`], repo);
     expect(log).not.toContain('(#1521)');
     // The evicted member's tree is gone; the local branch (unmerged) is gone.
     expect(fs.existsSync(batch1?.member_worktree as string)).toBe(false);
-    expect(gitAt(['branch', '--list', 'batch/b-evict-m1-1521'], repo).trim()).toBe('');
+    expect(gitAt(['branch', '--list', memberBranchFor('b-evict', 1, 1521)], repo).trim()).toBe('');
 
     // The batch continues: member 2 dispatches, completes, lands.
     pid = batchSlotPid(h, 'b-evict') as number;

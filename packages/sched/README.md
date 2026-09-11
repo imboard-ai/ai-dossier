@@ -140,7 +140,7 @@ where every mechanical supervision decision is code, not remembered prose:
    completing a freshly-spawned agent on
    its first reconcile tick; a legacy slot with no `spawned_at` degrades to the old,
    unfenced check. Batch members get the same fence on their own completion signal
-   (`isMemberComplete`, `phase=review status=done mode=slot`).
+   (`isMemberComplete`, `phase=review status=done` on the member-trail vocabulary — `mode=slot` or `batch=<id>`, #677).
 3. **Reconciliation tick (AC3)** — every tick detects externally-advanced state (someone
    finished the work outside sched → complete, kill the leftover agent, reclaim the
    slot), orphaned pids after a restart (dead pid on a running slot → exit rail →
@@ -685,18 +685,28 @@ failure rails: executing → dissolving (a member self-reports blocked)
   package-manager-detected install/build (`@ai-dossier/worktree-pool`'s command
   resolution — respects the repo's `.worktree-pool.json` `project_subdir`/
   `warm_commands` even in repos that never use the pool for anything else).
-- **Members run serially, one fresh `slot-cycle` agent at a time**, in the shared
-  worktree. A member's completion signal is `phase=review status=done mode=slot` on its
-  OWN issue (`slot-cycle` posts no phase of its own past `review` — ship is batch-owned);
-  its commit range on the batch branch is recomputed (`git log`) after every member and
-  kept on `BatchEntry.ranges` for eviction. An incremental gate (`ai-dossier cap run
+  This shared tree is the batch's INTEGRATION branch: members branch off it, and
+  the tail work (aggregate suite, review, ship) runs in it (#677).
+- **Members run `member-cycle` serially, one fresh agent at a time — each in its OWN
+  worktree** on its OWN branch `batch/<id>-m<n>-<issue>` (#677, RFC-0001 §J.3), cut off
+  the integration branch, warmed, and pushed before the agent spawns; the agent never
+  creates either. When the member's incremental gate passes, the scheduler LANDS the
+  member's branch onto the integration branch (`git merge --ff-only` + push) and tears
+  the member worktree down (pool-return or remove) before the next member prep. A
+  member's completion signal is `phase=review status=done` carrying the member-trail
+  vocabulary — `mode=slot` or `batch=<id>` — on its OWN issue (the member workflow
+  posts no phase of its own past `review` — ship is batch-owned); its commit range on
+  the integration branch is recomputed (`git log`) after every landing and kept on
+  `BatchEntry.ranges` for eviction. An incremental gate (`ai-dossier cap run
   typecheck.run` / `test.focused`, when the repo has a manifest) runs after each member
-  before advancing — a second, independent check that the member's self-reported "done"
-  is real. Four-way outcome policy (#583, split further by #594): a `task-failed` whose
+  IN ITS MEMBER WORKTREE before landing — a second, independent check that the
+  member's self-reported "done" is real (`resume --batch` rechecks run there too).
+  Four-way outcome policy (#583, split further by #594): a `task-failed` whose
   `output_tail` carries recognizable evidence that the capability EARNED it — failing-test
   output for a `test.*` capability, compiler/build errors for the others
-  (`hasEarnedFailureEvidence`) — evicts the member (same rail as a self-reported block);
-  a `task-failed` with an empty or framing-only capture proves nothing and joins
+  (`hasEarnedFailureEvidence`) — evicts the member (same rail as a self-reported block;
+  its commits never landed, so there is nothing to revert); a `task-failed` with an
+  empty or framing-only capture proves nothing and joins
   `automation-broken`/`capability-unavailable` — the gate itself couldn't reach a verdict
   — on the block-the-batch path instead of silently proceeding (`gate-inconclusive:<cap>`,
   `member_gates`/`blocked_reason` on `BatchEntry`, surfaced in `sched status`; the journal
@@ -803,7 +813,26 @@ recorded under the old behavior, so those values are exact, not a guess. Cleared
 with the slot on release (`CLEARED_SLOT_FIELDS`), so the next unit assigned there
 journals its first milestone fresh.
 
+Schema 1.18.0 (#677): `BatchEntry` gains `member_branch` and `member_worktree` (the
+CURRENT member's own branch `batch/<id>-m<n>-<issue>` off the integration branch and
+the worktree holding it — the `{worktree}`/`{integration_branch}` inputs the member
+prompt carries, and where the incremental gate runs pre-landing) and
+`member_pool_claimed` (teardown reads it to decide pool-return vs remove, mirroring
+`pool_claimed` at member granularity). 1.17.0 states migrate on load, backfilling
+`null`/`null`/`false` — pre-#677 members ran in the shared batch worktree, so those
+values are exact, not a guess. Persisted (not re-derived) so a takeover redispatch or
+a `sched resume --batch` recheck after an engine restart lands in the SAME
+worktree/branch.
+
 New journal events: `batch-setup-done`, `batch-setup-failed`, `member-advanced`,
+`member-worktree-reused` (#677 — an on-disk member worktree reused by a takeover
+redispatch or a crash-window re-prep; a spawn-time event, never per-tick),
+`member-landed` (#677 — the member's verified branch fast-forward-landed onto the
+integration branch), `landing-failed` (#677 — the mechanical landing failed; BLOCKS
+the batch for an operator, like `batch-blocked`), `member-worktree-torn-down` (#677 —
+the member's own worktree/branch cleaned up after it resolved) and
+`stale-member-worktree` (#677 — persisted member context that does not belong to the
+current member was discarded for a fresh prep),
 `batch-warmup-done`, `batch-warmup-failed` (#561 — the cold-path warm step only; a pool
 claim emits neither). `gate-inconclusive` (#583 — the incremental gate came back
 `automation-broken`/`capability-unavailable` rather than a definite `ok`/`task-failed`;
@@ -818,7 +847,8 @@ once per member and names the member the batch is advancing FROM) and
 stops advancing never does so silently). Member/tail/report/fix-agent spawn, progress,
 completion and park events reuse the existing unit-generic names (`assigned`/`spawned`/`unit-failed`/
 `external-advance`/`pr-parked`/`merge-accepted`/`report-dispatched`/`teardown-done`/
-`teardown-failed`) with `unit = batch:<id>`.
+`teardown-failed`) with `unit = batch:<id>`; the member `spawned` event also carries
+`worktree` (#677) naming the member worktree the prompt was built with.
 
 ## API surface
 
@@ -953,10 +983,11 @@ import {
   type CapOutcome,       // ok | task-failed | automation-broken | capability-unavailable
   type CapabilityGateResult, // {outcome: CapOutcome, outputTail?, reason?} — runCapability's return shape (#583)
   resumeBlockedGate,     // #583: sched resume --batch <id> — re-run the gate that blocked a batch
-  buildMemberPrompt, buildBatchTailPrompt, buildBatchReportPrompt, // #523 prompt builders
+  buildMemberPrompt, buildBatchTailPrompt, buildBatchReportPrompt, // #523 prompt builders (#677: member carries {issue}/{batch}/{worktree}/{integration_branch})
+  memberBranchFor, // #677: the member branch name, `batch/<id>-m<n>-<issue>` — one definition, every recovery surface derives from it
   DEFAULT_MEMBER_PROMPT_TEMPLATE, DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE,
   DEFAULT_BATCH_REPORT_PROMPT_TEMPLATE,
-  isMemberComplete, isMemberBlocked, // member milestone predicates (mode=slot gated)
+  isMemberComplete, isMemberBlocked, // member milestone predicates (member-trail gated: mode=slot or batch=<id>, #677)
   isBatchTailParked,     // batch-ship awaiting-merge + pr= — the batch park signal
   isBatchPhaseDone,      // <phase> done on the anchor (batch-review/batch-report)
   batchOfUnit,           // batch:<id> → <id>; null for issue units or malformed ids

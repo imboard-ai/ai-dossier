@@ -385,16 +385,19 @@ export interface BatchEntry {
    */
   anchor: number | null;
   /**
-   * The batch working branch, written by batch-setup dispatch (#523) — the
-   * ONE worktree/branch every member and tail step shares. Null before the
+   * The batch INTEGRATION branch, written by batch-setup dispatch (#523) —
+   * members branch off it and the scheduler lands their verified work onto
+   * it; the tail steps (aggregate suite, review, ship) run in it. Null before the
    * batch has been dispatched a first time; recovery also READS it, to refuse
    * a rebase when the checkout is on some other branch.
    */
   branch: string | null;
   /**
-   * Absolute path of the shared worktree batch-setup created (#523) — where
-   * every member's `slot-cycle` run and every tail-phase agent (validate,
-   * review, ship, report) execute. Null until batch-setup lands.
+   * Absolute path of the shared worktree batch-setup created (#523) — holds
+   * the integration branch, where the tail-phase agents (validate, review,
+   * ship, report), the aggregate suite, and each member's landing merge
+   * run. Since #677 members execute in their own `member_worktree`, not
+   * here. Null until batch-setup lands.
    */
   worktree: string | null;
   /**
@@ -419,7 +422,8 @@ export interface BatchEntry {
    * carries no such key — `state.ts`'s load-time normalization backfills it
    * to `null`. Persisted (not re-derived) so a takeover redispatch or a
    * `sched resume --batch` recheck after an engine restart lands in the SAME
-   * worktree/branch the member was already using.
+   * worktree/branch the member was already using. Added in schema 1.18.0;
+   * 1.17.0 batches backfill null.
    */
   member_branch: string | null;
   /**
@@ -427,6 +431,7 @@ export interface BatchEntry {
    * `{worktree}` input the member prompt carries, and where the incremental
    * gate runs (pre-landing, the member's diff exists only here). Paired with
    * {@link BatchEntry.member_branch}; same lifecycle and backfill-to-null.
+   * Added in schema 1.18.0.
    */
   member_worktree: string | null;
   /**
@@ -434,7 +439,8 @@ export interface BatchEntry {
    * (#677) — teardown reads this to decide `worktree-pool return` vs
    * `git worktree remove`, mirroring {@link BatchEntry.pool_claimed} at
    * member granularity. `false` until a member worktree is prepared;
-   * backfilled to `false` on load like the other #677 fields.
+   * backfilled to `false` on load like the other #677 fields. Added in
+   * schema 1.18.0.
    */
   member_pool_claimed: boolean;
   /**
@@ -872,9 +878,11 @@ export interface DispatchConfig {
    */
   suite_command?: string[];
   /**
-   * Prompt template for one batch member (#523 AC1) — runs `imboard-ai/git/
-   * slot-cycle` inside the shared batch worktree; `{issue}`, `{batch}` and
-   * `{worktree}` substituted. Defaults to `DEFAULT_MEMBER_PROMPT_TEMPLATE`.
+   * Prompt template for one batch member (#523 AC1, #677) — runs
+   * `imboard-ai/git/member-cycle` in the member's OWN worktree off the
+   * integration branch; `{issue}`, `{batch}`, `{worktree}` and
+   * `{integration_branch}` substituted. Defaults to
+   * `DEFAULT_MEMBER_PROMPT_TEMPLATE`.
    */
   member_prompt?: string;
   /**
@@ -1102,8 +1110,11 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * 1.17.0 (#683): `SlotEntry` gains `run_id`/`fence_phase` — the fence's trail
  * coordinates, captured at write time so the spawn-path bind and the
  * `exit-detected`-hook release can name the same record without a trail read.
+ * 1.18.0 (#677): `BatchEntry` gains `member_branch`/`member_worktree`/
+ * `member_pool_claimed` — the current member's own worktree/branch context
+ * (RFC-0001 §J.3); `null`/`null`/`false` backfilled on load.
  */
-export const SCHEMA_VERSION = '1.17.0' as const;
+export const SCHEMA_VERSION = '1.18.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1124,6 +1135,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.14.0',
   '1.15.0',
   '1.16.0',
+  '1.17.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.8.0' as const;
@@ -1337,7 +1349,8 @@ export type JournalEventName =
   // redispatched at the same tier without consuming an escalation rung.
   | 'announced-wait'
   // #523 batch dispatch: claiming the shared worktree/branch, and advancing
-  // the member pointer between slot-cycle runs. Member/tail-agent spawn,
+  // the member pointer between member-cycle runs (#677: members run in their
+  // own worktrees off the integration branch). Member/tail-agent spawn,
   // progress, completion and park events reuse the existing unit-generic
   // names above (`assigned`/`spawned`/`progress`/`external-advance`/
   // `verify-complete`/`pr-parked`/`merge-accepted`/`report-dispatched`) —
@@ -1358,11 +1371,15 @@ export type JournalEventName =
   // SAME member reused by a takeover redispatch (spawn-time event, never
   // per-tick); a member's verified branch fast-forward-landed onto the
   // integration branch; the mechanical landing step failing (blocks the
-  // batch); the member's own worktree/branch cleaned up after resolution.
+  // batch); the member's own worktree/branch cleaned up after resolution;
+  // and persisted member context that does NOT belong to the current
+  // member (stale after a failed teardown or a crash mid-eviction),
+  // journalled once at the moment it is discarded for a fresh prep.
   | 'member-worktree-reused'
   | 'member-landed'
   | 'landing-failed'
   | 'member-worktree-torn-down'
+  | 'stale-member-worktree'
   // #507 enqueue-time hard-block label pre-screen (journaled by the CLI,
   // NOT the engine — sched enqueue appends these before the issue is ever
   // dispatched)

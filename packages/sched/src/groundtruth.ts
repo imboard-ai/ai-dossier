@@ -610,18 +610,18 @@ export function isMemberComplete(
   if (milestone === null || milestone.phase !== 'review' || milestone.status !== 'done') {
     return false;
   }
-  if (!isSlotModeTrail(milestone)) return false;
+  if (!isBatchMemberTrail(milestone)) return false;
   return postdatesDispatch(milestone.at, dispatchedAt);
 }
 
 /**
- * The slot-mode trail guard shared by `isMemberComplete`/`isMemberBlocked`
+ * The batch-member trail guard shared by `isMemberComplete`/`isMemberBlocked`
  * (#677): the milestone names a batch-member run — `mode=slot` (slot-cycle's
  * spelling) or a present `batch=<id>` key (member-cycle's spelling, the same
  * disjunction gate-issue's fresh-entry rule documents). A stray full-cycle
  * milestone carries neither.
  */
-function isSlotModeTrail(milestone: GroundTruthMilestone): boolean {
+function isBatchMemberTrail(milestone: GroundTruthMilestone): boolean {
   return milestone.keys.mode === 'slot' || milestone.keys.batch !== undefined;
 }
 
@@ -652,7 +652,7 @@ export function isMemberBlocked(
   dispatchedAt: string | null = null
 ): boolean {
   if (milestone === null || milestone.status !== 'blocked') return false;
-  if (!isSlotModeTrail(milestone)) return false;
+  if (!isBatchMemberTrail(milestone)) return false;
   return postdatesDispatch(milestone.at, dispatchedAt);
 }
 
