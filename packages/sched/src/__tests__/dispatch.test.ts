@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import {
   buildAgentCommand,
@@ -887,7 +888,6 @@ describe('background-execution guard (#685 AC1 — the tool cannot be background
   // The hook command is executed through a shell by the claude CLI — run it
   // the same way, feeding it the hook payload on stdin like the CLI does.
   function runHook(input: string): number {
-    const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
     const command = (
       JSON.parse(HEADLESS_BACKGROUND_GUARD_SETTINGS) as {
         hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> };

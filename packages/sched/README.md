@@ -115,7 +115,19 @@ where every mechanical supervision decision is code, not remembered prose:
    in `config.json` to opt out, or list your own tools to deny instead of the default
    `["Monitor"]`. Matched on the binary's basename, so an absolute or wrapper path
    (`/usr/local/bin/claude`) still gets it; never applied to a non-`claude` command or one
-   that already carries the flag itself, so an `opencode` tier is unaffected.
+   that already carries the flag itself, so an `opencode` tier is unaffected. Since #685
+   the same commands also get `--settings` carrying a `PreToolUse` hook that DENIES
+   background execution outright: any `Bash`/`Task` call with `run_in_background` set is
+   blocked at the tool layer (exit 2, the deny message fed back to the model), so the
+   agent runs the command in the foreground instead — the failure mode can no longer
+   occur on a `claude`-family dispatch, not merely be discouraged. The guard is
+   independent of `disallowed_tools` (the `[]` opt-out removes only the flag), never
+   applied to a non-`claude` command, and skipped when the template already carries its
+   own `--settings` (an operator's settings file is authoritative). `opencode` tiers have
+   no settings surface: there the prompt instruction plus the engine's `announced-wait`
+   classification carry the load — a clean exit whose final message announces a wait on
+   background work is redispatched at the SAME tier without consuming an escalation rung
+   (#685), instead of burning a tier on a known-recoverable condition.
 2. **Completion verification (AC2)** — an agent exiting is never proof of completion.
    On exit, the unit completes only when ground truth confirms it: the issue's latest
    runstate milestone is `report done`, or GitHub says the issue is closed — except a
