@@ -115,14 +115,20 @@ for host in "${HOST_LIST[@]}"; do
   # Capture the version actually installed and compare it against npm latest —
   # `ok` must mean "current", not "the command ran" (#696).
   if [ "$host" = "wls" ] || [ "$host" = "$(hostname)" ]; then
-    inst=$(bash -lc "$REMOTE_PRELUDE
-\"\$AD\" --version" 2>/dev/null | tail -1); rc=$?
+    out=$(bash -lc "$REMOTE_PRELUDE
+\"\$AD\" --version" 2>&1); rc=$?
   else
-    inst=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "$REMOTE_PRELUDE
-\"\$AD\" --version" 2>/dev/null | tail -1); rc=$?
+    out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "$REMOTE_PRELUDE
+\"\$AD\" --version" 2>&1); rc=$?
   fi
+  # The version is the last non-empty line; nvm/banner noise lands above it.
+  inst=$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | tail -1)
   if [ $rc -ne 0 ] || [ -z "$inst" ]; then
-    echo "    FAIL cli version (binary did not report a version)"
+    echo "    FAIL cli version (exit $rc — binary did not report a version)"
+    printf '%s\n' "$out" | tail -4 | sed 's/^/         /'
+    HOST_STATUS[$host]="fail"; FAILED=1
+  elif ! printf '%s' "$inst" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]*)?$'; then
+    echo "    FAIL cli version (unparseable version output: $inst)"
     HOST_STATUS[$host]="fail"; FAILED=1
   elif [ -n "$LATEST" ] && ! ver_ge "$inst" "$LATEST"; then
     echo "    WARN cli version installed=$inst latest=$LATEST — BEHIND (npm still has the previous release, or the install landed under a different node)"
