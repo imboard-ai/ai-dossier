@@ -581,15 +581,24 @@ export function isVerifiedComplete(
 }
 
 /**
- * A batch member's completion signal (#523 AC1): `slot-cycle` posts no phase
- * of its own past `review` — "ship is batch-owned" — so a member's work is
- * verified complete when its latest milestone is `phase=review status=done
- * mode=slot`. `mode=slot` guards against a member issue somehow carrying an
- * unrelated `review done` from a stray full-cycle run.
+ * A batch member's completion signal (#523 AC1): the member workflow posts no
+ * phase of its own past `review` — "ship is batch-owned" — so a member's work
+ * is verified complete when its latest milestone is `phase=review status=done`
+ * carrying the slot-mode trail vocabulary. `mode=slot` guards against a member
+ * issue somehow carrying an unrelated `review done` from a stray full-cycle
+ * run.
+ *
+ * #677: the vocabulary is now TWO spellings, matching gate-issue's documented
+ * slot-trail rule ("carries `mode=slot` or `batch=<id>`"): `slot-cycle` posts
+ * `mode=slot`, and `member-cycle` (the §J workflow the default member prompt
+ * dispatches) carries `batch=<id>` on every milestone — its blocked postings
+ * in particular name `batch=` without `mode=slot`. Either key marks the trail
+ * as batch-member-owned; a milestone with NEITHER is some other run's and
+ * never completes a member.
  *
  * #575: the same dispatch fence as `isVerifiedComplete` — a member issue
  * re-added to a fresh batch run after a PREVIOUS batch already posted its
- * `review done mode=slot` milestone (pilot re-run, requeue-with-context) must
+ * terminal milestone (pilot re-run, requeue-with-context) must
  * not read as instantly complete against that stale milestone. `dispatchedAt`
  * is the member slot's `SlotEntry.spawned_at`, stamped fresh on every
  * `spawnMember` call (`batch-dispatch.ts`) exactly like the per-issue path.
@@ -598,32 +607,42 @@ export function isMemberComplete(
   milestone: GroundTruthMilestone | null,
   dispatchedAt: string | null = null
 ): boolean {
-  if (
-    milestone === null ||
-    milestone.phase !== 'review' ||
-    milestone.status !== 'done' ||
-    milestone.keys.mode !== 'slot'
-  ) {
+  if (milestone === null || milestone.phase !== 'review' || milestone.status !== 'done') {
     return false;
   }
+  if (!isSlotModeTrail(milestone)) return false;
   return postdatesDispatch(milestone.at, dispatchedAt);
 }
 
 /**
- * A batch member's blocked signal (#523 AC1/AC2): `slot-cycle` posts
- * `status=blocked mode=slot` at whichever phase it could not proceed past
+ * The slot-mode trail guard shared by `isMemberComplete`/`isMemberBlocked`
+ * (#677): the milestone names a batch-member run — `mode=slot` (slot-cycle's
+ * spelling) or a present `batch=<id>` key (member-cycle's spelling, the same
+ * disjunction gate-issue's fresh-entry rule documents). A stray full-cycle
+ * milestone carries neither.
+ */
+function isSlotModeTrail(milestone: GroundTruthMilestone): boolean {
+  return milestone.keys.mode === 'slot' || milestone.keys.batch !== undefined;
+}
+
+/**
+ * A batch member's blocked signal (#523 AC1/AC2): the member workflow posts
+ * `status=blocked` at whichever phase it could not proceed past
  * (plan/implement/review) — the reason lives in the milestone's `reason=` key.
+ * The trail-vocabulary guard is #677's two-spelling slot-mode rule (see
+ * `isMemberComplete`).
  *
  * #605: the SAME dispatch fence as `isMemberComplete`, and for the same
  * reason at the opposite end of the state machine. #575 fenced the complete
  * half of this bug class and left the blocked half reading raw, so a member
- * re-added to a fresh batch after a PREVIOUS batch posted `blocked mode=slot`
- * — which is precisely what RFC-0001 F.8 does, requeuing every member of a
- * dissolved batch — read as instantly blocked against that stale milestone.
- * Its agent was evicted mid-run, and the journal named the OLD run's `reason=`
- * on a run where that reason no longer applied. Worse than one lost member: a
- * dissolved batch's members became permanently un-batchable, because every
- * retry re-read the hand-back that caused the dissolve and dissolved again.
+ * re-added to a fresh batch after a PREVIOUS batch posted a stale blocked
+ * milestone — which is precisely what RFC-0001 F.8 does, requeuing every
+ * member of a dissolved batch — read as instantly blocked against that stale
+ * milestone. Its agent was evicted mid-run, and the journal named the OLD
+ * run's `reason=` on a run where that reason no longer applied. Worse than
+ * one lost member: a dissolved batch's members became permanently
+ * un-batchable, because every retry re-read the hand-back that caused the
+ * dissolve and dissolved again.
  *
  * `dispatchedAt` is the member slot's `SlotEntry.spawned_at`; `null` degrades
  * to the old permissive check exactly as it does for the complete path.
@@ -632,9 +651,8 @@ export function isMemberBlocked(
   milestone: GroundTruthMilestone | null,
   dispatchedAt: string | null = null
 ): boolean {
-  if (milestone === null || milestone.status !== 'blocked' || milestone.keys.mode !== 'slot') {
-    return false;
-  }
+  if (milestone === null || milestone.status !== 'blocked') return false;
+  if (!isSlotModeTrail(milestone)) return false;
   return postdatesDispatch(milestone.at, dispatchedAt);
 }
 

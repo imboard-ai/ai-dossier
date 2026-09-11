@@ -60,8 +60,9 @@
  * Everything that touches the world (processes, GitHub, git) is injected;
  * the state machine is pure. This file dispatches `issue:<n>` units only —
  * since #523, `tick()` also runs a second pass (`batch-dispatch.ts`'s
- * `runBatchTick`) that drives every `batch:<id>` unit (serial slot-cycle
- * members, the aggregate suite, the tail agent, the PR watch, the report
+ * `runBatchTick`) that drives every `batch:<id>` unit (serial member-cycle
+ * members in their own worktrees (#677), the aggregate suite, the tail
+ * agent, the PR watch, the report
  * agent), merging its result into this tick's `TickResult`. That pass runs
  * only when `EngineDeps.batchExec`/`runBatchSuite` are both supplied — an
  * engine missing either never dispatches a `ready` batch (it stays queued).

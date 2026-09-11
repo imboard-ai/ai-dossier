@@ -185,6 +185,45 @@ describe('isMemberComplete (#523 AC1) with the #575 dispatch fence', () => {
     expect(isMemberComplete(memberDone('2026-08-29T12:00:00Z'), null)).toBe(true);
     expect(isMemberComplete(memberDone('2026-08-29T12:00:00Z'))).toBe(true);
   });
+
+  describe('#677: member-cycle vocabulary — a present batch= key also marks the trail', () => {
+    // member-cycle carries `batch=<id>` on every milestone (its blocked
+    // postings name `batch=` without `mode=slot`); gate-issue's slot-trail
+    // rule already reads the disjunction ("carries `mode=slot` or
+    // `batch=<id>`"). The scheduler's predicates must accept both spellings.
+    const memberDoneBatch = (at: string): GroundTruthMilestone => ({
+      phase: 'review',
+      status: 'done',
+      run: 'r',
+      at,
+      keys: { batch: 'b-20260909-01' },
+    });
+
+    it('a review/done milestone carrying only batch= verifies completion', () => {
+      expect(isMemberComplete(memberDoneBatch('2026-08-29T12:00:00Z'))).toBe(true);
+      expect(
+        isMemberComplete(memberDoneBatch('2026-09-02T08:00:00Z'), '2026-09-02T08:00:00Z')
+      ).toBe(true);
+    });
+
+    it('the #575 dispatch fence applies to the batch= spelling too', () => {
+      expect(
+        isMemberComplete(memberDoneBatch('2026-09-02T05:00:00Z'), '2026-09-02T08:00:00Z')
+      ).toBe(false);
+    });
+
+    it('a full-cycle milestone (neither mode=slot nor batch=) still does NOT complete a member', () => {
+      expect(
+        isMemberComplete({
+          phase: 'review',
+          status: 'done',
+          run: 'r',
+          at: '2026-08-29T12:00:00Z',
+          keys: {},
+        })
+      ).toBe(false);
+    });
+  });
 });
 
 describe('isMemberBlocked (#523 AC1/AC2) with the #605 dispatch fence', () => {
@@ -208,6 +247,33 @@ describe('isMemberBlocked (#523 AC1/AC2) with the #605 dispatch fence', () => {
       })
     ).toBe(false);
     expect(isMemberBlocked(null)).toBe(false);
+  });
+
+  it('#677: a blocked milestone carrying only batch= (member-cycle) signals a blocked member', () => {
+    // member-cycle's Step 0/Step 6 hand-back postings name `--kv batch=<batch>`
+    // without `mode=slot` — the scheduler must read the hand-back, or the
+    // member dies unfenced as `agent-exited-unverified` instead.
+    expect(
+      isMemberBlocked({
+        phase: 'plan',
+        status: 'blocked',
+        run: 'r',
+        at: '2026-08-29T12:00:00Z',
+        keys: { batch: 'b-20260909-01', reason: 'env-cold' },
+      })
+    ).toBe(true);
+    expect(
+      isMemberBlocked(
+        {
+          phase: 'plan',
+          status: 'blocked',
+          run: 'r',
+          at: '2026-09-06T07:00:00Z',
+          keys: { batch: 'b-20260909-01', reason: 'env-cold' },
+        },
+        '2026-09-06T08:02:00Z'
+      )
+    ).toBe(false);
   });
 
   it('#605: a blocked milestone that predates dispatchedAt does NOT block the member', () => {

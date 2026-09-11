@@ -409,6 +409,35 @@ export interface BatchEntry {
    */
   pool_claimed: boolean;
   /**
+   * The CURRENT member's own branch (#677, RFC-0001 §J.3) — `batch/<id>-m<n>-<issue>`,
+   * created off the integration branch, checked out in the member's own
+   * worktree, and pushed so the member agent can commit to it. The member
+   * NEVER touches the integration branch; the scheduler lands its commits
+   * there (`merge --ff-only`) only after the member's incremental gate
+   * passes. Null before a member is dispatched and cleared once the member
+   * is resolved (landed or evicted); a state file written before #677
+   * carries no such key — `state.ts`'s load-time normalization backfills it
+   * to `null`. Persisted (not re-derived) so a takeover redispatch or a
+   * `sched resume --batch` recheck after an engine restart lands in the SAME
+   * worktree/branch the member was already using.
+   */
+  member_branch: string | null;
+  /**
+   * Absolute path of the CURRENT member's own worktree (#677) — the
+   * `{worktree}` input the member prompt carries, and where the incremental
+   * gate runs (pre-landing, the member's diff exists only here). Paired with
+   * {@link BatchEntry.member_branch}; same lifecycle and backfill-to-null.
+   */
+  member_worktree: string | null;
+  /**
+   * Whether {@link BatchEntry.member_worktree} came from a pool claim
+   * (#677) — teardown reads this to decide `worktree-pool return` vs
+   * `git worktree remove`, mirroring {@link BatchEntry.pool_claimed} at
+   * member granularity. `false` until a member worktree is prepared;
+   * backfilled to `false` on load like the other #677 fields.
+   */
+  member_pool_claimed: boolean;
+  /**
    * runstate run id of the batch run (`r-<issue>-<hex>`), null until batch-setup
    * mints it. `ai-dossier runstate post` REQUIRES a run id, so a batch without
    * one cannot post milestones at all — recovery journals them instead.
@@ -1325,6 +1354,15 @@ export type JournalEventName =
   | 'batch-warmup-done'
   | 'batch-warmup-failed'
   | 'member-advanced'
+  // #677 per-member worktrees (RFC-0001 §J.3): an on-disk worktree for the
+  // SAME member reused by a takeover redispatch (spawn-time event, never
+  // per-tick); a member's verified branch fast-forward-landed onto the
+  // integration branch; the mechanical landing step failing (blocks the
+  // batch); the member's own worktree/branch cleaned up after resolution.
+  | 'member-worktree-reused'
+  | 'member-landed'
+  | 'landing-failed'
+  | 'member-worktree-torn-down'
   // #507 enqueue-time hard-block label pre-screen (journaled by the CLI,
   // NOT the engine — sched enqueue appends these before the issue is ever
   // dispatched)
@@ -1403,6 +1441,8 @@ export interface JournalEvent {
   issue?: number;
   pid?: number;
   tier?: ModelTier;
+  /** The worktree a member dispatch spawned into (#677) — the per-member evidence trail. */
+  worktree?: string;
   detail?: string;
   /**
    * Free-form cause, matching `QueueEntry.reason`'s vocabulary for a

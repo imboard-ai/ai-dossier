@@ -16,7 +16,9 @@
  *              agent, the fix agent and the report agent, so this mode
  *              decides its behavior from the PROMPT TEXT (mirroring `tail`'s
  *              own report-vs-park detection):
- *                - "slot-cycle workflow" → a batch MEMBER. Its FIRST action,
+ *                - "member-cycle workflow" → a batch MEMBER (#677: the
+ *              scheduler's default member prompt dispatches member-cycle; the
+ *              regex matched "slot-cycle" before it). Its FIRST action,
  *                  when --require-dep=<name> is set (#561 AC3 — opt-in so
  *                  every other test's cwd-less batch worktree is unaffected),
  *                  is to resolve `node_modules/<name>` under the worktree the
@@ -94,7 +96,7 @@ process.stdin.on('end', () => {
     process.exit(0);
   }
   if (mode === 'batch' && dir) {
-    if (/slot-cycle workflow/i.test(input)) {
+    if (/member-cycle workflow/i.test(input)) {
       const requireDep = opt('require-dep');
       if (requireDep) {
         const worktreeMatch = input.match(/worktree=(\S+)/);
