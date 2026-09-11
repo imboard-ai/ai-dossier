@@ -2860,6 +2860,12 @@ const DISPATCHED_MEMBER_STATUSES: ReadonlySet<IssueStatus> = new Set([
  */
 function branchMergedIntoBase(deps: BatchDispatchDeps, batch: BatchEntry): boolean {
   if (batch.worktree === null || batch.branch === null) return false;
+  // CWE-88 (the repo's own trap index): both refs are interpolated into git
+  // argv below. They are state values written by batch-setup, not remote
+  // input, but `runBatchSetup` refuses to CREATE anything this pattern would
+  // reject (SAFE_REF_RE at the branch-creation site) — hold the reader to
+  // the same bar instead of trusting upstream state shape.
+  if (!SAFE_REF_RE.test(batch.branch) || !SAFE_REF_RE.test(batch.base_branch)) return false;
   const base = `origin/${batch.base_branch}`;
   deps.exec('git', ['fetch', 'origin', batch.base_branch], deps.repoDir);
   const ahead = deps.exec('git', ['rev-list', '--count', `${base}..${batch.branch}`], deps.repoDir);
