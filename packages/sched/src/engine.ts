@@ -67,7 +67,13 @@
  * engine missing either never dispatches a `ready` batch (it stays queued).
  */
 
-import { type DispatchApiError, parseDispatchApiError, parseLastToolUse } from '@ai-dossier/core';
+import {
+  type AnnouncedWaitEvidence,
+  type DispatchApiError,
+  parseAnnouncedWait,
+  parseDispatchApiError,
+  parseLastToolUse,
+} from '@ai-dossier/core';
 import type { BatchDispatchDeps, BatchTickResult } from './batch-dispatch';
 import { runBatchTick } from './batch-dispatch';
 import {
@@ -1288,14 +1294,21 @@ function enterRecovery(
   ctx: TickCtx,
   state: SchedState,
   unit: string,
-  causeEvent: 'stalled' | 'verify-incomplete' | 'dispatch-failure' | 'deferred-to-owner',
+  causeEvent:
+    | 'stalled'
+    | 'verify-incomplete'
+    | 'dispatch-failure'
+    | 'deferred-to-owner'
+    | 'announced-wait',
   cause: string,
   truth: UnitTruth,
   evidence: Record<string, unknown> = {},
   // #629: `escalate: false` for a CONFIRMED provider API error — it must
   // never consume the per-unit escalation ladder or the ESCALATION_CAP
   // (a spend/rate wall is not the issue's fault), so the respawn keeps the
-  // slot's CURRENT tier and `recoveries` count unchanged. Every other caller
+  // slot's CURRENT tier and `recoveries` count unchanged. #683/#685: the
+  // `deferred-to-owner` and `announced-wait` causes pass it too — both are
+  // known-recoverable conditions, not capability signals. Every other caller
   // keeps the default (`true`), unaffected.
   options: { escalate?: boolean } = {}
 ): SchedState {
@@ -1328,11 +1341,12 @@ function enterRecovery(
   if (escalate) {
     const escalated = report ? reportTierFor(slot.recoveries + 1) : escalateTier(entry.tier);
     if (slot.recoveries >= ESCALATION_CAP || escalated === null) {
-      // #629: unreachable with `causeEvent === 'dispatch-failure'` or
-      // `'deferred-to-owner'` (#683) — both causes always pass
-      // `escalate: false` above, so this branch (and the narrower
-      // `causeEvent` type `failOrAdoptOpenPr` declares) is never actually
-      // asked to terminally fail a unit over a provider wall or a defer.
+      // #629: unreachable with `causeEvent === 'dispatch-failure'`,
+      // `'deferred-to-owner'` (#683) or `'announced-wait'` (#685) — all three
+      // causes always pass `escalate: false` above, so this branch (and the
+      // narrower `causeEvent` type `failOrAdoptOpenPr` declares) is never
+      // actually asked to terminally fail a unit over a provider wall, a
+      // defer, or an announced wait.
       return failOrAdoptOpenPr(
         ctx,
         state,
@@ -1909,12 +1923,20 @@ interface DispatchSignals {
    * no fence-abort marker for this unit's trail run id.
    */
   fenceAbort: FenceAbortEvidence | null;
+  /**
+   * Evidence this dispatch ended with the announce-then-exit signature (#685) — a CLEAN
+   * exit whose final message announces a wait on background work. The deciding input
+   * for the `announced-wait` classification. Null when the log slice carries no clean
+   * exit or no wait announcement in its final assistant text.
+   */
+  announcedWait: AnnouncedWaitEvidence | null;
 }
 
 const NO_DISPATCH_SIGNALS: DispatchSignals = {
   lastTool: null,
   apiError: null,
   fenceAbort: null,
+  announcedWait: null,
 };
 
 /**
@@ -1949,6 +1971,7 @@ function readDispatchSignalsForSlot(
     lastTool: parseLastToolUse(content),
     apiError: parseDispatchApiError(content),
     fenceAbort: parseFenceAbort(content, run),
+    announcedWait: parseAnnouncedWait(content),
   };
 }
 
@@ -2068,11 +2091,14 @@ function recordDispatchRunLog(
   // `completeUnitOrRecover`. #683 AC3: whether it ended because a fence told it to —
   // `run` names the trail run id the fence check must have answered to; with no run
   // known, no fence-abort evidence can be this dispatch's own and the parse is skipped.
+  // #685: whether it ended with the announce-then-exit signature (clean exit whose
+  // final message announces a wait) — the `announced-wait` classification's input.
   const fenceRun = run !== '' ? run : (slot.run_id ?? '');
   return {
     lastTool: parseLastToolUse(logContent),
     apiError: parseDispatchApiError(logContent),
     fenceAbort: parseFenceAbort(logContent, fenceRun),
+    announcedWait: parseAnnouncedWait(logContent),
   };
 }
 
@@ -2419,6 +2445,37 @@ function completeUnitOrRecover(
         ...(resolved.fenceAbort.takeover !== null
           ? { fence_takeover: resolved.fenceAbort.takeover }
           : {}),
+      },
+      { escalate: false }
+    );
+  }
+
+  // #685 AC2: the announce-then-exit signature — a CLEAN exit whose final message
+  // announces a wait on background work. The issue's three incidents (~$52) all
+  // believed a background notification would arrive, which is true interactively and
+  // false under `-p`; a capability-tier escalation misdiagnoses a recoverable wait
+  // as a model failure. Classified deterministically off the dispatch's own log
+  // (clean `result` event + wait announcement in the FINAL assistant text), recorded
+  // as a HEALTHY dispatch (no `suspect-dispatch`), and redispatched at the same tier
+  // via the #629 unescalated rail — the re-fence gives the successor the next
+  // generation, so the trail's partial work is preserved and resumed (AC3), never
+  // restarted. Checked AFTER the api-error rail (a provider wall's result event
+  // cannot also be a clean wait announcement) and AFTER `deferred-to-owner` (the
+  // checkpoint output is exact CLI evidence; prose never outranks it), and BEFORE
+  // the generic `unverified-exit` fallthrough — this class IS an unverified exit,
+  // just a known-recoverable one.
+  if (resolved.announcedWait !== null) {
+    const recorded = recordDispatchOutcome(ctx, next, unit, slot, false);
+    return enterRecovery(
+      ctx,
+      recorded,
+      unit,
+      'announced-wait',
+      'exited while announcing a wait on background work — same-tier redispatch, no escalation rung consumed (#685)',
+      truth,
+      {
+        wait_signal: resolved.announcedWait.signal,
+        wait_excerpt: resolved.announcedWait.excerpt,
       },
       { escalate: false }
     );

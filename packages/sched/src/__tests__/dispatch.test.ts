@@ -13,6 +13,7 @@ import {
   DEFAULT_TIER_MODELS,
   dispatchSummary,
   escalateTier,
+  HEADLESS_BACKGROUND_GUARD_SETTINGS,
   journalCmdModelFields,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
@@ -89,6 +90,9 @@ describe('resolveDispatch', () => {
       ...DEFAULT_DISPATCH_COMMAND,
       '--disallowedTools',
       DEFAULT_DISALLOWED_TOOLS.join(','),
+      // #685: the background-execution guard rides every resolved claude command.
+      '--settings',
+      HEADLESS_BACKGROUND_GUARD_SETTINGS,
     ]);
     expect(resolved.tierModels).toEqual({
       mechanical: 'haiku',
@@ -138,6 +142,9 @@ describe('--disallowedTools hardening (#591 — a headless exit must never hide 
       ...DEFAULT_DISPATCH_COMMAND,
       '--disallowedTools',
       DEFAULT_DISALLOWED_TOOLS.join(','),
+      // #685: the background-execution guard rides every resolved claude command.
+      '--settings',
+      HEADLESS_BACKGROUND_GUARD_SETTINGS,
     ]);
   });
 
@@ -154,18 +161,35 @@ describe('--disallowedTools hardening (#591 — a headless exit must never hide 
         '{model}',
         '--disallowedTools',
         DEFAULT_DISALLOWED_TOOLS.join(','),
+        // #685: the background-execution guard rides every resolved claude command.
+        '--settings',
+        HEADLESS_BACKGROUND_GUARD_SETTINGS,
       ]);
     }
   });
 
-  it('dispatch.disallowed_tools: [] opts out on the top-level command and every tier', () => {
+  it('dispatch.disallowed_tools: [] opts the flag out — the #685 guard is independent and stays', () => {
     const resolved = resolveDispatch({
       max_slots: 1,
       dispatch: { command: ['claude', '-p', '--model', '{model}'], disallowed_tools: [] },
     });
-    expect(resolved.command).toEqual(['claude', '-p', '--model', '{model}']);
+    expect(resolved.command).toEqual([
+      'claude',
+      '-p',
+      '--model',
+      '{model}',
+      '--settings',
+      HEADLESS_BACKGROUND_GUARD_SETTINGS,
+    ]);
     for (const tier of ['mechanical', 'mid', 'strong'] as const) {
-      expect(resolved.tiers[tier].commandTemplate).toEqual(['claude', '-p', '--model', '{model}']);
+      expect(resolved.tiers[tier].commandTemplate).toEqual([
+        'claude',
+        '-p',
+        '--model',
+        '{model}',
+        '--settings',
+        HEADLESS_BACKGROUND_GUARD_SETTINGS,
+      ]);
     }
   });
 
@@ -178,6 +202,8 @@ describe('--disallowedTools hardening (#591 — a headless exit must never hide 
       ...DEFAULT_DISPATCH_COMMAND,
       '--disallowedTools',
       'Monitor,SomeOtherTool',
+      '--settings',
+      HEADLESS_BACKGROUND_GUARD_SETTINGS,
     ]);
   });
 
@@ -215,6 +241,8 @@ describe('--disallowedTools hardening (#591 — a headless exit must never hide 
       '{model}',
       '--disallowedTools',
       DEFAULT_DISALLOWED_TOOLS.join(','),
+      '--settings',
+      HEADLESS_BACKGROUND_GUARD_SETTINGS,
     ]);
   });
 
@@ -230,6 +258,8 @@ describe('--disallowedTools hardening (#591 — a headless exit must never hide 
       '{model}',
       '--disallowedTools',
       DEFAULT_DISALLOWED_TOOLS.join(','),
+      '--settings',
+      HEADLESS_BACKGROUND_GUARD_SETTINGS,
     ]);
   });
 
@@ -247,6 +277,8 @@ describe('--disallowedTools hardening (#591 — a headless exit must never hide 
       'WebSearch',
       '--model',
       '{model}',
+      '--settings',
+      HEADLESS_BACKGROUND_GUARD_SETTINGS,
     ]);
   });
 });
@@ -264,7 +296,14 @@ describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () =
     };
     const resolved = resolveDispatch(config);
     for (const tier of ['mechanical', 'mid', 'strong'] as const) {
-      expect(resolved.tiers[tier].commandTemplate).toEqual(['claude', '-p', '--model', '{model}']);
+      expect(resolved.tiers[tier].commandTemplate).toEqual([
+        'claude',
+        '-p',
+        '--model',
+        '{model}',
+        '--settings',
+        HEADLESS_BACKGROUND_GUARD_SETTINGS,
+      ]);
       expect(resolved.tiers[tier].prompt).toContain('do #{issue}');
     }
     expect(resolved.tiers.mechanical.model).toBe('haiku'); // default, untouched
@@ -294,9 +333,16 @@ describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () =
       '{model}',
     ]);
     expect(resolved.tiers.mid.model).toBe('glm');
-    // strong: no tiers entry — falls back to the shorthand unchanged
-    expect(resolved.tiers.strong.commandTemplate).toEqual(['claude', '-p', '--model', '{model}']);
-    expect(resolved.tiers.strong.model).toBe('opus');
+    // strong: no tiers entry — falls back to the shorthand (with its hardening appended;
+    // disallowed_tools: [] removes only the #591 flag, the #685 guard is independent)
+    expect(resolved.tiers.strong.commandTemplate).toEqual([
+      'claude',
+      '-p',
+      '--model',
+      '{model}',
+      '--settings',
+      HEADLESS_BACKGROUND_GUARD_SETTINGS,
+    ]);
   });
 
   it('a tiers entry may override only one field, falling back to the shorthand for the rest', () => {
@@ -309,7 +355,14 @@ describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () =
       },
     };
     const resolved = resolveDispatch(config);
-    expect(resolved.tiers.strong.commandTemplate).toEqual(['claude', '-p', '--model', '{model}']);
+    expect(resolved.tiers.strong.commandTemplate).toEqual([
+      'claude',
+      '-p',
+      '--model',
+      '{model}',
+      '--settings',
+      HEADLESS_BACKGROUND_GUARD_SETTINGS,
+    ]);
     expect(resolved.tiers.strong.model).toBe('custom-strong-model');
   });
 
@@ -338,7 +391,14 @@ describe('per-tier dispatch (#527 — mixed agent-CLI escalation ladders)', () =
       '--model',
       'glm',
     ]);
-    expect(buildTierCommand(resolved, 'strong', 527)).toEqual(['claude', '-p', '--model', 'opus']);
+    expect(buildTierCommand(resolved, 'strong', 527)).toEqual([
+      'claude',
+      '-p',
+      '--model',
+      'opus',
+      '--settings',
+      HEADLESS_BACKGROUND_GUARD_SETTINGS,
+    ]);
   });
 
   it('an explicit dispatch.tiers.<tier>.prompt override gets the supersession checkpoint too, same as the shorthand', () => {
@@ -766,5 +826,107 @@ describe('dispatchSummary (#680 — the configured executor, visible without rea
         strong: { agent: 'claude', model: 'opus' },
       })
     ).toBe('mechanical=agent-bin/- mid=claude/sonnet strong=claude/opus');
+  });
+});
+
+// --- #685: background-execution guard — runtime enforcement, not prompt text ---
+
+describe('background-execution guard (#685 AC1 — the tool cannot be backgrounded, so the failure cannot occur)', () => {
+  it('the guard settings JSON parses and carries a PreToolUse hook on Bash|Task', () => {
+    const settings = JSON.parse(HEADLESS_BACKGROUND_GUARD_SETTINGS) as {
+      hooks: {
+        PreToolUse: Array<{ matcher: string; hooks: Array<{ type: string; command: string }> }>;
+      };
+    };
+    const rule = settings.hooks.PreToolUse[0];
+    expect(rule.matcher).toBe('Bash|Task');
+    expect(rule.hooks[0].type).toBe('command');
+    // Self-contained: an inline `node -e` script, never a host-specific path.
+    expect(rule.hooks[0].command.startsWith('node -e ')).toBe(true);
+  });
+
+  it('is appended to every resolved claude command (top level and tiers)', () => {
+    const resolved = resolveDispatch({ max_slots: 1 });
+    expect(resolved.command).toContain('--settings');
+    for (const tier of ['mechanical', 'mid', 'strong'] as const) {
+      expect(resolved.tiers[tier].commandTemplate).toContain('--settings');
+    }
+  });
+
+  it('never applied to a non-claude command — an opencode tier has no settings surface', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: {
+        tiers: {
+          strong: { command: ['opencode', 'run', '--auto', '--model', '{model}'], model: 'glm' },
+        },
+      },
+    });
+    expect(resolved.tiers.strong.commandTemplate).not.toContain('--settings');
+  });
+
+  it('does not double-append when the operator already passes --settings (operator authoritative)', () => {
+    const resolved = resolveDispatch({
+      max_slots: 1,
+      dispatch: { command: ['claude', '-p', '--settings', '{"model":"x"}', '--model', '{model}'] },
+    });
+    // Each hardening is independent: the guard skips (the operator's settings
+    // file is authoritative), the #591 disallowedTools default still applies.
+    expect(resolved.command).toEqual([
+      'claude',
+      '-p',
+      '--settings',
+      '{"model":"x"}',
+      '--model',
+      '{model}',
+      '--disallowedTools',
+      DEFAULT_DISALLOWED_TOOLS.join(','),
+    ]);
+  });
+
+  // The hook command is executed through a shell by the claude CLI — run it
+  // the same way, feeding it the hook payload on stdin like the CLI does.
+  function runHook(input: string): number {
+    const { execFileSync } = require('node:child_process') as typeof import('node:child_process');
+    const command = (
+      JSON.parse(HEADLESS_BACKGROUND_GUARD_SETTINGS) as {
+        hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> };
+      }
+    ).hooks.PreToolUse[0].hooks[0].command;
+    try {
+      execFileSync('sh', ['-c', command], { input, stdio: ['pipe', 'ignore', 'ignore'] });
+      return 0;
+    } catch (err) {
+      return (err as { status?: number }).status ?? -1;
+    }
+  }
+
+  it('the hook DENIES a backgrounded Bash call (exit 2, the blocking contract)', () => {
+    expect(
+      runHook(
+        JSON.stringify({
+          tool_name: 'Bash',
+          tool_input: { command: 'sleep 300', run_in_background: true },
+        })
+      )
+    ).toBe(2);
+  });
+
+  it('the hook denies the string form too (some CLI versions pass "true")', () => {
+    expect(
+      runHook(JSON.stringify({ tool_name: 'Bash', tool_input: { run_in_background: 'true' } }))
+    ).toBe(2);
+  });
+
+  it('the hook ALLOWS a foreground command (exit 0)', () => {
+    expect(
+      runHook(
+        JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'bash scripts/ci-parity.sh' } })
+      )
+    ).toBe(0);
+  });
+
+  it('the hook tolerates non-JSON stdin (fail-open, exit 0)', () => {
+    expect(runHook('<<<truncated>>>')).toBe(0);
   });
 });

@@ -123,6 +123,77 @@ function withDisallowedTools(template: readonly string[], tools: readonly string
 }
 
 /**
+ * The PreToolUse hook command that denies background execution in a headless
+ * dispatch (#685, AC1 — enforcement by the runtime, not prompt text).
+ *
+ * The three incidents the issue files (~$52 of discarded work) each ended with
+ * the agent announcing a wait on a background command and exiting cleanly:
+ * in an interactive session a background notification arrives on the next
+ * turn, and the agents applied that correct model to a `claude -p` session
+ * where no next turn exists. Prose against the habit had already failed three
+ * times across two model tiers (`NO_BACKGROUND_EXIT_INSTRUCTION` is emphatic,
+ * capitalised, and names `ci-parity` specifically), so the guard removes the
+ * capability instead of arguing with it: the hook reads the tool-call payload
+ * from stdin and exits 2 — claude's blocking-deny contract, the deny message
+ * fed back to the model — whenever `tool_input.run_in_background` is truthy.
+ * The tool cannot be backgrounded, so the failure cannot occur. Verified live
+ * against `claude -p --model haiku --settings <guard>`: the backgrounded call
+ * is denied, the agent reports the disablement and reruns the command in the
+ * foreground, and the session completes normally.
+ *
+ * Self-contained by construction (an inline `node -e` script — node is a hard
+ * dependency of every host that runs this scheduler) so no dispatch ever
+ * points at a file that may not exist. Two quoting rules keep the command
+ * shell-safe inside claude's settings JSON: the script body is wrapped in
+ * DOUBLE quotes for the shell and therefore contains no `$`, backtick, or
+ * double quote (nothing to expand, nothing to escape), and its own strings
+ * use single quotes only. `Task` is matched alongside `Bash` because a
+ * backgrounded subagent dies by the same no-next-turn rule.
+ */
+export const HEADLESS_BACKGROUND_GUARD_HOOK_COMMAND =
+  `node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{const j=JSON.parse(d);` +
+  `const t=(j&&j.tool_input)||{};if(t.run_in_background===true||t.run_in_background==='true'){` +
+  `process.stderr.write('background execution is disabled in headless dispatches - run this ` +
+  `command in the foreground and wait for it to finish');process.exit(2)}}catch(e){}process.exit(0)})"`;
+
+/**
+ * The `--settings` payload carrying {@link HEADLESS_BACKGROUND_GUARD_HOOK_COMMAND} (#685).
+ *
+ * A single JSON string (one argv element — argv passing, so no shell ever
+ * re-splits it) with a `PreToolUse` hook on `Bash|Task`. Exported so tests
+ * and operators can inspect exactly what a dispatch will carry.
+ */
+export const HEADLESS_BACKGROUND_GUARD_SETTINGS = JSON.stringify({
+  hooks: {
+    PreToolUse: [
+      {
+        matcher: 'Bash|Task',
+        hooks: [{ type: 'command', command: HEADLESS_BACKGROUND_GUARD_HOOK_COMMAND }],
+      },
+    ],
+  },
+});
+
+/**
+ * Append `--settings <guard>` to a `claude`-family command template (#685).
+ *
+ * Mirrors `withDisallowedTools`' contract exactly: a no-op for a non-`claude`
+ * binary (an `opencode` tier has no `--settings`/hooks equivalent — there the
+ * prompt instruction plus the engine's announce-then-exit classification
+ * still carry the load), and a no-op when the template already carries
+ * `--settings` (an operator's own settings file is authoritative — injecting
+ * a second one's precedence would depend on the CLI's own arg parser, and an
+ * operator overriding settings is exactly the profile that opted out of
+ * #591's default with `disallowed_tools: []`).
+ */
+function withBackgroundGuard(template: readonly string[]): string[] {
+  const isClaude = path.basename(template[0] ?? '') === 'claude';
+  const alreadySet = template.some((arg) => arg === '--settings');
+  if (!isClaude || alreadySet) return [...template];
+  return [...template, '--settings', HEADLESS_BACKGROUND_GUARD_SETTINGS];
+}
+
+/**
  * Shared hardening sentence appended to any dispatch prompt that runs a
  * build/test/lint command (#497): a headless `claude -p` session ends the
  * instant the model stops responding, so an agent that starts a long command
@@ -132,6 +203,14 @@ function withDisallowedTools(template: readonly string[], tools: readonly string
  * stronger, but every occurrence burns an escalation for a reason unrelated
  * to model capability. Excluded from `DEFAULT_REPORT_PROMPT_TEMPLATE`, which
  * only reads already-merged state and never spawns a long command.
+ *
+ * Since #685 this sentence is the SECOND line of defense on a `claude`-family
+ * dispatch, not the first: `withBackgroundGuard` denies background execution
+ * at the tool layer, so the shape it warns about cannot occur there. It still
+ * carries the load for `opencode` tiers (no settings/hooks equivalent) and
+ * for agents dispatched outside sched, and it remains on claude prompts as
+ * belt-and-braces — an operator who overrides `--settings` implicitly opts
+ * out of the guard.
  */
 export const NO_BACKGROUND_EXIT_INSTRUCTION =
   'IMPORTANT — this is a HEADLESS session: never end the session while a command you still need ' +
@@ -370,7 +449,10 @@ export function resolveDispatch(config: SchedConfig): ResolvedDispatch {
   };
   const disallowedTools = dispatch.disallowed_tools ?? [...DEFAULT_DISALLOWED_TOOLS];
   const rawCommand = dispatch.command ?? [...DEFAULT_DISPATCH_COMMAND];
-  const command = withDisallowedTools(rawCommand, disallowedTools);
+  // #685: background-execution guard applied per resolved command path (here and in
+  // `resolveTierDispatch`), never on the raw constant — `buildAgentCommand` tests and
+  // operators consuming the template must see it unchanged.
+  const command = withBackgroundGuard(withDisallowedTools(rawCommand, disallowedTools));
   const prompt = withSupersessionCheckpoint(dispatch.prompt ?? DEFAULT_PROMPT_TEMPLATE);
   const tiers = Object.fromEntries(
     TIER_ORDER.map((tier) => [
@@ -423,8 +505,11 @@ function resolveTierDispatch(
   return {
     // Applied per-tier, not once on `fallbackCommand`, because an explicit
     // `spec.command` (#527's mixed-CLI ladder) can point this tier at a different
-    // agent CLI (`opencode`) that must never receive `--disallowedTools` (#591).
-    commandTemplate: withDisallowedTools(spec?.command ?? fallbackCommand, disallowedTools),
+    // agent CLI (`opencode`) that must never receive `--disallowedTools` (#591)
+    // — nor the background guard's `--settings` (#685, same CLI-family rule).
+    commandTemplate: withBackgroundGuard(
+      withDisallowedTools(spec?.command ?? fallbackCommand, disallowedTools)
+    ),
     model: spec?.model ?? fallbackTierModels[tier],
     // An explicit override gets the checkpoint too — `fallbackPrompt` already
     // carries it (resolveDispatch wraps the top-level prompt once), so a
