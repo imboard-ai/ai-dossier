@@ -22,6 +22,9 @@
 #   "command not found". Every remote command sources nvm first.
 # - A step that prints nothing is NOT a step that succeeded. Every step reports ok/FAIL, and
 #   the script exits non-zero if any host had any failure.
+# - An `ok` on the install step does NOT mean the host is current (#696): a host can
+#   install "successfully" and still resolve the previous release. The version step
+#   therefore prints installed=<ver> latest=<ver> and flags BEHIND as a failure.
 
 set -uo pipefail
 
@@ -65,6 +68,14 @@ AD="$(npm root -g 2>/dev/null)/@ai-dossier/cli/bin/ai-dossier";
 declare -A HOST_STATUS
 FAILED=0
 
+# $1 >= $2 ? (semver-ish; same comparison as fleet-cli-audit.sh)
+ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
+
+# Resolve npm latest ONCE on the driving host; every host is compared against it
+# (#696). A lookup failure must not fail the refresh — hosts then report
+# installed=<ver> with the comparison explicitly skipped.
+LATEST=$(npm view @ai-dossier/cli version 2>/dev/null)
+
 run_on() {  # run_on <host> <label> <command>
   local host="$1" label="$2" cmd="$3" out rc
   if [ "$host" = "wls" ] || [ "$host" = "$(hostname)" ]; then
@@ -100,7 +111,27 @@ for host in "${HOST_LIST[@]}"; do
   fi
 
   run_on "$host" "npm i -g @ai-dossier/cli@latest" 'npm i -g @ai-dossier/cli@latest >/dev/null 2>&1'
-  run_on "$host" "cli version" '"$AD" --version'
+
+  # Capture the version actually installed and compare it against npm latest —
+  # `ok` must mean "current", not "the command ran" (#696).
+  if [ "$host" = "wls" ] || [ "$host" = "$(hostname)" ]; then
+    inst=$(bash -lc "$REMOTE_PRELUDE
+\"\$AD\" --version" 2>/dev/null | tail -1); rc=$?
+  else
+    inst=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "$REMOTE_PRELUDE
+\"\$AD\" --version" 2>/dev/null | tail -1); rc=$?
+  fi
+  if [ $rc -ne 0 ] || [ -z "$inst" ]; then
+    echo "    FAIL cli version (binary did not report a version)"
+    HOST_STATUS[$host]="fail"; FAILED=1
+  elif [ -n "$LATEST" ] && ! ver_ge "$inst" "$LATEST"; then
+    echo "    WARN cli version installed=$inst latest=$LATEST — BEHIND (npm still has the previous release, or the install landed under a different node)"
+    HOST_STATUS[$host]="behind"; FAILED=1
+  elif [ -n "$LATEST" ]; then
+    echo "    ok   cli version installed=$inst latest=$LATEST"
+  else
+    echo "    ok   cli version installed=$inst latest=unknown (npm view failed on the driving host; comparison skipped)"
+  fi
 
   if [ "$CLI_ONLY" -eq 0 ]; then
     for d in "${DOSSIERS[@]}" "${EXTRA_TARGETS[@]:-}"; do

@@ -1,0 +1,137 @@
+name: Surface npm Publish Failures
+
+# Why this exists (#696):
+#   The `test` job gates every npm publish. When it flakes or breaks on main,
+#   `smoke`, `publish` and `verify` are skipped — and a blocked publish is
+#   indistinguishable from a publish that was never triggered. cli@0.34.7 sat
+#   unpublished this way while `refresh-fleet.sh` happily reported `ok` on every
+#   host (it correctly installed the latest *published* CLI, which was one
+#   release behind). The red X on the Actions tab was technically visible; nobody
+#   looks at the Actions tab.
+#
+#   This converts the silence into a durable, agent-visible signal: a tracking
+#   issue on the repo, opened on the first failure and updated on repeats, and
+#   closed automatically by the next successful run so recovery is also visible.
+#
+# House precedent: vercel-failure-logs.yml (same "make the failure readable
+# without opening another dashboard" purpose) and sign.yml's weekly canary
+# (infrastructure-lessons.md: a mechanism that only surfaces when a human
+# remembers to look should be assumed broken).
+#
+# Notes:
+# - `workflow_run` always executes the default-branch copy of THIS file and
+#   cannot be triggered by fork PRs; `publish-packages.yml` itself only runs
+#   on pushes to main, tags, and releases, so `head_branch == 'main'` is the
+#   gate that matters here.
+# - GITHUB_TOKEN with `issues: write` is the only credential — no secrets.
+# - Idempotent by title prefix: repeated failures update one open issue
+#   instead of spamming the tracker; a success run closes it with the
+#   recovering run's link.
+
+on:
+  workflow_run:
+    workflows: ["Publish Packages to npm"]
+    types: [completed]
+
+permissions:
+  issues: write
+  actions: read
+
+concurrency:
+  group: publish-failure-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  report-failure:
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open or update the publish-failure tracking issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const repoRef = { owner: context.repo.owner, repo: context.repo.repo };
+            const TITLE = '🚨 npm publish failed on main — npm did not move';
+
+            // List the failed jobs (and failed steps inside them) so the issue
+            // is diagnosable without opening the run at all.
+            const { data: jobs } = await github.rest.actions.listJobsForWorkflowRun({
+              ...repoRef,
+              run_id: run.id,
+              per_page: 100,
+            });
+            const failedJobs = jobs.jobs.filter((j) => j.conclusion === 'failure');
+            const jobLines = failedJobs.map((j) => {
+              const failedSteps = (j.steps || [])
+                .filter((s) => s.conclusion === 'failure')
+                .map((s) => `  - step: ${s.name}`);
+              return [`- **${j.name}** (${Math.round(j.duration / 1000)}s)`, ...failedSteps].join('\n');
+            }).join('\n');
+
+            const body = [
+              `Run: [${run.name} #${run.run_number}](${run.html_url}) on \`${run.head_sha.slice(0, 7)}\``,
+              '',
+              '**Failed jobs:**',
+              '',
+              jobLines || `- (no per-job failure detail available — read the [run log](${run.html_url}))`,
+              '',
+              'Until a later run of this workflow succeeds, the newest `package.json` versions are NOT on npm and `npm i -g @ai-dossier/cli@latest` keeps serving the previous release while reporting success.',
+              '',
+              '<sub>Posted automatically so a blocked publish is visible. This issue is closed by the next successful run.</sub>',
+            ].join('\n');
+
+            // Find an OPEN tracking issue by its exact title (created by this
+            // workflow only), newest first.
+            const { data: search } = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open in:title "${TITLE}"`,
+              per_page: 1,
+              sort: 'created',
+              order: 'desc',
+            });
+            const existing = search.items[0];
+
+            if (existing) {
+              await github.rest.issues.createComment({ ...repoRef, issue_number: existing.number, body });
+              core.info(`updated existing tracking issue #${existing.number}`);
+            } else {
+              const { data: created } = await github.rest.issues.create({ ...repoRef, title: TITLE, body });
+              core.info(`opened tracking issue #${created.number}`);
+            }
+
+  resolve-on-success:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close the tracking issue if the publish recovered
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const repoRef = { owner: context.repo.owner, repo: context.repo.repo };
+            const TITLE = '🚨 npm publish failed on main — npm did not move';
+
+            const { data: search } = await github.rest.search.issuesAndPullRequests({
+              q: `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open in:title "${TITLE}"`,
+              per_page: 1,
+              sort: 'created',
+              order: 'desc',
+            });
+            const existing = search.items[0];
+            if (!existing) {
+              core.info('no open tracking issue — nothing to close');
+              return;
+            }
+            await github.rest.issues.createComment({
+              ...repoRef,
+              issue_number: existing.number,
+              body: `✅ Recovered: [${run.name} #${run.run_number}](${run.html_url}) succeeded on \`${run.head_sha.slice(0, 7)}\` — closing.`,
+            });
+            await github.rest.issues.update({ ...repoRef, issue_number: existing.number, state: 'closed' });
+            core.info(`closed tracking issue #${existing.number}`);
