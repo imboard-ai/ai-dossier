@@ -38,6 +38,8 @@
  *                  posted nothing; the engine verifies a fix by re-running
  *                  the (injected, fake) suite, never by trusting this exit.
  */
+
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -107,6 +109,26 @@ process.stdin.on('end', () => {
       }
       const batchMatch = input.match(/batch=(\S+)/);
       const batchId = batchMatch ? batchMatch[1].replace(/[.,]+$/, '') : 'unknown';
+      // #686: opt-in REAL member work — write `--commit-file=<name>` into the
+      // worktree the prompt names and commit it with the `(#<issue>)` subject
+      // trailer `boundaryCommits` attributes by, so `memberRanges` records a
+      // genuine range for this member (a member with no commits is
+      // indistinguishable from one that never ran). Runs BEFORE the
+      // milestone lands, exactly like a real member committing before it
+      // posts `review done`.
+      const commitFile = opt('commit-file');
+      if (commitFile) {
+        const worktreeMatch = input.match(/worktree=(\S+)/);
+        const worktree = worktreeMatch ? worktreeMatch[1].replace(/[.,]+$/, '') : null;
+        if (worktree) {
+          fs.writeFileSync(path.join(worktree, commitFile), `member #${issue}\n`);
+          execFileSync('git', ['add', commitFile], { cwd: worktree, stdio: 'ignore' });
+          execFileSync('git', ['commit', '-m', `feat: ${commitFile} (#${issue})`], {
+            cwd: worktree,
+            stdio: 'ignore',
+          });
+        }
+      }
       const evictMembers = (opt('evict-members') ?? '')
         .split(',')
         .map((s) => s.trim())

@@ -86,14 +86,15 @@ const ISSUE_BASE_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   blocked: ['queued', 'waiting', 'evicted'],
   'decision-pending': ['queued'],
   done: [],
-  // #501: the ONLY outgoing edge from `failed` — reconciles a
-  // `reason=auto-merge-blocked` entry whose PR was later manually re-queued
-  // and merged outside the engine's own watch (reconcileParked stops
-  // watching the instant an entry leaves `parked`, including into
-  // `failed`). This table can't see *why* a caller wants the edge; the
-  // engine (`reconcileStaleFailedParks`, via `isStaleFailedPark`) is what
-  // restricts it to that one reason — every other `failed` entry stays
-  // terminal. It's "the ONLY edge" only because `failed` stays a member of
+  // #501: the ONLY outgoing edge from `failed` — reconciles an entry whose
+  // PR was later manually re-queued and merged outside the engine's own
+  // watch (reconcileParked stops watching the instant an entry leaves
+  // `parked`, including into `failed`). This table can't see *why* a caller
+  // wants the edge; the engine (`reconcileStaleFailedParks`, via
+  // `isStaleFailedPark`) is what restricts it — since #686 to ANY stale
+  // verdict on an entry that carries a PR inside the reconcile window
+  // (ground truth beats the ledger), no longer just
+  // `reason=auto-merge-blocked`. `failed` stays a member of
   // `TERMINAL_ISSUE_STATUSES` — `allowedIssueTransitions` below skips the
   // universal failure edges for terminal rows; dropping `failed` from that
   // set would silently reopen `blocked`/`decision-pending`/`failed` here.
@@ -156,7 +157,14 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   // gate that blocked it; a passing recheck resumes the member loop exactly
   // where it left off (the SAME `executing`-guarded advance/evict functions
   // the original gate uses).
-  blocked: ['validating', 'dissolving', 'executing'],
+  // → merged (#686): ground truth beats the ledger — a blocked batch whose
+  // work demonstrably shipped anyway (its PR merged out of band, or every
+  // member commit is already an ancestor of the base) reconciles onto the
+  // same merged → deployed rail a normally-watched batch takes, instead of
+  // staying blocked forever. The ENGINE decides when the edge is legal
+  // (`reconcileStaleBlockedBatches`, which proves the merge evidence first);
+  // this table only makes the edge exist.
+  blocked: ['validating', 'dissolving', 'executing', 'merged'],
 };
 
 const SLOT_BASE_TRANSITIONS: Record<SlotStatus, SlotStatus[]> = {

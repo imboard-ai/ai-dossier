@@ -128,6 +128,7 @@ import {
   duplicateEvictionDetail,
   findBatch,
   findEntry,
+  isPreservedMember,
   patchBatch,
   patchSlot,
   releaseBatchSlot,
@@ -145,6 +146,7 @@ import type {
   CapabilityGateResult,
   CapOutcome,
   EvictionRecord,
+  IssueStatus,
   JournalEventName,
   ModelTier,
   SchedConfig,
@@ -2771,6 +2773,229 @@ function reconcilePrWatch(deps: BatchDispatchDeps, now: Date, result: BatchTickR
   }
 }
 
+// --- #686: stale-BLOCKED batch reconciliation (ground truth beats the ledger) ---
+
+/**
+ * #686: how long after a batch `blocked` its merge evidence may still arrive
+ * and reconcile it — measured from `updated_at`, which is when the batch
+ * became blocked (dedup writes don't touch it). Same window semantics as the
+ * per-issue path's `STALE_RECONCILE_WINDOW_MS` (engine.ts): past it, an
+ * abandoned batch is left as-is rather than polled (one `gh pr view` plus git
+ * probes) forever. A local constant rather than an import: engine.ts already
+ * imports THIS module, so the arrow points one way only.
+ */
+const STALE_BLOCKED_RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The forward rail a surviving member walks to `done` on a stale-blocked
+ * reconcile — every step an ALREADY-LEGAL `ISSUE_BASE_TRANSITIONS` edge, so
+ * the walk invents no new state-machine surface (AC3: a member whose commits
+ * are in the base must not stay `in-work`, and `in-work → shipped-in-batch`
+ * is not an edge — but `in-work → committed → validated → shipped-in-batch →
+ * done` is). Members whose current status has no entry here (`waiting`, i.e.
+ * never dispatched) are not walked: no recorded work, nothing shipped.
+ */
+const MEMBER_RECONCILE_CHAIN: Partial<Record<IssueStatus, IssueStatus>> = {
+  'in-work': 'committed',
+  committed: 'validated',
+  validated: 'shipped-in-batch',
+  'shipped-in-batch': 'done',
+};
+
+/**
+ * Whether every SURVIVING member of `batch` was actually dispatched — i.e. no
+ * surviving member is still sitting in a pre-dispatch status (`queued`,
+ * `classified`, `batched`, `waiting`). Surviving = a `batch.members` issue
+ * that is still a slot-mode entry, not evicted (its work was reverted and it
+ * requeued full-cycle), and not already preserved (shipped/terminal through
+ * another rail).
+ *
+ * This is the safety rail behind AC1: a member that never ran has NO work on
+ * the branch, so a batch carrying one is NOT reconcilable to shipped —
+ * reconciling it would call an issue `done` that shipped nothing, minting the
+ * exact ledger/ground-truth drift (#675-class) this issue exists to cure,
+ * just with the signs flipped. A dispatched member, by contrast, put its work
+ * ON the branch (even when the gate blocked before its range was recorded —
+ * the b-20260909-01 shape, where the only surviving member sat `in-work`),
+ * and the branch is exactly what the merge evidence below covers.
+ */
+function everySurvivingMemberDispatched(state: SchedState, batch: BatchEntry): boolean {
+  const evicted = new Set(batch.evictions.map((e) => e.issue));
+  for (const issue of batch.members) {
+    const entry = findEntry(state, issue);
+    if (!entry) continue;
+    if (entry.mode !== 'slot' || evicted.has(issue) || isPreservedMember(entry)) continue;
+    // Pre-dispatch statuses: queued/classified/batched/waiting. `in-work` is
+    // stamped at SPAWN (`spawnMember`), `committed`/`validated` at verified
+    // completion — everything the entry can reach afterwards means the
+    // member was dispatched and its work is on the branch.
+    if (!DISPATCHED_MEMBER_STATUSES.has(entry.status)) return false;
+  }
+  return true;
+}
+
+/** Slot-line statuses that prove a member was actually dispatched (see above). */
+const DISPATCHED_MEMBER_STATUSES: ReadonlySet<IssueStatus> = new Set([
+  'in-work',
+  'committed',
+  'validated',
+]);
+
+/**
+ * Whether the batch branch has landed in the base — the b-20260909-01 shape
+ * of merge evidence ("The batch branch is in `main` at c277ff59b", `pr=None`):
+ * the branch was merged out of band, so its commits are IN the base even
+ * though the batch never shipped a PR of its own. Two probes against the
+ * remote-tracking ref (refreshed best-effort first — a merge that landed on
+ * the remote is invisible to `rev-list` until fetched; fetch failure leaves
+ * the stale ref, the same degradation the per-issue path tolerates):
+ *
+ * - `git rev-list --count origin/<base>..<branch>` is 0 — nothing of the
+ *   branch is missing from the base, i.e. every member commit on it is an
+ *   ancestor of the base (AC1's wording);
+ * - the branch tip is NOT the base tip — the branch actually carried work.
+ *   A batch branch starts AT the base tip, so a branch that never received a
+ *   member commit still probes 0 on the range; requiring a different tip is
+ *   what separates "shipped" from "vacuously empty".
+ */
+function branchMergedIntoBase(deps: BatchDispatchDeps, batch: BatchEntry): boolean {
+  if (batch.worktree === null || batch.branch === null) return false;
+  const base = `origin/${batch.base_branch}`;
+  deps.exec('git', ['fetch', 'origin', batch.base_branch], deps.repoDir);
+  const ahead = deps.exec('git', ['rev-list', '--count', `${base}..${batch.branch}`], deps.repoDir);
+  if ((ahead ?? '').trim() !== '0') return false;
+  const branchTip = deps.exec('git', ['rev-parse', batch.branch], deps.repoDir);
+  const baseTip = deps.exec('git', ['rev-parse', base], deps.repoDir);
+  return branchTip !== null && baseTip !== null && branchTip.trim() !== '' && branchTip !== baseTip;
+}
+
+/**
+ * #686: reconcile a `blocked` batch whose work demonstrably shipped anyway.
+ * `reconcilePrWatch` above only watches `awaiting-merge` batches, and
+ * `resumeBlockedGate` only re-runs the gate — so a batch blocked on a stale
+ * verdict (the concrete case: `gate-inconclusive:test.focused`, itself often
+ * a #690-declined gate TIMEOUT) whose PR merged out of band — or whose every
+ * member commit is already in the base — stayed blocked FOREVER: no report,
+ * no teardown, an operator-visible `blocked` row, and members stuck
+ * `in-work`. Sibling of the per-issue `reconcileStaleFailedParks`
+ * (engine.ts) under the same principle: ground truth beats the ledger, for
+ * ANY stale verdict — the blocked_reason is deliberately not examined.
+ *
+ * Evidence (either suffices, cheapest first): the batch PR is MERGED with a
+ * real timestamp (a merged batch PR contains the whole batch branch), or the
+ * batch branch has fully landed in the base branch. A survivability guard
+ * applies to BOTH paths (see `everySurvivingMemberDispatched`) — a batch with
+ * a surviving member that was never dispatched is not reconcilable.
+ *
+ * On reconcile the batch joins the SAME rail a normally-merged batch takes:
+ * `blocked → merged → deployed` (the `blocked → merged` edge exists for
+ * exactly this caller), surviving members walked to `done` along legal
+ * edges, and — when `batch.pr` is set — the ordinary `deployed` machinery
+ * dispatches the report agent next tick, with teardown after `batch-report
+ * done`. With `pr === null` no report agent can be prompted (it names the
+ * PR), so the same lock continues `deployed → reported → done` and the
+ * worktree is torn down here instead; the journal line says why no report
+ * agent was dispatched rather than leaving the gap silent.
+ *
+ * Bounded by construction: only `blocked` batches within the window are
+ * examined, the PR check is one `gh` call, git runs only when PR evidence
+ * didn't already reconcile, and a reconciled batch leaves `blocked` — the
+ * one journal line fires on the one-way transition, never per-tick (the
+ * #632 lesson: no journal inside a loop that doesn't terminate the unit).
+ */
+function reconcileStaleBlockedBatches(
+  deps: BatchDispatchDeps,
+  now: Date,
+  result: BatchTickResult
+): void {
+  const state = deps.store.load();
+  const nowMs = now.getTime();
+  for (const batch of state.batches) {
+    if (batch.status !== 'blocked') continue;
+    if (nowMs - Date.parse(batch.updated_at) >= STALE_BLOCKED_RECONCILE_WINDOW_MS) continue;
+    if (!everySurvivingMemberDispatched(state, batch)) continue;
+
+    let evidence:
+      | { kind: 'pr-merged'; pr: number; mergedAt: string }
+      | { kind: 'commits-in-base' }
+      | null = null;
+    if (batch.pr !== null) {
+      const truth = deps.groundTruth.prState(batch.pr);
+      if (truth !== undefined && truth.state === 'MERGED' && truth.mergedAt !== null) {
+        evidence = { kind: 'pr-merged', pr: batch.pr, mergedAt: truth.mergedAt };
+      }
+    }
+    if (evidence === null && branchMergedIntoBase(deps, batch)) {
+      evidence = { kind: 'commits-in-base' };
+    }
+    if (evidence === null) continue;
+
+    const blockedReason = batch.blocked_reason ?? 'blocked';
+    const failedAt = batch.updated_at;
+    let reconciled = false;
+    let unwalkable: number[] = [];
+    deps.store.withLock((s) => {
+      const b = findBatch(s, batch.id);
+      // Re-check under the lock: `sched resume --batch` (a passing recheck)
+      // or `sched abandon` may have moved the batch out from under the
+      // snapshot this pass started from.
+      if (!b || b.status !== 'blocked') return { state: s, result: undefined };
+      let n = transitionBatch(s, batch.id, 'merged', {}, now);
+      n = transitionBatch(n, batch.id, 'deployed', {}, now);
+      unwalkable = [];
+      for (const issue of b.members) {
+        let entry = findEntry(n, issue);
+        if (!entry || isPreservedMember(entry)) continue;
+        let guard = 0;
+        while (entry !== undefined) {
+          const nextStatus = MEMBER_RECONCILE_CHAIN[entry.status];
+          if (nextStatus === undefined || guard++ > 8) break; // chain is 4 long; never loop forever on a bad table
+          try {
+            n = transitionIssue(n, issue, nextStatus, {}, now);
+          } catch {
+            // Not reachable along legal edges from here — name it in the
+            // journal rather than forcing an illegal transition.
+            unwalkable.push(issue);
+            break;
+          }
+          entry = findEntry(n, issue);
+        }
+      }
+      if (b.pr === null) {
+        // No PR → no report agent is possible (its prompt names the PR).
+        // Finish the terminal rail and let teardown run below.
+        n = transitionBatch(n, batch.id, 'reported', {}, now);
+        n = transitionBatch(n, batch.id, 'done', {}, now);
+      }
+      reconciled = true;
+      return { state: n, result: undefined };
+    });
+    if (!reconciled) continue;
+
+    journalEvent(deps, 'stale-failure-reconciled', unit(batch.id), {
+      pr: batch.pr ?? undefined,
+      reason: blockedReason,
+      failedAt,
+      evidence: evidence.kind,
+      ...(evidence.kind === 'pr-merged' ? { mergedAt: evidence.mergedAt } : {}),
+      detail:
+        (evidence.kind === 'pr-merged'
+          ? `PR #${evidence.pr} is MERGED — ledger reconciled blocked (${blockedReason}) to the merged rail (blocked at ${failedAt}); report and teardown will now dispatch`
+          : `every member commit is an ancestor of ${batch.base_branch} — ledger reconciled blocked (${blockedReason}) to shipped (blocked at ${failedAt})`) +
+        (batch.pr === null
+          ? ' — no PR of its own, so no report agent can be prompted; teardown dispatched inline'
+          : '') +
+        (unwalkable.length > 0
+          ? `; members NOT walked (no legal edge): ${unwalkable.join(',')}`
+          : ''),
+    });
+    result.mergeAccepted.push(unit(batch.id));
+    if (batch.pr === null) {
+      teardownBatch(deps, batch.id);
+    }
+  }
+}
+
 /**
  * Remove the batch's shared worktree — called both on the happy path
  * (`reconcileReportSlot`, after `batch-report done`) and on every dissolve
@@ -2958,5 +3183,6 @@ export function runBatchTick(
   }
 
   reconcilePrWatch(deps, now, result);
+  reconcileStaleBlockedBatches(deps, now, result);
   return result;
 }

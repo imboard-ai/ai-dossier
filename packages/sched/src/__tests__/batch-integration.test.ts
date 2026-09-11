@@ -40,6 +40,7 @@ import {
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
   type PrTruth,
+  patchBatch,
   patchSlot,
   resolveDispatch,
   resumeBlockedGate,
@@ -2067,4 +2068,182 @@ describe('#630: pr-watch-failed journals once per distinct condition, not once p
     expect(h.batch()?.pr_watch_failed_since).toBeNull();
     expect(h.batch()?.pr_watch_failed_ticks).toBe(0);
   });
+});
+
+// --- #686: stale-BLOCKED batch reconciliation (ground truth beats the ledger) ---
+
+/**
+ * The #594 block shape: `test.focused` reports `task-failed` whose captured
+ * output is only framing (no failing-test evidence) — the gate blocks the
+ * batch (`gate-inconclusive:test.focused`) instead of evicting the member.
+ */
+const UNEVIDENCED_GATE_FAILS: (worktree: string, id: string) => CapabilityGateResult = (
+  _worktree,
+  id
+) =>
+  id === 'test.focused'
+    ? { outcome: 'task-failed', outputTail: 'tee: /dev/stderr: No such device or address\n' }
+    : { outcome: 'ok' };
+
+/**
+ * Drive a 1-member batch to the exact state the #686 issue found in
+ * production (b-20260909-01): the member's work is ON THE BATCH BRANCH (the
+ * fake agent makes a real `(#<issue>)`-trailer commit, so `batch.ranges`
+ * records it), the gate blocked the batch on `gate-inconclusive:test.focused`,
+ * and the member sits at `validated` with the batch `blocked` — while the
+ * work has demonstrably shipped.
+ */
+async function blockedBatchHarness(
+  batchId: string,
+  anchor: number,
+  member: number,
+  extraMembers: number[] = []
+) {
+  const repo = scratchRepo();
+  const h = batchHarness(repo, ['--mode=batch', `--commit-file=member-${member}.txt`], {
+    maxSlots: 1,
+    capability: UNEVIDENCED_GATE_FAILS,
+  });
+  h.enqueue([
+    { issue: member, mode: 'slot', batch: batchId, anchor, tier: 'mid' },
+    ...extraMembers.map((issue) => ({
+      issue,
+      mode: 'slot' as const,
+      batch: batchId,
+      tier: 'mid' as const,
+    })),
+  ]);
+
+  h.tick(); // batch-setup + member 1
+  const pid = batchSlotPid(h, batchId) as number;
+  expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+  h.tick(); // member advance (ranges recorded) → gate blocks the batch
+
+  const batch = findBatch(h.state(), batchId);
+  expect(batch?.status).toBe('blocked');
+  expect(batch?.blocked_reason).toBe('gate-inconclusive:test.focused');
+  // The member's commit is real and ON THE BATCH BRANCH — the branch is what
+  // the reconcile's merge evidence reads (a gate-blocked member's range is
+  // never recorded, which is exactly why the evidence is branch-based).
+  const branch = batch?.branch as string;
+  const branchLog = execFileSync('git', ['log', '--format=%s', `origin/main..${branch}`], {
+    cwd: batch?.worktree as string,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  expect(branchLog).toContain(`(#${member})`);
+  return { h, repo, batchId };
+}
+
+/** Out-of-band merge: fold the batch branch into origin main for real (the b-20260909-01 shape). */
+function mergeBatchBranchIntoMain(repo: string, branch: string, worktree: string): void {
+  const git = (args: string[], cwd: string = repo) =>
+    execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  // The member's commits live in the batch WORKTREE — batch-setup pushed the
+  // branch before any member committed, so origin's copy is stale. An
+  // operator merging out of band publishes the branch first.
+  git(['push', 'origin', branch], worktree);
+  git(['fetch', 'origin', branch]);
+  git(['merge', '--no-ff', '--no-edit', `origin/${branch}`]);
+  git(['push', 'origin', 'main']);
+}
+
+describe('#686: a blocked batch whose work merged out of band reconciles (ground truth beats the ledger)', () => {
+  it('AC4: blocked on gate-inconclusive, its PR merges out of band → next tick reconciles it; report dispatches and teardown runs', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-stale-pr', 6800, 6801);
+    const batchBefore = findBatch(h.state(), batchId);
+    expect(batchBefore?.pr).toBeNull();
+
+    // Out of band: an operator opens a PR for the batch branch and merges it.
+    h.store.withLock((s) => ({
+      state: patchBatch(s, batchId, { pr: 9600 }),
+      result: null,
+    }));
+    fs.writeFileSync(
+      path.join(h.truthDir, '9600.pr.json'),
+      JSON.stringify({ state: 'MERGED', mergedAt: '2026-09-10T09:00:00.000Z' })
+    );
+
+    const result = h.tick(); // the stale-blocked reconcile fires
+    expect(result.mergeAccepted).toContain(`batch:${batchId}`);
+    const batch = findBatch(h.state(), batchId);
+    // On the same rail a normally-watched merge takes: report dispatches next.
+    expect(batch?.status).toBe('deployed');
+    // AC3: the member did NOT stay mid-rail — it is done, like its batch.
+    expect(h.state().entries.find((e) => e.issue === 6801)?.status).toBe('done');
+    const ev = h.deps.journal
+      .read()
+      .find((e) => e.event === 'stale-failure-reconciled' && e.unit === `batch:${batchId}`);
+    expect(String(ev?.detail)).toContain('MERGED');
+    expect(String(ev?.detail)).toContain('gate-inconclusive:test.focused');
+
+    // deployed, no live slot → the report agent claims one next tick, and
+    // batch-report done walks the batch to `done` with a REAL worktree teardown.
+    const r2 = h.tick();
+    expect(r2.spawned).toEqual([`batch:${batchId}`]);
+    const rpid = batchSlotPid(h, batchId) as number;
+    expect(await waitUntilDead(h.spawnDeps, rpid)).toBe(true);
+    const r3 = h.tick();
+    expect(r3.completed).toEqual([`batch:${batchId}`]);
+    const done = findBatch(h.state(), batchId);
+    expect(done?.status).toBe('done');
+    expect(fs.existsSync(done?.worktree as string)).toBe(false);
+  }, 60_000);
+
+  it('AC1 (pr=None, the b-20260909-01 shape): every member commit an ancestor of the base → reconciles to done and tears the worktree down inline', async () => {
+    const { h, repo, batchId } = await blockedBatchHarness('b-stale-anc', 6810, 6811);
+    const batchBefore = findBatch(h.state(), batchId);
+    const branch = batchBefore?.branch as string;
+    const worktree = batchBefore?.worktree as string;
+
+    // Ground truth arrives without any PR: the batch branch lands in main.
+    mergeBatchBranchIntoMain(repo, branch, worktree);
+
+    const result = h.tick();
+    expect(result.mergeAccepted).toContain(`batch:${batchId}`);
+    const batch = findBatch(h.state(), batchId);
+    // No PR → no report agent can be prompted; the batch walks the terminal
+    // rail in the same tick and its worktree is torn down HERE (AC1's
+    // "dispatches teardown", with the skipped report stated in the journal).
+    expect(batch?.status).toBe('done');
+    expect(h.state().entries.find((e) => e.issue === 6811)?.status).toBe('done');
+    expect(fs.existsSync(batch?.worktree as string)).toBe(false);
+    expect(
+      h.deps.journal
+        .read()
+        .some((e) => e.event === 'teardown-done' && e.unit === `batch:${batchId}`)
+    ).toBe(true);
+    const ev = h.deps.journal
+      .read()
+      .find((e) => e.event === 'stale-failure-reconciled' && e.unit === `batch:${batchId}`);
+    expect(String(ev?.detail)).toContain('ancestor');
+    // The merge really is why it reconciled: a second tick changes nothing.
+    expect(h.tick().mergeAccepted).toEqual([]);
+  }, 60_000);
+
+  it('AC1 guard: a batch with a surviving member that never ran does NOT reconcile — its work never shipped', async () => {
+    // Member 6821 never dispatched (the gate blocked after member 6820): no
+    // commits, no shipped work — reconciling it to `done` would mint the
+    // exact ledger/ground-truth drift #686 exists to cure.
+    const { h } = await blockedBatchHarness('b-stale-guard', 6819, 6820, [6821]);
+
+    h.store.withLock((s) => ({
+      state: patchBatch(s, 'b-stale-guard', { pr: 9601 }),
+      result: null,
+    }));
+    fs.writeFileSync(
+      path.join(h.truthDir, '9601.pr.json'),
+      JSON.stringify({ state: 'MERGED', mergedAt: '2026-09-10T09:00:00.000Z' })
+    );
+
+    const result = h.tick();
+    expect(result.mergeAccepted).not.toContain('batch:b-stale-guard');
+    const batch = findBatch(h.state(), 'b-stale-guard');
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('gate-inconclusive:test.focused');
+    // The gate-blocked member sits `in-work` (its gate never advanced it);
+    // the never-dispatched one stays `queued`. NEITHER may be declared done.
+    expect(h.state().entries.find((e) => e.issue === 6820)?.status).toBe('in-work');
+    expect(h.state().entries.find((e) => e.issue === 6821)?.status).toBe('queued');
+  }, 60_000);
 });
