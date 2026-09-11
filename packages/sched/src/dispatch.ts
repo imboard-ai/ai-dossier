@@ -535,8 +535,17 @@ export function resolveProfiledDispatch(
   const { command, prompt, tier_models: tierModels, tiers: profileTiers } = named;
   const mergedTiers = { ...config.dispatch?.tiers };
   for (const tier of TIER_ORDER) {
-    if (profileTiers?.[tier] !== undefined) {
-      mergedTiers[tier] = { ...mergedTiers[tier], ...profileTiers[tier] };
+    const profileTier = profileTiers?.[tier];
+    const profileModel = profileTier?.model ?? tierModels?.[tier];
+    if (profileTier !== undefined || profileModel !== undefined) {
+      // A profile's tier_models are part of its spawn shape and must not be
+      // shadowed by a base config's more specific tier spec. An explicit
+      // profile tier model remains the most-specific override.
+      mergedTiers[tier] = {
+        ...mergedTiers[tier],
+        ...(profileModel !== undefined ? { model: profileModel } : {}),
+        ...profileTier,
+      };
     }
   }
   return resolveDispatch({
@@ -776,6 +785,44 @@ export interface TierExecutor {
   agent: string;
   /** The resolved per-tier model; null means the tier's command has no model flag. */
   model: string | null;
+  /** The final reasoning-effort value in the command, when configured. */
+  effort?: string | null;
+  /** The final provider variant in the command, when configured. */
+  variant?: string | null;
+}
+
+/**
+ * Read the value of a long command-line option from an argv template.
+ *
+ * Profiles use both `--effort value` and `--variant=value` forms. Scan from
+ * right to left because the last occurrence is the one most CLI parsers use
+ * when a hand-written template supplies an override more than once.
+ */
+function commandOptionValue(command: readonly string[], options: readonly string[]): string | null {
+  for (let i = command.length - 1; i >= 0; i--) {
+    const item = command[i];
+    for (const option of options) {
+      if (item.startsWith(`${option}=`)) {
+        const value = item.slice(option.length + 1);
+        return value.length > 0 ? value : null;
+      }
+      if (item !== option) continue;
+      const value = command[i + 1];
+      return value !== undefined && !value.startsWith('--') ? value : null;
+    }
+  }
+  return null;
+}
+
+function formatTierExecutor(executor: TierExecutor): string {
+  const options = [
+    executor.effort !== undefined && executor.effort !== null ? `effort=${executor.effort}` : null,
+    executor.variant !== undefined && executor.variant !== null
+      ? `variant=${executor.variant}`
+      : null,
+  ].filter((value): value is string => value !== null);
+  const settings = options.length > 0 ? ` (${options.join(', ')})` : '';
+  return `${executor.agent}/${executor.model ?? '-'}${settings}`;
 }
 
 /**
@@ -794,6 +841,11 @@ export function tierExecutors(
       {
         agent: path.basename(resolved.tiers[tier].commandTemplate[0] ?? ''),
         model: resolved.tiers[tier].model,
+        effort: commandOptionValue(resolved.tiers[tier].commandTemplate, [
+          '--effort',
+          '--reasoning-effort',
+        ]),
+        variant: commandOptionValue(resolved.tiers[tier].commandTemplate, ['--variant']),
       },
     ])
   ) as Record<ModelTier, TierExecutor>;
@@ -803,12 +855,12 @@ export function tierExecutors(
  * One-line summary of the configured executor per tier (#680): `tier=agent/model`.
  * An operator sees `claude/sonnet` vs `opencode/glm-5.3` at a glance, on
  * `sched status` and in the engine's startup banner, instead of digging the
- * dispatch command out of `events.jsonl`. A tier with no model renders `-`.
+ * dispatch command out of `events.jsonl`. Effort and variant are included when
+ * present because they can change provider behavior without changing the model.
+ * A tier with no model renders `-`.
  */
-export function dispatchSummary(tiers: Record<ModelTier, TierExecutor>): string {
-  return TIER_ORDER.map((tier) => `${tier}=${tiers[tier].agent}/${tiers[tier].model ?? '-'}`).join(
-    ' '
-  );
+export function dispatchSummary(tiers: Record<ModelTier, TierExecutor>, separator = ' '): string {
+  return TIER_ORDER.map((tier) => `${tier}=${formatTierExecutor(tiers[tier])}`).join(separator);
 }
 
 /** A `TierSpawn` as `spawned`/`redispatched`/`fix-dispatched` journal fields — `model` omitted when the tier has none, matching every other optional journal field's convention. */

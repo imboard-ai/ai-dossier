@@ -248,9 +248,9 @@ describe('#680: the configured dispatch agent + resolved per-tier models are vis
     const report = buildStatusReport(seeded(), { max_slots: 3 }, 'proj');
     expect(report.dispatch).toEqual({
       tiers: {
-        mechanical: { agent: 'claude', model: 'haiku' },
-        mid: { agent: 'claude', model: 'sonnet' },
-        strong: { agent: 'claude', model: 'opus' },
+        mechanical: { agent: 'claude', model: 'haiku', effort: null, variant: null },
+        mid: { agent: 'claude', model: 'sonnet', effort: null, variant: null },
+        strong: { agent: 'claude', model: 'opus', effort: null, variant: null },
       },
       // #707: no profiles configured — the named set is empty, not absent
       profiles: {},
@@ -277,9 +277,21 @@ describe('#680: the configured dispatch agent + resolved per-tier models are vis
     expect(report.dispatch.tiers.mechanical).toEqual({
       agent: 'opencode',
       model: 'glm-5.3-flash',
+      effort: null,
+      variant: null,
     });
-    expect(report.dispatch.tiers.mid).toEqual({ agent: 'claude', model: 'glm-5.3' });
-    expect(report.dispatch.tiers.strong).toEqual({ agent: 'claude', model: 'opus' });
+    expect(report.dispatch.tiers.mid).toEqual({
+      agent: 'claude',
+      model: 'glm-5.3',
+      effort: null,
+      variant: null,
+    });
+    expect(report.dispatch.tiers.strong).toEqual({
+      agent: 'claude',
+      model: 'opus',
+      effort: null,
+      variant: null,
+    });
   });
 });
 
@@ -304,6 +316,8 @@ describe('#707 status: dispatch profiles are named, not just the models', () => 
     expect(report.dispatch.profiles.glm.mechanical).toEqual({
       agent: 'opencode',
       model: 'glm-flash',
+      effort: null,
+      variant: null,
     });
     // batches carry their own assignment (null = default here)
     expect(report.batches.every((b) => b.dispatch_profile === null)).toBe(true);

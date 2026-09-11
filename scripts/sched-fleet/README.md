@@ -8,10 +8,10 @@ on the `hcc2` host, versioned here so a host reset or disk loss doesn't lose the
 copy.
 
 **These scripts are a reference install, not a generic product.** `bootstrap.sh` in
-particular is committed exactly as it ran on hcc2 — hardcoded issue numbers, a
-hardcoded sched `config.json` — because AC1 for this change is "verbatim from hcc2
-with only path/secret generalization." Treat it as a worked example to copy and edit
-per deployment, not something to run as-is against your own issues.
+particular retains the hcc2-specific hardcoded issue numbers and sched defaults;
+dispatch profiles are the deliberate shared addition for this change. Treat it as a
+worked example to copy and edit per deployment, not something to run as-is against
+your own issues.
 
 ## Prerequisites
 
@@ -29,6 +29,8 @@ per deployment, not something to run as-is against your own issues.
 |---|---|
 | `tick.sh` | Cron job, every 2 min: ticks every project in `projects.txt` once, Telegram-reports new scheduler events, watches `issues.txt` for closures, arms the 7-day report hook, self-upgrades the CLI when idle, self-removes its own cron line once every tracked issue is closed |
 | `bootstrap.sh` | One-shot: fires at a weekly reset, writes a sched `config.json`, enqueues a fixed dependency chain of issues, arms `tick.sh`'s cron line. **hcc2-specific — edit before reuse.** |
+| `dispatch-profiles.json` | Provider-family dispatch profiles merged into each target project's local scheduler config by `refresh-fleet.sh`; only this config key is fleet-shared |
+| `probe-effort.mjs` | Dry-run-by-default provider probe; compares same-model lower/max effort or variant settings and reports provider-reported token deltas when run with `--run` |
 | `enqueue-report.sh` | Dated one-shot, installed by `tick.sh`: fires once 7 days after a tracked issue closes, enqueues the follow-up report issue, then removes its own cron line |
 | `fmt_events.py` | Reads scheduler `events.jsonl` lines from stdin, filters to the reportable event types, formats up to 8 lines for a Telegram message. Invoked as `python3 fmt_events.py` (no shebang, not directly executable — matches the hcc2 source file exactly) |
 | `allow-sched.py` | One-off fixer for `~/.claude/settings.json` — normalizes malformed `Bash(ai-dossier sched ...)` permission rules. Run it as `python3 allow-sched.py` (no shebang, not directly executable — matches the hcc2 source file exactly) |
@@ -42,7 +44,7 @@ per deployment, not something to run as-is against your own issues.
 ```bash
 # From wherever you want the fleet to live — the hcc2 reference install uses
 # ~/.dossier/reset-fleet/; pick any directory, e.g. ~/.dossier/sched-fleet/
-cp scripts/sched-fleet/{tick.sh,bootstrap.sh,enqueue-report.sh,scorecard-weekly.sh,fmt_events.py,allow-sched.py} .
+cp scripts/sched-fleet/{tick.sh,bootstrap.sh,enqueue-report.sh,scorecard-weekly.sh,dispatch-profiles.json,fmt_events.py,allow-sched.py} .
 cp scripts/sched-fleet/projects.txt.example projects.txt      # edit to your projects
 cp scripts/sched-fleet/issues.txt.example issues.txt          # edit to your tracked issues
 cp scripts/sched-fleet/telegram.env.example telegram.env      # fill in real values
@@ -57,6 +59,28 @@ sit alongside them (or `SCHED_FLEET_HOME` points at that directory).
 `tick.sh`'s `repo_dir()` function maps each `projects.txt` slug to an absolute repo
 checkout path — it is a hardcoded case statement, not data-driven. Add a case arm per
 project before ticking it.
+
+## Dispatch profiles
+
+`dispatch-profiles.json` is the fleet-shared source for the four provider families
+used by the reference deployment. `refresh-fleet.sh` validates it locally, copies
+the source beside the reset bootstrap, then merges only `dispatch.dispatch_profiles`
+into each target host's existing `~/.dossier/sched/<project>/config.json`. Config
+replacement is atomic, and host-local slots, timers, prompts, and pool state are
+left unchanged.
+
+The default target is `imboard-ai-imboard-monorepo`. Add another scheduler slug
+without replacing the default with:
+
+```bash
+SCHED_PROFILE_PROJECTS=imboard-ai-imboard-monorepo,imboard-ai-ai-dossier \
+  bash scripts/refresh-fleet.sh
+```
+
+Use `--profiles-file <path>` for a deployment-specific ladder. A missing target
+config is reported as a host failure instead of silently claiming that the
+profile was synchronized. Set `SCHED_PROFILE_FLEET_HOME` when the reset scripts
+live somewhere other than `~/.dossier/reset-fleet`.
 
 ## Cron install
 
@@ -176,12 +200,12 @@ background (see Known Limitations).
 
 ## Known Limitations
 
-These scripts are committed **verbatim** from the live hcc2 deployment (AC1 for this
-change) — only the `D=` path-resolution line was generalized. The items below are real,
-pre-existing behaviors of the running hcc2 pipeline, disclosed here rather than fixed in
-the committed copy, so this versioning change carries zero behavior change for hcc2 (AC3)
-and the committed scripts stay an honest reference of what's actually deployed. Fix them
-in a follow-up change if/when this is promoted beyond a single-operator reference install.
+These scripts retain the live hcc2 deployment's behavior for its hardcoded workflow and
+are still a reference install, not a generic product. The profile source and merge path
+are the deliberate behavior added by this change; the items below are real, pre-existing
+behaviors of the running hcc2 pipeline, disclosed here rather than fixed in the
+committed copy. Fix them in a follow-up change if/when this is promoted beyond a
+single-operator reference install.
 
 - **`issues.txt`/`projects.txt` loops are not comment-tolerant.** `tick.sh`'s issue-closure
   loop (`for REF in $(cat "$D/issues.txt")`) and its project loop both word-split on
@@ -228,7 +252,7 @@ without configuring a real deployment directory first.
 
 ## No behaviour change for hcc2
 
-This commit only adds files under this repo's `scripts/sched-fleet/`. The running
-hcc2 deployment keeps using its own copy at `~/.dossier/reset-fleet/` until someone
-deliberately repoints `SCHED_FLEET_HOME` (or re-installs from here) — nothing here
-touches that host's crontab, `$HOME`, or credentials.
+These repository changes do not mutate the running hcc2 deployment automatically.
+It keeps using its own copy at `~/.dossier/reset-fleet/` until someone deliberately
+runs the refresh or reinstalls from here — nothing in this checkout touches that
+host's crontab, `$HOME`, or credentials by itself.

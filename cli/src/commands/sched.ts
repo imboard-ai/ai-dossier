@@ -288,25 +288,12 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   // operator driving a session from opencode/GLM sees here that every tier
   // still dispatches the default claude template (or that a mixed
   // `dispatch.tiers` ladder is in effect).
-  lines.push(
-    `Dispatch (default): ${(
-      Object.keys(report.dispatch.tiers) as Array<keyof typeof report.dispatch.tiers>
-    )
-      .map((tier) => {
-        const t = report.dispatch.tiers[tier];
-        return `${tier}=${t.agent}/${t.model ?? '-'}`;
-      })
-      .join(' · ')}`
-  );
+  lines.push(`Dispatch (default): ${dispatchSummary(report.dispatch.tiers, ' · ')}`);
   // #707: configured dispatch profiles, each named with the tier ladder it
   // will actually spawn — what a `--dispatch <name>` batch inherits. Which
   // batch uses which profile shows in the Batches table's profile column.
   for (const [name, tiers] of Object.entries(report.dispatch.profiles)) {
-    lines.push(
-      `Profile ${name}: ${(Object.keys(tiers) as Array<keyof typeof tiers>)
-        .map((tier) => `${tier}=${tiers[tier].agent}/${tiers[tier].model ?? '-'}`)
-        .join(' · ')}`
-    );
+    lines.push(`Profile ${name}: ${dispatchSummary(tiers, ' · ')}`);
   }
   if (staleness?.stale && staleness.installed !== null && staleness.latest !== null) {
     // #537: mirrors the dispatch-health block below — a status line, not a

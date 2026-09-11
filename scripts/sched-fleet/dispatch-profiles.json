@@ -1,0 +1,201 @@
+{
+  "anthropic": {
+    "tiers": {
+      "mechanical": {
+        "command": [
+          "claude",
+          "-p",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--model",
+          "haiku",
+          "--effort",
+          "medium",
+          "--disallowedTools",
+          "Monitor"
+        ],
+        "model": "haiku"
+      },
+      "mid": {
+        "command": [
+          "claude",
+          "-p",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--model",
+          "opus",
+          "--effort",
+          "low",
+          "--disallowedTools",
+          "Monitor"
+        ],
+        "model": "opus"
+      },
+      "strong": {
+        "command": [
+          "claude",
+          "-p",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--model",
+          "opus",
+          "--effort",
+          "max",
+          "--disallowedTools",
+          "Monitor"
+        ],
+        "model": "opus"
+      }
+    }
+  },
+  "zai": {
+    "tiers": {
+      "mechanical": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "zai-coding-plan/glm-5.3-flash",
+          "--variant",
+          "low",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "zai-coding-plan/glm-5.3-flash"
+      },
+      "mid": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "zai-coding-plan/glm-5.3-flash",
+          "--variant",
+          "high",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "zai-coding-plan/glm-5.3-flash"
+      },
+      "strong": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "zai-coding-plan/glm-5.3-flash",
+          "--variant",
+          "max",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "zai-coding-plan/glm-5.3-flash"
+      }
+    }
+  },
+  "openai": {
+    "tiers": {
+      "mechanical": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "openai/gpt-5.6-luna",
+          "--variant",
+          "high",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "openai/gpt-5.6-luna"
+      },
+      "mid": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "openai/gpt-5.6-luna",
+          "--variant",
+          "max",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "openai/gpt-5.6-luna"
+      },
+      "strong": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "openai/gpt-6-astra",
+          "--variant",
+          "low",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "openai/gpt-6-astra"
+      }
+    }
+  },
+  "alibaba": {
+    "tiers": {
+      "mechanical": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "alibaba-token-plan/deepseek-v4-flash",
+          "--variant",
+          "low",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "alibaba-token-plan/deepseek-v4-flash"
+      },
+      "mid": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "alibaba-token-plan/deepseek-v4-flash",
+          "--variant",
+          "max",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "alibaba-token-plan/deepseek-v4-flash"
+      },
+      "strong": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "alibaba-token-plan/deepseek-v4-pro",
+          "--variant",
+          "max",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "alibaba-token-plan/deepseek-v4-pro"
+      }
+    }
+  }
+}

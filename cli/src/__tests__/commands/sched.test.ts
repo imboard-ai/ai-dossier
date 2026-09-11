@@ -1271,6 +1271,39 @@ describe('#680: the configured dispatch agent is visible (status line + startup 
     expect(logs.filter((l) => l.includes('sched dispatch:'))).toHaveLength(0);
     expect(() => JSON.parse(logs.join('\n'))).not.toThrow();
   });
+
+  it('#709: renders effort and variant in both status and startup output', async () => {
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+    fs.writeFileSync(
+      configPath(),
+      JSON.stringify({
+        schema_version: '1.9.0',
+        max_slots: 3,
+        dispatch: {
+          tiers: {
+            mechanical: {
+              command: ['claude', '-p', '--model', '{model}', '--effort', 'low'],
+            },
+            mid: {
+              command: ['opencode', 'run', '--model', '{model}', '--variant=max'],
+            },
+          },
+        },
+      })
+    );
+
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain(
+      'Dispatch (default): mechanical=claude/haiku (effort=low) · mid=opencode/sonnet (variant=max) · strong=claude/opus'
+    );
+
+    logs.length = 0;
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+    const banners = logs.filter((l) => l.includes('sched dispatch (default):'));
+    expect(banners).toHaveLength(1);
+    expect(banners[0]).toContain('mechanical=claude/haiku (effort=low)');
+    expect(banners[0]).toContain('mid=opencode/sonnet (variant=max)');
+  });
 });
 
 describe('#707: sched enqueue --dispatch (named dispatch profiles)', () => {

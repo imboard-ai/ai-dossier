@@ -6,6 +6,7 @@
 #   bash scripts/refresh-fleet.sh                    # CLI + default dossier/skill set
 #   bash scripts/refresh-fleet.sh --cli-only         # just bump the CLI everywhere
 #   bash scripts/refresh-fleet.sh --hosts wls,hcc    # subset of machines
+#   bash scripts/refresh-fleet.sh --profiles-file path # use a different profile source
 #   bash scripts/refresh-fleet.sh imboard-ai/git/ship-issue   # extra targets, appended
 #
 # WHY THIS EXISTS
@@ -28,10 +29,14 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOSTS_DEFAULT="wls,hcc,hcc2"
 HOSTS="$HOSTS_DEFAULT"
 CLI_ONLY=0
 EXTRA_TARGETS=()
+PROFILE_FILE="${SCHED_PROFILE_FILE:-$SCRIPT_DIR/sched-fleet/dispatch-profiles.json}"
+PROFILE_PROJECTS="${SCHED_PROFILE_PROJECTS:-imboard-ai-imboard-monorepo}"
+PROFILE_FLEET_HOME="${SCHED_PROFILE_FLEET_HOME:-$HOME/.dossier/reset-fleet}"
 
 # The dossiers and skills worth force-refreshing everywhere. Skills are installed AND
 # wrapper-synced; plain dossiers are pulled into cache.
@@ -52,6 +57,10 @@ while [ $# -gt 0 ]; do
     --cli-only) CLI_ONLY=1 ;;
     --hosts) HOSTS="${2:?--hosts needs a comma-separated list}"; shift ;;
     --hosts=*) HOSTS="${1#*=}" ;;
+    --profiles-file) PROFILE_FILE="${2:?--profiles-file needs a JSON path}"; shift ;;
+    --profiles-file=*) PROFILE_FILE="${1#*=}" ;;
+    --profile-projects) PROFILE_PROJECTS="${2:?--profile-projects needs comma-separated scheduler slugs}"; shift ;;
+    --profile-projects=*) PROFILE_PROJECTS="${1#*=}" ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) EXTRA_TARGETS+=("$1") ;;
@@ -75,6 +84,81 @@ ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
 # (#696). A lookup failure must not fail the refresh — hosts then report
 # installed=<ver> with the comparison explicitly skipped.
 LATEST=$(npm view @ai-dossier/cli version 2>/dev/null)
+
+# Profiles are intentionally the only scheduler config this script distributes.
+# Slots, paths, timers, pool state, and prompts remain host-local. The checked-in
+# source is also copied beside the reset bootstrap so a future reset cannot lose
+# the profile set; callers can point at another JSON file with --profiles-file when
+# a deployment has its own provider ladders.
+PROFILE_B64=""
+PROFILE_SYNC_CMD=""
+if [ "$CLI_ONLY" -eq 0 ]; then
+  if [ ! -f "$PROFILE_FILE" ]; then
+    echo "FAIL: dispatch profile source not found: $PROFILE_FILE" >&2
+    exit 2
+  fi
+  if [[ ! "$PROFILE_PROJECTS" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(,[A-Za-z0-9][A-Za-z0-9._-]{0,127})*$ ]]; then
+    echo "FAIL: --profile-projects must be comma-separated scheduler slugs" >&2
+    exit 2
+  fi
+  PROFILE_B64=$(PROFILE_FILE="$PROFILE_FILE" node <<'NODE' 2>/dev/null
+const fs = require("node:fs");
+const tiers = new Set(["mechanical", "mid", "strong"]);
+const profileName = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const strings = (value) =>
+  Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string" && item.length > 0);
+const tierSpec = (name, value) => {
+  if (!plain(value)) throw new Error(`invalid tier spec: ${name}`);
+  for (const key of Object.keys(value)) {
+    if (!["command", "model", "prompt"].includes(key)) throw new Error(`unknown tier key: ${name}.${key}`);
+  }
+  if (value.command !== undefined && !strings(value.command)) throw new Error(`invalid command: ${name}`);
+  if (value.model !== undefined && (typeof value.model !== "string" || value.model.length === 0)) throw new Error(`invalid model: ${name}`);
+  if (value.prompt !== undefined && (typeof value.prompt !== "string" || value.prompt.length === 0)) throw new Error(`invalid prompt: ${name}`);
+};
+const validateProfile = (name, value) => {
+  if (!plain(value)) throw new Error(`invalid dispatch profile: ${name}`);
+  for (const key of Object.keys(value)) {
+    if (!["command", "prompt", "tier_models", "tiers"].includes(key)) throw new Error(`unknown profile key: ${name}.${key}`);
+  }
+  if (value.command !== undefined && !strings(value.command)) throw new Error(`invalid command: ${name}`);
+  if (value.prompt !== undefined && (typeof value.prompt !== "string" || value.prompt.length === 0)) throw new Error(`invalid prompt: ${name}`);
+  if (value.tier_models !== undefined) {
+    if (!plain(value.tier_models)) throw new Error(`invalid tier_models: ${name}`);
+    for (const [tier, model] of Object.entries(value.tier_models)) {
+      if (!tiers.has(tier) || typeof model !== "string" || model.length === 0) throw new Error(`invalid tier_models entry: ${name}.${tier}`);
+    }
+  }
+  if (value.tiers !== undefined) {
+    if (!plain(value.tiers)) throw new Error(`invalid tiers: ${name}`);
+    for (const [tier, spec] of Object.entries(value.tiers)) {
+      if (!tiers.has(tier)) throw new Error(`invalid tier: ${name}.${tier}`);
+      tierSpec(`${name}.${tier}`, spec);
+    }
+  }
+};
+const value = JSON.parse(fs.readFileSync(process.env.PROFILE_FILE, "utf8"));
+if (!plain(value) || Object.keys(value).length === 0) throw new Error("profile source must be a non-empty object");
+for (const [name, profile] of Object.entries(value)) {
+  if (!profileName.test(name)) throw new Error(`invalid profile name: ${name}`);
+  validateProfile(name, profile);
+}
+process.stdout.write(Buffer.from(JSON.stringify(value)).toString("base64"));
+NODE
+  )
+  rc=$?
+  if [ $rc -ne 0 ] || [ -z "$PROFILE_B64" ]; then
+    echo "FAIL: dispatch profile source is not valid JSON: $PROFILE_FILE" >&2
+    exit 2
+  fi
+  PROFILE_FLEET_HOME_B64=$(node -e 'process.stdout.write(Buffer.from(process.argv[1]).toString("base64"))' "$PROFILE_FLEET_HOME")
+  # Use base64 payloads so profile JSON and deployment paths never become shell
+  # syntax on a remote host. The remote command validates the target objects,
+  # writes the source beside bootstrap, and atomically replaces each config.
+  PROFILE_SYNC_SCRIPT='const fs=require("node:fs"),path=require("node:path"),os=require("node:os");const plain=value=>value!==null&&typeof value==="object"&&!Array.isArray(value);const profiles=JSON.parse(Buffer.from(process.env.SCHED_PROFILE_B64,"base64").toString("utf8"));if(!plain(profiles)||Object.keys(profiles).length===0)throw new Error("profile source must be a non-empty object");const fleetDir=Buffer.from(process.env.SCHED_PROFILE_FLEET_HOME_B64,"base64").toString("utf8");const root=path.resolve(os.homedir(),".dossier","sched");const writeAtomic=(file,text,mode)=>{fs.mkdirSync(path.dirname(file),{recursive:true});const temp=path.join(path.dirname(file),`.${path.basename(file)}.${process.pid}.tmp`);try{fs.writeFileSync(temp,text,{encoding:"utf8",mode:mode??0o644});if(mode!==undefined)fs.chmodSync(temp,mode);fs.renameSync(temp,file)}finally{try{fs.unlinkSync(temp)}catch{}}};const updates=[];for(const project of process.env.SCHED_PROFILE_PROJECTS.split(",")){const file=path.resolve(root,project,"config.json");if(!file.startsWith(`${root}${path.sep}`))throw new Error(`scheduler path escapes root: ${project}`);if(!fs.existsSync(file))throw new Error(`missing scheduler config: ${file}`);const config=JSON.parse(fs.readFileSync(file,"utf8"));if(!plain(config)||(config.dispatch!==undefined&&!plain(config.dispatch)))throw new Error(`invalid scheduler config: ${file}`);const mode=fs.statSync(file).mode&0o777;updates.push([file,JSON.stringify({...config,dispatch:{...(config.dispatch||{}),dispatch_profiles:profiles},},null,2)+"\n",mode])};const source=path.join(fleetDir,"dispatch-profiles.json");const sourceMode=fs.existsSync(source)?fs.statSync(source).mode&0o777:0o644;writeAtomic(source,JSON.stringify(profiles,null,2)+"\n",sourceMode);for(const [file,text,mode] of updates)writeAtomic(file,text,mode);'
+  PROFILE_SYNC_CMD="SCHED_PROFILE_B64='$PROFILE_B64' SCHED_PROFILE_PROJECTS='$PROFILE_PROJECTS' SCHED_PROFILE_FLEET_HOME_B64='$PROFILE_FLEET_HOME_B64' node -e '$PROFILE_SYNC_SCRIPT'"
+fi
 
 run_on() {  # run_on <host> <label> <command>
   local host="$1" label="$2" cmd="$3" out rc
@@ -140,6 +224,7 @@ for host in "${HOST_LIST[@]}"; do
   fi
 
   if [ "$CLI_ONLY" -eq 0 ]; then
+    run_on "$host" "sync dispatch profiles ($PROFILE_PROJECTS)" "$PROFILE_SYNC_CMD"
     for d in "${DOSSIERS[@]}" "${EXTRA_TARGETS[@]:-}"; do
       [ -z "$d" ] && continue
       run_on "$host" "pull $d" "\"\$AD\" pull '$d' --force >/dev/null 2>&1"
