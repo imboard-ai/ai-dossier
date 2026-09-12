@@ -23,13 +23,21 @@ import * as path from 'node:path';
 export interface AgentRunUsage {
   /** Model id the agent reported; comma-joined when several models ran (token/cost fields are totals across all). */
   model: string | null;
+  /** Agent CLI/provider that emitted this usage stream. */
+  provider: 'claude' | 'opencode';
   input_tokens: number | null;
   output_tokens: number | null;
+  /** OpenCode reports thinking tokens separately from generated output. */
+  reasoning_tokens: number | null;
+  /** Number of usage-bearing OpenCode step_finish events. */
+  steps: number | null;
   /** Cache-creation (write) input tokens, summed across models when several ran. */
   cache_creation_tokens: number | null;
   /** Cache-read input tokens, summed across models when several ran. */
   cache_read_tokens: number | null;
   total_cost_usd: number | null;
+  /** False when OpenCode reported subscription-plan zero costs alongside consumed tokens. */
+  cost_available: boolean | null;
   /** The final result text (claude's `result` field), for re-emitting to stdout. */
   result_text: string | null;
 }
@@ -265,11 +273,15 @@ function extractResultUsage(parsed: Record<string, unknown>): AgentRunUsage {
 
   return {
     model,
+    provider: 'claude',
     input_tokens,
     output_tokens,
+    reasoning_tokens: null,
+    steps: null,
     cache_creation_tokens,
     cache_read_tokens,
     total_cost_usd,
+    cost_available: total_cost_usd === null ? null : true,
     result_text,
   };
 }
@@ -331,11 +343,15 @@ function sumAssistantUsage(events: readonly Record<string, unknown>[]): AgentRun
 
   return {
     model: sanitizeModel(joinModels([...models])),
+    provider: 'claude',
     input_tokens: sawInput ? input : null,
     output_tokens: sawOutput ? output : null,
+    reasoning_tokens: null,
+    steps: null,
     cache_creation_tokens: sawCacheCreation ? cacheCreation : null,
     cache_read_tokens: sawCacheRead ? cacheRead : null,
     total_cost_usd: null,
+    cost_available: null,
     result_text: null,
   };
 }
@@ -731,12 +747,17 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
   const texts: string[] = [];
   let inputTokens = 0;
   let outputTokens = 0;
+  let reasoningTokens = 0;
   let cacheCreationTokens = 0;
   let cacheReadTokens = 0;
   let costUsd = 0;
   let sawUsage = false;
   let sawCacheCreation = false;
   let sawCacheRead = false;
+  let sawReasoning = false;
+  let sawCost = false;
+  let allCostsZero = true;
+  let steps = 0;
 
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim();
@@ -765,6 +786,7 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
       texts.push(part.text);
     }
     if (event.type === 'step_finish' && part) {
+      steps += 1;
       const tokens = asRecord(part.tokens);
       if (tokens) {
         const input = toCount(tokens.input);
@@ -775,6 +797,12 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
         const output = toCount(tokens.output);
         if (output !== null) {
           outputTokens += output;
+          sawUsage = true;
+        }
+        const reasoning = toCount(tokens.reasoning);
+        if (reasoning !== null) {
+          reasoningTokens += reasoning;
+          sawReasoning = true;
           sawUsage = true;
         }
         // opencode nests cache counts one level down, as
@@ -801,7 +829,8 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
       const cost = toCost(part.cost);
       if (cost !== null) {
         costUsd += cost;
-        sawUsage = true;
+        sawCost = true;
+        if (cost !== 0) allCostsZero = false;
       }
     }
   }
@@ -810,13 +839,29 @@ export function parseOpenCodeUsage(stdout: string | null | undefined): AgentRunU
 
   return {
     model: null,
+    provider: 'opencode',
     input_tokens: sawUsage ? inputTokens : null,
     output_tokens: sawUsage ? outputTokens : null,
+    reasoning_tokens: sawReasoning ? reasoningTokens : null,
+    steps: steps > 0 ? steps : null,
     cache_creation_tokens: sawCacheCreation ? cacheCreationTokens : null,
     cache_read_tokens: sawCacheRead ? cacheReadTokens : null,
-    total_cost_usd: sawUsage ? costUsd : null,
+    // Subscription-plan streams report a literal zero per step despite consuming
+    // tokens. That is unavailable pricing, not a measured $0 run.
+    total_cost_usd: sawCost && (!sawUsage || !allCostsZero) ? costUsd : null,
+    cost_available: sawCost ? !(sawUsage && allCostsZero) : null,
     result_text: texts.length > 0 ? texts.join('') : null,
   };
+}
+
+/** True only for the distinctive OpenCode step-finish JSONL shape. */
+export function isOpenCodeUsageStream(stdout: string | null | undefined): boolean {
+  if (typeof stdout !== 'string') return false;
+  for (const line of stdout.split('\n')) {
+    const event = parseJsonObject(line.trim());
+    if (event?.type === 'step_finish' && asRecord(event.part)?.type === 'step-finish') return true;
+  }
+  return false;
 }
 
 /**

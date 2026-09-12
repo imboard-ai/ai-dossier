@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   appendSchedRunLog,
   buildSchedRunLogEntry,
+  finalizeRunLogEntry,
   parseFenceAbort,
   readDispatchLog,
   schedRunsLogPath,
@@ -154,8 +155,34 @@ describe('buildSchedRunLogEntry', () => {
       model: 'grok',
       input_tokens: 300,
       output_tokens: 40,
+      reasoning_tokens: null,
+      steps: 1,
       total_cost_usd: 0.004,
+      provider: 'opencode',
     });
+  });
+
+  it('does not journal run-log-no-usage for a recognized OpenCode stream with cache-only usage', () => {
+    const logContent = JSON.stringify({
+      type: 'step_finish',
+      part: { type: 'step-finish', tokens: { cache: { write: 0, read: 10 } }, cost: 0 },
+    });
+    const entry = buildSchedRunLogEntry({
+      unit: 'issue:715',
+      role: 'cycle',
+      cmd0: 'opencode',
+      cmd: ['opencode', 'run'],
+      logContent,
+      spawnedAt: null,
+      completedAt,
+      configuredModel: null,
+      cwd: '/repo',
+    });
+    const events: string[] = [];
+
+    finalizeRunLogEntry(entry, logContent, home, (event) => events.push(event));
+
+    expect(events).not.toContain('run-log-no-usage');
   });
 
   it('falls back to the configured model, and leaves duration null, when the agent reported no usage and spawnedAt is unknown', () => {

@@ -29,11 +29,15 @@ describe('parseAgentUsage', () => {
 
     expect(parseAgentUsage(stdout)).toEqual({
       model: 'claude-sonnet-4-20250514',
+      provider: 'claude',
       input_tokens: 25,
       output_tokens: 200,
+      reasoning_tokens: null,
+      steps: null,
       cache_creation_tokens: 100,
       cache_read_tokens: 1000,
       total_cost_usd: 0.0035,
+      cost_available: true,
       result_text: 'done',
     });
   });
@@ -165,11 +169,15 @@ describe('parseAgentUsage', () => {
 
     expect(parseAgentUsage(stdout)).toEqual({
       model: null,
+      provider: 'claude',
       input_tokens: null,
       output_tokens: null,
+      reasoning_tokens: null,
+      steps: null,
       cache_creation_tokens: null,
       cache_read_tokens: null,
       total_cost_usd: null,
+      cost_available: null,
       result_text: 'no usage here',
     });
   });
@@ -250,13 +258,17 @@ describe('parseOpenCodeUsage', () => {
 
     expect(parseOpenCodeUsage(stdout)).toEqual({
       model: null, // opencode events carry no model id — caller falls back to --model
+      provider: 'opencode',
       input_tokens: 26502,
       output_tokens: 3,
+      reasoning_tokens: 0,
+      steps: 1,
       // The fixture's step reports `cache: {write: 0, read: 0}` — a real
       // reported zero, surfaced as 0 rather than null (#524 review).
       cache_creation_tokens: 0,
       cache_read_tokens: 0,
       total_cost_usd: 0.03771504,
+      cost_available: true,
       result_text: 'OK',
     });
   });
@@ -276,6 +288,27 @@ describe('parseOpenCodeUsage', () => {
       output_tokens: 15,
       total_cost_usd: 0.03,
       result_text: 'first second',
+    });
+  });
+
+  it('sums the captured 31-step subscription-plan stream without treating its zero costs as free', () => {
+    const captured = Array.from({ length: 31 }, (_, index) =>
+      stepFinish(index === 30 ? 5_468 : 5_448, index === 30 ? 285 : 280, 0).replace(
+        '"cache":{"write":0,"read":0}',
+        `"cache":{"write":0,"read":${index === 30 ? 107_860 : 107_850}}`
+      )
+    ).join('\n');
+
+    expect(parseOpenCodeUsage(captured)).toMatchObject({
+      provider: 'opencode',
+      input_tokens: 168_908,
+      output_tokens: 8_685,
+      reasoning_tokens: 0,
+      cache_creation_tokens: 0,
+      cache_read_tokens: 3_343_360,
+      steps: 31,
+      total_cost_usd: null,
+      cost_available: false,
     });
   });
 

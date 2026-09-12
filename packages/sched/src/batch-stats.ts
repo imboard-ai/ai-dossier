@@ -17,7 +17,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { RunLogEntry } from '@ai-dossier/core';
+import { isOpenCodeUsageStream, type RunLogEntry } from '@ai-dossier/core';
 import {
   batchFixLogPath,
   batchMemberLogPath,
@@ -102,17 +102,6 @@ export function listBatchDispatchLogs(runsDir: string, batchId: string): BatchLo
   return entries;
 }
 
-/**
- * The agent CLI these logs are shaped for — every batch dispatch produced so
- * far uses the Claude CLI (`modelUsage`/`total_cost_usd` stream-json
- * result), and the filename convention on disk carries no record of which
- * binary was spawned (unlike a live dispatch, which knows `cmd[0]` from
- * `resolveTierSpawn` at record time). `usageParserFor` degrades to this same
- * parser for any command it doesn't specifically recognize, so this default
- * is also the safe fallback, never a narrowing assumption.
- */
-const RECONSTRUCTED_CMD0 = 'claude';
-
 function roleLabel(entry: BatchLogEntry): string {
   switch (entry.role) {
     case 'member':
@@ -151,11 +140,15 @@ export function buildBatchRunLogEntries(runsDir: string, batchId: string): RunLo
     } catch {
       completedAt = new Date(0);
     }
+    // Historical filenames do not retain the spawned command. Only select
+    // OpenCode for its distinctive step_finish/step-finish pair; everything
+    // else retains the established Claude-shaped fallback.
+    const cmd0 = isOpenCodeUsageStream(logContent) ? 'opencode' : 'claude';
     return buildSchedRunLogEntry({
       unit: entryUnit(entry, batchId),
       role: roleLabel(entry),
-      cmd0: RECONSTRUCTED_CMD0,
-      cmd: [RECONSTRUCTED_CMD0],
+      cmd0,
+      cmd: [cmd0],
       logContent,
       spawnedAt: null,
       completedAt,

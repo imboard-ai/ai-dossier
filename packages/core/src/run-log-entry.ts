@@ -54,6 +54,8 @@ export interface RunLogEntry {
   spawned_command?: string | null;
   /** Model id as reported by the agent CLI, else the requested --model alias. Null when unknown. */
   model?: string | null;
+  /** Agent CLI/provider that reported the usage. Absent on historical rows. */
+  provider?: 'claude' | 'opencode' | null;
   /** Exit code of the spawned agent process, or of the CLI action for early exits. Null when killed by a signal or failed to spawn. */
   exit_code?: number | null;
   /** Why the spawned process produced no exit code: spawn error (e.g. ENOENT) or signal. Null when the process exited normally. */
@@ -62,6 +64,10 @@ export interface RunLogEntry {
   input_tokens?: number | null;
   /** Output tokens reported by the agent CLI. Null when unavailable. */
   output_tokens?: number | null;
+  /** OpenCode reasoning tokens, kept separate from output tokens. */
+  reasoning_tokens?: number | null;
+  /** Number of OpenCode step_finish events. */
+  steps?: number | null;
   /**
    * Cache-creation (write) and cache-read input tokens reported by the agent
    * CLI (#524). Sourced from `modelUsage`, the same as `input_tokens`/
@@ -72,6 +78,8 @@ export interface RunLogEntry {
   cache_read_tokens?: number | null;
   /** Total cost in USD reported by the agent CLI. Null when unavailable. */
   total_cost_usd?: number | null;
+  /** False for token-consuming OpenCode subscription-plan streams reporting only zero costs. */
+  cost_available?: boolean | null;
   /**
    * The scheduler unit this run belongs to (#524), e.g. `issue:524` or
    * `batch:b1` — set by `packages/sched` dispatch entries, null/absent for

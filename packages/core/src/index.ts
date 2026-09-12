@@ -14,6 +14,7 @@
 // Agent usage exports (headless-agent JSON result parsing, shared by cli + sched)
 export type { AgentRunUsage, AnnouncedWaitEvidence, DispatchApiError } from './agent-usage';
 export {
+  isOpenCodeUsageStream,
   parseAgentUsage,
   parseAnnouncedWait,
   parseDispatchApiError,

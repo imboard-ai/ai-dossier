@@ -170,13 +170,17 @@ export function buildSchedRunLogEntry(input: SchedRunLogInput): RunLogEntry {
     duration_ms,
     spawned_command: input.cmd.join(' '),
     model: usage?.model ?? input.configuredModel ?? null,
+    provider: usage?.provider ?? null,
     exit_code: input.exitCode ?? null,
     spawn_error: input.spawnError ?? null,
     input_tokens: usage?.input_tokens ?? null,
     output_tokens: usage?.output_tokens ?? null,
+    reasoning_tokens: usage?.reasoning_tokens ?? null,
+    steps: usage?.steps ?? null,
     cache_creation_tokens: usage?.cache_creation_tokens ?? null,
     cache_read_tokens: usage?.cache_read_tokens ?? null,
     total_cost_usd: usage?.total_cost_usd ?? null,
+    cost_available: usage?.cost_available ?? null,
     unit: input.unit,
     tier: input.tier ?? null,
   };
@@ -329,7 +333,13 @@ export function finalizeRunLogEntry(
   journal: (event: JournalEventName, extra: Record<string, unknown>) => void,
   extraFields: Record<string, unknown> = {}
 ): void {
-  if (runEntry.input_tokens === null && runEntry.output_tokens === null) {
+  if (
+    runEntry.input_tokens === null &&
+    runEntry.output_tokens === null &&
+    runEntry.reasoning_tokens === null &&
+    runEntry.cache_creation_tokens === null &&
+    runEntry.cache_read_tokens === null
+  ) {
     journal('run-log-no-usage', {
       ...extraFields,
       bytes: logContent === null ? null : logContent.length,

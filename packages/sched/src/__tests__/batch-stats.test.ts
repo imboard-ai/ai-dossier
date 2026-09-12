@@ -153,6 +153,31 @@ describe('buildBatchRunLogEntries', () => {
     expect(entries[0].output_tokens).toBeNull();
   });
 
+  it('recognizes and reconstructs an OpenCode step stream instead of forcing the Claude parser', () => {
+    const runsDir = tmpDir();
+    fs.writeFileSync(
+      path.join(runsDir, 'batch-b1-m1-540.log'),
+      JSON.stringify({
+        type: 'step_finish',
+        part: {
+          type: 'step-finish',
+          tokens: { input: 10, output: 2, reasoning: 3, cache: { write: 0, read: 20 } },
+          cost: 0,
+        },
+      })
+    );
+
+    expect(buildBatchRunLogEntries(runsDir, 'b1')[0]).toMatchObject({
+      provider: 'opencode',
+      input_tokens: 10,
+      output_tokens: 2,
+      reasoning_tokens: 3,
+      steps: 1,
+      total_cost_usd: null,
+      cost_available: false,
+    });
+  });
+
   it('empty batch (no matching logs) reconstructs to an empty list', () => {
     const runsDir = tmpDir();
     fs.writeFileSync(path.join(runsDir, 'issue-540.log'), fakeResultJson(1, 100, 100));
