@@ -226,6 +226,8 @@ export interface BatchTickResult {
   parked: string[];
   mergeAccepted: string[];
   failed: string[];
+  /** Per-batch exceptions contained so unrelated units can continue this tick (#635). */
+  reconciliation_errors: string[];
   /** Issue numbers requeued full-cycle by a dissolve — matches `TickResult.blocked`'s shape. */
   blocked: number[];
 }
@@ -244,7 +246,15 @@ export interface MemberFailure {
 }
 
 function emptyResult(): BatchTickResult {
-  return { spawned: [], completed: [], parked: [], mergeAccepted: [], failed: [], blocked: [] };
+  return {
+    spawned: [],
+    completed: [],
+    parked: [],
+    mergeAccepted: [],
+    failed: [],
+    reconciliation_errors: [],
+    blocked: [],
+  };
 }
 
 function unit(batchId: string): string {
@@ -3779,6 +3789,29 @@ export function runBatchTick(
     }
   };
 
+  const containFailure = (batchId: string, err: unknown): void => {
+    const detail = `${(err as Error).name}: ${(err as Error).message}`;
+    // A corrupt unit must not turn into a project-wide scheduler outage.
+    // Keep the failed batch inspectable, release its slot, and continue.
+    deps.store.withLock((state) => {
+      const fresh = findBatch(state, batchId);
+      if (!fresh || TERMINAL_BATCH_STATUSES.has(fresh.status) || fresh.status === 'blocked') {
+        return { state, result: undefined };
+      }
+      const blocked = transitionBatch(
+        state,
+        batchId,
+        'blocked',
+        { blocked_reason: 'reconcile-error' },
+        now
+      );
+      return { state: releaseBatchSlot(blocked, batchId, now), result: undefined };
+    });
+    journalEvent(deps, 'unit-failed', unit(batchId), { reason: 'reconcile-error', detail });
+    result.failed.push(unit(batchId));
+    result.reconciliation_errors.push(`${unit(batchId)}: ${detail}`);
+  };
+
   // #565: when more ready batches exist than free capacity, claim them in
   // the same priority order `runnableUnits` would (desc priority → asc
   // readiness age → anchor) — this loop never goes through
@@ -3810,11 +3843,15 @@ export function runBatchTick(
     const state = deps.store.load();
     const batch = findBatch(state, batchId);
     if (batch && batch.status === 'ready' && slotFor(state, batchId) === undefined) {
-      // #707: batch-setup dispatches through the batch's own profile too — it
-      // is the batch's first agent, not an engine-internal step.
-      const batchDispatch = dispatchFor(batch);
-      if (batchDispatch !== null) {
-        claimAndSetup(deps, config, batchDispatch, batchId, now, result);
+      try {
+        // #707: batch-setup dispatches through the batch's own profile too — it
+        // is the batch's first agent, not an engine-internal step.
+        const batchDispatch = dispatchFor(batch);
+        if (batchDispatch !== null) {
+          claimAndSetup(deps, config, batchDispatch, batchId, now, result);
+        }
+      } catch (err) {
+        containFailure(batchId, err);
       }
     }
   }
@@ -3844,75 +3881,79 @@ export function runBatchTick(
       }
       continue;
     }
-    // #707: resolve this batch's profile once per pass — or dissolve/fall
-    // back loudly when it no longer resolves (see `dispatchFor` above).
-    // Terminal batches are skipped before this call so a removed profile does
-    // not generate a missing-profile event on every later tick.
-    const batchDispatch = dispatchFor(batch);
-    if (batchDispatch === null) continue;
-    if (slot && (slot.status === 'running' || slot.status === 'assigned')) {
-      if (batch.status === 'executing') {
-        reconcileMemberSlot(deps, config, batchDispatch, batch.id, slot, now, result);
-      } else if (batch.status === 'fixing') {
-        reconcileFixSlot(deps, config, batch.id, slot, now, result);
+    try {
+      // #707: resolve this batch's profile once per pass — or dissolve/fall
+      // back loudly when it no longer resolves (see `dispatchFor` above).
+      // Terminal batches are skipped before this call so a removed profile does
+      // not generate a missing-profile event on every later tick.
+      const batchDispatch = dispatchFor(batch);
+      if (batchDispatch === null) continue;
+      if (slot && (slot.status === 'running' || slot.status === 'assigned')) {
+        if (batch.status === 'executing') {
+          reconcileMemberSlot(deps, config, batchDispatch, batch.id, slot, now, result);
+        } else if (batch.status === 'fixing') {
+          reconcileFixSlot(deps, config, batch.id, slot, now, result);
+        } else if (batch.status === 'reviewing' || batch.status === 'shipping') {
+          reconcileTailSlot(deps, batch.id, slot, now, result);
+        } else if (batch.status === 'deployed') {
+          reconcileReportSlot(deps, batch.id, slot, now, result);
+        }
+        continue;
+      }
+      if (slot) continue; // live but neither running/assigned (e.g. mid-verify) — next tick
+      if (batch.status === 'validating') {
+        // A local suite run, not a provider dispatch — unaffected by `paused`.
+        runValidate(deps, config, batchDispatch, batch.id, now, result);
+        continue;
+      }
+      // #629: every branch below spawns a provider agent — hold the wedge
+      // until `sched resume` (see the top of this function for why `paused`
+      // is read once, up front, rather than per iteration).
+      if (paused) continue;
+      if (batch.status === 'deployed') {
+        spawnReportAgent(deps, config, batchDispatch, batch.id, now, result);
+      } else if (batch.status === 'executing') {
+        // A prior spawn threw, or `claimAndSpawn` found zero free capacity —
+        // either way the batch is stuck mid-member with no slot and nothing
+        // else will ever retry it (Conformance review AC5 caveat; Supportability
+        // review #12). Retrying every tick is cheap-by-contract (#677 review):
+        // `spawnMemberContinuation` runs the free-capacity and member-identity
+        // pre-checks BEFORE any pool/git work, so a full scheduler (or stale
+        // member context) exits here without exec'ing, and `claimAndSpawn`
+        // remains the authoritative capacity gate.
+        spawnMemberContinuation(deps, config, batchDispatch, batch.id, now, result);
       } else if (batch.status === 'reviewing' || batch.status === 'shipping') {
-        reconcileTailSlot(deps, batch.id, slot, now, result);
-      } else if (batch.status === 'deployed') {
-        reconcileReportSlot(deps, batch.id, slot, now, result);
+        // Same wedge, for a dead-or-never-claimed tail agent.
+        spawnTailAgent(deps, config, batchDispatch, batch.id, now, result);
+      } else if (batch.status === 'fixing') {
+        // `beginFixAttempt` already recorded this member's ONE attempt as
+        // `dispatched` before `claimAndSpawn` could find capacity — retrying the
+        // exact same dispatch isn't reconstructible from persisted state (only
+        // the outcome is persisted, not the command/prompt), so resolve it
+        // `red` (conservatively: the member loses its one attempt and evicts on
+        // the next validate pass, which is safe — never a permanent wedge).
+        const state = deps.store.load();
+        const b = findBatch(state, batch.id);
+        const offenderRecord = b
+          ? [...b.fix_attempts].reverse().find((a) => a.outcome === 'dispatched')
+          : undefined;
+        if (b && offenderRecord) {
+          const rDeps = recoveryDeps(deps, config, b, now);
+          const { state: resolved } = resolveFixAttempt(
+            state,
+            batch.id,
+            offenderRecord.issue,
+            'red',
+            rDeps
+          );
+          deps.store.withLock((s) => ({
+            state: applyBatchAndIssues(s, resolved, batch.id, []),
+            result: undefined,
+          }));
+        }
       }
-      continue;
-    }
-    if (slot) continue; // live but neither running/assigned (e.g. mid-verify) — next tick
-    if (batch.status === 'validating') {
-      // A local suite run, not a provider dispatch — unaffected by `paused`.
-      runValidate(deps, config, batchDispatch, batch.id, now, result);
-      continue;
-    }
-    // #629: every branch below spawns a provider agent — hold the wedge
-    // until `sched resume` (see the top of this function for why `paused`
-    // is read once, up front, rather than per iteration).
-    if (paused) continue;
-    if (batch.status === 'deployed') {
-      spawnReportAgent(deps, config, batchDispatch, batch.id, now, result);
-    } else if (batch.status === 'executing') {
-      // A prior spawn threw, or `claimAndSpawn` found zero free capacity —
-      // either way the batch is stuck mid-member with no slot and nothing
-      // else will ever retry it (Conformance review AC5 caveat; Supportability
-      // review #12). Retrying every tick is cheap-by-contract (#677 review):
-      // `spawnMemberContinuation` runs the free-capacity and member-identity
-      // pre-checks BEFORE any pool/git work, so a full scheduler (or stale
-      // member context) exits here without exec'ing, and `claimAndSpawn`
-      // remains the authoritative capacity gate.
-      spawnMemberContinuation(deps, config, batchDispatch, batch.id, now, result);
-    } else if (batch.status === 'reviewing' || batch.status === 'shipping') {
-      // Same wedge, for a dead-or-never-claimed tail agent.
-      spawnTailAgent(deps, config, batchDispatch, batch.id, now, result);
-    } else if (batch.status === 'fixing') {
-      // `beginFixAttempt` already recorded this member's ONE attempt as
-      // `dispatched` before `claimAndSpawn` could find capacity — retrying the
-      // exact same dispatch isn't reconstructible from persisted state (only
-      // the outcome is persisted, not the command/prompt), so resolve it
-      // `red` (conservatively: the member loses its one attempt and evicts on
-      // the next validate pass, which is safe — never a permanent wedge).
-      const state = deps.store.load();
-      const b = findBatch(state, batch.id);
-      const offenderRecord = b
-        ? [...b.fix_attempts].reverse().find((a) => a.outcome === 'dispatched')
-        : undefined;
-      if (b && offenderRecord) {
-        const rDeps = recoveryDeps(deps, config, b, now);
-        const { state: resolved } = resolveFixAttempt(
-          state,
-          batch.id,
-          offenderRecord.issue,
-          'red',
-          rDeps
-        );
-        deps.store.withLock((s) => ({
-          state: applyBatchAndIssues(s, resolved, batch.id, []),
-          result: undefined,
-        }));
-      }
+    } catch (err) {
+      containFailure(batch.id, err);
     }
   }
 

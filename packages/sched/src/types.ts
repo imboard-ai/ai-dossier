@@ -776,6 +776,8 @@ export interface SchedState {
    * reported, or once the streak above resets.
    */
   dispatch_pause_reset_at: string | null;
+  /** The latest scheduler-wide tick failure, cleared by the next successful tick (#635). */
+  last_tick_failure: { at: string; detail: string } | null;
 }
 
 /** Durable intent, persisted separately in `config.json` (state.json is rebuildable hot truth). */
@@ -1175,8 +1177,10 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * backfilled on load.
  * 1.20.0 (#713): `QueueEntry` gains `dispatch_profile` for full-cycle
  * entries; `null` is backfilled on load.
+ * 1.21.0 (#635): `SchedState` gains `last_tick_failure`, retaining the latest
+ * scheduler-wide error for `sched status`; null is backfilled on load.
  */
-export const SCHEMA_VERSION = '1.20.0' as const;
+export const SCHEMA_VERSION = '1.21.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1200,6 +1204,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.17.0',
   '1.18.0',
   '1.19.0',
+  '1.20.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;

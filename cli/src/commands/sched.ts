@@ -51,6 +51,7 @@ import {
   labelOfBlockReason,
   OPENCODE_DISPATCH_COMMAND,
   parseManifest,
+  recordTickFailure,
   reprioritizeBatch,
   reprioritizeIssue,
   resolveDispatch,
@@ -286,6 +287,11 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   lines.push(
     `Scheduler [${report.project}]: ${state} · slots ${report.live_slots}/${report.max_slots} live`
   );
+  if (report.last_tick_failure) {
+    lines.push(
+      `⚠ Last tick failed at ${report.last_tick_failure.at}: ${report.last_tick_failure.detail}`
+    );
+  }
   // #680: the configured executor, visible without reading the journal — an
   // operator driving a session from opencode/GLM sees here that every tier
   // still dispatches the default claude template (or that a mixed
@@ -1726,6 +1732,7 @@ function registerStartSubcommand(cmd: Command): void {
         try {
           result = tick(deps, engineConfig);
         } catch (err) {
+          recordTickFailure(deps, err);
           // Route known package errors through the CLI exit path; any other
           // failure must not surface as an unhandled async rejection (this is
           // the cron path).

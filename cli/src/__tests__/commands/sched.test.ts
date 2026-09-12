@@ -723,6 +723,30 @@ describe('ai-dossier sched status', () => {
     expect(parsed.queue).toHaveLength(1);
   });
 
+  it('#635: surfaces the latest tick failure in text and JSON status', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '1', '--project', 'test-proj']);
+    const state = readState() as Record<string, unknown>;
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        last_tick_failure: {
+          at: '2026-09-12T00:00:00.000Z',
+          detail: 'Error: batch reconcile failed',
+        },
+      })
+    );
+
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain('Last tick failed at 2026-09-12T00:00:00.000Z');
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj', '--json']);
+    expect(JSON.parse(logs.join('')).last_tick_failure).toMatchObject({
+      detail: 'Error: batch reconcile failed',
+    });
+  });
+
   it('#505: renders a dispatch-health warning when suspect dispatches are recorded', async () => {
     await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
     const state = readState() as Record<string, unknown>;

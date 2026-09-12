@@ -3042,6 +3042,7 @@ function recordTeardowns(
  */
 export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const dispatch = resolveDispatch(config);
+  let containedFailure: string | null = null;
   const state0 = deps.store.load();
   const polled = pollUnits(deps, state0);
   const prPoll = pollParkedPrs(deps, state0, dispatch);
@@ -3119,9 +3120,37 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     };
     const batchResult = runBatchTick(batchDeps, config, dispatch);
     result = mergeBatchResult(result, batchResult);
+    if (batchResult.reconciliation_errors.length > 0) {
+      containedFailure = batchResult.reconciliation_errors.join('; ');
+    }
   }
 
+  deps.store.withLock((state) => ({
+    state:
+      containedFailure !== null
+        ? {
+            ...state,
+            last_tick_failure: { at: deps.now().toISOString(), detail: containedFailure },
+          }
+        : state.last_tick_failure === null
+          ? state
+          : { ...state, last_tick_failure: null },
+    result: undefined,
+  }));
   return result;
+}
+
+/** Persist a scheduler-wide failure so `sched status` exposes a wedge without log access. */
+export function recordTickFailure(
+  deps: Pick<EngineDeps, 'store' | 'journal' | 'now'>,
+  err: unknown
+): void {
+  const detail = `${(err as Error).name}: ${(err as Error).message}`;
+  deps.store.withLock((state) => ({
+    state: { ...state, last_tick_failure: { at: deps.now().toISOString(), detail } },
+    result: undefined,
+  }));
+  deps.journal.append({ event: 'tick-failed', detail }, deps.now());
 }
 
 /** Fold a `BatchTickResult` into the issue-oriented `TickResult` — same unit-id-shaped arrays, one extra source. */
@@ -3159,7 +3188,7 @@ export async function runLoop(
     } catch (err) {
       const detail = `${(err as Error).name}: ${(err as Error).message}`;
       process.stderr.write(`⚠ sched tick failed: ${detail}\n`);
-      deps.journal.append({ event: 'tick-failed', detail }, deps.now());
+      recordTickFailure(deps, err);
     }
     if (shouldStop()) break;
     await sleep(interval, shouldStop);

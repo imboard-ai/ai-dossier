@@ -119,8 +119,8 @@ function allowedIssueTransitions(from: IssueStatus): IssueStatus[] {
 }
 
 const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
-  forming: ['ready', 'dissolving'],
-  ready: ['executing', 'dissolving'],
+  forming: ['ready', 'dissolving', 'blocked'],
+  ready: ['executing', 'dissolving', 'blocked'],
   // executing → executing advances the member pointer (i/N); the ⟲ in RFC-0001 §D.2.
   // → blocked (#583): the per-member incremental gate came back inconclusive
   // (automation-broken/capability-unavailable) — the gate itself, not any
@@ -138,17 +138,17 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   // absent, errored, or unattributable) — without the edge, an unattributable
   // red suite is a dead end with no way out but fixing or evicting a member the
   // system cannot identify.
-  attributing: ['fixing', 'evicting', 'dissolving'],
-  fixing: ['validating', 'dissolving'],
-  evicting: ['validating', 'dissolving'],
-  reviewing: ['shipping', 'dissolving'],
-  shipping: ['awaiting-merge', 'dissolving'],
-  'awaiting-merge': ['rebasing', 'merged'],
-  rebasing: ['re-validating', 'dissolving'],
-  're-validating': ['shipping', 'dissolving'],
-  merged: ['deployed'],
-  deployed: ['reported'],
-  reported: ['done'],
+  attributing: ['fixing', 'evicting', 'dissolving', 'blocked'],
+  fixing: ['validating', 'dissolving', 'blocked'],
+  evicting: ['validating', 'dissolving', 'blocked'],
+  reviewing: ['shipping', 'dissolving', 'blocked'],
+  shipping: ['awaiting-merge', 'dissolving', 'blocked'],
+  'awaiting-merge': ['rebasing', 'merged', 'blocked'],
+  rebasing: ['re-validating', 'dissolving', 'blocked'],
+  're-validating': ['shipping', 'dissolving', 'blocked'],
+  merged: ['deployed', 'blocked'],
+  deployed: ['reported', 'blocked'],
+  reported: ['done', 'blocked'],
   done: [],
   dissolving: ['dissolved'],
   dissolved: [],
@@ -234,6 +234,7 @@ export function createEmptyState(): SchedState {
     last_suspect_dispatch_unit: null,
     consecutive_dispatch_api_errors: 0,
     dispatch_pause_reset_at: null,
+    last_tick_failure: null,
   };
 }
 
@@ -836,6 +837,15 @@ export function validateState(data: unknown): SchedState {
   ) {
     throw new Error('dispatch_pause_reset_at must be a string or null');
   }
+  if (
+    obj.last_tick_failure !== null &&
+    obj.last_tick_failure !== undefined &&
+    (typeof obj.last_tick_failure !== 'object' ||
+      !isIsoDateString((obj.last_tick_failure as { at?: unknown }).at) ||
+      typeof (obj.last_tick_failure as { detail?: unknown }).detail !== 'string')
+  ) {
+    throw new Error('last_tick_failure must be an { at, detail } object or null');
+  }
   // One-directional, unlike the suspect-dispatch pair's "zero ⇔ null"
   // agreement (#629 review): a confirmed failure with no reset time is valid
   // (`count > 0, resetAt === null` — the provider didn't supply one), so only
@@ -1000,6 +1010,9 @@ export function validateState(data: unknown): SchedState {
     consecutive_dispatch_api_errors:
       (obj.consecutive_dispatch_api_errors as number | undefined) ?? 0,
     dispatch_pause_reset_at: (obj.dispatch_pause_reset_at as string | undefined) ?? null,
+    // Pre-#635 states did not retain failed tick context, so null is exact.
+    last_tick_failure:
+      (obj.last_tick_failure as SchedState['last_tick_failure'] | undefined) ?? null,
   };
 }
 
