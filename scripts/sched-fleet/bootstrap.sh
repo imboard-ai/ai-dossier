@@ -92,12 +92,12 @@ then
   exit 1
 fi
 
-# Keep the reference reset config aligned with the profile source used by
-# refresh-fleet.sh. Only dispatch_profiles is copied; this bootstrap's slots,
-# prompts, and timers remain deployment-specific.
+# Keep the host-level profile source aligned with refresh-fleet.sh. Scheduler
+# slots, prompts, and timers remain deployment-specific.
 if [ -f "$PROFILE_FILE" ]; then
-  if ! SCHED_CONFIG_FILE="$CONFIG_TMP" PROFILE_FILE="$PROFILE_FILE" node <<'NODE'
+  if ! flock -x "$HOME/.dossier/.dispatch-profile-refresh.lock" env PROFILE_FILE="$PROFILE_FILE" node <<'NODE'
 const fs = require("node:fs");
+const path = require("node:path");
 const tiers = new Set(["mechanical", "mid", "strong"]);
 const profileName = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -139,9 +139,23 @@ for (const [name, profile] of Object.entries(profiles)) {
   if (!profileName.test(name)) throw new Error(`invalid profile name: ${name}`);
   validateProfile(name, profile);
 }
-const config = JSON.parse(fs.readFileSync(process.env.SCHED_CONFIG_FILE, "utf8"));
-config.dispatch = { ...(config.dispatch || {}), dispatch_profiles: profiles };
-fs.writeFileSync(process.env.SCHED_CONFIG_FILE, JSON.stringify(config, null, 2) + "\n");
+const userConfigFile = path.join(process.env.HOME, ".dossier", "config.json");
+let userConfig = {};
+if (fs.existsSync(userConfigFile)) {
+  userConfig = JSON.parse(fs.readFileSync(userConfigFile, "utf8"));
+  if (!plain(userConfig)) throw new Error("invalid user config");
+}
+fs.mkdirSync(path.dirname(userConfigFile), { recursive: true });
+const mode = fs.existsSync(userConfigFile) ? fs.statSync(userConfigFile).mode & 0o600 : 0o600;
+const temp = path.join(path.dirname(userConfigFile), `.config.json.bootstrap.${process.pid}.tmp`);
+const fd = fs.openSync(temp, "w", mode);
+try {
+  fs.writeFileSync(fd, JSON.stringify({ ...userConfig, dispatch_profiles: profiles }, null, 2) + "\n");
+  fs.fsyncSync(fd);
+} finally {
+  fs.closeSync(fd);
+}
+fs.renameSync(temp, userConfigFile);
 NODE
   then
     TG "❌ reset-fleet: invalid dispatch profile source at $PROFILE_FILE"

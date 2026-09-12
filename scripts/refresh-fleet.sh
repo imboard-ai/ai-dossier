@@ -37,7 +37,7 @@ EXTRA_TARGETS=()
 PROFILE_FILE="${SCHED_PROFILE_FILE:-$SCRIPT_DIR/sched-fleet/dispatch-profiles.json}"
 BOOTSTRAP_FILE="${SCHED_BOOTSTRAP_FILE:-$SCRIPT_DIR/sched-fleet/bootstrap.sh}"
 CRON_LIB_FILE="${SCHED_CRON_LIB_FILE:-$SCRIPT_DIR/sched-fleet/cron-lib.sh}"
-PROFILE_PROJECTS="${SCHED_PROFILE_PROJECTS:-imboard-ai-imboard-monorepo,imboard-ai-ai-dossier}"
+PROFILE_PROJECTS="${SCHED_PROFILE_PROJECTS:-}"
 PROFILE_FLEET_HOME="${SCHED_PROFILE_FLEET_HOME:-$HOME/.dossier/reset-fleet}"
 
 # The dossiers and skills worth force-refreshing everywhere. Skills are installed AND
@@ -118,7 +118,7 @@ if [ "$CLI_ONLY" -eq 0 ]; then
     echo "FAIL: cron helper not found: $CRON_LIB_FILE" >&2
     exit 2
   fi
-  if [[ ! "$PROFILE_PROJECTS" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(,[A-Za-z0-9][A-Za-z0-9._-]{0,127})*$ ]]; then
+  if [ -n "$PROFILE_PROJECTS" ] && [[ ! "$PROFILE_PROJECTS" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}(,[A-Za-z0-9][A-Za-z0-9._-]{0,127})*$ ]]; then
     echo "FAIL: --profile-projects must be comma-separated scheduler slugs" >&2
     exit 2
   fi
@@ -311,6 +311,7 @@ const cronLib = Buffer.from(process.env.SCHED_CRON_LIB_B64, "base64");
 if (cronLib.length === 0) throw new Error("cron helper source must be non-empty");
 const fleetDir = Buffer.from(process.env.SCHED_PROFILE_FLEET_HOME_B64, "base64").toString("utf8");
 const root = path.resolve(os.homedir(), ".dossier", "sched");
+const userConfigFile = path.resolve(os.homedir(), ".dossier", "config.json");
 const writeAtomic = (file, data, mode) => {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.tmp`);
@@ -323,7 +324,15 @@ const writeAtomic = (file, data, mode) => {
   }
 };
 const updates = [];
-for (const project of process.env.SCHED_PROFILE_PROJECTS.split(",")) {
+let userConfig = {};
+let userConfigMode = 0o600;
+if (fs.existsSync(userConfigFile)) {
+  userConfig = JSON.parse(fs.readFileSync(userConfigFile, "utf8"));
+  if (!plain(userConfig)) throw new Error(`invalid user config: ${userConfigFile}`);
+  userConfigMode = fs.statSync(userConfigFile).mode & 0o777;
+}
+updates.push([userConfigFile, JSON.stringify({ ...userConfig, dispatch_profiles: profiles }, null, 2) + "\n", userConfigMode]);
+for (const project of process.env.SCHED_PROFILE_PROJECTS.split(",").filter(Boolean)) {
   const file = path.resolve(root, project, "config.json");
   if (!file.startsWith(`${root}${path.sep}`)) throw new Error(`scheduler path escapes root: ${project}`);
   if (!fs.existsSync(file)) throw new Error(`missing scheduler config: ${file}`);
@@ -344,7 +353,7 @@ writeAtomic(cronLibPath, cronLib, cronLibMode);
 for (const [file, text, mode] of updates) writeAtomic(file, text, mode);
 NODE
   )
-  PROFILE_SYNC_CMD="flock -x \"\$HOME/.dossier/sched/.dispatch-profile-refresh.lock\" env SCHED_PROFILE_B64='$PROFILE_B64' SCHED_PROFILE_PROJECTS='$PROFILE_PROJECTS' SCHED_PROFILE_FLEET_HOME_B64='$PROFILE_FLEET_HOME_B64' SCHED_BOOTSTRAP_B64='$BOOTSTRAP_B64' SCHED_CRON_LIB_B64='$CRON_LIB_B64' node -e '$PROFILE_SYNC_SCRIPT'"
+  PROFILE_SYNC_CMD="mkdir -p \"\$HOME/.dossier\" && flock -x \"\$HOME/.dossier/.dispatch-profile-refresh.lock\" env SCHED_PROFILE_B64='$PROFILE_B64' SCHED_PROFILE_PROJECTS='$PROFILE_PROJECTS' SCHED_PROFILE_FLEET_HOME_B64='$PROFILE_FLEET_HOME_B64' SCHED_BOOTSTRAP_B64='$BOOTSTRAP_B64' SCHED_CRON_LIB_B64='$CRON_LIB_B64' node -e '$PROFILE_SYNC_SCRIPT'"
 fi
 
 run_on() {  # run_on <host> <label> <command>
@@ -411,7 +420,7 @@ for host in "${HOST_LIST[@]}"; do
   fi
 
   if [ "$CLI_ONLY" -eq 0 ]; then
-    run_on "$host" "sync dispatch profiles ($PROFILE_PROJECTS)" "$PROFILE_SYNC_CMD"
+    run_on "$host" "sync user dispatch profiles" "$PROFILE_SYNC_CMD"
     for d in "${DOSSIERS[@]}" "${EXTRA_TARGETS[@]:-}"; do
       [ -z "$d" ] && continue
       run_on "$host" "pull $d" "\"\$AD\" pull '$d' --force"

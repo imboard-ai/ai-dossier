@@ -861,6 +861,9 @@ export interface DispatchProfile {
   tiers?: Partial<Record<ModelTier, TierDispatchSpec>>;
 }
 
+/** The configuration layer that supplied a resolved named dispatch profile. */
+export type DispatchProfileSource = 'user' | 'project';
+
 /**
  * Agent dispatch configuration (#464). The command is a template: `{model}`
  * and `{issue}` placeholders are substituted per dispatch; a `{model}` item
@@ -883,6 +886,8 @@ export interface DispatchConfig {
    * never a default (#707).
    */
   dispatch_profiles?: Record<string, DispatchProfile>;
+  /** Runtime-only provenance for resolved named profiles; never persisted to project config. */
+  dispatch_profile_sources?: Record<string, DispatchProfileSource>;
   /**
    * Per-tier full spawn spec (#527) — the mixed agent-CLI escalation ladder.
    * A tier without an entry here falls back to `command`/`tier_models`/

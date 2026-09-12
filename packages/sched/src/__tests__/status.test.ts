@@ -254,6 +254,7 @@ describe('#680: the configured dispatch agent + resolved per-tier models are vis
       },
       // #707: no profiles configured — the named set is empty, not absent
       profiles: {},
+      profile_sources: {},
     });
   });
 
@@ -319,6 +320,7 @@ describe('#707 status: dispatch profiles are named, not just the models', () => 
       effort: null,
       variant: null,
     });
+    expect(report.dispatch.profile_sources).toEqual({});
     // batches carry their own assignment (null = default here)
     expect(report.batches.every((b) => b.dispatch_profile === null)).toBe(true);
   });
@@ -326,5 +328,21 @@ describe('#707 status: dispatch profiles are named, not just the models', () => 
   it('reports no profiles when none are configured (AC1)', () => {
     const report = buildStatusReport(seeded(), { max_slots: 2 }, 'test-project');
     expect(report.dispatch.profiles).toEqual({});
+    expect(report.dispatch.profile_sources).toEqual({});
+  });
+
+  it('includes the resolved source layer for each profile', () => {
+    const report = buildStatusReport(
+      seeded(),
+      {
+        max_slots: 2,
+        dispatch: {
+          dispatch_profiles: { glm: { tier_models: { mid: 'glm-5.3' } } },
+          dispatch_profile_sources: { glm: 'user' },
+        },
+      },
+      'test-project'
+    );
+    expect(report.dispatch.profile_sources).toEqual({ glm: 'user' });
   });
 });

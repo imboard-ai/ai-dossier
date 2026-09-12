@@ -307,6 +307,12 @@ profiles exist and detection is inconclusive, enqueue fails and names the availa
 profiles rather than silently choosing the default. `--dispatch` is intentionally rejected
 for full-cycle entries; no profiles means legacy dispatch behavior remains unchanged.
 
+Host defaults live at top-level `dispatch_profiles` in `~/.dossier/config.json`.
+Scheduler projects inherit those profiles even before their own config exists. A
+project's `dispatch.dispatch_profiles` overrides matching names only, leaving other
+host profiles available. `sched status` reports every effective profile's source as
+`user` or `project`.
+
 Two engine-safety policies were explicit product decisions on #464:
 
 - **Pid identity is hybrid-verified (decision 1, option C).** Every spawn records the

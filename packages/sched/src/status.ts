@@ -21,6 +21,7 @@ import {
 import { distinctEvictions } from './state';
 import type {
   BatchEntry,
+  DispatchProfileSource,
   ModelTier,
   QueueEntry,
   SchedConfig,
@@ -99,6 +100,7 @@ export interface StatusReport {
   dispatch: {
     tiers: Record<ModelTier, TierExecutor>;
     profiles: Record<string, Record<ModelTier, TierExecutor>>;
+    profile_sources: Record<string, DispatchProfileSource>;
   };
   blocked: BlockedItem[];
   failed: QueueEntry[];
@@ -195,6 +197,7 @@ export function buildStatusReport(
     ])
   ) as Record<string, Record<ModelTier, TierExecutor>>;
   const dispatch = { tiers: tierExecutors(resolved), profiles };
+  const profileSources = config.dispatch?.dispatch_profile_sources ?? {};
 
   const parked: ParkedItem[] = state.entries
     .filter((e): e is QueueEntry & { pr: number } => e.status === 'parked' && e.pr !== null)
@@ -226,7 +229,7 @@ export function buildStatusReport(
     runnable_units: units.map((u) =>
       u.kind === 'issue' ? `issue:${u.issue}` : `batch:${u.batch}`
     ),
-    dispatch,
+    dispatch: { ...dispatch, profile_sources: profileSources },
     blocked,
     failed,
   };

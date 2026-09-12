@@ -295,7 +295,8 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   // will actually spawn — what a `--dispatch <name>` batch inherits. Which
   // batch uses which profile shows in the Batches table's profile column.
   for (const [name, tiers] of Object.entries(report.dispatch.profiles)) {
-    lines.push(`Profile ${name}: ${dispatchSummary(tiers, ' · ')}`);
+    const source = report.dispatch.profile_sources[name] ?? 'project';
+    lines.push(`Profile ${name} (${source}): ${dispatchSummary(tiers, ' · ')}`);
   }
   if (staleness?.stale && staleness.installed !== null && staleness.latest !== null) {
     // #537: mirrors the dispatch-health block below — a status line, not a

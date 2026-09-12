@@ -172,6 +172,84 @@ describe('SchedStore', () => {
     warned.mockRestore();
   });
 
+  it('inherits dispatch profiles from user config without a project scheduler config', () => {
+    const userConfigPath = path.join(dir, 'user-config.json');
+    fs.writeFileSync(
+      userConfigPath,
+      JSON.stringify({ dispatch_profiles: { glm: { tier_models: { mid: 'glm-5.3' } } } })
+    );
+    const store = new SchedStore(path.join(dir, 'sched', 'project'), userConfigPath);
+
+    expect(store.loadConfig()).toEqual({
+      max_slots: 3,
+      dispatch: {
+        dispatch_profiles: { glm: { tier_models: { mid: 'glm-5.3' } } },
+        dispatch_profile_sources: { glm: 'user' },
+      },
+    });
+  });
+
+  it('merges project profiles by name over user profiles and never persists source metadata', () => {
+    const userConfigPath = path.join(dir, 'user-config.json');
+    fs.writeFileSync(
+      userConfigPath,
+      JSON.stringify({
+        dispatch_profiles: {
+          claude: { tier_models: { mid: 'sonnet' } },
+          glm: { tier_models: { mid: 'glm-5.3' } },
+        },
+      })
+    );
+    const store = new SchedStore(path.join(dir, 'sched', 'project'), userConfigPath);
+    fs.mkdirSync(store.dir, { recursive: true });
+    fs.writeFileSync(
+      store.configPath,
+      JSON.stringify({
+        schema_version: '1.9.0',
+        max_slots: 2,
+        dispatch: { dispatch_profiles: { glm: { tier_models: { mid: 'pinned-glm' } } } },
+      })
+    );
+
+    const config = store.loadConfig();
+    expect(config.dispatch?.dispatch_profiles).toEqual({
+      claude: { tier_models: { mid: 'sonnet' } },
+      glm: { tier_models: { mid: 'pinned-glm' } },
+    });
+    expect(config.dispatch?.dispatch_profile_sources).toEqual({ claude: 'user', glm: 'project' });
+
+    store.saveConfig(config);
+    expect(JSON.parse(fs.readFileSync(store.configPath, 'utf-8')).dispatch).toEqual({
+      dispatch_profiles: { glm: { tier_models: { mid: 'pinned-glm' } } },
+    });
+  });
+
+  it('ignores malformed user profiles without disabling valid project profiles', () => {
+    const userConfigPath = path.join(dir, 'user-config.json');
+    fs.writeFileSync(
+      userConfigPath,
+      JSON.stringify({ dispatch_profiles: { glm: { command: [] } } })
+    );
+    const store = new SchedStore(path.join(dir, 'sched', 'project'), userConfigPath);
+    fs.mkdirSync(store.dir, { recursive: true });
+    fs.writeFileSync(
+      store.configPath,
+      JSON.stringify({
+        schema_version: '1.9.0',
+        max_slots: 2,
+        dispatch: { dispatch_profiles: { glm: { tier_models: { mid: 'project-glm' } } } },
+      })
+    );
+    const warned = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(store.loadConfig().dispatch).toMatchObject({
+      dispatch_profiles: { glm: { tier_models: { mid: 'project-glm' } } },
+      dispatch_profile_sources: { glm: 'project' },
+    });
+    expect(warned).toHaveBeenCalledWith(expect.stringContaining('ignoring user profiles'));
+    warned.mockRestore();
+  });
+
   it('validates what it loads (validateState integration)', () => {
     const store = new SchedStore(dir);
     const state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
