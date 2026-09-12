@@ -24,6 +24,7 @@ import {
   DEFAULT_MAX_SLOTS,
   type DispatchConfig,
   type DispatchProfile,
+  type DispatchProfileSource,
   type DissolvePolicy,
   EngineTooOldError,
   LEGACY_CONFIG_SCHEMA_VERSIONS,
@@ -169,7 +170,10 @@ function releaseLock(dir: string): void {
 export class SchedStore {
   readonly dir: string;
 
-  constructor(dir: string) {
+  constructor(
+    dir: string,
+    private readonly userConfigPath = path.resolve(dir, '..', '..', CONFIG_FILE)
+  ) {
     this.dir = dir;
   }
 
@@ -240,8 +244,11 @@ export class SchedStore {
   }
 
   loadConfig(): SchedConfig {
+    const userProfiles = this.loadUserProfiles();
+    let config: SchedConfig;
     if (!fs.existsSync(this.configPath)) {
-      return { max_slots: DEFAULT_MAX_SLOTS };
+      config = { max_slots: DEFAULT_MAX_SLOTS };
+      return mergeDispatchProfiles(config, userProfiles);
     }
     try {
       const parsed = JSON.parse(fs.readFileSync(this.configPath, 'utf-8')) as SchedConfigFile;
@@ -258,7 +265,7 @@ export class SchedStore {
           `max_slots must be an integer between ${MIN_MAX_SLOTS} and ${MAX_MAX_SLOTS}`
         );
       }
-      const config: SchedConfig = { max_slots: parsed.max_slots };
+      config = { max_slots: parsed.max_slots };
       if (parsed.stall_timeout_ms !== undefined) {
         config.stall_timeout_ms = requirePositiveIntMs('stall_timeout_ms', parsed.stall_timeout_ms);
       }
@@ -300,7 +307,6 @@ export class SchedStore {
         }
         config.default_batch_priority = parsed.default_batch_priority;
       }
-      return config;
     } catch (err) {
       // Deliberate degrade-to-default (unlike state.json, config is re-derivable
       // operator intent and hard-failing every command on a typo would brick
@@ -315,8 +321,9 @@ export class SchedStore {
           `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout/disallowed-tools, auto_upgrade, ` +
           `dissolve_policy, default_batch_priority) reverted to built-in defaults (max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
       );
-      return { max_slots: DEFAULT_MAX_SLOTS };
+      config = { max_slots: DEFAULT_MAX_SLOTS };
     }
+    return mergeDispatchProfiles(config, userProfiles);
   }
 
   saveConfig(config: SchedConfig): void {
@@ -335,7 +342,26 @@ export class SchedStore {
       ...(config.label_poll_interval_ms !== undefined
         ? { label_poll_interval_ms: config.label_poll_interval_ms }
         : {}),
-      ...(config.dispatch !== undefined ? { dispatch: config.dispatch } : {}),
+      ...(config.dispatch !== undefined
+        ? {
+            dispatch: (() => {
+              const {
+                dispatch_profile_sources: sources,
+                dispatch_profiles: profiles,
+                ...dispatch
+              } = config.dispatch;
+              const projectProfiles = Object.fromEntries(
+                Object.entries(profiles ?? {}).filter(([name]) => sources?.[name] !== 'user')
+              );
+              return {
+                ...dispatch,
+                ...(Object.keys(projectProfiles).length > 0
+                  ? { dispatch_profiles: projectProfiles }
+                  : {}),
+              };
+            })(),
+          }
+        : {}),
       ...(config.auto_upgrade !== undefined ? { auto_upgrade: config.auto_upgrade } : {}),
       ...(config.dissolve_policy !== undefined ? { dissolve_policy: config.dissolve_policy } : {}),
       ...(config.default_batch_priority !== undefined
@@ -344,6 +370,41 @@ export class SchedStore {
     };
     writeAtomic(this.configPath, `${JSON.stringify(file, null, 2)}\n`);
   }
+
+  private loadUserProfiles(): Record<string, DispatchProfile> {
+    if (!fs.existsSync(this.userConfigPath)) return {};
+    try {
+      const raw: unknown = JSON.parse(fs.readFileSync(this.userConfigPath, 'utf-8'));
+      const userConfig = requirePlainObject('user config', raw);
+      if (userConfig.dispatch_profiles === undefined) return {};
+      return validateDispatchProfiles('dispatch_profiles', userConfig.dispatch_profiles);
+    } catch (err) {
+      console.error(
+        `⚠ User config ${this.userConfigPath} has unreadable dispatch_profiles (${(err as Error).message}) — ignoring user profiles; fix the file and re-run`
+      );
+      return {};
+    }
+  }
+}
+
+function mergeDispatchProfiles(
+  config: SchedConfig,
+  userProfiles: Record<string, DispatchProfile>
+): SchedConfig {
+  const projectProfiles = config.dispatch?.dispatch_profiles ?? {};
+  const profiles = { ...userProfiles, ...projectProfiles };
+  if (Object.keys(profiles).length === 0) return config;
+  const sources: Record<string, DispatchProfileSource> = Object.fromEntries(
+    Object.keys(profiles).map((name) => [name, name in projectProfiles ? 'project' : 'user'])
+  );
+  return {
+    ...config,
+    dispatch: {
+      ...config.dispatch,
+      dispatch_profiles: profiles,
+      dispatch_profile_sources: sources,
+    },
+  };
 }
 
 /** Validates `dissolve_policy` (#563): a fraction in (0, 1], and a positive-integer floor. */
@@ -466,6 +527,19 @@ function validateDispatchProfile(name: string, raw: unknown): void {
   }
 }
 
+function validateDispatchProfiles(label: string, raw: unknown): Record<string, DispatchProfile> {
+  const profiles = requirePlainObject(label, raw);
+  for (const [name, profile] of Object.entries(profiles)) {
+    if (!DISPATCH_PROFILE_RE.test(name)) {
+      throw new Error(
+        `${label}: profile name '${name}' must match ${DISPATCH_PROFILE_RE} (lowercase, no whitespace or path separators)`
+      );
+    }
+    validateDispatchProfile(name, profile);
+  }
+  return profiles as Record<string, DispatchProfile>;
+}
+
 /** Strict validation of the optional `dispatch` section (#464). */
 function validateDispatchConfig(raw: unknown): DispatchConfig {
   const dispatch = requirePlainObject('dispatch', raw);
@@ -517,20 +591,7 @@ function validateDispatchConfig(raw: unknown): DispatchConfig {
     }
   }
   if (dispatch.dispatch_profiles !== undefined) {
-    const profiles = requirePlainObject('dispatch.dispatch_profiles', dispatch.dispatch_profiles);
-    for (const [name, profile] of Object.entries(profiles)) {
-      // The name is persisted on `BatchEntry.dispatch_profile` and printed in
-      // journal/status lines, so it must match the same grammar the enqueue
-      // path enforces (`DISPATCH_PROFILE_RE`) — an unloadable name would
-      // otherwise only fail at profile-resolution time, far from the config
-      // that caused it.
-      if (!DISPATCH_PROFILE_RE.test(name)) {
-        throw new Error(
-          `dispatch.dispatch_profiles: profile name '${name}' must match ${DISPATCH_PROFILE_RE} (lowercase, no whitespace or path separators)`
-        );
-      }
-      validateDispatchProfile(name, profile);
-    }
+    validateDispatchProfiles('dispatch.dispatch_profiles', dispatch.dispatch_profiles);
   }
   if (dispatch.phase_stall_timeout_ms !== undefined) {
     const phaseTimeouts = requirePlainObject(
