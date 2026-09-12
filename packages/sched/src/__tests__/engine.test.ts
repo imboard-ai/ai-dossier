@@ -1493,6 +1493,29 @@ describe('restart self-healing', () => {
     expect(h.state().slots.find((s) => s.unit === 'issue:101')?.status).toBe('running');
   });
 
+  it('does not spawn an assigned crash-recovery slot while paused', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    h.tick();
+    h.store.withLock((state) => ({
+      state: {
+        ...setPaused(state, true),
+        slots: state.slots.map((slot) =>
+          slot.unit === 'issue:101'
+            ? { ...slot, status: 'assigned' as const, pid: null, phase: null }
+            : slot
+        ),
+      },
+      result: null,
+    }));
+
+    h.tick();
+
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.state().slots.find((slot) => slot.unit === 'issue:101')?.status).toBe('assigned');
+  });
+
   it('a dispatched entry no slot holds (crash window) returns to the queue', () => {
     const h = harness();
     REGISTRIES.push(h.dir);
@@ -1903,6 +1926,42 @@ describe('confirmed dispatch failures (#629: a 429 spend/rate wall is not an unv
     expect(h.journal.read().some((e) => e.event === 'verify-incomplete')).toBe(true);
     expect(h.journal.read().some((e) => e.event === 'dispatch-failure')).toBe(false);
     expect(h.state().consecutive_dispatch_api_errors).toBe(0);
+  });
+
+  it('a no-usage, no-progress exit redispatches at the same tier without consuming recovery', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+
+    fs.mkdirSync(path.dirname(h.spawnCalls[0].logFile), { recursive: true });
+    fs.writeFileSync(h.spawnCalls[0].logFile, 'scheduler preamble\nagent startup output\n');
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick();
+
+    expect(h.state().entries.find((entry) => entry.issue === 101)?.tier).toBe('mechanical');
+    expect(h.state().slots.find((slot) => slot.unit === 'issue:101')?.recoveries).toBe(0);
+    expect(h.spawnCalls).toHaveLength(2);
+  });
+
+  it('holds an escalated recovery while paused and spawns it only after resume', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    writeToolUseLog(h.spawnCalls[0].logFile);
+    h.store.withLock((state) => ({ state: setPaused(state, true), result: null }));
+    h.alive.delete(h.spawnCalls[0].pid);
+
+    h.tick();
+
+    expect(h.state().entries.find((entry) => entry.issue === 101)?.tier).toBe('mid');
+    expect(h.state().slots.find((slot) => slot.unit === 'issue:101')?.status).toBe('recovering');
+    expect(h.spawnCalls).toHaveLength(1);
+
+    h.store.withLock((state) => ({ state: setPaused(state, false), result: null }));
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(2);
   });
 
   it('records the reset time when the provider supplies one (AC4)', () => {
@@ -3235,7 +3294,7 @@ describe('#683: fence lifecycle — write → bind → release, and the defer cl
     expect(h.spawnCalls[3].prompt).toContain('--gen 3');
   });
 
-  it('does not fake a defer off text naming ANOTHER run — an unverified exit still escalates (AC3 guard)', () => {
+  it('does not fake a defer off text naming ANOTHER run — an unverified exit stays on the no-usage rail (AC3 guard)', () => {
     // The classification keys on the dispatch's OWN checkpoint output. An agent that
     // merely read a historical incident (docs quote `r-999-dead`, not this trail's run)
     // must keep riding the ordinary unverified-exit ladder — a false defer would skip
@@ -3253,7 +3312,7 @@ describe('#683: fence lifecycle — write → bind → release, and the defer cl
     expect(result.redispatched).toEqual(['issue:683']);
     expect(h.events().some((e) => e.event === 'deferred-to-owner')).toBe(false);
     expect(h.events().some((e) => e.event === 'verify-incomplete')).toBe(true);
-    expect(h.state().entries.find((e) => e.issue === 683)?.tier).toBe('mid');
+    expect(h.state().entries.find((e) => e.issue === 683)?.tier).toBe('mechanical');
   });
 });
 
@@ -3331,7 +3390,7 @@ describe('#685: the announce-then-exit signature — a cheap retry, never a capa
     expect(successor.prompt).toContain('Resume the existing work');
   });
 
-  it('a clean exit that announces NO wait still escalates (the classification does not swallow real failures)', () => {
+  it('a clean exit that announces NO wait stays on the no-usage rail (the classification does not swallow it)', () => {
     const h = harness({ stallTimeoutMs: HOUR });
     REGISTRIES.push(h.dir);
     h.enqueue([{ issue: 685, mode: 'full', tier: 'mechanical' }]);
@@ -3344,7 +3403,7 @@ describe('#685: the announce-then-exit signature — a cheap retry, never a capa
 
     expect(h.events().some((e) => e.event === 'announced-wait')).toBe(false);
     expect(h.events().some((e) => e.event === 'verify-incomplete')).toBe(true);
-    expect(h.state().entries.find((e) => e.issue === 685)?.tier).toBe('mid');
+    expect(h.state().entries.find((e) => e.issue === 685)?.tier).toBe('mechanical');
   });
 
   it('a confirmed provider API error wins over a wait announcement (deterministic rails first)', () => {

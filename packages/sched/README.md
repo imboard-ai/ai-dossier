@@ -29,8 +29,10 @@ ai-dossier sched enqueue --from-manifest batch-prep.json                  # batc
 ai-dossier sched start            # the dispatch engine: spawn, verify, escalate, watch parked PRs (Ctrl-C stops it)
 ai-dossier sched start --once     # a single reconcile+refill tick (cron-style)
 ai-dossier sched status           # queue (+pr/cleanup), parked PRs, slots, batches, blocked/failed
-ai-dossier sched pause            # stop NEW assignments; live units keep running
+ai-dossier sched pause            # prevent every new agent process; live units keep running
 ai-dossier sched resume
+ai-dossier sched stop --issue 42  # terminate one full-cycle agent and record it stopped (no recovery)
+ai-dossier sched stop --batch b1  # terminate the batch process and stop unfinished members
 ai-dossier sched abandon --issue 42 --reason "operator abort"
 ai-dossier sched abandon --batch b1   # dissolve; members requeue as full-cycle
 ai-dossier sched stats --issues 4..9  # per-issue tokens/cost from ~/.dossier/runs.jsonl (#524)
@@ -46,6 +48,14 @@ number in two repos sums together). `stats --batch <id>` instead takes `--projec
 every other subcommand and reads that project's `~/.dossier/sched/<project>/runs/`
 directory directly, reconstructing costs from the raw dispatch logs rather than
 `runs.jsonl` (#564) — see "Batch members (#564)" below.
+
+`pause` prevents every new agent process, including escalation and same-tier recovery
+takeovers; it does not terminate agents that are already running. `stop --issue <n>` is the
+single-command stop path: it PID-start-safely terminates that issue's live agent, releases its
+slot, and records a terminal `stopped` outcome that will not recover or escalate. An active
+slot-mode member must instead be stopped through `stop --batch <id>`, which terminates the batch
+process and atomically stops the batch and its unfinished members. `abandon` only records failure
+and releases the slot; it intentionally does not terminate its process.
 
 Since #507, `enqueue` additionally reads each candidate issue's live GitHub labels (one
 `gh issue view --json labels` call per issue, resolved against the current directory's repo

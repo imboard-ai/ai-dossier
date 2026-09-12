@@ -106,6 +106,7 @@ export interface StatusReport {
   };
   blocked: BlockedItem[];
   failed: QueueEntry[];
+  stopped: QueueEntry[];
 }
 
 export function buildStatusReport(
@@ -115,6 +116,7 @@ export function buildStatusReport(
 ): StatusReport {
   const blocked: BlockedItem[] = [];
   const failed: QueueEntry[] = [];
+  const stopped: QueueEntry[] = [];
 
   const describeBlocker = (b: { dep: number; reason: string; depStatus?: string }): string =>
     b.reason === 'not-in-queue'
@@ -124,6 +126,10 @@ export function buildStatusReport(
   for (const entry of state.entries) {
     if (entry.status === 'failed') {
       failed.push(entry);
+      continue;
+    }
+    if (entry.status === 'stopped') {
+      stopped.push(entry);
       continue;
     }
     if (entry.status === 'blocked' || entry.status === 'decision-pending') {
@@ -235,5 +241,6 @@ export function buildStatusReport(
     dispatch: { ...dispatch, profile_sources: profileSources },
     blocked,
     failed,
+    stopped,
   };
 }

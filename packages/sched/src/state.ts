@@ -103,6 +103,7 @@ const ISSUE_BASE_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   // `transitionIssue` can legally drive a `failed` entry to `shipped` — keep
   // that behind `isStaleFailedPark` rather than re-deriving the check.
   failed: ['shipped'],
+  stopped: [],
 };
 
 /** Failure edges RFC-0001 §D.1 attaches to ANY state (blocked / decision-pending / failed). */
@@ -110,6 +111,7 @@ const ISSUE_UNIVERSAL_FAILURE_EDGES: readonly IssueStatus[] = [
   'blocked',
   'decision-pending',
   'failed',
+  'stopped',
 ];
 
 function allowedIssueTransitions(from: IssueStatus): IssueStatus[] {
@@ -119,36 +121,36 @@ function allowedIssueTransitions(from: IssueStatus): IssueStatus[] {
 }
 
 const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
-  forming: ['ready', 'dissolving', 'blocked'],
-  ready: ['executing', 'dissolving', 'blocked'],
+  forming: ['ready', 'dissolving', 'blocked', 'stopped'],
+  ready: ['executing', 'dissolving', 'blocked', 'stopped'],
   // executing → executing advances the member pointer (i/N); the ⟲ in RFC-0001 §D.2.
   // → blocked (#583): the per-member incremental gate came back inconclusive
   // (automation-broken/capability-unavailable) — the gate itself, not any
   // member, is untrustworthy, so the batch blocks rather than evicting on a
   // false signal. `sched resume --batch` re-runs the gate and transitions
   // straight back to `executing` on success (see `blocked`'s edge below).
-  executing: ['executing', 'validating', 'dissolving', 'blocked'],
+  executing: ['executing', 'validating', 'dissolving', 'blocked', 'stopped'],
   // `blocked` (#562): the suite REPORT was unreadable even after a fallback
   // retry — distinct from `dissolving`, which is for a red suite that WAS
   // read but named no offender. Nothing is requeued or reverted for `blocked`.
   // A member admitted while the suite runs returns the batch to execution;
   // the aggregate suite must run again before final review can begin.
-  validating: ['executing', 'attributing', 'reviewing', 'dissolving', 'blocked'],
+  validating: ['executing', 'attributing', 'reviewing', 'dissolving', 'blocked', 'stopped'],
   // `dissolving` because attribution can legitimately name nobody (bisect
   // absent, errored, or unattributable) — without the edge, an unattributable
   // red suite is a dead end with no way out but fixing or evicting a member the
   // system cannot identify.
-  attributing: ['fixing', 'evicting', 'dissolving', 'blocked'],
-  fixing: ['validating', 'dissolving', 'blocked'],
-  evicting: ['validating', 'dissolving', 'blocked'],
-  reviewing: ['shipping', 'dissolving', 'blocked'],
-  shipping: ['awaiting-merge', 'dissolving', 'blocked'],
-  'awaiting-merge': ['rebasing', 'merged', 'blocked'],
-  rebasing: ['re-validating', 'dissolving', 'blocked'],
-  're-validating': ['shipping', 'dissolving', 'blocked'],
-  merged: ['deployed', 'blocked'],
-  deployed: ['reported', 'blocked'],
-  reported: ['done', 'blocked'],
+  attributing: ['fixing', 'evicting', 'dissolving', 'blocked', 'stopped'],
+  fixing: ['validating', 'dissolving', 'blocked', 'stopped'],
+  evicting: ['validating', 'dissolving', 'blocked', 'stopped'],
+  reviewing: ['shipping', 'dissolving', 'blocked', 'stopped'],
+  shipping: ['awaiting-merge', 'dissolving', 'blocked', 'stopped'],
+  'awaiting-merge': ['rebasing', 'merged', 'blocked', 'stopped'],
+  rebasing: ['re-validating', 'dissolving', 'blocked', 'stopped'],
+  're-validating': ['shipping', 'dissolving', 'blocked', 'stopped'],
+  merged: ['deployed', 'blocked', 'stopped'],
+  deployed: ['reported', 'blocked', 'stopped'],
+  reported: ['done', 'blocked', 'stopped'],
   done: [],
   dissolving: ['dissolved'],
   dissolved: [],
@@ -167,7 +169,8 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   // staying blocked forever. The ENGINE decides when the edge is legal
   // (`reconcileStaleBlockedBatches`, which proves the merge evidence first);
   // this table only makes the edge exist.
-  blocked: ['validating', 'dissolving', 'executing', 'merged'],
+  blocked: ['validating', 'dissolving', 'executing', 'merged', 'stopped'],
+  stopped: [],
 };
 
 const SLOT_BASE_TRANSITIONS: Record<SlotStatus, SlotStatus[]> = {

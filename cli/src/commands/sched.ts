@@ -64,6 +64,8 @@ import {
   schedStateDir,
   schedTelemetryEnabled,
   setPaused,
+  stopBatch,
+  stopIssue,
   TEARDOWN_TIMEOUT_MS,
   TIER_ORDER,
   tick,
@@ -199,6 +201,12 @@ interface EnqueueOptions extends SchedOptions {
 }
 
 interface AbandonOptions extends SchedOptions {
+  issue?: string;
+  batch?: string;
+  reason?: string;
+}
+
+interface StopOptions extends SchedOptions {
   issue?: string;
   batch?: string;
   reason?: string;
@@ -480,6 +488,14 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   lines.push(
     report.failed.length > 0
       ? report.failed.map((f) => `#${f.issue} — ${f.reason ?? f.status}`).join('\n')
+      : '(none)'
+  );
+  lines.push('');
+  lines.push('== Stopped ==');
+  const stopped = report.stopped ?? [];
+  lines.push(
+    stopped.length > 0
+      ? stopped.map((entry) => `#${entry.issue} — ${entry.reason ?? entry.status}`).join('\n')
       : '(none)'
   );
   return lines.join('\n');
@@ -1121,7 +1137,7 @@ function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
     .command(pause ? 'pause' : 'resume')
     .description(
       pause
-        ? 'Stop making new slot assignments (live units keep running)'
+        ? 'Prevent every new agent process, including recovery takeovers; live agents keep running'
         : 'Resume making new slot assignments; with --batch <id>, re-run the incremental gate for a batch blocked on gate-inconclusive instead (#583)'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
@@ -1379,6 +1395,79 @@ function registerAbandonSubcommand(cmd: Command): void {
               `✓ Dissolved batch ${opts.batch}; requeued ${requeued.length} member(s) as full-cycle`
             );
           }
+        }
+      } catch (err) {
+        handleKnownError(err);
+      }
+    });
+}
+
+function registerStopSubcommand(cmd: Command): void {
+  cmd
+    .command('stop')
+    .description(
+      'Terminate an issue agent or batch process and record terminal stopped outcomes without escalation'
+    )
+    .option('--issue <number>', 'Issue number to stop')
+    .option('--batch <id>', 'Batch id to stop with all unfinished members')
+    .option('--reason <text>', 'Reason recorded on the entry', 'stopped')
+    .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
+    .option('--json', 'Output the result as JSON')
+    .action((opts: StopOptions) => {
+      if ((opts.issue ? 1 : 0) + (opts.batch ? 1 : 0) !== 1) {
+        fail(['Pass exactly one of --issue <number> or --batch <id>']);
+      }
+      const issues = opts.issue ? issueList(opts.issue, 'issue') : null;
+      if (issues !== null && issues.length !== 1) {
+        fail([`--issue takes a single issue number, got '${opts.issue}'`]);
+      }
+      const issue = issues?.[0];
+      const { store } = resolveStore(opts);
+      const spawnDeps = createSpawnDeps(process.cwd());
+      try {
+        const result = store.withLock((state) => {
+          const unit = opts.batch ? `batch:${opts.batch}` : `issue:${issue}`;
+          const slot = state.slots.find((candidate) => candidate.unit === unit);
+          const terminated =
+            slot?.pid !== null &&
+            slot?.pid !== undefined &&
+            spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
+              ? spawnDeps.kill(slot.pid, slot.pid_start ?? undefined)
+              : false;
+          const stopped = opts.batch
+            ? stopBatch(state, opts.batch, opts.reason)
+            : stopIssue(state, issue as number, opts.reason);
+          return {
+            state: stopped.state,
+            result: {
+              releasedSlots: stopped.releasedSlots,
+              stopped:
+                'stopped' in stopped && Array.isArray(stopped.stopped) ? stopped.stopped : [],
+              terminated,
+            },
+          };
+        });
+        new Journal(store.dir).append(
+          unitEvent('stopped', opts.batch ? `batch:${opts.batch}` : `issue:${issue}`, {
+            reason: opts.reason,
+            detail: result.terminated ? 'agent terminated' : 'no live agent to terminate',
+          })
+        );
+        if (opts.json) {
+          console.log(
+            JSON.stringify({
+              stopped: opts.batch ? `batch:${opts.batch}` : `issue:${issue}`,
+              terminated: result.terminated,
+              released_slots: result.releasedSlots,
+              ...(opts.batch ? { stopped_members: result.stopped } : {}),
+            })
+          );
+        } else {
+          console.log(
+            opts.batch
+              ? `✓ Stopped batch ${opts.batch} and ${result.stopped.length} member(s) (released ${result.releasedSlots.length} slot(s))`
+              : `✓ Stopped issue #${issue} (released ${result.releasedSlots.length} slot(s))`
+          );
         }
       } catch (err) {
         handleKnownError(err);
@@ -1792,6 +1881,7 @@ export function registerSchedCommand(program: Command): void {
   registerPauseResumeSubcommand(schedCmd, true);
   registerPauseResumeSubcommand(schedCmd, false);
   registerAbandonSubcommand(schedCmd);
+  registerStopSubcommand(schedCmd);
   registerReprioritizeSubcommand(schedCmd);
   registerStartSubcommand(schedCmd);
   registerStatsSubcommand(schedCmd);

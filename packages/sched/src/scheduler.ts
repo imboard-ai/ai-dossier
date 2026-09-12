@@ -227,6 +227,79 @@ export function abandonIssue(
 }
 
 /**
+ * `sched stop --issue N`: record an operator-stopped terminal outcome and
+ * release any held slot. The CLI owns process termination; this pure state
+ * transition ensures a later reconcile cannot recover or redispatch the unit.
+ */
+export function stopIssue(
+  state: SchedState,
+  issue: number,
+  reason = 'stopped',
+  now: Date = new Date()
+): { state: SchedState; releasedSlots: number[] } {
+  const entry = state.entries.find((e) => e.issue === issue);
+  if (!entry) {
+    throw new SchedNotFoundError(`Queue entry not found: ${issue}`);
+  }
+  if (TERMINAL_ISSUE_STATUSES.has(entry.status)) {
+    throw new SchedNotFoundError(`Issue ${issue} is already ${entry.status} — nothing to stop`);
+  }
+  if (entry.mode === 'slot' && entry.batch !== null) {
+    const batch = findBatch(state, entry.batch);
+    if (batch && !TERMINAL_BATCH_STATUSES.has(batch.status)) {
+      throw new SchedNotFoundError(
+        `Issue ${issue} is an active member of batch ${entry.batch} — use sched stop --batch ${entry.batch}`
+      );
+    }
+  }
+  let next = transitionIssue(state, issue, 'stopped', { reason }, now);
+  const unit = `issue:${issue}`;
+  const released: number[] = [];
+  for (const slot of next.slots) {
+    if (slot.unit === unit && slot.status !== 'idle') {
+      if (slot.status !== 'failed' && slot.status !== 'complete') {
+        next = transitionSlot(next, slot.id, 'failed', {}, now);
+      }
+      next = transitionSlot(next, slot.id, 'idle', {}, now);
+      released.push(slot.id);
+    }
+  }
+  return { state: next, releasedSlots: released };
+}
+
+/**
+ * `sched stop --batch B`: stop the batch and every unfinished member, then
+ * release its shared slot. The CLI terminates the process while holding the
+ * same state lock, so later ticks cannot recover this stopped work.
+ */
+export function stopBatch(
+  state: SchedState,
+  batchId: string,
+  reason = 'stopped',
+  now: Date = new Date()
+): { state: SchedState; stopped: number[]; releasedSlots: number[] } {
+  const batch = findBatch(state, batchId);
+  if (!batch) {
+    throw new SchedNotFoundError(`Batch not found: ${batchId}`);
+  }
+  if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
+    throw new SchedNotFoundError(`Batch ${batchId} is already ${batch.status} — nothing to stop`);
+  }
+  const releasedSlots = state.slots
+    .filter((slot) => slot.unit === `batch:${batchId}` && slot.status !== 'idle')
+    .map((slot) => slot.id);
+  let next = transitionBatch(state, batchId, 'stopped', {}, now);
+  const stopped: number[] = [];
+  for (const issue of batch.members) {
+    const entry = next.entries.find((candidate) => candidate.issue === issue);
+    if (!entry || TERMINAL_ISSUE_STATUSES.has(entry.status)) continue;
+    next = transitionIssue(next, issue, 'stopped', { reason }, now);
+    stopped.push(issue);
+  }
+  return { state: releaseBatchSlot(next, batchId, now), stopped, releasedSlots };
+}
+
+/**
  * `sched abandon --batch B`: dissolve the batch and requeue every non-terminal
  * member as full-cycle (RFC-0001 §D.2 dissolving → "members requeued"; F.8
  * "nothing green is discarded" — members already shipped stay put).

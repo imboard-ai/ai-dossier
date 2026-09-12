@@ -11,6 +11,8 @@ import {
   reprioritizeIssue,
   runnableUnits,
   setPaused,
+  stopBatch,
+  stopIssue,
   transitionBatch,
   transitionIssue,
   transitionSlot,
@@ -283,6 +285,68 @@ describe('abandon', () => {
       NOW
     );
     expect(() => abandonBatch(state, 'nope')).toThrow(/not found/);
+  });
+});
+
+describe('stop', () => {
+  it('records a non-failed stopped outcome, releases its slot, and permits explicit re-enqueue', () => {
+    const state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
+    const assigned = computeAssignments(state, { max_slots: 1 }, NOW2);
+    const running = transitionSlot(
+      assigned.state,
+      assigned.assignments[0].slot,
+      'running',
+      { pid: 77 },
+      NOW2
+    );
+
+    const stopped = stopIssue(running, 1, 'operator stop', NOW2);
+
+    expect(stopped.state.entries.find((entry) => entry.issue === 1)).toMatchObject({
+      status: 'stopped',
+      reason: 'operator stop',
+    });
+    expect(stopped.releasedSlots).toEqual([1]);
+    expect(stopped.state.slots[0]).toMatchObject({ status: 'idle', unit: null, pid: null });
+    expect(enqueueEntries(stopped.state, [{ issue: 1 }], NOW2).entries).toHaveLength(1);
+  });
+
+  it('refuses terminal and unknown entries', () => {
+    const state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
+    const stopped = stopIssue(state, 1, 'operator stop', NOW2).state;
+    expect(() => stopIssue(stopped, 1)).toThrow(/already stopped/);
+    expect(() => stopIssue(stopped, 2)).toThrow(/not found/);
+  });
+
+  it('requires active batch members to be stopped through their batch', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1, mode: 'slot', batch: 'b1' }],
+      NOW
+    );
+    expect(() => stopIssue(state, 1)).toThrow(/stop --batch b1/);
+  });
+
+  it('stops an active batch and its unfinished members while releasing its shared slot', () => {
+    let state = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 1, mode: 'slot', batch: 'b1' },
+        { issue: 2, mode: 'slot', batch: 'b1' },
+      ],
+      NOW
+    );
+    state = transitionBatch(state, 'b1', 'executing', { executing_member: 1 }, NOW2);
+    const assigned = assignToIdleSlot(state, 'batch:b1', 'member', NOW2);
+    state = transitionSlot(assigned.state, assigned.slotId, 'running', { pid: 77 }, NOW2);
+
+    const stopped = stopBatch(state, 'b1', 'operator stop', NOW2);
+
+    expect(stopped.stopped).toEqual([1, 2]);
+    expect(stopped.releasedSlots).toEqual([1]);
+    expect(stopped.state.batches[0].status).toBe('stopped');
+    expect(stopped.state.entries.map((entry) => entry.status)).toEqual(['stopped', 'stopped']);
+    expect(stopped.state.slots[0]).toMatchObject({ status: 'idle', unit: null, pid: null });
   });
 });
 

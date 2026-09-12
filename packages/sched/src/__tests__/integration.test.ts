@@ -154,8 +154,8 @@ describe('integration: dispatch → exit → verify against fake milestones', ()
     expect(log).toContain('#301');
   }, 20_000);
 
-  it('a fake agent that dies without doing anything → NOT complete → redispatched stronger', async () => {
-    const h = harness(['--mode=die']);
+  it('a fake agent that makes tool progress then dies → NOT complete → redispatched stronger', async () => {
+    const h = harness(['--mode=die', '--emit-progress=true']);
     h.enqueue([{ issue: 302, mode: 'full', tier: 'mechanical' }]);
 
     h.tick();
@@ -218,7 +218,15 @@ describe('integration: #527 mixed agent-CLI escalation ladder', () => {
       max_slots: 1,
       dispatch: {
         tiers: {
-          mid: { command: ['node', FAKE_AGENT, '--mode=die', `--milestones-dir=${milestonesDir}`] },
+          mid: {
+            command: [
+              'node',
+              FAKE_AGENT,
+              '--mode=die',
+              '--emit-progress=true',
+              `--milestones-dir=${milestonesDir}`,
+            ],
+          },
           strong: {
             command: ['node', FAKE_AGENT, '--mode=complete', `--milestones-dir=${milestonesDir}`],
           },
@@ -235,7 +243,8 @@ describe('integration: #527 mixed agent-CLI escalation ladder', () => {
     const firstPid = store.load().slots[0].pid as number;
     expect(await waitUntilDead(deps.spawnDeps, firstPid)).toBe(true);
 
-    // cmd A (mid, --mode=die) posted nothing verifiable → not complete → redispatched to strong.
+    // cmd A (mid, --mode=die) made tool progress but posted no completion milestone,
+    // so it is not complete and is redispatched to strong.
     const result = tick(deps, config);
     expect(result.completed).toHaveLength(0);
     expect(result.redispatched).toEqual(['issue:527']);
