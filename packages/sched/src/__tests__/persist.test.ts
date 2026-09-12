@@ -224,6 +224,32 @@ describe('SchedStore', () => {
     });
   });
 
+  it('ignores malformed user profiles without disabling valid project profiles', () => {
+    const userConfigPath = path.join(dir, 'user-config.json');
+    fs.writeFileSync(
+      userConfigPath,
+      JSON.stringify({ dispatch_profiles: { glm: { command: [] } } })
+    );
+    const store = new SchedStore(path.join(dir, 'sched', 'project'), userConfigPath);
+    fs.mkdirSync(store.dir, { recursive: true });
+    fs.writeFileSync(
+      store.configPath,
+      JSON.stringify({
+        schema_version: '1.9.0',
+        max_slots: 2,
+        dispatch: { dispatch_profiles: { glm: { tier_models: { mid: 'project-glm' } } } },
+      })
+    );
+    const warned = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(store.loadConfig().dispatch).toMatchObject({
+      dispatch_profiles: { glm: { tier_models: { mid: 'project-glm' } } },
+      dispatch_profile_sources: { glm: 'project' },
+    });
+    expect(warned).toHaveBeenCalledWith(expect.stringContaining('ignoring user profiles'));
+    warned.mockRestore();
+  });
+
   it('validates what it loads (validateState integration)', () => {
     const store = new SchedStore(dir);
     const state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);

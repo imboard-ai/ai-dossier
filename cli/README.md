@@ -1234,7 +1234,9 @@ against ground truth.
   re-read labels ("(labels last checked 4 minutes ago)", or "(labels never checked)"),
   so a `decision-pending` you removed but the engine has not looked at yet is
   distinguishable from one that is still there; `--json` carries the same timestamp as
-  `last_label_poll_at`. When suspect-dispatch exits have
+   `last_label_poll_at`. Named dispatch profiles are shown as `Profile <name> (user)`
+   or `Profile <name> (project)`; `--json` exposes the same provenance under
+   `dispatch.profile_sources`. When suspect-dispatch exits have
   been recorded (#505 below), a `⚠ Dispatch health: N consecutive suspect-dispatch
   exit(s) (last: <unit>)` warning line prints too, saying whether it's just informational
   or likely why the scheduler is paused; the same counters ride along in `--json` as

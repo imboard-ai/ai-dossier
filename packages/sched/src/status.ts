@@ -21,6 +21,7 @@ import {
 import { distinctEvictions } from './state';
 import type {
   BatchEntry,
+  DispatchProfileSource,
   ModelTier,
   QueueEntry,
   SchedConfig,
@@ -99,7 +100,7 @@ export interface StatusReport {
   dispatch: {
     tiers: Record<ModelTier, TierExecutor>;
     profiles: Record<string, Record<ModelTier, TierExecutor>>;
-    profile_sources: Record<string, 'user' | 'project'>;
+    profile_sources: Record<string, DispatchProfileSource>;
   };
   blocked: BlockedItem[];
   failed: QueueEntry[];

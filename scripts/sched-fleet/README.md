@@ -32,7 +32,7 @@ your own issues.
 | `tick.sh` | Cron job, every 2 min: ticks every project in `projects.txt` once, Telegram-reports new scheduler events, watches `issues.txt` for closures, arms the 7-day report hook, self-upgrades the CLI when idle, self-removes its own cron line once every tracked issue is closed |
 | `bootstrap.sh` | Fires at the configured annual reset, writes a sched `config.json`, enqueues a fixed dependency chain of issues, arms `tick.sh`'s cron line, and records completion for safe retries. Failures re-arm a 5-minute retry cron. **hcc2-specific — edit before reuse.** |
 | `cron-lib.sh` | Shared guarded cron read/modify/write helpers; retries transient reads and uses an independent `at` retry when a crontab remains unreadable |
-| `dispatch-profiles.json` | Provider-family dispatch profiles merged into each target project's local scheduler config by `refresh-fleet.sh`; only this config key is fleet-shared |
+| `dispatch-profiles.json` | Provider-family dispatch profiles installed into host-level `~/.dossier/config.json` by `refresh-fleet.sh`; projects may override individual profile names |
 | `probe-effort.mjs` | Dry-run-by-default provider probe; compares same-model lower/max effort or variant settings and reports provider-reported measured-token deltas when run with `--run` (OpenCode includes reasoning tokens) |
 | `enqueue-report.sh` | Dated one-shot, installed by `tick.sh`: fires once 7 days after a tracked issue closes, enqueues the follow-up report issue, then removes its own cron line; enqueue failures re-arm a 5-minute retry |
 | `fmt_events.py` | Reads scheduler `events.jsonl` lines from stdin, filters to the reportable event types, formats up to 8 lines for a Telegram message. Invoked as `python3 fmt_events.py` (no shebang, not directly executable — matches the hcc2 source file exactly) |
@@ -68,21 +68,19 @@ project before ticking it.
 `dispatch-profiles.json` is the fleet-shared source for the four provider families
 used by the reference deployment. `refresh-fleet.sh` validates it locally, copies
 the source beside the reset bootstrap, then merges only `dispatch.dispatch_profiles`
-into each target host's existing `~/.dossier/sched/<project>/config.json`. Config
-replacement is atomic, and host-local slots, timers, prompts, and pool state are
-left unchanged.
+into each host's `~/.dossier/config.json` as top-level `dispatch_profiles`. No
+project scheduler directory needs to exist. A project can override one name under
+`dispatch.dispatch_profiles` while inheriting every other host profile.
 
-The default targets are the two projects in `projects.txt.example`. Restrict the
-refresh to one scheduler slug with:
+`SCHED_PROFILE_PROJECTS` is empty by default. Set it only to also synchronize the
+legacy project profile map for an explicit override:
 
 ```bash
 SCHED_PROFILE_PROJECTS=imboard-ai-imboard-monorepo \
   bash scripts/refresh-fleet.sh
 ```
 
-Use `--profiles-file <path>` for a deployment-specific ladder. A missing target
-config is reported as a host failure instead of silently claiming that the
-profile was synchronized. Set `SCHED_FLEET_HOME` when the reset scripts live
+Use `--profiles-file <path>` for a deployment-specific ladder. Set `SCHED_FLEET_HOME` when the reset scripts live
 somewhere other than `~/.dossier/reset-fleet`. `SCHED_PROFILE_FLEET_HOME` is only
 the destination override for `refresh-fleet.sh`; it must point at the same
 directory as the installed reset scripts.
