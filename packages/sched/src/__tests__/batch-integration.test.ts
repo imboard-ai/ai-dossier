@@ -2568,6 +2568,28 @@ describe('integration #707: a batch dispatches through its recorded profile', ()
     expect(tailSpawn.model).toBe('glm-strong');
   }, 60_000);
 
+  it('#713: full-cycle and batch entries both use the requested profile in one tick', () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], {
+      maxSlots: 2,
+      profiles: GLM_PROFILES,
+    });
+    h.enqueue([
+      { issue: 7131, mode: 'full', tier: 'mid', dispatch: 'glm' },
+      { issue: 7132, mode: 'slot', batch: 'b-mixed', anchor: 7130, tier: 'mid', dispatch: 'glm' },
+    ]);
+
+    const result = h.tick();
+
+    expect(result.spawned).toContain('issue:7131');
+    expect(result.spawned).toContain('batch:b-mixed');
+    const spawned = readSpawned(h.deps.store.dir);
+    expect(spawned.filter((event) => event.cmd?.includes('--profile-member=glm'))).toHaveLength(
+      spawned.length
+    );
+    expect(spawned.find((event) => event.unit === 'issue:7131')?.model).toBe('glm-5.3');
+  });
+
   it('a batch whose profile no longer resolves pre-merge DISSOLVES loudly instead of falling back (AC5 spirit, engine side)', async () => {
     const repo = scratchRepo();
     // Config knows NO profiles at all; the batch records one anyway (a
