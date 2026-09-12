@@ -1107,7 +1107,7 @@ ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
 ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--json]
 ai-dossier sched status [--json]
 ai-dossier sched pause | resume
-ai-dossier sched stop --issue 42 [--reason "..."]
+ai-dossier sched stop (--issue 42 | --batch b1) [--reason "..."]
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
 ai-dossier sched reprioritize --issue 42 --priority 20 | --batch b1 --priority 20 [--json]
 ai-dossier sched stats [--issues 4,5|4..9] [--batch b1 --project owner-repo] [--json]
@@ -1123,8 +1123,9 @@ against ground truth.
 
 `pause` prevents every new agent process, including recovery takeovers, but leaves live
 agents running. `stop --issue <n>` PID-start-safely terminates one live agent, releases its
-slot, and records terminal `stopped` state without recovery or escalation. `abandon` instead
-records failure and releases a slot without terminating the process.
+slot, and records terminal `stopped` state without recovery or escalation. Active batch members
+must use `stop --batch <id>`, which terminates the batch process and stops unfinished members
+atomically. `abandon` instead records failure and releases a slot without terminating the process.
 
 - **`enqueue`** records entries (issue, mode, batch id, dependency edges, model tier) from
   flags or a batch-prep manifest (`--from-manifest`, a JSON file of entries — flags and

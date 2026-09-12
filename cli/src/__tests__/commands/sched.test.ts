@@ -908,6 +908,41 @@ describe('ai-dossier sched pause/resume/abandon', () => {
     expect(journalEvents()).toContainEqual(
       expect.objectContaining({ event: 'stopped', unit: 'issue:42' })
     );
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    expect(logs.join('')).toContain('== Stopped ==\n#42 — stopped');
+  });
+
+  it('stops a batch and all unfinished members together', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '42,43',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--skip-plan-check',
+      '--project',
+      'test-proj',
+    ]);
+    logs.length = 0;
+    await runSched(['sched', 'stop', '--batch', 'b1', '--project', 'test-proj', '--json']);
+
+    expect(JSON.parse(logs.join(''))).toEqual({
+      stopped: 'batch:b1',
+      terminated: false,
+      released_slots: [],
+      stopped_members: [42, 43],
+    });
+    const state = readState() as {
+      entries: Array<Record<string, unknown>>;
+      batches: Array<Record<string, unknown>>;
+    };
+    expect(state.batches[0].status).toBe('stopped');
+    expect(state.entries.map((entry) => entry.status)).toEqual(['stopped', 'stopped']);
   });
 
   it('abandons an issue, recording the reason', async () => {

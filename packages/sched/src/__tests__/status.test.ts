@@ -65,6 +65,15 @@ describe('buildStatusReport', () => {
     expect(report.failed[0].reason).toBe('escalation-cap');
   });
 
+  it('lists terminal stopped entries separately from failed entries', () => {
+    let state = seeded();
+    state = transitionIssue(state, 101, 'stopped', { reason: 'operator stop' }, NOW);
+    const report = buildStatusReport(state, { max_slots: 3 }, 'p');
+    expect(report.failed).toEqual([]);
+    expect(report.stopped).toHaveLength(1);
+    expect(report.stopped[0]).toMatchObject({ issue: 101, reason: 'operator stop' });
+  });
+
   it('#501: a stale-failure-reconciled unit no longer appears under failed', () => {
     let state = seeded();
     state = transitionIssue(state, 101, 'failed', { reason: 'auto-merge-blocked' }, NOW);

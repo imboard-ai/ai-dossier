@@ -209,6 +209,7 @@ export {
   reprioritizeIssue,
   runnableUnits,
   setPaused,
+  stopBatch,
   stopIssue,
 } from './scheduler';
 export {

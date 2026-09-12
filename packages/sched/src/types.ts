@@ -226,10 +226,15 @@ export type BatchStatus =
    * (#583, a passing gate recheck), or #686's stale-blocked reconcile
    * (ground truth says the work shipped anyway).
    */
-  | 'blocked';
+  | 'blocked'
+  | 'stopped';
 
 /** Batch statuses that cannot transition further. */
-export const TERMINAL_BATCH_STATUSES: ReadonlySet<BatchStatus> = new Set(['done', 'dissolved']);
+export const TERMINAL_BATCH_STATUSES: ReadonlySet<BatchStatus> = new Set([
+  'done',
+  'dissolved',
+  'stopped',
+]);
 
 /**
  * Batch statuses that mean the batch's PR has merged. Cross-batch dependency

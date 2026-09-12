@@ -2551,19 +2551,20 @@ function completeUnitOrRecover(
     );
   }
 
-  // A process stopped before it reached a tool call, emitted model usage, or
-  // advanced its trail is not evidence that a stronger tier is needed.
+  // A process that emitted neither model usage nor a new milestone is not
+  // evidence that a stronger tier is needed. Dispatch preambles and other
+  // non-usage output are common when an operator stops an agent early.
   const hasMilestoneProgress =
     truth.milestone !== null &&
     slot.spawned_at !== null &&
     Date.parse(truth.milestone.at) > Date.parse(slot.spawned_at);
-  // A missing log is unknown, not an empty run: retain the conservative
-  // escalation rail unless we could read a slice proving no agent output.
   const progressed =
+    // An unreadable log remains unknown, preserving the existing conservative
+    // recovery rail. A tool call is concrete agent progress; arbitrary text is
+    // not, so an early stop that only leaves output stays on the same tier.
     !resolved.logReadable ||
     resolved.hasUsage ||
     resolved.lastTool !== null ||
-    resolved.hasAgentOutput ||
     hasMilestoneProgress;
   next = recordDispatchOutcome(ctx, next, unit, slot, suspect);
   return enterRecovery(
@@ -2601,6 +2602,7 @@ function reconcileAssigned(
     });
     return transitionSlot(state, slot.id, 'running', {}, ctx.deps.now());
   }
+  if (state.paused) return state;
   journal(ctx, 'assigned', unit, { slot: slot.id, detail: 'crash-recovery spawn' });
   return spawnUnit(ctx, state, unit);
 }
