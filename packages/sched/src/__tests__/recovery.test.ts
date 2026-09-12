@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import {
+  assignToIdleSlot,
   type BatchMilestone,
   beginAttribution,
   beginFixAttempt,
@@ -30,11 +31,13 @@ import {
   patchBatch,
   type RecoveryDeps,
   reprioritizeBatch,
+  requeueMember,
   resolveFixAttempt,
   type SchedState,
   type SuiteResult,
   transitionBatch,
   transitionIssue,
+  transitionSlot,
   validateState,
 } from '../index';
 import { recording } from './helpers/recording-exec';
@@ -740,6 +743,29 @@ describe('dissolveBatch', () => {
     expect(findEntry(result.state, 202)?.mode).toBe('full');
     expect(findEntry(result.state, 202)?.batch).toBeNull();
     expect(findBatch(result.state, 'b1')?.status).toBe('dissolved');
+  });
+
+  it('#635: leaves a member already redispatched as full-cycle untouched', () => {
+    let state = batchState([201, 202], 'validating');
+    state = requeueMember(state, 201, { mode: 'full', batch: null }, 'member-evicted', NOW).state;
+    state = transitionIssue(state, 201, 'dispatched', {}, NOW);
+    const assigned = assignToIdleSlot(state, 'issue:201', 'implement', NOW);
+    state = transitionSlot(assigned.state, assigned.slotId, 'running', { pid: 201 }, NOW);
+    const h = harness();
+
+    const result = dissolveBatch(state, 'b1', { strategy: 'full', reason: 'threshold' }, h.deps);
+
+    expect(result.requeued).toEqual([202]);
+    expect(result.preserved).toEqual([201]);
+    expect(findEntry(result.state, 201)).toMatchObject({
+      mode: 'full',
+      batch: null,
+      status: 'dispatched',
+    });
+    expect(result.state.slots.find((slot) => slot.id === assigned.slotId)).toMatchObject({
+      unit: 'issue:201',
+      status: 'running',
+    });
   });
 
   it('splits into two forming half-batches, retagging the entries', () => {

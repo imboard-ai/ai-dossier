@@ -1218,3 +1218,12 @@ describe('#707 state migration: dispatch_profile', () => {
     expect(() => validateState({ ...bad, batches })).toThrow(/dispatch_profile must match/);
   });
 });
+
+describe('#635 state migration: last_tick_failure', () => {
+  it('backfills no failure for a pre-#635 state', () => {
+    const legacy = { ...seeded(), schema_version: '1.20.0' } as Record<string, unknown>;
+    delete legacy.last_tick_failure;
+
+    expect(validateState(legacy).last_tick_failure).toBeNull();
+  });
+});

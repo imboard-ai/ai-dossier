@@ -79,6 +79,8 @@ export interface StatusReport {
     consecutive_api_errors: number;
     pause_reset_at: string | null;
   };
+  /** Most recent scheduler-wide tick failure, if the following tick has not recovered. */
+  last_tick_failure: SchedState['last_tick_failure'];
   /** How many units are runnable right now. */
   runnable: number;
   /** Which units are runnable (`issue:<n>` / `batch:<id>`), in dispatch order. */
@@ -225,6 +227,7 @@ export function buildStatusReport(
       consecutive_api_errors: state.consecutive_dispatch_api_errors,
       pause_reset_at: state.dispatch_pause_reset_at,
     },
+    last_tick_failure: state.last_tick_failure,
     runnable: units.length,
     runnable_units: units.map((u) =>
       u.kind === 'issue' ? `issue:${u.issue}` : `batch:${u.batch}`

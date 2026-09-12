@@ -1072,7 +1072,10 @@ export function dissolveBatch(
   for (const issue of batch.members) {
     const entry = state.entries.find((e) => e.issue === issue);
     if (!entry) continue;
-    if (isPreservedMember(entry)) {
+    // A prior eviction can requeue and redispatch a member as a full-cycle
+    // unit before this batch reaches its dissolve threshold. The batch still
+    // names it historically, but no longer owns its entry or its live slot.
+    if (isPreservedMember(entry) || entry.mode !== 'slot' || entry.batch !== batchId) {
       preserved.push(issue);
     } else {
       unshipped.push(issue);

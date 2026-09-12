@@ -80,7 +80,7 @@ export {
   tierExecutors,
   unitLogName,
 } from './dispatch';
-export { type EngineDeps, runLoop, type TickResult, tick } from './engine';
+export { type EngineDeps, recordTickFailure, runLoop, type TickResult, tick } from './engine';
 export {
   assertNoDependencyCycle,
   EnqueueError,
