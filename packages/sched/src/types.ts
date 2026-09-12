@@ -294,6 +294,12 @@ export interface QueueEntry {
   priority: number;
   /** Model tier the entry is dispatched at. */
   tier: ModelTier;
+  /**
+   * Named dispatch profile resolved at enqueue for a full-cycle entry (#713).
+   * Null deliberately selects the project's default profile; slot entries use
+   * their batch's profile so there is only one source of truth for a batch.
+   */
+  dispatch_profile: string | null;
   /** Current D.1 state. */
   status: IssueStatus;
   /** Free-form reason attached to failure-edge transitions (evicted/blocked/failed). */
@@ -1167,8 +1173,10 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * 1.19.0 (#707): `BatchEntry` gains `dispatch_profile` — the named dispatch
  * profile resolved at enqueue (null = the config's default); `null`
  * backfilled on load.
+ * 1.20.0 (#713): `QueueEntry` gains `dispatch_profile` for full-cycle
+ * entries; `null` is backfilled on load.
  */
-export const SCHEMA_VERSION = '1.19.0' as const;
+export const SCHEMA_VERSION = '1.20.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1191,6 +1199,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.16.0',
   '1.17.0',
   '1.18.0',
+  '1.19.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;

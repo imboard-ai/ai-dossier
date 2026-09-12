@@ -92,9 +92,8 @@ export interface EnqueueInput {
    * members, tail, fix, report — dispatches through it. The CLI resolves
    * detection/override and validates the name against the project config
    * BEFORE calling in here; this module stays config-free, same as
-   * `blocked_label`'s resolution. Slot-mode only: a full-cycle entry has no
-   * batch to record it on, so supplying one there is rejected rather than
-   * silently dropped.
+   * `blocked_label`'s resolution. For slot entries it is batch-level; for
+   * full-cycle entries it is persisted directly on the queue entry.
    */
   dispatch?: string;
   /**
@@ -447,18 +446,17 @@ export function enqueueEntries(
       throw new EnqueueError(`Issue ${input.issue}: full mode cannot carry a batch id`);
     }
     // Batch-level facts on a batch-less entry would be parsed, validated and
-    // then silently dropped — the same class of quiet misconfiguration that
-    // `assertBatchFactsAgree` exists to prevent one field over.
+    // then silently dropped — `dispatch` is intentionally excluded because a
+    // full-cycle entry persists it directly (#713).
     if (
       batch === null &&
       (input.anchor !== undefined ||
         input.run_id !== undefined ||
         input.eviction_groups !== undefined ||
-        input.more_members_expected !== undefined ||
-        input.dispatch !== undefined)
+        input.more_members_expected !== undefined)
     ) {
       throw new EnqueueError(
-        `Issue ${input.issue}: anchor/run_id/eviction_groups/more_members_expected/dispatch describe a batch — they cannot be set on a full-cycle entry (dispatch profiles are batch-scoped: full-cycle dispatches the config's default)`
+        `Issue ${input.issue}: anchor/run_id/eviction_groups/more_members_expected describe a batch — they cannot be set on a full-cycle entry`
       );
     }
     // A `decision-pending` GITHUB LABEL (one of the four hard-block labels
@@ -474,6 +472,7 @@ export function enqueueEntries(
       deps: input.deps ? [...input.deps] : [],
       priority: input.priority ?? DEFAULT_ISSUE_PRIORITY,
       tier: input.tier ?? 'mid',
+      dispatch_profile: mode === 'full' ? (input.dispatch ?? null) : null,
       status: input.blocked_label ? 'blocked' : 'queued',
       reason: input.blocked_label ? labelBlockReason(input.blocked_label) : null,
       pr: null,

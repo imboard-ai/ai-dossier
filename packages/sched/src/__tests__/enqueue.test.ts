@@ -42,7 +42,21 @@ describe('enqueueEntries', () => {
 
   it('applies documented defaults (mode full, tier mid, no deps)', () => {
     const state = enqueueEntries(createEmptyState(), [{ issue: 7 }], NOW);
-    expect(state.entries[0]).toMatchObject({ mode: 'full', tier: 'mid', deps: [] });
+    expect(state.entries[0]).toMatchObject({
+      mode: 'full',
+      tier: 'mid',
+      deps: [],
+      dispatch_profile: null,
+    });
+  });
+
+  it('#713: persists a dispatch profile on a full-cycle entry', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 8, mode: 'full', dispatch: 'openai' }],
+      NOW
+    );
+    expect(state.entries[0]?.dispatch_profile).toBe('openai');
   });
 
   it('rejects slot mode without a batch and full mode with one', () => {
@@ -588,10 +602,9 @@ describe('dispatch profile as a batch-level fact (#707)', () => {
     expect(findBatch(state, 'b1')?.dispatch_profile).toBe('glm');
   });
 
-  it('rejects a dispatch profile on a full-cycle entry — profiles are batch-scoped', () => {
-    expect(() =>
-      enqueueEntries(createEmptyState(), [{ issue: 213, dispatch: 'glm' }], NOW)
-    ).toThrow(/dispatch profiles are batch-scoped/);
+  it('#713: persists a dispatch profile on a full-cycle entry', () => {
+    const state = enqueueEntries(createEmptyState(), [{ issue: 213, dispatch: 'glm' }], NOW);
+    expect(state.entries[0]?.dispatch_profile).toBe('glm');
   });
 
   it('rejects a name outside the grammar', () => {

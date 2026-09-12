@@ -356,6 +356,16 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   if (!MODEL_TIERS.has(String(entry.tier))) {
     throw new Error(`${label}: tier must be mechanical | mid | strong`);
   }
+  if (
+    entry.dispatch_profile !== undefined &&
+    entry.dispatch_profile !== null &&
+    (typeof entry.dispatch_profile !== 'string' ||
+      !DISPATCH_PROFILE_RE.test(entry.dispatch_profile))
+  ) {
+    throw new Error(
+      `${label}: dispatch_profile must match ${DISPATCH_PROFILE_RE} or be null, got ${String(entry.dispatch_profile)}`
+    );
+  }
   // Absent (pre-#565/1.9.0) OR explicit null (a hand-edited state.json's
   // natural spelling of "unset") — both backfilled by the migration below.
   if (
@@ -903,6 +913,9 @@ export function validateState(data: unknown): SchedState {
     // also backfills an explicit `null` (a hand-edited state.json's natural
     // spelling of "no priority set") the same as a genuinely absent key.
     priority: entry.priority ?? DEFAULT_ISSUE_PRIORITY,
+    // Pre-#713 entries always dispatched through the project default, so null
+    // is an exact migration rather than a guessed profile.
+    dispatch_profile: entry.dispatch_profile ?? null,
     // Pre-#632 (1.13.0) entries carry none of these four — no dedup marker
     // was ever recorded under the old once-per-tick behavior, so null/0 is
     // exact, not a guess.

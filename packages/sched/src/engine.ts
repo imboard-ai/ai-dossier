@@ -87,6 +87,7 @@ import {
   type ResolvedDispatch,
   reportTierFor,
   resolveDispatch,
+  resolveProfiledDispatch,
   resolveTierSpawn,
   type SpawnDeps,
   STOP_POLL_MAX_MS,
@@ -343,6 +344,7 @@ interface LabelPoll {
 
 interface TickCtx {
   deps: EngineDeps;
+  config: SchedConfig;
   dispatch: ResolvedDispatch;
   result: TickResult;
 }
@@ -847,16 +849,23 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
     return spawnReportAgent(ctx, state, unit);
   }
 
+  let dispatch: ResolvedDispatch;
+  try {
+    dispatch = resolveProfiledDispatch(ctx.config, entry.dispatch_profile);
+  } catch (err) {
+    return failUnit(ctx, state, unit, `dispatch-profile-error: ${(err as Error).message}`);
+  }
+
   return spawnAndRecord(ctx, state, unit, slot, {
     tier: entry.tier,
-    spawn: resolveTierSpawn(ctx.dispatch, entry.tier, issue),
+    spawn: resolveTierSpawn(dispatch, entry.tier, issue),
     // The slot's generation reaches the agent here (#504): a takeover is told which
     // generation it owns, so its own `runstate post --gen` is accepted while the run it
     // replaced is refused. A first dispatch is generation 0 and reads as it always did.
     // The tier's own resolved prompt (#527) — falls back to the global
     // dispatch.prompt when the tier has no override.
     prompt: buildPrompt(
-      ctx.dispatch.tiers[entry.tier].prompt,
+      dispatch.tiers[entry.tier].prompt,
       issue,
       slot.gen,
       // #683 AC6: the takeover is told its slot identity alongside the generation —
@@ -883,10 +892,18 @@ function spawnReportAgent(ctx: TickCtx, state: SchedState, unit: string): SchedS
   if (!entry || !slot || entry.pr === null || entry.cleanup === null) return state;
   const tier = reportTierFor(slot.recoveries);
   if (tier === null) return state;
+  let dispatch: ResolvedDispatch;
+  try {
+    dispatch = resolveProfiledDispatch(ctx.config, entry.dispatch_profile);
+  } catch (err) {
+    return failUnit(ctx, state, unit, `dispatch-profile-error: ${(err as Error).message}`, {
+      merged: true,
+    });
+  }
 
   return spawnAndRecord(ctx, state, unit, slot, {
     tier,
-    spawn: resolveTierSpawn(ctx.dispatch, tier, issue),
+    spawn: resolveTierSpawn(dispatch, tier, issue),
     // Report agents use the dedicated report-prompt template (`{pr}`/`{cleanup}`
     // placeholders), never a tier's `prompt` override — that override's fallback
     // chain is the cycle-agent prompt (a different template family), so wiring
@@ -896,7 +913,7 @@ function spawnReportAgent(ctx: TickCtx, state: SchedState, unit: string): SchedS
     // not know its generation would have its `report done` milestone refused by the
     // CLI — recovering forever on a PR that already merged.
     prompt: buildReportPrompt(
-      ctx.dispatch.reportPrompt,
+      dispatch.reportPrompt,
       issue,
       entry.pr,
       entry.cleanup,
@@ -1429,10 +1446,16 @@ function enterRecovery(
     return next;
   }
 
+  let dispatch: ResolvedDispatch;
+  try {
+    dispatch = resolveProfiledDispatch(ctx.config, entry.dispatch_profile);
+  } catch (err) {
+    return failUnit(ctx, next, unit, `dispatch-profile-error: ${(err as Error).message}`);
+  }
   journal(ctx, 'redispatched', unit, {
     tier: resolvedTier,
     slot: slot.id,
-    ...journalCmdModelFields(resolveTierSpawn(ctx.dispatch, resolvedTier, issue)),
+    ...journalCmdModelFields(resolveTierSpawn(dispatch, resolvedTier, issue)),
   });
   ctx.result.redispatched.push(unit);
   // Respawn immediately on the recovering rail — recovering → running. A
@@ -2067,7 +2090,8 @@ function recordDispatchRunLog(
   // #527: the tier's OWN resolved command/model — not the global
   // dispatch.command/tierModels — so a mixed agent-CLI ladder's runs.jsonl
   // entry (AC3) matches what was actually spawned for this dispatch.
-  const { cmd, model } = resolveTierSpawn(ctx.dispatch, tier, issue);
+  const dispatch = resolveProfiledDispatch(ctx.config, entry.dispatch_profile);
+  const { cmd, model } = resolveTierSpawn(dispatch, tier, issue);
   // #524: read only THIS dispatch's slice — see `dispatchLogSlice`.
   const { logFile, offset, content: logContent } = dispatchLogSlice(ctx, slot, unit);
 
@@ -3025,7 +3049,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const labelVerifiedIssues = labelVerified(labelPoll);
 
   const pass1 = deps.store.withLock((state) => {
-    const ctx: TickCtx = { deps, dispatch, result: emptyResult() };
+    const ctx: TickCtx = { deps, config, dispatch, result: emptyResult() };
     let next = reconcileSlots(ctx, state, polled);
     next = reconcileParked(ctx, next, prPoll);
     next = reconcileStaleFailedParks(ctx, next, prPoll);
@@ -3054,7 +3078,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     }
     if (results.size > 0) {
       result = deps.store.withLock((state) => {
-        const ctx: TickCtx = { deps, dispatch, result };
+        const ctx: TickCtx = { deps, config, dispatch, result };
         const next = recordTeardowns(ctx, state, results);
         const withReport = dispatchReportAgents(ctx, next, config);
         return { state: withReport, result: ctx.result };
