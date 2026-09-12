@@ -3,10 +3,10 @@
   "dossier_schema_version": "1.0.0",
   "name": "batch-integrate",
   "title": "Batch Integrate — Verify N Members Once, Repair What Is Yours, Escalate What Is Not",
-  "version": "1.3.0",
+  "version": "1.3.2",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-09-10",
+  "last_updated": "2026-09-12",
   "objective": "Merge a batch's members onto its integration branch, run the repo's expensive verification ONCE for all of them, repair mechanical failures, escalate semantic ones, never evict on a signal the verification cannot stand behind, release each disposed member's batch claim, and ship one PR",
   "category": [
     "development",
@@ -63,13 +63,13 @@
   "content_scope": "self-contained",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "0600010a40838276e57cb92ecc8ec94794ae7573958902ed95a456f81a86f181"
+    "hash": "39388e3e8420f121a14a2a2031ad4bae6711c82a6480d3b13a6e063c5fe170a3"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "a8ccfpLZmY5t6XIQLKjB8rriE5bl0Mlu1e6tY5fNvqzWrxfK4gU7pSEerl4Jve/a73e6PAuB6o6L9wFDslX0Ag==",
+    "signature": "5Fjawcq7uESew1jg/o3XBRZAEU/uo8piMlaP2cWn+m2HGN6lVBJz18uaq8/jIobFciLafh2OugHK6KX3aQxhAA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-10T14:46:07.429Z",
+    "signed_at": "2026-09-12T11:15:17.455Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -92,6 +92,19 @@ N members implemented N issues in isolation. You make them one shippable change:
 
 ## Actions to Perform
 
+### Claim-release protocol
+
+Run this protocol in the same step that records any member disposition: eviction, supersession, gate decline, or shipment. Remove `in-progress`, then remove every assignee returned by GitHub. For a non-shipping disposition, also post a comment naming the batch id and reason:
+
+```bash
+gh issue edit "$issue_number" --remove-label "in-progress"
+gh issue view "$issue_number" --json assignees --jq '.assignees[].login' | while read -r login; do
+  gh issue edit "$issue_number" --remove-assignee "$login"
+done
+```
+
+This protocol is safe to repeat, and an already-closed issue with a stale claim must still run it.
+
 ### Step 1: Merge members onto the integration branch
 
 Merge each member branch in turn. Expect most to be clean.
@@ -109,7 +122,7 @@ A batch that outlives another batch's merge inherits its changes, and on an acti
 **Three resolutions, not two.** Beyond "keep both" and "escalate" (Step 4):
 
 - **Union — but only for FLAT regions.** Concatenating both sides is safe for adjacent top-level declarations or a list of constants. When the conflict sits INSIDE a syntactic construct — an interface, an object literal, a call expression — *your* block's closing delimiter lies past the `=======` marker and concatenating silently drops it. The result looks like a clean resolution and fails to compile at a line far from the conflict. Recover the exact closing from the pre-merge version (`git show <branch>:<path>` on the side that owned the block) and typecheck each resolved file individually.
-- **Supersession.** The base may have ALREADY implemented what a member was written to do — a second issue solving the same problem, often better factored, landing while the batch ran. Take the base's implementation, drop the member's, and keep any tests the member added that still assert the behaviour: a different implementation of an equivalent contract makes them added coverage, not dead weight. Close that member's issue as superseded, naming what actually shipped — a reader tracing the member's commit must not conclude it is what is live — and RELEASE its batch claim **in the same step**: `gh issue edit <n> --remove-label "in-progress"` plus a release comment naming the batch id and `superseded` (the claim was written by prep's manifest step; supersession is one of the three disposals that must write its release — see Step 6 for the ship release and Step 4 for eviction).
+- **Supersession.** The base may have ALREADY implemented what a member was written to do — a second issue solving the same problem, often better factored, landing while the batch ran. Take the base's implementation, drop the member's, and keep any tests the member added that still assert the behaviour: a different implementation of an equivalent contract makes them added coverage, not dead weight. Close that member's issue as superseded, naming what actually shipped — a reader tracing the member's commit must not conclude it is what is live — and run the claim-release protocol **in the same step** (the claim prep's manifest step wrote; supersession is one of the disposals that must release it).
 
 ### Step 2: Cheap gates first
 
@@ -154,7 +167,7 @@ Escalate a semantic failure to a bounded member-tier agent with the failure evid
 
 Commit repairs as batch-level commits, attributable to no member.
 
-**Bound the repair budget per member.** Exhausting it is the signal to evict, not to keep trying. Evicting means reverting that member's commits, re-running verification, and requeueing the issue with the failure evidence attached — the rest of the batch still ships. **Release the evicted member's batch claim in the same step that records the eviction**: `gh issue edit <n> --remove-label "in-progress"` plus a release comment naming the batch id and the eviction reason. This is load-bearing, not bookkeeping — a requeued member still carrying `in-progress` is skipped by the next prep run's readiness screen forever (the claim was written by prep's manifest step; the read side trusts it absolutely), so a missed release strands the issue in "looks busy but is not" until someone applies the stale-claim recovery by hand.
+**Bound the repair budget per member.** Exhausting it is the signal to evict, not to keep trying. Evicting means reverting that member's commits, re-running verification, and requeueing the issue with the failure evidence attached — the rest of the batch still ships. **Run the shared claim-release protocol in the same step that records an eviction or a gate decline.** This is load-bearing, not bookkeeping — a requeued member still carrying `in-progress` is skipped by the next prep run's readiness screen forever (the claim prep's manifest step wrote; the read side trusts it absolutely), so a missed release strands the issue in "looks busy but is not" until someone applies stale-claim recovery by hand.
 
 ### Step 4b: Which model decides — a different axis from tier
 
@@ -182,7 +195,29 @@ Review the combined diff for **cross-member interaction** — seams, duplicated 
 
 Open a single PR closing every member issue that survived. **Merge with rebase, never squash** — per-issue commits carry the attribution eviction, revert, and bisect all depend on, and squashing destroys it.
 
-**Release every surviving member's batch claim once the merge is confirmed** (`mergedAt` non-null, `state` `MERGED`): `gh issue edit <n> --remove-label "in-progress"` per surviving member — the batch analogue of full-cycle's post-merge label removal (ship-issue Step 6), applied here because the batch's one PR closes all members at once. With the issue closed and the claim gone, nothing on the backlog can mistake a shipped member for work in progress.
+### Step 6a: Verify closure and release claims
+
+After the merge is confirmed (`mergedAt` non-null, `state` `MERGED`), verify the final state instead of trusting `Closes #N`. For each surviving member, retain its own shipping commit SHA from the rebase-merged PR, set `issue_number` and `member_sha`, then query its state. An open member must receive one comment naming the PR, merge timestamp, and its own shipping commit SHA, then be explicitly closed and recorded in `closed_by_workflow`. Include a durable `batch-close:v1` marker in that comment. A closed member with that marker is `already_closed` on a rerun; a closed member without it is `closed_by_github`:
+
+```bash
+STATE=$(gh issue view "$issue_number" --json state --jq .state)
+if [ "$STATE" = OPEN ]; then
+  gh issue comment "$issue_number" --body "<!-- batch-close:v1 batch=$batch pr=$pr -->
+Shipped in #$pr at $merged_at; member commit: $member_sha. Closing explicitly because the batch verified GitHub did not close it."
+  gh issue close "$issue_number"
+  closed_by_workflow+=("$issue_number")
+elif gh issue view "$issue_number" --json comments --jq '.comments[].body' | grep -Fq "<!-- batch-close:v1 batch=$batch pr=$pr -->"; then
+  already_closed+=("$issue_number")
+else
+  closed_by_github+=("$issue_number")
+fi
+```
+
+Run the claim-release protocol for every shipped member after this state check. Its idempotency repairs an already-closed issue with a stale claim on rerun.
+
+Query the batch anchor after every member. If it is still open, comment with the batch PR, merge timestamp, and the complete member-to-shipping-commit list, then close it explicitly. On rerun, a closed anchor receives neither a duplicate comment nor another close request.
+
+Report `closed_by_github`, `closed_by_workflow`, `already_closed`, and `claims_released` in the batch summary. A non-zero `closed_by_workflow` count is an operational signal that GitHub's closing-reference behavior is not being relied on silently.
 
 The PR body should carry a section per member and name every batch-level repair with its cause.
 
@@ -212,4 +247,6 @@ Everything you decide is read from an artifact. These rules exist because an act
 - Every repair verified against the affected member's own tests before commit
 - One PR, rebase-merged, closing every surviving member issue
 - Evicted members requeued with their failure evidence; the batch ships what survived
-- Every disposed member's batch claim released in the step that recorded the disposal — evicted, superseded, and shipped members carry no `in-progress` label (the claim prep's manifest step wrote)
+- Every merged member and the anchor have their final issue state verified; open issues are closed explicitly with their traceability evidence
+- The batch summary separates GitHub closures from workflow closures and records claim release
+- Every disposed member's batch claim released in the step that recorded the disposal — evicted, superseded, gate-declined, and shipped members carry no `in-progress` label or assignee (the claim prep's manifest step wrote)
