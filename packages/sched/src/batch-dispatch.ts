@@ -492,10 +492,21 @@ function applyBatchAndIssues(
   fresh: SchedState,
   computed: SchedState,
   batchId: string,
-  issues: readonly number[]
+  issues: readonly number[],
+  membersBeforeRecovery?: readonly number[]
 ): SchedState {
   const updatedBatch = computed.batches.find((b) => b.id === batchId);
-  const batches = fresh.batches.map((b) => (b.id === batchId && updatedBatch ? updatedBatch : b));
+  const batches = fresh.batches.map((b) => {
+    if (b.id !== batchId || !updatedBatch) return b;
+    if (!membersBeforeRecovery) return updatedBatch;
+    // Recovery runs outside the lock. Retain members admitted while its suite
+    // or remediation work was running rather than overwriting them with the
+    // recovery snapshot captured before admission.
+    const admitted = b.members.filter((member) => !membersBeforeRecovery.includes(member));
+    return admitted.length === 0
+      ? updatedBatch
+      : { ...updatedBatch, members: [...updatedBatch.members, ...admitted] };
+  });
   // A `halved` dissolve creates new batch ids (`<id>-a`/`<id>-b`) that exist
   // in `computed` but not yet in `fresh`.
   for (const cb of computed.batches) {
@@ -1774,11 +1785,27 @@ function runValidate(
       unitEvent('verify-complete', unit(batchId), { detail: suite.detail ?? 'suite green' }),
       now
     );
-    deps.store.withLock((s) => {
+    const admitted = deps.store.withLock((s) => {
       const b = findBatch(s, batchId);
-      if (!b || b.status !== 'validating') return { state: s, result: undefined };
+      if (!b || b.status !== 'validating') return { state: s, result: false };
+      if (b.executing_member < b.members.length) {
+        return {
+          state: transitionBatch(
+            s,
+            batchId,
+            'executing',
+            { executing_member: b.executing_member + 1 },
+            now
+          ),
+          result: true,
+        };
+      }
       return { state: transitionBatch(s, batchId, 'reviewing', {}, now), result: undefined };
     });
+    if (admitted) {
+      spawnMemberContinuation(deps, config, dispatch, batchId, now, result);
+      return;
+    }
     spawnTailAgent(deps, config, dispatch, batchId, now, result);
     return;
   }
@@ -1799,7 +1826,7 @@ function runValidate(
     );
     const blocked = blockBatch(state, batchId, { reason: 'suite-unreadable' }, rDeps);
     deps.store.withLock((s) => ({
-      state: applyBatchAndIssues(s, blocked.state, batchId, []),
+      state: applyBatchAndIssues(s, blocked.state, batchId, [], batch.members),
       result: undefined,
     }));
     // `result.blocked` is "issue numbers requeued full-cycle by a dissolve"
@@ -1824,7 +1851,7 @@ function runValidate(
       rDeps
     );
     deps.store.withLock((s) => ({
-      state: applyBatchAndIssues(s, dissolve.state, batchId, dissolve.requeued),
+      state: applyBatchAndIssues(s, dissolve.state, batchId, dissolve.requeued, batch.members),
       result: undefined,
     }));
     teardownBatch(deps, batchId);
@@ -1844,7 +1871,7 @@ function runValidate(
     { config, tests: outcome.attributed.get(offender) ?? [], dispatch }
   );
   deps.store.withLock((s) => ({
-    state: applyBatchAndIssues(s, fixing, batchId, []),
+    state: applyBatchAndIssues(s, fixing, batchId, [], batch.members),
     result: undefined,
   }));
   if (fixDispatch === null) {
@@ -1908,7 +1935,7 @@ function evictOffender(
     rDeps
   );
   deps.store.withLock((s) => ({
-    state: applyBatchAndIssues(s, outcome.state, batchId, outcome.requeued),
+    state: applyBatchAndIssues(s, outcome.state, batchId, outcome.requeued, batch.members),
     result: undefined,
   }));
   if (outcome.dissolved) {
@@ -1919,6 +1946,18 @@ function evictOffender(
     deps.store.withLock((s) => {
       const b = findBatch(s, batchId);
       if (!b || b.status !== 'validating') return { state: s, result: undefined };
+      if (b.executing_member < b.members.length) {
+        return {
+          state: transitionBatch(
+            s,
+            batchId,
+            'executing',
+            { executing_member: b.executing_member + 1 },
+            now
+          ),
+          result: undefined,
+        };
+      }
       return { state: transitionBatch(s, batchId, 'reviewing', {}, now), result: undefined };
     });
   }

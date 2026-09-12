@@ -131,7 +131,9 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   // `blocked` (#562): the suite REPORT was unreadable even after a fallback
   // retry — distinct from `dissolving`, which is for a red suite that WAS
   // read but named no offender. Nothing is requeued or reverted for `blocked`.
-  validating: ['attributing', 'reviewing', 'dissolving', 'blocked'],
+  // A member admitted while the suite runs returns the batch to execution;
+  // the aggregate suite must run again before final review can begin.
+  validating: ['executing', 'attributing', 'reviewing', 'dissolving', 'blocked'],
   // `dissolving` because attribution can legitimately name nobody (bisect
   // absent, errored, or unattributable) — without the edge, an unattributable
   // red suite is a dead end with no way out but fixing or evicting a member the

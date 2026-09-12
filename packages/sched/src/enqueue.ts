@@ -15,7 +15,7 @@ import { DISPATCH_PROFILE_RE } from './dispatch';
 import { unwrapList } from './json';
 import { labelBlockReason } from './labels';
 import { CLEARED_ENTRY_DEDUP_MARKERS, createBatch, findBatch, transitionBatch } from './state';
-import type { CycleMode, ModelTier, QueueEntry, SchedState } from './types';
+import type { BatchStatus, CycleMode, ModelTier, QueueEntry, SchedState } from './types';
 import { DEFAULT_ISSUE_PRIORITY, TERMINAL_ISSUE_STATUSES } from './types';
 
 export class EnqueueError extends Error {
@@ -34,6 +34,14 @@ const RUN_ID_RE = /^r-\d+-[0-9a-f]{4,}$/;
 
 /** GitHub label-name grammar: what `blocked_label` (and `EnqueueInput.blocked_label`) may contain. */
 const LABEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._:-]{0,49}$/;
+
+/** Members may join until the batch starts its final review/PR tail. */
+const ADMISSION_OPEN_BATCH_STATUSES: ReadonlySet<BatchStatus> = new Set([
+  'forming',
+  'ready',
+  'executing',
+  'validating',
+]);
 
 /**
  * Batch id grammar — deliberately stricter than `SAFE_REF_RE` (which permits
@@ -484,10 +492,11 @@ export function enqueueEntries(
     };
   });
 
-  // Create batches for unseen slot batch ids; reject joining a batch that has
-  // already left `forming` (composition is frozen when the batch seals). Only
-  // batches actually joined get `updated_at` bumped — a blanket rewrite would
-  // churn the audit signal on every enqueue.
+  // Create batches for unseen slot batch ids. Membership remains open while
+  // members run and the aggregate suite validates; `reviewing` starts the
+  // final PR tail with a fixed member list, so later joins are rejected.
+  // Only batches actually joined get `updated_at` bumped — a blanket rewrite
+  // would churn the audit signal on every enqueue.
   const batches = state.batches.map((b) => ({ ...b }));
   // Collected alongside the loop below (not re-derived from `inputs` after
   // the fact) so the two can never drift: every batch id this call touches,
@@ -502,9 +511,9 @@ export function enqueueEntries(
     if (input.more_members_expected) heldBatchIds.add(batchId);
     const existing = findBatch({ ...state, batches }, batchId);
     if (existing) {
-      if (existing.status !== 'forming') {
+      if (!ADMISSION_OPEN_BATCH_STATUSES.has(existing.status)) {
         throw new EnqueueError(
-          `Batch ${batchId} is ${existing.status} — members can only join while forming`
+          `Batch ${batchId} is ${existing.status} — admission closes when final PR review starts`
         );
       }
       if (input.base_branch !== undefined && input.base_branch !== existing.base_branch) {
@@ -588,15 +597,13 @@ export function enqueueEntries(
 
 /**
  * Seal every batch this call touched (created or joined) and was not told to
- * hold open: composition is frozen the moment a batch seals (this file's own
- * long-standing promise at the top of the batch-join loop, previously
- * unenforced — #535). A caller declares a batch complete simply by NOT
+ * hold open: a caller declares its initial composition complete simply by NOT
  * setting `more_members_expected` on any of this call's entries for it — the
  * common case, since a manifest normally declares a batch's full membership
  * in one `enqueue` call (batch-prep composes the batch before writing it) —
- * so by the time this transaction commits, whatever such a batch received
- * here is everything it is ever getting; the `status !== 'forming'` check
- * earlier in this function already refuses a later call from adding more. A
+ * so by the time this transaction commits, the batch becomes dispatchable. A
+ * later compatible member may still join through `validating`; `reviewing`
+ * closes admission when the final PR tail starts. A
  * batch held open (AC1's "partial batch… seals when the last declared member
  * lands") stays `forming` until a later call touches it again without the
  * hold. Sealing here, not at dispatch time, is what makes `forming` batches

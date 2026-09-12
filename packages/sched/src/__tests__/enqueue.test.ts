@@ -7,6 +7,7 @@ import {
   findBatch,
   parseManifest,
   type SchedState,
+  transitionBatch,
   validateState,
 } from '../index';
 
@@ -168,9 +169,9 @@ describe('enqueueEntries', () => {
     ).toThrow(/cycle/i);
   });
 
-  it('rejects joining a batch that has sealed (left forming)', () => {
+  it('admits members after initial composition until final PR review starts (#714)', () => {
     // No hand-mutation needed — the first call already seals it (#535).
-    const state = enqueueEntries(
+    let state = enqueueEntries(
       createEmptyState(),
       [
         { issue: 1, mode: 'slot', batch: 'b1' },
@@ -179,13 +180,25 @@ describe('enqueueEntries', () => {
       NOW
     );
     expect(findBatch(state, 'b1')?.status).toBe('ready');
-    expect(() => enqueueEntries(state, [{ issue: 3, mode: 'slot', batch: 'b1' }], NOW)).toThrow(
-      /only join while forming/
+    state = enqueueEntries(state, [{ issue: 3, mode: 'slot', batch: 'b1' }], NOW);
+    expect(findBatch(state, 'b1')?.members).toEqual([1, 2, 3]);
+
+    state = transitionBatch(state, 'b1', 'executing', { executing_member: 1 }, NOW);
+    state = enqueueEntries(state, [{ issue: 4, mode: 'slot', batch: 'b1' }], NOW);
+    expect(findBatch(state, 'b1')?.members).toEqual([1, 2, 3, 4]);
+
+    state = transitionBatch(state, 'b1', 'validating', {}, NOW);
+    state = enqueueEntries(state, [{ issue: 5, mode: 'slot', batch: 'b1' }], NOW);
+    expect(findBatch(state, 'b1')?.members).toEqual([1, 2, 3, 4, 5]);
+
+    state = transitionBatch(state, 'b1', 'reviewing', {}, NOW);
+    expect(() => enqueueEntries(state, [{ issue: 6, mode: 'slot', batch: 'b1' }], NOW)).toThrow(
+      /admission closes when final PR review starts/
     );
   });
 
   it('seals a complete batch forming → ready in the same transaction (#535)', () => {
-    const state = enqueueEntries(
+    let state = enqueueEntries(
       createEmptyState(),
       [
         { issue: 1, mode: 'slot', batch: 'b1' },
@@ -194,10 +207,9 @@ describe('enqueueEntries', () => {
       NOW
     );
     expect(findBatch(state, 'b1')?.status).toBe('ready');
-    // Sealed — a later call can no longer join it (composition is frozen).
-    expect(() => enqueueEntries(state, [{ issue: 3, mode: 'slot', batch: 'b1' }], NOW)).toThrow(
-      /only join while forming/
-    );
+    // Sealed batches are dispatchable, but remain open to compatible late admissions.
+    state = enqueueEntries(state, [{ issue: 3, mode: 'slot', batch: 'b1' }], NOW);
+    expect(findBatch(state, 'b1')?.members).toEqual([1, 2, 3]);
   });
 
   it('holds a batch open across multiple enqueue calls, sealing when the last declared member lands (#535 AC1)', () => {

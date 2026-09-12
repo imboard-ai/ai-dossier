@@ -407,6 +407,14 @@ describe('batch state machine (RFC-0001 §D.2)', () => {
     expect(findBatch(state, 'b1')?.status).toBe('validating');
   });
 
+  it('returns validating → executing when a late member is admitted before final review (#714)', () => {
+    let state = seeded();
+    state = transitionBatch(state, 'b1', 'executing', { executing_member: 1 }, NOW);
+    state = transitionBatch(state, 'b1', 'validating', {}, NOW);
+    state = transitionBatch(state, 'b1', 'executing', { executing_member: 2 }, NOW2);
+    expect(findBatch(state, 'b1')).toMatchObject({ status: 'executing', executing_member: 2 });
+  });
+
   it('walks the eviction and dissolution rails', () => {
     let state = seeded();
     state = transitionBatch(state, 'b1', 'executing', {}, NOW);
