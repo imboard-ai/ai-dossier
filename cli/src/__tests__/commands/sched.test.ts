@@ -1123,7 +1123,7 @@ describe('ai-dossier sched stats (#524: per-issue token/cost from runs.jsonl)', 
 
     return runSched(['sched', 'stats', '--json']).then(() => {
       const report = JSON.parse(logs.join(''));
-      expect(report.issues).toEqual([
+      expect(report.issues).toMatchObject([
         {
           issue: 9,
           runs: 1,
@@ -1192,6 +1192,53 @@ describe('ai-dossier sched stats (#524: per-issue token/cost from runs.jsonl)', 
     expect(out).toContain('#524');
     expect(out).toContain('TOTAL');
     expect(out).toContain('$0.0100');
+  });
+
+  it('renders provider, reasoning, steps, and unpriced OpenCode usage', async () => {
+    mockRunLog([
+      {
+        timestamp: '2026-09-01T12:00:00Z',
+        unit: 'issue:715',
+        model: 'glm-5.3',
+        provider: 'opencode',
+        input_tokens: 168_908,
+        output_tokens: 8_685,
+        reasoning_tokens: 4_000,
+        steps: 31,
+        cost_available: false,
+      },
+    ]);
+
+    await runSched(['sched', 'stats']);
+
+    const out = logs.join('\n');
+    expect(out).toContain('Provider');
+    expect(out).toContain('opencode');
+    expect(out).toContain('4000');
+    expect(out).toContain('31');
+    expect(out).toContain('unpriced');
+  });
+
+  it('retains measured spend when a cohort also includes an unpriced run', async () => {
+    mockRunLog([
+      {
+        timestamp: '2026-09-01T12:00:00Z',
+        unit: 'issue:715',
+        input_tokens: 100,
+        total_cost_usd: 0.5,
+        cost_available: true,
+      },
+      {
+        timestamp: '2026-09-01T12:01:00Z',
+        unit: 'issue:715',
+        cache_read_tokens: 20,
+        cost_available: false,
+      },
+    ]);
+
+    await runSched(['sched', 'stats']);
+
+    expect(logs.join('\n')).toContain('$0.5000 + unpriced');
   });
 });
 

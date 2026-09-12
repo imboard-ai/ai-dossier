@@ -51,9 +51,13 @@ export interface IssueCost {
   /** Null when NO entry for this issue reported the field — never a fabricated 0. */
   input_tokens: number | null;
   output_tokens: number | null;
+  reasoning_tokens: number | null;
+  steps: number | null;
   cache_creation_tokens: number | null;
   cache_read_tokens: number | null;
   total_cost_usd: number | null;
+  /** Explicitly unavailable subscription-plan pricing, distinct from old sparse rows. */
+  cost: 'priced' | 'unpriced' | 'partial' | 'missing';
   duration_ms: number | null;
   /**
    * Every distinct non-null `model`/`tier` reported across this issue's
@@ -63,6 +67,7 @@ export interface IssueCost {
    * pre-`model`-field entry never has a `model`).
    */
   model: string | null;
+  provider: string | null;
   tier: string | null;
   /**
    * `'missing'` when at least one dispatch happened (`runs > 0`) but NONE of
@@ -84,11 +89,14 @@ export interface SchedCostReport {
 const SUM_FIELDS = [
   'input_tokens',
   'output_tokens',
+  'reasoning_tokens',
+  'steps',
   'cache_creation_tokens',
   'cache_read_tokens',
   'total_cost_usd',
   'duration_ms',
-] as const satisfies readonly (keyof Omit<IssueCost, 'issue' | 'runs'> & keyof RunLogEntry)[];
+] as const satisfies readonly (keyof Omit<IssueCost, 'issue' | 'runs' | 'cost'> &
+  keyof RunLogEntry)[];
 
 /**
  * Every distinct non-null value `field` reports across `entries`, sorted and
@@ -97,7 +105,10 @@ const SUM_FIELDS = [
  * so split each on `,` before deduping, rather than treating "a,b" and "b,a"
  * from two different dispatches as distinct). Null when nothing reported it.
  */
-function aggregateCategorical(entries: RunLogEntry[], field: 'model' | 'tier'): string | null {
+function aggregateCategorical(
+  entries: RunLogEntry[],
+  field: 'model' | 'provider' | 'tier'
+): string | null {
   const seen = new Set<string>();
   for (const entry of entries) {
     const value = entry[field];
@@ -120,16 +131,35 @@ function aggregateCategorical(entries: RunLogEntry[], field: 'model' | 'tier'): 
  */
 export function aggregateRunLogEntries(entries: RunLogEntry[]): Omit<IssueCost, 'issue'> {
   const runs = entries.length;
-  const totals = {} as Omit<IssueCost, 'issue' | 'runs' | 'usage' | 'model' | 'tier'>;
+  const totals = {} as Omit<
+    IssueCost,
+    'issue' | 'runs' | 'usage' | 'cost' | 'model' | 'provider' | 'tier'
+  >;
   for (const field of SUM_FIELDS) {
     const { total, samples } = sumField(entries, field);
     totals[field] = samples > 0 ? total : null;
   }
   const model = aggregateCategorical(entries, 'model');
+  const provider = aggregateCategorical(entries, 'provider');
   const tier = aggregateCategorical(entries, 'tier');
+  const hasUnpricedCost = entries.some((entry) => entry.cost_available === false);
+  const cost: IssueCost['cost'] = hasUnpricedCost
+    ? totals.total_cost_usd === null
+      ? 'unpriced'
+      : 'partial'
+    : totals.total_cost_usd === null
+      ? 'missing'
+      : 'priced';
   const usage: IssueCost['usage'] =
-    runs > 0 && totals.input_tokens === null && totals.output_tokens === null ? 'missing' : 'ok';
-  return { runs, ...totals, model, tier, usage };
+    runs > 0 &&
+    totals.input_tokens === null &&
+    totals.output_tokens === null &&
+    totals.reasoning_tokens === null &&
+    totals.cache_creation_tokens === null &&
+    totals.cache_read_tokens === null
+      ? 'missing'
+      : 'ok';
+  return { runs, ...totals, cost, model, provider, tier, usage };
 }
 
 /**

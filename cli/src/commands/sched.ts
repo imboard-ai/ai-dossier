@@ -1164,11 +1164,18 @@ function statsRow(label: string, row: Omit<IssueCost, 'issue'>): string[] {
     String(row.runs),
     formatCount(row.input_tokens),
     formatCount(row.output_tokens),
+    formatCount(row.reasoning_tokens),
+    formatCount(row.steps),
     formatCount(row.cache_creation_tokens),
     formatCount(row.cache_read_tokens),
-    formatCost(row.total_cost_usd),
+    row.cost === 'unpriced'
+      ? 'unpriced'
+      : row.cost === 'partial'
+        ? `${formatCost(row.total_cost_usd)} + unpriced`
+        : formatCost(row.total_cost_usd),
     formatDurationMs(row.duration_ms),
     row.model ?? '-',
+    row.provider ?? '-',
     row.tier ?? '-',
     row.usage,
   ];
@@ -1179,11 +1186,14 @@ const STATS_HEADERS = [
   'Runs',
   'In',
   'Out',
+  'Reasoning',
+  'Steps',
   'Cache-W',
   'Cache-R',
   'Cost',
   'Duration',
   'Model',
+  'Provider',
   'Tier',
   'Usage',
 ];
@@ -1196,6 +1206,9 @@ const STATS_ALIGN = [
   'right',
   'right',
   'right',
+  'right',
+  'right',
+  'left',
   'left',
   'left',
   'left',

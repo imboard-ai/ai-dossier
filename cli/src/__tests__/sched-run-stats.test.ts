@@ -40,7 +40,7 @@ describe('buildSchedCostReport', () => {
 
     const report = buildSchedCostReport(entries);
 
-    expect(report.issues).toEqual([
+    expect(report.issues).toMatchObject([
       {
         issue: 9,
         runs: 1,
@@ -92,6 +92,58 @@ describe('buildSchedCostReport', () => {
       output_tokens: null,
       total_cost_usd: null,
       duration_ms: null,
+    });
+  });
+
+  it('keeps OpenCode reasoning and steps separate, exposing subscription pricing as unpriced', () => {
+    const report = buildSchedCostReport([
+      entry({
+        unit: 'issue:715',
+        provider: 'opencode',
+        model: 'glm-5.3',
+        input_tokens: 168_908,
+        output_tokens: 8_685,
+        reasoning_tokens: 4_000,
+        cache_read_tokens: 3_343_360,
+        cache_creation_tokens: 0,
+        steps: 31,
+        total_cost_usd: null,
+        cost_available: false,
+      }),
+    ]);
+
+    expect(report.issues[0]).toMatchObject({
+      provider: 'opencode',
+      input_tokens: 168_908,
+      output_tokens: 8_685,
+      reasoning_tokens: 4_000,
+      cache_read_tokens: 3_343_360,
+      steps: 31,
+      cost: 'unpriced',
+      usage: 'ok',
+    });
+  });
+
+  it('preserves priced spend and cache-only usage alongside unpriced OpenCode runs', () => {
+    const report = buildSchedCostReport([
+      entry({
+        unit: 'issue:715',
+        input_tokens: 100,
+        total_cost_usd: 0.5,
+        cost_available: true,
+      }),
+      entry({
+        unit: 'issue:715',
+        cache_read_tokens: 20,
+        cost_available: false,
+      }),
+    ]);
+
+    expect(report.issues[0]).toMatchObject({
+      cache_read_tokens: 20,
+      total_cost_usd: 0.5,
+      cost: 'partial',
+      usage: 'ok',
     });
   });
 

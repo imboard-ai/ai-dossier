@@ -215,6 +215,7 @@ source of record.
 import {
   parseAgentUsage,      // claude: one --output-format json object, OR a stream-json event stream
   parseOpenCodeUsage,   // opencode: a `run --format json` JSONL event stream
+  isOpenCodeUsageStream,// identify OpenCode step-finish JSONL for log reconstruction
   usageParserFor,       // pick the parser from the spawned binary's basename
   runsLogPath,          // ~/.dossier/runs.jsonl
   SCHED_DISPATCH_EVENT, // the sched dispatch-log preamble `type`, skipped by both parsers
@@ -223,9 +224,10 @@ import {
 } from '@ai-dossier/core';
 
 const usage = parseAgentUsage(stdout);
-// → { model, input_tokens, output_tokens, cache_creation_tokens,
-//     cache_read_tokens, total_cost_usd, result_text } — every field null
-//     when the agent did not report it; values are never fabricated.
+// → { model, provider, input_tokens, output_tokens, reasoning_tokens, steps,
+//     cache_creation_tokens, cache_read_tokens, total_cost_usd, cost_available, result_text }
+//     — unavailable numeric fields are null; a false cost_available marks an
+//     OpenCode subscription stream whose literal zero cost is not priced.
 ```
 
 `parseAgentUsage` treats the agent's per-model **`modelUsage` map as the source of

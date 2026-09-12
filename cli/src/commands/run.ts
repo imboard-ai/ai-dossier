@@ -301,12 +301,16 @@ export function registerRunCommand(program: Command): void {
             duration_ms: Date.now() - startTime,
             spawned_command: null,
             model: options.model ?? null,
+            provider: null,
             exit_code: null,
             input_tokens: null,
             output_tokens: null,
+            reasoning_tokens: null,
+            steps: null,
             cache_creation_tokens: null,
             cache_read_tokens: null,
             total_cost_usd: null,
+            cost_available: null,
             unit: null,
             ...extra,
           });
@@ -316,11 +320,15 @@ export function registerRunCommand(program: Command): void {
         // not report usage (interactive mode, non-JSON output).
         const usageLogFields = (usage: AgentRunUsage | null) => ({
           model: usage?.model ?? options.model ?? null,
+          provider: usage?.provider ?? null,
           input_tokens: usage?.input_tokens ?? null,
           output_tokens: usage?.output_tokens ?? null,
+          reasoning_tokens: usage?.reasoning_tokens ?? null,
+          steps: usage?.steps ?? null,
           cache_creation_tokens: usage?.cache_creation_tokens ?? null,
           cache_read_tokens: usage?.cache_read_tokens ?? null,
           total_cost_usd: usage?.total_cost_usd ?? null,
+          cost_available: usage?.cost_available ?? null,
         });
 
         // Show metadata summary
