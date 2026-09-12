@@ -1143,15 +1143,14 @@ against ground truth.
   `default_batch_priority`, see `config.json` below) as a batch-level fact like
   `anchor`/`run_id` — a later member joining the same batch must agree or omit it, never
   silently re-point it.
-- **`enqueue`'s batch sealing (#535)**: a batch's status seals `forming → ready` at the end
-  of the call that completes its composition — the common case, since a single manifest (or
-  `--issues --batch <id>` call) normally declares a batch's full membership at once. Once
-  sealed, no later call can join it (`Batch <id> is ready — members can only join while
-  forming`). If a batch's membership genuinely arrives across several calls — e.g. an
-  oversized manifest split by the `MAX_ISSUE_SELECTION` cap above, or a batch composed
-  incrementally by hand — pass `--more-members-expected` (or a manifest entry's
-  `more_members_expected: true`) on every call except the one landing the last member, so
-  the batch stays `forming` until it is genuinely complete.
+- **Rolling batch admission (#714)**: initial composition seals `forming → ready` at the
+  end of an unheld enqueue call, making the batch dispatchable. Compatible members may still
+  join while the batch is `ready`, `executing`, or `validating`, so they can share the final
+  PR and its expensive gate. `reviewing` starts the tail agent with a fixed member list and
+  atomically closes admission; `shipping` and later states reject joins. A member admitted
+  during validation runs before the batch validates again. Use `--more-members-expected` (or
+  a manifest entry's `more_members_expected: true`) only when initial composition must remain
+  non-dispatchable across calls.
 - **`start`** runs the dispatch engine (#464): a runnable unit is spawned as a detached
   agent process (`claude -p --output-format stream-json --verbose --model <tier model>` by default,
   auto-falling back to `opencode run`; the command, prompt, and tier→model mapping are

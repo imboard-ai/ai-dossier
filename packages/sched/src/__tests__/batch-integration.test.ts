@@ -447,6 +447,38 @@ function batchDispatchDepsFrom(
 }
 
 describe('integration #523: batch dispatch (real git worktree, real spawned fake agents)', () => {
+  it('admits a member during validation and reruns the member rail before final PR review (#714)', async () => {
+    const repo = scratchRepo();
+    let h!: BatchHarness;
+    let admitted = false;
+    h = batchHarness(repo, ['--mode=batch'], {
+      maxSlots: 1,
+      suite: () => {
+        if (!admitted) {
+          admitted = true;
+          h.enqueue([{ issue: 602, mode: 'slot', batch: 'b-late', tier: 'mid' }]);
+        }
+        return { ok: true, failing: [] };
+      },
+    });
+    h.enqueue([{ issue: 601, mode: 'slot', batch: 'b-late', anchor: 600, tier: 'mid' }]);
+
+    h.tick();
+    let pid = batchSlotPid(h, 'b-late') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+
+    const afterFirst = h.tick();
+    let batch = findBatch(h.state(), 'b-late');
+    expect(batch).toMatchObject({ status: 'executing', executing_member: 2, members: [601, 602] });
+    expect(afterFirst.spawned).toEqual(['batch:b-late']);
+
+    pid = batchSlotPid(h, 'b-late') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+    batch = findBatch(h.state(), 'b-late');
+    expect(batch?.status).toBe('reviewing');
+  });
+
   it('3-member happy path: setup → 3 serial members → validate → tail → merge → report → done', async () => {
     const repo = scratchRepo();
     const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1 });

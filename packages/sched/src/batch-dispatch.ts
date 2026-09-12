@@ -1774,11 +1774,27 @@ function runValidate(
       unitEvent('verify-complete', unit(batchId), { detail: suite.detail ?? 'suite green' }),
       now
     );
-    deps.store.withLock((s) => {
+    const admitted = deps.store.withLock((s) => {
       const b = findBatch(s, batchId);
-      if (!b || b.status !== 'validating') return { state: s, result: undefined };
+      if (!b || b.status !== 'validating') return { state: s, result: false };
+      if (b.executing_member < b.members.length) {
+        return {
+          state: transitionBatch(
+            s,
+            batchId,
+            'executing',
+            { executing_member: b.executing_member + 1 },
+            now
+          ),
+          result: true,
+        };
+      }
       return { state: transitionBatch(s, batchId, 'reviewing', {}, now), result: undefined };
     });
+    if (admitted) {
+      spawnMemberContinuation(deps, config, dispatch, batchId, now, result);
+      return;
+    }
     spawnTailAgent(deps, config, dispatch, batchId, now, result);
     return;
   }
