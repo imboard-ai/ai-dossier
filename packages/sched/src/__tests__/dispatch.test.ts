@@ -1138,6 +1138,7 @@ describe('resolveProfiledDispatch (#707 — a batch inherits the family it was t
     const mixed: SchedConfig = {
       max_slots: 1,
       dispatch: {
+        tier_models: { mid: 'base-mid' },
         tiers: {
           mechanical: { command: ['opencode', 'run', '-m', '{model}'], model: 'base-flash' },
           strong: { command: ['claude', '-p', '--model', '{model}'], model: 'base-opus' },
@@ -1151,7 +1152,34 @@ describe('resolveProfiledDispatch (#707 — a batch inherits the family it was t
     };
     const profiled = resolveProfiledDispatch(mixed, 'glm');
     expect(profiled.tiers.mechanical.model).toBe('profile-flash');
+    expect(profiled.tierModels.mid).toBe('base-mid');
     expect(profiled.tiers.strong.model).toBe('profile-opus');
+  });
+
+  it('inherits the configured disallowed-tools opt-out for profile-owned Claude commands', () => {
+    const config: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        disallowed_tools: [],
+        dispatch_profiles: {
+          claude: {
+            tiers: {
+              mid: { command: ['claude', '-p', '--model', '{model}'], model: 'sonnet' },
+            },
+          },
+        },
+      },
+    };
+    const profiled = resolveProfiledDispatch(config, 'claude');
+    expect(profiled.tiers.mid.commandTemplate).not.toContain('--disallowedTools');
+  });
+
+  it('does not resolve inherited object properties as profile names', () => {
+    const config: SchedConfig = {
+      max_slots: 1,
+      dispatch: { dispatch_profiles: { glm: GLM_PROFILE } },
+    };
+    expect(() => resolveProfiledDispatch(config, 'constructor')).toThrow(DispatchProfileError);
   });
 
   it('a single-model profile is expressible — every tier names the same model (#707 AC8)', () => {

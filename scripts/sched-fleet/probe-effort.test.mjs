@@ -1,7 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { measuredTokens, prepareProfile, selectEffortPair } from './probe-effort.mjs';
+import {
+  measuredTokens,
+  prepareProfile,
+  schedulerConfigPath,
+  selectEffortPair,
+} from './probe-effort.mjs';
 
 describe('selectEffortPair', () => {
   it('chooses the widest same-model effort range', () => {
@@ -98,6 +103,14 @@ describe('prepareProfile', () => {
   });
 });
 
+describe('schedulerConfigPath', () => {
+  it('keeps traversal-shaped project names inside the scheduler state root', () => {
+    expect(schedulerConfigPath('../outside', '/tmp/probe-home')).toBe(
+      '/tmp/probe-home/.dossier/sched/..-outside/config.json'
+    );
+  });
+});
+
 describe('measuredTokens', () => {
   it('includes OpenCode reasoning in the provider-reported total', () => {
     const stdout = JSON.stringify({
@@ -124,6 +137,8 @@ describe('dispatch-profiles.json', () => {
       expect(prepared.max.value).toBe('max');
       expect(prepared.low.model).toBe(prepared.max.model);
       expect(prepared.low.value).not.toBe(prepared.max.value);
+      expect(prepared.low.command).toContain(prepared.low.model);
+      expect(prepared.max.command).toContain(prepared.max.model);
     }
   });
 });

@@ -1126,6 +1126,7 @@ export function dissolveBatch(
             base_branch: batch.base_branch,
             anchor: batch.anchor ?? undefined,
             run_id: batch.run_id ?? undefined,
+            dispatch_profile: batch.dispatch_profile ?? undefined,
             // #565: a dissolve split is not a fresh batch — carry the
             // parent's priority forward, or an operator's `--priority`
             // (or `reprioritize`) is silently lost the moment a batch

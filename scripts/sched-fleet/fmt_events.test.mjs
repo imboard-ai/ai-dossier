@@ -26,6 +26,19 @@ describe('fmt_events.py', () => {
     expect(out.trim()).toBe('spawned #7');
   });
 
+  it('reports a missing dispatch profile with its batch and detail', () => {
+    const out = run([
+      {
+        event: 'dispatch-profile-missing',
+        unit: 'batch:b-gone',
+        detail: "profile 'ghost' is no longer configured",
+      },
+    ]);
+    expect(out.trim()).toBe(
+      "dispatch-profile-missing batch:b-gone profile 'ghost' is no longer configured"
+    );
+  });
+
   it('drops event types not in the keep set', () => {
     const out = run([
       { event: 'dispatched', issue: 1 },

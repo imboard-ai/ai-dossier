@@ -2432,6 +2432,12 @@ export function resumeBlockedGate(
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
   if (!batch) throw new SchedNotFoundError(`Batch not found: ${batchId}`);
+  // A gate recheck can immediately advance to the next provider dispatch, so
+  // it must use the batch's recorded profile rather than the engine default.
+  const batchDispatch =
+    batch.dispatch_profile === null
+      ? dispatch
+      : resolveProfiledDispatch(config, batch.dispatch_profile);
   if (batch.status !== 'blocked' || !batch.blocked_reason?.startsWith('gate-inconclusive:')) {
     // #677 review: the landing-failure blocks have no resume verb (same as
     // `suite-unreadable`) — name the actual reason and the operator path
@@ -2501,7 +2507,7 @@ export function resumeBlockedGate(
       },
       now
     );
-    completeMemberGate(deps, config, dispatch, batchId, batch, memberIssue, now, result);
+    completeMemberGate(deps, config, batchDispatch, batchId, batch, memberIssue, now, result);
     return { outcome: 'skipped', capability: capabilityId, detail: excerpt };
   }
 
@@ -2570,7 +2576,7 @@ export function resumeBlockedGate(
     evictMemberAndContinue(
       deps,
       config,
-      dispatch,
+      batchDispatch,
       batchId,
       batch,
       memberIssue,
@@ -2591,7 +2597,7 @@ export function resumeBlockedGate(
     issue: memberIssue,
     detail: `sched resume --batch: cap run ${capabilityId} reported ok on recheck`,
   });
-  completeMemberGate(deps, config, dispatch, batchId, batch, memberIssue, now, result);
+  completeMemberGate(deps, config, batchDispatch, batchId, batch, memberIssue, now, result);
   return { outcome: 'completed', capability: capabilityId };
 }
 
@@ -3655,9 +3661,9 @@ export function runBatchTick(
   const now = deps.now();
 
   // #707: each batch dispatches through ITS OWN recorded profile, not the
-  // engine's default. Resolution is cached per tick (per runBatchTick call):
-  // within one pass a profile resolves at most once, and a failed resolution
-  // reacts at most once. A profile that no longer resolves (config edited
+  // engine's default. Successful resolution is cached per tick (per
+  // runBatchTick call); missing profiles are handled per batch. A profile that
+  // no longer resolves (config edited
   // mid-run) never silently falls back — the silent fallback is precisely
   // the #680 incident shape (a run that looked like one agent family,
   // executed as another). The reaction depends on how far the batch got:
@@ -3668,18 +3674,29 @@ export function runBatchTick(
   // - post-merge (PR parked/merged — the product already shipped): dissolving
   //   would discard a landed PR's bookkeeping, so the remaining dispatch (the
   //   report agent) runs on the default and journals
-  //   `dispatch-profile-missing` every tick it holds the decision open — a
-  //   bounded phase (deployed → reported), so the event cannot flood.
+  //   `dispatch-profile-missing` once while it holds the decision open — a
+  //   bounded phase (deployed → reported), with the journal acting as the
+  //   durable deduplication record across ticks and process restarts.
   const profileCache = new Map<string, ResolvedDispatch>();
-  const dispatchFor = (batch: BatchEntry): ResolvedDispatch => {
+  const missingProfileBatches = new Set<string>();
+  const missingProfileNotices = new Set(
+    deps.journal
+      .read()
+      .filter((event) => event.event === 'dispatch-profile-missing' && event.unit !== undefined)
+      .map((event) => event.unit as string)
+  );
+  const dispatchFor = (batch: BatchEntry): ResolvedDispatch | null => {
     if (batch.dispatch_profile === null) return dispatch;
     const cached = profileCache.get(batch.dispatch_profile);
     if (cached !== undefined) return cached;
-    let resolved: ResolvedDispatch;
+    if (missingProfileBatches.has(batch.id)) return dispatch;
     try {
-      resolved = resolveProfiledDispatch(config, batch.dispatch_profile);
+      const resolved = resolveProfiledDispatch(config, batch.dispatch_profile);
+      profileCache.set(batch.dispatch_profile, resolved);
+      return resolved;
     } catch (err) {
       if (!(err instanceof DispatchProfileError)) throw err;
+      missingProfileBatches.add(batch.id);
       const current = deps.store.load();
       const fresh = findBatch(current, batch.id);
       const dissolvable =
@@ -3703,20 +3720,24 @@ export function runBatchTick(
           state: applyBatchAndIssues(s, outcome.state, batch.id, outcome.requeued),
           result: undefined,
         }));
+        teardownBatch(deps, batch.id);
         result.failed.push(unit(batch.id));
-        // Resolution failed: skip this batch for the rest of the pass with the
-        // base dispatch as a harmless placeholder — the batch is dissolved, so
-        // no further arm can claim a slot for it this tick.
-        resolved = dispatch;
+        // Resolution failed: clean up any batch/member worktrees, then skip
+        // this batch for the rest of the pass. No further arm can claim it.
+        // Do not cache a missing profile: every batch must receive its own
+        // dissolve/journal reaction rather than inheriting a cached default.
+        return null;
       } else {
-        journalEvent(deps, 'dispatch-profile-missing', unit(batch.id), {
-          detail: `profile '${batch.dispatch_profile}' is no longer configured; the post-merge tail runs on the default dispatch`,
-        });
-        resolved = dispatch;
+        const batchUnit = unit(batch.id);
+        if (!missingProfileNotices.has(batchUnit)) {
+          journalEvent(deps, 'dispatch-profile-missing', batchUnit, {
+            detail: `profile '${batch.dispatch_profile}' is no longer configured; the post-merge tail runs on the default dispatch`,
+          });
+          missingProfileNotices.add(batchUnit);
+        }
+        return dispatch;
       }
     }
-    profileCache.set(batch.dispatch_profile, resolved);
-    return resolved;
   };
 
   // #565: when more ready batches exist than free capacity, claim them in
@@ -3752,14 +3773,14 @@ export function runBatchTick(
     if (batch && batch.status === 'ready' && slotFor(state, batchId) === undefined) {
       // #707: batch-setup dispatches through the batch's own profile too — it
       // is the batch's first agent, not an engine-internal step.
-      claimAndSetup(deps, config, dispatchFor(batch), batchId, now, result);
+      const batchDispatch = dispatchFor(batch);
+      if (batchDispatch !== null) {
+        claimAndSetup(deps, config, batchDispatch, batchId, now, result);
+      }
     }
   }
 
   for (const batch of deps.store.load().batches) {
-    // #707: resolve this batch's profile once per pass — or dissolve/fall
-    // back loudly when it no longer resolves (see `dispatchFor` above).
-    const batchDispatch = dispatchFor(batch);
     const slot = slotFor(deps.store.load(), batch.id);
     // #609: a TERMINAL batch (`done`/`dissolved`) still holding a slot matches
     // none of the status arms below and would fall through their `continue`,
@@ -3771,17 +3792,25 @@ export function runBatchTick(
     // `abandonBatch` that stops one from being created: it also REPAIRS state
     // files that already carry a leaked slot, which is the only way an
     // operator gets those three hours of held capacity back.
-    if (slot && TERMINAL_BATCH_STATUSES.has(batch.status)) {
-      deps.store.withLock((s) => ({
-        state: releaseBatchSlot(s, batch.id, now),
-        result: undefined,
-      }));
-      journalEvent(deps, 'slot-released', unit(batch.id), {
-        slot: slot.id,
-        detail: `terminal batch (${batch.status}) held slot ${slot.id}`,
-      });
+    if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
+      if (slot) {
+        deps.store.withLock((s) => ({
+          state: releaseBatchSlot(s, batch.id, now),
+          result: undefined,
+        }));
+        journalEvent(deps, 'slot-released', unit(batch.id), {
+          slot: slot.id,
+          detail: `terminal batch (${batch.status}) held slot ${slot.id}`,
+        });
+      }
       continue;
     }
+    // #707: resolve this batch's profile once per pass — or dissolve/fall
+    // back loudly when it no longer resolves (see `dispatchFor` above).
+    // Terminal batches are skipped before this call so a removed profile does
+    // not generate a missing-profile event on every later tick.
+    const batchDispatch = dispatchFor(batch);
+    if (batchDispatch === null) continue;
     if (slot && (slot.status === 'running' || slot.status === 'assigned')) {
       if (batch.status === 'executing') {
         reconcileMemberSlot(deps, config, batchDispatch, batch.id, slot, now, result);

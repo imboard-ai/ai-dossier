@@ -5,8 +5,9 @@
  * The default is a dry run: it resolves and prints the exact argv that would
  * be spawned. Pass --run only when provider credentials are available. The
  * probe sends the same prompt to two tiers using the same model and compares
- * output tokens, which is the useful signal for reasoning effort (the input
- * prompt is identical by construction).
+ * provider-reported measured tokens, which is the useful signal for reasoning
+ * effort (the input prompt is identical by construction). OpenCode's measured
+ * total includes reasoning tokens; Claude falls back to input + output tokens.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -15,7 +16,12 @@ import { homedir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { usageParserFor } from '@ai-dossier/core';
-import { buildTierCommand, resolveProfiledDispatch, tierExecutors } from '@ai-dossier/sched';
+import {
+  buildTierCommand,
+  resolveProfiledDispatch,
+  schedStateDir,
+  tierExecutors,
+} from '@ai-dossier/sched';
 
 const TIER_ORDER = ['mechanical', 'mid', 'strong'];
 const DEFAULT_PROJECT = 'imboard-ai-imboard-monorepo';
@@ -104,7 +110,7 @@ export function selectEffortPair(executors) {
 }
 
 export function schedulerConfigPath(project, home = homedir()) {
-  return join(home, '.dossier', 'sched', project, 'config.json');
+  return join(schedStateDir(project, home), 'config.json');
 }
 
 function parseArgs(argv) {
@@ -290,7 +296,9 @@ function runCommand(spec, task, cwd, timeoutMs) {
   });
   if (result.error) throw new Error(`${spec.tier} run failed: ${result.error.message}`);
   if (result.status !== 0) {
-    throw new Error(`${spec.tier} run exited with status ${String(result.status)}`);
+    const stderr = typeof result.stderr === 'string' ? result.stderr.trim() : '';
+    const detail = stderr.length > 0 ? `: ${stderr.slice(-2000)}` : '';
+    throw new Error(`${spec.tier} run exited with status ${String(result.status)}${detail}`);
   }
   const stdout = typeof result.stdout === 'string' ? result.stdout : '';
   const usage = usageParserFor(spec.command[0])(stdout);

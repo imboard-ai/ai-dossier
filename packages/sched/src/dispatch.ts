@@ -522,7 +522,7 @@ export function resolveProfiledDispatch(
     return resolveDispatch(config);
   }
   const profiles = config.dispatch?.dispatch_profiles ?? {};
-  const named = profiles[profile];
+  const named = Object.hasOwn(profiles, profile) ? profiles[profile] : undefined;
   if (named === undefined) {
     const available = Object.keys(profiles);
     throw new DispatchProfileError(
@@ -533,6 +533,7 @@ export function resolveProfiledDispatch(
     );
   }
   const { command, prompt, tier_models: tierModels, tiers: profileTiers } = named;
+  const mergedTierModels = { ...config.dispatch?.tier_models, ...tierModels };
   const mergedTiers = { ...config.dispatch?.tiers };
   for (const tier of TIER_ORDER) {
     const profileTier = profileTiers?.[tier];
@@ -554,7 +555,7 @@ export function resolveProfiledDispatch(
       ...config.dispatch,
       ...(command !== undefined ? { command } : {}),
       ...(prompt !== undefined ? { prompt } : {}),
-      ...(tierModels !== undefined ? { tier_models: tierModels } : {}),
+      ...(Object.keys(mergedTierModels).length > 0 ? { tier_models: mergedTierModels } : {}),
       ...(Object.keys(mergedTiers).length > 0 ? { tiers: mergedTiers } : {}),
     },
   });

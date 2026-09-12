@@ -33,6 +33,7 @@ import {
   DEFAULT_ISSUE_PRIORITY,
   DEFAULT_RECONCILE_INTERVAL_MS,
   DISPATCH_PROFILE_RE,
+  DispatchProfileError,
   defaultExec,
   dispatchSummary,
   type EngineDeps,
@@ -265,6 +266,7 @@ function handleKnownError(err: unknown): never {
     err instanceof CorruptStateError ||
     err instanceof LockTimeoutError ||
     err instanceof EnqueueError ||
+    err instanceof DispatchProfileError ||
     err instanceof IllegalTransitionError ||
     err instanceof SchedNotFoundError ||
     err instanceof EngineTooOldError
@@ -729,7 +731,7 @@ function resolveEnqueueDispatchProfile(
     for (const input of slotInputs) {
       if (input.dispatch === undefined) input.dispatch = opts.dispatch;
     }
-    console.log(`Dispatch profile: ${opts.dispatch} (explicit)`);
+    (opts.json ? console.error : console.log)(`Dispatch profile: ${opts.dispatch} (explicit)`);
     return;
   }
 
@@ -780,7 +782,7 @@ function resolveEnqueueDispatchProfile(
       input.dispatch = detected.profile;
     }
   }
-  console.log(
+  (opts.json ? console.error : console.log)(
     `Dispatch profile: ${detected.profile} (${
       detected.method === 'claudecode-env'
         ? 'inherited via CLAUDECODE'

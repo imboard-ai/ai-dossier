@@ -18,6 +18,8 @@ your own issues.
 - `ai-dossier` CLI (`npm i -g @ai-dossier/cli`) authenticated for `ai-dossier sched`
 - `gh` (GitHub CLI), authenticated
 - `crontab` available (Linux/macOS `cron`)
+- `flock` available to serialize cron read/modify/write operations
+- `at` available for the independent retry fallback when a crontab read is temporarily unavailable
 - Node on `PATH`. The scripts hardcode an nvm path entry
   (`$HOME/.nvm/versions/node/v24.20.0/bin`) that matched the hcc2 install at the time —
   **adjust this in your copy** to wherever your Node lives (or drop it if Node is
@@ -28,10 +30,11 @@ your own issues.
 | File | Role |
 |---|---|
 | `tick.sh` | Cron job, every 2 min: ticks every project in `projects.txt` once, Telegram-reports new scheduler events, watches `issues.txt` for closures, arms the 7-day report hook, self-upgrades the CLI when idle, self-removes its own cron line once every tracked issue is closed |
-| `bootstrap.sh` | One-shot: fires at a weekly reset, writes a sched `config.json`, enqueues a fixed dependency chain of issues, arms `tick.sh`'s cron line. **hcc2-specific — edit before reuse.** |
+| `bootstrap.sh` | Fires at the configured annual reset, writes a sched `config.json`, enqueues a fixed dependency chain of issues, arms `tick.sh`'s cron line, and records completion for safe retries. Failures re-arm a 5-minute retry cron. **hcc2-specific — edit before reuse.** |
+| `cron-lib.sh` | Shared guarded cron read/modify/write helpers; retries transient reads and uses an independent `at` retry when a crontab remains unreadable |
 | `dispatch-profiles.json` | Provider-family dispatch profiles merged into each target project's local scheduler config by `refresh-fleet.sh`; only this config key is fleet-shared |
-| `probe-effort.mjs` | Dry-run-by-default provider probe; compares same-model lower/max effort or variant settings and reports provider-reported token deltas when run with `--run` |
-| `enqueue-report.sh` | Dated one-shot, installed by `tick.sh`: fires once 7 days after a tracked issue closes, enqueues the follow-up report issue, then removes its own cron line |
+| `probe-effort.mjs` | Dry-run-by-default provider probe; compares same-model lower/max effort or variant settings and reports provider-reported measured-token deltas when run with `--run` (OpenCode includes reasoning tokens) |
+| `enqueue-report.sh` | Dated one-shot, installed by `tick.sh`: fires once 7 days after a tracked issue closes, enqueues the follow-up report issue, then removes its own cron line; enqueue failures re-arm a 5-minute retry |
 | `fmt_events.py` | Reads scheduler `events.jsonl` lines from stdin, filters to the reportable event types, formats up to 8 lines for a Telegram message. Invoked as `python3 fmt_events.py` (no shebang, not directly executable — matches the hcc2 source file exactly) |
 | `allow-sched.py` | One-off fixer for `~/.claude/settings.json` — normalizes malformed `Bash(ai-dossier sched ...)` permission rules. Run it as `python3 allow-sched.py` (no shebang, not directly executable — matches the hcc2 source file exactly) |
 | `scorecard-weekly.sh` | Weekly cron ([#566](https://github.com/imboard-ai/ai-dossier/issues/566)): regenerates `docs/reports/model-scorecard.md` + its JSON sidecar in a dedicated worktree, opens/refreshes a PR with the snapshot, and Telegram-reports the 6-line digest. Never merges — this repo has no auto-merge watcher |
@@ -43,8 +46,8 @@ your own issues.
 
 ```bash
 # From wherever you want the fleet to live — the hcc2 reference install uses
-# ~/.dossier/reset-fleet/; pick any directory, e.g. ~/.dossier/sched-fleet/
-cp scripts/sched-fleet/{tick.sh,bootstrap.sh,enqueue-report.sh,scorecard-weekly.sh,dispatch-profiles.json,fmt_events.py,allow-sched.py} .
+# ~/.dossier/reset-fleet/; pick a path without whitespace or `%`, e.g. ~/.dossier/sched-fleet/
+cp scripts/sched-fleet/{tick.sh,bootstrap.sh,enqueue-report.sh,cron-lib.sh,scorecard-weekly.sh,dispatch-profiles.json,probe-effort.mjs,fmt_events.py,allow-sched.py} .
 cp scripts/sched-fleet/projects.txt.example projects.txt      # edit to your projects
 cp scripts/sched-fleet/issues.txt.example issues.txt          # edit to your tracked issues
 cp scripts/sched-fleet/telegram.env.example telegram.env      # fill in real values
@@ -69,18 +72,37 @@ into each target host's existing `~/.dossier/sched/<project>/config.json`. Confi
 replacement is atomic, and host-local slots, timers, prompts, and pool state are
 left unchanged.
 
-The default target is `imboard-ai-imboard-monorepo`. Add another scheduler slug
-without replacing the default with:
+The default targets are the two projects in `projects.txt.example`. Restrict the
+refresh to one scheduler slug with:
 
 ```bash
-SCHED_PROFILE_PROJECTS=imboard-ai-imboard-monorepo,imboard-ai-ai-dossier \
+SCHED_PROFILE_PROJECTS=imboard-ai-imboard-monorepo \
   bash scripts/refresh-fleet.sh
 ```
 
 Use `--profiles-file <path>` for a deployment-specific ladder. A missing target
 config is reported as a host failure instead of silently claiming that the
-profile was synchronized. Set `SCHED_PROFILE_FLEET_HOME` when the reset scripts
-live somewhere other than `~/.dossier/reset-fleet`.
+profile was synchronized. Set `SCHED_FLEET_HOME` when the reset scripts live
+somewhere other than `~/.dossier/reset-fleet`. `SCHED_PROFILE_FLEET_HOME` is only
+the destination override for `refresh-fleet.sh`; it must point at the same
+directory as the installed reset scripts.
+
+Run the probe from the repository checkout or a copy that includes
+`probe-effort.mjs`:
+
+```bash
+npm run fleet:probe-effort -- --project imboard-ai-imboard-monorepo
+```
+
+This is a dry run and makes no provider calls. Add `--profile <name>` to probe
+one family, or `--run` only when credentials are available. The report's
+`measured_tokens` field is the comparison signal: Claude uses parsed input plus
+output tokens, while OpenCode uses its reported total, including reasoning tokens.
+
+Profiles resolve from the current scheduler config at each tick. Editing a profile
+therefore affects active batches on their next dispatch; removing one dissolves a
+pre-merge batch with an explicit `dispatch-profile-missing:<name>` reason, while a
+post-merge report tail uses the default dispatch and journals the missing profile.
 
 ## Cron install
 
@@ -95,7 +117,12 @@ this fires once a year, at 04:00 on September 1, not weekly. It's timed to hcc2'
 specific annual Claude-usage reset date; adjust both the date and cadence to your own
 reset schedule (a genuinely weekly reset would use something like `0 4 * * 1`).
 `bootstrap.sh` then arms `tick.sh`'s own cron line (`*/2 * * * * .../tick.sh`) itself;
-you never install that one by hand.
+you never install that one by hand. Before enqueueing, it removes active or completed
+issues already present in scheduler state from its manifest, while failed entries remain
+retryable. A retry after a partial run therefore does not duplicate active or completed
+entries. If bootstrap fails, it replaces its annual trigger with a `*/5` retry trigger;
+when the crontab cannot be read safely, it leaves the existing trigger untouched and
+uses one independent `at` retry instead. Successful completion removes the bootstrap line.
 
 ### The `crontab -l` / empty-crontab trap
 
@@ -105,9 +132,9 @@ that non-zero exit would abort the script *inside* the
 `crontab -l 2>/dev/null | grep -v ... | crontab -` pipeline before the new line gets
 appended — silently **replacing the existing crontab with an empty one** instead of
 preserving it. This bit a real reset-fleet run (see `docs/agent-traps.md`, row
-`no crontab for`). Every shell script here uses `set -u` only, and the three that touch
-`crontab` (`tick.sh`, `bootstrap.sh`, `enqueue-report.sh`) always route `crontab -l`
-through `2>/dev/null` before piping — keep it that way if you edit them.
+`no crontab for`). Every shell script here uses `set -u` only, and every script that
+touches `crontab` uses a guarded read that distinguishes an empty crontab from a read
+failure — keep those protections if you edit them.
 `scorecard-weekly.sh` never touches `crontab`, so the trap does not reach it.
 
 ## Multi-project ticking
@@ -174,9 +201,12 @@ weekly regeneration would open a PR that fails `make check` until a human ran
 When `tick.sh` sees a specific tracked issue (hardcoded in the script — the pilot's
 gate issue) transition to closed, it installs a one-shot crontab entry 7 days out that
 runs `enqueue-report.sh`. That script enqueues the follow-up report issue, notifies
-Telegram, and removes its own cron line so it never fires twice. This is a one-shot-via-
-cron pattern: `bootstrap.sh` and `enqueue-report.sh` both remove their own cron entry as
-their first action, so a delayed re-run (e.g. after a reboot) can't double-fire.
+Telegram, and removes its own cron line only after scheduler success. A failed enqueue
+replaces the dated line with a `*/5` retry, while an already-enqueued issue is detected
+on the next attempt and cleaned up without duplication. `bootstrap.sh` uses the same
+near-term retry pattern for reset failures. If the crontab remains unreadable, the dated
+trigger is preserved and one independent `at` retry is queued without replacing unrelated
+cron jobs.
 
 ## Engine self-upgrade
 
@@ -192,7 +222,8 @@ background (see Known Limitations).
 |---|---|---|
 | `<D>/tick.log` | `tick.sh`'s own cron redirect (installed by `bootstrap.sh`) | `tick.sh`'s stdout/stderr each run |
 | `<D>/engine-<slug>.log` | `ai-dossier sched start --once` per project (`tick.sh`) | scheduler engine output for that project |
-| `<D>/enqueue.log` | `bootstrap.sh`'s `Q()` helper | output of each `ai-dossier sched enqueue` call |
+| `<D>/enqueue.log` | `bootstrap.sh`'s enqueue step | output of the `ai-dossier sched enqueue --from-manifest` call |
+| `<D>/bootstrap.completed` | `bootstrap.sh` after config, enqueue, and cron setup | UTC completion marker used to make retries after partial post-enqueue failures idempotent |
 | `<D>/enqueue-report.log` | `enqueue-report.sh`'s cron redirect (installed by `tick.sh`) | `enqueue-report.sh`'s stdout/stderr |
 | `<D>/bootstrap.log` | `bootstrap.sh`'s own cron redirect (user-installed) | `bootstrap.sh`'s stdout/stderr |
 | `<D>/scorecard-weekly.log` | `scorecard-weekly.sh`'s `log()` and its per-stage redirects | stage markers plus git/`npm ci`/build/scorecard/`gh` output for the weekly run; rotated to `.log.1` past 10 MB |
@@ -217,13 +248,6 @@ single-operator reference install.
   other local account via `ps`/`/proc/<pid>/cmdline` for the life of the request. Low risk
   on a single-user host; harden with `curl -K -` (config-from-stdin) before reusing this
   on a shared host.
-- **Self-removal `crontab -l | grep -v ... | crontab -` pipelines have no fallback.**
-  (`bootstrap.sh`, `tick.sh`, `enqueue-report.sh`, each removing their own cron line as a
-  first/last action.) If `crontab -l` fails transiently (not just "no crontab exists" —
-  the case the `2>/dev/null` already handles safely), the empty result still gets piped
-  into `crontab -`, installing an empty crontab and silently dropping every other cron job
-  on the host. This is the same class of incident as `docs/agent-traps.md`'s `no crontab
-  for` row, one step further than that row's already-fixed case.
 - **`tick.sh`'s self-upgrade duplicates the CLI's own `--auto-upgrade` flag** (see
   `cli/src/engine-version.ts`/`cli/src/commands/sched.ts`), which additionally gates on no
   unit being mid-dispatch — a check this hand-rolled version's own comment claims but does
@@ -232,9 +256,9 @@ single-operator reference install.
 - **Silent failure paths**: an unmapped `projects.txt` slug in `repo_dir()` returns empty
   and `cd ""` succeeds (bash quirk), so the tick silently runs against whatever directory
   the previous project left the shell in, not "skipped"; `gh issue view` failures
-  (auth/network) are indistinguishable from "issue still open"; the self-upgrade block and
-  the enqueue chains in `bootstrap.sh`/`enqueue-report.sh` report Telegram "success"
-  regardless of whether the underlying command actually succeeded. None of these have been
+  (auth/network) are indistinguishable from "issue still open"; `enqueue-report.sh`
+  still reports Telegram "success" regardless of whether its underlying command succeeded;
+  `bootstrap.sh` now checks its upgrade, enqueue, cron, and completion-marker steps. None of these have been
   hit in the hcc2 pilot's actual run history, but they are real gaps in a script meant to
   run unattended for weeks.
 
