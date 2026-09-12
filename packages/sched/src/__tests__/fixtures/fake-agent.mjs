@@ -6,6 +6,8 @@
  * `#<issue>` from it, and behaves per --mode:
  *   complete — posts a fake `report done` milestone JSON into --milestones-dir, exits 0
  *   die      — exits 1 having done nothing verifiable
+ *   emit-progress — emits a stream-JSON tool-use event before its mode behavior,
+ *                   representing an agent that actually began work
  *   sleep    — sleeps --sleep-ms (default 30s) then exits
  *   tail     — #468: a detached-ship agent. Decides by prompt: a REPORT
  *              dispatch ("report phase") posts `report done`; a full-cycle
@@ -78,6 +80,15 @@ process.stdin.on('end', () => {
       )
     );
   };
+
+  if (opt('emit-progress') !== undefined) {
+    console.log(
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }] },
+      })
+    );
+  }
 
   if (mode === 'complete' && dir) {
     post('report', 'done');
