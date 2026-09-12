@@ -13,10 +13,9 @@ capabilities:
     command: make test
     lifecycle: active
     description: Full workspace test suite (all workspaces + repo scripts)
-    # Must match cli/src/batch-suite-runner.ts's BATCH_SUITE_TIMEOUT_MS (the
-    # caller's own budget) — cap's own default is 5 min, which would time
-    # this out and report automation-broken well before a real 10-min-budget
-    # run legitimately finishes.
+    # This is the active capability command's own budget. The aggregate runner
+    # gives its outer cap-run watchdog bounded setup grace, then treats this
+    # timeout as terminal rather than guessing with a fallback command.
     timeout_ms: 600000
     assumptions:
       - file-exists: Makefile

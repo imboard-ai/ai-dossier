@@ -2,7 +2,11 @@ import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import type { SchedConfig } from '@ai-dossier/sched';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createBatchSuiteRunner } from '../batch-suite-runner';
+import {
+  BATCH_SUITE_TIMEOUT_MS,
+  CAP_RUN_SETUP_GRACE_MS,
+  createBatchSuiteRunner,
+} from '../batch-suite-runner';
 
 vi.mock('node:fs');
 vi.mock('node:child_process');
@@ -52,6 +56,8 @@ describe('createBatchSuiteRunner (#562)', () => {
   beforeEach(() => {
     vi.mocked(spawnSync).mockReset();
     mockedFs.readFileSync.mockReset();
+    // Detection needs a package manifest; capability manifests remain absent unless a test supplies one.
+    mockedFs.existsSync.mockImplementation((file) => !String(file).includes('.dossier/automation'));
   });
 
   it('tier 1: prefers `cap run test.full` when the manifest declares it', () => {
@@ -71,9 +77,92 @@ describe('createBatchSuiteRunner (#562)', () => {
     expect(spawnSync).toHaveBeenCalledWith(
       'ai-dossier',
       ['cap', 'run', 'test.full'],
-      expect.objectContaining({ cwd: '/wt' })
+      expect.objectContaining({
+        cwd: '/wt',
+        timeout: BATCH_SUITE_TIMEOUT_MS + CAP_RUN_SETUP_GRACE_MS,
+      })
     );
     expect(spawnSync).toHaveBeenCalledTimes(1); // no fallback needed
+  });
+
+  it('uses an active declared test.full timeout only for cap run', () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockImplementation((file) =>
+      String(file).includes('.dossier/automation')
+        ? 'version: 1\ncapabilities:\n  test.full:\n    command: make test\n    lifecycle: active\n    timeout_ms: 900000\n'
+        : JSON.stringify({ scripts: { test: 'make test' } })
+    );
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({
+        status: 0,
+        stdout: `${vitestReport(0)}\n{"capability":"test.full","outcome":"ok","exit_code":0}`,
+      })
+    );
+
+    createBatchSuiteRunner(config())('/wt');
+
+    expect(spawnSync).toHaveBeenCalledWith(
+      'ai-dossier',
+      ['cap', 'run', 'test.full'],
+      expect.objectContaining({ timeout: 900_000 + CAP_RUN_SETUP_GRACE_MS })
+    );
+    expect(BATCH_SUITE_TIMEOUT_MS).toBe(600_000);
+  });
+
+  it('does not let a shadow test.full entry control the cap-run timeout', () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockImplementation((file) =>
+      String(file).includes('.dossier/automation')
+        ? 'version: 1\ncapabilities:\n  test.full:\n    command: make test\n    lifecycle: shadow\n    timeout_ms: 900000\n'
+        : JSON.stringify({ scripts: { test: 'make test' } })
+    );
+    vi.mocked(spawnSync).mockImplementation((cmd) => {
+      if (cmd === 'ai-dossier') return CAP_UNAVAILABLE;
+      if (cmd === 'npm') return spawnResult({ status: 0, stdout: 'green\n' });
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    createBatchSuiteRunner(config(), { timeoutMs: 1234 })('/wt');
+
+    expect(spawnSync).toHaveBeenNthCalledWith(
+      1,
+      'ai-dossier',
+      ['cap', 'run', 'test.full'],
+      expect.objectContaining({ timeout: 1234 + CAP_RUN_SETUP_GRACE_MS })
+    );
+    expect(spawnSync).toHaveBeenNthCalledWith(
+      2,
+      'npm',
+      ['test'],
+      expect.objectContaining({ timeout: 1234 })
+    );
+  });
+
+  it('keeps the configured runner timeout for tier 2 after cap is unavailable', () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(
+      'version: 1\ncapabilities:\n  test.full:\n    command: make test\n    lifecycle: active\n    timeout_ms: 900000\n'
+    );
+    vi.mocked(spawnSync).mockImplementation((cmd) => {
+      if (cmd === 'ai-dossier') return CAP_UNAVAILABLE;
+      if (cmd === 'make') return spawnResult({ status: 0, stdout: vitestReport(0) });
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    createBatchSuiteRunner(config({ suite_command: ['make', 'test'] }), { timeoutMs: 1234 })('/wt');
+
+    expect(spawnSync).toHaveBeenNthCalledWith(
+      1,
+      'ai-dossier',
+      ['cap', 'run', 'test.full'],
+      expect.objectContaining({ timeout: 900_000 + CAP_RUN_SETUP_GRACE_MS })
+    );
+    expect(spawnSync).toHaveBeenNthCalledWith(
+      2,
+      'make',
+      ['test'],
+      expect.objectContaining({ timeout: 1234 })
+    );
   });
 
   it('tier 2: falls through to dispatch.suite_command when the capability is unavailable', () => {
@@ -217,6 +306,41 @@ describe('createBatchSuiteRunner (#562)', () => {
     expect(result.ok).toBe(false);
     expect(result.readable).toBe(false);
     expect(result.detail).toContain('ETIMEDOUT');
+  });
+
+  it('a declared non-default test.full timeout is terminal, reports its budget and elapsed time, and never reaches a fallback', () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(
+      'version: 1\ncapabilities:\n  test.full:\n    command: make test\n    lifecycle: active\n    timeout_ms: 900000\n'
+    );
+    const timeoutError = Object.assign(new Error('spawnSync ai-dossier ETIMEDOUT'), {
+      code: 'ETIMEDOUT',
+    });
+    vi.mocked(spawnSync).mockReturnValue(spawnResult({ error: timeoutError }));
+    vi.spyOn(Date, 'now').mockReturnValueOnce(10_000).mockReturnValueOnce(910_123);
+
+    const result = createBatchSuiteRunner(config(), { timeoutMs: 1234 })('/wt');
+
+    expect(result).toMatchObject({ ok: false, readable: false });
+    expect(result.detail).toContain('command timed out after 900000ms');
+    expect(result.detail).toContain('elapsed 900123ms');
+    expect(spawnSync).toHaveBeenCalledTimes(1);
+    expect(spawnSync).toHaveBeenLastCalledWith(
+      'ai-dossier',
+      ['cap', 'run', 'test.full'],
+      expect.objectContaining({ timeout: 900_000 + CAP_RUN_SETUP_GRACE_MS })
+    );
+  });
+
+  it('does not spawn npm when tier 3 has no root package.json', () => {
+    mockedFs.existsSync.mockReturnValue(false);
+    vi.mocked(spawnSync).mockReturnValue(CAP_UNAVAILABLE);
+
+    const result = createBatchSuiteRunner(config())('/wt');
+
+    expect(result).toMatchObject({ ok: false, readable: false });
+    expect(result.detail).toContain('capability unavailable: no root package.json');
+    expect(spawnSync).toHaveBeenCalledTimes(1);
   });
 
   it('a genuinely red, parseable report stays readable so attribution can still run', () => {

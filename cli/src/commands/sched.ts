@@ -455,7 +455,15 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   }
   lines.push(
     report.blocked.length > 0
-      ? report.blocked.map((b) => `#${b.issue} [${b.status}] — ${b.reason}`).join('\n')
+      ? report.blocked
+          .map(
+            (b) =>
+              `#${b.issue} [${b.status}] — ${b.reason}` +
+              (b.reason === 'suite-unreadable'
+                ? '; current exit: sched abandon --batch <batch-id> (dissolves the batch and requeues its members as full-cycle work)'
+                : '')
+          )
+          .join('\n')
       : '(none)'
   );
   lines.push('');

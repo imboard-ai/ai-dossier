@@ -658,6 +658,39 @@ describe('ai-dossier sched status', () => {
     expect(text).not.toContain('labels last checked');
   });
 
+  it('explains the cost of abandoning a suite-unreadable batch', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '101,102',
+      '--mode',
+      'slot',
+      '--batch',
+      'b-suite-unreadable',
+      '--project',
+      'test-proj',
+    ]);
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        batches: state.batches.map((batch) =>
+          batch.id === 'b-suite-unreadable'
+            ? { ...batch, status: 'blocked', blocked_reason: 'suite-unreadable' }
+            : batch
+        ),
+      })
+    );
+
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+
+    const text = logs.join('\n');
+    expect(text).toContain('sched abandon --batch <batch-id>');
+    expect(text).toContain('dissolves the batch and requeues its members as full-cycle work');
+  });
+
   it('names deps that are not in the queue as blocked, not runnable', async () => {
     await runSched([
       'sched',
