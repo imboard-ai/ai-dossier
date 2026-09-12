@@ -540,8 +540,9 @@ interface FormatResult {
 | `createDefaultVerificationResult(file)` | Create a default `VerificationResult` |
 | `parseAgentUsage(stdout)` | Token/cost/model from a claude headless result — one `--output-format json` object or a `stream-json` event stream. `modelUsage` is the source of record, never blended with the top-level `usage` block (#524); returns `AgentRunUsage \| null` |
 | `parseOpenCodeUsage(stdout)` | The same, for an `opencode run --format json` JSONL event stream |
+| `isOpenCodeUsageStream(stdout)` | Identify the distinctive OpenCode `step_finish` / `step-finish` JSONL shape |
 | `usageParserFor(cmd0)` | Pick the parser for a spawned binary (`opencode` basename → `parseOpenCodeUsage`, else `parseAgentUsage`) |
 | `runsLogPath(home?)` | `~/.dossier/runs.jsonl` — the run log both `cli` and `sched` append to |
 | `SCHED_DISPATCH_EVENT` | The `type` of the scheduler's dispatch-log preamble line; every parser above skips it |
 
-Types: `AgentRunUsage` (all fields nullable — never fabricated) and `RunLogEntry` (one `runs.jsonl` line).
+Types: `AgentRunUsage` (values are nullable/optional when unavailable — never fabricated; OpenCode exposes separate reasoning, step, provider, and cost-availability fields) and `RunLogEntry` (one `runs.jsonl` line).

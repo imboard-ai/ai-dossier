@@ -57,7 +57,7 @@ export interface IssueCost {
   cache_read_tokens: number | null;
   total_cost_usd: number | null;
   /** Explicitly unavailable subscription-plan pricing, distinct from old sparse rows. */
-  cost: 'priced' | 'unpriced' | 'missing';
+  cost: 'priced' | 'unpriced' | 'partial' | 'missing';
   duration_ms: number | null;
   /**
    * Every distinct non-null `model`/`tier` reported across this issue's
@@ -142,13 +142,23 @@ export function aggregateRunLogEntries(entries: RunLogEntry[]): Omit<IssueCost, 
   const model = aggregateCategorical(entries, 'model');
   const provider = aggregateCategorical(entries, 'provider');
   const tier = aggregateCategorical(entries, 'tier');
-  const cost: IssueCost['cost'] = entries.some((entry) => entry.cost_available === false)
-    ? 'unpriced'
+  const hasUnpricedCost = entries.some((entry) => entry.cost_available === false);
+  const cost: IssueCost['cost'] = hasUnpricedCost
+    ? totals.total_cost_usd === null
+      ? 'unpriced'
+      : 'partial'
     : totals.total_cost_usd === null
       ? 'missing'
       : 'priced';
   const usage: IssueCost['usage'] =
-    runs > 0 && totals.input_tokens === null && totals.output_tokens === null ? 'missing' : 'ok';
+    runs > 0 &&
+    totals.input_tokens === null &&
+    totals.output_tokens === null &&
+    totals.reasoning_tokens === null &&
+    totals.cache_creation_tokens === null &&
+    totals.cache_read_tokens === null
+      ? 'missing'
+      : 'ok';
   return { runs, ...totals, cost, model, provider, tier, usage };
 }
 

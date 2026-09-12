@@ -1168,7 +1168,11 @@ function statsRow(label: string, row: Omit<IssueCost, 'issue'>): string[] {
     formatCount(row.steps),
     formatCount(row.cache_creation_tokens),
     formatCount(row.cache_read_tokens),
-    row.cost === 'unpriced' ? 'unpriced' : formatCost(row.total_cost_usd),
+    row.cost === 'unpriced'
+      ? 'unpriced'
+      : row.cost === 'partial'
+        ? `${formatCost(row.total_cost_usd)} + unpriced`
+        : formatCost(row.total_cost_usd),
     formatDurationMs(row.duration_ms),
     row.model ?? '-',
     row.provider ?? '-',

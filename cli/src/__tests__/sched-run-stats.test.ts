@@ -124,6 +124,29 @@ describe('buildSchedCostReport', () => {
     });
   });
 
+  it('preserves priced spend and cache-only usage alongside unpriced OpenCode runs', () => {
+    const report = buildSchedCostReport([
+      entry({
+        unit: 'issue:715',
+        input_tokens: 100,
+        total_cost_usd: 0.5,
+        cost_available: true,
+      }),
+      entry({
+        unit: 'issue:715',
+        cache_read_tokens: 20,
+        cost_available: false,
+      }),
+    ]);
+
+    expect(report.issues[0]).toMatchObject({
+      cache_read_tokens: 20,
+      total_cost_usd: 0.5,
+      cost: 'partial',
+      usage: 'ok',
+    });
+  });
+
   describe('model/tier fields (#564 AC1)', () => {
     it('surfaces a single model/tier reported by one dispatch', () => {
       const report = buildSchedCostReport([

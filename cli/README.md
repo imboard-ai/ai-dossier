@@ -1265,10 +1265,12 @@ against ground truth.
   the FIFO queue at that priority; a `reprioritized` journal event records the previous
   value. `--json` emits `{reprioritized: "issue:<n>"|"batch:<id>", priority}`.
 - **`stats`** (#524, `--batch` #564) prints per-issue token/cost totals:
-  `Issue, Runs, In, Out, Cache-W, Cache-R, Cost, Duration, Model, Tier, Usage`, plus a
+  `Issue, Runs, In, Out, Reasoning, Steps, Cache-W, Cache-R, Cost, Duration, Model, Provider, Tier, Usage`, plus a
   `TOTAL` row. A numeric field is `-`/null when *no* dispatch reported it — never a
   fabricated 0; `Usage` reads `missing` (not blank) when a dispatch happened but reported
-  no tokens at all, distinct from `runs=0` ("nothing dispatched"). Two modes:
+  no tokens at all, distinct from `runs=0` ("nothing dispatched"). A token-consuming
+  OpenCode subscription stream that reports only zero costs is `unpriced`; mixed cohorts
+  preserve known spend as `$amount + unpriced`. Two modes:
   - **Default / `--issues`** reads the one global `~/.dossier/runs.jsonl` file (not a
     `--project`-scoped state directory — the same issue number dispatched from two
     different repos sums together in this cohort), sourced from the sched dispatch
@@ -1429,6 +1431,7 @@ Headless runs execute `claude -p --output-format json` (claude-code) or `opencod
 | `duration_ms` | Wall-clock ms, action start → entry write (v0.12.0+) |
 | `spawned_command` | Exact agent command spawned (binary + args); prompt excluded — headless prompts travel over stdin, and opencode interactive runs log a redacted form (v0.12.0+; redaction v0.13.0+) |
 | `model` | Model reported by the agent CLI (comma-joined when several ran), else the `--model` alias; null when unknown (v0.12.0+) |
+| `provider`, `reasoning_tokens`, `steps`, `cost_available` | Agent CLI/provider, OpenCode reasoning-token and `step_finish` totals, and whether a reported cost is priced. `cost_available: false` means a token-consuming subscription stream reported only zero costs (v0.42.0+) |
 | `exit_code` | Spawned agent's exit code, or the CLI action's for early exits; null when killed by a signal (v0.12.0+) |
 | `spawn_error` | Why there is no exit code: spawn error (e.g. ENOENT) or signal. Null when the process exited normally (v0.12.0+) |
 | `input_tokens`, `output_tokens`, `total_cost_usd` | Usage reported by the agent (claude JSON result / opencode JSONL event stream, headless only); null when not reported — never fabricated (v0.12.0+) |

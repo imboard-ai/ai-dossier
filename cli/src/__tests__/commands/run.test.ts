@@ -584,9 +584,13 @@ describe('run command', () => {
       );
       vi.mocked(helpers.parseOpenCodeUsage).mockReturnValue({
         model: null,
+        provider: 'opencode',
         input_tokens: 73,
         output_tokens: 6,
+        reasoning_tokens: 9,
+        steps: 2,
         total_cost_usd: 0.00774516,
+        cost_available: true,
         result_text: 'PIPED-OK',
       });
       const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -624,7 +628,11 @@ describe('run command', () => {
           model: null, // opencode events carry no model id; no --model alias given
           input_tokens: 73,
           output_tokens: 6,
+          provider: 'opencode',
+          reasoning_tokens: 9,
+          steps: 2,
           total_cost_usd: 0.00774516,
+          cost_available: true,
           exit_code: 0,
         })
       );

@@ -24,20 +24,20 @@ export interface AgentRunUsage {
   /** Model id the agent reported; comma-joined when several models ran (token/cost fields are totals across all). */
   model: string | null;
   /** Agent CLI/provider that emitted this usage stream. */
-  provider: 'claude' | 'opencode';
+  provider?: 'claude' | 'opencode';
   input_tokens: number | null;
   output_tokens: number | null;
   /** OpenCode reports thinking tokens separately from generated output. */
-  reasoning_tokens: number | null;
+  reasoning_tokens?: number | null;
   /** Number of usage-bearing OpenCode step_finish events. */
-  steps: number | null;
+  steps?: number | null;
   /** Cache-creation (write) input tokens, summed across models when several ran. */
   cache_creation_tokens: number | null;
   /** Cache-read input tokens, summed across models when several ran. */
   cache_read_tokens: number | null;
   total_cost_usd: number | null;
   /** False when OpenCode reported subscription-plan zero costs alongside consumed tokens. */
-  cost_available: boolean | null;
+  cost_available?: boolean | null;
   /** The final result text (claude's `result` field), for re-emitting to stdout. */
   result_text: string | null;
 }
