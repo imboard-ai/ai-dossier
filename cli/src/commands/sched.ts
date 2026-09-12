@@ -343,7 +343,9 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
         `#${e.issue}`,
         e.mode,
         e.batch ?? '-',
-        e.mode === 'full' ? (e.dispatch_profile ?? '-') : '-',
+        e.mode === 'full'
+          ? (e.dispatch_profile ?? '-')
+          : (report.batches.find((batch) => batch.id === e.batch)?.dispatch_profile ?? '-'),
         // A slot-mode member's own priority is never read by the scheduler
         // (the BATCH's priority governs, in the table below) — render '-'
         // rather than a number that looks load-bearing but is not.

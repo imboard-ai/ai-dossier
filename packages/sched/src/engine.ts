@@ -892,10 +892,18 @@ function spawnReportAgent(ctx: TickCtx, state: SchedState, unit: string): SchedS
   if (!entry || !slot || entry.pr === null || entry.cleanup === null) return state;
   const tier = reportTierFor(slot.recoveries);
   if (tier === null) return state;
+  let dispatch: ResolvedDispatch;
+  try {
+    dispatch = resolveProfiledDispatch(ctx.config, entry.dispatch_profile);
+  } catch (err) {
+    return failUnit(ctx, state, unit, `dispatch-profile-error: ${(err as Error).message}`, {
+      merged: true,
+    });
+  }
 
   return spawnAndRecord(ctx, state, unit, slot, {
     tier,
-    spawn: resolveTierSpawn(ctx.dispatch, tier, issue),
+    spawn: resolveTierSpawn(dispatch, tier, issue),
     // Report agents use the dedicated report-prompt template (`{pr}`/`{cleanup}`
     // placeholders), never a tier's `prompt` override — that override's fallback
     // chain is the cycle-agent prompt (a different template family), so wiring
@@ -905,7 +913,7 @@ function spawnReportAgent(ctx: TickCtx, state: SchedState, unit: string): SchedS
     // not know its generation would have its `report done` milestone refused by the
     // CLI — recovering forever on a PR that already merged.
     prompt: buildReportPrompt(
-      ctx.dispatch.reportPrompt,
+      dispatch.reportPrompt,
       issue,
       entry.pr,
       entry.cleanup,
@@ -1438,10 +1446,16 @@ function enterRecovery(
     return next;
   }
 
+  let dispatch: ResolvedDispatch;
+  try {
+    dispatch = resolveProfiledDispatch(ctx.config, entry.dispatch_profile);
+  } catch (err) {
+    return failUnit(ctx, next, unit, `dispatch-profile-error: ${(err as Error).message}`);
+  }
   journal(ctx, 'redispatched', unit, {
     tier: resolvedTier,
     slot: slot.id,
-    ...journalCmdModelFields(resolveTierSpawn(ctx.dispatch, resolvedTier, issue)),
+    ...journalCmdModelFields(resolveTierSpawn(dispatch, resolvedTier, issue)),
   });
   ctx.result.redispatched.push(unit);
   // Respawn immediately on the recovering rail — recovering → running. A
@@ -2076,7 +2090,8 @@ function recordDispatchRunLog(
   // #527: the tier's OWN resolved command/model — not the global
   // dispatch.command/tierModels — so a mixed agent-CLI ladder's runs.jsonl
   // entry (AC3) matches what was actually spawned for this dispatch.
-  const { cmd, model } = resolveTierSpawn(ctx.dispatch, tier, issue);
+  const dispatch = resolveProfiledDispatch(ctx.config, entry.dispatch_profile);
+  const { cmd, model } = resolveTierSpawn(dispatch, tier, issue);
   // #524: read only THIS dispatch's slice — see `dispatchLogSlice`.
   const { logFile, offset, content: logContent } = dispatchLogSlice(ctx, slot, unit);
 
