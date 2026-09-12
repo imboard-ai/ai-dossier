@@ -103,6 +103,7 @@ const ISSUE_BASE_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   // `transitionIssue` can legally drive a `failed` entry to `shipped` — keep
   // that behind `isStaleFailedPark` rather than re-deriving the check.
   failed: ['shipped'],
+  stopped: [],
 };
 
 /** Failure edges RFC-0001 §D.1 attaches to ANY state (blocked / decision-pending / failed). */
@@ -110,6 +111,7 @@ const ISSUE_UNIVERSAL_FAILURE_EDGES: readonly IssueStatus[] = [
   'blocked',
   'decision-pending',
   'failed',
+  'stopped',
 ];
 
 function allowedIssueTransitions(from: IssueStatus): IssueStatus[] {

@@ -58,7 +58,8 @@ export type IssueStatus =
   | 'requeued'
   | 'blocked'
   | 'decision-pending'
-  | 'failed';
+  | 'failed'
+  | 'stopped';
 
 /**
  * Issue statuses the normal rails never leave: `done` is absolute, and
@@ -68,7 +69,11 @@ export type IssueStatus =
  * mechanism that keeps `failed`'s one outgoing edge from also reopening
  * `blocked`/`decision-pending`/`failed` itself.
  */
-export const TERMINAL_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set(['done', 'failed']);
+export const TERMINAL_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set([
+  'done',
+  'failed',
+  'stopped',
+]);
 
 /**
  * Statuses that mean the issue's work has merged. Dependency edges gate on
@@ -1425,6 +1430,7 @@ export type JournalEventName =
   // `-p`). A known-recoverable condition, never an unverified failure:
   // redispatched at the same tier without consuming an escalation rung.
   | 'announced-wait'
+  | 'stopped'
   // #523 batch dispatch: claiming the shared worktree/branch, and advancing
   // the member pointer between member-cycle runs (#677: members run in their
   // own worktrees off the integration branch). Member/tail-agent spawn,
@@ -1523,7 +1529,8 @@ export type SlotReleaseReason =
   | 'unit-failed'
   | 'report-failed'
   | 'dependents-blocked'
-  | 'parked';
+  | 'parked'
+  | 'stopped';
 
 /** One journaled event. `ts` is stamped by the journal, never by callers. */
 export interface JournalEvent {

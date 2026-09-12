@@ -64,6 +64,7 @@ import {
   schedStateDir,
   schedTelemetryEnabled,
   setPaused,
+  stopIssue,
   TEARDOWN_TIMEOUT_MS,
   TIER_ORDER,
   tick,
@@ -201,6 +202,11 @@ interface EnqueueOptions extends SchedOptions {
 interface AbandonOptions extends SchedOptions {
   issue?: string;
   batch?: string;
+  reason?: string;
+}
+
+interface StopOptions extends SchedOptions {
+  issue?: string;
   reason?: string;
 }
 
@@ -1121,7 +1127,7 @@ function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
     .command(pause ? 'pause' : 'resume')
     .description(
       pause
-        ? 'Stop making new slot assignments (live units keep running)'
+        ? 'Prevent every new agent process, including recovery takeovers; live agents keep running'
         : 'Resume making new slot assignments; with --batch <id>, re-run the incremental gate for a batch blocked on gate-inconclusive instead (#583)'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
@@ -1379,6 +1385,64 @@ function registerAbandonSubcommand(cmd: Command): void {
               `✓ Dissolved batch ${opts.batch}; requeued ${requeued.length} member(s) as full-cycle`
             );
           }
+        }
+      } catch (err) {
+        handleKnownError(err);
+      }
+    });
+}
+
+function registerStopSubcommand(cmd: Command): void {
+  cmd
+    .command('stop')
+    .description(
+      'Terminate one issue agent and record a terminal stopped outcome without escalation'
+    )
+    .requiredOption('--issue <number>', 'Issue number to stop')
+    .option('--reason <text>', 'Reason recorded on the entry', 'stopped')
+    .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
+    .option('--json', 'Output the result as JSON')
+    .action((opts: StopOptions) => {
+      const issues = issueList(opts.issue as string, 'issue');
+      if (issues.length !== 1) {
+        fail([`--issue takes a single issue number, got '${opts.issue}'`]);
+      }
+      const issue = issues[0];
+      const { store } = resolveStore(opts);
+      const spawnDeps = createSpawnDeps(process.cwd());
+      try {
+        const result = store.withLock((state) => {
+          const slot = state.slots.find((candidate) => candidate.unit === `issue:${issue}`);
+          const terminated =
+            slot?.pid !== null &&
+            slot?.pid !== undefined &&
+            spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
+              ? spawnDeps.kill(slot.pid, slot.pid_start ?? undefined)
+              : false;
+          const stopped = stopIssue(state, issue, opts.reason);
+          return {
+            state: stopped.state,
+            result: { releasedSlots: stopped.releasedSlots, terminated },
+          };
+        });
+        new Journal(store.dir).append(
+          unitEvent('stopped', `issue:${issue}`, {
+            reason: opts.reason,
+            detail: result.terminated ? 'agent terminated' : 'no live agent to terminate',
+          })
+        );
+        if (opts.json) {
+          console.log(
+            JSON.stringify({
+              stopped: `issue:${issue}`,
+              terminated: result.terminated,
+              released_slots: result.releasedSlots,
+            })
+          );
+        } else {
+          console.log(
+            `✓ Stopped issue #${issue} (released ${result.releasedSlots.length} slot(s))`
+          );
         }
       } catch (err) {
         handleKnownError(err);
@@ -1792,6 +1856,7 @@ export function registerSchedCommand(program: Command): void {
   registerPauseResumeSubcommand(schedCmd, true);
   registerPauseResumeSubcommand(schedCmd, false);
   registerAbandonSubcommand(schedCmd);
+  registerStopSubcommand(schedCmd);
   registerReprioritizeSubcommand(schedCmd);
   registerStartSubcommand(schedCmd);
   registerStatsSubcommand(schedCmd);

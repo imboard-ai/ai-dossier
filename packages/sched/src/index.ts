@@ -209,6 +209,7 @@ export {
   reprioritizeIssue,
   runnableUnits,
   setPaused,
+  stopIssue,
 } from './scheduler';
 export {
   allowedBatchTransitions,

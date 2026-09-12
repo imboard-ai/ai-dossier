@@ -885,6 +885,31 @@ describe('ai-dossier sched pause/resume/abandon', () => {
     expect(JSON.parse(logs.join(''))).toEqual({ project: 'test-proj', paused: true });
   });
 
+  it('describes pause as preventing recovery takeovers', async () => {
+    const program = createTestProgram();
+    registerSchedCommand(program);
+    const sched = program.commands.find((command) => command.name() === 'sched');
+    const pause = sched?.commands.find((command) => command.name() === 'pause');
+    expect(pause?.description()).toContain('including recovery takeovers');
+  });
+
+  it('stops an issue with a terminal non-failed outcome', async () => {
+    await runSched(['sched', 'enqueue', '--issues', '42', '--project', 'test-proj']);
+    logs.length = 0;
+    await runSched(['sched', 'stop', '--issue', '42', '--project', 'test-proj', '--json']);
+
+    expect(JSON.parse(logs.join(''))).toEqual({
+      stopped: 'issue:42',
+      terminated: false,
+      released_slots: [],
+    });
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries[0]).toMatchObject({ issue: 42, status: 'stopped', reason: 'stopped' });
+    expect(journalEvents()).toContainEqual(
+      expect.objectContaining({ event: 'stopped', unit: 'issue:42' })
+    );
+  });
+
   it('abandons an issue, recording the reason', async () => {
     await runSched(['sched', 'enqueue', '--issues', '42', '--project', 'test-proj']);
     await runSched([

@@ -122,6 +122,7 @@ import {
   finalizeRunLogEntry,
   parseFenceAbort,
   readDispatchLog,
+  usageParserFor,
 } from './run-log';
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import {
@@ -1442,7 +1443,7 @@ function enterRecovery(
   // `sched resume`: `reconcileRecovering` (below) is what retries it once the
   // pause clears — no separate re-classification happens while parked, since
   // this function is reached exactly once per dead dispatch.
-  if (!escalate && next.paused) {
+  if (next.paused) {
     return next;
   }
 
@@ -1946,6 +1947,12 @@ function journalStaleMilestoneIfIgnored(
  */
 interface DispatchSignals {
   lastTool: string | null;
+  /** The dispatch log slice could be read, so an empty slice is meaningful. */
+  logReadable: boolean;
+  /** Whether this dispatch emitted parseable model usage. */
+  hasUsage: boolean;
+  /** A readable log slice contains output from the agent, not only scheduler preambles. */
+  hasAgentOutput: boolean;
   apiError: DispatchApiError | null;
   /**
    * Evidence this dispatch ended because a fence told it to (#683 AC3) — the deciding
@@ -1964,6 +1971,9 @@ interface DispatchSignals {
 
 const NO_DISPATCH_SIGNALS: DispatchSignals = {
   lastTool: null,
+  logReadable: false,
+  hasUsage: false,
+  hasAgentOutput: false,
   apiError: null,
   fenceAbort: null,
   announcedWait: null,
@@ -1991,14 +2001,32 @@ const NO_DISPATCH_SIGNALS: DispatchSignals = {
  */
 function readDispatchSignalsForSlot(
   ctx: TickCtx,
+  state: SchedState,
   slot: SlotEntry,
   unit: string,
   run: string
 ): DispatchSignals {
   if (slot.spawned_at === null) return NO_DISPATCH_SIGNALS;
   const { content } = dispatchLogSlice(ctx, slot, unit);
+  const issue = issueOfUnit(unit);
+  const entry = issue === null ? undefined : findEntry(state, issue);
+  const cmd0 =
+    entry === undefined || issue === null
+      ? undefined
+      : resolveTierSpawn(
+          resolveProfiledDispatch(ctx.config, entry.dispatch_profile),
+          isReportSlot(slot) ? (reportTierFor(slot.recoveries) ?? entry.tier) : entry.tier,
+          issue
+        ).cmd[0];
+  const hasAgentOutput =
+    content
+      ?.split('\n')
+      .some((line) => line.trim() !== '' && !line.includes('"type":"sched-dispatch"')) ?? false;
   return {
     lastTool: parseLastToolUse(content),
+    logReadable: content !== null,
+    hasUsage: cmd0 !== undefined && usageParserFor(cmd0)(content) !== null,
+    hasAgentOutput,
     apiError: parseDispatchApiError(content),
     fenceAbort: parseFenceAbort(content, run),
     announcedWait: parseAnnouncedWait(content),
@@ -2127,6 +2155,17 @@ function recordDispatchRunLog(
   const fenceRun = run !== '' ? run : (slot.run_id ?? '');
   return {
     lastTool: parseLastToolUse(logContent),
+    logReadable: logContent !== null,
+    hasUsage:
+      runEntry.input_tokens !== null ||
+      runEntry.output_tokens !== null ||
+      runEntry.reasoning_tokens !== null ||
+      runEntry.cache_creation_tokens !== null ||
+      runEntry.cache_read_tokens !== null,
+    hasAgentOutput:
+      logContent
+        ?.split('\n')
+        .some((line) => line.trim() !== '' && !line.includes('"type":"sched-dispatch"')) ?? false,
     apiError: parseDispatchApiError(logContent),
     fenceAbort: parseFenceAbort(logContent, fenceRun),
     announcedWait: parseAnnouncedWait(logContent),
@@ -2512,15 +2551,38 @@ function completeUnitOrRecover(
     );
   }
 
+  // A process stopped before it reached a tool call, emitted model usage, or
+  // advanced its trail is not evidence that a stronger tier is needed.
+  const hasMilestoneProgress =
+    truth.milestone !== null &&
+    slot.spawned_at !== null &&
+    Date.parse(truth.milestone.at) > Date.parse(slot.spawned_at);
+  // A missing log is unknown, not an empty run: retain the conservative
+  // escalation rail unless we could read a slice proving no agent output.
+  const progressed =
+    !resolved.logReadable ||
+    resolved.hasUsage ||
+    resolved.lastTool !== null ||
+    resolved.hasAgentOutput ||
+    hasMilestoneProgress;
   next = recordDispatchOutcome(ctx, next, unit, slot, suspect);
-  return enterRecovery(ctx, next, unit, 'verify-incomplete', 'unverified-exit', truth, {
-    observed: truth.milestone
-      ? `milestone ${truth.milestone.phase}/${truth.milestone.status}; closed=${truth.closed}`
-      : `no milestone; closed=${truth.closed}`,
-    // #591: attributes the unverified exit to a concrete cause (e.g. `Monitor`)
-    // without opening the transcript. Omitted when the log yielded no tool_use.
-    ...(resolved.lastTool !== null ? { last_tool: resolved.lastTool } : {}),
-  });
+  return enterRecovery(
+    ctx,
+    next,
+    unit,
+    'verify-incomplete',
+    'unverified-exit',
+    truth,
+    {
+      observed: truth.milestone
+        ? `milestone ${truth.milestone.phase}/${truth.milestone.status}; closed=${truth.closed}`
+        : `no milestone; closed=${truth.closed}`,
+      // #591: attributes the unverified exit to a concrete cause (e.g. `Monitor`)
+      // without opening the transcript. Omitted when the log yielded no tool_use.
+      ...(resolved.lastTool !== null ? { last_tool: resolved.lastTool } : {}),
+    },
+    { escalate: progressed }
+  );
 }
 
 /** Re-attach or spawn a slot left `assigned` by a crash between assign and spawn. */
@@ -2599,7 +2661,7 @@ function reconcileSlots(
         // happens only on the tick that actually reaches the unverified-exit
         // decision, not on every tick an outage holds the slot here.
         next = completeUnitOrRecover(ctx, next, unit, truth, 'verify-complete', () =>
-          readDispatchSignalsForSlot(ctx, slot, unit, truth.milestone?.run ?? '')
+          readDispatchSignalsForSlot(ctx, next, slot, unit, truth.milestone?.run ?? '')
         );
         break;
       case 'recovering':

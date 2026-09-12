@@ -1905,6 +1905,42 @@ describe('confirmed dispatch failures (#629: a 429 spend/rate wall is not an unv
     expect(h.state().consecutive_dispatch_api_errors).toBe(0);
   });
 
+  it('a no-usage, no-progress exit redispatches at the same tier without consuming recovery', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+
+    fs.mkdirSync(path.dirname(h.spawnCalls[0].logFile), { recursive: true });
+    fs.writeFileSync(h.spawnCalls[0].logFile, '');
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.tick();
+
+    expect(h.state().entries.find((entry) => entry.issue === 101)?.tier).toBe('mechanical');
+    expect(h.state().slots.find((slot) => slot.unit === 'issue:101')?.recoveries).toBe(0);
+    expect(h.spawnCalls).toHaveLength(2);
+  });
+
+  it('holds an escalated recovery while paused and spawns it only after resume', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    writeToolUseLog(h.spawnCalls[0].logFile);
+    h.store.withLock((state) => ({ state: setPaused(state, true), result: null }));
+    h.alive.delete(h.spawnCalls[0].pid);
+
+    h.tick();
+
+    expect(h.state().entries.find((entry) => entry.issue === 101)?.tier).toBe('mid');
+    expect(h.state().slots.find((slot) => slot.unit === 'issue:101')?.status).toBe('recovering');
+    expect(h.spawnCalls).toHaveLength(1);
+
+    h.store.withLock((state) => ({ state: setPaused(state, false), result: null }));
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(2);
+  });
+
   it('records the reset time when the provider supplies one (AC4)', () => {
     const h = harness();
     REGISTRIES.push(h.dir);

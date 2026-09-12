@@ -227,6 +227,39 @@ export function abandonIssue(
 }
 
 /**
+ * `sched stop --issue N`: record an operator-stopped terminal outcome and
+ * release any held slot. The CLI owns process termination; this pure state
+ * transition ensures a later reconcile cannot recover or redispatch the unit.
+ */
+export function stopIssue(
+  state: SchedState,
+  issue: number,
+  reason = 'stopped',
+  now: Date = new Date()
+): { state: SchedState; releasedSlots: number[] } {
+  const entry = state.entries.find((e) => e.issue === issue);
+  if (!entry) {
+    throw new SchedNotFoundError(`Queue entry not found: ${issue}`);
+  }
+  if (TERMINAL_ISSUE_STATUSES.has(entry.status)) {
+    throw new SchedNotFoundError(`Issue ${issue} is already ${entry.status} — nothing to stop`);
+  }
+  let next = transitionIssue(state, issue, 'stopped', { reason }, now);
+  const unit = `issue:${issue}`;
+  const released: number[] = [];
+  for (const slot of next.slots) {
+    if (slot.unit === unit && slot.status !== 'idle') {
+      if (slot.status !== 'failed' && slot.status !== 'complete') {
+        next = transitionSlot(next, slot.id, 'failed', {}, now);
+      }
+      next = transitionSlot(next, slot.id, 'idle', {}, now);
+      released.push(slot.id);
+    }
+  }
+  return { state: next, releasedSlots: released };
+}
+
+/**
  * `sched abandon --batch B`: dissolve the batch and requeue every non-terminal
  * member as full-cycle (RFC-0001 §D.2 dissolving → "members requeued"; F.8
  * "nothing green is discarded" — members already shipped stay put).
