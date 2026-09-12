@@ -49,6 +49,7 @@ function harness(
     prPollIntervalMs?: number;
     labelPollIntervalMs?: number;
     fenceTakeoverTimeoutMs?: number;
+    dispatch?: SchedConfig['dispatch'];
   },
   existingDir?: string
 ) {
@@ -215,9 +216,12 @@ function harness(
     ...(opts?.labelPollIntervalMs !== undefined
       ? { label_poll_interval_ms: opts.labelPollIntervalMs }
       : {}),
-    ...(opts?.phaseStallTimeoutMs !== undefined || opts?.fenceTakeoverTimeoutMs !== undefined
+    ...(opts?.phaseStallTimeoutMs !== undefined ||
+    opts?.fenceTakeoverTimeoutMs !== undefined ||
+    opts?.dispatch !== undefined
       ? {
           dispatch: {
+            ...opts?.dispatch,
             ...(opts?.phaseStallTimeoutMs !== undefined
               ? { phase_stall_timeout_ms: opts.phaseStallTimeoutMs }
               : {}),
@@ -382,6 +386,25 @@ describe('dispatch (AC1: spawn with --model per tier; pid/phase/progress in stat
     expect(JSON.parse(fs.readFileSync(h.store.statePath, 'utf8')).slots[0].pid).toBe(
       h.spawnCalls[0].pid
     );
+  });
+
+  it('#713: dispatches a full-cycle entry through its recorded profile', () => {
+    const h = harness({
+      dispatch: {
+        dispatch_profiles: {
+          openai: {
+            command: ['opencode', 'run', '-m', '{model}'],
+            tier_models: { mid: 'openai/gpt-5.6-luna' },
+          },
+        },
+      },
+    });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 713, mode: 'full', tier: 'mid', dispatch: 'openai' }]);
+
+    h.tick();
+
+    expect(h.spawnCalls[0]?.cmd).toEqual(['opencode', 'run', '-m', 'openai/gpt-5.6-luna']);
   });
 
   it('respects max_slots: a second runnable unit waits for a free slot', () => {

@@ -338,11 +338,12 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   lines.push('== Queue ==');
   lines.push(
     renderTable(
-      ['issue', 'mode', 'batch', 'priority', 'tier', 'deps', 'status', 'pr', 'cleanup'],
+      ['issue', 'mode', 'batch', 'profile', 'priority', 'tier', 'deps', 'status', 'pr', 'cleanup'],
       report.queue.map((e) => [
         `#${e.issue}`,
         e.mode,
         e.batch ?? '-',
+        e.mode === 'full' ? (e.dispatch_profile ?? '-') : '-',
         // A slot-mode member's own priority is never read by the scheduler
         // (the BATCH's priority governs, in the table below) — render '-'
         // rather than a number that looks load-bearing but is not.
@@ -657,8 +658,8 @@ function journalLabelScreen(store: SchedStore, blocked: EnqueueInput[], failed: 
 }
 
 /**
- * Resolve the dispatch profile a batch enqueue records (#707), mutating the
- * slot-mode inputs in place. Explicit is the mechanism, detection the
+ * Resolve the dispatch profile each enqueue records (#707/#713), mutating
+ * inputs in place. Explicit is the mechanism, detection the
  * convenience (#707):
  *
  * - `--dispatch <name>` wins outright — validated against the project's
@@ -690,7 +691,7 @@ function resolveEnqueueDispatchProfile(
   const names = Object.keys(profiles).sort();
   const slotInputs = inputs.filter((input) => (input.mode ?? 'full') === 'slot');
   const manifestProfilesByBatch = new Map<string, Set<string>>();
-  for (const input of slotInputs) {
+  for (const input of inputs) {
     if (input.dispatch === undefined) continue;
     if (!DISPATCH_PROFILE_RE.test(input.dispatch)) {
       fail([`manifest dispatch must match ${DISPATCH_PROFILE_RE}, got '${input.dispatch}'`]);
@@ -716,11 +717,6 @@ function resolveEnqueueDispatchProfile(
     if (!DISPATCH_PROFILE_RE.test(opts.dispatch)) {
       fail([`--dispatch must match ${DISPATCH_PROFILE_RE}, got '${opts.dispatch}'`]);
     }
-    if (slotInputs.length === 0) {
-      fail([
-        "--dispatch applies to batch (--mode slot) enqueues only — dispatch profiles are batch-scoped; full-cycle entries always dispatch the config's default",
-      ]);
-    }
     if (names.length === 0) {
       fail([
         `--dispatch '${opts.dispatch}' was given, but no dispatch_profiles are configured for this project`,
@@ -737,7 +733,7 @@ function resolveEnqueueDispatchProfile(
         `--dispatch '${opts.dispatch}' is not a configured profile — available: ${names.join(', ')}`,
       ]);
     }
-    for (const input of slotInputs) {
+    for (const input of inputs) {
       if (input.dispatch === undefined) input.dispatch = opts.dispatch;
     }
     (opts.json ? console.error : console.log)(`Dispatch profile: ${opts.dispatch} (explicit)`);
@@ -745,8 +741,6 @@ function resolveEnqueueDispatchProfile(
   }
 
   if (names.length === 0) return; // AC1: no profiles configured — legacy behavior, unchanged.
-  if (slotInputs.length === 0) return; // full-cycle only — nothing to inherit into.
-
   // Only batches this call CREATES need their family decided now. A manifest
   // that already names a valid profile made that decision at composition time;
   // never replace it with (or reject it for lack of) ambient detection.
@@ -759,7 +753,10 @@ function resolveEnqueueDispatchProfile(
   const undecidedBornBatches = new Set(
     [...bornBatches].filter((batchId) => !manifestProfilesByBatch.has(batchId))
   );
-  if (undecidedBornBatches.size === 0) return;
+  const undecidedFullEntries = inputs.filter(
+    (input) => (input.mode ?? 'full') === 'full' && input.dispatch === undefined
+  );
+  if (undecidedBornBatches.size === 0 && undecidedFullEntries.length === 0) return;
 
   const candidates: ProfileCandidate[] = names.map((name) => {
     const binaries = new Set<string>();
@@ -790,6 +787,9 @@ function resolveEnqueueDispatchProfile(
     ) {
       input.dispatch = detected.profile;
     }
+  }
+  for (const input of undecidedFullEntries) {
+    input.dispatch = detected.profile;
   }
   (opts.json ? console.error : console.log)(
     `Dispatch profile: ${detected.profile} (${
@@ -860,7 +860,7 @@ function registerEnqueueSubcommand(cmd: Command): void {
     )
     .option(
       '--dispatch <profile>',
-      '#707: name the dispatch profile this batch records (a dispatch_profiles key) — overrides CLAUDECODE/parent-chain detection; with no flag and inconclusive detection the enqueue FAILS rather than guessing the default'
+      'Name the dispatch profile for every enqueued entry (a dispatch_profiles key) — overrides CLAUDECODE/parent-chain detection; with no flag and inconclusive detection the enqueue FAILS rather than guessing the default'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option(

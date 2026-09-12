@@ -1192,6 +1192,18 @@ describe('#707 state migration: dispatch_profile', () => {
     }
   });
 
+  it('#713: loads a pre-entry-profile state with the default profile', () => {
+    const legacy = { ...seeded(), schema_version: '1.19.0' } as Record<string, unknown>;
+    for (const entry of legacy.entries as Record<string, unknown>[]) {
+      delete entry.dispatch_profile;
+    }
+
+    const migrated = validateState(legacy);
+
+    expect(migrated.schema_version).toBe(SCHEMA_VERSION);
+    expect(migrated.entries.every((entry) => entry.dispatch_profile === null)).toBe(true);
+  });
+
   it('rejects a batch whose dispatch_profile violates the name grammar', () => {
     const bad = seeded();
     const batches = bad.batches.map((b) => ({ ...b, dispatch_profile: '../escape' }));

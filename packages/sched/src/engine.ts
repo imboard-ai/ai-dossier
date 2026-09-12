@@ -87,6 +87,7 @@ import {
   type ResolvedDispatch,
   reportTierFor,
   resolveDispatch,
+  resolveProfiledDispatch,
   resolveTierSpawn,
   type SpawnDeps,
   STOP_POLL_MAX_MS,
@@ -343,6 +344,7 @@ interface LabelPoll {
 
 interface TickCtx {
   deps: EngineDeps;
+  config: SchedConfig;
   dispatch: ResolvedDispatch;
   result: TickResult;
 }
@@ -847,16 +849,23 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
     return spawnReportAgent(ctx, state, unit);
   }
 
+  let dispatch: ResolvedDispatch;
+  try {
+    dispatch = resolveProfiledDispatch(ctx.config, entry.dispatch_profile);
+  } catch (err) {
+    return failUnit(ctx, state, unit, `dispatch-profile-error: ${(err as Error).message}`);
+  }
+
   return spawnAndRecord(ctx, state, unit, slot, {
     tier: entry.tier,
-    spawn: resolveTierSpawn(ctx.dispatch, entry.tier, issue),
+    spawn: resolveTierSpawn(dispatch, entry.tier, issue),
     // The slot's generation reaches the agent here (#504): a takeover is told which
     // generation it owns, so its own `runstate post --gen` is accepted while the run it
     // replaced is refused. A first dispatch is generation 0 and reads as it always did.
     // The tier's own resolved prompt (#527) — falls back to the global
     // dispatch.prompt when the tier has no override.
     prompt: buildPrompt(
-      ctx.dispatch.tiers[entry.tier].prompt,
+      dispatch.tiers[entry.tier].prompt,
       issue,
       slot.gen,
       // #683 AC6: the takeover is told its slot identity alongside the generation —
@@ -3025,7 +3034,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const labelVerifiedIssues = labelVerified(labelPoll);
 
   const pass1 = deps.store.withLock((state) => {
-    const ctx: TickCtx = { deps, dispatch, result: emptyResult() };
+    const ctx: TickCtx = { deps, config, dispatch, result: emptyResult() };
     let next = reconcileSlots(ctx, state, polled);
     next = reconcileParked(ctx, next, prPoll);
     next = reconcileStaleFailedParks(ctx, next, prPoll);
@@ -3054,7 +3063,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     }
     if (results.size > 0) {
       result = deps.store.withLock((state) => {
-        const ctx: TickCtx = { deps, dispatch, result };
+        const ctx: TickCtx = { deps, config, dispatch, result };
         const next = recordTeardowns(ctx, state, results);
         const withReport = dispatchReportAgents(ctx, next, config);
         return { state: withReport, result: ctx.result };

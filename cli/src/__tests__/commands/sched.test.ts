@@ -1432,20 +1432,20 @@ describe('#707: sched enqueue --dispatch (named dispatch profiles)', () => {
     err.mockRestore();
   });
 
-  it('rejects --dispatch on a full-cycle enqueue — profiles are batch-scoped', async () => {
+  it('#713: records --dispatch on a full-cycle enqueue', async () => {
     writeConfig(GLM_CONFIG);
-    await expect(
-      runSched([
-        'sched',
-        'enqueue',
-        '--issues',
-        '305',
-        '--dispatch',
-        'glm',
-        '--project',
-        'test-proj',
-      ])
-    ).rejects.toThrow('process.exit(1)');
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '305',
+      '--dispatch',
+      'glm',
+      '--project',
+      'test-proj',
+    ]);
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries[0]).toMatchObject({ issue: 305, dispatch_profile: 'glm' });
   });
 
   it('no profiles configured + no flag → legacy behavior, no detection, no failure (AC1)', async () => {
