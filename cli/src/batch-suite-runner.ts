@@ -23,7 +23,7 @@
  *      through a wrapper that might not understand them).
  *
  * A report that comes back unreadable (empty stdout, no parseable JSON, a
- * spawn/timeout error) from tier 1 or 2 retries once with tier 3 before
+ * spawn error) from tier 1 or 2 retries once with tier 3 before
  * giving up — `runValidate` treats a still-unreadable result as
  * `suite-unreadable` and blocks the batch (preserving every member commit)
  * rather than treating "nothing to attribute" as license to dissolve.
@@ -38,6 +38,7 @@ import {
   type SchedConfig,
   type SuiteResult,
 } from '@ai-dossier/sched';
+import { loadCapabilityManifest, timeoutReasonSpent } from './capability';
 
 /** Aggregate suite runs can be minutes long (full workspace test suite, not a focused subset). */
 export const BATCH_SUITE_TIMEOUT_MS = 600_000;
@@ -63,6 +64,8 @@ function stderrTail(stderr: string | null | undefined): string {
 interface RunOutcome {
   source: string;
   result: SuiteResult;
+  /** A declared capability spent its whole budget, so a guessed retry is unsafe. */
+  terminal?: boolean;
 }
 
 /** Run one argv command in `worktree`, parsing stdout as a vitest JSON report when possible. */
@@ -119,7 +122,7 @@ function runCommand(
  * repo has no manifest, no `test.full` entry, or it is `lifecycle: shadow` —
  * the capability layer's own `capability-unavailable` outcome — or when the
  * capability layer could not even be invoked (no `ai-dossier` on `PATH`, a
- * stale shadow copy, a timeout) — either way "no trustworthy tier-1 answer
+ * stale shadow copy) — either way "no trustworthy tier-1 answer
  * here", so the caller falls through to tier 2 (AC1's resolution order)
  * rather than skipping straight past a configured `dispatch.suite_command`.
  */
@@ -131,7 +134,21 @@ function runCapabilityTestFull(worktree: string, timeoutMs: number): RunOutcome 
     timeout: timeoutMs,
     maxBuffer: MAX_BUFFER_BYTES,
   });
-  if (spawned.error) return 'unavailable';
+  if (spawned.error) {
+    if ((spawned.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+      return {
+        source,
+        terminal: true,
+        result: {
+          ok: false,
+          failing: [],
+          readable: false,
+          detail: `${source}: ${timeoutReasonSpent(timeoutMs)} (cwd=${worktree})`,
+        },
+      };
+    }
+    return 'unavailable';
+  }
   const stdout = spawned.stdout ?? '';
   const lastLine = stdout.trim().split('\n').pop() ?? '';
   let envelope: { outcome?: string; exit_code?: number; reason?: string } | null = null;
@@ -199,7 +216,26 @@ function detectSuiteCommand(worktree: string): string[] {
 }
 
 function runDetected(worktree: string, timeoutMs: number): SuiteResult {
+  if (!fs.existsSync(path.join(worktree, 'package.json'))) {
+    return {
+      ok: false,
+      failing: [],
+      readable: false,
+      detail: `detected: capability unavailable: no root package.json (cwd=${worktree})`,
+    };
+  }
   return runCommand(detectSuiteCommand(worktree), worktree, 'detected', timeoutMs);
+}
+
+function capabilityTimeout(worktree: string, defaultTimeoutMs: number): number {
+  try {
+    return (
+      loadCapabilityManifest(worktree).capabilities['test.full']?.timeoutMs ?? defaultTimeoutMs
+    );
+  } catch {
+    // `cap run` will report a malformed manifest; retain the portable outer default.
+    return defaultTimeoutMs;
+  }
 }
 
 /**
@@ -207,17 +243,17 @@ function runDetected(worktree: string, timeoutMs: number): SuiteResult {
  * three-tier order, retrying once with the tier-3 safe default when the
  * resolved primary tier's report is unreadable.
  *
- * `timeoutMs` defaults to `BATCH_SUITE_TIMEOUT_MS` — overridable so a future
- * test can exercise a REAL `spawnSync` timeout (ETIMEDOUT) against a
- * deliberately slow fixture command without waiting ten minutes for it; this
- * module's own tests mock `spawnSync` directly instead and don't need it.
+ * `opts.timeoutMs` supplies the default `BATCH_SUITE_TIMEOUT_MS` fallback for
+ * repos without a declared `test.full` budget. A declared capability timeout
+ * always controls the outer `cap run` invocation too.
  */
 export function createBatchSuiteRunner(
   config: SchedConfig,
   opts: { timeoutMs?: number } = {}
 ): (worktree: string) => SuiteResult {
-  const timeoutMs = opts.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
+  const defaultTimeoutMs = opts.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
   return (worktree) => {
+    const timeoutMs = capabilityTimeout(worktree, defaultTimeoutMs);
     let primary: RunOutcome;
     const cap = runCapabilityTestFull(worktree, timeoutMs);
     if (cap !== 'unavailable') {
@@ -235,7 +271,8 @@ export function createBatchSuiteRunner(
     } else {
       return runDetected(worktree, timeoutMs);
     }
-    if (primary.result.ok || primary.result.readable !== false) return primary.result;
+    if (primary.terminal || primary.result.ok || primary.result.readable !== false)
+      return primary.result;
     const fallback = runDetected(worktree, timeoutMs);
     return {
       ...fallback,
