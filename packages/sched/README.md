@@ -254,8 +254,10 @@ migration, only resolution-time fallback in `resolveDispatch`.
 
 Config schema moves to 1.6.0 (#562): `dispatch` gains `suite_command` — an explicit argv
 override for the aggregate batch-suite command, the middle tier of the new resolution
-order (`cap run test.full` manifest → `dispatch.suite_command` → a repo-detected safe
-default that never forwards extra flags through an unrecognized wrapper script). Also new:
+ order (active `cap run test.full` manifest → `dispatch.suite_command` → a repo-detected safe
+ default that never forwards extra flags through an unrecognized wrapper script). An active
+ `test.full.timeout_ms` applies only to the cap run; a timeout is terminal rather than a
+ retry through a guessed fallback. Also new:
 the `blocked` `BatchStatus` and `batch-blocked` journal event — an unreadable suite report
 blocks the batch (worktree and every member commit preserved) instead of dissolving it,
 distinct from `dissolving`'s "a red suite named no offender." `blocked` is a new

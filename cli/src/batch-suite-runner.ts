@@ -43,6 +43,9 @@ import { loadCapabilityManifest, timeoutReasonSpent } from './capability';
 /** Aggregate suite runs can be minutes long (full workspace test suite, not a focused subset). */
 export const BATCH_SUITE_TIMEOUT_MS = 600_000;
 
+/** Lets `cap run` finish manifest/probe setup without shortening its command's declared budget. */
+export const CAP_RUN_SETUP_GRACE_MS = 10_000;
+
 /**
  * `spawnSync`'s default `maxBuffer` is 1 MB — a full-workspace vitest JSON
  * report routinely exceeds that, and a truncated buffer surfaces as
@@ -126,16 +129,22 @@ function runCommand(
  * here", so the caller falls through to tier 2 (AC1's resolution order)
  * rather than skipping straight past a configured `dispatch.suite_command`.
  */
-function runCapabilityTestFull(worktree: string, timeoutMs: number): RunOutcome | 'unavailable' {
+function runCapabilityTestFull(
+  worktree: string,
+  capabilityTimeoutMs: number
+): RunOutcome | 'unavailable' {
   const source = 'cap run test.full';
+  const start = Date.now();
   const spawned = spawnSync('ai-dossier', ['cap', 'run', 'test.full'], {
     cwd: worktree,
     encoding: 'utf-8',
-    timeout: timeoutMs,
+    // The inner capability owns this budget; the outer watchdog has bounded setup grace.
+    timeout: capabilityTimeoutMs + CAP_RUN_SETUP_GRACE_MS,
     maxBuffer: MAX_BUFFER_BYTES,
   });
   if (spawned.error) {
     if ((spawned.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+      const elapsedMs = Date.now() - start;
       return {
         source,
         terminal: true,
@@ -143,7 +152,7 @@ function runCapabilityTestFull(worktree: string, timeoutMs: number): RunOutcome 
           ok: false,
           failing: [],
           readable: false,
-          detail: `${source}: ${timeoutReasonSpent(timeoutMs)} (cwd=${worktree})`,
+          detail: `${source}: ${timeoutReasonSpent(capabilityTimeoutMs)} (elapsed ${elapsedMs}ms; cwd=${worktree})`,
         },
       };
     }
@@ -151,9 +160,19 @@ function runCapabilityTestFull(worktree: string, timeoutMs: number): RunOutcome 
   }
   const stdout = spawned.stdout ?? '';
   const lastLine = stdout.trim().split('\n').pop() ?? '';
-  let envelope: { outcome?: string; exit_code?: number; reason?: string } | null = null;
+  let envelope: {
+    outcome?: string;
+    exit_code?: number;
+    reason?: string;
+    duration_ms?: number;
+  } | null = null;
   try {
-    envelope = JSON.parse(lastLine) as { outcome?: string; exit_code?: number; reason?: string };
+    envelope = JSON.parse(lastLine) as {
+      outcome?: string;
+      exit_code?: number;
+      reason?: string;
+      duration_ms?: number;
+    };
   } catch {
     envelope = null;
   }
@@ -164,8 +183,10 @@ function runCapabilityTestFull(worktree: string, timeoutMs: number): RunOutcome 
   const ok = envelope?.outcome === 'ok' && spawned.status === 0;
   const readable = isReadableVitestReport(stdout);
   const failing = readable ? parseVitestJson(stdout) : [];
+  const timedOut = envelope?.reason === timeoutReasonSpent(capabilityTimeoutMs);
   return {
     source,
+    terminal: timedOut,
     result: {
       ok,
       failing,
@@ -174,6 +195,7 @@ function runCapabilityTestFull(worktree: string, timeoutMs: number): RunOutcome 
         envelope !== null
           ? `${source}: outcome=${envelope.outcome} exit_code=${envelope.exit_code ?? 'unknown'}` +
             (envelope.reason ? ` reason=${envelope.reason}` : '') +
+            (typeof envelope.duration_ms === 'number' ? ` elapsed ${envelope.duration_ms}ms` : '') +
             (!ok && readable ? ` (${failing.length} failing)` : '') +
             (!ok && !readable ? stderrTail(spawned.stderr) : '')
           : `${source}: no envelope line — treating as unreadable${stderrTail(spawned.stderr)}`,
@@ -229,9 +251,8 @@ function runDetected(worktree: string, timeoutMs: number): SuiteResult {
 
 function capabilityTimeout(worktree: string, defaultTimeoutMs: number): number {
   try {
-    return (
-      loadCapabilityManifest(worktree).capabilities['test.full']?.timeoutMs ?? defaultTimeoutMs
-    );
+    const entry = loadCapabilityManifest(worktree).capabilities['test.full'];
+    return entry?.lifecycle === 'active' ? (entry.timeoutMs ?? defaultTimeoutMs) : defaultTimeoutMs;
   } catch {
     // `cap run` will report a malformed manifest; retain the portable outer default.
     return defaultTimeoutMs;
@@ -244,8 +265,8 @@ function capabilityTimeout(worktree: string, defaultTimeoutMs: number): number {
  * resolved primary tier's report is unreadable.
  *
  * `opts.timeoutMs` supplies the default `BATCH_SUITE_TIMEOUT_MS` fallback for
- * repos without a declared `test.full` budget. A declared capability timeout
- * always controls the outer `cap run` invocation too.
+ * repos without an active, declared `test.full` budget. A declared capability
+ * timeout controls only `cap run`; tier 2 and 3 retain this runner timeout.
  */
 export function createBatchSuiteRunner(
   config: SchedConfig,
@@ -253,9 +274,9 @@ export function createBatchSuiteRunner(
 ): (worktree: string) => SuiteResult {
   const defaultTimeoutMs = opts.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
   return (worktree) => {
-    const timeoutMs = capabilityTimeout(worktree, defaultTimeoutMs);
+    const capabilityTimeoutMs = capabilityTimeout(worktree, defaultTimeoutMs);
     let primary: RunOutcome;
-    const cap = runCapabilityTestFull(worktree, timeoutMs);
+    const cap = runCapabilityTestFull(worktree, capabilityTimeoutMs);
     if (cap !== 'unavailable') {
       primary = cap;
     } else if (config.dispatch?.suite_command) {
@@ -265,15 +286,15 @@ export function createBatchSuiteRunner(
           config.dispatch.suite_command,
           worktree,
           'dispatch.suite_command',
-          timeoutMs
+          defaultTimeoutMs
         ),
       };
     } else {
-      return runDetected(worktree, timeoutMs);
+      return runDetected(worktree, defaultTimeoutMs);
     }
     if (primary.terminal || primary.result.ok || primary.result.readable !== false)
       return primary.result;
-    const fallback = runDetected(worktree, timeoutMs);
+    const fallback = runDetected(worktree, defaultTimeoutMs);
     return {
       ...fallback,
       detail: `${fallback.detail ?? (fallback.ok ? 'suite green' : 'suite red')} [fallback after ${primary.source} was unreadable: ${primary.result.detail ?? 'no detail'}]`,
