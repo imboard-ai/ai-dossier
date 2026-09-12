@@ -1314,8 +1314,8 @@ export type JournalEventName =
   // current config, and the batch is POST-merge (its product already shipped)
   // — the remaining tail work falls back to the default dispatch, loudly.
   // Pre-merge the same condition dissolves the batch instead (a state
-  // transition, journaled once), so this event is bounded by the report
-  // phase's own lifetime and cannot flood a reconcile loop.
+  // transition, journaled once). Post-merge notices are also journal-deduped,
+  // so this event remains bounded across reconcile ticks and restarts.
   | 'dispatch-profile-missing'
   // #525: a slot reaching `idle` on a per-issue dispatch terminal path
   // (verified completion, external-advance, a detached-ship park, a direct

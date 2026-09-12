@@ -93,7 +93,7 @@ function rangesOf(repo: string, base: string): MemberRange[] {
 function batchState(
   members: number[],
   status: 'validating' | 'attributing' | 'awaiting-merge' = 'attributing',
-  opts: { anchor?: number; run?: string; groups?: number[][] } = {}
+  opts: { anchor?: number; run?: string; groups?: number[][]; dispatch_profile?: string } = {}
 ): SchedState {
   let state = enqueueEntries(
     createEmptyState(),
@@ -106,6 +106,7 @@ function batchState(
             anchor: opts.anchor ?? 900,
             run_id: opts.run ?? 'r-900-aaaa',
             eviction_groups: opts.groups ?? [],
+            dispatch: opts.dispatch_profile,
           }
         : {}),
     })),
@@ -795,6 +796,15 @@ describe('dissolveBatch', () => {
     const result = dissolveBatch(state, 'b1', { strategy: 'halved', reason: 'x' }, h.deps);
     expect(findBatch(result.state, 'b1-a')?.priority).toBe(50);
     expect(findBatch(result.state, 'b1-b')?.priority).toBe(50);
+  });
+
+  it('#709: carries the parent dispatch profile forward onto both split halves', () => {
+    const state = batchState([201, 202, 203, 204], 'validating', { dispatch_profile: 'glm' });
+    const h = harness();
+    const result = dissolveBatch(state, 'b1', { strategy: 'halved', reason: 'x' }, h.deps);
+
+    expect(findBatch(result.state, 'b1-a')?.dispatch_profile).toBe('glm');
+    expect(findBatch(result.state, 'b1-b')?.dispatch_profile).toBe('glm');
   });
 
   it('reports what was preserved on the milestone', () => {

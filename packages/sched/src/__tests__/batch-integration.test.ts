@@ -1505,10 +1505,25 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     let testFocusedOutcome: CapabilityGateResult = { outcome: 'automation-broken' };
     const capability: (worktree: string, id: string) => CapabilityGateResult = (_worktree, id) =>
       id === 'test.focused' ? testFocusedOutcome : { outcome: 'ok' };
-    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    const h = batchHarness(repo, ['--mode=batch'], {
+      maxSlots: 1,
+      capability,
+      profiles: (truthDir) => ({
+        glm: {
+          command: [
+            'node',
+            FAKE_AGENT,
+            '--mode=batch',
+            '--profile-member=glm',
+            `--milestones-dir=${truthDir}`,
+          ],
+          tier_models: { mechanical: 'glm-flash', mid: 'glm-5.3', strong: 'glm-strong' },
+        },
+      }),
+    });
     h.enqueue([
-      { issue: 2201, mode: 'slot', batch: 'b-resume', anchor: 2200, tier: 'mid' },
-      { issue: 2202, mode: 'slot', batch: 'b-resume', tier: 'mid' },
+      { issue: 2201, mode: 'slot', batch: 'b-resume', anchor: 2200, tier: 'mid', dispatch: 'glm' },
+      { issue: 2202, mode: 'slot', batch: 'b-resume', tier: 'mid', dispatch: 'glm' },
     ]);
 
     h.tick();
@@ -1556,6 +1571,10 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       capability: 'test.focused',
       outcome: 'ok',
     });
+    const nextMember = h.deps.journal
+      .read()
+      .find((event) => event.event === 'spawned' && event.issue === 2202);
+    expect(nextMember?.cmd).toContain('--profile-member=glm');
   }, 60_000);
 
   it('#583 AC4: sched resume --batch evicts the member when the recheck confirms a real task-failed', async () => {
@@ -2581,6 +2600,80 @@ describe('integration #707: a batch dispatches through its recorded profile', ()
     expect(memberSpawn?.cmd).not.toContain('--PROF'); // default template, not the ghost profile
   }, 60_000);
 
+  it('handles every batch independently when the same recorded profile is missing', () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 2 });
+    h.enqueue([
+      { issue: 641, mode: 'slot', batch: 'b-gone-a', anchor: 640, tier: 'mid' },
+      { issue: 642, mode: 'slot', batch: 'b-gone-b', anchor: 640, tier: 'mid' },
+    ]);
+    h.store.withLock((state) => ({
+      state: patchBatch(
+        patchBatch(state, 'b-gone-a', { dispatch_profile: 'ghost' }, new Date()),
+        'b-gone-b',
+        { dispatch_profile: 'ghost' },
+        new Date()
+      ),
+      result: null,
+    }));
+
+    const result = h.tick();
+
+    expect(findBatch(h.state(), 'b-gone-a')?.status).toBe('dissolved');
+    expect(findBatch(h.state(), 'b-gone-b')?.status).toBe('dissolved');
+    expect(result.failed).toEqual(expect.arrayContaining(['batch:b-gone-a', 'batch:b-gone-b']));
+  });
+
+  it('does not reprocess a missing profile for a terminal batch', () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1 });
+    h.enqueue([{ issue: 651, mode: 'slot', batch: 'b-terminal-gone', anchor: 650, tier: 'mid' }]);
+    h.store.withLock((state) => ({
+      state: patchBatch(
+        state,
+        'b-terminal-gone',
+        { status: 'dissolved', dispatch_profile: 'ghost' },
+        new Date()
+      ),
+      result: null,
+    }));
+
+    h.tick();
+    h.tick();
+
+    const events = readJsonl(path.join(h.deps.store.dir, 'events.jsonl'));
+    expect(events.filter((event) => event.event === 'dispatch-profile-missing')).toHaveLength(0);
+  });
+
+  it('deduplicates a post-merge missing-profile notice across ticks', () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1 });
+    h.enqueue([{ issue: 661, mode: 'slot', batch: 'b-post-merge-gone', anchor: 660, tier: 'mid' }]);
+    h.store.withLock((state) => ({
+      state: {
+        ...patchBatch(
+          state,
+          'b-post-merge-gone',
+          { status: 'deployed', dispatch_profile: 'ghost' },
+          new Date()
+        ),
+        paused: true,
+      },
+      result: null,
+    }));
+
+    h.tick();
+    h.tick();
+
+    const events = h.deps.journal
+      .read()
+      .filter(
+        (event) =>
+          event.event === 'dispatch-profile-missing' && event.unit === 'batch:b-post-merge-gone'
+      );
+    expect(events).toHaveLength(1);
+  });
+
   it('terminates a live member before dissolving after its profile disappears', async () => {
     const repo = scratchRepo();
     const h = batchHarness(repo, ['--mode=batch'], {
@@ -2611,5 +2704,14 @@ describe('integration #707: a batch dispatches through its recorded profile', ()
 
     expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
     expect(findBatch(h.state(), 'b-live-gone')?.status).toBe('dissolved');
+    const events = h.deps.journal.read();
+    expect(
+      events.some(
+        (event) => event.event === 'member-worktree-torn-down' && event.unit === 'batch:b-live-gone'
+      )
+    ).toBe(true);
+    expect(
+      events.some((event) => event.event === 'teardown-done' && event.unit === 'batch:b-live-gone')
+    ).toBe(true);
   }, 60_000);
 });

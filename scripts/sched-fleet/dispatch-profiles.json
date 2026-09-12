@@ -1,0 +1,195 @@
+{
+  "anthropic": {
+    "tiers": {
+      "mechanical": {
+        "command": [
+          "claude",
+          "-p",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--model",
+          "{model}",
+          "--effort",
+          "medium"
+        ],
+        "model": "haiku"
+      },
+      "mid": {
+        "command": [
+          "claude",
+          "-p",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--model",
+          "{model}",
+          "--effort",
+          "low"
+        ],
+        "model": "opus"
+      },
+      "strong": {
+        "command": [
+          "claude",
+          "-p",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--model",
+          "{model}",
+          "--effort",
+          "max"
+        ],
+        "model": "opus"
+      }
+    }
+  },
+  "zai": {
+    "tiers": {
+      "mechanical": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "{model}",
+          "--variant",
+          "low",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "zai-coding-plan/glm-5.3-flash"
+      },
+      "mid": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "{model}",
+          "--variant",
+          "high",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "zai-coding-plan/glm-5.3-flash"
+      },
+      "strong": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "{model}",
+          "--variant",
+          "max",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "zai-coding-plan/glm-5.3-flash"
+      }
+    }
+  },
+  "openai": {
+    "tiers": {
+      "mechanical": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "{model}",
+          "--variant",
+          "high",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "openai/gpt-5.6-luna"
+      },
+      "mid": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "{model}",
+          "--variant",
+          "max",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "openai/gpt-5.6-luna"
+      },
+      "strong": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "{model}",
+          "--variant",
+          "low",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "openai/gpt-6-astra"
+      }
+    }
+  },
+  "alibaba": {
+    "tiers": {
+      "mechanical": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "{model}",
+          "--variant",
+          "low",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "alibaba-token-plan/deepseek-v4-flash"
+      },
+      "mid": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "{model}",
+          "--variant",
+          "max",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "alibaba-token-plan/deepseek-v4-flash"
+      },
+      "strong": {
+        "command": [
+          "opencode",
+          "run",
+          "--auto",
+          "-m",
+          "{model}",
+          "--variant",
+          "max",
+          "--format",
+          "json",
+          "--"
+        ],
+        "model": "alibaba-token-plan/deepseek-v4-pro"
+      }
+    }
+  }
+}

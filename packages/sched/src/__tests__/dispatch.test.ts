@@ -893,6 +893,29 @@ describe('dispatchSummary (#680 — the configured executor, visible without rea
     );
   });
 
+  it('renders per-tier effort and variant values from the actual command template', () => {
+    const resolved = resolveDispatch({
+      dispatch: {
+        tiers: {
+          mechanical: {
+            command: ['claude', '-p', '--model', '{model}', '--effort', 'low'],
+          },
+          mid: {
+            command: ['opencode', 'run', '--model', '{model}', '--variant=max'],
+          },
+        },
+      },
+    });
+    expect(tierExecutors(resolved)).toMatchObject({
+      mechanical: { effort: 'low', variant: null },
+      mid: { effort: null, variant: 'max' },
+      strong: { effort: null, variant: null },
+    });
+    expect(dispatchSummary(tierExecutors(resolved), ' · ')).toBe(
+      'mechanical=claude/haiku (effort=low) · mid=opencode/sonnet (variant=max) · strong=claude/opus'
+    );
+  });
+
   it('renders `-` for a tier whose resolved model is null', () => {
     // Hand-built: the config types never produce a null model, but the
     // resolved shape (`TierExecutor.model: string | null`) allows one.
@@ -1109,6 +1132,54 @@ describe('resolveProfiledDispatch (#707 — a batch inherits the family it was t
     expect(profiled.tiers.mechanical.model).toBe('profile-flash');
     expect(profiled.tiers.strong.commandTemplate.slice(0, 2)).toEqual(['claude', '-p']);
     expect(profiled.tiers.strong.model).toBe('base-opus');
+  });
+
+  it("a profile's tier_models are not shadowed by base tier specs", () => {
+    const mixed: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        tier_models: { mid: 'base-mid' },
+        tiers: {
+          mechanical: { command: ['opencode', 'run', '-m', '{model}'], model: 'base-flash' },
+          strong: { command: ['claude', '-p', '--model', '{model}'], model: 'base-opus' },
+        },
+        dispatch_profiles: {
+          glm: {
+            tier_models: { mechanical: 'profile-flash', strong: 'profile-opus' },
+          },
+        },
+      },
+    };
+    const profiled = resolveProfiledDispatch(mixed, 'glm');
+    expect(profiled.tiers.mechanical.model).toBe('profile-flash');
+    expect(profiled.tierModels.mid).toBe('base-mid');
+    expect(profiled.tiers.strong.model).toBe('profile-opus');
+  });
+
+  it('inherits the configured disallowed-tools opt-out for profile-owned Claude commands', () => {
+    const config: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        disallowed_tools: [],
+        dispatch_profiles: {
+          claude: {
+            tiers: {
+              mid: { command: ['claude', '-p', '--model', '{model}'], model: 'sonnet' },
+            },
+          },
+        },
+      },
+    };
+    const profiled = resolveProfiledDispatch(config, 'claude');
+    expect(profiled.tiers.mid.commandTemplate).not.toContain('--disallowedTools');
+  });
+
+  it('does not resolve inherited object properties as profile names', () => {
+    const config: SchedConfig = {
+      max_slots: 1,
+      dispatch: { dispatch_profiles: { glm: GLM_PROFILE } },
+    };
+    expect(() => resolveProfiledDispatch(config, 'constructor')).toThrow(DispatchProfileError);
   });
 
   it('a single-model profile is expressible — every tier names the same model (#707 AC8)', () => {

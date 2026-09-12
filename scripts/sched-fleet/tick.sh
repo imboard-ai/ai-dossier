@@ -5,7 +5,13 @@
 # 7-day-later enqueue of the report issue (#529). Self-removes when all terminal.
 set -u
 export PATH="$HOME/.local/bin:$HOME/.nvm/versions/node/v24.20.0/bin:/usr/local/bin:/usr/bin:/bin"
-D="${SCHED_FLEET_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+D="${SCHED_FLEET_HOME:-$SCRIPT_DIR}"
+export SCHED_FLEET_HOME="$D"
+export SCHED_CRON_LOCK="${SCHED_CRON_LOCK:-$D/.cron.lock}"
+source "${SCHED_CRON_LIB:-$SCRIPT_DIR/cron-lib.sh}"
+TICK_CRON_MARKER="$D/tick.sh"
+REPORT_CRON_MARKER="$D/enqueue-report.sh"
 source "$D/telegram.env"
 TG() { curl -s --max-time 20 "https://api.telegram.org/bot${HANEST_TELEGRAM_BOT_TOKEN}/sendMessage" \
         -d chat_id="${HANEST_TELEGRAM_CHAT_ID}" --data-urlencode text="$1" >/dev/null 2>&1; }
@@ -45,16 +51,38 @@ for REF in $(cat "$D/issues.txt"); do
   if [ "$STATE" = "CLOSED" ]; then
     if [ ! -f "$D/done.$KEY" ]; then
       PR=$(gh pr list -R "$REPO" --search "$I in:title" --state merged --limit 1 --json number -q '.[0].number' 2>/dev/null)
-      TG "✅ $REF closed (PR #${PR:-?})"
-      touch "$D/done.$KEY"
       # Pilot execution closed → schedule the 7-day-later report enqueue (#529).
       if [ "$REF" = "imboard-ai/ai-dossier#526" ] && [ ! -f "$D/report-scheduled" ]; then
         WHEN=$(date -u -d "+7 days" +"%M %H %d %m")
-        (crontab -l 2>/dev/null || true; echo "$WHEN * $D/enqueue-report.sh >> $D/enqueue-report.log 2>&1") | crontab -
-        grep -q "imboard-ai/ai-dossier#529" "$D/issues.txt" || echo "imboard-ai/ai-dossier#529" >> "$D/issues.txt"
-        touch "$D/report-scheduled"
-        TG "📅 #526 closed — report run #529 scheduled for $(date -u -d '+7 days' +'%a %Y-%m-%d %H:%M UTC') (7-day regression window)."
+        if install_cron_line "$REPORT_CRON_MARKER" "$WHEN * $D/enqueue-report.sh >> $D/enqueue-report.log 2>&1"; then
+          if ! grep -q "imboard-ai/ai-dossier#529" "$D/issues.txt"; then
+            if ! printf '%s\n' "imboard-ai/ai-dossier#529" >> "$D/issues.txt"; then
+              TG "⚠️ $REF closed, but #529 could not be added to the tracked issue list; retrying next tick."
+              ALLDONE=0
+              continue
+            fi
+          fi
+          if ! touch "$D/report-scheduled"; then
+            TG "⚠️ $REF closed, but the report-scheduled marker could not be written; retrying next tick."
+            ALLDONE=0
+            continue
+          fi
+          # The new issue was appended after the loop expanded its input. Keep
+          # the ticker alive so the next tick can observe and track #529.
+          ALLDONE=0
+          TG "📅 #526 closed — report run #529 scheduled for $(date -u -d '+7 days' +'%a %Y-%m-%d %H:%M UTC') (7-day regression window)."
+        else
+          TG "⚠️ $REF closed, but the #529 report cron could not be installed; retrying next tick."
+          ALLDONE=0
+          continue
+        fi
       fi
+      if ! touch "$D/done.$KEY"; then
+        TG "⚠️ $REF closed, but the completion marker could not be written; retrying next tick."
+        ALLDONE=0
+        continue
+      fi
+      TG "✅ $REF closed (PR #${PR:-?})"
     fi
   else
     ALLDONE=0
@@ -62,6 +90,9 @@ for REF in $(cat "$D/issues.txt"); do
 done
 
 if [ "$ALLDONE" = "1" ]; then
-  TG "🏁 Pipeline COMPLETE — every tracked issue closed: $(cat "$D/issues.txt" | tr '\n' ' '). Engine cron removed. Next: file Step-4 widening from #529's verdict."
-  crontab -l 2>/dev/null | grep -v "reset-fleet/tick.sh" | crontab -
+  if remove_cron_line "$TICK_CRON_MARKER"; then
+    TG "🏁 Pipeline COMPLETE — every tracked issue closed: $(cat "$D/issues.txt" | tr '\n' ' '). Engine cron removed. Next: file Step-4 widening from #529's verdict."
+  else
+    TG "⚠️ Pipeline is complete, but the engine cron could not be removed; retrying next tick."
+  fi
 fi
