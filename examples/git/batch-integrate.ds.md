@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "batch-integrate",
   "title": "Batch Integrate — Verify N Members Once, Repair What Is Yours, Escalate What Is Not",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "protocol_version": "1.0",
   "status": "Draft",
   "last_updated": "2026-09-12",
@@ -63,13 +63,13 @@
   "content_scope": "self-contained",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "c85a556d312c6e3814435c09790be8b32da77fc65214ae564ba35e9641adc6fe"
+    "hash": "39388e3e8420f121a14a2a2031ad4bae6711c82a6480d3b13a6e063c5fe170a3"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "lIcTycraU6eqaKtLKBTpAwTwKMYWZbqYtBkX413raDbFWS7YxLJQiXrUJuYxnpDssdMOXYKIMyZ1q8JthnXABw==",
+    "signature": "5Fjawcq7uESew1jg/o3XBRZAEU/uo8piMlaP2cWn+m2HGN6lVBJz18uaq8/jIobFciLafh2OugHK6KX3aQxhAA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-12T11:11:52.580Z",
+    "signed_at": "2026-09-12T11:15:17.455Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -92,6 +92,19 @@ N members implemented N issues in isolation. You make them one shippable change:
 
 ## Actions to Perform
 
+### Claim-release protocol
+
+Run this protocol in the same step that records any member disposition: eviction, supersession, gate decline, or shipment. Remove `in-progress`, then remove every assignee returned by GitHub. For a non-shipping disposition, also post a comment naming the batch id and reason:
+
+```bash
+gh issue edit "$issue_number" --remove-label "in-progress"
+gh issue view "$issue_number" --json assignees --jq '.assignees[].login' | while read -r login; do
+  gh issue edit "$issue_number" --remove-assignee "$login"
+done
+```
+
+This protocol is safe to repeat, and an already-closed issue with a stale claim must still run it.
+
 ### Step 1: Merge members onto the integration branch
 
 Merge each member branch in turn. Expect most to be clean.
@@ -109,7 +122,7 @@ A batch that outlives another batch's merge inherits its changes, and on an acti
 **Three resolutions, not two.** Beyond "keep both" and "escalate" (Step 4):
 
 - **Union — but only for FLAT regions.** Concatenating both sides is safe for adjacent top-level declarations or a list of constants. When the conflict sits INSIDE a syntactic construct — an interface, an object literal, a call expression — *your* block's closing delimiter lies past the `=======` marker and concatenating silently drops it. The result looks like a clean resolution and fails to compile at a line far from the conflict. Recover the exact closing from the pre-merge version (`git show <branch>:<path>` on the side that owned the block) and typecheck each resolved file individually.
-- **Supersession.** The base may have ALREADY implemented what a member was written to do — a second issue solving the same problem, often better factored, landing while the batch ran. Take the base's implementation, drop the member's, and keep any tests the member added that still assert the behaviour: a different implementation of an equivalent contract makes them added coverage, not dead weight. Close that member's issue as superseded, naming what actually shipped — a reader tracing the member's commit must not conclude it is what is live — and run the shared claim-release protocol **in the same step** (the claim was written by prep's manifest step; supersession is one of the disposals that must release it — see Step 6a for the protocol).
+- **Supersession.** The base may have ALREADY implemented what a member was written to do — a second issue solving the same problem, often better factored, landing while the batch ran. Take the base's implementation, drop the member's, and keep any tests the member added that still assert the behaviour: a different implementation of an equivalent contract makes them added coverage, not dead weight. Close that member's issue as superseded, naming what actually shipped — a reader tracing the member's commit must not conclude it is what is live — and run the claim-release protocol **in the same step** (the claim prep's manifest step wrote; supersession is one of the disposals that must release it).
 
 ### Step 2: Cheap gates first
 
@@ -184,29 +197,23 @@ Open a single PR closing every member issue that survived. **Merge with rebase, 
 
 ### Step 6a: Verify closure and release claims
 
-After the merge is confirmed (`mergedAt` non-null, `state` `MERGED`), verify the final state instead of trusting `Closes #N`. For each surviving member, retain its own shipping commit SHA from the rebase-merged PR, then query `gh issue view <n> --json state,assignees`. A `CLOSED` member belongs in `closed_by_github`; an `OPEN` member must receive one comment naming the PR, merge timestamp, and its own shipping commit SHA, then be explicitly closed and recorded in `closed_by_workflow`:
+After the merge is confirmed (`mergedAt` non-null, `state` `MERGED`), verify the final state instead of trusting `Closes #N`. For each surviving member, retain its own shipping commit SHA from the rebase-merged PR, set `issue_number` and `member_sha`, then query its state. An open member must receive one comment naming the PR, merge timestamp, and its own shipping commit SHA, then be explicitly closed and recorded in `closed_by_workflow`. Include a durable `batch-close:v1` marker in that comment. A closed member with that marker is `already_closed` on a rerun; a closed member without it is `closed_by_github`:
 
 ```bash
-STATE=$(gh issue view <n> --json state --jq .state)
+STATE=$(gh issue view "$issue_number" --json state --jq .state)
 if [ "$STATE" = OPEN ]; then
-  gh issue comment <n> --body "Shipped in #<pr> at <merged-at>; member commit: <member-sha>. Closing explicitly because the batch verified GitHub did not close it."
-  gh issue close <n>
-  closed_by_workflow+=<n>
+  gh issue comment "$issue_number" --body "<!-- batch-close:v1 batch=$batch pr=$pr -->
+Shipped in #$pr at $merged_at; member commit: $member_sha. Closing explicitly because the batch verified GitHub did not close it."
+  gh issue close "$issue_number"
+  closed_by_workflow+=("$issue_number")
+elif gh issue view "$issue_number" --json comments --jq '.comments[].body' | grep -Fq "<!-- batch-close:v1 batch=$batch pr=$pr -->"; then
+  already_closed+=("$issue_number")
 else
-  closed_by_github+=<n>
+  closed_by_github+=("$issue_number")
 fi
 ```
 
-Run this shared claim-release protocol for every disposed member: shipped, evicted, superseded, or gate-declined. Remove `in-progress`, then remove every assignee returned by GitHub. Post the release comment only for non-shipped disposal paths, where it records the batch id and reason:
-
-```bash
-gh issue edit <n> --remove-label "in-progress"
-gh issue view <n> --json assignees --jq '.assignees[].login' | while read -r login; do
-  gh issue edit <n> --remove-assignee "$login"
-done
-```
-
-The protocol is idempotent: query state first, close and comment only an open issue, and always attempt label and assignee removal so an already-closed issue with a stale claim is repaired on rerun.
+Run the claim-release protocol for every shipped member after this state check. Its idempotency repairs an already-closed issue with a stale claim on rerun.
 
 Query the batch anchor after every member. If it is still open, comment with the batch PR, merge timestamp, and the complete member-to-shipping-commit list, then close it explicitly. On rerun, a closed anchor receives neither a duplicate comment nor another close request.
 
