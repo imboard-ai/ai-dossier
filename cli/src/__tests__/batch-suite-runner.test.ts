@@ -1,6 +1,7 @@
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import type { SchedConfig } from '@ai-dossier/sched';
+import { readPoolFileConfig } from '@ai-dossier/worktree-pool';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BATCH_SUITE_TIMEOUT_MS,
@@ -10,6 +11,10 @@ import {
 
 vi.mock('node:fs');
 vi.mock('node:child_process');
+vi.mock('@ai-dossier/worktree-pool', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@ai-dossier/worktree-pool')>();
+  return { ...actual, readPoolFileConfig: vi.fn(actual.readPoolFileConfig) };
+});
 
 const mockedFs = vi.mocked(fs);
 
@@ -56,6 +61,8 @@ describe('createBatchSuiteRunner (#562)', () => {
   beforeEach(() => {
     vi.mocked(spawnSync).mockReset();
     mockedFs.readFileSync.mockReset();
+    vi.mocked(readPoolFileConfig).mockReset();
+    vi.mocked(readPoolFileConfig).mockReturnValue({} as ReturnType<typeof readPoolFileConfig>);
     // Detection needs a package manifest; capability manifests remain absent unless a test supplies one.
     mockedFs.existsSync.mockImplementation((file) => !String(file).includes('.dossier/automation'));
   });
@@ -207,27 +214,24 @@ describe('createBatchSuiteRunner (#562)', () => {
     );
   });
 
-  it('tier 1 (regression): a forged "ok" envelope does not override a non-zero cap exit code — falls back to tier 3 instead of trusting it', () => {
+  it('tier 1 (regression): a declared capability failure without an envelope is preserved without detection fallback', () => {
     vi.mocked(spawnSync).mockImplementation((cmd) => {
       if (cmd === 'ai-dossier') {
-        // The process itself exited 2 (automation-broken), but stdout's last
-        // line forges an "ok" outcome — trusting stdout alone would report
-        // green without ever falling through to a real attempt.
         return spawnResult({
-          status: 2,
-          stdout: '{"capability":"test.full","outcome":"ok","exit_code":0}',
+          status: 1,
+          stdout: 'test command failed before the harness emitted its envelope',
         });
       }
-      if (cmd === 'npm') return spawnResult({ status: 1, stdout: 'real failure\n' });
       throw new Error(`unexpected command: ${cmd}`);
     });
 
     const result = createBatchSuiteRunner(config())('/wt');
 
-    // If the forged envelope had been trusted, tier 3 would never run and
-    // this would read `ok: true` from the (untrustworthy) primary alone.
-    expect(spawnSync).toHaveBeenCalledWith('npm', ['test'], expect.anything());
+    expect(result.detail).toContain('task-failed');
+    expect(result.detail).toContain('harness produced no envelope');
     expect(result.ok).toBe(false);
+    expect(result.readable).toBe(false);
+    expect(spawnSync).toHaveBeenCalledTimes(1);
   });
 
   it('tier 3 (regression, #562 root cause): a make-delegated `test` script runs as plain `npm test` — no reporter flags forwarded through the wrapper', () => {
@@ -265,31 +269,51 @@ describe('createBatchSuiteRunner (#562)', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('regression: an unreadable report (missing/broken reporter) retries once with the detected fallback and never looks like a parseable zero-failure report', () => {
+  it('regression: an unreadable configured suite retries once with detected fallback and never looks like a parseable zero-failure report', () => {
     mockedFs.readFileSync.mockReturnValue(JSON.stringify({ scripts: { test: 'make test' } }));
     vi.mocked(spawnSync).mockImplementation((cmd) => {
-      if (cmd === 'ai-dossier') {
-        // Genuinely ran, genuinely failed, but the reporter never produced
-        // parseable JSON — plain text, not `{ testResults: [...] }`.
-        return spawnResult({
-          status: 1,
-          stdout:
-            'some tests failed, no json reporter configured\n{"outcome":"task-failed","exit_code":1}',
-        });
-      }
+      if (cmd === 'ai-dossier') return CAP_UNAVAILABLE;
+      if (cmd === 'make') return spawnResult({ status: 1, stdout: 'configured suite failed' });
       if (cmd === 'npm') {
         return spawnResult({ status: 1, stdout: 'make: *** [test] Error 1\n' });
       }
       throw new Error(`unexpected command: ${cmd}`);
     });
 
-    const result = createBatchSuiteRunner(config())('/wt');
+    const result = createBatchSuiteRunner(config({ suite_command: ['make', 'test'] }))('/wt');
 
     expect(result.ok).toBe(false);
     expect(result.readable).toBe(false);
     expect(result.failing).toEqual([]);
-    // Both tiers were tried: primary, then the one fallback retry.
-    expect(spawnSync).toHaveBeenCalledTimes(2);
+    // Capability availability, configured suite, then the one fallback retry.
+    expect(spawnSync).toHaveBeenCalledTimes(3);
+  });
+
+  it('runs detected suites from the configured nested project root', () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    vi.mocked(readPoolFileConfig).mockReturnValue({
+      project_subdir: 'main',
+    } as ReturnType<typeof readPoolFileConfig>);
+    mockedFs.readFileSync.mockImplementation((_file) => {
+      return JSON.stringify({ scripts: { test: 'vitest run' } });
+    });
+    vi.mocked(spawnSync).mockImplementation((cmd, args) => {
+      if (cmd === 'ai-dossier') return CAP_UNAVAILABLE;
+      if (cmd === 'npx') {
+        expect(args).toEqual(['--no', 'vitest', 'run', '--reporter=json']);
+        return spawnResult({ status: 0, stdout: vitestReport(0) });
+      }
+      throw new Error(`unexpected command: ${cmd}`);
+    });
+
+    const result = createBatchSuiteRunner(config())('/wt');
+
+    expect(result.ok).toBe(true);
+    expect(spawnSync).toHaveBeenLastCalledWith(
+      'npx',
+      ['--no', 'vitest', 'run', '--reporter=json'],
+      expect.objectContaining({ cwd: '/wt/main' })
+    );
   });
 
   it('regression: a timeout/spawn error is unreadable, not an attributable empty report', () => {
@@ -332,14 +356,14 @@ describe('createBatchSuiteRunner (#562)', () => {
     );
   });
 
-  it('does not spawn npm when tier 3 has no root package.json', () => {
+  it('does not spawn npm when tier 3 has no project package.json', () => {
     mockedFs.existsSync.mockReturnValue(false);
     vi.mocked(spawnSync).mockReturnValue(CAP_UNAVAILABLE);
 
     const result = createBatchSuiteRunner(config())('/wt');
 
     expect(result).toMatchObject({ ok: false, readable: false });
-    expect(result.detail).toContain('capability unavailable: no root package.json');
+    expect(result.detail).toContain('capability unavailable: no package.json');
     expect(spawnSync).toHaveBeenCalledTimes(1);
   });
 
