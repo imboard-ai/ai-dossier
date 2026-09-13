@@ -28,7 +28,7 @@ ai-dossier sched enqueue --issues 101,105..109 --deps 100 --tier strong   # flag
 ai-dossier sched enqueue --from-manifest batch-prep.json                  # batch-prep output
 ai-dossier sched start            # the dispatch engine: spawn, verify, escalate, watch parked PRs (Ctrl-C stops it)
 ai-dossier sched start --once     # a single reconcile+refill tick (cron-style)
-ai-dossier sched status           # queue (+pr/cleanup), parked PRs, slots, batches, blocked/failed
+ai-dossier sched status           # queue (+pr/cleanup), engine lease, slots, batches, blocked/failed
 ai-dossier sched pause            # prevent every new agent process; live units keep running
 ai-dossier sched resume
 ai-dossier sched stop --issue 42  # terminate one full-cycle agent and record it stopped (no recovery)
