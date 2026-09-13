@@ -12,6 +12,7 @@ import {
   type TierExecutor,
   tierExecutors,
 } from './dispatch';
+import type { EngineLeaseStatus } from './persist';
 import {
   batchBlockers,
   DISPATCHABLE_ISSUE_STATUSES,
@@ -52,6 +53,7 @@ export interface StatusReport {
   paused: boolean;
   max_slots: number;
   live_slots: number;
+  engine_lease: EngineLeaseStatus | null;
   queue: QueueEntry[];
   slots: SlotEntry[];
   batches: BatchEntry[];
@@ -112,7 +114,8 @@ export interface StatusReport {
 export function buildStatusReport(
   state: SchedState,
   config: SchedConfig,
-  project: string
+  project: string,
+  engineLease: EngineLeaseStatus | null = null
 ): StatusReport {
   const blocked: BlockedItem[] = [];
   const failed: QueueEntry[] = [];
@@ -216,6 +219,7 @@ export function buildStatusReport(
     paused: state.paused,
     max_slots: config.max_slots,
     live_slots: state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length,
+    engine_lease: engineLease,
     queue: state.entries,
     slots: state.slots,
     // Read-side half of #595's dedupe: a `state.json` persisted before

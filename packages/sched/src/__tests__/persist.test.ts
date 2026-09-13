@@ -8,6 +8,7 @@ import {
   DEFAULT_LABEL_POLL_INTERVAL_MS,
   EngineTooOldError,
   enqueueEntries,
+  procStartTime,
   resolveDispatch,
   SCHEMA_VERSION,
   SchedStore,
@@ -15,6 +16,7 @@ import {
   validateState,
   writeAtomic,
 } from '../index';
+import { isEngineLeaseRace } from '../persist';
 
 const NOW = new Date('2026-08-29T12:00:00Z');
 
@@ -157,6 +159,68 @@ describe('SchedStore', () => {
     fs.writeFileSync(path.join(lockDir, 'pid'), '999999999');
     const result = store.withLock((s) => ({ state: s, result: 'stolen' }));
     expect(result).toBe('stolen');
+  });
+
+  it('holds one engine lease for its lifecycle and releases only its own holder record', () => {
+    const store = new SchedStore(dir);
+    const first = store.acquireEngineLease();
+    expect(first.acquired).toBe(true);
+    if (!first.acquired) throw new Error('expected first lease acquisition');
+
+    const second = store.acquireEngineLease();
+    expect(second).toEqual({
+      acquired: false,
+      holder: { pid: process.pid, pid_start: procStartTime(process.pid) },
+    });
+    expect(store.engineLeaseStatus()).toMatchObject({ pid: process.pid, alive: true });
+
+    store.releaseEngineLease(first.lease);
+    expect(store.engineLeaseStatus()).toBeNull();
+  });
+
+  it('reclaims a dead or PID-reused engine lease', () => {
+    const store = new SchedStore(dir);
+    const leaseDir = path.join(dir, '.sched-engine-lease');
+    fs.mkdirSync(leaseDir);
+    fs.writeFileSync(
+      path.join(leaseDir, 'holder.json'),
+      JSON.stringify({ pid: 999_999_999, pid_start: 1, id: 'dead' })
+    );
+    const dead = store.acquireEngineLease();
+    expect(dead.acquired).toBe(true);
+    if (!dead.acquired) throw new Error('expected dead lease reclamation');
+    store.releaseEngineLease(dead.lease);
+
+    fs.mkdirSync(leaseDir);
+    const currentStart = procStartTime(process.pid);
+    expect(currentStart).not.toBeNull();
+    fs.writeFileSync(
+      path.join(leaseDir, 'holder.json'),
+      JSON.stringify({ pid: process.pid, pid_start: (currentStart as number) + 1, id: 'reused' })
+    );
+    expect(store.engineLeaseStatus()).toMatchObject({ pid: process.pid, alive: false });
+    const reused = store.acquireEngineLease();
+    expect(reused.acquired).toBe(true);
+    if (reused.acquired) store.releaseEngineLease(reused.lease);
+  });
+
+  it('surfaces pending lease creation errors instead of retrying them as contention', () => {
+    const store = new SchedStore(dir);
+    fs.chmodSync(dir, 0o500);
+    try {
+      expect(() => store.acquireEngineLease()).toThrow(/EACCES|permission denied/i);
+    } finally {
+      fs.chmodSync(dir, 0o700);
+    }
+  });
+
+  it('retries only expected lease contention errors', () => {
+    for (const code of ['EEXIST', 'ENOTEMPTY', 'ENOENT']) {
+      expect(isEngineLeaseRace(Object.assign(new Error(code), { code }))).toBe(true);
+    }
+    for (const code of ['EACCES', 'ENOSPC', 'EROFS', 'EIO']) {
+      expect(isEngineLeaseRace(Object.assign(new Error(code), { code }))).toBe(false);
+    }
   });
 
   it('config defaults to max_slots 3, persists overrides, and warns (not silently) on corrupt files', () => {

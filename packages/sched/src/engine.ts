@@ -2241,14 +2241,6 @@ function reconcileRunning(
     closedSignal
   );
   if (verifiedComplete && !isParkedMilestone(truth.milestone)) {
-    journal(ctx, 'external-advance', unit, {
-      pid: slot.pid,
-      slot: slot.id,
-      // closedSignal, not the raw truth.closed, decided this: for a
-      // report-role slot `closed` is suppressed, so `truth.closed` reads true
-      // at completion regardless — the actual signal was the report milestone.
-      detail: closedSignal ? 'issue closed' : `report done (role=${slot.role})`,
-    });
     killUnitAgent(ctx, marked, unit);
     // The agent was still alive (that's what "externally-advanced" means) —
     // log it here too, or an external-advance dispatch would never get a

@@ -490,6 +490,25 @@ describe('ai-dossier sched enqueue', () => {
 });
 
 describe('ai-dossier sched start (#537: engine-stale detection)', () => {
+  it('a contending --once exits successfully without output, while an interactive start names the holder pid', async () => {
+    const leaseDir = path.join(home, '.dossier', 'sched', 'test-proj', '.sched-engine-lease');
+    fs.mkdirSync(leaseDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(leaseDir, 'holder.json'),
+      JSON.stringify({ pid: process.pid, pid_start: null, id: 'other-engine' })
+    );
+
+    await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
+    expect(logs).toEqual([]);
+
+    await runSched(['sched', 'start', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain(`already running (pid ${process.pid})`);
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain(`Engine lease: pid ${process.pid} (live)`);
+  });
+
   it('runs a tick cleanly and journals nothing when the engine is not stale', async () => {
     await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
     expect(journalEvents().some((e) => e.event === 'engine-stale')).toBe(false);

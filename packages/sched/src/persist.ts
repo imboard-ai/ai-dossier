@@ -15,7 +15,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { DISPATCH_PROFILE_RE } from './dispatch';
+import { DISPATCH_PROFILE_RE, procStartTime } from './dispatch';
 import { JOURNAL_FILE } from './journal';
 import { createEmptyState, validateState } from './state';
 import {
@@ -44,6 +44,25 @@ const LOCK_RETRY_MS = 200;
 const STATE_FILE = 'state.json';
 const CONFIG_FILE = 'config.json';
 const LOCK_DIR = '.sched-lock';
+const ENGINE_LEASE_DIR = '.sched-engine-lease';
+const ENGINE_LEASE_HOLDER_FILE = 'holder.json';
+
+export interface EngineLeaseHolder {
+  pid: number;
+  pid_start: number | null;
+}
+
+export interface EngineLease extends EngineLeaseHolder {
+  id: string;
+}
+
+export type EngineLeaseAcquisition =
+  | { acquired: true; lease: EngineLease }
+  | { acquired: false; holder: EngineLeaseHolder | null };
+
+export interface EngineLeaseStatus extends EngineLeaseHolder {
+  alive: boolean;
+}
 
 /** Thrown when the cross-process lock cannot be acquired in time. */
 export class LockTimeoutError extends Error {
@@ -159,6 +178,44 @@ function releaseLock(dir: string): void {
   fs.rmSync(path.join(dir, LOCK_DIR), { recursive: true, force: true });
 }
 
+function readEngineLeaseHolder(leasePath: string): EngineLease | null {
+  try {
+    const raw: unknown = JSON.parse(
+      fs.readFileSync(path.join(leasePath, ENGINE_LEASE_HOLDER_FILE), 'utf8')
+    );
+    if (raw === null || typeof raw !== 'object') return null;
+    const candidate = raw as EngineLease;
+    const pidStart = candidate.pid_start;
+    if (
+      !Number.isInteger(candidate.pid) ||
+      candidate.pid <= 0 ||
+      (pidStart !== null && (!Number.isInteger(pidStart) || pidStart < 0)) ||
+      typeof candidate.id !== 'string'
+    ) {
+      return null;
+    }
+    return raw as EngineLease;
+  } catch {
+    return null;
+  }
+}
+
+function engineLeaseIsAlive(holder: EngineLeaseHolder): boolean {
+  try {
+    process.kill(holder.pid, 0);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+  const currentStart = procStartTime(holder.pid);
+  return holder.pid_start === null || currentStart === null || currentStart === holder.pid_start;
+}
+
+/** Directory creation and rename report these only when another lease contender moved first. */
+export function isEngineLeaseRace(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === 'EEXIST' || code === 'ENOTEMPTY' || code === 'ENOENT';
+}
+
 // --- Store ---
 
 /**
@@ -192,6 +249,67 @@ export class SchedStore {
   /** Directory for per-unit agent output logs (`runs/<unit>.log`). */
   get runsDir(): string {
     return path.join(this.dir, 'runs');
+  }
+
+  engineLeaseStatus(): EngineLeaseStatus | null {
+    const holder = readEngineLeaseHolder(path.join(this.dir, ENGINE_LEASE_DIR));
+    return holder === null
+      ? null
+      : { pid: holder.pid, pid_start: holder.pid_start, alive: engineLeaseIsAlive(holder) };
+  }
+
+  /** Acquire the engine lifecycle lease, separate from short-lived state mutation locks. */
+  acquireEngineLease(): EngineLeaseAcquisition {
+    fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    const leasePath = path.join(this.dir, ENGINE_LEASE_DIR);
+    const lease: EngineLease = {
+      pid: process.pid,
+      pid_start: procStartTime(process.pid),
+      id: `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    };
+    while (true) {
+      const pending = `${leasePath}.pending-${lease.id}`;
+      // A unique pending directory must be created and populated successfully.
+      // Permission, quota, or read-only filesystem failures are operational errors,
+      // not contention, and must reach the caller.
+      fs.mkdirSync(pending, { mode: 0o700 });
+      try {
+        fs.writeFileSync(
+          path.join(pending, ENGINE_LEASE_HOLDER_FILE),
+          `${JSON.stringify(lease)}\n`,
+          {
+            mode: 0o600,
+          }
+        );
+        fs.renameSync(pending, leasePath);
+        return { acquired: true, lease };
+      } catch (err) {
+        fs.rmSync(pending, { recursive: true, force: true });
+        if (!isEngineLeaseRace(err)) throw err;
+        const holder = readEngineLeaseHolder(leasePath);
+        if (holder !== null && engineLeaseIsAlive(holder)) {
+          return { acquired: false, holder: { pid: holder.pid, pid_start: holder.pid_start } };
+        }
+        // Renaming stale state prevents a concurrent reclaimer from deleting
+        // a newly acquired lease after both observed the old holder.
+        const stale = `${leasePath}.stale-${lease.id}`;
+        try {
+          fs.renameSync(leasePath, stale);
+          fs.rmSync(stale, { recursive: true, force: true });
+        } catch (reclaimErr) {
+          if (!isEngineLeaseRace(reclaimErr)) throw reclaimErr;
+          // Another contender changed the directory; inspect and retry.
+        }
+      }
+    }
+  }
+
+  /** Release only the lease created by this invocation. */
+  releaseEngineLease(lease: EngineLease): void {
+    const leasePath = path.join(this.dir, ENGINE_LEASE_DIR);
+    if (readEngineLeaseHolder(leasePath)?.id === lease.id) {
+      fs.rmSync(leasePath, { recursive: true, force: true });
+    }
   }
 
   load(): SchedState {

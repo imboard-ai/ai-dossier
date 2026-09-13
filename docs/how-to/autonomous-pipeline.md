@@ -199,8 +199,9 @@ What each step is guarding against:
   not change the exit status, so under `set -e` a `crontab -l` on a host with no crontab still
   aborts the subshell and installs an **empty** crontab, dropping every job. See the
   `no crontab for` row in [`docs/agent-traps.md`](../agent-traps.md). The duplicate guard matters
-  too: re-running this step is the natural response to a failed attempt, and `tick.sh` has no
-  lockfile, so two `*/2` lines means two ticks racing on one `state.json`.
+   too: re-running this step is the natural response to a failed attempt. A project-scoped
+   scheduler lease now makes a concurrent `sched start --once` exit successfully and quietly,
+   but duplicate cron entries are still redundant and should be removed.
 - **Step 6 — `crontab -l` proves installed, not executing.** A rewritten script that lost its `+x`
   bit gives a valid crontab line, no error anywhere, and a log that simply stops growing — a 3.5 h
   outage here, and `tick.log` still ends in its `Permission denied` lines. The exec bit and a
