@@ -38,6 +38,7 @@ import {
   type SchedConfig,
   type SuiteResult,
 } from '@ai-dossier/sched';
+import { readPoolFileConfig, resolveProjectDir } from '@ai-dossier/worktree-pool';
 import { loadCapabilityManifest, timeoutReasonSpent } from './capability';
 
 /** Aggregate suite runs can be minutes long (full workspace test suite, not a focused subset). */
@@ -198,7 +199,7 @@ function runCapabilityTestFull(
             (typeof envelope.duration_ms === 'number' ? ` elapsed ${envelope.duration_ms}ms` : '') +
             (!ok && readable ? ` (${failing.length} failing)` : '') +
             (!ok && !readable ? stderrTail(spawned.stderr) : '')
-          : `${source}: no envelope line — treating as unreadable${stderrTail(spawned.stderr)}`,
+          : `${source}: task-failed (exit ${spawned.status ?? 'unknown'}), harness produced no envelope${stderrTail(spawned.stderr)}`,
     },
   };
 }
@@ -238,15 +239,24 @@ function detectSuiteCommand(worktree: string): string[] {
 }
 
 function runDetected(worktree: string, timeoutMs: number): SuiteResult {
-  if (!fs.existsSync(path.join(worktree, 'package.json'))) {
+  const projectDir = resolveProjectDir(worktree, readPoolFileConfig(worktree).project_subdir);
+  if (projectDir !== worktree && !projectDir.startsWith(worktree + path.sep)) {
     return {
       ok: false,
       failing: [],
       readable: false,
-      detail: `detected: capability unavailable: no root package.json (cwd=${worktree})`,
+      detail: `detected: capability unavailable: project directory escapes worktree (cwd=${worktree})`,
     };
   }
-  return runCommand(detectSuiteCommand(worktree), worktree, 'detected', timeoutMs);
+  if (!fs.existsSync(path.join(projectDir, 'package.json'))) {
+    return {
+      ok: false,
+      failing: [],
+      readable: false,
+      detail: `detected: capability unavailable: no package.json (cwd=${projectDir})`,
+    };
+  }
+  return runCommand(detectSuiteCommand(projectDir), projectDir, 'detected', timeoutMs);
 }
 
 function capabilityTimeout(worktree: string, defaultTimeoutMs: number): number {
@@ -292,7 +302,15 @@ export function createBatchSuiteRunner(
     } else {
       return runDetected(worktree, defaultTimeoutMs);
     }
-    if (primary.terminal || primary.result.ok || primary.result.readable !== false)
+    // A declared capability's non-zero outcome is the suite's verdict even
+    // without a parseable Vitest report. Retrying detection would replace it
+    // with an unrelated guess about the worktree layout.
+    if (
+      primary.source === 'cap run test.full' ||
+      primary.terminal ||
+      primary.result.ok ||
+      primary.result.readable !== false
+    )
       return primary.result;
     const fallback = runDetected(worktree, defaultTimeoutMs);
     return {
