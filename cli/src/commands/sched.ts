@@ -295,6 +295,11 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   lines.push(
     `Scheduler [${report.project}]: ${state} · slots ${report.live_slots}/${report.max_slots} live`
   );
+  if (report.engine_lease) {
+    lines.push(
+      `Engine lease: pid ${report.engine_lease.pid} (${report.engine_lease.alive ? 'live' : 'stale'})`
+    );
+  }
   if (report.last_tick_failure) {
     lines.push(
       `⚠ Last tick failed at ${report.last_tick_failure.at}: ${report.last_tick_failure.detail}`
@@ -1042,7 +1047,12 @@ function registerStatusSubcommand(cmd: Command): void {
     .action(async (opts: SchedOptions) => {
       const { store, project } = resolveStore(opts);
       try {
-        const report = buildStatusReport(store.load(), store.loadConfig(), project);
+        const report = buildStatusReport(
+          store.load(),
+          store.loadConfig(),
+          project,
+          store.engineLeaseStatus()
+        );
         // Cache-only (#537): `status` is a fast, offline-friendly diagnostic
         // — it reads whatever `sched start` last cached rather than risking
         // a multi-second hang on an unreachable npm registry.
@@ -1663,209 +1673,226 @@ function registerStartSubcommand(cmd: Command): void {
     .option('--json', 'Output tick results as JSON')
     .action(async (opts: StartOptions) => {
       const { store, project } = resolveStore(opts);
-      let config: SchedConfig;
-      try {
-        config = store.loadConfig();
-      } catch (err) {
-        handleKnownError(err);
-      }
-
-      // CLI flag beats config.json beats the engine default (60s).
-      if (opts.interval !== undefined) {
-        if (!Number.isInteger(opts.interval) || opts.interval <= 0) {
-          fail(['--interval must be a positive number of seconds']);
-        }
-        config = { ...config, reconcile_interval_ms: opts.interval * 1000 };
-      }
-
-      // #537: CLI flag beats config.json beats off-by-default, same
-      // precedence as --interval above.
-      const autoUpgradeEnabled = opts.autoUpgrade ?? config.auto_upgrade ?? false;
-      const upgradeExec = createUpgradeExec();
-
-      // Resolve the agent command: config dispatch.command wins; otherwise
-      // auto-detect (claude first, opencode fallback — the run machinery's
-      // order, #459) and use the matching headless template. Skipped
-      // entirely once `dispatch.tiers` is set (#527) — an operator who
-      // configured a mixed agent-CLI ladder opted out of the single-CLI
-      // auto-detect for every tier, not just the ones they overrode.
-      const tiersBypassesAutoDetect = config.dispatch?.tiers !== undefined;
-      if (tiersBypassesAutoDetect && config.dispatch?.command === undefined) {
-        // A tier without its own `dispatch.tiers.<tier>.command` (and no
-        // top-level `dispatch.command`) falls back to the built-in claude
-        // template, not the detected CLI — surface this before a confusing
-        // `spawn-error: ENOENT` shows up deep in the journal instead.
-        console.error(
-          '⚠ dispatch.tiers is set — auto-detect (claude/opencode) is skipped for every tier; ' +
-            'a tier without its own dispatch.tiers.<tier>.command falls back to the built-in ' +
-            'claude template, not the detected CLI.'
-        );
-      }
-      const dispatchCommand = tiersBypassesAutoDetect
-        ? undefined
-        : (config.dispatch?.command ??
-          (detectLlm('auto', true) === 'opencode' ? [...OPENCODE_DISPATCH_COMMAND] : undefined));
-      const engineConfig = dispatchCommand
-        ? { ...config, dispatch: { ...config.dispatch, command: dispatchCommand } }
-        : config;
-
-      // #680: log the executor the engine will actually use — agent + model
-      // per tier, resolved AFTER the auto-detect above so the banner matches
-      // real spawns. Once per start (both --once and the continuous loop):
-      // the operator's prep-session choice of agent/model stops here, and
-      // this line is where that becomes visible. Suppressed on the one
-      // machine-consumed path (`--once --json`, the cron/automation output)
-      // so stdout stays pure JSON there — every human-facing path sees it.
-      if (!(opts.once && opts.json)) {
-        console.log(
-          `▶ sched dispatch (default): ${dispatchSummary(tierExecutors(resolveDispatch(engineConfig)))}`
-        );
-        // #707: name every configured profile and the tier ladder it spawns —
-        // what a `--dispatch <name>` batch inherits, visible at engine start.
-        for (const name of Object.keys(engineConfig.dispatch?.dispatch_profiles ?? {}).sort()) {
+      const acquisition = store.acquireEngineLease();
+      if (!acquisition.acquired) {
+        // Timer overlap is expected: --once must produce no human or JSON noise.
+        if (!opts.once) {
           console.log(
-            `▶ sched profile ${name}: ${dispatchSummary(tierExecutors(resolveProfiledDispatch(engineConfig, name)))}`
+            acquisition.holder === null
+              ? 'Scheduler engine is already starting for this project.'
+              : `Scheduler engine is already running (pid ${acquisition.holder.pid}).`
           );
-        }
-      }
-
-      const deps: EngineDeps = {
-        store,
-        journal: new Journal(store.dir),
-        groundTruth: createExecGroundTruth(undefined, { repoDir: process.cwd() }),
-        spawnDeps: createSpawnDeps(process.cwd()),
-        now: () => new Date(),
-        repoDir: process.cwd(),
-        teardownExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
-          onError: (file, args, err) =>
-            process.stderr.write(
-              `⚠ sched teardown: '${file} ${args.join(' ')}' failed: ${err.message}\n`
-            ),
-        }),
-        // #504: the ladder fences a superseded run before respawning its takeover.
-        // Its own exec rather than the ground-truth one: a fence is a WRITE, and
-        // borrowing `groundTruthExec` would file the only diagnostic for a failed write
-        // under `sched ground truth`, where nobody debugging a fence would look.
-        fencer: createExecRunFencer(
-          createExecFn(FENCE_TIMEOUT_MS, {
-            onError: (file, args, err) =>
-              process.stderr.write(
-                `⚠ sched fence: '${file} ${args.join(' ')}' failed: ${err.message}\n`
-              ),
-          }),
-          { repoDir: process.cwd() }
-        ),
-        // #523: batch git/milestone-CLI operations (worktree claim, commit-range
-        // recording, milestone posting, PR watch) and the aggregate suite runner
-        // that gates `executing → reviewing`. Reuses the same timeout as teardown
-        // (worktree/git ops). The cold-path warm-up install/build (#561) does
-        // NOT reuse this — see `batchWarmExec` below — a real `npm ci`+build
-        // routinely exceeds this budget.
-        batchExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
-          onError: (file, args, err) =>
-            process.stderr.write(
-              `⚠ sched batch: '${file} ${args.join(' ')}' failed: ${err.message}\n`
-            ),
-        }),
-        // #561: batch-setup's cold-path warm-up (install + build) on its own
-        // budget, matching `@ai-dossier/worktree-pool`'s own per-issue warm-up
-        // budget for the identical work (`WARM_COMMAND_TIMEOUT_MS`) rather than
-        // the git-op-tuned `batchExec` above.
-        batchWarmExec: createExecFn(WARM_COMMAND_TIMEOUT_MS, {
-          onError: (file, args, err) =>
-            process.stderr.write(
-              `⚠ sched batch warm-up: '${file} ${args.join(' ')}' failed: ${err.message}\n`
-            ),
-        }),
-        runBatchSuite: createBatchSuiteRunner(config),
-        runBatchCapability: createBatchCapabilityRunner(),
-      };
-
-      const describe = (result: TickResult): string => {
-        const parts: string[] = [];
-        if (result.spawned.length > 0) parts.push(`spawned ${result.spawned.join(', ')}`);
-        if (result.parked.length > 0) parts.push(`parked ${result.parked.join(', ')}`);
-        if (result.mergeAccepted.length > 0)
-          parts.push(`merge accepted ${result.mergeAccepted.join(', ')}`);
-        if (result.staleReconciled.length > 0)
-          parts.push(`stale failure reconciled ${result.staleReconciled.join(', ')}`);
-        if (result.dependentsUnblocked.length > 0)
-          parts.push(`dependents unblocked ${result.dependentsUnblocked.join(', ')}`);
-        if (result.labelCleared.length > 0)
-          parts.push(`label cleared ${result.labelCleared.join(', ')}`);
-        if (result.labelBlocked.length > 0)
-          parts.push(`label blocked ${result.labelBlocked.join(', ')}`);
-        if (result.labelCheckFailed.length > 0)
-          parts.push(`label check unreachable ${result.labelCheckFailed.join(', ')}`);
-        if (result.teardownDone.length > 0)
-          parts.push(`teardown done ${result.teardownDone.join(', ')}`);
-        if (result.teardownFailed.length > 0)
-          parts.push(`teardown failed ${result.teardownFailed.join(', ')}`);
-        if (result.reportDispatched.length > 0)
-          parts.push(`report dispatched ${result.reportDispatched.join(', ')}`);
-        if (result.reportWaiting > 0)
-          parts.push(`${result.reportWaiting} report(s) waiting for a free slot`);
-        if (result.externalAdvances.length > 0)
-          parts.push(`externally completed ${result.externalAdvances.join(', ')}`);
-        if (result.completed.length > 0) parts.push(`completed ${result.completed.join(', ')}`);
-        if (result.redispatched.length > 0)
-          parts.push(`redispatched ${result.redispatched.join(', ')}`);
-        if (result.failed.length > 0) parts.push(`failed ${result.failed.join(', ')}`);
-        if (result.blocked.length > 0)
-          parts.push(`blocked ${result.blocked.map((i) => `#${i}`).join(', ')}`);
-        return parts.length > 0 ? parts.join(' · ') : 'nothing to do';
-      };
-
-      if (opts.once) {
-        let result: TickResult;
-        try {
-          result = tick(deps, engineConfig);
-        } catch (err) {
-          recordTickFailure(deps, err);
-          // Route known package errors through the CLI exit path; any other
-          // failure must not surface as an unhandled async rejection (this is
-          // the cron path).
-          handleKnownError(err);
-          fail([`sched tick failed: ${(err as Error).name}: ${(err as Error).message}`]);
-        }
-        await checkAndHandleEngineStaleness(store, deps.journal, autoUpgradeEnabled, upgradeExec);
-        if (opts.json) {
-          console.log(JSON.stringify(result, null, 2));
-        } else {
-          console.log(`✓ [${project}] tick: ${describe(result)}`);
         }
         return;
       }
+      try {
+        let config: SchedConfig;
+        try {
+          config = store.loadConfig();
+        } catch (err) {
+          handleKnownError(err);
+        }
 
-      const interval = (engineConfig.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS) / 1000;
-      console.log(
-        `▶ Scheduler engine running for ${project} (tick every ${interval}s, Ctrl-C to stop)`
-      );
-      let stopping = false;
-      process.on('SIGINT', () => {
-        if (stopping) process.exit(130);
-        stopping = true;
-        console.log('\n⏹ Stopping engine (spawned agents keep running)…');
-      });
-      await runLoop(
-        deps,
-        engineConfig,
-        () => stopping,
-        (result) => {
-          if (!opts.json) console.log(`✓ [${new Date().toISOString()}] ${describe(result)}`);
-          else console.log(JSON.stringify({ ts: new Date().toISOString(), ...result }));
-          // #537: journal/warn only in the continuous loop — the actual
-          // `npm i -g` shell-out (up to UPGRADE_TIMEOUT_MS) only runs from
-          // the cron-driven --once path below; running it here would stall
-          // reconciliation for however long the install takes. Fire-and-
-          // forget: bounded by the check's own short network timeout, never
-          // blocks the next tick (onTick is synchronous by contract).
-          void checkAndHandleEngineStaleness(store, deps.journal, false, upgradeExec).catch(
-            () => {}
+        // CLI flag beats config.json beats the engine default (60s).
+        if (opts.interval !== undefined) {
+          if (!Number.isInteger(opts.interval) || opts.interval <= 0) {
+            fail(['--interval must be a positive number of seconds']);
+          }
+          config = { ...config, reconcile_interval_ms: opts.interval * 1000 };
+        }
+
+        // #537: CLI flag beats config.json beats off-by-default, same
+        // precedence as --interval above.
+        const autoUpgradeEnabled = opts.autoUpgrade ?? config.auto_upgrade ?? false;
+        const upgradeExec = createUpgradeExec();
+
+        // Resolve the agent command: config dispatch.command wins; otherwise
+        // auto-detect (claude first, opencode fallback — the run machinery's
+        // order, #459) and use the matching headless template. Skipped
+        // entirely once `dispatch.tiers` is set (#527) — an operator who
+        // configured a mixed agent-CLI ladder opted out of the single-CLI
+        // auto-detect for every tier, not just the ones they overrode.
+        const tiersBypassesAutoDetect = config.dispatch?.tiers !== undefined;
+        if (tiersBypassesAutoDetect && config.dispatch?.command === undefined) {
+          // A tier without its own `dispatch.tiers.<tier>.command` (and no
+          // top-level `dispatch.command`) falls back to the built-in claude
+          // template, not the detected CLI — surface this before a confusing
+          // `spawn-error: ENOENT` shows up deep in the journal instead.
+          console.error(
+            '⚠ dispatch.tiers is set — auto-detect (claude/opencode) is skipped for every tier; ' +
+              'a tier without its own dispatch.tiers.<tier>.command falls back to the built-in ' +
+              'claude template, not the detected CLI.'
           );
         }
-      );
-      console.log('⏹ Engine stopped');
+        const dispatchCommand = tiersBypassesAutoDetect
+          ? undefined
+          : (config.dispatch?.command ??
+            (detectLlm('auto', true) === 'opencode' ? [...OPENCODE_DISPATCH_COMMAND] : undefined));
+        const engineConfig = dispatchCommand
+          ? { ...config, dispatch: { ...config.dispatch, command: dispatchCommand } }
+          : config;
+
+        // #680: log the executor the engine will actually use — agent + model
+        // per tier, resolved AFTER the auto-detect above so the banner matches
+        // real spawns. Once per start (both --once and the continuous loop):
+        // the operator's prep-session choice of agent/model stops here, and
+        // this line is where that becomes visible. Suppressed on the one
+        // machine-consumed path (`--once --json`, the cron/automation output)
+        // so stdout stays pure JSON there — every human-facing path sees it.
+        if (!(opts.once && opts.json)) {
+          console.log(
+            `▶ sched dispatch (default): ${dispatchSummary(tierExecutors(resolveDispatch(engineConfig)))}`
+          );
+          // #707: name every configured profile and the tier ladder it spawns —
+          // what a `--dispatch <name>` batch inherits, visible at engine start.
+          for (const name of Object.keys(engineConfig.dispatch?.dispatch_profiles ?? {}).sort()) {
+            console.log(
+              `▶ sched profile ${name}: ${dispatchSummary(tierExecutors(resolveProfiledDispatch(engineConfig, name)))}`
+            );
+          }
+        }
+
+        const deps: EngineDeps = {
+          store,
+          journal: new Journal(store.dir),
+          groundTruth: createExecGroundTruth(undefined, { repoDir: process.cwd() }),
+          spawnDeps: createSpawnDeps(process.cwd()),
+          now: () => new Date(),
+          repoDir: process.cwd(),
+          teardownExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
+            onError: (file, args, err) =>
+              process.stderr.write(
+                `⚠ sched teardown: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+              ),
+          }),
+          // #504: the ladder fences a superseded run before respawning its takeover.
+          // Its own exec rather than the ground-truth one: a fence is a WRITE, and
+          // borrowing `groundTruthExec` would file the only diagnostic for a failed write
+          // under `sched ground truth`, where nobody debugging a fence would look.
+          fencer: createExecRunFencer(
+            createExecFn(FENCE_TIMEOUT_MS, {
+              onError: (file, args, err) =>
+                process.stderr.write(
+                  `⚠ sched fence: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+                ),
+            }),
+            { repoDir: process.cwd() }
+          ),
+          // #523: batch git/milestone-CLI operations (worktree claim, commit-range
+          // recording, milestone posting, PR watch) and the aggregate suite runner
+          // that gates `executing → reviewing`. Reuses the same timeout as teardown
+          // (worktree/git ops). The cold-path warm-up install/build (#561) does
+          // NOT reuse this — see `batchWarmExec` below — a real `npm ci`+build
+          // routinely exceeds this budget.
+          batchExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
+            onError: (file, args, err) =>
+              process.stderr.write(
+                `⚠ sched batch: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+              ),
+          }),
+          // #561: batch-setup's cold-path warm-up (install + build) on its own
+          // budget, matching `@ai-dossier/worktree-pool`'s own per-issue warm-up
+          // budget for the identical work (`WARM_COMMAND_TIMEOUT_MS`) rather than
+          // the git-op-tuned `batchExec` above.
+          batchWarmExec: createExecFn(WARM_COMMAND_TIMEOUT_MS, {
+            onError: (file, args, err) =>
+              process.stderr.write(
+                `⚠ sched batch warm-up: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+              ),
+          }),
+          runBatchSuite: createBatchSuiteRunner(config),
+          runBatchCapability: createBatchCapabilityRunner(),
+        };
+
+        const describe = (result: TickResult): string => {
+          const parts: string[] = [];
+          if (result.spawned.length > 0) parts.push(`spawned ${result.spawned.join(', ')}`);
+          if (result.parked.length > 0) parts.push(`parked ${result.parked.join(', ')}`);
+          if (result.mergeAccepted.length > 0)
+            parts.push(`merge accepted ${result.mergeAccepted.join(', ')}`);
+          if (result.staleReconciled.length > 0)
+            parts.push(`stale failure reconciled ${result.staleReconciled.join(', ')}`);
+          if (result.dependentsUnblocked.length > 0)
+            parts.push(`dependents unblocked ${result.dependentsUnblocked.join(', ')}`);
+          if (result.labelCleared.length > 0)
+            parts.push(`label cleared ${result.labelCleared.join(', ')}`);
+          if (result.labelBlocked.length > 0)
+            parts.push(`label blocked ${result.labelBlocked.join(', ')}`);
+          if (result.labelCheckFailed.length > 0)
+            parts.push(`label check unreachable ${result.labelCheckFailed.join(', ')}`);
+          if (result.teardownDone.length > 0)
+            parts.push(`teardown done ${result.teardownDone.join(', ')}`);
+          if (result.teardownFailed.length > 0)
+            parts.push(`teardown failed ${result.teardownFailed.join(', ')}`);
+          if (result.reportDispatched.length > 0)
+            parts.push(`report dispatched ${result.reportDispatched.join(', ')}`);
+          if (result.reportWaiting > 0)
+            parts.push(`${result.reportWaiting} report(s) waiting for a free slot`);
+          if (result.externalAdvances.length > 0)
+            parts.push(`externally completed ${result.externalAdvances.join(', ')}`);
+          if (result.completed.length > 0) parts.push(`completed ${result.completed.join(', ')}`);
+          if (result.redispatched.length > 0)
+            parts.push(`redispatched ${result.redispatched.join(', ')}`);
+          if (result.failed.length > 0) parts.push(`failed ${result.failed.join(', ')}`);
+          if (result.blocked.length > 0)
+            parts.push(`blocked ${result.blocked.map((i) => `#${i}`).join(', ')}`);
+          return parts.length > 0 ? parts.join(' · ') : 'nothing to do';
+        };
+
+        if (opts.once) {
+          let result: TickResult;
+          try {
+            result = tick(deps, engineConfig);
+          } catch (err) {
+            recordTickFailure(deps, err);
+            // Route known package errors through the CLI exit path; any other
+            // failure must not surface as an unhandled async rejection (this is
+            // the cron path).
+            handleKnownError(err);
+            fail([`sched tick failed: ${(err as Error).name}: ${(err as Error).message}`]);
+          }
+          await checkAndHandleEngineStaleness(store, deps.journal, autoUpgradeEnabled, upgradeExec);
+          if (opts.json) {
+            console.log(JSON.stringify(result, null, 2));
+          } else {
+            console.log(`✓ [${project}] tick: ${describe(result)}`);
+          }
+          return;
+        }
+
+        const interval =
+          (engineConfig.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS) / 1000;
+        console.log(
+          `▶ Scheduler engine running for ${project} (tick every ${interval}s, Ctrl-C to stop)`
+        );
+        let stopping = false;
+        process.on('SIGINT', () => {
+          if (stopping) process.exit(130);
+          stopping = true;
+          console.log('\n⏹ Stopping engine (spawned agents keep running)…');
+        });
+        await runLoop(
+          deps,
+          engineConfig,
+          () => stopping,
+          (result) => {
+            if (!opts.json) console.log(`✓ [${new Date().toISOString()}] ${describe(result)}`);
+            else console.log(JSON.stringify({ ts: new Date().toISOString(), ...result }));
+            // #537: journal/warn only in the continuous loop — the actual
+            // `npm i -g` shell-out (up to UPGRADE_TIMEOUT_MS) only runs from
+            // the cron-driven --once path below; running it here would stall
+            // reconciliation for however long the install takes. Fire-and-
+            // forget: bounded by the check's own short network timeout, never
+            // blocks the next tick (onTick is synchronous by contract).
+            void checkAndHandleEngineStaleness(store, deps.journal, false, upgradeExec).catch(
+              () => {}
+            );
+          }
+        );
+        console.log('⏹ Engine stopped');
+      } finally {
+        store.releaseEngineLease(acquisition.lease);
+      }
     });
 }
 

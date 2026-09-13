@@ -98,6 +98,15 @@ describe('buildStatusReport', () => {
     expect(report.runnable_units).toEqual([]);
   });
 
+  it('includes the current engine lease holder and liveness', () => {
+    const report = buildStatusReport(seeded(), { max_slots: 3 }, 'p', {
+      pid: 1234,
+      pid_start: 5678,
+      alive: true,
+    });
+    expect(report.engine_lease).toEqual({ pid: 1234, pid_start: 5678, alive: true });
+  });
+
   it('#505: surfaces the dispatch-health counters', () => {
     let state = seeded();
     state = {

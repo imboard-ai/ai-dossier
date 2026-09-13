@@ -50,6 +50,7 @@ import {
   SchedStore,
   type SpawnDeps,
   type SuiteResult,
+  schedRunsLogPath,
   setPaused,
   tick,
   transitionBatch,
@@ -930,6 +931,66 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(unitFailed[0]?.issue).toBe(941);
     expect(memberAdvanced).toHaveLength(1);
     expect(memberAdvanced[0]?.issue).toBe(941);
+  }, 30_000);
+
+  it('#725: concurrent engine starts process an externally completed batch member once', () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1 });
+    h.enqueue([
+      { issue: 941, mode: 'slot', batch: 'b-engine-lease', anchor: 940, tier: 'mid' },
+      { issue: 942, mode: 'slot', batch: 'b-engine-lease', tier: 'mid' },
+    ]);
+    h.tick(); // batch setup and member 941 dispatch
+
+    // The member's agent is still running, but its completed milestone arrives
+    // from the shared ground-truth source before either engine's next tick.
+    fs.writeFileSync(
+      path.join(h.truthDir, '941.json'),
+      JSON.stringify({
+        phase: 'review',
+        status: 'done',
+        run: 'r-941-external',
+        at: new Date().toISOString(),
+        keys: { mode: 'slot', batch: 'b-engine-lease' },
+      })
+    );
+
+    // These are independent engine lifecycles, not two calls through one store
+    // object. Their overlapping starts share only the on-disk project state.
+    const firstEngine = new SchedStore(h.store.dir);
+    const secondEngine = new SchedStore(h.store.dir);
+    const startOnce = (store: SchedStore, reconcile: () => void): boolean => {
+      const acquisition = store.acquireEngineLease();
+      if (!acquisition.acquired) return false;
+      try {
+        reconcile();
+        return true;
+      } finally {
+        store.releaseEngineLease(acquisition.lease);
+      }
+    };
+    let excludedEngineReconciled = false;
+    const winnerStarted = startOnce(firstEngine, () => {
+      // Start the second engine while the first lifecycle still owns the lease.
+      const loserStarted = startOnce(secondEngine, () => {
+        excludedEngineReconciled = true;
+        h.tick();
+      });
+      expect(loserStarted).toBe(false);
+      h.tick();
+    });
+
+    expect(winnerStarted).toBe(true);
+    expect(excludedEngineReconciled).toBe(false);
+
+    const events = h.deps.journal.read();
+    expect(
+      events.filter((e) => e.event === 'external-advance' && e.unit === 'batch:b-engine-lease')
+    ).toHaveLength(1);
+    expect(
+      events.filter((e) => e.event === 'run-log-recorded' && e.unit === 'batch:b-engine-lease')
+    ).toHaveLength(1);
+    expect(fs.readFileSync(schedRunsLogPath(h.homeDir), 'utf8').trim().split('\n')).toHaveLength(1);
   }, 30_000);
 
   it('#613 AC4: a 4-member batch evicting members 1-3 in sequence names each record after its OWN member, never the previously evicted one', async () => {
