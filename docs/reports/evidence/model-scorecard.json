@@ -1,7 +1,7 @@
 {
-  "generatedAt": "2026-09-07T05:00:37.840Z",
-  "windowStart": "2026-08-08",
-  "windowEnd": "2026-09-07",
+  "generatedAt": "2026-09-14T05:00:37.968Z",
+  "windowStart": "2026-08-15",
+  "windowEnd": "2026-09-14",
   "windowDays": 30,
   "since": null,
   "buckets": [
@@ -151,10 +151,10 @@
       "model": "<unknown>",
       "repo": "imboard-ai/imboard-monorepo",
       "tier": "<unknown>",
-      "n": 56,
-      "delivered": 14,
-      "blocked": 8,
-      "deliveryRate": 0.25,
+      "n": 70,
+      "delivered": 18,
+      "blocked": 12,
+      "deliveryRate": 0.2571428571428571,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -162,7 +162,7 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 117.10833333333333,
+      "medianWallClockMinutes": 124.28333333333333,
       "acMet": 74,
       "acTotal": 75,
       "conformanceRate": 0.9866666666666667,
@@ -173,36 +173,36 @@
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 132,
+      "reviewFixed": 150,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 8.8,
+      "reviewFixedPerIssue": 7.5,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 15,
+      "reviewSamples": 20,
       "phaseMedians": [
         {
           "phase": "batch-review",
-          "n": 1,
-          "medianSeconds": 4121
+          "n": 2,
+          "medianSeconds": 5295.5
         },
         {
           "phase": "implement",
-          "n": 14,
-          "medianSeconds": 2713
+          "n": 18,
+          "medianSeconds": 2937
         },
         {
           "phase": "batch-validate",
-          "n": 6,
-          "medianSeconds": 1968
+          "n": 9,
+          "medianSeconds": 2020
         },
         {
           "phase": "merge-wait",
-          "n": 14,
-          "medianSeconds": 1848
+          "n": 18,
+          "medianSeconds": 1934.5
         },
         {
           "phase": "review",
-          "n": 14,
-          "medianSeconds": 1249.5
+          "n": 19,
+          "medianSeconds": 980
         },
         {
           "phase": "batch-report",
@@ -211,13 +211,13 @@
         },
         {
           "phase": "plan",
-          "n": 14,
-          "medianSeconds": 461.5
+          "n": 18,
+          "medianSeconds": 401.5
         },
         {
           "phase": "setup",
-          "n": 13,
-          "medianSeconds": 311
+          "n": 17,
+          "medianSeconds": 278
         },
         {
           "phase": "batch-ship",
@@ -226,13 +226,13 @@
         },
         {
           "phase": "ship",
-          "n": 15,
-          "medianSeconds": 101
+          "n": 19,
+          "medianSeconds": 77
         },
         {
           "phase": "report",
-          "n": 14,
-          "medianSeconds": 49.5
+          "n": 18,
+          "medianSeconds": 43
         },
         {
           "phase": "classify",
@@ -245,8 +245,8 @@
     {
       "model": "<unknown>",
       "repo": "imboard-ai/imboard-monorepo",
-      "tier": "mid",
-      "n": 2,
+      "tier": "mechanical",
+      "n": 1,
       "delivered": 0,
       "blocked": 0,
       "deliveryRate": 0,
@@ -268,11 +268,53 @@
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 4,
+      "reviewFixed": 0,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 2,
+      "reviewFixedPerIssue": 0,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 2,
+      "reviewSamples": 1,
+      "phaseMedians": [
+        {
+          "phase": "review",
+          "n": 1,
+          "medianSeconds": 48
+        }
+      ],
+      "agentClis": [
+        "opencode"
+      ]
+    },
+    {
+      "model": "<unknown>",
+      "repo": "imboard-ai/imboard-monorepo",
+      "tier": "mid",
+      "n": 4,
+      "delivered": 0,
+      "blocked": 0,
+      "deliveryRate": 0,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": null,
+      "billableTokensPerDeliveredIssue": null,
+      "tokenSamples": 0,
+      "cacheTokenSamples": 0,
+      "medianWallClockMinutes": null,
+      "acMet": null,
+      "acTotal": null,
+      "conformanceRate": null,
+      "conformanceSamples": 0,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 6,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 1.5,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 4,
       "phaseMedians": [
         {
           "phase": "implement",
@@ -281,12 +323,13 @@
         },
         {
           "phase": "review",
-          "n": 2,
+          "n": 4,
           "medianSeconds": 1067
         }
       ],
       "agentClis": [
-        "claude"
+        "claude",
+        "opencode"
       ]
     },
     {
@@ -368,10 +411,10 @@
       "model": "claude-fable-5-1",
       "repo": "imboard-ai/imboard-monorepo",
       "tier": "<unknown>",
-      "n": 1,
-      "delivered": 0,
+      "n": 7,
+      "delivered": 7,
       "blocked": 0,
-      "deliveryRate": 0,
+      "deliveryRate": 1,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -379,7 +422,77 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": null,
+      "medianWallClockMinutes": 182.05,
+      "acMet": 29,
+      "acTotal": 29,
+      "conformanceRate": 1,
+      "conformanceSamples": 4,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 97,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 16.166666666666668,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 6,
+      "phaseMedians": [
+        {
+          "phase": "implement",
+          "n": 7,
+          "medianSeconds": 2455
+        },
+        {
+          "phase": "merge-wait",
+          "n": 7,
+          "medianSeconds": 1506
+        },
+        {
+          "phase": "review",
+          "n": 6,
+          "medianSeconds": 945
+        },
+        {
+          "phase": "plan",
+          "n": 7,
+          "medianSeconds": 441
+        },
+        {
+          "phase": "setup",
+          "n": 7,
+          "medianSeconds": 84
+        },
+        {
+          "phase": "ship",
+          "n": 7,
+          "medianSeconds": 75
+        },
+        {
+          "phase": "report",
+          "n": 7,
+          "medianSeconds": 2
+        }
+      ],
+      "agentClis": []
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "repo": "imboard-ai/imboard-monorepo",
+      "tier": "mechanical",
+      "n": 1,
+      "delivered": 1,
+      "blocked": 0,
+      "deliveryRate": 1,
+      "costPerDeliveredUsd": 1.5638669999999997,
+      "costSamples": 1,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": 86.0966,
+      "billableTokensPerDeliveredIssue": 7602537,
+      "tokenSamples": 1,
+      "cacheTokenSamples": 1,
+      "medianWallClockMinutes": 1075.6333333333334,
       "acMet": null,
       "acTotal": null,
       "conformanceRate": null,
@@ -390,33 +503,55 @@
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": null,
-      "reviewEscalated": null,
-      "reviewFixedPerIssue": null,
-      "reviewEscalatedPerIssue": null,
-      "reviewSamples": 0,
+      "reviewFixed": 1,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 1,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 1,
       "phaseMedians": [
         {
-          "phase": "plan",
+          "phase": "report",
           "n": 1,
-          "medianSeconds": 613
+          "medianSeconds": 63152
+        },
+        {
+          "phase": "implement",
+          "n": 1,
+          "medianSeconds": 525
+        },
+        {
+          "phase": "review",
+          "n": 1,
+          "medianSeconds": 420
         },
         {
           "phase": "setup",
           "n": 1,
-          "medianSeconds": 84
+          "medianSeconds": 281
+        },
+        {
+          "phase": "plan",
+          "n": 1,
+          "medianSeconds": 121
+        },
+        {
+          "phase": "ship",
+          "n": 1,
+          "medianSeconds": 39
         }
       ],
-      "agentClis": []
+      "agentClis": [
+        "claude"
+      ]
     },
     {
       "model": "claude-opus-5",
       "repo": "imboard-ai/ai-dossier",
       "tier": "<unknown>",
-      "n": 3,
-      "delivered": 2,
+      "n": 5,
+      "delivered": 4,
       "blocked": 1,
-      "deliveryRate": 0.6666666666666666,
+      "deliveryRate": 0.8,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -425,56 +560,56 @@
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
       "medianWallClockMinutes": 52.84166666666667,
-      "acMet": 11,
-      "acTotal": 11,
+      "acMet": 26,
+      "acTotal": 26,
       "conformanceRate": 1,
-      "conformanceSamples": 2,
+      "conformanceSamples": 4,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 57,
+      "reviewFixed": 129,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 28.5,
+      "reviewFixedPerIssue": 32.25,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 2,
+      "reviewSamples": 4,
       "phaseMedians": [
         {
           "phase": "review",
-          "n": 2,
-          "medianSeconds": 1684
+          "n": 4,
+          "medianSeconds": 1510
         },
         {
           "phase": "merge-wait",
-          "n": 2,
-          "medianSeconds": 424
+          "n": 4,
+          "medianSeconds": 568.5
         },
         {
           "phase": "implement",
-          "n": 2,
+          "n": 4,
           "medianSeconds": 340
         },
         {
+          "phase": "plan",
+          "n": 4,
+          "medianSeconds": 229
+        },
+        {
           "phase": "report",
-          "n": 2,
-          "medianSeconds": 253
+          "n": 4,
+          "medianSeconds": 191.5
         },
         {
           "phase": "setup",
-          "n": 2,
-          "medianSeconds": 213.5
-        },
-        {
-          "phase": "plan",
-          "n": 2,
-          "medianSeconds": 166.5
+          "n": 4,
+          "medianSeconds": 115.5
         },
         {
           "phase": "ship",
-          "n": 2,
-          "medianSeconds": 89.5
+          "n": 4,
+          "medianSeconds": 107.5
         }
       ],
       "agentClis": []
@@ -555,10 +690,10 @@
       "model": "claude-opus-5",
       "repo": "imboard-ai/imboard-monorepo",
       "tier": "<unknown>",
-      "n": 28,
-      "delivered": 28,
-      "blocked": 0,
-      "deliveryRate": 1,
+      "n": 38,
+      "delivered": 37,
+      "blocked": 1,
+      "deliveryRate": 0.9736842105263158,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -566,65 +701,137 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 128.19166666666666,
-      "acMet": 79,
-      "acTotal": 80,
-      "conformanceRate": 0.9875,
-      "conformanceSamples": 19,
+      "medianWallClockMinutes": 131.75,
+      "acMet": 142,
+      "acTotal": 143,
+      "conformanceRate": 0.993006993006993,
+      "conformanceSamples": 24,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 490,
+      "reviewFixed": 706,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 17.5,
+      "reviewFixedPerIssue": 19.08108108108108,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 28,
+      "reviewSamples": 37,
       "phaseMedians": [
         {
+          "phase": "review",
+          "n": 38,
+          "medianSeconds": 2353.5
+        },
+        {
           "phase": "implement",
-          "n": 27,
-          "medianSeconds": 2082
+          "n": 37,
+          "medianSeconds": 2215
         },
         {
           "phase": "merge-wait",
-          "n": 17,
-          "medianSeconds": 1959
-        },
-        {
-          "phase": "review",
-          "n": 28,
-          "medianSeconds": 1859
+          "n": 24,
+          "medianSeconds": 1958.5
         },
         {
           "phase": "ship",
-          "n": 28,
-          "medianSeconds": 746
+          "n": 37,
+          "medianSeconds": 747
         },
         {
           "phase": "gate",
-          "n": 9,
-          "medianSeconds": 529
+          "n": 11,
+          "medianSeconds": 588
         },
         {
           "phase": "plan",
-          "n": 28,
-          "medianSeconds": 276
+          "n": 38,
+          "medianSeconds": 322
         },
         {
           "phase": "setup",
-          "n": 28,
-          "medianSeconds": 129.5
+          "n": 38,
+          "medianSeconds": 98.5
         },
         {
           "phase": "report",
-          "n": 28,
-          "medianSeconds": 49.5
+          "n": 37,
+          "medianSeconds": 69
         }
       ],
       "agentClis": []
+    },
+    {
+      "model": "claude-opus-5",
+      "repo": "imboard-ai/imboard-monorepo",
+      "tier": "mechanical",
+      "n": 1,
+      "delivered": 1,
+      "blocked": 0,
+      "deliveryRate": 1,
+      "costPerDeliveredUsd": 25.2410878,
+      "costSamples": 1,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": 396.7182,
+      "billableTokensPerDeliveredIssue": 45852474,
+      "tokenSamples": 1,
+      "cacheTokenSamples": 1,
+      "medianWallClockMinutes": 1616.8,
+      "acMet": 7,
+      "acTotal": 7,
+      "conformanceRate": 1,
+      "conformanceSamples": 1,
+      "stalls": 0,
+      "escalations": 1,
+      "unverifiedExits": 1,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 1,
+      "unverifiedExitsPerIssue": 1,
+      "reviewFixed": 23,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 23,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 1,
+      "phaseMedians": [
+        {
+          "phase": "gate",
+          "n": 1,
+          "medianSeconds": 64247
+        },
+        {
+          "phase": "report",
+          "n": 1,
+          "medianSeconds": 21153
+        },
+        {
+          "phase": "ship",
+          "n": 1,
+          "medianSeconds": 6427
+        },
+        {
+          "phase": "implement",
+          "n": 1,
+          "medianSeconds": 2362
+        },
+        {
+          "phase": "review",
+          "n": 1,
+          "medianSeconds": 2260
+        },
+        {
+          "phase": "plan",
+          "n": 1,
+          "medianSeconds": 495
+        },
+        {
+          "phase": "setup",
+          "n": 1,
+          "medianSeconds": 64
+        }
+      ],
+      "agentClis": [
+        "claude"
+      ]
     },
     {
       "model": "claude-opus-5",
@@ -827,8 +1034,8 @@
       "model": "claude-sonnet-5",
       "repo": "imboard-ai/ai-dossier",
       "tier": "<unknown>",
-      "n": 1,
-      "delivered": 1,
+      "n": 7,
+      "delivered": 7,
       "blocked": 0,
       "deliveryRate": 1,
       "costPerDeliveredUsd": null,
@@ -838,57 +1045,62 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 29.133333333333333,
-      "acMet": null,
-      "acTotal": null,
-      "conformanceRate": null,
-      "conformanceSamples": 0,
+      "medianWallClockMinutes": 33.733333333333334,
+      "acMet": 27,
+      "acTotal": 27,
+      "conformanceRate": 1,
+      "conformanceSamples": 5,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 8,
+      "reviewFixed": 51,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 8,
+      "reviewFixedPerIssue": 7.285714285714286,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 1,
+      "reviewSamples": 7,
       "phaseMedians": [
         {
           "phase": "review",
-          "n": 1,
-          "medianSeconds": 847
-        },
-        {
-          "phase": "plan",
-          "n": 1,
-          "medianSeconds": 248
-        },
-        {
-          "phase": "implement",
-          "n": 1,
-          "medianSeconds": 245
-        },
-        {
-          "phase": "setup",
-          "n": 1,
-          "medianSeconds": 161
-        },
-        {
-          "phase": "merge-wait",
-          "n": 1,
-          "medianSeconds": 160
-        },
-        {
-          "phase": "ship",
-          "n": 1,
-          "medianSeconds": 58
+          "n": 7,
+          "medianSeconds": 771
         },
         {
           "phase": "report",
-          "n": 1,
-          "medianSeconds": 29
+          "n": 7,
+          "medianSeconds": 288
+        },
+        {
+          "phase": "implement",
+          "n": 7,
+          "medianSeconds": 245
+        },
+        {
+          "phase": "ship",
+          "n": 7,
+          "medianSeconds": 237
+        },
+        {
+          "phase": "gate",
+          "n": 2,
+          "medianSeconds": 227.5
+        },
+        {
+          "phase": "plan",
+          "n": 7,
+          "medianSeconds": 213
+        },
+        {
+          "phase": "merge-wait",
+          "n": 5,
+          "medianSeconds": 197
+        },
+        {
+          "phase": "setup",
+          "n": 7,
+          "medianSeconds": 64
         }
       ],
       "agentClis": []
@@ -1113,10 +1325,10 @@
       "model": "claude-sonnet-5",
       "repo": "imboard-ai/imboard-monorepo",
       "tier": "<unknown>",
-      "n": 30,
-      "delivered": 28,
+      "n": 34,
+      "delivered": 32,
       "blocked": 0,
-      "deliveryRate": 0.9333333333333333,
+      "deliveryRate": 0.9411764705882353,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -1124,22 +1336,22 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 198.25833333333333,
-      "acMet": 113,
-      "acTotal": 116,
-      "conformanceRate": 0.9741379310344828,
-      "conformanceSamples": 28,
+      "medianWallClockMinutes": 187.425,
+      "acMet": 123,
+      "acTotal": 126,
+      "conformanceRate": 0.9761904761904762,
+      "conformanceSamples": 30,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 246,
+      "reviewFixed": 256,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 8.2,
+      "reviewFixedPerIssue": 7.757575757575758,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 30,
+      "reviewSamples": 33,
       "phaseMedians": [
         {
           "phase": "gate",
@@ -1148,37 +1360,37 @@
         },
         {
           "phase": "merge-wait",
-          "n": 23,
+          "n": 27,
           "medianSeconds": 1909
         },
         {
-          "phase": "review",
-          "n": 30,
-          "medianSeconds": 1647.5
+          "phase": "implement",
+          "n": 33,
+          "medianSeconds": 1474
         },
         {
-          "phase": "implement",
-          "n": 30,
-          "medianSeconds": 1521
+          "phase": "review",
+          "n": 33,
+          "medianSeconds": 1383
         },
         {
           "phase": "plan",
-          "n": 30,
-          "medianSeconds": 258
+          "n": 33,
+          "medianSeconds": 253
         },
         {
           "phase": "ship",
-          "n": 30,
+          "n": 34,
           "medianSeconds": 202
         },
         {
           "phase": "setup",
-          "n": 30,
-          "medianSeconds": 98.5
+          "n": 33,
+          "medianSeconds": 99
         },
         {
           "phase": "report",
-          "n": 27,
+          "n": 31,
           "medianSeconds": 49
         }
       ],
@@ -1188,33 +1400,33 @@
       "model": "claude-sonnet-5",
       "repo": "imboard-ai/imboard-monorepo",
       "tier": "mechanical",
-      "n": 17,
-      "delivered": 16,
+      "n": 20,
+      "delivered": 19,
       "blocked": 0,
-      "deliveryRate": 0.9411764705882353,
-      "costPerDeliveredUsd": 28.44225630625,
-      "costSamples": 16,
+      "deliveryRate": 0.95,
+      "costPerDeliveredUsd": 30.575539655263157,
+      "costSamples": 19,
       "costFromRunLogSamples": 5,
-      "medianApiMinutes": 67.09563333333334,
-      "billableTokensPerDeliveredIssue": 48511450,
-      "tokenSamples": 16,
-      "cacheTokenSamples": 16,
-      "medianWallClockMinutes": 285.41666666666663,
-      "acMet": 61,
-      "acTotal": 63,
-      "conformanceRate": 0.9682539682539683,
-      "conformanceSamples": 16,
+      "medianApiMinutes": 91.03326666666666,
+      "billableTokensPerDeliveredIssue": 58773047.578947365,
+      "tokenSamples": 19,
+      "cacheTokenSamples": 19,
+      "medianWallClockMinutes": 305.81666666666666,
+      "acMet": 76,
+      "acTotal": 78,
+      "conformanceRate": 0.9743589743589743,
+      "conformanceSamples": 19,
       "stalls": 0,
-      "escalations": 16,
-      "unverifiedExits": 7,
+      "escalations": 22,
+      "unverifiedExits": 13,
       "stallsPerIssue": 0,
-      "escalationsPerIssue": 0.9411764705882353,
-      "unverifiedExitsPerIssue": 0.4117647058823529,
-      "reviewFixed": 247,
+      "escalationsPerIssue": 1.1,
+      "unverifiedExitsPerIssue": 0.65,
+      "reviewFixed": 288,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 14.529411764705882,
+      "reviewFixedPerIssue": 14.4,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 17,
+      "reviewSamples": 20,
       "phaseMedians": [
         {
           "phase": "merge-wait",
@@ -1223,38 +1435,38 @@
         },
         {
           "phase": "review",
-          "n": 17,
-          "medianSeconds": 2472
-        },
-        {
-          "phase": "implement",
-          "n": 16,
-          "medianSeconds": 1821.5
-        },
-        {
-          "phase": "gate",
-          "n": 9,
-          "medianSeconds": 1697
+          "n": 20,
+          "medianSeconds": 2416
         },
         {
           "phase": "report",
-          "n": 16,
-          "medianSeconds": 1689.5
+          "n": 19,
+          "medianSeconds": 2136
+        },
+        {
+          "phase": "implement",
+          "n": 19,
+          "medianSeconds": 2075
+        },
+        {
+          "phase": "gate",
+          "n": 10,
+          "medianSeconds": 1287
         },
         {
           "phase": "plan",
-          "n": 17,
-          "medianSeconds": 443
+          "n": 20,
+          "medianSeconds": 478
         },
         {
           "phase": "setup",
-          "n": 17,
-          "medianSeconds": 166
+          "n": 20,
+          "medianSeconds": 164.5
         },
         {
           "phase": "ship",
-          "n": 17,
-          "medianSeconds": 152
+          "n": 20,
+          "medianSeconds": 160
         }
       ],
       "agentClis": [
@@ -1266,7 +1478,7 @@
       "model": "claude-sonnet-5",
       "repo": "imboard-ai/imboard-monorepo",
       "tier": "mid",
-      "n": 2,
+      "n": 3,
       "delivered": 0,
       "blocked": 1,
       "deliveryRate": 0,
@@ -1286,7 +1498,7 @@
       "escalations": 1,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
-      "escalationsPerIssue": 0.5,
+      "escalationsPerIssue": 0.3333333333333333,
       "unverifiedExitsPerIssue": 0,
       "reviewFixed": 3,
       "reviewEscalated": 0,
@@ -1296,8 +1508,8 @@
       "phaseMedians": [
         {
           "phase": "plan",
-          "n": 1,
-          "medianSeconds": 4769
+          "n": 2,
+          "medianSeconds": 2528
         },
         {
           "phase": "review",
@@ -1311,8 +1523,8 @@
         },
         {
           "phase": "setup",
-          "n": 1,
-          "medianSeconds": 86
+          "n": 2,
+          "medianSeconds": 114
         },
         {
           "phase": "implement",
@@ -1328,7 +1540,7 @@
       "model": "claude-sonnet-5",
       "repo": "imboard-ai/imboard-monorepo",
       "tier": "strong",
-      "n": 4,
+      "n": 5,
       "delivered": 0,
       "blocked": 1,
       "deliveryRate": 0,
@@ -1345,11 +1557,11 @@
       "conformanceRate": 1,
       "conformanceSamples": 2,
       "stalls": 0,
-      "escalations": 4,
-      "unverifiedExits": 3,
+      "escalations": 5,
+      "unverifiedExits": 4,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 1,
-      "unverifiedExitsPerIssue": 0.75,
+      "unverifiedExitsPerIssue": 0.8,
       "reviewFixed": 29,
       "reviewEscalated": 0,
       "reviewFixedPerIssue": 9.666666666666666,
@@ -1358,8 +1570,8 @@
       "phaseMedians": [
         {
           "phase": "implement",
-          "n": 3,
-          "medianSeconds": 1346
+          "n": 4,
+          "medianSeconds": 1800.5
         },
         {
           "phase": "review",
@@ -1372,19 +1584,19 @@
           "medianSeconds": 525
         },
         {
+          "phase": "setup",
+          "n": 4,
+          "medianSeconds": 500
+        },
+        {
           "phase": "gate",
           "n": 2,
           "medianSeconds": 444
         },
         {
-          "phase": "setup",
-          "n": 3,
-          "medianSeconds": 411
-        },
-        {
           "phase": "plan",
-          "n": 3,
-          "medianSeconds": 309
+          "n": 4,
+          "medianSeconds": 343.5
         }
       ],
       "agentClis": [
@@ -1540,10 +1752,10 @@
       "model": "glm-5.3",
       "repo": "imboard-ai/imboard-monorepo",
       "tier": "<unknown>",
-      "n": 26,
-      "delivered": 24,
+      "n": 28,
+      "delivered": 26,
       "blocked": 2,
-      "deliveryRate": 0.9230769230769231,
+      "deliveryRate": 0.9285714285714286,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -1552,30 +1764,30 @@
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
       "medianWallClockMinutes": 173.25833333333333,
-      "acMet": 115,
-      "acTotal": 117,
-      "conformanceRate": 0.9829059829059829,
-      "conformanceSamples": 22,
+      "acMet": 123,
+      "acTotal": 127,
+      "conformanceRate": 0.968503937007874,
+      "conformanceSamples": 24,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 213,
+      "reviewFixed": 227,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 8.875,
+      "reviewFixedPerIssue": 8.73076923076923,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 24,
+      "reviewSamples": 26,
       "phaseMedians": [
         {
           "phase": "implement",
-          "n": 24,
+          "n": 26,
           "medianSeconds": 2090
         },
         {
           "phase": "merge-wait",
-          "n": 20,
+          "n": 22,
           "medianSeconds": 1972.5
         },
         {
@@ -1585,27 +1797,27 @@
         },
         {
           "phase": "review",
-          "n": 24,
+          "n": 26,
           "medianSeconds": 1015
         },
         {
           "phase": "ship",
-          "n": 24,
-          "medianSeconds": 407.5
+          "n": 26,
+          "medianSeconds": 438.5
         },
         {
           "phase": "plan",
-          "n": 25,
-          "medianSeconds": 393
+          "n": 27,
+          "medianSeconds": 352
         },
         {
           "phase": "setup",
-          "n": 25,
-          "medianSeconds": 74
+          "n": 27,
+          "medianSeconds": 76
         },
         {
           "phase": "report",
-          "n": 24,
+          "n": 26,
           "medianSeconds": 74
         }
       ],
@@ -1732,12 +1944,12 @@
     },
     {
       "model": "glm-5.3-flash",
-      "repo": "imboard-ai/imboard-monorepo",
+      "repo": "imboard-ai/ai-dossier",
       "tier": "<unknown>",
-      "n": 13,
-      "delivered": 12,
+      "n": 14,
+      "delivered": 13,
       "blocked": 0,
-      "deliveryRate": 0.9230769230769231,
+      "deliveryRate": 0.9285714285714286,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -1745,62 +1957,187 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 235.36666666666667,
-      "acMet": 61,
-      "acTotal": 62,
-      "conformanceRate": 0.9838709677419355,
-      "conformanceSamples": 11,
+      "medianWallClockMinutes": 57.6,
+      "acMet": 37,
+      "acTotal": 37,
+      "conformanceRate": 1,
+      "conformanceSamples": 9,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 132,
+      "reviewFixed": 65,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 11,
+      "reviewFixedPerIssue": 5,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 12,
+      "reviewSamples": 13,
       "phaseMedians": [
         {
-          "phase": "gate",
-          "n": 2,
-          "medianSeconds": 8788
-        },
-        {
           "phase": "implement",
-          "n": 12,
-          "medianSeconds": 7042.5
+          "n": 13,
+          "medianSeconds": 1237
         },
         {
           "phase": "merge-wait",
-          "n": 10,
-          "medianSeconds": 3452.5
-        },
-        {
-          "phase": "review",
-          "n": 12,
-          "medianSeconds": 1239
+          "n": 7,
+          "medianSeconds": 686
         },
         {
           "phase": "plan",
-          "n": 13,
-          "medianSeconds": 465
+          "n": 14,
+          "medianSeconds": 577.5
+        },
+        {
+          "phase": "gate",
+          "n": 7,
+          "medianSeconds": 293
         },
         {
           "phase": "ship",
-          "n": 12,
-          "medianSeconds": 390.5
+          "n": 13,
+          "medianSeconds": 248
+        },
+        {
+          "phase": "review",
+          "n": 13,
+          "medianSeconds": 228
         },
         {
           "phase": "setup",
           "n": 13,
-          "medianSeconds": 104
+          "medianSeconds": 115
         },
         {
           "phase": "report",
-          "n": 12,
-          "medianSeconds": 70.5
+          "n": 13,
+          "medianSeconds": 88
+        }
+      ],
+      "agentClis": []
+    },
+    {
+      "model": "glm-5.3-flash",
+      "repo": "imboard-ai/imboard-monorepo",
+      "tier": "<unknown>",
+      "n": 17,
+      "delivered": 17,
+      "blocked": 0,
+      "deliveryRate": 1,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": null,
+      "billableTokensPerDeliveredIssue": null,
+      "tokenSamples": 0,
+      "cacheTokenSamples": 0,
+      "medianWallClockMinutes": 215.21666666666667,
+      "acMet": 84,
+      "acTotal": 88,
+      "conformanceRate": 0.9545454545454546,
+      "conformanceSamples": 16,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 160,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 9.411764705882353,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 17,
+      "phaseMedians": [
+        {
+          "phase": "gate",
+          "n": 3,
+          "medianSeconds": 8449
+        },
+        {
+          "phase": "implement",
+          "n": 17,
+          "medianSeconds": 5816
+        },
+        {
+          "phase": "merge-wait",
+          "n": 14,
+          "medianSeconds": 2150.5
+        },
+        {
+          "phase": "review",
+          "n": 17,
+          "medianSeconds": 1036
+        },
+        {
+          "phase": "plan",
+          "n": 17,
+          "medianSeconds": 452
+        },
+        {
+          "phase": "ship",
+          "n": 17,
+          "medianSeconds": 442
+        },
+        {
+          "phase": "setup",
+          "n": 17,
+          "medianSeconds": 111
+        },
+        {
+          "phase": "report",
+          "n": 17,
+          "medianSeconds": 89
+        }
+      ],
+      "agentClis": []
+    },
+    {
+      "model": "gpt-5.6-luna",
+      "repo": "imboard-ai/ai-dossier",
+      "tier": "<unknown>",
+      "n": 1,
+      "delivered": 0,
+      "blocked": 0,
+      "deliveryRate": 0,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": null,
+      "billableTokensPerDeliveredIssue": null,
+      "tokenSamples": 0,
+      "cacheTokenSamples": 0,
+      "medianWallClockMinutes": null,
+      "acMet": null,
+      "acTotal": null,
+      "conformanceRate": null,
+      "conformanceSamples": 0,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": null,
+      "reviewEscalated": null,
+      "reviewFixedPerIssue": null,
+      "reviewEscalatedPerIssue": null,
+      "reviewSamples": 0,
+      "phaseMedians": [
+        {
+          "phase": "implement",
+          "n": 1,
+          "medianSeconds": 5477
+        },
+        {
+          "phase": "plan",
+          "n": 1,
+          "medianSeconds": 4518
+        },
+        {
+          "phase": "setup",
+          "n": 1,
+          "medianSeconds": 118
         }
       ],
       "agentClis": []
@@ -1882,12 +2219,12 @@
     },
     {
       "model": "gpt-5.6-terra",
-      "repo": "imboard-ai/imboard-monorepo",
+      "repo": "imboard-ai/ai-dossier",
       "tier": "<unknown>",
-      "n": 4,
-      "delivered": 3,
+      "n": 12,
+      "delivered": 7,
       "blocked": 1,
-      "deliveryRate": 0.75,
+      "deliveryRate": 0.5833333333333334,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -1895,9 +2232,154 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 110.5,
-      "acMet": 4,
-      "acTotal": 4,
+      "medianWallClockMinutes": 32.81666666666667,
+      "acMet": 42,
+      "acTotal": 43,
+      "conformanceRate": 0.9767441860465116,
+      "conformanceSamples": 8,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 31,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 3.875,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 8,
+      "phaseMedians": [
+        {
+          "phase": "gate",
+          "n": 1,
+          "medianSeconds": 486
+        },
+        {
+          "phase": "implement",
+          "n": 10,
+          "medianSeconds": 484
+        },
+        {
+          "phase": "review",
+          "n": 8,
+          "medianSeconds": 383.5
+        },
+        {
+          "phase": "merge-wait",
+          "n": 7,
+          "medianSeconds": 357
+        },
+        {
+          "phase": "plan",
+          "n": 12,
+          "medianSeconds": 137.5
+        },
+        {
+          "phase": "setup",
+          "n": 12,
+          "medianSeconds": 82
+        },
+        {
+          "phase": "ship",
+          "n": 8,
+          "medianSeconds": 82
+        },
+        {
+          "phase": "report",
+          "n": 7,
+          "medianSeconds": 22
+        }
+      ],
+      "agentClis": []
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "repo": "imboard-ai/imboard-monorepo",
+      "tier": "<unknown>",
+      "n": 14,
+      "delivered": 9,
+      "blocked": 2,
+      "deliveryRate": 0.6428571428571429,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": null,
+      "billableTokensPerDeliveredIssue": null,
+      "tokenSamples": 0,
+      "cacheTokenSamples": 0,
+      "medianWallClockMinutes": 102.06666666666666,
+      "acMet": 9,
+      "acTotal": 9,
+      "conformanceRate": 1,
+      "conformanceSamples": 2,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 15,
+      "reviewEscalated": 2,
+      "reviewFixedPerIssue": 1.6666666666666667,
+      "reviewEscalatedPerIssue": 0.2222222222222222,
+      "reviewSamples": 9,
+      "phaseMedians": [
+        {
+          "phase": "implement",
+          "n": 12,
+          "medianSeconds": 2779.5
+        },
+        {
+          "phase": "merge-wait",
+          "n": 6,
+          "medianSeconds": 1325.5
+        },
+        {
+          "phase": "ship",
+          "n": 9,
+          "medianSeconds": 498
+        },
+        {
+          "phase": "setup",
+          "n": 14,
+          "medianSeconds": 371
+        },
+        {
+          "phase": "review",
+          "n": 9,
+          "medianSeconds": 296
+        },
+        {
+          "phase": "plan",
+          "n": 14,
+          "medianSeconds": 250
+        },
+        {
+          "phase": "report",
+          "n": 7,
+          "medianSeconds": 8
+        }
+      ],
+      "agentClis": []
+    },
+    {
+      "model": "gpt-5.6-terra",
+      "repo": "imboard-ai/imboard-monorepo",
+      "tier": "mechanical",
+      "n": 1,
+      "delivered": 1,
+      "blocked": 0,
+      "deliveryRate": 1,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": 78.09868333333333,
+      "billableTokensPerDeliveredIssue": 23354866,
+      "tokenSamples": 1,
+      "cacheTokenSamples": 1,
+      "medianWallClockMinutes": 886.75,
+      "acMet": 2,
+      "acTotal": 2,
       "conformanceRate": 1,
       "conformanceSamples": 1,
       "stalls": 0,
@@ -1908,44 +2390,116 @@
       "unverifiedExitsPerIssue": 0,
       "reviewFixed": 2,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 0.6666666666666666,
+      "reviewFixedPerIssue": 2,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 3,
+      "reviewSamples": 1,
       "phaseMedians": [
         {
-          "phase": "merge-wait",
-          "n": 3,
-          "medianSeconds": 1727
-        },
-        {
-          "phase": "plan",
-          "n": 4,
-          "medianSeconds": 977
-        },
-        {
-          "phase": "ship",
-          "n": 3,
-          "medianSeconds": 849
-        },
-        {
           "phase": "review",
-          "n": 3,
-          "medianSeconds": 296
+          "n": 1,
+          "medianSeconds": 50442
         },
         {
-          "phase": "setup",
-          "n": 4,
-          "medianSeconds": 90
-        },
-        {
-          "phase": "report",
-          "n": 3,
-          "medianSeconds": 22
+          "phase": "merge-wait",
+          "n": 1,
+          "medianSeconds": 1101
         },
         {
           "phase": "implement",
-          "n": 3,
-          "medianSeconds": 2
+          "n": 1,
+          "medianSeconds": 1085
+        },
+        {
+          "phase": "setup",
+          "n": 1,
+          "medianSeconds": 388
+        },
+        {
+          "phase": "plan",
+          "n": 1,
+          "medianSeconds": 166
+        },
+        {
+          "phase": "ship",
+          "n": 1,
+          "medianSeconds": 20
+        },
+        {
+          "phase": "report",
+          "n": 1,
+          "medianSeconds": 3
+        }
+      ],
+      "agentClis": [
+        "opencode"
+      ]
+    },
+    {
+      "model": "gpt-6-astra",
+      "repo": "imboard-ai/imboard-monorepo",
+      "tier": "<unknown>",
+      "n": 2,
+      "delivered": 1,
+      "blocked": 0,
+      "deliveryRate": 0.5,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": null,
+      "billableTokensPerDeliveredIssue": null,
+      "tokenSamples": 0,
+      "cacheTokenSamples": 0,
+      "medianWallClockMinutes": 55.11666666666667,
+      "acMet": 11,
+      "acTotal": 12,
+      "conformanceRate": 0.9166666666666666,
+      "conformanceSamples": 2,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 20,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 10,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 2,
+      "phaseMedians": [
+        {
+          "phase": "ship",
+          "n": 2,
+          "medianSeconds": 6744
+        },
+        {
+          "phase": "implement",
+          "n": 2,
+          "medianSeconds": 1730.5
+        },
+        {
+          "phase": "review",
+          "n": 2,
+          "medianSeconds": 1719.5
+        },
+        {
+          "phase": "merge-wait",
+          "n": 1,
+          "medianSeconds": 528
+        },
+        {
+          "phase": "setup",
+          "n": 2,
+          "medianSeconds": 420
+        },
+        {
+          "phase": "plan",
+          "n": 2,
+          "medianSeconds": 78.5
+        },
+        {
+          "phase": "report",
+          "n": 1,
+          "medianSeconds": 24
         }
       ],
       "agentClis": []
@@ -2141,10 +2695,10 @@
   "totals": [
     {
       "model": "<unknown>",
-      "n": 84,
-      "delivered": 20,
-      "blocked": 12,
-      "deliveryRate": 0.23809523809523808,
+      "n": 101,
+      "delivered": 24,
+      "blocked": 16,
+      "deliveryRate": 0.2376237623762376,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -2152,7 +2706,7 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 112.51666666666667,
+      "medianWallClockMinutes": 114.78333333333333,
       "acMet": 131,
       "acTotal": 133,
       "conformanceRate": 0.9849624060150376,
@@ -2163,36 +2717,36 @@
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 302,
+      "reviewFixed": 322,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 9.741935483870968,
+      "reviewFixedPerIssue": 8.256410256410257,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 31,
+      "reviewSamples": 39,
       "phaseMedians": [
         {
-          "phase": "batch-validate",
-          "n": 14,
-          "medianSeconds": 2092
+          "phase": "batch-review",
+          "n": 6,
+          "medianSeconds": 3011
         },
         {
-          "phase": "batch-review",
-          "n": 5,
-          "medianSeconds": 1901
+          "phase": "batch-validate",
+          "n": 17,
+          "medianSeconds": 2138
         },
         {
           "phase": "merge-wait",
-          "n": 16,
-          "medianSeconds": 1779.5
+          "n": 20,
+          "medianSeconds": 1896.5
         },
         {
           "phase": "implement",
-          "n": 26,
-          "medianSeconds": 1361.5
+          "n": 30,
+          "medianSeconds": 1431.5
         },
         {
           "phase": "review",
-          "n": 26,
-          "medianSeconds": 907.5
+          "n": 34,
+          "medianSeconds": 782
         },
         {
           "phase": "batch-report",
@@ -2201,13 +2755,13 @@
         },
         {
           "phase": "plan",
-          "n": 17,
-          "medianSeconds": 344
+          "n": 21,
+          "medianSeconds": 339
         },
         {
           "phase": "setup",
-          "n": 15,
-          "medianSeconds": 309
+          "n": 19,
+          "medianSeconds": 268
         },
         {
           "phase": "batch-ship",
@@ -2216,13 +2770,13 @@
         },
         {
           "phase": "ship",
-          "n": 17,
-          "medianSeconds": 93
+          "n": 21,
+          "medianSeconds": 77
         },
         {
           "phase": "report",
-          "n": 16,
-          "medianSeconds": 45.5
+          "n": 20,
+          "medianSeconds": 43
         },
         {
           "phase": "classify",
@@ -2231,15 +2785,16 @@
         }
       ],
       "agentClis": [
-        "claude"
+        "claude",
+        "opencode"
       ],
       "providers": [
         {
           "provider": "direct",
-          "n": 84,
-          "delivered": 20,
-          "blocked": 12,
-          "deliveryRate": 0.23809523809523808,
+          "n": 101,
+          "delivered": 24,
+          "blocked": 16,
+          "deliveryRate": 0.2376237623762376,
           "costPerDeliveredUsd": null,
           "costSamples": 0,
           "costFromRunLogSamples": 0,
@@ -2247,7 +2802,7 @@
           "billableTokensPerDeliveredIssue": null,
           "tokenSamples": 0,
           "cacheTokenSamples": 0,
-          "medianWallClockMinutes": 112.51666666666667,
+          "medianWallClockMinutes": 114.78333333333333,
           "acMet": 131,
           "acTotal": 133,
           "conformanceRate": 0.9849624060150376,
@@ -2258,36 +2813,36 @@
           "stallsPerIssue": 0,
           "escalationsPerIssue": 0,
           "unverifiedExitsPerIssue": 0,
-          "reviewFixed": 302,
+          "reviewFixed": 322,
           "reviewEscalated": 0,
-          "reviewFixedPerIssue": 9.741935483870968,
+          "reviewFixedPerIssue": 8.256410256410257,
           "reviewEscalatedPerIssue": 0,
-          "reviewSamples": 31,
+          "reviewSamples": 39,
           "phaseMedians": [
             {
-              "phase": "batch-validate",
-              "n": 14,
-              "medianSeconds": 2092
+              "phase": "batch-review",
+              "n": 6,
+              "medianSeconds": 3011
             },
             {
-              "phase": "batch-review",
-              "n": 5,
-              "medianSeconds": 1901
+              "phase": "batch-validate",
+              "n": 17,
+              "medianSeconds": 2138
             },
             {
               "phase": "merge-wait",
-              "n": 16,
-              "medianSeconds": 1779.5
+              "n": 20,
+              "medianSeconds": 1896.5
             },
             {
               "phase": "implement",
-              "n": 26,
-              "medianSeconds": 1361.5
+              "n": 30,
+              "medianSeconds": 1431.5
             },
             {
               "phase": "review",
-              "n": 26,
-              "medianSeconds": 907.5
+              "n": 34,
+              "medianSeconds": 782
             },
             {
               "phase": "batch-report",
@@ -2296,13 +2851,13 @@
             },
             {
               "phase": "plan",
-              "n": 17,
-              "medianSeconds": 344
+              "n": 21,
+              "medianSeconds": 339
             },
             {
               "phase": "setup",
-              "n": 15,
-              "medianSeconds": 309
+              "n": 19,
+              "medianSeconds": 268
             },
             {
               "phase": "batch-ship",
@@ -2311,13 +2866,13 @@
             },
             {
               "phase": "ship",
-              "n": 17,
-              "medianSeconds": 93
+              "n": 21,
+              "medianSeconds": 77
             },
             {
               "phase": "report",
-              "n": 16,
-              "medianSeconds": 45.5
+              "n": 20,
+              "medianSeconds": 43
             },
             {
               "phase": "classify",
@@ -2326,12 +2881,13 @@
             }
           ],
           "agentClis": [
-            "claude"
+            "claude",
+            "opencode"
           ]
         }
       ],
-      "deliveryRateDelta": 0.19642857142857142,
-      "deliveryRateBaselineWindowEnd": "2026-09-02"
+      "deliveryRateDelta": -0.00047147571900046925,
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "claude-fable-5",
@@ -2479,14 +3035,16 @@
           ],
           "agentClis": []
         }
-      ]
+      ],
+      "deliveryRateDelta": 0,
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "claude-fable-5-1",
-      "n": 1,
-      "delivered": 0,
+      "n": 7,
+      "delivered": 7,
       "blocked": 0,
-      "deliveryRate": 0,
+      "deliveryRate": 1,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -2494,7 +3052,147 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": null,
+      "medianWallClockMinutes": 182.05,
+      "acMet": 29,
+      "acTotal": 29,
+      "conformanceRate": 1,
+      "conformanceSamples": 4,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 97,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 16.166666666666668,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 6,
+      "phaseMedians": [
+        {
+          "phase": "implement",
+          "n": 7,
+          "medianSeconds": 2455
+        },
+        {
+          "phase": "merge-wait",
+          "n": 7,
+          "medianSeconds": 1506
+        },
+        {
+          "phase": "review",
+          "n": 6,
+          "medianSeconds": 945
+        },
+        {
+          "phase": "plan",
+          "n": 7,
+          "medianSeconds": 441
+        },
+        {
+          "phase": "setup",
+          "n": 7,
+          "medianSeconds": 84
+        },
+        {
+          "phase": "ship",
+          "n": 7,
+          "medianSeconds": 75
+        },
+        {
+          "phase": "report",
+          "n": 7,
+          "medianSeconds": 2
+        }
+      ],
+      "agentClis": [],
+      "providers": [
+        {
+          "provider": "direct",
+          "n": 7,
+          "delivered": 7,
+          "blocked": 0,
+          "deliveryRate": 1,
+          "costPerDeliveredUsd": null,
+          "costSamples": 0,
+          "costFromRunLogSamples": 0,
+          "medianApiMinutes": null,
+          "billableTokensPerDeliveredIssue": null,
+          "tokenSamples": 0,
+          "cacheTokenSamples": 0,
+          "medianWallClockMinutes": 182.05,
+          "acMet": 29,
+          "acTotal": 29,
+          "conformanceRate": 1,
+          "conformanceSamples": 4,
+          "stalls": 0,
+          "escalations": 0,
+          "unverifiedExits": 0,
+          "stallsPerIssue": 0,
+          "escalationsPerIssue": 0,
+          "unverifiedExitsPerIssue": 0,
+          "reviewFixed": 97,
+          "reviewEscalated": 0,
+          "reviewFixedPerIssue": 16.166666666666668,
+          "reviewEscalatedPerIssue": 0,
+          "reviewSamples": 6,
+          "phaseMedians": [
+            {
+              "phase": "implement",
+              "n": 7,
+              "medianSeconds": 2455
+            },
+            {
+              "phase": "merge-wait",
+              "n": 7,
+              "medianSeconds": 1506
+            },
+            {
+              "phase": "review",
+              "n": 6,
+              "medianSeconds": 945
+            },
+            {
+              "phase": "plan",
+              "n": 7,
+              "medianSeconds": 441
+            },
+            {
+              "phase": "setup",
+              "n": 7,
+              "medianSeconds": 84
+            },
+            {
+              "phase": "ship",
+              "n": 7,
+              "medianSeconds": 75
+            },
+            {
+              "phase": "report",
+              "n": 7,
+              "medianSeconds": 2
+            }
+          ],
+          "agentClis": []
+        }
+      ],
+      "deliveryRateDelta": 1,
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "n": 1,
+      "delivered": 1,
+      "blocked": 0,
+      "deliveryRate": 1,
+      "costPerDeliveredUsd": 1.5638669999999997,
+      "costSamples": 1,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": 86.0966,
+      "billableTokensPerDeliveredIssue": 7602537,
+      "tokenSamples": 1,
+      "cacheTokenSamples": 1,
+      "medianWallClockMinutes": 1075.6333333333334,
       "acMet": null,
       "acTotal": null,
       "conformanceRate": null,
@@ -2505,39 +3203,61 @@
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": null,
-      "reviewEscalated": null,
-      "reviewFixedPerIssue": null,
-      "reviewEscalatedPerIssue": null,
-      "reviewSamples": 0,
+      "reviewFixed": 1,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 1,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 1,
       "phaseMedians": [
         {
-          "phase": "plan",
+          "phase": "report",
           "n": 1,
-          "medianSeconds": 613
+          "medianSeconds": 63152
+        },
+        {
+          "phase": "implement",
+          "n": 1,
+          "medianSeconds": 525
+        },
+        {
+          "phase": "review",
+          "n": 1,
+          "medianSeconds": 420
         },
         {
           "phase": "setup",
           "n": 1,
-          "medianSeconds": 84
+          "medianSeconds": 281
+        },
+        {
+          "phase": "plan",
+          "n": 1,
+          "medianSeconds": 121
+        },
+        {
+          "phase": "ship",
+          "n": 1,
+          "medianSeconds": 39
         }
       ],
-      "agentClis": [],
+      "agentClis": [
+        "claude"
+      ],
       "providers": [
         {
           "provider": "direct",
           "n": 1,
-          "delivered": 0,
+          "delivered": 1,
           "blocked": 0,
-          "deliveryRate": 0,
-          "costPerDeliveredUsd": null,
-          "costSamples": 0,
+          "deliveryRate": 1,
+          "costPerDeliveredUsd": 1.5638669999999997,
+          "costSamples": 1,
           "costFromRunLogSamples": 0,
-          "medianApiMinutes": null,
-          "billableTokensPerDeliveredIssue": null,
-          "tokenSamples": 0,
-          "cacheTokenSamples": 0,
-          "medianWallClockMinutes": null,
+          "medianApiMinutes": 86.0966,
+          "billableTokensPerDeliveredIssue": 7602537,
+          "tokenSamples": 1,
+          "cacheTokenSamples": 1,
+          "medianWallClockMinutes": 1075.6333333333334,
           "acMet": null,
           "acTotal": null,
           "conformanceRate": null,
@@ -2548,96 +3268,118 @@
           "stallsPerIssue": 0,
           "escalationsPerIssue": 0,
           "unverifiedExitsPerIssue": 0,
-          "reviewFixed": null,
-          "reviewEscalated": null,
-          "reviewFixedPerIssue": null,
-          "reviewEscalatedPerIssue": null,
-          "reviewSamples": 0,
+          "reviewFixed": 1,
+          "reviewEscalated": 0,
+          "reviewFixedPerIssue": 1,
+          "reviewEscalatedPerIssue": 0,
+          "reviewSamples": 1,
           "phaseMedians": [
             {
-              "phase": "plan",
+              "phase": "report",
               "n": 1,
-              "medianSeconds": 613
+              "medianSeconds": 63152
+            },
+            {
+              "phase": "implement",
+              "n": 1,
+              "medianSeconds": 525
+            },
+            {
+              "phase": "review",
+              "n": 1,
+              "medianSeconds": 420
             },
             {
               "phase": "setup",
               "n": 1,
-              "medianSeconds": 84
+              "medianSeconds": 281
+            },
+            {
+              "phase": "plan",
+              "n": 1,
+              "medianSeconds": 121
+            },
+            {
+              "phase": "ship",
+              "n": 1,
+              "medianSeconds": 39
             }
           ],
-          "agentClis": []
+          "agentClis": [
+            "claude"
+          ]
         }
       ]
     },
     {
       "model": "claude-opus-5",
-      "n": 34,
-      "delivered": 32,
-      "blocked": 2,
-      "deliveryRate": 0.9411764705882353,
-      "costPerDeliveredUsd": 52.14336617499997,
-      "costSamples": 2,
+      "n": 47,
+      "delivered": 44,
+      "blocked": 3,
+      "deliveryRate": 0.9361702127659575,
+      "costPerDeliveredUsd": 43.17594004999998,
+      "costSamples": 3,
       "costFromRunLogSamples": 1,
-      "medianApiMinutes": 133.899325,
-      "billableTokensPerDeliveredIssue": 68552014.5,
-      "tokenSamples": 2,
-      "cacheTokenSamples": 2,
-      "medianWallClockMinutes": 125.82499999999999,
-      "acMet": 98,
-      "acTotal": 100,
-      "conformanceRate": 0.98,
-      "conformanceSamples": 23,
+      "medianApiMinutes": 198.03021666666666,
+      "billableTokensPerDeliveredIssue": 60985501,
+      "tokenSamples": 3,
+      "cacheTokenSamples": 3,
+      "medianWallClockMinutes": 130.84166666666667,
+      "acMet": 183,
+      "acTotal": 185,
+      "conformanceRate": 0.9891891891891892,
+      "conformanceSamples": 31,
       "stalls": 0,
-      "escalations": 1,
-      "unverifiedExits": 1,
+      "escalations": 2,
+      "unverifiedExits": 2,
       "stallsPerIssue": 0,
-      "escalationsPerIssue": 0.029411764705882353,
-      "unverifiedExitsPerIssue": 0.029411764705882353,
-      "reviewFixed": 634,
+      "escalationsPerIssue": 0.0425531914893617,
+      "unverifiedExitsPerIssue": 0.0425531914893617,
+      "reviewFixed": 945,
       "reviewEscalated": 1,
-      "reviewFixedPerIssue": 19.21212121212121,
-      "reviewEscalatedPerIssue": 0.030303030303030304,
-      "reviewSamples": 33,
+      "reviewFixedPerIssue": 21,
+      "reviewEscalatedPerIssue": 0.022222222222222223,
+      "reviewSamples": 45,
       "phaseMedians": [
         {
           "phase": "review",
-          "n": 33,
-          "medianSeconds": 1847
+          "n": 46,
+          "medianSeconds": 2113.5
         },
         {
           "phase": "implement",
-          "n": 32,
-          "medianSeconds": 1255
+          "n": 45,
+          "medianSeconds": 2113
         },
         {
           "phase": "merge-wait",
-          "n": 21,
-          "medianSeconds": 878
+          "n": 30,
+          "medianSeconds": 1324.5
         },
         {
           "phase": "gate",
-          "n": 10,
-          "medianSeconds": 506.5
+          "n": 13,
+          "medianSeconds": 588
         },
         {
           "phase": "ship",
-          "n": 32,
-          "medianSeconds": 466.5
+          "n": 44,
+          "medianSeconds": 545.5
         },
         {
           "phase": "plan",
-          "n": 32,
-          "medianSeconds": 266.5
+          "n": 45,
+          "medianSeconds": 313
         },
         {
           "phase": "setup",
-          "n": 33,
-          "medianSeconds": 127
+          "n": 46,
+          "medianSeconds": 98.5
         },
         {
           "phase": "report",
-          "n": 32,
-          "medianSeconds": 51
+          "n": 44,
+          "medianSeconds": 66
         }
       ],
       "agentClis": [
@@ -2646,73 +3388,73 @@
       "providers": [
         {
           "provider": "direct",
-          "n": 34,
-          "delivered": 32,
-          "blocked": 2,
-          "deliveryRate": 0.9411764705882353,
-          "costPerDeliveredUsd": 52.14336617499997,
-          "costSamples": 2,
+          "n": 47,
+          "delivered": 44,
+          "blocked": 3,
+          "deliveryRate": 0.9361702127659575,
+          "costPerDeliveredUsd": 43.17594004999998,
+          "costSamples": 3,
           "costFromRunLogSamples": 1,
-          "medianApiMinutes": 133.899325,
-          "billableTokensPerDeliveredIssue": 68552014.5,
-          "tokenSamples": 2,
-          "cacheTokenSamples": 2,
-          "medianWallClockMinutes": 125.82499999999999,
-          "acMet": 98,
-          "acTotal": 100,
-          "conformanceRate": 0.98,
-          "conformanceSamples": 23,
+          "medianApiMinutes": 198.03021666666666,
+          "billableTokensPerDeliveredIssue": 60985501,
+          "tokenSamples": 3,
+          "cacheTokenSamples": 3,
+          "medianWallClockMinutes": 130.84166666666667,
+          "acMet": 183,
+          "acTotal": 185,
+          "conformanceRate": 0.9891891891891892,
+          "conformanceSamples": 31,
           "stalls": 0,
-          "escalations": 1,
-          "unverifiedExits": 1,
+          "escalations": 2,
+          "unverifiedExits": 2,
           "stallsPerIssue": 0,
-          "escalationsPerIssue": 0.029411764705882353,
-          "unverifiedExitsPerIssue": 0.029411764705882353,
-          "reviewFixed": 634,
+          "escalationsPerIssue": 0.0425531914893617,
+          "unverifiedExitsPerIssue": 0.0425531914893617,
+          "reviewFixed": 945,
           "reviewEscalated": 1,
-          "reviewFixedPerIssue": 19.21212121212121,
-          "reviewEscalatedPerIssue": 0.030303030303030304,
-          "reviewSamples": 33,
+          "reviewFixedPerIssue": 21,
+          "reviewEscalatedPerIssue": 0.022222222222222223,
+          "reviewSamples": 45,
           "phaseMedians": [
             {
               "phase": "review",
-              "n": 33,
-              "medianSeconds": 1847
+              "n": 46,
+              "medianSeconds": 2113.5
             },
             {
               "phase": "implement",
-              "n": 32,
-              "medianSeconds": 1255
+              "n": 45,
+              "medianSeconds": 2113
             },
             {
               "phase": "merge-wait",
-              "n": 21,
-              "medianSeconds": 878
+              "n": 30,
+              "medianSeconds": 1324.5
             },
             {
               "phase": "gate",
-              "n": 10,
-              "medianSeconds": 506.5
+              "n": 13,
+              "medianSeconds": 588
             },
             {
               "phase": "ship",
-              "n": 32,
-              "medianSeconds": 466.5
+              "n": 44,
+              "medianSeconds": 545.5
             },
             {
               "phase": "plan",
-              "n": 32,
-              "medianSeconds": 266.5
+              "n": 45,
+              "medianSeconds": 313
             },
             {
               "phase": "setup",
-              "n": 33,
-              "medianSeconds": 127
+              "n": 46,
+              "medianSeconds": 98.5
             },
             {
               "phase": "report",
-              "n": 32,
-              "medianSeconds": 51
+              "n": 44,
+              "medianSeconds": 66
             }
           ],
           "agentClis": [
@@ -2720,8 +3462,8 @@
           ]
         }
       ],
-      "deliveryRateDelta": -0.05882352941176472,
-      "deliveryRateBaselineWindowEnd": "2026-09-02"
+      "deliveryRateDelta": -0.005006257822277815,
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "claude-opus-5[1m]",
@@ -2861,77 +3603,77 @@
         }
       ],
       "deliveryRateDelta": 0,
-      "deliveryRateBaselineWindowEnd": "2026-09-02"
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "claude-sonnet-5",
-      "n": 98,
-      "delivered": 85,
+      "n": 113,
+      "delivered": 98,
       "blocked": 2,
-      "deliveryRate": 0.8673469387755102,
-      "costPerDeliveredUsd": 23.438448275641026,
-      "costSamples": 39,
+      "deliveryRate": 0.8672566371681416,
+      "costPerDeliveredUsd": 24.76091988809524,
+      "costSamples": 42,
       "costFromRunLogSamples": 16,
-      "medianApiMinutes": 51.23655,
-      "billableTokensPerDeliveredIssue": 46567839.87179487,
-      "tokenSamples": 39,
-      "cacheTokenSamples": 39,
-      "medianWallClockMinutes": 84.7,
-      "acMet": 346,
-      "acTotal": 364,
-      "conformanceRate": 0.9505494505494505,
-      "conformanceSamples": 88,
+      "medianApiMinutes": 56.939375,
+      "billableTokensPerDeliveredIssue": 51348820.452380955,
+      "tokenSamples": 42,
+      "cacheTokenSamples": 42,
+      "medianWallClockMinutes": 75.74166666666667,
+      "acMet": 398,
+      "acTotal": 416,
+      "conformanceRate": 0.9567307692307693,
+      "conformanceSamples": 98,
       "stalls": 0,
-      "escalations": 30,
-      "unverifiedExits": 16,
+      "escalations": 37,
+      "unverifiedExits": 23,
       "stallsPerIssue": 0,
-      "escalationsPerIssue": 0.30612244897959184,
-      "unverifiedExitsPerIssue": 0.16326530612244897,
-      "reviewFixed": 1193,
+      "escalationsPerIssue": 0.3274336283185841,
+      "unverifiedExitsPerIssue": 0.20353982300884957,
+      "reviewFixed": 1287,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 12.427083333333334,
+      "reviewFixedPerIssue": 11.916666666666666,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 96,
+      "reviewSamples": 108,
       "phaseMedians": [
         {
           "phase": "review",
-          "n": 95,
-          "medianSeconds": 1540
+          "n": 107,
+          "medianSeconds": 1379
         },
         {
           "phase": "implement",
-          "n": 94,
-          "medianSeconds": 803.5
+          "n": 107,
+          "medianSeconds": 753
         },
         {
           "phase": "gate",
-          "n": 25,
-          "medianSeconds": 675
+          "n": 28,
+          "medianSeconds": 582.5
         },
         {
           "phase": "merge-wait",
-          "n": 66,
-          "medianSeconds": 442.5
+          "n": 74,
+          "medianSeconds": 483
         },
         {
           "phase": "plan",
-          "n": 96,
-          "medianSeconds": 396
+          "n": 110,
+          "medianSeconds": 361
         },
         {
           "phase": "setup",
-          "n": 95,
-          "medianSeconds": 163
+          "n": 109,
+          "medianSeconds": 160
         },
         {
           "phase": "ship",
-          "n": 93,
-          "medianSeconds": 142
+          "n": 106,
+          "medianSeconds": 144.5
         },
         {
           "phase": "report",
-          "n": 63,
-          "medianSeconds": 53
+          "n": 76,
+          "medianSeconds": 59.5
         }
       ],
       "agentClis": [
@@ -2941,73 +3683,73 @@
       "providers": [
         {
           "provider": "direct",
-          "n": 98,
-          "delivered": 85,
+          "n": 113,
+          "delivered": 98,
           "blocked": 2,
-          "deliveryRate": 0.8673469387755102,
-          "costPerDeliveredUsd": 23.438448275641026,
-          "costSamples": 39,
+          "deliveryRate": 0.8672566371681416,
+          "costPerDeliveredUsd": 24.76091988809524,
+          "costSamples": 42,
           "costFromRunLogSamples": 16,
-          "medianApiMinutes": 51.23655,
-          "billableTokensPerDeliveredIssue": 46567839.87179487,
-          "tokenSamples": 39,
-          "cacheTokenSamples": 39,
-          "medianWallClockMinutes": 84.7,
-          "acMet": 346,
-          "acTotal": 364,
-          "conformanceRate": 0.9505494505494505,
-          "conformanceSamples": 88,
+          "medianApiMinutes": 56.939375,
+          "billableTokensPerDeliveredIssue": 51348820.452380955,
+          "tokenSamples": 42,
+          "cacheTokenSamples": 42,
+          "medianWallClockMinutes": 75.74166666666667,
+          "acMet": 398,
+          "acTotal": 416,
+          "conformanceRate": 0.9567307692307693,
+          "conformanceSamples": 98,
           "stalls": 0,
-          "escalations": 30,
-          "unverifiedExits": 16,
+          "escalations": 37,
+          "unverifiedExits": 23,
           "stallsPerIssue": 0,
-          "escalationsPerIssue": 0.30612244897959184,
-          "unverifiedExitsPerIssue": 0.16326530612244897,
-          "reviewFixed": 1193,
+          "escalationsPerIssue": 0.3274336283185841,
+          "unverifiedExitsPerIssue": 0.20353982300884957,
+          "reviewFixed": 1287,
           "reviewEscalated": 0,
-          "reviewFixedPerIssue": 12.427083333333334,
+          "reviewFixedPerIssue": 11.916666666666666,
           "reviewEscalatedPerIssue": 0,
-          "reviewSamples": 96,
+          "reviewSamples": 108,
           "phaseMedians": [
             {
               "phase": "review",
-              "n": 95,
-              "medianSeconds": 1540
+              "n": 107,
+              "medianSeconds": 1379
             },
             {
               "phase": "implement",
-              "n": 94,
-              "medianSeconds": 803.5
+              "n": 107,
+              "medianSeconds": 753
             },
             {
               "phase": "gate",
-              "n": 25,
-              "medianSeconds": 675
+              "n": 28,
+              "medianSeconds": 582.5
             },
             {
               "phase": "merge-wait",
-              "n": 66,
-              "medianSeconds": 442.5
+              "n": 74,
+              "medianSeconds": 483
             },
             {
               "phase": "plan",
-              "n": 96,
-              "medianSeconds": 396
+              "n": 110,
+              "medianSeconds": 361
             },
             {
               "phase": "setup",
-              "n": 95,
-              "medianSeconds": 163
+              "n": 109,
+              "medianSeconds": 160
             },
             {
               "phase": "ship",
-              "n": 93,
-              "medianSeconds": 142
+              "n": 106,
+              "medianSeconds": 144.5
             },
             {
               "phase": "report",
-              "n": 63,
-              "medianSeconds": 53
+              "n": 76,
+              "medianSeconds": 59.5
             }
           ],
           "agentClis": [
@@ -3016,8 +3758,8 @@
           ]
         }
       ],
-      "deliveryRateDelta": 0.002482073910645255,
-      "deliveryRateBaselineWindowEnd": "2026-09-02"
+      "deliveryRateDelta": -0.00009030160736855919,
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "deepseek-v4-pro-0813",
@@ -3155,14 +3897,16 @@
           ],
           "agentClis": []
         }
-      ]
+      ],
+      "deliveryRateDelta": 0,
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "glm-5.3",
-      "n": 45,
-      "delivered": 40,
+      "n": 47,
+      "delivered": 42,
       "blocked": 4,
-      "deliveryRate": 0.8888888888888888,
+      "deliveryRate": 0.8936170212765957,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -3171,21 +3915,21 @@
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
       "medianWallClockMinutes": 139.275,
-      "acMet": 206,
-      "acTotal": 208,
-      "conformanceRate": 0.9903846153846154,
-      "conformanceSamples": 39,
+      "acMet": 214,
+      "acTotal": 218,
+      "conformanceRate": 0.981651376146789,
+      "conformanceSamples": 41,
       "stalls": 1,
       "escalations": 6,
       "unverifiedExits": 0,
-      "stallsPerIssue": 0.022222222222222223,
-      "escalationsPerIssue": 0.13333333333333333,
+      "stallsPerIssue": 0.02127659574468085,
+      "escalationsPerIssue": 0.1276595744680851,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 483,
+      "reviewFixed": 497,
       "reviewEscalated": 2,
-      "reviewFixedPerIssue": 11.5,
-      "reviewEscalatedPerIssue": 0.047619047619047616,
-      "reviewSamples": 42,
+      "reviewFixedPerIssue": 11.295454545454545,
+      "reviewEscalatedPerIssue": 0.045454545454545456,
+      "reviewSamples": 44,
       "phaseMedians": [
         {
           "phase": "gate",
@@ -3194,37 +3938,37 @@
         },
         {
           "phase": "implement",
-          "n": 42,
-          "medianSeconds": 1606.5
+          "n": 44,
+          "medianSeconds": 1643
         },
         {
           "phase": "review",
-          "n": 42,
-          "medianSeconds": 1170.5
+          "n": 44,
+          "medianSeconds": 1135.5
         },
         {
           "phase": "merge-wait",
-          "n": 35,
-          "medianSeconds": 1079
+          "n": 37,
+          "medianSeconds": 1093
         },
         {
           "phase": "plan",
-          "n": 44,
-          "medianSeconds": 411.5
+          "n": 46,
+          "medianSeconds": 403.5
         },
         {
           "phase": "ship",
-          "n": 42,
-          "medianSeconds": 167
+          "n": 44,
+          "medianSeconds": 196
         },
         {
           "phase": "setup",
-          "n": 44,
-          "medianSeconds": 131
+          "n": 46,
+          "medianSeconds": 146.5
         },
         {
           "phase": "report",
-          "n": 41,
+          "n": 43,
           "medianSeconds": 52
         }
       ],
@@ -3234,10 +3978,10 @@
       "providers": [
         {
           "provider": "direct",
-          "n": 33,
-          "delivered": 30,
+          "n": 35,
+          "delivered": 32,
           "blocked": 3,
-          "deliveryRate": 0.9090909090909091,
+          "deliveryRate": 0.9142857142857143,
           "costPerDeliveredUsd": null,
           "costSamples": 0,
           "costFromRunLogSamples": 0,
@@ -3246,21 +3990,21 @@
           "tokenSamples": 0,
           "cacheTokenSamples": 0,
           "medianWallClockMinutes": 139.65833333333336,
-          "acMet": 161,
-          "acTotal": 163,
-          "conformanceRate": 0.9877300613496932,
-          "conformanceSamples": 30,
+          "acMet": 169,
+          "acTotal": 173,
+          "conformanceRate": 0.976878612716763,
+          "conformanceSamples": 32,
           "stalls": 0,
           "escalations": 0,
           "unverifiedExits": 0,
           "stallsPerIssue": 0,
           "escalationsPerIssue": 0,
           "unverifiedExitsPerIssue": 0,
-          "reviewFixed": 365,
+          "reviewFixed": 379,
           "reviewEscalated": 1,
-          "reviewFixedPerIssue": 11.774193548387096,
-          "reviewEscalatedPerIssue": 0.03225806451612903,
-          "reviewSamples": 31,
+          "reviewFixedPerIssue": 11.484848484848484,
+          "reviewEscalatedPerIssue": 0.030303030303030304,
+          "reviewSamples": 33,
           "phaseMedians": [
             {
               "phase": "gate",
@@ -3269,37 +4013,37 @@
             },
             {
               "phase": "implement",
-              "n": 31,
-              "medianSeconds": 1615
+              "n": 33,
+              "medianSeconds": 1671
             },
             {
               "phase": "merge-wait",
-              "n": 26,
+              "n": 28,
               "medianSeconds": 1326.5
             },
             {
               "phase": "review",
-              "n": 31,
+              "n": 33,
               "medianSeconds": 1070
             },
             {
-              "phase": "plan",
-              "n": 32,
-              "medianSeconds": 376
+              "phase": "ship",
+              "n": 33,
+              "medianSeconds": 398
             },
             {
-              "phase": "ship",
-              "n": 31,
-              "medianSeconds": 248
+              "phase": "plan",
+              "n": 34,
+              "medianSeconds": 355.5
             },
             {
               "phase": "setup",
-              "n": 32,
-              "medianSeconds": 85
+              "n": 34,
+              "medianSeconds": 92
             },
             {
               "phase": "report",
-              "n": 30,
+              "n": 32,
               "medianSeconds": 58.5
             }
           ],
@@ -3517,15 +4261,15 @@
           "agentClis": []
         }
       ],
-      "deliveryRateDelta": 0.022222222222222143,
-      "deliveryRateBaselineWindowEnd": "2026-09-02"
+      "deliveryRateDelta": 0.004728132387706863,
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "glm-5.3-flash",
-      "n": 13,
-      "delivered": 12,
+      "n": 31,
+      "delivered": 30,
       "blocked": 0,
-      "deliveryRate": 0.9230769230769231,
+      "deliveryRate": 0.967741935483871,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -3533,143 +4277,70 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 235.36666666666667,
-      "acMet": 61,
-      "acTotal": 62,
-      "conformanceRate": 0.9838709677419355,
-      "conformanceSamples": 11,
+      "medianWallClockMinutes": 160.64166666666665,
+      "acMet": 121,
+      "acTotal": 125,
+      "conformanceRate": 0.968,
+      "conformanceSamples": 25,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 132,
+      "reviewFixed": 225,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 11,
+      "reviewFixedPerIssue": 7.5,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 12,
+      "reviewSamples": 30,
       "phaseMedians": [
         {
-          "phase": "gate",
-          "n": 2,
-          "medianSeconds": 8788
+          "phase": "merge-wait",
+          "n": 21,
+          "medianSeconds": 2049
         },
         {
           "phase": "implement",
-          "n": 12,
-          "medianSeconds": 7042.5
+          "n": 30,
+          "medianSeconds": 1583.5
         },
         {
-          "phase": "merge-wait",
+          "phase": "gate",
           "n": 10,
-          "medianSeconds": 3452.5
-        },
-        {
-          "phase": "review",
-          "n": 12,
-          "medianSeconds": 1239
+          "medianSeconds": 729
         },
         {
           "phase": "plan",
-          "n": 13,
-          "medianSeconds": 465
+          "n": 31,
+          "medianSeconds": 485
+        },
+        {
+          "phase": "review",
+          "n": 30,
+          "medianSeconds": 422
         },
         {
           "phase": "ship",
-          "n": 12,
-          "medianSeconds": 390.5
+          "n": 30,
+          "medianSeconds": 331
         },
         {
           "phase": "setup",
-          "n": 13,
-          "medianSeconds": 104
+          "n": 30,
+          "medianSeconds": 113
         },
         {
           "phase": "report",
-          "n": 12,
-          "medianSeconds": 70.5
+          "n": 30,
+          "medianSeconds": 88.5
         }
       ],
       "agentClis": [],
       "providers": [
         {
           "provider": "direct",
-          "n": 9,
-          "delivered": 8,
-          "blocked": 0,
-          "deliveryRate": 0.8888888888888888,
-          "costPerDeliveredUsd": null,
-          "costSamples": 0,
-          "costFromRunLogSamples": 0,
-          "medianApiMinutes": null,
-          "billableTokensPerDeliveredIssue": null,
-          "tokenSamples": 0,
-          "cacheTokenSamples": 0,
-          "medianWallClockMinutes": 264.85,
-          "acMet": 49,
-          "acTotal": 50,
-          "conformanceRate": 0.98,
-          "conformanceSamples": 8,
-          "stalls": 0,
-          "escalations": 0,
-          "unverifiedExits": 0,
-          "stallsPerIssue": 0,
-          "escalationsPerIssue": 0,
-          "unverifiedExitsPerIssue": 0,
-          "reviewFixed": 101,
-          "reviewEscalated": 0,
-          "reviewFixedPerIssue": 12.625,
-          "reviewEscalatedPerIssue": 0,
-          "reviewSamples": 8,
-          "phaseMedians": [
-            {
-              "phase": "gate",
-              "n": 2,
-              "medianSeconds": 8788
-            },
-            {
-              "phase": "implement",
-              "n": 8,
-              "medianSeconds": 7042.5
-            },
-            {
-              "phase": "merge-wait",
-              "n": 6,
-              "medianSeconds": 3452.5
-            },
-            {
-              "phase": "review",
-              "n": 8,
-              "medianSeconds": 1804.5
-            },
-            {
-              "phase": "plan",
-              "n": 9,
-              "medianSeconds": 554
-            },
-            {
-              "phase": "ship",
-              "n": 8,
-              "medianSeconds": 319
-            },
-            {
-              "phase": "setup",
-              "n": 9,
-              "medianSeconds": 103
-            },
-            {
-              "phase": "report",
-              "n": 8,
-              "medianSeconds": 80.5
-            }
-          ],
-          "agentClis": []
-        },
-        {
-          "provider": "zai-coding-plan",
-          "n": 4,
-          "delivered": 4,
+          "n": 21,
+          "delivered": 21,
           "blocked": 0,
           "deliveryRate": 1,
           "costPerDeliveredUsd": null,
@@ -3679,69 +4350,149 @@
           "billableTokensPerDeliveredIssue": null,
           "tokenSamples": 0,
           "cacheTokenSamples": 0,
-          "medianWallClockMinutes": 225.76666666666665,
-          "acMet": 12,
-          "acTotal": 12,
-          "conformanceRate": 1,
-          "conformanceSamples": 3,
+          "medianWallClockMinutes": 158.33333333333334,
+          "acMet": 98,
+          "acTotal": 102,
+          "conformanceRate": 0.9607843137254902,
+          "conformanceSamples": 20,
           "stalls": 0,
           "escalations": 0,
           "unverifiedExits": 0,
           "stallsPerIssue": 0,
           "escalationsPerIssue": 0,
           "unverifiedExitsPerIssue": 0,
-          "reviewFixed": 31,
+          "reviewFixed": 133,
           "reviewEscalated": 0,
-          "reviewFixedPerIssue": 7.75,
+          "reviewFixedPerIssue": 6.333333333333333,
           "reviewEscalatedPerIssue": 0,
-          "reviewSamples": 4,
+          "reviewSamples": 21,
           "phaseMedians": [
             {
               "phase": "merge-wait",
-              "n": 4,
-              "medianSeconds": 5937.5
+              "n": 13,
+              "medianSeconds": 2113
             },
             {
               "phase": "implement",
-              "n": 4,
-              "medianSeconds": 5411.5
+              "n": 21,
+              "medianSeconds": 1703
             },
             {
-              "phase": "review",
-              "n": 4,
-              "medianSeconds": 861
-            },
-            {
-              "phase": "ship",
-              "n": 4,
-              "medianSeconds": 464
+              "phase": "gate",
+              "n": 9,
+              "medianSeconds": 727
             },
             {
               "phase": "plan",
-              "n": 4,
-              "medianSeconds": 330.5
+              "n": 21,
+              "medianSeconds": 554
             },
             {
-              "phase": "setup",
-              "n": 4,
-              "medianSeconds": 170.5
+              "phase": "ship",
+              "n": 21,
+              "medianSeconds": 323
+            },
+            {
+              "phase": "review",
+              "n": 21,
+              "medianSeconds": 258
             },
             {
               "phase": "report",
-              "n": 4,
-              "medianSeconds": 52
+              "n": 21,
+              "medianSeconds": 115
+            },
+            {
+              "phase": "setup",
+              "n": 21,
+              "medianSeconds": 104
+            }
+          ],
+          "agentClis": []
+        },
+        {
+          "provider": "zai-coding-plan",
+          "n": 10,
+          "delivered": 9,
+          "blocked": 0,
+          "deliveryRate": 0.9,
+          "costPerDeliveredUsd": null,
+          "costSamples": 0,
+          "costFromRunLogSamples": 0,
+          "medianApiMinutes": null,
+          "billableTokensPerDeliveredIssue": null,
+          "tokenSamples": 0,
+          "cacheTokenSamples": 0,
+          "medianWallClockMinutes": 173.73333333333332,
+          "acMet": 23,
+          "acTotal": 23,
+          "conformanceRate": 1,
+          "conformanceSamples": 5,
+          "stalls": 0,
+          "escalations": 0,
+          "unverifiedExits": 0,
+          "stallsPerIssue": 0,
+          "escalationsPerIssue": 0,
+          "unverifiedExitsPerIssue": 0,
+          "reviewFixed": 92,
+          "reviewEscalated": 0,
+          "reviewFixedPerIssue": 10.222222222222221,
+          "reviewEscalatedPerIssue": 0,
+          "reviewSamples": 9,
+          "phaseMedians": [
+            {
+              "phase": "gate",
+              "n": 1,
+              "medianSeconds": 1853
+            },
+            {
+              "phase": "merge-wait",
+              "n": 8,
+              "medianSeconds": 1521
+            },
+            {
+              "phase": "implement",
+              "n": 9,
+              "medianSeconds": 1245
+            },
+            {
+              "phase": "review",
+              "n": 9,
+              "medianSeconds": 821
+            },
+            {
+              "phase": "plan",
+              "n": 10,
+              "medianSeconds": 427
+            },
+            {
+              "phase": "ship",
+              "n": 9,
+              "medianSeconds": 369
+            },
+            {
+              "phase": "setup",
+              "n": 9,
+              "medianSeconds": 127
+            },
+            {
+              "phase": "report",
+              "n": 9,
+              "medianSeconds": 54
             }
           ],
           "agentClis": []
         }
-      ]
+      ],
+      "deliveryRateDelta": 0.04466501240694787,
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "gpt-5.6-luna",
-      "n": 5,
+      "n": 6,
       "delivered": 4,
       "blocked": 0,
-      "deliveryRate": 0.8,
+      "deliveryRate": 0.6666666666666666,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -3773,8 +4524,8 @@
         },
         {
           "phase": "implement",
-          "n": 4,
-          "medianSeconds": 4285
+          "n": 5,
+          "medianSeconds": 4766
         },
         {
           "phase": "merge-wait",
@@ -3782,14 +4533,14 @@
           "medianSeconds": 3331
         },
         {
+          "phase": "plan",
+          "n": 6,
+          "medianSeconds": 1054
+        },
+        {
           "phase": "ship",
           "n": 4,
           "medianSeconds": 728.5
-        },
-        {
-          "phase": "plan",
-          "n": 5,
-          "medianSeconds": 689
         },
         {
           "phase": "review",
@@ -3798,8 +4549,8 @@
         },
         {
           "phase": "setup",
-          "n": 5,
-          "medianSeconds": 163
+          "n": 6,
+          "medianSeconds": 146
         },
         {
           "phase": "report",
@@ -3811,10 +4562,10 @@
       "providers": [
         {
           "provider": "direct",
-          "n": 2,
+          "n": 3,
           "delivered": 2,
           "blocked": 0,
-          "deliveryRate": 1,
+          "deliveryRate": 0.6666666666666666,
           "costPerDeliveredUsd": null,
           "costSamples": 0,
           "costFromRunLogSamples": 0,
@@ -3840,14 +4591,14 @@
           "reviewSamples": 2,
           "phaseMedians": [
             {
-              "phase": "implement",
-              "n": 2,
-              "medianSeconds": 14147
-            },
-            {
               "phase": "gate",
               "n": 1,
               "medianSeconds": 6655
+            },
+            {
+              "phase": "implement",
+              "n": 3,
+              "medianSeconds": 5477
             },
             {
               "phase": "merge-wait",
@@ -3856,8 +4607,8 @@
             },
             {
               "phase": "plan",
-              "n": 2,
-              "medianSeconds": 1054
+              "n": 3,
+              "medianSeconds": 1419
             },
             {
               "phase": "ship",
@@ -3871,8 +4622,8 @@
             },
             {
               "phase": "setup",
-              "n": 2,
-              "medianSeconds": 173
+              "n": 3,
+              "medianSeconds": 163
             },
             {
               "phase": "report",
@@ -3951,76 +4702,83 @@
           "agentClis": []
         }
       ],
-      "deliveryRateDelta": 0,
-      "deliveryRateBaselineWindowEnd": "2026-09-02"
+      "deliveryRateDelta": -0.13333333333333341,
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "gpt-5.6-terra",
-      "n": 4,
-      "delivered": 3,
-      "blocked": 1,
-      "deliveryRate": 0.75,
+      "n": 27,
+      "delivered": 17,
+      "blocked": 3,
+      "deliveryRate": 0.6296296296296297,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
-      "medianApiMinutes": null,
-      "billableTokensPerDeliveredIssue": null,
-      "tokenSamples": 0,
-      "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 110.5,
-      "acMet": 4,
-      "acTotal": 4,
-      "conformanceRate": 1,
-      "conformanceSamples": 1,
+      "medianApiMinutes": 78.09868333333333,
+      "billableTokensPerDeliveredIssue": 23354866,
+      "tokenSamples": 1,
+      "cacheTokenSamples": 1,
+      "medianWallClockMinutes": 68.98333333333333,
+      "acMet": 53,
+      "acTotal": 54,
+      "conformanceRate": 0.9814814814814815,
+      "conformanceSamples": 11,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 2,
-      "reviewEscalated": 0,
-      "reviewFixedPerIssue": 0.6666666666666666,
-      "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 3,
+      "reviewFixed": 48,
+      "reviewEscalated": 2,
+      "reviewFixedPerIssue": 2.6666666666666665,
+      "reviewEscalatedPerIssue": 0.1111111111111111,
+      "reviewSamples": 18,
       "phaseMedians": [
         {
+          "phase": "implement",
+          "n": 23,
+          "medianSeconds": 972
+        },
+        {
           "phase": "merge-wait",
-          "n": 3,
-          "medianSeconds": 1727
+          "n": 14,
+          "medianSeconds": 537
         },
         {
-          "phase": "plan",
-          "n": 4,
-          "medianSeconds": 977
-        },
-        {
-          "phase": "ship",
-          "n": 3,
-          "medianSeconds": 849
+          "phase": "gate",
+          "n": 1,
+          "medianSeconds": 486
         },
         {
           "phase": "review",
-          "n": 3,
-          "medianSeconds": 296
+          "n": 18,
+          "medianSeconds": 383.5
         },
         {
           "phase": "setup",
-          "n": 4,
-          "medianSeconds": 90
+          "n": 27,
+          "medianSeconds": 220
+        },
+        {
+          "phase": "plan",
+          "n": 27,
+          "medianSeconds": 210
+        },
+        {
+          "phase": "ship",
+          "n": 18,
+          "medianSeconds": 82
         },
         {
           "phase": "report",
-          "n": 3,
-          "medianSeconds": 22
-        },
-        {
-          "phase": "implement",
-          "n": 3,
-          "medianSeconds": 2
+          "n": 15,
+          "medianSeconds": 17
         }
       ],
-      "agentClis": [],
+      "agentClis": [
+        "opencode"
+      ],
       "providers": [
         {
           "provider": "llmgateway",
@@ -4092,10 +4850,157 @@
         },
         {
           "provider": "openai",
+          "n": 24,
+          "delivered": 15,
+          "blocked": 2,
+          "deliveryRate": 0.625,
+          "costPerDeliveredUsd": null,
+          "costSamples": 0,
+          "costFromRunLogSamples": 0,
+          "medianApiMinutes": 78.09868333333333,
+          "billableTokensPerDeliveredIssue": 23354866,
+          "tokenSamples": 1,
+          "cacheTokenSamples": 1,
+          "medianWallClockMinutes": 68.98333333333333,
+          "acMet": 53,
+          "acTotal": 54,
+          "conformanceRate": 0.9814814814814815,
+          "conformanceSamples": 11,
+          "stalls": 0,
+          "escalations": 0,
+          "unverifiedExits": 0,
+          "stallsPerIssue": 0,
+          "escalationsPerIssue": 0,
+          "unverifiedExitsPerIssue": 0,
+          "reviewFixed": 47,
+          "reviewEscalated": 2,
+          "reviewFixedPerIssue": 2.9375,
+          "reviewEscalatedPerIssue": 0.125,
+          "reviewSamples": 16,
+          "phaseMedians": [
+            {
+              "phase": "implement",
+              "n": 21,
+              "medianSeconds": 1085
+            },
+            {
+              "phase": "merge-wait",
+              "n": 12,
+              "medianSeconds": 487
+            },
+            {
+              "phase": "gate",
+              "n": 1,
+              "medianSeconds": 486
+            },
+            {
+              "phase": "review",
+              "n": 16,
+              "medianSeconds": 383.5
+            },
+            {
+              "phase": "setup",
+              "n": 24,
+              "medianSeconds": 226
+            },
+            {
+              "phase": "plan",
+              "n": 24,
+              "medianSeconds": 198
+            },
+            {
+              "phase": "ship",
+              "n": 16,
+              "medianSeconds": 82
+            },
+            {
+              "phase": "report",
+              "n": 13,
+              "medianSeconds": 17
+            }
+          ],
+          "agentClis": [
+            "opencode"
+          ]
+        }
+      ],
+      "deliveryRateDelta": -0.12037037037037035,
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
+    },
+    {
+      "model": "gpt-6-astra",
+      "n": 2,
+      "delivered": 1,
+      "blocked": 0,
+      "deliveryRate": 0.5,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": null,
+      "billableTokensPerDeliveredIssue": null,
+      "tokenSamples": 0,
+      "cacheTokenSamples": 0,
+      "medianWallClockMinutes": 55.11666666666667,
+      "acMet": 11,
+      "acTotal": 12,
+      "conformanceRate": 0.9166666666666666,
+      "conformanceSamples": 2,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 20,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 10,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 2,
+      "phaseMedians": [
+        {
+          "phase": "ship",
+          "n": 2,
+          "medianSeconds": 6744
+        },
+        {
+          "phase": "implement",
+          "n": 2,
+          "medianSeconds": 1730.5
+        },
+        {
+          "phase": "review",
+          "n": 2,
+          "medianSeconds": 1719.5
+        },
+        {
+          "phase": "merge-wait",
           "n": 1,
+          "medianSeconds": 528
+        },
+        {
+          "phase": "setup",
+          "n": 2,
+          "medianSeconds": 420
+        },
+        {
+          "phase": "plan",
+          "n": 2,
+          "medianSeconds": 78.5
+        },
+        {
+          "phase": "report",
+          "n": 1,
+          "medianSeconds": 24
+        }
+      ],
+      "agentClis": [],
+      "providers": [
+        {
+          "provider": "openai",
+          "n": 2,
           "delivered": 1,
           "blocked": 0,
-          "deliveryRate": 1,
+          "deliveryRate": 0.5,
           "costPerDeliveredUsd": null,
           "costSamples": 0,
           "costFromRunLogSamples": 0,
@@ -4103,64 +5008,62 @@
           "billableTokensPerDeliveredIssue": null,
           "tokenSamples": 0,
           "cacheTokenSamples": 0,
-          "medianWallClockMinutes": 110.5,
-          "acMet": 4,
-          "acTotal": 4,
-          "conformanceRate": 1,
-          "conformanceSamples": 1,
+          "medianWallClockMinutes": 55.11666666666667,
+          "acMet": 11,
+          "acTotal": 12,
+          "conformanceRate": 0.9166666666666666,
+          "conformanceSamples": 2,
           "stalls": 0,
           "escalations": 0,
           "unverifiedExits": 0,
           "stallsPerIssue": 0,
           "escalationsPerIssue": 0,
           "unverifiedExitsPerIssue": 0,
-          "reviewFixed": 1,
+          "reviewFixed": 20,
           "reviewEscalated": 0,
-          "reviewFixedPerIssue": 1,
+          "reviewFixedPerIssue": 10,
           "reviewEscalatedPerIssue": 0,
-          "reviewSamples": 1,
+          "reviewSamples": 2,
           "phaseMedians": [
             {
+              "phase": "ship",
+              "n": 2,
+              "medianSeconds": 6744
+            },
+            {
               "phase": "implement",
-              "n": 1,
-              "medianSeconds": 3967
+              "n": 2,
+              "medianSeconds": 1730.5
+            },
+            {
+              "phase": "review",
+              "n": 2,
+              "medianSeconds": 1719.5
             },
             {
               "phase": "merge-wait",
               "n": 1,
-              "medianSeconds": 1157
-            },
-            {
-              "phase": "ship",
-              "n": 1,
-              "medianSeconds": 849
-            },
-            {
-              "phase": "review",
-              "n": 1,
-              "medianSeconds": 296
-            },
-            {
-              "phase": "plan",
-              "n": 1,
-              "medianSeconds": 253
+              "medianSeconds": 528
             },
             {
               "phase": "setup",
-              "n": 1,
-              "medianSeconds": 86
+              "n": 2,
+              "medianSeconds": 420
+            },
+            {
+              "phase": "plan",
+              "n": 2,
+              "medianSeconds": 78.5
             },
             {
               "phase": "report",
               "n": 1,
-              "medianSeconds": 22
+              "medianSeconds": 24
             }
           ],
           "agentClis": []
         }
-      ],
-      "deliveryRateDelta": 0.25,
-      "deliveryRateBaselineWindowEnd": "2026-09-02"
+      ]
     },
     {
       "model": "kimi-k3",
@@ -4240,7 +5143,7 @@
         }
       ],
       "deliveryRateDelta": 0,
-      "deliveryRateBaselineWindowEnd": "2026-09-02"
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "kimi-k3-fast",
@@ -4390,7 +5293,7 @@
         }
       ],
       "deliveryRateDelta": 0,
-      "deliveryRateBaselineWindowEnd": "2026-09-02"
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     },
     {
       "model": "kimi-latest",
@@ -4534,7 +5437,7 @@
         }
       ],
       "deliveryRateDelta": 0,
-      "deliveryRateBaselineWindowEnd": "2026-09-02"
+      "deliveryRateBaselineWindowEnd": "2026-09-07"
     }
   ],
   "repoTotals": [
@@ -4632,10 +5535,10 @@
     {
       "repo": "imboard-ai/ai-dossier",
       "model": "claude-opus-5",
-      "n": 5,
-      "delivered": 4,
+      "n": 7,
+      "delivered": 6,
       "blocked": 1,
-      "deliveryRate": 0.8,
+      "deliveryRate": 0.8571428571428571,
       "costPerDeliveredUsd": 52.14336617499997,
       "costSamples": 2,
       "costFromRunLogSamples": 1,
@@ -4644,55 +5547,55 @@
       "tokenSamples": 2,
       "cacheTokenSamples": 2,
       "medianWallClockMinutes": 62.825,
-      "acMet": 16,
-      "acTotal": 16,
+      "acMet": 31,
+      "acTotal": 31,
       "conformanceRate": 1,
-      "conformanceSamples": 3,
+      "conformanceSamples": 5,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 109,
+      "reviewFixed": 181,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 27.25,
+      "reviewFixedPerIssue": 30.166666666666668,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 4,
+      "reviewSamples": 6,
       "phaseMedians": [
         {
           "phase": "review",
-          "n": 4,
-          "medianSeconds": 1766.5
-        },
-        {
-          "phase": "implement",
-          "n": 4,
-          "medianSeconds": 762.5
+          "n": 6,
+          "medianSeconds": 1603.5
         },
         {
           "phase": "merge-wait",
-          "n": 4,
-          "medianSeconds": 424
+          "n": 6,
+          "medianSeconds": 568.5
+        },
+        {
+          "phase": "implement",
+          "n": 6,
+          "medianSeconds": 474
         },
         {
           "phase": "plan",
-          "n": 4,
-          "medianSeconds": 210.5
+          "n": 6,
+          "medianSeconds": 256.5
         },
         {
           "phase": "setup",
-          "n": 4,
-          "medianSeconds": 144.5
+          "n": 6,
+          "medianSeconds": 116.5
         },
         {
           "phase": "ship",
-          "n": 4,
+          "n": 6,
           "medianSeconds": 112.5
         },
         {
           "phase": "report",
-          "n": 4,
+          "n": 6,
           "medianSeconds": 52
         }
       ],
@@ -4772,10 +5675,10 @@
     {
       "repo": "imboard-ai/ai-dossier",
       "model": "claude-sonnet-5",
-      "n": 45,
-      "delivered": 41,
+      "n": 51,
+      "delivered": 47,
       "blocked": 0,
-      "deliveryRate": 0.9111111111111111,
+      "deliveryRate": 0.9215686274509803,
       "costPerDeliveredUsd": 19.95753834130435,
       "costSamples": 23,
       "costFromRunLogSamples": 11,
@@ -4783,62 +5686,62 @@
       "billableTokensPerDeliveredIssue": 45215763.26086956,
       "tokenSamples": 23,
       "cacheTokenSamples": 23,
-      "medianWallClockMinutes": 54.03333333333333,
-      "acMet": 163,
-      "acTotal": 176,
-      "conformanceRate": 0.9261363636363636,
-      "conformanceSamples": 41,
+      "medianWallClockMinutes": 48.983333333333334,
+      "acMet": 190,
+      "acTotal": 203,
+      "conformanceRate": 0.9359605911330049,
+      "conformanceSamples": 46,
       "stalls": 0,
       "escalations": 9,
       "unverifiedExits": 6,
       "stallsPerIssue": 0,
-      "escalationsPerIssue": 0.2,
-      "unverifiedExitsPerIssue": 0.13333333333333333,
-      "reviewFixed": 668,
+      "escalationsPerIssue": 0.17647058823529413,
+      "unverifiedExitsPerIssue": 0.11764705882352941,
+      "reviewFixed": 711,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 14.844444444444445,
+      "reviewFixedPerIssue": 13.941176470588236,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 45,
+      "reviewSamples": 51,
       "phaseMedians": [
         {
           "phase": "review",
-          "n": 44,
-          "medianSeconds": 1210.5
+          "n": 50,
+          "medianSeconds": 1117.5
         },
         {
           "phase": "implement",
-          "n": 44,
-          "medianSeconds": 480
+          "n": 50,
+          "medianSeconds": 425
         },
         {
           "phase": "plan",
-          "n": 45,
-          "medianSeconds": 433
+          "n": 51,
+          "medianSeconds": 344
         },
         {
           "phase": "merge-wait",
-          "n": 41,
+          "n": 45,
           "medianSeconds": 340
         },
         {
           "phase": "setup",
-          "n": 44,
-          "medianSeconds": 198
+          "n": 50,
+          "medianSeconds": 167.5
         },
         {
           "phase": "gate",
-          "n": 6,
-          "medianSeconds": 142.5
+          "n": 8,
+          "medianSeconds": 162.5
         },
         {
           "phase": "ship",
-          "n": 42,
-          "medianSeconds": 134.5
+          "n": 48,
+          "medianSeconds": 138
         },
         {
           "phase": "report",
-          "n": 20,
-          "medianSeconds": 42.5
+          "n": 26,
+          "medianSeconds": 49.5
         }
       ],
       "agentClis": [
@@ -4920,12 +5823,12 @@
       "agentClis": []
     },
     {
-      "repo": "imboard-ai/imboard-monorepo",
-      "model": "<unknown>",
-      "n": 58,
-      "delivered": 14,
-      "blocked": 8,
-      "deliveryRate": 0.2413793103448276,
+      "repo": "imboard-ai/ai-dossier",
+      "model": "glm-5.3-flash",
+      "n": 14,
+      "delivered": 13,
+      "blocked": 0,
+      "deliveryRate": 0.9285714285714286,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -4933,7 +5836,204 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 117.10833333333333,
+      "medianWallClockMinutes": 57.6,
+      "acMet": 37,
+      "acTotal": 37,
+      "conformanceRate": 1,
+      "conformanceSamples": 9,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 65,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 5,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 13,
+      "phaseMedians": [
+        {
+          "phase": "implement",
+          "n": 13,
+          "medianSeconds": 1237
+        },
+        {
+          "phase": "merge-wait",
+          "n": 7,
+          "medianSeconds": 686
+        },
+        {
+          "phase": "plan",
+          "n": 14,
+          "medianSeconds": 577.5
+        },
+        {
+          "phase": "gate",
+          "n": 7,
+          "medianSeconds": 293
+        },
+        {
+          "phase": "ship",
+          "n": 13,
+          "medianSeconds": 248
+        },
+        {
+          "phase": "review",
+          "n": 13,
+          "medianSeconds": 228
+        },
+        {
+          "phase": "setup",
+          "n": 13,
+          "medianSeconds": 115
+        },
+        {
+          "phase": "report",
+          "n": 13,
+          "medianSeconds": 88
+        }
+      ],
+      "agentClis": []
+    },
+    {
+      "repo": "imboard-ai/ai-dossier",
+      "model": "gpt-5.6-luna",
+      "n": 1,
+      "delivered": 0,
+      "blocked": 0,
+      "deliveryRate": 0,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": null,
+      "billableTokensPerDeliveredIssue": null,
+      "tokenSamples": 0,
+      "cacheTokenSamples": 0,
+      "medianWallClockMinutes": null,
+      "acMet": null,
+      "acTotal": null,
+      "conformanceRate": null,
+      "conformanceSamples": 0,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": null,
+      "reviewEscalated": null,
+      "reviewFixedPerIssue": null,
+      "reviewEscalatedPerIssue": null,
+      "reviewSamples": 0,
+      "phaseMedians": [
+        {
+          "phase": "implement",
+          "n": 1,
+          "medianSeconds": 5477
+        },
+        {
+          "phase": "plan",
+          "n": 1,
+          "medianSeconds": 4518
+        },
+        {
+          "phase": "setup",
+          "n": 1,
+          "medianSeconds": 118
+        }
+      ],
+      "agentClis": []
+    },
+    {
+      "repo": "imboard-ai/ai-dossier",
+      "model": "gpt-5.6-terra",
+      "n": 12,
+      "delivered": 7,
+      "blocked": 1,
+      "deliveryRate": 0.5833333333333334,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": null,
+      "billableTokensPerDeliveredIssue": null,
+      "tokenSamples": 0,
+      "cacheTokenSamples": 0,
+      "medianWallClockMinutes": 32.81666666666667,
+      "acMet": 42,
+      "acTotal": 43,
+      "conformanceRate": 0.9767441860465116,
+      "conformanceSamples": 8,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 31,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 3.875,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 8,
+      "phaseMedians": [
+        {
+          "phase": "gate",
+          "n": 1,
+          "medianSeconds": 486
+        },
+        {
+          "phase": "implement",
+          "n": 10,
+          "medianSeconds": 484
+        },
+        {
+          "phase": "review",
+          "n": 8,
+          "medianSeconds": 383.5
+        },
+        {
+          "phase": "merge-wait",
+          "n": 7,
+          "medianSeconds": 357
+        },
+        {
+          "phase": "plan",
+          "n": 12,
+          "medianSeconds": 137.5
+        },
+        {
+          "phase": "setup",
+          "n": 12,
+          "medianSeconds": 82
+        },
+        {
+          "phase": "ship",
+          "n": 8,
+          "medianSeconds": 82
+        },
+        {
+          "phase": "report",
+          "n": 7,
+          "medianSeconds": 22
+        }
+      ],
+      "agentClis": []
+    },
+    {
+      "repo": "imboard-ai/imboard-monorepo",
+      "model": "<unknown>",
+      "n": 75,
+      "delivered": 18,
+      "blocked": 12,
+      "deliveryRate": 0.24,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": null,
+      "billableTokensPerDeliveredIssue": null,
+      "tokenSamples": 0,
+      "cacheTokenSamples": 0,
+      "medianWallClockMinutes": 124.28333333333333,
       "acMet": 74,
       "acTotal": 75,
       "conformanceRate": 0.9866666666666667,
@@ -4944,36 +6044,36 @@
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 136,
+      "reviewFixed": 156,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 8,
+      "reviewFixedPerIssue": 6.24,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 17,
+      "reviewSamples": 25,
       "phaseMedians": [
         {
           "phase": "batch-review",
-          "n": 1,
-          "medianSeconds": 4121
+          "n": 2,
+          "medianSeconds": 5295.5
         },
         {
           "phase": "implement",
-          "n": 16,
-          "medianSeconds": 2679.5
+          "n": 20,
+          "medianSeconds": 2713
         },
         {
           "phase": "batch-validate",
-          "n": 6,
-          "medianSeconds": 1968
+          "n": 9,
+          "medianSeconds": 2020
         },
         {
           "phase": "merge-wait",
-          "n": 14,
-          "medianSeconds": 1848
+          "n": 18,
+          "medianSeconds": 1934.5
         },
         {
           "phase": "review",
-          "n": 16,
-          "medianSeconds": 1249.5
+          "n": 24,
+          "medianSeconds": 937
         },
         {
           "phase": "batch-report",
@@ -4982,13 +6082,13 @@
         },
         {
           "phase": "plan",
-          "n": 14,
-          "medianSeconds": 461.5
+          "n": 18,
+          "medianSeconds": 401.5
         },
         {
           "phase": "setup",
-          "n": 13,
-          "medianSeconds": 311
+          "n": 17,
+          "medianSeconds": 278
         },
         {
           "phase": "batch-ship",
@@ -4997,13 +6097,13 @@
         },
         {
           "phase": "ship",
-          "n": 15,
-          "medianSeconds": 101
+          "n": 19,
+          "medianSeconds": 77
         },
         {
           "phase": "report",
-          "n": 14,
-          "medianSeconds": 49.5
+          "n": 18,
+          "medianSeconds": 43
         },
         {
           "phase": "classify",
@@ -5012,7 +6112,8 @@
         }
       ],
       "agentClis": [
-        "claude"
+        "claude",
+        "opencode"
       ]
     },
     {
@@ -5092,10 +6193,10 @@
     {
       "repo": "imboard-ai/imboard-monorepo",
       "model": "claude-fable-5-1",
-      "n": 1,
-      "delivered": 0,
+      "n": 7,
+      "delivered": 7,
       "blocked": 0,
-      "deliveryRate": 0,
+      "deliveryRate": 1,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -5103,7 +6204,76 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": null,
+      "medianWallClockMinutes": 182.05,
+      "acMet": 29,
+      "acTotal": 29,
+      "conformanceRate": 1,
+      "conformanceSamples": 4,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 97,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 16.166666666666668,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 6,
+      "phaseMedians": [
+        {
+          "phase": "implement",
+          "n": 7,
+          "medianSeconds": 2455
+        },
+        {
+          "phase": "merge-wait",
+          "n": 7,
+          "medianSeconds": 1506
+        },
+        {
+          "phase": "review",
+          "n": 6,
+          "medianSeconds": 945
+        },
+        {
+          "phase": "plan",
+          "n": 7,
+          "medianSeconds": 441
+        },
+        {
+          "phase": "setup",
+          "n": 7,
+          "medianSeconds": 84
+        },
+        {
+          "phase": "ship",
+          "n": 7,
+          "medianSeconds": 75
+        },
+        {
+          "phase": "report",
+          "n": 7,
+          "medianSeconds": 2
+        }
+      ],
+      "agentClis": []
+    },
+    {
+      "repo": "imboard-ai/imboard-monorepo",
+      "model": "claude-haiku-4-5-20251001",
+      "n": 1,
+      "delivered": 1,
+      "blocked": 0,
+      "deliveryRate": 1,
+      "costPerDeliveredUsd": 1.5638669999999997,
+      "costSamples": 1,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": 86.0966,
+      "billableTokensPerDeliveredIssue": 7602537,
+      "tokenSamples": 1,
+      "cacheTokenSamples": 1,
+      "medianWallClockMinutes": 1075.6333333333334,
       "acMet": null,
       "acTotal": null,
       "conformanceRate": null,
@@ -5114,95 +6284,117 @@
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": null,
-      "reviewEscalated": null,
-      "reviewFixedPerIssue": null,
-      "reviewEscalatedPerIssue": null,
-      "reviewSamples": 0,
+      "reviewFixed": 1,
+      "reviewEscalated": 0,
+      "reviewFixedPerIssue": 1,
+      "reviewEscalatedPerIssue": 0,
+      "reviewSamples": 1,
       "phaseMedians": [
         {
-          "phase": "plan",
+          "phase": "report",
           "n": 1,
-          "medianSeconds": 613
+          "medianSeconds": 63152
+        },
+        {
+          "phase": "implement",
+          "n": 1,
+          "medianSeconds": 525
+        },
+        {
+          "phase": "review",
+          "n": 1,
+          "medianSeconds": 420
         },
         {
           "phase": "setup",
           "n": 1,
-          "medianSeconds": 84
+          "medianSeconds": 281
+        },
+        {
+          "phase": "plan",
+          "n": 1,
+          "medianSeconds": 121
+        },
+        {
+          "phase": "ship",
+          "n": 1,
+          "medianSeconds": 39
         }
       ],
-      "agentClis": []
+      "agentClis": [
+        "claude"
+      ]
     },
     {
       "repo": "imboard-ai/imboard-monorepo",
       "model": "claude-opus-5",
-      "n": 29,
-      "delivered": 28,
-      "blocked": 1,
-      "deliveryRate": 0.9655172413793104,
-      "costPerDeliveredUsd": null,
-      "costSamples": 0,
+      "n": 40,
+      "delivered": 38,
+      "blocked": 2,
+      "deliveryRate": 0.95,
+      "costPerDeliveredUsd": 25.2410878,
+      "costSamples": 1,
       "costFromRunLogSamples": 0,
-      "medianApiMinutes": null,
-      "billableTokensPerDeliveredIssue": null,
-      "tokenSamples": 0,
-      "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 128.19166666666666,
-      "acMet": 82,
-      "acTotal": 84,
-      "conformanceRate": 0.9761904761904762,
-      "conformanceSamples": 20,
+      "medianApiMinutes": 396.7182,
+      "billableTokensPerDeliveredIssue": 45852474,
+      "tokenSamples": 1,
+      "cacheTokenSamples": 1,
+      "medianWallClockMinutes": 132.30833333333334,
+      "acMet": 152,
+      "acTotal": 154,
+      "conformanceRate": 0.987012987012987,
+      "conformanceSamples": 26,
       "stalls": 0,
-      "escalations": 1,
-      "unverifiedExits": 1,
+      "escalations": 2,
+      "unverifiedExits": 2,
       "stallsPerIssue": 0,
-      "escalationsPerIssue": 0.034482758620689655,
-      "unverifiedExitsPerIssue": 0.034482758620689655,
-      "reviewFixed": 525,
+      "escalationsPerIssue": 0.05,
+      "unverifiedExitsPerIssue": 0.05,
+      "reviewFixed": 764,
       "reviewEscalated": 1,
-      "reviewFixedPerIssue": 18.103448275862068,
-      "reviewEscalatedPerIssue": 0.034482758620689655,
-      "reviewSamples": 29,
+      "reviewFixedPerIssue": 19.58974358974359,
+      "reviewEscalatedPerIssue": 0.02564102564102564,
+      "reviewSamples": 39,
       "phaseMedians": [
         {
           "phase": "review",
-          "n": 29,
-          "medianSeconds": 2011
-        },
-        {
-          "phase": "merge-wait",
-          "n": 17,
-          "medianSeconds": 1959
+          "n": 40,
+          "medianSeconds": 2353.5
         },
         {
           "phase": "implement",
-          "n": 28,
-          "medianSeconds": 1711
+          "n": 39,
+          "medianSeconds": 2215
+        },
+        {
+          "phase": "merge-wait",
+          "n": 24,
+          "medianSeconds": 1958.5
         },
         {
           "phase": "ship",
-          "n": 28,
-          "medianSeconds": 746
+          "n": 38,
+          "medianSeconds": 751.5
         },
         {
           "phase": "gate",
-          "n": 10,
-          "medianSeconds": 506.5
+          "n": 13,
+          "medianSeconds": 588
         },
         {
           "phase": "plan",
-          "n": 28,
-          "medianSeconds": 276
+          "n": 39,
+          "medianSeconds": 325
         },
         {
           "phase": "setup",
-          "n": 29,
-          "medianSeconds": 118
+          "n": 40,
+          "medianSeconds": 98
         },
         {
           "phase": "report",
-          "n": 28,
-          "medianSeconds": 49.5
+          "n": 38,
+          "medianSeconds": 70.5
         }
       ],
       "agentClis": [
@@ -5281,73 +6473,73 @@
     {
       "repo": "imboard-ai/imboard-monorepo",
       "model": "claude-sonnet-5",
-      "n": 53,
-      "delivered": 44,
+      "n": 62,
+      "delivered": 51,
       "blocked": 2,
-      "deliveryRate": 0.8301886792452831,
-      "costPerDeliveredUsd": 28.44225630625,
-      "costSamples": 16,
+      "deliveryRate": 0.8225806451612904,
+      "costPerDeliveredUsd": 30.575539655263157,
+      "costSamples": 19,
       "costFromRunLogSamples": 5,
-      "medianApiMinutes": 67.09563333333334,
-      "billableTokensPerDeliveredIssue": 48511450,
-      "tokenSamples": 16,
-      "cacheTokenSamples": 16,
-      "medianWallClockMinutes": 243.4,
-      "acMet": 183,
-      "acTotal": 188,
-      "conformanceRate": 0.973404255319149,
-      "conformanceSamples": 47,
+      "medianApiMinutes": 91.03326666666666,
+      "billableTokensPerDeliveredIssue": 58773047.578947365,
+      "tokenSamples": 19,
+      "cacheTokenSamples": 19,
+      "medianWallClockMinutes": 239.58333333333334,
+      "acMet": 208,
+      "acTotal": 213,
+      "conformanceRate": 0.9765258215962441,
+      "conformanceSamples": 52,
       "stalls": 0,
-      "escalations": 21,
-      "unverifiedExits": 10,
+      "escalations": 28,
+      "unverifiedExits": 17,
       "stallsPerIssue": 0,
-      "escalationsPerIssue": 0.39622641509433965,
-      "unverifiedExitsPerIssue": 0.18867924528301888,
-      "reviewFixed": 525,
+      "escalationsPerIssue": 0.45161290322580644,
+      "unverifiedExitsPerIssue": 0.27419354838709675,
+      "reviewFixed": 576,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 10.294117647058824,
+      "reviewFixedPerIssue": 10.105263157894736,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 51,
+      "reviewSamples": 57,
       "phaseMedians": [
         {
           "phase": "merge-wait",
-          "n": 25,
+          "n": 29,
           "medianSeconds": 1909
         },
         {
           "phase": "review",
-          "n": 51,
-          "medianSeconds": 1803
-        },
-        {
-          "phase": "gate",
-          "n": 19,
-          "medianSeconds": 1697
+          "n": 57,
+          "medianSeconds": 1779
         },
         {
           "phase": "implement",
-          "n": 50,
-          "medianSeconds": 1580
+          "n": 57,
+          "medianSeconds": 1620
+        },
+        {
+          "phase": "gate",
+          "n": 20,
+          "medianSeconds": 1370
         },
         {
           "phase": "plan",
-          "n": 51,
+          "n": 59,
           "medianSeconds": 378
         },
         {
           "phase": "ship",
-          "n": 51,
-          "medianSeconds": 201
+          "n": 58,
+          "medianSeconds": 185.5
         },
         {
           "phase": "report",
-          "n": 43,
-          "medianSeconds": 127
+          "n": 50,
+          "medianSeconds": 166.5
         },
         {
           "phase": "setup",
-          "n": 51,
-          "medianSeconds": 112
+          "n": 59,
+          "medianSeconds": 118
         }
       ],
       "agentClis": [
@@ -5427,10 +6619,10 @@
     {
       "repo": "imboard-ai/imboard-monorepo",
       "model": "glm-5.3",
-      "n": 29,
-      "delivered": 26,
+      "n": 31,
+      "delivered": 28,
       "blocked": 3,
-      "deliveryRate": 0.896551724137931,
+      "deliveryRate": 0.9032258064516129,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -5439,30 +6631,30 @@
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
       "medianWallClockMinutes": 173.25833333333333,
-      "acMet": 124,
-      "acTotal": 126,
-      "conformanceRate": 0.9841269841269841,
-      "conformanceSamples": 24,
+      "acMet": 132,
+      "acTotal": 136,
+      "conformanceRate": 0.9705882352941176,
+      "conformanceSamples": 26,
       "stalls": 1,
       "escalations": 6,
       "unverifiedExits": 0,
-      "stallsPerIssue": 0.034482758620689655,
-      "escalationsPerIssue": 0.20689655172413793,
+      "stallsPerIssue": 0.03225806451612903,
+      "escalationsPerIssue": 0.1935483870967742,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 232,
+      "reviewFixed": 246,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 8.923076923076923,
+      "reviewFixedPerIssue": 8.785714285714286,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 26,
+      "reviewSamples": 28,
       "phaseMedians": [
         {
           "phase": "implement",
-          "n": 26,
+          "n": 28,
           "medianSeconds": 2090
         },
         {
           "phase": "merge-wait",
-          "n": 20,
+          "n": 22,
           "medianSeconds": 1972.5
         },
         {
@@ -5472,28 +6664,28 @@
         },
         {
           "phase": "review",
-          "n": 26,
-          "medianSeconds": 1205.5
+          "n": 28,
+          "medianSeconds": 1075
         },
         {
           "phase": "ship",
-          "n": 26,
-          "medianSeconds": 407.5
+          "n": 28,
+          "medianSeconds": 438.5
         },
         {
           "phase": "plan",
-          "n": 28,
-          "medianSeconds": 398
+          "n": 30,
+          "medianSeconds": 372.5
         },
         {
           "phase": "report",
-          "n": 26,
+          "n": 28,
           "medianSeconds": 79.5
         },
         {
           "phase": "setup",
-          "n": 28,
-          "medianSeconds": 76
+          "n": 30,
+          "medianSeconds": 77.5
         }
       ],
       "agentClis": [
@@ -5503,10 +6695,10 @@
     {
       "repo": "imboard-ai/imboard-monorepo",
       "model": "glm-5.3-flash",
-      "n": 13,
-      "delivered": 12,
+      "n": 17,
+      "delivered": 17,
       "blocked": 0,
-      "deliveryRate": 0.9230769230769231,
+      "deliveryRate": 1,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -5514,62 +6706,62 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 235.36666666666667,
-      "acMet": 61,
-      "acTotal": 62,
-      "conformanceRate": 0.9838709677419355,
-      "conformanceSamples": 11,
+      "medianWallClockMinutes": 215.21666666666667,
+      "acMet": 84,
+      "acTotal": 88,
+      "conformanceRate": 0.9545454545454546,
+      "conformanceSamples": 16,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 132,
+      "reviewFixed": 160,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 11,
+      "reviewFixedPerIssue": 9.411764705882353,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 12,
+      "reviewSamples": 17,
       "phaseMedians": [
         {
           "phase": "gate",
-          "n": 2,
-          "medianSeconds": 8788
+          "n": 3,
+          "medianSeconds": 8449
         },
         {
           "phase": "implement",
-          "n": 12,
-          "medianSeconds": 7042.5
+          "n": 17,
+          "medianSeconds": 5816
         },
         {
           "phase": "merge-wait",
-          "n": 10,
-          "medianSeconds": 3452.5
+          "n": 14,
+          "medianSeconds": 2150.5
         },
         {
           "phase": "review",
-          "n": 12,
-          "medianSeconds": 1239
+          "n": 17,
+          "medianSeconds": 1036
         },
         {
           "phase": "plan",
-          "n": 13,
-          "medianSeconds": 465
+          "n": 17,
+          "medianSeconds": 452
         },
         {
           "phase": "ship",
-          "n": 12,
-          "medianSeconds": 390.5
+          "n": 17,
+          "medianSeconds": 442
         },
         {
           "phase": "setup",
-          "n": 13,
-          "medianSeconds": 104
+          "n": 17,
+          "medianSeconds": 111
         },
         {
           "phase": "report",
-          "n": 12,
-          "medianSeconds": 70.5
+          "n": 17,
+          "medianSeconds": 89
         }
       ],
       "agentClis": []
@@ -5651,10 +6843,81 @@
     {
       "repo": "imboard-ai/imboard-monorepo",
       "model": "gpt-5.6-terra",
-      "n": 4,
-      "delivered": 3,
-      "blocked": 1,
-      "deliveryRate": 0.75,
+      "n": 15,
+      "delivered": 10,
+      "blocked": 2,
+      "deliveryRate": 0.6666666666666666,
+      "costPerDeliveredUsd": null,
+      "costSamples": 0,
+      "costFromRunLogSamples": 0,
+      "medianApiMinutes": 78.09868333333333,
+      "billableTokensPerDeliveredIssue": 23354866,
+      "tokenSamples": 1,
+      "cacheTokenSamples": 1,
+      "medianWallClockMinutes": 106.28333333333333,
+      "acMet": 11,
+      "acTotal": 11,
+      "conformanceRate": 1,
+      "conformanceSamples": 3,
+      "stalls": 0,
+      "escalations": 0,
+      "unverifiedExits": 0,
+      "stallsPerIssue": 0,
+      "escalationsPerIssue": 0,
+      "unverifiedExitsPerIssue": 0,
+      "reviewFixed": 17,
+      "reviewEscalated": 2,
+      "reviewFixedPerIssue": 1.7,
+      "reviewEscalatedPerIssue": 0.2,
+      "reviewSamples": 10,
+      "phaseMedians": [
+        {
+          "phase": "implement",
+          "n": 13,
+          "medianSeconds": 2219
+        },
+        {
+          "phase": "merge-wait",
+          "n": 7,
+          "medianSeconds": 1157
+        },
+        {
+          "phase": "review",
+          "n": 10,
+          "medianSeconds": 458
+        },
+        {
+          "phase": "setup",
+          "n": 15,
+          "medianSeconds": 374
+        },
+        {
+          "phase": "ship",
+          "n": 10,
+          "medianSeconds": 271
+        },
+        {
+          "phase": "plan",
+          "n": 15,
+          "medianSeconds": 247
+        },
+        {
+          "phase": "report",
+          "n": 8,
+          "medianSeconds": 5.5
+        }
+      ],
+      "agentClis": [
+        "opencode"
+      ]
+    },
+    {
+      "repo": "imboard-ai/imboard-monorepo",
+      "model": "gpt-6-astra",
+      "n": 2,
+      "delivered": 1,
+      "blocked": 0,
+      "deliveryRate": 0.5,
       "costPerDeliveredUsd": null,
       "costSamples": 0,
       "costFromRunLogSamples": 0,
@@ -5662,57 +6925,57 @@
       "billableTokensPerDeliveredIssue": null,
       "tokenSamples": 0,
       "cacheTokenSamples": 0,
-      "medianWallClockMinutes": 110.5,
-      "acMet": 4,
-      "acTotal": 4,
-      "conformanceRate": 1,
-      "conformanceSamples": 1,
+      "medianWallClockMinutes": 55.11666666666667,
+      "acMet": 11,
+      "acTotal": 12,
+      "conformanceRate": 0.9166666666666666,
+      "conformanceSamples": 2,
       "stalls": 0,
       "escalations": 0,
       "unverifiedExits": 0,
       "stallsPerIssue": 0,
       "escalationsPerIssue": 0,
       "unverifiedExitsPerIssue": 0,
-      "reviewFixed": 2,
+      "reviewFixed": 20,
       "reviewEscalated": 0,
-      "reviewFixedPerIssue": 0.6666666666666666,
+      "reviewFixedPerIssue": 10,
       "reviewEscalatedPerIssue": 0,
-      "reviewSamples": 3,
+      "reviewSamples": 2,
       "phaseMedians": [
         {
-          "phase": "merge-wait",
-          "n": 3,
-          "medianSeconds": 1727
-        },
-        {
-          "phase": "plan",
-          "n": 4,
-          "medianSeconds": 977
-        },
-        {
           "phase": "ship",
-          "n": 3,
-          "medianSeconds": 849
-        },
-        {
-          "phase": "review",
-          "n": 3,
-          "medianSeconds": 296
-        },
-        {
-          "phase": "setup",
-          "n": 4,
-          "medianSeconds": 90
-        },
-        {
-          "phase": "report",
-          "n": 3,
-          "medianSeconds": 22
+          "n": 2,
+          "medianSeconds": 6744
         },
         {
           "phase": "implement",
-          "n": 3,
-          "medianSeconds": 2
+          "n": 2,
+          "medianSeconds": 1730.5
+        },
+        {
+          "phase": "review",
+          "n": 2,
+          "medianSeconds": 1719.5
+        },
+        {
+          "phase": "merge-wait",
+          "n": 1,
+          "medianSeconds": 528
+        },
+        {
+          "phase": "setup",
+          "n": 2,
+          "medianSeconds": 420
+        },
+        {
+          "phase": "plan",
+          "n": 2,
+          "medianSeconds": 78.5
+        },
+        {
+          "phase": "report",
+          "n": 1,
+          "medianSeconds": 24
         }
       ],
       "agentClis": []
@@ -5904,63 +7167,63 @@
   ],
   "grandTotal": {
     "model": "TOTAL",
-    "n": 302,
-    "delivered": 212,
-    "blocked": 22,
-    "deliveryRate": 0.7019867549668874,
-    "costPerDeliveredUsd": 24.838688173170727,
-    "costSamples": 41,
+    "n": 400,
+    "delivered": 284,
+    "blocked": 29,
+    "deliveryRate": 0.71,
+    "costPerDeliveredUsd": 25.45761570543478,
+    "costSamples": 46,
     "costFromRunLogSamples": 17,
-    "medianApiMinutes": 55.97215,
-    "billableTokensPerDeliveredIssue": 47640238.63414634,
-    "tokenSamples": 41,
-    "cacheTokenSamples": 41,
-    "medianWallClockMinutes": 114.78333333333333,
-    "acMet": 921,
-    "acTotal": 948,
-    "conformanceRate": 0.9715189873417721,
-    "conformanceSamples": 199,
+    "medianApiMinutes": 63.99153333333334,
+    "billableTokensPerDeliveredIssue": 50437539.680851065,
+    "tokenSamples": 47,
+    "cacheTokenSamples": 47,
+    "medianWallClockMinutes": 113.20833333333333,
+    "acMet": 1215,
+    "acTotal": 1249,
+    "conformanceRate": 0.9727782225780625,
+    "conformanceSamples": 249,
     "stalls": 1,
-    "escalations": 37,
-    "unverifiedExits": 17,
-    "stallsPerIssue": 0.0033112582781456954,
-    "escalationsPerIssue": 0.12251655629139073,
-    "unverifiedExitsPerIssue": 0.056291390728476824,
-    "reviewFixed": 2897,
-    "reviewEscalated": 3,
-    "reviewFixedPerIssue": 12.223628691983123,
-    "reviewEscalatedPerIssue": 0.012658227848101266,
-    "reviewSamples": 237,
+    "escalations": 45,
+    "unverifiedExits": 25,
+    "stallsPerIssue": 0.0025,
+    "escalationsPerIssue": 0.1125,
+    "unverifiedExitsPerIssue": 0.0625,
+    "reviewFixed": 3593,
+    "reviewEscalated": 5,
+    "reviewFixedPerIssue": 11.47923322683706,
+    "reviewEscalatedPerIssue": 0.01597444089456869,
+    "reviewSamples": 313,
     "phaseMedians": [
       {
-        "phase": "batch-validate",
-        "n": 14,
-        "medianSeconds": 2092
+        "phase": "batch-review",
+        "n": 6,
+        "medianSeconds": 3011
       },
       {
-        "phase": "batch-review",
-        "n": 5,
-        "medianSeconds": 1901
+        "phase": "batch-validate",
+        "n": 17,
+        "medianSeconds": 2138
       },
       {
         "phase": "gate",
-        "n": 66,
-        "medianSeconds": 1727
-      },
-      {
-        "phase": "review",
-        "n": 231,
-        "medianSeconds": 1357
+        "n": 81,
+        "medianSeconds": 1494
       },
       {
         "phase": "implement",
-        "n": 229,
-        "medianSeconds": 1270
+        "n": 310,
+        "medianSeconds": 1310.5
       },
       {
         "phase": "merge-wait",
-        "n": 162,
-        "medianSeconds": 1211.5
+        "n": 215,
+        "medianSeconds": 1201
+      },
+      {
+        "phase": "review",
+        "n": 308,
+        "medianSeconds": 1200.5
       },
       {
         "phase": "batch-report",
@@ -5969,8 +7232,8 @@
       },
       {
         "phase": "plan",
-        "n": 229,
-        "medianSeconds": 349
+        "n": 313,
+        "medianSeconds": 344
       },
       {
         "phase": "batch-ship",
@@ -5979,18 +7242,18 @@
       },
       {
         "phase": "ship",
-        "n": 219,
-        "medianSeconds": 157
+        "n": 293,
+        "medianSeconds": 167
       },
       {
         "phase": "setup",
-        "n": 227,
-        "medianSeconds": 156
+        "n": 310,
+        "medianSeconds": 139.5
       },
       {
         "phase": "report",
-        "n": 187,
-        "medianSeconds": 55
+        "n": 257,
+        "medianSeconds": 58
       },
       {
         "phase": "classify",
@@ -6005,34 +7268,34 @@
   },
   "phases": [
     {
-      "phase": "batch-validate",
-      "n": 14,
-      "medianSeconds": 2092
+      "phase": "batch-review",
+      "n": 6,
+      "medianSeconds": 3011
     },
     {
-      "phase": "batch-review",
-      "n": 5,
-      "medianSeconds": 1901
+      "phase": "batch-validate",
+      "n": 17,
+      "medianSeconds": 2138
     },
     {
       "phase": "gate",
-      "n": 66,
-      "medianSeconds": 1727
-    },
-    {
-      "phase": "review",
-      "n": 231,
-      "medianSeconds": 1357
+      "n": 81,
+      "medianSeconds": 1494
     },
     {
       "phase": "implement",
-      "n": 229,
-      "medianSeconds": 1270
+      "n": 310,
+      "medianSeconds": 1310.5
     },
     {
       "phase": "merge-wait",
-      "n": 162,
-      "medianSeconds": 1211.5
+      "n": 215,
+      "medianSeconds": 1201
+    },
+    {
+      "phase": "review",
+      "n": 308,
+      "medianSeconds": 1200.5
     },
     {
       "phase": "batch-report",
@@ -6041,8 +7304,8 @@
     },
     {
       "phase": "plan",
-      "n": 229,
-      "medianSeconds": 349
+      "n": 313,
+      "medianSeconds": 344
     },
     {
       "phase": "batch-ship",
@@ -6051,18 +7314,18 @@
     },
     {
       "phase": "ship",
-      "n": 219,
-      "medianSeconds": 157
+      "n": 293,
+      "medianSeconds": 167
     },
     {
       "phase": "setup",
-      "n": 227,
-      "medianSeconds": 156
+      "n": 310,
+      "medianSeconds": 139.5
     },
     {
       "phase": "report",
-      "n": 187,
-      "medianSeconds": 55
+      "n": 257,
+      "medianSeconds": 58
     },
     {
       "phase": "classify",
@@ -6072,12 +7335,12 @@
   ],
   "warnings": [
     "imboard-ai/ai-dossier: 33 run(s) recorded no model= — their row is bucketed as <unknown>, and its outcome columns are not attributable to any model",
-    "imboard-ai/ai-dossier: 26 of 131 run(s) are classifier dispatches (classify milestones only) — excluded from the by-model and by-class tables, since they record no model= and never ship",
-    "imboard-ai/ai-dossier: 76 of 105 run(s) (72%) carry no classifier risk= verdict — they are bucketed as <unclassified>, so the class rows describe only the classified remainder",
+    "imboard-ai/ai-dossier: 26 of 166 run(s) are classifier dispatches (classify milestones only) — excluded from the by-model and by-class tables, since they record no model= and never ship",
+    "imboard-ai/ai-dossier: 111 of 140 run(s) (79%) carry no classifier risk= verdict — they are bucketed as <unclassified>, so the class rows describe only the classified remainder",
     "imboard-ai/imboard-monorepo: issue imboard-ai/imboard-monorepo#3684 run r-3684-a0cf: gate milestone has an unusable at= value ('$(date') — skipped, and the next phase's duration is reported as unknown",
-    "imboard-ai/imboard-monorepo: 35 run(s) recorded no model= — their row is bucketed as <unknown>, and its outcome columns are not attributable to any model",
+    "imboard-ai/imboard-monorepo: 51 run(s) recorded no model= — their row is bucketed as <unknown>, and its outcome columns are not attributable to any model",
     "imboard-ai/imboard-monorepo: 'kimi-latest' is a moving version tag with no declared pin — its 1 run(s) sit in their own row, apart from whatever pinned version the tag resolves to; add it to MODEL_ALIASES to fold them",
-    "imboard-ai/imboard-monorepo: 53 of 239 run(s) are classifier dispatches (classify milestones only) — excluded from the by-model and by-class tables, since they record no model= and never ship",
-    "imboard-ai/imboard-monorepo: 156 of 186 run(s) (84%) carry no classifier risk= verdict — they are bucketed as <unclassified>, so the class rows describe only the classified remainder"
+    "imboard-ai/imboard-monorepo: 71 of 320 run(s) are classifier dispatches (classify milestones only) — excluded from the by-model and by-class tables, since they record no model= and never ship",
+    "imboard-ai/imboard-monorepo: 203 of 249 run(s) (82%) carry no classifier risk= verdict — they are bucketed as <unclassified>, so the class rows describe only the classified remainder"
   ]
 }
