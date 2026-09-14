@@ -2,12 +2,12 @@
 {
   "dossier_schema_version": "1.0.0",
   "name": "slot-cycle",
-  "title": "Slot Cycle — Per-Issue Execution Unit Inside a Batch",
-  "version": "1.0.0",
+  "title": "Slot Cycle — SUPERSEDED by member-cycle",
+  "version": "1.1.2",
   "protocol_version": "1.0",
-  "status": "Draft",
-  "last_updated": "2026-08-29",
-  "objective": "Execute ONE member issue inside a scheduler-provided batch worktree: validate the issue's plan:v1 artifact, implement with changed-file discipline, run the per-issue blind conformance check, and land exactly one commit at the issue boundary — the minimum issue-specific work that creates confidence while the batch owns the expensive lifecycle",
+  "status": "Deprecated",
+  "last_updated": "2026-09-10",
+  "objective": "SUPERSEDED by imboard-ai/git/member-cycle. Executed one member issue inside a SHARED batch worktree, members serialised. RFC-0001 §J replaced that with per-member worktrees off an integration branch. Kept for reference only.",
   "category": [
     "development"
   ],
@@ -65,13 +65,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "0f8f801fc965258b46cda050a356573a6c4f8d0c33ec78bc5d9c70265cc82701"
+    "hash": "fc0a97532e19d51396d7dd9181d08e41e41d183b3cea0d3e2b3e887844699a5f"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "q+yHDHwfYDbjd83eU6Nb5YPjRo46Hb0EX66NSuh1bKs1CJbyvWogxCNcIyWaoOxbNgXz5x5hCh8zGWGugWJIAQ==",
+    "signature": "pp/SiL1iDToAOQkKGjoj0DhBEG4oRsT7PegGkZHrBCz7tfSjKRWlRjij5lGcVuaT0uMg4YC/Mnp2E0iplmyYDA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T18:12:23.961Z",
+    "signed_at": "2026-09-10T16:09:50.249Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -80,6 +80,16 @@
 ---
 
 # Slot Cycle — Per-Issue Execution Unit Inside a Batch
+
+> ## ⚠️ SUPERSEDED
+>
+> This dossier describes the **shared-worktree, serial-member** model that RFC-0001 §J replaced.
+> Use **`imboard-ai/git/member-cycle`** instead — own worktree per member off an integration branch,
+> relevance-scoped verification, and a `handover:v1` artifact for the parent orchestrator
+> (**`imboard-ai/git/batch-integrate`**). Entry point for operators: **`imboard-ai/skills/batch-cycle-skill`**.
+>
+> Retained for reference; do not dispatch.
+
 
 ## Objective
 
@@ -109,7 +119,7 @@ Assert every precondition the scheduler owes you, in order — any failure posts
 
 1. **Worktree exists and is a git worktree** — `test -d "<worktree>"` and `git rev-parse --is-inside-work-tree`. Failure: `reason=worktree-missing`.
 2. **Batch branch checked out** — `git branch --show-current` contains the `batch` input's id and is NOT the default branch (`git symbolic-ref --short refs/remotes/origin/HEAD`) — a concrete predicate, not a naming convention. Failure: `reason=not-batch-branch`.
-3. **Environment warm** — the repo's dependency marker is present (e.g. `node_modules/`, `vendor/`, `.venv/` — whatever a fresh clone lacks). A cold environment means warm-up was skipped. Failure: `reason=env-cold`.
+3. **Environment warm** — a dependency marker a fresh clone lacks is present **somewhere in the worktree, not necessarily at its root**: `find . -maxdepth 3 \( -name node_modules -o -name vendor -o -name .venv \) -type d -print -quit` returns non-empty. A monorepo's workspace root is often a subdirectory, and checking the worktree root alone is a false negative — batch `b-20260909-01` evicted `#4159` for `env-cold` while `main/node_modules` held 1173 packages, and that issue then completed as a standalone full-cycle on the same machine. Do **not** locate the root by nearest lockfile either: imboard carries a stray root `package-lock.json` that shadows the real `main/pnpm-lock.yaml`. Nothing found anywhere → warm-up was genuinely skipped. Failure: `reason=env-cold`. (ai-dossier#676)
 4. **Clean working tree** — `git status --porcelain` empty. A dirty tree means the previous member crashed mid-issue; recovery (revert, requeue) is the scheduler's call, not yours. Failure: `reason=dirty-worktree`.
 5. **Plan artifact available** — `ai-dossier plan get --issue <issue_number>` exits 0. batch-issues-preparation owes every member a plan:v1 artifact; a missing one is prep's failure, not yours to fix. Failure: `reason=no-plan-artifact`.
 6. **Classify record available** — `ai-dossier runstate last --issue <issue_number> --json` shows `mode=slot` on the latest milestone: `phase=classify` (first dispatch) OR a prior slot-mode milestone (crash-restart re-dispatch or re-batch — resume at Step 4, which squashes any intermediate commits). `runstate last` returns only the latest milestone, so after any partial slot run the classify record itself is buried — that is expected. `mode=slot` absent entirely (never classified, or classified `full`) → Failure: `reason=no-classify-record`. **Capture `est_files` and `est_diff` now** (from the classify record on first dispatch, from your notes on a re-dispatch) — the Step 1 and Step 2 tripwires compare against them, and `runstate last` will not return the classify record again once your own milestones post.
@@ -311,7 +321,8 @@ On a hand-back, the blocked milestone IS the output — state which step posted 
 | `error: unknown command 'plan'` | CLI older than 0.16.0 — same upgrade/shadow-copy fix |
 | `plan validate` reports `missing-file` errors | Predicted paths don't exist at this boundary — refine the artifact's paths (`plan post` a superseding one); never build to a stale plan |
 | `plan validate` reports an `artifact` error | No plan:v1 comment exists at all — `blocked reason=no-plan-artifact`; refinement cannot fix this (batch-prep's contract) |
-| `blocked reason=worktree-missing` / `not-batch-branch` / `env-cold` | Scheduler-side contract failure — dispatch promised a warm worktree on the batch branch; fix the scheduler's setup/claim step and re-dispatch. Not a member failure: the member correctly refused to touch anything |
+| `blocked reason=worktree-missing` / `not-batch-branch` | Scheduler-side contract failure — dispatch promised a worktree on the batch branch; fix the scheduler's setup/claim step and re-dispatch. Not a member failure: the member correctly refused to touch anything |
+| `blocked reason=env-cold` on a worktree you believe is warm | A root-level marker check in a nested-workspace repo is a FALSE NEGATIVE, not a cold pool — the dependency marker lives at the workspace root, which is often a subdirectory of the worktree (imboard: `main/node_modules`). Run Step 0 precondition 3's search-the-worktree `find` first; only a search that returns nothing is a genuine scheduler warmup failure. Do not go pool-hunting before that (ai-dossier#676) |
 | Re-dispatch posts `no-classify-record` though the issue WAS classified | Expected after a partial slot run — `runstate last` shows the latest milestone (the slot trail), not classify; precondition 6 accepts any latest milestone carrying `mode=slot` |
 | `blocked reason=unrefinable-plan` | Refinement is exhausted — the scheduler requeues the member as full-cycle, where plan-issue authors a fresh plan |
 | `cap run test.focused` exits 3 (`capability-unavailable`) | Expected when the repo has no `.dossier/automation/` manifest — use the reasoning fallback; it is the designed path, not an error |
