@@ -1,8 +1,13 @@
-import Ajv from 'ajv';
 import evidenceSchema from './schema/evidence-schema.json';
+import type { DossierFrontmatter } from './types';
+import { compileSchema } from './utils/ajv';
+import { getErrorMessage } from './utils/errors';
 
+/** Must stay in sync with evidence-schema.json's `evidence_schema_version` const. */
 export const EVIDENCE_SCHEMA_VERSION = '1.0.0';
+/** Parse-time size guard for a sidecar file, ahead of JSON.parse and schema validation. */
 export const EVIDENCE_MAX_BYTES = 256 * 1024;
+/** Must stay in sync with evidence-schema.json's `entries.items.properties.rationale.maxLength`. */
 export const EVIDENCE_MAX_RATIONALE_CHARS = 500;
 
 export interface EvidenceRef {
@@ -31,8 +36,7 @@ export interface EvidenceRecord {
   entries: EvidenceEntry[];
 }
 
-const ajv = new Ajv({ allErrors: true, strict: false, validateFormats: false });
-const validate = ajv.compile(evidenceSchema);
+const validate = compileSchema<EvidenceRecord>(evidenceSchema);
 
 export function validateEvidence(value: unknown): string[] {
   const valid = validate(value);
@@ -44,11 +48,17 @@ export function validateEvidence(value: unknown): string[] {
 }
 
 export function parseEvidence(json: string): EvidenceRecord {
-  if (json.length > EVIDENCE_MAX_BYTES) {
+  if (Buffer.byteLength(json, 'utf8') > EVIDENCE_MAX_BYTES) {
     throw new Error(`Evidence record exceeds maximum size of ${EVIDENCE_MAX_BYTES} bytes`);
   }
 
-  const parsed = JSON.parse(json);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch (err) {
+    throw new Error(`Failed to parse evidence record JSON: ${getErrorMessage(err)}`);
+  }
+
   const errors = validateEvidence(parsed);
   if (errors.length > 0) {
     throw new Error(errors.join('; '));
@@ -76,11 +86,15 @@ export function createEvidenceRecord(input: {
 
 export function evidenceMatchesDossier(
   record: EvidenceRecord,
-  frontmatter: { version?: string; checksum?: { hash?: string } },
+  frontmatter: Pick<DossierFrontmatter, 'version' | 'checksum'>,
   fullName: string
 ): string[] {
   if (!frontmatter.checksum?.hash) {
     return ['dossier has no checksum; sign or run checksum --update before attaching evidence'];
+  }
+
+  if (!record.checksum?.hash) {
+    return ['evidence record has no checksum; parse it with parseEvidence before comparing'];
   }
 
   const messages: string[] = [];

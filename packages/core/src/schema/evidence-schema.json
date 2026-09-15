@@ -26,6 +26,7 @@
       "type": "object",
       "description": "Body checksum of the dossier version this evidence record applies to",
       "required": ["algorithm", "hash"],
+      "additionalProperties": false,
       "properties": {
         "algorithm": {
           "type": "string",
@@ -62,7 +63,8 @@
           },
           "created_at": {
             "type": "string",
-            "description": "ISO 8601 timestamp when this entry was recorded"
+            "description": "ISO 8601 timestamp when this entry was recorded",
+            "maxLength": 40
           },
           "evidence": {
             "type": "array",
@@ -100,7 +102,8 @@
                 "extra": {
                   "type": "object",
                   "description": "Optional tool-specific locator IDs (e.g. ctx); never the only locator",
-                  "additionalProperties": { "type": "string" }
+                  "maxProperties": 20,
+                  "additionalProperties": { "type": "string", "maxLength": 500 }
                 }
               }
             }
