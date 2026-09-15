@@ -95,7 +95,8 @@ cp <name>.ds.md <name>.ds.md.bak   # optional, if you want a pre-edit copy
 ai-dossier evidence add <name>.ds.md \
   --anchor "<heading or rule as written in the body>" \
   --rationale "<one or two sentences: what failed / what this prevents>" \
-  --session "$(ls -t ~/.claude/projects/*/*.jsonl | head -1 | xargs -n1 basename | sed 's/\.jsonl$//')"
+  --session "$(ls -t ~/.claude/projects/*/*.jsonl | head -1 | xargs -n1 basename | sed 's/\.jsonl$//')" \
+  --namespace <namespace>
 # repeat evidence add, once per rule/section you changed
 ai-dossier sign <name>.ds.md --key ~/.dossier/<org>.pem --key-id <org>
 ai-dossier evidence sync <name>.ds.md
@@ -112,6 +113,18 @@ creates the sidecar automatically on first use if one doesn't already
 exist next to the dossier file — there's no separate "create the sidecar"
 step you have to remember. Skip `evidence add` only when the change is
 purely cosmetic (typo fix, reformatting) with nothing to explain.
+
+**Always pass `--namespace` explicitly on `evidence add`/`evidence init`
+when it might differ from your default.** The default namespace mirrors
+`publish`'s own resolution: `--namespace` if given, else your first org,
+else your username. If you belong to an org but are publishing this
+dossier under your personal namespace (or vice versa), the sidecar's
+`dossier` field is stamped with the *default*, not the namespace you
+`publish` to — and `publish` then rejects it with `EVIDENCE_MISMATCH:
+evidence record dossier "<default>/<name>" does not match "<actual>/<name>"`.
+There's no in-place fix for a sidecar with the wrong namespace baked in
+(`evidence sync` only refreshes `version`/`checksum`) — delete the sidecar
+and re-run `evidence add` with the correct `--namespace` if this happens.
 
 ## 5. Finding the session ID
 
