@@ -35,6 +35,17 @@ export type {
   StepOutput,
 } from './coherence';
 export { validateCoherence, validateStepCoherence } from './coherence';
+// Evidence exports
+export type { EvidenceEntry, EvidenceRecord, EvidenceRef } from './evidence';
+export {
+  createEvidenceRecord,
+  EVIDENCE_MAX_BYTES,
+  EVIDENCE_MAX_RATIONALE_CHARS,
+  EVIDENCE_SCHEMA_VERSION,
+  evidenceMatchesDossier,
+  parseEvidence,
+  validateEvidence,
+} from './evidence';
 export type { FormatOptions, FormatResult } from './formatter';
 // Formatter exports
 export { formatDossierContent, formatDossierFile } from './formatter';

@@ -1,9 +1,8 @@
-import Ajv from 'ajv';
 import dossierSchema from '../../schema/dossier-schema.json';
+import { compileSchema } from '../../utils/ajv';
 import type { LintRule } from '../types';
 
-const ajv = new Ajv({ allErrors: true, strict: false, validateFormats: false });
-const validate = ajv.compile(dossierSchema);
+const validate = compileSchema(dossierSchema);
 
 export const schemaValidRule: LintRule = {
   id: 'schema-valid',

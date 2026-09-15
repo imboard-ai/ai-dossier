@@ -1,0 +1,115 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/imboard-ai/ai-dossier/schema/evidence/v1.0.0",
+  "title": "Dossier Authoring Evidence Schema",
+  "description": "JSON Schema for a dossier's authoring-evidence sidecar record — per-rule rationale plus pointers to the agent session(s) where the decision was made. Never loaded by `ai-dossier run`; keyed by the dossier's body checksum.",
+  "type": "object",
+  "required": ["evidence_schema_version", "dossier", "version", "checksum", "entries"],
+  "additionalProperties": false,
+  "properties": {
+    "evidence_schema_version": {
+      "type": "string",
+      "description": "Version of the Authoring Evidence Schema specification being used",
+      "const": "1.0.0"
+    },
+    "dossier": {
+      "type": "string",
+      "description": "Fully-qualified dossier name (namespace/name)",
+      "pattern": "^[a-z0-9][a-z0-9-]*(/[a-z0-9][a-z0-9-]*)+$"
+    },
+    "version": {
+      "type": "string",
+      "description": "Semantic version of the dossier this evidence record applies to",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(-[0-9A-Za-z.-]+)?$"
+    },
+    "checksum": {
+      "type": "object",
+      "description": "Body checksum of the dossier version this evidence record applies to",
+      "required": ["algorithm", "hash"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "description": "Hash algorithm used",
+          "const": "sha256"
+        },
+        "hash": {
+          "type": "string",
+          "description": "SHA256 hash of dossier body content (after frontmatter)",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
+    "entries": {
+      "type": "array",
+      "description": "Per-rule/section authoring evidence entries",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "required": ["anchor", "rationale", "created_at", "evidence"],
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "type": "string",
+            "description": "Free text naming the rule/heading in the dossier body this entry documents",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "rationale": {
+            "type": "string",
+            "description": "Short rationale for why the rule/section reads the way it does",
+            "minLength": 1,
+            "maxLength": 500
+          },
+          "created_at": {
+            "type": "string",
+            "description": "ISO 8601 timestamp when this entry was recorded",
+            "maxLength": 40
+          },
+          "evidence": {
+            "type": "array",
+            "description": "Pointers to the agent session(s) where this decision was made",
+            "minItems": 0,
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "required": ["provider", "session"],
+              "additionalProperties": false,
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "description": "Agent provider that produced the session",
+                  "enum": ["claude-code", "codex", "opencode", "gemini-cli", "other"]
+                },
+                "session": {
+                  "type": "string",
+                  "description": "Provider-native session id (e.g. Claude Code's session UUID)",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "event": {
+                  "type": "string",
+                  "description": "Provider-native per-message/tool-call id within the session",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "host": {
+                  "type": "string",
+                  "description": "Machine the session ran on (evidence refs are only resolvable there)",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "extra": {
+                  "type": "object",
+                  "description": "Optional tool-specific locator IDs (e.g. ctx); never the only locator",
+                  "maxProperties": 20,
+                  "additionalProperties": { "type": "string", "maxLength": 500 }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
