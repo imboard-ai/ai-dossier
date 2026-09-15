@@ -33,6 +33,15 @@ const existingRecord = createEvidenceRecord({
   checksumHash: dossierChecksum,
 });
 
+/** Wire fs mocks for an `evidence sync` test: `sidecarRecord` sits beside `dossierWithChecksum`. */
+function mockSyncFixture(sidecarRecord: ReturnType<typeof createEvidenceRecord>): void {
+  mockedFs.existsSync.mockReturnValue(true);
+  mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+    String(p).endsWith('.evidence.json')
+      ? JSON.stringify(sidecarRecord)
+      : dossierWithChecksum) as typeof fs.readFileSync);
+}
+
 describe('evidence command', () => {
   beforeEach(() => {
     mockedFs.existsSync.mockReset();
@@ -166,7 +175,7 @@ describe('evidence command', () => {
       expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
     });
 
-    it('should error when the dossier has no checksum', async () => {
+    it('should compute the checksum from the body when frontmatter has none', async () => {
       mockedFs.existsSync.mockImplementation(((p: unknown) => {
         return String(p).endsWith('.ds.md');
       }) as typeof fs.existsSync);
@@ -174,14 +183,11 @@ describe('evidence command', () => {
 
       const program = createTestProgram();
       registerEvidenceCommand(program);
+      await program.parseAsync(['node', 'dossier', 'evidence', 'init', 'test.ds.md']);
 
-      await expect(
-        program.parseAsync(['node', 'dossier', 'evidence', 'init', 'test.ds.md'])
-      ).rejects.toThrow();
-
-      expect(console.error).toHaveBeenCalledWith(
-        expect.stringContaining('Dossier has no checksum')
-      );
+      const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+      expect(written.checksum.hash).toBe(dossierChecksum);
+      expect(console.error).not.toHaveBeenCalled();
     });
 
     it('should error when not logged in and no --namespace', async () => {
@@ -346,20 +352,79 @@ describe('evidence command', () => {
       expect(written.dossier).toBe('test-org/test-dossier');
       expect(written.entries).toHaveLength(1);
     });
-  });
 
-  describe('sync', () => {
-    it('should update version and hash from the current frontmatter', async () => {
-      const staleRecord = createEvidenceRecord({
-        dossier: 'org/test-dossier',
-        version: '0.9.0',
-        checksumHash: '0'.repeat(64),
+    it('should compute the checksum from the body when frontmatter has none', async () => {
+      mockedFs.existsSync.mockImplementation(((p: unknown) => {
+        return String(p).endsWith('.ds.md');
+      }) as typeof fs.existsSync);
+      mockedFs.readFileSync.mockReturnValue(dossierNoChecksum);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'add',
+        'test.ds.md',
+        '--anchor',
+        'A',
+        '--rationale',
+        'B',
+        '--session',
+        'sess-1',
+      ]);
+
+      const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+      expect(written.checksum.hash).toBe(dossierChecksum);
+      expect(console.error).not.toHaveBeenCalled();
+    });
+
+    it('should preserve an existing sidecar’s namespace on a repeat call without --namespace', async () => {
+      // A second `evidence add` (e.g. for a different anchor) must not silently revert a
+      // previously-set custom namespace back to the account default — see the equivalent
+      // `sync` test above for the trap (#736) this protects against.
+      const customNamespaceRecord = createEvidenceRecord({
+        dossier: 'custom-org/test-dossier',
+        version: '1.0.0',
+        checksumHash: dossierChecksum,
       });
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockImplementation(((p: unknown) =>
         String(p).endsWith('.evidence.json')
-          ? JSON.stringify(staleRecord)
+          ? JSON.stringify(customNamespaceRecord)
           : dossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'add',
+        'test.ds.md',
+        '--anchor',
+        'A',
+        '--rationale',
+        'B',
+        '--session',
+        'sess-1',
+      ]);
+
+      const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+      expect(written.dossier).toBe('custom-org/test-dossier');
+    });
+  });
+
+  describe('sync', () => {
+    it('should update version and hash from the current frontmatter', async () => {
+      mockSyncFixture(
+        createEvidenceRecord({
+          dossier: 'org/test-dossier',
+          version: '0.9.0',
+          checksumHash: '0'.repeat(64),
+        })
+      );
 
       const program = createTestProgram();
       registerEvidenceCommand(program);
@@ -369,6 +434,101 @@ describe('evidence command', () => {
       expect(written.version).toBe('1.0.0');
       expect(written.checksum.hash).toBe(dossierChecksum);
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining(dossierChecksum));
+    });
+
+    it('should rewrite dossier to the given --namespace', async () => {
+      mockSyncFixture(
+        createEvidenceRecord({
+          dossier: 'wrong-org/test-dossier',
+          version: '1.0.0',
+          checksumHash: dossierChecksum,
+        })
+      );
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'sync',
+        'test.ds.md',
+        '--namespace',
+        'foo',
+      ]);
+
+      const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+      expect(written.dossier).toBe('foo/test-dossier');
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('dossier=foo/test-dossier'));
+    });
+
+    it('should preserve the existing namespace when --namespace is absent', async () => {
+      // A previously-set custom namespace ("custom-org") must never be silently reverted to
+      // the account default ("test-org") just because a later sync omits --namespace — that
+      // was the exact mis-stamping trap (#736) this command exists to let an author fix
+      // in place, on purpose, by passing --namespace.
+      mockSyncFixture(
+        createEvidenceRecord({
+          dossier: 'custom-org/test-dossier',
+          version: '1.0.0',
+          checksumHash: dossierChecksum,
+        })
+      );
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync(['node', 'dossier', 'evidence', 'sync', 'test.ds.md']);
+
+      const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+      expect(written.dossier).toBe('custom-org/test-dossier');
+    });
+
+    it('should not require credentials when the sidecar already has a namespace', async () => {
+      mockSyncFixture(
+        createEvidenceRecord({
+          dossier: 'custom-org/test-dossier',
+          version: '1.0.0',
+          checksumHash: dossierChecksum,
+        })
+      );
+      vi.mocked(credentials.loadCredentials).mockReturnValue(null);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync(['node', 'dossier', 'evidence', 'sync', 'test.ds.md']);
+
+      const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+      expect(written.dossier).toBe('custom-org/test-dossier');
+      expect(console.error).not.toHaveBeenCalled();
+    });
+
+    it('should error when the dossier has no checksum', async () => {
+      mockSyncFixture(
+        createEvidenceRecord({
+          dossier: 'custom-org/test-dossier',
+          version: '1.0.0',
+          checksumHash: dossierChecksum,
+        })
+      );
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? JSON.stringify(
+              createEvidenceRecord({
+                dossier: 'custom-org/test-dossier',
+                version: '1.0.0',
+                checksumHash: dossierChecksum,
+              })
+            )
+          : dossierNoChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'evidence', 'sync', 'test.ds.md'])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('has no checksum'));
     });
   });
 

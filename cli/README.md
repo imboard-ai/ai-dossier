@@ -279,7 +279,8 @@ ai-dossier evidence add my-dossier.ds.md \
   --anchor "Guiding Principle" --rationale "Autonomous runs must never block on a reply" \
   --session abc-123
 
-# Refresh version/checksum after re-signing the dossier
+# Refresh dossier/version/checksum after re-signing the dossier (namespace preserved
+# unless --namespace is given, which rewrites it in place — e.g. after a mis-stamp)
 ai-dossier evidence sync my-dossier.ds.md
 
 # Attach the sidecar on publish (auto-attaches a sibling .evidence.json by default)
