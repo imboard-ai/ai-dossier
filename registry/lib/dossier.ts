@@ -1,6 +1,12 @@
 import type { DossierFrontmatter } from '@ai-dossier/core';
 import { parseDossierContent } from '@ai-dossier/core';
-import { MAX_NAME_LENGTH, MAX_NAMESPACE_DEPTH, SLUG_PATTERN } from './constants';
+import {
+  DOSSIER_FILE_SUFFIX,
+  EVIDENCE_FILE_SUFFIX,
+  MAX_NAME_LENGTH,
+  MAX_NAMESPACE_DEPTH,
+  SLUG_PATTERN,
+} from './constants';
 import type { DossierValidation, NamespaceValidation } from './types';
 
 /**
@@ -61,6 +67,16 @@ export function validateDossier(frontmatter: DossierFrontmatter): DossierValidat
 export function buildFullName(namespace: string, name: string): string {
   const normalizedNamespace = namespace.replace(/\/+$/, '');
   return `${normalizedNamespace}/${name}`;
+}
+
+/** Path to a dossier's content file in the content repo, e.g. `ns/name.ds.md`. */
+export function dossierFilePath(fullName: string): string {
+  return `${fullName}${DOSSIER_FILE_SUFFIX}`;
+}
+
+/** Path to a dossier's evidence sidecar in the content repo, e.g. `ns/name.evidence.json`. */
+export function evidenceFilePath(fullName: string): string {
+  return `${fullName}${EVIDENCE_FILE_SUFFIX}`;
 }
 
 export function getRootNamespace(namespace: string): string {

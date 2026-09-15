@@ -1,4 +1,10 @@
-import { EVIDENCE_MAX_BYTES, evidenceMatchesDossier, parseEvidence } from '@ai-dossier/core';
+import type { EvidenceRecord } from '@ai-dossier/core';
+import {
+  EVIDENCE_MAX_BYTES,
+  evidenceMatchesDossier,
+  getErrorMessage,
+  parseEvidence,
+} from '@ai-dossier/core';
 import { authorizePublish } from '../../../lib/auth';
 import config from '../../../lib/config';
 import { HTTP_STATUS, MAX_CHANGELOG_LENGTH, MAX_CONTENT_SIZE } from '../../../lib/constants';
@@ -154,12 +160,12 @@ export function validatePublishInput(req: VercelRequest): ValidationResult {
     };
   }
 
-  if (typeof evidence === 'string' && evidence.length > EVIDENCE_MAX_BYTES) {
+  if (typeof evidence === 'string' && Buffer.byteLength(evidence, 'utf8') > EVIDENCE_MAX_BYTES) {
     return {
       ok: false,
       status: HTTP_STATUS.CONTENT_TOO_LARGE,
       code: 'EVIDENCE_TOO_LARGE',
-      message: 'Evidence exceeds maximum size of 256KB',
+      message: `Evidence exceeds maximum size of ${EVIDENCE_MAX_BYTES / 1024}KB`,
     };
   }
 
@@ -184,12 +190,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
     try {
       parsed = dossier.parseFrontmatter(content);
     } catch (err) {
-      return badRequest(
-        res,
-        'INVALID_CONTENT',
-        err instanceof Error ? err.message : String(err),
-        requestId
-      );
+      return badRequest(res, 'INVALID_CONTENT', getErrorMessage(err), requestId);
     }
 
     const validation = dossier.validateDossier(parsed.frontmatter);
@@ -199,7 +200,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
 
     const fullPath = dossier.buildFullName(namespace, parsed.frontmatter.name as string);
 
-    let evidenceRecord: ReturnType<typeof parseEvidence> | undefined;
+    let evidenceRecord: EvidenceRecord | undefined;
     if (evidence !== undefined) {
       try {
         evidenceRecord = parseEvidence(evidence);
@@ -207,14 +208,19 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
         return badRequest(
           res,
           'INVALID_EVIDENCE',
-          err instanceof Error ? err.message : String(err),
+          `Invalid evidence record: ${getErrorMessage(err)}`,
           requestId
         );
       }
 
       const mismatches = evidenceMatchesDossier(evidenceRecord, parsed.frontmatter, fullPath);
       if (mismatches.length > 0) {
-        return badRequest(res, 'EVIDENCE_MISMATCH', mismatches.join('; '), requestId);
+        return badRequest(
+          res,
+          'EVIDENCE_MISMATCH',
+          `Evidence does not match dossier: ${mismatches.join('; ')}`,
+          requestId
+        );
       }
     }
 
@@ -237,16 +243,17 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       namespace,
       name: fullPath,
       version: parsed.frontmatter.version,
+      evidence: evidence !== undefined ? 'attached' : 'none',
     });
 
     return res.status(HTTP_STATUS.CREATED).json({
       name: fullPath,
       version: parsed.frontmatter.version,
       title: parsed.frontmatter.title,
-      content_url: config.getCdnUrl(`${fullPath}.ds.md`),
+      content_url: config.getCdnUrl(dossier.dossierFilePath(fullPath)),
       published_at: new Date().toISOString(),
       ...(evidence !== undefined
-        ? { evidence_url: config.getCdnUrl(`${fullPath}.evidence.json`) }
+        ? { evidence_url: config.getCdnUrl(dossier.evidenceFilePath(fullPath)) }
         : {}),
     });
   } catch (err) {

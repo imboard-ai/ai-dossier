@@ -176,10 +176,6 @@ describe('publishDossier', () => {
 
     const deleteBody = bodyOf(3);
     expect(deleteBody.sha).toBe('existing-evidence-sha');
-
-    const deleteCallIndex = 3;
-    const manifestPutIndex = 5;
-    expect(deleteCallIndex).toBeLessThan(manifestPutIndex);
   });
 
   it('without evidence and no sidecar: no DELETE, exactly two PUTs', async () => {
@@ -197,6 +193,30 @@ describe('publishDossier', () => {
     expect(methods).toEqual(['GET', 'PUT', 'GET', 'GET', 'PUT']);
     expect(methods.filter((m) => m === 'DELETE')).toHaveLength(0);
     expect(methods.filter((m) => m === 'PUT')).toHaveLength(2);
+  });
+
+  it('with evidence: a sidecar write failure aborts the publish before the manifest PUT', async () => {
+    const { publishDossier } = await import('../lib/github');
+    mockFetch
+      .mockResolvedValueOnce(NOT_FOUND) // GET content
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'file-sha' } })) // PUT content
+      .mockResolvedValueOnce(NOT_FOUND) // GET sidecar (none)
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ message: 'internal error' }),
+      }); // PUT sidecar fails
+
+    await expect(
+      publishDossier('ns/test-dossier', '# content', metadata, 'changelog', '{"entries":[]}')
+    ).rejects.toThrow(/500.*internal error/);
+
+    const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
+    expect(methods).toEqual(['GET', 'PUT', 'GET', 'PUT']);
+    // The manifest step (a further GET+PUT against index.json) never ran.
+    expect(mockFetch.mock.calls.some((call) => (call[0] as string).includes('index.json'))).toBe(
+      false
+    );
   });
 });
 
@@ -223,20 +243,38 @@ describe('deleteDossier', () => {
     const sidecarDeleteBody = bodyOf(4);
     expect(sidecarDeleteBody.sha).toBe('evidence-sha');
   });
+
+  it('still succeeds and still updates the manifest when the sidecar delete fails', async () => {
+    const { deleteDossier } = await import('../lib/github');
+    const manifestJson = JSON.stringify({
+      dossiers: [
+        { name: 'ns/test-dossier', title: 'Test', version: '1.0.0', path: 'ns/test-dossier.ds.md' },
+      ],
+    });
+    mockFetch
+      .mockResolvedValueOnce(contentResponse('---\nname: test-dossier\n---', 'content-sha')) // GET content
+      .mockResolvedValueOnce(contentResponse(manifestJson, 'manifest-sha')) // GET manifest
+      .mockResolvedValueOnce(jsonResponse({ commit: { sha: 'delete-content-sha' } })) // DELETE content
+      .mockResolvedValueOnce(contentResponse('{}', 'evidence-sha')) // GET sidecar (exists)
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ message: 'internal error' }),
+      }) // DELETE sidecar fails
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha-2' } })); // PUT index.json still runs
+
+    const result = await deleteDossier('ns/test-dossier');
+
+    expect(result.found).toBe(true);
+    const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
+    expect(methods).toEqual(['GET', 'GET', 'DELETE', 'GET', 'DELETE', 'PUT']);
+  });
 });
 
 describe('getManifest', () => {
   it('should throw descriptive error on malformed JSON', async () => {
     const { getManifest } = await import('../lib/github');
-    mockFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: () =>
-        Promise.resolve({
-          content: Buffer.from('not valid json').toString('base64'),
-          sha: 'abc',
-        }),
-    });
+    mockFetch.mockResolvedValue(contentResponse('not valid json', 'abc'));
 
     await expect(getManifest()).rejects.toThrow(/Failed to parse manifest/);
   });

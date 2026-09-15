@@ -32,6 +32,8 @@ describe('successful mutation logging', () => {
       validateDossier: () => ({ valid: true, errors: [] }),
       buildFullName: (ns: string, name: string) => `${ns}/${name}`,
       getRootNamespace: (ns: string) => ns.split('/')[0],
+      dossierFilePath: (fullName: string) => `${fullName}.ds.md`,
+      evidenceFilePath: (fullName: string) => `${fullName}.evidence.json`,
     }));
     vi.doMock('../lib/manifest', () => ({
       fetchManifestDossiers: vi.fn(),

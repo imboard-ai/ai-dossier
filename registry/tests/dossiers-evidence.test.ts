@@ -64,6 +64,7 @@ describe('GET .../evidence', () => {
 
     expect(getStatus()).toBe(200);
     expect(headers['Content-Type']).toBe('application/json');
+    expect(headers['X-Content-Type-Options']).toBe('nosniff');
     expect(headers['X-Evidence-Checksum']).toBe(`sha256:${HASH_A}`);
     expect(getBody()).toBe(stored);
     expect(mockGetFileContent).toHaveBeenCalledWith('ns/test-dossier.evidence.json');
@@ -81,6 +82,41 @@ describe('GET .../evidence', () => {
 
     expect(getStatus()).toBe(404);
     expect((getBody() as { error: { code: string } }).error.code).toBe('EVIDENCE_NOT_FOUND');
+  });
+
+  it('returns 502 EVIDENCE_CORRUPT when the stored sidecar does not parse', async () => {
+    const { default: handler } = await import('../api/v1/dossiers/[...name]');
+    mockGetManifest.mockResolvedValue({ dossiers: [manifestEntry], sha: 'manifest-sha' });
+    mockGetFileContent.mockResolvedValue({ content: 'not json', sha: 'evidence-sha' });
+
+    const req = makeReq({ method: 'GET', query: { name: ['ns', 'test-dossier', 'evidence'] } });
+    const { res, getStatus, getBody } = createMockRes();
+
+    await handler(req, res as unknown as VercelResponse);
+
+    expect(getStatus()).toBe(502);
+    expect((getBody() as { error: { code: string } }).error.code).toBe('EVIDENCE_CORRUPT');
+  });
+
+  it('returns 502 EVIDENCE_CORRUPT when the stored sidecar binds a different dossier/version', async () => {
+    const { default: handler } = await import('../api/v1/dossiers/[...name]');
+    mockGetManifest.mockResolvedValue({ dossiers: [manifestEntry], sha: 'manifest-sha' });
+    const staleRecord = JSON.stringify({
+      evidence_schema_version: '1.0.0',
+      dossier: 'ns/test-dossier',
+      version: '0.9.0', // stale — manifestEntry.version is 1.0.0
+      checksum: { algorithm: 'sha256', hash: HASH_A },
+      entries: [],
+    });
+    mockGetFileContent.mockResolvedValue({ content: staleRecord, sha: 'evidence-sha' });
+
+    const req = makeReq({ method: 'GET', query: { name: ['ns', 'test-dossier', 'evidence'] } });
+    const { res, getStatus, getBody } = createMockRes();
+
+    await handler(req, res as unknown as VercelResponse);
+
+    expect(getStatus()).toBe(502);
+    expect((getBody() as { error: { code: string } }).error.code).toBe('EVIDENCE_CORRUPT');
   });
 
   it('returns 404 VERSION_NOT_FOUND for a mismatched version, same as content', async () => {
