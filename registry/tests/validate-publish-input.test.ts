@@ -1,3 +1,4 @@
+import { EVIDENCE_MAX_BYTES } from '@ai-dossier/core';
 import { describe, expect, it } from 'vitest';
 import type { ValidationFailure } from '../api/v1/dossiers/index';
 import { validatePublishInput } from '../api/v1/dossiers/index';
@@ -115,5 +116,38 @@ describe('validatePublishInput', () => {
     }) as unknown as VercelRequest;
     const result = validatePublishInput(req);
     expectFailure(result, 400, 'MISSING_FIELD');
+  });
+
+  it('leaves evidence undefined when absent', () => {
+    const req = makeReq();
+    const result = validatePublishInput(req);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.evidence).toBeUndefined();
+    }
+  });
+
+  it('rejects non-string evidence', () => {
+    const req = makeReq({ body: { ...validBody, evidence: 42 } });
+    const result = validatePublishInput(req);
+    expectFailure(result, 400, 'INVALID_FIELD');
+  });
+
+  it('rejects evidence exceeding max size', () => {
+    const req = makeReq({
+      body: { ...validBody, evidence: 'x'.repeat(EVIDENCE_MAX_BYTES + 1) },
+    });
+    const result = validatePublishInput(req);
+    expectFailure(result, 413, 'EVIDENCE_TOO_LARGE');
+  });
+
+  it('passes through a valid evidence string untouched', () => {
+    const evidence = '{"evidence_schema_version":"1.0.0"}';
+    const req = makeReq({ body: { ...validBody, evidence } });
+    const result = validatePublishInput(req);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.data.evidence).toBe(evidence);
+    }
   });
 });

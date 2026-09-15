@@ -83,6 +83,22 @@ const getDossierContentEndpoint = {
   response: 'text/markdown body with X-Dossier-Digest header (sha256:<hex>)',
 };
 
+const getDossierEvidenceEndpoint = {
+  description: 'Get the evidence sidecar record for a dossier (GET/HEAD only)',
+  authentication: false,
+  parameters: {
+    name: 'string - Full dossier name (e.g., imboard-ai/development/setup-react)',
+    version: 'string (query, optional) - Must match the current version, else 404',
+  },
+  response:
+    'application/json body (the stored evidence record) with X-Evidence-Checksum header (sha256:<hex> — the dossier body checksum the record is keyed to, not a digest of this JSON)',
+  errors: {
+    404: 'DOSSIER_NOT_FOUND, VERSION_NOT_FOUND, EVIDENCE_NOT_FOUND',
+    405: 'METHOD_NOT_ALLOWED - Only GET and HEAD are allowed; DELETE is rejected',
+    502: 'EVIDENCE_CORRUPT - Stored evidence record failed to parse or does not match the dossier',
+  },
+};
+
 const publishDossierEndpoint = {
   description: 'Publish a new dossier',
   authentication: true,
@@ -108,6 +124,14 @@ const publishDossierEndpoint = {
         description: 'Description of changes for this version. Max 500 characters.',
         example: 'Initial release',
       },
+      evidence: {
+        type: 'string',
+        required: false,
+        description:
+          'JSON-encoded evidence record (.evidence.json) for this dossier body checksum; its dossier/version/checksum must match the published content. Max 256KB. Omitting it removes any existing sidecar from a prior version.',
+        example:
+          '{"evidence_schema_version":"1.0.0","dossier":"yuvaldim/tools/my-dossier","version":"1.0.0","checksum":{"algorithm":"sha256","hash":"<64 hex chars>"},"entries":[]}',
+      },
     },
   },
   response: {
@@ -116,19 +140,20 @@ const publishDossierEndpoint = {
     title: 'string',
     content_url: 'string - CDN URL',
     published_at: 'string - ISO timestamp',
+    evidence_url: 'string - CDN URL to the evidence sidecar (present only when evidence was sent)',
   },
   errors: {
-    400: 'MISSING_FIELD, INVALID_FIELD, INVALID_NAMESPACE, INVALID_CONTENT, CHANGELOG_TOO_LONG',
+    400: 'MISSING_FIELD, INVALID_FIELD, INVALID_NAMESPACE, INVALID_CONTENT, CHANGELOG_TOO_LONG, INVALID_EVIDENCE, EVIDENCE_MISMATCH',
     401: 'MISSING_TOKEN, INVALID_TOKEN, TOKEN_EXPIRED',
     403: 'FORBIDDEN - Cannot publish to this namespace (includes `namespace` field)',
-    413: 'CONTENT_TOO_LARGE - Max 1MB',
+    413: 'CONTENT_TOO_LARGE - Max 1MB; EVIDENCE_TOO_LARGE - Max 256KB',
     415: 'UNSUPPORTED_MEDIA_TYPE - Content-Type must be application/json',
     502: 'PUBLISH_ERROR - Includes request_id for log correlation',
   },
 };
 
 const deleteDossierEndpoint = {
-  description: 'Delete a dossier',
+  description: 'Delete a dossier (also removes its evidence sidecar, best-effort)',
   authentication: true,
   parameters: {
     name: 'string - Full dossier name (e.g., imboard-ai/development/setup-react)',
@@ -167,6 +192,7 @@ const endpoints = {
   'GET /api/v1/dossiers/{name}': getDossierEndpoint,
   'GET /api/v1/search': searchEndpoint,
   'GET /api/v1/dossiers/{name}/content': getDossierContentEndpoint,
+  'GET /api/v1/dossiers/{name}/evidence': getDossierEvidenceEndpoint,
   'DELETE /api/v1/dossiers/{name}': deleteDossierEndpoint,
   'POST /api/v1/dossiers': publishDossierEndpoint,
 };

@@ -26,6 +26,12 @@ export const DOSSIER_DEFAULTS = {
 /** Maximum dossier content size (1MB). */
 export const MAX_CONTENT_SIZE = 1024 * 1024;
 
+/** Filename suffix for a dossier's content file in the content repo. */
+export const DOSSIER_FILE_SUFFIX = '.ds.md';
+
+/** Filename suffix for the evidence sidecar stored next to a dossier. */
+export const EVIDENCE_FILE_SUFFIX = '.evidence.json';
+
 /** Maximum namespace depth. */
 export const MAX_NAMESPACE_DEPTH = 5;
 

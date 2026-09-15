@@ -3,6 +3,7 @@ import type { DossierFrontmatter } from '@ai-dossier/core';
 import { getErrorMessage } from '@ai-dossier/core';
 import config from './config';
 import { DOSSIER_DEFAULTS, GITHUB_API_VERSION, USER_AGENT } from './constants';
+import { dossierFilePath, evidenceFilePath } from './dossier';
 import createLogger from './logger';
 import type {
   DeleteResult,
@@ -202,13 +203,29 @@ export async function removeFromManifest(
   return createOrUpdateFile('index.json', content, message, sha);
 }
 
+/** Deletes `<sidecarPath>` if it exists; a no-op (returns undefined) if it does not. */
+async function deleteEvidenceSidecar(
+  sidecarPath: string,
+  message: string
+): Promise<GitHubCommitResponse | undefined> {
+  const existing = await getFileContent(sidecarPath);
+  if (!existing) return undefined;
+  return deleteFile(sidecarPath, message, existing.sha);
+}
+
 export async function publishDossier(
   fullPath: string,
   content: string,
   metadata: DossierFrontmatter,
-  changelog: string
-): Promise<{ file: GitHubCommitResponse; manifest: GitHubCommitResponse }> {
-  const filePath = `${fullPath}.ds.md`;
+  changelog: string,
+  evidence: string | null = null
+): Promise<{
+  file: GitHubCommitResponse;
+  manifest: GitHubCommitResponse;
+  evidence?: GitHubCommitResponse;
+}> {
+  const filePath = dossierFilePath(fullPath);
+  const sidecarPath = evidenceFilePath(fullPath);
 
   const existing = await getFileContent(filePath);
 
@@ -216,16 +233,66 @@ export async function publishDossier(
     ? `Update ${metadata.name} to v${metadata.version}: ${changelog}`
     : `Publish ${metadata.name} v${metadata.version}: ${changelog}`;
 
-  log.info('Writing content file', { step: '1/2', filePath });
+  log.info('Writing content file', { step: '1/3', filePath });
   const fileResult = await createOrUpdateFile(
     filePath,
     content,
     fileMessage,
     existing?.sha ?? null
   );
-  log.info('Content file written', { step: '1/2' });
+  log.info('Content file written', { step: '1/3' });
 
-  log.info('Updating manifest', { step: '2/2', dossier: metadata.name });
+  let evidenceResult: GitHubCommitResponse | undefined;
+  let evidenceAction: 'created' | 'updated' | 'removed-stale' | 'skipped' = 'skipped';
+  if (typeof evidence === 'string') {
+    // Evidence was supplied: a write failure here must abort the publish (rethrow) —
+    // the manifest must never point at a content file whose evidence write is unknown.
+    log.info('Writing evidence sidecar', { step: '2/3', sidecarPath });
+    try {
+      const existingEvidence = await getFileContent(sidecarPath);
+      evidenceAction = existingEvidence ? 'updated' : 'created';
+      evidenceResult = await createOrUpdateFile(
+        sidecarPath,
+        evidence,
+        `Evidence for ${metadata.name} v${metadata.version}`,
+        existingEvidence?.sha ?? null
+      );
+    } catch (err) {
+      log.error(
+        `Content file ${existing ? 'updated' : 'created'} but evidence sidecar write failed — manifest not yet updated, manual reconciliation required`,
+        {
+          filePath,
+          sidecarPath,
+          dossier: metadata.name,
+          version: metadata.version,
+          error: getErrorMessage(err),
+        }
+      );
+      throw err;
+    }
+  } else {
+    // No evidence on this publish: a sidecar left over from an earlier version is keyed to a
+    // checksum the new content no longer has, so it must be removed rather than left stale.
+    // Best effort (log and continue) — this is cleanup, not the publish itself, and per AC2
+    // a publish without evidence must behave exactly as it did before this cleanup existed.
+    try {
+      evidenceResult = await deleteEvidenceSidecar(
+        sidecarPath,
+        `Remove stale evidence for ${metadata.name} v${metadata.version}`
+      );
+      evidenceAction = evidenceResult ? 'removed-stale' : 'skipped';
+    } catch (err) {
+      log.error('Best-effort stale evidence sidecar cleanup failed', {
+        sidecarPath,
+        dossier: metadata.name,
+        version: metadata.version,
+        error: getErrorMessage(err),
+      });
+    }
+  }
+  log.info('Evidence sidecar step complete', { step: '2/3', sidecarPath, action: evidenceAction });
+
+  log.info('Updating manifest', { step: '3/3', dossier: metadata.name });
   const manifest = await getManifest();
 
   const OPTIONAL_MANIFEST_FIELDS = Object.keys(DOSSIER_DEFAULTS) as Array<
@@ -255,20 +322,38 @@ export async function publishDossier(
     });
     throw err;
   }
-  log.info('Manifest updated', { step: '2/2', dossier: metadata.name });
+  log.info('Manifest updated', { step: '3/3', dossier: metadata.name });
 
-  return { file: fileResult, manifest: manifestResult };
+  return { file: fileResult, manifest: manifestResult, evidence: evidenceResult };
+}
+
+/** Best-effort: removes `<dossierName>`'s evidence sidecar if present. A failure is logged and
+ * swallowed so a sidecar problem never fails an otherwise-successful dossier delete. */
+async function deleteEvidenceSidecarBestEffort(dossierName: string): Promise<void> {
+  const sidecarPath = evidenceFilePath(dossierName);
+  try {
+    await deleteEvidenceSidecar(sidecarPath, `Delete evidence for ${dossierName}`);
+  } catch (err) {
+    log.error('Best-effort evidence sidecar delete failed', {
+      sidecarPath,
+      error: getErrorMessage(err),
+    });
+  }
 }
 
 export async function deleteDossier(
   dossierName: string,
   expectedVersion: string | null = null
 ): Promise<DeleteResult> {
-  const filePath = `${dossierName}.ds.md`;
+  const filePath = dossierFilePath(dossierName);
 
   const existing = await getFileContent(filePath);
 
   if (!existing) {
+    // No content file, but a prior crashed publish/delete may have left an orphaned sidecar
+    // (see publishDossier's crash-halfway note) — reconcile it even though there is nothing
+    // else to delete here.
+    await deleteEvidenceSidecarBestEffort(dossierName);
     return { found: false };
   }
 
@@ -281,6 +366,7 @@ export async function deleteDossier(
       `Delete orphaned file: ${dossierName}`,
       existing.sha
     );
+    await deleteEvidenceSidecarBestEffort(dossierName);
     return { found: true, version: null, file: fileResult };
   }
 
@@ -293,15 +379,21 @@ export async function deleteDossier(
     };
   }
 
-  log.info('Deleting content file', { step: '1/2', filePath });
+  log.info('Deleting content file', { step: '1/3', filePath });
   const fileResult = await deleteFile(
     filePath,
     `Delete ${dossierName} v${dossierEntry.version}`,
     existing.sha
   );
-  log.info('Content file deleted', { step: '1/2' });
+  log.info('Content file deleted', { step: '1/3' });
 
-  log.info('Removing from manifest', { step: '2/2', dossier: dossierName });
+  // The dossier is already gone from the manifest by this point, so a leftover sidecar is
+  // inert — log and continue rather than failing a successful delete (contrast publishDossier,
+  // where a sidecar write failure must abort: there the manifest has not yet been updated).
+  log.info('Removing evidence sidecar (best effort)', { step: '2/3', dossier: dossierName });
+  await deleteEvidenceSidecarBestEffort(dossierName);
+
+  log.info('Removing from manifest', { step: '3/3', dossier: dossierName });
   let manifestResult: GitHubCommitResponse;
   try {
     manifestResult = await removeFromManifest(manifest, dossierName);
@@ -312,7 +404,7 @@ export async function deleteDossier(
     });
     throw err;
   }
-  log.info('Manifest updated', { step: '2/2' });
+  log.info('Manifest updated', { step: '3/3' });
 
   return {
     found: true,

@@ -22,6 +22,7 @@ This package (`@ai-dossier/registry`) is an npm workspace within the [ai-dossier
 | GET | `/api/v1/dossiers` | No | List all dossiers |
 | GET | `/api/v1/dossiers/{name}` | No | Get dossier metadata |
 | GET | `/api/v1/dossiers/{name}/content` | No | Get raw dossier content |
+| GET | `/api/v1/dossiers/{name}/evidence` | No | Get the dossier's evidence sidecar record |
 | GET | `/api/v1/search?q=...` | No | Search dossiers |
 | POST | `/api/v1/dossiers` | Yes | Publish a dossier |
 | DELETE | `/api/v1/dossiers/{name}` | Yes | Delete a dossier |
@@ -49,7 +50,9 @@ Common error codes:
 | Status | Code | Description |
 |--------|------|-------------|
 | 400 | `INVALID_CONTENT` | Missing/malformed frontmatter |
-| 400 | `INVALID_FIELD` | Invalid field value (e.g. changelog not a string) |
+| 400 | `INVALID_FIELD` | Invalid field value (e.g. changelog or evidence not a string) |
+| 400 | `INVALID_EVIDENCE` | Evidence field is not a parseable/valid evidence record |
+| 400 | `EVIDENCE_MISMATCH` | Evidence record's dossier/version/checksum does not match the published content |
 | 400 | `INVALID_NAMESPACE` | Dossier name fails validation (invalid characters, depth, or length) |
 | 400 | `INVALID_PATH` | Path traversal attempt detected |
 | 400 | `MISSING_FIELD` | Required field missing from request body |
@@ -60,11 +63,14 @@ Common error codes:
 | 404 | `DOSSIER_NOT_FOUND` | Dossier does not exist in the manifest |
 | 404 | `VERSION_NOT_FOUND` | Requested version does not match current version |
 | 404 | `CONTENT_NOT_FOUND` | Dossier entry exists but content file is missing |
+| 404 | `EVIDENCE_NOT_FOUND` | Dossier exists but has no evidence sidecar |
 | 405 | `METHOD_NOT_ALLOWED` | HTTP method not supported for this endpoint |
 | 413 | `CONTENT_TOO_LARGE` | Content exceeds 1MB limit |
+| 413 | `EVIDENCE_TOO_LARGE` | Evidence exceeds 256KB limit |
 | 415 | `UNSUPPORTED_MEDIA_TYPE` | Content-Type is not application/json |
 | 502 | `UPSTREAM_ERROR` | CDN or GitHub API request failed (network error, timeout, malformed response) |
 | 502 | `PUBLISH_ERROR` | GitHub API commit failed (includes request_id for log correlation) |
+| 502 | `EVIDENCE_CORRUPT` | Stored evidence sidecar failed to parse or does not match the dossier it is served for |
 
 Server errors (5xx) include a `request_id` for correlating with server logs. See [Error Observability](#error-observability) for tracing details.
 

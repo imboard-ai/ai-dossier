@@ -1,9 +1,10 @@
-import { sha256Hex } from '@ai-dossier/core';
+import type { EvidenceRecord } from '@ai-dossier/core';
+import { parseEvidence, sha256Hex } from '@ai-dossier/core';
 import { authorizePublish } from '../../../lib/auth';
 import config from '../../../lib/config';
 import { HTTP_STATUS } from '../../../lib/constants';
 import { handleCors } from '../../../lib/cors';
-import { validateNamespace } from '../../../lib/dossier';
+import { evidenceFilePath, validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
 import createLogger from '../../../lib/logger';
 import { queryString } from '../../../lib/query';
@@ -19,6 +20,10 @@ import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 const log = createLogger('dossiers/[name]');
 
+/** `content` and `evidence` are reserved trailing path segments: a dossier whose own last
+ * name segment is one of these cannot be addressed for metadata through this route. */
+type Subresource = 'content' | 'evidence' | null;
+
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
 
@@ -33,8 +38,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const version = queryString(req.query.version);
   const pathParts = Array.isArray(name) ? name : typeof name === 'string' ? name.split('/') : [];
 
-  const isContentRequest = pathParts[pathParts.length - 1] === 'content';
-  const dossierName = isContentRequest ? pathParts.slice(0, -1).join('/') : pathParts.join('/');
+  const tail = pathParts[pathParts.length - 1];
+  const subresource: Subresource =
+    tail === 'content' ? 'content' : tail === 'evidence' ? 'evidence' : null;
+  const dossierName = subresource !== null ? pathParts.slice(0, -1).join('/') : pathParts.join('/');
 
   const namespaceCheck = validateNamespace(dossierName);
   if (!namespaceCheck.valid) {
@@ -42,17 +49,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   if (req.method === 'DELETE') {
+    if (subresource === 'evidence') {
+      return methodNotAllowed(req, res, 'GET', 'HEAD');
+    }
     return handleDelete(req, res, dossierName, version, requestId);
   }
 
-  return handleGet(res, dossierName, version, isContentRequest, requestId);
+  return handleGet(res, dossierName, version, subresource, requestId);
 }
 
 async function handleGet(
   res: VercelResponse,
   dossierName: string,
   version: string | undefined,
-  isContentRequest: boolean,
+  subresource: Subresource,
   requestId: string
 ) {
   try {
@@ -73,7 +83,7 @@ async function handleGet(
       );
     }
 
-    if (isContentRequest) {
+    if (subresource === 'content') {
       log.info('Getting file content', { requestId, path: dossierEntry.path });
       const fileContent = await github.getFileContent(dossierEntry.path);
 
@@ -93,6 +103,61 @@ async function handleGet(
       return res.status(HTTP_STATUS.OK).send(fileContent.content);
     }
 
+    if (subresource === 'evidence') {
+      const sidecarPath = evidenceFilePath(dossierName);
+      log.info('Getting evidence sidecar', { requestId, path: sidecarPath });
+      const sidecarContent = await github.getFileContent(sidecarPath);
+
+      if (!sidecarContent) {
+        return notFound(
+          res,
+          'EVIDENCE_NOT_FOUND',
+          `No evidence for dossier '${dossierName}'`,
+          requestId
+        );
+      }
+
+      let record: EvidenceRecord;
+      try {
+        record = parseEvidence(sidecarContent.content);
+      } catch (err) {
+        return serverError(res, {
+          operation: `dossier.evidence(${dossierName})`,
+          error: err,
+          code: 'EVIDENCE_CORRUPT',
+          message: 'Stored evidence record is corrupt',
+          status: HTTP_STATUS.BAD_GATEWAY,
+          requestId,
+          context: { dossier: dossierName, path: sidecarPath },
+        });
+      }
+
+      // Defense in depth: publish already binds the sidecar to this exact dossier/version, but
+      // a partial-write race (content written, sidecar step failed before the manifest update —
+      // see publishDossier) can leave a sidecar the manifest no longer agrees with. Never vouch
+      // for a checksum on the wrong record.
+      if (record.dossier !== dossierName || record.version !== dossierEntry.version) {
+        return serverError(res, {
+          operation: `dossier.evidence(${dossierName})`,
+          error: new Error(
+            `stored evidence binds ${record.dossier}@${record.version}, expected ${dossierName}@${dossierEntry.version}`
+          ),
+          code: 'EVIDENCE_CORRUPT',
+          message: 'Stored evidence record is corrupt',
+          status: HTTP_STATUS.BAD_GATEWAY,
+          requestId,
+          context: { dossier: dossierName, path: sidecarPath },
+        });
+      }
+
+      // X-Evidence-Checksum is the dossier BODY checksum this record is keyed to — not a
+      // digest of the JSON bytes below (contrast X-Dossier-Digest on the /content branch).
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('X-Evidence-Checksum', `sha256:${record.checksum.hash}`);
+      return res.status(HTTP_STATUS.OK).send(sidecarContent.content);
+    }
+
     return res.status(HTTP_STATUS.OK).json({
       name: dossierEntry.name,
       title: dossierEntry.title,
@@ -110,7 +175,7 @@ async function handleGet(
       code: 'UPSTREAM_ERROR',
       message: 'Failed to fetch dossier information',
       requestId,
-      context: { dossier: dossierName, isContentRequest },
+      context: { dossier: dossierName, subresource },
     });
   }
 }

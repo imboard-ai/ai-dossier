@@ -23,6 +23,11 @@ GET {{baseUrl}}/api/v1/dossiers/getting-started/hello/content
 
 ###
 
+### Get Dossier Evidence Sidecar (200 if present, 404 EVIDENCE_NOT_FOUND otherwise)
+GET {{baseUrl}}/api/v1/dossiers/getting-started/hello/evidence
+
+###
+
 ### 404 - Dossier Not Found
 GET {{baseUrl}}/api/v1/dossiers/nonexistent/dossier
 
@@ -76,4 +81,20 @@ Content-Type: application/json
 #   "namespace": "yuvaldim/test",
 #   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello\n\nThis is a test dossier.",
 #   "changelog": "Initial publish"
+# }
+
+###
+
+### Publish Dossier - With Evidence Sidecar (should return 201 with evidence_url)
+# Replace <JWT> with actual token from OAuth flow, and the checksum.hash values so they
+# match: the evidence record's checksum must equal the dossier's frontmatter checksum.
+# POST {{baseUrl}}/api/v1/dossiers
+# Content-Type: application/json
+# Authorization: Bearer <JWT>
+#
+# {
+#   "namespace": "yuvaldim/test",
+#   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\nchecksum:\n  algorithm: sha256\n  hash: 0000000000000000000000000000000000000000000000000000000000000000\n---\n\n# Hello\n\nThis is a test dossier.",
+#   "changelog": "Initial publish",
+#   "evidence": "{\"evidence_schema_version\":\"1.0.0\",\"dossier\":\"yuvaldim/test/my-dossier\",\"version\":\"1.0.0\",\"checksum\":{\"algorithm\":\"sha256\",\"hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"entries\":[]}"
 # }
