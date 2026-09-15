@@ -81,8 +81,8 @@ Field by field:
 - `entries` — one entry per rule or section you've explained. Each has:
   - `anchor` — the heading or rule text, written exactly as it appears in the dossier body, so a reader can find it.
   - `rationale` — one or two sentences: what failed, or what this rule/wording prevents. Free text, up to 500 characters.
-  - `created_at` — ISO 8601 timestamp of when the entry was recorded.
-  - `evidence` — zero or more session pointers (`provider`, `session`, optional `event`/`host`/`extra`) locating the agent session where the reasoning happened. `extra` is where tool-specific locator IDs (e.g. a local session-search index) go — see Optional tools below.
+  - `created_at` — ISO 8601 timestamp of when the entry was recorded (auto-generated; there is no `--created-at` flag).
+  - `evidence` — zero or more session pointers locating the agent session where the reasoning happened: `provider` (agent provider, defaults to `claude-code`), `session` (provider-native session id, required), `event` (optional per-message/tool-call id), `host` (machine hostname, defaults to `os.hostname()`), `extra` (optional tool-specific locator IDs, e.g. a local session-search index — see Optional tools below).
 
 ## 4. Workflow
 
