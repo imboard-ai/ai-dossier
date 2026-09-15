@@ -10,6 +10,7 @@ Task-oriented guides for accomplishing specific goals with Dossier.
 
 ### Authoring
 - [Authoring guidelines](authoring-guidelines.md) - How to write dossiers that help agents succeed (declarative what/why over procedural how)
+- [Authoring evidence](authoring-evidence.md) - Attach per-rule rationale and session pointers to a published dossier so later editors know why a rule says what it says
 
 ### Integration
 - [Claude Code integration](claude-code-integration.md) - Use dossiers from Claude Code (MCP server, install-skill, run)
