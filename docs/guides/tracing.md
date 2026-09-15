@@ -3,6 +3,8 @@
 **Last Updated**: 2026-05-13
 **Status**: Active — shipped in `@ai-dossier/core@1.3.3` / `@ai-dossier/mcp-server@1.3.3`
 
+> For authoring provenance (why a rule reads the way it does, not what ran) see [authoring-evidence.md](authoring-evidence.md).
+
 ---
 
 ## 1. Purpose
