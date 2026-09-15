@@ -91,10 +91,14 @@ export function registerPullCommand(program: Command): void {
 
           let evidenceCached = false;
           try {
-            const { result: evidenceResult } = await multiRegistryGetEvidence(dossierName, version);
+            const { result: evidenceResult, errors: evidenceErrors } =
+              await multiRegistryGetEvidence(dossierName, version);
             if (evidenceResult) {
               writeCachedEvidence(dossierName, version, evidenceResult.evidence);
               evidenceCached = true;
+            } else if (process.env.DOSSIER_DEBUG && evidenceErrors.length > 0) {
+              process.stderr.write(`[pull] evidence fetch failed for '${dossierName}':\n`);
+              printRegistryErrors(evidenceErrors);
             }
           } catch {
             // Evidence is optional — a 404 or any other error never changes the exit code

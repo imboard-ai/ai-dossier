@@ -167,6 +167,15 @@ class RegistryClient {
   }
 
   /**
+   * URL-encode a dossier name for use as a path segment, preserving its `/` separators
+   * (a dossier name is namespace-scoped, e.g. `org/name`) while escaping everything else —
+   * so a name containing `?`, `#`, or `../` cannot alter the request path or query.
+   */
+  private _encodeDossierPath(name: string): string {
+    return name.split('/').map(encodeURIComponent).join('/');
+  }
+
+  /**
    * Build URL with query parameters.
    */
   private _buildUrl(path: string, params: Record<string, unknown> = {}): string {
@@ -213,6 +222,28 @@ class RegistryClient {
   }
 
   /**
+   * Raise a RegistryError for a failed response, parsing the registry's JSON error body
+   * when present. Shared by every download method's failure path.
+   */
+  private async _throwForFailedDownload(response: Response, failureLabel: string): Promise<never> {
+    let message = `${failureLabel}: ${response.status} ${response.statusText}`;
+    let code: string | null = null;
+
+    try {
+      const body = (await response.json()) as { error?: { message?: string; code?: string } };
+      const errorData = body.error || {};
+      if (errorData.message) {
+        message = errorData.message;
+      }
+      code = errorData.code || null;
+    } catch {
+      // Could not parse error body
+    }
+
+    throw new RegistryError(message, response.status, code);
+  }
+
+  /**
    * Download dossier content.
    */
   async getDossierContent(
@@ -224,26 +255,13 @@ class RegistryClient {
       params.version = version;
     }
 
-    const response = await fetch(this._buildUrl(`/dossiers/${name}/content`, params), {
-      headers: this._buildHeaders(),
-    });
+    const response = await fetch(
+      this._buildUrl(`/dossiers/${this._encodeDossierPath(name)}/content`, params),
+      { headers: this._buildHeaders() }
+    );
 
     if (!response.ok) {
-      let message = `Failed to download dossier '${name}': ${response.status} ${response.statusText}`;
-      let code: string | null = null;
-
-      try {
-        const body = (await response.json()) as { error?: { message?: string; code?: string } };
-        const errorData = body.error || {};
-        if (errorData.message) {
-          message = errorData.message;
-        }
-        code = errorData.code || null;
-      } catch {
-        // Could not parse error body
-      }
-
-      throw new RegistryError(message, response.status, code);
+      await this._throwForFailedDownload(response, `Failed to download dossier '${name}'`);
     }
 
     const content = await response.text();
@@ -264,26 +282,13 @@ class RegistryClient {
       params.version = version;
     }
 
-    const response = await fetch(this._buildUrl(`/dossiers/${name}/evidence`, params), {
-      headers: this._buildHeaders(),
-    });
+    const response = await fetch(
+      this._buildUrl(`/dossiers/${this._encodeDossierPath(name)}/evidence`, params),
+      { headers: this._buildHeaders() }
+    );
 
     if (!response.ok) {
-      let message = `Failed to download evidence for '${name}': ${response.status} ${response.statusText}`;
-      let code: string | null = null;
-
-      try {
-        const body = (await response.json()) as { error?: { message?: string; code?: string } };
-        const errorData = body.error || {};
-        if (errorData.message) {
-          message = errorData.message;
-        }
-        code = errorData.code || null;
-      } catch {
-        // Could not parse error body
-      }
-
-      throw new RegistryError(message, response.status, code);
+      await this._throwForFailedDownload(response, `Failed to download evidence for '${name}'`);
     }
 
     const evidence = await response.text();

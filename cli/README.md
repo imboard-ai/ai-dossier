@@ -292,6 +292,8 @@ ai-dossier evidence show org/my-dossier
 ai-dossier evidence validate my-dossier.evidence.json
 ```
 
+Override the sidecar path with `--evidence <path>`, or skip attaching one (even if a sibling exists) with `--no-evidence`.
+
 ---
 
 ## Skills
@@ -2037,6 +2039,7 @@ Exit 0 (safe) or 1 (unsafe)
 - ✅ `install-skill` / `skill-export` (Claude Code skill bridge)
 - ✅ Execution tracing with verified checksum + signer metadata
 - ✅ TTL-based version resolution for the content cache
+- ✅ Evidence sidecar (`.evidence.json`) — `evidence init/add/sync/validate/show`, wired through publish/pull/export
 
 ### v1.0.0 (Stable)
 - ⏳ Stable, frozen CLI surface and exit-code contract

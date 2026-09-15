@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { printRegistryErrors, validateRelativePath } from '../helpers';
+import { printRegistryErrors, siblingEvidencePath, validateRelativePath } from '../helpers';
 import { multiRegistryGetContent, multiRegistryGetEvidence } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
@@ -73,17 +73,17 @@ export function registerExportCommand(program: Command): void {
 
       let evidencePath: string | null = null;
       try {
-        const { result: evidenceResult } = await multiRegistryGetEvidence(
+        const { result: evidenceResult, errors: evidenceErrors } = await multiRegistryGetEvidence(
           dossierName,
           version || null
         );
         if (evidenceResult) {
-          const resolvedOutputPath = path.resolve(outputPath);
-          const target = resolvedOutputPath.endsWith('.ds.md')
-            ? `${resolvedOutputPath.slice(0, -'.ds.md'.length)}.evidence.json`
-            : `${resolvedOutputPath}.evidence.json`;
+          const target = siblingEvidencePath(outputPath);
           fs.writeFileSync(target, evidenceResult.evidence, 'utf8');
           evidencePath = target;
+        } else if (process.env.DOSSIER_DEBUG && evidenceErrors.length > 0) {
+          process.stderr.write(`[export] evidence fetch failed for '${dossierName}':\n`);
+          printRegistryErrors(evidenceErrors);
         }
       } catch {
         // Evidence is optional — a 404 or any other error never fails the export.

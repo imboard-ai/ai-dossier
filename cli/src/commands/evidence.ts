@@ -14,9 +14,9 @@ import {
   parseEvidence,
   validateEvidence,
 } from '@ai-dossier/core';
-import type { Command } from 'commander';
+import { type Command, Option } from 'commander';
 import { loadCredentials } from '../credentials';
-import { printRegistryErrors } from '../helpers';
+import { printRegistryErrors, siblingEvidencePath } from '../helpers';
 import { multiRegistryGetEvidence } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
@@ -34,20 +34,21 @@ interface AddOptions {
   anchor: string;
   rationale: string;
   session?: string;
-  provider?: string;
+  provider: EvidenceRef['provider'];
   event?: string;
   host?: string;
   extra?: string[];
   namespace?: string;
 }
 
-/** Sibling `.evidence.json` path for a `<name>.ds.md` dossier file. */
-function siblingEvidencePath(dossierFile: string): string {
-  const resolved = path.resolve(dossierFile);
-  return resolved.endsWith('.ds.md')
-    ? `${resolved.slice(0, -'.ds.md'.length)}.evidence.json`
-    : `${resolved}.evidence.json`;
-}
+/** Providers `evidence add` accepts — mirrors the schema's `evidence[].provider` enum. */
+const EVIDENCE_PROVIDERS: EvidenceRef['provider'][] = [
+  'claude-code',
+  'codex',
+  'opencode',
+  'gemini-cli',
+  'other',
+];
 
 /** Namespace resolution identical to `publish` — explicit flag, else credentials. */
 function resolveNamespace(explicit?: string): string {
@@ -127,6 +128,23 @@ function parseExtra(pairs: string[] | undefined): Record<string, string> | undef
   return extra;
 }
 
+/** Read + parse an existing sidecar file, exiting with a clean message on a corrupt one. */
+function loadSidecar(sidecarPath: string): EvidenceRecord {
+  try {
+    return parseEvidence(fs.readFileSync(sidecarPath, 'utf8'));
+  } catch (err: unknown) {
+    console.error(`\n❌ Evidence file is corrupt: ${sidecarPath}\n   ${(err as Error).message}\n`);
+    process.exit(1);
+  }
+}
+
+/** Write a sidecar record atomically — write to a per-process temp file, then rename. */
+function writeSidecarAtomic(sidecarPath: string, record: EvidenceRecord): void {
+  const tmpPath = `${sidecarPath}.tmp.${process.pid}`;
+  fs.writeFileSync(tmpPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+  fs.renameSync(tmpPath, sidecarPath);
+}
+
 /** `evidence show` — fetch and render evidence from the registry. */
 function registerShowSubcommand(cmd: Command): void {
   cmd
@@ -198,7 +216,7 @@ function registerInitSubcommand(cmd: Command): void {
       }
 
       const record = buildFreshRecord(file, options.namespace);
-      fs.writeFileSync(outputPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+      writeSidecarAtomic(outputPath, record);
       console.log(`✅ Evidence sidecar created: ${outputPath}`);
     });
 }
@@ -212,7 +230,11 @@ function registerAddSubcommand(cmd: Command): void {
     .requiredOption('--anchor <text>', 'Rule/heading in the dossier body this entry documents')
     .requiredOption('--rationale <text>', 'Why the rule/section reads the way it does')
     .option('--session <id>', 'Provider-native session id (defaults to AI_DOSSIER_SESSION_ID)')
-    .option('--provider <provider>', 'Agent provider', 'claude-code')
+    .addOption(
+      new Option('--provider <provider>', 'Agent provider')
+        .choices(EVIDENCE_PROVIDERS)
+        .default('claude-code')
+    )
     .option('--event <id>', 'Provider-native per-message/tool-call id')
     .option('--host <name>', 'Machine the session ran on (defaults to os.hostname())')
     .option('--extra <k=v...>', 'Tool-specific locator ids, repeatable')
@@ -221,7 +243,7 @@ function registerAddSubcommand(cmd: Command): void {
       const sidecarPath = siblingEvidencePath(file);
 
       let record: EvidenceRecord = fs.existsSync(sidecarPath)
-        ? parseEvidence(fs.readFileSync(sidecarPath, 'utf8'))
+        ? loadSidecar(sidecarPath)
         : buildFreshRecord(file, options.namespace);
 
       const session = options.session || process.env.AI_DOSSIER_SESSION_ID;
@@ -230,12 +252,13 @@ function registerAddSubcommand(cmd: Command): void {
         process.exit(1);
       }
 
+      const extra = parseExtra(options.extra);
       const ref: EvidenceRef = {
-        provider: (options.provider || 'claude-code') as EvidenceRef['provider'],
+        provider: options.provider,
         session,
         ...(options.event ? { event: options.event } : {}),
         host: options.host || os.hostname(),
-        ...(parseExtra(options.extra) ? { extra: parseExtra(options.extra) } : {}),
+        ...(extra ? { extra } : {}),
       };
 
       record = {
@@ -262,7 +285,7 @@ function registerAddSubcommand(cmd: Command): void {
         process.exit(1);
       }
 
-      fs.writeFileSync(sidecarPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+      writeSidecarAtomic(sidecarPath, record);
       console.log(`✅ Evidence entry added (${record.entries.length} entries)`);
     });
 }
@@ -280,10 +303,10 @@ function registerSyncSubcommand(cmd: Command): void {
         process.exit(1);
       }
 
-      let record = parseEvidence(fs.readFileSync(sidecarPath, 'utf8'));
+      let record = loadSidecar(sidecarPath);
       record = refreshFromFrontmatter(record, file);
 
-      fs.writeFileSync(sidecarPath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+      writeSidecarAtomic(sidecarPath, record);
       console.log(`✅ Evidence synced: version=${record.version} hash=${record.checksum.hash}`);
     });
 }
