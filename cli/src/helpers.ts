@@ -178,6 +178,18 @@ export function safeDossierPath(baseDir: string, dossierName: string): string {
   return resolved;
 }
 
+/**
+ * Sibling `.evidence.json` path for a `<name>.ds.md` dossier file — swaps the `.ds.md`
+ * suffix when present, otherwise appends. Shared by publish/export/evidence so the
+ * sidecar-naming convention lives in one place.
+ */
+export function siblingEvidencePath(dossierFile: string): string {
+  const resolved = path.resolve(dossierFile);
+  return resolved.endsWith('.ds.md')
+    ? `${resolved.slice(0, -'.ds.md'.length)}.evidence.json`
+    : `${resolved}.evidence.json`;
+}
+
 // ============================================================================
 // Helper functions
 // ============================================================================

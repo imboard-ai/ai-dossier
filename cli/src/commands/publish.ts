@@ -3,13 +3,65 @@ import path from 'node:path';
 import readline from 'node:readline';
 import {
   type DossierFrontmatter,
+  evidenceMatchesDossier,
   parseDossierContent,
+  parseEvidence,
   sha256Hex,
   validateFrontmatter,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
+import { siblingEvidencePath } from '../helpers';
 import { getClientForRegistry } from '../registry-client';
 import { handleRegistryWriteError, requireWriteAuth } from '../write-auth';
+
+/**
+ * Resolve, read, and validate the evidence sidecar to attach to a publish — the sibling
+ * `.evidence.json` by default, an explicit `--evidence <path>`, or none under `--no-evidence`.
+ * Exits the process (with a `❌` message) on a missing explicit file, an unparsable sidecar,
+ * or one that does not match the dossier being published.
+ */
+function resolveEvidenceForPublish(
+  dossierFile: string,
+  evidenceOption: string | false | undefined,
+  frontmatter: DossierFrontmatter,
+  fullPath: string
+): string | null {
+  if (evidenceOption === false) return null;
+
+  const explicitEvidencePath = typeof evidenceOption === 'string';
+  const evidencePath = explicitEvidencePath
+    ? path.resolve(evidenceOption as string)
+    : siblingEvidencePath(dossierFile);
+
+  if (!fs.existsSync(evidencePath)) {
+    if (explicitEvidencePath) {
+      console.error(`\n❌ Evidence file not found: ${evidencePath}\n`);
+      process.exit(1);
+    }
+    return null;
+  }
+
+  const rawEvidence = fs.readFileSync(evidencePath, 'utf8');
+  let evidenceRecord: ReturnType<typeof parseEvidence>;
+  try {
+    evidenceRecord = parseEvidence(rawEvidence);
+  } catch (err: unknown) {
+    console.error(`\n❌ Invalid evidence file: ${(err as Error).message}\n`);
+    process.exit(1);
+  }
+
+  const mismatches = evidenceMatchesDossier(evidenceRecord, frontmatter, fullPath);
+  if (mismatches.length > 0) {
+    console.error('\n❌ Evidence does not match dossier:');
+    for (const mismatch of mismatches) {
+      console.error(`   - ${mismatch}`);
+    }
+    console.error("\n   Run 'ai-dossier evidence sync <file>' to update version/checksum\n");
+    process.exit(1);
+  }
+
+  return rawEvidence;
+}
 
 export function registerPublishCommand(program: Command): void {
   program
@@ -20,6 +72,11 @@ export function registerPublishCommand(program: Command): void {
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--namespace <namespace>', 'Override namespace (e.g., imboard-ai/skills)')
     .option('--registry <name>', 'Target registry to publish to')
+    .option(
+      '--evidence <path>',
+      'Attach an evidence sidecar (defaults to a sibling .evidence.json)'
+    )
+    .option('--no-evidence', 'Skip attaching evidence, even if a sibling sidecar exists')
     .option('--json', 'Output as JSON')
     .action(
       async (
@@ -29,6 +86,7 @@ export function registerPublishCommand(program: Command): void {
           yes?: boolean;
           namespace?: string;
           registry?: string;
+          evidence?: string | false;
           json?: boolean;
         }
       ) => {
@@ -88,6 +146,14 @@ export function registerPublishCommand(program: Command): void {
         const version = frontmatter.version || 'unknown';
         const fullPath = `${namespace}/${name}`;
         const registryPath = `${fullPath}@${version}`;
+
+        // Resolve, read, and validate the evidence sidecar (if one is going to be sent).
+        const evidenceContent = resolveEvidenceForPublish(
+          dossierFile,
+          options.evidence,
+          frontmatter,
+          fullPath
+        );
 
         // Pre-publish existence check — version-specific via registry API
         const client = getClientForRegistry(targetRegistry.url, credentials.token);
@@ -170,7 +236,12 @@ export function registerPublishCommand(program: Command): void {
         }
 
         try {
-          const result = await client.publishDossier(namespace, content, options.changelog || null);
+          const result = await client.publishDossier(
+            namespace,
+            content,
+            options.changelog || null,
+            evidenceContent
+          );
 
           const verifyCommand = `dossier info ${fullPath}@${version}`;
           const cdnDelaySeconds = 30;
@@ -184,6 +255,7 @@ export function registerPublishCommand(program: Command): void {
                   version,
                   registry: targetRegistry.name,
                   content_url: result.content_url || null,
+                  evidence_url: result.evidence_url || null,
                   verification: {
                     verify_command: verifyCommand,
                     cdn_delay_seconds: cdnDelaySeconds,
@@ -200,6 +272,9 @@ export function registerPublishCommand(program: Command): void {
             }
             if (result.content_url) {
               console.log(`   URL: ${result.content_url}`);
+            }
+            if (result.evidence_url) {
+              console.log(`   Evidence: ${result.evidence_url}`);
             }
             console.log(
               `\n   ⏳ CDN propagation may take up to ${cdnDelaySeconds}s. Verify with:\n   $ ${verifyCommand}\n`

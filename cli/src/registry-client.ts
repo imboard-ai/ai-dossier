@@ -31,6 +31,11 @@ interface DossierContentResult {
   digest: string | null;
 }
 
+interface DossierEvidenceResult {
+  evidence: string;
+  checksum: string | null;
+}
+
 interface DossierInfo {
   name: string;
   title?: string;
@@ -97,6 +102,7 @@ interface ListDossiersResult {
 interface PublishResult {
   name?: string;
   content_url?: string;
+  evidence_url?: string;
 }
 
 interface SearchResult {
@@ -161,6 +167,15 @@ class RegistryClient {
   }
 
   /**
+   * URL-encode a dossier name for use as a path segment, preserving its `/` separators
+   * (a dossier name is namespace-scoped, e.g. `org/name`) while escaping everything else —
+   * so a name containing `?`, `#`, or `../` cannot alter the request path or query.
+   */
+  private _encodeDossierPath(name: string): string {
+    return name.split('/').map(encodeURIComponent).join('/');
+  }
+
+  /**
    * Build URL with query parameters.
    */
   private _buildUrl(path: string, params: Record<string, unknown> = {}): string {
@@ -207,6 +222,28 @@ class RegistryClient {
   }
 
   /**
+   * Raise a RegistryError for a failed response, parsing the registry's JSON error body
+   * when present. Shared by every download method's failure path.
+   */
+  private async _throwForFailedDownload(response: Response, failureLabel: string): Promise<never> {
+    let message = `${failureLabel}: ${response.status} ${response.statusText}`;
+    let code: string | null = null;
+
+    try {
+      const body = (await response.json()) as { error?: { message?: string; code?: string } };
+      const errorData = body.error || {};
+      if (errorData.message) {
+        message = errorData.message;
+      }
+      code = errorData.code || null;
+    } catch {
+      // Could not parse error body
+    }
+
+    throw new RegistryError(message, response.status, code);
+  }
+
+  /**
    * Download dossier content.
    */
   async getDossierContent(
@@ -218,32 +255,46 @@ class RegistryClient {
       params.version = version;
     }
 
-    const response = await fetch(this._buildUrl(`/dossiers/${name}/content`, params), {
-      headers: this._buildHeaders(),
-    });
+    const response = await fetch(
+      this._buildUrl(`/dossiers/${this._encodeDossierPath(name)}/content`, params),
+      { headers: this._buildHeaders() }
+    );
 
     if (!response.ok) {
-      let message = `Failed to download dossier '${name}': ${response.status} ${response.statusText}`;
-      let code: string | null = null;
-
-      try {
-        const body = (await response.json()) as { error?: { message?: string; code?: string } };
-        const errorData = body.error || {};
-        if (errorData.message) {
-          message = errorData.message;
-        }
-        code = errorData.code || null;
-      } catch {
-        // Could not parse error body
-      }
-
-      throw new RegistryError(message, response.status, code);
+      await this._throwForFailedDownload(response, `Failed to download dossier '${name}'`);
     }
 
     const content = await response.text();
     const digest = response.headers.get('X-Dossier-Digest');
 
     return { content, digest };
+  }
+
+  /**
+   * Download a dossier's evidence sidecar.
+   */
+  async getDossierEvidence(
+    name: string,
+    version: string | null = null
+  ): Promise<DossierEvidenceResult> {
+    const params: Record<string, unknown> = {};
+    if (version) {
+      params.version = version;
+    }
+
+    const response = await fetch(
+      this._buildUrl(`/dossiers/${this._encodeDossierPath(name)}/evidence`, params),
+      { headers: this._buildHeaders() }
+    );
+
+    if (!response.ok) {
+      await this._throwForFailedDownload(response, `Failed to download evidence for '${name}'`);
+    }
+
+    const evidence = await response.text();
+    const checksum = response.headers.get('X-Evidence-Checksum');
+
+    return { evidence, checksum };
   }
 
   /**
@@ -268,11 +319,15 @@ class RegistryClient {
   async publishDossier(
     namespace: string,
     content: string,
-    changelog: string | null = null
+    changelog: string | null = null,
+    evidence: string | null = null
   ): Promise<PublishResult> {
     const data: Record<string, string> = { namespace, content };
     if (changelog) {
       data.changelog = changelog;
+    }
+    if (typeof evidence === 'string') {
+      data.evidence = evidence;
     }
 
     const response = await fetch(this._buildUrl('/dossiers'), {
@@ -387,6 +442,7 @@ export type {
   DossierListItem,
   ListDossiersResult,
   DossierContentResult,
+  DossierEvidenceResult,
   PublishResult,
   SearchResult,
   ListDossiersOptions,

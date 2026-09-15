@@ -285,6 +285,13 @@ export function cachedContentPath(dossierName: string, version: string): string 
 }
 
 /**
+ * Path to a cached dossier's evidence sidecar (without checking existence).
+ */
+export function cachedEvidencePath(dossierName: string, version: string): string {
+  return path.join(safeDossierPath(CACHE_DIR, dossierName), `${version}.evidence.json`);
+}
+
+/**
  * Return cached dossier content as a string, or null if not cached.
  * Single source of truth for the `existsSync(contentFile) ? read : miss`
  * block that previously lived in run.ts, create.ts, and install-skill.ts.
@@ -337,6 +344,29 @@ export function writeCachedContent(
   } catch (err) {
     if (opts.throwOnError) throw err;
     // best-effort: swallow (matches prior create.ts / install-skill.ts behaviour)
+  }
+}
+
+/**
+ * Write a dossier's evidence sidecar to the cache, mirroring {@link writeCachedContent}'s
+ * error handling. No registry-tracking (`.meta.json`) side effects — evidence is a sidecar
+ * to the content cache, not a cache entry of its own.
+ *
+ * Best-effort by default (errors swallowed). Pass `throwOnError: true` to surface failures.
+ */
+export function writeCachedEvidence(
+  dossierName: string,
+  version: string,
+  evidence: string,
+  opts: { throwOnError?: boolean } = {}
+): void {
+  const dir = safeDossierPath(CACHE_DIR, dossierName);
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(dir, `${version}.evidence.json`), evidence, 'utf8');
+  } catch (err) {
+    if (opts.throwOnError) throw err;
+    // best-effort: swallow (matches writeCachedContent's default behaviour)
   }
 }
 

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { createEvidenceRecord, parseDossierContent, sha256Hex } from '@ai-dossier/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerPublishCommand } from '../../commands/publish';
 import * as config from '../../config';
@@ -19,6 +20,29 @@ const validDossier = `---dossier
 ---
 Body content here`;
 
+const validDossierChecksum = sha256Hex(parseDossierContent(validDossier).body);
+
+const validDossierWithChecksum = `---dossier
+{"dossier_schema_version":"1.0.0","title":"Test Dossier","version":"1.0.0","name":"test-dossier","risk_level":"low","status":"Stable","checksum":{"algorithm":"sha256","hash":"${validDossierChecksum}"}}
+---
+Body content here`;
+
+const validEvidence = JSON.stringify(
+  createEvidenceRecord({
+    dossier: 'org/test-dossier',
+    version: '1.0.0',
+    checksumHash: validDossierChecksum,
+  })
+);
+
+const mismatchedEvidence = JSON.stringify(
+  createEvidenceRecord({
+    dossier: 'org/test-dossier',
+    version: '9.9.9',
+    checksumHash: validDossierChecksum,
+  })
+);
+
 describe('publish command', () => {
   const mockClient = { publishDossier: vi.fn(), getDossier: vi.fn() };
 
@@ -38,7 +62,11 @@ describe('publish command', () => {
     mockClient.getDossier.mockRejectedValue(
       Object.assign(new Error('Not found'), { statusCode: 404 })
     );
-    mockedFs.existsSync.mockReturnValue(true);
+    // Path-aware by default: the dossier file exists, but no sibling evidence sidecar does —
+    // matches "no sidecar" being the common case across the pre-existing tests below.
+    mockedFs.existsSync.mockImplementation(((p: unknown) => {
+      return !String(p).endsWith('.evidence.json');
+    }) as typeof fs.existsSync);
     mockedFs.readFileSync.mockReturnValue(validDossier);
   });
 
@@ -137,7 +165,7 @@ describe('publish command', () => {
 
     await program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes']);
 
-    expect(mockClient.publishDossier).toHaveBeenCalledWith('org', validDossier, null);
+    expect(mockClient.publishDossier).toHaveBeenCalledWith('org', validDossier, null, null);
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('org/test-dossier@1.0.0'));
   });
 
@@ -287,5 +315,174 @@ describe('publish command', () => {
 
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Updated from v0.9.0'));
     expect(mockClient.publishDossier).toHaveBeenCalled();
+  });
+
+  describe('evidence sidecar', () => {
+    beforeEach(() => {
+      mockClient.publishDossier.mockReset();
+      mockClient.publishDossier.mockResolvedValue({
+        name: 'org/test-dossier',
+        content_url: 'https://registry.example.com/dossiers/org/test-dossier',
+        evidence_url: 'https://registry.example.com/dossiers/org/test-dossier/evidence',
+      });
+    });
+
+    it('should auto-attach a sibling evidence sidecar when present', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? validEvidence
+          : validDossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+      await program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes']);
+
+      expect(mockClient.publishDossier).toHaveBeenCalledWith(
+        'org',
+        validDossierWithChecksum,
+        null,
+        validEvidence
+      );
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Evidence: https://registry.example.com/dossiers/org/test-dossier/evidence'
+        )
+      );
+    });
+
+    it('should include evidence_url (null when absent) in --json output', async () => {
+      mockedFs.existsSync.mockImplementation(((p: unknown) => {
+        return !String(p).endsWith('.evidence.json');
+      }) as typeof fs.existsSync);
+      mockedFs.readFileSync.mockReturnValue(validDossierWithChecksum);
+      mockClient.publishDossier.mockResolvedValue({
+        name: 'org/test-dossier',
+        content_url: 'https://registry.example.com/dossiers/org/test-dossier',
+      });
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+      await program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes', '--json']);
+
+      const jsonCall = vi.mocked(console.log).mock.calls.find((call) => {
+        try {
+          return JSON.parse(call[0] as string).published === true;
+        } catch {
+          return false;
+        }
+      });
+      expect(jsonCall).toBeDefined();
+      expect(JSON.parse(jsonCall?.[0] as string).evidence_url).toBeNull();
+    });
+
+    it('should skip an existing sidecar with --no-evidence', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? validEvidence
+          : validDossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'publish',
+        'test.ds.md',
+        '--yes',
+        '--no-evidence',
+      ]);
+
+      expect(mockClient.publishDossier).toHaveBeenCalledWith(
+        'org',
+        validDossierWithChecksum,
+        null,
+        null
+      );
+    });
+
+    it('should override the sidecar path with --evidence <path>', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).includes('custom-evidence')
+          ? validEvidence
+          : validDossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'publish',
+        'test.ds.md',
+        '--yes',
+        '--evidence',
+        'custom-evidence.json',
+      ]);
+
+      expect(mockClient.publishDossier).toHaveBeenCalledWith(
+        'org',
+        validDossierWithChecksum,
+        null,
+        validEvidence
+      );
+    });
+
+    it('should exit 1 without publishing on an invalid sidecar', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? 'not valid json'
+          : validDossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes'])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Invalid evidence file'));
+      expect(mockClient.publishDossier).not.toHaveBeenCalled();
+    });
+
+    it('should exit 1 with the evidence sync hint on a mismatch', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? mismatchedEvidence
+          : validDossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes'])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining("Run 'ai-dossier evidence sync <file>' to update version/checksum")
+      );
+      expect(mockClient.publishDossier).not.toHaveBeenCalled();
+    });
+
+    it('should produce the same request body as before when no sidecar exists', async () => {
+      mockedFs.existsSync.mockImplementation(((p: unknown) => {
+        return !String(p).endsWith('.evidence.json');
+      }) as typeof fs.existsSync);
+      mockedFs.readFileSync.mockReturnValue(validDossierWithChecksum);
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+      await program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes']);
+
+      expect(mockClient.publishDossier).toHaveBeenCalledWith(
+        'org',
+        validDossierWithChecksum,
+        null,
+        null
+      );
+    });
   });
 });

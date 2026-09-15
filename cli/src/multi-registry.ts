@@ -9,6 +9,7 @@ import { resolveRegistries } from './config';
 import { loadCredentials } from './credentials';
 import type {
   DossierContentResult,
+  DossierEvidenceResult,
   DossierInfo,
   DossierListItem,
   ListDossiersOptions,
@@ -43,6 +44,11 @@ export interface MultiRegistryGetDossierResult {
 
 export interface MultiRegistryGetContentResult {
   result: (DossierContentResult & { _registry: string }) | null;
+  errors: Array<{ registry: string; error: string }>;
+}
+
+export interface MultiRegistryGetEvidenceResult {
+  result: (DossierEvidenceResult & { _registry: string }) | null;
   errors: Array<{ registry: string; error: string }>;
 }
 
@@ -225,10 +231,51 @@ async function multiRegistryGetContent(
   return { result: null, errors };
 }
 
+/**
+ * Get dossier evidence sidecar from the first registry that has it.
+ * Returns error details when all registries fail.
+ * When DOSSIER_DEBUG is set, logs which registry served the request to stderr.
+ */
+async function multiRegistryGetEvidence(
+  name: string,
+  version: string | null = null
+): Promise<MultiRegistryGetEvidenceResult> {
+  const registries = resolveRegistries();
+
+  const results = await Promise.allSettled(
+    registries.map(async (reg) => {
+      const token = getTokenForRegistry(reg.name);
+      const client = getClientForRegistry(reg.url, token);
+      const result = await client.getDossierEvidence(name, version);
+      return { ...result, _registry: reg.name };
+    })
+  );
+
+  const errors: Array<{ registry: string; error: string }> = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'fulfilled') {
+      if (process.env.DOSSIER_DEBUG) {
+        process.stderr.write(
+          `[multi-registry] getEvidence '${name}' served by '${r.value._registry}'\n`
+        );
+      }
+      return { result: r.value, errors: [] };
+    }
+    errors.push({
+      registry: registries[i].name,
+      error: r.reason?.message || String(r.reason),
+    });
+  }
+
+  return { result: null, errors };
+}
+
 export {
   multiRegistryList,
   multiRegistryListFrom,
   multiRegistrySearch,
   multiRegistryGetDossier,
   multiRegistryGetContent,
+  multiRegistryGetEvidence,
 };

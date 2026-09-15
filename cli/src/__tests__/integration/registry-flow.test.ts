@@ -77,8 +77,10 @@ describe('registry flow integration', () => {
   });
 
   it('should publish, search, info, export, then remove', async () => {
-    // Step 1: Publish
-    mockedFs.existsSync.mockReturnValue(true);
+    // Step 1: Publish — path-aware so the (absent) evidence sidecar isn't misread as content
+    mockedFs.existsSync.mockImplementation(((p: unknown) => {
+      return !String(p).endsWith('.evidence.json');
+    }) as typeof fs.existsSync);
     mockedFs.readFileSync.mockReturnValue(dossierContent);
     mockClient.getDossier.mockRejectedValue(
       Object.assign(new Error('Not found'), { statusCode: 404 })
@@ -92,7 +94,7 @@ describe('registry flow integration', () => {
     registerPublishCommand(publish);
     await publish.parseAsync(['node', 'dossier', 'publish', 'workflow.ds.md', '--yes']);
 
-    expect(mockClient.publishDossier).toHaveBeenCalledWith('org', dossierContent, null);
+    expect(mockClient.publishDossier).toHaveBeenCalledWith('org', dossierContent, null, null);
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Published'));
 
     // Step 2: Search
@@ -160,7 +162,9 @@ describe('registry flow integration', () => {
   });
 
   it('should handle publish then 409 conflict on re-publish', async () => {
-    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.existsSync.mockImplementation(((p: unknown) => {
+      return !String(p).endsWith('.evidence.json');
+    }) as typeof fs.existsSync);
     mockedFs.readFileSync.mockReturnValue(dossierContent);
     mockClient.getDossier.mockRejectedValue(
       Object.assign(new Error('Not found'), { statusCode: 404 })

@@ -16,6 +16,11 @@ describe('pull command', () => {
   beforeEach(() => {
     vi.mocked(multiRegistry.multiRegistryGetDossier).mockReset();
     vi.mocked(multiRegistry.multiRegistryGetContent).mockReset();
+    vi.mocked(multiRegistry.multiRegistryGetEvidence).mockReset();
+    vi.mocked(multiRegistry.multiRegistryGetEvidence).mockResolvedValue({
+      result: null,
+      errors: [],
+    });
     mockedFs.existsSync.mockReset();
     mockedFs.mkdirSync.mockReset();
     mockedFs.writeFileSync.mockReset();
@@ -202,5 +207,64 @@ describe('pull command', () => {
     await program.parseAsync(['node', 'dossier', 'pull', 'org/dossier@2.0.0']);
 
     expect(multiRegistry.multiRegistryGetContent).toHaveBeenCalledWith('org/dossier', '2.0.0');
+  });
+
+  describe('evidence sidecar', () => {
+    it('should stay ✅ with no evidence file written on a 404', async () => {
+      vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+        result: { version: '1.0.0', _registry: 'public' },
+        errors: [],
+      } as any);
+      vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+        result: { content: '# Dossier', digest: null, _registry: 'public' },
+        errors: [],
+      });
+      vi.mocked(multiRegistry.multiRegistryGetEvidence).mockRejectedValue(
+        Object.assign(new Error('Not found'), { statusCode: 404 })
+      );
+      mockedFs.existsSync.mockReturnValue(false);
+
+      const program = createTestProgram();
+      registerPullCommand(program);
+
+      await program.parseAsync(['node', 'dossier', 'pull', 'org/my-dossier']);
+
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringMatching(/^✅ org\/my-dossier@1\.0\.0 \(downloaded\) \[public\]$/)
+      );
+      // content + meta only — no evidence file written
+      expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(2);
+    });
+
+    it('should write the evidence file and append +evidence when present', async () => {
+      vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+        result: { version: '1.0.0', _registry: 'public' },
+        errors: [],
+      } as any);
+      vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+        result: { content: '# Dossier', digest: null, _registry: 'public' },
+        errors: [],
+      });
+      const evidence = '{"evidence_schema_version":"1.0.0"}';
+      vi.mocked(multiRegistry.multiRegistryGetEvidence).mockResolvedValue({
+        result: { evidence, checksum: 'sha256:abc', _registry: 'public' },
+        errors: [],
+      });
+      mockedFs.existsSync.mockReturnValue(false);
+
+      const program = createTestProgram();
+      registerPullCommand(program);
+
+      await program.parseAsync(['node', 'dossier', 'pull', 'org/my-dossier']);
+
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringContaining('✅ org/my-dossier@1.0.0 (downloaded) [public] +evidence')
+      );
+      expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('1.0.0.evidence.json'),
+        evidence,
+        'utf8'
+      );
+    });
   });
 });

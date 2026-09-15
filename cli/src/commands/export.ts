@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Command } from 'commander';
-import { printRegistryErrors, validateRelativePath } from '../helpers';
-import { multiRegistryGetContent } from '../multi-registry';
+import { printRegistryErrors, siblingEvidencePath, validateRelativePath } from '../helpers';
+import { multiRegistryGetContent, multiRegistryGetEvidence } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
 /** Registers the `export` command — downloads a dossier and saves it to a local file. */
@@ -71,10 +71,31 @@ export function registerExportCommand(program: Command): void {
         return;
       }
 
+      let evidencePath: string | null = null;
+      try {
+        const { result: evidenceResult, errors: evidenceErrors } = await multiRegistryGetEvidence(
+          dossierName,
+          version || null
+        );
+        if (evidenceResult) {
+          const target = siblingEvidencePath(outputPath);
+          fs.writeFileSync(target, evidenceResult.evidence, 'utf8');
+          evidencePath = target;
+        } else if (process.env.DOSSIER_DEBUG && evidenceErrors.length > 0) {
+          process.stderr.write(`[export] evidence fetch failed for '${dossierName}':\n`);
+          printRegistryErrors(evidenceErrors);
+        }
+      } catch {
+        // Evidence is optional — a 404 or any other error never fails the export.
+      }
+
       console.log(`\n✅ Exported: ${outputPath}`);
       console.log(`   Source: ${dossierName}${version ? `@${version}` : ''}`);
       if (digest) {
         console.log(`   Digest: ${digest}`);
+      }
+      if (evidencePath) {
+        console.log(`   Evidence: ${evidencePath}`);
       }
       console.log('');
     });

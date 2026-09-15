@@ -3,9 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { sha256Hex } from '@ai-dossier/core';
 import type { Command } from 'commander';
-import { cachedContentPath, writeCachedContent } from '../cache-resolver';
+import { cachedContentPath, writeCachedContent, writeCachedEvidence } from '../cache-resolver';
 import { printRegistryErrors, safeDossierPath } from '../helpers';
-import { multiRegistryGetContent, multiRegistryGetDossier } from '../multi-registry';
+import {
+  multiRegistryGetContent,
+  multiRegistryGetDossier,
+  multiRegistryGetEvidence,
+} from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 
 /** Registers the `pull` command — downloads dossiers from the registry to local cache. */
@@ -85,8 +89,26 @@ export function registerPullCommand(program: Command): void {
             continue;
           }
 
+          let evidenceCached = false;
+          try {
+            const { result: evidenceResult, errors: evidenceErrors } =
+              await multiRegistryGetEvidence(dossierName, version);
+            if (evidenceResult) {
+              writeCachedEvidence(dossierName, version, evidenceResult.evidence);
+              evidenceCached = true;
+            } else if (process.env.DOSSIER_DEBUG && evidenceErrors.length > 0) {
+              process.stderr.write(`[pull] evidence fetch failed for '${dossierName}':\n`);
+              printRegistryErrors(evidenceErrors);
+            }
+          } catch {
+            // Evidence is optional — a 404 or any other error never changes the exit code
+            // or the success line below.
+          }
+
           const status = options.force ? 'updated' : 'downloaded';
-          console.log(`✅ ${dossierName}@${version} (${status}) [${result._registry}]`);
+          console.log(
+            `✅ ${dossierName}@${version} (${status}) [${result._registry}]${evidenceCached ? ' +evidence' : ''}`
+          );
           console.log(`   ${contentFile}`);
         } catch (err: unknown) {
           const e = err as { statusCode?: number; message: string };

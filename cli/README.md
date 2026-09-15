@@ -247,7 +247,7 @@ ai-dossier pull org/dossier-a org/dossier-b
 ai-dossier pull org/my-dossier --force
 ```
 
-Pulled dossiers are cached locally with checksum verification. Subsequent `pull` calls skip the download if the version is already cached (use `--force` to override). See [Cache and Version Resolution](#cache-and-version-resolution) for how versionless names are resolved and how to control freshness.
+Pulled dossiers are cached locally with checksum verification. Subsequent `pull` calls skip the download if the version is already cached (use `--force` to override). See [Cache and Version Resolution](#cache-and-version-resolution) for how versionless names are resolved and how to control freshness. When the dossier carries an evidence sidecar, `pull` also fetches it and caches it alongside the content (`+evidence` in the success line) — a missing sidecar is not an error.
 
 ### Export
 
@@ -263,6 +263,36 @@ ai-dossier export org/my-dossier -o ./local-copy.ds.md
 # Print to stdout (for piping)
 ai-dossier export org/my-dossier --stdout
 ```
+
+When the dossier carries an evidence sidecar, `export` also writes it next to the output file (`<output minus .ds.md>.evidence.json`); `--stdout` never fetches it.
+
+### Evidence
+
+An evidence sidecar (`<name>.evidence.json`) records, per rule or section of a dossier, the rationale for why it reads the way it does and pointers to the agent session(s) where that decision was made. It travels alongside a dossier through `publish`/`pull`/`export` but is never loaded by `ai-dossier run` — evidence is for a human or a future author reviewing the dossier, not for an agent executing it.
+
+```bash
+# Create a fresh sidecar for a dossier
+ai-dossier evidence init my-dossier.ds.md
+
+# Append an entry (session id from AI_DOSSIER_SESSION_ID if --session is omitted)
+ai-dossier evidence add my-dossier.ds.md \
+  --anchor "Guiding Principle" --rationale "Autonomous runs must never block on a reply" \
+  --session abc-123
+
+# Refresh version/checksum after re-signing the dossier
+ai-dossier evidence sync my-dossier.ds.md
+
+# Attach the sidecar on publish (auto-attaches a sibling .evidence.json by default)
+ai-dossier publish my-dossier.ds.md --yes
+
+# Fetch and read a published dossier's evidence
+ai-dossier evidence show org/my-dossier
+
+# Validate a sidecar file against the schema
+ai-dossier evidence validate my-dossier.evidence.json
+```
+
+Override the sidecar path with `--evidence <path>`, or skip attaching one (even if a sibling exists) with `--no-evidence`.
 
 ---
 
@@ -2009,6 +2039,7 @@ Exit 0 (safe) or 1 (unsafe)
 - ✅ `install-skill` / `skill-export` (Claude Code skill bridge)
 - ✅ Execution tracing with verified checksum + signer metadata
 - ✅ TTL-based version resolution for the content cache
+- ✅ Evidence sidecar (`.evidence.json`) — `evidence init/add/sync/validate/show`, wired through publish/pull/export
 
 ### v1.0.0 (Stable)
 - ⏳ Stable, frozen CLI surface and exit-code contract
