@@ -190,6 +190,10 @@ plus the one-line addition to Step 3 itself.
 ```markdown
 ### Step 2b: Record evidence for every rule you changed
 
+`evidence add` requires an existing checksum, and Step 2 just deleted it — restore it first (harmless; `sign` overwrites it in Step 3 regardless):
+
+ai-dossier checksum <name>.ds.md --update
+
 For each rule/section you added or changed, record why:
 
 ai-dossier evidence add <name>.ds.md \
