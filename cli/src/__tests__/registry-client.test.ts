@@ -175,6 +175,66 @@ describe('RegistryClient', () => {
     });
   });
 
+  describe('getDossierEvidence', () => {
+    it('should hit /dossiers/<name>/evidence and return body + checksum header', async () => {
+      const mockResponse = {
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve('{"evidence_schema_version":"1.0.0"}'),
+        headers: { get: (key: string) => (key === 'X-Evidence-Checksum' ? 'sha256:abc' : null) },
+      };
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse));
+
+      const result = await client.getDossierEvidence('org/my-dossier');
+
+      const url = vi.mocked(fetch).mock.calls[0][0] as string;
+      expect(url).toContain('/dossiers/org/my-dossier/evidence');
+      expect(result.evidence).toBe('{"evidence_schema_version":"1.0.0"}');
+      expect(result.checksum).toBe('sha256:abc');
+    });
+
+    it('should return null checksum when the header is absent', async () => {
+      const mockResponse = {
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve('{}'),
+        headers: { get: () => null },
+      };
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse));
+
+      const result = await client.getDossierEvidence('org/my-dossier');
+      expect(result.checksum).toBeNull();
+    });
+
+    it('should include version in the URL when given', async () => {
+      const mockResponse = {
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve('{}'),
+        headers: { get: () => null },
+      };
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse));
+
+      await client.getDossierEvidence('org/my-dossier', '1.0.0');
+
+      const url = vi.mocked(fetch).mock.calls[0][0] as string;
+      expect(url).toContain('version=1.0.0');
+    });
+
+    it('should throw RegistryError on 404', async () => {
+      const mockResponse = {
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: () =>
+          Promise.resolve({ error: { message: 'No evidence', code: 'EVIDENCE_NOT_FOUND' } }),
+      };
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(mockResponse));
+
+      await expect(client.getDossierEvidence('org/missing')).rejects.toThrow(RegistryError);
+    });
+  });
+
   describe('searchDossiers', () => {
     it('should include query parameter', async () => {
       await client.searchDossiers('deploy workflow');
@@ -202,6 +262,20 @@ describe('RegistryClient', () => {
 
       const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1] as RequestInit).body as string);
       expect(body.changelog).toBeUndefined();
+    });
+
+    it('should include evidence in the body when given', async () => {
+      await client.publishDossier('my-ns', 'content', null, '{"evidence_schema_version":"1.0.0"}');
+
+      const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1] as RequestInit).body as string);
+      expect(body.evidence).toBe('{"evidence_schema_version":"1.0.0"}');
+    });
+
+    it('should omit evidence from the body when not given', async () => {
+      await client.publishDossier('my-ns', 'content');
+
+      const body = JSON.parse((vi.mocked(fetch).mock.calls[0][1] as RequestInit).body as string);
+      expect(body.evidence).toBeUndefined();
     });
   });
 

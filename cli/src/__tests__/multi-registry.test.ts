@@ -4,6 +4,7 @@ import * as credentials from '../credentials';
 import {
   multiRegistryGetContent,
   multiRegistryGetDossier,
+  multiRegistryGetEvidence,
   multiRegistryList,
 } from '../multi-registry';
 import * as registryClient from '../registry-client';
@@ -17,6 +18,7 @@ describe('multi-registry', () => {
     listDossiers: vi.fn(),
     getDossier: vi.fn(),
     getDossierContent: vi.fn(),
+    getDossierEvidence: vi.fn(),
   };
 
   beforeEach(() => {
@@ -28,6 +30,7 @@ describe('multi-registry', () => {
     mockClient.listDossiers.mockReset();
     mockClient.getDossier.mockReset();
     mockClient.getDossierContent.mockReset();
+    mockClient.getDossierEvidence.mockReset();
   });
 
   describe('multiRegistryList', () => {
@@ -136,6 +139,32 @@ describe('multi-registry', () => {
       );
 
       const { result, errors } = await multiRegistryGetContent('missing');
+      expect(result).toBeNull();
+      expect(errors).toHaveLength(1);
+      expect(errors[0].registry).toBe('public');
+    });
+  });
+
+  describe('multiRegistryGetEvidence', () => {
+    it('should return evidence from first succeeding registry', async () => {
+      mockClient.getDossierEvidence.mockResolvedValue({
+        evidence: '{"evidence_schema_version":"1.0.0"}',
+        checksum: 'sha256:abc',
+      });
+
+      const { result, errors } = await multiRegistryGetEvidence('test');
+      expect(errors).toHaveLength(0);
+      expect(result?.evidence).toBe('{"evidence_schema_version":"1.0.0"}');
+      expect(result?.checksum).toBe('sha256:abc');
+      expect(result?._registry).toBe('public');
+    });
+
+    it('should return null with errors when not found', async () => {
+      mockClient.getDossierEvidence.mockRejectedValue(
+        Object.assign(new Error('Not found'), { statusCode: 404 })
+      );
+
+      const { result, errors } = await multiRegistryGetEvidence('missing');
       expect(result).toBeNull();
       expect(errors).toHaveLength(1);
       expect(errors[0].registry).toBe('public');

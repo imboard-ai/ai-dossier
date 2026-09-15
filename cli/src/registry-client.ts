@@ -31,6 +31,11 @@ interface DossierContentResult {
   digest: string | null;
 }
 
+interface DossierEvidenceResult {
+  evidence: string;
+  checksum: string | null;
+}
+
 interface DossierInfo {
   name: string;
   title?: string;
@@ -97,6 +102,7 @@ interface ListDossiersResult {
 interface PublishResult {
   name?: string;
   content_url?: string;
+  evidence_url?: string;
 }
 
 interface SearchResult {
@@ -247,6 +253,46 @@ class RegistryClient {
   }
 
   /**
+   * Download a dossier's evidence sidecar.
+   */
+  async getDossierEvidence(
+    name: string,
+    version: string | null = null
+  ): Promise<DossierEvidenceResult> {
+    const params: Record<string, unknown> = {};
+    if (version) {
+      params.version = version;
+    }
+
+    const response = await fetch(this._buildUrl(`/dossiers/${name}/evidence`, params), {
+      headers: this._buildHeaders(),
+    });
+
+    if (!response.ok) {
+      let message = `Failed to download evidence for '${name}': ${response.status} ${response.statusText}`;
+      let code: string | null = null;
+
+      try {
+        const body = (await response.json()) as { error?: { message?: string; code?: string } };
+        const errorData = body.error || {};
+        if (errorData.message) {
+          message = errorData.message;
+        }
+        code = errorData.code || null;
+      } catch {
+        // Could not parse error body
+      }
+
+      throw new RegistryError(message, response.status, code);
+    }
+
+    const evidence = await response.text();
+    const checksum = response.headers.get('X-Evidence-Checksum');
+
+    return { evidence, checksum };
+  }
+
+  /**
    * Search dossiers.
    */
   async searchDossiers(query: string, options: SearchOptions = {}): Promise<SearchResult> {
@@ -268,11 +314,15 @@ class RegistryClient {
   async publishDossier(
     namespace: string,
     content: string,
-    changelog: string | null = null
+    changelog: string | null = null,
+    evidence: string | null = null
   ): Promise<PublishResult> {
     const data: Record<string, string> = { namespace, content };
     if (changelog) {
       data.changelog = changelog;
+    }
+    if (typeof evidence === 'string') {
+      data.evidence = evidence;
     }
 
     const response = await fetch(this._buildUrl('/dossiers'), {
@@ -387,6 +437,7 @@ export type {
   DossierListItem,
   ListDossiersResult,
   DossierContentResult,
+  DossierEvidenceResult,
   PublishResult,
   SearchResult,
   ListDossiersOptions,

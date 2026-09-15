@@ -17,6 +17,11 @@ describe('export command', () => {
     mockedFs.existsSync.mockReturnValue(true);
     mockedFs.writeFileSync.mockReset();
     mockedFs.mkdirSync.mockReset();
+    vi.mocked(multiRegistry.multiRegistryGetEvidence).mockReset();
+    vi.mocked(multiRegistry.multiRegistryGetEvidence).mockResolvedValue({
+      result: null,
+      errors: [],
+    });
   });
 
   it('should export dossier to file', async () => {
@@ -168,5 +173,48 @@ describe('export command', () => {
 
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining('must not contain ".."'));
     expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  describe('evidence sidecar', () => {
+    it('should write a sidecar next to the output and print its path', async () => {
+      vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+        result: { content: 'content', digest: null, _registry: 'public' },
+        errors: [],
+      });
+      const evidence = '{"evidence_schema_version":"1.0.0"}';
+      vi.mocked(multiRegistry.multiRegistryGetEvidence).mockResolvedValue({
+        result: { evidence, checksum: 'sha256:abc', _registry: 'public' },
+        errors: [],
+      });
+
+      const program = createTestProgram();
+      registerExportCommand(program);
+
+      await program.parseAsync(['node', 'dossier', 'export', 'my-dossier']);
+
+      expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('.evidence.json'),
+        evidence,
+        'utf8'
+      );
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Evidence:'));
+    });
+
+    it('should never fetch evidence with --stdout', async () => {
+      vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({
+        result: { content: 'content', digest: null, _registry: 'public' },
+        errors: [],
+      });
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+      const program = createTestProgram();
+      registerExportCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'export', 'my-dossier', '--stdout'])
+      ).rejects.toThrow();
+
+      expect(multiRegistry.multiRegistryGetEvidence).not.toHaveBeenCalled();
+    });
   });
 });

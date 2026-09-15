@@ -16,6 +16,7 @@ import { registerCommandsCommand } from './commands/commands';
 import { registerConfigCommand } from './commands/config-cmd';
 import { registerCreateCommand } from './commands/create';
 import { registerDoctorCommand } from './commands/doctor';
+import { registerEvidenceCommand } from './commands/evidence';
 import { registerExportCommand } from './commands/export';
 import { registerFormatCommand } from './commands/format';
 import { registerFromFileCommand } from './commands/from-file';
@@ -93,6 +94,7 @@ registerGetCommand(program);
 registerPullCommand(program);
 registerExportCommand(program);
 registerPublishCommand(program);
+registerEvidenceCommand(program);
 registerRemoveCommand(program);
 
 // Skills
