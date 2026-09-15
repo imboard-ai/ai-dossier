@@ -3,10 +3,10 @@
   "dossier_schema_version": "1.0.0",
   "name": "full-cycle-issue",
   "title": "Full Cycle Issue Workflow",
-  "version": "3.15.3",
+  "version": "3.15.4",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-09-09",
+  "last_updated": "2026-09-13",
   "objective": "Take a GitHub issue from start to merged PR autonomously — composed from shared sub-dossiers: gate, setup, plan, implement, review, ship, and report",
   "category": [
     "development"
@@ -77,13 +77,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "7ea66af4885aebe1d442d029f5f9e9b2b9a7aad9857539c7822a49f309678281"
+    "hash": "1dfc7ec32ce52c14f036072da2cd654c6b46a49426e9622eeade7d7fb21af680"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "nmLF0hR0ohi2p53IqncnvtDuyakfoOEkY+TL4pBCtMzpiig/27yR7y1sTWiVW4oY+2LMZGDmQzwJN9KAqQU4CQ==",
+    "signature": "YXlndgKklhObinUPpOm2I06ylqNDAB4Sxn2PWr5hZNmLYWSNiip0OfkC5qHjbmeg7+wRhdBmK/GfqDvFzv0JBg==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T08:11:46.315Z",
+    "signed_at": "2026-09-13T06:43:11.667Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -101,7 +101,9 @@ Take a GitHub issue from start to merged PR autonomously. For small-to-medium is
 
 **Do not ask the user interactively, at any phase.** This runs unattended — there may be no one present to answer. If the run cannot complete autonomously, STOP and hand the decision back through the issue itself; never wait on a reply in this conversation.
 
-Stop and hand off when: the issue is too vague to implement · a business/product/design decision is genuinely ambiguous, including anything review escalates (Phase 4) or a CI/merge blocker needing judgment (Phase 5) · tests fail after 2 fix attempts with no clear path · merge conflicts require human judgment.
+The following are the ONLY authorized hand-off triggers; any other stop is unauthorized: the issue is too vague to implement · a business/product/design decision is genuinely ambiguous, including anything review escalates (Phase 4) or a CI/merge blocker needing judgment (Phase 5) · tests fail after 2 fix attempts with no clear path · merge conflicts require human judgment.
+
+The orchestrator's metered model budget, provider quotas and rate limits, and wall-clock pressure are never hand-off triggers. When an issue specifies spend ceilings, reaching one is a recorded result, not an escalation. If a run is unsure but has not reached an authorized trigger, drop optional work and state that omission in the report rather than asking. Continue all required work that remains safe and possible.
 
 **How to hand off** (same procedure every time, whichever phase triggers it):
 
