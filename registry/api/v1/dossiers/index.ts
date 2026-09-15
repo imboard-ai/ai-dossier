@@ -1,3 +1,4 @@
+import { EVIDENCE_MAX_BYTES, evidenceMatchesDossier, parseEvidence } from '@ai-dossier/core';
 import { authorizePublish } from '../../../lib/auth';
 import config from '../../../lib/config';
 import { HTTP_STATUS, MAX_CHANGELOG_LENGTH, MAX_CONTENT_SIZE } from '../../../lib/constants';
@@ -64,7 +65,12 @@ async function handleList(_req: VercelRequest, res: VercelResponse, requestId: s
   }
 }
 
-export type PublishInput = { namespace: string; content: string; changelog: string | undefined };
+export type PublishInput = {
+  namespace: string;
+  content: string;
+  changelog: string | undefined;
+  evidence: string | undefined;
+};
 
 export type ValidationSuccess = { ok: true; data: PublishInput };
 export type ValidationFailure = { ok: false; status: number; code: string; message: string };
@@ -82,7 +88,7 @@ export function validatePublishInput(req: VercelRequest): ValidationResult {
     };
   }
 
-  const { namespace, content, changelog } = req.body || {};
+  const { namespace, content, changelog, evidence } = req.body || {};
 
   if (!namespace || typeof namespace !== 'string') {
     return {
@@ -139,7 +145,25 @@ export function validatePublishInput(req: VercelRequest): ValidationResult {
     };
   }
 
-  return { ok: true, data: { namespace, content, changelog } };
+  if (evidence !== undefined && typeof evidence !== 'string') {
+    return {
+      ok: false,
+      status: HTTP_STATUS.BAD_REQUEST,
+      code: 'INVALID_FIELD',
+      message: 'Field evidence must be a JSON string',
+    };
+  }
+
+  if (typeof evidence === 'string' && evidence.length > EVIDENCE_MAX_BYTES) {
+    return {
+      ok: false,
+      status: HTTP_STATUS.CONTENT_TOO_LARGE,
+      code: 'EVIDENCE_TOO_LARGE',
+      message: 'Evidence exceeds maximum size of 256KB',
+    };
+  }
+
+  return { ok: true, data: { namespace, content, changelog, evidence } };
 }
 
 async function handlePublish(req: VercelRequest, res: VercelResponse, requestId: string) {
@@ -150,7 +174,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
 
   const input = result.data;
 
-  const { namespace, content, changelog } = input;
+  const { namespace, content, changelog, evidence } = input;
 
   try {
     const authorized = await authorizePublish(req, res, namespace);
@@ -174,13 +198,39 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
     }
 
     const fullPath = dossier.buildFullName(namespace, parsed.frontmatter.name as string);
+
+    let evidenceRecord: ReturnType<typeof parseEvidence> | undefined;
+    if (evidence !== undefined) {
+      try {
+        evidenceRecord = parseEvidence(evidence);
+      } catch (err) {
+        return badRequest(
+          res,
+          'INVALID_EVIDENCE',
+          err instanceof Error ? err.message : String(err),
+          requestId
+        );
+      }
+
+      const mismatches = evidenceMatchesDossier(evidenceRecord, parsed.frontmatter, fullPath);
+      if (mismatches.length > 0) {
+        return badRequest(res, 'EVIDENCE_MISMATCH', mismatches.join('; '), requestId);
+      }
+    }
+
     // Strip control characters (except space) to prevent git commit message injection
     const sanitizedChangelog = changelog ? changelog.replace(CONTROL_CHARS, '').trim() : '';
     if (changelog && sanitizedChangelog !== changelog) {
       log.warn('Stripped control characters from changelog', { requestId, namespace });
     }
     const changelogMessage = sanitizedChangelog || 'No changelog provided';
-    await github.publishDossier(fullPath, content, parsed.frontmatter, changelogMessage);
+    await github.publishDossier(
+      fullPath,
+      content,
+      parsed.frontmatter,
+      changelogMessage,
+      evidence ?? null
+    );
 
     log.info('Dossier published', {
       requestId,
@@ -195,6 +245,9 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       title: parsed.frontmatter.title,
       content_url: config.getCdnUrl(`${fullPath}.ds.md`),
       published_at: new Date().toISOString(),
+      ...(evidence !== undefined
+        ? { evidence_url: config.getCdnUrl(`${fullPath}.evidence.json`) }
+        : {}),
     });
   } catch (err) {
     if (err instanceof github.PathTraversalError) {

@@ -1,4 +1,4 @@
-import { sha256Hex } from '@ai-dossier/core';
+import { parseEvidence, sha256Hex } from '@ai-dossier/core';
 import { authorizePublish } from '../../../lib/auth';
 import config from '../../../lib/config';
 import { HTTP_STATUS } from '../../../lib/constants';
@@ -33,8 +33,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const version = queryString(req.query.version);
   const pathParts = Array.isArray(name) ? name : typeof name === 'string' ? name.split('/') : [];
 
-  const isContentRequest = pathParts[pathParts.length - 1] === 'content';
-  const dossierName = isContentRequest ? pathParts.slice(0, -1).join('/') : pathParts.join('/');
+  const tail = pathParts[pathParts.length - 1];
+  const subresource = tail === 'content' ? 'content' : tail === 'evidence' ? 'evidence' : null;
+  const dossierName = subresource !== null ? pathParts.slice(0, -1).join('/') : pathParts.join('/');
 
   const namespaceCheck = validateNamespace(dossierName);
   if (!namespaceCheck.valid) {
@@ -42,17 +43,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   if (req.method === 'DELETE') {
+    if (subresource === 'evidence') {
+      return methodNotAllowed(req, res, 'GET', 'HEAD');
+    }
     return handleDelete(req, res, dossierName, version, requestId);
   }
 
-  return handleGet(res, dossierName, version, isContentRequest, requestId);
+  return handleGet(res, dossierName, version, subresource, requestId);
 }
 
 async function handleGet(
   res: VercelResponse,
   dossierName: string,
   version: string | undefined,
-  isContentRequest: boolean,
+  subresource: 'content' | 'evidence' | null,
   requestId: string
 ) {
   try {
@@ -73,7 +77,7 @@ async function handleGet(
       );
     }
 
-    if (isContentRequest) {
+    if (subresource === 'content') {
       log.info('Getting file content', { requestId, path: dossierEntry.path });
       const fileContent = await github.getFileContent(dossierEntry.path);
 
@@ -93,6 +97,39 @@ async function handleGet(
       return res.status(HTTP_STATUS.OK).send(fileContent.content);
     }
 
+    if (subresource === 'evidence') {
+      const sidecarPath = dossierEntry.path.replace(/\.ds\.md$/, '.evidence.json');
+      log.info('Getting evidence sidecar', { requestId, path: sidecarPath });
+      const sidecarContent = await github.getFileContent(sidecarPath);
+
+      if (!sidecarContent) {
+        return notFound(
+          res,
+          'EVIDENCE_NOT_FOUND',
+          `No evidence for dossier '${dossierName}'`,
+          requestId
+        );
+      }
+
+      let record: ReturnType<typeof parseEvidence>;
+      try {
+        record = parseEvidence(sidecarContent.content);
+      } catch (err) {
+        return serverError(res, {
+          operation: `dossier.evidence(${dossierName})`,
+          error: err,
+          code: 'EVIDENCE_CORRUPT',
+          message: 'Stored evidence record is corrupt',
+          status: HTTP_STATUS.BAD_GATEWAY,
+          requestId,
+        });
+      }
+
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('X-Evidence-Checksum', `sha256:${record.checksum.hash}`);
+      return res.status(HTTP_STATUS.OK).send(sidecarContent.content);
+    }
+
     return res.status(HTTP_STATUS.OK).json({
       name: dossierEntry.name,
       title: dossierEntry.title,
@@ -110,7 +147,7 @@ async function handleGet(
       code: 'UPSTREAM_ERROR',
       message: 'Failed to fetch dossier information',
       requestId,
-      context: { dossier: dossierName, isContentRequest },
+      context: { dossier: dossierName, subresource },
     });
   }
 }

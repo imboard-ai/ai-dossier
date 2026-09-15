@@ -109,6 +109,122 @@ describe('createOrUpdateFile', () => {
   });
 });
 
+function jsonResponse(body: unknown) {
+  return { ok: true, status: 200, json: () => Promise.resolve(body) };
+}
+
+function contentResponse(content: string, sha: string) {
+  return jsonResponse({ content: Buffer.from(content).toString('base64'), sha });
+}
+
+const NOT_FOUND = { ok: false, status: 404 };
+
+function bodyOf(callIndex: number) {
+  return JSON.parse(mockFetch.mock.calls[callIndex][1].body as string);
+}
+
+describe('publishDossier', () => {
+  const metadata = { name: 'test-dossier', title: 'Test', version: '1.0.0' } as never;
+
+  it('with evidence: writes content, sidecar, then manifest — sidecar body and message match', async () => {
+    const { publishDossier } = await import('../lib/github');
+    mockFetch
+      .mockResolvedValueOnce(NOT_FOUND) // GET content (no existing)
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'file-sha' } })) // PUT content
+      .mockResolvedValueOnce(NOT_FOUND) // GET sidecar (none)
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'evidence-sha' } })) // PUT sidecar
+      .mockResolvedValueOnce(NOT_FOUND) // GET index.json (empty manifest)
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
+
+    const evidence = '{"evidence_schema_version":"1.0.0"}';
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', evidence);
+
+    const puts = mockFetch.mock.calls
+      .map((call, i) => ({
+        i,
+        url: call[0] as string,
+        method: (call[1]?.method as string) || 'GET',
+      }))
+      .filter((c) => c.method === 'PUT');
+
+    expect(puts.map((p) => p.url)).toEqual([
+      expect.stringContaining('ns/test-dossier.ds.md'),
+      expect.stringContaining('ns/test-dossier.evidence.json'),
+      expect.stringContaining('index.json'),
+    ]);
+
+    const sidecarPutIndex = puts[1].i;
+    const sidecarBody = bodyOf(sidecarPutIndex);
+    expect(Buffer.from(sidecarBody.content, 'base64').toString('utf-8')).toBe(evidence);
+    expect(sidecarBody.message).toMatch(/^Evidence for/);
+  });
+
+  it('without evidence when a sidecar exists: deletes the sidecar before the manifest PUT', async () => {
+    const { publishDossier } = await import('../lib/github');
+    mockFetch
+      .mockResolvedValueOnce(NOT_FOUND) // GET content
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'file-sha' } })) // PUT content
+      .mockResolvedValueOnce(contentResponse('{}', 'existing-evidence-sha')) // GET sidecar (exists)
+      .mockResolvedValueOnce(jsonResponse({ commit: { sha: 'delete-sha' } })) // DELETE sidecar
+      .mockResolvedValueOnce(NOT_FOUND) // GET index.json
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
+
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', null);
+
+    const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
+    expect(methods).toEqual(['GET', 'PUT', 'GET', 'DELETE', 'GET', 'PUT']);
+
+    const deleteBody = bodyOf(3);
+    expect(deleteBody.sha).toBe('existing-evidence-sha');
+
+    const deleteCallIndex = 3;
+    const manifestPutIndex = 5;
+    expect(deleteCallIndex).toBeLessThan(manifestPutIndex);
+  });
+
+  it('without evidence and no sidecar: no DELETE, exactly two PUTs', async () => {
+    const { publishDossier } = await import('../lib/github');
+    mockFetch
+      .mockResolvedValueOnce(NOT_FOUND) // GET content
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'file-sha' } })) // PUT content
+      .mockResolvedValueOnce(NOT_FOUND) // GET sidecar (none)
+      .mockResolvedValueOnce(NOT_FOUND) // GET index.json
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
+
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', null);
+
+    const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
+    expect(methods).toEqual(['GET', 'PUT', 'GET', 'GET', 'PUT']);
+    expect(methods.filter((m) => m === 'DELETE')).toHaveLength(0);
+    expect(methods.filter((m) => m === 'PUT')).toHaveLength(2);
+  });
+});
+
+describe('deleteDossier', () => {
+  it('also DELETEs the sidecar when present', async () => {
+    const { deleteDossier } = await import('../lib/github');
+    const manifestJson = JSON.stringify({
+      dossiers: [
+        { name: 'ns/test-dossier', title: 'Test', version: '1.0.0', path: 'ns/test-dossier.ds.md' },
+      ],
+    });
+    mockFetch
+      .mockResolvedValueOnce(contentResponse('---\nname: test-dossier\n---', 'content-sha')) // GET content
+      .mockResolvedValueOnce(contentResponse(manifestJson, 'manifest-sha')) // GET manifest (index.json)
+      .mockResolvedValueOnce(jsonResponse({ commit: { sha: 'delete-content-sha' } })) // DELETE content
+      .mockResolvedValueOnce(contentResponse('{}', 'evidence-sha')) // GET sidecar (exists)
+      .mockResolvedValueOnce(jsonResponse({ commit: { sha: 'delete-evidence-sha' } })) // DELETE sidecar
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha-2' } })); // PUT index.json
+
+    await deleteDossier('ns/test-dossier');
+
+    const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
+    expect(methods).toEqual(['GET', 'GET', 'DELETE', 'GET', 'DELETE', 'PUT']);
+    const sidecarDeleteBody = bodyOf(4);
+    expect(sidecarDeleteBody.sha).toBe('evidence-sha');
+  });
+});
+
 describe('getManifest', () => {
   it('should throw descriptive error on malformed JSON', async () => {
     const { getManifest } = await import('../lib/github');
