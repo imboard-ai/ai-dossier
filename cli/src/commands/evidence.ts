@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  calculateChecksum,
   createEvidenceRecord,
   type EvidenceRecord,
   type EvidenceRef,
@@ -75,16 +76,15 @@ function readDossier(file: string): ReturnType<typeof parseDossierContent> {
   }
 }
 
-/** Build a fresh evidence record for a dossier file, per `init`'s rules. */
+/**
+ * Build a fresh evidence record for a dossier file, per `init`'s rules. When the frontmatter
+ * has no checksum yet (e.g. right after `publish-dossier`'s Step 2 deletes it, before Step 3's
+ * `sign` restores it), compute the hash from the current body instead of erroring — the sidecar
+ * just records the hash the body currently has; `sync` after `sign` reconciles it later.
+ */
 function buildFreshRecord(dossierFile: string, namespace?: string): EvidenceRecord {
-  const { frontmatter } = readDossier(dossierFile);
-
-  if (!frontmatter.checksum?.hash) {
-    console.error(
-      "\n❌ Dossier has no checksum; run 'ai-dossier checksum <file> --update' or sign it first\n"
-    );
-    process.exit(1);
-  }
+  const { frontmatter, body } = readDossier(dossierFile);
+  const checksumHash = frontmatter.checksum?.hash || calculateChecksum(body);
 
   const ns = resolveNamespace(namespace);
   const name = frontmatter.name || frontmatter.title || path.basename(dossierFile, '.ds.md');
@@ -93,23 +93,47 @@ function buildFreshRecord(dossierFile: string, namespace?: string): EvidenceReco
   return createEvidenceRecord({
     dossier: fullPath,
     version: frontmatter.version,
-    checksumHash: frontmatter.checksum.hash,
+    checksumHash,
   });
 }
 
-/** Refresh `record.version` and `record.checksum.hash` from the dossier's current frontmatter. */
-function refreshFromFrontmatter(record: EvidenceRecord, dossierFile: string): EvidenceRecord {
-  const { frontmatter } = readDossier(dossierFile);
-  if (!frontmatter.checksum?.hash) {
-    console.error(
-      "\n❌ Dossier has no checksum; run 'ai-dossier checksum <file> --update' or sign it first\n"
-    );
-    process.exit(1);
+/**
+ * Refresh `record.dossier`, `record.version` and `record.checksum.hash` from the dossier's
+ * current frontmatter. `dossier` is recomputed with the same namespace resolution `publish`
+ * uses (`namespace` param, else `credentials.orgs[0]`, else `credentials.username`), fixing a
+ * sidecar created under the wrong default namespace in place.
+ *
+ * `computeIfMissing` (default `false`) controls what happens when the frontmatter has no
+ * checksum: `sync` always runs after `sign`, so a missing checksum there is a real problem and
+ * still hard-errors; `add` may run between `publish-dossier`'s Step 2 (deletes checksum) and
+ * Step 3 (`sign` restores it), so it passes `true` to compute the hash from the body instead.
+ */
+function refreshFromFrontmatter(
+  record: EvidenceRecord,
+  dossierFile: string,
+  namespace: string | undefined,
+  computeIfMissing = false
+): EvidenceRecord {
+  const { frontmatter, body } = readDossier(dossierFile);
+  let hash = frontmatter.checksum?.hash;
+  if (!hash) {
+    if (!computeIfMissing) {
+      console.error(
+        "\n❌ Dossier has no checksum; run 'ai-dossier checksum <file> --update' or sign it first\n"
+      );
+      process.exit(1);
+    }
+    hash = calculateChecksum(body);
   }
+
+  const ns = resolveNamespace(namespace);
+  const name = frontmatter.name || frontmatter.title || path.basename(dossierFile, '.ds.md');
+
   return {
     ...record,
+    dossier: `${ns}/${name}`,
     version: frontmatter.version,
-    checksum: { algorithm: 'sha256', hash: frontmatter.checksum.hash },
+    checksum: { algorithm: 'sha256', hash },
   };
 }
 
@@ -273,7 +297,7 @@ function registerAddSubcommand(cmd: Command): void {
           },
         ],
       };
-      record = refreshFromFrontmatter(record, file);
+      record = refreshFromFrontmatter(record, file, options.namespace, true);
 
       const errors = validateEvidence(record);
       if (errors.length > 0) {
@@ -290,13 +314,20 @@ function registerAddSubcommand(cmd: Command): void {
     });
 }
 
-/** `evidence sync` — refresh version/checksum from the dossier's current frontmatter. */
+interface SyncOptions {
+  namespace?: string;
+}
+
+/** `evidence sync` — refresh dossier/version/checksum from the dossier's current frontmatter. */
 function registerSyncSubcommand(cmd: Command): void {
   cmd
     .command('sync')
-    .description("Refresh a sidecar's version/checksum from the dossier's current frontmatter")
+    .description(
+      "Refresh a sidecar's dossier/version/checksum from the dossier's current frontmatter"
+    )
     .argument('<file>', 'Dossier file (.ds.md)')
-    .action((file: string) => {
+    .option('--namespace <namespace>', 'Override namespace (same default resolution as publish)')
+    .action((file: string, options: SyncOptions) => {
       const sidecarPath = siblingEvidencePath(file);
       if (!fs.existsSync(sidecarPath)) {
         console.error(`\n❌ Evidence file not found: ${sidecarPath}\n`);
@@ -304,10 +335,12 @@ function registerSyncSubcommand(cmd: Command): void {
       }
 
       let record = loadSidecar(sidecarPath);
-      record = refreshFromFrontmatter(record, file);
+      record = refreshFromFrontmatter(record, file, options.namespace);
 
       writeSidecarAtomic(sidecarPath, record);
-      console.log(`✅ Evidence synced: version=${record.version} hash=${record.checksum.hash}`);
+      console.log(
+        `✅ Evidence synced: dossier=${record.dossier} version=${record.version} hash=${record.checksum.hash}`
+      );
     });
 }
 

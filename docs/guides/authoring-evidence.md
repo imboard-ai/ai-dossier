@@ -114,17 +114,12 @@ exist next to the dossier file — there's no separate "create the sidecar"
 step you have to remember. Skip `evidence add` only when the change is
 purely cosmetic (typo fix, reformatting) with nothing to explain.
 
-**Always pass `--namespace` explicitly on `evidence add`/`evidence init`
-when it might differ from your default.** The default namespace mirrors
-`publish`'s own resolution: `--namespace` if given, else your first org,
-else your username. If you belong to an org but are publishing this
-dossier under your personal namespace (or vice versa), the sidecar's
-`dossier` field is stamped with the *default*, not the namespace you
-`publish` to — and `publish` then rejects it with `EVIDENCE_MISMATCH:
-evidence record dossier "<default>/<name>" does not match "<actual>/<name>"`.
-There's no in-place fix for a sidecar with the wrong namespace baked in
-(`evidence sync` only refreshes `version`/`checksum`) — delete the sidecar
-and re-run `evidence add` with the correct `--namespace` if this happens.
+**Pass `--namespace` explicitly on `evidence add`/`evidence init`/`evidence
+sync` when it might differ from your default** (mirrors `publish`'s own
+resolution: `--namespace` if given, else your first org, else your
+username) — a sidecar stamped with the wrong namespace now has an in-place
+fix: re-run `evidence sync --namespace <namespace>` to rewrite `dossier`
+without recreating the sidecar.
 
 ## 5. Finding the session ID
 
@@ -190,11 +185,7 @@ plus the one-line addition to Step 3 itself.
 ```markdown
 ### Step 2b: Record evidence for every rule you changed
 
-`evidence add` requires an existing checksum, and Step 2 just deleted it — restore it first (harmless; `sign` overwrites it in Step 3 regardless):
-
-ai-dossier checksum <name>.ds.md --update
-
-For each rule/section you added or changed, record why:
+`evidence add` computes a checksum from the current body when Step 2 has already deleted the frontmatter's one (`sign` overwrites it properly in Step 3 regardless), so there's no need to restore it first. For each rule/section you added or changed, record why:
 
 ai-dossier evidence add <name>.ds.md \
   --anchor "<heading or rule as written in the body>" \
