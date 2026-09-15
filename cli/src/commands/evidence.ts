@@ -121,14 +121,22 @@ function deriveIdentity(dossierFile: string): {
  * Apply a derived identity (`deriveIdentity`) to a record's `dossier`/`version`/`checksum`
  * fields. `dossier`'s namespace segment is resolved via `resolveDossierNamespace` (preserved
  * unless `namespace` is given explicitly); `dossier`'s name segment, `version` and `checksum`
- * are always refreshed to the dossier's current frontmatter.
+ * are always refreshed to the dossier's current frontmatter. Warns on stderr when an explicit
+ * `--namespace` actually changes a namespace the sidecar already had — the change is intended
+ * (that is the in-place fix this command exists to offer), but it should never be silent.
  */
 function applyIdentity(
   record: EvidenceRecord,
   identity: ReturnType<typeof deriveIdentity>,
   namespace?: string
 ): EvidenceRecord {
+  const previousNamespace = record.dossier?.includes('/')
+    ? record.dossier.slice(0, record.dossier.lastIndexOf('/'))
+    : undefined;
   const ns = resolveDossierNamespace(record.dossier, namespace);
+  if (previousNamespace && ns !== previousNamespace) {
+    console.error(`⚠️  dossier namespace changed: ${previousNamespace} → ${ns}`);
+  }
   return {
     ...record,
     dossier: `${ns}/${identity.name}`,
@@ -324,7 +332,9 @@ function registerAddSubcommand(cmd: Command): void {
       }
 
       writeSidecarAtomic(sidecarPath, record);
-      console.log(`✅ Evidence entry added (${record.entries.length} entries)`);
+      console.log(
+        `✅ Evidence entry added (dossier=${record.dossier} version=${record.version}, ${record.entries.length} entries)`
+      );
     });
 }
 
@@ -363,6 +373,16 @@ function registerSyncSubcommand(cmd: Command): void {
 
       let record = loadSidecar(sidecarPath);
       record = applyIdentity(record, identity, options.namespace);
+
+      const errors = validateEvidence(record);
+      if (errors.length > 0) {
+        console.error('\n❌ Invalid evidence record:');
+        for (const error of errors) {
+          console.error(`   - ${error}`);
+        }
+        console.error('');
+        process.exit(1);
+      }
 
       writeSidecarAtomic(sidecarPath, record);
       console.log(

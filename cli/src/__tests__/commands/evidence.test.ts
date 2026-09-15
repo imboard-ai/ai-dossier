@@ -233,7 +233,9 @@ describe('evidence command', () => {
       ]);
 
       expect(console.log).toHaveBeenCalledWith(
-        expect.stringContaining('Evidence entry added (1 entries)')
+        expect.stringContaining(
+          'Evidence entry added (dossier=org/test-dossier version=1.0.0, 1 entries)'
+        )
       );
       const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
       expect(written.entries).toHaveLength(1);
@@ -460,6 +462,9 @@ describe('evidence command', () => {
       const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
       expect(written.dossier).toBe('foo/test-dossier');
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining('dossier=foo/test-dossier'));
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('dossier namespace changed: wrong-org → foo')
+      );
     });
 
     it('should preserve the existing namespace when --namespace is absent', async () => {
@@ -529,6 +534,36 @@ describe('evidence command', () => {
       ).rejects.toThrow();
 
       expect(console.error).toHaveBeenCalledWith(expect.stringContaining('has no checksum'));
+    });
+
+    it('should refuse to write a sidecar an invalid --namespace would make schema-invalid', async () => {
+      mockSyncFixture(
+        createEvidenceRecord({
+          dossier: 'custom-org/test-dossier',
+          version: '1.0.0',
+          checksumHash: dossierChecksum,
+        })
+      );
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'evidence',
+          'sync',
+          'test.ds.md',
+          '--namespace',
+          'Bad_NS',
+        ])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('Invalid evidence record')
+      );
+      expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
     });
   });
 
