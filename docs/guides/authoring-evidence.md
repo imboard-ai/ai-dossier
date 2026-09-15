@@ -114,12 +114,15 @@ exist next to the dossier file — there's no separate "create the sidecar"
 step you have to remember. Skip `evidence add` only when the change is
 purely cosmetic (typo fix, reformatting) with nothing to explain.
 
-**Pass `--namespace` explicitly on `evidence add`/`evidence init`/`evidence
-sync` when it might differ from your default** (mirrors `publish`'s own
-resolution: `--namespace` if given, else your first org, else your
-username) — a sidecar stamped with the wrong namespace now has an in-place
-fix: re-run `evidence sync --namespace <namespace>` to rewrite `dossier`
-without recreating the sidecar.
+**Pass `--namespace` on `evidence add`/`evidence init` when creating a
+sidecar and your target namespace differs from your default** (mirrors
+`publish`'s own resolution: `--namespace` if given, else your first org,
+else your username). Once a sidecar has a `dossier` field, every later
+`evidence add`/`evidence sync` call **preserves its existing namespace**
+by default — a plain `evidence sync <name>.ds.md` never silently reverts a
+namespace you set on purpose, and works without being logged in. A sidecar
+stamped with the wrong namespace has an in-place fix: re-run
+`evidence sync <name>.ds.md --namespace <namespace>` to rewrite it.
 
 ## 5. Finding the session ID
 

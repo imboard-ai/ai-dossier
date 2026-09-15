@@ -51,6 +51,9 @@ const EVIDENCE_PROVIDERS: EvidenceRef['provider'][] = [
   'other',
 ];
 
+/** Dossier file extension, hoisted since several places derive a name by stripping it. */
+const DOSSIER_EXT = '.ds.md';
+
 /** Namespace resolution identical to `publish` — explicit flag, else credentials. */
 function resolveNamespace(explicit?: string): string {
   if (explicit) return explicit;
@@ -60,6 +63,24 @@ function resolveNamespace(explicit?: string): string {
   }
   console.error('\n❌ --namespace required (not logged in)\n');
   process.exit(1);
+}
+
+/**
+ * Resolve the namespace segment of a sidecar's `dossier` field. An explicit `--namespace`
+ * always wins. Otherwise, a sidecar that already has a `dossier` value KEEPS its current
+ * namespace — a plain `evidence add`/`evidence sync` must never silently revert a deliberately
+ * set namespace back to the account default; that is the exact mis-stamping trap (#736) this
+ * command exists to let an author fix *in place*, by passing `--namespace` when they mean to
+ * change it. Only a brand-new sidecar (`existingDossier` undefined) falls back to `publish`'s
+ * own default chain — which also means a plain `sync`/`add` on an already-identified sidecar
+ * needs no credentials at all.
+ */
+function resolveDossierNamespace(existingDossier: string | undefined, explicit?: string): string {
+  if (explicit) return explicit;
+  const existingNamespace = existingDossier?.includes('/')
+    ? existingDossier.slice(0, existingDossier.lastIndexOf('/'))
+    : undefined;
+  return existingNamespace || resolveNamespace(explicit);
 }
 
 /** Read + parse a dossier file, exiting on failure. */
@@ -77,63 +98,42 @@ function readDossier(file: string): ReturnType<typeof parseDossierContent> {
 }
 
 /**
- * Build a fresh evidence record for a dossier file, per `init`'s rules. When the frontmatter
- * has no checksum yet (e.g. right after `publish-dossier`'s Step 2 deletes it, before Step 3's
- * `sign` restores it), compute the hash from the current body instead of erroring — the sidecar
- * just records the hash the body currently has; `sync` after `sign` reconciles it later.
+ * Derive a dossier's identity fields — reads the file exactly once. `name` follows `publish`'s
+ * own rule (`frontmatter.name || frontmatter.title || basename`). `checksumHash` falls back to
+ * `calculateChecksum(body)` when the frontmatter has none: `publish-dossier`'s Step 2 deletes
+ * `checksum`/`signature` on edit, restored later by Step 3's `sign`, so `init`/`add` (which may
+ * run in between) must not error — the sidecar just records the hash the body currently has,
+ * and `sync` after `sign` reconciles it. `sync` itself always runs after `sign`, so it checks
+ * `frontmatter.checksum?.hash` itself before relying on this fallback (see its action below).
  */
-function buildFreshRecord(dossierFile: string, namespace?: string): EvidenceRecord {
+function deriveIdentity(dossierFile: string): {
+  frontmatter: ReturnType<typeof parseDossierContent>['frontmatter'];
+  name: string;
+  checksumHash: string;
+} {
   const { frontmatter, body } = readDossier(dossierFile);
+  const name = frontmatter.name || frontmatter.title || path.basename(dossierFile, DOSSIER_EXT);
   const checksumHash = frontmatter.checksum?.hash || calculateChecksum(body);
-
-  const ns = resolveNamespace(namespace);
-  const name = frontmatter.name || frontmatter.title || path.basename(dossierFile, '.ds.md');
-  const fullPath = `${ns}/${name}`;
-
-  return createEvidenceRecord({
-    dossier: fullPath,
-    version: frontmatter.version,
-    checksumHash,
-  });
+  return { frontmatter, name, checksumHash };
 }
 
 /**
- * Refresh `record.dossier`, `record.version` and `record.checksum.hash` from the dossier's
- * current frontmatter. `dossier` is recomputed with the same namespace resolution `publish`
- * uses (`namespace` param, else `credentials.orgs[0]`, else `credentials.username`), fixing a
- * sidecar created under the wrong default namespace in place.
- *
- * `computeIfMissing` (default `false`) controls what happens when the frontmatter has no
- * checksum: `sync` always runs after `sign`, so a missing checksum there is a real problem and
- * still hard-errors; `add` may run between `publish-dossier`'s Step 2 (deletes checksum) and
- * Step 3 (`sign` restores it), so it passes `true` to compute the hash from the body instead.
+ * Apply a derived identity (`deriveIdentity`) to a record's `dossier`/`version`/`checksum`
+ * fields. `dossier`'s namespace segment is resolved via `resolveDossierNamespace` (preserved
+ * unless `namespace` is given explicitly); `dossier`'s name segment, `version` and `checksum`
+ * are always refreshed to the dossier's current frontmatter.
  */
-function refreshFromFrontmatter(
+function applyIdentity(
   record: EvidenceRecord,
-  dossierFile: string,
-  namespace: string | undefined,
-  computeIfMissing = false
+  identity: ReturnType<typeof deriveIdentity>,
+  namespace?: string
 ): EvidenceRecord {
-  const { frontmatter, body } = readDossier(dossierFile);
-  let hash = frontmatter.checksum?.hash;
-  if (!hash) {
-    if (!computeIfMissing) {
-      console.error(
-        "\n❌ Dossier has no checksum; run 'ai-dossier checksum <file> --update' or sign it first\n"
-      );
-      process.exit(1);
-    }
-    hash = calculateChecksum(body);
-  }
-
-  const ns = resolveNamespace(namespace);
-  const name = frontmatter.name || frontmatter.title || path.basename(dossierFile, '.ds.md');
-
+  const ns = resolveDossierNamespace(record.dossier, namespace);
   return {
     ...record,
-    dossier: `${ns}/${name}`,
-    version: frontmatter.version,
-    checksum: { algorithm: 'sha256', hash },
+    dossier: `${ns}/${identity.name}`,
+    version: identity.frontmatter.version,
+    checksum: { algorithm: 'sha256', hash: identity.checksumHash },
   };
 }
 
@@ -239,7 +239,13 @@ function registerInitSubcommand(cmd: Command): void {
         process.exit(1);
       }
 
-      const record = buildFreshRecord(file, options.namespace);
+      const identity = deriveIdentity(file);
+      const ns = resolveDossierNamespace(undefined, options.namespace);
+      const record = createEvidenceRecord({
+        dossier: `${ns}/${identity.name}`,
+        version: identity.frontmatter.version,
+        checksumHash: identity.checksumHash,
+      });
       writeSidecarAtomic(outputPath, record);
       console.log(`✅ Evidence sidecar created: ${outputPath}`);
     });
@@ -262,13 +268,21 @@ function registerAddSubcommand(cmd: Command): void {
     .option('--event <id>', 'Provider-native per-message/tool-call id')
     .option('--host <name>', 'Machine the session ran on (defaults to os.hostname())')
     .option('--extra <k=v...>', 'Tool-specific locator ids, repeatable')
-    .option('--namespace <namespace>', 'Override namespace when creating a fresh sidecar')
+    .option(
+      '--namespace <namespace>',
+      'Override namespace (rewrites the sidecar’s dossier field; preserved across runs otherwise)'
+    )
     .action((file: string, options: AddOptions) => {
       const sidecarPath = siblingEvidencePath(file);
+      const identity = deriveIdentity(file);
 
       let record: EvidenceRecord = fs.existsSync(sidecarPath)
         ? loadSidecar(sidecarPath)
-        : buildFreshRecord(file, options.namespace);
+        : createEvidenceRecord({
+            dossier: `${resolveDossierNamespace(undefined, options.namespace)}/${identity.name}`,
+            version: identity.frontmatter.version,
+            checksumHash: identity.checksumHash,
+          });
 
       const session = options.session || process.env.AI_DOSSIER_SESSION_ID;
       if (!session) {
@@ -297,7 +311,7 @@ function registerAddSubcommand(cmd: Command): void {
           },
         ],
       };
-      record = refreshFromFrontmatter(record, file, options.namespace, true);
+      record = applyIdentity(record, identity, options.namespace);
 
       const errors = validateEvidence(record);
       if (errors.length > 0) {
@@ -326,7 +340,10 @@ function registerSyncSubcommand(cmd: Command): void {
       "Refresh a sidecar's dossier/version/checksum from the dossier's current frontmatter"
     )
     .argument('<file>', 'Dossier file (.ds.md)')
-    .option('--namespace <namespace>', 'Override namespace (same default resolution as publish)')
+    .option(
+      '--namespace <namespace>',
+      'Rewrite the dossier namespace (otherwise the sidecar’s existing namespace is preserved)'
+    )
     .action((file: string, options: SyncOptions) => {
       const sidecarPath = siblingEvidencePath(file);
       if (!fs.existsSync(sidecarPath)) {
@@ -334,8 +351,18 @@ function registerSyncSubcommand(cmd: Command): void {
         process.exit(1);
       }
 
+      const identity = deriveIdentity(file);
+      if (!identity.frontmatter.checksum?.hash) {
+        // sync always runs after `sign` (which restores the checksum) — unlike `add`/`init`,
+        // a missing checksum here is a real problem, not the publish-dossier Step 2/3 gap.
+        console.error(
+          `\n❌ ${file} has no checksum in frontmatter; run 'ai-dossier checksum ${file} --update' or sign it first\n`
+        );
+        process.exit(1);
+      }
+
       let record = loadSidecar(sidecarPath);
-      record = refreshFromFrontmatter(record, file, options.namespace);
+      record = applyIdentity(record, identity, options.namespace);
 
       writeSidecarAtomic(sidecarPath, record);
       console.log(
