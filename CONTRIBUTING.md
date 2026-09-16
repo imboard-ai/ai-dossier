@@ -110,11 +110,17 @@ Example dossiers are one of the most valuable contributions!
 
 ### Location
 Put your example under `examples/<topic>/`:
-- `examples/development/` - Development workflows
-- `examples/devops/` - Operations and deployment
-- `examples/database/` - Database operations
-- `examples/data-science/` - ML and data workflows
-- `examples/security/` - Security validation
+- `examples/test/` - Minimal fixtures used by the project's own test suite
+- `examples/setup/` - Project scaffolding workflows
+- `examples/guides/` - Reference guides for writing agent context files
+- `examples/validation/` - Standalone dossier-validation scripts
+- `examples/git/` - Registry snapshot of the `imboard-ai/git/*` issue-workflow family
+- `examples/authoring/` - Dossier and skill authoring examples
+- `examples/meta/` - Registry snapshot of `imboard-ai/meta/*` authoring/publishing dossiers
+
+`git/` and `meta/` are registry snapshots refreshed from the published source — never hand-edit
+a dossier under either directory; publish the change to the registry instead (see
+`ai-dossier run imboard-ai/meta/publish-dossier`) and re-export the snapshot.
 
 For atomic, focused examples:
 - `examples/<topic>/atomic/` - Quick, minimal runnable cases (< 2 min)
