@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "ship-issue",
   "title": "Ship Issue — Commit, PR, Merge, Deploy, Teardown",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch",
@@ -109,16 +109,16 @@
       "name": "Yuval Dimnik"
     }
   ],
-  "last_updated": "2026-09-09",
+  "last_updated": "2026-09-16",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "1469054fab8b902401cb060fb42455bef13f4c189f2c818e17997f4ad7f923eb"
+    "hash": "54fed638dfcb197c82ab402d36b7e0b29e594d455f7651c1c5349f9aefee2218"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "NWV9teaSMjK4lyHy8tJ9oUDPbnD5al+nCLn4kKWwq3AentApHAnU0V1cc/8adCEutXjEnLGmGyWvqRjqXl47Aw==",
+    "signature": "JdawgU0qGQe18TXpqMapPOuBYs+c3fz464neBzGH8JPv08S4SiCediHiQrvFS+BoojSPQVBRQG5eysXyLvgfBw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T08:11:48.076Z",
+    "signed_at": "2026-09-16T20:52:40.275Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -639,16 +639,68 @@ landed), return to Step 4; never merge on a stale green.
 
 **Then re-run Step 3a.5's verdict-freshness gate, if and only if the head moved** since that step ran — i.e. Step 5 pushed a CI fix. This is the self-merge path's authorization point, and it comes after the CI-fix loop has settled, never per attempt; an unchanged head carries Step 3a.5's result forward with no second Agent 7. A green build on a head the review never saw is exactly what this catches: `reason=verdict-stale-not-met` stops the run instead of merging it, and the values it produces go on Step 8's milestone.
 
-All checks confirmed green and the verdict fresh — merge, then clean up issue labels:
+All checks confirmed green and the verdict fresh — merge via the REST endpoint, **never**
+`gh pr merge` (which always goes through GitHub's GraphQL `mergePullRequest` mutation —
+see `docs/agent-traps.md`'s stuck-lock-after-502 row, PR #745):
 
 ```bash
-gh pr merge <pr-number> --squash --match-head-commit "$PR_HEAD" --subject "<conventional PR title> (#<pr-number>)" --body "Closes #<issue_number>"
+PR_TITLE=$(gh pr view <pr-number> --json title --jq .title)
+
+merge_attempt() {
+  gh api -X PUT "repos/{owner}/{repo}/pulls/<pr-number>/merge" \
+    -f merge_method=squash \
+    -f sha="$PR_HEAD" \
+    -f commit_title="${PR_TITLE} (#<pr-number>)" \
+    -f commit_message="Closes #<issue_number>"
+}
+merge_attempt
+```
+
+`sha=` is the REST equivalent of `--match-head-commit` — the API 405s if the head moved
+— so the gate's teeth are unchanged: it pins the merge to the exact sha Step 3a.5 cleared
+(`PR_HEAD` — under `verdict_check=patch-id` the sha whose diff the verdict covered, which
+need not equal `verdict_head` itself). `commit_message` is a fixed, marker-free literal
+— never the PR body, and never the default squash body's concatenation of the branch's
+`wip(...)` commit subjects — this makes the skip-ci-in-squash-body mitigation a structural
+property of the API call itself, not an agent's discipline about passing a flag
+(`docs/agent-traps.md`, PR #602/#598 row): the WIP Sync Rule's `[skip ci]` markers can
+never reach the base-branch commit through this parameter, and neither can anything else
+a PR body might contain — a PR whose own body legitimately discusses this trap (as this
+one does) would otherwise risk re-introducing the marker into the squash commit through
+the very field meant to keep it out. `commit_message` is deliberately NOT the PR body.
+
+Handle each response shape before continuing:
+
+- **Success** (`"merged": true`) → continue to Step 6b.
+- **`405` with `Base branch was modified`** → transient, not a hard blocker
+  (`docs/agent-traps.md`, issue #655 row): a sibling fleet run merged into the base
+  between the mergeability check and this call — a race on the base ref, not this PR's
+  head. Wait ~15–30s for `gh pr view <pr-number> --json mergeStateStatus` to leave
+  `UNKNOWN` and settle back to `CLEAN`/`UNSTABLE`, then re-run `merge_attempt` unchanged
+  — never drop `sha=` to work around it, and never spend a Step 5 CI-fix attempt on it.
+- **`405` for any other reason (head moved)** → a genuine mismatch: return to Step 4,
+  never retry with `sha=` dropped.
+- **5xx** (`502`/`503`/etc.) → the REST analogue of the GraphQL stuck-lock shape
+  (`docs/agent-traps.md`, PR #745 row), with one difference: on GraphQL the stuck lock
+  left `mergedAt` null on every retry (the merge itself was stuck, not just the response),
+  while on the REST path a 5xx can mask a merge that actually completed — the error is in
+  the HTTP response, not necessarily the operation. So first poll `gh pr view <pr-number>
+  --json mergedAt` — non-null means it merged despite the 5xx, continue to Step 6b. Still
+  null → retry `merge_attempt` unchanged with backoff (e.g. 10s, 20s, 40s, 60s, 60s), at
+  most 5 attempts total across ~3 minutes, polling `mergedAt` after each; `sha=` stays
+  identical on every retry, so a push landing mid-retry still aborts the merge instead of
+  slipping in unreviewed. Exhausted with no merge → `reason=merge-unavailable` (see
+  Troubleshooting): apply the `decision-pending` hand-off (remove `in-progress`, comment
+  on the issue with the attempt count and the last error body) — do NOT fall back to
+  `gh pr merge`.
+
+Then clean up issue labels:
+
+```bash
 gh issue edit <issue_number> --remove-label "in-progress"
 ```
 
-`--match-head-commit` is the gate's teeth: it pins the merge to the exact sha Step 3a.5 cleared (`PR_HEAD` — under `verdict_check=patch-id` the sha whose diff the verdict covered, which need not equal `verdict_head` itself), so a push landing between the check and the merge aborts the merge instead of slipping in unreviewed. A mismatch exit is a return to Step 4, never a retry with the flag dropped.
-
-Always pass an explicit `--subject`/`--body`: the default squash body concatenates the wip commit messages, and a leaked `[skip ci]` in the merge commit silently suppresses EVERY push-triggered workflow on the base branch (publishes, deploys) — this stalled two npm releases. Do NOT use `--delete-branch` — it fails from worktrees. Branch cleanup happens in Step 7.
+Do NOT use `--delete-branch` — it fails from worktrees. Branch cleanup happens in Step 7.
 
 ### Step 6b: Confirm the merge before doing ANYTHING else
 
@@ -780,6 +832,7 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 | CI fails after fixes | See Step 5 item 5 — after 2 attempts, stop and hand off on the issue (`decision-pending` label + comment). Do not open a new issue. May be an infrastructure issue rather than a code issue — say so in the comment. |
 | Phantom success / flaky check status | Never merge on one read — require two consecutive `CLEAN` + zero-pending reads (Step 4). |
 | Merge stall / "I'll be notified when CI is done" | Backgrounding the CI wait is this phase's most common failure — the PR goes green but never merges. Never do that; Step 4 is a foreground, same-turn loop. |
+| `reason=merge-unavailable` | Step 6's REST merge (`gh api -X PUT .../pulls/<n>/merge`) returned a 5xx on every attempt — up to 5 retries with backoff over ~3 minutes — and `gh pr view <pr-number> --json mergedAt` stayed null after each poll. Not a code-review blocker: the PR is green and the verdict is fresh, GitHub's merge endpoint itself is unavailable. Stop and hand off (`decision-pending` label + comment naming the attempt count and the last error body); do NOT fall back to `gh pr merge`, and do NOT spend a Step 5 CI-fix attempt on it — the PR's own checks are unaffected. |
 | `reason=verdict-stale-not-met` (also `verdict-refresh-failed`, `verdict-head-unreadable`, `verdict-head-drifted`) | Step 3a.5 refused to authorize a merge: the reviewed diff changed after review — the PR head's patch-id no longer matches the one the verdict covered (or, on `verdict_check=sha-fallback`, its sha does not) — and the Agent 7 re-run found an AC no longer met (or could not answer, or the heads could not be read, or a parked PR's head drifted before the watcher merged). A deliberate stop BEFORE a merge, not a merge failure — expect a PR that is open, green and unmerged, `decision-pending` on the issue, and on the attached path a live worktree and no `ship done` milestone. The evidence is the hand-off comment's per-AC findings plus the blocked milestone's `verdict_head=`/`verdict_refreshed=`/`verdict_check=` (`verdict_check` names which comparison decided it — `sha-fallback` means the reviewed head was unfetchable, so an unchanged diff could not be proven and any new sha reads as stale); fix the AC (or amend it) and re-run the cycle, which re-enters ship from that milestone's `pr=`. Never apply `auto-merge` by hand to get past it. |
 | Merge conflicts | Needs human judgment. Stop and hand off on the issue (`decision-pending` label + comment describing the conflicting files and why an automatic resolution isn't safe) — do not guess at a resolution, do not open a new issue. |
 | Detached run looks unfinished | It is — by design. A `ship awaiting-merge` milestone with no `ship done` after it is a parked PR, not a failure. The tail run (`full cycle issue <n>`) resumes at `ship-teardown` once the PR merges. |
