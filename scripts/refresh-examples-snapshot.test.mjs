@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -151,11 +151,24 @@ describe('buildPrBody', () => {
     ]);
     expect(body).toContain('_(new file)_');
   });
+
+  it('defaults to naming every configured family (#751)', () => {
+    const body = buildPrBody([]);
+    expect(body).toContain('`examples/git/`');
+    expect(body).toContain('`examples/meta/`');
+  });
+
+  it('names only the families actually passed in, not every configured one (#751)', () => {
+    const metaOnly = [{ prefix: META_PREFIX, dir: 'examples/meta' }];
+    const body = buildPrBody([], metaOnly);
+    expect(body).toContain('`examples/meta/`');
+    expect(body).not.toContain('`examples/git/`');
+  });
 });
 
 describe('PR_TITLE', () => {
-  it('matches the exact title AC1 requires', () => {
-    expect(PR_TITLE).toBe('chore(examples): refresh git/ snapshot');
+  it('is family-agnostic — no longer names one directory verbatim (#751)', () => {
+    expect(PR_TITLE).toBe('chore(examples): refresh dossier snapshots');
   });
 });
 
@@ -339,5 +352,68 @@ describe('main (orchestration, with a stubbed pull)', () => {
     });
 
     expect(result.changed).toBe(false);
+  });
+});
+
+describe('main GITHUB_OUTPUT (dirs output, #751)', () => {
+  let repoRoot;
+  let examplesDir;
+  let metaDir;
+  let families;
+  let outputFile;
+  let prevGithubOutput;
+
+  beforeEach(() => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'refresh-examples-outputs-'));
+    examplesDir = 'examples/git';
+    metaDir = 'examples/meta';
+    families = [
+      { prefix: DOSSIER_PREFIX, dir: examplesDir },
+      { prefix: META_PREFIX, dir: metaDir },
+    ];
+    mkdirSync(join(repoRoot, examplesDir), { recursive: true });
+    mkdirSync(join(repoRoot, metaDir), { recursive: true });
+    writeFileSync(join(repoRoot, examplesDir, 'gate-issue.ds.md'), dossierContent('1.5.2'));
+    writeFileSync(join(repoRoot, metaDir, 'publish-dossier.ds.md'), dossierContent('1.1.2'));
+    outputFile = join(repoRoot, 'github-output.txt');
+    prevGithubOutput = process.env.GITHUB_OUTPUT;
+    process.env.GITHUB_OUTPUT = outputFile;
+  });
+
+  afterEach(() => {
+    if (prevGithubOutput === undefined) {
+      delete process.env.GITHUB_OUTPUT;
+    } else {
+      process.env.GITHUB_OUTPUT = prevGithubOutput;
+    }
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('writes a dirs output listing every family directory, driving the workflow git add (#751)', () => {
+    main({
+      families,
+      cliPath: 'cli/dist/cli.js',
+      repoRoot,
+      prBodyOut: join(repoRoot, 'pr-body.md'),
+      pull: () => ({ version: '1.5.2', content: dossierContent('1.5.2') }),
+      log: () => {},
+    });
+
+    const output = readFileSync(outputFile, 'utf8');
+    expect(output).toContain(`dirs=${examplesDir} ${metaDir}\n`);
+  });
+
+  it('never writes GITHUB_OUTPUT during --check — a dry run must not masquerade as the real refresh', () => {
+    main({
+      families,
+      cliPath: 'cli/dist/cli.js',
+      repoRoot,
+      prBodyOut: join(repoRoot, 'pr-body.md'),
+      check: true,
+      pull: () => ({ version: '1.5.2', content: dossierContent('1.5.2') }),
+      log: () => {},
+    });
+
+    expect(existsSync(outputFile)).toBe(false);
   });
 });

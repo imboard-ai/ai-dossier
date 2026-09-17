@@ -70,8 +70,13 @@ export const FAMILIES = [
   { prefix: 'imboard-ai/meta', dir: 'examples/meta' },
 ];
 
-/** PR title AC1 requires verbatim. */
-export const PR_TITLE = 'chore(examples): refresh git/ snapshot';
+/**
+ * PR title for the refresh job. Family-agnostic — the job now covers every
+ * directory in `FAMILIES`, not just `examples/git/`, so this can't name one
+ * directory verbatim the way it did before #751 (that requirement traced to
+ * the now-closed #441, not to any live external consumer of this string).
+ */
+export const PR_TITLE = 'chore(examples): refresh dossier snapshots';
 
 export class RefreshError extends Error {
   constructor(message) {
@@ -204,14 +209,19 @@ export function parsePulledVersion(pullStdout, dossierName) {
  * by the calling workflow YAML gating the PR step on `changed == 'true'`,
  * not by this function skipping its empty-list branch, which is live,
  * regularly-exercised code (see the "handles an empty change list" test).
+ *
+ * `families` names which mirror directories this run actually covered —
+ * defaults to every configured family, but a `--family git` run passes just
+ * that one so the summary never claims to have refreshed a directory it
+ * didn't touch.
  */
-export function buildPrBody(changes) {
+export function buildPrBody(changes, families = FAMILIES) {
+  const dirLabel = families.map(({ dir }) => `\`${dir}/\``).join(', ');
   const lines = [
     '## Summary',
     '',
-    'Automated weekly refresh of the example dossier mirrors under `examples/`',
-    '(`examples/git/`, `examples/meta/`) from their published registry versions —',
-    'see #441, #751.',
+    `Automated weekly refresh of the example dossier mirror(s) under ${dirLabel} from`,
+    'their published registry versions — see #441, #751.',
     '',
   ];
 
@@ -340,6 +350,63 @@ function pullOne({ name, cliPath, repoRoot, scratchHome }) {
   return { version, content: readFileSync(cachePath, 'utf8') };
 }
 
+/**
+ * Refresh one family: pull every dossier already snapshotted in `dir`,
+ * byte-compare it against the local copy, and (unless `check`) write back
+ * any dossier whose registry content moved. Logs its own per-family summary
+ * line as its last step, so a crash partway through a LATER family still
+ * leaves this family's line in the log — the summary isn't deferred to a
+ * second pass over every family's result at the end of `main()`.
+ *
+ * Extracted out of `main()` (#751 review) so the family loop there stays a
+ * flat aggregate instead of nesting `for family -> for file -> if changed`
+ * inline.
+ */
+function refreshFamily({ prefix, dir, repoRoot, cliPath, scratchHome, pull, log, check }) {
+  const absExamplesDir = join(repoRoot, dir);
+  if (!existsSync(absExamplesDir)) {
+    throw new RefreshError(`examples dir not found: ${absExamplesDir}`);
+  }
+
+  const files = readdirSync(absExamplesDir)
+    .filter((f) => f.endsWith('.ds.md'))
+    .sort();
+  if (files.length === 0) {
+    throw new RefreshError(`no .ds.md files found in ${absExamplesDir} — nothing to refresh.`);
+  }
+
+  const changes = [];
+  for (const file of files) {
+    const name = dossierNameFromFile(file, prefix);
+    const localPath = join(absExamplesDir, file);
+    const oldContent = readFileSync(localPath, 'utf8');
+    const oldVersion = extractVersion(oldContent, localPath);
+
+    const { version: newVersion, content: newContent } = pull({
+      name,
+      cliPath,
+      repoRoot,
+      scratchHome,
+    });
+
+    if (newContent !== oldContent) {
+      if (!check) {
+        writeFileSync(localPath, newContent);
+      }
+      changes.push({ name, oldVersion, newVersion });
+      log(`${check ? 'stale' : 'changed'}: ${name}  ${oldVersion} -> ${newVersion}`);
+    } else {
+      log(`unchanged: ${name}  ${oldVersion}`);
+    }
+  }
+
+  const summary = { prefix, dir, fileCount: files.length, changedCount: changes.length };
+  log(
+    `${dir}: ${summary.fileCount} dossier(s), ${summary.changedCount} ${check ? 'stale' : 'changed'}`
+  );
+  return { changes, summary };
+}
+
 export function main({
   families = FAMILIES,
   cliPath,
@@ -357,63 +424,40 @@ export function main({
   const changes = [];
   const familySummaries = [];
 
-  for (const { prefix, dir } of families) {
-    const absExamplesDir = join(repoRoot, dir);
-    if (!existsSync(absExamplesDir)) {
-      throw new RefreshError(`examples dir not found: ${absExamplesDir}`);
-    }
-
-    const files = readdirSync(absExamplesDir)
-      .filter((f) => f.endsWith('.ds.md'))
-      .sort();
-    if (files.length === 0) {
-      throw new RefreshError(`no .ds.md files found in ${absExamplesDir} — nothing to refresh.`);
-    }
-
-    let familyChanged = 0;
-    for (const file of files) {
-      const name = dossierNameFromFile(file, prefix);
-      const localPath = join(absExamplesDir, file);
-      const oldContent = readFileSync(localPath, 'utf8');
-      const oldVersion = extractVersion(oldContent, localPath);
-
-      const { version: newVersion, content: newContent } = pull({
-        name,
-        cliPath,
-        repoRoot,
-        scratchHome,
-      });
-
-      if (newContent !== oldContent) {
-        if (!check) {
-          writeFileSync(localPath, newContent);
-        }
-        changes.push({ name, oldVersion, newVersion });
-        familyChanged += 1;
-        log(`${check ? 'stale' : 'changed'}: ${name}  ${oldVersion} -> ${newVersion}`);
-      } else {
-        log(`unchanged: ${name}  ${oldVersion}`);
-      }
-    }
-    familySummaries.push({ prefix, dir, fileCount: files.length, changedCount: familyChanged });
+  for (const family of families) {
+    const { changes: familyChanges, summary } = refreshFamily({
+      ...family,
+      repoRoot,
+      cliPath,
+      scratchHome,
+      pull,
+      log,
+      check,
+    });
+    changes.push(...familyChanges);
+    familySummaries.push(summary);
   }
 
   const changed = changes.length > 0;
-  const body = buildPrBody(changes);
+  const body = buildPrBody(changes, families);
   writeFileSync(prBodyOut, body);
 
   log('');
-  for (const { dir, fileCount, changedCount } of familySummaries) {
-    log(`${dir}: ${fileCount} dossier(s), ${changedCount} ${check ? 'stale' : 'changed'}`);
-  }
   log(changed ? `${changes.length} dossier(s) changed.` : 'No changes — no-op week.');
   if (!check) {
     log(`PR body written to ${prBodyOut}`);
-  }
 
-  setGithubOutput('changed', changed ? 'true' : 'false');
-  setGithubOutput('pr_title', PR_TITLE);
-  setGithubOutput('pr_body_path', prBodyOut);
+    // Only a real (non-dry-run) refresh is authoritative for the CI job's
+    // outputs — a --check invocation is a local verification pass and must
+    // never masquerade as the source of GITHUB_OUTPUT for a downstream step.
+    setGithubOutput('changed', changed ? 'true' : 'false');
+    setGithubOutput('pr_title', PR_TITLE);
+    setGithubOutput('pr_body_path', prBodyOut);
+    // FAMILIES is the single source of truth for which directories this job
+    // covers (#751 review) — the workflow's `git add` stages exactly this
+    // list instead of a hardcoded, easily-stale directory pair.
+    setGithubOutput('dirs', families.map((f) => f.dir).join(' '));
+  }
 
   return { changed, changes, prBodyPath: prBodyOut, families: familySummaries };
 }
