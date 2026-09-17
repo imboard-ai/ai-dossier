@@ -89,6 +89,7 @@ export interface PoolWorktree {
  */
 export type ReturnStep =
   | 'lookup'
+  | 'kill-processes'
   | 'fetch'
   | 'checkout-temp-branch'
   | 'clean'

@@ -3,7 +3,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { findWorktreeProcesses } from '../process-scan';
+import {
+  assertWorktreeKillRootSafe,
+  findWorktreeProcesses,
+  UnsafeKillRootError,
+} from '../process-scan';
 import {
   readPoolState,
   runPoolExpectingFailure as runPoolExpectingFailureIn,
@@ -113,6 +117,47 @@ describe.sequential('worktree-pool process cleanup (#760)', () => {
     // before asserting it was never even targeted.
     await new Promise((resolve) => setTimeout(resolve, 500));
     expect(isAlive(siblingPid)).toBe(true);
+  });
+
+  it('never kills an ancestor of the invoking process, even one whose own cwd is inside the worktree', async () => {
+    // Orchestrator addendum on #760's review (#763): `return --path <wt>` is
+    // frequently invoked from a shell whose own cwd is `<wt>` — this spawns
+    // a real ANCESTOR of the CLI process performing the kill (a shell whose
+    // cwd is the worktree being recycled, which `sh` then execs the CLI as
+    // a child of, then execs into a long-lived process itself so it survives
+    // past the CLI's exit for the assertion below).
+    runPool('replenish --count 1');
+    const claimedPath = runPool('claim --issue 768 --branch bug/768-ancestor').trim();
+    const fixturePid = spawnSleeper(claimedPath);
+
+    const TSX = path.resolve(__dirname, '../../../../node_modules/.bin/tsx');
+    const CLI = path.resolve(__dirname, '../cli.ts');
+    // The CLI invocation runs in a SUBSHELL cd'd to `repo.root` — required
+    // for `worktree-pool` to resolve the right `.worktree-pool.json` (it
+    // discovers the pool config from its OWN process cwd's git toplevel,
+    // which for a linked worktree is the worktree itself, not the main
+    // repo). The subshell does not change the outer wrapper's own cwd, so
+    // the wrapper — the actual ancestor under test — keeps `claimedPath` as
+    // its cwd for the whole test, exactly like a real invoking shell would.
+    const wrapperScript = `(cd "${repo.root}" && "${TSX}" "${CLI}" return --path "${claimedPath}"); exec sleep 300`;
+    const wrapper = spawn('sh', ['-c', wrapperScript], {
+      cwd: claimedPath,
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, FORCE_COLOR: '0' },
+    });
+    if (wrapper.pid === undefined) throw new Error('failed to spawn wrapper process');
+    spawnedPids.push(wrapper.pid);
+    wrapper.unref();
+
+    // The fixture (a genuine orphan, unrelated to the wrapper) must still be
+    // killed — this is not a case where the guard should refuse anything.
+    expect(await waitUntil(() => !isAlive(fixturePid), 10000)).toBe(true);
+    // The wrapper — alive throughout via `exec`, so its pid never changes —
+    // must never be a kill target despite its cwd matching the recycle root
+    // exactly.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(isAlive(wrapper.pid)).toBe(true);
   });
 
   it('gc kills a process still running from a stale worktree before removing it', async () => {
@@ -307,5 +352,70 @@ describe('findWorktreeProcesses path-boundary matching (#760)', () => {
     expect(realMatches.find((m) => m.pid === child.pid)).toBeDefined();
 
     fs.rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
+describe('assertWorktreeKillRootSafe (#763)', () => {
+  let tmp: string;
+  let gitRoot: string;
+  let poolDir: string;
+  let worktreePath: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wtp-guard-'));
+    gitRoot = path.join(tmp, 'main');
+    poolDir = path.join(tmp, 'worktrees');
+    worktreePath = path.join(poolDir, 'pool-1700000000-1');
+    fs.mkdirSync(gitRoot, { recursive: true });
+    fs.mkdirSync(worktreePath, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('accepts a path strictly inside the pool directory', () => {
+    expect(assertWorktreeKillRootSafe(worktreePath, gitRoot, poolDir)).toBe(
+      path.resolve(worktreePath)
+    );
+  });
+
+  it('refuses an empty path', () => {
+    expect(() => assertWorktreeKillRootSafe('', gitRoot, poolDir)).toThrow(UnsafeKillRootError);
+    expect(() => assertWorktreeKillRootSafe('   ', gitRoot, poolDir)).toThrow(UnsafeKillRootError);
+  });
+
+  it('refuses the filesystem root', () => {
+    expect(() => assertWorktreeKillRootSafe('/', gitRoot, poolDir)).toThrow(UnsafeKillRootError);
+  });
+
+  it('refuses the git root itself', () => {
+    expect(() => assertWorktreeKillRootSafe(gitRoot, gitRoot, poolDir)).toThrow(
+      UnsafeKillRootError
+    );
+  });
+
+  it('refuses the pool directory itself (must be strictly inside it, not equal to it)', () => {
+    expect(() => assertWorktreeKillRootSafe(poolDir, gitRoot, poolDir)).toThrow(
+      UnsafeKillRootError
+    );
+  });
+
+  it('refuses a path outside the pool directory entirely', () => {
+    const outside = path.join(tmp, 'somewhere-else');
+    fs.mkdirSync(outside);
+    expect(() => assertWorktreeKillRootSafe(outside, gitRoot, poolDir)).toThrow(
+      UnsafeKillRootError
+    );
+  });
+
+  it('refuses a sibling directory whose name is merely a numeric-prefix collision with the pool dir', () => {
+    // Guards against the same `String.includes` boundary bug findWorktreeProcesses's
+    // command-line fallback had (#760): `${poolDir}extra` is NOT inside `poolDir`.
+    const collision = `${poolDir}-extra-suffix`;
+    fs.mkdirSync(collision, { recursive: true });
+    expect(() => assertWorktreeKillRootSafe(collision, gitRoot, poolDir)).toThrow(
+      UnsafeKillRootError
+    );
   });
 });

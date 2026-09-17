@@ -48,6 +48,19 @@ const HAS_PROC = process.platform === 'linux' && fs.existsSync('/proc');
 /** Default SIGTERM-to-SIGKILL grace period, shared by every caller (return/gc/reap). */
 export const DEFAULT_KILL_GRACE_MS = 5000;
 
+/**
+ * Thrown by {@link assertWorktreeKillRootSafe} — a kill root that fails the
+ * safety check (imboard-ai/ai-dossier#763). Every current caller derives its
+ * target correctly, so this should never fire in practice; it exists so a
+ * future call site cannot skip the check by construction.
+ */
+export class UnsafeKillRootError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UnsafeKillRootError';
+  }
+}
+
 function readCmdline(pid: number): string | null {
   try {
     const raw = fs.readFileSync(`/proc/${pid}/cmdline`);
@@ -137,6 +150,56 @@ function isUnder(childAbs: string, rootAbs: string): boolean {
 }
 
 /**
+ * Universal floor for ANY kill/scan root, regardless of caller: never
+ * operate on an empty path or a filesystem root (`/`, `C:\`, ...). Applied
+ * inside {@link findWorktreeProcesses} itself so every caller gets it,
+ * including `reap`'s whole-pool-directory scan.
+ */
+function assertNotEmptyOrRoot(rootAbsPath: string): string {
+  if (!rootAbsPath || rootAbsPath.trim().length === 0) {
+    throw new UnsafeKillRootError('refusing to scan for processes: empty path');
+  }
+  const resolved = path.resolve(rootAbsPath);
+  if (resolved === path.parse(resolved).root) {
+    throw new UnsafeKillRootError(
+      `refusing to scan for processes: path resolves to a filesystem root (${resolved})`
+    );
+  }
+  return resolved;
+}
+
+/**
+ * Extra guard for a kill scoped to one SPECIFIC worktree — `return` and
+ * `gc`, never `reap`'s pool-directory-wide scan (imboard-ai/ai-dossier#763).
+ * Beyond the universal empty/root check, the target must not be the git
+ * root itself and must be strictly INSIDE the pool directory — never the
+ * pool directory itself, which would broaden a single-worktree kill to
+ * everything the pool manages. Every current caller already derives this
+ * path as `toAbs(poolDir, someTrackedId)`, so this should never fire; it
+ * exists so a future call site cannot skip it by construction.
+ */
+export function assertWorktreeKillRootSafe(
+  targetAbsPath: string,
+  gitRootAbs: string,
+  poolDirAbs: string
+): string {
+  const resolved = assertNotEmptyOrRoot(targetAbsPath);
+  const resolvedGitRoot = path.resolve(gitRootAbs);
+  const resolvedPoolDir = path.resolve(poolDirAbs);
+  if (resolved === resolvedGitRoot) {
+    throw new UnsafeKillRootError(
+      `refusing to kill processes rooted at the git root itself (${resolved})`
+    );
+  }
+  if (resolved === resolvedPoolDir || !isUnder(resolved, resolvedPoolDir)) {
+    throw new UnsafeKillRootError(
+      `refusing to kill processes at ${resolved}: not strictly inside the pool directory (${resolvedPoolDir})`
+    );
+  }
+  return resolved;
+}
+
+/**
  * True when `root` appears in `command` at a real path boundary — as the
  * whole string, or followed by a path separator, whitespace, or a quote —
  * never as a bare substring. Pool worktree directory names are
@@ -197,7 +260,7 @@ function findViaPs(rootAbsPath: string): WorktreeProcess[] {
  * decide the scope). Never returns this process or any of its ancestors.
  */
 export function findWorktreeProcesses(rootAbsPath: string): WorktreeProcess[] {
-  const root = path.resolve(rootAbsPath);
+  const root = assertNotEmptyOrRoot(rootAbsPath);
   if (!HAS_PROC) return findViaPs(root);
 
   const protect = selfAndAncestorPids();
@@ -220,6 +283,48 @@ export function findWorktreeProcesses(rootAbsPath: string): WorktreeProcess[] {
     });
   }
   return results;
+}
+
+/**
+ * Pids that would match {@link findWorktreeProcesses}'s rooting test for
+ * `rootAbsPath` but are excluded because they are this process or one of
+ * its ancestors (imboard-ai/ai-dossier#763). Reported, never killed — a
+ * caller can show why fewer processes were killed than a naive scan would
+ * suggest (the CLI's own invocation of `return --path <wt>` routinely
+ * matches this way: its own command line contains `--path <wt>`).
+ */
+export function selfOrAncestorMatches(rootAbsPath: string): number[] {
+  const root = assertNotEmptyOrRoot(rootAbsPath);
+  const protect = selfAndAncestorPids();
+
+  if (!HAS_PROC) {
+    let out: string;
+    try {
+      out = execFileSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf-8' });
+    } catch {
+      return [];
+    }
+    const hits: number[] = [];
+    for (const line of out.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const match = /^(\d+)\s+(.*)$/.exec(trimmed);
+      if (!match) continue;
+      const pid = Number.parseInt(match[1], 10);
+      if (protect.has(pid) && commandRootedAt(match[2], root)) hits.push(pid);
+    }
+    return hits.sort((a, b) => a - b);
+  }
+
+  const hits: number[] = [];
+  for (const pid of protect) {
+    const cwd = readCwd(pid);
+    const command = readCmdline(pid);
+    const cwdMatches = cwd !== null && isUnder(cwd, root);
+    const cmdMatches = !cwdMatches && command !== null && commandRootedAt(command, root);
+    if (cwdMatches || cmdMatches) hits.push(pid);
+  }
+  return hits.sort((a, b) => a - b);
 }
 
 /**
@@ -309,10 +414,17 @@ export async function killProcesses(
   return { killed, errors };
 }
 
+export interface KillWorktreeProcessesResult extends KillResult {
+  /** Pids that matched but were excluded as this process or an ancestor of it (#763). */
+  skippedSelfOrAncestor: number[];
+}
+
 /** {@link findWorktreeProcesses} + {@link killProcesses} for a single worktree path. */
 export async function killWorktreeProcesses(
   rootAbsPath: string,
   graceMs = DEFAULT_KILL_GRACE_MS
-): Promise<KillResult> {
-  return killProcesses(findWorktreeProcesses(rootAbsPath), graceMs);
+): Promise<KillWorktreeProcessesResult> {
+  const skippedSelfOrAncestor = selfOrAncestorMatches(rootAbsPath);
+  const result = await killProcesses(findWorktreeProcesses(rootAbsPath), graceMs);
+  return { ...result, skippedSelfOrAncestor };
 }
