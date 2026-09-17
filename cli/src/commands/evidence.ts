@@ -40,6 +40,7 @@ interface AddOptions {
   host?: string;
   extra?: string[];
   namespace?: string;
+  forceSession?: boolean;
 }
 
 /** Providers `evidence add` accepts — mirrors the schema's `evidence[].provider` enum. */
@@ -53,6 +54,141 @@ const EVIDENCE_PROVIDERS: EvidenceRef['provider'][] = [
 
 /** Dossier file extension, hoisted since several places derive a name by stripping it. */
 const DOSSIER_EXT = '.ds.md';
+
+/** Filename (sans `.jsonl`) Claude Code uses for a transcript is the session UUID. */
+const CLAUDE_SESSION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Values that look like a placeholder/example instead of a real provider session id (#749). */
+const PLACEHOLDER_SESSION_RE = /placeholder|session-fc|example|todo|xxx/i;
+
+/** `--rationale` text that reads like the copied instruction rather than the agent's own words. */
+const IMPERATIVE_RATIONALE_RE = /^(cite|record|add|write)\s/i;
+
+/** How long an evidence-add run scans other project dirs, in the "any recent session" fallback. */
+const RECENT_SESSION_WINDOW_MS = 60 * 60 * 1000;
+
+/** Newest `*.jsonl` transcript directly inside `dir`, or undefined if there is none / it errors. */
+function newestJsonlInDir(dir: string): { id: string; mtimeMs: number } | undefined {
+  if (!fs.existsSync(dir)) return undefined;
+  let entries: unknown;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(entries)) return undefined;
+  let newest: { id: string; mtimeMs: number } | undefined;
+  for (const entry of entries) {
+    if (!entry.endsWith('.jsonl')) continue;
+    let mtimeMs: number;
+    try {
+      mtimeMs = fs.statSync(path.join(dir, entry)).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (!newest || mtimeMs > newest.mtimeMs) {
+      newest = { id: entry.slice(0, -'.jsonl'.length), mtimeMs };
+    }
+  }
+  return newest;
+}
+
+/**
+ * Default `--session` for provider `claude-code`: the newest `*.jsonl` transcript under
+ * `~/.claude/projects/<slug>/`, where `<slug>` is the current working directory path with
+ * every `/` replaced by `-` — that is how Claude Code names its project directories. Falls
+ * back to the newest jsonl under ANY project dir modified in the last hour, since a worktree's
+ * cwd may not be the slug Claude Code actually wrote the transcript under.
+ */
+function findClaudeCodeSession(): string | undefined {
+  const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  const slug = process.cwd().replace(/\//g, '-');
+
+  const primary = newestJsonlInDir(path.join(projectsDir, slug));
+  if (primary) return primary.id;
+
+  if (!fs.existsSync(projectsDir)) return undefined;
+  let projectDirs: unknown;
+  try {
+    projectDirs = fs.readdirSync(projectsDir);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(projectDirs)) return undefined;
+
+  const cutoff = Date.now() - RECENT_SESSION_WINDOW_MS;
+  let best: { id: string; mtimeMs: number } | undefined;
+  for (const name of projectDirs) {
+    const candidate = newestJsonlInDir(path.join(projectsDir, name));
+    if (candidate && candidate.mtimeMs >= cutoff && (!best || candidate.mtimeMs > best.mtimeMs)) {
+      best = candidate;
+    }
+  }
+  return best?.id;
+}
+
+interface ResolvedSession {
+  session: string;
+  source: 'flag' | 'env' | 'transcript';
+}
+
+/**
+ * Resolution order for `--session`: the explicit flag; `AI_DOSSIER_SESSION_ID`; for provider
+ * `claude-code`, the newest transcript (`findClaudeCodeSession`). Returns undefined when none
+ * of those produced a value — the caller prints the original "required" error in that case.
+ */
+function resolveSession(options: AddOptions): ResolvedSession | undefined {
+  if (options.session) return { session: options.session, source: 'flag' };
+  if (process.env.AI_DOSSIER_SESSION_ID) {
+    return { session: process.env.AI_DOSSIER_SESSION_ID, source: 'env' };
+  }
+  if (options.provider === 'claude-code') {
+    const detected = findClaudeCodeSession();
+    if (detected) return { session: detected, source: 'transcript' };
+  }
+  return undefined;
+}
+
+/**
+ * Reject a session id that cannot resolve to anything (#749: a placeholder like
+ * `claude-session-fc749` recorded next to real UUIDs defeats the sidecar's purpose).
+ * `--force-session` bypasses this entirely — for a provider whose session ids are
+ * genuinely not UUIDs and don't happen to match the placeholder heuristic either.
+ */
+function validateSessionShape(
+  session: string,
+  provider: EvidenceRef['provider'],
+  forceSession: boolean | undefined
+): void {
+  if (forceSession) return;
+
+  if (provider === 'claude-code') {
+    if (!CLAUDE_SESSION_UUID_RE.test(session)) {
+      console.error(
+        `\n❌ --session must be the Claude Code session UUID (the transcript filename under ~/.claude/projects); got "${session}"\n`
+      );
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (session.length < 8 || PLACEHOLDER_SESSION_RE.test(session)) {
+    console.error(
+      `\n❌ --session looks like a placeholder, not a real ${provider} session id; got "${session}" (use --force-session to bypass)\n`
+    );
+    process.exit(1);
+  }
+}
+
+/** Warn (never fail) when `--rationale` reads like copied instruction text, not the agent's own words. */
+function warnIfImperativeRationale(rationale: string): void {
+  const match = IMPERATIVE_RATIONALE_RE.exec(rationale.trim());
+  if (match) {
+    console.error(
+      `⚠️  --rationale starts with "${match[1]} " — looks like copied instruction text; write why, in your own words\n`
+    );
+  }
+}
 
 /** Namespace resolution identical to `publish` — explicit flag, else credentials. */
 function resolveNamespace(explicit?: string): string {
@@ -267,7 +403,10 @@ function registerAddSubcommand(cmd: Command): void {
     .argument('<file>', 'Dossier file (.ds.md)')
     .requiredOption('--anchor <text>', 'Rule/heading in the dossier body this entry documents')
     .requiredOption('--rationale <text>', 'Why the rule/section reads the way it does')
-    .option('--session <id>', 'Provider-native session id (defaults to AI_DOSSIER_SESSION_ID)')
+    .option(
+      '--session <id>',
+      'Provider-native session id (defaults to AI_DOSSIER_SESSION_ID, then — for claude-code — the newest transcript under ~/.claude/projects)'
+    )
     .addOption(
       new Option('--provider <provider>', 'Agent provider')
         .choices(EVIDENCE_PROVIDERS)
@@ -279,6 +418,10 @@ function registerAddSubcommand(cmd: Command): void {
     .option(
       '--namespace <namespace>',
       'Override namespace (rewrites the sidecar’s dossier field; preserved across runs otherwise)'
+    )
+    .option(
+      '--force-session',
+      'Bypass session-id shape validation (for a provider whose session ids are genuinely not UUIDs)'
     )
     .action((file: string, options: AddOptions) => {
       const sidecarPath = siblingEvidencePath(file);
@@ -292,11 +435,19 @@ function registerAddSubcommand(cmd: Command): void {
             checksumHash: identity.checksumHash,
           });
 
-      const session = options.session || process.env.AI_DOSSIER_SESSION_ID;
-      if (!session) {
+      const resolved = resolveSession(options);
+      if (!resolved) {
         console.error('\n❌ --session required (or set AI_DOSSIER_SESSION_ID)\n');
         process.exit(1);
       }
+      const { session } = resolved;
+      if (resolved.source !== 'flag') {
+        const sourceLabel =
+          resolved.source === 'env' ? 'AI_DOSSIER_SESSION_ID' : 'newest transcript';
+        console.log(`session=${session} (from ${sourceLabel})`);
+      }
+      validateSessionShape(session, options.provider, options.forceSession);
+      warnIfImperativeRationale(options.rationale);
 
       const extra = parseExtra(options.extra);
       const ref: EvidenceRef = {
