@@ -111,7 +111,7 @@ describe('runTeardown: pool return', () => {
     poolClaimed: true,
     branch: 'feature/101-x',
   });
-  const poolPrefix = ['-y', '@ai-dossier/worktree-pool@^0.6.0'];
+  const poolPrefix = ['-y', '@ai-dossier/worktree-pool@^0.7.0'];
 
   it('returns to the pool and claims done only on a warm self-check', () => {
     const { exec, calls } = recording((file, args) => {

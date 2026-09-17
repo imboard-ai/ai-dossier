@@ -32,17 +32,23 @@ import type { CleanupStatus } from './types';
 export const TEARDOWN_TIMEOUT_MS = 120_000;
 
 /**
- * Pool CLI invocation. Requires ≥0.6.0 — `status --json`, `return --json`,
- * and the `verification.entry_status` self-check (#453) all landed there, so
- * `^0.5.1` (which resolves to ≤0.5.3) cannot ever satisfy the JSON contract
- * and every pool teardown would record `failed-pool-return`. Versions ≤0.5.0
- * additionally carry the data-loss `gc` bug — never pin lower.
+ * Pool CLI invocation. Requires ≥0.7.0 — `return`/`gc` kill any process still
+ * running out of a worktree before recycling/removing it, and a `reap`
+ * command sweeps up what escapes that (#760); before that, `status --json`,
+ * `return --json`, and the `verification.entry_status` self-check (#453) all
+ * landed at 0.6.0, so `^0.5.1` (which resolves to ≤0.5.3) cannot ever satisfy
+ * the JSON contract and every pool teardown would record `failed-pool-return`.
+ * Versions ≤0.5.0 additionally carry the data-loss `gc` bug — never pin lower.
+ * A caret below `^0.7.0` here is exactly the trap #760 fixed everywhere else:
+ * this is the scheduler's own automated teardown path — the one that
+ * produced the 13 orphaned processes #760 describes — so it is not enough to
+ * bump `worktree-pool`'s version; every real invoker of it must track along.
  *
  * Exported so `batch-dispatch.ts`'s pool-claim attempt (#561) shares this
  * exact pin instead of duplicating it.
  */
 export const POOL_BIN = 'npx';
-export const POOL_ARGS_PREFIX = ['-y', '@ai-dossier/worktree-pool@^0.6.0'];
+export const POOL_ARGS_PREFIX = ['-y', '@ai-dossier/worktree-pool@^0.7.0'];
 
 /** The outcome recorded on the entry's `cleanup` and in the journal. */
 export interface TeardownResult {
