@@ -1,7 +1,9 @@
 import { execSync, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { findWorktreeProcesses } from '../process-scan';
 import {
   readPoolState,
   runPoolExpectingFailure as runPoolExpectingFailureIn,
@@ -232,5 +234,78 @@ describe.sequential('worktree-pool process cleanup (#760)', () => {
     // The kill ran before the failing step, and is reported anyway.
     expect(await waitUntil(() => !isAlive(pid))).toBe(true);
     expect(output).toContain(`pid ${pid}`);
+  });
+
+  it('reap does not touch a worktree mid-recycle (status recycling, not yet assigned=null)', async () => {
+    // Regression for a review finding on #760: reap only excluded status
+    // 'assigned', so a `return` that had already flipped its entry to
+    // 'recycling' (its very first write, before its own kill step even
+    // runs) looked like an orphan to a concurrently-running `reap`.
+    runPool('replenish --count 1');
+    const claimedPath = runPool('claim --issue 767 --branch bug/767-recycling').trim();
+
+    const pid = spawnSleeper(claimedPath);
+
+    const st = readPoolState(poolDir) as NonNullable<ReturnType<typeof readPoolState>>;
+    st.worktrees[0].status = 'recycling';
+    fs.writeFileSync(path.join(poolDir, '.pool-state.json'), JSON.stringify(st, null, 2));
+
+    const plan = runPoolCombined('reap --older-than 0 --dry-run');
+
+    expect(plan).not.toContain(`pid ${pid}`);
+    expect(isAlive(pid)).toBe(true);
+  });
+});
+
+describe('findWorktreeProcesses path-boundary matching (#760)', () => {
+  const spawnedPids: number[] = [];
+
+  afterEach(() => {
+    for (const pid of spawnedPids.splice(0)) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // already gone — fine
+      }
+    }
+  });
+
+  it('does not match a sibling process whose path is a numeric-prefix collision, only in the command-line fallback', async () => {
+    // Regression for a review finding on #760: pool worktree names are
+    // `pool-<timestamp>-<pid>`, so a same-batch replenish routinely produces
+    // one name that is a literal string-prefix of another
+    // (`pool-1700000000-1234` vs `pool-1700000000-12345`). The cwd match was
+    // always boundary-safe (`path.relative`); the command-line fallback used
+    // to be a bare `String.includes`, which would treat the short root as a
+    // substring of the sibling's argv and report it as rooted there too.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wtp-boundary-'));
+    const shortRoot = path.join(tmp, 'pool-1700000000-1234');
+    const longSibling = path.join(tmp, 'pool-1700000000-12345');
+    fs.mkdirSync(shortRoot);
+    fs.mkdirSync(longSibling);
+
+    // cwd is neither root (forces the command-line fallback path); the
+    // sibling's own path is passed as an argv (a long-lived `node` process
+    // ignores extra positional args, unlike `sleep`, which would error on a
+    // non-numeric one), which contains `shortRoot` as a literal
+    // character-prefix.
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', longSibling], {
+      cwd: tmp,
+      detached: true,
+      stdio: 'ignore',
+    });
+    if (child.pid === undefined) throw new Error('failed to spawn test process');
+    spawnedPids.push(child.pid);
+    child.unref();
+
+    const matches = findWorktreeProcesses(shortRoot);
+    expect(matches.find((m) => m.pid === child.pid)).toBeUndefined();
+
+    // Sanity: the real target (longSibling) does match, proving the process
+    // and the fallback path are both live for this test.
+    const realMatches = findWorktreeProcesses(longSibling);
+    expect(realMatches.find((m) => m.pid === child.pid)).toBeDefined();
+
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 });

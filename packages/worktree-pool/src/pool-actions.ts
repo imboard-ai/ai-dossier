@@ -20,6 +20,7 @@ import {
   validateState,
 } from './pool-state';
 import {
+  DEFAULT_KILL_GRACE_MS,
   findWorktreeProcesses,
   firstSegmentUnder,
   type KilledProcess,
@@ -182,6 +183,28 @@ async function promptUser(question: string): Promise<string> {
       resolve(answer.trim());
     });
   });
+}
+
+/** Outcome of {@link confirmOrAbort} — what the caller should do next. */
+type ConfirmOutcome = 'proceed' | 'no-tty' | 'declined';
+
+/**
+ * Shared `--yes`/TTY confirmation gate for a destructive operation with a
+ * printed plan (`gc`, `reap`): `--yes` (or an empty candidate list) proceeds
+ * silently; otherwise a TTY prompts and a non-TTY refuses. Every caller
+ * prints its own "Aborted"/"Refusing" message on `'declined'`/`'no-tty'` —
+ * this only decides which one applies, since the wording differs per verb.
+ */
+async function confirmOrAbort(
+  count: number,
+  verb: string,
+  opts: { yes?: boolean; interactive?: boolean }
+): Promise<ConfirmOutcome> {
+  if (count === 0 || opts.yes) return 'proceed';
+  const interactive = opts.interactive ?? Boolean(process.stdin.isTTY);
+  if (!interactive) return 'no-tty';
+  const answer = await promptUser(`\n${verb} ${count} item(s)? [y/N]: `);
+  return /^y(es)?$/i.test(answer) ? 'proceed' : 'declined';
 }
 
 export async function resolvePoolDir(
@@ -908,6 +931,14 @@ export interface ReturnResult {
    * was found running.
    */
   killedProcesses: KilledProcess[];
+  /**
+   * Non-fatal kill failures (e.g. EPERM sending a signal) — a process that
+   * could not be confirmed dead. Empty on a clean kill or when nothing was
+   * found running; never throws the return over this, but an operator
+   * reading only `killedProcesses` would otherwise see `[]` and read a
+   * refused kill as "nothing was running."
+   */
+  killErrors: string[];
 }
 
 /**
@@ -928,6 +959,8 @@ export class ReturnFailure extends Error {
   readonly markError: string | null;
   /** Processes killed before the failure (imboard-ai/ai-dossier#760), if any. */
   readonly killedProcesses: KilledProcess[];
+  /** Non-fatal kill failures before the failure, if any — see `ReturnResult.killErrors`. */
+  readonly killErrors: string[];
 
   constructor(
     step: ReturnStep,
@@ -935,7 +968,8 @@ export class ReturnFailure extends Error {
     entryId: string | null,
     cause: unknown,
     markError: string | null = null,
-    killedProcesses: KilledProcess[] = []
+    killedProcesses: KilledProcess[] = [],
+    killErrors: string[] = []
   ) {
     super(`return failed at step '${step}': ${messageOf(cause)}`, { cause });
     this.name = 'ReturnFailure';
@@ -944,6 +978,7 @@ export class ReturnFailure extends Error {
     this.worktreePath = worktreePath;
     this.markError = markError;
     this.killedProcesses = killedProcesses;
+    this.killErrors = killErrors;
   }
 }
 
@@ -1110,13 +1145,16 @@ export async function returnWorktree(worktreePath: string): Promise<ReturnResult
   let liveTempBranch = entry.temp_branch;
   let liveId = entry.id;
   let killedProcesses: KilledProcess[] = [];
+  let killErrors: string[] = [];
 
   try {
     // First step, before anything else touches the worktree (#760): a
     // verification step's dev server, jest run, or vite server must not
     // outlive the recycle. Scoped to exactly this worktree's absolute path —
     // never the whole pool directory — so a sibling worktree is untouched.
-    killedProcesses = (await killWorktreeProcesses(livePath)).killed;
+    const killResult = await killWorktreeProcesses(livePath);
+    killedProcesses = killResult.killed;
+    killErrors = killResult.errors;
 
     step('fetch', () => git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: livePath }));
 
@@ -1193,6 +1231,7 @@ export async function returnWorktree(worktreePath: string): Promise<ReturnResult
       path: newAbsPath,
       verification: step('verify', () => verifyRecycled(poolDir, newId, newAbsPath, newTempBranch)),
       killedProcesses,
+      killErrors,
     };
   } catch (err) {
     const failedStep: ReturnStep = err instanceof StepError ? err.step : 'unknown';
@@ -1217,7 +1256,15 @@ export async function returnWorktree(worktreePath: string): Promise<ReturnResult
       broken_branch: observedBranch,
     });
 
-    throw new ReturnFailure(failedStep, onDiskPath, liveId, cause, markError, killedProcesses);
+    throw new ReturnFailure(
+      failedStep,
+      onDiskPath,
+      liveId,
+      cause,
+      markError,
+      killedProcesses,
+      killErrors
+    );
   }
 }
 
@@ -1451,17 +1498,14 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
     return { ...base, removed: 0, dryRun: true, aborted: false };
   }
 
-  if (candidates.length > 0 && !opts.yes) {
-    const interactive = opts.interactive ?? Boolean(process.stdin.isTTY);
-    if (!interactive) {
-      console.error('\nRefusing to remove without confirmation. Re-run with --yes (or --dry-run).');
-      return { ...base, removed: 0, dryRun: false, aborted: true };
-    }
-    const answer = await promptUser(`\nRemove ${candidates.length} item(s)? [y/N]: `);
-    if (!/^y(es)?$/i.test(answer)) {
-      console.error('Aborted — nothing was removed.');
-      return { ...base, removed: 0, dryRun: false, aborted: true };
-    }
+  const confirmation = await confirmOrAbort(candidates.length, 'Remove', opts);
+  if (confirmation === 'no-tty') {
+    console.error('\nRefusing to remove without confirmation. Re-run with --yes (or --dry-run).');
+    return { ...base, removed: 0, dryRun: false, aborted: true };
+  }
+  if (confirmation === 'declined') {
+    console.error('Aborted — nothing was removed.');
+    return { ...base, removed: 0, dryRun: false, aborted: true };
   }
 
   for (const c of candidates) {
@@ -1472,6 +1516,7 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
         // running out of it must not survive that as an orphan.
         const killResult = await killWorktreeProcesses(c.path);
         killedProcesses.push(...killResult.killed);
+        errors.push(...killResult.errors);
         destroyWorktree(ctx, c.tempBranch, c.path);
       } else {
         deletePoolTempBranch(gitRoot, c.tempBranch);
@@ -1499,8 +1544,14 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
 }
 
 const DEFAULT_REAP_OLDER_THAN_HOURS = 24;
-/** Grace period between SIGTERM and SIGKILL for a `reap` kill. */
-const REAP_KILL_GRACE_MS = 5000;
+
+/** Pool entry statuses that represent active, in-progress work — never reap's concern. */
+const REAP_ACTIVE_STATUSES: ReadonlySet<WorktreeStatus> = new Set([
+  'assigned',
+  'recycling',
+  'creating',
+  'warming',
+]);
 
 export interface ReapOptions {
   /** Only kill processes at least this many hours old. Default 24. */
@@ -1578,21 +1629,25 @@ export async function reap(opts: ReapOptions = {}): Promise<ReapResult> {
   const state = readState(poolDir);
   const ctx = buildOwnershipContext(gitRoot, poolDir, state);
 
-  // Every directory name the pool can youch for: currently on-disk and
-  // pool-owned, recorded in state (even if its directory is already gone —
-  // exactly the removed-worktree case this command exists for), or matching
-  // the pool's own naming outright (covers a state row that was already
-  // dropped by an earlier `gc`, leaving only the name pattern as evidence).
-  const ownedNames = new Set<string>();
+  // Every directory name the pool can vouch for — deliberately BROADER than
+  // gc's own `ownedNames` (which only counts current on-disk, provenance-owned
+  // entries): reap's whole point is catching processes whose directory is
+  // already gone, so this also counts a state row even when its directory is
+  // gone (the removed-worktree case), and the pool's own naming pattern
+  // outright (covers a state row an earlier `gc` already dropped, leaving
+  // only the name pattern as evidence). Named distinctly from gc's set so an
+  // edit to one is never mistaken for governing the other.
+  const reapEligibleNames = new Set<string>();
   if (fs.existsSync(poolDir)) {
     for (const entry of scanPoolDir(ctx)) {
-      if (entry.owned) ownedNames.add(entry.name);
+      if (entry.owned) reapEligibleNames.add(entry.name);
     }
   }
   for (const wt of state.worktrees) {
-    ownedNames.add(wt.path);
+    reapEligibleNames.add(wt.path);
   }
-  const isOwnedName = (name: string): boolean => ownedNames.has(name) || isPoolDirName(name);
+  const isReapEligibleName = (name: string): boolean =>
+    reapEligibleNames.has(name) || isPoolDirName(name);
 
   const stateByPath = new Map(state.worktrees.map((w) => [w.path, w]));
   const registeredBranches = listWorktreeBranches(gitRoot);
@@ -1604,13 +1659,17 @@ export async function reap(opts: ReapOptions = {}): Promise<ReapResult> {
     const rootedChild = resolveRootedChild(proc, poolDir);
     if (rootedChild === null) continue;
     const name = firstSegmentUnder(poolDir, rootedChild);
-    if (name === null || !isOwnedName(name)) continue;
+    if (name === null || !isReapEligibleName(name)) continue;
 
     const absName = toAbs(poolDir, name);
     const isRegistered = registeredBranches.has(realpathOrSelf(absName));
-    const isAssigned = stateByPath.get(name)?.status === 'assigned';
-    // Active, legitimate work — never reap's concern.
-    if (isRegistered && isAssigned) continue;
+    const status = stateByPath.get(name)?.status;
+    // Active, legitimate work — never reap's concern, whether it's actually
+    // assigned to an issue or still being created/recycled/warmed by the
+    // pool itself (a `return` in progress flips to `recycling` before its
+    // own kill step runs, and warm-commands can spawn a fresh install/build
+    // partway through — reap must not race that).
+    if (isRegistered && status !== undefined && REAP_ACTIVE_STATUSES.has(status)) continue;
 
     candidates.push({ pid: proc.pid, worktree: name, command: proc.command, ageMs: proc.ageMs });
   }
@@ -1623,22 +1682,19 @@ export async function reap(opts: ReapOptions = {}): Promise<ReapResult> {
     return { candidates: toKill, killed: [], dryRun: true, aborted: false, errors };
   }
 
-  if (toKill.length > 0 && !opts.yes) {
-    const interactive = opts.interactive ?? Boolean(process.stdin.isTTY);
-    if (!interactive) {
-      console.error('\nRefusing to kill without confirmation. Re-run with --yes (or --dry-run).');
-      return { candidates: toKill, killed: [], dryRun: false, aborted: true, errors };
-    }
-    const answer = await promptUser(`\nKill ${toKill.length} process(es)? [y/N]: `);
-    if (!/^y(es)?$/i.test(answer)) {
-      console.error('Aborted — nothing was killed.');
-      return { candidates: toKill, killed: [], dryRun: false, aborted: true, errors };
-    }
+  const confirmation = await confirmOrAbort(toKill.length, 'Kill', opts);
+  if (confirmation === 'no-tty') {
+    console.error('\nRefusing to kill without confirmation. Re-run with --yes (or --dry-run).');
+    return { candidates: toKill, killed: [], dryRun: false, aborted: true, errors };
+  }
+  if (confirmation === 'declined') {
+    console.error('Aborted — nothing was killed.');
+    return { candidates: toKill, killed: [], dryRun: false, aborted: true, errors };
   }
 
   const killResult = await killProcesses(
     toKill.map((c) => ({ pid: c.pid, cwd: null, command: c.command, ageMs: c.ageMs })),
-    REAP_KILL_GRACE_MS
+    DEFAULT_KILL_GRACE_MS
   );
   errors.push(...killResult.errors);
   const killedPids = new Set(killResult.killed.map((k) => k.pid));

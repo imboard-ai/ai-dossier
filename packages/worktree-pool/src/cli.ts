@@ -15,6 +15,34 @@ import {
   returnWorktree,
   status,
 } from './pool-actions';
+import type { KilledProcess } from './process-scan';
+
+/**
+ * Print the processes a `return`/`gc` kill step killed, and any non-fatal
+ * kill failures alongside them — the one block `return`, `gc`, and a failed
+ * `return`'s error handler all need (imboard-ai/ai-dossier#760).
+ */
+function printKilledProcesses(
+  killed: KilledProcess[],
+  killErrors: string[],
+  headerIndent = '',
+  itemIndent = '  '
+): void {
+  if (killed.length > 0) {
+    console.error(`${headerIndent}Killed ${killed.length} process(es):`);
+    for (const p of killed) {
+      console.error(`${itemIndent}pid ${p.pid} (${p.signal})  ${p.command.slice(0, 80)}`);
+    }
+  }
+  if (killErrors.length > 0) {
+    console.error(
+      `${headerIndent}Kill failures (${killErrors.length}) — process may still be running:`
+    );
+    for (const e of killErrors) {
+      console.error(`${itemIndent}${e}`);
+    }
+  }
+}
 
 /**
  * Print corrupted pool directories (#443) — a directory on disk whose git
@@ -62,10 +90,10 @@ failed step, and gc clears the entry.
 recycling/removing it (a dev server, jest run, or vite server a verification
 step started and never stopped — imboard-ai/ai-dossier#760). 'reap' is the
 sweep for what escaped that: processes rooted in worktrees that are already
-gone, or in pool entries that are not 'assigned', regardless of when they were
-last touched by return/gc. It never touches a worktree the pool did not
-create, and never a currently-assigned, still-registered worktree — that is
-active work, not an orphan.`);
+gone, or in pool entries that are not actively assigned/recycling/creating/
+warming, regardless of when they were last touched by return/gc. It never
+touches a worktree the pool did not create, and never a currently-registered
+worktree in an active pool status — that is active work, not an orphan.`);
 }
 
 /** A flag is set when present as `--x` or given the literal string 'true'. */
@@ -212,12 +240,7 @@ async function main(): Promise<void> {
           console.log(JSON.stringify(returned, null, 2));
           break;
         }
-        if (returned.killedProcesses.length > 0) {
-          console.error(`Killed ${returned.killedProcesses.length} process(es) still running:`);
-          for (const p of returned.killedProcesses) {
-            console.error(`  pid ${p.pid} (${p.signal})  ${p.command.slice(0, 80)}`);
-          }
-        }
+        printKilledProcesses(returned.killedProcesses, returned.killErrors, '', '  ');
         const v = returned.verification;
         console.error('Worktree returned to pool');
         console.error('Self-check:');
@@ -261,12 +284,7 @@ async function main(): Promise<void> {
           if (result.orphanIds.length > 0) {
             console.error(`  Orphans: ${result.orphanIds.join(', ')}`);
           }
-          if (result.killedProcesses.length > 0) {
-            console.error(`  Killed ${result.killedProcesses.length} process(es):`);
-            for (const p of result.killedProcesses) {
-              console.error(`    pid ${p.pid} (${p.signal})  ${p.command.slice(0, 80)}`);
-            }
-          }
+          printKilledProcesses(result.killedProcesses, [], '  ', '    ');
         }
         if (result.errors.length > 0) {
           for (const err of result.errors) {
@@ -282,10 +300,16 @@ async function main(): Promise<void> {
       case 'reap': {
         const dryRun = boolFlag(flags['dry-run']);
         const yes = boolFlag(flags.yes) || flags.force === true;
-        const olderThanHours =
-          flags['older-than'] !== undefined
-            ? Number.parseFloat(String(flags['older-than']))
-            : undefined;
+        let olderThanHours: number | undefined;
+        if (flags['older-than'] !== undefined) {
+          olderThanHours = Number.parseFloat(String(flags['older-than']));
+          if (!Number.isFinite(olderThanHours) || olderThanHours < 0) {
+            console.error(
+              `Error: --older-than must be a non-negative number of hours, got "${flags['older-than']}"`
+            );
+            process.exit(1);
+          }
+        }
         const result = await reap({ dryRun, yes, olderThanHours });
         if (!result.dryRun && !result.aborted && result.candidates.length > 0) {
           console.error(`Killed ${result.killed.length}/${result.candidates.length} process(es):`);
@@ -330,12 +354,7 @@ async function main(): Promise<void> {
       // Say plainly what state the pool is in, so a caller cannot read a
       // non-zero exit as "nothing happened" (#453). Never assert the entry was
       // marked without knowing it was — that claim being false is the bug.
-      if (err.killedProcesses.length > 0) {
-        console.error(`Killed ${err.killedProcesses.length} process(es) before the failure:`);
-        for (const p of err.killedProcesses) {
-          console.error(`  pid ${p.pid} (${p.signal})  ${p.command.slice(0, 80)}`);
-        }
-      }
+      printKilledProcesses(err.killedProcesses, err.killErrors, '', '  ');
       if (err.entryId === null) {
         console.error('No pool entry was modified.');
       } else if (err.markError !== null) {

@@ -13,11 +13,13 @@ import * as path from 'node:path';
  * fall back to `ps`, matching only the command line — there is no
  * dependency-free way to read another process's cwd there.
  *
- * Every lookup here excludes this process and its ancestor chain
- * unconditionally: `return --path <wt>` can be invoked from a shell whose
- * own cwd is inside `<wt>`, and a pattern/path-based kill must never be able
- * to take out its own invoker (see docs/agent-traps.md's `pkill -f` row —
- * the same class of mistake, a different trigger).
+ * Every lookup here excludes this process and its ancestor chain on Linux
+ * (the `/proc` `PPid` walk): `return --path <wt>` can be invoked from a
+ * shell whose own cwd is inside `<wt>`, and a pattern/path-based kill must
+ * never be able to take out its own invoker (see docs/agent-traps.md's
+ * `pkill -f` row — the same class of mistake, a different trigger). The
+ * `ps` fallback (non-Linux) can only exclude this process itself — an
+ * ancestor's cwd/ppid is not determinable without `/proc`.
  */
 
 export interface WorktreeProcess {
@@ -42,6 +44,9 @@ export interface KillResult {
 }
 
 const HAS_PROC = process.platform === 'linux' && fs.existsSync('/proc');
+
+/** Default SIGTERM-to-SIGKILL grace period, shared by every caller (return/gc/reap). */
+export const DEFAULT_KILL_GRACE_MS = 5000;
 
 function readCmdline(pid: number): string | null {
   try {
@@ -132,15 +137,41 @@ function isUnder(childAbs: string, rootAbs: string): boolean {
 }
 
 /**
+ * True when `root` appears in `command` at a real path boundary — as the
+ * whole string, or followed by a path separator, whitespace, or a quote —
+ * never as a bare substring. Pool worktree directory names are
+ * `pool-<timestamp>-<pid>` (see `pool-state.ts`'s `POOL_DIR_NAME_PATTERN`),
+ * so a same-batch replenish routinely produces siblings that share a long
+ * numeric prefix (`pool-1700000000-1234` vs `pool-1700000000-12345`) — an
+ * unbounded `String.includes` would treat one worktree's root as a
+ * substring of the sibling's cwd/argv and kill a process that is not
+ * actually rooted there. `isUnder` already gets this right for cwd
+ * comparisons via `path.relative`; this is the same guarantee for the
+ * command-line fallback.
+ */
+function commandRootedAt(command: string, root: string): boolean {
+  let from = 0;
+  for (;;) {
+    const idx = command.indexOf(root, from);
+    if (idx === -1) return false;
+    const after = command[idx + root.length];
+    if (after === undefined || after === path.sep || /[\s"'`]/.test(after)) return true;
+    from = idx + 1;
+  }
+}
+
+/**
  * Non-Linux fallback: `ps` gives pid + command only, no reliable cwd. A
- * process is "rooted" here only when the absolute root path appears
- * verbatim in its command line.
+ * process is "rooted" here only when the absolute root path appears, at a
+ * real path boundary, in its command line.
  */
 function findViaPs(rootAbsPath: string): WorktreeProcess[] {
   let out: string;
   try {
     out = execFileSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf-8' });
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Warning: process discovery via 'ps' failed (${msg}) — nothing will be found`);
     return [];
   }
   const self = selfAndAncestorPids();
@@ -153,7 +184,7 @@ function findViaPs(rootAbsPath: string): WorktreeProcess[] {
     const pid = Number.parseInt(match[1], 10);
     if (self.has(pid)) continue;
     const command = match[2];
-    if (command.includes(rootAbsPath)) {
+    if (commandRootedAt(command, rootAbsPath)) {
       results.push({ pid, cwd: null, command, ageMs: null });
     }
   }
@@ -176,7 +207,7 @@ export function findWorktreeProcesses(rootAbsPath: string): WorktreeProcess[] {
     const cwd = readCwd(pid);
     const command = readCmdline(pid);
     const cwdMatches = cwd !== null && isUnder(cwd, root);
-    const cmdMatches = !cwdMatches && command !== null && command.includes(root);
+    const cmdMatches = !cwdMatches && command !== null && commandRootedAt(command, root);
     if (!cwdMatches && !cmdMatches) continue;
     results.push({
       pid,
@@ -238,7 +269,7 @@ function sleep(ms: number): Promise<void> {
  */
 export async function killProcesses(
   targets: WorktreeProcess[],
-  graceMs = 5000
+  graceMs = DEFAULT_KILL_GRACE_MS
 ): Promise<KillResult> {
   const killed: KilledProcess[] = [];
   const errors: string[] = [];
@@ -281,7 +312,7 @@ export async function killProcesses(
 /** {@link findWorktreeProcesses} + {@link killProcesses} for a single worktree path. */
 export async function killWorktreeProcesses(
   rootAbsPath: string,
-  graceMs = 5000
+  graceMs = DEFAULT_KILL_GRACE_MS
 ): Promise<KillResult> {
   return killProcesses(findWorktreeProcesses(rootAbsPath), graceMs);
 }

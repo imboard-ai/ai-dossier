@@ -97,8 +97,8 @@ A dev server, jest run, or vite server started inside a worktree by a verificati
         node /repo/../worktrees/bug-701-fix-something/node_modules/.bin/vite
   ```
 
-  `reap` never touches a worktree the pool did not create (the same [ownership rule](#sharing-the-pool-directory) `gc` uses), and never a currently-assigned, still-registered worktree — that is active work, not an orphan. Run it on a schedule (a host cron/timer calling `reap --older-than 24 --yes`), not per-issue; `return`/`gc` already handle the common case at the moment a worktree changes hands.
-- Both the Linux discovery path (`/proc/*/cwd` + `/proc/*/cmdline`) and its `ps`-based fallback elsewhere always exclude the invoking process and its whole parent chain, so running `return --path <wt>` from a shell whose own cwd is inside `<wt>` cannot kill its own invoker.
+  `reap` never touches a worktree the pool did not create (the same [ownership rule](#sharing-the-pool-directory) `gc` uses), and never a currently-registered worktree in an active pool status (`assigned`, `recycling`, `creating`, `warming`) — that is active work, not an orphan, and includes a `return` that is mid-flight but has not reached its own kill step yet. Run it on a schedule (a host cron/timer calling `reap --older-than 24 --yes`), not per-issue; `return`/`gc` already handle the common case at the moment a worktree changes hands.
+- The Linux discovery path (`/proc/*/cwd` + `/proc/*/cmdline`) always excludes the invoking process and its whole parent chain, so running `return --path <wt>` from a shell whose own cwd is inside `<wt>` cannot kill its own invoker. The `ps`-based fallback (non-Linux) can only exclude the invoking process itself — an ancestor's cwd/ppid is not determinable without `/proc`.
 
 ### Pool State
 
@@ -248,16 +248,28 @@ import { returnWorktree, ReturnFailure } from '@ai-dossier/worktree-pool';
 
 try {
   const result = await returnWorktree(worktreePath);
-  // result.id, result.path, result.verification, result.killedProcesses
+  // result.id, result.path, result.verification, result.killedProcesses, result.killErrors
 } catch (err) {
   if (err instanceof ReturnFailure) {
-    // err.step (a ReturnStep), err.entryId, err.worktreePath, err.killedProcesses
+    // err.step (a ReturnStep), err.entryId, err.worktreePath, err.killedProcesses, err.killErrors
     // The entry is 'broken' and the directory was NOT destroyed — unless
     // err.markError is non-null, which means the marking write itself failed
     // and pool state should be re-checked before the next claim.
   }
 }
 ```
+
+`reap` is the same shape, without the try/catch — it never throws:
+
+```ts
+import { reap } from '@ai-dossier/worktree-pool';
+
+const result = await reap({ olderThanHours: 24, dryRun: true });
+// result.candidates (what matched the age threshold), result.killed (empty on a dry run),
+// result.aborted (confirmation missing / declined), result.errors
+```
+
+The lower-level primitives `return`/`gc`/`reap` are built on — `findWorktreeProcesses`, `killProcesses`, `killWorktreeProcesses` — are also exported, for a caller that wants process discovery/kill on its own terms.
 
 ## Configuration
 
