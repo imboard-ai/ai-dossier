@@ -274,10 +274,11 @@ An evidence sidecar (`<name>.evidence.json`) records, per rule or section of a d
 # Create a fresh sidecar for a dossier
 ai-dossier evidence init my-dossier.ds.md
 
-# Append an entry (session id from AI_DOSSIER_SESSION_ID if --session is omitted)
+# Append an entry — --session defaults on its own: AI_DOSSIER_SESSION_ID, else (for
+# provider claude-code) the newest transcript under ~/.claude/projects/. It must be a
+# real session UUID for claude-code; a placeholder-looking value is rejected, not recorded.
 ai-dossier evidence add my-dossier.ds.md \
-  --anchor "Guiding Principle" --rationale "Autonomous runs must never block on a reply" \
-  --session abc-123
+  --anchor "Guiding Principle" --rationale "Autonomous runs must never block on a reply"
 
 # Refresh dossier/version/checksum after re-signing the dossier (namespace preserved
 # unless --namespace is given, which rewrites it in place — e.g. after a mis-stamp)
