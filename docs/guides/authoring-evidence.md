@@ -1,6 +1,6 @@
 # Authoring Evidence
 
-**Last Updated**: 2026-09-15
+**Last Updated**: 2026-09-17
 **Status**: Active — shipped in `@ai-dossier/core`, the registry, and `@ai-dossier/cli` (`evidence` command group)
 
 ---
@@ -95,7 +95,6 @@ cp <name>.ds.md <name>.ds.md.bak   # optional, if you want a pre-edit copy
 ai-dossier evidence add <name>.ds.md \
   --anchor "<heading or rule as written in the body>" \
   --rationale "<one or two sentences: what failed / what this prevents>" \
-  --session "$(ls -t ~/.claude/projects/*/*.jsonl | head -1 | xargs -n1 basename | sed 's/\.jsonl$//')" \
   --namespace <namespace>
 # repeat evidence add, once per rule/section you changed
 ai-dossier sign <name>.ds.md --key ~/.dossier/<org>.pem --key-id <org>
@@ -126,10 +125,33 @@ stamped with the wrong namespace has an in-place fix: re-run
 
 ## 5. Finding the session ID
 
-For Claude Code, the session UUID is the filename of the newest `*.jsonl`
-file under `~/.claude/projects/<project-slug>/` (the project slug is your
-working directory path with `/` replaced by `-`). One-liner to print the
-newest session id for the current project:
+`evidence add` resolves `--session` for you — you rarely need to pass it
+by hand. Resolution order: the explicit `--session` flag; the
+`AI_DOSSIER_SESSION_ID` environment variable; and, for the default
+provider `claude-code`, the newest `*.jsonl` transcript under
+`~/.claude/projects/<project-slug>/` (the project slug is your working
+directory path with `/` replaced by `-`), falling back to the newest
+transcript under *any* project directory modified in the last hour (covers
+a worktree whose cwd doesn't match the slug Claude Code actually wrote
+under). When it defaults the value, `evidence add` prints which source it
+used, e.g. `session=5a718af0-4e3c-4d6b-a7e1-e73bd3358ab4 (from newest
+transcript)` — check that line before trusting the recorded pointer.
+
+**Validation.** For provider `claude-code`, the resolved (or explicit)
+`--session` must be a session UUID
+(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`); a value
+that doesn't match — including a placeholder like `claude-session-fc749`
+copied from an example — is rejected rather than silently recorded (#750:
+a placeholder ref recorded in a real sidecar defeats the sidecar's whole
+purpose, since it resolves to nothing). Other providers require at least 8
+characters and reject values that look like placeholders
+(`placeholder`, `session-fc`, `example`, `todo`, `xxx`, case-insensitive).
+Pass `--force-session` to bypass the check for a provider whose session
+ids are genuinely not UUIDs and happen to trip the placeholder heuristic.
+
+If you need the session UUID for something other than `evidence add`
+(e.g. cross-referencing a transcript by hand), the same one-liner still
+works:
 
 ```bash
 ls -t ~/.claude/projects/*/*.jsonl | head -1 | xargs -n1 basename | sed 's/\.jsonl$//'
@@ -140,11 +162,16 @@ field of the relevant line inside that JSONL file — the specific message
 or tool call where the decision was actually made, if you want to point
 more precisely than "somewhere in this session".
 
-Two other ways a session ID can reach you without hand-copying it: a hook
-receives `session_id` on stdin (useful for a `PostToolUse`/`Stop` hook
-that auto-records evidence), and a dispatch wrapper may export
-`AI_DOSSIER_SESSION_ID` into the environment, which `evidence add --session`
-reads as its default when `--session` is omitted.
+A hook is a third way a session ID can reach you without hand-copying it:
+it receives `session_id` on stdin (useful for a `PostToolUse`/`Stop` hook
+that auto-records evidence), which a dispatch wrapper can export as
+`AI_DOSSIER_SESSION_ID` into the environment — the second entry in
+`evidence add`'s resolution order above.
+
+`evidence add` also warns (without failing) when `--rationale` starts with
+an imperative instruction verb (`cite `, `record `, `add `, `write `) —
+that pattern usually means the agent pasted the instruction it was given
+instead of writing the actual reason in its own words.
 
 ## 6. Optional tools
 
@@ -192,8 +219,9 @@ plus the one-line addition to Step 3 itself.
 
 ai-dossier evidence add <name>.ds.md \
   --anchor "<heading or rule as written in the body>" \
-  --rationale "<one or two sentences: what failed / what this prevents>" \
-  --session "$(ls -t ~/.claude/projects/*/*.jsonl | head -1 | xargs -n1 basename | sed 's/\.jsonl$//')"
+  --rationale "<one or two sentences: what failed / what this prevents>"
+
+`--session` defaults on its own for a Claude Code session (from `AI_DOSSIER_SESSION_ID`, else the newest transcript under `~/.claude/projects/`) — check the printed `session=<uuid> (from ...)` line, and pass `--session` explicitly only when the default is wrong. A placeholder-looking value (e.g. `claude-session-fc749`) is rejected, not silently recorded.
 
 Skip only when the change is cosmetic. The sidecar `<name>.evidence.json` is published next to the dossier by `ai-dossier publish`; it is never loaded on `run`.
 ```

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { createEvidenceRecord, parseDossierContent, sha256Hex } from '@ai-dossier/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerEvidenceCommand } from '../../commands/evidence';
@@ -32,6 +33,9 @@ const existingRecord = createEvidenceRecord({
   version: '1.0.0',
   checksumHash: dossierChecksum,
 });
+
+/** A well-formed Claude Code session UUID, for tests exercising the default `claude-code` provider. */
+const VALID_SESSION = '5a718af0-4e3c-4d6b-a7e1-e73bd3358ab4';
 
 /** Wire fs mocks for an `evidence sync` test: `sidecarRecord` sits beside `dossierWithChecksum`. */
 function mockSyncFixture(sidecarRecord: ReturnType<typeof createEvidenceRecord>): void {
@@ -229,7 +233,7 @@ describe('evidence command', () => {
         '--rationale',
         'Because X',
         '--session',
-        'sess-1',
+        VALID_SESSION,
       ]);
 
       expect(console.log).toHaveBeenCalledWith(
@@ -241,7 +245,7 @@ describe('evidence command', () => {
       expect(written.entries).toHaveLength(1);
       expect(written.entries[0].evidence[0].provider).toBe('claude-code');
       expect(written.entries[0].evidence[0].host).toBe(os.hostname());
-      expect(written.entries[0].evidence[0].session).toBe('sess-1');
+      expect(written.entries[0].evidence[0].session).toBe(VALID_SESSION);
     });
 
     it('should error without --session and without AI_DOSSIER_SESSION_ID', async () => {
@@ -271,8 +275,8 @@ describe('evidence command', () => {
       expect(console.error).toHaveBeenCalledWith(expect.stringContaining('--session required'));
     });
 
-    it('should respect AI_DOSSIER_SESSION_ID when --session is absent', async () => {
-      process.env.AI_DOSSIER_SESSION_ID = 'env-session';
+    it('should default --session from AI_DOSSIER_SESSION_ID when the flag is absent', async () => {
+      process.env.AI_DOSSIER_SESSION_ID = VALID_SESSION;
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockImplementation(((p: unknown) =>
         String(p).endsWith('.evidence.json')
@@ -294,9 +298,204 @@ describe('evidence command', () => {
       ]);
 
       const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
-      expect(written.entries[0].evidence[0].session).toBe('env-session');
+      expect(written.entries[0].evidence[0].session).toBe(VALID_SESSION);
+      expect(console.log).toHaveBeenCalledWith(
+        `session=${VALID_SESSION} (from AI_DOSSIER_SESSION_ID)`
+      );
 
       delete process.env.AI_DOSSIER_SESSION_ID;
+    });
+
+    it('should default --session from the newest transcript for provider claude-code', async () => {
+      const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+      const slug = process.cwd().replace(/\//g, '-');
+      const projectDir = path.join(projectsDir, slug);
+
+      mockedFs.existsSync.mockImplementation(((p: unknown) => {
+        const s = String(p);
+        if (s.endsWith('.ds.md')) return true;
+        if (s.endsWith('.evidence.json')) return false;
+        return s === projectsDir || s === projectDir;
+      }) as typeof fs.existsSync);
+      mockedFs.readFileSync.mockReturnValue(dossierWithChecksum);
+      mockedFs.readdirSync.mockImplementation(((p: unknown) => {
+        if (String(p) === projectDir) return ['older-session.jsonl', `${VALID_SESSION}.jsonl`];
+        return [];
+      }) as unknown as typeof fs.readdirSync);
+      mockedFs.statSync.mockImplementation(((p: unknown) => {
+        const mtimeMs = String(p).includes(VALID_SESSION) ? 2000 : 1000;
+        return { mtimeMs } as fs.Stats;
+      }) as typeof fs.statSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'add',
+        'test.ds.md',
+        '--anchor',
+        'A',
+        '--rationale',
+        'B',
+      ]);
+
+      const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+      expect(written.entries[0].evidence[0].session).toBe(VALID_SESSION);
+      expect(console.log).toHaveBeenCalledWith(`session=${VALID_SESSION} (from newest transcript)`);
+    });
+
+    it('should reject a placeholder session id for provider claude-code', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? JSON.stringify(existingRecord)
+          : dossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'evidence',
+          'add',
+          'test.ds.md',
+          '--anchor',
+          'A',
+          '--rationale',
+          'B',
+          '--session',
+          'claude-session-fc749',
+        ])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '--session must be the Claude Code session UUID (the transcript filename under ~/.claude/projects); got "claude-session-fc749"'
+        )
+      );
+      expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should reject a placeholder session id for a non-claude-code provider', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? JSON.stringify(existingRecord)
+          : dossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'evidence',
+          'add',
+          'test.ds.md',
+          '--anchor',
+          'A',
+          '--rationale',
+          'B',
+          '--provider',
+          'codex',
+          '--session',
+          'example-session',
+        ])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('--session looks like a placeholder')
+      );
+      expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should bypass session validation with --force-session', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? JSON.stringify(existingRecord)
+          : dossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'add',
+        'test.ds.md',
+        '--anchor',
+        'A',
+        '--rationale',
+        'B',
+        '--session',
+        'claude-session-fc749',
+        '--force-session',
+      ]);
+
+      const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+      expect(written.entries[0].evidence[0].session).toBe('claude-session-fc749');
+    });
+
+    it('should warn (not fail) when --rationale starts with an imperative instruction verb', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? JSON.stringify(existingRecord)
+          : dossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'add',
+        'test.ds.md',
+        '--anchor',
+        'A',
+        '--rationale',
+        'Record evidence for every rule you changed',
+        '--session',
+        VALID_SESSION,
+      ]);
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('looks like copied instruction text')
+      );
+      // The warning does not block the write.
+      expect(mockedFs.writeFileSync).toHaveBeenCalled();
+    });
+
+    it('should not warn when --rationale is not an imperative instruction', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? JSON.stringify(existingRecord)
+          : dossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'add',
+        'test.ds.md',
+        '--anchor',
+        'A',
+        '--rationale',
+        'The placeholder session defeated the sidecar; this fixes it.',
+        '--session',
+        VALID_SESSION,
+      ]);
+
+      expect(console.error).not.toHaveBeenCalled();
     });
 
     it('should land --extra k=v pairs in extra', async () => {
@@ -319,7 +518,7 @@ describe('evidence command', () => {
         '--rationale',
         'B',
         '--session',
-        'sess-1',
+        VALID_SESSION,
         '--extra',
         'ctx=abc123',
       ]);
@@ -347,7 +546,7 @@ describe('evidence command', () => {
         '--rationale',
         'B',
         '--session',
-        'sess-1',
+        VALID_SESSION,
       ]);
 
       const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
@@ -374,7 +573,7 @@ describe('evidence command', () => {
         '--rationale',
         'B',
         '--session',
-        'sess-1',
+        VALID_SESSION,
       ]);
 
       const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
@@ -410,7 +609,7 @@ describe('evidence command', () => {
         '--rationale',
         'B',
         '--session',
-        'sess-1',
+        VALID_SESSION,
       ]);
 
       const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
