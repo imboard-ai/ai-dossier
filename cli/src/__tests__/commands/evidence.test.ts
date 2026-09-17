@@ -300,7 +300,7 @@ describe('evidence command', () => {
       const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
       expect(written.entries[0].evidence[0].session).toBe(VALID_SESSION);
       expect(console.log).toHaveBeenCalledWith(
-        `session=${VALID_SESSION} (from AI_DOSSIER_SESSION_ID)`
+        `ℹ️  session=${VALID_SESSION} (from AI_DOSSIER_SESSION_ID)`
       );
 
       delete process.env.AI_DOSSIER_SESSION_ID;
@@ -343,7 +343,114 @@ describe('evidence command', () => {
 
       const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
       expect(written.entries[0].evidence[0].session).toBe(VALID_SESSION);
-      expect(console.log).toHaveBeenCalledWith(`session=${VALID_SESSION} (from newest transcript)`);
+      expect(console.log).toHaveBeenCalledWith(
+        `ℹ️  session=${VALID_SESSION} (from newest transcript)`
+      );
+    });
+
+    it('should default --session from the cross-project fallback and label it distinctly', async () => {
+      const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+      const primaryDir = path.join(projectsDir, process.cwd().replace(/\//g, '-'));
+      const otherDir = path.join(projectsDir, 'some-other-project');
+
+      mockedFs.existsSync.mockImplementation(((p: unknown) => {
+        const s = String(p);
+        if (s.endsWith('.ds.md')) return true;
+        if (s.endsWith('.evidence.json')) return false;
+        return s === projectsDir || s === otherDir;
+      }) as typeof fs.existsSync);
+      mockedFs.readFileSync.mockReturnValue(dossierWithChecksum);
+      mockedFs.readdirSync.mockImplementation(((p: unknown) => {
+        if (String(p) === primaryDir) return []; // nothing for this cwd's own project dir
+        if (String(p) === projectsDir) return ['some-other-project'];
+        if (String(p) === otherDir) return [`${VALID_SESSION}.jsonl`];
+        return [];
+      }) as unknown as typeof fs.readdirSync);
+      mockedFs.statSync.mockReturnValue({ mtimeMs: Date.now() } as fs.Stats);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'add',
+        'test.ds.md',
+        '--anchor',
+        'A',
+        '--rationale',
+        'B',
+      ]);
+
+      const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+      expect(written.entries[0].evidence[0].session).toBe(VALID_SESSION);
+      expect(console.log).toHaveBeenCalledWith(
+        `ℹ️  session=${VALID_SESSION} (from newest transcript — ${otherDir}, not this project's dir; pass --session explicitly if wrong)`
+      );
+    });
+
+    it('should hint at the transcript search paths when --session cannot be resolved at all', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? JSON.stringify(existingRecord)
+          : dossierWithChecksum) as typeof fs.readFileSync);
+      mockedFs.readdirSync.mockReturnValue([] as unknown as ReturnType<typeof fs.readdirSync>);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'evidence',
+          'add',
+          'test.ds.md',
+          '--anchor',
+          'A',
+          '--rationale',
+          'B',
+        ])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('looked for a transcript under ~/.claude/projects/')
+      );
+    });
+
+    it('should reject a short non-placeholder session id for a non-claude-code provider', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? JSON.stringify(existingRecord)
+          : dossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'evidence',
+          'add',
+          'test.ds.md',
+          '--anchor',
+          'A',
+          '--rationale',
+          'B',
+          '--provider',
+          'codex',
+          '--session',
+          'abc123',
+        ])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('--session looks like a placeholder')
+      );
+      expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
     });
 
     it('should reject a placeholder session id for provider claude-code', async () => {
