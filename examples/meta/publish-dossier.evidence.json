@@ -1,0 +1,71 @@
+{
+  "evidence_schema_version": "1.0.0",
+  "dossier": "imboard-ai/meta/publish-dossier",
+  "version": "1.1.3",
+  "checksum": {
+    "algorithm": "sha256",
+    "hash": "88448b38d34f58c38df5b6a8d8890463b58923d29a1292b461e415f0768e3ff5"
+  },
+  "entries": [
+    {
+      "anchor": "Step 2b: Record evidence for every rule you changed",
+      "rationale": "Issue #736: the authoring flow had no step producing evidence, so per-rule rationale + session pointers were never attached to a published dossier. Inserted between Edit and Sign so evidence is recorded before the checksum it must match is finalized.",
+      "created_at": "2026-09-15T11:45:43.480Z",
+      "evidence": [
+        {
+          "provider": "claude-code",
+          "session": "73ca020f-8e89-40e4-bc85-d6e511f5fc45",
+          "host": "hcc2"
+        }
+      ]
+    },
+    {
+      "anchor": "Step 3: Sign, lint, verify — in this order, signing last",
+      "rationale": "sign regenerates the dossier checksum; evidence sync must run after sign so the sidecar's recorded checksum matches the just-signed dossier, otherwise publish rejects it with EVIDENCE_MISMATCH.",
+      "created_at": "2026-09-15T11:45:44.195Z",
+      "evidence": [
+        {
+          "provider": "claude-code",
+          "session": "73ca020f-8e89-40e4-bc85-d6e511f5fc45",
+          "host": "hcc2"
+        }
+      ]
+    },
+    {
+      "anchor": "Step 2b: Record evidence for every rule you changed",
+      "rationale": "ai-dossier evidence add/init (cli 0.48.0, ai-dossier#743) now compute a missing checksum from the body themselves, so the checksum --update workaround between publish-dossier's Step 2 (deletes checksum) and Step 3 (sign restores it) is no longer needed.",
+      "created_at": "2026-09-15T22:05:06.131Z",
+      "evidence": [
+        {
+          "provider": "claude-code",
+          "session": "4e15a017-3cce-45b9-a19a-558ade4e693a",
+          "host": "hcc2"
+        }
+      ]
+    },
+    {
+      "anchor": "Step 5: Refresh every machine",
+      "rationale": "occ decommissioned 2026-09-09; refresh-fleet.sh is the canonical refresh; cite ai-dossier#749",
+      "created_at": "2026-09-16T22:43:53.911Z",
+      "evidence": [
+        {
+          "provider": "claude-code",
+          "session": "claude-session-fc749",
+          "host": "hcc2"
+        }
+      ]
+    },
+    {
+      "anchor": "Step 2b: Record evidence for every rule you changed",
+      "rationale": "Dropped the manual --session incantation since ai-dossier#750 made evidence add default and validate the session id on its own, and a copied incantation was exactly how a placeholder session (claude-session-fc749) got recorded in the publish-dossier@1.1.2 sidecar in the first place (ai-dossier#749).",
+      "created_at": "2026-09-17T06:49:54.159Z",
+      "evidence": [
+        {
+          "provider": "claude-code",
+          "session": "4e15a017-3cce-45b9-a19a-558ade4e693a",
+          "host": "hcc2"
+        }
+      ]
+    }
+  ]
+}

@@ -4,9 +4,9 @@
   "protocol_version": "1.0",
   "name": "publish-dossier",
   "title": "Publish an imboard-ai Dossier or Skill",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "status": "Stable",
-  "last_updated": "2026-09-16",
+  "last_updated": "2026-09-17",
   "objective": "Edit, sign with the team key, lint, verify and publish a dossier or skill to the imboard-ai registry namespace, then refresh every machine — the exact recipe, so no agent rediscovers the signing and login walls",
   "category": [
     "development",
@@ -79,13 +79,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "313e42ec95c2c0dc2d7a825694c5b4d0395008b1a47832070735b3fe0b877c39"
+    "hash": "88448b38d34f58c38df5b6a8d8890463b58923d29a1292b461e415f0768e3ff5"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "Pc9tjEfG1M1wB+rbp4dV7T/583qWgV+sHSfZHIhHuscF16CC4jYfdjrNXtx8yKe1qyXs4HBo73RZ36nA1BH4BA==",
+    "signature": "Uc0BIVX52CC0vppxMctWNZrEM0hLU9CHWAFl8hrs8StGirTiRopJGBy6qf8Rs0CAhFiNov7xWbIPkuWD0F5aDw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-16T22:43:58.841Z",
+    "signed_at": "2026-09-17T06:50:10.956Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -136,9 +136,10 @@ For a **new** dossier start from `ai-dossier create` or the `imboard-ai/meta/cre
 ```bash
 ai-dossier evidence add <name>.ds.md \
   --anchor "<heading or rule as written in the body>" \
-  --rationale "<one or two sentences: what failed / what this prevents>" \
-  --session "$(ls -t ~/.claude/projects/*/*.jsonl | head -1 | xargs -n1 basename | sed 's/\.jsonl$//')"
+  --rationale "<one or two sentences: what failed / what this prevents>"
 ```
+
+`--session` no longer needs a manual incantation: `evidence add` (cli >= 0.49.0) defaults it on its own — `AI_DOSSIER_SESSION_ID`, else the newest transcript under `~/.claude/projects/` for provider `claude-code` — and prints which source it used. A placeholder-looking value (e.g. a copied example) is rejected, not silently recorded (ai-dossier#750); pass `--session` explicitly only when the default picks the wrong one.
 
 Skip only when the change is cosmetic. The sidecar `<name>.evidence.json` is published next to the dossier by `ai-dossier publish`; it is never loaded on `run`. See `docs/guides/authoring-evidence.md` for the full record format and workflow.
 
