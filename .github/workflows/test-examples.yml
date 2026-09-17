@@ -60,9 +60,11 @@ jobs:
         run: bash scripts/test-examples.sh
 
   refresh-examples-snapshot:
-    # examples/git/*.ds.md is a hand-copied snapshot of the published
-    # imboard-ai/git/* dossier family and drifts within days (#441). This job
-    # re-pulls the latest published version of everything already snapshotted,
+    # examples/git/*.ds.md and examples/meta/*.ds.md are hand-copied snapshots
+    # of published dossier families and drift within days (#441; #749 added
+    # the meta/ mirror, #751 brought it under this same job instead of
+    # leaving it to drift silently). This job re-pulls the latest published
+    # version of everything already snapshotted in every configured family,
     # validates the refreshed set with the same script the test-examples job
     # uses, and opens (or updates) a single PR only when something changed —
     # never on the regular push/pull_request/workflow_dispatch triggers, only
@@ -90,7 +92,7 @@ jobs:
       - name: Build
         run: make build-all
 
-      - name: Pull latest dossiers and refresh examples/git
+      - name: Pull latest dossiers and refresh examples/git + examples/meta
         id: refresh
         run: node scripts/refresh-examples-snapshot.mjs
 
@@ -117,7 +119,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git checkout -B "$BRANCH"
-          git add examples/git
+          git add examples/git examples/meta
           git commit -m "${{ steps.refresh.outputs.pr_title }}"
           git push -u origin "$BRANCH" --force
 

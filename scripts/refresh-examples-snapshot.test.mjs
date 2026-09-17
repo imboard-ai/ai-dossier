@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -8,30 +8,75 @@ import {
   DOSSIER_PREFIX,
   dossierNameFromFile,
   extractVersion,
+  FAMILIES,
+  familyShortName,
   main,
   PR_TITLE,
   parsePulledVersion,
   RefreshError,
+  selectFamilies,
 } from './refresh-examples-snapshot.mjs';
+
+const META_PREFIX = 'imboard-ai/meta';
 
 function dossierContent(version, extra = '{}') {
   return `---dossier\n{\n  "name": "sample",\n  "version": "${version}",\n  "extra": ${JSON.stringify(extra)}\n}\n---\n\n# Sample\n`;
 }
 
 describe('dossierNameFromFile', () => {
-  it('maps a .ds.md filename onto imboard-ai/git/<slug>', () => {
-    expect(dossierNameFromFile('full-cycle-issue.ds.md')).toBe(
+  it('maps a .ds.md filename onto <prefix>/<slug> for the given family prefix', () => {
+    expect(dossierNameFromFile('full-cycle-issue.ds.md', DOSSIER_PREFIX)).toBe(
       `${DOSSIER_PREFIX}/full-cycle-issue`
     );
-    expect(dossierNameFromFile('gate-issue.ds.md')).toBe(`${DOSSIER_PREFIX}/gate-issue`);
+    expect(dossierNameFromFile('gate-issue.ds.md', DOSSIER_PREFIX)).toBe(
+      `${DOSSIER_PREFIX}/gate-issue`
+    );
+  });
+
+  it('uses whichever prefix is passed, not a hardcoded one (#751)', () => {
+    expect(dossierNameFromFile('publish-dossier.ds.md', META_PREFIX)).toBe(
+      `${META_PREFIX}/publish-dossier`
+    );
   });
 
   it('rejects a filename without the .ds.md extension', () => {
-    expect(() => dossierNameFromFile('full-cycle-issue.md')).toThrow(RefreshError);
+    expect(() => dossierNameFromFile('full-cycle-issue.md', DOSSIER_PREFIX)).toThrow(RefreshError);
   });
 
   it('rejects a filename that is only the extension', () => {
-    expect(() => dossierNameFromFile('.ds.md')).toThrow(RefreshError);
+    expect(() => dossierNameFromFile('.ds.md', DOSSIER_PREFIX)).toThrow(RefreshError);
+  });
+});
+
+describe('FAMILIES', () => {
+  it('covers both the git and meta example mirrors (#751)', () => {
+    expect(FAMILIES).toEqual([
+      { prefix: 'imboard-ai/git', dir: 'examples/git' },
+      { prefix: 'imboard-ai/meta', dir: 'examples/meta' },
+    ]);
+  });
+});
+
+describe('familyShortName', () => {
+  it('returns the last segment of a registry prefix', () => {
+    expect(familyShortName('imboard-ai/git')).toBe('git');
+    expect(familyShortName('imboard-ai/meta')).toBe('meta');
+  });
+});
+
+describe('selectFamilies', () => {
+  it('returns every family when no name is given', () => {
+    expect(selectFamilies(FAMILIES, null)).toBe(FAMILIES);
+  });
+
+  it('filters to the one family matching --family <name>', () => {
+    expect(selectFamilies(FAMILIES, 'meta')).toEqual([
+      { prefix: 'imboard-ai/meta', dir: 'examples/meta' },
+    ]);
+  });
+
+  it('throws on an unknown family name, listing the known ones', () => {
+    expect(() => selectFamilies(FAMILIES, 'nope')).toThrow(/unknown family 'nope'.*git, meta/);
   });
 });
 
@@ -117,10 +162,12 @@ describe('PR_TITLE', () => {
 describe('main (orchestration, with a stubbed pull)', () => {
   let repoRoot;
   let examplesDir;
+  let families;
 
   beforeEach(() => {
     repoRoot = mkdtempSync(join(tmpdir(), 'refresh-examples-main-'));
     examplesDir = 'examples/git';
+    families = [{ prefix: DOSSIER_PREFIX, dir: examplesDir }];
     mkdirSync(join(repoRoot, examplesDir), { recursive: true });
   });
 
@@ -128,8 +175,9 @@ describe('main (orchestration, with a stubbed pull)', () => {
     rmSync(repoRoot, { recursive: true, force: true });
   });
 
-  function writeExample(slug, version) {
-    writeFileSync(join(repoRoot, examplesDir, `${slug}.ds.md`), dossierContent(version));
+  function writeExample(slug, version, dir = examplesDir) {
+    mkdirSync(join(repoRoot, dir), { recursive: true });
+    writeFileSync(join(repoRoot, dir, `${slug}.ds.md`), dossierContent(version));
   }
 
   it('reports changed=true and writes an old->new PR body when a version moved', () => {
@@ -137,7 +185,7 @@ describe('main (orchestration, with a stubbed pull)', () => {
     const prBodyOut = join(repoRoot, 'pr-body.md');
 
     const result = main({
-      examplesDir,
+      families,
       cliPath: 'cli/dist/cli.js',
       repoRoot,
       prBodyOut,
@@ -156,7 +204,7 @@ describe('main (orchestration, with a stubbed pull)', () => {
     const prBodyOut = join(repoRoot, 'pr-body.md');
 
     const result = main({
-      examplesDir,
+      families,
       cliPath: 'cli/dist/cli.js',
       repoRoot,
       prBodyOut,
@@ -173,7 +221,7 @@ describe('main (orchestration, with a stubbed pull)', () => {
     const prBodyOut = join(repoRoot, 'pr-body.md');
 
     const result = main({
-      examplesDir,
+      families,
       cliPath: 'cli/dist/cli.js',
       repoRoot,
       prBodyOut,
@@ -188,7 +236,7 @@ describe('main (orchestration, with a stubbed pull)', () => {
     const prBodyOut = join(repoRoot, 'pr-body.md');
     expect(() =>
       main({
-        examplesDir,
+        families,
         cliPath: 'cli/dist/cli.js',
         repoRoot,
         prBodyOut,
@@ -205,7 +253,7 @@ describe('main (orchestration, with a stubbed pull)', () => {
 
     expect(() =>
       main({
-        examplesDir,
+        families,
         cliPath: 'cli/dist/cli.js',
         repoRoot,
         prBodyOut,
@@ -218,5 +266,78 @@ describe('main (orchestration, with a stubbed pull)', () => {
         log: () => {},
       })
     ).toThrow(RefreshError);
+  });
+
+  it('drives both directories independently from one family list (#751)', () => {
+    const metaDir = 'examples/meta';
+    writeExample('full-cycle-issue', '3.6.1', examplesDir);
+    writeExample('publish-dossier', '1.1.2', metaDir);
+    const twoFamilies = [
+      { prefix: DOSSIER_PREFIX, dir: examplesDir },
+      { prefix: META_PREFIX, dir: metaDir },
+    ];
+    const prBodyOut = join(repoRoot, 'pr-body.md');
+
+    const result = main({
+      families: twoFamilies,
+      cliPath: 'cli/dist/cli.js',
+      repoRoot,
+      prBodyOut,
+      // Only the meta dossier moved; the git one is pulled back unchanged.
+      pull: ({ name }) =>
+        name === `${META_PREFIX}/publish-dossier`
+          ? { version: '1.1.3', content: dossierContent('1.1.3') }
+          : { version: '3.6.1', content: dossierContent('3.6.1') },
+      log: () => {},
+    });
+
+    expect(result.changed).toBe(true);
+    expect(result.changes).toEqual([
+      { name: `${META_PREFIX}/publish-dossier`, oldVersion: '1.1.2', newVersion: '1.1.3' },
+    ]);
+    expect(result.families).toEqual([
+      { prefix: DOSSIER_PREFIX, dir: examplesDir, fileCount: 1, changedCount: 0 },
+      { prefix: META_PREFIX, dir: metaDir, fileCount: 1, changedCount: 1 },
+    ]);
+  });
+
+  it('--check detects drift but does not write the new content to disk', () => {
+    writeExample('gate-issue', '1.5.2');
+    const localPath = join(repoRoot, examplesDir, 'gate-issue.ds.md');
+    const beforeCheck = readFileSync(localPath, 'utf8');
+    const prBodyOut = join(repoRoot, 'pr-body.md');
+
+    const result = main({
+      families,
+      cliPath: 'cli/dist/cli.js',
+      repoRoot,
+      prBodyOut,
+      check: true,
+      pull: () => ({ version: '1.5.3', content: dossierContent('1.5.3') }),
+      log: () => {},
+    });
+
+    expect(result.changed).toBe(true);
+    expect(result.changes).toEqual([
+      { name: `${DOSSIER_PREFIX}/gate-issue`, oldVersion: '1.5.2', newVersion: '1.5.3' },
+    ]);
+    expect(readFileSync(localPath, 'utf8')).toBe(beforeCheck);
+  });
+
+  it('--check reports changed=false when every mirror already matches (AC1)', () => {
+    writeExample('gate-issue', '1.5.2');
+    const prBodyOut = join(repoRoot, 'pr-body.md');
+
+    const result = main({
+      families,
+      cliPath: 'cli/dist/cli.js',
+      repoRoot,
+      prBodyOut,
+      check: true,
+      pull: () => ({ version: '1.5.2', content: dossierContent('1.5.2') }),
+      log: () => {},
+    });
+
+    expect(result.changed).toBe(false);
   });
 });
