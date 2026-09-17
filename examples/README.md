@@ -14,7 +14,7 @@ For a full collection of example dossiers — covering DevOps, databases, data s
 | `validation/` | Standalone validation scripts (Node.js, Python) for checking dossiers against the JSON schema |
 | `git/` | Snapshot of the `imboard-ai/git/*` issue-workflow family (`gate`, `setup`, `plan`, `implement`, `review`, `ship`, `report`, `full-cycle-issue`, `fleet-cycle`, `git-sync`, `issue-cycle-classifier`, `slot-cycle`, `member-cycle`, `batch-issues-preparation`, `batch-integrate`, `watch-task`, guide). The registry is the source of truth; these are copies of the latest published versions, refreshed automatically by a weekly CI job (see `.github/workflows/test-examples.yml`) |
 | `authoring/` | Example of creating a new dossier and its companion skill |
-| `meta/publish-dossier.ds.md` | Snapshot of `imboard-ai/meta/publish-dossier` — the sign → lint → verify → publish → refresh-all-machines recipe. The registry is the source of truth; this is a manually refreshed copy of the latest published version. The weekly snapshot job covers `git/` only |
+| `meta/publish-dossier.ds.md` | Snapshot of `imboard-ai/meta/publish-dossier` — the sign → lint → verify → publish → refresh-all-machines recipe. The registry is the source of truth; refreshed automatically alongside `git/` by the same weekly CI job (see `.github/workflows/test-examples.yml`) |
 
 ## Finding dossiers
 

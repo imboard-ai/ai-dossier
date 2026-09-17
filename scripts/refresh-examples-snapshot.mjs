@@ -2,14 +2,17 @@
 // ------------------------------------------------------------------
 // refresh-examples-snapshot.mjs
 //
-// Weekly CI job support: `examples/git/*.ds.md` is a hand-copied snapshot of
-// the published `imboard-ai/git/*` dossier family and drifts within days
-// (#441 — full-cycle-issue alone moved 3.6.1 -> 3.12.3 in the 3 days since
-// the last manual refresh, PR #431). This script re-pulls the latest
-// published version of every dossier already snapshotted in examples/git,
-// copies it over the local copy, and reports what changed so the calling
-// workflow can decide whether to open a PR (AC1) with an old->new version
-// table (AC2) — or, on a no-op week, do nothing at all (AC4).
+// Weekly CI job support: `examples/git/*.ds.md` and `examples/meta/*.ds.md`
+// are hand-copied snapshots of published dossier families and drift within
+// days (#441 — full-cycle-issue alone moved 3.6.1 -> 3.12.3 in the 3 days
+// since the last manual refresh, PR #431; #749 added the `examples/meta/`
+// mirror; #751 generalized this script to cover it instead of leaving it to
+// drift silently, same failure mode as #441 one directory over). This
+// script re-pulls the latest published version of every dossier already
+// snapshotted in each configured family's directory, copies it over the
+// local copy, and reports what changed so the calling workflow can decide
+// whether to open a PR (AC1) with an old->new version table (AC2) — or, on
+// a no-op week, do nothing at all (AC4).
 //
 // This script deliberately does NOT touch git or `gh` itself — orchestration
 // (branch, commit, push, PR create/update) lives in the workflow YAML, same
@@ -24,13 +27,25 @@
 // actually missing a real update.
 //
 // Usage:
-//   node scripts/refresh-examples-snapshot.mjs [--examples-dir <dir>]
+//   node scripts/refresh-examples-snapshot.mjs [--family <name>]
+//                                               [--check]
 //                                               [--cli <path-to-cli.js>]
 //                                               [--repo-root <dir>]
 //                                               [--pr-body-out <path>]
 //
-// Exit codes: 0 = ran successfully (whether or not anything changed),
-//             1 = a dossier could not be pulled/parsed/copied.
+// --family <name> restricts the run to one configured family (its short
+// name — the last segment of its registry prefix, e.g. `git` or `meta`).
+// Omit it to run every family in FAMILIES.
+//
+// --check runs the full pull + byte-compare for every dossier without
+// writing any changed content to disk, and exits 1 if anything is out of
+// date (0 if every mirror already matches the registry) — the dry-run
+// verification mode AC1 requires.
+//
+// Exit codes: 0 = ran successfully and (outside --check) applied all
+//             changes, or (--check) found nothing out of date;
+//             1 = a dossier could not be pulled/parsed/copied, an unknown
+//             --family was given, or (--check only) a mirror is stale.
 // ------------------------------------------------------------------
 
 import { execFileSync } from 'node:child_process';
@@ -44,8 +59,24 @@ import { parseDossierContent } from '@ai-dossier/core';
 /** The registry owner/category every `examples/git/*.ds.md` file maps onto. */
 export const DOSSIER_PREFIX = 'imboard-ai/git';
 
-/** PR title AC1 requires verbatim. */
-export const PR_TITLE = 'chore(examples): refresh git/ snapshot';
+/**
+ * Every family this script keeps as a byte-exact mirror of published
+ * registry dossiers. Add an entry here to bring a new directory under
+ * refresh coverage — everything else (pull, byte-compare, write-on-change,
+ * PR body) is generic over this list (#751).
+ */
+export const FAMILIES = [
+  { prefix: DOSSIER_PREFIX, dir: 'examples/git' },
+  { prefix: 'imboard-ai/meta', dir: 'examples/meta' },
+];
+
+/**
+ * PR title for the refresh job. Family-agnostic — the job now covers every
+ * directory in `FAMILIES`, not just `examples/git/`, so this can't name one
+ * directory verbatim the way it did before #751 (that requirement traced to
+ * the now-closed #441, not to any live external consumer of this string).
+ */
+export const PR_TITLE = 'chore(examples): refresh dossier snapshots';
 
 export class RefreshError extends Error {
   constructor(message) {
@@ -55,13 +86,16 @@ export class RefreshError extends Error {
 }
 
 /**
- * `full-cycle-issue.ds.md` -> `imboard-ai/git/full-cycle-issue`.
+ * `full-cycle-issue.ds.md` + prefix `imboard-ai/git` -> `imboard-ai/git/full-cycle-issue`.
  *
- * Every file in examples/git/ is, by construction (see PR #431 and #441),
- * a 1:1 snapshot of a published `imboard-ai/git/<name>` dossier — the
- * filename (minus `.ds.md`) IS the registry name's last segment.
+ * Every file in a family's directory is, by construction (see PR #431,
+ * #441, #749, #751), a 1:1 snapshot of a published `<prefix>/<name>`
+ * dossier — the filename (minus `.ds.md`) IS the registry name's last
+ * segment. `prefix` is the calling family's registry prefix (see
+ * `FAMILIES`) rather than a module-level constant, so this function has no
+ * built-in assumption about which family it's being used for.
  */
-export function dossierNameFromFile(filename) {
+export function dossierNameFromFile(filename, prefix) {
   if (!filename.endsWith('.ds.md')) {
     throw new RefreshError(`'${filename}' is not a .ds.md file — cannot derive a dossier name.`);
   }
@@ -69,7 +103,30 @@ export function dossierNameFromFile(filename) {
   if (!slug) {
     throw new RefreshError(`'${filename}' has no name before .ds.md.`);
   }
-  return `${DOSSIER_PREFIX}/${slug}`;
+  return `${prefix}/${slug}`;
+}
+
+/** The `--family` short name for a family — the last segment of its registry prefix. */
+export function familyShortName(prefix) {
+  return prefix.split('/').pop();
+}
+
+/**
+ * Filter `FAMILIES` (or an equivalent list) down to the one matching
+ * `--family <name>`, or return the full list when no name was given.
+ * Extracted from the CLI entrypoint so the filtering logic (and its
+ * unknown-name error) is unit-testable without shelling out.
+ */
+export function selectFamilies(all, familyName) {
+  if (!familyName) {
+    return all;
+  }
+  const matched = all.filter((f) => familyShortName(f.prefix) === familyName);
+  if (matched.length === 0) {
+    const known = all.map((f) => familyShortName(f.prefix)).join(', ');
+    throw new RefreshError(`unknown family '${familyName}' — expected one of: ${known}`);
+  }
+  return matched;
 }
 
 /**
@@ -152,13 +209,19 @@ export function parsePulledVersion(pullStdout, dossierName) {
  * by the calling workflow YAML gating the PR step on `changed == 'true'`,
  * not by this function skipping its empty-list branch, which is live,
  * regularly-exercised code (see the "handles an empty change list" test).
+ *
+ * `families` names which mirror directories this run actually covered —
+ * defaults to every configured family, but a `--family git` run passes just
+ * that one so the summary never claims to have refreshed a directory it
+ * didn't touch.
  */
-export function buildPrBody(changes) {
+export function buildPrBody(changes, families = FAMILIES) {
+  const dirLabel = families.map(({ dir }) => `\`${dir}/\``).join(', ');
   const lines = [
     '## Summary',
     '',
-    'Automated weekly refresh of `examples/git/*.ds.md` from the published',
-    '`imboard-ai/git/*` dossiers — see #441.',
+    `Automated weekly refresh of the example dossier mirror(s) under ${dirLabel} from`,
+    'their published registry versions — see #441, #751.',
     '',
   ];
 
@@ -187,19 +250,28 @@ export function buildPrBody(changes) {
 
 function parseArgs(argv) {
   const opts = {
-    examplesDir: 'examples/git',
+    family: null,
     cli: 'cli/dist/cli.js',
     repoRoot: process.cwd(),
     prBodyOut: null,
+    check: false,
   };
   const takesValue = {
-    '--examples-dir': 'examplesDir',
+    '--family': 'family',
     '--cli': 'cli',
     '--repo-root': 'repoRoot',
     '--pr-body-out': 'prBodyOut',
   };
+  const booleanFlags = {
+    '--check': 'check',
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
+    const boolKey = booleanFlags[arg];
+    if (boolKey) {
+      opts[boolKey] = true;
+      continue;
+    }
     const key = takesValue[arg];
     if (!key) {
       throw new RefreshError(`unrecognised argument '${arg}'.`);
@@ -278,15 +350,20 @@ function pullOne({ name, cliPath, repoRoot, scratchHome }) {
   return { version, content: readFileSync(cachePath, 'utf8') };
 }
 
-export function main({
-  examplesDir,
-  cliPath,
-  repoRoot,
-  prBodyOut,
-  pull = pullOne,
-  log = console.log,
-} = {}) {
-  const absExamplesDir = join(repoRoot, examplesDir);
+/**
+ * Refresh one family: pull every dossier already snapshotted in `dir`,
+ * byte-compare it against the local copy, and (unless `check`) write back
+ * any dossier whose registry content moved. Logs its own per-family summary
+ * line as its last step, so a crash partway through a LATER family still
+ * leaves this family's line in the log — the summary isn't deferred to a
+ * second pass over every family's result at the end of `main()`.
+ *
+ * Extracted out of `main()` (#751 review) so the family loop there stays a
+ * flat aggregate instead of nesting `for family -> for file -> if changed`
+ * inline.
+ */
+function refreshFamily({ prefix, dir, repoRoot, cliPath, scratchHome, pull, log, check }) {
+  const absExamplesDir = join(repoRoot, dir);
   if (!existsSync(absExamplesDir)) {
     throw new RefreshError(`examples dir not found: ${absExamplesDir}`);
   }
@@ -298,11 +375,9 @@ export function main({
     throw new RefreshError(`no .ds.md files found in ${absExamplesDir} — nothing to refresh.`);
   }
 
-  const scratchHome = mkdtempSync(join(tmpdir(), 'refresh-examples-'));
   const changes = [];
-
   for (const file of files) {
-    const name = dossierNameFromFile(file);
+    const name = dossierNameFromFile(file, prefix);
     const localPath = join(absExamplesDir, file);
     const oldContent = readFileSync(localPath, 'utf8');
     const oldVersion = extractVersion(oldContent, localPath);
@@ -315,27 +390,76 @@ export function main({
     });
 
     if (newContent !== oldContent) {
-      writeFileSync(localPath, newContent);
+      if (!check) {
+        writeFileSync(localPath, newContent);
+      }
       changes.push({ name, oldVersion, newVersion });
-      log(`changed: ${name}  ${oldVersion} -> ${newVersion}`);
+      log(`${check ? 'stale' : 'changed'}: ${name}  ${oldVersion} -> ${newVersion}`);
     } else {
       log(`unchanged: ${name}  ${oldVersion}`);
     }
   }
 
+  const summary = { prefix, dir, fileCount: files.length, changedCount: changes.length };
+  log(
+    `${dir}: ${summary.fileCount} dossier(s), ${summary.changedCount} ${check ? 'stale' : 'changed'}`
+  );
+  return { changes, summary };
+}
+
+export function main({
+  families = FAMILIES,
+  cliPath,
+  repoRoot,
+  prBodyOut,
+  pull = pullOne,
+  log = console.log,
+  check = false,
+} = {}) {
+  if (families.length === 0) {
+    throw new RefreshError('no families configured — nothing to refresh.');
+  }
+
+  const scratchHome = mkdtempSync(join(tmpdir(), 'refresh-examples-'));
+  const changes = [];
+  const familySummaries = [];
+
+  for (const family of families) {
+    const { changes: familyChanges, summary } = refreshFamily({
+      ...family,
+      repoRoot,
+      cliPath,
+      scratchHome,
+      pull,
+      log,
+      check,
+    });
+    changes.push(...familyChanges);
+    familySummaries.push(summary);
+  }
+
   const changed = changes.length > 0;
-  const body = buildPrBody(changes);
+  const body = buildPrBody(changes, families);
   writeFileSync(prBodyOut, body);
 
   log('');
   log(changed ? `${changes.length} dossier(s) changed.` : 'No changes — no-op week.');
-  log(`PR body written to ${prBodyOut}`);
+  if (!check) {
+    log(`PR body written to ${prBodyOut}`);
 
-  setGithubOutput('changed', changed ? 'true' : 'false');
-  setGithubOutput('pr_title', PR_TITLE);
-  setGithubOutput('pr_body_path', prBodyOut);
+    // Only a real (non-dry-run) refresh is authoritative for the CI job's
+    // outputs — a --check invocation is a local verification pass and must
+    // never masquerade as the source of GITHUB_OUTPUT for a downstream step.
+    setGithubOutput('changed', changed ? 'true' : 'false');
+    setGithubOutput('pr_title', PR_TITLE);
+    setGithubOutput('pr_body_path', prBodyOut);
+    // FAMILIES is the single source of truth for which directories this job
+    // covers (#751 review) — the workflow's `git add` stages exactly this
+    // list instead of a hardcoded, easily-stale directory pair.
+    setGithubOutput('dirs', families.map((f) => f.dir).join(' '));
+  }
 
-  return { changed, changes, prBodyPath: prBodyOut };
+  return { changed, changes, prBodyPath: prBodyOut, families: familySummaries };
 }
 
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
@@ -343,12 +467,20 @@ const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(pro
 if (invokedDirectly) {
   try {
     const opts = parseArgs(process.argv.slice(2));
-    main({
-      examplesDir: opts.examplesDir,
+    const families = selectFamilies(FAMILIES, opts.family);
+    const result = main({
+      families,
       cliPath: opts.cli,
       repoRoot: opts.repoRoot,
       prBodyOut: opts.prBodyOut,
+      check: opts.check,
     });
+    if (opts.check && result.changed) {
+      console.error(
+        `refresh-examples-snapshot --check: ${result.changes.length} dossier(s) out of date with the registry.`
+      );
+      process.exit(1);
+    }
     process.exit(0);
   } catch (err) {
     if (err instanceof RefreshError) {
