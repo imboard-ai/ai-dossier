@@ -67,23 +67,41 @@ const IMPERATIVE_RATIONALE_RE = /^(cite|record|add|write)\s/i;
 /** How long an evidence-add run scans other project dirs, in the "any recent session" fallback. */
 const RECENT_SESSION_WINDOW_MS = 60 * 60 * 1000;
 
+/**
+ * `fs.readdirSync(dir)`, treating a missing directory as empty. Any OTHER error (permission
+ * denied, I/O error) is not silently swallowed — auto-detection still falls through to its
+ * next source, but a warning on stderr says why, so an unreadable `~/.claude/projects/<slug>/`
+ * doesn't read as "no transcript found" with no trace of the real cause.
+ */
+function safeReaddir(dir: string): string[] {
+  try {
+    const entries = fs.readdirSync(dir);
+    return Array.isArray(entries) ? entries : [];
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      console.error(
+        `⚠️  could not read ${dir} while auto-detecting --session: ${(err as Error).message}\n`
+      );
+    }
+    return [];
+  }
+}
+
 /** Newest `*.jsonl` transcript directly inside `dir`, or undefined if there is none / it errors. */
 function newestJsonlInDir(dir: string): { id: string; mtimeMs: number } | undefined {
-  if (!fs.existsSync(dir)) return undefined;
-  let entries: unknown;
-  try {
-    entries = fs.readdirSync(dir);
-  } catch {
-    return undefined;
-  }
-  if (!Array.isArray(entries)) return undefined;
   let newest: { id: string; mtimeMs: number } | undefined;
-  for (const entry of entries) {
+  for (const entry of safeReaddir(dir)) {
     if (!entry.endsWith('.jsonl')) continue;
+    const entryPath = path.join(dir, entry);
     let mtimeMs: number;
     try {
-      mtimeMs = fs.statSync(path.join(dir, entry)).mtimeMs;
-    } catch {
+      mtimeMs = fs.statSync(entryPath).mtimeMs;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        console.error(
+          `⚠️  could not stat ${entryPath} while auto-detecting --session: ${(err as Error).message}\n`
+        );
+      }
       continue;
     }
     if (!newest || mtimeMs > newest.mtimeMs) {
@@ -93,43 +111,47 @@ function newestJsonlInDir(dir: string): { id: string; mtimeMs: number } | undefi
   return newest;
 }
 
+/** A detected Claude Code session transcript: which directory it came from and how. */
+interface ClaudeSessionMatch {
+  id: string;
+  /** `project` = this cwd's own transcript dir; `fallback` = the any-project recent-activity scan. */
+  scope: 'project' | 'fallback';
+  dir: string;
+}
+
 /**
  * Default `--session` for provider `claude-code`: the newest `*.jsonl` transcript under
  * `~/.claude/projects/<slug>/`, where `<slug>` is the current working directory path with
  * every `/` replaced by `-` — that is how Claude Code names its project directories. Falls
  * back to the newest jsonl under ANY project dir modified in the last hour, since a worktree's
- * cwd may not be the slug Claude Code actually wrote the transcript under.
+ * cwd may not be the slug Claude Code actually wrote the transcript under — the caller labels
+ * that fallback distinctly (`scope: 'fallback'`), since it can pick up an unrelated project.
  */
-function findClaudeCodeSession(): string | undefined {
+function findClaudeCodeSession(): ClaudeSessionMatch | undefined {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   const slug = process.cwd().replace(/\//g, '-');
+  const projectDir = path.join(projectsDir, slug);
 
-  const primary = newestJsonlInDir(path.join(projectsDir, slug));
-  if (primary) return primary.id;
-
-  if (!fs.existsSync(projectsDir)) return undefined;
-  let projectDirs: unknown;
-  try {
-    projectDirs = fs.readdirSync(projectsDir);
-  } catch {
-    return undefined;
-  }
-  if (!Array.isArray(projectDirs)) return undefined;
+  const primary = newestJsonlInDir(projectDir);
+  if (primary) return { id: primary.id, scope: 'project', dir: projectDir };
 
   const cutoff = Date.now() - RECENT_SESSION_WINDOW_MS;
-  let best: { id: string; mtimeMs: number } | undefined;
-  for (const name of projectDirs) {
-    const candidate = newestJsonlInDir(path.join(projectsDir, name));
+  let best: { id: string; mtimeMs: number; dir: string } | undefined;
+  for (const name of safeReaddir(projectsDir)) {
+    const dir = path.join(projectsDir, name);
+    const candidate = newestJsonlInDir(dir);
     if (candidate && candidate.mtimeMs >= cutoff && (!best || candidate.mtimeMs > best.mtimeMs)) {
-      best = candidate;
+      best = { ...candidate, dir };
     }
   }
-  return best?.id;
+  return best ? { id: best.id, scope: 'fallback', dir: best.dir } : undefined;
 }
 
 interface ResolvedSession {
   session: string;
-  source: 'flag' | 'env' | 'transcript';
+  source: 'flag' | 'env' | 'transcript-project' | 'transcript-fallback';
+  /** The transcript directory the session id came from — only set for the two transcript sources. */
+  dir?: string;
 }
 
 /**
@@ -144,7 +166,13 @@ function resolveSession(options: AddOptions): ResolvedSession | undefined {
   }
   if (options.provider === 'claude-code') {
     const detected = findClaudeCodeSession();
-    if (detected) return { session: detected, source: 'transcript' };
+    if (detected) {
+      return {
+        session: detected.id,
+        source: detected.scope === 'project' ? 'transcript-project' : 'transcript-fallback',
+        dir: detected.dir,
+      };
+    }
   }
   return undefined;
 }
@@ -437,14 +465,23 @@ function registerAddSubcommand(cmd: Command): void {
 
       const resolved = resolveSession(options);
       if (!resolved) {
-        console.error('\n❌ --session required (or set AI_DOSSIER_SESSION_ID)\n');
+        const slug = process.cwd().replace(/\//g, '-');
+        const hint =
+          options.provider === 'claude-code'
+            ? ` (looked for a transcript under ~/.claude/projects/${slug}/, and any project dir modified in the last hour — found none)`
+            : '';
+        console.error(`\n❌ --session required (or set AI_DOSSIER_SESSION_ID)${hint}\n`);
         process.exit(1);
       }
       const { session } = resolved;
       if (resolved.source !== 'flag') {
         const sourceLabel =
-          resolved.source === 'env' ? 'AI_DOSSIER_SESSION_ID' : 'newest transcript';
-        console.log(`session=${session} (from ${sourceLabel})`);
+          resolved.source === 'env'
+            ? 'AI_DOSSIER_SESSION_ID'
+            : resolved.source === 'transcript-fallback'
+              ? `newest transcript — ${resolved.dir}, not this project's dir; pass --session explicitly if wrong`
+              : 'newest transcript';
+        console.log(`ℹ️  session=${session} (from ${sourceLabel})`);
       }
       validateSessionShape(session, options.provider, options.forceSession);
       warnIfImperativeRationale(options.rationale);

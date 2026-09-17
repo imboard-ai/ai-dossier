@@ -134,8 +134,11 @@ directory path with `/` replaced by `-`), falling back to the newest
 transcript under *any* project directory modified in the last hour (covers
 a worktree whose cwd doesn't match the slug Claude Code actually wrote
 under). When it defaults the value, `evidence add` prints which source it
-used, e.g. `session=5a718af0-4e3c-4d6b-a7e1-e73bd3358ab4 (from newest
-transcript)` — check that line before trusting the recorded pointer.
+used, e.g. `ℹ️  session=5a718af0-4e3c-4d6b-a7e1-e73bd3358ab4 (from newest
+transcript)` — check that line before trusting the recorded pointer. The
+any-project fallback is labeled distinctly (`from newest transcript —
+<dir>, not this project's dir; pass --session explicitly if wrong`),
+since it can pick up a transcript from an unrelated project.
 
 **Validation.** For provider `claude-code`, the resolved (or explicit)
 `--session` must be a session UUID
