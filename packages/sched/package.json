@@ -42,7 +42,7 @@
   },
   "dependencies": {
     "@ai-dossier/core": "^1.9.0",
-    "@ai-dossier/worktree-pool": "^0.6.0"
+    "@ai-dossier/worktree-pool": "^0.7.0"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",

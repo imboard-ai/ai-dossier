@@ -10,6 +10,7 @@ import {
   findStaleWorktrees,
   getPoolStatus,
   getSparesNeeded,
+  isPoolDirName,
   isPoolTempBranch,
   normalizePoolFileConfig,
   type PoolDirClassification,
@@ -18,6 +19,14 @@ import {
   updateWorktree,
   validateState,
 } from './pool-state';
+import {
+  findWorktreeProcesses,
+  firstSegmentUnder,
+  type KilledProcess,
+  killProcesses,
+  killWorktreeProcesses,
+  resolveRootedChild,
+} from './process-scan';
 import {
   detectProjectEnv,
   lockfileChangedInDiff,
@@ -892,6 +901,13 @@ export interface ReturnResult {
   path: string;
   /** The self-check that ran before this result was returned. */
   verification: ReturnVerification;
+  /**
+   * Processes killed before the recycle (imboard-ai/ai-dossier#760) — a dev
+   * server, jest run, or vite server started inside the worktree by a
+   * verification step, which would otherwise outlive it. Empty when nothing
+   * was found running.
+   */
+  killedProcesses: KilledProcess[];
 }
 
 /**
@@ -910,13 +926,16 @@ export class ReturnFailure extends Error {
   readonly worktreePath: string;
   /** Why the entry could NOT be marked broken, or `null` when it was marked. */
   readonly markError: string | null;
+  /** Processes killed before the failure (imboard-ai/ai-dossier#760), if any. */
+  readonly killedProcesses: KilledProcess[];
 
   constructor(
     step: ReturnStep,
     worktreePath: string,
     entryId: string | null,
     cause: unknown,
-    markError: string | null = null
+    markError: string | null = null,
+    killedProcesses: KilledProcess[] = []
   ) {
     super(`return failed at step '${step}': ${messageOf(cause)}`, { cause });
     this.name = 'ReturnFailure';
@@ -924,6 +943,7 @@ export class ReturnFailure extends Error {
     this.entryId = entryId;
     this.worktreePath = worktreePath;
     this.markError = markError;
+    this.killedProcesses = killedProcesses;
   }
 }
 
@@ -1049,7 +1069,7 @@ function markEntryBroken(
  * (recorded id, actual on-disk path, a pool-owned temp branch) so `status`
  * shows it and `gc` can remove it.
  */
-export function returnWorktree(worktreePath: string): ReturnResult {
+export async function returnWorktree(worktreePath: string): Promise<ReturnResult> {
   const gitRoot = findGitRoot();
   const cfg = readPoolFileConfig(gitRoot);
   const poolDir = resolvePoolDirSync(gitRoot);
@@ -1089,8 +1109,15 @@ export function returnWorktree(worktreePath: string): ReturnResult {
   let livePath = absPath;
   let liveTempBranch = entry.temp_branch;
   let liveId = entry.id;
+  let killedProcesses: KilledProcess[] = [];
 
   try {
+    // First step, before anything else touches the worktree (#760): a
+    // verification step's dev server, jest run, or vite server must not
+    // outlive the recycle. Scoped to exactly this worktree's absolute path —
+    // never the whole pool directory — so a sibling worktree is untouched.
+    killedProcesses = (await killWorktreeProcesses(livePath)).killed;
+
     step('fetch', () => git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: livePath }));
 
     step('checkout-temp-branch', () =>
@@ -1165,6 +1192,7 @@ export function returnWorktree(worktreePath: string): ReturnResult {
       id: newId,
       path: newAbsPath,
       verification: step('verify', () => verifyRecycled(poolDir, newId, newAbsPath, newTempBranch)),
+      killedProcesses,
     };
   } catch (err) {
     const failedStep: ReturnStep = err instanceof StepError ? err.step : 'unknown';
@@ -1189,7 +1217,7 @@ export function returnWorktree(worktreePath: string): ReturnResult {
       broken_branch: observedBranch,
     });
 
-    throw new ReturnFailure(failedStep, onDiskPath, liveId, cause, markError);
+    throw new ReturnFailure(failedStep, onDiskPath, liveId, cause, markError, killedProcesses);
   }
 }
 
@@ -1290,6 +1318,12 @@ export interface GcResult {
   /** `true` when confirmation was missing and nothing was removed. */
   aborted: boolean;
   errors: string[];
+  /**
+   * Processes killed before their worktree was destroyed (#760), across all
+   * removed candidates. Empty on a dry run — nothing is killed until the
+   * removal actually happens.
+   */
+  killedProcesses: KilledProcess[];
 }
 
 function describeGcPlan(candidates: GcCandidate[], foreign: PoolDirEntryReport[]): void {
@@ -1409,7 +1443,8 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
 
   describeGcPlan(candidates, foreign);
 
-  const base = { staleIds, orphanIds, brokenIds, foreign, candidates, errors };
+  const killedProcesses: KilledProcess[] = [];
+  const base = { staleIds, orphanIds, brokenIds, foreign, candidates, errors, killedProcesses };
 
   if (opts.dryRun) {
     console.error('\nDry run — nothing was removed.');
@@ -1432,6 +1467,11 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
   for (const c of candidates) {
     try {
       if (c.path !== null) {
+        // Kill before destroy (#760) — a candidate here is about to be
+        // `git worktree remove --force`d or `rmSync`'d; anything still
+        // running out of it must not survive that as an orphan.
+        const killResult = await killWorktreeProcesses(c.path);
+        killedProcesses.push(...killResult.killed);
         destroyWorktree(ctx, c.tempBranch, c.path);
       } else {
         deletePoolTempBranch(gitRoot, c.tempBranch);
@@ -1456,6 +1496,155 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
   git(['worktree', 'prune'], { cwd: gitRoot });
 
   return { ...base, removed, dryRun: false, aborted: false };
+}
+
+const DEFAULT_REAP_OLDER_THAN_HOURS = 24;
+/** Grace period between SIGTERM and SIGKILL for a `reap` kill. */
+const REAP_KILL_GRACE_MS = 5000;
+
+export interface ReapOptions {
+  /** Only kill processes at least this many hours old. Default 24. */
+  olderThanHours?: number;
+  /** Report what would be killed and exit without touching anything. */
+  dryRun?: boolean;
+  /** Approve the kill list without prompting. */
+  yes?: boolean;
+  /** Override TTY detection for the confirmation prompt. */
+  interactive?: boolean;
+}
+
+export interface ReapCandidate {
+  pid: number;
+  /** Directory name directly inside the pool directory this process is rooted in. */
+  worktree: string;
+  /** Best-effort command line. */
+  command: string;
+  /** Milliseconds since process start, or `null` when it could not be determined. */
+  ageMs: number | null;
+}
+
+export interface ReapResult {
+  /** Orphaned processes meeting the `--older-than` age threshold — what a real run would kill. */
+  candidates: ReapCandidate[];
+  /** The subset actually killed (empty on a dry run or an aborted run). */
+  killed: ReapCandidate[];
+  dryRun: boolean;
+  /** `true` when confirmation was missing and nothing was killed. */
+  aborted: boolean;
+  errors: string[];
+}
+
+function describeReapPlan(candidates: ReapCandidate[]): void {
+  if (candidates.length === 0) {
+    console.error('Nothing to reap.');
+    return;
+  }
+  console.error(`Found ${candidates.length} orphaned process(es):`);
+  for (const c of candidates) {
+    console.error(`  pid ${c.pid}  age ${formatAge(c.ageMs)}  worktree ${c.worktree}`);
+    console.error(`      ${c.command.slice(0, 80)}`);
+  }
+}
+
+/** Human-readable age for CLI/plan output — hours to one decimal, or 'unknown'. */
+export function formatAge(ageMs: number | null): string {
+  if (ageMs === null) return 'unknown';
+  const hours = ageMs / (60 * 60 * 1000);
+  if (hours < 1) return `${Math.max(0, Math.round(ageMs / 60_000))}m`;
+  return `${hours.toFixed(1)}h`;
+}
+
+/**
+ * Collect processes rooted in worktrees the pool owns that are no longer
+ * legitimately running — a removed worktree (no longer a registered git
+ * worktree), or a pool entry that is not `assigned` (imboard-ai/ai-dossier#760).
+ * A currently-assigned, still-registered worktree is active work and is
+ * always out of scope here — `return`'s kill-on-recycle covers it once it is
+ * actually returned. A worktree the pool does not own (a developer's own
+ * checkout sharing the pool directory) is never touched, matching every
+ * other command's ownership rule (#438).
+ *
+ * This is what a host timer calls (`reap --older-than 24`, cron-driven) to
+ * collect processes that outlived the worktree, branch, and issue that
+ * spawned them.
+ */
+export async function reap(opts: ReapOptions = {}): Promise<ReapResult> {
+  const gitRoot = findGitRoot();
+  const poolDir = resolvePoolDirSync(gitRoot);
+  const olderThanHours = opts.olderThanHours ?? DEFAULT_REAP_OLDER_THAN_HOURS;
+  const cutoffMs = olderThanHours * 60 * 60 * 1000;
+  const errors: string[] = [];
+
+  const state = readState(poolDir);
+  const ctx = buildOwnershipContext(gitRoot, poolDir, state);
+
+  // Every directory name the pool can youch for: currently on-disk and
+  // pool-owned, recorded in state (even if its directory is already gone —
+  // exactly the removed-worktree case this command exists for), or matching
+  // the pool's own naming outright (covers a state row that was already
+  // dropped by an earlier `gc`, leaving only the name pattern as evidence).
+  const ownedNames = new Set<string>();
+  if (fs.existsSync(poolDir)) {
+    for (const entry of scanPoolDir(ctx)) {
+      if (entry.owned) ownedNames.add(entry.name);
+    }
+  }
+  for (const wt of state.worktrees) {
+    ownedNames.add(wt.path);
+  }
+  const isOwnedName = (name: string): boolean => ownedNames.has(name) || isPoolDirName(name);
+
+  const stateByPath = new Map(state.worktrees.map((w) => [w.path, w]));
+  const registeredBranches = listWorktreeBranches(gitRoot);
+
+  const allProcesses = fs.existsSync(poolDir) ? findWorktreeProcesses(poolDir) : [];
+  const candidates: ReapCandidate[] = [];
+
+  for (const proc of allProcesses) {
+    const rootedChild = resolveRootedChild(proc, poolDir);
+    if (rootedChild === null) continue;
+    const name = firstSegmentUnder(poolDir, rootedChild);
+    if (name === null || !isOwnedName(name)) continue;
+
+    const absName = toAbs(poolDir, name);
+    const isRegistered = registeredBranches.has(realpathOrSelf(absName));
+    const isAssigned = stateByPath.get(name)?.status === 'assigned';
+    // Active, legitimate work — never reap's concern.
+    if (isRegistered && isAssigned) continue;
+
+    candidates.push({ pid: proc.pid, worktree: name, command: proc.command, ageMs: proc.ageMs });
+  }
+
+  const toKill = candidates.filter((c) => c.ageMs === null || c.ageMs >= cutoffMs);
+
+  describeReapPlan(toKill);
+
+  if (opts.dryRun) {
+    return { candidates: toKill, killed: [], dryRun: true, aborted: false, errors };
+  }
+
+  if (toKill.length > 0 && !opts.yes) {
+    const interactive = opts.interactive ?? Boolean(process.stdin.isTTY);
+    if (!interactive) {
+      console.error('\nRefusing to kill without confirmation. Re-run with --yes (or --dry-run).');
+      return { candidates: toKill, killed: [], dryRun: false, aborted: true, errors };
+    }
+    const answer = await promptUser(`\nKill ${toKill.length} process(es)? [y/N]: `);
+    if (!/^y(es)?$/i.test(answer)) {
+      console.error('Aborted — nothing was killed.');
+      return { candidates: toKill, killed: [], dryRun: false, aborted: true, errors };
+    }
+  }
+
+  const killResult = await killProcesses(
+    toKill.map((c) => ({ pid: c.pid, cwd: null, command: c.command, ageMs: c.ageMs })),
+    REAP_KILL_GRACE_MS
+  );
+  errors.push(...killResult.errors);
+  const killedPids = new Set(killResult.killed.map((k) => k.pid));
+  const killed = toKill.filter((c) => killedPids.has(c.pid));
+
+  return { candidates: toKill, killed, dryRun: false, aborted: false, errors };
 }
 
 export function status(): ReturnType<typeof getPoolStatus> & {

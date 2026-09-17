@@ -4,10 +4,12 @@ import {
   claim,
   detect,
   findBrokenEntries,
+  formatAge,
   gc,
   init,
   type PoolDirEntryReport,
   ReturnFailure,
+  reap,
   refresh,
   replenish,
   returnWorktree,
@@ -37,21 +39,33 @@ Commands:
   status [--json]                 Show pool inventory (--json for callers)
   replenish [--count N]             Pre-warm spares up to target
   claim --issue N --branch B      Claim a warm worktree, print path
-  return --path P [--json]        Return worktree to pool
+  return --path P [--json]        Return worktree to pool (kills its processes first)
   refresh                         Fetch + rebuild all warm worktrees
-  gc [--dry-run] [--yes]          Remove stale/orphaned worktrees
+  gc [--dry-run] [--yes]          Remove stale/orphaned worktrees (kills their processes first)
+  reap [--older-than H] [--dry-run] [--yes]
+                                   Kill processes orphaned by removed/non-assigned
+                                   worktrees, older than H hours (default 24)
   init                            Configure pool directory for this project
   detect [dir]                    Print detected package manager env as JSON
 
 The pool only ever removes worktrees it created. Worktrees sharing the pool
 directory that the pool did not create are reported as "foreign, skipped" and
-are never touched. gc requires --yes when stdin is not a TTY.
+are never touched. gc and reap require --yes when stdin is not a TTY.
 
 A failed 'return' leaves its pool entry marked 'broken' (never 'assigned' or
 'warm') and exits non-zero naming the step that failed — except for a path that
 is not in the pool at all, which fails before there is any entry to mark. The
 worktree directory is left on disk for inspection; 'status --json' carries the
-failed step, and gc clears the entry.`);
+failed step, and gc clears the entry.
+
+'return' and 'gc' kill any process still running out of a worktree before
+recycling/removing it (a dev server, jest run, or vite server a verification
+step started and never stopped — imboard-ai/ai-dossier#760). 'reap' is the
+sweep for what escaped that: processes rooted in worktrees that are already
+gone, or in pool entries that are not 'assigned', regardless of when they were
+last touched by return/gc. It never touches a worktree the pool did not
+create, and never a currently-assigned, still-registered worktree — that is
+active work, not an orphan.`);
 }
 
 /** A flag is set when present as `--x` or given the literal string 'true'. */
@@ -193,10 +207,16 @@ async function main(): Promise<void> {
         }
         // Failures fall through to the outer catch, which prints the step and
         // exits 1 (#453). The entry is left `broken`, never `assigned`.
-        const returned = returnWorktree(wtPath);
+        const returned = await returnWorktree(wtPath);
         if (boolFlag(flags.json)) {
           console.log(JSON.stringify(returned, null, 2));
           break;
+        }
+        if (returned.killedProcesses.length > 0) {
+          console.error(`Killed ${returned.killedProcesses.length} process(es) still running:`);
+          for (const p of returned.killedProcesses) {
+            console.error(`  pid ${p.pid} (${p.signal})  ${p.command.slice(0, 80)}`);
+          }
         }
         const v = returned.verification;
         console.error('Worktree returned to pool');
@@ -241,6 +261,40 @@ async function main(): Promise<void> {
           if (result.orphanIds.length > 0) {
             console.error(`  Orphans: ${result.orphanIds.join(', ')}`);
           }
+          if (result.killedProcesses.length > 0) {
+            console.error(`  Killed ${result.killedProcesses.length} process(es):`);
+            for (const p of result.killedProcesses) {
+              console.error(`    pid ${p.pid} (${p.signal})  ${p.command.slice(0, 80)}`);
+            }
+          }
+        }
+        if (result.errors.length > 0) {
+          for (const err of result.errors) {
+            console.error(`  Error: ${err}`);
+          }
+        }
+        if (result.aborted) {
+          process.exit(1);
+        }
+        break;
+      }
+
+      case 'reap': {
+        const dryRun = boolFlag(flags['dry-run']);
+        const yes = boolFlag(flags.yes) || flags.force === true;
+        const olderThanHours =
+          flags['older-than'] !== undefined
+            ? Number.parseFloat(String(flags['older-than']))
+            : undefined;
+        const result = await reap({ dryRun, yes, olderThanHours });
+        if (!result.dryRun && !result.aborted && result.candidates.length > 0) {
+          console.error(`Killed ${result.killed.length}/${result.candidates.length} process(es):`);
+          for (const c of result.candidates) {
+            const label = result.killed.some((k) => k.pid === c.pid) ? 'killed' : 'FAILED';
+            console.error(
+              `  pid ${c.pid}  age ${formatAge(c.ageMs)}  worktree ${c.worktree}  [${label}]  ${c.command.slice(0, 80)}`
+            );
+          }
         }
         if (result.errors.length > 0) {
           for (const err of result.errors) {
@@ -276,6 +330,12 @@ async function main(): Promise<void> {
       // Say plainly what state the pool is in, so a caller cannot read a
       // non-zero exit as "nothing happened" (#453). Never assert the entry was
       // marked without knowing it was — that claim being false is the bug.
+      if (err.killedProcesses.length > 0) {
+        console.error(`Killed ${err.killedProcesses.length} process(es) before the failure:`);
+        for (const p of err.killedProcesses) {
+          console.error(`  pid ${p.pid} (${p.signal})  ${p.command.slice(0, 80)}`);
+        }
+      }
       if (err.entryId === null) {
         console.error('No pool entry was modified.');
       } else if (err.markError !== null) {

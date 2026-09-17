@@ -29,9 +29,10 @@ Requires Node.js >= 20.0.0.
 | `worktree-pool status [--json]` | Show pool inventory (warm/assigned/broken counts); `--json` prints the whole inventory, including per-entry `status`, for callers |
 | `worktree-pool replenish [--count N]` | Pre-warm spares up to target count |
 | `worktree-pool claim --issue N --branch B` | Claim a warm worktree, print path |
-| `worktree-pool return --path P [--json]` | Return worktree to pool for reuse; self-checks on success, and on failure marks the entry `broken` and exits non-zero naming the step |
+| `worktree-pool return --path P [--json]` | Return worktree to pool for reuse; kills any process still running out of it first, self-checks on success, and on failure marks the entry `broken` and exits non-zero naming the step |
 | `worktree-pool refresh` | Fetch origin + rebuild in all warm worktrees |
-| `worktree-pool gc [--dry-run] [--yes]` | Remove stale/orphaned pool worktrees (never anything else) |
+| `worktree-pool gc [--dry-run] [--yes]` | Remove stale/orphaned pool worktrees (never anything else), killing any process still running out of one first |
+| `worktree-pool reap [--older-than H] [--dry-run] [--yes]` | Kill processes orphaned by a removed or non-assigned worktree, at least `H` hours old (default 24) — the sweep for what `return`/`gc` already missed |
 | `worktree-pool init` | Configure pool directory for this project |
 | `worktree-pool detect [dir]` | Print the detected package-manager env as JSON |
 
@@ -57,6 +58,11 @@ worktree-pool return --path "$WORKTREE_PATH"
 # Clean up stale worktrees (prints the plan first, then asks)
 worktree-pool gc --dry-run   # show what would go
 worktree-pool gc --yes       # remove it, no prompt (required when stdin is not a TTY)
+
+# Sweep processes orphaned by worktrees return/gc already lost track of —
+# run this on a schedule (a host cron/timer), not per-issue
+worktree-pool reap --older-than 24 --dry-run
+worktree-pool reap --older-than 24 --yes
 ```
 
 ## How It Works
@@ -72,10 +78,27 @@ replenish          claim               return
 
 1. **Replenish** creates worktrees from `base_ref` (default `origin/main`) on temp branches, then runs the warm commands (install + build)
 2. **Claim** renames a warm worktree, switches to your feature branch — instant setup (~2s)
-3. **Return** recycles the worktree back to pool on a fresh temp branch, then verifies the result against reality — the entry really reads `warm`, no tracked file is dirty, and the new `pool/spare-*` branch is really checked out — before reporting success. A failure at any step leaves the entry `broken` (never `assigned`, never a falsely-`warm` spare), leaves the directory on disk, and exits non-zero naming the step
-4. **GC** removes broken entries and stale entries (>72h) and reconciles disk state vs pool state — only for worktrees the pool created (see [Sharing the pool directory](#sharing-the-pool-directory))
+3. **Return** first kills any process still running out of the worktree (see [Process cleanup](#process-cleanup) below), then recycles it back to pool on a fresh temp branch, then verifies the result against reality — the entry really reads `warm`, no tracked file is dirty, and the new `pool/spare-*` branch is really checked out — before reporting success. A failure at any step leaves the entry `broken` (never `assigned`, never a falsely-`warm` spare), leaves the directory on disk, and exits non-zero naming the step
+4. **GC** kills any process still running out of a worktree it is about to touch, then removes broken entries and stale entries (>72h) and reconciles disk state vs pool state — only for worktrees the pool created (see [Sharing the pool directory](#sharing-the-pool-directory))
 
 Claim and return only re-run the warm commands when the project's lockfile changed between the worktree's base commit and `base_ref` — otherwise the existing `node_modules` and build output are reused.
+
+## Process cleanup
+
+A dev server, jest run, or vite server started inside a worktree by a verification step does not stop on its own when the worktree it was started in is recycled or removed. Left unaddressed, these outlive the worktree, the branch and the issue that spawned them — a real sweep on hcc found 13 such processes across four merged worktrees, one holding open connections to a shared test database for 10 days.
+
+- **`return` and `gc` kill first.** Before recycling or removing a worktree, both send SIGTERM to every process whose cwd or command line is rooted under that exact worktree path, wait up to 5 seconds, then SIGKILL anything still alive. The kill is scoped to that one worktree — a sibling worktree sharing the same pool directory is never touched — and the killed pids are printed and included in `return --json`'s `killedProcesses` / `gc`'s `killedProcesses` field.
+- **`reap` is the sweep for what got away** — a process from a worktree that was removed by something other than this tool, or that is otherwise no longer `assigned`:
+
+  ```bash
+  $ worktree-pool reap --older-than 24 --dry-run
+  Found 1 orphaned process(es):
+    pid 48213  age 11.4h  worktree bug-701-fix-something
+        node /repo/../worktrees/bug-701-fix-something/node_modules/.bin/vite
+  ```
+
+  `reap` never touches a worktree the pool did not create (the same [ownership rule](#sharing-the-pool-directory) `gc` uses), and never a currently-assigned, still-registered worktree — that is active work, not an orphan. Run it on a schedule (a host cron/timer calling `reap --older-than 24 --yes`), not per-issue; `return`/`gc` already handle the common case at the moment a worktree changes hands.
+- Both the Linux discovery path (`/proc/*/cwd` + `/proc/*/cmdline`) and its `ps`-based fallback elsewhere always exclude the invoking process and its whole parent chain, so running `return --path <wt>` from a shell whose own cwd is inside `<wt>` cannot kill its own invoker.
 
 ### Pool State
 
@@ -208,21 +231,27 @@ Note the two distinct fields, matching the two sections above: the top-level
     "dirty_entries": [],
     "checked_out_branch": "pool/spare-pool-1787468026330-1079658",
     "expected_branch": "pool/spare-pool-1787468026330-1079658"
-  }
+  },
+  "killedProcesses": [
+    { "pid": 48213, "command": "node .../vite", "signal": "SIGTERM" }
+  ]
 }
 ```
 
 ### Programmatic use
 
+`returnWorktree` is `async` (it kills processes before recycling — see
+[Process cleanup](#process-cleanup)):
+
 ```ts
 import { returnWorktree, ReturnFailure } from '@ai-dossier/worktree-pool';
 
 try {
-  const result = returnWorktree(worktreePath);
-  // result.id, result.path, result.verification
+  const result = await returnWorktree(worktreePath);
+  // result.id, result.path, result.verification, result.killedProcesses
 } catch (err) {
   if (err instanceof ReturnFailure) {
-    // err.step (a ReturnStep), err.entryId, err.worktreePath
+    // err.step (a ReturnStep), err.entryId, err.worktreePath, err.killedProcesses
     // The entry is 'broken' and the directory was NOT destroyed — unless
     // err.markError is non-null, which means the marking write itself failed
     // and pool state should be re-checked before the next claim.
