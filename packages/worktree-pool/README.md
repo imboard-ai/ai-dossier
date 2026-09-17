@@ -98,7 +98,8 @@ A dev server, jest run, or vite server started inside a worktree by a verificati
   ```
 
   `reap` never touches a worktree the pool did not create (the same [ownership rule](#sharing-the-pool-directory) `gc` uses), and never a currently-registered worktree in an active pool status (`assigned`, `recycling`, `creating`, `warming`) — that is active work, not an orphan, and includes a `return` that is mid-flight but has not reached its own kill step yet. Run it on a schedule (a host cron/timer calling `reap --older-than 24 --yes`), not per-issue; `return`/`gc` already handle the common case at the moment a worktree changes hands.
-- The Linux discovery path (`/proc/*/cwd` + `/proc/*/cmdline`) always excludes the invoking process and its whole parent chain, so running `return --path <wt>` from a shell whose own cwd is inside `<wt>` cannot kill its own invoker. The `ps`-based fallback (non-Linux) can only exclude the invoking process itself — an ancestor's cwd/ppid is not determinable without `/proc`.
+- The Linux discovery path (`/proc/*/cwd` + `/proc/*/cmdline`) always excludes the invoking process and its whole parent chain, so running `return --path <wt>` from a shell whose own cwd is inside `<wt>` cannot kill its own invoker. The `ps`-based fallback (non-Linux) can only exclude the invoking process itself — an ancestor's cwd/ppid is not determinable without `/proc`. `return`, `gc`, and `reap` all print `skipped self/ancestors: <pids>` whenever a match was excluded this way — routinely true for `return`, since its own command line contains the worktree path it was given.
+- **`return` and `gc` refuse an unsafe kill root outright** rather than silently skipping it: an empty path, the filesystem root, the git root itself, or anything outside the pool directory. Every current call site already derives a safe path, so this should never fire — it exists so a future one cannot skip the check.
 
 ### Pool State
 

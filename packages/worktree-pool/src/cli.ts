@@ -18,13 +18,15 @@ import {
 import type { KilledProcess } from './process-scan';
 
 /**
- * Print the processes a `return`/`gc` kill step killed, and any non-fatal
- * kill failures alongside them — the one block `return`, `gc`, and a failed
- * `return`'s error handler all need (imboard-ai/ai-dossier#760).
+ * Print the processes a `return`/`gc` kill step killed, any non-fatal kill
+ * failures, and any matching pids excluded as this process or an ancestor of
+ * it — the one block `return`, `gc`, and a failed `return`'s error handler
+ * all need (imboard-ai/ai-dossier#760, #763).
  */
 function printKilledProcesses(
   killed: KilledProcess[],
   killErrors: string[],
+  skippedSelfOrAncestor: number[] = [],
   headerIndent = '',
   itemIndent = '  '
 ): void {
@@ -41,6 +43,9 @@ function printKilledProcesses(
     for (const e of killErrors) {
       console.error(`${itemIndent}${e}`);
     }
+  }
+  if (skippedSelfOrAncestor.length > 0) {
+    console.error(`${headerIndent}skipped self/ancestors: ${skippedSelfOrAncestor.join(', ')}`);
   }
 }
 
@@ -240,7 +245,13 @@ async function main(): Promise<void> {
           console.log(JSON.stringify(returned, null, 2));
           break;
         }
-        printKilledProcesses(returned.killedProcesses, returned.killErrors, '', '  ');
+        printKilledProcesses(
+          returned.killedProcesses,
+          returned.killErrors,
+          returned.skippedSelfOrAncestor,
+          '',
+          '  '
+        );
         const v = returned.verification;
         console.error('Worktree returned to pool');
         console.error('Self-check:');
@@ -284,7 +295,13 @@ async function main(): Promise<void> {
           if (result.orphanIds.length > 0) {
             console.error(`  Orphans: ${result.orphanIds.join(', ')}`);
           }
-          printKilledProcesses(result.killedProcesses, [], '  ', '    ');
+          printKilledProcesses(
+            result.killedProcesses,
+            [],
+            result.skippedSelfOrAncestor,
+            '  ',
+            '    '
+          );
         }
         if (result.errors.length > 0) {
           for (const err of result.errors) {
@@ -320,6 +337,9 @@ async function main(): Promise<void> {
             );
           }
         }
+        if (result.skippedSelfOrAncestor.length > 0) {
+          console.error(`skipped self/ancestors: ${result.skippedSelfOrAncestor.join(', ')}`);
+        }
         if (result.errors.length > 0) {
           for (const err of result.errors) {
             console.error(`  Error: ${err}`);
@@ -354,7 +374,13 @@ async function main(): Promise<void> {
       // Say plainly what state the pool is in, so a caller cannot read a
       // non-zero exit as "nothing happened" (#453). Never assert the entry was
       // marked without knowing it was — that claim being false is the bug.
-      printKilledProcesses(err.killedProcesses, err.killErrors, '', '  ');
+      printKilledProcesses(
+        err.killedProcesses,
+        err.killErrors,
+        err.skippedSelfOrAncestor,
+        '',
+        '  '
+      );
       if (err.entryId === null) {
         console.error('No pool entry was modified.');
       } else if (err.markError !== null) {

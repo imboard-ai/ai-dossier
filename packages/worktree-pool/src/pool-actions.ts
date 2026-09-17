@@ -20,6 +20,7 @@ import {
   validateState,
 } from './pool-state';
 import {
+  assertWorktreeKillRootSafe,
   DEFAULT_KILL_GRACE_MS,
   findWorktreeProcesses,
   firstSegmentUnder,
@@ -27,6 +28,7 @@ import {
   killProcesses,
   killWorktreeProcesses,
   resolveRootedChild,
+  selfOrAncestorMatches,
 } from './process-scan';
 import {
   detectProjectEnv,
@@ -939,6 +941,14 @@ export interface ReturnResult {
    * refused kill as "nothing was running."
    */
   killErrors: string[];
+  /**
+   * Pids that matched but were excluded because they are this process or an
+   * ancestor of it (imboard-ai/ai-dossier#763) — reported so an operator can
+   * see the exclusion happened rather than reading a shorter-than-expected
+   * `killedProcesses` list as a scan failure. Routinely non-empty: the CLI's
+   * own invocation (`return --path <wt>`) has `<wt>` in its own command line.
+   */
+  skippedSelfOrAncestor: number[];
 }
 
 /**
@@ -961,6 +971,8 @@ export class ReturnFailure extends Error {
   readonly killedProcesses: KilledProcess[];
   /** Non-fatal kill failures before the failure, if any — see `ReturnResult.killErrors`. */
   readonly killErrors: string[];
+  /** See `ReturnResult.skippedSelfOrAncestor` (imboard-ai/ai-dossier#763). */
+  readonly skippedSelfOrAncestor: number[];
 
   constructor(
     step: ReturnStep,
@@ -969,7 +981,8 @@ export class ReturnFailure extends Error {
     cause: unknown,
     markError: string | null = null,
     killedProcesses: KilledProcess[] = [],
-    killErrors: string[] = []
+    killErrors: string[] = [],
+    skippedSelfOrAncestor: number[] = []
   ) {
     super(`return failed at step '${step}': ${messageOf(cause)}`, { cause });
     this.name = 'ReturnFailure';
@@ -979,6 +992,7 @@ export class ReturnFailure extends Error {
     this.markError = markError;
     this.killedProcesses = killedProcesses;
     this.killErrors = killErrors;
+    this.skippedSelfOrAncestor = skippedSelfOrAncestor;
   }
 }
 
@@ -989,6 +1003,22 @@ function step<T>(name: ReturnStep, fn: () => T): T {
   } catch (err) {
     // Kept so that if a step is ever nested inside another, the innermost
     // attribution wins rather than being overwritten by its caller.
+    if (err instanceof StepError) throw err;
+    throw new StepError(name, err);
+  }
+}
+
+/**
+ * Async counterpart of {@link step}. `step` only catches a SYNCHRONOUS
+ * throw from `fn` — an async `fn` that rejects returns a rejected promise
+ * `step` never observes, so its `try/catch` cannot attribute the failure to
+ * `name`. Used for `kill-processes` (imboard-ai/ai-dossier#763), the one
+ * async action in `returnWorktree`.
+ */
+async function asyncStep<T>(name: ReturnStep, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
     if (err instanceof StepError) throw err;
     throw new StepError(name, err);
   }
@@ -1146,15 +1176,23 @@ export async function returnWorktree(worktreePath: string): Promise<ReturnResult
   let liveId = entry.id;
   let killedProcesses: KilledProcess[] = [];
   let killErrors: string[] = [];
+  let skippedSelfOrAncestor: number[] = [];
 
   try {
     // First step, before anything else touches the worktree (#760): a
     // verification step's dev server, jest run, or vite server must not
     // outlive the recycle. Scoped to exactly this worktree's absolute path —
     // never the whole pool directory — so a sibling worktree is untouched.
-    const killResult = await killWorktreeProcesses(livePath);
+    // Guarded (#763): refuses an empty/root/git-root/outside-pool-dir target
+    // before ever touching `/proc` — every current caller already derives a
+    // safe path, so this is defense in depth, not a path expected to fire.
+    const killResult = await asyncStep('kill-processes', async () => {
+      assertWorktreeKillRootSafe(livePath, gitRoot, poolDir);
+      return killWorktreeProcesses(livePath);
+    });
     killedProcesses = killResult.killed;
     killErrors = killResult.errors;
+    skippedSelfOrAncestor = killResult.skippedSelfOrAncestor;
 
     step('fetch', () => git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: livePath }));
 
@@ -1232,6 +1270,7 @@ export async function returnWorktree(worktreePath: string): Promise<ReturnResult
       verification: step('verify', () => verifyRecycled(poolDir, newId, newAbsPath, newTempBranch)),
       killedProcesses,
       killErrors,
+      skippedSelfOrAncestor,
     };
   } catch (err) {
     const failedStep: ReturnStep = err instanceof StepError ? err.step : 'unknown';
@@ -1263,7 +1302,8 @@ export async function returnWorktree(worktreePath: string): Promise<ReturnResult
       cause,
       markError,
       killedProcesses,
-      killErrors
+      killErrors,
+      skippedSelfOrAncestor
     );
   }
 }
@@ -1371,6 +1411,8 @@ export interface GcResult {
    * removal actually happens.
    */
   killedProcesses: KilledProcess[];
+  /** See `ReturnResult.skippedSelfOrAncestor` (#763), aggregated across all candidates. */
+  skippedSelfOrAncestor: number[];
 }
 
 function describeGcPlan(candidates: GcCandidate[], foreign: PoolDirEntryReport[]): void {
@@ -1491,7 +1533,17 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
   describeGcPlan(candidates, foreign);
 
   const killedProcesses: KilledProcess[] = [];
-  const base = { staleIds, orphanIds, brokenIds, foreign, candidates, errors, killedProcesses };
+  const skippedSelfOrAncestor: number[] = [];
+  const base = {
+    staleIds,
+    orphanIds,
+    brokenIds,
+    foreign,
+    candidates,
+    errors,
+    killedProcesses,
+    skippedSelfOrAncestor,
+  };
 
   if (opts.dryRun) {
     console.error('\nDry run — nothing was removed.');
@@ -1513,10 +1565,13 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
       if (c.path !== null) {
         // Kill before destroy (#760) — a candidate here is about to be
         // `git worktree remove --force`d or `rmSync`'d; anything still
-        // running out of it must not survive that as an orphan.
+        // running out of it must not survive that as an orphan. Guarded
+        // (#763) the same way `returnWorktree` is — see its comment.
+        assertWorktreeKillRootSafe(c.path, gitRoot, poolDir);
         const killResult = await killWorktreeProcesses(c.path);
         killedProcesses.push(...killResult.killed);
         errors.push(...killResult.errors);
+        skippedSelfOrAncestor.push(...killResult.skippedSelfOrAncestor);
         destroyWorktree(ctx, c.tempBranch, c.path);
       } else {
         deletePoolTempBranch(gitRoot, c.tempBranch);
@@ -1583,6 +1638,8 @@ export interface ReapResult {
   /** `true` when confirmation was missing and nothing was killed. */
   aborted: boolean;
   errors: string[];
+  /** See `ReturnResult.skippedSelfOrAncestor` (#763) — computed over the whole pool directory. */
+  skippedSelfOrAncestor: number[];
 }
 
 function describeReapPlan(candidates: ReapCandidate[]): void {
@@ -1653,6 +1710,7 @@ export async function reap(opts: ReapOptions = {}): Promise<ReapResult> {
   const registeredBranches = listWorktreeBranches(gitRoot);
 
   const allProcesses = fs.existsSync(poolDir) ? findWorktreeProcesses(poolDir) : [];
+  const skippedSelfOrAncestor = fs.existsSync(poolDir) ? selfOrAncestorMatches(poolDir) : [];
   const candidates: ReapCandidate[] = [];
 
   for (const proc of allProcesses) {
@@ -1679,17 +1737,38 @@ export async function reap(opts: ReapOptions = {}): Promise<ReapResult> {
   describeReapPlan(toKill);
 
   if (opts.dryRun) {
-    return { candidates: toKill, killed: [], dryRun: true, aborted: false, errors };
+    return {
+      candidates: toKill,
+      killed: [],
+      dryRun: true,
+      aborted: false,
+      errors,
+      skippedSelfOrAncestor,
+    };
   }
 
   const confirmation = await confirmOrAbort(toKill.length, 'Kill', opts);
   if (confirmation === 'no-tty') {
     console.error('\nRefusing to kill without confirmation. Re-run with --yes (or --dry-run).');
-    return { candidates: toKill, killed: [], dryRun: false, aborted: true, errors };
+    return {
+      candidates: toKill,
+      killed: [],
+      dryRun: false,
+      aborted: true,
+      errors,
+      skippedSelfOrAncestor,
+    };
   }
   if (confirmation === 'declined') {
     console.error('Aborted — nothing was killed.');
-    return { candidates: toKill, killed: [], dryRun: false, aborted: true, errors };
+    return {
+      candidates: toKill,
+      killed: [],
+      dryRun: false,
+      aborted: true,
+      errors,
+      skippedSelfOrAncestor,
+    };
   }
 
   const killResult = await killProcesses(
@@ -1700,7 +1779,14 @@ export async function reap(opts: ReapOptions = {}): Promise<ReapResult> {
   const killedPids = new Set(killResult.killed.map((k) => k.pid));
   const killed = toKill.filter((c) => killedPids.has(c.pid));
 
-  return { candidates: toKill, killed, dryRun: false, aborted: false, errors };
+  return {
+    candidates: toKill,
+    killed,
+    dryRun: false,
+    aborted: false,
+    errors,
+    skippedSelfOrAncestor,
+  };
 }
 
 export function status(): ReturnType<typeof getPoolStatus> & {
