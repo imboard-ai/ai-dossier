@@ -3,10 +3,10 @@
   "dossier_schema_version": "1.0.0",
   "name": "batch-integrate",
   "title": "Batch Integrate — Verify N Members Once, Repair What Is Yours, Escalate What Is Not",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-09-12",
+  "last_updated": "2026-09-15",
   "objective": "Merge a batch's members onto its integration branch, run the repo's expensive verification ONCE for all of them, repair mechanical failures, escalate semantic ones, never evict on a signal the verification cannot stand behind, release each disposed member's batch claim, and ship one PR",
   "category": [
     "development",
@@ -67,9 +67,9 @@
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "5Fjawcq7uESew1jg/o3XBRZAEU/uo8piMlaP2cWn+m2HGN6lVBJz18uaq8/jIobFciLafh2OugHK6KX3aQxhAA==",
+    "signature": "oZ7qG6y4yJ+GzNEyJcAR5vozF+WvyJzgxfex26ZAgCeDI0MJvUvx0qajAkE/Vqa6TyFXjfg+kzxz3jFq64c3CA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-12T11:15:17.455Z",
+    "signed_at": "2026-09-15T21:21:50.995Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"

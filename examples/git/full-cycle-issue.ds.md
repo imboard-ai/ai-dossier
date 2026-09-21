@@ -3,10 +3,10 @@
   "dossier_schema_version": "1.0.0",
   "name": "full-cycle-issue",
   "title": "Full Cycle Issue Workflow",
-  "version": "3.15.4",
+  "version": "3.16.0",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-09-13",
+  "last_updated": "2026-09-17",
   "objective": "Take a GitHub issue from start to merged PR autonomously — composed from shared sub-dossiers: gate, setup, plan, implement, review, ship, and report",
   "category": [
     "development"
@@ -77,13 +77,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "1dfc7ec32ce52c14f036072da2cd654c6b46a49426e9622eeade7d7fb21af680"
+    "hash": "ceca0683001cc167d4fa64b74d60876e8fb7d9ca9feaf744f05c3539c7fa04de"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "YXlndgKklhObinUPpOm2I06ylqNDAB4Sxn2PWr5hZNmLYWSNiip0OfkC5qHjbmeg7+wRhdBmK/GfqDvFzv0JBg==",
+    "signature": "MJhhKMVrqCVU/nRyis7nmTKG56bifT/z742UaAW3iOYJ4XkRT1QujbQEtzMhFTSclHdAZ9M4GqOPhl55VeUkCA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-13T06:43:11.667Z",
+    "signed_at": "2026-09-17T14:22:45.342Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -161,7 +161,7 @@ Per-phase `--kv` keys:
 | implement | done / blocked | `head=<short sha>` `files=<n>` `tests_added=<n>` `tests_run=<n>` `ci_parity=pass\|fail-then-fixed\|blocked-external\|skipped` |
 | review | done / partial / blocked | `head=` `fixed=<n>` `escalated=<n>` `tier=micro\|docs\|small\|full` `agents_done=<comma list>` `agents_pending=<comma list or none>` (lists cover only the tier's agents) `live=pass\|fail\|unverifiable\|n/a` `live_flows=<n>` (always present; `n/a`/`0` when Agent 8 did not run) `live_note=<slug>` (only when one applied) |
 | ship (1st, BEFORE the CI/merge wait) | awaiting-merge | `pr=<n>` `head=<pushed sha>` `ci_fix_attempts=0` |
-| ship (2nd, after merge + teardown) | done / blocked | `pr=` `merge_commit=` `ci_fix_attempts=<n>` `cleanup=pool_returned\|worktree_removed\|skipped` |
+| ship (2nd, after merge + teardown) | done / blocked | `pr=` `merge_commit=` `ci_fix_attempts=<n>` `cleanup=pool_returned\|worktree_removed\|skipped` `procs_killed=<n>` |
 | report | done | `pr=` `traps_added=<n>` |
 
 `next=` is the following phase: gate → setup → plan → implement → review → ship → report → done.

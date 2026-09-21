@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "ship-issue",
   "title": "Ship Issue — Commit, PR, Merge, Deploy, Teardown",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch",
@@ -109,16 +109,16 @@
       "name": "Yuval Dimnik"
     }
   ],
-  "last_updated": "2026-09-16",
+  "last_updated": "2026-09-17",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "54fed638dfcb197c82ab402d36b7e0b29e594d455f7651c1c5349f9aefee2218"
+    "hash": "22dc2eda17e743086de3287659f6f8d7272d9615e569ccd6656510e10e54a4b9"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "JdawgU0qGQe18TXpqMapPOuBYs+c3fz464neBzGH8JPv08S4SiCediHiQrvFS+BoojSPQVBRQG5eysXyLvgfBw==",
+    "signature": "NTw+T1jFas59MNrc1XTrpo0BpdznqQ1SFPD0Zwt5gl9GVTJsvakFee6BOsVfjb1Uwz/sPkifmWy/CgwZZkXFDA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-16T20:52:40.275Z",
+    "signed_at": "2026-09-17T14:29:08.743Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -314,9 +314,10 @@ Same order and verification discipline as per-issue Step 7, scoped to the batch:
 
 1. `scripts/ensure-test-env.sh --teardown` if the repo has it (batch test resources leak the same way).
 2. `cd` back to `original_dir` (if provided).
-3. Pool return if `pool_claimed` (setup's batch mode claims with the anchor issue) — `npx -y @ai-dossier/worktree-pool@^0.5.1 return --path <worktree_path>`; verify with pool `status` AND `git worktree list` before claiming `cleanup=pool_returned`.
-4. Else remove the worktree and delete the batch branch (local + remote). Deleting the branch after a rebase merge is safe — every commit was replayed onto the base branch; the replayed range is the durable artifact.
-5. Remove the `in-progress`-style labels only per the anchor's flow (the scheduler/report owns anchor closure).
+3. Pool return if `pool_claimed` (setup's batch mode claims with the anchor issue) — `npx -y @ai-dossier/worktree-pool@^0.7.0 return --path <worktree_path>`; verify with pool `status` AND `git worktree list` before claiming `cleanup=pool_returned`.
+4. **Kill processes rooted in the batch worktree (cold path only — skip when step 3's pool return succeeded)** — identical procedure to per-issue Step 7 item 3, scoped to the batch `<worktree_path>`: self/ancestor exclusion and the empty/`/`/repo-root/no-`/worktrees/`-segment guard both apply unchanged, then SIGTERM, wait 5s, SIGKILL survivors, assert none remain, carry the count to Batch Step 8's `procs_killed=`.
+5. Else remove the worktree and delete the batch branch (local + remote). Deleting the branch after a rebase merge is safe — every commit was replayed onto the base branch; the replayed range is the durable artifact.
+6. Remove the `in-progress`-style labels only per the anchor's flow (the scheduler/report owns anchor closure).
 
 ### Batch Step 8: Final Runstate Milestone — on the ANCHOR
 
@@ -329,6 +330,7 @@ ai-dossier runstate post --issue <anchor_number> --phase batch-ship --status don
   --kv deploy=<confirmed-sha|n/a|blocked-<reason>> \
   --kv cleanup=pool_returned|worktree_removed|skipped \
   --kv test_env=torn-down|none \
+  --kv procs_killed=<n> \
   --kv members=<comma list> \
   --kv strategy=rebase \
   --kv verdict_head=<short sha the last conformance verdict covered|none> \
@@ -336,7 +338,7 @@ ai-dossier runstate post --issue <anchor_number> --phase batch-ship --status don
   --kv verdict_check=<patch-id|sha-fallback>
 ```
 
-The CLI computes `next=batch-report` — report-issue's batch variant continues from this milestone (it reads the trail for traps evidence and takes the merge head from the PR itself). `merge_commit=` empty is the same failure it is per-issue: a batch report over an unmerged PR is a failed run, never a clean one.
+`procs_killed=` is Batch Step 7 item 4's kill count (`0` on a clean run, or whatever the pool reports when `cleanup=pool_returned`). The CLI computes `next=batch-report` — report-issue's batch variant continues from this milestone (it reads the trail for traps evidence and takes the merge head from the PR itself). `merge_commit=` empty is the same failure it is per-issue: a batch report over an unmerged PR is a failed run, never a clean one.
 
 ## Actions to Perform
 
@@ -753,14 +755,82 @@ Never emit an idle notification, end your turn, or proceed to Teardown (Step 7) 
 
 **Step 7.0 — release per-worktree test resources first.** If the repo has `scripts/ensure-test-env.sh` (or `main/scripts/ensure-test-env.sh`), run `bash scripts/ensure-test-env.sh --teardown` from the worktree BEFORE removing it. This drops the worktree's isolated test database and S3 prefix; skipping it leaks one database per run, and a shared-tier Atlas cluster caps at 500 collections cluster-wide — once full, every integration test fails with `cannot create a new collection -- already using 500 collections of 500`. Record `test_env=torn-down|none` in the final ship milestone.
 
-**Verify cleanup before claiming it.** `cleanup=pool_returned` may only be posted after confirming it: `npx -y @ai-dossier/worktree-pool@^0.5.1 status` no longer lists the entry as assigned AND `git worktree list` no longer contains the path. If the return errored or the state is inconsistent, post `cleanup=failed-<step>` instead — a milestone claiming completion is not proof of completion (imboard#3692, ai-dossier#453).
+**Verify cleanup before claiming it.** `cleanup=pool_returned` may only be posted after confirming it: `npx -y @ai-dossier/worktree-pool@^0.7.0 status` no longer lists the entry as assigned AND `git worktree list` no longer contains the path. If the return errored or the state is inconsistent, post `cleanup=failed-<step>` instead — a milestone claiming completion is not proof of completion (imboard#3692, ai-dossier#453).
 
 1. `cd` back to `original_dir` (if provided).
 2. **Try to return the worktree to the pool** (if `pool_claimed` is true) — on success the worktree is recycled, skip steps 3-5; on failure continue with manual cleanup:
    ```bash
-   npx -y @ai-dossier/worktree-pool@^0.5.1 return --path <worktree_path> 2>/dev/null
+   npx -y @ai-dossier/worktree-pool@^0.7.0 return --path <worktree_path> 2>/dev/null
    ```
-3. Remove the worktree and clean up the branches (deleting the remote branch also drops the run's WIP history — intended; the squash-merge commit on the base branch is the durable artifact):
+3. **Kill worktree-rooted processes (cold path only — skip when step 2's pool return succeeded; `worktree-pool return` owns this itself once it ships it).** A run's dev servers, jest workers, and Atlas-pool test connections must not outlive the checkout they ran in: list every process whose cwd or command line is under `<worktree_path>`, SIGTERM it, wait 5s, SIGKILL survivors, print what was killed, and assert none remain before touching the checkout — but first exclude this script's own shell and every one of its ancestors, since the shell's own argv contains `$WT` verbatim and a fleet run launched from inside the worktree puts the agent process itself under it too (an unguarded match would SIGTERM the very process running this step), and refuse to run at all when `<worktree_path>` is empty, `/`, the repo root, or has no `/worktrees/` segment, since any of those would match every process on the host instead of the one checkout being torn down. Written for bash AND zsh — never `for p in $LIST` over an unquoted variable (zsh does not word-split it the way bash does); pids only ever pass through a file and `xargs`:
+
+   ```bash
+   WT="<worktree_path>"
+   REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+   case "$WT" in
+     ""|/) echo "refusing: worktree_path is empty or /"; exit 1 ;;
+   esac
+   case "$WT" in
+     */worktrees/*) : ;;
+     *) echo "refusing: worktree_path '$WT' has no /worktrees/ segment"; exit 1 ;;
+   esac
+   if [ -n "$REPO_ROOT" ] && [ "$WT" = "$REPO_ROOT" ]; then
+     echo "refusing: worktree_path equals the repo root"; exit 1
+   fi
+
+   PIDS=$(mktemp); EXCL=$(mktemp); SURV=$(mktemp)
+
+   # self/ancestor exclusion set — $$ and every ancestor up to (and including) pid 1
+   ppid_of() {
+     if [ -d "/proc/$1" ]; then
+       sed 's/^[0-9]*[[:space:]]*(.*)[[:space:]]*//' "/proc/$1/stat" 2>/dev/null | awk '{print $2}'
+     else
+       ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '
+     fi
+   }
+   pid=$$
+   : >"$EXCL"
+   while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+     echo "$pid" >>"$EXCL"
+     pid=$(ppid_of "$pid")
+   done
+   echo 1 >>"$EXCL"
+   sort -un "$EXCL" -o "$EXCL"
+
+   if [ -d /proc ]; then
+     for p in /proc/[0-9]*; do            # globbing a path, not a variable — same in bash and zsh
+       pid=${p#/proc/}
+       { readlink "$p/cwd" 2>/dev/null; tr '\0' ' ' <"$p/cmdline" 2>/dev/null; } | grep -qF "$WT" && echo "$pid"
+     done >"$PIDS" 2>/dev/null
+   else
+     { lsof +D "$WT" -t 2>/dev/null; ps -eo pid,args | awk -v wt="$WT" 'index($0,wt){print $1}'; } | sort -un >"$PIDS"
+   fi
+   sort -un "$PIDS" -o "$PIDS"
+
+   EXCLUDED=$(grep -xFf "$EXCL" "$PIDS" | tr '\n' ' ')
+   [ -n "$EXCLUDED" ] && echo "excluded (self/ancestor, never a kill candidate): $EXCLUDED"
+   grep -vxFf "$EXCL" "$PIDS" >"$PIDS.filtered" 2>/dev/null
+   mv "$PIDS.filtered" "$PIDS"
+
+   if [ -s "$PIDS" ]; then
+     echo "worktree-rooted processes found:"; cat "$PIDS"
+     xargs -r kill -TERM <"$PIDS"
+     sleep 5
+     xargs -I{} sh -c 'kill -0 {} 2>/dev/null && echo {}' <"$PIDS" >"$SURV"
+     if [ -s "$SURV" ]; then
+       echo "SIGKILL survivors:"; cat "$SURV"
+       xargs -r kill -KILL <"$SURV"
+       sleep 1
+     fi
+   fi
+   PROCS_KILLED=$(wc -l <"$PIDS" | tr -d ' ')
+   STILL=$(xargs -I{} sh -c 'kill -0 {} 2>/dev/null && echo {}' <"$PIDS" 2>/dev/null)
+   [ -z "$STILL" ] || { echo "processes survived SIGKILL: $STILL"; exit 1; }
+   echo "procs_killed=$PROCS_KILLED"
+   ```
+
+   On a host without `/proc` (Linux hosts — WSL2, Fly, hcc/hcc2 — all have it; this is the non-Linux fallback), use `lsof`/`ps` as shown, and `ppid_of` falls back to `ps -o ppid=` the same way. Carry `PROCS_KILLED` to Step 8's `procs_killed=`; `0` is a valid, expected value on a clean run.
+4. Remove the worktree and clean up the branches (deleting the remote branch also drops the run's WIP history — intended; the squash-merge commit on the base branch is the durable artifact):
    ```bash
    git worktree remove <worktree_path>
    git branch -d <branch-name> 2>/dev/null || git branch -D <branch-name>
@@ -779,12 +849,13 @@ ai-dossier runstate post --issue <issue_number> --phase ship --status done --run
   --kv deploy=<confirmed-sha|n/a|blocked-<reason>> \
   --kv cleanup=pool_returned|worktree_removed|skipped \
   --kv test_env=torn-down|none \
+  --kv procs_killed=<n> \
   --kv verdict_head=<short sha the last conformance verdict covered|none> \
   --kv verdict_refreshed=<true|false> \
   --kv verdict_check=<patch-id|sha-fallback>
 ```
 
-`verdict_head=`/`verdict_refreshed=`/`verdict_check=` are the verdict-freshness result (Step 3a.5) for the head this merge actually landed. A tail run resuming at `ship-teardown` did not authorize the merge — the detached run's gate did — so it carries that run's `awaiting-merge` values forward rather than inventing new ones, **after confirming the head did not drift while the PR sat parked**: compare the merged head (`gh pr view <pr-number> --json mergeCommit,headRefOid`) against that milestone's `head=` — **not** `verdict_head=`: under `verdict_check=patch-id`, `verdict_head` is deliberately the reviewed head, which an empty CI-enable commit or a same-content rewrap leaves different from the head that was actually authorized and merged, so comparing against it would report drift on every healthy patch-id-fresh run. `head=` is the pushed sha the gate cleared (Step 3b), and is the correct drift baseline on both the `patch-id` and `sha-fallback` paths. On a mismatch post `--status blocked --kv reason=verdict-head-drifted` with the Guiding Principle hand-off instead of reporting a clean run. Parking a PR hands the merge timing to the watcher; nothing stops a push landing in between, and this is the only place that can catch it.
+`procs_killed=` is Step 7 item 3's `PROCS_KILLED` (`0` on a clean run; on `cleanup=pool_returned` the pool owns the kill and this is whatever it reports, or `0` if it reports nothing). `verdict_head=`/`verdict_refreshed=`/`verdict_check=` are the verdict-freshness result (Step 3a.5) for the head this merge actually landed. A tail run resuming at `ship-teardown` did not authorize the merge — the detached run's gate did — so it carries that run's `awaiting-merge` values forward rather than inventing new ones, **after confirming the head did not drift while the PR sat parked**: compare the merged head (`gh pr view <pr-number> --json mergeCommit,headRefOid`) against that milestone's `head=` — **not** `verdict_head=`: under `verdict_check=patch-id`, `verdict_head` is deliberately the reviewed head, which an empty CI-enable commit or a same-content rewrap leaves different from the head that was actually authorized and merged, so comparing against it would report drift on every healthy patch-id-fresh run. `head=` is the pushed sha the gate cleared (Step 3b), and is the correct drift baseline on both the `patch-id` and `sha-fallback` paths. On a mismatch post `--status blocked --kv reason=verdict-head-drifted` with the Guiding Principle hand-off instead of reporting a clean run. Parking a PR hands the merge timing to the watcher; nothing stops a push landing in between, and this is the only place that can catch it.
 
 Let the CLI stamp `at=` and compute `next=report` — do not pass either; never hand-write the comment. `ci_fix_attempts` is how many Step 5 fix-and-push cycles ran (0 if CI was green first time).
 
@@ -796,11 +867,12 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 - `merge_status`: merged | failed | parked (detached: PR open on auto-merge, no merge attempted)
 - `target_branch`: the branch merged into
 - `cleanup`: pool_returned | worktree_removed | skipped
+- `procs_killed`: number of worktree-rooted processes SIGTERM/SIGKILLed in Step 7 item 3 (`0` on a clean run; whatever the pool reports when `cleanup=pool_returned`)
 - `ci_fix_attempts`: number of CI fix-and-push cycles run in Step 5
 - `verdict_head`: the short sha the conformance verdict that authorized the merge actually covered (`none` when the issue carries no acceptance criteria)
 - `verdict_refreshed`: true | false — whether Step 3a.5 had to re-run Agent 7 because the reviewed diff was stale
 - `verdict_check`: patch-id | sha-fallback — which comparison Step 3a.5 used to decide freshness
-- Batch mode: `merge_commit` = the rebase merge head (N member commits landed individually), `members`, `strategy=rebase`
+- Batch mode: `merge_commit` = the rebase merge head (N member commits landed individually), `members`, `strategy=rebase`, `procs_killed` (batch worktree's cold-path kill count)
 - Posts TWO runstate milestones to the issue (`phase=ship`: `awaiting-merge` before the CI wait, then `done`) — in `detached` mode only the first, and the tail run posts the second. Batch mode posts `phase=batch-ship` milestones on the ANCHOR with the same two-step shape.
 
 ## Validation
@@ -821,9 +893,10 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 - [ ] Deploy confirmed: a successful deploy run CONTAINS `MERGE_COMMIT`, or `DEPLOYED=N/A` with a reason (Step 6c) — merged is not shipped
 - [ ] in-progress label removed
 - [ ] Worktree returned to pool or removed; returned to original directory
+- [ ] Cold teardown path (no pool return): every process rooted in the worktree was SIGTERM'd, survivors SIGKILL'd, none remained before `git worktree remove` — `procs_killed` recorded on the final milestone (`0` is a valid, expected value)
 - [ ] `scripts/ci-parity.sh` was run before committing when present
 - [ ] Runstate milestones were posted via `ai-dossier runstate post` (`awaiting-merge` before the CI wait — with `--next ship` — and, on the attached/tail path, the final one after teardown)
-- Batch mode: rebase prerequisites asserted BEFORE the PR (repo `allow_rebase_merge`, watcher batch-epic rebase support when a watcher exists, watcher presence for detached) — each failure posted `phase=batch-ship status=blocked reason=rebase-not-allowed|watcher-no-rebase|no-watcher` and stopped; PR body has one section per member with its AC checkboxes (from `member_verdicts`) and `Closes #N` per member (never the anchor); `batch-epic` applied and confirmed at PR creation (`auto-merge` applied and confirmed only when parking on or handing the merge to the watcher — never on the attached-no-watcher self-merge path); merged with `--rebase` (never `--squash`); `MERGE_COMMIT` = the merge head, deploy confirmed via the unchanged containment check; teardown returned/removed the BATCH worktree and deleted the batch branch; both milestones posted on the ANCHOR (`batch-ship` awaiting-merge with `--next batch-ship`, then done with `batch=` `pr=` `merge_commit=` `deploy=` `cleanup=` `test_env=` `members=` `strategy=rebase` `verdict_head=` `verdict_refreshed=` `verdict_check=`); Batch Step 3a.5's gate cleared before each batch merge authorization (the `auto-merge` park and the Batch Step 6 merge)
+- Batch mode: rebase prerequisites asserted BEFORE the PR (repo `allow_rebase_merge`, watcher batch-epic rebase support when a watcher exists, watcher presence for detached) — each failure posted `phase=batch-ship status=blocked reason=rebase-not-allowed|watcher-no-rebase|no-watcher` and stopped; PR body has one section per member with its AC checkboxes (from `member_verdicts`) and `Closes #N` per member (never the anchor); `batch-epic` applied and confirmed at PR creation (`auto-merge` applied and confirmed only when parking on or handing the merge to the watcher — never on the attached-no-watcher self-merge path); merged with `--rebase` (never `--squash`); `MERGE_COMMIT` = the merge head, deploy confirmed via the unchanged containment check; teardown returned/removed the BATCH worktree and deleted the batch branch, killing any worktree-rooted processes first on the cold path (`procs_killed`); both milestones posted on the ANCHOR (`batch-ship` awaiting-merge with `--next batch-ship`, then done with `batch=` `pr=` `merge_commit=` `deploy=` `cleanup=` `test_env=` `procs_killed=` `members=` `strategy=rebase` `verdict_head=` `verdict_refreshed=` `verdict_check=`); Batch Step 3a.5's gate cleared before each batch merge authorization (the `auto-merge` park and the Batch Step 6 merge)
 
 ## Troubleshooting
 
