@@ -211,4 +211,55 @@ describe.sequential('worktree repair after rename (#443)', () => {
       expect(output).not.toContain('fatal:');
     });
   });
+
+  /**
+   * A warm entry whose directory was deleted outside the pool (`rm -rf`,
+   * a manual `git worktree remove`) used to be handed out: claim then ran
+   * git with the missing directory as `cwd`, which fails as the misleading
+   * `spawnSync git ENOENT`.
+   */
+  describe('warm entries missing from disk', () => {
+    function deleteWarmDir(): { id: string; name: string } {
+      const entry = readPoolState().worktrees[0];
+      fs.rmSync(path.join(poolDir, entry.path), { recursive: true, force: true });
+      expect(fs.existsSync(path.join(poolDir, entry.path))).toBe(false);
+      return { id: entry.id, name: entry.path };
+    }
+
+    it('claim skips a missing entry and hands out the next warm one', () => {
+      runPool('replenish --count 1');
+      const missing = deleteWarmDir();
+      runPool('replenish --count 1');
+      const healthy = readPoolState().worktrees.find((w) => w.id !== missing.id);
+      expect(healthy).toBeDefined();
+
+      const output = runPoolCombined('claim --issue 4164 --branch fix/missing-skip');
+      expect(output).toContain('Missing from disk (skipped): 1');
+      expect(output).toContain(missing.name);
+      expect(output).not.toContain('ENOENT');
+
+      const claimed = readPoolState().worktrees.find((w) => w.assigned_to_issue === 4164);
+      expect(claimed?.id).toBe(healthy?.id);
+      expectUsableWorktree(path.join(poolDir, claimed?.path as string));
+    });
+
+    it('claim falls back cleanly when the only warm entry is missing', () => {
+      runPool('replenish --count 1');
+      deleteWarmDir();
+
+      let output = '';
+      let failed = false;
+      try {
+        runPoolCombined('claim --issue 4164 --branch fix/missing-none');
+      } catch (err) {
+        failed = true;
+        output = String((err as { stdout?: Buffer }).stdout ?? '');
+      }
+
+      expect(failed).toBe(true);
+      expect(output).toContain('Missing from disk (skipped): 1');
+      expect(output).toContain('No warm worktrees available');
+      expect(output).not.toContain('ENOENT');
+    });
+  });
 });
