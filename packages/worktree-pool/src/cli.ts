@@ -4,6 +4,7 @@ import {
   claim,
   detect,
   findBrokenEntries,
+  findMissingWarmEntries,
   formatAge,
   gc,
   init,
@@ -63,6 +64,19 @@ function reportCorrupted(corrupted: PoolDirEntryReport[]): void {
     console.error(`  ${b.name} — ${b.reason}`);
   }
   console.error("Run 'worktree-pool gc --yes' to clear corrupted pool directories.");
+}
+
+/**
+ * Print warm entries whose directory is gone from disk — removed outside the
+ * pool. Never fatal: claim skips them; `gc` drops the stale state entries.
+ */
+function reportMissing(missing: string[]): void {
+  if (missing.length === 0) return;
+  console.error(`Missing from disk (skipped): ${missing.length}`);
+  for (const name of missing) {
+    console.error(`  ${name} — recorded as warm, directory no longer exists`);
+  }
+  console.error("Run 'worktree-pool gc --yes' to drop stale pool entries.");
 }
 
 function usage(): void {
@@ -223,9 +237,11 @@ async function main(): Promise<void> {
         const result = claim(issue, branch);
         if (result) {
           reportCorrupted(result.broken);
+          reportMissing(result.missing);
           console.log(result.path);
         } else {
           reportCorrupted(findBrokenEntries());
+          reportMissing(findMissingWarmEntries());
           console.error("No warm worktrees available. Run 'worktree-pool replenish' first.");
           process.exit(1);
         }

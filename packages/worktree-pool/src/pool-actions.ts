@@ -803,6 +803,21 @@ export interface ClaimResult {
    * claim still succeeds; these are reported so the pool can be repaired.
    */
   broken: PoolDirEntryReport[];
+  /**
+   * Warm entries passed over because their directory no longer exists on disk
+   * (removed outside the pool). Handing one out used to run git with a
+   * nonexistent `cwd`, which Node reports as `spawnSync git ENOENT`.
+   */
+  missing: string[];
+}
+
+/** Warm state entries whose directory is gone from disk — what claim skips. */
+export function findMissingWarmEntries(): string[] {
+  const gitRoot = findGitRoot();
+  const poolDir = resolvePoolDirSync(gitRoot);
+  return readState(poolDir)
+    .worktrees.filter((w) => w.status === 'warm' && !fs.existsSync(toAbs(poolDir, w.path)))
+    .map((w) => w.path);
 }
 
 export function claim(issue: number, branch: string): ClaimResult | null {
@@ -813,10 +828,18 @@ export function claim(issue: number, branch: string): ClaimResult | null {
   // A warm entry whose directory lost its git admin dir would fail every git
   // command with a raw `fatal: not a git repository`. Skip it and take the
   // next warm spare instead, reporting what was passed over.
+  // A warm entry whose directory is gone from disk entirely is skipped too:
+  // every git call below runs with it as `cwd`, and a missing `cwd` surfaces
+  // as a misleading `spawnSync git ENOENT`.
   const brokenSkipped: PoolDirEntryReport[] = [];
+  const missingSkipped: string[] = [];
   const result = withLock(poolDir, (state) => {
     const ctx = buildOwnershipContext(gitRoot, poolDir, state);
     const claimed = claimFromState(state, issue, branch, (candidate) => {
+      if (!fs.existsSync(toAbs(poolDir, candidate.path))) {
+        missingSkipped.push(candidate.path);
+        return false;
+      }
       const report = classifyPath(ctx, toAbs(poolDir, candidate.path));
       if (!report.broken) return true;
       brokenSkipped.push(report);
@@ -878,7 +901,7 @@ export function claim(issue: number, branch: string): ClaimResult | null {
       result: undefined,
     }));
 
-    return { path: newAbsPath, broken: brokenSkipped };
+    return { path: newAbsPath, broken: brokenSkipped, missing: missingSkipped };
   } catch (err) {
     // Revert claim on failure
     withLock(poolDir, (state) => ({
