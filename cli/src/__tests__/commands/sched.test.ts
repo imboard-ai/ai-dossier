@@ -931,6 +931,97 @@ describe('ai-dossier sched status', () => {
   });
 });
 
+describe('#771: per-member review level (sched enqueue / status)', () => {
+  function writeManifest(entries: unknown[]): string {
+    const manifest = path.join(home, 'manifest-771.json');
+    fs.writeFileSync(manifest, JSON.stringify({ project: 'test-proj', entries }));
+    return manifest;
+  }
+
+  it('enqueues review=full slot members and status shows review + the strong floor per member', async () => {
+    const manifest = writeManifest([
+      { issue: 1, mode: 'slot', batch: 'b1', tier: 'mid', review: 'full' },
+      { issue: 2, mode: 'slot', batch: 'b1', tier: 'mid' },
+    ]);
+    await runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj']);
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries.map((e) => e.review)).toEqual(['full', 'light']);
+
+    logs = [];
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const queue = logs.join('\n').split('== Slots ==')[0];
+    const row = (issue: number) => queue.split('\n').find((l) => l.includes(`#${issue} `)) ?? '';
+    expect(queue).toContain('review');
+    expect(row(1)).toContain('mid→strong');
+    expect(row(1)).toMatch(/\bfull\b/);
+    expect(row(2)).toMatch(/\blight\b/);
+    expect(row(2)).not.toContain('→');
+  });
+
+  it('rejects a third review=full member in one batch (state untouched)', async () => {
+    const manifest = writeManifest([
+      { issue: 1, mode: 'slot', batch: 'b1', review: 'full' },
+      { issue: 2, mode: 'slot', batch: 'b1', review: 'full' },
+      { issue: 3, mode: 'slot', batch: 'b1', review: 'full' },
+    ]);
+    await expect(
+      runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
+    expect(fs.existsSync(statePath())).toBe(false);
+  });
+
+  it("honors config's max_full_review_members override", async () => {
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+    fs.writeFileSync(
+      configPath(),
+      JSON.stringify({ schema_version: '1.4.0', max_slots: 3, max_full_review_members: 3 })
+    );
+    const manifest = writeManifest([
+      { issue: 1, mode: 'slot', batch: 'b1', review: 'full' },
+      { issue: 2, mode: 'slot', batch: 'b1', review: 'full' },
+      { issue: 3, mode: 'slot', batch: 'b1', review: 'full' },
+    ]);
+    await runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj']);
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries.filter((e) => e.review === 'full')).toHaveLength(3);
+  });
+
+  it('--review full applies to --issues slot members; an invalid level is rejected', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '5',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--review',
+      'full',
+      '--project',
+      'test-proj',
+    ]);
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries[0]).toMatchObject({ issue: 5, review: 'full' });
+    await expect(
+      runSched([
+        'sched',
+        'enqueue',
+        '--issues',
+        '6',
+        '--mode',
+        'slot',
+        '--batch',
+        'b2',
+        '--review',
+        'deep',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
+  });
+});
+
 describe('ai-dossier sched pause/resume/abandon', () => {
   it('pauses and resumes, persisting the flag', async () => {
     await runSched(['sched', 'pause', '--project', 'test-proj']);

@@ -15,8 +15,15 @@ import { DISPATCH_PROFILE_RE } from './dispatch';
 import { unwrapList } from './json';
 import { labelBlockReason } from './labels';
 import { CLEARED_ENTRY_DEDUP_MARKERS, createBatch, findBatch, transitionBatch } from './state';
-import type { BatchStatus, CycleMode, ModelTier, QueueEntry, SchedState } from './types';
-import { DEFAULT_ISSUE_PRIORITY, TERMINAL_ISSUE_STATUSES } from './types';
+import type {
+  BatchStatus,
+  CycleMode,
+  ModelTier,
+  QueueEntry,
+  ReviewLevel,
+  SchedState,
+} from './types';
+import { DEFAULT_ISSUE_PRIORITY, MAX_FULL_REVIEW_MEMBERS, TERMINAL_ISSUE_STATUSES } from './types';
 
 export class EnqueueError extends Error {
   constructor(message: string) {
@@ -69,6 +76,13 @@ export interface EnqueueInput {
   batch?: string | null;
   deps?: number[];
   tier?: ModelTier;
+  /**
+   * Review level for a slot member (#771, default `light`). `full` lets a
+   * risk-floor issue join a batch while still getting full-cycle-grade
+   * review; capped per batch (see `EnqueueOptions.maxFullReviewMembers`).
+   * Rejected on a full-cycle entry, which always gets full review.
+   */
+  review?: ReviewLevel;
   /**
    * Assignment weight for a full-cycle entry (#565, default 0). Ignored for
    * a slot-mode member — see `batch_priority` for the BATCH's own weight.
@@ -124,6 +138,19 @@ export interface EnqueueInput {
    * lands as `blocked` with `reason: 'label:<name>'` instead of `queued`.
    */
   blocked_label?: string | null;
+}
+
+/** Caller-resolved knobs for `enqueueEntries` — this module stays config-free. */
+export interface EnqueueOptions {
+  /**
+   * Per-batch cap on `review=full` members (#771). The CLI resolves it from
+   * `SchedConfig.max_full_review_members`; default `MAX_FULL_REVIEW_MEMBERS`.
+   */
+  maxFullReviewMembers?: number;
+}
+
+function isReviewLevel(value: unknown): value is ReviewLevel {
+  return value === 'light' || value === 'full';
 }
 
 function asPositiveInt(value: unknown, label: string): number {
@@ -188,6 +215,12 @@ export function parseManifest(raw: unknown): EnqueueInput[] {
         throw new EnqueueError(`Manifest entry [${i}]: tier must be mechanical | mid | strong`);
       }
       input.tier = obj.tier;
+    }
+    if (obj.review !== undefined) {
+      if (!isReviewLevel(obj.review)) {
+        throw new EnqueueError(`Manifest entry [${i}]: review must be 'light' | 'full'`);
+      }
+      input.review = obj.review;
     }
     if (obj.priority !== undefined) {
       input.priority = asInt(obj.priority, `Manifest entry [${i}]: priority`);
@@ -368,10 +401,17 @@ function assertBatchFactsAgree(
 export function enqueueEntries(
   state: SchedState,
   inputs: EnqueueInput[],
-  now: Date = new Date()
+  now: Date = new Date(),
+  options: EnqueueOptions = {}
 ): SchedState {
   if (inputs.length === 0) {
     throw new EnqueueError('No entries to enqueue');
+  }
+  const maxFullReviewMembers = options.maxFullReviewMembers ?? MAX_FULL_REVIEW_MEMBERS;
+  if (!Number.isInteger(maxFullReviewMembers) || maxFullReviewMembers < 0) {
+    throw new EnqueueError(
+      `max_full_review_members must be a non-negative integer, got ${String(maxFullReviewMembers)}`
+    );
   }
 
   const seen = new Set<number>();
@@ -405,6 +445,19 @@ export function enqueueEntries(
       input.tier !== 'strong'
     ) {
       throw new EnqueueError(`Issue ${input.issue}: tier must be mechanical | mid | strong`);
+    }
+    if (input.review !== undefined) {
+      if (!isReviewLevel(input.review)) {
+        throw new EnqueueError(`Issue ${input.issue}: review must be 'light' | 'full'`);
+      }
+      // A full-cycle run always gets full review — a `review` on it would be
+      // parsed and then mean nothing (or, as `light`, promise a review it
+      // never gets). Reject rather than silently carry it.
+      if ((input.mode ?? 'full') !== 'slot') {
+        throw new EnqueueError(
+          `Issue ${input.issue}: review applies to mode 'slot' batch members only — a full-cycle entry always gets full review`
+        );
+      }
     }
     if (input.priority !== undefined) asInt(input.priority, `Issue ${input.issue}: priority`);
     if (input.batch_priority !== undefined) {
@@ -480,6 +533,7 @@ export function enqueueEntries(
       deps: input.deps ? [...input.deps] : [],
       priority: input.priority ?? DEFAULT_ISSUE_PRIORITY,
       tier: input.tier ?? 'mid',
+      review: input.review ?? 'light',
       dispatch_profile: mode === 'full' ? (input.dispatch ?? null) : null,
       status: input.blocked_label ? 'blocked' : 'queued',
       reason: input.blocked_label ? labelBlockReason(input.blocked_label) : null,
@@ -592,7 +646,36 @@ export function enqueueEntries(
     }
   }
 
+  assertFullReviewCap(combined, touchedBatchIds, maxFullReviewMembers);
+
   return sealCompletedBatches(combined, touchedBatchIds, heldBatchIds, now);
+}
+
+/**
+ * #771 batch invariant: at most `max` `review=full` members per batch — the
+ * operator's bound on a batch's deploy blast radius (#770 Option A). Counted
+ * over the batch's FULL membership after this call (existing members plus
+ * joiners), so an incremental join cannot sneak a third one in. Only batches
+ * this call touched are checked: an untouched batch's count cannot change.
+ */
+function assertFullReviewCap(
+  state: SchedState,
+  touchedBatchIds: ReadonlySet<string>,
+  max: number
+): void {
+  for (const batchId of touchedBatchIds) {
+    const batch = findBatch(state, batchId);
+    if (!batch) continue;
+    const full = batch.members.filter(
+      (issue) =>
+        state.entries.find((e) => e.issue === issue && e.batch === batchId)?.review === 'full'
+    );
+    if (full.length > max) {
+      throw new EnqueueError(
+        `Batch ${batchId} would carry ${full.length} review=full members (${full.map((i) => `#${i}`).join(', ')}) — at most ${max} per batch (max_full_review_members). Move one to another batch, or run it as mode 'full'`
+      );
+    }
+  }
 }
 
 /**

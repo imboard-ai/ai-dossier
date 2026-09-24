@@ -49,6 +49,8 @@ import {
   LockTimeoutError,
   labelBlockReason,
   labelOfBlockReason,
+  MAX_FULL_REVIEW_MEMBERS,
+  memberDispatchTier,
   OPENCODE_DISPATCH_COMMAND,
   parseManifest,
   recordTickFailure,
@@ -190,6 +192,8 @@ interface EnqueueOptions extends SchedOptions {
   batch?: string;
   deps?: string;
   tier?: string;
+  /** #771: review level for --issues slot members (light | full). */
+  review?: string;
   fromManifest?: string;
   repo?: string;
   moreMembersExpected?: boolean;
@@ -234,6 +238,13 @@ function parseTier(raw: string | undefined): 'mechanical' | 'mid' | 'strong' {
   if (raw === undefined || raw === 'mid') return 'mid';
   if (raw === 'mechanical' || raw === 'strong') return raw;
   fail([`--tier must be mechanical | mid | strong, got '${raw}'`]);
+}
+
+/** `--review <level>` (#771): undefined when omitted, so full-mode entries carry none. */
+function parseReview(raw: string | undefined): 'light' | 'full' | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === 'light' || raw === 'full') return raw;
+  fail([`--review must be light | full, got '${raw}'`]);
 }
 
 /** `--priority <n>` (#565): any integer, undefined when the flag was omitted (the caller resolves the default). */
@@ -363,7 +374,19 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   lines.push('== Queue ==');
   lines.push(
     renderTable(
-      ['issue', 'mode', 'batch', 'profile', 'priority', 'tier', 'deps', 'status', 'pr', 'cleanup'],
+      [
+        'issue',
+        'mode',
+        'batch',
+        'profile',
+        'priority',
+        'tier',
+        'review',
+        'deps',
+        'status',
+        'pr',
+        'cleanup',
+      ],
       report.queue.map((e) => [
         `#${e.issue}`,
         e.mode,
@@ -375,7 +398,13 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
         // (the BATCH's priority governs, in the table below) — render '-'
         // rather than a number that looks load-bearing but is not.
         e.mode === 'slot' ? '-' : String(e.priority),
-        e.tier,
+        // #771: a review=full member dispatches at `strong` minimum — show the
+        // floor rather than a manifest tier that is not what actually spawns.
+        e.mode === 'slot' && memberDispatchTier(e) !== e.tier
+          ? `${e.tier}→${memberDispatchTier(e)}`
+          : e.tier,
+        // Review level is a slot-member concept; a full cycle always reviews fully.
+        e.mode === 'slot' ? (e.review ?? 'light') : '-',
         e.deps.length > 0 ? e.deps.map((d) => `#${d}`).join(',') : '-',
         e.status,
         e.pr !== null && e.pr !== undefined ? String(e.pr) : '-',
@@ -880,6 +909,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
     .option('--batch <id>', 'Batch id (required for slot mode)')
     .option('--deps <numbers>', 'Comma-separated dependency issue numbers (applied to all)')
     .option('--tier <tier>', 'Model tier: mechanical | mid (default) | strong', 'mid')
+    .option(
+      '--review <level>',
+      "Slot members only: review level light (default) | full — a review=full member dispatches at strong tier minimum and gets full-cycle-grade review; at most 2 per batch (config's max_full_review_members)"
+    )
     .option('--from-manifest <path>', 'JSON file of entries (batch-prep output)')
     .option(
       '--more-members-expected',
@@ -956,6 +989,7 @@ function registerEnqueueSubcommand(cmd: Command): void {
       if (opts.issues) {
         const mode = parseMode(opts.mode);
         const tier = parseTier(opts.tier);
+        const review = parseReview(opts.review);
         const deps = opts.deps ? issueList(opts.deps, 'deps') : [];
         for (const issue of issueList(opts.issues, 'issues')) {
           inputs.push({
@@ -964,6 +998,7 @@ function registerEnqueueSubcommand(cmd: Command): void {
             batch: opts.batch ?? null,
             deps,
             tier,
+            ...(review !== undefined ? { review } : {}),
             // #565: for a slot-mode entry, --priority addresses the BATCH
             // (batch_priority below) — the member's own priority is never
             // read by the scheduler (only `mode: 'full'` entries compete for
@@ -1028,10 +1063,17 @@ function registerEnqueueSubcommand(cmd: Command): void {
 
       const failed = screenHardBlockLabels(inputs, opts.repo);
 
+      // #771: the per-batch review=full cap, resolved from config here —
+      // `enqueueEntries` stays config-free, same as default_batch_priority.
+      const maxFullReviewMembers =
+        store.loadConfig().max_full_review_members ?? MAX_FULL_REVIEW_MEMBERS;
+
       let queueDepth: number;
       try {
         queueDepth = store.withLock((state) => {
-          const next = enqueueEntries(state, inputs);
+          const next = enqueueEntries(state, inputs, new Date(), {
+            maxFullReviewMembers,
+          });
           return { state: next, result: next.entries.length };
         });
       } catch (err) {

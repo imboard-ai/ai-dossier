@@ -265,6 +265,24 @@ describe('issue state machine (RFC-0001 §D.1)', () => {
 const TO_FULL = { mode: 'full', batch: null } as const;
 
 describe('requeueMember (regressions)', () => {
+  it('#771: a review=full member requeued to full-cycle keeps its strong floor as a real tier', () => {
+    const base = seeded();
+    let state = {
+      ...base,
+      entries: base.entries.map((e) =>
+        e.issue === 201 ? { ...e, tier: 'mechanical' as const, review: 'full' as const } : e
+      ),
+    };
+    state = transitionIssue(state, 201, 'classified', {}, NOW);
+    state = transitionIssue(state, 201, 'batched', {}, NOW);
+    const result = requeueMember(state, 201, TO_FULL, 'evicted', NOW2);
+    const entry = findEntry(result.state, 201);
+    expect(entry).toMatchObject({ mode: 'full', batch: null, tier: 'strong', review: 'light' });
+    // A light member's tier is untouched.
+    const light = requeueMember(state, 202, TO_FULL, 'evicted', NOW2);
+    expect(findEntry(light.state, 202)).toMatchObject({ tier: 'mid', review: 'light' });
+  });
+
   it('#503: is idempotent on an already-requeued entry — no IllegalTransitionError, metadata retagged', () => {
     let state = seeded();
     state = transitionIssue(state, 201, 'classified', {}, NOW);

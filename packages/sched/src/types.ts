@@ -21,6 +21,15 @@ export type CycleMode = 'full' | 'slot';
 /** Model tier the entry is dispatched at (RFC-0001 role-based routing: mechanical / generation / judgment). */
 export type ModelTier = 'mechanical' | 'mid' | 'strong';
 
+/**
+ * Per-entry review level (#771, #770 Option A). `light` is the member-cycle's
+ * relevance-scoped review; `full` asks a slot member for full-cycle-grade
+ * review, so a risk-floor issue (billing/security/auth/deploy/migration) can
+ * ride a batch instead of being forced out to `mode=full`. Meaningful on
+ * `mode=slot` members only — a full-cycle entry always gets full review.
+ */
+export type ReviewLevel = 'light' | 'full';
+
 // --- D.1 Issue state machine ---
 
 /**
@@ -304,6 +313,13 @@ export interface QueueEntry {
   priority: number;
   /** Model tier the entry is dispatched at. */
   tier: ModelTier;
+  /**
+   * Review level (#771). Default `light`; `full` on a slot member dispatches it
+   * at `strong` tier minimum (see `memberDispatchTier`) and carries
+   * `review=full` into its member prompt. At most `MAX_FULL_REVIEW_MEMBERS`
+   * (or `SchedConfig.max_full_review_members`) per batch, enforced at enqueue.
+   */
+  review: ReviewLevel;
   /**
    * Named dispatch profile resolved at enqueue for a full-cycle entry (#713).
    * Null deliberately selects the project's default profile; slot entries use
@@ -861,6 +877,12 @@ export interface SchedConfig {
    * ahead of same-readiness issue units unless the operator says otherwise.
    */
   default_batch_priority?: number;
+  /**
+   * Cap on `review=full` members per batch (#771). Default
+   * `MAX_FULL_REVIEW_MEMBERS` (2) — bounds a batch's deploy blast radius while
+   * still letting risk-floor issues join. Enforced at enqueue.
+   */
+  max_full_review_members?: number;
 }
 
 /**
@@ -1263,6 +1285,12 @@ export interface SchedConfigFile {
   auto_upgrade?: boolean;
   dissolve_policy?: DissolvePolicy;
   default_batch_priority?: number;
+  /**
+   * Cap on `review=full` members per batch (#771). Default
+   * `MAX_FULL_REVIEW_MEMBERS` (2) — bounds a batch's deploy blast radius while
+   * still letting risk-floor issues join. Enforced at enqueue.
+   */
+  max_full_review_members?: number;
 }
 
 export const DEFAULT_MAX_SLOTS = 3;
@@ -1278,6 +1306,9 @@ export const DEFAULT_ISSUE_PRIORITY = 0;
 
 /** Default `BatchEntry.priority` (#565) — see `SchedConfig.default_batch_priority`. Must stay > `DEFAULT_ISSUE_PRIORITY`. */
 export const DEFAULT_BATCH_PRIORITY = 10;
+
+/** Default per-batch cap on `review=full` members (#771) — see `SchedConfig.max_full_review_members`. */
+export const MAX_FULL_REVIEW_MEMBERS = 2;
 
 /** Bounds for `max_slots` when reading `config.json` (named — not magic numbers in persist.ts). */
 export const MIN_MAX_SLOTS = 1;
@@ -1569,6 +1600,8 @@ export interface JournalEvent {
   issue?: number;
   pid?: number;
   tier?: ModelTier;
+  /** Review level of a `review=full` member dispatch (#771); absent for `light`. */
+  review?: ReviewLevel;
   /** The worktree a member dispatch spawned into (#677) — the per-member evidence trail. */
   worktree?: string;
   detail?: string;

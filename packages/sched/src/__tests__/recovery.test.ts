@@ -339,6 +339,19 @@ describe('fix attempts', () => {
     expect(eventNames(h.events)).toEqual(['fix-dispatched']);
   });
 
+  it("#771: a review=full member's fix attempt keeps the strong floor", () => {
+    const base = batchState([201, 202]);
+    const state = {
+      ...base,
+      entries: base.entries.map((e) => (e.issue === 201 ? { ...e, review: 'full' as const } : e)),
+    };
+    const h = harness();
+    const result = beginFixAttempt(state, 'b1', 201, h.deps);
+    expect(result.dispatch?.tier).toBe('strong');
+    // A light member still fixes at the default mid tier.
+    expect(beginFixAttempt(state, 'b1', 202, harness().deps).dispatch?.tier).toBe('mid');
+  });
+
   it('refuses a second attempt for the same member — the next step is eviction', () => {
     const state = batchState([201, 202]);
     const h = harness();

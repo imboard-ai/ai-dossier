@@ -665,7 +665,35 @@ below. 1.9.0 and earlier states migrate on load, backfilling absent OR explicit 
 those same defaults: nothing before this field existed was ever weighted differently, so
 the backfill is exact, not a guess.
 
-## Unit priority (#565)
+## Per-member review level (#771)
+
+A slot member carries `review: 'light' | 'full'` on its `QueueEntry` (default `light`;
+pre-#771 `state.json` entries backfill to `light` on load — exact, since every earlier slot
+member got the light, relevance-scoped review). `review=full` is how a risk-floor issue
+(billing/security/auth/deploy/migration) joins a batch instead of being forced out to
+`mode=full` (#770, operator Option A):
+
+- **Enqueue** — set per manifest entry (`"review": "full"`) or with `sched enqueue --mode
+  slot --review full`. Rejected on a `mode=full` entry (a full cycle always reviews fully).
+  At most `MAX_FULL_REVIEW_MEMBERS` (2) `review=full` members per batch, counted over the
+  batch's whole membership after the call so an incremental join cannot slip a third in;
+  a violating call is rejected with an `EnqueueError` and writes nothing. The cap is
+  overridable per project via `config.json`'s `max_full_review_members` (a non-negative
+  integer), resolved by the CLI and passed to `enqueueEntries` as
+  `options.maxFullReviewMembers` — the core stays config-free.
+- **Dispatch** — `memberDispatchTier` floors a `review=full` member at `strong`, whatever
+  tier its manifest asked for; the recorded `QueueEntry.tier` stays as written. Only the
+  tier moves: the batch's dispatch profile still resolves the executor for that tier, so the
+  batch stays one agent family. The member's `spawned` journal event carries `review: "full"`.
+  The floor follows the member: its bounded fix attempt dispatches at `strong` (not
+  `FIX_ATTEMPT_TIER`), and an eviction/abandon requeue to full-cycle rewrites its `tier` to the
+  floored value (and `review` back to `light`, a slot-only concept) so the full cycle keeps it.
+- **Prompt** — `buildMemberPrompt` substitutes a `{review}` placeholder; a `review=full`
+  member whose template lacks one gets `FULL_REVIEW_MEMBER_DIRECTIVE` appended (full-cycle-
+  grade review before handover). A `light` member's prompt is byte-identical to before.
+- **Status** — `sched status`'s Queue table has a `review` column for slot members, and the
+  `tier` column shows the floor as `mid→strong` when it applies.
+
 
 `readiness.ts`'s `runnableUnits` ranks EVERY candidate — issues and batches together — by
 `priority` desc, then readiness age (`updated_at`) asc, then a numeric tiebreak (an
