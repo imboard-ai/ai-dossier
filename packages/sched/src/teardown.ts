@@ -61,6 +61,15 @@ export interface TeardownResult {
 /** Whether a path exists (injectable so tests need no filesystem). */
 export type FsExists = (p: string) => boolean;
 
+/** The real `FsExists` — `fs.existsSync`, never throwing. Shared default so it is defined once (#791 DRY review). */
+export const defaultFsExists: FsExists = (p) => {
+  try {
+    return fs.existsSync(p);
+  } catch {
+    return false;
+  }
+};
+
 /**
  * Containment check for a worktree path recovered from an issue comment
  * (#468): the path must be absolute and fully resolved (no `..`/`.`/symlink
@@ -110,13 +119,7 @@ export function runTeardown(
   exec: ExecFn,
   repoDir: string,
   info: SetupInfo,
-  fsExists: FsExists = (p) => {
-    try {
-      return fs.existsSync(p);
-    } catch {
-      return false;
-    }
-  }
+  fsExists: FsExists = defaultFsExists
 ): TeardownResult {
   // The worktree path originates from an issue comment written by the spawned
   // agent — validate it before any destructive subprocess (CWE-22).
@@ -209,8 +212,13 @@ function worktreeRemove(
   return { cleanup: 'done', detail: 'worktree removed' };
 }
 
-/** The pool entry status (`warm`/`assigned`/…) for `worktree`, or null when absent/unparseable. */
-function poolEntryFor(statusJson: string, worktree: string): string | null {
+/**
+ * The pool entry status (`warm`/`assigned`/…) for `worktree`, or null when
+ * absent/unparseable. Exported (#791) so a caller can tell "the pool already
+ * shows this path returned" from ledger-observed state alone, without
+ * duplicating the `worktree-pool status --json` parse.
+ */
+export function poolEntryFor(statusJson: string, worktree: string): string | null {
   try {
     const parsed: unknown = JSON.parse(statusJson);
     if (parsed === null || typeof parsed !== 'object') return null;

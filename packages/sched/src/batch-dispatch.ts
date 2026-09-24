@@ -170,7 +170,14 @@ import {
   transitionSlot,
   validatedMembersOf,
 } from './state';
-import { type FsExists, isSafeWorktree, POOL_ARGS_PREFIX, POOL_BIN, runTeardown } from './teardown';
+import {
+  type FsExists,
+  isSafeWorktree,
+  POOL_ARGS_PREFIX,
+  POOL_BIN,
+  poolEntryFor,
+  runTeardown,
+} from './teardown';
 import type {
   AttributionMethod,
   BatchEntry,
@@ -4017,6 +4024,80 @@ function reconcileStaleBlockedBatches(
 }
 
 /**
+ * #791: once a `done` batch's kept worktree (left in place by the
+ * `members-closed` branch above) is DEFINITIVELY gone — the path no longer
+ * exists on disk, or the pool itself now reports it back as a warm spare —
+ * clear the ledger's `worktree`/`pool_claimed` (and, separately,
+ * `member_worktree`/`member_pool_claimed`) fields so `sched status`'s
+ * `kept-worktree` warning does not persist after the operator's cleanup
+ * already happened. Ledger-only, by construction: this function reads
+ * `fsExists` and `worktree-pool status --json` (both read-only) and never
+ * builds a `git worktree remove` / `worktree-pool return` argv — the actual
+ * removal stays entirely the operator's call, exactly like the warning
+ * itself. Bounded the same way the warning's own candidate scan is: only
+ * `done` batches carrying a kept worktree are considered, which in practice
+ * is a small set.
+ */
+function reconcileKeptWorktrees(deps: BatchDispatchDeps, now: Date): void {
+  const state = deps.store.load();
+  const fsExists = deps.fsExists ?? ((p: string) => fs.existsSync(p));
+  const candidates = state.batches.filter(
+    (b) => b.status === 'done' && (b.worktree !== null || b.member_worktree !== null)
+  );
+  if (candidates.length === 0) return;
+
+  const needsPoolCheck = candidates.some(
+    (b) =>
+      (b.worktree !== null && b.pool_claimed) ||
+      (b.member_worktree !== null && b.member_pool_claimed)
+  );
+  // One pool query per TICK, not per candidate — `worktree-pool status` is a
+  // real subprocess (`npx ...`), and this reconcile is meant to be cheap.
+  const poolStatusJson = needsPoolCheck
+    ? deps.exec(POOL_BIN, [...POOL_ARGS_PREFIX, 'status', '--json'], deps.repoDir)
+    : null;
+
+  const goneOrReturned = (worktree: string, poolClaimed: boolean): boolean => {
+    if (!fsExists(worktree)) return true;
+    if (poolClaimed && poolStatusJson !== null) {
+      return poolEntryFor(poolStatusJson, worktree) === 'warm';
+    }
+    return false;
+  };
+
+  for (const batch of candidates) {
+    const clears: Omit<Partial<BatchEntry>, 'id' | 'status'> = {};
+    const clearedFields: string[] = [];
+    if (batch.worktree !== null && goneOrReturned(batch.worktree, batch.pool_claimed)) {
+      clears.worktree = null;
+      clears.pool_claimed = false;
+      clearedFields.push('worktree', 'pool_claimed');
+    }
+    if (
+      batch.member_worktree !== null &&
+      goneOrReturned(batch.member_worktree, batch.member_pool_claimed)
+    ) {
+      clears.member_worktree = null;
+      clears.member_pool_claimed = false;
+      clearedFields.push('member_worktree', 'member_pool_claimed');
+    }
+    if (clearedFields.length === 0) continue;
+
+    deps.store.withLock((s) => {
+      const b = findBatch(s, batch.id);
+      // Re-check under the lock: another tick, or an operator command, may
+      // have already moved this batch or cleared the fields itself.
+      if (!b || b.status !== 'done') return { state: s, result: undefined };
+      return { state: patchBatch(s, batch.id, clears, now, false), result: undefined };
+    });
+    journalEvent(deps, 'kept-worktree-cleared', unit(batch.id), {
+      cleared: clearedFields.join(','),
+      detail: `kept-worktree ledger field(s) cleared on definitive evidence (${clearedFields.join(', ')}) — path gone or pool reports it returned; no removal command was run`,
+    });
+  }
+}
+
+/**
  * #768: what one tick's anchor work reads GitHub and git through — built once
  * per tick so the stale-blocked reconcile and the anchor close never read the
  * same issue twice in a tick. `undefined` when the tick cannot verify anything
@@ -5445,5 +5526,6 @@ export function runBatchTick(
   const anchorCtx = anchorTickContext(deps);
   reconcileStaleBlockedBatches(deps, now, result, anchorCtx);
   reconcileAnchorClosure(deps, now, anchorCtx);
+  reconcileKeptWorktrees(deps, now);
   return result;
 }

@@ -1124,6 +1124,8 @@ import {
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
                          //   (+ optional `anchorSweep` → `anchors`, #768; null without it)
+                         //   (+ optional `worktreeReader` → `kept-worktree` warnings, #791)
+  keptWorktreeCandidates, buildKeptWorktreeWarnings, defaultKeptWorktreeReader,  // #791
   sweepAnchors, classifyAnchor, membersShippedVerdict, anchorLedgerBlockers,
   shippingEvidence,      // #768 anchor-close predicate (pure; readers injected)
   closeAnchor,           // #768 idempotent comment-then-close, `-R <repo>` explicit
@@ -1327,10 +1329,14 @@ after-the-fact recovery, not a missing-data bug.
   can be manual (`sched pause`) or automatic (dispatch-health, #505/#629 above); `sched
   resume` clears the flag and both dispatch-health streaks.
 
-## Status health warnings (#776)
+## Status health warnings (#776, #791)
 
-`sched status` (and `warnings[]` in `--json`, built by `buildStatusWarnings`) flags state
-nobody came back to, each with its exact remedy:
+`sched status` (and `warnings[]` in `--json`) flags state nobody came back to, each with
+its exact remedy. Most kinds come from `buildStatusWarnings`, pure over state + engine
+lease + clock; `kept-worktree` (below) comes from the separate `buildKeptWorktreeWarnings`,
+since it needs local git/fs reads — it only appears when the caller passes a
+`KeptWorktreeReader` to `buildStatusReport` (the CLI always does; a test harness omits it
+to skip the check entirely):
 
 - **`long-pause`** — paused for more than 24 h (`STATUS_HEALTH_WARNING_AGE_MS`), measured
   from `paused_at`, which `setPaused` stamps on the running → paused edge and clears on
@@ -1344,6 +1350,25 @@ nobody came back to, each with its exact remedy:
   closed issue sets the entry's sticky `stale_closed_at`, journals `stale-closed` once, and
   the recovery rail never respawns it (even after `sched resume`). Report slots are exempt:
   their issue is closed at merge by design. Remedy: `sched stop --issue N`.
+- **`kept-worktree`** (#791) — a `done` batch whose `worktree` or `member_worktree` is
+  still set in the ledger: the `members-closed` stale-blocked reconcile below
+  intentionally leaves it in place (it may hold unpushed operator repair work), and
+  nothing else surfaced it until now. For each kept path, `sched status` reports:
+  whether it still exists on disk; whether it is pool-claimed (the claim is held
+  indefinitely until returned); and, via two local, read-only `git` probes scoped to
+  that worktree's own `HEAD` (`git --no-optional-locks status --porcelain`, `git log
+  HEAD --not --remotes`), whether it has uncommitted or unpushed work. The remedy is the
+  exact `git worktree remove <path>` or `worktree-pool return --path <path>` command,
+  properly shell-quoted — report-only, never executed. `reconcileKeptWorktrees`
+  (`batch-dispatch.ts`, run every tick) separately clears the ledger's `worktree`/
+  `pool_claimed` fields once there is DEFINITIVE evidence the cleanup already
+  happened — the path no longer exists, or the pool itself reports it back as a warm
+  spare — so the warning does not persist after the operator (or the pool) has already
+  dealt with it; it never removes anything itself. A candidate whose path is currently
+  claimed by a different, still in-flight batch is skipped (a returned pool worktree can
+  be re-issued before the done batch's own field clears). Local-git-only, capped at 10
+  probed candidates per run — no network call, so unlike `sched status --anchors` this
+  runs by default.
 
 ## Batch anchors close only on positive evidence (#768)
 
@@ -1380,7 +1405,9 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   for #686's stale-blocked reconcile (`members-closed`), which survives the mandated
   rebase-merge that makes the ancestry probe structurally dead. It finishes the terminal
   rail inline but never tears the blocked worktree down (it may hold unpushed work);
-  the journal line says the worktree was kept.
+  the journal line says the worktree was kept, and `sched status` then raises a
+  `kept-worktree` warning for it on every run until the ledger field clears — see
+  above and `reconcileKeptWorktrees` (#791).
 
 Everything else is surfaced, never closed: `sched status --anchors` (opt-in; `status`
 makes no GitHub call without it) lists each still-open anchor of a batch no longer in
