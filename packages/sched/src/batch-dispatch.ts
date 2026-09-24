@@ -3734,14 +3734,19 @@ function anchorTickContext(deps: BatchDispatchDeps): AnchorTickContext | undefin
     if (!cache.has(issue)) cache.set(issue, reader(issue));
     return cache.get(issue);
   };
-  const fetched = new Set<string>();
+  const fetched = new Map<string, boolean>();
   const commitInBase: CommitInBase = (oid, baseBranch) => {
     // CWE-88: both are interpolated into git argv — the oid comes from GitHub.
     if (!GIT_OID_RE.test(oid) || !SAFE_REF_RE.test(baseBranch)) return false;
     if (!fetched.has(baseBranch)) {
-      deps.exec('git', ['fetch', 'origin', baseBranch], deps.repoDir);
-      fetched.add(baseBranch);
+      fetched.set(
+        baseBranch,
+        deps.exec('git', ['fetch', 'origin', baseBranch], deps.repoDir) !== null
+      );
     }
+    // A failed fetch leaves a possibly stale `origin/<base>` (a force-push may
+    // have dropped the commit since): unverifiable, so never evidence.
+    if (fetched.get(baseBranch) !== true) return false;
     // `--is-ancestor` exits 0 (non-null) iff reachable; 1 and any failure → null.
     return (
       deps.exec(
