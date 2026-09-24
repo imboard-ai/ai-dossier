@@ -95,15 +95,18 @@ describe('assessIssue — readiness', () => {
     expect(a.excluded).toEqual([{ code: 'unreadable', message: 'gh is not authenticated' }]);
   });
 
-  it('a plan:v1 artifact over the file-count floor is prescreen-full (excluded)', () => {
+  it('a plan:v1 artifact over the file-count floor is an admissible review=full member (#818)', () => {
     const files = Array.from({ length: 9 }, (_, i) => `cli/src/f${i}.ts`);
     const a = assessIssue(input({ predictedFiles: files }));
-    expect(a.excluded.map((e) => e.code)).toEqual(['prescreen-full']);
+    expect(a.admissible).toBe(true);
+    expect(a.excluded).toEqual([]);
+    expect(a.review).toBe('full');
+    expect(a.prescreen).toEqual([expect.objectContaining({ check: 'file-count' })]);
     expect(a.packages).toEqual(['cli']);
   });
 });
 
-describe('#805: a plan:v1 risk-floor path is a review=full member, not an exclusion (prescreen:v3)', () => {
+describe('#805: a plan:v1 risk-floor path is a review=full member, not an exclusion (prescreen:v3+)', () => {
   // imboard#4343's shape: batch-prep admitted it on the `billing` keyword and posted a plan:v1
   // artifact predicting a billing job; a later compose re-run must still admit it.
   const riskPath = ['packages/backend/src/billing/billing-sync.job.ts'];
@@ -128,15 +131,63 @@ describe('#805: a plan:v1 risk-floor path is a review=full member, not an exclus
     expect(a.excluded.map((e) => e.code)).toEqual(['prescreen-full']);
   });
 
-  it('>8 predicted files still excludes even with a risk-floor path among them', () => {
+  it('>8 predicted files with a risk-floor path among them is still one review=full member (#818)', () => {
     const files = [...riskPath, ...Array.from({ length: 8 }, (_, i) => `cli/src/f${i}.ts`)];
     const a = assessIssue(input({ predictedFiles: files }));
-    expect(a.excluded.map((e) => e.code)).toEqual(['prescreen-full']);
-    expect(a.excluded[0]?.message).not.toContain('rule1-risk-floor-area');
+    expect(a.admissible).toBe(true);
+    expect(a.review).toBe('full');
+    expect(a.prescreen.map((r) => r.check)).toEqual(['path-floor', 'file-count']);
   });
 });
 
-describe('assessIssue — review level (#770 Option A, prescreen:v3)', () => {
+describe('#818: E.2 rules 4 (deploy pipeline) and 5 (>8 files) are review=full members (prescreen:v4)', () => {
+  const nine = Array.from({ length: 9 }, (_, i) => `packages/backend/src/f${i}.ts`);
+  const deploy = {
+    title: 'fix(ci): deploy job skips the smoke gate after a build-once promote',
+    body: 'The deploy workflow in `packages/backend/fly.toml` promotes the image unchecked.',
+  };
+
+  it('a deploy-pipeline issue (imboard#4136 shape) is admitted at review=full', () => {
+    const a = assessIssue(input(deploy));
+    expect(a).toMatchObject({ admissible: true, review: 'full', excluded: [] });
+  });
+
+  it('a 9-file plan (imboard#4239 shape) is admitted at review=full', () => {
+    const a = assessIssue(input({ predictedFiles: nine }));
+    expect(a).toMatchObject({ admissible: true, review: 'full', excluded: [] });
+  });
+
+  it('--rules legacy still excludes both (pre-#770 admission)', () => {
+    const files = assessIssue(input({ predictedFiles: nine }), 'legacy');
+    expect(files.admissible).toBe(false);
+    expect(files.excluded.map((e) => e.code)).toEqual(['prescreen-full']);
+    expect(files.excluded[0]?.message).toContain('rule5-file-count');
+    expect(files.excluded[0]?.message).toContain('Legacy rules');
+    const pipeline = assessIssue(input(deploy), 'legacy');
+    expect(pipeline.admissible).toBe(false);
+    expect(pipeline.excluded.map((e) => e.code)).toEqual(['legacy-full']);
+  });
+
+  it('compose over 4 rule-4/5 picks + 1 light pick forms one batch with ≤ 2 review=full (the rest held)', () => {
+    // The #770 validation-run-#2 set: #4239 (9 files), #4355 (10 files), #4136/#3549 (deploy), #4216 light.
+    const ten = Array.from({ length: 10 }, (_, i) => `packages/backend/src/g${i}.ts`);
+    const picks = [
+      assessIssue(input({ issue: 4239, predictedFiles: nine })),
+      assessIssue(input({ issue: 4355, predictedFiles: ten })),
+      assessIssue(input({ issue: 4136, ...deploy })),
+      assessIssue(input({ issue: 3549, title: 'fix: rollback pipeline skips migrations check' })),
+      assessIssue(input({ issue: 4216 })),
+    ];
+    expect(picks.every((a) => a.admissible)).toBe(true);
+    const r = composeBatch(picks, OPTS);
+    expect(r.members.filter((m) => m.review === 'full')).toHaveLength(2);
+    expect(r.members.map((m) => m.issue)).toContain(4216);
+    expect(r.held).toHaveLength(2);
+    expect(r.held.every((h) => h.reason === 'review-full-cap')).toBe(true);
+  });
+});
+
+describe('assessIssue — review level (#770 Option A, prescreen:v4)', () => {
   it('a risk keyword in scope makes the issue an admissible review=full member, not an exclusion', () => {
     const a = assessIssue(input({ title: 'fix: billing sweep window arithmetic' }));
     expect(a.admissible).toBe(true);

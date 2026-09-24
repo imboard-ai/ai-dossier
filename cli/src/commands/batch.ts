@@ -1,6 +1,6 @@
 /**
  * `ai-dossier batch compose` (#773, #770 P3) — preview which issues may share a batch PR, with
- * zero model tokens. Runs prescreen:v3 + the deterministic readiness screen over the operator's
+ * zero model tokens. Runs prescreen:v4 + the deterministic readiness screen over the operator's
  * picks and/or the backlog and proposes a composition honouring the scheduler's batch invariants
  * (≤ `max_full_review_members` review=full members, one base branch, 3–6 members), listing ranked
  * backfill candidates when the picks fall short.

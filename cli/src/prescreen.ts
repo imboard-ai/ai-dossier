@@ -16,8 +16,13 @@
  * any finding — a text-floor keyword hit included — sets `review: full`. A text-floor hit alone
  * is a batchable `candidate` reviewed at full depth (#770 Option A), and the text floor scans the
  * change surface only (`floorScanText`: reference sections/lines and provenance clauses removed).
- * v3 (#805, `PRESCREEN_SCHEMA`): a plan:v1 risk-floor PATH is review-raising too, exactly like the keyword it makes
- * precise — `verdict: full` is left to hard-block label, open dependency and >8 predicted files.
+ * v3 (#805): a plan:v1 risk-floor PATH is review-raising too, exactly like the keyword it makes
+ * precise — `verdict: full` was left to hard-block label, open dependency and >8 predicted files.
+ * v4 (#818, `PRESCREEN_SCHEMA`): #770 Option A extended to E.2 rule 4 (deploy pipeline — the
+ * text floor was already review-raising since v2) and rule 5 (>8 predicted files): both are
+ * review-depth questions, not can-share-a-PR questions. `verdict: full` is now left to the
+ * hard-block label and a rule-9 open dependency. Rule 8 (visual/browser) stays excluding, but
+ * this module never detected it — the classifier's model pass does.
  *
  * Pure and dependency-free (no `gh`, network, or fs), same discipline as `plan-artifact.ts` and
  * `runstate.ts` — unit-testable directly. Subprocess access (fetching the issue, resolving
@@ -383,33 +388,44 @@ export interface PrescreenInput {
  * floor and >8 predicted files. v3 (#805): a plan:v1 path-floor hit is also `candidate` +
  * `review: full` — the same risk fact as the keyword, only more precise, so under #770 Option A it
  * raises review instead of excluding. Otherwise batch-prep's own plan:v1 artifact would exclude a
- * member it had just admitted on any compose/prescreen re-run.
+ * member it had just admitted on any compose/prescreen re-run. v4 (#818): >8 predicted files
+ * (rule 5) is also `candidate` + `review: full` — a large change is reviewed at full depth inside
+ * a batch (still subject to the ≤ 2 `review=full` cap), not excluded from one.
  */
-export const PRESCREEN_SCHEMA = 'prescreen:v3';
+export const PRESCREEN_SCHEMA = 'prescreen:v4';
 
 /**
  * Checks whose hit excludes the issue from batching outright (`verdict: full`). Exported so
  * `batch compose` derives its `prescreen-full` exclusion from this one list instead of a
- * hand-kept copy (#805 had to edit both).
+ * hand-kept copy (#805 had to edit both). Since v4 (#818) only a hard-block label and an open
+ * dependency exclude; every floor finding (text, path, file count) raises `review` instead.
  */
 export const EXCLUDING_CHECKS: ReadonlySet<PrescreenReason['check']> = new Set([
   'hard-block-label',
   'open-dependency',
+]);
+
+/**
+ * Checks that excluded under pre-#770 admission and are review-raising today — `batch compose
+ * --rules legacy` reproduces the old behaviour from this list (a legacy text-floor keyword is
+ * handled separately there, over the unfiltered pre-#772 text).
+ */
+export const LEGACY_EXCLUDING_CHECKS: ReadonlySet<PrescreenReason['check']> = new Set([
+  'path-floor',
   'file-count',
 ]);
 
 export interface PrescreenVerdict {
   /**
-   * `full` = an excluding hit (hard-block label, open dependency, >8 predicted files) — reject
-   * before any model call. `candidate` = proceed to the bounded mechanical-tier classify pass;
+   * `full` = an excluding hit (hard-block label, open dependency) — reject before any model call. `candidate` = proceed to the bounded mechanical-tier classify pass;
    * read `review` for how deeply it must be reviewed.
    */
   verdict: 'full' | 'candidate';
   /**
    * Review depth the issue needs, vocabulary shared with the scheduler's per-member `review`
-   * (#771): `full` when ANY floor finding exists — a text-floor keyword or plan:v1 path-floor hit
-   * on a `candidate` means "batchable, but reviewed at full depth" (#770 Option A, #805), not
-   * exclusion. `light` when no check found anything.
+   * (#771): `full` when ANY floor finding exists — a text-floor keyword (rules 1/3/4), a plan:v1
+   * path-floor hit or >8 predicted files on a `candidate` means "batchable, but reviewed at full
+   * depth" (#770 Option A, #805, #818), not exclusion. `light` when no check found anything.
    */
   review: 'light' | 'full';
   /** Every check's finding, in evaluation order — not just the one that decided `verdict`. */
