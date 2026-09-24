@@ -122,6 +122,12 @@ describe('#805: a plan:v1 risk-floor path is a review=full member, not an exclus
     expect(r.members).toContainEqual(expect.objectContaining({ issue: 4343, review: 'full' }));
   });
 
+  it('--rules legacy still excludes a plan:v1 risk-floor path (pre-#770 admission)', () => {
+    const a = assessIssue(input({ predictedFiles: riskPath }), 'legacy');
+    expect(a.admissible).toBe(false);
+    expect(a.excluded.map((e) => e.code)).toEqual(['prescreen-full']);
+  });
+
   it('>8 predicted files still excludes even with a risk-floor path among them', () => {
     const files = [...riskPath, ...Array.from({ length: 8 }, (_, i) => `cli/src/f${i}.ts`)];
     const a = assessIssue(input({ predictedFiles: files }));

@@ -12,11 +12,11 @@
  * a plan artifact, rule 10 confidence) falls through to the classifier's own bounded
  * mechanical-tier pass, which is the intended safety net — not a gap this module needs to close.
  *
- * v2 (#772, `PRESCREEN_SCHEMA`): two outputs. `verdict: full` only for the EXCLUDING checks;
+ * v2 (#772): two outputs. `verdict: full` only for the EXCLUDING checks;
  * any finding — a text-floor keyword hit included — sets `review: full`. A text-floor hit alone
  * is a batchable `candidate` reviewed at full depth (#770 Option A), and the text floor scans the
  * change surface only (`floorScanText`: reference sections/lines and provenance clauses removed).
- * v3 (#805): a plan:v1 risk-floor PATH is review-raising too, exactly like the keyword it makes
+ * v3 (#805, `PRESCREEN_SCHEMA`): a plan:v1 risk-floor PATH is review-raising too, exactly like the keyword it makes
  * precise — `verdict: full` is left to hard-block label, open dependency and >8 predicted files.
  *
  * Pure and dependency-free (no `gh`, network, or fs), same discipline as `plan-artifact.ts` and
@@ -387,8 +387,12 @@ export interface PrescreenInput {
  */
 export const PRESCREEN_SCHEMA = 'prescreen:v3';
 
-/** Checks whose hit excludes the issue from batching outright (`verdict: full`). */
-const EXCLUDING_CHECKS: ReadonlySet<PrescreenReason['check']> = new Set([
+/**
+ * Checks whose hit excludes the issue from batching outright (`verdict: full`). Exported so
+ * `batch compose` derives its `prescreen-full` exclusion from this one list instead of a
+ * hand-kept copy (#805 had to edit both).
+ */
+export const EXCLUDING_CHECKS: ReadonlySet<PrescreenReason['check']> = new Set([
   'hard-block-label',
   'open-dependency',
   'file-count',
@@ -397,16 +401,15 @@ const EXCLUDING_CHECKS: ReadonlySet<PrescreenReason['check']> = new Set([
 export interface PrescreenVerdict {
   /**
    * `full` = an excluding hit (hard-block label, open dependency, >8 predicted files) — reject
-   * before any model call. `candidate` = proceed to the bounded
-   * mechanical-tier classify pass; read `review` for how deeply it must be reviewed.
+   * before any model call. `candidate` = proceed to the bounded mechanical-tier classify pass;
+   * read `review` for how deeply it must be reviewed.
    */
   verdict: 'full' | 'candidate';
   /**
    * Review depth the issue needs, vocabulary shared with the scheduler's per-member `review`
    * (#771): `full` when ANY floor finding exists — a text-floor keyword or plan:v1 path-floor hit
    * on a `candidate` means "batchable, but reviewed at full depth" (#770 Option A, #805), not
-   * exclusion. `light` when
-   * no check found anything.
+   * exclusion. `light` when no check found anything.
    */
   review: 'light' | 'full';
   /** Every check's finding, in evaluation order — not just the one that decided `verdict`. */
