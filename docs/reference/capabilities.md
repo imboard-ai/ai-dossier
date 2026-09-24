@@ -51,6 +51,7 @@ capabilities:
 | entry `.description` | string | no | What the capability does (shown by `cap list`) |
 | entry `.timeout_ms` | number | no | Per-entry command timeout in ms (default 5 min; a timeout is `automation-broken`) |
 | entry `.min_duration_ms` | number | no | Sanity floor (#583): a non-zero exit that finishes faster than this is reclassified `automation-broken` instead of `task-failed` — "this probably didn't really run", not a genuine failure. Default 0 (no floor) |
+| entry `.timeout_prone` | boolean | no | The repo's own admission (#777) that this capability routinely runs past any reasonable `cap run` budget. On `test.full` with no active `gate.batch`, `sched enqueue` refuses to form a batch (see [the batch gate](#the-batch-gate-gatebatch-777)). Default `false` |
 
 Capability ids are dotted lowercase words (`test.focused`, `worktree.prepare`).
 
@@ -148,7 +149,8 @@ but use these when they fit):
 | `worktree.cleanup` | Clean up / return a worktree |
 | `dependencies.install` | Install project dependencies (npm/pnpm/uv/…) |
 | `test.focused` | Fast, targeted test suite (batch member gate fast path) |
-| `test.full` | Complete test suite |
+| `test.full` | Complete test suite (the batch gate's fallback) |
+| `gate.batch` | The gate a batch pays once before its PR — normally the same CI-parity gate a single PR pays (#777) |
 | `lint.run` | Linter/formatter check (batch member gate fast path) |
 | `typecheck.run` | Type checking (tsc / mypy / …) |
 | `build.run` | Build the project |
@@ -193,13 +195,59 @@ member reports review-done. It degrades exactly as the vocabulary above implies 
 
 A repo that declares neither id runs batches end to end. Skipping costs *early*
 detection — a bad member's commit may be built on before anyone notices — but not
-correctness: the aggregate `test.full` gate still runs before ship, CI still runs on
+correctness: the aggregate batch gate (`gate.batch`, else `test.full`) still runs before ship, CI still runs on
 the batch PR, and #562's attribution still pins a red suite to the member that caused
 it. Declaring the two ids buys earlier, cheaper failure, which is the whole point of
 progressive determinism.
 
 The skip is always journalled. A gate that silently does not run is its own trap, and
 silence must never read as a pass.
+
+## The batch gate: `gate.batch` (#777)
+
+A batch's `validating` phase runs ONE aggregate gate over the combined work of every
+member before the tail agent opens the batch PR. The scheduler resolves it in this order,
+each tier preferred to the next:
+
+| Tier | What runs | When |
+|---|---|---|
+| 0 | `cap run gate.batch` | the manifest declares an **active** `gate.batch` |
+| 1 | `cap run test.full` | no active `gate.batch` (or `cap run` reported it `capability-unavailable`) |
+| 2 | `dispatch.suite_command` from sched config | neither capability available |
+| 3 | the repo's detected test runner | nothing above |
+
+`gate.batch` exists because `test.full` is the wrong gate for a repo whose full suite is
+too slow to finish: a batch should pay **the same gate a normal PR pays, once** — e.g. a
+CI-parity script, affected-scoped over the union of the members' diffs — not the most
+expensive suite the repo has. Its command runs with `cwd` = the batch integration
+worktree and two extra environment variables:
+
+| Variable | Value |
+|---|---|
+| `DOSSIER_BATCH_BASE` | the ref the batch branched from, as a fetchable ref — `origin/<base_branch>` (scope with `git diff "$DOSSIER_BATCH_BASE"...HEAD`) |
+| `DOSSIER_BATCH_ID` | the batch id |
+
+```yaml
+  gate.batch:
+    command: scripts/ci-parity.sh --isolated-db --base "$DOSSIER_BATCH_BASE"
+    lifecycle: active
+    timeout_ms: 2700000   # its own budget; test.full's is not consulted
+    description: CI-parity gate, affected-scoped against the batch base
+```
+
+Its outcomes map to the batch exactly as `test.full`'s do: `ok` → green (next member or
+the tail); `task-failed` with a parseable vitest JSON report → red, attributed to the
+offending member; `task-failed` with no parseable report, or `automation-broken`
+(including a timeout) → the batch blocks `suite-unreadable`, every member commit
+preserved. A declared capability's verdict is never replaced by a detected-runner retry.
+
+**Timeout-prone full gates.** A repo whose `test.full` cannot finish inside any
+reasonable budget should say so with `timeout_prone: true`. When that is the only full
+gate — no active `gate.batch` — `sched enqueue` refuses to form a new batch and says
+why, rather than admitting members into a gate that usually ends `suite-unreadable`.
+Declare `gate.batch`, or run those issues as ordinary full cycles. The check reads the
+manifest in the directory `enqueue` runs in, and is skipped when `--repo` names another
+repository.
 
 ## Non-goals (per #463)
 

@@ -979,7 +979,7 @@ export interface DispatchConfig {
   fix_prompt?: string;
   /**
    * Aggregate batch-suite command, argv form (#562) — the middle tier of the
-   * suite-command resolution order (`cap run test.full` manifest → this →
+   * suite-command resolution order (`cap run gate.batch` → `cap run test.full` manifest (#777) → this →
    * repo-detected safe default). Set this when the repo's `test` script
    * delegates to something that cannot take extra reporter flags (a
    * Makefile, a shell wrapper) and there is no `.dossier/automation/`

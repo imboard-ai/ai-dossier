@@ -28,6 +28,7 @@ import { batchMemberLogPath } from '../dispatch';
 import {
   assignToIdleSlot,
   type BatchDispatchDeps,
+  type BatchSuiteContext,
   type CapabilityGateResult,
   createSpawnDeps,
   type EngineDeps,
@@ -347,7 +348,7 @@ function batchHarness(
   agentArgs: string[],
   opts?: {
     maxSlots?: number;
-    suite?: (worktree: string) => SuiteResult;
+    suite?: (worktree: string, ctx?: BatchSuiteContext) => SuiteResult;
     capability?: (worktree: string, capabilityId: string) => CapabilityGateResult;
     /** #561: simulated `npx worktree-pool claim` result — null = no warm spares (default, matches every scratch repo's real state). */
     poolClaimPath?: string | null;
@@ -442,7 +443,7 @@ function batchDispatchDepsFrom(
     now: h.deps.now,
     repoDir: h.deps.repoDir,
     exec: h.deps.batchExec as ExecFn,
-    runSuite: h.deps.runBatchSuite as (worktree: string) => SuiteResult,
+    runSuite: h.deps.runBatchSuite as BatchDispatchDeps['runSuite'],
     runCapability: capability,
   };
 }
@@ -1088,14 +1089,18 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     // parseable report at all, distinct from a genuinely red, PARSEABLE
     // suite. `beginAttribution` would read `failing: []` as "nothing to
     // attribute" and dissolve — `readable: false` must route elsewhere.
+    const suiteCalls: unknown[][] = [];
     const h = batchHarness(repo, ['--mode=batch'], {
       maxSlots: 1,
-      suite: () => ({
-        ok: false,
-        failing: [],
-        readable: false,
-        detail: "make: unrecognized option '--reporter=json'",
-      }),
+      suite: (worktree, ctx) => {
+        suiteCalls.push([worktree, ctx]);
+        return {
+          ok: false,
+          failing: [],
+          readable: false,
+          detail: "make: unrecognized option '--reporter=json'",
+        };
+      },
     });
     h.enqueue([{ issue: 901, mode: 'slot', batch: 'b-unreadable', anchor: 900, tier: 'mid' }]);
     // b-unreadable is already sealed forming → ready by enqueueEntries
@@ -1111,6 +1116,12 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(batch?.status).toBe('blocked');
     expect(result.failed).toContain('batch:b-unreadable');
     expect(result.blocked).toEqual([]); // nothing requeued — the whole point of #562
+
+    // #777: the runner is told which batch it gates and the base it branched
+    // from, in the batch worktree — the runner hands these to `gate.batch`.
+    expect(suiteCalls).toEqual([
+      [batch?.worktree, { batchId: 'b-unreadable', baseRef: `origin/${batch?.base_branch}` }],
+    ]);
 
     const entry = h.state().entries.find((e) => e.issue === 901);
     expect(entry?.mode).toBe('slot'); // never flipped to 'full' (no requeue)
