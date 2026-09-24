@@ -903,3 +903,57 @@ describe('#791: kept-worktree warning', () => {
     expect(report.warnings.filter((w) => w.kind === 'kept-worktree')).toEqual([]);
   });
 });
+
+describe('#790 status: the orphan anchor sweep rides the same --anchors opt-in', () => {
+  it('is null unless asked for (--anchors) — same as the ledger sweep', () => {
+    expect(buildStatusReport(seeded(), { max_slots: 3 }, 'p').orphan_anchors).toBeNull();
+  });
+
+  it('is null when the ledger sweep is asked for but no orphan lister is supplied', () => {
+    const report = buildStatusReport(seeded(), { max_slots: 3 }, 'p', null, NOW, {
+      read: () => ({ state: 'OPEN', stateReason: null, labels: [], closer: null, closingPrs: [] }),
+    });
+    expect(report.anchors).toEqual([]); // ledger sweep still ran
+    expect(report.orphan_anchors).toBeNull(); // orphan sweep did not
+  });
+
+  it('lists an open batch-epic anchor whose batch is not in state.batches, alongside the ledger sweep', () => {
+    const report = buildStatusReport(seeded(), { max_slots: 3 }, 'p', null, NOW, {
+      read: (n) =>
+        n === 4244
+          ? { state: 'OPEN', stateReason: null, labels: [], closer: null, closingPrs: [] }
+          : {
+              state: 'CLOSED',
+              stateReason: 'COMPLETED',
+              labels: [],
+              closer: { kind: 'commit', oid: 'a'.repeat(40) },
+              closingPrs: [],
+            },
+      commitInBase: () => true,
+      orphanList: () => [
+        {
+          number: 4244,
+          title: 'Batch b-20260912-02: #4146',
+          body: '- [ ] #4146 x\n\nbase_branch: main',
+        },
+      ],
+    });
+    expect(report.orphan_anchors).toEqual([
+      {
+        anchor: 4244,
+        title: 'Batch b-20260912-02: #4146',
+        verdict: 'orphan-closable-candidate',
+        reasons: [],
+        members: [
+          {
+            issue: 4146,
+            ledger_status: null,
+            github: 'CLOSED',
+            state_reason: 'COMPLETED',
+            shipped_by: `commit ${'a'.repeat(12)}`,
+          },
+        ],
+      },
+    ]);
+  });
+});
