@@ -696,6 +696,7 @@ describe('publish command', () => {
       await program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes']);
 
       expect(mockClient.getDossierEvidence).not.toHaveBeenCalled();
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('First publish'));
       expect(mockClient.publishDossier).toHaveBeenCalled();
     });
 
@@ -731,6 +732,181 @@ describe('publish command', () => {
         expect.stringContaining('Could not establish previous evidence')
       );
       expect(mockClient.publishDossier).toHaveBeenCalled();
+    });
+
+    it('a hung registry (no response within the timeout) skips the check without blocking', async () => {
+      vi.useFakeTimers();
+      try {
+        mockClient.getDossier.mockReset();
+        mockClient.getDossier.mockRejectedValueOnce(
+          Object.assign(new Error('Not found'), { statusCode: 404 })
+        );
+        mockClient.getDossier.mockResolvedValueOnce({
+          name: 'org/test-dossier',
+          version: '0.9.0',
+        });
+        // Never resolves — simulates a hung registry call.
+        mockClient.getDossierEvidence.mockReturnValueOnce(new Promise(() => {}));
+
+        const program = createTestProgram();
+        registerPublishCommand(program);
+        const run = program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes']);
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        await run;
+
+        expect(console.log).toHaveBeenCalledWith(
+          expect.stringContaining('Could not establish previous evidence')
+        );
+        expect(console.log).toHaveBeenCalledWith(expect.stringContaining('timed out'));
+        expect(mockClient.publishDossier).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('blocks the default sibling .evidence.json path the same as an explicit --evidence path', async () => {
+      mockClient.getDossier.mockReset();
+      mockClient.getDossier.mockRejectedValueOnce(
+        Object.assign(new Error('Not found'), { statusCode: 404 })
+      );
+      mockClient.getDossier.mockResolvedValueOnce({ name: 'org/test-dossier', version: '1.0.0' });
+      mockClient.getDossierEvidence.mockResolvedValueOnce({
+        evidence: JSON.stringify(previousEvidenceRecord(['Step 2', 'Step 6'])),
+        checksum: null,
+      });
+
+      // No --evidence flag: resolveEvidenceForPublish falls back to the sibling .evidence.json.
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? evidenceWithAnchors('1.1.0', bodyKeepsAllSections, ['Step 6'])
+          : withChecksum('1.1.0', bodyKeepsAllSections)) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes'])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('"Step 2"'));
+      expect(mockClient.publishDossier).not.toHaveBeenCalled();
+    });
+
+    it('strips control characters from a dropped anchor before printing it', async () => {
+      mockClient.getDossier.mockReset();
+      mockClient.getDossier.mockRejectedValueOnce(
+        Object.assign(new Error('Not found'), { statusCode: 404 })
+      );
+      mockClient.getDossier.mockResolvedValueOnce({ name: 'org/test-dossier', version: '1.0.0' });
+      const maliciousAnchor = 'Step 2\x1b[31mFAKE ERROR\x1b[0m';
+      mockClient.getDossierEvidence.mockResolvedValueOnce({
+        evidence: JSON.stringify(previousEvidenceRecord([maliciousAnchor])),
+        checksum: null,
+      });
+
+      const bodyWithMaliciousSection = `Body content here\n\n## ${maliciousAnchor}\nDo the thing.`;
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? evidenceWithAnchors('1.1.0', bodyWithMaliciousSection, [])
+          : withChecksum('1.1.0', bodyWithMaliciousSection)) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes'])
+      ).rejects.toThrow();
+
+      for (const call of vi.mocked(console.error).mock.calls) {
+        expect(String(call[0])).not.toContain('\x1b');
+      }
+      expect(mockClient.publishDossier).not.toHaveBeenCalled();
+    });
+
+    describe('--json output', () => {
+      it('emits a structured evidence_regression envelope on the blocked path', async () => {
+        mockClient.getDossier.mockReset();
+        mockClient.getDossier.mockRejectedValueOnce(
+          Object.assign(new Error('Not found'), { statusCode: 404 })
+        );
+        mockClient.getDossier.mockResolvedValueOnce({
+          name: 'org/test-dossier',
+          version: '1.0.0',
+        });
+        mockClient.getDossierEvidence.mockResolvedValueOnce({
+          evidence: JSON.stringify(previousEvidenceRecord(['Step 2', 'Step 6'])),
+          checksum: null,
+        });
+
+        mockedFs.existsSync.mockReturnValue(true);
+        mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+          String(p).endsWith('.evidence.json')
+            ? evidenceWithAnchors('1.1.0', bodyKeepsAllSections, ['Step 6'])
+            : withChecksum('1.1.0', bodyKeepsAllSections)) as typeof fs.readFileSync);
+
+        const program = createTestProgram();
+        registerPublishCommand(program);
+
+        await expect(
+          program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes', '--json'])
+        ).rejects.toThrow();
+
+        const jsonCall = vi.mocked(console.log).mock.calls.find((call) => {
+          try {
+            return JSON.parse(call[0] as string).code === 'evidence_regression';
+          } catch {
+            return false;
+          }
+        });
+        expect(jsonCall).toBeDefined();
+        const output = JSON.parse(jsonCall?.[0] as string);
+        expect(output.published).toBe(false);
+        expect(output.anchors).toEqual(['Step 2']);
+        expect(mockClient.publishDossier).not.toHaveBeenCalled();
+      });
+
+      it('carries evidence_check on the successful JSON result (clean vs. skipped)', async () => {
+        mockClient.publishDossier.mockResolvedValue({
+          name: 'org/test-dossier',
+          content_url: 'https://registry.example.com/dossiers/org/test-dossier',
+        });
+
+        // Clean case: previous evidence exists, nothing was dropped.
+        mockClient.getDossier.mockReset();
+        mockClient.getDossier.mockRejectedValueOnce(
+          Object.assign(new Error('Not found'), { statusCode: 404 })
+        );
+        mockClient.getDossier.mockResolvedValueOnce({
+          name: 'org/test-dossier',
+          version: '1.0.0',
+        });
+        mockClient.getDossierEvidence.mockResolvedValueOnce({
+          evidence: JSON.stringify(previousEvidenceRecord(['Step 2'])),
+          checksum: null,
+        });
+        mockedFs.existsSync.mockReturnValue(true);
+        mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+          String(p).endsWith('.evidence.json')
+            ? evidenceWithAnchors('1.1.0', bodyKeepsAllSections, ['Step 2', 'Step 6'])
+            : withChecksum('1.1.0', bodyKeepsAllSections)) as typeof fs.readFileSync);
+
+        const program = createTestProgram();
+        registerPublishCommand(program);
+        await program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes', '--json']);
+
+        const jsonCall = vi.mocked(console.log).mock.calls.find((call) => {
+          try {
+            return JSON.parse(call[0] as string).published === true;
+          } catch {
+            return false;
+          }
+        });
+        expect(jsonCall).toBeDefined();
+        expect(JSON.parse(jsonCall?.[0] as string).evidence_check).toEqual({ status: 'clean' });
+      });
     });
   });
 });

@@ -1,6 +1,6 @@
 # Authoring Evidence
 
-**Last Updated**: 2026-09-17
+**Last Updated**: 2026-09-24
 **Status**: Active — shipped in `@ai-dossier/core`, the registry, and `@ai-dossier/cli` (`evidence` command group)
 
 ---
@@ -221,10 +221,9 @@ This exists because of a real incident: `batch-integrate` 1.4.0 published
 with 3 evidence entries, down from 7 in 1.3.3, while 5 of those entries'
 sections still existed in the document. Nothing at publish time noticed;
 the entries were restored by hand in 1.5.1. Refuse-with-override matches
-every other "you're about to lose something" guard in this CLI (`keys
---force`, `pull --force`, `evidence add --force`, `sign --force`) — a
-warning that scrolls past a non-interactive `-y` publish would not have
-caught the actual incident.
+this CLI's other "you're about to lose something" guards (`keys --force`,
+`evidence init --force`) — a warning that scrolls past a non-interactive
+`-y` publish would not have caught the actual incident.
 
 If a drop is intentional (the entry's rationale no longer applies even
 though the section survives, or you're deliberately thinning evidence),
@@ -235,9 +234,19 @@ ai-dossier publish <name>.ds.md --drop-evidence "<anchor>"
 ```
 
 Repeat `--drop-evidence` once per anchor being dropped. The check never
-blocks a publish it can't evaluate — a first publish (no previous version),
-no evidence recorded for the previous version, or a failed fetch (offline)
-all print an informational note and let the publish proceed.
+blocks a publish it can't evaluate: a first publish (no previous version
+resolved — including when the earlier "does this dossier exist at all"
+lookup itself failed), no evidence recorded for the previous version, and
+a failed evidence fetch (offline, or a 10s timeout) all print an
+informational note and let the publish proceed.
+
+**`--no-evidence` interacts with this check.** Publishing with
+`--no-evidence` attaches no sidecar at all, so every anchor still present
+from the previous version's sidecar is dropped by definition — the check
+treats that exactly like an incomplete sidecar, refusing unless each
+anchor is acknowledged with `--drop-evidence`. If you genuinely mean to
+strip all evidence from a dossier that previously had some, expect to pass
+one `--drop-evidence <anchor>` per anchor the previous version recorded.
 
 ## Step text for publish-dossier
 

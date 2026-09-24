@@ -190,6 +190,15 @@ export function siblingEvidencePath(dossierFile: string): string {
     : `${resolved}.evidence.json`;
 }
 
+/**
+ * Commander.js accumulator for a repeatable `<flag> <value>` option — pass as the option's
+ * `parseArg` with `[]` as its default. Shared so the same one-line reducer isn't reimplemented
+ * per command (`--label`, `--author`, `--drop-evidence`, …).
+ */
+export function collectRepeatable(value: string, previous: string[] = []): string[] {
+  return [...previous, value];
+}
+
 // ============================================================================
 // Helper functions
 // ============================================================================
