@@ -70,6 +70,17 @@ import {
   resolveWarmCommands,
 } from '@ai-dossier/worktree-pool';
 import {
+  ANCHOR_CLOSE_BATCH_STATUSES,
+  type AnchorCloseOutcome,
+  anchorLedgerBlockers,
+  type CommitInBase,
+  classifyAnchor,
+  closeAnchor,
+  type IssueCloseReader,
+  membersShippedVerdict,
+  openAnchorBatches,
+} from './anchor-close';
+import {
   type BoundaryCommit,
   hasEarnedFailureEvidence,
   type MemberFootprint,
@@ -98,12 +109,15 @@ import {
 } from './dispatch';
 import { recordDispatchApiError, resetDispatchApiErrorStreak } from './dispatch-health';
 import {
+  GIT_OID_RE,
   type GroundTruth,
   type GroundTruthMilestone,
+  type IssueCloseTruth,
   isBatchPhaseDone,
   isBatchTailParked,
   isMemberBlocked,
   isMemberComplete,
+  issueCloseReader,
   type PrTruth,
   prOfMilestone,
 } from './groundtruth';
@@ -129,6 +143,7 @@ import { assignToIdleSlot, freeCapacity } from './scheduler';
 import {
   allowedBatchTransitions,
   appendEvictions,
+  CLEARED_ANCHOR_CLOSE_FAILED_FIELDS,
   CLEARED_PR_WATCH_FIELDS,
   duplicateEvictionDetail,
   findBatch,
@@ -225,6 +240,14 @@ export interface BatchDispatchDeps {
    * Undefined defers to `appendSchedRunLog`'s own `os.homedir()` default.
    */
   homeDir?: string;
+  /**
+   * #768: the `owner/name` repository whose issues are this project's batch
+   * anchors and members, verified against the project by the caller
+   * (`resolveProjectRepo`). Without it the anchor close and the members-closed
+   * reconcile evidence never fire — they never act on whatever repository the
+   * cwd resolves to.
+   */
+  anchorRepo?: string;
 }
 
 /** What one `runBatchTick` call did, merged into `engine.ts`'s `TickResult` by the caller. */
@@ -3568,7 +3591,8 @@ function branchMergedIntoBase(deps: BatchDispatchDeps, batch: BatchEntry): boole
 function reconcileStaleBlockedBatches(
   deps: BatchDispatchDeps,
   now: Date,
-  result: BatchTickResult
+  result: BatchTickResult,
+  anchorCtx: AnchorTickContext | undefined
 ): void {
   const state = deps.store.load();
   const nowMs = now.getTime();
@@ -3580,6 +3604,7 @@ function reconcileStaleBlockedBatches(
     let evidence:
       | { kind: 'pr-merged'; pr: number; mergedAt: string }
       | { kind: 'commits-in-base' }
+      | { kind: 'members-closed' }
       | null = null;
     if (batch.pr !== null) {
       const truth = deps.groundTruth.prState(batch.pr);
@@ -3590,7 +3615,32 @@ function reconcileStaleBlockedBatches(
     if (evidence === null && branchMergedIntoBase(deps, batch)) {
       evidence = { kind: 'commits-in-base' };
     }
+    // #768: the evidence that survives a rebase-merge (which rewrites SHAs, so
+    // the ancestry probe above can never pass) and a member shipped through a
+    // PR of its own (nothing batch-shaped ever merges): every member issue is
+    // CLOSED as completed BY CODE IN THE BASE (a merged PR / reachable commit —
+    // never a bare hand close) with no failure trail — the SAME strict
+    // predicate the anchor close uses, so the two never disagree.
+    if (
+      evidence === null &&
+      anchorCtx !== undefined &&
+      membersShippedVerdict(state, batch, anchorCtx.read, {
+        repo: anchorCtx.repo,
+        commitInBase: anchorCtx.commitInBase,
+      }).kind === 'closable'
+    ) {
+      evidence = { kind: 'members-closed' };
+    }
     if (evidence === null) continue;
+    // A members-closed reconcile has no merged batch PR for a report agent to
+    // report on, whatever `batch.pr` recorded — finish the rail inline, as
+    // for `pr === null`.
+    const finishInline = batch.pr === null || evidence.kind === 'members-closed';
+    // ...but never tear its worktree down: the members shipped OUTSIDE the
+    // batch branch, so the blocked integration worktree may hold an
+    // operator's unpushed repair work. It is left in place, inert, and the
+    // journal says so.
+    const keepWorktree = evidence.kind === 'members-closed';
 
     const blockedReason = batch.blocked_reason ?? 'blocked';
     const failedAt = batch.updated_at;
@@ -3623,9 +3673,9 @@ function reconcileStaleBlockedBatches(
           entry = findEntry(n, issue);
         }
       }
-      if (b.pr === null) {
-        // No PR → no report agent is possible (its prompt names the PR).
-        // Finish the terminal rail and let teardown run below.
+      if (finishInline) {
+        // No (merged) PR → no report agent is possible (its prompt names the
+        // PR). Finish the terminal rail and let teardown run below.
         n = transitionBatch(n, batch.id, 'reported', {}, now);
         n = transitionBatch(n, batch.id, 'done', {}, now);
       }
@@ -3643,19 +3693,231 @@ function reconcileStaleBlockedBatches(
       detail:
         (evidence.kind === 'pr-merged'
           ? `PR #${evidence.pr} is MERGED — ledger reconciled blocked (${blockedReason}) to the merged rail (blocked at ${failedAt}); report and teardown will now dispatch`
-          : `every member commit is an ancestor of ${batch.base_branch} — ledger reconciled blocked (${blockedReason}) to shipped (blocked at ${failedAt})`) +
-        (batch.pr === null
-          ? ' — no PR of its own, so no report agent can be prompted; teardown dispatched inline'
+          : evidence.kind === 'members-closed'
+            ? `every member issue is CLOSED as completed on GitHub with no failure trail — ledger reconciled blocked (${blockedReason}) to shipped (blocked at ${failedAt})`
+            : `every member commit is an ancestor of ${batch.base_branch} — ledger reconciled blocked (${blockedReason}) to shipped (blocked at ${failedAt})`) +
+        (finishInline
+          ? ' — no merged PR of its own, so no report agent can be prompted; ' +
+            (keepWorktree
+              ? `worktree KEPT in place (${batch.worktree ?? 'none'}) — the work shipped outside the batch branch, which may hold unpushed work; once inspected, remove it with \`git worktree remove\` (or \`worktree-pool return\` if pool-claimed)`
+              : 'teardown dispatched inline')
           : '') +
         (unwalkable.length > 0
           ? `; members NOT walked (no legal edge): ${unwalkable.join(',')}`
           : ''),
     });
     result.mergeAccepted.push(unit(batch.id));
-    if (batch.pr === null) {
+    if (finishInline && !keepWorktree) {
       teardownBatch(deps, batch.id);
     }
   }
+}
+
+/**
+ * #768: what one tick's anchor work reads GitHub and git through — built once
+ * per tick so the stale-blocked reconcile and the anchor close never read the
+ * same issue twice in a tick. `undefined` when the tick cannot verify anything
+ * (no issue-closure ground truth, or no verified `anchorRepo`): then neither
+ * pass acts at all.
+ */
+interface AnchorTickContext {
+  repo: string;
+  read: IssueCloseReader;
+  commitInBase: CommitInBase;
+}
+
+function anchorTickContext(deps: BatchDispatchDeps): AnchorTickContext | undefined {
+  const reader = issueCloseReader(deps.groundTruth);
+  if (reader === undefined || deps.anchorRepo === undefined) return undefined;
+  const cache = new Map<number, IssueCloseTruth | undefined>();
+  const read: IssueCloseReader = (issue) => {
+    if (!cache.has(issue)) cache.set(issue, reader(issue));
+    return cache.get(issue);
+  };
+  const fetched = new Set<string>();
+  const commitInBase: CommitInBase = (oid, baseBranch) => {
+    // CWE-88: both are interpolated into git argv — the oid comes from GitHub.
+    if (!GIT_OID_RE.test(oid) || !SAFE_REF_RE.test(baseBranch)) return false;
+    if (!fetched.has(baseBranch)) {
+      deps.exec('git', ['fetch', 'origin', baseBranch], deps.repoDir);
+      fetched.add(baseBranch);
+    }
+    // `--is-ancestor` exits 0 (non-null) iff reachable; 1 and any failure → null.
+    return (
+      deps.exec(
+        'git',
+        ['merge-base', '--is-ancestor', oid, `origin/${baseBranch}`],
+        deps.repoDir
+      ) !== null
+    );
+  };
+  return { repo: deps.anchorRepo, read, commitInBase };
+}
+
+/**
+ * #768: close a batch's anchor issue when — and ONLY when — the positive
+ * evidence holds: every member CLOSED as completed by code that landed in the
+ * base, and no member evicted, handed back, requeued, or failed
+ * (`anchor-close.ts`). Before this, the anchor closed only on the happy path
+ * (batch-integrate's #720 step), so a blocked or hand-recovered batch — or one
+ * whose members shipped through PRs of their own — left it open forever
+ * (imboard#4244, imboard#4253).
+ *
+ * Every other shape is left strictly alone: a blocked, abandoned, or
+ * partially shipped batch keeps its anchor open, and `sched status --anchors`
+ * shows it as `needs-operator`. Closing an anchor on a terminal transition
+ * alone was rejected on #768 — it would bury the failure trail.
+ *
+ * Bounded: only `blocked`/`done` batches touched within
+ * `STALE_BLOCKED_RECONCILE_WINDOW_MS` whose anchor is not yet recorded closed
+ * are examined (an older one is only ever surfaced, never auto-closed); the
+ * ledger check runs first and costs no GitHub call; member reads stop at the
+ * first disqualifier. When this pass reads an anchor and finds it closed it
+ * records `anchor_closed_at` and never polls it again. A batch the ledger
+ * rules out is never read here at all, so its `anchor_closed_at` stays null —
+ * the sweep reads (but never closes) those anchors when asked.
+ */
+function reconcileAnchorClosure(
+  deps: BatchDispatchDeps,
+  now: Date,
+  ctx: AnchorTickContext | undefined
+): void {
+  if (ctx === undefined) return;
+  const state = deps.store.load();
+  for (const batch of openAnchorBatches(state, ANCHOR_CLOSE_BATCH_STATUSES)) {
+    if (now.getTime() - Date.parse(batch.updated_at) >= STALE_BLOCKED_RECONCILE_WINDOW_MS) {
+      continue;
+    }
+    // Deliberately BEFORE classifyAnchor (which repeats it): a ledger-ruled-out
+    // batch must cost no GitHub read, and a blocked one is re-checked every tick.
+    if (anchorLedgerBlockers(state, batch).length > 0) continue;
+
+    const verdict = classifyAnchor(state, batch, ctx.read, {
+      repo: ctx.repo,
+      commitInBase: ctx.commitInBase,
+    });
+    if (verdict.kind === 'anchor-closed') {
+      // Closed outside this pass — or by a prior pass that crashed before
+      // recording it; either way the trail gets one line.
+      recordAnchorClosed(deps, batch.id, now);
+      journalEvent(deps, 'anchor-closed', unit(batch.id), {
+        issue: batch.anchor,
+        detail: `anchor #${batch.anchor} found already closed — recorded, never polled again`,
+      });
+      continue;
+    }
+    if (verdict.kind !== 'closable') {
+      clearAnchorCloseFailed(deps, batch, now);
+      continue;
+    }
+
+    // The GitHub reads above took time: re-check the ledger on a FRESH load,
+    // immediately before the irreversible close, so an eviction, `abandon` or
+    // `stop` that landed meanwhile is never closed over.
+    const stillClean = deps.store.withLock((s) => {
+      const fresh = findBatch(s, batch.id);
+      const ok =
+        fresh !== undefined &&
+        fresh.anchor_closed_at === null &&
+        ANCHOR_CLOSE_BATCH_STATUSES.has(fresh.status) &&
+        anchorLedgerBlockers(s, fresh).length === 0;
+      return { state: s, result: ok };
+    });
+    if (!stillClean) {
+      clearAnchorCloseFailed(deps, batch, now);
+      continue;
+    }
+
+    const outcome = closeAnchor(
+      deps.exec,
+      deps.repoDir,
+      ctx.repo,
+      batch,
+      batch.anchor,
+      verdict.members
+    );
+    const shipped = verdict.members.map((m) => `#${m.issue}: ${m.shipped_by}`).join('; ');
+    if (outcome !== 'closed') {
+      recordAnchorCloseFailed(deps, batch, outcome, shipped, now);
+      continue;
+    }
+    // Journal before recording: a crash between the two leaves the line, and
+    // the next tick records the (already-closed) anchor.
+    journalEvent(deps, 'anchor-closed', unit(batch.id), {
+      issue: batch.anchor,
+      detail: `every member closed as completed by code in ${batch.base_branch}, no failure trail — ${shipped}`,
+    });
+    recordAnchorClosed(deps, batch.id, now);
+  }
+}
+
+function recordAnchorClosed(deps: BatchDispatchDeps, batchId: string, now: Date): void {
+  deps.store.withLock((s) => ({
+    // Bookkeeping, not activity — `updated_at` is the blocked-window clock.
+    state: patchBatch(
+      s,
+      batchId,
+      { anchor_closed_at: now.toISOString(), ...CLEARED_ANCHOR_CLOSE_FAILED_FIELDS },
+      now,
+      false
+    ),
+    result: undefined,
+  }));
+}
+
+/**
+ * The anchor stopped qualifying: end any `anchor-close-failed` streak, so the
+ * next failure episode journals its own first line instead of continuing a
+ * stale streak's count. A no-op (no write) when no streak is recorded.
+ */
+function clearAnchorCloseFailed(deps: BatchDispatchDeps, batch: BatchEntry, now: Date): void {
+  if (batch.anchor_close_failed_reason === null) return;
+  deps.store.withLock((s) => ({
+    state: patchBatch(s, batch.id, CLEARED_ANCHOR_CLOSE_FAILED_FIELDS, now, false),
+    result: undefined,
+  }));
+}
+
+/**
+ * A close that qualified but failed: journal it on the streak's first tick and
+ * every `JOURNAL_DEDUP_REANNOUNCE_TICKS` after — never every tick (#632) —
+ * exactly `reconcilePrWatch`'s `pr-watch-failed` dedup.
+ */
+function recordAnchorCloseFailed(
+  deps: BatchDispatchDeps,
+  batch: BatchEntry,
+  outcome: Exclude<AnchorCloseOutcome, 'closed'>,
+  shipped: string,
+  now: Date
+): void {
+  const priorSince = batch.anchor_close_failed_since;
+  const isNewStreak = batch.anchor_close_failed_reason !== outcome || priorSince === null;
+  const ticks = isNewStreak ? 1 : batch.anchor_close_failed_ticks + 1;
+  const since = isNewStreak || priorSince === null ? now.toISOString() : priorSince;
+  if (isNewStreak || ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0) {
+    journalEvent(deps, 'anchor-close-failed', unit(batch.id), {
+      issue: batch.anchor ?? undefined,
+      reason: outcome,
+      at: now.toISOString(),
+      since,
+      ticks_persisted: ticks,
+      detail: `anchor #${batch.anchor} qualifies for close (${shipped}) but ${outcome}; retried every tick — the gh error is on the engine's stderr ('⚠ sched …')`,
+    });
+  }
+  deps.store.withLock((s) => ({
+    state: patchBatch(
+      s,
+      batch.id,
+      {
+        anchor_close_failed_reason: outcome,
+        anchor_close_failed_since: since,
+        anchor_close_failed_ticks: ticks,
+      },
+      now,
+      false
+    ),
+    result: undefined,
+  }));
 }
 
 /**
@@ -3984,6 +4246,8 @@ export function runBatchTick(
   }
 
   reconcilePrWatch(deps, now, result);
-  reconcileStaleBlockedBatches(deps, now, result);
+  const anchorCtx = anchorTickContext(deps);
+  reconcileStaleBlockedBatches(deps, now, result, anchorCtx);
+  reconcileAnchorClosure(deps, now, anchorCtx);
   return result;
 }

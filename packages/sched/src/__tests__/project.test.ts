@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type ExecFn, resolveProjectSlug, schedStateDir } from '../index';
+import { type ExecFn, resolveProjectRepo, resolveProjectSlug, schedStateDir } from '../index';
 
 describe('resolveProjectSlug (fleet-cycle convention)', () => {
   it('uses gh repo view owner-name when available', () => {
@@ -50,5 +50,24 @@ describe('schedStateDir', () => {
       '/home/tester/.dossier/sched/imboard-ai-ai-dossier'
     );
     expect(schedStateDir('a/b', '/home/tester')).toBe('/home/tester/.dossier/sched/a-b');
+  });
+});
+
+describe('resolveProjectRepo (#768)', () => {
+  const ghRepo =
+    (owner: string, name: string): ExecFn =>
+    (file) =>
+      file === 'gh' ? JSON.stringify({ owner: { login: owner }, name }) : null;
+
+  it("returns owner/name only when the cwd's repository IS the project", () => {
+    expect(resolveProjectRepo('imboard-ai-imboard', ghRepo('imboard-ai', 'imboard'))).toBe(
+      'imboard-ai/imboard'
+    );
+  });
+
+  it('returns null for another repository, or when gh cannot say — never a guess', () => {
+    expect(resolveProjectRepo('imboard-ai-imboard', ghRepo('imboard-ai', 'ai-dossier'))).toBeNull();
+    expect(resolveProjectRepo('imboard-ai-imboard', () => null)).toBeNull();
+    expect(resolveProjectRepo('imboard-ai-imboard', () => 'not json')).toBeNull();
   });
 });

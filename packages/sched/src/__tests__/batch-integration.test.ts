@@ -26,9 +26,11 @@ import { type BatchTickResult, evictMemberAndContinue, memberBranchFor } from '.
 // path builder, not part of the package's public `index.ts` surface.
 import { batchMemberLogPath } from '../dispatch';
 import {
+  abandonBatch,
   assignToIdleSlot,
   type BatchDispatchDeps,
   type BatchSuiteContext,
+  buildStatusReport,
   type CapabilityGateResult,
   createSpawnDeps,
   type EngineDeps,
@@ -38,6 +40,7 @@ import {
   findBatch,
   type GroundTruth,
   type GroundTruthMilestone,
+  type IssueCloseTruth,
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
   type PrTruth,
@@ -116,6 +119,14 @@ function fileBatchGroundTruth(dir: string): GroundTruth {
     }
   };
   return stubGroundTruth({
+    // #768: an issue's closure record lives at `<issue>.issue.json`; absent =
+    // unreachable, so every pre-#768 test (which writes none) sees the anchor
+    // pass and the members-closed evidence stay inert.
+    issueCloseTruth: (issue) => {
+      const raw = readJson(`${issue}.issue.json`);
+      if (raw === undefined || raw === null || typeof raw !== 'object') return undefined;
+      return raw as IssueCloseTruth;
+    },
     latestMilestone: (issue) => {
       const raw = readJson(`${issue}.json`);
       if (raw === undefined || raw === null || typeof raw !== 'object') return null;
@@ -176,6 +187,15 @@ function commitAllAndPush(work: string, message: string): void {
   git(['add', '.']);
   git(['commit', '-m', message]);
   git(['push', 'origin', 'main']);
+}
+
+/** The authenticated gh user the fake `gh api user` reports (#768). */
+const FAKE_GH_LOGIN = 'sched-bot';
+
+/** An issue's comments in the fake GitHub, with their authors (#768). */
+function readComments(dir: string, issue: number): Array<{ author: string; body: string }> {
+  const file = path.join(dir, `${issue}.comments.json`);
+  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : [];
 }
 
 /**
@@ -295,6 +315,53 @@ function fakeBatchExec(
     if (file === 'npx' && args[2] === 'return' && poolClaimPath) {
       return JSON.stringify({ verification: { entry_status: 'warm' } });
     }
+    // #768: the anchor close's `gh` calls, against the same file-backed
+    // ground truth — never the real GitHub. The authenticated user is
+    // `FAKE_GH_LOGIN`; comments are stored with their author so the marker's
+    // author filter is exercised. Every `gh issue` call is logged to
+    // `gh-calls.jsonl` so a test can assert what was (not) posted; an
+    // `<issue>.close-fail` flag file makes the next close fail once, and
+    // `<issue>.close-fail-always` makes every close fail.
+    if (file === 'gh' && args[0] === 'api' && args[1] === 'user') return FAKE_GH_LOGIN;
+    if (file === 'gh' && args[0] === 'issue') {
+      const issue = args[2];
+      expect(args[3]).toBe('-R'); // never resolved from the cwd
+      fs.mkdirSync(milestonesDir, { recursive: true });
+      fs.appendFileSync(
+        path.join(milestonesDir, 'gh-calls.jsonl'),
+        `${JSON.stringify({ verb: args[1], issue, args })}\n`
+      );
+      const comments = readComments(milestonesDir, Number(issue));
+      if (args[1] === 'view') {
+        const jq = args[args.indexOf('--jq') + 1];
+        const login = /author\.login == "([^"]+)"/.exec(jq)?.[1];
+        return JSON.stringify(comments.filter((c) => c.author === login).map((c) => c.body));
+      }
+      if (args[1] === 'comment') {
+        comments.push({ author: FAKE_GH_LOGIN, body: args[args.indexOf('--body') + 1] });
+        fs.writeFileSync(
+          path.join(milestonesDir, `${issue}.comments.json`),
+          JSON.stringify(comments)
+        );
+        return '';
+      }
+      if (args[1] === 'close') {
+        if (fs.existsSync(path.join(milestonesDir, `${issue}.close-fail-always`))) return null;
+        const failFlag = path.join(milestonesDir, `${issue}.close-fail`);
+        if (fs.existsSync(failFlag)) {
+          fs.rmSync(failFlag);
+          return null;
+        }
+        const truthFile = path.join(milestonesDir, `${issue}.issue.json`);
+        const truth = JSON.parse(fs.readFileSync(truthFile, 'utf8')) as IssueCloseTruth;
+        fs.writeFileSync(
+          truthFile,
+          JSON.stringify({ ...truth, state: 'CLOSED', stateReason: 'COMPLETED' })
+        );
+        return '';
+      }
+      return null;
+    }
     if (file === 'ai-dossier') {
       if (args[0] === 'runstate' && args[1] === 'mint') {
         const issue = args[args.indexOf('--issue') + 1];
@@ -354,6 +421,8 @@ function batchHarness(
     poolClaimPath?: string | null;
     /** #561: force this bin to fail — for the `batch-warmup-failed` regression case. */
     failWarmupCommand?: string;
+    /** #768: omit `anchorRepo` — the cwd could not be verified as the project's repository. */
+    noAnchorRepo?: boolean;
     /**
      * #707: named dispatch profiles merged under
      * `config.dispatch.dispatch_profiles`. A factory of the harness's
@@ -399,6 +468,8 @@ function batchHarness(
     ),
     runBatchSuite: opts?.suite ?? (() => ({ ok: true, failing: [] })),
     ...(opts?.capability ? { runBatchCapability: opts.capability } : {}),
+    // #768: the verified project repository the anchor close writes to.
+    ...(opts?.noAnchorRepo ? {} : { anchorRepo: 'test-org/test-repo' }),
   };
   const config: SchedConfig = {
     max_slots: opts?.maxSlots ?? 2,
@@ -2459,12 +2530,14 @@ async function blockedBatchHarness(
   batchId: string,
   anchor: number,
   member: number,
-  extraMembers: number[] = []
+  extraMembers: number[] = [],
+  harnessOpts: { noAnchorRepo?: boolean } = {}
 ) {
   const repo = scratchRepo();
   const h = batchHarness(repo, ['--mode=batch', `--commit-file=member-${member}.txt`], {
     maxSlots: 1,
     capability: UNEVIDENCED_GATE_FAILS,
+    ...harnessOpts,
   });
   h.enqueue([
     { issue: member, mode: 'slot', batch: batchId, anchor, tier: 'mid' },
@@ -2607,6 +2680,395 @@ describe('#686: a blocked batch whose work merged out of band reconciles (ground
     // the never-dispatched one stays `queued`. NEITHER may be declared done.
     expect(h.state().entries.find((e) => e.issue === 6820)?.status).toBe('in-work');
     expect(h.state().entries.find((e) => e.issue === 6821)?.status).toBe('queued');
+  }, 60_000);
+});
+
+// --- #768: batch anchors close off the happy path — only on positive evidence ---
+
+/** Write an issue's GitHub closure record into the harness's file-backed ground truth. */
+function setIssueTruth(truthDir: string, issue: number, truth: Partial<IssueCloseTruth>): void {
+  fs.writeFileSync(
+    path.join(truthDir, `${issue}.issue.json`),
+    JSON.stringify({ state: 'OPEN', stateReason: null, labels: [], closer: null, ...truth })
+  );
+}
+
+function issueTruth(truthDir: string, issue: number): IssueCloseTruth {
+  return JSON.parse(fs.readFileSync(path.join(truthDir, `${issue}.issue.json`), 'utf8'));
+}
+
+function ghWrites(truthDir: string): Array<{ verb: string; issue: string }> {
+  const file = path.join(truthDir, 'gh-calls.jsonl');
+  const calls = fs.existsSync(file)
+    ? (readJsonl(file) as Array<{ verb: string; issue: string }>)
+    : [];
+  return calls.filter((c) => c.verb === 'comment' || c.verb === 'close');
+}
+
+function anchorComments(truthDir: string, anchor: number): string[] {
+  return readComments(truthDir, anchor).map((c) => c.body);
+}
+
+/** The opt-in status sweep, read through the same file-backed ground truth the engine used. */
+function sweepFor(h: BatchHarness) {
+  const gt = h.deps.groundTruth;
+  const read = (n: number) => gt.issueCloseTruth?.(n);
+  return buildStatusReport(h.state(), h.config, 'test', null, new Date(), {
+    read,
+    repo: 'test-org/test-repo',
+  }).anchors;
+}
+
+/** A member closed as completed by a PR merged into `main` — the shipped shape. */
+const COMPLETED_BY_PR = (pr: number): Partial<IssueCloseTruth> => ({
+  state: 'CLOSED',
+  stateReason: 'COMPLETED',
+  closer: { kind: 'pr', number: pr, merged: true, baseRefName: 'main', repo: 'test-org/test-repo' },
+});
+
+/** Commit a file straight to origin/main of the scratch repo and return its sha. */
+function commitOnMain(repo: string, file: string): string {
+  fs.writeFileSync(path.join(repo, file), `${file}\n`);
+  commitAllAndPush(repo, `direct commit ${file}`);
+  return gitAt(['rev-parse', 'HEAD'], repo).trim();
+}
+
+describe('#768: a batch anchor closes off the happy path only on positive evidence', () => {
+  it('imboard#4244 shape: blocked at validate, members later ship via a commit in main and a merged PR → anchor closed with a batch-close:v1 comment naming each; idempotent on rerun', async () => {
+    const { h, repo, batchId } = await blockedBatchHarness('b-20260912-02', 4244, 4146, [4147]);
+    const sha = commitOnMain(repo, 'direct-4146.txt');
+    setIssueTruth(h.truthDir, 4244, { labels: ['batch-epic'] });
+    setIssueTruth(h.truthDir, 4146, {
+      state: 'CLOSED',
+      stateReason: 'COMPLETED',
+      closer: { kind: 'commit', oid: sha },
+    });
+    setIssueTruth(h.truthDir, 4147, COMPLETED_BY_PR(4256));
+
+    h.tick();
+
+    expect(issueTruth(h.truthDir, 4244).state).toBe('CLOSED');
+    const comments = anchorComments(h.truthDir, 4244);
+    expect(comments).toHaveLength(1);
+    expect(comments[0].startsWith(`<!-- batch-close:v1 batch=${batchId} anchor -->`)).toBe(true);
+    expect(comments[0]).toContain(`| #4146 | commit ${sha.slice(0, 12)} |`);
+    expect(comments[0]).toContain('| #4147 | PR #4256 |');
+    expect(findBatch(h.state(), batchId)?.anchor_closed_at).not.toBeNull();
+    expect(
+      h.deps.journal
+        .read()
+        .some((e) => e.event === 'anchor-closed' && e.unit === `batch:${batchId}`)
+    ).toBe(true);
+
+    // Rerun: nothing is posted or closed a second time.
+    const writesBefore = ghWrites(h.truthDir).length;
+    h.tick();
+    h.tick();
+    expect(ghWrites(h.truthDir)).toHaveLength(writesBefore);
+    expect(anchorComments(h.truthDir, 4244)).toHaveLength(1);
+    expect(sweepFor(h)).toEqual([]);
+  }, 60_000);
+
+  it('the marker makes a retried close idempotent: a close that failed after the comment landed closes next tick WITHOUT a second comment', async () => {
+    const { h } = await blockedBatchHarness('b-768-retry', 7680, 7681);
+    setIssueTruth(h.truthDir, 7680, {});
+    setIssueTruth(h.truthDir, 7681, COMPLETED_BY_PR(9768));
+    fs.writeFileSync(path.join(h.truthDir, '7680.close-fail'), '');
+
+    h.tick();
+    expect(issueTruth(h.truthDir, 7680).state).toBe('OPEN');
+    expect(anchorComments(h.truthDir, 7680)).toHaveLength(1);
+    expect(h.deps.journal.read().some((e) => e.event === 'anchor-close-failed')).toBe(true);
+
+    h.tick();
+    expect(issueTruth(h.truthDir, 7680).state).toBe('CLOSED');
+    expect(anchorComments(h.truthDir, 7680)).toHaveLength(1);
+  }, 60_000);
+
+  it('a marker posted by someone else does not count: sched still posts its own audit comment', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-768-spoof', 7682, 7683);
+    setIssueTruth(h.truthDir, 7682, {});
+    setIssueTruth(h.truthDir, 7683, COMPLETED_BY_PR(9771));
+    fs.writeFileSync(
+      path.join(h.truthDir, '7682.comments.json'),
+      JSON.stringify([
+        { author: 'mallory', body: `<!-- batch-close:v1 batch=${batchId} anchor -->` },
+      ])
+    );
+
+    h.tick();
+
+    expect(issueTruth(h.truthDir, 7682).state).toBe('CLOSED');
+    const mine = readComments(h.truthDir, 7682).filter((c) => c.author === FAKE_GH_LOGIN);
+    expect(mine).toHaveLength(1);
+    expect(mine[0].body).toContain('| #7683 | PR #9771 |');
+  }, 60_000);
+
+  it('a close that keeps failing journals once, not every tick (#632 dedup)', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-768-dedup', 7684, 7685);
+    setIssueTruth(h.truthDir, 7684, {});
+    setIssueTruth(h.truthDir, 7685, COMPLETED_BY_PR(9772));
+    fs.writeFileSync(path.join(h.truthDir, '7684.close-fail-always'), '');
+
+    h.tick();
+    h.tick();
+    h.tick();
+
+    const failed = h.deps.journal
+      .read()
+      .filter((e) => e.event === 'anchor-close-failed' && e.unit === `batch:${batchId}`);
+    expect(failed).toHaveLength(1);
+    expect(findBatch(h.state(), batchId)?.anchor_close_failed_ticks).toBe(3);
+  }, 60_000);
+
+  it('imboard#4253 shape: hand-recovered, rebase-merged batch PR the ledger never recorded and that never mentions the anchor → batch reconciles, anchor closed, blocked worktree KEPT', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-20260913-01', 4253, 4116);
+    // Rebase-merge rewrote the SHAs: the batch branch is NOT an ancestor of
+    // main, and `batch.pr` was never recorded — neither #686 signal can fire.
+    expect(findBatch(h.state(), batchId)?.pr).toBeNull();
+    setIssueTruth(h.truthDir, 4253, { labels: ['batch-epic'] });
+    // The hand-opened PR said `Closes #4116`, so GitHub linked it as the closer.
+    setIssueTruth(h.truthDir, 4116, COMPLETED_BY_PR(4255));
+
+    const result = h.tick();
+
+    expect(result.mergeAccepted).toContain(`batch:${batchId}`);
+    const batch = findBatch(h.state(), batchId);
+    expect(batch?.status).toBe('done');
+    expect(h.state().entries.find((e) => e.issue === 4116)?.status).toBe('done');
+    // Not torn down: the members shipped outside the batch branch, so its
+    // worktree may hold unpushed work — left in place, and the journal says so.
+    expect(fs.existsSync(batch?.worktree as string)).toBe(true);
+    const ev = h.deps.journal
+      .read()
+      .find((e) => e.event === 'stale-failure-reconciled' && e.unit === `batch:${batchId}`);
+    expect(String(ev?.detail)).toContain('CLOSED as completed');
+    expect(String(ev?.detail)).toContain('worktree KEPT');
+
+    expect(issueTruth(h.truthDir, 4253).state).toBe('CLOSED');
+    const [comment] = anchorComments(h.truthDir, 4253);
+    expect(comment).toContain('| #4116 | PR #4255 |');
+  }, 60_000);
+
+  // NEGATIVE: every shape without verified shipping evidence, or with a
+  // failure trail, keeps the anchor OPEN and is surfaced as needs-operator.
+  const NEGATIVE_SHAPES: Array<{
+    name: string;
+    reason: string;
+    arrange: (h: BatchHarness, batchId: string, repo: string) => void;
+  }> = [
+    {
+      name: 'a member still open',
+      reason: 'member-open:#7692',
+      arrange: (h) => setIssueTruth(h.truthDir, 7692, {}),
+    },
+    {
+      name: 'a member closed NOT_PLANNED',
+      reason: 'member-closed-not_planned:#7692',
+      arrange: (h) =>
+        setIssueTruth(h.truthDir, 7692, { state: 'CLOSED', stateReason: 'NOT_PLANNED' }),
+    },
+    {
+      name: 'a member self-closed by its author as completed (no linked PR or commit)',
+      reason: 'member-closed-by-hand:#7692',
+      arrange: (h) =>
+        setIssueTruth(h.truthDir, 7692, {
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          closer: null,
+        }),
+    },
+    {
+      name: 'a member closed by an UNMERGED PR',
+      reason: 'member-closer-pr-unmerged-9773:#7692',
+      arrange: (h) =>
+        setIssueTruth(h.truthDir, 7692, {
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          closer: {
+            kind: 'pr',
+            number: 9773,
+            merged: false,
+            baseRefName: 'main',
+            repo: 'test-org/test-repo',
+          },
+        }),
+    },
+    {
+      name: "a member closed by a merged PR in ANOTHER repository ('Fixes test-org/test-repo#N')",
+      reason: 'member-closer-pr-9778-other-repo:#7692',
+      arrange: (h) =>
+        setIssueTruth(h.truthDir, 7692, {
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          closer: {
+            kind: 'pr',
+            number: 9778,
+            merged: true,
+            baseRefName: 'main',
+            repo: 'test-org/other-repo',
+          },
+        }),
+    },
+    {
+      name: 'a member issue that no longer resolves (deleted / transferred)',
+      reason: 'member-missing:#7692',
+      arrange: (h) => setIssueTruth(h.truthDir, 7692, { state: 'MISSING' }),
+    },
+    {
+      name: 'a member closed by a commit that is not in main',
+      reason: 'member-closer-commit-',
+      arrange: (h, _batchId, repo) => {
+        gitAt(['checkout', '-q', '-b', 'side'], repo);
+        fs.writeFileSync(path.join(repo, 'side.txt'), 'side\n');
+        gitAt(['add', '.'], repo);
+        gitAt(['commit', '-qm', 'side'], repo);
+        const oid = gitAt(['rev-parse', 'HEAD'], repo).trim();
+        gitAt(['checkout', '-q', 'main'], repo);
+        setIssueTruth(h.truthDir, 7692, {
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          closer: { kind: 'commit', oid },
+        });
+      },
+    },
+    {
+      name: 'a member handed back (Decision-Pending, any case), even though shipped',
+      reason: 'member-handed-back:#7692',
+      arrange: (h) =>
+        setIssueTruth(h.truthDir, 7692, { ...COMPLETED_BY_PR(9769), labels: ['Decision-Pending'] }),
+    },
+    {
+      name: 'a member evicted, even though GitHub shows it shipped',
+      reason: 'member-evicted:#7691',
+      arrange: (h, batchId) =>
+        h.store.withLock((s) => ({
+          state: patchBatch(s, batchId, {
+            evictions: [
+              {
+                issue: 7691,
+                reason: 'suite-red',
+                attribution: 'overlap',
+                reverted_commits: [],
+                group: [],
+                at: new Date().toISOString(),
+              },
+            ],
+          }),
+          result: null,
+        })),
+    },
+    {
+      name: 'an abandoned batch (dissolved, members requeued full-cycle)',
+      reason: 'batch-dissolved',
+      arrange: (h, batchId) =>
+        h.store.withLock((s) => ({ state: abandonBatch(s, batchId).state, result: null })),
+    },
+  ];
+
+  for (const shape of NEGATIVE_SHAPES) {
+    it(`NEGATIVE — ${shape.name}: anchor stays open, batch not reconciled, shows needs-operator`, async () => {
+      const batchId = `b-768-neg-${NEGATIVE_SHAPES.indexOf(shape)}`;
+      const { h, repo } = await blockedBatchHarness(batchId, 7690, 7691, [7692]);
+      setIssueTruth(h.truthDir, 7690, { labels: ['batch-epic'] });
+      setIssueTruth(h.truthDir, 7691, COMPLETED_BY_PR(9767));
+      setIssueTruth(h.truthDir, 7692, COMPLETED_BY_PR(9766));
+      shape.arrange(h, batchId, repo);
+      const statusBefore = findBatch(h.state(), batchId)?.status;
+      const worktree = findBatch(h.state(), batchId)?.worktree as string;
+
+      h.tick();
+      h.tick();
+
+      expect(issueTruth(h.truthDir, 7690).state).toBe('OPEN');
+      expect(anchorComments(h.truthDir, 7690)).toEqual([]);
+      expect(ghWrites(h.truthDir)).toEqual([]);
+      expect(findBatch(h.state(), batchId)?.anchor_closed_at).toBeNull();
+      expect(findBatch(h.state(), batchId)?.status).toBe(statusBefore);
+      if (statusBefore === 'blocked') expect(fs.existsSync(worktree)).toBe(true);
+      const row = sweepFor(h)?.find((a) => a.anchor === 7690);
+      expect(row?.verdict).toBe('needs-operator');
+      expect(row?.reasons.some((r) => r.startsWith(shape.reason))).toBe(true);
+      expect(row?.members.map((m) => m.issue)).toEqual([7691, 7692]);
+    }, 60_000);
+  }
+
+  it('NEGATIVE — a member evicted WHILE the pass reads GitHub: the fresh re-check before the close refuses', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-768-race', 7686, 7687, [7688]);
+    setIssueTruth(h.truthDir, 7686, {});
+    setIssueTruth(h.truthDir, 7687, COMPLETED_BY_PR(9774));
+    setIssueTruth(h.truthDir, 7688, COMPLETED_BY_PR(9775));
+    const gt = h.deps.groundTruth;
+    const read = gt.issueCloseTruth?.bind(gt);
+    h.deps.groundTruth = {
+      ...gt,
+      issueCloseTruth: (n) => {
+        if (n === 7688) {
+          // A concurrent eviction lands between the snapshot and the close.
+          h.store.withLock((s) => ({
+            state: patchBatch(s, batchId, {
+              evictions: [
+                {
+                  issue: 7688,
+                  reason: 'suite-red',
+                  attribution: 'overlap',
+                  reverted_commits: [],
+                  group: [],
+                  at: new Date().toISOString(),
+                },
+              ],
+            }),
+            result: null,
+          }));
+        }
+        return read?.(n);
+      },
+    };
+
+    h.tick();
+
+    expect(issueTruth(h.truthDir, 7686).state).toBe('OPEN');
+    expect(ghWrites(h.truthDir)).toEqual([]);
+  }, 60_000);
+
+  it('never acts without a verified project repository (the cwd may be another repo)', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-768-norepo', 7693, 7694, [], {
+      noAnchorRepo: true,
+    });
+    setIssueTruth(h.truthDir, 7693, {});
+    setIssueTruth(h.truthDir, 7694, COMPLETED_BY_PR(9776));
+
+    h.tick();
+
+    expect(issueTruth(h.truthDir, 7693).state).toBe('OPEN');
+    expect(ghWrites(h.truthDir)).toEqual([]);
+    expect(findBatch(h.state(), batchId)?.status).toBe('blocked');
+  }, 60_000);
+
+  it('an anchor older than the 7-day window is only surfaced (closable), never auto-closed', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-768-old', 7697, 7698);
+    setIssueTruth(h.truthDir, 7697, {});
+    setIssueTruth(h.truthDir, 7698, COMPLETED_BY_PR(9777));
+    const old = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+    h.store.withLock((s) => ({ state: patchBatch(s, batchId, {}, old), result: null }));
+
+    h.tick();
+
+    expect(issueTruth(h.truthDir, 7697).state).toBe('OPEN');
+    expect(ghWrites(h.truthDir)).toEqual([]);
+    expect(sweepFor(h)?.find((a) => a.anchor === 7697)?.verdict).toBe('closable');
+  }, 60_000);
+
+  it('an unreachable member read never closes the anchor, and stops the sweep', async () => {
+    const { h } = await blockedBatchHarness('b-768-unreach', 7695, 7696, [7699]);
+    setIssueTruth(h.truthDir, 7695, {});
+    setIssueTruth(h.truthDir, 7696, COMPLETED_BY_PR(9770));
+    // 7699 has no truth file → the poll "failed".
+
+    h.tick();
+
+    expect(issueTruth(h.truthDir, 7695).state).toBe('OPEN');
+    expect(sweepFor(h)?.find((a) => a.anchor === 7695)?.verdict).toBe('unknown');
   }, 60_000);
 });
 

@@ -106,8 +106,12 @@ const ISSUE_BASE_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   stopped: [],
 };
 
-/** Failure edges RFC-0001 §D.1 attaches to ANY state (blocked / decision-pending / failed). */
-const ISSUE_UNIVERSAL_FAILURE_EDGES: readonly IssueStatus[] = [
+/**
+ * Failure edges RFC-0001 §D.1 attaches to ANY state (blocked / decision-pending / failed).
+ * Exported because a member sitting in one of them is a failure trail — #768's
+ * anchor close refuses on it, so a status added here is refused there too.
+ */
+export const ISSUE_UNIVERSAL_FAILURE_EDGES: readonly IssueStatus[] = [
   'blocked',
   'decision-pending',
   'failed',
@@ -286,6 +290,8 @@ export function createBatch(
     pr_watch_failed_reason: null,
     pr_watch_failed_since: null,
     pr_watch_failed_ticks: 0,
+    anchor_closed_at: null,
+    ...CLEARED_ANCHOR_CLOSE_FAILED_FIELDS,
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -528,6 +534,36 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
     throw new Error(`Batch ${id}: pr_watch_failed_reason must be a string or null`);
   }
   validateDedupMarker(batch, `Batch ${id}`, 'pr_watch_failed_since', 'pr_watch_failed_ticks');
+  // #768: a non-date here would read as "anchor already closed" and silently
+  // exempt the batch from both the engine's close pass and the sweep.
+  if (
+    batch.anchor_closed_at !== null &&
+    batch.anchor_closed_at !== undefined &&
+    !isIsoDateString(batch.anchor_closed_at)
+  ) {
+    throw new Error(`Batch ${id}: anchor_closed_at must be an ISO date string or null`);
+  }
+  if (
+    batch.anchor_close_failed_reason !== null &&
+    batch.anchor_close_failed_reason !== undefined &&
+    typeof batch.anchor_close_failed_reason !== 'string'
+  ) {
+    throw new Error(`Batch ${id}: anchor_close_failed_reason must be a string or null`);
+  }
+  validateDedupMarker(
+    batch,
+    `Batch ${id}`,
+    'anchor_close_failed_since',
+    'anchor_close_failed_ticks'
+  );
+  if (
+    ((batch.anchor_close_failed_reason ?? null) === null) !==
+    ((batch.anchor_close_failed_since ?? null) === null)
+  ) {
+    throw new Error(
+      `Batch ${id}: anchor_close_failed_reason and anchor_close_failed_since must agree — null iff null`
+    );
+  }
   if (
     ((batch.pr_watch_failed_reason ?? null) === null) !==
     ((batch.pr_watch_failed_since ?? null) === null)
@@ -1003,6 +1039,12 @@ export function validateState(data: unknown): SchedState {
     pr_watch_failed_reason: batch.pr_watch_failed_reason ?? null,
     pr_watch_failed_since: batch.pr_watch_failed_since ?? null,
     pr_watch_failed_ticks: batch.pr_watch_failed_ticks ?? 0,
+    // Pre-#768 batches never recorded an anchor close — null ("not verified
+    // closed") is exact: the engine re-checks it once and records it.
+    anchor_closed_at: batch.anchor_closed_at ?? null,
+    anchor_close_failed_reason: batch.anchor_close_failed_reason ?? null,
+    anchor_close_failed_since: batch.anchor_close_failed_since ?? null,
+    anchor_close_failed_ticks: batch.anchor_close_failed_ticks ?? 0,
   }));
 
   return {
@@ -1133,6 +1175,13 @@ export const CLEARED_ENTRY_DEDUP_MARKERS = {
   // #776: a requeue is a fresh attempt — the stale-closed flag belonged to
   // the previous dispatch's recovery, not to the new one.
   stale_closed_at: null,
+} as const;
+
+/** The `BatchEntry` `anchor-close-failed` dedup marker (#768), zeroed. */
+export const CLEARED_ANCHOR_CLOSE_FAILED_FIELDS = {
+  anchor_close_failed_reason: null,
+  anchor_close_failed_since: null,
+  anchor_close_failed_ticks: 0,
 } as const;
 
 /** The `BatchEntry` `pr-watch-failed` dedup marker (#630), zeroed. */

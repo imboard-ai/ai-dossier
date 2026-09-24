@@ -199,12 +199,23 @@ export const RESUME_LOOP_CAP = 3;
 const DIRTY_HEAD_SUFFIX_RE = /-dirty$/;
 
 /**
- * Every value `next=` may legally carry: a phase to re-enter, or `done`. The batch line
+ * `operator` (#768): a blocked BATCH milestone's successor. A blocked batch is
+ * not finished — its anchor is still open and its next step is operator
+ * inspection — so `next=done` told readers and agents the opposite.
+ */
+export const OPERATOR_NEXT = 'operator';
+
+/** What {@link defaultNext} can return: a phase to re-enter, `done`, or `operator`. */
+export type NextValue = KnownPhase | 'done' | typeof OPERATOR_NEXT;
+
+/**
+ * Every value `next=` may legally carry: a phase to re-enter, `done`, or `operator`
+ * (a blocked batch waiting on operator inspection, #768). The batch line
  * is included because `defaultNext` returns it; `classify` is deliberately absent —
  * nothing transitions INTO classify (it is always a trail's first milestone), so a
  * `next=classify` pointer would name a transition no state machine makes.
  */
-export const NEXT_VALUES: readonly string[] = [...PHASES, ...BATCH_PHASES, 'done'];
+export const NEXT_VALUES: readonly string[] = [...PHASES, ...BATCH_PHASES, 'done', OPERATOR_NEXT];
 
 // `isIssueNumber` moved to `gh.ts` next to the other CLI-input validators when that
 // module became the shared subprocess plumbing; import it from there.
@@ -372,7 +383,7 @@ export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
 };
 
 /** The batch line's successor order, for `defaultNext`. */
-const BATCH_NEXT: Record<BatchPhase, KnownPhase | 'done'> = {
+const BATCH_NEXT: Record<BatchPhase, NextValue> = {
   'batch-setup': 'batch-validate',
   'batch-validate': 'batch-review',
   'batch-review': 'batch-ship',
@@ -383,7 +394,9 @@ const BATCH_NEXT: Record<BatchPhase, KnownPhase | 'done'> = {
 /**
  * The phase that follows `phase`, for the milestone's `next=` line.
  *
- * - `blocked` ends the run, so `next=done`.
+ * - `blocked` ends the run, so `next=done` — except on the batch line, where it
+ *   is `next=operator` (#768): a blocked batch still has an open anchor and
+ *   waits on operator inspection, it is not done.
  * - the two non-terminal statuses keep the run inside the same phase: ship's and
  *   batch-ship's `awaiting-merge` are the FIRST of two milestones (CI wait, then
  *   teardown), and a `partial` review still has agents left to run — which is exactly
@@ -395,8 +408,8 @@ const BATCH_NEXT: Record<BatchPhase, KnownPhase | 'done'> = {
  * - the batch line walks its own order: batch-setup → batch-validate → batch-review →
  *   batch-ship → batch-report → done.
  */
-export function defaultNext(phase: KnownPhase, status: Status): KnownPhase | 'done' {
-  if (status === 'blocked') return 'done';
+export function defaultNext(phase: KnownPhase, status: Status): NextValue {
+  if (status === 'blocked') return isBatchPhase(phase) ? OPERATOR_NEXT : 'done';
   // A fence hands the SAME phase to the takeover, so the trail still points at work to
   // be done — that is what makes a fence whose takeover died resumable rather than
   // terminal (#504). `classify` is exempt only because it is not a `next=` value.
@@ -517,7 +530,13 @@ export function validateMilestone(input: MilestoneInput): string[] {
 
   // An unchecked --next lands verbatim in the comment: a typo sends the next resume to a
   // phase that does not exist, and whitespace/newlines corrupt the line outright.
-  if (input.next !== undefined && !NEXT_VALUES.includes(input.next)) {
+  // `operator` is the batch line's blocked successor only (#768): on a
+  // full-cycle phase a blocked run hands off through the issue, not an operator.
+  if (input.next === OPERATOR_NEXT && !isBatchPhase(phase)) {
+    errors.push(
+      `--next ${OPERATOR_NEXT} is only valid on a batch phase (${BATCH_PHASES.join(', ')}) — omit --next to use the default`
+    );
+  } else if (input.next !== undefined && !NEXT_VALUES.includes(input.next)) {
     errors.push(
       `Invalid --next '${input.next}' — expected one of: ${NEXT_VALUES.join(', ')} (omit --next to use the default for this phase and status)`
     );

@@ -593,6 +593,35 @@ describe('validateState', () => {
     expect(() => validateState({ ...state, paused_at: 'yesterday' })).toThrow(/paused_at/);
   });
 
+  it('#768: loads a 1.21.0 state, backfills the anchor-close fields, and rejects a malformed anchor_closed_at', () => {
+    const state = seeded();
+    expect(state.batches.length).toBeGreaterThan(0);
+    const legacy = JSON.parse(JSON.stringify(state));
+    legacy.schema_version = '1.21.0';
+    for (const batch of legacy.batches) {
+      delete batch.anchor_closed_at;
+      delete batch.anchor_close_failed_reason;
+      delete batch.anchor_close_failed_since;
+      delete batch.anchor_close_failed_ticks;
+    }
+    const loaded = validateState(legacy);
+    for (const batch of loaded.batches) {
+      expect(batch.anchor_closed_at).toBeNull();
+      expect(batch.anchor_close_failed_reason).toBeNull();
+      expect(batch.anchor_close_failed_since).toBeNull();
+      expect(batch.anchor_close_failed_ticks).toBe(0);
+    }
+    // A non-date would read as "already closed" and silently exempt the batch.
+    for (const bad of [true, '', 'yesterday']) {
+      expect(() =>
+        validateState({
+          ...state,
+          batches: [{ ...state.batches[0], anchor_closed_at: bad }],
+        })
+      ).toThrow(/anchor_closed_at/);
+    }
+  });
+
   it('accepts a state produced by the package itself', () => {
     const state = seeded();
     expect(validateState(JSON.parse(JSON.stringify(state)))).toEqual(state);

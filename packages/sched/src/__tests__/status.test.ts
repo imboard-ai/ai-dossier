@@ -445,3 +445,21 @@ describe('#776: status health warnings', () => {
     expect(report.warnings[0].message).toContain('recovering');
   });
 });
+
+describe('#768 status: the open-anchor sweep is report-only', () => {
+  it('is null unless asked for (--anchors) — status makes no network call by default', () => {
+    expect(buildStatusReport(seeded(), { max_slots: 3 }, 'p').anchors).toBeNull();
+  });
+
+  it('never lists an in-flight batch, and never reads an issue for one', () => {
+    const reads: number[] = [];
+    const report = buildStatusReport(seeded(), { max_slots: 3 }, 'p', null, NOW, {
+      read: (n) => {
+        reads.push(n);
+        return { state: 'OPEN', stateReason: null, labels: [], closer: null };
+      },
+    });
+    expect(report.anchors).toEqual([]);
+    expect(reads).toEqual([]);
+  });
+});
