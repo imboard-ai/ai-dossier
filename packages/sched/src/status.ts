@@ -26,10 +26,12 @@ import {
   dependencyBlockers,
   runnableUnits,
 } from './readiness';
-import { distinctEvictions, PARKED_MEMBER_STATUSES } from './state';
+import { DISSOLVE_REFUSED_PREFIX } from './recovery';
+import { distinctEvictions, PARKED_MEMBER_STATUSES, validatedMembersOf } from './state';
 import type {
   BatchEntry,
   DispatchProfileSource,
+  MemberExitKind,
   ModelTier,
   QueueEntry,
   SchedConfig,
@@ -63,7 +65,7 @@ export interface ParkedMemberItem {
   issue: number;
   /** The batch it left (null for a pre-#810 entry that no longer names one). */
   batch: string | null;
-  kind: 'evicted' | 'handed-back';
+  kind: MemberExitKind;
   reason: string;
   /** Member branch holding its un-landed work (its remote copy survives teardown), when recorded. */
   branch: string | null;
@@ -79,7 +81,7 @@ export interface ParkedMemberItem {
 
 /** The parked-member row for one entry (#810). */
 function parkedMemberItem(entry: QueueEntry): ParkedMemberItem {
-  const kind = entry.status === 'handed-back' ? 'handed-back' : 'evicted';
+  const kind = entry.status as MemberExitKind;
   const reason = entry.reason ?? entry.failure_evidence?.reason ?? kind;
   const branch = entry.failure_evidence?.branch ?? null;
   const profile = entry.dispatch_profile ?? null;
@@ -104,6 +106,31 @@ function parkedMemberItem(entry: QueueEntry): ParkedMemberItem {
       `ai-dossier sched abandon --issue ${entry.issue} --reason <why>`,
     ],
   };
+}
+
+/**
+ * #810: what an operator can do with a batch whose `full` dissolve was
+ * refused over validated members (`blocked_reason: dissolve-refused:<why>`).
+ * Only an unattributed failure or a broken dispatch profile leaves a branch
+ * worth shipping as-is; a red suite or a partial revert does not.
+ */
+function dissolveRefusedNote(state: SchedState, batch: BatchEntry): string {
+  const reason = batch.blocked_reason ?? '';
+  if (!reason.startsWith(DISSOLVE_REFUSED_PREFIX)) return '';
+  const validated = validatedMembersOf(state, batch);
+  if (validated.length === 0) return '';
+  const why = reason.slice(DISSOLVE_REFUSED_PREFIX.length);
+  const branch = batch.branch ?? '<integration branch>';
+  const list = validated.map((m) => `#${m}`).join(',');
+  const shippable =
+    why === 'unattributable-suite-failure' || why.startsWith('dispatch-profile-missing');
+  const salvage = shippable
+    ? `ship them: \`gh pr create --head ${branch} --base ${batch.base_branch}\` — once it merges the engine reconciles them to shipped`
+    : `the branch is red or partly reverted — inspect it before shipping anything (fix on ${branch}, then \`gh pr create --head ${branch} --base ${batch.base_branch}\`)`;
+  return (
+    `; validated member(s) ${list} stay landed on ${branch} — ${salvage}; or ` +
+    `\`ai-dossier sched abandon --batch ${batch.id}\` (requeues them full-cycle instead)`
+  );
 }
 
 /**
@@ -392,18 +419,7 @@ export function buildStatusReport(
   // fallback is defensive, not expected in practice.
   for (const batch of state.batches) {
     if (batch.status !== 'blocked') continue;
-    // #810: a batch blocked instead of dissolved keeps validated members
-    // landed on its integration branch — name them and the operator's exits.
-    const validated = batch.members.filter(
-      (m) =>
-        state.entries.find((e) => e.issue === m && e.batch === batch.id)?.status === 'validated'
-    );
-    const validatedNote =
-      validated.length > 0
-        ? `; validated member(s) ${validated.map((m) => `#${m}`).join(',')} stay landed on ` +
-          `${batch.branch ?? 'the integration branch'} — ship them from it, or ` +
-          `\`ai-dossier sched abandon --batch ${batch.id}\` (requeues every unshipped member full-cycle)`
-        : '';
+    const validatedNote = dissolveRefusedNote(state, batch);
     blocked.push({
       issue: batch.anchor ?? batch.members[batch.executing_member - 1] ?? -1,
       status: 'batch-blocked',

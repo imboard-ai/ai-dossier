@@ -25,7 +25,12 @@
 import type { IssueCloseTruth } from './groundtruth';
 import { DECISION_PENDING_LABEL, hasLabel } from './labels';
 import type { ExecFn } from './project';
-import { distinctEvictions, findEntry, ISSUE_UNIVERSAL_FAILURE_EDGES } from './state';
+import {
+  distinctEvictions,
+  findEntry,
+  ISSUE_UNIVERSAL_FAILURE_EDGES,
+  PARKED_MEMBER_STATUSES,
+} from './state';
 import type { BatchEntry, BatchStatus, IssueStatus, SchedState } from './types';
 
 /** Reads one issue's closure record; `undefined` = the poll failed (unreachable). */
@@ -47,9 +52,8 @@ export type CommitInBase = (oid: string, baseBranch: string) => boolean;
  */
 const MEMBER_FAILURE_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
   ...ISSUE_UNIVERSAL_FAILURE_EDGES,
-  'evicted',
-  // #810: a member's own hand-back is parked for an operator decision too.
-  'handed-back',
+  // #810: both parked statuses — `evicted` and the member's own `handed-back`.
+  ...PARKED_MEMBER_STATUSES,
   'requeued',
 ]);
 

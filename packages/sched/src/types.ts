@@ -43,7 +43,11 @@ export type ReviewLevel = 'light' | 'full';
  *   slot:  → batched(b) → waiting → in-work → committed(range) → validated
  *              → shipped-in-batch → done
  * failure edges (any state):
- *   in-work/committed → evicted(reason) → requeued{full}
+ *   batched…committed → evicted(reason) | handed-back(reason)   (#810: PARKED —
+ *     never auto-dispatched) → requeued{full} only by an operator's
+ *     `sched requeue` (or `sched abandon --batch`)
+ *   validated → evicted → requeued{full}   (aggregate-suite eviction: commits
+ *     reverted, requeued by `evictMembers`)
  *   any → blocked(dep-failed) | decision-pending | failed(escalation-cap)
  *   failed(auto-merge-blocked) → shipped   (#501 stale-failure reconcile —
  *     the ONE edge out of `failed`, engine-guarded to that one reason; see
@@ -170,13 +174,20 @@ export interface FailureEvidence {
 }
 
 /**
- * #810: how a member left its batch before landing. `evicted` is a failure
- * the ENGINE decided (unverified exit, gate task-failed, landing conflict,
- * aggregate-suite attribution) and counts toward the dissolve threshold;
+ * #810: how a member left its batch before landing — also the two PARKED
+ * issue statuses. `evicted` is a failure the ENGINE decided (unverified exit,
+ * incremental-gate task-failed, landing conflict, worktree prep, or an
+ * in-flight member of a dissolve) and counts toward the dissolve threshold;
  * `handed-back` is the MEMBER's own explicit terminal hand-back (a `blocked`
  * or `review partial` milestone it posted) — a valued outcome, never counted.
+ * (Aggregate-suite attribution evictions — `evictMembers`, after landing —
+ * revert the member's commits and still requeue it full-cycle: its member
+ * branch was deleted when it landed, so there is no branch to park it on.)
  */
-export type MemberExitKind = 'evicted' | 'handed-back';
+export const MEMBER_EXIT_KINDS = ['evicted', 'handed-back'] as const;
+
+/** See {@link MEMBER_EXIT_KINDS}. */
+export type MemberExitKind = (typeof MEMBER_EXIT_KINDS)[number];
 
 /**
  * One eviction, kept on the batch for the batch report and as the classifier
@@ -586,7 +597,8 @@ export interface BatchEntry {
    * name that no longer resolves against the CURRENT config never silently
    * falls back — the silent fallback is the #680 incident shape: pre-merge
    * the batch DISSOLVES with reason `dispatch-profile-missing:<name>`
-   * (members requeue as full-cycle units on the config default), post-merge
+   * (members requeue as full-cycle units on the config default — #810:
+   * in-flight ones park on it, and validated members block the batch), post-merge
    * the remaining tail work runs on the default with a journaled
    * `dispatch-profile-missing` event. Added in schema 1.19.0; 1.18.0
    * batches backfill to null.

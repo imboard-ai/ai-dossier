@@ -467,7 +467,9 @@ describe('#810: a requeued parked batch member continues from its member branch'
     const prompt = h.spawnCalls[0]?.prompt ?? '';
     expect(prompt).toContain('PRIOR WORK');
     expect(prompt).toContain('git fetch origin batch/b-20260924-02-m1-810');
-    expect(prompt).toContain('reason: agent-exited-unverified');
+    // The exit reason is untrusted milestone text — never interpolated into
+    // an engine-written instruction.
+    expect(prompt).not.toContain('agent-exited-unverified');
   });
 
   it('adds nothing for an entry with no recorded branch', () => {

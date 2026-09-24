@@ -880,10 +880,9 @@ describe('dissolveBatch', () => {
 
     expect(result.blocked).toBe(true);
     expect(result.validated).toEqual([201]);
-    expect(result.requeued).toEqual([]);
     expect(findBatch(result.state, 'b1')).toMatchObject({
       status: 'blocked',
-      blocked_reason: 'unattributable-suite-failure',
+      blocked_reason: 'dissolve-refused:unattributable-suite-failure',
     });
     // The validated member keeps its batch and its landing.
     expect(findEntry(result.state, 201)).toMatchObject({
@@ -891,11 +890,23 @@ describe('dissolveBatch', () => {
       mode: 'slot',
       batch: 'b1',
     });
-    // Nothing else was requeued either — the operator decides.
-    expect(findEntry(result.state, 202)?.mode).toBe('slot');
+    // The non-validated members (no member branch recorded — nothing to lose)
+    // are released full-cycle on the batch profile, and recorded out of the
+    // batch, so the blocked batch holds only its validated work.
+    expect(result.requeued).toEqual([202, 203]);
+    expect(findEntry(result.state, 202)).toMatchObject({
+      mode: 'full',
+      dispatch_profile: 'openai',
+    });
+    expect(findBatch(result.state, 'b1')?.evictions.map((e) => e.issue)).toEqual([202, 203]);
     expect(h.milestones.at(-1)?.milestone).toMatchObject({
       status: 'blocked',
-      kv: { reason: 'unattributable-suite-failure', dissolved: 'false', validated: '201' },
+      kv: {
+        reason: 'dissolve-refused:unattributable-suite-failure',
+        dissolved: 'false',
+        validated: '201',
+        requeued: '202,203',
+      },
     });
     expect(h.events.map((e) => e.event)).toContain('batch-blocked');
     expect(h.events.map((e) => e.event)).not.toContain('batch-dissolved');

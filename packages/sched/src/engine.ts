@@ -899,8 +899,10 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
         // generation, never by matching this label (AC7).
         slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined
       ),
-      // #810: a requeued parked batch member continues from its member branch.
-      priorWorkInstruction(issue, entry.failure_evidence)
+      // #810: a requeued parked batch member continues from its member branch —
+      // on the FIRST generation only: a takeover resumes its own run's pushed
+      // branch (the takeover instruction), which may already carry newer work.
+      slot.gen === 0 ? priorWorkInstruction(issue, entry.failure_evidence) : null
     ),
     phase: 'gate',
     ...(slot.gen > 0 ? { journalExtra: { detail: `takeover gen=${slot.gen}` } } : {}),

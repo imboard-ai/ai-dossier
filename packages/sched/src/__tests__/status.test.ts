@@ -316,13 +316,23 @@ describe('#810: parked batch members in the status report', () => {
       state = transitionIssue(state, 201, to, {}, NOW);
     }
     state = patchBatch(state, 'b1', { branch: 'batch/b1' }, NOW);
-    state = transitionBatch(state, 'b1', 'blocked', { blocked_reason: 'eviction-threshold' }, NOW);
-    const report = buildStatusReport(state, { max_slots: 3 }, 'proj');
-    const row = report.blocked.find((b) => b.status === 'batch-blocked');
-    expect(row?.reason).toContain(
-      'eviction-threshold; validated member(s) #201 stay landed on batch/b1'
+    const blockedOn = (why: string) =>
+      buildStatusReport(
+        transitionBatch(state, 'b1', 'blocked', { blocked_reason: why }, NOW),
+        { max_slots: 3 },
+        'proj'
+      ).blocked.find((b) => b.status === 'batch-blocked')?.reason;
+
+    const unattributed = blockedOn('dissolve-refused:unattributable-suite-failure');
+    expect(unattributed).toContain('validated member(s) #201 stay landed on batch/b1');
+    expect(unattributed).toContain('gh pr create --head batch/b1 --base main');
+    expect(unattributed).toContain('ai-dossier sched abandon --batch b1');
+    // A red suite is not a branch to ship as-is.
+    expect(blockedOn('dissolve-refused:eviction-threshold-suite-red')).toContain(
+      'inspect it before shipping'
     );
-    expect(row?.reason).toContain('ai-dossier sched abandon --batch b1');
+    // Any other block reason gets no dissolve-refused note.
+    expect(blockedOn('suite-unreadable')).toBe('suite-unreadable');
   });
 });
 

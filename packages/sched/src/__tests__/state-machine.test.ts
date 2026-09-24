@@ -440,6 +440,60 @@ describe('#810: parkMember / profile-carrying requeue', () => {
     expect(findEntry(reset.state, 202)?.dispatch_profile).toBeNull();
   });
 
+  it('a parked member keeps its park-time profile on requeue — a deliberate null is not re-derived from the batch', () => {
+    // The `dispatch-profile-missing` dissolve parks on the config default; the
+    // batch still records the broken profile. `sched requeue` must not revive it.
+    let state = withProfile(inWork(seeded(), 201));
+    state = parkMember(state, 201, 'evicted', 'dispatch-profile-missing:openai', NOW, {
+      dispatch_profile: null,
+    }).state;
+    expect(findEntry(state, 201)?.dispatch_profile).toBeNull();
+    const result = requeueMember(state, 201, TO_FULL, 'operator-requeue', NOW2);
+    expect(findEntry(result.state, 201)).toMatchObject({
+      status: 'requeued',
+      dispatch_profile: null,
+    });
+  });
+
+  it('validateState refuses a failure_evidence.branch that is not a plain ref', () => {
+    let state = inWork(seeded(), 201);
+    state = parkMember(state, 201, 'evicted', 'x', NOW, {
+      failure_evidence: {
+        batch: 'b1',
+        reason: 'x',
+        failing_tests: [],
+        attribution: 'none',
+        reverted_commits: [],
+        branch: 'batch/b1-m1-201',
+        at: NOW.toISOString(),
+      },
+    }).state;
+    expect(() => validateState(JSON.parse(JSON.stringify(state)))).not.toThrow();
+    const bad = JSON.parse(JSON.stringify(state));
+    bad.entries.find((e: { issue: number }) => e.issue === 201).failure_evidence.branch =
+      '--upload-pack=evil';
+    expect(() => validateState(bad)).toThrow(/failure_evidence\.branch/);
+  });
+
+  it('a 1.23.0 state loads and migrates to 1.24.0 unchanged (no backfill: kind/branch are optional)', () => {
+    const legacy = JSON.parse(JSON.stringify({ ...seeded(), schema_version: '1.23.0' }));
+    legacy.batches[0].evictions = [
+      {
+        issue: 201,
+        reason: 'agent-exited-unverified',
+        attribution: 'none',
+        reverted_commits: [],
+        group: [],
+        at: NOW.toISOString(),
+      },
+    ];
+    const loaded = validateState(legacy);
+    expect(loaded.schema_version).toBe(SCHEMA_VERSION);
+    expect(SCHEMA_VERSION).toBe('1.24.0');
+    expect(loaded.batches[0]?.evictions[0]).not.toHaveProperty('kind');
+    expect(loaded.entries.map((e) => e.status)).toEqual(seeded().entries.map((e) => e.status));
+  });
+
   it('validateState refuses an unknown eviction kind (it would change what the threshold counts)', () => {
     const state = seeded();
     const bad = {

@@ -27,6 +27,7 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SCHED_DISPATCH_EVENT } from '@ai-dossier/core';
+import { SAFE_REF_RE } from './attribution';
 import { sanitizeSlug } from './project';
 import {
   DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
@@ -932,28 +933,33 @@ export function buildPrompt(template: string, issue: number, gen = 0, slotLabel?
  * of re-deriving everything from the base branch. `null` when the evidence
  * names no branch, or a branch/batch that is not a plain ref (persisted state
  * reaching an agent's instruction stream is re-validated, never trusted).
+ *
+ * The exit `reason` is deliberately NOT interpolated: for a hand-back it is
+ * the member's own milestone text (anyone who can comment on the issue can
+ * write it), and inside an engine-written instruction it would carry the
+ * engine's authority. The agent reads it from the issue trail, as data.
  */
 export function priorWorkInstruction(
   issue: number,
-  evidence: { batch: string; reason: string; branch?: string | null } | null
+  evidence: { batch: string; branch?: string | null } | null
 ): string | null {
   const branch = evidence?.branch;
-  if (evidence === null || typeof branch !== 'string' || !PRIOR_WORK_REF_RE.test(branch)) {
-    return null;
-  }
-  const batch = PRIOR_WORK_REF_RE.test(evidence.batch) ? evidence.batch : 'its batch';
-  const reason = evidence.reason.replace(/[^A-Za-z0-9._:/-]/g, '-').slice(0, 120);
+  if (evidence === null || !isPlainRef(branch)) return null;
+  const batch = isPlainRef(evidence.batch) ? evidence.batch : 'its batch';
   return (
-    `PRIOR WORK — issue #${issue} was a member of ${batch} and left it (reason: ${reason}) with ` +
-    `its work on branch ${branch}. Before planning, run \`git fetch origin ${branch}\`: if it ` +
-    'exists, set up your worktree from that branch (not the base branch), read its commits and ' +
-    "the issue's plan/handover comments, and continue that work rather than restarting it; ship " +
-    'to the base branch as usual. If the branch is gone, start fresh from the base branch.'
+    `PRIOR WORK — issue #${issue} was a member of ${batch} and was parked out of it with its ` +
+    `work on branch ${branch} (why: see the blocked milestone / handover comments on the ` +
+    `issue). Before planning, run \`git fetch origin ${branch}\`: if it exists, set up your ` +
+    "worktree from that branch (not the base branch), read its commits and the issue's " +
+    'plan/handover comments, and continue that work rather than restarting it; ship to the ' +
+    'base branch as usual. If the branch is gone, start fresh from the base branch.'
   );
 }
 
-/** A plain git ref / batch id — no whitespace, no shell or prompt metacharacters. */
-const PRIOR_WORK_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+/** A plain git ref / batch id (`SAFE_REF_RE`, bounded) — safe in argv and in a prompt. */
+function isPlainRef(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 200 && SAFE_REF_RE.test(value);
+}
 
 /**
  * Build the report agent's stdin prompt (#468): `{issue}`/`{pr}`/`{cleanup}`/`{gen}`

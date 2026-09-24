@@ -3923,6 +3923,62 @@ describe('#809: parallel member dispatch', () => {
     expect(log).toEqual(['feat: f-8131.txt (#8131)', 'feat: f-8133.txt (#8133)']);
   }, 60_000);
 
+  it('#810: a dissolve REFUSED over a validated member blocks the batch — the running member is stopped and parked with its branch, every slot released, the validated landing kept', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--slow-members=8162', '--slow-ms=30000'],
+      { maxSlots: 3, parallel: true }
+    );
+    h.enqueue([
+      { issue: 8161, mode: 'slot', batch: 'b-refuse', anchor: 8160, tier: 'mid' },
+      { issue: 8162, mode: 'slot', batch: 'b-refuse', tier: 'mid' },
+    ]);
+    h.tick();
+    const slowSlot = memberSlots(h, 'b-refuse').find((s) => s.unit === 'batch:b-refuse#8162');
+    const slowPid = slowSlot?.pid as number;
+    procsToKill.push(slowPid);
+    const quick = memberPids(h, 'b-refuse').filter((pid) => pid !== slowPid);
+    expect(await waitAllDead(h, quick)).toBe(true);
+    h.tick(); // 8161 verified → lands → validated; 8162 still running
+    expect(h.state().entries.find((e) => e.issue === 8161)?.status).toBe('validated');
+
+    // The recorded profile stops resolving mid-run → a full dissolve, which
+    // must not requeue the validated 8161 from scratch.
+    h.store.withLock((state) => ({
+      state: patchBatch(state, 'b-refuse', { dispatch_profile: 'ghost' }, new Date()),
+      result: null,
+    }));
+    const slowBranch = findBatch(h.state(), 'b-refuse')?.member_runs.find(
+      (r) => r.issue === 8162
+    )?.branch;
+    h.tick();
+
+    const batch = findBatch(h.state(), 'b-refuse');
+    expect(batch).toMatchObject({
+      status: 'blocked',
+      blocked_reason: 'dissolve-refused:dispatch-profile-missing:ghost',
+    });
+    expect(h.state().entries.find((e) => e.issue === 8161)).toMatchObject({
+      status: 'validated',
+      mode: 'slot',
+      batch: 'b-refuse',
+    });
+    expect(h.state().entries.find((e) => e.issue === 8162)).toMatchObject({
+      status: 'evicted',
+      dispatch_profile: null,
+      failure_evidence: expect.objectContaining({ branch: slowBranch }),
+    });
+    expect(await waitUntilDead(h.spawnDeps, slowPid)).toBe(true);
+    expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
+    // The integration branch (and its worktree) are kept for the operator.
+    expect(fs.existsSync(batch?.worktree as string)).toBe(true);
+    const report = buildStatusReport(h.state(), h.config, 'proj');
+    expect(report.blocked.find((b) => b.status === 'batch-blocked')?.reason).toContain(
+      'validated member(s) #8161'
+    );
+  }, 60_000);
+
   it('a dissolve mid-run KILLS the still-running members, releases their slots, and tears their worktrees down', async () => {
     const repo = scratchRepo();
     const h = batchHarness(

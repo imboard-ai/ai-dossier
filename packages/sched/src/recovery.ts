@@ -6,6 +6,8 @@
  * validating → attributing → fixing (ONE bounded attempt) → validating
  *                          → evicting (revert the member's commits) → validating
  *   > ⅓ evicted, or a revert conflict → dissolving → members requeued
+ *     (#810: in-flight members parked; validated members present → blocked
+ *     `dissolve-refused:<why>` instead)
  * awaiting-merge (CONFLICTING | auto-merge-blocked)
  *                          → rebasing → re-validating → shipping
  *                          → (2nd occurrence) dissolving into two half-batches
@@ -58,11 +60,15 @@ import {
   findBatch,
   findEntry,
   isPreservedMember,
+  type MemberExitExtra,
+  memberExitEvidence,
   PARKED_MEMBER_STATUSES,
   parkMember,
   patchBatch,
+  recordedMemberBranch,
   requeueMember,
   transitionBatch,
+  validatedMembersOf,
 } from './state';
 import {
   type AttributionMethod,
@@ -690,7 +696,8 @@ export function evictMembers(
       requeued: dissolve.requeued,
       reverted: [],
       conflict: true,
-      dissolved: true,
+      // #810: a refused dissolve (validated members kept) blocks instead.
+      dissolved: !dissolve.blocked,
       dissolve,
       suite: null,
     };
@@ -950,7 +957,8 @@ function revertConflict(
     requeued: dissolve.requeued,
     reverted,
     conflict: true,
-    dissolved: true,
+    // #810: a refused dissolve (validated members kept) blocks instead.
+    dissolved: !dissolve.blocked,
     dissolve,
     suite: null,
   };
@@ -1009,15 +1017,23 @@ function evictedMemberIds(batch: BatchEntry): Set<number> {
  * OR handed back (#810). The one definition of "which members are out" for
  * survivor computation (`preserveSurvivors`).
  */
-export function exitedMemberIds(batch: BatchEntry): Set<number> {
+function exitedMemberIds(batch: BatchEntry): Set<number> {
   return new Set(batch.evictions.map((e) => e.issue));
 }
 
 // --- AC3: dissolve ---
 
+/**
+ * #810: `blocked_reason` prefix of a batch whose `full` dissolve was refused
+ * because validated members would have been discarded.
+ */
+export const DISSOLVE_REFUSED_PREFIX = 'dissolve-refused:';
+
 export interface DissolveOptions {
   /**
-   * `full` requeues every unshipped member as its own full-cycle run;
+   * `full` requeues every unshipped member as its own full-cycle run (#810:
+   * in-flight members with a member branch are parked `evicted` instead, and
+   * validated members make the batch BLOCK rather than dissolve);
    * `halved` splits them into two fresh `forming` batches (§F.9's answer to a
    * batch that keeps conflicting: smaller batches, not abandoned work);
    * `partial` (#563) keeps the batch alive and ships only the survivors,
@@ -1070,20 +1086,11 @@ export interface DissolveOutcome {
 }
 
 /**
- * The member branch holding `issue`'s un-landed work in `batch` (#810): its
- * parallel run's branch, else the serial current-member branch when `issue`
- * is the member in work. `null` when the batch has none recorded.
- */
-export function memberBranchOf(batch: BatchEntry, issue: number): string | null {
-  const run = batch.member_runs.find((r) => r.issue === issue);
-  if (run !== undefined) return run.branch;
-  if (batch.members[batch.executing_member - 1] === issue) return batch.member_branch;
-  return null;
-}
-
-/**
- * Dissolve a batch (AC3): mark it `dissolved`, requeue every unshipped member,
- * and report what was preserved. Shipped/terminal members are never touched —
+ * Dissolve a batch (AC3): mark it `dissolved`, release every unshipped member
+ * (#810: in-flight ones parked with their member branch, the rest requeued on
+ * the batch's dispatch profile), and report what was preserved — or, for a
+ * `full` dissolve over VALIDATED members, block instead
+ * (`blockInsteadOfDissolve`). Shipped/terminal members are never touched —
  * "nothing green is discarded" is the whole point of dissolving rather than
  * failing the batch.
  *
@@ -1135,69 +1142,28 @@ export function dissolveBatch(
   }
   const strategy: 'full' | 'halved' = opts.strategy === 'halved' ? 'halved' : 'full';
 
-  const unshipped: number[] = [];
-  const preserved: number[] = [];
-  // #810: the three kinds of unshipped member a `full` dissolve treats
-  // differently — validated (landed on the integration branch), in flight
-  // (work on a recorded member branch), and the rest (nothing to preserve).
-  const validatedMembers: number[] = [];
-  const inFlight: number[] = [];
-  for (const issue of batch.members) {
-    const entry = state.entries.find((e) => e.issue === issue);
-    if (!entry) continue;
-    // A prior eviction can requeue and redispatch a member as a full-cycle
-    // unit before this batch reaches its dissolve threshold. The batch still
-    // names it historically, but no longer owns its entry or its live slot.
-    // #810: a member already PARKED (evicted / handed back) is out of the
-    // batch too — its park is the operator's decision to make, never re-made
-    // here by requeueing it.
-    if (
-      isPreservedMember(entry) ||
-      entry.mode !== 'slot' ||
-      entry.batch !== batchId ||
-      PARKED_MEMBER_STATUSES.has(entry.status)
-    ) {
-      preserved.push(issue);
-    } else {
-      unshipped.push(issue);
-      if (entry.status === 'validated') validatedMembers.push(issue);
-      else if (
-        (entry.status === 'in-work' || entry.status === 'committed') &&
-        memberBranchOf(batch, issue) !== null
-      ) {
-        // In flight WITH a member branch: its work lives there — park it.
-        // One without a recorded branch has nothing to preserve and requeues.
-        inFlight.push(issue);
-      }
-    }
-  }
+  const { unshipped, preserved, validated, inFlight } = classifyDissolveMembers(state, batch);
+
+  // Why the member is back on the queue (or parked), carried on the entry
+  // itself — a dissolve requeue is otherwise indistinguishable from a fresh
+  // enqueue.
+  const evidence = memberExitEvidence(batchId, opts.reason, null, now);
+  const profileOverride: MemberExitExtra =
+    opts.carryDispatchProfile === false ? { dispatch_profile: null } : {};
 
   // #810: a `full` dissolve never requeues (or discards) validated work. With
-  // validated members present the batch BLOCKS for an operator instead: the
-  // validated members stay landed on the integration branch, in-flight
-  // members are parked with their branch (their agents were stopped by the
-  // caller), and unstarted members stay put for the operator's decision.
-  if (strategy === 'full' && validatedMembers.length > 0) {
+  // validated members present the batch BLOCKS for an operator instead.
+  if (strategy === 'full' && validated.length > 0) {
     return blockInsteadOfDissolve(state, batch, opts, deps, now, {
       policyInputs,
-      validated: validatedMembers,
+      validated,
+      release: unshipped.filter((issue) => !validated.includes(issue)),
       inFlight,
+      evidence,
+      profileOverride,
     });
   }
 
-  // Why the member is back on the queue, carried on the entry itself — a
-  // dissolve requeue is otherwise indistinguishable from a fresh enqueue.
-  const evidence: FailureEvidence = {
-    batch: batchId,
-    reason: opts.reason,
-    failing_tests: [],
-    attribution: 'none',
-    reverted_commits: [],
-    at: now.toISOString(),
-  };
-
-  const profileOverride =
-    opts.carryDispatchProfile === false ? { dispatch_profile: null as string | null } : {};
   let next = transitionBatch(state, batchId, 'dissolving', {}, now);
   const newBatches: string[] = [];
   const requeued: number[] = [];
@@ -1269,27 +1235,13 @@ export function dissolveBatch(
       now
     );
   } else {
-    for (const issue of unshipped) {
-      if (inFlight.includes(issue)) {
-        // #810: an in-flight member's work is on its member branch — park it
-        // with that branch instead of restarting it from the base.
-        const parkedResult = parkMember(next, issue, 'evicted', opts.reason, now, {
-          failure_evidence: { ...evidence, branch: memberBranchOf(batch, issue) },
-          ...profileOverride,
-        });
-        next = parkedResult.state;
-        if (parkedResult.parked) parked.push(issue);
-        continue;
-      }
-      // Unstarted: no work to lose — requeue full-cycle (on the batch's
-      // dispatch profile, which `requeueMember` carries since #810).
-      const result = requeueMember(next, issue, { mode: 'full', batch: null }, opts.reason, now, {
-        failure_evidence: evidence,
-        ...profileOverride,
-      });
-      next = result.state;
-      if (result.requeued) requeued.push(issue);
-    }
+    const released = releaseMembers(next, batch, unshipped, inFlight, opts.reason, now, {
+      evidence,
+      profileOverride,
+    });
+    next = released.state;
+    requeued.push(...released.requeued);
+    parked.push(...released.parked);
   }
 
   next = transitionBatch(next, batchId, 'dissolved', {}, now);
@@ -1339,12 +1291,95 @@ export function dissolveBatch(
 }
 
 /**
+ * #810: sort a dissolving batch's members. `preserved` = no longer the
+ * batch's to decide (shipped/terminal, redispatched elsewhere, or already
+ * PARKED — a park is the operator's decision, never re-made by a requeue);
+ * `unshipped` = everything else, of which `validated` landed on the
+ * integration branch and `inFlight` has work on a recorded member branch.
+ */
+function classifyDissolveMembers(
+  state: SchedState,
+  batch: BatchEntry
+): { unshipped: number[]; preserved: number[]; validated: number[]; inFlight: number[] } {
+  const unshipped: number[] = [];
+  const preserved: number[] = [];
+  const inFlight: number[] = [];
+  for (const issue of batch.members) {
+    const entry = findEntry(state, issue);
+    if (!entry) continue;
+    // A prior eviction can requeue and redispatch a member as a full-cycle
+    // unit before this batch reaches its dissolve threshold. The batch still
+    // names it historically, but no longer owns its entry or its live slot.
+    if (
+      isPreservedMember(entry) ||
+      entry.mode !== 'slot' ||
+      entry.batch !== batch.id ||
+      PARKED_MEMBER_STATUSES.has(entry.status)
+    ) {
+      preserved.push(issue);
+      continue;
+    }
+    unshipped.push(issue);
+    if (
+      (entry.status === 'in-work' || entry.status === 'committed') &&
+      recordedMemberBranch(batch, issue) !== null
+    ) {
+      inFlight.push(issue);
+    }
+  }
+  const validated = validatedMembersOf(state, batch).filter((m) => unshipped.includes(m));
+  return { unshipped, preserved, validated, inFlight };
+}
+
+/**
+ * #810: take `members` out of a dissolving/blocking batch without losing
+ * work. An in-flight member (work on its recorded member branch) is PARKED
+ * `evicted` with that branch — an operator's `sched requeue` continues it; any
+ * other member has no work to lose and is requeued full-cycle, on the batch's
+ * dispatch profile unless `profileOverride` says otherwise.
+ */
+function releaseMembers(
+  state: SchedState,
+  batch: BatchEntry,
+  members: readonly number[],
+  inFlight: readonly number[],
+  reason: string,
+  now: Date,
+  ctx: { evidence: FailureEvidence; profileOverride: MemberExitExtra }
+): { state: SchedState; requeued: number[]; parked: number[] } {
+  let next = state;
+  const requeued: number[] = [];
+  const parked: number[] = [];
+  for (const issue of members) {
+    if (inFlight.includes(issue)) {
+      const result = parkMember(next, issue, 'evicted', reason, now, {
+        failure_evidence: { ...ctx.evidence, branch: recordedMemberBranch(batch, issue) },
+        ...ctx.profileOverride,
+      });
+      next = result.state;
+      if (result.parked) parked.push(issue);
+      continue;
+    }
+    const result = requeueMember(next, issue, { mode: 'full', batch: null }, reason, now, {
+      failure_evidence: ctx.evidence,
+      ...ctx.profileOverride,
+    });
+    next = result.state;
+    if (result.requeued) requeued.push(issue);
+  }
+  return { state: next, requeued, parked };
+}
+
+/**
  * #810: the `full` dissolve's replacement when validated members exist —
- * block the batch for an operator (`blocked_reason` = the dissolve reason)
- * rather than requeue validated work from scratch. In-flight members are
- * parked with their member branch; validated members stay landed and are
- * named in the journal and the milestone (`validated=`), so the operator can
- * ship them from the integration branch or `sched abandon --batch` it.
+ * BLOCK the batch for an operator (`blocked_reason: dissolve-refused:<reason>`)
+ * rather than requeue validated work from scratch. The validated members stay
+ * landed on the integration branch; every other unshipped member is released
+ * exactly as a dissolve would (in-flight parked with its branch, the rest
+ * requeued on the batch profile), so the blocked batch holds nothing but its
+ * validated work — which `reconcileStaleBlockedBatches` settles to shipped
+ * once the integration branch merges (an operator's PR). The caller stops any
+ * still-running member agents and releases the slots (`applyDissolveOutcome`).
  */
 function blockInsteadOfDissolve(
   state: SchedState,
@@ -1355,38 +1390,43 @@ function blockInsteadOfDissolve(
   ctx: {
     policyInputs: { memberCount: number; evictedCount: number; threshold: number };
     validated: number[];
+    release: number[];
     inFlight: number[];
+    evidence: FailureEvidence;
+    profileOverride: MemberExitExtra;
   }
 ): DissolveOutcome {
   const batchId = batch.id;
-  let next = state;
-  const parked: number[] = [];
-  for (const issue of ctx.inFlight) {
-    const result = parkMember(next, issue, 'evicted', opts.reason, now, {
-      ...(opts.carryDispatchProfile === false ? { dispatch_profile: null } : {}),
-      failure_evidence: {
-        batch: batchId,
-        reason: opts.reason,
-        failing_tests: [],
-        attribution: 'none',
-        reverted_commits: [],
-        branch: memberBranchOf(batch, issue),
-        at: now.toISOString(),
-      },
-    });
-    next = result.state;
-    if (result.parked) parked.push(issue);
-  }
-  next = transitionBatch(next, batchId, 'blocked', { blocked_reason: opts.reason }, now);
+  const released = releaseMembers(state, batch, ctx.release, ctx.inFlight, opts.reason, now, ctx);
+  let next = released.state;
+  // Every released member is out of the batch (`memberStillInBatch`, survivor
+  // computation, stale-blocked reconcile) exactly like a direct eviction —
+  // record it the same way.
+  const { evictions } = appendEvictions(
+    batchOrThrow(next, batchId),
+    [...released.parked, ...released.requeued].map((issue) => ({
+      issue,
+      reason: opts.reason,
+      attribution: 'none' as const,
+      reverted_commits: [],
+      group: [],
+      kind: 'evicted' as const,
+      branch: recordedMemberBranch(batch, issue),
+      at: now.toISOString(),
+    }))
+  );
+  next = patchBatch(next, batchId, { evictions }, now);
+  const blockedReason = `${DISSOLVE_REFUSED_PREFIX}${opts.reason}`;
+  next = transitionBatch(next, batchId, 'blocked', { blocked_reason: blockedReason }, now);
   const { policyInputs } = ctx;
   journal(
     deps,
     unitEvent('batch-blocked', `batch:${batchId}`, {
       detail:
-        `${opts.reason} — dissolve refused: validated member(s) ${ctx.validated.join(',')} stay ` +
-        `landed on ${batch.branch ?? 'the integration branch'} ` +
-        `N=${policyInputs.memberCount} evictions=${policyInputs.evictedCount} ` +
-        `threshold=${policyInputs.threshold} parked=${parked.join(',') || 'none'}`,
+        `${blockedReason} — validated member(s) ${ctx.validated.join(',')} stay landed on ` +
+        `${batch.branch ?? 'the integration branch'} N=${policyInputs.memberCount} ` +
+        `evictions=${policyInputs.evictedCount} threshold=${policyInputs.threshold} ` +
+        `parked=${released.parked.join(',') || 'none'} requeued=${released.requeued.join(',') || 'none'}`,
     }),
     now
   );
@@ -1397,21 +1437,21 @@ function blockInsteadOfDissolve(
       phase: opts.milestonePhase ?? 'batch-validate',
       status: 'blocked',
       kv: {
-        reason: opts.reason,
+        reason: blockedReason,
         dissolved: 'false',
         validated: ctx.validated.join(','),
-        requeued: 'none',
-        ...(parked.length > 0 ? { parked: parked.join(',') } : {}),
+        requeued: released.requeued.join(',') || 'none',
+        ...(released.parked.length > 0 ? { parked: released.parked.join(',') } : {}),
       },
     },
     now
   );
   return {
     state: next,
-    requeued: [],
+    requeued: released.requeued,
     preserved: ctx.validated,
     newBatches: [],
-    parked,
+    parked: released.parked,
     blocked: true,
     validated: ctx.validated,
   };
@@ -1447,10 +1487,12 @@ function preserveSurvivors(
 ): DissolveOutcome | null {
   // Cumulative across every eviction round this batch has had, not just this
   // one — a member evicted two rounds ago is still not a survivor.
-  const evictedIds = exitedMemberIds(batch);
-  const survivors = batch.members.filter((issue) => !evictedIds.has(issue));
+  const exitedIds = exitedMemberIds(batch);
+  const survivors = batch.members.filter((issue) => !exitedIds.has(issue));
   if (survivors.length === 0) return null;
-  const evictedTotal = [...evictedIds].sort((a, b) => a - b);
+  // `evicted_total` keeps its name for readers of old milestones; since #810
+  // it also counts members that handed back.
+  const evictedTotal = [...exitedIds].sort((a, b) => a - b);
 
   let next = patchBatch(
     state,
