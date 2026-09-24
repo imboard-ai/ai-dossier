@@ -17,7 +17,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { isOpenCodeUsageStream, type RunLogEntry } from '@ai-dossier/core';
+import { isOpenCodeUsageStream, type RunLogEntry, SCHED_DISPATCH_EVENT } from '@ai-dossier/core';
 import {
   batchFixLogPath,
   batchMemberLogPath,
@@ -102,6 +102,70 @@ export function listBatchDispatchLogs(runsDir: string, batchId: string): BatchLo
   return entries;
 }
 
+/**
+ * The argv of one `{"type":"sched-dispatch","cmd":[...]}` preamble line, or
+ * null for any other line (including the `event:"spawned"` follow-up, which
+ * carries no `cmd`). Only a non-empty all-string `cmd` array counts.
+ */
+export function parsePreambleLine(line: string): string[] | null {
+  if (!line.includes(`"${SCHED_DISPATCH_EVENT}"`)) return null;
+  try {
+    const parsed = JSON.parse(line) as { type?: unknown; cmd?: unknown };
+    if (
+      parsed.type === SCHED_DISPATCH_EVENT &&
+      Array.isArray(parsed.cmd) &&
+      parsed.cmd.length > 0 &&
+      parsed.cmd.every((part) => typeof part === 'string')
+    ) {
+      return parsed.cmd as string[];
+    }
+  } catch {
+    // truncated/partial line
+  }
+  return null;
+}
+
+/**
+ * The spawned argv of the LAST dispatch recorded in a log — each spawn opens
+ * with a `sched-dispatch` preamble (written by `createSpawnDeps`), and logs
+ * are append-mode, so a redispatched unit (e.g. retried on a fallback agent,
+ * #629) holds several; the newest one describes the stream the parsers read
+ * the final result from. Null when the log has none (a pre-preamble log, or
+ * one whose head was cut by `readDispatchLog`'s bounded window).
+ */
+export function dispatchPreambleCmd(logContent: string | null): string[] | null {
+  if (!logContent) return null;
+  const marker = `{"type":"${SCHED_DISPATCH_EVENT}"`;
+  let last: string[] | null = null;
+  for (let at = logContent.indexOf(marker); at !== -1; at = logContent.indexOf(marker, at + 1)) {
+    if (at > 0 && logContent[at - 1] !== '\n') continue; // only whole preamble lines
+    const end = logContent.indexOf('\n', at);
+    const cmd = parsePreambleLine(logContent.slice(at, end === -1 ? undefined : end));
+    if (cmd) last = cmd;
+  }
+  return last;
+}
+
+/**
+ * The model an agent argv requested — the value after `-m`/`--model`, or
+ * `--model=<id>` — or null when the argv names none. For opencode this is
+ * already a concrete `provider/model` id (e.g. `openai/gpt-5.6-luna`); for
+ * claude it may be an alias, but claude's own result reports the resolved
+ * model, which `buildSchedRunLogEntry` prefers over this fallback.
+ */
+export function modelFromCmd(cmd: readonly string[]): string | null {
+  for (let i = 0; i < cmd.length; i++) {
+    const part = cmd[i];
+    if (part === '--') break; // everything after is the agent's prompt, not flags
+    if ((part === '-m' || part === '--model') && i + 1 < cmd.length) {
+      const value = cmd[i + 1];
+      return value && !value.startsWith('-') ? value : null;
+    }
+    if (part.startsWith('--model=')) return part.slice('--model='.length) || null;
+  }
+  return null;
+}
+
 function roleLabel(entry: BatchLogEntry): string {
   switch (entry.role) {
     case 'member':
@@ -140,19 +204,25 @@ export function buildBatchRunLogEntries(runsDir: string, batchId: string): RunLo
     } catch {
       completedAt = new Date(0);
     }
-    // Historical filenames do not retain the spawned command. Only select
-    // OpenCode for its distinctive step_finish/step-finish pair; everything
-    // else retains the established Claude-shaped fallback.
-    const cmd0 = isOpenCodeUsageStream(logContent) ? 'opencode' : 'claude';
+    // Filenames do not retain the spawned command, but every dispatch log
+    // opens with a `sched-dispatch` preamble carrying the exact argv (#769).
+    // Prefer it: it names the binary AND the model the member was spawned
+    // with — the opencode JSON stream never reports a model id, so without
+    // it an opencode member's Model column read `-`. Logs that predate the
+    // preamble (or whose head fell outside the bounded read window) keep the
+    // old fallback: OpenCode only for its distinctive step_finish/step-finish
+    // pair, everything else the established Claude-shaped parser.
+    const preambleCmd = dispatchPreambleCmd(logContent);
+    const cmd0 = preambleCmd?.[0] ?? (isOpenCodeUsageStream(logContent) ? 'opencode' : 'claude');
     return buildSchedRunLogEntry({
       unit: entryUnit(entry, batchId),
       role: roleLabel(entry),
       cmd0,
-      cmd: [cmd0],
+      cmd: preambleCmd ?? [cmd0],
       logContent,
       spawnedAt: null,
       completedAt,
-      configuredModel: null,
+      configuredModel: preambleCmd ? modelFromCmd(preambleCmd) : null,
       cwd: runsDir,
     });
   });

@@ -95,6 +95,16 @@ export interface RunLogEntry {
    * historical dispatch is no longer recorded anywhere.
    */
   tier?: string | null;
+  /**
+   * The host agent session this `ai-dossier run` was invoked from (#769),
+   * e.g. Claude Code's `CLAUDE_CODE_SESSION_ID` — the join key `ai-dossier
+   * usage` uses to attribute dossier runs to the session (and so the
+   * model/tokens) that executed them. Null/absent outside an agent host and
+   * on sched dispatch entries.
+   */
+  session_id?: string | null;
+  /** The host agent that invoked this run (#769): `claude-code` | `opencode`; null/absent outside an agent host. */
+  agent?: string | null;
 }
 
 /**
