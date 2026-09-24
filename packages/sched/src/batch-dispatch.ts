@@ -119,6 +119,7 @@ import {
   isMemberBlocked,
   isMemberComplete,
   issueCloseReader,
+  type MergedPrLookup,
   memberBlockedReason,
   type PrTruth,
   prOfMilestone,
@@ -147,6 +148,7 @@ import {
   appendEvictions,
   batchMemberUnit,
   CLEARED_ANCHOR_CLOSE_FAILED_FIELDS,
+  CLEARED_PR_DETECT_AMBIGUOUS_FIELDS,
   CLEARED_PR_WATCH_FIELDS,
   duplicateEvictionDetail,
   findBatch,
@@ -3754,6 +3756,65 @@ function branchMergedIntoBase(deps: BatchDispatchDeps, batch: BatchEntry): boole
 }
 
 /**
+ * The ambiguity condition stopped qualifying (the branch resolved to zero or
+ * exactly one candidate, or the batch left `blocked` some other way): end any
+ * `pr-detect-ambiguous` streak, so a future ambiguity episode journals its
+ * own first line instead of continuing a stale count. A no-op (no write) when
+ * no streak is recorded.
+ */
+function clearPrDetectAmbiguous(deps: BatchDispatchDeps, batch: BatchEntry, now: Date): void {
+  if (batch.pr_detect_ambiguous_reason === null) return;
+  deps.store.withLock((s) => ({
+    state: patchBatch(s, batch.id, CLEARED_PR_DETECT_AMBIGUOUS_FIELDS, now, false),
+    result: undefined,
+  }));
+}
+
+/**
+ * #789: more than one MERGED PR matches `batch.branch` — positive evidence
+ * only, so the caller records nothing. Journal it on the streak's first tick
+ * and every `JOURNAL_DEDUP_REANNOUNCE_TICKS` after — never every tick — the
+ * same dedup shape `recordAnchorCloseFailed`/`reconcilePrWatch` use.
+ */
+function recordPrDetectAmbiguous(
+  deps: BatchDispatchDeps,
+  batch: BatchEntry,
+  matches: number[],
+  now: Date
+): void {
+  const reason = 'ambiguous-merged-pr';
+  const priorSince = batch.pr_detect_ambiguous_since;
+  const isNewStreak = batch.pr_detect_ambiguous_reason !== reason || priorSince === null;
+  const ticks = isNewStreak ? 1 : batch.pr_detect_ambiguous_ticks + 1;
+  const since = isNewStreak || priorSince === null ? now.toISOString() : priorSince;
+  if (isNewStreak || ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0) {
+    journalEvent(deps, 'pr-detect-ambiguous', unit(batch.id), {
+      reason,
+      branch: batch.branch ?? undefined,
+      matches: matches.join(','),
+      at: now.toISOString(),
+      since,
+      ticks_persisted: ticks,
+      detail: `${matches.length} MERGED PRs match head=${batch.branch ?? '?'} (#${matches.join(', #')}) — refusing to guess which is ours; record it explicitly or close the extras`,
+    });
+  }
+  deps.store.withLock((s) => ({
+    state: patchBatch(
+      s,
+      batch.id,
+      {
+        pr_detect_ambiguous_reason: reason,
+        pr_detect_ambiguous_since: since,
+        pr_detect_ambiguous_ticks: ticks,
+      },
+      now,
+      false
+    ),
+    result: undefined,
+  }));
+}
+
+/**
  * #686: reconcile a `blocked` batch whose work demonstrably shipped anyway.
  * `reconcilePrWatch` above only watches `awaiting-merge` batches, and
  * `resumeBlockedGate` only re-runs the gate — so a batch blocked on a stale
@@ -3765,21 +3826,28 @@ function branchMergedIntoBase(deps: BatchDispatchDeps, batch: BatchEntry): boole
  * (engine.ts) under the same principle: ground truth beats the ledger, for
  * ANY stale verdict — the blocked_reason is deliberately not examined.
  *
- * Evidence (either suffices, cheapest first): the batch PR is MERGED with a
- * real timestamp (a merged batch PR contains the whole batch branch), or the
- * batch branch has fully landed in the base branch. A survivability guard
- * applies to BOTH paths (see `everySurvivingMemberDispatched`) — a batch with
- * a surviving member that was never dispatched is not reconcilable.
+ * Evidence (cheapest first): the batch PR is MERGED with a real timestamp (a
+ * merged batch PR contains the whole batch branch) — including one
+ * `batch.pr` never recorded at all (#789): when `pr === null`, before falling
+ * through to the weaker branch/members evidence below, look for exactly one
+ * MERGED PR whose head is the batch branch (`imboard#4255`, a hand-opened PR
+ * the ledger never saw). Positive evidence only — zero candidates changes
+ * nothing, more than one is `ambiguous` and journaled rather than guessed —
+ * or the batch branch has fully landed in the base branch. A survivability
+ * guard applies to every path (see `everySurvivingMemberDispatched`) — a
+ * batch with a surviving member that was never dispatched is not
+ * reconcilable.
  *
  * On reconcile the batch joins the SAME rail a normally-merged batch takes:
  * `blocked → merged → deployed` (the `blocked → merged` edge exists for
  * exactly this caller), surviving members walked to `done` along legal
- * edges, and — when `batch.pr` is set — the ordinary `deployed` machinery
- * dispatches the report agent next tick, with teardown after `batch-report
- * done`. With `pr === null` no report agent can be prompted (it names the
- * PR), so the same lock continues `deployed → reported → done` and the
- * worktree is torn down here instead; the journal line says why no report
- * agent was dispatched rather than leaving the gap silent.
+ * edges, and — when the batch now carries a PR (recorded before or detected
+ * here) — the ordinary `deployed` machinery dispatches the report agent next
+ * tick, with teardown after `batch-report done`. With no PR at all no report
+ * agent can be prompted (it names the PR), so the same lock continues
+ * `deployed → reported → done` and the worktree is torn down here instead;
+ * the journal line says why no report agent was dispatched rather than
+ * leaving the gap silent.
  *
  * Bounded by construction: only `blocked` batches within the window are
  * examined, the PR check is one `gh` call, git runs only when PR evidence
@@ -3805,10 +3873,40 @@ function reconcileStaleBlockedBatches(
       | { kind: 'commits-in-base' }
       | { kind: 'members-closed' }
       | null = null;
+    // #789: set only when THIS tick's automatic lookup found the PR — never
+    // when `batch.pr` was already recorded (that PR is reported via
+    // `evidence.pr` as before, and there is nothing new to persist).
+    let detectedPr: number | null = null;
+    let ambiguousMatches: number[] | null = null;
+    // Whether the lookup below produced a definite VERIFIED answer this tick
+    // (`found`/`none`, either resolves an earlier ambiguity) as opposed to no
+    // answer at all (`undefined` — unreachable, or no pinned repo to `-R`).
+    let prLookupRanClean = false;
     if (batch.pr !== null) {
       const truth = deps.groundTruth.prState(batch.pr);
       if (truth !== undefined && truth.state === 'MERGED' && truth.mergedAt !== null) {
         evidence = { kind: 'pr-merged', pr: batch.pr, mergedAt: truth.mergedAt };
+      }
+    } else if (batch.branch !== null) {
+      // #789: batch.pr was never recorded — a hand-opened or manually
+      // recovered PR the ledger never saw (the imboard#4255 shape). Look for
+      // exactly one MERGED PR whose head is the batch branch before falling
+      // through to the weaker branch/members evidence below. Positive
+      // evidence only: `undefined` (unreachable) touches nothing, and
+      // `ambiguous` (more than one candidate) is journaled, never guessed.
+      const lookup: MergedPrLookup | undefined = deps.groundTruth.mergedPrForBranch?.(
+        batch.branch,
+        batch.base_branch,
+        batch.created_at
+      );
+      if (lookup?.kind === 'found') {
+        detectedPr = lookup.pr;
+        evidence = { kind: 'pr-merged', pr: lookup.pr, mergedAt: lookup.mergedAt };
+        prLookupRanClean = true;
+      } else if (lookup?.kind === 'ambiguous') {
+        ambiguousMatches = lookup.matches;
+      } else if (lookup?.kind === 'none') {
+        prLookupRanClean = true;
       }
     }
     if (evidence === null && branchMergedIntoBase(deps, batch)) {
@@ -3830,11 +3928,23 @@ function reconcileStaleBlockedBatches(
     ) {
       evidence = { kind: 'members-closed' };
     }
+    // #789: resolve the ambiguity streak exactly once per tick, on whichever
+    // outcome this tick actually reached — reconciling via ANY evidence means
+    // the batch is leaving `blocked`, so a same-tick ambiguity is moot too.
+    if (evidence !== null) {
+      clearPrDetectAmbiguous(deps, batch, now);
+    } else if (ambiguousMatches !== null) {
+      recordPrDetectAmbiguous(deps, batch, ambiguousMatches, now);
+    } else if (prLookupRanClean) {
+      clearPrDetectAmbiguous(deps, batch, now);
+    }
     if (evidence === null) continue;
-    // A members-closed reconcile has no merged batch PR for a report agent to
-    // report on, whatever `batch.pr` recorded — finish the rail inline, as
-    // for `pr === null`.
-    const finishInline = batch.pr === null || evidence.kind === 'members-closed';
+    // The batch now carries a PR — recorded before, or detected just above —
+    // only when one exists does the ordinary `deployed` machinery have
+    // anything to hand the report agent. A members-closed reconcile has no
+    // merged batch PR to report on regardless.
+    const effectivePr = detectedPr ?? batch.pr;
+    const finishInline = effectivePr === null || evidence.kind === 'members-closed';
     // ...but never tear its worktree down: the members shipped OUTSIDE the
     // batch branch, so the blocked integration worktree may hold an
     // operator's unpushed repair work. It is left in place, inert, and the
@@ -3851,7 +3961,15 @@ function reconcileStaleBlockedBatches(
       // or `sched abandon` may have moved the batch out from under the
       // snapshot this pass started from.
       if (!b || b.status !== 'blocked') return { state: s, result: undefined };
-      let n = transitionBatch(s, batch.id, 'merged', {}, now);
+      // #789: record the auto-detected PR as part of the SAME transition that
+      // leaves `blocked` — a batch whose ledger never had one now does.
+      let n = transitionBatch(
+        s,
+        batch.id,
+        'merged',
+        detectedPr !== null ? { pr: detectedPr } : {},
+        now
+      );
       n = transitionBatch(n, batch.id, 'deployed', {}, now);
       unwalkable = [];
       for (const issue of b.members) {
@@ -3884,14 +4002,18 @@ function reconcileStaleBlockedBatches(
     if (!reconciled) continue;
 
     journalEvent(deps, 'stale-failure-reconciled', unit(batch.id), {
-      pr: batch.pr ?? undefined,
+      pr: effectivePr ?? undefined,
       reason: blockedReason,
       failedAt,
       evidence: evidence.kind,
       ...(evidence.kind === 'pr-merged' ? { mergedAt: evidence.mergedAt } : {}),
+      ...(detectedPr !== null ? { pr_detected: true } : {}),
       detail:
         (evidence.kind === 'pr-merged'
-          ? `PR #${evidence.pr} is MERGED — ledger reconciled blocked (${blockedReason}) to the merged rail (blocked at ${failedAt}); report and teardown will now dispatch`
+          ? (detectedPr !== null
+              ? `batch.pr was never recorded — detected PR #${evidence.pr} MERGED with head=${batch.branch} (gh pr list --state merged), recorded batch.pr=${evidence.pr}`
+              : `PR #${evidence.pr} is MERGED`) +
+            ` — ledger reconciled blocked (${blockedReason}) to the merged rail (blocked at ${failedAt}); report and teardown will now dispatch`
           : evidence.kind === 'members-closed'
             ? `every member issue is CLOSED as completed on GitHub with no failure trail — ledger reconciled blocked (${blockedReason}) to shipped (blocked at ${failedAt})`
             : `every member commit is an ancestor of ${batch.base_branch} — ledger reconciled blocked (${blockedReason}) to shipped (blocked at ${failedAt})`) +

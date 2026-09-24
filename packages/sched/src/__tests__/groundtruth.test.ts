@@ -12,6 +12,7 @@ import {
   memberBlockedReason,
   parseIssueCloseTruthJson,
   parseIssueLabelsJson,
+  parseMergedPrListJson,
   parseMilestoneJson,
   parseMilestoneListJson,
   parseOpenPrListJson,
@@ -545,6 +546,219 @@ describe('parseOpenPrListJson (#596)', () => {
       { number: 4000, headRefName: 'issue-596', isCrossRepository: false },
     ]);
     expect(parseOpenPrListJson(out, 'issue-596')).toBe(3999);
+  });
+});
+
+// --- #789: automatic detection of a hand-opened batch PR the ledger never recorded ---
+
+describe('parseMergedPrListJson (#789)', () => {
+  const THRESHOLD = '2026-09-13T00:00:00Z';
+  const AFTER = '2026-09-13T01:00:00Z';
+  const BEFORE = '2026-09-12T23:00:00Z';
+
+  it('finds the single qualifying MERGED PR — the imboard#4255 shape', () => {
+    const out = JSON.stringify([
+      {
+        number: 4255,
+        headRefName: 'batch/b-20260913-01-20260913',
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: AFTER,
+        createdAt: AFTER,
+      },
+    ]);
+    expect(parseMergedPrListJson(out, 'batch/b-20260913-01-20260913', 'main', THRESHOLD)).toEqual({
+      kind: 'found',
+      pr: 4255,
+      mergedAt: AFTER,
+    });
+  });
+
+  it('zero candidates is a VERIFIED none, not unreachable', () => {
+    expect(parseMergedPrListJson('[]', 'batch/x', 'main', THRESHOLD)).toEqual({ kind: 'none' });
+  });
+
+  it('an unusable payload is UNREACHABLE, never a verified answer', () => {
+    expect(parseMergedPrListJson(null, 'batch/x', 'main', THRESHOLD)).toBeUndefined();
+    expect(parseMergedPrListJson('', 'batch/x', 'main', THRESHOLD)).toBeUndefined();
+    expect(parseMergedPrListJson('not json', 'batch/x', 'main', THRESHOLD)).toBeUndefined();
+    expect(
+      parseMergedPrListJson('{"unexpected":"shape"}', 'batch/x', 'main', THRESHOLD)
+    ).toBeUndefined();
+  });
+
+  it('an unparseable threshold verifies nothing (fails closed, never "none")', () => {
+    expect(parseMergedPrListJson('[]', 'batch/x', 'main', 'not-a-date')).toBeUndefined();
+  });
+
+  it("skips a FORK PR that merely reuses the branch name — never adopt work the fleet didn't do", () => {
+    const out = JSON.stringify([
+      {
+        number: 9999,
+        headRefName: 'batch/x',
+        baseRefName: 'main',
+        isCrossRepository: true,
+        mergedAt: AFTER,
+        createdAt: AFTER,
+      },
+    ]);
+    expect(parseMergedPrListJson(out, 'batch/x', 'main', THRESHOLD)).toEqual({ kind: 'none' });
+  });
+
+  it('skips a PR based against the WRONG base branch', () => {
+    const out = JSON.stringify([
+      {
+        number: 4255,
+        headRefName: 'batch/x',
+        baseRefName: 'staging',
+        isCrossRepository: false,
+        mergedAt: AFTER,
+        createdAt: AFTER,
+      },
+    ]);
+    expect(parseMergedPrListJson(out, 'batch/x', 'main', THRESHOLD)).toEqual({ kind: 'none' });
+  });
+
+  it('skips an UNMERGED PR (no mergedAt) even under --state merged', () => {
+    const out = JSON.stringify([
+      {
+        number: 4255,
+        headRefName: 'batch/x',
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: null,
+        createdAt: AFTER,
+      },
+    ]);
+    expect(parseMergedPrListJson(out, 'batch/x', 'main', THRESHOLD)).toEqual({ kind: 'none' });
+  });
+
+  it('skips a PR created BEFORE the batch — a stale PR from an earlier batch reusing the branch name', () => {
+    const out = JSON.stringify([
+      {
+        number: 1111,
+        headRefName: 'batch/x',
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: AFTER,
+        createdAt: BEFORE,
+      },
+    ]);
+    expect(parseMergedPrListJson(out, 'batch/x', 'main', THRESHOLD)).toEqual({ kind: 'none' });
+  });
+
+  it('a PR created exactly AT the threshold qualifies ("at or after")', () => {
+    const out = JSON.stringify([
+      {
+        number: 4255,
+        headRefName: 'batch/x',
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: AFTER,
+        createdAt: THRESHOLD,
+      },
+    ]);
+    expect(parseMergedPrListJson(out, 'batch/x', 'main', THRESHOLD)).toEqual({
+      kind: 'found',
+      pr: 4255,
+      mergedAt: AFTER,
+    });
+  });
+
+  it('TWO qualifying candidates is ambiguous — refuses to guess', () => {
+    const out = JSON.stringify([
+      {
+        number: 4255,
+        headRefName: 'batch/x',
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: AFTER,
+        createdAt: AFTER,
+      },
+      {
+        number: 4260,
+        headRefName: 'batch/x',
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: AFTER,
+        createdAt: AFTER,
+      },
+    ]);
+    expect(parseMergedPrListJson(out, 'batch/x', 'main', THRESHOLD)).toEqual({
+      kind: 'ambiguous',
+      matches: [4255, 4260],
+    });
+  });
+
+  it("accepts gh's single-key wrapper shape as well as a bare array (#496)", () => {
+    const wrapped = JSON.stringify({
+      pullRequests: [
+        {
+          number: 4255,
+          headRefName: 'batch/x',
+          baseRefName: 'main',
+          isCrossRepository: false,
+          mergedAt: AFTER,
+          createdAt: AFTER,
+        },
+      ],
+    });
+    expect(parseMergedPrListJson(wrapped, 'batch/x', 'main', THRESHOLD)).toEqual({
+      kind: 'found',
+      pr: 4255,
+      mergedAt: AFTER,
+    });
+  });
+});
+
+describe('createExecGroundTruth.mergedPrForBranch (#789)', () => {
+  it('no mergedPrForBranch without a verified repo — never the cwd repo', () => {
+    expect(createExecGroundTruth(() => '[]').mergedPrForBranch).toBeUndefined();
+    expect(
+      createExecGroundTruth(() => '[]', { repo: '--repo=evil' }).mergedPrForBranch
+    ).toBeUndefined();
+  });
+
+  it('pins the repo with -R and passes --head/--base/--state merged', () => {
+    const calls: string[][] = [];
+    const exec: ExecFn = (_file, args) => {
+      calls.push(args);
+      return '[]';
+    };
+    const gt = createExecGroundTruth(exec, { repo: 'imboard-ai/imboard' });
+    expect(gt.mergedPrForBranch?.('batch/b-1-20260913', 'main', '2026-09-13T00:00:00Z')).toEqual({
+      kind: 'none',
+    });
+    expect(calls[0]).toContain('-R');
+    expect(calls[0]).toContain('imboard-ai/imboard');
+    expect(calls[0]).toContain('--head');
+    expect(calls[0]).toContain('batch/b-1-20260913');
+    expect(calls[0]).toContain('--base');
+    expect(calls[0]).toContain('main');
+    expect(calls[0]).toContain('--state');
+    expect(calls[0]).toContain('merged');
+  });
+
+  it('a failed gh call is unreachable', () => {
+    const failing: ExecFn = () => null;
+    const gt = createExecGroundTruth(failing, { repo: 'imboard-ai/imboard' });
+    expect(gt.mergedPrForBranch?.('batch/x', 'main', '2026-09-13T00:00:00Z')).toBeUndefined();
+  });
+
+  it('rejects crafted branch/base names (CWE-88) before any subprocess runs', () => {
+    const calls: string[][] = [];
+    const exec: ExecFn = (_file, args) => {
+      calls.push(args);
+      return '[]';
+    };
+    const gt = createExecGroundTruth(exec, { repo: 'imboard-ai/imboard' });
+    expect(
+      gt.mergedPrForBranch?.('--upload-pack=evil', 'main', '2026-09-13T00:00:00Z')
+    ).toBeUndefined();
+    expect(
+      gt.mergedPrForBranch?.('batch/x', '--upload-pack=evil', '2026-09-13T00:00:00Z')
+    ).toBeUndefined();
+    expect(calls).toHaveLength(0);
   });
 });
 

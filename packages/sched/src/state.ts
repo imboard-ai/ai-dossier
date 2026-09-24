@@ -295,6 +295,7 @@ export function createBatch(
     pr_watch_failed_ticks: 0,
     anchor_closed_at: null,
     ...CLEARED_ANCHOR_CLOSE_FAILED_FIELDS,
+    ...CLEARED_PR_DETECT_AMBIGUOUS_FIELDS,
     member_dispatch: null,
     member_runs: [],
     created_at: timestamp,
@@ -577,6 +578,28 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
   ) {
     throw new Error(
       `Batch ${id}: pr_watch_failed_reason and pr_watch_failed_since must agree — null iff null`
+    );
+  }
+  // #789: same dedup-marker shape as pr_watch_failed_*/anchor_close_failed_*.
+  if (
+    batch.pr_detect_ambiguous_reason !== null &&
+    batch.pr_detect_ambiguous_reason !== undefined &&
+    typeof batch.pr_detect_ambiguous_reason !== 'string'
+  ) {
+    throw new Error(`Batch ${id}: pr_detect_ambiguous_reason must be a string or null`);
+  }
+  validateDedupMarker(
+    batch,
+    `Batch ${id}`,
+    'pr_detect_ambiguous_since',
+    'pr_detect_ambiguous_ticks'
+  );
+  if (
+    ((batch.pr_detect_ambiguous_reason ?? null) === null) !==
+    ((batch.pr_detect_ambiguous_since ?? null) === null)
+  ) {
+    throw new Error(
+      `Batch ${id}: pr_detect_ambiguous_reason and pr_detect_ambiguous_since must agree — null iff null`
     );
   }
 }
@@ -1095,6 +1118,12 @@ export function validateState(data: unknown): SchedState {
     pr_watch_failed_reason: batch.pr_watch_failed_reason ?? null,
     pr_watch_failed_since: batch.pr_watch_failed_since ?? null,
     pr_watch_failed_ticks: batch.pr_watch_failed_ticks ?? 0,
+    // 1.23.0 → 1.24.0 (#789): pre-existing batches never had the automatic
+    // PR-detection lookup run against them — no ambiguity streak has ever
+    // been recorded, so null/null/0 is exact, not a guess.
+    pr_detect_ambiguous_reason: batch.pr_detect_ambiguous_reason ?? null,
+    pr_detect_ambiguous_since: batch.pr_detect_ambiguous_since ?? null,
+    pr_detect_ambiguous_ticks: batch.pr_detect_ambiguous_ticks ?? 0,
     // Pre-#768 batches never recorded an anchor close — null ("not verified
     // closed") is exact: the engine re-checks it once and records it.
     anchor_closed_at: batch.anchor_closed_at ?? null,
@@ -1256,6 +1285,13 @@ export const CLEARED_PR_WATCH_FIELDS = {
   pr_watch_failed_reason: null,
   pr_watch_failed_since: null,
   pr_watch_failed_ticks: 0,
+} as const;
+
+/** The `BatchEntry` `pr-detect-ambiguous` dedup marker (#789), zeroed. */
+export const CLEARED_PR_DETECT_AMBIGUOUS_FIELDS = {
+  pr_detect_ambiguous_reason: null,
+  pr_detect_ambiguous_since: null,
+  pr_detect_ambiguous_ticks: 0,
 } as const;
 
 export const CLEARED_SLOT_FIELDS = {

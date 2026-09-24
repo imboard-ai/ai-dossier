@@ -1237,7 +1237,7 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to the current schema (1.23.0) automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
+  load and migrate to the current schema (1.24.0) automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
   `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
   `evictions`/`fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to
@@ -1250,7 +1250,9 @@ after-the-fact recovery, not a missing-data bug.
   `consecutive_dispatch_api_errors`/`dispatch_pause_reset_at` backfill to `0`/`null` —
   #629; batch `anchor_closed_at` and `anchor_close_failed_reason`/`_since`/`_ticks`
   backfill to `null`/`null`/`null`/`0` — #768, schema 1.22.0; batch `member_dispatch`/`member_runs`
-  backfill to `null`/`[]` — #809, schema 1.23.0 — a null mode past `ready` runs serially).
+  backfill to `null`/`[]` — #809, schema 1.23.0 — a null mode past `ready` runs serially;
+  batch `pr_detect_ambiguous_reason`/`_since`/`_ticks` backfill to `null`/`null`/`0` — #789,
+  schema 1.24.0).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -1318,6 +1320,21 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   rebase-merge that makes the ancestry probe structurally dead. It finishes the terminal
   rail inline but never tears the blocked worktree down (it may hold unpushed work);
   the journal line says the worktree was kept.
+- **PR-detection evidence (#789).** When `batch.pr` was never recorded at all — a PR
+  opened by hand, e.g. imboard#4255 — the stale-blocked reconcile also looks for
+  exactly one MERGED pull request whose head is the batch branch, based against
+  `batch.base_branch`, created at or after the batch's own `created_at`, and not from a
+  fork (`GroundTruth.mergedPrForBranch`: `gh pr list -R <repo> --head <branch> --base
+  <base> --state merged`, gated on the same verified `resolveProjectRepo` #768 uses —
+  absent entirely without one). Positive evidence only: zero candidates changes
+  nothing, and two or more is `ambiguous` — nothing is recorded, and the ambiguity is
+  journaled (`pr-detect-ambiguous`, deduped like `pr-watch-failed`: once per streak,
+  re-announced every `JOURNAL_DEDUP_REANNOUNCE_TICKS`). On a match, `batch.pr` is
+  recorded as part of the SAME `blocked → merged` transition, so the ordinary
+  `deployed` machinery (item 6 above) dispatches the report agent exactly as if the
+  fleet had opened the PR itself, and `sched status`'s existing `pr` column shows it.
+  Recording `batch.pr` never closes the anchor by itself — that stays #768's own
+  evidence-gated `reconcileAnchorClosure`, unchanged.
 
 Everything else is surfaced, never closed: `sched status --anchors` (opt-in; `status`
 makes no GitHub call without it) lists each still-open anchor of a batch no longer in

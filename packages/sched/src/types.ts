@@ -588,6 +588,20 @@ export interface BatchEntry {
    */
   pr: number | null;
   /**
+   * The `ambiguous-merged-pr` streak (#789) — set when
+   * `reconcileStaleBlockedBatches`'s automatic PR-detection (`pr === null`,
+   * so it looks for a MERGED PR whose head is `branch`) finds MORE THAN ONE
+   * qualifying candidate and refuses to guess which is ours (positive
+   * evidence only). Deduped exactly like `pr_watch_failed_*`/
+   * `anchor_close_failed_*`: journals once on the streak's first tick, then
+   * again only every `JOURNAL_DEDUP_REANNOUNCE_TICKS`, never every tick.
+   * `null`/`null`/`0` while no ambiguity streak is open — including the
+   * common case where `pr` is already recorded, so the lookup never runs.
+   */
+  pr_detect_ambiguous_reason: string | null;
+  pr_detect_ambiguous_since: string | null;
+  pr_detect_ambiguous_ticks: number;
+  /**
    * Members that must revert together when any one of them is evicted
    * (RFC-0001 §E.4 eviction groups — e.g. a member built on another's API).
    * Each inner array is one group; members in no group evict alone.
@@ -1340,8 +1354,12 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * at the executing claim) and `member_runs` (parallel members' own
  * branch/worktree/status); `null`/`[]` backfilled on load — a null mode past
  * `ready` reads as serial, so batches in flight keep their serial rail.
+ * 1.24.0 (#789): `BatchEntry` gains `pr_detect_ambiguous_reason`/`_since`/
+ * `_ticks` — the dedup marker for `reconcileStaleBlockedBatches`'s automatic
+ * merged-PR detection when more than one candidate matches; `null`/`null`/`0`
+ * backfilled on load.
  */
-export const SCHEMA_VERSION = '1.23.0' as const;
+export const SCHEMA_VERSION = '1.24.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1368,6 +1386,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.20.0',
   '1.21.0',
   '1.22.0',
+  '1.23.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
@@ -1689,7 +1708,13 @@ export type JournalEventName =
   // #595: a second eviction call named a member already in `batch.evictions`
   // — the append is a no-op (never a second `EvictionRecord`), journaled here
   // instead of silently dropped so the duplicate attempt is still visible.
-  | 'eviction-duplicate';
+  | 'eviction-duplicate'
+  // #789: `reconcileStaleBlockedBatches`'s automatic merged-PR detection
+  // (`batch.pr === null`) found MORE THAN ONE merged PR whose head is the
+  // batch branch — positive evidence only, so nothing is recorded. Deduped
+  // like `pr-watch-failed`/`anchor-close-failed`: journals on the streak's
+  // first tick, then every `JOURNAL_DEDUP_REANNOUNCE_TICKS`, never every tick.
+  | 'pr-detect-ambiguous';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —
