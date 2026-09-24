@@ -335,7 +335,9 @@ export const DEFAULT_FIX_PROMPT_TEMPLATE = withNoBackgroundExit(
  * level (`{review}` — placed here so BOTH light and full reach the member),
  * run BEFORE the handover; the `review done` milestone names the agents that
  * ran and is never a zero-agent bookkeeping post (imboard#4178's
- * `agents_done=0`, run `r-4178-928b`).
+ * `agents_done=0`, run `r-4178-928b`). Its honest fallbacks — `review partial`
+ * and `blocked reason=review-not-run` — are both terminal hand-backs to
+ * `groundtruth.ts`'s `isMemberBlocked`.
  *
  * The wire contract (mint a run id; terminal milestones `review done` /
  * `blocked` carrying `mode=slot` + `batch=<batch>`) is stated in the prompt
@@ -372,10 +374,13 @@ export const DEFAULT_MEMBER_PROMPT_TEMPLATE = withNoBackgroundExit(
     'what you deliberately did NOT verify, assumptions, your conformance verdict, your review ' +
     'level and the review agents that ran), THEN post ai-dossier runstate post --issue {issue} ' +
     '--phase review --status done --run <run_id> --kv mode=slot --kv batch={batch} --kv ' +
-    'review={review} --kv agents_done=<the review agents that actually ran> (plus the other ' +
-    'review keys member-cycle names) and END your run. Never post agents_done=0 or none: if a ' +
-    'required review agent could not finish, post --status partial with it in agents_pending; if ' +
-    'no review could run at all, post --status blocked --kv reason=review-not-run.\n' +
+    'review={review} --kv head=<pushed sha> --kv fixed=<n> --kv escalated=<n> --kv ' +
+    'agents_done=<the review agents that actually ran> --kv agents_pending=none and END your run. ' +
+    'Never post agents_done=0 or none. If a required review agent could not finish, post the ' +
+    'same command with --status partial and that agent in --kv agents_pending=<agents>; if no ' +
+    'review could run at all, post ai-dossier runstate post --issue {issue} --phase review ' +
+    '--status blocked --run <run_id> --kv reason=review-not-run --kv mode=slot --kv ' +
+    'batch={batch}. Either one ends your run and hands the member back.\n' +
     '- If you cannot proceed (preconditions fail, issue not implementable, ACs not met), post ' +
     'ai-dossier runstate post --issue {issue} --phase <phase> --status blocked --run <run_id> ' +
     '--kv reason=<slug> --kv mode=slot --kv batch={batch}, leave the tree clean, and end your ' +

@@ -713,10 +713,6 @@ describe('member prompt dispatches member-cycle (#677)', () => {
     // The review level is placed, not appended — both light and full reach the member.
     expect(t).toContain('Review level: review={review}.');
     expect(t).toContain("member-cycle Step 4b's self-review");
-    expect(t).toContain('not a bookkeeping post');
-    // Level semantics match member-cycle@1.3.0.
-    expect(t).toContain('Security included');
-    expect(t).toContain('review=light runs at least Conformance');
     // Order: review → handover → review milestone.
     const review = t.indexOf("Step 4b's self-review");
     const handover = t.indexOf('## handover:v1');
@@ -725,10 +721,19 @@ describe('member prompt dispatches member-cycle (#677)', () => {
     expect(review).toBeLessThan(handover);
     expect(handover).toBeLessThan(milestone);
     // The milestone names the agents that ran; zero is forbidden with honest fallbacks.
+    // Every key runstate's review-done validator requires is spelled out.
+    for (const key of ['head', 'fixed', 'escalated', 'agents_done', 'agents_pending']) {
+      expect(t).toContain(`--kv ${key}=`);
+    }
     expect(t).toContain('--kv agents_done=<the review agents that actually ran>');
     expect(t).toContain('Never post agents_done=0 or none');
     expect(t).toContain('--status partial');
-    expect(t).toContain('--kv reason=review-not-run');
+    // The blocked fallback is a full command carrying the member-trail keys, so
+    // `isMemberBlocked` reads it (a bare fragment would evict as unverified).
+    expect(t).toContain(
+      '--phase review --status blocked --run <run_id> --kv reason=review-not-run --kv mode=slot ' +
+        '--kv batch={batch}'
+    );
   });
 
   it('buildMemberPrompt substitutes issue, batch, worktree and integration_branch (#677)', () => {

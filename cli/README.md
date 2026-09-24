@@ -634,6 +634,12 @@ valid on **every** phase — a takeover can happen anywhere — and requires `ge
 `takeover=`. It is written by [`runstate fence`](#run-fencing-504), never by hand, and
 `post` refuses it.
 
+A `review` milestone with `status=done` must name at least one agent in `agents_done`:
+`post` refuses a value that names none — `0`, `none`, `n/a`, or a list of only those —
+because a review that ran no agent is not done (#804). Post `--status partial` with the
+unfinished agent in `agents_pending`, or `--status blocked --kv reason=review-not-run` when
+no review could run at all.
+
 `next=` is computed for you: the linear order `gate → setup → plan → implement → review →
 ship → report → done`, except that `blocked` ends the run (`next=done` — on a `batch-*`
 phase it is `next=operator` instead, #768) and the three

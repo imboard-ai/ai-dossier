@@ -336,7 +336,16 @@ describe('validateMilestone', () => {
       ['agents_pending', 'none'],
     ];
 
-    it.each(['0', 'none', 'NONE', 'None'])('rejects review done with agents_done=%s', (v) => {
+    it.each([
+      '0',
+      'none',
+      'NONE',
+      'None',
+      'n/a',
+      'none,none',
+      '0,none',
+      ',',
+    ])('rejects review done with agents_done=%s', (v) => {
       const errors = validateMilestone({
         phase: 'review',
         status: 'done',

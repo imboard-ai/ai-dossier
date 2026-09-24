@@ -115,8 +115,24 @@ export const MAX_BODY_LENGTH = 60000;
  */
 const REVIEW_KEYS = ['head', 'fixed', 'escalated', 'agents_done', 'agents_pending'] as const;
 
-/** `agents_done` spellings meaning "no review agent ran" — refused on `review done` (#804). */
-const ZERO_AGENTS_VALUES: ReadonlySet<string> = new Set(['0', 'none']);
+/** `agents_done` entries meaning "no review agent ran" — refused on `review done` (#804). */
+const ZERO_AGENT_ENTRIES: ReadonlySet<string> = new Set(['0', 'none', 'n/a', '-', 'null', 'nil']);
+
+/** The `reason=` a review that could not run at all hands back with (#804). */
+export const REVIEW_NOT_RUN_REASON = 'review-not-run';
+
+/**
+ * Whether an `agents_done` value names no agent (#804): after splitting on `,`
+ * and dropping blank entries, nothing is left or every entry is a zero spelling
+ * (`0`, `none`, …) — so `none,none` or `,` cannot pass where `none` would not.
+ */
+function namesNoAgent(agentsDone: string): boolean {
+  const entries = agentsDone
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.length > 0);
+  return entries.every((e) => ZERO_AGENT_ENTRIES.has(e));
+}
 
 export const PHASE_SPECS: Record<Phase, PhaseSpec> = {
   gate: {
@@ -561,17 +577,14 @@ export function validateMilestone(input: MilestoneInput): string[] {
 
   // #804: a `review done` that names no agent is a false "reviewed" claim —
   // imboard#4178's member (run r-4178-928b) posted `agents_done=0` and shipped
-  // unreviewed. member-cycle@1.3.0 / review-issue forbid it; refuse it here too.
+  // unreviewed. member-cycle Step 4b forbids it; refuse it here too.
   const agentsDone = seen.get('agents_done');
-  if (
-    phase === 'review' &&
-    status === 'done' &&
-    agentsDone !== undefined &&
-    ZERO_AGENTS_VALUES.has(agentsDone.trim().toLowerCase())
-  ) {
-    errors.push(
-      `Phase 'review' with status 'done' cannot carry agents_done=${agentsDone} — a review that ran no agent is not done. If a required agent could not finish, post --status partial with it in agents_pending; if no review could run at all, post --status blocked --kv reason=review-not-run`
-    );
+  if (phase === 'review' && status === 'done' && agentsDone !== undefined) {
+    if (namesNoAgent(agentsDone)) {
+      errors.push(
+        `Phase 'review' with status 'done' cannot carry agents_done=${agentsDone} — a review that ran no agent is not done. Keep your --run and other --kv keys (e.g. mode=slot, batch=) and either post --status partial with the unfinished agent in agents_pending, or, if no review could run at all, --status blocked --kv reason=${REVIEW_NOT_RUN_REASON}`
+      );
+    }
   }
 
   if (isKnownPhase(phase) && isStatus(status) && statusAllowed(phase, status)) {

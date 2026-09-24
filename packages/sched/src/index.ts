@@ -144,6 +144,7 @@ export {
   issueCloseReader,
   isVerifiedComplete,
   labelNames,
+  memberBlockedReason,
   type PrTruth,
   parseIssueCloseTruthJson,
   parseIssueLabelsJson,
@@ -154,6 +155,7 @@ export {
   parseRepoName,
   parseSetupInfo,
   prOfMilestone,
+  REVIEW_PARTIAL_REASON,
   type SetupInfo,
 } from './groundtruth';
 export {

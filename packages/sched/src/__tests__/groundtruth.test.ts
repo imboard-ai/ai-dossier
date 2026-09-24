@@ -9,6 +9,7 @@ import {
   isMemberComplete,
   isParkedMilestone,
   isVerifiedComplete,
+  memberBlockedReason,
   parseIssueCloseTruthJson,
   parseIssueLabelsJson,
   parseMilestoneJson,
@@ -16,6 +17,7 @@ import {
   parseOpenPrListJson,
   parsePrViewJson,
   parseSetupInfo,
+  REVIEW_PARTIAL_REASON,
 } from '../index';
 
 describe('parseMilestoneJson', () => {
@@ -224,6 +226,41 @@ describe('isMemberComplete (#523 AC1) with the #575 dispatch fence', () => {
         })
       ).toBe(false);
     });
+  });
+});
+
+describe('#804: a member review partial is a terminal hand-back', () => {
+  const partial = (keys: Record<string, string>): GroundTruthMilestone => ({
+    phase: 'review',
+    status: 'partial',
+    run: 'r',
+    at: '2026-09-24T12:00:00Z',
+    keys,
+  });
+
+  it('a batch-trail review partial reads as blocked, naming the pending agents', () => {
+    const m = partial({ batch: 'b1', agents_pending: 'security' });
+    expect(isMemberBlocked(m)).toBe(true);
+    expect(isMemberComplete(m)).toBe(false);
+    expect(memberBlockedReason(m)).toBe(`${REVIEW_PARTIAL_REASON}:security`);
+    expect(memberBlockedReason(partial({ mode: 'slot' }))).toBe(REVIEW_PARTIAL_REASON);
+  });
+
+  it('a non-member review partial, or a partial at another phase, is not a hand-back', () => {
+    expect(isMemberBlocked(partial({ agents_pending: 'security' }))).toBe(false);
+    expect(isMemberBlocked({ ...partial({ batch: 'b1' }), phase: 'implement' })).toBe(false);
+  });
+
+  it("a blocked milestone's own reason= wins", () => {
+    expect(
+      memberBlockedReason({
+        phase: 'review',
+        status: 'blocked',
+        run: 'r',
+        at: '2026-09-24T12:00:00Z',
+        keys: { batch: 'b1', reason: 'review-not-run' },
+      })
+    ).toBe('review-not-run');
   });
 });
 

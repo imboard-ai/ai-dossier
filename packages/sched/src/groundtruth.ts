@@ -854,14 +854,50 @@ function isBatchMemberTrail(milestone: GroundTruthMilestone): boolean {
  *
  * `dispatchedAt` is the member slot's `SlotEntry.spawned_at`; `null` degrades
  * to the old permissive check exactly as it does for the complete path.
+ *
+ * #804: a member's `review partial` (member-cycle Step 4b — a required review
+ * agent could not finish) is terminal too: the member line has no partial
+ * resume, and an unreviewed member must not land. Without this it read as
+ * neither complete nor blocked, and the exited member was evicted as
+ * `agent-exited-unverified` — a false journal line that dropped the pending
+ * agent. The reason is `memberBlockedReason`'s `review-partial`.
  */
 export function isMemberBlocked(
   milestone: GroundTruthMilestone | null,
   dispatchedAt: string | null = null
 ): boolean {
-  if (milestone === null || milestone.status !== 'blocked') return false;
+  if (milestone === null || !isMemberHandBack(milestone)) return false;
   if (!isBatchMemberTrail(milestone)) return false;
   return postdatesDispatch(milestone.at, dispatchedAt);
+}
+
+/** `blocked` at any phase, or a `review partial` (#804) — a member's terminal hand-back. */
+function isMemberHandBack(milestone: GroundTruthMilestone): boolean {
+  return (
+    milestone.status === 'blocked' ||
+    (milestone.phase === 'review' && milestone.status === 'partial')
+  );
+}
+
+/** Reason recorded for a member that handed back a `review partial` (#804). */
+export const REVIEW_PARTIAL_REASON = 'review-partial';
+
+/**
+ * The reason a blocked member's milestone names (#804): its own `reason=` key,
+ * else — for a `review partial`, which carries none — `review-partial` plus the
+ * `agents_pending` list, so the journal names what did not run. `undefined`
+ * when the milestone names nothing (the caller picks its own fallback).
+ */
+export function memberBlockedReason(milestone: GroundTruthMilestone): string | undefined {
+  const own = milestone.keys.reason;
+  if (typeof own === 'string' && own.length > 0) return own;
+  if (milestone.phase === 'review' && milestone.status === 'partial') {
+    const pending = milestone.keys.agents_pending;
+    return typeof pending === 'string' && pending.length > 0
+      ? `${REVIEW_PARTIAL_REASON}:${pending}`
+      : REVIEW_PARTIAL_REASON;
+  }
+  return undefined;
 }
 
 /**
