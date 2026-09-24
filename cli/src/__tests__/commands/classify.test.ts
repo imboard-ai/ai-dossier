@@ -42,7 +42,7 @@ describe('classify prescreen', () => {
     expect(code).toBeUndefined();
     const out = loggedJson();
     expect(out).toMatchObject({
-      schema: 'prescreen:v2',
+      schema: 'prescreen:v3',
       issue: 538,
       state: 'OPEN',
       verdict: 'candidate',
@@ -66,7 +66,7 @@ describe('classify prescreen', () => {
     await runCommandTree(registerClassifyCommand, ['classify', 'prescreen', '--issue', '538']);
 
     const out = loggedJson();
-    expect(out.schema).toBe('prescreen:v2');
+    expect(out.schema).toBe('prescreen:v3');
     expect(out.verdict).toBe('candidate');
     expect(out.review).toBe('full');
     expect(out.reasons).toEqual([expect.objectContaining({ check: 'text-floor' })]);
@@ -89,7 +89,7 @@ describe('classify prescreen', () => {
 
     expect(code).toBeUndefined();
     const out = loggedJson();
-    expect(out.schema).toBe('prescreen:v2');
+    expect(out.schema).toBe('prescreen:v3');
     expect(out.verdict).toBe('candidate');
     expect(out.review).toBe('full'); // nothing scanned ⇒ never claim light
     expect(out.state).toBeNull();

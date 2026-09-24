@@ -144,9 +144,10 @@ describe('prescreenIssue — text floor keywords', () => {
 });
 
 describe('prescreenIssue — path-based risk floor and file count (plan:v1 artifact present)', () => {
-  it('reuses scanRiskFloor on predicted files', () => {
+  it('reuses scanRiskFloor on predicted files — a path-floor hit raises review, never excludes (#805)', () => {
     const result = prescreenIssue({ ...baseInput, predictedFiles: ['packages/auth/login.ts'] });
-    expect(result.verdict).toBe('full');
+    expect(result.verdict).toBe('candidate');
+    expect(result.review).toBe('full');
     expect(result.reasons[0]).toMatchObject({ check: 'path-floor' });
   });
 
@@ -469,16 +470,29 @@ describe('prescreenIssue — section-aware text floor (#772)', () => {
     expect(result.review).toBe('full');
   });
 
-  it('a plan:v1 path floor or >8 predicted files still → verdict full', () => {
-    expect(prescreenIssue({ ...baseInput, predictedFiles: ['packages/auth/x.ts'] }).verdict).toBe(
-      'full'
-    );
+  it('#805: a plan:v1 path floor alone → candidate + review full; >8 predicted files still → full', () => {
+    // imboard#4343's shape: admitted on the `billing` keyword, then its own plan:v1 artifact
+    // predicts a billing path — the re-run must not turn the member into an exclusion.
+    const billing = prescreenIssue({
+      ...baseInput,
+      predictedFiles: ['packages/backend/src/billing/billing-sync.job.ts'],
+    });
+    expect(billing).toMatchObject({ verdict: 'candidate', review: 'full' });
+    expect(billing.reasons.map((r) => r.check)).toEqual(['path-floor']);
     const nine = Array.from({ length: 9 }, (_, i) => `src/f${i}.ts`);
     expect(prescreenIssue({ ...baseInput, predictedFiles: nine }).verdict).toBe('full');
+    // A path-floor hit next to an excluding check still excludes (the excluding check decides).
+    expect(
+      prescreenIssue({
+        ...baseInput,
+        predictedFiles: ['packages/auth/x.ts'],
+        openDependencies: [7],
+      }).verdict
+    ).toBe('full');
   });
 
-  it('PRESCREEN_SCHEMA names the v2 contract', () => {
-    expect(PRESCREEN_SCHEMA).toBe('prescreen:v2');
+  it('PRESCREEN_SCHEMA names the v3 contract (#805)', () => {
+    expect(PRESCREEN_SCHEMA).toBe('prescreen:v3');
   });
 
   it.each([

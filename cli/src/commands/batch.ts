@@ -1,6 +1,6 @@
 /**
  * `ai-dossier batch compose` (#773, #770 P3) — preview which issues may share a batch PR, with
- * zero model tokens. Runs prescreen:v2 + the deterministic readiness screen over the operator's
+ * zero model tokens. Runs prescreen:v3 + the deterministic readiness screen over the operator's
  * picks and/or the backlog and proposes a composition honouring the scheduler's batch invariants
  * (≤ `max_full_review_members` review=full members, one base branch, 3–6 members), listing ranked
  * backfill candidates when the picks fall short.
@@ -526,7 +526,7 @@ export function registerBatchCommand(program: Command): void {
     )
     .option(
       '--rules <rules>',
-      "Admission rules: 'v2' (prescreen:v2 + review=full members) or 'legacy' (pre-#770: any risk keyword excludes)",
+      "Admission rules: 'v2' (#770 Option A: prescreen:v3 + review=full members) or 'legacy' (pre-#770: any risk keyword excludes)",
       'v2'
     )
     .option('--json', `Machine-readable output (schema ${COMPOSE_SCHEMA})`)

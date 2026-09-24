@@ -94,7 +94,7 @@ function fetchPredictedFiles(issue: string, repo: string | undefined): Predicted
   return { status: 'present', files: latest.artifact.predictedFiles };
 }
 
-/** The one JSON shape every path emits (`schema: prescreen:v2`, #772) — success and failure alike carry the same keys, plus `degraded`/`warnings` when something didn't run cleanly. */
+/** The one JSON shape every path emits (`schema: prescreen:v3`, #772/#805) — success and failure alike carry the same keys, plus `degraded`/`warnings` when something didn't run cleanly. */
 function emitVerdict(fields: {
   issue: number;
   state: string | null;

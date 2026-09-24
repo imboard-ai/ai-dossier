@@ -40,7 +40,7 @@ const DEFAULT_LIMIT = 500;
 /** `gh issue list --json body` for a few hundred issues runs to tens of MB. */
 const GH_MAX_BUFFER = 256 * 1024 * 1024;
 /** The contract this script measures against; an older dist lacks `review`. */
-const EXPECTED_SCHEMA = 'prescreen:v2';
+const EXPECTED_SCHEMA = 'prescreen:v3';
 
 /**
  * Normalise one `gh issue list --json` row into the prescreen input shape. Labels follow
