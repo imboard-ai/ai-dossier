@@ -1479,7 +1479,7 @@ export function handlePrConflict(
     {
       phase: 'batch-ship',
       // NOT `blocked`: the rebase worked and the batch is re-shipping. `blocked`
-      // stamps `next=done` on a run that is still going, and counts toward the
+      // stamps `next=operator` (#768) on a run that is still going, and counts toward the
       // runstate resume-loop cap.
       status: 'awaiting-merge',
       kv: { reason, rebased: base, rebase_attempts: String(batch.rebase_attempts + 1) },

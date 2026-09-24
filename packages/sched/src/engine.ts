@@ -205,6 +205,8 @@ export interface EngineDeps {
    * supplied. Optional independently of `batchExec`/`runBatchSuite`.
    */
   batchWarmExec?: BatchDispatchDeps['warmExec'];
+  /** #768: the verified `owner/name` of this project's issues — see `BatchDispatchDeps.anchorRepo`. */
+  anchorRepo?: string;
   /**
    * Runs the aggregate suite inside a batch worktree (#523) — the deterministic
    * gate between `executing` and `reviewing`. Optional; see `batchExec`'s doc
@@ -3222,6 +3224,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
       homeDir: deps.homeDir,
       ...(deps.runBatchCapability !== undefined ? { runCapability: deps.runBatchCapability } : {}),
       ...(deps.batchWarmExec !== undefined ? { warmExec: deps.batchWarmExec } : {}),
+      ...(deps.anchorRepo !== undefined ? { anchorRepo: deps.anchorRepo } : {}),
     };
     const batchResult = runBatchTick(batchDeps, config, dispatch);
     result = mergeBatchResult(result, batchResult);

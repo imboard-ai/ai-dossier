@@ -453,7 +453,7 @@ prints `No runstate milestones on issue #440.` (or `null` under `--json`) and ex
 | `--status <s>` | `done`, `partial`, `blocked`, `awaiting-merge` (required). `superseded` is rejected here — a fence is written by [`runstate fence`](#run-fencing-504) |
 | `--run <id>` | Run id (`r-<issue>-<hex>`) — mint one with `runstate mint`; full-cycle runs mint it at the gate phase (required) |
 | `--kv <key=value...>` | Phase-specific key, repeatable (and variadic: `--kv a=1 b=2` works too) |
-| `--next <phase>` | Override the computed `next=` line — a phase name or `done` |
+| `--next <phase>` | Override the computed `next=` line — a phase name, `done`, or `operator` (batch phases only) |
 | `--gen <n>` | Run generation this agent owns (default 0). A post below the trail's fenced generation is refused — see [Run fencing](#run-fencing-504) |
 | `--repo <owner/name>` | Target repository (defaults to the current one) |
 | `--dry-run` | Print the comment body instead of posting it |
@@ -532,7 +532,8 @@ vocabulary underneath it is stable. `batch-ship` mirrors `ship`'s two-milestone 
 `awaiting-merge`, then `done` after the merge, and `stats` reports the gap between them
 under its own `batch-merge-wait` label (not pooled with full-cycle `merge-wait`).
 `next=` walks the batch line: batch-setup → batch-validate → batch-review → batch-ship →
-batch-report → done.
+batch-report → done. A `blocked` batch milestone is followed by `next=operator`, not `done`
+(#768): the batch's anchor is still open and its next step is operator inspection.
 
 > **Compatibility.** Reading and posting these phases requires CLI ≥ 0.14.0. An older
 > CLI rejects them outright on `post` (`Unknown phase 'classify' — expected one of: …`),
@@ -634,7 +635,8 @@ valid on **every** phase — a takeover can happen anywhere — and requires `ge
 `post` refuses it.
 
 `next=` is computed for you: the linear order `gate → setup → plan → implement → review →
-ship → report → done`, except that `blocked` ends the run (`next=done`) and the three
+ship → report → done`, except that `blocked` ends the run (`next=done` — on a `batch-*`
+phase it is `next=operator` instead, #768) and the three
 non-terminal statuses stay in their own phase — `superseded` points back at its own phase,
 so a takeover that dies leaves a resumable trail rather than a terminal one;
 `ship`/`awaiting-merge` is followed by a
@@ -677,7 +679,7 @@ Every `--kv` pair is checked before anything is posted:
   | `deps` | `none`, or comma-separated issue numbers, e.g. `474,480` |
   | `batch` | a batch id slug starting with a letter or digit, then letters, digits, `.`, `_`, `-` (e.g. `b-2026-08-29-01`) |
 
-- `--next` must be a phase name or `done`. It is written to the comment verbatim, so an
+- `--next` must be a phase name, `done`, or `operator` (batch phases only). It is written to the comment verbatim, so an
   unchecked typo would point the next resume at a phase that does not exist.
 - Comments are append-only: never edit or delete a prior milestone.
 
@@ -1294,7 +1296,7 @@ respectively; `get --json` includes the comment's `author`.
 ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--more-members-expected] [--deps 100,104] [--tier mechanical|mid|strong] [--priority <n>] [--repo owner/name]
 ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
 ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--json]
-ai-dossier sched status [--json]   # ⚠ health warnings: long pause, stale lease, stuck / stale-closed slots (#776)
+ai-dossier sched status [--json] [--anchors]   # ⚠ health warnings: long pause, stale lease, stuck / stale-closed slots (#776)
 ai-dossier sched pause | resume
 ai-dossier sched stop (--issue 42 | --batch b1) [--reason "..."]
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
@@ -1394,6 +1396,20 @@ atomically. `abandon` instead records failure and releases a slot without termin
   `shipped` — journaled `stale-failure-reconciled` — unblocking whatever
   dependents were blocked by the original failure, up to a 7-day watch
   window past which an abandoned failure is left as-is.
+  A batch's anchor issue is closed off the happy path too (#768), but only on
+  positive evidence: every member issue CLOSED as completed BY SHIPPED CODE (a
+  PR merged into the batch's base, or a commit reachable from it — never a bare
+  hand close), and no member evicted, handed back (`decision-pending`, any
+  case), requeued, or failed. The engine then comments on the anchor with each
+  member's shipping PR or commit (marker `batch-close:v1`, honoured only on its
+  own comments, so a rerun never double-posts) and closes it — journaled
+  `anchor-closed` (`anchor-close-failed` on a failed write, deduped like
+  `pr-watch-failed`). It acts only on batches touched within 7 days, and only
+  when the current directory is verified to be the project's repository (every
+  `gh` call names it with `-R`). Any other shape leaves the anchor open;
+  `status --anchors` lists every still-open anchor under
+  `== Open batch anchors ==` as `closable`, `needs-operator`, or `unknown`
+  (report-only and opt-in — without `--anchors`, `status` makes no GitHub call).
   `--once` runs a single tick (cron-style); Ctrl-C stops
   the engine while spawned agents keep running. Pids are identity-guarded via
   `/proc` start-times (a reused pid is never signalled; best-effort on macOS/Windows),

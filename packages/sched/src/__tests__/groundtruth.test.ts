@@ -9,6 +9,7 @@ import {
   isMemberComplete,
   isParkedMilestone,
   isVerifiedComplete,
+  parseIssueCloseTruthJson,
   parseIssueLabelsJson,
   parseMilestoneJson,
   parseMilestoneListJson,
@@ -872,5 +873,156 @@ describe('parseMilestoneListJson (#622 — the milestones one dispatch posted)',
     expect(
       isMemberComplete(parseMilestoneListJson(JSON.stringify([stale]))?.[0] ?? null, spawnedAt)
     ).toBe(false);
+  });
+});
+
+describe('parseIssueCloseTruthJson (#768)', () => {
+  const wrap = (issue: unknown) => JSON.stringify({ data: { repository: { issue } } });
+
+  it('reads a PR closer (imboard#4147 shape)', () => {
+    expect(
+      parseIssueCloseTruthJson(
+        wrap({
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          labels: { nodes: [{ name: 'cycle:slot' }] },
+          timelineItems: {
+            nodes: [
+              {
+                closer: {
+                  __typename: 'PullRequest',
+                  number: 4256,
+                  merged: true,
+                  baseRefName: 'main',
+                  repository: { nameWithOwner: 'imboard-ai/imboard' },
+                },
+              },
+            ],
+          },
+        })
+      )
+    ).toEqual({
+      state: 'CLOSED',
+      stateReason: 'COMPLETED',
+      labels: ['cycle:slot'],
+      closer: {
+        kind: 'pr',
+        number: 4256,
+        merged: true,
+        baseRefName: 'main',
+        repo: 'imboard-ai/imboard',
+      },
+      closingPrs: [],
+    });
+  });
+
+  it('reads closing references (imboard#4116: merged #4255, closed by hand)', () => {
+    expect(
+      parseIssueCloseTruthJson(
+        wrap({
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          closedByPullRequestsReferences: {
+            nodes: [
+              {
+                number: 4255,
+                merged: true,
+                baseRefName: 'main',
+                repository: { nameWithOwner: 'imboard-ai/imboard-monorepo' },
+              },
+            ],
+          },
+          timelineItems: { nodes: [{ closer: null }] },
+        })
+      )
+    ).toMatchObject({
+      closer: null,
+      closingPrs: [
+        { number: 4255, merged: true, baseRefName: 'main', repo: 'imboard-ai/imboard-monorepo' },
+      ],
+    });
+  });
+
+  it('reads a commit closer (imboard#4146 shape) and a null closer (imboard#4116 shape)', () => {
+    const oid = '628c6fad676c46cad0c701c07dfd8fad40a9f39c';
+    expect(
+      parseIssueCloseTruthJson(
+        wrap({
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          labels: { nodes: [] },
+          timelineItems: { nodes: [{ closer: { __typename: 'Commit', oid } }] },
+        })
+      )?.closer
+    ).toEqual({ kind: 'commit', oid });
+    expect(
+      parseIssueCloseTruthJson(
+        wrap({
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          timelineItems: { nodes: [{ closer: null }] },
+        })
+      )?.closer
+    ).toBeNull();
+  });
+
+  it('keeps NOT_PLANNED distinct from COMPLETED, and an open issue as OPEN', () => {
+    expect(
+      parseIssueCloseTruthJson(wrap({ state: 'CLOSED', stateReason: 'NOT_PLANNED' }))?.stateReason
+    ).toBe('NOT_PLANNED');
+    expect(parseIssueCloseTruthJson(wrap({ state: 'OPEN', stateReason: null }))?.state).toBe(
+      'OPEN'
+    );
+  });
+
+  it('an unusable payload is unreachable (undefined), never a verified state', () => {
+    expect(parseIssueCloseTruthJson(null)).toBeUndefined();
+    expect(parseIssueCloseTruthJson('')).toBeUndefined();
+    expect(parseIssueCloseTruthJson('not json')).toBeUndefined();
+    expect(
+      parseIssueCloseTruthJson(JSON.stringify({ data: { repository: { issue: null } } }))
+    ).toBeUndefined();
+    expect(parseIssueCloseTruthJson(wrap({ state: 'MERGED' }))).toBeUndefined();
+  });
+
+  it('more labels than one page is unreachable — the hand-back label could be on the next page', () => {
+    expect(
+      parseIssueCloseTruthJson(
+        wrap({
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          labels: { pageInfo: { hasNextPage: true }, nodes: [{ name: 'a' }] },
+        })
+      )
+    ).toBeUndefined();
+  });
+
+  it('createExecGroundTruth: no issueCloseTruth without a verified repo — never the cwd repo', () => {
+    expect(createExecGroundTruth(() => '{}').issueCloseTruth).toBeUndefined();
+    expect(
+      createExecGroundTruth(() => '{}', { repo: '--repo=evil' }).issueCloseTruth
+    ).toBeUndefined();
+  });
+
+  it('createExecGroundTruth.issueCloseTruth names the repo explicitly, and a failed gh call is unreachable', () => {
+    const calls: string[][] = [];
+    const exec: ExecFn = (_file, args) => {
+      calls.push(args);
+      return null;
+    };
+    const gt = createExecGroundTruth(exec, { repo: 'imboard-ai/imboard' });
+    expect(gt.issueCloseTruth?.(4146)).toBeUndefined(); // the repo probe failed too
+    expect(calls[0]).toContain('owner=imboard-ai');
+    expect(calls[0]).toContain('name=imboard');
+    expect(calls[0].join(' ')).not.toContain('{owner}');
+  });
+});
+
+describe('issueCloseTruth: a missing issue is not an outage (#768)', () => {
+  it('reads MISSING when the issue read fails but the repository answers', () => {
+    const exec: ExecFn = (_file, args) =>
+      args[0] === 'api' && args[1] === 'graphql' ? null : 'imboard-ai/imboard';
+    const gt = createExecGroundTruth(exec, { repo: 'imboard-ai/imboard' });
+    expect(gt.issueCloseTruth?.(99999)?.state).toBe('MISSING');
   });
 });

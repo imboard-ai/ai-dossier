@@ -595,6 +595,26 @@ export interface BatchEntry {
    * Reset to `0` whenever `pr_watch_failed_reason` is `null`.
    */
   pr_watch_failed_ticks: number;
+  /**
+   * When the engine verified the batch's anchor issue CLOSED (#768) — either
+   * it closed it itself (every member closed as completed, no failure trail)
+   * or it found it already closed. `null` while the anchor is open or was
+   * never checked — including every batch the engine's close pass does not
+   * read (dissolved/stopped, or ruled out by the ledger), whose anchors
+   * `sched status`'s sweep reads each time. Once set, neither the engine nor
+   * the sweep polls that anchor again.
+   */
+  anchor_closed_at: string | null;
+  /**
+   * The `anchor-close-failed` streak (#768), deduped exactly like
+   * `pr_watch_failed_*`: the reason already journalled (null = the close is
+   * not failing), when the streak began, and ticks it has persisted — so a
+   * close that keeps failing journals once, then every
+   * `JOURNAL_DEDUP_REANNOUNCE_TICKS`, never every tick.
+   */
+  anchor_close_failed_reason: string | null;
+  anchor_close_failed_since: string | null;
+  anchor_close_failed_ticks: number;
   created_at: string;
   updated_at: string;
 }
@@ -1230,8 +1250,11 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * entries; `null` is backfilled on load.
  * 1.21.0 (#635): `SchedState` gains `last_tick_failure`, retaining the latest
  * scheduler-wide error for `sched status`; null is backfilled on load.
+ * 1.22.0 (#768): `BatchEntry` gains `anchor_closed_at` and the
+ * `anchor_close_failed_reason`/`_since`/`_ticks` dedup marker;
+ * `null`/`null`/`null`/`0` backfilled on load.
  */
-export const SCHEMA_VERSION = '1.21.0' as const;
+export const SCHEMA_VERSION = '1.22.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1256,6 +1279,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.18.0',
   '1.19.0',
   '1.20.0',
+  '1.21.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
@@ -1428,6 +1452,10 @@ export type JournalEventName =
   // manually re-queued and merged is reconciled back to `shipped` (and its
   // dependents unblocked).
   | 'stale-failure-reconciled'
+  // #768: a batch anchor closed on positive evidence (every member closed as
+  // completed, no failure trail), or the close attempt that failed.
+  | 'anchor-closed'
+  | 'anchor-close-failed'
   // #472 batch failure recovery (RFC-0001 §F.2/F.8/F.9)
   | 'suite-failed'
   | 'git-failed'

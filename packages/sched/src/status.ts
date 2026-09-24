@@ -7,6 +7,12 @@
  */
 
 import {
+  type AnchorReportItem,
+  type CommitInBase,
+  type IssueCloseReader,
+  sweepAnchors,
+} from './anchor-close';
+import {
   resolveDispatch,
   resolveProfiledDispatch,
   type TierExecutor,
@@ -139,6 +145,14 @@ export interface StatusReport {
   stopped: QueueEntry[];
   /** Health warnings (#776) — empty when nothing needs an operator. */
   warnings: StatusWarning[];
+  /**
+   * #768 anchor sweep (report-only, `sched status --anchors`): every
+   * still-open anchor of a batch that is no longer in flight, `closable`,
+   * `needs-operator` or `unknown`, with each member's state. `null` when the
+   * report was built without the sweep (the default — `status` makes no
+   * network call unless asked; nothing is guessed from the ledger alone).
+   */
+  anchors: AnchorReportItem[] | null;
 }
 
 function hoursSince(iso: string, nowMs: number): number | null {
@@ -239,7 +253,9 @@ export function buildStatusReport(
   config: SchedConfig,
   project: string,
   engineLease: EngineLeaseStatus | null = null,
-  now: Date = new Date()
+  now: Date = new Date(),
+  /** #768: the opt-in anchor sweep's GitHub/git readers; omitted → `anchors: null`. */
+  anchorSweep?: { read: IssueCloseReader; repo?: string; commitInBase?: CommitInBase }
 ): StatusReport {
   const blocked: BlockedItem[] = [];
   const failed: QueueEntry[] = [];
@@ -371,5 +387,12 @@ export function buildStatusReport(
     failed,
     stopped,
     warnings: buildStatusWarnings(state, engineLease, now),
+    anchors:
+      anchorSweep !== undefined
+        ? sweepAnchors(state, anchorSweep.read, {
+            repo: anchorSweep.repo,
+            commitInBase: anchorSweep.commitInBase,
+          })
+        : null,
   };
 }

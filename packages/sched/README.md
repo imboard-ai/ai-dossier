@@ -28,7 +28,7 @@ ai-dossier sched enqueue --issues 101,105..109 --deps 100 --tier strong   # flag
 ai-dossier sched enqueue --from-manifest batch-prep.json                  # batch-prep output
 ai-dossier sched start            # the dispatch engine: spawn, verify, escalate, watch parked PRs (Ctrl-C stops it)
 ai-dossier sched start --once     # a single reconcile+refill tick (cron-style)
-ai-dossier sched status           # queue (+pr/cleanup), engine lease, slots, batches, blocked/failed
+ai-dossier sched status           # queue (+pr/cleanup), engine lease, slots, batches, blocked/failed; --anchors adds the open-batch-anchor sweep (#768)
 ai-dossier sched pause            # prevent every new agent process; live units keep running
 ai-dossier sched resume
 ai-dossier sched stop --issue 42  # terminate one full-cycle agent and record it stopped (no recovery)
@@ -1034,6 +1034,14 @@ import {
                          //   so batch-dispatch.ts can share it.
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
+                         //   (+ optional `anchorSweep` → `anchors`, #768; null without it)
+  sweepAnchors, classifyAnchor, membersShippedVerdict, anchorLedgerBlockers,
+  shippingEvidence,      // #768 anchor-close predicate (pure; readers injected)
+  closeAnchor,           // #768 idempotent comment-then-close, `-R <repo>` explicit
+  anchorCloseMarker, renderAnchorCloseComment, openAnchorBatches, formatBatchStatus,
+  issueCloseReader, parseIssueCloseTruthJson, parseRepoName,
+  resolveProjectRepo,    // #768 owner/name of the cwd repo only when it IS the project's
+  hasLabel,              // case-insensitive label match (#768)
   validateState,         // strict persisted-state validation (1.0.0-1.13.0 files migrate)
   DEFAULT_ISSUE_PRIORITY, DEFAULT_BATCH_PRIORITY, // priority defaults (0 / 10, #565)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
@@ -1213,7 +1221,8 @@ after-the-fact recovery, not a missing-data bug.
   `member_gates`/`blocked_reason` — #565/#583, slot
   `stale_milestone_ignored_for` backfill to `null` — #610, and state-level
   `consecutive_dispatch_api_errors`/`dispatch_pause_reset_at` backfill to `0`/`null` —
-  #629).
+  #629; batch `anchor_closed_at` and `anchor_close_failed_reason`/`_since`/`_ticks`
+  backfill to `null`/`null`/`null`/`0` — #768, schema 1.22.0).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -1244,6 +1253,53 @@ nobody came back to, each with its exact remedy:
   closed issue sets the entry's sticky `stale_closed_at`, journals `stale-closed` once, and
   the recovery rail never respawns it (even after `sched resume`). Report slots are exempt:
   their issue is closed at merge by design. Remedy: `sched stop --issue N`.
+
+## Batch anchors close only on positive evidence (#768)
+
+A batch's anchor issue used to close only on the happy path (batch-integrate's
+post-merge step, #720). A batch that blocked, was recovered by hand, or whose members
+shipped through PRs of their own left its anchor open forever (imboard#4244,
+imboard#4253). Each tick now runs `reconcileAnchorClosure` (`batch-dispatch.ts`, with the
+predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the 7-day
+`STALE_BLOCKED_RECONCILE_WINDOW_MS` whose anchor is not yet recorded closed:
+
+- **Closes only when every member shipped.** Each member issue must be CLOSED with
+  `stateReason=COMPLETED`, and its close event's closer must be a PR of the project's own repository MERGED
+  into the batch's `base_branch` or a commit reachable from `origin/<base>`
+  (`shippingEvidence`). A hand close — no linked PR or commit — is not evidence: an
+  issue's author can close their own issue. One more path counts for a hand close: a
+  PR of the project's repository, MERGED into the base, that GitHub lists as closing
+  the issue (`closedByPullRequestsReferences` — `Closes #N` parsed but not acted on,
+  the imboard#4116 shape); that still needs a merge, i.e. write access. A member issue that no longer resolves
+  (deleted/transferred) reads `member-missing` — needs-operator, not an outage.
+- **Never over a failure trail.** Any evicted member, any member in a failure status
+  (`ISSUE_UNIVERSAL_FAILURE_EDGES` + `evicted`/`requeued`), any member requeued out of
+  the batch, a dissolved/stopped batch, or a `decision-pending` label on the anchor or a
+  member (case-insensitive, `hasLabel`) leaves the anchor open. The ledger is re-checked
+  on a fresh load immediately before the close.
+- **Idempotent and attributable.** The anchor gets one comment naming each member's
+  shipping PR or commit, starting with `<!-- batch-close:v1 batch=<id> anchor -->`;
+  only that marker on a comment by the authenticated gh user counts, so a rerun after a
+  failed close closes without a second comment. `anchor_closed_at` is then recorded and
+  the anchor is never polled again.
+- **Only the verified repository.** The pass runs only when `EngineDeps.anchorRepo` is
+  set — `sched start` sets it from `resolveProjectRepo`, i.e. only when the cwd IS the
+  project's repository — and every `gh` call names it (`-R`, explicit GraphQL owner/name).
+- **Members-closed reconcile evidence.** The same predicate is a third evidence kind
+  for #686's stale-blocked reconcile (`members-closed`), which survives the mandated
+  rebase-merge that makes the ancestry probe structurally dead. It finishes the terminal
+  rail inline but never tears the blocked worktree down (it may hold unpushed work);
+  the journal line says the worktree was kept.
+
+Everything else is surfaced, never closed: `sched status --anchors` (opt-in; `status`
+makes no GitHub call without it) lists each still-open anchor of a batch no longer in
+flight as `closable`, `needs-operator` or `unknown`, with every member's GitHub and
+ledger state, stopping its reads at the first failed one. A blocked batch milestone now
+reads `next=operator`, not `next=done`.
+
+Journal: `anchor-closed` (including "found already closed") and `anchor-close-failed`
+(deduped like `pr-watch-failed`: once per streak, re-announced every
+`JOURNAL_DEDUP_REANNOUNCE_TICKS`).
 
 ## Hard-block labels are re-read every tick (#544)
 

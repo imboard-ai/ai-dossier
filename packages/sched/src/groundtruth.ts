@@ -65,6 +65,58 @@ export interface SetupInfo {
   branch: string | null;
 }
 
+/**
+ * An issue's closure as GitHub records it (#768) — what the anchor-close
+ * predicate (`anchor-close.ts`) decides on. `stateReason` distinguishes a
+ * member that SHIPPED (`COMPLETED`) from one closed as `NOT_PLANNED` /
+ * `DUPLICATE`; `closer` is the PR or commit GitHub linked to the close event,
+ * `null` when none was recorded (a hand close, or a rebase-merged PR GitHub
+ * did not link — imboard#4116 is exactly that shape).
+ */
+export interface IssueCloseTruth {
+  /**
+   * `MISSING` (#768): the issue read failed while the repository itself
+   * answered — deleted, transferred, or otherwise unresolvable. Distinct from
+   * `undefined` (GitHub unreachable): it is a fact about THIS issue, so it
+   * disqualifies the batch rather than stalling every read after it.
+   */
+  state: 'OPEN' | 'CLOSED' | 'MISSING';
+  /** GitHub's `stateReason` (`COMPLETED`, `NOT_PLANNED`, `DUPLICATE`, `REOPENED`), or null. */
+  stateReason: string | null;
+  labels: string[];
+  /**
+   * What GitHub linked to the close event. A PR closer carries whether it
+   * MERGED and into which base — an unmerged or wrong-base PR is not shipping
+   * evidence. `null` = no linked PR or commit: a person closed it by hand.
+   */
+  closer:
+    | {
+        kind: 'pr';
+        number: number;
+        merged: boolean;
+        baseRefName: string | null;
+        /** The PR's own repository (`owner/name`) — a PR elsewhere can close this issue too. */
+        repo: string | null;
+      }
+    | { kind: 'commit'; oid: string }
+    | null;
+  /**
+   * PRs GitHub parsed as closing this issue (`Closes #N`), merged or not
+   * (`closedByPullRequestsReferences`). The imboard#4116 shape: the PR merged,
+   * GitHub declined to close the issue, a person closed it by hand — so the
+   * close event has no closer, yet a merged PR still vouches for it.
+   */
+  closingPrs: ClosingPr[];
+}
+
+/** A PR that references an issue as closed by it (#768). */
+export interface ClosingPr {
+  number: number;
+  merged: boolean;
+  baseRefName: string | null;
+  repo: string | null;
+}
+
 export interface GroundTruth {
   /**
    * Latest runstate milestone on the issue. **Tri-state (decision 2, option
@@ -130,6 +182,15 @@ export interface GroundTruth {
    * a live human hand-off whenever gh is down.
    */
   issueLabels(issue: number): string[] | undefined;
+  /**
+   * The issue's closure record (#768): state, `stateReason`, labels and the
+   * close event's closer. Same tri-state as its siblings: `undefined` = the
+   * poll FAILED, which the anchor-close predicate reads as "unknown", never
+   * as closable. OPTIONAL like `milestonesSince` so existing implementations
+   * stay valid; without it the anchor-close pass and the members-closed
+   * reconcile evidence simply never fire.
+   */
+  issueCloseTruth?(issue: number): IssueCloseTruth | undefined;
 }
 
 /** Subprocess timeout: a hung gh/git call must not stall a tick. */
@@ -222,10 +283,20 @@ export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone 
  */
 export function createExecGroundTruth(
   exec: ExecFn = groundTruthExec,
-  opts: { repoDir?: string; runstateBin?: string } = {}
+  opts: {
+    repoDir?: string;
+    runstateBin?: string;
+    /**
+     * #768: the `owner/name` repository issue closure is read from. Without
+     * it `issueCloseTruth` is not provided at all — the anchor close never
+     * resolves a repo from the cwd, which may not be the project's (see
+     * `resolveProjectRepo`).
+     */
+    repo?: string;
+  } = {}
 ): GroundTruth {
   const runstateBin = opts.runstateBin ?? 'ai-dossier';
-  return {
+  const truth: GroundTruth = {
     latestMilestone(issue: number): GroundTruthMilestone | null | undefined {
       const out = exec(
         runstateBin,
@@ -311,6 +382,143 @@ export function createExecGroundTruth(
       return parseIssueLabelsJson(out);
     },
   };
+  const repo = opts.repo !== undefined ? parseRepoName(opts.repo) : null;
+  if (repo !== null) {
+    truth.issueCloseTruth = (issue: number): IssueCloseTruth | undefined => {
+      const out = exec(
+        'gh',
+        [
+          'api',
+          'graphql',
+          '-f',
+          `owner=${repo.owner}`,
+          '-f',
+          `name=${repo.name}`,
+          '-F',
+          `n=${issue}`,
+          '-f',
+          `query=${ISSUE_CLOSE_QUERY}`,
+        ],
+        opts.repoDir
+      );
+      if (out !== null) return parseIssueCloseTruthJson(out);
+      // The read failed: unreachable, or this one issue cannot be resolved?
+      // Ask the repository itself — if IT answers, the issue is what's gone.
+      const repoAlive = exec(
+        'gh',
+        ['api', `repos/${repo.owner}/${repo.name}`, '--jq', '.full_name'],
+        opts.repoDir
+      );
+      return repoAlive === null
+        ? undefined
+        : { state: 'MISSING', stateReason: null, labels: [], closer: null, closingPrs: [] };
+    };
+  }
+  return truth;
+}
+
+/** An `owner/name` GitHub repository reference — the only shape `-R` and the GraphQL read accept here. */
+const REPO_NAME_RE = /^([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+)$/;
+
+/** Split `owner/name`, or `null` when it is not a plain repository reference (CWE-88). */
+export function parseRepoName(repo: string): { owner: string; name: string } | null {
+  const m = REPO_NAME_RE.exec(repo);
+  return m ? { owner: m[1], name: m[2] } : null;
+}
+
+/**
+ * How many labels `issueCloseTruth` reads. The hand-back label
+ * (`decision-pending`) is what keeps an anchor open, so a label list longer
+ * than one page is read as UNREACHABLE (the parser checks `hasNextPage`) —
+ * failing closed rather than missing the label.
+ */
+const ISSUE_LABEL_PAGE_SIZE = 100;
+
+/** A full or abbreviated git object id. */
+export const GIT_OID_RE = /^[0-9a-f]{7,40}$/i;
+
+/** GraphQL for `issueCloseTruth` — one round trip for state, reason, labels and closer. */
+const ISSUE_CLOSE_QUERY =
+  'query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){' +
+  `state stateReason labels(first:${ISSUE_LABEL_PAGE_SIZE}){pageInfo{hasNextPage} nodes{name}} ` +
+  'closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number merged baseRefName repository{nameWithOwner}}} ' +
+  'timelineItems(itemTypes:[CLOSED_EVENT],last:1){nodes{... on ClosedEvent{closer{__typename ' +
+  '... on PullRequest{number merged baseRefName repository{nameWithOwner}} ... on Commit{oid}}}}}}}}';
+
+/**
+ * Parse `issueCloseTruth`'s GraphQL response (#768). An unusable payload is
+ * `undefined` (unreachable), never a verified state — the same rule
+ * `parseIssueLabelsJson` follows, and for the same reason: the caller closes
+ * an issue on this answer, so garbage must not be able to manufacture it.
+ */
+export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth | undefined {
+  if (stdout === null || stdout.trim() === '') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  const issue = (parsed as { data?: { repository?: { issue?: unknown } } } | null)?.data?.repository
+    ?.issue;
+  if (issue === null || typeof issue !== 'object') return undefined;
+  const obj = issue as Record<string, unknown>;
+  const state = typeof obj.state === 'string' ? obj.state.toUpperCase() : null;
+  if (state !== 'OPEN' && state !== 'CLOSED') return undefined;
+  const stateReason =
+    typeof obj.stateReason === 'string' && obj.stateReason !== ''
+      ? obj.stateReason.toUpperCase()
+      : null;
+  const labelConn = obj.labels as
+    | { nodes?: unknown; pageInfo?: { hasNextPage?: unknown } }
+    | undefined;
+  // More labels than one page: the hand-back label could be on the next one.
+  if (labelConn?.pageInfo?.hasNextPage === true) return undefined;
+  const labels = labelNames(labelConn?.nodes);
+  const nodes = (obj.timelineItems as { nodes?: unknown } | undefined)?.nodes;
+  const last = Array.isArray(nodes) ? nodes[nodes.length - 1] : undefined;
+  const closerRaw =
+    last !== null && typeof last === 'object' ? (last as { closer?: unknown }).closer : undefined;
+  let closer: IssueCloseTruth['closer'] = null;
+  if (closerRaw !== null && typeof closerRaw === 'object') {
+    const c = closerRaw as {
+      __typename?: unknown;
+      number?: unknown;
+      merged?: unknown;
+      baseRefName?: unknown;
+      repository?: { nameWithOwner?: unknown } | null;
+      oid?: unknown;
+    };
+    if (c.__typename === 'PullRequest' && typeof c.number === 'number') {
+      closer = {
+        kind: 'pr',
+        number: c.number,
+        merged: c.merged === true,
+        baseRefName: typeof c.baseRefName === 'string' ? c.baseRefName : null,
+        repo: typeof c.repository?.nameWithOwner === 'string' ? c.repository.nameWithOwner : null,
+      };
+    } else if (c.__typename === 'Commit' && typeof c.oid === 'string' && GIT_OID_RE.test(c.oid)) {
+      closer = { kind: 'commit', oid: c.oid };
+    }
+  }
+  const refNodes = (obj.closedByPullRequestsReferences as { nodes?: unknown } | undefined)?.nodes;
+  const closingPrs: ClosingPr[] = [];
+  for (const n of Array.isArray(refNodes) ? refNodes : []) {
+    const pr = n as {
+      number?: unknown;
+      merged?: unknown;
+      baseRefName?: unknown;
+      repository?: { nameWithOwner?: unknown } | null;
+    } | null;
+    if (pr === null || typeof pr !== 'object' || typeof pr.number !== 'number') continue;
+    closingPrs.push({
+      number: pr.number,
+      merged: pr.merged === true,
+      baseRefName: typeof pr.baseRefName === 'string' ? pr.baseRefName : null,
+      repo: typeof pr.repository?.nameWithOwner === 'string' ? pr.repository.nameWithOwner : null,
+    });
+  }
+  return { state, stateReason, labels, closer, closingPrs };
 }
 
 /**
@@ -691,4 +899,16 @@ export function isBatchPhaseDone(
     return false;
   }
   return postdatesDispatch(milestone.at, dispatchedAt);
+}
+
+/**
+ * `gt.issueCloseTruth` as a plain reader (#768), or `undefined` when this
+ * ground truth has no such method — the one adapter every caller (the engine's
+ * anchor pass and members-closed evidence, `sched status`'s sweep) shares.
+ */
+export function issueCloseReader(
+  gt: GroundTruth
+): ((issue: number) => IssueCloseTruth | undefined) | undefined {
+  const read = gt.issueCloseTruth;
+  return read === undefined ? undefined : (issue) => read.call(gt, issue);
 }
