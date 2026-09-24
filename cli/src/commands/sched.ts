@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import * as path from 'node:path';
 import type {
   BatchDispatchDeps,
+  BatchEntry,
   CapabilityGateResult,
   SchedConfig,
   StatusReport,
@@ -53,6 +54,7 @@ import {
   memberDispatchTier,
   OPENCODE_DISPATCH_COMMAND,
   parseManifest,
+  readJsonl,
   recordTickFailure,
   reprioritizeBatch,
   reprioritizeIssue,
@@ -97,7 +99,16 @@ import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
 import { findLatestPlan } from '../plan-artifact';
 import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
 import { hasSlotModeLatestMilestone } from '../runstate';
-import { aggregateRunLogEntries, buildSchedCostReport, type IssueCost } from '../sched-run-stats';
+import {
+  aggregateRunLogEntries,
+  type BatchAmortizationSummary,
+  type BatchJournalEvent,
+  buildBatchAmortizationSummary,
+  buildSchedCostReport,
+  formatAmortizationLine,
+  type IssueCost,
+  summarizeBatchJournal,
+} from '../sched-run-stats';
 import { renderTable } from '../table';
 
 /**
@@ -1361,6 +1372,7 @@ function runBatchStats(opts: StatsOptions & { batch: string }): void {
   // #564 review) sums these `batch:<id>`-unit entries directly.
   const overhead = entries.filter((e) => e.unit === `batch:${opts.batch}`);
   const overheadTotals = aggregateRunLogEntries(overhead);
+  const amortization = batchAmortization(store, opts.batch, entries);
 
   if (opts.json) {
     console.log(
@@ -1371,6 +1383,7 @@ function runBatchStats(opts: StatsOptions & { batch: string }): void {
           project,
           overhead: overhead.length > 0 ? overheadTotals : null,
           overhead_runs: overhead.length,
+          amortization,
           source: store.runsDir,
         },
         null,
@@ -1382,6 +1395,7 @@ function runBatchStats(opts: StatsOptions & { batch: string }): void {
 
   if (entries.length === 0) {
     console.log(`No dispatch logs found for batch '${opts.batch}' under ${store.runsDir}.`);
+    if (amortization.members_enqueued > 0) console.log(formatAmortizationLine(amortization));
     return;
   }
 
@@ -1392,6 +1406,38 @@ function runBatchStats(opts: StatsOptions & { batch: string }): void {
   }
   console.log(`Batch ${opts.batch} [${project}]:`);
   console.log(renderTable(STATS_HEADERS, rows, { align: [...STATS_ALIGN], separator: true }));
+  console.log(formatAmortizationLine(amortization));
+}
+
+/**
+ * The batch's amortization summary (#775): its persisted state entry (when
+ * `state.json` still holds it) + its `events.jsonl` lines + the reconstructed
+ * dispatch entries. Best-effort on the two extra reads — an unreadable state
+ * or journal only narrows the summary, never fails the cost report above it.
+ */
+function batchAmortization(
+  store: SchedStore,
+  batchId: string,
+  entries: ReturnType<typeof buildBatchRunLogEntries>
+): BatchAmortizationSummary {
+  let batch: BatchEntry | null = null;
+  try {
+    batch = store.load().batches.find((b) => b.id === batchId) ?? null;
+  } catch {
+    batch = null;
+  }
+  let events: BatchJournalEvent[] = [];
+  try {
+    events = readJsonl<BatchJournalEvent>(store.journalPath);
+  } catch {
+    events = [];
+  }
+  return buildBatchAmortizationSummary({
+    batchId,
+    batch,
+    journal: summarizeBatchJournal(events, batchId),
+    entries,
+  });
 }
 
 function registerStatsSubcommand(cmd: Command): void {

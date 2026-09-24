@@ -1484,6 +1484,13 @@ atomically. `abandon` instead records failure and releases a slot without termin
     comes from the agent's own result when it reports one, else from the `-m/--model`
     argv in the log's `sched-dispatch` preamble — opencode streams never report a model,
     so before #769 opencode members always read `-` here.
+    Below the table (and as `amortization` in `--json`) a **`Summary:` line** (#775) states
+    what the batch amortized: members enqueued / landed / evicted, issues shipped per gate
+    run (only once `state.json` has the batch `merged`/`deployed` — a batch PR recovered by
+    hand stays `not shipped` here; one gate run per PR, a lower bound since CI re-runs are
+    not in `state.json`), billable tokens per member, and tokens by model. The
+    repo-wide view, which joins merged `batch/*` PRs so hand-recovered batches count, is the
+    **Batch amortization** section of `npm run scorecard` (`scripts/model-scorecard.mjs`).
 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically
