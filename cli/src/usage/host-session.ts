@@ -11,8 +11,11 @@
  * - Claude Code exports `CLAUDE_CODE_SESSION_ID`; its transcript
  *   (`~/.claude/projects/<slug>/<id>.jsonl`, or a subagent's under
  *   `<id>/subagents/`) records each assistant message's resolved `model`.
- *   The newest transcript of that session is the one that just issued the
- *   `ai-dossier run` tool call, so its last assistant model is the caller's.
+ *   Subagents share the parent's id, so the caller is the transcript whose
+ *   newest tool call is a still-pending `ai-dossier run` (else the recently
+ *   active transcripts' model when they all agree; null when they don't).
+ * - Both markers are inherited by child processes, so the NEAREST host
+ *   ancestor (`CLAUDE_PID` / `OPENCODE_PID` via /proc) wins.
  * - opencode exports `OPENCODE=1` but no session id; the newest session for
  *   this working directory in opencode.db (updated in the last few minutes)
  *   is the caller.
@@ -100,6 +103,125 @@ export function findClaudeTranscript(projectsDir: string, sessionId: string): st
   return (best as { file: string } | null)?.file ?? null;
 }
 
+/** Transcripts written within this long of the newest one are "concurrently active" candidates. */
+const ACTIVE_WINDOW_MS = 2 * 60 * 1000;
+const DOSSIER_RUN_RE = /\b(?:ai-)?dossier\s+run\b/;
+
+/** Every transcript (main + subagents) of `sessionId`, with mtimes. */
+function claudeTranscripts(
+  projectsDir: string,
+  sessionId: string
+): { file: string; mtime: number }[] {
+  const out: { file: string; mtime: number }[] = [];
+  const consider = (file: string) => {
+    const mtime = mtimeMs(file);
+    if (mtime !== null) out.push({ file, mtime });
+  };
+  for (const project of safeReaddir(projectsDir)) {
+    if (!project.isDirectory()) continue;
+    const dir = path.join(projectsDir, project.name);
+    consider(path.join(dir, `${sessionId}.jsonl`));
+    const subDir = path.join(dir, sessionId, 'subagents');
+    for (const sub of safeReaddir(subDir)) {
+      if (sub.isFile() && sub.name.endsWith('.jsonl')) consider(path.join(subDir, sub.name));
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether a transcript's newest tool call is a still-pending `ai-dossier run`
+ * — i.e. this transcript's agent is the one executing us right now: the
+ * command is in a `tool_use` block whose `tool_result` has not been written.
+ */
+export function hasPendingDossierRun(transcript: string): boolean {
+  const lines = tail(transcript, TAIL_BYTES).split('\n');
+  const answered = new Set<string>();
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line.includes('tool_')) continue;
+    let record: { type?: unknown; message?: { content?: unknown } };
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const content = Array.isArray(record.message?.content) ? record.message.content : [];
+    for (const block of content as Record<string, unknown>[]) {
+      if (block?.type === 'tool_result' && typeof block.tool_use_id === 'string') {
+        answered.add(block.tool_use_id);
+      }
+      if (block?.type === 'tool_use' && typeof block.id === 'string' && !answered.has(block.id)) {
+        const command = (block.input as { command?: unknown } | undefined)?.command;
+        if (typeof command === 'string' && DOSSIER_RUN_RE.test(command)) return true;
+      }
+    }
+    if (
+      record.type === 'assistant' &&
+      content.some((b) => (b as { type?: unknown })?.type === 'tool_use')
+    ) {
+      // Only the newest tool-calling turn can be the one invoking us.
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * The model of the Claude Code agent invoking us. Subagents share their
+ * parent's `CLAUDE_CODE_SESSION_ID`, so "newest transcript" alone can pick a
+ * concurrent sibling: prefer the one transcript with a pending `ai-dossier
+ * run` call; otherwise accept the recently-active candidates' model only when
+ * they all agree — a guess between different models records null.
+ */
+export function claudeHostModel(projectsDir: string, sessionId: string): string | null {
+  const all = claudeTranscripts(projectsDir, sessionId);
+  if (all.length === 0) return null;
+  const newest = Math.max(...all.map((t) => t.mtime));
+  const active = all.filter((t) => t.mtime >= newest - ACTIVE_WINDOW_MS);
+  const pending = active.filter((t) => hasPendingDossierRun(t.file));
+  if (pending.length === 1) return lastAssistantModel(pending[0].file);
+  const pool = pending.length > 1 ? pending : active;
+  const models = new Set(pool.map((t) => lastAssistantModel(t.file)));
+  if (models.size !== 1) return null;
+  return [...models][0];
+}
+
+/** `/proc/<pid>/stat` parent pid, or null (non-Linux, gone, unreadable). */
+function parentPid(pid: number): number | null {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8');
+    // comm (field 2) may contain spaces/parens — parse after the LAST ')'.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const ppid = Number.parseInt(fields[1], 10);
+    return Number.isFinite(ppid) ? ppid : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Sentinel depth for "cannot tell" (no pid given, or no /proc): trusted, but loses to a proven ancestor. */
+const UNKNOWN_DEPTH = Number.MAX_SAFE_INTEGER;
+
+/**
+ * How many generations up `pid` is from this process: a number when it is a
+ * proven ancestor, null when it provably is not (an inherited env marker from
+ * an unrelated outer host), UNKNOWN_DEPTH when it cannot be told.
+ */
+export function ancestorDepth(
+  pidText: string | undefined,
+  self: number = process.pid
+): number | null {
+  const pid = pidText ? Number.parseInt(pidText, 10) : Number.NaN;
+  if (!Number.isFinite(pid) || !fs.existsSync(`/proc/${self}/stat`)) return UNKNOWN_DEPTH;
+  let current: number | null = self;
+  for (let depth = 0; depth < 64 && current !== null && current > 1; depth++) {
+    if (current === pid) return depth;
+    current = parentPid(current);
+  }
+  return null;
+}
+
 function openCodeSession(dbFile: string, cwd: string, nowMs: number): HostSession {
   const base: HostSession = { agent: 'opencode', session_id: null, model: null };
   const sqlite = loadNodeSqlite();
@@ -153,22 +275,26 @@ export interface DetectHostOptions {
 export function detectHostSession(opts: DetectHostOptions = {}): HostSession {
   const env = opts.env ?? process.env;
   try {
-    if (env.CLAUDECODE === '1' || env.CLAUDE_CODE === '1') {
+    // Child processes inherit BOTH hosts' markers (e.g. an opencode agent
+    // dispatched by a sched daemon started from a Claude Code shell), so pick
+    // the NEAREST host ancestor, not whichever marker is checked first.
+    const claudeDepth =
+      env.CLAUDECODE === '1' || env.CLAUDE_CODE === '1' ? ancestorDepth(env.CLAUDE_PID) : null;
+    const opencodeDepth = env.OPENCODE === '1' ? ancestorDepth(env.OPENCODE_PID) : null;
+    const useClaude =
+      claudeDepth !== null && (opencodeDepth === null || claudeDepth <= opencodeDepth);
+    if (useClaude) {
       const id = env.CLAUDE_CODE_SESSION_ID;
       if (!id || !CLAUDE_SESSION_RE.test(id)) {
         return { agent: 'claude-code', session_id: null, model: null };
       }
-      const transcript = findClaudeTranscript(
-        opts.claudeProjectsDir ?? defaultClaudeProjectsDir(env),
-        id
-      );
       return {
         agent: 'claude-code',
         session_id: id,
-        model: transcript ? lastAssistantModel(transcript) : null,
+        model: claudeHostModel(opts.claudeProjectsDir ?? defaultClaudeProjectsDir(env), id),
       };
     }
-    if (env.OPENCODE === '1') {
+    if (opencodeDepth !== null) {
       return openCodeSession(
         opts.opencodeDb ?? defaultOpenCodeDbPath(env),
         opts.cwd ?? process.cwd(),

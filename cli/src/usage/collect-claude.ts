@@ -125,7 +125,8 @@ function statusOf(record: Record<string, unknown>, text: string): number | null 
 export function collectClaude(opts: ClaudeCollectOptions): ClaudeCollectResult {
   const rows: UsageRow[] = [];
   const limits: LimitEvent[] = [];
-  const seen = new Set<string>();
+  // key → the row already emitted for that message (see the repeat handling below)
+  const seen = new Map<string, UsageRow>();
   const untilMs = opts.untilMs ?? Number.POSITIVE_INFINITY;
   const files = listClaudeTranscripts(opts.projectsDir, opts.sinceMs);
 
@@ -185,25 +186,36 @@ export function collectClaude(opts: ClaudeCollectOptions): ClaudeCollectResult {
         : typeof record.uuid === 'string'
           ? `uuid:${record.uuid}`
           : null;
-      if (key) {
-        if (seen.has(key)) return;
-        seen.add(key);
+      const input = count(usage.input_tokens);
+      const output = count(usage.output_tokens);
+      const cache_read = count(usage.cache_read_input_tokens);
+      const cache_write = count(usage.cache_creation_input_tokens);
+      const prior = key ? seen.get(key) : undefined;
+      if (prior) {
+        // A repeat line of an already-counted message. Earlier content-block
+        // lines carry a PARTIAL `output_tokens` (streaming); later ones the
+        // final count — so keep the max of each field, never the first line's.
+        prior.input = Math.max(prior.input, input);
+        prior.output = Math.max(prior.output, output);
+        prior.cache_read = Math.max(prior.cache_read, cache_read);
+        prior.cache_write = Math.max(prior.cache_write, cache_write);
+        return;
       }
 
       const cwd = typeof record.cwd === 'string' ? record.cwd : null;
       const branch =
         typeof record.gitBranch === 'string' && record.gitBranch ? record.gitBranch : null;
       const issue = issueFromRef(branch) ?? issueFromRef(cwd ? path.basename(cwd) : null);
-      rows.push({
+      const row: UsageRow = {
         ts,
         host: opts.host,
         provider: 'anthropic',
         model,
-        input: count(usage.input_tokens),
-        output: count(usage.output_tokens),
+        input,
+        output,
         reasoning: 0,
-        cache_read: count(usage.cache_read_input_tokens),
-        cache_write: count(usage.cache_creation_input_tokens),
+        cache_read,
+        cache_write,
         cost_usd: typeof record.costUSD === 'number' ? record.costUSD : null,
         source: 'claude-code',
         session_id,
@@ -216,7 +228,9 @@ export function collectClaude(opts: ClaudeCollectOptions): ClaudeCollectResult {
         issue_source: issue === null ? null : 'branch',
         batch: null,
         unit: null,
-      });
+      };
+      if (key) seen.set(key, row);
+      rows.push(row);
     });
   }
   return { rows, limits, files: files.length };

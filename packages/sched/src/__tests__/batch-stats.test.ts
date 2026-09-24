@@ -251,6 +251,12 @@ describe('dispatchPreambleCmd / modelFromCmd (#769)', () => {
     expect(
       dispatchPreambleCmd('{"type":"sched-dispatch","cmd":["claude","-p","--model","opus"]}\n{}')
     ).toEqual(['claude', '-p', '--model', 'opus']);
+    // append-mode log of a redispatched unit: the LAST preamble wins
+    expect(
+      dispatchPreambleCmd(
+        '{"type":"sched-dispatch","cmd":["claude","-p"]}\n{"x":1}\n{"type":"sched-dispatch","event":"spawned"}\n{"type":"sched-dispatch","cmd":["opencode","run","-m","openai/y"]}\n'
+      )
+    ).toEqual(['opencode', 'run', '-m', 'openai/y']);
   });
 
   it('extracts -m / --model / --model= and stops at the -- prompt separator', () => {

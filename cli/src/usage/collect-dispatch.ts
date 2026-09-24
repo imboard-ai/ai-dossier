@@ -19,7 +19,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
-import { dispatchPreambleCmd, modelFromCmd } from '@ai-dossier/sched';
+import { modelFromCmd, parsePreambleLine } from '@ai-dossier/sched';
 import type { LimitEvent, UsageRow } from './types';
 import { forEachLine, LIMIT_TEXT_RE, mtimeMs, oneLine, safeReaddir } from './util';
 
@@ -59,14 +59,44 @@ export function parseDispatchLogName(
   return null;
 }
 
-const SESSION_ID_RE =
-  /"(?:sessionID|session_id)"\s*:\s*"(ses_[A-Za-z0-9]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/g;
+/**
+ * Every agent session in a dispatch log, each with the model of the
+ * `sched-dispatch` preamble that precedes it (logs are append-mode: a
+ * redispatched unit holds several dispatches, possibly on different agents).
+ * Only a record's TOP-LEVEL `sessionID` (opencode) / `session_id` (claude)
+ * counts — a tool call's input or output that merely mentions another
+ * session id must not attribute that session to this unit.
+ */
+export function sessionsIn(content: string): { session_id: string; model: string | null }[] {
+  const found = new Map<string, string | null>();
+  let model: string | null = null;
+  for (const line of content.split('\n')) {
+    const cmd = parsePreambleLine(line);
+    if (cmd) {
+      model = modelFromCmd(cmd);
+      continue;
+    }
+    if (!line.includes('"sessionID"') && !line.includes('"session_id"')) continue;
+    let record: Record<string, unknown>;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const id = record.sessionID ?? record.session_id;
+    if (typeof id === 'string' && SESSION_ID_SHAPE.test(id) && !found.has(id)) {
+      found.set(id, model);
+    }
+  }
+  return [...found].map(([session_id, m]) => ({ session_id, model: m }));
+}
 
-/** Every distinct agent session id in a dispatch log (a redispatched unit's log holds several). */
+const SESSION_ID_SHAPE =
+  /^(?:ses_[A-Za-z0-9]+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+/** Session ids only — see {@link sessionsIn}. */
 export function sessionIdsIn(content: string): string[] {
-  const ids = new Set<string>();
-  for (const match of content.matchAll(SESSION_ID_RE)) ids.add(match[1]);
-  return [...ids];
+  return sessionsIn(content).map((s) => s.session_id);
 }
 
 function readBounded(file: string): string | null {
@@ -104,9 +134,7 @@ export function indexDispatchLogs(schedRoot: string, sinceMs: number): Map<strin
       if ((mtimeMs(log) ?? 0) < sinceMs) continue;
       const content = readBounded(log);
       if (!content) continue;
-      const cmd = dispatchPreambleCmd(content);
-      const model = cmd ? modelFromCmd(cmd) : null;
-      for (const session_id of sessionIdsIn(content)) {
+      for (const { session_id, model } of sessionsIn(content)) {
         index.set(session_id, { session_id, ...parsed, project: project.name, model, log });
       }
     }
@@ -123,10 +151,24 @@ export function indexDispatchLogs(schedRoot: string, sinceMs: number): Map<strin
  */
 export function applyDispatchIndex(rows: UsageRow[], index: Map<string, DispatchRef>): void {
   if (index.size === 0) return;
+  // session → parent, so a grandchild (a subagent's own subagent) still
+  // reaches the dispatched root.
+  const parentOf = new Map<string, string>();
+  for (const row of rows) {
+    if (row.parent_session_id) parentOf.set(row.session_id, row.parent_session_id);
+  }
+  const refFor = (session: string): DispatchRef | undefined => {
+    let current: string | undefined = session;
+    for (let depth = 0; current && depth < 16; depth++) {
+      const ref = index.get(current);
+      if (ref) return ref;
+      current = parentOf.get(current);
+    }
+    return undefined;
+  };
   for (const row of rows) {
     const ref =
-      index.get(row.session_id) ??
-      (row.parent_session_id ? index.get(row.parent_session_id) : undefined);
+      refFor(row.session_id) ?? (row.parent_session_id ? refFor(row.parent_session_id) : undefined);
     if (!ref) continue;
     row.unit = ref.unit;
     row.batch = ref.batch;

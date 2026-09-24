@@ -102,37 +102,48 @@ export function listBatchDispatchLogs(runsDir: string, batchId: string): BatchLo
   return entries;
 }
 
-/** How many leading lines of a dispatch log are searched for the `sched-dispatch` preamble. */
-const PREAMBLE_SCAN_LINES = 5;
-/** Most leading bytes searched for the preamble — it is a single short JSON line. */
-const PREAMBLE_SCAN_BYTES = 64 * 1024;
+/**
+ * The argv of one `{"type":"sched-dispatch","cmd":[...]}` preamble line, or
+ * null for any other line (including the `event:"spawned"` follow-up, which
+ * carries no `cmd`). Only a non-empty all-string `cmd` array counts.
+ */
+export function parsePreambleLine(line: string): string[] | null {
+  if (!line.includes(`"${SCHED_DISPATCH_EVENT}"`)) return null;
+  try {
+    const parsed = JSON.parse(line) as { type?: unknown; cmd?: unknown };
+    if (
+      parsed.type === SCHED_DISPATCH_EVENT &&
+      Array.isArray(parsed.cmd) &&
+      parsed.cmd.length > 0 &&
+      parsed.cmd.every((part) => typeof part === 'string')
+    ) {
+      return parsed.cmd as string[];
+    }
+  } catch {
+    // truncated/partial line
+  }
+  return null;
+}
 
 /**
- * The spawned argv recorded in a dispatch log's `{"type":"sched-dispatch","cmd":[...]}`
- * preamble (written by `createSpawnDeps` at spawn), or null when the log has
- * none — a pre-preamble log, or one whose head was cut by `readDispatchLog`'s
- * bounded window. Only a non-empty all-string `cmd` array counts.
+ * The spawned argv of the LAST dispatch recorded in a log — each spawn opens
+ * with a `sched-dispatch` preamble (written by `createSpawnDeps`), and logs
+ * are append-mode, so a redispatched unit (e.g. retried on a fallback agent,
+ * #629) holds several; the newest one describes the stream the parsers read
+ * the final result from. Null when the log has none (a pre-preamble log, or
+ * one whose head was cut by `readDispatchLog`'s bounded window).
  */
 export function dispatchPreambleCmd(logContent: string | null): string[] | null {
   if (!logContent) return null;
-  const head = logContent.slice(0, PREAMBLE_SCAN_BYTES).split('\n', PREAMBLE_SCAN_LINES);
-  for (const line of head) {
-    if (!line.includes(`"${SCHED_DISPATCH_EVENT}"`)) continue;
-    try {
-      const parsed = JSON.parse(line) as { type?: unknown; cmd?: unknown };
-      if (
-        parsed.type === SCHED_DISPATCH_EVENT &&
-        Array.isArray(parsed.cmd) &&
-        parsed.cmd.length > 0 &&
-        parsed.cmd.every((part) => typeof part === 'string')
-      ) {
-        return parsed.cmd as string[];
-      }
-    } catch {
-      // A truncated/partial preamble line — keep scanning, then fall back.
-    }
+  const marker = `{"type":"${SCHED_DISPATCH_EVENT}"`;
+  let last: string[] | null = null;
+  for (let at = logContent.indexOf(marker); at !== -1; at = logContent.indexOf(marker, at + 1)) {
+    if (at > 0 && logContent[at - 1] !== '\n') continue; // only whole preamble lines
+    const end = logContent.indexOf('\n', at);
+    const cmd = parsePreambleLine(logContent.slice(at, end === -1 ? undefined : end));
+    if (cmd) last = cmd;
   }
-  return null;
+  return last;
 }
 
 /**

@@ -465,7 +465,11 @@ export function registerUsageCommand(program: Command): void {
     .option('--top <n>', 'How many top sessions to list', '10')
     .option('--limit-window <duration>', 'Look-back used to explain each limit event', '5h')
     .option('--json', 'Output JSON')
-    .action((opts: WindowOptions) => {
+    .action((_opts: WindowOptions, command: Command) => {
+      // optsWithGlobals: without positional options on the root program,
+      // Commander hands `--json`/`--provider`/`--source` given after `window`
+      // to the parent `usage` command (which defines the same flags).
+      const opts = command.optsWithGlobals<WindowOptions>();
       const report = buildWindowReport(opts);
       console.log(opts.json ? JSON.stringify(report, null, 2) : renderWindowReport(report));
     });
@@ -479,7 +483,10 @@ export function registerUsageCommand(program: Command): void {
     .option('--top <n>', 'How many top sessions to list', '10')
     .option('--interval <duration>', 'Refresh interval', '30s')
     .option('--iterations <n>', 'Stop after this many renders (default: until interrupted)')
-    .action(async (opts: WindowOptions & { interval?: string; iterations?: string }) => {
+    .action(async (_opts: WindowOptions, command: Command) => {
+      const opts = command.optsWithGlobals<
+        WindowOptions & { interval?: string; iterations?: string }
+      >();
       const intervalMs = parseDurationSpec(opts.interval ?? '30s');
       if (intervalMs === null) fail([`--interval must be a duration (got '${opts.interval}')`]);
       const max = opts.iterations ? Number.parseInt(opts.iterations, 10) : Number.POSITIVE_INFINITY;

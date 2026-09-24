@@ -25,6 +25,7 @@ import {
   parseDispatchLogName,
   providerFromText,
   sessionIdsIn,
+  sessionsIn,
 } from '../usage/collect-dispatch';
 import {
   collectOpenCode,
@@ -34,7 +35,13 @@ import {
   type OpenCodeSession,
   openOpenCodeDb,
 } from '../usage/collect-opencode';
-import { detectHostSession, findClaudeTranscript, lastAssistantModel } from '../usage/host-session';
+import {
+  ancestorDepth,
+  detectHostSession,
+  findClaudeTranscript,
+  hasPendingDossierRun,
+  lastAssistantModel,
+} from '../usage/host-session';
 import {
   collapseLimitEvents,
   groupRows,
@@ -119,7 +126,7 @@ function claudeFixture(root: string): string {
   write(path.join(slugDir, `${SESSION}.jsonl`), [
     { type: 'user', timestamp: iso(90 * MIN), message: { role: 'user', content: 'go' } },
     // same message written twice (one line per content block) — must count once
-    assistant({ ts: iso(60 * MIN), id: 'a1', session: SESSION }),
+    assistant({ ts: iso(60 * MIN), id: 'a1', session: SESSION, output: 3 }),
     assistant({ ts: iso(60 * MIN), id: 'a1', session: SESSION }),
     assistant({ ts: iso(30 * MIN), id: 'a2', session: SESSION, model: 'claude-fable-5-1' }),
     // out of a 5h window
@@ -258,6 +265,7 @@ describe('collectClaude', () => {
       project: 'ai-dossier',
       host: 'h1',
     });
+    // the first (partial, output 3) line of msg a1 is superseded by the final count
     const main = rows.find((r) => r.model === 'claude-opus-5-5');
     expect(main).toMatchObject({ input: 10, output: 20, cache_read: 1000, cache_write: 100 });
     expect(limits).toHaveLength(1);
@@ -373,6 +381,19 @@ describe('collectOpenCode', () => {
     expect(fs.readFileSync(dbFile).equals(before)).toBe(true);
   });
 
+  it.skipIf(!sqlite)(
+    'reports a store with an unexpected schema as an error instead of throwing',
+    () => {
+      const dbFile = path.join(tmpDir(), 'other.db');
+      // biome-ignore lint/style/noNonNullAssertion: guarded by skipIf
+      const db = new sqlite!.DatabaseSync(dbFile);
+      db.prepare('CREATE TABLE unrelated (x integer)').all();
+      db.close();
+      const res = openOpenCodeDb(dbFile);
+      expect(res.status).toBe('error');
+    }
+  );
+
   it('reports a missing database / missing node:sqlite as unavailable instead of throwing', () => {
     expect(openOpenCodeDb(path.join(tmpDir(), 'nope.db')).status).toBe('unavailable');
     const file = path.join(tmpDir(), 'exists.db');
@@ -441,12 +462,32 @@ describe('dispatch attribution', () => {
     expect(parseDispatchLogName('notes.txt')).toBeNull();
   });
 
-  it('extracts only unescaped session-id keys', () => {
+  it('extracts only top-level session ids, each with its own dispatch model', () => {
     expect(sessionIdsIn('{"sessionID":"ses_A1"}\n{"x":"{\\"sessionID\\":\\"ses_B2\\"}"}')).toEqual([
       'ses_A1',
     ]);
+    // a tool call's input naming another session is not this unit's session
+    expect(
+      sessionIdsIn(
+        JSON.stringify({
+          type: 'assistant',
+          message: { content: [{ type: 'tool_use', input: { session_id: SESSION } }] },
+        })
+      )
+    ).toEqual([]);
+    const log = [
+      { type: 'sched-dispatch', cmd: ['claude', '-p', '--model', 'opus'] },
+      { type: 'system', subtype: 'init', session_id: SESSION },
+      { type: 'sched-dispatch', cmd: ['opencode', 'run', '-m', 'openai/gpt-5.6-luna'] },
+      { type: 'step_start', sessionID: 'ses_retry' },
+    ]
+      .map((l) => JSON.stringify(l))
+      .join('\n');
+    expect(sessionsIn(log)).toEqual([
+      { session_id: SESSION, model: 'opus' },
+      { session_id: 'ses_retry', model: 'openai/gpt-5.6-luna' },
+    ]);
   });
-
   it('indexes sessions → unit/batch/model and stamps rows (children inherit)', () => {
     const schedRoot = schedFixture(tmpDir());
     const index = indexDispatchLogs(schedRoot, 0);
@@ -481,6 +522,7 @@ describe('dispatch attribution', () => {
       { ...base, session_id: 'ses_member', parent_session_id: null, model: null },
       { ...base, session_id: 'ses_kid', parent_session_id: 'ses_member', model: 'openai/x' },
       { ...base, session_id: 'ses_unrelated', parent_session_id: null, model: 'openai/x' },
+      { ...base, session_id: 'ses_grandkid', parent_session_id: 'ses_kid', model: 'openai/x' },
     ];
     applyDispatchIndex(rows, index);
     expect(rows[0]).toMatchObject({
@@ -491,6 +533,7 @@ describe('dispatch attribution', () => {
     });
     expect(rows[1]).toMatchObject({ issue: 4360, unit: 'issue:4360', model: 'openai/x' });
     expect(rows[2]).toMatchObject({ issue: 999, issue_source: 'branch', unit: null });
+    expect(rows[3]).toMatchObject({ issue: 4360, batch: 'b-20260920-01' });
   });
 
   it('collects only limit-shaped sched failures, inferring the provider from the text', () => {
@@ -613,19 +656,73 @@ describe('aggregation', () => {
 });
 
 describe('host session (#769 fix at the source)', () => {
-  it('resolves Claude Code session + newest assistant model from the transcript', () => {
+  it('picks the transcript with the pending `ai-dossier run` call among concurrent subagents', () => {
     const projectsDir = claudeFixture(tmpDir());
-    const transcript = findClaudeTranscript(projectsDir, SESSION);
-    expect(transcript).not.toBeNull();
-    // biome-ignore lint/style/noNonNullAssertion: asserted above
-    expect(lastAssistantModel(transcript!)).toMatch(/^claude-/);
-    const host = detectHostSession({
-      env: { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: SESSION },
-      claudeProjectsDir: projectsDir,
+    expect(findClaudeTranscript(projectsDir, SESSION)).not.toBeNull();
+    const env = { CLAUDECODE: '1', CLAUDE_CODE_SESSION_ID: SESSION };
+    // main (fable last) and subagent (sonnet) are equally recent and disagree → null, not a guess
+    expect(detectHostSession({ env, claudeProjectsDir: projectsDir })).toEqual({
+      agent: 'claude-code',
+      session_id: SESSION,
+      model: null,
     });
-    expect(host.agent).toBe('claude-code');
-    expect(host.session_id).toBe(SESSION);
-    expect(host.model).toMatch(/^claude-/);
+    // the subagent issues `ai-dossier run …` and its tool_result is not written yet → it is the caller
+    const sub = path.join(
+      projectsDir,
+      '-home-u-projects-ai-dossier',
+      SESSION,
+      'subagents',
+      'agent-abc123.jsonl'
+    );
+    const call = assistant({
+      ts: iso(MIN),
+      id: 's2',
+      session: SESSION,
+      agentId: 'abc123',
+      model: 'claude-sonnet-5',
+    });
+    (call.message as { content: unknown }).content = [
+      {
+        type: 'tool_use',
+        id: 'toolu_1',
+        name: 'Bash',
+        input: { command: 'ai-dossier run imboard-ai/git/x' },
+      },
+    ];
+    fs.appendFileSync(sub, `${JSON.stringify(call)}\n`);
+    fs.utimesSync(sub, NOW / 1000, NOW / 1000);
+    expect(hasPendingDossierRun(sub)).toBe(true);
+    expect(detectHostSession({ env, claudeProjectsDir: projectsDir }).model).toBe(
+      'claude-sonnet-5'
+    );
+    // once answered, it is no longer pending
+    fs.appendFileSync(
+      sub,
+      `${JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1' }] } })}\n`
+    );
+    expect(hasPendingDossierRun(sub)).toBe(false);
+  });
+
+  it('prefers the nearest host ancestor when both host markers are inherited', () => {
+    const selfDepth = ancestorDepth(String(process.pid));
+    expect(selfDepth === 0 || selfDepth === Number.MAX_SAFE_INTEGER).toBe(true);
+    expect(ancestorDepth(undefined)).toBe(Number.MAX_SAFE_INTEGER);
+    if (fs.existsSync('/proc/self/stat')) {
+      expect(ancestorDepth(String(process.ppid))).toBe(1);
+      // a pid that is not our ancestor → the marker was inherited from an unrelated host
+      expect(ancestorDepth('999999999')).toBeNull();
+      const host = detectHostSession({
+        env: {
+          CLAUDECODE: '1',
+          CLAUDE_CODE_SESSION_ID: SESSION,
+          CLAUDE_PID: '999999999',
+          OPENCODE: '1',
+          OPENCODE_PID: String(process.ppid),
+        },
+        opencodeDb: path.join(tmpDir(), 'none.db'),
+      });
+      expect(host.agent).toBe('opencode');
+    }
   });
 
   it('skips synthetic models and returns nulls outside an agent host', () => {

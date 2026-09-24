@@ -53,6 +53,9 @@ export function defaultOpenCodeDbPath(env: NodeJS.ProcessEnv = process.env): str
   return path.join(dataHome, 'opencode', 'opencode.db');
 }
 
+/** How far before the window start messages are read (a long-running message completes later than it is created). */
+const MESSAGE_SLACK_MS = 60 * 60 * 1000;
+
 interface SqliteStatement {
   all(...params: unknown[]): unknown[];
 }
@@ -68,7 +71,20 @@ type SqliteModule = {
 export function loadNodeSqlite(): SqliteModule | null {
   try {
     // Lazy: a static import would crash the whole CLI on Node 20.
-    return require('node:sqlite') as SqliteModule;
+    // Node 22.13–22.x still emits an ExperimentalWarning on first load; it
+    // would land on stderr of every `ai-dossier run` inside opencode. Drop
+    // just that one warning while loading.
+    const emit = process.emitWarning;
+    process.emitWarning = ((warning: string | Error, ...rest: unknown[]) => {
+      const text = typeof warning === 'string' ? warning : warning.message;
+      if (/sqlite/i.test(text)) return;
+      return (emit as (...a: unknown[]) => void).call(process, warning, ...rest);
+    }) as typeof process.emitWarning;
+    try {
+      return require('node:sqlite') as SqliteModule;
+    } finally {
+      process.emitWarning = emit;
+    }
   } catch {
     return null;
   }
@@ -92,17 +108,29 @@ export function openOpenCodeDb(
   } catch (err) {
     return { status: 'error', detail: `cannot open ${dbFile}: ${(err as Error).message}` };
   }
-  const sessions = db.prepare(
-    'SELECT id, parent_id, directory, title FROM session WHERE time_updated >= ?'
-  );
-  const messages = db.prepare(
-    'SELECT id, time_created, data FROM message WHERE session_id = ? AND time_created >= ? ORDER BY time_created'
-  );
+  let sessions: SqliteStatement;
+  let messages: SqliteStatement;
+  try {
+    sessions = db.prepare(
+      'SELECT id, parent_id, directory, title FROM session WHERE time_updated >= ?'
+    );
+    // `time_created` bound is widened by MESSAGE_SLACK_MS: a row's timestamp is
+    // its COMPLETION time, so a message created just before the window and
+    // completed inside it must still be read; the collector re-filters exactly.
+    messages = db.prepare(
+      'SELECT id, time_created, data FROM message WHERE session_id = ? AND time_created >= ? ORDER BY time_created'
+    );
+  } catch (err) {
+    // Not an opencode store of the expected shape (other version / wrong file).
+    db.close();
+    return { status: 'error', detail: `unexpected schema in ${dbFile}: ${(err as Error).message}` };
+  }
   return {
     status: 'ok',
     reader: {
       sessionsUpdatedSince: (sinceMs) => sessions.all(sinceMs) as OpenCodeSession[],
-      messagesSince: (sessionId, sinceMs) => messages.all(sessionId, sinceMs) as OpenCodeMessage[],
+      messagesSince: (sessionId, sinceMs) =>
+        messages.all(sessionId, sinceMs - MESSAGE_SLACK_MS) as OpenCodeMessage[],
       close: () => db.close(),
     },
   };
