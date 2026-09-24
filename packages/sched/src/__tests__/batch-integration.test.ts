@@ -4158,3 +4158,167 @@ describe('#809: parallel member dispatch', () => {
     expect(findBatch(h.state(), 'b-stop')?.member_runs.every((r) => r.torn_down)).toBe(true);
   }, 60_000);
 });
+
+/**
+ * #791: `reconcileKeptWorktrees`'s own harness — a `done` batch takes no
+ * branch in `runBatchTick`'s main per-batch loop (it is neither `executing`,
+ * `reviewing`/`shipping`, nor `fixing`), so `groundTruth`/`spawnDeps`/
+ * `runSuite` never need to be real; only `exec` (for the pool status query)
+ * and `fsExists` (for the on-disk check) are exercised.
+ */
+function keptWorktreeReconcileHarness() {
+  const store = new SchedStore(tmpDir('sched-kept-wt-'));
+  const journal = new Journal(store.dir);
+  const now = new Date('2026-09-24T12:00:00.000Z');
+  store.withLock(() => ({
+    state: { ...createEmptyState(), batches: [createBatch('b-kept', [901], now)] },
+    result: undefined,
+  }));
+
+  let execImpl: ExecFn = () => null;
+  const execCalls: Array<{ file: string; args: string[] }> = [];
+  let fsExistsImpl: (p: string) => boolean = () => true;
+
+  const config: SchedConfig = { max_slots: 1 };
+  const dispatch = resolveDispatch(config);
+  const deps: BatchDispatchDeps = {
+    store,
+    journal,
+    groundTruth: stubGroundTruth(),
+    spawnDeps: {
+      spawn: () => {
+        throw new Error('must not spawn in this test');
+      },
+      kill: () => true,
+      isAlive: () => true,
+      processStart: () => null,
+    },
+    now: () => now,
+    repoDir: store.dir,
+    exec: (file, args, cwd) => {
+      execCalls.push({ file, args });
+      return execImpl(file, args, cwd);
+    },
+    fsExists: (p) => fsExistsImpl(p),
+    runSuite: () => {
+      throw new Error('must not run the aggregate suite in this test');
+    },
+  };
+
+  return {
+    store,
+    execCalls,
+    setExec: (fn: ExecFn) => {
+      execImpl = fn;
+    },
+    setFsExists: (fn: (p: string) => boolean) => {
+      fsExistsImpl = fn;
+    },
+    /** Patches `b-kept` directly (bypasses the legal-transition table — this harness only cares about the `done` ledger fields #791 reads). */
+    patch: (patch: Record<string, unknown>) => {
+      store.withLock((s) => ({
+        state: {
+          ...s,
+          batches: s.batches.map((b) => (b.id === 'b-kept' ? { ...b, ...patch } : b)),
+        },
+        result: undefined,
+      }));
+    },
+    batch: () => findBatch(store.load(), 'b-kept'),
+    events: () => readJsonl(path.join(store.dir, 'events.jsonl')),
+    tick: () => runBatchTick(deps, config, dispatch),
+  };
+}
+
+describe("#791: reconcileKeptWorktrees clears a done batch's kept-worktree ledger fields on definitive evidence", () => {
+  it('clears `worktree`/`pool_claimed` once the path no longer exists on disk', () => {
+    const h = keptWorktreeReconcileHarness();
+    h.patch({ status: 'done', worktree: '/gone/worktree', pool_claimed: false });
+    h.setFsExists((p) => p !== '/gone/worktree');
+
+    h.tick();
+
+    const b = h.batch();
+    expect(b?.worktree).toBeNull();
+    expect(b?.pool_claimed).toBe(false);
+    const cleared = h.events().filter((e) => e.event === 'kept-worktree-cleared');
+    expect(cleared).toHaveLength(1);
+    expect(String(cleared[0].detail ?? '')).toContain('worktree');
+  });
+
+  it('clears `member_worktree`/`member_pool_claimed` independently of `worktree`', () => {
+    const h = keptWorktreeReconcileHarness();
+    h.patch({
+      status: 'done',
+      worktree: '/still/there',
+      pool_claimed: false,
+      member_worktree: '/gone/member-worktree',
+      member_pool_claimed: false,
+    });
+    h.setFsExists((p) => p !== '/gone/member-worktree');
+
+    h.tick();
+
+    const b = h.batch();
+    expect(b?.worktree).toBe('/still/there'); // untouched — it still exists
+    expect(b?.member_worktree).toBeNull();
+    expect(b?.member_pool_claimed).toBe(false);
+  });
+
+  it('clears a pool-claimed worktree once the pool itself reports it returned (warm) — never from disk state alone', () => {
+    const h = keptWorktreeReconcileHarness();
+    h.patch({ status: 'done', worktree: '/pool/worktree', pool_claimed: true });
+    h.setFsExists(() => true); // still ON DISK — pool evidence alone must be enough
+    h.setExec((file, args) => {
+      if (file === 'npx' && args.includes('status')) {
+        return JSON.stringify({ worktrees: [{ path: '/pool/worktree', status: 'warm' }] });
+      }
+      return null;
+    });
+
+    h.tick();
+
+    const b = h.batch();
+    expect(b?.worktree).toBeNull();
+    expect(b?.pool_claimed).toBe(false);
+  });
+
+  it('negative case: keeps the fields when the path exists and the pool does not show it returned', () => {
+    const h = keptWorktreeReconcileHarness();
+    h.patch({ status: 'done', worktree: '/pool/worktree', pool_claimed: true });
+    h.setFsExists(() => true);
+    h.setExec((file, args) => {
+      if (file === 'npx' && args.includes('status')) {
+        return JSON.stringify({ worktrees: [{ path: '/pool/worktree', status: 'assigned' }] });
+      }
+      return null;
+    });
+
+    h.tick();
+
+    const b = h.batch();
+    expect(b?.worktree).toBe('/pool/worktree');
+    expect(b?.pool_claimed).toBe(true);
+    expect(h.events().filter((e) => e.event === 'kept-worktree-cleared')).toHaveLength(0);
+  });
+
+  it('a non-done batch is never touched, and a done batch with no kept worktree costs zero exec calls', () => {
+    const h = keptWorktreeReconcileHarness();
+    h.patch({ status: 'executing', worktree: '/still/executing', pool_claimed: true });
+    h.tick();
+    expect(h.batch()?.worktree).toBe('/still/executing');
+    expect(h.execCalls).toHaveLength(0);
+  });
+
+  it('the reconcile never invokes a destructive git/worktree/pool command — only `worktree-pool status` (read-only)', () => {
+    const h = keptWorktreeReconcileHarness();
+    h.patch({ status: 'done', worktree: '/pool/worktree', pool_claimed: true });
+    h.setExec(() => JSON.stringify({ worktrees: [] }));
+    h.tick();
+    const DESTRUCTIVE = /\bremove\b|\bgc\b|\bclean\b|\breset\b|\bcheckout\b|\bprune\b/;
+    for (const call of h.execCalls) {
+      expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
+    }
+    expect(h.execCalls.some((c) => c.args.includes('status'))).toBe(true);
+  });
+});

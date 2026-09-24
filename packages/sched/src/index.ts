@@ -296,8 +296,14 @@ export {
 } from './state';
 export {
   type BlockedItem,
+  buildKeptWorktreeWarnings,
   buildStatusReport,
   buildStatusWarnings,
+  defaultKeptWorktreeReader,
+  KEPT_WORKTREE_PROBE_LIMIT,
+  type KeptWorktreeCandidate,
+  type KeptWorktreeReader,
+  keptWorktreeCandidates,
   type ParkedItem,
   type ParkedMemberItem,
   STATUS_HEALTH_WARNING_AGE_MS,
@@ -305,7 +311,17 @@ export {
   type StatusWarning,
   type StatusWarningKind,
 } from './status';
-export { isSafeWorktree, runTeardown, TEARDOWN_TIMEOUT_MS, type TeardownResult } from './teardown';
+export {
+  defaultFsExists,
+  type FsExists,
+  isSafeWorktree,
+  POOL_ARGS_PREFIX,
+  POOL_BIN,
+  poolEntryFor,
+  runTeardown,
+  TEARDOWN_TIMEOUT_MS,
+  type TeardownResult,
+} from './teardown';
 export {
   type AttributionMethod,
   BATCH_PHASES,

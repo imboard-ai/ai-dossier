@@ -38,6 +38,7 @@ import {
   DISPATCH_PROFILE_RE,
   DispatchProfileError,
   defaultExec,
+  defaultKeptWorktreeReader,
   dispatchSummary,
   type EngineDeps,
   EngineTooOldError,
@@ -51,6 +52,7 @@ import {
   IllegalTransitionError,
   issueCloseReader,
   Journal,
+  type KeptWorktreeReader,
   LIVE_SLOT_STATUSES,
   LockTimeoutError,
   labelBlockReason,
@@ -336,9 +338,10 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
       `⚠ Last tick failed at ${report.last_tick_failure.at}: ${report.last_tick_failure.detail}`
     );
   }
-  // #776: health warnings (long pause, stale engine lease, stuck or
-  // stale-closed slots), each with the exact remedy — near the top, where
-  // they cannot be missed under a long queue table.
+  // #776/#791: health warnings (long pause, stale engine lease, stuck or
+  // stale-closed slots, kept worktrees on done batches), each with the exact
+  // remedy — near the top, where they cannot be missed under a long queue
+  // table.
   for (const warning of report.warnings) {
     lines.push(`⚠ ${warning.message} → ${warning.remedy}`);
   }
@@ -630,6 +633,34 @@ function anchorSweepFor(project: string): Parameters<typeof buildStatusReport>[5
       SAFE_REF_RE.test(base) &&
       exec('git', ['merge-base', '--is-ancestor', oid, `origin/${base}`], process.cwd()) !== null,
   };
+}
+
+/**
+ * An `ExecFn` that reports its own failures to stderr with `label` — the same
+ * `createExecFn(timeout, { onError: ... })` shape used at every other
+ * subprocess call site in this file (`anchorSweepFor`, the teardown/fence/
+ * batch-warm execs in `registerStartSubcommand`), pulled out once so a new
+ * caller (#791's `keptWorktreeReaderFor`) does not add an eighth copy.
+ */
+function labelledExecFn(label: string, timeoutMs: number): ExecFn {
+  return createExecFn(timeoutMs, {
+    onError: (file, args, err) =>
+      process.stderr.write(`⚠ ${label}: '${file} ${args.join(' ')}' failed: ${err.message}\n`),
+  });
+}
+
+/** Per-call budget for #791's kept-worktree probes — local-only, but bounded so `status` never hangs on a wedged worktree. */
+const KEPT_WORKTREE_TIMEOUT_MS = 5_000;
+
+/**
+ * `sched status`'s #791 kept-worktree reader — local `git status --porcelain`
+ * / `git log HEAD --not --remotes` only, no network and no `gh` call, so
+ * (unlike `--anchors`) it runs by default, not behind a flag.
+ */
+function keptWorktreeReaderFor(): KeptWorktreeReader {
+  return defaultKeptWorktreeReader(
+    labelledExecFn('sched kept-worktree check', KEPT_WORKTREE_TIMEOUT_MS)
+  );
 }
 
 /** One `== Open batch anchors ==` row (#768): the anchor, its verdict and why, then its members. */
@@ -1246,7 +1277,9 @@ function registerStatusSubcommand(cmd: Command): void {
           project,
           store.engineLeaseStatus(),
           new Date(),
-          opts.anchors === true ? anchorSweepFor(project) : undefined
+          opts.anchors === true ? anchorSweepFor(project) : undefined,
+          // #791: local git only, no network — runs by default, unlike --anchors.
+          keptWorktreeReaderFor()
         );
         // Cache-only (#537): `status` is a fast, offline-friendly diagnostic
         // — it reads whatever `sched start` last cached rather than risking

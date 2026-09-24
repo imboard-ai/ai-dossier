@@ -6,6 +6,7 @@
  * utilities.
  */
 
+import * as fs from 'node:fs';
 import {
   type AnchorReportItem,
   type CommitInBase,
@@ -20,6 +21,7 @@ import {
 } from './dispatch';
 import { batchOfUnit } from './journal';
 import type { EngineLeaseStatus } from './persist';
+import type { ExecFn } from './project';
 import {
   batchBlockers,
   DISPATCHABLE_ISSUE_STATUSES,
@@ -28,6 +30,7 @@ import {
 } from './readiness';
 import { DISSOLVE_REFUSED_PREFIX } from './recovery';
 import { distinctEvictions, PARKED_MEMBER_STATUSES, validatedMembersOf } from './state';
+import { defaultFsExists, type FsExists, POOL_ARGS_PREFIX, POOL_BIN } from './teardown';
 import type {
   BatchEntry,
   DispatchProfileSource,
@@ -141,8 +144,13 @@ function dissolveRefusedNote(state: SchedState, batch: BatchEntry): string {
  */
 export const STATUS_HEALTH_WARNING_AGE_MS = 24 * 60 * 60 * 1000;
 
-/** The kinds of health warning `sched status` raises (#776). */
-export type StatusWarningKind = 'long-pause' | 'stale-engine-lease' | 'stuck-slot' | 'stale-closed';
+/** The kinds of health warning `sched status` raises (#776, plus #791's `kept-worktree`). */
+export type StatusWarningKind =
+  | 'long-pause'
+  | 'stale-engine-lease'
+  | 'stuck-slot'
+  | 'stale-closed'
+  | 'kept-worktree';
 
 /**
  * A condition an operator must act on (#776): the 2026-09-24 incident was a
@@ -159,6 +167,8 @@ export interface StatusWarning {
   issue?: number;
   /** The slot the warning is about, when it is about one. */
   slot?: number;
+  /** The batch the warning is about, when it is about one (#791: batch ids are strings, unlike `issue`/`slot`). */
+  batch?: string;
 }
 
 /** Machine-readable status report (`sched status --json`). */
@@ -229,7 +239,10 @@ export interface StatusReport {
   blocked: BlockedItem[];
   failed: QueueEntry[];
   stopped: QueueEntry[];
-  /** Health warnings (#776) — empty when nothing needs an operator. */
+  /**
+   * Health warnings (#776), plus #791's `kept-worktree` when a reader was
+   * supplied — empty when nothing needs an operator.
+   */
   warnings: StatusWarning[];
   /**
    * #768 anchor sweep (report-only, `sched status --anchors`): every
@@ -336,6 +349,270 @@ export function buildStatusWarnings(
   return warnings;
 }
 
+// --- #791: kept-worktree warning ---
+//
+// #768's `members-closed` reconcile keeps a `done` batch's worktree on disk
+// (may hold unpushed operator work) but never surfaced it; this section adds
+// that visibility, report-only. Deliberately a SEPARATE function from
+// `buildStatusWarnings` above (which stays pure over state + lease + clock)
+// since this one needs local git/fs reads — mirrors `anchorSweep`'s
+// injectable, opt-in-by-omission shape in `buildStatusReport` below.
+// `reconcileKeptWorktrees` (`batch-dispatch.ts`) clears the ledger fields on
+// definitive evidence, so the warning does not persist forever.
+
+/** One `done` batch's kept worktree (#791) — either the shared batch worktree or the current member's own. */
+export interface KeptWorktreeCandidate {
+  batch: string;
+  /** Which `BatchEntry` field this candidate came from — `worktree` (shared) or `member_worktree` (current member, #677). */
+  field: 'worktree' | 'member_worktree';
+  path: string;
+  poolClaimed: boolean;
+}
+
+/**
+ * Every `done` batch whose `worktree` or `member_worktree` is still set in
+ * the ledger (#791) — pure over state, exactly like `buildStatusWarnings`.
+ * A candidate is skipped when its path is ALSO held by a non-`done` (still
+ * in-flight) batch: a pool worktree the operator already returned can be
+ * re-claimed by a fresh batch before the done batch's own ledger field is
+ * cleared, and warning about a path a live batch is actively using is worse
+ * than not warning at all — it tells the operator to remove/return a
+ * worktree that is in use. Naturally bounded beyond that: only `done`
+ * batches are considered, and in practice very few ever carry a kept
+ * worktree (only the `members-closed` reconcile path leaves one).
+ */
+export function keptWorktreeCandidates(state: SchedState): KeptWorktreeCandidate[] {
+  const inFlightPaths = new Set<string>();
+  for (const batch of state.batches) {
+    if (batch.status === 'done') continue;
+    if (batch.worktree !== null) inFlightPaths.add(batch.worktree);
+    if (batch.member_worktree !== null) inFlightPaths.add(batch.member_worktree);
+  }
+
+  const candidates: KeptWorktreeCandidate[] = [];
+  for (const batch of state.batches) {
+    if (batch.status !== 'done') continue;
+    if (batch.worktree !== null && !inFlightPaths.has(batch.worktree)) {
+      candidates.push({
+        batch: batch.id,
+        field: 'worktree',
+        path: batch.worktree,
+        poolClaimed: batch.pool_claimed,
+      });
+    }
+    if (batch.member_worktree !== null && !inFlightPaths.has(batch.member_worktree)) {
+      candidates.push({
+        batch: batch.id,
+        field: 'member_worktree',
+        path: batch.member_worktree,
+        poolClaimed: batch.member_pool_claimed,
+      });
+    }
+  }
+  return candidates;
+}
+
+/**
+ * Local, read-only facts about a kept worktree (#791) — injectable so tests
+ * never touch a real filesystem or spawn a real `git`. The default
+ * implementation ({@link defaultKeptWorktreeReader}) is the only place that
+ * runs a real command, and it runs at most three, all read-only: `git
+ * rev-parse --show-toplevel` (containment check), `git --no-optional-locks
+ * status --porcelain`, and `git log HEAD --not --remotes`. Nothing in this
+ * package ever builds a `git worktree remove` / `worktree-pool return` argv
+ * from this reader — the remedy text is a string for a human to run by hand.
+ */
+export interface KeptWorktreeReader {
+  /** Whether `path` still exists on disk. */
+  exists: (path: string) => boolean;
+  /**
+   * Whether `path` (an existing worktree) has uncommitted changes or
+   * commits not on any remote branch. `true` = dirty/unpushed (unsafe to
+   * remove), `false` = clean and fully pushed (safe to remove), `null` =
+   * the check could not be trusted — the git probe itself failed (path not
+   * a repo, git missing, timeout), OR `path` is no longer its own worktree
+   * root (pruned, or reused by something else — see `defaultKeptWorktreeReader`)
+   * — reported as `unknown`, never guessed.
+   */
+  hasLocalWork: (path: string) => boolean | null;
+}
+
+/**
+ * The real {@link KeptWorktreeReader}: `exec`/`fsExists` follow the same
+ * injectable conventions as the rest of the package (`project.ts`'s
+ * `ExecFn`, `teardown.ts`'s `FsExists`) so the CLI wires in a real,
+ * bounded-timeout `git`/`fs` and every test wires in a spy instead.
+ */
+export function defaultKeptWorktreeReader(
+  exec: ExecFn,
+  fsExists: FsExists = defaultFsExists
+): KeptWorktreeReader {
+  return {
+    exists: fsExists,
+    hasLocalWork: (worktreePath) => {
+      // Containment: a kept path that is no longer its OWN worktree root —
+      // pruned by `git worktree prune`, or its directory reused for
+      // something else entirely — must never report the status of whatever
+      // repo git happens to find by walking up from it (#791 supportability
+      // review finding 3). `git rev-parse --show-toplevel` from inside a
+      // non-worktree directory still finds an ENCLOSING repo (this one, if
+      // the path is under it), so the toplevel must match `worktreePath`
+      // itself, not merely resolve to something.
+      const toplevel = exec('git', ['rev-parse', '--show-toplevel'], worktreePath);
+      if (toplevel === null) return null;
+      let resolvedTarget: string;
+      let resolvedToplevel: string;
+      try {
+        resolvedTarget = fs.realpathSync(worktreePath);
+        resolvedToplevel = fs.realpathSync(toplevel);
+      } catch {
+        return null;
+      }
+      if (resolvedTarget !== resolvedToplevel) return null;
+
+      // `--no-optional-locks`: this worktree may be the operator's own
+      // in-progress repair work (the entire reason #768 kept it) — a plain
+      // `git status` can contend for `index.lock` with a concurrent `git
+      // add`/`commit` there (#791 supportability review finding 4); the
+      // read-only variant never takes it.
+      const status = exec('git', ['--no-optional-locks', 'status', '--porcelain'], worktreePath);
+      if (status === null) return null;
+      if (status.trim().length > 0) return true;
+
+      // Scoped to THIS worktree's own HEAD, not `--branches` (every local
+      // branch in the shared repository, #791 supportability/maintainability
+      // review): worktrees share refs, so `--branches` would mark a clean,
+      // fully-pushed kept worktree "unsafe to remove" because of an
+      // unrelated unpushed branch sitting in a completely different
+      // worktree.
+      const unpushed = exec(
+        'git',
+        ['log', 'HEAD', '--not', '--remotes', '--oneline'],
+        worktreePath
+      );
+      if (unpushed === null) return null;
+      return unpushed.trim().length > 0;
+    },
+  };
+}
+
+/** Shell-quote `s` for a copy-pasteable remedy command (#791 security review) — passthrough when already shell-safe. */
+function shellQuote(s: string): string {
+  return /^[A-Za-z0-9_./-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The `git worktree remove` / `worktree-pool return` remedy text for a
+ * candidate — never executed here, only printed. The pool invocation is
+ * built from `teardown.ts`'s own `POOL_BIN`/`POOL_ARGS_PREFIX` (the same
+ * `npx -y @ai-dossier/worktree-pool@^0.7.0` pin teardown.ts actually runs),
+ * not a hand-written `ai-dossier worktree-pool` string — that binary does
+ * not exist (#791 DRY/documentation review).
+ */
+function keptWorktreeRemedy(candidate: KeptWorktreeCandidate): string {
+  const path = shellQuote(candidate.path);
+  return candidate.poolClaimed
+    ? `${POOL_BIN} ${POOL_ARGS_PREFIX.join(' ')} return --path ${path}`
+    : `git worktree remove ${path}`;
+}
+
+/** Per-run cap on how many kept-worktree candidates get probed with real git calls (#791 supportability review finding 7) — `sched status` must stay fast even with many leftovers. */
+export const KEPT_WORKTREE_PROBE_LIMIT = 10;
+
+/** One `{ kind: 'kept-worktree', ... }` warning — the shared literal shape every branch below returns (#791 maintainability review finding 5). */
+function keptWorktreeWarning(
+  candidate: KeptWorktreeCandidate,
+  detail: string,
+  remedy: string
+): StatusWarning {
+  const poolNote = candidate.poolClaimed ? ' (pool claim held indefinitely)' : '';
+  return {
+    kind: 'kept-worktree',
+    message: `batch ${candidate.batch} is done but its ${candidate.field} ${candidate.path} is still held${poolNote} — ${detail}`,
+    remedy,
+    batch: candidate.batch,
+  };
+}
+
+/**
+ * Turn kept-worktree candidates into `StatusWarning`s (#791) — pure given
+ * the reader, exactly like `buildStatusWarnings` is pure given the state
+ * and lease. A reader call that throws is caught defensively (a hostile or
+ * buggy injected reader must never crash `sched status`) and routed to the
+ * SAME "could not be checked" outcome as a reader returning `null` — a
+ * thrown `exists()` must never read as "gone", which would tell an operator
+ * there is nothing left to do when the truth is simply unknown (#791
+ * maintainability review finding 3).
+ */
+export function buildKeptWorktreeWarnings(
+  candidates: KeptWorktreeCandidate[],
+  reader: KeptWorktreeReader
+): StatusWarning[] {
+  const probed = candidates.slice(0, KEPT_WORKTREE_PROBE_LIMIT);
+  const overflow = candidates.slice(KEPT_WORKTREE_PROBE_LIMIT);
+
+  const warnings = probed.map((candidate) => {
+    let exists: boolean;
+    let existsChecked = true;
+    try {
+      exists = reader.exists(candidate.path);
+    } catch {
+      exists = false;
+      existsChecked = false;
+    }
+    if (!existsChecked) {
+      return keptWorktreeWarning(
+        candidate,
+        'whether the path still exists could not be checked',
+        `inspect ${shellQuote(candidate.path)} manually — if it is gone, no cleanup is needed; if clear, \`${keptWorktreeRemedy(candidate)}\``
+      );
+    }
+    if (!exists) {
+      return keptWorktreeWarning(
+        candidate,
+        'the path no longer exists on disk — the engine clears this ledger entry automatically once it re-confirms on its next tick',
+        candidate.poolClaimed
+          ? 'no local cleanup needed for now — if this persists past the next tick, check `worktree-pool status` for the claim'
+          : 'no local cleanup needed — the worktree is already gone'
+      );
+    }
+    let hasLocalWork: boolean | null;
+    try {
+      hasLocalWork = reader.hasLocalWork(candidate.path);
+    } catch {
+      hasLocalWork = null;
+    }
+    const removeCmd = keptWorktreeRemedy(candidate);
+    if (hasLocalWork === null) {
+      return keptWorktreeWarning(
+        candidate,
+        'local git status could not be checked',
+        `inspect ${shellQuote(candidate.path)} manually before removing (git probe failed) — if clear, \`${removeCmd}\``
+      );
+    }
+    if (hasLocalWork) {
+      return keptWorktreeWarning(
+        candidate,
+        'it has uncommitted changes or commits not on any remote branch',
+        `commit/push first, then \`${removeCmd}\``
+      );
+    }
+    return keptWorktreeWarning(candidate, 'it is clean and fully pushed', removeCmd);
+  });
+
+  for (const candidate of overflow) {
+    warnings.push(
+      keptWorktreeWarning(
+        candidate,
+        `not probed (over the ${KEPT_WORKTREE_PROBE_LIMIT}-candidate limit this run)`,
+        're-run `sched status` after clearing some of the other kept worktrees, or inspect it manually'
+      )
+    );
+  }
+
+  return warnings;
+}
+
 export function buildStatusReport(
   state: SchedState,
   config: SchedConfig,
@@ -343,7 +620,9 @@ export function buildStatusReport(
   engineLease: EngineLeaseStatus | null = null,
   now: Date = new Date(),
   /** #768: the opt-in anchor sweep's GitHub/git readers; omitted → `anchors: null`. */
-  anchorSweep?: { read: IssueCloseReader; repo?: string; commitInBase?: CommitInBase }
+  anchorSweep?: { read: IssueCloseReader; repo?: string; commitInBase?: CommitInBase },
+  /** #791: the opt-in kept-worktree reader; omitted → no `kept-worktree` warnings (zero behavior change for every existing caller). */
+  worktreeReader?: KeptWorktreeReader
 ): StatusReport {
   const blocked: BlockedItem[] = [];
   const failed: QueueEntry[] = [];
@@ -481,7 +760,15 @@ export function buildStatusReport(
     blocked,
     failed,
     stopped,
-    warnings: buildStatusWarnings(state, engineLease, now),
+    warnings: [
+      ...buildStatusWarnings(state, engineLease, now),
+      // #791: omitted unless the caller supplies a reader — same opt-in-by-
+      // omission shape as the anchor sweep below, so every pre-existing
+      // caller/test sees zero behavior change.
+      ...(worktreeReader !== undefined
+        ? buildKeptWorktreeWarnings(keptWorktreeCandidates(state), worktreeReader)
+        : []),
+    ],
     anchors:
       anchorSweep !== undefined
         ? sweepAnchors(state, anchorSweep.read, {
