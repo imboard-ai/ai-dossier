@@ -1585,6 +1585,7 @@ ai-dossier cap list [--json]       # inspect .dossier/automation/manifest.yaml
 ai-dossier cap run test.focused    # execute one capability
 ai-dossier cap run test.focused -- --grep auth   # extra args are shell-quoted and appended
 ai-dossier cap run test.focused --tail-bytes 4096   # bytes of output captured on a non-ok outcome (default 8192)
+ai-dossier cap run test.focused --envelope-file /tmp/env.json   # also write the envelope atomically to a file (or set $DOSSIER_CAP_ENVELOPE_FILE)
 ```
 
 A repo declares its deterministic, recurring operations — tests, lint, build, deps
@@ -1611,8 +1612,10 @@ Extra args after `--` are shell-quoted and appended (they are data, not shell sy
 ai-dossier cap run test.focused -- --grep auth   # → npm test -- --silent --grep auth
 ```
 
-`cap run` reports one of exactly four outcomes — the JSON envelope is the **last
-stdout line**, and the exit code matches:
+`cap run` reports one of exactly four outcomes — the JSON envelope (marked
+`"cap_envelope": 1`) is the **last stdout line** and, with `--envelope-file <path>` /
+`$DOSSIER_CAP_ENVELOPE_FILE`, is also written to that file (the channel machine consumers
+should read, #811); the exit code matches:
 
 | Outcome | Exit | Meaning |
 |---|---|---|

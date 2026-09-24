@@ -686,3 +686,77 @@ capabilities:
     });
   });
 });
+
+describe('cap run — envelope file channel (#811)', () => {
+  let tmpDir: string;
+  let originalCwd: string;
+
+  beforeEach(() => {
+    originalCwd = process.cwd();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-envfile-test-'));
+    process.chdir(tmpDir);
+    mockedAppendCapLog.mockClear();
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    delete process.env.DOSSIER_CAP_ENVELOPE_FILE;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('--envelope-file writes the same marked envelope printed on stdout', async () => {
+    writeManifest(
+      tmpDir,
+      `
+capabilities:
+  echo.ok:
+    command: node -e "process.exit(0)"
+`
+    );
+    const file = path.join(tmpDir, 'envelope.json');
+    await expect(runCap('run', 'echo.ok', '--envelope-file', file)).rejects.toThrow(
+      'process.exit(0)'
+    );
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]).trim());
+    const stdoutEnvelope = JSON.parse(calls[calls.length - 1]);
+    const fileEnvelope = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(fileEnvelope).toEqual(stdoutEnvelope);
+    expect(fileEnvelope).toMatchObject({ cap_envelope: 1, outcome: 'ok', exit_code: 0 });
+  });
+
+  it('DOSSIER_CAP_ENVELOPE_FILE selects the file, and the capability command never sees it', async () => {
+    writeManifest(
+      tmpDir,
+      `
+capabilities:
+  peek.env:
+    command: 'node -e "process.exit(process.env.DOSSIER_CAP_ENVELOPE_FILE === undefined ? 0 : 1)"'
+`
+    );
+    const file = path.join(tmpDir, 'from-env.json');
+    process.env.DOSSIER_CAP_ENVELOPE_FILE = file;
+    await expect(runCap('run', 'peek.env')).rejects.toThrow('process.exit(0)');
+
+    expect(JSON.parse(fs.readFileSync(file, 'utf-8'))).toMatchObject({ outcome: 'ok' });
+  });
+
+  it('an unwritable envelope path never changes the outcome', async () => {
+    writeManifest(
+      tmpDir,
+      `
+capabilities:
+  echo.ok:
+    command: node -e "process.exit(0)"
+`
+    );
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    await expect(
+      runCap('run', 'echo.ok', '--envelope-file', path.join(tmpDir, 'no', 'such', 'dir.json'))
+    ).rejects.toThrow('process.exit(0)');
+    expect(stderrSpy.mock.calls.map((c) => String(c[0])).join('')).toContain(
+      'could not write envelope file'
+    );
+    stderrSpy.mockRestore();
+  });
+});

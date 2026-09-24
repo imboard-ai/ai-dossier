@@ -6,10 +6,14 @@
  *
  * `cap run` owns its exit codes (the four-way outcome contract):
  *   0 ok · 1 task-failed · 2 automation-broken · 3 capability-unavailable
- * The JSON envelope is the LAST stdout line — machine consumers read that line.
+ * The JSON envelope (marked `"cap_envelope": 1`) is the LAST stdout line, and —
+ * when `--envelope-file <path>` or `DOSSIER_CAP_ENVELOPE_FILE` names a file —
+ * is also written there before exit: the dedicated channel machine consumers
+ * read (#811), immune to anything else that lands on stdout.
  */
 
 import type { Command } from 'commander';
+import { CAP_ENVELOPE_FILE_ENV, CAP_ENVELOPE_MARKER, writeCapEnvelopeFile } from '../cap-envelope';
 import { appendCapLog } from '../cap-log';
 import {
   AUTOMATION_DIR,
@@ -31,6 +35,25 @@ interface ListOptions {
 
 interface RunOptions {
   tailBytes?: string;
+  envelopeFile?: string;
+}
+
+/**
+ * Resolve once everything written to `stream` so far has been handed to the
+ * OS (#811). `process.exit()` right after a large write to a PIPE discards
+ * whatever libuv still has queued — a 20 MB re-emitted capability output
+ * arrived as 146 KB with no envelope, exit 0. A zero-length write's callback
+ * fires only after every earlier queued write completes.
+ */
+function drain(stream: NodeJS.WriteStream): Promise<void> {
+  if (stream.writableLength === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    try {
+      stream.write('', () => resolve());
+    } catch {
+      resolve();
+    }
+  });
 }
 
 function loadOrFail(): CapabilityManifest {
@@ -52,6 +75,7 @@ function loadOrFail(): CapabilityManifest {
  */
 function envelope(result: CapRunResult): string {
   return JSON.stringify({
+    [CAP_ENVELOPE_MARKER]: 1,
     capability: result.capability,
     outcome: result.outcome,
     command: result.command,
@@ -124,8 +148,12 @@ export function registerCapCommand(program: Command): void {
       '--tail-bytes <n>',
       `Bytes of combined stdout+stderr to capture on a non-ok outcome (default ${DEFAULT_OUTPUT_TAIL_BYTES})`
     )
+    .option(
+      '--envelope-file <path>',
+      `Also write the JSON envelope to <path> before exiting — a channel machine consumers read instead of stdout's last line (default: $${CAP_ENVELOPE_FILE_ENV})`
+    )
     .allowUnknownOption(true)
-    .action((id: string, args: string[], opts: RunOptions) => {
+    .action(async (id: string, args: string[], opts: RunOptions) => {
       const cwd = process.cwd();
       const tailBytes = opts.tailBytes ? Number(opts.tailBytes) : DEFAULT_OUTPUT_TAIL_BYTES;
       if (!Number.isFinite(tailBytes) || tailBytes < 0) {
@@ -133,22 +161,45 @@ export function registerCapCommand(program: Command): void {
       }
       const result = runCapabilityFromCwd(id, args, cwd, tailBytes);
 
-      appendCapLog({
-        timestamp: new Date().toISOString(),
-        capability: result.capability,
-        outcome: result.outcome,
-        exit_code: result.exit_code,
-        duration_ms: result.duration_ms,
-        reason: result.reason,
-        signal: result.signal,
-        cwd,
-        ...(result.output_tail !== undefined ? { output_tail: result.output_tail } : {}),
-      });
+      // The verdict channel is written FIRST: nothing after this point (the
+      // telemetry append, stdout) may prevent a consumer from reading it.
+      const json = envelope(result);
+      const envelopeFile = opts.envelopeFile ?? process.env[CAP_ENVELOPE_FILE_ENV];
+      if (envelopeFile) {
+        try {
+          writeCapEnvelopeFile(envelopeFile, json);
+        } catch (err) {
+          // The stdout envelope below is still the fallback channel; never
+          // let a bad path change the capability's own outcome.
+          process.stderr.write(
+            `cap run: could not write envelope file ${envelopeFile}: ${(err as Error).message}\n`
+          );
+        }
+      }
+
+      try {
+        appendCapLog({
+          timestamp: new Date().toISOString(),
+          capability: result.capability,
+          outcome: result.outcome,
+          exit_code: result.exit_code,
+          duration_ms: result.duration_ms,
+          reason: result.reason,
+          signal: result.signal,
+          cwd,
+          ...(result.output_tail !== undefined ? { output_tail: result.output_tail } : {}),
+        });
+      } catch (err) {
+        // Telemetry must never suppress the verdict (disk full, ~/.dossier unwritable).
+        process.stderr.write(`cap run: could not append caps.jsonl: ${(err as Error).message}\n`);
+      }
 
       // Leading newline: a child whose last write had no trailing newline must
-      // not end up on the same line as the envelope — the envelope is the
-      // machine-readable LAST stdout line, so it has to stand alone.
-      console.log(`\n${envelope(result)}`);
+      // not end up on the same line as the envelope — the stdout envelope is
+      // the last line, the fallback channel for consumers without
+      // --envelope-file, so it has to stand alone.
+      console.log(`\n${json}`);
+      await Promise.all([drain(process.stdout), drain(process.stderr)]);
       process.exit(CAPABILITY_EXIT_CODES[result.outcome]);
     });
 }

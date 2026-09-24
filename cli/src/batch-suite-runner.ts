@@ -46,6 +46,7 @@ import {
   type SuiteResult,
 } from '@ai-dossier/sched';
 import { readPoolFileConfig, resolveProjectDir } from '@ai-dossier/worktree-pool';
+import { envelopeFields, spawnCapRun } from './cap-envelope';
 import { type CapabilityManifest, loadCapabilityManifest, timeoutReasonSpent } from './capability';
 
 /** The repo-declared batch gate (#777) — preferred over `test.full` when active. */
@@ -185,15 +186,18 @@ function runCapabilitySuite(
 ): RunOutcome | 'unavailable' {
   const source = `cap run ${capabilityId}`;
   const start = Date.now();
-  const spawned = spawnSync('ai-dossier', ['cap', 'run', capabilityId], {
-    cwd: worktree,
-    encoding: 'utf-8',
+  // #811: the envelope comes from `cap run`'s dedicated envelope file, not
+  // stdout's last line — output that lands after the envelope (or a tail lost
+  // on exit) must never turn a green gate into "no envelope". `spawnCapRun`
+  // only returns an envelope whose outcome agrees with `cap run`'s own exit
+  // code, which the capability's command cannot forge (#562 review).
+  const run = spawnCapRun(capabilityId, worktree, {
     // The inner capability owns this budget; the outer watchdog has bounded setup grace.
-    timeout: capabilityTimeoutMs + CAP_RUN_SETUP_GRACE_MS,
-    maxBuffer: MAX_BUFFER_BYTES,
-    ...(env !== undefined ? { env } : {}),
+    timeoutMs: capabilityTimeoutMs + CAP_RUN_SETUP_GRACE_MS,
+    env,
   });
-  if (spawned.error) {
+  const { spawned } = run;
+  if (spawned.error && !run.exitedWithVerdict) {
     if ((spawned.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
       const elapsedMs = Date.now() - start;
       return {
@@ -210,31 +214,12 @@ function runCapabilitySuite(
     return 'unavailable';
   }
   const stdout = spawned.stdout ?? '';
-  const lastLine = stdout.trim().split('\n').pop() ?? '';
-  let envelope: {
-    outcome?: string;
-    exit_code?: number;
-    reason?: string;
-    duration_ms?: number;
-  } | null = null;
-  try {
-    envelope = JSON.parse(lastLine) as {
-      outcome?: string;
-      exit_code?: number;
-      reason?: string;
-      duration_ms?: number;
-    };
-  } catch {
-    envelope = null;
-  }
-  if (envelope?.outcome === 'capability-unavailable') return 'unavailable';
-  // The exit code is `cap run`'s own — it cannot be forged by anything the
-  // capability's command writes to stdout, unlike the envelope's `outcome`
-  // field. Both must agree before this is trusted as green (#562 review).
-  const ok = envelope?.outcome === 'ok' && spawned.status === 0;
+  const fields = run.envelope !== null ? envelopeFields(run.envelope) : null;
+  if (fields?.outcome === 'capability-unavailable') return 'unavailable';
+  const ok = fields?.outcome === 'ok' && spawned.status === 0;
   const readable = isReadableVitestReport(stdout);
   const failing = readable ? parseVitestJson(stdout) : [];
-  const timedOut = envelope?.reason === timeoutReasonSpent(capabilityTimeoutMs);
+  const timedOut = fields?.reason === timeoutReasonSpent(capabilityTimeoutMs);
   return {
     source,
     terminal: timedOut,
@@ -243,13 +228,14 @@ function runCapabilitySuite(
       failing,
       readable: ok || readable,
       detail:
-        envelope !== null
-          ? `${source}: outcome=${envelope.outcome} exit_code=${envelope.exit_code ?? 'unknown'}` +
-            (envelope.reason ? ` reason=${envelope.reason}` : '') +
-            (typeof envelope.duration_ms === 'number' ? ` elapsed ${envelope.duration_ms}ms` : '') +
+        fields !== null
+          ? `${source}: outcome=${fields.outcome} exit_code=${fields.exitCode ?? 'unknown'}` +
+            (fields.reason ? ` reason=${fields.reason}` : '') +
+            (fields.durationMs !== null ? ` elapsed ${fields.durationMs}ms` : '') +
             (!ok && readable ? ` (${failing.length} failing)` : '') +
+            ` [${run.diagnostics}]` +
             (!ok && !readable ? stderrTail(spawned.stderr) : '')
-          : `${source}: task-failed (exit ${spawned.status ?? 'unknown'}), harness produced no envelope${stderrTail(spawned.stderr)}`,
+          : `${source}: task-failed (exit ${spawned.status ?? 'unknown'}), harness produced no envelope [${run.diagnostics}]${stderrTail(spawned.stderr)}`,
     },
   };
 }
