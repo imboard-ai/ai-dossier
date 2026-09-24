@@ -1070,7 +1070,7 @@ issue is never reported `light`). A **text-floor** hit
 (risk keyword in the issue text) is `verdict: "candidate"` + `review: "full"` — the issue
 may join a batch, but as a full-review member (#770 Option A), not be excluded from it.
 
-**Contract change — `prescreen:v1` → `prescreen:v2` (#772, CLI 0.50.0).** v1 (no
+**Contract change — `prescreen:v1` → `prescreen:v2` (#772, CLI 0.52.0).** v1 (no
 `schema` key) returned `verdict: "full"` for a text-floor hit too; v2 returns
 `candidate` + `review: "full"` for it and adds the `schema` and `review` keys. A consumer
 that reads only `verdict` must also read `review` to keep routing risk-keyword issues to
@@ -1165,7 +1165,7 @@ respectively; `get --json` includes the comment's `author`.
 ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--more-members-expected] [--deps 100,104] [--tier mechanical|mid|strong] [--priority <n>] [--repo owner/name]
 ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
 ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--json]
-ai-dossier sched status [--json]
+ai-dossier sched status [--json]   # ⚠ health warnings: long pause, stale lease, stuck / stale-closed slots (#776)
 ai-dossier sched pause | resume
 ai-dossier sched stop (--issue 42 | --batch b1) [--reason "..."]
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
@@ -1210,6 +1210,13 @@ atomically. `abandon` instead records failure and releases a slot without termin
   `default_batch_priority`, see `config.json` below) as a batch-level fact like
   `anchor`/`run_id` — a later member joining the same batch must agree or omit it, never
   silently re-point it.
+- **Per-member review level (#771)**: a slot member may carry `review: "full"` (manifest)
+  or `--review full` (`--issues` with `--mode slot`) — a risk-floor issue riding the batch
+  with full-cycle-grade review. It dispatches at `strong` tier minimum within the batch's
+  dispatch profile and its member prompt carries `review=full`. At most 2 `review=full`
+  members per batch (`config.json`'s `max_full_review_members` overrides); a call that
+  would exceed it is rejected and writes nothing. `review` on a `--mode full` entry is
+  rejected. `sched status` shows a `review` column, with the tier floor as `mid→strong`.
 - **Rolling batch admission (#714)**: initial composition seals `forming → ready` at the
   end of an unheld enqueue call, making the batch dispatchable. Compatible members may still
   join while the batch is `ready`, `executing`, or `validating`, so they can share the final

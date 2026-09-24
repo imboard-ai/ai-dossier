@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildStatusReport,
+  buildStatusWarnings,
   createEmptyState,
   enqueueEntries,
   type SchedState,
@@ -362,5 +363,85 @@ describe('#707 status: dispatch profiles are named, not just the models', () => 
       'test-project'
     );
     expect(report.dispatch.profile_sources).toEqual({ glm: 'user' });
+  });
+});
+
+describe('#776: status health warnings', () => {
+  const HOUR = 60 * 60 * 1000;
+  const ago = (ms: number) => new Date(NOW.getTime() - ms).toISOString();
+  const kinds = (state: SchedState, lease: Parameters<typeof buildStatusWarnings>[1] = null) =>
+    buildStatusWarnings(state, lease, NOW).map((w) => w.kind);
+
+  it('a healthy state raises no warnings, and --json carries an empty warnings[]', () => {
+    const state = seeded();
+    expect(buildStatusReport(state, { max_slots: 3 }, 'p', null, NOW).warnings).toEqual([]);
+  });
+
+  it('warns when paused for more than 24h, not for a fresh pause', () => {
+    const fresh = { ...seeded(), paused: true, paused_at: ago(2 * HOUR) };
+    expect(kinds(fresh)).toEqual([]);
+    const long = { ...seeded(), paused: true, paused_at: ago(4 * 24 * HOUR) };
+    const [w] = buildStatusWarnings(long, null, NOW);
+    expect(w).toMatchObject({ kind: 'long-pause' });
+    expect(w.message).toContain('4d');
+    expect(w.remedy).toContain('sched resume');
+  });
+
+  it('warns on a pause of unknown age (state predates paused_at)', () => {
+    const legacy = { ...seeded(), paused: true, paused_at: null };
+    const [w] = buildStatusWarnings(legacy, null, NOW);
+    expect(w.kind).toBe('long-pause');
+    expect(w.message).toContain('unknown');
+  });
+
+  it('warns on a stale engine lease only while work is pending', () => {
+    const dead = { pid: 4321, pid_start: null, alive: false };
+    const [w] = buildStatusWarnings(seeded(), dead, NOW);
+    expect(w.kind).toBe('stale-engine-lease');
+    expect(w.message).toContain('pid 4321');
+    expect(w.remedy).toContain('sched start');
+    // A live lease, or a dead one with nothing to do, is not a warning.
+    expect(kinds(seeded(), { ...dead, alive: true })).toEqual([]);
+    expect(kinds(createEmptyState(), dead)).toEqual([]);
+  });
+
+  it('warns when a live slot has made no progress for more than 24h', () => {
+    const stuck = {
+      ...slot(2, 'recovering', 'issue:101'),
+      last_progress_at: ago(4 * 24 * HOUR),
+    };
+    const busy = { ...slot(3, 'running', 'batch:b1'), last_progress_at: ago(HOUR) };
+    const state = { ...seeded(), slots: [stuck, busy] };
+    const warnings = buildStatusWarnings(state, null, NOW);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ kind: 'stuck-slot', slot: 2, issue: 101 });
+    expect(warnings[0].remedy).toContain('sched stop --issue 101');
+    // A stuck batch slot names the batch stop instead.
+    const stuckBatch = { ...busy, last_progress_at: ago(30 * HOUR) };
+    const [b] = buildStatusWarnings({ ...seeded(), slots: [stuckBatch] }, null, NOW);
+    expect(b.remedy).toContain('sched stop --batch b1');
+  });
+
+  it('lists a stale-closed entry with the exact `sched stop --issue N` remedy (and no duplicate stuck-slot line)', () => {
+    let state = seeded();
+    state = {
+      ...state,
+      entries: state.entries.map((e) =>
+        e.issue === 101 ? { ...e, stale_closed_at: ago(HOUR) } : e
+      ),
+    };
+    state = {
+      ...state,
+      slots: [{ ...slot(2, 'recovering', 'issue:101'), last_progress_at: ago(4 * 24 * HOUR) }],
+    };
+    const report = buildStatusReport(state, { max_slots: 3 }, 'p', null, NOW);
+    expect(report.warnings).toHaveLength(1);
+    expect(report.warnings[0]).toMatchObject({
+      kind: 'stale-closed',
+      issue: 101,
+      slot: 2,
+      remedy: 'sched stop --issue 101',
+    });
+    expect(report.warnings[0].message).toContain('recovering');
   });
 });

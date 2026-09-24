@@ -21,6 +21,15 @@ export type CycleMode = 'full' | 'slot';
 /** Model tier the entry is dispatched at (RFC-0001 role-based routing: mechanical / generation / judgment). */
 export type ModelTier = 'mechanical' | 'mid' | 'strong';
 
+/**
+ * Per-entry review level (#771, #770 Option A). `light` is the member-cycle's
+ * relevance-scoped review; `full` asks a slot member for full-cycle-grade
+ * review, so a risk-floor issue (billing/security/auth/deploy/migration) can
+ * ride a batch instead of being forced out to `mode=full`. Meaningful on
+ * `mode=slot` members only — a full-cycle entry always gets full review.
+ */
+export type ReviewLevel = 'light' | 'full';
+
 // --- D.1 Issue state machine ---
 
 /**
@@ -305,6 +314,13 @@ export interface QueueEntry {
   /** Model tier the entry is dispatched at. */
   tier: ModelTier;
   /**
+   * Review level (#771). Default `light`; `full` on a slot member dispatches it
+   * at `strong` tier minimum (see `memberDispatchTier`) and carries
+   * `review=full` into its member prompt. At most `MAX_FULL_REVIEW_MEMBERS`
+   * (or `SchedConfig.max_full_review_members`) per batch, enforced at enqueue.
+   */
+  review: ReviewLevel;
+  /**
    * Named dispatch profile resolved at enqueue for a full-cycle entry (#713).
    * Null deliberately selects the project's default profile; slot entries use
    * their batch's profile so there is only one source of truth for a batch.
@@ -371,6 +387,17 @@ export interface QueueEntry {
    * `pr_watch_waiting_since` is `null`.
    */
   pr_watch_waiting_ticks: number;
+  /**
+   * #776: ISO time the engine first saw this entry's GitHub issue CLOSED while
+   * a cycle slot held it in `recovering` — the "stale-closed" flag. Once set,
+   * the recovery rail never respawns the unit (a closed issue is shipped or
+   * abandoned work; redispatching it re-runs finished work), and `sched
+   * status` lists it with the `sched stop --issue N` remedy. Sticky on
+   * purpose: `issueClosed` reads false when gh is unreachable, so clearing on
+   * a later "open" reading would let one flaky poll re-dispatch the unit.
+   * Cleared only by a requeue (a fresh attempt). `null` = never flagged.
+   */
+  stale_closed_at: string | null;
   enqueued_at: string;
   updated_at: string;
 }
@@ -724,6 +751,14 @@ export interface SchedState {
   schema_version: typeof SCHEMA_VERSION;
   /** When true, `computeAssignments` returns no assignments (sched pause). */
   paused: boolean;
+  /**
+   * #776: when the scheduler was paused — stamped by `setPaused` on the
+   * running → paused edge (manual `sched pause` or a dispatch-health
+   * auto-pause), cleared on resume. `sched status` warns once a pause has
+   * lasted more than a day. `null` while running, and for a pause recorded
+   * before this field existed (duration unknown — status says so).
+   */
+  paused_at: string | null;
   entries: QueueEntry[];
   batches: BatchEntry[];
   slots: SlotEntry[];
@@ -842,6 +877,12 @@ export interface SchedConfig {
    * ahead of same-readiness issue units unless the operator says otherwise.
    */
   default_batch_priority?: number;
+  /**
+   * Cap on `review=full` members per batch (#771). Default
+   * `MAX_FULL_REVIEW_MEMBERS` (2) — bounds a batch's deploy blast radius while
+   * still letting risk-floor issues join. Enforced at enqueue.
+   */
+  max_full_review_members?: number;
 }
 
 /**
@@ -1244,6 +1285,12 @@ export interface SchedConfigFile {
   auto_upgrade?: boolean;
   dissolve_policy?: DissolvePolicy;
   default_batch_priority?: number;
+  /**
+   * Cap on `review=full` members per batch (#771). Default
+   * `MAX_FULL_REVIEW_MEMBERS` (2) — bounds a batch's deploy blast radius while
+   * still letting risk-floor issues join. Enforced at enqueue.
+   */
+  max_full_review_members?: number;
 }
 
 export const DEFAULT_MAX_SLOTS = 3;
@@ -1259,6 +1306,9 @@ export const DEFAULT_ISSUE_PRIORITY = 0;
 
 /** Default `BatchEntry.priority` (#565) — see `SchedConfig.default_batch_priority`. Must stay > `DEFAULT_ISSUE_PRIORITY`. */
 export const DEFAULT_BATCH_PRIORITY = 10;
+
+/** Default per-batch cap on `review=full` members (#771) — see `SchedConfig.max_full_review_members`. */
+export const MAX_FULL_REVIEW_MEMBERS = 2;
 
 /** Bounds for `max_slots` when reading `config.json` (named — not magic numbers in persist.ts). */
 export const MIN_MAX_SLOTS = 1;
@@ -1419,6 +1469,9 @@ export type JournalEventName =
   // respawns, and the degraded path where it could not be written.
   | 'fence-written'
   | 'fence-failed'
+  // #776: a `recovering` cycle slot whose issue GitHub reports CLOSED — the
+  // recovery rail refuses to respawn it; `sched stop --issue N` releases it.
+  | 'stale-closed'
   // #683 fence lifecycle: the takeover's spawn bound its pid to the fence (so
   // readers can tell a live owner from a ghost), and the owning dispatch's
   // `exit-detected` released the fence — plus the degraded path of either.
@@ -1547,6 +1600,8 @@ export interface JournalEvent {
   issue?: number;
   pid?: number;
   tier?: ModelTier;
+  /** Review level of a `review=full` member dispatch (#771); absent for `light`. */
+  review?: ReviewLevel;
   /** The worktree a member dispatch spawned into (#677) — the per-member evidence trail. */
   worktree?: string;
   detail?: string;

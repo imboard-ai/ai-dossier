@@ -446,6 +446,25 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
   const out = new Map<string, UnitTruth>();
   for (const slot of state.slots) {
     if (slot.unit === null) continue;
+    if (slot.status === 'recovering') {
+      // #776: the recovery rail respawns without re-reading ground truth, so
+      // a unit whose issue was closed (shipped elsewhere, or abandoned) while
+      // its slot sat in `recovering` was re-dispatched on the next tick. One
+      // `issueClosed` read per recovering cycle slot closes that gap; report
+      // slots are excluded (their issue is closed AT MERGE, by design), and
+      // an already-flagged entry needs no further reads (the flag is sticky).
+      const issue = issueOfUnit(slot.unit);
+      if (issue === null || out.has(slot.unit) || isReportSlot(slot)) continue;
+      if ((findEntry(state, issue)?.stale_closed_at ?? null) !== null) continue;
+      out.set(slot.unit, {
+        reachable: true,
+        milestone: null,
+        closed: deps.groundTruth.issueClosed(issue),
+        head: null,
+        branch: slot.branch,
+      });
+      continue;
+    }
     if (slot.status !== 'running' && slot.status !== 'verifying' && slot.status !== 'exited') {
       continue;
     }
@@ -2328,7 +2347,7 @@ function recordDispatchOutcome(
     last_suspect_dispatch_unit: unit,
   };
   if (count >= DISPATCH_UNHEALTHY_THRESHOLD && !next.paused) {
-    next = setPaused(next, true);
+    next = setPaused(next, true, ctx.deps.now());
     // Name both units involved — the current one and the one that carried
     // the streak into it — so an operator reading `dispatch-unhealthy` in
     // isolation (without scrolling back through prior `suspect-dispatch`
@@ -2465,7 +2484,7 @@ function completeUnitOrRecover(
       next,
       unit,
       resolved.apiError,
-      { journalFailure: false }
+      { journalFailure: false, now: ctx.deps.now() }
     );
     return enterRecovery(
       ctx,
@@ -2600,7 +2619,33 @@ function reconcileAssigned(
 }
 
 /** Reconcile a `recovering` slot: respawn with the escalated tier. */
-function reconcileRecovering(ctx: TickCtx, state: SchedState, unit: string): SchedState {
+function reconcileRecovering(
+  ctx: TickCtx,
+  state: SchedState,
+  slot: SlotEntry,
+  truth: UnitTruth,
+  unit: string
+): SchedState {
+  // #776: never re-dispatch a unit whose issue is closed. Checked BEFORE the
+  // pause guard so a paused scheduler still flags it (the incident shape:
+  // paused for days with a recovering slot on an issue shipped elsewhere —
+  // `sched resume` would have re-run finished work). The flag is sticky and
+  // the slot stays held: releasing it is an operator decision
+  // (`sched stop --issue N`), which `sched status` names.
+  const issue = issueOfUnit(unit);
+  const entry = issue === null ? undefined : findEntry(state, issue);
+  if (entry && issue !== null && !isReportSlot(slot)) {
+    if (entry.stale_closed_at !== null) return state;
+    if (truth.closed) {
+      const now = ctx.deps.now();
+      journal(ctx, 'stale-closed', unit, {
+        slot: slot.id,
+        detail: `issue #${issue} is closed — recovery will not re-dispatch it; release the slot with \`sched stop --issue ${issue}\``,
+      });
+      // Not an activity bump: `updated_at` keeps meaning "last state change".
+      return patchEntry(state, issue, { stale_closed_at: now.toISOString() }, now, false);
+    }
+  }
   // #629: while paused, do not resume a `recovering` slot's respawn — this is
   // the crash-recovery rail (a sched restart caught a slot between
   // `enterRecovery`'s transition and its own `spawnUnit` call, OR `enterRecovery`
@@ -2629,6 +2674,10 @@ function reconcileSlots(
     // synthetic default truth below would read a batch's live agent as
     // ground-truth-unreachable and kill it out from under the batch pass.
     if (issueOfUnit(unit) === null) continue;
+    // #776: `pollUnits` polls every unflagged `recovering` cycle slot, so the
+    // `closed: false` default below only ever reaches one the poll snapshot
+    // did not see (the single engine lease makes that a same-tick race, not a
+    // steady state) — the stale-closed guard then catches it next tick.
     const truth: UnitTruth = polled.get(unit) ?? {
       reachable: true,
       milestone: null,
@@ -2659,7 +2708,7 @@ function reconcileSlots(
         );
         break;
       case 'recovering':
-        next = reconcileRecovering(ctx, next, unit);
+        next = reconcileRecovering(ctx, next, slot, truth, unit);
         break;
       default:
         break;

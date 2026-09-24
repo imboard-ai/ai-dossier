@@ -95,7 +95,7 @@ export function recordDispatchApiError(
   state: SchedState,
   unit: string,
   apiError: DispatchApiError,
-  options: { journalFailure?: boolean } = {}
+  options: { journalFailure?: boolean; now?: Date } = {}
 ): SchedState {
   const count = state.consecutive_dispatch_api_errors + 1;
   let next: SchedState = {
@@ -117,7 +117,8 @@ export function recordDispatchApiError(
   }
 
   if (count >= DISPATCH_UNHEALTHY_THRESHOLD && !next.paused) {
-    next = setPaused(next, true);
+    // #776: `now` stamps `paused_at`; wall clock when the caller has no tick clock.
+    next = setPaused(next, true, options.now);
     journal('dispatch-unhealthy', unit, {
       detail: `${count} consecutive confirmed dispatch failures (${apiError.terminalReason ?? apiError.apiErrorStatus ?? 'api_error'}) — new assignments paused; \`sched resume\` once dispatch is healthy${apiError.resetAt ? ` (provider reset at ${apiError.resetAt})` : ''}`,
     });

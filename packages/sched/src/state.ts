@@ -9,7 +9,7 @@
  * non-terminal issue status rather than repeated per row.
  */
 
-import { DISPATCH_PROFILE_RE } from './dispatch';
+import { DISPATCH_PROFILE_RE, memberDispatchTier } from './dispatch';
 import { issueOfUnit } from './journal';
 import {
   type BatchEntry,
@@ -227,6 +227,7 @@ export function createEmptyState(): SchedState {
   return {
     schema_version: SCHEMA_VERSION,
     paused: false,
+    paused_at: null,
     entries: [],
     batches: [],
     slots: [],
@@ -295,6 +296,7 @@ const BATCH_STATUSES = new Set<string>(Object.keys(BATCH_TRANSITIONS));
 const SLOT_STATUSES = new Set<string>(Object.keys(SLOT_BASE_TRANSITIONS));
 const CYCLE_MODES = new Set(['full', 'slot']);
 const MODEL_TIERS = new Set(['mechanical', 'mid', 'strong']);
+const REVIEW_LEVELS = new Set(['light', 'full']);
 
 function isIsoDateString(value: unknown): value is string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
@@ -361,6 +363,10 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   }
   if (!MODEL_TIERS.has(String(entry.tier))) {
     throw new Error(`${label}: tier must be mechanical | mid | strong`);
+  }
+  // Absent on pre-#771 entries — backfilled to `light` by the migration below.
+  if (entry.review !== undefined && !REVIEW_LEVELS.has(String(entry.review))) {
+    throw new Error(`${label}: review must be 'light' | 'full', got ${String(entry.review)}`);
   }
   if (
     entry.dispatch_profile !== undefined &&
@@ -849,6 +855,9 @@ export function validateState(data: unknown): SchedState {
   ) {
     throw new Error('last_tick_failure must be an { at, detail } object or null');
   }
+  if (obj.paused_at !== null && obj.paused_at !== undefined && !isIsoDateString(obj.paused_at)) {
+    throw new Error('paused_at must be an ISO date string or null');
+  }
   // One-directional, unlike the suspect-dispatch pair's "zero ⇔ null"
   // agreement (#629 review): a confirmed failure with no reset time is valid
   // (`count > 0, resetAt === null` — the provider didn't supply one), so only
@@ -931,6 +940,9 @@ export function validateState(data: unknown): SchedState {
     // Pre-#713 entries always dispatched through the project default, so null
     // is an exact migration rather than a guessed profile.
     dispatch_profile: entry.dispatch_profile ?? null,
+    // Pre-#771 entries had no review level; every one of them was reviewed
+    // `light` (slot) or ran a full cycle (full), so `light` is exact.
+    review: entry.review ?? 'light',
     // Pre-#632 (1.13.0) entries carry none of these four — no dedup marker
     // was ever recorded under the old once-per-tick behavior, so null/0 is
     // exact, not a guess.
@@ -938,6 +950,8 @@ export function validateState(data: unknown): SchedState {
     ground_truth_unreachable_ticks: entry.ground_truth_unreachable_ticks ?? 0,
     pr_watch_waiting_since: entry.pr_watch_waiting_since ?? null,
     pr_watch_waiting_ticks: entry.pr_watch_waiting_ticks ?? 0,
+    // Pre-#776 entries were never flagged stale-closed — null is exact.
+    stale_closed_at: entry.stale_closed_at ?? null,
   }));
   const batches = (obj.batches as BatchEntry[]).map((batch) => ({
     ...batch,
@@ -1016,6 +1030,9 @@ export function validateState(data: unknown): SchedState {
     // Pre-#635 states did not retain failed tick context, so null is exact.
     last_tick_failure:
       (obj.last_tick_failure as SchedState['last_tick_failure'] | undefined) ?? null,
+    // Pre-#776 states never recorded when a pause began — null reads as
+    // "paused, duration unknown" in `sched status`, never as a fresh pause.
+    paused_at: (obj.paused_at as string | undefined) ?? null,
   };
 }
 
@@ -1113,6 +1130,9 @@ export const CLEARED_ENTRY_DEDUP_MARKERS = {
   ground_truth_unreachable_ticks: 0,
   pr_watch_waiting_since: null,
   pr_watch_waiting_ticks: 0,
+  // #776: a requeue is a fresh attempt — the stale-closed flag belonged to
+  // the previous dispatch's recovery, not to the new one.
+  stale_closed_at: null,
 } as const;
 
 /** The `BatchEntry` `pr-watch-failed` dedup marker (#630), zeroed. */
@@ -1406,8 +1426,16 @@ export function requeueMember(
   // this one (`requeueMember` reuses the entry object rather than creating a
   // fresh one, so without this reset a stale marker would silently carry
   // over).
+  // #771: a review=full member leaving for a full cycle keeps its strong
+  // floor as a real tier (the full-cycle engine reads `entry.tier` directly)
+  // and drops `review`, which only means something on a slot member.
+  const reviewPatch =
+    target.mode === 'full' && entry.review === 'full'
+      ? { tier: memberDispatchTier(entry), review: 'light' as const }
+      : {};
   const patch = {
     ...target,
+    ...reviewPatch,
     reason,
     ...CLEARED_ENTRY_DEDUP_MARKERS,
     ...extra,

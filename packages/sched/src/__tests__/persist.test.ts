@@ -719,6 +719,43 @@ describe('#565 config: default_batch_priority', () => {
   });
 });
 
+describe('#771 config: max_full_review_members', () => {
+  it('round-trips max_full_review_members through save/load, absent by default', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-771-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({ max_slots: 2 });
+      expect(store.loadConfig().max_full_review_members).toBeUndefined();
+      store.saveConfig({ max_slots: 2, max_full_review_members: 3 });
+      expect(store.loadConfig().max_full_review_members).toBe(3);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a negative max_full_review_members (degrades to defaults, loudly)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-771-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({ schema_version: '1.4.0', max_slots: 2, max_full_review_members: -1 })
+      );
+      const err = console.error;
+      const warnings: string[] = [];
+      console.error = (msg: string) => warnings.push(msg);
+      try {
+        expect(store.loadConfig()).toEqual({ max_slots: 3 });
+      } finally {
+        console.error = err;
+      }
+      expect(warnings[0]).toContain('max_full_review_members');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('#537 config: auto_upgrade', () => {
   it('round-trips auto_upgrade through save/load', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-537-'));

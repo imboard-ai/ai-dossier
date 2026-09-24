@@ -18,8 +18,10 @@ import {
   DispatchProfileError,
   dispatchSummary,
   escalateTier,
+  FULL_REVIEW_MEMBER_DIRECTIVE,
   HEADLESS_BACKGROUND_GUARD_SETTINGS,
   journalCmdModelFields,
+  memberDispatchTier,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
   reportTierFor,
@@ -600,6 +602,54 @@ describe('background-exit hardening (#497)', () => {
 
   it('the report prompt is deliberately excluded — it never spawns a build/test command', () => {
     expect(DEFAULT_REPORT_PROMPT_TEMPLATE).not.toContain(NO_BACKGROUND_EXIT_INSTRUCTION);
+  });
+});
+
+describe('per-member review level at dispatch (#771)', () => {
+  it('a review=full member dispatches at strong minimum; light keeps its manifest tier', () => {
+    expect(memberDispatchTier({ tier: 'mechanical', review: 'full' })).toBe('strong');
+    expect(memberDispatchTier({ tier: 'mid', review: 'full' })).toBe('strong');
+    expect(memberDispatchTier({ tier: 'strong', review: 'full' })).toBe('strong');
+    expect(memberDispatchTier({ tier: 'mechanical', review: 'light' })).toBe('mechanical');
+    expect(memberDispatchTier({ tier: 'mid' })).toBe('mid');
+  });
+
+  it('the floored tier resolves through the batch PROFILE, not the default ladder', () => {
+    const config: SchedConfig = {
+      max_slots: 1,
+      dispatch: {
+        dispatch_profiles: {
+          glm: { tier_models: { mechanical: 'glm-flash', mid: 'glm-5.3', strong: 'glm-strong' } },
+        },
+      },
+    };
+    const dispatch = resolveProfiledDispatch(config, 'glm');
+    const tier = memberDispatchTier({ tier: 'mid', review: 'full' });
+    expect(resolveTierSpawn(dispatch, tier, 1).model).toBe('glm-strong');
+  });
+
+  it('a light member prompt is byte-identical to the pre-#771 rendering (AC3)', () => {
+    const args = [DEFAULT_MEMBER_PROMPT_TEMPLATE, 42, 'b1', '/wt/m', 'batch/b1'] as const;
+    const legacy = buildMemberPrompt(...args);
+    expect(buildMemberPrompt(...args, 'light')).toBe(legacy);
+    expect(legacy).not.toContain('review=full');
+  });
+
+  it('review=full reaches the member prompt, with or without a {review} placeholder (AC2)', () => {
+    const full = buildMemberPrompt(
+      DEFAULT_MEMBER_PROMPT_TEMPLATE,
+      42,
+      'b1',
+      '/wt/m',
+      'b/b1',
+      'full'
+    );
+    expect(full.endsWith(FULL_REVIEW_MEMBER_DIRECTIVE)).toBe(true);
+    expect(full).toContain('review=full');
+    // An operator template that places {review} itself gets it substituted, no appendix.
+    const custom = buildMemberPrompt('issue {issue} review={review}', 42, 'b1', '/wt', 'b', 'full');
+    expect(custom).toBe('issue 42 review=full');
+    expect(buildMemberPrompt('review={review}', 42, 'b1', '/wt', 'b')).toBe('review=light');
   });
 });
 

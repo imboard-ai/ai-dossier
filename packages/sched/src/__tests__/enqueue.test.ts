@@ -5,6 +5,7 @@ import {
   EnqueueError,
   enqueueEntries,
   findBatch,
+  MAX_FULL_REVIEW_MEMBERS,
   parseManifest,
   type SchedState,
   transitionBatch,
@@ -636,5 +637,137 @@ describe('dispatch profile as a batch-level fact (#707)', () => {
     expect(() => parseManifest([{ issue: 1, mode: 'slot', batch: 'b1', dispatch: 7 }])).toThrow(
       /dispatch must match/
     );
+  });
+});
+
+describe('per-member review level (#771)', () => {
+  it('a manifest with review=full slot members enqueues and records the level (AC1)', () => {
+    const inputs = parseManifest({
+      entries: [
+        { issue: 1, mode: 'slot', batch: 'b1', review: 'full' },
+        { issue: 2, mode: 'slot', batch: 'b1', review: 'full' },
+        { issue: 3, mode: 'slot', batch: 'b1', review: 'light' },
+        { issue: 4, mode: 'slot', batch: 'b1' },
+      ],
+    });
+    const state = enqueueEntries(createEmptyState(), inputs, NOW);
+    const review = (issue: number) => state.entries.find((e) => e.issue === issue)?.review;
+    expect([review(1), review(2), review(3), review(4)]).toEqual([
+      'full',
+      'full',
+      'light',
+      'light',
+    ]);
+    expect(findBatch(state, 'b1')?.status).toBe('ready');
+    // The persistence boundary: what enqueue writes, validateState accepts.
+    expect(() => validateState(JSON.parse(JSON.stringify(state)))).not.toThrow();
+  });
+
+  it(`rejects a third review=full member in one batch (cap ${MAX_FULL_REVIEW_MEMBERS}, AC1)`, () => {
+    expect(MAX_FULL_REVIEW_MEMBERS).toBe(2);
+    expect(() =>
+      enqueueEntries(
+        createEmptyState(),
+        [
+          { issue: 1, mode: 'slot', batch: 'b1', review: 'full' },
+          { issue: 2, mode: 'slot', batch: 'b1', review: 'full' },
+          { issue: 3, mode: 'slot', batch: 'b1', review: 'full' },
+        ],
+        NOW
+      )
+    ).toThrow(/Batch b1 would carry 3 review=full members \(#1, #2, #3\) — at most 2 per batch/);
+  });
+
+  it('counts existing members too — an incremental join cannot slip a third one in', () => {
+    const first = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 1, mode: 'slot', batch: 'b1', review: 'full', more_members_expected: true },
+        { issue: 2, mode: 'slot', batch: 'b1', review: 'full', more_members_expected: true },
+      ],
+      NOW
+    );
+    expect(() =>
+      enqueueEntries(first, [{ issue: 3, mode: 'slot', batch: 'b1', review: 'full' }], NOW)
+    ).toThrow(EnqueueError);
+    // A light joiner is fine.
+    const joined = enqueueEntries(first, [{ issue: 3, mode: 'slot', batch: 'b1' }], NOW);
+    expect(findBatch(joined, 'b1')?.members).toEqual([1, 2, 3]);
+  });
+
+  it('the cap is per batch, not per call', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 1, mode: 'slot', batch: 'b1', review: 'full' },
+        { issue: 2, mode: 'slot', batch: 'b1', review: 'full' },
+        { issue: 3, mode: 'slot', batch: 'b2', review: 'full' },
+        { issue: 4, mode: 'slot', batch: 'b2', review: 'full' },
+      ],
+      NOW
+    );
+    expect(state.entries.filter((e) => e.review === 'full')).toHaveLength(4);
+  });
+
+  it('honors a caller-resolved override of the cap (project config)', () => {
+    const inputs = [
+      { issue: 1, mode: 'slot' as const, batch: 'b1', review: 'full' as const },
+      { issue: 2, mode: 'slot' as const, batch: 'b1', review: 'full' as const },
+      { issue: 3, mode: 'slot' as const, batch: 'b1', review: 'full' as const },
+    ];
+    expect(() =>
+      enqueueEntries(createEmptyState(), inputs, NOW, { maxFullReviewMembers: 3 })
+    ).not.toThrow();
+    expect(() =>
+      enqueueEntries(createEmptyState(), inputs.slice(0, 1), NOW, { maxFullReviewMembers: 0 })
+    ).toThrow(/at most 0 per batch/);
+    expect(() =>
+      enqueueEntries(createEmptyState(), inputs.slice(0, 1), NOW, { maxFullReviewMembers: -1 })
+    ).toThrow(/max_full_review_members must be a non-negative integer/);
+  });
+
+  it('rejects review on a full-cycle entry — a full cycle always reviews fully', () => {
+    expect(() =>
+      enqueueEntries(createEmptyState(), [{ issue: 1, mode: 'full', review: 'full' }], NOW)
+    ).toThrow(/review applies to mode 'slot' batch members only/);
+    expect(() => enqueueEntries(createEmptyState(), [{ issue: 1, review: 'light' }], NOW)).toThrow(
+      EnqueueError
+    );
+  });
+
+  it('parseManifest rejects an unknown review level', () => {
+    expect(() => parseManifest([{ issue: 1, mode: 'slot', batch: 'b1', review: 'deep' }])).toThrow(
+      /review must be 'light' \| 'full'/
+    );
+  });
+
+  it('manifests without review behave exactly as before — every entry defaults to light (AC3)', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      parseManifest([
+        { issue: 1, mode: 'slot', batch: 'b1', tier: 'mechanical' },
+        { issue: 2, mode: 'slot', batch: 'b1' },
+        { issue: 3, mode: 'slot', batch: 'b1' },
+        { issue: 9 },
+      ]),
+      NOW
+    );
+    expect(state.entries.map((e) => e.review)).toEqual(['light', 'light', 'light', 'light']);
+    expect(state.entries.find((e) => e.issue === 1)?.tier).toBe('mechanical');
+  });
+
+  it('a pre-#771 state.json (no review key) loads with review backfilled to light (AC3)', () => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 1, mode: 'slot', batch: 'b1' }],
+      NOW
+    );
+    const legacy = JSON.parse(JSON.stringify(state));
+    for (const entry of legacy.entries) delete entry.review;
+    const loaded = validateState(legacy);
+    expect(loaded.entries[0].review).toBe('light');
+    const bad = JSON.parse(JSON.stringify(state));
+    bad.entries[0].review = 'heavy';
+    expect(() => validateState(bad)).toThrow(/review must be 'light' \| 'full'/);
   });
 });

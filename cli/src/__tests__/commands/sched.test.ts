@@ -489,6 +489,50 @@ describe('ai-dossier sched enqueue', () => {
   });
 });
 
+describe('ai-dossier sched status (#776: health warnings)', () => {
+  it('renders a long pause and a stale engine lease with remedies, and exposes warnings[] in --json', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '101',
+      '--mode',
+      'full',
+      '--project',
+      'test-proj',
+    ]);
+    await runSched(['sched', 'pause', '--project', 'test-proj']);
+    const state = readState() as Record<string, unknown>;
+    expect(typeof state.paused_at).toBe('string');
+    // Backdate the pause three days — the incident's shape.
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        paused_at: new Date(Date.now() - 3 * 24 * 3600_000).toISOString(),
+      })
+    );
+    // A lease whose holder pid is not running.
+    const leaseDir = path.join(home, '.dossier', 'sched', 'test-proj', '.sched-engine-lease');
+    fs.mkdirSync(leaseDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(leaseDir, 'holder.json'),
+      JSON.stringify({ pid: 2 ** 22 + 12345, pid_start: null, id: 'dead-engine' })
+    );
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    expect(text).toMatch(/⚠ scheduler has been paused for 3d .*→ .*sched resume/);
+    expect(text).toMatch(/⚠ engine lease is stale .*→ start an engine with `sched start`/);
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--json', '--project', 'test-proj']);
+    const report = JSON.parse(logs.join('\n')) as { warnings: Array<{ kind: string }> };
+    expect(report.warnings.map((w) => w.kind)).toEqual(['long-pause', 'stale-engine-lease']);
+  });
+});
+
 describe('ai-dossier sched start (#537: engine-stale detection)', () => {
   it('a contending --once exits successfully without output, while an interactive start names the holder pid', async () => {
     const leaseDir = path.join(home, '.dossier', 'sched', 'test-proj', '.sched-engine-lease');
@@ -884,6 +928,97 @@ describe('ai-dossier sched status', () => {
     logs.length = 0;
     await runSched(['sched', 'status', '--project', 'test-proj']);
     expect(logs.join('\n')).not.toContain('Engine stale');
+  });
+});
+
+describe('#771: per-member review level (sched enqueue / status)', () => {
+  function writeManifest(entries: unknown[]): string {
+    const manifest = path.join(home, 'manifest-771.json');
+    fs.writeFileSync(manifest, JSON.stringify({ project: 'test-proj', entries }));
+    return manifest;
+  }
+
+  it('enqueues review=full slot members and status shows review + the strong floor per member', async () => {
+    const manifest = writeManifest([
+      { issue: 1, mode: 'slot', batch: 'b1', tier: 'mid', review: 'full' },
+      { issue: 2, mode: 'slot', batch: 'b1', tier: 'mid' },
+    ]);
+    await runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj']);
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries.map((e) => e.review)).toEqual(['full', 'light']);
+
+    logs = [];
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const queue = logs.join('\n').split('== Slots ==')[0];
+    const row = (issue: number) => queue.split('\n').find((l) => l.includes(`#${issue} `)) ?? '';
+    expect(queue).toContain('review');
+    expect(row(1)).toContain('mid→strong');
+    expect(row(1)).toMatch(/\bfull\b/);
+    expect(row(2)).toMatch(/\blight\b/);
+    expect(row(2)).not.toContain('→');
+  });
+
+  it('rejects a third review=full member in one batch (state untouched)', async () => {
+    const manifest = writeManifest([
+      { issue: 1, mode: 'slot', batch: 'b1', review: 'full' },
+      { issue: 2, mode: 'slot', batch: 'b1', review: 'full' },
+      { issue: 3, mode: 'slot', batch: 'b1', review: 'full' },
+    ]);
+    await expect(
+      runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
+    expect(fs.existsSync(statePath())).toBe(false);
+  });
+
+  it("honors config's max_full_review_members override", async () => {
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+    fs.writeFileSync(
+      configPath(),
+      JSON.stringify({ schema_version: '1.4.0', max_slots: 3, max_full_review_members: 3 })
+    );
+    const manifest = writeManifest([
+      { issue: 1, mode: 'slot', batch: 'b1', review: 'full' },
+      { issue: 2, mode: 'slot', batch: 'b1', review: 'full' },
+      { issue: 3, mode: 'slot', batch: 'b1', review: 'full' },
+    ]);
+    await runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj']);
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries.filter((e) => e.review === 'full')).toHaveLength(3);
+  });
+
+  it('--review full applies to --issues slot members; an invalid level is rejected', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '5',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--review',
+      'full',
+      '--project',
+      'test-proj',
+    ]);
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries[0]).toMatchObject({ issue: 5, review: 'full' });
+    await expect(
+      runSched([
+        'sched',
+        'enqueue',
+        '--issues',
+        '6',
+        '--mode',
+        'slot',
+        '--batch',
+        'b2',
+        '--review',
+        'deep',
+        '--project',
+        'test-proj',
+      ])
+    ).rejects.toThrow('process.exit(1)');
   });
 });
 

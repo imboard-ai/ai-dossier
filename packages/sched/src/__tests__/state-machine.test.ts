@@ -265,6 +265,24 @@ describe('issue state machine (RFC-0001 §D.1)', () => {
 const TO_FULL = { mode: 'full', batch: null } as const;
 
 describe('requeueMember (regressions)', () => {
+  it('#771: a review=full member requeued to full-cycle keeps its strong floor as a real tier', () => {
+    const base = seeded();
+    let state = {
+      ...base,
+      entries: base.entries.map((e) =>
+        e.issue === 201 ? { ...e, tier: 'mechanical' as const, review: 'full' as const } : e
+      ),
+    };
+    state = transitionIssue(state, 201, 'classified', {}, NOW);
+    state = transitionIssue(state, 201, 'batched', {}, NOW);
+    const result = requeueMember(state, 201, TO_FULL, 'evicted', NOW2);
+    const entry = findEntry(result.state, 201);
+    expect(entry).toMatchObject({ mode: 'full', batch: null, tier: 'strong', review: 'light' });
+    // A light member's tier is untouched.
+    const light = requeueMember(state, 202, TO_FULL, 'evicted', NOW2);
+    expect(findEntry(light.state, 202)).toMatchObject({ tier: 'mid', review: 'light' });
+  });
+
   it('#503: is idempotent on an already-requeued entry — no IllegalTransitionError, metadata retagged', () => {
     let state = seeded();
     state = transitionIssue(state, 201, 'classified', {}, NOW);
@@ -564,6 +582,17 @@ describe('slot state machine (RFC-0001 §D.3)', () => {
 });
 
 describe('validateState', () => {
+  it('#776: backfills paused_at and stale_closed_at on pre-#776 states, and rejects a malformed paused_at', () => {
+    const state = seeded();
+    const legacy = JSON.parse(JSON.stringify(state));
+    delete legacy.paused_at;
+    for (const entry of legacy.entries) delete entry.stale_closed_at;
+    const loaded = validateState(legacy);
+    expect(loaded.paused_at).toBeNull();
+    expect(loaded.entries.every((e) => e.stale_closed_at === null)).toBe(true);
+    expect(() => validateState({ ...state, paused_at: 'yesterday' })).toThrow(/paused_at/);
+  });
+
   it('accepts a state produced by the package itself', () => {
     const state = seeded();
     expect(validateState(JSON.parse(JSON.stringify(state)))).toEqual(state);

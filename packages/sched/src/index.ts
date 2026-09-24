@@ -57,10 +57,12 @@ export {
   dispatchLogPath,
   dispatchSummary,
   escalateTier,
+  FULL_REVIEW_MEMBER_DIRECTIVE,
   fileSizeOrZero,
   HEADLESS_BACKGROUND_GUARD_HOOK_COMMAND,
   HEADLESS_BACKGROUND_GUARD_SETTINGS,
   journalCmdModelFields,
+  memberDispatchTier,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
   procStartTime,
@@ -85,6 +87,7 @@ export {
   assertNoDependencyCycle,
   EnqueueError,
   type EnqueueInput,
+  type EnqueueOptions,
   enqueueEntries,
   LABEL_BLOCK_REASON_PREFIX,
   labelBlockReason,
@@ -240,7 +243,16 @@ export {
   transitionSlot,
   validateState,
 } from './state';
-export { type BlockedItem, buildStatusReport, type ParkedItem, type StatusReport } from './status';
+export {
+  type BlockedItem,
+  buildStatusReport,
+  buildStatusWarnings,
+  type ParkedItem,
+  STATUS_HEALTH_WARNING_AGE_MS,
+  type StatusReport,
+  type StatusWarning,
+  type StatusWarningKind,
+} from './status';
 export { isSafeWorktree, runTeardown, TEARDOWN_TIMEOUT_MS, type TeardownResult } from './teardown';
 export {
   type AttributionMethod,
@@ -280,6 +292,7 @@ export {
   LEGACY_SCHEMA_VERSIONS,
   LIVE_SLOT_STATUSES,
   MAX_FIX_ATTEMPTS_PER_MEMBER,
+  MAX_FULL_REVIEW_MEMBERS,
   MAX_MAX_SLOTS,
   MAX_REBASE_ATTEMPTS,
   MERGED_BATCH_STATUSES,
@@ -288,6 +301,7 @@ export {
   PHASES,
   type Phase,
   type QueueEntry,
+  type ReviewLevel,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
   type SchedConfig,
