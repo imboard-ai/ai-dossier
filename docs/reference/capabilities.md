@@ -241,6 +241,16 @@ offending member; `task-failed` with no parseable report, or `automation-broken`
 (including a timeout) → the batch blocks `suite-unreadable`, every member commit
 preserved. A declared capability's verdict is never replaced by a detected-runner retry.
 
+**Attribution needs a report.** Member attribution reads a vitest JSON report from the
+gate's stdout. A CI-parity script that prints only its own log gives every red run
+`readable: false`, so the batch blocks `suite-unreadable` instead of pinning the failure
+on a member. To keep attribution, have `gate.batch` emit a vitest JSON report on stdout
+(e.g. `--reporter=json` on its test step).
+
+**Diff with three dots.** `origin/<base_branch>` moves whenever the batch worktree
+fetches. `git diff "$DOSSIER_BATCH_BASE"...HEAD` diffs from the merge-base and is stable;
+a two-dot diff would pull in upstream changes merged since the batch branched.
+
 **Timeout-prone full gates.** A repo whose `test.full` cannot finish inside any
 reasonable budget should say so with `timeout_prone: true`. When that is the only full
 gate — no active `gate.batch` — `sched enqueue` refuses to form a new batch and says
