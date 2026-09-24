@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { HARD_BLOCK_LABELS } from '../hard-block-labels';
 import {
   extractDependencyRefs,
+  floorScanText,
   MAX_DEPENDENCY_REFS,
+  PRESCREEN_SCHEMA,
   prescreenIssue,
   stripQuotedSpans,
+  stripReferenceMaterial,
   TEXT_FLOOR_PATTERNS,
 } from '../prescreen';
 import regressionFixtures from './fixtures/prescreen-regression-issues.json';
@@ -23,6 +26,20 @@ function hasControlCharOrBacktick(s: string): boolean {
       ch === '`'
     );
   });
+}
+
+/** #772: a text-floor hit is batchable (`candidate`) but reviewed at full depth. */
+function expectTextFloorReviewFull(result: ReturnType<typeof prescreenIssue>): void {
+  expect(result.verdict).toBe('candidate');
+  expect(result.review).toBe('full');
+  expect(result.reasons.some((r) => r.check === 'text-floor')).toBe(true);
+}
+
+/** No finding at all: `candidate`, `light`, no reasons. */
+function expectClean(result: ReturnType<typeof prescreenIssue>): void {
+  expect(result.verdict).toBe('candidate');
+  expect(result.review).toBe('light');
+  expect(result.reasons).toHaveLength(0);
 }
 
 describe('prescreenIssue — hard-block labels', () => {
@@ -60,40 +77,40 @@ describe('prescreenIssue — hard-block labels', () => {
 });
 
 describe('prescreenIssue — text floor keywords', () => {
-  it('rejects on a security keyword in the body', () => {
+  it('flags review=full (not exclusion) on a security keyword in the body', () => {
     const result = prescreenIssue({
       ...baseInput,
       body: 'This route has no security check on write access.',
     });
-    expect(result.verdict).toBe('full');
+    expectTextFloorReviewFull(result);
     expect(result.reasons[0]).toMatchObject({ check: 'text-floor' });
   });
 
   it('names the matched keyword in the reason message', () => {
     const result = prescreenIssue({ ...baseInput, body: 'This integrates with Stripe.' });
-    expect(result.verdict).toBe('full');
+    expectTextFloorReviewFull(result);
     expect(result.reasons[0]?.message).toContain("keyword: 'stripe'");
   });
 
-  it('rejects on a terraform keyword in the title', () => {
+  it('flags review=full (not exclusion) on a terraform keyword in the title', () => {
     const result = prescreenIssue({ ...baseInput, title: 'CI gate: fail the terraform plan job' });
-    expect(result.verdict).toBe('full');
+    expectTextFloorReviewFull(result);
   });
 
-  it('rejects on a deploy-pipeline keyword', () => {
+  it('flags review=full (not exclusion) on a deploy-pipeline keyword', () => {
     const result = prescreenIssue({
       ...baseInput,
       body: 'The deploy job failed on every push to main.',
     });
-    expect(result.verdict).toBe('full');
+    expectTextFloorReviewFull(result);
   });
 
-  it('rejects on a new-package keyword (multi-word phrase, whitespace-insensitive)', () => {
+  it('flags review=full (not exclusion) on a new-package keyword (multi-word phrase, whitespace-insensitive)', () => {
     const result = prescreenIssue({
       ...baseInput,
       body: 'This adds a new   package to the monorepo.',
     });
-    expect(result.verdict).toBe('full');
+    expectTextFloorReviewFull(result);
   });
 
   it('does NOT reject bare "auth" — collides with benign phrasing like `gh auth`', () => {
@@ -101,7 +118,7 @@ describe('prescreenIssue — text floor keywords', () => {
       ...baseInput,
       body: 'Excluded from CI — no `gh` auth there, but runnable locally with auth.',
     });
-    expect(result.verdict).toBe('candidate');
+    expectClean(result);
   });
 
   it('does NOT reject bare "infrastructure" — collides with "test infrastructure"', () => {
@@ -109,7 +126,7 @@ describe('prescreenIssue — text floor keywords', () => {
       ...baseInput,
       body: 'This would have been an unrelated rider on a test-infrastructure change.',
     });
-    expect(result.verdict).toBe('candidate');
+    expectClean(result);
   });
 
   it('treats a regex-metacharacter phrase as a literal keyword, not a pattern', () => {
@@ -117,7 +134,7 @@ describe('prescreenIssue — text floor keywords', () => {
     // a keyword's characters must be escaped before reaching `new RegExp`, so a keyword like
     // "c++" (hypothetical future addition) could never be misread as a quantifier.
     const result = prescreenIssue({ ...baseInput, body: 'Our ci/cd pipeline is broken.' });
-    expect(result.verdict).toBe('full');
+    expectTextFloorReviewFull(result);
   });
 
   it('every pattern name is unique (reasons stay attributable)', () => {
@@ -252,7 +269,8 @@ describe('prescreenIssue — open dependencies', () => {
  *   reject a real slot-eligible issue (that would silently regress classification quality).
  * - The 12 known `full` issues split: 7 have a genuinely deterministic signal in their
  *   title/body/labels (terraform, security, deploy, migration, authorization, or a `cicd`
- *   label) and MUST come back `full`. The remaining 5 (#3839, #3893, #3632 — rule 8
+ *   label) and MUST be flagged — since #772 as `candidate` + `review: full` (a text-floor hit
+ *   is no longer an exclusion; `expectedReview` carries it). The remaining 5 (#3839, #3893, #3632 — rule 8
  *   visual/browser review; #3961 — rules 9/10 dependency/confidence; #3923 — rules 5/6 file/diff
  *   size, unavailable without a plan:v1 artifact) have no deterministic signal available from
  *   issue text alone — asserted `candidate` ON PURPOSE. That's not a miss; it's exactly what
@@ -280,19 +298,19 @@ describe('prescreenIssue — quoted spans are not the change surface (#627)', ()
     expect(result.verdict).toBe('candidate');
   });
 
-  it('the SAME keyword unquoted still forces full', () => {
+  it('the SAME keyword unquoted still flags review=full', () => {
     // The narrowing must not disarm the rule — this is the case it exists for.
     const result = prescreenIssue({
       ...baseInput,
       title: 'feat: rewrite the payment capture flow',
     });
-    expect(result.verdict).toBe('full');
+    expectTextFloorReviewFull(result);
     expect(result.reasons[0]?.check).toBe('text-floor');
   });
 
   it('an unbalanced quote blanks nothing', () => {
     const result = prescreenIssue({ ...baseInput, title: 'fix: the " in our terraform output' });
-    expect(result.verdict).toBe('full');
+    expectTextFloorReviewFull(result);
   });
 
   it('a quote spanning more than MAX_QUOTED_SPAN is treated as prose, not stripped', () => {
@@ -300,7 +318,7 @@ describe('prescreenIssue — quoted spans are not the change surface (#627)', ()
     // text and blank every keyword.
     const long = 'x'.repeat(200);
     const result = prescreenIssue({ ...baseInput, title: `fix: "${long} terraform ${long}"` });
-    expect(result.verdict).toBe('full');
+    expectTextFloorReviewFull(result);
   });
 
   it('stripQuotedSpans leaves unquoted text byte-identical', () => {
@@ -317,18 +335,21 @@ describe('prescreenIssue — regression fixture (imboard-monorepo pilot attempt 
     body: string;
     knownCycle: 'slot' | 'full';
     expectedVerdict: 'full' | 'candidate';
+    /** #772: what `review` must be. The 7 text-floor issues moved from `verdict: full` to `candidate` + `review: full`. */
+    expectedReview: 'light' | 'full';
   }
 
   const fixtures = regressionFixtures as Fixture[];
 
   for (const fixture of fixtures) {
-    it(`#${fixture.number} → ${fixture.expectedVerdict}`, () => {
+    it(`#${fixture.number} → ${fixture.expectedVerdict}, review=${fixture.expectedReview}`, () => {
       const result = prescreenIssue({
         title: fixture.title,
         body: fixture.body,
         labels: fixture.labels,
       });
       expect(result.verdict).toBe(fixture.expectedVerdict);
+      expect(result.review).toBe(fixture.expectedReview);
     });
   }
 
@@ -343,15 +364,18 @@ describe('prescreenIssue — regression fixture (imboard-monorepo pilot attempt 
     expect(fixtures.filter((f) => f.knownCycle === 'full')).toHaveLength(12);
   });
 
-  it('the pre-screen deterministically rejects exactly 7 of the 15 (the aggregate this PR reports)', () => {
+  it('the pre-screen deterministically flags exactly 7 of the 15 (the aggregate #538 reports) — as review=full, excluding none (#772)', () => {
     // Pinned so the reported hit rate (docs/reports/issue-538-classifier-cost-methodology.md)
     // cannot silently drift — adding/removing a fixture without updating that report now fails
-    // a test instead of just going stale.
-    const results = fixtures.map(
-      (f) => prescreenIssue({ title: f.title, body: f.body, labels: f.labels }).verdict
+    // a test instead of just going stale. #772: the same 7 are still caught deterministically
+    // (section-aware scanning dropped none of them), but as `review: full` candidates — none of
+    // the 15 carries a hard-block label, open dependency, or plan:v1 artifact, so none is excluded.
+    const results = fixtures.map((f) =>
+      prescreenIssue({ title: f.title, body: f.body, labels: f.labels })
     );
-    expect(results.filter((v) => v === 'full')).toHaveLength(7);
-    expect(results.filter((v) => v === 'candidate')).toHaveLength(8);
+    expect(results.filter((r) => r.review === 'full')).toHaveLength(7);
+    expect(results.filter((r) => r.review === 'light')).toHaveLength(8);
+    expect(results.filter((r) => r.verdict === 'full')).toHaveLength(0);
   });
 
   it('never falsely rejects a known-slot issue (the safety property AC4 exists to protect)', () => {
@@ -361,5 +385,202 @@ describe('prescreenIssue — regression fixture (imboard-monorepo pilot attempt 
       .filter((f) => slotIssues.includes(f.number))
       .map((f) => prescreenIssue({ title: f.title, body: f.body, labels: f.labels }).verdict);
     expect(results).toEqual(['candidate', 'candidate', 'candidate']);
+    const reviews = fixtures
+      .filter((f) => slotIssues.includes(f.number))
+      .map((f) => prescreenIssue({ title: f.title, body: f.body, labels: f.labels }).review);
+    expect(reviews).toEqual(['light', 'light', 'light']);
+  });
+});
+
+/**
+ * #772 (parent RCA #770, Option A): the text floor scans the change surface, not provenance, and
+ * a keyword hit means `review: full` — not exclusion from a batch.
+ */
+describe('prescreenIssue — section-aware text floor (#772)', () => {
+  // imboard#4114, shape-preserving excerpt: the ONLY risk keyword ("security") sits in the
+  // provenance line. The issue is a data-hygiene cascade cleanup.
+  const issue4114 = {
+    title:
+      'chore: guest-board and example-pool cleanup are partial cascades that bypass purgeBoardCompletely',
+    body: [
+      'Found by the #4103 security review (committee subgroups slice 1/4).',
+      '',
+      '`services/guestBoardCleanupService.ts` (`deleteAbandonedBoard`) and `services/exampleBoardPoolService.ts` are bespoke, partial board cascades: they delete `Board` + `BoardUser` directly inside their own transactions rather than delegating to `purgeBoardCompletely`.',
+      '',
+      '## Suggested scope',
+      '',
+      '- Decide: delegate to `purgeBoardCompletely` or keep the bespoke deletes and add a drift test.',
+      '- Either way, cover it with a test: seed a guest/pool board, run the cleanup, assert no orphan survives.',
+    ].join('\n'),
+    labels: ['in-progress'],
+  };
+
+  // imboard#4343, shape-preserving excerpt: genuine billing scope, stated in prose.
+  const issue4343 = {
+    title:
+      'Guardrail: steer duration date-arithmetic to addDaysUtc — sweep-job query windows still use local setDate()',
+    body: [
+      '## What the user sees',
+      '',
+      'Nothing today — this is a latent guardrail gap, filed as the deliberate out-of-scope remainder of #4314.',
+      '',
+      '#4314 fixed the three billing windows that are **persisted as an end-date on a board**.',
+      '',
+      '## Acceptance',
+      '',
+      '1. The sweep-job query windows either move to `addDaysUtc`, or carry a one-line comment.',
+      '',
+      '## Notes',
+      '',
+      '- Guardrail follow-up to #4314 (PR pending). Not a regression.',
+    ].join('\n'),
+    labels: ['bug'],
+  };
+
+  it('AC1: imboard#4114-shaped body (keyword only in provenance) → no text-floor hit', () => {
+    const result = prescreenIssue(issue4114);
+    expect(result.reasons.filter((r) => r.check === 'text-floor')).toHaveLength(0);
+    expectClean(result);
+  });
+
+  it('AC1 guard: the same body WITHOUT provenance handling would have hit (the fixture is live)', () => {
+    const naive = stripQuotedSpans(`${issue4114.title}\n${issue4114.body}`);
+    expect(TEXT_FLOOR_PATTERNS.some((p) => p.match(naive) !== null)).toBe(true);
+  });
+
+  it('AC2: genuine billing scope (imboard#4343-shaped) → verdict candidate, review full', () => {
+    const result = prescreenIssue(issue4343);
+    expect(result.verdict).toBe('candidate');
+    expect(result.review).toBe('full');
+    expect(result.reasons).toEqual([
+      expect.objectContaining({ check: 'text-floor', message: expect.stringContaining('billing') }),
+    ]);
+  });
+
+  it('AC3: a hard-block label still → verdict full, even alongside a text-floor hit', () => {
+    const result = prescreenIssue({ ...issue4343, labels: ['needs-clarification'] });
+    expect(result.verdict).toBe('full');
+    expect(result.review).toBe('full');
+  });
+
+  it('AC3: an open external dependency still → verdict full', () => {
+    const result = prescreenIssue({ ...baseInput, openDependencies: [42] });
+    expect(result.verdict).toBe('full');
+    expect(result.review).toBe('full');
+  });
+
+  it('a plan:v1 path floor or >8 predicted files still → verdict full', () => {
+    expect(prescreenIssue({ ...baseInput, predictedFiles: ['packages/auth/x.ts'] }).verdict).toBe(
+      'full'
+    );
+    const nine = Array.from({ length: 9 }, (_, i) => `src/f${i}.ts`);
+    expect(prescreenIssue({ ...baseInput, predictedFiles: nine }).verdict).toBe('full');
+  });
+
+  it('PRESCREEN_SCHEMA names the v2 contract', () => {
+    expect(PRESCREEN_SCHEMA).toBe('prescreen:v2');
+  });
+
+  it.each([
+    'Found by the #4103 security review.',
+    'Found during the billing audit.',
+    'Discovered during the payment migration.',
+    '**Related:** #12 (security)',
+    'Related: the billing epic',
+    '- Follow-up to #4314 (billing windows)',
+    'Followup to the security sweep',
+    'Split from #99 (stripe work)',
+    'Spun off from the terraform cleanup',
+    'Parent: #770 (security RCA)',
+    '> Surfaced by the deploy review',
+    'See also #10 — billing',
+  ])('drops the provenance line %j', (line) => {
+    expect(stripReferenceMaterial(line).trim()).toBe('');
+    expect(prescreenIssue({ ...baseInput, body: line }).reasons).toHaveLength(0);
+  });
+
+  it('drops a link-only line (URLs, markdown links, #refs) but keeps prose around it', () => {
+    const body = [
+      'https://example.com/security/advisory',
+      '- [billing runbook](https://example.com/billing) , #12, org/repo#34',
+      'Rename the widget helper.',
+    ].join('\n');
+    const result = prescreenIssue({ ...baseInput, body });
+    expect(result.reasons).toHaveLength(0);
+    expect(stripReferenceMaterial(body)).toContain('Rename the widget helper.');
+  });
+
+  it('strips a mid-line provenance clause to the end of its sentence, keeping the rest of the line', () => {
+    const out = stripReferenceMaterial(
+      'Two services bypass the cascade. Found by the security review. Fix the cascade.'
+    );
+    expect(out).toContain('Two services bypass the cascade.');
+    expect(out).toContain('Fix the cascade.');
+    expect(out).not.toContain('security');
+  });
+
+  it('keeps "related"/"context" mid-sentence — they are ordinary prose there', () => {
+    const result = prescreenIssue({
+      ...baseInput,
+      body: 'Rewrite the related billing job; the context is the payment retry path.',
+    });
+    expectTextFloorReviewFull(result);
+  });
+
+  it.each([
+    '## Related',
+    '### Related issues',
+    '## References',
+    '## See also',
+    '## Context',
+    '## Background:',
+  ])('drops the whole %j section (to the next same-or-higher heading)', (heading) => {
+    const body = [
+      'Rename the widget helper.',
+      heading,
+      '- The security audit that found this.',
+      '#### nested detail',
+      'The billing epic tracks the rest.',
+      '## Acceptance',
+      '- [ ] helper renamed',
+    ].join('\n');
+    const result = prescreenIssue({ ...baseInput, body });
+    expect(result.reasons).toHaveLength(0);
+    expect(stripReferenceMaterial(body)).toContain('helper renamed');
+  });
+
+  it('a scope section AFTER an ignored section is scanned again', () => {
+    const body = ['## Background', 'Old notes.', '## Scope', 'Rewrite the billing sweep.'].join(
+      '\n'
+    );
+    expectTextFloorReviewFull(prescreenIssue({ ...baseInput, body }));
+  });
+
+  it('unknown headings (Problem, Fix, What the user sees) are scanned — denylist, not allowlist', () => {
+    for (const heading of ['## Problem', '## Fix', '## What the user sees']) {
+      const result = prescreenIssue({
+        ...baseInput,
+        body: `${heading}\nThe stripe webhook drops events.`,
+      });
+      expectTextFloorReviewFull(result);
+    }
+  });
+
+  it('the title and labels are always scanned (provenance handling is body-only)', () => {
+    expectTextFloorReviewFull(prescreenIssue({ ...baseInput, title: 'Found by: security' }));
+    expectTextFloorReviewFull(prescreenIssue({ ...baseInput, labels: ['security'] }));
+  });
+
+  it('floorScanText composes reference stripping with quote stripping (#627)', () => {
+    const text = floorScanText('fix "payment" label', 'Found by the security review.', []);
+    expect(text).not.toContain('payment');
+    expect(text).not.toContain('security');
+  });
+
+  it('stripReferenceMaterial preserves line count and leaves plain scope text byte-identical', () => {
+    const body = 'Line one.\n\nLine three with a billing change.';
+    expect(stripReferenceMaterial(body)).toBe(body);
+    const withProv = 'Found by X.\nKeep me.';
+    expect(stripReferenceMaterial(withProv).split('\n')).toHaveLength(2);
   });
 });

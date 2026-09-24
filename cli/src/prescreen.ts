@@ -24,7 +24,7 @@ import { scanRiskFloor } from './plan-artifact';
 export interface TextFloorPattern {
   /** Reported in the reason; also the RFC-0001 E.2 rule it approximates. */
   name: string;
-  /** Matched case-insensitively against title + body + label names, joined. Returns the matched keyword, or null. */
+  /** Matched case-insensitively against {@link floorScanText} (title + reference-stripped body + label names). Returns the matched keyword, or null. */
   match: (text: string) => string | null;
 }
 
@@ -125,7 +125,10 @@ const MAX_QUOTED_SPAN = 120;
  * issues are rejected by text-floor alone, including genuine risk-floor cases
  * (#3403 `terraform`, #3901 `authorization`). That change would have gutted the
  * deterministic rejection rate the pre-screen exists to provide, and #538's
- * cost saving with it.
+ * cost saving with it. (#772 later made that move deliberately — but not as
+ * "advisory": a text-floor hit still costs no model call and now carries
+ * `review: full`, so the genuine risk-floor cases are reviewed at full depth
+ * inside a batch instead of being excluded from one. See `PRESCREEN_SCHEMA`.)
  *
  * Stripping quoted spans, by contrast, leaves all 15 fixture verdicts
  * unchanged — the true positives name their risk surface in prose, not in
@@ -140,6 +143,105 @@ export function stripQuotedSpans(text: string): string {
   return text
     .replace(new RegExp(`"[^"\\n]{0,${MAX_QUOTED_SPAN}}"`, 'g'), ' ')
     .replace(new RegExp(`\`[^\`\\n]{0,${MAX_QUOTED_SPAN}}\``, 'g'), ' ');
+}
+
+/**
+ * #772: markdown section headings whose content is reference/provenance material, not the change
+ * surface — the whole section (to the next heading of the same or higher level) is dropped before
+ * the text floor runs. A denylist on purpose: real issue bodies use arbitrary headings for their
+ * scope ("Problem", "What the user sees", "Fix"), so an allowlist of scope/requirements/acceptance
+ * headings would silently drop genuine scope. Matched against the heading text, case-insensitive,
+ * as a leading word/phrase ("## Related issues", "### Background:").
+ */
+const IGNORED_SECTION_HEADING_RE =
+  /^(?:related|references?|see\s+also|context|background|provenance|origin)\b/i;
+
+/** ATX markdown heading: 1–6 `#`, a space, the heading text. */
+const HEADING_RE = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+
+/**
+ * Line-leading markdown decoration stripped before the provenance test: whitespace, blockquote
+ * `>`, list markers (`-`, `*`, `+`, `1.`), task boxes, and emphasis (`**`, `_`).
+ */
+const LINE_DECORATION_RE = /^(?:\s|>|[-*+](?=\s)|\d+[.)](?=\s)|\[[ xX]\]|\*\*|__|\*|_)*/;
+
+/**
+ * #772: a line that STARTS with one of these phrases records where the issue came from or what it
+ * relates to — "Found by the #4103 security review", "Follow-up to #4314", "Parent: #770" — not
+ * what the change touches. Whole line dropped.
+ */
+const PROVENANCE_LINE_RE =
+  /^(?:found\s+(?:by|during|in|while)|discovered\s+(?:by|during|in|while)|surfaced\s+(?:by|during|in)|spotted\s+(?:by|during|in)|reported\s+(?:by|during|in)|related\b|follow[\s-]?up\s+(?:to|of|from|for)\b|split\s+(?:from|out\s+of|off\s+from)|spun\s+(?:off|out)\s+(?:of|from)|parent\s*:|refs?\s*:|see\s+also\b|context\s*:|background\s*:|provenance\s*:)/i;
+
+/**
+ * #772: the unambiguous provenance phrases, stripped mid-line too — from the phrase to the end of
+ * its sentence (`.`/`;` followed by whitespace, or end of line). "…partial cascades. Found by the
+ * #4103 security review." keeps the first sentence and drops the second. Ambiguous words
+ * ("related", "context", "background") are line-leading only: mid-sentence they are ordinary prose
+ * ("the related billing job").
+ */
+const PROVENANCE_CLAUSE_RE =
+  /\b(?:found\s+(?:by|during)|discovered\s+(?:by|during|while)|surfaced\s+(?:by|during)|follow[\s-]?up\s+(?:to|of)|split\s+(?:from|out\s+of|off\s+from)|spun\s+(?:off|out)\s+(?:of|from))\b.*?(?:[.;](?=\s|$)|$)/gi;
+
+/**
+ * A line carrying nothing but references: URLs, markdown links, `#N` / `owner/repo#N` refs, and
+ * separators. Checked by erasing every reference and separator and testing for an empty remainder.
+ */
+function isLinkOnlyLine(line: string): boolean {
+  const remainder = line
+    .replace(/\[[^\]\n]*\]\([^)\n]*\)/g, ' ')
+    .replace(/<?https?:\/\/[^\s>)]+>?/g, ' ')
+    .replace(/\b[\w.-]+\/[\w.-]+#\d+\b/g, ' ')
+    .replace(/#\d+\b/g, ' ')
+    .replace(/[\s\-*+>•|,;:/()[\]&.–—]|\band\b|\bor\b/gi, '');
+  return remainder === '' && /\S/.test(line);
+}
+
+/**
+ * #772: the issue body with reference material removed — the part a text-floor keyword may
+ * legitimately fire on. Removes (in order): sections under an {@link IGNORED_SECTION_HEADING_RE}
+ * heading, provenance lines ({@link PROVENANCE_LINE_RE}), link-only lines, and mid-line provenance
+ * clauses ({@link PROVENANCE_CLAUSE_RE}). Quoted spans are handled separately by
+ * {@link stripQuotedSpans} (#627). Pure; line structure is preserved (dropped lines become empty)
+ * so `stripQuotedSpans`'s same-line bound behaves exactly as before.
+ */
+export function stripReferenceMaterial(body: string): string {
+  const out: string[] = [];
+  /** Heading level of the ignored section currently being skipped, or null. */
+  let skipLevel: number | null = null;
+  for (const line of body.split('\n')) {
+    const heading = HEADING_RE.exec(line);
+    if (heading) {
+      const level = heading[1].length;
+      if (skipLevel !== null && level > skipLevel) {
+        out.push('');
+        continue; // a sub-heading inside an ignored section stays ignored
+      }
+      skipLevel = IGNORED_SECTION_HEADING_RE.test(heading[2]) ? level : null;
+      out.push(skipLevel === null ? line : '');
+      continue;
+    }
+    if (skipLevel !== null) {
+      out.push('');
+      continue;
+    }
+    const content = line.replace(LINE_DECORATION_RE, '');
+    if (PROVENANCE_LINE_RE.test(content) || isLinkOnlyLine(content)) {
+      out.push('');
+      continue;
+    }
+    out.push(line.replace(PROVENANCE_CLAUSE_RE, ' '));
+  }
+  return out.join('\n');
+}
+
+/**
+ * The exact text the text floor scans (#772): title + section/provenance-filtered body + label
+ * names, with quoted spans blanked (#627). Exported so measurement tooling
+ * (`scripts/prescreen-backlog-measure.mjs`) and tests see precisely what the rule sees.
+ */
+export function floorScanText(title: string, body: string, labels: readonly string[]): string {
+  return stripQuotedSpans(`${title}\n${stripReferenceMaterial(body)}\n${labels.join(' ')}`);
 }
 
 /** `Depends on #N` references resolved per issue; each costs a `gh` call downstream (command layer), same rationale as `MAX_ISSUE_SELECTION` (`issue-selection.ts`). */
@@ -188,9 +290,36 @@ export interface PrescreenInput {
   openDependencies?: readonly number[];
 }
 
+/**
+ * Version of the `classify prescreen` JSON contract (#772). v1 (implicit, pre-#772): any finding,
+ * text-floor included, meant `verdict: full`. v2: a text-floor hit is `verdict: candidate` +
+ * `review: full`; `verdict: full` is reserved for the checks that genuinely exclude an issue from
+ * a batch (hard-block label, open dependency, plan:v1 path floor, >8 predicted files).
+ */
+export const PRESCREEN_SCHEMA = 'prescreen:v2';
+
+/** Checks whose hit excludes the issue from batching outright (`verdict: full`). */
+const EXCLUDING_CHECKS: ReadonlySet<PrescreenReason['check']> = new Set([
+  'hard-block-label',
+  'open-dependency',
+  'path-floor',
+  'file-count',
+]);
+
 export interface PrescreenVerdict {
-  /** `full` = an obvious floor hit found, reject before any model call. `candidate` = proceed to the bounded mechanical-tier classify pass. */
+  /**
+   * `full` = an excluding floor hit (hard-block label, open dependency, plan:v1 path floor,
+   * >8 predicted files) — reject before any model call. `candidate` = proceed to the bounded
+   * mechanical-tier classify pass; read `review` for how deeply it must be reviewed.
+   */
   verdict: 'full' | 'candidate';
+  /**
+   * Review depth the issue needs, vocabulary shared with the scheduler's per-member `review`
+   * (#771): `full` when ANY floor finding exists — a text-floor keyword hit on a `candidate`
+   * means "batchable, but reviewed at full depth" (#770 Option A), not exclusion. `light` when
+   * no check found anything.
+   */
+  review: 'light' | 'full';
   /** Every check's finding, in evaluation order — not just the one that decided `verdict`. */
   reasons: PrescreenReason[];
 }
@@ -223,8 +352,8 @@ function sanitize(value: string): string {
 }
 
 /**
- * Run every deterministic check, in order, and record every hit — first hit decides `verdict`,
- * but the caller (and the rationale a consumer posts) gets the full list, matching the existing
+ * Run every deterministic check, in order, and record every hit — an excluding hit decides
+ * `verdict`, any hit decides `review`, and the caller (and the rationale a consumer posts) gets the full list, matching the existing
  * "a verdict may hit several" precedent in `issue-cycle-classifier.ds.md`.
  */
 export function prescreenIssue(input: PrescreenInput): PrescreenVerdict {
@@ -238,7 +367,7 @@ export function prescreenIssue(input: PrescreenInput): PrescreenVerdict {
     });
   }
 
-  const text = stripQuotedSpans(`${input.title}\n${input.body}\n${input.labels.join(' ')}`);
+  const text = floorScanText(input.title, input.body, input.labels);
   for (const pattern of TEXT_FLOOR_PATTERNS) {
     const hit = pattern.match(text);
     if (hit !== null) {
@@ -270,5 +399,9 @@ export function prescreenIssue(input: PrescreenInput): PrescreenVerdict {
     });
   }
 
-  return { verdict: reasons.length > 0 ? 'full' : 'candidate', reasons };
+  return {
+    verdict: reasons.some((r) => EXCLUDING_CHECKS.has(r.check)) ? 'full' : 'candidate',
+    review: reasons.length > 0 ? 'full' : 'light',
+    reasons,
+  };
 }

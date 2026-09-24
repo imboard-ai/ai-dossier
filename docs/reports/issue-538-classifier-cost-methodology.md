@@ -40,6 +40,13 @@ issues are caught deterministically via a genuinely present title/body/label sig
 (terraform, security, deploy, migration, authorization keywords, or a `cicd` label — see the
 fixture file and `cli/README.md`'s Classify Pre-Screen section for the exact breakdown).
 
+> **Superseded semantics (#772, `prescreen:v2`).** The same 7 are still caught deterministically,
+> with no model call, but a text-floor hit is no longer a rejection: it is now
+> `verdict: "candidate"` + `review: "full"` (batchable as a full-review member, #770 Option A).
+> The test now pins 7 `review: full` / 8 `review: light` / 0 `verdict: full` for this fixture.
+> The token argument above is unchanged — the text floor still resolves these 7 for free — only
+> what the resolution *means* for batching changed.
+
 At baseline cost (§4.1's ~64k mean, applied to these 7), those 7 issues would extrapolate to
 ~7 × 64k ≈ 448k tokens — coincidentally the same total §4.1 measured for wave 2's 7 dispatches,
 but a different set of 7 issues; this is an extrapolation from the §4.1 mean, not a reuse of its
