@@ -1076,14 +1076,17 @@ may join a batch, but as a full-review member (#770 Option A), not be excluded f
 that reads only `verdict` must also read `review` to keep routing risk-keyword issues to
 full-depth review. The text floor is also section-aware in v2: it scans the title, labels,
 and the body **minus** reference material — sections headed Related / References / See
-also / Context / Background / Provenance / Origin, provenance lines ("Found by…",
-"Discovered during…", "Related…", "Follow-up to…", "Split from…", "Parent:", …), mid-line
-provenance clauses that open a sentence ("…. Found by the #4103 security review."), and
-link-only lines — in addition to the quoted spans #627 already blanked. A heading is ignored
-only when its whole text is one of those names ("## Background jobs" is scope); `#` lines
-inside fenced code blocks are never headings. Other sections (Problem, Scope, Fix, …) are
-scanned; a sub-heading nested inside an ignored section stays ignored. `scripts/prescreen-backlog-measure.mjs --repo owner/name` measures
-v1 vs v2 over a repo's open backlog (read-only; prints no issue text).
+also / Links / Context / Background / Provenance / Origin; reference lines ("Related: #…",
+"Parent: #…", "Refs: …", "See also …"); provenance clauses that open a sentence ("Found by
+the #4103 security review.", "Discovered during…", "Follow-up to #…", "Split from #…" —
+stripped to the end of the clause, the rest of the line is kept); and link-only lines (a
+markdown link's text is kept, only its target is dropped) — in addition to the quoted spans
+#627 already blanked. A heading is ignored only when its whole text is one of those names
+("## Background jobs" is scope); `#` lines inside fenced code blocks are never headings.
+Mid-sentence the same words are prose ("the token leak is found during checkout") and are
+scanned. Other sections (Problem, Scope, Fix, …) are scanned; a sub-heading nested inside an
+ignored section stays ignored. `scripts/prescreen-backlog-measure.mjs --repo owner/name`
+measures v1 vs v2 over a repo's open backlog (read-only; prints no issue text).
 
 Coverage is deliberately partial — it catches the OBVIOUS floor hits, not all of them:
 
