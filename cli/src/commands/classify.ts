@@ -16,7 +16,13 @@ import {
 } from '../gh';
 import { parseIssueSelection } from '../issue-selection';
 import { findLatestPlan } from '../plan-artifact';
-import { extractDependencyRefs, type PrescreenReason, prescreenIssue } from '../prescreen';
+import {
+  extractDependencyRefs,
+  PRESCREEN_SCHEMA,
+  type PrescreenReason,
+  type PrescreenVerdict,
+  prescreenIssue,
+} from '../prescreen';
 
 interface PrescreenOptions {
   issue: string;
@@ -88,23 +94,26 @@ function fetchPredictedFiles(issue: string, repo: string | undefined): Predicted
   return { status: 'present', files: latest.artifact.predictedFiles };
 }
 
-/** The one JSON shape every path emits — success and failure alike carry the same five keys, plus `degraded`/`warnings` when something didn't run cleanly. */
+/** The one JSON shape every path emits (`schema: prescreen:v2`, #772) — success and failure alike carry the same keys, plus `degraded`/`warnings` when something didn't run cleanly. */
 function emitVerdict(fields: {
   issue: number;
   state: string | null;
-  verdict: 'full' | 'candidate';
+  verdict: PrescreenVerdict['verdict'];
+  review: PrescreenVerdict['review'];
   reasons: PrescreenReason[];
   planArtifact: PlanArtifactStatus | null;
   warnings: string[];
 }): void {
-  const { issue, state, verdict, reasons, planArtifact, warnings } = fields;
+  const { issue, state, verdict, review, reasons, planArtifact, warnings } = fields;
   for (const w of warnings) console.error(`⚠ ${w}`);
   console.log(
     JSON.stringify(
       {
+        schema: PRESCREEN_SCHEMA,
         issue,
         state,
         verdict,
+        review,
         reasons,
         plan_artifact: planArtifact,
         degraded: warnings.length > 0,
@@ -141,6 +150,9 @@ function registerPrescreenSubcommand(cmd: Command): void {
           issue: Number(options.issue),
           state: null,
           verdict: 'candidate',
+          // Nothing was scanned — never claim "light". Fail open on exclusion (candidate) but
+          // fail safe on depth: an unread issue gets full review.
+          review: 'full',
           reasons: [],
           planArtifact: null,
           warnings: [meta.error],
@@ -180,6 +192,7 @@ function registerPrescreenSubcommand(cmd: Command): void {
         issue: Number(options.issue),
         state: meta.state,
         verdict: result.verdict,
+        review: result.review,
         reasons: result.reasons,
         planArtifact: predicted.status,
         warnings,

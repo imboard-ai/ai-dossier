@@ -42,9 +42,11 @@ describe('classify prescreen', () => {
     expect(code).toBeUndefined();
     const out = loggedJson();
     expect(out).toMatchObject({
+      schema: 'prescreen:v2',
       issue: 538,
       state: 'OPEN',
       verdict: 'candidate',
+      review: 'light',
       reasons: [],
       plan_artifact: 'absent',
       degraded: false,
@@ -52,7 +54,7 @@ describe('classify prescreen', () => {
     });
   });
 
-  it('an obvious floor hit comes back full with a reason', async () => {
+  it('a text-floor hit comes back candidate + review=full with a reason, not excluded (#772)', async () => {
     execHandles((file, args) => {
       if (file === 'gh' && args[4] === 'title,body,labels,state') {
         return issueMetaJson({ title: 'fix: terraform plan job' });
@@ -64,7 +66,9 @@ describe('classify prescreen', () => {
     await runCommandTree(registerClassifyCommand, ['classify', 'prescreen', '--issue', '538']);
 
     const out = loggedJson();
-    expect(out.verdict).toBe('full');
+    expect(out.schema).toBe('prescreen:v2');
+    expect(out.verdict).toBe('candidate');
+    expect(out.review).toBe('full');
     expect(out.reasons).toEqual([expect.objectContaining({ check: 'text-floor' })]);
   });
 
@@ -85,7 +89,9 @@ describe('classify prescreen', () => {
 
     expect(code).toBeUndefined();
     const out = loggedJson();
+    expect(out.schema).toBe('prescreen:v2');
     expect(out.verdict).toBe('candidate');
+    expect(out.review).toBe('full'); // nothing scanned ⇒ never claim light
     expect(out.state).toBeNull();
     expect(out.degraded).toBe(true);
     expect((out.warnings as string[])[0]).toMatch(/could not find it|gh|Could not read issue/i);
@@ -180,6 +186,7 @@ describe('classify prescreen', () => {
 
     const out = loggedJson();
     expect(out.verdict).toBe('full');
+    expect(out.review).toBe('full');
     expect(out.reasons).toEqual([expect.objectContaining({ check: 'open-dependency' })]);
   });
 
