@@ -46,6 +46,34 @@ export interface ParkedItem {
   since: string;
 }
 
+/**
+ * #776: how long a pause, or a live slot without progress, may last before
+ * `sched status` flags it. A day is long past every phase stall allowance
+ * (30 min default, 90 min `implement`), so anything older is not "still
+ * working" — it is state nobody came back to.
+ */
+export const STATUS_HEALTH_WARNING_AGE_MS = 24 * 60 * 60 * 1000;
+
+/** The kinds of health warning `sched status` raises (#776). */
+export type StatusWarningKind = 'long-pause' | 'stale-engine-lease' | 'stuck-slot' | 'stale-closed';
+
+/**
+ * A condition an operator must act on (#776): the 2026-09-24 incident was a
+ * scheduler paused for days, a dead engine lease, and a slot `recovering` an
+ * issue shipped four days earlier — all visible in the raw report, none of
+ * them called out. `message` states the fact; `remedy` is the exact command
+ * (or step) that resolves it.
+ */
+export interface StatusWarning {
+  kind: StatusWarningKind;
+  message: string;
+  remedy: string;
+  /** The issue the warning is about, when it is about one. */
+  issue?: number;
+  /** The slot the warning is about, when it is about one. */
+  slot?: number;
+}
+
 /** Machine-readable status report (`sched status --json`). */
 export interface StatusReport {
   /** Project slug the report was built for (which state bucket this is). */
@@ -109,13 +137,109 @@ export interface StatusReport {
   blocked: BlockedItem[];
   failed: QueueEntry[];
   stopped: QueueEntry[];
+  /** Health warnings (#776) — empty when nothing needs an operator. */
+  warnings: StatusWarning[];
+}
+
+function hoursSince(iso: string, nowMs: number): number | null {
+  const at = Date.parse(iso);
+  return Number.isNaN(at) ? null : (nowMs - at) / (60 * 60 * 1000);
+}
+
+function formatHours(hours: number): string {
+  return hours >= 48 ? `${Math.floor(hours / 24)}d` : `${Math.floor(hours)}h`;
+}
+
+/** The `sched stop` invocation that releases `unit` (`issue:<n>` / `batch:<id>`). */
+function stopRemedy(unit: string): string {
+  return unit.startsWith('batch:')
+    ? `sched stop --batch ${unit.slice('batch:'.length)}`
+    : `sched stop --issue ${unit.slice('issue:'.length)}`;
+}
+
+/**
+ * #776: the health warnings — pure over state + lease + clock, so every
+ * warning is unit-testable without a live engine.
+ */
+export function buildStatusWarnings(
+  state: SchedState,
+  engineLease: EngineLeaseStatus | null,
+  now: Date
+): StatusWarning[] {
+  const warnings: StatusWarning[] = [];
+  const nowMs = now.getTime();
+  const thresholdHours = STATUS_HEALTH_WARNING_AGE_MS / (60 * 60 * 1000);
+
+  if (state.paused) {
+    const hours = state.paused_at === null ? null : hoursSince(state.paused_at, nowMs);
+    if (hours === null) {
+      warnings.push({
+        kind: 'long-pause',
+        message:
+          'scheduler is paused, since an unknown time (the pause predates paused_at tracking)',
+        remedy: 'review the queue and slots below, then `sched resume`',
+      });
+    } else if (hours > thresholdHours) {
+      warnings.push({
+        kind: 'long-pause',
+        message: `scheduler has been paused for ${formatHours(hours)} (since ${state.paused_at})`,
+        remedy: 'review the queue and slots below, then `sched resume`',
+      });
+    }
+  }
+
+  const unfinished = state.entries.filter(
+    (e) => !TERMINAL_ISSUE_STATUSES.has(e.status) && !SATISFIED_ISSUE_STATUSES.has(e.status)
+  ).length;
+  const liveSlots = state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length;
+  if (engineLease !== null && !engineLease.alive && (unfinished > 0 || liveSlots > 0)) {
+    warnings.push({
+      kind: 'stale-engine-lease',
+      message: `engine lease is stale (pid ${engineLease.pid} is not running) while ${unfinished} queue entr${unfinished === 1 ? 'y is' : 'ies are'} unfinished and ${liveSlots} slot(s) live — nothing is ticking`,
+      remedy: 'start an engine with `sched start`',
+    });
+  }
+
+  const staleClosed = new Set<number>();
+  for (const entry of state.entries) {
+    if (entry.stale_closed_at === null || TERMINAL_ISSUE_STATUSES.has(entry.status)) continue;
+    staleClosed.add(entry.issue);
+    const holder = state.slots.find(
+      (s) => s.unit === `issue:${entry.issue}` && LIVE_SLOT_STATUSES.has(s.status)
+    );
+    warnings.push({
+      kind: 'stale-closed',
+      message: `issue #${entry.issue} is closed on GitHub but ${holder ? `slot ${holder.id} still holds it (${holder.status})` : 'its entry is still active'} — recovery will not re-dispatch it (flagged ${entry.stale_closed_at})`,
+      remedy: `sched stop --issue ${entry.issue}`,
+      issue: entry.issue,
+      ...(holder ? { slot: holder.id } : {}),
+    });
+  }
+
+  for (const slot of state.slots) {
+    if (slot.unit === null || !LIVE_SLOT_STATUSES.has(slot.status)) continue;
+    const issue = slot.unit.startsWith('issue:') ? Number(slot.unit.slice('issue:'.length)) : null;
+    if (issue !== null && staleClosed.has(issue)) continue; // already named above
+    const hours = hoursSince(slot.last_progress_at ?? slot.updated_at, nowMs);
+    if (hours === null || hours <= thresholdHours) continue;
+    warnings.push({
+      kind: 'stuck-slot',
+      message: `slot ${slot.id} has been ${slot.status} on ${slot.unit} with no progress for ${formatHours(hours)}`,
+      remedy: `check the unit's issue, then \`${stopRemedy(slot.unit)}\` if its work is done or abandoned`,
+      ...(issue !== null ? { issue } : {}),
+      slot: slot.id,
+    });
+  }
+
+  return warnings;
 }
 
 export function buildStatusReport(
   state: SchedState,
   config: SchedConfig,
   project: string,
-  engineLease: EngineLeaseStatus | null = null
+  engineLease: EngineLeaseStatus | null = null,
+  now: Date = new Date()
 ): StatusReport {
   const blocked: BlockedItem[] = [];
   const failed: QueueEntry[] = [];
@@ -246,5 +370,6 @@ export function buildStatusReport(
     blocked,
     failed,
     stopped,
+    warnings: buildStatusWarnings(state, engineLease, now),
   };
 }

@@ -305,6 +305,12 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
       `⚠ Last tick failed at ${report.last_tick_failure.at}: ${report.last_tick_failure.detail}`
     );
   }
+  // #776: health warnings (long pause, stale engine lease, stuck or
+  // stale-closed slots), each with the exact remedy — near the top, where
+  // they cannot be missed under a long queue table.
+  for (const warning of report.warnings) {
+    lines.push(`⚠ ${warning.message} → ${warning.remedy}`);
+  }
   // #680: the configured executor, visible without reading the journal — an
   // operator driving a session from opencode/GLM sees here that every tier
   // still dispatches the default claude template (or that a mixed

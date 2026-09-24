@@ -227,6 +227,7 @@ export function createEmptyState(): SchedState {
   return {
     schema_version: SCHEMA_VERSION,
     paused: false,
+    paused_at: null,
     entries: [],
     batches: [],
     slots: [],
@@ -849,6 +850,9 @@ export function validateState(data: unknown): SchedState {
   ) {
     throw new Error('last_tick_failure must be an { at, detail } object or null');
   }
+  if (obj.paused_at !== null && obj.paused_at !== undefined && !isIsoDateString(obj.paused_at)) {
+    throw new Error('paused_at must be an ISO date string or null');
+  }
   // One-directional, unlike the suspect-dispatch pair's "zero ⇔ null"
   // agreement (#629 review): a confirmed failure with no reset time is valid
   // (`count > 0, resetAt === null` — the provider didn't supply one), so only
@@ -938,6 +942,8 @@ export function validateState(data: unknown): SchedState {
     ground_truth_unreachable_ticks: entry.ground_truth_unreachable_ticks ?? 0,
     pr_watch_waiting_since: entry.pr_watch_waiting_since ?? null,
     pr_watch_waiting_ticks: entry.pr_watch_waiting_ticks ?? 0,
+    // Pre-#776 entries were never flagged stale-closed — null is exact.
+    stale_closed_at: entry.stale_closed_at ?? null,
   }));
   const batches = (obj.batches as BatchEntry[]).map((batch) => ({
     ...batch,
@@ -1016,6 +1022,9 @@ export function validateState(data: unknown): SchedState {
     // Pre-#635 states did not retain failed tick context, so null is exact.
     last_tick_failure:
       (obj.last_tick_failure as SchedState['last_tick_failure'] | undefined) ?? null,
+    // Pre-#776 states never recorded when a pause began — null reads as
+    // "paused, duration unknown" in `sched status`, never as a fresh pause.
+    paused_at: (obj.paused_at as string | undefined) ?? null,
   };
 }
 
@@ -1113,6 +1122,9 @@ export const CLEARED_ENTRY_DEDUP_MARKERS = {
   ground_truth_unreachable_ticks: 0,
   pr_watch_waiting_since: null,
   pr_watch_waiting_ticks: 0,
+  // #776: a requeue is a fresh attempt — the stale-closed flag belonged to
+  // the previous dispatch's recovery, not to the new one.
+  stale_closed_at: null,
 } as const;
 
 /** The `BatchEntry` `pr-watch-failed` dedup marker (#630), zeroed. */
