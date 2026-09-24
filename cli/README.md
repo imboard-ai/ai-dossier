@@ -1314,6 +1314,7 @@ ai-dossier sched status [--json] [--anchors]   # ⚠ health warnings: long pause
 ai-dossier sched pause | resume
 ai-dossier sched stop (--issue 42 | --batch b1) [--reason "..."]
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
+ai-dossier sched requeue --issue 42 [--reason "..."]   # parked batch member → full-cycle from its member branch (#810)
 ai-dossier sched reprioritize --issue 42 --priority 20 | --batch b1 --priority 20 [--json]
 ai-dossier sched stats [--issues 4,5|4..9] [--batch b1 --project owner-repo] [--json]
 ```

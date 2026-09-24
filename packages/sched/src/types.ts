@@ -64,6 +64,7 @@ export type IssueStatus =
   | 'validated'
   | 'shipped-in-batch'
   | 'evicted'
+  | 'handed-back'
   | 'requeued'
   | 'blocked'
   | 'decision-pending'
@@ -157,8 +158,25 @@ export interface FailureEvidence {
   attribution: AttributionMethod;
   /** Commits reverted out of the batch branch for this member. */
   reverted_commits: string[];
+  /**
+   * #810: the member branch holding the member's un-landed work, when it had
+   * one (`batch/<id>-m<i>-<issue>`; the REMOTE copy survives teardown). A
+   * full-cycle requeue of a parked member continues from this branch instead
+   * of starting from the base. Absent on records written before #810 and on
+   * post-landing evictions (the member branch was deleted when it landed).
+   */
+  branch?: string | null;
   at: string;
 }
+
+/**
+ * #810: how a member left its batch before landing. `evicted` is a failure
+ * the ENGINE decided (unverified exit, gate task-failed, landing conflict,
+ * aggregate-suite attribution) and counts toward the dissolve threshold;
+ * `handed-back` is the MEMBER's own explicit terminal hand-back (a `blocked`
+ * or `review partial` milestone it posted) — a valued outcome, never counted.
+ */
+export type MemberExitKind = 'evicted' | 'handed-back';
 
 /**
  * One eviction, kept on the batch for the batch report and as the classifier
@@ -171,6 +189,14 @@ export interface EvictionRecord {
   reverted_commits: string[];
   /** Members evicted alongside it because they share an eviction group (§E.4). */
   group: number[];
+  /**
+   * #810: `handed-back` records are the member's own hand-back — they take the
+   * member out of the batch like an eviction but never count toward the
+   * dissolve threshold. Absent = `evicted` (every record before #810).
+   */
+  kind?: MemberExitKind;
+  /** #810: the member branch holding its un-landed work (see `FailureEvidence.branch`). */
+  branch?: string | null;
   at: string;
 }
 
@@ -1340,8 +1366,13 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * at the executing claim) and `member_runs` (parallel members' own
  * branch/worktree/status); `null`/`[]` backfilled on load — a null mode past
  * `ready` reads as serial, so batches in flight keep their serial rail.
+ * 1.24.0 (#810): `IssueStatus` gains `handed-back`; `EvictionRecord` gains
+ * optional `kind`/`branch` and `FailureEvidence` optional `branch` (absent =
+ * a pre-#810 record with no recorded branch). Bumped so an older engine
+ * refuses a state carrying a `handed-back` member with `EngineTooOldError`
+ * instead of an opaque invalid-status error.
  */
-export const SCHEMA_VERSION = '1.23.0' as const;
+export const SCHEMA_VERSION = '1.24.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1368,6 +1399,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.20.0',
   '1.21.0',
   '1.22.0',
+  '1.23.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
@@ -1689,7 +1721,17 @@ export type JournalEventName =
   // #595: a second eviction call named a member already in `batch.evictions`
   // — the append is a no-op (never a second `EvictionRecord`), journaled here
   // instead of silently dropped so the duplicate attempt is still visible.
-  | 'eviction-duplicate';
+  | 'eviction-duplicate'
+  // #810: a member's own explicit hand-back (`blocked` / `review partial`
+  // milestone) — parked `handed-back`, NOT a failure, never counted toward
+  // the dissolve threshold (the `unit-failed` twin for evictions).
+  | 'member-handed-back'
+  // #810: the eviction threshold tripped while members were already
+  // validated — the batch keeps them landed and continues instead of
+  // dissolving.
+  | 'dissolve-suppressed'
+  // #810: an operator requeued a parked member (`sched requeue`).
+  | 'member-requeued';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —

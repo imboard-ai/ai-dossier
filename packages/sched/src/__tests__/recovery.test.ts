@@ -667,6 +667,24 @@ describe('checkDissolveTrigger', () => {
     })),
   });
 
+  it('#810: a member hand-back never counts toward the threshold — only engine evictions do', () => {
+    const base = batchWith([201, 202, 203], [201, 202]);
+    const handedBack = {
+      ...base,
+      evictions: base.evictions.map((e) =>
+        e.issue === 202 ? { ...e, kind: 'handed-back' as const } : e
+      ),
+    };
+    // 2 records, but only one is an eviction: exactly ⅓, not over it.
+    expect(checkDissolveTrigger(handedBack)).toBe(false);
+    // An explicit `kind: 'evicted'` counts exactly like a pre-#810 record.
+    const explicit = {
+      ...base,
+      evictions: base.evictions.map((e) => ({ ...e, kind: 'evicted' as const })),
+    };
+    expect(checkDissolveTrigger(explicit)).toBe(true);
+  });
+
   it('is strictly more than a third, not at least', () => {
     expect(checkDissolveTrigger(batchWith([201, 202, 203], [201]))).toBe(false); // exactly ⅓
     expect(checkDissolveTrigger(batchWith([201, 202, 203], [201, 202]))).toBe(true);
@@ -844,6 +862,89 @@ describe('dissolveBatch', () => {
 
     expect(findBatch(result.state, 'b1-a')?.dispatch_profile).toBe('glm');
     expect(findBatch(result.state, 'b1-b')?.dispatch_profile).toBe('glm');
+  });
+
+  it('#810: a full dissolve with VALIDATED members blocks instead — validated work stays landed, nothing validated is requeued', () => {
+    // b-20260924-02: the dissolve requeued the already-validated #4137 as
+    // `mode=full, dispatch_profile=null`. Never again: block for the operator.
+    let state = batchState([201, 202, 203], 'validating', { dispatch_profile: 'openai' });
+    state = transitionIssue(state, 201, 'validated', {}, NOW);
+    const h = harness();
+
+    const result = dissolveBatch(
+      state,
+      'b1',
+      { strategy: 'full', reason: 'unattributable-suite-failure' },
+      h.deps
+    );
+
+    expect(result.blocked).toBe(true);
+    expect(result.validated).toEqual([201]);
+    expect(result.requeued).toEqual([]);
+    expect(findBatch(result.state, 'b1')).toMatchObject({
+      status: 'blocked',
+      blocked_reason: 'unattributable-suite-failure',
+    });
+    // The validated member keeps its batch and its landing.
+    expect(findEntry(result.state, 201)).toMatchObject({
+      status: 'validated',
+      mode: 'slot',
+      batch: 'b1',
+    });
+    // Nothing else was requeued either — the operator decides.
+    expect(findEntry(result.state, 202)?.mode).toBe('slot');
+    expect(h.milestones.at(-1)?.milestone).toMatchObject({
+      status: 'blocked',
+      kv: { reason: 'unattributable-suite-failure', dissolved: 'false', validated: '201' },
+    });
+    expect(h.events.map((e) => e.event)).toContain('batch-blocked');
+    expect(h.events.map((e) => e.event)).not.toContain('batch-dissolved');
+  });
+
+  it('#810: a full dissolve PARKS an in-flight member with its branch, skips already-parked members, and requeues the rest on the batch profile', () => {
+    let state = batchState([201, 202, 203], 'validating', { dispatch_profile: 'openai' });
+    // 201: in flight on its member branch (the serial current member).
+    state = patchBatch(state, 'b1', { executing_member: 1, member_branch: 'batch/b1-m1-201' }, NOW);
+    // 202: already handed back earlier in the batch.
+    state = transitionIssue(state, 202, 'handed-back', { reason: 'needs-operator-input' }, NOW);
+    const h = harness();
+
+    const result = dissolveBatch(state, 'b1', { strategy: 'full', reason: 'x' }, h.deps);
+
+    expect(result.blocked).toBe(false);
+    expect(result.parked).toEqual([201]);
+    expect(result.requeued).toEqual([203]);
+    expect(result.preserved).toEqual([202]);
+    expect(findEntry(result.state, 201)).toMatchObject({
+      status: 'evicted',
+      mode: 'slot',
+      dispatch_profile: 'openai',
+      failure_evidence: expect.objectContaining({ branch: 'batch/b1-m1-201', reason: 'x' }),
+    });
+    // The earlier hand-back is the operator's decision — untouched.
+    expect(findEntry(result.state, 202)).toMatchObject({
+      status: 'handed-back',
+      reason: 'needs-operator-input',
+    });
+    // #713 class on the requeue rail: the profile rides along.
+    expect(findEntry(result.state, 203)).toMatchObject({
+      mode: 'full',
+      batch: null,
+      dispatch_profile: 'openai',
+    });
+    expect(h.milestones.at(-1)?.milestone.kv).toMatchObject({ parked: '201', requeued: '203' });
+  });
+
+  it('#810: carryDispatchProfile=false requeues on the config default (the profile is what broke)', () => {
+    const state = batchState([201], 'validating', { dispatch_profile: 'ghost' });
+    const h = harness();
+    const result = dissolveBatch(
+      state,
+      'b1',
+      { strategy: 'full', reason: 'dispatch-profile-missing:ghost', carryDispatchProfile: false },
+      h.deps
+    );
+    expect(findEntry(result.state, 201)).toMatchObject({ mode: 'full', dispatch_profile: null });
   });
 
   it('reports what was preserved on the milestone', () => {

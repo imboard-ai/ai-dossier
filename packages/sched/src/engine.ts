@@ -85,6 +85,7 @@ import {
   escalateTier,
   fileSizeOrZero,
   journalCmdModelFields,
+  priorWorkInstruction,
   type ResolvedDispatch,
   reportTierFor,
   resolveDispatch,
@@ -887,19 +888,28 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
     // replaced is refused. A first dispatch is generation 0 and reads as it always did.
     // The tier's own resolved prompt (#527) — falls back to the global
     // dispatch.prompt when the tier has no override.
-    prompt: buildPrompt(
-      dispatch.tiers[entry.tier].prompt,
-      issue,
-      slot.gen,
-      // #683 AC6: the takeover is told its slot identity alongside the generation —
-      // the same label the fence announced and the bind names (one spelling,
-      // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
-      // generation, never by matching this label (AC7).
-      slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined
+    prompt: withPriorWork(
+      buildPrompt(
+        dispatch.tiers[entry.tier].prompt,
+        issue,
+        slot.gen,
+        // #683 AC6: the takeover is told its slot identity alongside the generation —
+        // the same label the fence announced and the bind names (one spelling,
+        // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
+        // generation, never by matching this label (AC7).
+        slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined
+      ),
+      // #810: a requeued parked batch member continues from its member branch.
+      priorWorkInstruction(issue, entry.failure_evidence)
     ),
     phase: 'gate',
     ...(slot.gen > 0 ? { journalExtra: { detail: `takeover gen=${slot.gen}` } } : {}),
   });
+}
+
+/** Append the #810 prior-work instruction to a cycle prompt, when there is one. */
+function withPriorWork(prompt: string, instruction: string | null): string {
+  return instruction === null ? prompt : `${prompt}\n\n${instruction}`;
 }
 
 /**

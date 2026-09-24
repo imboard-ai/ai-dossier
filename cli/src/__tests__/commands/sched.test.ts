@@ -1227,6 +1227,100 @@ describe('ai-dossier sched pause/resume/abandon', () => {
   });
 });
 
+describe('#810: parked batch members (sched status + sched requeue)', () => {
+  async function parkedFixture(): Promise<void> {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '1,2',
+      '--mode',
+      'slot',
+      '--batch',
+      'bp',
+      '--project',
+      'test-proj',
+    ]);
+    const state = readState() as {
+      entries: Array<Record<string, unknown>>;
+      batches: Array<Record<string, unknown>>;
+    };
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        batches: state.batches.map((b) => ({
+          ...b,
+          dispatch_profile: null,
+          evictions: [
+            {
+              issue: 1,
+              reason: 'scope-mismatch',
+              attribution: 'none',
+              reverted_commits: [],
+              group: [],
+              kind: 'handed-back',
+              branch: 'batch/bp-m1-1',
+              at: new Date().toISOString(),
+            },
+          ],
+        })),
+        entries: state.entries.map((e) =>
+          e.issue === 1
+            ? {
+                ...e,
+                status: 'handed-back',
+                reason: 'scope-mismatch',
+                failure_evidence: {
+                  batch: 'bp',
+                  reason: 'scope-mismatch',
+                  failing_tests: [],
+                  attribution: 'none',
+                  reverted_commits: [],
+                  branch: 'batch/bp-m1-1',
+                  at: new Date().toISOString(),
+                },
+              }
+            : e
+        ),
+      })
+    );
+  }
+
+  it('sched status lists the parked member with reason, branch and the exact remedies', async () => {
+    await parkedFixture();
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    expect(text).toContain('== Parked members');
+    expect(text).toContain('#1 [handed-back] batch bp — scope-mismatch; branch batch/bp-m1-1');
+    expect(text).toContain('→ ai-dossier sched requeue --issue 1');
+    expect(text).toContain('→ ai-dossier sched abandon --issue 1 --reason <why>');
+    expect(text).toContain('#1(handed-back:scope-mismatch)');
+  });
+
+  it('sched requeue puts a parked member back as full-cycle, continuing from its branch', async () => {
+    await parkedFixture();
+    await runSched(['sched', 'requeue', '--issue', '1', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain('Requeued #1 as full-cycle');
+    expect(logs.join('\n')).toContain('continuing from batch/bp-m1-1');
+    const state = readState() as { entries: Array<Record<string, unknown>> };
+    expect(state.entries.find((e) => e.issue === 1)).toMatchObject({
+      status: 'requeued',
+      mode: 'full',
+      batch: null,
+      failure_evidence: expect.objectContaining({ branch: 'batch/bp-m1-1' }),
+    });
+    expect(journalEvents().some((e) => e.event === 'member-requeued')).toBe(true);
+  });
+
+  it('sched requeue refuses a member that is not parked', async () => {
+    await parkedFixture();
+    await expect(
+      runSched(['sched', 'requeue', '--issue', '2', '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
+  });
+});
+
 describe('ai-dossier sched reprioritize (#565)', () => {
   it('adjusts a queued issue in place, without abandon/re-enqueue', async () => {
     await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);

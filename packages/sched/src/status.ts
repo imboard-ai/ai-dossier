@@ -26,7 +26,7 @@ import {
   dependencyBlockers,
   runnableUnits,
 } from './readiness';
-import { distinctEvictions } from './state';
+import { distinctEvictions, PARKED_MEMBER_STATUSES } from './state';
 import type {
   BatchEntry,
   DispatchProfileSource,
@@ -51,6 +51,59 @@ export interface ParkedItem {
   pr: number;
   /** When the unit parked (entry `updated_at`). */
   since: string;
+}
+
+/**
+ * #810: a batch member PARKED out of its batch — `evicted` (an engine-decided
+ * failure) or `handed-back` (the member's own hand-back). Parked members are
+ * never auto-dispatched; `remedies` are the exact commands an operator runs
+ * to decide.
+ */
+export interface ParkedMemberItem {
+  issue: number;
+  /** The batch it left (null for a pre-#810 entry that no longer names one). */
+  batch: string | null;
+  kind: 'evicted' | 'handed-back';
+  reason: string;
+  /** Member branch holding its un-landed work (its remote copy survives teardown), when recorded. */
+  branch: string | null;
+  /** Dispatch profile a requeue runs on (the batch's). */
+  dispatch_profile: string | null;
+  /** When it parked (entry `updated_at`). */
+  since: string;
+  /** What the operator should know before choosing a remedy. */
+  note: string;
+  /** Exact remedy commands, in order of preference. */
+  remedies: string[];
+}
+
+/** The parked-member row for one entry (#810). */
+function parkedMemberItem(entry: QueueEntry): ParkedMemberItem {
+  const kind = entry.status === 'handed-back' ? 'handed-back' : 'evicted';
+  const reason = entry.reason ?? entry.failure_evidence?.reason ?? kind;
+  const branch = entry.failure_evidence?.branch ?? null;
+  const profile = entry.dispatch_profile ?? null;
+  const from =
+    branch !== null ? `from ${branch}` : 'from the base branch (no member branch recorded)';
+  const on = profile !== null ? ` on profile ${profile}` : ' on the default profile';
+  const note =
+    kind === 'handed-back'
+      ? `the member handed back (${reason}) — resolve what it needs (see its handover / blocked milestone on #${entry.issue}) before requeueing`
+      : `evicted (${reason}) — requeue continues the work ${from}${on}`;
+  return {
+    issue: entry.issue,
+    batch: entry.batch ?? entry.failure_evidence?.batch ?? null,
+    kind,
+    reason,
+    branch,
+    dispatch_profile: profile,
+    since: entry.updated_at,
+    note,
+    remedies: [
+      `ai-dossier sched requeue --issue ${entry.issue}`,
+      `ai-dossier sched abandon --issue ${entry.issue} --reason <why>`,
+    ],
+  };
 }
 
 /**
@@ -94,6 +147,11 @@ export interface StatusReport {
   batches: BatchEntry[];
   /** Parked units being watched by the PR watcher (#468). */
   parked: ParkedItem[];
+  /**
+   * #810: batch members parked out of their batch (evicted / handed back),
+   * with reason, branch, profile and the exact remedy commands.
+   */
+  parked_members: ParkedMemberItem[];
   /** When the PR watcher last polled (#468) — null before the first poll. */
   last_pr_poll_at: string | null;
   /**
@@ -263,6 +321,7 @@ export function buildStatusReport(
   const blocked: BlockedItem[] = [];
   const failed: QueueEntry[] = [];
   const stopped: QueueEntry[] = [];
+  const parkedMembers: ParkedMemberItem[] = [];
 
   const describeBlocker = (b: { dep: number; reason: string; depStatus?: string }): string =>
     b.reason === 'not-in-queue'
@@ -287,6 +346,10 @@ export function buildStatusReport(
       continue;
     }
     if (TERMINAL_ISSUE_STATUSES.has(entry.status) || SATISFIED_ISSUE_STATUSES.has(entry.status)) {
+      continue;
+    }
+    if (PARKED_MEMBER_STATUSES.has(entry.status)) {
+      parkedMembers.push(parkedMemberItem(entry));
       continue;
     }
 
@@ -329,10 +392,22 @@ export function buildStatusReport(
   // fallback is defensive, not expected in practice.
   for (const batch of state.batches) {
     if (batch.status !== 'blocked') continue;
+    // #810: a batch blocked instead of dissolved keeps validated members
+    // landed on its integration branch — name them and the operator's exits.
+    const validated = batch.members.filter(
+      (m) =>
+        state.entries.find((e) => e.issue === m && e.batch === batch.id)?.status === 'validated'
+    );
+    const validatedNote =
+      validated.length > 0
+        ? `; validated member(s) ${validated.map((m) => `#${m}`).join(',')} stay landed on ` +
+          `${batch.branch ?? 'the integration branch'} — ship them from it, or ` +
+          `\`ai-dossier sched abandon --batch ${batch.id}\` (requeues every unshipped member full-cycle)`
+        : '';
     blocked.push({
       issue: batch.anchor ?? batch.members[batch.executing_member - 1] ?? -1,
       status: 'batch-blocked',
-      reason: batch.blocked_reason ?? 'unknown',
+      reason: `${batch.blocked_reason ?? 'unknown'}${validatedNote}`,
     });
   }
 
@@ -372,6 +447,7 @@ export function buildStatusReport(
     // duplicates — nothing rewrites them).
     batches: state.batches.map((b) => ({ ...b, evictions: distinctEvictions(b.evictions) })),
     parked,
+    parked_members: parkedMembers,
     last_pr_poll_at: state.last_pr_poll_at,
     last_label_poll_at: state.last_label_poll_at,
     dispatch_health: {

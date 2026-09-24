@@ -48,6 +48,8 @@ export type CommitInBase = (oid: string, baseBranch: string) => boolean;
 const MEMBER_FAILURE_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
   ...ISSUE_UNIVERSAL_FAILURE_EDGES,
   'evicted',
+  // #810: a member's own hand-back is parked for an operator decision too.
+  'handed-back',
   'requeued',
 ]);
 

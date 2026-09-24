@@ -184,6 +184,17 @@ process.stdin.on('end', () => {
         });
       }
     }
+    // #810: `--die-members=<a,b>` — the member exits WITHOUT any terminal
+    // milestone (after its optional commit): the engine's unverified-exit
+    // eviction, as opposed to `--evict-members`' explicit hand-back.
+    const dieMembers = (opt('die-members') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (dieMembers.includes(issue)) {
+      console.log(`fake batch member: exiting without a milestone for #${issue}`);
+      process.exit(1);
+    }
     const evictMembers = (opt('evict-members') ?? '')
       .split(',')
       .map((s) => s.trim())

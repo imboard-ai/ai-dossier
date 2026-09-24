@@ -926,6 +926,36 @@ export function buildPrompt(template: string, issue: number, gen = 0, slotLabel?
 }
 
 /**
+ * #810: the instruction appended to a full-cycle prompt when the entry was a
+ * parked batch member requeued by an operator (`sched requeue`) — its work is
+ * on the member branch the batch recorded, so the cycle continues it instead
+ * of re-deriving everything from the base branch. `null` when the evidence
+ * names no branch, or a branch/batch that is not a plain ref (persisted state
+ * reaching an agent's instruction stream is re-validated, never trusted).
+ */
+export function priorWorkInstruction(
+  issue: number,
+  evidence: { batch: string; reason: string; branch?: string | null } | null
+): string | null {
+  const branch = evidence?.branch;
+  if (evidence === null || typeof branch !== 'string' || !PRIOR_WORK_REF_RE.test(branch)) {
+    return null;
+  }
+  const batch = PRIOR_WORK_REF_RE.test(evidence.batch) ? evidence.batch : 'its batch';
+  const reason = evidence.reason.replace(/[^A-Za-z0-9._:/-]/g, '-').slice(0, 120);
+  return (
+    `PRIOR WORK — issue #${issue} was a member of ${batch} and left it (reason: ${reason}) with ` +
+    `its work on branch ${branch}. Before planning, run \`git fetch origin ${branch}\`: if it ` +
+    'exists, set up your worktree from that branch (not the base branch), read its commits and ' +
+    "the issue's plan/handover comments, and continue that work rather than restarting it; ship " +
+    'to the base branch as usual. If the branch is gone, start fresh from the base branch.'
+  );
+}
+
+/** A plain git ref / batch id — no whitespace, no shell or prompt metacharacters. */
+const PRIOR_WORK_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+
+/**
  * Build the report agent's stdin prompt (#468): `{issue}`/`{pr}`/`{cleanup}`/`{gen}`
  * substituted, with the takeover instruction appended for `gen > 0` (#504).
  *

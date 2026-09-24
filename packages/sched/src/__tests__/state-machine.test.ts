@@ -8,6 +8,9 @@ import {
   findEntry,
   IllegalTransitionError,
   type IssueStatus,
+  PARKED_MEMBER_STATUSES,
+  parkMember,
+  patchBatch,
   requeueMember,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
@@ -344,6 +347,119 @@ describe('requeueMember (regressions)', () => {
     const result = requeueMember(state, 101, TO_FULL, 'noop', NOW2);
     expect(result.requeued).toBe(false);
     expect(findEntry(result.state, 101)?.status).toBe('done');
+  });
+});
+
+describe('#810: parkMember / profile-carrying requeue', () => {
+  const inWork = (state: SchedState, issue: number): SchedState => {
+    let next = state;
+    for (const to of ['classified', 'batched', 'waiting', 'in-work'] as const) {
+      next = transitionIssue(next, issue, to, {}, NOW);
+    }
+    return next;
+  };
+  const withProfile = (state: SchedState): SchedState =>
+    patchBatch(state, 'b1', { dispatch_profile: 'openai' }, NOW);
+
+  it('parks a hand-back as `handed-back` with reason, branch and the batch profile — not requeued, not dispatchable', () => {
+    const state = withProfile(inWork(seeded(), 201));
+    const result = parkMember(state, 201, 'handed-back', 'scope-mismatch', NOW2, {
+      failure_evidence: {
+        batch: 'b1',
+        reason: 'scope-mismatch',
+        failing_tests: [],
+        attribution: 'none',
+        reverted_commits: [],
+        branch: 'batch/b1-m1-201',
+        at: NOW2.toISOString(),
+      },
+    });
+    expect(result.parked).toBe(true);
+    expect(findEntry(result.state, 201)).toMatchObject({
+      status: 'handed-back',
+      mode: 'slot',
+      batch: 'b1',
+      reason: 'scope-mismatch',
+      dispatch_profile: 'openai',
+      failure_evidence: expect.objectContaining({ branch: 'batch/b1-m1-201' }),
+    });
+    expect(PARKED_MEMBER_STATUSES.has('handed-back')).toBe(true);
+    // Parking twice is a no-op, never a second transition.
+    expect(parkMember(result.state, 201, 'evicted', 'again', NOW2).parked).toBe(false);
+  });
+
+  it('parks an unverified exit as `evicted`; a classified member walks the batched waypoint first', () => {
+    const state = withProfile(seeded());
+    const fromClassified = parkMember(
+      transitionIssue(state, 202, 'classified', {}, NOW),
+      202,
+      'evicted',
+      'member-worktree-prep-failed:x',
+      NOW2
+    );
+    expect(fromClassified.parked).toBe(true);
+    expect(findEntry(fromClassified.state, 202)).toMatchObject({
+      status: 'evicted',
+      dispatch_profile: 'openai',
+    });
+    // `queued` has no batch-rail edge and no work — left alone.
+    expect(parkMember(state, 202, 'evicted', 'x', NOW2).parked).toBe(false);
+  });
+
+  it('a parked member requeues full-cycle ONLY through requeueMember, carrying profile and evidence', () => {
+    let state = withProfile(inWork(seeded(), 201));
+    state = parkMember(state, 201, 'handed-back', 'needs-input', NOW, {
+      failure_evidence: {
+        batch: 'b1',
+        reason: 'needs-input',
+        failing_tests: [],
+        attribution: 'none',
+        reverted_commits: [],
+        branch: 'batch/b1-m1-201',
+        at: NOW.toISOString(),
+      },
+    }).state;
+    const result = requeueMember(state, 201, TO_FULL, 'operator-requeue', NOW2);
+    expect(result.requeued).toBe(true);
+    expect(findEntry(result.state, 201)).toMatchObject({
+      status: 'requeued',
+      mode: 'full',
+      batch: null,
+      dispatch_profile: 'openai',
+      failure_evidence: expect.objectContaining({ branch: 'batch/b1-m1-201' }),
+    });
+  });
+
+  it('#713 class: requeueMember carries the BATCH profile onto a member whose own profile is null', () => {
+    const state = withProfile(inWork(seeded(), 202));
+    expect(findEntry(state, 202)?.dispatch_profile ?? null).toBeNull();
+    const result = requeueMember(state, 202, TO_FULL, 'eviction-threshold', NOW2);
+    expect(findEntry(result.state, 202)?.dispatch_profile).toBe('openai');
+    // An explicit override wins (the profile-missing dissolve).
+    const reset = requeueMember(state, 202, TO_FULL, 'x', NOW2, { dispatch_profile: null });
+    expect(findEntry(reset.state, 202)?.dispatch_profile).toBeNull();
+  });
+
+  it('validateState refuses an unknown eviction kind (it would change what the threshold counts)', () => {
+    const state = seeded();
+    const bad = {
+      ...state,
+      batches: state.batches.map((b) => ({
+        ...b,
+        evictions: [
+          {
+            issue: 201,
+            reason: 'x',
+            attribution: 'none',
+            reverted_commits: [],
+            group: [],
+            kind: 'retired',
+            at: NOW.toISOString(),
+          },
+        ],
+      })),
+    };
+    expect(() => validateState(JSON.parse(JSON.stringify(bad)))).toThrow(/evictions\[\]\.kind/);
   });
 });
 

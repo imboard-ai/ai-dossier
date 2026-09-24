@@ -4,8 +4,11 @@ import {
   buildStatusWarnings,
   createEmptyState,
   enqueueEntries,
+  parkMember,
+  patchBatch,
   type SchedState,
   type SlotEntry,
+  transitionBatch,
   transitionIssue,
 } from '../index';
 
@@ -246,6 +249,80 @@ describe('#468: parked units in the status report', () => {
     expect(report.queue.find((e) => e.issue === 101)?.cleanup).toBe('done');
     // merged → the dependent is no longer blocked
     expect(report.blocked.some((b) => b.issue === 102)).toBe(false);
+  });
+});
+
+describe('#810: parked batch members in the status report', () => {
+  it('lists evicted / handed-back members with reason, branch, profile and exact remedies', () => {
+    let state = patchBatch(seeded(), 'b1', { dispatch_profile: 'openai' }, NOW);
+    for (const issue of [201, 202]) {
+      for (const to of ['classified', 'batched', 'waiting', 'in-work'] as const) {
+        state = transitionIssue(state, issue, to, {}, NOW);
+      }
+    }
+    const evidence = (issue: number, reason: string) => ({
+      batch: 'b1',
+      reason,
+      failing_tests: [],
+      attribution: 'none' as const,
+      reverted_commits: [],
+      branch: `batch/b1-m${issue - 200}-${issue}`,
+      at: NOW.toISOString(),
+    });
+    state = parkMember(state, 201, 'handed-back', 'meta-test-event-code-unavailable', NOW, {
+      failure_evidence: evidence(201, 'meta-test-event-code-unavailable'),
+    }).state;
+    state = parkMember(state, 202, 'evicted', 'agent-exited-unverified', NOW, {
+      failure_evidence: evidence(202, 'agent-exited-unverified'),
+    }).state;
+
+    const report = buildStatusReport(state, { max_slots: 3 }, 'proj');
+    expect(report.parked_members).toEqual([
+      expect.objectContaining({
+        issue: 201,
+        batch: 'b1',
+        kind: 'handed-back',
+        reason: 'meta-test-event-code-unavailable',
+        branch: 'batch/b1-m1-201',
+        dispatch_profile: 'openai',
+        remedies: [
+          'ai-dossier sched requeue --issue 201',
+          'ai-dossier sched abandon --issue 201 --reason <why>',
+        ],
+      }),
+      expect.objectContaining({
+        issue: 202,
+        kind: 'evicted',
+        reason: 'agent-exited-unverified',
+        branch: 'batch/b1-m2-202',
+      }),
+    ]);
+    expect(report.parked_members[1]?.note).toContain('from batch/b1-m2-202 on profile openai');
+    // A parked member is not also reported as blocked or runnable.
+    expect(report.blocked.some((b) => b.issue === 201 || b.issue === 202)).toBe(false);
+    expect(report.runnable_units).not.toContain('issue:201');
+  });
+
+  it('a batch blocked over validated members names them and the operator exits', () => {
+    let state = seeded();
+    for (const to of [
+      'classified',
+      'batched',
+      'waiting',
+      'in-work',
+      'committed',
+      'validated',
+    ] as const) {
+      state = transitionIssue(state, 201, to, {}, NOW);
+    }
+    state = patchBatch(state, 'b1', { branch: 'batch/b1' }, NOW);
+    state = transitionBatch(state, 'b1', 'blocked', { blocked_reason: 'eviction-threshold' }, NOW);
+    const report = buildStatusReport(state, { max_slots: 3 }, 'proj');
+    const row = report.blocked.find((b) => b.status === 'batch-blocked');
+    expect(row?.reason).toContain(
+      'eviction-threshold; validated member(s) #201 stay landed on batch/b1'
+    );
+    expect(row?.reason).toContain('ai-dossier sched abandon --batch b1');
   });
 });
 

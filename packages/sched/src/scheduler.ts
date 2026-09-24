@@ -21,6 +21,7 @@ import {
 import {
   CLEARED_SLOT_FIELDS,
   findBatch,
+  PARKED_MEMBER_STATUSES,
   releaseAllBatchSlots,
   requeueMember,
   slotsForBatch,
@@ -28,7 +29,7 @@ import {
   transitionIssue,
   transitionSlot,
 } from './state';
-import type { SchedConfig, SchedState, SlotRole } from './types';
+import type { QueueEntry, SchedConfig, SchedState, SlotRole } from './types';
 import {
   LIVE_SLOT_STATUSES,
   SchedNotFoundError,
@@ -352,6 +353,35 @@ export function abandonBatch(
     if (result.requeued) requeued.push(issue);
   }
   return { state: next, requeued };
+}
+
+/**
+ * `sched requeue --issue N` (#810): the operator's decision on a PARKED batch
+ * member (`evicted` / `handed-back`) — put it back on the queue as a
+ * full-cycle unit. The entry keeps the batch's dispatch profile (stamped at
+ * park time, and re-derived by `requeueMember`) and its `failure_evidence`,
+ * whose `branch` makes the engine's cycle prompt continue from the member
+ * branch instead of the base. Refuses any entry that is not parked: this is
+ * a remedy for the park rail, not a general re-run lever.
+ */
+export function requeueParkedMember(
+  state: SchedState,
+  issue: number,
+  reason = 'operator-requeue',
+  now: Date = new Date()
+): { state: SchedState; entry: QueueEntry } {
+  const entry = state.entries.find((e) => e.issue === issue);
+  if (!entry) {
+    throw new SchedNotFoundError(`Queue entry not found: ${issue}`);
+  }
+  if (!PARKED_MEMBER_STATUSES.has(entry.status)) {
+    throw new SchedNotFoundError(
+      `Issue ${issue} is ${entry.status}, not a parked batch member (evicted / handed-back) — nothing to requeue`
+    );
+  }
+  const result = requeueMember(state, issue, { mode: 'full', batch: null }, reason, now);
+  const requeued = result.state.entries.find((e) => e.issue === issue) as QueueEntry;
+  return { state: result.state, entry: requeued };
 }
 
 /**
