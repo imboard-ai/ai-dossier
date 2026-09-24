@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { HARD_BLOCK_LABELS } from '../hard-block-labels';
 import {
+  EXCLUDING_CHECKS,
   extractDependencyRefs,
   floorScanText,
   MAX_DEPENDENCY_REFS,
@@ -166,10 +167,11 @@ describe('prescreenIssue — path-based risk floor and file count (plan:v1 artif
     expect(pathFloorReasons).toHaveLength(8);
   });
 
-  it('rejects when predicted files exceed 8', () => {
+  it('raises review (not the verdict) when predicted files exceed 8 (#818, prescreen:v4)', () => {
     const files = Array.from({ length: 9 }, (_, i) => `src/file${i}.ts`);
     const result = prescreenIssue({ ...baseInput, predictedFiles: files });
-    expect(result.verdict).toBe('full');
+    expect(result.verdict).toBe('candidate');
+    expect(result.review).toBe('full');
     expect(result.reasons[0]).toMatchObject({ check: 'file-count' });
   });
 
@@ -470,7 +472,7 @@ describe('prescreenIssue — section-aware text floor (#772)', () => {
     expect(result.review).toBe('full');
   });
 
-  it('#805: a plan:v1 path floor alone → candidate + review full; >8 predicted files still → full', () => {
+  it('#805: a plan:v1 path floor alone → candidate + review full', () => {
     // imboard#4343's shape: admitted on the `billing` keyword, then its own plan:v1 artifact
     // predicts a billing path — the re-run must not turn the member into an exclusion.
     const billing = prescreenIssue({
@@ -479,8 +481,6 @@ describe('prescreenIssue — section-aware text floor (#772)', () => {
     });
     expect(billing).toMatchObject({ verdict: 'candidate', review: 'full' });
     expect(billing.reasons.map((r) => r.check)).toEqual(['path-floor']);
-    const nine = Array.from({ length: 9 }, (_, i) => `src/f${i}.ts`);
-    expect(prescreenIssue({ ...baseInput, predictedFiles: nine }).verdict).toBe('full');
     // A path-floor hit next to an excluding check still excludes (the excluding check decides).
     expect(
       prescreenIssue({
@@ -491,8 +491,54 @@ describe('prescreenIssue — section-aware text floor (#772)', () => {
     ).toBe('full');
   });
 
-  it('PRESCREEN_SCHEMA names the v3 contract (#805)', () => {
-    expect(PRESCREEN_SCHEMA).toBe('prescreen:v3');
+  it('PRESCREEN_SCHEMA names the v4 contract (#818)', () => {
+    expect(PRESCREEN_SCHEMA).toBe('prescreen:v4');
+  });
+
+  describe('#818: E.2 rules 4 and 5 raise review=full instead of excluding (#770 Option A)', () => {
+    it('an imboard#4136-shaped body (deploy pipeline keyword) → candidate + review full', () => {
+      const result = prescreenIssue({
+        ...baseInput,
+        title: 'fix(ci): deploy job skips the smoke gate after a build-once promote',
+        body: 'The deploy workflow promotes the image without running the post-deploy smoke check.',
+      });
+      expect(result).toMatchObject({ verdict: 'candidate', review: 'full' });
+      expect(result.reasons).toEqual([
+        expect.objectContaining({
+          check: 'text-floor',
+          message: expect.stringContaining('rule4-deploy-pipeline'),
+        }),
+      ]);
+    });
+
+    it('a plan:v1 with 9 predicted files → candidate + review full', () => {
+      const nine = Array.from({ length: 9 }, (_, i) => `packages/backend/src/f${i}.ts`);
+      const result = prescreenIssue({ ...baseInput, predictedFiles: nine });
+      expect(result).toMatchObject({ verdict: 'candidate', review: 'full' });
+      expect(result.reasons.map((r) => r.check)).toEqual(['file-count']);
+    });
+
+    it('deploy keyword + >8 files together still only raise review', () => {
+      const ten = Array.from({ length: 10 }, (_, i) => `src/f${i}.ts`);
+      const result = prescreenIssue({
+        ...baseInput,
+        title: 'chore: split the deployment pipeline config',
+        predictedFiles: ten,
+      });
+      expect(result).toMatchObject({ verdict: 'candidate', review: 'full' });
+      expect(result.reasons.map((r) => r.check)).toEqual(['text-floor', 'file-count']);
+    });
+
+    it('only a hard-block label or an open dependency still excludes', () => {
+      expect([...EXCLUDING_CHECKS].sort()).toEqual(['hard-block-label', 'open-dependency']);
+      const nine = Array.from({ length: 9 }, (_, i) => `src/f${i}.ts`);
+      expect(
+        prescreenIssue({ ...baseInput, predictedFiles: nine, openDependencies: [7] }).verdict
+      ).toBe('full');
+      expect(
+        prescreenIssue({ ...baseInput, predictedFiles: nine, labels: ['decision-pending'] }).verdict
+      ).toBe('full');
+    });
   });
 
   it.each([

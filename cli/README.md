@@ -1024,7 +1024,7 @@ Prints a single JSON verdict — no model call anywhere, exits 0 for either verd
 
 ```json
 {
-  "schema": "prescreen:v3",
+  "schema": "prescreen:v4",
   "issue": 538,
   "state": "OPEN",
   "verdict": "candidate",
@@ -1050,7 +1050,7 @@ verdict still reflects whatever DID complete rather than blocking on the gap:
 
 ```json
 {
-  "schema": "prescreen:v3",
+  "schema": "prescreen:v4",
   "issue": 538,
   "state": null,
   "verdict": "candidate",
@@ -1075,9 +1075,19 @@ text + `reasons`/`warnings` as context, still no repo exploration unless that pa
 (`light` | `full`, #771): `full` whenever any check found anything — and also when the
 issue itself could not be read (the fail-open path above stays `candidate`, but an unscanned
 issue is never reported `light`). A **text-floor** hit
-(risk keyword in the issue text) or a **path-floor** hit (a plan:v1 artifact predicting a
-risk-floor path) is `verdict: "candidate"` + `review: "full"` — the issue may join a batch,
-but as a full-review member (#770 Option A), not be excluded from it.
+(risk keyword in the issue text, rules 1/3/4 — deploy pipeline included), a **path-floor** hit
+(a plan:v1 artifact predicting a risk-floor path) or a **file-count** hit (a plan:v1 artifact
+predicting > 8 files) is `verdict: "candidate"` + `review: "full"` — the issue may join a
+batch, but as a full-review member (#770 Option A), not be excluded from it. Only a hard-block
+label or an open dependency returns `verdict: "full"`.
+
+**Contract change — `prescreen:v3` → `prescreen:v4` (#818, CLI 0.61.0).** v3 still returned
+`verdict: "full"` for > 8 predicted files (E.2 rule 5); v4 returns `candidate` +
+`review: "full"` for it. Operator decision on #770: rules 4 (deploy pipeline — already
+review-raising in the text floor since v2) and 5 are review-depth questions, not
+can-share-a-PR questions; the ≤ 2 `review=full` per batch cap still applies. Rule 8
+(visual/browser) stays excluding — the pre-screen never detected it; the classifier's model
+pass does.
 
 **Contract change — `prescreen:v2` → `prescreen:v3` (#805, CLI 0.58.0).** v2 still returned
 `verdict: "full"` for a plan:v1 path-floor hit; v3 returns `candidate` + `review: "full"`,
@@ -1111,7 +1121,7 @@ Coverage is deliberately partial — it catches the OBVIOUS floor hits, not all 
 | `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` | same policy as the `sched enqueue` pre-screen (#507) and the engine's per-tick re-check (#544), shared via `@ai-dossier/sched`'s `labels.ts` (re-exported by `cli/src/hard-block-labels.ts`) |
 | `text-floor` | A text-keyword approximation of RFC-0001 E.2 rules 1/3/4 (risk-floor area, new package/workspace, deploy pipeline) scanned over title + reference-stripped body + labels — sets `review: full`, does **not** exclude | `prescreen.ts`'s `TEXT_FLOOR_PATTERNS` / `floorScanText`; the matched keyword is named in the reason message |
 | `path-floor` | Rule 1's path-based risk floor, reusing `plan validate`'s `scanRiskFloor` (capped at 8 reasons — a plan:v1 artifact is comment-sourced, untrusted input) — sets `review: full`, does **not** exclude (v3, #805) | requires a `plan:v1` artifact already on the issue |
-| `file-count` | Rule 5, "Predicted files > 8" | requires a `plan:v1` artifact already on the issue |
+| `file-count` | Rule 5, "Predicted files > 8" — sets `review: full`, does **not** exclude (v4, #818) | requires a `plan:v1` artifact already on the issue |
 | `open-dependency` | Rule 9, an open `Depends on #N` outside `--submitted-set` (capped at 8 reasons; refs themselves capped at 32 per issue — an issue body is untrusted input) | resolved via `gh issue view <N> --json state` |
 
 What it does NOT catch — rule 2 beyond the bare `migration` keyword, rule 7 (hard
@@ -1133,7 +1143,7 @@ measured pre-screen hit rate:
 ## Batch Composition (`batch compose`)
 
 Previews which issues may share a batch PR **before any model spend** (#773, #770 P3
-"selection = admission"). It runs the classify pre-screen (`prescreen:v3`) plus the
+"selection = admission"). It runs the classify pre-screen (`prescreen:v4`) plus the
 deterministic readiness screen over the operator's picks and/or the open backlog, and proposes
 one composition that honours the scheduler's batch invariants. No model call, no writes (no
 labels, comments, or queue changes) — only `gh` reads and a read-only look at the local sched
@@ -1153,7 +1163,7 @@ ai-dossier batch compose --backlog [--label backend]... [--search "no:assignee"]
 | `--base <branch>` | `main` | The base branch every member shares |
 | `--min-members <n>` / `--max-members <n>` | 3 / 6 | Minimum viable batch / member ceiling (≤ 6) |
 | `--max-full-review <n>` | sched config `max_full_review_members`, else 2 | Per-batch `review=full` cap (#771) |
-| `--rules v2\|legacy` | `v2` | `legacy` replays pre-#770 admission (any risk keyword ⇒ `mode=full` ⇒ excluded) for comparison |
+| `--rules v2\|legacy` | `v2` | `legacy` replays pre-#770 admission for comparison: any risk keyword (`legacy-full`), a plan:v1 risk-floor path or > 8 predicted files (`prescreen-full`) excludes |
 | `--repo`, `--project` | cwd repo, `owner-name` | Target repo; sched project whose queue/config is read |
 
 At least one of `--issues` / `--backlog` is required. With `--issues` alone, the backlog is
@@ -1175,10 +1185,11 @@ after the caps, so five admissible `review=full` picks (cap 2) still trigger bac
 | `sched-active` | A non-terminal, not-yet-merged sched queue entry exists |
 | `open-dependency` | `Depends on #N` with N open and not among the picks; N a pick that is itself excluded; or N whose state could not be read (fails closed) |
 | `data-mutation` | Change surface names a production data action (`data migration`, `data backfill`, `backfill script`, `one-off script`, `bulk delete`, …) — never shares a PR |
-| `prescreen-full` | `prescreen:v3` excluding floor: a plan:v1 artifact with > 8 predicted files (a risk-floor path is a `review=full` member, not an exclusion — #805) |
+| `prescreen-full` | A `prescreen:v4` excluding check not already reported under its own code — none today: a plan:v1 risk-floor path (#805) and > 8 predicted files (#818) are `review=full` members, not exclusions. Under `--rules legacy` it reports a path-floor or file-count hit (pre-#770 admission) |
 | `legacy-full` | `--rules legacy` only: any text-floor keyword anywhere in title/body/labels |
 
-`--rules legacy` replays only the pre-#770 keyword rule on top of today's readiness screen (the
+`--rules legacy` replays only the pre-#770 floor rules — any risk keyword, a plan:v1 risk-floor
+path, > 8 predicted files — on top of today's readiness screen (the
 other codes above still apply) — it is a comparison of the admission rule, not a full replay of
 the old pipeline, which also ran a model classifier no deterministic check reproduces.
 
