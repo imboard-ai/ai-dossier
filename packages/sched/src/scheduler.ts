@@ -21,8 +21,9 @@ import {
 import {
   CLEARED_SLOT_FIELDS,
   findBatch,
-  releaseBatchSlot,
+  releaseAllBatchSlots,
   requeueMember,
+  slotsForBatch,
   transitionBatch,
   transitionIssue,
   transitionSlot,
@@ -292,9 +293,8 @@ export function stopBatch(
   if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
     throw new SchedNotFoundError(`Batch ${batchId} is already ${batch.status} — nothing to stop`);
   }
-  const releasedSlots = state.slots
-    .filter((slot) => slot.unit === `batch:${batchId}` && slot.status !== 'idle')
-    .map((slot) => slot.id);
+  // #809: a parallel batch also holds one slot per running member.
+  const releasedSlots = slotsForBatch(state, batchId).map((slot) => slot.id);
   let next = transitionBatch(state, batchId, 'stopped', {}, now);
   const stopped: number[] = [];
   for (const issue of batch.members) {
@@ -303,7 +303,7 @@ export function stopBatch(
     next = transitionIssue(next, issue, 'stopped', { reason }, now);
     stopped.push(issue);
   }
-  return { state: releaseBatchSlot(next, batchId, now), stopped, releasedSlots };
+  return { state: releaseAllBatchSlots(next, batchId, now), stopped, releasedSlots };
 }
 
 /**
@@ -339,7 +339,8 @@ export function abandonBatch(
   // `abandon --batch` did, which is exactly the command reached for when a
   // pilot batch goes wrong. Observed: one slot held by a dissolved batch for
   // over three hours, a `max_slots=3` project down to two.
-  next = releaseBatchSlot(next, batchId, now);
+  // #809: and every parallel member slot with it.
+  next = releaseAllBatchSlots(next, batchId, now);
 
   // Nothing green is discarded (F.8): terminal or already-shipped members keep
   // their outcome; only active members requeue, each through the one shared

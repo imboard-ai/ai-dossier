@@ -622,6 +622,33 @@ describe('validateState', () => {
     }
   });
 
+  it('#809: loads a 1.22.0 state, backfills member_dispatch/member_runs, and rejects malformed ones', () => {
+    const state = seeded();
+    expect(state.batches.length).toBeGreaterThan(0);
+    const legacy = JSON.parse(JSON.stringify(state));
+    legacy.schema_version = '1.22.0';
+    for (const batch of legacy.batches) {
+      delete batch.member_dispatch;
+      delete batch.member_runs;
+    }
+    const loaded = validateState(legacy);
+    for (const batch of loaded.batches) {
+      // null, not 'serial': an unclaimed batch still chooses at its claim, and
+      // a null mode past `ready` already reads as serial.
+      expect(batch.member_dispatch).toBeNull();
+      expect(batch.member_runs).toEqual([]);
+    }
+    expect(() =>
+      validateState({ ...state, batches: [{ ...state.batches[0], member_dispatch: 'fast' }] })
+    ).toThrow(/member_dispatch/);
+    expect(() =>
+      validateState({
+        ...state,
+        batches: [{ ...state.batches[0], member_runs: [{ issue: 1, status: 'flying' }] }],
+      })
+    ).toThrow(/member_runs/);
+  });
+
   it('accepts a state produced by the package itself', () => {
     const state = seeded();
     expect(validateState(JSON.parse(JSON.stringify(state)))).toEqual(state);

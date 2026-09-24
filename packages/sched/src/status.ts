@@ -166,8 +166,9 @@ function formatHours(hours: number): string {
 
 /** The `sched stop` invocation that releases `unit` (`issue:<n>` / `batch:<id>`). */
 function stopRemedy(unit: string): string {
+  // #809: a parallel member's unit `batch:<id>#<issue>` is stopped with its batch.
   return unit.startsWith('batch:')
-    ? `sched stop --batch ${unit.slice('batch:'.length)}`
+    ? `sched stop --batch ${unit.slice('batch:'.length).split('#')[0]}`
     : `sched stop --issue ${unit.slice('issue:'.length)}`;
 }
 

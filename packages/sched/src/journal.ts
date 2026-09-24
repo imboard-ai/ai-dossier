@@ -101,10 +101,13 @@ export function issueOfUnit(unit: unknown): number | null {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
-/** `batch:b1` → `b1`; null for issue or malformed unit ids (#523). */
+/**
+ * `batch:b1` → `b1`; null for issue or malformed unit ids (#523). A parallel
+ * member's slot unit `batch:b1#601` (#809) maps to its batch, `b1`.
+ */
 export function batchOfUnit(unit: string | null): string | null {
   if (unit === null || !unit.startsWith('batch:')) return null;
-  const id = unit.slice('batch:'.length);
+  const id = unit.slice('batch:'.length).split('#')[0] ?? '';
   return id.length > 0 ? id : null;
 }
 

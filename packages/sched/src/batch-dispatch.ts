@@ -11,7 +11,8 @@
  * at batch-phase granularity instead of per-issue-phase granularity:
  *
  * ```
- * ready → executing(member i/N) ⟲ → validating → reviewing → shipping
+ * ready → executing(serial: member i/N ⟲ | parallel: members ∥ + ordered landing)
+ *   → validating → reviewing → shipping
  *   → awaiting-merge → merged → deployed → reported → done
  * failure rails (RFC F.2/F.8/F.9):
  *   executing → dissolving  (a member self-reports blocked, RFC F.1)
@@ -144,6 +145,7 @@ import { assignToIdleSlot, freeCapacity } from './scheduler';
 import {
   allowedBatchTransitions,
   appendEvictions,
+  batchMemberUnit,
   CLEARED_ANCHOR_CLOSE_FAILED_FIELDS,
   CLEARED_PR_WATCH_FIELDS,
   duplicateEvictionDetail,
@@ -152,9 +154,13 @@ import {
   isPreservedMember,
   patchBatch,
   patchSlot,
+  releaseAllBatchSlots,
+  releaseBatchMemberSlot,
   releaseBatchSlot,
   requeueMember,
   slotForBatch,
+  slotForBatchMember,
+  slotsForBatch,
   transitionBatch,
   transitionIssue,
   transitionSlot,
@@ -169,6 +175,8 @@ import type {
   EvictionRecord,
   IssueStatus,
   JournalEventName,
+  MemberDispatchMode,
+  MemberRun,
   ModelTier,
   ReviewLevel,
   SchedConfig,
@@ -178,9 +186,11 @@ import type {
 import {
   IllegalTransitionError,
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
+  LIVE_SLOT_STATUSES,
   resolveDissolvePolicy,
   SchedNotFoundError,
   TERMINAL_BATCH_STATUSES,
+  TERMINAL_ISSUE_STATUSES,
 } from './types';
 
 // `CapOutcome` moved to `types.ts` (#583, so `BatchEntry.member_gates` can use
@@ -370,7 +380,11 @@ function handleDeadDispatchApiError(
   logFile: string,
   offset: number,
   now: Date,
-  options: { release?: boolean } = {}
+  options: {
+    release?: boolean;
+    /** #809: release a slot other than the batch's own (a parallel member's). */
+    releaseWith?: (state: SchedState) => SchedState;
+  } = {}
 ): boolean {
   const apiError = readDispatchApiError(logFile, offset);
   if (!apiError) return false;
@@ -381,7 +395,8 @@ function handleDeadDispatchApiError(
       unit(batchId),
       apiError
     );
-    if (options.release ?? true) n = releaseSlot(n, batchId, now);
+    if (options.releaseWith) n = options.releaseWith(n);
+    else if (options.release ?? true) n = releaseSlot(n, batchId, now);
     return { state: n, result: undefined };
   });
   return true;
@@ -1117,13 +1132,9 @@ function teardownMemberWorktree(
     });
     return;
   }
-  // Route through `runTeardown` for the same guarantees `teardownBatch`
-  // gets: pool returns are verify-first idempotent and refuse to claim
-  // success unless the pool's own self-check reports the entry `warm`;
-  // cold removes post-verify the path is gone and unlisted. Nulls first —
-  // clear the fields BEFORE the exec so a crash mid-teardown doesn't retry
-  // into a half-cleaned tree (the re-derived path is deterministic if a
-  // leftover does survive).
+  // Nulls first — clear the fields BEFORE the exec so a crash mid-teardown
+  // doesn't retry into a half-cleaned tree (the re-derived path is
+  // deterministic if a leftover does survive).
   deps.store.withLock((s) => {
     const b = findBatch(s, batchId);
     if (!b) return { state: s, result: undefined };
@@ -1137,10 +1148,42 @@ function teardownMemberWorktree(
       result: undefined,
     };
   });
+  teardownMemberTree(
+    deps,
+    batchId,
+    { worktree, branch, poolClaimed: batch.member_pool_claimed === true },
+    landed
+  );
+}
+
+/**
+ * The exec half of a member teardown, shared by the serial rail
+ * (`teardownMemberWorktree`, which first clears the batch's member fields) and
+ * the parallel rail (#809, `teardownParallelRun`). See
+ * `teardownMemberWorktree` for the landed/evicted branch policy.
+ */
+function teardownMemberTree(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  tree: { worktree: string; branch: string | null; poolClaimed: boolean },
+  landed: boolean
+): void {
+  const { worktree, branch } = tree;
+  if (branch !== null && !SAFE_REF_RE.test(branch)) {
+    journalEvent(deps, 'teardown-failed', unit(batchId), {
+      cleanup: 'failed-invalid-branch-name',
+      detail: branch,
+    });
+    return;
+  }
+  // Route through `runTeardown` for the same guarantees `teardownBatch`
+  // gets: pool returns are verify-first idempotent and refuse to claim
+  // success unless the pool's own self-check reports the entry `warm`;
+  // cold removes post-verify the path is gone and unlisted.
   const t = runTeardown(
     deps.exec,
     deps.repoDir,
-    { worktree, poolClaimed: batch.member_pool_claimed === true, branch },
+    { worktree, poolClaimed: tree.poolClaimed, branch },
     deps.fsExists
   );
   const treeCleared = !t.cleanup.startsWith('failed');
@@ -1211,9 +1254,10 @@ function blockLandingFailure(
 }
 
 /**
- * Spawn one batch member's member-cycle agent (#677) into the slot a prior
- * member (or batch-setup) just released — each member in its OWN worktree
- * off the integration branch, dispatched serially as before. Prepared by
+ * Spawn one SERIAL batch member's member-cycle agent (#677) into the slot a
+ * prior member (or batch-setup) just released — each member in its OWN
+ * worktree off the integration branch. Parallel batches (#809) spawn through
+ * `spawnParallelMembers` instead, one slot per member. Prepared by
  * {@link prepareMemberWorktree} at the spawn site (outside the lock); this
  * function only patches state and spawns.
  */
@@ -1267,6 +1311,63 @@ function spawnMember(
   member: MemberWorktree
 ): SchedState {
   const batch = findBatch(state, batchId);
+  const memberIssue = batch?.members[(batch?.executing_member ?? 0) - 1];
+  if (batch && memberIssue === undefined) {
+    journalEvent(deps, 'unit-failed', unit(batchId), {
+      reason: 'no-member',
+      detail: `spawnMember: executing_member ${batch.executing_member} has no member issue`,
+    });
+    return releaseSlot(state, batchId, now);
+  }
+  const spawned = spawnMemberAgent(deps, dispatch, state, slot, batchId, now, result, {
+    index: batch?.executing_member ?? 0,
+    issue: memberIssue ?? 0,
+    member,
+    unitId: unit(batchId),
+    release: (s) => releaseSlot(s, batchId, now),
+  });
+  if (!spawned.ok) return spawned.state;
+  // #677: persist the member's worktree context — a takeover redispatch or a
+  // `sched resume --batch` recheck after an engine restart must land in the
+  // SAME worktree/branch this prompt names, not re-derive (or worse,
+  // re-create) it.
+  return patchBatch(
+    spawned.state,
+    batchId,
+    {
+      member_branch: member.branch,
+      member_worktree: member.worktree,
+      member_pool_claimed: member.poolClaimed,
+    },
+    now
+  );
+}
+
+/**
+ * Spawn ONE member's member-cycle agent into `slot` — the shared core of the
+ * serial rail (`spawnMember`, the batch's own slot) and the parallel rail
+ * (`spawnParallelMember`, #809: the member's own `batch:<id>#<issue>` slot).
+ * Patches the slot and the member's queue entry; the caller persists its own
+ * member context. On failure the slot is released through `target.release`.
+ */
+function spawnMemberAgent(
+  deps: BatchDispatchDeps,
+  dispatch: ResolvedDispatch,
+  state: SchedState,
+  slot: SlotEntry,
+  batchId: string,
+  now: Date,
+  result: BatchTickResult,
+  target: {
+    index: number;
+    issue: number;
+    member: MemberWorktree;
+    /** What `result.spawned`/`failed` report — the batch unit (serial) or the member unit (parallel). */
+    unitId: string;
+    release: (s: SchedState) => SchedState;
+  }
+): { ok: boolean; state: SchedState } {
+  const batch = findBatch(state, batchId);
   if (!batch || batch.worktree === null || batch.branch === null) {
     // A leaked `assigned` slot with `pid: null` is invisible to `dead`
     // detection (nothing ever kills/reclaims it) — release it here rather
@@ -1275,17 +1376,9 @@ function spawnMember(
       reason: 'no-worktree',
       detail: 'spawnMember: batch has no worktree/branch — batch-setup has not landed',
     });
-    return releaseSlot(state, batchId, now);
+    return { ok: false, state: target.release(state) };
   }
-  const memberIssue = batch.members[batch.executing_member - 1];
-  if (memberIssue === undefined) {
-    journalEvent(deps, 'unit-failed', unit(batchId), {
-      reason: 'no-member',
-      detail: `spawnMember: executing_member ${batch.executing_member} has no member issue`,
-    });
-    return releaseSlot(state, batchId, now);
-  }
-
+  const memberIssue = target.issue;
   const withStatus = advanceMemberToInWork(state, memberIssue, now);
   const memberEntry = findEntry(withStatus, memberIssue);
   // #771: a `review=full` member dispatches at `strong` minimum (within this
@@ -1301,16 +1394,11 @@ function spawnMember(
     dispatch.memberPrompt,
     memberIssue,
     batchId,
-    member.worktree,
+    target.member.worktree,
     batch.branch,
     review
   );
-  const logFile = batchMemberLogPath(
-    deps.store.runsDir,
-    batchId,
-    batch.executing_member,
-    memberIssue
-  );
+  const logFile = batchMemberLogPath(deps.store.runsDir, batchId, target.index, memberIssue);
   // #629: captured BEFORE spawning, mirroring `engine.ts`'s own
   // `spawnAndRecord` — the log is per-role and append-mode, so the size at
   // this instant is exactly where THIS dispatch's own output starts. Fences
@@ -1326,8 +1414,8 @@ function spawnMember(
       reason: 'spawn-error',
       detail: `member #${memberIssue} spawn failed: ${(err as Error).message}`,
     });
-    result.failed.push(unit(batchId));
-    return releaseSlot(withStatus, batchId, now);
+    result.failed.push(target.unitId);
+    return { ok: false, state: target.release(withStatus) };
   }
 
   const patch = {
@@ -1341,24 +1429,10 @@ function spawnMember(
     spawned_at: now.toISOString(),
     log_offset_at_spawn: logOffset,
   };
-  let next =
+  const next =
     slot.status === 'assigned' || slot.status === 'recovering'
       ? transitionSlot(withStatus, slot.id, 'running', patch, now)
       : withStatus;
-  // #677: persist the member's worktree context — a takeover redispatch or a
-  // `sched resume --batch` recheck after an engine restart must land in the
-  // SAME worktree/branch this prompt names, not re-derive (or worse,
-  // re-create) it.
-  next = patchBatch(
-    next,
-    batchId,
-    {
-      member_branch: member.branch,
-      member_worktree: member.worktree,
-      member_pool_claimed: member.poolClaimed,
-    },
-    now
-  );
   deps.journal.append(
     unitEvent('spawned', unit(batchId), {
       pid,
@@ -1368,13 +1442,13 @@ function spawnMember(
       issue: memberIssue,
       ...journalCmdModelFields(spawnSpec),
       log: logFile,
-      worktree: member.worktree,
-      detail: `member ${batch.executing_member}/${batch.members.length}`,
+      worktree: target.member.worktree,
+      detail: `member ${target.index}/${batch.members.length}${batch.member_dispatch === 'parallel' ? ' (parallel)' : ''}`,
     }),
     now
   );
-  result.spawned.push(unit(batchId));
-  return next;
+  result.spawned.push(target.unitId);
+  return { ok: true, state: next };
 }
 
 /**
@@ -1451,10 +1525,47 @@ function claimAndSetup(
       pool_claimed: setup.poolClaimed ? 'true' : 'false',
     },
   });
+  // #809: decided ONCE, here, and persisted — a batch never changes mode mid-run.
+  const mode = memberDispatchModeFor(deps.store.load(), batch, config);
   deps.journal.append(
-    unitEvent('batch-setup-done', unit(batchId), { detail: setup.worktree }),
+    unitEvent('batch-setup-done', unit(batchId), {
+      detail: `${setup.worktree} (members: ${mode})`,
+    }),
     now
   );
+
+  if (mode === 'parallel') {
+    // Parallel members each claim their OWN slot (`batch:<id>#<issue>`), so
+    // the setup slot is released here and the members' worktrees are prepared
+    // by `spawnParallelMembers` (outside the lock, per member).
+    deps.store.withLock((s) => {
+      const b = findBatch(s, batchId);
+      if (!b || b.status !== 'ready') {
+        journalEvent(deps, 'unit-failed', unit(batchId), {
+          reason: 'batch-left-ready-during-setup',
+          detail: `worktree ${setup.worktree} created but batch is now '${b?.status ?? 'gone'}' — orphaned, manual cleanup required`,
+        });
+        return { state: releaseSlot(s, batchId, now), result: undefined };
+      }
+      let next = patchBatch(
+        s,
+        batchId,
+        {
+          branch: setup.branch,
+          worktree: setup.worktree,
+          run_id: setup.runId,
+          pool_claimed: setup.poolClaimed,
+          member_dispatch: 'parallel',
+          member_runs: [],
+        },
+        now
+      );
+      next = transitionBatch(next, batchId, 'executing', { executing_member: 0 }, now);
+      return { state: releaseSlot(next, batchId, now), result: undefined };
+    });
+    spawnParallelMembers(deps, config, dispatch, batchId, now, result);
+    return;
+  }
 
   // #677: prepare member 1's OWN worktree before claiming the spawn — real
   // git/network work, so OUTSIDE the store lock (the same contract
@@ -1526,6 +1637,7 @@ function claimAndSetup(
         worktree: setup.worktree,
         run_id: setup.runId,
         pool_claimed: setup.poolClaimed,
+        member_dispatch: 'serial',
       },
       now
     );
@@ -1851,7 +1963,8 @@ function runValidate(
             s,
             batchId,
             'executing',
-            { executing_member: b.executing_member + 1 },
+            // #809: a parallel batch spawns every run-less member itself.
+            isParallelBatch(b) ? {} : { executing_member: b.executing_member + 1 },
             now
           ),
           result: true,
@@ -1860,7 +1973,10 @@ function runValidate(
       return { state: transitionBatch(s, batchId, 'reviewing', {}, now), result: undefined };
     });
     if (admitted) {
-      spawnMemberContinuation(deps, config, dispatch, batchId, now, result);
+      const b = findBatch(deps.store.load(), batchId);
+      if (b && isParallelBatch(b))
+        spawnParallelMembers(deps, config, dispatch, batchId, now, result);
+      else spawnMemberContinuation(deps, config, dispatch, batchId, now, result);
       return;
     }
     spawnTailAgent(deps, config, dispatch, batchId, now, result);
@@ -2009,7 +2125,7 @@ function evictOffender(
             s,
             batchId,
             'executing',
-            { executing_member: b.executing_member + 1 },
+            isParallelBatch(b) ? {} : { executing_member: b.executing_member + 1 },
             now
           ),
           result: undefined,
@@ -2099,6 +2215,15 @@ function advanceMemberOrValidate(
   now: Date,
   result: BatchTickResult
 ): void {
+  // #809: a parallel batch reaches this serial rail only through `sched resume
+  // --batch` resolving its gate-inconclusive member — hand back to the
+  // parallel rail instead of advancing a serial member pointer.
+  const current = findBatch(deps.store.load(), batchId);
+  if (current && isParallelBatch(current)) {
+    settleParallelResume(deps, batchId, memberIssue, now);
+    advanceParallelBatch(deps, config, dispatch, batchId, now, result);
+    return;
+  }
   const isLast = currentMember >= memberCount;
   if (isLast) {
     const claim = claimMemberResolution(deps, batchId, currentMember, now, () => ({
@@ -2239,7 +2364,69 @@ function runIncrementalGate(
   // the fallback for a batch dispatched before member worktrees existed (its
   // members' commits landed directly on the integration branch).
   const worktree = batch.member_worktree ?? batch.worktree;
+  const verdict = evaluateIncrementalGate(deps, batchId, worktree, memberIssue, now);
+  if (verdict.kind === 'pass') return false;
+  if (verdict.kind === 'failed') {
+    deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
+    evictMemberAndContinue(
+      deps,
+      config,
+      dispatch,
+      batchId,
+      batch,
+      memberIssue,
+      { reason: verdict.reason, detail: verdict.detail },
+      now,
+      result
+    );
+    return true;
+  }
+  deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
+  // #677: F.11's block semantics are "the member's commit stays on the
+  // branch, nothing requeued/reverted" — under member worktrees that is
+  // true only if the member LANDS before the batch blocks. The block means
+  // the gate could not reach a verdict, not that the work is bad, so the
+  // verified member joins the integration branch and is there for an
+  // operator (or the #686 out-of-band reconcile) to act on. A landing
+  // failure blocks the batch with its own reason — same operator outcome.
+  const landed = landMemberBranch(deps, batchId, now);
+  if (!landed.ok) {
+    blockLandingFailure(deps, config, batch, landed.reason, now, result);
+    return true;
+  }
+  blockBatchForOperator(
+    deps,
+    config,
+    batchId,
+    { reason: verdict.reason, milestonePhase: 'batch-review' },
+    now,
+    result
+  );
+  return true;
+}
+
+/** What the incremental gate concluded about one member (#809 split it from its actions). */
+type GateVerdict =
+  | { kind: 'pass' }
+  | { kind: 'failed'; reason: string; detail: string }
+  | { kind: 'inconclusive'; reason: string; capability: string };
+
+/**
+ * Run the incremental gate's capabilities against one member worktree and
+ * reach a verdict — journaling, gate logs and `member_gates` included, but NO
+ * state action: serial (`runIncrementalGate`) and parallel
+ * (`reconcileParallelMemberSlot`, #809) members act on the verdict
+ * differently. See `runIncrementalGate`'s doc for the policy.
+ */
+function evaluateIncrementalGate(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  worktree: string,
+  memberIssue: number,
+  now: Date
+): GateVerdict {
   const runCapability = deps.runCapability;
+  if (!runCapability) return { kind: 'pass' };
   const gateResults = ['typecheck.run', 'test.focused'].map((id) => ({
     id,
     ...runCapability(worktree, id),
@@ -2282,13 +2469,10 @@ function runIncrementalGate(
     // trap (#594's shape — absence reading as a verdict). Silence must never
     // be mistaken for a pass.
     //
-    // #632: confirmed this fires once per member, not once per tick.
-    // `runIncrementalGate` is called only from the `isMemberComplete` branch
-    // of `reconcileMemberSlot`, and both of that branch's callees
-    // (`completeMemberGate`, `evictMemberAndContinue`) advance
-    // `batch.executing_member` before returning — so the very next tick
-    // reads a DIFFERENT `memberIssue` from `batch.members[executing_member -
-    // 1]`, and this gate never runs twice against the same member.
+    // #632: confirmed this fires once per member, not once per tick: the
+    // gate runs only on a member dispatch's verified completion, and both
+    // rails resolve that member (serial: the pointer advances; parallel:
+    // the run leaves `running` and its slot is released) before returning.
     journalEvent(deps, 'gate-skipped', unit(batchId), {
       issue: memberIssue,
       reason: `gate-skipped:${skipped.id}`,
@@ -2346,28 +2530,16 @@ function runIncrementalGate(
     recordMemberGate(deps, batchId, memberIssue, decisiveGate, now);
   }
   if (earnedFailure) {
-    const reason = `incremental-gate-failed:${earnedFailure.id}`;
     writeGateLog(deps, batchId, earnedFailure.id, memberIssue, earnedFailure.outputTail);
     const excerpt = gateDetailExcerpt(earnedFailure.outputTail, earnedFailure.reason);
-    deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
-    evictMemberAndContinue(
-      deps,
-      config,
-      dispatch,
-      batchId,
-      batch,
-      memberIssue,
-      {
-        reason,
-        detail: withExcerpt(
-          `cap run ${earnedFailure.id} reported task-failed with failing-test evidence after member review done`,
-          excerpt
-        ),
-      },
-      now,
-      result
-    );
-    return true;
+    return {
+      kind: 'failed',
+      reason: `incremental-gate-failed:${earnedFailure.id}`,
+      detail: withExcerpt(
+        `cap run ${earnedFailure.id} reported task-failed with failing-test evidence after member review done`,
+        excerpt
+      ),
+    };
   }
   const inconclusive = gateInconclusive ?? unevidencedFailure;
   if (inconclusive) {
@@ -2386,30 +2558,9 @@ function runIncrementalGate(
         excerpt
       ),
     });
-    deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
-    // #677: F.11's block semantics are "the member's commit stays on the
-    // branch, nothing requeued/reverted" — under member worktrees that is
-    // true only if the member LANDS before the batch blocks. The block means
-    // the gate could not reach a verdict, not that the work is bad, so the
-    // verified member joins the integration branch and is there for an
-    // operator (or the #686 out-of-band reconcile) to act on. A landing
-    // failure blocks the batch with its own reason — same operator outcome.
-    const landed = landMemberBranch(deps, batchId, now);
-    if (!landed.ok) {
-      blockLandingFailure(deps, config, batch, landed.reason, now, result);
-      return true;
-    }
-    blockBatchForOperator(
-      deps,
-      config,
-      batchId,
-      { reason, milestonePhase: 'batch-review' },
-      now,
-      result
-    );
-    return true;
+    return { kind: 'inconclusive', reason, capability: inconclusive.id };
   }
-  return false;
+  return { kind: 'pass' };
 }
 
 /**
@@ -2720,7 +2871,8 @@ function recordMemberRunLog(
   dispatch: ResolvedDispatch,
   state: SchedState,
   batchId: string,
-  batch: BatchEntry,
+  /** 1-based member index — names the per-member log file (serial: `executing_member`; parallel: `MemberRun.index`). */
+  memberIndex: number,
   memberIssue: number,
   slot: SlotEntry,
   now: Date
@@ -2739,12 +2891,7 @@ function recordMemberRunLog(
   const memberEntry = findEntry(state, memberIssue);
   const tier: ModelTier = memberEntry ? memberDispatchTier(memberEntry) : 'mid';
   const { cmd, model } = resolveTierSpawn(dispatch, tier, memberIssue);
-  const logFile = batchMemberLogPath(
-    deps.store.runsDir,
-    batchId,
-    batch.executing_member,
-    memberIssue
-  );
+  const logFile = batchMemberLogPath(deps.store.runsDir, batchId, memberIndex, memberIssue);
   // #629: fenced to THIS dispatch's slice (`log_offset_at_spawn`, stamped by
   // `spawnMember`/`spawnMemberContinuation` at spawn time) rather than a
   // fixed byte-0 read. Before #629 a member log never outlived one attempt
@@ -2824,21 +2971,24 @@ function terminalMilestoneForDispatch(
   return latest;
 }
 
-function reconcileMemberSlot(
-  deps: BatchDispatchDeps,
-  config: SchedConfig,
-  dispatch: ResolvedDispatch,
-  batchId: string,
-  slot: SlotEntry,
-  now: Date,
-  result: BatchTickResult
-): void {
-  const state0 = deps.store.load();
-  const batch = findBatch(state0, batchId);
-  if (!batch) return;
-  const memberIssue = batch.members[batch.executing_member - 1];
-  if (memberIssue === undefined) return;
+/** What one member dispatch's ground truth says this tick — shared by the serial and parallel (#809) rails. */
+type MemberDispatchRead =
+  | { kind: 'unreachable' }
+  | { kind: 'complete' }
+  | { kind: 'pending'; milestone: GroundTruthMilestone | null; dead: boolean; blockedNow: boolean };
 
+/**
+ * Read one member dispatch's fate: the fenced terminal milestone (#575/#605/
+ * #622) plus liveness, journaling a stale terminal milestone once per
+ * dispatch (#610). Pure reading — the caller acts on the result.
+ */
+function readMemberDispatch(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  memberIssue: number,
+  slot: SlotEntry,
+  now: Date
+): MemberDispatchRead {
   const dead = slot.pid !== null && !deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined);
   // #622: the milestone this DISPATCH's fate should be read from — the last
   // TERMINAL one it posted, not merely the newest one on the issue.
@@ -2856,7 +3006,7 @@ function reconcileMemberSlot(
   // ground truth cannot answer (older implementation, or an unreachable
   // poll) this degrades to the previous latest-only behaviour.
   const milestone = terminalMilestoneForDispatch(deps, memberIssue, slot);
-  if (milestone === undefined) return; // unreachable — pause this batch's decisions
+  if (milestone === undefined) return { kind: 'unreachable' }; // pause this batch's decisions
 
   // #575 / #605: fence to THIS member dispatch's `spawned_at` — a member
   // re-added to a fresh batch run after a PREVIOUS batch already posted a
@@ -2898,7 +3048,76 @@ function reconcileMemberSlot(
     }));
   }
 
-  if (isMemberComplete(milestone, slot.spawned_at)) {
+  if (isMemberComplete(milestone, slot.spawned_at)) return { kind: 'complete' };
+  return {
+    kind: 'pending',
+    milestone,
+    dead,
+    blockedNow: isMemberBlocked(milestone, slot.spawned_at),
+  };
+}
+
+/**
+ * The eviction a blocked-or-dead member dispatch earns (shared by both rails).
+ * #605: only a milestone THIS dispatch posted may name the reason. A dead
+ * agent whose issue carries only a stale `blocked` milestone is an unverified
+ * exit, not a re-run of the previous run's block — reporting the old
+ * `reason=` here is what made the journal misdirect, naming a precondition
+ * that had already been fixed on a run where it no longer applied.
+ * #804: `memberBlockedReason` also names a `review partial` hand-back.
+ */
+function memberFailureFor(
+  read: { milestone: GroundTruthMilestone | null; dead: boolean; blockedNow: boolean },
+  lastTool: string | null
+): MemberFailure {
+  const rawReason =
+    read.blockedNow && read.milestone ? memberBlockedReason(read.milestone) : undefined;
+  const reason =
+    typeof rawReason === 'string' && rawReason.length > 0
+      ? sanitizeUntrustedText(rawReason)
+      : read.dead
+        ? 'agent-exited-unverified'
+        : 'member-blocked';
+  return {
+    reason,
+    // This rail covers a self-reported block AND a member that simply died, so the
+    // detail must follow the RESOLVED reason — `member blocked` on an
+    // `agent-exited-unverified` eviction contradicts the reason on its own journal line.
+    detail:
+      reason === 'agent-exited-unverified'
+        ? 'member agent exited without posting a terminal milestone'
+        : 'member blocked',
+    // #591: attributes an unverified member exit to a concrete cause (e.g.
+    // `Monitor`) without opening the transcript. Gated on the RESOLVED reason, not
+    // `dead` — a member can be simultaneously `dead` AND carry a milestone-posted
+    // `reason` (it posted `blocked` and then exited), and that real block has no
+    // log-derived cause to attribute; only `agent-exited-unverified` does.
+    extraKv:
+      reason === 'agent-exited-unverified' && lastTool !== null
+        ? { last_tool: lastTool }
+        : undefined,
+  };
+}
+
+function reconcileMemberSlot(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  slot: SlotEntry,
+  now: Date,
+  result: BatchTickResult
+): void {
+  const state0 = deps.store.load();
+  const batch = findBatch(state0, batchId);
+  if (!batch) return;
+  const memberIssue = batch.members[batch.executing_member - 1];
+  if (memberIssue === undefined) return;
+
+  const read = readMemberDispatch(deps, batchId, memberIssue, slot, now);
+  if (read.kind === 'unreachable') return;
+
+  if (read.kind === 'complete') {
     deps.journal.append(
       unitEvent('external-advance', unit(batchId), {
         issue: memberIssue,
@@ -2909,7 +3128,16 @@ function reconcileMemberSlot(
     // The member's own agent process is done regardless of what the
     // incremental gate below decides — record its telemetry once here (#564)
     // rather than at each of this branch's two later exit points.
-    recordMemberRunLog(deps, dispatch, state0, batchId, batch, memberIssue, slot, now);
+    recordMemberRunLog(
+      deps,
+      dispatch,
+      state0,
+      batchId,
+      batch.executing_member,
+      memberIssue,
+      slot,
+      now
+    );
 
     // Incremental gate (#523 AC2, revised #583) — see `runIncrementalGate`'s
     // own doc comment for the three-way policy. A `true` return means the
@@ -2924,10 +3152,9 @@ function reconcileMemberSlot(
     return;
   }
 
-  const blockedNow = isMemberBlocked(milestone, slot.spawned_at);
   if (
-    dead &&
-    !blockedNow &&
+    read.dead &&
+    !read.blockedNow &&
     handleDeadDispatchApiError(
       deps,
       batchId,
@@ -2943,27 +3170,13 @@ function reconcileMemberSlot(
     // place, keeping its position.
     return;
   }
-  if (blockedNow || dead) {
-    // #605: only a milestone THIS dispatch posted may name the reason. A dead
-    // agent whose issue carries only a stale `blocked` milestone is an
-    // unverified exit, not a re-run of the previous run's block — reporting
-    // the old `reason=` here is what made the journal misdirect, naming a
-    // precondition that had already been fixed on a run where it no longer
-    // applied.
-    // #804: `memberBlockedReason` also names a `review partial` hand-back.
-    const rawReason = blockedNow && milestone ? memberBlockedReason(milestone) : undefined;
-    const reason =
-      typeof rawReason === 'string' && rawReason.length > 0
-        ? sanitizeUntrustedText(rawReason)
-        : dead
-          ? 'agent-exited-unverified'
-          : 'member-blocked';
+  if (read.blockedNow || read.dead) {
     const lastTool = recordMemberRunLog(
       deps,
       dispatch,
       state0,
       batchId,
-      batch,
+      batch.executing_member,
       memberIssue,
       slot,
       now
@@ -2985,25 +3198,7 @@ function reconcileMemberSlot(
       batchId,
       batch,
       memberIssue,
-      {
-        reason,
-        // This rail covers a self-reported block AND a member that simply died, so the
-        // detail must follow the RESOLVED reason — `member blocked` on an
-        // `agent-exited-unverified` eviction contradicts the reason on its own journal line.
-        detail:
-          reason === 'agent-exited-unverified'
-            ? 'member agent exited without posting a terminal milestone'
-            : 'member blocked',
-        // #591: attributes an unverified member exit to a concrete cause (e.g.
-        // `Monitor`) without opening the transcript. Gated on the RESOLVED reason, not
-        // `dead` — a member can be simultaneously `dead` AND carry a milestone-posted
-        // `reason` (it posted `blocked` and then exited), and that real block has no
-        // log-derived cause to attribute; only `agent-exited-unverified` does.
-        extraKv:
-          reason === 'agent-exited-unverified' && lastTool !== null
-            ? { last_tool: lastTool }
-            : undefined,
-      },
+      memberFailureFor(read, lastTool),
       now,
       result
     );
@@ -3958,7 +4153,9 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
   const lastMemberLanded =
     terminal?.ranges.some((r) => r.issue === terminal.members[terminal.executing_member - 1]) ===
     true;
+  const serialTree = terminal?.member_worktree ?? null;
   teardownMemberWorktree(deps, batchId, deps.now(), lastMemberLanded);
+  teardownParallelRuns(deps, batchId, serialTree);
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
   if (!batch || batch.worktree === null) return;
@@ -3990,6 +4187,705 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
       worktree: batch.worktree,
     }
   );
+}
+
+// --- Parallel member dispatch (#809) ---
+
+/**
+ * How a batch should dispatch its members (#809) — decided once, at the
+ * `ready → executing` claim, and persisted on `BatchEntry.member_dispatch`.
+ *
+ * Serial when the operator set `member_parallelism: 1`, or the batch itself
+ * says its members are not independent: an eviction group (members that must
+ * revert together — e.g. one built on another's API) or a member whose `deps`
+ * names another member (it must see that member's landed work before it is
+ * cut). Parallel otherwise — the batch-cycle skill's and prep dossier's
+ * design (RFC-0001 §J.3: each member works off the integration branch and
+ * sees no one else's changes until the parent lands them).
+ */
+export function memberDispatchModeFor(
+  state: SchedState,
+  batch: BatchEntry,
+  config: SchedConfig
+): MemberDispatchMode {
+  if (config.member_parallelism === 1) return 'serial';
+  if (batch.eviction_groups.some((group) => group.length > 1)) return 'serial';
+  const members = new Set(batch.members);
+  for (const issue of batch.members) {
+    if (findEntry(state, issue)?.deps.some((dep) => members.has(dep))) return 'serial';
+  }
+  return 'parallel';
+}
+
+/** Whether `batch` runs the parallel member rail — `null` (pre-#809, or not yet claimed) is serial. */
+function isParallelBatch(batch: BatchEntry): boolean {
+  return batch.member_dispatch === 'parallel';
+}
+
+/** At most this many members of one batch run at once (#809) — `max_slots` when unset. */
+function memberParallelism(config: SchedConfig): number {
+  return Math.max(1, config.member_parallelism ?? config.max_slots);
+}
+
+/** Merge `patch` into member `issue`'s run record (no-op when it has none). */
+function patchRun(
+  state: SchedState,
+  batchId: string,
+  issue: number,
+  patch: Partial<MemberRun>,
+  now: Date
+): SchedState {
+  const batch = findBatch(state, batchId);
+  if (!batch || !batch.member_runs.some((r) => r.issue === issue)) return state;
+  return patchBatch(
+    state,
+    batchId,
+    { member_runs: batch.member_runs.map((r) => (r.issue === issue ? { ...r, ...patch } : r)) },
+    now
+  );
+}
+
+/** Insert or replace member `run.issue`'s run record. */
+function upsertRun(state: SchedState, batchId: string, run: MemberRun, now: Date): SchedState {
+  const batch = findBatch(state, batchId);
+  if (!batch) return state;
+  const others = batch.member_runs.filter((r) => r.issue !== run.issue);
+  return patchBatch(
+    state,
+    batchId,
+    { member_runs: [...others, run].sort((a, b) => a.index - b.index) },
+    now
+  );
+}
+
+/**
+ * Whether `issue` is still an active member of `batch` — not evicted, and its
+ * queue entry (when it has one) still a live slot-mode entry of THIS batch. An
+ * evicted member's entry is requeued `mode: 'full', batch: null`, so both
+ * checks agree; the entry check also covers a member stopped or abandoned out
+ * from under the batch.
+ */
+function memberStillInBatch(state: SchedState, batch: BatchEntry, issue: number): boolean {
+  if (batch.evictions.some((e) => e.issue === issue)) return false;
+  const entry = findEntry(state, issue);
+  if (entry === undefined) return true;
+  return (
+    entry.mode === 'slot' && entry.batch === batch.id && !TERMINAL_ISSUE_STATUSES.has(entry.status)
+  );
+}
+
+/** Whether member `issue`'s own slot currently holds a live agent. */
+function hasLiveMemberSlot(state: SchedState, batchId: string, issue: number): boolean {
+  const slot = slotForBatchMember(state, batchId, issue);
+  return slot !== undefined && LIVE_SLOT_STATUSES.has(slot.status);
+}
+
+/**
+ * The next member to (re)spawn: first a run still `running` that holds no slot
+ * (an api-error hold released it, its spawn threw, or the engine restarted) —
+ * respawned in place, in its own worktree — then the first member in order
+ * that has no run yet.
+ */
+function nextParallelCandidate(
+  state: SchedState,
+  batch: BatchEntry,
+  attempted: ReadonlySet<number>
+): { issue: number; index: number; run?: MemberRun } | undefined {
+  for (const run of batch.member_runs) {
+    if (
+      run.status === 'running' &&
+      !attempted.has(run.issue) &&
+      slotForBatchMember(state, batch.id, run.issue) === undefined &&
+      memberStillInBatch(state, batch, run.issue)
+    ) {
+      return { issue: run.issue, index: run.index, run };
+    }
+  }
+  for (const [i, issue] of batch.members.entries()) {
+    if (attempted.has(issue) || batch.member_runs.some((r) => r.issue === issue)) continue;
+    if (!memberStillInBatch(state, batch, issue)) continue;
+    return { issue, index: i + 1 };
+  }
+  return undefined;
+}
+
+/**
+ * Fill the batch's member concurrency: spawn members into their OWN slots
+ * (`batch:<id>#<issue>`) while fewer than `member_parallelism` run and the
+ * scheduler has free capacity. Each gets its own worktree off the integration
+ * branch (`prepareMemberWorktree`, outside the lock) — the integration branch
+ * does not move until members land, so concurrent members are all cut from the
+ * same base. A member whose worktree cannot be prepared is evicted (requeued
+ * full-cycle, which does its own setup) rather than retried every tick in
+ * front of the members behind it.
+ */
+function spawnParallelMembers(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  now: Date,
+  result: BatchTickResult
+): void {
+  const limit = memberParallelism(config);
+  const fsExists = deps.fsExists ?? ((p: string) => fs.existsSync(p));
+  const attempted = new Set<number>();
+  // Bounded by the member count: every iteration marks one member attempted.
+  for (;;) {
+    const state = deps.store.load();
+    const batch = findBatch(state, batchId);
+    if (!batch || batch.status !== 'executing' || !isParallelBatch(batch)) return;
+    const live = batch.member_runs.filter((r) => hasLiveMemberSlot(state, batchId, r.issue)).length;
+    if (live >= limit || freeCapacity(state, config) === 0) return;
+    const next = nextParallelCandidate(state, batch, attempted);
+    if (next === undefined) return;
+    attempted.add(next.issue);
+
+    let member: MemberWorktree;
+    if (next.run !== undefined && fsExists(next.run.worktree)) {
+      member = {
+        branch: next.run.branch,
+        worktree: next.run.worktree,
+        poolClaimed: next.run.pool_claimed,
+      };
+    } else {
+      // The serial-member fields describe no member of a parallel batch —
+      // blank them so the reuse branch re-derives THIS member's branch/path.
+      const prep = prepareMemberWorktree(
+        deps,
+        { ...batch, member_branch: null, member_worktree: null, member_pool_claimed: false },
+        next.index,
+        next.issue,
+        now
+      );
+      if (!prep.ok) {
+        evictMemberDirectly(
+          deps,
+          config,
+          batchId,
+          next.issue,
+          {
+            reason: `member-worktree-prep-failed:${prep.reason}`,
+            detail: `member worktree prep failed: ${prep.reason} (member ${next.index} #${next.issue}, branch ${memberBranchFor(batchId, next.index, next.issue)})`,
+          },
+          now
+        );
+        result.failed.push(batchMemberUnit(batchId, next.issue));
+        continue;
+      }
+      member = prep;
+    }
+
+    deps.store.withLock((s) => {
+      const b = findBatch(s, batchId);
+      if (
+        !b ||
+        b.status !== 'executing' ||
+        slotForBatchMember(s, batchId, next.issue) !== undefined ||
+        freeCapacity(s, config) === 0
+      ) {
+        return { state: s, result: undefined };
+      }
+      const memberUnit = batchMemberUnit(batchId, next.issue);
+      const assigned = assignToIdleSlot(s, memberUnit, 'member', now, 'cycle');
+      const slot = assigned.state.slots.find((x) => x.id === assigned.slotId);
+      if (!slot) return { state: s, result: undefined };
+      const spawned = spawnMemberAgent(deps, dispatch, assigned.state, slot, batchId, now, result, {
+        index: next.index,
+        issue: next.issue,
+        member,
+        unitId: memberUnit,
+        release: (st) => releaseBatchMemberSlot(st, batchId, next.issue, now),
+      });
+      // The run is recorded whether or not the spawn succeeded: its worktree
+      // exists either way, and a `running` run with no slot is exactly what
+      // the next tick respawns in place.
+      let n = upsertRun(
+        spawned.state,
+        batchId,
+        {
+          issue: next.issue,
+          index: next.index,
+          branch: member.branch,
+          worktree: member.worktree,
+          pool_claimed: member.poolClaimed,
+          status: 'running',
+          gate_inconclusive: null,
+        },
+        now
+      );
+      n = patchBatch(
+        n,
+        batchId,
+        { executing_member: Math.max(b.executing_member, next.index) },
+        now
+      );
+      return { state: n, result: undefined };
+    });
+  }
+}
+
+/**
+ * Evict one parallel member directly (RFC F.1 — its commits never landed) and
+ * tear its worktree down; the pushed member branch is KEPT on origin (the
+ * evicted work's only recoverable copy, as in serial mode). A dissolve this
+ * tips over is torn down by `teardownBatch`, which covers every live run.
+ */
+function evictParallelMember(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  batchId: string,
+  run: MemberRun,
+  failure: MemberFailure,
+  now: Date,
+  result: BatchTickResult
+): void {
+  const { dissolved, duplicate } = evictMemberDirectly(
+    deps,
+    config,
+    batchId,
+    run.issue,
+    failure,
+    now
+  );
+  if (duplicate) return;
+  result.failed.push(dissolved ? unit(batchId) : batchMemberUnit(batchId, run.issue));
+  if (dissolved) return;
+  deps.store.withLock((s) => ({
+    state: patchRun(s, batchId, run.issue, { status: 'evicted', gate_inconclusive: null }, now),
+    result: undefined,
+  }));
+  teardownMemberTree(
+    deps,
+    batchId,
+    { worktree: run.worktree, branch: run.branch, poolClaimed: run.pool_claimed },
+    false
+  );
+}
+
+/**
+ * Reconcile one parallel member's slot — the parallel twin of
+ * `reconcileMemberSlot`: the same fenced milestone read, the same incremental
+ * gate (in the member's OWN worktree), the same eviction rail. A verified
+ * member does NOT land here: landing is ordered (`advanceParallelBatch`), so
+ * it only leaves `running` and gives its slot back.
+ */
+function reconcileParallelMemberSlot(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  run: MemberRun,
+  slot: SlotEntry,
+  now: Date,
+  result: BatchTickResult
+): void {
+  const state0 = deps.store.load();
+  const read = readMemberDispatch(deps, batchId, run.issue, slot, now);
+  if (read.kind === 'unreachable') return;
+  const memberUnit = batchMemberUnit(batchId, run.issue);
+  const release = (s: SchedState) => releaseBatchMemberSlot(s, batchId, run.issue, now);
+
+  if (read.kind === 'complete') {
+    journalEvent(deps, 'external-advance', unit(batchId), {
+      issue: run.issue,
+      detail: 'member review done',
+    });
+    recordMemberRunLog(deps, dispatch, state0, batchId, run.index, run.issue, slot, now);
+    const verdict = evaluateIncrementalGate(deps, batchId, run.worktree, run.issue, now);
+    if (verdict.kind === 'failed') {
+      deps.store.withLock((s) => ({ state: release(s), result: undefined }));
+      evictParallelMember(
+        deps,
+        config,
+        batchId,
+        run,
+        { reason: verdict.reason, detail: verdict.detail },
+        now,
+        result
+      );
+      return;
+    }
+    deps.store.withLock((s) => ({
+      // #629: a verified member completion is proof dispatch is healthy.
+      state: patchRun(
+        resetDispatchApiErrorStreak(release(s)),
+        batchId,
+        run.issue,
+        {
+          status: 'verified',
+          gate_inconclusive: verdict.kind === 'inconclusive' ? verdict.capability : null,
+        },
+        now
+      ),
+      result: undefined,
+    }));
+    result.completed.push(memberUnit);
+    return;
+  }
+
+  if (
+    read.dead &&
+    !read.blockedNow &&
+    handleDeadDispatchApiError(
+      deps,
+      batchId,
+      batchMemberLogPath(deps.store.runsDir, batchId, run.index, run.issue),
+      slot.log_offset_at_spawn ?? 0,
+      now,
+      { releaseWith: release }
+    )
+  ) {
+    // #629: not a member failure — the run stays `running` with no slot, and
+    // `spawnParallelMembers` (pause-gated) respawns it in place.
+    return;
+  }
+  if (read.blockedNow || read.dead) {
+    const lastTool = recordMemberRunLog(
+      deps,
+      dispatch,
+      state0,
+      batchId,
+      run.index,
+      run.issue,
+      slot,
+      now
+    );
+    deps.store.withLock((s) => ({ state: release(s), result: undefined }));
+    evictParallelMember(deps, config, batchId, run, memberFailureFor(read, lastTool), now, result);
+  }
+}
+
+/**
+ * Land one verified parallel member onto the integration branch (#809): rebase
+ * its commits onto the integration TIP in its own worktree (earlier members may
+ * have landed since it was cut), refresh the pushed member branch, then
+ * `merge --ff-only` + push in the batch worktree — the same linear,
+ * `(#<issue>)`-trailed history serial landing produces, so `memberRanges`
+ * attribution and per-member commits are unchanged.
+ *
+ * `conflict` — the member's diff does not apply on top of the members landed
+ * before it (the rebase is aborted, leaving its pushed branch untouched); the
+ * caller evicts it, batch-integrate's eviction verdict. `failed` — a mechanical
+ * step failed after a clean rebase; the caller blocks the batch, like serial.
+ */
+function landParallelRun(
+  deps: BatchDispatchDeps,
+  batch: BatchEntry,
+  run: MemberRun,
+  now: Date
+): { kind: 'landed' } | { kind: 'conflict'; detail: string } | { kind: 'failed'; reason: string } {
+  const fail = (reason: string, detail: string): { kind: 'failed'; reason: string } => {
+    journalEvent(deps, 'landing-failed', unit(batch.id), { issue: run.issue, reason, detail });
+    return { kind: 'failed', reason };
+  };
+  if (batch.worktree === null || batch.branch === null) {
+    return fail('no-integration-branch', 'batch has no integration worktree/branch');
+  }
+  // Defense in depth (CWE-88): persisted refs reach git argv below.
+  if (!SAFE_REF_RE.test(run.branch) || !SAFE_REF_RE.test(batch.branch)) {
+    return fail(
+      'invalid-branch-name',
+      `persisted member/integration branch failed SAFE_REF_RE: ${run.branch} → ${batch.branch}`
+    );
+  }
+  // `--autostash`: a stray uncommitted file in the member tree is not the
+  // member's deliverable and must not read as a conflict.
+  if (deps.exec('git', ['rebase', '--autostash', batch.branch], run.worktree) === null) {
+    deps.exec('git', ['rebase', '--abort'], run.worktree);
+    const detail = `${run.branch} does not rebase cleanly onto ${batch.branch} (members landed before it touched the same lines) — evicted with its pushed branch intact`;
+    journalEvent(deps, 'landing-failed', unit(batch.id), {
+      issue: run.issue,
+      reason: 'landing-conflict',
+      detail,
+    });
+    return { kind: 'conflict', detail };
+  }
+  if (
+    deps.exec('git', ['push', '--force-with-lease', 'origin', '--', run.branch], run.worktree) ===
+    null
+  ) {
+    return fail(
+      'member-push-failed',
+      `rebased ${run.branch} onto ${batch.branch} but could not push it — blocking so origin stays the durable copy`
+    );
+  }
+  if (deps.exec('git', ['merge', '--ff-only', run.branch], batch.worktree) === null) {
+    return fail(
+      'landing-merge-failed',
+      `git merge --ff-only ${run.branch} into ${batch.branch} failed right after a clean rebase — blocking for an operator`
+    );
+  }
+  if (deps.exec('git', ['push', 'origin', '--', batch.branch], batch.worktree) === null) {
+    return fail(
+      'landing-push-failed',
+      `landed ${run.branch} on ${batch.branch} locally but the push failed — blocking so origin stays the durable copy`
+    );
+  }
+  deps.journal.append(
+    unitEvent('member-landed', unit(batch.id), {
+      issue: run.issue,
+      detail: `${run.branch} rebased onto and fast-forwarded into ${batch.branch} (member ${run.index}, parallel)`,
+    }),
+    now
+  );
+  return { kind: 'landed' };
+}
+
+/** The next thing the ordered landing walk can do (#809). */
+type LandingStep = { kind: 'land'; run: MemberRun } | { kind: 'wait' } | { kind: 'done' };
+
+/**
+ * Walk members IN ORDER: skip every resolved one (landed, evicted, or no longer
+ * in the batch); the first unresolved one is either landable (`verified`) or
+ * something the walk must wait for (not yet spawned, or still running) — later
+ * members never land ahead of it, so the integration branch always holds a
+ * member-order prefix.
+ */
+function nextLandingStep(state: SchedState, batch: BatchEntry): LandingStep {
+  for (const issue of batch.members) {
+    const run = batch.member_runs.find((r) => r.issue === issue);
+    if (run?.status === 'landed' || run?.status === 'evicted') continue;
+    if (!memberStillInBatch(state, batch, issue)) continue;
+    if (run === undefined || run.status === 'running') return { kind: 'wait' };
+    return { kind: 'land', run };
+  }
+  return { kind: 'done' };
+}
+
+/**
+ * Land every landable member in order, then — once every member is resolved —
+ * either block on a gate-inconclusive member (serial parity: it landed, the
+ * batch blocks for `sched resume --batch`) or move to `validating` and run the
+ * aggregate suite once.
+ */
+function advanceParallelBatch(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  now: Date,
+  result: BatchTickResult
+): void {
+  // Bounded: every iteration lands or evicts one member.
+  for (;;) {
+    const state = deps.store.load();
+    const batch = findBatch(state, batchId);
+    if (!batch || batch.status !== 'executing' || !isParallelBatch(batch)) return;
+    const step = nextLandingStep(state, batch);
+    if (step.kind === 'wait') return;
+    if (step.kind === 'done') {
+      finalizeParallelMembers(deps, config, dispatch, batchId, now, result);
+      return;
+    }
+    const { run } = step;
+    const landed = landParallelRun(deps, batch, run, now);
+    if (landed.kind === 'conflict') {
+      evictParallelMember(
+        deps,
+        config,
+        batchId,
+        run,
+        { reason: 'landing-conflict', detail: landed.detail },
+        now,
+        result
+      );
+      continue;
+    }
+    if (landed.kind === 'failed') {
+      blockBatchForOperator(deps, config, batchId, { reason: landed.reason }, now, result);
+      return;
+    }
+    // `git log` outside the lock (same invariant as `completeMemberGate`).
+    const ranges = memberRanges(boundaryCommits(deps, batch));
+    deps.store.withLock((s) => {
+      let n = patchBatch(s, batchId, { ranges }, now);
+      n = advanceMemberToValidated(n, run.issue, now);
+      n = patchRun(n, batchId, run.issue, { status: 'landed' }, now);
+      return { state: n, result: undefined };
+    });
+    // A gate-inconclusive member keeps its tree for `sched resume --batch`'s
+    // recheck; everyone else's is done serving.
+    if (run.gate_inconclusive === null) {
+      teardownMemberTree(
+        deps,
+        batchId,
+        { worktree: run.worktree, branch: run.branch, poolClaimed: run.pool_claimed },
+        true
+      );
+    }
+  }
+}
+
+/** Every member is resolved — block on a gate-inconclusive one, or validate. */
+function finalizeParallelMembers(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  now: Date,
+  result: BatchTickResult
+): void {
+  const batch = findBatch(deps.store.load(), batchId);
+  if (!batch) return;
+  const blockedOn = batch.member_runs.find(
+    (r) => r.status === 'landed' && r.gate_inconclusive !== null
+  );
+  if (blockedOn !== undefined) {
+    // Point the serial "current member" fields at it: `sched resume --batch`
+    // (`resumeBlockedGate`) rechecks `member_worktree` and completes/evicts
+    // `members[executing_member - 1]`, then hands back via
+    // `advanceMemberOrValidate` → `settleParallelResume`.
+    deps.store.withLock((s) => ({
+      state: patchBatch(
+        s,
+        batchId,
+        {
+          executing_member: blockedOn.index,
+          member_branch: blockedOn.branch,
+          member_worktree: blockedOn.worktree,
+          member_pool_claimed: blockedOn.pool_claimed,
+        },
+        now
+      ),
+      result: undefined,
+    }));
+    blockBatchForOperator(
+      deps,
+      config,
+      batchId,
+      {
+        reason: `gate-inconclusive:${blockedOn.gate_inconclusive}`,
+        milestonePhase: 'batch-review',
+      },
+      now,
+      result
+    );
+    return;
+  }
+  const claimed = deps.store.withLock((s) => {
+    const b = findBatch(s, batchId);
+    if (!b || b.status !== 'executing') return { state: s, result: false };
+    return {
+      state: transitionBatch(s, batchId, 'validating', { executing_member: b.members.length }, now),
+      result: true,
+    };
+  });
+  if (claimed) runValidate(deps, config, dispatch, batchId, now, result);
+}
+
+/**
+ * `sched resume --batch` resolved the gate-inconclusive member of a parallel
+ * batch (completed or evicted it through the serial rail): record that on its
+ * run so the landing walk treats it as resolved, then continue the parallel
+ * rail from where it blocked.
+ */
+function settleParallelResume(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  memberIssue: number,
+  now: Date
+): void {
+  deps.store.withLock((s) => {
+    const b = findBatch(s, batchId);
+    if (!b) return { state: s, result: undefined };
+    const evicted = b.evictions.some((e) => e.issue === memberIssue);
+    return {
+      state: patchRun(
+        s,
+        batchId,
+        memberIssue,
+        { gate_inconclusive: null, ...(evicted ? { status: 'evicted' as const } : {}) },
+        now
+      ),
+      result: undefined,
+    };
+  });
+}
+
+/**
+ * One tick of a parallel batch in `executing`: reconcile every member slot,
+ * land what can land in order, then fill free member concurrency (unless the
+ * scheduler is paused — a spawn is a provider dispatch).
+ */
+function reconcileParallelBatch(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  now: Date,
+  result: BatchTickResult,
+  paused: boolean
+): void {
+  const batch = findBatch(deps.store.load(), batchId);
+  if (!batch) return;
+  for (const { issue } of batch.member_runs) {
+    // Fresh per member: an earlier member's eviction may have dissolved the
+    // batch (killing and releasing every other member) in this same pass.
+    const state = deps.store.load();
+    const fresh = findBatch(state, batchId);
+    if (!fresh || fresh.status !== 'executing') return;
+    const run = fresh.member_runs.find((r) => r.issue === issue);
+    if (run?.status !== 'running') continue;
+    const slot = slotForBatchMember(state, batchId, issue);
+    if (slot && (slot.status === 'running' || slot.status === 'assigned')) {
+      reconcileParallelMemberSlot(deps, config, dispatch, batchId, run, slot, now, result);
+    }
+  }
+  advanceParallelBatch(deps, config, dispatch, batchId, now, result);
+  if (!paused) spawnParallelMembers(deps, config, dispatch, batchId, now, result);
+}
+
+/**
+ * #809: stop and tear down every parallel member still holding a tree — a
+ * dissolve can land while other members are mid-run (their agents are killed:
+ * their entries were just requeued full-cycle, so a live member agent would be
+ * working a unit nothing tracks any more). Landed/evicted runs were torn down
+ * when they resolved; a landed gate-inconclusive run kept its tree for a
+ * resume, and is torn down here unless it is the serial-field tree
+ * `teardownMemberWorktree` just handled.
+ */
+function teardownParallelRuns(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  alreadyTornDown: string | null
+): void {
+  const batch = findBatch(deps.store.load(), batchId);
+  if (!batch) return;
+  const now = deps.now();
+  for (const run of batch.member_runs) {
+    const holdsTree =
+      run.status === 'running' ||
+      run.status === 'verified' ||
+      (run.status === 'landed' && run.gate_inconclusive !== null);
+    if (!holdsTree) continue;
+    const slot = slotForBatchMember(deps.store.load(), batchId, run.issue);
+    if (
+      slot?.pid !== null &&
+      slot?.pid !== undefined &&
+      deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
+    ) {
+      deps.spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
+    }
+    const landed = run.status === 'landed';
+    deps.store.withLock((s) => ({
+      state: patchRun(
+        releaseBatchMemberSlot(s, batchId, run.issue, now),
+        batchId,
+        run.issue,
+        { status: landed ? 'landed' : 'evicted', gate_inconclusive: null },
+        now
+      ),
+      result: undefined,
+    }));
+    if (run.worktree === alreadyTornDown) continue;
+    teardownMemberTree(
+      deps,
+      batchId,
+      { worktree: run.worktree, branch: run.branch, poolClaimed: run.pool_claimed },
+      landed
+    );
+  }
 }
 
 // --- Entry point ---
@@ -4058,13 +4954,14 @@ export function runBatchTick(
       const dissolvable =
         fresh !== undefined && allowedBatchTransitions(fresh.status).includes('dissolving');
       if (dissolvable) {
-        const liveSlot = slotFor(current, batch.id);
-        if (
-          liveSlot !== undefined &&
-          liveSlot.pid !== null &&
-          deps.spawnDeps.isAlive(liveSlot.pid, liveSlot.pid_start ?? undefined)
-        ) {
-          deps.spawnDeps.kill(liveSlot.pid, liveSlot.pid_start ?? undefined);
+        // #809: a parallel batch holds one slot per running member too.
+        for (const liveSlot of slotsForBatch(current, batch.id)) {
+          if (
+            liveSlot.pid !== null &&
+            deps.spawnDeps.isAlive(liveSlot.pid, liveSlot.pid_start ?? undefined)
+          ) {
+            deps.spawnDeps.kill(liveSlot.pid, liveSlot.pid_start ?? undefined);
+          }
         }
         const outcome = dissolveBatch(
           current,
@@ -4112,7 +5009,7 @@ export function runBatchTick(
         { blocked_reason: 'reconcile-error' },
         now
       );
-      return { state: releaseBatchSlot(blocked, batchId, now), result: undefined };
+      return { state: releaseAllBatchSlots(blocked, batchId, now), result: undefined };
     });
     journalEvent(deps, 'unit-failed', unit(batchId), { reason: 'reconcile-error', detail });
     result.failed.push(unit(batchId));
@@ -4165,6 +5062,8 @@ export function runBatchTick(
 
   for (const batch of deps.store.load().batches) {
     const slot = slotFor(deps.store.load(), batch.id);
+    // #809: a terminal batch may also leak parallel member slots.
+    const heldSlots = slotsForBatch(deps.store.load(), batch.id);
     // #609: a TERMINAL batch (`done`/`dissolved`) still holding a slot matches
     // none of the status arms below and would fall through their `continue`,
     // so nothing ever looks at that slot again — not even the orphaned-pid
@@ -4176,15 +5075,17 @@ export function runBatchTick(
     // files that already carry a leaked slot, which is the only way an
     // operator gets those three hours of held capacity back.
     if (TERMINAL_BATCH_STATUSES.has(batch.status)) {
-      if (slot) {
+      if (heldSlots.length > 0) {
         deps.store.withLock((s) => ({
-          state: releaseBatchSlot(s, batch.id, now),
+          state: releaseAllBatchSlots(s, batch.id, now),
           result: undefined,
         }));
-        journalEvent(deps, 'slot-released', unit(batch.id), {
-          slot: slot.id,
-          detail: `terminal batch (${batch.status}) held slot ${slot.id}`,
-        });
+        for (const held of heldSlots) {
+          journalEvent(deps, 'slot-released', unit(batch.id), {
+            slot: held.id,
+            detail: `terminal batch (${batch.status}) held slot ${held.id}${held.unit === unit(batch.id) ? '' : ` (${held.unit})`}`,
+          });
+        }
       }
       continue;
     }
@@ -4195,6 +5096,12 @@ export function runBatchTick(
       // not generate a missing-profile event on every later tick.
       const batchDispatch = dispatchFor(batch);
       if (batchDispatch === null) continue;
+      // #809: a parallel batch's members hold their OWN slots — its whole
+      // `executing` phase is one arm.
+      if (batch.status === 'executing' && isParallelBatch(batch)) {
+        reconcileParallelBatch(deps, config, batchDispatch, batch.id, now, result, paused);
+        continue;
+      }
       if (slot && (slot.status === 'running' || slot.status === 'assigned')) {
         if (batch.status === 'executing') {
           reconcileMemberSlot(deps, config, batchDispatch, batch.id, slot, now, result);

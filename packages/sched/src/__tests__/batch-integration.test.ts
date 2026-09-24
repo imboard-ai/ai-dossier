@@ -21,7 +21,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 // stale `BatchEntry` snapshot, a condition the public `runBatchTick`/
 // `resumeBlockedGate` entry points cannot reproduce (both always read state
 // fresh from the store).
-import { type BatchTickResult, evictMemberAndContinue, memberBranchFor } from '../batch-dispatch';
+import {
+  type BatchTickResult,
+  evictMemberAndContinue,
+  memberBranchFor,
+  memberDispatchModeFor,
+} from '../batch-dispatch';
 // Same rationale as the `evictMemberAndContinue` import above: a test-only
 // path builder, not part of the package's public `index.ts` surface.
 import { batchMemberLogPath } from '../dispatch';
@@ -32,6 +37,8 @@ import {
   type BatchSuiteContext,
   buildStatusReport,
   type CapabilityGateResult,
+  createBatch,
+  createEmptyState,
   createSpawnDeps,
   type EngineDeps,
   type EnqueueInput,
@@ -56,6 +63,7 @@ import {
   type SuiteResult,
   schedRunsLogPath,
   setPaused,
+  stopBatch,
   tick,
   transitionBatch,
   transitionIssue,
@@ -433,6 +441,13 @@ function batchHarness(
     profiles?: (
       truthDir: string
     ) => Record<string, { command?: string[]; tier_models?: Record<string, string> }>;
+    /**
+     * #809: `SchedConfig.member_parallelism`. Defaults to 1 (serial) so the
+     * suites written against the serial member rail keep exercising it; the
+     * #809 parallel suite passes `undefined` explicitly via `parallel: true`.
+     */
+    memberParallelism?: number;
+    parallel?: boolean;
   }
 ): BatchHarness {
   const store = new SchedStore(tmpDir('sched-batch-'));
@@ -473,6 +488,11 @@ function batchHarness(
   };
   const config: SchedConfig = {
     max_slots: opts?.maxSlots ?? 2,
+    ...(opts?.parallel
+      ? opts.memberParallelism !== undefined
+        ? { member_parallelism: opts.memberParallelism }
+        : {}
+      : { member_parallelism: opts?.memberParallelism ?? 1 }),
     dispatch: {
       command: ['node', FAKE_AGENT, ...agentArgs, `--milestones-dir=${truthDir}`],
       prompt: 'placeholder — every builder below (member/tail/report/fix) renders its own prompt',
@@ -3428,5 +3448,449 @@ describe('integration #707: a batch dispatches through its recorded profile', ()
     expect(
       events.some((event) => event.event === 'teardown-done' && event.unit === 'batch:b-live-gone')
     ).toBe(true);
+  }, 60_000);
+});
+
+// --- #809: parallel member dispatch ---
+
+/** Every member slot (`batch:<id>#<issue>`) a batch currently holds, live or not. */
+function memberSlots(h: BatchHarness, batchId: string) {
+  return h.state().slots.filter((s) => s.unit?.startsWith(`batch:${batchId}#`) === true);
+}
+
+/** Wait until every given pid is dead. */
+async function waitAllDead(h: BatchHarness, pids: number[], ms = 15_000): Promise<boolean> {
+  for (const pid of pids) {
+    if (!(await waitUntilDead(h.spawnDeps, pid, ms))) return false;
+  }
+  return true;
+}
+
+/** The live pids of a batch's member slots. */
+function memberPids(h: BatchHarness, batchId: string): number[] {
+  return memberSlots(h, batchId)
+    .filter((s) => s.status === 'running' && s.pid !== null)
+    .map((s) => s.pid as number);
+}
+
+describe('#809: parallel member dispatch', () => {
+  it('AC1: a 3-member batch with disjoint files runs its members CONCURRENTLY — member phase ≈ max(member), not sum', async () => {
+    const repo = scratchRepo();
+    const holdMs = 2_000;
+    const gateCalls: Array<{ worktree: string; id: string }> = [];
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', `--member-sleep-ms=${holdMs}`],
+      {
+        maxSlots: 3,
+        parallel: true,
+        capability: (worktree, id) => {
+          gateCalls.push({ worktree, id });
+          return { outcome: 'ok' };
+        },
+      }
+    );
+    h.enqueue([
+      { issue: 8091, mode: 'slot', batch: 'b-par', anchor: 8090, tier: 'mid' },
+      { issue: 8092, mode: 'slot', batch: 'b-par', tier: 'mid' },
+      { issue: 8093, mode: 'slot', batch: 'b-par', tier: 'mid' },
+    ]);
+
+    const started = Date.now();
+    // Tick 1: batch-setup, then ALL THREE members spawn — each in its own slot.
+    const first = h.tick();
+    let batch = findBatch(h.state(), 'b-par');
+    expect(batch?.status).toBe('executing');
+    expect(batch?.member_dispatch).toBe('parallel');
+    expect(first.spawned).toEqual(['batch:b-par#8091', 'batch:b-par#8092', 'batch:b-par#8093']);
+    expect(batch?.member_runs.map((r) => [r.issue, r.index, r.status])).toEqual([
+      [8091, 1, 'running'],
+      [8092, 2, 'running'],
+      [8093, 3, 'running'],
+    ]);
+    // No batch-level slot is held while members run — members hold their own.
+    expect(batchSlotPid(h, 'b-par')).toBeUndefined();
+    const pids = memberPids(h, 'b-par');
+    expect(pids).toHaveLength(3);
+    // Concurrency is observable: all three agents are alive at the same time.
+    expect(pids.every((pid) => h.spawnDeps.isAlive(pid))).toBe(true);
+    // Every member is cut from the SAME integration base, in its OWN worktree
+    // on its OWN branch.
+    const integrationBranch = batch?.branch as string;
+    const base = gitAt(['rev-parse', integrationBranch], repo).trim();
+    const worktrees = new Set(batch?.member_runs.map((r) => r.worktree));
+    expect(worktrees.size).toBe(3);
+    for (const run of batch?.member_runs ?? []) {
+      expect(run.branch).toBe(memberBranchFor('b-par', run.index, run.issue));
+      expect(gitAt(['rev-parse', run.branch], repo).trim()).toBe(base);
+    }
+
+    expect(await waitAllDead(h, pids)).toBe(true);
+    const memberPhaseMs = Date.now() - started;
+    // Serial would take ≥ 3 × holdMs; concurrent members finish in ≈ one hold.
+    expect(memberPhaseMs).toBeLessThan(3 * holdMs);
+
+    // Tick 2: all three complete → gated → land IN MEMBER ORDER → aggregate
+    // suite (once) → tail.
+    const second = h.tick();
+    expect(second.completed).toEqual(['batch:b-par#8091', 'batch:b-par#8092', 'batch:b-par#8093']);
+    batch = findBatch(h.state(), 'b-par');
+    expect(batch?.status).toBe('reviewing');
+    expect(batch?.member_runs.every((r) => r.status === 'landed')).toBe(true);
+    const log = gitAt(
+      ['log', '--reverse', '--format=%s', `origin/main..${integrationBranch}`],
+      repo
+    )
+      .trim()
+      .split('\n');
+    expect(log).toEqual([
+      'feat: f-8091.txt (#8091)',
+      'feat: f-8092.txt (#8092)',
+      'feat: f-8093.txt (#8093)',
+    ]);
+    // Per-member attribution survives: one range per member, one commit each.
+    expect(batch?.ranges.map((r) => [r.issue, r.commits.length])).toEqual([
+      [8091, 1],
+      [8092, 1],
+      [8093, 1],
+    ]);
+    for (const issue of [8091, 8092, 8093]) {
+      expect(h.state().entries.find((e) => e.issue === issue)?.status).toBe('validated');
+    }
+    // The incremental gate still ran per member, in each member's OWN worktree.
+    for (const run of batch?.member_runs ?? []) {
+      const gateIds = gateCalls
+        .filter((c) => c.worktree === run.worktree && c.id !== 'worktree.prepare')
+        .map((c) => c.id);
+      expect(gateIds).toEqual(['typecheck.run', 'test.focused']);
+      // Landed → torn down; remote member branch deleted (its work is on the
+      // integration branch now).
+      expect(fs.existsSync(run.worktree)).toBe(false);
+      expect(gitAt(['ls-remote', 'origin', run.branch], repo).trim()).toBe('');
+    }
+    // Member slots are all released; the tail agent holds the batch slot.
+    expect(memberSlots(h, 'b-par').every((s) => s.status === 'idle')).toBe(true);
+    expect(batchSlotPid(h, 'b-par')).toBeDefined();
+  }, 60_000);
+
+  it('lands in MEMBER ORDER even when a later member finishes first — the integration branch holds only a member-order prefix', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--slow-members=8101', '--slow-ms=2500'],
+      { maxSlots: 3, parallel: true }
+    );
+    h.enqueue([
+      { issue: 8101, mode: 'slot', batch: 'b-order', anchor: 8100, tier: 'mid' },
+      { issue: 8102, mode: 'slot', batch: 'b-order', tier: 'mid' },
+      { issue: 8103, mode: 'slot', batch: 'b-order', tier: 'mid' },
+    ]);
+    h.tick();
+    let batch = findBatch(h.state(), 'b-order');
+    const integrationBranch = batch?.branch as string;
+    const base = gitAt(['rev-parse', integrationBranch], repo).trim();
+    const slow = memberSlots(h, 'b-order').find((s) => s.unit === 'batch:b-order#8101');
+    const fast = memberSlots(h, 'b-order')
+      .filter((s) => s.unit !== 'batch:b-order#8101')
+      .map((s) => s.pid as number);
+    expect(await waitAllDead(h, fast)).toBe(true);
+    expect(h.spawnDeps.isAlive(slow?.pid as number)).toBe(true);
+
+    // 8102/8103 verified, but 8101 is still running: NOTHING lands.
+    h.tick();
+    batch = findBatch(h.state(), 'b-order');
+    expect(batch?.status).toBe('executing');
+    expect(batch?.member_runs.map((r) => [r.issue, r.status])).toEqual([
+      [8101, 'running'],
+      [8102, 'verified'],
+      [8103, 'verified'],
+    ]);
+    expect(gitAt(['rev-parse', integrationBranch], repo).trim()).toBe(base);
+
+    expect(await waitUntilDead(h.spawnDeps, slow?.pid as number)).toBe(true);
+    h.tick();
+    batch = findBatch(h.state(), 'b-order');
+    expect(batch?.status).toBe('reviewing');
+    const log = gitAt(
+      ['log', '--reverse', '--format=%s', `origin/main..${integrationBranch}`],
+      repo
+    )
+      .trim()
+      .split('\n');
+    // Member order, rebased onto each predecessor — linear history.
+    expect(log).toEqual([
+      'feat: f-8101.txt (#8101)',
+      'feat: f-8102.txt (#8102)',
+      'feat: f-8103.txt (#8103)',
+    ]);
+    expect(gitAt(['rev-list', '--merges', '--count', integrationBranch], repo).trim()).toBe('0');
+  }, 60_000);
+
+  it('AC2: OVERLAPPING members whose diffs do not rebase onto the landed member are evicted (landing-conflict) with their pushed branches intact; the batch ships the winner', async () => {
+    const repo = scratchRepo();
+    // All three members create `shared.txt` with different content: the first
+    // in member order lands, the other two cannot rebase onto it.
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=shared.txt'], {
+      maxSlots: 3,
+      parallel: true,
+    });
+    h.enqueue([
+      { issue: 8111, mode: 'slot', batch: 'b-conf', anchor: 8110, tier: 'mid' },
+      { issue: 8112, mode: 'slot', batch: 'b-conf', tier: 'mid' },
+      { issue: 8113, mode: 'slot', batch: 'b-conf', tier: 'mid' },
+    ]);
+    h.tick();
+    let batch = findBatch(h.state(), 'b-conf');
+    const integrationBranch = batch?.branch as string;
+    const m2 = batch?.member_runs.find((r) => r.issue === 8112);
+    expect(m2).toBeDefined();
+    expect(await waitAllDead(h, memberPids(h, 'b-conf'))).toBe(true);
+    const m2PushedSha = gitAt(['rev-parse', `origin/${m2?.branch}`], repo).trim();
+
+    // 2 of 3 evicted would cross the default >⅓ dissolve threshold — this
+    // test is about the landing rail, so the batch tolerates it.
+    h.config.dissolve_policy = { fraction: 1, min_evictions_before_dissolve: 3 };
+    h.tick();
+    batch = findBatch(h.state(), 'b-conf');
+    expect(batch?.member_runs.map((r) => [r.issue, r.status])).toEqual([
+      [8111, 'landed'],
+      [8112, 'evicted'],
+      [8113, 'evicted'],
+    ]);
+    expect(batch?.evictions.map((e) => [e.issue, e.reason])).toEqual([
+      [8112, 'landing-conflict'],
+      [8113, 'landing-conflict'],
+    ]);
+    // The evicted members are requeued full-cycle (they redo their work off
+    // main after this batch merges) — nothing lost: the pushed member branch
+    // still holds the member's own, un-rebased commit.
+    for (const issue of [8112, 8113]) {
+      const entry = h.state().entries.find((e) => e.issue === issue);
+      expect(entry).toMatchObject({ mode: 'full', batch: null, status: 'requeued' });
+    }
+    expect(gitAt(['rev-parse', `origin/${m2?.branch}`], repo).trim()).toBe(m2PushedSha);
+    expect(fs.existsSync(m2?.worktree as string)).toBe(false);
+    // The integration branch holds exactly the winning member, cleanly.
+    const log = gitAt(['log', '--format=%s', `origin/main..${integrationBranch}`], repo).trim();
+    expect(log).toBe('feat: shared.txt (#8111)');
+    expect(batch?.status).toBe('reviewing');
+    expect(
+      h.deps.journal
+        .read()
+        .filter((e) => e.event === 'landing-failed' && e.reason === 'landing-conflict')
+        .map((e) => e.issue)
+    ).toEqual([8112, 8113]);
+  }, 60_000);
+
+  it('member_parallelism bounds how many members of one batch run at once', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--member-sleep-ms=500'], {
+      maxSlots: 3,
+      parallel: true,
+      memberParallelism: 2,
+    });
+    h.enqueue([
+      { issue: 8121, mode: 'slot', batch: 'b-cap', anchor: 8120, tier: 'mid' },
+      { issue: 8122, mode: 'slot', batch: 'b-cap', tier: 'mid' },
+      { issue: 8123, mode: 'slot', batch: 'b-cap', tier: 'mid' },
+    ]);
+    const first = h.tick();
+    expect(first.spawned).toEqual(['batch:b-cap#8121', 'batch:b-cap#8122']);
+    expect(findBatch(h.state(), 'b-cap')?.member_dispatch).toBe('parallel');
+    expect(await waitAllDead(h, memberPids(h, 'b-cap'))).toBe(true);
+    const second = h.tick();
+    // The two finished members free their slots; the third spawns.
+    expect(second.spawned).toEqual(['batch:b-cap#8123']);
+    expect(await waitAllDead(h, memberPids(h, 'b-cap'))).toBe(true);
+    h.tick();
+    expect(findBatch(h.state(), 'b-cap')?.status).toBe('reviewing');
+  }, 60_000);
+
+  it('a member-blocked member is evicted without stopping its siblings; the batch continues', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--evict-members=8132'],
+      { maxSlots: 3, parallel: true }
+    );
+    h.enqueue([
+      { issue: 8131, mode: 'slot', batch: 'b-pevict', anchor: 8130, tier: 'mid' },
+      { issue: 8132, mode: 'slot', batch: 'b-pevict', tier: 'mid' },
+      { issue: 8133, mode: 'slot', batch: 'b-pevict', tier: 'mid' },
+    ]);
+    h.tick();
+    expect(await waitAllDead(h, memberPids(h, 'b-pevict'))).toBe(true);
+    h.tick();
+    const batch = findBatch(h.state(), 'b-pevict');
+    expect(batch?.evictions.map((e) => [e.issue, e.reason])).toEqual([[8132, 'test-failures']]);
+    expect(batch?.status).toBe('reviewing');
+    const log = gitAt(['log', '--reverse', '--format=%s', `origin/main..${batch?.branch}`], repo)
+      .trim()
+      .split('\n');
+    expect(log).toEqual(['feat: f-8131.txt (#8131)', 'feat: f-8133.txt (#8133)']);
+  }, 60_000);
+
+  it('a dissolve mid-run KILLS the still-running members, releases their slots, and tears their worktrees down', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--evict-members=8141,8142', '--slow-members=8143', '--slow-ms=30000'],
+      { maxSlots: 3, parallel: true }
+    );
+    h.enqueue([
+      { issue: 8141, mode: 'slot', batch: 'b-pdis', anchor: 8140, tier: 'mid' },
+      { issue: 8142, mode: 'slot', batch: 'b-pdis', tier: 'mid' },
+      { issue: 8143, mode: 'slot', batch: 'b-pdis', tier: 'mid' },
+    ]);
+    h.tick();
+    const slowSlot = memberSlots(h, 'b-pdis').find((s) => s.unit === 'batch:b-pdis#8143');
+    const slowPid = slowSlot?.pid as number;
+    procsToKill.push(slowPid);
+    const slowTree = findBatch(h.state(), 'b-pdis')?.member_runs.find((r) => r.issue === 8143)
+      ?.worktree as string;
+    const quick = memberPids(h, 'b-pdis').filter((pid) => pid !== slowPid);
+    expect(await waitAllDead(h, quick)).toBe(true);
+
+    h.tick(); // 2/3 evicted > ⅓ → dissolve
+    const batch = findBatch(h.state(), 'b-pdis');
+    expect(batch?.status).toBe('dissolved');
+    expect(await waitUntilDead(h.spawnDeps, slowPid)).toBe(true);
+    expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
+    expect(fs.existsSync(slowTree)).toBe(false);
+    expect(h.state().entries.find((e) => e.issue === 8143)).toMatchObject({
+      mode: 'full',
+      batch: null,
+    });
+  }, 60_000);
+
+  it('gate-inconclusive in parallel: the member lands, the batch blocks once every member resolved, and sched resume --batch continues the parallel rail', async () => {
+    const repo = scratchRepo();
+    let broken = true;
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=f-{issue}.txt'], {
+      maxSlots: 3,
+      parallel: true,
+      capability: (worktree, id) =>
+        broken && id === 'test.focused' && worktree.includes('-m1-8151')
+          ? { outcome: 'automation-broken', reason: 'harness missing' }
+          : { outcome: 'ok' },
+    });
+    h.enqueue([
+      { issue: 8151, mode: 'slot', batch: 'b-pinc', anchor: 8150, tier: 'mid' },
+      { issue: 8152, mode: 'slot', batch: 'b-pinc', tier: 'mid' },
+    ]);
+    h.tick();
+    expect(await waitAllDead(h, memberPids(h, 'b-pinc'))).toBe(true);
+    h.tick();
+    let batch = findBatch(h.state(), 'b-pinc');
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('gate-inconclusive:test.focused');
+    // Both landed (F.11 parity); the inconclusive member keeps its tree and is
+    // the serial "current member" the resume verb rechecks.
+    expect(batch?.member_runs.map((r) => r.status)).toEqual(['landed', 'landed']);
+    const m1 = batch?.member_runs[0];
+    expect(batch?.executing_member).toBe(1);
+    expect(batch?.member_worktree).toBe(m1?.worktree);
+    expect(fs.existsSync(m1?.worktree as string)).toBe(true);
+
+    broken = false;
+    const out = resumeBlockedGate(
+      batchDispatchDepsFrom(h, () => ({ outcome: 'ok' })),
+      h.config,
+      resolveDispatch(h.config),
+      'b-pinc',
+      new Date()
+    );
+    expect(out.outcome).toBe('completed');
+    batch = findBatch(h.state(), 'b-pinc');
+    expect(batch?.status).toBe('reviewing');
+    expect(batch?.member_runs.every((r) => r.gate_inconclusive === null)).toBe(true);
+    expect(fs.existsSync(m1?.worktree as string)).toBe(false);
+  }, 60_000);
+
+  it('serial opt-in: an eviction group, an intra-batch dep, or member_parallelism=1 keeps the serial rail', () => {
+    const state = createEmptyState();
+    const base = createBatch('b-x', [1, 2, 3], new Date());
+    const cfg = { max_slots: 3 };
+    expect(memberDispatchModeFor(state, base, cfg)).toBe('parallel');
+    expect(memberDispatchModeFor(state, base, { ...cfg, member_parallelism: 1 })).toBe('serial');
+    expect(memberDispatchModeFor(state, { ...base, eviction_groups: [[1, 2]] }, cfg)).toBe(
+      'serial'
+    );
+    const withDep = enqueueEntries(
+      state,
+      [
+        { issue: 1, mode: 'slot', batch: 'b-y', anchor: 9 },
+        { issue: 2, mode: 'slot', batch: 'b-y', deps: [1] },
+      ],
+      new Date()
+    );
+    expect(memberDispatchModeFor(withDep, findBatch(withDep, 'b-y') as never, cfg)).toBe('serial');
+  });
+
+  it('an eviction-group batch dispatches serially on the batch slot even with parallelism enabled', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 3, parallel: true });
+    h.enqueue([
+      { issue: 8161, mode: 'slot', batch: 'b-grp', anchor: 8160, tier: 'mid' },
+      { issue: 8162, mode: 'slot', batch: 'b-grp', tier: 'mid' },
+    ]);
+    h.store.withLock((s) => ({
+      state: patchBatch(s, 'b-grp', { eviction_groups: [[8161, 8162]] }, new Date()),
+      result: null,
+    }));
+    const first = h.tick();
+    expect(first.spawned).toEqual(['batch:b-grp']);
+    const batch = findBatch(h.state(), 'b-grp');
+    expect(batch?.member_dispatch).toBe('serial');
+    expect(batch?.executing_member).toBe(1);
+    expect(memberSlots(h, 'b-grp')).toHaveLength(0);
+  }, 60_000);
+
+  it('upgrade safety: a batch already executing with no recorded mode (pre-1.23.0) stays on the serial rail', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 3 }); // serial claim
+    h.enqueue([
+      { issue: 8171, mode: 'slot', batch: 'b-old', anchor: 8170, tier: 'mid' },
+      { issue: 8172, mode: 'slot', batch: 'b-old', tier: 'mid' },
+    ]);
+    h.tick();
+    // Simulate a batch claimed by the old engine, then the engine upgraded to
+    // one whose config allows parallel members.
+    h.store.withLock((s) => ({
+      state: patchBatch(s, 'b-old', { member_dispatch: null }, new Date()),
+      result: null,
+    }));
+    delete h.config.member_parallelism;
+    const pid = batchSlotPid(h, 'b-old') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    const result = h.tick();
+    expect(result.spawned).toEqual(['batch:b-old']); // member 2, serially, on the batch slot
+    expect(findBatch(h.state(), 'b-old')?.executing_member).toBe(2);
+    expect(memberSlots(h, 'b-old')).toHaveLength(0);
+  }, 60_000);
+
+  it('sched stop --batch releases (and reports) every member slot of a parallel batch; abandon too', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--member-sleep-ms=30000'], {
+      maxSlots: 3,
+      parallel: true,
+    });
+    h.enqueue([
+      { issue: 8181, mode: 'slot', batch: 'b-stop', anchor: 8180, tier: 'mid' },
+      { issue: 8182, mode: 'slot', batch: 'b-stop', tier: 'mid' },
+    ]);
+    h.tick();
+    procsToKill.push(...memberPids(h, 'b-stop'));
+    const live = memberSlots(h, 'b-stop').filter((s) => s.status === 'running');
+    expect(live).toHaveLength(2);
+    const stopped = stopBatch(h.state(), 'b-stop', 'test');
+    expect(stopped.releasedSlots.sort()).toEqual(live.map((s) => s.id).sort());
+    expect(stopped.state.slots.every((s) => s.status === 'idle')).toBe(true);
+    const abandoned = h.store.withLock((s) => {
+      const r = abandonBatch(s, 'b-stop', 'test');
+      return { state: r.state, result: r.requeued };
+    });
+    expect(abandoned).toEqual([8181, 8182]);
+    expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
   }, 60_000);
 });

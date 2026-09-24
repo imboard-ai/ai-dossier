@@ -75,6 +75,7 @@ import {
   schedStateDir,
   schedTelemetryEnabled,
   setPaused,
+  slotsForBatch,
   stopBatch,
   stopIssue,
   TEARDOWN_TIMEOUT_MS,
@@ -1642,13 +1643,17 @@ function registerStopSubcommand(cmd: Command): void {
       try {
         const result = store.withLock((state) => {
           const unit = opts.batch ? `batch:${opts.batch}` : `issue:${issue}`;
-          const slot = state.slots.find((candidate) => candidate.unit === unit);
-          const terminated =
-            slot?.pid !== null &&
-            slot?.pid !== undefined &&
-            spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
-              ? spawnDeps.kill(slot.pid, slot.pid_start ?? undefined)
-              : false;
+          // #809: a parallel batch also holds one slot per running member
+          // (`batch:<id>#<issue>`) — terminate every one of them.
+          const slots = opts.batch
+            ? slotsForBatch(state, opts.batch)
+            : state.slots.filter((candidate) => candidate.unit === unit);
+          let terminated = false;
+          for (const slot of slots) {
+            if (slot.pid !== null && spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
+              terminated = spawnDeps.kill(slot.pid, slot.pid_start ?? undefined) || terminated;
+            }
+          }
           const stopped = opts.batch
             ? stopBatch(state, opts.batch, opts.reason)
             : stopIssue(state, issue as number, opts.reason);

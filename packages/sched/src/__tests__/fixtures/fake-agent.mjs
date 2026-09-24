@@ -31,7 +31,10 @@
  *                  batch=<id>` UNLESS this member's issue is listed in
  *                  --evict-members (comma-separated), in which case it posts
  *                  `status=blocked mode=slot` with --evict-reason (default
- *                  `test-failures`) instead.
+ *                  `test-failures`) instead. #809: --member-sleep-ms holds
+ *                  every member before it works (concurrency is observable),
+ *                  --slow-members/--slow-ms override the hold per issue, and
+ *                  `{issue}` in --commit-file names a per-member file.
  *                - "batch review and ship tail" → the TAIL agent. Posts
  *                  `batch-review done` then the batch-ship park
  *                  (`awaiting-merge` with `pr=` from --pr=, default 9000) on
@@ -108,53 +111,19 @@ process.stdin.on('end', () => {
   }
   if (mode === 'batch' && dir) {
     if (/member-cycle workflow/i.test(input)) {
-      const requireDep = opt('require-dep');
-      if (requireDep) {
-        const worktreeMatch = input.match(/worktree=(\S+)/);
-        const worktree = worktreeMatch ? worktreeMatch[1].replace(/[.,]+$/, '') : null;
-        const depPath = worktree ? path.join(worktree, 'node_modules', requireDep) : null;
-        if (!depPath || !fs.existsSync(depPath)) {
-          console.error(
-            `fake batch member: env-cold — ${depPath ?? '<no worktree in prompt>'} not found, dying before doing any work`
-          );
-          process.exit(1);
-        }
-      }
-      const batchMatch = input.match(/batch=(\S+)/);
-      const batchId = batchMatch ? batchMatch[1].replace(/[.,]+$/, '') : 'unknown';
-      // #686: opt-in REAL member work — write `--commit-file=<name>` into the
-      // worktree the prompt names and commit it with the `(#<issue>)` subject
-      // trailer `boundaryCommits` attributes by, so `memberRanges` records a
-      // genuine range for this member (a member with no commits is
-      // indistinguishable from one that never ran). Runs BEFORE the
-      // milestone lands, exactly like a real member committing before it
-      // posts `review done`.
-      const commitFile = opt('commit-file');
-      if (commitFile) {
-        const worktreeMatch = input.match(/worktree=(\S+)/);
-        const worktree = worktreeMatch ? worktreeMatch[1].replace(/[.,]+$/, '') : null;
-        if (worktree) {
-          fs.writeFileSync(path.join(worktree, commitFile), `member #${issue}\n`);
-          execFileSync('git', ['add', commitFile], { cwd: worktree, stdio: 'ignore' });
-          execFileSync('git', ['commit', '-m', `feat: ${commitFile} (#${issue})`], {
-            cwd: worktree,
-            stdio: 'ignore',
-          });
-        }
-      }
-      const evictMembers = (opt('evict-members') ?? '')
+      // #809: `--member-sleep-ms=<n>` holds every member n ms before it does
+      // its work (so concurrent members are observably alive at once);
+      // `--slow-members=<a,b>` + `--slow-ms=<n>` override the hold for those
+      // issues (out-of-order completion, for the ordered-landing tests).
+      const slowMembers = (opt('slow-members') ?? '')
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
-      if (evictMembers.includes(issue)) {
-        const reason = opt('evict-reason') ?? 'test-failures';
-        post('review', 'blocked', { mode: 'slot', batch: batchId, reason });
-        console.log(`fake batch member: posted blocked (${reason}) for #${issue} batch=${batchId}`);
-      } else {
-        post('review', 'done', { mode: 'slot', batch: batchId });
-        console.log(`fake batch member: posted review done for #${issue} batch=${batchId}`);
-      }
-      process.exit(0);
+      const holdMs = slowMembers.includes(issue)
+        ? Number(opt('slow-ms') ?? 0)
+        : Number(opt('member-sleep-ms') ?? 0);
+      setTimeout(() => runMember(), holdMs);
+      return;
     }
     if (/batch review and ship tail/i.test(input)) {
       post('batch-review', 'done', {});
@@ -174,6 +143,59 @@ process.stdin.on('end', () => {
     // verifies the fix by re-running the (fake, test-injected) suite, never
     // by trusting this exit.
     console.log(`fake batch fix agent: exiting for #${issue}`);
+    process.exit(0);
+  }
+
+  function runMember() {
+    const requireDep = opt('require-dep');
+    if (requireDep) {
+      const worktreeMatch = input.match(/worktree=(\S+)/);
+      const worktree = worktreeMatch ? worktreeMatch[1].replace(/[.,]+$/, '') : null;
+      const depPath = worktree ? path.join(worktree, 'node_modules', requireDep) : null;
+      if (!depPath || !fs.existsSync(depPath)) {
+        console.error(
+          `fake batch member: env-cold — ${depPath ?? '<no worktree in prompt>'} not found, dying before doing any work`
+        );
+        process.exit(1);
+      }
+    }
+    const batchMatch = input.match(/batch=(\S+)/);
+    const batchId = batchMatch ? batchMatch[1].replace(/[.,]+$/, '') : 'unknown';
+    // #686: opt-in REAL member work — write `--commit-file=<name>` into the
+    // worktree the prompt names and commit it with the `(#<issue>)` subject
+    // trailer `boundaryCommits` attributes by, so `memberRanges` records a
+    // genuine range for this member (a member with no commits is
+    // indistinguishable from one that never ran). Runs BEFORE the
+    // milestone lands, exactly like a real member committing before it
+    // posts `review done`.
+    // #809: `{issue}` in the name is replaced by the member's issue, so each
+    // member of a parallel batch can commit a DISJOINT file; a fixed name
+    // makes every member touch the same file (the landing-conflict tests).
+    const commitFile = opt('commit-file')?.replaceAll('{issue}', issue);
+    if (commitFile) {
+      const worktreeMatch = input.match(/worktree=(\S+)/);
+      const worktree = worktreeMatch ? worktreeMatch[1].replace(/[.,]+$/, '') : null;
+      if (worktree) {
+        fs.writeFileSync(path.join(worktree, commitFile), `member #${issue}\n`);
+        execFileSync('git', ['add', commitFile], { cwd: worktree, stdio: 'ignore' });
+        execFileSync('git', ['commit', '-m', `feat: ${commitFile} (#${issue})`], {
+          cwd: worktree,
+          stdio: 'ignore',
+        });
+      }
+    }
+    const evictMembers = (opt('evict-members') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (evictMembers.includes(issue)) {
+      const reason = opt('evict-reason') ?? 'test-failures';
+      post('review', 'blocked', { mode: 'slot', batch: batchId, reason });
+      console.log(`fake batch member: posted blocked (${reason}) for #${issue} batch=${batchId}`);
+    } else {
+      post('review', 'done', { mode: 'slot', batch: batchId });
+      console.log(`fake batch member: posted review done for #${issue} batch=${batchId}`);
+    }
     process.exit(0);
   }
   if (mode === 'die') {

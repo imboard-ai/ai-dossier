@@ -754,7 +754,7 @@ only when `batchExec`/`runBatchSuite` are both configured on `EngineDeps` — dr
 `batch:<id>` unit through:
 
 ```
-ready → executing(member i/N) ⟲ → validating → reviewing → shipping
+ready → executing(serial: member i/N ⟲ | parallel: members ∥, ordered landing) → validating → reviewing → shipping
   → awaiting-merge → merged → deployed → reported → done
 failure rails: executing → dissolving (a member self-reports blocked)
                validating → attributing → (fixing | evicting) → validating → dissolving
@@ -774,7 +774,25 @@ failure rails: executing → dissolving (a member self-reports blocked)
   `warm_commands` even in repos that never use the pool for anything else).
   This shared tree is the batch's INTEGRATION branch: members branch off it, and
   the tail work (aggregate suite, review, ship) runs in it (#677).
-- **Members run `member-cycle` serially, one fresh agent at a time — each in its OWN
+- **Members run in PARALLEL by default (#809)** — each member's `member-cycle` agent holds
+  its OWN slot (`batch:<id>#<issue>`, bounded by config `member_parallelism`, default
+  `max_slots`, and free capacity), in its own worktree cut off the integration branch, so
+  a batch's member phase costs ≈ max(member), not sum(member). Nothing lands until a
+  member-order prefix is verified: each verified member is rebased onto the integration
+  TIP in its own worktree, its pushed branch refreshed (`--force-with-lease`), then
+  `merge --ff-only`-landed — the same linear, `(#<issue>)`-trailed history (and
+  `memberRanges` attribution) as serial landing. A member whose diff no longer rebases
+  onto the members landed before it is evicted (`landing-conflict`, requeued full-cycle,
+  its pushed branch kept) — batch-integrate's eviction verdict; a parent repair agent for
+  that conflict is a follow-up. A gate-inconclusive member still lands and keeps its
+  tree; once every member resolves the batch blocks on it exactly as in serial mode
+  (`sched resume --batch` works unchanged). The mode is decided ONCE at the
+  `ready → executing` claim and persisted (`BatchEntry.member_dispatch`, `member_runs`
+  per member; schema 1.23.0): **serial** when `member_parallelism` is 1, the batch has
+  an eviction group, or a member `deps` on another member; a batch already past `ready`
+  with no recorded mode (claimed by a pre-1.23.0 engine) stays serial across the upgrade.
+  Dissolve, `sched stop --batch` and `abandon` stop/release every member slot.
+- **Serial mode: members run `member-cycle` one fresh agent at a time — each in its OWN
   worktree** on its OWN branch `batch/<id>-m<n>-<issue>` (#677, RFC-0001 §J.3), cut off
   the integration branch, warmed, and pushed before the agent spawns; the agent never
   creates either. When the member's incremental gate passes, the scheduler LANDS the
@@ -801,8 +819,9 @@ failure rails: executing → dissolving (a member self-reports blocked)
   gate later to resolve the block once the capability is fixed, and applies the same
   evidence bar on the recheck — a still-unevidenced `task-failed` stays blocked rather
   than evicting on a resume.
-- **The batch's single slot is claimed FRESH for each live step** (a member, the tail
-  agent, the report agent, a bounded fix agent) — never held across a wait. The aggregate
+- **The batch's own slot is claimed FRESH for each live step** (a serial member, the tail
+  agent, the report agent, a bounded fix agent) — never held across a wait; parallel
+  members hold their own member slots instead. The aggregate
   suite itself runs with NO slot claimed at all (deterministic engine work, not an LLM
   step).
 - **Two failure rails.** A member that never went green evicts directly (nothing to
