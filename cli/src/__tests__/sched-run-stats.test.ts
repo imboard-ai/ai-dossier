@@ -1,6 +1,13 @@
 import type { RunLogEntry } from '@ai-dossier/core';
 import { describe, expect, it } from 'vitest';
-import { buildSchedCostReport, issueOfUnit } from '../sched-run-stats';
+import {
+  buildBatchAmortizationSummary,
+  buildSchedCostReport,
+  formatAmortizationLine,
+  issueOfUnit,
+  summarizeBatchJournal,
+  tokensByModel,
+} from '../sched-run-stats';
 
 function entry(overrides: Partial<RunLogEntry>): RunLogEntry {
   return {
@@ -205,5 +212,111 @@ describe('buildSchedCostReport', () => {
     const report = buildSchedCostReport([]);
     expect(report.issues).toEqual([]);
     expect(report.totals).toMatchObject({ runs: 0 });
+  });
+});
+
+describe('batch amortization (#775)', () => {
+  const events = [
+    { event: 'spawned', unit: 'batch:b1', issue: 11 },
+    { event: 'member-landed', unit: 'batch:b1', issue: 11 },
+    { event: 'run-log-recorded', unit: 'batch:b1', issue: 12 },
+    { event: 'unit-failed', unit: 'batch:b1', issue: 12, reason: 'env-cold' },
+    { event: 'unit-failed', unit: 'batch:b1', issue: 12, reason: 'env-cold' },
+    { event: 'member-landed', unit: 'batch:b1', issue: 13 },
+    { event: 'suite-failed', unit: 'batch:b1', detail: 'unreadable' },
+    { event: 'batch-blocked', unit: 'batch:b1', detail: 'suite-unreadable' },
+    // Another batch and an issue-unit line must not leak in.
+    { event: 'member-landed', unit: 'batch:b2', issue: 99 },
+    { event: 'spawned', unit: 'issue:12', issue: 12 },
+  ];
+
+  it('summarizes one batch journal, de-duplicating evictions', () => {
+    expect(summarizeBatchJournal(events, 'b1')).toEqual({
+      members: [11, 12, 13],
+      landed: [11, 13],
+      evicted: [12],
+      suiteFailures: 1,
+      blocked: 'suite-unreadable',
+      dissolved: false,
+    });
+  });
+
+  it('groups billable tokens by model, keeping a null model visible', () => {
+    const rows = tokensByModel([
+      entry({
+        unit: 'issue:11',
+        model: 'openai/gpt-5.6-luna',
+        input_tokens: 100,
+        output_tokens: 10,
+        cache_read_tokens: 1000,
+      }),
+      entry({ unit: 'issue:13', model: 'openai/gpt-5.6-luna', input_tokens: 50, output_tokens: 5 }),
+      entry({
+        unit: 'batch:b1',
+        model: 'claude-sonnet-5',
+        input_tokens: 1,
+        output_tokens: 1,
+        total_cost_usd: 0.5,
+      }),
+      entry({ unit: 'issue:12' }),
+    ]);
+    expect(rows).toEqual([
+      { model: 'openai/gpt-5.6-luna', runs: 2, billable_tokens: 1165, total_cost_usd: null },
+      { model: 'claude-sonnet-5', runs: 1, billable_tokens: 2, total_cost_usd: 0.5 },
+      { model: null, runs: 1, billable_tokens: null, total_cost_usd: null },
+    ]);
+  });
+
+  it('reports issues per gate run only once the batch merged', () => {
+    const journal = summarizeBatchJournal(events, 'b1');
+    const entries = [
+      entry({ unit: 'issue:11', model: 'm', input_tokens: 600, output_tokens: 0 }),
+      entry({ unit: 'issue:13', model: 'm', input_tokens: 400, output_tokens: 0 }),
+    ];
+    const blocked = buildBatchAmortizationSummary({
+      batchId: 'b1',
+      batch: { status: 'blocked', members: [11, 12, 13], pr: null, evictions: [] },
+      journal,
+      entries,
+    });
+    expect(blocked).toMatchObject({
+      members_enqueued: 3,
+      members_landed: 2,
+      evictions: 1,
+      members_shipped: null,
+      gate_runs: 0,
+      issues_per_gate_run: null,
+      billable_tokens: 1000,
+      tokens_per_member: 500,
+    });
+    expect(formatAmortizationLine(blocked)).toContain('not shipped (status=blocked)');
+
+    const merged = buildBatchAmortizationSummary({
+      batchId: 'b1',
+      batch: { status: 'merged', members: [11, 12, 13], pr: 7, evictions: [{ issue: 12 }] },
+      journal,
+      entries,
+    });
+    expect(merged).toMatchObject({
+      members_shipped: 2,
+      gate_runs: 1,
+      issues_per_gate_run: 2,
+      pr: 7,
+    });
+    const line = formatAmortizationLine(merged);
+    expect(line).toContain('2 shipped in 1 gate run(s) → 2.0 issues/gate run');
+    expect(line).toContain('by model: m');
+  });
+
+  it('still summarizes a batch pruned from state.json', () => {
+    const summary = buildBatchAmortizationSummary({
+      batchId: 'b1',
+      batch: null,
+      journal: summarizeBatchJournal(events, 'b1'),
+      entries: [],
+    });
+    expect(summary.status).toBeNull();
+    expect(summary.members_enqueued).toBe(3);
+    expect(formatAmortizationLine(summary)).toContain('none recorded');
   });
 });
