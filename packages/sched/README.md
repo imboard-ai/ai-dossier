@@ -32,7 +32,7 @@ ai-dossier sched status           # queue (+pr/cleanup), engine lease, slots, ba
 ai-dossier sched pause            # prevent every new agent process; live units keep running
 ai-dossier sched resume
 ai-dossier sched stop --issue 42  # terminate one full-cycle agent and record it stopped (no recovery)
-ai-dossier sched stop --batch b1  # terminate the batch process and stop unfinished members
+ai-dossier sched stop --batch b1  # terminate every batch agent (incl. parallel members) and stop unfinished members
 ai-dossier sched abandon --issue 42 --reason "operator abort"
 ai-dossier sched abandon --batch b1   # dissolve; members requeue as full-cycle
 ai-dossier sched stats --issues 4..9  # per-issue tokens/cost from ~/.dossier/runs.jsonl (#524)
@@ -53,8 +53,8 @@ directory directly, reconstructing costs from the raw dispatch logs rather than
 takeovers; it does not terminate agents that are already running. `stop --issue <n>` is the
 single-command stop path: it PID-start-safely terminates that issue's live agent, releases its
 slot, and records a terminal `stopped` outcome that will not recover or escalate. An active
-slot-mode member must instead be stopped through `stop --batch <id>`, which terminates the batch
-process and atomically stops the batch and its unfinished members. `abandon` only records failure
+slot-mode member must instead be stopped through `stop --batch <id>`, which terminates every agent
+the batch holds (its own slot plus one per running parallel member, `batch:<id>#<issue>`) and atomically stops the batch and its unfinished members. `abandon` only records failure
 and releases the slot; it intentionally does not terminate its process.
 
 Since #507, `enqueue` additionally reads each candidate issue's live GitHub labels (one
@@ -783,7 +783,7 @@ failure rails: executing → dissolving (a member self-reports blocked)
   `merge --ff-only`-landed — the same linear, `(#<issue>)`-trailed history (and
   `memberRanges` attribution) as serial landing. A member whose diff no longer rebases
   onto the members landed before it is evicted (`landing-conflict`, requeued full-cycle,
-  its pushed branch kept) — batch-integrate's eviction verdict; a parent repair agent for
+  its pushed branch kept) — batch-integrate's eviction verdict; a parent repair agent (#813) for
   that conflict is a follow-up. A gate-inconclusive member still lands and keeps its
   tree; once every member resolves the batch blocks on it exactly as in serial mode
   (`sched resume --batch` works unchanged). The mode is decided ONCE at the
@@ -1047,6 +1047,8 @@ import {
   duplicateEvictionDetail, // the one eviction-duplicate wording, shared by both rails
   isPreservedMember,     // the single definition of "already green"
   createBatch,           // the single BatchEntry constructor
+  batchMemberUnit,       // #809: a parallel member's slot unit, `batch:<id>#<issue>`
+  slotsForBatch,         // #809: every live slot a batch holds (its own + member slots)
   type RecoveryDeps,     // inject exec/repoDir/journal/milestone-poster/suite-runner/clock
   type SuiteRunner,      // re-runs the aggregate suite after a revert or rebase
   type BatchMilestonePoster, // batch-milestone sink (createExecMilestonePoster is default)
@@ -1127,7 +1129,8 @@ telemetry" below.
 │                  # pr_poll_interval_ms, dispatch (incl. report_prompt,
 │                  # phase_stall_timeout_ms, fence_takeover_timeout_ms, tiers — #527,
 │                  # suite_command — #562, disallowed_tools — #591), auto_upgrade — #537,
-│                  # dissolve_policy — #563
+│                  # dissolve_policy — #563, default_batch_priority — #565,
+│                  # max_full_review_members — #771, member_parallelism — #809
 ├── events.jsonl   # append-only event journal (the operator's flight recorder)
 ├── runs/          # per-unit agent output logs (issue-<n>.log)
 └── .sched-lock/   # cross-process directory mutex (pid; stolen from dead holders)
@@ -1234,8 +1237,7 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to 1.14.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
-  load and migrate to 1.13.0 automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
+  load and migrate to the current schema (1.23.0) automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
   `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
   `evictions`/`fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to
@@ -1247,7 +1249,8 @@ after-the-fact recovery, not a missing-data bug.
   `stale_milestone_ignored_for` backfill to `null` — #610, and state-level
   `consecutive_dispatch_api_errors`/`dispatch_pause_reset_at` backfill to `0`/`null` —
   #629; batch `anchor_closed_at` and `anchor_close_failed_reason`/`_since`/`_ticks`
-  backfill to `null`/`null`/`null`/`0` — #768, schema 1.22.0).
+  backfill to `null`/`null`/`null`/`0` — #768, schema 1.22.0; batch `member_dispatch`/`member_runs`
+  backfill to `null`/`[]` — #809, schema 1.23.0 — a null mode past `ready` runs serially).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.

@@ -336,6 +336,7 @@ export {
   MAX_FULL_REVIEW_MEMBERS,
   MAX_MAX_SLOTS,
   MAX_REBASE_ATTEMPTS,
+  MEMBER_RUN_STATUSES,
   MERGED_BATCH_STATUSES,
   type MemberDispatchMode,
   type MemberRun,

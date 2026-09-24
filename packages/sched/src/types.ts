@@ -418,8 +418,11 @@ export interface QueueEntry {
  */
 export type MemberDispatchMode = 'serial' | 'parallel';
 
+/** Closed vocabulary of {@link MemberRunStatus} (#809) — `validateState` checks against it. */
+export const MEMBER_RUN_STATUSES = ['running', 'verified', 'landed', 'evicted'] as const;
+
 /** Lifecycle of one parallel member run (#809) — see {@link MemberRun}. */
-export type MemberRunStatus = 'running' | 'verified' | 'landed' | 'evicted';
+export type MemberRunStatus = (typeof MEMBER_RUN_STATUSES)[number];
 
 /**
  * One member's dispatch under `member_dispatch === 'parallel'` (#809) — the
@@ -448,6 +451,13 @@ export interface MemberRun {
    * `sched resume --batch` can recheck it exactly as in serial mode.
    */
   gate_inconclusive: string | null;
+  /**
+   * Whether this run's worktree has been torn down (pool-returned or removed).
+   * Set only AFTER the teardown, so a crash in between — or a batch ended by
+   * `sched stop`/`abandon`, which never runs a teardown — leaves `false`, and
+   * `teardownBatch`/the terminal-batch arm tear it down (idempotently) later.
+   */
+  torn_down: boolean;
 }
 
 /** A batch of slot-mode issues sharing one lifecycle (RFC-0001 §C.4/E.4). */
@@ -467,7 +477,12 @@ export interface BatchEntry {
    * found (an operator manually deferring full-cycle entries by hand).
    */
   priority: number;
-  /** Index of the member currently in work, when status is `executing` (1-based member pointer). */
+  /**
+   * Index of the member currently in work, when status is `executing` (1-based
+   * member pointer). #809: under `member_dispatch === 'parallel'` it is the
+   * highest member index dispatched so far (see `member_runs` for per-member
+   * state), and a gate-inconclusive block points it at the blocked member.
+   */
   executing_member: number;
   /**
    * The batch ANCHOR issue — where every batch milestone posts (#472 AC5).
@@ -684,7 +699,7 @@ export interface BatchEntry {
 export interface SlotEntry {
   id: number;
   status: SlotStatus;
-  /** Unit identifier currently held: `issue:<n>` or `batch:<id>`; null when idle. */
+  /** Unit identifier currently held: `issue:<n>`, `batch:<id>`, or a parallel batch member's `batch:<id>#<issue>` (#809); null when idle. */
   unit: string | null;
   /** OS pid of the spawned agent process, when known (#464 dispatch). */
   pid: number | null;
@@ -1697,7 +1712,7 @@ export type SlotReleaseReason =
 export interface JournalEvent {
   ts: string;
   event: JournalEventName;
-  /** Unit the event concerns (`issue:<n>` / `batch:<id>`), when applicable. */
+  /** Unit the event concerns (`issue:<n>` / `batch:<id>`; parallel member events use `batch:<id>` plus `issue`), when applicable. */
   unit?: string;
   slot?: number;
   issue?: number;

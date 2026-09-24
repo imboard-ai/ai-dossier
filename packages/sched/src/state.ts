@@ -9,6 +9,8 @@
  * non-terminal issue status rather than repeated per row.
  */
 
+import * as path from 'node:path';
+import { SAFE_REF_RE } from './attribution';
 import { DISPATCH_PROFILE_RE, memberDispatchTier } from './dispatch';
 import { issueOfUnit } from './journal';
 import {
@@ -23,6 +25,7 @@ import {
   IllegalTransitionError,
   type IssueStatus,
   LEGACY_SCHEMA_VERSIONS,
+  MEMBER_RUN_STATUSES,
   type QueueEntry,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
@@ -302,7 +305,7 @@ export function createBatch(
 const ISSUE_STATUSES = new Set<string>(Object.keys(ISSUE_BASE_TRANSITIONS));
 const BATCH_STATUSES = new Set<string>(Object.keys(BATCH_TRANSITIONS));
 /** #809: the closed vocabulary `validateState` accepts for `MemberRun.status`. */
-const MEMBER_RUN_STATUSES = new Set<string>(['running', 'verified', 'landed', 'evicted']);
+const MEMBER_RUN_STATUS_SET = new Set<string>(MEMBER_RUN_STATUSES);
 const SLOT_STATUSES = new Set<string>(Object.keys(SLOT_BASE_TRANSITIONS));
 const CYCLE_MODES = new Set(['full', 'slot']);
 const MODEL_TIERS = new Set(['mechanical', 'mid', 'strong']);
@@ -708,14 +711,33 @@ export function validateState(data: unknown): SchedState {
       }
       for (const run of batch.member_runs as unknown[]) {
         const r = run as Record<string, unknown>;
+        // These values become git argv, spawn cwds and teardown targets —
+        // hold persisted state to the same shape the code that wrote it
+        // enforced (SAFE_REF_RE branch, absolute resolved path, a member of
+        // this batch), so a corrupt or hand-edited state.json cannot point a
+        // rebase/force-push/teardown somewhere else.
+        const worktree = r.worktree;
         if (
           typeof run !== 'object' ||
           run === null ||
           !Number.isInteger(r.issue) ||
+          (r.issue as number) <= 0 ||
+          !batch.members.includes(r.issue as number) ||
           !Number.isInteger(r.index) ||
+          (r.index as number) <= 0 ||
           typeof r.branch !== 'string' ||
-          typeof r.worktree !== 'string' ||
-          !MEMBER_RUN_STATUSES.has(String(r.status))
+          !SAFE_REF_RE.test(r.branch) ||
+          typeof worktree !== 'string' ||
+          !path.isAbsolute(worktree) ||
+          path.resolve(worktree) !== worktree ||
+          worktree.includes('\0') ||
+          worktree.includes('\n') ||
+          (r.pool_claimed !== undefined && typeof r.pool_claimed !== 'boolean') ||
+          (r.torn_down !== undefined && typeof r.torn_down !== 'boolean') ||
+          (r.gate_inconclusive !== undefined &&
+            r.gate_inconclusive !== null &&
+            typeof r.gate_inconclusive !== 'string') ||
+          !MEMBER_RUN_STATUS_SET.has(String(r.status))
         ) {
           throw new Error(`Batch ${batch.id}: malformed member_runs entry ${JSON.stringify(run)}`);
         }
@@ -1086,7 +1108,9 @@ export function validateState(data: unknown): SchedState {
     member_dispatch: batch.member_dispatch ?? null,
     member_runs: (batch.member_runs ?? []).map((run) => ({
       ...run,
+      pool_claimed: run.pool_claimed ?? false,
       gate_inconclusive: run.gate_inconclusive ?? null,
+      torn_down: run.torn_down ?? false,
     })),
   }));
 
@@ -1598,7 +1622,7 @@ export function slotsForBatch(state: SchedState, batchId: string): SlotEntry[] {
 }
 
 /** Walk one slot to idle (see {@link NEXT_TOWARD_IDLE}). */
-function walkSlotToIdle(state: SchedState, slotId: number, now: Date): SchedState {
+function walkSlotIdToIdle(state: SchedState, slotId: number, now: Date): SchedState {
   let next = state;
   let slot = next.slots.find((s) => s.id === slotId);
   // Bounded: the longest real walk (recovering → failed → idle, or
@@ -1620,13 +1644,13 @@ export function releaseBatchMemberSlot(
   now: Date
 ): SchedState {
   const slot = slotForBatchMember(state, batchId, issue);
-  return slot ? walkSlotToIdle(state, slot.id, now) : state;
+  return slot ? walkSlotIdToIdle(state, slot.id, now) : state;
 }
 
 /** Release EVERY slot a batch holds — batch slot and member slots (#809). */
 export function releaseAllBatchSlots(state: SchedState, batchId: string, now: Date): SchedState {
   let next = state;
-  for (const slot of slotsForBatch(state, batchId)) next = walkSlotToIdle(next, slot.id, now);
+  for (const slot of slotsForBatch(state, batchId)) next = walkSlotIdToIdle(next, slot.id, now);
   return next;
 }
 
@@ -1654,19 +1678,14 @@ const NEXT_TOWARD_IDLE: Record<SlotStatus, SlotStatus | null> = {
  * leaked for the life of the state file, with no CLI lever to recover it. One
  * operator `abandon --batch` per leaked slot, against a `max_slots` typically
  * of 3, and the scheduler starves showing nothing but a dead pid.
+ *
+ * #809: releases the batch's OWN slot only — never a parallel member's
+ * (`batch:<id>#<issue>`); the whole-batch exits (`abandonBatch`, `stopBatch`)
+ * now call {@link releaseAllBatchSlots}.
  */
 export function releaseBatchSlot(state: SchedState, batchId: string, now: Date): SchedState {
-  let next = state;
-  let slot = slotForBatch(next, batchId);
-  // Bounded: the longest real walk (recovering → failed → idle, or
-  // running → exited → verifying → complete → idle) is 4 hops.
-  for (let i = 0; i < 8 && slot && slot.status !== 'idle'; i++) {
-    const to = NEXT_TOWARD_IDLE[slot.status];
-    if (to === null) break;
-    next = transitionSlot(next, slot.id, to, {}, now);
-    slot = slotForBatch(next, batchId);
-  }
-  return next;
+  const slot = slotForBatch(state, batchId);
+  return slot ? walkSlotIdToIdle(state, slot.id, now) : state;
 }
 
 /**

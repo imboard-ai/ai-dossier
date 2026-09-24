@@ -3892,5 +3892,12 @@ describe('#809: parallel member dispatch', () => {
     });
     expect(abandoned).toEqual([8181, 8182]);
     expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
+    // abandon ends the batch without a teardown: the next tick's terminal arm
+    // stops any agent still running in a member tree and gives every tree back.
+    const runs = findBatch(h.state(), 'b-stop')?.member_runs ?? [];
+    expect(runs.every((r) => fs.existsSync(r.worktree))).toBe(true);
+    h.tick();
+    expect(runs.every((r) => !fs.existsSync(r.worktree))).toBe(true);
+    expect(findBatch(h.state(), 'b-stop')?.member_runs.every((r) => r.torn_down)).toBe(true);
   }, 60_000);
 });

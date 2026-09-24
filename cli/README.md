@@ -1329,8 +1329,8 @@ against ground truth.
 `pause` prevents every new agent process, including recovery takeovers, but leaves live
 agents running. `stop --issue <n>` PID-start-safely terminates one live agent, releases its
 slot, and records terminal `stopped` state without recovery or escalation. Active batch members
-must use `stop --batch <id>`, which terminates the batch process and stops unfinished members
-atomically. `abandon` instead records failure and releases a slot without terminating the process.
+must use `stop --batch <id>`, which terminates every agent the batch holds (its own slot plus one
+per running parallel member) and stops unfinished members atomically. `abandon` instead records failure and releases a slot without terminating the process.
 
 - **`enqueue`** records entries (issue, mode, batch id, dependency edges, model tier) from
   flags or a batch-prep manifest (`--from-manifest`, a JSON file of entries — flags and
@@ -1541,7 +1541,9 @@ serialized by a `.sched-lock` directory mutex (stolen from dead holders). `confi
 holds `max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default
 1 800 000 — but the `implement` phase defaults to 5 400 000, overridable per phase via
 `dispatch.phase_stall_timeout_ms: {"<phase>": <ms>}`, #495), `reconcile_interval_ms`
-(default 60 000), and the optional `dispatch` section (including `report_prompt` for
+(default 60 000), `member_parallelism` (#809 — at most this many members of one batch run
+concurrently; default bounded only by `max_slots`/free capacity; `1` runs every batch's members
+serially), and the optional `dispatch` section (including `report_prompt` for
 the #468 report agent and `fence_takeover_timeout_ms`, default 900 000 — the short stall
 allowance for a freshly-fenced takeover that has posted nothing, #504; `dispatch.prompt`
 substitutes `{issue}` and `{gen}`; `dispatch.tiers.<tier>` — `{command?, model?, prompt?}`
