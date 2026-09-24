@@ -1140,8 +1140,9 @@ ai-dossier batch compose --backlog [--label backend]... [--search "no:assignee"]
 | `--rules v2\|legacy` | `v2` | `legacy` replays pre-#770 admission (any risk keyword ⇒ `mode=full` ⇒ excluded) for comparison |
 | `--repo`, `--project` | cwd repo, `owner-name` | Target repo; sched project whose queue/config is read |
 
-At least one of `--issues` / `--backlog` is required. With `--issues`, the backlog is read
-**only** when fewer than `--min-members` picks are admissible (automatic backfill preview).
+At least one of `--issues` / `--backlog` is required. With `--issues` alone, the backlog is
+read **only** when the picks by themselves compose fewer than `--min-members` members — counted
+after the caps, so five admissible `review=full` picks (cap 2) still trigger backfill.
 
 **Admission.** An issue is excluded — with every reason recorded, not just the first — on:
 
@@ -1156,10 +1157,14 @@ At least one of `--issues` / `--backlog` is required. With `--issues`, the backl
 | `not-a-unit` | Tracker / decision / research / parked: labels `tracker` `decision` `question` `discussion` `research` `parked` `on-hold` `wontfix` `duplicate`; titles like `[PARKED] …`, `research: …`, `epic(x): …`; a `## Decision needed` section |
 | `in-flight` | Latest runstate milestone is any phase other than `classify` |
 | `sched-active` | A non-terminal, not-yet-merged sched queue entry exists |
-| `open-dependency` | `Depends on #N` with N open and not among the picks |
+| `open-dependency` | `Depends on #N` with N open and not among the picks; N a pick that is itself excluded; or N whose state could not be read (fails closed) |
 | `data-mutation` | Change surface names a production data action (`data migration`, `data backfill`, `backfill script`, `one-off script`, `bulk delete`, …) — never shares a PR |
 | `prescreen-full` | `prescreen:v2` excluding floor: plan:v1 path floor or > 8 predicted files |
 | `legacy-full` | `--rules legacy` only: any text-floor keyword anywhere in title/body/labels |
+
+`--rules legacy` replays only the pre-#770 keyword rule on top of today's readiness screen (the
+other codes above still apply) — it is a comparison of the admission rule, not a full replay of
+the old pipeline, which also ran a model classifier no deterministic check reproduces.
 
 A risk keyword in the change surface (`billing`, `security`, `deploy`, …) does **not**
 exclude: the issue is admissible as a `review=full` member (#770 Option A). The data-mutation
@@ -1187,7 +1192,7 @@ branch on `status`, take `manifest_entries`, and report `excluded`:
   "base_branch": "main",
   "rules": "v2",
   "params": {
-    "min_members": 3, "max_members": 6, "max_full_review": 2, "picks": [4333, 4343],
+    "min_members": 3, "max_members": 6, "max_full_review": 2, "picks": [4178, 4333, 4343],
     "backlog": { "queried": true, "labels": [], "search": null, "limit": 100 }
   },
   "status": "ok",
@@ -1223,7 +1228,9 @@ branch on `status`, take `manifest_entries`, and report `excluded`:
   `backlog` (backlog-only mode). `review_reasons` are the prescreen findings behind a `full`.
 - `manifest_entries` are **draft** `sched enqueue --from-manifest` entries (`parseManifest`
   shape): batch-issues-preparation adds `batch`, `anchor`, `run_id`, `tier`, `deps`, and
-  `dispatch` — compose mints nothing and claims nothing.
+  `dispatch` — compose mints nothing and claims nothing. The report itself is not a manifest;
+  extract the entries first, e.g.
+  `jq '{entries: [.manifest_entries[] | . + {batch: $b, anchor: $a}]}' --arg b b-20260924-02 --argjson a 4410`.
 - `backfill` is present only with `--issues`: every admissible backlog candidate, ranked
   against the admitted picks, `selected: true` on the ones the composition took.
 - `held` lists admissible issues left out (`review-full-cap`, `max-members`).

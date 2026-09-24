@@ -27,6 +27,7 @@ import {
 import type { Command } from 'commander';
 import {
   type AssessedIssue,
+  applyPickDependencies,
   assessIssue,
   COMPOSE_SCHEMA,
   type ComposeIssueInput,
@@ -152,8 +153,8 @@ function fetchBacklog(
   warnings: string[]
 ): ComposeIssueInput[] {
   const args = ['issue', 'list', '--state', 'open', '--limit', String(opts.limit)];
-  for (const label of opts.labels) args.push('--label', label);
-  if (opts.search !== undefined) args.push('--search', opts.search);
+  for (const label of opts.labels) args.push(`--label=${label}`);
+  if (opts.search !== undefined) args.push(`--search=${opts.search}`);
   args.push('--json', ISSUE_FIELDS, ...repoArgs(repo));
   const res = exec('gh', args, { maxBuffer: BACKLOG_MAX_BUFFER });
   if (!res.ok) {
@@ -256,8 +257,14 @@ export interface ComposeReport extends CompositionResult {
   warnings: string[];
 }
 
+/** Terminal control characters — issue titles and label names are untrusted, network-sourced text. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching (and stripping) control characters is exactly this regex's job
+const TERMINAL_CONTROL_RE = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g;
+
 function renderText(r: ComposeReport): void {
-  const line = (s = '') => console.log(s);
+  // Every text line goes through one strip, so an ANSI/OSC escape in an issue title can never
+  // reach the operator's terminal raw. (JSON mode is safe: JSON.stringify escapes them.)
+  const line = (s = '') => console.log(s.replace(TERMINAL_CONTROL_RE, ''));
   line(`batch compose — ${r.repo ?? r.project} (base ${r.base_branch}, rules ${r.rules})`);
   line(
     `status: ${r.status} — ${r.members.length} member(s), ${r.members.filter((m) => m.review === 'full').length}/${r.params.max_full_review} review=full, min ${r.params.min_members}, max ${r.params.max_members}`
@@ -296,7 +303,7 @@ function renderText(r: ComposeReport): void {
     }
     if (r.backfill.length > 10) line(`  … ${r.backfill.length - 10} more (see --json)`);
   }
-  for (const w of r.warnings) console.error(`⚠ ${w}`);
+  for (const w of r.warnings) console.error(`⚠ ${w.replace(TERMINAL_CONTROL_RE, '')}`);
 }
 
 function runCompose(opts: ComposeCliOptions): void {
@@ -340,46 +347,72 @@ function runCompose(opts: ComposeCliOptions): void {
   // Backlog: explicitly requested, or automatic backfill when the picks fall short.
   const labels = opts.label ?? [];
   let backlogQueried = false;
-  const wantBacklog = (): boolean => {
-    if (opts.backlog) return true;
-    if (opts.backfill === false) return false;
-    // Auto-backfill needs the admissible pick count, which needs deps — assess cheaply first.
-    const admissiblePicks = inputs.filter((i) => assessIssue(withDeps(i), rules).admissible).length;
-    return admissiblePicks < minMembers;
-  };
-
   // Dependency state lookups, cached across issues (backlog issues are known OPEN for free).
   const knownState = new Map<number, string>();
   const unresolved = new Set<number>();
   const depCache = new Map<number, ComposeIssueInput>();
+  /** Pick → the other picks it depends on (checked after assessment, see applyPickDependencies). */
+  const pickDeps = new Map<number, number[]>();
   function withDeps(input: ComposeIssueInput): ComposeIssueInput {
     const cached = depCache.get(input.issue);
     if (cached) return cached;
     if (input.error !== undefined) return input;
     const open: number[] = [];
+    const unknown: number[] = [];
+    const onPicks: number[] = [];
     for (const dep of extractDependencyRefs(`${input.title}\n${input.body}`)) {
-      if (pickSet.has(dep) || dep === input.issue) continue;
+      if (dep === input.issue) continue;
+      if (pickSet.has(dep)) {
+        onPicks.push(dep);
+        continue;
+      }
       let state = knownState.get(dep);
       if (state === undefined) {
         const res = tryFetchIssueState(String(dep), opts.repo);
-        if (res.ok) {
-          state = res.state;
-          knownState.set(dep, state);
-        } else {
+        if (!res.ok) {
           unresolved.add(dep);
+          unknown.push(dep);
           continue;
         }
+        state = res.state;
+        knownState.set(dep, state);
       }
       if (state.toUpperCase() === 'OPEN') open.push(dep);
     }
+    if (onPicks.length > 0) pickDeps.set(input.issue, onPicks);
     const full = {
       ...input,
       openDependencies: open,
+      unknownDependencies: unknown,
       schedStatus: activeSchedStatus(sched.state, input.issue),
     };
     depCache.set(input.issue, full);
     return full;
   }
+  const isOpen = (issue: number) => (knownState.get(issue) ?? 'OPEN').toUpperCase() === 'OPEN';
+  const assessAll = (list: ComposeIssueInput[]) =>
+    applyPickDependencies(
+      list.map((i) => assessIssue(withDeps(i), rules)),
+      pickDeps,
+      isOpen
+    );
+  const composeOpts = {
+    rules,
+    baseBranch: opts.base,
+    minMembers,
+    maxMembers,
+    maxFullReview,
+    picksMode: picks.length > 0,
+  };
+
+  // Backlog: explicitly requested, or automatic backfill when the picks alone cannot compose
+  // min_members (counted after the caps — five admissible review=full picks compose only two).
+  const wantBacklog = (): boolean => {
+    if (opts.backlog) return true;
+    if (opts.backfill === false) return false;
+    return composeBatch(assessAll(inputs), composeOpts).members.length < minMembers;
+  };
+
   for (const i of inputs) if (i.error === undefined) knownState.set(i.issue, i.state);
 
   if (wantBacklog()) {
@@ -389,25 +422,18 @@ function runCompose(opts: ComposeCliOptions): void {
     for (const b of backlog) if (!pickSet.has(b.issue)) inputs.push(b);
   }
 
-  const assessed = inputs.map((i) => assessIssue(withDeps(i), rules));
+  const assessed = assessAll(inputs);
   for (const a of assessed) {
     const input = inputs.find((i) => i.issue === a.issue);
     if (input?.error !== undefined) warnings.push(input.error);
   }
   if (unresolved.size > 0) {
     warnings.push(
-      `Could not resolve open/closed state for dependency issue(s) ${[...unresolved].map((n) => `#${n}`).join(', ')} — treated as satisfied; the open-dependency check may be incomplete.`
+      `Could not resolve open/closed state for dependency issue(s) ${[...unresolved].map((n) => `#${n}`).join(', ')} — those issues were excluded as open-dependency (fail closed).`
     );
   }
 
-  const composition = composeBatch(assessed, {
-    rules,
-    baseBranch: opts.base,
-    minMembers,
-    maxMembers,
-    maxFullReview,
-    picksMode: picks.length > 0,
-  });
+  const composition = composeBatch(assessed, composeOpts);
 
   const excluded = assessed
     .filter((a) => !a.admissible)

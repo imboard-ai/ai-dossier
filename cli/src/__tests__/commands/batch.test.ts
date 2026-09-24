@@ -212,6 +212,49 @@ describe('batch compose', () => {
     ]);
   });
 
+  it('a pick depending on an EXCLUDED pick is excluded too (it would ship without it)', async () => {
+    fakeGh([
+      { number: 1, body: 'Depends on #2.' },
+      { number: 2, assignees: ['busy'] },
+      { number: 3 },
+    ]);
+
+    await compose('--issues', '1,2,3', '--no-backfill');
+
+    const r = report();
+    expect(r.excluded.map((e: { issue: number }) => e.issue).sort()).toEqual([1, 2]);
+    expect(r.excluded.find((e: { issue: number }) => e.issue === 1).reasons).toEqual([
+      expect.objectContaining({ code: 'open-dependency' }),
+    ]);
+  });
+
+  it('a dependency whose state cannot be read fails closed (excluded, report degraded)', async () => {
+    fakeGh([{ number: 1 }, { number: 2, body: 'Depends on #777.' }]);
+
+    await compose('--issues', '1,2', '--no-backfill');
+
+    const r = report();
+    expect(r.degraded).toBe(true);
+    expect(r.excluded).toEqual([
+      expect.objectContaining({
+        issue: 2,
+        reasons: [expect.objectContaining({ code: 'open-dependency' })],
+      }),
+    ]);
+  });
+
+  it('backfills when the caps, not admission, leave the picks short', async () => {
+    const full = (n: number) => ({ number: n, title: `fix: billing window ${n}` });
+    fakeGh([full(1), full(2), full(3)], [{ number: 20 }]);
+
+    await compose('--issues', '1,2,3');
+
+    const r = report();
+    expect(ghCalls('list')).toHaveLength(1);
+    expect(r.held).toEqual([expect.objectContaining({ issue: 3, reason: 'review-full-cap' })]);
+    expect(r.members.map((m: { issue: number }) => m.issue)).toEqual([1, 2, 20]);
+  });
+
   it('an unreadable pick is excluded and degrades the report instead of failing it', async () => {
     fakeGh([{ number: 1 }, { number: 2 }]);
 
@@ -243,6 +286,25 @@ describe('batch compose', () => {
     const out = logged().join('\n');
     expect(out).toContain('status: ok');
     expect(out).toContain('#1  review=light  (pick)');
+  });
+
+  it('text mode strips terminal escapes from untrusted issue titles', async () => {
+    fakeGh([{ number: 1, title: 'fix: \u001b]52;c;cGF5bG9hZA==\u0007evil \u001b[31mred' }]);
+
+    await runCommandTree(registerBatchCommand, [
+      'batch',
+      'compose',
+      '--project',
+      PROJECT,
+      '--issues',
+      '1',
+      '--no-backfill',
+    ]);
+
+    const out = logged().join('\n');
+    expect(out).toContain('evil');
+    expect(out).not.toContain('\u001b');
+    expect(out).not.toContain('\u0007');
   });
 
   it('refuses to run with nothing to compose', async () => {

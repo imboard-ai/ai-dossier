@@ -81,6 +81,8 @@ export interface ComposeIssueInput {
   schedStatus?: string | null;
   /** `Depends on #N` refs resolved OPEN and outside the operator's picks. */
   openDependencies?: readonly number[];
+  /** `Depends on #N` refs whose state could not be read — an admission gate fails closed on them. */
+  unknownDependencies?: readonly number[];
 }
 
 export interface AssessedIssue {
@@ -343,6 +345,15 @@ export function assessIssue(input: ComposeIssueInput, rules: ComposeRules = 'v2'
       message: `Depends on #${dep}, which is open and not among the operator's picks.`,
     });
   }
+  for (const dep of input.unknownDependencies ?? []) {
+    excluded.push({
+      code: 'open-dependency',
+      message: `Depends on #${dep}, whose state could not be read — treated as open.`,
+    });
+  }
+  // prescreen:v2 keeps path-floor / >8-files as EXCLUDING checks (#772's schema): a plan:v1
+  // artifact that predicts risk-floor paths or a large diff is a deliberate full-cycle case, so
+  // only a text-floor hit rides a batch as a review=full member (#770 Option A).
   const floorExclusions = verdict.reasons.filter(
     (r) => r.check === 'path-floor' || r.check === 'file-count'
   );
@@ -604,4 +615,36 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
   }
 
   return { status, members, held, backfill, shared_packages: shared, recommendation };
+}
+
+/**
+ * A pick that depends on ANOTHER pick is admissible only while that pick is: when the depended-on
+ * pick is excluded (and still open), the dependent would ship without it. Applied to a fixpoint,
+ * so a chain A → B → C collapses when C is excluded. Mutates and returns `assessed`.
+ */
+export function applyPickDependencies(
+  assessed: AssessedIssue[],
+  pickDeps: ReadonlyMap<number, readonly number[]>,
+  isOpen: (issue: number) => boolean
+): AssessedIssue[] {
+  const byIssue = new Map(assessed.map((a) => [a.issue, a]));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const a of assessed) {
+      if (!a.admissible) continue;
+      for (const dep of pickDeps.get(a.issue) ?? []) {
+        const d = byIssue.get(dep);
+        if (d === undefined || d.admissible || !isOpen(dep)) continue;
+        a.excluded.push({
+          code: 'open-dependency',
+          message: `Depends on #${dep}, a pick that cannot join this batch (${d.excluded.map((e) => e.code).join(', ')}).`,
+        });
+        a.admissible = false;
+        changed = true;
+        break;
+      }
+    }
+  }
+  return assessed;
 }
