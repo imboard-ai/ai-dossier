@@ -47,6 +47,7 @@ import {
   requireRepoSlug,
   tryFetchIssueState,
 } from '../gh';
+import { collectRepeatable } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
 import { findLatestPlan } from '../plan-artifact';
 import { extractDependencyRefs } from '../prescreen';
@@ -477,10 +478,6 @@ function runCompose(opts: ComposeCliOptions): void {
   }
 }
 
-function collect(value: string, previous: string[] = []): string[] {
-  return [...previous, value];
-}
-
 /** Registers the `batch` command tree (currently just `compose`). */
 export function registerBatchCommand(program: Command): void {
   const batch = program
@@ -501,7 +498,11 @@ export function registerBatchCommand(program: Command): void {
       'Also draw candidates from the open backlog (implied for backfill when picks fall short)'
     )
     .option('--no-backfill', 'Never query the backlog to backfill short picks')
-    .option('--label <name>', 'Backlog filter: only issues with this label (repeatable)', collect)
+    .option(
+      '--label <name>',
+      'Backlog filter: only issues with this label (repeatable)',
+      collectRepeatable
+    )
     .option('--search <query>', 'Backlog filter: GitHub search query (gh issue list --search)')
     .option(
       '--limit <n>',

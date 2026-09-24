@@ -296,6 +296,8 @@ ai-dossier evidence validate my-dossier.evidence.json
 
 Override the sidecar path with `--evidence <path>`, or skip attaching one (even if a sibling exists) with `--no-evidence`.
 
+`publish` also refuses (exit 1) if an entry from the previous version's sidecar is missing from the new one while its anchor still appears in the body — pass `--drop-evidence <anchor>` (repeatable) to acknowledge an intentional drop. See [`docs/guides/authoring-evidence.md`](../docs/guides/authoring-evidence.md) §8.
+
 ---
 
 ## Skills
