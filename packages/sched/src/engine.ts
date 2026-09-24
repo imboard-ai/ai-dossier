@@ -2674,6 +2674,10 @@ function reconcileSlots(
     // synthetic default truth below would read a batch's live agent as
     // ground-truth-unreachable and kill it out from under the batch pass.
     if (issueOfUnit(unit) === null) continue;
+    // #776: `pollUnits` polls every unflagged `recovering` cycle slot, so the
+    // `closed: false` default below only ever reaches one the poll snapshot
+    // did not see (the single engine lease makes that a same-tick race, not a
+    // steady state) — the stale-closed guard then catches it next tick.
     const truth: UnitTruth = polled.get(unit) ?? {
       reachable: true,
       milestone: null,
