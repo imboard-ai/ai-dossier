@@ -3,6 +3,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import {
   type DossierFrontmatter,
+  type EvidenceEntry,
   evidenceMatchesDossier,
   parseDossierContent,
   parseEvidence,
@@ -13,6 +14,24 @@ import type { Command } from 'commander';
 import { siblingEvidencePath } from '../helpers';
 import { getClientForRegistry } from '../registry-client';
 import { handleRegistryWriteError, requireWriteAuth } from '../write-auth';
+
+/**
+ * Anchors from the PREVIOUS published version's evidence sidecar whose section still exists
+ * in the new dossier body, but whose entry is missing from the new sidecar being published.
+ * Silent by construction for an anchor whose section was removed — it's excluded before the
+ * "missing from the new sidecar" check even runs. See #817 (batch-integrate 1.4.0: 5 of 7
+ * evidence entries silently dropped even though their sections survived, restored in 1.5.1).
+ */
+export function findDroppedEvidenceAnchors(
+  previousEntries: EvidenceEntry[],
+  newBody: string,
+  newEntries: EvidenceEntry[]
+): string[] {
+  const newAnchors = new Set(newEntries.map((entry) => entry.anchor));
+  return previousEntries
+    .filter((entry) => newBody.includes(entry.anchor) && !newAnchors.has(entry.anchor))
+    .map((entry) => entry.anchor);
+}
 
 /**
  * Resolve, read, and validate the evidence sidecar to attach to a publish — the sibling
@@ -77,6 +96,12 @@ export function registerPublishCommand(program: Command): void {
       'Attach an evidence sidecar (defaults to a sibling .evidence.json)'
     )
     .option('--no-evidence', 'Skip attaching evidence, even if a sibling sidecar exists')
+    .option(
+      '--drop-evidence <anchor>',
+      'Acknowledge intentionally dropping the evidence entry for this anchor (repeatable)',
+      (value: string, previous: string[]) => [...previous, value],
+      [] as string[]
+    )
     .option('--json', 'Output as JSON')
     .action(
       async (
@@ -87,6 +112,7 @@ export function registerPublishCommand(program: Command): void {
           namespace?: string;
           registry?: string;
           evidence?: string | false;
+          dropEvidence: string[];
           json?: boolean;
         }
       ) => {
@@ -199,6 +225,67 @@ export function registerPublishCommand(program: Command): void {
           }
         } catch {
           // Ignore — dossier doesn't exist or check failed
+        }
+
+        // Evidence-regression check (#817): compare the sidecar about to be published
+        // against the PREVIOUS published version's sidecar. Never blocks the publish when
+        // the previous sidecar can't be established — first publish, no prior evidence, or
+        // a fetch failure (offline) all skip with an informational note instead.
+        //
+        // The fetch/parse of the PREVIOUS sidecar is the only part wrapped in try/catch —
+        // `droppedAnchors` stays `null` (meaning "nothing to check") on any failure there.
+        // The block-or-proceed decision below runs outside that try, so `process.exit(1)`
+        // is never caught by the fetch-failure handler.
+        let droppedAnchors: string[] | null = null;
+        if (existingVersion) {
+          try {
+            const previous = await client.getDossierEvidence(fullPath, existingVersion);
+            const previousRecord = parseEvidence(previous.evidence);
+            const newEntries = evidenceContent ? parseEvidence(evidenceContent).entries : [];
+            droppedAnchors = findDroppedEvidenceAnchors(previousRecord.entries, body, newEntries);
+          } catch (err: unknown) {
+            if ((err as { statusCode?: number }).statusCode === 404) {
+              if (!options.json) {
+                console.log(
+                  `\nℹ️  No evidence recorded for ${fullPath}@${existingVersion} — skipping evidence-regression check\n`
+                );
+              }
+            } else if (!options.json) {
+              console.log(
+                `\nℹ️  Could not establish previous evidence for ${fullPath}@${existingVersion} (${(err as Error).message}) — skipping evidence-regression check\n`
+              );
+            }
+          }
+        }
+
+        if (droppedAnchors && droppedAnchors.length > 0) {
+          const dropOverrides = new Set(options.dropEvidence);
+          const blockedAnchors = droppedAnchors.filter((anchor) => !dropOverrides.has(anchor));
+          const acknowledgedAnchors = droppedAnchors.filter((anchor) => dropOverrides.has(anchor));
+
+          if (blockedAnchors.length > 0) {
+            const noun = blockedAnchors.length === 1 ? 'entry' : 'entries';
+            console.error(
+              `\n❌ Evidence ${noun} dropped for anchor(s) still present in the new dossier:`
+            );
+            for (const anchor of blockedAnchors) {
+              console.error(`   - "${anchor}"`);
+            }
+            console.error(
+              `\n   These anchors have evidence in ${fullPath}@${existingVersion} but not in this publish's sidecar, even though their sections remain in the body.`
+            );
+            console.error(
+              '   Re-add the entries (ai-dossier evidence add), or pass --drop-evidence "<anchor>" once per anchor to confirm the drop is intentional.\n'
+            );
+            process.exit(1);
+            return;
+          }
+
+          if (acknowledgedAnchors.length > 0 && !options.json) {
+            console.log(
+              `\nℹ️  Dropping evidence for ${acknowledgedAnchors.length} anchor(s) as confirmed via --drop-evidence: ${acknowledgedAnchors.map((anchor) => `"${anchor}"`).join(', ')}\n`
+            );
+          }
         }
 
         if (!options.yes) {

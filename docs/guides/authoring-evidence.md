@@ -207,6 +207,38 @@ thing it explains. If your edit changes the rule's substance (not just
 wording), record new evidence for it rather than leaving the stale
 rationale attached to text it no longer describes.
 
+## 8. Publish refuses a silent evidence regression
+
+`ai-dossier publish` compares the sidecar it's about to publish against the
+PREVIOUS published version's sidecar (fetched from the registry). For every
+entry in that previous sidecar whose `anchor` still appears in the NEW
+dossier body but has no matching entry in the NEW sidecar, publish refuses
+(exit 1) and names the anchor — it does not merely warn. It stays silent
+when the anchor's own section was removed from the body; that's a normal
+edit, not a drop.
+
+This exists because of a real incident: `batch-integrate` 1.4.0 published
+with 3 evidence entries, down from 7 in 1.3.3, while 5 of those entries'
+sections still existed in the document. Nothing at publish time noticed;
+the entries were restored by hand in 1.5.1. Refuse-with-override matches
+every other "you're about to lose something" guard in this CLI (`keys
+--force`, `pull --force`, `evidence add --force`, `sign --force`) — a
+warning that scrolls past a non-interactive `-y` publish would not have
+caught the actual incident.
+
+If a drop is intentional (the entry's rationale no longer applies even
+though the section survives, or you're deliberately thinning evidence),
+acknowledge it explicitly per anchor:
+
+```bash
+ai-dossier publish <name>.ds.md --drop-evidence "<anchor>"
+```
+
+Repeat `--drop-evidence` once per anchor being dropped. The check never
+blocks a publish it can't evaluate — a first publish (no previous version),
+no evidence recorded for the previous version, or a failed fetch (offline)
+all print an informational note and let the publish proceed.
+
 ## Step text for publish-dossier
 
 The `imboard-ai/meta/publish-dossier` dossier lives in the registry, not in
