@@ -685,6 +685,9 @@ member got the light, relevance-scoped review). `review=full` is how a risk-floo
   tier its manifest asked for; the recorded `QueueEntry.tier` stays as written. Only the
   tier moves: the batch's dispatch profile still resolves the executor for that tier, so the
   batch stays one agent family. The member's `spawned` journal event carries `review: "full"`.
+  The floor follows the member: its bounded fix attempt dispatches at `strong` (not
+  `FIX_ATTEMPT_TIER`), and an eviction/abandon requeue to full-cycle rewrites its `tier` to the
+  floored value (and `review` back to `light`, a slot-only concept) so the full cycle keeps it.
 - **Prompt** — `buildMemberPrompt` substitutes a `{review}` placeholder; a `review=full`
   member whose template lacks one gets `FULL_REVIEW_MEMBER_DIRECTIVE` appended (full-cycle-
   grade review before handover). A `light` member's prompt is byte-identical to before.

@@ -9,7 +9,7 @@
  * non-terminal issue status rather than repeated per row.
  */
 
-import { DISPATCH_PROFILE_RE } from './dispatch';
+import { DISPATCH_PROFILE_RE, memberDispatchTier } from './dispatch';
 import { issueOfUnit } from './journal';
 import {
   type BatchEntry,
@@ -1414,8 +1414,16 @@ export function requeueMember(
   // this one (`requeueMember` reuses the entry object rather than creating a
   // fresh one, so without this reset a stale marker would silently carry
   // over).
+  // #771: a review=full member leaving for a full cycle keeps its strong
+  // floor as a real tier (the full-cycle engine reads `entry.tier` directly)
+  // and drops `review`, which only means something on a slot member.
+  const reviewPatch =
+    target.mode === 'full' && entry.review === 'full'
+      ? { tier: memberDispatchTier(entry), review: 'light' as const }
+      : {};
   const patch = {
     ...target,
+    ...reviewPatch,
     reason,
     ...CLEARED_ENTRY_DEDUP_MARKERS,
     ...extra,

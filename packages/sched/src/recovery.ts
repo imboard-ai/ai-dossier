@@ -44,6 +44,7 @@ import { type BisectOutcome, runAttributionBisect } from './bisect';
 import {
   buildFixPrompt,
   journalCmdModelFields,
+  memberDispatchTier,
   type ResolvedDispatch,
   resolveDispatch,
   resolveTierSpawn,
@@ -55,6 +56,7 @@ import {
   createBatch,
   duplicateEvictionDetail,
   findBatch,
+  findEntry,
   isPreservedMember,
   patchBatch,
   requeueMember,
@@ -457,7 +459,11 @@ export function beginFixAttempt(
     return { state, dispatch: null };
   }
 
-  const tier = FIX_ATTEMPT_TIER;
+  // #771: a review=full member's fix attempt keeps the member's strong floor.
+  const tier = memberDispatchTier({
+    tier: FIX_ATTEMPT_TIER,
+    review: findEntry(state, issue)?.review,
+  });
   // `max_slots` is irrelevant here — only the command/prompt/tier-model parts
   // of the resolved dispatch are used — but SchedConfig requires it.
   // #707: a batch with a recorded dispatch profile fixes through the SAME
