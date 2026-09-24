@@ -16,6 +16,9 @@
 //      agent CLI, and stall/escalation/unverified-exit counts. Local to
 //      whichever host ran the dispatch (documented per-host gap: a run
 //      dispatched from a different machine has no events.jsonl entry here).
+//   4. Merged `batch/*` PRs (`gh pr list`) — the members a batch actually shipped, for the
+//      Batch amortization section (#775): issues shipped per gate run, per batch and
+//      against full-cycle.
 //
 // Deterministic — no LLM call anywhere in this script.
 //
@@ -37,6 +40,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  buildBatchRunLogEntries,
   JOURNAL_FILE,
   readJsonl,
   sanitizeSlug,
@@ -342,6 +346,7 @@ export function joinRepoRows({
       reviewEscalated: escalated,
       acMet,
       acTotal,
+      ciFixAttempts: ciFixAttemptsOf(milestonesByIssue.get(issue) ?? []),
       // Wall-clock, from the milestone `at=` stamps -- distinct from `apiMinutes`, which is
       // the agent's billed session time. A run that stalled overnight shows the gap here.
       wallClockMinutes: run.total_seconds != null ? run.total_seconds / 60 : null,
@@ -778,6 +783,9 @@ export function renderMarkdown(scorecard, { isFirstSnapshot = true } = {}) {
     );
   }
 
+  const amortizationLines = renderBatchAmortization(scorecard.batchAmortization);
+  if (amortizationLines.length > 0) lines.push('', ...amortizationLines);
+
   lines.push(
     '',
     '## Wall-clock per phase (all models)',
@@ -982,6 +990,410 @@ function shortRepo(repo) {
 }
 
 // ------------------------------------------------------------------
+// Batch amortization (#775, parent #770 P6). Batching exists to pay the CI gate ONCE for
+// N issues, so the number that matters per batch is issues shipped per gate run. Pure —
+// `main()` passes already-read trails, merged batch PRs, and per-host journal/log readers.
+// ------------------------------------------------------------------
+
+/** A scheduler-formed batch id (`b-20260920-01`, a halved dissolve's `b-20260920-01-a`). */
+export const SCHED_BATCH_ID_RE = /^b-\d{8}-\d{2,}(?:-[a-z])*$/;
+
+/**
+ * `batch/b-20260920-01-20260920` → `b-20260920-01`; `batch/m3-20260908` → `m3` (a manual
+ * batch-cycle PR). Null for a non-batch branch and for a MEMBER branch
+ * (`batch/<id>-m<n>-<issue>`), which is never a batch PR's head.
+ */
+export function batchIdFromBranch(branch) {
+  if (typeof branch !== 'string' || !branch.startsWith('batch/')) return null;
+  const rest = branch.slice('batch/'.length);
+  if (/^b-\d{8}-\d{2,}(?:-[a-z])*-m\d+-\d+$/.test(rest)) return null;
+  const id = rest.replace(/-\d{8}$/, '');
+  return id === '' ? null : id;
+}
+
+/** `4036,4037` → `[4036, 4037]`; null for anything that is not a comma list of issue numbers. */
+function issueListOf(value) {
+  if (typeof value !== 'string' || value === '') return null;
+  const parts = value.split(',');
+  if (!parts.every((p) => /^\d+$/.test(p))) return null;
+  return parts.map(Number);
+}
+
+/**
+ * One record per batch from its ANCHOR trail — the batch line (`batch-setup` →
+ * `batch-report`) the scheduler posts on the anchor issue (RFC-0001 D.2).
+ *
+ * Keyed by batch id: `batch=` where a milestone carries it, else derived from
+ * `batch-setup`'s `branch=`. `members=` is read only from `batch-review`/`batch-ship`,
+ * where it is the member LIST — `batch-report`'s `members=` is a COUNT, and a
+ * single-member list is indistinguishable from a count.
+ */
+export function collectBatchAnchors(trails) {
+  const byId = new Map();
+  for (const { issue, milestones } of trails) {
+    const batchLine = (milestones ?? []).filter((m) => m.phase?.startsWith('batch-'));
+    if (batchLine.length === 0) continue;
+    const byRun = new Map();
+    for (const m of batchLine) {
+      const run = m.keys?.run ?? m.run ?? '';
+      const list = byRun.get(run) ?? [];
+      list.push(m);
+      byRun.set(run, list);
+    }
+    for (const list of byRun.values()) {
+      const id =
+        list.map((m) => m.keys?.batch).find((v) => typeof v === 'string' && v !== '') ??
+        list
+          .filter((m) => m.phase === 'batch-setup')
+          .map((m) => batchIdFromBranch(m.keys?.branch))
+          .find((v) => v !== null) ??
+        null;
+      if (id === null) continue;
+      const record = byId.get(id) ?? {
+        batch: id,
+        anchor: issue,
+        setupAt: null,
+        members: new Set(),
+        requeued: new Set(),
+        dissolved: false,
+        blockedReason: null,
+        pr: null,
+        ciFixAttempts: null,
+      };
+      for (const m of list) {
+        const keys = m.keys ?? {};
+        if (m.phase === 'batch-setup' && typeof keys.at === 'string') {
+          if (record.setupAt === null || keys.at < record.setupAt) record.setupAt = keys.at;
+        }
+        if (m.phase === 'batch-review' || m.phase === 'batch-ship') {
+          for (const n of issueListOf(keys.members) ?? []) record.members.add(n);
+        }
+        for (const n of issueListOf(keys.requeued) ?? []) record.requeued.add(n);
+        if (keys.dissolved === 'true') record.dissolved = true;
+        if (m.status === 'blocked') record.blockedReason = keys.reason ?? 'blocked';
+        if (/^\d+$/.test(keys.pr ?? '')) record.pr = Number(keys.pr);
+        if (m.phase === 'batch-ship' && /^\d+$/.test(keys.ci_fix_attempts ?? '')) {
+          record.ciFixAttempts = Number(keys.ci_fix_attempts);
+        }
+      }
+      byId.set(id, record);
+    }
+  }
+  return byId;
+}
+
+/** `ci_fix_attempts=` from a full-cycle run's last `ship` milestone, or null. */
+function ciFixAttemptsOf(milestones) {
+  const ships = milestones.filter(
+    (m) => m.phase === 'ship' && /^\d+$/.test(m.keys?.ci_fix_attempts ?? '')
+  );
+  return ships.length > 0 ? Number(ships.at(-1).keys.ci_fix_attempts) : null;
+}
+
+const minutesBetween = (fromIso, toIso) => {
+  const ms = Date.parse(toIso) - Date.parse(fromIso);
+  return Number.isFinite(ms) && ms >= 0 ? ms / 60000 : null;
+};
+
+/**
+ * One row per batch in the window, joining its anchor trail, its merged PR (whose
+ * closing references are the members that actually SHIPPED — a batch blocked at
+ * `batch-validate` and recovered by hand never posts `batch-ship`, so the trail alone
+ * reads it as unshipped), and — on the host that ran it — its journal and dispatch logs.
+ *
+ * A gate run is one CI gate on one PR: `1 + ci_fix_attempts` for a shipped batch, 0 for
+ * one that never opened a merged PR. `journalOf`/`tokensOf` return null off-host.
+ */
+export function buildBatchRows({
+  repo,
+  anchors,
+  prs,
+  windowStartIso,
+  journalOf = () => null,
+  tokensOf = () => null,
+}) {
+  // A manual batch-cycle id can be reused on another day (`batch/m3-20260908`,
+  // `batch/m3-20260915`); key such PRs by their full head so neither PR's shipped issues
+  // are lost. Scheduler ids are unique per day, so they keep the id anchors are keyed by.
+  const idCounts = new Map();
+  for (const pr of prs) {
+    const id = batchIdFromBranch(pr.headRefName);
+    if (id !== null) idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
+  }
+  const prById = new Map();
+  for (const pr of prs) {
+    const id = batchIdFromBranch(pr.headRefName);
+    if (id === null) continue;
+    const key = idCounts.get(id) > 1 ? pr.headRefName.slice('batch/'.length) : id;
+    if (!prById.has(key)) prById.set(key, pr);
+  }
+  const ids = new Set([
+    ...[...anchors.values()]
+      .filter((a) => a.setupAt === null || a.setupAt >= windowStartIso || prById.has(a.batch))
+      .map((a) => a.batch),
+    ...prById.keys(),
+  ]);
+
+  const rows = [];
+  for (const id of ids) {
+    const anchor = anchors.get(id) ?? null;
+    const pr = prById.get(id) ?? null;
+    const journal = journalOf(id);
+    const byModel = tokensOf(id);
+    const shippedIssues = (pr?.closingIssuesReferences ?? [])
+      .map((ref) => ref?.number)
+      .filter((n) => typeof n === 'number');
+    const enqueued = new Set([
+      ...(anchor?.members ?? []),
+      ...(anchor?.requeued ?? []),
+      ...(journal?.members ?? []),
+      ...shippedIssues,
+    ]);
+    const evicted = new Set([
+      ...(journal?.evicted ?? []),
+      ...(anchor?.dissolved ? (anchor?.requeued ?? []) : []),
+    ]);
+    const shipped = pr !== null;
+    const gateRuns = shipped ? 1 + (anchor?.ciFixAttempts ?? 0) : 0;
+    const tokenTerms = (byModel ?? [])
+      .map((m) => m.billable_tokens)
+      .filter((v) => typeof v === 'number');
+    const costTerms = (byModel ?? [])
+      .map((m) => m.total_cost_usd)
+      .filter((v) => typeof v === 'number');
+    const outcome = shipped
+      ? 'shipped'
+      : anchor?.dissolved
+        ? 'dissolved'
+        : anchor?.blockedReason
+          ? 'blocked'
+          : 'open';
+    rows.push({
+      repo,
+      batch: id,
+      kind: SCHED_BATCH_ID_RE.test(id) || anchor !== null ? 'sched' : 'manual',
+      anchor: anchor?.anchor ?? null,
+      outcome,
+      blockedReason: shipped ? null : (anchor?.blockedReason ?? null),
+      pr: pr?.number ?? anchor?.pr ?? null,
+      membersEnqueued: enqueued.size > 0 ? enqueued.size : null,
+      membersShipped: shipped ? shippedIssues.length : 0,
+      shippedIssues,
+      // Every issue the batch touched — excluded from the full-cycle comparison row.
+      memberIssues: [...enqueued].sort((a, b) => a - b),
+      evictions: evicted.size,
+      gateRuns,
+      gateWallClockMinutes: shipped ? minutesBetween(pr.createdAt, pr.mergedAt) : null,
+      wallClockMinutes: shipped
+        ? minutesBetween(anchor?.setupAt ?? pr.createdAt, pr.mergedAt)
+        : null,
+      billableTokens: tokenTerms.length > 0 ? sum(tokenTerms) : null,
+      costUsd: costTerms.length > 0 ? sum(costTerms) : null,
+      byModel: byModel ?? null,
+    });
+  }
+  return rows.sort((a, b) => a.repo.localeCompare(b.repo) || a.batch.localeCompare(b.batch));
+}
+
+/** Per-kind rollup of batch rows: the "issues per gate run" headline and its inputs. */
+function batchSummaryOf(repo, kind, rows) {
+  const shipped = rows.filter((r) => r.outcome === 'shipped');
+  const sized = rows.filter((r) => r.membersEnqueued !== null);
+  const membersShipped = sum(shipped.map((r) => r.membersShipped));
+  const gateRuns = sum(rows.map((r) => r.gateRuns));
+  const perShipped = (pick) => {
+    const eligible = shipped.filter((r) => pick(r) != null && r.membersShipped > 0);
+    const issues = sum(eligible.map((r) => r.membersShipped));
+    return issues > 0
+      ? { value: sum(eligible.map(pick)) / issues, samples: eligible.length }
+      : null;
+  };
+  const tokens = perShipped((r) => r.billableTokens);
+  const cost = perShipped((r) => r.costUsd);
+  const wall = perShipped((r) => r.wallClockMinutes);
+  const gateWall = shipped.map((r) => r.gateWallClockMinutes).filter((v) => v != null);
+  return {
+    repo,
+    kind,
+    batches: rows.length,
+    shippedBatches: shipped.length,
+    dissolvedBatches: rows.filter((r) => r.outcome === 'dissolved').length,
+    blockedBatches: rows.filter((r) => r.outcome === 'blocked').length,
+    singleMemberBatches: sized.filter((r) => r.membersEnqueued === 1).length,
+    singleMemberShare:
+      sized.length > 0 ? sized.filter((r) => r.membersEnqueued === 1).length / sized.length : null,
+    membersEnqueued: sized.length > 0 ? sum(sized.map((r) => r.membersEnqueued)) : null,
+    membersShipped,
+    evictions: sum(rows.map((r) => r.evictions)),
+    gateRuns,
+    issuesPerGateRun: gateRuns > 0 ? membersShipped / gateRuns : null,
+    medianGateWallClockMinutes: median(gateWall),
+    wallClockPerShippedIssueMinutes: wall?.value ?? null,
+    billableTokensPerShippedIssue: tokens?.value ?? null,
+    tokenSamples: tokens?.samples ?? 0,
+    costPerShippedIssueUsd: cost?.value ?? null,
+    costSamples: cost?.samples ?? 0,
+  };
+}
+
+/**
+ * The full-cycle comparison row for one repo: every delivered, non-batch issue is one
+ * PR, so it pays `1 + ci_fix_attempts` gate runs for exactly one shipped issue.
+ */
+function fullCycleSummaryOf(repo, rows) {
+  const delivered = rows.filter((r) => r.delivered);
+  const gateRuns = sum(delivered.map((r) => 1 + (r.ciFixAttempts ?? 0)));
+  const withTokens = delivered.filter((r) => r.inputTokens != null && r.outputTokens != null);
+  const billable = (r) =>
+    r.inputTokens + r.outputTokens + (r.cacheCreationTokens ?? 0) + (r.cacheReadTokens ?? 0);
+  const costs = delivered.map((r) => r.costUsd).filter((v) => v != null);
+  const wall = delivered.map((r) => r.wallClockMinutes).filter((v) => v != null);
+  return {
+    repo,
+    kind: 'full-cycle',
+    batches: null,
+    shippedBatches: null,
+    dissolvedBatches: null,
+    blockedBatches: null,
+    singleMemberBatches: null,
+    singleMemberShare: null,
+    membersEnqueued: rows.length,
+    membersShipped: delivered.length,
+    evictions: null,
+    gateRuns,
+    issuesPerGateRun: gateRuns > 0 ? delivered.length / gateRuns : null,
+    medianGateWallClockMinutes: null,
+    wallClockPerShippedIssueMinutes: wall.length > 0 ? sum(wall) / wall.length : null,
+    billableTokensPerShippedIssue:
+      withTokens.length > 0 ? sum(withTokens.map(billable)) / withTokens.length : null,
+    tokenSamples: withTokens.length,
+    costPerShippedIssueUsd: costs.length > 0 ? sum(costs) / costs.length : null,
+    costSamples: costs.length,
+  };
+}
+
+/**
+ * Batch amortization for the whole scorecard: per-batch rows plus, per repo, one summary
+ * row each for scheduler batches, manual batch-cycle PRs, and full-cycle runs (every
+ * scored issue that is neither a batch member nor a batch anchor).
+ */
+export function aggregateBatchAmortization(batchRows, issueRows) {
+  const repos = [
+    ...new Set([...batchRows.map((r) => r.repo), ...issueRows.map((r) => r.repo)]),
+  ].sort();
+  const summary = [];
+  for (const repo of repos) {
+    const repoBatches = batchRows.filter((r) => r.repo === repo);
+    const batchIssues = new Set(
+      repoBatches.flatMap((r) => [...r.memberIssues, ...(r.anchor !== null ? [r.anchor] : [])])
+    );
+    for (const kind of ['sched', 'manual']) {
+      const rows = repoBatches.filter((r) => r.kind === kind);
+      if (rows.length > 0) summary.push(batchSummaryOf(repo, kind, rows));
+    }
+    const fullCycle = issueRows.filter((r) => r.repo === repo && !batchIssues.has(r.issue));
+    if (fullCycle.length > 0) summary.push(fullCycleSummaryOf(repo, fullCycle));
+  }
+  return { summary, batches: batchRows };
+}
+
+function fmtMinOrNa(value) {
+  return value == null ? 'N/A' : `${value.toFixed(0)} min`;
+}
+function fmtRatioOrNa(value) {
+  return value == null ? 'N/A' : value.toFixed(2);
+}
+function fmtTokensOrNa(value, samples) {
+  if (value == null) return 'N/A';
+  const text =
+    value >= 1e6
+      ? `${(value / 1e6).toFixed(1)}M`
+      : value >= 1e3
+        ? `${(value / 1e3).toFixed(0)}k`
+        : `${Math.round(value)}`;
+  return samples == null ? text : `${text} (n=${samples})`;
+}
+
+const BATCH_KIND_LABEL = {
+  sched: 'scheduler batches',
+  manual: 'manual batch-cycle PRs',
+  'full-cycle': 'full-cycle (1 PR per issue)',
+};
+
+/** The "Batch amortization" markdown section (#775). Empty when there is nothing to say. */
+export function renderBatchAmortization(amortization) {
+  if (!amortization || amortization.summary.length === 0) return [];
+  const dash = (v) => (v == null ? '—' : String(v));
+  const lines = [
+    '## Batch amortization',
+    '',
+    'Batching exists to pay the CI gate **once for N issues** (#770), so the headline is',
+    '**issues shipped per gate run**. A gate run is one CI gate on one PR: `1 + ci_fix_attempts`',
+    'for a merged PR (batch or full-cycle alike), 0 for a batch that never merged. Shipped',
+    "members are the merged batch PR's closing references — a batch blocked at `batch-validate`",
+    'and recovered by hand never posts `batch-ship`, so its trail alone reads it as unshipped.',
+    '',
+    '| Repo | Kind | Batches | Single-member | Shipped / dissolved / blocked | Enqueued | Shipped issues | Evictions | Gate runs | **Issues/gate run** | Median gate wall-clock | Wall-clock/shipped issue | Billable tokens/shipped issue | Cost/shipped issue |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+  ];
+  for (const s of amortization.summary) {
+    const outcomes =
+      s.batches == null ? '—' : `${s.shippedBatches} / ${s.dissolvedBatches} / ${s.blockedBatches}`;
+    const single =
+      s.singleMemberShare == null
+        ? '—'
+        : `${s.singleMemberBatches} (${fmtPct(s.singleMemberShare)})`;
+    lines.push(
+      `| ${safeCell(s.repo)} | ${BATCH_KIND_LABEL[s.kind] ?? s.kind} | ${dash(s.batches)} | ${single} | ${outcomes} | ${dash(s.membersEnqueued)} | ${s.membersShipped} | ${dash(s.evictions)} | ${s.gateRuns} | **${fmtRatioOrNa(s.issuesPerGateRun)}** | ${fmtMinOrNa(s.medianGateWallClockMinutes)} | ${fmtMinOrNa(s.wallClockPerShippedIssueMinutes)} | ${fmtTokensOrNa(s.billableTokensPerShippedIssue, s.tokenSamples)} | ${fmtUsd(s.costPerShippedIssueUsd, s.costSamples)} |`
+    );
+  }
+  lines.push(
+    '',
+    '### Per batch',
+    '',
+    '| Batch | Repo | Kind | Anchor | Outcome | Enqueued | Shipped | Evictions | Gate runs | PR | Gate wall-clock | Tokens by model |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|'
+  );
+  for (const b of amortization.batches) {
+    const models =
+      b.byModel == null
+        ? 'N/A (not on this host)'
+        : b.byModel.length === 0
+          ? 'none recorded'
+          : b.byModel
+              .map(
+                (m) =>
+                  `\`${safeCell(m.model ?? UNKNOWN_MODEL_LABEL)}\` ${fmtTokensOrNa(m.billable_tokens)}`
+              )
+              .join(', ');
+    const outcome = b.blockedReason ? `${b.outcome} (${safeCell(b.blockedReason)})` : b.outcome;
+    lines.push(
+      `| \`${safeCell(b.batch)}\` | ${safeCell(b.repo)} | ${b.kind} | ${b.anchor == null ? '—' : `#${b.anchor}`} | ${outcome} | ${dash(b.membersEnqueued)} | ${b.membersShipped} | ${b.evictions} | ${b.gateRuns} | ${b.pr == null ? '—' : `#${b.pr}`} | ${fmtMinOrNa(b.gateWallClockMinutes)} | ${models} |`
+    );
+  }
+  lines.push(
+    '',
+    '- **Prep tokens are not in these figures.** `batch-issues-preparation` (the classifier',
+    '  agents that pick members) runs in the operator session, not a scheduler dispatch, and',
+    '  nothing ties its tokens to a batch id yet — so cost/tokens per shipped issue here is',
+    '  member + tail/report dispatches only and understates a batch by its prep spend (#796).',
+    '- **A dissolved batch counts every requeued member as evicted** — the dissolve requeues',
+    '  all unshipped members as full-cycle runs, so none of them shipped with the batch.',
+    '- **A hand-recovered batch PR records no `ci_fix_attempts`** and counts as one gate run.',
+    '- **`Wall-clock/shipped issue` is amortized throughput for batches, latency for full-cycle.**',
+    '  A batch row is Σ batch wall-clock ÷ Σ shipped issues (a 300-min 3-member batch reads 100',
+    '  min); the full-cycle row is the mean per-issue span. Batch token/cost figures include',
+    "  evicted members' dispatch spend, while full-cycle averages delivered issues only.",
+    '- **Tokens by model are per-host.** They come from `~/.dossier/sched/<slug>/runs/`',
+    '  (`ai-dossier sched stats --batch <id>` reads the same logs); a batch run elsewhere',
+    '  reads `N/A (not on this host)`, and a subscription-plan model is tokens without cost.',
+    '- **Full-cycle `Wall-clock/shipped issue` is the milestone span; batch is batch-setup →',
+    '  PR merge.** Gate wall-clock is PR open → merge, which includes CI and review waits.'
+  );
+  return lines;
+}
+
+// ------------------------------------------------------------------
 // I/O — everything below this line touches gh, the filesystem, or cli/dist.
 // Kept thin and injectable so `main()` is the only place tests need to fake.
 // ------------------------------------------------------------------
@@ -1017,6 +1429,48 @@ function ghIssueListWithComments(repo, since, execFile) {
   return JSON.parse(out);
 }
 
+/** Upper bound on merged batch PRs read per repo per window. */
+const GH_BATCH_PR_LIMIT = 200;
+
+/**
+ * Merged PRs whose head is a batch integration branch (`batch/<id>-YYYYMMDD`), merged in
+ * the window. Their closing references are the members that shipped (#775).
+ */
+function ghMergedBatchPrs(repo, since, execFile) {
+  let out;
+  try {
+    out = execFile(
+      'gh',
+      [
+        'pr',
+        'list',
+        '--repo',
+        repo,
+        '--state',
+        'merged',
+        '--search',
+        `head:batch/ merged:>=${since}`,
+        '--json',
+        'number,headRefName,createdAt,mergedAt,closingIssuesReferences',
+        '--limit',
+        String(GH_BATCH_PR_LIMIT),
+      ],
+      { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
+    );
+  } catch (err) {
+    throw new ScorecardError(`gh pr list failed for ${repo}: ${err.stderr || err.message}`);
+  }
+  const parsed = JSON.parse(out);
+  // Filter client-side too: the search qualifier is a prefix match on GitHub's side, and
+  // a fake/older gh may ignore it entirely.
+  return (Array.isArray(parsed) ? parsed : []).filter(
+    (pr) =>
+      typeof pr?.headRefName === 'string' &&
+      batchIdFromBranch(pr.headRefName) !== null &&
+      typeof pr.mergedAt === 'string'
+  );
+}
+
 /**
  * Per-issue cost recovered from `<sched state>/runs/*.log`, keyed by issue number.
  *
@@ -1047,6 +1501,49 @@ function readRunLogCosts(runLogDir) {
     if (aggregate) byIssue.set(issue, aggregate);
   }
   return byIssue;
+}
+
+/** One repo's batch rows: anchors from its trails, merged batch PRs, local journal + logs. */
+function batchRowsForRepo({
+  repo,
+  start,
+  trails,
+  events,
+  runLogDir,
+  execFile,
+  warnings,
+  summarizeBatchJournal,
+  tokensByModel,
+}) {
+  let batchPrs = [];
+  try {
+    batchPrs = ghMergedBatchPrs(repo, start, execFile);
+    if (batchPrs.length >= GH_BATCH_PR_LIMIT) {
+      warnings.push(
+        `${repo}: gh pr list hit the ${GH_BATCH_PR_LIMIT}-PR cap for merged batch PRs — batch amortization may be truncated.`
+      );
+    }
+  } catch (err) {
+    warnings.push(
+      `${repo}: merged batch PRs unavailable — ${err?.message ?? err}; batch amortization counts no shipped batches for this repo.`
+    );
+  }
+  const hasLogs = existsSync(runLogDir);
+  return buildBatchRows({
+    repo,
+    anchors: collectBatchAnchors(trails),
+    prs: batchPrs,
+    windowStartIso: `${start}T00:00:00Z`,
+    journalOf: (id) => {
+      const summary = summarizeBatchJournal(events, id);
+      return summary.members.length > 0 || summary.suiteFailures > 0 ? summary : null;
+    },
+    tokensOf: (id) => {
+      if (!hasLogs) return null;
+      const entries = buildBatchRunLogEntries(runLogDir, id);
+      return entries.length > 0 ? tokensByModel(entries) : null;
+    },
+  });
 }
 
 function loadCliDist(repoRoot, name, expected = []) {
@@ -1173,12 +1670,24 @@ export function main({
     'runstate-stats.js',
     ['canonicalModel', 'buildStatsReport', 'providerOf', 'DELIVERED_PHASES']
   );
-  const { buildSchedCostReport } = loadCliDist(repoRoot, 'sched-run-stats.js', [
-    'buildSchedCostReport',
-  ]);
+  const { buildSchedCostReport, summarizeBatchJournal, tokensByModel } = loadCliDist(
+    repoRoot,
+    'sched-run-stats.js',
+    ['buildSchedCostReport']
+  );
+  // Batch amortization is additive: a `cli/dist` built before #775 still yields the issue
+  // report, just without the section.
+  const batchHelpersAvailable =
+    typeof summarizeBatchJournal === 'function' && typeof tokensByModel === 'function';
 
   const allRows = [];
+  const allBatchRows = [];
   const warnings = [];
+  if (!batchHelpersAvailable) {
+    warnings.push(
+      `cli/dist/sched-run-stats.js predates #775 (no summarizeBatchJournal/tokensByModel) — batch amortization is skipped; run 'make build-all' to include it.`
+    );
+  }
   let anyRepoSucceeded = false;
 
   const runsJsonlPath = schedRunsLogPath(home);
@@ -1239,6 +1748,30 @@ export function main({
       });
       allRows.push(...rows);
       anyRepoSucceeded = true;
+
+      // Batch amortization (#775) is additive: a failure here narrows the report, it never
+      // drops the repo's issue rows above.
+      if (batchHelpersAvailable) {
+        try {
+          allBatchRows.push(
+            ...batchRowsForRepo({
+              repo,
+              start,
+              trails,
+              events,
+              runLogDir,
+              execFile,
+              warnings,
+              summarizeBatchJournal,
+              tokensByModel,
+            })
+          );
+        } catch (err) {
+          warnings.push(
+            `${repo}: batch amortization skipped — ${err?.message ?? err}; the issue rows above are unaffected.`
+          );
+        }
+      }
       const recovered = rows.filter((r) => r.costSource === 'agent-log').length;
       log(
         `scorecard: ${repo} — ${issuesWithComments.length} issue(s) read, ${rows.length} scored` +
@@ -1299,6 +1832,7 @@ export function main({
     }),
     previous
   );
+  scorecard.batchAmortization = aggregateBatchAmortization(allBatchRows, allRows);
   scorecard.warnings = warnings;
 
   // An empty result is indistinguishable from a healthy one downstream: `gh` exits 0 with

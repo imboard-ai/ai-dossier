@@ -6,9 +6,13 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   aggregateAgentRunLog,
+  aggregateBatchAmortization,
   aggregateScorecard,
   attachDeliveryRateDeltas,
+  batchIdFromBranch,
+  buildBatchRows,
   buildDispatchInfo,
+  collectBatchAnchors,
   issueFromRunLogName,
   joinRepoRows,
   main,
@@ -16,6 +20,7 @@ import {
   parseArgs,
   pickCanonicalRun,
   projectSlug,
+  renderBatchAmortization,
   renderDigest,
   renderJson,
   renderMarkdown,
@@ -1559,5 +1564,385 @@ describe('renderDigest — every regressing model, not just the worst (#566 AC4)
   it('ignores a drop that did not clear the threshold', () => {
     const shallow = { windowEnd: '2026-08-26', totals: [{ model: 'a', deliveryRate: 0.55 }] };
     expect(renderDigest(sc, shallow)).toContain('drop >10pt: none');
+  });
+});
+
+describe('batch amortization (#775)', () => {
+  const ms = (phase, status, keys) => ({ phase, status, keys: { phase, status, ...keys } });
+
+  it('derives a batch id from an integration branch, never from a member branch', () => {
+    expect(batchIdFromBranch('batch/b-20260920-01-20260920')).toBe('b-20260920-01');
+    expect(batchIdFromBranch('batch/m3-20260908')).toBe('m3');
+    expect(batchIdFromBranch('batch/b-20260920-01-m2-4360')).toBeNull();
+    expect(batchIdFromBranch('feat/775-x')).toBeNull();
+    expect(batchIdFromBranch(undefined)).toBeNull();
+  });
+
+  it('collects anchors from the batch line, reading members only as a list', () => {
+    const anchors = collectBatchAnchors([
+      {
+        issue: 4063,
+        milestones: [
+          ms('batch-setup', 'done', {
+            run: 'r-1',
+            at: '2026-09-06T18:27:51Z',
+            branch: 'batch/b-20260906-06-20260906',
+          }),
+          ms('batch-review', 'done', { run: 'r-1', batch: 'b-20260906-06', members: '4036,4037' }),
+          ms('batch-ship', 'awaiting-merge', {
+            run: 'r-1',
+            batch: 'b-20260906-06',
+            pr: '4069',
+            ci_fix_attempts: '1',
+            members: '4036,4037',
+          }),
+          // `members=` on batch-report is a COUNT — must not become issue #2.
+          ms('batch-report', 'done', { run: 'r-1', batch: 'b-20260906-06', members: '2' }),
+        ],
+      },
+      {
+        issue: 3993,
+        milestones: [
+          ms('batch-setup', 'done', {
+            run: 'r-2',
+            at: '2026-09-03T05:26:14Z',
+            branch: 'batch/b-20260903-01-20260903',
+          }),
+          ms('batch-validate', 'blocked', {
+            run: 'r-2',
+            reason: 'eviction-threshold',
+            dissolved: 'true',
+            requeued: '47,826',
+          }),
+        ],
+      },
+      { issue: 1, milestones: [ms('gate', 'done', { run: 'r-3' })] },
+    ]);
+    expect([...anchors.keys()].sort()).toEqual(['b-20260903-01', 'b-20260906-06']);
+    const shipped = anchors.get('b-20260906-06');
+    expect([...shipped.members]).toEqual([4036, 4037]);
+    expect(shipped).toMatchObject({ anchor: 4063, pr: 4069, ciFixAttempts: 1 });
+    const dissolved = anchors.get('b-20260903-01');
+    expect(dissolved).toMatchObject({ dissolved: true, blockedReason: 'eviction-threshold' });
+    expect([...dissolved.requeued]).toEqual([47, 826]);
+  });
+
+  function fixtureRows() {
+    const anchors = collectBatchAnchors([
+      {
+        issue: 100,
+        milestones: [
+          ms('batch-setup', 'done', {
+            run: 'r',
+            at: '2026-09-20T15:00:00Z',
+            branch: 'batch/b-20260920-01-20260920',
+          }),
+          ms('batch-validate', 'blocked', {
+            run: 'r',
+            reason: 'suite-unreadable',
+            dissolved: 'false',
+          }),
+        ],
+      },
+      {
+        issue: 200,
+        milestones: [
+          ms('batch-setup', 'done', {
+            run: 'r',
+            at: '2026-09-21T00:00:00Z',
+            branch: 'batch/b-20260921-01-20260921',
+          }),
+          ms('batch-validate', 'blocked', {
+            run: 'r',
+            reason: 'eviction-threshold',
+            dissolved: 'true',
+            requeued: '7',
+          }),
+        ],
+      },
+      {
+        issue: 300,
+        milestones: [
+          ms('batch-setup', 'done', {
+            run: 'r',
+            at: '2026-09-22T00:00:00Z',
+            branch: 'batch/b-20260922-01-20260922',
+          }),
+        ],
+      },
+    ]);
+    const prs = [
+      // Blocked at validate, recovered by hand: the PR is the only proof it shipped.
+      {
+        number: 4364,
+        headRefName: 'batch/b-20260920-01-20260920',
+        createdAt: '2026-09-20T19:00:00Z',
+        mergedAt: '2026-09-20T19:12:00Z',
+        closingIssuesReferences: [{ number: 11 }, { number: 12 }, { number: 13 }],
+      },
+      {
+        number: 4125,
+        headRefName: 'batch/m2-20260908',
+        createdAt: '2026-09-08T07:00:00Z',
+        mergedAt: '2026-09-08T07:30:00Z',
+        closingIssuesReferences: [1, 2, 3, 4, 5].map((number) => ({ number })),
+      },
+    ];
+    return buildBatchRows({
+      repo: 'o/r',
+      anchors,
+      prs,
+      windowStartIso: '2026-09-01T00:00:00Z',
+      journalOf: (id) =>
+        id === 'b-20260920-01'
+          ? { members: [11, 12, 13], landed: [11, 13], evicted: [12], suiteFailures: 1 }
+          : null,
+      tokensOf: (id) =>
+        id === 'b-20260920-01'
+          ? [
+              {
+                model: 'openai/gpt-5.6-luna',
+                runs: 3,
+                billable_tokens: 3_000_000,
+                total_cost_usd: null,
+              },
+            ]
+          : null,
+    });
+  }
+
+  it('joins anchors, merged PRs, journal and per-model tokens into per-batch rows', () => {
+    const rows = fixtureRows();
+    const byId = Object.fromEntries(rows.map((r) => [r.batch, r]));
+    expect(byId['b-20260920-01']).toMatchObject({
+      kind: 'sched',
+      anchor: 100,
+      outcome: 'shipped',
+      blockedReason: null,
+      pr: 4364,
+      membersEnqueued: 3,
+      membersShipped: 3,
+      evictions: 1,
+      gateRuns: 1,
+      gateWallClockMinutes: 12,
+      billableTokens: 3_000_000,
+    });
+    // AC2: an opencode member's model is attributed, not null.
+    expect(byId['b-20260920-01'].byModel[0].model).toBe('openai/gpt-5.6-luna');
+    expect(byId['b-20260921-01']).toMatchObject({
+      outcome: 'dissolved',
+      membersEnqueued: 1,
+      membersShipped: 0,
+      evictions: 1,
+      gateRuns: 0,
+    });
+    expect(byId['b-20260922-01']).toMatchObject({ outcome: 'open', membersEnqueued: null });
+    expect(byId.m2).toMatchObject({ kind: 'manual', anchor: null, membersShipped: 5 });
+  });
+
+  it('rolls up issues per gate run per kind, against a full-cycle row', () => {
+    const issueRows = [
+      { repo: 'o/r', issue: 11, delivered: true, ciFixAttempts: 0 }, // shipped via batch — excluded
+      { repo: 'o/r', issue: 100, delivered: false }, // the anchor — excluded
+      {
+        repo: 'o/r',
+        issue: 50,
+        delivered: true,
+        ciFixAttempts: 1,
+        costUsd: 4,
+        wallClockMinutes: 60,
+        inputTokens: 10,
+        outputTokens: 10,
+      },
+      {
+        repo: 'o/r',
+        issue: 51,
+        delivered: true,
+        ciFixAttempts: null,
+        costUsd: 2,
+        wallClockMinutes: 30,
+        inputTokens: 5,
+        outputTokens: 5,
+      },
+      { repo: 'o/r', issue: 52, delivered: false },
+    ];
+    const { summary, batches } = aggregateBatchAmortization(fixtureRows(), issueRows);
+    expect(batches).toHaveLength(4);
+    const byKind = Object.fromEntries(summary.map((s) => [s.kind, s]));
+    expect(byKind.sched).toMatchObject({
+      batches: 3,
+      shippedBatches: 1,
+      dissolvedBatches: 1,
+      blockedBatches: 0,
+      singleMemberBatches: 1,
+      singleMemberShare: 0.5,
+      membersShipped: 3,
+      gateRuns: 1,
+      issuesPerGateRun: 3,
+      billableTokensPerShippedIssue: 1_000_000,
+      tokenSamples: 1,
+    });
+    expect(byKind.manual).toMatchObject({ membersShipped: 5, gateRuns: 1, issuesPerGateRun: 5 });
+    expect(byKind['full-cycle']).toMatchObject({
+      membersEnqueued: 3,
+      membersShipped: 2,
+      gateRuns: 3,
+      costPerShippedIssueUsd: 3,
+      wallClockPerShippedIssueMinutes: 45,
+    });
+    expect(byKind['full-cycle'].issuesPerGateRun).toBeCloseTo(2 / 3);
+
+    const md = renderBatchAmortization({ summary, batches }).join('\n');
+    expect(md).toContain('## Batch amortization');
+    expect(md).toContain('| o/r | scheduler batches | 3 | 1 (50%) | 1 / 1 / 0 |');
+    expect(md).toContain('**3.00**');
+    expect(md).toContain('`openai/gpt-5.6-luna` 3.0M');
+    expect(md).toContain('N/A (not on this host)');
+    expect(md).toContain('Prep tokens are not in these figures');
+  });
+
+  it('keeps both PRs of a reused manual batch id, and drops an out-of-window anchor with no PR', () => {
+    const anchors = collectBatchAnchors([
+      {
+        issue: 1,
+        milestones: [
+          ms('batch-setup', 'done', {
+            run: 'r',
+            at: '2026-07-01T00:00:00Z',
+            branch: 'batch/b-20260701-01-20260701',
+          }),
+        ],
+      },
+    ]);
+    const pr = (number, headRefName, closes) => ({
+      number,
+      headRefName,
+      createdAt: '2026-09-08T00:00:00Z',
+      mergedAt: '2026-09-08T00:10:00Z',
+      closingIssuesReferences: closes.map((n) => ({ number: n })),
+    });
+    const rows = buildBatchRows({
+      repo: 'o/r',
+      anchors,
+      prs: [
+        pr(1, 'batch/m3-20260908', [1, 2]),
+        pr(2, 'batch/m3-20260915', [3]),
+        pr(3, 'batch/foo-m2-20260908', [4]),
+      ],
+      windowStartIso: '2026-09-01T00:00:00Z',
+    });
+    expect(rows.map((r) => [r.batch, r.membersShipped])).toEqual([
+      ['foo-m2', 1],
+      ['m3-20260908', 2],
+      ['m3-20260915', 1],
+    ]);
+  });
+
+  it('excludes every member of an unshipped batch from the full-cycle row', () => {
+    const [dissolved] = fixtureRows().filter((r) => r.batch === 'b-20260921-01');
+    const { summary } = aggregateBatchAmortization(
+      [dissolved],
+      [
+        { repo: 'o/r', issue: 7, delivered: true },
+        { repo: 'o/r', issue: 8, delivered: true },
+      ]
+    );
+    const fullCycle = summary.find((s) => s.kind === 'full-cycle');
+    expect(fullCycle).toMatchObject({ membersEnqueued: 1, membersShipped: 1, gateRuns: 1 });
+  });
+
+  it('renders nothing when there is nothing to amortize', () => {
+    expect(renderBatchAmortization({ summary: [], batches: [] })).toEqual([]);
+    expect(renderBatchAmortization(undefined)).toEqual([]);
+  });
+
+  describe('main()', () => {
+    let home;
+    beforeEach(() => {
+      home = mkdtempSync(join(tmpdir(), 'scorecard-batch-'));
+    });
+    afterEach(() => {
+      rmSync(home, { recursive: true, force: true });
+    });
+
+    it('adds the section and sidecar key from gh PRs + local batch logs, and survives a failing pr list', () => {
+      const slugDir = join(home, '.dossier', 'sched', 'imboard-ai-ai-dossier');
+      mkdirSync(join(slugDir, 'runs'), { recursive: true });
+      writeFileSync(
+        join(slugDir, 'events.jsonl'),
+        `${[
+          { ts: '2026-08-30T00:00:00Z', event: 'spawned', unit: 'batch:b-20260830-01', issue: 11 },
+          {
+            ts: '2026-08-30T01:00:00Z',
+            event: 'member-landed',
+            unit: 'batch:b-20260830-01',
+            issue: 11,
+          },
+        ]
+          .map((e) => JSON.stringify(e))
+          .join('\n')}\n`
+      );
+      writeFileSync(
+        join(slugDir, 'runs', 'batch-b-20260830-01-m1-11.log'),
+        `${JSON.stringify({ type: 'result', total_cost_usd: 1.25, usage: { input_tokens: 100, output_tokens: 50 } })}\n`
+      );
+      const anchorComment =
+        '<!-- runstate:v1 -->\nphase=batch-setup status=done run=r-5-aaaa at=2026-08-30T00:00:00Z branch=batch/b-20260830-01-20260830 base_branch=main next=batch-validate\n';
+      let prListOk = true;
+      const execFile = (cmd, args) => {
+        if (cmd !== 'gh') throw new Error(`unexpected command in test: ${cmd}`);
+        if (args[0] === 'pr') {
+          if (!prListOk) throw new Error('gh pr list exploded');
+          return JSON.stringify([
+            {
+              number: 900,
+              headRefName: 'batch/b-20260830-01-20260830',
+              createdAt: '2026-08-31T00:00:00Z',
+              mergedAt: '2026-08-31T00:20:00Z',
+              closingIssuesReferences: [{ number: 11 }, { number: 12 }],
+            },
+          ]);
+        }
+        return JSON.stringify([{ number: 5, comments: [{ body: anchorComment }] }]);
+      };
+      const opts = {
+        repoRoot: REPO_ROOT,
+        repos: ['imboard-ai/ai-dossier'],
+        dryRun: true,
+        execFile,
+        home,
+        now: new Date('2026-09-02T00:00:00Z'),
+        log: () => {},
+      };
+
+      const { scorecard, markdown, json } = main(opts);
+      const [row] = scorecard.batchAmortization.batches;
+      expect(row).toMatchObject({
+        batch: 'b-20260830-01',
+        anchor: 5,
+        outcome: 'shipped',
+        membersShipped: 2,
+        gateRuns: 1,
+        billableTokens: 150,
+        costUsd: 1.25,
+      });
+      expect(scorecard.batchAmortization.summary[0]).toMatchObject({
+        kind: 'sched',
+        issuesPerGateRun: 2,
+        costPerShippedIssueUsd: 0.625,
+      });
+      expect(markdown).toContain('## Batch amortization');
+      expect(JSON.parse(json).batchAmortization.batches).toHaveLength(1);
+
+      prListOk = false;
+      const degraded = main(opts);
+      expect(degraded.scorecard.batchAmortization.batches[0]).toMatchObject({
+        outcome: 'open',
+        gateRuns: 0,
+      });
+      expect(
+        degraded.scorecard.warnings.some((w) => w.includes('merged batch PRs unavailable'))
+      ).toBe(true);
+    });
   });
 });

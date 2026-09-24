@@ -13,6 +13,7 @@
 
 import type { RunLogEntry } from '@ai-dossier/core';
 import { issueOfUnit } from '@ai-dossier/sched';
+import { formatCount } from './cost-format';
 
 /**
  * `issue:<n>` → `<n>`; null for anything else (a batch unit, or no unit at
@@ -198,4 +199,244 @@ export function buildSchedCostReport(
   const totals = aggregateRunLogEntries(selected.flatMap((issue) => byIssue.get(issue) ?? []));
 
   return { issues: rows, totals };
+}
+
+// ---------------------------------------------------------------------------
+// Batch amortization (#775, parent #770 P6): what batching is FOR is paying
+// the CI gate once for N issues, so the one number that matters per batch is
+// issues shipped per gate run. Everything below is pure — `sched stats
+// --batch` and `scripts/model-scorecard.mjs` feed it already-read data.
+// ---------------------------------------------------------------------------
+
+/** The minimal journal-event shape these helpers read (an `events.jsonl` line). */
+export interface BatchJournalEvent {
+  ts?: string;
+  event?: string;
+  unit?: string;
+  issue?: number;
+  detail?: string;
+}
+
+/** What a batch's own `events.jsonl` lines say about its members. */
+export interface BatchJournalSummary {
+  /** Every member issue any event on `batch:<id>` named, ascending. */
+  members: number[];
+  /** Members whose work fast-forwarded onto the integration branch (`member-landed`). */
+  landed: number[];
+  /** Members the batch lost (`unit-failed` / `member-evicted` on the batch unit), de-duplicated. */
+  evicted: number[];
+  /** `suite-failed` lines: aggregate-suite (local gate) runs that did not come back green. */
+  suiteFailures: number;
+  /** The last `batch-blocked` detail, or null when the batch never blocked. */
+  blocked: string | null;
+  dissolved: boolean;
+}
+
+/** Events whose `issue` names a member of the batch the event's `unit` is. */
+const BATCH_MEMBER_EVENTS = new Set([
+  'spawned',
+  'redispatched',
+  'member-landed',
+  'member-advanced',
+  'member-evicted',
+  'unit-failed',
+  'run-log-recorded',
+  'gate-skipped',
+]);
+
+/** Summarize the `batch:<batchId>` lines of an `events.jsonl` (#775). */
+export function summarizeBatchJournal(
+  events: readonly BatchJournalEvent[],
+  batchId: string
+): BatchJournalSummary {
+  const unit = `batch:${batchId}`;
+  const members = new Set<number>();
+  const landed = new Set<number>();
+  const evicted = new Set<number>();
+  let suiteFailures = 0;
+  let blocked: string | null = null;
+  let dissolved = false;
+  for (const event of events) {
+    if (event?.unit !== unit || typeof event.event !== 'string') continue;
+    const issue = typeof event.issue === 'number' ? event.issue : null;
+    if (issue !== null && BATCH_MEMBER_EVENTS.has(event.event)) members.add(issue);
+    if (issue !== null && event.event === 'member-landed') landed.add(issue);
+    if (issue !== null && (event.event === 'unit-failed' || event.event === 'member-evicted')) {
+      evicted.add(issue);
+    }
+    if (event.event === 'suite-failed') suiteFailures += 1;
+    if (event.event === 'batch-blocked') blocked = event.detail ?? 'blocked';
+    if (event.event === 'batch-dissolved') dissolved = true;
+  }
+  const sorted = (s: Set<number>) => [...s].sort((a, b) => a - b);
+  return {
+    members: sorted(members),
+    landed: sorted(landed),
+    evicted: sorted(evicted),
+    suiteFailures,
+    blocked,
+    dissolved,
+  };
+}
+
+/** One model's share of a batch's dispatches. */
+export interface ModelTokens {
+  /** The entry's `model` as recorded (comma-joined when one dispatch escalated), or null. */
+  model: string | null;
+  runs: number;
+  /** Uncached input + cache-creation + cache-read + output — the scorecard's billable total. */
+  billable_tokens: number | null;
+  total_cost_usd: number | null;
+}
+
+/** Billable tokens of one entry, or null when it reported none of the four terms. */
+function billableTokensOf(entry: RunLogEntry): number | null {
+  const terms = [
+    entry.input_tokens,
+    entry.cache_creation_tokens,
+    entry.cache_read_tokens,
+    entry.output_tokens,
+  ].filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  return terms.length > 0 ? terms.reduce((a, b) => a + b, 0) : null;
+}
+
+/** Group dispatch entries by model — "tokens by model" per batch (#775). Sorted by tokens, descending. */
+export function tokensByModel(entries: readonly RunLogEntry[]): ModelTokens[] {
+  const byModel = new Map<string, RunLogEntry[]>();
+  for (const entry of entries) {
+    const key = typeof entry.model === 'string' && entry.model !== '' ? entry.model : '';
+    const list = byModel.get(key);
+    if (list) list.push(entry);
+    else byModel.set(key, [entry]);
+  }
+  const rows = [...byModel.entries()].map(([model, list]) => {
+    const tokens = list.map(billableTokensOf).filter((v): v is number => v !== null);
+    const costs = list
+      .map((e) => e.total_cost_usd)
+      .filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+    return {
+      model: model === '' ? null : model,
+      runs: list.length,
+      billable_tokens: tokens.length > 0 ? tokens.reduce((a, b) => a + b, 0) : null,
+      total_cost_usd: costs.length > 0 ? costs.reduce((a, b) => a + b, 0) : null,
+    };
+  });
+  return rows.sort((a, b) => (b.billable_tokens ?? -1) - (a.billable_tokens ?? -1));
+}
+
+/** Batch states in which the batch's PR has merged — its landed members shipped. */
+const SHIPPED_BATCH_STATUSES = new Set(['merged', 'deployed']);
+
+/** The subset of a persisted `BatchEntry` the amortization summary reads. */
+export interface BatchStateSlice {
+  status: string;
+  members: readonly number[];
+  pr: number | null;
+  evictions: readonly { issue: number }[];
+}
+
+/** `sched stats --batch <id>`'s amortization summary (#775). */
+export interface BatchAmortizationSummary {
+  batch: string;
+  status: string | null;
+  pr: number | null;
+  members_enqueued: number;
+  members_landed: number;
+  evictions: number;
+  /** Members that shipped with the batch PR; null while the batch has not merged. */
+  members_shipped: number | null;
+  /** CI gate runs paid for the batch PR (one per PR); 0 while unshipped. */
+  gate_runs: number;
+  /** `members_shipped / gate_runs` — the number batching exists to raise. Null while unshipped. */
+  issues_per_gate_run: number | null;
+  suite_failures: number;
+  billable_tokens: number | null;
+  total_cost_usd: number | null;
+  /** Billable tokens per shipped member (or per landed member while unshipped). */
+  tokens_per_member: number | null;
+  by_model: ModelTokens[];
+}
+
+/**
+ * Combine the persisted batch (when `state.json` still holds it), its journal
+ * lines and its reconstructed dispatch entries into one amortization summary.
+ * Every source is optional: an old batch pruned from state still summarizes
+ * from its journal and logs, and vice versa.
+ */
+export function buildBatchAmortizationSummary({
+  batchId,
+  batch,
+  journal,
+  entries,
+}: {
+  batchId: string;
+  batch: BatchStateSlice | null;
+  journal: BatchJournalSummary;
+  entries: readonly RunLogEntry[];
+}): BatchAmortizationSummary {
+  const evicted = new Set<number>([
+    ...journal.evicted,
+    ...(batch?.evictions ?? []).map((e) => e.issue),
+  ]);
+  const enqueued = new Set<number>([...journal.members, ...(batch?.members ?? []), ...evicted]);
+  for (const entry of entries) {
+    const issue = issueOfUnit(entry.unit);
+    if (issue !== null) enqueued.add(issue);
+  }
+  const landed = journal.landed.filter((issue) => !evicted.has(issue));
+  // Shipped = what landed on the integration branch, when the journal saw landings; only
+  // a journal-less batch (rotated/other host) falls back to enqueued minus evicted.
+  const shipped =
+    batch !== null && SHIPPED_BATCH_STATUSES.has(batch.status)
+      ? landed.length > 0
+        ? landed.length
+        : [...enqueued].filter((issue) => !evicted.has(issue)).length
+      : null;
+  // One CI gate per merged PR. `state.json` does not record CI re-runs, so this is a lower
+  // bound; the scorecard adds the anchor's `ci_fix_attempts` where one was posted.
+  const gateRuns = shipped !== null ? 1 : 0;
+  const byModel = tokensByModel(entries);
+  const tokenTerms = byModel.map((m) => m.billable_tokens).filter((v): v is number => v !== null);
+  const costTerms = byModel.map((m) => m.total_cost_usd).filter((v): v is number => v !== null);
+  const billable = tokenTerms.length > 0 ? tokenTerms.reduce((a, b) => a + b, 0) : null;
+  const perMemberDenominator = shipped ?? landed.length;
+  return {
+    batch: batchId,
+    status: batch?.status ?? null,
+    pr: batch?.pr ?? null,
+    members_enqueued: enqueued.size,
+    members_landed: landed.length,
+    evictions: evicted.size,
+    members_shipped: shipped,
+    gate_runs: gateRuns,
+    issues_per_gate_run: shipped !== null && gateRuns > 0 ? shipped / gateRuns : null,
+    suite_failures: journal.suiteFailures,
+    billable_tokens: billable,
+    total_cost_usd: costTerms.length > 0 ? costTerms.reduce((a, b) => a + b, 0) : null,
+    tokens_per_member:
+      billable !== null && perMemberDenominator > 0 ? billable / perMemberDenominator : null,
+    by_model: byModel,
+  };
+}
+
+/** One human line: members in/out, issues per gate run, tokens per member, tokens by model. */
+export function formatAmortizationLine(a: BatchAmortizationSummary): string {
+  const outcome =
+    a.members_shipped !== null
+      ? `${a.members_shipped} shipped in ${a.gate_runs} gate run(s) → ${a.issues_per_gate_run?.toFixed(1)} issues/gate run`
+      : `not shipped per state.json (status=${a.status ?? 'unknown'}) → issues/gate run n/a`;
+  const perMember =
+    a.tokens_per_member !== null
+      ? ` (${formatCount(Math.round(a.tokens_per_member))}/${a.members_shipped !== null ? 'shipped' : 'landed'} member)`
+      : '';
+  const models =
+    a.by_model.length > 0
+      ? a.by_model
+          .map((m) => `${m.model ?? '<unknown>'} ${formatCount(m.billable_tokens)} ×${m.runs}`)
+          .join(', ')
+      : 'none recorded';
+  return [
+    `Summary: ${a.members_enqueued} enqueued, ${a.members_landed} landed, ${a.evictions} evicted; ${outcome};`,
+    `${formatCount(a.billable_tokens)} billable tokens${perMember}; by model: ${models}`,
+  ].join(' ');
 }
