@@ -8,6 +8,7 @@ import * as helpers from '../../helpers';
 import * as multiRegistry from '../../multi-registry';
 import * as registryClient from '../../registry-client';
 import * as runLog from '../../run-log';
+import * as hostSession from '../../usage/host-session';
 import { createTestProgram, parseNameVersionImpl } from '../helpers/test-utils';
 
 vi.mock('node:fs');
@@ -18,6 +19,7 @@ vi.mock('../../registry-client');
 vi.mock('../../helpers');
 vi.mock('../../run-log');
 vi.mock('../../cache-resolver');
+vi.mock('../../usage/host-session');
 
 const mockedFs = vi.mocked(fs);
 
@@ -33,6 +35,11 @@ describe('run command', () => {
     vi.mocked(helpers.runVerification).mockResolvedValue({ passed: true, checks: [] });
     vi.mocked(helpers.detectLlm).mockReturnValue('claude-code');
     vi.mocked(helpers.detectNestedHost).mockReturnValue(null);
+    vi.mocked(hostSession.detectHostSession).mockReturnValue({
+      agent: null,
+      session_id: null,
+      model: null,
+    });
     vi.mocked(helpers.buildLlmCommand).mockReturnValue({
       cmd: 'claude',
       args: ['test.ds.md'],
@@ -189,6 +196,51 @@ describe('run command', () => {
       })
     );
     expect(spawnSync).not.toHaveBeenCalled();
+  });
+
+  it('records the host session and its resolved model on a nested run (#769)', async () => {
+    vi.mocked(helpers.detectNestedHost).mockReturnValue('Claude Code');
+    vi.mocked(hostSession.detectHostSession).mockReturnValue({
+      agent: 'claude-code',
+      session_id: 'e529de77-f8f1-4580-9264-12c09cd46cb6',
+      model: 'claude-opus-5-5',
+    });
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+
+    const program = createTestProgram();
+    registerRunCommand(program);
+
+    await expect(program.parseAsync(['node', 'dossier', 'run', 'test.ds.md'])).rejects.toThrow();
+
+    expect(runLog.appendRunLog).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verification: 'nested-skip',
+        model: 'claude-opus-5-5',
+        session_id: 'e529de77-f8f1-4580-9264-12c09cd46cb6',
+        agent: 'claude-code',
+      })
+    );
+  });
+
+  it('an explicit --model still wins over the host model (#769)', async () => {
+    vi.mocked(helpers.detectNestedHost).mockReturnValue('Claude Code');
+    vi.mocked(hostSession.detectHostSession).mockReturnValue({
+      agent: 'claude-code',
+      session_id: 'e529de77-f8f1-4580-9264-12c09cd46cb6',
+      model: 'claude-opus-5-5',
+    });
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');
+
+    const program = createTestProgram();
+    registerRunCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--model', 'sonnet'])
+    ).rejects.toThrow();
+
+    expect(runLog.appendRunLog).toHaveBeenCalledWith(expect.objectContaining({ model: 'sonnet' }));
   });
 
   it('should call appendRunLog in nested mode (opencode)', async () => {

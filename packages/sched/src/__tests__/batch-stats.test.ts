@@ -11,7 +11,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { buildBatchRunLogEntries, listBatchDispatchLogs } from '../batch-stats';
+import {
+  buildBatchRunLogEntries,
+  dispatchPreambleCmd,
+  listBatchDispatchLogs,
+  modelFromCmd,
+} from '../batch-stats';
 
 const dirs: string[] = [];
 
@@ -178,9 +183,90 @@ describe('buildBatchRunLogEntries', () => {
     });
   });
 
+  it("recovers an opencode member's model and binary from the sched-dispatch preamble (#769)", () => {
+    const runsDir = tmpDir();
+    const cmd = [
+      'opencode',
+      'run',
+      '--auto',
+      '-m',
+      'openai/gpt-5.6-luna',
+      '--format',
+      'json',
+      '--',
+    ];
+    fs.writeFileSync(
+      path.join(runsDir, 'batch-b-20260920-01-m1-4360.log'),
+      [
+        JSON.stringify({ type: 'sched-dispatch', ts: '2026-09-20T15:00:00.000Z', cmd }),
+        JSON.stringify({ type: 'sched-dispatch', event: 'spawned', pid: 1 }),
+        JSON.stringify({
+          type: 'step_finish',
+          sessionID: 'ses_x',
+          part: {
+            type: 'step-finish',
+            tokens: { input: 10, output: 2, reasoning: 3, cache: { write: 0, read: 20 } },
+            cost: 0,
+          },
+        }),
+      ].join('\n')
+    );
+
+    const [entry] = buildBatchRunLogEntries(runsDir, 'b-20260920-01');
+    expect(entry).toMatchObject({
+      unit: 'issue:4360',
+      llm: 'opencode',
+      model: 'openai/gpt-5.6-luna',
+      provider: 'opencode',
+      input_tokens: 10,
+      spawned_command: cmd.join(' '),
+    });
+  });
+
+  it('keeps a model-less entry when a log has no preamble (pre-#769 logs)', () => {
+    const runsDir = tmpDir();
+    fs.writeFileSync(
+      path.join(runsDir, 'batch-b1-m1-540.log'),
+      JSON.stringify({
+        type: 'step_finish',
+        part: { type: 'step-finish', tokens: { input: 1, output: 1 }, cost: 0 },
+      })
+    );
+    expect(buildBatchRunLogEntries(runsDir, 'b1')[0].model).toBeNull();
+  });
+
   it('empty batch (no matching logs) reconstructs to an empty list', () => {
     const runsDir = tmpDir();
     fs.writeFileSync(path.join(runsDir, 'issue-540.log'), fakeResultJson(1, 100, 100));
     expect(buildBatchRunLogEntries(runsDir, 'b1')).toEqual([]);
+  });
+});
+
+describe('dispatchPreambleCmd / modelFromCmd (#769)', () => {
+  it('reads the argv from the first sched-dispatch line and ignores malformed ones', () => {
+    expect(dispatchPreambleCmd(null)).toBeNull();
+    expect(dispatchPreambleCmd('{"type":"sched-dispatch","cmd":"not-an-array"}')).toBeNull();
+    expect(dispatchPreambleCmd('{"type":"sched-dispatch","cmd":[1,2]}')).toBeNull();
+    expect(dispatchPreambleCmd('{"type":"sched-dispatch","cm')).toBeNull();
+    expect(
+      dispatchPreambleCmd('{"type":"sched-dispatch","cmd":["claude","-p","--model","opus"]}\n{}')
+    ).toEqual(['claude', '-p', '--model', 'opus']);
+    // append-mode log of a redispatched unit: the LAST preamble wins
+    expect(
+      dispatchPreambleCmd(
+        '{"type":"sched-dispatch","cmd":["claude","-p"]}\n{"x":1}\n{"type":"sched-dispatch","event":"spawned"}\n{"type":"sched-dispatch","cmd":["opencode","run","-m","openai/y"]}\n'
+      )
+    ).toEqual(['opencode', 'run', '-m', 'openai/y']);
+  });
+
+  it('extracts -m / --model / --model= and stops at the -- prompt separator', () => {
+    expect(modelFromCmd(['opencode', 'run', '-m', 'openai/gpt-5.6-luna'])).toBe(
+      'openai/gpt-5.6-luna'
+    );
+    expect(modelFromCmd(['claude', '-p', '--model', 'opus'])).toBe('opus');
+    expect(modelFromCmd(['claude', '--model=claude-fable-5-1'])).toBe('claude-fable-5-1');
+    expect(modelFromCmd(['opencode', 'run', '--', '-m', 'x'])).toBeNull();
+    expect(modelFromCmd(['opencode', 'run', '-m', '--format'])).toBeNull();
+    expect(modelFromCmd(['claude', '-p'])).toBeNull();
   });
 });
