@@ -3060,6 +3060,66 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
     expect(ghWrites(h.truthDir)).toEqual([]);
   }, 60_000);
 
+  it('NEGATIVE — a member REOPENED between the verdict read and the close: the fresh GitHub re-read refuses', async () => {
+    const { h } = await blockedBatchHarness('b-768-reopen', 7760, 7761);
+    setIssueTruth(h.truthDir, 7760, {});
+    setIssueTruth(h.truthDir, 7761, COMPLETED_BY_PR(9781));
+    const gt = h.deps.groundTruth;
+    const read = gt.issueCloseTruth?.bind(gt);
+    let memberReads = 0;
+    h.deps.groundTruth = {
+      ...gt,
+      issueCloseTruth: (n) => {
+        const truth = read?.(n);
+        // After the (cached) verdict read, the member is reopened on GitHub.
+        if (n === 7761 && ++memberReads === 1) setIssueTruth(h.truthDir, 7761, {});
+        return truth;
+      },
+    };
+
+    h.tick();
+
+    expect(memberReads).toBeGreaterThanOrEqual(2);
+    expect(issueTruth(h.truthDir, 7760).state).toBe('OPEN');
+    expect(ghWrites(h.truthDir)).toEqual([]);
+  }, 60_000);
+
+  /** Make every `git fetch` through the batch exec fail, leaving the (current) remote-tracking ref in place. */
+  function failGitFetch(h: BatchHarness): void {
+    const exec = h.deps.batchExec as ExecFn;
+    h.deps.batchExec = (file, args, cwd) =>
+      file === 'git' && args[0] === 'fetch' ? null : exec(file, args, cwd);
+  }
+
+  it('NEGATIVE — a failed base fetch verifies no commit closer, even one really in origin/main', async () => {
+    const { h, repo } = await blockedBatchHarness('b-768-nofetch-commit', 7762, 7763);
+    const sha = commitOnMain(repo, 'direct-7763.txt');
+    setIssueTruth(h.truthDir, 7762, {});
+    setIssueTruth(h.truthDir, 7763, {
+      state: 'CLOSED',
+      stateReason: 'COMPLETED',
+      closer: { kind: 'commit', oid: sha },
+    });
+    failGitFetch(h);
+
+    h.tick();
+
+    expect(issueTruth(h.truthDir, 7762).state).toBe('OPEN');
+    expect(ghWrites(h.truthDir)).toEqual([]);
+  }, 60_000);
+
+  it('NEGATIVE — a failed base fetch yields no commits-in-base reconcile evidence', async () => {
+    const { h, repo, batchId } = await blockedBatchHarness('b-768-nofetch-anc', 7764, 7765);
+    const batch = findBatch(h.state(), batchId);
+    mergeBatchBranchIntoMain(repo, batch?.branch as string, batch?.worktree as string);
+    failGitFetch(h);
+
+    const result = h.tick();
+
+    expect(result.mergeAccepted).not.toContain(`batch:${batchId}`);
+    expect(findBatch(h.state(), batchId)?.status).toBe('blocked');
+  }, 60_000);
+
   it('never acts without a verified project repository (the cwd may be another repo)', async () => {
     const { h, batchId } = await blockedBatchHarness('b-768-norepo', 7693, 7694, [], {
       noAnchorRepo: true,
