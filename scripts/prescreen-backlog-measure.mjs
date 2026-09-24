@@ -6,8 +6,10 @@
 // prescreen`'s pure core over a repo's OPEN backlog and compare the pre-#772
 // contract (prescreen v1 — any text-floor keyword anywhere in title + body +
 // labels ⇒ `verdict: full`, i.e. excluded from batching) with the current one
-// (prescreen v2 — section/provenance-aware scan; a text-floor hit ⇒
-// `verdict: candidate` + `review: full`).
+// (prescreen v2+ — section/provenance-aware scan; a text-floor hit ⇒
+// `verdict: candidate` + `review: full`). v3 (#805) changed only the plan:v1
+// path-floor, which this label+text-only measurement never exercises, so the
+// "after" columns read the same under v2 and v3.
 //
 // Read-only and deterministic: one `gh issue list` call, no model call, no
 // writes. Issue text is never printed — only numbers, verdicts, and the
@@ -40,7 +42,7 @@ const DEFAULT_LIMIT = 500;
 /** `gh issue list --json body` for a few hundred issues runs to tens of MB. */
 const GH_MAX_BUFFER = 256 * 1024 * 1024;
 /** The contract this script measures against; an older dist lacks `review`. */
-const EXPECTED_SCHEMA = 'prescreen:v2';
+const EXPECTED_SCHEMA = 'prescreen:v3';
 
 /**
  * Normalise one `gh issue list --json` row into the prescreen input shape. Labels follow
@@ -231,12 +233,12 @@ function main() {
   }
   console.log(`issues measured:                 ${summary.total}`);
   console.log(`before (v1) verdict=full:        ${summary.beforeFull}`);
-  console.log(`after  (v2) verdict=full:        ${summary.afterFull}`);
-  console.log(`after  (v2) review=full:         ${summary.afterReviewFull}`);
+  console.log(`after       verdict=full:        ${summary.afterFull}`);
+  console.log(`after       review=full:         ${summary.afterReviewFull}`);
   console.log(`  of which candidate+review=full: ${summary.afterCandidateReviewFull}`);
-  console.log(`v1 text hits v2 no longer sees:  ${summary.droppedTextHits}`);
+  console.log(`v1 text hits now unseen:         ${summary.droppedTextHits}`);
   console.log('');
-  console.log('number  before     after      review  v1-keyword       v2-keyword');
+  console.log('number  before     after      review  v1-keyword       now-keyword');
   for (const r of rows.filter((x) => x.before === 'full' || x.review === 'full')) {
     console.log(
       `${String(r.number).padEnd(7)} ${r.before.padEnd(10)} ${r.after.padEnd(10)} ${r.review.padEnd(7)} ${String(r.beforeKeyword ?? '-').padEnd(16)} ${r.afterKeyword ?? '-'}`

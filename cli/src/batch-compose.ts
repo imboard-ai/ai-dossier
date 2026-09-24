@@ -4,7 +4,7 @@
  * The batch pipeline used to admit members by keyword AFTER humans/models had already selected
  * them — a hand-picked five-issue set collapsed to one member only after ~425k decision-grade
  * classifier tokens (#770). This module previews admission BEFORE any model spend: it runs the
- * deterministic `classify prescreen` (prescreen:v2, #772) plus the readiness screen
+ * deterministic `classify prescreen` (prescreen:v3, #772/#805) plus the readiness screen
  * batch-issues-preparation Step 1/5 applies, and proposes a composition that honours the
  * scheduler's batch invariants — at most `max_full_review_members` (default 2, #771) `review=full`
  * members, one base branch, `min_members` (default 3) to `max_members` (default 6) — preferring
@@ -16,7 +16,9 @@
 
 import { pickHardBlockLabel } from './hard-block-labels';
 import {
+  EXCLUDING_CHECKS,
   floorScanText,
+  PRESCREEN_SCHEMA,
   type PrescreenReason,
   prescreenIssue,
   stripQuotedSpans,
@@ -36,7 +38,12 @@ export const DEFAULT_MAX_MEMBERS = 6;
 /** Fewer admissible members than this and no batch should form — hand the survivor to full-cycle (#770 P4). */
 export const MIN_FORMABLE_MEMBERS = 2;
 
-/** Admission rules: `v2` = prescreen:v2 + #771 review level (today); `legacy` = pre-#770 (any keyword ⇒ full ⇒ excluded). */
+/**
+ * Admission rules: `v2` = the current #770 Option A rules (prescreen + #771 review level);
+ * `legacy` = pre-#770 (any keyword ⇒ full ⇒ excluded). `v2` names the admission-rules
+ * generation and is the stable `--rules` CLI value — NOT the prescreen schema version (see
+ * `PRESCREEN_SCHEMA`). Do not rename it to track the schema.
+ */
 export type ComposeRules = 'v2' | 'legacy';
 
 /** Why an issue cannot join a batch. Stable codes — consumers branch on `code`, humans read `message`. */
@@ -90,7 +97,7 @@ export interface AssessedIssue {
   source: 'pick' | 'backlog';
   title: string;
   admissible: boolean;
-  /** Review depth the member needs (prescreen:v2 / #771 vocabulary). */
+  /** Review depth the member needs (prescreen / #771 vocabulary). */
   review: 'light' | 'full';
   /** Workspace packages the issue is predicted to touch (plan:v1 files first, else paths named in the body). */
   packages: string[];
@@ -273,8 +280,17 @@ const BATCH_ANCHOR_LABEL = 'batch-epic';
 const CLASSIFY_PHASE = 'classify';
 
 /**
+ * Prescreen excluding checks `assessIssue` re-derives itself under its own exclusion codes
+ * (richer messages, unknown-dependency case) — never reported again as `prescreen-full`.
+ */
+const COMPOSE_OWN_CHECKS: ReadonlySet<PrescreenReason['check']> = new Set([
+  'hard-block-label',
+  'open-dependency',
+]);
+
+/**
  * Deterministic admission for one issue: readiness (batch-issues-preparation Step 1/5) +
- * prescreen:v2 (#772) + data-mutation. Records EVERY exclusion reason, not just the first, so an
+ * prescreen:v3 (#772/#805) + data-mutation. Records EVERY exclusion reason, not just the first, so an
  * operator sees the whole picture of why a pick cannot join.
  */
 export function assessIssue(input: ComposeIssueInput, rules: ComposeRules = 'v2'): AssessedIssue {
@@ -351,16 +367,21 @@ export function assessIssue(input: ComposeIssueInput, rules: ComposeRules = 'v2'
       message: `Depends on #${dep}, whose state could not be read — treated as open.`,
     });
   }
-  // prescreen:v2 keeps path-floor / >8-files as EXCLUDING checks (#772's schema): a plan:v1
-  // artifact that predicts risk-floor paths or a large diff is a deliberate full-cycle case, so
-  // only a text-floor hit rides a batch as a review=full member (#770 Option A).
+  // prescreen:v3 (#805): the prescreen's excluding checks, minus the two compose reports under
+  // its own codes above — today that leaves only >8 predicted files, a deliberate full-cycle case. A risk-floor PATH is the same fact as a
+  // text-floor keyword, so it rides a batch as a review=full member (#770 Option A) via
+  // `verdict.review`, exactly like the keyword — batch-prep's own plan:v1 artifact must not
+  // exclude a member it admitted on a later compose re-run.
+  // `--rules legacy` reproduces pre-#770 admission, where a plan:v1 path-floor hit excluded too.
   const floorExclusions = verdict.reasons.filter(
-    (r) => r.check === 'path-floor' || r.check === 'file-count'
+    (r) =>
+      (EXCLUDING_CHECKS.has(r.check) && !COMPOSE_OWN_CHECKS.has(r.check)) ||
+      (rules === 'legacy' && r.check === 'path-floor')
   );
   if (floorExclusions.length > 0) {
     excluded.push({
       code: 'prescreen-full',
-      message: `prescreen:v2 verdict full — ${floorExclusions.map((r) => r.message).join(' ')}`,
+      message: `${PRESCREEN_SCHEMA} verdict full — ${floorExclusions.map((r) => r.message).join(' ')}`,
     });
   }
 

@@ -103,7 +103,40 @@ describe('assessIssue — readiness', () => {
   });
 });
 
-describe('assessIssue — review level (#770 Option A, prescreen:v2)', () => {
+describe('#805: a plan:v1 risk-floor path is a review=full member, not an exclusion (prescreen:v3)', () => {
+  // imboard#4343's shape: batch-prep admitted it on the `billing` keyword and posted a plan:v1
+  // artifact predicting a billing job; a later compose re-run must still admit it.
+  const riskPath = ['packages/backend/src/billing/billing-sync.job.ts'];
+
+  it('assessIssue admits it with review=full and records the path-floor reason', () => {
+    const a = assessIssue(input({ predictedFiles: riskPath }));
+    expect(a.admissible).toBe(true);
+    expect(a.excluded).toEqual([]);
+    expect(a.review).toBe('full');
+    expect(a.prescreen).toEqual([expect.objectContaining({ check: 'path-floor' })]);
+  });
+
+  it('batch compose admits it as a review=full member', () => {
+    const risky = assessIssue(input({ issue: 4343, predictedFiles: riskPath }));
+    const r = composeBatch([risky, assessed(2), assessed(3)], OPTS);
+    expect(r.members).toContainEqual(expect.objectContaining({ issue: 4343, review: 'full' }));
+  });
+
+  it('--rules legacy still excludes a plan:v1 risk-floor path (pre-#770 admission)', () => {
+    const a = assessIssue(input({ predictedFiles: riskPath }), 'legacy');
+    expect(a.admissible).toBe(false);
+    expect(a.excluded.map((e) => e.code)).toEqual(['prescreen-full']);
+  });
+
+  it('>8 predicted files still excludes even with a risk-floor path among them', () => {
+    const files = [...riskPath, ...Array.from({ length: 8 }, (_, i) => `cli/src/f${i}.ts`)];
+    const a = assessIssue(input({ predictedFiles: files }));
+    expect(a.excluded.map((e) => e.code)).toEqual(['prescreen-full']);
+    expect(a.excluded[0]?.message).not.toContain('rule1-risk-floor-area');
+  });
+});
+
+describe('assessIssue — review level (#770 Option A, prescreen:v3)', () => {
   it('a risk keyword in scope makes the issue an admissible review=full member, not an exclusion', () => {
     const a = assessIssue(input({ title: 'fix: billing sweep window arithmetic' }));
     expect(a.admissible).toBe(true);
