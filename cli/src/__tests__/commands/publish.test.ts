@@ -546,6 +546,46 @@ describe('publish command', () => {
     it('returns nothing for an empty previous entry list', () => {
       expect(findDroppedEvidenceAnchors([], 'anything', [])).toEqual([]);
     });
+
+    it('does not falsely match a heading renamed past the anchor (Step 2 vs. Step 20)', () => {
+      // Word-boundary check, not plain substring: "Step 2" no longer matches "Step 20" (the
+      // digit right after "2" is still a word char). A checker can't tell "renamed" from
+      // "genuinely deleted" syntactically, so — consistent with AC2 ("silent when the
+      // anchor's own line was removed") — a no-longer-matching anchor is treated as removed,
+      // not flagged. This closes the OLD substring bug's false PASS in the opposite direction
+      // too: plain substring matching would have treated "Step 2" as still present merely
+      // because "Step 20" contains it, which is exactly the false signal this check replaces.
+      expect(
+        findDroppedEvidenceAnchors([entry('Step 2')], '## Step 20: expanded scope\nnew text', [])
+      ).toEqual([]);
+    });
+
+    it('does not match an anchor word appearing only inside prose, not at line start', () => {
+      expect(
+        findDroppedEvidenceAnchors(
+          [entry('Timeout')],
+          'The Connection Timeout increased after the change.',
+          []
+        )
+      ).toEqual([]);
+    });
+
+    it('matches an anchor against a bold (non-heading) line', () => {
+      const anchor = 'If rebase-merge is refused, ship with a MERGE COMMIT — never a squash.';
+      expect(
+        findDroppedEvidenceAnchors([entry(anchor)], `Intro text\n\n**${anchor}**\n\nMore text`, [])
+      ).toEqual([anchor]);
+    });
+
+    it('matches an anchor that is a prefix of a longer heading (Step 3 of "### Step 3: ...")', () => {
+      expect(
+        findDroppedEvidenceAnchors(
+          [entry('Step 3')],
+          '### Step 3: merge-commit fallback\ndetails',
+          []
+        )
+      ).toEqual(['Step 3']);
+    });
   });
 
   describe('evidence regression check (#817)', () => {

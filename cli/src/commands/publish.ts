@@ -20,26 +20,63 @@ import { handleRegistryWriteError, requireWriteAuth } from '../write-auth';
 const EVIDENCE_FETCH_TIMEOUT_MS = 10_000;
 
 /**
- * Anchors from the PREVIOUS published version's evidence sidecar whose section still exists
- * in the new dossier body, but whose entry is missing from the new sidecar being published.
- * Silent by construction for an anchor whose section was removed — it's excluded before the
+ * Strip a line down to its "anchor-bearing" text for matching: leading `#` heading markers,
+ * leading list markers (`- `, `* `, `1. `, `2) `), and whole-line `*`/`**` emphasis wrapping —
+ * the shapes a real evidence anchor is actually written against (survey of every cached
+ * sidecar under `~/.dossier/cache`, #817 review: 25/28 anchors match a heading exactly, 3
+ * match a non-heading line — a bold line and a heading-prefix — 0 match mid-prose only).
+ */
+function normalizeLineForAnchorMatch(line: string): string {
+  let normalized = line.trim();
+  normalized = normalized.replace(/^#+\s*/, '');
+  normalized = normalized.replace(/^(?:[-*+]|\d+[.)])\s+/, '');
+  normalized = normalized.replace(/^\*{1,2}(.*)\*{1,2}$/, '$1');
+  return normalized.trim();
+}
+
+/**
+ * True when `line`, once normalized, either equals `anchor` exactly or starts with it
+ * followed by a non-word character (`:`, space, `—`, `.`, or end of line) — a word-boundary
+ * check, so `anchor="Step 2"` does NOT match a line renamed to `"Step 20: ..."` (the digit
+ * right after "2" is still a word character) while still matching `"Step 2: ..."` and a bare
+ * `"Step 2"` line.
+ */
+function lineMatchesAnchor(line: string, anchor: string): boolean {
+  const normalized = normalizeLineForAnchorMatch(line);
+  if (normalized === anchor) return true;
+  if (normalized.startsWith(anchor)) {
+    const boundary = normalized.charAt(anchor.length);
+    return boundary === '' || /\W/.test(boundary);
+  }
+  return false;
+}
+
+/**
+ * Anchors from the PREVIOUS published version's evidence sidecar whose line still exists in
+ * the new dossier body, but whose entry is missing from the new sidecar being published.
+ * Silent by construction for an anchor whose line was removed — it's excluded before the
  * "missing from the new sidecar" check even runs. See #817 (batch-integrate 1.4.0: 5 of 7
  * evidence entries silently dropped even though their sections survived, restored in 1.5.1).
  *
- * `anchor` is matched as a plain substring of the body, not against extracted headings —
- * this mirrors how the rest of the evidence system treats an anchor (free text "written
- * exactly as it appears in the dossier body" per authoring-evidence.md, never parsed as
- * markdown). Tightening this to heading-only matching would be a broader redefinition of
- * what an anchor is, not a fix scoped to this check.
+ * Matching is line-anchored (`lineMatchesAnchor`), not a whole-body substring search: an
+ * anchor word appearing only inside a sentence's prose does not count as "still present" (it
+ * must start a normalized line), and a heading renamed past the anchor's own text (`Step 2`
+ * -> `Step 20`) does not count as surviving either — both were failure modes of plain
+ * substring matching, resolved during #817's review (see the doc comments above).
  */
 export function findDroppedEvidenceAnchors(
   previousEntries: EvidenceEntry[],
   newBody: string,
   newEntries: EvidenceEntry[]
 ): string[] {
+  const bodyLines = newBody.split('\n');
   const newAnchors = new Set(newEntries.map((entry) => entry.anchor));
   return previousEntries
-    .filter((entry) => newBody.includes(entry.anchor) && !newAnchors.has(entry.anchor))
+    .filter(
+      (entry) =>
+        bodyLines.some((line) => lineMatchesAnchor(line, entry.anchor)) &&
+        !newAnchors.has(entry.anchor)
+    )
     .map((entry) => entry.anchor);
 }
 
@@ -336,7 +373,7 @@ export function registerPublishCommand(program: Command): void {
                 console.error(`   - "${sanitizeForDisplay(anchor)}"`);
               }
               console.error(
-                `\n   These anchors have evidence in ${fullPath}@${existingVersion} but not in this publish's sidecar, even though their sections remain in the body.`
+                `\n   These anchors have evidence in ${fullPath}@${existingVersion} but not in this publish's sidecar, even though their lines remain in the body.`
               );
               console.error(
                 '   Re-add the entries (ai-dossier evidence add), or pass --drop-evidence "<anchor>" once per anchor to confirm the drop is intentional.\n'

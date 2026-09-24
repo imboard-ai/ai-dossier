@@ -211,22 +211,30 @@ rationale attached to text it no longer describes.
 
 `ai-dossier publish` compares the sidecar it's about to publish against the
 PREVIOUS published version's sidecar (fetched from the registry). For every
-entry in that previous sidecar whose `anchor` still appears in the NEW
-dossier body but has no matching entry in the NEW sidecar, publish refuses
-(exit 1) and names the anchor — it does not merely warn. It stays silent
-when the anchor's own section was removed from the body; that's a normal
-edit, not a drop.
+entry in that previous sidecar whose `anchor` still matches a line in the
+NEW dossier body but has no matching entry in the NEW sidecar, publish
+refuses (exit 1) and names the anchor — it does not merely warn. It stays
+silent when the anchor's own line was removed from the body; that's a
+normal edit, not a drop.
+
+Matching is line-anchored, not a whole-body substring search: a line
+(stripped of leading `#` heading markers, list markers, and `*`/`**`
+emphasis) counts as matching an anchor when it equals the anchor exactly,
+or starts with it followed by a word boundary — so a heading renamed past
+the anchor's own text (`Step 2` -> `Step 20`) is correctly treated as
+dropped, and an anchor word appearing only inside a sentence's prose is
+correctly treated as removed, not as still present.
 
 This exists because of a real incident: `batch-integrate` 1.4.0 published
 with 3 evidence entries, down from 7 in 1.3.3, while 5 of those entries'
-sections still existed in the document. Nothing at publish time noticed;
-the entries were restored by hand in 1.5.1. Refuse-with-override matches
-this CLI's other "you're about to lose something" guards (`keys --force`,
+lines still existed in the document. Nothing at publish time noticed; the
+entries were restored by hand in 1.5.1. Refuse-with-override matches this
+CLI's other "you're about to lose something" guards (`keys --force`,
 `evidence init --force`) — a warning that scrolls past a non-interactive
 `-y` publish would not have caught the actual incident.
 
 If a drop is intentional (the entry's rationale no longer applies even
-though the section survives, or you're deliberately thinning evidence),
+though the line survives, or you're deliberately thinning evidence),
 acknowledge it explicitly per anchor:
 
 ```bash
