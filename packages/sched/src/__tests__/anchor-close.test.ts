@@ -294,6 +294,52 @@ describe('#790 classifyOrphanAnchor', () => {
     });
     expect(reads).toBe(1); // only the anchor itself — zero member reads
   });
+
+  // #790 review (team-lead ruling): base_branch decides what counts as
+  // "shipped" (shippingEvidence) — a value that does not match the
+  // project's expected base must NEVER produce orphan-closable-candidate,
+  // even when every member's GitHub state would otherwise look clean.
+  it('a base_branch that differs from the expected/configured base → orphan-needs-operator with reason base-branch-nonstandard, even with clean members, and NO member reads', () => {
+    let memberReads = 0;
+    const read = (issue: number) => {
+      if (issue === 4244) return truth({ state: 'OPEN' });
+      memberReads += 1;
+      return truth({
+        state: 'CLOSED',
+        stateReason: 'COMPLETED',
+        closer: { kind: 'pr', number: 1, merged: true, baseRefName: 'release', repo: REPO },
+      });
+    };
+    const verdict = expectVerdict(
+      classifyOrphanAnchor({ anchor: 4244, members: [4146], base_branch: 'release' }, read, {
+        repo: REPO,
+      })
+    );
+    expect(verdict).toEqual({
+      kind: 'orphan-needs-operator',
+      reasons: ['base-branch-nonstandard:release'],
+      members: [],
+    });
+    expect(memberReads).toBe(0);
+  });
+
+  it('an explicit expectedBaseBranch override accepts a non-main base — the check is against the CONFIGURED base, not a hardcoded main', () => {
+    const read = readerFrom({
+      4244: truth({ state: 'OPEN' }),
+      4146: truth({
+        state: 'CLOSED',
+        stateReason: 'COMPLETED',
+        closer: { kind: 'pr', number: 1, merged: true, baseRefName: 'release', repo: REPO },
+      }),
+    });
+    const verdict = expectVerdict(
+      classifyOrphanAnchor({ anchor: 4244, members: [4146], base_branch: 'release' }, read, {
+        repo: REPO,
+        expectedBaseBranch: 'release',
+      })
+    );
+    expect(verdict.kind).toBe('orphan-closable-candidate');
+  });
 });
 
 describe('#790 sweepOrphanAnchors', () => {
@@ -305,8 +351,8 @@ describe('#790 sweepOrphanAnchors', () => {
     const list = (): OpenAnchorIssue[] => [
       { number: 4244, title: 'Batch b1: #4146', body: ANCHOR_BODY([4146]) },
     ];
-    const items = sweepOrphanAnchors(state, list, readerFrom({}));
-    expect(items).toEqual([]);
+    const result = sweepOrphanAnchors(state, list, readerFrom({}));
+    expect(result).toEqual({ items: [], truncated: false });
   });
 
   it('an anchor NOT in the ledger, every member shipped → one orphan-closable-candidate row', () => {
@@ -327,12 +373,13 @@ describe('#790 sweepOrphanAnchors', () => {
         closer: { kind: 'pr', number: 1, merged: true, baseRefName: 'main', repo: REPO },
       }),
     });
-    const items = sweepOrphanAnchors(state, list, read, {
+    const result = sweepOrphanAnchors(state, list, read, {
       repo: REPO,
       commitInBase: () => true,
     });
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({
+    expect(result?.truncated).toBe(false);
+    expect(result?.items).toHaveLength(1);
+    expect(result?.items[0]).toMatchObject({
       anchor: 4244,
       verdict: 'orphan-closable-candidate',
       reasons: [],
@@ -344,13 +391,13 @@ describe('#790 sweepOrphanAnchors', () => {
     const list = (): OpenAnchorIssue[] => [
       { number: 4244, title: 'Batch b1: #4146', body: ANCHOR_BODY([4146]) },
     ];
-    const items = sweepOrphanAnchors(
+    const result = sweepOrphanAnchors(
       state,
       list,
       readerFrom({ 4244: truth({ state: 'OPEN' }), 4146: truth({ state: 'OPEN' }) })
     );
-    expect(items).toHaveLength(1);
-    expect(items?.[0]?.verdict).toBe('orphan-needs-operator');
+    expect(result?.items).toHaveLength(1);
+    expect(result?.items[0]?.verdict).toBe('orphan-needs-operator');
   });
 
   it('the lister failing (unverified repo / gh unreachable) → null, not an empty-but-clean sweep, no crash', () => {
@@ -373,12 +420,15 @@ describe('#790 sweepOrphanAnchors', () => {
         body: ANCHOR_BODY([1]),
       })
     );
-    const items = sweepOrphanAnchors(
+    const result = sweepOrphanAnchors(
       state,
       () => many,
       readerFrom({ 1: truth({ state: 'OPEN' }) })
     );
-    expect(items).toHaveLength(ORPHAN_SWEEP_MAX_ANCHORS);
+    expect(result?.items).toHaveLength(ORPHAN_SWEEP_MAX_ANCHORS);
+    // #790 review: more candidates existed than the cap could classify —
+    // the sweep must say so, not report a silently-clean result.
+    expect(result?.truncated).toBe(true);
   });
 
   // #790 review (Maintainability/Supportability/Documentation/Conformance):
@@ -401,7 +451,7 @@ describe('#790 sweepOrphanAnchors', () => {
         body: ANCHOR_BODY([1]),
       })),
     ];
-    const items = sweepOrphanAnchors(
+    const result = sweepOrphanAnchors(
       state,
       () => listed,
       readerFrom({
@@ -409,8 +459,9 @@ describe('#790 sweepOrphanAnchors', () => {
         4146: truth({ state: 'OPEN' }),
       })
     );
-    expect(items).toHaveLength(1);
-    expect(items?.[0]?.anchor).toBe(4244);
+    expect(result?.items).toHaveLength(1);
+    expect(result?.items[0]?.anchor).toBe(4244);
+    expect(result?.truncated).toBe(false); // the one real orphan fit well within the cap
   });
 
   // #790 review (Conformance/AC6): the earlier version of this test could
@@ -478,14 +529,14 @@ describe('#790 sweepOrphanAnchors', () => {
     );
     expect(read).toBeDefined();
 
-    const items = sweepOrphanAnchors(createEmptyState(), list, read as IssueCloseReader, {
+    const result = sweepOrphanAnchors(createEmptyState(), list, read as IssueCloseReader, {
       repo: REPO,
     });
 
     // The sweep genuinely drove real gh calls (proving this isn't a no-op).
     expect(calls.length).toBeGreaterThanOrEqual(3); // list + anchor read + 2 member reads
-    expect(items).not.toBeNull();
-    expect(items?.[0]?.verdict).toBe('orphan-closable-candidate');
+    expect(result).not.toBeNull();
+    expect(result?.items[0]?.verdict).toBe('orphan-closable-candidate');
 
     const isWrite = (argv: string[]): boolean => {
       const [, ...args] = argv;

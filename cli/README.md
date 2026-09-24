@@ -1457,18 +1457,29 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   ledger sweep's bare `closable`: without a ledger there is no
   eviction/requeue trail to rule out, so even a clean read is a candidate for
   a human to confirm, not an engine-actionable verdict. Classifies at most 20
-  anchors per run (`ORPHAN_SWEEP_MAX_ANCHORS`) from a larger raw fetch (`gh`
-  lists newest-first, so the fetch itself is wider than the cap); the anchor
-  body is untrusted (anyone who can edit an open `batch-epic` issue controls
-  it) — a member number outside the valid GitHub issue range is dropped, a
-  body over 50 members refuses with zero reads, and an unsafe `base_branch`
-  value falls back to `main`. Like the ledger sweep, purely report-only — it
-  has no write capability at all, proven by a recording-exec test over the
-  real gh-argv-building path. Separately, `abandon --batch` warns (stderr
-  line, correctly labeled `sched abandon` — not `sched status` — plus a
-  journaled `batch-anchor-open-on-abandon` event) rather than refuses when it
-  dissolves a batch whose anchor is still open on GitHub — a courtesy at the
-  moment an operator ends the batch's active lifecycle, never a gate.
+  anchors per run (`ORPHAN_SWEEP_MAX_ANCHORS`, 20) from a larger raw fetch
+  (`ORPHAN_LIST_FETCH_LIMIT`, 100 — `gh` lists newest-first, so the fetch
+  itself is wider than the cap); a cap that still leaves candidates unprobed
+  sets `orphan_anchors_truncated` and prints a truncation line, rather than
+  looking like a complete, clean sweep. The anchor body is untrusted (anyone
+  who can edit an open `batch-epic` issue controls it) — a member number
+  outside the valid GitHub issue range is dropped, a body over 50 members
+  refuses with zero reads, and `base_branch` is checked twice: syntactically
+  (falls back to `main` if unsafe) and then against the expected/configured
+  base — a value naming any OTHER branch, even a syntactically valid one,
+  can never be `orphan-closable-candidate`, only `orphan-needs-operator`
+  with reason `base-branch-nonstandard:<value>` (it decides what counts as
+  shipped; an editable issue field does not get to pick that alone). Like
+  the ledger sweep, purely report-only — it has no write capability at all,
+  proven by a recording-exec test over the real gh-argv-building path.
+  Separately, `abandon --batch` warns (stderr line, correctly labeled `sched
+  abandon` — not `sched status` — plus a journaled
+  `batch-anchor-open-on-abandon` event, and an additive `anchor_open` field
+  on `abandon --json`) rather than refuses when it dissolves a batch whose
+  anchor is still open on GitHub — a courtesy at the moment an operator ends
+  the batch's active lifecycle, never a gate. The repo-verification exec on
+  this path is timed (10s) too, so an abandon that used to make no network
+  calls at all cannot hang on an unresponsive `gh`.
   `--once` runs a single tick (cron-style); Ctrl-C stops
   the engine while spawned agents keep running. Pids are identity-guarded via
   `/proc` start-times (a reused pid is never signalled; best-effort on macOS/Windows),

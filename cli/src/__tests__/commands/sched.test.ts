@@ -1278,6 +1278,24 @@ describe('ai-dossier sched pause/resume/abandon', () => {
     stderrSpy.mockRestore();
   });
 
+  it('#790: abandon --batch --json carries an additive anchor_open field (null when the check could not run)', async () => {
+    const manifest = path.join(home, 'm2b.json');
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({ entries: [{ issue: 1, mode: 'slot', batch: 'by', anchor: 9002 }] })
+    );
+    await runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj']);
+    logs.length = 0;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await runSched(['sched', 'abandon', '--batch', 'by', '--project', 'test-proj', '--json']);
+
+    const parsed = JSON.parse(logs.join(''));
+    expect(parsed).toMatchObject({ abandoned: 'batch:by', anchor_open: null });
+    expect(parsed.requeued).toBeDefined();
+    stderrSpy.mockRestore();
+  });
+
   it('rejects abandoning with both --issue and --batch', async () => {
     await expect(
       runSched(['sched', 'abandon', '--issue', '1', '--batch', 'b', '--project', 'test-proj'])

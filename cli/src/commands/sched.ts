@@ -625,6 +625,13 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
           ? report.orphan_anchors.map(renderOrphanAnchorItem).join('\n')
           : '(none)'
       );
+      // #790 review: a cap that silently drops candidates reads as a clean,
+      // complete sweep on a busy repo where it is neither — say so.
+      if (report.orphan_anchors_truncated) {
+        lines.push(
+          `(list truncated at ${ORPHAN_SWEEP_MAX_ANCHORS} classified — more open batch-epic anchors exist beyond what is shown above)`
+        );
+      }
     }
   }
   return lines.join('\n');
@@ -643,7 +650,7 @@ const ANCHOR_SWEEP_TIMEOUT_MS = 10_000;
  * exclusion ever runs. Still bounded — a single `gh` call, not one per
  * anchor.
  */
-const ORPHAN_LIST_FETCH_LIMIT = ORPHAN_SWEEP_MAX_ANCHORS * 3;
+const ORPHAN_LIST_FETCH_LIMIT = 100;
 
 /**
  * `sched status --anchors`' GitHub-side lister for the #790 orphan sweep:
@@ -710,17 +717,23 @@ function anchorReaderFor(
   project: string,
   context: string
 ): { read: IssueCloseReader; repo: string; commitInBase: CommitInBase; exec: ExecFn } | undefined {
-  const repo = resolveProjectRepo(project, defaultExec);
+  // #790 review (supportability): `resolveProjectRepo` used to run through
+  // the untimed `defaultExec` — `sched abandon --batch` previously made no
+  // network calls at all, so this path could hang past the abandon itself
+  // on an unresponsive `gh`. Build the timed exec FIRST and use it for the
+  // repo check too, so every call this function makes shares the same
+  // bound.
+  const exec = createExecFn(ANCHOR_SWEEP_TIMEOUT_MS, {
+    onError: (file, args, err) =>
+      process.stderr.write(`⚠ ${context}: '${file} ${args.join(' ')}' failed: ${err.message}\n`),
+  });
+  const repo = resolveProjectRepo(project, exec);
   if (repo === null) {
     process.stderr.write(
       `⚠ ${context}: anchor check skipped — the current directory is not ${project}'s GitHub repository\n`
     );
     return undefined;
   }
-  const exec = createExecFn(ANCHOR_SWEEP_TIMEOUT_MS, {
-    onError: (file, args, err) =>
-      process.stderr.write(`⚠ ${context}: '${file} ${args.join(' ')}' failed: ${err.message}\n`),
-  });
   const read = issueCloseReader(createExecGroundTruth(exec, { repoDir: process.cwd(), repo }));
   if (read === undefined) return undefined;
   return {
@@ -1813,18 +1826,26 @@ function registerAbandonSubcommand(cmd: Command): void {
             const r = abandonBatch(state, opts.batch as string, reason);
             return { state: r.state, result: { requeued: r.requeued, anchor } };
           });
+          // #790: never a refusal — the dissolve above already committed.
+          // This is a courtesy warning only, run after the lock (a GitHub
+          // read, never inside `withLock` — see `anchorReaderFor`'s own
+          // comment on why network I/O stays outside it). Run before the
+          // JSON output below so `--json` can carry its result too, not
+          // just the stderr line.
+          const anchorOpen = warnIfAbandonedAnchorOpen(store, project, opts.batch, anchor);
           if (opts.json) {
-            console.log(JSON.stringify({ abandoned: `batch:${opts.batch}`, requeued }));
+            console.log(
+              JSON.stringify({
+                abandoned: `batch:${opts.batch}`,
+                requeued,
+                anchor_open: anchorOpen,
+              })
+            );
           } else {
             console.log(
               `✓ Dissolved batch ${opts.batch}; requeued ${requeued.length} member(s) as full-cycle`
             );
           }
-          // #790: never a refusal — the dissolve above already committed.
-          // This is a courtesy warning only, run after the lock (a GitHub
-          // read, never inside `withLock` — see `anchorReaderFor`'s own
-          // comment on why network I/O stays outside it).
-          warnIfAbandonedAnchorOpen(store, project, opts.batch, anchor);
         }
       } catch (err) {
         handleKnownError(err);
@@ -1907,18 +1928,22 @@ function registerRequeueSubcommand(cmd: Command): void {
  * gives up on the "still open" question specifically: a false "still open"
  * would be worse than saying nothing about THAT, but the failure itself is
  * never hidden.
+ *
+ * Returns the anchor number when it warned (still open), else `null` — the
+ * caller folds this into `abandon --json`'s additive `anchor_open` field
+ * (#790 review) so a JSON consumer sees the warning too, not just stderr.
  */
 function warnIfAbandonedAnchorOpen(
   store: SchedStore,
   project: string,
   batchId: string,
   anchor: number | null
-): void {
-  if (anchor === null) return;
+): number | null {
+  if (anchor === null) return null;
   const reader = anchorReaderFor(project, 'sched abandon');
-  if (reader === undefined) return;
+  if (reader === undefined) return null;
   const stillOpen = batchAnchorStillOpen({ anchor }, reader.read);
-  if (stillOpen === null) return;
+  if (stillOpen === null) return null;
   const message = `batch ${batchId} abandoned with its anchor #${stillOpen} still open on GitHub — sched status --anchors will surface it as needs-operator; close it by hand once its members are accounted for`;
   process.stderr.write(`⚠ sched abandon: ${message}\n`);
   new Journal(store.dir).append(
@@ -1926,6 +1951,7 @@ function warnIfAbandonedAnchorOpen(
       detail: `anchor #${stillOpen} still open`,
     })
   );
+  return stillOpen;
 }
 
 function registerStopSubcommand(cmd: Command): void {

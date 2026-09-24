@@ -543,6 +543,9 @@ export function sweepAnchors(
 const ORPHAN_MEMBER_RE = /^- \[[ xX]\] #(\d+)/gm;
 const ORPHAN_BASE_BRANCH_RE = /^base_branch:\s*(\S+)/m;
 
+/** The base branch `parseOrphanAnchorBody` falls back to, and `classifyOrphanAnchor` treats as the expected/project-standard base absent an `expectedBaseBranch` override — what `gate-issue` itself defaults to. */
+export const DEFAULT_ORPHAN_BASE_BRANCH = 'main';
+
 /** The largest issue number a GitHub GraphQL `Int!` variable accepts — a member number above this could never be a real issue, so it is dropped rather than sent to `read`. */
 const MAX_GITHUB_ISSUE_NUMBER = 2 ** 31 - 1;
 
@@ -591,7 +594,8 @@ export function parseOrphanAnchorBody(body: string): {
   const members_over_cap = deduped.length > ORPHAN_SWEEP_MAX_MEMBERS;
   const members = members_over_cap ? deduped.slice(0, ORPHAN_SWEEP_MAX_MEMBERS) : deduped;
   const rawBranch = ORPHAN_BASE_BRANCH_RE.exec(body)?.[1];
-  const base_branch = rawBranch !== undefined && SAFE_REF_RE.test(rawBranch) ? rawBranch : 'main';
+  const base_branch =
+    rawBranch !== undefined && SAFE_REF_RE.test(rawBranch) ? rawBranch : DEFAULT_ORPHAN_BASE_BRANCH;
   return { members, base_branch, members_over_cap };
 }
 
@@ -638,7 +642,7 @@ export type OrphanAnchorVerdict = {
 export function classifyOrphanAnchor(
   candidate: OrphanAnchorCandidate,
   read: IssueCloseReader,
-  opts: { repo?: string; commitInBase?: CommitInBase } = {}
+  opts: { repo?: string; commitInBase?: CommitInBase; expectedBaseBranch?: string } = {}
 ): OrphanAnchorVerdict | null {
   const ground = anchorGroundVerdict(read, candidate.anchor);
   if (ground.kind === 'anchor-closed') {
@@ -662,6 +666,23 @@ export function classifyOrphanAnchor(
   // the wrong batch. Refuse without a single GitHub read.
   if (candidate.members_over_cap === true) {
     return { kind: 'orphan-needs-operator', reasons: ['members-over-cap'], members: [] };
+  }
+  // #790 review: `base_branch` is parsed from the same untrusted body as
+  // `members` — `parseOrphanAnchorBody` already refuses a syntactically
+  // UNSAFE value (falls back to `main`), but a syntactically valid one that
+  // simply names a DIFFERENT branch is not thereby trustworthy: it decides
+  // what counts as "shipped" (`shippingEvidence`), so a value that does not
+  // match the project's expected base is never allowed to produce
+  // `orphan-closable-candidate` — needs-operator, unconditionally, citing the
+  // value, so a human confirms it rather than the sweep silently trusting an
+  // editable issue field to pick which branch code must land on to count.
+  const expectedBase = opts.expectedBaseBranch ?? DEFAULT_ORPHAN_BASE_BRANCH;
+  if (candidate.base_branch !== expectedBase) {
+    return {
+      kind: 'orphan-needs-operator',
+      reasons: [`base-branch-nonstandard:${candidate.base_branch}`],
+      members: [],
+    };
   }
   const extraReasons = ground.handedBack ? ['anchor-handed-back'] : [];
   const gh = readMembersShipping(
@@ -708,6 +729,19 @@ export interface OrphanAnchorReportItem {
 }
 
 /**
+ * {@link sweepOrphanAnchors}'s result: the classified rows plus whether the
+ * cap left anything unprobed. `truncated` distinguishes "these are ALL the
+ * open orphans" from "more may exist beyond what was classified" — silently
+ * capping without saying so would read as a complete, clean sweep on a busy
+ * repo where it is neither.
+ */
+export interface OrphanAnchorSweepResult {
+  items: OrphanAnchorReportItem[];
+  /** True when more ledger-unbound open `batch-epic` anchors existed than {@link ORPHAN_SWEEP_MAX_ANCHORS} could classify this run. */
+  truncated: boolean;
+}
+
+/**
  * `sched status --anchors`' orphan sweep (#790): every open `batch-epic`
  * anchor in the pinned project repo whose batch is no longer in
  * `state.batches` — invisible to {@link sweepAnchors}, which only walks the
@@ -717,13 +751,15 @@ export interface OrphanAnchorReportItem {
  * only ever builds and returns {@link OrphanAnchorReportItem} rows.
  *
  * `null` means the list itself failed (an unverified repo, or `gh`
- * unreachable) — distinct from `[]` ("asked, found zero orphans"), the same
- * null-vs-empty convention `StatusReport.anchors`/`orphan_anchors` already
- * use for "the sweep did not run at all". Ledger-tracked anchors are
- * excluded BEFORE the {@link ORPHAN_SWEEP_MAX_ANCHORS} cap is applied — a
- * busy repo with 20+ open ledger-tracked `batch-epic` anchors must not let
- * them crowd out the orphans this sweep exists to find. Classifying stops at
- * the first failed member/anchor read (the same fail-closed posture as
+ * unreachable) — distinct from `{items: [], truncated: false}` ("asked,
+ * found zero orphans"), the same null-vs-empty convention
+ * `StatusReport.anchors`/`orphan_anchors` already use for "the sweep did not
+ * run at all". Ledger-tracked anchors are excluded BEFORE the
+ * {@link ORPHAN_SWEEP_MAX_ANCHORS} cap is applied — a busy repo with 20+ open
+ * ledger-tracked `batch-epic` anchors must not let them crowd out the
+ * orphans this sweep exists to find; `truncated=true` when the cap still
+ * left real orphan candidates unprobed. Classifying stops at the first
+ * failed member/anchor read (the same fail-closed posture as
  * `sweepAnchors`): every anchor after that point is reported `orphan-unknown`
  * without a further call.
  */
@@ -731,14 +767,15 @@ export function sweepOrphanAnchors(
   state: SchedState,
   list: OpenAnchorLister,
   read: IssueCloseReader,
-  opts: { repo?: string; commitInBase?: CommitInBase } = {}
-): OrphanAnchorReportItem[] | null {
+  opts: { repo?: string; commitInBase?: CommitInBase; expectedBaseBranch?: string } = {}
+): OrphanAnchorSweepResult | null {
   const anchors = list();
   if (anchors === undefined) return null;
   const ledgerAnchors = new Set(
     state.batches.map((b) => b.anchor).filter((a): a is number => a !== null)
   );
   const orphanCandidates = anchors.filter((issue) => !ledgerAnchors.has(issue.number));
+  const truncated = orphanCandidates.length > ORPHAN_SWEEP_MAX_ANCHORS;
   const items: OrphanAnchorReportItem[] = [];
   let aborted = false;
   for (const issue of orphanCandidates.slice(0, ORPHAN_SWEEP_MAX_ANCHORS)) {
@@ -760,7 +797,7 @@ export function sweepOrphanAnchors(
       members: verdict.members,
     });
   }
-  return items;
+  return { items, truncated };
 }
 
 // --- #790: warn (never refuse) when a batch with an open anchor is dropped ---
