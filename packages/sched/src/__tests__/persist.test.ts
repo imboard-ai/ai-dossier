@@ -756,6 +756,43 @@ describe('#771 config: max_full_review_members', () => {
   });
 });
 
+describe('#809 config: member_parallelism', () => {
+  it('round-trips member_parallelism through save/load, absent by default', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-809-'));
+    try {
+      const store = new SchedStore(dir);
+      store.saveConfig({ max_slots: 2 });
+      expect(store.loadConfig().member_parallelism).toBeUndefined();
+      store.saveConfig({ max_slots: 2, member_parallelism: 1 });
+      expect(store.loadConfig().member_parallelism).toBe(1);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-positive member_parallelism (degrades to defaults, loudly)', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-809-'));
+    try {
+      const store = new SchedStore(dir);
+      fs.writeFileSync(
+        store.configPath,
+        JSON.stringify({ schema_version: '1.9.0', max_slots: 2, member_parallelism: 0 })
+      );
+      const err = console.error;
+      const warnings: string[] = [];
+      console.error = (msg: string) => warnings.push(msg);
+      try {
+        expect(store.loadConfig()).toEqual({ max_slots: 3 });
+      } finally {
+        console.error = err;
+      }
+      expect(warnings[0]).toContain('member_parallelism');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('#537 config: auto_upgrade', () => {
   it('round-trips auto_upgrade through save/load', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-persist-537-'));

@@ -18,6 +18,7 @@ import {
   type TierExecutor,
   tierExecutors,
 } from './dispatch';
+import { batchOfUnit } from './journal';
 import type { EngineLeaseStatus } from './persist';
 import {
   batchBlockers,
@@ -166,8 +167,10 @@ function formatHours(hours: number): string {
 
 /** The `sched stop` invocation that releases `unit` (`issue:<n>` / `batch:<id>`). */
 function stopRemedy(unit: string): string {
-  return unit.startsWith('batch:')
-    ? `sched stop --batch ${unit.slice('batch:'.length)}`
+  // #809: a parallel member's unit `batch:<id>#<issue>` is stopped with its batch.
+  const batchId = batchOfUnit(unit);
+  return batchId !== null
+    ? `sched stop --batch ${batchId}`
     : `sched stop --issue ${unit.slice('issue:'.length)}`;
 }
 

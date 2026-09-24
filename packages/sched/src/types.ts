@@ -402,6 +402,64 @@ export interface QueueEntry {
   updated_at: string;
 }
 
+/**
+ * How a batch dispatches its members (#809). Decided ONCE, at the batch's
+ * `ready → executing` claim, and persisted so a batch never flips mode
+ * mid-run:
+ * - `parallel` — every member runs concurrently in its own slot and worktree
+ *   (bounded by `SchedConfig.member_parallelism`, default `max_slots`, and free
+ *   capacity), each cut off the integration branch; verified members land in
+ *   MEMBER ORDER, rebased onto the integration tip (RFC-0001 §J.3 as the
+ *   batch-cycle skill and prep dossier describe it).
+ * - `serial` — the pre-#809 shape: one slot per batch, one member at a time,
+ *   each ff-landed before the next is cut. Selected for a batch with eviction
+ *   groups or intra-batch deps (a member built on another's work must see it),
+ *   or when `member_parallelism` is 1.
+ */
+export type MemberDispatchMode = 'serial' | 'parallel';
+
+/** Closed vocabulary of {@link MemberRunStatus} (#809) — `validateState` checks against it. */
+export const MEMBER_RUN_STATUSES = ['running', 'verified', 'landed', 'evicted'] as const;
+
+/** Lifecycle of one parallel member run (#809) — see {@link MemberRun}. */
+export type MemberRunStatus = (typeof MEMBER_RUN_STATUSES)[number];
+
+/**
+ * One member's dispatch under `member_dispatch === 'parallel'` (#809) — the
+ * per-member analogue of `BatchEntry.member_branch`/`member_worktree`/
+ * `member_pool_claimed`, which describe only the CURRENT member of a serial
+ * batch.
+ *
+ * `running` (its agent holds slot `batch:<id>#<issue>`, or is waiting for one
+ * after an api-error hold) → `verified` (review done + incremental gate did not
+ * evict it; waits for every earlier member to resolve) → `landed` (rebased onto
+ * the integration tip and fast-forwarded in) — or `evicted` at any point before
+ * landing.
+ */
+export interface MemberRun {
+  issue: number;
+  /** 1-based position in `BatchEntry.members` — names the member branch/log exactly like serial mode. */
+  index: number;
+  branch: string;
+  worktree: string;
+  pool_claimed: boolean;
+  status: MemberRunStatus;
+  /**
+   * The capability id whose gate verdict was inconclusive (`gate-inconclusive:<cap>`),
+   * or null. Such a member still lands (F.11: its commit stays on the branch) and
+   * keeps its worktree; once every member is resolved the batch blocks on it so
+   * `sched resume --batch` can recheck it exactly as in serial mode.
+   */
+  gate_inconclusive: string | null;
+  /**
+   * Whether this run's worktree has been torn down (pool-returned or removed).
+   * Set only AFTER the teardown, so a crash in between — or a batch ended by
+   * `sched stop`/`abandon`, which never runs a teardown — leaves `false`, and
+   * `teardownBatch`/the terminal-batch arm tear it down (idempotently) later.
+   */
+  torn_down: boolean;
+}
+
 /** A batch of slot-mode issues sharing one lifecycle (RFC-0001 §C.4/E.4). */
 export interface BatchEntry {
   id: string;
@@ -419,7 +477,12 @@ export interface BatchEntry {
    * found (an operator manually deferring full-cycle entries by hand).
    */
   priority: number;
-  /** Index of the member currently in work, when status is `executing` (1-based member pointer). */
+  /**
+   * Index of the member currently in work, when status is `executing` (1-based
+   * member pointer). #809: under `member_dispatch === 'parallel'` it is the
+   * highest member index dispatched so far (see `member_runs` for per-member
+   * state), and a gate-inconclusive block points it at the blocked member.
+   */
   executing_member: number;
   /**
    * The batch ANCHOR issue — where every batch milestone posts (#472 AC5).
@@ -615,6 +678,19 @@ export interface BatchEntry {
   anchor_close_failed_reason: string | null;
   anchor_close_failed_since: string | null;
   anchor_close_failed_ticks: number;
+  /**
+   * #809: how this batch dispatches its members — decided once at the
+   * `ready → executing` claim (see {@link MemberDispatchMode}). `null` until
+   * then; a batch loaded from a pre-1.23.0 state file backfills `null`, and a
+   * null mode on a batch already past `ready` reads as `serial` — a live batch
+   * never changes mode across an engine upgrade.
+   */
+  member_dispatch: MemberDispatchMode | null;
+  /**
+   * #809: per-member dispatch records for a `parallel` batch, in dispatch
+   * order; always `[]` for a serial batch. Backfilled `[]` on load.
+   */
+  member_runs: MemberRun[];
   created_at: string;
   updated_at: string;
 }
@@ -623,7 +699,7 @@ export interface BatchEntry {
 export interface SlotEntry {
   id: number;
   status: SlotStatus;
-  /** Unit identifier currently held: `issue:<n>` or `batch:<id>`; null when idle. */
+  /** Unit identifier currently held: `issue:<n>`, `batch:<id>`, or a parallel batch member's `batch:<id>#<issue>` (#809); null when idle. */
   unit: string | null;
   /** OS pid of the spawned agent process, when known (#464 dispatch). */
   pid: number | null;
@@ -903,6 +979,13 @@ export interface SchedConfig {
    * still letting risk-floor issues join. Enforced at enqueue.
    */
   max_full_review_members?: number;
+  /**
+   * #809: at most this many members of ONE batch run concurrently. Default
+   * (absent): bounded only by `max_slots` / free capacity. `1` selects serial
+   * member dispatch for every batch (the pre-#809 behavior). Batches with
+   * eviction groups or intra-batch deps are serial regardless.
+   */
+  member_parallelism?: number;
 }
 
 /**
@@ -1253,8 +1336,12 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * 1.22.0 (#768): `BatchEntry` gains `anchor_closed_at` and the
  * `anchor_close_failed_reason`/`_since`/`_ticks` dedup marker;
  * `null`/`null`/`null`/`0` backfilled on load.
+ * 1.23.0 (#809): `BatchEntry` gains `member_dispatch` (serial|parallel, decided
+ * at the executing claim) and `member_runs` (parallel members' own
+ * branch/worktree/status); `null`/`[]` backfilled on load — a null mode past
+ * `ready` reads as serial, so batches in flight keep their serial rail.
  */
-export const SCHEMA_VERSION = '1.22.0' as const;
+export const SCHEMA_VERSION = '1.23.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1280,6 +1367,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.19.0',
   '1.20.0',
   '1.21.0',
+  '1.22.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
@@ -1315,6 +1403,8 @@ export interface SchedConfigFile {
    * still letting risk-floor issues join. Enforced at enqueue.
    */
   max_full_review_members?: number;
+  /** #809: per-batch member concurrency cap — see `SchedConfig.member_parallelism`. */
+  member_parallelism?: number;
 }
 
 export const DEFAULT_MAX_SLOTS = 3;
@@ -1622,7 +1712,7 @@ export type SlotReleaseReason =
 export interface JournalEvent {
   ts: string;
   event: JournalEventName;
-  /** Unit the event concerns (`issue:<n>` / `batch:<id>`), when applicable. */
+  /** Unit the event concerns (`issue:<n>` / `batch:<id>`; parallel member events use `batch:<id>` plus `issue`), when applicable. */
   unit?: string;
   slot?: number;
   issue?: number;

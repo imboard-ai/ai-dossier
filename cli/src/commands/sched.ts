@@ -75,6 +75,7 @@ import {
   schedStateDir,
   schedTelemetryEnabled,
   setPaused,
+  slotsForBatch,
   stopBatch,
   stopIssue,
   TEARDOWN_TIMEOUT_MS,
@@ -500,7 +501,12 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
             formatBatchStatus(b),
             String(b.priority),
             b.members.length > 0 ? b.members.map((m) => `#${m}`).join(',') : '-',
-            b.executing_member > 0 ? `${b.executing_member}/${b.members.length}` : '-',
+            // #809: a parallel batch has no single member in work — summarize its runs.
+            b.member_dispatch === 'parallel'
+              ? parallelMemberSummary(b.member_runs, b.members.length)
+              : b.executing_member > 0
+                ? `${b.executing_member}/${b.members.length}`
+                : '-',
             b.anchor !== null ? `#${b.anchor}` : '-',
             b.worktree ?? '-',
             // #707: the dispatch family this batch recorded at enqueue —
@@ -1567,6 +1573,17 @@ function registerStatsSubcommand(cmd: Command): void {
     });
 }
 
+/**
+ * #809: the `member-in-work` cell of a parallel batch — `∥ 2 running, 1 landed /3`
+ * rather than a pointer that reads as "member 3 of 3" while three still run.
+ */
+function parallelMemberSummary(runs: ReadonlyArray<{ status: string }>, members: number): string {
+  if (runs.length === 0) return `∥ 0/${members}`;
+  const counts = new Map<string, number>();
+  for (const r of runs) counts.set(r.status, (counts.get(r.status) ?? 0) + 1);
+  return `∥ ${[...counts].map(([status, n]) => `${n} ${status}`).join(', ')} /${members}`;
+}
+
 function registerAbandonSubcommand(cmd: Command): void {
   cmd
     .command('abandon')
@@ -1595,7 +1612,16 @@ function registerAbandonSubcommand(cmd: Command): void {
             console.log(`✓ Abandoned issue #${issue} (released ${result.length} slot(s))`);
           }
         } else if (opts.batch) {
+          const spawnDeps = createSpawnDeps(process.cwd());
           const requeued = store.withLock((state) => {
+            // #809: abandon requeues every member full-cycle — an agent still
+            // running in one of the batch's slots (a parallel member holds its
+            // own) would keep working a unit the engine is about to redispatch.
+            for (const slot of slotsForBatch(state, opts.batch as string)) {
+              if (slot.pid !== null && spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
+                spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
+              }
+            }
             const r = abandonBatch(state, opts.batch as string, reason);
             return { state: r.state, result: r.requeued };
           });
@@ -1638,13 +1664,17 @@ function registerStopSubcommand(cmd: Command): void {
       try {
         const result = store.withLock((state) => {
           const unit = opts.batch ? `batch:${opts.batch}` : `issue:${issue}`;
-          const slot = state.slots.find((candidate) => candidate.unit === unit);
-          const terminated =
-            slot?.pid !== null &&
-            slot?.pid !== undefined &&
-            spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
-              ? spawnDeps.kill(slot.pid, slot.pid_start ?? undefined)
-              : false;
+          // #809: a parallel batch also holds one slot per running member
+          // (`batch:<id>#<issue>`) — terminate every one of them.
+          const slots = opts.batch
+            ? slotsForBatch(state, opts.batch)
+            : state.slots.filter((candidate) => candidate.unit === unit);
+          let terminated = false;
+          for (const slot of slots) {
+            if (slot.pid !== null && spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
+              terminated = spawnDeps.kill(slot.pid, slot.pid_start ?? undefined) || terminated;
+            }
+          }
           const stopped = opts.batch
             ? stopBatch(state, opts.batch, opts.reason)
             : stopIssue(state, issue as number, opts.reason);

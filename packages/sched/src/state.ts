@@ -9,6 +9,8 @@
  * non-terminal issue status rather than repeated per row.
  */
 
+import * as path from 'node:path';
+import { SAFE_REF_RE } from './attribution';
 import { DISPATCH_PROFILE_RE, memberDispatchTier } from './dispatch';
 import { issueOfUnit } from './journal';
 import {
@@ -23,6 +25,7 @@ import {
   IllegalTransitionError,
   type IssueStatus,
   LEGACY_SCHEMA_VERSIONS,
+  MEMBER_RUN_STATUSES,
   type QueueEntry,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
@@ -292,6 +295,8 @@ export function createBatch(
     pr_watch_failed_ticks: 0,
     anchor_closed_at: null,
     ...CLEARED_ANCHOR_CLOSE_FAILED_FIELDS,
+    member_dispatch: null,
+    member_runs: [],
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -299,6 +304,8 @@ export function createBatch(
 
 const ISSUE_STATUSES = new Set<string>(Object.keys(ISSUE_BASE_TRANSITIONS));
 const BATCH_STATUSES = new Set<string>(Object.keys(BATCH_TRANSITIONS));
+/** #809: the closed vocabulary `validateState` accepts for `MemberRun.status`. */
+const MEMBER_RUN_STATUS_SET = new Set<string>(MEMBER_RUN_STATUSES);
 const SLOT_STATUSES = new Set<string>(Object.keys(SLOT_BASE_TRANSITIONS));
 const CYCLE_MODES = new Set(['full', 'slot']);
 const MODEL_TIERS = new Set(['mechanical', 'mid', 'strong']);
@@ -687,6 +694,55 @@ export function validateState(data: unknown): SchedState {
         `Batch ${batch.id}: dispatch_profile must match ${DISPATCH_PROFILE_RE} or be null, got ${String(batch.dispatch_profile)}`
       );
     }
+    // #809: absent (pre-1.23.0) and null are both "not decided yet".
+    if (
+      batch.member_dispatch !== undefined &&
+      batch.member_dispatch !== null &&
+      batch.member_dispatch !== 'serial' &&
+      batch.member_dispatch !== 'parallel'
+    ) {
+      throw new Error(
+        `Batch ${batch.id}: member_dispatch must be "serial", "parallel", or null, got ${String(batch.member_dispatch)}`
+      );
+    }
+    if (batch.member_runs !== undefined) {
+      if (!Array.isArray(batch.member_runs)) {
+        throw new Error(`Batch ${batch.id}: member_runs must be an array`);
+      }
+      for (const run of batch.member_runs as unknown[]) {
+        const r = run as Record<string, unknown>;
+        // These values become git argv, spawn cwds and teardown targets —
+        // hold persisted state to the same shape the code that wrote it
+        // enforced (SAFE_REF_RE branch, absolute resolved path, a member of
+        // this batch), so a corrupt or hand-edited state.json cannot point a
+        // rebase/force-push/teardown somewhere else.
+        const worktree = r.worktree;
+        if (
+          typeof run !== 'object' ||
+          run === null ||
+          !Number.isInteger(r.issue) ||
+          (r.issue as number) <= 0 ||
+          !batch.members.includes(r.issue as number) ||
+          !Number.isInteger(r.index) ||
+          (r.index as number) <= 0 ||
+          typeof r.branch !== 'string' ||
+          !SAFE_REF_RE.test(r.branch) ||
+          typeof worktree !== 'string' ||
+          !path.isAbsolute(worktree) ||
+          path.resolve(worktree) !== worktree ||
+          worktree.includes('\0') ||
+          worktree.includes('\n') ||
+          (r.pool_claimed !== undefined && typeof r.pool_claimed !== 'boolean') ||
+          (r.torn_down !== undefined && typeof r.torn_down !== 'boolean') ||
+          (r.gate_inconclusive !== undefined &&
+            r.gate_inconclusive !== null &&
+            typeof r.gate_inconclusive !== 'string') ||
+          !MEMBER_RUN_STATUS_SET.has(String(r.status))
+        ) {
+          throw new Error(`Batch ${batch.id}: malformed member_runs entry ${JSON.stringify(run)}`);
+        }
+      }
+    }
     if (!Number.isInteger(batch.executing_member) || batch.executing_member < 0) {
       throw new Error(`Batch ${batch.id}: executing_member must be a non-negative integer`);
     }
@@ -1045,6 +1101,17 @@ export function validateState(data: unknown): SchedState {
     anchor_close_failed_reason: batch.anchor_close_failed_reason ?? null,
     anchor_close_failed_since: batch.anchor_close_failed_since ?? null,
     anchor_close_failed_ticks: batch.anchor_close_failed_ticks ?? 0,
+    // 1.22.0 → 1.23.0 (#809): every batch written before parallel member
+    // dispatch ran serially. `null` (not `'serial'`) keeps a still-`ready`
+    // batch free to choose its mode at the claim; past `ready`, a null mode
+    // reads as serial (`isParallelBatch`), so an in-flight batch never flips.
+    member_dispatch: batch.member_dispatch ?? null,
+    member_runs: (batch.member_runs ?? []).map((run) => ({
+      ...run,
+      pool_claimed: run.pool_claimed ?? false,
+      gate_inconclusive: run.gate_inconclusive ?? null,
+      torn_down: run.torn_down ?? false,
+    })),
   }));
 
   return {
@@ -1520,6 +1587,73 @@ export function slotForBatch(state: SchedState, batchId: string): SlotEntry | un
   return state.slots.find((s) => s.unit === batchUnit(batchId));
 }
 
+/**
+ * The `unit` string a PARALLEL batch member's own slot carries (#809):
+ * `batch:<id>#<issue>`. Distinct from {@link batchUnit} so the batch-level
+ * lookups (`slotForBatch`) keep meaning "the batch's setup/tail/report/fix
+ * agent" and never pick up a member's slot. `#` can never occur in a batch id
+ * (enqueue's `BATCH_ID_RE`), so the two shapes cannot collide.
+ */
+export function batchMemberUnit(batchId: string, issue: number): string {
+  return `${batchUnit(batchId)}#${issue}`;
+}
+
+/** The slot currently holding a parallel member's unit, if any (#809). */
+export function slotForBatchMember(
+  state: SchedState,
+  batchId: string,
+  issue: number
+): SlotEntry | undefined {
+  return state.slots.find((s) => s.unit === batchMemberUnit(batchId, issue));
+}
+
+/**
+ * Every non-idle slot a batch holds (#809) — its own `batch:<id>` slot plus
+ * any parallel member slots `batch:<id>#<issue>`. For the whole-batch exits
+ * (stop, abandon, a terminal batch's leak repair, reconcile-error
+ * containment), which must release all of them, not only the batch slot.
+ */
+export function slotsForBatch(state: SchedState, batchId: string): SlotEntry[] {
+  const own = batchUnit(batchId);
+  return state.slots.filter(
+    (s) =>
+      s.status !== 'idle' && s.unit !== null && (s.unit === own || s.unit.startsWith(`${own}#`))
+  );
+}
+
+/** Walk one slot to idle (see {@link NEXT_TOWARD_IDLE}). */
+function walkSlotIdToIdle(state: SchedState, slotId: number, now: Date): SchedState {
+  let next = state;
+  let slot = next.slots.find((s) => s.id === slotId);
+  // Bounded: the longest real walk (recovering → failed → idle, or
+  // running → exited → verifying → complete → idle) is 4 hops.
+  for (let i = 0; i < 8 && slot && slot.status !== 'idle'; i++) {
+    const to = NEXT_TOWARD_IDLE[slot.status];
+    if (to === null) break;
+    next = transitionSlot(next, slot.id, to, {}, now);
+    slot = next.slots.find((s) => s.id === slotId);
+  }
+  return next;
+}
+
+/** Release one parallel member's slot to idle (#809); a no-op when it holds none. */
+export function releaseBatchMemberSlot(
+  state: SchedState,
+  batchId: string,
+  issue: number,
+  now: Date
+): SchedState {
+  const slot = slotForBatchMember(state, batchId, issue);
+  return slot ? walkSlotIdToIdle(state, slot.id, now) : state;
+}
+
+/** Release EVERY slot a batch holds — batch slot and member slots (#809). */
+export function releaseAllBatchSlots(state: SchedState, batchId: string, now: Date): SchedState {
+  let next = state;
+  for (const slot of slotsForBatch(state, batchId)) next = walkSlotIdToIdle(next, slot.id, now);
+  return next;
+}
+
 /** Slot statuses, in the order a walk toward `idle` passes through them. */
 const NEXT_TOWARD_IDLE: Record<SlotStatus, SlotStatus | null> = {
   idle: null,
@@ -1544,19 +1678,14 @@ const NEXT_TOWARD_IDLE: Record<SlotStatus, SlotStatus | null> = {
  * leaked for the life of the state file, with no CLI lever to recover it. One
  * operator `abandon --batch` per leaked slot, against a `max_slots` typically
  * of 3, and the scheduler starves showing nothing but a dead pid.
+ *
+ * #809: releases the batch's OWN slot only — never a parallel member's
+ * (`batch:<id>#<issue>`); the whole-batch exits (`abandonBatch`, `stopBatch`)
+ * now call {@link releaseAllBatchSlots}.
  */
 export function releaseBatchSlot(state: SchedState, batchId: string, now: Date): SchedState {
-  let next = state;
-  let slot = slotForBatch(next, batchId);
-  // Bounded: the longest real walk (recovering → failed → idle, or
-  // running → exited → verifying → complete → idle) is 4 hops.
-  for (let i = 0; i < 8 && slot && slot.status !== 'idle'; i++) {
-    const to = NEXT_TOWARD_IDLE[slot.status];
-    if (to === null) break;
-    next = transitionSlot(next, slot.id, to, {}, now);
-    slot = slotForBatch(next, batchId);
-  }
-  return next;
+  const slot = slotForBatch(state, batchId);
+  return slot ? walkSlotIdToIdle(state, slot.id, now) : state;
 }
 
 /**
