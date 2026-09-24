@@ -2661,6 +2661,44 @@ describe('integration #707: a batch dispatches through its recorded profile', ()
     expect(tailSpawn.model).toBe('glm-strong');
   }, 60_000);
 
+  it('#771: a review=full member dispatches at the PROFILE strong tier even when its manifest tier is lower', () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], {
+      maxSlots: 1,
+      profiles: GLM_PROFILES,
+    });
+    h.enqueue([
+      {
+        issue: 7711,
+        mode: 'slot',
+        batch: 'b-review',
+        anchor: 7710,
+        tier: 'mid',
+        review: 'full',
+        dispatch: 'glm',
+      },
+    ]);
+
+    const result = h.tick();
+    expect(result.spawned).toEqual(['batch:b-review']);
+    const spawned = readSpawned(h.deps.store.dir) as Array<{
+      cmd?: string;
+      model?: string;
+      tier?: string;
+      review?: string;
+      issue?: number;
+    }>;
+    const memberSpawn = spawned[spawned.length - 1];
+    expect(memberSpawn.issue).toBe(7711);
+    // Still the batch's profile family — only the tier is floored.
+    expect(memberSpawn.cmd).toContain('--profile-member=glm');
+    expect(memberSpawn.tier).toBe('strong');
+    expect(memberSpawn.model).toBe('glm-strong');
+    expect(memberSpawn.review).toBe('full');
+    // The manifest tier stays recorded as written.
+    expect(h.state().entries.find((e) => e.issue === 7711)?.tier).toBe('mid');
+  });
+
   it('#713: full-cycle and batch entries both use the requested profile in one tick', () => {
     const repo = scratchRepo();
     const h = batchHarness(repo, ['--mode=batch'], {

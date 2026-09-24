@@ -90,6 +90,7 @@ import {
   DispatchProfileError,
   fileSizeOrZero,
   journalCmdModelFields,
+  memberDispatchTier,
   type ResolvedDispatch,
   resolveProfiledDispatch,
   resolveTierSpawn,
@@ -152,6 +153,7 @@ import type {
   IssueStatus,
   JournalEventName,
   ModelTier,
+  ReviewLevel,
   SchedConfig,
   SchedState,
   SlotEntry,
@@ -1246,7 +1248,11 @@ function spawnMember(
   }
 
   const withStatus = advanceMemberToInWork(state, memberIssue, now);
-  const tier: ModelTier = findEntry(withStatus, memberIssue)?.tier ?? 'mid';
+  const memberEntry = findEntry(withStatus, memberIssue);
+  // #771: a `review=full` member dispatches at `strong` minimum (within this
+  // batch's profile — `dispatch` is already the batch-profiled resolution).
+  const tier: ModelTier = memberEntry ? memberDispatchTier(memberEntry) : 'mid';
+  const review: ReviewLevel = memberEntry?.review ?? 'light';
   const spawnSpec = resolveTierSpawn(dispatch, tier, memberIssue);
   const cmd = spawnSpec.cmd;
   // #677: the prompt carries THIS member's own worktree and the integration
@@ -1257,7 +1263,8 @@ function spawnMember(
     memberIssue,
     batchId,
     member.worktree,
-    batch.branch
+    batch.branch,
+    review
   );
   const logFile = batchMemberLogPath(
     deps.store.runsDir,
@@ -1317,6 +1324,7 @@ function spawnMember(
     unitEvent('spawned', unit(batchId), {
       pid,
       tier,
+      ...(review === 'full' ? { review } : {}),
       slot: slot.id,
       issue: memberIssue,
       ...journalCmdModelFields(spawnSpec),
@@ -2687,7 +2695,10 @@ function recordMemberRunLog(
     return null;
   }
 
-  const tier: ModelTier = findEntry(state, memberIssue)?.tier ?? 'mid';
+  // Same effective tier `spawnMember` dispatched at (#771), so the run log
+  // records the model that actually ran.
+  const memberEntry = findEntry(state, memberIssue);
+  const tier: ModelTier = memberEntry ? memberDispatchTier(memberEntry) : 'mid';
   const { cmd, model } = resolveTierSpawn(dispatch, tier, memberIssue);
   const logFile = batchMemberLogPath(
     deps.store.runsDir,

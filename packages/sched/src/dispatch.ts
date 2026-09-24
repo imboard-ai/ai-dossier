@@ -37,6 +37,7 @@ import {
   DEFAULT_STALL_TIMEOUT_MS,
   type DispatchConfig,
   type ModelTier,
+  type ReviewLevel,
   type SchedConfig,
   TIER_LADDER,
   TIER_ORDER,
@@ -979,26 +980,60 @@ export function buildFixPrompt(
 }
 
 /**
+ * The tier a batch member actually dispatches at (#771): a `review=full`
+ * member runs at `strong` minimum — full-cycle-grade review on a risk-floor
+ * issue is judgment work — whatever tier its manifest asked for. The floor is
+ * applied here, at dispatch, rather than by rewriting `QueueEntry.tier` at
+ * enqueue, so the recorded manifest tier stays what the operator wrote. Only
+ * the TIER is raised: the batch's dispatch profile still picks the executor
+ * for that tier (`resolveTierSpawn`), so the batch stays one agent family.
+ */
+export function memberDispatchTier(entry: { tier: ModelTier; review?: ReviewLevel }): ModelTier {
+  if (entry.review !== 'full') return entry.tier;
+  const floor = TIER_ORDER.indexOf('strong');
+  return TIER_ORDER.indexOf(entry.tier) >= floor ? entry.tier : 'strong';
+}
+
+/**
+ * Appended to a `review=full` member's prompt when the operator's
+ * `member_prompt` template does not place `{review}` itself (#771) — so the
+ * review level reaches the member regardless of template, while a `light`
+ * member's prompt stays byte-identical to the pre-#771 rendering.
+ */
+export const FULL_REVIEW_MEMBER_DIRECTIVE =
+  '\n\nReview level: review=full. This member is a risk-floor issue riding the batch — run ' +
+  'member-cycle with review=full: a full-cycle-grade review (the full review tier, not the ' +
+  'relevance-scoped light review) of your change before handover, and record review=full on ' +
+  'your handover.';
+
+/**
  * Build one batch member's stdin prompt (#523 AC1, #677): `{issue}`, `{batch}`,
- * `{worktree}` and `{integration_branch}` substituted. `batch`, `worktree` and
- * `integration_branch` are flattened — the batch id is enqueue-time-validated
- * but still operator/manifest-supplied text, and flattening locally-derived
- * worktree/branch values is cheap insurance against the same
- * instruction-stream injection `buildFixPrompt` already guards against.
+ * `{worktree}`, `{integration_branch}` and `{review}` (#771) substituted.
+ * `batch`, `worktree` and `integration_branch` are flattened — the batch id is
+ * enqueue-time-validated but still operator/manifest-supplied text, and
+ * flattening locally-derived worktree/branch values is cheap insurance against
+ * the same instruction-stream injection `buildFixPrompt` already guards
+ * against. A `review=full` member whose template has no `{review}`
+ * placeholder gets `FULL_REVIEW_MEMBER_DIRECTIVE` appended.
  */
 export function buildMemberPrompt(
   template: string,
   issue: number,
   batch: string,
   worktree: string,
-  integrationBranch: string
+  integrationBranch: string,
+  review: ReviewLevel = 'light'
 ): string {
-  return renderTemplate(template, {
+  const rendered = renderTemplate(template, {
     issue,
     batch: flattenPromptValue(batch),
     worktree: flattenPromptValue(worktree),
     integration_branch: flattenPromptValue(integrationBranch),
+    review,
   });
+  return review === 'full' && !template.includes('{review}')
+    ? rendered + FULL_REVIEW_MEMBER_DIRECTIVE
+    : rendered;
 }
 
 /**

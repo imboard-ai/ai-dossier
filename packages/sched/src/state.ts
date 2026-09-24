@@ -295,6 +295,7 @@ const BATCH_STATUSES = new Set<string>(Object.keys(BATCH_TRANSITIONS));
 const SLOT_STATUSES = new Set<string>(Object.keys(SLOT_BASE_TRANSITIONS));
 const CYCLE_MODES = new Set(['full', 'slot']);
 const MODEL_TIERS = new Set(['mechanical', 'mid', 'strong']);
+const REVIEW_LEVELS = new Set(['light', 'full']);
 
 function isIsoDateString(value: unknown): value is string {
   return typeof value === 'string' && !Number.isNaN(Date.parse(value));
@@ -361,6 +362,10 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   }
   if (!MODEL_TIERS.has(String(entry.tier))) {
     throw new Error(`${label}: tier must be mechanical | mid | strong`);
+  }
+  // Absent on pre-#771 entries — backfilled to `light` by the migration below.
+  if (entry.review !== undefined && !REVIEW_LEVELS.has(String(entry.review))) {
+    throw new Error(`${label}: review must be 'light' | 'full', got ${String(entry.review)}`);
   }
   if (
     entry.dispatch_profile !== undefined &&
@@ -931,6 +936,9 @@ export function validateState(data: unknown): SchedState {
     // Pre-#713 entries always dispatched through the project default, so null
     // is an exact migration rather than a guessed profile.
     dispatch_profile: entry.dispatch_profile ?? null,
+    // Pre-#771 entries had no review level; every one of them was reviewed
+    // `light` (slot) or ran a full cycle (full), so `light` is exact.
+    review: entry.review ?? 'light',
     // Pre-#632 (1.13.0) entries carry none of these four — no dedup marker
     // was ever recorded under the old once-per-tick behavior, so null/0 is
     // exact, not a guess.

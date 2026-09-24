@@ -425,6 +425,17 @@ export class SchedStore {
         }
         config.default_batch_priority = parsed.default_batch_priority;
       }
+      if (parsed.max_full_review_members !== undefined) {
+        if (
+          !Number.isInteger(parsed.max_full_review_members) ||
+          parsed.max_full_review_members < 0
+        ) {
+          throw new Error(
+            `max_full_review_members must be a non-negative integer, got ${JSON.stringify(parsed.max_full_review_members)}`
+          );
+        }
+        config.max_full_review_members = parsed.max_full_review_members;
+      }
     } catch (err) {
       // Deliberate degrade-to-default (unlike state.json, config is re-derivable
       // operator intent and hard-failing every command on a typo would brick
@@ -437,7 +448,7 @@ export class SchedStore {
           `ALL config (max_slots, stall_timeout_ms, reconcile_interval_ms, pr_poll_interval_ms, ` +
           `label_poll_interval_ms, ` +
           `dispatch command/prompt/models/tiers/phase-timeouts/fence-takeover-timeout/disallowed-tools, auto_upgrade, ` +
-          `dissolve_policy, default_batch_priority) reverted to built-in defaults (max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
+          `dissolve_policy, default_batch_priority, max_full_review_members) reverted to built-in defaults (max_slots=${DEFAULT_MAX_SLOTS}); fix the file and re-run`
       );
       config = { max_slots: DEFAULT_MAX_SLOTS };
     }
@@ -484,6 +495,9 @@ export class SchedStore {
       ...(config.dissolve_policy !== undefined ? { dissolve_policy: config.dissolve_policy } : {}),
       ...(config.default_batch_priority !== undefined
         ? { default_batch_priority: config.default_batch_priority }
+        : {}),
+      ...(config.max_full_review_members !== undefined
+        ? { max_full_review_members: config.max_full_review_members }
         : {}),
     };
     writeAtomic(this.configPath, `${JSON.stringify(file, null, 2)}\n`);
