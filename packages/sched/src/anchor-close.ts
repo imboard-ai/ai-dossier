@@ -218,6 +218,78 @@ export interface MembersVerdictOptions {
   repo?: string;
 }
 
+/** {@link readMembersShipping}'s answer: the GitHub-side half only, no ledger. */
+interface MembersShippingResult {
+  reasons: string[];
+  members: AnchorMemberReport[];
+  /** The member whose read failed, stopping the reads; `null` when every read that ran succeeded. */
+  unreachable: number | null;
+}
+
+/**
+ * The GitHub-only half of the member predicate: every member CLOSED as
+ * `COMPLETED` by shipped code ({@link shippingEvidence}), none handed back.
+ * No ledger involvement — `ledgerStatus` supplies each report's
+ * `ledger_status` display field only, never a disqualifier; callers that
+ * have a ledger entry to consult layer their own blockers on top (see
+ * {@link membersShippedVerdict}). Extracted so {@link classifyOrphanAnchor}
+ * can reuse the identical shipping-evidence logic for a batch that, by
+ * definition, has no ledger entry to consult.
+ *
+ * `exhaustive: false` stops at the first disqualifying fact; `exhaustive:
+ * true` reads every member so the operator sees each one's state. Either way
+ * a failed read stops the reads: GitHub being unreachable is not worth N
+ * more timeouts.
+ */
+function readMembersShipping(
+  members: readonly number[],
+  read: IssueCloseReader,
+  baseBranch: string,
+  opts: { exhaustive: boolean; repo?: string; commitInBase?: CommitInBase },
+  ledgerStatus: (issue: number) => IssueStatus | null
+): MembersShippingResult {
+  const reports: AnchorMemberReport[] = members.map((issue) => ({
+    issue,
+    ledger_status: ledgerStatus(issue),
+    github: 'unknown',
+    state_reason: null,
+    shipped_by: null,
+  }));
+  const reasons: string[] = [];
+  let unreachable: number | null = null;
+  for (const member of reports) {
+    const truth = read(member.issue);
+    if (truth === undefined) {
+      unreachable = member.issue;
+      break;
+    }
+    if (truth.state === 'MISSING') {
+      member.github = 'MISSING';
+      reasons.push(`member-missing:#${member.issue}`);
+      if (!opts.exhaustive) break;
+      continue;
+    }
+    member.github = truth.state;
+    member.state_reason = truth.stateReason;
+    if (truth.state === 'OPEN') {
+      reasons.push(`member-open:#${member.issue}`);
+    } else if (truth.stateReason !== 'COMPLETED') {
+      reasons.push(
+        `member-closed-${(truth.stateReason ?? 'unknown').toLowerCase()}:#${member.issue}`
+      );
+    } else {
+      const evidence = shippingEvidence(truth, baseBranch, opts.repo, opts.commitInBase);
+      if ('shipped' in evidence) member.shipped_by = evidence.shipped;
+      else reasons.push(`member-${evidence.refused}:#${member.issue}`);
+    }
+    if (hasLabel(truth.labels, DECISION_PENDING_LABEL)) {
+      reasons.push(`member-handed-back:#${member.issue}`);
+    }
+    if (reasons.length > 0 && !opts.exhaustive) break;
+  }
+  return { reasons, members: reports, unreachable };
+}
+
 /**
  * The member half of the predicate: every member CLOSED as `COMPLETED` by
  * shipped code ({@link shippingEvidence}), none handed back, and the ledger
@@ -239,54 +311,54 @@ export function membersShippedVerdict(
   opts: MembersVerdictOptions = {}
 ): OpenAnchorVerdict {
   const exhaustive = opts.exhaustive === true;
-  const reasons = [...(opts.extraReasons ?? []), ...anchorLedgerBlockers(state, batch)];
-  const members: AnchorMemberReport[] = batch.members.map((issue) => ({
-    issue,
-    ledger_status: findEntry(state, issue)?.status ?? null,
-    github: 'unknown',
-    state_reason: null,
-    shipped_by: null,
-  }));
-  if (reasons.length > 0 && !exhaustive) return { kind: 'needs-operator', reasons, members };
-
-  let unreachable: number | null = null;
-  for (const member of members) {
-    const truth = read(member.issue);
-    if (truth === undefined) {
-      unreachable = member.issue;
-      break;
-    }
-    if (truth.state === 'MISSING') {
-      member.github = 'MISSING';
-      reasons.push(`member-missing:#${member.issue}`);
-      if (!exhaustive) break;
-      continue;
-    }
-    member.github = truth.state;
-    member.state_reason = truth.stateReason;
-    if (truth.state === 'OPEN') {
-      reasons.push(`member-open:#${member.issue}`);
-    } else if (truth.stateReason !== 'COMPLETED') {
-      reasons.push(
-        `member-closed-${(truth.stateReason ?? 'unknown').toLowerCase()}:#${member.issue}`
-      );
-    } else {
-      const evidence = shippingEvidence(truth, batch.base_branch, opts.repo, opts.commitInBase);
-      if ('shipped' in evidence) member.shipped_by = evidence.shipped;
-      else reasons.push(`member-${evidence.refused}:#${member.issue}`);
-    }
-    if (hasLabel(truth.labels, DECISION_PENDING_LABEL)) {
-      reasons.push(`member-handed-back:#${member.issue}`);
-    }
-    if (reasons.length > 0 && !exhaustive) break;
+  const ledgerReasons = [...(opts.extraReasons ?? []), ...anchorLedgerBlockers(state, batch)];
+  if (ledgerReasons.length > 0 && !exhaustive) {
+    const members: AnchorMemberReport[] = batch.members.map((issue) => ({
+      issue,
+      ledger_status: findEntry(state, issue)?.status ?? null,
+      github: 'unknown',
+      state_reason: null,
+      shipped_by: null,
+    }));
+    return { kind: 'needs-operator', reasons: ledgerReasons, members };
   }
+
+  const gh = readMembersShipping(
+    batch.members,
+    read,
+    batch.base_branch,
+    { exhaustive, repo: opts.repo, commitInBase: opts.commitInBase },
+    (issue) => findEntry(state, issue)?.status ?? null
+  );
+  const reasons = [...ledgerReasons, ...gh.reasons];
   // A known disqualifier outranks an unreachable read: whatever the missing
   // poll would have said, the batch is not closable on this pass.
-  if (reasons.length > 0) return { kind: 'needs-operator', reasons, members };
-  if (unreachable !== null) {
-    return { kind: 'unknown', reasons: [`issue #${unreachable} unreachable`], members };
+  if (reasons.length > 0) return { kind: 'needs-operator', reasons, members: gh.members };
+  if (gh.unreachable !== null) {
+    return {
+      kind: 'unknown',
+      reasons: [`issue #${gh.unreachable} unreachable`],
+      members: gh.members,
+    };
   }
-  return { kind: 'closable', reasons: [], members };
+  return { kind: 'closable', reasons: [], members: gh.members };
+}
+
+/** The anchor issue's own ground truth, shared by {@link classifyAnchor} and {@link classifyOrphanAnchor}. */
+type AnchorGroundVerdict =
+  | { kind: 'anchor-closed' }
+  | { kind: 'anchor-missing' }
+  | { kind: 'unknown'; reasons: string[] }
+  | { kind: 'open'; handedBack: boolean };
+
+function anchorGroundVerdict(read: IssueCloseReader, anchorIssue: number): AnchorGroundVerdict {
+  const anchor = read(anchorIssue);
+  if (anchor === undefined) {
+    return { kind: 'unknown', reasons: [`anchor #${anchorIssue} unreachable`] };
+  }
+  if (anchor.state === 'CLOSED') return { kind: 'anchor-closed' };
+  if (anchor.state === 'MISSING') return { kind: 'anchor-missing' };
+  return { kind: 'open', handedBack: hasLabel(anchor.labels, DECISION_PENDING_LABEL) };
 }
 
 /**
@@ -303,17 +375,13 @@ export function classifyAnchor(
   if (batch.anchor === null) {
     return { kind: 'needs-operator', reasons: ['no-anchor'], members: [] };
   }
-  const anchor = read(batch.anchor);
-  if (anchor === undefined) {
-    return { kind: 'unknown', reasons: [`anchor #${batch.anchor} unreachable`], members: [] };
-  }
-  if (anchor.state === 'CLOSED') return { kind: 'anchor-closed' };
-  if (anchor.state === 'MISSING') {
+  const ground = anchorGroundVerdict(read, batch.anchor);
+  if (ground.kind === 'anchor-closed') return { kind: 'anchor-closed' };
+  if (ground.kind === 'anchor-missing') {
     return { kind: 'needs-operator', reasons: ['anchor-missing'], members: [] };
   }
-  const extraReasons = hasLabel(anchor.labels, DECISION_PENDING_LABEL)
-    ? ['anchor-handed-back']
-    : [];
+  if (ground.kind === 'unknown') return { kind: 'unknown', reasons: ground.reasons, members: [] };
+  const extraReasons = ground.handedBack ? ['anchor-handed-back'] : [];
   return membersShippedVerdict(state, batch, read, { ...opts, extraReasons });
 }
 
@@ -450,4 +518,210 @@ export function sweepAnchors(
     });
   }
   return items;
+}
+
+// --- #790: orphan anchors — batches dropped from `state.batches` entirely ---
+//
+// `sweepAnchors` above only ever sees a batch that is still IN `state.batches`
+// (`openAnchorBatches` filters that array). Nothing in this codebase today
+// removes an entry from `state.batches` — `abandonBatch` dissolves a batch
+// in place (status → `dissolved`, still swept) and the one split path
+// (`recovery.ts`'s halved dissolve) carries the parent's `anchor` forward
+// onto the new half-batches. The one way a batch's row is gone while its
+// GitHub anchor stays open is `state.json` itself being lost or reset
+// (`persist.ts`'s `load()` falls back to `createEmptyState()` when the file
+// is missing) — exactly the imboard#4244/#4253 shape: `sched status --json`
+// showed `batches: []` while both anchors were still open. Whatever the
+// cause, an anchor with no ledger row is invisible to `sweepAnchors`
+// (there is no `BatchEntry` to iterate), so this sweep is GitHub-only: list
+// open `batch-epic` anchors directly, recover membership from the anchor's
+// own issue body, and classify with the same shipping-evidence logic
+// `classifyAnchor` uses.
+
+/** One `- [ ] #N ...` / `- [x] #N ...` member line, plus the `base_branch: <name>` line — both written once at batch creation (`cli/src/batch-compose.ts`) and never edited afterward. */
+const ORPHAN_MEMBER_RE = /^- \[[ xX]\] #(\d+)/gm;
+const ORPHAN_BASE_BRANCH_RE = /^base_branch:\s*(\S+)/m;
+
+/**
+ * Recover a batch anchor's members and base branch from its own issue body —
+ * the only record left once the batch has dropped out of `state.batches`.
+ * The body is the batch-compose format (RFC-0001): one member checklist line
+ * per issue, then metadata lines including `base_branch: <name>`. Nothing in
+ * this codebase edits an anchor's body after creation (verified: no
+ * `gh issue edit ... --body` targets an anchor), so the checklist is already
+ * the complete, stable membership — a `batch-setup` runstate milestone would
+ * only repeat the same list less reliably (missing entirely for an anchor
+ * that predates runstate, or belonging to a requeued run's earlier attempt).
+ * `base_branch` defaults to `main` when the line is missing (pre-metadata
+ * anchors, or a hand-created one) — `shippingEvidence` needs SOME branch to
+ * check a closer against, and `main` is what `gate-issue` defaults to.
+ */
+export function parseOrphanAnchorBody(body: string): { members: number[]; base_branch: string } {
+  const members = [...body.matchAll(ORPHAN_MEMBER_RE)].map((m) => Number(m[1]));
+  const base_branch = ORPHAN_BASE_BRANCH_RE.exec(body)?.[1] ?? 'main';
+  return { members: [...new Set(members)], base_branch };
+}
+
+/** A batch-epic anchor recovered from GitHub, with no `state.batches` row behind it. */
+export interface OrphanAnchorCandidate {
+  anchor: number;
+  members: number[];
+  base_branch: string;
+}
+
+/**
+ * {@link classifyOrphanAnchor}'s answer. Deliberately its own vocabulary —
+ * `orphan-closable-candidate`, never bare `closable` — because without a
+ * ledger there is no failure-trail evidence (no eviction/requeue record to
+ * rule out, the operator's rule from #768 is POSITIVE evidence only): even a
+ * verdict with zero disqualifying reasons is a CANDIDATE for a human to
+ * confirm, not the ledger-backed `sweepAnchors`' stronger `closable`.
+ */
+export type OrphanAnchorVerdict = {
+  kind: 'orphan-closable-candidate' | 'orphan-needs-operator' | 'orphan-unknown';
+  reasons: string[];
+  members: AnchorMemberReport[];
+};
+
+/**
+ * Classify one orphan anchor candidate. Deliberately NOT `classifyAnchor` /
+ * `membersShippedVerdict` verbatim: those consult `anchorLedgerBlockers`,
+ * which pushes `member-not-in-ledger:#N` for every member of ANY batch not
+ * in `state.batches` — for an orphan that is true by construction, so the
+ * ledger-backed predicate would answer `needs-operator` unconditionally and
+ * this sweep could never report a clean batch as a candidate. This reuses
+ * the SAME shipping-evidence logic ({@link readMembersShipping}, which is
+ * {@link shippingEvidence} plus the open/not-completed/handed-back checks)
+ * and the SAME anchor-level ground truth ({@link anchorGroundVerdict}) that
+ * `classifyAnchor` uses — the ledger check is the one piece structurally
+ * inapplicable to something not in the ledger.
+ */
+export function classifyOrphanAnchor(
+  candidate: OrphanAnchorCandidate,
+  read: IssueCloseReader,
+  opts: { repo?: string; commitInBase?: CommitInBase } = {}
+): OrphanAnchorVerdict {
+  const ground = anchorGroundVerdict(read, candidate.anchor);
+  if (ground.kind === 'anchor-closed') {
+    // The caller lists only OPEN anchors, so this should not happen; stay
+    // report-only and defer to the operator rather than assume.
+    return { kind: 'orphan-needs-operator', reasons: ['anchor-already-closed'], members: [] };
+  }
+  if (ground.kind === 'anchor-missing') {
+    return { kind: 'orphan-needs-operator', reasons: ['anchor-missing'], members: [] };
+  }
+  if (ground.kind === 'unknown') {
+    return { kind: 'orphan-unknown', reasons: ground.reasons, members: [] };
+  }
+  if (candidate.members.length === 0) {
+    return { kind: 'orphan-needs-operator', reasons: ['no-members-recovered'], members: [] };
+  }
+  const extraReasons = ground.handedBack ? ['anchor-handed-back'] : [];
+  const gh = readMembersShipping(
+    candidate.members,
+    read,
+    candidate.base_branch,
+    { exhaustive: true, repo: opts.repo, commitInBase: opts.commitInBase },
+    () => null
+  );
+  const reasons = [...extraReasons, ...gh.reasons];
+  if (reasons.length > 0) {
+    return { kind: 'orphan-needs-operator', reasons, members: gh.members };
+  }
+  if (gh.unreachable !== null) {
+    return {
+      kind: 'orphan-unknown',
+      reasons: [`issue #${gh.unreachable} unreachable`],
+      members: gh.members,
+    };
+  }
+  return { kind: 'orphan-closable-candidate', reasons: [], members: gh.members };
+}
+
+/** One open `batch-epic` anchor issue, as listed from GitHub. */
+export interface OpenAnchorIssue {
+  number: number;
+  title: string;
+  body: string;
+}
+
+/** Lists open `batch-epic` anchor issues for the pinned project repo, or `undefined` on a failed read (unverified repo, `gh` unreachable). */
+export type OpenAnchorLister = () => OpenAnchorIssue[] | undefined;
+
+/** `sched status --anchors`' orphan sweep (#790): bounded read cost per run — a GitHub-side sweep must never grow with the repo's total anchor count. */
+export const ORPHAN_SWEEP_MAX_ANCHORS = 20;
+
+/** One `sched status --anchors` orphan-sweep row. */
+export interface OrphanAnchorReportItem {
+  anchor: number;
+  title: string;
+  verdict: OrphanAnchorVerdict['kind'];
+  reasons: string[];
+  members: AnchorMemberReport[];
+}
+
+/**
+ * `sched status --anchors`' orphan sweep (#790): every open `batch-epic`
+ * anchor in the pinned project repo whose batch is no longer in
+ * `state.batches` — invisible to {@link sweepAnchors}, which only walks the
+ * ledger. Report-only by construction, exactly like `sweepAnchors`: `list`
+ * and `read` are both pure lookups with no write capability, so this
+ * function has no way to close, comment on, label, or edit anything — it
+ * only ever builds and returns {@link OrphanAnchorReportItem} rows.
+ *
+ * Capped at {@link ORPHAN_SWEEP_MAX_ANCHORS} and stops classifying at the
+ * first failed member/anchor read (the same fail-closed posture as
+ * `sweepAnchors`): every anchor after that point is reported
+ * `orphan-unknown` without a further call.
+ */
+export function sweepOrphanAnchors(
+  state: SchedState,
+  list: OpenAnchorLister,
+  read: IssueCloseReader,
+  opts: { repo?: string; commitInBase?: CommitInBase } = {}
+): OrphanAnchorReportItem[] {
+  const anchors = list();
+  if (anchors === undefined) return [];
+  const ledgerAnchors = new Set(
+    state.batches.map((b) => b.anchor).filter((a): a is number => a !== null)
+  );
+  const items: OrphanAnchorReportItem[] = [];
+  let aborted = false;
+  for (const issue of anchors.slice(0, ORPHAN_SWEEP_MAX_ANCHORS)) {
+    if (ledgerAnchors.has(issue.number)) continue; // already covered by `sweepAnchors` (#768)
+    const { members, base_branch } = parseOrphanAnchorBody(issue.body);
+    const verdict: OrphanAnchorVerdict = aborted
+      ? { kind: 'orphan-unknown', reasons: ['GitHub unreachable — sweep aborted'], members: [] }
+      : classifyOrphanAnchor({ anchor: issue.number, members, base_branch }, read, opts);
+    if (verdict.kind === 'orphan-unknown') aborted = true;
+    items.push({
+      anchor: issue.number,
+      title: issue.title,
+      verdict: verdict.kind,
+      reasons: verdict.reasons,
+      members: verdict.members,
+    });
+  }
+  return items;
+}
+
+// --- #790: warn (never refuse) when a batch with an open anchor is dropped ---
+
+/**
+ * Whether dissolving `batch` (`sched abandon --batch`) should warn an
+ * operator: its anchor is set and, per `read`, still OPEN. Pure predicate —
+ * the CLI performs the actual GitHub read and the print/journal side effect
+ * (`sched abandon --batch`'s handler). `null` covers both "no anchor to warn
+ * about" and "read failed / anchor already closed or missing" alike: this
+ * function only ever tells the caller whether to warn, never why not to —
+ * `abandonBatch` itself must NEVER refuse over this (#790: refusing would
+ * wedge exactly the cleanup `abandon` exists for).
+ */
+export function batchAnchorStillOpen(
+  batch: Pick<BatchEntry, 'anchor'>,
+  read: IssueCloseReader
+): number | null {
+  if (batch.anchor === null) return null;
+  const truth = read(batch.anchor);
+  return truth?.state === 'OPEN' ? batch.anchor : null;
 }

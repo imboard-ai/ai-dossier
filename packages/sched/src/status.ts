@@ -11,7 +11,10 @@ import {
   type AnchorReportItem,
   type CommitInBase,
   type IssueCloseReader,
+  type OpenAnchorLister,
+  type OrphanAnchorReportItem,
   sweepAnchors,
+  sweepOrphanAnchors,
 } from './anchor-close';
 import {
   resolveDispatch,
@@ -252,6 +255,17 @@ export interface StatusReport {
    * network call unless asked; nothing is guessed from the ledger alone).
    */
   anchors: AnchorReportItem[] | null;
+  /**
+   * #790 orphan anchor sweep (report-only, same `sched status --anchors`
+   * opt-in): every open `batch-epic` anchor whose batch is no longer in
+   * `state.batches` at all — invisible to `anchors` above, which only walks
+   * the ledger. `null` under the same conditions as `anchors` (no sweep
+   * asked for) OR when the orphan lister was not supplied even though the
+   * ledger sweep was (an older caller, or a repo the orphan lister could not
+   * verify) — distinguished from `[]` (asked for, found none) the same way
+   * `anchors` distinguishes "not asked" from "asked, clean".
+   */
+  orphan_anchors: OrphanAnchorReportItem[] | null;
 }
 
 function hoursSince(iso: string, nowMs: number): number | null {
@@ -619,8 +633,19 @@ export function buildStatusReport(
   project: string,
   engineLease: EngineLeaseStatus | null = null,
   now: Date = new Date(),
-  /** #768: the opt-in anchor sweep's GitHub/git readers; omitted → `anchors: null`. */
-  anchorSweep?: { read: IssueCloseReader; repo?: string; commitInBase?: CommitInBase },
+  /**
+   * #768/#790: the opt-in anchor sweep's GitHub/git readers; omitted →
+   * `anchors: null` and `orphan_anchors: null`. `orphanList` is optional
+   * within this — a caller that supplies `read`/`repo` but no `orphanList`
+   * (an unverified repo, or one that has not adopted #790 yet) still gets
+   * the ledger sweep, just no orphan sweep (`orphan_anchors: null`).
+   */
+  anchorSweep?: {
+    read: IssueCloseReader;
+    repo?: string;
+    commitInBase?: CommitInBase;
+    orphanList?: OpenAnchorLister;
+  },
   /** #791: the opt-in kept-worktree reader; omitted → no `kept-worktree` warnings (zero behavior change for every existing caller). */
   worktreeReader?: KeptWorktreeReader
 ): StatusReport {
@@ -772,6 +797,13 @@ export function buildStatusReport(
     anchors:
       anchorSweep !== undefined
         ? sweepAnchors(state, anchorSweep.read, {
+            repo: anchorSweep.repo,
+            commitInBase: anchorSweep.commitInBase,
+          })
+        : null,
+    orphan_anchors:
+      anchorSweep?.orphanList !== undefined
+        ? sweepOrphanAnchors(state, anchorSweep.orphanList, anchorSweep.read, {
             repo: anchorSweep.repo,
             commitInBase: anchorSweep.commitInBase,
           })

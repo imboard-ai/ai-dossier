@@ -1752,7 +1752,12 @@ export type JournalEventName =
   // this event never accompanies a `git worktree remove` or `worktree-pool
   // return` the engine ran itself — it only observed the state was already
   // gone.
-  | 'kept-worktree-cleared';
+  | 'kept-worktree-cleared'
+  // #790: `sched abandon --batch` dissolved a batch whose anchor is still
+  // OPEN on GitHub — WARN, never refuse (abandon exists to unwedge a stuck
+  // batch; refusing over an open anchor would wedge exactly that cleanup).
+  // `detail` names the anchor; `unit` is `batch:<id>`.
+  | 'batch-anchor-open-on-abandon';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —

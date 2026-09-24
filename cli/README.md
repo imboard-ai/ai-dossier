@@ -1440,6 +1440,23 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   `status --anchors` lists every still-open anchor under
   `== Open batch anchors ==` as `closable`, `needs-operator`, or `unknown`
   (report-only and opt-in — without `--anchors`, `status` makes no GitHub call).
+  That ledger sweep only ever walks `state.batches` — an anchor whose batch
+  fell out of the ledger entirely (a lost or reset `state.json`; imboard#4244/
+  #4253 were exactly this shape: `status --json` showed `batches: []` with
+  both anchors still open) is invisible to it. The same `--anchors` flag also
+  runs a GitHub-only orphan sweep (#790): every open `batch-epic` anchor not
+  already covered by the ledger sweep, membership recovered from the anchor's
+  own issue-body checklist, classified with the same shipping-evidence logic
+  and listed under `== Orphaned batch anchors (not in ledger) ==` as
+  `orphan-closable-candidate` or `orphan-needs-operator` — deliberately never
+  the ledger sweep's bare `closable`: without a ledger there is no
+  eviction/requeue trail to rule out, so even a clean read is a candidate for
+  a human to confirm, not an engine-actionable verdict. Capped at 20 anchors
+  per run and, like the ledger sweep, purely report-only — it has no write
+  capability at all. Separately, `abandon --batch` warns (stderr line plus a
+  journaled `batch-anchor-open-on-abandon` event) rather than refuses when it
+  dissolves a batch whose anchor is still open on GitHub — a courtesy at the
+  moment an operator ends the batch's active lifecycle, never a gate.
   `--once` runs a single tick (cron-style); Ctrl-C stops
   the engine while spawned agents keep running. Pids are identity-guarded via
   `/proc` start-times (a reused pid is never signalled; best-effort on macOS/Windows),
