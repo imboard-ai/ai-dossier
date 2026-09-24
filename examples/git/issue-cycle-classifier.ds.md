@@ -62,7 +62,7 @@
     "algorithm": "ed25519",
     "signature": "Ljo2b9TRID9lxPjqy+u7B162r9loqlYk1F9jTzHJmtii5oC6hG+flNb6Sb/16KZlUQyZFtDW2V48SdCcSlj8BA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-24T16:00:32.398Z",
+    "signed_at": "2026-09-24T16:01:47.923Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
