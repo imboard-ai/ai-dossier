@@ -710,7 +710,7 @@ describe('ai-dossier sched status', () => {
     expect(text).not.toContain('== Open batch anchors ==');
     expect(text).not.toContain('== Orphaned batch anchors');
     const stderrLines = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
-    expect(stderrLines).toContain('anchor sweep skipped');
+    expect(stderrLines).toContain('sched status: anchor check skipped');
     stderrSpy.mockRestore();
   });
 
@@ -1265,11 +1265,12 @@ describe('ai-dossier sched pause/resume/abandon', () => {
     expect(logs.join('\n')).toContain('Dissolved batch bx');
     const state = readState() as { batches: Array<Record<string, unknown>> };
     expect(state.batches[0].status).toBe('dissolved');
-    // The unverifiable-repo path is silent-but-reported, not a crash: the
-    // existing #768 anchor-sweep note fires (skipped with a note), and no
-    // #790 "still open" warning is fabricated from a check that never ran.
+    // The unverifiable-repo path is silent-but-reported, not a crash: a note
+    // fires, correctly labeled `sched abandon` (not `sched status` — #790
+    // review fix), and no "still open" warning is fabricated from a check
+    // that never ran.
     const stderrLines = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
-    expect(stderrLines).toContain('anchor sweep skipped');
+    expect(stderrLines).toContain('sched abandon: anchor check skipped');
     expect(stderrLines).not.toContain('still open');
     expect(journalEvents()).not.toContainEqual(
       expect.objectContaining({ event: 'batch-anchor-open-on-abandon' })

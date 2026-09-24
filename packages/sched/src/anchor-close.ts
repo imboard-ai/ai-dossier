@@ -22,6 +22,7 @@
  * talks to GitHub or git is injected, so tests never shell out.
  */
 
+import { SAFE_REF_RE } from './attribution';
 import type { IssueCloseTruth } from './groundtruth';
 import { DECISION_PENDING_LABEL, hasLabel } from './labels';
 import type { ExecFn } from './project';
@@ -538,9 +539,25 @@ export function sweepAnchors(
 // own issue body, and classify with the same shipping-evidence logic
 // `classifyAnchor` uses.
 
-/** One `- [ ] #N ...` / `- [x] #N ...` member line, plus the `base_branch: <name>` line — both written once at batch creation (`cli/src/batch-compose.ts`) and never edited afterward. */
+/** One `- [ ] #N ...` / `- [x] #N ...` member line, plus the `base_branch: <name>` line — both written once at batch creation (per `examples/git/batch-issues-preparation.ds.md`'s Step 6 anchor-body template) and never edited afterward by any code in this repo. */
 const ORPHAN_MEMBER_RE = /^- \[[ xX]\] #(\d+)/gm;
 const ORPHAN_BASE_BRANCH_RE = /^base_branch:\s*(\S+)/m;
+
+/** The largest issue number a GitHub GraphQL `Int!` variable accepts — a member number above this could never be a real issue, so it is dropped rather than sent to `read`. */
+const MAX_GITHUB_ISSUE_NUMBER = 2 ** 31 - 1;
+
+/**
+ * #790 (security review): the anchor body is untrusted input — anyone who can
+ * comment-and-edit an open `batch-epic` issue controls it. Without a cap, a
+ * body with thousands of checklist lines would cost thousands of GraphQL
+ * reads per sweep (`classifyOrphanAnchor` runs `exhaustive: true`), and one
+ * crafted out-of-range member number would error that member's read,
+ * `orphan-unknown` it, and abort {@link sweepOrphanAnchors}'s reads for every
+ * later anchor. Both are answered the same way: a body over the cap is
+ * reported `orphan-needs-operator` (reason `members-over-cap`) with NO reads
+ * performed at all — see {@link classifyOrphanAnchor}.
+ */
+export const ORPHAN_SWEEP_MAX_MEMBERS = 50;
 
 /**
  * Recover a batch anchor's members and base branch from its own issue body —
@@ -552,14 +569,30 @@ const ORPHAN_BASE_BRANCH_RE = /^base_branch:\s*(\S+)/m;
  * the complete, stable membership — a `batch-setup` runstate milestone would
  * only repeat the same list less reliably (missing entirely for an anchor
  * that predates runstate, or belonging to a requeued run's earlier attempt).
- * `base_branch` defaults to `main` when the line is missing (pre-metadata
- * anchors, or a hand-created one) — `shippingEvidence` needs SOME branch to
- * check a closer against, and `main` is what `gate-issue` defaults to.
+ *
+ * Both fields are untrusted (#790 security review) and validated before use:
+ * a member number outside `1..MAX_GITHUB_ISSUE_NUMBER` is dropped (never sent
+ * to `read`), and `base_branch` falls back to `main` — never propagating a
+ * string {@link SAFE_REF_RE} would reject as a git ref — when the metadata
+ * line is missing OR unsafe. `main` is what `gate-issue` defaults to, so it
+ * is what `shippingEvidence` checks a closer against either way.
+ * `members_over_cap` is set (members truncated to {@link ORPHAN_SWEEP_MAX_MEMBERS})
+ * rather than silently proceeding on a partial list — the caller reports it,
+ * never reads a partial membership as if it were the whole batch.
  */
-export function parseOrphanAnchorBody(body: string): { members: number[]; base_branch: string } {
-  const members = [...body.matchAll(ORPHAN_MEMBER_RE)].map((m) => Number(m[1]));
-  const base_branch = ORPHAN_BASE_BRANCH_RE.exec(body)?.[1] ?? 'main';
-  return { members: [...new Set(members)], base_branch };
+export function parseOrphanAnchorBody(body: string): {
+  members: number[];
+  base_branch: string;
+  members_over_cap: boolean;
+} {
+  const raw = [...body.matchAll(ORPHAN_MEMBER_RE)].map((m) => Number(m[1]));
+  const valid = raw.filter((n) => Number.isInteger(n) && n > 0 && n <= MAX_GITHUB_ISSUE_NUMBER);
+  const deduped = [...new Set(valid)];
+  const members_over_cap = deduped.length > ORPHAN_SWEEP_MAX_MEMBERS;
+  const members = members_over_cap ? deduped.slice(0, ORPHAN_SWEEP_MAX_MEMBERS) : deduped;
+  const rawBranch = ORPHAN_BASE_BRANCH_RE.exec(body)?.[1];
+  const base_branch = rawBranch !== undefined && SAFE_REF_RE.test(rawBranch) ? rawBranch : 'main';
+  return { members, base_branch, members_over_cap };
 }
 
 /** A batch-epic anchor recovered from GitHub, with no `state.batches` row behind it. */
@@ -567,6 +600,8 @@ export interface OrphanAnchorCandidate {
   anchor: number;
   members: number[];
   base_branch: string;
+  /** Set when {@link parseOrphanAnchorBody} truncated the member list at {@link ORPHAN_SWEEP_MAX_MEMBERS} — `classifyOrphanAnchor` refuses to read a partial membership. */
+  members_over_cap?: boolean;
 }
 
 /**
@@ -584,7 +619,11 @@ export type OrphanAnchorVerdict = {
 };
 
 /**
- * Classify one orphan anchor candidate. Deliberately NOT `classifyAnchor` /
+ * Classify one orphan anchor candidate, or `null` when it turns out not to be
+ * an orphan at all — the anchor CLOSED between the GitHub list and this read
+ * (the caller only ever lists open anchors), the same list-then-read race
+ * `sweepAnchors` answers by `continue`-ing past a freshly `anchor-closed`
+ * verdict rather than reporting one. Deliberately NOT `classifyAnchor` /
  * `membersShippedVerdict` verbatim: those consult `anchorLedgerBlockers`,
  * which pushes `member-not-in-ledger:#N` for every member of ANY batch not
  * in `state.batches` — for an orphan that is true by construction, so the
@@ -600,12 +639,14 @@ export function classifyOrphanAnchor(
   candidate: OrphanAnchorCandidate,
   read: IssueCloseReader,
   opts: { repo?: string; commitInBase?: CommitInBase } = {}
-): OrphanAnchorVerdict {
+): OrphanAnchorVerdict | null {
   const ground = anchorGroundVerdict(read, candidate.anchor);
   if (ground.kind === 'anchor-closed') {
-    // The caller lists only OPEN anchors, so this should not happen; stay
-    // report-only and defer to the operator rather than assume.
-    return { kind: 'orphan-needs-operator', reasons: ['anchor-already-closed'], members: [] };
+    // The caller lists only OPEN anchors, so this is a list-then-read race
+    // (closed between the list and this read) — same non-event as
+    // `sweepAnchors`'s `if (verdict.kind === 'anchor-closed') continue`, so
+    // the sweep skips it too rather than reporting a stale action item.
+    return null;
   }
   if (ground.kind === 'anchor-missing') {
     return { kind: 'orphan-needs-operator', reasons: ['anchor-missing'], members: [] };
@@ -615,6 +656,12 @@ export function classifyOrphanAnchor(
   }
   if (candidate.members.length === 0) {
     return { kind: 'orphan-needs-operator', reasons: ['no-members-recovered'], members: [] };
+  }
+  // #790 security review: a body truncated at the member cap is a PARTIAL
+  // membership — reading and clearing those members would be evidence about
+  // the wrong batch. Refuse without a single GitHub read.
+  if (candidate.members_over_cap === true) {
+    return { kind: 'orphan-needs-operator', reasons: ['members-over-cap'], members: [] };
   }
   const extraReasons = ground.handedBack ? ['anchor-handed-back'] : [];
   const gh = readMembersShipping(
@@ -669,30 +716,41 @@ export interface OrphanAnchorReportItem {
  * function has no way to close, comment on, label, or edit anything — it
  * only ever builds and returns {@link OrphanAnchorReportItem} rows.
  *
- * Capped at {@link ORPHAN_SWEEP_MAX_ANCHORS} and stops classifying at the
- * first failed member/anchor read (the same fail-closed posture as
- * `sweepAnchors`): every anchor after that point is reported
- * `orphan-unknown` without a further call.
+ * `null` means the list itself failed (an unverified repo, or `gh`
+ * unreachable) — distinct from `[]` ("asked, found zero orphans"), the same
+ * null-vs-empty convention `StatusReport.anchors`/`orphan_anchors` already
+ * use for "the sweep did not run at all". Ledger-tracked anchors are
+ * excluded BEFORE the {@link ORPHAN_SWEEP_MAX_ANCHORS} cap is applied — a
+ * busy repo with 20+ open ledger-tracked `batch-epic` anchors must not let
+ * them crowd out the orphans this sweep exists to find. Classifying stops at
+ * the first failed member/anchor read (the same fail-closed posture as
+ * `sweepAnchors`): every anchor after that point is reported `orphan-unknown`
+ * without a further call.
  */
 export function sweepOrphanAnchors(
   state: SchedState,
   list: OpenAnchorLister,
   read: IssueCloseReader,
   opts: { repo?: string; commitInBase?: CommitInBase } = {}
-): OrphanAnchorReportItem[] {
+): OrphanAnchorReportItem[] | null {
   const anchors = list();
-  if (anchors === undefined) return [];
+  if (anchors === undefined) return null;
   const ledgerAnchors = new Set(
     state.batches.map((b) => b.anchor).filter((a): a is number => a !== null)
   );
+  const orphanCandidates = anchors.filter((issue) => !ledgerAnchors.has(issue.number));
   const items: OrphanAnchorReportItem[] = [];
   let aborted = false;
-  for (const issue of anchors.slice(0, ORPHAN_SWEEP_MAX_ANCHORS)) {
-    if (ledgerAnchors.has(issue.number)) continue; // already covered by `sweepAnchors` (#768)
-    const { members, base_branch } = parseOrphanAnchorBody(issue.body);
-    const verdict: OrphanAnchorVerdict = aborted
+  for (const issue of orphanCandidates.slice(0, ORPHAN_SWEEP_MAX_ANCHORS)) {
+    const { members, base_branch, members_over_cap } = parseOrphanAnchorBody(issue.body);
+    const verdict: OrphanAnchorVerdict | null = aborted
       ? { kind: 'orphan-unknown', reasons: ['GitHub unreachable — sweep aborted'], members: [] }
-      : classifyOrphanAnchor({ anchor: issue.number, members, base_branch }, read, opts);
+      : classifyOrphanAnchor(
+          { anchor: issue.number, members, base_branch, members_over_cap },
+          read,
+          opts
+        );
+    if (verdict === null) continue; // closed between the list and this read — not an orphan
     if (verdict.kind === 'orphan-unknown') aborted = true;
     items.push({
       anchor: issue.number,
@@ -722,6 +780,9 @@ export function batchAnchorStillOpen(
   read: IssueCloseReader
 ): number | null {
   if (batch.anchor === null) return null;
-  const truth = read(batch.anchor);
-  return truth?.state === 'OPEN' ? batch.anchor : null;
+  // Reuses `anchorGroundVerdict` (the same anchor-level read `classifyAnchor`
+  // and `classifyOrphanAnchor` use) rather than re-deriving "is it OPEN"
+  // ourselves — `kind === 'open'` is exactly `truth.state === 'OPEN'`, one
+  // ground-truth read of the anchor shared by all three call sites.
+  return anchorGroundVerdict(read, batch.anchor).kind === 'open' ? batch.anchor : null;
 }

@@ -182,6 +182,7 @@ export {
 // since #544, but stay exported through `./enqueue` above — that is where
 // they were first public, and re-exporting them twice would collide.
 export {
+  BATCH_ANCHOR_LABEL,
   DECISION_PENDING_LABEL,
   HARD_BLOCK_LABELS,
   hasLabel,

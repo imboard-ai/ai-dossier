@@ -39,6 +39,16 @@
  */
 export const DECISION_PENDING_LABEL = 'decision-pending';
 
+/**
+ * The label a batch ANCHOR issue carries (`cli/src/batch-compose.ts`'s Step 6
+ * anchor-creation, per `examples/git/batch-issues-preparation.ds.md`) —
+ * distinct from every per-issue hard-block label above, since an anchor is
+ * never itself dispatched. Canonical here (#790) so the #790 orphan sweep's
+ * `gh issue list --label batch-epic` (`cli/src/commands/sched.ts`) and
+ * `batch-compose.ts`'s own `BATCH_ANCHOR_LABEL` cannot silently drift apart.
+ */
+export const BATCH_ANCHOR_LABEL = 'batch-epic';
+
 export const HARD_BLOCK_LABELS = [
   DECISION_PENDING_LABEL,
   'needs-clarification',

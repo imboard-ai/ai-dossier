@@ -14,7 +14,7 @@
  * All I/O (fetching issues, dependency states, the sched queue) lives in `commands/batch.ts`.
  */
 
-import { pickHardBlockLabel } from './hard-block-labels';
+import { BATCH_ANCHOR_LABEL, pickHardBlockLabel } from './hard-block-labels';
 import {
   EXCLUDING_CHECKS,
   floorScanText,
@@ -273,9 +273,6 @@ export function inferPackages(body: string, predictedFiles?: readonly string[]):
 
 /** Labels that mark an issue as already claimed by a running cycle. */
 const IN_PROGRESS_LABEL = 'in-progress';
-
-/** A batch ANCHOR (batch-epic) — the batch's own tracking issue, never a member. */
-const BATCH_ANCHOR_LABEL = 'batch-epic';
 
 /** The one runstate phase that does NOT mean a cycle is in flight (classifier record). */
 const CLASSIFY_PHASE = 'classify';

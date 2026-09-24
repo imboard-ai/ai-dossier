@@ -18,6 +18,7 @@ import type {
   BatchDispatchDeps,
   BatchEntry,
   CapabilityGateResult,
+  IssueCloseReader,
   OpenAnchorIssue,
   OpenAnchorLister,
   OrphanAnchorReportItem,
@@ -28,9 +29,11 @@ import type {
 import {
   abandonBatch,
   abandonIssue,
+  BATCH_ANCHOR_LABEL,
   batchAnchorStillOpen,
   buildBatchRunLogEntries,
   buildStatusReport,
+  type CommitInBase,
   CorruptStateError,
   createExecFn,
   createExecGroundTruth,
@@ -110,13 +113,14 @@ import {
   type EngineStalenessCheck,
   formatEngineStaleWarning,
 } from '../engine-version';
-import { requireRepoSlug, tryFetchComments, tryFetchLabels } from '../gh';
+import { parseGhJson, requireRepoSlug, tryFetchComments, tryFetchLabels } from '../gh';
 import { pickHardBlockLabel } from '../hard-block-labels';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
 import { findLatestPlan } from '../plan-artifact';
 import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
 import { hasSlotModeLatestMilestone } from '../runstate';
+import { renderValue } from '../runstate-stats';
 import {
   aggregateRunLogEntries,
   type BatchAmortizationSummary,
@@ -605,16 +609,23 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   }
   // #790: the GitHub-side orphan sweep — anchors whose batch fell out of
   // `state.batches` entirely, so the ledger sweep above never saw them.
-  // Report-only, same as above; omitted when the orphan lister did not run
-  // (older caller, or an unverified repo — see `orphanAnchorListerFor`).
-  if (report.orphan_anchors !== null) {
+  // Report-only, same as above. Gated on `anchors !== null` (repo verified,
+  // `--anchors` asked for) rather than `orphan_anchors !== null` directly:
+  // `orphan_anchors` is `null` BOTH when the sweep was never asked for and
+  // when it ran but the GitHub list call itself failed — those two must not
+  // render identically, or a failed check looks exactly like a clean one.
+  if (report.anchors !== null) {
     lines.push('');
     lines.push('== Orphaned batch anchors (not in ledger) ==');
-    lines.push(
-      report.orphan_anchors.length > 0
-        ? report.orphan_anchors.map(renderOrphanAnchorItem).join('\n')
-        : '(none)'
-    );
+    if (report.orphan_anchors === null) {
+      lines.push('(unavailable — could not list batch-epic anchors; see the warning above)');
+    } else {
+      lines.push(
+        report.orphan_anchors.length > 0
+          ? report.orphan_anchors.map(renderOrphanAnchorItem).join('\n')
+          : '(none)'
+      );
+    }
   }
   return lines.join('\n');
 }
@@ -623,14 +634,28 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
 const ANCHOR_SWEEP_TIMEOUT_MS = 10_000;
 
 /**
+ * How many open `batch-epic` anchors the orphan lister fetches from GitHub —
+ * deliberately larger than `ORPHAN_SWEEP_MAX_ANCHORS` (the classification
+ * cap): `gh issue list` returns newest first, and ledger-tracked anchors are
+ * excluded from the fetched set before the classification cap is applied
+ * (`sweepOrphanAnchors`), so fetching only the classification cap's worth
+ * would let a busy repo's tracked anchors crowd real orphans out before
+ * exclusion ever runs. Still bounded — a single `gh` call, not one per
+ * anchor.
+ */
+const ORPHAN_LIST_FETCH_LIMIT = ORPHAN_SWEEP_MAX_ANCHORS * 3;
+
+/**
  * `sched status --anchors`' GitHub-side lister for the #790 orphan sweep:
  * every open `batch-epic` anchor issue in `repo`, or `undefined` on a failed
  * read (a non-zero `gh` exit, or output that does not parse as the requested
- * shape) — the orphan sweep then reports nothing rather than guess.  Capped
- * at the source: `--limit` matches `ORPHAN_SWEEP_MAX_ANCHORS`, so a repo with
- * hundreds of historical anchors never becomes a hundreds-of-issues `gh`
- * call. `sweepOrphanAnchors`'s own `.slice()` is the second, belt-and-braces
- * cap for a `gh` version that ignores `--limit`.
+ * shape) — the orphan sweep then reports nothing rather than guess. The raw
+ * fetch asks for more than `ORPHAN_SWEEP_MAX_ANCHORS` (`gh` lists newest
+ * first): a busy repo can have that many ledger-TRACKED anchors open too,
+ * and `sweepOrphanAnchors` excludes those before applying the classification
+ * cap — fetching only exactly the cap would let tracked anchors crowd real
+ * orphans out before exclusion ever runs. `sweepOrphanAnchors`'s `.slice()`
+ * is the belt-and-braces cap on the classified count either way.
  */
 function orphanAnchorListerFor(repo: string, exec: ExecFn): OpenAnchorLister {
   return () => {
@@ -640,7 +665,7 @@ function orphanAnchorListerFor(repo: string, exec: ExecFn): OpenAnchorLister {
         'issue',
         'list',
         '--label',
-        'batch-epic',
+        BATCH_ANCHOR_LABEL,
         '--state',
         'open',
         '-R',
@@ -648,17 +673,12 @@ function orphanAnchorListerFor(repo: string, exec: ExecFn): OpenAnchorLister {
         '--json',
         'number,title,body',
         '--limit',
-        String(ORPHAN_SWEEP_MAX_ANCHORS),
+        String(ORPHAN_LIST_FETCH_LIMIT),
       ],
       process.cwd()
     );
     if (raw === null) return undefined;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      return undefined;
-    }
+    const parsed = parseGhJson<unknown>(raw);
     if (!Array.isArray(parsed)) return undefined;
     const issues: OpenAnchorIssue[] = [];
     for (const item of parsed) {
@@ -679,36 +699,51 @@ function orphanAnchorListerFor(repo: string, exec: ExecFn): OpenAnchorLister {
 }
 
 /**
- * `sched status --anchors`' readers (#768) plus the #790 orphan lister, or
- * `undefined` (with a stderr line) when the cwd is not `project`'s
- * repository — the sweep never reads another repository's issue numbers as
- * if they were this project's.
+ * `sched status --anchors`' readers (#768), or `undefined` (with a stderr
+ * line naming `context`) when the cwd is not `project`'s repository — the
+ * sweep never reads another repository's issue numbers as if they were this
+ * project's. `context` labels the stderr line with the command that asked
+ * (`sched status` vs `sched abandon`, #790) — reusing one function for both
+ * must not print a `sched status` line while `sched abandon` is running.
  */
-function anchorSweepFor(project: string): Parameters<typeof buildStatusReport>[5] {
+function anchorReaderFor(
+  project: string,
+  context: string
+): { read: IssueCloseReader; repo: string; commitInBase: CommitInBase; exec: ExecFn } | undefined {
   const repo = resolveProjectRepo(project, defaultExec);
   if (repo === null) {
     process.stderr.write(
-      `⚠ sched status: anchor sweep skipped — the current directory is not ${project}'s GitHub repository\n`
+      `⚠ ${context}: anchor check skipped — the current directory is not ${project}'s GitHub repository\n`
     );
     return undefined;
   }
   const exec = createExecFn(ANCHOR_SWEEP_TIMEOUT_MS, {
     onError: (file, args, err) =>
-      process.stderr.write(
-        `⚠ sched anchor sweep: '${file} ${args.join(' ')}' failed: ${err.message}\n`
-      ),
+      process.stderr.write(`⚠ ${context}: '${file} ${args.join(' ')}' failed: ${err.message}\n`),
   });
   const read = issueCloseReader(createExecGroundTruth(exec, { repoDir: process.cwd(), repo }));
   if (read === undefined) return undefined;
   return {
     read,
     repo,
+    exec,
     // Read-only reachability probe against the already-fetched remote ref.
     commitInBase: (oid, base) =>
       GIT_OID_RE.test(oid) &&
       SAFE_REF_RE.test(base) &&
       exec('git', ['merge-base', '--is-ancestor', oid, `origin/${base}`], process.cwd()) !== null,
-    orphanList: orphanAnchorListerFor(repo, exec),
+  };
+}
+
+/** `sched status --anchors`' full readers (#768) plus the #790 orphan lister — built on {@link anchorReaderFor}. */
+function anchorSweepFor(project: string): Parameters<typeof buildStatusReport>[5] {
+  const reader = anchorReaderFor(project, 'sched status');
+  if (reader === undefined) return undefined;
+  return {
+    read: reader.read,
+    repo: reader.repo,
+    commitInBase: reader.commitInBase,
+    orphanList: orphanAnchorListerFor(reader.repo, reader.exec),
   };
 }
 
@@ -749,11 +784,21 @@ function renderAnchorItem(a: AnchorReportItem): string {
   );
 }
 
-/** One `== Orphaned batch anchors (not in ledger) ==` row (#790): report-only, same shape as {@link renderAnchorItem} minus the ledger's own batch id/status (there is none). */
+/**
+ * One `== Orphaned batch anchors (not in ledger) ==` row (#790): report-only,
+ * same shape as {@link renderAnchorItem} minus the ledger's own batch
+ * id/status (there is none). The title and every reason are sanitized
+ * (`renderValue`) before printing: unlike the ledger sweep's `batch`/`reason`
+ * strings (operator-controlled, from `sched enqueue`), this row's `title`
+ * and any `base_branch`-derived reason both come from the anchor's own
+ * GitHub issue body/title — editable by anyone with issue-edit rights on the
+ * pinned repo, so a raw ANSI/C1 escape in either could repaint or erase
+ * terminal rows (#790 security review).
+ */
 function renderOrphanAnchorItem(a: OrphanAnchorReportItem): string {
-  const reasons = a.reasons.length > 0 ? ` — ${a.reasons.join(', ')}` : '';
+  const reasons = a.reasons.length > 0 ? ` — ${a.reasons.map(renderValue).join(', ')}` : '';
   return (
-    `#${a.anchor} "${a.title}" [${a.verdict}]${reasons}\n` +
+    `#${a.anchor} "${renderValue(a.title)}" [${a.verdict}]${reasons}\n` +
     `  members: ${a.members.map(renderAnchorMember).join(', ')}`
   );
 }
@@ -1755,9 +1800,8 @@ function registerAbandonSubcommand(cmd: Command): void {
           }
         } else if (opts.batch) {
           const spawnDeps = createSpawnDeps(process.cwd());
-          let anchor: number | null = null;
-          const requeued = store.withLock((state) => {
-            anchor = findBatch(state, opts.batch as string)?.anchor ?? null;
+          const { requeued, anchor } = store.withLock((state) => {
+            const anchor = findBatch(state, opts.batch as string)?.anchor ?? null;
             // #809: abandon requeues every member full-cycle — an agent still
             // running in one of the batch's slots (a parallel member holds its
             // own) would keep working a unit the engine is about to redispatch.
@@ -1767,7 +1811,7 @@ function registerAbandonSubcommand(cmd: Command): void {
               }
             }
             const r = abandonBatch(state, opts.batch as string, reason);
-            return { state: r.state, result: r.requeued };
+            return { state: r.state, result: { requeued: r.requeued, anchor } };
           });
           if (opts.json) {
             console.log(JSON.stringify({ abandoned: `batch:${opts.batch}`, requeued }));
@@ -1778,7 +1822,7 @@ function registerAbandonSubcommand(cmd: Command): void {
           }
           // #790: never a refusal — the dissolve above already committed.
           // This is a courtesy warning only, run after the lock (a GitHub
-          // read, never inside `withLock` — see `anchorSweepFor`'s own
+          // read, never inside `withLock` — see `anchorReaderFor`'s own
           // comment on why network I/O stays outside it).
           warnIfAbandonedAnchorOpen(store, project, opts.batch, anchor);
         }
@@ -1857,9 +1901,12 @@ function registerRequeueSubcommand(cmd: Command): void {
  * this batch is done, so warn right here instead of relying on them to
  * remember to check. Never refuses — the dissolve has already happened by
  * the time this runs; refusing here would accomplish nothing but noise.
- * Silent on any failure to verify (unresolved repo, unreachable `gh`): this
- * is a courtesy, not a gate, and a false "still open" would be worse than
- * saying nothing.
+ * When the anchor check itself cannot run (unresolved repo, unreachable
+ * `gh`), `anchorReaderFor` prints its own stderr note labeled `sched
+ * abandon` (not `sched status` — #790 review) and this function silently
+ * gives up on the "still open" question specifically: a false "still open"
+ * would be worse than saying nothing about THAT, but the failure itself is
+ * never hidden.
  */
 function warnIfAbandonedAnchorOpen(
   store: SchedStore,
@@ -1868,9 +1915,9 @@ function warnIfAbandonedAnchorOpen(
   anchor: number | null
 ): void {
   if (anchor === null) return;
-  const sweep = anchorSweepFor(project);
-  if (sweep === undefined) return;
-  const stillOpen = batchAnchorStillOpen({ anchor }, sweep.read);
+  const reader = anchorReaderFor(project, 'sched abandon');
+  if (reader === undefined) return;
+  const stillOpen = batchAnchorStillOpen({ anchor }, reader.read);
   if (stillOpen === null) return;
   const message = `batch ${batchId} abandoned with its anchor #${stillOpen} still open on GitHub — sched status --anchors will surface it as needs-operator; close it by hand once its members are accounted for`;
   process.stderr.write(`⚠ sched abandon: ${message}\n`);

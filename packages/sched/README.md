@@ -28,7 +28,7 @@ ai-dossier sched enqueue --issues 101,105..109 --deps 100 --tier strong   # flag
 ai-dossier sched enqueue --from-manifest batch-prep.json                  # batch-prep output
 ai-dossier sched start            # the dispatch engine: spawn, verify, escalate, watch parked PRs (Ctrl-C stops it)
 ai-dossier sched start --once     # a single reconcile+refill tick (cron-style)
-ai-dossier sched status           # queue (+pr/cleanup), engine lease, slots, batches, blocked/failed; --anchors adds the open-batch-anchor sweep (#768)
+ai-dossier sched status           # queue (+pr/cleanup), engine lease, slots, batches, blocked/failed; --anchors adds the ledger anchor sweep (#768) plus orphaned anchors no longer in state.batches (#790)
 ai-dossier sched pause            # prevent every new agent process; live units keep running
 ai-dossier sched resume
 ai-dossier sched stop --issue 42  # terminate one full-cycle agent and record it stopped (no recovery)
@@ -1123,13 +1123,17 @@ import {
                          //   so batch-dispatch.ts can share it.
   TRANSITIONS,           // the transition tables themselves (for previews)
   buildStatusReport,     // machine-readable status incl. blocked/failed sets
-                         //   (+ optional `anchorSweep` → `anchors`, #768; null without it)
+                         //   (+ optional `anchorSweep` → `anchors`/`orphan_anchors`, #768/#790)
                          //   (+ optional `worktreeReader` → `kept-worktree` warnings, #791)
   keptWorktreeCandidates, buildKeptWorktreeWarnings, defaultKeptWorktreeReader,  // #791
   sweepAnchors, classifyAnchor, membersShippedVerdict, anchorLedgerBlockers,
   shippingEvidence,      // #768 anchor-close predicate (pure; readers injected)
   closeAnchor,           // #768 idempotent comment-then-close, `-R <repo>` explicit
   anchorCloseMarker, renderAnchorCloseComment, openAnchorBatches, formatBatchStatus,
+  sweepOrphanAnchors, classifyOrphanAnchor, parseOrphanAnchorBody, batchAnchorStillOpen,
+                         // #790 orphan sweep — batches gone from state.batches entirely;
+                         //   pure, GitHub/git only via the injected list/read (never exec)
+  ORPHAN_SWEEP_MAX_ANCHORS, ORPHAN_SWEEP_MAX_MEMBERS, BATCH_ANCHOR_LABEL, // #790
   issueCloseReader, parseIssueCloseTruthJson, parseRepoName,
   resolveProjectRepo,    // #768 owner/name of the cwd repo only when it IS the project's
   hasLabel,              // case-insensitive label match (#768)
@@ -1418,6 +1422,39 @@ reads `next=operator`, not `next=done`.
 Journal: `anchor-closed` (including "found already closed") and `anchor-close-failed`
 (deduped like `pr-watch-failed`: once per streak, re-announced every
 `JOURNAL_DEDUP_REANNOUNCE_TICKS`).
+
+### Orphaned anchors — batches dropped from the ledger entirely (#790)
+
+The sweep above only ever walks `state.batches` (`openAnchorBatches`) — an anchor whose
+batch fell out of the ledger ENTIRELY (a lost or reset `state.json`; imboard#4244/#4253
+were exactly this shape: `sched status --json` showed `batches: []` with both anchors
+still open) is invisible to it. The same `--anchors` flag also runs a GitHub-only sweep
+for exactly that: `gh issue list --label batch-epic --state open` for the pinned
+project repo, excluding anchors the ledger sweep already covers, recovering each
+orphan's members from its own issue-body checklist (`parseOrphanAnchorBody`) and
+classifying with the same shipping-evidence logic (`classifyOrphanAnchor`, sharing
+`readMembersShipping`/`anchorGroundVerdict` with `classifyAnchor` above) — minus the
+ledger check, which cannot apply to something not in the ledger. Reported under
+`== Orphaned batch anchors (not in ledger) ==` (`orphan_anchors` in `--json`) as
+`orphan-closable-candidate`, `orphan-needs-operator`, or `orphan-unknown` — deliberately
+never the ledger sweep's bare `closable`: without a ledger there is no eviction/requeue
+trail to rule out, so even a clean read is a CANDIDATE for a human to confirm. Capped at
+`ORPHAN_SWEEP_MAX_ANCHORS` (20) classified per run, with the GitHub fetch itself larger
+(`ORPHAN_LIST_FETCH_LIMIT`) so ledger-tracked anchors — excluded before the cap — cannot
+crowd real orphans out of a busy repo's listing. The anchor body is untrusted input
+(anyone who can edit an open `batch-epic` issue controls it): member numbers outside the
+valid GitHub issue range are dropped, a body over `ORPHAN_SWEEP_MAX_MEMBERS` (50) refuses
+with NO reads at all (`members-over-cap`), and an unsafe `base_branch` value falls back
+to `main` rather than being used as-is. Report-only by construction, exactly like the
+ledger sweep — `list`/`read` are pure lookups with no write capability, proven by a
+recording-`ExecFn` test over the real gh-argv-building path (`anchor-close.test.ts`).
+
+Separately, `sched abandon --batch` warns — stderr line plus a journaled
+`batch-anchor-open-on-abandon` event — rather than refuses, when it dissolves a batch
+whose anchor is still open on GitHub. Nothing in this codebase currently removes a batch
+row from `state.batches` (`abandonBatch` dissolves in place, status `dissolved`, still
+ledger-swept above), so this is a courtesy at the one real moment an operator ends a
+batch's active lifecycle — never a gate, and never a substitute for the orphan sweep.
 
 ## Hard-block labels are re-read every tick (#544)
 

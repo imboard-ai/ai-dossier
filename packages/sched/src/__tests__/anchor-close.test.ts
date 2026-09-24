@@ -18,11 +18,26 @@ import {
   classifyOrphanAnchor,
   type OpenAnchorIssue,
   ORPHAN_SWEEP_MAX_ANCHORS,
+  ORPHAN_SWEEP_MAX_MEMBERS,
   parseOrphanAnchorBody,
   sweepOrphanAnchors,
 } from '../anchor-close';
 import type { IssueCloseTruth } from '../groundtruth';
-import { createBatch, createEmptyState, type SchedState } from '../index';
+import {
+  createBatch,
+  createEmptyState,
+  createExecGroundTruth,
+  type ExecFn,
+  issueCloseReader,
+  type OrphanAnchorVerdict,
+  type SchedState,
+} from '../index';
+
+/** `classifyOrphanAnchor` returns `null` only for the closed-anchor list-then-read race (tested separately below) — every other test here expects a real verdict. */
+function expectVerdict(v: OrphanAnchorVerdict | null): OrphanAnchorVerdict {
+  if (v === null) throw new Error('expected a non-null verdict — the anchor was not closed');
+  return v;
+}
 
 const NOW = new Date('2026-09-24T12:00:00Z');
 
@@ -57,24 +72,78 @@ const ANCHOR_BODY = (members: number[], baseBranch = 'main'): string =>
     'dispatch_profile: default',
   ].join('\n');
 
+/** The `data.repository.issue` GraphQL shape `createExecGroundTruth`'s `issueCloseTruth` parses — used only by the AC6 no-write proof below, which drives the REAL gh-argv-building path rather than a mock `IssueCloseReader`. */
+function graphqlIssue(opts: {
+  state: 'OPEN' | 'CLOSED';
+  stateReason?: string;
+  closer?: unknown;
+}): unknown {
+  return {
+    data: {
+      repository: {
+        issue: {
+          state: opts.state,
+          stateReason: opts.stateReason ?? null,
+          labels: { nodes: [], pageInfo: { hasNextPage: false } },
+          timelineItems: { nodes: opts.closer !== undefined ? [{ closer: opts.closer }] : [] },
+          closedByPullRequestsReferences: { nodes: [] },
+        },
+      },
+    },
+  };
+}
+
 describe('#790 parseOrphanAnchorBody', () => {
   it('recovers members (checked and unchecked) and base_branch from the batch-compose body format', () => {
     const body = ANCHOR_BODY([4146, 4147], 'main');
-    expect(parseOrphanAnchorBody(body)).toEqual({ members: [4146, 4147], base_branch: 'main' });
+    expect(parseOrphanAnchorBody(body)).toEqual({
+      members: [4146, 4147],
+      base_branch: 'main',
+      members_over_cap: false,
+    });
   });
 
   it('a checked-off member line ([x]) still counts — the checklist is never re-read as progress', () => {
     const body = '- [x] #100 done already\n- [ ] #101 still open\n\nbase_branch: release';
-    expect(parseOrphanAnchorBody(body)).toEqual({ members: [100, 101], base_branch: 'release' });
+    expect(parseOrphanAnchorBody(body)).toEqual({
+      members: [100, 101],
+      base_branch: 'release',
+      members_over_cap: false,
+    });
   });
 
   it('dedupes a repeated member line and defaults base_branch to main when the metadata line is absent', () => {
     const body = '- [ ] #5 a\n- [ ] #5 a\n- [ ] #6 b\n';
-    expect(parseOrphanAnchorBody(body)).toEqual({ members: [5, 6], base_branch: 'main' });
+    expect(parseOrphanAnchorBody(body)).toEqual({
+      members: [5, 6],
+      base_branch: 'main',
+      members_over_cap: false,
+    });
   });
 
   it('no checklist lines at all → empty members', () => {
     expect(parseOrphanAnchorBody('just prose, no checklist').members).toEqual([]);
+  });
+
+  // #790 security review: the body is untrusted (anyone who can edit an open
+  // batch-epic issue controls it) — these lock in the two validations added
+  // in response.
+  it('drops a member number outside the valid GitHub issue range (never sent to a GraphQL read)', () => {
+    const body = '- [ ] #123 ok\n- [ ] #99999999999 too big\n- [ ] #0 not positive\n';
+    expect(parseOrphanAnchorBody(body).members).toEqual([123]);
+  });
+
+  it('truncates at ORPHAN_SWEEP_MAX_MEMBERS and sets members_over_cap', () => {
+    const many = Array.from({ length: ORPHAN_SWEEP_MAX_MEMBERS + 5 }, (_, i) => 1000 + i);
+    const body = ANCHOR_BODY(many);
+    const parsed = parseOrphanAnchorBody(body);
+    expect(parsed.members).toHaveLength(ORPHAN_SWEEP_MAX_MEMBERS);
+    expect(parsed.members_over_cap).toBe(true);
+  });
+
+  it('an unsafe base_branch value (fails SAFE_REF_RE) falls back to main rather than being used as a git ref', () => {
+    const body = '- [ ] #1 a\n\nbase_branch: main; rm -rf /\n';
+    expect(parseOrphanAnchorBody(body).base_branch).toBe('main');
   });
 });
 
@@ -93,10 +162,10 @@ describe('#790 classifyOrphanAnchor', () => {
         closer: { kind: 'pr', number: 4257, merged: true, baseRefName: 'main', repo: REPO },
       }),
     });
-    const verdict = classifyOrphanAnchor(
-      { anchor: 4244, members: [4146, 4147], base_branch: 'main' },
-      read,
-      { repo: REPO }
+    const verdict = expectVerdict(
+      classifyOrphanAnchor({ anchor: 4244, members: [4146, 4147], base_branch: 'main' }, read, {
+        repo: REPO,
+      })
     );
     expect(verdict).toEqual({
       kind: 'orphan-closable-candidate',
@@ -122,10 +191,10 @@ describe('#790 classifyOrphanAnchor', () => {
 
   it('an OPEN member → orphan-needs-operator, naming it', () => {
     const read = readerFrom({ 4244: truth({ state: 'OPEN' }), 4146: truth({ state: 'OPEN' }) });
-    const verdict = classifyOrphanAnchor(
-      { anchor: 4244, members: [4146], base_branch: 'main' },
-      read,
-      { repo: REPO }
+    const verdict = expectVerdict(
+      classifyOrphanAnchor({ anchor: 4244, members: [4146], base_branch: 'main' }, read, {
+        repo: REPO,
+      })
     );
     expect(verdict.kind).toBe('orphan-needs-operator');
     expect(verdict.reasons).toEqual(['member-open:#4146']);
@@ -136,10 +205,10 @@ describe('#790 classifyOrphanAnchor', () => {
       4244: truth({ state: 'OPEN' }),
       4146: truth({ state: 'CLOSED', stateReason: 'NOT_PLANNED' }),
     });
-    const verdict = classifyOrphanAnchor(
-      { anchor: 4244, members: [4146], base_branch: 'main' },
-      read,
-      { repo: REPO }
+    const verdict = expectVerdict(
+      classifyOrphanAnchor({ anchor: 4244, members: [4146], base_branch: 'main' }, read, {
+        repo: REPO,
+      })
     );
     expect(verdict.kind).toBe('orphan-needs-operator');
     expect(verdict.reasons).toEqual(['member-closed-not_planned:#4146']);
@@ -163,34 +232,67 @@ describe('#790 classifyOrphanAnchor', () => {
         closer: { kind: 'pr', number: 1, merged: true, baseRefName: 'main', repo: REPO },
       }),
     });
-    const verdict = classifyOrphanAnchor(
-      { anchor: 4244, members: [4146], base_branch: 'main' },
-      read,
-      { repo: REPO }
+    const verdict = expectVerdict(
+      classifyOrphanAnchor({ anchor: 4244, members: [4146], base_branch: 'main' }, read, {
+        repo: REPO,
+      })
     );
     expect(verdict.kind).toBe('orphan-needs-operator');
     expect(verdict.reasons).toContain('anchor-handed-back');
   });
 
   it('an unreachable member read → orphan-unknown, decides nothing', () => {
-    const verdict = classifyOrphanAnchor(
-      { anchor: 4244, members: [4146], base_branch: 'main' },
-      readerFrom({}),
-      { repo: REPO }
+    const verdict = expectVerdict(
+      classifyOrphanAnchor({ anchor: 4244, members: [4146], base_branch: 'main' }, readerFrom({}), {
+        repo: REPO,
+      })
     );
     expect(verdict.kind).toBe('orphan-unknown');
   });
 
   it('no members recovered from the body → orphan-needs-operator (never mistaken for clean)', () => {
     const read = readerFrom({ 4244: truth({ state: 'OPEN' }) });
-    const verdict = classifyOrphanAnchor({ anchor: 4244, members: [], base_branch: 'main' }, read, {
-      repo: REPO,
-    });
+    const verdict = expectVerdict(
+      classifyOrphanAnchor({ anchor: 4244, members: [], base_branch: 'main' }, read, {
+        repo: REPO,
+      })
+    );
     expect(verdict).toEqual({
       kind: 'orphan-needs-operator',
       reasons: ['no-members-recovered'],
       members: [],
     });
+  });
+
+  it('the anchor CLOSED between the GitHub list and this read → null, skipped like sweepAnchors skips a fresh anchor-closed verdict', () => {
+    const read = readerFrom({ 4244: truth({ state: 'CLOSED', stateReason: 'COMPLETED' }) });
+    const verdict = classifyOrphanAnchor(
+      { anchor: 4244, members: [4146], base_branch: 'main' },
+      read,
+      { repo: REPO }
+    );
+    expect(verdict).toBeNull();
+  });
+
+  it('#790 security review: members_over_cap refuses with NO reads at all — a truncated membership is never treated as the whole batch', () => {
+    let reads = 0;
+    const read = (issue: number) => {
+      reads += 1;
+      return issue === 4244 ? truth({ state: 'OPEN' }) : undefined;
+    };
+    const verdict = expectVerdict(
+      classifyOrphanAnchor(
+        { anchor: 4244, members: [1, 2, 3], base_branch: 'main', members_over_cap: true },
+        read,
+        { repo: REPO }
+      )
+    );
+    expect(verdict).toEqual({
+      kind: 'orphan-needs-operator',
+      reasons: ['members-over-cap'],
+      members: [],
+    });
+    expect(reads).toBe(1); // only the anchor itself — zero member reads
   });
 });
 
@@ -248,13 +350,17 @@ describe('#790 sweepOrphanAnchors', () => {
       readerFrom({ 4244: truth({ state: 'OPEN' }), 4146: truth({ state: 'OPEN' }) })
     );
     expect(items).toHaveLength(1);
-    expect(items[0].verdict).toBe('orphan-needs-operator');
+    expect(items?.[0]?.verdict).toBe('orphan-needs-operator');
   });
 
-  it('the lister failing (unverified repo / gh unreachable) → empty sweep, no crash', () => {
+  it('the lister failing (unverified repo / gh unreachable) → null, not an empty-but-clean sweep, no crash', () => {
     const state = createEmptyState();
     const list = (): OpenAnchorIssue[] | undefined => undefined;
-    expect(sweepOrphanAnchors(state, list, readerFrom({}))).toEqual([]);
+    // null (the list itself failed) is distinct from [] (asked, found zero
+    // orphans) — the same convention `StatusReport.anchors`/`orphan_anchors`
+    // already use for "did not run at all". Collapsing the two would make a
+    // failed check look identical to a clean one.
+    expect(sweepOrphanAnchors(state, list, readerFrom({}))).toBeNull();
   });
 
   it('caps at ORPHAN_SWEEP_MAX_ANCHORS — a huge open-anchor list never balloons the read cost', () => {
@@ -275,30 +381,133 @@ describe('#790 sweepOrphanAnchors', () => {
     expect(items).toHaveLength(ORPHAN_SWEEP_MAX_ANCHORS);
   });
 
-  it("never issues a gh write command: no anchor row here can even carry a write — the function takes only read-shaped inputs (list/read), and #768's closeAnchor (the only writer in this module) is never called from this path", () => {
-    let wrote = false;
-    const state = createEmptyState();
-    const list = (): OpenAnchorIssue[] => [
-      { number: 4244, title: 'Batch b1: #4146', body: ANCHOR_BODY([4146]) },
+  // #790 review (Maintainability/Supportability/Documentation/Conformance):
+  // the cap used to apply BEFORE ledger-tracked anchors were excluded, so a
+  // busy repo with `ORPHAN_SWEEP_MAX_ANCHORS`+ open ledger-tracked anchors
+  // could crowd real orphans out of the classified set entirely, silently.
+  it('ledger-tracked anchors are excluded BEFORE the cap, not counted against it', () => {
+    // Fill the ledger with exactly the cap's worth of tracked anchors...
+    const ledgerBatches = Array.from({ length: ORPHAN_SWEEP_MAX_ANCHORS }, (_, i) =>
+      createBatch(`b${i}`, [], NOW, { anchor: 8000 + i })
+    );
+    const state: SchedState = { ...createEmptyState(), batches: ledgerBatches };
+    // ...GitHub lists all of those PLUS one real orphan, listed first (the
+    // pre-fix ordering bug sliced the cap off the front of the raw list).
+    const listed: OpenAnchorIssue[] = [
+      { number: 4244, title: 'Batch b-orphan: #4146', body: ANCHOR_BODY([4146]) },
+      ...ledgerBatches.map((b) => ({
+        number: b.anchor as number,
+        title: `Batch ${b.id}: #1`,
+        body: ANCHOR_BODY([1]),
+      })),
     ];
-    const read = readerFrom({
-      4244: truth({ state: 'OPEN' }),
-      4146: truth({
-        state: 'CLOSED',
-        stateReason: 'COMPLETED',
-        closer: { kind: 'pr', number: 1, merged: true, baseRefName: 'main', repo: REPO },
-      }),
-    });
-    // Wrap `read` to prove it's the only GitHub call surface this function
-    // uses — no injected exec/write function exists in its signature at all.
-    const spiedRead = (issue: number) => {
-      wrote = wrote || false; // no write path reachable through `read`
-      return read(issue);
+    const items = sweepOrphanAnchors(
+      state,
+      () => listed,
+      readerFrom({
+        4244: truth({ state: 'OPEN' }),
+        4146: truth({ state: 'OPEN' }),
+      })
+    );
+    expect(items).toHaveLength(1);
+    expect(items?.[0]?.anchor).toBe(4244);
+  });
+
+  // #790 review (Conformance/AC6): the earlier version of this test could
+  // never fail — `wrote` was only ever assigned `wrote || false`, and the
+  // `.length` checks bound an arity, not a capability. Replaced with a
+  // RECORDING ExecFn driven through the REAL gh-argv-building path
+  // (`createExecGroundTruth` + `issueCloseReader`, the same machinery
+  // `orphanAnchorListerFor`/`anchorSweepFor` use in the CLI) so this test
+  // actually observes every `gh` invocation the sweep causes, not a mock
+  // return value. Manually verified to have teeth: temporarily adding a
+  // `gh issue comment` call inside `sweepOrphanAnchors` made this test fail;
+  // reverting that made it pass again (not committed — see PR description).
+  it('AC6: a full sweep — anchor list, anchor read, member reads — never issues a gh write command', () => {
+    const calls: string[][] = [];
+    const fakeExec: ExecFn = (file, args) => {
+      calls.push([file, ...args]);
+      if (file !== 'gh') return null;
+      if (args[0] === 'issue' && args[1] === 'list') {
+        return JSON.stringify([
+          { number: 4244, title: 'Batch b1: #4146, #4147', body: ANCHOR_BODY([4146, 4147]) },
+        ]);
+      }
+      if (args[0] === 'api' && args[1] === 'graphql') {
+        const nArg = args.find((a) => a.startsWith('n='));
+        const issue = nArg !== undefined ? Number(nArg.slice(2)) : null;
+        if (issue === 4244) return JSON.stringify(graphqlIssue({ state: 'OPEN' }));
+        // Both members shipped via a merged PR — the closable-candidate
+        // shape, since that path reads the most (every member, exhaustive).
+        return JSON.stringify(
+          graphqlIssue({
+            state: 'CLOSED',
+            stateReason: 'COMPLETED',
+            closer: {
+              __typename: 'PullRequest',
+              number: 999,
+              merged: true,
+              baseRefName: 'main',
+              repository: { nameWithOwner: REPO },
+            },
+          })
+        );
+      }
+      return null; // an unrecognized gh call — never treated as a green light
     };
-    const items = sweepOrphanAnchors(state, list, spiedRead, { repo: REPO });
-    expect(items[0].verdict).toBe('orphan-closable-candidate');
-    expect(wrote).toBe(false);
-    expect(sweepOrphanAnchors.length).toBeLessThanOrEqual(4); // (state, list, read, opts) — no exec param
+
+    const list = (): OpenAnchorIssue[] | undefined => {
+      const out = fakeExec('gh', [
+        'issue',
+        'list',
+        '--label',
+        'batch-epic',
+        '--state',
+        'open',
+        '-R',
+        REPO,
+        '--json',
+        'number,title,body',
+        '--limit',
+        String(ORPHAN_SWEEP_MAX_ANCHORS),
+      ]);
+      return out === null ? undefined : (JSON.parse(out) as OpenAnchorIssue[]);
+    };
+    const read = issueCloseReader(
+      createExecGroundTruth(fakeExec, { repoDir: '/repo', repo: REPO })
+    );
+    expect(read).toBeDefined();
+
+    const items = sweepOrphanAnchors(createEmptyState(), list, read as IssueCloseReader, {
+      repo: REPO,
+    });
+
+    // The sweep genuinely drove real gh calls (proving this isn't a no-op).
+    expect(calls.length).toBeGreaterThanOrEqual(3); // list + anchor read + 2 member reads
+    expect(items).not.toBeNull();
+    expect(items?.[0]?.verdict).toBe('orphan-closable-candidate');
+
+    const isWrite = (argv: string[]): boolean => {
+      const [, ...args] = argv;
+      if (args[0] === 'issue' && ['close', 'comment', 'edit'].includes(args[1] ?? '')) return true;
+      if (args.includes('--add-label') || args.includes('--remove-label')) return true;
+      if (args[0] === 'api') {
+        const xIdx = args.indexOf('-X');
+        if (xIdx !== -1 && ['POST', 'PATCH', 'PUT', 'DELETE'].includes(args[xIdx + 1] ?? '')) {
+          return true;
+        }
+      }
+      return false;
+    };
+    expect(calls.filter(isWrite)).toEqual([]);
+  });
+
+  it('no exec/write capability is even reachable through the sweep’s own parameter types (list/read are data-only)', () => {
+    // Type-level guarantee: OpenAnchorLister and IssueCloseReader both return
+    // DATA, never an ExecFn or anything write-shaped — there is no channel
+    // through either signature for a write to travel through, independent
+    // of what the AC6 test above empirically observed.
+    expect(sweepOrphanAnchors.length).toBeLessThanOrEqual(4); // (state, list, read, opts)
   });
 });
 

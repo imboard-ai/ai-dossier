@@ -1445,15 +1445,27 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   #4253 were exactly this shape: `status --json` showed `batches: []` with
   both anchors still open) is invisible to it. The same `--anchors` flag also
   runs a GitHub-only orphan sweep (#790): every open `batch-epic` anchor not
-  already covered by the ledger sweep, membership recovered from the anchor's
-  own issue-body checklist, classified with the same shipping-evidence logic
-  and listed under `== Orphaned batch anchors (not in ledger) ==` as
-  `orphan-closable-candidate` or `orphan-needs-operator` — deliberately never
-  the ledger sweep's bare `closable`: without a ledger there is no
+  already bound to a ledger batch (excluded before, not after, the anchor
+  cap below — a busy repo's ledger-tracked anchors never crowd real orphans
+  out), membership recovered from the anchor's own issue-body checklist,
+  classified with the same shipping-evidence logic and listed under
+  `== Orphaned batch anchors (not in ledger) ==` (`orphan_anchors` in
+  `--json`; `null` when the sweep did not run OR the GitHub list call itself
+  failed — see the stderr note either way) as `orphan-closable-candidate`,
+  `orphan-needs-operator`, or `orphan-unknown` (a failed anchor/member read —
+  the sweep stops classifying at the first one) — deliberately never the
+  ledger sweep's bare `closable`: without a ledger there is no
   eviction/requeue trail to rule out, so even a clean read is a candidate for
-  a human to confirm, not an engine-actionable verdict. Capped at 20 anchors
-  per run and, like the ledger sweep, purely report-only — it has no write
-  capability at all. Separately, `abandon --batch` warns (stderr line plus a
+  a human to confirm, not an engine-actionable verdict. Classifies at most 20
+  anchors per run (`ORPHAN_SWEEP_MAX_ANCHORS`) from a larger raw fetch (`gh`
+  lists newest-first, so the fetch itself is wider than the cap); the anchor
+  body is untrusted (anyone who can edit an open `batch-epic` issue controls
+  it) — a member number outside the valid GitHub issue range is dropped, a
+  body over 50 members refuses with zero reads, and an unsafe `base_branch`
+  value falls back to `main`. Like the ledger sweep, purely report-only — it
+  has no write capability at all, proven by a recording-exec test over the
+  real gh-argv-building path. Separately, `abandon --batch` warns (stderr
+  line, correctly labeled `sched abandon` — not `sched status` — plus a
   journaled `batch-anchor-open-on-abandon` event) rather than refuses when it
   dissolves a batch whose anchor is still open on GitHub — a courtesy at the
   moment an operator ends the batch's active lifecycle, never a gate.
