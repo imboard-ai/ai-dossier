@@ -26,6 +26,7 @@ export {
   type OrphanAnchorSweepResult,
   type OrphanAnchorVerdict,
   openAnchorBatches,
+  orphanAnchorListArgs,
   parseOrphanAnchorBody,
   renderAnchorCloseComment,
   shippingEvidence,

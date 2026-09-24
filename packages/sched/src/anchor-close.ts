@@ -24,7 +24,7 @@
 
 import { SAFE_REF_RE } from './attribution';
 import type { IssueCloseTruth } from './groundtruth';
-import { DECISION_PENDING_LABEL, hasLabel } from './labels';
+import { BATCH_ANCHOR_LABEL, DECISION_PENDING_LABEL, hasLabel } from './labels';
 import type { ExecFn } from './project';
 import {
   distinctEvictions,
@@ -715,6 +715,31 @@ export interface OpenAnchorIssue {
 
 /** Lists open `batch-epic` anchor issues for the pinned project repo, or `undefined` on a failed read (unverified repo, `gh` unreachable). */
 export type OpenAnchorLister = () => OpenAnchorIssue[] | undefined;
+
+/**
+ * The exact `gh issue list` argv for the #790 orphan lister — exported so
+ * the CLI's real lister (`orphanAnchorListerFor`, `cli/src/commands/sched.ts`)
+ * and this package's own tests build the SAME command from ONE definition
+ * (#790 review: the earlier AC6 test built its own copy of this argv, so a
+ * future change to the production command would not have been caught by
+ * it). Read-only by construction — `gh issue list` never writes.
+ */
+export function orphanAnchorListArgs(repo: string, limit: number): string[] {
+  return [
+    'issue',
+    'list',
+    '--label',
+    BATCH_ANCHOR_LABEL,
+    '--state',
+    'open',
+    '-R',
+    repo,
+    '--json',
+    'number,title,body',
+    '--limit',
+    String(limit),
+  ];
+}
 
 /** `sched status --anchors`' orphan sweep (#790): bounded read cost per run — a GitHub-side sweep must never grow with the repo's total anchor count. */
 export const ORPHAN_SWEEP_MAX_ANCHORS = 20;

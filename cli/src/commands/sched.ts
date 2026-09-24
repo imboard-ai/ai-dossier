@@ -29,7 +29,6 @@ import type {
 import {
   abandonBatch,
   abandonIssue,
-  BATCH_ANCHOR_LABEL,
   batchAnchorStillOpen,
   buildBatchRunLogEntries,
   buildStatusReport,
@@ -69,6 +68,7 @@ import {
   memberDispatchTier,
   OPENCODE_DISPATCH_COMMAND,
   ORPHAN_SWEEP_MAX_ANCHORS,
+  orphanAnchorListArgs,
   parseManifest,
   readJsonl,
   recordTickFailure,
@@ -666,24 +666,10 @@ const ORPHAN_LIST_FETCH_LIMIT = 100;
  */
 function orphanAnchorListerFor(repo: string, exec: ExecFn): OpenAnchorLister {
   return () => {
-    const raw = exec(
-      'gh',
-      [
-        'issue',
-        'list',
-        '--label',
-        BATCH_ANCHOR_LABEL,
-        '--state',
-        'open',
-        '-R',
-        repo,
-        '--json',
-        'number,title,body',
-        '--limit',
-        String(ORPHAN_LIST_FETCH_LIMIT),
-      ],
-      process.cwd()
-    );
+    // #790 review: the argv is built by the exported `orphanAnchorListArgs`
+    // (packages/sched) — the same function this package's own tests drive —
+    // rather than a copy, so a change here is covered by those tests too.
+    const raw = exec('gh', orphanAnchorListArgs(repo, ORPHAN_LIST_FETCH_LIMIT), process.cwd());
     if (raw === null) return undefined;
     const parsed = parseGhJson<unknown>(raw);
     if (!Array.isArray(parsed)) return undefined;

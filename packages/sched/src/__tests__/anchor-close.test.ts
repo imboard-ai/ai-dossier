@@ -19,6 +19,7 @@ import {
   type OpenAnchorIssue,
   ORPHAN_SWEEP_MAX_ANCHORS,
   ORPHAN_SWEEP_MAX_MEMBERS,
+  orphanAnchorListArgs,
   parseOrphanAnchorBody,
   sweepOrphanAnchors,
 } from '../anchor-close';
@@ -92,6 +93,77 @@ function graphqlIssue(opts: {
     },
   };
 }
+
+/**
+ * #790 review (round 3): the AC6 no-write proof's denylist is a module-level
+ * function (not inline in the test) so it has its own unit tests, and so
+ * "prove it has teeth" (below) exercises exactly this function rather than
+ * a copy. Catches: `gh issue close/comment/edit`; `--add-label`/
+ * `--remove-label` on any command; `gh api` with `-X`/`--method`
+ * POST/PATCH/PUT/DELETE; and `gh api graphql` whose query text contains
+ * `mutation` (case-insensitive) — a GraphQL write is a POST at the HTTP
+ * layer regardless of the JSON body, so the `-X`/`--method` check alone
+ * would miss it.
+ */
+function isWriteCall(argv: string[]): boolean {
+  const [, ...args] = argv;
+  if (args[0] === 'issue' && ['close', 'comment', 'edit'].includes(args[1] ?? '')) return true;
+  if (args.includes('--add-label') || args.includes('--remove-label')) return true;
+  if (args[0] === 'api') {
+    const methodIdx = args.findIndex((a) => a === '-X' || a === '--method');
+    if (
+      methodIdx !== -1 &&
+      ['POST', 'PATCH', 'PUT', 'DELETE'].includes((args[methodIdx + 1] ?? '').toUpperCase())
+    ) {
+      return true;
+    }
+    if (args[1] === 'graphql' && args.some((a) => /mutation/i.test(a))) return true;
+  }
+  return false;
+}
+
+describe('#790 isWriteCall (the AC6 denylist itself)', () => {
+  it('flags gh issue close/comment/edit', () => {
+    expect(isWriteCall(['gh', 'issue', 'close', '4244'])).toBe(true);
+    expect(isWriteCall(['gh', 'issue', 'comment', '4244', '--body', 'x'])).toBe(true);
+    expect(isWriteCall(['gh', 'issue', 'edit', '4244', '--add-label', 'x'])).toBe(true);
+  });
+
+  it('flags --add-label/--remove-label anywhere in the argv', () => {
+    expect(
+      isWriteCall(['gh', 'api', '-X', 'POST', 'repos/o/r/issues/1/labels', '--add-label', 'x'])
+    ).toBe(true);
+  });
+
+  it('flags gh api with -X or --method POST/PATCH/PUT/DELETE', () => {
+    expect(isWriteCall(['gh', 'api', '-X', 'POST', 'repos/o/r/issues'])).toBe(true);
+    expect(isWriteCall(['gh', 'api', '--method', 'PATCH', 'repos/o/r/issues/1'])).toBe(true);
+    expect(isWriteCall(['gh', 'api', 'repos/o/r/issues/1'])).toBe(false); // GET, no method flag
+  });
+
+  it('flags a gh api graphql call whose query text contains a mutation', () => {
+    expect(
+      isWriteCall([
+        'gh',
+        'api',
+        'graphql',
+        '-f',
+        'query=mutation { addComment(input: {}) { clientMutationId } }',
+      ])
+    ).toBe(true);
+  });
+
+  it('does not flag a genuine gh api graphql QUERY (read)', () => {
+    expect(isWriteCall(['gh', 'api', 'graphql', '-f', 'query=query { repository { name } }'])).toBe(
+      false
+    );
+  });
+
+  it('does not flag a plain gh issue list / gh issue view (read-only commands)', () => {
+    expect(isWriteCall(['gh', 'issue', 'list', '--label', 'batch-epic'])).toBe(false);
+    expect(isWriteCall(['gh', 'issue', 'view', '4244', '--json', 'state'])).toBe(false);
+  });
+});
 
 describe('#790 parseOrphanAnchorBody', () => {
   it('recovers members (checked and unchecked) and base_branch from the batch-compose body format', () => {
@@ -464,6 +536,40 @@ describe('#790 sweepOrphanAnchors', () => {
     expect(result?.truncated).toBe(false); // the one real orphan fit well within the cap
   });
 
+  // #790 review (Conformance, AC4 nuance — accepted as-is by team-lead
+  // ruling): the sweep's fail-closed `aborted` flag trips only on a fresh
+  // `orphan-unknown` verdict. When an anchor ALREADY has a disqualifying
+  // reason before a later member's read fails, `classifyOrphanAnchor`
+  // returns `orphan-needs-operator` (a known disqualifier always outranks
+  // an unreachable read — see `readMembersShipping`'s own comment), so
+  // `aborted` never trips and the NEXT anchor is still read normally. This
+  // pins that behavior — needs-operator is the safe direction, so it is
+  // accepted, not fixed — with no code change.
+  it('AC4 nuance: a disqualified anchor whose LATER member read then fails stays needs-operator (never aborts the sweep for later anchors)', () => {
+    const list = (): OpenAnchorIssue[] => [
+      { number: 4244, title: 'Batch b-a: #4146, #4147', body: ANCHOR_BODY([4146, 4147]) },
+      { number: 4300, title: 'Batch b-b: #4148', body: ANCHOR_BODY([4148]) },
+    ];
+    const read = readerFrom({
+      4244: truth({ state: 'OPEN' }),
+      4146: truth({ state: 'OPEN' }), // disqualifies #4244 BEFORE #4147 is even read
+      // 4147 deliberately absent — its read fails (undefined)
+      4300: truth({ state: 'OPEN' }),
+      4148: truth({
+        state: 'CLOSED',
+        stateReason: 'COMPLETED',
+        closer: { kind: 'pr', number: 1, merged: true, baseRefName: 'main', repo: REPO },
+      }),
+    });
+    const result = sweepOrphanAnchors(createEmptyState(), list, read, { repo: REPO });
+    expect(result?.items).toHaveLength(2);
+    expect(result?.items[0]).toMatchObject({ anchor: 4244, verdict: 'orphan-needs-operator' });
+    expect(result?.items[0]?.reasons).toContain('member-open:#4146');
+    // The second anchor was still read for real — never short-circuited to
+    // orphan-unknown by an "aborted" flag the first anchor never tripped.
+    expect(result?.items[1]).toMatchObject({ anchor: 4300, verdict: 'orphan-closable-candidate' });
+  });
+
   // #790 review (Conformance/AC6): the earlier version of this test could
   // never fail — `wrote` was only ever assigned `wrote || false`, and the
   // `.length` checks bound an arity, not a capability. Replaced with a
@@ -507,21 +613,11 @@ describe('#790 sweepOrphanAnchors', () => {
       return null; // an unrecognized gh call — never treated as a green light
     };
 
+    // #790 review: drive the SAME argv-building function the real CLI
+    // lister uses (`orphanAnchorListArgs`) rather than a hand-copied argv —
+    // a change to the production command is now covered by this test too.
     const list = (): OpenAnchorIssue[] | undefined => {
-      const out = fakeExec('gh', [
-        'issue',
-        'list',
-        '--label',
-        'batch-epic',
-        '--state',
-        'open',
-        '-R',
-        REPO,
-        '--json',
-        'number,title,body',
-        '--limit',
-        String(ORPHAN_SWEEP_MAX_ANCHORS),
-      ]);
+      const out = fakeExec('gh', orphanAnchorListArgs(REPO, ORPHAN_SWEEP_MAX_ANCHORS));
       return out === null ? undefined : (JSON.parse(out) as OpenAnchorIssue[]);
     };
     const read = issueCloseReader(
@@ -538,19 +634,7 @@ describe('#790 sweepOrphanAnchors', () => {
     expect(result).not.toBeNull();
     expect(result?.items[0]?.verdict).toBe('orphan-closable-candidate');
 
-    const isWrite = (argv: string[]): boolean => {
-      const [, ...args] = argv;
-      if (args[0] === 'issue' && ['close', 'comment', 'edit'].includes(args[1] ?? '')) return true;
-      if (args.includes('--add-label') || args.includes('--remove-label')) return true;
-      if (args[0] === 'api') {
-        const xIdx = args.indexOf('-X');
-        if (xIdx !== -1 && ['POST', 'PATCH', 'PUT', 'DELETE'].includes(args[xIdx + 1] ?? '')) {
-          return true;
-        }
-      }
-      return false;
-    };
-    expect(calls.filter(isWrite)).toEqual([]);
+    expect(calls.filter(isWriteCall)).toEqual([]);
   });
 
   it('no exec/write capability is even reachable through the sweep’s own parameter types (list/read are data-only)', () => {
