@@ -3723,7 +3723,10 @@ function reconcileStaleBlockedBatches(
  */
 interface AnchorTickContext {
   repo: string;
+  /** Cached for the tick — the verdict passes. */
   read: IssueCloseReader;
+  /** Uncached — the re-read immediately before an irreversible close. */
+  readFresh: IssueCloseReader;
   commitInBase: CommitInBase;
 }
 
@@ -3757,7 +3760,7 @@ function anchorTickContext(deps: BatchDispatchDeps): AnchorTickContext | undefin
       ) !== null
     );
   };
-  return { repo: deps.anchorRepo, read, commitInBase };
+  return { repo: deps.anchorRepo, read, readFresh: reader, commitInBase };
 }
 
 /**
@@ -3829,7 +3832,15 @@ function reconcileAnchorClosure(
         anchorLedgerBlockers(s, fresh).length === 0;
       return { state: s, result: ok };
     });
-    if (!stillClean) {
+    // ...and GitHub itself, uncached: a member reopened or the anchor handed
+    // back since the (cached) verdict read must stop the close too.
+    const freshVerdict = stillClean
+      ? classifyAnchor(state, batch, ctx.readFresh, {
+          repo: ctx.repo,
+          commitInBase: ctx.commitInBase,
+        })
+      : undefined;
+    if (freshVerdict?.kind !== 'closable') {
       clearAnchorCloseFailed(deps, batch, now);
       continue;
     }
