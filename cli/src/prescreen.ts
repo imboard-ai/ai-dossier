@@ -167,17 +167,22 @@ const IGNORED_SECTION_HEADING_RE =
  * ATX markdown heading: 0–3 spaces, 1–6 `#`, then (optionally) whitespace + the heading text and an
  * optional closing `#` run preceded by whitespace (CommonMark).
  */
-const HEADING_RE = /^\s{0,3}(#{1,6})(?:\s+(.*?))?(?:\s+#+)?\s*$/;
+const HEADING_RE = /^[ \t]{0,3}(#{1,6})(?:[ \t]+([^\n]*))?$/;
 
 /** A fenced code block delimiter — a `#` line inside a fence is a shell comment, not a heading. */
 const FENCE_RE = /^\s{0,3}(?:```|~~~)/;
 
-/** Heading text with leading emoji/emphasis/punctuation and trailing `:`/emphasis removed. */
+/** Characters trimmed from the end of a heading: whitespace, `:`, emphasis, and a CommonMark closing `#` run. */
+const HEADING_TRAILING_CHARS = ' \t\r\n\f\v:*_#';
+
+/** Heading text with leading emoji/emphasis/punctuation and trailing `:`/emphasis/closing `#`s removed. */
 function normaliseHeading(text: string): string {
-  return text
-    .replace(/^[^\p{L}\p{N}]+/u, '')
-    .replace(/[\s:*_]+$/, '')
-    .trim();
+  // Trailing trim by loop, not `/[…]+$/` — that regex is quadratic on a long whitespace run
+  // (untrusted issue body; #772 security review).
+  const trimmed = text.replace(/^[^\p{L}\p{N}]+/u, '');
+  let end = trimmed.length;
+  while (end > 0 && HEADING_TRAILING_CHARS.includes(trimmed[end - 1])) end--;
+  return trimmed.slice(0, end);
 }
 
 /**
@@ -255,9 +260,9 @@ const PROVENANCE_CLAUSE_RE = new RegExp(
  */
 function isLinkOnlyLine(line: string): boolean {
   const remainder = line
-    .replace(/\[([^\]\n]*)\]\([^)\n]*\)/g, ' $1 ')
+    .replace(/\[([^[\]\n]*)\]\([^()\n]*\)/g, ' $1 ')
     .replace(/<?https?:\/\/[^\s>)]+>?/g, ' ')
-    .replace(/\b[\w.-]+\/[\w.-]+#\d+\b/g, ' ')
+    .replace(/(?<![\w.-])[\w.-]+\/[\w.-]+#\d+\b/g, ' ')
     .replace(/#\d+\b/g, ' ')
     .replace(/[\s\-*+>•|,;:/()[\]&.–—]|\band\b|\bor\b/gi, '');
   return remainder === '' && /\S/.test(line);

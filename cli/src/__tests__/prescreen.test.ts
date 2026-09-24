@@ -640,3 +640,35 @@ describe('prescreenIssue — section-aware text floor (#772)', () => {
     expect(stripReferenceMaterial(withProv).split('\n')).toHaveLength(2);
   });
 });
+
+describe('prescreenIssue — adversarial bodies stay linear (#772 security review)', () => {
+  // A 64 KB body (GitHub's limit) must not stall the pre-screen. Each of these took 8–25 s
+  // before the heading / markdown-link / owner-repo regexes were made non-backtracking.
+  const size = 65536;
+  it.each([
+    ['long whitespace run after a heading', `# a${' '.repeat(size)}b`],
+    ['unclosed markdown link brackets', '['.repeat(size)],
+    ['repeated half links', '[a]('.repeat(size / 4)],
+    ['owner/repo-like dash runs', `${'a-'.repeat(size / 3)}/${'a-'.repeat(size / 6)}`],
+  ])('%s', (_name, body) => {
+    const start = performance.now();
+    prescreenIssue({ ...baseInput, body });
+    expect(performance.now() - start).toBeLessThan(1000);
+  });
+
+  it('heading edge cases keep their meaning after the regex rewrite', () => {
+    for (const heading of ['## Context ##', '## Background:\r', '### Related issues ###  ']) {
+      const body = `${heading}\nThe security audit that found this.`;
+      expect(prescreenIssue({ ...baseInput, body }).reasons).toHaveLength(0);
+    }
+    expectTextFloorReviewFull(
+      prescreenIssue({ ...baseInput, body: '#nope\nRewrite the billing job.' })
+    );
+    expectTextFloorReviewFull(
+      prescreenIssue({ ...baseInput, body: 'see owner/repo#12 and fix the billing job' })
+    );
+    expect(
+      prescreenIssue({ ...baseInput, body: 'org/repo#12, foo-bar/baz.qux#3' }).reasons
+    ).toHaveLength(0);
+  });
+});
