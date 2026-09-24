@@ -1267,7 +1267,10 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   `stateReason=COMPLETED`, and its close event's closer must be a PR of the project's own repository MERGED
   into the batch's `base_branch` or a commit reachable from `origin/<base>`
   (`shippingEvidence`). A hand close — no linked PR or commit — is not evidence: an
-  issue's author can close their own issue. A member issue that no longer resolves
+  issue's author can close their own issue. One more path counts for a hand close: a
+  PR of the project's repository, MERGED into the base, that GitHub lists as closing
+  the issue (`closedByPullRequestsReferences` — `Closes #N` parsed but not acted on,
+  the imboard#4116 shape); that still needs a merge, i.e. write access. A member issue that no longer resolves
   (deleted/transferred) reads `member-missing` — needs-operator, not an outage.
 - **Never over a failure trail.** Any evicted member, any member in a failure status
   (`ISSUE_UNIVERSAL_FAILURE_EDGES` + `evicted`/`requeued`), any member requeued out of

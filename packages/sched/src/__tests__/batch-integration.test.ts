@@ -2689,7 +2689,14 @@ describe('#686: a blocked batch whose work merged out of band reconciles (ground
 function setIssueTruth(truthDir: string, issue: number, truth: Partial<IssueCloseTruth>): void {
   fs.writeFileSync(
     path.join(truthDir, `${issue}.issue.json`),
-    JSON.stringify({ state: 'OPEN', stateReason: null, labels: [], closer: null, ...truth })
+    JSON.stringify({
+      state: 'OPEN',
+      stateReason: null,
+      labels: [],
+      closer: null,
+      closingPrs: [],
+      ...truth,
+    })
   );
 }
 
@@ -2827,8 +2834,16 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
     // main, and `batch.pr` was never recorded — neither #686 signal can fire.
     expect(findBatch(h.state(), batchId)?.pr).toBeNull();
     setIssueTruth(h.truthDir, 4253, { labels: ['batch-epic'] });
-    // The hand-opened PR said `Closes #4116`, so GitHub linked it as the closer.
-    setIssueTruth(h.truthDir, 4116, COMPLETED_BY_PR(4255));
+    // The REAL shape (verified on imboard-monorepo): PR #4255 said
+    // `Closes #4116` and merged, GitHub did not close the issue, and a person
+    // closed it by hand minutes later — so the close event has NO closer, and
+    // only the merged closing reference vouches for it.
+    setIssueTruth(h.truthDir, 4116, {
+      state: 'CLOSED',
+      stateReason: 'COMPLETED',
+      closer: null,
+      closingPrs: [{ number: 4255, merged: true, baseRefName: 'main', repo: 'test-org/test-repo' }],
+    });
 
     const result = h.tick();
 
@@ -2847,7 +2862,7 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
 
     expect(issueTruth(h.truthDir, 4253).state).toBe('CLOSED');
     const [comment] = anchorComments(h.truthDir, 4253);
-    expect(comment).toContain('| #4116 | PR #4255 |');
+    expect(comment).toContain('| #4116 | PR #4255 (closing reference; issue closed by hand) |');
   }, 60_000);
 
   // NEGATIVE: every shape without verified shipping evidence, or with a
@@ -2876,6 +2891,20 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
           state: 'CLOSED',
           stateReason: 'COMPLETED',
           closer: null,
+        }),
+    },
+    {
+      name: 'a member closed by hand whose only closing reference is an UNMERGED PR',
+      reason: 'member-closed-by-hand:#7692',
+      arrange: (h) =>
+        setIssueTruth(h.truthDir, 7692, {
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          closer: null,
+          closingPrs: [
+            { number: 9779, merged: false, baseRefName: 'main', repo: 'test-org/test-repo' },
+            { number: 9780, merged: true, baseRefName: 'main', repo: 'test-org/other-repo' },
+          ],
         }),
     },
     {
