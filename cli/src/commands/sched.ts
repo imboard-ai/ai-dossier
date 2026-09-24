@@ -9,7 +9,7 @@
  * cheap-tier report dispatch.
  */
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import * as path from 'node:path';
 import type {
@@ -90,6 +90,7 @@ import {
   batchGateRefusal,
   createBatchSuiteRunner,
 } from '../batch-suite-runner';
+import { spawnCapRun } from '../cap-envelope';
 import { loadCapabilityManifest, timeoutReasonSpent } from '../capability';
 import { formatCost, formatCount } from '../cost-format';
 import { detectDispatchProfile, type ProfileCandidate } from '../dispatch-detect';
@@ -139,12 +140,20 @@ export function createBatchCapabilityRunner(opts?: {
 }): (worktree: string, capabilityId: string) => CapabilityGateResult {
   const timeoutMs = opts?.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
   return (worktree, capabilityId) => {
-    const result = spawnSync('ai-dossier', ['cap', 'run', capabilityId], {
-      cwd: worktree,
-      encoding: 'utf-8',
-      timeout: timeoutMs,
+    // #811: read the envelope off `cap run`'s dedicated envelope file (stdout
+    // bottom-up scan as the fallback), never blindly stdout's last line.
+    const {
+      spawned: result,
+      envelope,
+      envelopeSource,
+    } = spawnCapRun(capabilityId, worktree, {
+      timeoutMs,
     });
-    if (result.error) {
+    // A descendant holding the inherited stdout can keep `spawnSync` waiting
+    // past its timeout after `cap run` already exited with a verdict — that
+    // verdict stands (see batch-suite-runner's `runCapabilitySuite`).
+    const exitedWithVerdict = result.status !== null && envelopeSource !== 'none';
+    if (result.error && !exitedWithVerdict) {
       // #681: this runner's OWN timeout (spawnSync's, `BATCH_SUITE_TIMEOUT_MS`)
       // must be distinguishable from a genuine machinery failure — before, it
       // collapsed into the evidence-free `{outcome: 'automation-broken'}`
@@ -163,43 +172,33 @@ export function createBatchCapabilityRunner(opts?: {
       }
       return { outcome: 'automation-broken' };
     }
-    const lastLine = (result.stdout ?? '').trim().split('\n').pop() ?? '';
-    try {
-      const envelope = JSON.parse(lastLine) as {
-        outcome?: unknown;
-        output_tail?: unknown;
-        reason?: unknown;
-        duration_ms?: unknown;
-      };
-      const outcome = envelope.outcome;
-      // Fall back to the subprocess's own capture when the envelope omits
-      // `output_tail` (a capability build predating #583, or a non-string
-      // field). Passing `null` through would read as "nobody tried to capture
-      // output" to `hasEarnedFailureEvidence`, which trusts the exit code in
-      // that case — silently buying back the pre-#594 evict-on-any-
-      // `task-failed` behaviour on the exact path #594 closes.
-      const captured = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-      const outputTail =
-        typeof envelope.output_tail === 'string' ? envelope.output_tail : captured || null;
-      // `reason` (#583 review) is the only explanation available when no
-      // subprocess ran at all — `capability-unavailable`, or `automation-broken`
-      // from a failed assumption probe — since `output_tail` is unset there.
-      const reason = typeof envelope.reason === 'string' ? envelope.reason : null;
-      // `duration_ms` (#681) rides to `member_gates` — the gate's cost per
-      // member, the raw material for per-change-shape savings reporting.
-      const durationMs = typeof envelope.duration_ms === 'number' ? envelope.duration_ms : null;
-      if (
-        outcome === 'ok' ||
-        outcome === 'task-failed' ||
-        outcome === 'automation-broken' ||
-        outcome === 'capability-unavailable'
-      ) {
-        return { outcome, outputTail, reason, durationMs };
-      }
-      return { outcome: 'automation-broken' };
-    } catch {
-      return { outcome: 'automation-broken' };
+    if (envelope === null) return { outcome: 'automation-broken' };
+    const outcome = envelope.outcome;
+    // Fall back to the subprocess's own capture when the envelope omits
+    // `output_tail` (a capability build predating #583, or a non-string
+    // field). Passing `null` through would read as "nobody tried to capture
+    // output" to `hasEarnedFailureEvidence`, which trusts the exit code in
+    // that case — silently buying back the pre-#594 evict-on-any-
+    // `task-failed` behaviour on the exact path #594 closes.
+    const captured = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    const outputTail =
+      typeof envelope.output_tail === 'string' ? envelope.output_tail : captured || null;
+    // `reason` (#583 review) is the only explanation available when no
+    // subprocess ran at all — `capability-unavailable`, or `automation-broken`
+    // from a failed assumption probe — since `output_tail` is unset there.
+    const reason = typeof envelope.reason === 'string' ? envelope.reason : null;
+    // `duration_ms` (#681) rides to `member_gates` — the gate's cost per
+    // member, the raw material for per-change-shape savings reporting.
+    const durationMs = typeof envelope.duration_ms === 'number' ? envelope.duration_ms : null;
+    if (
+      outcome === 'ok' ||
+      outcome === 'task-failed' ||
+      outcome === 'automation-broken' ||
+      outcome === 'capability-unavailable'
+    ) {
+      return { outcome, outputTail, reason, durationMs };
     }
+    return { outcome: 'automation-broken' };
   };
 }
 

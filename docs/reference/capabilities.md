@@ -109,6 +109,17 @@ than swallowing it and printing only its own framing.
 > consumers should read the envelope's last stdout line — present for every `cap run`
 > outcome — rather than the exit code alone, and check stderr for usage errors.
 
+**Machine consumers should read the envelope file, not stdout** (#811). Pass
+`--envelope-file <path>` (or set `DOSSIER_CAP_ENVELOPE_FILE=<path>` in `cap run`'s
+environment) and `cap run` writes the same envelope there, atomically, before it exits.
+Stdout is a shared channel: anything else holding it — a descendant process that writes
+after `cap run` prints the envelope — pushes the envelope off the last line, and a
+green 33-minute `gate.batch` was once recorded as "no envelope" that way. The variable
+is stripped from the capability command's own environment, so the command cannot write
+the verdict. Every envelope carries `"cap_envelope": 1`; a consumer without the file
+should scan stdout bottom-up for the last line carrying that marker rather than trusting
+the last line blindly. The scheduler's suite and per-member gate runners do both.
+
 **On any non-`ok` outcome, the envelope also carries `output_tail`** (#583 AC1/AC3) —
 the last `--tail-bytes` (default 8192) bytes of the command's combined stdout+stderr,
 UTF-8-safe (never splits a multi-byte character). Omitted entirely on `ok`, so a
@@ -126,7 +137,7 @@ it completes, instead of showing progress incrementally.
 Envelope example:
 
 ```json
-{"capability":"test.focused","outcome":"task-failed","command":"npm test -- --silent","exit_code":1,"signal":null,"duration_ms":8421,"reason":null,"output_tail":"FAIL src/foo.test.ts\n  ✗ should do the thing\n"}
+{"cap_envelope":1,"capability":"test.focused","outcome":"task-failed","command":"npm test -- --silent","exit_code":1,"signal":null,"duration_ms":8421,"reason":null,"output_tail":"FAIL src/foo.test.ts\n  ✗ should do the thing\n"}
 ```
 
 ## Telemetry

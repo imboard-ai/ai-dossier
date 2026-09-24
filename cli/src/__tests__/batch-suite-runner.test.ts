@@ -485,7 +485,11 @@ describe('gate.batch capability (#777)', () => {
 
     createBatchSuiteRunner(config())('/wt');
 
-    expect(vi.mocked(spawnSync).mock.calls[0]?.[2]).not.toHaveProperty('env');
+    // #811: `env` now always carries the envelope-file channel — never the batch keys.
+    const env = vi.mocked(spawnSync).mock.calls[0]?.[2]?.env ?? {};
+    expect(env).not.toHaveProperty('DOSSIER_BATCH_ID');
+    expect(env).not.toHaveProperty('DOSSIER_BATCH_BASE');
+    expect(env).toHaveProperty('DOSSIER_CAP_ENVELOPE_FILE');
   });
 
   // AC: outcomes map identically whichever capability is the gate.

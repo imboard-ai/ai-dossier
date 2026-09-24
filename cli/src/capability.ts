@@ -22,6 +22,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
+import { CAP_ENVELOPE_FILE_ENV } from './cap-envelope';
 import { compareVersions } from './version';
 
 /** Directory (relative to the run directory) that holds the automation manifest. */
@@ -545,12 +546,16 @@ export function runCapability(
   // misclassified `automation-broken`, which the batch gate would then read
   // as a genuine inconclusive result rather than "the command produced a lot
   // of output" (review finding on #583).
+  // The envelope channel (#811) belongs to `cap run`, not to the command it
+  // runs — strip it so the command cannot write (or clobber) the verdict.
+  const { [CAP_ENVELOPE_FILE_ENV]: _envelopeFile, ...childEnv } = process.env;
   const res = spawnSync(commandLine, {
     shell: true,
     cwd,
     encoding: 'utf-8',
     timeout: timeoutMs,
     maxBuffer: MAX_CAPABILITY_OUTPUT_BYTES,
+    env: childEnv,
   });
   if (res.stdout) process.stdout.write(res.stdout);
   if (res.stderr) process.stderr.write(res.stderr);
