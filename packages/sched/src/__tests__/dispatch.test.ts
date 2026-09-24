@@ -628,11 +628,19 @@ describe('per-member review level at dispatch (#771)', () => {
     expect(resolveTierSpawn(dispatch, tier, 1).model).toBe('glm-strong');
   });
 
-  it('a light member prompt is byte-identical to the pre-#771 rendering (AC3)', () => {
+  it('a light member prompt defaults to light and carries no full-review appendix (AC3, #804)', () => {
     const args = [DEFAULT_MEMBER_PROMPT_TEMPLATE, 42, 'b1', '/wt/m', 'batch/b1'] as const;
     const legacy = buildMemberPrompt(...args);
     expect(buildMemberPrompt(...args, 'light')).toBe(legacy);
-    expect(legacy).not.toContain('review=full');
+    // The template explains both levels; the member's OWN level is light.
+    expect(legacy).not.toContain('Review level: review=full');
+    expect(legacy).not.toContain('--kv review=full');
+    expect(legacy).toContain('--kv review=light');
+    expect(legacy).not.toContain(FULL_REVIEW_MEMBER_DIRECTIVE);
+    // #804: the default template now names the level for light members too.
+    expect(legacy).toContain('Review level: review=light.');
+    // An operator template without {review} keeps the pre-#771 light rendering.
+    expect(buildMemberPrompt('issue {issue}', 42, 'b1', '/wt', 'b', 'light')).toBe('issue 42');
   });
 
   it('review=full reaches the member prompt, with or without a {review} placeholder (AC2)', () => {
@@ -644,8 +652,14 @@ describe('per-member review level at dispatch (#771)', () => {
       'b/b1',
       'full'
     );
-    expect(full.endsWith(FULL_REVIEW_MEMBER_DIRECTIVE)).toBe(true);
-    expect(full).toContain('review=full');
+    // #804: the default template places {review} itself — substituted, no appendix.
+    expect(full).toContain('Review level: review=full.');
+    expect(full).toContain('--kv review=full');
+    expect(full).not.toContain(FULL_REVIEW_MEMBER_DIRECTIVE);
+    expect(full).not.toContain('{review}');
+    // An operator template with no {review} placeholder gets the directive appended.
+    const bare = buildMemberPrompt('issue {issue}', 42, 'b1', '/wt', 'b', 'full');
+    expect(bare).toBe(`issue 42${FULL_REVIEW_MEMBER_DIRECTIVE}`);
     // An operator template that places {review} itself gets it substituted, no appendix.
     const custom = buildMemberPrompt('issue {issue} review={review}', 42, 'b1', '/wt', 'b', 'full');
     expect(custom).toBe('issue 42 review=full');
@@ -692,6 +706,29 @@ describe('member prompt dispatches member-cycle (#677)', () => {
     expect(DEFAULT_MEMBER_PROMPT_TEMPLATE).toContain('--kv batch={batch}');
     expect(DEFAULT_MEMBER_PROMPT_TEMPLATE).toContain('--phase review --status done');
     expect(DEFAULT_MEMBER_PROMPT_TEMPLATE).toContain('--status blocked');
+  });
+
+  it('#804: review is a real Step 4b self-review before handover, never a zero-agent post', () => {
+    const t = DEFAULT_MEMBER_PROMPT_TEMPLATE;
+    // The review level is placed, not appended — both light and full reach the member.
+    expect(t).toContain('Review level: review={review}.');
+    expect(t).toContain("member-cycle Step 4b's self-review");
+    expect(t).toContain('not a bookkeeping post');
+    // Level semantics match member-cycle@1.3.0.
+    expect(t).toContain('Security included');
+    expect(t).toContain('review=light runs at least Conformance');
+    // Order: review → handover → review milestone.
+    const review = t.indexOf("Step 4b's self-review");
+    const handover = t.indexOf('## handover:v1');
+    const milestone = t.indexOf('--phase review --status done');
+    expect(review).toBeGreaterThan(-1);
+    expect(review).toBeLessThan(handover);
+    expect(handover).toBeLessThan(milestone);
+    // The milestone names the agents that ran; zero is forbidden with honest fallbacks.
+    expect(t).toContain('--kv agents_done=<the review agents that actually ran>');
+    expect(t).toContain('Never post agents_done=0 or none');
+    expect(t).toContain('--status partial');
+    expect(t).toContain('--kv reason=review-not-run');
   });
 
   it('buildMemberPrompt substitutes issue, batch, worktree and integration_branch (#677)', () => {
