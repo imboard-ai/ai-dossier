@@ -3525,9 +3525,10 @@ const DISPATCHED_MEMBER_STATUSES: ReadonlySet<IssueStatus> = new Set([
  * of merge evidence ("The batch branch is in `main` at c277ff59b", `pr=None`):
  * the branch was merged out of band, so its commits are IN the base even
  * though the batch never shipped a PR of its own. Two probes against the
- * remote-tracking ref (refreshed best-effort first — a merge that landed on
- * the remote is invisible to `rev-list` until fetched; fetch failure leaves
- * the stale ref, the same degradation the per-issue path tolerates):
+ * remote-tracking ref (refreshed first — a merge that landed on the remote is
+ * invisible to `rev-list` until fetched; since #768 a FAILED fetch yields no
+ * evidence at all: a stale ref is not proof, and this answer can reconcile a
+ * batch to shipped):
  *
  * - `git rev-list --count origin/<base>..<branch>` is 0 — nothing of the
  *   branch is missing from the base, i.e. every member commit on it is an
@@ -3546,7 +3547,7 @@ function branchMergedIntoBase(deps: BatchDispatchDeps, batch: BatchEntry): boole
   // the same bar instead of trusting upstream state shape.
   if (!SAFE_REF_RE.test(batch.branch) || !SAFE_REF_RE.test(batch.base_branch)) return false;
   const base = `origin/${batch.base_branch}`;
-  deps.exec('git', ['fetch', 'origin', batch.base_branch], deps.repoDir);
+  if (deps.exec('git', ['fetch', 'origin', batch.base_branch], deps.repoDir) === null) return false;
   const ahead = deps.exec('git', ['rev-list', '--count', `${base}..${batch.branch}`], deps.repoDir);
   if ((ahead ?? '').trim() !== '0') return false;
   const branchTip = deps.exec('git', ['rev-parse', batch.branch], deps.repoDir);

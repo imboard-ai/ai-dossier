@@ -154,8 +154,9 @@ export type OpenAnchorVerdict = Exclude<AnchorVerdict, { kind: 'anchor-closed' }
 /**
  * The verified shipping evidence for a member closed as completed, or the
  * reason it is not evidence. Only code that landed in `baseBranch` counts:
- * a PR of `repo` (the pinned project repository) MERGED into it, or a commit
- * reachable from it. A hand close (no linked
+ * a PR of `repo` (the pinned project repository) MERGED into it — as the
+ * close event's closer, or, for a hand close, as a closing reference — or a
+ * commit reachable from it. A hand close (no linked
  * closer), an unmerged or other-base PR, and an unverifiable commit are all
  * refusals — anyone who can close the issue could otherwise mint "shipped".
  */
@@ -166,7 +167,22 @@ export function shippingEvidence(
   commitInBase: CommitInBase | undefined
 ): { shipped: string } | { refused: string } {
   const closer = truth.closer;
-  if (closer === null) return { refused: 'closed-by-hand' };
+  if (closer === null) {
+    // Closed by hand. Still shipped when a PR of the pinned repo, MERGED into
+    // the base, names it as closed (`Closes #N` — GitHub parsed it, then did
+    // not act: the imboard#4116 shape). A merge needs write access, so an
+    // author's self-close alone still never counts.
+    const ref = truth.closingPrs.find(
+      (pr) =>
+        pr.merged &&
+        pr.baseRefName === baseBranch &&
+        repo !== undefined &&
+        pr.repo?.toLowerCase() === repo.toLowerCase()
+    );
+    return ref !== undefined
+      ? { shipped: `PR #${ref.number} (closing reference; issue closed by hand)` }
+      : { refused: 'closed-by-hand' };
+  }
   if (closer.kind === 'pr') {
     // A PR in ANOTHER repository can close this issue (`Fixes owner/repo#N`)
     // and merge into a same-named base — that is not code in this project.

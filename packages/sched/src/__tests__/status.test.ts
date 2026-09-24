@@ -456,7 +456,7 @@ describe('#768 status: the open-anchor sweep is report-only', () => {
     const report = buildStatusReport(seeded(), { max_slots: 3 }, 'p', null, NOW, {
       read: (n) => {
         reads.push(n);
-        return { state: 'OPEN', stateReason: null, labels: [], closer: null };
+        return { state: 'OPEN', stateReason: null, labels: [], closer: null, closingPrs: [] };
       },
     });
     expect(report.anchors).toEqual([]);

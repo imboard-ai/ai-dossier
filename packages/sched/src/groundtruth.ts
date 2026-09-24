@@ -100,6 +100,21 @@ export interface IssueCloseTruth {
       }
     | { kind: 'commit'; oid: string }
     | null;
+  /**
+   * PRs GitHub parsed as closing this issue (`Closes #N`), merged or not
+   * (`closedByPullRequestsReferences`). The imboard#4116 shape: the PR merged,
+   * GitHub declined to close the issue, a person closed it by hand — so the
+   * close event has no closer, yet a merged PR still vouches for it.
+   */
+  closingPrs: ClosingPr[];
+}
+
+/** A PR that references an issue as closed by it (#768). */
+export interface ClosingPr {
+  number: number;
+  merged: boolean;
+  baseRefName: string | null;
+  repo: string | null;
 }
 
 export interface GroundTruth {
@@ -396,7 +411,7 @@ export function createExecGroundTruth(
       );
       return repoAlive === null
         ? undefined
-        : { state: 'MISSING', stateReason: null, labels: [], closer: null };
+        : { state: 'MISSING', stateReason: null, labels: [], closer: null, closingPrs: [] };
     };
   }
   return truth;
@@ -426,6 +441,7 @@ export const GIT_OID_RE = /^[0-9a-f]{7,40}$/i;
 const ISSUE_CLOSE_QUERY =
   'query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){' +
   `state stateReason labels(first:${ISSUE_LABEL_PAGE_SIZE}){pageInfo{hasNextPage} nodes{name}} ` +
+  'closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number merged baseRefName repository{nameWithOwner}}} ' +
   'timelineItems(itemTypes:[CLOSED_EVENT],last:1){nodes{... on ClosedEvent{closer{__typename ' +
   '... on PullRequest{number merged baseRefName repository{nameWithOwner}} ... on Commit{oid}}}}}}}}';
 
@@ -485,7 +501,24 @@ export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth
       closer = { kind: 'commit', oid: c.oid };
     }
   }
-  return { state, stateReason, labels, closer };
+  const refNodes = (obj.closedByPullRequestsReferences as { nodes?: unknown } | undefined)?.nodes;
+  const closingPrs: ClosingPr[] = [];
+  for (const n of Array.isArray(refNodes) ? refNodes : []) {
+    const pr = n as {
+      number?: unknown;
+      merged?: unknown;
+      baseRefName?: unknown;
+      repository?: { nameWithOwner?: unknown } | null;
+    } | null;
+    if (pr === null || typeof pr !== 'object' || typeof pr.number !== 'number') continue;
+    closingPrs.push({
+      number: pr.number,
+      merged: pr.merged === true,
+      baseRefName: typeof pr.baseRefName === 'string' ? pr.baseRefName : null,
+      repo: typeof pr.repository?.nameWithOwner === 'string' ? pr.repository.nameWithOwner : null,
+    });
+  }
+  return { state, stateReason, labels, closer, closingPrs };
 }
 
 /**

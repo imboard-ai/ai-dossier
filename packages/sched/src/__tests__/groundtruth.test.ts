@@ -912,6 +912,34 @@ describe('parseIssueCloseTruthJson (#768)', () => {
         baseRefName: 'main',
         repo: 'imboard-ai/imboard',
       },
+      closingPrs: [],
+    });
+  });
+
+  it('reads closing references (imboard#4116: merged #4255, closed by hand)', () => {
+    expect(
+      parseIssueCloseTruthJson(
+        wrap({
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          closedByPullRequestsReferences: {
+            nodes: [
+              {
+                number: 4255,
+                merged: true,
+                baseRefName: 'main',
+                repository: { nameWithOwner: 'imboard-ai/imboard-monorepo' },
+              },
+            ],
+          },
+          timelineItems: { nodes: [{ closer: null }] },
+        })
+      )
+    ).toMatchObject({
+      closer: null,
+      closingPrs: [
+        { number: 4255, merged: true, baseRefName: 'main', repo: 'imboard-ai/imboard-monorepo' },
+      ],
     });
   });
 
