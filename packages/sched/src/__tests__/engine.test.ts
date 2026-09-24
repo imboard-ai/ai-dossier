@@ -23,6 +23,7 @@ import {
   type SpawnDeps,
   schedRunsLogPath,
   setPaused,
+  stopIssue,
   tick,
   transitionIssue,
   transitionSlot,
@@ -4168,5 +4169,75 @@ describe('#632: ground-truth-unreachable / pr-watch-waiting dedup once per strea
     expect(entry?.ground_truth_unreachable_since).toBeNull();
     expect(entry?.ground_truth_unreachable_ticks).toBe(0);
     expect(entry?.pr_watch_waiting_since).toBeNull();
+  });
+});
+
+describe('#776: recovery never re-dispatches a unit whose issue is closed', () => {
+  /** Enqueue #101, spawn it, then park its slot in `recovering` with a dead agent. */
+  function recoveringUnit() {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(1);
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.store.withLock((state) => {
+      const slot = state.slots.find((s) => s.unit === 'issue:101');
+      if (!slot) throw new Error('no slot');
+      return { state: transitionSlot(state, slot.id, 'recovering', { pid: null }), result: null };
+    });
+    return h;
+  }
+
+  it('control: a recovering slot on an OPEN issue is respawned', () => {
+    const h = recoveringUnit();
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(2);
+    expect(h.journal.read().some((e) => e.event === 'stale-closed')).toBe(false);
+  });
+
+  it('a recovering slot on a CLOSED issue is flagged stale-closed and never respawned', () => {
+    const h = recoveringUnit();
+    h.closedIssues.add(101);
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(1);
+    const entry = h.state().entries.find((e) => e.issue === 101);
+    expect(entry?.stale_closed_at).not.toBeNull();
+    expect(h.state().slots.find((s) => s.unit === 'issue:101')?.status).toBe('recovering');
+    const flagged = h.journal.read().filter((e) => e.event === 'stale-closed');
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0].detail).toContain('sched stop --issue 101');
+
+    // Sticky: a later poll that reads the issue as open (gh unreachable reads
+    // `false`) must not re-dispatch it, and the flag is journalled once.
+    h.closedIssues.delete(101);
+    h.tick();
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.journal.read().filter((e) => e.event === 'stale-closed')).toHaveLength(1);
+
+    // sched status names it with the exact remedy.
+    const warning = buildStatusReport(h.state(), h.config, 'p').warnings.find(
+      (w) => w.kind === 'stale-closed'
+    );
+    expect(warning).toMatchObject({ issue: 101, remedy: 'sched stop --issue 101' });
+
+    // The remedy releases the slot for good.
+    h.store.withLock((state) => ({ state: stopIssue(state, 101).state, result: null }));
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
+  });
+
+  it('flags while PAUSED, so `sched resume` does not re-run shipped work (the incident shape)', () => {
+    const h = recoveringUnit();
+    h.store.withLock((state) => ({ state: setPaused(state, true), result: null }));
+    h.closedIssues.add(101);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.stale_closed_at).not.toBeNull();
+
+    h.store.withLock((state) => ({ state: setPaused(state, false), result: null }));
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(1);
   });
 });

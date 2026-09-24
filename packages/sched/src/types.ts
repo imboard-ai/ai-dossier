@@ -387,6 +387,17 @@ export interface QueueEntry {
    * `pr_watch_waiting_since` is `null`.
    */
   pr_watch_waiting_ticks: number;
+  /**
+   * #776: ISO time the engine first saw this entry's GitHub issue CLOSED while
+   * a cycle slot held it in `recovering` — the "stale-closed" flag. Once set,
+   * the recovery rail never respawns the unit (a closed issue is shipped or
+   * abandoned work; redispatching it re-runs finished work), and `sched
+   * status` lists it with the `sched stop --issue N` remedy. Sticky on
+   * purpose: `issueClosed` reads false when gh is unreachable, so clearing on
+   * a later "open" reading would let one flaky poll re-dispatch the unit.
+   * Cleared only by a requeue (a fresh attempt). `null` = never flagged.
+   */
+  stale_closed_at: string | null;
   enqueued_at: string;
   updated_at: string;
 }
@@ -740,6 +751,14 @@ export interface SchedState {
   schema_version: typeof SCHEMA_VERSION;
   /** When true, `computeAssignments` returns no assignments (sched pause). */
   paused: boolean;
+  /**
+   * #776: when the scheduler was paused — stamped by `setPaused` on the
+   * running → paused edge (manual `sched pause` or a dispatch-health
+   * auto-pause), cleared on resume. `sched status` warns once a pause has
+   * lasted more than a day. `null` while running, and for a pause recorded
+   * before this field existed (duration unknown — status says so).
+   */
+  paused_at: string | null;
   entries: QueueEntry[];
   batches: BatchEntry[];
   slots: SlotEntry[];
@@ -1450,6 +1469,9 @@ export type JournalEventName =
   // respawns, and the degraded path where it could not be written.
   | 'fence-written'
   | 'fence-failed'
+  // #776: a `recovering` cycle slot whose issue GitHub reports CLOSED — the
+  // recovery rail refuses to respawn it; `sched stop --issue N` releases it.
+  | 'stale-closed'
   // #683 fence lifecycle: the takeover's spawn bound its pid to the fence (so
   // readers can tell a live owner from a ghost), and the owning dispatch's
   // `exit-detected` released the fence — plus the degraded path of either.

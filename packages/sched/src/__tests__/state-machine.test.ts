@@ -582,6 +582,17 @@ describe('slot state machine (RFC-0001 §D.3)', () => {
 });
 
 describe('validateState', () => {
+  it('#776: backfills paused_at and stale_closed_at on pre-#776 states, and rejects a malformed paused_at', () => {
+    const state = seeded();
+    const legacy = JSON.parse(JSON.stringify(state));
+    delete legacy.paused_at;
+    for (const entry of legacy.entries) delete entry.stale_closed_at;
+    const loaded = validateState(legacy);
+    expect(loaded.paused_at).toBeNull();
+    expect(loaded.entries.every((e) => e.stale_closed_at === null)).toBe(true);
+    expect(() => validateState({ ...state, paused_at: 'yesterday' })).toThrow(/paused_at/);
+  });
+
   it('accepts a state produced by the package itself', () => {
     const state = seeded();
     expect(validateState(JSON.parse(JSON.stringify(state)))).toEqual(state);

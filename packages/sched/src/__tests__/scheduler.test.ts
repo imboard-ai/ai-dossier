@@ -146,6 +146,15 @@ describe('computeAssignments — dependency gating (AC5)', () => {
 });
 
 describe('pause / resume', () => {
+  it('#776: pausing stamps paused_at once; re-pausing keeps it; resuming clears it', () => {
+    let state = setPaused(createEmptyState(), true, NOW);
+    expect(state.paused_at).toBe(NOW.toISOString());
+    state = setPaused(state, true, NOW2);
+    expect(state.paused_at).toBe(NOW.toISOString());
+    state = setPaused(state, false, NOW2);
+    expect(state.paused_at).toBeNull();
+  });
+
   it('a paused scheduler makes no assignments; resume restores them', () => {
     let state = enqueueEntries(createEmptyState(), [{ issue: 1 }], NOW);
     state = setPaused(state, true);

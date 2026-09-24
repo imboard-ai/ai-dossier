@@ -243,7 +243,16 @@ export {
   transitionSlot,
   validateState,
 } from './state';
-export { type BlockedItem, buildStatusReport, type ParkedItem, type StatusReport } from './status';
+export {
+  type BlockedItem,
+  buildStatusReport,
+  buildStatusWarnings,
+  type ParkedItem,
+  STATUS_HEALTH_WARNING_AGE_MS,
+  type StatusReport,
+  type StatusWarning,
+  type StatusWarningKind,
+} from './status';
 export { isSafeWorktree, runTeardown, TEARDOWN_TIMEOUT_MS, type TeardownResult } from './teardown';
 export {
   type AttributionMethod,

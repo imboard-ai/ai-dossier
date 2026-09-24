@@ -1216,6 +1216,24 @@ after-the-fact recovery, not a missing-data bug.
   can be manual (`sched pause`) or automatic (dispatch-health, #505/#629 above); `sched
   resume` clears the flag and both dispatch-health streaks.
 
+## Status health warnings (#776)
+
+`sched status` (and `warnings[]` in `--json`, built by `buildStatusWarnings`) flags state
+nobody came back to, each with its exact remedy:
+
+- **`long-pause`** — paused for more than 24 h (`STATUS_HEALTH_WARNING_AGE_MS`), measured
+  from `paused_at`, which `setPaused` stamps on the running → paused edge and clears on
+  resume. A pause recorded before `paused_at` existed is flagged as "unknown age".
+- **`stale-engine-lease`** — the engine lease holder's pid is dead while queue entries are
+  unfinished or slots live: nothing is ticking (`sched start`).
+- **`stuck-slot`** — a live slot (`assigned`/`running`/`recovering`) with no progress for
+  more than 24 h (`sched stop --issue N` / `--batch B` once the work is confirmed done or
+  abandoned).
+- **`stale-closed`** — each tick polls `issueClosed` for every `recovering` cycle slot; a
+  closed issue sets the entry's sticky `stale_closed_at`, journals `stale-closed` once, and
+  the recovery rail never respawns it (even after `sched resume`). Report slots are exempt:
+  their issue is closed at merge by design. Remedy: `sched stop --issue N`.
+
 ## Hard-block labels are re-read every tick (#544)
 
 #507's enqueue pre-screen resolves an issue's GitHub labels in the CLI and lands the
