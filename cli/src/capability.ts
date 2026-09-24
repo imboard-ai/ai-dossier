@@ -128,6 +128,14 @@ export interface CapabilityEntry {
    * Default 0 (no floor) — opt in per capability.
    */
   minDurationMs?: number;
+  /**
+   * The repo's own admission (#777) that this capability routinely runs past
+   * any reasonable `cap run` budget — e.g. an unsharded full-repo `test.full`.
+   * The batch scheduler refuses to form a batch whose ONLY full gate is a
+   * timeout-prone `test.full` (no active `gate.batch`), rather than paying a
+   * gate that usually ends `suite-unreadable`. Default false.
+   */
+  timeoutProne?: boolean;
 }
 
 export interface CapabilityManifest {
@@ -277,6 +285,14 @@ function parseCapabilityEntry(id: string, raw: unknown): CapabilityEntry {
     minDurationMs = entry.min_duration_ms;
   }
 
+  let timeoutProne: boolean | undefined;
+  if (entry.timeout_prone !== undefined) {
+    if (typeof entry.timeout_prone !== 'boolean') {
+      throw new CapManifestError(`capability '${id}': timeout_prone must be true or false`);
+    }
+    timeoutProne = entry.timeout_prone;
+  }
+
   let assumptions: CapabilityAssumption[] | undefined;
   if (entry.assumptions !== undefined) {
     if (!Array.isArray(entry.assumptions)) {
@@ -285,7 +301,15 @@ function parseCapabilityEntry(id: string, raw: unknown): CapabilityEntry {
     assumptions = entry.assumptions.map((probe, i) => parseAssumption(id, i, probe));
   }
 
-  return { command: entry.command, lifecycle, assumptions, description, timeoutMs, minDurationMs };
+  return {
+    command: entry.command,
+    lifecycle,
+    assumptions,
+    description,
+    timeoutMs,
+    minDurationMs,
+    ...(timeoutProne !== undefined ? { timeoutProne } : {}),
+  };
 }
 
 function parseAssumption(id: string, index: number, raw: unknown): CapabilityAssumption {

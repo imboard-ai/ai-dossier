@@ -1022,6 +1022,78 @@ describe('#771: per-member review level (sched enqueue / status)', () => {
   });
 });
 
+describe('#777: sched enqueue refuses a batch whose only full gate is timeout-prone', () => {
+  let repoDir: string;
+  const writeCapManifest = (body: string): void => {
+    fs.mkdirSync(path.join(repoDir, '.dossier', 'automation'), { recursive: true });
+    fs.writeFileSync(path.join(repoDir, '.dossier', 'automation', 'manifest.yaml'), body);
+  };
+  const enqueueBatch = (extra: string[] = []) =>
+    runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '1,2',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--skip-plan-check',
+      '--project',
+      'test-proj',
+      ...extra,
+    ]);
+
+  beforeEach(() => {
+    repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-777-repo-'));
+    vi.spyOn(process, 'cwd').mockReturnValue(repoDir);
+  });
+  afterEach(() => fs.rmSync(repoDir, { recursive: true, force: true }));
+
+  const TIMEOUT_PRONE_FULL =
+    'version: 1\ncapabilities:\n  test.full:\n    command: make test\n    timeout_prone: true\n';
+
+  it('refuses to form the batch, says why, and leaves no state behind', async () => {
+    writeCapManifest(TIMEOUT_PRONE_FULL);
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((msg) => {
+      errors.push(String(msg));
+    });
+    await expect(enqueueBatch()).rejects.toThrow('process.exit(1)');
+    expect(errors.join('\n')).toContain('Cannot form batch b1');
+    expect(errors.join('\n')).toContain('timeout_prone');
+    expect(fs.existsSync(statePath())).toBe(false);
+  });
+
+  it('forms the batch when an active gate.batch is declared', async () => {
+    writeCapManifest(`${TIMEOUT_PRONE_FULL}  gate.batch:\n    command: scripts/ci-parity.sh\n`);
+    await enqueueBatch();
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b1', members: [1, 2] });
+  });
+
+  it('forms the batch when test.full is not marked timeout-prone', async () => {
+    writeCapManifest('version: 1\ncapabilities:\n  test.full:\n    command: make test\n');
+    await enqueueBatch();
+    expect((readState() as { batches: unknown[] }).batches).toHaveLength(1);
+  });
+
+  it('does not screen full-mode entries', async () => {
+    writeCapManifest(TIMEOUT_PRONE_FULL);
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '5',
+      '--mode',
+      'full',
+      '--project',
+      'test-proj',
+    ]);
+    expect((readState() as { entries: unknown[] }).entries).toHaveLength(1);
+  });
+});
+
 describe('ai-dossier sched pause/resume/abandon', () => {
   it('pauses and resumes, persisting the flag', async () => {
     await runSched(['sched', 'pause', '--project', 'test-proj']);

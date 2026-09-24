@@ -106,6 +106,18 @@ export interface SuiteResult {
   detail?: string;
 }
 
+/**
+ * Which batch an aggregate-suite run is gating (#777) — handed to the
+ * injected runner so a repo's `gate.batch` capability can scope itself
+ * (e.g. affected-only CI parity over the union of members' diffs). The CLI
+ * runner exports these as `DOSSIER_BATCH_ID` / `DOSSIER_BATCH_BASE`.
+ */
+export interface BatchSuiteContext {
+  batchId: string;
+  /** The ref the batch branched from, as a fetchable ref — `origin/<base_branch>`. */
+  baseRef: string;
+}
+
 /** Re-runs the aggregate suite in the batch checkout (AC2: after every revert/rebase). */
 export type SuiteRunner = () => SuiteResult;
 

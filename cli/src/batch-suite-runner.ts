@@ -13,6 +13,12 @@
  * work that may have been fully green (docs/agent-traps.md).
  *
  * Resolution order, each tier preferred to the next:
+ *   0. `cap run gate.batch` (#777) — the repo's declared BATCH gate, when its
+ *      manifest has one `active`: the same gate a normal PR pays (e.g. CI
+ *      parity, affected-scoped against `DOSSIER_BATCH_BASE`), run once for
+ *      the whole batch. Its outcome maps to a `SuiteResult` exactly as
+ *      `test.full`'s does; `capability-unavailable` (or no `ai-dossier` on
+ *      PATH) falls through to tier 1.
  *   1. `cap run test.full` — the repo's own declared capability, when its
  *      manifest (`.dossier/automation/manifest.yaml`) has one `active`.
  *   2. `dispatch.suite_command` — an explicit per-project override in sched
@@ -33,13 +39,51 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  type BatchSuiteContext,
   isReadableVitestReport,
   parseVitestJson,
   type SchedConfig,
   type SuiteResult,
 } from '@ai-dossier/sched';
 import { readPoolFileConfig, resolveProjectDir } from '@ai-dossier/worktree-pool';
-import { loadCapabilityManifest, timeoutReasonSpent } from './capability';
+import { type CapabilityManifest, loadCapabilityManifest, timeoutReasonSpent } from './capability';
+
+/** The repo-declared batch gate (#777) — preferred over `test.full` when active. */
+export const BATCH_GATE_CAPABILITY = 'gate.batch';
+
+/** The aggregate full-suite capability — the batch gate's fallback. */
+export const FULL_SUITE_CAPABILITY = 'test.full';
+
+/**
+ * Environment handed to every suite command (#777): which batch is being
+ * gated and the ref it branched from, so a `gate.batch` capability can scope
+ * itself to the union of the members' diffs (`git diff $DOSSIER_BATCH_BASE...HEAD`).
+ * `cap run` runs its command with the inherited environment, so these reach it.
+ */
+function suiteEnv(ctx: BatchSuiteContext | undefined): NodeJS.ProcessEnv | undefined {
+  if (ctx === undefined) return undefined;
+  return { ...process.env, DOSSIER_BATCH_ID: ctx.batchId, DOSSIER_BATCH_BASE: ctx.baseRef };
+}
+
+/**
+ * #777: the refusal reason when a repo's only full gate is one it declares
+ * timeout-prone — no active `gate.batch`, and an active `test.full` marked
+ * `timeout_prone: true`. A batch there pays a gate that usually ends
+ * `suite-unreadable` (imboard #4244/#4253), so the batch should never be
+ * formed. `null` = batching is fine (including "no manifest at all", which
+ * falls back to `dispatch.suite_command`/detection as before).
+ */
+export function batchGateRefusal(manifest: CapabilityManifest): string | null {
+  const gate = manifest.capabilities[BATCH_GATE_CAPABILITY];
+  if (gate?.lifecycle === 'active') return null;
+  const full = manifest.capabilities[FULL_SUITE_CAPABILITY];
+  if (full?.lifecycle !== 'active' || full.timeoutProne !== true) return null;
+  return (
+    `this repo's only full gate is '${FULL_SUITE_CAPABILITY}', which its manifest (${manifest.path ?? '.dossier/automation/manifest.yaml'}) marks timeout_prone: true ` +
+    `— a batch would pay a gate that usually never produces a verdict (suite-unreadable). ` +
+    `Declare an active '${BATCH_GATE_CAPABILITY}' capability (the CI-parity gate a normal PR pays, scoped by DOSSIER_BATCH_BASE), or run these issues as full cycles.`
+  );
+}
 
 /** Aggregate suite runs can be minutes long (full workspace test suite, not a focused subset). */
 export const BATCH_SUITE_TIMEOUT_MS = 600_000;
@@ -77,7 +121,8 @@ function runCommand(
   argv: readonly string[],
   worktree: string,
   source: string,
-  timeoutMs: number
+  timeoutMs: number,
+  env?: NodeJS.ProcessEnv
 ): SuiteResult {
   if (argv.length === 0) {
     return {
@@ -93,6 +138,7 @@ function runCommand(
     encoding: 'utf-8',
     timeout: timeoutMs,
     maxBuffer: MAX_BUFFER_BYTES,
+    ...(env !== undefined ? { env } : {}),
   });
   // `spawned.error` (ENOENT, ETIMEDOUT at the budget above, EACCES, ENOBUFS)
   // means the command never produced a trustworthy report — this must never
@@ -122,26 +168,30 @@ function runCommand(
 }
 
 /**
- * Tier 1: `ai-dossier cap run test.full`. Returns `'unavailable'` when the
- * repo has no manifest, no `test.full` entry, or it is `lifecycle: shadow` —
+ * Tiers 0/1: `ai-dossier cap run <gate.batch|test.full>` — both map their
+ * envelope to a `SuiteResult` identically (#777 AC). Returns `'unavailable'`
+ * when the repo has no manifest, no such entry, or it is `lifecycle: shadow` —
  * the capability layer's own `capability-unavailable` outcome — or when the
  * capability layer could not even be invoked (no `ai-dossier` on `PATH`, a
  * stale shadow copy) — either way "no trustworthy tier-1 answer
  * here", so the caller falls through to tier 2 (AC1's resolution order)
  * rather than skipping straight past a configured `dispatch.suite_command`.
  */
-function runCapabilityTestFull(
+function runCapabilitySuite(
+  capabilityId: string,
   worktree: string,
-  capabilityTimeoutMs: number
+  capabilityTimeoutMs: number,
+  env?: NodeJS.ProcessEnv
 ): RunOutcome | 'unavailable' {
-  const source = 'cap run test.full';
+  const source = `cap run ${capabilityId}`;
   const start = Date.now();
-  const spawned = spawnSync('ai-dossier', ['cap', 'run', 'test.full'], {
+  const spawned = spawnSync('ai-dossier', ['cap', 'run', capabilityId], {
     cwd: worktree,
     encoding: 'utf-8',
     // The inner capability owns this budget; the outer watchdog has bounded setup grace.
     timeout: capabilityTimeoutMs + CAP_RUN_SETUP_GRACE_MS,
     maxBuffer: MAX_BUFFER_BYTES,
+    ...(env !== undefined ? { env } : {}),
   });
   if (spawned.error) {
     if ((spawned.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
@@ -238,7 +288,7 @@ function detectSuiteCommand(worktree: string): string[] {
   return ['npm', 'test'];
 }
 
-function runDetected(worktree: string, timeoutMs: number): SuiteResult {
+function runDetected(worktree: string, timeoutMs: number, env?: NodeJS.ProcessEnv): SuiteResult {
   const projectDir = resolveProjectDir(worktree, readPoolFileConfig(worktree).project_subdir);
   if (projectDir !== worktree && !projectDir.startsWith(worktree + path.sep)) {
     return {
@@ -256,37 +306,69 @@ function runDetected(worktree: string, timeoutMs: number): SuiteResult {
       detail: `detected: capability unavailable: no package.json (cwd=${projectDir})`,
     };
   }
-  return runCommand(detectSuiteCommand(projectDir), projectDir, 'detected', timeoutMs);
+  return runCommand(detectSuiteCommand(projectDir), projectDir, 'detected', timeoutMs, env);
 }
 
-function capabilityTimeout(worktree: string, defaultTimeoutMs: number): number {
+/** The worktree's manifest, or `null` when it is malformed — `cap run` reports that itself. */
+function tryLoadManifest(worktree: string): CapabilityManifest | null {
   try {
-    const entry = loadCapabilityManifest(worktree).capabilities['test.full'];
-    return entry?.lifecycle === 'active' ? (entry.timeoutMs ?? defaultTimeoutMs) : defaultTimeoutMs;
+    return loadCapabilityManifest(worktree);
   } catch {
-    // `cap run` will report a malformed manifest; retain the portable outer default.
-    return defaultTimeoutMs;
+    return null;
   }
+}
+
+function capabilityTimeout(
+  manifest: CapabilityManifest | null,
+  capabilityId: string,
+  defaultTimeoutMs: number
+): number {
+  const entry = manifest?.capabilities[capabilityId];
+  // A malformed manifest (`null`) retains the portable outer default.
+  return entry?.lifecycle === 'active' ? (entry.timeoutMs ?? defaultTimeoutMs) : defaultTimeoutMs;
 }
 
 /**
  * Resolve and run the aggregate batch suite (#562) per the module doc's
- * three-tier order, retrying once with the tier-3 safe default when the
- * resolved primary tier's report is unreadable.
+ * tier order, retrying once with the tier-3 safe default when the resolved
+ * primary tier's report is unreadable.
  *
  * `opts.timeoutMs` supplies the default `BATCH_SUITE_TIMEOUT_MS` fallback for
- * repos without an active, declared `test.full` budget. A declared capability
- * timeout controls only `cap run`; tier 2 and 3 retain this runner timeout.
+ * repos without an active, declared capability budget. A declared capability
+ * timeout controls only that capability's `cap run`; tier 2 and 3 retain this
+ * runner timeout.
+ *
+ * `ctx` (#777) becomes `DOSSIER_BATCH_ID`/`DOSSIER_BATCH_BASE` in every suite
+ * command's environment.
  */
 export function createBatchSuiteRunner(
   config: SchedConfig,
   opts: { timeoutMs?: number } = {}
-): (worktree: string) => SuiteResult {
+): (worktree: string, ctx?: BatchSuiteContext) => SuiteResult {
   const defaultTimeoutMs = opts.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
-  return (worktree) => {
-    const capabilityTimeoutMs = capabilityTimeout(worktree, defaultTimeoutMs);
+  return (worktree, ctx) => {
+    const manifest = tryLoadManifest(worktree);
+    const env = suiteEnv(ctx);
     let primary: RunOutcome;
-    const cap = runCapabilityTestFull(worktree, capabilityTimeoutMs);
+    // Tier 0 (#777): only attempted when the manifest DECLARES an active
+    // gate.batch — a repo without one pays exactly the pre-#777 spawns.
+    let cap: RunOutcome | 'unavailable' = 'unavailable';
+    if (manifest?.capabilities[BATCH_GATE_CAPABILITY]?.lifecycle === 'active') {
+      cap = runCapabilitySuite(
+        BATCH_GATE_CAPABILITY,
+        worktree,
+        capabilityTimeout(manifest, BATCH_GATE_CAPABILITY, defaultTimeoutMs),
+        env
+      );
+    }
+    if (cap === 'unavailable') {
+      cap = runCapabilitySuite(
+        FULL_SUITE_CAPABILITY,
+        worktree,
+        capabilityTimeout(manifest, FULL_SUITE_CAPABILITY, defaultTimeoutMs),
+        env
+      );
+    }
     if (cap !== 'unavailable') {
       primary = cap;
     } else if (config.dispatch?.suite_command) {
@@ -296,23 +378,24 @@ export function createBatchSuiteRunner(
           config.dispatch.suite_command,
           worktree,
           'dispatch.suite_command',
-          defaultTimeoutMs
+          defaultTimeoutMs,
+          env
         ),
       };
     } else {
-      return runDetected(worktree, defaultTimeoutMs);
+      return runDetected(worktree, defaultTimeoutMs, env);
     }
     // A declared capability's non-zero outcome is the suite's verdict even
     // without a parseable Vitest report. Retrying detection would replace it
     // with an unrelated guess about the worktree layout.
     if (
-      primary.source === 'cap run test.full' ||
+      primary.source.startsWith('cap run ') ||
       primary.terminal ||
       primary.result.ok ||
       primary.result.readable !== false
     )
       return primary.result;
-    const fallback = runDetected(worktree, defaultTimeoutMs);
+    const fallback = runDetected(worktree, defaultTimeoutMs, env);
     return {
       ...fallback,
       detail: `${fallback.detail ?? (fallback.ok ? 'suite green' : 'suite red')} [fallback after ${primary.source} was unreadable: ${primary.result.detail ?? 'no detail'}]`,
