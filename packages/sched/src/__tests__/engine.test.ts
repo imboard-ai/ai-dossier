@@ -434,6 +434,53 @@ describe('dispatch (AC1: spawn with --model per tier; pid/phase/progress in stat
   });
 });
 
+describe('#810: a requeued parked batch member continues from its member branch', () => {
+  it('appends the PRIOR WORK instruction naming the recorded member branch to the cycle prompt', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 810, mode: 'full', tier: 'mid' }]);
+    h.store.withLock((state) => ({
+      state: {
+        ...state,
+        entries: state.entries.map((e) =>
+          e.issue === 810
+            ? {
+                ...e,
+                failure_evidence: {
+                  batch: 'b-20260924-02',
+                  reason: 'agent-exited-unverified',
+                  failing_tests: [],
+                  attribution: 'none' as const,
+                  reverted_commits: [],
+                  branch: 'batch/b-20260924-02-m1-810',
+                  at: new Date().toISOString(),
+                },
+              }
+            : e
+        ),
+      },
+      result: null,
+    }));
+
+    h.tick();
+
+    const prompt = h.spawnCalls[0]?.prompt ?? '';
+    expect(prompt).toContain('PRIOR WORK');
+    expect(prompt).toContain('git fetch origin batch/b-20260924-02-m1-810');
+    // The exit reason is untrusted milestone text — never interpolated into
+    // an engine-written instruction.
+    expect(prompt).not.toContain('agent-exited-unverified');
+  });
+
+  it('adds nothing for an entry with no recorded branch', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 811, mode: 'full', tier: 'mid' }]);
+    h.tick();
+    expect(h.spawnCalls[0]?.prompt).not.toContain('PRIOR WORK');
+  });
+});
+
 describe('completion verification (AC2: an agent exiting is never proof of completion)', () => {
   it('exit + verified report-done milestone → complete; slot freed; entry done', () => {
     const h = harness();

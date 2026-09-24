@@ -4,7 +4,7 @@
  * The batch pipeline used to admit members by keyword AFTER humans/models had already selected
  * them — a hand-picked five-issue set collapsed to one member only after ~425k decision-grade
  * classifier tokens (#770). This module previews admission BEFORE any model spend: it runs the
- * deterministic `classify prescreen` (prescreen:v3, #772/#805) plus the readiness screen
+ * deterministic `classify prescreen` (prescreen:v4, #772/#805/#818) plus the readiness screen
  * batch-issues-preparation Step 1/5 applies, and proposes a composition that honours the
  * scheduler's batch invariants — at most `max_full_review_members` (default 2, #771) `review=full`
  * members, one base branch, `min_members` (default 3) to `max_members` (default 6) — preferring
@@ -18,6 +18,7 @@ import { pickHardBlockLabel } from './hard-block-labels';
 import {
   EXCLUDING_CHECKS,
   floorScanText,
+  LEGACY_EXCLUDING_CHECKS,
   PRESCREEN_SCHEMA,
   type PrescreenReason,
   prescreenIssue,
@@ -290,7 +291,7 @@ const COMPOSE_OWN_CHECKS: ReadonlySet<PrescreenReason['check']> = new Set([
 
 /**
  * Deterministic admission for one issue: readiness (batch-issues-preparation Step 1/5) +
- * prescreen:v3 (#772/#805) + data-mutation. Records EVERY exclusion reason, not just the first, so an
+ * prescreen:v4 (#772/#805/#818) + data-mutation. Records EVERY exclusion reason, not just the first, so an
  * operator sees the whole picture of why a pick cannot join.
  */
 export function assessIssue(input: ComposeIssueInput, rules: ComposeRules = 'v2'): AssessedIssue {
@@ -367,21 +368,21 @@ export function assessIssue(input: ComposeIssueInput, rules: ComposeRules = 'v2'
       message: `Depends on #${dep}, whose state could not be read — treated as open.`,
     });
   }
-  // prescreen:v3 (#805): the prescreen's excluding checks, minus the two compose reports under
-  // its own codes above — today that leaves only >8 predicted files, a deliberate full-cycle case. A risk-floor PATH is the same fact as a
-  // text-floor keyword, so it rides a batch as a review=full member (#770 Option A) via
-  // `verdict.review`, exactly like the keyword — batch-prep's own plan:v1 artifact must not
-  // exclude a member it admitted on a later compose re-run.
-  // `--rules legacy` reproduces pre-#770 admission, where a plan:v1 path-floor hit excluded too.
+  // prescreen:v4 (#818): the prescreen's excluding checks, minus the two compose reports under
+  // its own codes above — today that leaves none. A risk-floor PATH (#805) and >8 predicted files
+  // (#818, rule 5) ride a batch as review=full members (#770 Option A) via `verdict.review`,
+  // exactly like a text-floor keyword (rules 1/3/4) — subject to the ≤ 2 review=full cap in
+  // `composeBatch`. The derivation stays so a future excluding check needs no edit here.
+  // `--rules legacy` reproduces pre-#770 admission, where a path-floor or file-count hit excluded.
   const floorExclusions = verdict.reasons.filter(
     (r) =>
       (EXCLUDING_CHECKS.has(r.check) && !COMPOSE_OWN_CHECKS.has(r.check)) ||
-      (rules === 'legacy' && r.check === 'path-floor')
+      (rules === 'legacy' && LEGACY_EXCLUDING_CHECKS.has(r.check))
   );
   if (floorExclusions.length > 0) {
     excluded.push({
       code: 'prescreen-full',
-      message: `${PRESCREEN_SCHEMA} verdict full — ${floorExclusions.map((r) => r.message).join(' ')}`,
+      message: `${rules === 'legacy' ? 'Legacy rules (pre-#770) exclude' : `${PRESCREEN_SCHEMA} verdict full`} — ${floorExclusions.map((r) => r.message).join(' ')}`,
     });
   }
 

@@ -26,6 +26,17 @@ describe('fmt_events.py', () => {
     expect(out.trim()).toBe('spawned #7');
   });
 
+  it('#810: keeps a member hand-back and a suppressed dissolve (with its detail)', () => {
+    const out = run([
+      { event: 'member-handed-back', unit: 'batch:b1', issue: 4333, reason: 'needs-input' },
+      { event: 'dissolve-suppressed', unit: 'batch:b1', detail: 'kept #4137' },
+    ]);
+    expect(out.trim().split('\n')).toEqual([
+      'member-handed-back #4333 needs-input',
+      'dissolve-suppressed batch:b1 kept #4137',
+    ]);
+  });
+
   it('reports a missing dispatch profile with its batch and detail', () => {
     const out = run([
       {

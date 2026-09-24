@@ -225,6 +225,8 @@ export interface BatchJournalSummary {
   landed: number[];
   /** Members the batch lost (`unit-failed` / `member-evicted` on the batch unit), de-duplicated. */
   evicted: number[];
+  /** #810: members that handed themselves back (`member-handed-back`) — out, but not evicted. */
+  handedBack: number[];
   /** `suite-failed` lines: aggregate-suite (local gate) runs that did not come back green. */
   suiteFailures: number;
   /** The last `batch-blocked` detail, or null when the batch never blocked. */
@@ -239,6 +241,7 @@ const BATCH_MEMBER_EVENTS = new Set([
   'member-landed',
   'member-advanced',
   'member-evicted',
+  'member-handed-back',
   'unit-failed',
   'run-log-recorded',
   'gate-skipped',
@@ -253,6 +256,7 @@ export function summarizeBatchJournal(
   const members = new Set<number>();
   const landed = new Set<number>();
   const evicted = new Set<number>();
+  const handedBack = new Set<number>();
   let suiteFailures = 0;
   let blocked: string | null = null;
   let dissolved = false;
@@ -264,6 +268,7 @@ export function summarizeBatchJournal(
     if (issue !== null && (event.event === 'unit-failed' || event.event === 'member-evicted')) {
       evicted.add(issue);
     }
+    if (issue !== null && event.event === 'member-handed-back') handedBack.add(issue);
     if (event.event === 'suite-failed') suiteFailures += 1;
     if (event.event === 'batch-blocked') blocked = event.detail ?? 'blocked';
     if (event.event === 'batch-dissolved') dissolved = true;
@@ -273,6 +278,7 @@ export function summarizeBatchJournal(
     members: sorted(members),
     landed: sorted(landed),
     evicted: sorted(evicted),
+    handedBack: sorted(handedBack),
     suiteFailures,
     blocked,
     dissolved,
@@ -332,7 +338,8 @@ export interface BatchStateSlice {
   status: string;
   members: readonly number[];
   pr: number | null;
-  evictions: readonly { issue: number }[];
+  /** `kind` (#810): `handed-back` records are the member's own hand-back, not an eviction. */
+  evictions: readonly { issue: number; kind?: string }[];
 }
 
 /** `sched stats --batch <id>`'s amortization summary (#775). */
@@ -343,6 +350,8 @@ export interface BatchAmortizationSummary {
   members_enqueued: number;
   members_landed: number;
   evictions: number;
+  /** #810: members that handed themselves back (out of the batch, not evicted). */
+  handed_back: number;
   /** Members that shipped with the batch PR; null while the batch has not merged. */
   members_shipped: number | null;
   /** CI gate runs paid for the batch PR (one per PR); 0 while unshipped. */
@@ -374,23 +383,35 @@ export function buildBatchAmortizationSummary({
   journal: BatchJournalSummary;
   entries: readonly RunLogEntry[];
 }): BatchAmortizationSummary {
-  const evicted = new Set<number>([
-    ...journal.evicted,
-    ...(batch?.evictions ?? []).map((e) => e.issue),
+  const stateRecords = batch?.evictions ?? [];
+  const handedBack = new Set<number>([
+    ...(journal.handedBack ?? []),
+    ...stateRecords.filter((e) => e.kind === 'handed-back').map((e) => e.issue),
   ]);
-  const enqueued = new Set<number>([...journal.members, ...(batch?.members ?? []), ...evicted]);
+  const evicted = new Set<number>(
+    [
+      ...journal.evicted,
+      ...stateRecords.filter((e) => e.kind !== 'handed-back').map((e) => e.issue),
+    ]
+      // A member the journal saw hand back is not also an eviction (pre-#810
+      // journals recorded hand-backs as `unit-failed`).
+      .filter((issue) => !handedBack.has(issue))
+  );
+  // Out of the batch before landing, whichever way it left.
+  const out = new Set<number>([...evicted, ...handedBack]);
+  const enqueued = new Set<number>([...journal.members, ...(batch?.members ?? []), ...out]);
   for (const entry of entries) {
     const issue = issueOfUnit(entry.unit);
     if (issue !== null) enqueued.add(issue);
   }
-  const landed = journal.landed.filter((issue) => !evicted.has(issue));
+  const landed = journal.landed.filter((issue) => !out.has(issue));
   // Shipped = what landed on the integration branch, when the journal saw landings; only
   // a journal-less batch (rotated/other host) falls back to enqueued minus evicted.
   const shipped =
     batch !== null && SHIPPED_BATCH_STATUSES.has(batch.status)
       ? landed.length > 0
         ? landed.length
-        : [...enqueued].filter((issue) => !evicted.has(issue)).length
+        : [...enqueued].filter((issue) => !out.has(issue)).length
       : null;
   // One CI gate per merged PR. `state.json` does not record CI re-runs, so this is a lower
   // bound; the scorecard adds the anchor's `ci_fix_attempts` where one was posted.
@@ -407,6 +428,7 @@ export function buildBatchAmortizationSummary({
     members_enqueued: enqueued.size,
     members_landed: landed.length,
     evictions: evicted.size,
+    handed_back: handedBack.size,
     members_shipped: shipped,
     gate_runs: gateRuns,
     issues_per_gate_run: shipped !== null && gateRuns > 0 ? shipped / gateRuns : null,
@@ -436,7 +458,8 @@ export function formatAmortizationLine(a: BatchAmortizationSummary): string {
           .join(', ')
       : 'none recorded';
   return [
-    `Summary: ${a.members_enqueued} enqueued, ${a.members_landed} landed, ${a.evictions} evicted; ${outcome};`,
+    `Summary: ${a.members_enqueued} enqueued, ${a.members_landed} landed, ${a.evictions} evicted` +
+      `${a.handed_back > 0 ? `, ${a.handed_back} handed back` : ''}; ${outcome};`,
     `${formatCount(a.billable_tokens)} billable tokens${perMember}; by model: ${models}`,
   ].join(' ');
 }

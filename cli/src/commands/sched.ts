@@ -63,6 +63,7 @@ import {
   recordTickFailure,
   reprioritizeBatch,
   reprioritizeIssue,
+  requeueParkedMember,
   resolveDispatch,
   resolveProfiledDispatch,
   resolveProjectRepo,
@@ -444,6 +445,20 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
     );
     lines.push('');
   }
+  // #810: parked batch members — never auto-dispatched; each row carries
+  // the exact remedy commands. Tolerates a report from an older package.
+  const parkedMembers = report.parked_members ?? [];
+  if (parkedMembers.length > 0) {
+    lines.push('== Parked members (evicted / handed back — waiting on an operator) ==');
+    for (const p of parkedMembers) {
+      lines.push(
+        `#${p.issue} [${p.kind}] batch ${p.batch ?? '-'} — ${p.reason}; branch ${p.branch ?? '-'}; profile ${p.dispatch_profile ?? 'default'} (parked ${relativeTime(p.since)})`
+      );
+      lines.push(`    ${p.note}`);
+      for (const remedy of p.remedies) lines.push(`    → ${remedy}`);
+    }
+    lines.push('');
+  }
   lines.push('== Slots ==');
   lines.push(
     report.slots.length === 0
@@ -512,8 +527,16 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
             // #707: the dispatch family this batch recorded at enqueue —
             // `-` = the config's default profile.
             b.dispatch_profile ?? '-',
+            // #810: a hand-back is marked apart from an eviction — only
+            // evictions count toward the dissolve threshold.
             b.evictions.length > 0
-              ? b.evictions.map((e) => `#${e.issue}(${e.reason})`).join(',')
+              ? b.evictions
+                  .map((e) =>
+                    e.kind === 'handed-back'
+                      ? `#${e.issue}(handed-back:${e.reason})`
+                      : `#${e.issue}(${e.reason})`
+                  )
+                  .join(',')
               : '-',
             b.pr !== null ? `#${b.pr}` : '-',
           ])
@@ -1639,6 +1662,66 @@ function registerAbandonSubcommand(cmd: Command): void {
     });
 }
 
+interface RequeueOptions extends SchedOptions {
+  issue: string;
+  reason?: string;
+}
+
+/**
+ * `sched requeue --issue <n>` (#810): the operator's remedy for a PARKED batch
+ * member (evicted / handed back). Requeues it as a full-cycle unit on the
+ * batch's dispatch profile; the engine's cycle prompt then continues from the
+ * member branch recorded at park time. Refuses anything that is not parked.
+ */
+function registerRequeueSubcommand(cmd: Command): void {
+  cmd
+    .command('requeue')
+    .description(
+      'Requeue a parked batch member (evicted / handed-back) as full-cycle, on the batch dispatch profile, continuing from its member branch'
+    )
+    .requiredOption('--issue <number>', 'Parked member issue number')
+    .option('--reason <text>', 'Reason recorded on the entry', 'operator-requeue')
+    .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
+    .option('--json', 'Output the result as JSON')
+    .action((opts: RequeueOptions) => {
+      const issues = issueList(opts.issue, 'issue');
+      if (issues.length !== 1) {
+        fail([`--issue takes a single issue number, got '${opts.issue}'`]);
+      }
+      const issue = issues[0] as number;
+      const { store } = resolveStore(opts);
+      try {
+        const entry = store.withLock((state) => {
+          const r = requeueParkedMember(state, issue, opts.reason ?? 'operator-requeue');
+          return { state: r.state, result: r.entry };
+        });
+        const branch = entry.failure_evidence?.branch ?? null;
+        new Journal(store.dir).append(
+          unitEvent('member-requeued', `issue:${issue}`, {
+            reason: opts.reason ?? 'operator-requeue',
+            detail: `full-cycle on profile ${entry.dispatch_profile ?? 'default'}${branch !== null ? ` from ${branch}` : ''}`,
+          })
+        );
+        if (opts.json) {
+          console.log(
+            JSON.stringify({
+              requeued: `issue:${issue}`,
+              dispatch_profile: entry.dispatch_profile,
+              branch,
+            })
+          );
+        } else {
+          console.log(
+            `✓ Requeued #${issue} as full-cycle on profile ${entry.dispatch_profile ?? 'default'}` +
+              (branch !== null ? `, continuing from ${branch}` : '')
+          );
+        }
+      } catch (err) {
+        handleKnownError(err);
+      }
+    });
+}
+
 function registerStopSubcommand(cmd: Command): void {
   cmd
     .command('stop')
@@ -2151,6 +2234,7 @@ export function registerSchedCommand(program: Command): void {
   registerPauseResumeSubcommand(schedCmd, true);
   registerPauseResumeSubcommand(schedCmd, false);
   registerAbandonSubcommand(schedCmd);
+  registerRequeueSubcommand(schedCmd);
   registerStopSubcommand(schedCmd);
   registerReprioritizeSubcommand(schedCmd);
   registerStartSubcommand(schedCmd);

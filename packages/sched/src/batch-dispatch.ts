@@ -135,6 +135,7 @@ import {
   blockBatch,
   checkDissolveTrigger,
   createExecMilestonePoster,
+  type DissolveOutcome,
   dissolveBatch,
   evictMembers,
   type RecoveryDeps,
@@ -154,19 +155,23 @@ import {
   findBatch,
   findEntry,
   isPreservedMember,
+  memberExitEvidence,
+  PARKED_MEMBER_STATUSES,
   PR_DETECT_AMBIGUOUS_REASON,
+  parkMember,
   patchBatch,
   patchSlot,
+  recordedMemberBranch,
   releaseAllBatchSlots,
   releaseBatchMemberSlot,
   releaseBatchSlot,
-  requeueMember,
   slotForBatch,
   slotForBatchMember,
   slotsForBatch,
   transitionBatch,
   transitionIssue,
   transitionSlot,
+  validatedMembersOf,
 } from './state';
 import { type FsExists, isSafeWorktree, POOL_ARGS_PREFIX, POOL_BIN, runTeardown } from './teardown';
 import type {
@@ -179,6 +184,7 @@ import type {
   IssueStatus,
   JournalEventName,
   MemberDispatchMode,
+  MemberExitKind,
   MemberRun,
   ModelTier,
   ReviewLevel,
@@ -288,6 +294,12 @@ export interface MemberFailure {
   reason: string;
   detail: string;
   extraKv?: Record<string, string>;
+  /**
+   * #810: `handed-back` when the member itself posted the terminal hand-back
+   * (`blocked` / `review partial` milestone) — parked, never counted toward
+   * the dissolve threshold. Absent = an engine-decided eviction.
+   */
+  kind?: MemberExitKind;
 }
 
 function emptyResult(): BatchTickResult {
@@ -317,8 +329,11 @@ function unit(batchId: string): string {
 function sanitizeUntrustedText(value: string): string {
   return (
     value
+      // C0 + DEL + C1 (incl. the single-byte CSI \u009B) and the bidi
+      // overrides/isolates (#810: the reason now also renders in `sched status`'s
+      // Parked members rows).
       // biome-ignore lint/suspicious/noControlCharactersInRegex: flattening control characters is the point
-      .replace(/[\u0000-\u001F\u007F]/g, ' ')
+      .replace(/[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g, ' ')
       .slice(0, 200)
   );
 }
@@ -578,6 +593,45 @@ function applyBatchAndIssues(
     return computed.entries.find((ce) => ce.issue === e.issue) ?? e;
   });
   return { ...fresh, batches, entries };
+}
+
+/**
+ * #810: land a `dissolveBatch` outcome — the one tail every dissolve caller
+ * shares. Re-applies the batch plus every entry the dissolve touched
+ * (requeued AND parked — a parked entry left out here would silently revert
+ * to its pre-dissolve status). A dissolved batch is torn down; a dissolve
+ * REFUSED over validated members (`outcome.blocked`) keeps its worktree for
+ * the operator, but its member agents are stopped and its slots released —
+ * nothing reconciles a blocked batch's member slots.
+ */
+function applyDissolveOutcome(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  outcome: DissolveOutcome,
+  now: Date,
+  membersBeforeRecovery?: readonly number[]
+): void {
+  deps.store.withLock((s) => ({
+    state: applyBatchAndIssues(
+      s,
+      outcome.state,
+      batchId,
+      [...outcome.requeued, ...outcome.parked],
+      membersBeforeRecovery
+    ),
+    result: undefined,
+  }));
+  if (outcome.blocked) {
+    stopAndReleaseBlocked(deps, batchId, now);
+    return;
+  }
+  teardownBatch(deps, batchId);
+}
+
+/** Stop every live agent of a batch that just blocked, and release all its slots (#810). */
+function stopAndReleaseBlocked(deps: BatchDispatchDeps, batchId: string, now: Date): void {
+  stopRunningMembers(deps, batchId, now);
+  deps.store.withLock((s) => ({ state: releaseAllBatchSlots(s, batchId, now), result: undefined }));
 }
 
 /**
@@ -1104,8 +1158,9 @@ function landMemberBranch(
  * dangling pool entry — the corrupted-entry state `worktree-pool status`
  * reports), cold trees are removed. The member branch is deleted locally —
  * `-d` after a landing (fully merged into the integration branch), `-D` on
- * the eviction path (its commits never landed; the requeue carries the work
- * forward). The REMOTE member branch is deleted only on the landed path, and
+ * the eviction path (its commits never landed; since #810 the parked entry
+ * records the branch and an operator requeue continues from the REMOTE copy).
+ * The REMOTE member branch is deleted only on the landed path, and
  * deliberately KEPT on eviction — the pushed sha is the evicted work's only
  * recoverable copy.
  *
@@ -2027,11 +2082,7 @@ function runValidate(
       { strategy: 'full', reason: 'unattributable-suite-failure' },
       rDeps
     );
-    deps.store.withLock((s) => ({
-      state: applyBatchAndIssues(s, dissolve.state, batchId, dissolve.requeued, batch.members),
-      result: undefined,
-    }));
-    teardownBatch(deps, batchId);
+    applyDissolveOutcome(deps, batchId, dissolve, now, batch.members);
     result.blocked.push(...dissolve.requeued);
     result.failed.push(unit(batchId));
     return;
@@ -2112,10 +2163,19 @@ function evictOffender(
     rDeps
   );
   deps.store.withLock((s) => ({
-    state: applyBatchAndIssues(s, outcome.state, batchId, outcome.requeued, batch.members),
+    state: applyBatchAndIssues(
+      s,
+      outcome.state,
+      batchId,
+      [...outcome.requeued, ...(outcome.dissolve?.parked ?? [])],
+      batch.members
+    ),
     result: undefined,
   }));
-  if (outcome.dissolved) {
+  // #810: `dissolve.blocked` — a full dissolve refused over validated
+  // members; the batch is blocked for an operator, not validating.
+  if (outcome.dissolved || outcome.dissolve?.blocked === true) {
+    if (outcome.dissolve?.blocked === true) stopAndReleaseBlocked(deps, batchId, now);
     result.failed.push(unit(batchId));
     return;
   }
@@ -2289,7 +2349,7 @@ export function evictMemberAndContinue(
   now: Date,
   result: BatchTickResult
 ): void {
-  const { dissolved, duplicate } = evictMemberDirectly(
+  const { batchEnded, duplicate } = evictMemberDirectly(
     deps,
     config,
     batchId,
@@ -2298,7 +2358,7 @@ export function evictMemberAndContinue(
     now
   );
   if (duplicate) return;
-  if (dissolved) {
+  if (batchEnded) {
     result.failed.push(unit(batchId));
     return;
   }
@@ -2866,8 +2926,8 @@ export function resumeBlockedGate(
  * Exactly-once per dispatch, mirroring `recordDispatchRunLog`'s own
  * invariant: called from both of `reconcileMemberSlot`'s exit branches
  * (member complete, member blocked/dead) — a batch never redispatches the
- * same member slot (eviction requeues it as an independent full-cycle run
- * instead), so unlike `engine.ts`'s per-unit log, a member's log file is
+ * same member slot (an evicted member is parked, #810, and any later
+ * full-cycle run is an independent unit), so unlike `engine.ts`'s per-unit log, a member's log file is
  * always one-shot and reading from offset 0 is always correct.
  */
 function recordMemberRunLog(
@@ -3084,6 +3144,10 @@ function memberFailureFor(
         : 'member-blocked';
   return {
     reason,
+    // #810: a block THIS dispatch posted is the member's own hand-back — parked
+    // `handed-back`, never counted toward the dissolve threshold. A member that
+    // died without one is an engine-decided eviction (`agent-exited-unverified`).
+    kind: read.blockedNow ? 'handed-back' : 'evicted',
     // This rail covers a self-reported block AND a member that simply died, so the
     // detail must follow the RESOLVED reason — `member blocked` on an
     // `agent-exited-unverified` eviction contradicts the reason on its own journal line.
@@ -3210,24 +3274,42 @@ function reconcileMemberSlot(
 }
 
 /**
- * Requeue a member full-cycle, record the eviction, and dissolve if this tips
- * the batch past its `dissolve_policy` threshold (#563; RFC F.1/F.8) — WITHOUT
- * going through `recovery.ts`'s `evictMembers` (which needs
- * `attributing`/`evicting` status and a commit range to revert; a member
- * evicted here has neither). Returns whether the batch dissolved.
+ * Park a member that left the batch before landing, record the exit, and
+ * dissolve if this tips the batch past its `dissolve_policy` threshold (#563;
+ * RFC F.1/F.8) — WITHOUT going through `recovery.ts`'s `evictMembers` (which
+ * needs `attributing`/`evicting` status and a commit range to revert; a
+ * member evicted here has neither). Returns whether the batch dissolved.
+ *
+ * #810 — the member is PARKED, never auto-requeued:
+ * - `failure.kind === 'handed-back'` (the member posted its own `blocked` /
+ *   `review partial` milestone) → entry `handed-back`, record
+ *   `kind: 'handed-back'`, journal `member-handed-back`. A hand-back is a
+ *   valued outcome, not a batch failure: it never counts toward the dissolve
+ *   threshold.
+ * - otherwise (unverified exit, gate task-failed, landing conflict, worktree
+ *   prep) → entry `evicted`, journal `unit-failed`, counted.
+ * Either way the member branch is recorded on the record and the entry's
+ * `failure_evidence`, and the batch's dispatch profile on the entry — so an
+ * operator's `sched requeue` continues the work from that branch on the same
+ * provider. The pre-#810 rail requeued `mode: 'full', dispatch_profile: null`
+ * from the base branch, discarding the member's commits and its profile.
+ *
+ * #810: when the threshold trips while members are already VALIDATED (landed
+ * on the integration branch), the batch does not dissolve — dissolving would
+ * requeue validated work from scratch. It journals `dissolve-suppressed` and
+ * continues with the remaining members; its validated members still ship.
  *
  * A member already in `evictions[]` is a NO-OP here, not merely a skipped
- * record (#595 AC1): the requeue must not run a second time either. It would
- * overwrite the first eviction's `failure_evidence` — leaving `evictions[]`
- * and the queue entry disagreeing about why the member was evicted — and, if
- * the member has since been re-dispatched full-cycle, would take the
- * `executing → evicted → requeued` rail and kill that live run.
+ * record (#595 AC1): the park must not run a second time either.
  *
- * Returns `{ dissolved, duplicate }`: `dissolved` is whether this eviction tipped the batch
- * past its threshold and the batch is gone; `duplicate: true` means another resolution had
- * already claimed this member's eviction, and the caller must journal nothing and advance
- * nothing on top of it (#613 — that is exactly how a record ends up naming the member the
- * batch already advanced past).
+ * Returns `{ batchEnded, duplicate }`: `batchEnded` is whether this exit ended
+ * the batch's run — it dissolved, or (a `full` dissolve refused over validated
+ * members, #810) it blocked for an operator; either way the caller must not
+ * advance it. `duplicate: true` means another resolution had already claimed
+ * this member's exit, and the caller must journal nothing and advance nothing
+ * on top of it (#613). A dissolve interrupted between pass 1 and pass 2 is not
+ * retried by a re-entry: the re-entry takes the duplicate path (pre-existing,
+ * #595/#613) and the batch continues.
  */
 function evictMemberDirectly(
   deps: BatchDispatchDeps,
@@ -3236,50 +3318,53 @@ function evictMemberDirectly(
   memberIssue: number,
   failure: MemberFailure,
   now: Date
-): { dissolved: boolean; duplicate: boolean } {
+): { batchEnded: boolean; duplicate: boolean } {
   const { reason } = failure;
+  const kind: MemberExitKind = failure.kind ?? 'evicted';
   const dissolvePolicy = resolveDissolvePolicy(config.dissolve_policy);
-  // Pass 1 (pure — requeue + record the eviction): safe to run entirely
-  // inside the lock, unlike `dissolveBatch` below, which shells out
+  // Pass 1 (pure — park + record the exit): safe to run entirely inside the
+  // lock, unlike `dissolveBatch` below, which shells out
   // (`deps.exec`/`postMilestone`) and so must NOT hold the lock while it runs.
-  const { triggered, duplicate, prior } = deps.store.withLock<{
+  const { triggered, duplicate, prior, branch, validated } = deps.store.withLock<{
     triggered: boolean;
     duplicate: boolean;
     prior: EvictionRecord | undefined;
+    branch: string | null;
+    validated: number[];
   }>((s) => {
     const b = findBatch(s, batchId);
     if (!b) {
-      return { state: s, result: { triggered: false, duplicate: false, prior: undefined } };
+      return {
+        state: s,
+        result: {
+          triggered: false,
+          duplicate: false,
+          prior: undefined,
+          branch: null,
+          validated: [],
+        },
+      };
     }
     const priorRecord = b.evictions.find((e) => e.issue === memberIssue);
     if (priorRecord) {
       // A duplicate never re-evaluates the dissolve threshold: the resolution that WROTE
       // this record already did, under this same lock. (#595: a duplicate must not count
-      // twice; #613: it must not act on the batch at all.) Note this also means a dissolve
-      // interrupted between pass 1 and pass 2 is not retried here — re-entering
-      // `dissolveBatch` on an already-terminal batch throws `IllegalTransitionError`.
+      // twice; #613: it must not act on the batch at all.)
       return {
         state: s,
-        result: { triggered: false, duplicate: true, prior: priorRecord },
+        result: {
+          triggered: false,
+          duplicate: true,
+          prior: priorRecord,
+          branch: null,
+          validated: [],
+        },
       };
     }
-    const evidence = {
-      batch: batchId,
-      reason,
-      failing_tests: [],
-      attribution: 'none' as const,
-      reverted_commits: [],
-      at: now.toISOString(),
-    };
-    const requeueResult = requeueMember(
-      s,
-      memberIssue,
-      { mode: 'full', batch: null },
-      reason,
-      now,
-      { failure_evidence: evidence }
-    );
-    let next = requeueResult.state;
+    const memberBranch = recordedMemberBranch(b, memberIssue);
+    let next = parkMember(s, memberIssue, kind, reason, now, {
+      failure_evidence: memberExitEvidence(batchId, reason, memberBranch, now),
+    }).state;
     // `appendEvictions` stays the state-level backstop even though the
     // duplicate is already short-circuited above — it is the one append path.
     const { evictions, duplicate: duplicateRecords } = appendEvictions(b, [
@@ -3289,6 +3374,8 @@ function evictMemberDirectly(
         attribution: 'none',
         reverted_commits: [],
         group: [],
+        kind,
+        branch: memberBranch,
         at: now.toISOString(),
       },
     ]);
@@ -3300,6 +3387,8 @@ function evictMemberDirectly(
         triggered: updated !== undefined && checkDissolveTrigger(updated, dissolvePolicy),
         duplicate: duplicateRecords.length > 0,
         prior: undefined,
+        branch: memberBranch,
+        validated: updated !== undefined ? validatedMembersOf(next, updated) : [],
       },
     };
   });
@@ -3308,32 +3397,42 @@ function evictMemberDirectly(
       issue: memberIssue,
       detail: duplicateEvictionDetail(memberIssue, reason, prior),
     });
-    // Another resolution already claimed this member's eviction record — the
+    // Another resolution already claimed this member's exit record — the
     // caller must not journal its own `unit-failed`/advance the batch again
-    // on top of that one (#613: that is exactly how a record ends up naming
-    // the member the batch already advanced past).
-    return { dissolved: false, duplicate: true };
+    // on top of that one (#613).
+    return { batchEnded: false, duplicate: true };
   }
   // This call owns the member's resolution, so it owns recording WHY — before pass 2 below
-  // can dissolve, tear the worktree down, or be killed mid-shell-out and leave the eviction
-  // record on disk with no journal line naming its cause (#613). The caller's extras go
-  // first so the authoritative keys always win: `extraKv` is a wide Record, and a future
-  // caller passing `reason`/`detail`/`issue` must not be able to rewrite the record's own
-  // identity.
-  journalEvent(deps, 'unit-failed', unit(batchId), {
+  // can dissolve, tear the worktree down, or be killed mid-shell-out and leave the record
+  // on disk with no journal line naming its cause (#613). The caller's extras go first so
+  // the authoritative keys always win.
+  journalEvent(deps, kind === 'handed-back' ? 'member-handed-back' : 'unit-failed', unit(batchId), {
     ...(failure.extraKv ?? {}),
     issue: memberIssue,
     reason,
-    detail: failure.detail,
+    detail:
+      `${failure.detail} — parked ${kind}` +
+      (branch !== null ? ` (work on ${branch})` : '') +
+      `; remedy: sched requeue --issue ${memberIssue}`,
   });
-  if (!triggered) return { dissolved: false, duplicate: false };
+  if (!triggered) return { batchEnded: false, duplicate: false };
+
+  if (validated.length > 0) {
+    // #810: never dissolve over validated work — it stays landed and ships
+    // with the batch; the members that failed are parked, not requeued.
+    journalEvent(deps, 'dissolve-suppressed', unit(batchId), {
+      issue: memberIssue,
+      detail: `eviction threshold reached, but member(s) ${validated.join(',')} are validated on the integration branch — keeping them and continuing with the remaining members instead of dissolving`,
+    });
+    return { batchEnded: false, duplicate: false };
+  }
 
   // Pass 2 (outside the lock — dissolveBatch shells out): re-load fresh
   // (pass 1's write already landed), dissolve, then re-apply just this
   // batch's + the requeued members' state under a fresh lock.
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
-  if (!batch) return { dissolved: false, duplicate: false };
+  if (!batch) return { batchEnded: false, duplicate: false };
   const rDeps = recoveryDeps(deps, config, batch, now);
   const outcome = dissolveBatch(
     state,
@@ -3341,12 +3440,8 @@ function evictMemberDirectly(
     { strategy: 'full', reason: 'eviction-threshold' },
     rDeps
   );
-  deps.store.withLock((s) => ({
-    state: applyBatchAndIssues(s, outcome.state, batchId, outcome.requeued),
-    result: undefined,
-  }));
-  teardownBatch(deps, batchId);
-  return { dissolved: true, duplicate: false };
+  applyDissolveOutcome(deps, batchId, outcome, now);
+  return { batchEnded: true, duplicate: false };
 }
 
 function reconcileFixSlot(
@@ -3730,8 +3825,8 @@ const MEMBER_RECONCILE_CHAIN: Partial<Record<IssueStatus, IssueStatus>> = {
  * Whether every SURVIVING member of `batch` was actually dispatched — i.e. no
  * surviving member is still sitting in a pre-dispatch status (`queued`,
  * `classified`, `batched`, `waiting`). Surviving = a `batch.members` issue
- * that is still a slot-mode entry, not evicted (its work was reverted and it
- * requeued full-cycle), and not already preserved (shipped/terminal through
+ * that is still a slot-mode entry, not evicted / handed back (parked, #810),
+ * and not already preserved (shipped/terminal through
  * another rail).
  *
  * This is the safety rail behind AC1: a member that never ran has NO work on
@@ -3748,7 +3843,16 @@ function everySurvivingMemberDispatched(state: SchedState, batch: BatchEntry): b
   for (const issue of batch.members) {
     const entry = findEntry(state, issue);
     if (!entry) continue;
-    if (entry.mode !== 'slot' || evicted.has(issue) || isPreservedMember(entry)) continue;
+    // #810: a PARKED member (evicted / handed back) left the batch before
+    // landing — not a survivor, whether or not it has an `evictions[]` record.
+    if (
+      entry.mode !== 'slot' ||
+      evicted.has(issue) ||
+      isPreservedMember(entry) ||
+      PARKED_MEMBER_STATUSES.has(entry.status)
+    ) {
+      continue;
+    }
     // Pre-dispatch statuses: queued/classified/batched/waiting. `in-work` is
     // stamped at SPAWN (`spawnMember`), `committed`/`validated` at verified
     // completion — everything the entry can reach afterwards means the
@@ -4487,18 +4591,21 @@ function upsertRun(state: SchedState, batchId: string, run: MemberRun, now: Date
 }
 
 /**
- * Whether `issue` is still an active member of `batch` — not evicted, and its
- * queue entry (when it has one) still a live slot-mode entry of THIS batch. An
- * evicted member's entry is requeued `mode: 'full', batch: null`, so both
- * checks agree; the entry check also covers a member stopped or abandoned out
- * from under the batch.
+ * Whether `issue` is still an active member of `batch` — not evicted / handed back
+ * (its `evictions[]` record — a #810 parked entry keeps `mode: 'slot'` and its
+ * batch, so the record is what takes it out), and its queue entry (when it has
+ * one) still a live slot-mode entry of THIS batch — which also covers a member
+ * stopped, abandoned or operator-requeued out from under the batch.
  */
 function memberStillInBatch(state: SchedState, batch: BatchEntry, issue: number): boolean {
   if (batch.evictions.some((e) => e.issue === issue)) return false;
   const entry = findEntry(state, issue);
   if (entry === undefined) return true;
   return (
-    entry.mode === 'slot' && entry.batch === batch.id && !TERMINAL_ISSUE_STATUSES.has(entry.status)
+    entry.mode === 'slot' &&
+    entry.batch === batch.id &&
+    !TERMINAL_ISSUE_STATUSES.has(entry.status) &&
+    !PARKED_MEMBER_STATUSES.has(entry.status)
   );
 }
 
@@ -4543,9 +4650,9 @@ function nextParallelCandidate(
  * scheduler has free capacity. Each gets its own worktree off the integration
  * branch (`prepareMemberWorktree`, outside the lock) — the integration branch
  * does not move until members land, so concurrent members are all cut from the
- * same base. A member whose worktree cannot be prepared is evicted (requeued
- * full-cycle, which does its own setup) rather than retried every tick in
- * front of the members behind it.
+ * same base. A member whose worktree cannot be prepared is evicted (parked, #810 —
+ * an operator's `sched requeue` runs it full-cycle, which does its own setup)
+ * rather than retried every tick in front of the members behind it.
  */
 function spawnParallelMembers(
   deps: BatchDispatchDeps,
@@ -4686,7 +4793,7 @@ function evictParallelMember(
   now: Date,
   result: BatchTickResult
 ): void {
-  const { dissolved, duplicate } = evictMemberDirectly(
+  const { batchEnded, duplicate } = evictMemberDirectly(
     deps,
     config,
     batchId,
@@ -4695,8 +4802,8 @@ function evictParallelMember(
     now
   );
   if (duplicate) return;
-  result.failed.push(dissolved ? unit(batchId) : batchMemberUnit(batchId, run.issue));
-  if (dissolved) return;
+  result.failed.push(batchEnded ? unit(batchId) : batchMemberUnit(batchId, run.issue));
+  if (batchEnded) return;
   deps.store.withLock((s) => ({
     state: patchRun(s, batchId, run.issue, { status: 'evicted', gate_inconclusive: null }, now),
     result: undefined,
@@ -5170,7 +5277,7 @@ function reconcileParallelBatch(
 /**
  * #809: stop and tear down every parallel member whose tree is not yet torn
  * down — a dissolve can land while other members are mid-run (their agents are
- * killed: their entries were just requeued full-cycle, so a live member agent
+ * killed: their entries were just parked or requeued, so a live member agent
  * would be working a unit nothing tracks any more), `sched stop`/`abandon`
  * make a batch terminal without a teardown, and a crash between a run's
  * resolution and its teardown leaves `torn_down: false` behind. Teardown is
@@ -5268,7 +5375,8 @@ export function runBatchTick(
   // - pre-merge (`dissolving` is a legal edge): DISSOLVE with reason
   //   `dispatch-profile-missing:<name>` — loud, deterministic, one-shot, and
   //   the members requeue as full-cycle units on the config default, which is
-  //   a coherent recovery rather than a mislabelled continuation.
+  //   a coherent recovery rather than a mislabelled continuation (#810: in-flight
+  //   members park on the default; validated members block the batch instead).
   // - post-merge (PR parked/merged — the product already shipped): dissolving
   //   would discard a landed PR's bookkeeping, so the remaining dispatch (the
   //   report agent) runs on the default and journals
@@ -5312,14 +5420,15 @@ export function runBatchTick(
         const outcome = dissolveBatch(
           current,
           batch.id,
-          { strategy: 'full', reason: `dispatch-profile-missing:${batch.dispatch_profile}` },
+          {
+            strategy: 'full',
+            reason: `dispatch-profile-missing:${batch.dispatch_profile}`,
+            // #810: the profile is what is broken — requeue on the default.
+            carryDispatchProfile: false,
+          },
           recoveryDeps(deps, config, fresh, now)
         );
-        deps.store.withLock((s) => ({
-          state: applyBatchAndIssues(s, outcome.state, batch.id, outcome.requeued),
-          result: undefined,
-        }));
-        teardownBatch(deps, batch.id);
+        applyDissolveOutcome(deps, batch.id, outcome, now);
         result.failed.push(unit(batch.id));
         // Resolution failed: clean up any batch/member worktrees, then skip
         // this batch for the rest of the pass. No further arm can claim it.

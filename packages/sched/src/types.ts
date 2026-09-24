@@ -43,7 +43,11 @@ export type ReviewLevel = 'light' | 'full';
  *   slot:  → batched(b) → waiting → in-work → committed(range) → validated
  *              → shipped-in-batch → done
  * failure edges (any state):
- *   in-work/committed → evicted(reason) → requeued{full}
+ *   batched…committed → evicted(reason) | handed-back(reason)   (#810: PARKED —
+ *     never auto-dispatched) → requeued{full} only by an operator's
+ *     `sched requeue` (or `sched abandon --batch`)
+ *   validated → evicted → requeued{full}   (aggregate-suite eviction: commits
+ *     reverted, requeued by `evictMembers`)
  *   any → blocked(dep-failed) | decision-pending | failed(escalation-cap)
  *   failed(auto-merge-blocked) → shipped   (#501 stale-failure reconcile —
  *     the ONE edge out of `failed`, engine-guarded to that one reason; see
@@ -64,6 +68,7 @@ export type IssueStatus =
   | 'validated'
   | 'shipped-in-batch'
   | 'evicted'
+  | 'handed-back'
   | 'requeued'
   | 'blocked'
   | 'decision-pending'
@@ -157,8 +162,32 @@ export interface FailureEvidence {
   attribution: AttributionMethod;
   /** Commits reverted out of the batch branch for this member. */
   reverted_commits: string[];
+  /**
+   * #810: the member branch holding the member's un-landed work, when it had
+   * one (`batch/<id>-m<i>-<issue>`; the REMOTE copy survives teardown). A
+   * full-cycle requeue of a parked member continues from this branch instead
+   * of starting from the base. Absent on records written before #810 and on
+   * post-landing evictions (the member branch was deleted when it landed).
+   */
+  branch?: string | null;
   at: string;
 }
+
+/**
+ * #810: how a member left its batch before landing — also the two PARKED
+ * issue statuses. `evicted` is a failure the ENGINE decided (unverified exit,
+ * incremental-gate task-failed, landing conflict, worktree prep, or an
+ * in-flight member of a dissolve) and counts toward the dissolve threshold;
+ * `handed-back` is the MEMBER's own explicit terminal hand-back (a `blocked`
+ * or `review partial` milestone it posted) — a valued outcome, never counted.
+ * (Aggregate-suite attribution evictions — `evictMembers`, after landing —
+ * revert the member's commits and still requeue it full-cycle: its member
+ * branch was deleted when it landed, so there is no branch to park it on.)
+ */
+export const MEMBER_EXIT_KINDS = ['evicted', 'handed-back'] as const;
+
+/** See {@link MEMBER_EXIT_KINDS}. */
+export type MemberExitKind = (typeof MEMBER_EXIT_KINDS)[number];
 
 /**
  * One eviction, kept on the batch for the batch report and as the classifier
@@ -171,6 +200,14 @@ export interface EvictionRecord {
   reverted_commits: string[];
   /** Members evicted alongside it because they share an eviction group (§E.4). */
   group: number[];
+  /**
+   * #810: `handed-back` records are the member's own hand-back — they take the
+   * member out of the batch like an eviction but never count toward the
+   * dissolve threshold. Absent = `evicted` (every record before #810).
+   */
+  kind?: MemberExitKind;
+  /** #810: the member branch holding its un-landed work (see `FailureEvidence.branch`). */
+  branch?: string | null;
   at: string;
 }
 
@@ -560,7 +597,8 @@ export interface BatchEntry {
    * name that no longer resolves against the CURRENT config never silently
    * falls back — the silent fallback is the #680 incident shape: pre-merge
    * the batch DISSOLVES with reason `dispatch-profile-missing:<name>`
-   * (members requeue as full-cycle units on the config default), post-merge
+   * (members requeue as full-cycle units on the config default — #810:
+   * in-flight ones park on it, and validated members block the batch), post-merge
    * the remaining tail work runs on the default with a journaled
    * `dispatch-profile-missing` event. Added in schema 1.19.0; 1.18.0
    * batches backfill to null.
@@ -1354,12 +1392,17 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * at the executing claim) and `member_runs` (parallel members' own
  * branch/worktree/status); `null`/`[]` backfilled on load — a null mode past
  * `ready` reads as serial, so batches in flight keep their serial rail.
- * 1.24.0 (#789): `BatchEntry` gains `pr_detect_ambiguous_reason`/`_since`/
+ * 1.24.0 (#810): `IssueStatus` gains `handed-back`; `EvictionRecord` gains
+ * optional `kind`/`branch` and `FailureEvidence` optional `branch` (absent =
+ * a pre-#810 record with no recorded branch). Bumped so an older engine
+ * refuses a state carrying a `handed-back` member with `EngineTooOldError`
+ * instead of an opaque invalid-status error.
+ * 1.25.0 (#789): `BatchEntry` gains `pr_detect_ambiguous_reason`/`_since`/
  * `_ticks` — the dedup marker for `reconcileStaleBlockedBatches`'s automatic
  * merged-PR detection when more than one candidate matches; `null`/`null`/`0`
  * backfilled on load.
  */
-export const SCHEMA_VERSION = '1.24.0' as const;
+export const SCHEMA_VERSION = '1.25.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1387,6 +1430,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.21.0',
   '1.22.0',
   '1.23.0',
+  '1.24.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
@@ -1714,7 +1758,17 @@ export type JournalEventName =
   // batch branch — positive evidence only, so nothing is recorded. Deduped
   // like `pr-watch-failed`/`anchor-close-failed`: journals on the streak's
   // first tick, then every `JOURNAL_DEDUP_REANNOUNCE_TICKS`, never every tick.
-  | 'pr-detect-ambiguous';
+  | 'pr-detect-ambiguous'
+  // #810: a member's own explicit hand-back (`blocked` / `review partial`
+  // milestone) — parked `handed-back`, NOT a failure, never counted toward
+  // the dissolve threshold (the `unit-failed` twin for evictions).
+  | 'member-handed-back'
+  // #810: the eviction threshold tripped while members were already
+  // validated — the batch keeps them landed and continues instead of
+  // dissolving.
+  | 'dissolve-suppressed'
+  // #810: an operator requeued a parked member (`sched requeue`).
+  | 'member-requeued';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —

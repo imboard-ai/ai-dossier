@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { buildSignedPayload, calculateChecksum, Ed25519Signer } from '@ai-dossier/core';
 import type { Command } from 'commander';
+import { collectRepeatable } from '../helpers';
 
 export function registerFromFileCommand(program: Command): void {
   program
@@ -14,7 +15,7 @@ export function registerFromFileCommand(program: Command): void {
     .option('--dossier-version <version>', 'Dossier version')
     .option('--status <status>', 'Dossier status', 'draft')
     .option('--objective <text>', 'Dossier objective')
-    .option('--author <name>', 'Author name (repeatable)', collectValues, [])
+    .option('--author <name>', 'Author name (repeatable)', collectRepeatable, [])
     .option('--meta <path>', 'JSON file with frontmatter fields')
     .option('--sign', 'Sign the dossier')
     .option('--key <name-or-path>', 'Key name from ~/.dossier/ or path to private key')
@@ -150,8 +151,4 @@ export function registerFromFileCommand(program: Command): void {
         process.exit(0);
       }
     );
-}
-
-function collectValues(value: string, previous: string[]): string[] {
-  return previous.concat([value]);
 }

@@ -34,7 +34,8 @@ ai-dossier sched resume
 ai-dossier sched stop --issue 42  # terminate one full-cycle agent and record it stopped (no recovery)
 ai-dossier sched stop --batch b1  # terminate every batch agent (incl. parallel members) and stop unfinished members
 ai-dossier sched abandon --issue 42 --reason "operator abort"
-ai-dossier sched abandon --batch b1   # dissolve; members requeue as full-cycle
+ai-dossier sched abandon --batch b1   # dissolve; every unshipped member — parked and validated ones included — requeues as full-cycle
+ai-dossier sched requeue --issue 42   # a PARKED batch member (evicted / handed-back) → full-cycle from its member branch, on the batch profile (#810)
 ai-dossier sched stats --issues 4..9  # per-issue tokens/cost from ~/.dossier/runs.jsonl (#524)
 ai-dossier sched stats --batch b1 --project owner-repo  # batch member/tail/report/fix costs from raw dispatch logs (#564)
 ```
@@ -520,7 +521,9 @@ against real scratch repos.
 validating → attributing → fixing (ONE bounded attempt) → validating
                          → evicting (revert the member's commits) → validating
   evictions > max(ceil(N × fraction), min_evictions_before_dissolve), or a
-  revert conflict → dissolving → members requeued (`dissolve_policy`, #563)
+  revert conflict → dissolving → members requeued (`dissolve_policy`, #563;
+                           #810: in-flight members park, and with VALIDATED
+                           members present → blocked `dissolve-refused:<why>`)
   same threshold crossed, but the survivors' re-run suite came back green
                          → reviewing (batch preserved; only the evicted
                            members requeue — strategy=partial, #563)
@@ -580,7 +583,9 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    `state.json` persisted before this fix shows one row per member in both `sched status`
    and `sched status --json`; the stored array is left as written.
 4. **Dissolve (AC3)** — `dissolveBatch` marks the batch `dissolved` and requeues every
-   UNSHIPPED member: `full` (each as its own full-cycle run), `halved` (one or two fresh
+   UNSHIPPED member (#810 exceptions for `full`: already-parked members are left as they
+   are, in-flight members with a member branch are parked `evicted`, and validated members
+   make the batch BLOCK instead — see [Parked members](#parked-members-hand-back-vs-eviction-810)): `full` (each as its own full-cycle run), `halved` (one or two fresh
    `forming` half-batches — a single remaining member yields one — entries retagged,
    eviction groups inherited where they survive the split), or `partial` (#563 — never
    marks the batch `dissolved` at all: drops the evicted members from `batch.members` and
@@ -686,7 +691,8 @@ member got the light, relevance-scoped review). `review=full` is how a risk-floo
   tier moves: the batch's dispatch profile still resolves the executor for that tier, so the
   batch stays one agent family. The member's `spawned` journal event carries `review: "full"`.
   The floor follows the member: its bounded fix attempt dispatches at `strong` (not
-  `FIX_ATTEMPT_TIER`), and an eviction/abandon requeue to full-cycle rewrites its `tier` to the
+  `FIX_ATTEMPT_TIER`), and a requeue to full-cycle (abandon, or `sched requeue` of a parked
+  member, #810) rewrites its `tier` to the
   floored value (and `review` back to `light`, a slot-only concept) so the full cycle keeps it.
 - **Prompt** — `buildMemberPrompt` substitutes a `{review}` placeholder.
   `DEFAULT_MEMBER_PROMPT_TEMPLATE` places `{review}` itself (#804), so both `light` and `full`
@@ -782,8 +788,8 @@ failure rails: executing → dissolving (a member self-reports blocked)
   TIP in its own worktree, its pushed branch refreshed (`--force-with-lease`), then
   `merge --ff-only`-landed — the same linear, `(#<issue>)`-trailed history (and
   `memberRanges` attribution) as serial landing. A member whose diff no longer rebases
-  onto the members landed before it is evicted (`landing-conflict`, requeued full-cycle,
-  its pushed branch kept) — batch-integrate's eviction verdict; a parent repair agent (#813) for
+  onto the members landed before it is evicted (`landing-conflict`; since #810 parked
+  `evicted` with its pushed branch recorded, never requeued automatically) — batch-integrate's eviction verdict; a parent repair agent (#813) for
   that conflict is a follow-up. A gate-inconclusive member still lands and keeps its
   tree; once every member resolves the batch blocks on it exactly as in serial mode
   (`sched resume --batch` works unchanged). The mode is decided ONCE at the
@@ -956,6 +962,55 @@ completion and park events reuse the existing unit-generic names (`assigned`/`sp
 `teardown-failed`) with `unit = batch:<id>`; the member `spawned` event also carries
 `worktree` (#677) naming the member worktree the prompt was built with.
 
+### Parked members: hand-back vs eviction (#810)
+
+A batch member that leaves its batch before landing is **parked**, never auto-requeued:
+
+- **`handed-back`** — the member posted its own terminal hand-back (`status=blocked
+  reason=<x>` at any phase, or `review partial`). A hand-back is a valued outcome, not a
+  batch failure: its `evictions[]` record carries `kind: 'handed-back'` and it **never
+  counts toward the dissolve threshold**. Journals `member-handed-back`.
+- **`evicted`** — an engine-decided failure (unverified exit, incremental-gate
+  `task-failed`, landing conflict, worktree prep). Counts toward the threshold. Journals
+  `unit-failed`.
+
+Both keep `mode: slot` + `batch`, record the member branch (`evictions[].branch`,
+`failure_evidence.branch` — the pushed remote copy survives the member teardown) and stamp
+the batch's `dispatch_profile` onto the entry. Neither is runnable until an operator runs
+`sched requeue --issue <n>` (full-cycle on that profile; the cycle prompt gains a
+`PRIOR WORK` instruction to continue from the member branch) or `sched abandon --issue <n>`.
+`sched status` lists them under `== Parked members ==` with reason, branch, profile and
+those exact commands (`parked_members` in `--json`).
+
+The pre-#810 rail requeued every eviction `mode: full, dispatch_profile: null` from the
+base branch — discarding the member's commits and running it on the config-default
+provider (imboard b-20260924-02/-04).
+
+Dissolve never throws validated work away:
+
+- On the executing rail, an eviction that crosses the threshold while members are already
+  `validated` (landed on the integration branch) does **not** dissolve: it journals
+  `dissolve-suppressed` and the batch continues with its remaining members.
+- `dissolveBatch({ strategy: 'full' })` with validated members **blocks** the batch
+  (`blocked_reason: dissolve-refused:<reason>`, milestone `validated=`) instead of
+  requeueing them. Every other unshipped member is released as a dissolve would (in-flight
+  parked, the rest requeued on the batch profile), running member agents are stopped and
+  every slot is released, so the blocked batch holds only its validated work. `sched status`
+  names the members and the exits: for an unattributed failure or a missing profile,
+  `gh pr create --head <integration branch> --base <base>` — once it merges,
+  `reconcileStaleBlockedBatches` settles the validated members to shipped; for a red suite
+  or a partial revert, inspect/fix the branch first; `sched abandon --batch` requeues them
+  full-cycle instead. (A `sched resume --batch` arm for these blocks is a follow-up.) Without validated members it dissolves
+  as before, except that in-flight members with a member branch are parked `evicted` and
+  every requeue carries the batch's dispatch profile (`carryDispatchProfile: false` only
+  for `dispatch-profile-missing:*`, where the profile itself is what broke).
+- Not changed: the `halved` PR-conflict split still re-batches its members, and
+  aggregate-suite evictions (`evictMembers`, post-landing, member branch already deleted)
+  still requeue full-cycle — now on the batch profile.
+
+State schema 1.24.0: `IssueStatus` gains `handed-back`; `EvictionRecord` gains optional
+`kind`/`branch`, `FailureEvidence` optional `branch`.
+
 ## API surface
 
 ```ts
@@ -1048,7 +1103,14 @@ import {
   handlePrConflict,      // rebase + re-ship once, then dissolve into halves
   createExecMilestonePoster, // batch milestones via `ai-dossier runstate post`
   expandEvictionGroups,  // members that must revert together (§E.4 eviction groups)
-  requeueMember,         // the one requeue path abandon/evict/dissolve all take
+  requeueMember,         // the one requeue path (abandon, aggregate eviction, dissolve, sched requeue)
+  parkMember,            // #810: park a member `evicted` / `handed-back` — never auto-dispatched
+  requeueParkedMember,   // #810: `sched requeue` — a parked member → full-cycle on its park-time profile
+  PARKED_MEMBER_STATUSES, MEMBER_EXIT_KINDS, // #810: evicted | handed-back
+  memberDispatchProfile, // #810: a member's profile (its own, else its batch's)
+  recordedMemberBranch,  // #810: where a member's un-landed work is
+  validatedMembersOf,    // #810: the work a dissolve must never throw away
+  priorWorkInstruction,  // #810: the PRIOR WORK prompt suffix for a requeued parked member
   appendEvictions,       // #595: the one evictions[] append — skips an issue already
                          //   recorded, returns the duplicates so the caller can journal
   distinctEvictions,     // #595 read side: one record per member for a legacy state.json
@@ -1245,7 +1307,9 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to the current schema (1.24.0) automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
+  load and migrate to the current schema (1.25.0 — 1.24.0 was #810: no backfill,
+  `kind`/`branch` optional, absent = an `evicted` record with no branch) automatically
+  (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
   `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
   `evictions`/`fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to
@@ -1259,8 +1323,9 @@ after-the-fact recovery, not a missing-data bug.
   #629; batch `anchor_closed_at` and `anchor_close_failed_reason`/`_since`/`_ticks`
   backfill to `null`/`null`/`null`/`0` — #768, schema 1.22.0; batch `member_dispatch`/`member_runs`
   backfill to `null`/`[]` — #809, schema 1.23.0 — a null mode past `ready` runs serially;
-  batch `pr_detect_ambiguous_reason`/`_since`/`_ticks` backfill to `null`/`null`/`0` — #789,
-  schema 1.24.0).
+  `IssueStatus` gains `handed-back`, `EvictionRecord`/`FailureEvidence` gain optional
+  `kind`/`branch` — #810, schema 1.24.0; batch `pr_detect_ambiguous_reason`/`_since`/`_ticks`
+  backfill to `null`/`null`/`0` — #789, schema 1.25.0).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -1311,7 +1376,7 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   the imboard#4116 shape); that still needs a merge, i.e. write access. A member issue that no longer resolves
   (deleted/transferred) reads `member-missing` — needs-operator, not an outage.
 - **Never over a failure trail.** Any evicted member, any member in a failure status
-  (`ISSUE_UNIVERSAL_FAILURE_EDGES` + `evicted`/`requeued`), any member requeued out of
+  (`ISSUE_UNIVERSAL_FAILURE_EDGES` + `evicted`/`handed-back`/`requeued`), any member requeued out of
   the batch, a dissolved/stopped batch, or a `decision-pending` label on the anchor or a
   member (case-insensitive, `hasLabel`) leaves the anchor open. The ledger is re-checked
   on a fresh load immediately before the close.

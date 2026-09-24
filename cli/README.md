@@ -296,6 +296,8 @@ ai-dossier evidence validate my-dossier.evidence.json
 
 Override the sidecar path with `--evidence <path>`, or skip attaching one (even if a sibling exists) with `--no-evidence`.
 
+`publish` also refuses (exit 1) if an entry from the previous version's sidecar is missing from the new one while its anchor still appears in the body — pass `--drop-evidence <anchor>` (repeatable) to acknowledge an intentional drop. See [`docs/guides/authoring-evidence.md`](../docs/guides/authoring-evidence.md) §8.
+
 ---
 
 ## Skills
@@ -613,7 +615,9 @@ milestones with the member-trail keys: `mode=slot` and/or `batch=<id>`. Both are
 `runstate verify` treats a trail whose **latest** milestone is a full-cycle-line phase
 carrying either key — or a `classify` verdict with `mode=slot` — as slot-mode:
 `resume_from=none` — an evicted member re-enters full-cycle fresh (the batch worktree is
-machine-local; there is nothing to resume) — plus a distinguishable
+machine-local; there is nothing to resume; since #810 an evicted member is parked until
+`sched requeue`, whose cycle prompt then continues from the member's pushed branch,
+`failure_evidence.branch`) — plus a distinguishable
 `slot_trail=present` signal (text) / `slot_trail: true` (JSON), so "fresh because slot"
 never looks like "fresh because there was no trail". A trail whose latest milestone is a
 `batch-*` phase (an anchor issue) sets no slot signal — it reports its own note,
@@ -1024,7 +1028,7 @@ Prints a single JSON verdict — no model call anywhere, exits 0 for either verd
 
 ```json
 {
-  "schema": "prescreen:v3",
+  "schema": "prescreen:v4",
   "issue": 538,
   "state": "OPEN",
   "verdict": "candidate",
@@ -1050,7 +1054,7 @@ verdict still reflects whatever DID complete rather than blocking on the gap:
 
 ```json
 {
-  "schema": "prescreen:v3",
+  "schema": "prescreen:v4",
   "issue": 538,
   "state": null,
   "verdict": "candidate",
@@ -1075,9 +1079,19 @@ text + `reasons`/`warnings` as context, still no repo exploration unless that pa
 (`light` | `full`, #771): `full` whenever any check found anything — and also when the
 issue itself could not be read (the fail-open path above stays `candidate`, but an unscanned
 issue is never reported `light`). A **text-floor** hit
-(risk keyword in the issue text) or a **path-floor** hit (a plan:v1 artifact predicting a
-risk-floor path) is `verdict: "candidate"` + `review: "full"` — the issue may join a batch,
-but as a full-review member (#770 Option A), not be excluded from it.
+(risk keyword in the issue text, rules 1/3/4 — deploy pipeline included), a **path-floor** hit
+(a plan:v1 artifact predicting a risk-floor path) or a **file-count** hit (a plan:v1 artifact
+predicting > 8 files) is `verdict: "candidate"` + `review: "full"` — the issue may join a
+batch, but as a full-review member (#770 Option A), not be excluded from it. Only a hard-block
+label or an open dependency returns `verdict: "full"`.
+
+**Contract change — `prescreen:v3` → `prescreen:v4` (#818, CLI 0.61.0).** v3 still returned
+`verdict: "full"` for > 8 predicted files (E.2 rule 5); v4 returns `candidate` +
+`review: "full"` for it. Operator decision on #770: rules 4 (deploy pipeline — already
+review-raising in the text floor since v2) and 5 are review-depth questions, not
+can-share-a-PR questions; the ≤ 2 `review=full` per batch cap still applies. Rule 8
+(visual/browser) stays excluding — the pre-screen never detected it; the classifier's model
+pass does.
 
 **Contract change — `prescreen:v2` → `prescreen:v3` (#805, CLI 0.58.0).** v2 still returned
 `verdict: "full"` for a plan:v1 path-floor hit; v3 returns `candidate` + `review: "full"`,
@@ -1111,7 +1125,7 @@ Coverage is deliberately partial — it catches the OBVIOUS floor hits, not all 
 | `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` | same policy as the `sched enqueue` pre-screen (#507) and the engine's per-tick re-check (#544), shared via `@ai-dossier/sched`'s `labels.ts` (re-exported by `cli/src/hard-block-labels.ts`) |
 | `text-floor` | A text-keyword approximation of RFC-0001 E.2 rules 1/3/4 (risk-floor area, new package/workspace, deploy pipeline) scanned over title + reference-stripped body + labels — sets `review: full`, does **not** exclude | `prescreen.ts`'s `TEXT_FLOOR_PATTERNS` / `floorScanText`; the matched keyword is named in the reason message |
 | `path-floor` | Rule 1's path-based risk floor, reusing `plan validate`'s `scanRiskFloor` (capped at 8 reasons — a plan:v1 artifact is comment-sourced, untrusted input) — sets `review: full`, does **not** exclude (v3, #805) | requires a `plan:v1` artifact already on the issue |
-| `file-count` | Rule 5, "Predicted files > 8" | requires a `plan:v1` artifact already on the issue |
+| `file-count` | Rule 5, "Predicted files > 8" — sets `review: full`, does **not** exclude (v4, #818) | requires a `plan:v1` artifact already on the issue |
 | `open-dependency` | Rule 9, an open `Depends on #N` outside `--submitted-set` (capped at 8 reasons; refs themselves capped at 32 per issue — an issue body is untrusted input) | resolved via `gh issue view <N> --json state` |
 
 What it does NOT catch — rule 2 beyond the bare `migration` keyword, rule 7 (hard
@@ -1133,7 +1147,7 @@ measured pre-screen hit rate:
 ## Batch Composition (`batch compose`)
 
 Previews which issues may share a batch PR **before any model spend** (#773, #770 P3
-"selection = admission"). It runs the classify pre-screen (`prescreen:v3`) plus the
+"selection = admission"). It runs the classify pre-screen (`prescreen:v4`) plus the
 deterministic readiness screen over the operator's picks and/or the open backlog, and proposes
 one composition that honours the scheduler's batch invariants. No model call, no writes (no
 labels, comments, or queue changes) — only `gh` reads and a read-only look at the local sched
@@ -1153,7 +1167,7 @@ ai-dossier batch compose --backlog [--label backend]... [--search "no:assignee"]
 | `--base <branch>` | `main` | The base branch every member shares |
 | `--min-members <n>` / `--max-members <n>` | 3 / 6 | Minimum viable batch / member ceiling (≤ 6) |
 | `--max-full-review <n>` | sched config `max_full_review_members`, else 2 | Per-batch `review=full` cap (#771) |
-| `--rules v2\|legacy` | `v2` | `legacy` replays pre-#770 admission (any risk keyword ⇒ `mode=full` ⇒ excluded) for comparison |
+| `--rules v2\|legacy` | `v2` | `legacy` replays pre-#770 admission for comparison: any risk keyword (`legacy-full`), a plan:v1 risk-floor path or > 8 predicted files (`prescreen-full`) excludes |
 | `--repo`, `--project` | cwd repo, `owner-name` | Target repo; sched project whose queue/config is read |
 
 At least one of `--issues` / `--backlog` is required. With `--issues` alone, the backlog is
@@ -1175,10 +1189,11 @@ after the caps, so five admissible `review=full` picks (cap 2) still trigger bac
 | `sched-active` | A non-terminal, not-yet-merged sched queue entry exists |
 | `open-dependency` | `Depends on #N` with N open and not among the picks; N a pick that is itself excluded; or N whose state could not be read (fails closed) |
 | `data-mutation` | Change surface names a production data action (`data migration`, `data backfill`, `backfill script`, `one-off script`, `bulk delete`, …) — never shares a PR |
-| `prescreen-full` | `prescreen:v3` excluding floor: a plan:v1 artifact with > 8 predicted files (a risk-floor path is a `review=full` member, not an exclusion — #805) |
+| `prescreen-full` | A `prescreen:v4` excluding check not already reported under its own code — none today: a plan:v1 risk-floor path (#805) and > 8 predicted files (#818) are `review=full` members, not exclusions. Under `--rules legacy` it reports a path-floor or file-count hit (pre-#770 admission) |
 | `legacy-full` | `--rules legacy` only: any text-floor keyword anywhere in title/body/labels |
 
-`--rules legacy` replays only the pre-#770 keyword rule on top of today's readiness screen (the
+`--rules legacy` replays only the pre-#770 floor rules — any risk keyword, a plan:v1 risk-floor
+path, > 8 predicted files — on top of today's readiness screen (the
 other codes above still apply) — it is a comparison of the admission rule, not a full replay of
 the old pipeline, which also ran a model classifier no deterministic check reproduces.
 
@@ -1314,6 +1329,7 @@ ai-dossier sched status [--json] [--anchors]   # ⚠ health warnings: long pause
 ai-dossier sched pause | resume
 ai-dossier sched stop (--issue 42 | --batch b1) [--reason "..."]
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
+ai-dossier sched requeue --issue 42 [--reason "..."]   # parked batch member → full-cycle from its member branch (#810)
 ai-dossier sched reprioritize --issue 42 --priority 20 | --batch b1 --priority 20 [--json]
 ai-dossier sched stats [--issues 4,5|4..9] [--batch b1 --project owner-repo] [--json]
 ```
@@ -1477,8 +1493,14 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   @ai-dossier/cli@latest` line prints when the engine is behind — read from the same
   cache `start` writes (`--json`: `engine_staleness: {installed, latest, stale}`), never
   a live network call, so `status` stays fast and offline-friendly even when `start` has
-  never run or the cache has expired (it just shows nothing in that case). `--json` emits
-  the same report as data.
+  never run or the cache has expired (it just shows nothing in that case). Since #810 a
+  `== Parked members ==` section lists every batch member parked out of its batch —
+  `[evicted]` (an engine-decided failure) or `[handed-back]` (the member's own `blocked`
+  milestone) — with its reason, batch, member branch, dispatch profile, a note, and the
+  exact remedies (`sched requeue --issue <n>`, `sched abandon --issue <n>`); `--json`
+  carries them as `parked_members`. The batches table marks a hand-back
+  `#<n>(handed-back:<reason>)` apart from an eviction. `--json` emits the same report as
+  data.
 - **`pause`/`resume`** gate *new* assignments only — live units keep running. A pause can
   be manual (`sched pause`) or automatic: `DISPATCH_UNHEALTHY_THRESHOLD` (2) consecutive
   suspect-dispatch exits from DIFFERENT units — an unverified agent exit within 60s of
@@ -1488,6 +1510,12 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
 - **`abandon --issue`** fails the entry (recording the reason) and releases its slot;
   **`abandon --batch`** dissolves the batch and requeues every non-terminal member as
   full-cycle — members already shipped keep their outcome.
+- **`requeue --issue <n>`** (#810) is the operator's decision on a PARKED batch member
+  (`evicted` / `handed-back`): it requeues the member as a full-cycle unit on the dispatch
+  profile stamped when it parked (the batch's), and the engine's cycle prompt tells the
+  agent to continue from the member's pushed branch instead of the base. It refuses any
+  entry that is not parked, and journals `member-requeued`. `--json` emits
+  `{requeued: "issue:<n>", dispatch_profile, branch}`.
 - **`reprioritize --issue <n>|--batch <id> --priority <n>`** (#565) adjusts a queued
   unit's assignment weight in place — no abandon/re-enqueue round trip, which would also
   reset every other field `enqueue` does not accept as a re-supply (deps, tier, ...).
@@ -1522,7 +1550,8 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
     argv in the log's `sched-dispatch` preamble — opencode streams never report a model,
     so before #769 opencode members always read `-` here.
     Below the table (and as `amortization` in `--json`) a **`Summary:` line** (#775) states
-    what the batch amortized: members enqueued / landed / evicted, issues shipped per gate
+    what the batch amortized: members enqueued / landed / evicted (and, #810, handed back —
+    counted apart from evictions), issues shipped per gate
     run (only once `state.json` has the batch `merged`/`deployed` — a batch PR recovered by
     hand stays `not shipped` here; one gate run per PR, a lower bound since CI re-runs are
     not in `state.json`), billable tokens per member, and tokens by model. The

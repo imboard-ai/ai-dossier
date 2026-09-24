@@ -1,6 +1,6 @@
 /**
  * `ai-dossier batch compose` (#773, #770 P3) — preview which issues may share a batch PR, with
- * zero model tokens. Runs prescreen:v3 + the deterministic readiness screen over the operator's
+ * zero model tokens. Runs prescreen:v4 + the deterministic readiness screen over the operator's
  * picks and/or the backlog and proposes a composition honouring the scheduler's batch invariants
  * (≤ `max_full_review_members` review=full members, one base branch, 3–6 members), listing ranked
  * backfill candidates when the picks fall short.
@@ -47,6 +47,7 @@ import {
   requireRepoSlug,
   tryFetchIssueState,
 } from '../gh';
+import { collectRepeatable } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
 import { findLatestPlan } from '../plan-artifact';
 import { extractDependencyRefs } from '../prescreen';
@@ -477,10 +478,6 @@ function runCompose(opts: ComposeCliOptions): void {
   }
 }
 
-function collect(value: string, previous: string[] = []): string[] {
-  return [...previous, value];
-}
-
 /** Registers the `batch` command tree (currently just `compose`). */
 export function registerBatchCommand(program: Command): void {
   const batch = program
@@ -501,7 +498,11 @@ export function registerBatchCommand(program: Command): void {
       'Also draw candidates from the open backlog (implied for backfill when picks fall short)'
     )
     .option('--no-backfill', 'Never query the backlog to backfill short picks')
-    .option('--label <name>', 'Backlog filter: only issues with this label (repeatable)', collect)
+    .option(
+      '--label <name>',
+      'Backlog filter: only issues with this label (repeatable)',
+      collectRepeatable
+    )
     .option('--search <query>', 'Backlog filter: GitHub search query (gh issue list --search)')
     .option(
       '--limit <n>',
@@ -526,7 +527,7 @@ export function registerBatchCommand(program: Command): void {
     )
     .option(
       '--rules <rules>',
-      "Admission rules: 'v2' (current #770 rules: risk-floor issues join as review=full members) or 'legacy' (pre-#770: any risk keyword excludes)",
+      "Admission rules: 'v2' (current #770 rules: risk-floor, deploy-pipeline and >8-file issues join as review=full members) or 'legacy' (pre-#770: any risk keyword, plan:v1 risk-floor path or >8 predicted files excludes)",
       'v2'
     )
     .option('--json', `Machine-readable output (schema ${COMPOSE_SCHEMA})`)

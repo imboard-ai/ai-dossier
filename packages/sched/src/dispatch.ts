@@ -27,6 +27,7 @@ import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SCHED_DISPATCH_EVENT } from '@ai-dossier/core';
+import { SAFE_REF_RE } from './attribution';
 import { sanitizeSlug } from './project';
 import {
   DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
@@ -923,6 +924,41 @@ export function takeoverInstruction(issue: number, gen: number, slotLabel?: stri
 export function buildPrompt(template: string, issue: number, gen = 0, slotLabel?: string): string {
   const rendered = renderTemplate(template, { issue, gen });
   return gen > 0 ? `${rendered}\n\n${takeoverInstruction(issue, gen, slotLabel)}` : rendered;
+}
+
+/**
+ * #810: the instruction appended to a full-cycle prompt when the entry was a
+ * parked batch member requeued by an operator (`sched requeue`) — its work is
+ * on the member branch the batch recorded, so the cycle continues it instead
+ * of re-deriving everything from the base branch. `null` when the evidence
+ * names no branch, or a branch/batch that is not a plain ref (persisted state
+ * reaching an agent's instruction stream is re-validated, never trusted).
+ *
+ * The exit `reason` is deliberately NOT interpolated: for a hand-back it is
+ * the member's own milestone text (anyone who can comment on the issue can
+ * write it), and inside an engine-written instruction it would carry the
+ * engine's authority. The agent reads it from the issue trail, as data.
+ */
+export function priorWorkInstruction(
+  issue: number,
+  evidence: { batch: string; branch?: string | null } | null
+): string | null {
+  const branch = evidence?.branch;
+  if (evidence === null || !isPlainRef(branch)) return null;
+  const batch = isPlainRef(evidence.batch) ? evidence.batch : 'its batch';
+  return (
+    `PRIOR WORK — issue #${issue} was a member of ${batch} and was parked out of it with its ` +
+    `work on branch ${branch} (why: see the blocked milestone / handover comments on the ` +
+    `issue). Before planning, run \`git fetch origin ${branch}\`: if it exists, set up your ` +
+    "worktree from that branch (not the base branch), read its commits and the issue's " +
+    'plan/handover comments, and continue that work rather than restarting it; ship to the ' +
+    'base branch as usual. If the branch is gone, start fresh from the base branch.'
+  );
+}
+
+/** A plain git ref / batch id (`SAFE_REF_RE`, bounded) — safe in argv and in a prompt. */
+function isPlainRef(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 200 && SAFE_REF_RE.test(value);
 }
 
 /**
