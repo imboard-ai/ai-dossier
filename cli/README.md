@@ -1070,7 +1070,7 @@ issue is never reported `light`). A **text-floor** hit
 (risk keyword in the issue text) is `verdict: "candidate"` + `review: "full"` — the issue
 may join a batch, but as a full-review member (#770 Option A), not be excluded from it.
 
-**Contract change — `prescreen:v1` → `prescreen:v2` (#772, CLI 0.52.0).** v1 (no
+**Contract change — `prescreen:v1` → `prescreen:v2` (#772, CLI 0.54.0).** v1 (no
 `schema` key) returned `verdict: "full"` for a text-floor hit too; v2 returns
 `candidate` + `review: "full"` for it and adds the `schema` and `review` keys. A consumer
 that reads only `verdict` must also read `review` to keep routing risk-keyword issues to
@@ -1361,7 +1361,10 @@ atomically. `abandon` instead records failure and releases a slot without termin
     unlike the default path, these are RECONSTRUCTED from a raw log after the fact, and
     a dispatch's spawn time and model tier are not recoverable from the log content
     itself; this is a structural limit, not a missing-data bug (a live member dispatch
-    going forward through the default path DOES get real `Duration`/`Tier`).
+    going forward through the default path DOES get real `Duration`/`Tier`). `Model`
+    comes from the agent's own result when it reports one, else from the `-m/--model`
+    argv in the log's `sched-dispatch` preamble — opencode streams never report a model,
+    so before #769 opencode members always read `-` here.
 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically
@@ -1382,7 +1385,7 @@ substitutes `{issue}` and `{gen}`; `dispatch.tiers.<tier>` — `{command?, model
 — overrides the command/model/prompt for one tier only, #527, falling back to the
 top-level `command`/`tier_models`/`prompt` shorthand for any field left unset;
 `dispatch.suite_command` — an argv array for the aggregate batch-suite command, #562, the
- middle tier of an active `cap run test.full` (manifest) → `dispatch.suite_command` → a repo-detected
+ middle tier of an active `cap run gate.batch` (#777) → an active `cap run test.full` (manifest) → `dispatch.suite_command` → a repo-detected
 safe default; run exactly as given, never with extra flags appended — set this when the
 repo's `test` script delegates to something that cannot take a reporter flag and there is
  no `.dossier/automation/` manifest to declare an active `test.full` in instead; its
@@ -1463,6 +1466,38 @@ to `~/.dossier/caps.jsonl`. Full spec and the capability id vocabulary:
 
 ---
 
+## Token Ledger (`usage`)
+
+```bash
+ai-dossier usage window [--last 5h] [--until <iso>] [--provider anthropic] [--source claude-code,opencode] [--top 10] [--limit-window 5h] [--json]
+ai-dossier usage --batch <id> | --issue <n> [--since 30d] [--json]
+ai-dossier usage watch [--last 1h] [--interval 30s] [--iterations N]
+```
+
+One ledger over every place tokens are recorded on this host (#769), read on demand and
+**read-only** (nothing is written; `opencode.db` is opened `readOnly`):
+
+| Store | What it contributes |
+|---|---|
+| `~/.claude/projects/**/*.jsonl` (`$CLAUDE_CONFIG_DIR`) | One row per assistant message — model, input/output/cache tokens — for interactive sessions, headless `claude -p` dispatches, and **subagents** (session `<parent>/<agentId>`, `parent_session_id` = the parent). Deduped on `message.id:requestId`. API-error rows with limit wording become limit events. |
+| `opencode.db` (`$OPENCODE_DB`, else `$XDG_DATA_HOME/opencode/`) | One row per assistant message — `provider/model`, input/output/reasoning/cache tokens, cost. Needs `node:sqlite` (Node >= 22.13); otherwise the collector reports `unavailable`. |
+| `~/.dossier/sched/*/runs/*.log` | Attribution only: the agent session id in each dispatch log joins a session (and its child sessions) to its issue / batch / unit, and the `sched-dispatch` preamble supplies a model when the store recorded none. |
+| `~/.dossier/sched/*/events.jsonl` | `dispatch-failure`/`dispatch-unhealthy` events with a 429 or limit wording → limit events. |
+| `~/.dossier/runs.jsonl` | Attribution only: `ai-dossier run` invocations per host session (`session_id`). Its token columns are NOT summed — those tokens are already in the two stores above. |
+
+`window` is the quota-RCA view: totals and burn per hour, tokens by model × source and by
+project × issue, the top sessions, and every limit event with the top same-provider consumers
+in the preceding `--limit-window` (repeats of one wall within an hour fold into its onset,
+shown as `×N`). "model attributed" is the share of tokens carrying a concrete model id.
+`--batch`/`--issue` list every session attributed to it with its real model(s). Issues are
+attributed from sched dispatch logs when a session was dispatched, else heuristically from the
+git branch / worktree name (`issue_source: "branch"` in `--json`).
+
+Not yet: a persisted ledger and multi-host merge (`usage sync`) — rows carry `host` so they can
+be merged later.
+
+---
+
 ## Run History (`history`)
 
 Every `ai-dossier run` appends one JSON line to `~/.dossier/runs.jsonl` (append-only; disable with `dossier config auditLog false`). Since #524, `packages/sched`'s dispatch engine appends its own entries to the SAME file — one per completed scheduler-dispatched agent run (see `ai-dossier sched stats` above). The `auditLog` toggle governs only `ai-dossier run`'s own entries; the scheduler's are gated
@@ -1513,6 +1548,7 @@ Headless runs execute `claude -p --output-format json` (claude-code) or `opencod
 | `input_tokens`, `output_tokens`, `total_cost_usd` | Usage reported by the agent (claude JSON result / opencode JSONL event stream, headless only); null when not reported — never fabricated (v0.12.0+) |
 | `cache_creation_tokens`, `cache_read_tokens` | Cache-write/cache-read input tokens; same modelUsage-sourced rule as `input_tokens`/`output_tokens` — null when not reported (v0.22.0+) |
 | `unit` | Sched dispatch entries only: `issue:<n>` or `batch:<id>` — absent/null for an ordinary `ai-dossier run` entry, which has no unit (v0.22.0+) |
+| `session_id`, `agent` | The agent host session that invoked `ai-dossier run` (`CLAUDE_CODE_SESSION_ID`, or opencode's session for this cwd) and its kind (`claude-code`/`opencode`); null outside an agent host. When the run spawns no agent, `model` is the host's resolved model from that session (v0.52.0+, #769) |
 
 Pre-v0.12.0 entries simply lack the v0.12.0+ fields, and pre-v0.22.0 entries lack `cache_creation_tokens`/`cache_read_tokens`/`unit`; consumers must treat them as optional/nullable.
 

@@ -76,8 +76,12 @@ import {
 } from '@ai-dossier/sched';
 import { WARM_COMMAND_TIMEOUT_MS } from '@ai-dossier/worktree-pool';
 import type { Command } from 'commander';
-import { BATCH_SUITE_TIMEOUT_MS, createBatchSuiteRunner } from '../batch-suite-runner';
-import { timeoutReasonSpent } from '../capability';
+import {
+  BATCH_SUITE_TIMEOUT_MS,
+  batchGateRefusal,
+  createBatchSuiteRunner,
+} from '../batch-suite-runner';
+import { loadCapabilityManifest, timeoutReasonSpent } from '../capability';
 import { formatCost, formatCount } from '../cost-format';
 import { detectDispatchProfile, type ProfileCandidate } from '../dispatch-detect';
 import { formatAge, formatDurationMs } from '../duration';
@@ -701,6 +705,38 @@ function screenSlotPreconditions(inputs: EnqueueInput[], repo?: string): void {
   fail([lines.join('\n')]);
 }
 
+/**
+ * #777: refuse to CREATE a batch in a repo whose only full gate declares
+ * itself timeout-prone (see `batchGateRefusal`). Reads the capability
+ * manifest of the directory `enqueue` runs in — skipped when `--repo` names
+ * the GitHub repo explicitly (the flag exists for enqueueing into a project
+ * whose checkout is NOT the cwd, so the cwd's manifest would be the wrong
+ * one), and degrade-not-crash on a malformed manifest (`cap run` reports that
+ * itself at gate time). Only batches this call creates are screened: a
+ * member joining an existing batch cannot un-form it.
+ */
+function screenBatchGate(store: SchedStore, opts: EnqueueOptions, inputs: EnqueueInput[]): void {
+  if (opts.repo !== undefined) return;
+  const existing = new Set(store.load().batches.map((b) => b.id));
+  const born = [
+    ...new Set(
+      inputs
+        .filter((input) => (input.mode ?? 'full') === 'slot' && input.batch != null)
+        .map((input) => input.batch as string)
+        .filter((id) => !existing.has(id))
+    ),
+  ];
+  if (born.length === 0) return;
+  let refusal: string | null;
+  try {
+    refusal = batchGateRefusal(loadCapabilityManifest(process.cwd()));
+  } catch {
+    return;
+  }
+  if (refusal === null) return;
+  fail([`Cannot form batch ${born.join(', ')}: ${refusal}`]);
+}
+
 /** Append one `label-blocked`/`label-check-failed` journal event per outcome (#507 AC3). */
 function journalLabelScreen(store: SchedStore, blocked: EnqueueInput[], failed: number[]): void {
   if (blocked.length === 0 && failed.length === 0) return;
@@ -1030,6 +1066,9 @@ function registerEnqueueSubcommand(cmd: Command): void {
       // refuse) BEFORE any state mutation, so a refused enqueue leaves no
       // batch and no partially-applied batch fact.
       resolveEnqueueDispatchProfile(store, opts, inputs);
+
+      // #777: before any state mutation — a refused batch leaves nothing behind.
+      screenBatchGate(store, opts, inputs);
 
       // #565: a batch-mode entry with no explicit batch_priority (neither
       // --priority on the CLI nor a manifest field) gets the configurable

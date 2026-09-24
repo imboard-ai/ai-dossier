@@ -112,6 +112,7 @@ import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
 import { batchRank, compareByPriority } from './readiness';
 import {
+  type BatchSuiteContext,
   beginAttribution,
   beginFixAttempt,
   blockBatch,
@@ -190,8 +191,13 @@ export interface BatchDispatchDeps {
    * timeout, e.g. `@ai-dossier/worktree-pool`'s `WARM_COMMAND_TIMEOUT_MS`).
    */
   warmExec?: ExecFn;
-  /** Runs the aggregate suite inside a batch worktree; batches never leave `validating` without one. */
-  runSuite: (worktree: string) => SuiteResult;
+  /**
+   * Runs the aggregate suite inside a batch worktree; batches never leave
+   * `validating` without one. `ctx` (#777) names the batch and its base ref so
+   * the runner can hand them to the repo's `gate.batch` capability; optional
+   * so runners written before it keep working unchanged.
+   */
+  runSuite: (worktree: string, ctx?: BatchSuiteContext) => SuiteResult;
   /**
    * Runs one `ai-dossier cap run <capabilityId>` in a batch worktree. Two call
    * sites, different degrade contracts:
@@ -542,9 +548,10 @@ function applyBatchAndIssues(
  * into `tick()`'s own catch — a bare `tick-failed` with no unit id, repeating
  * every reconcile interval forever since nothing about the batch changed.
  */
-function safeSuite(deps: BatchDispatchDeps, batchId: string, worktree: string): SuiteResult {
+function safeSuite(deps: BatchDispatchDeps, batch: BatchEntry, worktree: string): SuiteResult {
+  const batchId = batch.id;
   try {
-    return deps.runSuite(worktree);
+    return deps.runSuite(worktree, batchSuiteContext(batch));
   } catch (err) {
     const detail = `suite runner threw: ${(err as Error).message}`;
     journalEvent(deps, 'suite-failed', unit(batchId), { detail });
@@ -552,6 +559,11 @@ function safeSuite(deps: BatchDispatchDeps, batchId: string, worktree: string): 
     // `readable: true` and look like a parseable report naming zero failures.
     return { ok: false, failing: [], readable: false, detail };
   }
+}
+
+/** What the aggregate-suite runner is told about the batch it gates (#777). */
+function batchSuiteContext(batch: BatchEntry): BatchSuiteContext {
+  return { batchId: batch.id, baseRef: `origin/${batch.base_branch}` };
 }
 
 function recoveryDeps(
@@ -565,7 +577,10 @@ function recoveryDeps(
     repoDir: batch.worktree ?? deps.repoDir,
     journal: deps.journal,
     postMilestone: createExecMilestonePoster(deps.exec, { repoDir: deps.repoDir }),
-    runSuite: batch.worktree !== null ? () => deps.runSuite(batch.worktree as string) : undefined,
+    runSuite:
+      batch.worktree !== null
+        ? () => deps.runSuite(batch.worktree as string, batchSuiteContext(batch))
+        : undefined,
     dissolvePolicy: resolveDissolvePolicy(config.dissolve_policy),
     now: () => now,
   };
@@ -1791,7 +1806,7 @@ function runValidate(
   const batch = findBatch(state, batchId);
   if (!batch || batch.worktree === null) return;
 
-  const suite = safeSuite(deps, batchId, batch.worktree);
+  const suite = safeSuite(deps, batch, batch.worktree);
   const rDeps = recoveryDeps(deps, config, batch, now);
   const poster = createExecMilestonePoster(deps.exec, { repoDir: deps.repoDir });
 
@@ -3149,7 +3164,7 @@ function reconcileFixSlot(
 
   deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
 
-  const suite = safeSuite(deps, batchId, batch.worktree);
+  const suite = safeSuite(deps, batch, batch.worktree);
   const rDeps = recoveryDeps(deps, config, batch, now);
   const { state: resolved } = resolveFixAttempt(
     deps.store.load(),

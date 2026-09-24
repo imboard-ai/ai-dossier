@@ -638,6 +638,18 @@ capabilities:
       });
     });
 
+    it('parses timeout_prone (#777) and rejects a non-boolean', () => {
+      const caps = parseCapabilityManifest(
+        'capabilities:\n  test.full:\n    command: make test\n    timeout_prone: true\n'
+      );
+      expect(caps['test.full']?.timeoutProne).toBe(true);
+      expect(() =>
+        parseCapabilityManifest(
+          'capabilities:\n  test.full:\n    command: make test\n    timeout_prone: "yes"\n'
+        )
+      ).toThrow(/timeout_prone must be true or false/);
+    });
+
     it('rejects an invalid capability id', () => {
       expect(() => parseCapabilityManifest('capabilities:\n  Bad_ID:\n    command: x\n')).toThrow(
         /invalid/
