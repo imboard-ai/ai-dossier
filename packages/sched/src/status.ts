@@ -11,7 +11,10 @@ import {
   type AnchorReportItem,
   type CommitInBase,
   type IssueCloseReader,
+  type OpenAnchorLister,
+  type OrphanAnchorReportItem,
   sweepAnchors,
+  sweepOrphanAnchors,
 } from './anchor-close';
 import {
   resolveDispatch,
@@ -252,6 +255,28 @@ export interface StatusReport {
    * network call unless asked; nothing is guessed from the ledger alone).
    */
   anchors: AnchorReportItem[] | null;
+  /**
+   * #790 orphan anchor sweep (report-only, same `sched status --anchors`
+   * opt-in): every open `batch-epic` anchor whose batch is no longer in
+   * `state.batches` at all — invisible to `anchors` above, which only walks
+   * the ledger. `null` under three conditions, deliberately never rendered
+   * as an empty-but-clean result: no sweep asked for; the orphan lister was
+   * not supplied even though the ledger sweep was (an older caller, or a
+   * repo the orphan lister could not verify); or the lister ran but the
+   * GitHub list call itself FAILED — distinguished from `[]` (asked for,
+   * genuinely found none) the same way `anchors` distinguishes "not asked"
+   * from "asked, clean".
+   */
+  orphan_anchors: OrphanAnchorReportItem[] | null;
+  /**
+   * True when {@link orphan_anchors} left real orphan candidates unprobed
+   * because {@link ORPHAN_SWEEP_MAX_ANCHORS} was hit — ledger-tracked
+   * anchors are excluded before the cap, so this can fire only when MORE
+   * than the cap's worth of genuine orphans exist in one repo. `false` when
+   * `orphan_anchors` is `null` (nothing was classified either way) or the
+   * sweep classified every candidate.
+   */
+  orphan_anchors_truncated: boolean;
 }
 
 function hoursSince(iso: string, nowMs: number): number | null {
@@ -619,8 +644,21 @@ export function buildStatusReport(
   project: string,
   engineLease: EngineLeaseStatus | null = null,
   now: Date = new Date(),
-  /** #768: the opt-in anchor sweep's GitHub/git readers; omitted → `anchors: null`. */
-  anchorSweep?: { read: IssueCloseReader; repo?: string; commitInBase?: CommitInBase },
+  /**
+   * #768/#790: the opt-in anchor sweep's GitHub/git readers; omitted →
+   * `anchors: null` and `orphan_anchors: null`. `orphanList` is optional
+   * within this — a caller that supplies `read`/`repo` but no `orphanList`
+   * (an unverified repo, or one that has not adopted #790 yet) still gets
+   * the ledger sweep, just no orphan sweep (`orphan_anchors: null`).
+   */
+  anchorSweep?: {
+    read: IssueCloseReader;
+    repo?: string;
+    commitInBase?: CommitInBase;
+    orphanList?: OpenAnchorLister;
+    /** #790: the base branch an orphan's own `base_branch:` metadata must match to ever be `orphan-closable-candidate` — passed to `sweepOrphanAnchors`; defaults to `DEFAULT_ORPHAN_BASE_BRANCH` ('main') when omitted. */
+    expectedBaseBranch?: string;
+  },
   /** #791: the opt-in kept-worktree reader; omitted → no `kept-worktree` warnings (zero behavior change for every existing caller). */
   worktreeReader?: KeptWorktreeReader
 ): StatusReport {
@@ -776,5 +814,19 @@ export function buildStatusReport(
             commitInBase: anchorSweep.commitInBase,
           })
         : null,
+    ...(() => {
+      const orphanSweep =
+        anchorSweep?.orphanList !== undefined
+          ? sweepOrphanAnchors(state, anchorSweep.orphanList, anchorSweep.read, {
+              repo: anchorSweep.repo,
+              commitInBase: anchorSweep.commitInBase,
+              expectedBaseBranch: anchorSweep.expectedBaseBranch,
+            })
+          : null;
+      return {
+        orphan_anchors: orphanSweep?.items ?? null,
+        orphan_anchors_truncated: orphanSweep?.truncated ?? false,
+      };
+    })(),
   };
 }

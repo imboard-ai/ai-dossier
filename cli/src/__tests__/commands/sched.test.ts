@@ -692,6 +692,28 @@ describe('ai-dossier sched status', () => {
     expect(text).toContain('(none)');
   });
 
+  it('#790: --anchors on an unresolvable project repo skips BOTH the ledger and orphan sweeps with one note, never crashes', async () => {
+    // Same module-boundary note as the abandon test above: the sched
+    // package's own `execFileSync` calls are not reachable through this
+    // file's `vi.mock('node:child_process')`, so the REAL `gh repo view`
+    // runs and — since it can never match the fake `test-proj` project
+    // slug — `anchorSweepFor` returns `undefined` for both sweeps. The pure
+    // orphan-sweep logic (`sweepOrphanAnchors`, `classifyOrphanAnchor`) is
+    // covered directly in `packages/sched/src/__tests__/anchor-close.test.ts`.
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    logs.length = 0;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await runSched(['sched', 'status', '--project', 'test-proj', '--anchors']);
+
+    const text = logs.join('\n');
+    expect(text).not.toContain('== Open batch anchors ==');
+    expect(text).not.toContain('== Orphaned batch anchors');
+    const stderrLines = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderrLines).toContain('sched status: anchor check skipped');
+    stderrSpy.mockRestore();
+  });
+
   it('#544: a label-blocked entry reports when the engine last re-read labels', async () => {
     execReturns('{"labels":[{"name":"decision-pending"}]}');
     await runSched(['sched', 'enqueue', '--issues', '9', '--project', 'test-proj']);
@@ -1212,6 +1234,66 @@ describe('ai-dossier sched pause/resume/abandon', () => {
     };
     expect(state.batches[0].status).toBe('dissolved');
     expect(state.entries.every((e) => e.mode === 'full')).toBe(true);
+  });
+
+  it("#790: dissolving a batch with an anchor never refuses, even when the anchor check can't verify the repo — a courtesy warning, not a gate", async () => {
+    // `warnIfAbandonedAnchorOpen`'s GitHub read goes through
+    // `@ai-dossier/sched`'s own `resolveProjectRepo`/`execFileSync`, which —
+    // unlike this file's own `gh` calls — is NOT reachable through this
+    // test's `execHandles` mock (the package is externalized/compiled, so
+    // `vi.mock('node:child_process')` here does not intercept its nested
+    // `execFileSync` calls; see `packages/sched/src/__tests__/anchor-close.test.ts`
+    // for the pure decision logic (`batchAnchorStillOpen`) this glue calls).
+    // The REAL `gh repo view` therefore runs here, resolving a repo that can
+    // never match the fake `--project test-proj` — exactly the
+    // "unverified repo" fail-closed path this test exercises: the check
+    // fails silently and abandon proceeds regardless. `batchAnchorStillOpen`
+    // itself is covered directly in the sched package's own tests.
+    const manifest = path.join(home, 'm2.json');
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({ entries: [{ issue: 1, mode: 'slot', batch: 'bx', anchor: 9001 }] })
+    );
+    await runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj']);
+    logs.length = 0;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await runSched(['sched', 'abandon', '--batch', 'bx', '--project', 'test-proj']);
+
+    // Never a refusal: the dissolve completed even though the anchor check
+    // could not run to completion.
+    expect(logs.join('\n')).toContain('Dissolved batch bx');
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0].status).toBe('dissolved');
+    // The unverifiable-repo path is silent-but-reported, not a crash: a note
+    // fires, correctly labeled `sched abandon` (not `sched status` — #790
+    // review fix), and no "still open" warning is fabricated from a check
+    // that never ran.
+    const stderrLines = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderrLines).toContain('sched abandon: anchor check skipped');
+    expect(stderrLines).not.toContain('still open');
+    expect(journalEvents()).not.toContainEqual(
+      expect.objectContaining({ event: 'batch-anchor-open-on-abandon' })
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('#790: abandon --batch --json carries an additive anchor_open field (null when the check could not run)', async () => {
+    const manifest = path.join(home, 'm2b.json');
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({ entries: [{ issue: 1, mode: 'slot', batch: 'by', anchor: 9002 }] })
+    );
+    await runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj']);
+    logs.length = 0;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await runSched(['sched', 'abandon', '--batch', 'by', '--project', 'test-proj', '--json']);
+
+    const parsed = JSON.parse(logs.join(''));
+    expect(parsed).toMatchObject({ abandoned: 'batch:by', anchor_open: null });
+    expect(parsed.requeued).toBeDefined();
+    stderrSpy.mockRestore();
   });
 
   it('rejects abandoning with both --issue and --batch', async () => {

@@ -13,4 +13,4 @@
  * the same name.
  */
 
-export { HARD_BLOCK_LABELS, pickHardBlockLabel } from '@ai-dossier/sched';
+export { BATCH_ANCHOR_LABEL, HARD_BLOCK_LABELS, pickHardBlockLabel } from '@ai-dossier/sched';
