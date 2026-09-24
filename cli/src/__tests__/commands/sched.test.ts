@@ -489,6 +489,50 @@ describe('ai-dossier sched enqueue', () => {
   });
 });
 
+describe('ai-dossier sched status (#776: health warnings)', () => {
+  it('renders a long pause and a stale engine lease with remedies, and exposes warnings[] in --json', async () => {
+    await runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '101',
+      '--mode',
+      'full',
+      '--project',
+      'test-proj',
+    ]);
+    await runSched(['sched', 'pause', '--project', 'test-proj']);
+    const state = readState() as Record<string, unknown>;
+    expect(typeof state.paused_at).toBe('string');
+    // Backdate the pause three days — the incident's shape.
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        paused_at: new Date(Date.now() - 3 * 24 * 3600_000).toISOString(),
+      })
+    );
+    // A lease whose holder pid is not running.
+    const leaseDir = path.join(home, '.dossier', 'sched', 'test-proj', '.sched-engine-lease');
+    fs.mkdirSync(leaseDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(leaseDir, 'holder.json'),
+      JSON.stringify({ pid: 2 ** 22 + 12345, pid_start: null, id: 'dead-engine' })
+    );
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--project', 'test-proj']);
+    const text = logs.join('\n');
+    expect(text).toMatch(/⚠ scheduler has been paused for 3d .*→ .*sched resume/);
+    expect(text).toMatch(/⚠ engine lease is stale .*→ start an engine with `sched start`/);
+
+    logs.length = 0;
+    await runSched(['sched', 'status', '--json', '--project', 'test-proj']);
+    const report = JSON.parse(logs.join('\n')) as { warnings: Array<{ kind: string }> };
+    expect(report.warnings.map((w) => w.kind)).toEqual(['long-pause', 'stale-engine-lease']);
+  });
+});
+
 describe('ai-dossier sched start (#537: engine-stale detection)', () => {
   it('a contending --once exits successfully without output, while an interactive start names the holder pid', async () => {
     const leaseDir = path.join(home, '.dossier', 'sched', 'test-proj', '.sched-engine-lease');

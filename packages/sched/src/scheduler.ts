@@ -176,12 +176,19 @@ export function assignToIdleSlot(
  * should not keep citing a wall the operator just acted on — without this,
  * the warning lingers verbatim until the next unrelated healthy dispatch
  * happens to reset it, which can be several ticks later.
+ *
+ * #776: the running → paused edge stamps `paused_at` (so `sched status` can
+ * warn about a pause nobody came back to); re-pausing an already-paused
+ * scheduler keeps the original stamp, and resuming clears it.
  */
-export function setPaused(state: SchedState, paused: boolean): SchedState {
-  if (paused) return { ...state, paused };
+export function setPaused(state: SchedState, paused: boolean, now: Date = new Date()): SchedState {
+  if (paused) {
+    return { ...state, paused, paused_at: state.paused ? state.paused_at : now.toISOString() };
+  }
   return {
     ...state,
     paused,
+    paused_at: null,
     consecutive_suspect_dispatches: 0,
     last_suspect_dispatch_unit: null,
     // #629: the confirmed-dispatch-failure streak is the same kind of fact —
