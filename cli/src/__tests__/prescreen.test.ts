@@ -113,7 +113,7 @@ describe('prescreenIssue — text floor keywords', () => {
     expectTextFloorReviewFull(result);
   });
 
-  it('does NOT reject bare "auth" — collides with benign phrasing like `gh auth`', () => {
+  it('does NOT flag bare "auth" — collides with benign phrasing like `gh auth`', () => {
     const result = prescreenIssue({
       ...baseInput,
       body: 'Excluded from CI — no `gh` auth there, but runnable locally with auth.',
@@ -121,7 +121,7 @@ describe('prescreenIssue — text floor keywords', () => {
     expectClean(result);
   });
 
-  it('does NOT reject bare "infrastructure" — collides with "test infrastructure"', () => {
+  it('does NOT flag bare "infrastructure" — collides with "test infrastructure"', () => {
     const result = prescreenIssue({
       ...baseInput,
       body: 'This would have been an unrelated rider on a test-infrastructure change.',
@@ -278,7 +278,7 @@ describe('prescreenIssue — open dependencies', () => {
  *   repo-exploring one.
  */
 describe('prescreenIssue — quoted spans are not the change surface (#627)', () => {
-  it('a risk keyword inside a quoted UI string does not force full', () => {
+  it('a risk keyword inside a quoted UI string does not flag review=full', () => {
     // imboard#4036, verbatim: a `test(e2e)` spec that CLICKS a button labelled
     // "Set up payment". The change adds a Playwright file; the keyword is the
     // label it asserts on.
@@ -495,19 +495,75 @@ describe('prescreenIssue — section-aware text floor (#772)', () => {
     '> Surfaced by the deploy review',
     'See also #10 — billing',
   ])('drops the provenance line %j', (line) => {
-    expect(stripReferenceMaterial(line).trim()).toBe('');
+    // Only markdown decoration / a terminator may survive — no words.
+    expect(stripReferenceMaterial(line)).not.toMatch(/[a-z]{2,}/i);
     expect(prescreenIssue({ ...baseInput, body: line }).reasons).toHaveLength(0);
   });
 
-  it('drops a link-only line (URLs, markdown links, #refs) but keeps prose around it', () => {
+  it('drops a link-only line (URLs, ref-only markdown links, #refs) but keeps prose around it', () => {
     const body = [
       'https://example.com/security/advisory',
-      '- [billing runbook](https://example.com/billing) , #12, org/repo#34',
+      '- [#12](https://example.com/billing) , #12, org/repo#34',
       'Rename the widget helper.',
     ].join('\n');
     const result = prescreenIssue({ ...baseInput, body });
     expect(result.reasons).toHaveLength(0);
     expect(stripReferenceMaterial(body)).toContain('Rename the widget helper.');
+  });
+
+  it('keeps a markdown link whose TEXT is scope (only the target is reference material)', () => {
+    expectTextFloorReviewFull(
+      prescreenIssue({ ...baseInput, body: '- [Migrate billing tables](https://x.example/y)' })
+    );
+  });
+
+  it('a # comment inside a fenced code block is not a heading — it neither opens nor closes an ignored section', () => {
+    const opens = [
+      '## Fix',
+      'Run:',
+      '```bash',
+      '# Context setup',
+      'make',
+      '```',
+      '## Scope',
+      'Rotate the Stripe secrets',
+    ].join('\n');
+    expectTextFloorReviewFull(prescreenIssue({ ...baseInput, body: opens }));
+    const closes = [
+      '## Related',
+      '```bash',
+      '# Scope',
+      '```',
+      'The security audit that found this.',
+    ].join('\n');
+    expect(prescreenIssue({ ...baseInput, body: closes }).reasons).toHaveLength(0);
+  });
+
+  it.each([
+    '## Background jobs\nThe billing cron fails.',
+    '## Origin validation\nCORS allows any origin for the oauth callback.',
+    '## Related billing work\nRewrite the invoice job.',
+  ])('a heading that merely STARTS with an ignored word is scope: %j', (body) => {
+    expectTextFloorReviewFull(prescreenIssue({ ...baseInput, body }));
+  });
+
+  it('an ignored heading still matches with emoji/emphasis/colon decoration', () => {
+    const body = '## 🔗 **Related:**\nThe security audit that found this.';
+    expect(prescreenIssue({ ...baseInput, body }).reasons).toHaveLength(0);
+  });
+
+  it.each([
+    'Reported in production: billing totals are wrong.',
+    'Found in the billing export: totals double-counted.',
+    'Related billing webhooks also fail and must be fixed.',
+    'Context: the Stripe checkout flow double-charges.',
+    'Found by the #4103 review. Rotate the Stripe secrets.',
+    'The token leak is found during checkout of credentials.',
+    'Job was split from the billing migration and must be redone.',
+    'This was found by QA, and the fix must touch the payment webhook.',
+    'Found by the review! Payment flow broken.',
+  ])('scope prose that shares words with provenance still hits: %j', (body) => {
+    expectTextFloorReviewFull(prescreenIssue({ ...baseInput, body }));
   });
 
   it('strips a mid-line provenance clause to the end of its sentence, keeping the rest of the line', () => {

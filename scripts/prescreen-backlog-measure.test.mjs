@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { legacyVerdict, measureBacklog, toInput } from './prescreen-backlog-measure.mjs';
+import {
+  firstKeyword,
+  legacyVerdict,
+  measureBacklog,
+  parseArgs,
+  toInput,
+} from './prescreen-backlog-measure.mjs';
 
 /**
  * A minimal stand-in for the cli/dist exports the script uses — keeps this test free of a
@@ -12,6 +18,11 @@ const api = {
   ],
   stripQuotedSpans: (t) => t.replace(/`[^`\n]*`/g, ' '),
   pickHardBlockLabel: (labels) => labels.find((l) => l === 'epic') ?? null,
+  floorScanText: (title, body, labels) =>
+    `${title}\n${body
+      .split('\n')
+      .filter((l) => !/^found by/i.test(l))
+      .join('\n')}\n${labels.join(' ')}`,
   prescreenIssue: ({ title, body, labels }) => {
     const hard = labels.includes('epic');
     const scoped = body
@@ -37,11 +48,27 @@ const api = {
 
 describe('prescreen-backlog-measure', () => {
   it('toInput normalises gh label objects and missing fields', () => {
-    expect(toInput({ number: 1, labels: [{ name: 'bug' }, 'x', {}] })).toEqual({
+    expect(toInput({ number: 1, labels: [{ name: 'bug' }, 'x', {}, { name: 7 }] })).toEqual({
       number: 1,
       title: '',
       body: '',
-      labels: ['bug', 'x'],
+      labels: ['bug'],
+    });
+  });
+
+  it('firstKeyword returns the first matching pattern keyword, or null', () => {
+    expect(firstKeyword('fix billing', api.TEXT_FLOOR_PATTERNS)).toBe('billing');
+    expect(firstKeyword('rename helper', api.TEXT_FLOOR_PATTERNS)).toBeNull();
+  });
+
+  it('parseArgs rejects a flag with a missing value instead of swallowing the next flag', () => {
+    expect(() => parseArgs(['--snapshot', '--json'])).toThrow('--snapshot needs a value.');
+    expect(() => parseArgs(['--repo'])).toThrow('--repo needs a value.');
+    expect(() => parseArgs([])).toThrow(/--repo owner\/name/);
+    expect(parseArgs(['--repo', 'o/r', '--limit', '10', '--json'])).toEqual({
+      repo: 'o/r',
+      limit: 10,
+      json: true,
     });
   });
 
@@ -53,7 +80,8 @@ describe('prescreen-backlog-measure', () => {
       keyword: 'billing',
     });
     expect(
-      legacyVerdict(toInput({ number: 2, title: 't', body: 'x', labels: ['epic'] }), api).verdict
+      legacyVerdict(toInput({ number: 2, title: 't', body: 'x', labels: [{ name: 'epic' }] }), api)
+        .verdict
     ).toBe('full');
     expect(legacyVerdict(toInput({ number: 3, title: 't', body: '`billing`' }), api).verdict).toBe(
       'candidate'

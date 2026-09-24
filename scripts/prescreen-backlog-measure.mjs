@@ -35,16 +35,35 @@ import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** Normalise one `gh issue list --json` row into the prescreen input shape. */
+/** Default `gh issue list --limit` — above any backlog measured so far; truncation is warned about. */
+const DEFAULT_LIMIT = 500;
+/** `gh issue list --json body` for a few hundred issues runs to tens of MB. */
+const GH_MAX_BUFFER = 256 * 1024 * 1024;
+/** The contract this script measures against; an older dist lacks `review`. */
+const EXPECTED_SCHEMA = 'prescreen:v2';
+
+/**
+ * Normalise one `gh issue list --json` row into the prescreen input shape. Labels follow
+ * `cli/src/gh.ts`'s `ghLabelNames`: only `{ name: string }` entries count.
+ */
 export function toInput(issue) {
   return {
     number: issue.number,
     title: typeof issue.title === 'string' ? issue.title : '',
     body: typeof issue.body === 'string' ? issue.body : '',
     labels: Array.isArray(issue.labels)
-      ? issue.labels.map((l) => (typeof l === 'string' ? l : l?.name)).filter(Boolean)
+      ? issue.labels.map((l) => l?.name).filter((n) => typeof n === 'string')
       : [],
   };
+}
+
+/** First text-floor keyword (pattern order) matching `text`, or null — the same loop both contracts run. */
+export function firstKeyword(text, patterns) {
+  for (const pattern of patterns) {
+    const keyword = pattern.match(text);
+    if (keyword !== null) return keyword;
+  }
+  return null;
 }
 
 /**
@@ -55,18 +74,8 @@ export function toInput(issue) {
 export function legacyVerdict(input, api) {
   const hardBlock = api.pickHardBlockLabel(input.labels) !== null;
   const text = api.stripQuotedSpans(`${input.title}\n${input.body}\n${input.labels.join(' ')}`);
-  let keyword = null;
-  for (const pattern of api.TEXT_FLOOR_PATTERNS) {
-    keyword = pattern.match(text);
-    if (keyword !== null) break;
-  }
+  const keyword = firstKeyword(text, api.TEXT_FLOOR_PATTERNS);
   return { verdict: hardBlock || keyword !== null ? 'full' : 'candidate', keyword };
-}
-
-/** First text-floor keyword named in a v2 reason list, or null. */
-function v2Keyword(reasons) {
-  const hit = reasons.find((r) => r.check === 'text-floor');
-  return hit ? (/keyword: '([^']+)'/.exec(hit.message)?.[1] ?? null) : null;
 }
 
 /**
@@ -88,7 +97,10 @@ export function measureBacklog(issues, api) {
       beforeKeyword: before.keyword,
       after: after.verdict,
       review: after.review,
-      afterKeyword: v2Keyword(after.reasons),
+      afterKeyword: firstKeyword(
+        api.floorScanText(input.title, input.body, input.labels),
+        api.TEXT_FLOOR_PATTERNS
+      ),
     };
   });
   const count = (pred) => rows.filter(pred).length;
@@ -106,15 +118,21 @@ export function measureBacklog(issues, api) {
   };
 }
 
-function parseArgs(argv) {
-  const opts = { limit: 500, json: false };
+export function parseArgs(argv) {
+  const opts = { limit: DEFAULT_LIMIT, json: false };
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--repo') opts.repo = argv[++i];
-    else if (a === '--limit') opts.limit = Number(argv[++i]);
-    else if (a === '--snapshot') opts.snapshot = argv[++i];
-    else if (a === '--json') opts.json = true;
-    else throw new Error(`unknown argument: ${a}`);
+    const arg = argv[i];
+    // Same guard as model-scorecard.mjs: `--snapshot --json` must not read "--json" as a path.
+    const next = () => {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith('--')) throw new Error(`${arg} needs a value.`);
+      return value;
+    };
+    if (arg === '--repo') opts.repo = next();
+    else if (arg === '--limit') opts.limit = Number(next());
+    else if (arg === '--snapshot') opts.snapshot = next();
+    else if (arg === '--json') opts.json = true;
+    else throw new Error(`unknown argument: ${arg}`);
   }
   if (!opts.snapshot && !opts.repo)
     throw new Error('--repo owner/name (or --snapshot file) is required');
@@ -134,52 +152,79 @@ function loadApi(repoRoot) {
   };
   const prescreen = load('prescreen.js');
   const { pickHardBlockLabel } = load('hard-block-labels.js');
-  if (typeof prescreen.floorScanText !== 'function') {
+  if (prescreen.PRESCREEN_SCHEMA !== EXPECTED_SCHEMA) {
     throw new Error(
-      'cli/dist/prescreen.js predates #772 (no floorScanText) — rebuild with make build-all.'
+      `cli/dist/prescreen.js is not ${EXPECTED_SCHEMA} (found ${prescreen.PRESCREEN_SCHEMA ?? 'none'}) — rebuild with 'make build-all'.`
     );
   }
   return { ...prescreen, pickHardBlockLabel };
 }
 
+/** Read the issue list from a snapshot file or `gh`, with errors that name their source. */
+function readIssues(opts) {
+  const source = opts.snapshot ? `--snapshot ${opts.snapshot}` : 'gh issue list output';
+  let raw;
+  if (opts.snapshot) {
+    raw = readFileSync(opts.snapshot, 'utf8');
+  } else {
+    try {
+      raw = execFileSync(
+        'gh',
+        [
+          'issue',
+          'list',
+          '--repo',
+          opts.repo,
+          '--state',
+          'open',
+          '--limit',
+          String(opts.limit),
+          '--json',
+          'number,title,body,labels',
+        ],
+        { encoding: 'utf8', maxBuffer: GH_MAX_BUFFER }
+      );
+    } catch (err) {
+      if (err?.code === 'ENOENT') {
+        throw new Error(
+          "gh CLI not found on PATH — install gh (and run 'gh auth login') or pass --snapshot <file>."
+        );
+      }
+      throw err;
+    }
+  }
+  let issues;
+  try {
+    issues = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`${source}: not valid JSON (${err.message})`);
+  }
+  if (!Array.isArray(issues)) {
+    throw new Error(
+      `${source}: expected a JSON array from 'gh issue list --json number,title,body,labels'.`
+    );
+  }
+  if (!opts.snapshot && issues.length === opts.limit) {
+    console.error(
+      `⚠ fetched exactly --limit ${opts.limit} issues; the backlog may be truncated — re-run with a higher --limit.`
+    );
+  }
+  return issues;
+}
+
 function main() {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  let rows;
+  let summary;
   let opts;
   try {
     opts = parseArgs(process.argv.slice(2));
+    const api = loadApi(repoRoot);
+    ({ rows, summary } = measureBacklog(readIssues(opts), api));
   } catch (err) {
     console.error(`prescreen-backlog-measure: ${err.message}`);
     process.exit(1);
   }
-  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  let api;
-  let issues;
-  try {
-    api = loadApi(repoRoot);
-    const raw = opts.snapshot
-      ? readFileSync(opts.snapshot, 'utf8')
-      : execFileSync(
-          'gh',
-          [
-            'issue',
-            'list',
-            '--repo',
-            opts.repo,
-            '--state',
-            'open',
-            '--limit',
-            String(opts.limit),
-            '--json',
-            'number,title,body,labels',
-          ],
-          { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 }
-        );
-    issues = JSON.parse(raw);
-  } catch (err) {
-    console.error(`prescreen-backlog-measure: ${err.message}`);
-    process.exit(1);
-  }
-
-  const { rows, summary } = measureBacklog(issues, api);
   if (opts.json) {
     console.log(JSON.stringify({ summary, rows }, null, 2));
     return;

@@ -91,7 +91,7 @@ describe('classify prescreen', () => {
     const out = loggedJson();
     expect(out.schema).toBe('prescreen:v2');
     expect(out.verdict).toBe('candidate');
-    expect(out.review).toBe('light');
+    expect(out.review).toBe('full'); // nothing scanned ⇒ never claim light
     expect(out.state).toBeNull();
     expect(out.degraded).toBe(true);
     expect((out.warnings as string[])[0]).toMatch(/could not find it|gh|Could not read issue/i);

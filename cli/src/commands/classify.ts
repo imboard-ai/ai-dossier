@@ -150,7 +150,9 @@ function registerPrescreenSubcommand(cmd: Command): void {
           issue: Number(options.issue),
           state: null,
           verdict: 'candidate',
-          review: 'light',
+          // Nothing was scanned — never claim "light". Fail open on exclusion (candidate) but
+          // fail safe on depth: an unread issue gets full review.
+          review: 'full',
           reasons: [],
           planArtifact: null,
           warnings: [meta.error],

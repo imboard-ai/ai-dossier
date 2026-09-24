@@ -28,7 +28,7 @@ shipped code, not a simulation — against all 15:
 
 | | count | tokens |
 |---|---|---|
-| `verdict: "full"` (pre-screen rejects, no model call) | **7 of 15 (46.7%)** | 0 |
+| text-floor hit (v1: `verdict: "full"`, pre-screen rejects; v2 / #772: `review: "full"` candidate) — no model call in the pre-screen | **7 of 15 (46.7%)** | 0 |
 | `verdict: "candidate"` (proceeds to the bounded mechanical-tier pass) | 8 of 15 (53.3%) | see below |
 
 This is the number `cli/src/__tests__/prescreen.test.ts` asserts on every test run (an explicit
@@ -44,8 +44,10 @@ fixture file and `cli/README.md`'s Classify Pre-Screen section for the exact bre
 > with no model call, but a text-floor hit is no longer a rejection: it is now
 > `verdict: "candidate"` + `review: "full"` (batchable as a full-review member, #770 Option A).
 > The test now pins 7 `review: full` / 8 `review: light` / 0 `verdict: full` for this fixture.
-> The token argument above is unchanged — the text floor still resolves these 7 for free — only
-> what the resolution *means* for batching changed.
+> The pre-screen still finds these 7 with no model call; whether the *classifier* also skips its
+> model pass for them depends on `issue-cycle-classifier` fast-pathing `candidate` +
+> `review: full` (a registry dossier change, tracked separately) — until it does, the v1 token
+> saving above applies to excluding hits only.
 
 At baseline cost (§4.1's ~64k mean, applied to these 7), those 7 issues would extrapolate to
 ~7 × 64k ≈ 448k tokens — coincidentally the same total §4.1 measured for wave 2's 7 dispatches,

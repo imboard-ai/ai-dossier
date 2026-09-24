@@ -12,6 +12,12 @@
  * a plan artifact, rule 10 confidence) falls through to the classifier's own bounded
  * mechanical-tier pass, which is the intended safety net — not a gap this module needs to close.
  *
+ * v2 (#772, `PRESCREEN_SCHEMA`): two outputs. `verdict: full` only for the EXCLUDING checks
+ * (hard-block label, open dependency, plan:v1 path floor, >8 predicted files); any finding —
+ * a text-floor keyword hit included — sets `review: full`. A text-floor hit alone is a batchable
+ * `candidate` reviewed at full depth (#770 Option A), and the text floor scans the change
+ * surface only (`floorScanText`: reference sections/lines and provenance clauses removed).
+ *
  * Pure and dependency-free (no `gh`, network, or fs), same discipline as `plan-artifact.ts` and
  * `runstate.ts` — unit-testable directly. Subprocess access (fetching the issue, resolving
  * dependency state, filtering by submitted set) lives in the command layer (`commands/classify.ts`).
@@ -148,48 +154,108 @@ export function stripQuotedSpans(text: string): string {
 /**
  * #772: markdown section headings whose content is reference/provenance material, not the change
  * surface — the whole section (to the next heading of the same or higher level) is dropped before
- * the text floor runs. A denylist on purpose: real issue bodies use arbitrary headings for their
- * scope ("Problem", "What the user sees", "Fix"), so an allowlist of scope/requirements/acceptance
- * headings would silently drop genuine scope. Matched against the heading text, case-insensitive,
- * as a leading word/phrase ("## Related issues", "### Background:").
+ * the text floor runs. `Related`/`Context`/`Background` are the sections #772 names explicitly.
+ * A denylist on purpose: real issue bodies use arbitrary headings for their scope ("Problem",
+ * "What the user sees", "Fix"), so an allowlist of scope/requirements/acceptance headings would
+ * silently drop genuine scope. Matched against the WHOLE normalised heading text — "## Background
+ * jobs" or "## Origin validation" is scope, not reference material, and stays scanned.
  */
 const IGNORED_SECTION_HEADING_RE =
-  /^(?:related|references?|see\s+also|context|background|provenance|origin)\b/i;
-
-/** ATX markdown heading: 1–6 `#`, a space, the heading text. */
-const HEADING_RE = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+  /^(?:related(?:\s+(?:issues?|prs?|work|links?|tickets?))?|references?|see\s+also|links|context|background|provenance|origin)$/i;
 
 /**
- * Line-leading markdown decoration stripped before the provenance test: whitespace, blockquote
- * `>`, list markers (`-`, `*`, `+`, `1.`), task boxes, and emphasis (`**`, `_`).
+ * ATX markdown heading: 0–3 spaces, 1–6 `#`, then (optionally) whitespace + the heading text and an
+ * optional closing `#` run preceded by whitespace (CommonMark).
+ */
+const HEADING_RE = /^\s{0,3}(#{1,6})(?:\s+(.*?))?(?:\s+#+)?\s*$/;
+
+/** A fenced code block delimiter — a `#` line inside a fence is a shell comment, not a heading. */
+const FENCE_RE = /^\s{0,3}(?:```|~~~)/;
+
+/** Heading text with leading emoji/emphasis/punctuation and trailing `:`/emphasis removed. */
+function normaliseHeading(text: string): string {
+  return text
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .replace(/[\s:*_]+$/, '')
+    .trim();
+}
+
+/**
+ * Line-leading markdown decoration split off before the provenance tests: whitespace, blockquote
+ * `>`, list markers (`-`, `*`, `+`, `1.`), task boxes, and emphasis (`**`, `_`). Deliberately
+ * conservative — anything it does not strip only makes a provenance line LESS likely to be
+ * recognised, which errs toward scanning (the safe direction for a risk floor).
  */
 const LINE_DECORATION_RE = /^(?:\s|>|[-*+](?=\s)|\d+[.)](?=\s)|\[[ xX]\]|\*\*|__|\*|_)*/;
 
-/**
- * #772: a line that STARTS with one of these phrases records where the issue came from or what it
- * relates to — "Found by the #4103 security review", "Follow-up to #4314", "Parent: #770" — not
- * what the change touches. Whole line dropped.
- */
-const PROVENANCE_LINE_RE =
-  /^(?:found\s+(?:by|during|in|while)|discovered\s+(?:by|during|in|while)|surfaced\s+(?:by|during|in)|spotted\s+(?:by|during|in)|reported\s+(?:by|during|in)|related\b|follow[\s-]?up\s+(?:to|of|from|for)\b|split\s+(?:from|out\s+of|off\s+from)|spun\s+(?:off|out)\s+(?:of|from)|parent\s*:|refs?\s*:|see\s+also\b|context\s*:|background\s*:|provenance\s*:)/i;
+/** Compile a phrase list into one alternation (each phrase escaped, whitespace-insensitive). */
+function alternation(phrases: readonly string[]): string {
+  return phrases.map((p) => phrase(p).replace(/-/g, '[\\s-]?')).join('|');
+}
 
 /**
- * #772: the unambiguous provenance phrases, stripped mid-line too — from the phrase to the end of
- * its sentence (`.`/`;` followed by whitespace, or end of line). "…partial cascades. Found by the
- * #4103 security review." keeps the first sentence and drops the second. Ambiguous words
- * ("related", "context", "background") are line-leading only: mid-sentence they are ordinary prose
- * ("the related billing job").
+ * #772: a line that STARTS with one of these markers is a pure reference line — "Parent: #770",
+ * "Related: #12", "Refs: #1709 …", "See also #10" — and is dropped whole. `related` needs a colon
+ * or a ref after it: "Related billing webhooks also fail" is scope prose.
  */
-const PROVENANCE_CLAUSE_RE =
-  /\b(?:found\s+(?:by|during)|discovered\s+(?:by|during|while)|surfaced\s+(?:by|during)|follow[\s-]?up\s+(?:to|of)|split\s+(?:from|out\s+of|off\s+from)|spun\s+(?:off|out)\s+(?:of|from))\b.*?(?:[.;](?=\s|$)|$)/gi;
+const REFERENCE_LINE_LEADS = [
+  'related:',
+  'related to #',
+  'related #',
+  'parent:',
+  'refs:',
+  'ref:',
+  'see also',
+  'provenance:',
+] as const;
+const REFERENCE_LINE_RE = new RegExp(
+  `^(?:${REFERENCE_LINE_LEADS.map((l) => phrase(l).replace(/:$/, '\\s*:')).join('|')})`,
+  'i'
+);
 
 /**
- * A line carrying nothing but references: URLs, markdown links, `#N` / `owner/repo#N` refs, and
- * separators. Checked by erasing every reference and separator and testing for an empty remainder.
+ * #772: provenance phrases — where the issue came from, not what it touches ("Found by the #4103
+ * security review", "Follow-up to #4314", "Split from #99"). A clause that OPENS a sentence (line
+ * start, or after `.`/`;`/`!`/`?`) with one of these is stripped to the end of its clause (`.`, `;`,
+ * `!`, `?`, `,` or a dash followed by whitespace, or end of line) — so "Found by the #4103 review.
+ * Rotate the Stripe secrets." keeps the second sentence. Mid-sentence the same words are ordinary
+ * prose ("the token leak is found during checkout") and are left alone. "found in"/"reported in"
+ * are NOT provenance — they say where the bug is.
+ */
+const PROVENANCE_LEADS = [
+  'found by',
+  'found during',
+  'discovered by',
+  'discovered during',
+  'discovered while',
+  'surfaced by',
+  'surfaced during',
+  'spotted by',
+  'reported by',
+  'filed while',
+  'filed from',
+  'filed during',
+  'follow-up to',
+  'follow-up of',
+  'split from',
+  'split out of',
+  'split off from',
+  'spun off from',
+  'spun out of',
+] as const;
+const PROVENANCE_CLAUSE_RE = new RegExp(
+  `(^|[.;!?]\\s+)(?:${alternation(PROVENANCE_LEADS)})\\b.*?(?=[.;!?,—–](?:\\s|$)|\\s-\\s|$)`,
+  'gi'
+);
+
+/**
+ * A line carrying nothing but references: URLs, bare `#N` / `owner/repo#N` refs, and separators.
+ * A markdown link keeps its TEXT ("[Migrate billing tables](…)" is scope) — only the target is
+ * erased. Checked by erasing every reference and separator and testing for an empty remainder.
  */
 function isLinkOnlyLine(line: string): boolean {
   const remainder = line
-    .replace(/\[[^\]\n]*\]\([^)\n]*\)/g, ' ')
+    .replace(/\[([^\]\n]*)\]\([^)\n]*\)/g, ' $1 ')
     .replace(/<?https?:\/\/[^\s>)]+>?/g, ' ')
     .replace(/\b[\w.-]+\/[\w.-]+#\d+\b/g, ' ')
     .replace(/#\d+\b/g, ' ')
@@ -199,25 +265,34 @@ function isLinkOnlyLine(line: string): boolean {
 
 /**
  * #772: the issue body with reference material removed — the part a text-floor keyword may
- * legitimately fire on. Removes (in order): sections under an {@link IGNORED_SECTION_HEADING_RE}
- * heading, provenance lines ({@link PROVENANCE_LINE_RE}), link-only lines, and mid-line provenance
- * clauses ({@link PROVENANCE_CLAUSE_RE}). Quoted spans are handled separately by
- * {@link stripQuotedSpans} (#627). Pure; line structure is preserved (dropped lines become empty)
- * so `stripQuotedSpans`'s same-line bound behaves exactly as before.
+ * legitimately fire on. Removes: sections under an {@link IGNORED_SECTION_HEADING_RE} heading
+ * (fence-aware — a `#` comment inside a code block is never a heading), reference lines
+ * ({@link REFERENCE_LINE_RE}), link-only lines, and sentence-opening provenance clauses
+ * ({@link PROVENANCE_CLAUSE_RE}). Quoted spans are handled separately by {@link stripQuotedSpans}
+ * (#627). Pure; line count is preserved (dropped lines become empty) so `stripQuotedSpans`'s
+ * same-line bound behaves exactly as before.
  */
 export function stripReferenceMaterial(body: string): string {
   const out: string[] = [];
   /** Heading level of the ignored section currently being skipped, or null. */
   let skipLevel: number | null = null;
+  let inFence = false;
   for (const line of body.split('\n')) {
-    const heading = HEADING_RE.exec(line);
+    if (FENCE_RE.test(line)) {
+      inFence = !inFence;
+      out.push(skipLevel === null ? line : '');
+      continue;
+    }
+    const heading = inFence ? null : HEADING_RE.exec(line);
     if (heading) {
       const level = heading[1].length;
       if (skipLevel !== null && level > skipLevel) {
         out.push('');
         continue; // a sub-heading inside an ignored section stays ignored
       }
-      skipLevel = IGNORED_SECTION_HEADING_RE.test(heading[2]) ? level : null;
+      skipLevel = IGNORED_SECTION_HEADING_RE.test(normaliseHeading(heading[2] ?? ''))
+        ? level
+        : null;
       out.push(skipLevel === null ? line : '');
       continue;
     }
@@ -225,12 +300,17 @@ export function stripReferenceMaterial(body: string): string {
       out.push('');
       continue;
     }
-    const content = line.replace(LINE_DECORATION_RE, '');
-    if (PROVENANCE_LINE_RE.test(content) || isLinkOnlyLine(content)) {
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+    const decoration = LINE_DECORATION_RE.exec(line)?.[0] ?? '';
+    const content = line.slice(decoration.length);
+    if (REFERENCE_LINE_RE.test(content) || isLinkOnlyLine(content)) {
       out.push('');
       continue;
     }
-    out.push(line.replace(PROVENANCE_CLAUSE_RE, ' '));
+    out.push(decoration + content.replace(PROVENANCE_CLAUSE_RE, '$1 '));
   }
   return out.join('\n');
 }

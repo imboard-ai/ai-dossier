@@ -1046,7 +1046,7 @@ verdict still reflects whatever DID complete rather than blocking on the gap:
   "issue": 538,
   "state": null,
   "verdict": "candidate",
-  "review": "light",
+  "review": "full",
   "reasons": [],
   "plan_artifact": null,
   "degraded": true,
@@ -1064,7 +1064,9 @@ text + `reasons`/`warnings` as context, still no repo exploration unless that pa
 `confidence` lands below 0.6, which triggers the dossier's single mid-tier escalation).
 
 `review` is the review depth the issue needs, in the scheduler's per-member vocabulary
-(`light` | `full`, #771): `full` whenever any check found anything. A **text-floor** hit
+(`light` | `full`, #771): `full` whenever any check found anything — and also when the
+issue itself could not be read (the fail-open path above stays `candidate`, but an unscanned
+issue is never reported `light`). A **text-floor** hit
 (risk keyword in the issue text) is `verdict: "candidate"` + `review: "full"` — the issue
 may join a batch, but as a full-review member (#770 Option A), not be excluded from it.
 
@@ -1076,9 +1078,11 @@ full-depth review. The text floor is also section-aware in v2: it scans the titl
 and the body **minus** reference material — sections headed Related / References / See
 also / Context / Background / Provenance / Origin, provenance lines ("Found by…",
 "Discovered during…", "Related…", "Follow-up to…", "Split from…", "Parent:", …), mid-line
-provenance clauses ("…. Found by the #4103 security review."), and link-only lines — in
-addition to the quoted spans #627 already blanked. Other headings (Problem, Scope, Fix, …)
-are always scanned. `scripts/prescreen-backlog-measure.mjs --repo owner/name` measures
+provenance clauses that open a sentence ("…. Found by the #4103 security review."), and
+link-only lines — in addition to the quoted spans #627 already blanked. A heading is ignored
+only when its whole text is one of those names ("## Background jobs" is scope); `#` lines
+inside fenced code blocks are never headings. Other sections (Problem, Scope, Fix, …) are
+scanned; a sub-heading nested inside an ignored section stays ignored. `scripts/prescreen-backlog-measure.mjs --repo owner/name` measures
 v1 vs v2 over a repo's open backlog (read-only; prints no issue text).
 
 Coverage is deliberately partial — it catches the OBVIOUS floor hits, not all of them:
