@@ -27,6 +27,7 @@ import {
 import { multiRegistryGetContent } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
 import { appendRunLog, type RunLogEntry } from '../run-log';
+import { detectHostSession } from '../usage/host-session';
 
 /**
  * spawnSync's default 1MB maxBuffer kills a headless child whose JSON result
@@ -286,6 +287,12 @@ export function registerRunCommand(program: Command): void {
         // verification/nested defaults assume post-verification exits — early
         // exits must override them.
         const finishRunLog = (extra: Partial<RunLogEntry>): void => {
+          // #769: record which host agent session invoked this run, and — for
+          // the no-spawn path, where the host itself executes the dossier —
+          // the host's resolved model, so the entry is attributable instead
+          // of `model: null`. A spawned agent's own reported model (via
+          // `usageLogFields` in `extra`) still wins below.
+          const host = detectHostSession();
           appendRunLog({
             timestamp: new Date().toISOString(),
             dossier: file,
@@ -300,7 +307,7 @@ export function registerRunCommand(program: Command): void {
             nested: false,
             duration_ms: Date.now() - startTime,
             spawned_command: null,
-            model: options.model ?? null,
+            model: options.model ?? host.model ?? null,
             provider: null,
             exit_code: null,
             input_tokens: null,
@@ -312,6 +319,8 @@ export function registerRunCommand(program: Command): void {
             total_cost_usd: null,
             cost_available: null,
             unit: null,
+            session_id: host.session_id,
+            agent: host.agent,
             ...extra,
           });
         };

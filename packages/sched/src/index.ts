@@ -29,7 +29,9 @@ export {
 export {
   type BatchLogEntry,
   buildBatchRunLogEntries,
+  dispatchPreambleCmd,
   listBatchDispatchLogs,
+  modelFromCmd,
 } from './batch-stats';
 export { type BisectOptions, type BisectOutcome, runAttributionBisect } from './bisect';
 export {

@@ -17,7 +17,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { isOpenCodeUsageStream, type RunLogEntry } from '@ai-dossier/core';
+import { isOpenCodeUsageStream, type RunLogEntry, SCHED_DISPATCH_EVENT } from '@ai-dossier/core';
 import {
   batchFixLogPath,
   batchMemberLogPath,
@@ -102,6 +102,59 @@ export function listBatchDispatchLogs(runsDir: string, batchId: string): BatchLo
   return entries;
 }
 
+/** How many leading lines of a dispatch log are searched for the `sched-dispatch` preamble. */
+const PREAMBLE_SCAN_LINES = 5;
+/** Most leading bytes searched for the preamble — it is a single short JSON line. */
+const PREAMBLE_SCAN_BYTES = 64 * 1024;
+
+/**
+ * The spawned argv recorded in a dispatch log's `{"type":"sched-dispatch","cmd":[...]}`
+ * preamble (written by `createSpawnDeps` at spawn), or null when the log has
+ * none — a pre-preamble log, or one whose head was cut by `readDispatchLog`'s
+ * bounded window. Only a non-empty all-string `cmd` array counts.
+ */
+export function dispatchPreambleCmd(logContent: string | null): string[] | null {
+  if (!logContent) return null;
+  const head = logContent.slice(0, PREAMBLE_SCAN_BYTES).split('\n', PREAMBLE_SCAN_LINES);
+  for (const line of head) {
+    if (!line.includes(`"${SCHED_DISPATCH_EVENT}"`)) continue;
+    try {
+      const parsed = JSON.parse(line) as { type?: unknown; cmd?: unknown };
+      if (
+        parsed.type === SCHED_DISPATCH_EVENT &&
+        Array.isArray(parsed.cmd) &&
+        parsed.cmd.length > 0 &&
+        parsed.cmd.every((part) => typeof part === 'string')
+      ) {
+        return parsed.cmd as string[];
+      }
+    } catch {
+      // A truncated/partial preamble line — keep scanning, then fall back.
+    }
+  }
+  return null;
+}
+
+/**
+ * The model an agent argv requested — the value after `-m`/`--model`, or
+ * `--model=<id>` — or null when the argv names none. For opencode this is
+ * already a concrete `provider/model` id (e.g. `openai/gpt-5.6-luna`); for
+ * claude it may be an alias, but claude's own result reports the resolved
+ * model, which `buildSchedRunLogEntry` prefers over this fallback.
+ */
+export function modelFromCmd(cmd: readonly string[]): string | null {
+  for (let i = 0; i < cmd.length; i++) {
+    const part = cmd[i];
+    if (part === '--') break; // everything after is the agent's prompt, not flags
+    if ((part === '-m' || part === '--model') && i + 1 < cmd.length) {
+      const value = cmd[i + 1];
+      return value && !value.startsWith('-') ? value : null;
+    }
+    if (part.startsWith('--model=')) return part.slice('--model='.length) || null;
+  }
+  return null;
+}
+
 function roleLabel(entry: BatchLogEntry): string {
   switch (entry.role) {
     case 'member':
@@ -140,19 +193,25 @@ export function buildBatchRunLogEntries(runsDir: string, batchId: string): RunLo
     } catch {
       completedAt = new Date(0);
     }
-    // Historical filenames do not retain the spawned command. Only select
-    // OpenCode for its distinctive step_finish/step-finish pair; everything
-    // else retains the established Claude-shaped fallback.
-    const cmd0 = isOpenCodeUsageStream(logContent) ? 'opencode' : 'claude';
+    // Filenames do not retain the spawned command, but every dispatch log
+    // opens with a `sched-dispatch` preamble carrying the exact argv (#769).
+    // Prefer it: it names the binary AND the model the member was spawned
+    // with — the opencode JSON stream never reports a model id, so without
+    // it an opencode member's Model column read `-`. Logs that predate the
+    // preamble (or whose head fell outside the bounded read window) keep the
+    // old fallback: OpenCode only for its distinctive step_finish/step-finish
+    // pair, everything else the established Claude-shaped parser.
+    const preambleCmd = dispatchPreambleCmd(logContent);
+    const cmd0 = preambleCmd?.[0] ?? (isOpenCodeUsageStream(logContent) ? 'opencode' : 'claude');
     return buildSchedRunLogEntry({
       unit: entryUnit(entry, batchId),
       role: roleLabel(entry),
       cmd0,
-      cmd: [cmd0],
+      cmd: preambleCmd ?? [cmd0],
       logContent,
       spawnedAt: null,
       completedAt,
-      configuredModel: null,
+      configuredModel: preambleCmd ? modelFromCmd(preambleCmd) : null,
       cwd: runsDir,
     });
   });
