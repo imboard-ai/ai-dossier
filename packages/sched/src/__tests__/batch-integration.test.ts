@@ -54,9 +54,11 @@ import {
   patchBatch,
   patchSlot,
   readJsonl,
+  requeueParkedMember,
   resolveDispatch,
   resumeBlockedGate,
   runBatchTick,
+  runnableUnits,
   type SchedConfig,
   SchedStore,
   type SpawnDeps,
@@ -715,8 +717,15 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(batch?.status).toBe('executing');
     expect(batch?.executing_member).toBe(3);
     expect(result.spawned).toContain('batch:b-evict'); // member 3 dispatched
-    expect(h.state().entries.find((e) => e.issue === 702)?.mode).toBe('full'); // requeued full-cycle
-    expect(h.state().entries.find((e) => e.issue === 702)?.batch).toBeNull();
+    // #810: the member's own `blocked` milestone is a HAND-BACK — parked
+    // `handed-back` with its batch kept, never requeued full-cycle.
+    expect(batch?.evictions[0]?.kind).toBe('handed-back');
+    expect(h.state().entries.find((e) => e.issue === 702)).toMatchObject({
+      status: 'handed-back',
+      mode: 'slot',
+      batch: 'b-evict',
+      reason: 'test-failures',
+    });
 
     // #564: a blocked/evicted member still recorded its own dispatch cost —
     // it consumed real tokens before self-reporting blocked, so its entry
@@ -903,47 +912,148 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     expect(resumed.spawned).toContain('batch:b-api-error-3');
   }, 60_000);
 
-  it('dissolve (RFC F.8): >⅓ evicted requeues every unshipped member, batch never ships', async () => {
+  it('#810 evidence 1: two hand-backs never dissolve the batch — the validated member keeps its landing and the batch ships it', async () => {
+    // b-20260924-02: #4333's member handed back (a blocked milestone with a
+    // reason) and was counted as an EVICTION, tipping 2 > threshold 1 into a
+    // dissolve that requeued the already-validated #4137 full-cycle with its
+    // profile lost. A hand-back is not a batch failure.
     const repo = scratchRepo();
-    const h = batchHarness(repo, ['--mode=batch', '--evict-members=802,803'], { maxSlots: 1 });
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--evict-members=802,803'],
+      { maxSlots: 1 }
+    );
     h.enqueue([
       { issue: 801, mode: 'slot', batch: 'b-dissolve', anchor: 800, tier: 'mid' },
       { issue: 802, mode: 'slot', batch: 'b-dissolve', tier: 'mid' },
       { issue: 803, mode: 'slot', batch: 'b-dissolve', tier: 'mid' },
     ]);
-    // b-dissolve is already sealed forming → ready by enqueueEntries
 
-    h.tick(); // batch-setup + member 1 (801, survives)
+    h.tick(); // batch-setup + member 1 (801, validates)
     let pid = batchSlotPid(h, 'b-dissolve') as number;
     expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
-    h.tick(); // member 1 green → member 2 (802, will be evicted)
+    h.tick(); // member 1 green → member 2 (802, hands back)
+    expect(h.state().entries.find((e) => e.issue === 801)?.status).toBe('validated');
 
     pid = batchSlotPid(h, 'b-dissolve') as number;
     expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
-    let result = h.tick(); // 802 evicted (1/3 — not yet over threshold) → member 3 (803, also evicted)
-    let batch = findBatch(h.state(), 'b-dissolve');
-    expect(batch?.status).toBe('executing');
-    expect(batch?.evictions).toHaveLength(1);
-
+    h.tick(); // 802 hands back → member 3 (803, hands back)
     pid = batchSlotPid(h, 'b-dissolve') as number;
     expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
-    result = h.tick(); // 803 evicted → 2/3 > ⅓ → dissolve
-    batch = findBatch(h.state(), 'b-dissolve');
-    expect(batch?.status).toBe('dissolved');
-    expect(batch?.evictions).toHaveLength(2);
-    expect(result.failed).toContain('batch:b-dissolve');
+    h.tick(); // 803 hands back → 2 hand-backs, 0 evictions: no dissolve → validate
 
-    // Nothing green was discarded: the surviving member (801, already
-    // shipped-in-batch-worthy work) keeps its outcome; 802/803 requeue
-    // full-cycle. No batch worktree ever reaches `reviewing`/ships a PR.
+    const batch = findBatch(h.state(), 'b-dissolve');
+    expect(batch?.status).not.toBe('dissolved');
+    expect(batch?.status).toBe('reviewing');
+    expect(batch?.evictions.map((e) => [e.issue, e.kind])).toEqual([
+      [802, 'handed-back'],
+      [803, 'handed-back'],
+    ]);
     const entries = h.state().entries;
-    expect(entries.find((e) => e.issue === 802)?.mode).toBe('full');
-    expect(entries.find((e) => e.issue === 803)?.mode).toBe('full');
+    // The validated member was neither requeued nor discarded.
+    expect(entries.find((e) => e.issue === 801)).toMatchObject({
+      status: 'validated',
+      mode: 'slot',
+      batch: 'b-dissolve',
+    });
+    // Both hand-backs are parked with their reason, never auto-requeued.
+    for (const issue of [802, 803]) {
+      expect(entries.find((e) => e.issue === issue)).toMatchObject({
+        status: 'handed-back',
+        mode: 'slot',
+        batch: 'b-dissolve',
+        reason: 'test-failures',
+      });
+    }
+    const events = h.deps.journal.read();
+    expect(events.filter((e) => e.event === 'member-handed-back')).toHaveLength(2);
+    expect(events.some((e) => e.event === 'batch-dissolved')).toBe(false);
+    // The integration branch still holds the validated member's landing.
+    expect(batch?.ranges.map((r) => r.issue)).toEqual([801]);
+  }, 60_000);
+
+  it('#810: real evictions past the threshold with a VALIDATED member suppress the dissolve — evicted members park with their branch, the batch ships the validated one', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--die-members=812,813'], { maxSlots: 1 });
+    h.enqueue([
+      { issue: 811, mode: 'slot', batch: 'b-suppress', anchor: 810, tier: 'mid' },
+      { issue: 812, mode: 'slot', batch: 'b-suppress', tier: 'mid' },
+      { issue: 813, mode: 'slot', batch: 'b-suppress', tier: 'mid' },
+    ]);
+    h.tick(); // setup + 811
+    let pid = batchSlotPid(h, 'b-suppress') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // 811 validated → 812
+    pid = batchSlotPid(h, 'b-suppress') as number;
+    const m2Branch = findBatch(h.state(), 'b-suppress')?.member_branch;
+    expect(m2Branch).toBeTruthy();
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // 812 exits unverified → evicted (1) → 813
+    pid = batchSlotPid(h, 'b-suppress') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // 813 exits unverified → 2 > 1 — but 811 is validated: no dissolve
+
+    const batch = findBatch(h.state(), 'b-suppress');
+    expect(batch?.status).toBe('reviewing');
+    expect(batch?.evictions.map((e) => [e.issue, e.kind, e.reason])).toEqual([
+      [812, 'evicted', 'agent-exited-unverified'],
+      [813, 'evicted', 'agent-exited-unverified'],
+    ]);
+    expect(batch?.evictions[0]?.branch).toBe(m2Branch);
+    const entries = h.state().entries;
+    expect(entries.find((e) => e.issue === 811)?.status).toBe('validated');
+    expect(entries.find((e) => e.issue === 812)).toMatchObject({
+      status: 'evicted',
+      mode: 'slot',
+      batch: 'b-suppress',
+      failure_evidence: expect.objectContaining({ branch: m2Branch }),
+    });
+    const events = h.deps.journal.read();
+    expect(events.some((e) => e.event === 'dissolve-suppressed')).toBe(true);
+    expect(events.some((e) => e.event === 'batch-dissolved')).toBe(false);
+  }, 60_000);
+
+  it('dissolve (RFC F.8, #810): >⅓ evicted with nothing validated dissolves — evicted members stay PARKED, only the unstarted member requeues full-cycle', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--die-members=821,822'], { maxSlots: 1 });
+    h.enqueue([
+      { issue: 821, mode: 'slot', batch: 'b-dis2', anchor: 820, tier: 'mid' },
+      { issue: 822, mode: 'slot', batch: 'b-dis2', tier: 'mid' },
+      { issue: 823, mode: 'slot', batch: 'b-dis2', tier: 'mid' },
+    ]);
+    h.tick(); // setup + 821
+    let pid = batchSlotPid(h, 'b-dis2') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // 821 evicted (1/3) → 822
+    pid = batchSlotPid(h, 'b-dis2') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    const result = h.tick(); // 822 evicted → 2 > 1, nothing validated → dissolve
+
+    const batch = findBatch(h.state(), 'b-dis2');
+    expect(batch?.status).toBe('dissolved');
+    expect(result.failed).toContain('batch:b-dis2');
+    const entries = h.state().entries;
+    for (const issue of [821, 822]) {
+      expect(entries.find((e) => e.issue === issue)).toMatchObject({
+        status: 'evicted',
+        mode: 'slot',
+        batch: 'b-dis2',
+      });
+    }
+    // The member that never started has no work to lose — it requeues.
+    // (Never dispatched, so it was still `queued` — requeue retags it in place.)
+    expect(entries.find((e) => e.issue === 823)).toMatchObject({
+      status: 'queued',
+      mode: 'full',
+      batch: null,
+    });
     expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
-    // The dissolved batch's shared worktree is torn down for real, not
-    // leaked (it would otherwise never be removed by anything else).
-    expect(batch?.worktree).toBeTruthy();
+    // The dissolved batch's shared worktree is torn down for real.
     expect(fs.existsSync(batch?.worktree as string)).toBe(false);
+    // Parked members are never runnable until an operator decides.
+    const next = h.tick();
+    expect(next.spawned).not.toContain('issue:821');
+    expect(next.spawned).not.toContain('issue:822');
   }, 60_000);
 
   it('#613: two resolutions of the same member against one stale batch snapshot never double-advance or double-journal', async () => {
@@ -1289,7 +1399,13 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       issue: 901,
       reason: 'incremental-gate-failed:test.focused',
     });
-    expect(h.state().entries.find((e) => e.issue === 901)?.mode).toBe('full');
+    // #810: an engine-decided eviction PARKS the member (`evicted`), never
+    // requeues it full-cycle from scratch.
+    expect(batch?.evictions[0]?.kind).toBe('evicted');
+    expect(h.state().entries.find((e) => e.issue === 901)).toMatchObject({
+      status: 'evicted',
+      mode: 'slot',
+    });
     // Only one member left — batch continues to it rather than wedging.
     expect(batch?.status).toBe('executing');
     expect(batch?.executing_member).toBe(2);
@@ -1370,7 +1486,7 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       issue: 2501,
       reason: 'incremental-gate-failed:test.focused',
     });
-    expect(h.state().entries.find((e) => e.issue === 2501)?.mode).toBe('full');
+    expect(h.state().entries.find((e) => e.issue === 2501)?.status).toBe('evicted');
     expect(batch?.status).toBe('executing');
     expect(batch?.executing_member).toBe(2);
     expect(result.spawned).toContain('batch:b-earned');
@@ -3303,6 +3419,80 @@ describe('integration #707: a batch dispatches through its recorded profile', ()
     expect(spawned.find((event) => event.unit === 'issue:7131')?.model).toBe('glm-5.3');
   });
 
+  it('#810 evidence 2+3: a profiled batch PARKS a hand-back (scope-mismatch) and an unverified exit with profile + branch; `sched requeue` continues them full-cycle on that profile', async () => {
+    // b-20260924-04: #4408 handed back `scope-mismatch` with no commits;
+    // b-20260924-02: #4174 exited unverified on an `openai` batch. Both were
+    // requeued `mode=full, dispatch_profile=null` from main (#713 class).
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch'], {
+      maxSlots: 1,
+      profiles: (truthDir) => ({
+        glm: {
+          command: [
+            'node',
+            FAKE_AGENT,
+            '--mode=batch',
+            '--profile-member=glm',
+            `--milestones-dir=${truthDir}`,
+            '--commit-file=f-{issue}.txt',
+            '--evict-members=8302',
+            '--evict-reason=scope-mismatch',
+            '--die-members=8303',
+          ],
+          tier_models: { mechanical: 'glm-flash', mid: 'glm-5.3', strong: 'glm-strong' },
+        },
+      }),
+    });
+    h.enqueue([
+      { issue: 8301, mode: 'slot', batch: 'b-prof', anchor: 8300, tier: 'mid', dispatch: 'glm' },
+      { issue: 8302, mode: 'slot', batch: 'b-prof', tier: 'mid', dispatch: 'glm' },
+      { issue: 8303, mode: 'slot', batch: 'b-prof', tier: 'mid', dispatch: 'glm' },
+    ]);
+    for (let i = 0; i < 3; i++) {
+      h.tick();
+      const pid = batchSlotPid(h, 'b-prof') as number;
+      expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    }
+    h.tick(); // 8303 exits unverified → 1 eviction (+1 hand-back) — within threshold
+
+    const batch = findBatch(h.state(), 'b-prof');
+    expect(batch?.status).toBe('reviewing');
+    const entries = h.state().entries;
+    expect(entries.find((e) => e.issue === 8302)).toMatchObject({
+      status: 'handed-back',
+      reason: 'scope-mismatch',
+      dispatch_profile: 'glm',
+      failure_evidence: expect.objectContaining({ branch: memberBranchFor('b-prof', 2, 8302) }),
+    });
+    expect(entries.find((e) => e.issue === 8303)).toMatchObject({
+      status: 'evicted',
+      reason: 'agent-exited-unverified',
+      dispatch_profile: 'glm',
+      failure_evidence: expect.objectContaining({ branch: memberBranchFor('b-prof', 3, 8303) }),
+    });
+    // Parked members are not runnable — nothing redispatches them by itself.
+    const runnable = runnableUnits(h.state()).map((u) => (u.kind === 'issue' ? u.issue : u.batch));
+    expect(runnable).not.toContain(8302);
+    expect(runnable).not.toContain(8303);
+    // The member's pushed branch survived the member teardown.
+    expect(
+      gitAt(['rev-parse', '--verify', `origin/${memberBranchFor('b-prof', 3, 8303)}`], repo).trim()
+    ).toMatch(/^[0-9a-f]{40}$/);
+
+    // The operator's remedy: full-cycle on the SAME profile, from the branch.
+    h.store.withLock((s) => ({ state: requeueParkedMember(s, 8303).state, result: null }));
+    expect(h.state().entries.find((e) => e.issue === 8303)).toMatchObject({
+      status: 'requeued',
+      mode: 'full',
+      batch: null,
+      dispatch_profile: 'glm',
+      failure_evidence: expect.objectContaining({ branch: memberBranchFor('b-prof', 3, 8303) }),
+    });
+    expect(runnableUnits(h.state()).some((u) => u.kind === 'issue' && u.issue === 8303)).toBe(true);
+    // A validated member is not a parked one — the remedy refuses it.
+    expect(() => requeueParkedMember(h.state(), 8301)).toThrow(/not a parked batch member/);
+  }, 60_000);
+
   it('a batch whose profile no longer resolves pre-merge DISSOLVES loudly instead of falling back (AC5 spirit, engine side)', async () => {
     const repo = scratchRepo();
     // Config knows NO profiles at all; the batch records one anyway (a
@@ -3661,12 +3851,15 @@ describe('#809: parallel member dispatch', () => {
       [8112, 'landing-conflict'],
       [8113, 'landing-conflict'],
     ]);
-    // The evicted members are requeued full-cycle (they redo their work off
-    // main after this batch merges) — nothing lost: the pushed member branch
-    // still holds the member's own, un-rebased commit.
+    // #810: the evicted members are PARKED with their member branch recorded
+    // — nothing lost, and nothing restarted from scratch: the pushed member
+    // branch still holds the member's own, un-rebased commit, and an
+    // operator's `sched requeue` continues from it.
     for (const issue of [8112, 8113]) {
       const entry = h.state().entries.find((e) => e.issue === issue);
-      expect(entry).toMatchObject({ mode: 'full', batch: null, status: 'requeued' });
+      const run = batch?.member_runs.find((r) => r.issue === issue);
+      expect(entry).toMatchObject({ mode: 'slot', batch: 'b-conf', status: 'evicted' });
+      expect(entry?.failure_evidence?.branch).toBe(run?.branch);
     }
     expect(gitAt(['rev-parse', `origin/${m2?.branch}`], repo).trim()).toBe(m2PushedSha);
     expect(fs.existsSync(m2?.worktree as string)).toBe(false);
@@ -3730,11 +3923,67 @@ describe('#809: parallel member dispatch', () => {
     expect(log).toEqual(['feat: f-8131.txt (#8131)', 'feat: f-8133.txt (#8133)']);
   }, 60_000);
 
+  it('#810: a dissolve REFUSED over a validated member blocks the batch — the running member is stopped and parked with its branch, every slot released, the validated landing kept', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--slow-members=8162', '--slow-ms=30000'],
+      { maxSlots: 3, parallel: true }
+    );
+    h.enqueue([
+      { issue: 8161, mode: 'slot', batch: 'b-refuse', anchor: 8160, tier: 'mid' },
+      { issue: 8162, mode: 'slot', batch: 'b-refuse', tier: 'mid' },
+    ]);
+    h.tick();
+    const slowSlot = memberSlots(h, 'b-refuse').find((s) => s.unit === 'batch:b-refuse#8162');
+    const slowPid = slowSlot?.pid as number;
+    procsToKill.push(slowPid);
+    const quick = memberPids(h, 'b-refuse').filter((pid) => pid !== slowPid);
+    expect(await waitAllDead(h, quick)).toBe(true);
+    h.tick(); // 8161 verified → lands → validated; 8162 still running
+    expect(h.state().entries.find((e) => e.issue === 8161)?.status).toBe('validated');
+
+    // The recorded profile stops resolving mid-run → a full dissolve, which
+    // must not requeue the validated 8161 from scratch.
+    h.store.withLock((state) => ({
+      state: patchBatch(state, 'b-refuse', { dispatch_profile: 'ghost' }, new Date()),
+      result: null,
+    }));
+    const slowBranch = findBatch(h.state(), 'b-refuse')?.member_runs.find(
+      (r) => r.issue === 8162
+    )?.branch;
+    h.tick();
+
+    const batch = findBatch(h.state(), 'b-refuse');
+    expect(batch).toMatchObject({
+      status: 'blocked',
+      blocked_reason: 'dissolve-refused:dispatch-profile-missing:ghost',
+    });
+    expect(h.state().entries.find((e) => e.issue === 8161)).toMatchObject({
+      status: 'validated',
+      mode: 'slot',
+      batch: 'b-refuse',
+    });
+    expect(h.state().entries.find((e) => e.issue === 8162)).toMatchObject({
+      status: 'evicted',
+      dispatch_profile: null,
+      failure_evidence: expect.objectContaining({ branch: slowBranch }),
+    });
+    expect(await waitUntilDead(h.spawnDeps, slowPid)).toBe(true);
+    expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
+    // The integration branch (and its worktree) are kept for the operator.
+    expect(fs.existsSync(batch?.worktree as string)).toBe(true);
+    const report = buildStatusReport(h.state(), h.config, 'proj');
+    expect(report.blocked.find((b) => b.status === 'batch-blocked')?.reason).toContain(
+      'validated member(s) #8161'
+    );
+  }, 60_000);
+
   it('a dissolve mid-run KILLS the still-running members, releases their slots, and tears their worktrees down', async () => {
     const repo = scratchRepo();
     const h = batchHarness(
       repo,
-      ['--mode=batch', '--evict-members=8141,8142', '--slow-members=8143', '--slow-ms=30000'],
+      ['--mode=batch', '--die-members=8141,8142', '--slow-members=8143', '--slow-ms=30000'],
       { maxSlots: 3, parallel: true }
     );
     h.enqueue([
@@ -3757,10 +4006,18 @@ describe('#809: parallel member dispatch', () => {
     expect(await waitUntilDead(h.spawnDeps, slowPid)).toBe(true);
     expect(h.state().slots.every((s) => s.status === 'idle')).toBe(true);
     expect(fs.existsSync(slowTree)).toBe(false);
+    // #810: the killed in-flight member is PARKED with its member branch, not
+    // requeued from scratch; the two that died are parked too.
+    const slowRun = batch?.member_runs.find((r) => r.issue === 8143);
     expect(h.state().entries.find((e) => e.issue === 8143)).toMatchObject({
-      mode: 'full',
-      batch: null,
+      status: 'evicted',
+      mode: 'slot',
+      batch: 'b-pdis',
+      failure_evidence: expect.objectContaining({ branch: slowRun?.branch }),
     });
+    for (const issue of [8141, 8142]) {
+      expect(h.state().entries.find((e) => e.issue === issue)?.status).toBe('evicted');
+    }
   }, 60_000);
 
   it('gate-inconclusive in parallel: the member lands, the batch blocks once every member resolved, and sched resume --batch continues the parallel rail', async () => {

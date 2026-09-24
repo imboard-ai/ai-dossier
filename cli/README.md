@@ -613,7 +613,9 @@ milestones with the member-trail keys: `mode=slot` and/or `batch=<id>`. Both are
 `runstate verify` treats a trail whose **latest** milestone is a full-cycle-line phase
 carrying either key — or a `classify` verdict with `mode=slot` — as slot-mode:
 `resume_from=none` — an evicted member re-enters full-cycle fresh (the batch worktree is
-machine-local; there is nothing to resume) — plus a distinguishable
+machine-local; there is nothing to resume; since #810 an evicted member is parked until
+`sched requeue`, whose cycle prompt then continues from the member's pushed branch,
+`failure_evidence.branch`) — plus a distinguishable
 `slot_trail=present` signal (text) / `slot_trail: true` (JSON), so "fresh because slot"
 never looks like "fresh because there was no trail". A trail whose latest milestone is a
 `batch-*` phase (an anchor issue) sets no slot signal — it reports its own note,
@@ -1325,6 +1327,7 @@ ai-dossier sched status [--json] [--anchors]   # ⚠ health warnings: long pause
 ai-dossier sched pause | resume
 ai-dossier sched stop (--issue 42 | --batch b1) [--reason "..."]
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
+ai-dossier sched requeue --issue 42 [--reason "..."]   # parked batch member → full-cycle from its member branch (#810)
 ai-dossier sched reprioritize --issue 42 --priority 20 | --batch b1 --priority 20 [--json]
 ai-dossier sched stats [--issues 4,5|4..9] [--batch b1 --project owner-repo] [--json]
 ```
@@ -1488,8 +1491,14 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   @ai-dossier/cli@latest` line prints when the engine is behind — read from the same
   cache `start` writes (`--json`: `engine_staleness: {installed, latest, stale}`), never
   a live network call, so `status` stays fast and offline-friendly even when `start` has
-  never run or the cache has expired (it just shows nothing in that case). `--json` emits
-  the same report as data.
+  never run or the cache has expired (it just shows nothing in that case). Since #810 a
+  `== Parked members ==` section lists every batch member parked out of its batch —
+  `[evicted]` (an engine-decided failure) or `[handed-back]` (the member's own `blocked`
+  milestone) — with its reason, batch, member branch, dispatch profile, a note, and the
+  exact remedies (`sched requeue --issue <n>`, `sched abandon --issue <n>`); `--json`
+  carries them as `parked_members`. The batches table marks a hand-back
+  `#<n>(handed-back:<reason>)` apart from an eviction. `--json` emits the same report as
+  data.
 - **`pause`/`resume`** gate *new* assignments only — live units keep running. A pause can
   be manual (`sched pause`) or automatic: `DISPATCH_UNHEALTHY_THRESHOLD` (2) consecutive
   suspect-dispatch exits from DIFFERENT units — an unverified agent exit within 60s of
@@ -1499,6 +1508,12 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
 - **`abandon --issue`** fails the entry (recording the reason) and releases its slot;
   **`abandon --batch`** dissolves the batch and requeues every non-terminal member as
   full-cycle — members already shipped keep their outcome.
+- **`requeue --issue <n>`** (#810) is the operator's decision on a PARKED batch member
+  (`evicted` / `handed-back`): it requeues the member as a full-cycle unit on the dispatch
+  profile stamped when it parked (the batch's), and the engine's cycle prompt tells the
+  agent to continue from the member's pushed branch instead of the base. It refuses any
+  entry that is not parked, and journals `member-requeued`. `--json` emits
+  `{requeued: "issue:<n>", dispatch_profile, branch}`.
 - **`reprioritize --issue <n>|--batch <id> --priority <n>`** (#565) adjusts a queued
   unit's assignment weight in place — no abandon/re-enqueue round trip, which would also
   reset every other field `enqueue` does not accept as a re-supply (deps, tier, ...).
@@ -1533,7 +1548,8 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
     argv in the log's `sched-dispatch` preamble — opencode streams never report a model,
     so before #769 opencode members always read `-` here.
     Below the table (and as `amortization` in `--json`) a **`Summary:` line** (#775) states
-    what the batch amortized: members enqueued / landed / evicted, issues shipped per gate
+    what the batch amortized: members enqueued / landed / evicted (and, #810, handed back —
+    counted apart from evictions), issues shipped per gate
     run (only once `state.json` has the batch `merged`/`deployed` — a batch PR recovered by
     hand stays `not shipped` here; one gate run per PR, a lower bound since CI re-runs are
     not in `state.json`), billable tokens per member, and tokens by model. The

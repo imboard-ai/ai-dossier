@@ -8,6 +8,12 @@ KEEP = {
     "teardown-failed",
     "parked",
     "dispatch-profile-missing",
+    # #810: a member's own hand-back is parked (not a failure), a threshold
+    # crossing over validated work does not dissolve, and an operator requeue.
+    "member-handed-back",
+    "dissolve-suppressed",
+    "member-requeued",
+    "batch-blocked",
 }
 out = []
 for line in sys.stdin:
@@ -25,6 +31,6 @@ for line in sys.stdin:
     if d.get("tier"): bits.append(f"tier={d['tier']}")
     if d.get("reason"): bits.append(d["reason"])
     if d.get("pr"): bits.append(f"PR#{d['pr']}")
-    if event == "dispatch-profile-missing" and d.get("detail"): bits.append(d["detail"])
+    if event in ("dispatch-profile-missing", "dissolve-suppressed", "batch-blocked") and d.get("detail"): bits.append(d["detail"])
     out.append(" ".join(str(b) for b in bits))
 print("\n".join(out[:8]))

@@ -235,6 +235,7 @@ describe('batch amortization (#775)', () => {
       members: [11, 12, 13],
       landed: [11, 13],
       evicted: [12],
+      handedBack: [],
       suiteFailures: 1,
       blocked: 'suite-unreadable',
       dissolved: false,
@@ -308,6 +309,33 @@ describe('batch amortization (#775)', () => {
     const line = formatAmortizationLine(merged);
     expect(line).toContain('2 shipped in 1 gate run(s) → 2.0 issues/gate run');
     expect(line).toContain('by model: m');
+  });
+
+  it('#810: a member hand-back is counted apart from evictions and never as landed', () => {
+    const journal = summarizeBatchJournal(
+      [
+        { event: 'spawned', unit: 'batch:b9', issue: 91 },
+        { event: 'member-landed', unit: 'batch:b9', issue: 91 },
+        { event: 'member-handed-back', unit: 'batch:b9', issue: 92, reason: 'needs-input' },
+        { event: 'unit-failed', unit: 'batch:b9', issue: 93, reason: 'agent-exited-unverified' },
+      ],
+      'b9'
+    );
+    expect(journal.handedBack).toEqual([92]);
+    expect(journal.members).toEqual([91, 92, 93]);
+    const summary = buildBatchAmortizationSummary({
+      batchId: 'b9',
+      batch: {
+        status: 'merged',
+        members: [91, 92, 93],
+        pr: 9,
+        evictions: [{ issue: 92, kind: 'handed-back' }, { issue: 93 }],
+      },
+      journal,
+      entries: [],
+    });
+    expect(summary).toMatchObject({ evictions: 1, handed_back: 1, members_shipped: 1 });
+    expect(formatAmortizationLine(summary)).toContain('1 evicted, 1 handed back');
   });
 
   it('still summarizes a batch pruned from state.json', () => {

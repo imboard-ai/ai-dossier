@@ -25,7 +25,9 @@ import {
   IllegalTransitionError,
   type IssueStatus,
   LEGACY_SCHEMA_VERSIONS,
+  MEMBER_EXIT_KINDS,
   MEMBER_RUN_STATUSES,
+  type MemberExitKind,
   type QueueEntry,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
@@ -67,21 +69,29 @@ const ISSUE_BASE_TRANSITIONS: Record<IssueStatus, IssueStatus[]> = {
   // #468: dispatched → parked is the detached-ship exit — the agent parked
   // its PR on auto-merge and exited; parked → shipped accepts the MERGE
   // (never the park — RFC-0001 §E.4 "scheduler gates on merge").
-  // Both also carry `evicted`: a batch dissolve (#472) requeues every unshipped
-  // member whatever state it reached, and an unmodelled edge there would throw
-  // mid-eviction, after the reverts already landed.
+  // Both also carry `evicted`: a batch dissolve (#472) parks or requeues every
+  // unshipped member whatever state it reached, and an unmodelled edge there
+  // would throw mid-eviction, after the reverts already landed.
   dispatched: ['shipped', 'parked', 'evicted'],
   parked: ['shipped', 'evicted'],
   shipped: ['done'],
   // batched/waiting/validated also carry `evicted`: RFC-0001 §D.2 dissolving
-  // requeues members at ANY batch stage, not just mid-member (F.8).
-  batched: ['waiting', 'evicted'],
-  waiting: ['in-work', 'evicted'],
-  'in-work': ['committed', 'evicted'],
-  committed: ['validated', 'evicted'],
+  // removes members at ANY batch stage, not just mid-member (F.8).
+  // #810: `handed-back` is the member's own explicit hand-back (a `blocked` /
+  // `review partial` milestone it posted) — a pre-landing exit, so it exists
+  // on the rows a member can still be working in, never from `validated`.
+  batched: ['waiting', 'evicted', 'handed-back'],
+  waiting: ['in-work', 'evicted', 'handed-back'],
+  'in-work': ['committed', 'evicted', 'handed-back'],
+  committed: ['validated', 'evicted', 'handed-back'],
   validated: ['shipped-in-batch', 'evicted'],
   'shipped-in-batch': ['done'],
+  // #810: `evicted` and `handed-back` are PARKED — terminal for their batch,
+  // never auto-dispatched. The only way on is an operator's decision:
+  // `sched requeue` (→ `requeued`, full-cycle from the member branch with
+  // the batch's dispatch profile) or `sched abandon`/`stop` (universal edges).
   evicted: ['requeued'],
+  'handed-back': ['requeued'],
   // `batched` is the half-batch rail: a member requeued into a fresh batch by a
   // halved dissolve (#472 AC4) re-enters §D.1's slot line, not the full-cycle
   // one. Without it those members are stranded — `requeued` + `mode: 'slot'` is
@@ -434,6 +444,12 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
     ) {
       throw new Error(`${label}: failure_evidence.reverted_commits must be an array of strings`);
     }
+    // #810: `reason` and `branch` reach an agent's prompt and git argv on a
+    // requeue — a malformed value is refused at load, never interpolated.
+    if (typeof ev.reason !== 'string') {
+      throw new Error(`${label}: failure_evidence.reason must be a string`);
+    }
+    validateMemberBranch(ev.branch, `${label}: failure_evidence.branch`);
   }
   validateDedupMarker(
     entry,
@@ -444,6 +460,14 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   validateDedupMarker(entry, label, 'pr_watch_waiting_since', 'pr_watch_waiting_ticks');
   if (!isIsoDateString(entry.enqueued_at) || !isIsoDateString(entry.updated_at)) {
     throw new Error(`${label}: enqueued_at/updated_at must be ISO date strings`);
+  }
+}
+
+/** #810: a recorded member branch is absent, null, or a plain git ref. */
+function validateMemberBranch(branch: unknown, label: string): void {
+  if (branch === undefined || branch === null) return;
+  if (typeof branch !== 'string' || !SAFE_REF_RE.test(branch)) {
+    throw new Error(`${label} must be null or a plain git ref`);
   }
 }
 
@@ -517,6 +541,17 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
         (issue as number) <= 0
       ) {
         throw new Error(`Batch ${id}: each ${key} record must carry a positive issue number`);
+      }
+      // #810: an unrecognized `kind` would silently change what the dissolve
+      // threshold counts — refuse it rather than guess.
+      if (key === 'evictions') {
+        const { kind, branch } = record as { kind?: unknown; branch?: unknown };
+        if (kind !== undefined && !(MEMBER_EXIT_KINDS as readonly unknown[]).includes(kind)) {
+          throw new Error(
+            `Batch ${id}: evictions[].kind must be one of ${MEMBER_EXIT_KINDS.join('|')}`
+          );
+        }
+        validateMemberBranch(branch, `Batch ${id}: evictions[].branch`);
       }
     }
   }
@@ -1112,6 +1147,10 @@ export function validateState(data: unknown): SchedState {
       gate_inconclusive: run.gate_inconclusive ?? null,
       torn_down: run.torn_down ?? false,
     })),
+    // 1.23.0 → 1.24.0 (#810): no backfill — `evictions[].kind`/`branch` and
+    // `failure_evidence.branch` are optional (absent = a pre-#810 `evicted`
+    // record with no recorded branch), and `handed-back` is a new status no
+    // older state can contain.
   }));
 
   return {
@@ -1506,15 +1545,19 @@ function partitionByIssue(
  * (RFC-0001 §D.1 "in-work/committed → evicted(reason) → requeued", §F.8
  * "nothing green is discarded").
  *
- * The single requeue path for `abandonBatch` (operator dissolve), eviction and
- * automatic dissolve (#472), so the "which edge applies from here?" question is
- * answered once:
+ * The single requeue path — `abandonBatch` (operator dissolve), an operator's
+ * `sched requeue` of a parked member (`requeueParkedMember`, #810), the
+ * aggregate-suite eviction (`evictMembers`), and a dissolve's unstarted
+ * members / half-batch split (#472) — so the "which edge applies from here?"
+ * question is answered once. (Per-member evictions and hand-backs on the
+ * executing rail PARK through `parkMember` instead, #810.)
  *
  * - already terminal or shipped → left alone, `requeued: false`
  * - never reached the batch rail (`queued`/`classified`), or already on the
  *   requeue rail (`requeued`) → metadata retag only; there is no status edge to
  *   take, and re-transitioning `requeued → requeued` would throw
- * - `evicted` → the one remaining edge, `evicted → requeued`
+ * - parked (`evicted` / `handed-back`) → the one remaining edge, `→ requeued`
+ *   — keeping the dispatch profile stamped at park time (#810)
  * - anything else active → the full failure rail, `→ evicted → requeued`
  *
  * `target` is where the member goes next: full-cycle (`{ mode: 'full', batch:
@@ -1530,7 +1573,7 @@ export function requeueMember(
   // entry directly on the queued/classified/requeued short-circuit, so a wider
   // type would let a caller write `status` without a transition check and walk
   // straight around the state machine.
-  extra: { failure_evidence?: FailureEvidence | null } = {}
+  extra: MemberExitExtra = {}
 ): { state: SchedState; requeued: boolean } {
   const entry = state.entries.find((e) => e.issue === issue);
   if (!entry) return { state, requeued: false };
@@ -1549,9 +1592,23 @@ export function requeueMember(
     target.mode === 'full' && entry.review === 'full'
       ? { tier: memberDispatchTier(entry), review: 'light' as const }
       : {};
+  // #810 (the #713 class, on the requeue rail): a member leaving its batch for
+  // a full cycle keeps the batch's dispatch profile. A slot member's own
+  // `dispatch_profile` is normally null — the BATCH carries it — so without
+  // this every requeue silently re-ran the member on the config default
+  // (observed: an `openai` batch's members requeued `dispatch_profile: null`).
+  // A PARKED entry already carries the profile stamped at park time — which
+  // may be a deliberate `null` (a `dispatch-profile-missing` dissolve parks on
+  // the config default); re-deriving it from the batch would bring the broken
+  // profile back.
+  const profilePatch =
+    target.mode === 'full' && !PARKED_MEMBER_STATUSES.has(entry.status)
+      ? { dispatch_profile: memberDispatchProfile(state, entry) }
+      : {};
   const patch = {
     ...target,
     ...reviewPatch,
+    ...profilePatch,
     reason,
     ...CLEARED_ENTRY_DEDUP_MARKERS,
     ...extra,
@@ -1560,11 +1617,145 @@ export function requeueMember(
     return { state: patchEntry(state, issue, patch, now), requeued: true };
   }
   let next = state;
-  if (entry.status !== 'evicted') {
+  if (!PARKED_MEMBER_STATUSES.has(entry.status)) {
     next = transitionIssue(next, issue, 'evicted', { reason }, now);
   }
   next = transitionIssue(next, issue, 'requeued', patch, now);
   return { state: next, requeued: true };
+}
+
+/**
+ * #810: the statuses a batch member is PARKED in — out of its batch, its work
+ * (if any) on its member branch, and never auto-dispatched until an operator
+ * decides (`sched requeue` / `sched abandon`).
+ */
+export const PARKED_MEMBER_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>(
+  MEMBER_EXIT_KINDS
+);
+
+/**
+ * Optional fields a member exit carries onto its entry (#810): the evidence
+ * (reason, member branch) and — only to override the default — the dispatch
+ * profile (`null` = the config default).
+ */
+export interface MemberExitExtra {
+  failure_evidence?: FailureEvidence | null;
+  dispatch_profile?: string | null;
+}
+
+/**
+ * The `failure_evidence` a pre-landing member exit records (#810): no failing
+ * tests, no attribution, nothing reverted — just why, and where its work is.
+ */
+export function memberExitEvidence(
+  batchId: string,
+  reason: string,
+  branch: string | null,
+  now: Date
+): FailureEvidence {
+  return {
+    batch: batchId,
+    reason,
+    failing_tests: [],
+    attribution: 'none',
+    reverted_commits: [],
+    branch,
+    at: now.toISOString(),
+  };
+}
+
+/**
+ * The member branch holding `issue`'s un-landed work in `batch` (#810): its
+ * parallel run's branch, else the serial current-member branch when `issue`
+ * is the member in work. `null` when the batch has none recorded. (Contrast
+ * `memberBranchFor` in batch-dispatch.ts, which BUILDS the name for a spawn.)
+ */
+export function recordedMemberBranch(batch: BatchEntry, issue: number): string | null {
+  const run = batch.member_runs.find((r) => r.issue === issue);
+  if (run !== undefined) return run.branch;
+  if (batch.members[batch.executing_member - 1] === issue) return batch.member_branch;
+  return null;
+}
+
+/**
+ * #810: the members of `batch` whose work is validated and landed on its
+ * integration branch — the work a dissolve must never throw away. The one
+ * definition shared by the executing rail's dissolve suppression, the
+ * `full` dissolve's block, and `sched status`.
+ */
+export function validatedMembersOf(state: SchedState, batch: BatchEntry): number[] {
+  const exited = new Set(batch.evictions.map((e) => e.issue));
+  return batch.members.filter((issue) => {
+    if (exited.has(issue)) return false;
+    const entry = findEntry(state, issue);
+    return (
+      entry !== undefined &&
+      entry.mode === 'slot' &&
+      entry.batch === batch.id &&
+      entry.status === 'validated'
+    );
+  });
+}
+
+/**
+ * The dispatch profile a member runs on (#810): its own when it has one, else
+ * its batch's. The one answer for "which provider does this member's work
+ * belong to?" — a requeue and a park both carry it onto the entry.
+ */
+export function memberDispatchProfile(state: SchedState, entry: QueueEntry): string | null {
+  if (entry.dispatch_profile !== null && entry.dispatch_profile !== undefined) {
+    return entry.dispatch_profile;
+  }
+  if (entry.batch === null) return null;
+  return findBatch(state, entry.batch)?.dispatch_profile ?? null;
+}
+
+/**
+ * Park one batch member (#810): move it to `evicted` (an engine-decided
+ * failure) or `handed-back` (the member's own explicit hand-back), keeping
+ * `mode: 'slot'` + `batch` so the ledger still says which batch it left, and
+ * stamping the evidence (reason, member branch) and the batch's dispatch
+ * profile onto the entry. Nothing is requeued: an operator's `sched requeue`
+ * is the only way on, and it then continues from `failure_evidence.branch`
+ * on the recorded profile.
+ *
+ * Replaces the pre-#810 automatic `requeueMember(..., { mode: 'full' })` on
+ * the eviction rail, which restarted the member from the base branch on the
+ * config-default provider — discarding its commits and its profile.
+ *
+ * Already terminal / shipped / parked → left alone (`parked: false`).
+ */
+export function parkMember(
+  state: SchedState,
+  issue: number,
+  kind: MemberExitKind,
+  reason: string,
+  now: Date = new Date(),
+  extra: MemberExitExtra = {}
+): { state: SchedState; parked: boolean } {
+  const entry = state.entries.find((e) => e.issue === issue);
+  if (!entry || isPreservedMember(entry) || PARKED_MEMBER_STATUSES.has(entry.status)) {
+    return { state, parked: false };
+  }
+  const patch = {
+    reason,
+    dispatch_profile: memberDispatchProfile(state, entry),
+    ...CLEARED_ENTRY_DEDUP_MARKERS,
+    ...extra,
+  };
+  // A `classified` member (evicted before its first spawn, e.g. a failed
+  // worktree prep) walks the `batched` waypoint first — the same waypoint
+  // `advanceMemberToInWork` walks. `queued`/`requeued` have no batch-rail
+  // edge at all and are left where they are, reported as not parked.
+  let next = state;
+  if (entry.status === 'classified') {
+    next = transitionIssue(next, issue, 'batched', {}, now);
+  }
+  const from = findEntry(next, issue)?.status;
+  if (from === undefined || !allowedIssueTransitions(from).includes(kind)) {
+    return { state, parked: false };
+  }
+  return { state: transitionIssue(next, issue, kind, patch, now), parked: true };
 }
 
 // --- Lookups ---
