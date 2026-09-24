@@ -1,4 +1,25 @@
 export {
+  ANCHOR_CLOSE_BATCH_STATUSES,
+  type AnchorCloseOutcome,
+  type AnchorMemberReport,
+  type AnchorReportItem,
+  type AnchorVerdict,
+  anchorCloseMarker,
+  anchorLedgerBlockers,
+  type CommitInBase,
+  classifyAnchor,
+  closeAnchor,
+  formatBatchStatus,
+  type IssueCloseReader,
+  type MembersVerdictOptions,
+  membersShippedVerdict,
+  type OpenAnchorVerdict,
+  openAnchorBatches,
+  renderAnchorCloseComment,
+  shippingEvidence,
+  sweepAnchors,
+} from './anchor-close';
+export {
   type AmbiguousTest,
   attributeByOverlap,
   type BoundaryCommit,
@@ -110,22 +131,27 @@ export {
 } from './fence';
 export {
   createExecGroundTruth,
+  GIT_OID_RE,
   type GroundTruth,
   type GroundTruthMilestone,
   groundTruthExec,
+  type IssueCloseTruth,
   isBatchPhaseDone,
   isBatchTailParked,
   isMemberBlocked,
   isMemberComplete,
   isParkedMilestone,
+  issueCloseReader,
   isVerifiedComplete,
   labelNames,
   type PrTruth,
+  parseIssueCloseTruthJson,
   parseIssueLabelsJson,
   parseMilestoneJson,
   parseMilestoneListJson,
   parseOpenPrListJson,
   parsePrViewJson,
+  parseRepoName,
   parseSetupInfo,
   prOfMilestone,
   type SetupInfo,
@@ -142,7 +168,13 @@ export {
 // `LABEL_BLOCK_REASON_PREFIX` / `labelBlockReason` also live in `labels.ts`
 // since #544, but stay exported through `./enqueue` above — that is where
 // they were first public, and re-exporting them twice would collide.
-export { HARD_BLOCK_LABELS, labelOfBlockReason, pickHardBlockLabel } from './labels';
+export {
+  DECISION_PENDING_LABEL,
+  HARD_BLOCK_LABELS,
+  hasLabel,
+  labelOfBlockReason,
+  pickHardBlockLabel,
+} from './labels';
 export {
   CorruptStateError,
   type EngineLease,
@@ -157,6 +189,7 @@ export {
   createExecFn,
   defaultExec,
   type ExecFn,
+  resolveProjectRepo,
   resolveProjectSlug,
   sanitizeSlug,
   schedStateDir,

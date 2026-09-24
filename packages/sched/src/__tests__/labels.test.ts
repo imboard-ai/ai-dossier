@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   HARD_BLOCK_LABELS,
+  hasLabel,
   LABEL_BLOCK_REASON_PREFIX,
   labelBlockReason,
   labelOfBlockReason,
@@ -52,5 +53,14 @@ describe('labelOfBlockReason (#544)', () => {
 
   it('treats a bare prefix as malformed, not a match', () => {
     expect(labelOfBlockReason(LABEL_BLOCK_REASON_PREFIX)).toBeNull();
+  });
+});
+
+describe('hasLabel (#768)', () => {
+  it('matches case-insensitively, like every other label screen', () => {
+    expect(hasLabel(['Decision-Pending'], 'decision-pending')).toBe(true);
+    expect(hasLabel(['decision-pending'], 'Decision-Pending')).toBe(true);
+    expect(hasLabel(['decision-pending-later'], 'decision-pending')).toBe(false);
+    expect(hasLabel([], 'decision-pending')).toBe(false);
   });
 });

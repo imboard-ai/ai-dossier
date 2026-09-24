@@ -32,12 +32,25 @@
  * `decision-pending` here is the GitHub LABEL, not the `IssueStatus` value
  * of the same name (`types.ts`).
  */
+/**
+ * The hand-back label a full-cycle run applies when it stops on a human
+ * decision (#768 reads it to keep a batch anchor open). The GitHub LABEL —
+ * not the `IssueStatus` value of the same name (`types.ts`).
+ */
+export const DECISION_PENDING_LABEL = 'decision-pending';
+
 export const HARD_BLOCK_LABELS = [
-  'decision-pending',
+  DECISION_PENDING_LABEL,
   'needs-clarification',
   'epic',
   'decomposed',
 ] as const;
+
+/** Whether `labels` carries `name`, case-insensitively — how every label screen here compares. */
+export function hasLabel(labels: readonly string[], name: string): boolean {
+  const wanted = name.toLowerCase();
+  return labels.some((label) => label.toLowerCase() === wanted);
+}
 
 /** The first hard-block label `labels` carries (case-insensitive), or `null`. */
 export function pickHardBlockLabel(labels: readonly string[]): string | null {

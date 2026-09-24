@@ -26,6 +26,7 @@ import {
   NEXT_VALUES,
   nextFenceGeneration,
   nowStamp,
+  OPERATOR_NEXT,
   type ParsedMilestone,
   PHASE_SPECS,
   PHASES,
@@ -163,6 +164,44 @@ describe('defaultNext', () => {
     for (const phase of PHASES) {
       expect(defaultNext(phase, 'blocked')).toBe('done');
     }
+  });
+
+  it('points a blocked BATCH milestone at the operator, not done (#768)', () => {
+    for (const phase of BATCH_PHASES) {
+      expect(defaultNext(phase, 'blocked')).toBe(OPERATOR_NEXT);
+    }
+    const body = buildMilestone({
+      phase: 'batch-validate',
+      status: 'blocked',
+      run: 'r-4244-ab12',
+      at: '2026-09-12T10:00:00Z',
+      keys: [
+        ['reason', 'suite-unreadable'],
+        ['dissolved', 'false'],
+      ],
+    });
+    expect(body).toContain(`next=${OPERATOR_NEXT}`);
+    expect(body).not.toContain('next=done');
+    expect(
+      validateMilestone({
+        phase: 'batch-validate',
+        status: 'blocked',
+        run: 'r-4244-ab12',
+        next: 'operator',
+        keys: [['reason', 'x']],
+      })
+    ).toEqual([]);
+  });
+
+  it('rejects --next operator on a full-cycle phase (#768)', () => {
+    expect(
+      validateMilestone({
+        phase: 'review',
+        status: 'blocked',
+        run: 'r-768-ab12',
+        next: OPERATOR_NEXT,
+      })
+    ).toContainEqual(expect.stringContaining('only valid on a batch phase'));
   });
 
   it('keeps awaiting-merge inside ship (a second ship milestone follows)', () => {

@@ -90,6 +90,34 @@ export function resolveProjectSlug(exec: ExecFn = defaultExec, cwd?: string): st
   return 'default';
 }
 
+/**
+ * The `owner/name` of the cwd's GitHub repository when — and only when — it is
+ * `project`'s (#768): the slug is `owner-name` sanitized, so it cannot be
+ * turned back into a repository on its own. Anything that WRITES to GitHub on
+ * a project's behalf (the anchor close) or reads its issues for a verdict
+ * (the anchor sweep) uses this instead of letting gh resolve the cwd, which
+ * under `--project` may be a different repository. `null` = unresolvable or a
+ * different repository: skip, never guess.
+ */
+export function resolveProjectRepo(
+  project: string,
+  exec: ExecFn = defaultExec,
+  cwd?: string
+): string | null {
+  const ghOut = exec('gh', ['repo', 'view', '--json', 'owner,name'], cwd);
+  if (ghOut === null) return null;
+  try {
+    const parsed = JSON.parse(ghOut) as { owner?: { login?: unknown }; name?: unknown };
+    const owner = parsed.owner?.login;
+    if (typeof owner !== 'string' || typeof parsed.name !== 'string') return null;
+    return sanitizeSlug(`${owner}-${parsed.name}`) === sanitizeSlug(project)
+      ? `${owner}/${parsed.name}`
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** State directory for one project under the dossier home (testable via `home`). */
 export function schedStateDir(project: string, home: string = os.homedir()): string {
   return path.join(home, '.dossier', 'sched', sanitizeSlug(project));

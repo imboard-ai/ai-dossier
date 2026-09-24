@@ -13,6 +13,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import * as path from 'node:path';
 import type {
+  AnchorMemberReport,
+  AnchorReportItem,
   BatchDispatchDeps,
   BatchEntry,
   CapabilityGateResult,
@@ -44,7 +46,10 @@ import {
   type ExecFn,
   enqueueEntries,
   FENCE_TIMEOUT_MS,
+  formatBatchStatus,
+  GIT_OID_RE,
   IllegalTransitionError,
+  issueCloseReader,
   Journal,
   LIVE_SLOT_STATUSES,
   LockTimeoutError,
@@ -60,9 +65,11 @@ import {
   reprioritizeIssue,
   resolveDispatch,
   resolveProfiledDispatch,
+  resolveProjectRepo,
   resolveProjectSlug,
   resumeBlockedGate,
   runLoop,
+  SAFE_REF_RE,
   SchedNotFoundError,
   SchedStore,
   schedStateDir,
@@ -494,7 +501,7 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
           ],
           report.batches.map((b) => [
             b.id,
-            b.status === 'blocked' && b.blocked_reason ? `blocked (${b.blocked_reason})` : b.status,
+            formatBatchStatus(b),
             String(b.priority),
             b.members.length > 0 ? b.members.map((m) => `#${m}`).join(',') : '-',
             b.executing_member > 0 ? `${b.executing_member}/${b.members.length}` : '-',
@@ -553,7 +560,66 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
       ? stopped.map((entry) => `#${entry.issue} — ${entry.reason ?? entry.status}`).join('\n')
       : '(none)'
   );
+  // #768: report-only anchor sweep — never closes anything. Omitted entirely
+  // when the report was built without GitHub (`--no-anchors`).
+  if (report.anchors !== null) {
+    lines.push('');
+    lines.push('== Open batch anchors ==');
+    lines.push(
+      report.anchors.length > 0 ? report.anchors.map(renderAnchorItem).join('\n') : '(none)'
+    );
+  }
   return lines.join('\n');
+}
+
+/** Per-call budget for the sweep's reads — `status` must never hang for minutes. */
+const ANCHOR_SWEEP_TIMEOUT_MS = 10_000;
+
+/**
+ * `sched status --anchors`' readers (#768), or `undefined` (with a stderr
+ * line) when the cwd is not `project`'s repository — the sweep never reads
+ * another repository's issue numbers as if they were this project's.
+ */
+function anchorSweepFor(project: string): Parameters<typeof buildStatusReport>[5] {
+  const repo = resolveProjectRepo(project, defaultExec);
+  if (repo === null) {
+    process.stderr.write(
+      `⚠ sched status: anchor sweep skipped — the current directory is not ${project}'s GitHub repository\n`
+    );
+    return undefined;
+  }
+  const exec = createExecFn(ANCHOR_SWEEP_TIMEOUT_MS, {
+    onError: (file, args, err) =>
+      process.stderr.write(
+        `⚠ sched anchor sweep: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+      ),
+  });
+  const read = issueCloseReader(createExecGroundTruth(exec, { repoDir: process.cwd(), repo }));
+  if (read === undefined) return undefined;
+  return {
+    read,
+    repo,
+    // Read-only reachability probe against the already-fetched remote ref.
+    commitInBase: (oid, base) =>
+      GIT_OID_RE.test(oid) &&
+      SAFE_REF_RE.test(base) &&
+      exec('git', ['merge-base', '--is-ancestor', oid, `origin/${base}`], process.cwd()) !== null,
+  };
+}
+
+/** One `== Open batch anchors ==` row (#768): the anchor, its verdict and why, then its members. */
+function renderAnchorItem(a: AnchorReportItem): string {
+  const reasons = a.reasons.length > 0 ? ` — ${a.reasons.join(', ')}` : '';
+  return (
+    `#${a.anchor} (batch ${a.batch}, ${a.batch_status}) [${a.verdict}]${reasons}\n` +
+    `  members: ${a.members.map(renderAnchorMember).join(', ')}`
+  );
+}
+
+/** `#4146 CLOSED/COMPLETED (ledger in-work)` — GitHub state beside the ledger's. */
+function renderAnchorMember(m: AnchorMemberReport): string {
+  const github = m.state_reason ? `${m.github}/${m.state_reason}` : m.github;
+  return `#${m.issue} ${github} (ledger ${m.ledger_status ?? 'none'})`;
 }
 
 /** `5m ago` / `2h ago` — compact last-progress rendering for the slot table. */
@@ -1142,14 +1208,20 @@ function registerStatusSubcommand(cmd: Command): void {
     .description('Render the queue, slots, batches, and blocked/failed sets')
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output the report as JSON')
-    .action(async (opts: SchedOptions) => {
+    .option(
+      '--anchors',
+      "Also sweep open batch anchors (reads issue state from GitHub; run from the project's repository)"
+    )
+    .action(async (opts: SchedOptions & { anchors?: boolean }) => {
       const { store, project } = resolveStore(opts);
       try {
         const report = buildStatusReport(
           store.load(),
           store.loadConfig(),
           project,
-          store.engineLeaseStatus()
+          store.engineLeaseStatus(),
+          new Date(),
+          opts.anchors === true ? anchorSweepFor(project) : undefined
         );
         // Cache-only (#537): `status` is a fast, offline-friendly diagnostic
         // — it reads whatever `sched start` last cached rather than risking
@@ -1885,10 +1957,22 @@ function registerStartSubcommand(cmd: Command): void {
           }
         }
 
+        // #768: the anchor close writes to GitHub, so it runs only against the
+        // repository verified to BE this project's — never whatever the cwd is.
+        const anchorRepo = resolveProjectRepo(project, defaultExec) ?? undefined;
+        if (anchorRepo === undefined && !(opts.once && opts.json)) {
+          console.log(
+            `▶ sched anchor close: off — the current directory is not ${project}'s GitHub repository`
+          );
+        }
         const deps: EngineDeps = {
           store,
           journal: new Journal(store.dir),
-          groundTruth: createExecGroundTruth(undefined, { repoDir: process.cwd() }),
+          groundTruth: createExecGroundTruth(undefined, {
+            repoDir: process.cwd(),
+            ...(anchorRepo !== undefined ? { repo: anchorRepo } : {}),
+          }),
+          ...(anchorRepo !== undefined ? { anchorRepo } : {}),
           spawnDeps: createSpawnDeps(process.cwd()),
           now: () => new Date(),
           repoDir: process.cwd(),
