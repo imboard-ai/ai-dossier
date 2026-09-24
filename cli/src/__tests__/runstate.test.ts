@@ -327,6 +327,60 @@ describe('validateMilestone', () => {
     ).toEqual([]);
   });
 
+  describe('#804: review done never carries a zero-agent agents_done', () => {
+    const reviewKeys = (agentsDone: string): Array<[string, string]> => [
+      ['head', 'abc1234'],
+      ['fixed', '0'],
+      ['escalated', '0'],
+      ['agents_done', agentsDone],
+      ['agents_pending', 'none'],
+    ];
+
+    it.each([
+      '0',
+      'none',
+      'NONE',
+      'None',
+      'n/a',
+      'none,none',
+      '0,none',
+      ',',
+    ])('rejects review done with agents_done=%s', (v) => {
+      const errors = validateMilestone({
+        phase: 'review',
+        status: 'done',
+        run: 'r-440-ab56',
+        keys: reviewKeys(v),
+      });
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain(`cannot carry agents_done=${v}`);
+      expect(errors[0]).toContain('--status partial');
+      expect(errors[0]).toContain('--status blocked --kv reason=review-not-run');
+    });
+
+    it('accepts review done naming the agents that ran', () => {
+      expect(
+        validateMilestone({
+          phase: 'review',
+          status: 'done',
+          run: 'r-440-ab56',
+          keys: reviewKeys('conformance'),
+        })
+      ).toEqual([]);
+    });
+
+    it('still allows partial with no agent finished (the honest fallback)', () => {
+      expect(
+        validateMilestone({
+          phase: 'review',
+          status: 'partial',
+          run: 'r-440-ab56',
+          keys: reviewKeys('none'),
+        })
+      ).toEqual([]);
+    });
+  });
+
   it('names every missing required key in one line with a copy-pasteable fix', () => {
     const errors = validateMilestone({
       phase: 'implement',

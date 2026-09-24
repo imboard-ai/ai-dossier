@@ -688,9 +688,15 @@ member got the light, relevance-scoped review). `review=full` is how a risk-floo
   The floor follows the member: its bounded fix attempt dispatches at `strong` (not
   `FIX_ATTEMPT_TIER`), and an eviction/abandon requeue to full-cycle rewrites its `tier` to the
   floored value (and `review` back to `light`, a slot-only concept) so the full cycle keeps it.
-- **Prompt** — `buildMemberPrompt` substitutes a `{review}` placeholder; a `review=full`
-  member whose template lacks one gets `FULL_REVIEW_MEMBER_DIRECTIVE` appended (full-cycle-
-  grade review before handover). A `light` member's prompt is byte-identical to before.
+- **Prompt** — `buildMemberPrompt` substitutes a `{review}` placeholder.
+  `DEFAULT_MEMBER_PROMPT_TEMPLATE` places `{review}` itself (#804), so both `light` and `full`
+  members see their level and are told to run member-cycle Step 4b's self-review at it before
+  handover (`full` → the full review-issue tier incl. Security; `light` → at least
+  Conformance), then post `review done` naming the agents that ran — never `agents_done=0`.
+  An operator `member_prompt` template without `{review}` gets `FULL_REVIEW_MEMBER_DIRECTIVE`
+  appended for a `review=full` member; a `light` member's prompt from such a template is
+  byte-identical to before. A member's `review partial` (an agent could not finish) is a
+  terminal hand-back like `blocked` (`reason=review-partial:<agents_pending>`).
 - **Status** — `sched status`'s Queue table has a `review` column for slot members, and the
   `tier` column shows the floor as `mid→strong` when it applies.
 

@@ -118,6 +118,7 @@ import {
   isMemberBlocked,
   isMemberComplete,
   issueCloseReader,
+  memberBlockedReason,
   type PrTruth,
   prOfMilestone,
 } from './groundtruth';
@@ -2949,7 +2950,8 @@ function reconcileMemberSlot(
     // the old `reason=` here is what made the journal misdirect, naming a
     // precondition that had already been fixed on a run where it no longer
     // applied.
-    const rawReason = blockedNow ? milestone?.keys.reason : undefined;
+    // #804: `memberBlockedReason` also names a `review partial` hand-back.
+    const rawReason = blockedNow && milestone ? memberBlockedReason(milestone) : undefined;
     const reason =
       typeof rawReason === 'string' && rawReason.length > 0
         ? sanitizeUntrustedText(rawReason)

@@ -331,6 +331,14 @@ export const DEFAULT_FIX_PROMPT_TEMPLATE = withNoBackgroundExit(
  * evict / inconclusive → block / timeout → decline) so handing over — not
  * waiting on integration — is the terminal act.
  *
+ * #804: review is member-cycle Step 4b's self-review at the member's own
+ * level (`{review}` — placed here so BOTH light and full reach the member),
+ * run BEFORE the handover; the `review done` milestone names the agents that
+ * ran and is never a zero-agent bookkeeping post (imboard#4178's
+ * `agents_done=0`, run `r-4178-928b`). Its honest fallbacks — `review partial`
+ * and `blocked reason=review-not-run` — are both terminal hand-backs to
+ * `groundtruth.ts`'s `isMemberBlocked`.
+ *
  * The wire contract (mint a run id; terminal milestones `review done` /
  * `blocked` carrying `mode=slot` + `batch=<batch>`) is stated in the prompt
  * because `groundtruth.ts`'s completion predicates read that vocabulary: it is
@@ -358,10 +366,21 @@ export const DEFAULT_MEMBER_PROMPT_TEMPLATE = withNoBackgroundExit(
     'direct consumers one hop out, typecheck and lint over the changed surface. Never run the ' +
     'repo-wide suite, any CI-parity or full-gate script, or e2e matrices — the parent runs those ' +
     'ONCE for the whole batch.\n' +
+    '- Review level: review={review}. Review is YOUR work, not a bookkeeping post: before handover, ' +
+    "run member-cycle Step 4b's self-review of your own diff at that level — review=full runs " +
+    'review-issue at the full tier (every dimension agent, Security included, plus Conformance); ' +
+    'review=light runs at least Conformance.\n' +
     '- Post ## handover:v1 on the issue (files changed and why, exact test commands and results, ' +
-    'what you deliberately did NOT verify, assumptions, your conformance verdict), THEN post ' +
-    'ai-dossier runstate post --issue {issue} --phase review --status done --run <run_id> --kv ' +
-    'mode=slot --kv batch={batch} and END your run.\n' +
+    'what you deliberately did NOT verify, assumptions, your conformance verdict, your review ' +
+    'level and the review agents that ran), THEN post ai-dossier runstate post --issue {issue} ' +
+    '--phase review --status done --run <run_id> --kv mode=slot --kv batch={batch} --kv ' +
+    'review={review} --kv head=<pushed sha> --kv fixed=<n> --kv escalated=<n> --kv ' +
+    'agents_done=<the review agents that actually ran> --kv agents_pending=none and END your run. ' +
+    'Never post agents_done=0 or none. If a required review agent could not finish, post the ' +
+    'same command with --status partial and that agent in --kv agents_pending=<agents>; if no ' +
+    'review could run at all, post ai-dossier runstate post --issue {issue} --phase review ' +
+    '--status blocked --run <run_id> --kv reason=review-not-run --kv mode=slot --kv ' +
+    'batch={batch}. Either one ends your run and hands the member back.\n' +
     '- If you cannot proceed (preconditions fail, issue not implementable, ACs not met), post ' +
     'ai-dossier runstate post --issue {issue} --phase <phase> --status blocked --run <run_id> ' +
     '--kv reason=<slug> --kv mode=slot --kv batch={batch}, leave the tree clean, and end your ' +
@@ -998,7 +1017,9 @@ export function memberDispatchTier(entry: { tier: ModelTier; review?: ReviewLeve
  * Appended to a `review=full` member's prompt when the operator's
  * `member_prompt` template does not place `{review}` itself (#771) — so the
  * review level reaches the member regardless of template, while a `light`
- * member's prompt stays byte-identical to the pre-#771 rendering.
+ * member's prompt from such a template stays byte-identical to its pre-#771
+ * rendering. The DEFAULT template places `{review}` itself (#804), so it never
+ * gets this appendix.
  */
 export const FULL_REVIEW_MEMBER_DIRECTIVE =
   '\n\nReview level: review=full. This member is a risk-floor issue riding the batch — run ' +
