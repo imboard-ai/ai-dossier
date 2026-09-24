@@ -730,6 +730,17 @@ row governs assignment), so the Queue table renders `-` for it rather than a num
 looks load-bearing but is not. A batch dissolve (`recovery.ts`'s `dissolveBatch`) carries
 the parent batch's priority forward onto both split halves.
 
+## The batch gate — `gate.batch` (#777)
+
+`runValidate` runs the injected `runSuite(worktree, ctx)` once per `validating` pass;
+`ctx` is `{ batchId, baseRef: 'origin/<base_branch>' }` (`BatchSuiteContext`, also passed
+on attribution/fix re-runs). The CLI's runner (`cli/src/batch-suite-runner.ts`) prefers the
+repo's active `gate.batch` capability — the same CI-parity gate a normal PR pays — over
+`test.full`, exporting `ctx` as `DOSSIER_BATCH_ID` / `DOSSIER_BATCH_BASE`; outcomes map
+identically either way (`ok` / red-and-attributable / `suite-unreadable` block).
+`sched enqueue` refuses to form a batch whose only full gate is a `test.full` marked
+`timeout_prone: true`. Details: `docs/reference/capabilities.md`.
+
 ## Batch dispatch (#523)
 
 `batch-dispatch.ts`'s `runBatchTick` — called from `tick()` after the issue-level pass,

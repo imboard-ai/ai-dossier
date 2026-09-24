@@ -173,6 +173,7 @@ export {
   type AttributionOutcome,
   type BatchMilestone,
   type BatchMilestonePoster,
+  type BatchSuiteContext,
   type BisectSpec,
   type BlockOptions,
   beginAttribution,

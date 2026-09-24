@@ -1016,9 +1016,11 @@ Prints a single JSON verdict — no model call anywhere, exits 0 for either verd
 
 ```json
 {
+  "schema": "prescreen:v2",
   "issue": 538,
   "state": "OPEN",
-  "verdict": "full",
+  "verdict": "candidate",
+  "review": "full",
   "reasons": [
     { "check": "text-floor", "message": "Title/body/labels match 'rule1-risk-floor-area' (keyword: 'terraform')." }
   ],
@@ -1040,9 +1042,11 @@ verdict still reflects whatever DID complete rather than blocking on the gap:
 
 ```json
 {
+  "schema": "prescreen:v2",
   "issue": 538,
   "state": null,
   "verdict": "candidate",
+  "review": "full",
   "reasons": [],
   "plan_artifact": null,
   "degraded": true,
@@ -1051,18 +1055,45 @@ verdict still reflects whatever DID complete rather than blocking on the gap:
 }
 ```
 
-`verdict: "full"` means an obvious floor hit was found — the classifier should skip
-straight to posting `mode=full` with the recorded reason, no repo exploration needed.
+`verdict: "full"` means an **excluding** floor hit was found — a hard-block label, an open
+dependency outside the submitted set, or (with a plan:v1 artifact) the path-based risk
+floor or more than 8 predicted files. The classifier should skip straight to posting
+`mode=full` with the recorded reason, no repo exploration needed.
 `verdict: "candidate"` means proceed to the bounded mechanical-tier classify pass (issue
 text + `reasons`/`warnings` as context, still no repo exploration unless that pass's
 `confidence` lands below 0.6, which triggers the dossier's single mid-tier escalation).
+
+`review` is the review depth the issue needs, in the scheduler's per-member vocabulary
+(`light` | `full`, #771): `full` whenever any check found anything — and also when the
+issue itself could not be read (the fail-open path above stays `candidate`, but an unscanned
+issue is never reported `light`). A **text-floor** hit
+(risk keyword in the issue text) is `verdict: "candidate"` + `review: "full"` — the issue
+may join a batch, but as a full-review member (#770 Option A), not be excluded from it.
+
+**Contract change — `prescreen:v1` → `prescreen:v2` (#772, CLI 0.54.0).** v1 (no
+`schema` key) returned `verdict: "full"` for a text-floor hit too; v2 returns
+`candidate` + `review: "full"` for it and adds the `schema` and `review` keys. A consumer
+that reads only `verdict` must also read `review` to keep routing risk-keyword issues to
+full-depth review. The text floor is also section-aware in v2: it scans the title, labels,
+and the body **minus** reference material — sections headed Related / References / See
+also / Links / Context / Background / Provenance / Origin; reference lines ("Related: #…",
+"Parent: #…", "Refs: …", "See also …"); provenance clauses that open a sentence ("Found by
+the #4103 security review.", "Discovered during…", "Follow-up to #…", "Split from #…" —
+stripped to the end of the clause, the rest of the line is kept); and link-only lines (a
+markdown link's text is kept, only its target is dropped) — in addition to the quoted spans
+#627 already blanked. A heading is ignored only when its whole text is one of those names
+("## Background jobs" is scope); `#` lines inside fenced code blocks are never headings.
+Mid-sentence the same words are prose ("the token leak is found during checkout") and are
+scanned. Other sections (Problem, Scope, Fix, …) are scanned; a sub-heading nested inside an
+ignored section stays ignored. `scripts/prescreen-backlog-measure.mjs --repo owner/name`
+measures v1 vs v2 over a repo's open backlog (read-only; prints no issue text).
 
 Coverage is deliberately partial — it catches the OBVIOUS floor hits, not all of them:
 
 | Check | What it catches | Source |
 |---|---|---|
 | `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` | same policy as the `sched enqueue` pre-screen (#507) and the engine's per-tick re-check (#544), shared via `@ai-dossier/sched`'s `labels.ts` (re-exported by `cli/src/hard-block-labels.ts`) |
-| `text-floor` | A text-keyword approximation of RFC-0001 E.2 rules 1/3/4 (risk-floor area, new package/workspace, deploy pipeline) scanned over title + body + labels | `prescreen.ts`'s `TEXT_FLOOR_PATTERNS`; the matched keyword is named in the reason message |
+| `text-floor` | A text-keyword approximation of RFC-0001 E.2 rules 1/3/4 (risk-floor area, new package/workspace, deploy pipeline) scanned over title + reference-stripped body + labels — sets `review: full`, does **not** exclude | `prescreen.ts`'s `TEXT_FLOOR_PATTERNS` / `floorScanText`; the matched keyword is named in the reason message |
 | `path-floor` | Rule 1's path-based risk floor, reusing `plan validate`'s `scanRiskFloor` (capped at 8 reasons — a plan:v1 artifact is comment-sourced, untrusted input) | requires a `plan:v1` artifact already on the issue |
 | `file-count` | Rule 5, "Predicted files > 8" | requires a `plan:v1` artifact already on the issue |
 | `open-dependency` | Rule 9, an open `Depends on #N` outside `--submitted-set` (capped at 8 reasons; refs themselves capped at 32 per issue — an issue body is untrusted input) | resolved via `gh issue view <N> --json state` |
@@ -1361,7 +1392,7 @@ substitutes `{issue}` and `{gen}`; `dispatch.tiers.<tier>` — `{command?, model
 — overrides the command/model/prompt for one tier only, #527, falling back to the
 top-level `command`/`tier_models`/`prompt` shorthand for any field left unset;
 `dispatch.suite_command` — an argv array for the aggregate batch-suite command, #562, the
- middle tier of an active `cap run test.full` (manifest) → `dispatch.suite_command` → a repo-detected
+ middle tier of an active `cap run gate.batch` (#777) → an active `cap run test.full` (manifest) → `dispatch.suite_command` → a repo-detected
 safe default; run exactly as given, never with extra flags appended — set this when the
 repo's `test` script delegates to something that cannot take a reporter flag and there is
  no `.dossier/automation/` manifest to declare an active `test.full` in instead; its
