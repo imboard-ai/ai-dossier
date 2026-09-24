@@ -526,7 +526,7 @@ export function registerBatchCommand(program: Command): void {
     )
     .option(
       '--rules <rules>',
-      "Admission rules: 'v2' (current #770 rules: risk-floor issues join as review=full members) or 'legacy' (pre-#770: any risk keyword excludes)",
+      "Admission rules: 'v2' (current #770 rules: risk-floor, deploy-pipeline and >8-file issues join as review=full members) or 'legacy' (pre-#770: any risk keyword, plan:v1 risk-floor path or >8 predicted files excludes)",
       'v2'
     )
     .option('--json', `Machine-readable output (schema ${COMPOSE_SCHEMA})`)

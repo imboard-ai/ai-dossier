@@ -1163,7 +1163,7 @@ ai-dossier batch compose --backlog [--label backend]... [--search "no:assignee"]
 | `--base <branch>` | `main` | The base branch every member shares |
 | `--min-members <n>` / `--max-members <n>` | 3 / 6 | Minimum viable batch / member ceiling (≤ 6) |
 | `--max-full-review <n>` | sched config `max_full_review_members`, else 2 | Per-batch `review=full` cap (#771) |
-| `--rules v2\|legacy` | `v2` | `legacy` replays pre-#770 admission (any risk keyword ⇒ `mode=full` ⇒ excluded) for comparison |
+| `--rules v2\|legacy` | `v2` | `legacy` replays pre-#770 admission for comparison: any risk keyword (`legacy-full`), a plan:v1 risk-floor path or > 8 predicted files (`prescreen-full`) excludes |
 | `--repo`, `--project` | cwd repo, `owner-name` | Target repo; sched project whose queue/config is read |
 
 At least one of `--issues` / `--backlog` is required. With `--issues` alone, the backlog is
@@ -1188,7 +1188,8 @@ after the caps, so five admissible `review=full` picks (cap 2) still trigger bac
 | `prescreen-full` | A `prescreen:v4` excluding check not already reported under its own code — none today: a plan:v1 risk-floor path (#805) and > 8 predicted files (#818) are `review=full` members, not exclusions. Under `--rules legacy` it reports a path-floor or file-count hit (pre-#770 admission) |
 | `legacy-full` | `--rules legacy` only: any text-floor keyword anywhere in title/body/labels |
 
-`--rules legacy` replays only the pre-#770 keyword rule on top of today's readiness screen (the
+`--rules legacy` replays only the pre-#770 floor rules — any risk keyword, a plan:v1 risk-floor
+path, > 8 predicted files — on top of today's readiness screen (the
 other codes above still apply) — it is a comparison of the admission rule, not a full replay of
 the old pipeline, which also ran a model classifier no deterministic check reproduces.
 

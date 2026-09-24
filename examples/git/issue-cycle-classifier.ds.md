@@ -56,13 +56,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "ae6fa55969e195fe6ceb22dbdc3084da25944427e087bb3767ac41ae08a97f01"
+    "hash": "8acde52bddea816b41ec55febf6995e80ccf08665eccdc89b951f5dd23093ecb"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "T+muesAX1b/WazqfnDorUK21wo/czhC7+DuEGZLOe2CZJooFV/f6usyqIjTAnP1IKA27LvM+IoncMKk6y8f1BQ==",
+    "signature": "Ljo2b9TRID9lxPjqy+u7B162r9loqlYk1F9jTzHJmtii5oC6hG+flNb6Sb/16KZlUQyZFtDW2V48SdCcSlj8BA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-24T15:56:46.146Z",
+    "signed_at": "2026-09-24T16:00:32.398Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -212,8 +212,9 @@ issue is batchable as a `review=full` member (at most 2 per batch — the schedu
 cap). Rule 8 (visual/browser) stays a mode floor: the batch gate has no browser stage.
 The one exception inside rule 1's territory: production data mutation or production ops (secret/SSM
 writes, DNS, prod DB writes) is rule 7, a mode floor.
-**Uncertainty on one of THESE rules ⇒ full** — a floor rule you cannot evaluate counts as a
-hit; this is unrelated to Step 4b's confidence escalation, which exists precisely so that
+**Uncertainty on one of THESE rules counts as a hit** — on a MODE floor (2, 3, 6–10) that
+means `mode=full`, on a REVIEW floor (1, 4, 5) it means `review=full` — a floor rule you cannot
+evaluate counts as a hit; this is unrelated to Step 4b's confidence escalation, which exists precisely so that
 "I can't tell without looking" is answered by one bounded look, not an automatic `full`.
 
 1. **Risk-floor area** *(review floor — hit ⇒ `review=full`, not `mode=full`)*: any predicted path touches auth, payment/billing, migrations, `.github/**`, security, crypto, secrets, or infra/terraform (review-issue Stage 1 list, verbatim), or Step 3 returned `review: full`
