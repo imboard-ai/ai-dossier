@@ -1768,7 +1768,16 @@ export type JournalEventName =
   // dissolving.
   | 'dissolve-suppressed'
   // #810: an operator requeued a parked member (`sched requeue`).
-  | 'member-requeued';
+  | 'member-requeued'
+  // #791: a `done` batch's `worktree`/`member_worktree` ledger field (and its
+  // paired `pool_claimed`/`member_pool_claimed`) cleared on DEFINITIVE
+  // evidence — the path no longer exists on disk, or the pool itself reports
+  // it back as a warm spare — so `sched status`'s kept-worktree warning does
+  // not persist after the operator's cleanup already happened. Ledger-only:
+  // this event never accompanies a `git worktree remove` or `worktree-pool
+  // return` the engine ran itself — it only observed the state was already
+  // gone.
+  | 'kept-worktree-cleared';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —

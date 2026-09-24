@@ -1,9 +1,18 @@
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  buildKeptWorktreeWarnings,
   buildStatusReport,
   buildStatusWarnings,
   createEmptyState,
+  defaultKeptWorktreeReader,
   enqueueEntries,
+  KEPT_WORKTREE_PROBE_LIMIT,
+  type KeptWorktreeReader,
+  keptWorktreeCandidates,
+  POOL_ARGS_PREFIX,
+  POOL_BIN,
   parkMember,
   patchBatch,
   type SchedState,
@@ -548,5 +557,349 @@ describe('#768 status: the open-anchor sweep is report-only', () => {
     });
     expect(report.anchors).toEqual([]);
     expect(reads).toEqual([]);
+  });
+});
+
+describe('#791: kept-worktree warning', () => {
+  const WORKTREE = '/repo/worktrees/batch-b1-20260924';
+  const POOL_REMEDY_PREFIX = `${POOL_BIN} ${POOL_ARGS_PREFIX.join(' ')} return --path`;
+  /** A path that actually exists on this machine — needed once `defaultKeptWorktreeReader` starts calling real `fs.realpathSync`. */
+  const REAL_DIR = os.tmpdir();
+
+  /** `seeded()`'s slot batch `b1`, patched to `done` with a kept worktree. */
+  function doneBatchWithWorktree(
+    patch: Partial<{ worktree: string | null; pool_claimed: boolean }> = {}
+  ): SchedState {
+    const state = seeded();
+    return {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id === 'b1'
+          ? { ...b, status: 'done', worktree: WORKTREE, pool_claimed: false, ...patch }
+          : b
+      ),
+    };
+  }
+
+  it('AC1/AC5: a done batch with `worktree` set warns; the same batch not-done does not', () => {
+    const done = doneBatchWithWorktree();
+    const candidates = keptWorktreeCandidates(done);
+    expect(candidates).toEqual([
+      { batch: 'b1', field: 'worktree', path: WORKTREE, poolClaimed: false },
+    ]);
+
+    const blocked = {
+      ...done,
+      batches: done.batches.map((b) => (b.id === 'b1' ? { ...b, status: 'blocked' } : b)),
+    };
+    expect(keptWorktreeCandidates(blocked)).toEqual([]);
+  });
+
+  it('AC1: a done batch with only `member_worktree` set warns for that field', () => {
+    const state = seeded();
+    const withMember: SchedState = {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id === 'b1'
+          ? { ...b, status: 'done', member_worktree: WORKTREE, member_pool_claimed: true }
+          : b
+      ),
+    };
+    expect(keptWorktreeCandidates(withMember)).toEqual([
+      { batch: 'b1', field: 'member_worktree', path: WORKTREE, poolClaimed: true },
+    ]);
+  });
+
+  it('a candidate whose path is still held by a non-done (in-flight) batch is skipped (#791 supportability review finding 5)', () => {
+    // b1 is `done` and kept WORKTREE; enqueue a second in-flight batch b2
+    // that has since claimed the very same path (a returned pool worktree
+    // re-issued to a fresh batch before b1's ledger field was cleared).
+    let withB1 = doneBatchWithWorktree();
+    withB1 = enqueueEntries(withB1, [{ issue: 301, mode: 'slot', batch: 'b2' }], NOW);
+    withB1 = {
+      ...withB1,
+      batches: withB1.batches.map((b) =>
+        b.id === 'b2' ? { ...b, status: 'executing', worktree: WORKTREE, pool_claimed: true } : b
+      ),
+    };
+    expect(keptWorktreeCandidates(withB1)).toEqual([]);
+
+    // Once b2 no longer holds that path, b1's candidate reappears.
+    const b2Released = {
+      ...withB1,
+      batches: withB1.batches.map((b) => (b.id === 'b2' ? { ...b, worktree: null } : b)),
+    };
+    expect(keptWorktreeCandidates(b2Released)).toEqual([
+      { batch: 'b1', field: 'worktree', path: WORKTREE, poolClaimed: false },
+    ]);
+  });
+
+  it('AC2: a missing path reports the path is gone and clears automatically, no destructive remedy implied', () => {
+    const reader: KeptWorktreeReader = { exists: () => false, hasLocalWork: () => false };
+    const [w] = buildKeptWorktreeWarnings(keptWorktreeCandidates(doneBatchWithWorktree()), reader);
+    expect(w).toMatchObject({ kind: 'kept-worktree', batch: 'b1' });
+    expect(w.message).toContain('no longer exists on disk');
+    expect(w.remedy).toContain('no local cleanup needed');
+  });
+
+  it('#791 maintainability review finding 3: `exists()` throwing means "could not be checked", never "gone"', () => {
+    const reader: KeptWorktreeReader = {
+      exists: () => {
+        throw new Error('EACCES');
+      },
+      hasLocalWork: () => false,
+    };
+    const [w] = buildKeptWorktreeWarnings(keptWorktreeCandidates(doneBatchWithWorktree()), reader);
+    expect(w.message).toContain('could not be checked');
+    expect(w.message).not.toContain('no longer exists on disk');
+    expect(w.remedy).not.toContain('no local cleanup needed');
+  });
+
+  it('AC3: pool-claimed picks the pool-return remedy (built from POOL_BIN/POOL_ARGS_PREFIX); cold picks git worktree remove', () => {
+    const exists: KeptWorktreeReader['exists'] = () => true;
+    const clean: KeptWorktreeReader['hasLocalWork'] = () => false;
+
+    const [cold] = buildKeptWorktreeWarnings(
+      keptWorktreeCandidates(doneBatchWithWorktree({ pool_claimed: false })),
+      { exists, hasLocalWork: clean }
+    );
+    expect(cold.remedy).toBe(`git worktree remove ${WORKTREE}`);
+
+    const [pooled] = buildKeptWorktreeWarnings(
+      keptWorktreeCandidates(doneBatchWithWorktree({ pool_claimed: true })),
+      { exists, hasLocalWork: clean }
+    );
+    // Not `ai-dossier worktree-pool return` — that binary does not exist
+    // (#791 DRY/documentation review finding 1).
+    expect(pooled.remedy).toBe(`${POOL_REMEDY_PREFIX} ${WORKTREE}`);
+    expect(pooled.message).toContain('pool claim held indefinitely');
+  });
+
+  it('#791 security review finding 1: a worktree path with a space is shell-quoted in every remedy', () => {
+    const SPACEY = '/repo/worktrees/batch b1 20260924';
+    const exists: KeptWorktreeReader['exists'] = () => true;
+    const clean: KeptWorktreeReader['hasLocalWork'] = () => false;
+    const state = doneBatchWithWorktree({ worktree: SPACEY, pool_claimed: false });
+
+    const [cold] = buildKeptWorktreeWarnings(keptWorktreeCandidates(state), {
+      exists,
+      hasLocalWork: clean,
+    });
+    expect(cold.remedy).toBe(`git worktree remove '${SPACEY}'`);
+
+    const pooledState = doneBatchWithWorktree({ worktree: SPACEY, pool_claimed: true });
+    const [pooled] = buildKeptWorktreeWarnings(keptWorktreeCandidates(pooledState), {
+      exists,
+      hasLocalWork: clean,
+    });
+    expect(pooled.remedy).toBe(`${POOL_REMEDY_PREFIX} '${SPACEY}'`);
+  });
+
+  it('AC4: dirty/unpushed is flagged unsafe; clean+pushed is flagged safe', () => {
+    const candidates = keptWorktreeCandidates(doneBatchWithWorktree());
+
+    const [dirty] = buildKeptWorktreeWarnings(candidates, {
+      exists: () => true,
+      hasLocalWork: () => true,
+    });
+    expect(dirty.message).toContain('uncommitted changes or commits not on any remote branch');
+    expect(dirty.remedy).toContain('commit/push first');
+
+    const [clean] = buildKeptWorktreeWarnings(candidates, {
+      exists: () => true,
+      hasLocalWork: () => false,
+    });
+    expect(clean.message).toContain('clean and fully pushed');
+    expect(clean.remedy).toBe(`git worktree remove ${WORKTREE}`);
+  });
+
+  it('AC6: a git probe failure (or a throwing reader) reports unknown and never throws', () => {
+    const candidates = keptWorktreeCandidates(doneBatchWithWorktree());
+
+    const [nullResult] = buildKeptWorktreeWarnings(candidates, {
+      exists: () => true,
+      hasLocalWork: () => null,
+    });
+    expect(nullResult.message).toContain('could not be checked');
+
+    const [thrown] = buildKeptWorktreeWarnings(candidates, {
+      exists: () => true,
+      hasLocalWork: () => {
+        throw new Error('boom');
+      },
+    });
+    expect(thrown.message).toContain('could not be checked');
+
+    expect(() =>
+      buildKeptWorktreeWarnings(candidates, {
+        exists: () => {
+          throw new Error('boom');
+        },
+        hasLocalWork: () => false,
+      })
+    ).not.toThrow();
+
+    // buildStatusReport itself must not throw or omit other warnings when the
+    // reader is unhealthy.
+    const report = buildStatusReport(
+      doneBatchWithWorktree(),
+      { max_slots: 3 },
+      'p',
+      null,
+      NOW,
+      undefined,
+      {
+        exists: () => true,
+        hasLocalWork: () => {
+          throw new Error('boom');
+        },
+      }
+    );
+    expect(report.warnings).toHaveLength(1);
+    expect(report.warnings[0].kind).toBe('kept-worktree');
+  });
+
+  it("#791 supportability review finding 3: a kept path that is no longer its own worktree root reports unknown, not the enclosing repo's status", () => {
+    const calls: Array<{ file: string; args: string[] }> = [];
+    const exec = (file: string, args: string[]): string | null => {
+      calls.push({ file, args });
+      if (args[0] === 'rev-parse') return path.dirname(REAL_DIR); // an ENCLOSING dir, not REAL_DIR itself
+      if (args.includes('status')) return ''; // would report "clean" if trusted — must not be reached
+      return null;
+    };
+    const reader = defaultKeptWorktreeReader(exec, () => true);
+    expect(reader.hasLocalWork(REAL_DIR)).toBeNull();
+    // The mismatch is caught before any status/log call.
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args[0]).toBe('rev-parse');
+  });
+
+  it('AC7 (+ #791 review findings 2/4): the real reader runs only read-only, HEAD-scoped, lock-safe git probes — never a destructive command', () => {
+    const calls: Array<{ file: string; args: string[] }> = [];
+    const exec = (file: string, args: string[]): string | null => {
+      calls.push({ file, args });
+      if (args[0] === 'rev-parse') return REAL_DIR; // its own toplevel — passes containment
+      if (args.includes('status')) return ''; // clean
+      if (args[0] === 'log') return ''; // nothing unpushed
+      return null;
+    };
+    const reader = defaultKeptWorktreeReader(exec, () => true);
+    const result = reader.hasLocalWork(REAL_DIR);
+    expect(result).toBe(false);
+
+    expect(calls).toHaveLength(3);
+    const DESTRUCTIVE =
+      /\bworktree\s+(remove|prune)\b|\bworktree-pool\b|\bclean\b|\breset\b|\bcheckout\b|\bstash\b|\breturn\b|\bgc\b/;
+    for (const call of calls) {
+      expect(call.file).toBe('git');
+      expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
+    }
+    expect(calls[0].args).toEqual(['rev-parse', '--show-toplevel']);
+    expect(calls[1].args).toEqual(['--no-optional-locks', 'status', '--porcelain']);
+    // HEAD-scoped, not `--branches` (which would read every local branch in
+    // the shared repo, including unrelated worktrees' — #791 supportability
+    // and maintainability review).
+    expect(calls[2].args).toEqual(['log', 'HEAD', '--not', '--remotes', '--oneline']);
+  });
+
+  it('a full sweep over multiple kept worktrees never invokes a destructive git/worktree/pool command (#791 review — replaces a prior vacuous test)', () => {
+    const calls: Array<{ file: string; args: string[] }> = [];
+    const exec = (file: string, args: string[]): string | null => {
+      calls.push({ file, args });
+      if (args[0] === 'rev-parse') return REAL_DIR;
+      if (args.includes('status')) return ' M dirty-file'; // dirty — exercises the unsafe path too
+      if (args[0] === 'log') return 'abc123 unpushed commit';
+      return null;
+    };
+    const fsCalls: string[] = [];
+    const fsExists = (p: string) => {
+      fsCalls.push(p);
+      return true;
+    };
+    const reader = defaultKeptWorktreeReader(exec, fsExists);
+
+    let state = seeded();
+    state = enqueueEntries(state, [{ issue: 302, mode: 'slot', batch: 'b3' }], NOW);
+    state = {
+      ...state,
+      batches: state.batches.map((b) => {
+        if (b.id === 'b1') {
+          return { ...b, status: 'done', worktree: REAL_DIR, pool_claimed: true };
+        }
+        if (b.id === 'b3') {
+          return {
+            ...b,
+            status: 'done',
+            member_worktree: REAL_DIR,
+            member_pool_claimed: false,
+          };
+        }
+        return b;
+      }),
+    };
+
+    const warnings = buildKeptWorktreeWarnings(keptWorktreeCandidates(state), reader);
+    expect(warnings.length).toBeGreaterThan(0);
+    expect(fsCalls.length).toBeGreaterThan(0);
+
+    const DESTRUCTIVE =
+      /\bworktree\s+(remove|prune)\b|\bworktree-pool\b|\bclean\b|\breset\b|\bcheckout\b|\bstash\b|\breturn\b|\bgc\b/;
+    for (const call of calls) {
+      expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
+    }
+    // Every remedy STRING may legitimately mention `worktree remove` /
+    // `worktree-pool ... return` — that text is for a human to run by hand,
+    // never executed here. The assertion above is over `calls` (what this
+    // pass actually RAN), not over the warnings' remedy text.
+
+    // Revert-proof (manual, not re-run automatically): temporarily adding a
+    // `exec('git', ['worktree', 'remove', '--force', REAL_DIR])` call inside
+    // `defaultKeptWorktreeReader` and re-running this test makes the
+    // assertion above fail — confirmed during implementation, then reverted.
+  });
+
+  it('#791 supportability review finding 7: probing is capped, the remainder is reported as not-probed without being probed', () => {
+    let state = seeded();
+    const manyIssues = Array.from({ length: KEPT_WORKTREE_PROBE_LIMIT + 3 }, (_, i) => ({
+      issue: 400 + i,
+      mode: 'slot' as const,
+      batch: `bx${i}`,
+    }));
+    state = enqueueEntries(state, manyIssues, NOW);
+    state = {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id.startsWith('bx')
+          ? {
+              ...b,
+              status: 'done' as const,
+              worktree: `/repo/worktrees/${b.id}`,
+              pool_claimed: false,
+            }
+          : b
+      ),
+    };
+    const candidates = keptWorktreeCandidates(state);
+    expect(candidates.length).toBe(KEPT_WORKTREE_PROBE_LIMIT + 3);
+
+    let probeCalls = 0;
+    const reader: KeptWorktreeReader = {
+      exists: () => {
+        probeCalls++;
+        return true;
+      },
+      hasLocalWork: () => false,
+    };
+    const warnings = buildKeptWorktreeWarnings(candidates, reader);
+    expect(warnings).toHaveLength(candidates.length);
+    expect(probeCalls).toBe(KEPT_WORKTREE_PROBE_LIMIT);
+    const overflowWarnings = warnings.filter((w) => w.message.includes('not probed'));
+    expect(overflowWarnings).toHaveLength(3);
+  });
+
+  it('AC8: omitting the reader is the default — no kept-worktree warnings, and nothing is executed', () => {
+    const state = doneBatchWithWorktree();
+    const report = buildStatusReport(state, { max_slots: 3 }, 'p', null, NOW);
+    expect(report.warnings.filter((w) => w.kind === 'kept-worktree')).toEqual([]);
   });
 });
