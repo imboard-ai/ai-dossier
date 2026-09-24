@@ -26,6 +26,7 @@ import {
   evictMemberAndContinue,
   memberBranchFor,
   memberDispatchModeFor,
+  reconcileStaleBlockedBatches,
 } from '../batch-dispatch';
 // Same rationale as the `evictMemberAndContinue` import above: a test-only
 // path builder, not part of the package's public `index.ts` surface.
@@ -2885,15 +2886,52 @@ describe('#789: automatic detection of a hand-opened batch PR the ledger never r
     }, 60_000);
   }
 
-  it('negative: an unreachable lookup (gh failure, or no verified repo to ask at all) touches nothing', async () => {
-    // No `setMergedPrsTruth` fixture at all — the fake's `mergedPrForBranch`
-    // returns `undefined` exactly like a failed `gh pr list` call.
+  it('negative: an unreachable lookup (gh failure) fails closed — a REAL candidate PR on disk is not adopted, and a prior ambiguity streak is left untouched (unreachable ≠ verified none)', async () => {
     const { h, batchId } = await blockedBatchHarness('b-789-unreachable', 7950, 7951);
+    const batch = findBatch(h.state(), batchId);
+    const branch = batch?.branch as string;
+    const createdAt = afterBatchCreated(h, batchId);
+    const fixturePath = path.join(h.truthDir, `merged-prs.${mergedPrFixtureSlug(branch)}.json`);
+
+    // First establish a real ambiguity streak (a WORKING fixture, two
+    // candidates) — this is the state whose marker must survive an
+    // unreachable tick untouched, since only a VERIFIED `none` may clear it.
+    setMergedPrsTruth(h.truthDir, branch, [
+      {
+        number: 4270,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      },
+      {
+        number: 4271,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      },
+    ]);
+    h.tick();
+    const ambiguous = findBatch(h.state(), batchId);
+    expect(ambiguous?.pr_detect_ambiguous_reason).not.toBeNull();
+    const sinceBefore = ambiguous?.pr_detect_ambiguous_since;
+
+    // Now corrupt the SAME fixture — simulates a garbled/failed `gh pr list`
+    // response on the next tick. If a real candidate PR existed on disk (it
+    // does — the two above), a lookup that failed closed must still adopt
+    // NEITHER of them; unlike `[]` (verified none), it must also NOT clear
+    // the ambiguity streak it cannot re-verify.
+    fs.writeFileSync(fixturePath, 'not valid json {{{');
     const result = h.tick();
     expect(result.mergeAccepted).not.toContain(`batch:${batchId}`);
-    const batch = findBatch(h.state(), batchId);
-    expect(batch?.pr).toBeNull();
-    expect(batch?.status).toBe('blocked');
+    const after = findBatch(h.state(), batchId);
+    expect(after?.pr).toBeNull();
+    expect(after?.status).toBe('blocked');
+    expect(after?.pr_detect_ambiguous_reason).not.toBeNull(); // untouched, not cleared
+    expect(after?.pr_detect_ambiguous_since).toBe(sinceBefore);
   }, 60_000);
 
   it('negative: no verified project repo (mergedPrForBranch absent from GroundTruth) → the lookup is never attempted', async () => {
@@ -3040,6 +3078,140 @@ describe('#789: automatic detection of a hand-opened batch PR the ledger never r
         .some((e) => e.event === 'anchor-closed' && e.unit === `batch:${batchId}`)
     ).toBe(false);
   }, 60_000);
+});
+
+/**
+ * #789 review: a lightweight harness for `reconcileStaleBlockedBatches`'s
+ * `pr-detect-ambiguous` dedup marker — calls the reconcile function
+ * DIRECTLY (exported for exactly this, like `evictMemberAndContinue`/
+ * `memberBranchFor` above are — "not part of the package's public
+ * `index.ts` surface") instead of a full `runBatchTick`, so moving the
+ * batch to a non-`blocked` status between calls never risks that OTHER
+ * status's own dispatch machinery (a real `executing` batch would try to
+ * spawn a member) — this harness asserts ONLY the one thing under test: the
+ * marker's behavior across a status that leaves and re-enters `blocked`.
+ */
+function prDetectAmbiguousHarness(memberIssue: number, batchId: string, branch: string) {
+  const store = new SchedStore(tmpDir('sched-batch-ambiguous-'));
+  const journal = new Journal(store.dir);
+  const setupAt = new Date('2026-09-13T00:00:00.000Z');
+  let currentNow = setupAt;
+
+  let state = enqueueEntries(
+    store.load(),
+    [{ issue: memberIssue, mode: 'slot', batch: batchId, anchor: null }],
+    setupAt
+  );
+  for (const to of ['classified', 'batched', 'waiting', 'in-work', 'committed'] as const) {
+    state = transitionIssue(state, memberIssue, to, {}, setupAt);
+  }
+  // `enqueueEntries` lands a freshly-formed batch straight at `ready` — patch
+  // `branch`/`base_branch` on the next legal edge instead of re-entering `ready`.
+  state = transitionBatch(state, batchId, 'executing', { branch, base_branch: 'main' }, setupAt);
+  state = transitionBatch(
+    state,
+    batchId,
+    'blocked',
+    { blocked_reason: 'gate-inconclusive:test.focused' },
+    setupAt
+  );
+  store.withLock(() => ({ state, result: undefined }));
+
+  let lookup: MergedPrLookup | undefined;
+  const groundTruth = stubGroundTruth({ mergedPrForBranch: () => lookup });
+  const deps: BatchDispatchDeps = {
+    store,
+    journal,
+    groundTruth,
+    spawnDeps: {
+      spawn: () => {
+        throw new Error('must not spawn in this test');
+      },
+      kill: () => true,
+      isAlive: () => true,
+      processStart: () => null,
+    },
+    now: () => currentNow,
+    repoDir: store.dir,
+    exec: () => {
+      throw new Error('must not exec in this test');
+    },
+    runSuite: () => {
+      throw new Error('must not run the aggregate suite in this test');
+    },
+  };
+  const emptyTickResult: BatchTickResult = {
+    spawned: [],
+    completed: [],
+    parked: [],
+    mergeAccepted: [],
+    failed: [],
+    reconciliation_errors: [],
+    blocked: [],
+  };
+
+  return {
+    journal,
+    store,
+    setLookup: (l: MergedPrLookup | undefined) => {
+      lookup = l;
+    },
+    /** Move the batch to `to` via the real transition rail (a legal `BATCH_TRANSITIONS` edge from its current status) — no reconcile pass runs; only `reconcileStaleBlockedBatches` below observes the change. */
+    transitionTo: (to: 'executing' | 'blocked') => {
+      store.withLock((s) => ({
+        state: transitionBatch(
+          s,
+          batchId,
+          to,
+          to === 'blocked' ? { blocked_reason: 'gate-inconclusive:test.focused' } : {},
+          currentNow
+        ),
+        result: undefined,
+      }));
+    },
+    advanceNow: (at: string) => {
+      currentNow = new Date(at);
+    },
+    batch: () => findBatch(store.load(), batchId),
+    reconcile: () => reconcileStaleBlockedBatches(deps, currentNow, emptyTickResult, undefined),
+  };
+}
+
+describe('#789 review: pr-detect-ambiguous is scoped to ONE blocked stretch, like pr-watch-failed', () => {
+  it('a streak recorded, then the batch LEAVES blocked and RETURNS to blocked with the same candidates: journals a fresh first line, not a continued streak', () => {
+    const h = prDetectAmbiguousHarness(7980, 'b-789-resume-reblock', 'batch/b-789-resume-reblock');
+    h.setLookup({ kind: 'ambiguous', matches: [100, 101] });
+
+    h.reconcile();
+    let events = h.journal.read().filter((e) => e.event === 'pr-detect-ambiguous');
+    expect(events).toHaveLength(1);
+    expect((events[0] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+    const firstSince = (events[0] as unknown as { since: string }).since;
+    expect(h.batch()?.pr_detect_ambiguous_reason).not.toBeNull();
+
+    // The real resume rail: `blocked -> executing` (#583's own edge) — a
+    // passing gate recheck would normally continue the member loop from
+    // here; this test only needs the batch to genuinely LEAVE `blocked`.
+    h.advanceNow('2026-09-13T01:00:00.000Z');
+    h.transitionTo('executing');
+    h.reconcile(); // status='executing' now — the marker must clear here
+    expect(h.batch()?.pr_detect_ambiguous_reason).toBeNull();
+    expect(h.batch()?.pr_detect_ambiguous_since).toBeNull();
+    expect(h.batch()?.pr_detect_ambiguous_ticks).toBe(0);
+
+    // Re-blocked (e.g. the recheck itself failed again for an unrelated
+    // reason) with the SAME two candidate PRs still matching.
+    h.advanceNow('2026-09-13T02:00:00.000Z');
+    h.transitionTo('blocked');
+    h.reconcile();
+
+    events = h.journal.read().filter((e) => e.event === 'pr-detect-ambiguous');
+    expect(events).toHaveLength(2); // NOT a continued streak
+    expect((events[1] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+    const secondSince = (events[1] as unknown as { since: string }).since;
+    expect(secondSince).not.toBe(firstSince);
+    expect(h.batch()?.pr_detect_ambiguous_ticks).toBe(1);
+  });
 });
 
 // --- #768: batch anchors close off the happy path — only on positive evidence ---

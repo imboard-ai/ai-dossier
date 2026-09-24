@@ -306,6 +306,8 @@ export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone 
  * - `git ls-remote origin <branch>` — branch head
  * - `gh pr view <n> --json state,mergedAt,mergeable,labels` — parked-PR state (#468)
  * - `gh issue view N --json comments` — the setup milestone's teardown keys (#468)
+ * - `gh pr list -R <repo> --head <branch> --base <base> --state merged --json ...` —
+ *   merged-PR detection (#789, only when `opts.repo` is a verified project repo)
  *
  * `repoDir` is the cwd for git; gh resolves the repo from cwd by default.
  * Every failure degrades safely: a failed milestone/PR poll reports UNREACHABLE
@@ -320,9 +322,9 @@ export function createExecGroundTruth(
     runstateBin?: string;
     /**
      * #768: the `owner/name` repository issue closure is read from. Without
-     * it `issueCloseTruth` is not provided at all — the anchor close never
-     * resolves a repo from the cwd, which may not be the project's (see
-     * `resolveProjectRepo`).
+     * it neither `issueCloseTruth` (#768) nor `mergedPrForBranch` (#789) is
+     * provided at all — neither resolves a repo from the cwd, which may not
+     * be the project's (see `resolveProjectRepo`).
      */
     repo?: string;
   } = {}
@@ -644,6 +646,26 @@ export function parsePrViewJson(stdout: string | null): PrTruth | null {
 }
 
 /**
+ * Parse a `gh ... list --json ...` payload into its item array — the shared
+ * opening every gh-list parser in this file repeats: null/empty stdout and
+ * invalid JSON are `undefined` (unreachable, never a verified empty list),
+ * and `unwrapList` accepts gh's `{ "<key>": [...] }` wrapper as well as a
+ * bare array (#496). `undefined` here always means the SAME thing it means
+ * to every caller: nothing was verified, so change nothing (#789 review —
+ * one parser opening that gets tightened once instead of per copy).
+ */
+function parseGhList(stdout: string | null, key: string): unknown[] | undefined {
+  if (stdout === null || stdout.trim() === '') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  return unwrapList(parsed, key) ?? undefined;
+}
+
+/**
  * Parse the stdout of
  * `gh pr list --head <branch> --state open --json number,headRefName,isCrossRepository`
  * (#596) into the number of an open PR the fleet itself opened from `branch`.
@@ -673,18 +695,8 @@ export function parseOpenPrListJson(
   stdout: string | null,
   branch?: string
 ): number | null | undefined {
-  if (stdout === null || stdout.trim() === '') return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return undefined;
-  }
-  // `unwrapList` accepts gh's `{ "<key>": [...] }` wrapper as well as the
-  // bare array (#496) — the same shape tolerance every other gh-list parser
-  // in this file already has.
-  const list = unwrapList(parsed, 'pullRequests');
-  if (list === null) return undefined;
+  const list = parseGhList(stdout, 'pullRequests');
+  if (list === undefined) return undefined;
   for (const item of list) {
     if (item === null || typeof item !== 'object') continue;
     const pr = item as Record<string, unknown>;
@@ -726,15 +738,8 @@ export function parseMergedPrListJson(
   base: string,
   createdAtOrAfter: string
 ): MergedPrLookup | undefined {
-  if (stdout === null || stdout.trim() === '') return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return undefined;
-  }
-  const list = unwrapList(parsed, 'pullRequests');
-  if (list === null) return undefined;
+  const list = parseGhList(stdout, 'pullRequests');
+  if (list === undefined) return undefined;
   const thresholdMs = Date.parse(createdAtOrAfter);
   if (!Number.isFinite(thresholdMs)) return undefined; // an unparseable threshold verifies nothing
   const matches: { pr: number; mergedAt: string }[] = [];
@@ -744,7 +749,16 @@ export function parseMergedPrListJson(
     if (pr.isCrossRepository === true) continue; // a fork's PR — not ours
     if (pr.headRefName !== branch) continue;
     if (pr.baseRefName !== base) continue;
-    if (typeof pr.mergedAt !== 'string' || pr.mergedAt === '') continue;
+    // #789 review (security hardening): a non-empty string alone is not
+    // "merged" — require it to parse as a real date too, the same standard
+    // `createdAt` below is already held to.
+    if (
+      typeof pr.mergedAt !== 'string' ||
+      pr.mergedAt === '' ||
+      !Number.isFinite(Date.parse(pr.mergedAt))
+    ) {
+      continue;
+    }
     if (typeof pr.createdAt !== 'string') continue;
     const createdMs = Date.parse(pr.createdAt);
     if (!Number.isFinite(createdMs) || createdMs < thresholdMs) continue;

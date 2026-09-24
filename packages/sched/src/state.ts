@@ -354,6 +354,34 @@ function validateDedupMarker(
   }
 }
 
+/**
+ * A `<prefix>_reason`/`_since`/`_ticks` dedup marker (#630/#768/#789) — the
+ * three families (`pr_watch_failed_*`, `anchor_close_failed_*`,
+ * `pr_detect_ambiguous_*`) share one shape: a reason string-or-null, the
+ * `since`/`ticks` pair `validateDedupMarker` already checks, and a "both
+ * null or both set" agreement between `reason` and `since`. This is that
+ * shape checked once, so a fourth marker family never needs a fourth
+ * hand-copied block (#789 review). Error text is built from `prefix` and is
+ * byte-identical to each family's original, hand-written block.
+ */
+function validateReasonDedupMarker(
+  record: Record<string, unknown>,
+  label: string,
+  prefix: string
+): void {
+  const reasonKey = `${prefix}_reason`;
+  const sinceKey = `${prefix}_since`;
+  const ticksKey = `${prefix}_ticks`;
+  const reason = record[reasonKey];
+  if (reason !== null && reason !== undefined && typeof reason !== 'string') {
+    throw new Error(`${label}: ${reasonKey} must be a string or null`);
+  }
+  validateDedupMarker(record, label, sinceKey, ticksKey);
+  if (((reason ?? null) === null) !== ((record[sinceKey] ?? null) === null)) {
+    throw new Error(`${label}: ${reasonKey} and ${sinceKey} must agree — null iff null`);
+  }
+}
+
 function validateQueueEntry(data: unknown, where: (n: number) => string): void {
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
     throw new Error(`${where(0)}: entry must be an object`);
@@ -534,14 +562,7 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
   ) {
     throw new Error(`Batch ${id}: rebase_attempts must be a non-negative integer`);
   }
-  if (
-    batch.pr_watch_failed_reason !== null &&
-    batch.pr_watch_failed_reason !== undefined &&
-    typeof batch.pr_watch_failed_reason !== 'string'
-  ) {
-    throw new Error(`Batch ${id}: pr_watch_failed_reason must be a string or null`);
-  }
-  validateDedupMarker(batch, `Batch ${id}`, 'pr_watch_failed_since', 'pr_watch_failed_ticks');
+  validateReasonDedupMarker(batch, `Batch ${id}`, 'pr_watch_failed');
   // #768: a non-date here would read as "anchor already closed" and silently
   // exempt the batch from both the engine's close pass and the sweep.
   if (
@@ -551,57 +572,9 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
   ) {
     throw new Error(`Batch ${id}: anchor_closed_at must be an ISO date string or null`);
   }
-  if (
-    batch.anchor_close_failed_reason !== null &&
-    batch.anchor_close_failed_reason !== undefined &&
-    typeof batch.anchor_close_failed_reason !== 'string'
-  ) {
-    throw new Error(`Batch ${id}: anchor_close_failed_reason must be a string or null`);
-  }
-  validateDedupMarker(
-    batch,
-    `Batch ${id}`,
-    'anchor_close_failed_since',
-    'anchor_close_failed_ticks'
-  );
-  if (
-    ((batch.anchor_close_failed_reason ?? null) === null) !==
-    ((batch.anchor_close_failed_since ?? null) === null)
-  ) {
-    throw new Error(
-      `Batch ${id}: anchor_close_failed_reason and anchor_close_failed_since must agree — null iff null`
-    );
-  }
-  if (
-    ((batch.pr_watch_failed_reason ?? null) === null) !==
-    ((batch.pr_watch_failed_since ?? null) === null)
-  ) {
-    throw new Error(
-      `Batch ${id}: pr_watch_failed_reason and pr_watch_failed_since must agree — null iff null`
-    );
-  }
+  validateReasonDedupMarker(batch, `Batch ${id}`, 'anchor_close_failed');
   // #789: same dedup-marker shape as pr_watch_failed_*/anchor_close_failed_*.
-  if (
-    batch.pr_detect_ambiguous_reason !== null &&
-    batch.pr_detect_ambiguous_reason !== undefined &&
-    typeof batch.pr_detect_ambiguous_reason !== 'string'
-  ) {
-    throw new Error(`Batch ${id}: pr_detect_ambiguous_reason must be a string or null`);
-  }
-  validateDedupMarker(
-    batch,
-    `Batch ${id}`,
-    'pr_detect_ambiguous_since',
-    'pr_detect_ambiguous_ticks'
-  );
-  if (
-    ((batch.pr_detect_ambiguous_reason ?? null) === null) !==
-    ((batch.pr_detect_ambiguous_since ?? null) === null)
-  ) {
-    throw new Error(
-      `Batch ${id}: pr_detect_ambiguous_reason and pr_detect_ambiguous_since must agree — null iff null`
-    );
-  }
+  validateReasonDedupMarker(batch, `Batch ${id}`, 'pr_detect_ambiguous');
 }
 
 /**
@@ -1293,6 +1266,13 @@ export const CLEARED_PR_DETECT_AMBIGUOUS_FIELDS = {
   pr_detect_ambiguous_since: null,
   pr_detect_ambiguous_ticks: 0,
 } as const;
+
+/**
+ * `pr_detect_ambiguous_reason`'s one value (#789 review) — a named constant
+ * rather than a string literal repeated at the site that sets it and every
+ * test that asserts on it, so the two can never drift silently.
+ */
+export const PR_DETECT_AMBIGUOUS_REASON = 'ambiguous-merged-pr' as const;
 
 export const CLEARED_SLOT_FIELDS = {
   unit: null,

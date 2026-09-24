@@ -985,7 +985,9 @@ import {
                          //   runBatchCapability — #523)
   createSpawnDeps,       // real detached-spawn process I/O
   createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec);
-                         //   since #468 also gh pr view PR state + setup info from comments
+                         //   since #468 also gh pr view PR state + setup info from comments;
+                         //   since #789 also mergedPrForBranch when constructed with a
+                         //   verified `repo` (resolveProjectRepo)
   resolveDispatch,       // config → resolved command/prompt/report-prompt/tier-models/timers/
                          //   per-tier spawn specs (tiers — #527)
   buildTierCommand,      // resolved dispatch + tier + issue → argv, using that tier's OWN
@@ -1013,6 +1015,12 @@ import {
   prOfMilestone,         // a milestone's pr= key as a positive integer
   parsePrViewJson,       // gh pr view --json → PR truth (mergedAt/mergeable/blocked label)
   parseOpenPrListJson,   // gh pr list --head <b> --state open → the open PR we opened (#596)
+  parseMergedPrListJson, // gh pr list --head <b> --base <base> --state merged → MergedPrLookup
+                         //   found/none/ambiguous — a hand-opened batch PR the ledger never
+                         //   recorded (#789)
+  type MergedPrLookup,   // { kind: 'found', pr, mergedAt } | { kind: 'none' } |
+                         //   { kind: 'ambiguous', matches } — GroundTruth.mergedPrForBranch's
+                         //   own return type (#789)
   parseSetupInfo,        // gh issue view --json comments → teardown inputs
   runTeardown,           // #468 script teardown for a merged unit (pool return / worktree remove)
   isSafeWorktree,        // worktree-path containment check (CWE-22)
@@ -1069,7 +1077,7 @@ import {
   issueCloseReader, parseIssueCloseTruthJson, parseRepoName,
   resolveProjectRepo,    // #768 owner/name of the cwd repo only when it IS the project's
   hasLabel,              // case-insensitive label match (#768)
-  validateState,         // strict persisted-state validation (1.0.0-1.13.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.23.0 files migrate)
   DEFAULT_ISSUE_PRIORITY, DEFAULT_BATCH_PRIORITY, // priority defaults (0 / 10, #565)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
@@ -1326,15 +1334,25 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   `batch.base_branch`, created at or after the batch's own `created_at`, and not from a
   fork (`GroundTruth.mergedPrForBranch`: `gh pr list -R <repo> --head <branch> --base
   <base> --state merged`, gated on the same verified `resolveProjectRepo` #768 uses —
-  absent entirely without one). Positive evidence only: zero candidates changes
-  nothing, and two or more is `ambiguous` — nothing is recorded, and the ambiguity is
-  journaled (`pr-detect-ambiguous`, deduped like `pr-watch-failed`: once per streak,
-  re-announced every `JOURNAL_DEDUP_REANNOUNCE_TICKS`). On a match, `batch.pr` is
-  recorded as part of the SAME `blocked → merged` transition, so the ordinary
-  `deployed` machinery (item 6 above) dispatches the report agent exactly as if the
+  absent entirely without one). Positive evidence only: zero candidates records
+  nothing and falls through to the branch/members evidence below; two or more is
+  `ambiguous` — no PR is recorded, and only when no OTHER evidence reconciles the
+  batch that same tick is the ambiguity journaled (`pr-detect-ambiguous`, deduped like
+  `pr-watch-failed`: once per `blocked` stretch, re-announced every
+  `JOURNAL_DEDUP_REANNOUNCE_TICKS`; a batch that leaves `blocked` any way — this
+  reconcile's own success, `sched resume --batch`, `sched abandon` — clears the marker,
+  so a later re-block never inherits a stale streak). A batch that still reconciles via
+  `commits-in-base`/`members-closed` does so without a PR and finishes inline, same as
+  before #789. On a match, `batch.pr` is recorded as part of the SAME `blocked →
+  merged` transition (the `stale-failure-reconciled` line then also carries
+  `pr_detected: true`), so the ordinary `deployed` machinery (item 6, "Report dispatch",
+  under "The PR watcher + tail work (#468)" below — shared infrastructure, not
+  per-issue-only despite the section's origin) dispatches the report agent exactly as if the
   fleet had opened the PR itself, and `sched status`'s existing `pr` column shows it.
   Recording `batch.pr` never closes the anchor by itself — that stays #768's own
-  evidence-gated `reconcileAnchorClosure`, unchanged.
+  evidence-gated `reconcileAnchorClosure`, unchanged. An ambiguous match with no
+  explicit way to resolve it today (#824 tracks a `sched attach-pr` verb) still lets the
+  batch reconcile via its other evidence, or falls to `sched abandon --batch`.
 
 Everything else is surfaced, never closed: `sched status --anchors` (opt-in; `status`
 makes no GitHub call without it) lists each still-open anchor of a batch no longer in
