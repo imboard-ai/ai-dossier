@@ -289,7 +289,9 @@ describe('batch amortization (#775)', () => {
       billable_tokens: 1000,
       tokens_per_member: 500,
     });
-    expect(formatAmortizationLine(blocked)).toContain('not shipped (status=blocked)');
+    expect(formatAmortizationLine(blocked)).toContain(
+      'not shipped per state.json (status=blocked)'
+    );
 
     const merged = buildBatchAmortizationSummary({
       batchId: 'b1',

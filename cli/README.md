@@ -1337,7 +1337,8 @@ atomically. `abandon` instead records failure and releases a slot without termin
     Below the table (and as `amortization` in `--json`) a **`Summary:` line** (#775) states
     what the batch amortized: members enqueued / landed / evicted, issues shipped per gate
     run (only once `state.json` has the batch `merged`/`deployed` — a batch PR recovered by
-    hand stays `not shipped` here), billable tokens per member, and tokens by model. The
+    hand stays `not shipped` here; one gate run per PR, a lower bound since CI re-runs are
+    not in `state.json`), billable tokens per member, and tokens by model. The
     repo-wide view, which joins merged `batch/*` PRs so hand-recovered batches count, is the
     **Batch amortization** section of `npm run scorecard` (`scripts/model-scorecard.mjs`).
 

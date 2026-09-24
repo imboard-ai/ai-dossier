@@ -1006,7 +1006,7 @@ export const SCHED_BATCH_ID_RE = /^b-\d{8}-\d{2,}(?:-[a-z])*$/;
 export function batchIdFromBranch(branch) {
   if (typeof branch !== 'string' || !branch.startsWith('batch/')) return null;
   const rest = branch.slice('batch/'.length);
-  if (/-m\d+-\d+$/.test(rest)) return null;
+  if (/^b-\d{8}-\d{2,}(?:-[a-z])*-m\d+-\d+$/.test(rest)) return null;
   const id = rest.replace(/-\d{8}$/, '');
   return id === '' ? null : id;
 }
@@ -1042,10 +1042,10 @@ export function collectBatchAnchors(trails) {
     }
     for (const list of byRun.values()) {
       const id =
-        list.map((m) => m.keys.batch).find((v) => typeof v === 'string' && v !== '') ??
+        list.map((m) => m.keys?.batch).find((v) => typeof v === 'string' && v !== '') ??
         list
           .filter((m) => m.phase === 'batch-setup')
-          .map((m) => batchIdFromBranch(m.keys.branch))
+          .map((m) => batchIdFromBranch(m.keys?.branch))
           .find((v) => v !== null) ??
         null;
       if (id === null) continue;
@@ -1112,10 +1112,20 @@ export function buildBatchRows({
   journalOf = () => null,
   tokensOf = () => null,
 }) {
+  // A manual batch-cycle id can be reused on another day (`batch/m3-20260908`,
+  // `batch/m3-20260915`); key such PRs by their full head so neither PR's shipped issues
+  // are lost. Scheduler ids are unique per day, so they keep the id anchors are keyed by.
+  const idCounts = new Map();
+  for (const pr of prs) {
+    const id = batchIdFromBranch(pr.headRefName);
+    if (id !== null) idCounts.set(id, (idCounts.get(id) ?? 0) + 1);
+  }
   const prById = new Map();
   for (const pr of prs) {
     const id = batchIdFromBranch(pr.headRefName);
-    if (id !== null && !prById.has(id)) prById.set(id, pr);
+    if (id === null) continue;
+    const key = idCounts.get(id) > 1 ? pr.headRefName.slice('batch/'.length) : id;
+    if (!prById.has(key)) prById.set(key, pr);
   }
   const ids = new Set([
     ...[...anchors.values()]
@@ -1169,6 +1179,8 @@ export function buildBatchRows({
       membersEnqueued: enqueued.size > 0 ? enqueued.size : null,
       membersShipped: shipped ? shippedIssues.length : 0,
       shippedIssues,
+      // Every issue the batch touched — excluded from the full-cycle comparison row.
+      memberIssues: [...enqueued].sort((a, b) => a - b),
       evictions: evicted.size,
       gateRuns,
       gateWallClockMinutes: shipped ? minutesBetween(pr.createdAt, pr.mergedAt) : null,
@@ -1273,7 +1285,7 @@ export function aggregateBatchAmortization(batchRows, issueRows) {
   for (const repo of repos) {
     const repoBatches = batchRows.filter((r) => r.repo === repo);
     const batchIssues = new Set(
-      repoBatches.flatMap((r) => [...r.shippedIssues, ...(r.anchor !== null ? [r.anchor] : [])])
+      repoBatches.flatMap((r) => [...r.memberIssues, ...(r.anchor !== null ? [r.anchor] : [])])
     );
     for (const kind of ['sched', 'manual']) {
       const rows = repoBatches.filter((r) => r.kind === kind);
@@ -1364,7 +1376,14 @@ export function renderBatchAmortization(amortization) {
     '- **Prep tokens are not in these figures.** `batch-issues-preparation` (the classifier',
     '  agents that pick members) runs in the operator session, not a scheduler dispatch, and',
     '  nothing ties its tokens to a batch id yet — so cost/tokens per shipped issue here is',
-    '  member + tail/report dispatches only and understates a batch by its prep spend.',
+    '  member + tail/report dispatches only and understates a batch by its prep spend (#796).',
+    '- **A dissolved batch counts every requeued member as evicted** — the dissolve requeues',
+    '  all unshipped members as full-cycle runs, so none of them shipped with the batch.',
+    '- **A hand-recovered batch PR records no `ci_fix_attempts`** and counts as one gate run.',
+    '- **`Wall-clock/shipped issue` is amortized throughput for batches, latency for full-cycle.**',
+    '  A batch row is Σ batch wall-clock ÷ Σ shipped issues (a 300-min 3-member batch reads 100',
+    '  min); the full-cycle row is the mean per-issue span. Batch token/cost figures include',
+    "  evicted members' dispatch spend, while full-cycle averages delivered issues only.",
     '- **Tokens by model are per-host.** They come from `~/.dossier/sched/<slug>/runs/`',
     '  (`ai-dossier sched stats --batch <id>` reads the same logs); a batch run elsewhere',
     '  reads `N/A (not on this host)`, and a subscription-plan model is tokens without cost.',
@@ -1482,6 +1501,49 @@ function readRunLogCosts(runLogDir) {
     if (aggregate) byIssue.set(issue, aggregate);
   }
   return byIssue;
+}
+
+/** One repo's batch rows: anchors from its trails, merged batch PRs, local journal + logs. */
+function batchRowsForRepo({
+  repo,
+  start,
+  trails,
+  events,
+  runLogDir,
+  execFile,
+  warnings,
+  summarizeBatchJournal,
+  tokensByModel,
+}) {
+  let batchPrs = [];
+  try {
+    batchPrs = ghMergedBatchPrs(repo, start, execFile);
+    if (batchPrs.length >= GH_BATCH_PR_LIMIT) {
+      warnings.push(
+        `${repo}: gh pr list hit the ${GH_BATCH_PR_LIMIT}-PR cap for merged batch PRs — batch amortization may be truncated.`
+      );
+    }
+  } catch (err) {
+    warnings.push(
+      `${repo}: merged batch PRs unavailable — ${err?.message ?? err}; batch amortization counts no shipped batches for this repo.`
+    );
+  }
+  const hasLogs = existsSync(runLogDir);
+  return buildBatchRows({
+    repo,
+    anchors: collectBatchAnchors(trails),
+    prs: batchPrs,
+    windowStartIso: `${start}T00:00:00Z`,
+    journalOf: (id) => {
+      const summary = summarizeBatchJournal(events, id);
+      return summary.members.length > 0 || summary.suiteFailures > 0 ? summary : null;
+    },
+    tokensOf: (id) => {
+      if (!hasLogs) return null;
+      const entries = buildBatchRunLogEntries(runLogDir, id);
+      return entries.length > 0 ? tokensByModel(entries) : null;
+    },
+  });
 }
 
 function loadCliDist(repoRoot, name, expected = []) {
@@ -1611,12 +1673,21 @@ export function main({
   const { buildSchedCostReport, summarizeBatchJournal, tokensByModel } = loadCliDist(
     repoRoot,
     'sched-run-stats.js',
-    ['buildSchedCostReport', 'summarizeBatchJournal', 'tokensByModel']
+    ['buildSchedCostReport']
   );
+  // Batch amortization is additive: a `cli/dist` built before #775 still yields the issue
+  // report, just without the section.
+  const batchHelpersAvailable =
+    typeof summarizeBatchJournal === 'function' && typeof tokensByModel === 'function';
 
   const allRows = [];
   const allBatchRows = [];
   const warnings = [];
+  if (!batchHelpersAvailable) {
+    warnings.push(
+      `cli/dist/sched-run-stats.js predates #775 (no summarizeBatchJournal/tokensByModel) — batch amortization is skipped; run 'make build-all' to include it.`
+    );
+  }
   let anyRepoSucceeded = false;
 
   const runsJsonlPath = schedRunsLogPath(home);
@@ -1680,32 +1751,27 @@ export function main({
 
       // Batch amortization (#775) is additive: a failure here narrows the report, it never
       // drops the repo's issue rows above.
-      let batchPrs = [];
-      try {
-        batchPrs = ghMergedBatchPrs(repo, start, execFile);
-      } catch (err) {
-        warnings.push(
-          `${repo}: merged batch PRs unavailable — ${err?.message ?? err}; batch amortization counts no shipped batches for this repo.`
-        );
+      if (batchHelpersAvailable) {
+        try {
+          allBatchRows.push(
+            ...batchRowsForRepo({
+              repo,
+              start,
+              trails,
+              events,
+              runLogDir,
+              execFile,
+              warnings,
+              summarizeBatchJournal,
+              tokensByModel,
+            })
+          );
+        } catch (err) {
+          warnings.push(
+            `${repo}: batch amortization skipped — ${err?.message ?? err}; the issue rows above are unaffected.`
+          );
+        }
       }
-      const hasLogs = existsSync(runLogDir);
-      allBatchRows.push(
-        ...buildBatchRows({
-          repo,
-          anchors: collectBatchAnchors(trails),
-          prs: batchPrs,
-          windowStartIso: `${start}T00:00:00Z`,
-          journalOf: (id) => {
-            const summary = summarizeBatchJournal(events, id);
-            return summary.members.length > 0 || summary.suiteFailures > 0 ? summary : null;
-          },
-          tokensOf: (id) => {
-            if (!hasLogs) return null;
-            const entries = buildBatchRunLogEntries(runLogDir, id);
-            return entries.length > 0 ? tokensByModel(entries) : null;
-          },
-        })
-      );
       const recovered = rows.filter((r) => r.costSource === 'agent-log').length;
       log(
         `scorecard: ${repo} — ${issuesWithComments.length} issue(s) read, ${rows.length} scored` +

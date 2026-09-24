@@ -384,10 +384,16 @@ export function buildBatchAmortizationSummary({
     if (issue !== null) enqueued.add(issue);
   }
   const landed = journal.landed.filter((issue) => !evicted.has(issue));
+  // Shipped = what landed on the integration branch, when the journal saw landings; only
+  // a journal-less batch (rotated/other host) falls back to enqueued minus evicted.
   const shipped =
     batch !== null && SHIPPED_BATCH_STATUSES.has(batch.status)
-      ? [...enqueued].filter((issue) => !evicted.has(issue)).length
+      ? landed.length > 0
+        ? landed.length
+        : [...enqueued].filter((issue) => !evicted.has(issue)).length
       : null;
+  // One CI gate per merged PR. `state.json` does not record CI re-runs, so this is a lower
+  // bound; the scorecard adds the anchor's `ci_fix_attempts` where one was posted.
   const gateRuns = shipped !== null ? 1 : 0;
   const byModel = tokensByModel(entries);
   const tokenTerms = byModel.map((m) => m.billable_tokens).filter((v): v is number => v !== null);
@@ -418,7 +424,7 @@ export function formatAmortizationLine(a: BatchAmortizationSummary): string {
   const outcome =
     a.members_shipped !== null
       ? `${a.members_shipped} shipped in ${a.gate_runs} gate run(s) → ${a.issues_per_gate_run?.toFixed(1)} issues/gate run`
-      : `not shipped (status=${a.status ?? 'unknown — not in state.json'}) → issues/gate run n/a — a manually recovered batch PR is not in state.json; the scorecard's Batch amortization section joins merged PRs`;
+      : `not shipped per state.json (status=${a.status ?? 'unknown'}) → issues/gate run n/a`;
   const perMember =
     a.tokens_per_member !== null
       ? ` (${formatCount(Math.round(a.tokens_per_member))}/${a.members_shipped !== null ? 'shipped' : 'landed'} member)`

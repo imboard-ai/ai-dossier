@@ -1801,6 +1801,56 @@ describe('batch amortization (#775)', () => {
     expect(md).toContain('Prep tokens are not in these figures');
   });
 
+  it('keeps both PRs of a reused manual batch id, and drops an out-of-window anchor with no PR', () => {
+    const anchors = collectBatchAnchors([
+      {
+        issue: 1,
+        milestones: [
+          ms('batch-setup', 'done', {
+            run: 'r',
+            at: '2026-07-01T00:00:00Z',
+            branch: 'batch/b-20260701-01-20260701',
+          }),
+        ],
+      },
+    ]);
+    const pr = (number, headRefName, closes) => ({
+      number,
+      headRefName,
+      createdAt: '2026-09-08T00:00:00Z',
+      mergedAt: '2026-09-08T00:10:00Z',
+      closingIssuesReferences: closes.map((n) => ({ number: n })),
+    });
+    const rows = buildBatchRows({
+      repo: 'o/r',
+      anchors,
+      prs: [
+        pr(1, 'batch/m3-20260908', [1, 2]),
+        pr(2, 'batch/m3-20260915', [3]),
+        pr(3, 'batch/foo-m2-20260908', [4]),
+      ],
+      windowStartIso: '2026-09-01T00:00:00Z',
+    });
+    expect(rows.map((r) => [r.batch, r.membersShipped])).toEqual([
+      ['foo-m2', 1],
+      ['m3-20260908', 2],
+      ['m3-20260915', 1],
+    ]);
+  });
+
+  it('excludes every member of an unshipped batch from the full-cycle row', () => {
+    const [dissolved] = fixtureRows().filter((r) => r.batch === 'b-20260921-01');
+    const { summary } = aggregateBatchAmortization(
+      [dissolved],
+      [
+        { repo: 'o/r', issue: 7, delivered: true },
+        { repo: 'o/r', issue: 8, delivered: true },
+      ]
+    );
+    const fullCycle = summary.find((s) => s.kind === 'full-cycle');
+    expect(fullCycle).toMatchObject({ membersEnqueued: 1, membersShipped: 1, gateRuns: 1 });
+  });
+
   it('renders nothing when there is nothing to amortize', () => {
     expect(renderBatchAmortization({ summary: [], batches: [] })).toEqual([]);
     expect(renderBatchAmortization(undefined)).toEqual([]);
