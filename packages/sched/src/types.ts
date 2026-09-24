@@ -626,6 +626,20 @@ export interface BatchEntry {
    */
   pr: number | null;
   /**
+   * The `ambiguous-merged-pr` streak (#789) — set when
+   * `reconcileStaleBlockedBatches`'s automatic PR-detection (`pr === null`,
+   * so it looks for a MERGED PR whose head is `branch`) finds MORE THAN ONE
+   * qualifying candidate and refuses to guess which is ours (positive
+   * evidence only). Deduped exactly like `pr_watch_failed_*`/
+   * `anchor_close_failed_*`: journals once on the streak's first tick, then
+   * again only every `JOURNAL_DEDUP_REANNOUNCE_TICKS`, never every tick.
+   * `null`/`null`/`0` while no ambiguity streak is open — including the
+   * common case where `pr` is already recorded, so the lookup never runs.
+   */
+  pr_detect_ambiguous_reason: string | null;
+  pr_detect_ambiguous_since: string | null;
+  pr_detect_ambiguous_ticks: number;
+  /**
    * Members that must revert together when any one of them is evicted
    * (RFC-0001 §E.4 eviction groups — e.g. a member built on another's API).
    * Each inner array is one group; members in no group evict alone.
@@ -1383,8 +1397,12 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * a pre-#810 record with no recorded branch). Bumped so an older engine
  * refuses a state carrying a `handed-back` member with `EngineTooOldError`
  * instead of an opaque invalid-status error.
+ * 1.25.0 (#789): `BatchEntry` gains `pr_detect_ambiguous_reason`/`_since`/
+ * `_ticks` — the dedup marker for `reconcileStaleBlockedBatches`'s automatic
+ * merged-PR detection when more than one candidate matches; `null`/`null`/`0`
+ * backfilled on load.
  */
-export const SCHEMA_VERSION = '1.24.0' as const;
+export const SCHEMA_VERSION = '1.25.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1412,6 +1430,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.21.0',
   '1.22.0',
   '1.23.0',
+  '1.24.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
@@ -1734,6 +1753,12 @@ export type JournalEventName =
   // — the append is a no-op (never a second `EvictionRecord`), journaled here
   // instead of silently dropped so the duplicate attempt is still visible.
   | 'eviction-duplicate'
+  // #789: `reconcileStaleBlockedBatches`'s automatic merged-PR detection
+  // (`batch.pr === null`) found MORE THAN ONE merged PR whose head is the
+  // batch branch — positive evidence only, so nothing is recorded. Deduped
+  // like `pr-watch-failed`/`anchor-close-failed`: journals on the streak's
+  // first tick, then every `JOURNAL_DEDUP_REANNOUNCE_TICKS`, never every tick.
+  | 'pr-detect-ambiguous'
   // #810: a member's own explicit hand-back (`blocked` / `review partial`
   // milestone) — parked `handed-back`, NOT a failure, never counted toward
   // the dissolve threshold (the `unit-failed` twin for evictions).

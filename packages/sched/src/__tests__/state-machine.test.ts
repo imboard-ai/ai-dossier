@@ -488,8 +488,11 @@ describe('#810: parkMember / profile-carrying requeue', () => {
       },
     ];
     const loaded = validateState(legacy);
+    // Migrates to whatever the CURRENT schema is, not a hardcoded literal —
+    // #789 bumped past 1.24.0 to 1.25.0, and pinning the exact string here
+    // would keep breaking on every future bump for no added test value; the
+    // eviction-shape assertion below is what this test actually verifies.
     expect(loaded.schema_version).toBe(SCHEMA_VERSION);
-    expect(SCHEMA_VERSION).toBe('1.24.0');
     expect(loaded.batches[0]?.evictions[0]).not.toHaveProperty('kind');
     expect(loaded.entries.map((e) => e.status)).toEqual(seeded().entries.map((e) => e.status));
   });

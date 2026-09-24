@@ -117,6 +117,19 @@ export interface ClosingPr {
   repo: string | null;
 }
 
+/**
+ * The result of looking for exactly one MERGED pull request whose head is a
+ * given branch (#789) — `reconcileStaleBlockedBatches`'s automatic detection
+ * of a batch PR the ledger never recorded (a hand-opened or manually-recovered
+ * merge; the imboard#4255 shape). Positive evidence only: `found` requires
+ * exactly one qualifying candidate — a batch with two is `ambiguous`, never a
+ * guess between them.
+ */
+export type MergedPrLookup =
+  | { kind: 'found'; pr: number; mergedAt: string }
+  | { kind: 'none' }
+  | { kind: 'ambiguous'; matches: number[] };
+
 export interface GroundTruth {
   /**
    * Latest runstate milestone on the issue. **Tri-state (decision 2, option
@@ -167,6 +180,25 @@ export interface GroundTruth {
    * `parseOpenPrListJson`.
    */
   openPrForBranch(branch: string): number | null | undefined;
+  /**
+   * #789: the single MERGED pull request (if any) whose head is `branch`,
+   * based against `base`, opened at or after `createdAtOrAfter`, and not from
+   * a fork — `reconcileStaleBlockedBatches`'s automatic detection when
+   * `batch.pr` was never recorded. OPTIONAL, like `issueCloseTruth`: only an
+   * implementation constructed with a verified project repo (#768's
+   * `resolveProjectRepo`) exposes it — without a pinned repo this method is
+   * absent entirely rather than guessing which `gh pr list` result belongs to
+   * the project. Same tri-state-plus-one as its siblings: `undefined` = the
+   * poll failed or the payload was unusable (unreachable — the caller must
+   * leave `batch.pr` alone, never treat it as `none`); an object is the
+   * verified answer, including `ambiguous` (more than one qualifying PR — the
+   * caller records nothing and journals the ambiguity, deduped).
+   */
+  mergedPrForBranch?(
+    branch: string,
+    base: string,
+    createdAtOrAfter: string
+  ): MergedPrLookup | undefined;
   /**
    * Teardown inputs from the issue's `setup` milestone (#468): `null` = the
    * issue verifiably has no setup milestone; `undefined` = poll FAILED.
@@ -274,6 +306,8 @@ export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone 
  * - `git ls-remote origin <branch>` — branch head
  * - `gh pr view <n> --json state,mergedAt,mergeable,labels` — parked-PR state (#468)
  * - `gh issue view N --json comments` — the setup milestone's teardown keys (#468)
+ * - `gh pr list -R <repo> --head <branch> --base <base> --state merged --json ...` —
+ *   merged-PR detection (#789, only when `opts.repo` is a verified project repo)
  *
  * `repoDir` is the cwd for git; gh resolves the repo from cwd by default.
  * Every failure degrades safely: a failed milestone/PR poll reports UNREACHABLE
@@ -288,9 +322,9 @@ export function createExecGroundTruth(
     runstateBin?: string;
     /**
      * #768: the `owner/name` repository issue closure is read from. Without
-     * it `issueCloseTruth` is not provided at all — the anchor close never
-     * resolves a repo from the cwd, which may not be the project's (see
-     * `resolveProjectRepo`).
+     * it neither `issueCloseTruth` (#768) nor `mergedPrForBranch` (#789) is
+     * provided at all — neither resolves a repo from the cwd, which may not
+     * be the project's (see `resolveProjectRepo`).
      */
     repo?: string;
   } = {}
@@ -412,6 +446,35 @@ export function createExecGroundTruth(
       return repoAlive === null
         ? undefined
         : { state: 'MISSING', stateReason: null, labels: [], closer: null, closingPrs: [] };
+    };
+    truth.mergedPrForBranch = (
+      branch: string,
+      base: string,
+      createdAtOrAfter: string
+    ): MergedPrLookup | undefined => {
+      // Same CWE-88 guard as branchHead/openPrForBranch: both refs are
+      // batch-state-derived, never trusted as literal CLI arguments.
+      if (!SAFE_REF_NAME.test(branch) || !SAFE_REF_NAME.test(base)) return undefined;
+      const out = exec(
+        'gh',
+        [
+          'pr',
+          'list',
+          '-R',
+          `${repo.owner}/${repo.name}`,
+          '--head',
+          branch,
+          '--base',
+          base,
+          '--state',
+          'merged',
+          '--json',
+          'number,headRefName,baseRefName,isCrossRepository,mergedAt,createdAt',
+        ],
+        opts.repoDir
+      );
+      if (out === null) return undefined; // poll failed — unreachable
+      return parseMergedPrListJson(out, branch, base, createdAtOrAfter);
     };
   }
   return truth;
@@ -583,6 +646,26 @@ export function parsePrViewJson(stdout: string | null): PrTruth | null {
 }
 
 /**
+ * Parse a `gh ... list --json ...` payload into its item array — the shared
+ * opening every gh-list parser in this file repeats: null/empty stdout and
+ * invalid JSON are `undefined` (unreachable, never a verified empty list),
+ * and `unwrapList` accepts gh's `{ "<key>": [...] }` wrapper as well as a
+ * bare array (#496). `undefined` here always means the SAME thing it means
+ * to every caller: nothing was verified, so change nothing (#789 review —
+ * one parser opening that gets tightened once instead of per copy).
+ */
+function parseGhList(stdout: string | null, key: string): unknown[] | undefined {
+  if (stdout === null || stdout.trim() === '') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return undefined;
+  }
+  return unwrapList(parsed, key) ?? undefined;
+}
+
+/**
  * Parse the stdout of
  * `gh pr list --head <branch> --state open --json number,headRefName,isCrossRepository`
  * (#596) into the number of an open PR the fleet itself opened from `branch`.
@@ -612,18 +695,8 @@ export function parseOpenPrListJson(
   stdout: string | null,
   branch?: string
 ): number | null | undefined {
-  if (stdout === null || stdout.trim() === '') return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return undefined;
-  }
-  // `unwrapList` accepts gh's `{ "<key>": [...] }` wrapper as well as the
-  // bare array (#496) — the same shape tolerance every other gh-list parser
-  // in this file already has.
-  const list = unwrapList(parsed, 'pullRequests');
-  if (list === null) return undefined;
+  const list = parseGhList(stdout, 'pullRequests');
+  if (list === undefined) return undefined;
   for (const item of list) {
     if (item === null || typeof item !== 'object') continue;
     const pr = item as Record<string, unknown>;
@@ -633,6 +706,70 @@ export function parseOpenPrListJson(
     if (typeof num === 'number' && Number.isInteger(num) && num > 0) return num;
   }
   return null; // verified: nothing on this branch we can claim
+}
+
+/**
+ * Parse the stdout of
+ * `gh pr list -R <repo> --head <branch> --base <base> --state merged --json
+ * number,headRefName,baseRefName,isCrossRepository,mergedAt,createdAt` (#789)
+ * into a {@link MergedPrLookup}. Every filter is a POSITIVE-evidence check —
+ * a candidate missing any of them is simply not counted, never defaulted in:
+ *
+ * - not from a fork (`isCrossRepository !== true`, the same convention
+ *   {@link parseOpenPrListJson} uses — `-R` already pins the base repository,
+ *   so this is what tells a same-named fork PR apart from ours);
+ * - `headRefName`/`baseRefName` match exactly (belt-and-suspenders on top of
+ *   `--head`/`--base`, which the parser has no way to confirm gh actually
+ *   applied);
+ * - genuinely merged (`mergedAt` a non-empty string — `--state merged`
+ *   should guarantee this, but the parser never trusts a flag it cannot see
+ *   in the payload itself);
+ * - `createdAt` parses and is at or after `createdAtOrAfter` (the batch's own
+ *   `created_at`) — the guard against a stale PR from an earlier batch that
+ *   reused the branch name.
+ *
+ * Zero survivors is a VERIFIED `none` (never unreachable); more than one is
+ * `ambiguous` — the caller must not guess which one is ours (positive
+ * evidence only).
+ */
+export function parseMergedPrListJson(
+  stdout: string | null,
+  branch: string,
+  base: string,
+  createdAtOrAfter: string
+): MergedPrLookup | undefined {
+  const list = parseGhList(stdout, 'pullRequests');
+  if (list === undefined) return undefined;
+  const thresholdMs = Date.parse(createdAtOrAfter);
+  if (!Number.isFinite(thresholdMs)) return undefined; // an unparseable threshold verifies nothing
+  const matches: { pr: number; mergedAt: string }[] = [];
+  for (const item of list) {
+    if (item === null || typeof item !== 'object') continue;
+    const pr = item as Record<string, unknown>;
+    if (pr.isCrossRepository === true) continue; // a fork's PR — not ours
+    if (pr.headRefName !== branch) continue;
+    if (pr.baseRefName !== base) continue;
+    // #789 review (security hardening): a non-empty string alone is not
+    // "merged" — require it to parse as a real date too, the same standard
+    // `createdAt` below is already held to.
+    if (
+      typeof pr.mergedAt !== 'string' ||
+      pr.mergedAt === '' ||
+      !Number.isFinite(Date.parse(pr.mergedAt))
+    ) {
+      continue;
+    }
+    if (typeof pr.createdAt !== 'string') continue;
+    const createdMs = Date.parse(pr.createdAt);
+    if (!Number.isFinite(createdMs) || createdMs < thresholdMs) continue;
+    const num = pr.number;
+    if (typeof num === 'number' && Number.isInteger(num) && num > 0) {
+      matches.push({ pr: num, mergedAt: pr.mergedAt });
+    }
+  }
+  if (matches.length === 0) return { kind: 'none' };
+  if (matches.length > 1) return { kind: 'ambiguous', matches: matches.map((m) => m.pr) };
+  return { kind: 'found', pr: matches[0].pr, mergedAt: matches[0].mergedAt };
 }
 
 /**

@@ -70,6 +70,27 @@ describe('buildStatusReport', () => {
     expect(report.project).toBe('test-proj');
   });
 
+  it('#789 AC12: a PR recorded by the automatic hand-opened-PR detection shows in the batches report, same as any other batch.pr', () => {
+    let state = seeded();
+    // The exact write reconcileStaleBlockedBatches performs when it detects a
+    // hand-opened PR the ledger never recorded (batch-dispatch.ts's `merged`
+    // transition patch) — buildStatusReport does no PR-source-specific
+    // handling, it passes `BatchEntry.pr` straight through regardless of how
+    // it was set, so this proves the existing `pr` column/field needs no
+    // change for #789, not a new one.
+    state = transitionBatch(
+      state,
+      'b1',
+      'blocked',
+      { blocked_reason: 'gate-inconclusive:test.focused' },
+      NOW
+    );
+    state = transitionBatch(state, 'b1', 'merged', { pr: 4255 }, NOW);
+    const report = buildStatusReport(state, { max_slots: 3 }, 'p');
+    const batch = report.batches.find((b) => b.id === 'b1');
+    expect(batch?.pr).toBe(4255);
+  });
+
   it('lists failed entries with their reasons', () => {
     let state = seeded();
     state = transitionIssue(state, 101, 'failed', { reason: 'escalation-cap' }, NOW);

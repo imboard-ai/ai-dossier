@@ -26,6 +26,7 @@ import {
   evictMemberAndContinue,
   memberBranchFor,
   memberDispatchModeFor,
+  reconcileStaleBlockedBatches,
 } from '../batch-dispatch';
 // Same rationale as the `evictMemberAndContinue` import above: a test-only
 // path builder, not part of the package's public `index.ts` surface.
@@ -51,6 +52,7 @@ import {
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
   type PrTruth,
+  parseMergedPrListJson,
   patchBatch,
   patchSlot,
   readJsonl,
@@ -161,7 +163,43 @@ function fileBatchGroundTruth(dir: string): GroundTruth {
         blocked: t.blocked ?? false,
       };
     },
+    // #789: `<branch-slug>.merged-prs.json` holds the raw `gh pr list --state
+    // merged` candidate array (`setMergedPrsTruth` below writes it) — parsed
+    // with the SAME production parser `createExecGroundTruth` uses, so a
+    // fixture bug and a prod bug would show up identically. No fixture file
+    // at all = unreachable (undefined), matching every other fixture here —
+    // most tests never call `setMergedPrsTruth` and must see the pre-#789
+    // behavior (this signal never fires).
+    mergedPrForBranch: (branch, base, createdAtOrAfter) => {
+      const raw = readJson(`merged-prs.${mergedPrFixtureSlug(branch)}.json`);
+      if (raw === undefined) return undefined;
+      return parseMergedPrListJson(JSON.stringify(raw), branch, base, createdAtOrAfter);
+    },
   });
+}
+
+/** Filesystem-safe form of a branch name for the `mergedPrForBranch` fixture file. */
+function mergedPrFixtureSlug(branch: string): string {
+  return branch.replace(/[^A-Za-z0-9._-]/g, '_');
+}
+
+/** Write the `gh pr list --state merged` fixture `mergedPrForBranch` reads for `branch` (#789). */
+function setMergedPrsTruth(
+  truthDir: string,
+  branch: string,
+  prs: Array<{
+    number: number;
+    headRefName?: string;
+    baseRefName?: string;
+    isCrossRepository?: boolean;
+    mergedAt?: string | null;
+    createdAt?: string;
+  }>
+): void {
+  fs.writeFileSync(
+    path.join(truthDir, `merged-prs.${mergedPrFixtureSlug(branch)}.json`),
+    JSON.stringify(prs)
+  );
 }
 
 /** A scratch repo (bare origin + main worktree) with one pushed commit — batch-setup's real `git` target. */
@@ -2817,6 +2855,479 @@ describe('#686: a blocked batch whose work merged out of band reconciles (ground
     expect(h.state().entries.find((e) => e.issue === 6820)?.status).toBe('in-work');
     expect(h.state().entries.find((e) => e.issue === 6821)?.status).toBe('queued');
   }, 60_000);
+});
+
+// --- #789: a hand-opened batch PR the ledger never recorded is detected automatically ---
+
+describe('#789: automatic detection of a hand-opened batch PR the ledger never recorded', () => {
+  /** `batch.created_at` plus one minute, ISO — safely "at or after" the batch's own creation. */
+  function afterBatchCreated(
+    h: Awaited<ReturnType<typeof blockedBatchHarness>>['h'],
+    batchId: string
+  ): string {
+    const createdAt = findBatch(h.state(), batchId)?.created_at as string;
+    return new Date(Date.parse(createdAt) + 60_000).toISOString();
+  }
+
+  it('imboard#4255 shape: a hand-opened, MERGED PR whose head is the batch branch is detected → batch.pr recorded, pr-merged evidence fires, report dispatches', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-20260913-01', 7890, 7891);
+    const batchBefore = findBatch(h.state(), batchId);
+    expect(batchBefore?.pr).toBeNull();
+    const branch = batchBefore?.branch as string;
+    const createdAt = afterBatchCreated(h, batchId);
+
+    setMergedPrsTruth(h.truthDir, branch, [
+      {
+        number: 4255,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      },
+    ]);
+
+    const result = h.tick(); // the stale-blocked reconcile detects and records the PR
+    expect(result.mergeAccepted).toContain(`batch:${batchId}`);
+    const batch = findBatch(h.state(), batchId);
+    expect(batch?.pr).toBe(4255); // #789: recorded even though `sched` itself never opened it
+    // NOT finished inline — a PR now exists, so the ordinary `deployed`
+    // machinery (#686/#686-unchanged) has something to hand the report agent.
+    expect(batch?.status).toBe('deployed');
+    expect(h.state().entries.find((e) => e.issue === 7891)?.status).toBe('done');
+
+    const ev = h.deps.journal
+      .read()
+      .find((e) => e.event === 'stale-failure-reconciled' && e.unit === `batch:${batchId}`);
+    expect(ev?.pr).toBe(4255);
+    expect(ev?.pr_detected).toBe(true);
+    expect(String(ev?.detail)).toContain('batch.pr was never recorded');
+    expect(String(ev?.detail)).toContain('detected PR #4255');
+
+    // The existing #686 pr-merged rail keeps working unmodified: the report
+    // agent dispatches next tick and teardown follows `batch-report done`.
+    const r2 = h.tick();
+    expect(r2.spawned).toEqual([`batch:${batchId}`]);
+    const rpid = batchSlotPid(h, batchId) as number;
+    expect(await waitUntilDead(h.spawnDeps, rpid)).toBe(true);
+    const r3 = h.tick();
+    expect(r3.completed).toEqual([`batch:${batchId}`]);
+    const done = findBatch(h.state(), batchId);
+    expect(done?.status).toBe('done');
+    expect(fs.existsSync(done?.worktree as string)).toBe(false);
+  }, 60_000);
+
+  const REJECTED_CANDIDATE_SHAPES: Array<{
+    name: string;
+    pr: number;
+    anchor: number;
+    member: number;
+    build: (branch: string, createdAt: string) => Parameters<typeof setMergedPrsTruth>[2][number];
+  }> = [
+    {
+      name: 'a FORK PR that merely reuses the branch name',
+      pr: 9001,
+      anchor: 7900,
+      member: 7901,
+      build: (branch, createdAt) => ({
+        number: 9001,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: true,
+        mergedAt: createdAt,
+        createdAt,
+      }),
+    },
+    {
+      name: 'a PR based against the WRONG base branch',
+      pr: 9002,
+      anchor: 7910,
+      member: 7911,
+      build: (branch, createdAt) => ({
+        number: 9002,
+        headRefName: branch,
+        baseRefName: 'staging',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      }),
+    },
+    {
+      name: 'an UNMERGED PR',
+      pr: 9003,
+      anchor: 7920,
+      member: 7921,
+      build: (branch, createdAt) => ({
+        number: 9003,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: null,
+        createdAt,
+      }),
+    },
+    {
+      name: 'a PR CREATED BEFORE the batch — a stale PR from an earlier batch reusing the branch name',
+      pr: 9004,
+      anchor: 7930,
+      member: 7931,
+      build: (branch) => ({
+        number: 9004,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: '2000-01-01T00:00:00.000Z',
+        createdAt: '2000-01-01T00:00:00.000Z',
+      }),
+    },
+  ];
+
+  for (const shape of REJECTED_CANDIDATE_SHAPES) {
+    it(`negative: ${shape.name} → nothing recorded, batch stays blocked`, async () => {
+      const { h, batchId } = await blockedBatchHarness(
+        `b-789-neg-${shape.pr}`,
+        shape.anchor,
+        shape.member
+      );
+      const batch = findBatch(h.state(), batchId);
+      const branch = batch?.branch as string;
+      const createdAt = afterBatchCreated(h, batchId);
+      setMergedPrsTruth(h.truthDir, branch, [shape.build(branch, createdAt)]);
+
+      const result = h.tick();
+      expect(result.mergeAccepted).not.toContain(`batch:${batchId}`);
+      const after = findBatch(h.state(), batchId);
+      expect(after?.pr).toBeNull();
+      expect(after?.status).toBe('blocked');
+    }, 60_000);
+  }
+
+  it('negative: an unreachable lookup (gh failure) fails closed — a REAL candidate PR on disk is not adopted, and a prior ambiguity streak is left untouched (unreachable ≠ verified none)', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-789-unreachable', 7950, 7951);
+    const batch = findBatch(h.state(), batchId);
+    const branch = batch?.branch as string;
+    const createdAt = afterBatchCreated(h, batchId);
+    const fixturePath = path.join(h.truthDir, `merged-prs.${mergedPrFixtureSlug(branch)}.json`);
+
+    // First establish a real ambiguity streak (a WORKING fixture, two
+    // candidates) — this is the state whose marker must survive an
+    // unreachable tick untouched, since only a VERIFIED `none` may clear it.
+    setMergedPrsTruth(h.truthDir, branch, [
+      {
+        number: 4270,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      },
+      {
+        number: 4271,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      },
+    ]);
+    h.tick();
+    const ambiguous = findBatch(h.state(), batchId);
+    expect(ambiguous?.pr_detect_ambiguous_reason).not.toBeNull();
+    const sinceBefore = ambiguous?.pr_detect_ambiguous_since;
+
+    // Now corrupt the SAME fixture — simulates a garbled/failed `gh pr list`
+    // response on the next tick. If a real candidate PR existed on disk (it
+    // does — the two above), a lookup that failed closed must still adopt
+    // NEITHER of them; unlike `[]` (verified none), it must also NOT clear
+    // the ambiguity streak it cannot re-verify.
+    fs.writeFileSync(fixturePath, 'not valid json {{{');
+    const result = h.tick();
+    expect(result.mergeAccepted).not.toContain(`batch:${batchId}`);
+    const after = findBatch(h.state(), batchId);
+    expect(after?.pr).toBeNull();
+    expect(after?.status).toBe('blocked');
+    expect(after?.pr_detect_ambiguous_reason).not.toBeNull(); // untouched, not cleared
+    expect(after?.pr_detect_ambiguous_since).toBe(sinceBefore);
+  }, 60_000);
+
+  it('negative: no verified project repo (mergedPrForBranch absent from GroundTruth) → the lookup is never attempted', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-789-norepo', 7960, 7961);
+    // Simulates `createExecGroundTruth` when `resolveProjectRepo` returns
+    // null (#768's own gate): the method is not on the object at all, so
+    // `deps.groundTruth.mergedPrForBranch?.(...)` never fires.
+    h.deps.groundTruth.mergedPrForBranch = undefined;
+    const batch = findBatch(h.state(), batchId);
+    // Even if a fixture existed, it would never be read — prove it by
+    // writing one that WOULD otherwise reconcile the batch.
+    setMergedPrsTruth(h.truthDir, batch?.branch as string, [
+      {
+        number: 9005,
+        headRefName: batch?.branch as string,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: afterBatchCreated(h, batchId),
+        createdAt: afterBatchCreated(h, batchId),
+      },
+    ]);
+
+    const result = h.tick();
+    expect(result.mergeAccepted).not.toContain(`batch:${batchId}`);
+    expect(findBatch(h.state(), batchId)?.pr).toBeNull();
+    expect(findBatch(h.state(), batchId)?.status).toBe('blocked');
+  }, 60_000);
+
+  it('two MERGED PRs matching the branch is ambiguous: nothing recorded, journaled once, not every tick', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-789-ambiguous', 7940, 7941);
+    const batch = findBatch(h.state(), batchId);
+    const branch = batch?.branch as string;
+    const createdAt = afterBatchCreated(h, batchId);
+    setMergedPrsTruth(h.truthDir, branch, [
+      {
+        number: 4260,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      },
+      {
+        number: 4261,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      },
+    ]);
+
+    h.tick();
+    h.tick();
+    h.tick();
+
+    const after = findBatch(h.state(), batchId);
+    expect(after?.pr).toBeNull(); // positive evidence only — refuses to guess
+    expect(after?.status).toBe('blocked');
+    expect(after?.pr_detect_ambiguous_ticks).toBe(3);
+    const ambiguous = h.deps.journal
+      .read()
+      .filter((e) => e.event === 'pr-detect-ambiguous' && e.unit === `batch:${batchId}`);
+    expect(ambiguous).toHaveLength(1); // #632 dedup — not once per tick
+    expect(String(ambiguous[0]?.matches)).toContain('4260');
+    expect(String(ambiguous[0]?.matches)).toContain('4261');
+  }, 60_000);
+
+  it('re-announces the ambiguity every JOURNAL_DEDUP_REANNOUNCE_TICKS, never suppressing it forever', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-789-ambiguous-reannounce', 7945, 7946);
+    const batch = findBatch(h.state(), batchId);
+    const branch = batch?.branch as string;
+    const createdAt = afterBatchCreated(h, batchId);
+    setMergedPrsTruth(h.truthDir, branch, [
+      {
+        number: 4262,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      },
+      {
+        number: 4263,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      },
+    ]);
+
+    for (let i = 0; i < JOURNAL_DEDUP_REANNOUNCE_TICKS; i++) h.tick();
+
+    const ambiguous = h.deps.journal
+      .read()
+      .filter((e) => e.event === 'pr-detect-ambiguous' && e.unit === `batch:${batchId}`);
+    expect(ambiguous).toHaveLength(2); // tick 1 (onset) and tick 20 (reannounce)
+    expect(findBatch(h.state(), batchId)?.pr_detect_ambiguous_ticks).toBe(
+      JOURNAL_DEDUP_REANNOUNCE_TICKS
+    );
+  }, 60_000);
+
+  it('recording batch.pr does NOT by itself close the anchor — #768s evidence-gated reconcileAnchorClosure is unchanged', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-789-anchor', 7970, 7971);
+    const batch = findBatch(h.state(), batchId);
+    const branch = batch?.branch as string;
+    const createdAt = afterBatchCreated(h, batchId);
+    setMergedPrsTruth(h.truthDir, branch, [
+      {
+        number: 7975,
+        headRefName: branch,
+        baseRefName: 'main',
+        isCrossRepository: false,
+        mergedAt: createdAt,
+        createdAt,
+      },
+    ]);
+    setIssueTruth(h.truthDir, 7970, { labels: ['batch-epic'] }); // the anchor — still OPEN
+    setIssueTruth(h.truthDir, 7971, {}); // the member — still OPEN, no shipping evidence
+
+    const result = h.tick();
+    expect(result.mergeAccepted).toContain(`batch:${batchId}`);
+    let reconciled = findBatch(h.state(), batchId);
+    expect(reconciled?.pr).toBe(7975); // #789 recorded the PR ...
+    expect(reconciled?.anchor_closed_at).toBeNull(); // ... but the anchor pass never touched it
+    expect(issueTruth(h.truthDir, 7970).state).toBe('OPEN');
+
+    // Drive the batch all the way to `done` — `ANCHOR_CLOSE_BATCH_STATUSES`
+    // is `blocked`/`done` only, so the strongest version of this claim is
+    // checked once the batch reaches the OTHER status the anchor pass reads.
+    const r2 = h.tick();
+    expect(r2.spawned).toEqual([`batch:${batchId}`]);
+    const rpid = batchSlotPid(h, batchId) as number;
+    expect(await waitUntilDead(h.spawnDeps, rpid)).toBe(true);
+    h.tick();
+    reconciled = findBatch(h.state(), batchId);
+    expect(reconciled?.status).toBe('done');
+    expect(reconciled?.anchor_closed_at).toBeNull();
+    expect(issueTruth(h.truthDir, 7970).state).toBe('OPEN');
+    expect(
+      h.deps.journal
+        .read()
+        .some((e) => e.event === 'anchor-closed' && e.unit === `batch:${batchId}`)
+    ).toBe(false);
+  }, 60_000);
+});
+
+/**
+ * #789 review: a lightweight harness for `reconcileStaleBlockedBatches`'s
+ * `pr-detect-ambiguous` dedup marker — calls the reconcile function
+ * DIRECTLY (exported for exactly this, like `evictMemberAndContinue`/
+ * `memberBranchFor` above are — "not part of the package's public
+ * `index.ts` surface") instead of a full `runBatchTick`, so moving the
+ * batch to a non-`blocked` status between calls never risks that OTHER
+ * status's own dispatch machinery (a real `executing` batch would try to
+ * spawn a member) — this harness asserts ONLY the one thing under test: the
+ * marker's behavior across a status that leaves and re-enters `blocked`.
+ */
+function prDetectAmbiguousHarness(memberIssue: number, batchId: string, branch: string) {
+  const store = new SchedStore(tmpDir('sched-batch-ambiguous-'));
+  const journal = new Journal(store.dir);
+  const setupAt = new Date('2026-09-13T00:00:00.000Z');
+  let currentNow = setupAt;
+
+  let state = enqueueEntries(
+    store.load(),
+    [{ issue: memberIssue, mode: 'slot', batch: batchId, anchor: null }],
+    setupAt
+  );
+  for (const to of ['classified', 'batched', 'waiting', 'in-work', 'committed'] as const) {
+    state = transitionIssue(state, memberIssue, to, {}, setupAt);
+  }
+  // `enqueueEntries` lands a freshly-formed batch straight at `ready` — patch
+  // `branch`/`base_branch` on the next legal edge instead of re-entering `ready`.
+  state = transitionBatch(state, batchId, 'executing', { branch, base_branch: 'main' }, setupAt);
+  state = transitionBatch(
+    state,
+    batchId,
+    'blocked',
+    { blocked_reason: 'gate-inconclusive:test.focused' },
+    setupAt
+  );
+  store.withLock(() => ({ state, result: undefined }));
+
+  let lookup: MergedPrLookup | undefined;
+  const groundTruth = stubGroundTruth({ mergedPrForBranch: () => lookup });
+  const deps: BatchDispatchDeps = {
+    store,
+    journal,
+    groundTruth,
+    spawnDeps: {
+      spawn: () => {
+        throw new Error('must not spawn in this test');
+      },
+      kill: () => true,
+      isAlive: () => true,
+      processStart: () => null,
+    },
+    now: () => currentNow,
+    repoDir: store.dir,
+    exec: () => {
+      throw new Error('must not exec in this test');
+    },
+    runSuite: () => {
+      throw new Error('must not run the aggregate suite in this test');
+    },
+  };
+  const emptyTickResult: BatchTickResult = {
+    spawned: [],
+    completed: [],
+    parked: [],
+    mergeAccepted: [],
+    failed: [],
+    reconciliation_errors: [],
+    blocked: [],
+  };
+
+  return {
+    journal,
+    store,
+    setLookup: (l: MergedPrLookup | undefined) => {
+      lookup = l;
+    },
+    /** Move the batch to `to` via the real transition rail (a legal `BATCH_TRANSITIONS` edge from its current status) — no reconcile pass runs; only `reconcileStaleBlockedBatches` below observes the change. */
+    transitionTo: (to: 'executing' | 'blocked') => {
+      store.withLock((s) => ({
+        state: transitionBatch(
+          s,
+          batchId,
+          to,
+          to === 'blocked' ? { blocked_reason: 'gate-inconclusive:test.focused' } : {},
+          currentNow
+        ),
+        result: undefined,
+      }));
+    },
+    advanceNow: (at: string) => {
+      currentNow = new Date(at);
+    },
+    batch: () => findBatch(store.load(), batchId),
+    reconcile: () => reconcileStaleBlockedBatches(deps, currentNow, emptyTickResult, undefined),
+  };
+}
+
+describe('#789 review: pr-detect-ambiguous is scoped to ONE blocked stretch, like pr-watch-failed', () => {
+  it('a streak recorded, then the batch LEAVES blocked and RETURNS to blocked with the same candidates: journals a fresh first line, not a continued streak', () => {
+    const h = prDetectAmbiguousHarness(7980, 'b-789-resume-reblock', 'batch/b-789-resume-reblock');
+    h.setLookup({ kind: 'ambiguous', matches: [100, 101] });
+
+    h.reconcile();
+    let events = h.journal.read().filter((e) => e.event === 'pr-detect-ambiguous');
+    expect(events).toHaveLength(1);
+    expect((events[0] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+    const firstSince = (events[0] as unknown as { since: string }).since;
+    expect(h.batch()?.pr_detect_ambiguous_reason).not.toBeNull();
+
+    // The real resume rail: `blocked -> executing` (#583's own edge) — a
+    // passing gate recheck would normally continue the member loop from
+    // here; this test only needs the batch to genuinely LEAVE `blocked`.
+    h.advanceNow('2026-09-13T01:00:00.000Z');
+    h.transitionTo('executing');
+    h.reconcile(); // status='executing' now — the marker must clear here
+    expect(h.batch()?.pr_detect_ambiguous_reason).toBeNull();
+    expect(h.batch()?.pr_detect_ambiguous_since).toBeNull();
+    expect(h.batch()?.pr_detect_ambiguous_ticks).toBe(0);
+
+    // Re-blocked (e.g. the recheck itself failed again for an unrelated
+    // reason) with the SAME two candidate PRs still matching.
+    h.advanceNow('2026-09-13T02:00:00.000Z');
+    h.transitionTo('blocked');
+    h.reconcile();
+
+    events = h.journal.read().filter((e) => e.event === 'pr-detect-ambiguous');
+    expect(events).toHaveLength(2); // NOT a continued streak
+    expect((events[1] as unknown as { ticks_persisted: number }).ticks_persisted).toBe(1);
+    const secondSince = (events[1] as unknown as { since: string }).since;
+    expect(secondSince).not.toBe(firstSince);
+    expect(h.batch()?.pr_detect_ambiguous_ticks).toBe(1);
+  });
 });
 
 // --- #768: batch anchors close off the happy path — only on positive evidence ---

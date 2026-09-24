@@ -1040,7 +1040,9 @@ import {
                          //   runBatchCapability — #523)
   createSpawnDeps,       // real detached-spawn process I/O
   createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec);
-                         //   since #468 also gh pr view PR state + setup info from comments
+                         //   since #468 also gh pr view PR state + setup info from comments;
+                         //   since #789 also mergedPrForBranch when constructed with a
+                         //   verified `repo` (resolveProjectRepo)
   resolveDispatch,       // config → resolved command/prompt/report-prompt/tier-models/timers/
                          //   per-tier spawn specs (tiers — #527)
   buildTierCommand,      // resolved dispatch + tier + issue → argv, using that tier's OWN
@@ -1068,6 +1070,12 @@ import {
   prOfMilestone,         // a milestone's pr= key as a positive integer
   parsePrViewJson,       // gh pr view --json → PR truth (mergedAt/mergeable/blocked label)
   parseOpenPrListJson,   // gh pr list --head <b> --state open → the open PR we opened (#596)
+  parseMergedPrListJson, // gh pr list --head <b> --base <base> --state merged → MergedPrLookup
+                         //   found/none/ambiguous — a hand-opened batch PR the ledger never
+                         //   recorded (#789)
+  type MergedPrLookup,   // { kind: 'found', pr, mergedAt } | { kind: 'none' } |
+                         //   { kind: 'ambiguous', matches } — GroundTruth.mergedPrForBranch's
+                         //   own return type (#789)
   parseSetupInfo,        // gh issue view --json comments → teardown inputs
   runTeardown,           // #468 script teardown for a merged unit (pool return / worktree remove)
   isSafeWorktree,        // worktree-path containment check (CWE-22)
@@ -1138,7 +1146,7 @@ import {
   issueCloseReader, parseIssueCloseTruthJson, parseRepoName,
   resolveProjectRepo,    // #768 owner/name of the cwd repo only when it IS the project's
   hasLabel,              // case-insensitive label match (#768)
-  validateState,         // strict persisted-state validation (1.0.0-1.13.0 files migrate)
+  validateState,         // strict persisted-state validation (1.0.0-1.23.0 files migrate)
   DEFAULT_ISSUE_PRIORITY, DEFAULT_BATCH_PRIORITY, // priority defaults (0 / 10, #565)
   IllegalTransitionError, EnqueueError, CorruptStateError, LockTimeoutError,
   SchedNotFoundError,
@@ -1306,8 +1314,9 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to the current schema (1.24.0 — #810: no backfill, `kind`/`branch`
-  optional, absent = an `evicted` record with no branch) automatically (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
+  load and migrate to the current schema (1.25.0 — 1.24.0 was #810: no backfill,
+  `kind`/`branch` optional, absent = an `evicted` record with no branch) automatically
+  (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
   `pr`/`cleanup`/`failure_evidence`, batch `anchor`/`branch`/`run_id`/`eviction_groups`/
   `evictions`/`fix_attempts`/`rebase_attempts`, state-level `last_pr_poll_at` backfill to
@@ -1320,7 +1329,10 @@ after-the-fact recovery, not a missing-data bug.
   `consecutive_dispatch_api_errors`/`dispatch_pause_reset_at` backfill to `0`/`null` —
   #629; batch `anchor_closed_at` and `anchor_close_failed_reason`/`_since`/`_ticks`
   backfill to `null`/`null`/`null`/`0` — #768, schema 1.22.0; batch `member_dispatch`/`member_runs`
-  backfill to `null`/`[]` — #809, schema 1.23.0 — a null mode past `ready` runs serially).
+  backfill to `null`/`[]` — #809, schema 1.23.0 — a null mode past `ready` runs serially;
+  `IssueStatus` gains `handed-back`, `EvictionRecord`/`FailureEvidence` gain optional
+  `kind`/`branch` — #810, schema 1.24.0; batch `pr_detect_ambiguous_reason`/`_since`/`_ticks`
+  backfill to `null`/`null`/`0` — #789, schema 1.25.0).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -1413,6 +1425,31 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   the journal line says the worktree was kept, and `sched status` then raises a
   `kept-worktree` warning for it on every run until the ledger field clears — see
   above and `reconcileKeptWorktrees` (#791).
+- **PR-detection evidence (#789).** When `batch.pr` was never recorded at all — a PR
+  opened by hand, e.g. imboard#4255 — the stale-blocked reconcile also looks for
+  exactly one MERGED pull request whose head is the batch branch, based against
+  `batch.base_branch`, created at or after the batch's own `created_at`, and not from a
+  fork (`GroundTruth.mergedPrForBranch`: `gh pr list -R <repo> --head <branch> --base
+  <base> --state merged`, gated on the same verified `resolveProjectRepo` #768 uses —
+  absent entirely without one). Positive evidence only: zero candidates records
+  nothing and falls through to the branch/members evidence below; two or more is
+  `ambiguous` — no PR is recorded, and only when no OTHER evidence reconciles the
+  batch that same tick is the ambiguity journaled (`pr-detect-ambiguous`, deduped like
+  `pr-watch-failed`: once per `blocked` stretch, re-announced every
+  `JOURNAL_DEDUP_REANNOUNCE_TICKS`; a batch that leaves `blocked` any way — this
+  reconcile's own success, `sched resume --batch`, `sched abandon` — clears the marker,
+  so a later re-block never inherits a stale streak). A batch that still reconciles via
+  `commits-in-base`/`members-closed` does so without a PR and finishes inline, same as
+  before #789. On a match, `batch.pr` is recorded as part of the SAME `blocked →
+  merged` transition (the `stale-failure-reconciled` line then also carries
+  `pr_detected: true`), so the ordinary `deployed` machinery (item 6, "Report dispatch",
+  under "The PR watcher + tail work (#468)" below — shared infrastructure, not
+  per-issue-only despite the section's origin) dispatches the report agent exactly as if the
+  fleet had opened the PR itself, and `sched status`'s existing `pr` column shows it.
+  Recording `batch.pr` never closes the anchor by itself — that stays #768's own
+  evidence-gated `reconcileAnchorClosure`, unchanged. An ambiguous match with no
+  explicit way to resolve it today (#824 tracks a `sched attach-pr` verb) still lets the
+  batch reconcile via its other evidence, or falls to `sched abandon --batch`.
 
 Everything else is surfaced, never closed: `sched status --anchors` (opt-in; `status`
 makes no GitHub call without it) lists each still-open anchor of a batch no longer in
