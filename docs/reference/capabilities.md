@@ -82,7 +82,7 @@ Only `lifecycle: active` entries execute; a `shadow` entry refuses with
 
 **The result is always one of exactly four outcomes**, distinguishable by exit code and
 by a JSON envelope printed as the **last stdout line** (child output is passed through
-first — consumers read the final line):
+first; machine consumers should prefer the envelope file — see below):
 
 | Outcome | Exit code | Meaning |
 |---|---|---|
@@ -106,19 +106,24 @@ consequence: make sure a failing capability lets its runner's own output through
 than swallowing it and printing only its own framing.
 
 > Exit 1 is also the CLI's generic usage-error exit (e.g. a typo'd command). Machine
-> consumers should read the envelope's last stdout line — present for every `cap run`
-> outcome — rather than the exit code alone, and check stderr for usage errors.
+> consumers should read the envelope — from `--envelope-file` / `$DOSSIER_CAP_ENVELOPE_FILE`,
+> else the last stdout line carrying `"cap_envelope": 1` — present for every `cap run`
+> outcome, rather than the exit code alone, and check stderr for usage errors.
 
 **Machine consumers should read the envelope file, not stdout** (#811). Pass
 `--envelope-file <path>` (or set `DOSSIER_CAP_ENVELOPE_FILE=<path>` in `cap run`'s
 environment) and `cap run` writes the same envelope there, atomically, before it exits.
-Stdout is a shared channel: anything else holding it — a descendant process that writes
-after `cap run` prints the envelope — pushes the envelope off the last line, and a
-green 33-minute `gate.batch` was once recorded as "no envelope" that way. The variable
-is stripped from the capability command's own environment, so the command cannot write
-the verdict. Every envelope carries `"cap_envelope": 1`; a consumer without the file
-should scan stdout bottom-up for the last line carrying that marker rather than trusting
-the last line blindly. The scheduler's suite and per-member gate runners do both.
+Stdout is a shared, lossy channel: a descendant process that writes after `cap run`
+prints the envelope pushes it off the last line, and (before #811's stdout drain)
+`process.exit()` could drop a large re-emitted output's tail — envelope included — which
+is how a green 33-minute `gate.batch` was once recorded as "no envelope". The variable is
+stripped from the environment of everything `cap run` spawns for the capability (its
+assumption probes and its command), so the command is never handed the envelope path.
+Every envelope carries `"cap_envelope": 1`; a consumer without the file should scan
+stdout bottom-up for the last line carrying that marker rather than trusting the last
+line blindly — and, from either source, trust an envelope only when its `outcome` agrees
+with `cap run`'s exit code (the one signal the command cannot forge). The scheduler's
+suite and per-member gate runners do all of this through `cli/src/cap-envelope.ts`.
 
 **On any non-`ok` outcome, the envelope also carries `output_tail`** (#583 AC1/AC3) —
 the last `--tail-bytes` (default 8192) bytes of the command's combined stdout+stderr,

@@ -54,15 +54,23 @@ describe('envelope file (#811)', () => {
   it('round-trips a marked envelope', () => {
     const file = path.join(dir, 'env.json');
     writeCapEnvelopeFile(file, marked('ok'));
-    expect(readCapEnvelopeFile(file)?.outcome).toBe('ok');
+    const read = readCapEnvelopeFile(file);
+    expect(read.state === 'ok' && read.envelope.outcome).toBe('ok');
     expect(fs.readdirSync(dir)).toEqual(['env.json']); // no temp leftovers
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
   });
 
-  it('rejects a missing file and an unmarked JSON object', () => {
-    expect(readCapEnvelopeFile(path.join(dir, 'missing.json'))).toBeNull();
+  it('tells a missing file apart from an unmarked one', () => {
+    expect(readCapEnvelopeFile(path.join(dir, 'missing.json'))).toEqual({ state: 'absent' });
     const file = path.join(dir, 'pkg.json');
     fs.writeFileSync(file, JSON.stringify({ outcome: 'ok' }));
-    expect(readCapEnvelopeFile(file)).toBeNull();
+    expect(readCapEnvelopeFile(file)).toMatchObject({ state: 'invalid' });
+  });
+
+  it('a failed write leaves no temp file behind and rethrows', () => {
+    const file = path.join(dir, 'missing-subdir', 'env.json');
+    expect(() => writeCapEnvelopeFile(file, marked('ok'))).toThrow();
+    expect(fs.readdirSync(dir)).toEqual([]);
   });
 });
 

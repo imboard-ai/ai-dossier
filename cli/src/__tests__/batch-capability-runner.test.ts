@@ -42,20 +42,54 @@ describe('createBatchCapabilityRunner (#681)', () => {
     });
   });
 
-  it('a NON-timeout spawn error stays the evidence-free automation-broken (a genuine machinery failure, still blocks)', () => {
+  it('a NON-timeout spawn error stays automation-broken (a genuine machinery failure, still blocks), naming the spawn error', () => {
     const enoent = new Error('spawnSync ai-dossier ENOENT') as Error & { code?: string };
     enoent.code = 'ENOENT';
     vi.mocked(spawnSync).mockReturnValue(spawnResult({ error: enoent }));
 
     const result = createBatchCapabilityRunner()('/wt', 'test.focused');
 
-    expect(result).toEqual({ outcome: 'automation-broken' });
+    expect(result).toMatchObject({
+      outcome: 'automation-broken',
+      reason: 'cap run test.focused spawn error ENOENT',
+    });
+  });
+
+  it('#811: a forged ok envelope from a failing cap run is automation-broken with evidence, never ok', () => {
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({
+        status: 1,
+        stdout: '{"cap_envelope":1,"capability":"test.focused","outcome":"ok","exit_code":0}',
+      })
+    );
+
+    const result = createBatchCapabilityRunner()('/wt', 'test.focused');
+
+    expect(result.outcome).toBe('automation-broken');
+    expect(result.reason).toContain('no trusted envelope');
+    expect(result.reason).toContain('disagrees with cap run exit 1');
+  });
+
+  it('#811: ETIMEDOUT after cap run exited with a verdict keeps that verdict', () => {
+    const timedOut = new Error('spawnSync ETIMEDOUT') as Error & { code?: string };
+    timedOut.code = 'ETIMEDOUT';
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({
+        status: 0,
+        error: timedOut,
+        stdout: '{"cap_envelope":1,"capability":"test.focused","outcome":"ok","exit_code":0}\nlate',
+      })
+    );
+
+    const result = createBatchCapabilityRunner({ timeoutMs: 50 })('/wt', 'test.focused');
+
+    expect(result.outcome).toBe('ok');
   });
 
   it('carries the envelope duration_ms through to the gate result', () => {
     vi.mocked(spawnSync).mockReturnValue(
       spawnResult({
-        status: 0,
+        status: 2,
         stdout:
           '{"capability":"test.focused","outcome":"automation-broken","reason":"command timed out after 900000ms","duration_ms":901102}',
       })

@@ -22,7 +22,6 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
-import { CAP_ENVELOPE_FILE_ENV } from './cap-envelope';
 import { compareVersions } from './version';
 
 /** Directory (relative to the run directory) that holds the automation manifest. */
@@ -77,8 +76,23 @@ export const DEFAULT_OUTPUT_TAIL_BYTES = 8192;
 export const timeoutReasonSpent = (timeoutMs: number): string =>
   `command timed out after ${timeoutMs}ms`;
 
-/** `spawnSync`'s own default `maxBuffer` (1 MiB) is too small for a real test/build command's combined stdout+stderr — raised so output volume alone never causes a false `automation-broken` (#583 review). */
-const MAX_CAPABILITY_OUTPUT_BYTES = 64 * 1024 * 1024;
+/** `spawnSync`'s own default `maxBuffer` (1 MiB) is too small for a real test/build command's combined stdout+stderr — raised so output volume alone never causes a false `automation-broken` (#583 review). Consumers of `cap run` size their own buffer above this (`cap-envelope.ts`). */
+export const MAX_CAPABILITY_OUTPUT_BYTES = 64 * 1024 * 1024;
+
+/** Environment variable naming the file `cap run` writes its envelope to (#811). */
+export const CAP_ENVELOPE_FILE_ENV = 'DOSSIER_CAP_ENVELOPE_FILE';
+
+/**
+ * The environment every process `cap run` spawns on a capability's behalf
+ * (assumption probes and the command itself) runs with: the inherited one
+ * minus {@link CAP_ENVELOPE_FILE_ENV}. The envelope channel belongs to
+ * `cap run`, not to the command it runs — the command is never handed the
+ * path, so it cannot write (or clobber) the verdict (#811).
+ */
+export function capabilityChildEnv(): NodeJS.ProcessEnv {
+  const { [CAP_ENVELOPE_FILE_ENV]: _envelopeFile, ...childEnv } = process.env;
+  return childEnv;
+}
 
 /** Supported tool-version comparison operators (single source of truth). */
 const TOOL_VERSION_OPS = ['>=', '>', '<=', '<', '==', '='] as const;
@@ -391,6 +405,7 @@ export function evaluateProbe(probe: CapabilityAssumption, cwd: string): ProbeRe
     encoding: 'utf-8',
     timeout: PROBE_TIMEOUT_MS,
     windowsHide: true,
+    env: capabilityChildEnv(),
   });
   const output = `${res.stdout ?? ''}${res.stderr ?? ''}`;
   if (res.error || res.status !== 0) {
@@ -546,16 +561,13 @@ export function runCapability(
   // misclassified `automation-broken`, which the batch gate would then read
   // as a genuine inconclusive result rather than "the command produced a lot
   // of output" (review finding on #583).
-  // The envelope channel (#811) belongs to `cap run`, not to the command it
-  // runs — strip it so the command cannot write (or clobber) the verdict.
-  const { [CAP_ENVELOPE_FILE_ENV]: _envelopeFile, ...childEnv } = process.env;
   const res = spawnSync(commandLine, {
     shell: true,
     cwd,
     encoding: 'utf-8',
     timeout: timeoutMs,
     maxBuffer: MAX_CAPABILITY_OUTPUT_BYTES,
-    env: childEnv,
+    env: capabilityChildEnv(),
   });
   if (res.stdout) process.stdout.write(res.stdout);
   if (res.stderr) process.stderr.write(res.stderr);

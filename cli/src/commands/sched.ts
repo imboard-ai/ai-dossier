@@ -90,7 +90,7 @@ import {
   batchGateRefusal,
   createBatchSuiteRunner,
 } from '../batch-suite-runner';
-import { spawnCapRun } from '../cap-envelope';
+import { envelopeFields, spawnCapRun } from '../cap-envelope';
 import { loadCapabilityManifest, timeoutReasonSpent } from '../capability';
 import { formatCost, formatCount } from '../cost-format';
 import { detectDispatchProfile, type ProfileCandidate } from '../dispatch-detect';
@@ -121,18 +121,18 @@ import { renderTable } from '../table';
 
 /**
  * Batch-worktree `ai-dossier cap run <id>` runner for the per-member
- * incremental gate (#523 AC2). `spawnSync` (not the plain `ExecFn`, which
- * throws away stdout on a non-zero exit) because `cap run`'s `task-failed`
- * outcome — a legitimately failing test/typecheck — IS exit code 1, and the
- * JSON envelope naming which of the four outcomes it was is the LAST stdout
- * line either way (docs/reference/capabilities.md). Reuses the aggregate
- * suite's timeout budget (`BATCH_SUITE_TIMEOUT_MS`) — both are batch-worktree
- * subprocess calls with no reason to disagree on how long is too long.
+ * incremental gate (#523 AC2). `cap run`'s `task-failed` outcome — a
+ * legitimately failing test/typecheck — IS exit code 1, so the verdict comes
+ * from the JSON envelope naming which of the four outcomes it was, read via
+ * `spawnCapRun` (cli/src/cap-envelope.ts, #811): the dedicated envelope file
+ * first, then a bottom-up stdout scan for the `cap_envelope` marker — and
+ * only when the envelope's outcome agrees with `cap run`'s exit code. Reuses
+ * the aggregate suite's timeout budget (`BATCH_SUITE_TIMEOUT_MS`) — both are
+ * batch-worktree subprocess calls with no reason to disagree on how long is
+ * too long.
  *
- * `output_tail` (#583 AC1/AC3) rides on the same envelope `cap run` already
- * prints — this function's own `spawnSync` call already captures the whole
- * subprocess's stdout (no `stdio: 'inherit'` here), so no extra plumbing is
- * needed beyond reading the field off the parsed envelope.
+ * `output_tail` (#583 AC1/AC3) rides on the same envelope; when it is absent
+ * the fallback is `spawnCapRun`'s captured stdout+stderr.
  */
 export function createBatchCapabilityRunner(opts?: {
   /** Overridable so tests can exercise the ETIMEDOUT branch cheaply (mirrors `createBatchSuiteRunner`). */
@@ -140,20 +140,11 @@ export function createBatchCapabilityRunner(opts?: {
 }): (worktree: string, capabilityId: string) => CapabilityGateResult {
   const timeoutMs = opts?.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
   return (worktree, capabilityId) => {
-    // #811: read the envelope off `cap run`'s dedicated envelope file (stdout
-    // bottom-up scan as the fallback), never blindly stdout's last line.
-    const {
-      spawned: result,
-      envelope,
-      envelopeSource,
-    } = spawnCapRun(capabilityId, worktree, {
-      timeoutMs,
-    });
-    // A descendant holding the inherited stdout can keep `spawnSync` waiting
-    // past its timeout after `cap run` already exited with a verdict — that
-    // verdict stands (see batch-suite-runner's `runCapabilitySuite`).
-    const exitedWithVerdict = result.status !== null && envelopeSource !== 'none';
-    if (result.error && !exitedWithVerdict) {
+    const run = spawnCapRun(capabilityId, worktree, { timeoutMs });
+    const result = run.spawned;
+    // Captured subprocess output — the evidence fallback on every path below.
+    const captured = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    if (result.error && !run.exitedWithVerdict) {
       // #681: this runner's OWN timeout (spawnSync's, `BATCH_SUITE_TIMEOUT_MS`)
       // must be distinguishable from a genuine machinery failure — before, it
       // collapsed into the evidence-free `{outcome: 'automation-broken'}`
@@ -161,44 +152,50 @@ export function createBatchCapabilityRunner(opts?: {
       // `command timed out after <N>ms` reason `cli/src/capability.ts`'s
       // `classifySpawnResult` emits for its ETIMEDOUT, so the gate's
       // `isGateTimeout` classifier sees both timeout layers identically.
-      // Any OTHER spawn error keeps the evidence-free `automation-broken` —
-      // a genuine machinery failure, which still blocks (#583/#585).
-      if ((result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT') {
+      // Any OTHER spawn error is a genuine machinery failure, which still
+      // blocks (#583/#585) — with its code as the reason.
+      const code = (result.error as NodeJS.ErrnoException).code;
+      if (code === 'ETIMEDOUT') {
         return {
           outcome: 'automation-broken',
           reason: timeoutReasonSpent(timeoutMs),
-          outputTail: `${result.stdout ?? ''}${result.stderr ?? ''}` || null,
+          outputTail: captured || null,
         };
       }
-      return { outcome: 'automation-broken' };
+      return {
+        outcome: 'automation-broken',
+        reason: `cap run ${capabilityId} spawn error ${code ?? result.error.message}`,
+        outputTail: captured || null,
+      };
     }
-    if (envelope === null) return { outcome: 'automation-broken' };
-    const outcome = envelope.outcome;
+    if (run.envelope === null) {
+      return {
+        outcome: 'automation-broken',
+        reason: `cap run ${capabilityId} exited ${result.status ?? 'unknown'} (signal ${result.signal ?? 'none'}) with no trusted envelope — ${run.diagnostics}`,
+        outputTail: captured || null,
+        durationMs: null,
+      };
+    }
+    const fields = envelopeFields(run.envelope);
     // Fall back to the subprocess's own capture when the envelope omits
     // `output_tail` (a capability build predating #583, or a non-string
     // field). Passing `null` through would read as "nobody tried to capture
     // output" to `hasEarnedFailureEvidence`, which trusts the exit code in
     // that case — silently buying back the pre-#594 evict-on-any-
     // `task-failed` behaviour on the exact path #594 closes.
-    const captured = `${result.stdout ?? ''}${result.stderr ?? ''}`;
-    const outputTail =
-      typeof envelope.output_tail === 'string' ? envelope.output_tail : captured || null;
+    const outputTail = fields.outputTail ?? (captured || null);
     // `reason` (#583 review) is the only explanation available when no
     // subprocess ran at all — `capability-unavailable`, or `automation-broken`
     // from a failed assumption probe — since `output_tail` is unset there.
-    const reason = typeof envelope.reason === 'string' ? envelope.reason : null;
     // `duration_ms` (#681) rides to `member_gates` — the gate's cost per
     // member, the raw material for per-change-shape savings reporting.
-    const durationMs = typeof envelope.duration_ms === 'number' ? envelope.duration_ms : null;
-    if (
-      outcome === 'ok' ||
-      outcome === 'task-failed' ||
-      outcome === 'automation-broken' ||
-      outcome === 'capability-unavailable'
-    ) {
-      return { outcome, outputTail, reason, durationMs };
-    }
-    return { outcome: 'automation-broken' };
+    // `spawnCapRun` only returns an envelope with a valid outcome.
+    return {
+      outcome: fields.outcome ?? 'automation-broken',
+      outputTail,
+      reason: fields.reason,
+      durationMs: fields.durationMs,
+    };
   };
 }
 

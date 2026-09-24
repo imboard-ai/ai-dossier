@@ -63,6 +63,7 @@ describe('createBatchSuiteRunner (#562)', () => {
   beforeEach(() => {
     vi.mocked(spawnSync).mockReset();
     mockedFs.readFileSync.mockReset();
+    mockedFs.mkdtempSync.mockReturnValue('/tmp/ai-dossier-cap-test');
     vi.mocked(readPoolFileConfig).mockReset();
     vi.mocked(readPoolFileConfig).mockReturnValue({} as ReturnType<typeof readPoolFileConfig>);
     // Detection needs a package manifest; capability manifests remain absent unless a test supplies one.
@@ -334,6 +335,42 @@ describe('createBatchSuiteRunner (#562)', () => {
     expect(result.detail).toContain('ETIMEDOUT');
   });
 
+  it('#811: a verdict survives ETIMEDOUT when cap run already exited and wrote its envelope file (a descendant held stdout)', () => {
+    mockedFs.readFileSync.mockImplementation((file) =>
+      String(file).includes('ai-dossier-cap-test')
+        ? JSON.stringify({ cap_envelope: 1, capability: 'test.full', outcome: 'ok', exit_code: 0 })
+        : JSON.stringify({ scripts: { test: 'make test' } })
+    );
+    const timeoutError = Object.assign(new Error('spawnSync ai-dossier ETIMEDOUT'), {
+      code: 'ETIMEDOUT',
+    });
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({ status: 0, error: timeoutError, stdout: 'late descendant output' })
+    );
+
+    const result = createBatchSuiteRunner(config())('/wt');
+
+    expect(result).toMatchObject({ ok: true, readable: true });
+    expect(result.detail).toContain('envelope=file');
+    expect(result.detail).toContain('a descendant held cap run');
+    expect(spawnSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("#811: an envelope whose outcome disagrees with cap run's exit code is never trusted (a forged ok)", () => {
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({
+        status: 1,
+        stdout: `${JSON.stringify({ cap_envelope: 1, capability: 'test.full', outcome: 'ok', exit_code: 0 })}\n`,
+      })
+    );
+
+    const result = createBatchSuiteRunner(config())('/wt');
+
+    expect(result.ok).toBe(false);
+    expect(result.detail).toContain('harness produced no envelope');
+    expect(result.detail).toContain('disagrees with cap run exit 1');
+  });
+
   it('a declared non-default test.full timeout is terminal, reports its budget and elapsed time, and never reaches a fallback', () => {
     mockedFs.existsSync.mockReturnValue(true);
     mockedFs.readFileSync.mockReturnValue(
@@ -400,6 +437,7 @@ describe('gate.batch capability (#777)', () => {
   beforeEach(() => {
     vi.mocked(spawnSync).mockReset();
     mockedFs.readFileSync.mockReset();
+    mockedFs.mkdtempSync.mockReturnValue('/tmp/ai-dossier-cap-test');
     vi.mocked(readPoolFileConfig).mockReset();
     vi.mocked(readPoolFileConfig).mockReturnValue({} as ReturnType<typeof readPoolFileConfig>);
     mockedFs.existsSync.mockReturnValue(true);
