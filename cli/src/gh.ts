@@ -58,12 +58,15 @@ export type ExecResult = { ok: true; stdout: string } | { ok: false; error: Exec
  * three different fixes and are indistinguishable without it. A hard timeout keeps a
  * network-stalled gh from hanging an agent-driven run with nothing to debug.
  */
-export function exec(file: string, args: string[]): ExecResult {
+export function exec(file: string, args: string[], opts: { maxBuffer?: number } = {}): ExecResult {
   try {
     const stdout = execFileSync(file, args, {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: EXEC_TIMEOUT_MS,
+      // Node's 1 MiB default; a caller reading many issues at once (`batch compose`'s backlog
+      // page, bodies + comments) raises it rather than dying with ENOBUFS.
+      ...(opts.maxBuffer !== undefined ? { maxBuffer: opts.maxBuffer } : {}),
     });
     return { ok: true, stdout: String(stdout).trim() };
   } catch (err) {

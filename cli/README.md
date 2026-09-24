@@ -1114,6 +1114,125 @@ measured pre-screen hit rate:
 
 ---
 
+## Batch Composition (`batch compose`)
+
+Previews which issues may share a batch PR **before any model spend** (#773, #770 P3
+"selection = admission"). It runs the classify pre-screen (`prescreen:v2`) plus the
+deterministic readiness screen over the operator's picks and/or the open backlog, and proposes
+one composition that honours the scheduler's batch invariants. No model call, no writes (no
+labels, comments, or queue changes) — only `gh` reads and a read-only look at the local sched
+queue/config. Exits 0 once arguments validate; `status` is the payload, not a pass/fail gate.
+
+```bash
+ai-dossier batch compose --issues 4114,4178,4327 [--repo owner/name] [--json]
+ai-dossier batch compose --backlog [--label backend]... [--search "no:assignee"] [--limit 100]
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--issues <selection>` | — | Operator picks (fleet grammar: `1,2,5..8`, ≤ 200) |
+| `--backlog` | off | Draw candidates from the open backlog (`gh issue list`, one call) |
+| `--no-backfill` | backfill on | With `--issues`: never query the backlog, even when picks fall below `--min-members` |
+| `--label <name>` (repeatable), `--search <q>`, `--limit <n>` | —, —, 100 (max 500) | Backlog filters, passed to `gh issue list` |
+| `--base <branch>` | `main` | The base branch every member shares |
+| `--min-members <n>` / `--max-members <n>` | 3 / 6 | Minimum viable batch / member ceiling (≤ 6) |
+| `--max-full-review <n>` | sched config `max_full_review_members`, else 2 | Per-batch `review=full` cap (#771) |
+| `--rules v2\|legacy` | `v2` | `legacy` replays pre-#770 admission (any risk keyword ⇒ `mode=full` ⇒ excluded) for comparison |
+| `--repo`, `--project` | cwd repo, `owner-name` | Target repo; sched project whose queue/config is read |
+
+At least one of `--issues` / `--backlog` is required. With `--issues`, the backlog is read
+**only** when fewer than `--min-members` picks are admissible (automatic backfill preview).
+
+**Admission.** An issue is excluded — with every reason recorded, not just the first — on:
+
+| `code` | Rule |
+|---|---|
+| `unreadable` | `gh issue view` failed (the report is `degraded`; the run continues) |
+| `closed` | Not `OPEN` |
+| `assigned` | Has an assignee |
+| `in-progress` | Carries the `in-progress` label |
+| `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` |
+| `batch-anchor` | Carries `batch-epic` |
+| `not-a-unit` | Tracker / decision / research / parked: labels `tracker` `decision` `question` `discussion` `research` `parked` `on-hold` `wontfix` `duplicate`; titles like `[PARKED] …`, `research: …`, `epic(x): …`; a `## Decision needed` section |
+| `in-flight` | Latest runstate milestone is any phase other than `classify` |
+| `sched-active` | A non-terminal, not-yet-merged sched queue entry exists |
+| `open-dependency` | `Depends on #N` with N open and not among the picks |
+| `data-mutation` | Change surface names a production data action (`data migration`, `data backfill`, `backfill script`, `one-off script`, `bulk delete`, …) — never shares a PR |
+| `prescreen-full` | `prescreen:v2` excluding floor: plan:v1 path floor or > 8 predicted files |
+| `legacy-full` | `--rules legacy` only: any text-floor keyword anywhere in title/body/labels |
+
+A risk keyword in the change surface (`billing`, `security`, `deploy`, …) does **not**
+exclude: the issue is admissible as a `review=full` member (#770 Option A). The data-mutation
+and text-floor scans read the same change-surface text (`floorScanText`: reference sections,
+provenance clauses and quoted spans removed).
+
+**Composition** (deterministic): every admissible pick joins, bounded by `--max-members` and
+the `review=full` cap; the overflow is listed under `held` (`review-full-cap` / `max-members`).
+Then, while the set is below its target — `--min-members` with picks, `--max-members` with
+`--backlog` alone — admissible backlog issues are added greedily, ranked: shares a workspace
+package with the current members → `light` before `full` → more shared packages → lower issue
+number. Packages come from a plan:v1 artifact's predicted files when present, else from paths
+named in the issue body (`…/packages/<x>/…` → `packages/<x>`, else the first path segment).
+`status` is `ok` (≥ min), `under-min` (2 … min−1), or `no-batch` (< 2 — run the survivor as a
+full-cycle issue, #770 P4).
+
+**JSON contract (`schema: batch-compose:v1`).** Consumers (batch-issues-preparation, #774)
+branch on `status`, take `manifest_entries`, and report `excluded`:
+
+```json
+{
+  "schema": "batch-compose:v1",
+  "repo": "imboard-ai/imboard-monorepo",
+  "project": "imboard-ai-imboard-monorepo",
+  "base_branch": "main",
+  "rules": "v2",
+  "params": {
+    "min_members": 3, "max_members": 6, "max_full_review": 2, "picks": [4333, 4343],
+    "backlog": { "queried": true, "labels": [], "search": null, "limit": 100 }
+  },
+  "status": "ok",
+  "members": [
+    { "issue": 4333, "title": "…", "review": "light", "source": "pick", "packages": [], "review_reasons": [] },
+    { "issue": 4343, "title": "…", "review": "full", "source": "pick", "packages": ["packages/backend"],
+      "review_reasons": ["Title/body/labels match 'rule1-risk-floor-area' (keyword: 'billing')."] },
+    { "issue": 4241, "title": "…", "review": "full", "source": "backfill", "packages": ["packages/backend"], "review_reasons": ["…"] }
+  ],
+  "held": [],
+  "backfill": [
+    { "rank": 1, "issue": 4241, "title": "…", "review": "full", "packages": ["packages/backend"], "shared_packages": ["packages/backend"], "selected": true }
+  ],
+  "shared_packages": ["packages/backend"],
+  "recommendation": "Form one batch of 3 on 'main' (2 review=full).",
+  "manifest_entries": [
+    { "issue": 4333, "mode": "slot", "review": "light", "base_branch": "main" },
+    { "issue": 4343, "mode": "slot", "review": "full", "base_branch": "main" },
+    { "issue": 4241, "mode": "slot", "review": "full", "base_branch": "main" }
+  ],
+  "excluded": [
+    { "issue": 4178, "title": "…", "source": "pick",
+      "reasons": [{ "code": "in-progress", "message": "Carries the 'in-progress' label." }] }
+  ],
+  "counts": { "assessed": 102, "admissible": 62, "excluded": 40 },
+  "model_calls": 0,
+  "degraded": false,
+  "warnings": []
+}
+```
+
+- `members` is in selection order (picks, then backfill); `source` is `pick`, `backfill`, or
+  `backlog` (backlog-only mode). `review_reasons` are the prescreen findings behind a `full`.
+- `manifest_entries` are **draft** `sched enqueue --from-manifest` entries (`parseManifest`
+  shape): batch-issues-preparation adds `batch`, `anchor`, `run_id`, `tier`, `deps`, and
+  `dispatch` — compose mints nothing and claims nothing.
+- `backfill` is present only with `--issues`: every admissible backlog candidate, ranked
+  against the admitted picks, `selected: true` on the ones the composition took.
+- `held` lists admissible issues left out (`review-full-cap`, `max-members`).
+- `degraded`/`warnings` name any lookup that did not complete (an unreadable pick, the backlog
+  list, a dependency's state, the sched queue/config); the result reflects what did complete.
+- `model_calls` is always `0`.
+
+---
+
 ## Plan Artifacts (`plan`) — plan:v1
 
 Issues used to be planned up to three times (triage, batch prep, plan-issue). The

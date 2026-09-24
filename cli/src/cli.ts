@@ -8,6 +8,7 @@ import { program } from 'commander';
 // Package info
 const pkg = require('../package.json');
 
+import { registerBatchCommand } from './commands/batch';
 import { registerCacheCommand } from './commands/cache';
 import { registerCapCommand } from './commands/cap';
 import { registerChecksumCommand } from './commands/checksum';
@@ -120,6 +121,7 @@ registerDoctorCommand(program);
 registerTracesCommand(program);
 registerRunstateCommand(program);
 registerClassifyCommand(program);
+registerBatchCommand(program);
 registerPlanCommand(program);
 registerSchedCommand(program);
 registerCapCommand(program);
