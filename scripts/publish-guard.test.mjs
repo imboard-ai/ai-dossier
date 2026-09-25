@@ -3,18 +3,20 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { CheckUnavailableError } from './check-version-bumps.mjs';
 import {
   decide,
   formatDecision,
   npmLookup,
+  npmViewOnce,
   oneLine,
   parseNpmView,
   parseRegistryResponse,
   REGISTRY_URL,
   registryLookup,
+  registryUrl,
   registryViewOnce,
   run,
 } from './publish-guard.mjs';
@@ -173,6 +175,51 @@ describe('registryViewOnce', () => {
     expect(asked).toBe(`${REGISTRY_URL}/@ai-dossier%2Fcore/1.11.0`);
   });
 
+  it('returns the gitHead from a real-shaped 200 answer, refusing redirects', async () => {
+    let init;
+    const fetchImpl = async (_url, opts) => {
+      init = opts;
+      return {
+        status: 200,
+        text: async () =>
+          JSON.stringify({ name: '@ai-dossier/core', version: '1.11.0', gitHead: SHA_A }),
+      };
+    };
+    expect(await registryViewOnce('@ai-dossier/core', '1.11.0', { fetchImpl })).toEqual({
+      gitHead: SHA_A,
+    });
+    expect(init.redirect).toBe('error');
+    expect(init.signal).toBeDefined();
+  });
+
+  it('treats a 3xx as unavailable, never as an answer', async () => {
+    const fetchImpl = async () => ({ status: 301, text: async () => '' });
+    await expect(registryViewOnce('@x/y', '1.0.0', { fetchImpl })).rejects.toThrow(
+      CheckUnavailableError
+    );
+  });
+
+  it('turns a failed body read into CheckUnavailableError', async () => {
+    const fetchImpl = async () => ({
+      status: 200,
+      text: async () => {
+        throw new Error('socket hang up');
+      },
+    });
+    await expect(registryViewOnce('@x/y', '1.0.0', { fetchImpl })).rejects.toThrow(
+      CheckUnavailableError
+    );
+  });
+
+  it('encodes the name fully and refuses one that is not a package name', () => {
+    expect(registryUrl('@ai-dossier/core', '1.11.0')).toBe(
+      `${REGISTRY_URL}/@ai-dossier%2Fcore/1.11.0`
+    );
+    for (const bad of ['@a/b/../c', '@a/b?x=1', '../etc', 'a#b']) {
+      expect(() => registryUrl(bad, '1.0.0')).toThrow(CheckUnavailableError);
+    }
+  });
+
   it('turns a network failure into CheckUnavailableError, never null', async () => {
     const fetchImpl = async () => {
       throw new TypeError('fetch failed');
@@ -183,14 +230,15 @@ describe('registryViewOnce', () => {
   });
 });
 
-describe('registryLookup — retries an unknown answer, never turns it into publish', () => {
+describe('registryLookup — retries a transient failure, never turns it into publish', () => {
   const quiet = { wait: async () => {}, log: () => {} };
+  const flaky = (m) => Object.assign(new CheckUnavailableError(m), { retryable: true });
 
   it('retries and returns the later answer', async () => {
     let calls = 0;
     const view = async () => {
       calls += 1;
-      if (calls < 3) throw new CheckUnavailableError('HTTP 503');
+      if (calls < 3) throw flaky('HTTP 503');
       return { gitHead: SHA_A };
     };
     expect(await registryLookup('@x/y', '1.0.0', { view, ...quiet })).toEqual({ gitHead: SHA_A });
@@ -198,12 +246,37 @@ describe('registryLookup — retries an unknown answer, never turns it into publ
   });
 
   it('rethrows after the last attempt instead of returning null', async () => {
+    let calls = 0;
     const view = async () => {
-      throw new CheckUnavailableError('HTTP 503');
+      calls += 1;
+      throw flaky('HTTP 503');
     };
     await expect(registryLookup('@x/y', '1.0.0', { view, ...quiet })).rejects.toThrow(
       CheckUnavailableError
     );
+    expect(calls).toBe(3);
+  });
+
+  it('does not retry a permanent failure (e.g. a missing gitHead)', async () => {
+    let calls = 0;
+    const view = async () => {
+      calls += 1;
+      throw new CheckUnavailableError('no usable gitHead');
+    };
+    await expect(registryLookup('@x/y', '1.0.0', { view, ...quiet })).rejects.toThrow(
+      /no usable gitHead/
+    );
+    expect(calls).toBe(1);
+  });
+
+  it('does not retry a definite 404 (null) answer', async () => {
+    let calls = 0;
+    const view = async () => {
+      calls += 1;
+      return null;
+    };
+    expect(await registryLookup('@x/y', '1.0.0', { view, ...quiet })).toBeNull();
+    expect(calls).toBe(1);
   });
 });
 
@@ -243,57 +316,79 @@ describe('npmLookup (inert CLI fallback) — retries an unknown answer, never tu
 });
 
 describe('parseNpmView — never fails open', () => {
-  const spec = '@ai-dossier/cli@1.0.0';
+  const SPEC = ['@ai-dossier/cli', '1.0.0'];
 
   it('returns the gitHead of a published version', () => {
     const out = JSON.stringify({ version: '1.0.0', gitHead: SHA_A });
-    expect(parseNpmView({ status: 0, stdout: out, stderr: '' }, spec)).toEqual({ gitHead: SHA_A });
+    expect(parseNpmView({ status: 0, stdout: out, stderr: '' }, ...SPEC)).toEqual({
+      gitHead: SHA_A,
+    });
   });
 
   it('accepts the npm 12 shape: a one-element array (#826 follow-up)', () => {
     // Real `npm view @ai-dossier/core@1.11.0 version gitHead --json` output
     // from npm 12.1.0 — the shape that turned the first publish run red.
-    const out = JSON.stringify([{ version: '1.11.0', gitHead: SHA_A }]);
-    expect(parseNpmView({ status: 0, stdout: out, stderr: '' }, spec)).toEqual({ gitHead: SHA_A });
+    const out = JSON.stringify([{ version: '1.0.0', gitHead: SHA_A }]);
+    expect(parseNpmView({ status: 0, stdout: out, stderr: '' }, ...SPEC)).toEqual({
+      gitHead: SHA_A,
+    });
   });
 
   it('refuses an array that is not exactly one version', () => {
     for (const arr of [[], [{ gitHead: SHA_A }, { gitHead: SHA_B }]]) {
       expect(() =>
-        parseNpmView({ status: 0, stdout: JSON.stringify(arr), stderr: '' }, spec)
+        parseNpmView({ status: 0, stdout: JSON.stringify(arr), stderr: '' }, ...SPEC)
       ).toThrow(CheckUnavailableError);
     }
   });
 
+  it('refuses output for a different version than was asked', () => {
+    const out = JSON.stringify({ version: '0.9.0', gitHead: SHA_A });
+    expect(() => parseNpmView({ status: 0, stdout: out, stderr: '' }, ...SPEC)).toThrow(
+      /different version/
+    );
+  });
+
   it('returns null for E404 (version or package not on npm)', () => {
     const out = JSON.stringify({ error: { code: 'E404', summary: 'No match found' } });
-    expect(parseNpmView({ status: 1, stdout: out, stderr: '' }, spec)).toBeNull();
+    expect(parseNpmView({ status: 1, stdout: out, stderr: '' }, ...SPEC)).toBeNull();
   });
 
   it('throws on any other npm error instead of guessing publish or skip', () => {
     const out = JSON.stringify({ error: { code: 'ETIMEDOUT', summary: 'network' } });
-    expect(() => parseNpmView({ status: 1, stdout: out, stderr: '' }, spec)).toThrow(
+    expect(() => parseNpmView({ status: 1, stdout: out, stderr: '' }, ...SPEC)).toThrow(
       CheckUnavailableError
     );
   });
 
   it('throws on a non-zero exit with no JSON answer', () => {
-    expect(() => parseNpmView({ status: 1, stdout: '', stderr: 'boom' }, spec)).toThrow(
+    expect(() => parseNpmView({ status: 1, stdout: '', stderr: 'boom' }, ...SPEC)).toThrow(
       CheckUnavailableError
     );
   });
 
   it('throws on unparseable output', () => {
-    expect(() => parseNpmView({ status: 0, stdout: '{nope', stderr: '' }, spec)).toThrow(
+    expect(() => parseNpmView({ status: 0, stdout: '{nope', stderr: '' }, ...SPEC)).toThrow(
       /not JSON/
     );
   });
 
   it('throws when the published version carries no gitHead', () => {
     const out = JSON.stringify({ version: '1.0.0' });
-    expect(() => parseNpmView({ status: 0, stdout: out, stderr: '' }, spec)).toThrow(
+    expect(() => parseNpmView({ status: 0, stdout: out, stderr: '' }, ...SPEC)).toThrow(
       /no usable gitHead/
     );
+  });
+
+  it('npmViewOnce maps a failed npm exec (exit 1, E404 JSON on stdout) to null', () => {
+    const exec = () => {
+      const err = new Error('npm exited 1');
+      err.status = 1;
+      err.stdout = JSON.stringify({ error: { code: 'E404', summary: 'No match found' } });
+      err.stderr = 'npm error code E404';
+      throw err;
+    };
+    expect(npmViewOnce(...SPEC, { exec })).toBeNull();
   });
 });
 
@@ -587,6 +682,87 @@ describe('run — end to end against a real git repo', () => {
     const rep = await report(ledger);
     expect(rep.code).toBe(1);
     expect(rep.out).toContain('Not checked: @fixture/cli');
+  });
+
+  it('names what a held dependency did: collided vs could not be checked', async () => {
+    const collided = freshLedger();
+    await guard({
+      head: loser,
+      lookup: publishedAt(winner),
+      extra: ['--defer-collision', collided],
+    });
+    const a = await guard({
+      head: loser,
+      dir: 'app',
+      lookup: () => null,
+      extra: ['--defer-collision', collided],
+    });
+    expect(a.out).toContain('@fixture/cli collided');
+
+    const unchecked = freshLedger();
+    await guard({ head: loser, lookup: unreachable, extra: ['--defer-collision', unchecked] });
+    const b = await guard({
+      head: loser,
+      dir: 'app',
+      lookup: () => null,
+      extra: ['--defer-collision', unchecked],
+    });
+    expect(b.out).toContain('@fixture/cli could not be checked');
+  });
+
+  it('a failure before the package is read still records it by name when the tree has it', async () => {
+    const ledger = freshLedger();
+    await guard({ head: 'no-such-ref', lookup: () => null, extra: ['--defer-collision', ledger] });
+    expect(readFileSync(ledger, 'utf8')).toBe('unavailable @fixture/cli\n');
+  });
+
+  it('a package that failed with its name unknown holds every same-scope dependent', async () => {
+    const ledger = freshLedger();
+    const ghost = await guard({
+      head: loser,
+      dir: 'ghost',
+      lookup: () => null,
+      extra: ['--defer-collision', ledger],
+    });
+    expect(ghost.code).toBe(0);
+    expect(readFileSync(ledger, 'utf8')).toBe('unavailable-unknown ghost\n');
+
+    const dependent = await guard({
+      head: loser,
+      dir: 'app',
+      lookup: () => null,
+      extra: ['--defer-collision', ledger],
+    });
+    expect(dependent.outputs).toContain('skip=true');
+    const unrelated = await guard({
+      head: loser,
+      dir: 'lib',
+      lookup: () => null,
+      extra: ['--defer-collision', ledger],
+    });
+    expect(unrelated.outputs).toContain('skip=false'); // no dependencies to hold it
+    expect((await report(ledger)).out).toContain('Not checked: ghost');
+  });
+
+  describe('default lookup is the registry HTTP API, not the npm CLI', () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    it('run() without a lookup option asks the registry', async () => {
+      const asked = [];
+      vi.stubGlobal('fetch', async (url) => {
+        asked.push(String(url));
+        return { status: 404, text: async () => '"version not found"' };
+      });
+      const outputFile = join(outDir, 'default-lookup');
+      const code = await run(['--repo-root', repo, '--dir', 'cli', '--head', loser], {
+        log: () => {},
+        error: () => {},
+        outputFile,
+      });
+      expect(code).toBe(0);
+      expect(asked).toEqual([`${REGISTRY_URL}/@fixture%2Fcli/1.1.0`]);
+      expect(readFileSync(outputFile, 'utf8')).toContain('skip=false');
+    });
   });
 
   it('runs as a real subprocess and exits 2 on a usage error', async () => {
