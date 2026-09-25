@@ -1560,7 +1560,13 @@ export class IllegalTransitionError extends Error {
   }
 }
 
-/** Thrown when an issue, batch, or slot id does not exist in the state. */
+/**
+ * Thrown when an issue, batch, or slot id does not exist in the state — and,
+ * by long-standing use (`resumeLandedBatch`, `abandonBatch`, `stopBatch`,
+ * `attachBatchPr`, ...), when an operator verb REFUSES on a ledger or
+ * evidence precondition. Either way the CLI prints the message verbatim and
+ * exits 1 (`handleKnownError`), so the message must say what to do next.
+ */
 export class SchedNotFoundError extends Error {
   constructor(message: string) {
     super(message);
@@ -1843,7 +1849,13 @@ export type JournalEventName =
   | 'batch-resumed'
   // #822: a member posted a full-cycle-shaped milestone (wrong procedure) —
   // released and respawned ONCE in place with a corrective directive.
-  | 'member-reprompted';
+  | 'member-reprompted'
+  // #824: an operator recorded `batch.pr` by hand (`sched attach-pr`) after
+  // the PR passed #789's own candidate checks — a separate event name from the
+  // automatic detection (`stale-failure-reconciled` with `pr_detected: true`)
+  // so `events.jsonl` always tells the two apart. `pr`/`mergedAt` name the PR;
+  // `detail` names the verified repo/head/base and any ambiguity streak cleared.
+  | 'pr-attached';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —
@@ -2007,4 +2019,13 @@ export interface JournalEvent {
    * `events.jsonl`, never for a decision.
    */
   fence_takeover?: string;
+  /**
+   * The PR an event concerns — typed here since #824's `pr-attached` (the PR
+   * an operator recorded as `batch.pr`); batch-dispatch's loosely-typed
+   * writers (`merge-accepted`, `pr-watch-failed`, `stale-failure-reconciled`)
+   * already wrote the same key.
+   */
+  pr?: number;
+  /** A PR's verified merge time (ISO) — `pr-attached` (#824) and `stale-failure-reconciled`. */
+  mergedAt?: string;
 }

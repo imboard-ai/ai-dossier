@@ -35,6 +35,7 @@ import { batchMemberLogPath } from '../dispatch';
 import {
   abandonBatch,
   assignToIdleSlot,
+  attachBatchPr,
   type BatchDispatchDeps,
   type BatchSuiteContext,
   buildStatusReport,
@@ -3200,6 +3201,89 @@ describe('#789: automatic detection of a hand-opened batch PR the ledger never r
   }, 60_000);
 });
 
+// --- #824: `sched attach-pr` resolves the ambiguity by hand; the engine does the rest ---
+
+describe('#824: an operator-attached PR rides the ordinary #686 rail and never closes the anchor', () => {
+  it('ambiguous detection → attach-pr records the PR and clears the streak → the next tick reconciles on pr-merged; the anchor stays open through done', async () => {
+    const { h, batchId } = await blockedBatchHarness('b-824-attach', 8240, 8241);
+    const batch = findBatch(h.state(), batchId);
+    const branch = batch?.branch as string;
+    const createdAt = new Date(Date.parse(batch?.created_at as string) + 60_000).toISOString();
+    const candidate = (number: number) => ({
+      number,
+      headRefName: branch,
+      baseRefName: 'main',
+      isCrossRepository: false,
+      mergedAt: createdAt,
+      createdAt,
+    });
+    setMergedPrsTruth(h.truthDir, branch, [candidate(4270), candidate(4271)]);
+    setIssueTruth(h.truthDir, 8240, { labels: ['batch-epic'] }); // the anchor — still OPEN
+    setIssueTruth(h.truthDir, 8241, {}); // the member — still OPEN, no shipping evidence
+
+    h.tick(); // #789: ambiguous — nothing recorded, streak opened
+    expect(findBatch(h.state(), batchId)?.pr).toBeNull();
+    expect(findBatch(h.state(), batchId)?.pr_detect_ambiguous_ticks).toBe(1);
+
+    // The operator inspected both and names #4270.
+    const attached = attachBatchPr(
+      {
+        store: h.store,
+        journal: h.deps.journal,
+        groundTruth: stubGroundTruth({
+          batchPrCandidate: (pr) => ({ ...candidate(pr), state: 'MERGED' }),
+        }),
+      },
+      batchId,
+      4270
+    );
+    expect(attached).toMatchObject({ outcome: 'attached', pr: 4270, clearedAmbiguousTicks: 1 });
+    let after = findBatch(h.state(), batchId);
+    expect(after?.pr).toBe(4270);
+    expect(after?.pr_detect_ambiguous_reason).toBeNull();
+    expect(after?.status).toBe('blocked'); // attach records; it does not transition
+    expect(after?.anchor_closed_at).toBeNull();
+
+    // The engine takes it from here — the recorded-PR branch of the
+    // stale-blocked reconcile, exactly as if the fleet had opened the PR.
+    fs.writeFileSync(
+      path.join(h.truthDir, '4270.pr.json'),
+      JSON.stringify({ state: 'MERGED', mergedAt: createdAt })
+    );
+    const r1 = h.tick();
+    expect(r1.mergeAccepted).toContain(`batch:${batchId}`);
+    after = findBatch(h.state(), batchId);
+    expect(after?.status).toBe('deployed');
+    expect(after?.pr).toBe(4270);
+    const events = h.deps.journal.read().filter((e) => e.unit === `batch:${batchId}`);
+    expect(events.filter((e) => e.event === 'pr-attached')).toHaveLength(1);
+    const reconciled = events.find((e) => e.event === 'stale-failure-reconciled');
+    expect(reconciled?.pr).toBe(4270);
+    // The automatic-detection marker is NOT on this line — the PR was attached, not detected.
+    expect((reconciled as Record<string, unknown> | undefined)?.pr_detected).toBeUndefined();
+    // No further ambiguity line after the attach.
+    expect(events.filter((e) => e.event === 'pr-detect-ambiguous')).toHaveLength(1);
+
+    // Drive to `done` — the anchor pass reads `blocked`/`done` only — and the
+    // anchor is still open: closure stays #768's evidence-gated call.
+    const r2 = h.tick();
+    expect(r2.spawned).toEqual([`batch:${batchId}`]);
+    const rpid = batchSlotPid(h, batchId) as number;
+    expect(await waitUntilDead(h.spawnDeps, rpid)).toBe(true);
+    h.tick();
+    after = findBatch(h.state(), batchId);
+    expect(after?.status).toBe('done');
+    expect(after?.anchor_closed_at).toBeNull();
+    expect(issueTruth(h.truthDir, 8240).state).toBe('OPEN');
+    expect(ghWrites(h.truthDir).filter((c) => c.issue === '8240')).toEqual([]);
+    expect(
+      h.deps.journal
+        .read()
+        .some((e) => e.event === 'anchor-closed' && e.unit === `batch:${batchId}`)
+    ).toBe(false);
+  }, 60_000);
+});
+
 /**
  * #789 review: a lightweight harness for `reconcileStaleBlockedBatches`'s
  * `pr-detect-ambiguous` dedup marker — calls the reconcile function
@@ -3238,7 +3322,13 @@ function prDetectAmbiguousHarness(memberIssue: number, batchId: string, branch: 
   store.withLock(() => ({ state, result: undefined }));
 
   let lookup: MergedPrLookup | undefined;
-  const groundTruth = stubGroundTruth({ mergedPrForBranch: () => lookup });
+  let onLookup: (() => void) | undefined;
+  const groundTruth = stubGroundTruth({
+    mergedPrForBranch: () => {
+      onLookup?.();
+      return lookup;
+    },
+  });
   const deps: BatchDispatchDeps = {
     store,
     journal,
@@ -3275,6 +3365,10 @@ function prDetectAmbiguousHarness(memberIssue: number, batchId: string, branch: 
     store,
     setLookup: (l: MergedPrLookup | undefined) => {
       lookup = l;
+    },
+    /** Run `fn` while the reconcile's GitHub lookup is "in flight" — outside the lock (#824 review). */
+    setOnLookup: (fn: (() => void) | undefined) => {
+      onLookup = fn;
     },
     /** Move the batch to `to` via the real transition rail (a legal `BATCH_TRANSITIONS` edge from its current status) — no reconcile pass runs; only `reconcileStaleBlockedBatches` below observes the change. */
     transitionTo: (to: 'executing' | 'blocked') => {
@@ -3331,6 +3425,25 @@ describe('#789 review: pr-detect-ambiguous is scoped to ONE blocked stretch, lik
     const secondSince = (events[1] as unknown as { since: string }).since;
     expect(secondSince).not.toBe(firstSince);
     expect(h.batch()?.pr_detect_ambiguous_ticks).toBe(1);
+  });
+
+  it('#824 review: an attach that lands during the lookup is not undone — no streak rewritten, no "use attach-pr" line', () => {
+    const h = prDetectAmbiguousHarness(7981, 'b-824-race', 'batch/b-824-race');
+    h.setLookup({ kind: 'ambiguous', matches: [100, 101] });
+    h.setOnLookup(() => {
+      // The operator's `sched attach-pr` commits while gh is answering.
+      h.store.withLock((s) => ({
+        state: patchBatch(s, 'b-824-race', { pr: 100 }),
+        result: undefined,
+      }));
+    });
+
+    h.reconcile();
+
+    expect(h.batch()?.pr).toBe(100);
+    expect(h.batch()?.pr_detect_ambiguous_reason).toBeNull();
+    expect(h.batch()?.pr_detect_ambiguous_ticks).toBe(0);
+    expect(h.journal.read().filter((e) => e.event === 'pr-detect-ambiguous')).toHaveLength(0);
   });
 });
 

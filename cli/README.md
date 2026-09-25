@@ -1331,6 +1331,7 @@ ai-dossier sched resume --batch <id>   # gate-inconclusive: re-run the gate (#58
 ai-dossier sched stop (--issue 42 | --batch b1) [--reason "..."]
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
 ai-dossier sched requeue --issue 42 [--reason "..."]   # parked batch member → full-cycle from its member branch (#810)
+ai-dossier sched attach-pr --batch b1 <pr> [--json]   # record a blocked batch's own MERGED PR by hand — resolves pr-detect-ambiguous (#824)
 ai-dossier sched reprioritize --issue 42 --priority 20 | --batch b1 --priority 20 [--json]
 ai-dossier sched stats [--issues 4,5|4..9] [--batch b1 --project owner-repo] [--json]
 ```
@@ -1559,6 +1560,18 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   agent to continue from the member's pushed branch instead of the base. It refuses any
   entry that is not parked, and journals `member-requeued`. `--json` emits
   `{requeued: "issue:<n>", dispatch_profile, branch}`.
+- **`attach-pr --batch <id> <pr>`** (#824) records a MERGED pull request as a `blocked`
+  batch's own `batch.pr` — the operator's answer when the engine's automatic detection
+  (#789) found several merged PRs on the batch branch and journaled
+  `pr-detect-ambiguous`. It verifies the current directory is the project's GitHub
+  repository first and reads the PR with `gh pr view <pr> -R <owner/name>`; the PR must be
+  same-repo (not a fork), MERGED, based on the batch's base branch, headed by the batch
+  branch, and created after the batch. Any mismatch, an unreadable repo or PR, a batch that
+  is not `blocked`, a batch with a never-dispatched member, or a different PR already
+  recorded refuses and records nothing (the same PR again is a no-op). On success it
+  clears the ambiguity streak and journals `pr-attached`; the next engine tick then
+  reconciles the batch on that PR (report + teardown follow). It never closes the anchor.
+  `--json` emits `{batch, repo, outcome, pr, mergedAt?, clearedAmbiguousTicks?}`.
 - **`reprioritize --issue <n>|--batch <id> --priority <n>`** (#565) adjusts a queued
   unit's assignment weight in place — no abandon/re-enqueue round trip, which would also
   reset every other field `enqueue` does not accept as a re-supply (deps, tier, ...).

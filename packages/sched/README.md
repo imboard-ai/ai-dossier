@@ -37,6 +37,7 @@ ai-dossier sched stop --batch b1  # terminate every batch agent (incl. parallel 
 ai-dossier sched abandon --issue 42 --reason "operator abort"
 ai-dossier sched abandon --batch b1   # dissolve; every unshipped member — parked and validated ones included — requeues as full-cycle
 ai-dossier sched requeue --issue 42   # a PARKED batch member (evicted / handed-back) → full-cycle from its member branch, on the batch profile (#810)
+ai-dossier sched attach-pr --batch b1 4270  # record a blocked batch's own MERGED PR by hand (resolves pr-detect-ambiguous, #824)
 ai-dossier sched stats --issues 4..9  # per-issue tokens/cost from ~/.dossier/runs.jsonl (#524)
 ai-dossier sched stats --batch b1 --project owner-repo  # batch member/tail/report/fix costs from raw dispatch logs (#564)
 ```
@@ -1133,8 +1134,9 @@ import {
   createSpawnDeps,       // real detached-spawn process I/O
   createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec);
                          //   since #468 also gh pr view PR state + setup info from comments;
-                         //   since #789 also mergedPrForBranch when constructed with a
-                         //   verified `repo` (resolveProjectRepo)
+                         //   since #789 also mergedPrForBranch, and since #824
+                         //   batchPrCandidate, when constructed with a verified `repo`
+                         //   (resolveProjectRepo) — which also pins prState with -R
   resolveDispatch,       // config → resolved command/prompt/report-prompt/tier-models/timers/
                          //   per-tier spawn specs (tiers — #527)
   buildTierCommand,      // resolved dispatch + tier + issue → argv, using that tier's OWN
@@ -1168,6 +1170,16 @@ import {
   type MergedPrLookup,   // { kind: 'found', pr, mergedAt } | { kind: 'none' } |
                          //   { kind: 'ambiguous', matches } — GroundTruth.mergedPrForBranch's
                          //   own return type (#789)
+  checkBatchPrCandidate, // the #789 candidate checks (fork/head/base/merged/created-after)
+                         //   → { ok: true, pr, mergedAt } | { ok: false, check } — shared by
+                         //   parseMergedPrListJson and attachBatchPr (#824)
+  type BatchPrCheck,     // which check failed: fork|head|base|unmerged|created-before-batch|number
+  parsePrCandidateJson,  // gh pr view --json → the PR object (GroundTruth.batchPrCandidate, #824)
+  attachBatchPr,         // sched attach-pr: verify an operator-named PR, record batch.pr,
+                         //   clear the pr-detect-ambiguous streak, journal pr-attached (#824)
+  type AttachPrDeps,     // { store, journal, groundTruth (repo-verified), repo? }
+  type AttachPrResult,   // { outcome: 'attached', pr, mergedAt, clearedAmbiguousTicks } |
+                         //   { outcome: 'already-attached', pr }
   parseSetupInfo,        // gh issue view --json comments → teardown inputs
   runTeardown,           // #468 script teardown for a merged unit (pool return / worktree remove)
   isSafeWorktree,        // worktree-path containment check (CWE-22)
@@ -1547,7 +1559,8 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   batch that same tick is the ambiguity journaled (`pr-detect-ambiguous`, deduped like
   `pr-watch-failed`: once per `blocked` stretch, re-announced every
   `JOURNAL_DEDUP_REANNOUNCE_TICKS`; a batch that leaves `blocked` any way — this
-  reconcile's own success, `sched resume --batch`, `sched abandon` — clears the marker,
+  reconcile's own success, `sched resume --batch`, `sched abandon` — or `sched
+  attach-pr` recording the batch's PR clears the marker,
   so a later re-block never inherits a stale streak). A batch that still reconciles via
   `commits-in-base`/`members-closed` does so without a PR and finishes inline, same as
   before #789. On a match, `batch.pr` is recorded as part of the SAME `blocked →
@@ -1557,9 +1570,34 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   per-issue-only despite the section's origin) dispatches the report agent exactly as if the
   fleet had opened the PR itself, and `sched status`'s existing `pr` column shows it.
   Recording `batch.pr` never closes the anchor by itself — that stays #768's own
-  evidence-gated `reconcileAnchorClosure`, unchanged. An ambiguous match with no
-  explicit way to resolve it today (#824 tracks a `sched attach-pr` verb) still lets the
-  batch reconcile via its other evidence, or falls to `sched abandon --batch`.
+  evidence-gated `reconcileAnchorClosure`, unchanged. An ambiguous match still lets the
+  batch reconcile via its other evidence; otherwise the operator resolves it with
+  `sched attach-pr` (below), or falls to `sched abandon --batch`.
+- **`sched attach-pr --batch <id> <pr>` (#824).** The operator's explicit, auditable
+  answer to `pr-detect-ambiguous` — and the scripted form of the `batch-integrate`
+  dossier's manual-recovery step that hand-records a batch PR (Step 6b of that registry
+  dossier; `<pr>` also accepts `#4270`). Positive evidence only: the project repository is verified first
+  (`resolveProjectRepo`; unverifiable → refused before any PR is read), the PR is read
+  with `gh pr view <pr> -R <owner/name>` (`GroundTruth.batchPrCandidate`, repo-gated like
+  `mergedPrForBranch`), and it must pass the SAME candidate checks #789's automatic path
+  applies (`checkBatchPrCandidate`: not a fork, head = `batch.branch`, base =
+  `batch.base_branch`, a real merge timestamp, created at or after the batch) plus an
+  explicit `state == MERGED` and a positively-read `isCrossRepository == false`. Any
+  mismatch, a failed or unusable gh read, a batch that is not `blocked` (or has no
+  branch), or a batch whose `batch.pr` is already a DIFFERENT PR refuses with a message
+  naming why — nothing written, nothing journaled; the same PR already recorded is a
+  no-op. There is no `--force`: every check reads a field `gh pr view` always returns.
+  On success `batch.pr` is recorded and the `pr_detect_ambiguous_*` streak cleared in
+  one locked write (`updated_at` is touched, which re-arms the 7-day reconcile window),
+  journaled as its own `pr-attached` event — never `stale-failure-reconciled` /
+  `pr_detected`, so `events.jsonl` always tells operator from automatic apart. Nothing
+  else happens in the command: the next tick's stale-blocked reconcile settles the batch
+  on its ordinary `pr-merged` evidence (report + teardown follow; that read, `prState`,
+  is `-R`-pinned too whenever the engine's repo is verified), and the anchor closes only
+  through `reconcileAnchorClosure`, which never reads `batch.pr`. A batch with a surviving
+  member that was never dispatched is refused too — the reconcile would never settle it
+  on PR evidence. `--json` emits `{batch, repo, outcome: "attached", pr, mergedAt,
+  clearedAmbiguousTicks}` or `{batch, repo, outcome: "already-attached", pr}`.
 
 Everything else is surfaced, never closed: `sched status --anchors` (opt-in; `status`
 makes no GitHub call without it) lists each still-open anchor of a batch no longer in

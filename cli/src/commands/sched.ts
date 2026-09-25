@@ -29,6 +29,7 @@ import type {
 import {
   abandonBatch,
   abandonIssue,
+  attachBatchPr,
   batchAnchorStillOpen,
   buildBatchRunLogEntries,
   buildStatusReport,
@@ -115,7 +116,13 @@ import {
   type EngineStalenessCheck,
   formatEngineStaleWarning,
 } from '../engine-version';
-import { parseGhJson, requireRepoSlug, tryFetchComments, tryFetchLabels } from '../gh';
+import {
+  isIssueNumber,
+  parseGhJson,
+  requireRepoSlug,
+  tryFetchComments,
+  tryFetchLabels,
+} from '../gh';
 import { pickHardBlockLabel } from '../hard-block-labels';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
@@ -1959,6 +1966,77 @@ function registerRequeueSubcommand(cmd: Command): void {
     });
 }
 
+/** Per-call budget for attach-pr's two reads (repo verification, `gh pr view`) — an operator command must not hang on gh. */
+const ATTACH_PR_READ_TIMEOUT_MS = 10_000;
+
+interface AttachPrOptions extends SchedOptions {
+  batch: string;
+}
+
+/**
+ * `sched attach-pr --batch <id> <pr>` (#824): record an operator-named PR as a
+ * blocked batch's `batch.pr` — the explicit remedy for #789's
+ * `pr-detect-ambiguous`, and batch-integrate manual recovery's Step 6b. The
+ * project repository is verified FIRST (`resolveProjectRepo`) and every PR
+ * read is pinned to it with `-R`; an unverifiable repository refuses before
+ * any PR is read. `attachBatchPr` holds the PR to #789's own candidate checks
+ * and records nothing on any mismatch; it never closes the anchor.
+ */
+function registerAttachPrSubcommand(cmd: Command): void {
+  cmd
+    .command('attach-pr <pr>')
+    .description(
+      "Record a MERGED PR as a blocked batch's own (resolves pr-detect-ambiguous, #824) — verified same-repo, head = batch branch, base = batch base; never closes the anchor"
+    )
+    .requiredOption('--batch <id>', 'Blocked batch id to record the PR on')
+    .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
+    .option('--json', 'Output the result as JSON')
+    .action((prArg: string, opts: AttachPrOptions) => {
+      const prDigits = prArg.replace(/^#/, '');
+      if (!isIssueNumber(prDigits)) {
+        fail([`<pr> must be a pull request number (e.g. 4270 or #4270), got '${prArg}'`]);
+      }
+      const pr = Number(prDigits);
+      const { store, project } = resolveStore(opts);
+      const exec = labelledExecFn('sched attach-pr', ATTACH_PR_READ_TIMEOUT_MS);
+      const repo = resolveProjectRepo(project, exec);
+      if (repo === null) {
+        fail([
+          `Refusing to attach PR #${pr}: the current directory is not ${project}'s GitHub repository (or gh could not confirm it) — every PR read is pinned to the verified repository with -R, and there is none to pin to. Run from the project's own checkout.`,
+        ]);
+      }
+      try {
+        const result = attachBatchPr(
+          {
+            store,
+            journal: new Journal(store.dir),
+            groundTruth: createExecGroundTruth(exec, { repoDir: process.cwd(), repo }),
+            repo,
+          },
+          opts.batch,
+          pr
+        );
+        if (opts.json) {
+          console.log(JSON.stringify({ batch: opts.batch, repo, ...result }));
+          return;
+        }
+        if (result.outcome === 'already-attached') {
+          console.log(`= Batch ${opts.batch} already has PR #${pr} recorded — nothing to do`);
+          return;
+        }
+        console.log(
+          `✓ Attached ${repo}#${pr} (MERGED ${result.mergedAt}) to batch ${opts.batch}` +
+            (result.clearedAmbiguousTicks > 0
+              ? `; cleared the pr-detect-ambiguous streak (${result.clearedAmbiguousTicks} tick(s))`
+              : '') +
+            ' — the next engine tick (`sched start`, the tick cron, or a one-off `sched start --once`) reconciles the batch on pr-merged evidence, then report + teardown follow; the anchor is left to its own evidence-gated close'
+        );
+      } catch (err) {
+        handleKnownError(err);
+      }
+    });
+}
+
 /**
  * #790: `sched abandon --batch` dissolves a batch in place — it stays in
  * `state.batches` (status `dissolved`), so `sched status --anchors`'s ledger
@@ -2513,6 +2591,7 @@ export function registerSchedCommand(program: Command): void {
   registerPauseResumeSubcommand(schedCmd, false);
   registerAbandonSubcommand(schedCmd);
   registerRequeueSubcommand(schedCmd);
+  registerAttachPrSubcommand(schedCmd);
   registerStopSubcommand(schedCmd);
   registerReprioritizeSubcommand(schedCmd);
   registerStartSubcommand(schedCmd);

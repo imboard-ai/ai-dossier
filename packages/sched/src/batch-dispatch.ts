@@ -4300,7 +4300,19 @@ const MEMBER_RECONCILE_CHAIN: Partial<Record<IssueStatus, IssueStatus>> = {
  * and the branch is exactly what the merge evidence below covers.
  */
 function everySurvivingMemberDispatched(state: SchedState, batch: BatchEntry): boolean {
+  return undispatchedSurvivingMembers(state, batch).length === 0;
+}
+
+/**
+ * The surviving members `everySurvivingMemberDispatched` finds NOT yet
+ * dispatched — the members that keep a blocked batch out of
+ * `reconcileStaleBlockedBatches` (#686). Exported for `sched attach-pr`
+ * (#824), which refuses to record a PR the reconcile would then never act on,
+ * and names these members in the refusal.
+ */
+export function undispatchedSurvivingMembers(state: SchedState, batch: BatchEntry): number[] {
   const evicted = new Set(batch.evictions.map((e) => e.issue));
+  const undispatched: number[] = [];
   for (const issue of batch.members) {
     const entry = findEntry(state, issue);
     if (!entry) continue;
@@ -4318,9 +4330,9 @@ function everySurvivingMemberDispatched(state: SchedState, batch: BatchEntry): b
     // stamped at SPAWN (`spawnMember`), `committed`/`validated` at verified
     // completion — everything the entry can reach afterwards means the
     // member was dispatched and its work is on the branch.
-    if (!DISPATCHED_MEMBER_STATUSES.has(entry.status)) return false;
+    if (!DISPATCHED_MEMBER_STATUSES.has(entry.status)) undispatched.push(issue);
   }
-  return true;
+  return undispatched;
 }
 
 /** Slot-line statuses that prove a member was actually dispatched (see above). */
@@ -4404,6 +4416,30 @@ function recordPrDetectAmbiguous(
     PR_DETECT_AMBIGUOUS_REASON,
     now
   );
+  // #824 review: the lookup above ran outside the lock — an operator's
+  // `sched attach-pr` (or a resume/abandon) may have landed meanwhile. Write
+  // the streak (and journal it) only while the batch is STILL blocked with no
+  // PR; never rewrite the marker an attach just cleared, nor tell the
+  // operator to run `sched attach-pr` after they already did.
+  const written = deps.store.withLock((s) => {
+    const b = findBatch(s, batch.id);
+    if (!b || b.status !== 'blocked' || b.pr !== null) return { state: s, result: false };
+    return {
+      state: patchBatch(
+        s,
+        batch.id,
+        {
+          pr_detect_ambiguous_reason: PR_DETECT_AMBIGUOUS_REASON,
+          pr_detect_ambiguous_since: since,
+          pr_detect_ambiguous_ticks: ticks,
+        },
+        now,
+        false
+      ),
+      result: true,
+    };
+  });
+  if (!written) return;
   if (announce) {
     journalEvent(deps, 'pr-detect-ambiguous', unit(batch.id), {
       reason: PR_DETECT_AMBIGUOUS_REASON,
@@ -4412,27 +4448,14 @@ function recordPrDetectAmbiguous(
       at: now.toISOString(),
       since,
       ticks_persisted: ticks,
-      // #789 review: neither "record it explicitly" (no command exists) nor
-      // "close the extras" (a MERGED PR cannot be closed, so it never leaves
-      // `gh pr list --state merged`) was ever an actionable remedy — state
-      // what actually resolves it instead. #824 tracks the missing verb.
-      detail: `${matches.length} MERGED PRs match head=${batch.branch ?? '?'} (#${matches.join(', #')}) — refusing to guess which is ours; nothing recorded. The batch still reconciles via commits-in-base/members-closed evidence if either holds; otherwise inspect and \`sched abandon --batch ${batch.id}\`, or use \`sched attach-pr\` once #824 ships it`,
+      // #789 review: "close the extras" (a MERGED PR cannot be closed, so it
+      // never leaves `gh pr list --state merged`) was never an actionable
+      // remedy — state what actually resolves it instead: the operator names
+      // the batch's own PR with `sched attach-pr` (#824), which holds it to
+      // these same candidate checks.
+      detail: `${matches.length} MERGED PRs match head=${batch.branch ?? '?'} (#${matches.join(', #')}) — refusing to guess which is ours; nothing recorded. The batch still reconciles via commits-in-base/members-closed evidence if either holds; otherwise inspect the candidates and record the batch's own with \`sched attach-pr --batch ${batch.id} <pr>\`, or \`sched abandon --batch ${batch.id}\``,
     });
   }
-  deps.store.withLock((s) => ({
-    state: patchBatch(
-      s,
-      batch.id,
-      {
-        pr_detect_ambiguous_reason: PR_DETECT_AMBIGUOUS_REASON,
-        pr_detect_ambiguous_since: since,
-        pr_detect_ambiguous_ticks: ticks,
-      },
-      now,
-      false
-    ),
-    result: undefined,
-  }));
 }
 
 /**
@@ -4577,7 +4600,7 @@ export function reconcileStaleBlockedBatches(
     // #789 review: what the lock ACTUALLY applied, not what the outer
     // snapshot predicted — re-derived from `b` (read under the lock) below,
     // since `batch.pr` could in principle have changed between the snapshot
-    // above and the lock acquiring (e.g. a future `sched attach-pr`, #824).
+    // above and the lock acquiring (e.g. `sched attach-pr`, #824).
     let effectivePr: number | null = null;
     let prWasRecorded = false;
     deps.store.withLock((s) => {
