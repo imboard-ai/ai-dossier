@@ -101,7 +101,7 @@ jobs:
               '',
               jobLines || `- (no per-job failure detail available — read the [run log](${run.html_url}))`,
               '',
-              'Until a later run of this workflow succeeds, the newest `package.json` versions are NOT on npm and `npm i -g @ai-dossier/cli@latest` keeps serving the previous release while reporting success.',
+              'Until a later run of this workflow succeeds, the newest `package.json` versions are NOT on npm and `npm i -g @ai-dossier/cli@latest` keeps serving the previous release while reporting success. If the failed step is `Fail on version collisions`, the named version IS on npm but from different source: bump that package in a follow-up PR (#826).',
               '',
               '<sub>Posted automatically so a blocked publish is visible. This issue is closed by the next successful run.</sub>',
             ].join('\n');

@@ -234,18 +234,21 @@ Packages are published to the public npm registry under the `@ai-dossier` scope.
 
 ### Version Bumps Are Enforced on PRs
 
-The publish workflow skips any package whose version is already on npm, so a PR that changes
-package source without bumping the version merges but never gets released. CI's `version-bump`
-job (`scripts/check-version-bumps.mjs`) catches this at PR time: it fails when a publishable
-package's `src/` or `bin/` changed and its `package.json` version still matches the base branch.
-Test files under those directories are ignored.
+The publish workflow never re-releases a version that is already on npm, so a PR that changes
+package source without bumping the version merges but is not released — and since #826 the publish
+run fails with a version collision (`scripts/publish-guard.mjs`) until the package is bumped. CI's
+`version-bump` job (`scripts/check-version-bumps.mjs`) catches this at PR time: it fails when a
+publishable package's `src/` or `bin/` (or its `@ai-dossier/*` dependency pins) changed and its
+`package.json` version still matches the base branch, or is not above the version on the
+base-branch tip. Test files under those directories are ignored.
 
 ```bash
 cd cli && npm version patch --no-git-tag-version   # or minor, major
 ```
 
 If the change genuinely needs no release, apply the **`no-release-needed`** label to the PR to
-skip the check.
+skip the check. Note that a labelled change to `src/`/`bin/` still makes the next publish run
+fail for that package until it is bumped: the source is on `main` but not on npm.
 
 ### Tag-based Workflow (Primary)
 

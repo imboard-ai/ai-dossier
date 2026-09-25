@@ -6,14 +6,23 @@
 // release-relevant source but leaves its `package.json` version equal to
 // the version on the base branch.
 //
-// Why this exists: `publish-packages.yml` skips publishing a package whose
-// current version already exists on npm. That skip is correct, but it made
+// Why this exists: `publish-packages.yml` will not re-release a version that
+// already exists on npm. It used to skip such a package silently, which made
 // "merged" quietly stop meaning "released" — #442 (worktree-pool 0.5.2) and
-// #446 (cli 0.10.0) both merged unbumped and never reached npm. This guard
-// moves the signal to PR time, where it is still cheap to act on.
+// #446 (cli 0.10.0) both merged unbumped and never reached npm. Since #826 the
+// publish run fails instead when that version was built from different source
+// (`scripts/publish-guard.mjs`), but that is after the merge; this guard moves
+// the signal to PR time, where it is still cheap to act on.
 //
 // This script deliberately lives in `scripts/` rather than inside any
 // package's `src/`, so editing the guard never trips the guard.
+//
+// It also compares against the base-branch TIP, not only the merge base (#826):
+// a branch cut before another PR bumped the same package can pick a number
+// that main already holds, and the merge-base comparison alone reports that
+// as a valid bump. The tip check only helps when CI runs after the other PR
+// merged; the race where both PRs were green before either merged is caught at
+// publish time by `scripts/publish-guard.mjs`.
 //
 // Operating principle: the guard must never FAIL OPEN. Every condition that
 // would leave it checking nothing (unreachable base ref, no discoverable
@@ -87,8 +96,8 @@ export function changedWorkspaceDeps(before, after) {
 /** How many changed paths to list per violating package before truncating. */
 const MAX_LISTED_FILES = 5;
 
-/** Characters that make the merge-base sha readable in a log without being ambiguous. */
-const SHORT_SHA_LENGTH = 12;
+/** Characters that make a sha readable in a log without being ambiguous. */
+export const SHORT_SHA_LENGTH = 12;
 
 /** Paths that live under a release dir but never change published behaviour. */
 const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]sx?$/;
@@ -282,23 +291,81 @@ export function discoverPackages(repoRoot) {
   return packages;
 }
 
+const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+
 /**
- * Pure decision core: given the changed paths, the packages at HEAD, and a
+ * Compare two semver strings: negative when a < b, 0 when equal, positive when
+ * a > b. Prerelease identifiers compare per the semver spec's simple cases
+ * (a prerelease sorts before its release; otherwise lexical per dot-part,
+ * numeric parts numerically). Throws on anything that is not semver, because
+ * "cannot order these" must never read as "not stale".
+ */
+export function compareVersions(a, b) {
+  const pa = SEMVER_RE.exec(a ?? '');
+  const pb = SEMVER_RE.exec(b ?? '');
+  if (!pa || !pb) {
+    throw new CheckUnavailableError(
+      `cannot order versions '${a}' and '${b}' — at least one is not semver.\n` +
+        '  Fix: use a valid semver version (MAJOR.MINOR.PATCH[-prerelease]) in package.json.'
+    );
+  }
+  for (let i = 1; i <= 3; i += 1) {
+    const diff = Number(pa[i]) - Number(pb[i]);
+    if (diff !== 0) return diff;
+  }
+  const [preA, preB] = [pa[4], pb[4]];
+  if (preA === preB) return 0;
+  if (preA === undefined) return 1;
+  if (preB === undefined) return -1;
+  const partsA = preA.split('.');
+  const partsB = preB.split('.');
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i += 1) {
+    const x = partsA[i];
+    const y = partsB[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    const nx = /^\d+$/.test(x);
+    const ny = /^\d+$/.test(y);
+    if (nx && ny && Number(x) !== Number(y)) return Number(x) - Number(y);
+    if (nx !== ny) return nx ? -1 : 1;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/** The next patch release above a semver version (`1.2.3` / `1.2.3-rc.1` -> `1.2.4`). */
+export function nextPatch(version) {
+  const m = SEMVER_RE.exec(version ?? '');
+  if (!m) return null;
+  return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+}
+
+/**
+ * Decision core: given the changed paths, the packages at HEAD, and a
  * lookup of each package's version on the base ref, decide what to report.
  *
  * `baseVersions[dir] === null` means the package.json does not exist on the
  * base ref — the package is new in this PR, so its first publish *is* the
  * release and no bump is required.
  *
+ * `tipVersions[dir]` is the package's version at the base-branch TIP (null or
+ * absent when unknown or not present there). A touched package whose version
+ * is not strictly greater than the tip's is a `stale` violation: main already
+ * holds that number, so after merge the publish run would find it taken.
+ *
  * When the escape label is present the analysis still runs, so the report can
  * name exactly which packages the label waived instead of printing an opaque
  * "skipped".
+ *
+ * No IO, but not total: throws CheckUnavailableError when a version cannot be
+ * ordered against the tip (see compareVersions).
  */
 export function analyze({
   changedFiles,
   packages,
   baseVersions,
   baseWorkspaceDeps = {},
+  tipVersions = {},
   labels = [],
 }) {
   const violations = [];
@@ -320,16 +387,30 @@ export function analyze({
     if (touched.length === 0 && pinChanges.length === 0) continue;
 
     const baseVersion = baseVersions[pkg.dir];
-    checked.push({ ...pkg, baseVersion, touched, pinChanges });
-
-    // New package on this branch — nothing to bump against.
-    if (baseVersion === null || baseVersion === undefined) continue;
+    const tipVersion = tipVersions[pkg.dir] ?? null;
+    checked.push({ ...pkg, baseVersion, tipVersion, touched, pinChanges });
 
     if (baseVersion === pkg.version) {
       violations.push({
+        kind: 'unbumped',
         dir: pkg.dir,
         name: pkg.name,
         version: pkg.version,
+        touched,
+        pinChanges,
+      });
+      continue;
+    }
+
+    // Bumped relative to the merge base (or new) — but main may have moved on
+    // and already taken this number (#826).
+    if (tipVersion !== null && compareVersions(pkg.version, tipVersion) <= 0) {
+      violations.push({
+        kind: 'stale',
+        dir: pkg.dir,
+        name: pkg.name,
+        version: pkg.version,
+        tipVersion,
         touched,
         pinChanges,
       });
@@ -371,10 +452,16 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
     if (waived.length > 0) {
       lines.push('The label waived a real finding — these packages ship unreleased:');
       for (const v of waived) {
-        lines.push(
-          `  ${v.name} [${v.dir}] — ${v.touched.length} file(s) changed, version ${v.version} unchanged.`
-        );
+        const why =
+          v.kind === 'stale'
+            ? `version ${v.version} is not above ${v.tipVersion} on the base-branch tip.`
+            : `version ${v.version} unchanged.`;
+        lines.push(`  ${v.name} [${v.dir}] — ${v.touched.length} file(s) changed, ${why}`);
       }
+      lines.push(
+        'The next publish run will fail with a version collision for these packages until ' +
+          'they are bumped (scripts/publish-guard.mjs).'
+      );
       lines.push(`Remove the \`${ESCAPE_LABEL}\` label and bump if that was not intended.`);
     } else {
       lines.push('No publishable package needs a version bump for this change.');
@@ -388,10 +475,12 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
   }
 
   for (const pkg of checked) {
-    const bumped = !violations.some((v) => v.dir === pkg.dir);
-    const state = bumped
+    const violation = violations.find((v) => v.dir === pkg.dir);
+    const state = !violation
       ? `OK (${pkg.baseVersion ?? 'new package'} -> ${pkg.version})`
-      : `NOT BUMPED (still ${pkg.version})`;
+      : violation.kind === 'stale'
+        ? `STALE (${pkg.version} is not above ${violation.tipVersion} on the base-branch tip)`
+        : `NOT BUMPED (still ${pkg.version})`;
     const pins = pkg.pinChanges?.length ? `, ${pkg.pinChanges.length} pin(s) changed` : '';
     lines.push(
       `  ${pkg.name} [${pkg.dir}] — ${pkg.touched.length} file(s) changed${pins} — ${state}`
@@ -406,6 +495,23 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
   lines.push('', 'Version-bump check FAILED.');
   lines.push('');
   for (const v of violations) {
+    if (v.kind === 'stale') {
+      lines.push(
+        `${v.name}: bumped to ${v.version}, but the base-branch tip already has ` +
+          `${v.tipVersion} — another PR merged a bump of this package after this ` +
+          'branch was cut.'
+      );
+      lines.push(
+        '  After merge npm would already have this number from different source, so the ' +
+          'publish run would fail with a version collision and this change would not be released.'
+      );
+      lines.push(`  Fix: merge the base branch, then bump ${v.name} above ${v.tipVersion}`);
+      lines.push(
+        `       cd ${v.dir} && npm version ${nextPatch(v.tipVersion) ?? 'patch'} --no-git-tag-version`
+      );
+      lines.push('');
+      continue;
+    }
     const what =
       v.touched.length > 0 && v.pinChanges?.length
         ? 'source and a workspace dependency pin changed'
@@ -434,8 +540,9 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
     lines.push('');
   }
   lines.push(
-    'A package whose version is already on npm is silently skipped by the publish ' +
-      'workflow, so this change would merge without ever being released.'
+    'A package whose version is already on npm is not re-released: after merge the publish ' +
+      'workflow would fail with a version collision, and this change would stay unreleased ' +
+      'until a follow-up bump.'
   );
   lines.push(
     `If the change genuinely needs no release, apply the \`${ESCAPE_LABEL}\` label to this PR.`
@@ -446,7 +553,7 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
 
 // ---------------------------------------------------------------- CLI --------
 
-function git(args, cwd) {
+export function git(args, cwd) {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
@@ -455,7 +562,7 @@ function git(args, cwd) {
 }
 
 /** Best available one-line description of why a git invocation failed. */
-function gitError(err) {
+export function gitError(err) {
   const stderr = (err?.stderr ?? '').toString().trim();
   return (stderr || err?.message || String(err)).split('\n').join(' | ');
 }
@@ -622,9 +729,11 @@ export function run(argv, { log = console.log, error = console.error } = {}) {
     const packages = discoverPackages(repoRoot);
     const baseVersions = {};
     const baseWorkspaceDeps = {};
+    const tipVersions = {};
     for (const pkg of packages) {
       baseVersions[pkg.dir] = versionAtRef(repoRoot, mergeBase, pkg.dir);
       baseWorkspaceDeps[pkg.dir] = workspaceDepsAtRef(repoRoot, mergeBase, pkg.dir);
+      tipVersions[pkg.dir] = versionAtRef(repoRoot, opts.base, pkg.dir);
     }
 
     const result = analyze({
@@ -632,6 +741,7 @@ export function run(argv, { log = console.log, error = console.error } = {}) {
       packages,
       baseVersions,
       baseWorkspaceDeps,
+      tipVersions,
       labels: opts.labels,
     });
     const report = formatReport({

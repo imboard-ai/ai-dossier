@@ -69,9 +69,10 @@ jobs:
         run: make test-coverage
 
   # Guards against the failure in #448: a package's source merges to main with its
-  # version unchanged, so the publish workflow's "already published" check skips the
-  # release and npm silently lags main (#442, #446). Fails the PR while it is still
-  # cheap to bump.
+  # version unchanged (or bumped to a number the base-branch tip already holds, #826),
+  # so npm lags main. The publish workflow used to skip such a package silently
+  # (#442, #446); since #826 `scripts/publish-guard.mjs` fails the publish run instead —
+  # either way the change is unreleased. Fails the PR while it is still cheap to bump.
   version-bump:
     runs-on: ubuntu-latest
     steps:
