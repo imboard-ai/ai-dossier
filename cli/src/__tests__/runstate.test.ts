@@ -1694,6 +1694,44 @@ describe('computeResume — classify, batch, and slot-mode trails (#461)', () =>
     expect(result.slot_trail).toBe(true);
   });
 
+  // #840 item 4: the scheduler seeds a requeued member's trail with a `setup done`
+  // milestone on its member branch (`@ai-dossier/sched`'s resume-seed). Over the
+  // member's slot-mode trail it must RESUME at plan on that branch — not re-enter
+  // fresh from the base (the slot-trail rule reads only the LAST milestone).
+  it('resumes at plan on the member branch when sched seeded setup over a slot-mode trail (#840)', () => {
+    const seeded = m(
+      'phase=setup status=done run=r-440-5eed at=2026-08-24T11:00:00Z',
+      'branch=batch/b-2026-08-29-01-m1-440',
+      'worktree=/repo/worktrees/batch-b-2026-08-29-01-m1-440',
+      'pool_claimed=false',
+      'base_branch=develop',
+      'remote=pushed',
+      'seeded_by=sched',
+      'from_batch=b-2026-08-29-01'
+    );
+    const branches: string[] = [];
+    const result = computeResume(
+      [classifySlot, implementSlot, seeded],
+      probe({
+        branchOnRemote: (b) => {
+          branches.push(b);
+          return true;
+        },
+      })
+    );
+    expect(result.resume_from).toBe('plan');
+    expect(result.run_id).toBe('r-440-5eed');
+    expect(result.slot_trail).toBeUndefined();
+    expect(result.resume_context.branch).toBe('batch/b-2026-08-29-01-m1-440');
+    expect(result.resume_context.base_branch).toBe('develop');
+    expect(branches).toEqual(['batch/b-2026-08-29-01-m1-440']);
+    // Branch gone from origin → start fresh at setup (off the base), never plan.
+    expect(
+      computeResume([classifySlot, implementSlot, seeded], probe({ branchOnRemote: () => false }))
+        .resume_from
+    ).toBe('setup');
+  });
+
   it('re-enters a slot-mode member fresh (mode=slot), with the distinguishable signal', () => {
     const result = computeResume([classifySlot, implementSlot], probe());
     expect(result.resume_from).toBe('none');

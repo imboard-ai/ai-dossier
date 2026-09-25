@@ -32,6 +32,7 @@ import {
   type RecoveryDeps,
   reprioritizeBatch,
   requeueMember,
+  requeueParkedMember,
   resolveFixAttempt,
   type SchedState,
   type SuiteResult,
@@ -1638,5 +1639,142 @@ describe('halved dissolve integrity (regressions)', () => {
     const dissolved = h.events.find((e) => e.event === 'batch-dissolved');
     expect(dissolved?.detail).toContain('requeued=202,203');
     expect(dissolved?.detail).toContain('preserved=201');
+  });
+});
+
+// --- #840: member branches outlive landing; PR-conflict split keeps validated work ---
+
+describe('#840 item 2: an aggregate-suite eviction parks the member on its live branch', () => {
+  /** A scratch batch checkout with a bare `origin` holding the landed member's branch. */
+  const withOrigin = () => {
+    const scratch = scratchRepo([
+      { subject: 'feat: a (#201)', file: 'a.txt', content: 'a\n' },
+      { subject: 'feat: b (#202)', file: 'b.txt', content: 'b\n' },
+    ]);
+    const origin = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-recovery-origin-'));
+    dirs.push(origin);
+    git(['init', '--bare', '--initial-branch=main', '.'], origin);
+    git(['remote', 'add', 'origin', origin], scratch.repo);
+    // Member 1's branch was pushed by its agent and — since #840 — kept on
+    // origin after it landed. Another batch's branch for the same issue must
+    // not be mistaken for it.
+    git(['push', 'origin', `${scratch.head}:refs/heads/batch/b1-m1-201`], scratch.repo);
+    git(['push', 'origin', `${scratch.head}:refs/heads/batch/b1-x-m1-201`], scratch.repo);
+    return scratch;
+  };
+
+  it('parks it `evicted` with branch= recorded instead of requeueing full-cycle from the base', () => {
+    const { repo, base } = withOrigin();
+    let state = batchState([201, 202, 203]);
+    state = transitionIssue(state, 201, 'validated', {}, NOW);
+    const h = harness({ exec: createExecFn(60_000), suite: { ok: true, failing: [] } });
+    h.deps.repoDir = repo;
+
+    const result = evictMembers(
+      state,
+      'b1',
+      {
+        issues: [201],
+        reason: 'suite-red-after-fix',
+        attribution: 'overlap',
+        ranges: rangesOf(repo, base),
+        failingByMember: new Map([[201, [failingTest('a.test.ts', 'a fails')]]]),
+      },
+      h.deps
+    );
+
+    expect(result.evicted).toEqual([201]);
+    expect(result.requeued).toEqual([]);
+    expect(result.parked).toEqual([201]);
+    const entry = findEntry(result.state, 201);
+    expect(entry?.status).toBe('evicted');
+    expect(entry?.failure_evidence).toMatchObject({
+      batch: 'b1',
+      reason: 'suite-red-after-fix',
+      branch: 'batch/b1-m1-201',
+      failing_tests: ['a.test.ts::a fails'],
+    });
+    expect(findBatch(result.state, 'b1')?.evictions[0]).toMatchObject({
+      issue: 201,
+      branch: 'batch/b1-m1-201',
+    });
+    expect(h.milestones.at(-1)?.milestone.kv).toMatchObject({ parked: '201', requeued: 'none' });
+
+    // The operator's `sched requeue` continues it from that branch.
+    const requeued = requeueParkedMember(result.state, 201, 'operator-requeue', NOW);
+    expect(requeued.entry.status).toBe('requeued');
+    expect(requeued.entry.mode).toBe('full');
+    expect(requeued.entry.failure_evidence?.branch).toBe('batch/b1-m1-201');
+  });
+
+  it('falls back to the full-cycle requeue when the member branch is gone from origin', () => {
+    const { repo, base } = withOrigin();
+    git(['push', 'origin', '--delete', 'batch/b1-m1-201'], repo);
+    const h = harness({ exec: createExecFn(60_000), suite: { ok: true, failing: [] } });
+    h.deps.repoDir = repo;
+
+    const result = evictMembers(
+      batchState([201, 202, 203]),
+      'b1',
+      { issues: [201], reason: 'suite-red', attribution: 'overlap', ranges: rangesOf(repo, base) },
+      h.deps
+    );
+
+    expect(result.requeued).toEqual([201]);
+    expect(result.parked).toEqual([]);
+    expect(findEntry(result.state, 201)?.mode).toBe('full');
+  });
+});
+
+describe('#840 item 3: a PR-conflict split never re-batches a validated member', () => {
+  /** 201 and 202 landed and validated; 203 never validated. */
+  const mixed = () => {
+    let state = batchState([201, 202, 203], 'awaiting-merge');
+    state = transitionIssue(state, 201, 'validated', {}, NOW);
+    state = transitionIssue(state, 202, 'validated', {}, NOW);
+    return state;
+  };
+
+  it('rebase conflict: validated members stay landed (batch blocked, resumable); only the unvalidated member is split', () => {
+    const h = harness({
+      exec: (_file, args) => (args[0] === 'rebase' && args[1] !== '--abort' ? null : ''),
+    });
+
+    const result = handlePrConflict(mixed(), 'b1', h.deps);
+
+    const batch = findBatch(result.state, 'b1');
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('dissolve-refused:rebase-conflict');
+    expect(batch?.members).toEqual([201, 202]);
+    for (const issue of [201, 202]) {
+      expect(findEntry(result.state, issue)).toMatchObject({
+        status: 'validated',
+        batch: 'b1',
+        mode: 'slot',
+      });
+    }
+    // No other batch ever names a validated member.
+    for (const other of result.state.batches.filter((b) => b.id !== 'b1')) {
+      expect(other.members).not.toContain(201);
+      expect(other.members).not.toContain(202);
+    }
+    expect(result.dissolve?.newBatches).toEqual(['b1-a']);
+    expect(findBatch(result.state, 'b1-a')?.members).toEqual([203]);
+    expect(findEntry(result.state, 203)?.batch).toBe('b1-a');
+    expect(() => validateState(result.state)).not.toThrow();
+  });
+
+  it('suite red after a clean rebase: the gate re-runs over the landed members (validating), not a split of them', () => {
+    const h = harness({ suite: { ok: false, failing: [failingTest('a.test.ts', 'a')] } });
+
+    const result = handlePrConflict(mixed(), 'b1', h.deps);
+
+    expect(result.rebased).toBe(true);
+    const batch = findBatch(result.state, 'b1');
+    expect(batch?.status).toBe('validating');
+    expect(batch?.members).toEqual([201, 202]);
+    expect(batch?.executing_member).toBe(2);
+    expect(findEntry(result.state, 201)?.status).toBe('validated');
+    expect(findEntry(result.state, 203)?.batch).toBe('b1-a');
   });
 });

@@ -37,6 +37,7 @@ import {
   CorruptStateError,
   createExecFn,
   createExecGroundTruth,
+  createExecResumeSeeder,
   createExecRunFencer,
   createSpawnDeps,
   DEFAULT_BATCH_PRIORITY,
@@ -2473,6 +2474,19 @@ function registerStartSubcommand(cmd: Command): void {
               onError: (file, args, err) =>
                 process.stderr.write(
                   `⚠ sched fence: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+                ),
+            }),
+            { repoDir: process.cwd() }
+          ),
+          // #840: a requeued parked batch member's first dispatch seeds its
+          // resume trail (a `setup done` milestone on its member branch) so the
+          // full-cycle gate resumes ON that branch. A write, so its own exec +
+          // diagnostic prefix, on the fence's budget (two short CLI calls).
+          resumeSeeder: createExecResumeSeeder(
+            createExecFn(FENCE_TIMEOUT_MS, {
+              onError: (file, args, err) =>
+                process.stderr.write(
+                  `⚠ sched resume-seed: '${file} ${args.join(' ')}' failed: ${err.message}\n`
                 ),
             }),
             { repoDir: process.cwd() }

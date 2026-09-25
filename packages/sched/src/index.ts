@@ -107,6 +107,7 @@ export {
   memberDispatchTier,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
+  priorWorkBranch,
   priorWorkInstruction,
   procStartTime,
   type ResolvedDispatch,
@@ -258,13 +259,21 @@ export {
   type FixDispatch,
   handlePrConflict,
   type JournalLike,
+  listRemoteMemberBranches,
   type PrConflictAction,
   type PrConflictOutcome,
   type RecoveryDeps,
+  type RemoteMemberBranch,
   resolveFixAttempt,
   type SuiteResult,
   type SuiteRunner,
 } from './recovery';
+export {
+  createExecResumeSeeder,
+  type MemberResumeSeeder,
+  type ResumeSeed,
+  type ResumeSeedOutcome,
+} from './resume-seed';
 export {
   appendSchedRunLog,
   buildSchedRunLogEntry,

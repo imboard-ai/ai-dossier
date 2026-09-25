@@ -53,6 +53,19 @@ describe('fmt_events.py', () => {
     ]);
   });
 
+  it('#840: keeps a batch re-gate and a resume-trail seed (and its failure)', () => {
+    const out = run([
+      { event: 'batch-regate', unit: 'batch:b1', detail: 'landed=4137' },
+      { event: 'resume-seeded', unit: 'issue:840', detail: 'run=r-840-a' },
+      { event: 'resume-seed-failed', unit: 'issue:841', detail: 'gh down' },
+    ]);
+    expect(out.trim().split('\n')).toEqual([
+      'batch-regate batch:b1 landed=4137',
+      'resume-seeded issue:840 run=r-840-a',
+      'resume-seed-failed issue:841 gh down',
+    ]);
+  });
+
   it('#844: keeps a SIGKILL escalation and a recovered member advance', () => {
     const out = run([
       { event: 'kill-escalated', unit: 'batch:b1', issue: 885, pid: 4242 },

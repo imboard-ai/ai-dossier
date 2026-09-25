@@ -144,6 +144,7 @@ import {
   type DissolveOutcome,
   dissolveBatch,
   evictMembers,
+  listRemoteMemberBranches,
   type RecoveryDeps,
   resolveFixAttempt,
   type SuiteResult,
@@ -1198,9 +1199,11 @@ function landMemberBranch(
  * `-d` after a landing (fully merged into the integration branch), `-D` on
  * the eviction path (its commits never landed; since #810 the parked entry
  * records the branch and an operator requeue continues from the REMOTE copy).
- * The REMOTE member branch is deleted only on the landed path, and
- * deliberately KEPT on eviction — the pushed sha is the evicted work's only
- * recoverable copy.
+ * The REMOTE member branch is never deleted here (#840): on eviction the
+ * pushed sha is the evicted work's only recoverable copy, and after a landing
+ * it is what a later aggregate-suite eviction parks the member on. Batch
+ * teardown deletes it once the batch ships or dissolves
+ * (`deleteMemberBranches`).
  *
  * Best-effort and idempotent: null fields are a no-op, and a failed cleanup
  * journals `teardown-failed` rather than throwing into the caller's
@@ -1322,9 +1325,6 @@ function teardownMemberTree(
       deps.exec('git', ['branch', flag, branch], deps.repoDir) === null
         ? `failed-branch-delete-${flag}`
         : `branch-deleted-${flag}`;
-    if (landed) {
-      deps.exec('git', ['push', 'origin', '--delete', branch], deps.repoDir);
-    }
   }
   const failed = !treeCleared || branchCleanup.startsWith('failed');
   journalEvent(deps, failed ? 'teardown-failed' : 'member-worktree-torn-down', unit(batchId), {
@@ -2340,7 +2340,7 @@ function evictOffender(
       s,
       outcome.state,
       batchId,
-      [...outcome.requeued, ...(outcome.dissolve?.parked ?? [])],
+      [...outcome.requeued, ...outcome.parked, ...(outcome.dissolve?.parked ?? [])],
       batch.members
     ),
     result: undefined,
@@ -5355,6 +5355,7 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
     true;
   const serial = teardownMemberWorktree(deps, batchId, deps.now(), lastMemberLanded);
   teardownParallelRuns(deps, batchId, serial);
+  deleteMemberBranches(deps, batchId);
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
   if (!batch || batch.worktree === null) return;
@@ -5386,6 +5387,42 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
       worktree: batch.worktree,
     }
   );
+}
+
+/**
+ * #840: the batch is over (shipped, or dissolved) — delete its member
+ * branches from origin. They were kept from landing until now so an
+ * aggregate-suite eviction could park a landed member on its branch. A
+ * branch any queue entry still names in `failure_evidence.branch` (a parked
+ * member, or one requeued to continue from it) is KEPT: it is that member's
+ * work. Best-effort — a failed listing or delete is journaled, never thrown
+ * into the teardown path; a kept batch (`worktree_kept`) never gets here.
+ */
+function deleteMemberBranches(deps: BatchDispatchDeps, batchId: string): void {
+  const live = listRemoteMemberBranches(deps.exec, deps.repoDir, batchId);
+  if (live === null) {
+    journalEvent(deps, 'teardown-failed', unit(batchId), {
+      cleanup: 'member-branches-unlisted',
+      detail: `could not list origin's batch/${batchId}-m* member branches — none deleted`,
+    });
+    return;
+  }
+  if (live.length === 0) return;
+  const referenced = new Set(
+    deps.store
+      .load()
+      .entries.map((e) => e.failure_evidence?.branch)
+      .filter((b): b is string => typeof b === 'string')
+  );
+  const kept = live.filter((b) => referenced.has(b.branch)).map((b) => b.branch);
+  const doomed = live.filter((b) => !referenced.has(b.branch)).map((b) => b.branch);
+  const ok =
+    doomed.length === 0 ||
+    deps.exec('git', ['push', 'origin', '--delete', ...doomed], deps.repoDir) !== null;
+  journalEvent(deps, ok ? 'member-branches-deleted' : 'teardown-failed', unit(batchId), {
+    ...(ok ? {} : { cleanup: 'member-branches-delete-failed' }),
+    detail: `deleted=${ok ? doomed.join(',') || 'none' : 'none'} kept=${kept.join(',') || 'none'}${ok ? '' : ` failed=${doomed.join(',')}`}`,
+  });
 }
 
 // --- Parallel member dispatch (#809) ---

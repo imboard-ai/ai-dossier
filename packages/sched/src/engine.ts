@@ -69,6 +69,7 @@
  * engine missing either never dispatches a `ready` batch (it stays queued).
  */
 
+import * as path from 'node:path';
 import {
   type AnnouncedWaitEvidence,
   type DispatchApiError,
@@ -85,6 +86,7 @@ import {
   escalateTier,
   fileSizeOrZero,
   journalCmdModelFields,
+  priorWorkBranch,
   priorWorkInstruction,
   type ResolvedDispatch,
   reportTierFor,
@@ -118,6 +120,7 @@ import { labelBlockReason, labelOfBlockReason, pickHardBlockLabel } from './labe
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
+import type { MemberResumeSeeder } from './resume-seed';
 import {
   buildSchedRunLogEntry,
   type FenceAbortEvidence,
@@ -129,6 +132,7 @@ import {
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import {
   CLEARED_ENTRY_DEDUP_MARKERS,
+  findBatch,
   findEntry,
   isReportSlot,
   patchEntry,
@@ -184,6 +188,14 @@ export interface EngineDeps {
    * backstop; failures journal `fence-release-failed`.
    */
   fenceReleaser?: RunFenceReleaser;
+  /**
+   * Seeds a requeued batch member's full-cycle RESUME trail (#840) — a `setup
+   * done` milestone on its recorded member branch, posted before its first
+   * dispatch so the run's gate resumes at plan on that branch. Optional like
+   * `fencer`: an engine without one falls back to the #810 prompt
+   * instruction alone; a failed seed journals `resume-seed-failed`.
+   */
+  resumeSeeder?: MemberResumeSeeder;
   /**
    * Home directory `runs.jsonl` telemetry (#524) is written under —
    * `<homeDir>/.dossier/runs.jsonl`, the same file `cli`'s `ai-dossier run`
@@ -880,7 +892,13 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
     return failUnit(ctx, state, unit, `dispatch-profile-error: ${(err as Error).message}`);
   }
 
-  return spawnAndRecord(ctx, state, unit, slot, {
+  // #840: a requeued parked member's FIRST dispatch seeds its resume trail
+  // on its member branch — the engine, not prompt text, decides the base.
+  const seeded = slot.gen === 0 ? seedResumeTrail(ctx, state, issue) : { state, run: null };
+  const seededState = seeded.state;
+  const evidence = findEntry(seededState, issue)?.failure_evidence ?? null;
+
+  return spawnAndRecord(ctx, seededState, unit, slot, {
     tier: entry.tier,
     spawn: resolveTierSpawn(dispatch, entry.tier, issue),
     // The slot's generation reaches the agent here (#504): a takeover is told which
@@ -902,11 +920,72 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
       // #810: a requeued parked batch member continues from its member branch —
       // on the FIRST generation only: a takeover resumes its own run's pushed
       // branch (the takeover instruction), which may already carry newer work.
-      slot.gen === 0 ? priorWorkInstruction(issue, entry.failure_evidence) : null
+      slot.gen === 0 ? priorWorkInstruction(issue, evidence, evidence?.resume_run ?? null) : null
     ),
     phase: 'gate',
     ...(slot.gen > 0 ? { journalExtra: { detail: `takeover gen=${slot.gen}` } } : {}),
   });
+}
+
+/**
+ * #840: seed the full-cycle RESUME trail of a requeued parked member before
+ * its first dispatch (see `resume-seed.ts`): a `setup done` milestone naming
+ * its recorded member branch and its batch's base, so the dispatched gate
+ * resumes at plan ON that branch. Runs once per requeue — the seeded run is
+ * stamped on `failure_evidence.resume_run`, and an entry carrying one is
+ * never seeded again (a respawn resumes its own, possibly later, progress).
+ * A missing seeder, batch or base is not an error: the dispatch goes out with
+ * the #810 prompt instruction alone. Runs under the tick's lock, like the
+ * fencer's write on the redispatch rail.
+ */
+function seedResumeTrail(
+  ctx: TickCtx,
+  state: SchedState,
+  issue: number
+): { state: SchedState; run: string | null } {
+  const entry = findEntry(state, issue);
+  const evidence = entry?.failure_evidence ?? null;
+  const branch = priorWorkBranch(evidence);
+  if (
+    evidence === null ||
+    branch === null ||
+    evidence.resume_run !== undefined ||
+    ctx.deps.resumeSeeder === undefined
+  ) {
+    return { state, run: null };
+  }
+  const unit = `issue:${issue}`;
+  const baseBranch = findBatch(state, evidence.batch)?.base_branch ?? null;
+  if (baseBranch === null) {
+    journal(ctx, 'resume-seed-failed', unit, {
+      detail: `batch ${evidence.batch} is not in state — no base branch to resume ${branch} against; prompt fallback only`,
+    });
+    return { state, run: null };
+  }
+  const outcome = ctx.deps.resumeSeeder(issue, {
+    branch,
+    baseBranch,
+    batch: evidence.batch,
+    worktree: path.join(ctx.deps.repoDir, 'worktrees', branch.replaceAll('/', '-')),
+  });
+  if (!outcome.ok) {
+    journal(ctx, 'resume-seed-failed', unit, {
+      detail: `${outcome.reason} — prompt fallback only`,
+    });
+    return { state, run: null };
+  }
+  journal(ctx, 'resume-seeded', unit, {
+    detail: `run=${outcome.run} branch=${branch} base=${baseBranch}`,
+  });
+  return {
+    state: patchEntry(
+      state,
+      issue,
+      { failure_evidence: { ...evidence, resume_run: outcome.run } },
+      ctx.deps.now()
+    ),
+    run: outcome.run,
+  };
 }
 
 /** Append the #810 prior-work instruction to a cycle prompt, when there is one. */

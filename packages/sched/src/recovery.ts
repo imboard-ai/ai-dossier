@@ -562,6 +562,71 @@ export function resolveFixAttempt(
   return { state: next };
 }
 
+// --- #840: member branches on origin ---
+
+/** One of a batch's member branches, as it exists on origin (#840). */
+export interface RemoteMemberBranch {
+  /** `batch/<batchId>-m<index>-<issue>` */
+  branch: string;
+  index: number;
+  issue: number;
+}
+
+/**
+ * #840: this batch's member branches that exist on ORIGIN right now —
+ * `batch/<batchId>-m<n>-<issue>` (`memberBranchFor`'s shape), matched exactly
+ * so another batch whose id merely starts with this one's (`b1-a`, a halved
+ * split) or the integration branch (`batch/<id>-<date>`) never matches.
+ * Since #840 a member branch outlives its landing — it is deleted when the
+ * batch ships or dissolves (`teardownBatch`), so this is also how an
+ * aggregate-suite eviction finds the branch a landed member can be parked on.
+ * `null` when origin could not be read (never "no branches").
+ */
+export function listRemoteMemberBranches(
+  exec: ExecFn,
+  repoDir: string,
+  batchId: string
+): RemoteMemberBranch[] | null {
+  if (!SAFE_REF_RE.test(`batch/${batchId}`)) return null;
+  const out = exec(
+    'git',
+    ['ls-remote', '--heads', 'origin', `refs/heads/batch/${batchId}-m*`],
+    repoDir
+  );
+  if (out === null) return null;
+  const escaped = batchId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const shape = new RegExp(`^refs/heads/(batch/${escaped}-m(\\d+)-(\\d+))$`);
+  const found: RemoteMemberBranch[] = [];
+  for (const line of out.split('\n')) {
+    const ref = line.trim().split(/\s+/)[1];
+    const match = ref === undefined ? null : shape.exec(ref);
+    if (match === null) continue;
+    found.push({
+      branch: match[1] as string,
+      index: Number(match[2]),
+      issue: Number(match[3]),
+    });
+  }
+  return found;
+}
+
+/**
+ * #840: the live member branch `issue`'s work sits on — the recorded one
+ * (parallel run / current serial member) when origin still has it, else the
+ * highest-indexed live `batch/<id>-m<n>-<issue>`. `null` when none is live.
+ */
+function liveMemberBranch(
+  batch: BatchEntry,
+  issue: number,
+  live: readonly RemoteMemberBranch[] | null
+): string | null {
+  if (live === null) return null;
+  const own = live.filter((b) => b.issue === issue);
+  const recorded = recordedMemberBranch(batch, issue);
+  if (recorded !== null && own.some((b) => b.branch === recorded)) return recorded;
+  return [...own].sort((a, b) => b.index - a.index)[0]?.branch ?? null;
+}
+
 // --- AC2/AC3: eviction ---
 
 export interface EvictionInput {
@@ -583,6 +648,12 @@ export interface EvictionOutcome {
   evicted: number[];
   /** Members actually put back on the queue (shipped members are not). */
   requeued: number[];
+  /**
+   * #840: members PARKED `evicted` on their still-live member branch instead
+   * of requeued — an operator's `sched requeue` continues them from it.
+   * Includes any a dissolve triggered by this eviction parked.
+   */
+  parked: number[];
   /** Commits reverted, in the order they were reverted (newest first). */
   reverted: string[];
   /** True when a revert conflicted — the batch dissolves instead. */
@@ -646,8 +717,9 @@ function orderRevertCommits(ranges: readonly MemberRange[], targets: readonly nu
 }
 
 /**
- * `attributing → evicting`: revert the offending members' commits, requeue them
- * as full-cycle with their failure evidence, re-run the suite, and check the
+ * `attributing → evicting`: revert the offending members' commits, park each
+ * on its still-live member branch (#840; else requeue it as full-cycle) with
+ * its failure evidence, re-run the suite, and check the
  * batch's configurable dissolve threshold (`DissolvePolicy`, AC2/AC3/AC5).
  * Crossing it has two outcomes (#563): if the re-run suite came back green
  * for the survivors, the batch is PRESERVED — trimmed to its survivors and
@@ -694,6 +766,7 @@ export function evictMembers(
       state: dissolve.state,
       evicted: [],
       requeued: dissolve.requeued,
+      parked: dissolve.parked,
       reverted: [],
       conflict: true,
       // #810: a refused dissolve (validated members kept) blocks instead.
@@ -761,7 +834,11 @@ export function evictMembers(
     record();
   }
 
-  // Requeue every reverted member with its evidence attached (AC2).
+  // Requeue every reverted member with its evidence attached (AC2) — or,
+  // since #840, PARK it `evicted` on its member branch when that branch is
+  // still live on origin (a landed member's branch now outlives the landing):
+  // the reverted work is exactly what is on it, and an operator's `sched
+  // requeue` continues it there instead of restarting from the base.
   //
   // A member already in `evictions[]` is skipped entirely (#595 AC1): the
   // reverts above are idempotent (each checks the branch history first), but a
@@ -773,7 +850,11 @@ export function evictMembers(
   // never silently dropped.
   const alreadyEvicted = new Map(batch.evictions.map((e) => [e.issue, e]));
   const requeued: number[] = [];
+  const parked: number[] = [];
   const records: EvictionRecord[] = [];
+  const live = targets.some((t) => !alreadyEvicted.has(t))
+    ? listRemoteMemberBranches(deps.exec, deps.repoDir, batchId)
+    : null;
   for (const issue of targets) {
     const prior = alreadyEvicted.get(issue);
     if (prior) {
@@ -797,17 +878,30 @@ export function evictMembers(
       reverted_commits: memberCommits,
       at: now.toISOString(),
     };
-    const result = requeueMember(next, issue, { mode: 'full', batch: null }, input.reason, now, {
-      failure_evidence: evidence,
-    });
-    next = result.state;
-    if (result.requeued) requeued.push(issue);
+    const branch = liveMemberBranch(batch, issue, live);
+    const park =
+      branch === null
+        ? { state: next, parked: false }
+        : parkMember(next, issue, 'evicted', input.reason, now, {
+            failure_evidence: { ...evidence, branch },
+          });
+    next = park.state;
+    if (park.parked) {
+      parked.push(issue);
+    } else {
+      const result = requeueMember(next, issue, { mode: 'full', batch: null }, input.reason, now, {
+        failure_evidence: evidence,
+      });
+      next = result.state;
+      if (result.requeued) requeued.push(issue);
+    }
     records.push({
       issue,
       reason: input.reason,
       attribution: input.attribution,
       reverted_commits: memberCommits,
       group: targets.filter((t) => t !== issue),
+      ...(park.parked ? { kind: 'evicted' as const, branch } : {}),
       at: now.toISOString(),
     });
     journal(
@@ -819,9 +913,10 @@ export function evictMembers(
         // ship code it believes it removed. `reverted=0` alone reads as "an
         // empty range", which is why this says it in words.
         detail:
-          memberCommits.length === 0
+          (memberCommits.length === 0
             ? `${input.reason} reverted=0 — NO commits found for this member on the batch branch; its work was NOT reverted`
-            : `${input.reason} reverted=${memberCommits.length}`,
+            : `${input.reason} reverted=${memberCommits.length}`) +
+          (park.parked ? ` — parked on ${branch}` : ''),
       }),
       now
     );
@@ -852,6 +947,7 @@ export function evictMembers(
         reason: input.reason,
         evicted: targets.join(',') || 'none',
         requeued: requeued.join(',') || 'none',
+        ...(parked.length > 0 ? { parked: parked.join(',') } : {}),
         reverted: String(reverted.length),
         attribution: input.attribution,
         ...(withoutCommits.length > 0 ? { no_commits: withoutCommits.join(',') } : {}),
@@ -902,6 +998,7 @@ export function evictMembers(
       // The surviving members the dissolve requeued belong here too — a caller
       // reading `requeued` must see everything that went back on the queue.
       requeued: [...new Set([...requeued, ...dissolve.requeued])].sort((a, b) => a - b),
+      parked: [...new Set([...parked, ...dissolve.parked])].sort((a, b) => a - b),
       reverted,
       conflict: false,
       dissolved,
@@ -914,6 +1011,7 @@ export function evictMembers(
     state: next,
     evicted: targets,
     requeued,
+    parked,
     reverted,
     conflict: false,
     dissolved: false,
@@ -955,6 +1053,7 @@ function revertConflict(
     state: dissolve.state,
     evicted: [...targets],
     requeued: dissolve.requeued,
+    parked: dissolve.parked,
     reverted,
     conflict: true,
     // #810: a refused dissolve (validated members kept) blocks instead.
@@ -1170,65 +1269,10 @@ export function dissolveBatch(
   const parked: number[] = [];
 
   if (strategy === 'halved' && unshipped.length > 0) {
-    // Split by POSITION, not by coupling: the halves are the first and second
-    // half of `unshipped` in member order. A coupled eviction group straddling
-    // the pivot is therefore broken up — accepted, because both halves re-run
-    // through the same validate/evict rails, where a member that cannot stand
-    // alone is evicted rather than silently shipped.
-    const pivot = Math.ceil(unshipped.length / 2);
-    const taken = new Set(next.batches.map((b) => b.id));
-    // A colliding id would produce two batches answering to one name:
-    // `findBatch` would return the first and `validateState` would refuse to
-    // load the file at all on the next start.
-    const freeId = (base: string): string => {
-      let id = base;
-      let n = 2;
-      while (taken.has(id)) id = `${base}${n++}`;
-      taken.add(id);
-      return id;
-    };
-    const halves: Array<{ id: string; members: number[] }> = [
-      { id: freeId(`${batchId}-a`), members: unshipped.slice(0, pivot) },
-      { id: freeId(`${batchId}-b`), members: unshipped.slice(pivot) },
-    ].filter((h) => h.members.length > 0);
-
-    for (const half of halves) {
-      next = {
-        ...next,
-        batches: [
-          ...next.batches,
-          createBatch(half.id, half.members, now, {
-            base_branch: batch.base_branch,
-            anchor: batch.anchor ?? undefined,
-            run_id: batch.run_id ?? undefined,
-            dispatch_profile: batch.dispatch_profile ?? undefined,
-            // #565: a dissolve split is not a fresh batch — carry the
-            // parent's priority forward, or an operator's `--priority`
-            // (or `reprioritize`) is silently lost the moment a batch
-            // dissolves into halves.
-            priority: batch.priority,
-            // Groups survive the split, restricted to the members that landed
-            // in this half — a group spanning both halves is no longer a group.
-            eviction_groups: batch.eviction_groups
-              .map((group) => group.filter((m) => half.members.includes(m)))
-              .filter((group) => group.length > 1),
-          }),
-        ],
-      };
-      newBatches.push(half.id);
-      for (const issue of half.members) {
-        const result = requeueMember(
-          next,
-          issue,
-          { mode: 'slot', batch: half.id },
-          opts.reason,
-          now,
-          { failure_evidence: { ...evidence, batch: half.id } }
-        );
-        next = result.state;
-        if (result.requeued) requeued.push(issue);
-      }
-    }
+    const split = splitIntoHalves(next, batch, unshipped, opts.reason, evidence, now);
+    next = split.state;
+    newBatches.push(...split.newBatches);
+    requeued.push(...split.requeued);
     journal(
       deps,
       unitEvent('batch-split', `batch:${batchId}`, { detail: newBatches.join(',') }),
@@ -1288,6 +1332,82 @@ export function dissolveBatch(
     blocked: false,
     validated: [],
   };
+}
+
+/**
+ * Split `members` of `batch` into two fresh `forming` half-batches and requeue
+ * each member into its half (§F.9: smaller batches, not abandoned work) — the
+ * `halved` dissolve's split, shared since #840 with `handlePrConflict`'s
+ * keep-landed path (which splits only the UNVALIDATED members).
+ *
+ * Split by POSITION, not by coupling: the halves are the first and second
+ * half of `members` in member order. A coupled eviction group straddling the
+ * pivot is therefore broken up — accepted, because both halves re-run
+ * through the same validate/evict rails, where a member that cannot stand
+ * alone is evicted rather than silently shipped.
+ */
+function splitIntoHalves(
+  state: SchedState,
+  batch: BatchEntry,
+  members: readonly number[],
+  reason: string,
+  evidence: FailureEvidence,
+  now: Date
+): { state: SchedState; newBatches: string[]; requeued: number[] } {
+  let next = state;
+  const newBatches: string[] = [];
+  const requeued: number[] = [];
+  if (members.length === 0) return { state: next, newBatches, requeued };
+  const pivot = Math.ceil(members.length / 2);
+  const taken = new Set(next.batches.map((b) => b.id));
+  // A colliding id would produce two batches answering to one name:
+  // `findBatch` would return the first and `validateState` would refuse to
+  // load the file at all on the next start.
+  const freeId = (base: string): string => {
+    let id = base;
+    let n = 2;
+    while (taken.has(id)) id = `${base}${n++}`;
+    taken.add(id);
+    return id;
+  };
+  const halves: Array<{ id: string; members: number[] }> = [
+    { id: freeId(`${batch.id}-a`), members: members.slice(0, pivot) },
+    { id: freeId(`${batch.id}-b`), members: members.slice(pivot) },
+  ].filter((h) => h.members.length > 0);
+
+  for (const half of halves) {
+    next = {
+      ...next,
+      batches: [
+        ...next.batches,
+        createBatch(half.id, half.members, now, {
+          base_branch: batch.base_branch,
+          anchor: batch.anchor ?? undefined,
+          run_id: batch.run_id ?? undefined,
+          dispatch_profile: batch.dispatch_profile ?? undefined,
+          // #565: a dissolve split is not a fresh batch — carry the
+          // parent's priority forward, or an operator's `--priority`
+          // (or `reprioritize`) is silently lost the moment a batch
+          // dissolves into halves.
+          priority: batch.priority,
+          // Groups survive the split, restricted to the members that landed
+          // in this half — a group spanning both halves is no longer a group.
+          eviction_groups: batch.eviction_groups
+            .map((group) => group.filter((m) => half.members.includes(m)))
+            .filter((group) => group.length > 1),
+        }),
+      ],
+    };
+    newBatches.push(half.id);
+    for (const issue of half.members) {
+      const result = requeueMember(next, issue, { mode: 'slot', batch: half.id }, reason, now, {
+        failure_evidence: { ...evidence, batch: half.id },
+      });
+      next = result.state;
+      if (result.requeued) requeued.push(issue);
+    }
+  }
+  return { state: next, newBatches, requeued };
 }
 
 /**
@@ -1619,7 +1739,15 @@ export function blockBatch(
 
 // --- AC4: the batch PR conflict path ---
 
-export type PrConflictAction = 'reship' | 'dissolved';
+/**
+ * `reship` — rebased and re-shipping; `dissolved` — split into halves (no
+ * validated member); #840, with VALIDATED members landed: `regate` — the
+ * rebase worked but the suite is red, so the gate re-runs over the landed
+ * members; `blocked` — no clean rebase, the landed members wait for an
+ * operator (`dissolve-refused:<reason>`). In both #840 outcomes only the
+ * unvalidated members were split off.
+ */
+export type PrConflictAction = 'reship' | 'dissolved' | 'regate' | 'blocked';
 
 export interface PrConflictOutcome {
   state: SchedState;
@@ -1636,8 +1764,16 @@ export interface PrConflictOutcome {
  *
  * First occurrence: rebase the batch branch onto the base, re-run the suite,
  * and re-ship once. Second occurrence — or a rebase that conflicts, or a suite
- * that is red after a clean rebase — dissolves the batch into two half-batches:
- * the work is kept, the batch that could not land is not retried a third time.
+ * that is red after a clean rebase — gives up on re-shipping as-is:
+ *
+ * - no VALIDATED member → the batch dissolves into two half-batches: the work
+ *   is kept, the batch that could not land is not retried a third time.
+ * - #840: VALIDATED members exist → they are never re-batched or re-dispatched
+ *   (`keepLandedAndSplit`): they stay landed on the integration branch, and
+ *   only the unvalidated members are split into half-batches. When the rebase
+ *   onto the new base succeeded (red suite) the gate re-runs over the landed
+ *   members (`validating` — the shape of #822's `sched resume --batch`);
+ *   otherwise the batch blocks `dissolve-refused:<reason>` for an operator.
  */
 export function handlePrConflict(
   state: SchedState,
@@ -1658,13 +1794,25 @@ export function handlePrConflict(
     next = transitionBatch(next, batchId, 'rebasing', {}, now);
   }
 
-  /** Every give-up path here ends the same way: halve the batch, keep the work. */
+  /**
+   * Every give-up path here ends the same way: keep the work. Validated
+   * members stay landed (#840); everything else is halved.
+   */
   const bailToHalves = (
     from: SchedState,
     bailReason: string,
     rebased = false,
     suite: SuiteResult | null = null
   ): PrConflictOutcome => {
+    const { validated } = classifyDissolveMembers(from, batchOrThrow(from, batchId));
+    if (validated.length > 0) {
+      return keepLandedAndSplit(from, batchId, deps, {
+        reason: bailReason,
+        validated,
+        rebased,
+        suite,
+      });
+    }
     const dissolve = dissolveBatch(
       from,
       batchId,
@@ -1744,4 +1892,116 @@ export function handlePrConflict(
     now
   );
   return { state: next, action: 'reship', rebased: true, suite };
+}
+
+/**
+ * #840: `handlePrConflict`'s give-up path when VALIDATED members exist. They
+ * are never re-batched or re-dispatched: they stay in this batch, landed on
+ * its integration branch. Only the unshipped, unvalidated members leave — split
+ * into half-batches exactly as a `halved` dissolve would, and trimmed out of
+ * this batch (with their groups/ranges, like `preserveSurvivors`). Then:
+ *
+ * - `rebased` (the rebase onto the new base worked, the suite is red) →
+ *   `re-validating → validating` with `executing_member` pinned to the end,
+ *   so the engine re-runs the gate over the landed members and attributes /
+ *   evicts on the ordinary rail — the same shape as `sched resume --batch`.
+ * - otherwise (rebase conflict, failed fetch, a recurred conflict, …) → the
+ *   batch BLOCKS `dissolve-refused:<reason>`: the landed work waits for an
+ *   operator (resolve the PR by hand — `reconcileStaleBlockedBatches` settles
+ *   the batch once it merges — or `sched abandon --batch`).
+ */
+function keepLandedAndSplit(
+  state: SchedState,
+  batchId: string,
+  deps: RecoveryDeps,
+  ctx: { reason: string; validated: number[]; rebased: boolean; suite: SuiteResult | null }
+): PrConflictOutcome {
+  const now = clock(deps);
+  const batch = batchOrThrow(state, batchId);
+  const { unshipped } = classifyDissolveMembers(state, batch);
+  const toSplit = unshipped.filter((issue) => !ctx.validated.includes(issue));
+  const evidence = memberExitEvidence(batchId, ctx.reason, null, now);
+  const split = splitIntoHalves(state, batch, toSplit, ctx.reason, evidence, now);
+  let next = split.state;
+  if (split.newBatches.length > 0) {
+    journal(
+      deps,
+      unitEvent('batch-split', `batch:${batchId}`, {
+        detail: `${split.newBatches.join(',')} — unvalidated member(s) ${toSplit.join(',')} only; validated ${ctx.validated.join(',')} stay landed`,
+      }),
+      now
+    );
+  }
+  const kept = batch.members.filter((issue) => !toSplit.includes(issue));
+  next = patchBatch(
+    next,
+    batchId,
+    {
+      members: kept,
+      eviction_groups: batch.eviction_groups
+        .map((group) => group.filter((m) => kept.includes(m)))
+        .filter((group) => group.length > 1),
+      ranges: batch.ranges.filter((r) => kept.includes(r.issue)),
+      executing_member: kept.length,
+    },
+    now
+  );
+  const dissolve: DissolveOutcome = {
+    state: next,
+    requeued: split.requeued,
+    preserved: ctx.validated,
+    newBatches: split.newBatches,
+    parked: [],
+    blocked: !ctx.rebased,
+    validated: ctx.validated,
+  };
+  if (ctx.rebased) {
+    next = transitionBatch(next, batchId, 'validating', {}, now);
+    journal(
+      deps,
+      unitEvent('batch-regate', `batch:${batchId}`, {
+        detail: `${ctx.reason} — gate re-runs over landed member(s) ${ctx.validated.join(',')} on the rebased branch; split=${split.newBatches.join(',') || 'none'}`,
+      }),
+      now
+    );
+    return {
+      state: next,
+      action: 'regate',
+      rebased: true,
+      suite: ctx.suite,
+      dissolve: { ...dissolve, state: next },
+    };
+  }
+  const blockedReason = `${DISSOLVE_REFUSED_PREFIX}${ctx.reason}`;
+  next = transitionBatch(next, batchId, 'blocked', { blocked_reason: blockedReason }, now);
+  journal(
+    deps,
+    unitEvent('batch-blocked', `batch:${batchId}`, {
+      detail: `${blockedReason} — validated member(s) ${ctx.validated.join(',')} stay landed on ${batch.branch ?? 'the integration branch'}; split=${split.newBatches.join(',') || 'none'}`,
+    }),
+    now
+  );
+  post(
+    deps,
+    batchOrThrow(next, batchId),
+    {
+      phase: 'batch-ship',
+      status: 'blocked',
+      kv: {
+        reason: blockedReason,
+        dissolved: 'false',
+        validated: ctx.validated.join(','),
+        requeued: split.requeued.join(',') || 'none',
+        ...(split.newBatches.length > 0 ? { split_into: split.newBatches.join(',') } : {}),
+      },
+    },
+    now
+  );
+  return {
+    state: next,
+    action: 'blocked',
+    rebased: false,
+    suite: ctx.suite,
+    dissolve: { ...dissolve, state: next },
+  };
 }

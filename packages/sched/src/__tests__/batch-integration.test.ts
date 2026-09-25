@@ -663,6 +663,10 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     batch = findBatch(h.state(), 'b-happy');
     expect(batch?.status).toBe('executing');
     expect(batch?.executing_member).toBe(2);
+    // #840: member 1 LANDED — its tree is gone, but its remote branch stays
+    // until the batch ships or dissolves (an aggregate-suite eviction parks
+    // the member on it).
+    expect(gitAt(['ls-remote', 'origin', 'batch/b-happy-m1-601'], repo).trim()).not.toBe('');
 
     // Member 2.
     pid = batchSlotPid(h, 'b-happy') as number;
@@ -718,6 +722,12 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     batch = findBatch(h.state(), 'b-happy');
     expect(batch?.status).toBe('done');
     expect(fs.existsSync(batch?.worktree as string)).toBe(false);
+    // #840: the batch shipped — batch teardown deletes the landed members' branches.
+    for (const [i, issue] of [601, 602, 603].entries()) {
+      expect(gitAt(['ls-remote', 'origin', `batch/b-happy-m${i + 1}-${issue}`], repo).trim()).toBe(
+        ''
+      );
+    }
 
     // #564: every completed member recorded its OWN runs.jsonl entry,
     // attributed to `issue:<memberIssue>` — the same unit scheme ordinary
@@ -4429,10 +4439,10 @@ describe('#809: parallel member dispatch', () => {
         .filter((c) => c.worktree === run.worktree && c.id !== 'worktree.prepare')
         .map((c) => c.id);
       expect(gateIds).toEqual(['typecheck.run', 'test.focused']);
-      // Landed → torn down; remote member branch deleted (its work is on the
-      // integration branch now).
+      // Landed → torn down; the remote member branch is KEPT until the batch
+      // ships or dissolves (#840).
       expect(fs.existsSync(run.worktree)).toBe(false);
-      expect(gitAt(['ls-remote', 'origin', run.branch], repo).trim()).toBe('');
+      expect(gitAt(['ls-remote', 'origin', run.branch], repo).trim()).not.toBe('');
     }
     // Member slots are all released; the tail agent holds the batch slot.
     expect(memberSlots(h, 'b-par').every((s) => s.status === 'idle')).toBe(true);

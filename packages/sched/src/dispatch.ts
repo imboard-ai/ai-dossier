@@ -934,6 +934,12 @@ export function buildPrompt(template: string, issue: number, gen = 0, slotLabel?
  * names no branch, or a branch/batch that is not a plain ref (persisted state
  * reaching an agent's instruction stream is re-validated, never trusted).
  *
+ * #840: the branch is no longer only prompt text — the engine seeds the
+ * run's resume trail (`resume-seed.ts`) so the gate itself resumes at plan on
+ * that branch. `seededRun` names that seeded run so the agent takes the
+ * resume rather than minting a fresh run over it; without one (no seeder, or
+ * the seed failed) this stays the #810 fallback instruction.
+ *
  * The exit `reason` is deliberately NOT interpolated: for a hand-back it is
  * the member's own milestone text (anyone who can comment on the issue can
  * write it), and inside an engine-written instruction it would carry the
@@ -941,19 +947,46 @@ export function buildPrompt(template: string, issue: number, gen = 0, slotLabel?
  */
 export function priorWorkInstruction(
   issue: number,
-  evidence: { batch: string; branch?: string | null } | null
+  evidence: { batch: string; branch?: string | null } | null,
+  seededRun: string | null = null
 ): string | null {
-  const branch = evidence?.branch;
-  if (evidence === null || !isPlainRef(branch)) return null;
+  const branch = priorWorkBranch(evidence);
+  if (evidence === null || branch === null) return null;
   const batch = isPlainRef(evidence.batch) ? evidence.batch : 'its batch';
-  return (
+  const lead =
     `PRIOR WORK — issue #${issue} was a member of ${batch} and was parked out of it with its ` +
     `work on branch ${branch} (why: see the blocked milestone / handover comments on the ` +
-    `issue). Before planning, run \`git fetch origin ${branch}\`: if it exists, set up your ` +
+    'issue). ';
+  if (seededRun !== null && isPlainRef(seededRun)) {
+    return (
+      lead +
+      `The scheduler has seeded this issue's runstate trail with a \`setup done\` milestone for run ` +
+      `${seededRun} naming branch=${branch}: your gate's \`ai-dossier runstate verify\` resumes ` +
+      `at plan on that branch — take that resume (run ${seededRun}), materialize your worktree ` +
+      `from origin/${branch} per full-cycle's Resuming section (never a fresh branch off the ` +
+      "base), read its commits and the issue's plan/handover comments, and continue that work; " +
+      'ship to the base branch as usual.'
+    );
+  }
+  return (
+    lead +
+    `Before planning, run \`git fetch origin ${branch}\`: if it exists, set up your ` +
     "worktree from that branch (not the base branch), read its commits and the issue's " +
     'plan/handover comments, and continue that work rather than restarting it; ship to the ' +
     'base branch as usual. If the branch is gone, start fresh from the base branch.'
   );
+}
+
+/**
+ * #840: the member branch a requeued entry's evidence names, re-validated as
+ * a plain ref — the one check shared by the prompt instruction and the
+ * engine's resume-trail seed. `null` when there is none (or it is malformed).
+ */
+export function priorWorkBranch(
+  evidence: { branch?: string | null } | null | undefined
+): string | null {
+  const branch = evidence?.branch;
+  return isPlainRef(branch) ? branch : null;
 }
 
 /** A plain git ref / batch id (`SAFE_REF_RE`, bounded) — safe in argv and in a prompt. */
