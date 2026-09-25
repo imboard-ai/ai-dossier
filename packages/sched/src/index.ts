@@ -57,6 +57,7 @@ export {
   type BatchDispatchDeps,
   type BatchTickResult,
   type CapOutcome,
+  MAX_BATCH_AGENT_RESPAWNS,
   memberBranchFor,
   resumeBlockedGate,
   runBatchTick,
@@ -145,6 +146,7 @@ export {
   takeoverLabelFor,
 } from './fence';
 export {
+  batchPhaseBlockedReason,
   createExecGroundTruth,
   GIT_OID_RE,
   type GroundTruth,
@@ -342,6 +344,8 @@ export {
 export {
   type AttributionMethod,
   BATCH_PHASES,
+  type BatchAgentExits,
+  type BatchAgentPhase,
   type BatchEntry,
   type BatchPhase,
   type BatchStatus,

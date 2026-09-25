@@ -254,11 +254,17 @@ export function stopIssue(
   if (TERMINAL_ISSUE_STATUSES.has(entry.status)) {
     throw new SchedNotFoundError(`Issue ${issue} is already ${entry.status} — nothing to stop`);
   }
-  if (entry.mode === 'slot' && entry.batch !== null) {
+  // #832: a PARKED member (`handed-back`/`evicted`, #810) has already left its
+  // batch — it holds no batch slot, its exit record keeps it out of the
+  // batch's landed set, and the tail never integrates it. Stopping it is the
+  // operator's cleanup after a hand-back and must not require stopping the
+  // whole batch. A member still IN the batch (pending, in work, or validated
+  // and landed) is refused: its work is part of the batch's own state.
+  if (entry.mode === 'slot' && entry.batch !== null && !PARKED_MEMBER_STATUSES.has(entry.status)) {
     const batch = findBatch(state, entry.batch);
     if (batch && !TERMINAL_BATCH_STATUSES.has(batch.status)) {
       throw new SchedNotFoundError(
-        `Issue ${issue} is an active member of batch ${entry.batch} — use sched stop --batch ${entry.batch}`
+        `Issue ${issue} is an active member of batch ${entry.batch} (${entry.status}) — use sched stop --batch ${entry.batch}`
       );
     }
   }

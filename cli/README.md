@@ -1344,8 +1344,9 @@ against ground truth.
 
 `pause` prevents every new agent process, including recovery takeovers, but leaves live
 agents running. `stop --issue <n>` PID-start-safely terminates one live agent, releases its
-slot, and records terminal `stopped` state without recovery or escalation. Active batch members
-must use `stop --batch <id>`, which terminates every agent the batch holds (its own slot plus one
+slot, and records terminal `stopped` state without recovery or escalation. Batch members still in
+a live batch must use `stop --batch <id>` (a parked `handed-back`/`evicted` member can be stopped
+with `stop --issue`, #832), which terminates every agent the batch holds (its own slot plus one
 per running parallel member) and stops unfinished members atomically. `abandon` instead records failure and releases a slot without terminating the process.
 
 - **`enqueue`** records entries (issue, mode, batch id, dependency edges, model tier) from

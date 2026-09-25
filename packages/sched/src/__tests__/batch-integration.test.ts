@@ -27,6 +27,7 @@ import {
   memberBranchFor,
   memberDispatchModeFor,
   reconcileStaleBlockedBatches,
+  tailMembersRefusal,
 } from '../batch-dispatch';
 // Same rationale as the `evictMemberAndContinue` import above: a test-only
 // path builder, not part of the package's public `index.ts` surface.
@@ -51,6 +52,7 @@ import {
   type IssueCloseTruth,
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
+  MAX_BATCH_AGENT_RESPAWNS,
   type PrTruth,
   parseMergedPrListJson,
   patchBatch,
@@ -68,6 +70,7 @@ import {
   schedRunsLogPath,
   setPaused,
   stopBatch,
+  stopIssue,
   tick,
   transitionBatch,
   transitionIssue,
@@ -4831,5 +4834,233 @@ describe("#791: reconcileKeptWorktrees clears a done batch's kept-worktree ledge
       expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
     }
     expect(h.execCalls.some((c) => c.args.includes('status'))).toBe(true);
+  });
+});
+
+/** #832: every `Members:` list a tail dispatch for `anchor` was given, in dispatch order. */
+function tailMemberLists(h: BatchHarness, anchor: number): string[] {
+  const file = path.join(h.truthDir, `${anchor}.tail-members`);
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, 'utf8')
+    .split('\n')
+    .filter((l) => l.length > 0);
+}
+
+/** #832: tick until the batch leaves its current live phase or `maxTicks` passes, waiting out each live agent. */
+async function tickThroughAgents(
+  h: BatchHarness,
+  batchId: string,
+  maxTicks: number
+): Promise<void> {
+  for (let i = 0; i < maxTicks; i++) {
+    const pid = batchSlotPid(h, batchId);
+    if (pid !== undefined) expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+  }
+}
+
+describe('#832: the batch tail runs over landed members only, and a tail verdict is never respawned', () => {
+  it('AC1/AC4: a member stopped mid-run (after its hand-back) is excluded — integrate is dispatched with only the landed members', async () => {
+    // b-20260924-04: #4408 handed back, the operator stopped it, and the tail
+    // was dispatched with members 4216,4408 anyway — no #4408 boundary
+    // commit, so the tail refused `members-mismatch` and was respawned.
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--evict-members=822'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([
+      { issue: 821, mode: 'slot', batch: 'b-832-stop', anchor: 820, tier: 'mid' },
+      { issue: 822, mode: 'slot', batch: 'b-832-stop', tier: 'mid' },
+      { issue: 823, mode: 'slot', batch: 'b-832-stop', tier: 'mid' },
+    ]);
+
+    h.tick(); // batch-setup + member 1 (821)
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-832-stop') as number)).toBe(true);
+    h.tick(); // 821 validated → member 2 (822, hands back)
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-832-stop') as number)).toBe(true);
+    h.tick(); // 822 parked handed-back → member 3 (823)
+    expect(h.state().entries.find((e) => e.issue === 822)?.status).toBe('handed-back');
+
+    // The operator's cleanup: stop the handed-back member while the batch is
+    // live. A PARKED member may be stopped on its own (AC4)…
+    h.store.withLock((state) => ({ state: stopIssue(state, 822).state, result: undefined }));
+    expect(h.state().entries.find((e) => e.issue === 822)?.status).toBe('stopped');
+    // …but a member still IN the batch (validated and landed) may not.
+    expect(() => stopIssue(h.state(), 821)).toThrow(/active member of batch b-832-stop/);
+
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-832-stop') as number)).toBe(true);
+    h.tick(); // 823 validated → validate → reviewing → tail dispatched
+    const batch = findBatch(h.state(), 'b-832-stop');
+    expect(batch?.status).toBe('reviewing');
+    expect(batch?.members).toEqual([821, 822, 823]); // the ledger still records who joined…
+    expect(batch?.ranges.map((r) => r.issue)).toEqual([821, 823]); // …and what landed
+
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-832-stop') as number)).toBe(true);
+    // The tail was told ONLY the landed members.
+    expect(tailMemberLists(h, 820)).toEqual(['821,823']);
+    h.tick(); // tail: batch-review done + park
+    expect(findBatch(h.state(), 'b-832-stop')?.status).toBe('awaiting-merge');
+    expect(h.deps.journal.read().some((e) => e.event === 'batch-blocked')).toBe(false);
+  }, 60_000);
+
+  it('AC2: a tail posting `batch-review status=blocked` blocks the batch ONCE with its reason, and is never respawned', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--tail-blocked=members-mismatch'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([{ issue: 831, mode: 'slot', batch: 'b-832-blocked', anchor: 830, tier: 'mid' }]);
+
+    h.tick(); // setup + member
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-832-blocked') as number)).toBe(true);
+    h.tick(); // validated → reviewing → tail (posts blocked)
+
+    await tickThroughAgents(h, 'b-832-blocked', 5);
+
+    const batch = findBatch(h.state(), 'b-832-blocked');
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('tail-blocked:members-mismatch');
+    const events = h.deps.journal.read();
+    expect(events.filter((e) => e.event === 'batch-blocked')).toHaveLength(1);
+    expect(
+      events.filter((e) => e.event === 'unit-failed' && e.reason === 'tail-agent-exited-unverified')
+    ).toHaveLength(0);
+    // One tail dispatch — no respawn — and its slot is released.
+    expect(tailMemberLists(h, 830)).toEqual(['831']);
+    expect(h.state().slots.some((s) => s.unit === 'batch:b-832-blocked')).toBe(false);
+    // The agent's own blocked milestone is the anchor's record; the engine
+    // did not post a second one over it.
+    const anchor = JSON.parse(fs.readFileSync(path.join(h.truthDir, '830.json'), 'utf8'));
+    expect(anchor).toMatchObject({ phase: 'batch-review', status: 'blocked' });
+    expect(anchor.keys.reason).toBe('members-mismatch');
+    // `sched status` names the evidence and the ways out.
+    const row = buildStatusReport(h.state(), h.config, 'proj').blocked.find(
+      (b) => b.status === 'batch-blocked'
+    );
+    expect(row?.reason).toMatch(
+      /^tail-blocked:members-mismatch; read the blocked milestone on anchor #830; landed member\(s\) #831 are on batch\/b-832-blocked-/
+    );
+    expect(row?.reason).toMatch(/sched abandon --batch b-832-blocked/);
+  }, 60_000);
+
+  it('AC3: a tail that keeps exiting unverified is respawned at most MAX_BATCH_AGENT_RESPAWNS times, then the batch blocks respawn-cap:tail', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=f-{issue}.txt', '--tail-die=1'], {
+      maxSlots: 1,
+    });
+    h.enqueue([{ issue: 841, mode: 'slot', batch: 'b-832-cap', anchor: 840, tier: 'mid' }]);
+
+    h.tick(); // setup + member
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-832-cap') as number)).toBe(true);
+    h.tick(); // validated → reviewing → tail #1
+
+    await tickThroughAgents(h, 'b-832-cap', 12);
+
+    const batch = findBatch(h.state(), 'b-832-cap');
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('respawn-cap:tail');
+    expect(batch?.agent_exits).toBeNull(); // the block ends the counted stretch
+    // First dispatch + MAX_BATCH_AGENT_RESPAWNS respawns, then nothing more.
+    expect(tailMemberLists(h, 840)).toHaveLength(MAX_BATCH_AGENT_RESPAWNS + 1);
+    const events = h.deps.journal.read();
+    const exits = events.filter(
+      (e) => e.event === 'unit-failed' && e.reason === 'tail-agent-exited-unverified'
+    );
+    expect(exits.map((e) => String(e.detail).split(' (log')[0])).toEqual([
+      'unverified exit 1/3',
+      'unverified exit 2/3',
+      'unverified exit 3/3',
+    ]);
+    expect(events.filter((e) => e.event === 'batch-blocked')).toHaveLength(1);
+  }, 60_000);
+
+  it('AC3 (report phase): a report agent that keeps exiting unverified is capped too — the MERGED batch closes without its report instead of looping', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--report-die=1'], { maxSlots: 1 });
+    h.enqueue([{ issue: 861, mode: 'slot', batch: 'b-832-report', anchor: 860, tier: 'mid' }]);
+
+    h.tick(); // setup + member
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-832-report') as number)).toBe(true);
+    h.tick(); // validated → reviewing → tail
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-832-report') as number)).toBe(true);
+    h.tick(); // tail parks the PR
+    expect(findBatch(h.state(), 'b-832-report')?.status).toBe('awaiting-merge');
+    fs.writeFileSync(
+      path.join(h.truthDir, '9000.pr.json'),
+      JSON.stringify({ state: 'MERGED', mergedAt: new Date().toISOString() })
+    );
+    h.tick(); // merge accepted → deployed
+
+    await tickThroughAgents(h, 'b-832-report', 12);
+
+    // A block would not hold here: the PR is merged, so the stale-blocked
+    // reconcile walks a blocked batch straight back to `deployed` and the
+    // report agent respawns (observed while writing this test).
+    const batch = findBatch(h.state(), 'b-832-report');
+    expect(batch?.status).toBe('done');
+    expect(batch?.agent_exits).toBeNull();
+    const events = h.deps.journal.read();
+    expect(events.filter((e) => e.event === 'report-dispatched')).toHaveLength(
+      MAX_BATCH_AGENT_RESPAWNS + 1
+    );
+    expect(events.some((e) => e.event === 'batch-blocked')).toBe(false);
+    const failures = events.filter((e) => e.event === 'report-failed').map((e) => e.detail);
+    expect(failures).toHaveLength(MAX_BATCH_AGENT_RESPAWNS + 2);
+    expect(failures[0]).toMatch(/^unverified exit 1\/3 \(log: .*-report\.log\)$/);
+    expect(failures.at(-1)).toMatch(/^respawn-cap:report — batch closed without its report/);
+  }, 60_000);
+
+  it('a batch whose every member left before landing never dispatches a tail — it blocks no-landed-members', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--evict-members=851,852'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([
+      { issue: 851, mode: 'slot', batch: 'b-832-empty', anchor: 850, tier: 'mid' },
+      { issue: 852, mode: 'slot', batch: 'b-832-empty', tier: 'mid' },
+    ]);
+
+    await tickThroughAgents(h, 'b-832-empty', 6);
+
+    const batch = findBatch(h.state(), 'b-832-empty');
+    expect(tailMemberLists(h, 850)).toEqual([]);
+    // Two hand-backs never dissolve (#810); with nothing landed there is
+    // nothing to integrate, so the batch blocks rather than spending a tail.
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('no-landed-members');
+  }, 60_000);
+});
+
+describe("#832: tailMembersRefusal — the tail's members check, made before any agent is spent", () => {
+  const batchWith = (ranges: number[]) =>
+    ({
+      ranges: ranges.map((issue) => ({ issue, from: 'a', to: 'a', commits: ['a'], indices: [0] })),
+    }) as unknown as Parameters<typeof tailMembersRefusal>[0];
+
+  it('nothing landed is refused outright', () => {
+    expect(tailMembersRefusal(batchWith([]), [])).toBe('no-landed-members');
+  });
+
+  it('agreeing lists (or no recorded attribution) pass', () => {
+    expect(tailMembersRefusal(batchWith([1, 2]), [1, 2])).toBeNull();
+    expect(tailMembersRefusal(batchWith([]), [1, 2])).toBeNull();
+  });
+
+  it('a landed member with no boundary commit is refused', () => {
+    expect(tailMembersRefusal(batchWith([1]), [1, 2])).toBe(
+      'members-mismatch:no-boundary-commit-2'
+    );
+  });
+
+  it('a boundary commit for a member that did not land is refused (the tail checks both ways)', () => {
+    expect(tailMembersRefusal(batchWith([1, 2, 3]), [1])).toBe(
+      'members-mismatch:unlanded-boundary-commit-2,3'
+    );
   });
 });

@@ -1554,6 +1554,11 @@ export interface BlockOptions {
   reason: string;
   /** Milestone phase to report under (default `batch-validate`). */
   milestonePhase?: BatchPhase;
+  /**
+   * #832: the batch's own agent already posted the `blocked` milestone that
+   * caused this block — skip posting a second one on the anchor.
+   */
+  milestoneAlreadyPosted?: boolean;
 }
 
 /**
@@ -1586,18 +1591,29 @@ export function blockBatch(
   // #583: persist the reason on the entry itself — previously only the
   // journal/runstate milestone carried it, so `sched status` had nothing to
   // read back for a blocked batch (including the pre-existing #562 case).
-  const next = transitionBatch(state, batchId, 'blocked', { blocked_reason: opts.reason }, now);
-  journal(deps, unitEvent('batch-blocked', `batch:${batchId}`, { detail: opts.reason }), now);
-  post(
-    deps,
-    batchOrThrow(next, batchId),
-    {
-      phase: opts.milestonePhase ?? 'batch-validate',
-      status: 'blocked',
-      kv: { reason: opts.reason, dissolved: 'false' },
-    },
+  // #832: a block ends the stretch the respawn counter measures — whatever
+  // takes the batch out of `blocked` next (e.g. `reconcileStaleBlockedBatches`'
+  // blocked → merged) starts its tail/report agents with a fresh count.
+  const next = transitionBatch(
+    state,
+    batchId,
+    'blocked',
+    { blocked_reason: opts.reason, agent_exits: null },
     now
   );
+  journal(deps, unitEvent('batch-blocked', `batch:${batchId}`, { detail: opts.reason }), now);
+  if (opts.milestoneAlreadyPosted !== true) {
+    post(
+      deps,
+      batchOrThrow(next, batchId),
+      {
+        phase: opts.milestonePhase ?? 'batch-validate',
+        status: 'blocked',
+        kv: { reason: opts.reason, dissolved: 'false' },
+      },
+      now
+    );
+  }
   return { state: next };
 }
 
