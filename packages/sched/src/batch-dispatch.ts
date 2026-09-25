@@ -144,7 +144,7 @@ import {
   type DissolveOutcome,
   dissolveBatch,
   evictMembers,
-  listRemoteMemberBranches,
+  pruneMemberBranches,
   type RecoveryDeps,
   resolveFixAttempt,
   type SuiteResult,
@@ -2340,7 +2340,7 @@ function evictOffender(
       s,
       outcome.state,
       batchId,
-      [...outcome.requeued, ...outcome.parked, ...(outcome.dissolve?.parked ?? [])],
+      [...new Set([...outcome.requeued, ...outcome.parked, ...(outcome.dissolve?.parked ?? [])])],
       batch.members
     ),
     result: undefined,
@@ -5390,39 +5390,33 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
 }
 
 /**
- * #840: the batch is over (shipped, or dissolved) — delete its member
- * branches from origin. They were kept from landing until now so an
- * aggregate-suite eviction could park a landed member on its branch. A
- * branch any queue entry still names in `failure_evidence.branch` (a parked
- * member, or one requeued to continue from it) is KEPT: it is that member's
- * work. Best-effort — a failed listing or delete is journaled, never thrown
- * into the teardown path; a kept batch (`worktree_kept`) never gets here.
+ * #840: `teardownBatch`'s member-branch cleanup — `pruneMemberBranches`
+ * (recovery.ts) plus the journal line. Best-effort: a failed listing or delete
+ * is journaled, never thrown into the teardown path; a kept batch
+ * (`worktree_kept`) never gets here.
  */
 function deleteMemberBranches(deps: BatchDispatchDeps, batchId: string): void {
-  const live = listRemoteMemberBranches(deps.exec, deps.repoDir, batchId);
-  if (live === null) {
+  const pruned = pruneMemberBranches(deps.exec, deps.repoDir, deps.store.load(), batchId);
+  if (pruned === null) {
     journalEvent(deps, 'teardown-failed', unit(batchId), {
       cleanup: 'member-branches-unlisted',
       detail: `could not list origin's batch/${batchId}-m* member branches — none deleted`,
     });
     return;
   }
-  if (live.length === 0) return;
-  const referenced = new Set(
-    deps.store
-      .load()
-      .entries.map((e) => e.failure_evidence?.branch)
-      .filter((b): b is string => typeof b === 'string')
+  const { deleted, kept, failed } = pruned;
+  if (deleted.length + kept.length + failed.length === 0) return;
+  journalEvent(
+    deps,
+    failed.length === 0 ? 'member-branches-deleted' : 'teardown-failed',
+    unit(batchId),
+    {
+      ...(failed.length === 0 ? {} : { cleanup: 'member-branches-delete-failed' }),
+      detail:
+        `deleted=${deleted.join(',') || 'none'} kept=${kept.join(',') || 'none'}` +
+        (failed.length > 0 ? ` failed=${failed.join(',')}` : ''),
+    }
   );
-  const kept = live.filter((b) => referenced.has(b.branch)).map((b) => b.branch);
-  const doomed = live.filter((b) => !referenced.has(b.branch)).map((b) => b.branch);
-  const ok =
-    doomed.length === 0 ||
-    deps.exec('git', ['push', 'origin', '--delete', ...doomed], deps.repoDir) !== null;
-  journalEvent(deps, ok ? 'member-branches-deleted' : 'teardown-failed', unit(batchId), {
-    ...(ok ? {} : { cleanup: 'member-branches-delete-failed' }),
-    detail: `deleted=${ok ? doomed.join(',') || 'none' : 'none'} kept=${kept.join(',') || 'none'}${ok ? '' : ` failed=${doomed.join(',')}`}`,
-  });
 }
 
 // --- Parallel member dispatch (#809) ---

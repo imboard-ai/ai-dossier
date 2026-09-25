@@ -29,6 +29,7 @@ import {
   memberRanges,
   parseBoundaryCommits,
   patchBatch,
+  pruneMemberBranches,
   type RecoveryDeps,
   reprioritizeBatch,
   requeueMember,
@@ -1775,6 +1776,96 @@ describe('#840 item 3: a PR-conflict split never re-batches a validated member',
     expect(batch?.members).toEqual([201, 202]);
     expect(batch?.executing_member).toBe(2);
     expect(findEntry(result.state, 201)?.status).toBe('validated');
+    expect(findEntry(result.state, 203)?.batch).toBe('b1-a');
+  });
+});
+
+describe('#840: pruneMemberBranches (batch over → member branches deleted, live work kept)', () => {
+  it('deletes the batch member branches no live entry continues from; keeps a parked member’s', () => {
+    const { repo, head } = scratchRepo([]);
+    const origin = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-recovery-origin-'));
+    dirs.push(origin);
+    git(['init', '--bare', '--initial-branch=main', '.'], origin);
+    git(['remote', 'add', 'origin', origin], repo);
+    for (const b of [
+      'batch/b1-m1-201',
+      'batch/b1-m2-202',
+      'batch/b1-m3-203',
+      'batch/b1-a-m1-204',
+      'batch/b1-20260925',
+    ]) {
+      git(['push', 'origin', `${head}:refs/heads/${b}`], repo);
+    }
+    let state = batchState([201, 202, 203]);
+    // 202 parked on its branch (live work); 203 finished with a stale reference.
+    state = {
+      ...state,
+      entries: state.entries.map((e) =>
+        e.issue === 202 || e.issue === 203
+          ? {
+              ...e,
+              failure_evidence: {
+                batch: 'b1',
+                reason: 'x',
+                failing_tests: [],
+                attribution: 'none' as const,
+                reverted_commits: [],
+                branch: `batch/b1-m${e.issue - 200}-${e.issue}`,
+                at: NOW.toISOString(),
+              },
+            }
+          : e
+      ),
+    };
+    state = transitionIssue(state, 202, 'evicted', {}, NOW);
+    state = transitionIssue(state, 203, 'stopped', {}, NOW);
+
+    const pruned = pruneMemberBranches(createExecFn(60_000), repo, state, 'b1');
+
+    expect(pruned).toEqual({
+      deleted: ['batch/b1-m1-201', 'batch/b1-m3-203'],
+      kept: ['batch/b1-m2-202'],
+      failed: [],
+    });
+    const left = git(['ls-remote', '--heads', 'origin'], repo);
+    expect(left).toContain('batch/b1-m2-202');
+    // Another batch's member branch and the integration branch are never touched.
+    expect(left).toContain('batch/b1-a-m1-204');
+    expect(left).toContain('batch/b1-20260925');
+    expect(left).not.toContain('batch/b1-m1-201');
+  });
+
+  it('returns null (deletes nothing) when origin cannot be listed', () => {
+    expect(pruneMemberBranches(() => null, '/repo', batchState([201]), 'b1')).toBeNull();
+  });
+});
+
+describe('#840 item 3 (review): a landed-but-unvalidated member is not split off', () => {
+  it('stays in the batch — its commits are on the kept integration branch', () => {
+    let state = batchState([201, 202, 203], 'awaiting-merge');
+    state = transitionIssue(state, 201, 'validated', {}, NOW);
+    state = patchBatch(
+      state,
+      'b1',
+      {
+        ranges: [201, 202].map((issue, i) => ({
+          issue,
+          from: String(i).repeat(40),
+          to: String(i).repeat(40),
+          commits: [String(i).repeat(40)],
+          positions: [i],
+        })),
+      },
+      NOW
+    );
+    const h = harness({
+      exec: (_file, args) => (args[0] === 'rebase' && args[1] !== '--abort' ? null : ''),
+    });
+
+    const result = handlePrConflict(state, 'b1', h.deps);
+
+    expect(findBatch(result.state, 'b1')?.members).toEqual([201, 202]);
+    expect(findEntry(result.state, 202)?.batch).toBe('b1');
     expect(findEntry(result.state, 203)?.batch).toBe('b1-a');
   });
 });

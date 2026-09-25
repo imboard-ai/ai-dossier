@@ -500,7 +500,7 @@ describe('#840 item 4: the ENGINE bases a requeued member on its recorded branch
                   reason: 'suite-red-after-fix',
                   failing_tests: [],
                   attribution: 'overlap' as const,
-                  reverted_commits: [],
+                  reverted_commits: ['abcdef1234567890abcdef1234567890abcdef12'],
                   branch: 'batch/b-840-m1-840',
                   at: new Date().toISOString(),
                   ...extra,
@@ -539,6 +539,10 @@ describe('#840 item 4: the ENGINE bases a requeued member on its recorded branch
     const entry = h.state().entries.find((e) => e.issue === 840);
     expect(entry?.failure_evidence?.resume_run).toBe('r-840-5eed');
     expect(h.spawnCalls[0]?.prompt).toContain('r-840-5eed');
+    // #840 review: a post-landing eviction's reverted commits are named, so a
+    // rebase onto a base carrying their reverts does not silently drop them.
+    expect(h.spawnCalls[0]?.prompt).toContain('REVERTED');
+    expect(h.spawnCalls[0]?.prompt).toContain('abcdef123456');
     expect(h.events().some((e) => e.event === 'resume-seeded')).toBe(true);
   });
 

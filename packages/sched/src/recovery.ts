@@ -91,6 +91,7 @@ import {
   SchedNotFoundError,
   type SchedState,
   TERMINAL_BATCH_STATUSES,
+  TERMINAL_ISSUE_STATUSES,
 } from './types';
 
 // --- Injected effects ---
@@ -614,17 +615,68 @@ export function listRemoteMemberBranches(
  * #840: the live member branch `issue`'s work sits on — the recorded one
  * (parallel run / current serial member) when origin still has it, else the
  * highest-indexed live `batch/<id>-m<n>-<issue>`. `null` when none is live.
+ * When origin could not be listed (`live === null`) nothing can be verified:
+ * a RECORDED branch (a parallel run's, or the current serial member's) is
+ * still parked on — a `sched requeue` onto a branch that turns out to be gone
+ * simply starts fresh (`runstate verify` → setup) — and anything else falls
+ * back to the full-cycle requeue, journaled by the caller.
  */
 function liveMemberBranch(
   batch: BatchEntry,
   issue: number,
   live: readonly RemoteMemberBranch[] | null
 ): string | null {
-  if (live === null) return null;
+  if (live === null) return recordedMemberBranch(batch, issue);
   const own = live.filter((b) => b.issue === issue);
   const recorded = recordedMemberBranch(batch, issue);
   if (recorded !== null && own.some((b) => b.branch === recorded)) return recorded;
   return [...own].sort((a, b) => b.index - a.index)[0]?.branch ?? null;
+}
+
+/** What {@link pruneMemberBranches} did (#840). */
+export interface MemberBranchPrune {
+  deleted: string[];
+  /** Branches a live queue entry still continues from — never deleted. */
+  kept: string[];
+  /** Branches whose delete failed (left on origin). */
+  failed: string[];
+}
+
+/**
+ * #840: the batch is over — delete its member branches from origin. They
+ * outlive landing so an aggregate-suite eviction can park a landed member on
+ * its branch; once the batch ships or dissolves (`teardownBatch`), or is
+ * abandoned (`sched abandon --batch`), nothing of the batch needs them —
+ * except a branch a NON-terminal queue entry's `failure_evidence.branch`
+ * still names (a parked member, or one requeued to continue from it): that
+ * branch is the member's work and is kept. One `git push --delete` per ref,
+ * so one already-gone ref cannot mask the others' outcome. `null` when
+ * origin could not be listed (nothing deleted). Never throws.
+ */
+export function pruneMemberBranches(
+  exec: ExecFn,
+  repoDir: string,
+  state: SchedState,
+  batchId: string
+): MemberBranchPrune | null {
+  const live = listRemoteMemberBranches(exec, repoDir, batchId);
+  if (live === null) return null;
+  const referenced = new Set(
+    state.entries
+      .filter((e) => !TERMINAL_ISSUE_STATUSES.has(e.status))
+      .map((e) => e.failure_evidence?.branch)
+      .filter((b): b is string => typeof b === 'string')
+  );
+  const out: MemberBranchPrune = { deleted: [], kept: [], failed: [] };
+  for (const { branch } of live) {
+    if (referenced.has(branch)) {
+      out.kept.push(branch);
+      continue;
+    }
+    const ok = exec('git', ['push', 'origin', '--delete', branch], repoDir) !== null;
+    (ok ? out.deleted : out.failed).push(branch);
+  }
+  return out;
 }
 
 // --- AC2/AC3: eviction ---
@@ -852,9 +904,17 @@ export function evictMembers(
   const requeued: number[] = [];
   const parked: number[] = [];
   const records: EvictionRecord[] = [];
-  const live = targets.some((t) => !alreadyEvicted.has(t))
-    ? listRemoteMemberBranches(deps.exec, deps.repoDir, batchId)
-    : null;
+  const needsBranch = targets.some((t) => !alreadyEvicted.has(t));
+  const live = needsBranch ? listRemoteMemberBranches(deps.exec, deps.repoDir, batchId) : [];
+  if (live === null) {
+    journal(
+      deps,
+      unitEvent('git-failed', `batch:${batchId}`, {
+        detail: `git ls-remote origin batch/${batchId}-m* failed — member branches unverifiable: only a recorded member branch is parked on, other evicted members requeue full-cycle from the base`,
+      }),
+      now
+    );
+  }
   for (const issue of targets) {
     const prior = alreadyEvicted.get(issue);
     if (prior) {
@@ -1907,8 +1967,13 @@ export function handlePrConflict(
  *   evicts on the ordinary rail — the same shape as `sched resume --batch`.
  * - otherwise (rebase conflict, failed fetch, a recurred conflict, …) → the
  *   batch BLOCKS `dissolve-refused:<reason>`: the landed work waits for an
- *   operator (resolve the PR by hand — `reconcileStaleBlockedBatches` settles
- *   the batch once it merges — or `sched abandon --batch`).
+ *   operator — resolve the conflict on the recorded PR by hand
+ *   (`reconcileStaleBlockedBatches` settles the batch once it merges), or
+ *   close that PR and `sched resume --batch` (which refuses while a PR is
+ *   recorded), or `sched abandon --batch`.
+ *
+ * Library behaviour: the engine does not yet route a conflicting batch PR
+ * here (#867).
  */
 function keepLandedAndSplit(
   state: SchedState,
@@ -1919,7 +1984,12 @@ function keepLandedAndSplit(
   const now = clock(deps);
   const batch = batchOrThrow(state, batchId);
   const { unshipped } = classifyDissolveMembers(state, batch);
-  const toSplit = unshipped.filter((issue) => !ctx.validated.includes(issue));
+  // A member with a recorded range has commits ON the integration branch this
+  // batch keeps — splitting it off would ship its code here AND re-run it in
+  // a half. It stays (not validated, so the tail never names it; the re-run
+  // gate or the operator decides it). Only unlanded, unvalidated members go.
+  const landed = new Set(batch.ranges.map((r) => r.issue));
+  const toSplit = unshipped.filter((issue) => !ctx.validated.includes(issue) && !landed.has(issue));
   const evidence = memberExitEvidence(batchId, ctx.reason, null, now);
   const split = splitIntoHalves(state, batch, toSplit, ctx.reason, evidence, now);
   let next = split.state;

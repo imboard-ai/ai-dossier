@@ -947,7 +947,7 @@ export function buildPrompt(template: string, issue: number, gen = 0, slotLabel?
  */
 export function priorWorkInstruction(
   issue: number,
-  evidence: { batch: string; branch?: string | null } | null,
+  evidence: { batch: string; branch?: string | null; reverted_commits?: readonly string[] } | null,
   seededRun: string | null = null
 ): string | null {
   const branch = priorWorkBranch(evidence);
@@ -956,7 +956,8 @@ export function priorWorkInstruction(
   const lead =
     `PRIOR WORK — issue #${issue} was a member of ${batch} and was parked out of it with its ` +
     `work on branch ${branch} (why: see the blocked milestone / handover comments on the ` +
-    'issue). ';
+    'issue). ' +
+    revertedNote(evidence.reverted_commits);
   if (seededRun !== null && isPlainRef(seededRun)) {
     return (
       lead +
@@ -974,6 +975,28 @@ export function priorWorkInstruction(
     "worktree from that branch (not the base branch), read its commits and the issue's " +
     'plan/handover comments, and continue that work rather than restarting it; ship to the ' +
     'base branch as usual. If the branch is gone, start fresh from the base branch.'
+  );
+}
+
+/** Commit ids named in an engine-written instruction — full or abbreviated hex only. */
+const COMMIT_ID_RE = /^[0-9a-f]{7,64}$/;
+
+/**
+ * #840: an aggregate-suite eviction happens AFTER the member landed — its
+ * commits were reverted on the integration branch, and if that batch later
+ * ships, the base carries the commits AND their reverts. Rebasing the member
+ * branch onto such a base drops the commits as already upstream, silently
+ * losing the work. Named so the resumed run re-applies it (engine-side fix:
+ * #866). Only well-formed commit ids are interpolated.
+ */
+function revertedNote(reverted: readonly string[] | undefined): string {
+  const shas = (reverted ?? []).filter((c) => COMMIT_ID_RE.test(c)).slice(0, 20);
+  if (shas.length === 0) return '';
+  return (
+    `Its commits ${shas.map((c) => c.slice(0, 12)).join(', ')} were REVERTED on the batch's ` +
+    'integration branch after landing: if the base branch now carries those reverts, a plain ' +
+    'rebase drops this work as already upstream — re-apply it (revert the reverts) before ' +
+    'shipping, and confirm the final diff against the base still contains it. '
   );
 }
 
