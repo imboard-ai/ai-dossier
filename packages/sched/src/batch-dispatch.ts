@@ -159,6 +159,7 @@ import {
   duplicateEvictionDetail,
   findBatch,
   findEntry,
+  isLeftoverMemberRun,
   isPreservedMember,
   memberExitEvidence,
   PARKED_MEMBER_STATUSES,
@@ -1236,10 +1237,15 @@ function teardownMemberWorktree(
     deps,
     batchId,
     { worktree, branch, poolClaimed: batch.member_pool_claimed === true },
-    landed
+    landed,
+    batch.members[batch.executing_member - 1]
   );
   return { path: worktree, cleared };
 }
+
+/** #855: the `teardown-failed` tail for a member tree that stays on disk. */
+const TREE_LEFT_FOR_OPERATOR =
+  'tree left on disk for the operator and NOT retried (it may hold work); inspect it, then remove it (`git worktree remove`, or `worktree-pool return` if pool-claimed) — `sched status` names it';
 
 /**
  * What `teardownMemberWorktree` did with the serial-field tree (#855): its
@@ -1261,19 +1267,27 @@ interface SerialTreeTeardown {
  * Returns whether the TREE is verifiably gone (#855) — `runTeardown` reports
  * `done` only after the path is gone and unlisted, or the pool's self-check
  * reports the entry returned. A failed branch delete after that does not
- * un-clear the tree. Journals exactly one line per call.
+ * un-clear the tree. Journals exactly one line per call; a failed tree is
+ * never re-attempted by any caller, so the line says what the operator does.
  */
 function teardownMemberTree(
   deps: BatchDispatchDeps,
   batchId: string,
   tree: { worktree: string; branch: string | null; poolClaimed: boolean },
-  landed: boolean
+  landed: boolean,
+  /** The member whose tree this is — named in the journal line. */
+  issue: number | undefined
 ): boolean {
   const { worktree, branch } = tree;
+  const context = {
+    ...(issue !== undefined ? { issue } : {}),
+    worktree,
+  };
   if (branch !== null && !SAFE_REF_RE.test(branch)) {
     journalEvent(deps, 'teardown-failed', unit(batchId), {
+      ...context,
       cleanup: 'failed-invalid-branch-name',
-      detail: branch,
+      detail: `${branch} — ${TREE_LEFT_FOR_OPERATOR}`,
     });
     return false;
   }
@@ -1303,10 +1317,10 @@ function teardownMemberTree(
   }
   const failed = !treeCleared || branchCleanup.startsWith('failed');
   journalEvent(deps, failed ? 'teardown-failed' : 'member-worktree-torn-down', unit(batchId), {
+    ...context,
     cleanup: t.cleanup,
     branch_cleanup: branchCleanup,
-    detail: t.detail,
-    worktree,
+    detail: treeCleared ? t.detail : `${t.detail} — ${TREE_LEFT_FOR_OPERATOR}`,
   });
   return treeCleared;
 }
@@ -4767,10 +4781,13 @@ export function reconcileStaleBlockedBatches(
 export function reconcileKeptWorktrees(deps: BatchDispatchDeps, now: Date): void {
   const state = deps.store.load();
   const fsExists = deps.fsExists ?? ((p: string) => fs.existsSync(p));
+  // #855: a `stopped`/`dissolved` batch's run whose teardown failed is a
+  // leftover too (`isLeftoverMemberRun`) — its ledger clears on the same
+  // evidence once the operator has dealt with it.
   const candidates = state.batches.filter(
     (b) =>
-      b.status === 'done' &&
-      (b.worktree !== null || b.member_worktree !== null || b.member_runs.some((r) => !r.torn_down))
+      (b.status === 'done' && (b.worktree !== null || b.member_worktree !== null)) ||
+      b.member_runs.some((r) => isLeftoverMemberRun(b, r))
   );
   if (candidates.length === 0) return;
 
@@ -4778,7 +4795,7 @@ export function reconcileKeptWorktrees(deps: BatchDispatchDeps, now: Date): void
     (b) =>
       (b.worktree !== null && b.pool_claimed) ||
       (b.member_worktree !== null && b.member_pool_claimed) ||
-      b.member_runs.some((r) => !r.torn_down && r.pool_claimed)
+      b.member_runs.some((r) => r.pool_claimed && isLeftoverMemberRun(b, r))
   );
   // One pool query per TICK, not per candidate — `worktree-pool status` is a
   // real subprocess (`npx ...`), and this reconcile is meant to be cheap.
@@ -4797,12 +4814,14 @@ export function reconcileKeptWorktrees(deps: BatchDispatchDeps, now: Date): void
   for (const batch of candidates) {
     const clears: Omit<Partial<BatchEntry>, 'id' | 'status'> = {};
     const clearedFields: string[] = [];
-    if (batch.worktree !== null && goneOrReturned(batch.worktree, batch.pool_claimed)) {
+    const done = batch.status === 'done';
+    if (done && batch.worktree !== null && goneOrReturned(batch.worktree, batch.pool_claimed)) {
       clears.worktree = null;
       clears.pool_claimed = false;
       clearedFields.push('worktree', 'pool_claimed');
     }
     if (
+      done &&
       batch.member_worktree !== null &&
       goneOrReturned(batch.member_worktree, batch.member_pool_claimed)
     ) {
@@ -4823,7 +4842,7 @@ export function reconcileKeptWorktrees(deps: BatchDispatchDeps, now: Date): void
     // to look at" pre-check runs out here, to decide whether entering the
     // lock is worth it at all; the real per-run evidence check re-reads
     // `member_runs` fresh, from the batch `withLock` reloads below.
-    const mightClearRuns = batch.member_runs.some((r) => !r.torn_down);
+    const mightClearRuns = batch.member_runs.some((r) => isLeftoverMemberRun(batch, r));
 
     if (clearedFields.length === 0 && !mightClearRuns) continue;
 
@@ -4832,11 +4851,11 @@ export function reconcileKeptWorktrees(deps: BatchDispatchDeps, now: Date): void
       const b = findBatch(s, batch.id);
       // Re-check under the lock: another tick, or an operator command, may
       // have already moved this batch or cleared the fields itself.
-      if (!b || b.status !== 'done') return { state: s, result: undefined };
+      if (!b || b.status !== batch.status) return { state: s, result: undefined };
       const runClears: Omit<Partial<BatchEntry>, 'id' | 'status'> = {};
       if (mightClearRuns) {
         const updatedRuns: MemberRun[] = b.member_runs.map((run) => {
-          if (run.torn_down) return run;
+          if (!isLeftoverMemberRun(b, run)) return run;
           if (!goneOrReturned(run.worktree, run.pool_claimed)) return run;
           clearedRunIssues.push(run.issue);
           return { ...run, torn_down: true };
@@ -5100,6 +5119,12 @@ function recordAnchorCloseFailed(
  * left on disk forever, since nothing else ever calls this for it.
  */
 function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
+  // #855: a kept batch's trees are the operator's — every teardown path reads
+  // the same persisted decision. Only its live agents are stopped.
+  if (findBatch(deps.store.load(), batchId)?.worktree_kept === true) {
+    teardownParallelRuns(deps, batchId, null);
+    return;
+  }
   // #677: the current member's worktree goes first — it is batch-owned
   // state on the same teardown path as the shared tree, and a blocked or
   // dissolved batch must not leak a member tree (its branch/fields are
@@ -5209,8 +5234,13 @@ function teardownRunTree(
   landed: boolean,
   now: Date
 ): void {
-  const cleared = teardownMemberTree(deps, batchId, runTree(run), landed);
+  const cleared = teardownMemberTree(deps, batchId, runTree(run), landed, run.issue);
   recordRunTeardown(deps, batchId, run.issue, cleared, now);
+}
+
+/** The one mapping from a member-tree teardown outcome to its run record (#855). */
+function teardownOutcomePatch(cleared: boolean, now: Date): Partial<MemberRun> {
+  return cleared ? { torn_down: true } : { teardown_failed_at: now.toISOString() };
 }
 
 /**
@@ -5230,13 +5260,7 @@ function recordRunTeardown(
   now: Date
 ): void {
   deps.store.withLock((s) => ({
-    state: patchRun(
-      s,
-      batchId,
-      issue,
-      cleared ? { torn_down: true } : { teardown_failed_at: now.toISOString() },
-      now
-    ),
+    state: patchRun(s, batchId, issue, teardownOutcomePatch(cleared, now), now),
     result: undefined,
   }));
 }
@@ -5456,7 +5480,7 @@ function spawnParallelMembers(
         reason: 'member-worktree-orphaned',
         detail: `batch left executing while member ${next.index}'s tree ${member.worktree} was prepared — tearing it down`,
       });
-      teardownMemberTree(deps, batchId, runTree(member), false);
+      teardownMemberTree(deps, batchId, runTree(member), false, next.issue);
     }
   }
 }
@@ -5936,8 +5960,7 @@ function settleParallelResume(
           // The serial rail's `teardownMemberWorktree` tore its tree down —
           // recorded as torn down only when that verifiably landed (#855).
           // No serial tree at all leaves the run live for `teardownBatch`.
-          ...(serialTeardown?.cleared === true ? { torn_down: true } : {}),
-          ...(serialTeardown?.cleared === false ? { teardown_failed_at: now.toISOString() } : {}),
+          ...(serialTeardown !== null ? teardownOutcomePatch(serialTeardown.cleared, now) : {}),
           ...(evicted ? { status: 'evicted' as const } : {}),
         },
         now
@@ -6010,18 +6033,17 @@ function teardownParallelRuns(
   for (const run of batch.member_runs) {
     if (run.torn_down) continue;
     stopMemberAgent(deps, batchId, run.issue, now);
-    if (batch.worktree_kept || run.teardown_failed_at !== null) continue;
+    if (run.teardown_failed_at !== null) continue;
     const landed = run.status === 'landed';
-    deps.store.withLock((s) => ({
-      state: patchRun(
-        s,
-        batchId,
-        run.issue,
-        { status: landed ? 'landed' : 'evicted', gate_inconclusive: null },
-        now
-      ),
-      result: undefined,
-    }));
+    const status = landed ? 'landed' : 'evicted';
+    // Only when it changes: a kept batch's runs pass through here every tick.
+    if (run.status !== status || run.gate_inconclusive !== null) {
+      deps.store.withLock((s) => ({
+        state: patchRun(s, batchId, run.issue, { status, gate_inconclusive: null }, now),
+        result: undefined,
+      }));
+    }
+    if (batch.worktree_kept) continue;
     if (serial !== null && run.worktree === serial.path) {
       recordRunTeardown(deps, batchId, run.issue, serial.cleared, now);
     } else {
@@ -6256,7 +6278,9 @@ export function runBatchTick(
       // reconcile's decision — the same one `worktree`/`member_worktree`
       // get) and a run whose teardown already failed: `teardownParallelRuns`
       // leaves both on disk with `torn_down: false`, and marks a run torn
-      // down only after a teardown that verifiably landed.
+      // down only after a teardown that verifiably landed. Such a batch
+      // re-enters here every tick by design — cheap (a state read per run),
+      // and it stops any agent that is somehow still running in a kept tree.
       if (batch.member_runs.some((r) => !r.torn_down)) {
         try {
           teardownParallelRuns(deps, batch.id, null);

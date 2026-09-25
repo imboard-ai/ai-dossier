@@ -28,7 +28,8 @@ import {
   memberDispatchModeFor,
   // #834: same test-only rationale as the other direct `batch-dispatch`
   // imports here — isolates `member_runs[]` tests from the terminal-batch
-  // safety net that otherwise always runs first inside `runBatchTick`.
+  // safety net, which reaches a non-kept batch's runs first inside
+  // `runBatchTick` (a kept batch's it leaves alone, #855).
   reconcileKeptWorktrees,
   reconcileStaleBlockedBatches,
   tailMembersRefusal,
@@ -4913,6 +4914,31 @@ function keptWorktreeReconcileHarness() {
   };
 }
 
+/**
+ * Any teardown-shaped argv — removal, pool return, or a cleanup that could
+ * discard work. `\breturn\b` catches `worktree-pool ... return --path ...`
+ * (review finding, #834: an earlier copy omitted it). Match it against
+ * `${file} ${args}` so a bare `rm` is caught too (#855).
+ */
+const DESTRUCTIVE_ARGV =
+  /\bremove\b|\breturn\b|\brm\b|\bclean\b|\breset\b|\bprune\b|\bgc\b|\bcheckout\b/;
+
+type KeptWorktreeHarness = ReturnType<typeof keptWorktreeReconcileHarness>;
+
+/** A realistic member tree (under `<repoDir>/worktrees`) so `isSafeWorktree` accepts it. */
+function realMemberTree(h: KeptWorktreeHarness, issue: number): string {
+  return path.join(h.store.dir, 'worktrees', `b-kept-${issue}`);
+}
+
+/** A cooperative `exec`: `git` succeeds, `rev-parse --show-toplevel` answers the harness repo root. */
+function cooperativeGit(h: KeptWorktreeHarness): ExecFn {
+  return (file, args) => {
+    if (file !== 'git') return null;
+    if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return h.store.dir;
+    return '';
+  };
+}
+
 describe("#791: reconcileKeptWorktrees clears a done batch's kept-worktree ledger fields on definitive evidence", () => {
   it('clears `worktree`/`pool_claimed` once the path no longer exists on disk', () => {
     const h = keptWorktreeReconcileHarness();
@@ -4998,12 +5024,8 @@ describe("#791: reconcileKeptWorktrees clears a done batch's kept-worktree ledge
     h.patch({ status: 'done', worktree: '/pool/worktree', pool_claimed: true });
     h.setExec(() => JSON.stringify({ worktrees: [] }));
     h.tick();
-    // `\breturn\b` catches a `worktree-pool ... return --path ...` call
-    // (review finding, #834: this denylist omitted it, so an injected pool
-    // return would have slipped through undetected).
-    const DESTRUCTIVE = /\bremove\b|\bgc\b|\bclean\b|\breset\b|\bcheckout\b|\bprune\b|\breturn\b/;
     for (const call of h.execCalls) {
-      expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
+      expect(`${call.file} ${call.args.join(' ')}`).not.toMatch(DESTRUCTIVE_ARGV);
     }
     expect(h.execCalls.some((c) => c.args.includes('status'))).toBe(true);
   });
@@ -5209,15 +5231,12 @@ describe("#834: reconcileKeptWorktrees clears a done batch's live member_runs[] 
     expect(h.batch()?.member_worktree).toBeNull();
     expect(h.batch()?.member_runs?.[0].torn_down).toBe(true);
 
-    // `\breturn\b` catches a `worktree-pool ... return --path ...` call —
-    // the exact command a pool-claimed candidate (all three here are)
-    // could trigger if this function ever regressed into actually running
-    // a teardown instead of reading evidence for it (review finding #834:
-    // this denylist originally omitted `\breturn\b`, same gap fixed on the
-    // #791 sweep test above).
-    const DESTRUCTIVE = /\bremove\b|\bgc\b|\bclean\b|\breset\b|\bcheckout\b|\bprune\b|\breturn\b/;
+    // `DESTRUCTIVE_ARGV` includes `\breturn\b` — the exact command a
+    // pool-claimed candidate (all three here are) could trigger if this
+    // function ever regressed into actually running a teardown instead of
+    // reading evidence for it (review finding #834).
     for (const call of h.execCalls) {
-      expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
+      expect(`${call.file} ${call.args.join(' ')}`).not.toMatch(DESTRUCTIVE_ARGV);
     }
     // Only ONE pool-status query for the whole call, across all three candidate kinds.
     expect(h.execCalls.filter((c) => c.args.includes('status'))).toHaveLength(1);
@@ -5238,7 +5257,7 @@ describe("#834: reconcileKeptWorktrees clears a done batch's live member_runs[] 
     // this harness's deps use) so `runTeardown`'s `isSafeWorktree` check
     // accepts it, matching production shape rather than a rejected path.
     const h = keptWorktreeReconcileHarness();
-    const realPath = path.join(h.store.dir, 'worktrees', 'b-kept-901');
+    const realPath = realMemberTree(h, 901);
     h.patch({
       status: 'done',
       member_runs: [memberRun({ worktree: realPath, pool_claimed: false })],
@@ -5249,11 +5268,7 @@ describe("#834: reconcileKeptWorktrees clears a done batch's live member_runs[] 
     // (`member-worktree-torn-down`) rather than merely failing loudly,
     // which would also prove the point but less legibly. No real directory
     // is created — nothing here is actually removed from disk.
-    h.setExec((file, args) => {
-      if (file !== 'git') return null;
-      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return h.store.dir;
-      return '';
-    });
+    h.setExec(cooperativeGit(h));
     h.setFsExists(() => false);
 
     h.tick();
@@ -5279,35 +5294,18 @@ describe("#834: reconcileKeptWorktrees clears a done batch's live member_runs[] 
  * re-injected into `teardownParallelRuns`, then to PASS once restored.
  */
 describe("#855: the terminal-batch safety net keeps a kept batch's member_runs[] and never marks a failed teardown torn down", () => {
-  /** Any teardown-shaped argv — removal, pool return, or a cleanup that could discard work. */
-  const DESTRUCTIVE =
-    /\bremove\b|\breturn\b|\brm\b|\bclean\b|\breset\b|\bprune\b|\bgc\b|\bcheckout\b/;
-
-  /** A realistic member tree (under `<repoDir>/worktrees`) so `isSafeWorktree` accepts it. */
-  const realTree = (h: ReturnType<typeof keptWorktreeReconcileHarness>, issue: number): string =>
-    path.join(h.store.dir, 'worktrees', `b-kept-${issue}`);
-
-  /** `git` succeeds; `rev-parse --show-toplevel` answers the harness repo root. */
-  const cooperativeGit =
-    (h: ReturnType<typeof keptWorktreeReconcileHarness>): ExecFn =>
-    (file, args) => {
-      if (file !== 'git') return null;
-      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return h.store.dir;
-      return '';
-    };
-
   it('AC1: a kept (members-closed) done batch — no destructive command runs on any tick and torn_down stays false', () => {
     const h = keptWorktreeReconcileHarness();
     h.patch({
       status: 'done',
       worktree_kept: true,
       member_runs: [
-        memberRun({ issue: 901, worktree: realTree(h, 901), pool_claimed: false }),
+        memberRun({ issue: 901, worktree: realMemberTree(h, 901), pool_claimed: false }),
         memberRun({
           issue: 902,
           index: 2,
           branch: 'feature/902-x',
-          worktree: realTree(h, 902),
+          worktree: realMemberTree(h, 902),
           pool_claimed: true,
           status: 'evicted',
         }),
@@ -5322,7 +5320,7 @@ describe("#855: the terminal-batch safety net keeps a kept batch's member_runs[]
     h.tick();
 
     for (const call of h.execCalls) {
-      expect(`${call.file} ${call.args.join(' ')}`).not.toMatch(DESTRUCTIVE);
+      expect(`${call.file} ${call.args.join(' ')}`).not.toMatch(DESTRUCTIVE_ARGV);
     }
     const runs = h.batch()?.member_runs ?? [];
     expect(runs.map((r) => r.torn_down)).toEqual([false, false]);
@@ -5336,7 +5334,7 @@ describe("#855: the terminal-batch safety net keeps a kept batch's member_runs[]
 
   it('AC2: a failed teardown leaves torn_down=false, records teardown_failed_at, and journals exactly once across ticks (never re-attempted)', () => {
     const h = keptWorktreeReconcileHarness();
-    const tree = realTree(h, 901);
+    const tree = realMemberTree(h, 901);
     h.patch({
       status: 'stopped',
       member_runs: [memberRun({ issue: 901, worktree: tree, pool_claimed: false })],
@@ -5367,7 +5365,7 @@ describe("#855: the terminal-batch safety net keeps a kept batch's member_runs[]
 
   it('AC2 (pool): a pool return the pool does not confirm leaves torn_down=false', () => {
     const h = keptWorktreeReconcileHarness();
-    const tree = realTree(h, 901);
+    const tree = realMemberTree(h, 901);
     h.patch({
       status: 'dissolved',
       member_runs: [
@@ -5393,7 +5391,7 @@ describe("#855: the terminal-batch safety net keeps a kept batch's member_runs[]
 
   it('AC3: a normal non-kept terminal batch tears down exactly as before — worktree removed, torn_down=true', () => {
     const h = keptWorktreeReconcileHarness();
-    const tree = realTree(h, 901);
+    const tree = realMemberTree(h, 901);
     h.patch({
       status: 'stopped',
       member_runs: [
@@ -5421,6 +5419,55 @@ describe("#855: the terminal-batch safety net keeps a kept batch's member_runs[]
     expect(run?.teardown_failed_at).toBeNull();
     expect(h.events().filter((e) => e.event === 'member-worktree-torn-down')).toHaveLength(1);
     expect(h.events().filter((e) => e.event === 'teardown-failed')).toHaveLength(0);
+  });
+
+  it("a stopped batch's failed-teardown run is cleared by reconcileKeptWorktrees once the operator removed the tree — never by a second teardown", () => {
+    const h = keptWorktreeReconcileHarness();
+    const tree = realMemberTree(h, 901);
+    h.patch({
+      status: 'stopped',
+      member_runs: [
+        memberRun({ issue: 901, worktree: tree, teardown_failed_at: '2026-09-24T11:00:00.000Z' }),
+      ],
+    });
+    h.setExec(cooperativeGit(h));
+
+    h.setFsExists(() => true); // still there: nothing to clear, nothing attempted
+    h.tick();
+    expect(h.batch()?.member_runs?.[0].torn_down).toBe(false);
+
+    h.setFsExists(() => false); // the operator removed it
+    h.tick();
+
+    expect(h.batch()?.member_runs?.[0].torn_down).toBe(true);
+    for (const call of h.execCalls) {
+      expect(`${call.file} ${call.args.join(' ')}`).not.toMatch(DESTRUCTIVE_ARGV);
+    }
+    const cleared = h.events().filter((e) => e.event === 'kept-worktree-cleared');
+    expect(cleared).toHaveLength(1);
+    expect(String(cleared[0].detail ?? '')).toContain('member_runs[901]');
+  });
+
+  it('a failed teardown journal line names the member, the tree, and that it is left for the operator', () => {
+    const h = keptWorktreeReconcileHarness();
+    const tree = realMemberTree(h, 902);
+    h.patch({
+      status: 'dissolved',
+      member_runs: [memberRun({ issue: 902, index: 2, branch: 'feature/902-x', worktree: tree })],
+    });
+    h.setExec((file, args) =>
+      file === 'git' && args[0] === 'worktree' && args[1] === 'remove'
+        ? null
+        : cooperativeGit(h)(file, args, h.store.dir)
+    );
+    h.setFsExists(() => true);
+
+    h.tick();
+
+    const [failed] = h.events().filter((e) => e.event === 'teardown-failed');
+    expect(failed.issue).toBe(902);
+    expect(failed.worktree).toBe(tree);
+    expect(String(failed.detail)).toContain('NOT retried');
   });
 });
 

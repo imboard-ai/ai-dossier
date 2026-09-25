@@ -28,6 +28,7 @@ import {
   MEMBER_EXIT_KINDS,
   MEMBER_RUN_STATUSES,
   type MemberExitKind,
+  type MemberRun,
   type QueueEntry,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
@@ -37,6 +38,7 @@ import {
   type SlotEntry,
   type SlotRole,
   type SlotStatus,
+  TERMINAL_BATCH_STATUSES,
   TERMINAL_ISSUE_STATUSES,
 } from './types';
 
@@ -1205,10 +1207,15 @@ export function validateState(data: unknown): SchedState {
     agent_exits: batch.agent_exits ?? null,
     // 1.26.0 → 1.27.0 (#822): nobody was re-prompted before the rule existed.
     reprompted_members: batch.reprompted_members ?? [],
-    // 1.27.0 → 1.28.0 (#855): the keep decision was never persisted before;
-    // a pre-1.28.0 members-closed batch's member trees already went through
-    // the old terminal-batch safety net, so `false` loses nothing.
-    worktree_kept: batch.worktree_kept ?? false,
+    // 1.27.0 → 1.28.0 (#855): the keep decision was never persisted. Infer
+    // it, defaulting to KEEP: a `done` batch still carrying a live member run
+    // may be a members-closed batch the old engine reconciled after its
+    // safety net had already run that tick — its trees may hold unpushed
+    // work. A normally finished batch tore every run down, so at worst this
+    // leaves a crash-stranded tree for `sched status` to name.
+    worktree_kept:
+      batch.worktree_kept ??
+      (batch.status === 'done' && (batch.member_runs ?? []).some((run) => run.torn_down !== true)),
     // 1.23.0 → 1.24.0 (#810): no backfill — `evictions[].kind`/`branch` and
     // `failure_evidence.branch` are optional (absent = a pre-#810 `evicted`
     // record with no recorded branch), and `handed-back` is a new status no
@@ -1586,6 +1593,20 @@ export function appendEvictions(
  */
 export function distinctEvictions(records: readonly EvictionRecord[]): EvictionRecord[] {
   return partitionByIssue(new Set<number>(), records).appended;
+}
+
+/**
+ * Whether `run` is a member tree the scheduler has LEFT on disk for the
+ * operator (#834/#855): its batch is terminal, the run is not torn down, and
+ * nothing will tear it down any more — every run of a `done` batch (a kept
+ * batch's, or one a crash stranded), or a `stopped`/`dissolved` batch's run
+ * whose teardown already failed (a still-pending one of those is the
+ * terminal-batch safety net's next tick, not a leftover). One definition for
+ * `sched status`'s `kept-worktree` warning and `reconcileKeptWorktrees`.
+ */
+export function isLeftoverMemberRun(batch: BatchEntry, run: MemberRun): boolean {
+  if (run.torn_down || !TERMINAL_BATCH_STATUSES.has(batch.status)) return false;
+  return batch.status === 'done' || run.teardown_failed_at !== null;
 }
 
 /** The `eviction-duplicate` journal detail — one wording for both eviction rails (#595). */

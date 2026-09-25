@@ -810,7 +810,7 @@ failure rails: executing → dissolving (a member self-reports blocked)
   A run's `torn_down` is set only after its tree teardown verifiably landed (path gone
   and unlisted, or the pool reports it returned); a failed one records
   `teardown_failed_at`, journals `teardown-failed` once and is never retried — the tree
-  stays for the operator (#855). A kept batch's (`worktree_kept`) runs are never torn
+  stays for the operator and `sched status` names it (`kept-worktree`) (#855). A kept batch's (`worktree_kept`) runs are never torn
   down by the scheduler.
 - **Serial mode: members run `member-cycle` one fresh agent at a time — each in its OWN
   worktree** on its OWN branch `batch/<id>-m<n>-<issue>` (#677, RFC-0001 §J.3), cut off
@@ -1456,7 +1456,8 @@ after-the-fact recovery, not a missing-data bug.
   (`{ issue, milestone_at, reprompted_at }` records; `[]` backfilled).
   Schema 1.28.0 (#855): `BatchEntry` gains `worktree_kept` (the members-closed keep
   decision, persisted; `false` backfilled) and `MemberRun` gains `teardown_failed_at`
-  (`null` backfilled).
+  (`null` backfilled). A 1.27.0 `done` batch still carrying a live member run loads as
+  kept — the old engine never recorded the decision, so the default is to keep.
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -1494,7 +1495,11 @@ to skip the check entirely):
 - **`kept-worktree`** (#791) — a `done` batch whose `worktree` or `member_worktree` is
   still set in the ledger: the `members-closed` stale-blocked reconcile below
   intentionally leaves it in place (it may hold unpushed operator repair work), and
-  nothing else surfaced it until now. For each kept path, `sched status` reports:
+  nothing else surfaced it until now. Also (#834/#855) each parallel `member_runs[]`
+  tree left on disk: every not-torn-down run of a `done` batch (a kept batch's, or one
+  a crash stranded), and a run of any ended batch whose teardown FAILED
+  (`teardown_failed_at` — the message says so; the cause is in the `teardown-failed`
+  journal line, and the scheduler never retries it). For each kept path, `sched status` reports:
   whether it still exists on disk; whether it is pool-claimed (the claim is held
   indefinitely until returned); and, via two local, read-only `git` probes scoped to
   that worktree's own `HEAD` (`git --no-optional-locks status --porcelain`, `git log

@@ -489,14 +489,14 @@ export interface MemberRun {
    */
   gate_inconclusive: string | null;
   /**
-   * Whether this run's worktree has been torn down (pool-returned or removed).
-   * Set only AFTER the teardown, so a crash in between — or a batch ended by
-   * `sched stop`/`abandon`, which never runs a teardown — leaves `false`, and
-   * `teardownBatch`/the terminal-batch arm tear it down (idempotently) later.
-   * #855: set ONLY after a teardown that verifiably landed (the path is gone
-   * and unlisted, or the pool's self-check reports the entry returned) — or
-   * by `reconcileKeptWorktrees` on the same evidence. Never set for a kept
-   * batch's run ({@link BatchEntry.worktree_kept}).
+   * Whether this run's worktree is verifiably gone (#855): set only after a
+   * teardown that landed — the path is gone and unlisted, or the pool's
+   * self-check reports the entry returned — or by `reconcileKeptWorktrees`
+   * on the same evidence. `false` otherwise: a run not yet torn down (a crash
+   * in between, or a batch `sched stop`/`abandon` ended, is picked up by
+   * `teardownBatch`/the terminal-batch arm, idempotently), a KEPT batch's run
+   * ({@link BatchEntry.worktree_kept}, never torn down by the scheduler), or
+   * one whose teardown failed ({@link MemberRun.teardown_failed_at}).
    */
   torn_down: boolean;
   /**

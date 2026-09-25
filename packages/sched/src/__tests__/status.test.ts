@@ -1123,3 +1123,75 @@ describe('#790 status: the orphan anchor sweep rides the same --anchors opt-in',
     ]);
   });
 });
+
+describe('#855: a failed member teardown on any ended batch is a kept-worktree candidate', () => {
+  const RUN_WORKTREE = '/repo/worktrees/batch-b1-901';
+  const FAILED_AT = '2026-09-25T10:00:00.000Z';
+
+  /** `seeded()`'s batch `b1`, patched to `status` with one member run. */
+  function batchWithRun(
+    status: 'stopped' | 'dissolved' | 'done',
+    runPatch: Partial<MemberRun>
+  ): SchedState {
+    const state = seeded();
+    return {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id === 'b1' ? { ...b, status, member_runs: [memberRun(runPatch)] } : b
+      ),
+    };
+  }
+
+  it('a stopped/dissolved batch run whose teardown failed is a candidate carrying teardownFailedAt; a still-pending one is not', () => {
+    for (const status of ['stopped', 'dissolved'] as const) {
+      expect(
+        keptWorktreeCandidates(batchWithRun(status, { teardown_failed_at: FAILED_AT }))
+      ).toEqual([
+        {
+          batch: 'b1',
+          field: 'member_run',
+          path: RUN_WORKTREE,
+          poolClaimed: false,
+          issue: 901,
+          teardownFailedAt: FAILED_AT,
+        },
+      ]);
+      // Not failed yet: the terminal-batch safety net's next tick owns it.
+      expect(keptWorktreeCandidates(batchWithRun(status, {}))).toEqual([]);
+    }
+  });
+
+  it('the warning says the teardown FAILED and was not retried, and points at the journal line', () => {
+    const reader: KeptWorktreeReader = { exists: () => true, hasLocalWork: () => false };
+    const [w] = buildKeptWorktreeWarnings(
+      keptWorktreeCandidates(batchWithRun('stopped', { teardown_failed_at: FAILED_AT })),
+      reader
+    );
+    expect(w.message).toContain(`teardown of it FAILED at ${FAILED_AT}`);
+    expect(w.message).toContain('not retried');
+    expect(w.message).toContain('teardown-failed');
+    expect(w.message).not.toContain('is done');
+  });
+
+  it("a failed run is never in flight: it does not hide a done batch's candidate on the same path", () => {
+    let state = batchWithRun('done', {});
+    state = enqueueEntries(state, [{ issue: 301, mode: 'slot', batch: 'b2' }], NOW);
+    const withB2Failed: SchedState = {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id === 'b2'
+          ? {
+              ...b,
+              status: 'executing',
+              member_runs: [
+                memberRun({ issue: 301, branch: 'feature/301-y', teardown_failed_at: FAILED_AT }),
+              ],
+            }
+          : b
+      ),
+    };
+    expect(keptWorktreeCandidates(withB2Failed)).toEqual([
+      { batch: 'b1', field: 'member_run', path: RUN_WORKTREE, poolClaimed: false, issue: 901 },
+    ]);
+  });
+});
