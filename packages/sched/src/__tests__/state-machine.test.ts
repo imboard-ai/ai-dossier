@@ -484,6 +484,16 @@ describe('#810: parkMember / profile-carrying requeue', () => {
     const counted = JSON.parse(JSON.stringify(seeded()));
     counted.batches[0].agent_exits = { phase: 'tail', count: 2 };
     expect(validateState(counted).batches[0]?.agent_exits).toEqual({ phase: 'tail', count: 2 });
+    for (const bad of [
+      { phase: 'tail', count: '2' },
+      { phase: 'fix', count: 1 },
+      { phase: 'tail', count: 0 },
+      3,
+    ]) {
+      const corrupt = JSON.parse(JSON.stringify(seeded()));
+      corrupt.batches[0].agent_exits = bad;
+      expect(() => validateState(corrupt)).toThrow(/agent_exits/);
+    }
   });
 
   it('a 1.23.0 state loads and migrates to 1.24.0 unchanged (no backfill: kind/branch are optional)', () => {

@@ -42,10 +42,11 @@
  *                  `Members:` list as one line to `<anchor>.tail-members`
  *                  (so a test can read what each tail dispatch was told);
  *                  --tail-blocked=<reason> posts `batch-review blocked
- *                  reason=<reason>` instead and exits, and --tail-die exits 1
+ *                  reason=<reason>` instead and exits, and --tail-die=1 exits 1
  *                  having posted nothing (an unverified exit).
  *                - "batch report phase" → the REPORT agent. Posts
- *                  `batch-report done` on the anchor issue.
+ *                  `batch-report done` on the anchor issue; #832:
+ *                  --report-die=1 exits 1 having posted nothing instead.
  *                - anything else (the bounded fix agent) → exits 0 having
  *                  posted nothing; the engine verifies a fix by re-running
  *                  the (injected, fake) suite, never by trusting this exit.
@@ -155,6 +156,10 @@ process.stdin.on('end', () => {
       process.exit(0);
     }
     if (/batch report phase/i.test(input)) {
+      if (opt('report-die') !== undefined) {
+        console.error(`fake batch report: dying unverified for anchor #${issue}`);
+        process.exit(1);
+      }
       post('batch-report', 'done', {});
       console.log(`fake batch report: posted batch-report done for anchor #${issue}`);
       process.exit(0);

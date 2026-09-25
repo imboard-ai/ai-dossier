@@ -1591,8 +1591,9 @@ export function blockBatch(
   // #583: persist the reason on the entry itself — previously only the
   // journal/runstate milestone carried it, so `sched status` had nothing to
   // read back for a blocked batch (including the pre-existing #562 case).
-  // #832: a block ends the stretch the respawn counter measures — an operator
-  // who resumes the batch starts its tail/report agents with a fresh count.
+  // #832: a block ends the stretch the respawn counter measures — whatever
+  // takes the batch out of `blocked` next (e.g. `reconcileStaleBlockedBatches`'
+  // blocked → merged) starts its tail/report agents with a fresh count.
   const next = transitionBatch(
     state,
     batchId,

@@ -737,6 +737,21 @@ export function validateState(data: unknown): SchedState {
         `Batch ${batch.id}: member_dispatch must be "serial", "parallel", or null, got ${String(batch.member_dispatch)}`
       );
     }
+    // #832: absent (pre-1.26.0) and null are both "no exit counted". A
+    // malformed count would make the respawn cap misfire (`'2' + 1` is '21').
+    if (batch.agent_exits !== undefined && batch.agent_exits !== null) {
+      const exits = batch.agent_exits as { phase?: unknown; count?: unknown };
+      if (
+        typeof exits !== 'object' ||
+        (exits.phase !== 'tail' && exits.phase !== 'report') ||
+        !Number.isInteger(exits.count) ||
+        (exits.count as number) < 1
+      ) {
+        throw new Error(
+          `Batch ${batch.id}: agent_exits must be null or { phase: "tail"|"report", count: positive integer }, got ${JSON.stringify(batch.agent_exits)}`
+        );
+      }
+    }
     if (batch.member_runs !== undefined) {
       if (!Array.isArray(batch.member_runs)) {
         throw new Error(`Batch ${batch.id}: member_runs must be an array`);
@@ -1701,7 +1716,9 @@ export function recordedMemberBranch(batch: BatchEntry, issue: number): string |
  * #810: the members of `batch` whose work is validated and landed on its
  * integration branch — the work a dissolve must never throw away. The one
  * definition shared by the executing rail's dissolve suppression, the
- * `full` dissolve's block, and `sched status`.
+ * `full` dissolve's block, `sched status`, and (#832) the tail's `{members}`
+ * and its pre-dispatch check — a stopped, handed-back, evicted, parked or
+ * requeued member is never `validated`, so it is never integrated.
  */
 export function validatedMembersOf(state: SchedState, batch: BatchEntry): number[] {
   const exited = new Set(batch.evictions.map((e) => e.issue));

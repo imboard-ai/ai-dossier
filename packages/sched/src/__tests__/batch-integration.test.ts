@@ -27,6 +27,7 @@ import {
   memberBranchFor,
   memberDispatchModeFor,
   reconcileStaleBlockedBatches,
+  tailMembersRefusal,
 } from '../batch-dispatch';
 // Same rationale as the `evictMemberAndContinue` import above: a test-only
 // path builder, not part of the package's public `index.ts` surface.
@@ -4936,6 +4937,14 @@ describe('#832: the batch tail runs over landed members only, and a tail verdict
     const anchor = JSON.parse(fs.readFileSync(path.join(h.truthDir, '830.json'), 'utf8'));
     expect(anchor).toMatchObject({ phase: 'batch-review', status: 'blocked' });
     expect(anchor.keys.reason).toBe('members-mismatch');
+    // `sched status` names the evidence and the ways out.
+    const row = buildStatusReport(h.state(), h.config, 'proj').blocked.find(
+      (b) => b.status === 'batch-blocked'
+    );
+    expect(row?.reason).toMatch(
+      /^tail-blocked:members-mismatch; read the blocked milestone on anchor #830; landed member\(s\) #831 are on batch\/b-832-blocked-/
+    );
+    expect(row?.reason).toMatch(/sched abandon --batch b-832-blocked/);
   }, 60_000);
 
   it('AC3: a tail that keeps exiting unverified is respawned at most MAX_BATCH_AGENT_RESPAWNS times, then the batch blocks respawn-cap:tail', async () => {
@@ -4958,10 +4967,51 @@ describe('#832: the batch tail runs over landed members only, and a tail verdict
     // First dispatch + MAX_BATCH_AGENT_RESPAWNS respawns, then nothing more.
     expect(tailMemberLists(h, 840)).toHaveLength(MAX_BATCH_AGENT_RESPAWNS + 1);
     const events = h.deps.journal.read();
-    expect(
-      events.filter((e) => e.event === 'unit-failed' && e.reason === 'tail-agent-exited-unverified')
-    ).toHaveLength(MAX_BATCH_AGENT_RESPAWNS + 1);
+    const exits = events.filter(
+      (e) => e.event === 'unit-failed' && e.reason === 'tail-agent-exited-unverified'
+    );
+    expect(exits.map((e) => String(e.detail).split(' (log')[0])).toEqual([
+      'unverified exit 1/3',
+      'unverified exit 2/3',
+      'unverified exit 3/3',
+    ]);
     expect(events.filter((e) => e.event === 'batch-blocked')).toHaveLength(1);
+  }, 60_000);
+
+  it('AC3 (report phase): a report agent that keeps exiting unverified is capped too — the MERGED batch closes without its report instead of looping', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--report-die=1'], { maxSlots: 1 });
+    h.enqueue([{ issue: 861, mode: 'slot', batch: 'b-832-report', anchor: 860, tier: 'mid' }]);
+
+    h.tick(); // setup + member
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-832-report') as number)).toBe(true);
+    h.tick(); // validated → reviewing → tail
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-832-report') as number)).toBe(true);
+    h.tick(); // tail parks the PR
+    expect(findBatch(h.state(), 'b-832-report')?.status).toBe('awaiting-merge');
+    fs.writeFileSync(
+      path.join(h.truthDir, '9000.pr.json'),
+      JSON.stringify({ state: 'MERGED', mergedAt: new Date().toISOString() })
+    );
+    h.tick(); // merge accepted → deployed
+
+    await tickThroughAgents(h, 'b-832-report', 12);
+
+    // A block would not hold here: the PR is merged, so the stale-blocked
+    // reconcile walks a blocked batch straight back to `deployed` and the
+    // report agent respawns (observed while writing this test).
+    const batch = findBatch(h.state(), 'b-832-report');
+    expect(batch?.status).toBe('done');
+    expect(batch?.agent_exits).toBeNull();
+    const events = h.deps.journal.read();
+    expect(events.filter((e) => e.event === 'report-dispatched')).toHaveLength(
+      MAX_BATCH_AGENT_RESPAWNS + 1
+    );
+    expect(events.some((e) => e.event === 'batch-blocked')).toBe(false);
+    const failures = events.filter((e) => e.event === 'report-failed').map((e) => e.detail);
+    expect(failures).toHaveLength(MAX_BATCH_AGENT_RESPAWNS + 2);
+    expect(failures[0]).toMatch(/^unverified exit 1\/3 \(log: .*-report\.log\)$/);
+    expect(failures.at(-1)).toMatch(/^respawn-cap:report — batch closed without its report/);
   }, 60_000);
 
   it('a batch whose every member left before landing never dispatches a tail — it blocks no-landed-members', async () => {
@@ -4985,4 +5035,32 @@ describe('#832: the batch tail runs over landed members only, and a tail verdict
     expect(batch?.status).toBe('blocked');
     expect(batch?.blocked_reason).toBe('no-landed-members');
   }, 60_000);
+});
+
+describe("#832: tailMembersRefusal — the tail's members check, made before any agent is spent", () => {
+  const batchWith = (ranges: number[]) =>
+    ({
+      ranges: ranges.map((issue) => ({ issue, from: 'a', to: 'a', commits: ['a'], indices: [0] })),
+    }) as unknown as Parameters<typeof tailMembersRefusal>[0];
+
+  it('nothing landed is refused outright', () => {
+    expect(tailMembersRefusal(batchWith([]), [])).toBe('no-landed-members');
+  });
+
+  it('agreeing lists (or no recorded attribution) pass', () => {
+    expect(tailMembersRefusal(batchWith([1, 2]), [1, 2])).toBeNull();
+    expect(tailMembersRefusal(batchWith([]), [1, 2])).toBeNull();
+  });
+
+  it('a landed member with no boundary commit is refused', () => {
+    expect(tailMembersRefusal(batchWith([1]), [1, 2])).toBe(
+      'members-mismatch:no-boundary-commit-2'
+    );
+  });
+
+  it('a boundary commit for a member that did not land is refused (the tail checks both ways)', () => {
+    expect(tailMembersRefusal(batchWith([1, 2, 3]), [1])).toBe(
+      'members-mismatch:unlanded-boundary-commit-2,3'
+    );
+  });
 });

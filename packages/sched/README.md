@@ -31,7 +31,7 @@ ai-dossier sched start --once     # a single reconcile+refill tick (cron-style)
 ai-dossier sched status           # queue (+pr/cleanup), engine lease, slots, batches, blocked/failed; --anchors adds the ledger anchor sweep (#768) plus orphaned anchors no longer in state.batches (#790)
 ai-dossier sched pause            # prevent every new agent process; live units keep running
 ai-dossier sched resume
-ai-dossier sched stop --issue 42  # terminate one full-cycle agent and record it stopped (no recovery)
+ai-dossier sched stop --issue 42  # terminate one full-cycle agent (or stop a parked batch member, #832) and record it stopped (no recovery)
 ai-dossier sched stop --batch b1  # terminate every batch agent (incl. parallel members) and stop unfinished members
 ai-dossier sched abandon --issue 42 --reason "operator abort"
 ai-dossier sched abandon --batch b1   # dissolve; every unshipped member — parked and validated ones included — requeues as full-cycle
@@ -53,8 +53,10 @@ directory directly, reconstructing costs from the raw dispatch logs rather than
 `pause` prevents every new agent process, including escalation and same-tier recovery
 takeovers; it does not terminate agents that are already running. `stop --issue <n>` is the
 single-command stop path: it PID-start-safely terminates that issue's live agent, releases its
-slot, and records a terminal `stopped` outcome that will not recover or escalate. An active
-slot-mode member must instead be stopped through `stop --batch <id>`, which terminates every agent
+slot, and records a terminal `stopped` outcome that will not recover or escalate. A slot-mode
+member still in a live batch (pending, in work, or validated) must instead be stopped through
+`stop --batch <id>` — a parked (`handed-back`/`evicted`) member can be stopped on its own (#832) —
+which terminates every agent
 the batch holds (its own slot plus one per running parallel member, `batch:<id>#<issue>`) and atomically stops the batch and its unfinished members. `abandon` only records failure
 and releases the slot; it intentionally does not terminate its process.
 
@@ -247,7 +249,9 @@ where every mechanical supervision decision is code, not remembered prose:
    `reconcileRecovering`, held in `recovering` until `sched resume`) and every batch
    respawn wedge in `runBatchTick` (tail, member continuation, fix, report, and the
    `ready` → `claimAndSetup` claim — `runValidate`'s local suite run is unaffected) stop
-   respawning into the wall, which previously ignored `paused` entirely. `dispatch-
+   respawning into the wall, which previously ignored `paused` entirely. (Unverified
+   tail/report exits that are NOT API errors are capped separately since #832 —
+   `respawn-cap:tail`, or a merged batch closed without its report.) `dispatch-
    health.ts` is its own module (not `engine.ts`) specifically so it is shared by BOTH
    dispatch paths without `engine.ts` and `batch-dispatch.ts` importing each other.
    Batch dispatch logs (per-role, append-mode) are fenced to `log_offset_at_spawn`,
@@ -1008,36 +1012,53 @@ Dissolve never throws validated work away:
   aggregate-suite evictions (`evictMembers`, post-landing, member branch already deleted)
   still requeue full-cycle — now on the batch profile.
 
+State schema 1.24.0: `IssueStatus` gains `handed-back`; `EvictionRecord` gains optional
+`kind`/`branch`, `FailureEvidence` optional `branch`.
+
 ### The tail runs over landed members; a tail verdict is final (#832)
 
 - **Landed members only.** The tail (aggregate review + integrate/ship) is dispatched with
   `{members}` = the batch's validated members (`validatedMembersOf`), never the raw
   `batch.members`, which still lists members that were stopped, handed back, evicted,
-  parked or requeued. Before spawning, the engine makes the tail's own check for free:
-  no landed members blocks `no-landed-members`, and when `batch.ranges` records boundary
-  commits, a landed member with none blocks `members-mismatch:no-boundary-commit-<n>`.
-  Neither case spends a tail agent.
+  parked or requeued. Before claiming a slot the engine makes the tail's own two-way check
+  for free (`tailMembersRefusal`): no landed members blocks `no-landed-members`; when
+  `batch.ranges` records boundary commits, a landed member with none blocks
+  `members-mismatch:no-boundary-commit-<n>`, and a boundary commit for a member that did
+  not land blocks `members-mismatch:unlanded-boundary-commit-<n>`. No tail agent is spent.
 - **`sched stop --issue` on a parked member.** A `handed-back`/`evicted` member of a live
   batch can be stopped on its own (the operator's cleanup after a hand-back). It moves to
   `stopped` and keeps its exit record, so it stays out of the landed set. A member still in
   the batch (pending, in work, or validated) is still refused: use `sched stop --batch`.
-- **A blocked tail blocks the batch.** When the tail posts `batch-review` or `batch-ship
-  status=blocked`, and that milestone postdates this dispatch (tail and report slots now
-  stamp `spawned_at`), the engine releases the slot and blocks the batch
-  `tail-blocked:<reason>` once. It never reads that as an unverified exit to respawn. The
-  agent's milestone is already on the anchor, so the engine posts none. The report agent
-  works the same way (`batch-report blocked` → `report-blocked:<reason>`). The reason is
-  reduced to a slug.
+- **A blocked tail blocks the batch.** A `batch-review` or `batch-ship` `status=blocked`
+  milestone posted by THIS tail dispatch (fenced by the slot's `spawned_at`, which tail and
+  report spawns now stamp; a slot from an older engine with no `spawned_at` skips this
+  check and falls to the capped path below) releases the slot and blocks the batch
+  `tail-blocked:<reason>` once, in one lock. It is never read as an unverified exit to
+  respawn. The agent's milestone is already on the anchor, so the engine posts none. The
+  reason is reduced to a slug.
 - **Per-phase respawn cap.** `BatchEntry.agent_exits` (`{ phase: 'tail'|'report', count }`,
-  schema 1.26.0) counts unverified exits of the phase's agent. #629 API-error exits are not
-  counted: they have their own pause. After `MAX_BATCH_AGENT_RESPAWNS` (2) respawns, the next
-  unverified exit blocks the batch `respawn-cap:<phase>` instead of respawning.
-  Verified progress (review done, park, report done) clears the count, and so does any
-  block. Before #832, b-20260924-04's tail was respawned four times at the strong tier
-  (~375k tokens) until an operator stopped the batch.
+  schema 1.26.0) counts unverified exits of the phase's agent; each is journaled with its
+  position (`unverified exit 2/3 (log: …)`). #629 API-error exits are not counted: they
+  have their own pause. After `MAX_BATCH_AGENT_RESPAWNS` (2) respawns, the next unverified
+  exit ends the phase:
+  - **tail** → the batch blocks `respawn-cap:tail`;
+  - **report** → the batch (whose PR is already merged and deployed) closes
+    `deployed → reported → done` without its report, journaling `report-failed
+    respawn-cap:report — batch closed without its report`. A block would not hold there:
+    `reconcileStaleBlockedBatches` walks a blocked batch with a merged PR straight back to
+    `deployed`, and the report agent would respawn.
 
-State schema 1.24.0: `IssueStatus` gains `handed-back`; `EvictionRecord` gains optional
-`kind`/`branch`, `FailureEvidence` optional `branch`.
+  Verified progress (review done, park, report done) clears the count, and so does blocking
+  the batch. A spawn that finds the count already spent (a crash between the count and the
+  block) refuses instead of spawning. Before #832, b-20260924-04's tail was respawned four
+  times at the strong tier (~375k tokens) until an operator stopped the batch.
+- **Clearing these blocks.** `no-landed-members`, `members-mismatch:*`, `tail-blocked:*` and
+  `respawn-cap:tail` have no `sched resume --batch` recheck. `sched status` names the
+  evidence (the anchor's blocked milestone, or the tail log) and the exits: fix the cause
+  on the integration branch and open its PR by hand (`gh pr create --head <branch> --base
+  <base>`; once it merges, `reconcileStaleBlockedBatches` settles the batch), or `sched
+  abandon --batch <id>` (requeues the landed members full-cycle; for `no-landed-members`
+  there is nothing to lose).
 
 ## API surface
 
@@ -1211,6 +1232,9 @@ import {
   isMemberComplete, isMemberBlocked, // member milestone predicates (member-trail gated: mode=slot or batch=<id>, #677)
   isBatchTailParked,     // batch-ship awaiting-merge + pr= — the batch park signal
   isBatchPhaseDone,      // <phase> done on the anchor (batch-review/batch-report)
+  batchPhaseBlockedReason, // #832: slugged reason of a `<phase> blocked` anchor milestone posted by THIS dispatch; null otherwise
+  MAX_BATCH_AGENT_RESPAWNS, // #832: tail/report respawns after unverified exits before the phase ends (2)
+  type BatchAgentExits, type BatchAgentPhase, // #832: BatchEntry.agent_exits ({ phase: 'tail'|'report', count })
   batchOfUnit,           // batch:<id> → <id>; null for issue units or malformed ids
 } from '@ai-dossier/sched';
 ```

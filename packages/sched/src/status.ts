@@ -140,6 +140,38 @@ function dissolveRefusedNote(state: SchedState, batch: BatchEntry): string {
 }
 
 /**
+ * #832: what an operator can do with a batch whose TAIL stage blocked — the
+ * tail refused (`tail-blocked:<why>`, e.g. `members-mismatch`), the engine's
+ * own pre-dispatch check refused (`members-mismatch:*`, `no-landed-members`),
+ * or the tail kept exiting without a verdict (`respawn-cap:tail`). None of
+ * these has a `sched resume --batch` recheck; the validated members are still
+ * landed on the integration branch.
+ */
+function tailBlockNote(state: SchedState, batch: BatchEntry): string {
+  const reason = batch.blocked_reason ?? '';
+  if (reason === 'no-landed-members') {
+    return `; nothing is landed, so there is nothing to ship — \`ai-dossier sched abandon --batch ${batch.id}\` is safe`;
+  }
+  const tailReason =
+    reason.startsWith('tail-blocked:') ||
+    reason.startsWith('members-mismatch:') ||
+    reason === 'respawn-cap:tail';
+  if (!tailReason) return '';
+  const validated = validatedMembersOf(state, batch);
+  const branch = batch.branch ?? '<integration branch>';
+  const list = validated.length > 0 ? validated.map((m) => `#${m}`).join(',') : 'none';
+  const evidence =
+    reason === 'respawn-cap:tail'
+      ? 'the tail agent exited without a verdict every time — read its log (`sched stats --batch` names it)'
+      : `read the blocked milestone on anchor #${batch.anchor ?? '?'}`;
+  return (
+    `; ${evidence}; landed member(s) ${list} are on ${branch} — fix the cause, then ` +
+    `\`gh pr create --head ${branch} --base ${batch.base_branch}\` (the engine reconciles the batch once it merges), ` +
+    `or \`ai-dossier sched abandon --batch ${batch.id}\` (requeues them full-cycle)`
+  );
+}
+
+/**
  * #776: how long a pause, or a live slot without progress, may last before
  * `sched status` flags it. A day is long past every phase stall allowance
  * (30 min default, 90 min `implement`), so anything older is not "still
@@ -736,7 +768,7 @@ export function buildStatusReport(
   // fallback is defensive, not expected in practice.
   for (const batch of state.batches) {
     if (batch.status !== 'blocked') continue;
-    const validatedNote = dissolveRefusedNote(state, batch);
+    const validatedNote = dissolveRefusedNote(state, batch) || tailBlockNote(state, batch);
     blocked.push({
       issue: batch.anchor ?? batch.members[batch.executing_member - 1] ?? -1,
       status: 'batch-blocked',
