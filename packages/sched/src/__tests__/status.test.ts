@@ -21,6 +21,7 @@ import {
   transitionBatch,
   transitionIssue,
 } from '../index';
+import { memberRun } from './helpers/member-run';
 
 const NOW = new Date('2026-08-29T12:00:00Z');
 
@@ -926,23 +927,15 @@ describe('#791: kept-worktree warning', () => {
   });
 });
 
+// Revert-proof (manual, not re-run automatically): every test in this
+// describe block was confirmed to FAIL when `status.ts`'s `member_run`
+// handling (the `field: 'member_run'` branch in `keptWorktreeCandidates`,
+// and its handling in `keptWorktreeWarning`) was reverted to the pre-#834
+// state, then confirmed to PASS again once restored — done during review
+// (#834), not re-run automatically by this suite.
 describe('#834: kept-worktree candidates cover parallel-dispatch member_runs[]', () => {
   const RUN_WORKTREE = '/repo/worktrees/batch-b1-901';
   const POOL_REMEDY_PREFIX = `${POOL_BIN} ${POOL_ARGS_PREFIX.join(' ')} return --path`;
-
-  function memberRun(patch: Partial<MemberRun> = {}): MemberRun {
-    return {
-      issue: 901,
-      index: 1,
-      branch: 'feature/901-x',
-      worktree: RUN_WORKTREE,
-      pool_claimed: false,
-      status: 'landed',
-      gate_inconclusive: null,
-      torn_down: false,
-      ...patch,
-    };
-  }
 
   /** `seeded()`'s slot batch `b1`, patched to `done` with one live `member_runs[]` entry. */
   function doneBatchWithMemberRun(runPatch: Partial<MemberRun> = {}): SchedState {
@@ -1066,6 +1059,14 @@ describe('#834: kept-worktree candidates cover parallel-dispatch member_runs[]',
     for (const call of calls) {
       expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
     }
+
+    // Revert-proof (manual, not re-run automatically, same discipline as
+    // the #791 sweep test above): temporarily adding a
+    // `exec('git', ['worktree', 'remove', '--force', worktreePath])` call
+    // inside `defaultKeptWorktreeReader`'s `hasLocalWork` makes THIS test
+    // fail too — confirmed during review (#834), then reverted. Proves the
+    // member_run-inclusive sweep exercises the same read-only reader path,
+    // not a bypass.
   });
 });
 

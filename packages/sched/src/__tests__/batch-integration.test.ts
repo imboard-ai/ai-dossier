@@ -58,7 +58,6 @@ import {
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
   MAX_BATCH_AGENT_RESPAWNS,
-  type MemberRun,
   type PrTruth,
   parseMergedPrListJson,
   patchBatch,
@@ -85,6 +84,7 @@ import {
 } from '../index';
 import { writeApiErrorLog, writeToolUseLog } from './helpers/dispatch-log';
 import { stubGroundTruth } from './helpers/ground-truth';
+import { memberRun } from './helpers/member-run';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
 const FAKE_AGENT = path.join(FIXTURES, 'fake-agent.mjs');
@@ -4995,7 +4995,10 @@ describe("#791: reconcileKeptWorktrees clears a done batch's kept-worktree ledge
     h.patch({ status: 'done', worktree: '/pool/worktree', pool_claimed: true });
     h.setExec(() => JSON.stringify({ worktrees: [] }));
     h.tick();
-    const DESTRUCTIVE = /\bremove\b|\bgc\b|\bclean\b|\breset\b|\bcheckout\b|\bprune\b/;
+    // `\breturn\b` catches a `worktree-pool ... return --path ...` call
+    // (review finding, #834: this denylist omitted it, so an injected pool
+    // return would have slipped through undetected).
+    const DESTRUCTIVE = /\bremove\b|\bgc\b|\bclean\b|\breset\b|\bcheckout\b|\bprune\b|\breturn\b/;
     for (const call of h.execCalls) {
       expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
     }
@@ -5003,21 +5006,14 @@ describe("#791: reconcileKeptWorktrees clears a done batch's kept-worktree ledge
   });
 });
 
-/** #834: a minimal `MemberRun` for the `reconcileKeptWorktrees` harness below. */
-function memberRun(patch: Partial<MemberRun> = {}): MemberRun {
-  return {
-    issue: 901,
-    index: 1,
-    branch: 'feature/901-x',
-    worktree: '/repo/worktrees/batch-b-kept-901',
-    pool_claimed: false,
-    status: 'landed',
-    gate_inconclusive: null,
-    torn_down: false,
-    ...patch,
-  };
-}
-
+// Revert-proof (manual, not re-run automatically): every test in this
+// describe block was confirmed to FAIL when `reconcileKeptWorktrees`'s
+// `member_runs[]` branch (`batch-dispatch.ts`) was reverted to the
+// pre-#834 state, then confirmed to PASS again once restored — done during
+// review (#834), not re-run automatically by this suite. The two tests
+// with their own dedicated revert-proof comment below additionally prove a
+// SPECIFIC regression each (the lost-update race, and the widened
+// destructive-command denylist).
 describe("#834: reconcileKeptWorktrees clears a done batch's live member_runs[] entries on definitive evidence", () => {
   // Every test below calls `h.reconcileOnly()` (not `h.tick()`) — a full
   // tick also runs `runBatchTick`'s terminal-batch safety net, which reaches
@@ -5111,6 +5107,65 @@ describe("#834: reconcileKeptWorktrees clears a done batch's live member_runs[] 
     expect(runs.find((r) => r.issue === 902)?.torn_down).toBe(false);
   });
 
+  it("a concurrent write to a SIBLING member_runs[] entry, landing between this function's own outer snapshot and its lock, survives (review finding: the clearing pass must re-read member_runs fresh under the lock, not write back a stale full-array snapshot)", () => {
+    const h = keptWorktreeReconcileHarness();
+    const gone = memberRun({ issue: 901, worktree: '/gone/one', status: 'landed' });
+    const sibling = memberRun({ issue: 902, index: 2, worktree: '/still/there', status: 'landed' });
+    h.patch({ status: 'done', member_runs: [gone, sibling] });
+    h.setFsExists((p) => p !== '/gone/one');
+
+    // Simulate a concurrent writer (another tick, `sched attach-pr`, a
+    // different member's own `markTornDown`) mutating the SIBLING entry
+    // (902) in the window between this function's own outer, unlocked
+    // `deps.store.load()` and the `withLock` call it later makes for this
+    // batch. `store.load` is overridden only for the FIRST call (the
+    // function's own outer snapshot) — the write below goes through the
+    // REAL `store.withLock`, whose internal fresh read is untouched by this
+    // override, so the reconcile's own `withLock` callback sees it exactly
+    // as a second concurrent process would.
+    let loadCalls = 0;
+    const originalLoad = h.store.load.bind(h.store);
+    h.store.load = () => {
+      loadCalls++;
+      if (loadCalls !== 1) return originalLoad();
+      const snapshot = originalLoad();
+      h.store.withLock((s) => ({
+        state: {
+          ...s,
+          batches: s.batches.map((b) =>
+            b.id === 'b-kept'
+              ? {
+                  ...b,
+                  member_runs: b.member_runs.map((r) =>
+                    r.issue === 902 ? { ...r, status: 'evicted' as const } : r
+                  ),
+                }
+              : b
+          ),
+        },
+        result: undefined,
+      }));
+      return snapshot; // the STALE, pre-write snapshot — what this function's own outer read actually captured
+    };
+
+    h.reconcileOnly();
+
+    const runs = h.batch()?.member_runs ?? [];
+    // The target entry (901) still clears correctly...
+    expect(runs.find((r) => r.issue === 901)?.torn_down).toBe(true);
+    // ...and the concurrent writer's change to the SIBLING (902) survived —
+    // the pre-fix code would have overwritten it back to 'landed', since it
+    // wrote `updatedRuns` built from the stale outer snapshot wholesale.
+    expect(runs.find((r) => r.issue === 902)?.status).toBe('evicted');
+
+    // Revert-proof (manual, not re-run automatically): temporarily
+    // reverting the `updatedRuns` computation above to read from the outer
+    // `batch.member_runs` snapshot instead of the freshly-reloaded
+    // `b.member_runs` (i.e. re-introducing the lost-update this test
+    // exists to catch) makes the last assertion fail — confirmed during
+    // review (#834), then reverted.
+  });
+
   it('a non-done batch with a live member_runs[] entry is never touched', () => {
     const h = keptWorktreeReconcileHarness();
     h.patch({
@@ -5151,15 +5206,28 @@ describe("#834: reconcileKeptWorktrees clears a done batch's live member_runs[] 
     expect(h.batch()?.member_worktree).toBeNull();
     expect(h.batch()?.member_runs?.[0].torn_down).toBe(true);
 
-    const DESTRUCTIVE = /\bremove\b|\bgc\b|\bclean\b|\breset\b|\bcheckout\b|\bprune\b/;
+    // `\breturn\b` catches a `worktree-pool ... return --path ...` call —
+    // the exact command a pool-claimed candidate (all three here are)
+    // could trigger if this function ever regressed into actually running
+    // a teardown instead of reading evidence for it (review finding #834:
+    // this denylist originally omitted `\breturn\b`, same gap fixed on the
+    // #791 sweep test above).
+    const DESTRUCTIVE = /\bremove\b|\bgc\b|\bclean\b|\breset\b|\bcheckout\b|\bprune\b|\breturn\b/;
     for (const call of h.execCalls) {
       expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
     }
     // Only ONE pool-status query for the whole call, across all three candidate kinds.
     expect(h.execCalls.filter((c) => c.args.includes('status'))).toHaveLength(1);
+
+    // Revert-proof (manual, not re-run automatically, same discipline as
+    // the #791 sweep test in status.test.ts): temporarily adding
+    // `deps.exec(POOL_BIN, [...POOL_ARGS_PREFIX, 'return', '--path',
+    // run.worktree], deps.repoDir)` inside `reconcileKeptWorktrees`'s
+    // member_runs branch (right after `goneOrReturned` returns true) makes
+    // THIS test fail — confirmed during review (#834), then reverted.
   });
 
-  it("documents the real interaction: a full tick clears a done batch's live member_runs[] via the terminal-batch safety net BEFORE reconcileKeptWorktrees gets a chance, still ending torn_down=true with no destructive command from THIS function", () => {
+  it("documents the real interaction: a full tick clears a done batch's live member_runs[] via the terminal-batch safety net (#855) BEFORE reconcileKeptWorktrees gets a chance, via a REAL teardown attempt this test does not assert is non-destructive — that guarantee belongs to reconcileKeptWorktrees's own isolated tests above, not this one", () => {
     // Unlike every test above, this one goes through `h.tick()` (full
     // `runBatchTick`) on purpose — it is the scenario an operator's running
     // scheduler daemon actually produces. The worktree path is a REALISTIC

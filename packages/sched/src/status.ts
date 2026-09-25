@@ -426,11 +426,15 @@ export function buildStatusWarnings(
 // member dispatch — `BatchEntry.member_runs[]`, one entry per concurrently
 // running member, each with its own `worktree`/`pool_claimed`/`torn_down`.
 // `teardownParallelRuns` (batch-dispatch.ts) is the only thing that tears
-// these down, and it only ever runs inside `teardownBatch` — the exact
-// function the `members-closed` reconcile path skips via `keepWorktree`, so
-// a parallel batch's member run worktrees can leak the same way the serial
-// ones did before #791, just through a field the original candidate scan
-// never read.
+// these down; unlike `worktree`/`member_worktree`, it is NOT gated by the
+// `members-closed` reconcile's `keepWorktree` — a separate, generic
+// terminal-batch safety net (`runBatchTick`, added by #809) reaches it
+// regardless, every tick, and (per #855, filed but not fixed here) can mark
+// a run torn down even when its teardown attempt failed. This candidate
+// scan and `reconcileKeptWorktrees` below matter for the window before that
+// safety net's next tick, and for `sched status` reads while the scheduler
+// isn't ticking at all — the field the original #791 candidate scan never
+// read.
 
 /** One `done` batch's kept worktree (#791) — the shared batch worktree, the current (serial) member's own, or one concurrently-running (parallel, #809) member's own (#834). */
 export interface KeptWorktreeCandidate {
