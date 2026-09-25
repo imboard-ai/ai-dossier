@@ -9,6 +9,7 @@ import {
   analyze,
   CheckUnavailableError,
   changedWorkspaceDeps,
+  compareVersions,
   discoverPackages,
   ESCAPE_LABEL,
   formatReport,
@@ -760,5 +761,176 @@ describe('formatReport — a pin-only violation says so', () => {
     expect(report).toContain('Repinned: @ai-dossier/sched');
     expect(report).not.toContain('source changed but');
     expect(report).toContain('cd cli && npm version patch --no-git-tag-version');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #826 — compare against the base-branch TIP, not only the merge base.
+//
+// A branch cut before another PR bumped the same package can pick a number the
+// tip already holds; the merge-base comparison alone calls that a valid bump.
+// ---------------------------------------------------------------------------
+
+describe('compareVersions', () => {
+  it('orders MAJOR.MINOR.PATCH numerically, not lexically', () => {
+    expect(compareVersions('0.10.0', '0.9.0')).toBeGreaterThan(0);
+    expect(compareVersions('0.62.0', '0.62.0')).toBe(0);
+    expect(compareVersions('0.62.0', '0.62.1')).toBeLessThan(0);
+    expect(compareVersions('2.0.0', '1.99.99')).toBeGreaterThan(0);
+  });
+
+  it('sorts a prerelease before its release', () => {
+    expect(compareVersions('1.0.0-rc.1', '1.0.0')).toBeLessThan(0);
+    expect(compareVersions('1.0.0-rc.2', '1.0.0-rc.10')).toBeLessThan(0);
+  });
+
+  it('throws on a non-semver version instead of calling it not-stale', () => {
+    expect(() => compareVersions('latest', '1.0.0')).toThrow(CheckUnavailableError);
+    expect(() => compareVersions('1.0.0', undefined)).toThrow(CheckUnavailableError);
+  });
+});
+
+describe('analyze — a bump the base-branch tip already holds is stale', () => {
+  const cli = { dir: 'cli', name: '@ai-dossier/cli', version: '0.62.0' };
+  const stale = (tipVersion, extra = {}) =>
+    analyze({
+      changedFiles: ['cli/src/a.ts'],
+      packages: [cli],
+      baseVersions: { cli: '0.60.0' },
+      tipVersions: { cli: tipVersion },
+      ...extra,
+    });
+
+  it('fails when the tip already has the same number (the #820/#821 shape)', () => {
+    const result = stale('0.62.0');
+    expect(result.violations).toHaveLength(1);
+    expect(result.violations[0]).toMatchObject({ kind: 'stale', tipVersion: '0.62.0' });
+  });
+
+  it('fails when the tip is already past the bump', () => {
+    expect(stale('0.63.0').violations[0].kind).toBe('stale');
+  });
+
+  it('passes when the bump is above the tip', () => {
+    expect(stale('0.61.0').violations).toEqual([]);
+  });
+
+  it('passes when the tip version is unknown (callers that predate #826)', () => {
+    const result = analyze({
+      changedFiles: ['cli/src/a.ts'],
+      packages: [cli],
+      baseVersions: { cli: '0.60.0' },
+    });
+    expect(result.violations).toEqual([]);
+  });
+
+  it('does not check an untouched package against the tip', () => {
+    const result = analyze({
+      changedFiles: ['README.md'],
+      packages: [cli],
+      baseVersions: { cli: '0.60.0' },
+      tipVersions: { cli: '0.99.0' },
+    });
+    expect(result.checked).toEqual([]);
+  });
+
+  it('keeps reporting an unbumped package as unbumped, not stale', () => {
+    const result = analyze({
+      changedFiles: ['cli/src/a.ts'],
+      packages: [cli],
+      baseVersions: { cli: '0.62.0' },
+      tipVersions: { cli: '0.62.0' },
+    });
+    expect(result.violations[0].kind).toBe('unbumped');
+  });
+
+  it('lets the escape label waive a stale bump and names it', () => {
+    const result = stale('0.62.0', { labels: [ESCAPE_LABEL] });
+    expect(result.skipped).toBe(true);
+    expect(formatReport(result)).toContain('not above 0.62.0 on the base-branch tip');
+  });
+
+  it('formats a stale violation with the tip version and a fix', () => {
+    const report = formatReport(stale('0.62.0'));
+    expect(report).toContain('STALE');
+    expect(report).toContain('the base-branch tip already has 0.62.0');
+    expect(report).toContain('bump @ai-dossier/cli above 0.62.0');
+    expect(report).toContain('Version-bump check FAILED.');
+  });
+});
+
+describe('run — tip comparison end to end', () => {
+  let repo;
+  const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+  const writeCli = (version, src) => {
+    writeFileSync(
+      join(repo, 'cli/package.json'),
+      `${JSON.stringify({ name: '@fixture/cli', version }, null, 2)}\n`
+    );
+    writeFileSync(join(repo, 'cli/src/index.js'), src);
+  };
+  const runIt = () => {
+    const out = [];
+    const code = run(['--repo-root', repo, '--base', 'main'], {
+      log: (m) => out.push(m),
+      error: (m) => out.push(m),
+    });
+    return { code, out: out.join('\n') };
+  };
+
+  beforeAll(() => {
+    repo = mkdtempSync(join(tmpdir(), 'version-bump-tip-'));
+    git('init', '-q', '-b', 'main');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'Test');
+    writeFileSync(
+      join(repo, 'package.json'),
+      `${JSON.stringify({ name: 'root', private: true, workspaces: ['cli'] }, null, 2)}\n`
+    );
+    mkdirSync(join(repo, 'cli/src'), { recursive: true });
+    writeCli('1.0.0', 'export const a = 1;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+
+    // This PR's branch is cut here...
+    git('checkout', '-q', '-b', 'feature');
+    git('checkout', '-q', 'main');
+    // ...then another PR bumps cli to 1.1.0 on main.
+    writeCli('1.1.0', 'export const a = 2;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'other PR: cli 1.1.0');
+    git('checkout', '-q', 'feature');
+  });
+
+  afterAll(() => {
+    if (repo) rmSync(repo, { recursive: true, force: true });
+  });
+
+  it('exits 1 when the branch bumps to a number main already holds', () => {
+    writeCli('1.1.0', 'export const a = 3;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'this PR: cli 1.1.0');
+    const { code, out } = runIt();
+    expect(code).toBe(1);
+    expect(out).toContain('STALE');
+    expect(out).toContain('the base-branch tip already has 1.1.0');
+  });
+
+  it('exits 0 once the branch bumps above the tip', () => {
+    writeCli('1.2.0', 'export const a = 3;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'this PR: cli 1.2.0');
+    const { code, out } = runIt();
+    expect(code).toBe(0);
+    expect(out).toContain('1.0.0 -> 1.2.0');
+  });
+
+  it('exits 2 (could not run) when a version is not semver, never 0', () => {
+    writeCli('banana', 'export const a = 3;\n');
+    git('add', '-A');
+    git('commit', '-qm', 'this PR: bad version');
+    const { code, out } = runIt();
+    expect(code).toBe(2);
+    expect(out).toContain('not semver');
   });
 });
