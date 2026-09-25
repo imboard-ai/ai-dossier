@@ -498,6 +498,47 @@ describe('#810: parkMember / profile-carrying requeue', () => {
     }
   });
 
+  it('#855: a 1.27.0 batch loads with worktree_kept=false and its runs with teardown_failed_at=null; malformed values are refused', () => {
+    const withRun = (): ReturnType<typeof seeded> => {
+      const state = JSON.parse(JSON.stringify(seeded()));
+      state.batches[0].member_runs = [
+        {
+          issue: state.batches[0].members[0],
+          index: 1,
+          branch: 'batch/b1-m1-x',
+          worktree: '/repo/worktrees/batch-b1-m1',
+          pool_claimed: false,
+          status: 'landed',
+          gate_inconclusive: null,
+          torn_down: false,
+          teardown_failed_at: null,
+        },
+      ];
+      return state;
+    };
+    const legacy = JSON.parse(JSON.stringify({ ...withRun(), schema_version: '1.27.0' }));
+    delete legacy.batches[0].worktree_kept;
+    delete legacy.batches[0].member_runs[0].teardown_failed_at;
+    const loaded = validateState(legacy);
+    expect(loaded.schema_version).toBe(SCHEMA_VERSION);
+    expect(loaded.batches[0]?.worktree_kept).toBe(false);
+    expect(loaded.batches[0]?.member_runs[0]?.teardown_failed_at).toBeNull();
+
+    const recorded = withRun();
+    recorded.batches[0].worktree_kept = true;
+    recorded.batches[0].member_runs[0].teardown_failed_at = '2026-09-25T10:00:00.000Z';
+    const round = validateState(JSON.parse(JSON.stringify(recorded)));
+    expect(round.batches[0]?.worktree_kept).toBe(true);
+    expect(round.batches[0]?.member_runs[0]?.teardown_failed_at).toBe('2026-09-25T10:00:00.000Z');
+
+    const badKept = JSON.parse(JSON.stringify(withRun()));
+    badKept.batches[0].worktree_kept = 'yes';
+    expect(() => validateState(badKept)).toThrow(/worktree_kept/);
+    const badFailedAt = JSON.parse(JSON.stringify(withRun()));
+    badFailedAt.batches[0].member_runs[0].teardown_failed_at = 'yesterday';
+    expect(() => validateState(badFailedAt)).toThrow(/member_runs/);
+  });
+
   it('#832: a 1.25.0 batch with no agent_exits loads with the respawn counter backfilled null', () => {
     const legacy = JSON.parse(JSON.stringify({ ...seeded(), schema_version: '1.25.0' }));
     delete legacy.batches[0].agent_exits;

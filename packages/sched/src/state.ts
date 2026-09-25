@@ -311,6 +311,7 @@ export function createBatch(
     member_runs: [],
     agent_exits: null,
     reprompted_members: [],
+    worktree_kept: false,
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -754,6 +755,9 @@ export function validateState(data: unknown): SchedState {
         );
       }
     }
+    if (batch.worktree_kept !== undefined && typeof batch.worktree_kept !== 'boolean') {
+      throw new Error(`Batch ${batch.id}: worktree_kept must be a boolean`);
+    }
     if (
       batch.reprompted_members !== undefined &&
       (!Array.isArray(batch.reprompted_members) ||
@@ -806,6 +810,9 @@ export function validateState(data: unknown): SchedState {
           worktree.includes('\n') ||
           (r.pool_claimed !== undefined && typeof r.pool_claimed !== 'boolean') ||
           (r.torn_down !== undefined && typeof r.torn_down !== 'boolean') ||
+          (r.teardown_failed_at !== undefined &&
+            r.teardown_failed_at !== null &&
+            !isIsoDateString(r.teardown_failed_at)) ||
           (r.gate_inconclusive !== undefined &&
             r.gate_inconclusive !== null &&
             typeof r.gate_inconclusive !== 'string') ||
@@ -1189,12 +1196,19 @@ export function validateState(data: unknown): SchedState {
       pool_claimed: run.pool_claimed ?? false,
       gate_inconclusive: run.gate_inconclusive ?? null,
       torn_down: run.torn_down ?? false,
+      // 1.27.0 → 1.28.0 (#855): no failed teardown was ever recorded — the
+      // old code marked a failed one torn down — so null is exact.
+      teardown_failed_at: run.teardown_failed_at ?? null,
     })),
     // 1.25.0 → 1.26.0 (#832): no tail/report exit was ever counted before
     // the respawn cap existed — `null` is exact, not a guess.
     agent_exits: batch.agent_exits ?? null,
     // 1.26.0 → 1.27.0 (#822): nobody was re-prompted before the rule existed.
     reprompted_members: batch.reprompted_members ?? [],
+    // 1.27.0 → 1.28.0 (#855): the keep decision was never persisted before;
+    // a pre-1.28.0 members-closed batch's member trees already went through
+    // the old terminal-batch safety net, so `false` loses nothing.
+    worktree_kept: batch.worktree_kept ?? false,
     // 1.23.0 → 1.24.0 (#810): no backfill — `evictions[].kind`/`branch` and
     // `failure_evidence.branch` are optional (absent = a pre-#810 `evicted`
     // record with no recorded branch), and `handed-back` is a new status no

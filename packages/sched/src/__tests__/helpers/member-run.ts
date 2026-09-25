@@ -18,6 +18,7 @@ export function memberRun(patch: Partial<MemberRun> = {}): MemberRun {
     status: 'landed',
     gate_inconclusive: null,
     torn_down: false,
+    teardown_failed_at: null,
     ...patch,
   };
 }
