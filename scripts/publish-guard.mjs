@@ -25,7 +25,11 @@
 //   version not on npm                        -> publish
 //   on npm, gitHead == HEAD                   -> skip (re-run of this commit)
 //   on npm, no release-relevant diff to HEAD  -> skip (unrelated merge)
-//   on npm, release-relevant diff to HEAD     -> collision (fail the job)
+//   on npm, release-relevant diff to HEAD     -> collision
+//
+// A collision is also what an unbumped source change merged under the
+// `no-release-needed` label produces: that source is on main and not on npm.
+// It stays red until the package is bumped — loud on purpose.
 //
 // Operating principle, shared with check-version-bumps.mjs: never FAIL OPEN.
 // Anything that leaves the answer unknown (an npm error that is not a 404, a
@@ -33,53 +37,83 @@
 // rather than skipping — a skip is exactly the silent outcome this prevents.
 //
 // Usage:
-//   node scripts/publish-guard.mjs --dir <package-dir> [--head <ref>] [--repo-root <dir>]
+//   node scripts/publish-guard.mjs --dir <package-dir> [--head <ref>]
+//                                  [--repo-root <dir>] [--defer-collision]
 //
 // When $GITHUB_OUTPUT is set, writes `skip=true|false` and
-// `collision=true|false` there. Exit codes: 0 = decided (publish, skip, or
-// collision — the workflow fails the job on collision after the other
-// packages are handled), 2 = the guard could not run.
+// `collision=true|false` there. Exit codes: 0 = publish or skip,
+// 1 = collision, 2 = the guard could not run. `--defer-collision` makes a
+// collision exit 0 (outputs still say `collision=true`) so the workflow can
+// publish the other packages first and fail the job in a final step.
 // ------------------------------------------------------------------
 
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 import {
   CheckUnavailableError,
   changedWorkspaceDeps,
+  git,
+  gitError,
   isReleaseRelevant,
+  SHORT_SHA_LENGTH,
   workspaceDepsAtRef,
 } from './check-version-bumps.mjs';
 
 /** How many differing paths to name in a collision message before truncating. */
 const MAX_LISTED_FILES = 10;
 
+/** npm's `gitHead` is always a full commit sha. */
+const FULL_SHA_RE = /^[0-9a-f]{40}$/;
+
+/** Attempts for an `npm view` that fails with something other than E404. */
+const NPM_LOOKUP_ATTEMPTS = 3;
+const NPM_LOOKUP_BACKOFF_MS = [5_000, 15_000];
+
+const short = (sha) => (typeof sha === 'string' ? sha.slice(0, SHORT_SHA_LENGTH) : String(sha));
+
+/**
+ * Collapse text that came from outside this repo (the npm registry, stderr) to
+ * one line with no `::`, so it can never be read by the Actions runner as a
+ * workflow command when printed in the privileged publish job.
+ */
+export function oneLine(text, max = 200) {
+  return String(text ?? '')
+    .replace(/\s+/g, ' ')
+    .replace(/::/g, ': :')
+    .trim()
+    .slice(0, max);
+}
+
 /**
  * Pure decision core.
  *
  * `published` is null when the exact version is not on npm, otherwise
  * `{ gitHead }`. `diff` is the release-relevant difference between that
- * gitHead and HEAD (`{ files, pins }`); it is only consulted when the version
- * is published from a different commit.
+ * gitHead and HEAD (`{ files, pins }`); it is required whenever the version
+ * was published from a different commit — deciding without it would have to
+ * guess, and guessing "skip" is the failure this guard exists to prevent.
  */
 export function decide({ published, headSha, diff }) {
   if (published === null) return { action: 'publish', reason: 'version-not-on-npm' };
 
   if (published.gitHead === headSha) return { action: 'skip', reason: 'same-commit' };
 
-  const files = diff?.files ?? [];
-  const pins = diff?.pins ?? [];
-  if (files.length === 0 && pins.length === 0) {
+  if (!Array.isArray(diff?.files) || !Array.isArray(diff?.pins)) {
+    throw new CheckUnavailableError(
+      `decide() needs the release diff between ${short(published.gitHead)} and ` +
+        `${short(headSha)} and was called without one.`
+    );
+  }
+  if (diff.files.length === 0 && diff.pins.length === 0) {
     return { action: 'skip', reason: 'no-release-relevant-change' };
   }
-  return { action: 'collision', reason: 'content-differs', files, pins };
+  return { action: 'collision', reason: 'content-differs', files: diff.files, pins: diff.pins };
 }
 
 /** Human-facing line(s) for a decision. Pure, so tests can assert on it. */
 export function formatDecision({ name, version, published, headSha, decision }) {
-  const short = (sha) => (typeof sha === 'string' ? sha.slice(0, 12) : String(sha));
   switch (decision.action) {
     case 'publish':
       return `${name}@${version} is not on npm — publishing.`;
@@ -88,12 +122,13 @@ export function formatDecision({ name, version, published, headSha, decision }) 
         ? `${name}@${version} already published from this commit (${short(headSha)}) — skipping (re-run).`
         : `${name}@${version} already published from ${short(published.gitHead)}; ` +
             `no release-relevant change since — skipping.`;
-    default: {
+    case 'collision': {
       const lines = [
         `${name}@${version} is already on npm, published from ${short(published.gitHead)}, ` +
-          `but this commit (${short(headSha)}) ships different release-relevant source.`,
-        'Skipping would merge this change without ever releasing it — most likely another PR ' +
-          'bumped this package to the same number and published first (#826).',
+          `but this commit (${short(headSha)}) ships different release-relevant source, so ` +
+          'that source is merged and NOT released.',
+        'Usual causes: another PR bumped this package to the same number and published first ' +
+          '(#826), or an unbumped source change merged under the `no-release-needed` label.',
       ];
       if (decision.files.length > 0) {
         const listed = decision.files.slice(0, MAX_LISTED_FILES).join(', ');
@@ -103,27 +138,17 @@ export function formatDecision({ name, version, published, headSha, decision }) 
       if (decision.pins.length > 0) lines.push(`  Repinned: ${decision.pins.join(', ')}`);
       lines.push(
         `  Fix: open a PR bumping ${name} past ${version} (npm version patch --no-git-tag-version ` +
-          'in its directory); its merge publishes the unreleased change.'
+          'in its directory); its merge publishes the unreleased change. Every publish run ' +
+          'fails this way until then.'
       );
       return lines.join('\n');
     }
+    default:
+      throw new Error(`unknown decision action '${decision.action}'`);
   }
 }
 
 // ---------------------------------------------------------------- IO ---------
-
-function git(args, cwd) {
-  return execFileSync('git', args, {
-    cwd,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-}
-
-function errText(err) {
-  const stderr = (err?.stderr ?? '').toString().trim();
-  return (stderr || err?.message || String(err)).split('\n').join(' | ');
-}
 
 /**
  * Parse `npm view <name>@<version> version gitHead --json` output.
@@ -134,44 +159,42 @@ function errText(err) {
  * each would otherwise have to be guessed as "publish" or "skip".
  */
 export function parseNpmView({ status, stdout, stderr }, spec) {
+  const stderrLine = oneLine(stderr.trim().split('\n')[0]);
   let parsed;
   try {
     parsed = stdout.trim() ? JSON.parse(stdout) : undefined;
   } catch (err) {
     throw new CheckUnavailableError(
-      `npm view ${spec} printed output that is not JSON (${err.message}).\n` +
-        `  stderr: ${stderr.trim().split('\n')[0] ?? ''}`
+      `npm view ${spec} printed output that is not JSON (${oneLine(err.message)}).\n` +
+        `  stderr: ${stderrLine}`
     );
   }
 
   if (parsed?.error) {
     if (parsed.error.code === 'E404') return null;
     throw new CheckUnavailableError(
-      `npm view ${spec} failed (${parsed.error.code}: ${parsed.error.summary}).\n` +
+      `npm view ${spec} failed (${oneLine(parsed.error.code)}: ${oneLine(parsed.error.summary)}).\n` +
         '  Fix: re-run the workflow once the registry is reachable; the guard will not guess.'
     );
   }
   if (status !== 0 || parsed === undefined) {
     throw new CheckUnavailableError(
-      `npm view ${spec} exited ${status} without a recognisable answer.\n` +
-        `  stderr: ${stderr.trim().split('\n')[0] ?? ''}`
+      `npm view ${spec} exited ${status} without a recognisable answer.\n  stderr: ${stderrLine}`
     );
   }
 
   const gitHead = typeof parsed === 'object' ? parsed.gitHead : undefined;
-  if (typeof gitHead !== 'string' || !/^[0-9a-f]{40}$/.test(gitHead)) {
+  if (typeof gitHead !== 'string' || !FULL_SHA_RE.test(gitHead)) {
     throw new CheckUnavailableError(
-      `${spec} is on npm but has no usable gitHead (${JSON.stringify(gitHead)}), so the guard ` +
-        'cannot tell whether it was built from this source.\n' +
+      `${spec} is on npm but has no usable gitHead (${oneLine(JSON.stringify(gitHead))}), so the ` +
+        'guard cannot tell whether it was built from this source.\n' +
         '  Fix: bump the version so this commit publishes under a fresh number.'
     );
   }
   return { gitHead };
 }
 
-/** Real npm lookup. `--prefer-online` sidesteps a stale local packument cache. */
-export function npmLookup(name, version) {
-  const spec = `${name}@${version}`;
+function npmViewOnce(spec) {
   try {
     const stdout = execFileSync(
       'npm',
@@ -192,6 +215,32 @@ export function npmLookup(name, version) {
   }
 }
 
+const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Real npm lookup. `--prefer-online` sidesteps a stale local packument cache.
+ * An answer that is not E404 and not a clean hit is retried with backoff (a
+ * registry blip would otherwise halt every later package), then rethrown —
+ * the retries narrow the window, they never turn "unknown" into "publish".
+ */
+export function npmLookup(
+  name,
+  version,
+  { view = npmViewOnce, sleep = sleepSync, log = console.error } = {}
+) {
+  const spec = `${name}@${version}`;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return view(spec);
+    } catch (err) {
+      if (!(err instanceof CheckUnavailableError) || attempt >= NPM_LOOKUP_ATTEMPTS) throw err;
+      const wait = NPM_LOOKUP_BACKOFF_MS[attempt - 1] ?? NPM_LOOKUP_BACKOFF_MS.at(-1);
+      log(`npm lookup for ${spec} failed (attempt ${attempt}): ${oneLine(err.message)}; retrying`);
+      sleep(wait);
+    }
+  }
+}
+
 /** Make sure `sha` is a commit in this clone, fetching it once if needed. */
 function ensureCommit(repoRoot, sha) {
   const present = () => {
@@ -208,7 +257,7 @@ function ensureCommit(repoRoot, sha) {
   } catch (err) {
     throw new CheckUnavailableError(
       `the published gitHead ${sha} is not in this clone and could not be fetched ` +
-        `(${errText(err)}).\n` +
+        `(${oneLine(gitError(err))}).\n` +
         '  Fix: check out with fetch-depth: 0; if the commit is truly gone, bump the version.'
     );
   }
@@ -222,12 +271,12 @@ function ensureCommit(repoRoot, sha) {
  * src/bin files (tests excluded) and changed workspace-sibling pins —
  * exactly what check-version-bumps.mjs treats as needing a release.
  */
-export function releaseDiff(repoRoot, fromSha, toRef, dir) {
+export function releaseDiff(repoRoot, fromSha, toSha, dir) {
   let names;
   try {
-    names = git(['diff', '--name-only', fromSha, toRef, '--', dir], repoRoot);
+    names = git(['diff', '--name-only', fromSha, toSha, '--', dir], repoRoot);
   } catch (err) {
-    throw new CheckUnavailableError(`cannot diff ${fromSha}..${toRef} (${errText(err)}).`);
+    throw new CheckUnavailableError(`cannot diff ${fromSha}..${toSha} (${gitError(err)}).`);
   }
   const files = names
     .split('\n')
@@ -235,7 +284,7 @@ export function releaseDiff(repoRoot, fromSha, toRef, dir) {
     .filter((f) => f && isReleaseRelevant(f, dir));
 
   const fromPins = workspaceDepsAtRef(repoRoot, fromSha, dir);
-  const toPins = workspaceDepsAtRef(repoRoot, toRef, dir);
+  const toPins = workspaceDepsAtRef(repoRoot, toSha, dir);
   if (fromPins === null) {
     throw new CheckUnavailableError(
       `${dir}/package.json does not exist at the published commit ${fromSha}, so the ` +
@@ -246,10 +295,34 @@ export function releaseDiff(repoRoot, fromSha, toRef, dir) {
   return { files, pins: changedWorkspaceDeps(fromPins, toPins ?? {}) };
 }
 
+/**
+ * The package's name and version at `sha` — read from the commit, not the
+ * working tree, so `--head` decides both what is looked up on npm and what is
+ * diffed.
+ */
+function readPackageAt(repoRoot, sha, dir) {
+  let pkg;
+  try {
+    pkg = JSON.parse(git(['show', `${sha}:${dir}/package.json`], repoRoot));
+  } catch (err) {
+    throw new CheckUnavailableError(
+      `cannot read ${dir}/package.json at ${short(sha)} (${oneLine(gitError(err))}).`
+    );
+  }
+  if (!pkg.name || !pkg.version) {
+    throw new CheckUnavailableError(`${dir}/package.json at ${short(sha)} has no name/version.`);
+  }
+  return pkg;
+}
+
 function parseArgs(argv) {
-  const opts = { dir: null, head: 'HEAD', repoRoot: process.cwd() };
+  const opts = { dir: null, head: 'HEAD', repoRoot: process.cwd(), deferCollision: false };
   const takesValue = { '--dir': 'dir', '--head': 'head', '--repo-root': 'repoRoot' };
   for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--defer-collision') {
+      opts.deferCollision = true;
+      continue;
+    }
     const key = takesValue[argv[i]];
     const next = argv[i + 1];
     if (!key) throw new CheckUnavailableError(`unrecognised argument '${argv[i]}'.`);
@@ -267,6 +340,33 @@ function parseArgs(argv) {
   return opts;
 }
 
+/** Decide for one package. Throws CheckUnavailableError when it cannot. */
+function evaluate({ repoRoot, dir, head }, lookup) {
+  let headSha;
+  try {
+    headSha = git(['rev-parse', `${head}^{commit}`], repoRoot);
+  } catch (err) {
+    throw new CheckUnavailableError(`cannot resolve --head '${head}' (${gitError(err)}).`);
+  }
+  const pkg = readPackageAt(repoRoot, headSha, dir);
+
+  const published = lookup(pkg.name, pkg.version);
+  let diff;
+  if (published !== null && published.gitHead !== headSha) {
+    ensureCommit(repoRoot, published.gitHead);
+    diff = releaseDiff(repoRoot, published.gitHead, headSha, dir);
+  }
+  const decision = decide({ published, headSha, diff });
+  const message = formatDecision({
+    name: pkg.name,
+    version: pkg.version,
+    published,
+    headSha,
+    decision,
+  });
+  return { pkg, decision, message };
+}
+
 export function run(
   argv,
   {
@@ -276,68 +376,31 @@ export function run(
     outputFile = process.env.GITHUB_OUTPUT,
   } = {}
 ) {
-  const writeOutputs = (skip, collision) => {
-    if (outputFile) appendFileSync(outputFile, `skip=${skip}\ncollision=${collision}\n`);
-  };
-
+  let dir = '(unknown)';
   try {
     const opts = parseArgs(argv);
-    const { repoRoot, dir } = opts;
+    dir = opts.dir;
+    const { pkg, decision, message } = evaluate(opts, lookup);
 
-    let pkg;
-    try {
-      pkg = JSON.parse(readFileSync(join(repoRoot, dir, 'package.json'), 'utf8'));
-    } catch (err) {
-      throw new CheckUnavailableError(`cannot read ${dir}/package.json (${err.message}).`);
+    const collision = decision.action === 'collision';
+    if (outputFile) {
+      appendFileSync(outputFile, `skip=${decision.action !== 'publish'}\ncollision=${collision}\n`);
     }
-    if (!pkg.name || !pkg.version) {
-      throw new CheckUnavailableError(`${dir}/package.json has no name/version.`);
-    }
-
-    let headSha;
-    try {
-      headSha = git(['rev-parse', `${opts.head}^{commit}`], repoRoot);
-    } catch (err) {
-      throw new CheckUnavailableError(`cannot resolve --head '${opts.head}' (${errText(err)}).`);
-    }
-
-    const published = lookup(pkg.name, pkg.version);
-    let diff;
-    if (published !== null && published.gitHead !== headSha) {
-      ensureCommit(repoRoot, published.gitHead);
-      diff = releaseDiff(repoRoot, published.gitHead, headSha, dir);
-    }
-
-    const decision = decide({ published, headSha, diff });
-    const message = formatDecision({
-      name: pkg.name,
-      version: pkg.version,
-      published,
-      headSha,
-      decision,
-    });
-
-    if (decision.action === 'collision') {
-      // `::error::` makes it an annotation on the run summary, not just a log line.
-      error(
-        `::error title=${pkg.name}@${pkg.version} version collision::${message.split('\n')[0]}`
-      );
-      error(message);
-      writeOutputs(true, true);
-    } else {
+    if (!collision) {
       log(message);
-      writeOutputs(decision.action === 'skip', false);
+      return 0;
     }
-    return 0;
+    // `::error::` makes it an annotation on the run summary, not just a log line.
+    error(`::error title=${pkg.name}@${pkg.version} version collision::${message.split('\n')[0]}`);
+    error(message);
+    return opts.deferCollision ? 0 : 1;
   } catch (err) {
-    if (err instanceof CheckUnavailableError) {
-      error(`Publish guard could not run: ${err.message}`);
-      return 2;
-    }
-    error(
-      'Publish guard could not run: unexpected error (this is a bug in ' +
-        `scripts/publish-guard.mjs).\n${err?.stack ?? String(err)}`
-    );
+    const known = err instanceof CheckUnavailableError;
+    const detail = known
+      ? err.message
+      : `unexpected error (this is a bug in scripts/publish-guard.mjs).\n${err?.stack ?? String(err)}`;
+    error(`::error title=publish-guard (${oneLine(dir)}) could not run::${oneLine(detail)}`);
+    error(`Publish guard for ${dir} could not run: ${detail}`);
     return 2;
   }
 }

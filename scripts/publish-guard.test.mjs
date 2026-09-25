@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { CheckUnavailableError } from './check-version-bumps.mjs';
-import { decide, formatDecision, parseNpmView, run } from './publish-guard.mjs';
+import { decide, formatDecision, npmLookup, oneLine, parseNpmView, run } from './publish-guard.mjs';
 
 const SCRIPT_PATH = fileURLToPath(new URL('./publish-guard.mjs', import.meta.url));
 const SHA_A = 'a'.repeat(40);
@@ -41,6 +41,12 @@ describe('decide', () => {
     expect(d.files).toEqual(['cli/src/a.ts']);
   });
 
+  it('refuses to decide without a release diff rather than defaulting to skip', () => {
+    expect(() => decide({ published: { gitHead: SHA_A }, headSha: SHA_B })).toThrow(
+      CheckUnavailableError
+    );
+  });
+
   it('reports a collision when only a workspace pin differs', () => {
     const d = decide({
       published: { gitHead: SHA_A },
@@ -68,6 +74,23 @@ describe('formatDecision', () => {
     expect(msg).toContain('Fix: open a PR bumping @ai-dossier/cli past 0.62.0');
   });
 
+  it('names the no-release-needed cause too, not only the two-PR race', () => {
+    const msg = formatDecision({
+      name: '@ai-dossier/cli',
+      version: '0.62.0',
+      published: { gitHead: SHA_A },
+      headSha: SHA_B,
+      decision: { action: 'collision', files: ['cli/src/a.ts'], pins: [] },
+    });
+    expect(msg).toContain('no-release-needed');
+  });
+
+  it('throws on an unknown action instead of reporting it as a collision', () => {
+    expect(() =>
+      formatDecision({ name: 'x', version: '1.0.0', headSha: SHA_A, decision: { action: 'nope' } })
+    ).toThrow(/unknown decision action/);
+  });
+
   it('says "re-run" for a same-commit skip', () => {
     const msg = formatDecision({
       name: '@ai-dossier/cli',
@@ -77,6 +100,49 @@ describe('formatDecision', () => {
       decision: { action: 'skip', reason: 'same-commit' },
     });
     expect(msg).toContain('re-run');
+  });
+});
+
+describe('oneLine', () => {
+  it('cannot emit a workflow command: newlines collapsed and :: broken', () => {
+    const out = oneLine('boom\n::error::injected');
+    expect(out).not.toContain('\n');
+    expect(out).not.toContain('::');
+  });
+});
+
+describe('npmLookup — retries an unknown answer, never turns it into publish', () => {
+  const quiet = { sleep: () => {}, log: () => {} };
+
+  it('retries a registry failure and returns the later answer', () => {
+    let calls = 0;
+    const view = () => {
+      calls += 1;
+      if (calls < 3) throw new CheckUnavailableError('ETIMEDOUT');
+      return { gitHead: SHA_A };
+    };
+    expect(npmLookup('@x/y', '1.0.0', { view, ...quiet })).toEqual({ gitHead: SHA_A });
+    expect(calls).toBe(3);
+  });
+
+  it('rethrows after the last attempt instead of returning null', () => {
+    let calls = 0;
+    const view = () => {
+      calls += 1;
+      throw new CheckUnavailableError('ETIMEDOUT');
+    };
+    expect(() => npmLookup('@x/y', '1.0.0', { view, ...quiet })).toThrow(CheckUnavailableError);
+    expect(calls).toBe(3);
+  });
+
+  it('does not retry a definite E404 answer', () => {
+    let calls = 0;
+    const view = () => {
+      calls += 1;
+      return null;
+    };
+    expect(npmLookup('@x/y', '1.0.0', { view, ...quiet })).toBeNull();
+    expect(calls).toBe(1);
   });
 });
 
@@ -151,11 +217,11 @@ describe('run — end to end against a real git repo', () => {
   };
 
   let outCount = 0;
-  const guard = ({ head, lookup }) => {
+  const guard = ({ head, lookup, extra = ['--defer-collision'] }) => {
     outCount += 1;
     const outputFile = join(outDir, `out-${outCount}`);
     const lines = [];
-    const code = run(['--repo-root', repo, '--dir', 'cli', '--head', head], {
+    const code = run(['--repo-root', repo, '--dir', 'cli', '--head', head, ...extra], {
       log: (m) => lines.push(m),
       error: (m) => lines.push(m),
       lookup,
@@ -193,7 +259,9 @@ describe('run — end to end against a real git repo', () => {
     unrelated = commit('docs only');
     writeFileSync(join(repo, 'cli/src/index.test.js'), 'test\n');
     testOnly = commit('test only');
-    git('checkout', '-q', loser);
+    // Leave the working tree somewhere unrelated: the guard must read the
+    // package at --head, never from the checkout.
+    git('checkout', '-q', '--detach', 'HEAD~3');
   });
 
   afterAll(() => {
@@ -203,17 +271,33 @@ describe('run — end to end against a real git repo', () => {
 
   it('reports a collision for the race loser and does not claim success silently', () => {
     const r = guard({ head: loser, lookup: publishedAt(winner) });
-    expect(r.code).toBe(0);
+    expect(r.code).toBe(0); // --defer-collision: the workflow fails the job at the end
     expect(r.outputs).toContain('collision=true');
     expect(r.outputs).toContain('skip=true');
     expect(r.out).toContain('::error title=@fixture/cli@1.1.0 version collision::');
     expect(r.out).toContain('Differs: cli/src/other.js');
   });
 
+  it('exits 1 on a collision when not deferred (direct callers cannot miss it)', () => {
+    const r = guard({ head: loser, lookup: publishedAt(winner), extra: [] });
+    expect(r.code).toBe(1);
+    expect(r.outputs).toContain('collision=true');
+  });
+
+  it('looks up the version at --head, not the checked-out version', () => {
+    let asked;
+    guard({
+      head: loser,
+      lookup: (name, version) => {
+        asked = `${name}@${version}`;
+        return null;
+      },
+    });
+    expect(asked).toBe('@fixture/cli@1.1.0');
+  });
+
   it('skips a re-run of the winning commit without a collision (idempotent)', () => {
-    git('checkout', '-q', winner);
     const r = guard({ head: winner, lookup: publishedAt(winner) });
-    git('checkout', '-q', loser);
     expect(r.code).toBe(0);
     expect(r.outputs).toContain('skip=true');
     expect(r.outputs).toContain('collision=false');
@@ -222,13 +306,11 @@ describe('run — end to end against a real git repo', () => {
 
   it('skips a later commit that changed nothing release-relevant for the package', () => {
     for (const head of [unrelated, testOnly]) {
-      git('checkout', '-q', head);
       const r = guard({ head, lookup: publishedAt(winner) });
       expect(r.code).toBe(0);
       expect(r.outputs).toContain('skip=true');
       expect(r.outputs).toContain('collision=false');
     }
-    git('checkout', '-q', loser);
   });
 
   it('publishes when the exact version is not on npm', () => {
@@ -247,7 +329,7 @@ describe('run — end to end against a real git repo', () => {
     });
     expect(r.code).toBe(2);
     expect(r.outputs).toBe('');
-    expect(r.out).toContain('could not run');
+    expect(r.out).toContain('::error title=publish-guard (cli) could not run::');
   });
 
   it('exits 2 when the published gitHead is not in the clone and cannot be fetched', () => {

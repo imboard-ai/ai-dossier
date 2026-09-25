@@ -6,11 +6,13 @@
 // release-relevant source but leaves its `package.json` version equal to
 // the version on the base branch.
 //
-// Why this exists: `publish-packages.yml` skips publishing a package whose
-// current version already exists on npm. That skip is correct, but it made
+// Why this exists: `publish-packages.yml` will not re-release a version that
+// already exists on npm. It used to skip such a package silently, which made
 // "merged" quietly stop meaning "released" — #442 (worktree-pool 0.5.2) and
-// #446 (cli 0.10.0) both merged unbumped and never reached npm. This guard
-// moves the signal to PR time, where it is still cheap to act on.
+// #446 (cli 0.10.0) both merged unbumped and never reached npm. Since #826 the
+// publish run fails instead when that version was built from different source
+// (`scripts/publish-guard.mjs`), but that is after the merge; this guard moves
+// the signal to PR time, where it is still cheap to act on.
 //
 // This script deliberately lives in `scripts/` rather than inside any
 // package's `src/`, so editing the guard never trips the guard.
@@ -94,8 +96,8 @@ export function changedWorkspaceDeps(before, after) {
 /** How many changed paths to list per violating package before truncating. */
 const MAX_LISTED_FILES = 5;
 
-/** Characters that make the merge-base sha readable in a log without being ambiguous. */
-const SHORT_SHA_LENGTH = 12;
+/** Characters that make a sha readable in a log without being ambiguous. */
+export const SHORT_SHA_LENGTH = 12;
 
 /** Paths that live under a release dir but never change published behaviour. */
 const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]sx?$/;
@@ -304,7 +306,7 @@ export function compareVersions(a, b) {
   if (!pa || !pb) {
     throw new CheckUnavailableError(
       `cannot order versions '${a}' and '${b}' — at least one is not semver.\n` +
-        '  Fix: use a plain MAJOR.MINOR.PATCH version in package.json.'
+        '  Fix: use a valid semver version (MAJOR.MINOR.PATCH[-prerelease]) in package.json.'
     );
   }
   for (let i = 1; i <= 3; i += 1) {
@@ -331,8 +333,15 @@ export function compareVersions(a, b) {
   return 0;
 }
 
+/** The next patch release above a semver version (`1.2.3` / `1.2.3-rc.1` -> `1.2.4`). */
+export function nextPatch(version) {
+  const m = SEMVER_RE.exec(version ?? '');
+  if (!m) return null;
+  return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+}
+
 /**
- * Pure decision core: given the changed paths, the packages at HEAD, and a
+ * Decision core: given the changed paths, the packages at HEAD, and a
  * lookup of each package's version on the base ref, decide what to report.
  *
  * `baseVersions[dir] === null` means the package.json does not exist on the
@@ -347,6 +356,9 @@ export function compareVersions(a, b) {
  * When the escape label is present the analysis still runs, so the report can
  * name exactly which packages the label waived instead of printing an opaque
  * "skipped".
+ *
+ * No IO, but not total: throws CheckUnavailableError when a version cannot be
+ * ordered against the tip (see compareVersions).
  */
 export function analyze({
   changedFiles,
@@ -378,7 +390,7 @@ export function analyze({
     const tipVersion = tipVersions[pkg.dir] ?? null;
     checked.push({ ...pkg, baseVersion, tipVersion, touched, pinChanges });
 
-    if (baseVersion !== null && baseVersion !== undefined && baseVersion === pkg.version) {
+    if (baseVersion === pkg.version) {
       violations.push({
         kind: 'unbumped',
         dir: pkg.dir,
@@ -446,6 +458,10 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
             : `version ${v.version} unchanged.`;
         lines.push(`  ${v.name} [${v.dir}] — ${v.touched.length} file(s) changed, ${why}`);
       }
+      lines.push(
+        'The next publish run will fail with a version collision for these packages until ' +
+          'they are bumped (scripts/publish-guard.mjs).'
+      );
       lines.push(`Remove the \`${ESCAPE_LABEL}\` label and bump if that was not intended.`);
     } else {
       lines.push('No publishable package needs a version bump for this change.');
@@ -486,11 +502,13 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
           'branch was cut.'
       );
       lines.push(
-        '  Publishing skips a version npm already has, so this change would merge ' +
-          'without being released.'
+        '  After merge npm would already have this number from different source, so the ' +
+          'publish run would fail with a version collision and this change would not be released.'
       );
       lines.push(`  Fix: merge the base branch, then bump ${v.name} above ${v.tipVersion}`);
-      lines.push(`       cd ${v.dir} && npm version minor --no-git-tag-version`);
+      lines.push(
+        `       cd ${v.dir} && npm version ${nextPatch(v.tipVersion) ?? 'patch'} --no-git-tag-version`
+      );
       lines.push('');
       continue;
     }
@@ -522,8 +540,9 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
     lines.push('');
   }
   lines.push(
-    'A package whose version is already on npm is silently skipped by the publish ' +
-      'workflow, so this change would merge without ever being released.'
+    'A package whose version is already on npm is not re-released: after merge the publish ' +
+      'workflow would fail with a version collision, and this change would stay unreleased ' +
+      'until a follow-up bump.'
   );
   lines.push(
     `If the change genuinely needs no release, apply the \`${ESCAPE_LABEL}\` label to this PR.`
@@ -534,7 +553,7 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
 
 // ---------------------------------------------------------------- CLI --------
 
-function git(args, cwd) {
+export function git(args, cwd) {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
@@ -543,7 +562,7 @@ function git(args, cwd) {
 }
 
 /** Best available one-line description of why a git invocation failed. */
-function gitError(err) {
+export function gitError(err) {
   const stderr = (err?.stderr ?? '').toString().trim();
   return (stderr || err?.message || String(err)).split('\n').join(' | ');
 }

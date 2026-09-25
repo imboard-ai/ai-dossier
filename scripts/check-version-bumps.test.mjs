@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   analyze,
@@ -861,6 +861,7 @@ describe('analyze — a bump the base-branch tip already holds is stale', () => 
 
 describe('run — tip comparison end to end', () => {
   let repo;
+  let forkPoint;
   const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
   const writeCli = (version, src) => {
     writeFileSync(
@@ -900,6 +901,12 @@ describe('run — tip comparison end to end', () => {
     git('add', '-A');
     git('commit', '-qm', 'other PR: cli 1.1.0');
     git('checkout', '-q', 'feature');
+    forkPoint = git('rev-parse', 'HEAD').trim();
+  });
+
+  // Each case commits on a known base, independent of the others' order.
+  beforeEach(() => {
+    git('reset', '-q', '--hard', forkPoint);
   });
 
   afterAll(() => {

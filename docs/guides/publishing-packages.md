@@ -76,8 +76,11 @@ When running the workflow manually:
 ### Enforced on Pull Requests
 
 CI's `version-bump` job fails a PR that changes a publishable package's `src/` or `bin/` without
-bumping that package's `package.json` version, because the publish workflow silently skips any
-version already on npm. Apply the `no-release-needed` label when a change truly needs no release.
+bumping that package's `package.json` version (or bumps it to a number the base-branch tip already
+holds), because the publish workflow never re-releases a version already on npm — since #826 it fails
+the run with a version collision (`scripts/publish-guard.mjs`) when that version was built from
+different source. Apply the `no-release-needed` label when a change truly needs no release; a
+labelled change to `src/`/`bin/` still fails the next publish run until the package is bumped.
 
 ### Manual Version Bumps
 
