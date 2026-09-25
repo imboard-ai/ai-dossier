@@ -162,8 +162,8 @@ export type OpenAnchorVerdict = Exclude<AnchorVerdict, { kind: 'anchor-closed' }
  * The verified shipping evidence for a member closed as completed, or the
  * reason it is not evidence. Only code that landed in `baseBranch` counts:
  * a PR of `repo` (the pinned project repository) MERGED into it — as the
- * close event's closer, or, for a hand close, as a closing reference — or a
- * commit reachable from it. A hand close (no linked
+ * close event's closer, or, for a hand close, as a closing reference merged
+ * after the member's last reopen (#799) — or a commit reachable from it. A hand close (no linked
  * closer), an unmerged or other-base PR, and an unverifiable commit are all
  * refusals — anyone who can close the issue could otherwise mint "shipped".
  */
@@ -179,16 +179,29 @@ export function shippingEvidence(
     // the base, names it as closed (`Closes #N` — GitHub parsed it, then did
     // not act: the imboard#4116 shape). A merge needs write access, so an
     // author's self-close alone still never counts.
-    const ref = truth.closingPrs.find(
+    const refs = truth.closingPrs.filter(
       (pr) =>
         pr.merged &&
         pr.baseRefName === baseBranch &&
         repo !== undefined &&
         pr.repo?.toLowerCase() === repo.toLowerCase()
     );
+    if (refs.length === 0) return { refused: 'closed-by-hand' };
+    // #799: a reference merged BEFORE the member's last reopen did not finish
+    // it — that is why it was reopened — so it cannot vouch for the later hand
+    // close. An unreadable reopen time, or an unreadable merge time after a
+    // reopen, is not evidence either way: fail closed.
+    const reopenedAt = truth.lastReopenedAt;
+    if (reopenedAt === undefined) return { refused: 'closed-by-hand-reopen-unreadable' };
+    const ref =
+      reopenedAt === null
+        ? refs[0]
+        : refs.find(
+            (pr) => pr.mergedAt !== null && Date.parse(pr.mergedAt) > Date.parse(reopenedAt)
+          );
     return ref !== undefined
       ? { shipped: `PR #${ref.number} (closing reference; issue closed by hand)` }
-      : { refused: 'closed-by-hand' };
+      : { refused: 'closed-by-hand-ref-predates-reopen' };
   }
   if (closer.kind === 'pr') {
     // A PR in ANOTHER repository can close this issue (`Fixes owner/repo#N`)

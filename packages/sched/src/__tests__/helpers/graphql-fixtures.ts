@@ -26,6 +26,7 @@ export function graphqlIssueResponse(opts: {
           stateReason: opts.stateReason ?? null,
           labels: { nodes: [], pageInfo: { hasNextPage: false } },
           timelineItems: { nodes: opts.closer !== undefined ? [{ closer: opts.closer }] : [] },
+          reopens: { nodes: [] },
           closedByPullRequestsReferences: { nodes: [] },
         },
       },
