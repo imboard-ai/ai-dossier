@@ -248,12 +248,44 @@ export interface MembersVerdictOptions {
   repo?: string;
 }
 
+/**
+ * The `repo`/`commitInBase` pair {@link shippingEvidence} needs, written out
+ * inline 4+ times across this file before this alias (#830). Named once so a
+ * new caller adds a field here instead of a fifth copy.
+ */
+export type ShippingCheckOptions = Pick<MembersVerdictOptions, 'repo' | 'commitInBase'>;
+
+/** {@link ShippingCheckOptions} plus the orphan sweep's own `expectedBaseBranch` override (#790). */
+export type OrphanShippingCheckOptions = ShippingCheckOptions & { expectedBaseBranch?: string };
+
 /** {@link readMembersShipping}'s answer: the GitHub-side half only, no ledger. */
 interface MembersShippingResult {
   reasons: string[];
   members: AnchorMemberReport[];
   /** The member whose read failed, stopping the reads; `null` when every read that ran succeeded. */
   unreachable: number | null;
+}
+
+/**
+ * The blank `AnchorMemberReport` skeleton shared by {@link membersShippedVerdict}'s
+ * early ledger-blocked return and {@link readMembersShipping}'s initial reports
+ * array (#830) — same five fields either way, before any GitHub read:
+ * `github` starts `'unknown'`, `state_reason`/`shipped_by` start `null`.
+ * `ledgerStatus` supplies each report's `ledger_status` display field only
+ * (never a disqualifier) — ledger-backed for the ledger-aware caller, always
+ * `null` for the ledger-less orphan path.
+ */
+function unreadMemberReports(
+  members: readonly number[],
+  ledgerStatus: (issue: number) => IssueStatus | null
+): AnchorMemberReport[] {
+  return members.map((issue) => ({
+    issue,
+    ledger_status: ledgerStatus(issue),
+    github: 'unknown',
+    state_reason: null,
+    shipped_by: null,
+  }));
 }
 
 /**
@@ -275,16 +307,10 @@ function readMembersShipping(
   members: readonly number[],
   read: IssueCloseReader,
   baseBranch: string,
-  opts: { exhaustive: boolean; repo?: string; commitInBase?: CommitInBase },
+  opts: { exhaustive: boolean } & ShippingCheckOptions,
   ledgerStatus: (issue: number) => IssueStatus | null
 ): MembersShippingResult {
-  const reports: AnchorMemberReport[] = members.map((issue) => ({
-    issue,
-    ledger_status: ledgerStatus(issue),
-    github: 'unknown',
-    state_reason: null,
-    shipped_by: null,
-  }));
+  const reports: AnchorMemberReport[] = unreadMemberReports(members, ledgerStatus);
   const reasons: string[] = [];
   let unreachable: number | null = null;
   for (const member of reports) {
@@ -342,15 +368,13 @@ export function membersShippedVerdict(
 ): OpenAnchorVerdict {
   const exhaustive = opts.exhaustive === true;
   const ledgerReasons = [...(opts.extraReasons ?? []), ...anchorLedgerBlockers(state, batch)];
+  const ledgerStatus = (issue: number) => findEntry(state, issue)?.status ?? null;
   if (ledgerReasons.length > 0 && !exhaustive) {
-    const members: AnchorMemberReport[] = batch.members.map((issue) => ({
-      issue,
-      ledger_status: findEntry(state, issue)?.status ?? null,
-      github: 'unknown',
-      state_reason: null,
-      shipped_by: null,
-    }));
-    return { kind: 'needs-operator', reasons: ledgerReasons, members };
+    return {
+      kind: 'needs-operator',
+      reasons: ledgerReasons,
+      members: unreadMemberReports(batch.members, ledgerStatus),
+    };
   }
 
   const gh = readMembersShipping(
@@ -358,20 +382,64 @@ export function membersShippedVerdict(
     read,
     batch.base_branch,
     { exhaustive, repo: opts.repo, commitInBase: opts.commitInBase },
-    (issue) => findEntry(state, issue)?.status ?? null
+    ledgerStatus
   );
-  const reasons = [...ledgerReasons, ...gh.reasons];
   // A known disqualifier outranks an unreachable read: whatever the missing
   // poll would have said, the batch is not closable on this pass.
-  if (reasons.length > 0) return { kind: 'needs-operator', reasons, members: gh.members };
+  return foldMembersVerdict(ledgerReasons, gh, {
+    needsOperator: 'needs-operator',
+    unknown: 'unknown',
+    closable: 'closable',
+  });
+}
+
+/**
+ * The verdict-kind vocabulary a {@link foldMembersVerdict} caller folds into —
+ * a named triple instead of three positional strings.
+ */
+interface FoldVerdictKinds<
+  NeedsOperator extends string,
+  Unknown extends string,
+  Closable extends string,
+> {
+  needsOperator: NeedsOperator;
+  unknown: Unknown;
+  closable: Closable;
+}
+
+/**
+ * The shared tail of {@link membersShippedVerdict} and
+ * {@link classifyOrphanAnchor} (#830): both fold `prefixReasons` (reasons
+ * already known before {@link readMembersShipping} ran — ledger blockers for
+ * one, the anchor's own handed-back check for the other) together with `gh`'s
+ * per-member reasons and unreachable-read signal into the SAME three-way
+ * verdict shape — differing only in which kind-name vocabulary each caller
+ * uses (`needs-operator`/`unknown`/`closable` vs the ledger-less orphan
+ * sweep's own `orphan-*` names, kept deliberately distinct — see
+ * {@link OrphanAnchorVerdict}).
+ */
+function foldMembersVerdict<
+  NeedsOperator extends string,
+  Unknown extends string,
+  Closable extends string,
+>(
+  prefixReasons: string[],
+  gh: MembersShippingResult,
+  kinds: FoldVerdictKinds<NeedsOperator, Unknown, Closable>
+):
+  | { kind: NeedsOperator; reasons: string[]; members: AnchorMemberReport[] }
+  | { kind: Unknown; reasons: string[]; members: AnchorMemberReport[] }
+  | { kind: Closable; reasons: string[]; members: AnchorMemberReport[] } {
+  const reasons = [...prefixReasons, ...gh.reasons];
+  if (reasons.length > 0) return { kind: kinds.needsOperator, reasons, members: gh.members };
   if (gh.unreachable !== null) {
     return {
-      kind: 'unknown',
+      kind: kinds.unknown,
       reasons: [`issue #${gh.unreachable} unreachable`],
       members: gh.members,
     };
   }
-  return { kind: 'closable', reasons: [], members: gh.members };
+  return { kind: kinds.closable, reasons: [], members: gh.members };
 }
 
 /** The anchor issue's own ground truth, shared by {@link classifyAnchor} and {@link classifyOrphanAnchor}. */
@@ -517,6 +585,38 @@ export interface AnchorReportItem {
 }
 
 /**
+ * The fail-closed sweep loop shared by {@link sweepAnchors} and
+ * {@link sweepOrphanAnchors} (#830): classify each candidate in order via
+ * `classify`, which returns `null` to SKIP a candidate entirely (both sweeps
+ * hit this on the same list-then-read race — the anchor closed between the
+ * list and this read). Once a classified verdict's `kind` is `unknownKind`,
+ * every LATER candidate is reported `abortedVerdict` WITHOUT calling
+ * `classify` again — GitHub being unreachable is not worth N more timeouts,
+ * and a partial outage must never look like "the rest are clean".
+ */
+function sweepFailClosed<
+  Candidate,
+  Verdict extends { kind: string; reasons: string[]; members: AnchorMemberReport[] },
+  Item,
+>(
+  candidates: readonly Candidate[],
+  unknownKind: Verdict['kind'],
+  abortedVerdict: Verdict,
+  classify: (candidate: Candidate) => Verdict | null,
+  toItem: (candidate: Candidate, verdict: Verdict) => Item
+): Item[] {
+  const items: Item[] = [];
+  let aborted = false;
+  for (const candidate of candidates) {
+    const verdict = aborted ? abortedVerdict : classify(candidate);
+    if (verdict === null) continue;
+    if (verdict.kind === unknownKind) aborted = true;
+    items.push(toItem(candidate, verdict));
+  }
+  return items;
+}
+
+/**
  * `sched status --anchors`' sweep (#768): every still-open anchor of a batch
  * that is no longer in flight, marked `closable` (the strict condition holds —
  * the engine will close it, within its 7-day window), `needs-operator`
@@ -528,26 +628,25 @@ export interface AnchorReportItem {
 export function sweepAnchors(
   state: SchedState,
   read: IssueCloseReader,
-  opts: { repo?: string; commitInBase?: CommitInBase } = {}
+  opts: ShippingCheckOptions = {}
 ): AnchorReportItem[] {
-  const items: AnchorReportItem[] = [];
-  let aborted = false;
-  for (const batch of openAnchorBatches(state, SWEEP_BATCH_STATUSES)) {
-    const verdict: AnchorVerdict = aborted
-      ? { kind: 'unknown', reasons: ['GitHub unreachable — sweep aborted'], members: [] }
-      : classifyAnchor(state, batch, read, { exhaustive: true, ...opts });
-    if (verdict.kind === 'anchor-closed') continue;
-    if (verdict.kind === 'unknown') aborted = true;
-    items.push({
+  return sweepFailClosed(
+    openAnchorBatches(state, SWEEP_BATCH_STATUSES),
+    'unknown',
+    { kind: 'unknown', reasons: ['GitHub unreachable — sweep aborted'], members: [] },
+    (batch) => {
+      const verdict = classifyAnchor(state, batch, read, { exhaustive: true, ...opts });
+      return verdict.kind === 'anchor-closed' ? null : verdict;
+    },
+    (batch, verdict) => ({
       batch: batch.id,
       anchor: batch.anchor,
       batch_status: batch.status,
       verdict: verdict.kind,
       reasons: verdict.reasons,
       members: verdict.members,
-    });
-  }
-  return items;
+    })
+  );
 }
 
 // --- #790: orphan anchors — batches dropped from `state.batches` entirely ---
@@ -572,8 +671,19 @@ export function sweepAnchors(
 const ORPHAN_MEMBER_RE = /^- \[[ xX]\] #(\d+)/gm;
 const ORPHAN_BASE_BRANCH_RE = /^base_branch:\s*(\S+)/m;
 
-/** The base branch `parseOrphanAnchorBody` falls back to, and `classifyOrphanAnchor` treats as the expected/project-standard base absent an `expectedBaseBranch` override — what `gate-issue` itself defaults to. */
-export const DEFAULT_ORPHAN_BASE_BRANCH = 'main';
+/**
+ * The base branch `parseOrphanAnchorBody` falls back to, and
+ * `classifyOrphanAnchor` treats as the expected/project-standard base absent
+ * an `expectedBaseBranch` override — what `gate-issue` itself defaults to.
+ * Named `DEFAULT_BASE_BRANCH`, not `DEFAULT_ORPHAN_BASE_BRANCH` (#830): it is
+ * this file's one project-wide default, not an orphan-sweep-specific one.
+ * `state.ts`'s `createBatch` has its own independent `?? 'main'` fallback for
+ * a fresh batch's `base_branch` — not repointed at this constant, because
+ * `state.ts` is imported BY this file (`anchor-close.ts` imports `findEntry`
+ * etc. from `./state`); importing this constant back into `state.ts` would
+ * create a cycle for one shared literal.
+ */
+export const DEFAULT_BASE_BRANCH = 'main';
 
 /** The largest issue number a GitHub GraphQL `Int!` variable accepts — a member number above this could never be a real issue, so it is dropped rather than sent to `read`. */
 const MAX_GITHUB_ISSUE_NUMBER = 2 ** 31 - 1;
@@ -624,7 +734,7 @@ export function parseOrphanAnchorBody(body: string): {
   const members = members_over_cap ? deduped.slice(0, ORPHAN_SWEEP_MAX_MEMBERS) : deduped;
   const rawBranch = ORPHAN_BASE_BRANCH_RE.exec(body)?.[1];
   const base_branch =
-    rawBranch !== undefined && SAFE_REF_RE.test(rawBranch) ? rawBranch : DEFAULT_ORPHAN_BASE_BRANCH;
+    rawBranch !== undefined && SAFE_REF_RE.test(rawBranch) ? rawBranch : DEFAULT_BASE_BRANCH;
   return { members, base_branch, members_over_cap };
 }
 
@@ -671,7 +781,7 @@ export type OrphanAnchorVerdict = {
 export function classifyOrphanAnchor(
   candidate: OrphanAnchorCandidate,
   read: IssueCloseReader,
-  opts: { repo?: string; commitInBase?: CommitInBase; expectedBaseBranch?: string } = {}
+  opts: OrphanShippingCheckOptions = {}
 ): OrphanAnchorVerdict | null {
   const ground = anchorGroundVerdict(read, candidate.anchor);
   if (ground.kind === 'anchor-closed') {
@@ -705,7 +815,7 @@ export function classifyOrphanAnchor(
   // `orphan-closable-candidate` — needs-operator, unconditionally, citing the
   // value, so a human confirms it rather than the sweep silently trusting an
   // editable issue field to pick which branch code must land on to count.
-  const expectedBase = opts.expectedBaseBranch ?? DEFAULT_ORPHAN_BASE_BRANCH;
+  const expectedBase = opts.expectedBaseBranch ?? DEFAULT_BASE_BRANCH;
   if (candidate.base_branch !== expectedBase) {
     return {
       kind: 'orphan-needs-operator',
@@ -721,18 +831,11 @@ export function classifyOrphanAnchor(
     { exhaustive: true, repo: opts.repo, commitInBase: opts.commitInBase },
     () => null
   );
-  const reasons = [...extraReasons, ...gh.reasons];
-  if (reasons.length > 0) {
-    return { kind: 'orphan-needs-operator', reasons, members: gh.members };
-  }
-  if (gh.unreachable !== null) {
-    return {
-      kind: 'orphan-unknown',
-      reasons: [`issue #${gh.unreachable} unreachable`],
-      members: gh.members,
-    };
-  }
-  return { kind: 'orphan-closable-candidate', reasons: [], members: gh.members };
+  return foldMembersVerdict(extraReasons, gh, {
+    needsOperator: 'orphan-needs-operator',
+    unknown: 'orphan-unknown',
+    closable: 'orphan-closable-candidate',
+  });
 }
 
 /** One open `batch-epic` anchor issue, as listed from GitHub. */
@@ -821,7 +924,7 @@ export function sweepOrphanAnchors(
   state: SchedState,
   list: OpenAnchorLister,
   read: IssueCloseReader,
-  opts: { repo?: string; commitInBase?: CommitInBase; expectedBaseBranch?: string } = {}
+  opts: OrphanShippingCheckOptions = {}
 ): OrphanAnchorSweepResult | null {
   const anchors = list();
   if (anchors === undefined) return null;
@@ -830,27 +933,26 @@ export function sweepOrphanAnchors(
   );
   const orphanCandidates = anchors.filter((issue) => !ledgerAnchors.has(issue.number));
   const truncated = orphanCandidates.length > ORPHAN_SWEEP_MAX_ANCHORS;
-  const items: OrphanAnchorReportItem[] = [];
-  let aborted = false;
-  for (const issue of orphanCandidates.slice(0, ORPHAN_SWEEP_MAX_ANCHORS)) {
-    const { members, base_branch, members_over_cap } = parseOrphanAnchorBody(issue.body);
-    const verdict: OrphanAnchorVerdict | null = aborted
-      ? { kind: 'orphan-unknown', reasons: ['GitHub unreachable — sweep aborted'], members: [] }
-      : classifyOrphanAnchor(
-          { anchor: issue.number, members, base_branch, members_over_cap },
-          read,
-          opts
-        );
-    if (verdict === null) continue; // closed between the list and this read — not an orphan
-    if (verdict.kind === 'orphan-unknown') aborted = true;
-    items.push({
+  const items = sweepFailClosed(
+    orphanCandidates.slice(0, ORPHAN_SWEEP_MAX_ANCHORS),
+    'orphan-unknown',
+    { kind: 'orphan-unknown', reasons: ['GitHub unreachable — sweep aborted'], members: [] },
+    (issue) => {
+      const { members, base_branch, members_over_cap } = parseOrphanAnchorBody(issue.body);
+      return classifyOrphanAnchor(
+        { anchor: issue.number, members, base_branch, members_over_cap },
+        read,
+        opts
+      );
+    },
+    (issue, verdict) => ({
       anchor: issue.number,
       title: issue.title,
       verdict: verdict.kind,
       reasons: verdict.reasons,
       members: verdict.members,
-    });
-  }
+    })
+  );
   return { items, truncated };
 }
 

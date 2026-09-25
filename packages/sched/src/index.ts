@@ -11,7 +11,7 @@ export {
   classifyAnchor,
   classifyOrphanAnchor,
   closeAnchor,
-  DEFAULT_ORPHAN_BASE_BRANCH,
+  DEFAULT_BASE_BRANCH,
   formatBatchStatus,
   type IssueCloseReader,
   type MembersVerdictOptions,

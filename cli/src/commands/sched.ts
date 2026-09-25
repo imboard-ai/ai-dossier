@@ -783,12 +783,32 @@ function keptWorktreeReaderFor(): KeptWorktreeReader {
   );
 }
 
+/**
+ * The row shape shared by {@link renderAnchorItem} and
+ * {@link renderOrphanAnchorItem} (#830): `<head> [<verdict>]<reasonsSuffix>`,
+ * then the members line. Each caller builds `reasonsSuffix` itself rather
+ * than this helper doing it — the ledger sweep's `reasons` are
+ * operator-controlled and printed as-is, while the orphan sweep's are
+ * sanitized (`renderValue`, #790 security review), and that distinction must
+ * not blur into one shared implementation.
+ */
+function renderAnchorRow(
+  head: string,
+  verdict: string,
+  reasonsSuffix: string,
+  members: AnchorMemberReport[]
+): string {
+  return `${head} [${verdict}]${reasonsSuffix}\n  members: ${members.map(renderAnchorMember).join(', ')}`;
+}
+
 /** One `== Open batch anchors ==` row (#768): the anchor, its verdict and why, then its members. */
 function renderAnchorItem(a: AnchorReportItem): string {
   const reasons = a.reasons.length > 0 ? ` — ${a.reasons.join(', ')}` : '';
-  return (
-    `#${a.anchor} (batch ${a.batch}, ${a.batch_status}) [${a.verdict}]${reasons}\n` +
-    `  members: ${a.members.map(renderAnchorMember).join(', ')}`
+  return renderAnchorRow(
+    `#${a.anchor} (batch ${a.batch}, ${a.batch_status})`,
+    a.verdict,
+    reasons,
+    a.members
   );
 }
 
@@ -805,10 +825,7 @@ function renderAnchorItem(a: AnchorReportItem): string {
  */
 function renderOrphanAnchorItem(a: OrphanAnchorReportItem): string {
   const reasons = a.reasons.length > 0 ? ` — ${a.reasons.map(renderValue).join(', ')}` : '';
-  return (
-    `#${a.anchor} "${renderValue(a.title)}" [${a.verdict}]${reasons}\n` +
-    `  members: ${a.members.map(renderAnchorMember).join(', ')}`
-  );
+  return renderAnchorRow(`#${a.anchor} "${renderValue(a.title)}"`, a.verdict, reasons, a.members);
 }
 
 /** `#4146 CLOSED/COMPLETED (ledger in-work)` — GitHub state beside the ledger's. */
