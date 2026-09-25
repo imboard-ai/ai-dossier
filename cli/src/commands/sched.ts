@@ -37,6 +37,7 @@ import {
   CorruptStateError,
   createExecFn,
   createExecGroundTruth,
+  createExecResumeSeeder,
   createExecRunFencer,
   createSpawnDeps,
   DEFAULT_BATCH_PRIORITY,
@@ -72,6 +73,7 @@ import {
   ORPHAN_SWEEP_MAX_ANCHORS,
   orphanAnchorListArgs,
   parseManifest,
+  pruneMemberBranches,
   readJsonl,
   recordTickFailure,
   reprioritizeBatch,
@@ -1903,12 +1905,14 @@ function registerAbandonSubcommand(cmd: Command): void {
           // JSON output below so `--json` can carry its result too, not
           // just the stderr line.
           const anchorOpen = warnIfAbandonedAnchorOpen(store, project, opts.batch, anchor);
+          const memberBranches = pruneAbandonedMemberBranches(store, project, opts.batch);
           if (opts.json) {
             console.log(
               JSON.stringify({
                 abandoned: `batch:${opts.batch}`,
                 requeued,
                 anchor_open: anchorOpen,
+                member_branches: memberBranches,
               })
             );
           } else {
@@ -2093,6 +2097,41 @@ function warnIfAbandonedAnchorOpen(
     })
   );
   return stillOpen;
+}
+
+/**
+ * #840: an abandoned batch is over — prune its member branches from origin
+ * (kept since landing for aggregate-suite parking), exactly as batch teardown
+ * does, keeping any a live queue entry still continues from. A write to
+ * origin, so only against the repository verified to BE this project's
+ * (never whatever the cwd is); best-effort, after the abandon committed.
+ */
+function pruneAbandonedMemberBranches(
+  store: SchedStore,
+  project: string,
+  batchId: string
+): { deleted: string[]; kept: string[]; failed: string[] } | null {
+  const exec = createExecFn(ANCHOR_SWEEP_TIMEOUT_MS, {
+    onError: (file, args, err) =>
+      process.stderr.write(`⚠ sched abandon: '${file} ${args.join(' ')}' failed: ${err.message}\n`),
+  });
+  if (resolveProjectRepo(project, exec) === null) return null;
+  const pruned = pruneMemberBranches(exec, process.cwd(), store.load(), batchId);
+  if (pruned === null) return null;
+  if (pruned.deleted.length + pruned.kept.length + pruned.failed.length > 0) {
+    new Journal(store.dir).append(
+      unitEvent(
+        pruned.failed.length === 0 ? 'member-branches-deleted' : 'teardown-failed',
+        `batch:${batchId}`,
+        {
+          detail:
+            `abandon: deleted=${pruned.deleted.join(',') || 'none'} kept=${pruned.kept.join(',') || 'none'}` +
+            (pruned.failed.length > 0 ? ` failed=${pruned.failed.join(',')}` : ''),
+        }
+      )
+    );
+  }
+  return pruned;
 }
 
 function registerStopSubcommand(cmd: Command): void {
@@ -2473,6 +2512,19 @@ function registerStartSubcommand(cmd: Command): void {
               onError: (file, args, err) =>
                 process.stderr.write(
                   `⚠ sched fence: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+                ),
+            }),
+            { repoDir: process.cwd() }
+          ),
+          // #840: a requeued parked batch member's first dispatch seeds its
+          // resume trail (a `setup done` milestone on its member branch) so the
+          // full-cycle gate resumes ON that branch. A write, so its own exec +
+          // diagnostic prefix, on the fence's budget (two short CLI calls).
+          resumeSeeder: createExecResumeSeeder(
+            createExecFn(FENCE_TIMEOUT_MS, {
+              onError: (file, args, err) =>
+                process.stderr.write(
+                  `⚠ sched resume-seed: '${file} ${args.join(' ')}' failed: ${err.message}\n`
                 ),
             }),
             { repoDir: process.cwd() }

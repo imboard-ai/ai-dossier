@@ -166,23 +166,31 @@ export interface FailureEvidence {
    * #810: the member branch holding the member's un-landed work, when it had
    * one (`batch/<id>-m<i>-<issue>`; the REMOTE copy survives teardown). A
    * full-cycle requeue of a parked member continues from this branch instead
-   * of starting from the base. Absent on records written before #810 and on
-   * post-landing evictions (the member branch was deleted when it landed).
+   * of starting from the base. Absent on records written before #810. Since
+   * #840 a LANDED member's branch also survives until its batch ships or
+   * dissolves, so a post-landing (aggregate-suite) eviction records it too.
    */
   branch?: string | null;
+  /**
+   * #840: the run id of the full-cycle RESUME trail the engine seeded for
+   * this entry (a `setup done` milestone on `branch`) at its first dispatch
+   * after a requeue. Set once; its presence is what stops a respawn from
+   * seeding again over the run's later progress. Absent until seeded.
+   */
+  resume_run?: string;
   at: string;
 }
 
 /**
- * #810: how a member left its batch before landing — also the two PARKED
- * issue statuses. `evicted` is a failure the ENGINE decided (unverified exit,
- * incremental-gate task-failed, landing conflict, worktree prep, or an
- * in-flight member of a dissolve) and counts toward the dissolve threshold;
- * `handed-back` is the MEMBER's own explicit terminal hand-back (a `blocked`
- * or `review partial` milestone it posted) — a valued outcome, never counted.
- * (Aggregate-suite attribution evictions — `evictMembers`, after landing —
- * revert the member's commits and still requeue it full-cycle: its member
- * branch was deleted when it landed, so there is no branch to park it on.)
+ * #810: how a member left its batch — also the two PARKED issue statuses.
+ * `evicted` is a failure the ENGINE decided (unverified exit, incremental-gate
+ * task-failed, landing conflict, worktree prep, an in-flight member of a
+ * dissolve, or — since #840 — an aggregate-suite attribution eviction after
+ * landing, whose member branch now outlives the landing) and counts toward
+ * the dissolve threshold; `handed-back` is the MEMBER's own explicit terminal
+ * hand-back (a `blocked` or `review partial` milestone it posted) — a valued
+ * outcome, never counted. (An aggregate-suite eviction whose member branch is
+ * gone from origin — a pre-#840 landing — still requeues full-cycle.)
  */
 export const MEMBER_EXIT_KINDS = ['evicted', 'handed-back'] as const;
 
@@ -1735,6 +1743,19 @@ export type JournalEventName =
   // together; only the evicted members requeue. Never `dissolved`.
   | 'batch-preserved'
   | 'batch-split'
+  // #840: a PR-conflict give-up with validated members — the landed members
+  // stay and the gate re-runs over them (`re-validating → validating`); only
+  // the unvalidated members were split off (`batch-split`).
+  | 'batch-regate'
+  // #840: batch teardown deleted its member branches (kept on origin from
+  // landing until the batch ships or dissolves) — and which it kept because a
+  // queue entry still continues from them.
+  | 'member-branches-deleted'
+  // #840: the engine seeded a requeued member's full-cycle RESUME trail — a
+  // `setup done` milestone on its recorded member branch, so the run's gate
+  // resumes at plan on that branch — or could not.
+  | 'resume-seeded'
+  | 'resume-seed-failed'
   // #562: the aggregate suite report was unreadable even after the one
   // fallback-runner retry — the batch blocks (no requeue, no revert) rather
   // than dissolving on an "unattributable" red suite that was never really

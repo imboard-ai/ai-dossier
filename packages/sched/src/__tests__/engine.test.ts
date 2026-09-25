@@ -481,6 +481,104 @@ describe('#810: a requeued parked batch member continues from its member branch'
   });
 });
 
+describe('#840 item 4: the ENGINE bases a requeued member on its recorded branch', () => {
+  /** Issue 840 requeued full-cycle out of batch b-840 (base `develop`), its work on its member branch. */
+  const requeuedMember = (h: ReturnType<typeof harness>, extra: Record<string, unknown> = {}) => {
+    h.enqueue([
+      { issue: 900, mode: 'slot', batch: 'b-840', anchor: 899, base_branch: 'develop' },
+      { issue: 840, mode: 'full', tier: 'mid' },
+    ]);
+    h.store.withLock((state) => ({
+      state: {
+        ...state,
+        entries: state.entries.map((e) =>
+          e.issue === 840
+            ? {
+                ...e,
+                failure_evidence: {
+                  batch: 'b-840',
+                  reason: 'suite-red-after-fix',
+                  failing_tests: [],
+                  attribution: 'overlap' as const,
+                  reverted_commits: ['abcdef1234567890abcdef1234567890abcdef12'],
+                  branch: 'batch/b-840-m1-840',
+                  at: new Date().toISOString(),
+                  ...extra,
+                },
+              }
+            : e
+        ),
+      },
+      result: null,
+    }));
+  };
+
+  it('seeds the resume trail (setup on the member branch) BEFORE the first spawn, once', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    const seeds: Array<{ issue: number; seed: unknown; spawnsBefore: number }> = [];
+    h.deps.resumeSeeder = (issue, seed) => {
+      seeds.push({ issue, seed, spawnsBefore: h.spawnCalls.length });
+      return { ok: true, run: 'r-840-5eed' };
+    };
+    requeuedMember(h);
+
+    h.tick();
+
+    expect(seeds).toEqual([
+      {
+        issue: 840,
+        seed: expect.objectContaining({
+          branch: 'batch/b-840-m1-840',
+          baseBranch: 'develop',
+          batch: 'b-840',
+        }),
+        spawnsBefore: 0,
+      },
+    ]);
+    const entry = h.state().entries.find((e) => e.issue === 840);
+    expect(entry?.failure_evidence?.resume_run).toBe('r-840-5eed');
+    expect(h.spawnCalls[0]?.prompt).toContain('r-840-5eed');
+    // #840 review: a post-landing eviction's reverted commits are named, so a
+    // rebase onto a base carrying their reverts does not silently drop them.
+    expect(h.spawnCalls[0]?.prompt).toContain('REVERTED');
+    expect(h.spawnCalls[0]?.prompt).toContain('abcdef123456');
+    expect(h.events().some((e) => e.event === 'resume-seeded')).toBe(true);
+  });
+
+  it('never re-seeds an entry whose trail was already seeded (a respawn resumes its own progress)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    let calls = 0;
+    h.deps.resumeSeeder = () => {
+      calls += 1;
+      return { ok: true, run: 'r-840-other' };
+    };
+    requeuedMember(h, { resume_run: 'r-840-5eed' });
+
+    h.tick();
+
+    expect(calls).toBe(0);
+    expect(h.spawnCalls).toHaveLength(1);
+  });
+
+  it('a failed seed is journaled and the dispatch still goes out (prompt fallback)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.deps.resumeSeeder = () => ({ ok: false, reason: 'gh down' });
+    requeuedMember(h);
+
+    h.tick();
+
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.spawnCalls[0]?.prompt).toContain('PRIOR WORK');
+    expect(h.events().find((e) => e.event === 'resume-seed-failed')?.detail).toContain('gh down');
+    expect(
+      h.state().entries.find((e) => e.issue === 840)?.failure_evidence?.resume_run
+    ).toBeUndefined();
+  });
+});
+
 describe('completion verification (AC2: an agent exiting is never proof of completion)', () => {
   it('exit + verified report-done milestone → complete; slot freed; entry done', () => {
     const h = harness();

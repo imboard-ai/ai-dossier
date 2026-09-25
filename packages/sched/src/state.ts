@@ -166,7 +166,11 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   shipping: ['awaiting-merge', 'dissolving', 'blocked', 'stopped'],
   'awaiting-merge': ['rebasing', 'merged', 'blocked', 'stopped'],
   rebasing: ['re-validating', 'dissolving', 'blocked', 'stopped'],
-  're-validating': ['shipping', 'dissolving', 'blocked', 'stopped'],
+  // → validating (#840): a clean rebase whose re-run suite came back red, with
+  // VALIDATED members landed — the gate re-runs over them (attribution /
+  // eviction on the ordinary rail) instead of splitting landed work into
+  // fresh half-batches. `handlePrConflict`.
+  're-validating': ['shipping', 'validating', 'dissolving', 'blocked', 'stopped'],
   merged: ['deployed', 'blocked', 'stopped'],
   deployed: ['reported', 'blocked', 'stopped'],
   reported: ['done', 'blocked', 'stopped'],
@@ -485,6 +489,13 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
       throw new Error(`${label}: failure_evidence.reason must be a string`);
     }
     validateMemberBranch(ev.branch, `${label}: failure_evidence.branch`);
+    // #840: the seeded resume run id reaches the cycle prompt — same bar.
+    if (
+      ev.resume_run !== undefined &&
+      (typeof ev.resume_run !== 'string' || !SAFE_REF_RE.test(ev.resume_run))
+    ) {
+      throw new Error(`${label}: failure_evidence.resume_run must be a plain run id`);
+    }
   }
   validateDedupMarker(
     entry,

@@ -985,14 +985,15 @@ A batch member that leaves its batch before landing is **parked**, never auto-re
   batch failure: its `evictions[]` record carries `kind: 'handed-back'` and it **never
   counts toward the dissolve threshold**. Journals `member-handed-back`.
 - **`evicted`** — an engine-decided failure (unverified exit, incremental-gate
-  `task-failed`, landing conflict, worktree prep). Counts toward the threshold. Journals
-  `unit-failed`.
+  `task-failed`, landing conflict, worktree prep, and — since #840 — an aggregate-suite
+  eviction after landing). Counts toward the threshold. Journals `unit-failed` (or
+  `member-evicted ... — parked on <branch>` for the post-landing case).
 
 Both keep `mode: slot` + `batch`, record the member branch (`evictions[].branch`,
 `failure_evidence.branch` — the pushed remote copy survives the member teardown) and stamp
 the batch's `dispatch_profile` onto the entry. Neither is runnable until an operator runs
-`sched requeue --issue <n>` (full-cycle on that profile; the cycle prompt gains a
-`PRIOR WORK` instruction to continue from the member branch) or `sched abandon --issue <n>`.
+`sched requeue --issue <n>` (full-cycle on that profile, based on the member branch — see
+below) or `sched abandon --issue <n>`.
 `sched status` lists them under `== Parked members ==` with reason, branch, profile and
 those exact commands (`parked_members` in `--json`).
 
@@ -1019,10 +1020,46 @@ Dissolve never throws validated work away:
   as before, except that in-flight members with a member branch are parked `evicted` and
   every requeue carries the batch's dispatch profile (`carryDispatchProfile: false` only
   for `dispatch-profile-missing:*`, where the profile itself is what broke).
-- Not changed: the `halved` PR-conflict split still re-batches its members, and
-  aggregate-suite evictions (`evictMembers`, post-landing, member branch already deleted)
-  still requeue full-cycle — now on the batch profile. Both, plus an engine-set requeue base,
-  are tracked in #840.
+- #840: a PR-conflict give-up (`handlePrConflict`: a recurred conflict, a conflicting or
+  failed rebase, a red suite after a clean rebase) never re-batches a validated member.
+  Validated members stay landed in the batch; only the unshipped, UNVALIDATED members with
+  no commits on the integration branch are split into half-batches (`batch-split`) and
+  trimmed out of it. A clean rebase with a red
+  suite re-runs the gate over the landed members (`re-validating → validating`,
+  `batch-regate`, `executing_member` pinned to the end — the shape of `sched resume
+  --batch`); anything else blocks `dissolve-refused:<reason>` (milestone `batch-ship`,
+  `validated=`; the recorded PR can be resolved by hand, or closed before `sched resume
+  --batch`). With no validated member it still dissolves into halves. **Library behaviour
+  only:** the engine does not yet route a CONFLICTING batch PR into `handlePrConflict`
+  (#867).
+
+#### Member branches live until the batch ends; a requeue resumes on them (#840)
+
+- A member's remote branch (`batch/<id>-m<n>-<issue>`) is **kept after it lands** — only
+  its tree and local branch go. `teardownBatch` (batch `done`, or dissolved) deletes the
+  batch's member branches from origin (`pruneMemberBranches`, one delete per ref,
+  `member-branches-deleted`), except any a NON-terminal queue entry's
+  `failure_evidence.branch` still names (a parked or branch-requeued member's work);
+  `sched abandon --batch` prunes the same way (verified project repo only). A kept batch
+  (`worktree_kept`) keeps them.
+- An aggregate-suite eviction (`evictMembers`, after `beginAttribution`) therefore PARKS the
+  reverted member `evicted` with `branch=` recorded (`EvictionOutcome.parked`, milestone
+  `parked=`), like a pre-landing eviction, instead of requeueing it from the base. A member
+  whose branch is no longer on origin (a pre-#840 landing) still requeues full-cycle; when
+  origin cannot be listed only a recorded branch is parked on (journaled `git-failed`).
+- `sched requeue` of a parked member is based on its branch **by the engine**: at the
+  entry's first dispatch, `EngineDeps.resumeSeeder` (`createExecResumeSeeder`: `runstate
+  mint` + `runstate post`) seeds the issue's trail with a `setup done` milestone
+  (`branch=<member branch> base_branch=<batch base> pool_claimed=false remote=pushed
+  seeded_by=sched from_batch=<id>`). The agent's gate (`runstate verify`) then resumes at
+  `plan` on that branch, and full-cycle's Resuming path builds the worktree from it — the
+  documented resume contract, no dossier change. The run id is stamped on
+  `failure_evidence.resume_run` so a respawn never re-seeds; `resume-seeded` /
+  `resume-seed-failed` journal it (a failure falls back to the `PRIOR WORK` prompt
+  instruction, which now names the seeded run when there is one, and — for a post-landing
+  eviction — the commits reverted on the integration branch, which a rebase onto a base
+  carrying those reverts would silently drop; engine-side re-application is #866). A branch
+  gone from origin makes `verify` answer `resume_from=setup` — a fresh run off the base.
 
 State schema 1.24.0: `IssueStatus` gains `handed-back`; `EvictionRecord` gains optional
 `kind`/`branch`, `FailureEvidence` optional `branch`.

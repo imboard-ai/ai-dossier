@@ -24,6 +24,11 @@ KEEP = {
     # past a member evicted by an engine that exited before advancing.
     "kill-escalated",
     "member-advance-recovered",
+    # #840: a PR-conflict give-up re-gated a batch over its landed members; the
+    # engine seeded (or failed to seed) a requeued member's resume trail.
+    "batch-regate",
+    "resume-seeded",
+    "resume-seed-failed",
 }
 out = []
 for line in sys.stdin:
@@ -41,6 +46,6 @@ for line in sys.stdin:
     if d.get("tier"): bits.append(f"tier={d['tier']}")
     if d.get("reason"): bits.append(d["reason"])
     if d.get("pr"): bits.append(f"PR#{d['pr']}")
-    if event in ("dispatch-profile-missing", "dissolve-suppressed", "batch-blocked", "batch-resumed") and d.get("detail"): bits.append(d["detail"])
+    if event in ("dispatch-profile-missing", "dissolve-suppressed", "batch-blocked", "batch-resumed", "batch-regate", "resume-seeded", "resume-seed-failed") and d.get("detail"): bits.append(d["detail"])
     out.append(" ".join(str(b) for b in bits))
 print("\n".join(out[:8]))

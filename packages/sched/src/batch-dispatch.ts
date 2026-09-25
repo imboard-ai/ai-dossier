@@ -144,6 +144,7 @@ import {
   type DissolveOutcome,
   dissolveBatch,
   evictMembers,
+  pruneMemberBranches,
   type RecoveryDeps,
   resolveFixAttempt,
   type SuiteResult,
@@ -1198,9 +1199,11 @@ function landMemberBranch(
  * `-d` after a landing (fully merged into the integration branch), `-D` on
  * the eviction path (its commits never landed; since #810 the parked entry
  * records the branch and an operator requeue continues from the REMOTE copy).
- * The REMOTE member branch is deleted only on the landed path, and
- * deliberately KEPT on eviction — the pushed sha is the evicted work's only
- * recoverable copy.
+ * The REMOTE member branch is never deleted here (#840): on eviction the
+ * pushed sha is the evicted work's only recoverable copy, and after a landing
+ * it is what a later aggregate-suite eviction parks the member on. Batch
+ * teardown deletes it once the batch ships or dissolves
+ * (`deleteMemberBranches`).
  *
  * Best-effort and idempotent: null fields are a no-op, and a failed cleanup
  * journals `teardown-failed` rather than throwing into the caller's
@@ -1322,9 +1325,6 @@ function teardownMemberTree(
       deps.exec('git', ['branch', flag, branch], deps.repoDir) === null
         ? `failed-branch-delete-${flag}`
         : `branch-deleted-${flag}`;
-    if (landed) {
-      deps.exec('git', ['push', 'origin', '--delete', branch], deps.repoDir);
-    }
   }
   const failed = !treeCleared || branchCleanup.startsWith('failed');
   journalEvent(deps, failed ? 'teardown-failed' : 'member-worktree-torn-down', unit(batchId), {
@@ -2340,7 +2340,7 @@ function evictOffender(
       s,
       outcome.state,
       batchId,
-      [...outcome.requeued, ...(outcome.dissolve?.parked ?? [])],
+      [...new Set([...outcome.requeued, ...outcome.parked, ...(outcome.dissolve?.parked ?? [])])],
       batch.members
     ),
     result: undefined,
@@ -5355,6 +5355,7 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
     true;
   const serial = teardownMemberWorktree(deps, batchId, deps.now(), lastMemberLanded);
   teardownParallelRuns(deps, batchId, serial);
+  deleteMemberBranches(deps, batchId);
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
   if (!batch || batch.worktree === null) return;
@@ -5384,6 +5385,36 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
       cleanup: result.cleanup,
       detail: result.detail,
       worktree: batch.worktree,
+    }
+  );
+}
+
+/**
+ * #840: `teardownBatch`'s member-branch cleanup — `pruneMemberBranches`
+ * (recovery.ts) plus the journal line. Best-effort: a failed listing or delete
+ * is journaled, never thrown into the teardown path; a kept batch
+ * (`worktree_kept`) never gets here.
+ */
+function deleteMemberBranches(deps: BatchDispatchDeps, batchId: string): void {
+  const pruned = pruneMemberBranches(deps.exec, deps.repoDir, deps.store.load(), batchId);
+  if (pruned === null) {
+    journalEvent(deps, 'teardown-failed', unit(batchId), {
+      cleanup: 'member-branches-unlisted',
+      detail: `could not list origin's batch/${batchId}-m* member branches — none deleted`,
+    });
+    return;
+  }
+  const { deleted, kept, failed } = pruned;
+  if (deleted.length + kept.length + failed.length === 0) return;
+  journalEvent(
+    deps,
+    failed.length === 0 ? 'member-branches-deleted' : 'teardown-failed',
+    unit(batchId),
+    {
+      ...(failed.length === 0 ? {} : { cleanup: 'member-branches-delete-failed' }),
+      detail:
+        `deleted=${deleted.join(',') || 'none'} kept=${kept.join(',') || 'none'}` +
+        (failed.length > 0 ? ` failed=${failed.join(',')}` : ''),
     }
   );
 }
