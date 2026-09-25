@@ -4,10 +4,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { graphqlIssueResponse } from '../../../../packages/sched/src/__tests__/helpers/graphql-fixtures';
 import { registerSchedCommand } from '../../commands/sched';
 import { checkEngineStaleness } from '../../engine-version';
 import { readRunLog } from '../../run-log';
-import { createTestProgram, execHandles, execReturns } from '../helpers/test-utils';
+import { createTestProgram, type ExecStub, execHandles, execReturns } from '../helpers/test-utils';
 
 vi.mock('node:child_process');
 // `cli/src/run-log.ts`'s LOG_FILE is computed once at import time from
@@ -666,6 +667,33 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
       latest: '0.13.0',
       stale: true,
     });
+    // #829: once `@ai-dossier/sched` is mockable, `sched start`'s tick
+    // reconciles ground truth for every live unit — `ai-dossier runstate
+    // last --issue 101` and `gh issue view 101 --json state` — before this
+    // function's own re-read of `state.slots`. The file-scoped default
+    // (`execReturns('{"labels":[]}')`, set in `beforeEach`) answers those
+    // calls with valid-but-wrong JSON instead of a failure, which reads as
+    // definitive ("no milestone, not closed") rather than unreachable — the
+    // tick then reconciles the fabricated `pid: null` "running" slot as a
+    // phantom and clears it, so by the time the busy-check below runs the
+    // slot is already idle and the upgrade fires. Before #829 this couldn't
+    // happen: those calls were unmocked native `execFileSync`, and in this
+    // sandbox `gh`/`ai-dossier` against a nonexistent local `test-proj`
+    // git remote fail outright — ground truth came back genuinely
+    // unreachable, which the engine treats conservatively (never resolves
+    // the unit, never touches the slot). Reproduce that same "unreachable"
+    // signal here so the scenario this test is actually about — an
+    // in-flight unit blocking auto-upgrade — is what's under test, not an
+    // accident of which calls used to escape the mock.
+    execHandles((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'view') {
+        throw new Error('gh not available in test sandbox');
+      }
+      if (file === 'ai-dossier' && args[0] === 'runstate') {
+        throw new Error('ai-dossier not available in test sandbox');
+      }
+      return '{"labels":[]}';
+    });
     vi.mocked(execFileSync).mockClear();
 
     await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
@@ -676,6 +704,10 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
     expect(upgradeCalls).toHaveLength(0);
     // The stale signal is still journaled — only the upgrade itself is gated.
     expect(journalEvents().some((e) => e.event === 'engine-stale')).toBe(true);
+    // And the mid-dispatch slot really is what gated it — not a slot the
+    // tick's ground-truth reconciliation quietly cleared out from under us.
+    const finalState = readState() as { slots: Array<Record<string, unknown>> };
+    expect(finalState.slots[0]).toMatchObject({ status: 'running', unit: 'issue:101' });
   });
 });
 
@@ -693,13 +725,20 @@ describe('ai-dossier sched status', () => {
   });
 
   it('#790: --anchors on an unresolvable project repo skips BOTH the ledger and orphan sweeps with one note, never crashes', async () => {
-    // Same module-boundary note as the abandon test above: the sched
-    // package's own `execFileSync` calls are not reachable through this
-    // file's `vi.mock('node:child_process')`, so the REAL `gh repo view`
-    // runs and — since it can never match the fake `test-proj` project
-    // slug — `anchorSweepFor` returns `undefined` for both sweeps. The pure
+    // #829: `@ai-dossier/sched`'s own `execFileSync` calls ARE reachable
+    // through this file's `vi.mock('node:child_process')` now (the CLI
+    // resolves `@ai-dossier/sched` to its TS source under test, per
+    // `cli/vitest.config.ts`'s `resolve.alias`) — but this test doesn't
+    // exercise that path specifically: it relies only on the file-scoped
+    // default mock response (`execReturns('{"labels":[]}')`, set in
+    // `beforeEach`), which has no `owner`/`name` fields, so `gh repo view`
+    // resolves to no usable repo regardless of which "test-proj" project
+    // slug is asked for — `anchorSweepFor` returns `undefined` for both
+    // sweeps exactly as it did before the mocking gap closed. The pure
     // orphan-sweep logic (`sweepOrphanAnchors`, `classifyOrphanAnchor`) is
-    // covered directly in `packages/sched/src/__tests__/anchor-close.test.ts`.
+    // covered directly in `packages/sched/src/__tests__/anchor-close.test.ts`;
+    // the end-to-end "repo resolves and the anchor read actually runs" case
+    // is covered below by the #829 abandon tests.
     await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
     logs.length = 0;
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -1237,18 +1276,21 @@ describe('ai-dossier sched pause/resume/abandon', () => {
   });
 
   it("#790: dissolving a batch with an anchor never refuses, even when the anchor check can't verify the repo — a courtesy warning, not a gate", async () => {
-    // `warnIfAbandonedAnchorOpen`'s GitHub read goes through
+    // #829: `warnIfAbandonedAnchorOpen`'s GitHub read goes through
     // `@ai-dossier/sched`'s own `resolveProjectRepo`/`execFileSync`, which —
-    // unlike this file's own `gh` calls — is NOT reachable through this
-    // test's `execHandles` mock (the package is externalized/compiled, so
-    // `vi.mock('node:child_process')` here does not intercept its nested
-    // `execFileSync` calls; see `packages/sched/src/__tests__/anchor-close.test.ts`
-    // for the pure decision logic (`batchAnchorStillOpen`) this glue calls).
-    // The REAL `gh repo view` therefore runs here, resolving a repo that can
-    // never match the fake `--project test-proj` — exactly the
-    // "unverified repo" fail-closed path this test exercises: the check
-    // fails silently and abandon proceeds regardless. `batchAnchorStillOpen`
-    // itself is covered directly in the sched package's own tests.
+    // now that `@ai-dossier/sched` resolves to source under test (see
+    // `cli/vitest.config.ts`) — IS reachable through this file's
+    // `vi.mock('node:child_process')`. This test still exercises the
+    // "unverified repo" fail-closed path, though: it never calls
+    // `execHandles`, so `gh repo view` gets only the file-scoped default
+    // (`execReturns('{"labels":[]}')`, `beforeEach`) — no `owner`/`name`
+    // fields, so `resolveProjectRepo` cannot match it to the fake
+    // `--project test-proj` and the anchor check gives up exactly as it did
+    // when this call was genuinely unmocked. The #829 tests below cover the
+    // path where the repo resolves and the anchor read actually completes.
+    // `batchAnchorStillOpen` itself (the pure decision logic this glue
+    // calls) is covered directly in
+    // `packages/sched/src/__tests__/anchor-close.test.ts`.
     const manifest = path.join(home, 'm2.json');
     fs.writeFileSync(
       manifest,
@@ -1293,6 +1335,86 @@ describe('ai-dossier sched pause/resume/abandon', () => {
     const parsed = JSON.parse(logs.join(''));
     expect(parsed).toMatchObject({ abandoned: 'batch:by', anchor_open: null });
     expect(parsed.requeued).toBeDefined();
+    stderrSpy.mockRestore();
+  });
+
+  /**
+   * A minimal `gh` dispatcher for the two calls `warnIfAbandonedAnchorOpen`'s
+   * chain makes once `@ai-dossier/sched` is inlined (#829): `resolveProjectRepo`'s
+   * `gh repo view --json owner,name` (must resolve to a repo whose sanitized
+   * `owner-name` equals the `--project` slug, or `anchorReaderFor` bails out
+   * as unresolvable) and `issueCloseTruth`'s `gh api graphql ... -F n=<issue>
+   * ...` (the anchor's close-state read). `owner=test name=proj` is chosen
+   * so `sanitizeSlug('test-proj')` matches the `test-proj` project slug used
+   * throughout this file. Returns the fixture JSON for the graphql call when
+   * `issue` matches `openIssue`, else an arbitrary CLOSED payload — a stray
+   * call for a different issue number must not accidentally read as "open".
+   */
+  function anchorGhStub(openIssue: number): ExecStub {
+    return (file, args) => {
+      if (file !== 'gh') return '';
+      if (args[0] === 'repo' && args[1] === 'view') {
+        return JSON.stringify({ owner: { login: 'test' }, name: 'proj' });
+      }
+      if (args[0] === 'api' && args[1] === 'graphql') {
+        const fIdx = args.indexOf('-F');
+        const nArg = fIdx >= 0 ? args[fIdx + 1] : undefined;
+        const issue = nArg?.startsWith('n=') ? Number(nArg.slice(2)) : undefined;
+        const state = issue === openIssue ? 'OPEN' : 'CLOSED';
+        return JSON.stringify(
+          graphqlIssueResponse({
+            state,
+            stateReason: state === 'CLOSED' ? 'COMPLETED' : undefined,
+          })
+        );
+      }
+      // `gh issue view --json labels` (enqueue's hard-block label check) and
+      // anything else default to "no labels" — same as this file's default
+      // `execReturns('{"labels":[]}')`.
+      return '{"labels":[]}';
+    };
+  }
+
+  it("#829: sched abandon --batch warns and journals when the anchor is genuinely open — proving @ai-dossier/sched now resolves through vitest's module graph so vi.mock('node:child_process') reaches its own gh calls (the end-to-end test #790 could not write)", async () => {
+    const manifest = path.join(home, 'm2c.json');
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({ entries: [{ issue: 1, mode: 'slot', batch: 'bz', anchor: 9003 }] })
+    );
+    execHandles(anchorGhStub(9003));
+    await runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj']);
+    logs.length = 0;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await runSched(['sched', 'abandon', '--batch', 'bz', '--project', 'test-proj']);
+
+    expect(logs.join('\n')).toContain('Dissolved batch bz');
+    const stderrLines = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderrLines).toContain('batch bz abandoned with its anchor #9003 still open on GitHub');
+    expect(journalEvents()).toContainEqual(
+      expect.objectContaining({
+        event: 'batch-anchor-open-on-abandon',
+        unit: 'batch:bz',
+      })
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it("#829: abandon --batch --json's anchor_open field is non-null when the anchor is genuinely open", async () => {
+    const manifest = path.join(home, 'm2d.json');
+    fs.writeFileSync(
+      manifest,
+      JSON.stringify({ entries: [{ issue: 1, mode: 'slot', batch: 'bw', anchor: 9004 }] })
+    );
+    execHandles(anchorGhStub(9004));
+    await runSched(['sched', 'enqueue', '--from-manifest', manifest, '--project', 'test-proj']);
+    logs.length = 0;
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    await runSched(['sched', 'abandon', '--batch', 'bw', '--project', 'test-proj', '--json']);
+
+    const parsed = JSON.parse(logs.join(''));
+    expect(parsed).toMatchObject({ abandoned: 'batch:bw', anchor_open: 9004 });
     stderrSpy.mockRestore();
   });
 
