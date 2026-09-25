@@ -252,7 +252,7 @@ describe('run — end to end against a real git repo', () => {
     git('config', 'user.name', 'Test');
     writeFileSync(
       join(repo, 'package.json'),
-      `${JSON.stringify({ name: 'root', private: true, workspaces: ['cli', 'app'] }, null, 2)}\n`
+      `${JSON.stringify({ name: 'root', private: true, workspaces: ['cli', 'app', 'lib'] }, null, 2)}\n`
     );
     writeCli('1.0.0', 'export const a = 1;\n');
     // A dependent of cli, for the held-dependent cases.
@@ -266,6 +266,12 @@ describe('run — end to end against a real git repo', () => {
       )}\n`
     );
     writeFileSync(join(repo, 'app/src/index.js'), 'export const app = 1;\n');
+    // An unrelated package: a cli collision must not hold it.
+    mkdirSync(join(repo, 'lib/src'), { recursive: true });
+    writeFileSync(
+      join(repo, 'lib/package.json'),
+      `${JSON.stringify({ name: '@fixture/lib', version: '2.0.0' }, null, 2)}\n`
+    );
     commit('base');
 
     // Winner merges first and publishes 1.1.0.
@@ -343,6 +349,20 @@ describe('run — end to end against a real git repo', () => {
     expect(r.outputs).toContain('collision=false');
     expect(r.out).toContain('held');
     expect(readFileSync(ledger, 'utf8')).toContain('held @fixture/app');
+  });
+
+  it('still publishes an unrelated package after another package collided', () => {
+    const ledger = freshLedger();
+    guard({ head: loser, lookup: publishedAt(winner), extra: ['--defer-collision', ledger] });
+    const r = guard({
+      head: loser,
+      dir: 'lib',
+      lookup: () => null,
+      extra: ['--defer-collision', ledger],
+    });
+    expect(r.code).toBe(0);
+    expect(r.outputs).toContain('skip=false');
+    expect(readFileSync(ledger, 'utf8')).not.toContain('@fixture/lib');
   });
 
   it('publishes a dependent normally when nothing it depends on collided', () => {
