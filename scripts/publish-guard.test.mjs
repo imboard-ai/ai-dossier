@@ -154,6 +154,21 @@ describe('parseNpmView — never fails open', () => {
     expect(parseNpmView({ status: 0, stdout: out, stderr: '' }, spec)).toEqual({ gitHead: SHA_A });
   });
 
+  it('accepts the npm 12 shape: a one-element array (#826 follow-up)', () => {
+    // Real `npm view @ai-dossier/core@1.11.0 version gitHead --json` output
+    // from npm 12.1.0 — the shape that turned the first publish run red.
+    const out = JSON.stringify([{ version: '1.11.0', gitHead: SHA_A }]);
+    expect(parseNpmView({ status: 0, stdout: out, stderr: '' }, spec)).toEqual({ gitHead: SHA_A });
+  });
+
+  it('refuses an array that is not exactly one version', () => {
+    for (const arr of [[], [{ gitHead: SHA_A }, { gitHead: SHA_B }]]) {
+      expect(() =>
+        parseNpmView({ status: 0, stdout: JSON.stringify(arr), stderr: '' }, spec)
+      ).toThrow(CheckUnavailableError);
+    }
+  });
+
   it('returns null for E404 (version or package not on npm)', () => {
     const out = JSON.stringify({ error: { code: 'E404', summary: 'No match found' } });
     expect(parseNpmView({ status: 1, stdout: out, stderr: '' }, spec)).toBeNull();
