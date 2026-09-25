@@ -1245,7 +1245,7 @@ import {
   sweepOrphanAnchors, classifyOrphanAnchor, parseOrphanAnchorBody, batchAnchorStillOpen,
                          // #790 orphan sweep — batches gone from state.batches entirely;
                          //   pure, GitHub/git only via the injected list/read (never exec)
-  ORPHAN_SWEEP_MAX_ANCHORS, ORPHAN_SWEEP_MAX_MEMBERS, DEFAULT_ORPHAN_BASE_BRANCH, // #790
+  ORPHAN_SWEEP_MAX_ANCHORS, ORPHAN_SWEEP_MAX_MEMBERS, DEFAULT_BASE_BRANCH, // #790
   BATCH_ANCHOR_LABEL,    // #790, also used by cli/src/batch-compose.ts (single source)
   issueCloseReader, parseIssueCloseTruthJson, parseRepoName,
   resolveProjectRepo,    // #768 owner/name of the cwd repo only when it IS the project's
@@ -1635,7 +1635,7 @@ untrusted input (anyone who can edit an open `batch-epic` issue controls it): me
 numbers outside the valid GitHub issue range are dropped, a body over
 `ORPHAN_SWEEP_MAX_MEMBERS` (50) refuses with NO reads at all (`members-over-cap`), and
 `base_branch` is checked twice — syntactically (`SAFE_REF_RE`, falling back to
-`DEFAULT_ORPHAN_BASE_BRANCH`/`main` when unsafe) and then against the expected/configured
+`DEFAULT_BASE_BRANCH`/`main` when unsafe) and then against the expected/configured
 base (`expectedBaseBranch`, default `main`): a value that names a DIFFERENT — even
 syntactically valid — branch can never produce `orphan-closable-candidate`, only
 `orphan-needs-operator` with reason `base-branch-nonstandard:<value>`, since it decides
