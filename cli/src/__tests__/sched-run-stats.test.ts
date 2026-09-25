@@ -236,6 +236,7 @@ describe('batch amortization (#775)', () => {
       landed: [11, 13],
       evicted: [12],
       handedBack: [],
+      reprompted: [],
       suiteFailures: 1,
       blocked: 'suite-unreadable',
       dissolved: false,
@@ -309,6 +310,20 @@ describe('batch amortization (#775)', () => {
     const line = formatAmortizationLine(merged);
     expect(line).toContain('2 shipped in 1 gate run(s) → 2.0 issues/gate run');
     expect(line).toContain('by model: m');
+  });
+
+  it('#822: a resume clears the reported block, and a re-prompted member is listed', () => {
+    const journal = summarizeBatchJournal(
+      [
+        { event: 'member-reprompted', unit: 'batch:b8', issue: 81, reason: 'wrong-procedure' },
+        { event: 'batch-blocked', unit: 'batch:b8', detail: 'dissolve-refused:x' },
+        { event: 'batch-resumed', unit: 'batch:b8', detail: 'landed=81' },
+      ],
+      'b8'
+    );
+    expect(journal.blocked).toBeNull();
+    expect(journal.reprompted).toEqual([81]);
+    expect(journal.members).toEqual([81]);
   });
 
   it('#810: a member hand-back is counted apart from evictions and never as landed', () => {

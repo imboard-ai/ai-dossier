@@ -121,6 +121,8 @@ export {
   takeoverInstruction,
   tierExecutors,
   unitLogName,
+  WRONG_PROCEDURE_MARKER,
+  wrongProcedureDirective,
 } from './dispatch';
 export { type EngineDeps, recordTickFailure, runLoop, type TickResult, tick } from './engine';
 export {
@@ -160,6 +162,7 @@ export {
   isParkedMilestone,
   issueCloseReader,
   isVerifiedComplete,
+  isWrongProcedureMilestone,
   labelNames,
   type MergedPrLookup,
   memberBlockedReason,
@@ -176,6 +179,7 @@ export {
   prOfMilestone,
   REVIEW_PARTIAL_REASON,
   type SetupInfo,
+  wrongProcedureShippedPr,
 } from './groundtruth';
 export {
   appendJsonl,
@@ -276,10 +280,13 @@ export {
   type DependencyBlocker,
   dependencyBlockers,
   freeCapacity,
+  isLandedResumableBlock,
+  LANDED_RESUMABLE_BLOCK_PREFIXES,
   type RunnableUnit,
   reprioritizeBatch,
   reprioritizeIssue,
   requeueParkedMember,
+  resumeLandedBatch,
   runnableUnits,
   setPaused,
   stopBatch,
@@ -396,6 +403,7 @@ export {
   PHASES,
   type Phase,
   type QueueEntry,
+  type RepromptRecord,
   type ReviewLevel,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,

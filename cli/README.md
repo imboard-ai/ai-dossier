@@ -1327,6 +1327,7 @@ ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
 ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--json]
 ai-dossier sched status [--json] [--anchors]   # ⚠ health warnings: long pause, stale lease, stuck / stale-closed slots (#776), kept worktrees on done batches (#791)
 ai-dossier sched pause | resume
+ai-dossier sched resume --batch <id>   # gate-inconclusive: re-run the gate (#583); blocked over landed work (dissolve-refused / tail-blocked / members-mismatch / respawn-cap:tail): re-run gate + tail over the landed members (#822)
 ai-dossier sched stop (--issue 42 | --batch b1) [--reason "..."]
 ai-dossier sched abandon --issue 42 [--reason "..."] | --batch b1 [--reason "..."]
 ai-dossier sched requeue --issue 42 [--reason "..."]   # parked batch member → full-cycle from its member branch (#810)

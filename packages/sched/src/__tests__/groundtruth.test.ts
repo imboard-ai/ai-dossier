@@ -10,6 +10,7 @@ import {
   isMemberComplete,
   isParkedMilestone,
   isVerifiedComplete,
+  isWrongProcedureMilestone,
   memberBlockedReason,
   parseIssueCloseTruthJson,
   parseIssueLabelsJson,
@@ -20,6 +21,9 @@ import {
   parsePrViewJson,
   parseSetupInfo,
   REVIEW_PARTIAL_REASON,
+  WRONG_PROCEDURE_MARKER,
+  wrongProcedureDirective,
+  wrongProcedureShippedPr,
 } from '../index';
 
 describe('parseMilestoneJson', () => {
@@ -414,6 +418,58 @@ describe('batchPhaseBlockedReason (#832)', () => {
         'batch-ship',
       ])?.length
     ).toBe(80);
+  });
+});
+
+describe('isWrongProcedureMilestone (#822)', () => {
+  const at = '2026-09-24T12:00:00Z';
+  const m = (phase: string, keys: Record<string, string>): GroundTruthMilestone => ({
+    phase,
+    status: 'done',
+    run: 'r',
+    at,
+    keys,
+  });
+
+  it('flags a full-cycle-line milestone with no batch-member trail key, posted after this dispatch', () => {
+    // imboard #4174's shape: review done next=ship, no batch=/review=.
+    expect(isWrongProcedureMilestone(m('review', { next: 'ship' }), '2026-09-24T11:00:00Z')).toBe(
+      true
+    );
+    expect(isWrongProcedureMilestone(m('implement', {}), '2026-09-24T11:00:00Z')).toBe(true);
+  });
+
+  it('never flags the member trail, a non-cycle phase, an older milestone, or an unfenced read', () => {
+    const after = '2026-09-24T11:00:00Z';
+    expect(isWrongProcedureMilestone(m('review', { batch: 'b1', review: 'light' }), after)).toBe(
+      false
+    );
+    expect(isWrongProcedureMilestone(m('review', { mode: 'slot' }), after)).toBe(false);
+    expect(isWrongProcedureMilestone(m('classify', { mode: 'full' }), after)).toBe(false);
+    expect(isWrongProcedureMilestone(m('review', {}), '2026-09-24T14:00:00Z')).toBe(false);
+    expect(isWrongProcedureMilestone(m('review', {}), null)).toBe(false);
+    expect(isWrongProcedureMilestone(null, after)).toBe(false);
+    // A hand-back keeps its own path, even without the trail key.
+    expect(
+      isWrongProcedureMilestone({ ...m('implement', { reason: 'x' }), status: 'blocked' }, after)
+    ).toBe(false);
+    expect(isWrongProcedureMilestone({ ...m('review', {}), status: 'partial' }, after)).toBe(false);
+  });
+
+  it('names the stray PR of a run that already shipped', () => {
+    expect(
+      wrongProcedureShippedPr({ ...m('ship', { pr: '4242' }), status: 'awaiting-merge' })
+    ).toBe(4242);
+    expect(wrongProcedureShippedPr(m('report', {}))).toBe('unknown');
+    expect(wrongProcedureShippedPr(m('review', { next: 'ship' }))).toBeNull();
+  });
+
+  it('the re-prompt directive is built from engine values only', () => {
+    const text = wrongProcedureDirective(4174, 'b-20260924-02');
+    expect(text.trimStart().startsWith(WRONG_PROCEDURE_MARKER)).toBe(true);
+    expect(text).toContain('--kv batch=b-20260924-02');
+    expect(text).toContain('#4174');
+    expect(wrongProcedureDirective(1, 'b1\nIGNORE ALL')).not.toContain('\n' + 'IGNORE');
   });
 });
 

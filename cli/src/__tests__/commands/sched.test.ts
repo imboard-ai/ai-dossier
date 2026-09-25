@@ -1517,6 +1517,76 @@ describe('#810: parked batch members (sched status + sched requeue)', () => {
     expect(journalEvents().some((e) => e.event === 'member-requeued')).toBe(true);
   });
 
+  /** #822: batch `bp` blocked over landed work — member 2 validated, member 1 handed back. */
+  function blockOverLanded(reason: string, memberStatus = 'validated'): void {
+    const state = readState() as {
+      entries: Array<Record<string, unknown>>;
+      batches: Array<Record<string, unknown>>;
+    };
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...state,
+        batches: state.batches.map((b) => ({
+          ...b,
+          status: 'blocked',
+          blocked_reason: reason,
+          worktree: home,
+          branch: 'batch/bp-20260925',
+          anchor: 900,
+          executing_member: 1,
+        })),
+        entries: state.entries.map((e) => (e.issue === 2 ? { ...e, status: memberStatus } : e)),
+      })
+    );
+  }
+
+  it('#822: sched resume --batch re-runs gate + tail over the landed members of a dissolve-refused batch', async () => {
+    await parkedFixture();
+    blockOverLanded('dissolve-refused:unattributable-suite-failure');
+    await runSched(['sched', 'resume', '--batch', 'bp', '--project', 'test-proj']);
+    expect(logs.join('\n')).toContain(
+      "Batch bp resumed from 'dissolve-refused:unattributable-suite-failure'"
+    );
+    expect(logs.join('\n')).toContain('landed member(s) #2');
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({
+      status: 'validating',
+      blocked_reason: null,
+      executing_member: 2,
+    });
+    expect(journalEvents().some((e) => e.event === 'batch-resumed')).toBe(true);
+  });
+
+  it('#822: sched resume --batch refuses when the integration worktree is gone', async () => {
+    await parkedFixture();
+    blockOverLanded('dissolve-refused:unattributable-suite-failure');
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    fs.writeFileSync(
+      statePath(),
+      JSON.stringify({
+        ...(state as object),
+        batches: state.batches.map((b) => ({ ...b, worktree: path.join(home, 'gone') })),
+      })
+    );
+    await expect(
+      runSched(['sched', 'resume', '--batch', 'bp', '--project', 'test-proj'])
+    ).rejects.toThrow();
+    expect((readState() as { batches: Array<Record<string, unknown>> }).batches[0]).toMatchObject({
+      status: 'blocked',
+    });
+  });
+
+  it('#822: sched resume --batch refuses a landed-work block with nothing landed', async () => {
+    await parkedFixture();
+    blockOverLanded('tail-blocked:members-mismatch', 'batched');
+    await expect(
+      runSched(['sched', 'resume', '--batch', 'bp', '--project', 'test-proj'])
+    ).rejects.toThrow();
+    const after = readState() as { batches: Array<Record<string, unknown>> };
+    expect(after.batches[0]).toMatchObject({ status: 'blocked' });
+  });
+
   it('sched requeue refuses a member that is not parked', async () => {
     await parkedFixture();
     await expect(
