@@ -107,6 +107,7 @@ import {
   resolveProfiledDispatch,
   resolveTierSpawn,
   type SpawnDeps,
+  wrongProcedureDirective,
 } from './dispatch';
 import { recordDispatchApiError, resetDispatchApiErrorStreak } from './dispatch-health';
 import {
@@ -120,6 +121,7 @@ import {
   isMemberBlocked,
   isMemberComplete,
   issueCloseReader,
+  isWrongProcedureMilestone,
   type MergedPrLookup,
   memberBlockedReason,
   type PrTruth,
@@ -1459,14 +1461,19 @@ function spawnMemberAgent(
   // #677: the prompt carries THIS member's own worktree and the integration
   // branch it was cut from — `member-cycle`'s `worktree`/`integration_branch`
   // inputs. The shared batch worktree is no longer a member surface at all.
-  const prompt = buildMemberPrompt(
-    dispatch.memberPrompt,
-    memberIssue,
-    batchId,
-    target.member.worktree,
-    batch.branch,
-    review
-  );
+  const prompt =
+    buildMemberPrompt(
+      dispatch.memberPrompt,
+      memberIssue,
+      batchId,
+      target.member.worktree,
+      batch.branch,
+      review
+    ) +
+    // #822: a member respawned after running the wrong procedure.
+    (batch.reprompted_members.some((r) => r.issue === memberIssue)
+      ? wrongProcedureDirective(memberIssue, batchId)
+      : '');
   const logFile = batchMemberLogPath(deps.store.runsDir, batchId, target.index, memberIssue);
   // #629: captured BEFORE spawning, mirroring `engine.ts`'s own
   // `spawnAndRecord` — the log is per-role and append-mode, so the size at
@@ -2857,7 +2864,7 @@ export function resumeBlockedGate(
     // instead of a bare illegal-transition error that reads like a bug.
     if (batch.status === 'blocked') {
       throw new SchedNotFoundError(
-        `Batch ${batchId} is blocked on '${batch.blocked_reason ?? '?'}', which has no gate recheck: inspect the batch worktree/state named in its journal, then \`sched abandon --batch ${batchId}\` if it is a dead end`
+        `Batch ${batchId} is blocked on '${batch.blocked_reason ?? '?'}', which has no gate recheck (a batch blocked over landed work — dissolve-refused / tail-blocked / members-mismatch / respawn-cap:tail — resumes via \`sched resume --batch\`, #822): inspect the batch worktree/state named in its journal, then \`sched abandon --batch ${batchId}\` if it is a dead end`
       );
     }
     throw new IllegalTransitionError('batch', batch.status, 'executing');
@@ -3141,7 +3148,14 @@ function terminalMilestoneForDispatch(
 type MemberDispatchRead =
   | { kind: 'unreachable' }
   | { kind: 'complete' }
-  | { kind: 'pending'; milestone: GroundTruthMilestone | null; dead: boolean; blockedNow: boolean };
+  | {
+      kind: 'pending';
+      milestone: GroundTruthMilestone | null;
+      dead: boolean;
+      blockedNow: boolean;
+      /** #822: this dispatch posted a full-cycle-shaped milestone (`isWrongProcedureMilestone`). */
+      wrongProcedure: boolean;
+    };
 
 /**
  * Read one member dispatch's fate: the fenced terminal milestone (#575/#605/
@@ -3220,8 +3234,78 @@ function readMemberDispatch(
     milestone,
     dead,
     blockedNow: isMemberBlocked(milestone, slot.spawned_at),
+    wrongProcedure:
+      isWrongProcedureMilestone(milestone, slot.spawned_at) &&
+      // The milestone that already earned this member its re-prompt still
+      // reads as post-dispatch inside the fence's skew tolerance — only a
+      // NEW wrong-procedure milestone counts against the respawned dispatch.
+      !(findBatch(deps.store.load(), batchId)?.reprompted_members ?? []).some(
+        (r) => r.issue === memberIssue && r.milestone_at === milestone?.at
+      ),
   };
 }
+
+/**
+ * #822 (#810 proposal 3): the member's dispatch ran the wrong procedure (a
+ * full-cycle-shaped trail — imboard #4174 ran full-cycle as a batch member).
+ * That is a dispatch mistake, not the member's work failing, so the first
+ * time it is RE-PROMPTED: a live agent is stopped (a full-cycle run left going
+ * would open its own PR), the slot is released, and the member is recorded in
+ * `reprompted_members` — the wedge arm (serial) or `spawnParallelMembers`
+ * (parallel) respawns it in place, in the same worktree, with
+ * `wrongProcedureDirective` appended. Returns `'evict'` when the member was
+ * already re-prompted once: the caller evicts it `wrong-procedure`.
+ */
+function repromptWrongProcedure(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  memberIssue: number,
+  milestoneAt: string,
+  slot: SlotEntry,
+  release: (s: SchedState) => SchedState,
+  now: Date
+): 'reprompted' | 'evict' {
+  if (slot.pid !== null && deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
+    deps.spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
+  }
+  const outcome = deps.store.withLock((s) => {
+    const released = release(s);
+    const b = findBatch(released, batchId);
+    if (!b || b.reprompted_members.some((r) => r.issue === memberIssue)) {
+      return { state: released, result: 'evict' as const };
+    }
+    return {
+      state: patchBatch(
+        released,
+        batchId,
+        {
+          reprompted_members: [
+            ...b.reprompted_members,
+            { issue: memberIssue, milestone_at: milestoneAt },
+          ],
+        },
+        now
+      ),
+      result: 'reprompted' as const,
+    };
+  });
+  if (outcome === 'reprompted') {
+    journalEvent(deps, 'member-reprompted', unit(batchId), {
+      issue: memberIssue,
+      reason: 'wrong-procedure',
+      detail:
+        'member posted a full-cycle-shaped milestone (no batch=/mode=slot) — respawning it once in place with a member-cycle directive',
+    });
+  }
+  return outcome;
+}
+
+/** #822: the eviction a member earns for running the wrong procedure after its one re-prompt. */
+const WRONG_PROCEDURE_FAILURE: MemberFailure = {
+  reason: 'wrong-procedure',
+  detail: 'member posted a full-cycle-shaped milestone again after its one re-prompt',
+  kind: 'evicted',
+};
 
 /**
  * The eviction a blocked-or-dead member dispatch earns (shared by both rails).
@@ -3319,6 +3403,45 @@ function reconcileMemberSlot(
     }
 
     completeMemberGate(deps, config, dispatch, batchId, batch, memberIssue, now, result);
+    return;
+  }
+
+  // #822: a wrong-procedure trail is re-prompted once, then evicted — decided
+  // before the dead/blocked rail, which would otherwise evict it as an
+  // unverified exit at the first sight.
+  if (read.wrongProcedure) {
+    const lastTool = recordMemberRunLog(
+      deps,
+      dispatch,
+      state0,
+      batchId,
+      batch.executing_member,
+      memberIssue,
+      slot,
+      now
+    );
+    const verdict = repromptWrongProcedure(
+      deps,
+      batchId,
+      memberIssue,
+      read.milestone?.at ?? now.toISOString(),
+      slot,
+      (s) => releaseSlot(s, batchId, now),
+      now
+    );
+    if (verdict === 'evict') {
+      evictMemberAndContinue(
+        deps,
+        config,
+        dispatch,
+        batchId,
+        batch,
+        memberIssue,
+        { ...WRONG_PROCEDURE_FAILURE, ...(lastTool ? { extraKv: { last_tool: lastTool } } : {}) },
+        now,
+        result
+      );
+    }
     return;
   }
 
@@ -5227,6 +5350,16 @@ function reconcileParallelMemberSlot(
       result: undefined,
     }));
     result.completed.push(memberUnit);
+    return;
+  }
+
+  // #822: re-prompt once, then evict — see the serial rail.
+  if (read.wrongProcedure) {
+    recordMemberRunLog(deps, dispatch, state0, batchId, run.index, run.issue, slot, now);
+    const at = read.milestone?.at ?? now.toISOString();
+    if (repromptWrongProcedure(deps, batchId, run.issue, at, slot, release, now) === 'evict') {
+      evictParallelMember(deps, config, batchId, run, WRONG_PROCEDURE_FAILURE, now, result);
+    }
     return;
   }
 

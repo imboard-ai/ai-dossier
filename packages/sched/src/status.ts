@@ -130,9 +130,10 @@ function dissolveRefusedNote(state: SchedState, batch: BatchEntry): string {
   const list = validated.map((m) => `#${m}`).join(',');
   const shippable =
     why === 'unattributable-suite-failure' || why.startsWith('dispatch-profile-missing');
+  const resume = `\`ai-dossier sched resume --batch ${batch.id}\``;
   const salvage = shippable
-    ? `ship them: \`gh pr create --head ${branch} --base ${batch.base_branch}\` — once it merges the engine reconciles them to shipped`
-    : `the branch is red or partly reverted — inspect it before shipping anything (fix on ${branch}, then \`gh pr create --head ${branch} --base ${batch.base_branch}\`)`;
+    ? `ship them: ${resume} re-runs the gate and the tail over them (#822), or \`gh pr create --head ${branch} --base ${batch.base_branch}\` by hand — once it merges the engine reconciles them to shipped`
+    : `the branch is red or partly reverted — inspect it before shipping anything (fix on ${branch}, then ${resume} re-runs the gate and the tail over the landed members, #822)`;
   return (
     `; validated member(s) ${list} stay landed on ${branch} — ${salvage}; or ` +
     `\`ai-dossier sched abandon --batch ${batch.id}\` (requeues them full-cycle instead)`
@@ -143,9 +144,9 @@ function dissolveRefusedNote(state: SchedState, batch: BatchEntry): string {
  * #832: what an operator can do with a batch whose TAIL stage blocked — the
  * tail refused (`tail-blocked:<why>`, e.g. `members-mismatch`), the engine's
  * own pre-dispatch check refused (`members-mismatch:*`, `no-landed-members`),
- * or the tail kept exiting without a verdict (`respawn-cap:tail`). None of
- * these has a `sched resume --batch` recheck; the validated members are still
- * landed on the integration branch.
+ * or the tail kept exiting without a verdict (`respawn-cap:tail`). The
+ * validated members are still landed on the integration branch, and
+ * `sched resume --batch` (#822) re-runs the gate and the tail over them.
  */
 function tailBlockNote(state: SchedState, batch: BatchEntry): string {
   const reason = batch.blocked_reason ?? '';
@@ -166,7 +167,8 @@ function tailBlockNote(state: SchedState, batch: BatchEntry): string {
       : `read the blocked milestone on anchor #${batch.anchor ?? '?'}`;
   return (
     `; ${evidence}; landed member(s) ${list} are on ${branch} — fix the cause, then ` +
-    `\`gh pr create --head ${branch} --base ${batch.base_branch}\` (the engine reconciles the batch once it merges), ` +
+    `\`ai-dossier sched resume --batch ${batch.id}\` (re-runs the gate and the tail over them, #822) ` +
+    `or \`gh pr create --head ${branch} --base ${batch.base_branch}\` by hand (the engine reconciles the batch once it merges), ` +
     `or \`ai-dossier sched abandon --batch ${batch.id}\` (requeues them full-cycle)`
   );
 }

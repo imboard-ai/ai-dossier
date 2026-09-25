@@ -309,6 +309,7 @@ export function createBatch(
     member_dispatch: null,
     member_runs: [],
     agent_exits: null,
+    reprompted_members: [],
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -752,6 +753,24 @@ export function validateState(data: unknown): SchedState {
         );
       }
     }
+    if (
+      batch.reprompted_members !== undefined &&
+      (!Array.isArray(batch.reprompted_members) ||
+        !(batch.reprompted_members as unknown[]).every((r) => {
+          const rec = r as { issue?: unknown; milestone_at?: unknown } | null;
+          return (
+            rec !== null &&
+            typeof rec === 'object' &&
+            Number.isInteger(rec.issue) &&
+            (rec.issue as number) > 0 &&
+            typeof rec.milestone_at === 'string'
+          );
+        }))
+    ) {
+      throw new Error(
+        `Batch ${batch.id}: reprompted_members must be an array of { issue, milestone_at } records`
+      );
+    }
     if (batch.member_runs !== undefined) {
       if (!Array.isArray(batch.member_runs)) {
         throw new Error(`Batch ${batch.id}: member_runs must be an array`);
@@ -1168,6 +1187,8 @@ export function validateState(data: unknown): SchedState {
     // 1.25.0 → 1.26.0 (#832): no tail/report exit was ever counted before
     // the respawn cap existed — `null` is exact, not a guess.
     agent_exits: batch.agent_exits ?? null,
+    // 1.26.0 → 1.27.0 (#822): nobody was re-prompted before the rule existed.
+    reprompted_members: batch.reprompted_members ?? [],
     // 1.23.0 → 1.24.0 (#810): no backfill — `evictions[].kind`/`branch` and
     // `failure_evidence.branch` are optional (absent = a pre-#810 `evicted`
     // record with no recorded branch), and `handed-back` is a new status no

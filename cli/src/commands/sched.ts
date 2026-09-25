@@ -57,6 +57,7 @@ import {
   formatBatchStatus,
   GIT_OID_RE,
   IllegalTransitionError,
+  isLandedResumableBlock,
   issueCloseReader,
   Journal,
   type KeptWorktreeReader,
@@ -80,6 +81,7 @@ import {
   resolveProjectRepo,
   resolveProjectSlug,
   resumeBlockedGate,
+  resumeLandedBatch,
   runLoop,
   SAFE_REF_RE,
   SchedNotFoundError,
@@ -1447,6 +1449,13 @@ function resumeBatchGate(opts: PauseResumeOptions): void {
   } catch (err) {
     handleKnownError(err);
   }
+  // #822: a batch blocked over LANDED work (a refused dissolve, #832's tail
+  // blocks) resumes by re-running the gate + tail over its landed members.
+  const blockedOn = findBatch(store.load(), opts.batch as string)?.blocked_reason ?? null;
+  if (isLandedResumableBlock(blockedOn)) {
+    resumeLandedBatchCommand(store, opts);
+    return;
+  }
   const deps: BatchDispatchDeps = {
     store,
     journal: new Journal(store.dir),
@@ -1500,20 +1509,56 @@ function resumeBatchGate(opts: PauseResumeOptions): void {
   }
 }
 
+/**
+ * `sched resume --batch <id>` for a batch blocked over landed work (#822):
+ * `blocked → validating`; the running engine's next tick re-runs the gate and
+ * then the tail over the landed members only.
+ */
+function resumeLandedBatchCommand(store: SchedStore, opts: PauseResumeOptions): void {
+  try {
+    const resumed = store.withLock((state) => {
+      const r = resumeLandedBatch(state, opts.batch as string);
+      return { state: r.state, result: r };
+    });
+    new Journal(store.dir).append(
+      unitEvent('batch-resumed', `batch:${opts.batch}`, {
+        reason: resumed.reason,
+        detail: `landed=${resumed.landed.join(',')} — gate + tail re-run over the landed members`,
+      })
+    );
+    if (opts.json) {
+      console.log(
+        JSON.stringify({
+          batch: opts.batch,
+          outcome: 'resumed',
+          from: resumed.reason,
+          landed: resumed.landed,
+        })
+      );
+      return;
+    }
+    console.log(
+      `▶ Batch ${opts.batch} resumed from '${resumed.reason}' — the next engine tick re-runs the batch gate, then the tail over landed member(s) ${resumed.landed.map((m) => `#${m}`).join(', ')}.`
+    );
+  } catch (err) {
+    handleKnownError(err);
+  }
+}
+
 function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
   const sub = cmd
     .command(pause ? 'pause' : 'resume')
     .description(
       pause
         ? 'Prevent every new agent process, including recovery takeovers; live agents keep running'
-        : 'Resume making new slot assignments; with --batch <id>, re-run the incremental gate for a batch blocked on gate-inconclusive instead (#583)'
+        : 'Resume making new slot assignments; with --batch <id>, re-run the incremental gate for a batch blocked on gate-inconclusive (#583), or re-run the gate + tail over the landed members of a batch blocked over landed work — dissolve-refused / tail-blocked / members-mismatch / respawn-cap:tail (#822)'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output the result as JSON');
   if (!pause) {
     sub.option(
       '--batch <id>',
-      'Batch id blocked on gate-inconclusive:<cap> — re-run that gate for its current member'
+      'Batch id blocked on gate-inconclusive:<cap> (re-run that gate) or over landed work (dissolve-refused / tail-blocked / members-mismatch / respawn-cap:tail — ship the landed members)'
     );
   }
   sub.action((opts: PauseResumeOptions) => {

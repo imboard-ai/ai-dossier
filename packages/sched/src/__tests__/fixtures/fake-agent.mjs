@@ -186,6 +186,24 @@ process.stdin.on('end', () => {
     }
     const batchMatch = input.match(/batch=(\S+)/);
     const batchId = batchMatch ? batchMatch[1].replace(/[.,]+$/, '') : 'unknown';
+    // #822: `--wrong-procedure-members=<a,b>` — those members run the WRONG
+    // procedure (before any commit, as full-cycle's gate/setup would be): they post a full-cycle-shaped `review done next=ship` with no
+    // `batch=`/`mode=slot` (imboard #4174). A re-prompted dispatch (the prompt
+    // carries the engine's WRONG PROCEDURE directive) behaves correctly unless
+    // `--wrong-procedure-always=1` is set too.
+    const wrongMembers = (opt('wrong-procedure-members') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const reprompted = /WRONG PROCEDURE/.test(input);
+    if (
+      wrongMembers.includes(issue) &&
+      (!reprompted || opt('wrong-procedure-always') !== undefined)
+    ) {
+      post('review', 'done', { next: 'ship', ac_total: '0' });
+      console.log(`fake batch member: posted a FULL-CYCLE review done for #${issue}`);
+      process.exit(0);
+    }
     // #686: opt-in REAL member work — write `--commit-file=<name>` into the
     // worktree the prompt names and commit it with the `(#<issue>)` subject
     // trailer `boundaryCommits` attributes by, so `memberRanges` records a

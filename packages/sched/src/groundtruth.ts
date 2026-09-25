@@ -13,7 +13,7 @@
 
 import { unwrapList } from './json';
 import { createExecFn, type ExecFn } from './project';
-import type { BatchPhase } from './types';
+import { type BatchPhase, PHASES } from './types';
 
 /**
  * A git ref name safe to pass as a literal CLI argument (CWE-88). Branch
@@ -968,6 +968,25 @@ export function isMemberComplete(
  */
 function isBatchMemberTrail(milestone: GroundTruthMilestone): boolean {
   return milestone.keys.mode === 'slot' || milestone.keys.batch !== undefined;
+}
+
+/**
+ * #822 (#810 proposal 3): a batch member's dispatch ran the WRONG PROCEDURE —
+ * it posted, after this dispatch, a full-cycle-line milestone (`gate` …
+ * `report`) that carries neither `batch=` nor `mode=slot`, the shape
+ * full-cycle writes and member-cycle never does (imboard #4174: `review done
+ * next=ship`, no `batch`/`review` keys). Fenced like `isMemberComplete`; a
+ * `null` dispatch time never matches (with no fence, an unrelated older
+ * full-cycle trail on the issue would read as this dispatch's).
+ */
+export function isWrongProcedureMilestone(
+  milestone: GroundTruthMilestone | null,
+  dispatchedAt: string | null
+): boolean {
+  if (milestone === null || dispatchedAt === null) return false;
+  if (!(PHASES as readonly string[]).includes(milestone.phase)) return false;
+  if (isBatchMemberTrail(milestone)) return false;
+  return postdatesDispatch(milestone.at, dispatchedAt);
 }
 
 /**

@@ -18,6 +18,7 @@ import {
   type RunnableUnit,
   runnableUnits,
 } from './readiness';
+import { DISSOLVE_REFUSED_PREFIX } from './recovery';
 import {
   CLEARED_SLOT_FIELDS,
   findBatch,
@@ -29,6 +30,7 @@ import {
   transitionBatch,
   transitionIssue,
   transitionSlot,
+  validatedMembersOf,
 } from './state';
 import type { QueueEntry, SchedConfig, SchedState, SlotRole } from './types';
 import {
@@ -281,6 +283,86 @@ export function stopIssue(
     }
   }
   return { state: next, releasedSlots: released };
+}
+
+/**
+ * #822: the `blocked_reason`s a batch can be RESUMED from over its landed
+ * work — blocks where the members that landed are good and what stopped is
+ * the batch's own machinery: a `full` dissolve refused over validated members
+ * (#810 `dissolve-refused:<why>`) and #832's tail-stage blocks.
+ * `no-landed-members` is deliberately absent (nothing to resume), as are the
+ * gate block (`gate-inconclusive:*` has its own recheck, `resumeBlockedGate`)
+ * and post-merge reasons.
+ */
+export const LANDED_RESUMABLE_BLOCK_PREFIXES: readonly string[] = [
+  DISSOLVE_REFUSED_PREFIX,
+  'tail-blocked:',
+  'members-mismatch:',
+  'respawn-cap:tail',
+];
+
+/** #822: whether `reason` is a block `resumeLandedBatch` can resume. */
+export function isLandedResumableBlock(reason: string | null): boolean {
+  return reason !== null && LANDED_RESUMABLE_BLOCK_PREFIXES.some((p) => reason.startsWith(p));
+}
+
+/**
+ * `sched resume --batch B` on a batch blocked over LANDED work (#822 item 1):
+ * move it `blocked → validating`, so the engine's next tick re-runs the batch
+ * gate (aggregate suite) and then the tail over the landed members only
+ * (#832) — shipping the validated members instead of requeueing them
+ * full-cycle (`sched abandon --batch`) or leaving them to a hand-opened PR.
+ * `executing_member` is pinned to the last member: `runValidate` goes back to
+ * `executing` while it points below the end, which here would re-dispatch
+ * members the dissolve already released. The respawn count starts fresh.
+ * Pure: refuses (throws `SchedNotFoundError`, naming why) when the batch is
+ * not blocked on a resumable reason, holds no landed member, lacks its
+ * integration worktree/branch, or still holds a slot.
+ */
+export function resumeLandedBatch(
+  state: SchedState,
+  batchId: string,
+  now: Date = new Date()
+): { state: SchedState; landed: number[]; reason: string } {
+  const batch = findBatch(state, batchId);
+  if (!batch) {
+    throw new SchedNotFoundError(`Batch not found: ${batchId}`);
+  }
+  const reason = batch.blocked_reason;
+  if (batch.status !== 'blocked' || !isLandedResumableBlock(reason)) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId} is ${batch.status}${reason ? ` (${reason})` : ''} — only a batch blocked on ${LANDED_RESUMABLE_BLOCK_PREFIXES.join(' / ')} resumes over its landed members`
+    );
+  }
+  const landed = validatedMembersOf(state, batch);
+  if (landed.length === 0) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId} has no landed (validated) member to resume — \`sched abandon --batch ${batchId}\` instead`
+    );
+  }
+  if (batch.worktree === null || batch.branch === null) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId} has no integration worktree/branch recorded — nothing to re-run the gate in`
+    );
+  }
+  const held = slotsForBatch(state, batchId);
+  if (held.length > 0) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId} still holds slot(s) ${held.map((s) => s.id).join(',')} — stop its agents first (\`sched stop --batch ${batchId}\` stops the batch; wait for them to exit instead to keep it)`
+    );
+  }
+  const next = transitionBatch(
+    state,
+    batchId,
+    'validating',
+    {
+      blocked_reason: null,
+      agent_exits: null,
+      executing_member: batch.members.length,
+    },
+    now
+  );
+  return { state: next, landed, reason: reason as string };
 }
 
 /**
