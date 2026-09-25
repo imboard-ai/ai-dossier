@@ -170,7 +170,10 @@ Actions → Publish Packages to npm → Run workflow
    ↓
 8. Publish @ai-dossier/sched, @ai-dossier/cli, @ai-dossier/mcp-server, @ai-dossier/worktree-pool
    - Publish to https://registry.npmjs.org with --provenance
-   - Each package skipped if version already published
+   - Each package checked by `scripts/publish-guard.mjs`: skipped if its version is already on
+     npm from this commit or from identical release-relevant source; a version on npm built from
+     different source is a collision — unaffected packages still publish (dependents of the
+     colliding one are held), then `Fail on version collisions` fails the job (#826)
    ↓
 9. Create Git tag (if version bumped)
    - Tag format: v0.1.0, v0.2.0, etc.
@@ -309,10 +312,27 @@ git push
 Actions → Publish Packages → Run workflow → Select "patch"
 ```
 
+### Workflow Fails: "<pkg>@<ver> version collision" / "Fail on version collisions"
+
+**Problem**: The package's version is already on npm but was published from a commit whose
+`src/`/`bin/` or `@ai-dossier/*` pins differ from this one — usually two PRs bumped to the same
+number and the other published first (#826), or an unbumped change merged under
+`no-release-needed`. Unaffected packages were published; this one (and its dependents) were not.
+Every publish run fails this way until the bump lands.
+
+**Solution**: Open a follow-up PR bumping the named package past that version; its merge publishes
+the unreleased change:
+```bash
+cd cli && npm version patch --no-git-tag-version
+```
+
 ### CI Fails: "Version-bump check FAILED"
 
 **Problem**: The PR changes a publishable package's `src/` or `bin/` but its `package.json`
-version still matches the base branch. The publish workflow would skip it as already published.
+version still matches the base branch. After merge the publish workflow would find that version
+already on npm from different source and fail the run (version collision), leaving the change
+unreleased. The check also reports `STALE (X is not above Y on the base-branch tip)` when another
+PR bumped the package after your branch was cut — merge the base branch and bump above Y.
 
 **Solution**: Bump the package's version, or apply the `no-release-needed` label when the change
 needs no release:
