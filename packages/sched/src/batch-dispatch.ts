@@ -4061,6 +4061,11 @@ function reconcileTailSlot(
 
 function reconcileReportSlot(
   deps: BatchDispatchDeps,
+  // Unused — kept so this function's signature matches its `reconcile*Slot`
+  // siblings (`reconcileMemberSlot`, `reconcileFixSlot`, `reconcileTailSlot`),
+  // all called uniformly as `reconcile*Slot(deps, config, ...)` from the same
+  // dispatch loop (#830 — pre-existing Biome `noUnusedFunctionParameters`,
+  // independently fixed the same way by #855/#857).
   _config: SchedConfig,
   batchId: string,
   slot: SlotEntry,

@@ -750,7 +750,7 @@ export function buildStatusReport(
     repo?: string;
     commitInBase?: CommitInBase;
     orphanList?: OpenAnchorLister;
-    /** #790: the base branch an orphan's own `base_branch:` metadata must match to ever be `orphan-closable-candidate` — passed to `sweepOrphanAnchors`; defaults to `DEFAULT_ORPHAN_BASE_BRANCH` ('main') when omitted. */
+    /** #790: the base branch an orphan's own `base_branch:` metadata must match to ever be `orphan-closable-candidate` — passed to `sweepOrphanAnchors`; defaults to `DEFAULT_BASE_BRANCH` ('main') when omitted. */
     expectedBaseBranch?: string;
   },
   /** #791: the opt-in kept-worktree reader; omitted → no `kept-worktree` warnings (zero behavior change for every existing caller). */
