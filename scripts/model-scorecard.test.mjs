@@ -1277,6 +1277,11 @@ describe('main — guards against writing a snapshot that is not evidence', () =
     // A dist built before this script's dependencies existed is present but incomplete; the
     // missing export used to surface as "every repo failed", which points at gh, not the build.
     const staleRoot = mkdtempSync(join(tmpdir(), 'model-scorecard-stale-'));
+    // require() resolves module type from the nearest ancestor package.json, which can live
+    // above tmpdir() (e.g. a stray /tmp/package.json with "type": "module") and isn't under this
+    // fixture's control. Pin the fixture root's own package.json so the bare .js dist file below
+    // always resolves as CommonJS, regardless of what the real filesystem happens to contain.
+    writeFileSync(join(staleRoot, 'package.json'), JSON.stringify({ type: 'commonjs' }));
     mkdirSync(join(staleRoot, 'cli', 'dist'), { recursive: true });
     writeFileSync(join(staleRoot, 'cli', 'dist', 'runstate.js'), 'module.exports = {};');
     expect(() => main(opts({ repoRoot: staleRoot }))).toThrow(/does not export parseMilestones/);
