@@ -61,6 +61,12 @@ const opt = (name) => {
   const hit = args.find((a) => a.startsWith(`--${name}=`));
   return hit === undefined ? undefined : hit.slice(name.length + 3);
 };
+/** A comma-separated list option (`--x=a,b`), trimmed, empty entries dropped. */
+const listOpt = (name) =>
+  (opt(name) ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 
 let input = '';
 process.stdin.on('data', (d) => {
@@ -121,10 +127,7 @@ process.stdin.on('end', () => {
       // its work (so concurrent members are observably alive at once);
       // `--slow-members=<a,b>` + `--slow-ms=<n>` override the hold for those
       // issues (out-of-order completion, for the ordered-landing tests).
-      const slowMembers = (opt('slow-members') ?? '')
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+      const slowMembers = listOpt('slow-members');
       const holdMs = slowMembers.includes(issue)
         ? Number(opt('slow-ms') ?? 0)
         : Number(opt('member-sleep-ms') ?? 0);
@@ -186,6 +189,29 @@ process.stdin.on('end', () => {
     }
     const batchMatch = input.match(/batch=(\S+)/);
     const batchId = batchMatch ? batchMatch[1].replace(/[.,]+$/, '') : 'unknown';
+    // #822: `--wrong-procedure-members=<a,b>` — those members run the WRONG
+    // procedure (before any commit, as full-cycle's gate/setup would be): they post a full-cycle-shaped `review done next=ship` with no
+    // `batch=`/`mode=slot` (imboard #4174). A re-prompted dispatch (the prompt
+    // carries the engine's WRONG PROCEDURE directive) behaves correctly unless
+    // `--wrong-procedure-always=1` is set too.
+    const wrongMembers = listOpt('wrong-procedure-members');
+    // `WRONG_PROCEDURE_MARKER` (dispatch.ts) — the directive's fixed opening.
+    const reprompted = input.includes('WRONG PROCEDURE');
+    if (
+      wrongMembers.includes(issue) &&
+      (!reprompted || opt('wrong-procedure-always') !== undefined)
+    ) {
+      // `--wrong-procedure-shipped=<pr>`: the stray full-cycle run got as far
+      // as parking its own PR (ship awaiting-merge pr=<n>).
+      const strayPr = opt('wrong-procedure-shipped');
+      if (strayPr !== undefined) {
+        post('ship', 'awaiting-merge', { pr: strayPr, head: 'abc1234' });
+      } else {
+        post('review', 'done', { next: 'ship', ac_total: '0' });
+      }
+      console.log(`fake batch member: posted a FULL-CYCLE milestone for #${issue}`);
+      process.exit(0);
+    }
     // #686: opt-in REAL member work — write `--commit-file=<name>` into the
     // worktree the prompt names and commit it with the `(#<issue>)` subject
     // trailer `boundaryCommits` attributes by, so `memberRanges` records a
@@ -212,18 +238,12 @@ process.stdin.on('end', () => {
     // #810: `--die-members=<a,b>` — the member exits WITHOUT any terminal
     // milestone (after its optional commit): the engine's unverified-exit
     // eviction, as opposed to `--evict-members`' explicit hand-back.
-    const dieMembers = (opt('die-members') ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const dieMembers = listOpt('die-members');
     if (dieMembers.includes(issue)) {
       console.log(`fake batch member: exiting without a milestone for #${issue}`);
       process.exit(1);
     }
-    const evictMembers = (opt('evict-members') ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const evictMembers = listOpt('evict-members');
     if (evictMembers.includes(issue)) {
       const reason = opt('evict-reason') ?? 'test-failures';
       post('review', 'blocked', { mode: 'slot', batch: batchId, reason });

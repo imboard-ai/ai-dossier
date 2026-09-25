@@ -229,8 +229,10 @@ export interface BatchJournalSummary {
   handedBack: number[];
   /** `suite-failed` lines: aggregate-suite (local gate) runs that did not come back green. */
   suiteFailures: number;
-  /** The last `batch-blocked` detail, or null when the batch never blocked. */
+  /** The last `batch-blocked` detail, or null when the batch never blocked (or was resumed since, #822). */
   blocked: string | null;
+  /** #822: members re-prompted once for running the wrong procedure (`member-reprompted`). */
+  reprompted: number[];
   dissolved: boolean;
 }
 
@@ -242,6 +244,7 @@ const BATCH_MEMBER_EVENTS = new Set([
   'member-advanced',
   'member-evicted',
   'member-handed-back',
+  'member-reprompted',
   'unit-failed',
   'run-log-recorded',
   'gate-skipped',
@@ -257,6 +260,7 @@ export function summarizeBatchJournal(
   const landed = new Set<number>();
   const evicted = new Set<number>();
   const handedBack = new Set<number>();
+  const reprompted = new Set<number>();
   let suiteFailures = 0;
   let blocked: string | null = null;
   let dissolved = false;
@@ -270,7 +274,10 @@ export function summarizeBatchJournal(
     }
     if (issue !== null && event.event === 'member-handed-back') handedBack.add(issue);
     if (event.event === 'suite-failed') suiteFailures += 1;
+    if (issue !== null && event.event === 'member-reprompted') reprompted.add(issue);
     if (event.event === 'batch-blocked') blocked = event.detail ?? 'blocked';
+    // #822: `sched resume --batch` took it out of that block.
+    if (event.event === 'batch-resumed') blocked = null;
     if (event.event === 'batch-dissolved') dissolved = true;
   }
   const sorted = (s: Set<number>) => [...s].sort((a, b) => a - b);
@@ -279,6 +286,7 @@ export function summarizeBatchJournal(
     landed: sorted(landed),
     evicted: sorted(evicted),
     handedBack: sorted(handedBack),
+    reprompted: sorted(reprompted),
     suiteFailures,
     blocked,
     dissolved,

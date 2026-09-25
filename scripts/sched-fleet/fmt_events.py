@@ -14,6 +14,10 @@ KEEP = {
     "dissolve-suppressed",
     "member-requeued",
     "batch-blocked",
+    # #822: an operator resumed a batch over its landed work; a member that
+    # ran the wrong procedure was re-prompted once.
+    "batch-resumed",
+    "member-reprompted",
 }
 out = []
 for line in sys.stdin:
@@ -31,6 +35,6 @@ for line in sys.stdin:
     if d.get("tier"): bits.append(f"tier={d['tier']}")
     if d.get("reason"): bits.append(d["reason"])
     if d.get("pr"): bits.append(f"PR#{d['pr']}")
-    if event in ("dispatch-profile-missing", "dissolve-suppressed", "batch-blocked") and d.get("detail"): bits.append(d["detail"])
+    if event in ("dispatch-profile-missing", "dissolve-suppressed", "batch-blocked", "batch-resumed") and d.get("detail"): bits.append(d["detail"])
     out.append(" ".join(str(b) for b in bits))
 print("\n".join(out[:8]))

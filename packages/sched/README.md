@@ -31,6 +31,7 @@ ai-dossier sched start --once     # a single reconcile+refill tick (cron-style)
 ai-dossier sched status           # queue (+pr/cleanup), engine lease, slots, batches, blocked/failed; --anchors adds the ledger anchor sweep (#768) plus orphaned anchors no longer in state.batches (#790)
 ai-dossier sched pause            # prevent every new agent process; live units keep running
 ai-dossier sched resume
+ai-dossier sched resume --batch b1  # recheck a gate-inconclusive block (#583), or re-run gate + tail over a batch blocked over landed work (#822)
 ai-dossier sched stop --issue 42  # terminate one full-cycle agent (or stop a parked batch member, #832) and record it stopped (no recovery)
 ai-dossier sched stop --batch b1  # terminate every batch agent (incl. parallel members) and stop unfinished members
 ai-dossier sched abandon --issue 42 --reason "operator abort"
@@ -771,6 +772,9 @@ failure rails: executing → dissolving (a member self-reports blocked)
                validating → blocked (suite report unreadable, #562) → validating
                executing → blocked (gate-inconclusive:<cap>, #583) → executing
                  (`sched resume --batch <id>` re-runs the gate; nothing requeued/reverted)
+               (dissolve refused | tail) → blocked (dissolve-refused:* / tail-blocked:* /
+                 members-mismatch:* / respawn-cap:tail) → validating
+                 (`sched resume --batch <id>` re-runs gate + tail over the landed members, #822)
 ```
 
 - **One shared worktree/branch per batch**, claimed once by a deterministic (no LLM)
@@ -1004,13 +1008,15 @@ Dissolve never throws validated work away:
   `gh pr create --head <integration branch> --base <base>` — once it merges,
   `reconcileStaleBlockedBatches` settles the validated members to shipped; for a red suite
   or a partial revert, inspect/fix the branch first; `sched abandon --batch` requeues them
-  full-cycle instead. (A `sched resume --batch` arm for these blocks is a follow-up.) Without validated members it dissolves
+  full-cycle instead. Since #822, `sched resume --batch <id>` re-runs the gate and the tail
+  over the validated members instead (see [below](#resuming-a-batch-blocked-over-landed-work-822)). Without validated members it dissolves
   as before, except that in-flight members with a member branch are parked `evicted` and
   every requeue carries the batch's dispatch profile (`carryDispatchProfile: false` only
   for `dispatch-profile-missing:*`, where the profile itself is what broke).
 - Not changed: the `halved` PR-conflict split still re-batches its members, and
   aggregate-suite evictions (`evictMembers`, post-landing, member branch already deleted)
-  still requeue full-cycle — now on the batch profile.
+  still requeue full-cycle — now on the batch profile. Both, plus an engine-set requeue base,
+  are tracked in #840.
 
 State schema 1.24.0: `IssueStatus` gains `handed-back`; `EvictionRecord` gains optional
 `kind`/`branch`, `FailureEvidence` optional `branch`.
@@ -1052,13 +1058,50 @@ State schema 1.24.0: `IssueStatus` gains `handed-back`; `EvictionRecord` gains o
   the batch. A spawn that finds the count already spent (a crash between the count and the
   block) refuses instead of spawning. Before #832, b-20260924-04's tail was respawned four
   times at the strong tier (~375k tokens) until an operator stopped the batch.
-- **Clearing these blocks.** `no-landed-members`, `members-mismatch:*`, `tail-blocked:*` and
-  `respawn-cap:tail` have no `sched resume --batch` recheck. `sched status` names the
-  evidence (the anchor's blocked milestone, or the tail log) and the exits: fix the cause
-  on the integration branch and open its PR by hand (`gh pr create --head <branch> --base
-  <base>`; once it merges, `reconcileStaleBlockedBatches` settles the batch), or `sched
-  abandon --batch <id>` (requeues the landed members full-cycle; for `no-landed-members`
-  there is nothing to lose).
+- **Clearing these blocks.** `sched status` names the evidence (the anchor's blocked
+  milestone, or the tail log) and the exits. For `members-mismatch:*`, `tail-blocked:*` and
+  `respawn-cap:tail`: fix the cause, then `sched resume --batch <id>` (#822, below), or open
+  the integration branch's PR by hand (`gh pr create --head <branch> --base <base>`; once it
+  merges, `reconcileStaleBlockedBatches` settles the batch), or `sched abandon --batch <id>`
+  (requeues the landed members full-cycle). `no-landed-members` has nothing to resume:
+  abandon it.
+
+### Resuming a batch blocked over landed work (#822)
+
+`sched resume --batch <id>` on a batch blocked `dissolve-refused:*` (#810) or on one of #832's
+tail blocks (`tail-blocked:*`, `members-mismatch:*`, `respawn-cap:tail`) —
+`LANDED_RESUMABLE_BLOCK_PREFIXES` — calls `resumeLandedBatch`: `blocked → validating`, with
+`blocked_reason`/`agent_exits` cleared and `executing_member` pinned to the last member (so
+`runValidate` never re-admits a member the dissolve released). The engine's next tick
+re-runs the batch gate and then the tail over the landed members only; a gate still red
+re-blocks it once. It journals `batch-resumed` (naming any tail exits it cleared). Refused,
+with the reason, when no member is landed, the batch still holds a slot, it has no
+integration worktree/branch/anchor, a PR is already recorded against it (let the stale-blocked
+reconcile settle it), or the tail's own members check would refuse the same landed set again
+(`tailMembersRefusal`). The CLI also refuses when the integration worktree is gone from disk
+or a profiled batch's dispatch profile no longer resolves (restore it first).
+`gate-inconclusive:*` keeps its own recheck (`resumeBlockedGate`).
+
+### Wrong-procedure members are re-prompted once (#822)
+
+A member whose dispatch posts a full-cycle-line milestone (`gate` … `report`) carrying neither
+`batch=` nor `mode=slot` ran the WRONG PROCEDURE (imboard #4174 ran full-cycle as a
+member: `review done next=ship`) — `isWrongProcedureMilestone`, fenced to this dispatch. A
+hand-back shape (`blocked`, `review partial`) never counts: it keeps its own path. Both
+member rails then:
+
+- stop a live agent and wait for it to be gone before anything else (a dying full-cycle run
+  could still push, post or open a PR in that worktree);
+- if the milestone shows the run already SHIPPED (a `ship`/`report` phase or a `pr=` key —
+  `wrongProcedureShippedPr`), evict it at once `wrong-procedure-shipped`, naming the stray PR
+  (`stray_pr`) for the operator to close or reconcile — a re-prompt cannot undo a PR;
+- otherwise, the first time, record it in `BatchEntry.reprompted_members`
+  (`{ issue, milestone_at, reprompted_at }`, schema 1.27.0) and journal `member-reprompted`:
+  it respawns in place, in the same worktree, with `wrongProcedureDirective` appended to its
+  prompt (engine values only — no milestone text);
+- a later wrong-procedure milestone posted strictly after `reprompted_at` (no skew tolerance:
+  the killed first dispatch's milestones would otherwise still count inside the 60s fence)
+  evicts it `wrong-procedure` (parked `evicted`, branch kept, #810).
 
 ## API surface
 
@@ -1225,6 +1268,11 @@ import {
   type CapOutcome,       // ok | task-failed | automation-broken | capability-unavailable
   type CapabilityGateResult, // {outcome: CapOutcome, outputTail?, reason?} — runCapability's return shape (#583)
   resumeBlockedGate,     // #583: sched resume --batch <id> — re-run the gate that blocked a batch
+  resumeLandedBatch,     // #822: sched resume --batch <id> over landed work — blocked → validating
+  isLandedResumableBlock, LANDED_RESUMABLE_BLOCK_PREFIXES, // #822: which blocks resumeLandedBatch accepts
+  isWrongProcedureMilestone, wrongProcedureShippedPr, // #822: wrong-procedure detection; did the stray run already ship?
+  wrongProcedureDirective, WRONG_PROCEDURE_MARKER, // #822: the re-prompt text and its fixed opening
+  type RepromptRecord,   // #822: BatchEntry.reprompted_members ({ issue, milestone_at, reprompted_at })
   buildMemberPrompt, buildBatchTailPrompt, buildBatchReportPrompt, // #523 prompt builders (#677: member carries {issue}/{batch}/{worktree}/{integration_branch})
   memberBranchFor, // #677: the member branch name, `batch/<id>-m<n>-<issue>` — one definition, every recovery surface derives from it
   DEFAULT_MEMBER_PROMPT_TEMPLATE, DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE,
@@ -1366,7 +1414,7 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to the current schema (1.26.0 — 1.24.0 was #810: no backfill,
+  load and migrate to the current schema (1.27.0 — 1.24.0 was #810: no backfill,
   `kind`/`branch` optional, absent = an `evicted` record with no branch) automatically
   (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
@@ -1387,6 +1435,8 @@ after-the-fact recovery, not a missing-data bug.
   backfill to `null`/`null`/`0` — #789, schema 1.25.0).
   Schema 1.26.0 (#832): `BatchEntry` gains `agent_exits` (the per-phase tail/report
   respawn counter); `null` is backfilled on load.
+  Schema 1.27.0 (#822): `BatchEntry` gains `reprompted_members`
+  (`{ issue, milestone_at, reprompted_at }` records; `[]` backfilled).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
