@@ -173,7 +173,9 @@ Actions → Publish Packages to npm → Run workflow
    - Each package checked by `scripts/publish-guard.mjs`: skipped if its version is already on
      npm from this commit or from identical release-relevant source; a version on npm built from
      different source is a collision — unaffected packages still publish (dependents of the
-     colliding one are held), then `Fail on version collisions` fails the job (#826)
+     colliding one are held), then `Fail on version collisions` fails the job (#826). A package
+     the guard cannot decide (registry error, missing gitHead) is handled the same way, as
+     `unavailable` — never skipped silently
    ↓
 9. Create Git tag (if version bumped)
    - Tag format: v0.1.0, v0.2.0, etc.
@@ -325,6 +327,17 @@ the unreleased change:
 ```bash
 cd cli && npm version patch --no-git-tag-version
 ```
+
+### Workflow Fails: "Publish guard could not decide" / "publish-guard (<dir>) could not run"
+
+**Problem**: The guard could not tell whether a package's already-published version matches this
+commit — the registry answered something other than 200/404 after retries, the published version
+has no usable `gitHead`, or that `gitHead` could not be fetched. The package is recorded as
+`unavailable`: it is not published, its `@ai-dossier/*` dependents are held, unrelated packages
+still publish, and `Fail on version collisions` fails the job naming it. Nothing is skipped silently.
+
+**Solution**: Follow the `Fix:` line in that package's "Check if ... needs publishing" log — re-run
+the workflow for a registry outage; bump the package's version for a missing gitHead.
 
 ### CI Fails: "Version-bump check FAILED"
 

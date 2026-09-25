@@ -145,6 +145,7 @@ jobs:
   publish:
     needs: [test, smoke]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: write
       id-token: write
@@ -222,7 +223,7 @@ jobs:
         run: node scripts/publish-guard.mjs --dir packages/core --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Publish @ai-dossier/core
-        if: steps.check-core.outputs.skip != 'true'
+        if: steps.check-core.outputs.skip == 'false'
         run: |
           cd packages/core
           npm publish --provenance --access public
@@ -235,7 +236,7 @@ jobs:
         run: node scripts/publish-guard.mjs --dir packages/worktree-pool --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Publish @ai-dossier/worktree-pool
-        if: steps.check-pool.outputs.skip != 'true'
+        if: steps.check-pool.outputs.skip == 'false'
         run: |
           cd packages/worktree-pool
           npm publish --provenance --access public
@@ -247,7 +248,7 @@ jobs:
       # Before cli: a published cli tarball depends on @ai-dossier/sched, so
       # the registry must have it first or the cli install breaks for users.
       - name: Publish @ai-dossier/sched
-        if: steps.check-sched.outputs.skip != 'true'
+        if: steps.check-sched.outputs.skip == 'false'
         run: |
           cd packages/sched
           npm publish --provenance --access public
@@ -257,7 +258,7 @@ jobs:
         run: node scripts/publish-guard.mjs --dir cli --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Publish @ai-dossier/cli
-        if: steps.check-cli.outputs.skip != 'true'
+        if: steps.check-cli.outputs.skip == 'false'
         run: |
           cd cli
           npm publish --provenance --access public
@@ -267,18 +268,23 @@ jobs:
         run: node scripts/publish-guard.mjs --dir mcp-server --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Publish @ai-dossier/mcp-server
-        if: steps.check-mcp.outputs.skip != 'true'
+        if: steps.check-mcp.outputs.skip == 'false'
         run: |
           cd mcp-server
           npm publish --provenance --access public
 
       # Each check step records a collision (version already on npm, built from
-      # different source) in a shared ledger instead of failing, so unaffected
-      # packages still publish; a package whose dependency collided is held
-      # (skip=true) by the guard itself. This step then fails the job naming
-      # every collided package — the ledger is the list, nothing hand-maintained
-      # here (#826).
+      # different source) or an unavailable package (the guard could not decide:
+      # registry error, missing/unfetchable gitHead) in a shared ledger instead of
+      # failing, so unaffected packages still publish; a package whose dependency
+      # collided, was unavailable or was held is itself held (skip=true) by the
+      # guard. Publish steps run only on an explicit skip == 'false', so a check
+      # that wrote no output never publishes. This step then fails the job naming
+      # every collided and unavailable package — the ledger is the list, nothing
+      # hand-maintained here (#826). `!cancelled()` so a failed publish step
+      # above cannot hide it.
       - name: Fail on version collisions
+        if: ${{ !cancelled() }}
         run: node scripts/publish-guard.mjs --report-collisions "$RUNNER_TEMP/publish-collisions"
 
   verify:

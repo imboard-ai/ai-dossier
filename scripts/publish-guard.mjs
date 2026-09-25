@@ -31,10 +31,18 @@
 // `no-release-needed` label produces: that source is on main and not on npm.
 // It stays red until the package is bumped — loud on purpose.
 //
+// The published version's gitHead is read from the registry's HTTP JSON API
+// (`GET <registry>/<name>/<version>`), a stable public format — not from
+// `npm view` output, whose shape changed under CI when npm@latest moved to
+// npm 12 (a one-element array instead of an object) and turned the first
+// publish run after #839 red (parser fix #842).
+//
 // Operating principle, shared with check-version-bumps.mjs: never FAIL OPEN.
-// Anything that leaves the answer unknown (an npm error that is not a 404, a
-// published version with no gitHead, a gitHead that cannot be fetched) exits 2
-// rather than skipping — a skip is exactly the silent outcome this prevents.
+// Anything that leaves the answer unknown (a registry answer other than 200 or
+// 404, a published version with no gitHead, a gitHead that cannot be fetched)
+// is "unavailable" — never a skip, which is exactly the silent outcome this
+// prevents. Without --defer-collision it exits 2; with it, it is recorded in
+// the ledger (as is an unexpected error in the guard itself).
 //
 // Usage:
 //   node scripts/publish-guard.mjs --dir <package-dir> [--head <ref>]
@@ -42,21 +50,28 @@
 //   node scripts/publish-guard.mjs --report-collisions <ledger>
 //
 // When $GITHUB_OUTPUT is set, writes `skip=true|false` and
-// `collision=true|false` there. Exit codes: 0 = publish or skip,
-// 1 = collision, 2 = the guard could not run.
+// `collision=true|false` there (an unavailable package writes skip=true,
+// collision=false). Exit codes: 0 = publish or skip (and, under
+// --defer-collision, a recorded collision/unavailable), 1 = collision
+// (without --defer-collision) or --report-collisions found entries,
+// 2 = the guard could not run (without --defer-collision, or the ledger
+// itself could not be written).
 //
-// `--defer-collision <ledger>` is for the workflow only: a collision exits 0
-// and is recorded in the ledger file, so the other packages still publish.
-// Every later package checked against the same ledger is HELD (skip) when one
-// of its `@ai-dossier/*` dependencies collided or was held — it would
-// otherwise ship against the older published dependency. The job's final
-// step runs `--report-collisions <ledger>`, which exits 1 naming every
-// collided package. The ledger is the single list of packages, so a new
+// `--defer-collision <ledger>` is for the workflow only: a collision — or a
+// package the guard could not decide ("unavailable") — exits 0 and is
+// recorded in the ledger file, so one package's problem never stops the
+// unrelated ones from publishing. Every later package checked against the
+// same ledger is HELD (skip) when one of its `@ai-dossier/*` dependencies
+// collided, was unavailable, or was held — it would otherwise ship against
+// the older published dependency. The job's final step runs
+// `--report-collisions <ledger>`, which exits 1 naming every collided and
+// unavailable package. The ledger is the single list of packages, so a new
 // package step cannot be forgotten in a hand-maintained `if:`.
 // ------------------------------------------------------------------
 
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
@@ -75,9 +90,33 @@ const MAX_LISTED_FILES = 10;
 /** npm's `gitHead` is always a full commit sha. */
 const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 
-/** Attempts for an `npm view` that fails with something other than E404. */
-const NPM_LOOKUP_ATTEMPTS = 3;
-const NPM_LOOKUP_BACKOFF_MS = [5_000, 15_000];
+/** The registry `publish-packages.yml` publishes to. */
+export const REGISTRY_URL = 'https://registry.npmjs.org';
+
+/** Attempts for a lookup whose failure is transient (network, 5xx, 429). */
+const LOOKUP_ATTEMPTS = 3;
+const LOOKUP_BACKOFF_MS = [5_000, 15_000];
+const backoffMs = (attempt) => LOOKUP_BACKOFF_MS[attempt - 1] ?? LOOKUP_BACKOFF_MS.at(-1);
+
+/** Budget for fetching a published gitHead that is not in the clone. */
+const GIT_FETCH_TIMEOUT_MS = 120_000;
+
+/** npm package-name shape (optionally scoped), checked before it goes into a URL. */
+const PACKAGE_NAME_RE = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
+
+/**
+ * A CheckUnavailableError worth retrying: the same request may well succeed
+ * a few seconds later. Everything else (a missing gitHead, a manifest for the
+ * wrong version) is permanent and is not retried.
+ */
+function transient(message) {
+  const err = new CheckUnavailableError(message);
+  err.retryable = true;
+  return err;
+}
+
+/** Per-request budget for a registry lookup. */
+const REGISTRY_TIMEOUT_MS = 20_000;
 
 const short = (sha) => (typeof sha === 'string' ? sha.slice(0, SHORT_SHA_LENGTH) : String(sha));
 
@@ -158,6 +197,126 @@ export function formatDecision({ name, version, published, headSha, decision }) 
 
 // ---------------------------------------------------------------- IO ---------
 
+/** The gitHead of a registry version manifest, or a CheckUnavailableError. */
+function requireGitHead(manifest, spec) {
+  const gitHead = manifest !== null && typeof manifest === 'object' ? manifest.gitHead : undefined;
+  if (typeof gitHead !== 'string' || !FULL_SHA_RE.test(gitHead)) {
+    throw new CheckUnavailableError(
+      `${spec} is on npm but has no usable gitHead (${oneLine(JSON.stringify(gitHead))}), so the ` +
+        'guard cannot tell whether it was built from this source.\n' +
+        '  Fix: bump the version so this commit publishes under a fresh number.'
+    );
+  }
+  return { gitHead };
+}
+
+/** Refuse an answer that describes a different package or version than was asked. */
+function requireIdentity(entry, name, version) {
+  if (entry?.name !== name || entry?.version !== version) {
+    throw new CheckUnavailableError(
+      `the registry returned ${oneLine(`${entry?.name}@${entry?.version}`)} when asked ` +
+        `for ${name}@${version}; refusing to compare against a different version.`
+    );
+  }
+}
+
+/**
+ * Interpret the registry's answer to `GET <registry>/<name>/<version>`.
+ *
+ * 404 -> null (the version, or the whole package, is not on npm). 200 -> the
+ * manifest, which must be for exactly this name and version and carry a full
+ * gitHead. Anything else throws: an unexpected status or body would otherwise
+ * have to be guessed as "publish" or "skip".
+ */
+export function parseRegistryResponse({ status, body }, name, version) {
+  const spec = `${name}@${version}`;
+  if (status === 404) return null;
+  if (status !== 200) {
+    const message =
+      `the registry answered HTTP ${status} for ${spec} (${oneLine(body, 120)}).\n` +
+      '  Fix: re-run the workflow once the registry is reachable; the guard will not guess.';
+    if (status === 429 || status >= 500) throw transient(message);
+    throw new CheckUnavailableError(message);
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(body);
+  } catch (err) {
+    throw new CheckUnavailableError(
+      `the registry's manifest for ${spec} is not JSON (${oneLine(err.message)}).`
+    );
+  }
+  requireIdentity(manifest, name, version);
+  return requireGitHead(manifest, spec);
+}
+
+/** The exact-version manifest URL; scoped names keep `@` and encode `/`. */
+export function registryUrl(name, version) {
+  if (!PACKAGE_NAME_RE.test(name)) {
+    throw new CheckUnavailableError(`'${oneLine(name)}' is not a valid npm package name.`);
+  }
+  return `${REGISTRY_URL}/${encodeURIComponent(name).replace(/^%40/, '@')}/${encodeURIComponent(version)}`;
+}
+
+/** One registry request. `fetchImpl` is injectable for tests. */
+export async function registryViewOnce(name, version, { fetchImpl = fetch } = {}) {
+  const url = registryUrl(name, version);
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      headers: { accept: 'application/json', 'cache-control': 'no-cache' },
+      // A redirect to another origin must never supply the manifest we trust.
+      redirect: 'error',
+      signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw transient(`cannot reach ${url} (${oneLine(err?.message ?? err)}).`);
+  }
+  let body;
+  try {
+    body = await response.text();
+  } catch (err) {
+    throw transient(
+      `reading the registry answer for ${name}@${version} failed (${oneLine(err?.message)}).`
+    );
+  }
+  return parseRegistryResponse({ status: response.status, body }, name, version);
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The published version's source commit, from the registry HTTP API. A
+ * transient failure (network, 5xx, 429) is retried with backoff (a registry
+ * blip would otherwise mark the package unavailable), then rethrown — the
+ * retries narrow the window, they never turn "unknown" into "publish". A
+ * permanent failure is rethrown at once.
+ */
+export async function registryLookup(
+  name,
+  version,
+  { view = registryViewOnce, wait = sleep, log = console.error } = {}
+) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await view(name, version);
+    } catch (err) {
+      if (!err?.retryable || attempt >= LOOKUP_ATTEMPTS) throw err;
+      log(
+        `registry lookup for ${name}@${version} failed (attempt ${attempt}): ` +
+          `${oneLine(err.message)}; retrying`
+      );
+      await wait(backoffMs(attempt));
+    }
+  }
+}
+
+// --- npm CLI lookup: inert fallback --------------------------------------
+// Superseded by registryLookup (#826 follow-up to #842) and not called by
+// run() by default. Kept as a documented fallback — e.g. for a private
+// registry that needs npm's auth handling — rather than deleted. To use it,
+// pass it as run()'s `lookup` option: `run(argv, { lookup: npmLookup })`.
+
 /**
  * Parse `npm view <name>@<version> version gitHead --json` output.
  *
@@ -166,7 +325,8 @@ export function formatDecision({ name, version, published, headSha, decision }) 
  * recognise, unparseable output, or a published version with no gitHead —
  * each would otherwise have to be guessed as "publish" or "skip".
  */
-export function parseNpmView({ status, stdout, stderr }, spec) {
+export function parseNpmView({ status, stdout, stderr }, name, version) {
+  const spec = `${name}@${version}`;
   const stderrLine = oneLine(stderr.trim().split('\n')[0]);
   let parsed;
   try {
@@ -200,60 +360,49 @@ export function parseNpmView({ status, stdout, stderr }, spec) {
     );
   }
   const entry = Array.isArray(parsed) ? parsed[0] : parsed;
-  const gitHead = entry !== null && typeof entry === 'object' ? entry.gitHead : undefined;
-  if (typeof gitHead !== 'string' || !FULL_SHA_RE.test(gitHead)) {
-    throw new CheckUnavailableError(
-      `${spec} is on npm but has no usable gitHead (${oneLine(JSON.stringify(gitHead))}), so the ` +
-        'guard cannot tell whether it was built from this source.\n' +
-        '  Fix: bump the version so this commit publishes under a fresh number.'
-    );
-  }
-  return { gitHead };
+  // `npm view` output carries `version` but not always `name`.
+  requireIdentity({ name, ...entry }, name, version);
+  return requireGitHead(entry, spec);
 }
 
-function npmViewOnce(spec) {
+/** One `npm view` call. `exec` is injectable for tests. */
+export function npmViewOnce(name, version, { exec = execFileSync } = {}) {
+  const spec = `${name}@${version}`;
+  let res;
   try {
-    const stdout = execFileSync(
-      'npm',
-      ['view', spec, 'version', 'gitHead', '--json', '--prefer-online'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }
-    );
-    return parseNpmView({ status: 0, stdout, stderr: '' }, spec);
+    const stdout = exec('npm', ['view', spec, 'version', 'gitHead', '--json', '--prefer-online'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    res = { status: 0, stdout, stderr: '' };
   } catch (err) {
-    if (err instanceof CheckUnavailableError) throw err;
-    return parseNpmView(
-      {
-        status: err.status ?? 1,
-        stdout: (err.stdout ?? '').toString(),
-        stderr: (err.stderr ?? '').toString(),
-      },
-      spec
-    );
+    res = {
+      status: err.status ?? 1,
+      stdout: (err.stdout ?? '').toString(),
+      stderr: (err.stderr ?? '').toString(),
+    };
   }
+  return parseNpmView(res, name, version);
 }
 
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/**
- * Real npm lookup. `--prefer-online` sidesteps a stale local packument cache.
- * An answer that is not E404 and not a clean hit is retried with backoff (a
- * registry blip would otherwise halt every later package), then rethrown —
- * the retries narrow the window, they never turn "unknown" into "publish".
- */
+/** npm CLI lookup (inert fallback, see above), with the same retry contract. */
 export function npmLookup(
   name,
   version,
   { view = npmViewOnce, sleep = sleepSync, log = console.error } = {}
 ) {
-  const spec = `${name}@${version}`;
   for (let attempt = 1; ; attempt += 1) {
     try {
-      return view(spec);
+      return view(name, version);
     } catch (err) {
-      if (!(err instanceof CheckUnavailableError) || attempt >= NPM_LOOKUP_ATTEMPTS) throw err;
-      const wait = NPM_LOOKUP_BACKOFF_MS[attempt - 1] ?? NPM_LOOKUP_BACKOFF_MS.at(-1);
-      log(`npm lookup for ${spec} failed (attempt ${attempt}): ${oneLine(err.message)}; retrying`);
-      sleep(wait);
+      if (!(err instanceof CheckUnavailableError) || attempt >= LOOKUP_ATTEMPTS) throw err;
+      log(
+        `npm lookup for ${name}@${version} failed (attempt ${attempt}): ` +
+          `${oneLine(err.message)}; retrying`
+      );
+      sleep(backoffMs(attempt));
     }
   }
 }
@@ -270,7 +419,7 @@ function ensureCommit(repoRoot, sha) {
   };
   if (present()) return;
   try {
-    git(['fetch', '--no-tags', 'origin', sha], repoRoot);
+    git(['fetch', '--no-tags', 'origin', sha], repoRoot, { timeout: GIT_FETCH_TIMEOUT_MS });
   } catch (err) {
     throw new CheckUnavailableError(
       `the published gitHead ${sha} is not in this clone and could not be fetched ` +
@@ -293,7 +442,9 @@ export function releaseDiff(repoRoot, fromSha, toSha, dir) {
   try {
     names = git(['diff', '--name-only', fromSha, toSha, '--', dir], repoRoot);
   } catch (err) {
-    throw new CheckUnavailableError(`cannot diff ${fromSha}..${toSha} (${gitError(err)}).`);
+    throw new CheckUnavailableError(
+      `cannot diff ${fromSha}..${toSha} (${oneLine(gitError(err))}).`
+    );
   }
   const files = names
     .split('\n')
@@ -332,12 +483,21 @@ function readPackageAt(repoRoot, sha, dir) {
   return pkg;
 }
 
+/** Ledger line kinds, and how each reads in a "held" warning. */
+const LEDGER_KINDS = {
+  collision: 'collided',
+  unavailable: 'could not be checked',
+  // A package that failed before its name was known — recorded by directory.
+  'unavailable-unknown': 'could not be checked (name unknown)',
+  held: 'was held',
+};
+
 /**
- * The collision ledger shared by one publish job: one `collision <name>` or
- * `held <name>` line per package. Absent file = nothing recorded yet.
+ * The ledger shared by one publish job: one `<kind> <name>` line per package,
+ * kind being one of LEDGER_KINDS. Absent file = nothing recorded yet.
  */
 export function readLedger(path) {
-  const entries = { collision: [], held: [] };
+  const entries = Object.fromEntries(Object.keys(LEDGER_KINDS).map((k) => [k, []]));
   if (!existsSync(path)) return entries;
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     const [kind, name] = line.trim().split(/\s+/);
@@ -346,19 +506,35 @@ export function readLedger(path) {
   return entries;
 }
 
-/** Final step of the publish job: exit 1 naming every collided package, else 0. */
+/**
+ * Final step of the publish job: exit 1 naming every collided or unavailable
+ * package (and the dependents held with them), else 0.
+ */
 export function reportCollisions(ledger, { log, error }) {
-  const { collision, held } = readLedger(ledger);
-  if (collision.length === 0) {
+  const { collision, held, ...rest } = readLedger(ledger);
+  const unavailable = [...rest.unavailable, ...rest['unavailable-unknown']];
+  if (collision.length === 0 && unavailable.length === 0) {
     log('No version collisions.');
     return 0;
   }
-  const heldNote = held.length > 0 ? ` Held with them (dependents): ${held.join(', ')}.` : '';
-  error(
-    `::error title=Version collision::Not released: ${collision.join(', ')} — each version is ` +
-      `already on npm from different source (see the 'Check if ... needs publishing' logs).` +
-      `${heldNote} Bump them in a follow-up PR; every publish run fails this way until then.`
-  );
+  if (collision.length > 0) {
+    error(
+      `::error title=Version collision::Not released: ${collision.join(', ')} — each version is ` +
+        `already on npm from different source (see the 'Check if ... needs publishing' logs). ` +
+        'Bump them in a follow-up PR; every publish run fails this way until then.'
+    );
+  }
+  if (unavailable.length > 0) {
+    error(
+      `::error title=Publish guard could not decide::Not checked: ${unavailable.join(', ')} — ` +
+        `the guard could not determine whether these are safe to publish. Follow the Fix: line ` +
+        `in each package's 'Check if ... needs publishing' log (re-run for a registry outage; ` +
+        'bump the version for a missing gitHead); nothing was skipped silently.'
+    );
+  }
+  if (held.length > 0) {
+    error(`::error title=Held dependents::Also not released (held): ${held.join(', ')}.`);
+  }
   return 1;
 }
 
@@ -395,17 +571,22 @@ function parseArgs(argv) {
   return opts;
 }
 
-/** Everything decide() needs, read from git and npm. */
-function resolve({ repoRoot, dir, head }, lookup) {
+/**
+ * Everything decide() needs, read from git and npm. `seen.name` is set as
+ * soon as the package is known, so a later failure can still be recorded
+ * under the package's name (which is what its dependents list).
+ */
+async function resolve({ repoRoot, dir, head }, lookup, seen) {
   let headSha;
   try {
     headSha = git(['rev-parse', `${head}^{commit}`], repoRoot);
   } catch (err) {
-    throw new CheckUnavailableError(`cannot resolve --head '${head}' (${gitError(err)}).`);
+    throw new CheckUnavailableError(`cannot resolve --head '${head}' (${oneLine(gitError(err))}).`);
   }
   const pkg = readPackageAt(repoRoot, headSha, dir);
+  seen.name = pkg.name;
 
-  const published = lookup(pkg.name, pkg.version);
+  const published = await lookup(pkg.name, pkg.version);
   let diff;
   if (published !== null && published.gitHead !== headSha) {
     ensureCommit(repoRoot, published.gitHead);
@@ -414,17 +595,31 @@ function resolve({ repoRoot, dir, head }, lookup) {
   return { pkg, published, headSha, diff };
 }
 
-/** Dependencies of `pkg` (at --head) that already collided or were held this job. */
+/**
+ * Why `pkg` must be held: its `@ai-dossier/*` dependencies that collided,
+ * could not be checked, or were held this job — as `{ name, kind }`. A
+ * package recorded only by directory (name unknown) could be any of them, so
+ * it blocks every dependency in the package's own scope.
+ */
 function heldBy(pkg, ledger) {
   if (!ledger) return [];
-  const { collision, held } = readLedger(ledger);
-  const blocked = new Set([...collision, ...held]);
-  return Object.keys(pkg.dependencies ?? {}).filter((name) => blocked.has(name));
+  const entries = readLedger(ledger);
+  const kindOf = new Map();
+  for (const kind of ['collision', 'unavailable', 'held']) {
+    for (const name of entries[kind]) kindOf.set(name, kind);
+  }
+  // Scope of this package (`@ai-dossier/`): a sibling in the same scope is a
+  // workspace package, which an unknown failed package could be.
+  const scope = pkg.name.startsWith('@') ? `${pkg.name.split('/')[0]}/` : null;
+  const unknown = entries['unavailable-unknown'].length > 0 && scope !== null;
+  return Object.keys(pkg.dependencies ?? {})
+    .filter((name) => kindOf.has(name) || (unknown && name.startsWith(scope)))
+    .map((name) => ({ name, kind: kindOf.get(name) ?? 'unavailable-unknown' }));
 }
 
 /** Decide for one package. Throws CheckUnavailableError when it cannot. */
-function evaluate(opts, lookup) {
-  const { pkg, published, headSha, diff } = resolve(opts, lookup);
+async function evaluate(opts, lookup, seen) {
+  const { pkg, published, headSha, diff } = await resolve(opts, lookup, seen);
   const decision = decide({ published, headSha, diff });
   const message = formatDecision({
     name: pkg.name,
@@ -436,61 +631,100 @@ function evaluate(opts, lookup) {
   return { pkg, decision, message };
 }
 
-export function run(
-  argv,
-  {
-    log = console.log,
-    error = console.error,
-    lookup = npmLookup,
-    outputFile = process.env.GITHUB_OUTPUT,
-  } = {}
-) {
-  let dir = '(unknown)';
-  try {
-    const opts = parseArgs(argv);
-    if (opts.reportLedger) return reportCollisions(opts.reportLedger, { log, error });
-    dir = opts.dir;
-    const { pkg, decision, message } = evaluate(opts, lookup);
-    const writeOutputs = (skip, collision) => {
-      if (outputFile) appendFileSync(outputFile, `skip=${skip}\ncollision=${collision}\n`);
-    };
-
-    if (decision.action !== 'collision') {
-      const blockers = decision.action === 'publish' ? heldBy(pkg, opts.ledger) : [];
-      if (blockers.length > 0) {
-        appendFileSync(opts.ledger, `held ${pkg.name}\n`);
-        writeOutputs(true, false);
-        error(
-          `::warning title=${pkg.name}@${pkg.version} held::not publishing — its dependency ` +
-            `${blockers.join(', ')} collided; it would ship against the older published version.`
-        );
-        return 0;
-      }
-      writeOutputs(decision.action !== 'publish', false);
-      log(message);
-      return 0;
-    }
-
+/** Print and record a decided package; returns the exit code. */
+function emitDecision({ pkg, decision, message }, ledger, { log, error, writeOutputs }) {
+  if (decision.action === 'collision') {
     writeOutputs(true, true);
     // `::error::` makes it an annotation on the run summary, not just a log line.
     error(`::error title=${pkg.name}@${pkg.version} version collision::${message.split('\n')[0]}`);
     error(message);
-    if (!opts.ledger) return 1;
-    appendFileSync(opts.ledger, `collision ${pkg.name}\n`);
+    if (!ledger) return 1;
+    appendFileSync(ledger, `collision ${pkg.name}\n`);
     return 0;
-  } catch (err) {
-    const known = err instanceof CheckUnavailableError;
-    const detail = known
-      ? err.message
-      : `unexpected error (this is a bug in scripts/publish-guard.mjs).\n${err?.stack ?? String(err)}`;
-    error(`::error title=publish-guard (${oneLine(dir)}) could not run::${oneLine(detail)}`);
-    error(`Publish guard for ${dir} could not run: ${detail}`);
+  }
+  const blockers = decision.action === 'publish' ? heldBy(pkg, ledger) : [];
+  if (blockers.length > 0) {
+    appendFileSync(ledger, `held ${pkg.name}\n`);
+    writeOutputs(true, false);
+    log(message);
+    const why = blockers.map((b) => `${b.name} ${LEDGER_KINDS[b.kind]}`).join(', ');
+    error(
+      `::warning title=${pkg.name}@${pkg.version} held::not publishing — its dependency ${why} ` +
+        'this run; it would ship against the older published version.'
+    );
+    return 0;
+  }
+  writeOutputs(decision.action !== 'publish', false);
+  log(message);
+  return 0;
+}
+
+/** The package name for a failed run: from HEAD if known, else the working tree. */
+function nameForLedger(seen, repoRoot, dir) {
+  if (seen.name) return { kind: 'unavailable', name: seen.name };
+  try {
+    const { name } = JSON.parse(readFileSync(join(repoRoot, dir, 'package.json'), 'utf8'));
+    if (typeof name === 'string' && PACKAGE_NAME_RE.test(name))
+      return { kind: 'unavailable', name };
+  } catch {
+    // Fall through: recorded by directory, which holds every dependent.
+  }
+  return { kind: 'unavailable-unknown', name: dir };
+}
+
+/**
+ * Deferred failure: record the package and let unrelated packages proceed;
+ * its dependents are held and the final report step fails the job. Never a
+ * skip that reads as success. Returns the exit code.
+ */
+function recordUnavailable({ seen, repoRoot, dir, ledger }, { error, writeOutputs }) {
+  if (!ledger) return 2;
+  try {
+    const { kind, name } = nameForLedger(seen, repoRoot, dir);
+    appendFileSync(ledger, `${kind} ${name}\n`);
+    writeOutputs(true, false);
+  } catch (recordErr) {
+    error(`cannot record ${dir} as unavailable (${oneLine(recordErr?.message)}).`);
     return 2;
+  }
+  return 0;
+}
+
+export async function run(
+  argv,
+  {
+    log = console.log,
+    error = console.error,
+    lookup = registryLookup,
+    outputFile = process.env.GITHUB_OUTPUT,
+  } = {}
+) {
+  const ctx = { dir: '(unknown)', repoRoot: process.cwd(), ledger: null, seen: { name: null } };
+  const writeOutputs = (skip, collision) => {
+    if (outputFile) appendFileSync(outputFile, `skip=${skip}\ncollision=${collision}\n`);
+  };
+  try {
+    const opts = parseArgs(argv);
+    if (opts.reportLedger) return reportCollisions(opts.reportLedger, { log, error });
+    Object.assign(ctx, { dir: opts.dir, repoRoot: opts.repoRoot, ledger: opts.ledger });
+    const evaluated = await evaluate(opts, lookup, ctx.seen);
+    return emitDecision(evaluated, opts.ledger, { log, error, writeOutputs });
+  } catch (err) {
+    const detail =
+      err instanceof CheckUnavailableError
+        ? err.message
+        : `unexpected error (this is a bug in scripts/publish-guard.mjs).\n${err?.stack ?? String(err)}`;
+    error(`::error title=publish-guard (${oneLine(ctx.dir)}) could not run::${oneLine(detail)}`);
+    error(`Publish guard for ${ctx.dir} could not run: ${detail}`);
+    return recordUnavailable(ctx, { error, writeOutputs });
   }
 }
 
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (invokedDirectly) {
-  process.exit(run(process.argv.slice(2)));
+  process.exitCode = await run(process.argv.slice(2)).catch((err) => {
+    console.error(`Publish guard could not run: ${err?.stack ?? String(err)}`);
+    return 2;
+  });
 }

@@ -553,11 +553,12 @@ export function formatReport({ skipped, violations, checked, waived = [], contex
 
 // ---------------------------------------------------------------- CLI --------
 
-export function git(args, cwd) {
+export function git(args, cwd, { timeout } = {}) {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
+    timeout,
   }).trim();
 }
 
