@@ -3572,7 +3572,7 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
       // did not finish it), then a person closed it by hand — the stale
       // reference must not vouch for that later close.
       name: 'a member closed by hand whose only merged closing reference predates its last reopen',
-      reason: 'member-closed-by-hand-ref-predates-reopen:#7692',
+      reason: 'member-closed-by-hand-ref-pr-9781-predates-reopen:#7692',
       arrange: (h) =>
         setIssueTruth(h.truthDir, 7692, {
           state: 'CLOSED',

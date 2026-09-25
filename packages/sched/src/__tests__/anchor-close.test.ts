@@ -698,11 +698,11 @@ describe("#799 a closing reference must postdate the member's last reopen", () =
   it('merged PR → reopen → hand close ⇒ refused, anchor needs-operator', () => {
     const member = handClosed([ref(MERGED_SEP_10)], REOPENED_SEP_11);
     expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
-      refused: 'closed-by-hand-ref-predates-reopen',
+      refused: 'closed-by-hand-ref-pr-4255-predates-reopen',
     });
     const verdict = anchorVerdictFor(member);
     expect(verdict.kind).toBe('orphan-needs-operator');
-    expect(verdict.reasons).toEqual(['member-closed-by-hand-ref-predates-reopen:#4116']);
+    expect(verdict.reasons).toEqual(['member-closed-by-hand-ref-pr-4255-predates-reopen:#4116']);
   });
 
   it('reopen → merged PR → hand close ⇒ shipped, anchor closable', () => {
@@ -728,7 +728,7 @@ describe("#799 a closing reference must postdate the member's last reopen", () =
   it('merged at the very instant of the reopen ⇒ refused (strictly after only)', () => {
     const member = handClosed([ref(REOPENED_SEP_11)], REOPENED_SEP_11);
     expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
-      refused: 'closed-by-hand-ref-predates-reopen',
+      refused: 'closed-by-hand-ref-pr-4255-predates-reopen',
     });
   });
 
@@ -755,9 +755,19 @@ describe("#799 a closing reference must postdate the member's last reopen", () =
   it("reopened, and the reference's merge time is unreadable ⇒ refused, never closable", () => {
     const member = handClosed([ref(null)], REOPENED_SEP_11);
     expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
-      refused: 'closed-by-hand-ref-predates-reopen',
+      refused: 'closed-by-hand-ref-pr-4255-merge-time-unreadable',
     });
     expect(anchorVerdictFor(member).kind).toBe('orphan-needs-operator');
+  });
+
+  it('every stale reference is named in the refusal, so the operator sees which PRs were rejected', () => {
+    const member = handClosed(
+      [ref(MERGED_SEP_10, 4200), ref(MERGED_SEP_10, 4201)],
+      REOPENED_SEP_11
+    );
+    expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
+      refused: 'closed-by-hand-ref-pr-4200+4201-predates-reopen',
+    });
   });
 
   it('a hand close with no qualifying reference at all keeps its original reason', () => {
@@ -777,41 +787,30 @@ describe("#799 a closing reference must postdate the member's last reopen", () =
   });
 
   it('end to end through the real GraphQL parse: reopens + mergedAt reach the verdict', () => {
-    const wire = (reopens: unknown) =>
-      JSON.stringify({
-        data: {
-          repository: {
-            issue: {
-              state: 'CLOSED',
-              stateReason: 'COMPLETED',
-              labels: { nodes: [], pageInfo: { hasNextPage: false } },
-              timelineItems: { nodes: [{ closer: null }] },
-              reopens,
-              closedByPullRequestsReferences: {
-                nodes: [
-                  {
-                    number: 4255,
-                    merged: true,
-                    mergedAt: MERGED_SEP_10,
-                    baseRefName: 'main',
-                    repository: { nameWithOwner: REPO },
-                  },
-                ],
-              },
-            },
-          },
-        },
-      });
     const verdictOver = (reopens: unknown) => {
       const exec: ExecFn = (_cmd, args) => {
-        const query = args.find((a) => a.startsWith('query=')) ?? '';
-        if (!query.includes('issue(number:$n)')) return null;
-        const n = args.find((a) => a.startsWith('n='));
-        if (n === 'n=4244') return JSON.stringify(graphqlIssue({ state: 'OPEN' }));
-        return wire(reopens);
+        if (!args.some((a) => a.startsWith('query=') && a.includes('issue(number:$n)')))
+          return null;
+        if (args.includes('n=4244')) return JSON.stringify(graphqlIssue({ state: 'OPEN' }));
+        return JSON.stringify(
+          graphqlIssue({
+            state: 'CLOSED',
+            stateReason: 'COMPLETED',
+            closer: null,
+            reopens,
+            closingRefs: [
+              {
+                number: 4255,
+                merged: true,
+                mergedAt: MERGED_SEP_10,
+                baseRefName: 'main',
+                repository: { nameWithOwner: REPO },
+              },
+            ],
+          })
+        );
       };
-      const gt = createExecGroundTruth(exec, { repo: REPO });
-      const read = issueCloseReader(gt);
+      const read = issueCloseReader(createExecGroundTruth(exec, { repo: REPO }));
       if (read === undefined) throw new Error('expected issueCloseTruth to be wired');
       return expectVerdict(
         classifyOrphanAnchor({ anchor: 4244, members: [4116], base_branch: 'main' }, read, {
@@ -821,13 +820,11 @@ describe("#799 a closing reference must postdate the member's last reopen", () =
     };
     // Merged Sep 10, reopened Sep 11, closed by hand: refused.
     expect(verdictOver({ nodes: [{ createdAt: REOPENED_SEP_11 }] }).reasons).toEqual([
-      'member-closed-by-hand-ref-predates-reopen:#4116',
+      'member-closed-by-hand-ref-pr-4255-predates-reopen:#4116',
     ]);
     // Never reopened: the reference still vouches.
     expect(verdictOver({ nodes: [] }).kind).toBe('orphan-closable-candidate');
     // Reopen connection missing from the payload: unreadable, fail closed.
-    expect(verdictOver(undefined).reasons).toEqual([
-      'member-closed-by-hand-reopen-unreadable:#4116',
-    ]);
+    expect(verdictOver(null).reasons).toEqual(['member-closed-by-hand-reopen-unreadable:#4116']);
   });
 });

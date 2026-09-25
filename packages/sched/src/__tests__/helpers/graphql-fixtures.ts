@@ -17,6 +17,10 @@ export function graphqlIssueResponse(opts: {
   state: 'OPEN' | 'CLOSED';
   stateReason?: string;
   closer?: unknown;
+  /** `closedByPullRequestsReferences.nodes` — raw wire nodes (#799). */
+  closingRefs?: unknown[];
+  /** The aliased `reopens` connection (#799); `null` omits it from the payload. Default: never reopened. */
+  reopens?: unknown;
 }): unknown {
   return {
     data: {
@@ -26,8 +30,8 @@ export function graphqlIssueResponse(opts: {
           stateReason: opts.stateReason ?? null,
           labels: { nodes: [], pageInfo: { hasNextPage: false } },
           timelineItems: { nodes: opts.closer !== undefined ? [{ closer: opts.closer }] : [] },
-          reopens: { nodes: [] },
-          closedByPullRequestsReferences: { nodes: [] },
+          ...(opts.reopens === null ? {} : { reopens: opts.reopens ?? { nodes: [] } }),
+          closedByPullRequestsReferences: { nodes: opts.closingRefs ?? [] },
         },
       },
     },

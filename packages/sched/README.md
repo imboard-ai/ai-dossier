@@ -1507,7 +1507,13 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   issue's author can close their own issue. One more path counts for a hand close: a
   PR of the project's repository, MERGED into the base, that GitHub lists as closing
   the issue (`closedByPullRequestsReferences` — `Closes #N` parsed but not acted on,
-  the imboard#4116 shape); that still needs a merge, i.e. write access. A member issue that no longer resolves
+  the imboard#4116 shape); that still needs a merge, i.e. write access. That reference must
+  also have merged AFTER the member's last reopen (#799): one merged before it did not finish
+  the issue — that is why it was reopened — so it reads `member-closed-by-hand-ref-pr-<n>-predates-reopen`
+  (or `…-merge-time-unreadable`), and a reopen timeline that cannot be read reads
+  `member-closed-by-hand-reopen-unreadable` — needs-operator either way, never closable. A member
+  never reopened is unaffected. Remedy: a new PR or commit that closes the member, or close the
+  anchor by hand. A member issue that no longer resolves
   (deleted/transferred) reads `member-missing` — needs-operator, not an outage.
 - **Never over a failure trail.** Any evicted member, any member in a failure status
   (`ISSUE_UNIVERSAL_FAILURE_EDGES` + `evicted`/`handed-back`/`requeued`), any member requeued out of

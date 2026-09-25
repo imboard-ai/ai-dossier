@@ -530,9 +530,19 @@ const ISSUE_CLOSE_QUERY =
   'timelineItems(itemTypes:[CLOSED_EVENT],last:1){nodes{... on ClosedEvent{closer{__typename ' +
   '... on PullRequest{number merged baseRefName repository{nameWithOwner}} ... on Commit{oid}}}}}}}}';
 
-/** `value` when it is a timestamp `Date.parse` accepts, else `null`. */
+/** GitHub's timestamp shape: ISO-8601 UTC, e.g. `2026-09-12T10:00:00Z`. */
+const ISO_UTC_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
+/**
+ * `value` when it is an ISO-8601 UTC timestamp that parses to a real date,
+ * else `null`. Stricter than `Date.parse` alone, which also accepts loose
+ * strings (`Date.parse('1')` is a date in 2001) — a time this code compares
+ * or trusts as "merged" must be GitHub's own format.
+ */
 function parseableTimestamp(value: unknown): string | null {
-  return typeof value === 'string' && value !== '' && Number.isFinite(Date.parse(value))
+  return typeof value === 'string' &&
+    ISO_UTC_TIMESTAMP_RE.test(value) &&
+    Number.isFinite(Date.parse(value))
     ? value
     : null;
 }
@@ -616,10 +626,11 @@ export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth
   // reopened"; a missing connection or an unparseable time is unreadable.
   const reopenNodes = (obj.reopens as { nodes?: unknown } | undefined)?.nodes;
   let lastReopenedAt: string | null | undefined;
-  if (Array.isArray(reopenNodes)) {
+  if (Array.isArray(reopenNodes) && reopenNodes.length === 0) {
+    lastReopenedAt = null;
+  } else if (Array.isArray(reopenNodes)) {
     const lastReopen = reopenNodes[reopenNodes.length - 1] as { createdAt?: unknown } | null;
-    if (reopenNodes.length === 0) lastReopenedAt = null;
-    else lastReopenedAt = parseableTimestamp(lastReopen?.createdAt) ?? undefined;
+    lastReopenedAt = parseableTimestamp(lastReopen?.createdAt) ?? undefined;
   }
   return { state, stateReason, labels, closer, closingPrs, lastReopenedAt };
 }
@@ -792,19 +803,14 @@ export function parseMergedPrListJson(
     // #789 review (security hardening): a non-empty string alone is not
     // "merged" — require it to parse as a real date too, the same standard
     // `createdAt` below is already held to.
-    if (
-      typeof pr.mergedAt !== 'string' ||
-      pr.mergedAt === '' ||
-      !Number.isFinite(Date.parse(pr.mergedAt))
-    ) {
-      continue;
-    }
+    const mergedAt = parseableTimestamp(pr.mergedAt);
+    if (mergedAt === null) continue;
     if (typeof pr.createdAt !== 'string') continue;
     const createdMs = Date.parse(pr.createdAt);
     if (!Number.isFinite(createdMs) || createdMs < thresholdMs) continue;
     const num = pr.number;
     if (typeof num === 'number' && Number.isInteger(num) && num > 0) {
-      matches.push({ pr: num, mergedAt: pr.mergedAt });
+      matches.push({ pr: num, mergedAt });
     }
   }
   if (matches.length === 0) return { kind: 'none' };

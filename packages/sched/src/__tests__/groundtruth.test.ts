@@ -1348,6 +1348,12 @@ describe('parseIssueCloseTruthJson (#768)', () => {
     expect(reopenedAt({ nodes: [{}] })).toBeUndefined();
     expect(reopenedAt({ nodes: [null] })).toBeUndefined();
     expect(reopenedAt({ nodes: [{ createdAt: 'not-a-date' }] })).toBeUndefined();
+    // Loose strings `Date.parse` would accept are not GitHub's format either.
+    expect(reopenedAt({ nodes: [{ createdAt: '1' }] })).toBeUndefined();
+    expect(reopenedAt({ nodes: [{ createdAt: '2026-09-11 10:00:00' }] })).toBeUndefined();
+    expect(reopenedAt({ nodes: [{ createdAt: '2026-09-11T10:00:00.123Z' }] })).toBe(
+      '2026-09-11T10:00:00.123Z'
+    );
     // An unparseable mergedAt is unreadable (null), never a guessed time.
     expect(
       parseIssueCloseTruthJson(
