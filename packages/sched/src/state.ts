@@ -935,8 +935,9 @@ export function validateState(data: unknown): SchedState {
     }
     // #683: the fence's trail coordinates are plain strings or null — never
     // used for identity matching (run id + generation decides that), only to
-    // NAME the trail record the bind/release posts describe.
-    for (const field of ['run_id', 'fence_phase'] as const) {
+    // NAME the trail record the bind/release posts describe. #844's kill
+    // timestamps share the same string-or-null shape.
+    for (const field of ['run_id', 'fence_phase', 'kill_sent_at', 'kill_escalated_at'] as const) {
       const value = slot[field];
       if (value !== null && value !== undefined && typeof value !== 'string') {
         throw new Error(`Slot ${slot.id}: ${field} must be a string or null`);
@@ -1098,6 +1099,10 @@ export function validateState(data: unknown): SchedState {
     // unblocks successors), so null/null is the honest backfill.
     run_id: slot.run_id ?? null,
     fence_phase: slot.fence_phase ?? null,
+    // 1.28.0 → 1.29.0 (#844): no kill was ever tracked before the SIGKILL
+    // escalation existed — null/null is exact, not a guess.
+    kill_sent_at: slot.kill_sent_at ?? null,
+    kill_escalated_at: slot.kill_escalated_at ?? null,
   }));
   const entries = (obj.entries as QueueEntry[]).map((entry) => ({
     ...entry,
@@ -1407,6 +1412,9 @@ export const CLEARED_SLOT_FIELDS = {
   // these fresh at write time.
   run_id: null,
   fence_phase: null,
+  // #844: a released slot is waiting on no agent to die.
+  kill_sent_at: null,
+  kill_escalated_at: null,
 };
 
 export function transitionSlot(

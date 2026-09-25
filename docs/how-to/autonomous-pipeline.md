@@ -85,8 +85,12 @@ the next tick picks it up — there is no reload command.
 The Telegram channel (`~/.dossier/reset-fleet/telegram.env` holds the bot token and chat
 id, sourced by every script here) is the one place an operator watches instead of
 tailing logs — but it is a filtered, capped view, not the full journal: `fmt_events.py`
-forwards only `spawned`, `stalled`, `redispatched`, `unit-failed`, and `teardown-failed`
-events, at most 8 lines per tick. Every event (including `label-blocked`/`label-cleared`,
+forwards only the events in its `KEEP` set — `spawned`, `stalled`, `redispatched`,
+`unit-failed`, `unit-blocked`, `teardown-failed`, `parked`, `dispatch-profile-missing`, and the
+batch events `member-handed-back`, `dissolve-suppressed`, `member-requeued`, `batch-blocked`,
+`batch-resumed`, `member-reprompted`, `pr-attached`, `kill-escalated`,
+`member-advance-recovered` (`KEEP` in `scripts/sched-fleet/fmt_events.py` is the source of
+truth) — at most 8 lines per tick. Every event (including `label-blocked`/`label-cleared`,
 `pr-parked`, `merge-accepted`, `report-*`) is still recorded in full in each project's
 `events.jsonl` — check that file directly for anything not in the whitelist above, plus
 tracked-issue closures and the end-of-pipeline summary, both of which Telegram does get.

@@ -965,6 +965,22 @@ export interface SlotEntry {
    * Added in schema 1.17.0; 1.16.0 slots backfill null.
    */
   fence_phase: string | null;
+  /**
+   * When the engine first signalled this slot's agent to stop (SIGTERM) and
+   * is waiting for it to die before deciding (#844) — the anchor of the
+   * SIGKILL escalation bound (`KILL_ESCALATION_MS`). Scoped to the current
+   * dispatch: a value older than `spawned_at` belongs to a previous one and
+   * is ignored. Cleared when the slot goes idle. Added in schema 1.29.0;
+   * 1.28.0 slots backfill null (no kill was ever tracked).
+   */
+  kill_sent_at: string | null;
+  /**
+   * When the engine escalated that stop to SIGKILL (#844) — the dedup marker
+   * that keeps `kill-escalated` to one journal line per dispatch. Cleared
+   * when the slot goes idle. Added in schema 1.29.0; 1.28.0 slots backfill
+   * null.
+   */
+  kill_escalated_at: string | null;
   updated_at: string;
 }
 
@@ -1483,8 +1499,11 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * 1.28.0 (#855): `BatchEntry` gains `worktree_kept` (the members-closed keep
  * decision, persisted) and `MemberRun` gains `teardown_failed_at`;
  * `false`/`null` backfilled on load.
+ * 1.29.0 (#844): `SlotEntry` gains `kill_sent_at`/`kill_escalated_at` — the
+ * SIGTERM → SIGKILL escalation anchor and its journal dedup marker;
+ * `null`/`null` backfilled on load.
  */
-export const SCHEMA_VERSION = '1.28.0' as const;
+export const SCHEMA_VERSION = '1.29.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1516,6 +1535,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.25.0',
   '1.26.0',
   '1.27.0',
+  '1.28.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
@@ -1881,6 +1901,19 @@ export type JournalEventName =
   // #822: a member posted a full-cycle-shaped milestone (wrong procedure) —
   // released and respawned ONCE in place with a corrective directive.
   | 'member-reprompted'
+  // #844: an agent the engine is waiting on to die ignored SIGTERM past
+  // `KILL_ESCALATION_MS` — SIGKILL sent (to its process group where
+  // available). Once per dispatch (`SlotEntry.kill_escalated_at`); `pid`
+  // names the agent, `issue` the member, `slot` the slot id.
+  | 'kill-escalated'
+  // #844: the engine sent SIGTERM to an agent it must wait on before a
+  // decision (the wrong-procedure stop) — once per dispatch; `pid`/`slot`
+  // name it. Pairs with `kill-escalated` when the agent ignores it.
+  | 'member-stop-requested'
+  // #844: a serial batch still pointed at a member already in `evictions[]`
+  // (the engine exited between the eviction's write and the advance) — the
+  // wedge arm advanced past it instead of respawning it.
+  | 'member-advance-recovered'
   // #824: an operator recorded `batch.pr` by hand (`sched attach-pr`) after
   // the PR passed #789's own candidate checks — a separate event name from the
   // automatic detection (`stale-failure-reconciled` with `pr_detected: true`)

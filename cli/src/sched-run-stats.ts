@@ -215,6 +215,8 @@ export interface BatchJournalEvent {
   unit?: string;
   issue?: number;
   detail?: string;
+  /** #844: `member-advance-recovered` carries the parked member's exit kind. */
+  kind?: string;
 }
 
 /** What a batch's own `events.jsonl` lines say about its members. */
@@ -245,6 +247,10 @@ const BATCH_MEMBER_EVENTS = new Set([
   'member-evicted',
   'member-handed-back',
   'member-reprompted',
+  // #844: the SIGTERM→SIGKILL stop of a member's agent, and the crash-recovery advance.
+  'member-stop-requested',
+  'kill-escalated',
+  'member-advance-recovered',
   'unit-failed',
   'run-log-recorded',
   'gate-skipped',
@@ -273,6 +279,11 @@ export function summarizeBatchJournal(
       evicted.add(issue);
     }
     if (issue !== null && event.event === 'member-handed-back') handedBack.add(issue);
+    // #844: an engine that exited right after an eviction's write may never have
+    // journaled its `unit-failed`/`member-handed-back` — the recovery line names it.
+    if (issue !== null && event.event === 'member-advance-recovered') {
+      (event.kind === 'handed-back' ? handedBack : evicted).add(issue);
+    }
     if (event.event === 'suite-failed') suiteFailures += 1;
     if (issue !== null && event.event === 'member-reprompted') reprompted.add(issue);
     if (event.event === 'batch-blocked') blocked = event.detail ?? 'blocked';

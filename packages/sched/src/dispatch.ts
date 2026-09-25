@@ -1164,6 +1164,20 @@ export function reportTierFor(recoveries: number): ModelTier | null {
 
 // --- Process I/O (injectable) ---
 
+/**
+ * How long an agent the batch wrong-procedure wait is stopping
+ * (`stopAgentBeforeDeciding`, `batch-dispatch.ts`) may stay alive after its
+ * first SIGTERM before the engine escalates to SIGKILL (#844) — two default
+ * reconcile ticks (`reconcile_interval_ms`, 60 s), long enough for a real
+ * agent's own SIGTERM cleanup, short enough that one ignoring it cannot hold
+ * its batch member indefinitely. The fire-and-forget kill paths (stall
+ * timeout, takeover, `killLiveAgent`, CLI `sched stop`) send SIGTERM only.
+ */
+export const KILL_ESCALATION_MS = 120_000;
+
+/** The signals the engine sends an agent (#844): a polite stop, then the escalation. */
+export type KillSignal = 'SIGTERM' | 'SIGKILL';
+
 export interface SpawnDeps {
   /**
    * Spawn a detached agent process and return its pid. `logFile` receives the
@@ -1176,9 +1190,15 @@ export interface SpawnDeps {
    * Signal a pid; returns false when it was already dead (or not ours).
    * `expectedStart` (the persisted `/proc` start-time) enables the pid-reuse
    * guard: a pid whose start-time no longer matches was reused by an
-   * unrelated process and is never signalled.
+   * unrelated process and is never signalled. `signal` defaults to
+   * `SIGTERM`; `SIGKILL` (#844, the escalation for an agent that ignored
+   * SIGTERM) goes to the agent's whole process GROUP where one exists —
+   * every agent is spawned `detached`, so it leads its own group and its
+   * children die with it — but only when its recorded start time positively
+   * confirms its identity; otherwise, or with no such group, the pid alone.
+   * A pid <= 1, or the engine's own, is never signalled (nor reported alive).
    */
-  kill(pid: number, expectedStart?: number): boolean;
+  kill(pid: number, expectedStart?: number, signal?: KillSignal): boolean;
   /**
    * Whether a pid is alive (best-effort). `expectedStart` applies the same
    * pid-reuse guard as `kill`.
@@ -1337,6 +1357,22 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
     return current === expected;
   }
 
+  /**
+   * #844: the group SIGKILL is sent only on POSITIVE identity — a recorded
+   * start time that `/proc` confirms. `matchesRecordedStart` lets a signal
+   * through best-effort when identity cannot be checked; a whole-group
+   * SIGKILL to a reused pid that now leads someone else's group is too
+   * destructive for best-effort, so that case gets the pid-only SIGKILL.
+   */
+  function identityConfirmed(pid: number, expectedStart: number | undefined): boolean {
+    const expected = expectedStart ?? spawnedStarts.get(pid);
+    return expected !== undefined && procStartTime(pid) === expected;
+  }
+
+  /** pid 0/1/negative is never an agent we spawned: `kill(0)` / `kill(-1)` reach the engine's group / every process. */
+  const signallable = (pid: number): boolean =>
+    Number.isInteger(pid) && pid > 1 && pid !== process.pid;
+
   return {
     spawn(cmd: string[], prompt: string, logFile: string): number {
       fs.mkdirSync(path.dirname(logFile), { recursive: true, mode: 0o700 });
@@ -1415,13 +1451,23 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
         fs.closeSync(out);
       }
     },
-    kill(pid: number, expectedStart?: number): boolean {
+    kill(pid: number, expectedStart?: number, signal: KillSignal = 'SIGTERM'): boolean {
+      if (!signallable(pid)) return false;
       if (!matchesRecordedStart(pid, expectedStart)) {
         spawnedStarts.delete(pid);
         return false; // reused pid — the agent we spawned is already gone
       }
+      if (signal === 'SIGKILL' && identityConfirmed(pid, expectedStart)) {
+        try {
+          // A negative pid signals the process group the (detached) agent leads.
+          process.kill(-pid, 'SIGKILL');
+          return true;
+        } catch {
+          // No such group (not a leader, or the platform has none) — the pid alone.
+        }
+      }
       try {
-        process.kill(pid, 'SIGTERM');
+        process.kill(pid, signal);
         return true;
       } catch {
         spawnedStarts.delete(pid);
@@ -1429,11 +1475,17 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
       }
     },
     isAlive(pid: number, expectedStart?: number): boolean {
+      if (!signallable(pid)) return false;
       try {
         process.kill(pid, 0);
         return matchesRecordedStart(pid, expectedStart);
       } catch (err) {
-        return (err as NodeJS.ErrnoException).code === 'EPERM';
+        // EPERM: alive but not ours to signal — still apply the identity
+        // guard, or a pid reused by another user's process reads alive forever.
+        return (
+          (err as NodeJS.ErrnoException).code === 'EPERM' &&
+          matchesRecordedStart(pid, expectedStart)
+        );
       }
     },
     processStart(pid: number): number | null {

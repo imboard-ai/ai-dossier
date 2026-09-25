@@ -20,6 +20,10 @@ KEEP = {
     "member-reprompted",
     # #824: an operator recorded a blocked batch's PR by hand (sched attach-pr).
     "pr-attached",
+    # #844: an agent ignored SIGTERM and was SIGKILLed; a serial batch advanced
+    # past a member evicted by an engine that exited before advancing.
+    "kill-escalated",
+    "member-advance-recovered",
 }
 out = []
 for line in sys.stdin:
