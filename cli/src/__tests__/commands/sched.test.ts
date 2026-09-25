@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { graphqlIssueResponse } from '../../../../packages/sched/src/__tests__/helpers/graphql-fixtures';
 import { registerSchedCommand } from '../../commands/sched';
 import { checkEngineStaleness } from '../../engine-version';
 import { readRunLog } from '../../run-log';
@@ -1360,19 +1361,12 @@ describe('ai-dossier sched pause/resume/abandon', () => {
         const nArg = fIdx >= 0 ? args[fIdx + 1] : undefined;
         const issue = nArg?.startsWith('n=') ? Number(nArg.slice(2)) : undefined;
         const state = issue === openIssue ? 'OPEN' : 'CLOSED';
-        return JSON.stringify({
-          data: {
-            repository: {
-              issue: {
-                state,
-                stateReason: state === 'CLOSED' ? 'COMPLETED' : null,
-                labels: { nodes: [], pageInfo: { hasNextPage: false } },
-                timelineItems: { nodes: [] },
-                closedByPullRequestsReferences: { nodes: [] },
-              },
-            },
-          },
-        });
+        return JSON.stringify(
+          graphqlIssueResponse({
+            state,
+            stateReason: state === 'CLOSED' ? 'COMPLETED' : undefined,
+          })
+        );
       }
       // `gh issue view --json labels` (enqueue's hard-block label check) and
       // anything else default to "no labels" — same as this file's default

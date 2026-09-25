@@ -33,6 +33,7 @@ import {
   type OrphanAnchorVerdict,
   type SchedState,
 } from '../index';
+import { graphqlIssueResponse as graphqlIssue } from './helpers/graphql-fixtures';
 
 /** `classifyOrphanAnchor` returns `null` only for the closed-anchor list-then-read race (tested separately below) — every other test here expects a real verdict. */
 function expectVerdict(v: OrphanAnchorVerdict | null): OrphanAnchorVerdict {
@@ -73,26 +74,13 @@ const ANCHOR_BODY = (members: number[], baseBranch = 'main'): string =>
     'dispatch_profile: default',
   ].join('\n');
 
-/** The `data.repository.issue` GraphQL shape `createExecGroundTruth`'s `issueCloseTruth` parses — used only by the AC6 no-write proof below, which drives the REAL gh-argv-building path rather than a mock `IssueCloseReader`. */
-function graphqlIssue(opts: {
-  state: 'OPEN' | 'CLOSED';
-  stateReason?: string;
-  closer?: unknown;
-}): unknown {
-  return {
-    data: {
-      repository: {
-        issue: {
-          state: opts.state,
-          stateReason: opts.stateReason ?? null,
-          labels: { nodes: [], pageInfo: { hasNextPage: false } },
-          timelineItems: { nodes: opts.closer !== undefined ? [{ closer: opts.closer }] : [] },
-          closedByPullRequestsReferences: { nodes: [] },
-        },
-      },
-    },
-  };
-}
+// `graphqlIssue` (the `data.repository.issue` GraphQL shape
+// `createExecGroundTruth`'s `issueCloseTruth` parses — used only by the AC6
+// no-write proof below, which drives the REAL gh-argv-building path rather
+// than a mock `IssueCloseReader`) now lives in `./helpers/graphql-fixtures`
+// as `graphqlIssueResponse`, imported above under this file's original name
+// — extracted (#829 DRY review) once `cli/src/__tests__/commands/sched.test.ts`
+// needed the identical shape.
 
 /**
  * #790 review (round 3): the AC6 no-write proof's denylist is a module-level
