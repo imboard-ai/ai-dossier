@@ -4412,11 +4412,12 @@ function recordPrDetectAmbiguous(
       at: now.toISOString(),
       since,
       ticks_persisted: ticks,
-      // #789 review: neither "record it explicitly" (no command exists) nor
-      // "close the extras" (a MERGED PR cannot be closed, so it never leaves
-      // `gh pr list --state merged`) was ever an actionable remedy — state
-      // what actually resolves it instead. #824 tracks the missing verb.
-      detail: `${matches.length} MERGED PRs match head=${batch.branch ?? '?'} (#${matches.join(', #')}) — refusing to guess which is ours; nothing recorded. The batch still reconciles via commits-in-base/members-closed evidence if either holds; otherwise inspect and \`sched abandon --batch ${batch.id}\`, or use \`sched attach-pr\` once #824 ships it`,
+      // #789 review: "close the extras" (a MERGED PR cannot be closed, so it
+      // never leaves `gh pr list --state merged`) was never an actionable
+      // remedy — state what actually resolves it instead: the operator names
+      // the batch's own PR with `sched attach-pr` (#824), which holds it to
+      // these same candidate checks.
+      detail: `${matches.length} MERGED PRs match head=${batch.branch ?? '?'} (#${matches.join(', #')}) — refusing to guess which is ours; nothing recorded. The batch still reconciles via commits-in-base/members-closed evidence if either holds; otherwise inspect the candidates and record the batch's own with \`sched attach-pr --batch ${batch.id} <pr>\`, or \`sched abandon --batch ${batch.id}\``,
     });
   }
   deps.store.withLock((s) => ({
@@ -4577,7 +4578,7 @@ export function reconcileStaleBlockedBatches(
     // #789 review: what the lock ACTUALLY applied, not what the outer
     // snapshot predicted — re-derived from `b` (read under the lock) below,
     // since `batch.pr` could in principle have changed between the snapshot
-    // above and the lock acquiring (e.g. a future `sched attach-pr`, #824).
+    // above and the lock acquiring (e.g. `sched attach-pr`, #824).
     let effectivePr: number | null = null;
     let prWasRecorded = false;
     deps.store.withLock((s) => {

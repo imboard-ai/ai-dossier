@@ -1843,7 +1843,13 @@ export type JournalEventName =
   | 'batch-resumed'
   // #822: a member posted a full-cycle-shaped milestone (wrong procedure) —
   // released and respawned ONCE in place with a corrective directive.
-  | 'member-reprompted';
+  | 'member-reprompted'
+  // #824: an operator recorded `batch.pr` by hand (`sched attach-pr`) after
+  // the PR passed #789's own candidate checks — a separate event name from the
+  // automatic detection (`stale-failure-reconciled` with `pr_detected: true`)
+  // so `events.jsonl` always tells the two apart. `pr`/`mergedAt` name the PR;
+  // `detail` names the verified repo/head/base and any ambiguity streak cleared.
+  | 'pr-attached';
 
 /**
  * The closed `reason` vocabulary a `slot-released` event carries (#525) —
@@ -2007,4 +2013,8 @@ export interface JournalEvent {
    * `events.jsonl`, never for a decision.
    */
   fence_takeover?: string;
+  /** `pr-attached` (#824): the PR an operator recorded as `batch.pr`. */
+  pr?: number;
+  /** `pr-attached` (#824): that PR's verified merge time (ISO) — the same key `stale-failure-reconciled` carries. */
+  mergedAt?: string;
 }

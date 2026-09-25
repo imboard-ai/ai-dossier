@@ -33,6 +33,7 @@ export {
   sweepAnchors,
   sweepOrphanAnchors,
 } from './anchor-close';
+export { type AttachPrDeps, type AttachPrResult, attachBatchPr } from './attach-pr';
 export {
   type AmbiguousTest,
   attributeByOverlap,
@@ -148,7 +149,10 @@ export {
   takeoverLabelFor,
 } from './fence';
 export {
+  type BatchPrCandidateVerdict,
+  type BatchPrCheck,
   batchPhaseBlockedReason,
+  checkBatchPrCandidate,
   createExecGroundTruth,
   GIT_OID_RE,
   type GroundTruth,
@@ -173,6 +177,7 @@ export {
   parseMilestoneJson,
   parseMilestoneListJson,
   parseOpenPrListJson,
+  parsePrCandidateJson,
   parsePrViewJson,
   parseRepoName,
   parseSetupInfo,

@@ -3,6 +3,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
+import {
+  enqueueEntries,
+  patchBatch,
+  SchedStore,
+  transitionBatch,
+  transitionIssue,
+} from '@ai-dossier/sched';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { graphqlIssueResponse } from '../../../../packages/sched/src/__tests__/helpers/graphql-fixtures';
 import { registerSchedCommand } from '../../commands/sched';
@@ -2308,5 +2315,176 @@ describe('#707: sched enqueue --dispatch (named dispatch profiles)', () => {
     ]);
     const state = readState() as { batches: Array<Record<string, unknown>> };
     expect(state.batches[0]).toMatchObject({ id: 'b-inc', dispatch_profile: 'glm' });
+  });
+});
+
+describe('#824: sched attach-pr', () => {
+  const BRANCH = 'batch/b824-20260925';
+
+  /** Seed `test-proj` with one blocked batch (branch recorded, pr null, an ambiguity streak open). */
+  function seedBlockedBatch(): void {
+    const store = new SchedStore(path.join(home, '.dossier', 'sched', 'test-proj'));
+    const at = new Date('2026-09-25T00:00:00.000Z');
+    store.withLock((s0) => {
+      let s = enqueueEntries(s0, [{ issue: 11, mode: 'slot', batch: 'b824', anchor: 10 }], at);
+      for (const to of ['classified', 'batched', 'waiting', 'in-work', 'committed'] as const) {
+        s = transitionIssue(s, 11, to, {}, at);
+      }
+      s = transitionBatch(s, 'b824', 'executing', { branch: BRANCH, base_branch: 'main' }, at);
+      s = transitionBatch(s, 'b824', 'blocked', { blocked_reason: 'gate-inconclusive:x' }, at);
+      s = patchBatch(
+        s,
+        'b824',
+        {
+          pr_detect_ambiguous_reason: 'ambiguous-merged-pr',
+          pr_detect_ambiguous_since: at.toISOString(),
+          pr_detect_ambiguous_ticks: 2,
+        },
+        at,
+        false
+      );
+      return { state: s, result: undefined };
+    });
+  }
+
+  function batchPr(): unknown {
+    const state = readState() as { batches: Array<{ id: string; pr: unknown }> };
+    return state.batches.find((b) => b.id === 'b824')?.pr;
+  }
+
+  /**
+   * gh: `repo view` answers `owner`/`name` (`test/proj` verifies `--project
+   * test-proj`); `pr view` answers `prPayload`, or throws (a failed call) when
+   * it is `null`. Every call is recorded.
+   */
+  function attachGhStub(
+    calls: Array<{ file: string; args: string[] }>,
+    repo: { owner: string; name: string } | null,
+    prPayload: Record<string, unknown> | null
+  ): ExecStub {
+    return (file, args) => {
+      calls.push({ file, args });
+      if (file === 'gh' && args[0] === 'repo' && args[1] === 'view') {
+        if (repo === null) throw new Error('gh: not a git repository');
+        return JSON.stringify({ owner: { login: repo.owner }, name: repo.name });
+      }
+      if (file === 'gh' && args[0] === 'pr' && args[1] === 'view') {
+        if (prPayload === null) throw new Error('gh: HTTP 502');
+        return JSON.stringify(prPayload);
+      }
+      return '{"labels":[]}';
+    };
+  }
+
+  const MERGED_PR = {
+    number: 4270,
+    state: 'MERGED',
+    headRefName: BRANCH,
+    baseRefName: 'main',
+    isCrossRepository: false,
+    mergedAt: '2026-09-25T03:00:00Z',
+    createdAt: '2026-09-25T01:00:00Z',
+  };
+
+  it('verifies the repo, reads the PR pinned with -R, records batch.pr and journals pr-attached', async () => {
+    seedBlockedBatch();
+    const calls: Array<{ file: string; args: string[] }> = [];
+    execHandles(attachGhStub(calls, { owner: 'test', name: 'proj' }, MERGED_PR));
+
+    await runSched(['sched', 'attach-pr', '4270', '--batch', 'b824', '--project', 'test-proj']);
+
+    expect(logs.join('\n')).toContain('Attached test/proj#4270');
+    expect(batchPr()).toBe(4270);
+    expect(journalEvents()).toContainEqual(
+      expect.objectContaining({ event: 'pr-attached', unit: 'batch:b824', pr: 4270 })
+    );
+    // Every gh call but the repo verification itself is pinned to the verified repo.
+    const ghCalls = calls.filter((c) => c.file === 'gh');
+    expect(ghCalls.map((c) => c.args.slice(0, 2).join(' '))).toEqual(['repo view', 'pr view']);
+    for (const c of ghCalls.filter((c) => c.args[0] !== 'repo')) {
+      expect(c.args[c.args.indexOf('-R') + 1]).toBe('test/proj');
+    }
+  });
+
+  it('--json carries the outcome and the verified repo', async () => {
+    seedBlockedBatch();
+    execHandles(attachGhStub([], { owner: 'test', name: 'proj' }, MERGED_PR));
+    await runSched([
+      'sched',
+      'attach-pr',
+      '#4270',
+      '--batch',
+      'b824',
+      '--project',
+      'test-proj',
+      '--json',
+    ]);
+    expect(JSON.parse(logs.join(''))).toMatchObject({
+      batch: 'b824',
+      repo: 'test/proj',
+      outcome: 'attached',
+      pr: 4270,
+      clearedAmbiguousTicks: 2,
+    });
+  });
+
+  it('fails closed when the cwd is not the project repository — no PR is read at all', async () => {
+    seedBlockedBatch();
+    const calls: Array<{ file: string; args: string[] }> = [];
+    execHandles(attachGhStub(calls, { owner: 'someone', name: 'else' }, MERGED_PR));
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    await expect(
+      runSched(['sched', 'attach-pr', '4270', '--batch', 'b824', '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
+    stderrSpy.mockRestore();
+    expect(calls.some((c) => c.args[0] === 'pr')).toBe(false);
+    expect(batchPr()).toBeNull();
+    expect(journalEvents().some((e) => e.event === 'pr-attached')).toBe(false);
+  });
+
+  it('fails closed when gh cannot verify the repo at all', async () => {
+    seedBlockedBatch();
+    const calls: Array<{ file: string; args: string[] }> = [];
+    execHandles(attachGhStub(calls, null, MERGED_PR));
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    await expect(
+      runSched(['sched', 'attach-pr', '4270', '--batch', 'b824', '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
+    stderrSpy.mockRestore();
+    expect(calls.some((c) => c.args[0] === 'pr')).toBe(false);
+    expect(batchPr()).toBeNull();
+  });
+
+  it('refuses when the PR read fails, recording nothing', async () => {
+    seedBlockedBatch();
+    execHandles(attachGhStub([], { owner: 'test', name: 'proj' }, null));
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    await expect(
+      runSched(['sched', 'attach-pr', '4270', '--batch', 'b824', '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
+    stderrSpy.mockRestore();
+    expect(batchPr()).toBeNull();
+    expect(journalEvents().some((e) => e.event === 'pr-attached')).toBe(false);
+  });
+
+  it('refuses a fork PR, recording nothing', async () => {
+    seedBlockedBatch();
+    execHandles(
+      attachGhStub([], { owner: 'test', name: 'proj' }, { ...MERGED_PR, isCrossRepository: true })
+    );
+    await expect(
+      runSched(['sched', 'attach-pr', '4270', '--batch', 'b824', '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
+    expect(batchPr()).toBeNull();
+  });
+
+  it('rejects a non-numeric PR argument before touching gh', async () => {
+    seedBlockedBatch();
+    const calls: Array<{ file: string; args: string[] }> = [];
+    execHandles(attachGhStub(calls, { owner: 'test', name: 'proj' }, MERGED_PR));
+    await expect(
+      runSched(['sched', 'attach-pr', '42x', '--batch', 'b824', '--project', 'test-proj'])
+    ).rejects.toThrow('process.exit(1)');
+    expect(calls).toHaveLength(0);
   });
 });

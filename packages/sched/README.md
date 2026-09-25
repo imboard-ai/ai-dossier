@@ -37,6 +37,7 @@ ai-dossier sched stop --batch b1  # terminate every batch agent (incl. parallel 
 ai-dossier sched abandon --issue 42 --reason "operator abort"
 ai-dossier sched abandon --batch b1   # dissolve; every unshipped member — parked and validated ones included — requeues as full-cycle
 ai-dossier sched requeue --issue 42   # a PARKED batch member (evicted / handed-back) → full-cycle from its member branch, on the batch profile (#810)
+ai-dossier sched attach-pr 4270 --batch b1  # record a blocked batch's own MERGED PR by hand (resolves pr-detect-ambiguous, #824)
 ai-dossier sched stats --issues 4..9  # per-issue tokens/cost from ~/.dossier/runs.jsonl (#524)
 ai-dossier sched stats --batch b1 --project owner-repo  # batch member/tail/report/fix costs from raw dispatch logs (#564)
 ```
@@ -1557,9 +1558,29 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   per-issue-only despite the section's origin) dispatches the report agent exactly as if the
   fleet had opened the PR itself, and `sched status`'s existing `pr` column shows it.
   Recording `batch.pr` never closes the anchor by itself — that stays #768's own
-  evidence-gated `reconcileAnchorClosure`, unchanged. An ambiguous match with no
-  explicit way to resolve it today (#824 tracks a `sched attach-pr` verb) still lets the
-  batch reconcile via its other evidence, or falls to `sched abandon --batch`.
+  evidence-gated `reconcileAnchorClosure`, unchanged. An ambiguous match still lets the
+  batch reconcile via its other evidence; otherwise the operator resolves it with
+  `sched attach-pr` (below), or falls to `sched abandon --batch`.
+- **`sched attach-pr --batch <id> <pr>` (#824).** The operator's explicit, auditable
+  answer to `pr-detect-ambiguous` — and the batch-integrate manual-recovery procedure's
+  scripted Step 6b. Positive evidence only: the project repository is verified first
+  (`resolveProjectRepo`; unverifiable → refused before any PR is read), the PR is read
+  with `gh pr view <pr> -R <owner/name>` (`GroundTruth.batchPrCandidate`, repo-gated like
+  `mergedPrForBranch`), and it must pass the SAME candidate checks #789's automatic path
+  applies (`checkBatchPrCandidate`: not a fork, head = `batch.branch`, base =
+  `batch.base_branch`, a real merge timestamp, created at or after the batch) plus an
+  explicit `state == MERGED` and a positively-read `isCrossRepository == false`. Any
+  mismatch, a failed or unusable gh read, a batch that is not `blocked` (or has no
+  branch), or a batch whose `batch.pr` is already a DIFFERENT PR refuses with a message
+  naming why — nothing written, nothing journaled; the same PR already recorded is a
+  no-op. There is no `--force`: every check reads a field `gh pr view` always returns.
+  On success `batch.pr` is recorded and the `pr_detect_ambiguous_*` streak cleared in
+  one locked write (`updated_at` is touched, which re-arms the 7-day reconcile window),
+  journaled as its own `pr-attached` event — never `stale-failure-reconciled` /
+  `pr_detected`, so `events.jsonl` always tells operator from automatic apart. Nothing
+  else happens in the command: the next tick's stale-blocked reconcile settles the batch
+  on its ordinary `pr-merged` evidence (report + teardown follow), and the anchor closes
+  only through `reconcileAnchorClosure`, which never reads `batch.pr`.
 
 Everything else is surfaced, never closed: `sched status --anchors` (opt-in; `status`
 makes no GitHub call without it) lists each still-open anchor of a batch no longer in
