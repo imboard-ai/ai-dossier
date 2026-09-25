@@ -807,6 +807,11 @@ failure rails: executing → dissolving (a member self-reports blocked)
   an eviction group, or a member `deps` on another member; a batch already past `ready`
   with no recorded mode (claimed by a pre-1.23.0 engine) stays serial across the upgrade.
   Dissolve, `sched stop --batch` and `abandon` stop/release every member slot.
+  A run's `torn_down` is set only after its tree teardown verifiably landed (path gone
+  and unlisted, or the pool reports it returned); a failed one records
+  `teardown_failed_at`, journals `teardown-failed` once and is never retried — the tree
+  stays for the operator and `sched status` names it (`kept-worktree`) (#855). A kept batch's (`worktree_kept`) runs are never torn
+  down by the scheduler.
 - **Serial mode: members run `member-cycle` one fresh agent at a time — each in its OWN
   worktree** on its OWN branch `batch/<id>-m<n>-<issue>` (#677, RFC-0001 §J.3), cut off
   the integration branch, warmed, and pushed before the agent spawns; the agent never
@@ -1426,7 +1431,7 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to the current schema (1.27.0 — 1.24.0 was #810: no backfill,
+  load and migrate to the current schema (1.28.0 — 1.24.0 was #810: no backfill,
   `kind`/`branch` optional, absent = an `evicted` record with no branch) automatically
   (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
@@ -1449,6 +1454,10 @@ after-the-fact recovery, not a missing-data bug.
   respawn counter); `null` is backfilled on load.
   Schema 1.27.0 (#822): `BatchEntry` gains `reprompted_members`
   (`{ issue, milestone_at, reprompted_at }` records; `[]` backfilled).
+  Schema 1.28.0 (#855): `BatchEntry` gains `worktree_kept` (the members-closed keep
+  decision, persisted; `false` backfilled) and `MemberRun` gains `teardown_failed_at`
+  (`null` backfilled). A 1.27.0 `done` batch still carrying a live member run loads as
+  kept — the old engine never recorded the decision, so the default is to keep.
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -1486,7 +1495,11 @@ to skip the check entirely):
 - **`kept-worktree`** (#791) — a `done` batch whose `worktree` or `member_worktree` is
   still set in the ledger: the `members-closed` stale-blocked reconcile below
   intentionally leaves it in place (it may hold unpushed operator repair work), and
-  nothing else surfaced it until now. For each kept path, `sched status` reports:
+  nothing else surfaced it until now. Also (#834/#855) each parallel `member_runs[]`
+  tree left on disk: every not-torn-down run of a `done` batch (a kept batch's, or one
+  a crash stranded), and a run of any ended batch whose teardown FAILED
+  (`teardown_failed_at` — the message says so; the cause is in the `teardown-failed`
+  journal line, and the scheduler never retries it). For each kept path, `sched status` reports:
   whether it still exists on disk; whether it is pool-claimed (the claim is held
   indefinitely until returned); and, via two local, read-only `git` probes scoped to
   that worktree's own `HEAD` (`git --no-optional-locks status --porcelain`, `git log
@@ -1544,7 +1557,9 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   for #686's stale-blocked reconcile (`members-closed`), which survives the mandated
   rebase-merge that makes the ancestry probe structurally dead. It finishes the terminal
   rail inline but never tears the blocked worktree down (it may hold unpushed work);
-  the journal line says the worktree was kept, and `sched status` then raises a
+  since #855 the decision is persisted as `worktree_kept`, so the terminal-batch safety
+  net leaves the batch's parallel `member_runs[]` trees in place too (`torn_down` stays
+  false). The journal line says the worktree was kept, and `sched status` then raises a
   `kept-worktree` warning for it on every run until the ledger field clears — see
   above and `reconcileKeptWorktrees` (#791).
 - **PR-detection evidence (#789).** When `batch.pr` was never recorded at all — a PR

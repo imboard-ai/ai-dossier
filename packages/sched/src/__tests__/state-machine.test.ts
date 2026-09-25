@@ -22,6 +22,7 @@ import {
   transitionSlot,
   validateState,
 } from '../index';
+import { memberRun } from './helpers/member-run';
 
 const NOW = new Date('2026-08-29T12:00:00Z');
 const NOW2 = new Date('2026-08-29T12:05:00Z');
@@ -496,6 +497,50 @@ describe('#810: parkMember / profile-carrying requeue', () => {
       corrupt.batches[0].reprompted_members = bad;
       expect(() => validateState(corrupt)).toThrow(/reprompted_members/);
     }
+  });
+
+  it('#855: a 1.27.0 batch loads with worktree_kept=false and its runs with teardown_failed_at=null; malformed values are refused', () => {
+    const withRun = (): SchedState => {
+      const state = seeded();
+      state.batches[0].member_runs = [
+        memberRun({
+          issue: state.batches[0].members[0],
+          branch: 'batch/b1-m1-x',
+          worktree: '/repo/worktrees/batch-b1-m1',
+        }),
+      ];
+      return state;
+    };
+    const legacy = JSON.parse(JSON.stringify({ ...withRun(), schema_version: '1.27.0' }));
+    delete legacy.batches[0].worktree_kept;
+    delete legacy.batches[0].member_runs[0].teardown_failed_at;
+    const loaded = validateState(legacy);
+    expect(loaded.schema_version).toBe(SCHEMA_VERSION);
+    expect(loaded.batches[0]?.worktree_kept).toBe(false);
+    expect(loaded.batches[0]?.member_runs[0]?.teardown_failed_at).toBeNull();
+
+    const recorded = withRun();
+    recorded.batches[0].worktree_kept = true;
+    recorded.batches[0].member_runs[0].teardown_failed_at = '2026-09-25T10:00:00.000Z';
+    const round = validateState(JSON.parse(JSON.stringify(recorded)));
+    expect(round.batches[0]?.worktree_kept).toBe(true);
+    expect(round.batches[0]?.member_runs[0]?.teardown_failed_at).toBe('2026-09-25T10:00:00.000Z');
+
+    // Default to KEEP (#855): a 1.27.0 DONE batch still carrying a live run
+    // may be a members-closed batch the old engine never recorded as kept.
+    const legacyDone = JSON.parse(JSON.stringify({ ...withRun(), schema_version: '1.27.0' }));
+    legacyDone.batches[0].status = 'done';
+    delete legacyDone.batches[0].worktree_kept;
+    expect(validateState(legacyDone).batches[0]?.worktree_kept).toBe(true);
+    legacyDone.batches[0].member_runs[0].torn_down = true;
+    expect(validateState(legacyDone).batches[0]?.worktree_kept).toBe(false);
+
+    const badKept = JSON.parse(JSON.stringify(withRun()));
+    badKept.batches[0].worktree_kept = 'yes';
+    expect(() => validateState(badKept)).toThrow(/worktree_kept/);
+    const badFailedAt = JSON.parse(JSON.stringify(withRun()));
+    badFailedAt.batches[0].member_runs[0].teardown_failed_at = 'yesterday';
+    expect(() => validateState(badFailedAt)).toThrow(/member_runs/);
   });
 
   it('#832: a 1.25.0 batch with no agent_exits loads with the respawn counter backfilled null', () => {

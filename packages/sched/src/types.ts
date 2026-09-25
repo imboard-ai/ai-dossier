@@ -489,12 +489,25 @@ export interface MemberRun {
    */
   gate_inconclusive: string | null;
   /**
-   * Whether this run's worktree has been torn down (pool-returned or removed).
-   * Set only AFTER the teardown, so a crash in between — or a batch ended by
-   * `sched stop`/`abandon`, which never runs a teardown — leaves `false`, and
-   * `teardownBatch`/the terminal-batch arm tear it down (idempotently) later.
+   * Whether this run's worktree is verifiably gone (#855): set only after a
+   * teardown that landed — the path is gone and unlisted, or the pool's
+   * self-check reports the entry returned — or by `reconcileKeptWorktrees`
+   * on the same evidence. `false` otherwise: a run not yet torn down (a crash
+   * in between, or a batch `sched stop`/`abandon` ended, is picked up by
+   * `teardownBatch`/the terminal-batch arm, idempotently), a KEPT batch's run
+   * ({@link BatchEntry.worktree_kept}, never torn down by the scheduler), or
+   * one whose teardown failed ({@link MemberRun.teardown_failed_at}).
    */
   torn_down: boolean;
+  /**
+   * #855: when a teardown of this run's tree was attempted and did NOT
+   * verifiably land (ISO time of the attempt), else null. The tree is left
+   * on disk, `torn_down` stays false, and the failure is journaled once; the
+   * run is never re-attempted — an operator may be using the leftover tree,
+   * and a later `--force` remove of it would be the data loss #855 closes.
+   * `null` backfilled on load (schema 1.28.0).
+   */
+  teardown_failed_at: string | null;
 }
 
 /** A batch of slot-mode issues sharing one lifecycle (RFC-0001 §C.4/E.4). */
@@ -769,6 +782,20 @@ export interface BatchEntry {
    * `reprompted_at` evicts. `[]` backfilled on load (schema 1.27.0).
    */
   reprompted_members: RepromptRecord[];
+  /**
+   * #855: the batch's worktrees are KEPT for the operator — set by #768's
+   * `members-closed` reconcile (the members shipped outside the batch
+   * branch, so its trees may hold unpushed repair work), in the same locked
+   * transition that ends the batch. Persisted so every teardown path —
+   * including `runBatchTick`'s terminal-batch safety net, which reaches
+   * `member_runs[]` on every tick — reads the same keep decision
+   * `worktree`/`member_worktree` get. A kept batch's trees are never removed
+   * or pool-returned by the scheduler; `sched status`'s `kept-worktree`
+   * warning names them for the operator. `false` backfilled on load
+   * (schema 1.28.0): a pre-1.28.0 members-closed batch already went through
+   * the old safety net.
+   */
+  worktree_kept: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -1453,8 +1480,11 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * backfilled on load.
  * 1.27.0 (#822): `BatchEntry` gains `reprompted_members` — members already
  * re-prompted once for a wrong-procedure trail; `[]` backfilled on load.
+ * 1.28.0 (#855): `BatchEntry` gains `worktree_kept` (the members-closed keep
+ * decision, persisted) and `MemberRun` gains `teardown_failed_at`;
+ * `false`/`null` backfilled on load.
  */
-export const SCHEMA_VERSION = '1.27.0' as const;
+export const SCHEMA_VERSION = '1.28.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1485,6 +1515,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.24.0',
   '1.25.0',
   '1.26.0',
+  '1.27.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
