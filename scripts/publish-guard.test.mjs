@@ -6,7 +6,18 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { CheckUnavailableError } from './check-version-bumps.mjs';
-import { decide, formatDecision, npmLookup, oneLine, parseNpmView, run } from './publish-guard.mjs';
+import {
+  decide,
+  formatDecision,
+  npmLookup,
+  oneLine,
+  parseNpmView,
+  parseRegistryResponse,
+  REGISTRY_URL,
+  registryLookup,
+  registryViewOnce,
+  run,
+} from './publish-guard.mjs';
 
 const SCRIPT_PATH = fileURLToPath(new URL('./publish-guard.mjs', import.meta.url));
 const SHA_A = 'a'.repeat(40);
@@ -111,7 +122,92 @@ describe('oneLine', () => {
   });
 });
 
-describe('npmLookup — retries an unknown answer, never turns it into publish', () => {
+// The registry HTTP API is what run() uses (#842 follow-up): npm CLI output
+// changed shape under CI (npm 12), the registry's manifest format did not.
+describe('parseRegistryResponse — never fails open', () => {
+  const name = '@ai-dossier/core';
+  const manifest = (over = {}) =>
+    JSON.stringify({ name, version: '1.11.0', gitHead: SHA_A, dist: {}, ...over });
+
+  it('returns the gitHead from a 200 manifest', () => {
+    expect(parseRegistryResponse({ status: 200, body: manifest() }, name, '1.11.0')).toEqual({
+      gitHead: SHA_A,
+    });
+  });
+
+  it('returns null for a 404 (version or package not on npm)', () => {
+    expect(
+      parseRegistryResponse({ status: 404, body: '"version not found: 9.9.9"' }, name, '9.9.9')
+    ).toBeNull();
+  });
+
+  it('throws on any other status instead of guessing', () => {
+    for (const status of [401, 403, 429, 500, 503]) {
+      expect(() => parseRegistryResponse({ status, body: 'nope' }, name, '1.11.0')).toThrow(
+        CheckUnavailableError
+      );
+    }
+  });
+
+  it('throws on a non-JSON body, a missing gitHead, or a manifest for another version', () => {
+    const cases = [
+      { status: 200, body: '<html>' },
+      { status: 200, body: manifest({ gitHead: undefined }) },
+      { status: 200, body: manifest({ version: '1.10.0' }) },
+      { status: 200, body: manifest({ name: '@ai-dossier/cli' }) },
+    ];
+    for (const res of cases) {
+      expect(() => parseRegistryResponse(res, name, '1.11.0')).toThrow(CheckUnavailableError);
+    }
+  });
+});
+
+describe('registryViewOnce', () => {
+  it('asks the exact-version manifest URL with the scope slash encoded', async () => {
+    let asked;
+    const fetchImpl = async (url) => {
+      asked = url;
+      return { status: 404, text: async () => 'not found' };
+    };
+    expect(await registryViewOnce('@ai-dossier/core', '1.11.0', { fetchImpl })).toBeNull();
+    expect(asked).toBe(`${REGISTRY_URL}/@ai-dossier%2Fcore/1.11.0`);
+  });
+
+  it('turns a network failure into CheckUnavailableError, never null', async () => {
+    const fetchImpl = async () => {
+      throw new TypeError('fetch failed');
+    };
+    await expect(registryViewOnce('@x/y', '1.0.0', { fetchImpl })).rejects.toThrow(
+      CheckUnavailableError
+    );
+  });
+});
+
+describe('registryLookup — retries an unknown answer, never turns it into publish', () => {
+  const quiet = { wait: async () => {}, log: () => {} };
+
+  it('retries and returns the later answer', async () => {
+    let calls = 0;
+    const view = async () => {
+      calls += 1;
+      if (calls < 3) throw new CheckUnavailableError('HTTP 503');
+      return { gitHead: SHA_A };
+    };
+    expect(await registryLookup('@x/y', '1.0.0', { view, ...quiet })).toEqual({ gitHead: SHA_A });
+    expect(calls).toBe(3);
+  });
+
+  it('rethrows after the last attempt instead of returning null', async () => {
+    const view = async () => {
+      throw new CheckUnavailableError('HTTP 503');
+    };
+    await expect(registryLookup('@x/y', '1.0.0', { view, ...quiet })).rejects.toThrow(
+      CheckUnavailableError
+    );
+  });
+});
+
+describe('npmLookup (inert CLI fallback) — retries an unknown answer, never turns it into publish', () => {
   const quiet = { sleep: () => {}, log: () => {} };
 
   it('retries a registry failure and returns the later answer', () => {
@@ -236,19 +332,24 @@ describe('run — end to end against a real git repo', () => {
     outCount += 1;
     return join(outDir, `ledger-${outCount}`);
   };
-  const report = (ledger) => {
+  const report = async (ledger) => {
     const lines = [];
-    const code = run(['--report-collisions', ledger], {
+    const code = await run(['--report-collisions', ledger], {
       log: (m) => lines.push(m),
       error: (m) => lines.push(m),
     });
     return { code, out: lines.join('\n') };
   };
-  const guard = ({ head, lookup, dir = 'cli', extra = ['--defer-collision', freshLedger()] }) => {
+  const guard = async ({
+    head,
+    lookup,
+    dir = 'cli',
+    extra = ['--defer-collision', freshLedger()],
+  }) => {
     outCount += 1;
     const outputFile = join(outDir, `out-${outCount}`);
     const lines = [];
-    const code = run(['--repo-root', repo, '--dir', dir, '--head', head, ...extra], {
+    const code = await run(['--repo-root', repo, '--dir', dir, '--head', head, ...extra], {
       log: (m) => lines.push(m),
       error: (m) => lines.push(m),
       lookup,
@@ -313,8 +414,8 @@ describe('run — end to end against a real git repo', () => {
     if (outDir) rmSync(outDir, { recursive: true, force: true });
   });
 
-  it('reports a collision for the race loser and does not claim success silently', () => {
-    const r = guard({ head: loser, lookup: publishedAt(winner) });
+  it('reports a collision for the race loser and does not claim success silently', async () => {
+    const r = await guard({ head: loser, lookup: publishedAt(winner) });
     expect(r.code).toBe(0); // --defer-collision: the workflow fails the job at the end
     expect(r.outputs).toContain('collision=true');
     expect(r.outputs).toContain('skip=true');
@@ -322,15 +423,15 @@ describe('run — end to end against a real git repo', () => {
     expect(r.out).toContain('Differs: cli/src/other.js');
   });
 
-  it('exits 1 on a collision when not deferred (direct callers cannot miss it)', () => {
-    const r = guard({ head: loser, lookup: publishedAt(winner), extra: [] });
+  it('exits 1 on a collision when not deferred (direct callers cannot miss it)', async () => {
+    const r = await guard({ head: loser, lookup: publishedAt(winner), extra: [] });
     expect(r.code).toBe(1);
     expect(r.outputs).toContain('collision=true');
   });
 
-  it('records a deferred collision in the ledger, and the report step fails naming it', () => {
+  it('records a deferred collision in the ledger, and the report step fails naming it', async () => {
     const ledger = freshLedger();
-    const r = guard({
+    const r = await guard({
       head: loser,
       lookup: publishedAt(winner),
       extra: ['--defer-collision', ledger],
@@ -338,22 +439,22 @@ describe('run — end to end against a real git repo', () => {
     expect(r.code).toBe(0);
     expect(readFileSync(ledger, 'utf8')).toBe('collision @fixture/cli\n');
 
-    const rep = report(ledger);
+    const rep = await report(ledger);
     expect(rep.code).toBe(1);
     expect(rep.out).toContain('Not released: @fixture/cli');
   });
 
-  it('the report step passes when nothing collided (ledger absent or clean)', () => {
+  it('the report step passes when nothing collided (ledger absent or clean)', async () => {
     const ledger = freshLedger();
-    expect(report(ledger).code).toBe(0);
-    guard({ head: loser, lookup: () => null, extra: ['--defer-collision', ledger] });
-    expect(report(ledger).code).toBe(0);
+    expect((await report(ledger)).code).toBe(0);
+    await guard({ head: loser, lookup: () => null, extra: ['--defer-collision', ledger] });
+    expect((await report(ledger)).code).toBe(0);
   });
 
-  it('holds a dependent of a collided package instead of publishing it', () => {
+  it('holds a dependent of a collided package instead of publishing it', async () => {
     const ledger = freshLedger();
-    guard({ head: loser, lookup: publishedAt(winner), extra: ['--defer-collision', ledger] });
-    const r = guard({
+    await guard({ head: loser, lookup: publishedAt(winner), extra: ['--defer-collision', ledger] });
+    const r = await guard({
       head: loser,
       dir: 'app',
       lookup: () => null,
@@ -366,10 +467,10 @@ describe('run — end to end against a real git repo', () => {
     expect(readFileSync(ledger, 'utf8')).toContain('held @fixture/app');
   });
 
-  it('still publishes an unrelated package after another package collided', () => {
+  it('still publishes an unrelated package after another package collided', async () => {
     const ledger = freshLedger();
-    guard({ head: loser, lookup: publishedAt(winner), extra: ['--defer-collision', ledger] });
-    const r = guard({
+    await guard({ head: loser, lookup: publishedAt(winner), extra: ['--defer-collision', ledger] });
+    const r = await guard({
       head: loser,
       dir: 'lib',
       lookup: () => null,
@@ -380,14 +481,14 @@ describe('run — end to end against a real git repo', () => {
     expect(readFileSync(ledger, 'utf8')).not.toContain('@fixture/lib');
   });
 
-  it('publishes a dependent normally when nothing it depends on collided', () => {
-    const r = guard({ head: loser, dir: 'app', lookup: () => null });
+  it('publishes a dependent normally when nothing it depends on collided', async () => {
+    const r = await guard({ head: loser, dir: 'app', lookup: () => null });
     expect(r.outputs).toContain('skip=false');
   });
 
-  it('looks up the version at --head, not the checked-out version', () => {
+  it('looks up the version at --head, not the checked-out version', async () => {
     let asked;
-    guard({
+    await guard({
       head: loser,
       lookup: (name, version) => {
         asked = `${name}@${version}`;
@@ -397,50 +498,98 @@ describe('run — end to end against a real git repo', () => {
     expect(asked).toBe('@fixture/cli@1.1.0');
   });
 
-  it('skips a re-run of the winning commit without a collision (idempotent)', () => {
-    const r = guard({ head: winner, lookup: publishedAt(winner) });
+  it('skips a re-run of the winning commit without a collision (idempotent)', async () => {
+    const r = await guard({ head: winner, lookup: publishedAt(winner) });
     expect(r.code).toBe(0);
     expect(r.outputs).toContain('skip=true');
     expect(r.outputs).toContain('collision=false');
     expect(r.out).toContain('re-run');
   });
 
-  it('skips a later commit that changed nothing release-relevant for the package', () => {
+  it('skips a later commit that changed nothing release-relevant for the package', async () => {
     for (const head of [unrelated, testOnly]) {
-      const r = guard({ head, lookup: publishedAt(winner) });
+      const r = await guard({ head, lookup: publishedAt(winner) });
       expect(r.code).toBe(0);
       expect(r.outputs).toContain('skip=true');
       expect(r.outputs).toContain('collision=false');
     }
   });
 
-  it('publishes when the exact version is not on npm', () => {
-    const r = guard({ head: loser, lookup: () => null });
+  it('publishes when the exact version is not on npm', async () => {
+    const r = await guard({ head: loser, lookup: () => null });
     expect(r.code).toBe(0);
     expect(r.outputs).toContain('skip=false');
     expect(r.outputs).toContain('collision=false');
   });
 
-  it('exits 2 and writes no skip output when the npm lookup cannot answer', () => {
-    const r = guard({
-      head: loser,
-      lookup: () => {
-        throw new CheckUnavailableError('registry unreachable');
-      },
-    });
+  const unreachable = () => {
+    throw new CheckUnavailableError('registry unreachable');
+  };
+
+  it('exits 2 and writes no skip output when the lookup cannot answer (run directly)', async () => {
+    const r = await guard({ head: loser, lookup: unreachable, extra: [] });
     expect(r.code).toBe(2);
     expect(r.outputs).toBe('');
     expect(r.out).toContain('::error title=publish-guard (cli) could not run::');
   });
 
-  it('exits 2 when the published gitHead is not in the clone and cannot be fetched', () => {
-    const r = guard({ head: loser, lookup: publishedAt('c'.repeat(40)) });
+  it('exits 2 when the published gitHead is not in the clone and cannot be fetched', async () => {
+    const r = await guard({ head: loser, lookup: publishedAt('c'.repeat(40)), extra: [] });
     expect(r.code).toBe(2);
     expect(r.outputs).toBe('');
     expect(r.out).toContain('could not be fetched');
   });
 
-  it('runs as a real subprocess and exits 2 on a usage error', () => {
+  // Isolation: one package the guard cannot decide must not stop the others.
+  it('deferred: records an undecidable package as unavailable and lets the job go on', async () => {
+    const ledger = freshLedger();
+    const r = await guard({
+      head: loser,
+      lookup: unreachable,
+      extra: ['--defer-collision', ledger],
+    });
+    expect(r.code).toBe(0);
+    expect(r.outputs).toContain('skip=true'); // never published blind
+    expect(r.outputs).toContain('collision=false');
+    expect(readFileSync(ledger, 'utf8')).toBe('unavailable @fixture/cli\n');
+    expect(r.out).toContain('could not run');
+  });
+
+  it('an unavailable package does not skip an unrelated one', async () => {
+    const ledger = freshLedger();
+    await guard({ head: loser, lookup: unreachable, extra: ['--defer-collision', ledger] });
+    const r = await guard({
+      head: loser,
+      dir: 'lib',
+      lookup: () => null,
+      extra: ['--defer-collision', ledger],
+    });
+    expect(r.code).toBe(0);
+    expect(r.outputs).toContain('skip=false');
+  });
+
+  it('an unavailable package holds its dependents', async () => {
+    const ledger = freshLedger();
+    await guard({ head: loser, lookup: unreachable, extra: ['--defer-collision', ledger] });
+    const r = await guard({
+      head: loser,
+      dir: 'app',
+      lookup: () => null,
+      extra: ['--defer-collision', ledger],
+    });
+    expect(r.outputs).toContain('skip=true');
+    expect(readFileSync(ledger, 'utf8')).toContain('held @fixture/app');
+  });
+
+  it('the report step fails the job naming an unavailable package', async () => {
+    const ledger = freshLedger();
+    await guard({ head: loser, lookup: unreachable, extra: ['--defer-collision', ledger] });
+    const rep = await report(ledger);
+    expect(rep.code).toBe(1);
+    expect(rep.out).toContain('Not checked: @fixture/cli');
+  });
+
+  it('runs as a real subprocess and exits 2 on a usage error', async () => {
     let status = 0;
     try {
       execFileSync('node', [SCRIPT_PATH], { stdio: ['ignore', 'pipe', 'pipe'] });

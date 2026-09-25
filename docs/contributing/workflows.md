@@ -173,7 +173,9 @@ Actions → Publish Packages to npm → Run workflow
    - Each package checked by `scripts/publish-guard.mjs`: skipped if its version is already on
      npm from this commit or from identical release-relevant source; a version on npm built from
      different source is a collision — unaffected packages still publish (dependents of the
-     colliding one are held), then `Fail on version collisions` fails the job (#826)
+     colliding one are held), then `Fail on version collisions` fails the job (#826). A package
+     the guard cannot decide (registry error, missing gitHead) is handled the same way, as
+     `unavailable` — never skipped silently
    ↓
 9. Create Git tag (if version bumped)
    - Tag format: v0.1.0, v0.2.0, etc.

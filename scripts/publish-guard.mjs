@@ -31,10 +31,17 @@
 // `no-release-needed` label produces: that source is on main and not on npm.
 // It stays red until the package is bumped — loud on purpose.
 //
+// The published version's gitHead is read from the registry's HTTP JSON API
+// (`GET <registry>/<name>/<version>`), a stable public format — not from
+// `npm view` output, whose shape changed under CI when npm@latest moved to
+// npm 12 (a one-element array instead of an object) and turned every publish
+// run red (#842).
+//
 // Operating principle, shared with check-version-bumps.mjs: never FAIL OPEN.
-// Anything that leaves the answer unknown (an npm error that is not a 404, a
-// published version with no gitHead, a gitHead that cannot be fetched) exits 2
-// rather than skipping — a skip is exactly the silent outcome this prevents.
+// Anything that leaves the answer unknown (a registry answer other than 200 or
+// 404, a published version with no gitHead, a gitHead that cannot be fetched)
+// is "unavailable" — never a skip, which is exactly the silent outcome this
+// prevents. Run directly it exits 2.
 //
 // Usage:
 //   node scripts/publish-guard.mjs --dir <package-dir> [--head <ref>]
@@ -45,13 +52,15 @@
 // `collision=true|false` there. Exit codes: 0 = publish or skip,
 // 1 = collision, 2 = the guard could not run.
 //
-// `--defer-collision <ledger>` is for the workflow only: a collision exits 0
-// and is recorded in the ledger file, so the other packages still publish.
-// Every later package checked against the same ledger is HELD (skip) when one
-// of its `@ai-dossier/*` dependencies collided or was held — it would
-// otherwise ship against the older published dependency. The job's final
-// step runs `--report-collisions <ledger>`, which exits 1 naming every
-// collided package. The ledger is the single list of packages, so a new
+// `--defer-collision <ledger>` is for the workflow only: a collision — or a
+// package the guard could not decide ("unavailable") — exits 0 and is
+// recorded in the ledger file, so one package's problem never stops the
+// unrelated ones from publishing. Every later package checked against the
+// same ledger is HELD (skip) when one of its `@ai-dossier/*` dependencies
+// collided, was unavailable, or was held — it would otherwise ship against
+// the older published dependency. The job's final step runs
+// `--report-collisions <ledger>`, which exits 1 naming every collided and
+// unavailable package. The ledger is the single list of packages, so a new
 // package step cannot be forgotten in a hand-maintained `if:`.
 // ------------------------------------------------------------------
 
@@ -75,9 +84,15 @@ const MAX_LISTED_FILES = 10;
 /** npm's `gitHead` is always a full commit sha. */
 const FULL_SHA_RE = /^[0-9a-f]{40}$/;
 
-/** Attempts for an `npm view` that fails with something other than E404. */
+/** The registry `publish-packages.yml` publishes to. */
+export const REGISTRY_URL = 'https://registry.npmjs.org';
+
+/** Attempts for a registry lookup whose answer is neither a hit nor a 404. */
 const NPM_LOOKUP_ATTEMPTS = 3;
 const NPM_LOOKUP_BACKOFF_MS = [5_000, 15_000];
+
+/** Per-request budget for a registry lookup. */
+const REGISTRY_TIMEOUT_MS = 20_000;
 
 const short = (sha) => (typeof sha === 'string' ? sha.slice(0, SHORT_SHA_LENGTH) : String(sha));
 
@@ -158,6 +173,109 @@ export function formatDecision({ name, version, published, headSha, decision }) 
 
 // ---------------------------------------------------------------- IO ---------
 
+/** The gitHead of a registry version manifest, or a CheckUnavailableError. */
+function requireGitHead(manifest, spec) {
+  const gitHead = manifest !== null && typeof manifest === 'object' ? manifest.gitHead : undefined;
+  if (typeof gitHead !== 'string' || !FULL_SHA_RE.test(gitHead)) {
+    throw new CheckUnavailableError(
+      `${spec} is on npm but has no usable gitHead (${oneLine(JSON.stringify(gitHead))}), so the ` +
+        'guard cannot tell whether it was built from this source.\n' +
+        '  Fix: bump the version so this commit publishes under a fresh number.'
+    );
+  }
+  return { gitHead };
+}
+
+/**
+ * Interpret the registry's answer to `GET <registry>/<name>/<version>`.
+ *
+ * 404 -> null (the version, or the whole package, is not on npm). 200 -> the
+ * manifest, which must be for exactly this name and version and carry a full
+ * gitHead. Anything else throws: an unexpected status or body would otherwise
+ * have to be guessed as "publish" or "skip".
+ */
+export function parseRegistryResponse({ status, body }, name, version) {
+  const spec = `${name}@${version}`;
+  if (status === 404) return null;
+  if (status !== 200) {
+    throw new CheckUnavailableError(
+      `the registry answered HTTP ${status} for ${spec} (${oneLine(body, 120)}).\n` +
+        '  Fix: re-run the workflow once the registry is reachable; the guard will not guess.'
+    );
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(body);
+  } catch (err) {
+    throw new CheckUnavailableError(
+      `the registry's manifest for ${spec} is not JSON (${oneLine(err.message)}).`
+    );
+  }
+  if (manifest?.name !== name || manifest?.version !== version) {
+    throw new CheckUnavailableError(
+      `the registry returned ${oneLine(`${manifest?.name}@${manifest?.version}`)} when asked ` +
+        `for ${spec}; refusing to compare against a different version.`
+    );
+  }
+  return requireGitHead(manifest, spec);
+}
+
+/** One registry request. `fetchImpl` is injectable for tests. */
+export async function registryViewOnce(name, version, { fetchImpl = fetch } = {}) {
+  // Scoped names keep their `@` and encode the `/`: `@ai-dossier%2Fcore`.
+  const url = `${REGISTRY_URL}/${name.replace('/', '%2F')}/${encodeURIComponent(version)}`;
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new CheckUnavailableError(`cannot reach ${url} (${oneLine(err?.message ?? err)}).`);
+  }
+  let body;
+  try {
+    body = await response.text();
+  } catch (err) {
+    throw new CheckUnavailableError(
+      `reading the registry answer for ${name}@${version} failed (${oneLine(err?.message)}).`
+    );
+  }
+  return parseRegistryResponse({ status: response.status, body }, name, version);
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * The published version's source commit, from the registry HTTP API. An
+ * answer that is neither a hit nor a 404 is retried with backoff (a registry
+ * blip would otherwise mark the package unavailable), then rethrown — the
+ * retries narrow the window, they never turn "unknown" into "publish".
+ */
+export async function registryLookup(
+  name,
+  version,
+  { view = registryViewOnce, wait = sleep, log = console.error } = {}
+) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await view(name, version);
+    } catch (err) {
+      if (!(err instanceof CheckUnavailableError) || attempt >= NPM_LOOKUP_ATTEMPTS) throw err;
+      log(
+        `registry lookup for ${name}@${version} failed (attempt ${attempt}): ` +
+          `${oneLine(err.message)}; retrying`
+      );
+      await wait(NPM_LOOKUP_BACKOFF_MS[attempt - 1] ?? NPM_LOOKUP_BACKOFF_MS.at(-1));
+    }
+  }
+}
+
+// --- npm CLI lookup: inert fallback --------------------------------------
+// Superseded by registryLookup (#842 follow-up) and not called by run(). Kept
+// as a documented fallback — e.g. for a private registry that needs npm's
+// auth handling — rather than deleted.
+
 /**
  * Parse `npm view <name>@<version> version gitHead --json` output.
  *
@@ -199,16 +317,7 @@ export function parseNpmView({ status, stdout, stderr }, spec) {
       `npm view ${spec} returned ${parsed.length} entries; expected exactly one version.`
     );
   }
-  const entry = Array.isArray(parsed) ? parsed[0] : parsed;
-  const gitHead = entry !== null && typeof entry === 'object' ? entry.gitHead : undefined;
-  if (typeof gitHead !== 'string' || !FULL_SHA_RE.test(gitHead)) {
-    throw new CheckUnavailableError(
-      `${spec} is on npm but has no usable gitHead (${oneLine(JSON.stringify(gitHead))}), so the ` +
-        'guard cannot tell whether it was built from this source.\n' +
-        '  Fix: bump the version so this commit publishes under a fresh number.'
-    );
-  }
-  return { gitHead };
+  return requireGitHead(Array.isArray(parsed) ? parsed[0] : parsed, spec);
 }
 
 function npmViewOnce(spec) {
@@ -234,12 +343,7 @@ function npmViewOnce(spec) {
 
 const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
-/**
- * Real npm lookup. `--prefer-online` sidesteps a stale local packument cache.
- * An answer that is not E404 and not a clean hit is retried with backoff (a
- * registry blip would otherwise halt every later package), then rethrown —
- * the retries narrow the window, they never turn "unknown" into "publish".
- */
+/** npm CLI lookup (inert fallback, see above), with the same retry contract. */
 export function npmLookup(
   name,
   version,
@@ -333,11 +437,12 @@ function readPackageAt(repoRoot, sha, dir) {
 }
 
 /**
- * The collision ledger shared by one publish job: one `collision <name>` or
- * `held <name>` line per package. Absent file = nothing recorded yet.
+ * The ledger shared by one publish job: one `collision <name>`,
+ * `unavailable <name>` or `held <name>` line per package. Absent file =
+ * nothing recorded yet.
  */
 export function readLedger(path) {
-  const entries = { collision: [], held: [] };
+  const entries = { collision: [], unavailable: [], held: [] };
   if (!existsSync(path)) return entries;
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     const [kind, name] = line.trim().split(/\s+/);
@@ -346,19 +451,32 @@ export function readLedger(path) {
   return entries;
 }
 
-/** Final step of the publish job: exit 1 naming every collided package, else 0. */
+/**
+ * Final step of the publish job: exit 1 naming every collided or unavailable
+ * package (and the dependents held with them), else 0.
+ */
 export function reportCollisions(ledger, { log, error }) {
-  const { collision, held } = readLedger(ledger);
-  if (collision.length === 0) {
+  const { collision, unavailable, held } = readLedger(ledger);
+  if (collision.length === 0 && unavailable.length === 0) {
     log('No version collisions.');
     return 0;
   }
   const heldNote = held.length > 0 ? ` Held with them (dependents): ${held.join(', ')}.` : '';
-  error(
-    `::error title=Version collision::Not released: ${collision.join(', ')} — each version is ` +
-      `already on npm from different source (see the 'Check if ... needs publishing' logs).` +
-      `${heldNote} Bump them in a follow-up PR; every publish run fails this way until then.`
-  );
+  if (collision.length > 0) {
+    error(
+      `::error title=Version collision::Not released: ${collision.join(', ')} — each version is ` +
+        `already on npm from different source (see the 'Check if ... needs publishing' logs).` +
+        `${heldNote} Bump them in a follow-up PR; every publish run fails this way until then.`
+    );
+  }
+  if (unavailable.length > 0) {
+    error(
+      `::error title=Publish guard could not decide::Not checked: ${unavailable.join(', ')} — ` +
+        `the guard could not determine whether these are safe to publish (see their ` +
+        `'Check if ... needs publishing' logs).${heldNote} Re-run the workflow once the cause ` +
+        'is fixed; nothing was skipped silently.'
+    );
+  }
   return 1;
 }
 
@@ -395,8 +513,12 @@ function parseArgs(argv) {
   return opts;
 }
 
-/** Everything decide() needs, read from git and npm. */
-function resolve({ repoRoot, dir, head }, lookup) {
+/**
+ * Everything decide() needs, read from git and npm. `seen.name` is set as
+ * soon as the package is known, so a later failure can still be recorded
+ * under the package's name (which is what its dependents list).
+ */
+async function resolve({ repoRoot, dir, head }, lookup, seen) {
   let headSha;
   try {
     headSha = git(['rev-parse', `${head}^{commit}`], repoRoot);
@@ -404,8 +526,9 @@ function resolve({ repoRoot, dir, head }, lookup) {
     throw new CheckUnavailableError(`cannot resolve --head '${head}' (${gitError(err)}).`);
   }
   const pkg = readPackageAt(repoRoot, headSha, dir);
+  seen.name = pkg.name;
 
-  const published = lookup(pkg.name, pkg.version);
+  const published = await lookup(pkg.name, pkg.version);
   let diff;
   if (published !== null && published.gitHead !== headSha) {
     ensureCommit(repoRoot, published.gitHead);
@@ -414,17 +537,17 @@ function resolve({ repoRoot, dir, head }, lookup) {
   return { pkg, published, headSha, diff };
 }
 
-/** Dependencies of `pkg` (at --head) that already collided or were held this job. */
+/** Dependencies of `pkg` (at --head) that collided, were unavailable or were held this job. */
 function heldBy(pkg, ledger) {
   if (!ledger) return [];
-  const { collision, held } = readLedger(ledger);
-  const blocked = new Set([...collision, ...held]);
+  const { collision, unavailable, held } = readLedger(ledger);
+  const blocked = new Set([...collision, ...unavailable, ...held]);
   return Object.keys(pkg.dependencies ?? {}).filter((name) => blocked.has(name));
 }
 
 /** Decide for one package. Throws CheckUnavailableError when it cannot. */
-function evaluate(opts, lookup) {
-  const { pkg, published, headSha, diff } = resolve(opts, lookup);
+async function evaluate(opts, lookup, seen) {
+  const { pkg, published, headSha, diff } = await resolve(opts, lookup, seen);
   const decision = decide({ published, headSha, diff });
   const message = formatDecision({
     name: pkg.name,
@@ -436,24 +559,27 @@ function evaluate(opts, lookup) {
   return { pkg, decision, message };
 }
 
-export function run(
+export async function run(
   argv,
   {
     log = console.log,
     error = console.error,
-    lookup = npmLookup,
+    lookup = registryLookup,
     outputFile = process.env.GITHUB_OUTPUT,
   } = {}
 ) {
   let dir = '(unknown)';
+  let ledger = null;
+  const seen = { name: null };
+  const writeOutputs = (skip, collision) => {
+    if (outputFile) appendFileSync(outputFile, `skip=${skip}\ncollision=${collision}\n`);
+  };
   try {
     const opts = parseArgs(argv);
     if (opts.reportLedger) return reportCollisions(opts.reportLedger, { log, error });
     dir = opts.dir;
-    const { pkg, decision, message } = evaluate(opts, lookup);
-    const writeOutputs = (skip, collision) => {
-      if (outputFile) appendFileSync(outputFile, `skip=${skip}\ncollision=${collision}\n`);
-    };
+    ledger = opts.ledger;
+    const { pkg, decision, message } = await evaluate(opts, lookup, seen);
 
     if (decision.action !== 'collision') {
       const blockers = decision.action === 'publish' ? heldBy(pkg, opts.ledger) : [];
@@ -485,12 +611,23 @@ export function run(
       : `unexpected error (this is a bug in scripts/publish-guard.mjs).\n${err?.stack ?? String(err)}`;
     error(`::error title=publish-guard (${oneLine(dir)}) could not run::${oneLine(detail)}`);
     error(`Publish guard for ${dir} could not run: ${detail}`);
-    return 2;
+    if (!ledger) return 2;
+    // Deferred: record it and let unrelated packages proceed; its dependents
+    // are held and the final report step fails the job. Never a skip that
+    // reads as success.
+    try {
+      appendFileSync(ledger, `unavailable ${seen.name ?? dir}\n`);
+    } catch (ledgerErr) {
+      error(`cannot record ${dir} in the ledger (${oneLine(ledgerErr.message)}).`);
+      return 2;
+    }
+    writeOutputs(true, false);
+    return 0;
   }
 }
 
 const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (invokedDirectly) {
-  process.exit(run(process.argv.slice(2)));
+  process.exitCode = await run(process.argv.slice(2));
 }
