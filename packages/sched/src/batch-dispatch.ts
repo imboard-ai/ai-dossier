@@ -4702,7 +4702,8 @@ export function reconcileStaleBlockedBatches(
  * `members-closed` branch above) is DEFINITIVELY gone — the path no longer
  * exists on disk, or the pool itself now reports it back as a warm spare —
  * clear the ledger's `worktree`/`pool_claimed` (and, separately,
- * `member_worktree`/`member_pool_claimed`) fields so `sched status`'s
+ * `member_worktree`/`member_pool_claimed`, and — #834 — each live
+ * `member_runs[]` entry's `torn_down`) fields so `sched status`'s
  * `kept-worktree` warning does not persist after the operator's cleanup
  * already happened. Ledger-only, by construction: this function reads
  * `fsExists` and `worktree-pool status --json` (both read-only) and never
@@ -4711,19 +4712,54 @@ export function reconcileStaleBlockedBatches(
  * itself. Bounded the same way the warning's own candidate scan is: only
  * `done` batches carrying a kept worktree are considered, which in practice
  * is a small set.
+ *
+ * #834: `MemberRun.worktree` is a required `string` (unlike
+ * `BatchEntry.worktree: string | null`) — there is no null to clear it to,
+ * so "cleared" for a member run means `torn_down: true`, the same flag
+ * `markTornDown` sets after a real teardown. Set here it means the same
+ * thing evidentially (nothing is holding this path any more), just reached
+ * by definitive evidence instead of by running `teardownParallelRuns`.
+ *
+ * #834 discovery: unlike `worktree`/`member_worktree`, a terminal batch's
+ * live `member_runs[]` entries are ALSO reached by the unconditional
+ * terminal-batch arm in `runBatchTick` (search `TERMINAL_BATCH_STATUSES.has(batch.status)`
+ * above the call site below) — added by #809 for `sched stop`/`abandon`,
+ * but written generically enough that it fires for EVERY terminal batch,
+ * `members-closed`-reconciled ones included, and it runs earlier in the
+ * same tick than this function. It calls `teardownParallelRuns` (an actual
+ * teardown attempt, unlike this read-only reconcile) and — notably — calls
+ * `markTornDown` unconditionally, even when that teardown attempt itself
+ * FAILS (e.g. `isSafeWorktree` rejects the path). So in the normal
+ * scheduler-ticking case this function's own `member_runs[]` branch below
+ * is effectively a backstop, not the primary path: by the time it runs,
+ * `torn_down` is usually already `true` — correctly when the tree really
+ * is gone, but also (a pre-existing, out-of-scope-for-#834 gap) when a
+ * real teardown attempt failed and left the tree on disk. This function's
+ * own branch still matters for the window before that safety net's next
+ * tick runs, and for `sched status` reads taken while the scheduler isn't
+ * ticking at all.
+ *
+ * Exported (not part of the package's public `index.ts` surface — same
+ * test-only convention as `reconcileStaleBlockedBatches`) so `member_runs[]`
+ * tests can call it directly, isolated from the terminal-batch safety net
+ * described above, which otherwise always beats it to `member_runs[]` when
+ * both run inside one `runBatchTick` call.
  */
-function reconcileKeptWorktrees(deps: BatchDispatchDeps, now: Date): void {
+export function reconcileKeptWorktrees(deps: BatchDispatchDeps, now: Date): void {
   const state = deps.store.load();
   const fsExists = deps.fsExists ?? ((p: string) => fs.existsSync(p));
   const candidates = state.batches.filter(
-    (b) => b.status === 'done' && (b.worktree !== null || b.member_worktree !== null)
+    (b) =>
+      b.status === 'done' &&
+      (b.worktree !== null || b.member_worktree !== null || b.member_runs.some((r) => !r.torn_down))
   );
   if (candidates.length === 0) return;
 
   const needsPoolCheck = candidates.some(
     (b) =>
       (b.worktree !== null && b.pool_claimed) ||
-      (b.member_worktree !== null && b.member_pool_claimed)
+      (b.member_worktree !== null && b.member_pool_claimed) ||
+      b.member_runs.some((r) => !r.torn_down && r.pool_claimed)
   );
   // One pool query per TICK, not per candidate — `worktree-pool status` is a
   // real subprocess (`npx ...`), and this reconcile is meant to be cheap.
@@ -4755,6 +4791,20 @@ function reconcileKeptWorktrees(deps: BatchDispatchDeps, now: Date): void {
       clears.member_pool_claimed = false;
       clearedFields.push('member_worktree', 'member_pool_claimed');
     }
+
+    // #834: same definitive-evidence rule, per `member_runs[]` entry.
+    const clearedRunIssues: number[] = [];
+    const updatedRuns: MemberRun[] = batch.member_runs.map((run) => {
+      if (run.torn_down) return run;
+      if (!goneOrReturned(run.worktree, run.pool_claimed)) return run;
+      clearedRunIssues.push(run.issue);
+      return { ...run, torn_down: true };
+    });
+    if (clearedRunIssues.length > 0) {
+      clears.member_runs = updatedRuns;
+      clearedFields.push(`member_runs[${clearedRunIssues.join(',')}].torn_down`);
+    }
+
     if (clearedFields.length === 0) continue;
 
     deps.store.withLock((s) => {

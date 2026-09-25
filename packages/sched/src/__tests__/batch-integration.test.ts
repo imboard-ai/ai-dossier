@@ -26,6 +26,10 @@ import {
   evictMemberAndContinue,
   memberBranchFor,
   memberDispatchModeFor,
+  // #834: same test-only rationale as the other direct `batch-dispatch`
+  // imports here — isolates `member_runs[]` tests from the terminal-batch
+  // safety net that otherwise always runs first inside `runBatchTick`.
+  reconcileKeptWorktrees,
   reconcileStaleBlockedBatches,
   tailMembersRefusal,
 } from '../batch-dispatch';
@@ -54,6 +58,7 @@ import {
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
   MAX_BATCH_AGENT_RESPAWNS,
+  type MemberRun,
   type PrTruth,
   parseMergedPrListJson,
   patchBatch,
@@ -4825,13 +4830,17 @@ describe('#809: parallel member dispatch', () => {
  * `reviewing`/`shipping`, nor `fixing`), so `groundTruth`/`spawnDeps`/
  * `runSuite` never need to be real; only `exec` (for the pool status query)
  * and `fsExists` (for the on-disk check) are exercised.
+ *
+ * Members `901`/`902` (rather than just `901`) so #834's `member_runs[]`
+ * tests below can seed more than one run — `validateState` requires every
+ * `member_runs[].issue` to be in `batch.members`.
  */
 function keptWorktreeReconcileHarness() {
   const store = new SchedStore(tmpDir('sched-kept-wt-'));
   const journal = new Journal(store.dir);
   const now = new Date('2026-09-24T12:00:00.000Z');
   store.withLock(() => ({
-    state: { ...createEmptyState(), batches: [createBatch('b-kept', [901], now)] },
+    state: { ...createEmptyState(), batches: [createBatch('b-kept', [901, 902], now)] },
     result: undefined,
   }));
 
@@ -4887,6 +4896,17 @@ function keptWorktreeReconcileHarness() {
     batch: () => findBatch(store.load(), 'b-kept'),
     events: () => readJsonl(path.join(store.dir, 'events.jsonl')),
     tick: () => runBatchTick(deps, config, dispatch),
+    /**
+     * #834: calls `reconcileKeptWorktrees` directly, bypassing
+     * `runBatchTick`'s terminal-batch safety net (the `TERMINAL_BATCH_STATUSES`
+     * arm) — that arm ALSO reaches `member_runs[]` for any terminal batch,
+     * every tick, ahead of `reconcileKeptWorktrees` in dispatch order, so a
+     * `member_runs[]` test that goes through `tick()` never observes this
+     * function's own evidence check (see the discovery note on
+     * `reconcileKeptWorktrees` itself). `worktree`/`member_worktree` have no
+     * such interference — the `#791` tests above correctly use `tick()`.
+     */
+    reconcileOnly: () => reconcileKeptWorktrees(deps, now),
   };
 }
 
@@ -4980,6 +5000,200 @@ describe("#791: reconcileKeptWorktrees clears a done batch's kept-worktree ledge
       expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
     }
     expect(h.execCalls.some((c) => c.args.includes('status'))).toBe(true);
+  });
+});
+
+/** #834: a minimal `MemberRun` for the `reconcileKeptWorktrees` harness below. */
+function memberRun(patch: Partial<MemberRun> = {}): MemberRun {
+  return {
+    issue: 901,
+    index: 1,
+    branch: 'feature/901-x',
+    worktree: '/repo/worktrees/batch-b-kept-901',
+    pool_claimed: false,
+    status: 'landed',
+    gate_inconclusive: null,
+    torn_down: false,
+    ...patch,
+  };
+}
+
+describe("#834: reconcileKeptWorktrees clears a done batch's live member_runs[] entries on definitive evidence", () => {
+  // Every test below calls `h.reconcileOnly()` (not `h.tick()`) — a full
+  // tick also runs `runBatchTick`'s terminal-batch safety net, which reaches
+  // `member_runs[]` for ANY terminal batch (see the discovery note on
+  // `reconcileKeptWorktrees`) and would beat this function to the punch
+  // every time, so a test going through `tick()` could never observe THIS
+  // function's own evidence-based clearing. The one exception is the final
+  // test in this block, which deliberately goes through `tick()` to
+  // document that real end-to-end interaction.
+
+  it('sets torn_down=true once the run worktree path no longer exists on disk', () => {
+    const h = keptWorktreeReconcileHarness();
+    const run = memberRun({ worktree: '/gone/member-run' });
+    h.patch({ status: 'done', member_runs: [run] });
+    h.setFsExists((p) => p !== '/gone/member-run');
+
+    h.reconcileOnly();
+
+    const runs = h.batch()?.member_runs ?? [];
+    expect(runs).toHaveLength(1);
+    expect(runs[0].torn_down).toBe(true);
+    expect(runs[0].worktree).toBe('/gone/member-run'); // path itself is never nulled — no nullable field to clear it to
+    const cleared = h.events().filter((e) => e.event === 'kept-worktree-cleared');
+    expect(cleared).toHaveLength(1);
+    expect(String(cleared[0].detail ?? '')).toContain('member_runs');
+  });
+
+  it('sets torn_down=true once the pool reports a pool-claimed run worktree returned (warm) — never from disk state alone', () => {
+    const h = keptWorktreeReconcileHarness();
+    const run = memberRun({ worktree: '/pool/member-run', pool_claimed: true });
+    h.patch({ status: 'done', member_runs: [run] });
+    h.setFsExists(() => true); // still ON DISK — pool evidence alone must be enough
+    h.setExec((file, args) => {
+      if (file === 'npx' && args.includes('status')) {
+        return JSON.stringify({ worktrees: [{ path: '/pool/member-run', status: 'warm' }] });
+      }
+      return null;
+    });
+
+    h.reconcileOnly();
+
+    expect(h.batch()?.member_runs?.[0].torn_down).toBe(true);
+  });
+
+  it('negative case: leaves torn_down=false when the path exists and the pool does not show it returned', () => {
+    const h = keptWorktreeReconcileHarness();
+    const run = memberRun({ worktree: '/pool/member-run', pool_claimed: true });
+    h.patch({ status: 'done', member_runs: [run] });
+    h.setFsExists(() => true);
+    h.setExec((file, args) => {
+      if (file === 'npx' && args.includes('status')) {
+        return JSON.stringify({ worktrees: [{ path: '/pool/member-run', status: 'assigned' }] });
+      }
+      return null;
+    });
+
+    h.reconcileOnly();
+
+    expect(h.batch()?.member_runs?.[0].torn_down).toBe(false);
+    expect(h.events().filter((e) => e.event === 'kept-worktree-cleared')).toHaveLength(0);
+  });
+
+  it('an already torn_down=true entry is left alone and costs no evidence check', () => {
+    const h = keptWorktreeReconcileHarness();
+    const run = memberRun({ worktree: '/already/gone', torn_down: true });
+    h.patch({ status: 'done', member_runs: [run] });
+    let fsCalls = 0;
+    h.setFsExists((p) => {
+      fsCalls++;
+      return p !== '/already/gone';
+    });
+
+    h.reconcileOnly();
+
+    expect(h.batch()?.member_runs?.[0].torn_down).toBe(true);
+    expect(fsCalls).toBe(0);
+    expect(h.events().filter((e) => e.event === 'kept-worktree-cleared')).toHaveLength(0);
+  });
+
+  it('multiple live member_runs[] entries are evaluated independently — only the gone one clears', () => {
+    const h = keptWorktreeReconcileHarness();
+    const gone = memberRun({ issue: 901, worktree: '/gone/one' });
+    const stillThere = memberRun({ issue: 902, index: 2, worktree: '/still/there' });
+    h.patch({ status: 'done', member_runs: [gone, stillThere] });
+    h.setFsExists((p) => p !== '/gone/one');
+
+    h.reconcileOnly();
+
+    const runs = h.batch()?.member_runs ?? [];
+    expect(runs.find((r) => r.issue === 901)?.torn_down).toBe(true);
+    expect(runs.find((r) => r.issue === 902)?.torn_down).toBe(false);
+  });
+
+  it('a non-done batch with a live member_runs[] entry is never touched', () => {
+    const h = keptWorktreeReconcileHarness();
+    h.patch({
+      status: 'executing',
+      member_runs: [memberRun({ worktree: '/still/executing-run' })],
+    });
+    h.reconcileOnly();
+    expect(h.batch()?.member_runs?.[0].torn_down).toBe(false);
+    expect(h.execCalls).toHaveLength(0);
+  });
+
+  it('the reconcile never invokes a destructive git/worktree/pool command over a sweep including worktree, member_worktree, and member_runs[] candidates together', () => {
+    const h = keptWorktreeReconcileHarness();
+    h.patch({
+      status: 'done',
+      worktree: '/pool/worktree',
+      pool_claimed: true,
+      member_worktree: '/pool/member-worktree',
+      member_pool_claimed: true,
+      member_runs: [memberRun({ worktree: '/pool/member-run', pool_claimed: true })],
+    });
+    h.setExec((file, args) => {
+      if (file === 'npx' && args.includes('status')) {
+        return JSON.stringify({
+          worktrees: [
+            { path: '/pool/worktree', status: 'warm' },
+            { path: '/pool/member-worktree', status: 'warm' },
+            { path: '/pool/member-run', status: 'warm' },
+          ],
+        });
+      }
+      return null;
+    });
+
+    h.reconcileOnly();
+
+    expect(h.batch()?.worktree).toBeNull();
+    expect(h.batch()?.member_worktree).toBeNull();
+    expect(h.batch()?.member_runs?.[0].torn_down).toBe(true);
+
+    const DESTRUCTIVE = /\bremove\b|\bgc\b|\bclean\b|\breset\b|\bcheckout\b|\bprune\b/;
+    for (const call of h.execCalls) {
+      expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
+    }
+    // Only ONE pool-status query for the whole call, across all three candidate kinds.
+    expect(h.execCalls.filter((c) => c.args.includes('status'))).toHaveLength(1);
+  });
+
+  it("documents the real interaction: a full tick clears a done batch's live member_runs[] via the terminal-batch safety net BEFORE reconcileKeptWorktrees gets a chance, still ending torn_down=true with no destructive command from THIS function", () => {
+    // Unlike every test above, this one goes through `h.tick()` (full
+    // `runBatchTick`) on purpose — it is the scenario an operator's running
+    // scheduler daemon actually produces. The worktree path is a REALISTIC
+    // one (under `store.dir/worktrees`, the "repo root" `repoDir: store.dir`
+    // this harness's deps use) so `runTeardown`'s `isSafeWorktree` check
+    // accepts it, matching production shape rather than a rejected path.
+    const h = keptWorktreeReconcileHarness();
+    const realPath = path.join(h.store.dir, 'worktrees', 'b-kept-901');
+    h.patch({
+      status: 'done',
+      member_runs: [memberRun({ worktree: realPath, pool_claimed: false })],
+    });
+    // A cooperative mock — `git` succeeds (branch delete/push included),
+    // and `fsExists` reports the tree already gone post-remove — so the
+    // real teardown this test is documenting completes cleanly
+    // (`member-worktree-torn-down`) rather than merely failing loudly,
+    // which would also prove the point but less legibly. No real directory
+    // is created — nothing here is actually removed from disk.
+    h.setExec((file, args) => {
+      if (file !== 'git') return null;
+      if (args[0] === 'rev-parse' && args[1] === '--show-toplevel') return h.store.dir;
+      return '';
+    });
+    h.setFsExists(() => false);
+
+    h.tick();
+
+    // Torn down either way — but by the terminal-batch safety net's
+    // `teardownParallelRuns`/`markTornDown`, not by `reconcileKeptWorktrees`
+    // (zero `kept-worktree-cleared` events for it): this IS the discovery,
+    // asserted rather than just described.
+    expect(h.batch()?.member_runs?.[0].torn_down).toBe(true);
+    expect(h.events().filter((e) => e.event === 'kept-worktree-cleared')).toHaveLength(0);
+    expect(h.events().some((e) => e.event === 'member-worktree-torn-down')).toBe(true);
   });
 });
 

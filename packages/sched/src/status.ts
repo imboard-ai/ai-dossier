@@ -421,27 +421,42 @@ export function buildStatusWarnings(
 // injectable, opt-in-by-omission shape in `buildStatusReport` below.
 // `reconcileKeptWorktrees` (`batch-dispatch.ts`) clears the ledger fields on
 // definitive evidence, so the warning does not persist forever.
+//
+// #834: a THIRD location joined the first two after #809 shipped parallel
+// member dispatch — `BatchEntry.member_runs[]`, one entry per concurrently
+// running member, each with its own `worktree`/`pool_claimed`/`torn_down`.
+// `teardownParallelRuns` (batch-dispatch.ts) is the only thing that tears
+// these down, and it only ever runs inside `teardownBatch` — the exact
+// function the `members-closed` reconcile path skips via `keepWorktree`, so
+// a parallel batch's member run worktrees can leak the same way the serial
+// ones did before #791, just through a field the original candidate scan
+// never read.
 
-/** One `done` batch's kept worktree (#791) — either the shared batch worktree or the current member's own. */
+/** One `done` batch's kept worktree (#791) — the shared batch worktree, the current (serial) member's own, or one concurrently-running (parallel, #809) member's own (#834). */
 export interface KeptWorktreeCandidate {
   batch: string;
-  /** Which `BatchEntry` field this candidate came from — `worktree` (shared) or `member_worktree` (current member, #677). */
-  field: 'worktree' | 'member_worktree';
+  /** Which location this candidate came from — `worktree` (shared, `BatchEntry.worktree`), `member_worktree` (serial-mode current member, `BatchEntry.member_worktree`, #677), or `member_run` (one `BatchEntry.member_runs[]` entry, #809/#834). */
+  field: 'worktree' | 'member_worktree' | 'member_run';
   path: string;
   poolClaimed: boolean;
+  /** The member's issue number — set only for `field: 'member_run'` (#834), for a readable warning message. */
+  issue?: number;
 }
 
 /**
- * Every `done` batch whose `worktree` or `member_worktree` is still set in
- * the ledger (#791) — pure over state, exactly like `buildStatusWarnings`.
- * A candidate is skipped when its path is ALSO held by a non-`done` (still
- * in-flight) batch: a pool worktree the operator already returned can be
- * re-claimed by a fresh batch before the done batch's own ledger field is
- * cleared, and warning about a path a live batch is actively using is worse
- * than not warning at all — it tells the operator to remove/return a
- * worktree that is in use. Naturally bounded beyond that: only `done`
- * batches are considered, and in practice very few ever carry a kept
- * worktree (only the `members-closed` reconcile path leaves one).
+ * Every `done` batch whose `worktree`, `member_worktree`, or any
+ * `member_runs[]` entry (`torn_down === false`, #834) is still set in the
+ * ledger (#791) — pure over state, exactly like `buildStatusWarnings`. A
+ * candidate is skipped when its path is ALSO held by a non-`done` (still
+ * in-flight) batch — including another batch's own live `member_runs[]`
+ * entry: a pool worktree the operator already returned can be re-claimed by
+ * a fresh batch (or a fresh parallel member) before the done batch's own
+ * ledger field is cleared, and warning about a path a live batch is
+ * actively using is worse than not warning at all — it tells the operator
+ * to remove/return a worktree that is in use. Naturally bounded beyond
+ * that: only `done` batches are considered, and in practice very few ever
+ * carry a kept worktree (only the `members-closed` reconcile path leaves
+ * one).
  */
 export function keptWorktreeCandidates(state: SchedState): KeptWorktreeCandidate[] {
   const inFlightPaths = new Set<string>();
@@ -449,6 +464,9 @@ export function keptWorktreeCandidates(state: SchedState): KeptWorktreeCandidate
     if (batch.status === 'done') continue;
     if (batch.worktree !== null) inFlightPaths.add(batch.worktree);
     if (batch.member_worktree !== null) inFlightPaths.add(batch.member_worktree);
+    for (const run of batch.member_runs) {
+      if (!run.torn_down) inFlightPaths.add(run.worktree);
+    }
   }
 
   const candidates: KeptWorktreeCandidate[] = [];
@@ -468,6 +486,17 @@ export function keptWorktreeCandidates(state: SchedState): KeptWorktreeCandidate
         field: 'member_worktree',
         path: batch.member_worktree,
         poolClaimed: batch.member_pool_claimed,
+      });
+    }
+    for (const run of batch.member_runs) {
+      if (run.torn_down) continue;
+      if (inFlightPaths.has(run.worktree)) continue;
+      candidates.push({
+        batch: batch.id,
+        field: 'member_run',
+        path: run.worktree,
+        poolClaimed: run.pool_claimed,
+        issue: run.issue,
       });
     }
   }
@@ -588,9 +617,16 @@ function keptWorktreeWarning(
   remedy: string
 ): StatusWarning {
   const poolNote = candidate.poolClaimed ? ' (pool claim held indefinitely)' : '';
+  // #834: `member_run` isn't itself a `BatchEntry` field name (unlike the
+  // other two variants) — name the member's issue instead so the warning
+  // reads as a location, not a literal field.
+  const fieldLabel =
+    candidate.field === 'member_run'
+      ? `member_runs[] worktree for issue #${candidate.issue}`
+      : candidate.field;
   return {
     kind: 'kept-worktree',
-    message: `batch ${candidate.batch} is done but its ${candidate.field} ${candidate.path} is still held${poolNote} — ${detail}`,
+    message: `batch ${candidate.batch} is done but its ${fieldLabel} ${candidate.path} is still held${poolNote} — ${detail}`,
     remedy,
     batch: candidate.batch,
   };

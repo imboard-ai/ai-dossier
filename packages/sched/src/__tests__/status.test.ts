@@ -11,6 +11,7 @@ import {
   KEPT_WORKTREE_PROBE_LIMIT,
   type KeptWorktreeReader,
   keptWorktreeCandidates,
+  type MemberRun,
   POOL_ARGS_PREFIX,
   POOL_BIN,
   parkMember,
@@ -922,6 +923,149 @@ describe('#791: kept-worktree warning', () => {
     const state = doneBatchWithWorktree();
     const report = buildStatusReport(state, { max_slots: 3 }, 'p', null, NOW);
     expect(report.warnings.filter((w) => w.kind === 'kept-worktree')).toEqual([]);
+  });
+});
+
+describe('#834: kept-worktree candidates cover parallel-dispatch member_runs[]', () => {
+  const RUN_WORKTREE = '/repo/worktrees/batch-b1-901';
+  const POOL_REMEDY_PREFIX = `${POOL_BIN} ${POOL_ARGS_PREFIX.join(' ')} return --path`;
+
+  function memberRun(patch: Partial<MemberRun> = {}): MemberRun {
+    return {
+      issue: 901,
+      index: 1,
+      branch: 'feature/901-x',
+      worktree: RUN_WORKTREE,
+      pool_claimed: false,
+      status: 'landed',
+      gate_inconclusive: null,
+      torn_down: false,
+      ...patch,
+    };
+  }
+
+  /** `seeded()`'s slot batch `b1`, patched to `done` with one live `member_runs[]` entry. */
+  function doneBatchWithMemberRun(runPatch: Partial<MemberRun> = {}): SchedState {
+    const state = seeded();
+    return {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id === 'b1' ? { ...b, status: 'done', member_runs: [memberRun(runPatch)] } : b
+      ),
+    };
+  }
+
+  it('AC1: a done batch with a live (torn_down=false) member_runs[] entry emits a member_run candidate carrying the issue', () => {
+    const candidates = keptWorktreeCandidates(doneBatchWithMemberRun());
+    expect(candidates).toEqual([
+      { batch: 'b1', field: 'member_run', path: RUN_WORKTREE, poolClaimed: false, issue: 901 },
+    ]);
+  });
+
+  it('a member_runs[] entry already torn_down=true is not a candidate', () => {
+    const candidates = keptWorktreeCandidates(doneBatchWithMemberRun({ torn_down: true }));
+    expect(candidates).toEqual([]);
+  });
+
+  it('a not-done batch with a live member_runs[] entry is not a candidate', () => {
+    const state = seeded();
+    const executing: SchedState = {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id === 'b1' ? { ...b, status: 'executing', member_runs: [memberRun()] } : b
+      ),
+    };
+    expect(keptWorktreeCandidates(executing)).toEqual([]);
+  });
+
+  it('a member_run candidate whose path is held by a non-done batch (its own live member_runs[] entry) is skipped, then reappears once torn down (#791 supportability review finding 5, extended)', () => {
+    let state = doneBatchWithMemberRun();
+    state = enqueueEntries(state, [{ issue: 301, mode: 'slot', batch: 'b2' }], NOW);
+    const withB2Live: SchedState = {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id === 'b2'
+          ? {
+              ...b,
+              status: 'executing',
+              member_runs: [memberRun({ issue: 301, index: 1, branch: 'feature/301-y' })],
+            }
+          : b
+      ),
+    };
+    expect(keptWorktreeCandidates(withB2Live)).toEqual([]);
+
+    const b2TornDown: SchedState = {
+      ...withB2Live,
+      batches: withB2Live.batches.map((b) =>
+        b.id === 'b2'
+          ? { ...b, member_runs: b.member_runs.map((r) => ({ ...r, torn_down: true })) }
+          : b
+      ),
+    };
+    expect(keptWorktreeCandidates(b2TornDown)).toEqual([
+      { batch: 'b1', field: 'member_run', path: RUN_WORKTREE, poolClaimed: false, issue: 901 },
+    ]);
+  });
+
+  it('AC3: the warning message names the member issue, and pool-claimed vs cold remedy selection is unchanged', () => {
+    const exists: KeptWorktreeReader['exists'] = () => true;
+    const clean: KeptWorktreeReader['hasLocalWork'] = () => false;
+
+    const [cold] = buildKeptWorktreeWarnings(
+      keptWorktreeCandidates(doneBatchWithMemberRun({ pool_claimed: false })),
+      { exists, hasLocalWork: clean }
+    );
+    expect(cold.message).toContain('member_runs[] worktree for issue #901');
+    expect(cold.remedy).toBe(`git worktree remove ${RUN_WORKTREE}`);
+
+    const [pooled] = buildKeptWorktreeWarnings(
+      keptWorktreeCandidates(doneBatchWithMemberRun({ pool_claimed: true })),
+      { exists, hasLocalWork: clean }
+    );
+    expect(pooled.message).toContain('pool claim held indefinitely');
+    expect(pooled.remedy).toBe(`${POOL_REMEDY_PREFIX} ${RUN_WORKTREE}`);
+  });
+
+  it('a sweep over worktree + member_worktree + member_run candidates together never invokes a destructive git/worktree/pool command', () => {
+    const REAL_DIR = os.tmpdir();
+    const calls: Array<{ file: string; args: string[] }> = [];
+    const exec = (file: string, args: string[]): string | null => {
+      calls.push({ file, args });
+      if (args[0] === 'rev-parse') return REAL_DIR;
+      if (args.includes('status')) return ' M dirty-file';
+      if (args[0] === 'log') return 'abc123 unpushed commit';
+      return null;
+    };
+    const reader = defaultKeptWorktreeReader(exec, () => true);
+
+    const state = seeded();
+    const mixed: SchedState = {
+      ...state,
+      batches: state.batches.map((b) =>
+        b.id === 'b1'
+          ? {
+              ...b,
+              status: 'done',
+              worktree: REAL_DIR,
+              pool_claimed: true,
+              member_worktree: REAL_DIR,
+              member_pool_claimed: false,
+              member_runs: [memberRun({ worktree: REAL_DIR, pool_claimed: true })],
+            }
+          : b
+      ),
+    };
+
+    const warnings = buildKeptWorktreeWarnings(keptWorktreeCandidates(mixed), reader);
+    expect(warnings.length).toBe(3);
+    expect(warnings.some((w) => w.message.includes('member_runs[]'))).toBe(true);
+
+    const DESTRUCTIVE =
+      /\bworktree\s+(remove|prune)\b|\bworktree-pool\b|\bclean\b|\breset\b|\bcheckout\b|\bstash\b|\breturn\b|\bgc\b/;
+    for (const call of calls) {
+      expect(call.args.join(' ')).not.toMatch(DESTRUCTIVE);
+    }
   });
 });
 
