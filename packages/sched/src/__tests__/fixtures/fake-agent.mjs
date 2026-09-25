@@ -210,6 +210,18 @@ process.stdin.on('end', () => {
         post('review', 'done', { next: 'ship', ac_total: '0' });
       }
       console.log(`fake batch member: posted a FULL-CYCLE milestone for #${issue}`);
+      // #844: `--ignore-sigterm-members=<a,b>` — those wrong-procedure
+      // members keep running after the milestone and IGNORE SIGTERM, so only
+      // the engine's SIGKILL escalation can stop them. A 60 s self-exit keeps
+      // a broken test from leaking the process.
+      if (listOpt('ignore-sigterm-members').includes(issue)) {
+        process.on('SIGTERM', () => {
+          console.log(`fake batch member: ignoring SIGTERM for #${issue}`);
+        });
+        setInterval(() => {}, 1_000);
+        setTimeout(() => process.exit(0), 60_000);
+        return;
+      }
       process.exit(0);
     }
     // #686: opt-in REAL member work — write `--commit-file=<name>` into the

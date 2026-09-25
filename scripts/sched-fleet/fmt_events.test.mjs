@@ -53,6 +53,17 @@ describe('fmt_events.py', () => {
     ]);
   });
 
+  it('#844: keeps a SIGKILL escalation and a recovered member advance', () => {
+    const out = run([
+      { event: 'kill-escalated', unit: 'batch:b1', issue: 885, pid: 4242 },
+      { event: 'member-advance-recovered', unit: 'batch:b1', issue: 881 },
+    ]);
+    expect(out.trim().split('\n')).toEqual([
+      'kill-escalated #885',
+      'member-advance-recovered #881',
+    ]);
+  });
+
   it('#824: keeps an operator attach-pr, naming the PR', () => {
     const out = run([
       { event: 'pr-attached', unit: 'batch:b1', pr: 4270, detail: 'operator attached o/r#4270' },

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendEvictions,
+  assignToIdleSlot,
   createBatch,
   createEmptyState,
   enqueueEntries,
@@ -11,6 +12,7 @@ import {
   PARKED_MEMBER_STATUSES,
   parkMember,
   patchBatch,
+  patchSlot,
   requeueMember,
   SATISFIED_ISSUE_STATUSES,
   SCHEMA_VERSION,
@@ -541,6 +543,39 @@ describe('#810: parkMember / profile-carrying requeue', () => {
     const badFailedAt = JSON.parse(JSON.stringify(withRun()));
     badFailedAt.batches[0].member_runs[0].teardown_failed_at = 'yesterday';
     expect(() => validateState(badFailedAt)).toThrow(/member_runs/);
+  });
+
+  it('#844: a 1.28.0 slot loads with kill_sent_at/kill_escalated_at=null; the stamps survive a round trip, clear on idle, and malformed values are refused', () => {
+    const now = new Date('2026-09-25T10:00:00.000Z');
+    const withSlot = (): { state: SchedState; slotId: number } =>
+      assignToIdleSlot(createEmptyState(), 'issue:844', null, now);
+    const { state, slotId } = withSlot();
+    const legacy = JSON.parse(JSON.stringify({ ...state, schema_version: '1.28.0' }));
+    delete legacy.slots[0].kill_sent_at;
+    delete legacy.slots[0].kill_escalated_at;
+    const loaded = validateState(legacy);
+    expect(loaded.schema_version).toBe(SCHEMA_VERSION);
+    expect(loaded.slots[0]?.kill_sent_at).toBeNull();
+    expect(loaded.slots[0]?.kill_escalated_at).toBeNull();
+
+    const stamped = patchSlot(
+      state,
+      slotId,
+      { kill_sent_at: '2026-09-25T10:01:00.000Z', kill_escalated_at: '2026-09-25T10:03:00.000Z' },
+      now
+    );
+    const round = validateState(JSON.parse(JSON.stringify(stamped)));
+    expect(round.slots[0]?.kill_sent_at).toBe('2026-09-25T10:01:00.000Z');
+    expect(round.slots[0]?.kill_escalated_at).toBe('2026-09-25T10:03:00.000Z');
+    const idle = transitionSlot(stamped, slotId, 'idle', {}, now);
+    expect(idle.slots[0]?.kill_sent_at).toBeNull();
+    expect(idle.slots[0]?.kill_escalated_at).toBeNull();
+
+    for (const field of ['kill_sent_at', 'kill_escalated_at']) {
+      const bad = JSON.parse(JSON.stringify(state));
+      bad.slots[0][field] = 42;
+      expect(() => validateState(bad)).toThrow(new RegExp(field));
+    }
   });
 
   it('#832: a 1.25.0 batch with no agent_exits loads with the respawn counter backfilled null', () => {

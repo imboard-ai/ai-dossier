@@ -1097,7 +1097,11 @@ hand-back shape (`blocked`, `review partial`) never counts: it keeps its own pat
 member rails then:
 
 - stop a live agent and wait for it to be gone before anything else (a dying full-cycle run
-  could still push, post or open a PR in that worktree);
+  could still push, post or open a PR in that worktree). The first sight sends SIGTERM and
+  stamps `SlotEntry.kill_sent_at`; an agent still alive `KILL_ESCALATION_MS` (120 s) later
+  is sent SIGKILL — to its process group, since every agent is spawned detached — and
+  `kill-escalated` is journaled once (#844). Pre-#844 an agent ignoring SIGTERM held its
+  member here indefinitely;
 - if the milestone shows the run already SHIPPED (a `ship`/`report` phase or a `pr=` key —
   `wrongProcedureShippedPr`), evict it at once `wrong-procedure-shipped`, naming the stray PR
   (`stray_pr`) for the operator to close or reconcile — a re-prompt cannot undo a PR;
@@ -1108,6 +1112,18 @@ member rails then:
 - a later wrong-procedure milestone posted strictly after `reprompted_at` (no skew tolerance:
   the killed first dispatch's milestones would otherwise still count inside the 60s fence)
   evicts it `wrong-procedure` (parked `evicted`, branch kept, #810).
+
+### A member's slot release and its eviction are one write (#844)
+
+Every member-failure rail — serial dead/blocked, the incremental gate's `task-failed`, both
+wrong-procedure evictions, and their parallel twins — hands the slot release to
+`evictMemberDirectly`, which applies it inside the same lock that parks the member and
+appends its `evictions[]` record. Pre-#844 the release was its own earlier write, and an
+engine exit between the two left the member in-work with no slot: the serial wedge arm or
+`spawnParallelMembers` then dispatched it once more, with no eviction in the journal. An exit
+AFTER the combined write but before the serial advance is recovered too: the wedge arm finds
+the current member already in `evictions[]`, journals `member-advance-recovered`, and
+advances instead of respawning it.
 
 ## API surface
 
@@ -1431,7 +1447,7 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to the current schema (1.28.0 — 1.24.0 was #810: no backfill,
+  load and migrate to the current schema (1.29.0 — 1.24.0 was #810: no backfill,
   `kind`/`branch` optional, absent = an `evicted` record with no branch) automatically
   (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
@@ -1458,6 +1474,9 @@ after-the-fact recovery, not a missing-data bug.
   decision, persisted; `false` backfilled) and `MemberRun` gains `teardown_failed_at`
   (`null` backfilled). A 1.27.0 `done` batch still carrying a live member run loads as
   kept — the old engine never recorded the decision, so the default is to keep.
+  Schema 1.29.0 (#844): `SlotEntry` gains `kill_sent_at`/`kill_escalated_at` (the
+  SIGTERM → SIGKILL escalation anchor and its journal dedup marker; `null`/`null`
+  backfilled, cleared when the slot goes idle).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.

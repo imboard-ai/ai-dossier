@@ -58,6 +58,7 @@ import {
   type IssueCloseTruth,
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
+  KILL_ESCALATION_MS,
   MAX_BATCH_AGENT_RESPAWNS,
   type PrTruth,
   parseMergedPrListJson,
@@ -5931,5 +5932,194 @@ describe('#822 item 5: a member that runs the WRONG PROCEDURE is re-prompted onc
     const failed = h.deps.journal.read().find((e) => e.event === 'unit-failed' && e.issue === 877);
     expect(String(failed?.detail)).toContain('PR #4242');
     expect(batch?.ranges.map((r) => r.issue)).toEqual([878]);
+  }, 60_000);
+});
+
+/**
+ * #844: simulate the engine process dying right after the store write that
+ * released `slotUnit`'s slot — that write lands, and every write after it
+ * fails (a dead process commits nothing more), until `restart()`.
+ */
+function crashAfterSlotRelease(
+  h: BatchHarness,
+  slotUnit: string
+): { fired: () => boolean; restart: () => void } {
+  const original = h.store.withLock.bind(h.store);
+  let fired = false;
+  h.store.withLock = (<T>(fn: Parameters<SchedStore['withLock']>[0]): T => {
+    if (fired) throw new Error('#844 injected crash: the engine is dead');
+    const held = h.store.load().slots.some((s) => s.unit === slotUnit);
+    const out = original(fn) as T;
+    if (held && !h.store.load().slots.some((s) => s.unit === slotUnit)) {
+      fired = true;
+      throw new Error('#844 injected crash right after the slot-release write');
+    }
+    return out;
+  }) as SchedStore['withLock'];
+  return {
+    fired: () => fired,
+    restart: () => {
+      h.store.withLock = original;
+    },
+  };
+}
+
+/** How many times a batch member was dispatched — one `sched-dispatch` preamble per spawn. */
+function memberDispatchCount(h: BatchHarness, batchId: string, index: number, issue: number) {
+  const log = batchMemberLogPath(h.store.runsDir, batchId, index, issue);
+  if (!fs.existsSync(log)) return 0;
+  return fs
+    .readFileSync(log, 'utf8')
+    .split('\n')
+    .filter((l) => l.includes('"type":"sched-dispatch"') && !l.includes('"event"')).length;
+}
+
+async function waitForFile(file: string, ms = 10_000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(file)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return fs.existsSync(file);
+}
+
+describe('#844 item 1: a member slot release and its eviction commit in ONE write', () => {
+  it('serial: a crash right after the release write leaves the member evicted with its slot released, and it is never respawned', async () => {
+    const repo = scratchRepo();
+    const id = 'b-844-crash';
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--die-members=881'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([
+      { issue: 881, mode: 'slot', batch: id, anchor: 880, tier: 'mid' },
+      { issue: 882, mode: 'slot', batch: id, tier: 'mid' },
+    ]);
+    await tickUntil(h, id, (b) => b.status === 'executing' && batchSlotPid(h, id) !== undefined);
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, id) as number)).toBe(true);
+
+    const crash = crashAfterSlotRelease(h, `batch:${id}`);
+    try {
+      h.tick();
+    } catch {
+      // the injected crash — the engine "died" mid-tick
+    }
+    crash.restart();
+    expect(crash.fired()).toBe(true);
+
+    // What the dead engine left on disk: the slot is released AND the member
+    // is already evicted — never one without the other.
+    const after = h.state();
+    expect(after.slots.some((s) => s.unit === `batch:${id}`)).toBe(false);
+    expect(findBatch(after, id)?.evictions.map((e) => [e.issue, e.reason])).toEqual([
+      [881, 'agent-exited-unverified'],
+    ]);
+    expect(after.entries.find((e) => e.issue === 881)?.status).toBe('evicted');
+
+    // The restarted engine continues past it — the wedge arm never respawns it.
+    await tickUntil(h, id, (b) => b.status === 'awaiting-merge');
+    expect(memberDispatchCount(h, id, 1, 881)).toBe(1);
+    expect(
+      h.deps.journal
+        .read()
+        .filter((e) => e.event === 'member-advance-recovered')
+        .map((e) => e.issue)
+    ).toEqual([881]);
+    expect(findBatch(h.state(), id)?.ranges.map((r) => r.issue)).toEqual([882]);
+  }, 60_000);
+
+  it('parallel: the same crash leaves the member evicted with its own slot released, and it is never respawned', async () => {
+    const repo = scratchRepo();
+    const id = 'b-844-par';
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--die-members=883'],
+      { maxSlots: 3, parallel: true }
+    );
+    h.enqueue([
+      { issue: 883, mode: 'slot', batch: id, anchor: 880, tier: 'mid' },
+      { issue: 884, mode: 'slot', batch: id, tier: 'mid' },
+    ]);
+    await tickUntil(h, id, () =>
+      memberSlots(h, id).some((s) => s.unit === `batch:${id}#883` && s.pid !== null)
+    );
+    expect(await waitAllDead(h, memberPids(h, id))).toBe(true);
+
+    const crash = crashAfterSlotRelease(h, `batch:${id}#883`);
+    try {
+      h.tick();
+    } catch {
+      // the injected crash
+    }
+    crash.restart();
+    expect(crash.fired()).toBe(true);
+
+    const after = h.state();
+    expect(after.slots.some((s) => s.unit === `batch:${id}#883`)).toBe(false);
+    expect(findBatch(after, id)?.evictions.map((e) => e.issue)).toEqual([883]);
+
+    await tickUntil(h, id, (b) => b.status === 'awaiting-merge');
+    expect(memberDispatchCount(h, id, 1, 883)).toBe(1);
+    expect(findBatch(h.state(), id)?.ranges.map((r) => r.issue)).toEqual([884]);
+  }, 60_000);
+});
+
+describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after the bound', () => {
+  it('the wrong-procedure wait escalates to SIGKILL once past KILL_ESCALATION_MS, journals it once, then re-prompts', async () => {
+    const repo = scratchRepo();
+    const id = 'b-844-kill';
+    const h = batchHarness(
+      repo,
+      [
+        '--mode=batch',
+        '--commit-file=f-{issue}.txt',
+        '--wrong-procedure-members=885',
+        '--ignore-sigterm-members=885',
+      ],
+      { maxSlots: 1 }
+    );
+    h.enqueue([
+      { issue: 885, mode: 'slot', batch: id, anchor: 880, tier: 'mid' },
+      { issue: 886, mode: 'slot', batch: id, tier: 'mid' },
+    ]);
+    await tickUntil(h, id, (b) => b.status === 'executing' && batchSlotPid(h, id) !== undefined);
+    const pid = batchSlotPid(h, id) as number;
+    expect(await waitForFile(path.join(h.truthDir, '885.json'))).toBe(true);
+    // Let the fake install its SIGTERM handler (it does so right after posting).
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // Within the bound: SIGTERM only — ignored — and the decision waits.
+    h.tick();
+    h.tick();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(h.spawnDeps.isAlive(pid)).toBe(true);
+    expect(findBatch(h.state(), id)?.reprompted_members).toEqual([]);
+    const slot = h.state().slots.find((s) => s.unit === `batch:${id}`);
+    expect(typeof slot?.kill_sent_at).toBe('string');
+    expect(slot?.kill_escalated_at).toBeNull();
+
+    // Past the bound (the first kill — and the dispatch it belongs to —
+    // backdated rather than a real 2-minute wait).
+    const pastBound = Date.now() - KILL_ESCALATION_MS - 1_000;
+    h.store.withLock((s) => ({
+      state: patchSlot(s, slot?.id as number, {
+        spawned_at: new Date(pastBound - 1_000).toISOString(),
+        kill_sent_at: new Date(pastBound).toISOString(),
+      }),
+      result: undefined,
+    }));
+    h.tick();
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+
+    const escalations = h.deps.journal.read().filter((e) => e.event === 'kill-escalated');
+    expect(escalations.map((e) => [e.issue, e.pid])).toEqual([[885, pid]]);
+
+    // The wrong-procedure decision proceeds: re-prompted once, then it lands.
+    await tickUntil(h, id, (b) => b.status === 'awaiting-merge');
+    const batch = findBatch(h.state(), id);
+    expect(batch?.reprompted_members.map((r) => r.issue)).toEqual([885]);
+    expect(batch?.ranges.map((r) => r.issue)).toEqual([885, 886]);
   }, 60_000);
 });

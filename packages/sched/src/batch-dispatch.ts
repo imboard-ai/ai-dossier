@@ -102,6 +102,7 @@ import {
   DispatchProfileError,
   fileSizeOrZero,
   journalCmdModelFields,
+  KILL_ESCALATION_MS,
   memberDispatchTier,
   type ResolvedDispatch,
   resolveProfiledDispatch,
@@ -1823,6 +1824,17 @@ function spawnMemberContinuation(
   if (!batch || batch.status !== 'executing' || batch.worktree === null) return;
   const memberIssue = batch.members[batch.executing_member - 1];
   if (memberIssue === undefined) return;
+  if (batch.evictions.some((e) => e.issue === memberIssue)) {
+    // #844: the member's eviction (and its slot release, in the same write)
+    // landed, but the engine died before advancing past it. Respawning it
+    // would dispatch an evicted member again — finish the advance instead.
+    journalEvent(deps, 'member-advance-recovered', unit(batchId), {
+      issue: memberIssue,
+      detail: `member ${batch.executing_member} is already evicted but the batch never advanced past it (engine exit mid-eviction) — advancing instead of respawning it`,
+    });
+    continuePastEvictedMember(deps, config, dispatch, batchId, batch, memberIssue, now, result);
+    return;
+  }
   if (freeCapacity(state, config) === 0) return;
   const expectedBranch = memberBranchFor(batchId, batch.executing_member, memberIssue);
   const fsExists = deps.fsExists ?? ((p: string) => fs.existsSync(p));
@@ -2475,7 +2487,9 @@ export function evictMemberAndContinue(
   memberIssue: number,
   failure: MemberFailure,
   now: Date,
-  result: BatchTickResult
+  result: BatchTickResult,
+  /** #844: the member's slot release — committed in the eviction's own write. */
+  release?: (s: SchedState) => SchedState
 ): void {
   const { batchEnded, duplicate } = evictMemberDirectly(
     deps,
@@ -2483,13 +2497,35 @@ export function evictMemberAndContinue(
     batchId,
     memberIssue,
     failure,
-    now
+    now,
+    release
   );
   if (duplicate) return;
   if (batchEnded) {
     result.failed.push(unit(batchId));
     return;
   }
+  continuePastEvictedMember(deps, config, dispatch, batchId, batch, memberIssue, now, result);
+}
+
+/**
+ * The serial rail after a member's eviction has been recorded: tear its tree
+ * down and advance. Also the crash recovery for an engine that died between
+ * the eviction's write and this advance (#844) — `spawnMemberContinuation`
+ * finds the batch still pointing at a member already in `evictions[]` and
+ * continues from here instead of respawning it. `advanceMemberOrValidate`'s
+ * one-shot claim (#613) keeps a re-entry from advancing twice.
+ */
+function continuePastEvictedMember(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  batch: BatchEntry,
+  memberIssue: number,
+  now: Date,
+  result: BatchTickResult
+): void {
   // #677: the evicted member's commits never landed (eviction is the
   // pre-landing rail), so there is nothing to revert on the integration
   // branch — but its worktree/branch must go, or the next tick's prep for
@@ -2560,7 +2596,6 @@ function runIncrementalGate(
   const verdict = evaluateIncrementalGate(deps, batchId, worktree, memberIssue, now);
   if (verdict.kind === 'pass') return false;
   if (verdict.kind === 'failed') {
-    deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
     evictMemberAndContinue(
       deps,
       config,
@@ -2570,7 +2605,8 @@ function runIncrementalGate(
       memberIssue,
       { reason: verdict.reason, detail: verdict.detail },
       now,
-      result
+      result,
+      (s) => releaseSlot(s, batchId, now)
     );
     return true;
   }
@@ -3281,6 +3317,78 @@ function wrongProcedureCounts(
 }
 
 /**
+ * A kill timestamp that belongs to the slot's CURRENT dispatch, or null
+ * (#844): one stamped before `spawned_at` was for an earlier dispatch in the
+ * same slot, and an unparseable one is no anchor at all.
+ */
+function currentDispatchStamp(stamp: string | null, spawnedAt: string | null): string | null {
+  if (stamp === null) return null;
+  const at = Date.parse(stamp);
+  if (Number.isNaN(at)) return null;
+  if (spawnedAt !== null && at < Date.parse(spawnedAt)) return null;
+  return stamp;
+}
+
+/**
+ * Stop the slot's agent before a decision that must not run alongside it
+ * (#844). Returns `true` while it is still alive — the caller waits and
+ * decides on a later tick — and `false` once it is gone (or never had a pid).
+ *
+ * The first sight sends SIGTERM and stamps `kill_sent_at`; each later tick
+ * re-sends SIGTERM until the agent has outlived it by `KILL_ESCALATION_MS`,
+ * then sends SIGKILL (to its process group — `SpawnDeps.kill`) and journals
+ * `kill-escalated` once (`kill_escalated_at`). Pre-#844 this path re-sent
+ * SIGTERM forever, so an agent ignoring it held its member indefinitely.
+ */
+function stopAgentBeforeDeciding(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  memberIssue: number,
+  slot: SlotEntry,
+  now: Date
+): boolean {
+  const { pid } = slot;
+  const pidStart = slot.pid_start ?? undefined;
+  if (pid === null || !deps.spawnDeps.isAlive(pid, pidStart)) return false;
+  const sentAt = currentDispatchStamp(slot.kill_sent_at, slot.spawned_at);
+  const aliveForMs = sentAt === null ? 0 : now.getTime() - Date.parse(sentAt);
+  const escalate = sentAt !== null && aliveForMs >= KILL_ESCALATION_MS;
+  deps.spawnDeps.kill(pid, pidStart, escalate ? 'SIGKILL' : 'SIGTERM');
+  const firstEscalation =
+    escalate && currentDispatchStamp(slot.kill_escalated_at, slot.spawned_at) === null;
+  if (sentAt === null || firstEscalation) {
+    deps.store.withLock((s) => {
+      const live = s.slots.find((x) => x.id === slot.id);
+      // Only the slot still holding THIS agent — never a later dispatch's.
+      if (!live || live.unit !== slot.unit || live.pid !== pid) {
+        return { state: s, result: undefined };
+      }
+      const stamp = now.toISOString();
+      return {
+        state: patchSlot(
+          s,
+          slot.id,
+          sentAt === null
+            ? { kill_sent_at: stamp, kill_escalated_at: null }
+            : { kill_escalated_at: stamp },
+          now
+        ),
+        result: undefined,
+      };
+    });
+  }
+  if (firstEscalation) {
+    journalEvent(deps, 'kill-escalated', unit(batchId), {
+      issue: memberIssue,
+      pid,
+      slot: slot.id,
+      detail: `agent still alive ${Math.round(aliveForMs / 1000)}s after SIGTERM (bound ${KILL_ESCALATION_MS / 1000}s) — sent SIGKILL to its process group`,
+    });
+  }
+  return true;
+}
+
+/**
  * #822 (#810 proposal 3): the member's dispatch ran the wrong procedure (a
  * full-cycle-shaped trail — imboard #4174 ran full-cycle as a batch member).
  * That is a dispatch mistake, not the member's work failing, so the first
@@ -3304,16 +3412,16 @@ function repromptWrongProcedure(
   // dying full-cycle run could still push, post, or open a PR. Signal it and
   // decide on a later tick, once it is gone — and so the re-prompt's
   // `reprompted_at` fence postdates everything it could still post.
-  if (slot.pid !== null && deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
-    deps.spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
-    return 'waiting';
-  }
+  if (stopAgentBeforeDeciding(deps, batchId, memberIssue, slot, now)) return 'waiting';
   const outcome = deps.store.withLock((s) => {
-    const released = release(s);
-    const b = findBatch(released, batchId);
+    const b = findBatch(s, batchId);
     if (!b || b.reprompted_members.some((r) => r.issue === memberIssue)) {
-      return { state: released, result: 'evict' as const };
+      // #844: NOT released here — the caller's eviction commits the release
+      // in its own write, so a crash in between cannot leave the member
+      // slotless and un-evicted (and so respawned).
+      return { state: s, result: 'evict' as const };
     }
+    const released = release(s);
     return {
       state: patchBatch(
         released,
@@ -3367,7 +3475,8 @@ function wrongProcedureFailure(
  * #822: the one wrong-procedure decision shared by both member rails —
  * `'waiting'` (the old agent is still dying), `'reprompted'`, or the
  * eviction failure to apply. A run that already shipped is evicted without
- * a re-prompt.
+ * a re-prompt. On an eviction the slot is still held: the caller passes
+ * `release` to the eviction, which commits both in one write (#844).
  */
 function decideWrongProcedure(
   deps: BatchDispatchDeps,
@@ -3381,13 +3490,9 @@ function decideWrongProcedure(
 ): 'waiting' | 'reprompted' | MemberFailure {
   const shipped = wrongProcedureShippedPr(milestone);
   if (shipped !== null) {
-    if (slot.pid !== null && deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
-      deps.spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
-      return 'waiting';
-    }
-    const tool = lastTool();
-    deps.store.withLock((s) => ({ state: release(s), result: undefined }));
-    return wrongProcedureFailure(tool, shipped);
+    if (stopAgentBeforeDeciding(deps, batchId, memberIssue, slot, now)) return 'waiting';
+    // #844: the caller's eviction releases the slot in its own write.
+    return wrongProcedureFailure(lastTool(), shipped);
   }
   const verdict = repromptWrongProcedure(
     deps,
@@ -3537,7 +3642,8 @@ function reconcileMemberSlot(
         memberIssue,
         decision,
         now,
-        result
+        result,
+        (s) => releaseSlot(s, batchId, now)
       );
     }
     return;
@@ -3572,8 +3678,6 @@ function reconcileMemberSlot(
       slot,
       now
     );
-    deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
-
     // A member that never went green (RFC F.1) evicts DIRECTLY — no aggregate
     // suite has run yet, so there is nothing for `attributing`/`evicting` (the
     // AGGREGATE-suite-red pipeline, RFC F.2) to attribute or revert: the
@@ -3591,7 +3695,9 @@ function reconcileMemberSlot(
       memberIssue,
       memberFailureFor(read, lastTool),
       now,
-      result
+      result,
+      // #844: released in the eviction's own write, never before it.
+      (s) => releaseSlot(s, batchId, now)
     );
   }
 }
@@ -3640,7 +3746,15 @@ function evictMemberDirectly(
   batchId: string,
   memberIssue: number,
   failure: MemberFailure,
-  now: Date
+  now: Date,
+  /**
+   * #844: the member's slot release, applied inside pass 1's lock in every
+   * branch — so the release and the park/eviction record commit as ONE write.
+   * Pre-#844 callers released under a separate lock first, and an engine exit
+   * between the two left the member in-work with no slot, which the wedge arm
+   * (serial) or `spawnParallelMembers` (parallel) then respawned.
+   */
+  release?: (s: SchedState) => SchedState
 ): { batchEnded: boolean; duplicate: boolean } {
   const { reason } = failure;
   const kind: MemberExitKind = failure.kind ?? 'evicted';
@@ -3654,7 +3768,8 @@ function evictMemberDirectly(
     prior: EvictionRecord | undefined;
     branch: string | null;
     validated: number[];
-  }>((s) => {
+  }>((held) => {
+    const s = release ? release(held) : held;
     const b = findBatch(s, batchId);
     if (!b) {
       return {
@@ -5503,7 +5618,9 @@ function evictParallelMember(
   run: MemberRun,
   failure: MemberFailure,
   now: Date,
-  result: BatchTickResult
+  result: BatchTickResult,
+  /** #844: the member's own slot release — committed in the eviction's write. */
+  release?: (s: SchedState) => SchedState
 ): void {
   const { batchEnded, duplicate } = evictMemberDirectly(
     deps,
@@ -5511,7 +5628,8 @@ function evictParallelMember(
     batchId,
     run.issue,
     failure,
-    now
+    now,
+    release
   );
   if (duplicate) return;
   result.failed.push(batchEnded ? unit(batchId) : batchMemberUnit(batchId, run.issue));
@@ -5560,7 +5678,6 @@ function reconcileParallelMemberSlot(
     recordMemberRunLog(deps, dispatch, state0, batchId, run.index, run.issue, slot, now);
     const verdict = evaluateIncrementalGate(deps, batchId, run.worktree, run.issue, now);
     if (verdict.kind === 'failed') {
-      deps.store.withLock((s) => ({ state: release(s), result: undefined }));
       evictParallelMember(
         deps,
         config,
@@ -5568,7 +5685,8 @@ function reconcileParallelMemberSlot(
         run,
         { reason: verdict.reason, detail: verdict.detail },
         now,
-        result
+        result,
+        release
       );
       return;
     }
@@ -5608,7 +5726,7 @@ function reconcileParallelMemberSlot(
       now
     );
     if (typeof decision === 'object') {
-      evictParallelMember(deps, config, batchId, run, decision, now, result);
+      evictParallelMember(deps, config, batchId, run, decision, now, result, release);
     }
     return;
   }
@@ -5640,8 +5758,16 @@ function reconcileParallelMemberSlot(
       slot,
       now
     );
-    deps.store.withLock((s) => ({ state: release(s), result: undefined }));
-    evictParallelMember(deps, config, batchId, run, memberFailureFor(read, lastTool), now, result);
+    evictParallelMember(
+      deps,
+      config,
+      batchId,
+      run,
+      memberFailureFor(read, lastTool),
+      now,
+      result,
+      release
+    );
   }
 }
 

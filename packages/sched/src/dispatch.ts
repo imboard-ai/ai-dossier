@@ -1164,6 +1164,18 @@ export function reportTierFor(recoveries: number): ModelTier | null {
 
 // --- Process I/O (injectable) ---
 
+/**
+ * How long an agent the engine is waiting on may stay alive after its first
+ * SIGTERM before the engine escalates to SIGKILL (#844) — two default
+ * reconcile ticks (`reconcile_interval_ms`, 60 s), long enough for a real
+ * agent's own SIGTERM cleanup, short enough that one ignoring it cannot hold
+ * its batch member indefinitely.
+ */
+export const KILL_ESCALATION_MS = 120_000;
+
+/** The signals the engine sends an agent (#844): a polite stop, then the escalation. */
+export type KillSignal = 'SIGTERM' | 'SIGKILL';
+
 export interface SpawnDeps {
   /**
    * Spawn a detached agent process and return its pid. `logFile` receives the
@@ -1176,9 +1188,13 @@ export interface SpawnDeps {
    * Signal a pid; returns false when it was already dead (or not ours).
    * `expectedStart` (the persisted `/proc` start-time) enables the pid-reuse
    * guard: a pid whose start-time no longer matches was reused by an
-   * unrelated process and is never signalled.
+   * unrelated process and is never signalled. `signal` defaults to
+   * `SIGTERM`; `SIGKILL` (#844, the escalation for an agent that ignored
+   * SIGTERM) goes to the agent's whole process GROUP where one exists —
+   * every agent is spawned `detached`, so it leads its own group and its
+   * children die with it — falling back to the pid alone.
    */
-  kill(pid: number, expectedStart?: number): boolean;
+  kill(pid: number, expectedStart?: number, signal?: KillSignal): boolean;
   /**
    * Whether a pid is alive (best-effort). `expectedStart` applies the same
    * pid-reuse guard as `kill`.
@@ -1415,13 +1431,22 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
         fs.closeSync(out);
       }
     },
-    kill(pid: number, expectedStart?: number): boolean {
+    kill(pid: number, expectedStart?: number, signal: KillSignal = 'SIGTERM'): boolean {
       if (!matchesRecordedStart(pid, expectedStart)) {
         spawnedStarts.delete(pid);
         return false; // reused pid — the agent we spawned is already gone
       }
+      if (signal === 'SIGKILL') {
+        try {
+          // A negative pid signals the process group the (detached) agent leads.
+          process.kill(-pid, 'SIGKILL');
+          return true;
+        } catch {
+          // No such group (not a leader, or the platform has none) — the pid alone.
+        }
+      }
       try {
-        process.kill(pid, 'SIGTERM');
+        process.kill(pid, signal);
         return true;
       } catch {
         spawnedStarts.delete(pid);
