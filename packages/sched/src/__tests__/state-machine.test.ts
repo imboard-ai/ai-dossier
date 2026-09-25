@@ -475,6 +475,27 @@ describe('#810: parkMember / profile-carrying requeue', () => {
     expect(() => validateState(bad)).toThrow(/failure_evidence\.branch/);
   });
 
+  it('#832: a 1.25.0 batch with no agent_exits loads with the respawn counter backfilled null', () => {
+    const legacy = JSON.parse(JSON.stringify({ ...seeded(), schema_version: '1.25.0' }));
+    delete legacy.batches[0].agent_exits;
+    const loaded = validateState(legacy);
+    expect(loaded.schema_version).toBe(SCHEMA_VERSION);
+    expect(loaded.batches[0]?.agent_exits).toBeNull();
+    const counted = JSON.parse(JSON.stringify(seeded()));
+    counted.batches[0].agent_exits = { phase: 'tail', count: 2 };
+    expect(validateState(counted).batches[0]?.agent_exits).toEqual({ phase: 'tail', count: 2 });
+    for (const bad of [
+      { phase: 'tail', count: '2' },
+      { phase: 'fix', count: 1 },
+      { phase: 'tail', count: 0 },
+      3,
+    ]) {
+      const corrupt = JSON.parse(JSON.stringify(seeded()));
+      corrupt.batches[0].agent_exits = bad;
+      expect(() => validateState(corrupt)).toThrow(/agent_exits/);
+    }
+  });
+
   it('a 1.23.0 state loads and migrates to 1.24.0 unchanged (no backfill: kind/branch are optional)', () => {
     const legacy = JSON.parse(JSON.stringify({ ...seeded(), schema_version: '1.23.0' }));
     legacy.batches[0].evictions = [

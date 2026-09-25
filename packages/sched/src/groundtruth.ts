@@ -1074,6 +1074,34 @@ export function isBatchPhaseDone(
   return postdatesDispatch(milestone.at, dispatchedAt);
 }
 
+/** Longest agent-supplied reason slug {@link batchPhaseBlockedReason} keeps. */
+const BLOCKED_REASON_MAX = 80;
+
+/**
+ * #832: the reason a batch tail-work agent handed back — the anchor's latest
+ * milestone is `<one of phases> blocked`, posted by THIS dispatch (the same
+ * #605 fence as {@link isBatchPhaseDone}). Returns the milestone's `reason=`
+ * reduced to a slug (it is agent-written text that lands in `blocked_reason`
+ * and the journal), `unspecified` when it names none, and `null` when the
+ * milestone is not such a hand-back. A tail that posts `batch-review blocked
+ * reason=members-mismatch` has DECIDED: it must block the batch, never read
+ * as an unverified exit and be respawned (b-20260924-04).
+ */
+export function batchPhaseBlockedReason(
+  milestone: GroundTruthMilestone | null,
+  phases: readonly BatchPhase[],
+  dispatchedAt: string | null = null
+): string | null {
+  if (milestone === null || milestone.status !== 'blocked') return null;
+  if (!(phases as readonly string[]).includes(milestone.phase)) return null;
+  if (!postdatesDispatch(milestone.at, dispatchedAt)) return null;
+  const slug = (milestone.keys.reason ?? '')
+    .replace(/[^A-Za-z0-9._:-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, BLOCKED_REASON_MAX);
+  return slug.length > 0 ? slug : 'unspecified';
+}
+
 /**
  * `gt.issueCloseTruth` as a plain reader (#768), or `undefined` when this
  * ground truth has no such method — the one adapter every caller (the engine's

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  batchPhaseBlockedReason,
   createExecGroundTruth,
   type ExecFn,
   type GroundTruthMilestone,
@@ -374,6 +375,45 @@ describe('isBatchPhaseDone (#605 audit) with the dispatch fence', () => {
     expect(
       isBatchPhaseDone(anchorDone('2026-09-06T08:00:00Z'), 'batch-review', '2026-09-06T08:00:00Z')
     ).toBe(true);
+  });
+});
+
+describe('batchPhaseBlockedReason (#832)', () => {
+  const blocked = (
+    phase: string,
+    at: string,
+    keys: Record<string, string> = {}
+  ): GroundTruthMilestone => ({ phase, status: 'blocked', run: 'r', at, keys });
+
+  it("returns the tail's own reason for a blocked milestone of a listed phase", () => {
+    const m = blocked('batch-review', '2026-09-24T17:25:00Z', { reason: 'members-mismatch' });
+    expect(batchPhaseBlockedReason(m, ['batch-review', 'batch-ship'])).toBe('members-mismatch');
+    expect(batchPhaseBlockedReason(m, ['batch-report'])).toBeNull();
+    expect(batchPhaseBlockedReason(null, ['batch-review'])).toBeNull();
+    expect(
+      batchPhaseBlockedReason({ ...m, status: 'done' }, ['batch-review', 'batch-ship'])
+    ).toBeNull();
+  });
+
+  it('is fenced to this dispatch — an earlier blocked milestone does not block a new tail', () => {
+    const m = blocked('batch-review', '2026-09-24T17:00:00Z', { reason: 'x' });
+    expect(batchPhaseBlockedReason(m, ['batch-review'], '2026-09-24T18:00:00Z')).toBeNull();
+    expect(batchPhaseBlockedReason(m, ['batch-review'], '2026-09-24T17:00:00Z')).toBe('x');
+  });
+
+  it('reduces the agent-written reason to a slug, and names a missing one', () => {
+    const at = '2026-09-24T17:25:00Z';
+    expect(
+      batchPhaseBlockedReason(blocked('batch-ship', at, { reason: 'bad $(rm -rf) reason' }), [
+        'batch-ship',
+      ])
+    ).toBe('bad-rm--rf-reason');
+    expect(batchPhaseBlockedReason(blocked('batch-ship', at), ['batch-ship'])).toBe('unspecified');
+    expect(
+      batchPhaseBlockedReason(blocked('batch-ship', at, { reason: 'a'.repeat(200) }), [
+        'batch-ship',
+      ])?.length
+    ).toBe(80);
   });
 });
 

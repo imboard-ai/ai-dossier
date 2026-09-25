@@ -743,8 +743,30 @@ export interface BatchEntry {
    * order; always `[]` for a serial batch. Backfilled `[]` on load.
    */
   member_runs: MemberRun[];
+  /**
+   * #832: the per-phase respawn counter of the batch's tail-work agents —
+   * how many times the agent of `phase` exited UNVERIFIED (dead, no
+   * milestone that advances or blocks the batch, not a #629 provider API
+   * error) since that phase last made verified progress. The tick loop
+   * respawns a dead tail/report agent on its own, so without this a tail that
+   * keeps exiting unverified is respawned every tick forever (b-20260924-04:
+   * four strong-tier respawns, ~375k tokens). Past
+   * `MAX_BATCH_AGENT_RESPAWNS` the batch blocks `respawn-cap:<phase>`
+   * instead. `null` = no unverified exit counted; backfilled `null` on load
+   * (schema 1.26.0).
+   */
+  agent_exits: BatchAgentExits | null;
   created_at: string;
   updated_at: string;
+}
+
+/** #832: which tail-work agent a {@link BatchEntry.agent_exits} count belongs to. */
+export type BatchAgentPhase = 'tail' | 'report';
+
+/** #832: {@link BatchEntry.agent_exits}. */
+export interface BatchAgentExits {
+  phase: BatchAgentPhase;
+  count: number;
 }
 
 /** A worker slot (RFC-0001 §D.3). */
@@ -1401,8 +1423,11 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * `_ticks` — the dedup marker for `reconcileStaleBlockedBatches`'s automatic
  * merged-PR detection when more than one candidate matches; `null`/`null`/`0`
  * backfilled on load.
+ * 1.26.0 (#832): `BatchEntry` gains `agent_exits` — the per-phase respawn
+ * counter of the tail/report agents (`respawn-cap:<phase>`); `null`
+ * backfilled on load.
  */
-export const SCHEMA_VERSION = '1.25.0' as const;
+export const SCHEMA_VERSION = '1.26.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1431,6 +1456,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.22.0',
   '1.23.0',
   '1.24.0',
+  '1.25.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;

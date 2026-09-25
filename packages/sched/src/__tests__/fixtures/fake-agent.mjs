@@ -38,9 +38,15 @@
  *                - "batch review and ship tail" → the TAIL agent. Posts
  *                  `batch-review done` then the batch-ship park
  *                  (`awaiting-merge` with `pr=` from --pr=, default 9000) on
- *                  the ANCHOR issue.
+ *                  the ANCHOR issue. #832: first appends the prompt's
+ *                  `Members:` list as one line to `<anchor>.tail-members`
+ *                  (so a test can read what each tail dispatch was told);
+ *                  --tail-blocked=<reason> posts `batch-review blocked
+ *                  reason=<reason>` instead and exits, and --tail-die=1 exits 1
+ *                  having posted nothing (an unverified exit).
  *                - "batch report phase" → the REPORT agent. Posts
- *                  `batch-report done` on the anchor issue.
+ *                  `batch-report done` on the anchor issue; #832:
+ *                  --report-die=1 exits 1 having posted nothing instead.
  *                - anything else (the bounded fix agent) → exits 0 having
  *                  posted nothing; the engine verifies a fix by re-running
  *                  the (injected, fake) suite, never by trusting this exit.
@@ -126,6 +132,21 @@ process.stdin.on('end', () => {
       return;
     }
     if (/batch review and ship tail/i.test(input)) {
+      const members = input.match(/Members: ([\d,]*)/);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(path.join(dir, `${issue}.tail-members`), `${members ? members[1] : ''}\n`);
+      if (opt('tail-die') !== undefined) {
+        console.error(`fake batch tail: dying unverified for anchor #${issue}`);
+        process.exit(1);
+      }
+      const blocked = opt('tail-blocked');
+      if (blocked !== undefined) {
+        post('batch-review', 'blocked', { reason: blocked });
+        console.log(
+          `fake batch tail: posted batch-review blocked (${blocked}) for anchor #${issue}`
+        );
+        process.exit(0);
+      }
       post('batch-review', 'done', {});
       const pr = opt('pr') ?? '9000';
       post('batch-ship', 'awaiting-merge', { pr: String(pr), head: 'abc1234' });
@@ -135,6 +156,10 @@ process.stdin.on('end', () => {
       process.exit(0);
     }
     if (/batch report phase/i.test(input)) {
+      if (opt('report-die') !== undefined) {
+        console.error(`fake batch report: dying unverified for anchor #${issue}`);
+        process.exit(1);
+      }
       post('batch-report', 'done', {});
       console.log(`fake batch report: posted batch-report done for anchor #${issue}`);
       process.exit(0);
