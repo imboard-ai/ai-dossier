@@ -191,7 +191,16 @@ export function parseNpmView({ status, stdout, stderr }, spec) {
     );
   }
 
-  const gitHead = typeof parsed === 'object' ? parsed.gitHead : undefined;
+  // npm <= 11 prints one object for an exact version; npm 12 wraps it in a
+  // one-element array. More than one entry means the spec matched several
+  // versions — not the exact version this guard asked about.
+  if (Array.isArray(parsed) && parsed.length !== 1) {
+    throw new CheckUnavailableError(
+      `npm view ${spec} returned ${parsed.length} entries; expected exactly one version.`
+    );
+  }
+  const entry = Array.isArray(parsed) ? parsed[0] : parsed;
+  const gitHead = entry !== null && typeof entry === 'object' ? entry.gitHead : undefined;
   if (typeof gitHead !== 'string' || !FULL_SHA_RE.test(gitHead)) {
     throw new CheckUnavailableError(
       `${spec} is on npm but has no usable gitHead (${oneLine(JSON.stringify(gitHead))}), so the ` +
