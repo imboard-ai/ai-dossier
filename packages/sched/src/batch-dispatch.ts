@@ -4047,7 +4047,7 @@ function reconcileTailSlot(
 
 function reconcileReportSlot(
   deps: BatchDispatchDeps,
-  config: SchedConfig,
+  _config: SchedConfig,
   batchId: string,
   slot: SlotEntry,
   now: Date,
