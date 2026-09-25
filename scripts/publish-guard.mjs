@@ -38,17 +38,25 @@
 //
 // Usage:
 //   node scripts/publish-guard.mjs --dir <package-dir> [--head <ref>]
-//                                  [--repo-root <dir>] [--defer-collision]
+//                                  [--repo-root <dir>] [--defer-collision <ledger>]
+//   node scripts/publish-guard.mjs --report-collisions <ledger>
 //
 // When $GITHUB_OUTPUT is set, writes `skip=true|false` and
 // `collision=true|false` there. Exit codes: 0 = publish or skip,
-// 1 = collision, 2 = the guard could not run. `--defer-collision` makes a
-// collision exit 0 (outputs still say `collision=true`) so the workflow can
-// publish the other packages first and fail the job in a final step.
+// 1 = collision, 2 = the guard could not run.
+//
+// `--defer-collision <ledger>` is for the workflow only: a collision exits 0
+// and is recorded in the ledger file, so the other packages still publish.
+// Every later package checked against the same ledger is HELD (skip) when one
+// of its `@ai-dossier/*` dependencies collided or was held — it would
+// otherwise ship against the older published dependency. The job's final
+// step runs `--report-collisions <ledger>`, which exits 1 naming every
+// collided package. The ledger is the single list of packages, so a new
+// package step cannot be forgotten in a hand-maintained `if:`.
 // ------------------------------------------------------------------
 
 import { execFileSync } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 import {
@@ -315,14 +323,52 @@ function readPackageAt(repoRoot, sha, dir) {
   return pkg;
 }
 
+/**
+ * The collision ledger shared by one publish job: one `collision <name>` or
+ * `held <name>` line per package. Absent file = nothing recorded yet.
+ */
+export function readLedger(path) {
+  const entries = { collision: [], held: [] };
+  if (!existsSync(path)) return entries;
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    const [kind, name] = line.trim().split(/\s+/);
+    if (name && kind in entries) entries[kind].push(name);
+  }
+  return entries;
+}
+
+/** Final step of the publish job: exit 1 naming every collided package, else 0. */
+export function reportCollisions(ledger, { log, error }) {
+  const { collision, held } = readLedger(ledger);
+  if (collision.length === 0) {
+    log('No version collisions.');
+    return 0;
+  }
+  const heldNote = held.length > 0 ? ` Held with them (dependents): ${held.join(', ')}.` : '';
+  error(
+    `::error title=Version collision::Not released: ${collision.join(', ')} — each version is ` +
+      `already on npm from different source (see the 'Check if ... needs publishing' logs).` +
+      `${heldNote} Bump them in a follow-up PR; every publish run fails this way until then.`
+  );
+  return 1;
+}
+
 function parseArgs(argv) {
-  const opts = { dir: null, head: 'HEAD', repoRoot: process.cwd(), deferCollision: false };
-  const takesValue = { '--dir': 'dir', '--head': 'head', '--repo-root': 'repoRoot' };
+  const opts = {
+    dir: null,
+    head: 'HEAD',
+    repoRoot: process.cwd(),
+    ledger: null,
+    reportLedger: null,
+  };
+  const takesValue = {
+    '--dir': 'dir',
+    '--head': 'head',
+    '--repo-root': 'repoRoot',
+    '--defer-collision': 'ledger',
+    '--report-collisions': 'reportLedger',
+  };
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--defer-collision') {
-      opts.deferCollision = true;
-      continue;
-    }
     const key = takesValue[argv[i]];
     const next = argv[i + 1];
     if (!key) throw new CheckUnavailableError(`unrecognised argument '${argv[i]}'.`);
@@ -332,7 +378,7 @@ function parseArgs(argv) {
     opts[key] = next;
     i += 1;
   }
-  if (!opts.dir) {
+  if (!opts.dir && !opts.reportLedger) {
     throw new CheckUnavailableError(
       '--dir is required.\n  Usage: node scripts/publish-guard.mjs --dir <package-dir>'
     );
@@ -340,8 +386,8 @@ function parseArgs(argv) {
   return opts;
 }
 
-/** Decide for one package. Throws CheckUnavailableError when it cannot. */
-function evaluate({ repoRoot, dir, head }, lookup) {
+/** Everything decide() needs, read from git and npm. */
+function resolve({ repoRoot, dir, head }, lookup) {
   let headSha;
   try {
     headSha = git(['rev-parse', `${head}^{commit}`], repoRoot);
@@ -356,6 +402,20 @@ function evaluate({ repoRoot, dir, head }, lookup) {
     ensureCommit(repoRoot, published.gitHead);
     diff = releaseDiff(repoRoot, published.gitHead, headSha, dir);
   }
+  return { pkg, published, headSha, diff };
+}
+
+/** Dependencies of `pkg` (at --head) that already collided or were held this job. */
+function heldBy(pkg, ledger) {
+  if (!ledger) return [];
+  const { collision, held } = readLedger(ledger);
+  const blocked = new Set([...collision, ...held]);
+  return Object.keys(pkg.dependencies ?? {}).filter((name) => blocked.has(name));
+}
+
+/** Decide for one package. Throws CheckUnavailableError when it cannot. */
+function evaluate(opts, lookup) {
+  const { pkg, published, headSha, diff } = resolve(opts, lookup);
   const decision = decide({ published, headSha, diff });
   const message = formatDecision({
     name: pkg.name,
@@ -379,21 +439,36 @@ export function run(
   let dir = '(unknown)';
   try {
     const opts = parseArgs(argv);
+    if (opts.reportLedger) return reportCollisions(opts.reportLedger, { log, error });
     dir = opts.dir;
     const { pkg, decision, message } = evaluate(opts, lookup);
+    const writeOutputs = (skip, collision) => {
+      if (outputFile) appendFileSync(outputFile, `skip=${skip}\ncollision=${collision}\n`);
+    };
 
-    const collision = decision.action === 'collision';
-    if (outputFile) {
-      appendFileSync(outputFile, `skip=${decision.action !== 'publish'}\ncollision=${collision}\n`);
-    }
-    if (!collision) {
+    if (decision.action !== 'collision') {
+      const blockers = decision.action === 'publish' ? heldBy(pkg, opts.ledger) : [];
+      if (blockers.length > 0) {
+        appendFileSync(opts.ledger, `held ${pkg.name}\n`);
+        writeOutputs(true, false);
+        error(
+          `::warning title=${pkg.name}@${pkg.version} held::not publishing — its dependency ` +
+            `${blockers.join(', ')} collided; it would ship against the older published version.`
+        );
+        return 0;
+      }
+      writeOutputs(decision.action !== 'publish', false);
       log(message);
       return 0;
     }
+
+    writeOutputs(true, true);
     // `::error::` makes it an annotation on the run summary, not just a log line.
     error(`::error title=${pkg.name}@${pkg.version} version collision::${message.split('\n')[0]}`);
     error(message);
-    return opts.deferCollision ? 0 : 1;
+    if (!opts.ledger) return 1;
+    appendFileSync(opts.ledger, `collision ${pkg.name}\n`);
+    return 0;
   } catch (err) {
     const known = err instanceof CheckUnavailableError;
     const detail = known

@@ -217,11 +217,23 @@ describe('run — end to end against a real git repo', () => {
   };
 
   let outCount = 0;
-  const guard = ({ head, lookup, extra = ['--defer-collision'] }) => {
+  const freshLedger = () => {
+    outCount += 1;
+    return join(outDir, `ledger-${outCount}`);
+  };
+  const report = (ledger) => {
+    const lines = [];
+    const code = run(['--report-collisions', ledger], {
+      log: (m) => lines.push(m),
+      error: (m) => lines.push(m),
+    });
+    return { code, out: lines.join('\n') };
+  };
+  const guard = ({ head, lookup, dir = 'cli', extra = ['--defer-collision', freshLedger()] }) => {
     outCount += 1;
     const outputFile = join(outDir, `out-${outCount}`);
     const lines = [];
-    const code = run(['--repo-root', repo, '--dir', 'cli', '--head', head, ...extra], {
+    const code = run(['--repo-root', repo, '--dir', dir, '--head', head, ...extra], {
       log: (m) => lines.push(m),
       error: (m) => lines.push(m),
       lookup,
@@ -240,9 +252,20 @@ describe('run — end to end against a real git repo', () => {
     git('config', 'user.name', 'Test');
     writeFileSync(
       join(repo, 'package.json'),
-      `${JSON.stringify({ name: 'root', private: true, workspaces: ['cli'] }, null, 2)}\n`
+      `${JSON.stringify({ name: 'root', private: true, workspaces: ['cli', 'app'] }, null, 2)}\n`
     );
     writeCli('1.0.0', 'export const a = 1;\n');
+    // A dependent of cli, for the held-dependent cases.
+    mkdirSync(join(repo, 'app/src'), { recursive: true });
+    writeFileSync(
+      join(repo, 'app/package.json'),
+      `${JSON.stringify(
+        { name: '@fixture/app', version: '3.0.0', dependencies: { '@fixture/cli': '^1.0.0' } },
+        null,
+        2
+      )}\n`
+    );
+    writeFileSync(join(repo, 'app/src/index.js'), 'export const app = 1;\n');
     commit('base');
 
     // Winner merges first and publishes 1.1.0.
@@ -282,6 +305,49 @@ describe('run — end to end against a real git repo', () => {
     const r = guard({ head: loser, lookup: publishedAt(winner), extra: [] });
     expect(r.code).toBe(1);
     expect(r.outputs).toContain('collision=true');
+  });
+
+  it('records a deferred collision in the ledger, and the report step fails naming it', () => {
+    const ledger = freshLedger();
+    const r = guard({
+      head: loser,
+      lookup: publishedAt(winner),
+      extra: ['--defer-collision', ledger],
+    });
+    expect(r.code).toBe(0);
+    expect(readFileSync(ledger, 'utf8')).toBe('collision @fixture/cli\n');
+
+    const rep = report(ledger);
+    expect(rep.code).toBe(1);
+    expect(rep.out).toContain('Not released: @fixture/cli');
+  });
+
+  it('the report step passes when nothing collided (ledger absent or clean)', () => {
+    const ledger = freshLedger();
+    expect(report(ledger).code).toBe(0);
+    guard({ head: loser, lookup: () => null, extra: ['--defer-collision', ledger] });
+    expect(report(ledger).code).toBe(0);
+  });
+
+  it('holds a dependent of a collided package instead of publishing it', () => {
+    const ledger = freshLedger();
+    guard({ head: loser, lookup: publishedAt(winner), extra: ['--defer-collision', ledger] });
+    const r = guard({
+      head: loser,
+      dir: 'app',
+      lookup: () => null,
+      extra: ['--defer-collision', ledger],
+    });
+    expect(r.code).toBe(0);
+    expect(r.outputs).toContain('skip=true');
+    expect(r.outputs).toContain('collision=false');
+    expect(r.out).toContain('held');
+    expect(readFileSync(ledger, 'utf8')).toContain('held @fixture/app');
+  });
+
+  it('publishes a dependent normally when nothing it depends on collided', () => {
+    const r = guard({ head: loser, dir: 'app', lookup: () => null });
+    expect(r.outputs).toContain('skip=false');
   });
 
   it('looks up the version at --head, not the checked-out version', () => {

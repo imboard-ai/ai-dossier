@@ -219,7 +219,7 @@ jobs:
 
       - name: Check if @ai-dossier/core needs publishing
         id: check-core
-        run: node scripts/publish-guard.mjs --dir packages/core --defer-collision
+        run: node scripts/publish-guard.mjs --dir packages/core --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Publish @ai-dossier/core
         if: steps.check-core.outputs.skip != 'true'
@@ -232,7 +232,7 @@ jobs:
       # same reasoning as sched-before-cli below.
       - name: Check if @ai-dossier/worktree-pool needs publishing
         id: check-pool
-        run: node scripts/publish-guard.mjs --dir packages/worktree-pool --defer-collision
+        run: node scripts/publish-guard.mjs --dir packages/worktree-pool --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Publish @ai-dossier/worktree-pool
         if: steps.check-pool.outputs.skip != 'true'
@@ -242,73 +242,44 @@ jobs:
 
       - name: Check if @ai-dossier/sched needs publishing
         id: check-sched
-        run: node scripts/publish-guard.mjs --dir packages/sched --defer-collision
+        run: node scripts/publish-guard.mjs --dir packages/sched --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       # Before cli: a published cli tarball depends on @ai-dossier/sched, so
       # the registry must have it first or the cli install breaks for users.
-      # A dependency held back by a collision holds its dependents too: they
-      # would otherwise ship against the older published dependency (#826).
       - name: Publish @ai-dossier/sched
-        if: >-
-          steps.check-sched.outputs.skip != 'true' &&
-          steps.check-core.outputs.collision != 'true' &&
-          steps.check-pool.outputs.collision != 'true'
+        if: steps.check-sched.outputs.skip != 'true'
         run: |
           cd packages/sched
           npm publish --provenance --access public
 
       - name: Check if @ai-dossier/cli needs publishing
         id: check-cli
-        run: node scripts/publish-guard.mjs --dir cli --defer-collision
+        run: node scripts/publish-guard.mjs --dir cli --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Publish @ai-dossier/cli
-        if: >-
-          steps.check-cli.outputs.skip != 'true' &&
-          steps.check-core.outputs.collision != 'true' &&
-          steps.check-pool.outputs.collision != 'true' &&
-          steps.check-sched.outputs.collision != 'true'
+        if: steps.check-cli.outputs.skip != 'true'
         run: |
           cd cli
           npm publish --provenance --access public
 
       - name: Check if @ai-dossier/mcp-server needs publishing
         id: check-mcp
-        run: node scripts/publish-guard.mjs --dir mcp-server --defer-collision
+        run: node scripts/publish-guard.mjs --dir mcp-server --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Publish @ai-dossier/mcp-server
-        if: >-
-          steps.check-mcp.outputs.skip != 'true' &&
-          steps.check-core.outputs.collision != 'true'
+        if: steps.check-mcp.outputs.skip != 'true'
         run: |
           cd mcp-server
           npm publish --provenance --access public
 
-      # A collision (version already on npm, built from different source) is
-      # held until here so unaffected packages still publish; then the job fails
-      # loudly instead of reporting a silent skip as success (#826). Dependents
-      # of a colliding package were held above and publish once it is bumped.
+      # Each check step records a collision (version already on npm, built from
+      # different source) in a shared ledger instead of failing, so unaffected
+      # packages still publish; a package whose dependency collided is held
+      # (skip=true) by the guard itself. This step then fails the job naming
+      # every collided package — the ledger is the list, nothing hand-maintained
+      # here (#826).
       - name: Fail on version collisions
-        if: >-
-          steps.check-core.outputs.collision == 'true' ||
-          steps.check-pool.outputs.collision == 'true' ||
-          steps.check-sched.outputs.collision == 'true' ||
-          steps.check-cli.outputs.collision == 'true' ||
-          steps.check-mcp.outputs.collision == 'true'
-        env:
-          CORE: ${{ steps.check-core.outputs.collision }}
-          POOL: ${{ steps.check-pool.outputs.collision }}
-          SCHED: ${{ steps.check-sched.outputs.collision }}
-          CLI: ${{ steps.check-cli.outputs.collision }}
-          MCP: ${{ steps.check-mcp.outputs.collision }}
-        run: |
-          collided=""
-          [ "$CORE" = "true" ] && collided="$collided @ai-dossier/core"
-          [ "$POOL" = "true" ] && collided="$collided @ai-dossier/worktree-pool"
-          [ "$SCHED" = "true" ] && collided="$collided @ai-dossier/sched"
-          [ "$CLI" = "true" ] && collided="$collided @ai-dossier/cli"
-          [ "$MCP" = "true" ] && collided="$collided @ai-dossier/mcp-server"
-          echo "::error title=Version collision::Not released:$collided — each version is already on npm from different source (see the 'Check if ... needs publishing' logs). Bump them in a follow-up PR; every publish run fails this way until then."
-          exit 1
+        run: node scripts/publish-guard.mjs --report-collisions "$RUNNER_TEMP/publish-collisions"
 
   verify:
     needs: publish
