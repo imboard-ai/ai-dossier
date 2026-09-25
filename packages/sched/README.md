@@ -772,6 +772,9 @@ failure rails: executing → dissolving (a member self-reports blocked)
                validating → blocked (suite report unreadable, #562) → validating
                executing → blocked (gate-inconclusive:<cap>, #583) → executing
                  (`sched resume --batch <id>` re-runs the gate; nothing requeued/reverted)
+               (dissolve refused | tail) → blocked (dissolve-refused:* / tail-blocked:* /
+                 members-mismatch:* / respawn-cap:tail) → validating
+                 (`sched resume --batch <id>` re-runs gate + tail over the landed members, #822)
 ```
 
 - **One shared worktree/branch per batch**, claimed once by a deterministic (no LLM)
@@ -1071,22 +1074,34 @@ tail blocks (`tail-blocked:*`, `members-mismatch:*`, `respawn-cap:tail`) —
 `blocked_reason`/`agent_exits` cleared and `executing_member` pinned to the last member (so
 `runValidate` never re-admits a member the dissolve released). The engine's next tick
 re-runs the batch gate and then the tail over the landed members only; a gate still red
-re-blocks it once. It journals `batch-resumed`. Refused, with the reason, when no member is
-landed, the batch still holds a slot, or it has no integration worktree/branch.
+re-blocks it once. It journals `batch-resumed` (naming any tail exits it cleared). Refused,
+with the reason, when no member is landed, the batch still holds a slot, it has no
+integration worktree/branch/anchor, a PR is already recorded against it (let the stale-blocked
+reconcile settle it), or the tail's own members check would refuse the same landed set again
+(`tailMembersRefusal`). The CLI also refuses when the integration worktree is gone from disk
+or a profiled batch's dispatch profile no longer resolves (restore it first).
 `gate-inconclusive:*` keeps its own recheck (`resumeBlockedGate`).
 
 ### Wrong-procedure members are re-prompted once (#822)
 
 A member whose dispatch posts a full-cycle-line milestone (`gate` … `report`) carrying neither
 `batch=` nor `mode=slot` ran the WRONG PROCEDURE (imboard #4174 ran full-cycle as a
-member: `review done next=ship`) — `isWrongProcedureMilestone`, fenced to this dispatch.
-Both member rails then stop a live agent (a full-cycle run left going would open its own
-PR), release its slot and, the first time, record it in `BatchEntry.reprompted_members`
-(`{ issue, milestone_at }`, schema 1.27.0) and journal `member-reprompted`: it respawns in
-place, in the same worktree, with `wrongProcedureDirective` appended to its prompt (engine
-values only — no milestone text). The recorded `milestone_at` keeps the same milestone from
-counting again inside the fence's 60s skew tolerance. A second wrong-procedure milestone
-evicts it `wrong-procedure` (parked `evicted`, branch kept, #810).
+member: `review done next=ship`) — `isWrongProcedureMilestone`, fenced to this dispatch. A
+hand-back shape (`blocked`, `review partial`) never counts: it keeps its own path. Both
+member rails then:
+
+- stop a live agent and wait for it to be gone before anything else (a dying full-cycle run
+  could still push, post or open a PR in that worktree);
+- if the milestone shows the run already SHIPPED (a `ship`/`report` phase or a `pr=` key —
+  `wrongProcedureShippedPr`), evict it at once `wrong-procedure-shipped`, naming the stray PR
+  (`stray_pr`) for the operator to close or reconcile — a re-prompt cannot undo a PR;
+- otherwise, the first time, record it in `BatchEntry.reprompted_members`
+  (`{ issue, milestone_at, reprompted_at }`, schema 1.27.0) and journal `member-reprompted`:
+  it respawns in place, in the same worktree, with `wrongProcedureDirective` appended to its
+  prompt (engine values only — no milestone text);
+- a later wrong-procedure milestone posted strictly after `reprompted_at` (no skew tolerance:
+  the killed first dispatch's milestones would otherwise still count inside the 60s fence)
+  evicts it `wrong-procedure` (parked `evicted`, branch kept, #810).
 
 ## API surface
 
@@ -1255,7 +1270,9 @@ import {
   resumeBlockedGate,     // #583: sched resume --batch <id> — re-run the gate that blocked a batch
   resumeLandedBatch,     // #822: sched resume --batch <id> over landed work — blocked → validating
   isLandedResumableBlock, LANDED_RESUMABLE_BLOCK_PREFIXES, // #822: which blocks resumeLandedBatch accepts
-  isWrongProcedureMilestone, wrongProcedureDirective, // #822: wrong-procedure detection + re-prompt text
+  isWrongProcedureMilestone, wrongProcedureShippedPr, // #822: wrong-procedure detection; did the stray run already ship?
+  wrongProcedureDirective, WRONG_PROCEDURE_MARKER, // #822: the re-prompt text and its fixed opening
+  type RepromptRecord,   // #822: BatchEntry.reprompted_members ({ issue, milestone_at, reprompted_at })
   buildMemberPrompt, buildBatchTailPrompt, buildBatchReportPrompt, // #523 prompt builders (#677: member carries {issue}/{batch}/{worktree}/{integration_branch})
   memberBranchFor, // #677: the member branch name, `batch/<id>-m<n>-<issue>` — one definition, every recovery surface derives from it
   DEFAULT_MEMBER_PROMPT_TEMPLATE, DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE,
@@ -1416,9 +1433,10 @@ after-the-fact recovery, not a missing-data bug.
   `IssueStatus` gains `handed-back`, `EvictionRecord`/`FailureEvidence` gain optional
   `kind`/`branch` — #810, schema 1.24.0; batch `pr_detect_ambiguous_reason`/`_since`/`_ticks`
   backfill to `null`/`null`/`0` — #789, schema 1.25.0).
-  Schema 1.27.0 (#822): `BatchEntry` gains `reprompted_members` (`[]` backfilled).
   Schema 1.26.0 (#832): `BatchEntry` gains `agent_exits` (the per-phase tail/report
   respawn counter); `null` is backfilled on load.
+  Schema 1.27.0 (#822): `BatchEntry` gains `reprompted_members`
+  (`{ issue, milestone_at, reprompted_at }` records; `[]` backfilled).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.

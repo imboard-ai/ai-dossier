@@ -32,6 +32,7 @@ import {
   runnableUnits,
 } from './readiness';
 import { DISSOLVE_REFUSED_PREFIX } from './recovery';
+import { isLandedResumableBlock } from './scheduler';
 import { distinctEvictions, PARKED_MEMBER_STATUSES, validatedMembersOf } from './state';
 import { defaultFsExists, type FsExists, POOL_ARGS_PREFIX, POOL_BIN } from './teardown';
 import type {
@@ -131,8 +132,11 @@ function dissolveRefusedNote(state: SchedState, batch: BatchEntry): string {
   const shippable =
     why === 'unattributable-suite-failure' || why.startsWith('dispatch-profile-missing');
   const resume = `\`ai-dossier sched resume --batch ${batch.id}\``;
+  const profileFirst = why.startsWith('dispatch-profile-missing')
+    ? `restore the dispatch profile in the config, then `
+    : '';
   const salvage = shippable
-    ? `ship them: ${resume} re-runs the gate and the tail over them (#822), or \`gh pr create --head ${branch} --base ${batch.base_branch}\` by hand — once it merges the engine reconciles them to shipped`
+    ? `ship them: ${profileFirst}${resume} re-runs the gate and the tail over them (#822), or \`gh pr create --head ${branch} --base ${batch.base_branch}\` by hand — once it merges the engine reconciles them to shipped`
     : `the branch is red or partly reverted — inspect it before shipping anything (fix on ${branch}, then ${resume} re-runs the gate and the tail over the landed members, #822)`;
   return (
     `; validated member(s) ${list} stay landed on ${branch} — ${salvage}; or ` +
@@ -150,15 +154,14 @@ function dissolveRefusedNote(state: SchedState, batch: BatchEntry): string {
  */
 function tailBlockNote(state: SchedState, batch: BatchEntry): string {
   const reason = batch.blocked_reason ?? '';
-  if (reason === 'no-landed-members') {
-    return `; nothing is landed, so there is nothing to ship — \`ai-dossier sched abandon --batch ${batch.id}\` is safe`;
-  }
-  const tailReason =
-    reason.startsWith('tail-blocked:') ||
-    reason.startsWith('members-mismatch:') ||
-    reason === 'respawn-cap:tail';
+  const nothingLanded = `; nothing is landed, so there is nothing to ship — \`ai-dossier sched abandon --batch ${batch.id}\` is safe`;
+  if (reason === 'no-landed-members') return nothingLanded;
+  // The same list `sched resume --batch` accepts, minus the dissolve block
+  // (`dissolveRefusedNote` owns that one) — one definition, no drift.
+  const tailReason = isLandedResumableBlock(reason) && !reason.startsWith(DISSOLVE_REFUSED_PREFIX);
   if (!tailReason) return '';
   const validated = validatedMembersOf(state, batch);
+  if (validated.length === 0) return nothingLanded;
   const branch = batch.branch ?? '<integration branch>';
   const list = validated.length > 0 ? validated.map((m) => `#${m}`).join(',') : 'none';
   const evidence =

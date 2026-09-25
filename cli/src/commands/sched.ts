@@ -1429,7 +1429,7 @@ function registerStatusSubcommand(cmd: Command): void {
 }
 
 interface PauseResumeOptions extends SchedOptions {
-  /** Resume-only (#583): a batch id blocked on `gate-inconclusive:<cap>` — re-run that gate for its current member instead of the global pause toggle. */
+  /** Resume-only: a batch id blocked on `gate-inconclusive:<cap>` (#583 — re-run that gate for its current member) or over landed work (`dissolve-refused:*` / `tail-blocked:*` / `members-mismatch:*` / `respawn-cap:tail`, #822 → `resumeLandedBatch`), instead of the global pause toggle. */
   batch?: string;
 }
 
@@ -1441,20 +1441,23 @@ interface PauseResumeOptions extends SchedOptions {
  * just what `resumeBlockedGate` needs — no teardown/fence/report machinery,
  * since this never touches those phases.
  */
+// #822: a batch blocked over landed work (`isLandedResumableBlock`) is routed
+// to `resumeLandedBatchCommand` instead of the gate recheck.
 function resumeBatchGate(opts: PauseResumeOptions): void {
   const { store } = resolveStore(opts);
+  // #822: a batch blocked over LANDED work (a refused dissolve, #832's tail
+  // blocks) resumes by re-running the gate + tail over its landed members —
+  // routed before the config load, which only the gate recheck needs.
+  const blockedOn = findBatch(store.load(), opts.batch as string)?.blocked_reason ?? null;
+  if (isLandedResumableBlock(blockedOn)) {
+    resumeLandedBatchCommand(store, opts);
+    return;
+  }
   let config: SchedConfig;
   try {
     config = store.loadConfig();
   } catch (err) {
     handleKnownError(err);
-  }
-  // #822: a batch blocked over LANDED work (a refused dissolve, #832's tail
-  // blocks) resumes by re-running the gate + tail over its landed members.
-  const blockedOn = findBatch(store.load(), opts.batch as string)?.blocked_reason ?? null;
-  if (isLandedResumableBlock(blockedOn)) {
-    resumeLandedBatchCommand(store, opts);
-    return;
   }
   const deps: BatchDispatchDeps = {
     store,
@@ -1516,6 +1519,18 @@ function resumeBatchGate(opts: PauseResumeOptions): void {
  */
 function resumeLandedBatchCommand(store: SchedStore, opts: PauseResumeOptions): void {
   try {
+    // The checks the pure transition cannot make: the worktree the gate re-runs
+    // in still exists, and a profiled batch's profile still resolves (else the
+    // engine's next tick would just dissolve-refuse it again).
+    const batch = findBatch(store.load(), opts.batch as string);
+    if (batch?.worktree && !fs.existsSync(batch.worktree)) {
+      throw new SchedNotFoundError(
+        `Batch ${opts.batch}: its integration worktree ${batch.worktree} no longer exists — the gate cannot re-run; open the PR from ${batch.branch ?? 'its branch'} by hand, or \`sched abandon --batch ${opts.batch}\``
+      );
+    }
+    if (batch?.dispatch_profile) {
+      resolveProfiledDispatch(store.loadConfig(), batch.dispatch_profile);
+    }
     const resumed = store.withLock((state) => {
       const r = resumeLandedBatch(state, opts.batch as string);
       return { state: r.state, result: r };
@@ -1523,7 +1538,7 @@ function resumeLandedBatchCommand(store: SchedStore, opts: PauseResumeOptions): 
     new Journal(store.dir).append(
       unitEvent('batch-resumed', `batch:${opts.batch}`, {
         reason: resumed.reason,
-        detail: `landed=${resumed.landed.join(',')} — gate + tail re-run over the landed members`,
+        detail: `landed=${resumed.landed.join(',')} — gate + tail re-run over the landed members${resumed.clearedExits > 0 ? `; cleared ${resumed.clearedExits} counted tail exit(s)` : ''}`,
       })
     );
     if (opts.json) {

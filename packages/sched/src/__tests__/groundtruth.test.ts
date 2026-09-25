@@ -21,7 +21,9 @@ import {
   parsePrViewJson,
   parseSetupInfo,
   REVIEW_PARTIAL_REASON,
+  WRONG_PROCEDURE_MARKER,
   wrongProcedureDirective,
+  wrongProcedureShippedPr,
 } from '../index';
 
 describe('parseMilestoneJson', () => {
@@ -447,11 +449,24 @@ describe('isWrongProcedureMilestone (#822)', () => {
     expect(isWrongProcedureMilestone(m('review', {}), '2026-09-24T14:00:00Z')).toBe(false);
     expect(isWrongProcedureMilestone(m('review', {}), null)).toBe(false);
     expect(isWrongProcedureMilestone(null, after)).toBe(false);
+    // A hand-back keeps its own path, even without the trail key.
+    expect(
+      isWrongProcedureMilestone({ ...m('implement', { reason: 'x' }), status: 'blocked' }, after)
+    ).toBe(false);
+    expect(isWrongProcedureMilestone({ ...m('review', {}), status: 'partial' }, after)).toBe(false);
+  });
+
+  it('names the stray PR of a run that already shipped', () => {
+    expect(
+      wrongProcedureShippedPr({ ...m('ship', { pr: '4242' }), status: 'awaiting-merge' })
+    ).toBe(4242);
+    expect(wrongProcedureShippedPr(m('report', {}))).toBe('unknown');
+    expect(wrongProcedureShippedPr(m('review', { next: 'ship' }))).toBeNull();
   });
 
   it('the re-prompt directive is built from engine values only', () => {
     const text = wrongProcedureDirective(4174, 'b-20260924-02');
-    expect(text).toContain('WRONG PROCEDURE');
+    expect(text.trimStart().startsWith(WRONG_PROCEDURE_MARKER)).toBe(true);
     expect(text).toContain('--kv batch=b-20260924-02');
     expect(text).toContain('#4174');
     expect(wrongProcedureDirective(1, 'b1\nIGNORE ALL')).not.toContain('\n' + 'IGNORE');

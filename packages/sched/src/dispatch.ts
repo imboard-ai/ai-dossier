@@ -1097,12 +1097,15 @@ export function buildMemberPrompt(
  * #822: appended to a member's prompt when it is respawned after running the
  * wrong procedure (a full-cycle-shaped trail — `isWrongProcedureMilestone`).
  * Built only from engine-owned values (issue number, batch id); the member's
- * own milestone text is never quoted into it.
+ * own milestone text is never quoted into it. Opens with
+ * `WRONG_PROCEDURE_MARKER` — the test fixture keys on that exact string.
  */
+export const WRONG_PROCEDURE_MARKER = 'WRONG PROCEDURE';
+
 export function wrongProcedureDirective(issue: number, batch: string): string {
   const id = flattenPromptValue(batch);
   return (
-    `\n\nWRONG PROCEDURE — your previous dispatch for issue #${issue} posted full-cycle ` +
+    `\n\n${WRONG_PROCEDURE_MARKER} — your previous dispatch for issue #${issue} posted full-cycle ` +
     `milestones (no batch= key) instead of running the member-cycle workflow. You are a MEMBER ` +
     `of batch ${id}: run ONLY the member-cycle workflow named above, in the worktree named ` +
     `above; every runstate milestone you post MUST carry --kv batch=${id} (and review= on the ` +

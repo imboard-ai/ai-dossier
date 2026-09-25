@@ -4861,6 +4861,33 @@ async function tickThroughAgents(
   }
 }
 
+/**
+ * #822: tick (waiting out every live agent — the batch's own slot and each
+ * parallel member's) until `done(batch)` holds, failing with the last status
+ * after `maxTicks` — an exact end state instead of a fixed tick count.
+ */
+async function tickUntil(
+  h: BatchHarness,
+  batchId: string,
+  done: (b: NonNullable<ReturnType<typeof findBatch>>) => boolean,
+  maxTicks = 20
+): Promise<void> {
+  for (let i = 0; i < maxTicks; i++) {
+    const b = findBatch(h.state(), batchId);
+    if (b && done(b)) return;
+    expect(await waitAllDead(h, memberPids(h, batchId))).toBe(true);
+    const pid = batchSlotPid(h, batchId);
+    if (pid !== undefined) expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+  }
+  const last = findBatch(h.state(), batchId);
+  if (!last || !done(last)) {
+    throw new Error(
+      `tickUntil: ${batchId} still ${last?.status ?? 'gone'} after ${maxTicks} ticks`
+    );
+  }
+}
+
 describe('#832: the batch tail runs over landed members only, and a tail verdict is never respawned', () => {
   it('AC1/AC4: a member stopped mid-run (after its hand-back) is excluded — integrate is dispatched with only the landed members', async () => {
     // b-20260924-04: #4408 handed back, the operator stopped it, and the tail
@@ -5090,7 +5117,7 @@ describe('#822 item 1: `sched resume --batch` ships the landed members of a batc
       { issue: 883, mode: 'slot', batch: 'b-822-resume', tier: 'mid' },
     ]);
 
-    await tickThroughAgents(h, 'b-822-resume', 4); // 881 lands, 882 hands back, 883 lands, gate red
+    await tickUntil(h, 'b-822-resume', (b) => b.status === 'blocked'); // 881 lands, 882 hands back, 883 lands, gate red
     let batch = findBatch(h.state(), 'b-822-resume');
     expect(batch?.status).toBe('blocked');
     expect(batch?.blocked_reason).toBe('dissolve-refused:unattributable-suite-failure');
@@ -5112,9 +5139,8 @@ describe('#822 item 1: `sched resume --batch` ships the landed members of a batc
 
     h.tick(); // gate green → reviewing → tail over the landed members
     expect(findBatch(h.state(), 'b-822-resume')?.status).toBe('reviewing');
-    await tickThroughAgents(h, 'b-822-resume', 2);
+    await tickUntil(h, 'b-822-resume', (b) => b.status === 'awaiting-merge');
     expect(tailMemberLists(h, 880)).toEqual(['881,883']);
-    expect(findBatch(h.state(), 'b-822-resume')?.status).toBe('awaiting-merge');
     // The handed-back member was never re-dispatched by the resume.
     expect(h.state().entries.find((e) => e.issue === 882)?.status).toBe('handed-back');
   }, 60_000);
@@ -5130,7 +5156,7 @@ describe('#822 item 1: `sched resume --batch` ships the landed members of a batc
         base,
         'b-822-refuse',
         'blocked',
-        { blocked_reason: reason, worktree: '/w', branch: 'batch/x' },
+        { blocked_reason: reason, worktree: '/w', branch: 'batch/x', anchor: 890 },
         new Date()
       );
     expect(() =>
@@ -5152,6 +5178,19 @@ describe('#822 item 1: `sched resume --batch` ships the landed members of a batc
     }
     const held = assignToIdleSlot(landed, 'batch:b-822-refuse', 'reviewing', new Date()).state;
     expect(() => resumeLandedBatch(held, 'b-822-refuse')).toThrow(/still holds slot/);
+    // Already shipped by hand: the stale-blocked reconcile settles it instead.
+    const withPr = patchBatch(landed, 'b-822-refuse', { pr: 77 }, new Date());
+    expect(() => resumeLandedBatch(withPr, 'b-822-refuse')).toThrow(/already has PR #77/);
+    // The tail would refuse the same landed set again — refused up front.
+    const mismatch = patchBatch(
+      landed,
+      'b-822-refuse',
+      { ranges: [{ issue: 999, from: 'a', to: 'a', commits: ['a'], indices: [0] }] },
+      new Date()
+    );
+    expect(() => resumeLandedBatch(mismatch, 'b-822-refuse')).toThrow(
+      /tail would refuse these members again \(members-mismatch:no-boundary-commit-891\)/
+    );
     expect(resumeLandedBatch(landed, 'b-822-refuse').landed).toEqual([891]);
   });
 });
@@ -5169,7 +5208,7 @@ describe('#822 item 5: a member that runs the WRONG PROCEDURE is re-prompted onc
       { issue: 872, mode: 'slot', batch: 'b-822-wrong', tier: 'mid' },
     ]);
 
-    await tickThroughAgents(h, 'b-822-wrong', 6);
+    await tickUntil(h, 'b-822-wrong', (b) => b.status === 'awaiting-merge');
 
     const events = h.deps.journal.read();
     expect(events.filter((e) => e.event === 'member-reprompted').map((e) => e.issue)).toEqual([
@@ -5182,7 +5221,6 @@ describe('#822 item 5: a member that runs the WRONG PROCEDURE is re-prompted onc
     // The fake member only behaves once its prompt carries the directive —
     // so landing proves the respawn was re-prompted.
     expect(batch?.ranges.map((r) => r.issue)).toEqual([871, 872]);
-    expect(['reviewing', 'shipping', 'awaiting-merge']).toContain(batch?.status);
   }, 60_000);
 
   it('serial: the wrong procedure AGAIN after the re-prompt evicts `wrong-procedure` (parked, branch kept) and the batch goes on', async () => {
@@ -5202,7 +5240,7 @@ describe('#822 item 5: a member that runs the WRONG PROCEDURE is re-prompted onc
       { issue: 874, mode: 'slot', batch: 'b-822-evict', tier: 'mid' },
     ]);
 
-    await tickThroughAgents(h, 'b-822-evict', 6);
+    await tickUntil(h, 'b-822-evict', (b) => b.status === 'awaiting-merge');
 
     const batch = findBatch(h.state(), 'b-822-evict');
     expect(batch?.evictions.map((e) => [e.issue, e.reason, e.kind])).toEqual([
@@ -5225,16 +5263,40 @@ describe('#822 item 5: a member that runs the WRONG PROCEDURE is re-prompted onc
       { issue: 876, mode: 'slot', batch: 'b-822-par', tier: 'mid' },
     ]);
 
-    for (let i = 0; i < 8; i++) {
-      expect(await waitAllDead(h, memberPids(h, 'b-822-par'))).toBe(true);
-      const pid = batchSlotPid(h, 'b-822-par');
-      if (pid !== undefined) expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
-      h.tick();
-    }
+    await tickUntil(h, 'b-822-par', (b) => b.status === 'awaiting-merge');
 
     const batch = findBatch(h.state(), 'b-822-par');
     expect(batch?.reprompted_members.map((r) => r.issue)).toEqual([875]);
     expect(batch?.evictions).toEqual([]);
     expect([...(batch?.ranges.map((r) => r.issue) ?? [])].sort()).toEqual([875, 876]);
+  }, 60_000);
+
+  it('a wrong-procedure run that already SHIPPED its own PR is evicted at once (no re-prompt) and the stray PR is named', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      [
+        '--mode=batch',
+        '--commit-file=f-{issue}.txt',
+        '--wrong-procedure-members=877',
+        '--wrong-procedure-shipped=4242',
+      ],
+      { maxSlots: 1 }
+    );
+    h.enqueue([
+      { issue: 877, mode: 'slot', batch: 'b-822-shipped', anchor: 870, tier: 'mid' },
+      { issue: 878, mode: 'slot', batch: 'b-822-shipped', tier: 'mid' },
+    ]);
+
+    await tickUntil(h, 'b-822-shipped', (b) => b.status === 'awaiting-merge');
+
+    const batch = findBatch(h.state(), 'b-822-shipped');
+    expect(batch?.reprompted_members).toEqual([]);
+    expect(batch?.evictions.map((e) => [e.issue, e.reason])).toEqual([
+      [877, 'wrong-procedure-shipped'],
+    ]);
+    const failed = h.deps.journal.read().find((e) => e.event === 'unit-failed' && e.issue === 877);
+    expect(String(failed?.detail)).toContain('PR #4242');
+    expect(batch?.ranges.map((r) => r.issue)).toEqual([878]);
   }, 60_000);
 });

@@ -171,10 +171,11 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   done: [],
   dissolving: ['dissolved'],
   dissolved: [],
-  // `validating` is where a future resume verb would land once an operator
-  // fixes the suite command — no such CLI command exists yet, so today's only
-  // real exit is giving up (`sched abandon --batch`, which routes through
-  // `dissolving` like every other non-terminal batch state).
+  // → validating (#822): `sched resume --batch <id>` on a batch blocked over
+  // landed work (`dissolve-refused:*`, `tail-blocked:*`, `members-mismatch:*`,
+  // `respawn-cap:tail`) — `resumeLandedBatch` re-runs the gate + tail over the
+  // landed members. A #562 `suite-unreadable` block still has no resume verb;
+  // its exit is `sched abandon --batch` (routes through `dissolving`).
   // → executing (#583): `sched resume --batch <id>` re-runs the incremental
   // gate that blocked it; a passing recheck resumes the member loop exactly
   // where it left off (the SAME `executing`-guarded advance/evict functions
@@ -757,18 +758,23 @@ export function validateState(data: unknown): SchedState {
       batch.reprompted_members !== undefined &&
       (!Array.isArray(batch.reprompted_members) ||
         !(batch.reprompted_members as unknown[]).every((r) => {
-          const rec = r as { issue?: unknown; milestone_at?: unknown } | null;
+          const rec = r as {
+            issue?: unknown;
+            milestone_at?: unknown;
+            reprompted_at?: unknown;
+          } | null;
           return (
             rec !== null &&
             typeof rec === 'object' &&
             Number.isInteger(rec.issue) &&
             (rec.issue as number) > 0 &&
-            typeof rec.milestone_at === 'string'
+            isIsoDateString(rec.milestone_at) &&
+            isIsoDateString(rec.reprompted_at)
           );
         }))
     ) {
       throw new Error(
-        `Batch ${batch.id}: reprompted_members must be an array of { issue, milestone_at } records`
+        `Batch ${batch.id}: reprompted_members must be an array of { issue, milestone_at, reprompted_at } records`
       );
     }
     if (batch.member_runs !== undefined) {
@@ -1753,6 +1759,34 @@ export function validatedMembersOf(state: SchedState, batch: BatchEntry): number
       entry.status === 'validated'
     );
   });
+}
+
+/**
+ * #832: why the tail must NOT be dispatched over `landed`, or null when it may.
+ * The deterministic half of the check the tail agent itself makes before
+ * integrating (the members it is told about and the members it derives from
+ * the integration branch's boundary commits must agree) — made here for free
+ * instead of by a strong-tier agent that then exits `members-mismatch`.
+ * `batch.ranges` is the recorded boundary attribution (recomputed at every
+ * landing); when it is empty nothing was attributed, so there is nothing to
+ * cross-check. Invariant this relies on: `ranges` names only landed members —
+ * every exit path that reverts a member also drops its range
+ * (`recovery.ts`'s partial dissolve); a path that re-derived `ranges` from
+ * `git log` after a revert would make this refuse a healthy batch.
+ */
+export function tailMembersRefusal(batch: BatchEntry, landed: readonly number[]): string | null {
+  if (landed.length === 0) return 'no-landed-members';
+  if (batch.ranges.length === 0) return null;
+  const attributed = new Set(batch.ranges.map((r) => r.issue));
+  const missing = landed.filter((issue) => !attributed.has(issue));
+  if (missing.length > 0) return `members-mismatch:no-boundary-commit-${missing.join(',')}`;
+  // The tail derives members from the boundary commits too, and refuses when
+  // the two lists disagree in EITHER direction (review-issue Aggregate Step 1).
+  const landedSet = new Set(landed);
+  const unlanded = [...attributed].filter((issue) => !landedSet.has(issue));
+  return unlanded.length > 0
+    ? `members-mismatch:unlanded-boundary-commit-${unlanded.join(',')}`
+    : null;
 }
 
 /**

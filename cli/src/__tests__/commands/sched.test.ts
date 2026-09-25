@@ -1396,7 +1396,7 @@ describe('#810: parked batch members (sched status + sched requeue)', () => {
   });
 
   /** #822: batch `bp` blocked over landed work — member 2 validated, member 1 handed back. */
-  function blockOverLanded(reason: string): void {
+  function blockOverLanded(reason: string, memberStatus = 'validated'): void {
     const state = readState() as {
       entries: Array<Record<string, unknown>>;
       batches: Array<Record<string, unknown>>;
@@ -1409,11 +1409,12 @@ describe('#810: parked batch members (sched status + sched requeue)', () => {
           ...b,
           status: 'blocked',
           blocked_reason: reason,
-          worktree: '/tmp/bp-worktree',
+          worktree: home,
           branch: 'batch/bp-20260925',
+          anchor: 900,
           executing_member: 1,
         })),
-        entries: state.entries.map((e) => (e.issue === 2 ? { ...e, status: 'validated' } : e)),
+        entries: state.entries.map((e) => (e.issue === 2 ? { ...e, status: memberStatus } : e)),
       })
     );
   }
@@ -1435,17 +1436,28 @@ describe('#810: parked batch members (sched status + sched requeue)', () => {
     expect(journalEvents().some((e) => e.event === 'batch-resumed')).toBe(true);
   });
 
-  it('#822: sched resume --batch refuses a landed-work block with nothing landed', async () => {
+  it('#822: sched resume --batch refuses when the integration worktree is gone', async () => {
     await parkedFixture();
-    blockOverLanded('tail-blocked:members-mismatch');
-    const state = readState() as { entries: Array<Record<string, unknown>> };
+    blockOverLanded('dissolve-refused:unattributable-suite-failure');
+    const state = readState() as { batches: Array<Record<string, unknown>> };
     fs.writeFileSync(
       statePath(),
       JSON.stringify({
         ...(state as object),
-        entries: state.entries.map((e) => (e.issue === 2 ? { ...e, status: 'batched' } : e)),
+        batches: state.batches.map((b) => ({ ...b, worktree: path.join(home, 'gone') })),
       })
     );
+    await expect(
+      runSched(['sched', 'resume', '--batch', 'bp', '--project', 'test-proj'])
+    ).rejects.toThrow();
+    expect((readState() as { batches: Array<Record<string, unknown>> }).batches[0]).toMatchObject({
+      status: 'blocked',
+    });
+  });
+
+  it('#822: sched resume --batch refuses a landed-work block with nothing landed', async () => {
+    await parkedFixture();
+    blockOverLanded('tail-blocked:members-mismatch', 'batched');
     await expect(
       runSched(['sched', 'resume', '--batch', 'bp', '--project', 'test-proj'])
     ).rejects.toThrow();

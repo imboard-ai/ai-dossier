@@ -986,7 +986,25 @@ export function isWrongProcedureMilestone(
   if (milestone === null || dispatchedAt === null) return false;
   if (!(PHASES as readonly string[]).includes(milestone.phase)) return false;
   if (isBatchMemberTrail(milestone)) return false;
+  // A hand-back shape (`blocked`, `review partial`) keeps its own handling —
+  // a member that blocked for a real reason must never be re-prompted into
+  // hitting the same blocker (member-cycle posts blocked milestones too).
+  if (isMemberHandBack(milestone)) return false;
   return postdatesDispatch(milestone.at, dispatchedAt);
+}
+
+/**
+ * #822: a wrong-procedure milestone that shows the full-cycle run already got
+ * as far as SHIPPING — a `ship`/`report` phase, or a `pr=` key. A re-prompt
+ * cannot undo a PR opened outside the batch, so such a member is evicted at
+ * once (`wrong-procedure-shipped`) and the PR is named for the operator.
+ */
+export function wrongProcedureShippedPr(
+  milestone: GroundTruthMilestone
+): number | 'unknown' | null {
+  const pr = prOfMilestone(milestone);
+  if (pr !== null) return pr;
+  return milestone.phase === 'ship' || milestone.phase === 'report' ? 'unknown' : null;
 }
 
 /**

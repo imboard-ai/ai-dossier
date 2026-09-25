@@ -267,10 +267,10 @@ export type BatchStatus =
    * no further fallback and blocks on its first unreadable report. Never
    * reached for a genuinely red suite with a parseable failing-test list,
    * which still goes through `attributing`. Nothing is requeued or reverted.
-   * The `validating` edge below is where a future resume verb would land.
    * Exits today: `sched abandon --batch` (#562), `sched resume --batch`
-   * (#583, a passing gate recheck), or #686's stale-blocked reconcile
-   * (ground truth says the work shipped anyway).
+   * (#583, a passing gate recheck → `executing`; #822, a batch blocked over
+   * landed work → `validating` via `resumeLandedBatch`), or #686's
+   * stale-blocked reconcile (ground truth says the work shipped anyway).
    */
   | 'blocked'
   | 'stopped';
@@ -762,11 +762,11 @@ export interface BatchEntry {
    * `batch=`/`mode=slot`) instead of the member-cycle trail (imboard #4174).
    * The first time, the member is respawned in place with a corrective
    * directive; a member already listed here is evicted `wrong-procedure`
-   * instead. Each record keeps the `at` of the milestone that triggered the
-   * re-prompt: the respawned dispatch's fence tolerates 60s of clock skew, so
-   * that same milestone still reads as "posted after this dispatch" — only a
-   * DIFFERENT (newer) wrong-procedure milestone evicts. `[]` backfilled on
-   * load (schema 1.27.0).
+   * instead. Each record keeps the triggering milestone's `at` and the
+   * re-prompt time: the respawned dispatch's fence tolerates 60s of clock
+   * skew, so the killed first dispatch's milestones still read as "posted
+   * after this dispatch" — only a wrong-procedure milestone posted after
+   * `reprompted_at` evicts. `[]` backfilled on load (schema 1.27.0).
    */
   reprompted_members: RepromptRecord[];
   created_at: string;
@@ -776,8 +776,13 @@ export interface BatchEntry {
 /** #822: one {@link BatchEntry.reprompted_members} record. */
 export interface RepromptRecord {
   issue: number;
-  /** `at` of the wrong-procedure milestone that triggered the re-prompt. */
+  /** `at` of the wrong-procedure milestone that triggered the re-prompt (evidence). */
   milestone_at: string;
+  /**
+   * When the engine re-prompted — the fence for the respawned dispatch: only
+   * a wrong-procedure milestone posted strictly after it evicts the member.
+   */
+  reprompted_at: string;
 }
 
 /** #832: which tail-work agent a {@link BatchEntry.agent_exits} count belongs to. */

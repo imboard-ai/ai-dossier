@@ -27,6 +27,7 @@ import {
   releaseAllBatchSlots,
   requeueMember,
   slotsForBatch,
+  tailMembersRefusal,
   transitionBatch,
   transitionIssue,
   transitionSlot,
@@ -317,13 +318,16 @@ export function isLandedResumableBlock(reason: string | null): boolean {
  * members the dissolve already released. The respawn count starts fresh.
  * Pure: refuses (throws `SchedNotFoundError`, naming why) when the batch is
  * not blocked on a resumable reason, holds no landed member, lacks its
- * integration worktree/branch, or still holds a slot.
+ * integration worktree/branch/anchor, already has a PR recorded, would be
+ * refused again by the tail's members check, or still holds a slot. (The
+ * CLI adds the checks that need the disk or the config: the worktree exists,
+ * and the batch's dispatch profile still resolves.)
  */
 export function resumeLandedBatch(
   state: SchedState,
   batchId: string,
   now: Date = new Date()
-): { state: SchedState; landed: number[]; reason: string } {
+): { state: SchedState; landed: number[]; reason: string; clearedExits: number } {
   const batch = findBatch(state, batchId);
   if (!batch) {
     throw new SchedNotFoundError(`Batch not found: ${batchId}`);
@@ -340,9 +344,25 @@ export function resumeLandedBatch(
       `Batch ${batchId} has no landed (validated) member to resume — \`sched abandon --batch ${batchId}\` instead`
     );
   }
-  if (batch.worktree === null || batch.branch === null) {
+  if (batch.worktree === null || batch.branch === null || batch.anchor === null) {
     throw new SchedNotFoundError(
-      `Batch ${batchId} has no integration worktree/branch recorded — nothing to re-run the gate in`
+      `Batch ${batchId} has no integration worktree/branch/anchor recorded — nothing to re-run the gate in`
+    );
+  }
+  // Already shipped by hand (a PR recorded against the batch): resuming would
+  // take it out of `blocked`, where `reconcileStaleBlockedBatches` settles it
+  // once that PR merges — and run a second tail over shipped work.
+  if (batch.pr !== null) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId} already has PR #${batch.pr} recorded — let it merge (the engine reconciles the batch) or close it before resuming`
+    );
+  }
+  // The tail's own members check would refuse the same landed set again after
+  // a full gate run — say so now instead of paying for that round trip.
+  const tailRefusal = tailMembersRefusal(batch, landed);
+  if (tailRefusal !== null) {
+    throw new SchedNotFoundError(
+      `Batch ${batchId}: the tail would refuse these members again (${tailRefusal}) — the landed members and the integration branch's boundary commits disagree; fix the branch, or \`sched abandon --batch ${batchId}\``
     );
   }
   const held = slotsForBatch(state, batchId);
@@ -362,7 +382,12 @@ export function resumeLandedBatch(
     },
     now
   );
-  return { state: next, landed, reason: reason as string };
+  return {
+    state: next,
+    landed,
+    reason: reason as string,
+    clearedExits: batch.agent_exits?.count ?? 0,
+  };
 }
 
 /**

@@ -37,6 +37,22 @@ describe('fmt_events.py', () => {
     ]);
   });
 
+  it('#822: keeps a batch resume (with its detail) and a wrong-procedure re-prompt', () => {
+    const out = run([
+      {
+        event: 'batch-resumed',
+        unit: 'batch:b1',
+        reason: 'dissolve-refused:x',
+        detail: 'landed=4137',
+      },
+      { event: 'member-reprompted', unit: 'batch:b1', issue: 4174, reason: 'wrong-procedure' },
+    ]);
+    expect(out.trim().split('\n')).toEqual([
+      'batch-resumed batch:b1 dissolve-refused:x landed=4137',
+      'member-reprompted #4174 wrong-procedure',
+    ]);
+  });
+
   it('reports a missing dispatch profile with its batch and detail', () => {
     const out = run([
       {

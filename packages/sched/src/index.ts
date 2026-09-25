@@ -121,6 +121,7 @@ export {
   takeoverInstruction,
   tierExecutors,
   unitLogName,
+  WRONG_PROCEDURE_MARKER,
   wrongProcedureDirective,
 } from './dispatch';
 export { type EngineDeps, recordTickFailure, runLoop, type TickResult, tick } from './engine';
@@ -178,6 +179,7 @@ export {
   prOfMilestone,
   REVIEW_PARTIAL_REASON,
   type SetupInfo,
+  wrongProcedureShippedPr,
 } from './groundtruth';
 export {
   appendJsonl,

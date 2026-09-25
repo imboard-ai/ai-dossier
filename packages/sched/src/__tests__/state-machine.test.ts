@@ -480,9 +480,18 @@ describe('#810: parkMember / profile-carrying requeue', () => {
     delete legacy.batches[0].reprompted_members;
     expect(validateState(legacy).batches[0]?.reprompted_members).toEqual([]);
     const ok = JSON.parse(JSON.stringify(seeded()));
-    ok.batches[0].reprompted_members = [{ issue: 7, milestone_at: '2026-09-24T12:00:00Z' }];
+    ok.batches[0].reprompted_members = [
+      { issue: 7, milestone_at: '2026-09-24T12:00:00Z', reprompted_at: '2026-09-24T12:01:00Z' },
+    ];
     expect(validateState(ok).batches[0]?.reprompted_members).toHaveLength(1);
-    for (const bad of [[7], [{ issue: 'x', milestone_at: 'a' }], [{ issue: 7 }], 'nope']) {
+    for (const bad of [
+      [7],
+      [{ issue: 'x', milestone_at: 'a' }],
+      [{ issue: 7 }],
+      [{ issue: 7, milestone_at: 'a', reprompted_at: '2026-09-24T12:01:00Z' }],
+      [{ issue: 7, milestone_at: '2026-09-24T12:00:00Z' }],
+      'nope',
+    ]) {
       const corrupt = JSON.parse(JSON.stringify(seeded()));
       corrupt.batches[0].reprompted_members = bad;
       expect(() => validateState(corrupt)).toThrow(/reprompted_members/);
