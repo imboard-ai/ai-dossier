@@ -308,6 +308,7 @@ export function createBatch(
     ...CLEARED_PR_DETECT_AMBIGUOUS_FIELDS,
     member_dispatch: null,
     member_runs: [],
+    agent_exits: null,
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -1149,6 +1150,9 @@ export function validateState(data: unknown): SchedState {
       gate_inconclusive: run.gate_inconclusive ?? null,
       torn_down: run.torn_down ?? false,
     })),
+    // 1.25.0 → 1.26.0 (#832): no tail/report exit was ever counted before
+    // the respawn cap existed — `null` is exact, not a guess.
+    agent_exits: batch.agent_exits ?? null,
     // 1.23.0 → 1.24.0 (#810): no backfill — `evictions[].kind`/`branch` and
     // `failure_evidence.branch` are optional (absent = a pre-#810 `evicted`
     // record with no recorded branch), and `handed-back` is a new status no

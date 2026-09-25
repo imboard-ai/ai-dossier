@@ -336,6 +336,28 @@ describe('stop', () => {
     expect(() => stopIssue(state, 1)).toThrow(/stop --batch b1/);
   });
 
+  it('#832: stops a PARKED member of a live batch on its own, leaving the batch running', () => {
+    let state = enqueueEntries(
+      createEmptyState(),
+      [
+        { issue: 1, mode: 'slot', batch: 'b1' },
+        { issue: 2, mode: 'slot', batch: 'b1' },
+      ],
+      NOW
+    );
+    state = transitionBatch(state, 'b1', 'executing', { executing_member: 2 }, NOW2);
+    for (const to of ['classified', 'batched', 'waiting', 'in-work', 'handed-back'] as const) {
+      state = transitionIssue(state, 2, to, {}, NOW2);
+    }
+
+    const stopped = stopIssue(state, 2, 'operator stop', NOW2).state;
+
+    expect(stopped.entries.find((e) => e.issue === 2)?.status).toBe('stopped');
+    expect(stopped.batches[0].status).toBe('executing');
+    // The member still in the batch is refused as before.
+    expect(() => stopIssue(stopped, 1)).toThrow(/active member of batch b1 \(queued\)/);
+  });
+
   it('stops an active batch and its unfinished members while releasing its shared slot', () => {
     let state = enqueueEntries(
       createEmptyState(),

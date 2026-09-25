@@ -110,6 +110,7 @@ import {
 } from './dispatch';
 import { recordDispatchApiError, resetDispatchApiErrorStreak } from './dispatch-health';
 import {
+  batchPhaseBlockedReason,
   GIT_OID_RE,
   type GroundTruth,
   type GroundTruthMilestone,
@@ -183,6 +184,7 @@ import {
 } from './teardown';
 import type {
   AttributionMethod,
+  BatchAgentPhase,
   BatchEntry,
   BatchStatus,
   CapabilityGateResult,
@@ -1286,7 +1288,11 @@ function blockBatchForOperator(
   deps: BatchDispatchDeps,
   config: SchedConfig,
   batchId: string,
-  opts: { reason: string; milestonePhase?: 'batch-validate' | 'batch-review' },
+  opts: {
+    reason: string;
+    milestonePhase?: 'batch-validate' | 'batch-review' | 'batch-report';
+    milestoneAlreadyPosted?: boolean;
+  },
   now: Date,
   result: BatchTickResult
 ): void {
@@ -1810,6 +1816,23 @@ function spawnMemberContinuation(
 }
 
 /**
+ * #832: why the tail must NOT be dispatched over `landed`, or null when it may.
+ * The deterministic half of the check the tail agent itself makes before
+ * integrating (every member it is told about has a boundary commit on the
+ * integration branch) — made here for free instead of by a strong-tier agent
+ * that then exits `members-mismatch`. `batch.ranges` is the recorded boundary
+ * attribution (recomputed at every landing); when it is empty nothing was
+ * attributed, so there is nothing to cross-check.
+ */
+function tailMembersRefusal(batch: BatchEntry, landed: readonly number[]): string | null {
+  if (landed.length === 0) return 'no-landed-members';
+  if (batch.ranges.length === 0) return null;
+  const attributed = new Set(batch.ranges.map((r) => r.issue));
+  const missing = landed.filter((issue) => !attributed.has(issue));
+  return missing.length > 0 ? `members-mismatch:no-boundary-commit-${missing.join(',')}` : null;
+}
+
+/**
  * Tail/report/fix dispatches (this function, `spawnReportAgent`,
  * `reconcileFixSlot`) are NOT recorded live to `runs.jsonl` — only member
  * dispatches got that treatment in #564 (`spawnMember`'s call into
@@ -1817,9 +1840,11 @@ function spawnMemberContinuation(
  * the only way to see their cost today, reconstructed from the raw log
  * after the fact. Wiring in live recording for these later means repeating
  * `spawnMember`'s own #564 fix first: none of these three spawn functions'
- * patches stamp `SlotEntry.spawned_at` either, so a `recordXRunLog` guarded
+ * patches stamped `SlotEntry.spawned_at` either, so a `recordXRunLog` guarded
  * on `spawned_at !== null` (mirroring `recordMemberRunLog`) would silently
- * no-op forever, exactly like the original bug.
+ * no-op forever, exactly like the original bug. #832 made the tail and report
+ * spawns stamp it (their hand-back fence needs it); the fix agent still does
+ * not.
  */
 function spawnTailAgent(
   deps: BatchDispatchDeps,
@@ -1829,6 +1854,27 @@ function spawnTailAgent(
   now: Date,
   result: BatchTickResult
 ): void {
+  // #832: the tail runs over the LANDED members only — never `batch.members`,
+  // which still lists a member that was stopped, handed back, evicted or
+  // parked. A refusal blocks the batch before any agent is spawned (and
+  // before a slot is claimed — `blockBatchForOperator` posts a milestone, an
+  // exec that must not run under the store lock).
+  const before = deps.store.load();
+  const pending = findBatch(before, batchId);
+  if (pending && (pending.status === 'reviewing' || pending.status === 'shipping')) {
+    const refusal = tailMembersRefusal(pending, validatedMembersOf(before, pending));
+    if (refusal !== null) {
+      blockBatchForOperator(
+        deps,
+        config,
+        batchId,
+        { reason: refusal, milestonePhase: 'batch-review' },
+        now,
+        result
+      );
+      return;
+    }
+  }
   claimAndSpawn(deps, config, batchId, 'reviewing', now, (state, slot) => {
     const batch = findBatch(state, batchId);
     if (!batch || batch.worktree === null || batch.anchor === null) {
@@ -1838,13 +1884,20 @@ function spawnTailAgent(
       });
       return releaseSlot(state, batchId, now);
     }
+    const landed = validatedMembersOf(state, batch);
+    if (tailMembersRefusal(batch, landed) !== null) {
+      // The landed set changed between the pre-check and the lock (a
+      // concurrent stop/park) — release and let the next tick's pre-check
+      // block it with the reason.
+      return releaseSlot(state, batchId, now);
+    }
     const spawnSpec = resolveTierSpawn(dispatch, 'strong', batch.anchor);
     const cmd = spawnSpec.cmd;
     const prompt = buildBatchTailPrompt(
       dispatch.batchTailPrompt,
       batchId,
       batch.anchor,
-      batch.members,
+      landed,
       batch.worktree
     );
     const logFile = batchTailLogPath(deps.store.runsDir, batchId);
@@ -1868,6 +1921,10 @@ function spawnTailAgent(
       phase: 'reviewing',
       last_progress_at: now.toISOString(),
       log_offset_at_spawn: logOffset,
+      // #832: the fence `reconcileTailSlot` reads — without it a
+      // `batch-review blocked` left on the anchor by an EARLIER dispatch
+      // (or a previous batch on the same anchor, #605) would block this one.
+      spawned_at: now.toISOString(),
     };
     const next =
       slot.status === 'assigned' ? transitionSlot(state, slot.id, 'running', patch, now) : state;
@@ -1937,6 +1994,8 @@ function spawnReportAgent(
       phase: 'report',
       last_progress_at: now.toISOString(),
       log_offset_at_spawn: logOffset,
+      // #832: the fence `reconcileReportSlot`'s hand-back check reads.
+      spawned_at: now.toISOString(),
     };
     const next =
       slot.status === 'assigned'
@@ -3515,8 +3574,89 @@ function reconcileFixSlot(
   evictOffender(deps, config, batchId, offenderRecord.issue, 'overlap', now, result);
 }
 
+/**
+ * #832: the most unverified exits one tail-work phase (`tail` or `report`)
+ * may have before the batch blocks `respawn-cap:<phase>` instead of being
+ * respawned again — the first dispatch plus this many respawns. The #629
+ * class: the tick loop's "same wedge" arm respawns a dead tail/report agent
+ * on its own, so without a cap an agent that exits without a verdict is
+ * redispatched at the strong tier forever (b-20260924-04: four respawns,
+ * ~375k tokens, stopped only by hand).
+ */
+export const MAX_BATCH_AGENT_RESPAWNS = 2;
+
+/**
+ * #832: a tail-work agent of `batch` posted its own `blocked` milestone —
+ * release its slot and block the batch with that reason, once. The agent
+ * decided; respawning it would only get the same answer again. The agent's
+ * milestone is already on the anchor, so none is re-posted.
+ */
+function blockOnAgentHandBack(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  batchId: string,
+  reason: string,
+  now: Date,
+  result: BatchTickResult
+): void {
+  deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
+  blockBatchForOperator(
+    deps,
+    config,
+    batchId,
+    { reason, milestoneAlreadyPosted: true },
+    now,
+    result
+  );
+}
+
+/**
+ * #832: count one unverified exit of `phase`'s agent and release its slot.
+ * Returns true when that exit crossed {@link MAX_BATCH_AGENT_RESPAWNS} and
+ * the batch was blocked `respawn-cap:<phase>` — the caller must not treat
+ * the unit as retryable. The count is per phase: a different phase's exits
+ * start it over, and verified progress clears it (`clearAgentExits`).
+ */
+function countAgentExit(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  batchId: string,
+  phase: BatchAgentPhase,
+  now: Date,
+  result: BatchTickResult
+): boolean {
+  const count = deps.store.withLock((s) => {
+    const b = findBatch(s, batchId);
+    const prior = b?.agent_exits;
+    const next = prior && prior.phase === phase ? prior.count + 1 : 1;
+    let n = releaseSlot(s, batchId, now);
+    if (b) n = patchBatch(n, batchId, { agent_exits: { phase, count: next } }, now);
+    return { state: n, result: next };
+  });
+  if (count <= MAX_BATCH_AGENT_RESPAWNS) return false;
+  blockBatchForOperator(
+    deps,
+    config,
+    batchId,
+    {
+      reason: `respawn-cap:${phase}`,
+      milestonePhase: phase === 'tail' ? 'batch-review' : 'batch-report',
+    },
+    now,
+    result
+  );
+  return true;
+}
+
+/** #832: verified progress in a tail-work phase — the respawn count starts over. */
+function clearAgentExits(s: SchedState, batchId: string, now: Date): SchedState {
+  const b = findBatch(s, batchId);
+  return b && b.agent_exits !== null ? patchBatch(s, batchId, { agent_exits: null }, now) : s;
+}
+
 function reconcileTailSlot(
   deps: BatchDispatchDeps,
+  config: SchedConfig,
   batchId: string,
   slot: SlotEntry,
   now: Date,
@@ -3536,8 +3676,24 @@ function reconcileTailSlot(
     deps.store.withLock((s) => {
       const b = findBatch(s, batchId);
       if (!b || b.status !== 'reviewing') return { state: s, result: undefined };
-      return { state: transitionBatch(s, batchId, 'shipping', {}, now), result: undefined };
+      const n = clearAgentExits(s, batchId, now);
+      return { state: transitionBatch(n, batchId, 'shipping', {}, now), result: undefined };
     });
+    return;
+  }
+
+  // #832: the tail handed back (`batch-review`/`batch-ship blocked`, e.g.
+  // `members-mismatch`) — block the batch with its reason, never respawn.
+  // Checked before liveness: the agent is done deciding whether or not its
+  // process has exited yet, and the block releases its slot.
+  const handedBack = batchPhaseBlockedReason(
+    milestone,
+    ['batch-review', 'batch-ship'],
+    slot.spawned_at
+  );
+  if (handedBack !== null) {
+    if (slot.pid !== null && !dead) deps.spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
+    blockOnAgentHandBack(deps, config, batchId, `tail-blocked:${handedBack}`, now, result);
     return;
   }
 
@@ -3551,6 +3707,7 @@ function reconcileTailSlot(
       let n = resetDispatchApiErrorStreak(releaseSlot(s, batchId, now));
       const b = findBatch(n, batchId);
       if (!b) return { state: n, result: undefined };
+      n = clearAgentExits(n, batchId, now);
       n = b.status === 'reviewing' ? transitionBatch(n, batchId, 'shipping', {}, now) : n;
       n = transitionBatch(n, batchId, 'awaiting-merge', { pr }, now);
       return { state: n, result: undefined };
@@ -3579,13 +3736,16 @@ function reconcileTailSlot(
       unitEvent('unit-failed', unit(batchId), { reason: 'tail-agent-exited-unverified' }),
       now
     );
-    deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
-    result.failed.push(unit(batchId));
+    // #832: counted — past the cap the batch blocks instead of respawning.
+    if (!countAgentExit(deps, config, batchId, 'tail', now, result)) {
+      result.failed.push(unit(batchId));
+    }
   }
 }
 
 function reconcileReportSlot(
   deps: BatchDispatchDeps,
+  config: SchedConfig,
   batchId: string,
   slot: SlotEntry,
   now: Date,
@@ -3607,7 +3767,11 @@ function reconcileReportSlot(
       // #629: a verified report completion is proof dispatch is healthy —
       // reset the confirmed-failure streak, mirroring the per-issue path's
       // own verified-complete branch.
-      let n = resetDispatchApiErrorStreak(releaseSlot(s, batchId, now));
+      let n = clearAgentExits(
+        resetDispatchApiErrorStreak(releaseSlot(s, batchId, now)),
+        batchId,
+        now
+      );
       const b = findBatch(n, batchId);
       if (!b || b.status !== 'deployed') return { state: n, result: undefined };
       n = transitionBatch(n, batchId, 'reported', {}, now);
@@ -3616,6 +3780,14 @@ function reconcileReportSlot(
     });
     result.completed.push(unit(batchId));
     teardownBatch(deps, batchId);
+    return;
+  }
+  // #832: the report agent handed back — block, never respawn (see
+  // `reconcileTailSlot`).
+  const handedBack = batchPhaseBlockedReason(milestone, ['batch-report'], slot.spawned_at);
+  if (handedBack !== null) {
+    if (slot.pid !== null && !dead) deps.spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
+    blockOnAgentHandBack(deps, config, batchId, `report-blocked:${handedBack}`, now, result);
     return;
   }
   if (dead) {
@@ -3638,7 +3810,8 @@ function reconcileReportSlot(
       unitEvent('report-failed', unit(batchId), { detail: 'unverified exit' }),
       now
     );
-    deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
+    // #832: counted — past the cap the batch blocks instead of respawning.
+    countAgentExit(deps, config, batchId, 'report', now, result);
   }
 }
 
@@ -5661,9 +5834,9 @@ export function runBatchTick(
         } else if (batch.status === 'fixing') {
           reconcileFixSlot(deps, config, batch.id, slot, now, result);
         } else if (batch.status === 'reviewing' || batch.status === 'shipping') {
-          reconcileTailSlot(deps, batch.id, slot, now, result);
+          reconcileTailSlot(deps, config, batch.id, slot, now, result);
         } else if (batch.status === 'deployed') {
-          reconcileReportSlot(deps, batch.id, slot, now, result);
+          reconcileReportSlot(deps, config, batch.id, slot, now, result);
         }
         continue;
       }

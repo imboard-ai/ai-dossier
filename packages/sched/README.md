@@ -1008,6 +1008,34 @@ Dissolve never throws validated work away:
   aggregate-suite evictions (`evictMembers`, post-landing, member branch already deleted)
   still requeue full-cycle — now on the batch profile.
 
+### The tail runs over landed members; a tail verdict is final (#832)
+
+- **Landed members only.** The tail (aggregate review + integrate/ship) is dispatched with
+  `{members}` = the batch's validated members (`validatedMembersOf`), never the raw
+  `batch.members`, which still lists members that were stopped, handed back, evicted,
+  parked or requeued. Before spawning, the engine makes the tail's own check for free:
+  no landed members blocks `no-landed-members`, and when `batch.ranges` records boundary
+  commits, a landed member with none blocks `members-mismatch:no-boundary-commit-<n>`.
+  Neither case spends a tail agent.
+- **`sched stop --issue` on a parked member.** A `handed-back`/`evicted` member of a live
+  batch can be stopped on its own (the operator's cleanup after a hand-back). It moves to
+  `stopped` and keeps its exit record, so it stays out of the landed set. A member still in
+  the batch (pending, in work, or validated) is still refused: use `sched stop --batch`.
+- **A blocked tail blocks the batch.** When the tail posts `batch-review` or `batch-ship
+  status=blocked`, and that milestone postdates this dispatch (tail and report slots now
+  stamp `spawned_at`), the engine releases the slot and blocks the batch
+  `tail-blocked:<reason>` once. It never reads that as an unverified exit to respawn. The
+  agent's milestone is already on the anchor, so the engine posts none. The report agent
+  works the same way (`batch-report blocked` → `report-blocked:<reason>`). The reason is
+  reduced to a slug.
+- **Per-phase respawn cap.** `BatchEntry.agent_exits` (`{ phase: 'tail'|'report', count }`,
+  schema 1.26.0) counts unverified exits of the phase's agent. #629 API-error exits are not
+  counted: they have their own pause. After `MAX_BATCH_AGENT_RESPAWNS` (2) respawns, the next
+  unverified exit blocks the batch `respawn-cap:<phase>` instead of respawning.
+  Verified progress (review done, park, report done) clears the count, and so does any
+  block. Before #832, b-20260924-04's tail was respawned four times at the strong tier
+  (~375k tokens) until an operator stopped the batch.
+
 State schema 1.24.0: `IssueStatus` gains `handed-back`; `EvictionRecord` gains optional
 `kind`/`branch`, `FailureEvidence` optional `branch`.
 
@@ -1314,7 +1342,7 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to the current schema (1.25.0 — 1.24.0 was #810: no backfill,
+  load and migrate to the current schema (1.26.0 — 1.24.0 was #810: no backfill,
   `kind`/`branch` optional, absent = an `evicted` record with no branch) automatically
   (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
@@ -1333,6 +1361,8 @@ after-the-fact recovery, not a missing-data bug.
   `IssueStatus` gains `handed-back`, `EvictionRecord`/`FailureEvidence` gain optional
   `kind`/`branch` — #810, schema 1.24.0; batch `pr_detect_ambiguous_reason`/`_since`/`_ticks`
   backfill to `null`/`null`/`0` — #789, schema 1.25.0).
+  Schema 1.26.0 (#832): `BatchEntry` gains `agent_exits` (the per-phase tail/report
+  respawn counter); `null` is backfilled on load.
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
