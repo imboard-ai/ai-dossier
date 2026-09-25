@@ -62,7 +62,10 @@ describe('publish-packages.yml fail-safe contract (#846)', () => {
   });
 
   it('flags a report step that a failed publish step would skip', () => {
-    const text = readFileSync(WORKFLOW, 'utf8').replace(/\n[ \t]*if: \$\{\{ !cancelled\(\) \}\}/, '');
+    const text = readFileSync(WORKFLOW, 'utf8').replace(
+      /\n[ \t]*if: \$\{\{ !cancelled\(\) \}\}/,
+      ''
+    );
     expect(failSafeViolations(text)).toHaveLength(1);
   });
 });
