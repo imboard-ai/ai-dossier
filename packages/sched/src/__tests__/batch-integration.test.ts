@@ -3346,6 +3346,7 @@ function setIssueTruth(truthDir: string, issue: number, truth: Partial<IssueClos
       labels: [],
       closer: null,
       closingPrs: [],
+      lastReopenedAt: null,
       ...truth,
     })
   );
@@ -3493,7 +3494,15 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
       state: 'CLOSED',
       stateReason: 'COMPLETED',
       closer: null,
-      closingPrs: [{ number: 4255, merged: true, baseRefName: 'main', repo: 'test-org/test-repo' }],
+      closingPrs: [
+        {
+          number: 4255,
+          merged: true,
+          mergedAt: '2026-09-12T10:00:00Z',
+          baseRefName: 'main',
+          repo: 'test-org/test-repo',
+        },
+      ],
     });
 
     const result = h.tick();
@@ -3556,6 +3565,29 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
             { number: 9779, merged: false, baseRefName: 'main', repo: 'test-org/test-repo' },
             { number: 9780, merged: true, baseRefName: 'main', repo: 'test-org/other-repo' },
           ],
+        }),
+    },
+    {
+      // #799: PR #9781 merged and closed it, the member was REOPENED (the PR
+      // did not finish it), then a person closed it by hand — the stale
+      // reference must not vouch for that later close.
+      name: 'a member closed by hand whose only merged closing reference predates its last reopen',
+      reason: 'member-closed-by-hand-ref-pr-9781-predates-reopen:#7692',
+      arrange: (h) =>
+        setIssueTruth(h.truthDir, 7692, {
+          state: 'CLOSED',
+          stateReason: 'COMPLETED',
+          closer: null,
+          closingPrs: [
+            {
+              number: 9781,
+              merged: true,
+              mergedAt: '2026-09-10T10:00:00Z',
+              baseRefName: 'main',
+              repo: 'test-org/test-repo',
+            },
+          ],
+          lastReopenedAt: '2026-09-11T10:00:00Z',
         }),
     },
     {

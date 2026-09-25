@@ -107,12 +107,22 @@ export interface IssueCloseTruth {
    * close event has no closer, yet a merged PR still vouches for it.
    */
   closingPrs: ClosingPr[];
+  /**
+   * When the issue was last REOPENED (#799): an ISO timestamp, `null` when the
+   * timeline verifiably holds no reopen, `undefined` when it could not be read.
+   * A closing reference merged BEFORE the last reopen did not finish the issue
+   * (that is why it was reopened), so it cannot vouch for a later hand close;
+   * an unreadable reopen time is never read as "never reopened".
+   */
+  lastReopenedAt: string | null | undefined;
 }
 
 /** A PR that references an issue as closed by it (#768). */
 export interface ClosingPr {
   number: number;
   merged: boolean;
+  /** When it merged (ISO timestamp); `null` when unmerged or unreadable (#799). */
+  mergedAt: string | null;
   baseRefName: string | null;
   repo: string | null;
 }
@@ -445,7 +455,14 @@ export function createExecGroundTruth(
       );
       return repoAlive === null
         ? undefined
-        : { state: 'MISSING', stateReason: null, labels: [], closer: null, closingPrs: [] };
+        : {
+            state: 'MISSING',
+            stateReason: null,
+            labels: [],
+            closer: null,
+            closingPrs: [],
+            lastReopenedAt: null,
+          };
     };
     truth.mergedPrForBranch = (
       branch: string,
@@ -500,13 +517,35 @@ const ISSUE_LABEL_PAGE_SIZE = 100;
 /** A full or abbreviated git object id. */
 export const GIT_OID_RE = /^[0-9a-f]{7,40}$/i;
 
-/** GraphQL for `issueCloseTruth` — one round trip for state, reason, labels and closer. */
+/**
+ * GraphQL for `issueCloseTruth` — one round trip for state, reason, labels,
+ * closer, closing references and the last reopen (#799; aliased `reopens`
+ * because `timelineItems` is already queried for the close event).
+ */
 const ISSUE_CLOSE_QUERY =
   'query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){' +
   `state stateReason labels(first:${ISSUE_LABEL_PAGE_SIZE}){pageInfo{hasNextPage} nodes{name}} ` +
-  'closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number merged baseRefName repository{nameWithOwner}}} ' +
+  'closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number merged mergedAt baseRefName repository{nameWithOwner}}} ' +
+  'reopens:timelineItems(itemTypes:[REOPENED_EVENT],last:1){nodes{... on ReopenedEvent{createdAt}}} ' +
   'timelineItems(itemTypes:[CLOSED_EVENT],last:1){nodes{... on ClosedEvent{closer{__typename ' +
   '... on PullRequest{number merged baseRefName repository{nameWithOwner}} ... on Commit{oid}}}}}}}}';
+
+/** GitHub's timestamp shape: ISO-8601 UTC, e.g. `2026-09-12T10:00:00Z`. */
+const ISO_UTC_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
+/**
+ * `value` when it is an ISO-8601 UTC timestamp that parses to a real date,
+ * else `null`. Stricter than `Date.parse` alone, which also accepts loose
+ * strings (`Date.parse('1')` is a date in 2001) — a time this code compares
+ * or trusts as "merged" must be GitHub's own format.
+ */
+function parseableTimestamp(value: unknown): string | null {
+  return typeof value === 'string' &&
+    ISO_UTC_TIMESTAMP_RE.test(value) &&
+    Number.isFinite(Date.parse(value))
+    ? value
+    : null;
+}
 
 /**
  * Parse `issueCloseTruth`'s GraphQL response (#768). An unusable payload is
@@ -570,6 +609,7 @@ export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth
     const pr = n as {
       number?: unknown;
       merged?: unknown;
+      mergedAt?: unknown;
       baseRefName?: unknown;
       repository?: { nameWithOwner?: unknown } | null;
     } | null;
@@ -577,11 +617,22 @@ export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth
     closingPrs.push({
       number: pr.number,
       merged: pr.merged === true,
+      mergedAt: parseableTimestamp(pr.mergedAt),
       baseRefName: typeof pr.baseRefName === 'string' ? pr.baseRefName : null,
       repo: typeof pr.repository?.nameWithOwner === 'string' ? pr.repository.nameWithOwner : null,
     });
   }
-  return { state, stateReason, labels, closer, closingPrs };
+  // The last reopen (#799). Only a present, empty node list proves "never
+  // reopened"; a missing connection or an unparseable time is unreadable.
+  const reopenNodes = (obj.reopens as { nodes?: unknown } | undefined)?.nodes;
+  let lastReopenedAt: string | null | undefined;
+  if (Array.isArray(reopenNodes) && reopenNodes.length === 0) {
+    lastReopenedAt = null;
+  } else if (Array.isArray(reopenNodes)) {
+    const lastReopen = reopenNodes[reopenNodes.length - 1] as { createdAt?: unknown } | null;
+    lastReopenedAt = parseableTimestamp(lastReopen?.createdAt) ?? undefined;
+  }
+  return { state, stateReason, labels, closer, closingPrs, lastReopenedAt };
 }
 
 /**
@@ -752,19 +803,14 @@ export function parseMergedPrListJson(
     // #789 review (security hardening): a non-empty string alone is not
     // "merged" — require it to parse as a real date too, the same standard
     // `createdAt` below is already held to.
-    if (
-      typeof pr.mergedAt !== 'string' ||
-      pr.mergedAt === '' ||
-      !Number.isFinite(Date.parse(pr.mergedAt))
-    ) {
-      continue;
-    }
+    const mergedAt = parseableTimestamp(pr.mergedAt);
+    if (mergedAt === null) continue;
     if (typeof pr.createdAt !== 'string') continue;
     const createdMs = Date.parse(pr.createdAt);
     if (!Number.isFinite(createdMs) || createdMs < thresholdMs) continue;
     const num = pr.number;
     if (typeof num === 'number' && Number.isInteger(num) && num > 0) {
-      matches.push({ pr: num, mergedAt: pr.mergedAt });
+      matches.push({ pr: num, mergedAt });
     }
   }
   if (matches.length === 0) return { kind: 'none' };

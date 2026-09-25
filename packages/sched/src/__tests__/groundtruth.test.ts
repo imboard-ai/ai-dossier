@@ -1313,6 +1313,77 @@ describe('parseIssueCloseTruthJson (#768)', () => {
     ).toBeNull();
   });
 
+  it("#799: reads the last reopen time and each closing reference's mergedAt", () => {
+    const parsed = parseIssueCloseTruthJson(
+      wrap({
+        state: 'CLOSED',
+        stateReason: 'COMPLETED',
+        closedByPullRequestsReferences: {
+          nodes: [
+            {
+              number: 4255,
+              merged: true,
+              mergedAt: '2026-09-10T10:00:00Z',
+              baseRefName: 'main',
+              repository: { nameWithOwner: 'imboard-ai/imboard-monorepo' },
+            },
+            { number: 4260, merged: false, mergedAt: null, baseRefName: 'main' },
+          ],
+        },
+        reopens: { nodes: [{ createdAt: '2026-09-11T10:00:00Z' }] },
+        timelineItems: { nodes: [{ closer: null }] },
+      })
+    );
+    expect(parsed?.lastReopenedAt).toBe('2026-09-11T10:00:00Z');
+    expect(parsed?.closingPrs.map((pr) => pr.mergedAt)).toEqual(['2026-09-10T10:00:00Z', null]);
+  });
+
+  it('#799: only a present, empty reopen list reads as never-reopened; anything else is unreadable', () => {
+    const reopenedAt = (reopens: unknown) =>
+      parseIssueCloseTruthJson(wrap({ state: 'CLOSED', stateReason: 'COMPLETED', reopens }))
+        ?.lastReopenedAt;
+    expect(reopenedAt({ nodes: [] })).toBeNull();
+    expect(reopenedAt(undefined)).toBeUndefined();
+    expect(reopenedAt({})).toBeUndefined();
+    expect(reopenedAt({ nodes: [{}] })).toBeUndefined();
+    expect(reopenedAt({ nodes: [null] })).toBeUndefined();
+    expect(reopenedAt({ nodes: [{ createdAt: 'not-a-date' }] })).toBeUndefined();
+    // Loose strings `Date.parse` would accept are not GitHub's format either.
+    expect(reopenedAt({ nodes: [{ createdAt: '1' }] })).toBeUndefined();
+    expect(reopenedAt({ nodes: [{ createdAt: '2026-09-11 10:00:00' }] })).toBeUndefined();
+    expect(reopenedAt({ nodes: [{ createdAt: '2026-09-11T10:00:00.123Z' }] })).toBe(
+      '2026-09-11T10:00:00.123Z'
+    );
+    // An unparseable mergedAt is unreadable (null), never a guessed time.
+    expect(
+      parseIssueCloseTruthJson(
+        wrap({
+          state: 'CLOSED',
+          closedByPullRequestsReferences: {
+            nodes: [{ number: 1, merged: true, mergedAt: 'garbage', baseRefName: 'main' }],
+          },
+        })
+      )?.closingPrs[0]?.mergedAt
+    ).toBeNull();
+  });
+
+  it("#799: the close query asks GitHub for the last REOPENED_EVENT and each reference's mergedAt", () => {
+    let query = '';
+    const gt = createExecGroundTruth(
+      (_cmd, args) => {
+        query ||= args.find((a) => a.startsWith('query=')) ?? '';
+        return null;
+      },
+      { repo: 'o/r' }
+    );
+    gt.issueCloseTruth?.(1);
+    expect(query).toContain('reopens:timelineItems(itemTypes:[REOPENED_EVENT],last:1)');
+    expect(query).toContain('... on ReopenedEvent{createdAt}');
+    expect(query).toMatch(
+      /closedByPullRequestsReferences\([^)]*\)\{nodes\{number merged mergedAt /
+    );
+  });
+
   it('keeps NOT_PLANNED distinct from COMPLETED, and an open issue as OPEN', () => {
     expect(
       parseIssueCloseTruthJson(wrap({ state: 'CLOSED', stateReason: 'NOT_PLANNED' }))?.stateReason
