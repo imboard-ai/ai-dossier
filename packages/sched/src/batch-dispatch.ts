@@ -1818,9 +1818,9 @@ function spawnMemberContinuation(
 /**
  * #832: why the tail must NOT be dispatched over `landed`, or null when it may.
  * The deterministic half of the check the tail agent itself makes before
- * integrating (every member it is told about has a boundary commit on the
- * integration branch) — made here for free instead of by a strong-tier agent
- * that then exits `members-mismatch`. `batch.ranges` is the recorded boundary
+ * integrating (the members it is told about and the members it derives from
+ * the integration branch's boundary commits must agree) — made here for free
+ * instead of by a strong-tier agent that then exits `members-mismatch`. `batch.ranges` is the recorded boundary
  * attribution (recomputed at every landing); when it is empty nothing was
  * attributed, so there is nothing to cross-check.
  */
@@ -1829,7 +1829,14 @@ function tailMembersRefusal(batch: BatchEntry, landed: readonly number[]): strin
   if (batch.ranges.length === 0) return null;
   const attributed = new Set(batch.ranges.map((r) => r.issue));
   const missing = landed.filter((issue) => !attributed.has(issue));
-  return missing.length > 0 ? `members-mismatch:no-boundary-commit-${missing.join(',')}` : null;
+  if (missing.length > 0) return `members-mismatch:no-boundary-commit-${missing.join(',')}`;
+  // The tail derives members from the boundary commits too, and refuses when
+  // the two lists disagree in EITHER direction (review-issue Aggregate Step 1).
+  const landedSet = new Set(landed);
+  const unlanded = [...attributed].filter((issue) => !landedSet.has(issue));
+  return unlanded.length > 0
+    ? `members-mismatch:unlanded-boundary-commit-${unlanded.join(',')}`
+    : null;
 }
 
 /**
