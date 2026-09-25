@@ -3322,7 +3322,13 @@ function prDetectAmbiguousHarness(memberIssue: number, batchId: string, branch: 
   store.withLock(() => ({ state, result: undefined }));
 
   let lookup: MergedPrLookup | undefined;
-  const groundTruth = stubGroundTruth({ mergedPrForBranch: () => lookup });
+  let onLookup: (() => void) | undefined;
+  const groundTruth = stubGroundTruth({
+    mergedPrForBranch: () => {
+      onLookup?.();
+      return lookup;
+    },
+  });
   const deps: BatchDispatchDeps = {
     store,
     journal,
@@ -3359,6 +3365,10 @@ function prDetectAmbiguousHarness(memberIssue: number, batchId: string, branch: 
     store,
     setLookup: (l: MergedPrLookup | undefined) => {
       lookup = l;
+    },
+    /** Run `fn` while the reconcile's GitHub lookup is "in flight" — outside the lock (#824 review). */
+    setOnLookup: (fn: (() => void) | undefined) => {
+      onLookup = fn;
     },
     /** Move the batch to `to` via the real transition rail (a legal `BATCH_TRANSITIONS` edge from its current status) — no reconcile pass runs; only `reconcileStaleBlockedBatches` below observes the change. */
     transitionTo: (to: 'executing' | 'blocked') => {
@@ -3415,6 +3425,25 @@ describe('#789 review: pr-detect-ambiguous is scoped to ONE blocked stretch, lik
     const secondSince = (events[1] as unknown as { since: string }).since;
     expect(secondSince).not.toBe(firstSince);
     expect(h.batch()?.pr_detect_ambiguous_ticks).toBe(1);
+  });
+
+  it('#824 review: an attach that lands during the lookup is not undone — no streak rewritten, no "use attach-pr" line', () => {
+    const h = prDetectAmbiguousHarness(7981, 'b-824-race', 'batch/b-824-race');
+    h.setLookup({ kind: 'ambiguous', matches: [100, 101] });
+    h.setOnLookup(() => {
+      // The operator's `sched attach-pr` commits while gh is answering.
+      h.store.withLock((s) => ({
+        state: patchBatch(s, 'b-824-race', { pr: 100 }),
+        result: undefined,
+      }));
+    });
+
+    h.reconcile();
+
+    expect(h.batch()?.pr).toBe(100);
+    expect(h.batch()?.pr_detect_ambiguous_reason).toBeNull();
+    expect(h.batch()?.pr_detect_ambiguous_ticks).toBe(0);
+    expect(h.journal.read().filter((e) => e.event === 'pr-detect-ambiguous')).toHaveLength(0);
   });
 });
 

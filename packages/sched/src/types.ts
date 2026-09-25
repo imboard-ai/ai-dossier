@@ -1560,7 +1560,13 @@ export class IllegalTransitionError extends Error {
   }
 }
 
-/** Thrown when an issue, batch, or slot id does not exist in the state. */
+/**
+ * Thrown when an issue, batch, or slot id does not exist in the state — and,
+ * by long-standing use (`resumeLandedBatch`, `abandonBatch`, `stopBatch`,
+ * `attachBatchPr`, ...), when an operator verb REFUSES on a ledger or
+ * evidence precondition. Either way the CLI prints the message verbatim and
+ * exits 1 (`handleKnownError`), so the message must say what to do next.
+ */
 export class SchedNotFoundError extends Error {
   constructor(message: string) {
     super(message);
@@ -2013,8 +2019,13 @@ export interface JournalEvent {
    * `events.jsonl`, never for a decision.
    */
   fence_takeover?: string;
-  /** `pr-attached` (#824): the PR an operator recorded as `batch.pr`. */
+  /**
+   * The PR an event concerns — typed here since #824's `pr-attached` (the PR
+   * an operator recorded as `batch.pr`); batch-dispatch's loosely-typed
+   * writers (`merge-accepted`, `pr-watch-failed`, `stale-failure-reconciled`)
+   * already wrote the same key.
+   */
   pr?: number;
-  /** `pr-attached` (#824): that PR's verified merge time (ISO) — the same key `stale-failure-reconciled` carries. */
+  /** A PR's verified merge time (ISO) — `pr-attached` (#824) and `stale-failure-reconciled`. */
   mergedAt?: string;
 }

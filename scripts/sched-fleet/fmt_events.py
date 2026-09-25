@@ -18,6 +18,8 @@ KEEP = {
     # ran the wrong procedure was re-prompted once.
     "batch-resumed",
     "member-reprompted",
+    # #824: an operator recorded a blocked batch's PR by hand (sched attach-pr).
+    "pr-attached",
 }
 out = []
 for line in sys.stdin:

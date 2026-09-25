@@ -116,7 +116,13 @@ import {
   type EngineStalenessCheck,
   formatEngineStaleWarning,
 } from '../engine-version';
-import { parseGhJson, requireRepoSlug, tryFetchComments, tryFetchLabels } from '../gh';
+import {
+  isIssueNumber,
+  parseGhJson,
+  requireRepoSlug,
+  tryFetchComments,
+  tryFetchLabels,
+} from '../gh';
 import { pickHardBlockLabel } from '../hard-block-labels';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
@@ -1960,6 +1966,9 @@ function registerRequeueSubcommand(cmd: Command): void {
     });
 }
 
+/** Per-call budget for attach-pr's two reads (repo verification, `gh pr view`) — an operator command must not hang on gh. */
+const ATTACH_PR_READ_TIMEOUT_MS = 10_000;
+
 interface AttachPrOptions extends SchedOptions {
   batch: string;
 }
@@ -1983,12 +1992,13 @@ function registerAttachPrSubcommand(cmd: Command): void {
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output the result as JSON')
     .action((prArg: string, opts: AttachPrOptions) => {
-      const pr = /^#?\d+$/.test(prArg) ? Number(prArg.replace(/^#/, '')) : Number.NaN;
-      if (!Number.isSafeInteger(pr) || pr <= 0) {
-        fail([`<pr> must be a pull request number, got '${prArg}'`]);
+      const prDigits = prArg.replace(/^#/, '');
+      if (!isIssueNumber(prDigits)) {
+        fail([`<pr> must be a pull request number (e.g. 4270 or #4270), got '${prArg}'`]);
       }
+      const pr = Number(prDigits);
       const { store, project } = resolveStore(opts);
-      const exec = labelledExecFn('sched attach-pr', ANCHOR_SWEEP_TIMEOUT_MS);
+      const exec = labelledExecFn('sched attach-pr', ATTACH_PR_READ_TIMEOUT_MS);
       const repo = resolveProjectRepo(project, exec);
       if (repo === null) {
         fail([
@@ -2001,6 +2011,7 @@ function registerAttachPrSubcommand(cmd: Command): void {
             store,
             journal: new Journal(store.dir),
             groundTruth: createExecGroundTruth(exec, { repoDir: process.cwd(), repo }),
+            repo,
           },
           opts.batch,
           pr
@@ -2018,7 +2029,7 @@ function registerAttachPrSubcommand(cmd: Command): void {
             (result.clearedAmbiguousTicks > 0
               ? `; cleared the pr-detect-ambiguous streak (${result.clearedAmbiguousTicks} tick(s))`
               : '') +
-            ' — the next engine tick reconciles the batch on pr-merged evidence (report + teardown follow); the anchor is left to its own evidence-gated close'
+            ' — the next engine tick (`sched start`, the tick cron, or a one-off `sched start --once`) reconciles the batch on pr-merged evidence, then report + teardown follow; the anchor is left to its own evidence-gated close'
         );
       } catch (err) {
         handleKnownError(err);

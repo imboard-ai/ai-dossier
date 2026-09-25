@@ -3,14 +3,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
-import {
-  enqueueEntries,
-  patchBatch,
-  SchedStore,
-  transitionBatch,
-  transitionIssue,
-} from '@ai-dossier/sched';
+import { patchBatch, SchedStore } from '@ai-dossier/sched';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { withBlockedBatch } from '../../../../packages/sched/src/__tests__/helpers/blocked-batch';
 import { graphqlIssueResponse } from '../../../../packages/sched/src/__tests__/helpers/graphql-fixtures';
 import { registerSchedCommand } from '../../commands/sched';
 import { checkEngineStaleness } from '../../engine-version';
@@ -2326,14 +2321,8 @@ describe('#824: sched attach-pr', () => {
     const store = new SchedStore(path.join(home, '.dossier', 'sched', 'test-proj'));
     const at = new Date('2026-09-25T00:00:00.000Z');
     store.withLock((s0) => {
-      let s = enqueueEntries(s0, [{ issue: 11, mode: 'slot', batch: 'b824', anchor: 10 }], at);
-      for (const to of ['classified', 'batched', 'waiting', 'in-work', 'committed'] as const) {
-        s = transitionIssue(s, 11, to, {}, at);
-      }
-      s = transitionBatch(s, 'b824', 'executing', { branch: BRANCH, base_branch: 'main' }, at);
-      s = transitionBatch(s, 'b824', 'blocked', { blocked_reason: 'gate-inconclusive:x' }, at);
-      s = patchBatch(
-        s,
+      const s = patchBatch(
+        withBlockedBatch(s0, { batchId: 'b824', member: 11, anchor: 10, branch: BRANCH, at }),
         'b824',
         {
           pr_detect_ambiguous_reason: 'ambiguous-merged-pr',

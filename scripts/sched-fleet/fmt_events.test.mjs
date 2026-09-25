@@ -53,6 +53,13 @@ describe('fmt_events.py', () => {
     ]);
   });
 
+  it('#824: keeps an operator attach-pr, naming the PR', () => {
+    const out = run([
+      { event: 'pr-attached', unit: 'batch:b1', pr: 4270, detail: 'operator attached o/r#4270' },
+    ]);
+    expect(out.trim()).toBe('pr-attached batch:b1 PR#4270');
+  });
+
   it('reports a missing dispatch profile with its batch and detail', () => {
     const out = run([
       {

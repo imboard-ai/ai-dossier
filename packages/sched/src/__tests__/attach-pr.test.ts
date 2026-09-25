@@ -11,18 +11,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { attachBatchPr } from '../attach-pr';
-import { enqueueEntries } from '../enqueue';
-import { createExecGroundTruth, type ExecFn, type GroundTruth } from '../groundtruth';
+import { createExecGroundTruth, type GroundTruth } from '../groundtruth';
 import { Journal } from '../journal';
 import { SchedStore } from '../persist';
-import {
-  findBatch,
-  PR_DETECT_AMBIGUOUS_REASON,
-  patchBatch,
-  transitionBatch,
-  transitionIssue,
-} from '../state';
+import { findBatch, PR_DETECT_AMBIGUOUS_REASON, patchBatch, transitionBatch } from '../state';
+import { withBlockedBatch } from './helpers/blocked-batch';
 import { stubGroundTruth } from './helpers/ground-truth';
+import { recording, recordingReturns } from './helpers/recording-exec';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -37,33 +32,22 @@ const MERGED_AT = '2026-09-25T03:00:00Z';
 const CREATED_AT = '2026-09-25T01:00:00Z';
 
 /** A store holding one `blocked` batch (branch recorded, pr null) with a live ambiguity streak. */
-function blockedStore(opts: { status?: 'blocked' | 'executing'; pr?: number | null } = {}) {
+function blockedStore(
+  opts: { status?: 'blocked' | 'executing'; pr?: number | null; undispatched?: number[] } = {}
+) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-attach-pr-'));
   dirs.push(dir);
   const store = new SchedStore(dir);
-  let state = enqueueEntries(
-    store.load(),
-    [{ issue: 8241, mode: 'slot', batch: BATCH, anchor: 8240 }],
-    SETUP_AT
-  );
-  for (const to of ['classified', 'batched', 'waiting', 'in-work', 'committed'] as const) {
-    state = transitionIssue(state, 8241, to, {}, SETUP_AT);
-  }
-  state = transitionBatch(
-    state,
-    BATCH,
-    'executing',
-    { branch: BRANCH, base_branch: 'main' },
-    SETUP_AT
-  );
-  if ((opts.status ?? 'blocked') === 'blocked') {
-    state = transitionBatch(
-      state,
-      BATCH,
-      'blocked',
-      { blocked_reason: 'gate-inconclusive:test.focused' },
-      SETUP_AT
-    );
+  let state = withBlockedBatch(store.load(), {
+    batchId: BATCH,
+    member: 8241,
+    anchor: 8240,
+    branch: BRANCH,
+    at: SETUP_AT,
+    undispatched: opts.undispatched,
+  });
+  if (opts.status === 'executing') {
+    state = transitionBatch(state, BATCH, 'executing', { blocked_reason: null }, SETUP_AT);
   }
   state = patchBatch(
     state,
@@ -249,8 +233,38 @@ describe('attachBatchPr (#824): every refusal records nothing and journals nothi
     const before = snapshot(store, journal);
     expect(() =>
       attachBatchPr({ store, journal, groundTruth: truthWith(undefined) }, BATCH, 4270, NOW)
-    ).toThrow(/could not read the PR from GitHub/);
+    ).toThrow(/could not read it from the project repository/);
     expect(snapshot(store, journal)).toEqual(before);
+  });
+
+  it('names the verified repo and the exact gh command when the read fails', () => {
+    const { store, journal } = blockedStore();
+    expect(() =>
+      attachBatchPr(
+        { store, journal, groundTruth: truthWith(undefined), repo: 'imboard-ai/imboard' },
+        BATCH,
+        4270,
+        NOW
+      )
+    ).toThrow(/`gh pr view 4270 -R imboard-ai\/imboard` failed/);
+  });
+
+  it('refuses a batch with a surviving member that was never dispatched — the reconcile would never act on the PR', () => {
+    const { store, journal } = blockedStore({ undispatched: [8242] });
+    expect(findBatch(store.load(), BATCH)?.members).toContain(8242);
+    const before = snapshot(store, journal);
+    let read = 0;
+    const groundTruth = stubGroundTruth({
+      batchPrCandidate: () => {
+        read++;
+        return goodPr();
+      },
+    });
+    expect(() => attachBatchPr({ store, journal, groundTruth }, BATCH, 4270, NOW)).toThrow(
+      /member\(s\) #8242 that were never dispatched/
+    );
+    expect(snapshot(store, journal)).toEqual(before);
+    expect(read).toBe(0);
   });
 
   it('refuses a different PR when batch.pr is already set', () => {
@@ -339,6 +353,24 @@ describe('attachBatchPr (#824): every refusal records nothing and journals nothi
     expect(findBatch(store.load(), BATCH)?.pr).toBeNull();
     expect(journal.read()).toHaveLength(0);
   });
+
+  it('re-runs the candidate checks under the lock: a batch whose branch changed during the GitHub read is refused', () => {
+    const { store, journal } = blockedStore();
+    const groundTruth = stubGroundTruth({
+      batchPrCandidate: () => {
+        store.withLock((s) => ({
+          state: patchBatch(s, BATCH, { branch: 'batch/b-824-01-rebuilt' }, NOW, false),
+          result: undefined,
+        }));
+        return goodPr();
+      },
+    });
+    expect(() => attachBatchPr({ store, journal, groundTruth }, BATCH, 4270, NOW)).toThrow(
+      /not the batch branch "batch\/b-824-01-rebuilt"/
+    );
+    expect(findBatch(store.load(), BATCH)?.pr).toBeNull();
+    expect(journal.read()).toHaveLength(0);
+  });
 });
 
 describe('createExecGroundTruth.batchPrCandidate (#824)', () => {
@@ -350,21 +382,30 @@ describe('createExecGroundTruth.batchPrCandidate (#824)', () => {
   });
 
   it('pins every read with -R <owner/name> and asks for the fields the checks need', () => {
-    const calls: Array<{ file: string; args: string[] }> = [];
-    const exec: ExecFn = (file, args) => {
-      calls.push({ file, args });
-      return JSON.stringify(goodPr());
-    };
-    const gt = createExecGroundTruth(exec, { repo: 'imboard-ai/imboard' });
+    const rec = recordingReturns(JSON.stringify(goodPr()));
+    const gt = createExecGroundTruth(rec.exec, { repo: 'imboard-ai/imboard' });
     expect(gt.batchPrCandidate?.(4270)).toEqual(goodPr());
-    expect(calls).toHaveLength(1);
-    const { file, args } = calls[0];
+    expect(rec.calls).toHaveLength(1);
+    const { file, args } = rec.calls[0];
     expect(file).toBe('gh');
     expect(args.slice(0, 3)).toEqual(['pr', 'view', '4270']);
     expect(args[args.indexOf('-R') + 1]).toBe('imboard-ai/imboard');
     expect(args[args.indexOf('--json') + 1]).toBe(
-      'number,state,headRefName,baseRefName,isCrossRepository,mergedAt,createdAt'
+      'state,number,headRefName,baseRefName,isCrossRepository,mergedAt,createdAt'
     );
+  });
+
+  it('prState — the read that settles an attached PR — is pinned with -R too when the repo is verified', () => {
+    const payload = JSON.stringify({ state: 'MERGED', mergedAt: MERGED_AT });
+    const pinned = recordingReturns(payload);
+    createExecGroundTruth(pinned.exec, { repo: 'imboard-ai/imboard' }).prState(4270);
+    expect(pinned.calls[0]?.args[pinned.calls[0].args.indexOf('-R') + 1]).toBe(
+      'imboard-ai/imboard'
+    );
+    // Without a verified repo nothing changes (the pre-#824 cwd-resolved read).
+    const unpinned = recordingReturns(payload);
+    createExecGroundTruth(unpinned.exec).prState(4270);
+    expect(unpinned.calls[0]?.args).not.toContain('-R');
   });
 
   it('a failed gh call or a non-object payload is unreadable (undefined)', () => {
@@ -380,16 +421,10 @@ describe('createExecGroundTruth.batchPrCandidate (#824)', () => {
   });
 
   it('never runs gh for a non-positive PR number', () => {
-    let calls = 0;
-    const gt = createExecGroundTruth(
-      () => {
-        calls++;
-        return '{}';
-      },
-      { repo: 'o/r' }
-    );
+    const rec = recording(() => '{}');
+    const gt = createExecGroundTruth(rec.exec, { repo: 'o/r' });
     expect(gt.batchPrCandidate?.(0)).toBeUndefined();
     expect(gt.batchPrCandidate?.(-3)).toBeUndefined();
-    expect(calls).toBe(0);
+    expect(rec.calls).toHaveLength(0);
   });
 });

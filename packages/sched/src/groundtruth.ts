@@ -354,6 +354,7 @@ export function createExecGroundTruth(
   } = {}
 ): GroundTruth {
   const runstateBin = opts.runstateBin ?? 'ai-dossier';
+  const repo = opts.repo !== undefined ? parseRepoName(opts.repo) : null;
   const truth: GroundTruth = {
     latestMilestone(issue: number): GroundTruthMilestone | null | undefined {
       const out = exec(
@@ -391,9 +392,20 @@ export function createExecGroundTruth(
       return sha && /^[0-9a-f]{40}$/i.test(sha) ? sha : null;
     },
     prState(pr: number): PrTruth | undefined {
+      // #824 review: pinned with -R when the repo is verified — an operator-
+      // attached `batch.pr` (`sched attach-pr`) is settled on THIS read, so it
+      // must name the same repository the attach verified the PR against, not
+      // whatever gh resolves the cwd to.
       const out = exec(
         'gh',
-        ['pr', 'view', String(pr), '--json', 'state,mergedAt,mergeable,labels'],
+        [
+          'pr',
+          'view',
+          String(pr),
+          ...(repo !== null ? ['-R', `${repo.owner}/${repo.name}`] : []),
+          '--json',
+          'state,mergedAt,mergeable,labels',
+        ],
         opts.repoDir
       );
       if (out === null) return undefined; // poll failed — unreachable
@@ -440,7 +452,6 @@ export function createExecGroundTruth(
       return parseIssueLabelsJson(out);
     },
   };
-  const repo = opts.repo !== undefined ? parseRepoName(opts.repo) : null;
   if (repo !== null) {
     truth.issueCloseTruth = (issue: number): IssueCloseTruth | undefined => {
       const out = exec(
@@ -500,7 +511,7 @@ export function createExecGroundTruth(
           '--state',
           'merged',
           '--json',
-          'number,headRefName,baseRefName,isCrossRepository,mergedAt,createdAt',
+          BATCH_PR_FIELDS,
         ],
         opts.repoDir
       );
@@ -518,7 +529,7 @@ export function createExecGroundTruth(
           '-R',
           `${repo.owner}/${repo.name}`,
           '--json',
-          'number,state,headRefName,baseRefName,isCrossRepository,mergedAt,createdAt',
+          `state,${BATCH_PR_FIELDS}`,
         ],
         opts.repoDir
       );
@@ -527,6 +538,13 @@ export function createExecGroundTruth(
   }
   return truth;
 }
+
+/**
+ * The PR fields {@link checkBatchPrCandidate} reads — requested by both
+ * `mergedPrForBranch` (#789) and `batchPrCandidate` (#824, which adds `state`),
+ * so the two reads can never ask for different evidence.
+ */
+const BATCH_PR_FIELDS = 'number,headRefName,baseRefName,isCrossRepository,mergedAt,createdAt';
 
 /** An `owner/name` GitHub repository reference — the only shape `-R` and the GraphQL read accept here. */
 const REPO_NAME_RE = /^([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+)$/;
@@ -830,12 +848,16 @@ export type BatchPrCandidateVerdict =
 
 /**
  * Check one `gh pr list`/`gh pr view` PR object against a batch (#789, shared
- * with #824). Every check is POSITIVE evidence — a field missing or malformed
- * fails it, never defaults it in:
+ * with #824). Every check but the fork flag is POSITIVE evidence — a field
+ * missing or malformed fails it, never defaults it in:
  *
  * - not from a fork (`isCrossRepository !== true`, the same convention
  *   {@link parseOpenPrListJson} uses — `-R` already pins the base repository,
- *   so this is what tells a same-named fork PR apart from ours);
+ *   so this is what tells a same-named fork PR apart from ours). The ONE
+ *   exception to positive evidence: an ABSENT flag reads as same-repo (the
+ *   #789 `gh pr list` convention). A caller that needs the flag read
+ *   positively must also require `isCrossRepository === false` itself, as
+ *   `attachBatchPr` does;
  * - `headRefName`/`baseRefName` match exactly (belt-and-suspenders on top of
  *   `--head`/`--base`, which the parser has no way to confirm gh actually
  *   applied);
