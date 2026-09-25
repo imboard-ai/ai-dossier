@@ -326,6 +326,21 @@ describe('batch amortization (#775)', () => {
     expect(journal.members).toEqual([81]);
   });
 
+  it('#844: kill and crash-recovery events name members, and a recovered eviction counts even without its unit-failed', () => {
+    const journal = summarizeBatchJournal(
+      [
+        { event: 'member-stop-requested', unit: 'batch:b10', issue: 101 },
+        { event: 'kill-escalated', unit: 'batch:b10', issue: 101 },
+        { event: 'member-advance-recovered', unit: 'batch:b10', issue: 102, kind: 'evicted' },
+        { event: 'member-advance-recovered', unit: 'batch:b10', issue: 103, kind: 'handed-back' },
+      ],
+      'b10'
+    );
+    expect(journal.members).toEqual([101, 102, 103]);
+    expect(journal.evicted).toEqual([102]);
+    expect(journal.handedBack).toEqual([103]);
+  });
+
   it('#810: a member hand-back is counted apart from evictions and never as landed', () => {
     const journal = summarizeBatchJournal(
       [

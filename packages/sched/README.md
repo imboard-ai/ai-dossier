@@ -1097,9 +1097,11 @@ hand-back shape (`blocked`, `review partial`) never counts: it keeps its own pat
 member rails then:
 
 - stop a live agent and wait for it to be gone before anything else (a dying full-cycle run
-  could still push, post or open a PR in that worktree). The first sight sends SIGTERM and
-  stamps `SlotEntry.kill_sent_at`; an agent still alive `KILL_ESCALATION_MS` (120 s) later
-  is sent SIGKILL — to its process group, since every agent is spawned detached — and
+  could still push, post or open a PR in that worktree). The first sight sends SIGTERM
+  (re-sent each tick), stamps `SlotEntry.kill_sent_at` and journals `member-stop-requested`
+  once; an agent still alive `KILL_ESCALATION_MS` (120 s) later
+  is sent SIGKILL — to its process group when its recorded start time confirms its identity
+  (every agent is spawned detached, so it leads one), else to the pid alone — and
   `kill-escalated` is journaled once (#844). Pre-#844 an agent ignoring SIGTERM held its
   member here indefinitely;
 - if the milestone shows the run already SHIPPED (a `ship`/`report` phase or a `pr=` key —
@@ -1122,8 +1124,11 @@ appends its `evictions[]` record. Pre-#844 the release was its own earlier write
 engine exit between the two left the member in-work with no slot: the serial wedge arm or
 `spawnParallelMembers` then dispatched it once more, with no eviction in the journal. An exit
 AFTER the combined write but before the serial advance is recovered too: the wedge arm finds
-the current member already in `evictions[]`, journals `member-advance-recovered`, and
-advances instead of respawning it.
+the current member already in `evictions[]`, journals `member-advance-recovered` (carrying the
+record's `reason`/`kind`, since the exit may have beaten the `unit-failed` line), and finishes
+what the eviction would have done — the dissolve its threshold tripped, or the advance —
+instead of respawning it. The same one-write rule covers the parallel run's `evicted` status
+and `sched resume --batch`'s `blocked → executing` transition before a recheck eviction.
 
 ## API surface
 
@@ -1153,6 +1158,10 @@ import {
                          //   truth/clock/repoDir/teardownExec/fencer/batchExec/runBatchSuite/
                          //   runBatchCapability — #523)
   createSpawnDeps,       // real detached-spawn process I/O
+  KILL_ESCALATION_MS,    // #844: SIGTERM → SIGKILL bound (120 s) for an agent the batch
+                         //   wrong-procedure wait is stopping
+  type KillSignal,       // #844: 'SIGTERM' | 'SIGKILL' — SpawnDeps.kill's optional 3rd arg
+                         //   (SIGKILL targets the agent's process group on confirmed identity)
   createExecGroundTruth, // runstate/gh/git ground truth via subprocesses (injectable exec);
                          //   since #468 also gh pr view PR state + setup info from comments;
                          //   since #789 also mergedPrForBranch, and since #824

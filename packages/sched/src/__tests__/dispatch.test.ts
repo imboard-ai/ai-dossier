@@ -539,6 +539,82 @@ describe('createSpawnDeps (real processes)', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }, 10_000);
+
+  it('#844: never signals (nor reports alive) pid 0, 1, a negative pid, or the engine itself', async () => {
+    const { createSpawnDeps } = await import('../index');
+    const deps = createSpawnDeps();
+    for (const pid of [0, 1, -5, process.pid]) {
+      expect(deps.isAlive(pid)).toBe(false);
+      expect(deps.kill(pid, undefined, 'SIGKILL')).toBe(false);
+    }
+  });
+
+  it.runIf(process.platform === 'linux')(
+    '#844: SIGKILL reaches the whole process group of a confirmed agent — a SIGTERM-ignoring child dies with it',
+    async () => {
+      const { createSpawnDeps } = await import('../index');
+      const os = await import('node:os');
+      const fs = await import('node:fs');
+      const path = await import('node:path');
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-spawn-'));
+      const deps = createSpawnDeps();
+      const childPidFile = path.join(dir, 'child.pid');
+      const fixture = path.join(dir, 'leader.mjs');
+      // The leader spawns a (non-detached, so same-group) child that ignores
+      // SIGTERM, records its pid, and both idle until killed.
+      fs.writeFileSync(
+        fixture,
+        [
+          "import { spawn } from 'node:child_process';",
+          "import fs from 'node:fs';",
+          "process.on('SIGTERM', () => {});",
+          "const child = spawn(process.execPath, ['-e', \"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);\"], { stdio: 'ignore' });",
+          `fs.writeFileSync(${JSON.stringify(childPidFile)}, String(child.pid));`,
+          'setInterval(() => {}, 1000);',
+          'setTimeout(() => process.exit(0), 30000);',
+        ].join('\n')
+      );
+      const pid = deps.spawn(['node', fixture], '', path.join(dir, 'log'));
+      let childPid: number | null = null;
+      try {
+        const deadline = Date.now() + 5_000;
+        while (!fs.existsSync(childPidFile) && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        childPid = Number(fs.readFileSync(childPidFile, 'utf8'));
+        const start = deps.processStart(pid) as number;
+        expect(deps.kill(pid, start, 'SIGTERM')).toBe(true);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(deps.isAlive(pid)).toBe(true); // SIGTERM ignored
+
+        expect(deps.kill(pid, start, 'SIGKILL')).toBe(true);
+        const dead = Date.now() + 5_000;
+        const childAlive = () => {
+          try {
+            process.kill(childPid as number, 0);
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        while ((deps.isAlive(pid) || childAlive()) && Date.now() < dead) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(deps.isAlive(pid)).toBe(false);
+        expect(childAlive()).toBe(false);
+      } finally {
+        for (const p of [pid, childPid]) {
+          try {
+            if (p !== null) process.kill(p, 'SIGKILL');
+          } catch {
+            // already dead
+          }
+        }
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    15_000
+  );
 });
 
 // --- #468: report dispatch ---

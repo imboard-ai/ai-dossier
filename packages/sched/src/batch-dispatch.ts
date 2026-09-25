@@ -375,10 +375,20 @@ function journalEvent(
   deps.journal.append(unitEvent(event, unitId, extra), deps.now());
 }
 
-/** Stop the slot's agent if it is still alive (pid-start-safe: a reused pid is never signalled). */
+/** Whether the slot's agent is still alive (pid-start-safe: a reused pid reads dead). */
+function agentAlive(deps: BatchDispatchDeps, slot: SlotEntry): boolean {
+  return slot.pid !== null && deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined);
+}
+
+/**
+ * Stop the slot's agent if it is still alive (pid-start-safe: a reused pid is
+ * never signalled). SIGTERM only — no wait, no escalation. A decision that
+ * must not run alongside the agent uses `stopAgentBeforeDeciding` instead,
+ * which escalates to SIGKILL (#844).
+ */
 function killLiveAgent(deps: BatchDispatchDeps, slot: SlotEntry): void {
-  if (slot.pid !== null && deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
-    deps.spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
+  if (agentAlive(deps, slot)) {
+    deps.spawnDeps.kill(slot.pid as number, slot.pid_start ?? undefined);
   }
 }
 
@@ -1810,6 +1820,9 @@ function spawnMemberContinuation(
   // contract `prepareMemberWorktree` documents). The wedge arm of
   // `runBatchTick` calls this EVERY tick while the batch is `executing`
   // with no slot, so the cheap gates run first:
+  // - recovery (#844): a current member already in `evictions[]` is advanced
+  //   past, never respawned — checked before capacity, since the advance
+  //   needs no slot.
   // - capacity: prep before the free-capacity check would do pool/git/npm
   //   work (and journal) per tick against a full scheduler — the #610/#630/
   //   #632 per-tick emission trap. `claimAndSpawn` re-checks under the lock;
@@ -1824,14 +1837,36 @@ function spawnMemberContinuation(
   if (!batch || batch.status !== 'executing' || batch.worktree === null) return;
   const memberIssue = batch.members[batch.executing_member - 1];
   if (memberIssue === undefined) return;
-  if (batch.evictions.some((e) => e.issue === memberIssue)) {
+  const evicted = batch.evictions.find((e) => e.issue === memberIssue);
+  if (evicted !== undefined) {
     // #844: the member's eviction (and its slot release, in the same write)
-    // landed, but the engine died before advancing past it. Respawning it
-    // would dispatch an evicted member again — finish the advance instead.
+    // landed, but the engine died before advancing past it — possibly before
+    // journaling its cause, too, so the record's cause goes on this line.
+    // Respawning it would dispatch an evicted member again — finish what the
+    // eviction would have done instead: the dissolve its threshold tripped,
+    // or the advance.
+    const kind = evicted.kind ?? 'evicted';
     journalEvent(deps, 'member-advance-recovered', unit(batchId), {
       issue: memberIssue,
-      detail: `member ${batch.executing_member} is already evicted but the batch never advanced past it (engine exit mid-eviction) — advancing instead of respawning it`,
+      reason: evicted.reason,
+      kind,
+      evicted_at: evicted.at,
+      detail: `member ${batch.executing_member} is already parked ${kind} (${evicted.reason}) but the batch never advanced past it (engine exit mid-eviction) — continuing instead of respawning it`,
     });
+    if (
+      checkDissolveTrigger(batch, resolveDissolvePolicy(config.dissolve_policy)) &&
+      settleEvictionThreshold(
+        deps,
+        config,
+        batchId,
+        memberIssue,
+        validatedMembersOf(state, batch),
+        now
+      )
+    ) {
+      result.failed.push(unit(batchId));
+      return;
+    }
     continuePastEvictedMember(deps, config, dispatch, batchId, batch, memberIssue, now, result);
     return;
   }
@@ -2455,8 +2490,14 @@ function advanceMemberOrValidate(
 
 /**
  * Evict the current member and either dissolve, or continue the batch via
- * `advanceMemberOrValidate` — the shared tail of both member-failure rails
- * (self-reported blocked, and the incremental gate below).
+ * `advanceMemberOrValidate` — the shared tail of the serial member-failure
+ * rails (dead/blocked, the incremental gate below, the wrong-procedure
+ * evictions, and `sched resume --batch`'s recheck).
+ *
+ * #844: a caller whose member still holds its slot MUST pass its release as
+ * `preWrite` — never release under a separate lock first. `evictMemberDirectly` commits
+ * the release with the park/eviction record in one write, so an engine exit
+ * cannot leave the member slotless and un-evicted (and so respawned).
  *
  * #613: `evictMemberDirectly`'s duplicate check (#595) is the one atomic,
  * lock-protected claim on "did THIS member's eviction already happen" — so
@@ -2488,8 +2529,8 @@ export function evictMemberAndContinue(
   failure: MemberFailure,
   now: Date,
   result: BatchTickResult,
-  /** #844: the member's slot release — committed in the eviction's own write. */
-  release?: (s: SchedState) => SchedState
+  /** #844: the member's slot release (or any pre-write) — committed in the eviction's own write. */
+  preWrite?: (s: SchedState) => SchedState
 ): void {
   const { batchEnded, duplicate } = evictMemberDirectly(
     deps,
@@ -2498,7 +2539,7 @@ export function evictMemberAndContinue(
     memberIssue,
     failure,
     now,
-    release
+    preWrite
   );
   if (duplicate) return;
   if (batchEnded) {
@@ -2585,7 +2626,9 @@ function runIncrementalGate(
   batch: BatchEntry,
   memberIssue: number,
   now: Date,
-  result: BatchTickResult
+  result: BatchTickResult,
+  /** The member's slot release — handed to the eviction on `failed` (#844). */
+  release: (s: SchedState) => SchedState
 ): boolean {
   if (batch.worktree === null || !deps.runCapability) return false;
   // #677: the gate judges the member's OWN work — pre-landing, its diff
@@ -2606,11 +2649,11 @@ function runIncrementalGate(
       { reason: verdict.reason, detail: verdict.detail },
       now,
       result,
-      (s) => releaseSlot(s, batchId, now)
+      release
     );
     return true;
   }
-  deps.store.withLock((s) => ({ state: releaseSlot(s, batchId, now), result: undefined }));
+  deps.store.withLock((s) => ({ state: release(s), result: undefined }));
   // #677: F.11's block semantics are "the member's commit stays on the
   // branch, nothing requeued/reverted" — under member worktrees that is
   // true only if the member LANDS before the batch blocks. The block means
@@ -3037,15 +3080,13 @@ export function resumeBlockedGate(
     };
   }
 
-  deps.store.withLock((s) => ({
-    state: patchBatch(
+  const unblock = (s: SchedState): SchedState =>
+    patchBatch(
       transitionBatch(s, batchId, 'executing', {}, now),
       batchId,
       { blocked_reason: null },
       now
-    ),
-    result: undefined,
-  }));
+    );
 
   if (recheck.outcome === 'task-failed') {
     const reason = `incremental-gate-failed:${capabilityId}`;
@@ -3065,10 +3106,16 @@ export function resumeBlockedGate(
         ),
       },
       now,
-      result
+      result,
+      // #844: the unblock commits with the eviction — two writes left a
+      // slotless `executing` batch whose un-evicted member the wedge arm
+      // then respawned.
+      unblock
     );
     return { outcome: 'evicted', capability: capabilityId, detail: excerpt };
   }
+
+  deps.store.withLock((s) => ({ state: unblock(s), result: undefined }));
 
   journalEvent(deps, 'external-advance', unit(batchId), {
     issue: memberIssue,
@@ -3319,13 +3366,20 @@ function wrongProcedureCounts(
 /**
  * A kill timestamp that belongs to the slot's CURRENT dispatch, or null
  * (#844): one stamped before `spawned_at` was for an earlier dispatch in the
- * same slot, and an unparseable one is no anchor at all.
+ * same slot, and an unparseable or future one is no anchor at all.
  */
-function currentDispatchStamp(stamp: string | null, spawnedAt: string | null): string | null {
+function currentDispatchStamp(
+  stamp: string | null,
+  spawnedAt: string | null,
+  now: Date
+): string | null {
   if (stamp === null) return null;
   const at = Date.parse(stamp);
   if (Number.isNaN(at)) return null;
   if (spawnedAt !== null && at < Date.parse(spawnedAt)) return null;
+  // A future stamp (clock step, hand edit) would make the elapsed time
+  // negative and switch the escalation off for good — re-stamp instead.
+  if (at > now.getTime()) return null;
   return stamp;
 }
 
@@ -3334,7 +3388,8 @@ function currentDispatchStamp(stamp: string | null, spawnedAt: string | null): s
  * (#844). Returns `true` while it is still alive — the caller waits and
  * decides on a later tick — and `false` once it is gone (or never had a pid).
  *
- * The first sight sends SIGTERM and stamps `kill_sent_at`; each later tick
+ * The first sight sends SIGTERM, stamps `kill_sent_at` and journals
+ * `member-stop-requested` once; each later tick
  * re-sends SIGTERM until the agent has outlived it by `KILL_ESCALATION_MS`,
  * then sends SIGKILL (to its process group — `SpawnDeps.kill`) and journals
  * `kill-escalated` once (`kill_escalated_at`). Pre-#844 this path re-sent
@@ -3347,15 +3402,17 @@ function stopAgentBeforeDeciding(
   slot: SlotEntry,
   now: Date
 ): boolean {
-  const { pid } = slot;
+  if (!agentAlive(deps, slot)) return false;
+  const pid = slot.pid as number;
   const pidStart = slot.pid_start ?? undefined;
-  if (pid === null || !deps.spawnDeps.isAlive(pid, pidStart)) return false;
-  const sentAt = currentDispatchStamp(slot.kill_sent_at, slot.spawned_at);
+  const sentAt = currentDispatchStamp(slot.kill_sent_at, slot.spawned_at, now);
   const aliveForMs = sentAt === null ? 0 : now.getTime() - Date.parse(sentAt);
   const escalate = sentAt !== null && aliveForMs >= KILL_ESCALATION_MS;
-  deps.spawnDeps.kill(pid, pidStart, escalate ? 'SIGKILL' : 'SIGTERM');
+  // `kill` refuses a pid whose recorded identity no longer matches (reused by
+  // another process): the agent we spawned is gone, so stop waiting on it.
+  if (!deps.spawnDeps.kill(pid, pidStart, escalate ? 'SIGKILL' : 'SIGTERM')) return false;
   const firstEscalation =
-    escalate && currentDispatchStamp(slot.kill_escalated_at, slot.spawned_at) === null;
+    escalate && currentDispatchStamp(slot.kill_escalated_at, slot.spawned_at, now) === null;
   if (sentAt === null || firstEscalation) {
     deps.store.withLock((s) => {
       const live = s.slots.find((x) => x.id === slot.id);
@@ -3377,12 +3434,20 @@ function stopAgentBeforeDeciding(
       };
     });
   }
+  if (sentAt === null) {
+    journalEvent(deps, 'member-stop-requested', unit(batchId), {
+      issue: memberIssue,
+      pid,
+      slot: slot.id,
+      detail: `SIGTERM sent — waiting for the agent to exit before deciding (SIGKILL after ${KILL_ESCALATION_MS / 1000}s)`,
+    });
+  }
   if (firstEscalation) {
     journalEvent(deps, 'kill-escalated', unit(batchId), {
       issue: memberIssue,
       pid,
       slot: slot.id,
-      detail: `agent still alive ${Math.round(aliveForMs / 1000)}s after SIGTERM (bound ${KILL_ESCALATION_MS / 1000}s) — sent SIGKILL to its process group`,
+      detail: `agent still alive ${Math.round(aliveForMs / 1000)}s after SIGTERM (bound ${KILL_ESCALATION_MS / 1000}s) — sent SIGKILL (to its process group where available)`,
     });
   }
   return true;
@@ -3397,7 +3462,10 @@ function stopAgentBeforeDeciding(
  * `reprompted_members` — the wedge arm (serial) or `spawnParallelMembers`
  * (parallel) respawns it in place, in the same worktree, with
  * `wrongProcedureDirective` appended. Returns `'evict'` when the member was
- * already re-prompted once: the caller evicts it `wrong-procedure`.
+ * already re-prompted once: the caller evicts it `wrong-procedure`. On
+ * `'evict'` the slot is NOT released here — the caller passes `release` to
+ * `evictMemberAndContinue`/`evictParallelMember`, which commits it in the
+ * eviction's own write (#844).
  */
 function repromptWrongProcedure(
   deps: BatchDispatchDeps,
@@ -3569,6 +3637,9 @@ function reconcileMemberSlot(
   if (!batch) return;
   const memberIssue = batch.members[batch.executing_member - 1];
   if (memberIssue === undefined) return;
+  // #844: every rail below that evicts hands THIS to the eviction, which
+  // commits it in the same write — never released under a lock of its own.
+  const release = (s: SchedState) => releaseSlot(s, batchId, now);
 
   const read = readMemberDispatch(deps, batchId, memberIssue, slot, now);
   if (read.kind === 'unreachable') return;
@@ -3600,7 +3671,9 @@ function reconcileMemberSlot(
     // gate already decided the member's fate (evicted or blocked) and
     // returned early; `false` means both checks were `ok` and the member is
     // genuinely done.
-    if (runIncrementalGate(deps, config, dispatch, batchId, batch, memberIssue, now, result)) {
+    if (
+      runIncrementalGate(deps, config, dispatch, batchId, batch, memberIssue, now, result, release)
+    ) {
       return;
     }
 
@@ -3618,7 +3691,7 @@ function reconcileMemberSlot(
       memberIssue,
       read.milestone,
       slot,
-      (s) => releaseSlot(s, batchId, now),
+      release,
       () =>
         recordMemberRunLog(
           deps,
@@ -3643,7 +3716,7 @@ function reconcileMemberSlot(
         decision,
         now,
         result,
-        (s) => releaseSlot(s, batchId, now)
+        release
       );
     }
     return;
@@ -3697,7 +3770,7 @@ function reconcileMemberSlot(
       now,
       result,
       // #844: released in the eviction's own write, never before it.
-      (s) => releaseSlot(s, batchId, now)
+      release
     );
   }
 }
@@ -3748,13 +3821,16 @@ function evictMemberDirectly(
   failure: MemberFailure,
   now: Date,
   /**
-   * #844: the member's slot release, applied inside pass 1's lock in every
-   * branch — so the release and the park/eviction record commit as ONE write.
-   * Pre-#844 callers released under a separate lock first, and an engine exit
-   * between the two left the member in-work with no slot, which the wedge arm
-   * (serial) or `spawnParallelMembers` (parallel) then respawned.
+   * #844: a state transform applied inside pass 1's lock in every branch —
+   * typically the member's slot release (plus, on the parallel rail, its
+   * run's `evicted` status; on `sched resume --batch`, the batch's
+   * `blocked → executing` transition) — so it and the park/eviction record
+   * commit as ONE write. Pre-#844 callers wrote it under a separate lock
+   * first, and an engine exit between the two left the member in-work with
+   * no slot, which the wedge arm (serial) or `spawnParallelMembers`
+   * (parallel) then respawned.
    */
-  release?: (s: SchedState) => SchedState
+  preWrite?: (s: SchedState) => SchedState
 ): { batchEnded: boolean; duplicate: boolean } {
   const { reason } = failure;
   const kind: MemberExitKind = failure.kind ?? 'evicted';
@@ -3769,7 +3845,7 @@ function evictMemberDirectly(
     branch: string | null;
     validated: number[];
   }>((held) => {
-    const s = release ? release(held) : held;
+    const s = preWrite ? preWrite(held) : held;
     const b = findBatch(s, batchId);
     if (!b) {
       return {
@@ -3854,7 +3930,28 @@ function evictMemberDirectly(
       `; remedy: sched requeue --issue ${memberIssue}`,
   });
   if (!triggered) return { batchEnded: false, duplicate: false };
+  return {
+    batchEnded: settleEvictionThreshold(deps, config, batchId, memberIssue, validated, now),
+    duplicate: false,
+  };
+}
 
+/**
+ * Pass 2 of an eviction that tipped the batch past its dissolve threshold:
+ * dissolve it — unless members are already VALIDATED (#810: never dissolve
+ * over landed work; journal `dissolve-suppressed` and continue). Returns
+ * whether the batch's run ended. Shared by `evictMemberDirectly` and #844's
+ * crash recovery in `spawnMemberContinuation`, which re-runs it for an
+ * eviction whose pass 1 landed but whose engine exited before this ran.
+ */
+function settleEvictionThreshold(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  batchId: string,
+  memberIssue: number,
+  validated: readonly number[],
+  now: Date
+): boolean {
   if (validated.length > 0) {
     // #810: never dissolve over validated work — it stays landed and ships
     // with the batch; the members that failed are parked, not requeued.
@@ -3862,15 +3959,15 @@ function evictMemberDirectly(
       issue: memberIssue,
       detail: `eviction threshold reached, but member(s) ${validated.join(',')} are validated on the integration branch — keeping them and continuing with the remaining members instead of dissolving`,
     });
-    return { batchEnded: false, duplicate: false };
+    return false;
   }
 
-  // Pass 2 (outside the lock — dissolveBatch shells out): re-load fresh
-  // (pass 1's write already landed), dissolve, then re-apply just this
-  // batch's + the requeued members' state under a fresh lock.
+  // Outside the lock — dissolveBatch shells out: re-load fresh (pass 1's
+  // write already landed), dissolve, then re-apply just this batch's + the
+  // requeued members' state under a fresh lock.
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
-  if (!batch) return { batchEnded: false, duplicate: false };
+  if (!batch) return false;
   const rDeps = recoveryDeps(deps, config, batch, now);
   const outcome = dissolveBatch(
     state,
@@ -3879,7 +3976,7 @@ function evictMemberDirectly(
     rDeps
   );
   applyDissolveOutcome(deps, batchId, outcome, now);
-  return { batchEnded: true, duplicate: false };
+  return true;
 }
 
 function reconcileFixSlot(
@@ -5539,7 +5636,11 @@ function spawnParallelMembers(
             reason: `member-worktree-prep-failed:${prep.reason}`,
             detail: `member worktree prep failed: ${prep.reason} (member ${next.index} #${next.issue}, branch ${memberBranchFor(batchId, next.index, next.issue)})`,
           },
-          now
+          now,
+          // #844: a run already recorded (a respawn whose tree vanished) must
+          // not stay `running` once its member is evicted.
+          (s) =>
+            patchRun(s, batchId, next.issue, { status: 'evicted', gate_inconclusive: null }, now)
         );
         result.failed.push(batchMemberUnit(batchId, next.issue));
         continue;
@@ -5629,15 +5730,21 @@ function evictParallelMember(
     run.issue,
     failure,
     now,
-    release
+    // #844: the run's `evicted` status lands in the eviction's write too — a
+    // separate write left an evicted member's run `running` (slotless, its
+    // tree kept until batch end) when the engine exited in between.
+    (s) =>
+      patchRun(
+        release ? release(s) : s,
+        batchId,
+        run.issue,
+        { status: 'evicted', gate_inconclusive: null },
+        now
+      )
   );
   if (duplicate) return;
   result.failed.push(batchEnded ? unit(batchId) : batchMemberUnit(batchId, run.issue));
   if (batchEnded) return;
-  deps.store.withLock((s) => ({
-    state: patchRun(s, batchId, run.issue, { status: 'evicted', gate_inconclusive: null }, now),
-    result: undefined,
-  }));
   teardownRunTree(deps, batchId, run, false, now);
 }
 
@@ -6276,14 +6383,7 @@ export function runBatchTick(
         fresh !== undefined && allowedBatchTransitions(fresh.status).includes('dissolving');
       if (dissolvable) {
         // #809: a parallel batch holds one slot per running member too.
-        for (const liveSlot of slotsForBatch(current, batch.id)) {
-          if (
-            liveSlot.pid !== null &&
-            deps.spawnDeps.isAlive(liveSlot.pid, liveSlot.pid_start ?? undefined)
-          ) {
-            deps.spawnDeps.kill(liveSlot.pid, liveSlot.pid_start ?? undefined);
-          }
-        }
+        for (const liveSlot of slotsForBatch(current, batch.id)) killLiveAgent(deps, liveSlot);
         const outcome = dissolveBatch(
           current,
           batch.id,

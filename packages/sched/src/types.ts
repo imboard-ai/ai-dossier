@@ -1904,8 +1904,12 @@ export type JournalEventName =
   // #844: an agent the engine is waiting on to die ignored SIGTERM past
   // `KILL_ESCALATION_MS` — SIGKILL sent (to its process group where
   // available). Once per dispatch (`SlotEntry.kill_escalated_at`); `pid`
-  // names the agent, `issue` the member.
+  // names the agent, `issue` the member, `slot` the slot id.
   | 'kill-escalated'
+  // #844: the engine sent SIGTERM to an agent it must wait on before a
+  // decision (the wrong-procedure stop) — once per dispatch; `pid`/`slot`
+  // name it. Pairs with `kill-escalated` when the agent ignores it.
+  | 'member-stop-requested'
   // #844: a serial batch still pointed at a member already in `evictions[]`
   // (the engine exited between the eviction's write and the advance) — the
   // wedge arm advanced past it instead of respawning it.

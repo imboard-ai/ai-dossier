@@ -62,6 +62,7 @@ import {
   MAX_BATCH_AGENT_RESPAWNS,
   type PrTruth,
   parseMergedPrListJson,
+  parsePreambleLine,
   patchBatch,
   patchSlot,
   readJsonl,
@@ -114,17 +115,22 @@ afterEach(() => {
 });
 
 /** Wait (bounded) until a real pid is dead — fake agents exit on their own. */
+/** Poll `pred` every 50 ms until it holds or `ms` elapses; returns its final value. */
+async function waitUntil(pred: () => boolean, ms = 10_000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (pred()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return pred();
+}
+
 async function waitUntilDead(
   spawnDeps: { isAlive: (pid: number) => boolean },
   pid: number,
   ms = 10_000
 ): Promise<boolean> {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (!spawnDeps.isAlive(pid)) return true;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  return !spawnDeps.isAlive(pid);
+  return waitUntil(() => !spawnDeps.isAlive(pid), ms);
 }
 
 /**
@@ -5971,16 +5977,7 @@ function memberDispatchCount(h: BatchHarness, batchId: string, index: number, is
   return fs
     .readFileSync(log, 'utf8')
     .split('\n')
-    .filter((l) => l.includes('"type":"sched-dispatch"') && !l.includes('"event"')).length;
-}
-
-async function waitForFile(file: string, ms = 10_000): Promise<boolean> {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(file)) return true;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  return fs.existsSync(file);
+    .filter((l) => parsePreambleLine(l) !== null).length;
 }
 
 describe('#844 item 1: a member slot release and its eviction commit in ONE write', () => {
@@ -6058,10 +6055,51 @@ describe('#844 item 1: a member slot release and its eviction commit in ONE writ
     const after = h.state();
     expect(after.slots.some((s) => s.unit === `batch:${id}#883`)).toBe(false);
     expect(findBatch(after, id)?.evictions.map((e) => e.issue)).toEqual([883]);
+    // The run's `evicted` status landed in the same write — never a slotless `running` run.
+    expect(findBatch(after, id)?.member_runs.find((r) => r.issue === 883)?.status).toBe('evicted');
 
     await tickUntil(h, id, (b) => b.status === 'awaiting-merge');
     expect(memberDispatchCount(h, id, 1, 883)).toBe(1);
     expect(findBatch(h.state(), id)?.ranges.map((r) => r.issue)).toEqual([884]);
+  }, 60_000);
+});
+
+describe('#844 item 1: crash recovery finishes what the eviction would have done', () => {
+  it('serial: an eviction that tripped the dissolve threshold, then crashed before pass 2, dissolves on restart instead of advancing', async () => {
+    const repo = scratchRepo();
+    const id = 'b-844-dissolve';
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--die-members=887'],
+      { maxSlots: 1 }
+    );
+    // Threshold 0: the first eviction trips the dissolve.
+    h.config.dissolve_policy = { fraction: 0, min_evictions_before_dissolve: 0 };
+    h.enqueue([
+      { issue: 887, mode: 'slot', batch: id, anchor: 880, tier: 'mid' },
+      { issue: 888, mode: 'slot', batch: id, tier: 'mid' },
+    ]);
+    await tickUntil(h, id, (b) => b.status === 'executing' && batchSlotPid(h, id) !== undefined);
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, id) as number)).toBe(true);
+
+    const crash = crashAfterSlotRelease(h, `batch:${id}`);
+    try {
+      h.tick();
+    } catch {
+      // the injected crash, between the eviction's write and its dissolve
+    }
+    crash.restart();
+    expect(crash.fired()).toBe(true);
+    expect(findBatch(h.state(), id)?.status).toBe('executing');
+
+    h.tick();
+    const events = h.deps.journal.read();
+    const recovered = events.find((e) => e.event === 'member-advance-recovered');
+    expect([recovered?.issue, recovered?.reason]).toEqual([887, 'agent-exited-unverified']);
+    expect(['dissolving', 'dissolved']).toContain(findBatch(h.state(), id)?.status);
+    // Neither the evicted member nor the next one was dispatched again.
+    expect(memberDispatchCount(h, id, 1, 887)).toBe(1);
+    expect(memberDispatchCount(h, id, 2, 888)).toBe(0);
   }, 60_000);
 });
 
@@ -6085,7 +6123,7 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
     ]);
     await tickUntil(h, id, (b) => b.status === 'executing' && batchSlotPid(h, id) !== undefined);
     const pid = batchSlotPid(h, id) as number;
-    expect(await waitForFile(path.join(h.truthDir, '885.json'))).toBe(true);
+    expect(await waitUntil(() => fs.existsSync(path.join(h.truthDir, '885.json')))).toBe(true);
     // Let the fake install its SIGTERM handler (it does so right after posting).
     await new Promise((resolve) => setTimeout(resolve, 300));
 
@@ -6096,14 +6134,28 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
     expect(h.spawnDeps.isAlive(pid)).toBe(true);
     expect(findBatch(h.state(), id)?.reprompted_members).toEqual([]);
     const slot = h.state().slots.find((s) => s.unit === `batch:${id}`);
-    expect(typeof slot?.kill_sent_at).toBe('string');
-    expect(slot?.kill_escalated_at).toBeNull();
+    if (!slot) throw new Error('#844 test: no batch slot');
+    expect(typeof slot.kill_sent_at).toBe('string');
+    expect(slot.kill_escalated_at).toBeNull();
+    const stopRequests = h.deps.journal.read().filter((e) => e.event === 'member-stop-requested');
+    expect(stopRequests.map((e) => [e.issue, e.pid])).toEqual([[885, pid]]);
+
+    // A FUTURE stamp (clock step, hand edit) must not switch the escalation
+    // off: it is replaced by a fresh one on the next tick.
+    const future = new Date(Date.now() + 3_600_000).toISOString();
+    h.store.withLock((s) => ({
+      state: patchSlot(s, slot.id, { kill_sent_at: future }),
+      result: undefined,
+    }));
+    h.tick();
+    const restamped = h.state().slots.find((s) => s.id === slot.id)?.kill_sent_at;
+    expect(Date.parse(restamped as string)).toBeLessThanOrEqual(Date.now());
 
     // Past the bound (the first kill — and the dispatch it belongs to —
     // backdated rather than a real 2-minute wait).
     const pastBound = Date.now() - KILL_ESCALATION_MS - 1_000;
     h.store.withLock((s) => ({
-      state: patchSlot(s, slot?.id as number, {
+      state: patchSlot(s, slot.id, {
         spawned_at: new Date(pastBound - 1_000).toISOString(),
         kill_sent_at: new Date(pastBound).toISOString(),
       }),
