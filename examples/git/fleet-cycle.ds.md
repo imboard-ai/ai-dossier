@@ -3,10 +3,10 @@
   "dossier_schema_version": "1.0.0",
   "name": "fleet-cycle",
   "title": "Fleet Cycle — Orchestrate Multiple Issues",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-08-26",
+  "last_updated": "2026-09-24",
   "objective": "Take a SET of GitHub issues to merged PRs by building a dependency-aware wave plan, dispatching detached full-cycle-issue runs across background agents, and supervising the parked PRs through merge — serial, parallel, or mixed",
   "category": [
     "development"
@@ -93,13 +93,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "917677d4904cc80578adcf95e44c65ab0c754b82afbff4991db0773f3310b964"
+    "hash": "0002f711b6bbff15c8d1fc9285eba256d344d62ff6a4024c3a13aa3b2760dcbe"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "wey+z2xWurZiof42iwtvuAVi5/hLQtO4v28CEaaiLc8GUev2LTEE8HwIUmGzwfeP7VwBZbb/N0xUTzOZzAIcBw==",
+    "signature": "n8hqXsUmFVtsnIPxabzEwKTC52E1lh8NgNMY70OrRGfdplLc37aR2XneYviHEYe2Dd6HPxr3P6ZsIIhJO4vdAw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-26T06:48:18.626Z",
+    "signed_at": "2026-09-23T21:24:40.347Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -171,17 +171,17 @@ Apply `mode`: `auto` (default) = the wave plan as computed; `serial` = one issue
 
 ## Phase 3.5: Prewarm the Pool
 
-> Pool CLI invocation: always `npx -y @ai-dossier/worktree-pool@^0.5.1 <cmd>`. The bare `npx worktree-pool` only resolves where the package is installed locally (it 404s elsewhere), and versions before 0.5.1 have a data-loss bug in `gc`. Never pin an older version.
+> Pool CLI invocation: always `npx -y @ai-dossier/worktree-pool@^0.7.2 <cmd>`. The bare `npx worktree-pool` only resolves where the package is installed locally (it 404s elsewhere), and versions before 0.5.1 have a data-loss bug in `gc`, and `claim` before 0.7.2 hands out a warm entry whose directory was deleted outside the pool, failing as `spawnSync git ENOENT`. Never pin an older version — and bump this range deliberately: a caret range on 0.x never leaves its minor (`^0.5.1` stays on 0.5.x).
 
 Before dispatching each wave, from the **orchestrator** — not the agents (replenish is serial by construction, so one orchestrator prewarm is strictly cheaper than N agents cold-starting behind the pool lock):
 
 ```bash
 # N = the smaller of this wave's size and max_parallel
 N=$(( wave_size < max_parallel ? wave_size : max_parallel ))
-npx -y @ai-dossier/worktree-pool@^0.5.1 replenish --count "$N"
+npx -y @ai-dossier/worktree-pool@^0.7.2 replenish --count "$N"
 ```
 
-Then wait until `npx -y @ai-dossier/worktree-pool@^0.5.1 status` shows Warm >= N — as an **armed watch** (one bounded blocking loop, poll every 10s, max 10 min; see Phase 4 rule 0), never an unarmed "check later". If the pool is not configured, say so once and continue — agents fall back to cold worktrees.
+Then wait until `npx -y @ai-dossier/worktree-pool@^0.7.2 status` shows Warm >= N — as an **armed watch** (one bounded blocking loop, poll every 10s, max 10 min; see Phase 4 rule 0), never an unarmed "check later". If the pool is not configured, say so once and continue — agents fall back to cold worktrees.
 
 ## Phase 4: Dispatch and Supervise
 

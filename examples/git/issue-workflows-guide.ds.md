@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "issue-workflows-guide",
   "title": "Issue Workflows Guide",
-  "version": "1.5.4",
+  "version": "1.5.5",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Reference guide for the issue workflow family — explains when to use each workflow, how they compose from shared sub-dossiers, and available flags",
@@ -25,16 +25,16 @@
       "name": "Yuval Dimnik"
     }
   ],
-  "last_updated": "2026-09-09",
+  "last_updated": "2026-09-24",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "543dbd9a1d46f82199aa22cfe2feac7e9586572006cc82f2a86b102460a4ca64"
+    "hash": "007a3ebb4326c317f8947678f8c21af4487d3329ffac26bf311216a74e743e17"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "RQfXr59uhVD0/aLzSfCrsM9TL4G9zw3ynESmL71cDFflLpRv/ehTDlGuUy2FiLoNZ4GEZ6QRH54ZfHHZ9V0YDg==",
+    "signature": "8h26Nx2AIjbf9+jxUXBZrEGcJxow5EbkI6P6Pl+spU4BeheErAx4uukQMyg3drT0DEHDjRWZEiFAj8SUARlLDQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T08:11:49.811Z",
+    "signed_at": "2026-09-23T21:24:42.357Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -131,7 +131,7 @@ Every phase of a full-cycle run appends a `<!-- runstate:v1 -->` comment to the 
   `scripts/ensure-test-env.sh` (remote Atlas/S3 test env, per-worktree isolation + teardown), and
   `docs/agent-traps.md` (grep-first symptom→trap→fix index; plan reads it, report writes it).
 - **Fleet prewarm**: fleet-cycle replenishes the worktree pool once per wave via
-  `npx -y @ai-dossier/worktree-pool@^0.5.1`; agents never run pool `gc`/`refresh`.
+  `npx -y @ai-dossier/worktree-pool@^0.7.2`; agents never run pool `gc`/`refresh`.
 
 ## Visual Review — Two Different Things
 

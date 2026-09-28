@@ -3,11 +3,11 @@
   "dossier_schema_version": "1.0.0",
   "name": "member-cycle",
   "title": "Member Cycle — One Issue Inside a Batch, Verified Only Where It Is Cheap",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-09-10",
-  "objective": "Implement ONE issue in its own worktree off a shared integration branch, test it thoroughly but scoped by relevance rather than volume, and hand over to a parent orchestrator that owns all expensive verification — so N issues pay the repo's expensive gate once instead of N times",
+  "last_updated": "2026-09-24",
+  "objective": "Implement ONE issue in its own worktree off a shared integration branch, test it by relevance, review it at the level the scheduler assigned (review=full: full-cycle-grade, security included; review=light: at least the correctness reviewer — never zero agents), and hand over to a parent orchestrator that owns all expensive verification",
   "category": [
     "development"
   ],
@@ -18,7 +18,8 @@
     "member",
     "integration-branch",
     "handover",
-    "runstate"
+    "runstate",
+    "review"
   ],
   "risk_level": "medium",
   "risk_factors": [
@@ -27,7 +28,8 @@
   ],
   "requires_approval": false,
   "destructive_operations": [
-    "Pushes commits to its own member branch. Never to the integration branch, never to the default branch; the parent orchestrator owns integration, revert and eviction."
+    "Pushes commits to its own member branch. Never to the integration branch, never to the default branch; the parent orchestrator owns integration, revert and eviction.",
+    "Posts runstate milestones (implement, review) and the handover comment on its own issue"
   ],
   "inputs": {
     "required": [
@@ -52,7 +54,14 @@
         "type": "string"
       }
     ],
-    "optional": []
+    "optional": [
+      {
+        "name": "review",
+        "description": "Review level the scheduler assigned this member (#771): light (default) or full. full = a risk-floor issue riding the batch — full-cycle-grade review (all review-issue agents, security included). The scheduler passes it via the {review} prompt placeholder or its review=full directive.",
+        "type": "string",
+        "default": "light"
+      }
+    ]
   },
   "authors": [
     {
@@ -62,15 +71,16 @@
   "content_scope": "self-contained",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "805ddd63b8e68b64dfc2678e34d5701f8d880be19afe1d61f25250336346a72d"
+    "hash": "d7eec3bcf9d6349552ee86ee395c6012332233fdedfc2339319951f9e88340cd"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "K7XIWPucyeelg7dA/32aDjOdR9xgWdE3f3O2yHbJepxnCF58OSc7ID66VLHL+csRgO8v49my9dXXWteiLYm+Bw==",
+    "signature": "FF6L0xndB/DRVn9lpjOuXOmC1MiLt8Fj5aPVGtW+Odpa0XGNV6H3MX1dvRERuNLlNVzZaRenhJKnyfyBa8l2AQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-10T06:56:36.858Z",
+    "signed_at": "2026-09-24T09:21:21.057Z",
     "covers": "frontmatter+body",
-    "signed_by": "(not specified)"
+    "key_id": "imboard-ai",
+    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
   }
 }
 ---
@@ -89,6 +99,8 @@ Implement one issue, well, in isolation — then hand it over. A parent orchestr
 These reinforce each other. **Thorough members are what make a single expensive run viable.** If members hand over code they have not convinced themselves of, the one shared run fails constantly and the batch serialises on a parent untangling N changes at once — spending more than the runs saved.
 
 **Non-responsibilities:** the repo-wide suite, any CI-parity/full-gate script, full e2e matrices, cross-package integration, the PR, the merge, the deploy, teardown, aggregate review, anything about sibling members. You never create a worktree or branch, never open a PR, never touch the integration branch directly.
+
+**Review IS your responsibility (Step 4b).** Your own diff is reviewed by you, before handover, at the level the scheduler assigned: `review=full` → full-cycle-grade review, `review=light` → at least the correctness reviewer. A member that posts `phase=review status=done` without having run a single review agent has not reviewed anything (imboard#4178, run `r-4178-928b`: `agents_done=0`, shipped with no review until the parent caught it by hand).
 
 ## Prerequisites
 
@@ -202,6 +214,41 @@ Never push to the integration branch or the default branch.
 
 A useful diagnostic if a check passes locally but fails for the parent: **a stack trace citing a line number your patch moved means the running code does not contain your patch.**
 
+Now post the implement milestone (the scheduler's contract): `ai-dossier runstate post --issue <issue_number> --phase implement --status done --run <run_id> --kv mode=slot --kv batch=<batch> ...` with the CLI's required keys.
+
+### Step 4b: Review your own change — at the assigned review level, never zero agents
+
+Resolve the review level: the `review` input; else the dispatch prompt (`Review level: review=full` directive, or a `{review}` value); else `light`. **If unsure, use `full`** — uncertainty raises review, never lowers it.
+
+Fetch the reviewer workflow and run its **per-issue** flow (not aggregate mode) over YOUR diff only — `git diff $BOUNDARY...HEAD`:
+
+```bash
+ai-dossier run imboard-ai/git/review-issue --pull
+```
+
+| Level | Agents that MUST run | Notes |
+|---|---|---|
+| `review=full` | review-issue tier **`full`** — every dimension agent (DRY, **Security**, Supportability, Maintainability, Documentation, Convention/Contract) **plus Conformance** — forced regardless of what the diff's paths would select | this member is a risk-floor issue (auth, billing, security, migrations, deploy) riding the batch; its review is what full-cycle would have given it. review-issue's time floor applies (full tier < 5 min = not performed → redo once). |
+| `review=light` | review-issue's own Stage 1 + Stage 2 selection, **with a floor of the correctness reviewer: Conformance** (Agent 7) | when the issue has no AC list, Conformance still runs against the issue body's stated fix/requirements instead of dropping out. A Stage 1 risk-floor path in your diff promotes you to `full` — say so. |
+
+Visual Conformance (Agent 8) does not run here — a member has no runtime (review-issue's own batch note). If your change is visual, say so in the handover for the parent's single browser pass.
+
+**Dispatch.** Launch the selected agents in parallel, report-only, as review-issue says. **If your runtime cannot spawn sub-agents** (a single-agent executor, e.g. an opencode or codex profile), run each selected agent's review prompt yourself as a **separate, sequential pass** over the diff and record `review_substituted=self` — a substituted agent that ran counts; an agent that never ran does not.
+
+Apply the surviving fixes (review-issue's validity gate, dedupe, apply), re-run your Step 2 relevance-scoped tests, then **commit and push again** (Step 4's rules). A `not-met` from Conformance gets one bounded fix loop; still `not-met` → hand back (Step 6), do not force it.
+
+**The review milestone is posted AFTER the handover (Step 5)** — it is the last thing you post, and the scheduler's prompt tells you to post it then. It must carry the agents that actually ran:
+
+```bash
+ai-dossier runstate post --issue <issue_number> --phase review --status done --run <run_id> \
+  --kv mode=slot --kv batch=<batch> --kv review=<light|full> --kv tier=<micro|docs|small|full> \
+  --kv head=<pushed sha> --kv fixed=<n> --kv escalated=<n> \
+  --kv agents_done=<comma list of agent names, e.g. conformance,security,dry> \
+  --kv agents_pending=none [--kv review_substituted=self]
+```
+
+**NEVER post `phase=review status=done` with `agents_done=0`, `none`, or an empty list** — that is a false "reviewed" claim, and batch-integrate refuses to ship a member that carries one. If an agent that must run (per the table) could not finish, post `--status partial` with it in `agents_pending`; if no review could run at all, post `--status blocked --kv reason=review-not-run`. Both are honest; a zero-agent `done` is not.
+
 ### Step 5: Handover — the artifact the parent depends on
 
 Post a comment on the issue whose first line is exactly `## handover:v1`, containing:
@@ -215,6 +262,7 @@ Post a comment on the issue whose first line is exactly `## handover:v1`, contai
 | **What you deliberately did NOT verify** | names the blast radius the parent must cover |
 | Assumptions and points of uncertainty | where a failure is most likely to be genuine |
 | Your conformance verdict | fix-vs-evict, per Step 3 |
+| **Review level, the agents that ran, findings fixed/escalated** (Step 4b) | `review=full` members are the ones batch-integrate re-reviews at the risk floor; a missing review is a ship blocker |
 
 Two behaviours make a handover genuinely useful, and both are worth the words:
 
@@ -223,9 +271,11 @@ Two behaviours make a handover genuinely useful, and both are worth the words:
 
 If your change is visual, say plainly what a reviewer should look at and at which viewport — the parent runs one browser pass for the whole batch.
 
+**Then post the Step 4b `phase=review` milestone — last — and end your run.** Its `agents_done` must name the agents that ran; see Step 4b for `partial` / `blocked`.
+
 ### Step 6: Handing back
 
-If the issue is not implementable, is larger or different than it reads, or its ACs cannot be met — **stop and say so in the handover.** Post `runstate ... --status blocked --kv reason=<slug>`, leave the tree clean, and report.
+If the issue is not implementable, is larger or different than it reads, or its ACs cannot be met — **stop and say so in the handover.** Post `runstate ... --status blocked --kv reason=<slug> --kv mode=slot --kv batch=<batch>`, leave the tree clean, and report.
 
 Reporting this is a correct outcome and is treated as such. **A member that forces a green is worse than one that hands back.**
 
@@ -234,7 +284,8 @@ Reporting this is a correct outcome and is treated as such. **A member that forc
 - Exactly one member branch, pushed, with commits scoped to this issue
 - Relevance-scoped verification actually run, and named in the handover
 - No repo-wide suite, parity gate, or e2e matrix executed
-- `## handover:v1` posted, including what was not verified and the conformance verdict
+- `## handover:v1` posted, including what was not verified, the conformance verdict and the review summary
+- Review run at the assigned level (Step 4b): `review=full` → full tier incl. Security; `review=light` → at least Conformance; the `phase=review` milestone lists the agents that ran — never `agents_done=0`
 - Integration branch and default branch untouched
 
 ## Rationale — why these clauses exist
@@ -246,4 +297,5 @@ Every rule above is here because its absence was measured in a real batch.
 - **Commit before claiming verified** — a repair verified against an uncommitted working tree shipped a branch that did not contain it; CI found it, at the cost of a cycle.
 - **Prove a pre-existing failure** — one member did exactly this, and it is the reason the parent did not chase a failure that was not the batch's.
 - **Handing back is valued** — a member found its issue depended on unmerged work, declined to copy that work forward, and handed back in four minutes. Forcing it would have cost far more and produced a divergent duplicate.
+- **Never zero review agents** — imboard#4178's member (run `r-4178-928b`, batch `b-20260924-01`) posted `phase=review status=done agents_done=0`: nothing looked at the diff, and the parent had to review it by hand before the batch PR. With risk-floor issues now admitted into batches as `review=full` members (#770 Option A), the member review is load-bearing.
 - **A member's own tests can pin a bug.** One asserted grammatically wrong copy; a repo-wide guard caught what the member's expectations encoded. Your tests are necessary, not sufficient — which is why the shared gates exist and why you must not route around them.

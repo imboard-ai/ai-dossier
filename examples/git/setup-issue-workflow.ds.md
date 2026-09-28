@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "setup-issue-workflow",
   "title": "Setup Issue Workflow",
-  "version": "1.14.1",
+  "version": "1.14.2",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Create a workflow for GitHub issues: fetch issue details, create appropriately named branches, set up git worktrees with environment warmup (or claim from a pre-warmed pool), and generate planning files; in batch mode (batch_id) it creates the shared batch branch for the batch anchor instead",
@@ -77,16 +77,16 @@
   "risk_factors": [
     "network_access"
   ],
-  "last_updated": "2026-08-29",
+  "last_updated": "2026-09-24",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "dcbca3c0060d32aef51cb11a4e5ceab92aeba1492bc45445aec8e50c1d389f21"
+    "hash": "19c3c39782762d3f5a32a0aaa94b19566429f896190613923b1dc3a3d3ce7ba2"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "NXJOoOgjivDOoSe7Oxmo+W27fdKOT0oCt1SbMN1n9ajvGrXNmAuCaskYSxCS03EA0vp/iBdpcKikN/+zAUNzDA==",
+    "signature": "c/D/MpAiSOaMNcVmW4WHbx1rtrCJfSPv93o9ADfRQHLCm/F6QnJm/4BNhilIdVvpYmaJ31w/WCiIOhgUGkCaBA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T18:21:27.636Z",
+    "signed_at": "2026-09-23T21:24:38.331Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -186,7 +186,7 @@ Option 1 → Step 5.1. Options 2, 3, 4 → Step 5b.
 
 ### Step 5.1: Check Worktree Pool (Option 1 Only)
 
-> Pool CLI invocation: always `npx -y @ai-dossier/worktree-pool@^0.5.1 <cmd>`. The bare `npx worktree-pool` only resolves where the package is installed locally (it 404s elsewhere), and versions before 0.5.1 have a data-loss bug in `gc`. Never pin an older version.
+> Pool CLI invocation: always `npx -y @ai-dossier/worktree-pool@^0.7.2 <cmd>`. The bare `npx worktree-pool` only resolves where the package is installed locally (it 404s elsewhere), and versions before 0.5.1 have a data-loss bug in `gc`, and `claim` before 0.7.2 hands out a warm entry whose directory was deleted outside the pool, failing as `spawnSync git ENOENT`. Never pin an older version — and bump this range deliberately: a caret range on 0.x never leaves its minor (`^0.5.1` stays on 0.5.x).
 
 > **Never run `worktree-pool gc`, `refresh`, or any command described as removing worktrees.** The pool directory is shared with developer worktrees; in `@ai-dossier/worktree-pool` ≤ 0.5.0 `gc` deleted every worktree it did not create (ai-dossier#438). Agents may only use `status`, `claim`, `return`, `replenish`, `detect`. If the pool looks broken (claim fails, orphaned entry, missing `.git` admin dir), **fall back to cold worktree creation (Step 6)** and mention the broken pool in the setup milestone (`pool_claimed=false pool_note=<reason>`); pool maintenance is a human task.
 
@@ -194,13 +194,13 @@ Pool worktrees already have `node_modules`, `.env` files and build artifacts —
 
 1. **Check the pool**:
    ```bash
-   npx -y @ai-dossier/worktree-pool@^0.5.1 status 2>/dev/null
+   npx -y @ai-dossier/worktree-pool@^0.7.2 status 2>/dev/null
    ```
    If the command fails (pool not installed or not configured), skip to Step 6.
 
 2. **If warm worktrees are available** (status shows `Warm: ≥ 1`):
    ```bash
-   CLAIMED_PATH=$(npx -y @ai-dossier/worktree-pool@^0.5.1 claim --issue <ISSUE_NUMBER> --branch <branch-name> 2>/dev/null)
+   CLAIMED_PATH=$(npx -y @ai-dossier/worktree-pool@^0.7.2 claim --issue <ISSUE_NUMBER> --branch <branch-name> 2>/dev/null)
    ```
    On exit code 0, `CLAIMED_PATH` is the absolute path to the ready worktree, already on the correct branch.
 
@@ -420,9 +420,9 @@ Let the CLI stamp `at=` and compute `next=plan` — do not pass either; never ha
 - [ ] Pool claim or cold path ran unchanged (5.1 / 6–8.5, warmup REQUIRED on the cold path)
 
 **Worktree mode — pool-claimed (ALL required before showing success):**
-- [ ] `npx -y @ai-dossier/worktree-pool@^0.5.1 status` was checked
+- [ ] `npx -y @ai-dossier/worktree-pool@^0.7.2 status` was checked
 - [ ] No `worktree-pool gc`/`refresh` was run (agents never run pool maintenance)
-- [ ] `npx -y @ai-dossier/worktree-pool@^0.5.1 claim` succeeded and returned a path
+- [ ] `npx -y @ai-dossier/worktree-pool@^0.7.2 claim` succeeded and returned a path
 - [ ] Steps 6-8.5 were skipped (pool worktree is pre-warmed)
 
 **Worktree mode — cold (ALL required before showing success):**
@@ -447,12 +447,13 @@ Let the CLI stamp `at=` and compute `next=plan` — do not pass either; never ha
 | Issue not found | Verify the issue number and that you have access to the repository |
 | Branch already exists | Use the existing branch or choose a different name |
 | Worktree path already in use | Check `git worktree list` and choose a different location |
-| `npx -y @ai-dossier/worktree-pool@^0.5.1` not found | Pool package is optional — the workflow falls back to cold worktree creation automatically |
-| Pool claim fails (no warm worktrees) | Run `npx -y @ai-dossier/worktree-pool@^0.5.1 replenish` to pre-warm spares, or let it fall back to cold creation |
+| `npx -y @ai-dossier/worktree-pool@^0.7.2` not found | Pool package is optional — the workflow falls back to cold worktree creation automatically |
+| Pool claim fails (no warm worktrees) | Run `npx -y @ai-dossier/worktree-pool@^0.7.2 replenish` to pre-warm spares, or let it fall back to cold creation |
+| Pool claim fails with `spawnSync git ENOENT` | A warm pool entry's directory was deleted outside the pool and an old pool CLI (< 0.7.2) handed it out. Use `@ai-dossier/worktree-pool@^0.7.2`, which skips it and reports `Missing from disk (skipped)`; the stale entry is cleared by a human-run `gc --yes`. Falling back to cold creation is fine meanwhile |
 
 ## Notes
 
 - Assumes a GitHub-based repository.
 - Modes: **New Worktree** (parallel work — pool ~2s, cold fallback ~3-5min) · **Repurpose** (~10s, reuses dependencies) · **Current directory** (in place) · **Custom path**.
-- To pre-warm pool worktrees: `npx -y @ai-dossier/worktree-pool@^0.5.1 replenish --count N`
+- To pre-warm pool worktrees: `npx -y @ai-dossier/worktree-pool@^0.7.2 replenish --count N`
 - Refs: [git worktree](https://git-scm.com/docs/git-worktree) · [GitHub CLI](https://cli.github.com/manual/) · [Conventional Commits](https://www.conventionalcommits.org/)
