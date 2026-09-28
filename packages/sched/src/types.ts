@@ -989,6 +989,8 @@ export interface SlotEntry {
    * null.
    */
   kill_escalated_at: string | null;
+  /** When a SIGKILL survivor was first observed; null until the second bound starts. */
+  kill_ineffective_at: string | null;
   updated_at: string;
 }
 
@@ -1927,6 +1929,7 @@ export type JournalEventName =
   // available). Once per dispatch (`SlotEntry.kill_escalated_at`); `pid`
   // names the agent, `issue` the member, `slot` the slot id.
   | 'kill-escalated'
+  | 'kill-ineffective'
   // #844: the engine sent SIGTERM to an agent it must wait on before a
   // decision (the wrong-procedure stop) — once per dispatch; `pid`/`slot`
   // name it. Pairs with `kill-escalated` when the agent ignores it.

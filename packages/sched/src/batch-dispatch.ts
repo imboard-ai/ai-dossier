@@ -3397,12 +3397,14 @@ function currentDispatchStamp(
  */
 function stopAgentBeforeDeciding(
   deps: BatchDispatchDeps,
+  config: SchedConfig,
   batchId: string,
   memberIssue: number,
   slot: SlotEntry,
-  now: Date
-): boolean {
-  if (!agentAlive(deps, slot)) return false;
+  now: Date,
+  result: BatchTickResult
+): 'waiting' | 'gone' | 'unkillable' {
+  if (!agentAlive(deps, slot)) return 'gone';
   const pid = slot.pid as number;
   const pidStart = slot.pid_start ?? undefined;
   const sentAt = currentDispatchStamp(slot.kill_sent_at, slot.spawned_at, now);
@@ -3410,7 +3412,28 @@ function stopAgentBeforeDeciding(
   const escalate = sentAt !== null && aliveForMs >= KILL_ESCALATION_MS;
   // `kill` refuses a pid whose recorded identity no longer matches (reused by
   // another process): the agent we spawned is gone, so stop waiting on it.
-  if (!deps.spawnDeps.kill(pid, pidStart, escalate ? 'SIGKILL' : 'SIGTERM')) return false;
+  if (!deps.spawnDeps.kill(pid, pidStart, escalate ? 'SIGKILL' : 'SIGTERM')) return 'gone';
+  const escalatedAt = currentDispatchStamp(slot.kill_escalated_at, slot.spawned_at, now);
+  const ineffective =
+    escalatedAt !== null && now.getTime() - Date.parse(escalatedAt) >= KILL_ESCALATION_MS;
+  if (ineffective) {
+    const firstIneffective =
+      currentDispatchStamp(slot.kill_ineffective_at, slot.spawned_at, now) === null;
+    if (firstIneffective) {
+      deps.store.withLock((s) => ({
+        state: patchSlot(s, slot.id, { kill_ineffective_at: now.toISOString() }, now),
+        result: undefined,
+      }));
+      journalEvent(deps, 'kill-ineffective', unit(batchId), {
+        issue: memberIssue,
+        pid,
+        slot: slot.id,
+        detail: `agent remained alive ${KILL_ESCALATION_MS / 1000}s after SIGKILL — blocking for operator`,
+      });
+      blockBatchForOperator(deps, config, batchId, { reason: 'agent-unkillable' }, now, result);
+    }
+    return 'unkillable';
+  }
   const firstEscalation =
     escalate && currentDispatchStamp(slot.kill_escalated_at, slot.spawned_at, now) === null;
   if (sentAt === null || firstEscalation) {
@@ -3450,7 +3473,7 @@ function stopAgentBeforeDeciding(
       detail: `agent still alive ${Math.round(aliveForMs / 1000)}s after SIGTERM (bound ${KILL_ESCALATION_MS / 1000}s) — sent SIGKILL (to its process group where available)`,
     });
   }
-  return true;
+  return 'waiting';
 }
 
 /**
@@ -3469,18 +3492,21 @@ function stopAgentBeforeDeciding(
  */
 function repromptWrongProcedure(
   deps: BatchDispatchDeps,
+  config: SchedConfig,
   batchId: string,
   memberIssue: number,
   milestoneAt: string,
   slot: SlotEntry,
   release: (s: SchedState) => SchedState,
-  now: Date
+  now: Date,
+  result: BatchTickResult
 ): 'waiting' | 'reprompted' | 'evict' {
   // Never respawn into (or release) a worktree the old agent is still in: a
   // dying full-cycle run could still push, post, or open a PR. Signal it and
   // decide on a later tick, once it is gone — and so the re-prompt's
   // `reprompted_at` fence postdates everything it could still post.
-  if (stopAgentBeforeDeciding(deps, batchId, memberIssue, slot, now)) return 'waiting';
+  if (stopAgentBeforeDeciding(deps, config, batchId, memberIssue, slot, now, result) !== 'gone')
+    return 'waiting';
   const outcome = deps.store.withLock((s) => {
     const b = findBatch(s, batchId);
     if (!b || b.reprompted_members.some((r) => r.issue === memberIssue)) {
@@ -3548,28 +3574,33 @@ function wrongProcedureFailure(
  */
 function decideWrongProcedure(
   deps: BatchDispatchDeps,
+  config: SchedConfig,
   batchId: string,
   memberIssue: number,
   milestone: GroundTruthMilestone,
   slot: SlotEntry,
   release: (s: SchedState) => SchedState,
   lastTool: () => string | null,
-  now: Date
+  now: Date,
+  result: BatchTickResult
 ): 'waiting' | 'reprompted' | MemberFailure {
   const shipped = wrongProcedureShippedPr(milestone);
   if (shipped !== null) {
-    if (stopAgentBeforeDeciding(deps, batchId, memberIssue, slot, now)) return 'waiting';
+    if (stopAgentBeforeDeciding(deps, config, batchId, memberIssue, slot, now, result) !== 'gone')
+      return 'waiting';
     // #844: the caller's eviction releases the slot in its own write.
     return wrongProcedureFailure(lastTool(), shipped);
   }
   const verdict = repromptWrongProcedure(
     deps,
+    config,
     batchId,
     memberIssue,
     milestone.at,
     slot,
     release,
-    now
+    now,
+    result
   );
   if (verdict === 'waiting') return verdict;
   // The finished dispatch's run-log entry, exactly once (never while waiting).
@@ -3687,6 +3718,7 @@ function reconcileMemberSlot(
   if (wrongProcedureCounts(batch, memberIssue, read) && read.milestone !== null) {
     const decision = decideWrongProcedure(
       deps,
+      config,
       batchId,
       memberIssue,
       read.milestone,
@@ -3703,7 +3735,8 @@ function reconcileMemberSlot(
           slot,
           now
         ),
-      now
+      now,
+      result
     );
     if (typeof decision === 'object') {
       evictMemberAndContinue(
@@ -5887,7 +5920,8 @@ function reconcileParallelMemberSlot(
     // The member's tree may be rebased or removed immediately after its slot
     // is released. Keep this slot draining until the agent is really gone so
     // the #844 SIGKILL bound remains available to a SIGTERM-ignoring agent.
-    if (stopAgentBeforeDeciding(deps, batchId, run.issue, slot, now)) return;
+    if (stopAgentBeforeDeciding(deps, config, batchId, run.issue, slot, now, result) !== 'gone')
+      return;
     journalEvent(deps, 'external-advance', unit(batchId), {
       issue: run.issue,
       detail: 'member review done',
@@ -5934,13 +5968,15 @@ function reconcileParallelMemberSlot(
   ) {
     const decision = decideWrongProcedure(
       deps,
+      config,
       batchId,
       run.issue,
       read.milestone,
       slot,
       release,
       () => recordMemberRunLog(deps, dispatch, state0, batchId, run.index, run.issue, slot, now),
-      now
+      now,
+      result
     );
     if (typeof decision === 'object') {
       evictParallelMember(deps, config, batchId, run, decision, now, result, release);
