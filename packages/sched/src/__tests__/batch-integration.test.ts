@@ -6191,6 +6191,42 @@ describe('#844 item 1: crash recovery finishes what the eviction would have done
 });
 
 describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after the bound', () => {
+  it('#862: blocks once when a stubbed agent remains alive after SIGKILL', async () => {
+    const repo = scratchRepo();
+    const id = 'b-862-unkillable';
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--wrong-procedure-members=8621'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([{ issue: 8621, mode: 'slot', batch: id, anchor: 8620, tier: 'mid' }]);
+    await tickUntil(h, id, (b) => b.status === 'executing' && batchSlotPid(h, id) !== undefined);
+    const slot = h.state().slots.find((candidate) => candidate.unit === `batch:${id}`);
+    if (!slot) throw new Error('#862 test: no batch slot');
+    expect(await waitUntil(() => fs.existsSync(path.join(h.truthDir, '8621.json')))).toBe(true);
+    h.deps.spawnDeps = { ...h.spawnDeps, isAlive: () => true, kill: () => true };
+    const pastBound = Date.now() - KILL_ESCALATION_MS - 1_000;
+    h.store.withLock((s) => ({
+      state: patchSlot(s, slot.id, {
+        spawned_at: new Date(pastBound - 1_000).toISOString(),
+        kill_sent_at: new Date(pastBound).toISOString(),
+      }),
+      result: undefined,
+    }));
+    h.tick();
+    h.store.withLock((s) => ({
+      state: patchSlot(s, slot.id, { kill_escalated_at: new Date(pastBound).toISOString() }),
+      result: undefined,
+    }));
+    h.tick();
+    h.tick();
+    const ineffective = h.deps.journal.read().filter((event) => event.event === 'kill-ineffective');
+    expect(ineffective.map((event) => [event.issue, event.pid, event.slot])).toEqual([
+      [8621, slot.pid, slot.id],
+    ]);
+    expect(findBatch(h.state(), id)?.blocked_reason).toBe('agent-unkillable');
+  }, 60_000);
+
   it('the wrong-procedure wait escalates to SIGKILL once past KILL_ESCALATION_MS, journals it once, then re-prompts', async () => {
     const repo = scratchRepo();
     const id = 'b-844-kill';
