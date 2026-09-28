@@ -119,8 +119,6 @@ process.stdin.on('end', () => {
     const pr = opt('pr') ?? issue;
     post('ship', 'awaiting-merge', { pr: String(pr), head: 'abc1234', ci_fix_attempts: '0' });
     console.log(`fake agent: parked PR #${pr} for #${issue}`);
-    // Keep an otherwise-correct parallel member alive after `review done` to
-    // exercise the scheduler's stop-before-tree-mutation path (#861).
     process.exit(0);
   }
   if (mode === 'batch' && dir) {
