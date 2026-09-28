@@ -119,6 +119,8 @@ process.stdin.on('end', () => {
     const pr = opt('pr') ?? issue;
     post('ship', 'awaiting-merge', { pr: String(pr), head: 'abc1234', ci_fix_attempts: '0' });
     console.log(`fake agent: parked PR #${pr} for #${issue}`);
+    // Keep an otherwise-correct parallel member alive after `review done` to
+    // exercise the scheduler's stop-before-tree-mutation path (#861).
     process.exit(0);
   }
   if (mode === 'batch' && dir) {
@@ -263,6 +265,14 @@ process.stdin.on('end', () => {
     } else {
       post('review', 'done', { mode: 'slot', batch: batchId });
       console.log(`fake batch member: posted review done for #${issue} batch=${batchId}`);
+    }
+    if (listOpt('ignore-sigterm-members').includes(issue)) {
+      process.on('SIGTERM', () => {
+        console.log(`fake batch member: ignoring SIGTERM for #${issue}`);
+      });
+      setInterval(() => {}, 1_000);
+      setTimeout(() => process.exit(0), 60_000);
+      return;
     }
     process.exit(0);
   }
