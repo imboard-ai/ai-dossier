@@ -2653,7 +2653,6 @@ describe('#630: pr-watch-failed journals once per distinct condition, not once p
   it('AC3: a still-blocked streak re-announces every JOURNAL_DEDUP_REANNOUNCE_TICKS ticks, so "still blocked after N checks" is legible from the journal — without breaking AC5’s 3-tick dedup', () => {
     const h = prWatchHarness(630, 'b-prwatch4', 629, 4072);
     h.setTruth(BLOCKED_TRUTH);
-
     // Driven off the constant, not a literal: a retune must fail on the
     // assertion it invalidates, not on an opaque `expected 1 to be 2`.
     for (let i = 0; i < JOURNAL_DEDUP_REANNOUNCE_TICKS - 1; i++) h.tick();
@@ -2703,6 +2702,81 @@ describe('#630: pr-watch-failed journals once per distinct condition, not once p
     expect(h.batch()?.pr_watch_failed_since).toBeNull();
     expect(h.batch()?.pr_watch_failed_ticks).toBe(0);
   });
+});
+
+describe('#867: PR-watch conflict recovery', () => {
+  it('rebases a conflicting batch PR, force-pushes the rewritten integration branch, and resumes watching it', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=member-8661.txt'], {
+      maxSlots: 1,
+    });
+    h.enqueue([{ issue: 8661, mode: 'slot', batch: 'b-pr-recover', anchor: 8660, tier: 'mid' }]);
+
+    h.tick();
+    let pid = batchSlotPid(h, 'b-pr-recover') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // member validates and the tail starts
+    pid = batchSlotPid(h, 'b-pr-recover') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick(); // tail parks PR #9000
+    expect(findBatch(h.state(), 'b-pr-recover')?.status).toBe('awaiting-merge');
+
+    fs.writeFileSync(path.join(repo, 'base-after-pr.txt'), 'new base\n');
+    commitAllAndPush(repo, 'advance base before conflict recovery');
+    fs.writeFileSync(
+      path.join(h.truthDir, '9000.pr.json'),
+      JSON.stringify({ state: 'OPEN', mergedAt: null, mergeable: 'CONFLICTING', blocked: false })
+    );
+
+    h.tick();
+
+    const batch = findBatch(h.state(), 'b-pr-recover');
+    expect(batch).toMatchObject({ status: 'awaiting-merge', pr: 9000, rebase_attempts: 1 });
+    expect(batch?.branch).toBeTruthy();
+    expect(gitAt(['rev-parse', `refs/heads/${batch?.branch}`], repo).trim()).toBe(
+      gitAt(['rev-parse', `refs/remotes/origin/${batch?.branch}`], repo).trim()
+    );
+    expect(h.deps.journal.read().some((event) => event.event === 'batch-rebased')).toBe(true);
+
+    expect(h.state().slots.every((slot) => slot.status === 'idle')).toBe(true);
+  }, 60_000);
+
+  it('blocks a conflicting rebase with a validated member without re-batching that member (#840)', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=conflict.txt'], { maxSlots: 1 });
+    h.enqueue([{ issue: 8671, mode: 'slot', batch: 'b-pr-keep', anchor: 8670, tier: 'mid' }]);
+
+    h.tick();
+    let pid = batchSlotPid(h, 'b-pr-keep') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+    pid = batchSlotPid(h, 'b-pr-keep') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+    expect(h.state().entries.find((entry) => entry.issue === 8671)?.status).toBe('validated');
+
+    fs.writeFileSync(path.join(repo, 'conflict.txt'), 'base change\n');
+    commitAllAndPush(repo, 'conflicting base change');
+    fs.writeFileSync(
+      path.join(h.truthDir, '9000.pr.json'),
+      JSON.stringify({ state: 'OPEN', mergedAt: null, mergeable: 'CONFLICTING', blocked: false })
+    );
+
+    h.tick();
+
+    const batch = findBatch(h.state(), 'b-pr-keep');
+    expect(batch).toMatchObject({
+      status: 'blocked',
+      blocked_reason: 'dissolve-refused:rebase-conflict',
+    });
+    expect(h.state().entries.find((entry) => entry.issue === 8671)).toMatchObject({
+      status: 'validated',
+      batch: 'b-pr-keep',
+    });
+    expect(h.state().batches.filter((candidate) => candidate.id !== 'b-pr-keep')).toHaveLength(0);
+    expect(h.state().slots.every((slot) => slot.status === 'idle')).toBe(true);
+    expect(fs.existsSync(batch?.worktree as string)).toBe(true);
+  }, 60_000);
 });
 
 // --- #686: stale-BLOCKED batch reconciliation (ground truth beats the ledger) ---

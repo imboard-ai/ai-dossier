@@ -536,8 +536,10 @@ validating → attributing → fixing (ONE bounded attempt) → validating
   suite report unreadable, after the fallback retry when one applied
                          → blocked → validating (nothing requeued/reverted; #562)
 awaiting-merge (CONFLICTING | auto-merge-blocked)
-                         → rebasing → re-validating → shipping
-                         → (2nd occurrence) dissolving into two half-batches
+                          → rebasing → re-validating → shipping
+                          → (2nd occurrence) dissolving into two half-batches
+                          #840: with VALIDATED members, keep them landed;
+                          #867: the PR watch automatically enters this rail
 ```
 
 1. **Attribution (AC1)** — `attributeByOverlap` maps each failing test to a member by
@@ -602,10 +604,14 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    batch branch is simply left behind unmerged, since sched deletes nothing. Every dissolve
    decision — all three strategies — journals its policy inputs (`N=`, `evictions=`,
    `threshold=`), so it is explainable without re-deriving the formula.
-5. **PR conflict (AC4)** — `handlePrConflict` rebases the batch branch, re-runs the suite
-   and re-ships ONCE. A second occurrence, a conflicting rebase, a failed fetch, an
-   unusable `base_branch`, a checkout that is not on the batch branch, or a red suite
-   after a clean rebase dissolves into two half-batches.
+5. **PR conflict (AC4)** — the PR watch routes a CONFLICTING or auto-merge-blocked batch
+   into `handlePrConflict`, which rebases the integration branch, re-runs the suite, and
+   force-pushes the rewritten branch with a lease before resuming the existing PR watch. A second occurrence,
+   a conflicting rebase, a failed fetch, an unusable branch, a checkout that is not on the
+   batch branch, or a red suite after a clean rebase dissolves into two half-batches when no
+   member is validated. With validated members, #840 keeps their landed work: a clean rebase
+   and red suite re-gates the retained batch; every other give-up case blocks it as
+   `dissolve-refused:<reason>`.
 6. **Milestones (AC5)** — every eviction and dissolve posts a `batch-validate` /
    `batch-ship` milestone to the batch ANCHOR issue via `ai-dossier runstate post`, with
    the reason, the evicted/requeued/preserved members and the attribution method (a
@@ -1029,9 +1035,9 @@ Dissolve never throws validated work away:
   `batch-regate`, `executing_member` pinned to the end — the shape of `sched resume
   --batch`); anything else blocks `dissolve-refused:<reason>` (milestone `batch-ship`,
   `validated=`; the recorded PR can be resolved by hand, or closed before `sched resume
-  --batch`). With no validated member it still dissolves into halves. **Library behaviour
-  only:** the engine does not yet route a CONFLICTING batch PR into `handlePrConflict`
-  (#867).
+   --batch`). With no validated member it still dissolves into halves. Since #867,
+   `reconcilePrWatch` routes a CONFLICTING or auto-merge-blocked batch PR into this recovery
+   path automatically.
 
 #### Member branches live until the batch ends; a requeue resumes on them (#840)
 
@@ -1271,7 +1277,7 @@ import {
   dissolveBatch,         // full | halved | partial (#563); preserves everything green
   blockBatch,            // #562: unreadable suite report → blocked; no requeue, no revert
   type BlockOptions,     // { reason, milestonePhase? } for blockBatch
-  handlePrConflict,      // rebase + re-ship once, then dissolve into halves
+  handlePrConflict,      // reship | dissolve; #840: regate | block over validated work
   createExecMilestonePoster, // batch milestones via `ai-dossier runstate post`
   expandEvictionGroups,  // members that must revert together (§E.4 eviction groups)
   requeueMember,         // the one requeue path (abandon, aggregate eviction, dissolve, sched requeue)

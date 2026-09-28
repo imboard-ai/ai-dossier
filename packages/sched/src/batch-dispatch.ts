@@ -144,6 +144,7 @@ import {
   type DissolveOutcome,
   dissolveBatch,
   evictMembers,
+  handlePrConflict,
   pruneMemberBranches,
   type RecoveryDeps,
   resolveFixAttempt,
@@ -4403,7 +4404,12 @@ function clearPrWatchFailed(deps: BatchDispatchDeps, batch: BatchEntry, now: Dat
   clearBatchDedupMarker(deps, batch, batch.pr_watch_failed_reason, CLEARED_PR_WATCH_FIELDS, now);
 }
 
-function reconcilePrWatch(deps: BatchDispatchDeps, now: Date, result: BatchTickResult): void {
+function reconcilePrWatch(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  now: Date,
+  result: BatchTickResult
+): void {
   const state = deps.store.load();
   for (const batch of state.batches) {
     if (batch.status !== 'awaiting-merge') {
@@ -4492,9 +4498,80 @@ function reconcilePrWatch(deps: BatchDispatchDeps, now: Date, result: BatchTickR
         ),
         result: undefined,
       }));
-      // #472's own rebase-and-reship path (RFC F.9) is a documented follow-up
-      // for the batch PR-conflict rail; for now the batch stays parked and
-      // the block is visible via the journal + `sched status`.
+
+      // An awaiting-merge record without its integration checkout is an
+      // incomplete/corrupt batch, not safe to rebase. Keep its durable watch
+      // evidence for an operator rather than running recovery in repoDir.
+      if (batch.branch === null || batch.worktree === null) continue;
+
+      // Recovery runs git and the aggregate suite outside the store lock. Apply
+      // its result to fresh state below so concurrent scheduler updates survive.
+      const recovered = handlePrConflict(state, batch.id, recoveryDeps(deps, config, batch, now), {
+        reason,
+      });
+      if (recovered.action === 'reship') {
+        // Rebasing rewrites the integration branch. Pin the lease to origin's
+        // current tip so a concurrent push cannot be overwritten.
+        const remote = deps.exec(
+          'git',
+          ['ls-remote', 'origin', `refs/heads/${batch.branch ?? ''}`],
+          batch.worktree ?? deps.repoDir
+        );
+        const remoteTip = remote?.trim().split(/\s+/)[0] ?? '';
+        const pushed =
+          batch.branch !== null &&
+          (remoteTip === '' || GIT_OID_RE.test(remoteTip)) &&
+          deps.exec(
+            'git',
+            [
+              'push',
+              `--force-with-lease=refs/heads/${batch.branch}:${remoteTip}`,
+              'origin',
+              '--',
+              batch.branch,
+            ],
+            batch.worktree ?? deps.repoDir
+          ) !== null;
+        if (!pushed) {
+          const blocked = blockBatch(
+            recovered.state,
+            batch.id,
+            { reason: 'rebase-force-push-failed', milestonePhase: 'batch-ship' },
+            recoveryDeps(deps, config, batch, now)
+          );
+          deps.store.withLock((s) => ({
+            state: applyBatchAndIssues(s, blocked.state, batch.id, [], batch.members),
+            result: undefined,
+          }));
+          stopAndReleaseBlocked(deps, batch.id, now);
+          result.failed.push(unit(batch.id));
+          continue;
+        }
+        // A force-push updates the recorded PR's head. Re-dispatching the tail
+        // would try to ship a second PR, so resume watching this same PR.
+        const reshipped = transitionBatch(recovered.state, batch.id, 'awaiting-merge', { pr }, now);
+        deps.store.withLock((s) => ({
+          state: applyBatchAndIssues(s, reshipped, batch.id, [], batch.members),
+          result: undefined,
+        }));
+        continue;
+      }
+      if (recovered.action === 'dissolved' && recovered.dissolve) {
+        applyDissolveOutcome(deps, batch.id, recovered.dissolve, now, batch.members);
+        result.failed.push(unit(batch.id));
+        continue;
+      }
+      const touched = recovered.dissolve
+        ? [...recovered.dissolve.requeued, ...recovered.dissolve.parked]
+        : [];
+      deps.store.withLock((s) => ({
+        state: applyBatchAndIssues(s, recovered.state, batch.id, touched, batch.members),
+        result: undefined,
+      }));
+      if (recovered.action === 'blocked') {
+        stopAndReleaseBlocked(deps, batch.id, now);
+        result.failed.push(unit(batch.id));
+      }
     } else {
       // #630: the condition cleared — reset the marker so a future
       // re-occurrence (even the SAME reason) journals its own fresh entry.
@@ -6648,7 +6725,7 @@ export function runBatchTick(
     }
   }
 
-  reconcilePrWatch(deps, now, result);
+  reconcilePrWatch(deps, config, now, result);
   const anchorCtx = anchorTickContext(deps);
   reconcileStaleBlockedBatches(deps, now, result, anchorCtx);
   reconcileAnchorClosure(deps, now, anchorCtx);
