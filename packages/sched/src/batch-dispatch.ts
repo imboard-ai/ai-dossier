@@ -220,15 +220,14 @@ import {
   TERMINAL_ISSUE_STATUSES,
 } from './types';
 
-// #822: `tailMembersRefusal` moved to `state.ts` so `resumeLandedBatch`
-// (scheduler.ts) can refuse a resume the tail would refuse again — re-exported
-// for the callers that import it from here.
-export { tailMembersRefusal };
-
 // `CapOutcome` moved to `types.ts` (#583, so `BatchEntry.member_gates` can use
 // it without an import cycle) — re-exported here so `index.ts`'s existing
 // `import { type CapOutcome } from './batch-dispatch'` keeps working.
 export type { CapOutcome } from './types';
+// #822: `tailMembersRefusal` moved to `state.ts` so `resumeLandedBatch`
+// (scheduler.ts) can refuse a resume the tail would refuse again — re-exported
+// for the callers that import it from here.
+export { tailMembersRefusal };
 
 /** Everything batch dispatch needs from the outside world. */
 export interface BatchDispatchDeps {
@@ -5885,7 +5884,10 @@ function reconcileParallelMemberSlot(
     // into that tree with its pid no longer tracked anywhere (so neither a
     // dissolve nor `sched stop --batch` could stop it). Its work is done —
     // stop it first.
-    killLiveAgent(deps, slot);
+    // The member's tree may be rebased or removed immediately after its slot
+    // is released. Keep this slot draining until the agent is really gone so
+    // the #844 SIGKILL bound remains available to a SIGTERM-ignoring agent.
+    if (stopAgentBeforeDeciding(deps, batchId, run.issue, slot, now)) return;
     journalEvent(deps, 'external-advance', unit(batchId), {
       issue: run.issue,
       detail: 'member review done',

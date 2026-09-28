@@ -5594,14 +5594,17 @@ async function tickUntil(
   h: BatchHarness,
   batchId: string,
   done: (b: NonNullable<ReturnType<typeof findBatch>>) => boolean,
-  maxTicks = 20
+  maxTicks = 20,
+  options: { allowLiveMemberProcesses?: boolean } = {}
 ): Promise<void> {
   for (let i = 0; i < maxTicks; i++) {
     const b = findBatch(h.state(), batchId);
     if (b && done(b)) return;
-    expect(await waitAllDead(h, memberPids(h, batchId))).toBe(true);
-    const pid = batchSlotPid(h, batchId);
-    if (pid !== undefined) expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    if (!options.allowLiveMemberProcesses) {
+      expect(await waitAllDead(h, memberPids(h, batchId))).toBe(true);
+      const pid = batchSlotPid(h, batchId);
+      if (pid !== undefined) expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    }
     h.tick();
   }
   const last = findBatch(h.state(), batchId);
@@ -6257,5 +6260,69 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
     const batch = findBatch(h.state(), id);
     expect(batch?.reprompted_members.map((r) => r.issue)).toEqual([885]);
     expect(batch?.ranges.map((r) => r.issue)).toEqual([885, 886]);
+  }, 60_000);
+
+  it('a parallel member that posted review done is SIGKILLed before its worktree can be landed', async () => {
+    const repo = scratchRepo();
+    const id = 'b-861-kill';
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--ignore-sigterm-after-review-members=8611'],
+      { maxSlots: 2, parallel: true }
+    );
+    h.enqueue([
+      { issue: 8611, mode: 'slot', batch: id, anchor: 8610, tier: 'mid' },
+      { issue: 8612, mode: 'slot', batch: id, tier: 'mid' },
+    ]);
+
+    // This is deliberately opt-in: normal integration flows require every
+    // member process to settle before ticking. This scenario proves that the
+    // scheduler, not the harness, owns the intentionally live agent.
+    await tickUntil(
+      h,
+      id,
+      () =>
+        memberSlots(h, id).some((slot) => slot.unit === `batch:${id}#8611` && slot.pid !== null),
+      20,
+      { allowLiveMemberProcesses: true }
+    );
+    const slot = memberSlots(h, id).find((candidate) => candidate.unit === `batch:${id}#8611`);
+    if (!slot?.pid) throw new Error('#861 test: no live member slot');
+    const pid = slot.pid;
+    expect(await waitUntil(() => fs.existsSync(path.join(h.truthDir, '8611.json')))).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // The first reconciliation sends SIGTERM but must keep the member slot
+    // and its worktree intact while the agent ignores it.
+    h.tick();
+    expect(h.spawnDeps.isAlive(pid)).toBe(true);
+    expect(findBatch(h.state(), id)?.member_runs.find((run) => run.issue === 8611)?.status).toBe(
+      'running'
+    );
+
+    const pastBound = Date.now() - KILL_ESCALATION_MS - 1_000;
+    h.store.withLock((state) => ({
+      state: patchSlot(state, slot.id, {
+        spawned_at: new Date(pastBound - 1_000).toISOString(),
+        kill_sent_at: new Date(pastBound).toISOString(),
+      }),
+      result: undefined,
+    }));
+    h.tick();
+
+    // SIGKILL and death are established before inspecting any worktree state.
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    expect(
+      h.deps.journal
+        .read()
+        .filter((event) => event.event === 'kill-escalated')
+        .map((event) => [event.issue, event.pid])
+    ).toEqual([[8611, pid]]);
+
+    h.tick();
+    expect(findBatch(h.state(), id)?.member_runs.find((run) => run.issue === 8611)?.status).toBe(
+      'landed'
+    );
+    await tickUntil(h, id, (batch) => batch.status === 'awaiting-merge');
   }, 60_000);
 });
