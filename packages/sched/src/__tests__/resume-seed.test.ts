@@ -23,10 +23,24 @@ describe('createExecResumeSeeder', () => {
 
     expect(seeder(840, seed)).toEqual({ ok: true, run: 'r-840-abc123' });
     expect(calls.slice(0, 4)).toEqual([
-      ['git', 'fetch', 'origin', 'main', 'batch/b-840-m1-840'],
-      ['git', 'checkout', '-B', 'batch/b-840-m1-840', 'origin/main'],
-      ['git', 'cherry-pick', 'abcdef1234567890abcdef1234567890abcdef12'],
-      ['git', 'push', '--force-with-lease', 'origin', 'batch/b-840-m1-840'],
+      ['git', '-C', '/repo/worktrees/batch-b-840-m1-840', 'fetch', 'origin', 'main'],
+      ['git', '-C', '/repo/worktrees/batch-b-840-m1-840', 'reset', '--hard', 'origin/main'],
+      [
+        'git',
+        '-C',
+        '/repo/worktrees/batch-b-840-m1-840',
+        'cherry-pick',
+        'abcdef1234567890abcdef1234567890abcdef12',
+      ],
+      [
+        'git',
+        '-C',
+        '/repo/worktrees/batch-b-840-m1-840',
+        'push',
+        '--force-with-lease',
+        'origin',
+        'batch/b-840-m1-840',
+      ],
     ]);
     expect(calls[4]).toEqual(['ai-dossier', 'runstate', 'mint', '--issue', '840']);
     const post = calls[5] ?? [];

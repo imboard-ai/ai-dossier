@@ -74,10 +74,12 @@ export function createExecResumeSeeder(
     }
     // A member branch starts at the batch integration branch. Recreate it from the
     // target base so a resumed full-cycle PR cannot carry earlier member work.
-    const repair = (args: string[]) => exec('git', args, opts.repoDir);
+    // The member branch can still be checked out by its parked worktree. Repair
+    // that worktree directly instead of trying to check the branch out at repoDir.
+    const repair = (args: string[]) => exec('git', ['-C', seed.worktree, ...args], opts.repoDir);
     if (
-      repair(['fetch', 'origin', seed.baseBranch, seed.branch]) === null ||
-      repair(['checkout', '-B', seed.branch, `origin/${seed.baseBranch}`]) === null
+      repair(['fetch', 'origin', seed.baseBranch]) === null ||
+      repair(['reset', '--hard', `origin/${seed.baseBranch}`]) === null
     ) {
       return { ok: false, reason: 'could not reset member branch onto its base' };
     }
