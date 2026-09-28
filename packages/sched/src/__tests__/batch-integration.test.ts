@@ -2705,7 +2705,7 @@ describe('#630: pr-watch-failed journals once per distinct condition, not once p
 });
 
 describe('#867: PR-watch conflict recovery', () => {
-  it('rebases a conflicting batch PR, force-pushes the rewritten integration branch, and returns it to shipping', async () => {
+  it('rebases a conflicting batch PR, force-pushes the rewritten integration branch, and resumes watching it', async () => {
     const repo = scratchRepo();
     const h = batchHarness(repo, ['--mode=batch', '--commit-file=member-8661.txt'], {
       maxSlots: 1,
@@ -2731,12 +2731,14 @@ describe('#867: PR-watch conflict recovery', () => {
     h.tick();
 
     const batch = findBatch(h.state(), 'b-pr-recover');
-    expect(batch).toMatchObject({ status: 'shipping', rebase_attempts: 1 });
+    expect(batch).toMatchObject({ status: 'awaiting-merge', pr: 9000, rebase_attempts: 1 });
     expect(batch?.branch).toBeTruthy();
     expect(gitAt(['rev-parse', `refs/heads/${batch?.branch}`], repo).trim()).toBe(
       gitAt(['rev-parse', `refs/remotes/origin/${batch?.branch}`], repo).trim()
     );
     expect(h.deps.journal.read().some((event) => event.event === 'batch-rebased')).toBe(true);
+
+    expect(h.state().slots.every((slot) => slot.status === 'idle')).toBe(true);
   }, 60_000);
 
   it('blocks a conflicting rebase with a validated member without re-batching that member (#840)', async () => {
@@ -2773,6 +2775,7 @@ describe('#867: PR-watch conflict recovery', () => {
     });
     expect(h.state().batches.filter((candidate) => candidate.id !== 'b-pr-keep')).toHaveLength(0);
     expect(h.state().slots.every((slot) => slot.status === 'idle')).toBe(true);
+    expect(fs.existsSync(batch?.worktree as string)).toBe(true);
   }, 60_000);
 });
 

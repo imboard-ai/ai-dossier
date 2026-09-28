@@ -605,8 +605,8 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    decision — all three strategies — journals its policy inputs (`N=`, `evictions=`,
    `threshold=`), so it is explainable without re-deriving the formula.
 5. **PR conflict (AC4)** — the PR watch routes a CONFLICTING or auto-merge-blocked batch
-   into `handlePrConflict`, which rebases the integration branch, re-runs the suite,
-   force-pushes the rewritten branch with a lease, and re-ships ONCE. A second occurrence,
+   into `handlePrConflict`, which rebases the integration branch, re-runs the suite, and
+   force-pushes the rewritten branch with a lease before resuming the existing PR watch. A second occurrence,
    a conflicting rebase, a failed fetch, an unusable branch, a checkout that is not on the
    batch branch, or a red suite after a clean rebase dissolves into two half-batches when no
    member is validated. With validated members, #840 keeps their landed work: a clean rebase

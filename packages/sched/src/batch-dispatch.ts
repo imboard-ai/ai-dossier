@@ -4547,8 +4547,11 @@ function reconcilePrWatch(
           result.failed.push(unit(batch.id));
           continue;
         }
+        // A force-push updates the recorded PR's head. Re-dispatching the tail
+        // would try to ship a second PR, so resume watching this same PR.
+        const reshipped = transitionBatch(recovered.state, batch.id, 'awaiting-merge', { pr }, now);
         deps.store.withLock((s) => ({
-          state: applyBatchAndIssues(s, recovered.state, batch.id, [], batch.members),
+          state: applyBatchAndIssues(s, reshipped, batch.id, [], batch.members),
           result: undefined,
         }));
         continue;
