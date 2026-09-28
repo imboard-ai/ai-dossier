@@ -6057,6 +6057,22 @@ function crashAfterSlotRelease(
   };
 }
 
+/** Simulate death immediately after the durable member run-log append. */
+function crashAfterMemberRunLog(h: BatchHarness): { restart: () => void } {
+  const original = h.deps.journal.append.bind(h.deps.journal);
+  h.deps.journal.append = ((event, now) => {
+    original(event, now);
+    if (event.event === 'run-log-recorded') {
+      throw new Error('#863 injected crash after member run-log append');
+    }
+  }) as typeof h.deps.journal.append;
+  return {
+    restart: () => {
+      h.deps.journal.append = original;
+    },
+  };
+}
+
 /** How many times a batch member was dispatched — one `sched-dispatch` preamble per spawn. */
 function memberDispatchCount(h: BatchHarness, batchId: string, index: number, issue: number) {
   const log = batchMemberLogPath(h.store.runsDir, batchId, index, issue);
@@ -6068,6 +6084,28 @@ function memberDispatchCount(h: BatchHarness, batchId: string, index: number, is
 }
 
 describe('#844 item 1: a member slot release and its eviction commit in ONE write', () => {
+  it('#863: a crash after recording an evicted member run never appends a duplicate after restart', async () => {
+    const repo = scratchRepo();
+    const id = 'b-863-run-log';
+    const h = batchHarness(repo, ['--mode=batch', '--die-members=8631'], { maxSlots: 1 });
+    h.enqueue([{ issue: 8631, mode: 'slot', batch: id, anchor: 8630, tier: 'mid' }]);
+    await tickUntil(h, id, () => batchSlotPid(h, id) !== undefined);
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, id) as number)).toBe(true);
+
+    const crash = crashAfterMemberRunLog(h);
+    expect(() => h.tick()).toThrow('#863 injected crash');
+    crash.restart();
+    h.tick();
+
+    const runs = fs
+      .readFileSync(path.join(h.homeDir, '.dossier', 'runs.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+      .filter((entry) => entry.unit === 'issue:8631');
+    expect(runs).toHaveLength(1);
+  }, 60_000);
+
   it('serial: a crash right after the release write leaves the member evicted with its slot released, and it is never respawned', async () => {
     const repo = scratchRepo();
     const id = 'b-844-crash';
