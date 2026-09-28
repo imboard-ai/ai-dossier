@@ -266,7 +266,7 @@ process.stdin.on('end', () => {
       post('review', 'done', { mode: 'slot', batch: batchId });
       console.log(`fake batch member: posted review done for #${issue} batch=${batchId}`);
     }
-    if (listOpt('ignore-sigterm-members').includes(issue)) {
+    if (listOpt('ignore-sigterm-after-review-members').includes(issue)) {
       process.on('SIGTERM', () => {
         console.log(`fake batch member: ignoring SIGTERM for #${issue}`);
       });
