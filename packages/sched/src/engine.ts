@@ -967,6 +967,7 @@ function seedResumeTrail(
     baseBranch,
     batch: evidence.batch,
     worktree: path.join(ctx.deps.repoDir, 'worktrees', branch.replaceAll('/', '-')),
+    revertedCommits: evidence.reverted_commits,
   });
   if (!outcome.ok) {
     journal(ctx, 'resume-seed-failed', unit, {

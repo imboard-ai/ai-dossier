@@ -34,6 +34,8 @@ export interface ResumeSeed {
    * the resume path creates (and warms) a worktree when this one is absent.
    */
   worktree: string;
+  /** Commits belonging to this member that were reverted from the batch branch. */
+  revertedCommits: readonly string[];
 }
 
 export type ResumeSeedOutcome = { ok: true; run: string } | { ok: false; reason: string };
@@ -65,6 +67,34 @@ export function createExecResumeSeeder(
       if (!SAFE_REF_RE.test(value)) return { ok: false, reason: `${name} is not a plain ref` };
     }
     if (/\s/.test(seed.worktree)) return { ok: false, reason: 'worktree path contains whitespace' };
+    for (const commit of seed.revertedCommits) {
+      if (!/^[0-9a-f]{7,40}$/i.test(commit)) {
+        return { ok: false, reason: 'reverted commit is not a git object id' };
+      }
+    }
+    // A member branch starts at the batch integration branch. Recreate it from the
+    // target base so a resumed full-cycle PR cannot carry earlier member work.
+    // The member branch can still be checked out by its parked worktree. Repair
+    // that worktree directly instead of trying to check the branch out at repoDir.
+    const repair = (args: string[]) => exec('git', ['-C', seed.worktree, ...args], opts.repoDir);
+    if (
+      repair(['fetch', 'origin', seed.baseBranch]) === null ||
+      repair(['reset', '--hard', `origin/${seed.baseBranch}`]) === null
+    ) {
+      return { ok: false, reason: 'could not reset member branch onto its base' };
+    }
+    for (const commit of seed.revertedCommits) {
+      if (repair(['cherry-pick', commit]) === null) {
+        repair(['cherry-pick', '--abort']);
+        return {
+          ok: false,
+          reason: `could not restore reverted member commit ${commit.slice(0, 12)}`,
+        };
+      }
+    }
+    if (repair(['push', '--force-with-lease', 'origin', seed.branch]) === null) {
+      return { ok: false, reason: 'could not push cleaned member branch' };
+    }
     const run = exec(bin, ['runstate', 'mint', '--issue', String(issue)], opts.repoDir)?.trim();
     if (run === undefined || !RUN_ID_RE.test(run)) {
       return { ok: false, reason: `'${bin} runstate mint' returned no run id` };
