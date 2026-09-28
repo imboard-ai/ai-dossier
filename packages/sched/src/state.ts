@@ -948,7 +948,13 @@ export function validateState(data: unknown): SchedState {
     // used for identity matching (run id + generation decides that), only to
     // NAME the trail record the bind/release posts describe. #844's kill
     // timestamps share the same string-or-null shape.
-    for (const field of ['run_id', 'fence_phase', 'kill_sent_at', 'kill_escalated_at'] as const) {
+    for (const field of [
+      'run_id',
+      'fence_phase',
+      'kill_sent_at',
+      'kill_escalated_at',
+      'kill_ineffective_at',
+    ] as const) {
       const value = slot[field];
       if (value !== null && value !== undefined && typeof value !== 'string') {
         throw new Error(`Slot ${slot.id}: ${field} must be a string or null`);
@@ -1114,6 +1120,7 @@ export function validateState(data: unknown): SchedState {
     // escalation existed — null/null is exact, not a guess.
     kill_sent_at: slot.kill_sent_at ?? null,
     kill_escalated_at: slot.kill_escalated_at ?? null,
+    kill_ineffective_at: slot.kill_ineffective_at ?? null,
   }));
   const entries = (obj.entries as QueueEntry[]).map((entry) => ({
     ...entry,
@@ -1426,6 +1433,7 @@ export const CLEARED_SLOT_FIELDS = {
   // #844: a released slot is waiting on no agent to die.
   kill_sent_at: null,
   kill_escalated_at: null,
+  kill_ineffective_at: null,
 };
 
 export function transitionSlot(

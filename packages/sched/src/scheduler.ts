@@ -153,6 +153,7 @@ export function assignToIdleSlot(
       ...CLEARED_SLOT_FIELDS,
       last_progress_at: null,
       recoveries: 0,
+      kill_ineffective_at: null,
       updated_at: now.toISOString(),
     };
     next = { ...next, slots: [...next.slots, slot], next_slot_id: next.next_slot_id + 1 };
