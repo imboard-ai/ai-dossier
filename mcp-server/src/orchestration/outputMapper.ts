@@ -15,14 +15,14 @@ import type { DossierNode, ExecutionPlan, FromDossierDeclaration } from './types
 // In-memory storage: journeyId → dossierName → outputKey → value
 // ---------------------------------------------------------------------------
 
-const MAX_JOURNEYS = 1000;
+export const MAX_JOURNEYS = 1000;
 const journeyOutputStore = new Map<string, Map<string, Map<string, unknown>>>();
 
 /**
  * Return a journey's output map, creating it (and evicting the oldest journey
  * when the store is at capacity) if it does not exist yet.
  */
-function ensureJourneyOutputs(journeyId: string): Map<string, Map<string, unknown>> {
+export function initJourneyOutputs(journeyId: string): Map<string, Map<string, unknown>> {
   const existing = journeyOutputStore.get(journeyId);
   if (existing) return existing;
 
@@ -42,10 +42,6 @@ function ensureJourneyOutputs(journeyId: string): Map<string, Map<string, unknow
   return journey;
 }
 
-export function initJourneyOutputs(journeyId: string): void {
-  ensureJourneyOutputs(journeyId);
-}
-
 /**
  * Store outputs reported by the LLM after completing a step.
  */
@@ -54,7 +50,7 @@ export function collectOutputs(
   dossierName: string,
   outputs: Record<string, unknown>
 ): void {
-  const journey = ensureJourneyOutputs(journeyId);
+  const journey = initJourneyOutputs(journeyId);
   const existing = journey.get(dossierName) ?? new Map<string, unknown>();
   for (const [key, value] of Object.entries(outputs)) {
     existing.set(key, value);

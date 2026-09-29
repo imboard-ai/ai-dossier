@@ -97,13 +97,13 @@ lint:
 ## format: Format code with Biome
 format:
 	@echo "Formatting code with Biome..."
-	npx biome format --write .
+	npm run format
 	@echo "✓ Code formatted"
 
-## check: Format and lint code with auto-fix
+## check: Format and lint code with auto-fix; fails if a warning remains
 check:
 	@echo "Checking and fixing code with Biome..."
-	npx biome check --write .
+	npm run check
 	@echo "✓ Code checked and formatted"
 
 ## verify: Verify a dossier file (usage: make verify FILE=path/to/file.ds.md)

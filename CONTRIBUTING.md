@@ -90,17 +90,17 @@ Use GitHub Discussions for:
 This project uses [Biome](https://biomejs.dev/) for linting and formatting.
 
 **Automatic enforcement (pre-commit hook):**
-After running `npm install`, a Git pre-commit hook is automatically set up via [husky](https://typicode.github.io/husky/). Every commit will run Biome on your staged files and auto-fix issues before committing.
+After running `npm install`, a Git pre-commit hook is automatically set up via [husky](https://typicode.github.io/husky/). Every commit will run Biome on your staged files and auto-fix issues before committing; the commit is blocked if an error or a warning remains, the same rule CI applies.
 
 **Manual commands:**
 ```bash
 npm run lint          # Check for lint & format errors and lint warnings (read-only)
-npm run lint:fix      # Auto-fix lint & format errors
+npm run lint:fix      # Auto-fix lint & format issues; fails if a warning remains
 npm run format        # Auto-format all files
 ```
 
 **CI enforcement:**
-Pull requests are checked by a dedicated `lint` job in CI. Merging is blocked until the codebase passes `npm run lint`, which runs `biome ci --error-on-warnings`, so a Biome warning fails the job just like an error. Fix the warning, or, where the rule is wrong for that site, suppress it with a justification: `// biome-ignore lint/<group>/<rule>: <why>`.
+Pull requests are checked by a dedicated `lint` job in CI that runs `npm run lint` (`biome ci --error-on-warnings .`): a Biome warning fails it just like an error, while info-level diagnostics are reported but do not fail it. `main` has no branch protection, so treat a red `lint` job as merge-blocking; nothing enforces it mechanically. Fix the warning, or, where the rule is wrong for that site, suppress it with a justification: `// biome-ignore lint/<group>/<rule>: <why>`.
 
 ## Adding an Example Dossier
 

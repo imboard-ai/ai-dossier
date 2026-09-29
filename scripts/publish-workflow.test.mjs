@@ -92,16 +92,14 @@ describe('publish-packages.yml fail-safe contract (#846)', () => {
   it('flags a report step that a failed publish step would skip', () => {
     const text = readWorkflow().replace(/\n[ \t]*if: \$\{\{ !cancelled\(\) \}\}/, '');
     expect(failSafeViolations(text)).toEqual([
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub Actions expression, not a JS placeholder
-      'Fail on version collisions: must run if: ${{ !cancelled() }}',
+      `Fail on version collisions: must run if: \${{ !cancelled() }}`,
     ]);
   });
 
   it('ignores a commented-out condition', () => {
     const text = readWorkflow().replace(
       /\n([ \t]*)if: \$\{\{ !cancelled\(\) \}\}/,
-      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal GitHub Actions expression, not a JS placeholder
-      '\n$1# was: if: ${{ !cancelled() }}'
+      `\n$1# was: if: \${{ !cancelled() }}`
     );
     expect(failSafeViolations(text)).toHaveLength(1);
   });
