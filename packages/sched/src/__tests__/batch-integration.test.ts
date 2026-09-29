@@ -6725,6 +6725,51 @@ describe('#793: every aggregate-suite re-run carries the batch context (DOSSIER_
     expect(findBatch(h.store.load(), batchId)?.status).toBe('reviewing'); // the green re-check was consumed
   });
 
+  it('#912: a red fix attempt evicts the offender (fixing → validating → evicting) instead of blocking reconcile-error', () => {
+    const batchId = 'b-912-red';
+    const h = ctxHarness(
+      batchId,
+      // Red for the fix-slot re-check, green for the survivors' re-run after the eviction.
+      (call) =>
+        call === 1
+          ? { ok: false, failing: [{ file: 'src/a.test.ts', name: 't', id: 'src/a.test.ts::t' }] }
+          : { ok: true, failing: [] },
+      (s) => {
+        let state = transitionBatch(s, batchId, 'validating', {}, at);
+        state = transitionBatch(state, batchId, 'attributing', {}, at);
+        state = transitionBatch(state, batchId, 'fixing', {}, at);
+        state = patchBatch(
+          state,
+          batchId,
+          {
+            fix_attempts: [
+              { issue: 7931, tier: 'mid', outcome: 'dispatched', at: at.toISOString() },
+            ],
+            ranges: [
+              { issue: 7931, from: SHA, to: SHA, commits: [SHA], positions: [0] },
+            ] as SchedState['batches'][number]['ranges'],
+          },
+          at
+        );
+        const assigned = assignToIdleSlot(state, `batch:${batchId}`, 'fix', at);
+        return transitionSlot(
+          assigned.state,
+          assigned.slotId,
+          'running',
+          { pid: 4243, pid_start: null, phase: 'fixing' },
+          at
+        );
+      }
+    );
+
+    h.tick(); // fix agent dead → suite still red → resolve red → evict the offender
+
+    const batch = findBatch(h.store.load(), batchId);
+    expect(batch?.blocked_reason ?? null).toBeNull();
+    expect(batch?.status).not.toBe('blocked');
+    expect(batch?.evictions?.map((e) => e.issue)).toEqual([7931]);
+  });
+
   it('the re-run inside recovery (recoveryDeps.runSuite, after an eviction) passes { batchId, baseRef }', () => {
     const batchId = 'b-793-evict';
     const h = ctxHarness(

@@ -155,7 +155,19 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   // read but named no offender. Nothing is requeued or reverted for `blocked`.
   // A member admitted while the suite runs returns the batch to execution;
   // the aggregate suite must run again before final review can begin.
-  validating: ['executing', 'attributing', 'reviewing', 'dissolving', 'blocked', 'stopped'],
+  // → evicting (#912): a red fix attempt (`resolveFixAttempt(..., 'red')`) lands
+  // the batch in `validating` with the suite re-run already red and the offender
+  // already attributed; RFC F.2's "one fix attempt, then evict" goes straight to
+  // eviction rather than re-attributing the same offender.
+  validating: [
+    'executing',
+    'attributing',
+    'evicting',
+    'reviewing',
+    'dissolving',
+    'blocked',
+    'stopped',
+  ],
   // `dissolving` because attribution can legitimately name nobody (bisect
   // absent, errored, or unattributable) — without the edge, an unattributable
   // red suite is a dead end with no way out but fixing or evicting a member the
