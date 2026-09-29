@@ -47,7 +47,14 @@ export interface UsageRow {
   unit: string | null;
   /** `prep` when the row is batch-prep spend attributed to `batch` by enqueue-time session capture (#796). */
   role?: 'prep';
+  /** For `role: 'prep'`: how the attributing window's start was found (#899). */
+  prep_basis?: PrepBasis;
+  /** For `role: 'prep'`: how many sibling batches (one enqueue) this row's window was split across, when > 1. */
+  prep_split?: number;
 }
+
+/** `marker` = the session's first batch-issues-preparation run; `prev-enqueue` / `lookback-cap` = upper bounds. */
+export type PrepBasis = 'marker' | 'prev-enqueue' | 'lookback-cap';
 
 /** A provider limit / rate-limit wall observed in a source store. */
 export interface LimitEvent {

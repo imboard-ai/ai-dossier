@@ -1092,7 +1092,11 @@ function recordPrepSession(
   if (batches.length === 0) return;
   const sessionId = flag ?? currentSessionId();
   if (!sessionId) return;
-  recordBatchPrep(store.dir, batches, sessionId, flag ? 'flag' : 'env');
+  const members = new Map<string, number>();
+  for (const i of inputs) {
+    if (typeof i.batch === 'string') members.set(i.batch, (members.get(i.batch) ?? 0) + 1);
+  }
+  recordBatchPrep(store.dir, batches, sessionId, flag ? 'flag' : 'env', new Date(), members);
 }
 
 /** Append one `label-blocked`/`label-check-failed` journal event per outcome (#507 AC3). */
@@ -1805,6 +1809,8 @@ function runBatchStats(opts: StatsOptions & { batch: string }): void {
   const prep = batchPrepTokens(store.dir, [opts.batch]).get(opts.batch) ?? null;
   amortization.prep_tokens = prep?.billable_tokens ?? null;
   amortization.prep_sessions = prep?.sessions ?? 0;
+  amortization.prep_basis = prep?.basis ?? null;
+  amortization.prep_split = prep?.split ?? false;
 
   if (opts.json) {
     console.log(

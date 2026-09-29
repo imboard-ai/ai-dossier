@@ -1424,9 +1424,13 @@ ai-dossier sched stats [--issues 4,5|4..9] [--batch b1 --project owner-repo] [--
 Batch-prep cost (#796): `sched enqueue` records the calling Claude Code session
 (`CLAUDE_CODE_SESSION_ID`, or `--prep-session <id>`) per batch in
 `~/.dossier/sched/<project>/batch-prep.jsonl`. The usage ledger attributes that session's tokens
-(subagents included; window = since the session's previous enqueue, max 6h) to `batch:<id>`, and
-`sched stats --batch` / the model scorecard report them as `prep_tokens` — separate from, never
-inside, the per-member figures. An upper bound; batches formed before #796 read `n/a`.
+(subagents included) to `batch:<id>`, and `sched stats --batch` / the model scorecard report them
+as `prep_tokens` — separate from, never inside, the per-member figures. The window (#899) starts at
+the session's first `ai-dossier run …/batch-issues-preparation` after its previous enqueue (read
+from `runs.jsonl`; `basis: marker` — exact start) and ends at the enqueue; with no such run it falls
+back to the previous enqueue, then to a 6h cap, and says so (`upper bound`). One enqueue that
+creates several batches splits its window's tokens across them by member count, so per-batch
+figures sum to the window total. Batches formed before #796 read `n/a`.
 
 The deterministic core of batch cycles (RFC-0001): a queue, worker slots, typed
 issue/batch/slot state machines persisted to `~/.dossier/sched/<project>/state.json`
@@ -1837,10 +1841,14 @@ to `~/.dossier/caps.jsonl`. Full spec and the capability id vocabulary:
 ai-dossier usage window [--last 5h] [--until <iso>] [--provider anthropic] [--source claude-code,opencode] [--top 10] [--limit-window 5h] [--json]
 ai-dossier usage --batch <id> | --issue <n> [--since 30d] [--json]
 ai-dossier usage watch [--last 1h] [--interval 30s] [--iterations N]
+ai-dossier usage sync [--hosts hcc,hcc2] [--since <when>] [--no-push|--no-pull] [--json]
+ai-dossier usage export [--all] [--since <when>] [--out <file>] | usage import <file|-> | usage hosts
+# window / --batch / --issue / watch also take: --hosts all|local|a,b   (merged multi-host ledger)
 ```
 
 One ledger over every place tokens are recorded on this host (#769), read on demand and
-**read-only** (nothing is written; `opencode.db` is opened `readOnly`):
+**read-only** (the views write nothing; `opencode.db` is opened `readOnly`; only `usage
+sync`/`export`/`import` write the persisted ledger below):
 
 | Store | What it contributes |
 |---|---|
@@ -1858,8 +1866,25 @@ shown as `×N`). "model attributed" is the share of tokens carrying a concrete m
 attributed from sched dispatch logs when a session was dispatched, else heuristically from the
 git branch / worktree name (`issue_source: "branch"` in `--json`).
 
-Not yet: a persisted ledger and multi-host merge (`usage sync`) — rows carry `host` so they can
-be merged later.
+### Persisted ledger + multi-host merge (#782)
+
+Claude Max / OpenAI quotas are per account, not per host, and Claude Code purges old
+transcripts — so `usage sync` persists this host's rows under `~/.dossier/usage/hosts/<host>.jsonl`
+(`$DOSSIER_USAGE_DIR`; host id = `os.hostname()`, or `$DOSSIER_USAGE_HOST`). **One file per host**, so
+merging never conflicts: a host's file is written only from that host's own collection, or by
+importing that same host's bundle. Each line is `{"k":"row","key":<stable hash of host+source+
+session+ts+model+tokens>,"row":{…UsageRow}}` (or `"k":"limit"`); re-collecting or re-importing
+upserts by key, so everything is idempotent, and later attribution refinements replace the row in place.
+`sync` resumes from the ledger's newest row (minus a 1-day overlap; first run 30d).
+
+Transport is the ssh the fleet already uses — no new secrets or services: `usage sync --hosts
+hcc,hcc2`, run from **wls** (the only host with ssh reach), pulls each host's bundle
+(`ssh <h> ai-dossier usage export --all`), merges it, then pushes every other host's rows back
+(`ssh <h> ai-dossier usage import -`), so one run leaves every host with all hosts. Bundles also move
+by hand: `usage export --out f.jsonl` → `usage import f.jsonl`. `scripts/refresh-fleet.sh --usage-sync`
+runs it after the CLI refresh. Reports opt in with `--hosts all|local|a,b` (default stays live-local)
+and gain a **By host** table; a purged transcript still reports from the persisted rows. Batch-prep
+tokens stay host-local (a batch is prepared and enqueued on one host).
 
 ---
 
