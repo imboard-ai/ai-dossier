@@ -9,6 +9,7 @@
  * duration_ms, reason, signal, cwd, timestamp.
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 import type { CapabilityOutcome } from './capability';
 import { CONFIG_DIR } from './config';
@@ -27,6 +28,12 @@ export interface CapLogEntry {
   cwd: string;
   /** Last bytes of combined stdout+stderr on a non-ok outcome (#583 AC1/AC3). */
   output_tail?: string;
+  /** `git rev-parse HEAD` when cwd is a git work tree (#941). */
+  git_head?: string;
+  /** `git rev-parse HEAD^{tree}` when cwd is a git work tree (#941). */
+  git_tree?: string;
+  /** `git status --porcelain` was non-empty when the run started (#941). */
+  dirty?: boolean;
 }
 
 const CAP_LOG_FILE = path.join(CONFIG_DIR, 'caps.jsonl');
@@ -37,6 +44,42 @@ const CAP_LOG_FILE = path.join(CONFIG_DIR, 'caps.jsonl');
  */
 export function appendCapLog(entry: CapLogEntry): void {
   appendAuditJsonl(CAP_LOG_FILE, entry);
+}
+
+/**
+ * Latest `ok` row for `capability` that verified exactly `tree` on a clean
+ * working tree. A dirty row (or one without git fields) never matches: its
+ * verdict may describe uncommitted code. Null when nothing qualifies.
+ */
+export function findLastOk(
+  capability: string,
+  tree: string,
+  file: string = CAP_LOG_FILE
+): CapLogEntry | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  const lines = raw.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i]) continue;
+    try {
+      const row = JSON.parse(lines[i]) as CapLogEntry;
+      if (
+        row.capability === capability &&
+        row.outcome === 'ok' &&
+        row.git_tree === tree &&
+        row.dirty === false
+      ) {
+        return row;
+      }
+    } catch {
+      // A torn or foreign line must not hide older valid rows.
+    }
+  }
+  return null;
 }
 
 export { CAP_LOG_FILE };

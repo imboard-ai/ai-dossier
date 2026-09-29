@@ -166,6 +166,13 @@ Every `cap run` — all four outcomes included — appends one JSON line to
 and (non-`ok` outcomes only, #583) `output_tail`. This mirrors the `runs.jsonl` dossier
 telemetry but stays a separate file because a capability execution is not a dossier run.
 
+When `cwd` is a git work tree the row also records what was verified (#941): `git_head`
+(`git rev-parse HEAD`), `git_tree` (`HEAD^{tree}`) and `dirty` (`git status --porcelain`
+was non-empty when the run started; a dirty pass may describe uncommitted code). Rows outside
+a work tree omit all three. `ai-dossier cap last-ok <id> --tree <sha>` prints the latest
+clean `ok` row for that tree and exits 0, or exits 1 with no output (a dirty row never
+matches), so a passing gate can be reused by tree.
+
 ## Capability id vocabulary
 
 Reserved vocabulary for cross-repo consistency (ids are a convention, not enforced —

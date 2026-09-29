@@ -4,6 +4,7 @@
  *   cap init [--print]       scaffold a manifest from the detected project (#645)
  *   cap list [--json]        inspect .dossier/automation/manifest.yaml
  *   cap run <id> [-- args]   execute one capability
+ *   cap last-ok <id> --tree <sha>   did this exact tree already pass? (#941)
  *
  * `cap run` owns its exit codes (the four-way outcome contract):
  *   0 ok · 1 task-failed · 2 automation-broken · 3 capability-unavailable
@@ -16,8 +17,9 @@
 import { findDossierRoot } from '@ai-dossier/sched';
 import type { Command } from 'commander';
 import { CAP_ENVELOPE_FILE_ENV, CAP_ENVELOPE_MARKER, writeCapEnvelopeFile } from '../cap-envelope';
+import { captureGitState } from '../cap-git';
 import { initManifest, missingGateCapabilities, scaffoldManifest } from '../cap-init';
-import { appendCapLog } from '../cap-log';
+import { appendCapLog, findLastOk } from '../cap-log';
 import {
   AUTOMATION_DIR,
   CAPABILITY_EXIT_CODES,
@@ -176,6 +178,18 @@ export function registerCapCommand(program: Command): void {
     });
 
   cap
+    .command('last-ok <id>')
+    .description(
+      'Did this exact tree already pass? Prints the latest clean `ok` caps.jsonl row for <id> at --tree and exits 0; exits 1 (no output) when none, or only a dirty run, exists (#941)'
+    )
+    .requiredOption('--tree <sha>', 'git tree sha (`git rev-parse HEAD^{tree}`)')
+    .action((id: string, opts: { tree: string }) => {
+      const row = findLastOk(id, opts.tree);
+      if (!row) process.exit(1);
+      console.log(JSON.stringify(row));
+    });
+
+  cap
     .command('run <id> [args...]')
     .description(
       'Execute one capability; extra args after -- are shell-quoted and appended to the command. ' +
@@ -196,6 +210,8 @@ export function registerCapCommand(program: Command): void {
       if (!Number.isFinite(tailBytes) || tailBytes < 0) {
         fail([`--tail-bytes must be a non-negative number, got '${opts.tailBytes}'`]);
       }
+      // Captured BEFORE the run: `dirty` describes the tree the run verified.
+      const gitState = captureGitState(cwd);
       const result = runCapabilityFromCwd(id, args, cwd, tailBytes);
 
       // The verdict channel is written FIRST: nothing after this point (the
@@ -224,6 +240,7 @@ export function registerCapCommand(program: Command): void {
           reason: result.reason,
           signal: result.signal,
           cwd,
+          ...(gitState ?? {}),
           ...(result.output_tail !== undefined ? { output_tail: result.output_tail } : {}),
         });
       } catch (err) {
