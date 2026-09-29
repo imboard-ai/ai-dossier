@@ -108,6 +108,12 @@ export interface IssueCloseTruth {
    */
   closingPrs: ClosingPr[];
   /**
+   * #850: GitHub reported more closing references than the one page read
+   * (`pageInfo.hasNextPage`), so `closingPrs` is only a prefix of the list —
+   * finding no reference that vouches in it is not a verified refusal.
+   */
+  closingPrsTruncated: boolean;
+  /**
    * When the issue was last REOPENED (#799): an ISO timestamp, `null` when the
    * timeline verifiably holds no reopen, `undefined` when it could not be read.
    * A closing reference merged BEFORE the last reopen did not finish the issue
@@ -115,6 +121,14 @@ export interface IssueCloseTruth {
    * an unreadable reopen time is never read as "never reopened".
    */
   lastReopenedAt: string | null | undefined;
+  /**
+   * When the issue was last CLOSED (#850): an ISO timestamp, `null` when it is
+   * open or the time could not be read. A closing reference that merged after
+   * this did not back the close, so it cannot vouch for it — whether or not
+   * GitHub links a `Closes #N` added to a PR body after the fact. A closed
+   * issue with no readable close time is never read as "no bound".
+   */
+  closedAt: string | null;
 }
 
 /** A PR that references an issue as closed by it (#768). */
@@ -486,7 +500,9 @@ export function createExecGroundTruth(
             labels: [],
             closer: null,
             closingPrs: [],
+            closingPrsTruncated: false,
             lastReopenedAt: null,
+            closedAt: null,
           };
     };
     truth.mergedPrForBranch = (
@@ -563,18 +579,26 @@ export function parseRepoName(repo: string): { owner: string; name: string } | n
  */
 const ISSUE_LABEL_PAGE_SIZE = 100;
 
+/**
+ * How many closing references `issueCloseTruth` reads. A longer list is
+ * flagged `closingPrsTruncated` (#850) rather than read as complete: a
+ * reference that vouches for a hand close could be on the next page.
+ */
+const CLOSING_REF_PAGE_SIZE = 10;
+
 /** A full or abbreviated git object id. */
 export const GIT_OID_RE = /^[0-9a-f]{7,40}$/i;
 
 /**
- * GraphQL for `issueCloseTruth` — one round trip for state, reason, labels,
- * closer, closing references and the last reopen (#799; aliased `reopens`
- * because `timelineItems` is already queried for the close event).
+ * GraphQL for `issueCloseTruth` — one round trip for state, reason, close
+ * time, labels, closer, closing references and the last reopen (#799; aliased
+ * `reopens` because `timelineItems` is already queried for the close event).
  */
 const ISSUE_CLOSE_QUERY =
   'query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){' +
-  `state stateReason labels(first:${ISSUE_LABEL_PAGE_SIZE}){pageInfo{hasNextPage} nodes{name}} ` +
-  'closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number merged mergedAt baseRefName repository{nameWithOwner}}} ' +
+  `state stateReason closedAt labels(first:${ISSUE_LABEL_PAGE_SIZE}){pageInfo{hasNextPage} nodes{name}} ` +
+  `closedByPullRequestsReferences(first:${CLOSING_REF_PAGE_SIZE},includeClosedPrs:true){pageInfo{hasNextPage} ` +
+  'nodes{number merged mergedAt baseRefName repository{nameWithOwner}}} ' +
   'reopens:timelineItems(itemTypes:[REOPENED_EVENT],last:1){nodes{... on ReopenedEvent{createdAt}}} ' +
   'timelineItems(itemTypes:[CLOSED_EVENT],last:1){nodes{... on ClosedEvent{closer{__typename ' +
   '... on PullRequest{number merged baseRefName repository{nameWithOwner}} ... on Commit{oid}}}}}}}}';
@@ -652,7 +676,13 @@ export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth
       closer = { kind: 'commit', oid: c.oid };
     }
   }
-  const refNodes = (obj.closedByPullRequestsReferences as { nodes?: unknown } | undefined)?.nodes;
+  const refConn = obj.closedByPullRequestsReferences as
+    | { nodes?: unknown; pageInfo?: { hasNextPage?: unknown } }
+    | null
+    | undefined;
+  const refNodes = refConn?.nodes;
+  // #850: more references than one page — `closingPrs` is only a prefix.
+  const closingPrsTruncated = refConn?.pageInfo?.hasNextPage === true;
   const closingPrs: ClosingPr[] = [];
   for (const n of Array.isArray(refNodes) ? refNodes : []) {
     const pr = n as {
@@ -681,7 +711,18 @@ export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth
     const lastReopen = reopenNodes[reopenNodes.length - 1] as { createdAt?: unknown } | null;
     lastReopenedAt = parseableTimestamp(lastReopen?.createdAt) ?? undefined;
   }
-  return { state, stateReason, labels, closer, closingPrs, lastReopenedAt };
+  // #850: an unparseable close time is `null` (unreadable), never a guessed time.
+  const closedAt = parseableTimestamp(obj.closedAt);
+  return {
+    state,
+    stateReason,
+    labels,
+    closer,
+    closingPrs,
+    closingPrsTruncated,
+    lastReopenedAt,
+    closedAt,
+  };
 }
 
 /**

@@ -1607,13 +1607,19 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   PR of the project's repository, MERGED into the base, that GitHub lists as closing
   the issue (`closedByPullRequestsReferences` — `Closes #N` parsed but not acted on,
   the imboard#4116 shape); that still needs a merge, i.e. write access. That reference must
-  also have merged AFTER the member's last reopen (#799): one merged before it did not finish
-  the issue — that is why it was reopened — so it reads `member-closed-by-hand-ref-pr-<n>-predates-reopen`
-  (or `…-merge-time-unreadable`), and a reopen timeline that cannot be read reads
-  `member-closed-by-hand-reopen-unreadable` — needs-operator either way, never closable. A member
-  never reopened is unaffected. Remedy: a new PR or commit that closes the member, or close the
-  anchor by hand. A member issue that no longer resolves
-  (deleted/transferred) reads `member-missing` — needs-operator, not an outage.
+  also have merged inside the member's last open stretch: strictly AFTER its last reopen (#799)
+  — one merged before it did not finish the issue, that is why it was reopened
+  (`member-closed-by-hand-ref-pr-<n>-predates-reopen`) — and no later than its close (#850,
+  every hand close, reopened or not) — one merged after the close did not back it, whether or
+  not GitHub links a `Closes #N` edited into a PR body after the fact (`…-postdates-close`). A
+  time that cannot be read fails closed: `…-merge-time-unreadable`,
+  `member-closed-by-hand-reopen-unreadable`, `member-closed-by-hand-close-time-unreadable` —
+  needs-operator every time, never closable. The reference list is read one page (10) deep; a
+  longer list whose first page holds no reference that vouches reads `unknown`
+  (`member-closed-by-hand-refs-truncated`, #850), not a refusal — one may be on the next page.
+  Remedy: a new PR or commit that closes the member, or close the anchor by hand. A member
+  issue that no longer resolves (deleted/transferred) reads `member-missing` — needs-operator,
+  not an outage.
 - **Never over a failure trail.** Any evicted member, any member in a failure status
   (`ISSUE_UNIVERSAL_FAILURE_EDGES` + `evicted`/`handed-back`/`requeued`), any member requeued out of
   the batch, a dissolved/stopped batch, or a `decision-pending` label on the anchor or a
@@ -1691,7 +1697,8 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
 Everything else is surfaced, never closed: `sched status --anchors` (opt-in; `status`
 makes no GitHub call without it) lists each still-open anchor of a batch no longer in
 flight as `closable`, `needs-operator` or `unknown`, with every member's GitHub and
-ledger state, stopping its reads at the first failed one. A blocked batch milestone now
+ledger state, stopping its reads at the first failed one (a truncated reference list's
+`unknown` is not a failed read and stops nothing, #850). A blocked batch milestone now
 reads `next=operator`, not `next=done`.
 
 Journal: `anchor-closed` (including "found already closed") and `anchor-close-failed`

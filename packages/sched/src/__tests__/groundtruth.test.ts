@@ -1232,6 +1232,7 @@ describe('parseIssueCloseTruthJson (#768)', () => {
         wrap({
           state: 'CLOSED',
           stateReason: 'COMPLETED',
+          closedAt: '2026-09-12T10:00:00Z',
           labels: { nodes: [{ name: 'cycle:slot' }] },
           timelineItems: {
             nodes: [
@@ -1260,6 +1261,8 @@ describe('parseIssueCloseTruthJson (#768)', () => {
         repo: 'imboard-ai/imboard',
       },
       closingPrs: [],
+      closingPrsTruncated: false,
+      closedAt: '2026-09-12T10:00:00Z',
     });
   });
 
@@ -1380,8 +1383,84 @@ describe('parseIssueCloseTruthJson (#768)', () => {
     expect(query).toContain('reopens:timelineItems(itemTypes:[REOPENED_EVENT],last:1)');
     expect(query).toContain('... on ReopenedEvent{createdAt}');
     expect(query).toMatch(
-      /closedByPullRequestsReferences\([^)]*\)\{nodes\{number merged mergedAt /
+      /closedByPullRequestsReferences\([^)]*\)\{pageInfo\{hasNextPage\} nodes\{number merged mergedAt /
     );
+  });
+
+  describe('#850: the close time and whether the closing-reference list is complete', () => {
+    const closedAt = (value: unknown) =>
+      parseIssueCloseTruthJson(wrap({ state: 'CLOSED', stateReason: 'COMPLETED', closedAt: value }))
+        ?.closedAt;
+    const truncatedBy = (refs: unknown) =>
+      parseIssueCloseTruthJson(
+        wrap({ state: 'CLOSED', stateReason: 'COMPLETED', closedByPullRequestsReferences: refs })
+      );
+
+    it("reads the issue's closedAt; a missing or unparseable one is null (unreadable), never a guessed time", () => {
+      expect(closedAt('2026-09-12T10:00:00Z')).toBe('2026-09-12T10:00:00Z');
+      expect(closedAt('2026-09-12T10:00:00.5Z')).toBe('2026-09-12T10:00:00.5Z');
+      expect(closedAt(undefined)).toBeNull();
+      expect(closedAt(null)).toBeNull();
+      expect(closedAt('garbage')).toBeNull();
+      expect(closedAt(1757671200000)).toBeNull();
+      // Loose strings `Date.parse` would accept are not GitHub's format either.
+      expect(closedAt('1')).toBeNull();
+      expect(closedAt('2026-09-12 10:00:00')).toBeNull();
+    });
+
+    it('flags a reference page GitHub says has more behind it; the page read is still kept', () => {
+      const parsed = truncatedBy({
+        pageInfo: { hasNextPage: true },
+        nodes: [
+          { number: 4255, merged: true, mergedAt: '2026-09-10T10:00:00Z', baseRefName: 'main' },
+        ],
+      });
+      expect(parsed?.closingPrsTruncated).toBe(true);
+      expect(parsed?.closingPrs.map((pr) => pr.number)).toEqual([4255]);
+    });
+
+    it('only an explicit hasNextPage: true is truncated — a complete, missing or garbled pageInfo reads complete', () => {
+      for (const refs of [
+        { pageInfo: { hasNextPage: false }, nodes: [] },
+        { nodes: [] },
+        { pageInfo: null, nodes: [] },
+        { pageInfo: { hasNextPage: 'true' }, nodes: [] },
+        null,
+        undefined,
+      ]) {
+        const parsed = truncatedBy(refs);
+        expect(parsed?.closingPrsTruncated).toBe(false);
+        expect(parsed?.closingPrs).toEqual([]);
+      }
+    });
+
+    it("the close query asks GitHub for the issue's closedAt and the reference page's hasNextPage", () => {
+      let query = '';
+      const gt = createExecGroundTruth(
+        (_cmd, args) => {
+          query ||= args.find((a) => a.startsWith('query=')) ?? '';
+          return null;
+        },
+        { repo: 'o/r' }
+      );
+      gt.issueCloseTruth?.(1);
+      expect(query).toContain('issue(number:$n){state stateReason closedAt ');
+      expect(query).toContain(
+        'closedByPullRequestsReferences(first:10,includeClosedPrs:true){pageInfo{hasNextPage} nodes{'
+      );
+    });
+
+    it('a MISSING issue carries no close time and a complete (empty) reference list', () => {
+      const exec: ExecFn = (_file, args) =>
+        args[0] === 'api' && args[1] === 'graphql' ? null : 'imboard-ai/imboard';
+      const gt = createExecGroundTruth(exec, { repo: 'imboard-ai/imboard' });
+      expect(gt.issueCloseTruth?.(99999)).toMatchObject({
+        state: 'MISSING',
+        closingPrs: [],
+        closingPrsTruncated: false,
+        closedAt: null,
+      });
+    });
   });
 
   it('keeps NOT_PLANNED distinct from COMPLETED, and an open issue as OPEN', () => {

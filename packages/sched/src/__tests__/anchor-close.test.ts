@@ -16,12 +16,14 @@ import { describe, expect, it } from 'vitest';
 import {
   batchAnchorStillOpen,
   classifyOrphanAnchor,
+  membersShippedVerdict,
   type OpenAnchorIssue,
   ORPHAN_SWEEP_MAX_ANCHORS,
   ORPHAN_SWEEP_MAX_MEMBERS,
   orphanAnchorListArgs,
   parseOrphanAnchorBody,
   shippingEvidence,
+  sweepAnchors,
   sweepOrphanAnchors,
 } from '../anchor-close';
 import type { ClosingPr, IssueCloseTruth } from '../groundtruth';
@@ -30,6 +32,7 @@ import {
   createEmptyState,
   createExecGroundTruth,
   type ExecFn,
+  enqueueEntries,
   issueCloseReader,
   type OrphanAnchorVerdict,
   type SchedState,
@@ -53,7 +56,9 @@ function truth(overrides: Partial<IssueCloseTruth> = {}): IssueCloseTruth {
     labels: [],
     closer: null,
     closingPrs: [],
+    closingPrsTruncated: false,
     lastReopenedAt: null,
+    closedAt: null,
     ...overrides,
   };
 }
@@ -665,36 +670,54 @@ describe('#790 batchAnchorStillOpen (the abandon-warning predicate)', () => {
   });
 });
 
-describe("#799 a closing reference must postdate the member's last reopen", () => {
-  const MERGED_SEP_10 = '2026-09-10T10:00:00Z';
-  const REOPENED_SEP_11 = '2026-09-11T10:00:00Z';
-  const MERGED_SEP_12 = '2026-09-12T10:00:00Z';
+// --- #799 / #850: a hand-closed member vouched for only by its closing references ---
 
-  const ref = (mergedAt: string | null, number = 4255): ClosingPr => ({
-    number,
-    merged: true,
-    mergedAt,
-    baseRefName: 'main',
-    repo: REPO,
+const MERGED_SEP_10 = '2026-09-10T10:00:00Z';
+const REOPENED_SEP_11 = '2026-09-11T10:00:00Z';
+const MERGED_SEP_12 = '2026-09-12T10:00:00Z';
+/** When {@link handClosed} closes a member (#850): after every merge above. */
+const CLOSED_SEP_13 = '2026-09-13T10:00:00Z';
+const MERGED_SEP_14 = '2026-09-14T10:00:00Z';
+
+const ref = (mergedAt: string | null, number = 4255): ClosingPr => ({
+  number,
+  merged: true,
+  mergedAt,
+  baseRefName: 'main',
+  repo: REPO,
+});
+
+/**
+ * A member closed as COMPLETED by hand (no closer) at {@link CLOSED_SEP_13},
+ * vouched for only by `closingPrs`; `more` overrides any other field (#850:
+ * `closedAt`, `closingPrsTruncated`).
+ */
+const handClosed = (
+  closingPrs: ClosingPr[],
+  lastReopenedAt: IssueCloseTruth['lastReopenedAt'],
+  more: Partial<IssueCloseTruth> = {}
+): IssueCloseTruth =>
+  truth({
+    state: 'CLOSED',
+    stateReason: 'COMPLETED',
+    closer: null,
+    closingPrs,
+    lastReopenedAt,
+    closedAt: CLOSED_SEP_13,
+    ...more,
   });
 
-  /** A member closed as COMPLETED by hand (no closer), vouched for only by `closingPrs`. */
-  const handClosed = (
-    closingPrs: ClosingPr[],
-    lastReopenedAt: IssueCloseTruth['lastReopenedAt']
-  ): IssueCloseTruth =>
-    truth({ state: 'CLOSED', stateReason: 'COMPLETED', closer: null, closingPrs, lastReopenedAt });
+/** The anchor verdict for one member, through the same predicate the sweep uses. */
+const anchorVerdictFor = (member: IssueCloseTruth): OrphanAnchorVerdict =>
+  expectVerdict(
+    classifyOrphanAnchor(
+      { anchor: 4244, members: [4116], base_branch: 'main' },
+      readerFrom({ 4244: truth({ state: 'OPEN' }), 4116: member }),
+      { repo: REPO }
+    )
+  );
 
-  /** The anchor verdict for one member, through the same predicate the sweep uses. */
-  const anchorVerdictFor = (member: IssueCloseTruth): OrphanAnchorVerdict =>
-    expectVerdict(
-      classifyOrphanAnchor(
-        { anchor: 4244, members: [4116], base_branch: 'main' },
-        readerFrom({ 4244: truth({ state: 'OPEN' }), 4116: member }),
-        { repo: REPO }
-      )
-    );
-
+describe("#799 a closing reference must postdate the member's last reopen", () => {
   it('merged PR → reopen → hand close ⇒ refused, anchor needs-operator', () => {
     const member = handClosed([ref(MERGED_SEP_10)], REOPENED_SEP_11);
     expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
@@ -732,14 +755,12 @@ describe("#799 a closing reference must postdate the member's last reopen", () =
     });
   });
 
-  it('never reopened ⇒ unchanged: the merged closing reference vouches, merge time not required', () => {
-    for (const mergedAt of [MERGED_SEP_10, null]) {
-      const member = handClosed([ref(mergedAt)], null);
-      expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
-        shipped: 'PR #4255 (closing reference; issue closed by hand)',
-      });
-      expect(anchorVerdictFor(member).kind).toBe('orphan-closable-candidate');
-    }
+  it('never reopened ⇒ no reopen bound: the merged closing reference vouches (its merge time is still needed, #850)', () => {
+    const member = handClosed([ref(MERGED_SEP_10)], null);
+    expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
+      shipped: 'PR #4255 (closing reference; issue closed by hand)',
+    });
+    expect(anchorVerdictFor(member).kind).toBe('orphan-closable-candidate');
   });
 
   it('an unreadable reopen timeline ⇒ refused, never closable', () => {
@@ -796,6 +817,7 @@ describe("#799 a closing reference must postdate the member's last reopen", () =
           graphqlIssue({
             state: 'CLOSED',
             stateReason: 'COMPLETED',
+            closedAt: CLOSED_SEP_13,
             closer: null,
             reopens,
             closingRefs: [
@@ -826,5 +848,367 @@ describe("#799 a closing reference must postdate the member's last reopen", () =
     expect(verdictOver({ nodes: [] }).kind).toBe('orphan-closable-candidate');
     // Reopen connection missing from the payload: unreadable, fail closed.
     expect(verdictOver(null).reasons).toEqual(['member-closed-by-hand-reopen-unreadable:#4116']);
+  });
+});
+
+/** A ledger holding `specs` as blocked batches with anchors, each member a slot entry of its batch. */
+function blockedLedger(
+  specs: Array<{ id: string; anchor: number; members: number[] }>
+): SchedState {
+  const state = enqueueEntries(
+    createEmptyState(),
+    specs.flatMap((s) => s.members.map((issue) => ({ issue, mode: 'slot' as const, batch: s.id }))),
+    NOW
+  );
+  return {
+    ...state,
+    batches: state.batches.map((b) => ({
+      ...b,
+      status: 'blocked' as const,
+      anchor: specs.find((s) => s.id === b.id)?.anchor ?? null,
+    })),
+  };
+}
+
+describe("#850 a closing reference must not postdate the member's close", () => {
+  it('merged PR AFTER the hand close ⇒ refused, anchor needs-operator', () => {
+    const member = handClosed([ref(MERGED_SEP_14)], null);
+    expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
+      refused: 'closed-by-hand-ref-pr-4255-postdates-close',
+    });
+    const verdict = anchorVerdictFor(member);
+    expect(verdict.kind).toBe('orphan-needs-operator');
+    expect(verdict.reasons).toEqual(['member-closed-by-hand-ref-pr-4255-postdates-close:#4116']);
+  });
+
+  it('merged at the very instant of the close ⇒ shipped (at or before the close counts)', () => {
+    expect(
+      shippingEvidence(handClosed([ref(CLOSED_SEP_13)], null), 'main', REPO, undefined)
+    ).toEqual({ shipped: 'PR #4255 (closing reference; issue closed by hand)' });
+  });
+
+  it('reopened: only a reference inside (last reopen, close] vouches — neither neighbour masks it', () => {
+    const early = ref(MERGED_SEP_10, 4200);
+    const late = ref(MERGED_SEP_14, 4201);
+    expect(
+      shippingEvidence(
+        handClosed([early, late, ref(MERGED_SEP_12)], REOPENED_SEP_11),
+        'main',
+        REPO,
+        undefined
+      )
+    ).toEqual({ shipped: 'PR #4255 (closing reference; issue closed by hand)' });
+    expect(anchorVerdictFor(handClosed([early, late], REOPENED_SEP_11)).kind).toBe(
+      'orphan-needs-operator'
+    );
+  });
+
+  it('a close time that cannot be read ⇒ refused, never closable — even never reopened with a readable merge time', () => {
+    // `undefined` is what an IssueCloseTruth producer that predates the field hands over.
+    for (const closedAt of [null, undefined, 'not-a-date']) {
+      const member = handClosed([ref(MERGED_SEP_12)], null, {
+        closedAt: closedAt as string | null,
+      });
+      expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
+        refused: 'closed-by-hand-close-time-unreadable',
+      });
+      const verdict = anchorVerdictFor(member);
+      expect(verdict.kind).toBe('orphan-needs-operator');
+      expect(verdict.reasons).toEqual(['member-closed-by-hand-close-time-unreadable:#4116']);
+    }
+  });
+
+  it("never reopened, and the reference's merge time is unreadable ⇒ refused: the close bound needs it", () => {
+    const member = handClosed([ref(null)], null);
+    expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
+      refused: 'closed-by-hand-ref-pr-4255-merge-time-unreadable',
+    });
+    expect(anchorVerdictFor(member).kind).toBe('orphan-needs-operator');
+  });
+
+  it('the refusal names the first bound that applies: merge time unreadable, then after the close, then before the reopen', () => {
+    const evidence = (refs: ClosingPr[]) =>
+      shippingEvidence(handClosed(refs, REOPENED_SEP_11), 'main', REPO, undefined);
+    expect(evidence([ref(MERGED_SEP_14, 4201), ref(null, 4202), ref(MERGED_SEP_10, 4200)])).toEqual(
+      { refused: 'closed-by-hand-ref-pr-4202-merge-time-unreadable' }
+    );
+    expect(
+      evidence([ref(MERGED_SEP_10, 4200), ref(MERGED_SEP_14, 4201), ref(MERGED_SEP_14, 4203)])
+    ).toEqual({ refused: 'closed-by-hand-ref-pr-4201+4203-postdates-close' });
+    expect(evidence([ref(MERGED_SEP_10, 4200)])).toEqual({
+      refused: 'closed-by-hand-ref-pr-4200-predates-reopen',
+    });
+  });
+
+  it('a PR or commit CLOSER is the close event itself — the close-time bound does not apply to it', () => {
+    const byPr = truth({
+      state: 'CLOSED',
+      stateReason: 'COMPLETED',
+      closer: { kind: 'pr', number: 4256, merged: true, baseRefName: 'main', repo: REPO },
+      closedAt: null,
+    });
+    expect(shippingEvidence(byPr, 'main', REPO, undefined)).toEqual({ shipped: 'PR #4256' });
+  });
+});
+
+describe('#850 a truncated closing-reference list is unknown, never a plain refusal', () => {
+  const truncated: Partial<IssueCloseTruth> = { closingPrsTruncated: true };
+  /** #799's stale-reference shape, with more references on a page never read. */
+  const TRUNCATED_MEMBER = handClosed([ref(MERGED_SEP_10)], REOPENED_SEP_11, truncated);
+  const SHIPPED_MEMBER = truth({
+    state: 'CLOSED',
+    stateReason: 'COMPLETED',
+    closer: { kind: 'pr', number: 1, merged: true, baseRefName: 'main', repo: REPO },
+  });
+
+  it('no vouching reference on the page read ⇒ unknown with its own reason', () => {
+    expect(shippingEvidence(TRUNCATED_MEMBER, 'main', REPO, undefined)).toEqual({
+      unknown: 'closed-by-hand-refs-truncated',
+    });
+    const verdict = anchorVerdictFor(TRUNCATED_MEMBER);
+    expect(verdict.kind).toBe('orphan-unknown');
+    expect(verdict.reasons).toEqual(['member-closed-by-hand-refs-truncated:#4116']);
+    // GitHub answered — this is no outage.
+    expect(verdict.unreachable).toBeUndefined();
+    // The same page, complete: the verified refusal it always was.
+    expect(
+      shippingEvidence(handClosed([ref(MERGED_SEP_10)], REOPENED_SEP_11), 'main', REPO, undefined)
+    ).toEqual({ refused: 'closed-by-hand-ref-pr-4255-predates-reopen' });
+  });
+
+  it('no qualifying reference at all on the page read ⇒ unknown, not closed-by-hand', () => {
+    const unmerged: ClosingPr = { ...ref(null, 4300), merged: false };
+    for (const refs of [[unmerged], []]) {
+      expect(shippingEvidence(handClosed(refs, null, truncated), 'main', REPO, undefined)).toEqual({
+        unknown: 'closed-by-hand-refs-truncated',
+      });
+    }
+  });
+
+  it('a vouching reference on the page read ⇒ shipped: no later page can take it back', () => {
+    const member = handClosed([ref(MERGED_SEP_12)], REOPENED_SEP_11, truncated);
+    expect(shippingEvidence(member, 'main', REPO, undefined)).toEqual({
+      shipped: 'PR #4255 (closing reference; issue closed by hand)',
+    });
+    expect(anchorVerdictFor(member).kind).toBe('orphan-closable-candidate');
+  });
+
+  it('an unreadable reopen or close time still refuses: no reference on any page could vouch', () => {
+    expect(shippingEvidence(handClosed([], undefined, truncated), 'main', REPO, undefined)).toEqual(
+      {
+        refused: 'closed-by-hand-reopen-unreadable',
+      }
+    );
+    expect(
+      shippingEvidence(
+        handClosed([ref(MERGED_SEP_12)], null, { ...truncated, closedAt: null }),
+        'main',
+        REPO,
+        undefined
+      )
+    ).toEqual({ refused: 'closed-by-hand-close-time-unreadable' });
+  });
+
+  it('a known disqualifier outranks it (needs-operator), and the undecided member is still named', () => {
+    const verdict = expectVerdict(
+      classifyOrphanAnchor(
+        { anchor: 4244, members: [4116, 4117], base_branch: 'main' },
+        readerFrom({
+          4244: truth({ state: 'OPEN' }),
+          4116: TRUNCATED_MEMBER,
+          4117: truth({ state: 'OPEN' }),
+        }),
+        { repo: REPO }
+      )
+    );
+    expect(verdict.kind).toBe('orphan-needs-operator');
+    expect(verdict.reasons).toEqual([
+      'member-open:#4117',
+      'member-closed-by-hand-refs-truncated:#4116',
+    ]);
+  });
+
+  it('the engine (non-exhaustive) stops reading at it: not closable, no further member read', () => {
+    const state = blockedLedger([{ id: 'b-850', anchor: 4244, members: [4116, 4117] }]);
+    const reads: number[] = [];
+    const verdict = membersShippedVerdict(
+      state,
+      state.batches[0],
+      (n) => {
+        reads.push(n);
+        return n === 4116 ? TRUNCATED_MEMBER : truth({ state: 'OPEN' });
+      },
+      { repo: REPO }
+    );
+    expect(verdict).toMatchObject({
+      kind: 'unknown',
+      reasons: ['member-closed-by-hand-refs-truncated:#4116'],
+    });
+    expect(reads).toEqual([4116]);
+  });
+
+  describe('the sweeps: only a FAILED read stops them', () => {
+    const TWO_BATCHES = [
+      { id: 'b-a', anchor: 4244, members: [4116] },
+      { id: 'b-b', anchor: 4300, members: [4148] },
+    ];
+    /** 4116 is `member` (absent = its read fails); 4148 shipped; both anchors open. */
+    const entriesWith = (member: IssueCloseTruth | undefined): Record<number, IssueCloseTruth> => {
+      const entries: Record<number, IssueCloseTruth> = {
+        4244: truth(),
+        4300: truth(),
+        4148: SHIPPED_MEMBER,
+      };
+      if (member !== undefined) entries[4116] = member;
+      return entries;
+    };
+    const recordingReader = (entries: Record<number, IssueCloseTruth>, reads: number[]) => {
+      const read = readerFrom(entries);
+      return (n: number) => {
+        reads.push(n);
+        return read(n);
+      };
+    };
+    const ORPHAN_LIST = (): OpenAnchorIssue[] => [
+      { number: 4244, title: 'Batch b-a: #4116', body: ANCHOR_BODY([4116]) },
+      { number: 4300, title: 'Batch b-b: #4148', body: ANCHOR_BODY([4148]) },
+    ];
+
+    it('sweepAnchors: a truncated member is unknown with its own reason, and the next batch is still read', () => {
+      const reads: number[] = [];
+      const items = sweepAnchors(
+        blockedLedger(TWO_BATCHES),
+        recordingReader(entriesWith(TRUNCATED_MEMBER), reads),
+        { repo: REPO }
+      );
+      expect(items.map((i) => [i.anchor, i.verdict, i.reasons])).toEqual([
+        [4244, 'unknown', ['member-closed-by-hand-refs-truncated:#4116']],
+        [4300, 'closable', []],
+      ]);
+      expect(reads).toEqual([4244, 4116, 4300, 4148]);
+    });
+
+    it('sweepAnchors: an unreachable read still stops the sweep — later batches unknown, never read', () => {
+      const reads: number[] = [];
+      const items = sweepAnchors(
+        blockedLedger(TWO_BATCHES),
+        recordingReader(entriesWith(undefined), reads),
+        { repo: REPO }
+      );
+      expect(items.map((i) => [i.anchor, i.verdict, i.reasons])).toEqual([
+        [4244, 'unknown', ['issue #4116 unreachable']],
+        [4300, 'unknown', ['GitHub unreachable — sweep aborted']],
+      ]);
+      expect(reads).toEqual([4244, 4116]);
+    });
+
+    it('sweepOrphanAnchors: the same — a truncated member does not abort the sweep, a failed read does', () => {
+      const sweep = (member: IssueCloseTruth | undefined, reads: number[]) =>
+        sweepOrphanAnchors(
+          createEmptyState(),
+          ORPHAN_LIST,
+          recordingReader(entriesWith(member), reads),
+          { repo: REPO }
+        )?.items.map((i) => [i.anchor, i.verdict, i.reasons]);
+      const truncatedReads: number[] = [];
+      expect(sweep(TRUNCATED_MEMBER, truncatedReads)).toEqual([
+        [4244, 'orphan-unknown', ['member-closed-by-hand-refs-truncated:#4116']],
+        [4300, 'orphan-closable-candidate', []],
+      ]);
+      expect(truncatedReads).toEqual([4244, 4116, 4300, 4148]);
+      const failedReads: number[] = [];
+      expect(sweep(undefined, failedReads)).toEqual([
+        [4244, 'orphan-unknown', ['issue #4116 unreachable']],
+        [4300, 'orphan-unknown', ['GitHub unreachable — sweep aborted']],
+      ]);
+      expect(failedReads).toEqual([4244, 4116]);
+    });
+
+    it('an unreachable ANCHOR read stops both sweeps as before', () => {
+      const entries = entriesWith(TRUNCATED_MEMBER);
+      delete entries[4244];
+      const ledgerReads: number[] = [];
+      expect(
+        sweepAnchors(blockedLedger(TWO_BATCHES), recordingReader(entries, ledgerReads), {
+          repo: REPO,
+        }).map((i) => [i.anchor, i.verdict, i.reasons])
+      ).toEqual([
+        [4244, 'unknown', ['anchor #4244 unreachable']],
+        [4300, 'unknown', ['GitHub unreachable — sweep aborted']],
+      ]);
+      expect(ledgerReads).toEqual([4244]);
+      const orphanReads: number[] = [];
+      expect(
+        sweepOrphanAnchors(createEmptyState(), ORPHAN_LIST, recordingReader(entries, orphanReads), {
+          repo: REPO,
+        })?.items.map((i) => [i.anchor, i.verdict, i.reasons])
+      ).toEqual([
+        [4244, 'orphan-unknown', ['anchor #4244 unreachable']],
+        [4300, 'orphan-unknown', ['GitHub unreachable — sweep aborted']],
+      ]);
+      expect(orphanReads).toEqual([4244]);
+    });
+  });
+
+  it('end to end through the real GraphQL parse: closedAt and hasNextPage reach the verdict', () => {
+    const verdictOver = (wire: {
+      closedAt: string | null;
+      mergedAt: string;
+      closingRefsHasNextPage?: boolean;
+    }) => {
+      const exec: ExecFn = (_cmd, args) => {
+        if (!args.some((a) => a.startsWith('query=') && a.includes('issue(number:$n)')))
+          return null;
+        if (args.includes('n=4244')) return JSON.stringify(graphqlIssue({ state: 'OPEN' }));
+        return JSON.stringify(
+          graphqlIssue({
+            state: 'CLOSED',
+            stateReason: 'COMPLETED',
+            closedAt: wire.closedAt,
+            closer: null,
+            closingRefsHasNextPage: wire.closingRefsHasNextPage,
+            closingRefs: [
+              {
+                number: 4255,
+                merged: true,
+                mergedAt: wire.mergedAt,
+                baseRefName: 'main',
+                repository: { nameWithOwner: REPO },
+              },
+            ],
+          })
+        );
+      };
+      const read = issueCloseReader(createExecGroundTruth(exec, { repo: REPO }));
+      if (read === undefined) throw new Error('expected issueCloseTruth to be wired');
+      return expectVerdict(
+        classifyOrphanAnchor({ anchor: 4244, members: [4116], base_branch: 'main' }, read, {
+          repo: REPO,
+        })
+      );
+    };
+    // Merged Sep 12, closed by hand Sep 13: the reference vouches.
+    expect(verdictOver({ closedAt: CLOSED_SEP_13, mergedAt: MERGED_SEP_12 }).kind).toBe(
+      'orphan-closable-candidate'
+    );
+    // Merged Sep 14, after the Sep 13 hand close: refused.
+    expect(verdictOver({ closedAt: CLOSED_SEP_13, mergedAt: MERGED_SEP_14 }).reasons).toEqual([
+      'member-closed-by-hand-ref-pr-4255-postdates-close:#4116',
+    ]);
+    // No close time on the wire: fail closed.
+    expect(verdictOver({ closedAt: null, mergedAt: MERGED_SEP_12 }).reasons).toEqual([
+      'member-closed-by-hand-close-time-unreadable:#4116',
+    ]);
+    // The only reference read postdates the close, and GitHub says more exist: undecided.
+    expect(
+      verdictOver({
+        closedAt: CLOSED_SEP_13,
+        mergedAt: MERGED_SEP_14,
+        closingRefsHasNextPage: true,
+      })
+    ).toMatchObject({
+      kind: 'orphan-unknown',
+      reasons: ['member-closed-by-hand-refs-truncated:#4116'],
+    });
   });
 });
