@@ -49,7 +49,12 @@ import {
 } from '../gh';
 import { collectRepeatable } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
-import { findLatestPlan } from '../plan-artifact';
+import {
+  findLatestTrustedPlan,
+  ignoredPlanWarning,
+  toAuthoredComments,
+  trustedCommentBodies,
+} from '../plan-artifact';
 import { extractDependencyRefs } from '../prescreen';
 import { parseMilestones } from '../runstate';
 
@@ -96,20 +101,24 @@ function names(value: unknown, key: 'name' | 'login'): string[] {
     .filter((v): v is string => typeof v === 'string');
 }
 
-function commentBodies(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.map((c) =>
-    c && typeof c === 'object' && typeof (c as { body?: unknown }).body === 'string'
-      ? (c as { body: string }).body
-      : ''
+/**
+ * A `gh` issue object → the core's input (dependencies and sched status filled in later).
+ *
+ * Both artifact reads are author-gated (#808): predicted files come only from a plan:v1
+ * artifact by a trusted author and the latest phase only from a trusted
+ * author's milestone (both fail closed on an unreported association). A skipped newer plan artifact lands in `warnings`.
+ */
+function toInput(
+  raw: RawIssue,
+  source: ComposeIssueInput['source'],
+  warnings: string[]
+): ComposeIssueInput {
+  const comments = toAuthoredComments(Array.isArray(raw.comments) ? raw.comments : []);
+  const { latest: plan, ignored } = findLatestTrustedPlan(comments);
+  if (ignored.length > 0) warnings.push(`#${Number(raw.number)}: ${ignoredPlanWarning(ignored)}`);
+  const milestones = parseMilestones(
+    trustedCommentBodies(Array.isArray(raw.comments) ? raw.comments : [])
   );
-}
-
-/** A `gh` issue object → the core's input (dependencies and sched status filled in later). */
-function toInput(raw: RawIssue, source: ComposeIssueInput['source']): ComposeIssueInput {
-  const bodies = commentBodies(raw.comments);
-  const plan = findLatestPlan(bodies);
-  const milestones = parseMilestones(bodies);
   return {
     issue: Number(raw.number),
     source,
@@ -123,7 +132,7 @@ function toInput(raw: RawIssue, source: ComposeIssueInput['source']): ComposeIss
   };
 }
 
-function fetchPick(issue: number, repo: string | undefined): ComposeIssueInput {
+function fetchPick(issue: number, repo: string | undefined, warnings: string[]): ComposeIssueInput {
   const res = exec('gh', [
     'issue',
     'view',
@@ -145,7 +154,7 @@ function fetchPick(issue: number, repo: string | undefined): ComposeIssueInput {
   if (!res.ok) return unreadable(ghFailure(`Could not read issue #${issue}`, res.error, repo));
   const parsed = parseGhJson<RawIssue>(res.stdout);
   if (parsed === null) return unreadable(`Could not read issue #${issue}: gh did not print JSON.`);
-  return toInput({ ...parsed, number: issue }, 'pick');
+  return toInput({ ...parsed, number: issue }, 'pick', warnings);
 }
 
 function fetchBacklog(
@@ -171,7 +180,7 @@ function fetchBacklog(
   }
   return parsed
     .filter((r) => Number.isSafeInteger(Number(r.number)) && Number(r.number) > 0)
-    .map((r) => toInput(r, 'backlog'));
+    .map((r) => toInput(r, 'backlog', warnings));
 }
 
 /** The sched project slug: explicit `--project`, else `--repo` as `owner-name`, else the cwd's repo. */
@@ -342,7 +351,7 @@ function runCompose(opts: ComposeCliOptions): void {
       ? positiveInt(opts.maxFullReview, '--max-full-review', { min: 0, max: DEFAULT_MAX_MEMBERS })
       : (sched.config?.max_full_review_members ?? MAX_FULL_REVIEW_MEMBERS);
 
-  const inputs: ComposeIssueInput[] = picks.map((n) => fetchPick(n, opts.repo));
+  const inputs: ComposeIssueInput[] = picks.map((n) => fetchPick(n, opts.repo, warnings));
   const pickSet = new Set(picks);
 
   // Backlog: explicitly requested, or automatic backfill when the picks fall short.

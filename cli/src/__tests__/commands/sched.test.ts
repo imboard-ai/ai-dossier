@@ -2623,3 +2623,84 @@ describe('#824: sched attach-pr', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+describe('#603/#808: sched enqueue slot pre-screen reads only trusted authors', () => {
+  const PLAN =
+    '<!-- plan:v1 head=abc1234 -->\n\n## Problem\np\n\n## Acceptance Criteria\n- a\n\n## Predicted Files\n- `cli/src/a.ts` — a\n\n## Approach\nx\n\n## Test Scope\ny\n';
+  const CLASSIFY =
+    '<!-- runstate:v1 -->\nphase=classify status=done run=r-1-aaaa at=2026-09-29T10:00:00Z\nmode=slot\nnext=plan';
+  const NON_SLOT =
+    '<!-- runstate:v1 -->\nphase=gate status=done run=r-1-aaaa at=2026-09-29T11:00:00Z\nnext=setup';
+
+  const serve = (comments: Array<{ body: string; authorAssociation?: string }>) =>
+    execHandles((_file, args) =>
+      args.includes('comments') ? JSON.stringify({ comments }) : '{"labels":[]}'
+    );
+  const enqueue = () =>
+    runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '1',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--project',
+      'test-proj',
+    ]);
+  const captureErrors = (): string[] => {
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((msg) => {
+      errors.push(String(msg));
+    });
+    return errors;
+  };
+
+  it('accepts a member whose plan and classify record come from trusted authors', async () => {
+    serve([
+      { body: PLAN, authorAssociation: 'MEMBER' },
+      { body: CLASSIFY, authorAssociation: 'OWNER' },
+    ]);
+    await enqueue();
+    expect(fs.existsSync(statePath())).toBe(true);
+  });
+
+  it('rejects a member whose only plan:v1 was posted by a stranger', async () => {
+    serve([
+      { body: PLAN, authorAssociation: 'NONE' },
+      { body: CLASSIFY, authorAssociation: 'OWNER' },
+    ]);
+    const errors = captureErrors();
+    await expect(enqueue()).rejects.toThrow('process.exit(1)');
+    expect(errors.join('\n')).toContain('no-plan-artifact');
+    expect(fs.existsSync(statePath())).toBe(false);
+  });
+
+  it("a stranger's newer non-slot milestone does not un-classify a member", async () => {
+    serve([
+      { body: PLAN, authorAssociation: 'MEMBER' },
+      { body: CLASSIFY, authorAssociation: 'OWNER' },
+      { body: NON_SLOT, authorAssociation: 'NONE' },
+    ]);
+    await enqueue();
+    expect(fs.existsSync(statePath())).toBe(true);
+  });
+
+  it("a stranger's mode=slot milestone does not satisfy the classify precondition", async () => {
+    serve([
+      { body: PLAN, authorAssociation: 'MEMBER' },
+      { body: CLASSIFY, authorAssociation: 'NONE' },
+    ]);
+    const errors = captureErrors();
+    await expect(enqueue()).rejects.toThrow('process.exit(1)');
+    expect(errors.join('\n')).toContain('no-classify-record');
+  });
+
+  it('fails closed when gh reports no association (plan not trusted)', async () => {
+    serve([{ body: PLAN }, { body: CLASSIFY, authorAssociation: 'OWNER' }]);
+    const errors = captureErrors();
+    await expect(enqueue()).rejects.toThrow('process.exit(1)');
+    expect(errors.join('\n')).toContain('no-plan-artifact');
+  });
+});

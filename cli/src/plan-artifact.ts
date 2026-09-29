@@ -12,6 +12,7 @@
  * command layer (`commands/plan.ts`).
  */
 
+import { isTrustedAuthorAssociation } from '@ai-dossier/core';
 import { MAX_BODY_LENGTH, RUNSTATE_MARKER } from './runstate';
 
 /**
@@ -242,6 +243,99 @@ export function findLatestPlan(commentBodies: string[]): LatestPlan | null {
     if (parsed !== null) latest = { artifact: parsed, index };
   });
   return latest;
+}
+
+/** A comment as the trusted-plan read needs it: body plus who wrote it. */
+export interface AuthoredComment {
+  body: string;
+  /** `authorAssociation` as gh reports it; `undefined` when gh did not report the field. */
+  authorAssociation?: string;
+  /** The author's login, for naming an ignored artifact. */
+  author?: string;
+}
+
+/** A plan:v1 artifact skipped because its author is not owner/member/collaborator (#808). */
+export interface IgnoredPlan {
+  /** Index into the comments array that was passed in. */
+  index: number;
+  author: string;
+  /** `authorAssociation` as reported, or `'unreported'` when gh omitted the field. */
+  association: string;
+}
+
+/** The latest TRUSTED plan, plus every newer untrusted artifact that was passed over. */
+export interface TrustedPlanRead {
+  latest: LatestPlan | null;
+  /** Untrusted plan:v1 artifacts, oldest first — only those NEWER than `latest` matter to a caller. */
+  ignored: IgnoredPlan[];
+}
+
+/**
+ * The latest plan artifact whose author is a repo owner / org member / collaborator (#808).
+ *
+ * A plan:v1 artifact is an issue comment anyone can post, and the deterministic
+ * pre-screen acts on its predicted files (the `file-count` exclusion and `path-floor`
+ * review reasons). Reading the LATEST artifact regardless of author lets a stranger post a
+ * benign artifact over a legitimate one and dodge both. This read walks the comments and
+ * only considers an artifact from a trusted author association (`isTrustedAuthorAssociation`), falling back to the
+ * latest trusted one. Untrusted artifacts NEWER than the chosen one are reported in
+ * `ignored` so the caller can surface them; older untrusted ones are noise and dropped.
+ *
+ * Fails closed: an absent or non-string `authorAssociation` is untrusted.
+ */
+export function findLatestTrustedPlan(comments: readonly AuthoredComment[]): TrustedPlanRead {
+  let latest: LatestPlan | null = null;
+  const untrusted: IgnoredPlan[] = [];
+  comments.forEach((c, index) => {
+    const parsed = parsePlanArtifact(c.body);
+    if (parsed === null) return;
+    if (isTrustedAuthorAssociation(c.authorAssociation)) {
+      latest = { artifact: parsed, index };
+    } else {
+      untrusted.push({
+        index,
+        author: c.author && c.author !== '' ? c.author : 'unknown',
+        association: c.authorAssociation ?? 'unreported',
+      });
+    }
+  });
+  const floor = (latest as LatestPlan | null)?.index ?? -1;
+  return { latest, ignored: untrusted.filter((u) => u.index > floor) };
+}
+
+/**
+ * Bodies of only the comments a trusted author posted — the input for every milestone
+ * (`runstate:v1`) read that ACTS on a comment. Fails closed like {@link findLatestTrustedPlan}.
+ */
+export function trustedCommentBodies(
+  raw: ReadonlyArray<{ body?: unknown; authorAssociation?: unknown }>
+): string[] {
+  return raw
+    .filter((c) => isTrustedAuthorAssociation(c?.authorAssociation))
+    .map((c) => (typeof c?.body === 'string' ? c.body : ''));
+}
+
+/** Project gh comments (`GhComment`-shaped, every field optional) into {@link AuthoredComment}s. */
+export function toAuthoredComments(
+  raw: ReadonlyArray<{
+    body?: unknown;
+    authorAssociation?: unknown;
+    author?: { login?: unknown } | null;
+  }>
+): AuthoredComment[] {
+  return raw.map((c) => ({
+    body: typeof c?.body === 'string' ? c.body : '',
+    authorAssociation: typeof c?.authorAssociation === 'string' ? c.authorAssociation : undefined,
+    author: typeof c?.author?.login === 'string' ? c.author.login : undefined,
+  }));
+}
+
+/** One-line warning naming the untrusted plan artifacts a trusted read skipped. */
+export function ignoredPlanWarning(ignored: readonly IgnoredPlan[]): string {
+  const who = ignored
+    .map((u) => `${JSON.stringify(u.author.slice(0, 40))} (${u.association})`)
+    .join(', ');
+  return `Ignored ${ignored.length} newer plan:v1 artifact(s) from author(s) who are not repo owner / org member / collaborator: ${who} — only their artifacts feed predicted files.`;
 }
 
 /**

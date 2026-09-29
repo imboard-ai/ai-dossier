@@ -11,6 +11,7 @@
  * and any consumer — supply fake ground truth and no subprocess runs.
  */
 
+import { isTrustedAuthorAssociation } from '@ai-dossier/core';
 import { unwrapList } from './json';
 import { createExecFn, type ExecFn } from './project';
 import { type BatchPhase, PHASES } from './types';
@@ -1026,8 +1027,6 @@ export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
   const comments = unwrapList(parsed, 'comments');
   if (comments === null) return null;
 
-  const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
-
   // Newest setup milestone wins (a re-run can re-post setup).
   for (const raw of [...comments].reverse()) {
     if (raw === null || typeof raw !== 'object') continue;
@@ -1035,10 +1034,7 @@ export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
     if (typeof comment.body !== 'string' || !comment.body.includes('<!-- runstate:v1 -->')) {
       continue;
     }
-    if (
-      comment.authorAssociation !== undefined &&
-      !TRUSTED_ASSOCIATIONS.has(String(comment.authorAssociation))
-    ) {
+    if (!isTrustedAuthorAssociation(comment.authorAssociation)) {
       continue; // untrusted author — never a teardown source
     }
 

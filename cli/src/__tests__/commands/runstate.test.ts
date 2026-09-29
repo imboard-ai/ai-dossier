@@ -58,7 +58,7 @@ function postedBody(): string {
 
 /** Build a `gh issue view --json comments` payload. */
 function commentsPayload(bodies: string[]): string {
-  return JSON.stringify({ comments: bodies.map((body) => ({ body })) });
+  return JSON.stringify({ comments: bodies.map((body) => ({ body, authorAssociation: 'OWNER' })) });
 }
 
 /**
@@ -1932,11 +1932,10 @@ describe('run fencing — trust and hardening on the read path (#504)', () => {
     expect(commentCall()).toBeUndefined();
   });
 
-  it('honours a fence from a bot token', async () => {
-    // The workflows that post milestones frequently run as an app token.
+  it('does not honour a fence whose association is not a GitHub value we trust (BOT is not an association)', async () => {
     ghWith(authoredComments([[fenceBody(1, 'slot-2-r1'), 'BOT']]));
 
-    expect(await run(IMPLEMENT_ARGS)).toBe(FENCED_EXIT_CODE);
+    expect(await run(IMPLEMENT_ARGS)).not.toBe(FENCED_EXIT_CODE);
   });
 
   it('refuses a hand-written fence through post, naming the command that owns it', async () => {

@@ -340,6 +340,29 @@ describe('plan get', () => {
     expect(errored().join('\n')).toContain('No plan:v1 artifact on issue #1');
   });
 
+  it('get selects the latest TRUSTED plan and notes the ignored newer stranger plan on stderr (#808)', async () => {
+    const forged = POSTED_ARTIFACT.replace('head=abc1234', 'head=bbb2222');
+    execReturns(
+      JSON.stringify({
+        comments: [
+          ghComment(POSTED_ARTIFACT, { id: 0, association: 'OWNER' }),
+          ghComment(forged, { id: 1, association: 'CONTRIBUTOR', login: 'rando' }),
+        ],
+      })
+    );
+
+    const code = await run(['plan', 'get', '--issue', '1', '--json']);
+    expect(code).toBeUndefined();
+    expect(JSON.parse(logged()[0]).head).toBe('abc1234');
+    expect(errored().join('\n')).toMatch(/Ignored 1 newer plan:v1.*rando/);
+  });
+
+  it('get exits 1 (no plan) when the only plan is from a stranger (#808)', async () => {
+    execReturns(ghCommentsJson([POSTED_ARTIFACT], 'NONE', 'rando'));
+    const code = await run(['plan', 'get', '--issue', '1']);
+    expect(code).toBe(1);
+  });
+
   it('exits 1 with the shared taxonomy when gh cannot read the issue', async () => {
     mockedExec.mockImplementation(() => {
       throw Object.assign(new Error('no gh'), { code: 'ENOENT' });
@@ -596,9 +619,36 @@ describe('plan validate', () => {
     ).toBe(true);
   });
 
-  it('warns when the canonical plan comes from an account without write access', async () => {
-    execHandles((file, args) => {
+  it('a plan posted only by a non-collaborator is NOT selected: valid=false naming the author (#808)', async () => {
+    execHandles((file) => {
       if (file === 'gh') return ghCommentsJson([POSTED_ARTIFACT], 'NONE', 'rando');
+      throw new Error(`unexpected: ${file}`);
+    });
+
+    const code = await run(['plan', 'validate', '--issue', '1']);
+    expect(code).toBe(1);
+    const v = verdict();
+    expect(v.valid).toBe(false);
+    expect(v.reasons).toEqual([
+      expect.objectContaining({
+        check: 'artifact',
+        severity: 'error',
+        message: expect.stringMatching(/No trusted plan:v1.*rando/),
+      }),
+    ]);
+  });
+
+  it("a stranger's newer plan is ignored with a warn; the collaborator's plan is validated (#808)", async () => {
+    const forged = POSTED_ARTIFACT.replace('head=abc1234', 'head=bbb2222');
+    execHandles((file, args) => {
+      if (file === 'gh') {
+        return JSON.stringify({
+          comments: [
+            ghComment(POSTED_ARTIFACT, { id: 0, association: 'MEMBER' }),
+            ghComment(forged, { id: 1, association: 'NONE', login: 'rando' }),
+          ],
+        });
+      }
       if (file === 'git' && args[0] === 'cat-file') return '';
       if (file === 'git' && args[0] === 'rev-list') return '0';
       throw new Error(`unexpected: ${file}`);
@@ -610,7 +660,7 @@ describe('plan validate', () => {
     expect(v.valid).toBe(true);
     expect(
       v.reasons.some(
-        (r) => r.check === 'artifact' && r.severity === 'warn' && r.message.includes("'rando'")
+        (r) => r.severity === 'warn' && r.check === 'artifact' && r.message.includes('rando')
       )
     ).toBe(true);
   });
@@ -637,7 +687,7 @@ describe('plan validate', () => {
       {
         check: 'artifact',
         severity: 'error',
-        message: "No plan:v1 artifact on issue #1 — post one with 'ai-dossier plan post'.",
+        message: "No trusted plan:v1 artifact on issue #1 — post one with 'ai-dossier plan post'.",
       },
     ]);
     expect(calls().some((c) => c.startsWith('git'))).toBe(false);

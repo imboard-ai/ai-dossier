@@ -935,7 +935,7 @@ describe('parseSetupInfo (#468 teardown inputs)', () => {
   // gh issue view --json comments always wraps the array — {"comments": [...]}
   // — never a bare array (#496). This fixture mirrors that real shape.
   const comments = (bodies: string[]) =>
-    JSON.stringify({ comments: bodies.map((body) => ({ body })) });
+    JSON.stringify({ comments: bodies.map((body) => ({ body, authorAssociation: 'OWNER' })) });
 
   it('recovers worktree/pool_claimed from the setup milestone comment', () => {
     const json = comments([
@@ -992,6 +992,7 @@ describe('parseSetupInfo (#468 teardown inputs)', () => {
       comments: [
         {
           body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-3810 at=2026-08-29T23:00:00Z\nbranch=feature/3810-x\nworktree=/repo/worktrees/feature-3810-x\npool_claimed=true\nnext=plan',
+          authorAssociation: 'OWNER',
         },
       ],
     });
@@ -1021,6 +1022,7 @@ describe('createExecGroundTruth prState/setupInfo (#468)', () => {
           comments: [
             {
               body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/wt-9\npool_claimed=true',
+              authorAssociation: 'OWNER',
             },
           ],
         });
@@ -1093,16 +1095,14 @@ describe('parseSetupInfo author trust (defense-in-depth)', () => {
     ).toBe('/repo/worktrees/real');
   });
 
-  it('comments without authorAssociation (older gh / file fakes) still parse', () => {
+  it('fails closed: a comment with no/non-string/BOT authorAssociation is never a teardown source (#808)', () => {
+    const body =
+      '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/wt\npool_claimed=true';
+    expect(parseSetupInfo(commentsPayload([{ body }]))).toBeNull();
+    expect(parseSetupInfo(commentsPayload([{ body, authorAssociation: 'BOT' }]))).toBeNull();
     expect(
-      parseSetupInfo(
-        commentsPayload([
-          {
-            body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/wt\npool_claimed=true',
-          },
-        ])
-      )
-    ).toEqual({ worktree: '/repo/worktrees/wt', poolClaimed: true, branch: null });
+      parseSetupInfo(JSON.stringify({ comments: [{ body, authorAssociation: 7 }] }))
+    ).toBeNull();
   });
 });
 

@@ -29,6 +29,7 @@ import {
   tryFetchComments,
 } from '../gh';
 import { parseIssueSelection } from '../issue-selection';
+import { trustedCommentBodies } from '../plan-artifact';
 import {
   activeFence,
   BATCH_PHASES,
@@ -540,14 +541,7 @@ function requirePostableBody(body: string, pairs: Array<[string, string]>): void
 export const FENCED_EXIT_CODE = 3;
 
 /**
- * Author associations GitHub reports for an account with write access to the repository.
- *
- * `BOT` is included: the workflows that post milestones frequently run as an app token.
- */
-const WRITE_ACCESS_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR', 'BOT']);
-
-/**
- * The trail read the FENCE decisions use: only comments from accounts with write access.
+ * The trail read the FENCE decisions use: only comments from a repo owner / org member / collaborator.
  *
  * A milestone is an issue comment, and on a public repository anyone can leave one.
  * Without this filter a single forged `status=superseded` comment from a stranger fences
@@ -563,15 +557,7 @@ const WRITE_ACCESS_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR', 'B
 function tryFetchTrustedMilestones(issue: string, repo?: string): TrailResult {
   const result = tryFetchComments(issue, repo);
   if (!result.ok) return { ok: false, error: result.error };
-  const bodies = result.comments
-    .filter(
-      (c) =>
-        // An older gh does not report the field at all; trusting it then matches
-        // `parseSetupInfo` and keeps the guard from failing closed on a tooling gap.
-        c?.authorAssociation === undefined ||
-        WRITE_ACCESS_ASSOCIATIONS.has(String(c.authorAssociation))
-    )
-    .map((c) => (typeof c?.body === 'string' ? c.body : ''));
+  const bodies = trustedCommentBodies(result.comments);
   return { ok: true, milestones: parseMilestones(bodies) };
 }
 

@@ -180,6 +180,8 @@ export type {
   TraceUpdate,
 } from './trace-recorder';
 export { createTraceRecorder, VALID_TRACE_STATUSES } from './trace-recorder';
+// Trusted comment-author check shared by every issue-artifact reader (#808)
+export { isTrustedAuthorAssociation, TRUSTED_AUTHOR_ASSOCIATIONS } from './trusted-author';
 // Type exports
 export * from './types';
 // Crypto utilities
