@@ -642,3 +642,14 @@ describe('logPaginationInfo', () => {
     expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('Use --page'));
   });
 });
+
+describe('formatPublishedBy (#971)', () => {
+  it('returns the login, N/A for missing/empty, and strips terminal escape sequences', async () => {
+    const { formatPublishedBy } = await import('../helpers');
+    expect(formatPublishedBy('alice')).toBe('alice');
+    expect(formatPublishedBy(null)).toBe('N/A');
+    expect(formatPublishedBy(undefined)).toBe('N/A');
+    expect(formatPublishedBy('  ')).toBe('N/A');
+    expect(formatPublishedBy('\x1b[2Jmallory\x07')).toBe('[2Jmallory');
+  });
+});

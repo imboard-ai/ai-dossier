@@ -7,6 +7,7 @@ import { handleCors } from '../../../lib/cors';
 import { evidenceFilePath, validateNamespace } from '../../../lib/dossier';
 import * as github from '../../../lib/github';
 import createLogger from '../../../lib/logger';
+import { publisherFields } from '../../../lib/manifest';
 import { queryString } from '../../../lib/query';
 import {
   getRequestId,
@@ -164,6 +165,7 @@ async function handleGet(
       version: dossierEntry.version,
       category: dossierEntry.category,
       content_url: config.getCdnUrl(dossierEntry.path),
+      ...publisherFields(dossierEntry),
     });
   } catch (error) {
     if (error instanceof github.PathTraversalError) {
@@ -188,11 +190,14 @@ async function handleDelete(
   requestId: string
 ) {
   try {
-    const authorized = await authorizePublish(req, res, dossierName, 'delete');
-    if (!authorized) return;
+    const auth = await authorizePublish(req, res, dossierName, 'delete');
+    if (!auth) return;
 
-    log.info('Deleting dossier', { requestId, dossier: dossierName, version });
-    const result = await github.deleteDossier(dossierName, version || null);
+    log.info('Deleting dossier', { requestId, dossier: dossierName, version, user: auth.sub });
+    const result = await github.deleteDossier(dossierName, {
+      expectedVersion: version || null,
+      removedBy: auth.sub,
+    });
 
     if (!result.found) {
       return notFound(res, 'DOSSIER_NOT_FOUND', `Dossier '${dossierName}' not found`, requestId);

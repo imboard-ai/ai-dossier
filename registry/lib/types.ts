@@ -37,6 +37,10 @@ export interface ManifestDossier {
   tags?: string[];
   authors?: unknown[];
   tools_required?: unknown[];
+  /** GitHub login of the publisher (from the verified JWT). Absent on entries published before #971. */
+  published_by?: string | null;
+  /** ISO timestamp of the publish. Absent on entries published before #971. */
+  published_at?: string | null;
   [key: string]: unknown;
 }
 

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { parseDossierContent, sha256Hex } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { resolveRegistries } from '../config';
-import { printRegistryErrors } from '../helpers';
+import { formatPublishedBy, printRegistryErrors } from '../helpers';
 import { multiRegistryGetDossier } from '../multi-registry';
 import type { DossierInfo } from '../registry-client';
 import { parseNameVersion } from '../registry-client';
@@ -126,6 +126,11 @@ export function registerInfoCommand(program: Command): void {
       if (fm.signature) {
         const sig = fm.signature;
         console.log(`   Signed by: ${sig.signed_by || sig.key_id || 'unknown'}`);
+      }
+
+      // Publisher is registry provenance, not frontmatter — only meaningful for a registry lookup.
+      if (!isLocal) {
+        console.log(`   Published by: ${formatPublishedBy(fm.published_by)}`);
       }
 
       console.log('');

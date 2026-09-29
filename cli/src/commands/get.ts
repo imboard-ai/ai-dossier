@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 import { resolveRegistries } from '../config';
-import { formatDossierFields, printRegistryErrors } from '../helpers';
+import { formatDossierFields, formatPublishedBy, printRegistryErrors } from '../helpers';
 import { multiRegistryGetDossier } from '../multi-registry';
 import type { DossierInfo } from '../registry-client';
 import { parseNameVersion } from '../registry-client';
@@ -80,6 +80,8 @@ export function registerGetCommand(program: Command): void {
           `   Signed by    ${meta.signature.signed_by || meta.signature.key_id || 'unknown'}`
         );
       }
+
+      console.log(`   Published by ${formatPublishedBy(meta.published_by)}`);
 
       console.log('');
       process.exit(0);
