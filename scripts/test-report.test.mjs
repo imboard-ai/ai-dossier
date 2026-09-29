@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import { discoverTestWorkspaces, mergeRuns, recordsForRun, TAIL_CHARS } from './test-report.mjs';
@@ -138,5 +140,13 @@ describe('discoverTestWorkspaces (#893)', () => {
     write('packages/b', { scripts: { build: 'tsc' } });
     write('cli', { scripts: { test: 'vitest run' } });
     expect(discoverTestWorkspaces(root)).toEqual(['cli', 'packages/a']);
+  });
+});
+
+describe('test-report.mjs entrypoint (#893)', () => {
+  it('starts, runs zero suites for an unmatched --only, and prints a readable green report', () => {
+    const script = fileURLToPath(new URL('./test-report.mjs', import.meta.url));
+    const out = execFileSync(process.execPath, [script, '--only=__none__'], { encoding: 'utf-8' });
+    expect(JSON.parse(out)).toEqual({ success: true, numFailedTests: 0, testResults: [] });
   });
 });
