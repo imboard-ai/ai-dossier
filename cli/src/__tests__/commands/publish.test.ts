@@ -238,7 +238,7 @@ describe('publish command', () => {
     const output = JSON.parse(jsonCall?.[0] as string);
     expect(output.verification).toBeDefined();
     expect(output.verification.verify_command).toBe('dossier info org/test-dossier@1.0.0');
-    expect(output.verification.cdn_delay_seconds).toBe(30);
+    expect(output.verification.cdn_delay_seconds).toBe(300);
   });
 
   it('should exit 1 on same-version collision (pre-publish check)', async () => {
