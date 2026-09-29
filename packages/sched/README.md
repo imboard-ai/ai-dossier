@@ -423,6 +423,33 @@ when a tick does nothing (`nothing to do`) — a log that stops growing while
 the failure mode #679 fixed: the engine exited cleanly after its first tick because its
 inter-tick sleep handles were unref'd.
 
+### Restart never discards work (#945, #940)
+
+Before the engine respawns an agent onto a worktree that already exists — a batch **tail**, a
+batch **member** reusing its worktree, an issue **takeover** — it preserves whatever the dead
+agent left there (`preserve.ts`):
+
+- a WIP commit on `rescue/<unit>-<timestamp>` holding every tracked change, untracked file
+  and unpushed commit, pushed to origin and journaled as `work-preserved` (`branch` = the ref);
+- built with a throwaway index, so the worktree, its index and its HEAD are untouched — the
+  respawned agent still finds the files in place, and preservation cannot itself lose work;
+- idempotent: an unchanged tree reuses its existing rescue ref instead of minting one per tick;
+- the respawned agent's prompt gets a `PRESERVED WORK` instruction naming the ref and forbidding a
+  reset to the last pushed head. A failed push is journaled (`pushed: false` in the detail) and is
+  not fatal; an unpreservable worktree journals `work-preserve-failed` and is left as it is.
+
+A takeover's worktree path comes from a setup milestone (an issue comment), so it is acted on only
+when `git worktree list` registers it in this repository.
+
+**Batch tail, respawn only:** when the previous tail exited unverified and its worktree holds
+uncommitted files, or a passing `gate.batch` row in `caps.jsonl` (matched by `cwd`) is newer than
+the last pushed head and describes code that is not that head (`dirty: true`, or a `git_tree`
+differing from HEAD's — the #941 fields; legacy rows count only while local work exists), the
+engine does **not** respawn. It blocks the batch `tail-dirty-worktree`, with the evidence and the
+rescue ref in the journal and `sched status`. Commit or discard the work in the worktree, then
+`sched resume --batch <id>`. A tail that left only unpushed commits is respawned, told to resume
+from the rescue ref.
+
 ### Zombie-run fencing (#504)
 
 The ladder redispatches the SAME run, so a takeover inherits the run id and its milestone

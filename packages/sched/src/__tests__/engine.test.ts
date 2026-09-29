@@ -3195,6 +3195,47 @@ describe('zombie-run fencing on redispatch (#504)', () => {
     expect(h.events().some((e) => e.event === 'fence-written')).toBe(true);
   });
 
+  it('#945: a takeover onto a registered worktree with leftover work preserves it first and is told to resume from the rescue ref', () => {
+    const h = stalling();
+    const worktree = h.wt('wt-504');
+    fs.mkdirSync(worktree, { recursive: true });
+    h.setupInfos.set(504, { worktree, poolClaimed: false, branch: 'f/504' });
+    h.setTeardownScript((file, args) => {
+      const key = `${file} ${args.join(' ')}`;
+      if (key === 'git worktree list --porcelain') return `worktree ${worktree}\nHEAD abc\n`;
+      if (key === 'git rev-parse --show-toplevel') return worktree;
+      if (key === 'git rev-parse HEAD') return 'abc1234';
+      if (key.startsWith('git --no-optional-locks status')) return '?? gated-fix.ts\n M a.ts';
+      if (key.startsWith('git log HEAD --not --remotes')) return 'deadbee local commit';
+      if (file === 'sh') return `created ${'f'.repeat(40)} refs/heads/${args[3]}`;
+      if (key.startsWith('git push origin')) return '';
+      return null;
+    });
+    h.advance(HOUR + 1000);
+
+    expect(h.tick().redispatched).toEqual(['issue:504']);
+
+    const takeover = h.spawnCalls[1].prompt;
+    expect(takeover).toContain('PRESERVED WORK');
+    expect(takeover).toMatch(/rescue\/issue-504-\d{8}T\d{6}Z/);
+    expect(takeover).toContain('2 uncommitted file(s) and 1 unpushed commit(s)');
+    const ev = h.events().find((e) => e.event === 'work-preserved');
+    expect(ev).toMatchObject({ unit: 'issue:504', worktree });
+    expect(h.spawnCalls[0].prompt).not.toContain('PRESERVED WORK');
+  });
+
+  it('#945: a worktree path git does not list is never acted on (setup milestones are issue comments)', () => {
+    const h = stalling();
+    h.setupInfos.set(504, { worktree: '/etc', poolClaimed: false, branch: 'f/504' });
+    h.setTeardownScript(() => null);
+    h.advance(HOUR + 1000);
+
+    expect(h.tick().redispatched).toEqual(['issue:504']);
+
+    expect(h.teardownCalls.filter((c) => c.file === 'sh')).toHaveLength(0);
+    expect(h.spawnCalls[1].prompt).not.toContain('PRESERVED WORK');
+  });
+
   it('records the installed generation on the slot and hands it to the takeover', () => {
     const h = stalling();
     h.advance(HOUR + 1000);

@@ -126,6 +126,12 @@ import {
   parkedWithoutMerger,
 } from './merge-mechanism';
 import type { SchedStore } from './persist';
+import {
+  isRegisteredWorktree,
+  type PreservedWork,
+  preservedWorkInstruction,
+  preserveWork,
+} from './preserve';
 import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
 import type { MemberResumeSeeder } from './resume-seed';
@@ -176,6 +182,11 @@ export interface EngineDeps {
   repoDir: string;
   /** Exec for teardown scripts (#468); injectable so tests never touch git/npx. */
   teardownExec: ExecFn;
+  /**
+   * Exec for `preserveWork` (#945) — git commit-tree + push from a dead
+   * agent's worktree. Falls back to `teardownExec` (same bounded-timeout git).
+   */
+  rescueExec?: ExecFn;
   /**
    * Writes the takeover record before a redispatch respawns (#504). Optional: an
    * engine constructed without one redispatches exactly as it did before fencing
@@ -956,6 +967,9 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
   const seeded = slot.gen === 0 ? seedResumeTrail(ctx, state, issue) : { state, run: null };
   const seededState = seeded.state;
   const evidence = findEntry(seededState, issue)?.failure_evidence ?? null;
+  // #945: a takeover (gen > 0) lands on whatever the dead run left in its
+  // worktree — preserve it first and tell the respawn to resume from it.
+  const preserved = slot.gen > 0 ? preserveForTakeover(ctx, seededState, unit, issue) : null;
 
   return spawnAndRecord(ctx, seededState, unit, slot, {
     tier: entry.tier,
@@ -965,27 +979,65 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
     // replaced is refused. A first dispatch is generation 0 and reads as it always did.
     // The tier's own resolved prompt (#527) — falls back to the global
     // dispatch.prompt when the tier has no override.
-    prompt: withPriorWork(
-      buildPrompt(
-        dispatch.tiers[entry.tier].prompt,
-        issue,
-        slot.gen,
-        // #683 AC6: the takeover is told its slot identity alongside the generation —
-        // the same label the fence announced and the bind names (one spelling,
-        // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
-        // generation, never by matching this label (AC7).
-        slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined,
-        // #887: the repo's detected merge mechanism decides detached vs attached ship.
-        ctx.mechanism
-      ),
-      // #810: a requeued parked batch member continues from its member branch —
-      // on the FIRST generation only: a takeover resumes its own run's pushed
-      // branch (the takeover instruction), which may already carry newer work.
-      slot.gen === 0 ? priorWorkInstruction(issue, evidence, evidence?.resume_run ?? null) : null
-    ),
+    prompt:
+      withPriorWork(
+        buildPrompt(
+          dispatch.tiers[entry.tier].prompt,
+          issue,
+          slot.gen,
+          // #683 AC6: the takeover is told its slot identity alongside the generation —
+          // the same label the fence announced and the bind names (one spelling,
+          // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
+          // generation, never by matching this label (AC7).
+          slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined,
+          // #887: the repo's detected merge mechanism decides detached vs attached ship.
+          ctx.mechanism
+        ),
+        // #810: a requeued parked batch member continues from its member branch —
+        // on the FIRST generation only: a takeover resumes its own run's pushed
+        // branch (the takeover instruction), which may already carry newer work.
+        slot.gen === 0 ? priorWorkInstruction(issue, evidence, evidence?.resume_run ?? null) : null
+      ) + (preserved === null ? '' : `\n\n${preservedWorkInstruction(preserved)}`),
     phase: 'gate',
     ...(slot.gen > 0 ? { journalExtra: { detail: `takeover gen=${slot.gen}` } } : {}),
   });
+}
+
+/**
+ * #945: preserve what a superseded run left in its worktree before its takeover
+ * is spawned. The worktree comes from the run's setup milestone (an issue
+ * COMMENT), so it is acted on only when git lists it as a worktree of THIS
+ * repository. Journals `work-preserved` / `work-preserve-failed`; null when
+ * there was nothing to preserve or it was not possible (never blocks the
+ * respawn — the worktree is untouched either way).
+ */
+function preserveForTakeover(
+  ctx: TickCtx,
+  _state: SchedState,
+  unit: string,
+  issue: number
+): PreservedWork | null {
+  const info = ctx.deps.groundTruth.setupInfo(issue);
+  if (info === null || info === undefined) return null;
+  const exec = ctx.deps.rescueExec ?? ctx.deps.teardownExec;
+  if (!isRegisteredWorktree(exec, ctx.deps.repoDir, info.worktree)) return null;
+  const outcome = preserveWork(exec, { worktree: info.worktree, unit, now: ctx.deps.now() });
+  if (outcome.kind === 'preserved') {
+    const w = outcome.work;
+    journal(ctx, 'work-preserved', unit, {
+      branch: w.ref,
+      worktree: info.worktree,
+      detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} on ${w.ref} (${w.pushed ? 'pushed' : 'NOT pushed — local ref only'}${w.reused ? ', reused an identical earlier rescue' : ''}); the takeover is told to resume from it`,
+    });
+    return w;
+  }
+  if (outcome.kind === 'failed') {
+    journal(ctx, 'work-preserve-failed', unit, {
+      worktree: info.worktree,
+      detail: `${outcome.reason} — ${outcome.probe.dirty_files} uncommitted file(s), ${outcome.probe.unpushed_commits} unpushed commit(s) left in place in the worktree`,
+    });
+  }
+  return null;
 }
 
 /**

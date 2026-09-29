@@ -138,6 +138,37 @@ process.stdin.on('end', () => {
       const members = input.match(/Members: ([\d,]*)/);
       fs.mkdirSync(dir, { recursive: true });
       fs.appendFileSync(path.join(dir, `${issue}.tail-members`), `${members ? members[1] : ''}\n`);
+      // #945: what each tail dispatch was told about preserved work, and — on
+      // its FIRST dispatch only — --tail-leave-dirty / --tail-leave-unpushed
+      // leave uncommitted / committed-but-unpushed work in the batch worktree
+      // and die (the #920 shape).
+      fs.appendFileSync(
+        path.join(dir, `${issue}.tail-preserved`),
+        `${/PRESERVED WORK/.test(input)}\n`
+      );
+      const dispatches = fs
+        .readFileSync(path.join(dir, `${issue}.tail-members`), 'utf8')
+        .split('\n')
+        .filter(Boolean).length;
+      const tailWorktree = input.match(/batch worktree at (\S+?)\. Members:/)?.[1];
+      if (dispatches === 1 && tailWorktree) {
+        if (opt('tail-leave-dirty') !== undefined) {
+          fs.writeFileSync(path.join(tailWorktree, 'gated-fix.txt'), 'gated but uncommitted\n');
+          console.error(`fake batch tail: left dirty work then died for anchor #${issue}`);
+          process.exit(1);
+        }
+        if (opt('tail-leave-unpushed') !== undefined) {
+          fs.writeFileSync(path.join(tailWorktree, 'local-fix.txt'), 'committed, unpushed\n');
+          execFileSync('git', ['add', 'local-fix.txt'], { cwd: tailWorktree });
+          execFileSync(
+            'git',
+            ['-c', 'user.name=fake', '-c', 'user.email=fake@test', 'commit', '-m', 'local only'],
+            { cwd: tailWorktree }
+          );
+          console.error(`fake batch tail: left an unpushed commit then died for anchor #${issue}`);
+          process.exit(1);
+        }
+      }
       if (opt('tail-die') !== undefined) {
         console.error(`fake batch tail: dying unverified for anchor #${issue}`);
         process.exit(1);

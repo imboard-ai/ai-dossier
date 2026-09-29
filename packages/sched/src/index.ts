@@ -235,6 +235,19 @@ export {
   writeAtomic,
 } from './persist';
 export {
+  findGatedWorkEvidence,
+  isRegisteredWorktree,
+  type PreservedWork,
+  type PreserveOutcome,
+  preservedWorkInstruction,
+  preserveWork,
+  probeWorktree,
+  pushedHeadDate,
+  rescueRefName,
+  rescueUnitSlug,
+  type WorktreeProbe,
+} from './preserve';
+export {
   createExecFn,
   defaultExec,
   type ExecFn,

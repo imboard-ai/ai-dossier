@@ -5943,6 +5943,76 @@ describe('#832: the batch tail runs over landed members only, and a tail verdict
     expect(events.filter((e) => e.event === 'batch-blocked')).toHaveLength(1);
   }, 60_000);
 
+  it('#945/#940: a tail that dies leaving uncommitted work is NOT respawned onto it — the work is preserved on a pushed rescue ref and the batch blocks tail-dirty-worktree', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--tail-leave-dirty=1'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([{ issue: 871, mode: 'slot', batch: 'b-945-dirty', anchor: 870, tier: 'mid' }]);
+    h.tick(); // setup + member
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-945-dirty') as number)).toBe(true);
+    h.tick(); // validated → reviewing → tail #1 (leaves dirty work, dies)
+
+    await tickThroughAgents(h, 'b-945-dirty', 8);
+
+    const batch = findBatch(h.state(), 'b-945-dirty');
+    expect(batch?.status).toBe('blocked');
+    expect(batch?.blocked_reason).toBe('tail-dirty-worktree');
+    expect(tailMemberLists(h, 870)).toHaveLength(1); // never respawned onto the dirty tree
+    // the agent's work is still in the worktree, untouched
+    const worktree = batch?.worktree as string;
+    expect(fs.readFileSync(path.join(worktree, 'gated-fix.txt'), 'utf8')).toContain('gated');
+    // …and preserved on a rescue ref that reached origin
+    const events = h.deps.journal.read();
+    const preserved = events.find((e) => e.event === 'work-preserved' && e.branch);
+    expect(preserved?.branch).toMatch(/^rescue\/batch-b-945-dirty-\d{8}T\d{6}Z$/);
+    const ref = preserved?.branch as string;
+    expect(gitAt(['show', `${ref}:gated-fix.txt`], repo)).toContain('gated but uncommitted');
+    expect(gitAt(['ls-remote', 'origin', `refs/heads/${ref}`], repo)).toContain(ref);
+    expect(
+      events.some((e) => e.event === 'work-preserved' && e.reason === 'tail-dirty-worktree')
+    ).toBe(true);
+    // the operator's status names the evidence and the way out
+    const row = buildStatusReport(h.state(), h.config, 'proj').blocked.find(
+      (b) => b.status === 'batch-blocked'
+    );
+    expect(row?.reason).toMatch(
+      /^tail-dirty-worktree; the batch worktree .*`rescue\/batch-b-945-dirty-\*`/
+    );
+    expect(row?.reason).toMatch(/sched resume --batch b-945-dirty/);
+  }, 60_000);
+
+  it('#945: a tail that dies leaving only an UNPUSHED commit is respawned, told to resume from the preserved rescue ref (never the last pushed head)', async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--tail-leave-unpushed=1'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([{ issue: 881, mode: 'slot', batch: 'b-945-unpushed', anchor: 880, tier: 'mid' }]);
+    h.tick();
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-945-unpushed') as number)).toBe(
+      true
+    );
+    h.tick(); // tail #1 commits locally and dies
+
+    await tickThroughAgents(h, 'b-945-unpushed', 8);
+
+    const batch = findBatch(h.state(), 'b-945-unpushed');
+    expect(batch?.status).toBe('awaiting-merge');
+    expect(tailMemberLists(h, 880)).toHaveLength(2);
+    const told = fs
+      .readFileSync(path.join(h.truthDir, '880.tail-preserved'), 'utf8')
+      .split('\n')
+      .filter(Boolean);
+    expect(told).toEqual(['false', 'true']); // only the respawn is told about preserved work
+    const preserved = h.deps.journal.read().find((e) => e.event === 'work-preserved');
+    expect(preserved?.branch).toMatch(/^rescue\/batch-b-945-unpushed-/);
+    expect(gitAt(['show', `${preserved?.branch}:local-fix.txt`], repo)).toContain('committed');
+  }, 60_000);
+
   it('AC3 (report phase): a report agent that keeps exiting unverified is capped too — the MERGED batch closes without its report instead of looping', async () => {
     const repo = scratchRepo();
     const h = batchHarness(repo, ['--mode=batch', '--report-die=1'], { maxSlots: 1 });
