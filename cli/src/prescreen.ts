@@ -121,6 +121,12 @@ export const TEXT_FLOOR_PATTERNS: readonly TextFloorPattern[] = [
   },
 ];
 
+/** A whole string that is exactly one floor keyword. */
+const FLOOR_KEYWORD_EXACT_RE = new RegExp(
+  `^(?:${[...RULE1_KEYWORDS, ...RULE3_KEYWORDS, ...RULE4_KEYWORDS].map(phrase).join('|')})$`,
+  'i'
+);
+
 /** Every text-floor keyword, longest first so a phrase wins over a word it contains. */
 const FLOOR_KEYWORD_RE = new RegExp(
   `\\b(?:${[...RULE1_KEYWORDS, ...RULE3_KEYWORDS, ...RULE4_KEYWORDS]
@@ -346,8 +352,15 @@ export function stripReferenceMaterial(body: string): string {
  * surface. Measured on 57 hand-labelled text-floor hits (#772): 24 false positives — 5 negated
  * mentions, 4 unquoted file/spec/workflow names, 3 other word senses (the other 12 are incidental
  * mentions, out of reach here). Each mask blanks (same length) only the offending span, never the
- * whole issue: an issue that ALSO names a floor keyword outside any masked span still fires, so a
- * negated or file-named mention can never hide a genuine one elsewhere in the text.
+ * whole issue: an issue that ALSO names a floor keyword outside any masked span still fires.
+ *
+ * Every mask is deliberately narrower than its FP class, because the cost is asymmetric: a lost
+ * true positive lets a risky change into a `review=light` slot. "Is missing / not required" is how
+ * security bugs are WRITTEN ("reachable without authentication", "no CSRF protection on
+ * checkout"), so a risk-area keyword is only ever masked by an explicit SCOPE disclaimer
+ * ("no billing changes", "we're not doing OAuth", "explicitly dropped"), never by a bare `no`/`without`.
+ * A file or directory whose name IS the keyword (`secrets.yml`, `db/migrations/`) names the surface
+ * and stays scanned.
  */
 
 /** Filename with a code/config/doc extension, unquoted: `legacy-billing.routes.ts`, `deploy.yml`. */
@@ -357,54 +370,118 @@ const FILE_TOKEN_RE =
 /** Path with two or more `/` (`packages/frontend/src/x`); a single slash is not enough — `ci/cd` is a keyword. */
 const PATH_TOKEN_RE = /[\w@~.-]{0,40}(?:\/[\w@~.-]{1,40}){2,}\/?/g;
 
-/** A comma list of 3+ short items; masked when at least two items are kebab-case names (`cost-audit, deploy, docker-image-build`). */
+/** Directory names that ARE a risk surface: a path through one keeps being scanned. */
+const SURFACE_SEGMENTS: ReadonlySet<string> = new Set([
+  'migration',
+  'migrations',
+  'secret',
+  'secrets',
+  'credential',
+  'credentials',
+  'terraform',
+]);
+
+/** A test/spec file is never the risk surface even when its stem names one (`billing-banners.spec.ts`). */
+const TEST_FILE_RE = /\.(?:spec|test)\.[a-z]+$/i;
+
+/** True when a masked-candidate file token still names a floor surface: a whole dot-segment of its basename is a keyword (`secrets.yml`, `Stripe.js`, `credentials.yml.enc`). */
+function fileTokenNamesSurface(token: string): boolean {
+  const base = token.slice(token.lastIndexOf('/') + 1);
+  if (TEST_FILE_RE.test(base)) return false;
+  return base.split('.').some((seg) => FLOOR_KEYWORD_EXACT_RE.test(seg));
+}
+
+function maskFileToken(token: string): string {
+  return fileTokenNamesSurface(token) ? token : blank(token);
+}
+
+function maskPathToken(token: string): string {
+  const segments = token.toLowerCase().split('/');
+  return segments.some((seg) => SURFACE_SEGMENTS.has(seg)) ? token : blank(token);
+}
+
+/** A comma list of 3+ short items. */
 const NAME_LIST_RE = /[\w-]{1,40}(?:[ \t]*,[ \t]*[\w-]{1,40}){2,}/g;
 const KEBAB_ITEM_RE = /^[a-z0-9]+(?:-[a-z0-9]+)+$/i;
 
-/** Other senses of a floor word: git's checkout, a repo checkout, financial security types, the HTTP Authorization header, Node's `crypto.*` API. */
+/**
+ * A list of workflow/job/route names (`cost-audit, deploy, docker-image-build`): blanked only when
+ * at least three items, and at least half, are kebab-case names. A mixed list ("user-profile,
+ * admin-panel, billing, migrations") is a scope enumeration and stays scanned.
+ */
+function maskNameList(list: string): string {
+  const items = list.split(',');
+  const kebab = items.filter((i) => KEBAB_ITEM_RE.test(i.trim())).length;
+  return kebab >= 3 && kebab * 2 >= items.length ? blank(list) : list;
+}
+
+/**
+ * Other senses of a floor word: git's checkout, a repo checkout, financial security types, the
+ * `Authorization:` header line, `crypto.randomUUID()`. Narrow on purpose — "the Authorization
+ * header is logged in plaintext", "crypto.randomBytes for session tokens" and "every checkout
+ * charges the card twice" are real findings and stay scanned.
+ */
 const WORD_SENSE_RES: readonly RegExp[] = [
   /\b(?:git|gh(?:\s+pr)?|actions\/)\s*checkout\b/gi,
-  /\b(?:fresh|clean|shallow|local)\s+checkout\b/gi,
-  /\b(?:any|every|each)\s+checkout\b(?!\s+(?:flow|page|session|button|form|step|summary|total))/gi,
+  /\b(?:fresh|clean|shallow)\s+checkout\b/gi,
+  /\b(?:on|in|from)\s+(?:any|every|each)\s+(?:git\s+)?checkout\b/gi,
   /\bsecurity\s+(?:types?|classes|prices?|symbols?|master)\b/gi,
-  /\bcrypto\.[a-z]\w*/gi,
+  /\bcrypto\.randomUUID\b/gi,
   /\bAuthorization\s*:/gi,
-  /\bAuthorization\s+headers?\b/gi,
   /\bheaders?\s*:\s*Authorization\b/gi,
 ];
 
 const blank = (m: string) => ' '.repeat(m.length);
 
 /**
- * Negators directly in front of a keyword: `no`, `without`, `non`, `zero`, `not a/an/the/any`,
- * with up to three list-ish words between ("no schema, billing or auth changes"). Kept narrow so
- * a verb phrase is never read as a negated mention: bare `not` ("login not working after
- * payment") and `no longer` do not qualify, and `without` allows one non-gerund word at most
- * ("without breaking billing" still names the surface).
+ * Keywords that are CHANGE TYPES an issue routinely disclaims ("no migration needed", "not a
+ * deploy change"): full negation rules apply. Every other floor keyword is a RISK AREA, masked
+ * only by an explicit scope disclaimer (see {@link SCOPE_DISCLAIMER_BEFORE_RES}, {@link NEGATED_AFTER_RE}).
  */
-const NEGATED_BEFORE_RES: readonly RegExp[] = [
-  /(?:^|[^\w-])(?:no(?!\s+(?:longer|more)\b)|non|zero|not\s+(?:a|an|the|any))[\s-]+(?:[\w-]+(?:,|\s+(?:or|and|nor))?\s+){0,3}$/i,
-  /(?:^|[^\w-])(?:not\s+(?:doing|building|adding|using|supporting)|won'?t\s+(?:do|build|add|use|support)|don'?t\s+(?:need|want))\s+(?:[\w-]+\s+){0,2}$/i,
-  /,\s*not\s+$/i,
-  /(?:^|[^\w-])without\s+(?:(?![\w-]*ing\b)[\w-]+\s+)?$/i,
-];
+const CHANGE_TYPE_KEYWORD_RE = new RegExp(
+  `^(?:${[...RULE3_KEYWORDS, ...RULE4_KEYWORDS, 'migration', 'migrations'].map(phrase).join('|')})$`,
+  'i'
+);
 
 /**
- * A "no X" negation only counts when X ENDS its noun phrase — a list separator, `or`/`and`, or a
- * scope noun ("no migration risk", "no billing changes"). "no security check on write access" is
- * a bug report whose change surface IS the keyword, so the negator must not hide it.
+ * Negators in front of a CHANGE-TYPE keyword: `no`, `zero`, `without`, `not a/an/the/any` as
+ * standalone words (a hyphen never counts: "zero-downtime deployment", "non-breaking migration"
+ * are real work), up to two words between ("no data migration", "no schema, data migration").
+ * Bare `not` ("not working after deploy") and `no longer` do not qualify.
  */
+const NEGATED_BEFORE_RES: readonly RegExp[] = [
+  /(?:^|[^\w-])(?:no(?!\s+(?:longer|more)\b)|zero|without|not\s+(?:a|an|the|any))\s+(?:[\w-]+(?:,|\s+(?:or|and|nor))?\s+){0,2}$/i,
+  /,\s*not\s+$/i,
+];
+
+/** A change-type negation only counts when the keyword ENDS its noun phrase: a list separator, `or`/`and`, `(`, or a scope noun. */
 const NEGATOR_TARGET_END_RE =
   /^(?:\s*(?:[,.;!?()\n]|$)|\s+(?:or|and|nor)\b|\s+(?:needed|required|changes?|risks?|impacts?|work|concerns?|steps?|involved|implications?|effects?)\b)/i;
 
-/** A negation AFTER the keyword within two words: "OAuth approach explicitly dropped", "billing is out of scope". */
+/**
+ * Explicit scope disclaimers before ANY floor keyword: "we're not doing OAuth", "this PR is not
+ * adding auth", and — for risk areas — a bare `no`/`without` only when a SCOPE noun follows the
+ * keyword ("no billing changes", "no schema, billing or auth changes", "no security impact").
+ */
+const SCOPE_DISCLAIMER_BEFORE_RES: readonly RegExp[] = [
+  /(?:^|[^\w-])(?:we(?:'re|\s+are)?\s+not|we\s+won'?t|this\s+(?:issue|pr|change)\s+(?:does\s+not|doesn'?t|is\s+not))\s+(?:doing|building|adding|using|supporting|touching|changing|do|build|add|use|support|touch|change)\s+(?:[\w-]+\s+){0,2}$/i,
+];
+const RISK_NEGATOR_BEFORE_RE =
+  /(?:^|[^\w-])(?:no(?!\s+(?:longer|more)\b)|zero|without)\s+(?:[\w-]+(?:,|\s+(?:or|and|nor))?\s+){0,2}$/i;
+const SCOPE_NOUN_AFTER_RE =
+  /^(?:\s*(?:,|\s(?:or|and|nor))\s*[\w-]+){0,3}\s+(?:changes?|risks?|impacts?|work|concerns?|implications?|effects?|needed|required)\b/i;
+
+/** A scope disclaimer AFTER the keyword within two words: "OAuth approach explicitly dropped", "billing is out of scope". */
 const NEGATED_AFTER_RE =
-  /^(?:\s+[\w/-]+){0,2}\s+(?:(?:is|are|was|were)\s+)?(?:explicitly\s+)?(?:dropped|descoped|out\s+of\s+scope|not\s+(?:needed|required|in\s+scope|applicable|affected)|ruled\s+out)\b/i;
+  /^(?:\s+[\w/-]+){0,2}\s+(?:(?:is|are|was|were)\s+)?(?:explicitly\s+)?(?:dropped|descoped|out\s+of\s+scope|ruled\s+out)\b/i;
+/** "not needed / not required" after a CHANGE-TYPE keyword only ("migration not required"); after a risk area it is a bug report. */
+const CHANGE_TYPE_NOT_NEEDED_AFTER_RE =
+  /^(?:\s+[\w/-]+){0,1}\s+(?:is\s+)?not\s+(?:needed|required|in\s+scope|applicable)\b/i;
 
 /** Longest text scanned either side of a keyword when looking for a negation. */
 const NEGATION_WINDOW = 60;
 
-/** Blank every floor keyword occurrence that is negated in its clause. */
+/** Blank every floor keyword occurrence that carries an explicit scope disclaimer. */
 function maskNegatedMentions(text: string): string {
   return text.replace(FLOOR_KEYWORD_RE, (match, offset: number, whole: string) => {
     const before = whole.slice(Math.max(0, offset - NEGATION_WINDOW), offset);
@@ -412,25 +489,26 @@ function maskNegatedMentions(text: string): string {
       Math.max(...['.', ';', '!', '?', '\n'].map((c) => before.lastIndexOf(c))) + 1
     );
     const after = whole.slice(offset + match.length, offset + match.length + NEGATION_WINDOW);
+    const changeType = CHANGE_TYPE_KEYWORD_RE.test(match);
     const negated =
-      (NEGATED_BEFORE_RES.some((re) => re.test(clauseBefore)) &&
-        NEGATOR_TARGET_END_RE.test(after)) ||
-      NEGATED_AFTER_RE.test(after);
+      SCOPE_DISCLAIMER_BEFORE_RES.some((re) => re.test(clauseBefore)) ||
+      NEGATED_AFTER_RE.test(after) ||
+      (changeType &&
+        ((NEGATED_BEFORE_RES.some((re) => re.test(clauseBefore)) &&
+          NEGATOR_TARGET_END_RE.test(after)) ||
+          CHANGE_TYPE_NOT_NEEDED_AFTER_RE.test(after))) ||
+      (!changeType && RISK_NEGATOR_BEFORE_RE.test(clauseBefore) && SCOPE_NOUN_AFTER_RE.test(after));
     return negated ? blank(match) : match;
   });
 }
 
 /**
  * #784: blank the false-positive spans of {@link stripQuotedSpans}' unquoted cousins — file/spec/
- * workflow names, other word senses, and negated mentions — before the text floor runs.
+ * workflow names, other word senses, and scope-disclaimed mentions — before the text floor runs.
  */
 export function maskFloorFalsePositives(text: string): string {
-  let out = text.replace(FILE_TOKEN_RE, blank).replace(PATH_TOKEN_RE, blank);
-  out = out.replace(NAME_LIST_RE, (list) =>
-    list.split(',').filter((item) => KEBAB_ITEM_RE.test(item.trim())).length >= 2
-      ? blank(list)
-      : list
-  );
+  let out = text.replace(FILE_TOKEN_RE, maskFileToken).replace(PATH_TOKEN_RE, maskPathToken);
+  out = out.replace(NAME_LIST_RE, maskNameList);
   for (const re of WORD_SENSE_RES) out = out.replace(re, blank);
   return maskNegatedMentions(out);
 }

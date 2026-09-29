@@ -246,5 +246,157 @@
     "title": "Tune the rate-limit rules",
     "body": "Noisy bots hammer the search route; no security impact, just load.",
     "labels": []
+  },
+  {
+    "id": "tp-rev-noauth-endpoint",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "The /admin/users endpoint is reachable without authentication.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-noauth-delete",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "DELETE /api/users/:id has no authentication, anyone can call it.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-nolabel-authz",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "The admin panel works without authorization.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-no-validation-payment",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "There is no validation on payment.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-csrf-checkout",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "No CSRF protection on checkout.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-admin-billing",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "No admin can access billing.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-auth-not-required",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "Authentication is not required for DELETE /api/users",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-stripe-sig",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "Stripe webhook signature not required; anyone can forge events.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-not-affected",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "Bug: the Stripe customer id is not affected by the refund path",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-zero-downtime",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "We need zero-downtime deployment.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-nonbreaking",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "Ship it as a non-breaking migration.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-every-checkout",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "Every checkout charges the card twice.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-auth-header-logged",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "The Authorization header is logged in plaintext to Sentry.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-crypto-random",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "Switch session tokens to crypto.randomBytes.",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-secrets-yml",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "Rotate the leaked key in secrets.yml and config/credentials.yml.enc",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-stripejs",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "Upgrade Stripe.js to v3",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-migrations-dir",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "Changes under server/db/migrations and src/billing/stripe",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-mixed-list",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "Touches user-profile, admin-panel, billing, migrations",
+    "labels": []
+  },
+  {
+    "id": "tp-rev-oauth-callback",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Report",
+    "body": "login, signup, oauth-callback, sso-redirect broken",
+    "labels": []
   }
 ]

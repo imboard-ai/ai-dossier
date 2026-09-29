@@ -47,7 +47,7 @@ const SKIP_DIRS = new Set([
   'infra',
 ]);
 
-/** Nested roots probed at most (each costs up to two `gh api` reads). */
+/** Nested roots probed at most (each costs up to three `gh api` reads: pnpm, package.json, lerna). */
 const MAX_PROBED_DIRS = 8;
 /** Globs kept per root — the config is untrusted-ish network text, keep the output bounded. */
 const MAX_GLOBS = 64;
@@ -72,7 +72,9 @@ function toPatterns(value: unknown): { globs: string[]; excludes: string[] } | n
     if (trimmed.startsWith('!')) excludes.push(trimmed.slice(1).replace(/^\.\//, ''));
     else globs.push(trimmed);
   }
-  return globs.length > 0 ? { globs: globs.slice(0, MAX_GLOBS), excludes } : null;
+  return globs.length > 0
+    ? { globs: globs.slice(0, MAX_GLOBS), excludes: excludes.slice(0, MAX_GLOBS) }
+    : null;
 }
 
 /**
@@ -188,16 +190,20 @@ export function packageOfPath(path: string, layout: WorkspaceLayout): string | n
     .replace(/^\.\//, '')
     .split('/')
     .filter((s) => s !== '');
+  const qualify = (root: WorkspaceRoot, dir: string) =>
+    layout.roots.length > 1 && root.prefix !== '' ? `${root.prefix}/${dir}` : dir;
+  // Pass 1: a root whose directory the path names. This wins outright, so root ORDER never
+  // matters (`main/packages/x` is `main`'s, even when another root's glob would also match it).
   for (const root of layout.roots) {
     const prefixSegments = root.prefix === '' ? [] : root.prefix.split('/');
-    const underPrefix =
-      prefixSegments.length > 0 && prefixSegments.every((p, i) => segments[i] === p);
-    const candidates = underPrefix ? [segments.slice(prefixSegments.length)] : [segments];
-    for (const relative of candidates) {
-      const dir = packageDirIn(root, relative);
-      if (dir === null) continue;
-      return layout.roots.length > 1 && root.prefix !== '' ? `${root.prefix}/${dir}` : dir;
-    }
+    if (prefixSegments.length === 0 || !prefixSegments.every((p, i) => segments[i] === p)) continue;
+    const dir = packageDirIn(root, segments.slice(prefixSegments.length));
+    if (dir !== null) return qualify(root, dir);
   }
-  return null;
+  // Pass 2: a root-relative spelling (`packages/x/…`, how issue text usually writes it). Ambiguous
+  // across roots (`a` and `b` both declare `packages/*`) means unknown, not "the first root".
+  const hits = layout.roots
+    .map((root) => [root, packageDirIn(root, segments)] as const)
+    .filter((h): h is readonly [WorkspaceRoot, string] => h[1] !== null);
+  return hits.length === 1 ? qualify(hits[0][0], hits[0][1]) : null;
 }

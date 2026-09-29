@@ -44,12 +44,9 @@ export const MIN_BODY_LENGTH = 40;
 export const TRACKER_LABELS: readonly string[] = [
   'initiative',
   'umbrella',
-  'meta',
   'roadmap',
   'punch-list',
   'tracking',
-  'theme',
-  'program',
 ];
 
 /** Labels that mark an issue as a feature request. */
@@ -72,8 +69,13 @@ export const BOUNDED_LABELS: readonly string[] = [
 ];
 const READY_LABEL_RE = /^ready[:/]/i;
 
+/**
+ * Tracker words in a title. `roadmap`/`initiative`/`workstream` are also ordinary product nouns
+ * ("Fix roadmap page rendering", "initiative card overflow"), so they count only as the LEAD word
+ * (optionally after a `[tag]`) or as the closing word ("… acquisition initiative").
+ */
 const TRACKER_TITLE_RE =
-  /\b(?:punch[\s-]?list|umbrella|tracking issue|master list|roadmap|initiative|meta[\s-]?issue|workstream)\b/i;
+  /\b(?:punch[\s-]?list|umbrella|tracking issue|master list|meta[\s-]?issue)\b|^\s*(?:\[[^\]]*\]\s*)?(?:roadmap|initiative|workstream)\b|\b(?:initiative|roadmap)\s*$/i;
 /** `audit`/`triage` alone are ordinary words ("fix audit log rotation") — a tracker only with a findings list. */
 const FINDINGS_TITLE_RE = /\b(?:audit|triage|sweep|findings)\b/i;
 const FINDINGS_LIST_MIN = 5;
@@ -87,13 +89,21 @@ const BOUNDED_TITLE_RE =
 const AC_MARKER_RE =
   /^[ \t]{0,3}(?:#{1,6}[ \t]*|\*\*|__)?[ \t]*(?:acceptance(?:[ \t]+criteria)?|requirements?|definition[ \t]+of[ \t]+done|done[ \t]+when|success[ \t]+criteria|ac)\b[ \t]*(?:\*\*|__)?[ \t]*:?/im;
 
+/** Any list item's text (task-list boxes stripped): plain `- #12` bullets link sub-issues too. */
+const ANY_ITEM_RE = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?(.*)$/gm;
 const TASK_ITEM_RE = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+\[[ xX]\][ \t]+(.*)$/gm;
 /** A task item that is (or starts with) an issue reference: `#12`, `org/repo#12`, an issue URL, `[title](…/issues/12)`. */
 const ISSUE_LINK_ITEM_RE =
   /^(?:\*\*|__)?(?:#\d+|[\w.-]+\/[\w.-]+#\d+|https?:\/\/\S+\/issues\/\d+|\[[^\]]*\]\([^)]*\/issues\/\d+\))/;
 const INITIATIVE_HEADING_RE =
   /^[ \t]{0,3}#{1,6}[ \t]*(?:strategic[ \t]+framing|kill[ \t]+criteria|success[ \t]+metrics|north[ \t-]?star|okrs?|roadmap|implementation[ \t]+phases|rollout[ \t]+plan|workstreams?)\b/gim;
-const DECLARED_SUBISSUES_RE = /\b\d+[ \t]+sub-?issues\b|^[ \t]{0,3}#{1,6}[ \t]*sub-?issues\b/im;
+/** Declared only in a HEADING ("Implementation plan — 4 sub-issues"): prose may just mention them ("closing 2 sub-issues does not update the parent"). */
+const DECLARED_SUBISSUES_RE = /^[ \t]{0,3}#{1,6}[^\n]*\bsub-?issues\b/im;
+/** GitHub's standard bug template / a repro-shaped report is bounded even without a label. */
+const BUG_REPORT_RE =
+  /^[ \t]{0,3}(?:#{1,6}[ \t]*|\*\*|__)?[ \t]*(?:steps[ \t]+to[ \t]+reproduce|expected[ \t]+(?:behaviou?r|result)|actual[ \t]+(?:behaviou?r|result)|repro(?:duction)?[ \t]+steps)\b/im;
+/** A plain checklist earns acceptance-criteria credit only while it is short enough to be one change's AC. */
+const AC_CHECKLIST_MAX = 6;
 const PHASE_HEADING_RE = /^[ \t]{0,3}#{1,6}[ \t]*(?:phase|part|milestone|stage|wave)[ \t]*\d+/gim;
 const LIST_ITEM_RE = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+\S/gm;
 // Every quantifier bounded: the body is untrusted and an unbounded `(?:[\w.-]+\/)+` is quadratic on `a.a.a.…`.
@@ -127,7 +137,8 @@ export function assessReadiness(
   const taskItems = [...body.matchAll(TASK_ITEM_RE)].map((m) => m[1].trim());
   const checklist = taskItems.length;
   const hasAcMarker = AC_MARKER_RE.test(body);
-  const hasAc = hasAcMarker || (checklist >= 1 && checklist < TRACKER_CHECKLIST_MIN);
+  const hasAc = hasAcMarker || (checklist >= 1 && checklist <= AC_CHECKLIST_MAX);
+  const bugReport = BUG_REPORT_RE.test(body);
   const bounded =
     lower.find((l) => BOUNDED_LABELS.includes(l) || READY_LABEL_RE.test(l)) ??
     (BOUNDED_TITLE_RE.test(title) ? 'title prefix' : undefined);
@@ -144,14 +155,17 @@ export function assessReadiness(
     const min = bounded === undefined ? FINDINGS_LIST_MIN : FINDINGS_LIST_MIN_BOUNDED;
     if (items >= min) blockers.push(`audit/triage title with a ${items}-item findings list`);
   }
-  if (checklist >= TRACKER_CHECKLIST_MIN) {
+  // A long checklist under an explicit AC heading on a bounded-type issue is a thorough spec, not a tracker.
+  if (checklist >= TRACKER_CHECKLIST_MIN && !(hasAcMarker && bounded !== undefined)) {
     blockers.push(
       `checklist of ${checklist} task items (>= ${TRACKER_CHECKLIST_MIN}) — a tracker, not one change`
     );
   }
-  const subIssues = taskItems.filter((t) => ISSUE_LINK_ITEM_RE.test(t)).length;
+  const subIssues = [...body.matchAll(ANY_ITEM_RE)].filter((m) =>
+    ISSUE_LINK_ITEM_RE.test(m[1].trim())
+  ).length;
   if (subIssues >= TRACKER_SUBISSUE_MIN) {
-    blockers.push(`${subIssues} task items link sub-issues — a tracker`);
+    blockers.push(`${subIssues} list items link sub-issues — a tracker`);
   }
   const phases = countMatches(PHASE_HEADING_RE, body);
   if (phases >= INITIATIVE_PHASE_HEADINGS_MIN) {
@@ -189,6 +203,10 @@ export function assessReadiness(
   if (bounded !== undefined) {
     score += 2;
     signals.push(`bounded type (${bounded})`);
+  }
+  if (bugReport) {
+    score += 2;
+    signals.push('bug-report structure (steps / expected / actual)');
   }
   if (CODE_PATH_RE.test(body)) {
     score += 1;

@@ -791,6 +791,23 @@ describe('prescreenIssue — text-floor false-positive classes (#784)', () => {
     ['invoices no longer generated', /invoices/],
     ['without breaking billing state', /billing/],
     ['We must enforce the authorization check on board access', /authorization/],
+    // #926 review: absence-of-control phrasings are how security bugs are written.
+    ['reachable without authentication.', /authentication/],
+    ['has no authentication, anyone can call it', /authentication/],
+    ['There is no validation on payment.', /payment/],
+    ['No CSRF protection on checkout.', /checkout/],
+    ['Authentication is not required for DELETE /api/users', /Authentication/],
+    ['the Stripe customer id is not affected by the refund path', /Stripe/],
+    ['We need zero-downtime deployment.', /deployment/],
+    ['Ship it as a non-breaking migration.', /migration/],
+    ['Every checkout charges the card twice.', /checkout/],
+    ['The Authorization header is logged in plaintext', /Authorization/],
+    ['Switch session tokens to crypto.randomBytes', /crypto/],
+    ['Rotate the key in secrets.yml and config/credentials.yml.enc', /secrets/],
+    ['Upgrade Stripe.js to v3', /Stripe/],
+    ['Changes under server/db/migrations', /migrations/],
+    ['Touches user-profile, admin-panel, billing, migrations', /billing/],
+    ['login, signup, oauth-callback, sso-redirect broken', /oauth/],
   ])('does not treat "%s" as a negated/sense mention', (body, kept) => {
     expect(floorScanText('t', body, [])).toMatch(kept);
   });
@@ -809,7 +826,7 @@ describe('prescreenIssue — text-floor false-positive classes (#784)', () => {
     'id via crypto.randomUUID()',
     'see legacy-billing.routes.ts',
     'see packages/frontend/src/billing/usePlan',
-    'workflows: cost-audit, deploy, docker-image-build',
+    'workflows: cost-audit, deploy, docker-image-build, demo-reseed',
   ])('masks the keyword in "%s"', (body) => {
     expect(TEXT_FLOOR_PATTERNS.map((p) => p.match(floorScanText('t', body, [])))).toEqual([
       null,

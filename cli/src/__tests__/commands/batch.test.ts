@@ -397,8 +397,8 @@ describe('batch compose', () => {
 
     const r = report();
     expect(r.workspace).toEqual({ source: 'heuristic', roots: [] });
-    expect(r.degraded).toBe(true);
-    expect(r.warnings.join(' ')).toMatch(/path heuristics: no workspace config/);
+    expect(r.degraded).toBe(false);
+    expect(r.notices.join(' ')).toMatch(/path heuristics: no workspace config/);
     expect(r.members[0].packages).toEqual(['main']);
   });
 

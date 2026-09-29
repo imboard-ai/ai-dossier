@@ -6,6 +6,7 @@ import {
   parseWorkspaceConfig,
   type WorkspaceFileReader,
   type WorkspaceLayout,
+  type WorkspaceRoot,
 } from '../workspace-layout';
 
 function reader(files: Record<string, string>, dirs: string[] = []): WorkspaceFileReader {
@@ -105,6 +106,42 @@ describe('packageOfPath', () => {
     expect(packageOfPath('tools/cli/src/a.ts', l)).toBe('tools/cli');
     expect(packageOfPath('tools/other/a.ts', l)).toBeNull();
     expect(packageOfPath('apps/web/src/a.ts', l)).toBe('apps/web');
+  });
+  it('multi-root resolution is order-independent and never guesses (#926 review)', () => {
+    const apps: WorkspaceRoot = {
+      prefix: 'apps',
+      file: 'package.json',
+      globs: ['*'],
+      excludes: [],
+    };
+    const main: WorkspaceRoot = {
+      prefix: 'main',
+      file: 'package.json',
+      globs: ['packages/*'],
+      excludes: [],
+    };
+    for (const roots of [
+      [apps, main],
+      [main, apps],
+    ]) {
+      // The path names `main`'s directory: `main` owns it, not `apps/main` via apps' `*` glob.
+      expect(packageOfPath('main/packages/x/a.ts', { roots })).toBe('main/packages/x');
+    }
+    const a: WorkspaceRoot = {
+      prefix: 'a',
+      file: 'package.json',
+      globs: ['packages/*'],
+      excludes: [],
+    };
+    const b: WorkspaceRoot = {
+      prefix: 'b',
+      file: 'package.json',
+      globs: ['packages/*'],
+      excludes: [],
+    };
+    // Root-relative spelling that two roots could own is unknown, not "the first root".
+    expect(packageOfPath('packages/x/a.ts', { roots: [a, b] })).toBeNull();
+    expect(packageOfPath('packages/x/a.ts', { roots: [a] })).toBe('packages/x');
   });
   it('prefixes packages with their root when the repo has several roots', () => {
     const l: WorkspaceLayout = {

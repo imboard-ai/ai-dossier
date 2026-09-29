@@ -238,12 +238,12 @@ function fsWorkspaceReader(root: string): WorkspaceFileReader {
 }
 
 /**
- * The target repo's declared workspace layout (#801), or null with a warning saying the path
- * heuristic is in force instead. Read-only: `gh api` contents reads, or plain file reads locally.
+ * The target repo's declared workspace layout (#801), or null with a notice saying the path
+ * heuristic is in force instead (a repo without workspaces is normal, so the report is not `degraded`). Read-only: `gh api` contents reads, or plain file reads locally.
  */
 function resolveWorkspaceLayout(
   repo: string | undefined,
-  warnings: string[]
+  notices: string[]
 ): WorkspaceLayout | null {
   let reader: WorkspaceFileReader;
   let where: string;
@@ -253,7 +253,7 @@ function resolveWorkspaceLayout(
   } else {
     const top = exec('git', ['rev-parse', '--show-toplevel']);
     if (!top.ok || top.stdout === '') {
-      warnings.push(
+      notices.push(
         'Workspace packages inferred from path heuristics: not in a git checkout and no --repo given, so no workspace config could be read.'
       );
       return null;
@@ -263,7 +263,7 @@ function resolveWorkspaceLayout(
   }
   const layout = discoverWorkspaceLayout(reader);
   if (layout === null) {
-    warnings.push(
+    notices.push(
       `Workspace packages inferred from path heuristics: no workspace config (pnpm-workspace.yaml, package.json workspaces, lerna.json) found in ${where}.`
     );
   }
@@ -451,7 +451,9 @@ function runCompose(opts: ComposeCliOptions): void {
       ? positiveInt(opts.maxFullReview, '--max-full-review', { min: 0, max: DEFAULT_MAX_MEMBERS })
       : (sched.config?.max_full_review_members ?? MAX_FULL_REVIEW_MEMBERS);
 
-  const layout = resolveWorkspaceLayout(opts.repo, warnings);
+  /** Advisories that do not make the report `degraded` (unlike `warnings`, which mean missing data). */
+  const notices: string[] = [];
+  const layout = resolveWorkspaceLayout(opts.repo, notices);
   const inputs: ComposeIssueInput[] = picks.map((n) => fetchPick(n, opts.repo, warnings));
   const pickSet = new Set(picks);
 
@@ -533,8 +535,6 @@ function runCompose(opts: ComposeCliOptions): void {
     for (const b of backlog) if (!pickSet.has(b.issue)) inputs.push(b);
   }
 
-  /** Advisories that do not make the report `degraded` (unlike `warnings`, which mean missing data). */
-  const notices: string[] = [];
   const assessed = assessAll(inputs);
   for (const a of assessed) {
     const input = inputs.find((i) => i.issue === a.issue);
