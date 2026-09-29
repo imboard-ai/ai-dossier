@@ -99,6 +99,14 @@ describe('analyzeDryRun: command classification', () => {
     expect(plan.files.map((f) => f.path)).toEqual(['./<name>.md']);
   });
 
+  it('skips heredoc bodies and joins multi-line quoted arguments', () => {
+    const plan = analyze(
+      "gh pr create --title t --body \"$(cat <<'EOF'\nrm -rf / is only prose here\nEOF\n)\"\njq '.a\n | select(.b)' f.json"
+    );
+    expect(plan.commands.map((c) => c.command.split(' ')[0])).toEqual(['gh', 'jq']);
+    expect(plan.commands.some((c) => c.kind === 'destructive')).toBe(false);
+  });
+
   it('treats unknown executables as local writes and says so', () => {
     const plan = analyze('./deploy.sh --now');
     expect(plan.commands[0]).toMatchObject({ kind: 'local_write', recognized: false });

@@ -162,19 +162,49 @@ function extractFences(body: string): Fence[] {
 
 // --- shell tokenising ------------------------------------------------------
 
-/** Join `\`-continued lines, keeping the number of the first physical line. */
+/** True when `s` ends inside an unterminated '...' or "..." string. */
+function endsInsideQuote(s: string): boolean {
+  let quote: string | null = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (quote) {
+      if (c === '\\' && quote === '"') i++;
+      else if (c === quote) quote = null;
+    } else if (c === '\\') {
+      i++;
+    } else if (c === '"' || c === "'") {
+      quote = c;
+    }
+  }
+  return quote !== null;
+}
+
+/** Longest quoted span joined into one logical line before giving up (stray apostrophes in prose). */
+const MAX_QUOTED_LINES = 40;
+
+/** Join `\`-continued lines and multi-line quoted strings, keeping the number of the first physical line. */
 function logicalLines(fence: Fence): Array<{ text: string; line: number }> {
   const out: Array<{ text: string; line: number }> = [];
   let acc = '';
   let accLine = 0;
+  let accCount = 0;
   fence.lines.forEach((raw, idx) => {
     const lineNo = fence.startLine + idx;
-    if (!acc) accLine = lineNo;
+    if (!acc) {
+      accLine = lineNo;
+      accCount = 0;
+    }
+    accCount++;
     if (/\\\s*$/.test(raw)) {
       acc += `${raw.replace(/\\\s*$/, '')} `;
       return;
     }
-    out.push({ text: (acc + raw).trim(), line: accLine });
+    const joined = acc + raw;
+    if (endsInsideQuote(joined) && accCount < MAX_QUOTED_LINES) {
+      acc = `${joined} `;
+      return;
+    }
+    out.push({ text: joined.trim(), line: accLine });
     acc = '';
   });
   if (acc.trim()) out.push({ text: acc.trim(), line: accLine });
@@ -227,11 +257,11 @@ function splitCommands(line: string): string[] {
 
 function tokenize(cmd: string): string[] {
   const tokens: string[] = [];
-  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  const re = /(?:[^\s"']|"[^"]*"|'[^']*')+/g;
   let m = re.exec(cmd);
   while (m !== null) {
-    if (m[3]?.startsWith('#')) break; // trailing shell comment
-    tokens.push(m[1] ?? m[2] ?? m[3]);
+    if (m[0].startsWith('#')) break; // trailing shell comment
+    tokens.push(m[0].replace(/"([^"]*)"|'([^']*)'/g, (_q, d: string, sq: string) => d ?? sq));
     m = re.exec(cmd);
   }
   return tokens;
@@ -742,7 +772,22 @@ export function analyzeDryRun(
     const isBare = fence.lang === '';
     if (!isShell && !isScript && !isBare) continue;
 
+    let heredocEnd: string | null = null;
     for (const { text, line } of logicalLines(fence)) {
+      if (heredocEnd !== null) {
+        if (text === heredocEnd) heredocEnd = null;
+        continue; // heredoc bodies are data (PR bodies, file contents), not commands
+      }
+      const heredoc = text.match(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/);
+      // A heredoc already closed inside a joined multi-line quote needs no skipping.
+      if (
+        heredoc &&
+        !new RegExp(`\\b${heredoc[1]}\\b`).test(
+          text.slice((heredoc.index ?? 0) + heredoc[0].length)
+        )
+      ) {
+        heredocEnd = heredoc[1];
+      }
       if (!text || text.startsWith('#')) continue;
       if (isScript) {
         for (const m of text.matchAll(ENV_NODE)) {
@@ -786,6 +831,8 @@ export function analyzeDryRun(
         // Redirections are attached to the segment that owns them.
         const c = classifyCommand(part, part);
         if (!c) return;
+        // Unknown words after a pipe are almost always prose (`a|b|c` alternatives), not tools.
+        if (i > 0 && !c.recognized && c.files.length === 0) return;
         let kind = c.kind;
         if (pipesToShell && (exes[i] === 'sh' || exes[i] === 'bash' || exes[i] === 'zsh'))
           kind = 'destructive';
