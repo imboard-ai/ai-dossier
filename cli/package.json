@@ -54,7 +54,7 @@
   },
   "dependencies": {
     "@ai-dossier/core": "^1.14.0",
-    "@ai-dossier/sched": "^0.66.0",
+    "@ai-dossier/sched": "^0.67.0",
     "@ai-dossier/worktree-pool": "^0.7.0",
     "commander": "^12.1.0",
     "yaml": "^2.8.3"
