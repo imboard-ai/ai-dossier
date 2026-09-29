@@ -45,6 +45,7 @@ capabilities:
 |---|---|---|---|
 | `version` | `1` | no | Manifest format version (currently only `1`; absent = `1`) |
 | `capabilities` | mapping | yes | Capability id → entry |
+| `gates` | `none-declared-on-purpose` | no | Durable opt-out (#895) of `sched enqueue`'s undeclared-gate warning, for a repo that deliberately declares no `typecheck.run` / `test.focused`. The only accepted value; anything else makes the manifest invalid |
 | entry `.command` | string | yes | Command line executed via the shell, in the directory `ai-dossier` runs in |
 | entry `.lifecycle` | `active` \| `shadow` | no | `active` (default) = executable; `shadow` = declared but not yet trusted to run |
 | entry `.assumptions` | list of probes | no | Preconditions checked **before** the command runs |
@@ -71,7 +72,10 @@ Scaffolds `.dossier/automation/manifest.yaml` from `detectProjectEnv` (package m
 install/build commands) and the `package.json` scripts. Idempotent: an existing manifest
 is never modified. Undetectable gates become commented `TODO` stubs. `sched enqueue`
 warns (never blocks — #625) when a created batch's manifest lacks `typecheck.run` /
-`test.focused`; opt out with `--skip-gate-check` or `DOSSIER_SKIP_GATE_CHECK=1`.
+`test.focused`; opt out per invocation with `--skip-gate-check` / `DOSSIER_SKIP_GATE_CHECK=1`, or durably with
+`gates: none-declared-on-purpose` in the manifest (#895). With `--repo <owner/name>` the target
+repo's manifest is read from `--repo-dir <path>`, or from the cwd when its `origin` remote is that repo;
+with neither, enqueue says the check was skipped rather than guessing a manifest.
 
 ## `cap list [--json]`
 

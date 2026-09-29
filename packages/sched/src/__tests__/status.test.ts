@@ -190,6 +190,34 @@ describe('buildStatusReport', () => {
     expect(report.blocked[0].reason).toContain('#902');
   });
 
+  it('#900: a batch held by a stale-closed member is Blocked with the reason and release command', () => {
+    const state = seeded();
+    const batch = state.batches.find((b) => b.id === 'b1');
+    const member = batch?.members[0] as number;
+    const held = {
+      ...state,
+      entries: state.entries.map((e) =>
+        e.issue === member ? { ...e, stale_closed_at: '2026-01-01T00:00:00.000Z' } : e
+      ),
+    };
+    const item = buildStatusReport(held, { max_slots: 3 }, 'p').blocked.find(
+      (b) => b.status === 'batch-held'
+    );
+    expect(item).toMatchObject({ issue: member });
+    expect(item?.reason).toContain(`member-stale-closed #${member}`);
+    expect(item?.reason).toContain(`sched stop --issue ${member}`);
+    // A finished batch no longer waits on its members.
+    const done = {
+      ...held,
+      batches: held.batches.map((b) =>
+        b.id === 'b1' ? { ...b, status: 'dissolved' as const } : b
+      ),
+    };
+    expect(
+      buildStatusReport(done, { max_slots: 3 }, 'p').blocked.some((b) => b.status === 'batch-held')
+    ).toBe(false);
+  });
+
   it('#583 AC4: a blocked batch (gate-inconclusive) surfaces under `blocked` with its reason', () => {
     let state = seeded();
     state = {

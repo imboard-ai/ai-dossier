@@ -242,6 +242,8 @@ interface EnqueueOptions extends SchedOptions {
   review?: string;
   fromManifest?: string;
   repo?: string;
+  /** #895: local checkout of `--repo`, for the gate-gap warning. */
+  repoDir?: string;
   moreMembersExpected?: boolean;
   priority?: string;
   /** #603: bypass the slot-member plan:v1 pre-screen. */
@@ -1003,10 +1005,10 @@ function screenSlotPreconditions(inputs: EnqueueInput[], repo?: string): void {
 /**
  * #777: refuse to CREATE a batch in a repo whose only full gate declares
  * itself timeout-prone (see `batchGateRefusal`). Reads the capability
- * manifest of the directory `enqueue` runs in — skipped when `--repo` names
- * the GitHub repo explicitly (the flag exists for enqueueing into a project
- * whose checkout is NOT the cwd, so the cwd's manifest would be the wrong
- * one), and degrade-not-crash on a malformed manifest (`cap run` reports that
+ * manifest of the directory `enqueue` runs in — or, with `--repo`, of that
+ * repo's checkout (#895: `--repo-dir`, or the cwd when its origin is that
+ * repo; unresolvable → the check is skipped with a notice, never the wrong
+ * repo's manifest). Degrade-not-crash on a malformed manifest (`cap run` reports that
  * itself at gate time). Only batches this call creates are screened: a
  * member joining an existing batch cannot un-form it.
  *
@@ -1015,7 +1017,6 @@ function screenSlotPreconditions(inputs: EnqueueInput[], repo?: string): void {
  * `--skip-gate-check`.
  */
 function screenBatchGate(store: SchedStore, opts: EnqueueOptions, inputs: EnqueueInput[]): void {
-  if (opts.repo !== undefined) return;
   const existing = new Set(store.load().batches.map((b) => b.id));
   const born = [
     ...new Set(
@@ -1026,9 +1027,21 @@ function screenBatchGate(store: SchedStore, opts: EnqueueOptions, inputs: Enqueu
     ),
   ];
   if (born.length === 0) return;
+  // #895: `--repo` names a repo whose checkout may not be the cwd — resolve
+  // THAT repo's manifest (via `findDossierRoot` inside `loadCapabilityManifest`)
+  // or say the check was skipped; never read the cwd's manifest for another repo.
+  const manifestDir = opts.repo === undefined ? process.cwd() : resolveRepoCheckout(opts);
+  if (manifestDir === null) {
+    if (!opts.skipGateCheck && !process.env[SKIP_GATE_CHECK_ENV]) {
+      console.error(
+        `⚠ Batch gate check skipped: no local checkout of ${opts.repo} found (cwd is another repo) — pass --repo-dir <path> to check its manifest.`
+      );
+    }
+    return;
+  }
   let manifest: CapabilityManifest;
   try {
-    manifest = loadCapabilityManifest(process.cwd());
+    manifest = loadCapabilityManifest(manifestDir);
   } catch {
     return;
   }
@@ -1039,6 +1052,19 @@ function screenBatchGate(store: SchedStore, opts: EnqueueOptions, inputs: Enqueu
     const warning = gateGapWarning(manifest);
     if (warning !== null) console.error(warning);
   }
+}
+
+/**
+ * #895: the local checkout of the `--repo` an enqueue targets — `--repo-dir`
+ * when given, else the cwd when its `origin` remote IS that repo; `null` when
+ * neither holds (an unverifiable cwd is not assumed to be the target).
+ */
+function resolveRepoCheckout(opts: EnqueueOptions): string | null {
+  if (opts.repoDir !== undefined) return path.resolve(opts.repoDir);
+  const cwd = process.cwd();
+  const remote = defaultExec('git', ['remote', 'get-url', 'origin'], cwd);
+  const slug = remote?.trim().match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1];
+  return slug !== undefined && slug.toLowerCase() === opts.repo?.toLowerCase() ? cwd : null;
 }
 
 /**
@@ -1300,6 +1326,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
     .option(
       '--repo <owner/name>',
       "GitHub repo to screen hard-block labels against (default: current directory's repo — required when --project targets a different repo)"
+    )
+    .option(
+      '--repo-dir <path>',
+      'Local checkout of --repo — where its capability manifest is read for the undeclared-gate warning (default: the cwd, when its origin remote is --repo)'
     )
     .option('--json', 'Output the result as JSON')
     .action((opts: EnqueueOptions) => {

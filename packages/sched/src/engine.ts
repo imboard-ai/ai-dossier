@@ -2910,6 +2910,7 @@ function requeueOrphanedDispatches(ctx: TickCtx, state: SchedState): SchedState 
         // let one unreachable-gh tick re-dispatch a shipped issue. Unflagged
         // orphans are read by `pollClosed` and flagged in the dispatch pass.
         stale_closed_at: entry.stale_closed_at,
+        stale_closed_ticks: entry.stale_closed_ticks,
       },
       now
     );

@@ -2738,6 +2738,29 @@ describe('#778: a batch member whose issue is closed is flagged, not spawned', (
     expect(batchSlotPid(h, 'b-778')).toBeFalsy();
     expect(flagged()).toHaveLength(1);
   }, 60_000);
+
+  it('#900: re-announces the hold on the shared dedup cadence, never every tick', () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=member-9001.txt'], {
+      maxSlots: 1,
+    });
+    h.deps.groundTruth = { ...h.deps.groundTruth, issueClosed: (i) => i === 9001 };
+    h.enqueue([{ issue: 9001, mode: 'slot', batch: 'b-900', anchor: 9000, tier: 'mid' }]);
+    const flagged = () => h.deps.journal.read().filter((e) => e.event === 'stale-closed');
+
+    // The flag tick may hit the guard twice (a fresh spawn and its
+    // continuation retry), so the streak is asserted by cadence, not by an
+    // exact tick count.
+    h.tick();
+    for (let i = 0; i < JOURNAL_DEDUP_REANNOUNCE_TICKS - 3; i++) h.tick();
+    expect(flagged()).toHaveLength(1); // silent through the window
+    for (let i = 0; i < 3 && flagged().length < 2; i++) h.tick();
+    expect(flagged()).toHaveLength(2); // re-announced once the streak hits the cadence
+    expect(flagged()[1].detail).toContain('sched stop --issue 9001');
+    expect(flagged()[1].detail).toContain('b-900');
+    h.tick();
+    expect(flagged()).toHaveLength(2); // and not again next tick
+  }, 120_000);
 });
 
 describe('#867: PR-watch conflict recovery', () => {

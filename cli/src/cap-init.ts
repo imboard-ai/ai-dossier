@@ -11,7 +11,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { detectProjectEnv, type PackageManager } from '@ai-dossier/worktree-pool';
-import { AUTOMATION_DIR, type CapabilityManifest, MANIFEST_FILE } from './capability';
+import {
+  AUTOMATION_DIR,
+  type CapabilityManifest,
+  GATES_NONE_DECLARED_ON_PURPOSE,
+  MANIFEST_FILE,
+} from './capability';
 
 /** The fixed pair `runIncrementalGate` (packages/sched) evaluates after every batch member. */
 export const MEMBER_GATE_CAPABILITIES = ['typecheck.run', 'test.focused'] as const;
@@ -29,6 +34,7 @@ export function missingGateCapabilities(manifest: CapabilityManifest): string[] 
  * when the manifest declares them all. Warning only — never a refusal.
  */
 export function gateGapWarning(manifest: CapabilityManifest): string | null {
+  if (manifest.gates === GATES_NONE_DECLARED_ON_PURPOSE) return null; // #895: durable opt-out
   const missing = missingGateCapabilities(manifest);
   if (missing.length === 0) return null;
   const where =
@@ -39,7 +45,8 @@ export function gateGapWarning(manifest: CapabilityManifest): string | null {
     `⚠ Batch member gate capabilities undeclared: ${missing.join(', ')} — ${where}.\n` +
     `  Every member will land with those gates SKIPPED (journalled gate-skipped:<id>), unverified.\n` +
     `  Fix:     ai-dossier cap init          # scaffold a manifest from the detected project\n` +
-    `  Opt out: --skip-gate-check (or ${SKIP_GATE_CHECK_ENV}=1) if this repo deliberately declares nothing.`
+    `  Opt out: --skip-gate-check (or ${SKIP_GATE_CHECK_ENV}=1) once, or durably add\n` +
+    `           gates: ${GATES_NONE_DECLARED_ON_PURPOSE}   # to the manifest, if this repo deliberately declares nothing.`
   );
 }
 

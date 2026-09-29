@@ -1177,6 +1177,8 @@ export function validateState(data: unknown): SchedState {
     pr_watch_waiting_ticks: entry.pr_watch_waiting_ticks ?? 0,
     // Pre-#776 entries were never flagged stale-closed — null is exact.
     stale_closed_at: entry.stale_closed_at ?? null,
+    // Pre-#900 entries carry no hold-tick counter — 0 restarts the streak.
+    stale_closed_ticks: entry.stale_closed_ticks ?? 0,
   }));
   const batches = (obj.batches as BatchEntry[]).map((batch) => ({
     ...batch,
@@ -1403,6 +1405,7 @@ export const CLEARED_ENTRY_DEDUP_MARKERS = {
   // #776: a requeue is a fresh attempt — the stale-closed flag belonged to
   // the previous dispatch's recovery, not to the new one.
   stale_closed_at: null,
+  stale_closed_ticks: 0,
 } as const;
 
 /** The `BatchEntry` `anchor-close-failed` dedup marker (#768), zeroed. */
@@ -1770,7 +1773,7 @@ export function requeueMember(
     // the flag gone, the next tick would read the issue via `issueClosed`,
     // which is false when gh is unreachable, and respawn a shipped issue.
     ...(state.slots.some((s) => s.unit === `issue:${issue}` && s.status === 'recovering')
-      ? { stale_closed_at: entry.stale_closed_at }
+      ? { stale_closed_at: entry.stale_closed_at, stale_closed_ticks: entry.stale_closed_ticks }
       : {}),
     ...extra,
   };

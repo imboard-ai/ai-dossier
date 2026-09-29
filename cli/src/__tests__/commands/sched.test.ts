@@ -1242,6 +1242,56 @@ describe('#645: sched enqueue warns when the member gate capabilities are undecl
     expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
   });
 
+  it('#895: `gates: none-declared-on-purpose` in the manifest silences the warning durably', async () => {
+    fs.mkdirSync(path.join(repoDir, '.dossier', 'automation'), { recursive: true });
+    fs.writeFileSync(
+      path.join(repoDir, '.dossier', 'automation', 'manifest.yaml'),
+      'version: 1\ngates: none-declared-on-purpose\ncapabilities: {}\n'
+    );
+    await enqueueBatch();
+    expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
+    expect((readState() as { batches: unknown[] }).batches).toHaveLength(1);
+  });
+
+  describe('#895: --repo enqueues', () => {
+    let targetDir: string;
+    beforeEach(() => {
+      targetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-895-target-'));
+    });
+    afterEach(() => fs.rmSync(targetDir, { recursive: true, force: true }));
+    const writeTargetManifest = (yaml: string) => {
+      fs.mkdirSync(path.join(targetDir, '.dossier', 'automation'), { recursive: true });
+      fs.writeFileSync(path.join(targetDir, '.dossier', 'automation', 'manifest.yaml'), yaml);
+    };
+    it("warns from the TARGET repo's manifest (found via findDossierRoot), not the cwd's", async () => {
+      // The cwd's manifest declares both gates; the target's does not.
+      fs.mkdirSync(path.join(repoDir, '.dossier', 'automation'), { recursive: true });
+      fs.writeFileSync(
+        path.join(repoDir, '.dossier', 'automation', 'manifest.yaml'),
+        'version: 1\ncapabilities:\n  typecheck.run:\n    command: tsc\n  test.focused:\n    command: vitest\n'
+      );
+      writeTargetManifest('version: 1\ncapabilities:\n  build:\n    command: make\n');
+      const nested = path.join(targetDir, 'main');
+      fs.mkdirSync(nested);
+      await enqueueBatch(['--repo', 'acme/widgets', '--repo-dir', nested]);
+      expect(errors.join('\n')).toContain('typecheck.run, test.focused');
+    });
+
+    it('the manifest opt-out silences a --repo enqueue too', async () => {
+      writeTargetManifest('version: 1\ngates: none-declared-on-purpose\ncapabilities: {}\n');
+      await enqueueBatch(['--repo', 'acme/widgets', '--repo-dir', targetDir]);
+      expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
+    });
+
+    it('says the check was skipped when no checkout of the repo can be verified (never reads the cwd for another repo)', async () => {
+      await enqueueBatch(['--repo', 'acme/widgets']);
+      const out = errors.join('\n');
+      expect(out).toContain('gate check skipped');
+      expect(out).toContain('--repo-dir');
+      expect(out).not.toContain('gate capabilities undeclared');
+    });
+  });
+
   it('stays silent once both ids are declared', async () => {
     fs.mkdirSync(path.join(repoDir, '.dossier', 'automation'), { recursive: true });
     fs.writeFileSync(

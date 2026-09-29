@@ -664,6 +664,17 @@ capabilities:
       ).toThrow(/unknown probe kind/);
     });
 
+    it('#895: accepts `gates: none-declared-on-purpose` and rejects any other value', () => {
+      expect(
+        parseCapabilityManifest('gates: none-declared-on-purpose\ncapabilities: {}\n')
+      ).toEqual({});
+      for (const bad of ['true', 'none', '"None-Declared-On-Purpose"', '[a]']) {
+        expect(() => parseCapabilityManifest(`gates: ${bad}\ncapabilities: {}\n`)).toThrow(
+          /'gates:' must be 'none-declared-on-purpose'/
+        );
+      }
+    });
+
     it('rejects an unsupported manifest version', () => {
       expect(() =>
         parseCapabilityManifest('version: 2\ncapabilities:\n  a.b:\n    command: x\n')

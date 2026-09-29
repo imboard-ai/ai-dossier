@@ -52,6 +52,16 @@ import type {
 } from './types';
 import { LIVE_SLOT_STATUSES, SATISFIED_ISSUE_STATUSES, TERMINAL_ISSUE_STATUSES } from './types';
 
+/** Batch statuses that no longer wait on their members (#900). */
+const BATCH_HOLD_EXEMPT_STATUSES: ReadonlySet<string> = new Set([
+  'merged',
+  'deployed',
+  'reported',
+  'done',
+  'dissolving',
+  'dissolved',
+]);
+
 /** An entry that cannot progress, with the human reason. */
 export interface BlockedItem {
   issue: number;
@@ -836,6 +846,28 @@ export function buildStatusReport(
       status: 'batch-blocked',
       reason: `${batch.blocked_reason ?? 'unknown'}${validatedNote}`,
     });
+  }
+
+  // #900: a batch held by a stale-closed member (#778's flag-not-evict guard)
+  // waits until an operator releases the member — list it here, with the exact
+  // release command, so the stall is visible without reading the journal.
+  for (const batch of state.batches) {
+    if (BATCH_HOLD_EXEMPT_STATUSES.has(batch.status)) continue;
+    for (const issue of batch.members) {
+      const member = state.entries.find((e) => e.issue === issue);
+      if (
+        !member ||
+        member.stale_closed_at === null ||
+        TERMINAL_ISSUE_STATUSES.has(member.status)
+      ) {
+        continue;
+      }
+      blocked.push({
+        issue,
+        status: 'batch-held',
+        reason: `member-stale-closed #${issue} — batch ${batch.id} is held (flagged ${member.stale_closed_at}); release: sched stop --issue ${issue}`,
+      });
+    }
   }
 
   const units = state.paused ? [] : runnableUnits(state);
