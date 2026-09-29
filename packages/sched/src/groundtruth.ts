@@ -122,6 +122,13 @@ export interface IssueCloseTruth {
    */
   lastReopenedAt: string | null | undefined;
   /**
+   * When the issue was CREATED (#850 review): an ISO timestamp, `null` when it
+   * could not be read. A PR merged before the issue existed cannot have carried
+   * a working `Closes #N` — only an edit made after the fact can link it — so
+   * it cannot vouch for a hand close either.
+   */
+  createdAt: string | null;
+  /**
    * When the issue was last CLOSED (#850): an ISO timestamp, `null` when it is
    * open or the time could not be read. A closing reference that merged after
    * this did not back the close, so it cannot vouch for it — whether or not
@@ -502,6 +509,7 @@ export function createExecGroundTruth(
             closingPrs: [],
             closingPrsTruncated: false,
             lastReopenedAt: null,
+            createdAt: null,
             closedAt: null,
           };
     };
@@ -580,23 +588,26 @@ export function parseRepoName(repo: string): { owner: string; name: string } | n
 const ISSUE_LABEL_PAGE_SIZE = 100;
 
 /**
- * How many closing references `issueCloseTruth` reads. A longer list is
- * flagged `closingPrsTruncated` (#850) rather than read as complete: a
- * reference that vouches for a hand close could be on the next page.
+ * How many closing references `issueCloseTruth` reads — GitHub's page maximum,
+ * so it takes 100 PRs naming the issue to push a vouching one off the page
+ * (#850 review: anyone who can open a PR can add one). A longer list is
+ * flagged `closingPrsTruncated` rather than read as complete: a reference
+ * that vouches for a hand close could be on the next page.
  */
-const CLOSING_REF_PAGE_SIZE = 10;
+const CLOSING_REF_PAGE_SIZE = 100;
 
 /** A full or abbreviated git object id. */
 export const GIT_OID_RE = /^[0-9a-f]{7,40}$/i;
 
 /**
- * GraphQL for `issueCloseTruth` — one round trip for state, reason, close
- * time, labels, closer, closing references and the last reopen (#799; aliased
- * `reopens` because `timelineItems` is already queried for the close event).
+ * GraphQL for `issueCloseTruth` — one round trip for state, reason, creation
+ * and close times, labels, closer, closing references and the last reopen
+ * (#799; aliased `reopens` because `timelineItems` is already queried for the
+ * close event).
  */
 const ISSUE_CLOSE_QUERY =
   'query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){' +
-  `state stateReason closedAt labels(first:${ISSUE_LABEL_PAGE_SIZE}){pageInfo{hasNextPage} nodes{name}} ` +
+  `state stateReason createdAt closedAt labels(first:${ISSUE_LABEL_PAGE_SIZE}){pageInfo{hasNextPage} nodes{name}} ` +
   `closedByPullRequestsReferences(first:${CLOSING_REF_PAGE_SIZE},includeClosedPrs:true){pageInfo{hasNextPage} ` +
   'nodes{number merged mergedAt baseRefName repository{nameWithOwner}}} ' +
   'reopens:timelineItems(itemTypes:[REOPENED_EVENT],last:1){nodes{... on ReopenedEvent{createdAt}}} ' +
@@ -618,6 +629,18 @@ function parseableTimestamp(value: unknown): string | null {
     Number.isFinite(Date.parse(value))
     ? value
     : null;
+}
+
+/**
+ * Epoch ms of a time {@link parseableTimestamp} accepts, else `NaN` —
+ * unreadable, so it can never pass a bound it is compared against. The one
+ * rule every closing-reference bound compares through (#850 review): the
+ * same GitHub-format check the parser applies, even for an `IssueCloseTruth`
+ * that did not come from it.
+ */
+export function timestampMs(value: unknown): number {
+  const ts = parseableTimestamp(value);
+  return ts === null ? Number.NaN : Date.parse(ts);
 }
 
 /**
@@ -711,7 +734,8 @@ export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth
     const lastReopen = reopenNodes[reopenNodes.length - 1] as { createdAt?: unknown } | null;
     lastReopenedAt = parseableTimestamp(lastReopen?.createdAt) ?? undefined;
   }
-  // #850: an unparseable close time is `null` (unreadable), never a guessed time.
+  // #850: an unparseable creation or close time is `null` (unreadable), never a guessed time.
+  const createdAt = parseableTimestamp(obj.createdAt);
   const closedAt = parseableTimestamp(obj.closedAt);
   return {
     state,
@@ -721,6 +745,7 @@ export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth
     closingPrs,
     closingPrsTruncated,
     lastReopenedAt,
+    createdAt,
     closedAt,
   };
 }

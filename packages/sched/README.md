@@ -1606,18 +1606,30 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   issue's author can close their own issue. One more path counts for a hand close: a
   PR of the project's repository, MERGED into the base, that GitHub lists as closing
   the issue (`closedByPullRequestsReferences` — `Closes #N` parsed but not acted on,
-  the imboard#4116 shape); that still needs a merge, i.e. write access. That reference must
-  also have merged inside the member's last open stretch: strictly AFTER its last reopen (#799)
-  — one merged before it did not finish the issue, that is why it was reopened
-  (`member-closed-by-hand-ref-pr-<n>-predates-reopen`) — and no later than its close (#850,
-  every hand close, reopened or not) — one merged after the close did not back it, whether or
-  not GitHub links a `Closes #N` edited into a PR body after the fact (`…-postdates-close`). A
-  time that cannot be read fails closed: `…-merge-time-unreadable`,
-  `member-closed-by-hand-reopen-unreadable`, `member-closed-by-hand-close-time-unreadable` —
-  needs-operator every time, never closable. The reference list is read one page (10) deep; a
-  longer list whose first page holds no reference that vouches reads `unknown`
-  (`member-closed-by-hand-refs-truncated`, #850), not a refusal — one may be on the next page.
-  Remedy: a new PR or commit that closes the member, or close the anchor by hand. A member
+  the imboard#4116 shape); that still needs a PR merged by someone with write access — though
+  not necessarily by whoever wrote its `Closes #N`. That reference must also have merged inside
+  the member's last open stretch, on every hand close: strictly AFTER the stretch began — the
+  last reopen (#799; one merged before it did not finish the issue, that is why it was
+  reopened: `member-closed-by-hand-ref-pr-<n>-predates-reopen`), or, never reopened, the
+  issue's creation (#850; a PR merged before the issue existed can only have been linked by an
+  edit made after the fact: `…-predates-issue`) — and no later than its close (#850; one merged
+  after the close did not back it: `…-postdates-close`). The bounds are on when the PR merged,
+  not on when its `Closes #N` was written: a reference edited into a PR that merged inside the
+  stretch still vouches (#850 chose the time bound over reading when the link was made). A
+  reopen, creation or close time that cannot be read refuses outright, however long the
+  reference list (`member-closed-by-hand-reopen-unreadable`, `…-created-time-unreadable`,
+  `…-close-time-unreadable`); a reference whose merge time cannot be read never vouches
+  (`…-merge-time-unreadable`). A refusal names only the PRs failing the first bound that
+  applies — merge time unreadable, then merged after the close, then merged before the
+  stretch — so a mixed list does not name every rejected PR. The reference list is read one
+  page (100) deep: a longer list whose first page holds no reference that vouches reads
+  `unknown` (`member-closed-by-hand-refs-truncated`, #850), not a refusal — one may be on a
+  later page — unless another member already makes the anchor needs-operator (the truncated
+  member is then named among its reasons). It does not clear on a re-read: list every reference
+  with `gh api graphql --paginate -f query='query($endCursor:String){repository(owner:"<owner>",name:"<name>"){issue(number:<n>){closedByPullRequestsReferences(first:100,after:$endCursor,includeClosedPrs:true){pageInfo{hasNextPage endCursor} nodes{number merged mergedAt baseRefName}}}}}'`
+  and close the anchor by hand if one merged into the base inside the stretch. Remedy for a
+  refusal: a new PR or commit that closes the member, or close the anchor by hand — reopening
+  and re-closing the member does not help (the reference then predates the reopen). A member
   issue that no longer resolves (deleted/transferred) reads `member-missing` — needs-operator,
   not an outage.
 - **Never over a failure trail.** Any evicted member, any member in a failure status

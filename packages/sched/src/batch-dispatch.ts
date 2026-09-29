@@ -5315,10 +5315,11 @@ function anchorTickContext(deps: BatchDispatchDeps): AnchorTickContext | undefin
  * `STALE_BLOCKED_RECONCILE_WINDOW_MS` whose anchor is not yet recorded closed
  * are examined (an older one is only ever surfaced, never auto-closed); the
  * ledger check runs first and costs no GitHub call; member reads stop at the
- * first disqualifier. When this pass reads an anchor and finds it closed it
- * records `anchor_closed_at` and never polls it again. A batch the ledger
- * rules out is never read here at all, so its `anchor_closed_at` stays null —
- * the sweep reads (but never closes) those anchors when asked.
+ * first disqualifier or undecided member (#850). When this pass reads an
+ * anchor and finds it closed it records `anchor_closed_at` and never polls it
+ * again. A batch the ledger rules out is never read here at all, so its
+ * `anchor_closed_at` stays null — the sweep reads (but never closes) those
+ * anchors when asked.
  */
 function reconcileAnchorClosure(
   deps: BatchDispatchDeps,

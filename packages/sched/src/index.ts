@@ -29,6 +29,7 @@ export {
   orphanAnchorListArgs,
   parseOrphanAnchorBody,
   renderAnchorCloseComment,
+  type ShippingEvidence,
   shippingEvidence,
   sweepAnchors,
   sweepOrphanAnchors,
