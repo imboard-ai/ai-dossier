@@ -1,0 +1,26 @@
+---
+interface Props { command: string; label: string }
+const { command, label } = Astro.props;
+---
+<div class="cmd">
+  <span class="cmd-label">{label}</span>
+  <pre><code>{command}</code></pre>
+  <button type="button" class="copy" data-copy={command} aria-label={`Copy: ${label}`}>Copy</button>
+</div>
+<script is:inline>
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('button.copy');
+    if (!b) return;
+    var done = function () { var t = b.textContent; b.textContent = 'Copied'; setTimeout(function () { b.textContent = t; }, 1500); };
+    if (navigator.clipboard) navigator.clipboard.writeText(b.dataset.copy).then(done, function () {});
+  });
+</script>
+<style>
+  .cmd { position: relative; margin: 10px 0; }
+  .cmd-label { font-size: .82rem; color: var(--muted); display: block; min-height: 26px; }
+  .cmd pre { margin: 2px 0 0; }
+  .copy {
+    position: absolute; right: 0; top: -2px; font: inherit; font-size: .8rem; padding: 3px 10px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); cursor: pointer;
+  }
+</style>

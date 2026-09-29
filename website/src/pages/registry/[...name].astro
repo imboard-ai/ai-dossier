@@ -1,0 +1,71 @@
+---
+import CopyCommand from '../../components/CopyCommand.astro';
+import Base from '../../layouts/Base.astro';
+import { loadRegistry } from '../../lib/registry.mjs';
+
+export async function getStaticPaths() {
+  const { dossiers } = await loadRegistry();
+  return dossiers.map((d) => ({ params: { name: d.name }, props: { d } }));
+}
+
+const { d } = Astro.props;
+const sig = d.signature;
+---
+<Base title={`${d.title} (${d.name})`} description={d.description.slice(0, 200) || `${d.title} on the AI Dossier registry`}>
+  <p><a href="/registry/">&larr; All dossiers</a></p>
+  <h1>{d.title}</h1>
+  <p class="meta">
+    <code>{d.name}</code>
+    <span class="badge">v{d.version}</span>
+    <span class={`badge risk-${d.riskLevel}`}>risk: {d.riskLevel}</span>
+    {d.status && <span class="badge">{d.status}</span>}
+  </p>
+  <p>{d.description}</p>
+  {d.objective && d.objective !== d.description && <p><strong>Objective:</strong> {d.objective}</p>}
+
+  <h2>Use it</h2>
+  <CopyCommand label="Inspect metadata" command={`ai-dossier info ${d.name}`} />
+  <CopyCommand label="Download to the current directory" command={`ai-dossier pull ${d.name}`} />
+  <CopyCommand label="Verify, then run" command={`ai-dossier run ${d.name}`} />
+  <p class="muted">Needs the <a href="/docs/getting-started/installation/">CLI</a>.</p>
+
+  <h2>Trust and risk</h2>
+  <table>
+    <tbody>
+      <tr><th scope="row">Declared risk level</th><td>{d.riskLevel}{d.riskFactors.length > 0 && ` (${d.riskFactors.join(', ')})`}</td></tr>
+      <tr><th scope="row">Requires approval</th><td>{d.requiresApproval === null ? 'not declared' : d.requiresApproval ? 'yes' : 'no'}</td></tr>
+      <tr><th scope="row">Checksum</th><td>{d.checksum ? <code>{d.checksum}</code> : 'none published'}</td></tr>
+      {sig ? (
+        <>
+          <tr><th scope="row">Signature</th><td>{sig.algorithm}, key <code>{sig.keyId || 'unnamed'}</code>{sig.signedBy && <> by {sig.signedBy}</>}</td></tr>
+          <tr><th scope="row">Signed at</th><td>{sig.signedAt || 'unknown'}{sig.covers && ` (covers ${sig.covers})`}</td></tr>
+          <tr><th scope="row">Public key</th><td><code>{sig.publicKey}</code></td></tr>
+        </>
+      ) : (
+        <tr><th scope="row">Signature</th><td>unsigned</td></tr>
+      )}
+    </tbody>
+  </table>
+  <p class="muted">
+    These values are copied from the published dossier header. This site does <strong>not</strong> verify
+    them: run <code>ai-dossier verify</code> before trusting a dossier.
+  </p>
+
+  <h2>Details</h2>
+  <table>
+    <tbody>
+      {d.categories.length > 0 && <tr><th scope="row">Categories</th><td>{d.categories.join(', ')}</td></tr>}
+      {d.tags.length > 0 && <tr><th scope="row">Tags</th><td>{d.tags.join(', ')}</td></tr>}
+      {d.tools.length > 0 && <tr><th scope="row">Tools required</th><td>{d.tools.join(', ')}</td></tr>}
+      {d.authors.length > 0 && <tr><th scope="row">Authors</th><td>{d.authors.join(', ')}</td></tr>}
+      <tr><th scope="row">Source</th><td><a href={d.sourceUrl}>raw <code>.ds.md</code></a></td></tr>
+    </tbody>
+  </table>
+  {!d.detailLoaded && <p class="muted">The dossier header could not be fetched at build time, so risk and signature data are unavailable.</p>}
+</Base>
+
+<style>
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  td code { overflow-wrap: anywhere; }
+  th { width: 11em; }
+</style>

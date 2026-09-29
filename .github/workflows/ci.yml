@@ -111,3 +111,58 @@ jobs:
           PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: node scripts/check-version-bumps.mjs --base "origin/$BASE_REF" --labels "$PR_LABELS"
+
+  # Builds the static site (website/) only when the PR touches it or the docs it renders.
+  # The job always runs (so it can be a required check) but skips its build steps otherwise.
+  # REGISTRY_OPTIONAL=1: a registry outage must not block unrelated PRs; the site build then
+  # has no registry pages (production builds on Vercel fail loudly instead).
+  website:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect website/docs changes
+        id: changes
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git fetch --no-tags origin -- "$BASE_REF"
+          if git diff --name-only "origin/$BASE_REF"...HEAD | grep -qE '^(website/|docs/|\.github/workflows/ci\.yml$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No website/ or docs/ changes; skipping."
+          fi
+
+      - name: Setup Node.js
+        if: steps.changes.outputs.run == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install
+        if: steps.changes.outputs.run == 'true'
+        working-directory: website
+        run: npm ci
+
+      - name: Unit tests
+        if: steps.changes.outputs.run == 'true'
+        working-directory: website
+        run: npm test
+
+      - name: Build
+        if: steps.changes.outputs.run == 'true'
+        working-directory: website
+        env:
+          REGISTRY_OPTIONAL: '1'
+        run: npm run build
+
+      - name: Check internal links
+        if: steps.changes.outputs.run == 'true'
+        working-directory: website
+        run: npm run check:links

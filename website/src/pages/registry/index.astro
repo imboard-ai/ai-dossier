@@ -1,0 +1,97 @@
+---
+import Base from '../../layouts/Base.astro';
+import { loadRegistry } from '../../lib/registry.mjs';
+
+const { dossiers, fetchedAt, api } = await loadRegistry();
+const categories = [...new Set(dossiers.flatMap((d) => d.categories))].sort();
+const risks = [...new Set(dossiers.map((d) => d.riskLevel))].sort();
+const stamp = fetchedAt.slice(0, 16).replace('T', ' ') + ' UTC';
+---
+<Base title="Registry" description="Browse published AI Dossier dossiers: signed, versioned automation with declared risk levels." wide>
+  <h1>Registry</h1>
+  <p class="muted">
+    {dossiers.length} published dossiers, snapshot taken at build time ({stamp}) from
+    <code>{api}</code>. Newer publishes appear on the next site rebuild; the CLI always reads the live registry.
+  </p>
+
+  <form class="filters" role="search" onsubmit="return false">
+    <label>Search
+      <input id="q" type="search" placeholder="name, title, tag..." autocomplete="off" />
+    </label>
+    <label>Category
+      <select id="cat">
+        <option value="">All</option>
+        {categories.map((c) => <option value={c}>{c}</option>)}
+      </select>
+    </label>
+    <label>Risk
+      <select id="risk">
+        <option value="">All</option>
+        {risks.map((r) => <option value={r}>{r}</option>)}
+      </select>
+    </label>
+  </form>
+  <p id="count" class="muted" aria-live="polite"></p>
+
+  {dossiers.length === 0 && <p>No registry data was available at build time.</p>}
+
+  <ul class="grid" id="list">
+    {dossiers.map((d) => (
+      <li
+        data-text={[d.name, d.title, d.description, ...d.tags].join(' ').toLowerCase()}
+        data-cat={d.categories.join('|')}
+        data-risk={d.riskLevel}
+      >
+        <h2><a href={`/registry/${d.name}/`}>{d.title}</a></h2>
+        <p class="meta">
+          <code>{d.name}</code>
+          <span class="badge">v{d.version}</span>
+          <span class={`badge risk-${d.riskLevel}`}>risk: {d.riskLevel}</span>
+          {d.signature && <span class="badge">signed</span>}
+        </p>
+        <p>{d.description.length > 200 ? `${d.description.slice(0, 197)}...` : d.description}</p>
+      </li>
+    ))}
+  </ul>
+</Base>
+
+<script is:inline>
+  (function () {
+    var q = document.getElementById('q');
+    var cat = document.getElementById('cat');
+    var risk = document.getElementById('risk');
+    var count = document.getElementById('count');
+    var items = Array.prototype.slice.call(document.querySelectorAll('#list > li'));
+    function apply() {
+      var terms = q.value.toLowerCase().split(/\s+/).filter(Boolean);
+      var shown = 0;
+      items.forEach(function (li) {
+        var ok =
+          terms.every(function (t) { return li.dataset.text.indexOf(t) !== -1; }) &&
+          (!cat.value || li.dataset.cat.split('|').indexOf(cat.value) !== -1) &&
+          (!risk.value || li.dataset.risk === risk.value);
+        li.hidden = !ok;
+        if (ok) shown++;
+      });
+      count.textContent = shown + ' of ' + items.length + ' shown';
+    }
+    [q, cat, risk].forEach(function (el) { el.addEventListener('input', apply); });
+    apply();
+  })();
+</script>
+
+<style>
+  .filters { display: flex; gap: 16px; flex-wrap: wrap; margin: 18px 0 6px; }
+  .filters label { display: flex; flex-direction: column; font-size: .85rem; color: var(--muted); gap: 4px; }
+  .filters input, .filters select {
+    font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); min-width: 200px;
+  }
+  .grid { list-style: none; padding: 0; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  .grid li { border: 1px solid var(--line); border-radius: 10px; padding: 4px 16px 10px; background: var(--bg-soft); min-width: 0; }
+  .grid li[hidden] { display: none; }
+  .grid h2 { font-size: 1.1rem; margin: 12px 0 6px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 6px; }
+  .meta code { overflow-wrap: anywhere; }
+  .grid p { margin: 6px 0; font-size: .93rem; }
+</style>

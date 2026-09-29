@@ -406,7 +406,7 @@ https://raw.githubusercontent.com/you/dossiers/main/deploy.ds.md
 
 ### How do dossiers compare to scripts (bash/Python/etc.)?
 
-See the comprehensive comparison table in the [main README](README.md#dossiers-vs-scripts-when-to-use-each).
+See the comprehensive comparison table in the [main README](../../README.md#why-use-dossier).
 
 **TL;DR**:
 - **Scripts**: Fast, deterministic, brittle (must handle every edge case in code)
@@ -1803,9 +1803,9 @@ Everything works without internet.
 ### Where can I learn more?
 
 - **Documentation**: [Main README](README.md)
-- **Getting Started**: [Quick Start Guide](QUICK_START.md)
-- **Schema Details**: [Schema Documentation](SCHEMA.md)
-- **Security**: [Security Model](SECURITY.md)
+- **Getting Started**: [Quick Start Guide](../getting-started/quick-start.md)
+- **Schema Details**: [Schema Documentation](../reference/schema.md)
+- **Security**: [Security Model](security-model.md)
 - **Examples**: [examples/](examples/) directory
 
 ### How can I contribute?
