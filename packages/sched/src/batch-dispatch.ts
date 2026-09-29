@@ -4841,12 +4841,21 @@ function reconcilePrWatch(
           result: undefined,
         }));
       } else if (step.due) {
-        const blocked = blockBatch(
-          deps.store.load(),
-          batch.id,
-          { reason: NO_MERGE_MECHANISM_REASON, milestonePhase: 'batch-ship' },
-          recoveryDeps(deps, config, batch, now)
-        );
+        // Re-check on a fresh load: the batch may have merged, blocked or been abandoned since
+        // the poll above, and blockBatch throws on a terminal batch — never abort the tick.
+        const fresh = deps.store.load();
+        if (findBatch(fresh, batch.id)?.status !== 'awaiting-merge') continue;
+        let blocked: { state: SchedState };
+        try {
+          blocked = blockBatch(
+            fresh,
+            batch.id,
+            { reason: NO_MERGE_MECHANISM_REASON, milestonePhase: 'batch-ship' },
+            recoveryDeps(deps, config, batch, now)
+          );
+        } catch {
+          continue;
+        }
         journalEvent(deps, 'pr-watch-failed', unit(batch.id), {
           reason: NO_MERGE_MECHANISM_REASON,
           pr,

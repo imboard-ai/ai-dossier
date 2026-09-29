@@ -376,8 +376,13 @@ export const LIVE_NOTES = [
 /** Who drives the merge (ship-issue Step 3c): a parked handoff or this run to the end. */
 export const SHIP_MODES = ['detached', 'attached'] as const;
 
-/** What will merge the PR (ship-issue Step 3c item 3b) — `unknown` mirrors sched's verdict. */
-export const MERGE_MECHANISMS = ['watcher', 'native', 'none', 'unknown'] as const;
+/**
+ * What will merge the PR. Canonical (what ship-issue Step 3c item 3b writes): `watcher | native |
+ * none`. `unknown` and `confirmed` are also accepted because sched's own verdict vocabulary
+ * (`confirmed | none | unknown`, merge-mechanism.ts) is handed to agents as facts, and an agent
+ * echoing it must not be rejected.
+ */
+export const MERGE_MECHANISMS = ['watcher', 'native', 'none', 'unknown', 'confirmed'] as const;
 
 /** The classifier's closed mode set — which cycle shape the issue was routed to. */
 export const CLASSIFY_MODES = ['full', SLOT_MODE] as const;
@@ -435,8 +440,8 @@ export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
     expects: 'expected a non-negative integer count of UI flows reported, e.g. 2',
   },
   live_note: enumRule(LIVE_NOTES),
-  // ship-issue's ship-mode record (#921). `merge_mechanism` also allows `unknown`: sched's
-  // detection verdict has it, and rejecting it would block a run from posting an honest value.
+  // ship-issue's ship-mode record (#921). `merge_mechanism` also allows sched's verdict
+  // words (`unknown`, `confirmed`): rejecting an honest echo of them would block a run.
   ship_mode: enumRule(SHIP_MODES),
   merge_mechanism: enumRule(MERGE_MECHANISMS),
   takeover: {

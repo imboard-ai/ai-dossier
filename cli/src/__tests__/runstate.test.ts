@@ -2167,6 +2167,7 @@ describe('KEY_VALUE_RULES — review live roll-up and ship-mode keys (#670, #921
     ['merge_mechanism', 'native'],
     ['merge_mechanism', 'none'],
     ['merge_mechanism', 'unknown'],
+    ['merge_mechanism', 'confirmed'],
   ])('accepts %s=%s', (key, value) => {
     expect(validateMilestone(shipAwaiting([[key, value]]))).toEqual([]);
   });
