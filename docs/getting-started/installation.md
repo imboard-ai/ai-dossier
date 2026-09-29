@@ -18,6 +18,22 @@ npx @ai-dossier/cli verify <dossier-file-or-url>
 
 Requires Node.js 20+.
 
+### Standalone binary (no Node.js)
+
+Prebuilt single-file executables for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64) are attached to each `cli-v<version>` [GitHub Release](https://github.com/imboard-ai/ai-dossier/releases) together with a `SHA256SUMS` file.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/install.sh | sh
+# pin a version / choose the directory:
+curl -fsSL https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/install.sh | sh -s -- --version X.Y.Z --dir /usr/local/bin
+```
+
+The script detects your OS and CPU, downloads the binary, verifies its SHA256 against `SHA256SUMS`, and installs it to `~/.local/bin` (or `--dir` / `$AI_DOSSIER_INSTALL_DIR`). On Windows, download `ai-dossier-win32-x64.exe` from the release page (or run the script from Git Bash) and verify it with `certutil -hashfile ai-dossier-win32-x64.exe SHA256`.
+
+**macOS Gatekeeper.** The binaries are ad-hoc signed but not notarized. Downloaded through `install.sh` (curl) they run without a prompt; downloaded through a browser, macOS quarantines them and reports the app cannot be verified. Clear it with `xattr -d com.apple.quarantine ./ai-dossier-darwin-arm64` (or right-click, Open). **Windows SmartScreen** may warn on first run of the unsigned `.exe`: choose "More info", then "Run anyway".
+
+The binary is a Node Single Executable Application (the Node runtime plus the bundled CLI, roughly 120 MB), built by `node scripts/build-sea.mjs` (`make build-binary`). Behaviour is identical to the npm install.
+
 ---
 
 ## Add the MCP server (Claude Code)

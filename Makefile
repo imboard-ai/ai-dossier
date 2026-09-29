@@ -1,7 +1,7 @@
 # Dossier Build System
 # Handles build order dependencies across npm workspaces
 
-.PHONY: all build build-all clean test test-coverage install help lint format check build-pool build-sched
+.PHONY: all build build-all clean test test-coverage install help lint format check build-pool build-sched build-binary
 .DEFAULT_GOAL := help
 
 ## help: Show this help message
@@ -61,6 +61,10 @@ build-sched: build-core build-pool
 	@echo "Building packages/sched..."
 	cd packages/sched && npm run build
 	@echo "✓ packages/sched built"
+
+## build-binary: Build a standalone (no-Node) ai-dossier executable for this host into dist-binaries/
+build-binary: build-cli
+	node scripts/build-sea.mjs
 
 ## clean: Remove all build artifacts
 clean:

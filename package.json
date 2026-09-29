@@ -45,8 +45,10 @@
   "devDependencies": {
     "@aws-sdk/client-kms": "^3.932.0",
     "@biomejs/biome": "^2.3.6",
+    "esbuild": "^0.27.7",
     "husky": "^9.1.7",
     "lint-staged": "^15.5.1",
+    "postject": "^1.0.0-alpha.6",
     "tsx": "^4.20.6",
     "vitest": "^4.0.9",
     "yaml": "^2.8.3"
