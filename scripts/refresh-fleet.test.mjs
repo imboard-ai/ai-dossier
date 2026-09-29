@@ -331,4 +331,14 @@ describe('refresh-fleet.sh', () => {
     expect(res.status).toBe(0);
     expect(calls(box)).toContain('install-skill --all --owner imboard-ai --fresh --json');
   });
+
+  it('--usage-sync runs `usage sync` from the driving host against the remote hosts only (#782)', () => {
+    const box = fixture(undefined);
+    // Every ssh succeeds; hcc2's stub reports no CLI version, so the run may exit non-zero —
+    // only the usage-sync step matters here.
+    executable(join(box.bin, 'ssh'), '#!/bin/sh\nexit 0\n');
+    const res = runRefreshRaw(box, ['--hosts', 'wls,hcc2', '--usage-sync']);
+    expect(res.out).toContain('== usage sync ==');
+    expect(calls(box).some((c) => c.startsWith('usage sync --hosts hcc2'))).toBe(true);
+  });
 });

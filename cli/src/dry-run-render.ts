@@ -33,7 +33,7 @@ function clip(s: string, max = 110): string {
 }
 
 function commandTag(c: DryRunCommand): string {
-  if (c.kind === 'destructive') return ' (destructive)';
+  if (c.kind === 'destructive') return c.reason ? ` (destructive: ${c.reason})` : ' (destructive)';
   if (!c.recognized) return ' (unrecognized executable)';
   return '';
 }
@@ -52,6 +52,23 @@ export function renderDryRun(plan: DryRunPlan, llmCommand?: string | null): stri
     `Risk score: ${paint(levelColor, `${plan.risk_score}/100 (${plan.level})`)}   declared risk_level: ${plan.dossier.declared_risk_level ?? 'unset'}`
   );
   for (const b of plan.score_breakdown) out.push(`   +${b.points}  ${b.component}`);
+  if (plan.declared_vs_observed?.mismatch) {
+    out.push(
+      paint(
+        'red',
+        `Declared vs observed: declares ${plan.declared_vs_observed.declared_level ?? 'no risk_level'}, code blocks show ${plan.declared_vs_observed.observed_level}. The score follows observed behaviour.`
+      )
+    );
+  }
+  if ((plan.unanalyzed_fences?.length ?? 0) > 0) {
+    const langs = [...new Set((plan.unanalyzed_fences ?? []).map((f) => f.lang || 'unlabeled'))];
+    out.push(
+      paint(
+        'yellow',
+        `Not analysed: ${plan.unanalyzed_fences?.length} code block(s) in ${langs.join(', ')} - their content is NOT reflected in the score.`
+      )
+    );
+  }
   out.push('');
 
   for (const g of GROUPS) {

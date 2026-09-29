@@ -4,9 +4,9 @@
   "protocol_version": "1.0",
   "name": "publish-dossier",
   "title": "Publish an imboard-ai Dossier or Skill",
-  "version": "1.1.3",
+  "version": "1.1.4",
   "status": "Stable",
-  "last_updated": "2026-09-17",
+  "last_updated": "2026-09-29",
   "objective": "Edit, sign with the team key, lint, verify and publish a dossier or skill to the imboard-ai registry namespace, then refresh every machine — the exact recipe, so no agent rediscovers the signing and login walls",
   "category": [
     "development",
@@ -79,13 +79,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "88448b38d34f58c38df5b6a8d8890463b58923d29a1292b461e415f0768e3ff5"
+    "hash": "65a7bda1b3b67bd54e105f9c5e25c92a25c01bb13e8c58d2c939eb7b63885d6e"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "Uc0BIVX52CC0vppxMctWNZrEM0hLU9CHWAFl8hrs8StGirTiRopJGBy6qf8Rs0CAhFiNov7xWbIPkuWD0F5aDw==",
+    "signature": "Txdjs5GZf3njU9vDWupkoLGgWmT++844tDsUe3RPF9BHpVPMVqOVCYb0mmEenyKg4WPmnefpODYKQSDbtK8YDw==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-17T06:50:10.956Z",
+    "signed_at": "2026-09-29T19:30:37.230Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -164,7 +164,7 @@ ai-dossier publish <name>.ds.md --namespace imboard-ai/skills --changelog "<what
 ai-dossier publish <name>.ds.md --namespace imboard-ai/meta --changelog "<what changed>" -y     # meta/authoring
 ```
 
-Confirm: `ai-dossier info <target> --json` shows the new version (CDN may lag up to 30 s).
+Confirm: `ai-dossier info <target> --json` shows the new version. `info` reflects it at once; `list`, `search` and `install-skill --all` read a cached `index.json` and can lag up to ~5 minutes — wait before refreshing machines for a newly published or removed skill.
 
 ### Step 5: Refresh every machine
 
@@ -176,7 +176,7 @@ bash scripts/refresh-fleet.sh                 # all of wls, hcc, hcc2
 bash scripts/refresh-fleet.sh --hosts hcc2    # a subset
 ```
 
-The script pulls the dossier caches, reinstalls skills and regenerates opencode wrappers on each host, and sources nvm on the remote shells so `ai-dossier` resolves. For a single host, the manual fallback is `ssh <host> 'source ~/.nvm/nvm.sh; ai-dossier pull <target> --force'`.
+On each host the script upgrades the CLI (needs 0.82.0+), pulls its fixed list of dossiers into the cache, and runs `ai-dossier install-skill --all --owner imboard-ai --fresh --json`, which installs or refreshes **every** imboard-ai registry skill (a dossier named `*-skill` or tagged `skill`) and writes its opencode wrapper — a newly published skill needs no edit to the script. It sources nvm on the remote shells so `ai-dossier` resolves. Two registry skills sharing a basename are reported as a `COLLISION` warning and neither is installed; fix that in the registry, not by forcing. Orphaned opencode wrappers are no longer pruned. Manual fallback on a single host: `ai-dossier install-skill --all --owner imboard-ai` for skills, or `ssh <host> 'source ~/.nvm/nvm.sh; ai-dossier pull <target> --force'` for one dossier.
 
 ### Step 6: Coordinated bumps
 
@@ -190,7 +190,7 @@ When a change spans a protocol shared by several dossiers (e.g. the runstate mil
 - [ ] `lint` clean and `verify` passed on the exact file published
 - [ ] Published to an explicit `imboard-ai/<family>` namespace
 - [ ] `info` shows the new version
-- [ ] Caches, skills and opencode wrappers refreshed on wls, hcc, hcc2 (scripts/refresh-fleet.sh)
+- [ ] Caches and skills refreshed on wls, hcc, hcc2 (scripts/refresh-fleet.sh — no host FAIL, no unexpected COLLISION)
 
 ## Troubleshooting
 
