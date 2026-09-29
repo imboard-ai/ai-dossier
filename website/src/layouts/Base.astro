@@ -1,17 +1,20 @@
 ---
 import Footer from '../components/Footer.astro';
 import Header from '../components/Header.astro';
+import '../styles/global.css';
 
 interface Props {
   title: string;
   description?: string;
   wide?: boolean;
+  bare?: boolean;
   noindex?: boolean;
 }
 const {
   title,
   description = 'AI Dossier: verifiable, signed, versioned automation for AI agents.',
   wide = false,
+  bare = false,
   noindex = false,
 } = Astro.props;
 const fullTitle = title === 'AI Dossier' ? title : `${title} | AI Dossier`;
@@ -25,8 +28,10 @@ const canonical = new URL(Astro.url.pathname, Astro.site).href;
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
     {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
+    <link rel="preload" href="/fonts/inter-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/jetbrains-mono-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <meta name="color-scheme" content="light dark" />
+    <meta name="color-scheme" content="dark light" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="AI Dossier" />
     <meta property="og:title" content={fullTitle} />
@@ -39,89 +44,9 @@ const canonical = new URL(Astro.url.pathname, Astro.site).href;
   <body>
     <a class="skip" href="#main">Skip to content</a>
     <Header />
-    <main id="main" class={wide ? 'wide' : 'narrow'}>
+    <main id="main" class={bare ? 'bare' : wide ? 'wide' : 'narrow'}>
       <slot />
     </main>
     <Footer />
   </body>
 </html>
-
-<style is:global>
-  :root {
-    --bg: #ffffff;
-    --bg-soft: #f5f7fb;
-    --fg: #14181f;
-    --muted: #4b5563;
-    --line: #dde2ea;
-    --accent: #1f4fd8;
-    --accent-fg: #ffffff;
-    --code-bg: #f1f4f9;
-    --ok: #12703a;
-    --warn: #8a5a00;
-    --bad: #a3271c;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0d1117;
-      --bg-soft: #151b24;
-      --fg: #e6e9ef;
-      --muted: #9aa4b2;
-      --line: #2a3340;
-      --accent: #7aa2ff;
-      --accent-fg: #0d1117;
-      --code-bg: #171e29;
-      --ok: #5fd08a;
-      --warn: #e5b04a;
-      --bad: #ff8a80;
-    }
-  }
-  * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--fg);
-    font: 16px/1.65 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  }
-  a { color: var(--accent); text-underline-offset: 2px; }
-  a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible {
-    outline: 3px solid var(--accent);
-    outline-offset: 2px;
-  }
-  .skip { position: absolute; left: -999px; top: 0; background: var(--accent); color: var(--accent-fg); padding: 8px 12px; z-index: 10; }
-  .skip:focus { left: 8px; top: 8px; }
-  main.narrow { max-width: 860px; margin: 0 auto; padding: 32px 20px 64px; }
-  main.wide { max-width: 1180px; margin: 0 auto; padding: 32px 20px 64px; }
-  h1, h2, h3, h4 { line-height: 1.25; }
-  h1 { font-size: 2rem; margin: 0 0 12px; }
-  h2 { font-size: 1.45rem; margin: 2rem 0 .6rem; }
-  h3 { font-size: 1.15rem; margin: 1.6rem 0 .4rem; }
-  code, pre { font: 0.9em/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  :not(pre) > code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
-  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; }
-  pre code { background: none; padding: 0; }
-  .astro-code, .astro-code span { color: var(--shiki-light); }
-  .astro-code { background-color: var(--code-bg) !important; }
-  @media (prefers-color-scheme: dark) {
-    .astro-code, .astro-code span { color: var(--shiki-dark) !important; }
-  }
-  table { border-collapse: collapse; display: block; overflow-x: auto; max-width: 100%; }
-  th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
-  th { background: var(--bg-soft); }
-  blockquote { margin: 1rem 0; padding: .1rem 1rem; border-left: 4px solid var(--line); color: var(--muted); }
-  img { max-width: 100%; height: auto; }
-  .btn {
-    display: inline-block; padding: 9px 16px; border-radius: 8px; font-weight: 600; text-decoration: none;
-    background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent);
-  }
-  .btn.secondary { background: transparent; color: var(--accent); }
-  .badge {
-    display: inline-block; font-size: .78rem; font-weight: 600; padding: 1px 8px; border-radius: 999px;
-    border: 1px solid var(--line); background: var(--bg-soft); color: var(--muted);
-  }
-  .badge.risk-low { color: var(--ok); border-color: var(--ok); }
-  .badge.risk-medium { color: var(--warn); border-color: var(--warn); }
-  .badge.risk-high, .badge.risk-critical { color: var(--bad); border-color: var(--bad); }
-  .muted { color: var(--muted); }
-  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
-</style>

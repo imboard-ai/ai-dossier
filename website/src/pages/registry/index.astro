@@ -43,13 +43,13 @@ const stamp = fetchedAt.slice(0, 16).replace('T', ' ') + ' UTC';
         data-risk={d.riskLevel}
       >
         <h2><a href={`/registry/${d.name}/`}>{d.title}</a></h2>
+        <p class="name"><code>{d.name}</code></p>
+        <p class="desc">{d.description.length > 200 ? `${d.description.slice(0, 197)}...` : d.description}</p>
         <p class="meta">
-          <code>{d.name}</code>
-          <span class="badge">v{d.version}</span>
           <span class={`badge risk-${d.riskLevel}`}>risk: {d.riskLevel}</span>
-          {d.signature && <span class="badge">signed</span>}
+          {d.signature && <span class="badge signed">signed</span>}
+          <span class="badge">v{d.version}</span>
         </p>
-        <p>{d.description.length > 200 ? `${d.description.slice(0, 197)}...` : d.description}</p>
       </li>
     ))}
   </ul>
@@ -81,17 +81,30 @@ const stamp = fetchedAt.slice(0, 16).replace('T', ' ') + ' UTC';
 </script>
 
 <style>
-  .filters { display: flex; gap: 16px; flex-wrap: wrap; margin: 18px 0 6px; }
-  .filters label { display: flex; flex-direction: column; font-size: .85rem; color: var(--muted); gap: 4px; }
+  .filters { display: flex; gap: 16px; flex-wrap: wrap; margin: 24px 0 8px; }
+  .filters label { display: flex; flex-direction: column; font-size: .8rem; font-weight: 500; color: var(--muted); gap: 6px; }
   .filters input, .filters select {
-    font: inherit; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--line);
-    background: var(--bg); color: var(--fg); min-width: 200px;
+    font: inherit; font-size: .95rem; padding: 9px 12px; border-radius: var(--radius-sm); border: 1px solid var(--line-strong);
+    background: var(--bg-soft); color: var(--fg); min-width: 220px; transition: border-color .15s;
   }
-  .grid { list-style: none; padding: 0; display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
-  .grid li { border: 1px solid var(--line); border-radius: 10px; padding: 4px 16px 10px; background: var(--bg-soft); min-width: 0; }
+  .filters input:hover, .filters select:hover { border-color: var(--muted); }
+  #count { font-size: .85rem; }
+  .grid { list-style: none; padding: 0; margin: 16px 0 0; display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  .grid li {
+    position: relative; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px 20px 16px; background: var(--bg-soft); min-width: 0; transition: border-color .2s, background-color .2s, transform .2s;
+  }
+  .grid li:hover { border-color: var(--accent-line); background: var(--bg-raised); transform: translateY(-2px); }
+  .grid li:focus-within { border-color: var(--accent); }
   .grid li[hidden] { display: none; }
-  .grid h2 { font-size: 1.1rem; margin: 12px 0 6px; }
-  .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 6px; }
-  .meta code { overflow-wrap: anywhere; }
-  .grid p { margin: 6px 0; font-size: .93rem; }
+  .grid h2 { font-size: var(--step-1); margin: 0 0 4px; }
+  .grid h2 a { color: var(--fg); text-decoration: none; }
+  .grid h2 a::after { content: ''; position: absolute; inset: 0; border-radius: var(--radius); }
+  .grid h2 a:focus-visible { outline: none; }
+  .name { margin: 0 0 10px; }
+  .name code { background: none; border: 0; padding: 0; color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
+  .desc { margin: 0 0 14px; font-size: .92rem; color: var(--muted); flex: 1; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0; }
+  @media (max-width: 400px) { .filters input, .filters select { min-width: 0; width: 100%; } .filters label { width: 100%; } .grid { grid-template-columns: minmax(0, 1fr); } }
+  @media (prefers-reduced-motion: reduce) { .grid li:hover { transform: none; } }
 </style>

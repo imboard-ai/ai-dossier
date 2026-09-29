@@ -24,11 +24,14 @@ const { command, label } = Astro.props;
   });
 </script>
 <style>
-  .cmd { position: relative; margin: 10px 0; }
-  .cmd-label { font-size: .82rem; color: var(--muted); display: block; min-height: 26px; }
-  .cmd pre { margin: 2px 0 0; }
+  .cmd { position: relative; margin: 14px 0; }
+  .cmd-label { font-size: .8rem; font-weight: 500; color: var(--muted); display: block; margin-bottom: 6px; }
+  .cmd pre { margin: 0; padding: 14px 76px 14px 16px; }
+  .cmd pre::before { content: '$ '; color: var(--accent); user-select: none; }
   .copy {
-    position: absolute; right: 0; top: -2px; font: inherit; font-size: .8rem; padding: 3px 10px;
-    border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); cursor: pointer;
+    position: absolute; right: 8px; top: 10px; font: inherit; font-size: .78rem; font-weight: 600; padding: 4px 11px;
+    border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-raised); color: var(--fg); cursor: pointer;
+    transition: background-color .15s, border-color .15s;
   }
+  .copy:hover { border-color: var(--accent-line); background: var(--accent-soft); }
 </style>

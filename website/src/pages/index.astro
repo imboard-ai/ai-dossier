@@ -1,4 +1,6 @@
 ---
+import { Code } from 'astro:components';
+import CopyCommand from '../components/CopyCommand.astro';
 import Base from '../layouts/Base.astro';
 import { loadRegistry } from '../lib/registry.mjs';
 
@@ -20,84 +22,216 @@ const example = `---dossier
 Instructions an AI agent follows, written in plain markdown.
 The header above is what makes them verifiable.`;
 ---
-<Base title="AI Dossier" description="Verifiable, signed, versioned automation for AI agents. Write instructions in markdown, sign them, and let any agent verify before it runs.">
+<Base bare title="AI Dossier" description="Verifiable, signed, versioned automation for AI agents. Write instructions in markdown, sign them, and let any agent verify before it runs.">
   <section class="hero">
-    <h1>Automation for AI agents you can verify before it runs</h1>
-    <p class="lead">
-      A <strong>dossier</strong> is a reusable instruction set an AI agent executes, with an integrity
-      checksum, an Ed25519 signature, a declared risk level and a pinnable version. Think of a
-      package registry, but for agent skills and workflows.
-    </p>
-    <p class="cta">
-      <a class="btn" href="/docs/getting-started/quick-start/">Quick start</a>
-      <a class="btn secondary" href="/registry/">Browse {registry.dossiers.length || ''} dossiers</a>
-      <a class="btn secondary" href={repo}>GitHub</a>
-    </p>
-  </section>
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="pill"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>Signed &middot; Verifiable &middot; Open source</p>
+        <h1>Automation for AI agents you can verify before it runs</h1>
+        <p class="lead">
+          A <strong>dossier</strong> is a reusable instruction set an AI agent executes, with an integrity
+          checksum, an Ed25519 signature, a declared risk level and a pinnable version. Think of a
+          package registry, but for agent skills and workflows.
+        </p>
+        <p class="cta">
+          <a class="btn" href="/docs/getting-started/quick-start/">Quick start</a>
+          <a class="btn secondary" href="/registry/">Browse {registry.dossiers.length || ''} dossiers</a>
+          <a class="btn secondary" href={repo}>GitHub</a>
+        </p>
+        <div class="installs">
+          <CopyCommand label="Install with npm" command="npm install -g @ai-dossier/cli" />
+          <CopyCommand label="Or a standalone binary, no Node.js" command="curl -fsSL https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/install.sh | sh" />
+        </div>
+      </div>
 
-  <section aria-labelledby="how">
-    <h2 id="how">How it works</h2>
-    <ol class="steps">
-      <li><h3>1. Write</h3><p>Author instructions in markdown in a <code>.ds.md</code> file with a JSON header: name, version, risk level, tools required.</p></li>
-      <li><h3>2. Sign and publish</h3><p>The CLI computes the checksum, signs the file with your key and publishes it to the registry, or you host the file anywhere.</p></li>
-      <li><h3>3. Verify and run</h3><p>Before an agent acts, <code>ai-dossier verify</code> checks the checksum and signature and surfaces the declared risk. Then the agent executes it.</p></li>
-    </ol>
-  </section>
-
-  <section aria-labelledby="example">
-    <h2 id="example">What a dossier looks like</h2>
-    <pre><code>{example}</code></pre>
-    <p class="muted">Trimmed from the published <a href="/registry/getting-started/hello/">getting-started/hello</a> dossier.</p>
-  </section>
-
-  <section aria-labelledby="install">
-    <h2 id="install">Install</h2>
-    <div class="cards">
-      <div>
-        <h3>npm</h3>
-        <pre><code>npm install -g @ai-dossier/cli
-ai-dossier --help</code></pre>
-        <p class="muted">Needs Node 20+. Or try without installing: <code>npx @ai-dossier/cli verify &lt;file&gt;</code>.</p>
-      </div>
-      <div>
-        <h3>Standalone binary</h3>
-        <pre><code>curl -fsSL https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/install.sh | sh</code></pre>
-        <p class="muted">No Node.js required. Checksum-verified download from <a href={`${repo}/releases`}>GitHub releases</a> (Linux, macOS; Windows via Git Bash).</p>
-      </div>
-      <div>
-        <h3>VS Code extension</h3>
-        <p>Diagnostics, completion and a dry-run preview for <code>*.ds.md</code> files.</p>
-        <p class="muted">Marketplace listing is pending. Until then install the <code>.vsix</code> from a <a href={`${repo}/releases`}><code>vscode-v*</code> release</a>.</p>
-      </div>
-      <div>
-        <h3>Claude Code (MCP)</h3>
-        <pre><code>claude mcp add dossier --scope user -- \
-  npx @ai-dossier/mcp-server</code></pre>
-        <p class="muted"><a href="/docs/tutorials/mcp-quickstart/">MCP in 60 seconds</a></p>
-      </div>
+      <figure class="term" aria-label="Terminal: ai-dossier verify and run --dry-run on the published hello dossier">
+        <div class="term-bar" aria-hidden="true"><i></i><i></i><i></i><span>~/hello</span></div>
+        <pre class="term-body"><code><span class="ln" style="--i:0"><b class="p">$</b> ai-dossier verify hello.ds.md</span><span class="ln" style="--i:1"><b class="ok">&check;</b> Parsed: Hello World Dossier v1.1.0</span><span class="ln" style="--i:2"><b class="ok">&check;</b> Checksum VALID <em>content has not been tampered with</em></span><span class="ln" style="--i:3"><b class="ok">&check;</b> Signature VERIFIED <em>from trusted author</em></span><span class="ln" style="--i:4">  Risk Level: <b class="ok">LOW</b>   Recommendation: <b class="ok">ALLOW</b></span><span class="ln" style="--i:5"> </span><span class="ln" style="--i:6"><b class="p">$</b> ai-dossier run hello.ds.md --dry-run</span><span class="ln" style="--i:7"><b class="ok">&check;</b> Checksum and signature valid</span><span class="ln" style="--i:8"><b class="warn">&#9679;</b> DRY RUN MODE <em>no execution</em></span><span class="ln" style="--i:9">  <em>Static preview, not a safety guarantee.</em></span></code></pre>
+        <figcaption class="term-cap">Abridged output of the real CLI on <a href="/registry/getting-started/hello/">getting-started/hello</a>.</figcaption>
+      </figure>
     </div>
   </section>
 
-  <section aria-labelledby="explore">
-    <h2 id="explore">Explore</h2>
-    <ul class="links">
-      <li><a href="/docs/">Documentation</a>: concepts, protocol, security model, guides.</li>
-      <li><a href="/registry/">Registry browser</a>: search published dossiers, see risk level and signature details.</li>
-      <li><a href="/case-study/">Internal case study</a>: how we used dossiers to run our own issue pipeline.</li>
-      <li><a href={repo}>Source on GitHub</a> · <a href={`${repo}/releases`}>Releases</a></li>
-    </ul>
-  </section>
+  <div class="wrap">
+    <section aria-labelledby="features" class="block">
+      <p class="eyebrow">Why dossiers</p>
+      <h2 id="features">Trust is built into the file</h2>
+      <div class="bento">
+        <article class="tile t-wide">
+          <h3>Signed and verifiable</h3>
+          <p>Every dossier carries a SHA-256 checksum and an Ed25519 signature in its header. <code>ai-dossier verify</code> checks both before an agent acts, and pins the version you reviewed.</p>
+          <dl class="hdr" aria-label="Example header fields">
+            <div><dt>checksum</dt><dd>sha256:2caae4c1&hellip;</dd></div>
+            <div><dt>signature</dt><dd>ed25519:tleSPJ4T&hellip;</dd></div>
+            <div><dt>key_id</dt><dd>imboard-ai</dd></div>
+          </dl>
+        </article>
+        <article class="tile">
+          <h3>Dry-run risk preview</h3>
+          <p>See what a dossier declares and what its code blocks would do before anything executes. A preview, not a safety guarantee.</p>
+          <p class="risk-row"><span class="badge risk-low">risk: low</span><span class="badge risk-medium">risk: medium</span><span class="badge risk-high">risk: high</span></p>
+        </article>
+        <article class="tile">
+          <h3>A registry for agent skills</h3>
+          <p class="big">{registry.dossiers.length || ''}<span> published dossiers</span></p>
+          <p>Search by category and risk level, and see signature details for each. <a href="/registry/">Browse the registry</a></p>
+        </article>
+        <article class="tile">
+          <h3>CLI, MCP and VS Code</h3>
+          <p>Use it from the terminal, from Claude Code through the MCP server, or in the editor with diagnostics, completion and a dry-run preview for <code>*.ds.md</code> files.</p>
+        </article>
+        <article class="tile">
+          <h3>Standalone binaries</h3>
+          <p>No Node.js required. A checksum-verified download from <a href={`${repo}/releases`}>GitHub releases</a> for Linux and macOS.</p>
+        </article>
+      </div>
+    </section>
+
+    <section aria-labelledby="how" class="block">
+      <p class="eyebrow">Workflow</p>
+      <h2 id="how">How it works</h2>
+      <ol class="steps">
+        <li><span class="num" aria-hidden="true">01</span><h3>Write</h3><p>Author instructions in markdown in a <code>.ds.md</code> file with a JSON header: name, version, risk level, tools required.</p></li>
+        <li><span class="num" aria-hidden="true">02</span><h3>Sign and publish</h3><p>The CLI computes the checksum, signs the file with your key and publishes it to the registry, or you host the file anywhere.</p></li>
+        <li><span class="num" aria-hidden="true">03</span><h3>Verify and run</h3><p>Before an agent acts, <code>ai-dossier verify</code> checks the checksum and signature and surfaces the declared risk. Then the agent executes it.</p></li>
+      </ol>
+    </section>
+
+    <section aria-labelledby="example" class="block">
+      <p class="eyebrow">Format</p>
+      <h2 id="example">What a dossier looks like</h2>
+      <Code code={example} lang="markdown" themes={{ light: 'github-light', dark: 'github-dark' }} />
+      <p class="muted">Trimmed from the published <a href="/registry/getting-started/hello/">getting-started/hello</a> dossier.</p>
+    </section>
+
+    <section aria-labelledby="install" class="block">
+      <p class="eyebrow">Get started</p>
+      <h2 id="install">Install</h2>
+      <div class="cards">
+        <div>
+          <h3>npm</h3>
+          <pre><code>npm install -g @ai-dossier/cli
+ai-dossier --help</code></pre>
+          <p class="muted">Needs Node 20+. Or try without installing: <code>npx @ai-dossier/cli verify &lt;file&gt;</code>.</p>
+        </div>
+        <div>
+          <h3>Standalone binary</h3>
+          <pre><code>curl -fsSL https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/install.sh | sh</code></pre>
+          <p class="muted">No Node.js required. Checksum-verified download from <a href={`${repo}/releases`}>GitHub releases</a> (Linux, macOS; Windows via Git Bash).</p>
+        </div>
+        <div>
+          <h3>VS Code extension</h3>
+          <p>Diagnostics, completion and a dry-run preview for <code>*.ds.md</code> files.</p>
+          <p class="muted">Marketplace listing is pending. Until then install the <code>.vsix</code> from a <a href={`${repo}/releases`}><code>vscode-v*</code> release</a>.</p>
+        </div>
+        <div>
+          <h3>Claude Code (MCP)</h3>
+          <pre><code>claude mcp add dossier --scope user -- \
+  npx @ai-dossier/mcp-server</code></pre>
+          <p class="muted"><a href="/docs/tutorials/mcp-quickstart/">MCP in 60 seconds</a></p>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="explore" class="block">
+      <p class="eyebrow">Keep reading</p>
+      <h2 id="explore">Explore</h2>
+      <ul class="links">
+        <li><a href="/docs/"><strong>Documentation</strong></a><span>Concepts, protocol, security model, guides.</span></li>
+        <li><a href="/registry/"><strong>Registry browser</strong></a><span>Search published dossiers, see risk level and signature details.</span></li>
+        <li><a href="/case-study/"><strong>Internal case study</strong></a><span>How we used dossiers to run our own issue pipeline.</span></li>
+        <li><a href={repo}><strong>Source on GitHub</strong></a><span><a href={`${repo}/releases`}>Releases</a> and changelog.</span></li>
+      </ul>
+    </section>
+  </div>
 </Base>
 
 <style>
-  .hero { padding: 24px 0 8px; }
-  .hero h1 { font-size: clamp(1.9rem, 5vw, 2.8rem); }
-  .lead { font-size: 1.15rem; color: var(--muted); max-width: 44em; }
-  .cta { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
-  .steps { list-style: none; padding: 0; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
-  .steps li { border: 1px solid var(--line); border-radius: 10px; padding: 4px 18px 14px; background: var(--bg-soft); }
-  .steps h3 { margin-top: 12px; }
-  .cards { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
-  .cards > div { border: 1px solid var(--line); border-radius: 10px; padding: 4px 16px 12px; min-width: 0; }
-  .links { padding-left: 1.2rem; }
+  .wrap { max-width: var(--page); margin: 0 auto; padding: 0 20px; }
+  .block { padding: 24px 0 8px; }
+  .block > h2 { margin-top: 0; }
+
+  .hero { position: relative; overflow: hidden; border-bottom: 1px solid var(--line); padding: 56px 0 64px; }
+  .hero::before {
+    content: ''; position: absolute; inset: 0; pointer-events: none;
+    background-image: linear-gradient(var(--grid) 1px, transparent 1px), linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 44px 44px;
+    -webkit-mask-image: radial-gradient(ellipse 70% 80% at 30% 20%, #000 20%, transparent 75%);
+    mask-image: radial-gradient(ellipse 70% 80% at 30% 20%, #000 20%, transparent 75%);
+  }
+  .hero::after {
+    content: ''; position: absolute; width: 720px; height: 420px; left: -120px; top: -160px; pointer-events: none;
+    background: radial-gradient(closest-side, var(--accent-soft), transparent);
+  }
+  .hero-grid { position: relative; z-index: 1; display: grid; gap: 40px; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); align-items: center; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; margin: 0 0 20px; padding: 5px 12px 5px 10px; border-radius: 999px;
+    border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--accent); font-size: .8rem; font-weight: 600;
+  }
+  .hero h1 { font-size: var(--step-4); line-height: 1.05; letter-spacing: -0.04em; margin: 0 0 20px; }
+  .lead { font-size: var(--step-1); color: var(--muted); max-width: 38em; margin: 0; line-height: 1.6; }
+  .lead strong { color: var(--fg); font-weight: 600; }
+  .cta { display: flex; gap: 10px; flex-wrap: wrap; margin: 28px 0 8px; }
+  .installs { max-width: 560px; }
+
+  .term { margin: 0; border: 1px solid var(--line-strong); border-radius: var(--radius); background: #0b0d10; box-shadow: var(--shadow); overflow: hidden; min-width: 0; color: #e6e9ee; }
+  .term-bar { display: flex; align-items: center; gap: 7px; padding: 11px 14px; border-bottom: 1px solid #262b33; background: #12151a; }
+  .term-bar i { width: 10px; height: 10px; border-radius: 50%; background: #2c323b; display: block; }
+  .term-bar span { margin-left: 8px; font: 500 .75rem var(--font-mono); color: #9aa3ae; }
+  .term-body { margin: 0; border: 0; border-radius: 0; background: transparent; padding: 18px 18px 14px; font-size: clamp(.68rem, .55rem + .55vw, .84rem); line-height: 1.75; color: #e6e9ee; }
+  .term-body code { display: block; }
+  .ln { display: block; white-space: pre; min-height: 1.75em; animation: ln .35s ease both; animation-delay: calc(var(--i) * .32s + .2s); }
+  .term b { font-weight: 600; }
+  .term .p { color: #6ee7b7; }
+  .term .ok { color: #4ade80; }
+  .term .warn { color: #fbbf24; }
+  .term em { font-style: normal; color: #9aa3ae; }
+  .term-cap { padding: 10px 16px 12px; border-top: 1px solid #262b33; font-size: .78rem; color: #9aa3ae; background: #12151a; }
+  .term-cap a { color: #6ee7b7; }
+  @keyframes ln { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+  .bento { display: grid; gap: 14px; grid-template-columns: repeat(6, minmax(0, 1fr)); margin-top: 24px; }
+  .tile {
+    grid-column: span 2; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-soft);
+    padding: 22px 22px 20px; min-width: 0; transition: border-color .2s, background-color .2s;
+  }
+  .tile:hover { border-color: var(--line-strong); background: var(--bg-raised); }
+  .tile.t-wide { grid-column: span 4; background: linear-gradient(160deg, var(--accent-soft), transparent 55%), var(--bg-soft); border-color: var(--accent-line); }
+  .tile h3 { margin: 0 0 8px; font-size: var(--step-1); }
+  .tile p { margin: 0 0 10px; color: var(--muted); font-size: .95rem; }
+  .hdr { margin: 16px 0 0; display: grid; gap: 6px; font: .8rem/1.4 var(--font-mono); }
+  .hdr div { display: flex; gap: 12px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--code-bg); min-width: 0; }
+  .hdr dt { color: var(--muted); width: 6.5em; flex: none; }
+  .hdr dd { margin: 0; color: var(--accent); overflow-wrap: anywhere; }
+  .risk-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 14px !important; }
+  .big { font-size: var(--step-3); font-weight: 650; color: var(--fg) !important; letter-spacing: -0.03em; line-height: 1.1; }
+  .big span { font-size: .95rem; font-weight: 500; letter-spacing: 0; color: var(--muted); }
+
+  .steps { list-style: none; padding: 0; margin: 24px 0 0; display: grid; gap: 14px; grid-template-columns: repeat(3, minmax(0, 1fr)); counter-reset: s; }
+  .steps li { border-top: 1px solid var(--line-strong); padding-top: 16px; }
+  .num { font: 600 .85rem var(--font-mono); color: var(--accent); }
+  .steps h3 { margin: 8px 0 6px; }
+  .steps p { margin: 0; color: var(--muted); font-size: .96rem; }
+
+  .cards { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 20px; }
+  .cards > div { border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 20px 14px; min-width: 0; background: var(--bg-soft); }
+  .cards p { color: var(--muted); font-size: .92rem; }
+  .cards p:not(.muted) { color: var(--fg); }
+
+  .links { list-style: none; padding: 0; margin: 20px 0 0; display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .links li { border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; background: var(--bg-soft); display: flex; flex-direction: column; gap: 4px; }
+  .links li > a:first-child { text-decoration: none; color: var(--fg); }
+  .links li > a:first-child:hover { color: var(--accent); }
+  .links span { color: var(--muted); font-size: .92rem; }
+
+  @media (max-width: 960px) {
+    .hero { padding: 40px 0 48px; }
+    .hero-grid { grid-template-columns: minmax(0, 1fr); }
+    .steps { grid-template-columns: minmax(0, 1fr); }
+    .tile, .tile.t-wide { grid-column: span 6; }
+  }
+  @media (min-width: 640px) and (max-width: 960px) {
+    .tile { grid-column: span 3; }
+    .tile.t-wide { grid-column: span 6; }
+  }
 </style>
