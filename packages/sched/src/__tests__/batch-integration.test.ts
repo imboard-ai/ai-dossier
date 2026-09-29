@@ -73,6 +73,7 @@ import {
   runBatchTick,
   runnableUnits,
   type SchedConfig,
+  type SchedState,
   SchedStore,
   type SpawnDeps,
   type SuiteResult,
@@ -2356,45 +2357,30 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
 });
 
 /**
- * #610: a lightweight harness for `reconcileMemberSlot`'s stale-milestone
- * dedup, deliberately WITHOUT `batchHarness`'s real git worktree / real
- * spawned fake-agent process. The scenario under test — a leftover terminal
- * milestone from a PREVIOUS batch run of this member reads as stale against
- * the CURRENT dispatch's `spawned_at` — starts mid-run (batch already
- * `executing`, slot already `running`), and the real fake-agent posts a
- * FRESH milestone the instant it is spawned, racing out any hand-written
- * stale one before a tick could ever observe it. Placing the batch/slot
- * directly with `assignToIdleSlot`/`transitionBatch` and driving
- * `runBatchTick` (not the full `tick()`) skips `claimAndSetup` entirely, so
- * no worktree, `exec`, or suite ever needs to be real.
+ * The shared base of the slotless batch harnesses (#638): a fresh store and
+ * journal, a controllable clock, throwing `spawn`/`exec`/`runSuite` stubs and
+ * the `BatchDispatchDeps` wiring. `seed` supplies the harness's own state
+ * (placing the batch/slot through the real transition rail); the caller
+ * supplies the stubbed `groundTruth`.
  */
-function staleMilestoneHarness(memberIssue: number, batchId: string, anchor: number) {
-  const store = new SchedStore(tmpDir('sched-batch-stale-'));
+function slotlessBatchHarness(
+  prefix: string,
+  groundTruth: GroundTruth,
+  seed: (state: SchedState, setupAt: Date) => SchedState
+) {
+  const store = new SchedStore(tmpDir(prefix));
   const journal = new Journal(store.dir);
   const setupAt = new Date('2026-09-06T12:00:00.000Z');
   let currentNow = setupAt;
-
-  let state = enqueueEntries(
-    store.load(),
-    [{ issue: memberIssue, mode: 'slot', batch: batchId, anchor, tier: 'mid' }],
-    setupAt
-  );
-  // enqueueEntries already seals a fresh batch forming → ready.
-  state = transitionBatch(state, batchId, 'executing', { executing_member: 1 }, setupAt);
-  const assigned = assignToIdleSlot(state, `batch:${batchId}`, 'member', setupAt);
-  state = assigned.state;
-  const slotId = assigned.slotId;
-  state = transitionSlot(state, slotId, 'running', { pid: 4242, pid_start: null }, setupAt);
+  const state = seed(store.load(), setupAt);
   store.withLock(() => ({ state, result: undefined }));
 
-  let milestone: GroundTruthMilestone | null = null;
-  const groundTruth = stubGroundTruth({ latestMilestone: () => milestone });
   const spawnDeps: SpawnDeps = {
     spawn: () => {
       throw new Error('must not spawn in this test');
     },
     kill: () => true,
-    isAlive: () => true, // the member's agent is genuinely still running
+    isAlive: () => true, // any seeded agent is genuinely still running
     processStart: () => null,
   };
   const config: SchedConfig = { max_slots: 1 };
@@ -2413,6 +2399,56 @@ function staleMilestoneHarness(memberIssue: number, batchId: string, anchor: num
       throw new Error('must not run the aggregate suite in this test');
     },
   };
+  return {
+    store,
+    journal,
+    now: () => currentNow,
+    advanceNow: (at: string) => {
+      currentNow = new Date(at);
+    },
+    tick: () => runBatchTick(deps, config, dispatch),
+  };
+}
+
+/**
+ * #610: a lightweight harness for `reconcileMemberSlot`'s stale-milestone
+ * dedup, deliberately WITHOUT `batchHarness`'s real git worktree / real
+ * spawned fake-agent process. The scenario under test — a leftover terminal
+ * milestone from a PREVIOUS batch run of this member reads as stale against
+ * the CURRENT dispatch's `spawned_at` — starts mid-run (batch already
+ * `executing`, slot already `running`), and the real fake-agent posts a
+ * FRESH milestone the instant it is spawned, racing out any hand-written
+ * stale one before a tick could ever observe it. Placing the batch/slot
+ * directly with `assignToIdleSlot`/`transitionBatch` and driving
+ * `runBatchTick` (not the full `tick()`) skips `claimAndSetup` entirely, so
+ * no worktree, `exec`, or suite ever needs to be real.
+ */
+function staleMilestoneHarness(memberIssue: number, batchId: string, anchor: number) {
+  let milestone: GroundTruthMilestone | null = null;
+  let slotId = 0;
+  const base = slotlessBatchHarness(
+    'sched-batch-stale-',
+    stubGroundTruth({ latestMilestone: () => milestone }),
+    (seeded, setupAt) => {
+      let state = enqueueEntries(
+        seeded,
+        [{ issue: memberIssue, mode: 'slot', batch: batchId, anchor, tier: 'mid' }],
+        setupAt
+      );
+      // enqueueEntries already seals a fresh batch forming → ready.
+      state = transitionBatch(state, batchId, 'executing', { executing_member: 1 }, setupAt);
+      const assigned = assignToIdleSlot(state, `batch:${batchId}`, 'member', setupAt);
+      slotId = assigned.slotId;
+      return transitionSlot(
+        assigned.state,
+        slotId,
+        'running',
+        { pid: 4242, pid_start: null },
+        setupAt
+      );
+    }
+  );
+  const { store, journal } = base;
 
   return {
     journal,
@@ -2421,17 +2457,15 @@ function staleMilestoneHarness(memberIssue: number, batchId: string, anchor: num
       milestone = m;
     },
     /** Advances the tick clock (`deps.now()`), independent of `spawned_at`. */
-    advanceNow: (at: string) => {
-      currentNow = new Date(at);
-    },
+    advanceNow: base.advanceNow,
     /** Simulates a fresh dispatch of the SAME member (new spawn, same slot). */
     setSpawnedAt: (at: string) => {
       store.withLock((s) => ({
-        state: patchSlot(s, slotId, { spawned_at: at }, currentNow),
+        state: patchSlot(s, slotId, { spawned_at: at }, base.now()),
         result: undefined,
       }));
     },
-    tick: () => runBatchTick(deps, config, dispatch),
+    tick: base.tick,
   };
 }
 
@@ -2510,52 +2544,27 @@ describe('#610: stale-milestone-ignored journals once per dispatch, not once per
  * transition rail and stubbing `groundTruth.prState` is enough.
  */
 function prWatchHarness(memberIssue: number, batchId: string, anchor: number, pr: number) {
-  const store = new SchedStore(tmpDir('sched-batch-prwatch-'));
-  const journal = new Journal(store.dir);
-  const setupAt = new Date('2026-09-06T12:00:00.000Z');
-  let currentNow = setupAt;
-
-  let state = enqueueEntries(
-    store.load(),
-    [{ issue: memberIssue, mode: 'slot', batch: batchId, anchor }],
-    setupAt
-  );
-  for (const to of ['classified', 'batched', 'waiting', 'in-work', 'committed'] as const) {
-    state = transitionIssue(state, memberIssue, to, {}, setupAt);
-  }
-  state = transitionBatch(state, batchId, 'executing', {}, setupAt);
-  state = transitionBatch(state, batchId, 'validating', {}, setupAt);
-  state = transitionBatch(state, batchId, 'reviewing', {}, setupAt);
-  state = transitionBatch(state, batchId, 'shipping', {}, setupAt);
-  state = transitionBatch(state, batchId, 'awaiting-merge', { pr }, setupAt);
-  store.withLock(() => ({ state, result: undefined }));
-
   let truth: PrTruth | undefined;
-  const groundTruth = stubGroundTruth({ prState: () => truth });
-  const spawnDeps: SpawnDeps = {
-    spawn: () => {
-      throw new Error('must not spawn in this test');
-    },
-    kill: () => true,
-    isAlive: () => true,
-    processStart: () => null,
-  };
-  const config: SchedConfig = { max_slots: 1 };
-  const dispatch = resolveDispatch(config);
-  const deps: BatchDispatchDeps = {
-    store,
-    journal,
-    groundTruth,
-    spawnDeps,
-    now: () => currentNow,
-    repoDir: store.dir,
-    exec: () => {
-      throw new Error('must not exec in this test');
-    },
-    runSuite: () => {
-      throw new Error('must not run the aggregate suite in this test');
-    },
-  };
+  const base = slotlessBatchHarness(
+    'sched-batch-prwatch-',
+    stubGroundTruth({ prState: () => truth }),
+    (seeded, setupAt) => {
+      let state = enqueueEntries(
+        seeded,
+        [{ issue: memberIssue, mode: 'slot', batch: batchId, anchor }],
+        setupAt
+      );
+      for (const to of ['classified', 'batched', 'waiting', 'in-work', 'committed'] as const) {
+        state = transitionIssue(state, memberIssue, to, {}, setupAt);
+      }
+      state = transitionBatch(state, batchId, 'executing', {}, setupAt);
+      state = transitionBatch(state, batchId, 'validating', {}, setupAt);
+      state = transitionBatch(state, batchId, 'reviewing', {}, setupAt);
+      state = transitionBatch(state, batchId, 'shipping', {}, setupAt);
+      return transitionBatch(state, batchId, 'awaiting-merge', { pr }, setupAt);
+    }
+  );
+  const { store, journal } = base;
 
   return {
     journal,
@@ -2563,11 +2572,9 @@ function prWatchHarness(memberIssue: number, batchId: string, anchor: number, pr
     setTruth: (t: PrTruth | undefined) => {
       truth = t;
     },
-    advanceNow: (at: string) => {
-      currentNow = new Date(at);
-    },
+    advanceNow: base.advanceNow,
     batch: () => findBatch(store.load(), batchId),
-    tick: () => runBatchTick(deps, config, dispatch),
+    tick: base.tick,
   };
 }
 

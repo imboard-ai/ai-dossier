@@ -154,6 +154,7 @@ import {
 import { buildSchedRunLogEntry, finalizeRunLogEntry, readDispatchLog } from './run-log';
 import { assignToIdleSlot, freeCapacity } from './scheduler';
 import {
+  advanceStreak,
   allowedBatchTransitions,
   appendEvictions,
   batchMemberUnit,
@@ -213,7 +214,6 @@ import type {
 } from './types';
 import {
   IllegalTransitionError,
-  JOURNAL_DEDUP_REANNOUNCE_TICKS,
   LIVE_SLOT_STATUSES,
   resolveDissolvePolicy,
   SchedNotFoundError,
@@ -4463,10 +4463,7 @@ function advanceBatchDedupStreak(
   reason: string,
   now: Date
 ): { since: string; ticks: number; announce: boolean } {
-  const isNewStreak = priorReason !== reason || priorSince === null;
-  const ticks = isNewStreak ? 1 : priorTicks + 1;
-  const since = isNewStreak || priorSince === null ? now.toISOString() : priorSince;
-  return { since, ticks, announce: isNewStreak || ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0 };
+  return advanceStreak({ since: priorSince, ticks: priorTicks }, priorReason !== reason, now);
 }
 
 /**

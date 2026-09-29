@@ -402,11 +402,9 @@ export interface QueueEntry {
    * on a given tick, and `QueueEntry` — unlike `SlotEntry` — exists for a
    * unit regardless of whether it currently holds a slot.
    *
-   * Streak identity here is PRESENCE-ONLY: unlike `BatchEntry`'s
-   * `pr_watch_failed_reason`, a changed `detail` does not start a new streak.
-   * Every site journalling this event must therefore be a flavour of the same
-   * underlying condition — a site whose `detail` describes a materially
-   * different failure would be silently folded into a running streak (#637).
+   * Streak identity is `ground_truth_unreachable_condition` + presence (#637):
+   * a changed condition key starts a new streak, like `BatchEntry`'s
+   * `pr_watch_failed_reason`.
    */
   ground_truth_unreachable_since: string | null;
   /**
@@ -418,6 +416,16 @@ export interface QueueEntry {
    * whenever `ground_truth_unreachable_since` is `null`.
    */
   ground_truth_unreachable_ticks: number;
+  /**
+   * Stable per-site key of the condition the current
+   * `ground-truth-unreachable` streak is counting (#637) — e.g.
+   * `poll-unreachable`, `parked-milestone-no-pr` — never the interpolated
+   * `detail`. A different key on the next report starts a NEW streak and
+   * journals immediately, so a milestone-parse failure is not folded into a
+   * network-outage streak. `null` whenever `ground_truth_unreachable_since`
+   * is `null`.
+   */
+  ground_truth_unreachable_condition: string | null;
   /**
    * ISO time this entry's current `pr-watch-waiting` streak began (#632) — a
    * merge GitHub has recorded but not yet reflected as the issue closing.
@@ -1512,8 +1520,10 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * 1.29.0 (#844): `SlotEntry` gains `kill_sent_at`/`kill_escalated_at` — the
  * SIGTERM → SIGKILL escalation anchor and its journal dedup marker;
  * `null`/`null` backfilled on load.
+ * 1.30.0 (#637): `QueueEntry` gains `ground_truth_unreachable_condition` —
+ * the streak's stable condition key; `null` backfilled on load.
  */
-export const SCHEMA_VERSION = '1.29.0' as const;
+export const SCHEMA_VERSION = '1.30.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1546,6 +1556,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.26.0',
   '1.27.0',
   '1.28.0',
+  '1.29.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
