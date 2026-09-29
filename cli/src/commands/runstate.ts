@@ -8,6 +8,7 @@
  */
 
 import fs from 'node:fs';
+import { isTrustedAuthorAssociation } from '@ai-dossier/core';
 import { procStartTime } from '@ai-dossier/sched';
 import type { Command } from 'commander';
 import { formatDurationCell } from '../duration';
@@ -132,8 +133,10 @@ interface ReadOptions {
   issue: string;
   repo?: string;
   json?: boolean;
-  /** #932: only milestones from a repo owner / org member / collaborator. */
+  /** #932: accepted for explicitness; trusted-only is the DEFAULT. */
   trusted?: boolean;
+  /** #932: opt out of the trusted-only filter (operator reporting reads). */
+  all?: boolean;
 }
 
 /** `runstate list` — every milestone, optionally bounded to one dispatch (#622). */
@@ -574,7 +577,7 @@ export const FENCED_EXIT_CODE = 3;
  * the same reason, and `gh issue view --json comments` already returns the field.
  *
  * `verify` is filtered too (#932): its `resume_from` decides which phases a resumed run
- * skips. Reporting reads (`last`/`list` without `--trusted`, `stats`) deliberately stay unfiltered — they
+ * skips. Reporting reads (`last`/`list --all`, `stats`) deliberately stay unfiltered — they
  * describe the trail rather than act on it, and hiding comments there would make an
  * operator's picture disagree with the issue they are looking at.
  */
@@ -966,13 +969,18 @@ function registerReadSubcommands(cmd: Command): void {
     .option('--json', 'Output the parsed milestones as a JSON array')
     .option(
       '--trusted',
-      'Only count milestones from a repo owner / org member / collaborator (#932) — what a supervisor that acts on the result must pass'
+      'Only count milestones from a repo owner / org member / collaborator (#932) — the default; accepted so a supervisor can state it (an older CLI rejects it, failing closed)'
+    )
+    .option(
+      '--all',
+      'Include milestones from ANY author (operator reporting only; never act on this)'
     )
     .action((options: ListOptions) => {
       requireIssueTarget(options);
-      let milestones = options.trusted
-        ? fetchTrustedMilestones(options.issue, options.repo)
-        : fetchMilestones(options.issue, options.repo);
+      let milestones =
+        options.all && !options.trusted
+          ? fetchMilestones(options.issue, options.repo)
+          : fetchTrustedMilestones(options.issue, options.repo);
 
       // #622: `last` is not enough for a consumer that must decide what a
       // DISPATCH produced. A member posting `review done` and then a
@@ -1027,13 +1035,18 @@ function registerReadSubcommands(cmd: Command): void {
     .option('--json', 'Output the parsed milestone as JSON')
     .option(
       '--trusted',
-      'Only count milestones from a repo owner / org member / collaborator (#932) — what a supervisor that acts on the result must pass'
+      'Only count milestones from a repo owner / org member / collaborator (#932) — the default; accepted so a supervisor can state it (an older CLI rejects it, failing closed)'
+    )
+    .option(
+      '--all',
+      'Include milestones from ANY author (operator reporting only; never act on this)'
     )
     .action((options: ReadOptions) => {
       requireIssueTarget(options);
-      const milestones = options.trusted
-        ? fetchTrustedMilestones(options.issue, options.repo)
-        : fetchMilestones(options.issue, options.repo);
+      const milestones =
+        options.all && !options.trusted
+          ? fetchMilestones(options.issue, options.repo)
+          : fetchTrustedMilestones(options.issue, options.repo);
 
       if (milestones.length === 0) {
         if (options.json) {
@@ -1806,7 +1819,13 @@ function abortCommentBody(
  */
 function alreadyAborted(issue: string, repo: string | undefined, marker: string): boolean {
   const comments = tryFetchComments(issue, repo);
-  return comments.ok && comments.comments.some((c) => String(c?.body ?? '').includes(marker));
+  return (
+    comments.ok &&
+    comments.comments.some(
+      (c) =>
+        isTrustedAuthorAssociation(c?.authorAssociation) && String(c?.body ?? '').includes(marker)
+    )
+  );
 }
 
 /**
