@@ -24,6 +24,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   type BatchTickResult,
   evictMemberAndContinue,
+  MAX_LAND_PUSH_RETRIES,
   memberBranchFor,
   memberDispatchModeFor,
   // #834: same test-only rationale as the other direct `batch-dispatch`
@@ -6622,4 +6623,267 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
     );
     await tickUntil(h, id, (batch) => batch.status === 'awaiting-merge');
   }, 60_000);
+});
+
+describe('#793: every aggregate-suite re-run carries the batch context (DOSSIER_BATCH_* must survive refactors)', () => {
+  const at = new Date('2026-09-06T12:00:00.000Z');
+  const WORKTREE = '/nonexistent/b-793-wt';
+  const SHA = 'a'.repeat(40);
+
+  /** A store seeded with a 2-member batch, plus deps whose suite runner records every (worktree, ctx). */
+  function ctxHarness(
+    batchId: string,
+    suite: (calls: number) => SuiteResult,
+    seed: (state: SchedState) => SchedState
+  ) {
+    const store = new SchedStore(tmpDir('sched-batch-ctx-'));
+    const journal = new Journal(store.dir);
+    const enqueued = enqueueEntries(
+      store.load(),
+      [
+        { issue: 7931, mode: 'slot', batch: batchId, anchor: 7930, tier: 'mid' },
+        { issue: 7932, mode: 'slot', batch: batchId, tier: 'mid' },
+      ],
+      at
+    );
+    const state = seed(
+      patchBatch(
+        transitionBatch(enqueued, batchId, 'executing', { executing_member: 2 }, at),
+        batchId,
+        { worktree: WORKTREE, branch: `batch/${batchId}` },
+        at
+      )
+    );
+    store.withLock(() => ({ state, result: undefined }));
+    const suiteCalls: Array<[string, BatchSuiteContext | undefined]> = [];
+    const config: SchedConfig = { max_slots: 1 };
+    const deps: BatchDispatchDeps = {
+      store,
+      journal,
+      groundTruth: stubGroundTruth({}),
+      spawnDeps: {
+        spawn: () => {
+          throw new Error('must not spawn in this test');
+        },
+        kill: () => true,
+        isAlive: () => false,
+        processStart: () => null,
+      },
+      now: () => at,
+      repoDir: store.dir,
+      // `git show --name-only` names the member's file; every other git call is a no-op success.
+      exec: (_file, args) => (args[0] === 'show' ? 'src/a.test.ts\n' : ''),
+      runSuite: (worktree, ctx) => {
+        suiteCalls.push([worktree, ctx]);
+        return suite(suiteCalls.length);
+      },
+    };
+    return {
+      store,
+      suiteCalls,
+      tick: () => runBatchTick(deps, config, resolveDispatch(config)),
+      expectedCtx: () => ({
+        batchId,
+        baseRef: `origin/${findBatch(store.load(), batchId)?.base_branch}`,
+      }),
+    };
+  }
+
+  it('the fix-slot re-check (reconcileFixSlot → safeSuite) passes { batchId, baseRef }', () => {
+    const batchId = 'b-793-fix';
+    const h = ctxHarness(
+      batchId,
+      () => ({ ok: true, failing: [] }),
+      (s) => {
+        let state = transitionBatch(s, batchId, 'validating', {}, at);
+        state = transitionBatch(state, batchId, 'attributing', {}, at);
+        state = transitionBatch(state, batchId, 'fixing', {}, at);
+        state = patchBatch(
+          state,
+          batchId,
+          {
+            fix_attempts: [
+              { issue: 7931, tier: 'mid', outcome: 'dispatched', at: at.toISOString() },
+            ],
+          },
+          at
+        );
+        const assigned = assignToIdleSlot(state, `batch:${batchId}`, 'fix', at);
+        return transitionSlot(
+          assigned.state,
+          assigned.slotId,
+          'running',
+          { pid: 4243, pid_start: null, phase: 'fixing' },
+          at
+        );
+      }
+    );
+
+    h.tick(); // the fix agent is dead → the fix-slot re-check runs the suite
+
+    expect(h.suiteCalls).toEqual([[WORKTREE, h.expectedCtx()]]);
+    expect(findBatch(h.store.load(), batchId)?.status).toBe('reviewing'); // the green re-check was consumed
+  });
+
+  it('the re-run inside recovery (recoveryDeps.runSuite, after an eviction) passes { batchId, baseRef }', () => {
+    const batchId = 'b-793-evict';
+    const h = ctxHarness(
+      batchId,
+      // Red for the validate gate, green for the survivors' re-run after the eviction.
+      (call) =>
+        call === 1
+          ? { ok: false, failing: [{ file: 'src/a.test.ts', name: 't', id: 'src/a.test.ts::t' }] }
+          : { ok: true, failing: [] },
+      (s) => {
+        const state = transitionBatch(s, batchId, 'validating', {}, at);
+        return patchBatch(
+          state,
+          batchId,
+          {
+            // Member 7931 already spent its one fix attempt, so the offender is evicted directly.
+            fix_attempts: [{ issue: 7931, tier: 'mid', outcome: 'red', at: at.toISOString() }],
+            ranges: [
+              { issue: 7931, from: SHA, to: SHA, commits: [SHA], positions: [0] },
+            ] as SchedState['batches'][number]['ranges'],
+          },
+          at
+        );
+      }
+    );
+
+    h.tick(); // validate (call 1) → attribution → eviction → recovery re-run (call 2)
+
+    expect(h.suiteCalls.length).toBeGreaterThanOrEqual(2);
+    for (const [worktree, ctx] of h.suiteCalls) {
+      expect(worktree).toBe(WORKTREE);
+      expect(ctx).toEqual(h.expectedCtx());
+    }
+  });
+});
+
+/**
+ * #815: make `batchExec` calls matching `shouldFail` return null (a failed
+ * command) — `budget` times when given, else always. Returns how many were
+ * failed.
+ */
+function failBatchExec(
+  h: BatchHarness,
+  shouldFail: (file: string, args: string[], cwd?: string) => boolean,
+  budget = Number.POSITIVE_INFINITY
+): { failed: () => number } {
+  const original = h.deps.batchExec as ExecFn;
+  let failed = 0;
+  h.deps.batchExec = (file, args, cwd) => {
+    if (failed < budget && shouldFail(file, args, cwd)) {
+      failed++;
+      return null;
+    }
+    return original(file, args, cwd);
+  };
+  return { failed: () => failed };
+}
+
+/** A push of the batch's integration branch (`git push origin -- batch/...`). */
+const isIntegrationPush = (file: string, args: string[]) =>
+  file === 'git' &&
+  args[0] === 'push' &&
+  args[1] === 'origin' &&
+  args.at(-1)?.startsWith('batch/') === true;
+
+describe('#815 item 2: a transient push failure while landing a parallel member is retried, not an operator round-trip', () => {
+  it('two failed integration pushes are retried on later ticks and the batch still ships', async () => {
+    const repo = scratchRepo();
+    const id = 'b-815-retry';
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=f-{issue}.txt'], {
+      maxSlots: 3,
+      parallel: true,
+    });
+    h.enqueue([
+      { issue: 8151, mode: 'slot', batch: id, anchor: 8150, tier: 'mid' },
+      { issue: 8152, mode: 'slot', batch: id, tier: 'mid' },
+    ]);
+    const flaky = failBatchExec(h, isIntegrationPush, 2);
+
+    await tickUntil(h, id, (b) => b.status === 'awaiting-merge', 30);
+
+    expect(flaky.failed()).toBe(2);
+    const events = h.deps.journal.read();
+    expect(events.filter((e) => e.event === 'landing-retry')).toHaveLength(2);
+    expect(findBatch(h.state(), id)?.blocked_reason ?? null).toBeNull();
+    expect(findBatch(h.state(), id)?.ranges.map((r) => r.issue)).toEqual([8151, 8152]);
+  }, 90_000);
+
+  it('a push that never recovers blocks after MAX_LAND_PUSH_RETRIES retries, naming the push failure', async () => {
+    const repo = scratchRepo();
+    const id = 'b-815-block';
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=f-{issue}.txt'], {
+      maxSlots: 3,
+      parallel: true,
+    });
+    h.enqueue([{ issue: 8161, mode: 'slot', batch: id, anchor: 8160, tier: 'mid' }]);
+    failBatchExec(h, isIntegrationPush);
+
+    await tickUntil(h, id, (b) => b.status === 'blocked', 30);
+
+    expect(findBatch(h.state(), id)?.blocked_reason).toBe('landing-push-failed');
+    expect(h.deps.journal.read().filter((e) => e.event === 'landing-retry')).toHaveLength(
+      MAX_LAND_PUSH_RETRIES
+    );
+  }, 90_000);
+});
+
+describe('#815 item 1: crash between a member pool claim and its run record', () => {
+  it('the retry takes over the orphaned claim instead of claiming a second tree and evicting the member', async () => {
+    const repo = scratchRepo();
+    const id = 'b-815-crash';
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=f-{issue}.txt'], {
+      maxSlots: 3,
+      parallel: true,
+    });
+    // A pool that hands out a tree already on the requested branch, at a path
+    // the scheduler cannot re-derive — exactly what `worktree-pool claim` does.
+    const claimed: string[] = [];
+    const pool = tmpDir('sched-815-pool-');
+    const original = h.deps.batchExec as ExecFn;
+    h.deps.batchExec = (file, args, cwd) => {
+      if (file === 'npx' && args[2] === 'claim' && args[6]?.includes('-m')) {
+        const branch = args[6] as string;
+        const dir = path.join(pool, branch.replaceAll('/', '-'));
+        try {
+          execFileSync('git', ['worktree', 'add', '-b', branch, dir, 'main'], {
+            cwd: repo,
+            stdio: 'ignore',
+          });
+        } catch {
+          return null; // the branch is already checked out somewhere — a real pool's `checkout -b` fails too
+        }
+        claimed.push(branch);
+        return dir;
+      }
+      return original(file, args, cwd);
+    };
+    h.enqueue([{ issue: 8171, mode: 'slot', batch: id, anchor: 8170, tier: 'mid' }]);
+
+    // The engine dies after the claim, before the write that records the run.
+    const realWithLock = h.store.withLock.bind(h.store);
+    h.store.withLock = (<T>(fn: Parameters<SchedStore['withLock']>[0]): T => {
+      const b = findBatch(h.store.load(), id);
+      if (claimed.length > 0 && b !== undefined && b.member_runs.length === 0) {
+        throw new Error('#815 injected crash: claimed, run never recorded');
+      }
+      return realWithLock(fn) as T;
+    }) as SchedStore['withLock'];
+    expect(() => h.tick()).toThrow('#815 injected crash');
+    h.store.withLock = realWithLock;
+    expect(claimed).toHaveLength(1);
+    expect(findBatch(h.state(), id)?.member_runs).toEqual([]);
+
+    await tickUntil(h, id, (b) => b.status === 'awaiting-merge', 30);
+
+    const batch = findBatch(h.state(), id);
+    expect(claimed).toHaveLength(1); // the orphan was taken over, never a second claim
+    expect(batch?.evictions).toEqual([]);
+    expect(batch?.ranges.map((r) => r.issue)).toEqual([8171]);
+    expect(h.deps.journal.read().some((e) => e.event === 'member-claim-reused')).toBe(true);
+  }, 90_000);
 });

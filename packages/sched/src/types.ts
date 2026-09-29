@@ -1851,6 +1851,8 @@ export type JournalEventName =
   // member (stale after a failed teardown or a crash mid-eviction),
   // journalled once at the moment it is discarded for a fresh prep.
   | 'member-worktree-reused'
+  | 'member-claim-reused'
+  | 'landing-retry'
   | 'member-landed'
   | 'landing-failed'
   | 'member-worktree-torn-down'

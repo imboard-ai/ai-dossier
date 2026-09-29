@@ -1268,6 +1268,22 @@ export interface SpawnDeps {
   processStart(pid: number): number | null;
 }
 
+/**
+ * SIGTERM the agent holding `slot`, if it is still alive (#815 — the one
+ * "kill the slot's agent" the engine, batch dispatch and `sched stop`/`abandon`
+ * share). Pid-start-safe: a reused pid reads dead and is never signalled. No
+ * wait, no escalation; a decision that must not run alongside the agent
+ * escalates through `stopAgentBeforeDeciding` instead. Returns whether a
+ * signal was delivered.
+ */
+export function killSlotAgent(
+  spawnDeps: Pick<SpawnDeps, 'kill' | 'isAlive'>,
+  slot: { pid: number | null; pid_start?: number | null }
+): boolean {
+  if (slot.pid === null || !spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) return false;
+  return spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
+}
+
 /** `issue:464` → `issue-464` (filesystem-safe unit ids for log file names). */
 export function unitLogName(unit: string): string {
   return sanitizeSlug(unit);

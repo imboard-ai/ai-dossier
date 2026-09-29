@@ -103,6 +103,7 @@ import {
   fileSizeOrZero,
   journalCmdModelFields,
   KILL_ESCALATION_MS,
+  killSlotAgent,
   memberDispatchTier,
   type ResolvedDispatch,
   resolveProfiledDispatch,
@@ -390,9 +391,7 @@ function agentAlive(deps: BatchDispatchDeps, slot: SlotEntry): boolean {
  * which escalates to SIGKILL (#844).
  */
 function killLiveAgent(deps: BatchDispatchDeps, slot: SlotEntry): void {
-  if (agentAlive(deps, slot)) {
-    deps.spawnDeps.kill(slot.pid as number, slot.pid_start ?? undefined);
-  }
+  killSlotAgent(deps.spawnDeps, slot);
 }
 
 /**
@@ -666,7 +665,7 @@ function applyDissolveOutcome(
     stopAndReleaseBlocked(deps, batchId, now);
     return;
   }
-  teardownBatch(deps, batchId);
+  teardownBatch(deps, batchId, now);
 }
 
 /** Stop every live agent of a batch that just blocked, and release all its slots (#810). */
@@ -1019,6 +1018,33 @@ function usablePoolClaim(deps: BatchDispatchDeps, w: string | undefined): w is s
   );
 }
 
+/**
+ * The path of a worktree, other than the repo's own or the batch's, that has
+ * `branch` checked out — an earlier prep's pool claim orphaned by an engine
+ * exit before its run was recorded (#815). `null` when there is none. Member
+ * branch names are unique per batch/index/issue, so a match can only be this
+ * member's own leftover.
+ */
+function orphanedMemberClaim(
+  deps: BatchDispatchDeps,
+  root: string,
+  batch: BatchEntry,
+  branch: string
+): string | null {
+  const listing = deps.exec('git', ['worktree', 'list', '--porcelain'], deps.repoDir);
+  if (listing === null) return null;
+  let current: string | null = null;
+  for (const line of listing.split('\n')) {
+    if (line.startsWith('worktree ')) current = line.slice('worktree '.length).trim();
+    else if (line.trim() === `branch refs/heads/${branch}` && current !== null) {
+      const candidate = current;
+      if (candidate === root || candidate === batch.worktree) return null;
+      return usablePoolClaim(deps, candidate) ? candidate : null;
+    }
+  }
+  return null;
+}
+
 function prepareMemberWorktree(
   deps: BatchDispatchDeps,
   batch: BatchEntry,
@@ -1073,11 +1099,30 @@ function prepareMemberWorktree(
     };
   }
 
-  const claimed = deps.exec(
-    POOL_BIN,
-    [...POOL_ARGS_PREFIX, 'claim', '--issue', String(issue), '--branch', branch],
-    deps.repoDir
-  );
+  // #815: a prior prep that died between its pool claim and the run record
+  // left the claim checked out on THIS member's branch at a pool path that is
+  // not re-derivable (the pool renames the claim to the branch slug). Claiming
+  // again would take a SECOND tree, and `checkout -B` would then fail because
+  // the branch is checked out in the orphan — an eviction over a blip. No run
+  // was recorded, so no agent ever started in it: take the orphan over and
+  // re-point it exactly like a fresh claim.
+  const orphan = orphanedMemberClaim(deps, root, batch, branch);
+  const claimed =
+    orphan ??
+    deps.exec(
+      POOL_BIN,
+      [...POOL_ARGS_PREFIX, 'claim', '--issue', String(issue), '--branch', branch],
+      deps.repoDir
+    );
+  if (orphan !== null) {
+    deps.journal.append(
+      unitEvent('member-claim-reused', unit(batch.id), {
+        issue,
+        detail: `${orphan} — a pool claim on ${branch} that no run recorded (engine exit mid-prep)`,
+      }),
+      now
+    );
+  }
   const claimedWorktree = claimed?.trim();
   if (claimedWorktree && usablePoolClaim(deps, claimedWorktree)) {
     // Re-point the warm spare at the member branch off the integration
@@ -1180,28 +1225,68 @@ function landMemberBranch(
     });
     return { ok: false, reason: 'invalid-branch-name' };
   }
-  if (deps.exec('git', ['merge', '--ff-only', batch.member_branch], batch.worktree) === null) {
-    journalEvent(deps, 'landing-failed', unit(batchId), {
-      issue: memberIssue,
-      reason: 'landing-merge-failed',
-      detail: `git merge --ff-only ${batch.member_branch} into ${batch.branch} failed — serial-landing invariant broken; blocking for an operator`,
-    });
-    return { ok: false, reason: 'landing-merge-failed' };
+  return fastForwardOntoIntegration(deps, {
+    batchId,
+    issue: memberIssue,
+    memberBranch: batch.member_branch,
+    integrationBranch: batch.branch,
+    worktree: batch.worktree,
+    now,
+    mergeFailedDetail: 'serial-landing invariant broken; blocking for an operator',
+    landedDetail: `${batch.member_branch} fast-forwarded onto ${batch.branch}`,
+  });
+}
+
+/**
+ * The tail every landing shares (#815 — serial `landMemberBranch` and
+ * parallel `landParallelRun` once each carried a copy): `git merge --ff-only
+ * <member branch>` in the shared batch worktree (which holds the integration
+ * branch), push the integration branch, journal `member-landed`. Both steps
+ * are idempotent, so re-running it after a partial failure (merged locally,
+ * push failed) is safe. A failure journals `landing-failed` with its reason
+ * and returns it; the caller decides whether that blocks or retries.
+ */
+function fastForwardOntoIntegration(
+  deps: BatchDispatchDeps,
+  land: {
+    batchId: string;
+    issue: number;
+    memberBranch: string;
+    integrationBranch: string;
+    /** The batch worktree, holding the integration branch. */
+    worktree: string;
+    now: Date;
+    /** Tail of the `landing-merge-failed` detail — what the failure means for this rail. */
+    mergeFailedDetail: string;
+    landedDetail: string;
   }
-  if (deps.exec('git', ['push', 'origin', '--', batch.branch], batch.worktree) === null) {
-    journalEvent(deps, 'landing-failed', unit(batchId), {
-      issue: memberIssue,
-      reason: 'landing-push-failed',
-      detail: `landed ${batch.member_branch} on ${batch.branch} locally but the push failed — blocking so origin stays the durable copy`,
+): { ok: true } | { ok: false; reason: string } {
+  const failed = (reason: string, detail: string): { ok: false; reason: string } => {
+    journalEvent(deps, 'landing-failed', unit(land.batchId), {
+      issue: land.issue,
+      reason,
+      detail,
     });
-    return { ok: false, reason: 'landing-push-failed' };
+    return { ok: false, reason };
+  };
+  if (deps.exec('git', ['merge', '--ff-only', land.memberBranch], land.worktree) === null) {
+    return failed(
+      'landing-merge-failed',
+      `git merge --ff-only ${land.memberBranch} into ${land.integrationBranch} failed — ${land.mergeFailedDetail}`
+    );
+  }
+  if (deps.exec('git', ['push', 'origin', '--', land.integrationBranch], land.worktree) === null) {
+    return failed(
+      'landing-push-failed',
+      `landed ${land.memberBranch} on ${land.integrationBranch} locally but the push failed — blocking so origin stays the durable copy`
+    );
   }
   deps.journal.append(
-    unitEvent('member-landed', unit(batchId), {
-      issue: memberIssue,
-      detail: `${batch.member_branch} fast-forwarded onto ${batch.branch}`,
+    unitEvent('member-landed', unit(land.batchId), {
+      issue: land.issue,
+      detail: land.landedDetail,
     }),
-    now
+    land.now
   );
   return { ok: true };
 }
@@ -1733,31 +1818,19 @@ function claimAndSetup(
     // Parallel members each claim their OWN slot (`batch:<id>#<issue>`), so
     // the setup slot is released here and the members' worktrees are prepared
     // by `spawnParallelMembers` (outside the lock, per member).
-    deps.store.withLock((s) => {
-      const b = findBatch(s, batchId);
-      if (!b || b.status !== 'ready') {
-        journalEvent(deps, 'unit-failed', unit(batchId), {
-          reason: 'batch-left-ready-during-setup',
-          detail: `worktree ${setup.worktree} created but batch is now '${b?.status ?? 'gone'}' — orphaned, manual cleanup required`,
-        });
-        return { state: releaseSlot(s, batchId, now), result: undefined };
-      }
-      let next = patchBatch(
+    deps.store.withLock((s) => ({
+      state: landSetup(
+        deps,
         s,
         batchId,
-        {
-          branch: setup.branch,
-          worktree: setup.worktree,
-          run_id: setup.runId,
-          pool_claimed: setup.poolClaimed,
-          member_dispatch: 'parallel',
-          member_runs: [],
-        },
-        now
-      );
-      next = transitionBatch(next, batchId, 'executing', { executing_member: 0 }, now);
-      return { state: releaseSlot(next, batchId, now), result: undefined };
-    });
+        setup,
+        now,
+        { member_dispatch: 'parallel', member_runs: [] },
+        0,
+        (next) => releaseSlot(next, batchId, now)
+      ),
+      result: undefined,
+    }));
     spawnParallelMembers(deps, config, dispatch, batchId, now, result);
     return;
   }
@@ -1809,22 +1882,48 @@ function claimAndSetup(
     return;
   }
 
-  deps.store.withLock((s) => {
-    const b = findBatch(s, batchId);
-    if (!b || b.status !== 'ready') {
-      // The batch moved (dissolved/abandoned) between the claim and here — a
-      // real worktree now exists that nothing else knows about, and the slot
-      // this claim took is still `assigned` with no agent in it. Release the
-      // slot rather than leaking capacity; the worktree is orphaned (named in
-      // the journal for manual cleanup — it is not this rare-race path's job
-      // to guess whether reusing or removing it is safe).
-      journalEvent(deps, 'unit-failed', unit(batchId), {
-        reason: 'batch-left-ready-during-setup',
-        detail: `worktree ${setup.worktree} created but batch is now '${b?.status ?? 'gone'}' — orphaned, manual cleanup required`,
-      });
-      return { state: releaseSlot(s, batchId, now), result: undefined };
-    }
-    let next = patchBatch(
+  deps.store.withLock((s) => ({
+    state: landSetup(deps, s, batchId, setup, now, { member_dispatch: 'serial' }, 1, (next) => {
+      const slot = slotFor(next, batchId);
+      return slot
+        ? spawnMember(deps, dispatch, next, slot, batchId, now, result, memberPrep)
+        : next;
+    }),
+    result: undefined,
+  }));
+}
+
+/**
+ * Land a completed `runBatchSetup` on the batch entry (inside the caller's
+ * lock): patch branch/worktree/run id, move `ready → executing`, then hand the
+ * result to `after` (serial: spawn member 1; parallel: release the setup slot).
+ * A batch that left `ready` between the claim and here (dissolved/abandoned)
+ * leaves a real worktree nothing else knows about and a slot still `assigned`
+ * with no agent in it — release the slot rather than leak capacity; the
+ * worktree is orphaned (named in the journal for manual cleanup — it is not
+ * this rare-race path's job to guess whether reusing or removing it is safe).
+ * Shared by both dispatch modes so the two landings cannot drift (#815).
+ */
+function landSetup(
+  deps: BatchDispatchDeps,
+  s: SchedState,
+  batchId: string,
+  setup: { branch: string; worktree: string; runId: string; poolClaimed: boolean },
+  now: Date,
+  modePatch: Pick<Partial<BatchEntry>, 'member_dispatch' | 'member_runs'>,
+  executingMember: number,
+  after: (next: SchedState) => SchedState
+): SchedState {
+  const b = findBatch(s, batchId);
+  if (!b || b.status !== 'ready') {
+    journalEvent(deps, 'unit-failed', unit(batchId), {
+      reason: 'batch-left-ready-during-setup',
+      detail: `worktree ${setup.worktree} created but batch is now '${b?.status ?? 'gone'}' — orphaned, manual cleanup required`,
+    });
+    return releaseSlot(s, batchId, now);
+  }
+  const next = transitionBatch(
+    patchBatch(
       s,
       batchId,
       {
@@ -1832,15 +1931,16 @@ function claimAndSetup(
         worktree: setup.worktree,
         run_id: setup.runId,
         pool_claimed: setup.poolClaimed,
-        member_dispatch: 'serial',
+        ...modePatch,
       },
       now
-    );
-    next = transitionBatch(next, batchId, 'executing', { executing_member: 1 }, now);
-    const slot = slotFor(next, batchId);
-    if (slot) next = spawnMember(deps, dispatch, next, slot, batchId, now, result, memberPrep);
-    return { state: next, result: undefined };
-  });
+    ),
+    batchId,
+    'executing',
+    { executing_member: executingMember },
+    now
+  );
+  return after(next);
 }
 
 // --- Continuation: claim a fresh slot for the next live step ---
@@ -2250,22 +2350,8 @@ function runValidate(
       now
     );
     const admitted = deps.store.withLock((s) => {
-      const b = findBatch(s, batchId);
-      if (!b || b.status !== 'validating') return { state: s, result: false };
-      if (b.executing_member < b.members.length) {
-        return {
-          state: transitionBatch(
-            s,
-            batchId,
-            'executing',
-            // #809: a parallel batch spawns every run-less member itself.
-            isParallelBatch(b) ? {} : { executing_member: b.executing_member + 1 },
-            now
-          ),
-          result: true,
-        };
-      }
-      return { state: transitionBatch(s, batchId, 'reviewing', {}, now), result: undefined };
+      const out = readmitAfterValidation(s, batchId, now);
+      return { state: out.state, result: out.admitted };
     });
     if (admitted) {
       const b = findBatch(deps.store.load(), batchId);
@@ -2416,24 +2502,41 @@ function evictOffender(
     return;
   }
   if (outcome.suite?.ok) {
-    deps.store.withLock((s) => {
-      const b = findBatch(s, batchId);
-      if (!b || b.status !== 'validating') return { state: s, result: undefined };
-      if (b.executing_member < b.members.length) {
-        return {
-          state: transitionBatch(
-            s,
-            batchId,
-            'executing',
-            isParallelBatch(b) ? {} : { executing_member: b.executing_member + 1 },
-            now
-          ),
-          result: undefined,
-        };
-      }
-      return { state: transitionBatch(s, batchId, 'reviewing', {}, now), result: undefined };
-    });
+    deps.store.withLock((s) => ({
+      state: readmitAfterValidation(s, batchId, now).state,
+      result: undefined,
+    }));
   }
+}
+
+/**
+ * The green-gate exit of `validating` (#815 — one step for `runValidate` and
+ * `evictOffender`): a member admitted while the suite ran sends the batch back
+ * to `executing` (the suite must run again before final review); otherwise it
+ * moves on to `reviewing`. A batch no longer `validating` is left untouched
+ * (`admitted: false`, so the caller falls through to the tail spawn).
+ */
+function readmitAfterValidation(
+  s: SchedState,
+  batchId: string,
+  now: Date
+): { state: SchedState; admitted: boolean } {
+  const b = findBatch(s, batchId);
+  if (!b || b.status !== 'validating') return { state: s, admitted: false };
+  if (b.executing_member < b.members.length) {
+    return {
+      state: transitionBatch(
+        s,
+        batchId,
+        'executing',
+        // #809: a parallel batch spawns every run-less member itself.
+        isParallelBatch(b) ? {} : { executing_member: b.executing_member + 1 },
+        now
+      ),
+      admitted: true,
+    };
+  }
+  return { state: transitionBatch(s, batchId, 'reviewing', {}, now), admitted: false };
 }
 
 // --- Reconcile a batch currently holding a live/exited slot ---
@@ -4284,7 +4387,7 @@ function closeWithoutReport(
     detail: `${why} — batch closed without its report (the PR is merged); post the batch report by hand if one is wanted`,
   });
   result.failed.push(unit(batchId));
-  teardownBatch(deps, batchId);
+  teardownBatch(deps, batchId, now);
 }
 
 function reconcileTailSlot(
@@ -4436,7 +4539,7 @@ function reconcileReportSlot(
       return { state: n, result: undefined };
     });
     result.completed.push(unit(batchId));
-    teardownBatch(deps, batchId);
+    teardownBatch(deps, batchId, now);
     return;
   }
   if (dead) {
@@ -5145,7 +5248,7 @@ export function reconcileStaleBlockedBatches(
     });
     result.mergeAccepted.push(unit(batch.id));
     if (finishInline && !keepWorktree) {
-      teardownBatch(deps, batch.id);
+      teardownBatch(deps, batch.id, now);
     }
   }
 }
@@ -5533,11 +5636,11 @@ function recordAnchorCloseFailed(
  * eviction-threshold dissolve): a dissolved batch's worktree is otherwise
  * left on disk forever, since nothing else ever calls this for it.
  */
-function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
+function teardownBatch(deps: BatchDispatchDeps, batchId: string, now: Date): void {
   // #855: a kept batch's trees are the operator's — every teardown path reads
   // the same persisted decision. Only its live agents are stopped.
   if (findBatch(deps.store.load(), batchId)?.worktree_kept === true) {
-    teardownParallelRuns(deps, batchId, null);
+    teardownParallelRuns(deps, batchId, null, now);
     return;
   }
   // #677: the current member's worktree goes first — it is batch-owned
@@ -5551,8 +5654,8 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
   const lastMemberLanded =
     terminal?.ranges.some((r) => r.issue === terminal.members[terminal.executing_member - 1]) ===
     true;
-  const serial = teardownMemberWorktree(deps, batchId, deps.now(), lastMemberLanded);
-  teardownParallelRuns(deps, batchId, serial);
+  const serial = teardownMemberWorktree(deps, batchId, now, lastMemberLanded);
+  teardownParallelRuns(deps, batchId, serial, now);
   deleteMemberBranches(deps, batchId);
   const state = deps.store.load();
   const batch = findBatch(state, batchId);
@@ -6248,26 +6351,72 @@ function landParallelRun(
       `rebased ${run.branch} onto ${batch.branch} but could not push it (origin moved since ${remoteTip.slice(0, 12) || 'absent'}, or the push failed) — blocking so nothing pushed after verification is overwritten`
     );
   }
-  if (deps.exec('git', ['merge', '--ff-only', run.branch], batch.worktree) === null) {
-    return fail(
-      'landing-merge-failed',
-      `git merge --ff-only ${run.branch} into ${batch.branch} failed right after a clean rebase — blocking for an operator`
-    );
-  }
-  if (deps.exec('git', ['push', 'origin', '--', batch.branch], batch.worktree) === null) {
-    return fail(
-      'landing-push-failed',
-      `landed ${run.branch} on ${batch.branch} locally but the push failed — blocking so origin stays the durable copy`
-    );
-  }
+  const ff = fastForwardOntoIntegration(deps, {
+    batchId: batch.id,
+    issue: run.issue,
+    memberBranch: run.branch,
+    integrationBranch: batch.branch,
+    worktree: batch.worktree,
+    now,
+    mergeFailedDetail: 'right after a clean rebase — blocking for an operator',
+    landedDetail: `${run.branch} rebased onto and fast-forwarded into ${batch.branch} (member ${run.index}, parallel)`,
+  });
+  return ff.ok ? { kind: 'landed' } : { kind: 'failed', reason: ff.reason };
+}
+
+/**
+ * #815: how many consecutive ticks a parallel member's landing may fail on a
+ * PUSH (`member-push-failed` / `landing-push-failed`) before the batch blocks.
+ * A network blip should not cost an operator round-trip; the landing is
+ * idempotent (the rebase is a no-op once done, the lease pins the same tip,
+ * `merge --ff-only` succeeds when already merged), so the next tick simply
+ * runs it again.
+ */
+export const MAX_LAND_PUSH_RETRIES = 3;
+
+/** Reasons that mean "the push failed", as opposed to a broken invariant that retrying cannot fix. */
+const TRANSIENT_LAND_REASONS: ReadonlySet<string> = new Set([
+  'member-push-failed',
+  'landing-push-failed',
+]);
+
+/**
+ * Consecutive push-failure ticks per parallel member, keyed by state dir +
+ * batch + issue. In-memory on purpose: a restart merely grants a fresh budget
+ * (still bounded), and it keeps the persisted schema untouched.
+ */
+const landPushRetries = new Map<string, number>();
+
+function landRetryKey(deps: BatchDispatchDeps, batchId: string, issue: number): string {
+  return `${deps.store.dir}\0${batchId}\0${issue}`;
+}
+
+/**
+ * Whether a failed parallel landing should be retried next tick instead of
+ * blocking the batch: only push failures, at most `MAX_LAND_PUSH_RETRIES`
+ * times in a row. Journals `landing-retry` with the position in the budget.
+ */
+function deferTransientPushFailure(
+  deps: BatchDispatchDeps,
+  batchId: string,
+  run: MemberRun,
+  reason: string,
+  now: Date
+): boolean {
+  if (!TRANSIENT_LAND_REASONS.has(reason)) return false;
+  const key = landRetryKey(deps, batchId, run.issue);
+  const attempt = (landPushRetries.get(key) ?? 0) + 1;
+  if (attempt > MAX_LAND_PUSH_RETRIES) return false;
+  landPushRetries.set(key, attempt);
   deps.journal.append(
-    unitEvent('member-landed', unit(batch.id), {
+    unitEvent('landing-retry', unit(batchId), {
       issue: run.issue,
-      detail: `${run.branch} rebased onto and fast-forwarded into ${batch.branch} (member ${run.index}, parallel)`,
+      reason,
+      detail: `${reason} for member ${run.index} (#${run.issue}) — retrying next tick (${attempt}/${MAX_LAND_PUSH_RETRIES}) before blocking`,
     }),
     now
   );
-  return { kind: 'landed' };
+  return true;
 }
 
 /** The next thing the ordered landing walk can do (#809). */
@@ -6331,10 +6480,13 @@ function advanceParallelBatch(
       continue;
     }
     if (landed.kind === 'failed') {
+      if (deferTransientPushFailure(deps, batchId, run, landed.reason, now)) return;
+      landPushRetries.delete(landRetryKey(deps, batchId, run.issue));
       stopRunningMembers(deps, batchId, now);
       blockBatchForOperator(deps, config, batchId, { reason: landed.reason }, now, result);
       return;
     }
+    landPushRetries.delete(landRetryKey(deps, batchId, run.issue));
     // `git log` outside the lock (same invariant as `completeMemberGate`).
     const ranges = memberRanges(boundaryCommits(deps, batch));
     deps.store.withLock((s) => {
@@ -6500,11 +6652,11 @@ function reconcileParallelBatch(
 function teardownParallelRuns(
   deps: BatchDispatchDeps,
   batchId: string,
-  serial: SerialTreeTeardown | null
+  serial: SerialTreeTeardown | null,
+  now: Date
 ): void {
   const batch = findBatch(deps.store.load(), batchId);
   if (!batch) return;
-  const now = deps.now();
   for (const run of batch.member_runs) {
     if (run.torn_down) continue;
     stopMemberAgent(deps, batchId, run.issue, now);
@@ -6751,7 +6903,7 @@ export function runBatchTick(
       // and it stops any agent that is somehow still running in a kept tree.
       if (batch.member_runs.some((r) => !r.torn_down)) {
         try {
-          teardownParallelRuns(deps, batch.id, null);
+          teardownParallelRuns(deps, batch.id, null, now);
         } catch (err) {
           journalEvent(deps, 'teardown-failed', unit(batch.id), {
             detail: `member teardown: ${(err as Error).message}`,

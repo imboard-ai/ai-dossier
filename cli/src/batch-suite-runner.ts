@@ -17,8 +17,10 @@
  *      manifest has one `active`: the same gate a normal PR pays (e.g. CI
  *      parity, affected-scoped against `DOSSIER_BATCH_BASE`), run once for
  *      the whole batch. Its outcome maps to a `SuiteResult` exactly as
- *      `test.full`'s does; `capability-unavailable` (or no `ai-dossier` on
- *      PATH) falls through to tier 1.
+ *      `test.full`'s does. A DECLARED-active gate.batch that reports
+ *      `capability-unavailable` (or no/older `ai-dossier` on PATH) is a
+ *      terminal unreadable result (#793) — never a silent fall-through to
+ *      tier 1, which may be the timeout-prone gate #777 refuses to pay.
  *   1. `cap run test.full` — the repo's own declared capability, when its
  *      manifest (`.dossier/automation/manifest.yaml`) has one `active`.
  *   2. `dispatch.suite_command` — an explicit per-project override in sched
@@ -346,6 +348,21 @@ export function createBatchSuiteRunner(
         capabilityTimeout(manifest, BATCH_GATE_CAPABILITY, defaultTimeoutMs),
         env
       );
+      // #793: the manifest declares the batch gate active but the capability
+      // layer cannot see it (older `ai-dossier` on PATH, stale shadow copy).
+      // Running `test.full` instead could be the timeout-prone gate the #777
+      // enqueue refusal exists to avoid — report unreadable so the batch
+      // blocks with every member commit preserved.
+      if (cap === 'unavailable') {
+        return {
+          ok: false,
+          failing: [],
+          readable: false,
+          detail:
+            `cap run ${BATCH_GATE_CAPABILITY}: manifest declares ${BATCH_GATE_CAPABILITY} active but the capability layer reports it unavailable ` +
+            `(older ai-dossier on PATH or not invocable) — refusing to fall back to ${FULL_SUITE_CAPABILITY} (cwd=${worktree})`,
+        };
+      }
     }
     if (cap === 'unavailable') {
       cap = runCapabilitySuite(
