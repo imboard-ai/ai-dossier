@@ -84,6 +84,38 @@ describe('run command', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Executing'));
   });
 
+  it('shows high-risk factors and proceeds without hanging when non-interactive', async () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(
+      '---dossier\n{"title":"Test","risk_level":"high","risk_factors":["modifies_cloud_resources"]}\n---\nBody'
+    );
+    vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
+
+    const program = createTestProgram();
+    registerRunCommand(program);
+    await program.parseAsync(['node', 'dossier', 'run', 'test.ds.md']);
+
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('High-risk dossier'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('modifies cloud resources'));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('non-interactive session'));
+    expect(spawnSync).toHaveBeenCalled();
+  });
+
+  it('--force skips the high-risk prompt', async () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(
+      '---dossier\n{"title":"Test","risk_level":"critical"}\n---\nBody'
+    );
+    vi.mocked(spawnSync).mockReturnValue({ status: 0 } as any);
+
+    const program = createTestProgram();
+    registerRunCommand(program);
+    await program.parseAsync(['node', 'dossier', 'run', 'test.ds.md', '--force']);
+
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('(--force)'));
+    expect(spawnSync).toHaveBeenCalled();
+  });
+
   it('should exit 1 when verification fails', async () => {
     mockedFs.existsSync.mockReturnValue(true);
     mockedFs.readFileSync.mockReturnValue('---dossier\n{"title":"Test"}\n---\nBody');

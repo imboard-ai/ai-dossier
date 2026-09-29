@@ -552,7 +552,7 @@ export async function runVerification(
       results.stages.push({ stage: 1, name: 'Integrity', passed: true });
     } else {
       console.log('   ❌ FAILED: Verification failed');
-      console.log(`   Run "dossier verify ${file}" for details\n`);
+      console.log(`   Run "ai-dossier verify ${file}" for details\n`);
       results.passed = false;
       results.stages.push({ stage: 1, name: 'Integrity', passed: false });
       return results;

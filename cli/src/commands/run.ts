@@ -26,6 +26,7 @@ import {
 } from '../helpers';
 import { multiRegistryGetContent } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
+import { askYesNo, decideRiskConfirmation } from '../risk-prompt';
 import { appendRunLog, type RunLogEntry } from '../run-log';
 import { detectHostSession } from '../usage/host-session';
 
@@ -60,7 +61,7 @@ export function registerRunCommand(program: Command): void {
       'Comma- or space-separated allowed tools (headless only; claude only — opencode tool access lives in opencode.json)'
     )
     .option('--dry-run', 'Show plan without executing')
-    .option('--force', 'Skip risk warnings')
+    .option('--force', 'Skip the high-risk confirmation prompt')
     .option('--no-prompt', "Don't ask for confirmation")
     .option('--fresh', 'Skip cache, fetch fresh from registry')
     .option('--pull', 'Update cache before running')
@@ -82,7 +83,7 @@ export function registerRunCommand(program: Command): void {
           allowedTools?: string;
           dryRun?: boolean;
           force?: boolean;
-          noPrompt?: boolean;
+          prompt?: boolean;
           fresh?: boolean;
           pull?: boolean;
           maxAge?: string;
@@ -400,6 +401,35 @@ export function registerRunCommand(program: Command): void {
         console.log(`   Action:      RUN`);
         console.log('   Status:      VERIFIED');
         console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+        // High-risk dossiers: show what they declare and ask first. Never blocks a
+        // non-interactive session (CI, pipes) or an explicit --force/--no-prompt.
+        let riskFm: DossierFrontmatter | null = null;
+        try {
+          riskFm = parseDossierContent(dossierContent).frontmatter;
+        } catch {
+          // Unparseable metadata was already warned about above.
+        }
+        if (riskFm) {
+          const decision = decideRiskConfirmation(
+            riskFm,
+            options,
+            Boolean(process.stdin.isTTY && process.stdout.isTTY)
+          );
+          if (decision.action !== 'none') {
+            console.log('⚠️  High-risk dossier');
+            for (const line of decision.lines) console.log(`   ${line}`);
+            console.log('');
+            if (decision.action === 'proceed') {
+              console.log(`   Continuing without confirmation (${decision.reason}).\n`);
+            } else if (!(await askYesNo('Continue? [y/N] '))) {
+              console.log('\n❌ Aborted - not executed (pass --force to skip this prompt)\n');
+              finishRunLog({ exit_code: 1 });
+              cleanupSecureTmp();
+              process.exit(1);
+            }
+          }
+        }
 
         if (
           !options.headless &&

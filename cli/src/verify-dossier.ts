@@ -29,20 +29,13 @@ import {
   verifySignature,
 } from '@ai-dossier/core';
 
+import { colors } from './color';
 import { convertGitHubBlobToRaw } from './github-url';
+import { checksumFailureGuidance, signatureFailureGuidance } from './verify-guidance';
 
 // ============================================================================
 // Terminal colors
 // ============================================================================
-
-const colors = {
-  reset: '\x1b[0m',
-  bright: '\x1b[1m',
-  red: '\x1b[31m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  cyan: '\x1b[36m',
-} as const;
 
 function log(message: string, color: keyof typeof colors = 'reset'): void {
   console.log(`${colors[color]}${message}${colors.reset}`);
@@ -62,6 +55,13 @@ function warning(message: string): void {
 
 function info(message: string): void {
   log(`\u2139\uFE0F  ${message}`, 'cyan');
+}
+
+/** Print indented guidance lines under a failure. */
+function printGuidance(lines: string[]): void {
+  console.log('');
+  for (const line of lines) console.log(line ? `   ${line}` : '');
+  console.log('');
 }
 
 // ============================================================================
@@ -276,11 +276,18 @@ export async function verifyDossier(input: string, options: VerifyOptions): Prom
         console.log(`   Hash: ${integrityResult.actualHash}`);
       }
     } else {
-      error('Checksum INVALID - content has been modified!');
-      if (options.verbose) {
-        console.log(`   Declared: ${integrityResult.expectedHash}`);
-        console.log(`   Actual:   ${integrityResult.actualHash}`);
-      }
+      error(
+        integrityResult.status === 'missing'
+          ? 'Checksum MISSING - dossier declares no checksum'
+          : 'Checksum INVALID - content has been modified!'
+      );
+      printGuidance(
+        checksumFailureGuidance({
+          input,
+          expected: integrityResult.expectedHash,
+          actual: integrityResult.actualHash,
+        })
+      );
     }
 
     // Verify signature
@@ -301,6 +308,14 @@ export async function verifyDossier(input: string, options: VerifyOptions): Prom
         if (frontmatter.signature?.signed_by) {
           console.log(`   Signed by: ${frontmatter.signature.signed_by}`);
         }
+        printGuidance(
+          signatureFailureGuidance({
+            input,
+            error: signatureResult.message.startsWith('Verification error: ')
+              ? signatureResult.message.slice('Verification error: '.length)
+              : undefined,
+          })
+        );
       }
     } else {
       warning('No signature present (dossier is unsigned)');
