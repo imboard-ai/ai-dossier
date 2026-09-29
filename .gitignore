@@ -165,3 +165,8 @@ worktrees/
 .env*.local
 WARMUP-STATUS.md
 dist-binaries/
+
+# website (Astro) build output
+website/dist/
+website/.astro/
+website/node_modules/

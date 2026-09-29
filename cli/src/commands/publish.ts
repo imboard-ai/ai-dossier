@@ -451,7 +451,8 @@ export function registerPublishCommand(program: Command): void {
           );
 
           const verifyCommand = `dossier info ${fullPath}@${version}`;
-          const cdnDelaySeconds = 30;
+          // list/search read index.json via raw.githubusercontent.com, cached ~5 min.
+          const cdnDelaySeconds = 300;
 
           if (options.json) {
             console.log(
@@ -485,7 +486,7 @@ export function registerPublishCommand(program: Command): void {
               console.log(`   Evidence: ${result.evidence_url}`);
             }
             console.log(
-              `\n   ⏳ CDN propagation may take up to ${cdnDelaySeconds}s. Verify with:\n   $ ${verifyCommand}\n`
+              `\n   ⏳ CDN propagation: list, search and install-skill --all may lag up to ${cdnDelaySeconds / 60} min. Verify with:\n   $ ${verifyCommand}\n`
             );
           }
         } catch (err: unknown) {

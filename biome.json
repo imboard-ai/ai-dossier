@@ -6,7 +6,8 @@
     "useIgnoreFile": true
   },
   "files": {
-    "ignoreUnknown": false
+    "ignoreUnknown": false,
+    "includes": ["**", "!website/dist", "!website/.astro", "!website/node_modules", "!**/*.astro"]
   },
   "formatter": {
     "enabled": true,
@@ -39,7 +40,7 @@
       }
     },
     {
-      "includes": ["registry/**"],
+      "includes": ["registry/**", "website/**"],
       "linter": {
         "rules": {
           "suspicious": {
