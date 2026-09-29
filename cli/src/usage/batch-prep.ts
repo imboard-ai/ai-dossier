@@ -258,6 +258,18 @@ export interface BatchPrepTokens {
   split: boolean;
 }
 
+/** Time range a scan needs for the wanted batches (their windows; siblings share theirs). */
+export function prepScanRange(
+  windows: readonly PrepWindow[],
+  wanted: ReadonlySet<string> | null
+): { sinceMs: number; untilMs: number } {
+  const w = windows.filter((x) => !wanted || wanted.has(x.batch));
+  return {
+    sinceMs: Math.min(...w.map((x) => x.fromMs)),
+    untilMs: Math.max(...w.map((x) => x.toMs)) + 1,
+  };
+}
+
 /**
  * Prep tokens per batch id recorded in `schedDir`. A batch with no record on
  * this host is absent from the map (unknown, not zero); a recorded batch whose
@@ -298,10 +310,10 @@ export function batchPrepTokens(
   }
   // Only the wanted batches' windows (siblings share theirs) bound the scan — not every
   // prep record ever written, which would read the whole transcript history.
-  const wantedWindows = windows.filter((w) => !wanted || wanted.has(w.batch));
+  const range = prepScanRange(windows, wanted);
   const { rows } = collectLedger({
-    sinceMs: Math.min(...wantedWindows.map((w) => w.fromMs)),
-    untilMs: Math.max(...wantedWindows.map((w) => w.toMs)) + 1,
+    sinceMs: range.sinceMs,
+    untilMs: range.untilMs,
     paths,
   });
   for (const row of rows) {

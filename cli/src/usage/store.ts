@@ -362,6 +362,8 @@ export function buildBundle(
 
 export interface ImportResult extends MergeStats {
   hosts: string[];
+  /** The exporting host's own id (bundle header) — may differ from the ssh alias used to reach it. */
+  from: string | null;
   skipped: number;
   /** Records claiming this host — ignored: a host's own files come only from its own collection. */
   ignored_local: number;
@@ -385,6 +387,7 @@ export function importBundle(dir: string, text: string, localHost: string): Impo
     updated: 0,
     unchanged: 0,
     hosts: [],
+    from: parser.header?.host ?? null,
     skipped: parser.skipped,
     ignored_local: 0,
   };

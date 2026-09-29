@@ -6,8 +6,21 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
-import { buildWindowReport, renderWindowReport } from '../commands/usage';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  buildScopeReport,
+  buildWindowReport,
+  registerUsageCommand,
+  renderWindowReport,
+  usageCommandDeps,
+} from '../commands/usage';
+import {
+  applyPrepWindows,
+  batchPrepTokens,
+  prepScanRange,
+  prepWindows,
+  recordBatchPrep,
+} from '../usage/batch-prep';
 import {
   buildBundle,
   hostFile,
@@ -20,6 +33,7 @@ import {
 } from '../usage/store';
 import { refreshLocal, type SshRunner, syncWithRemotes } from '../usage/sync';
 import type { LimitEvent, UsageRow } from '../usage/types';
+import { createTestProgram } from './helpers/test-utils';
 
 const tmp: string[] = [];
 function tmpDir(): string {
@@ -364,3 +378,127 @@ describe('refreshLocal + merged report', () => {
     expect(view.rows[0].issue).toBe(3);
   });
 });
+
+describe('usage sync command wiring (fake ssh)', () => {
+  it('routes --hosts / --since / --no-push to the sync engine and pulls remote rows', async () => {
+    const home = tmpDir();
+    const saved = { ...process.env };
+    process.env.HOME = home;
+    process.env.CLAUDE_CONFIG_DIR = path.join(home, '.claude');
+    process.env.OPENCODE_DB = path.join(home, 'none.db');
+    process.env.DOSSIER_USAGE_DIR = path.join(home, 'usage');
+    process.env.DOSSIER_USAGE_HOST = 'wls';
+    const remoteDir = tmpDir();
+    persistLocal(remoteDir, 'hcc', [row({ host: 'hcc', session_id: 'sess-hcc' })], []);
+    const calls: string[] = [];
+    usageCommandDeps.ssh = (host, script) => {
+      calls.push(`${host}: ${script}`);
+      return { status: 0, stdout: buildBundle(remoteDir, 'hcc', null, 0).text, stderr: '' };
+    };
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const p = createTestProgram();
+      registerUsageCommand(p);
+      await p.parseAsync([
+        'node',
+        'dossier',
+        'usage',
+        'sync',
+        '--hosts',
+        'hcc',
+        '--no-push',
+        '--since',
+        '2026-09-01',
+      ]);
+      expect(calls).toHaveLength(1); // --no-push: pull only
+      expect(calls[0]).toContain('hcc: ');
+      expect(calls[0]).toContain("usage export --all --since '2026-09-01T00:00:00.000Z'");
+      expect(listHosts(path.join(home, 'usage'))).toEqual(['hcc', 'wls']);
+      expect(log.mock.calls.flat().join('\n')).toContain('hcc: pulled +1'.replace('+1', '1 new'));
+    } finally {
+      usageCommandDeps.ssh = undefined;
+      log.mockRestore();
+      process.env = saved;
+    }
+  });
+});
+
+describe('prep attribution agrees across views (#899)', () => {
+  it('usage --batch and batchPrepTokens give the same per-batch split; scan range ignores other batches', () => {
+    const home = tmpDir();
+    const projects = path.join(home, 'claude', 'projects', '-x');
+    fs.mkdirSync(projects, { recursive: true });
+    const S = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const lines = Array.from({ length: 16 }, (_, i) =>
+      JSON.stringify({
+        type: 'assistant',
+        sessionId: S,
+        timestamp: `2026-09-29T10:${String(i).padStart(2, '0')}:00.000Z`,
+        cwd: '/x',
+        message: {
+          id: `m${i}`,
+          model: 'claude-x',
+          role: 'assistant',
+          usage: {
+            input_tokens: 10 + i,
+            output_tokens: 5,
+            cache_read_input_tokens: 100,
+            cache_creation_input_tokens: 20,
+          },
+        },
+      })
+    );
+    fs.writeFileSync(path.join(projects, `${S}.jsonl`), `${lines.join('\n')}\n`);
+    const schedRoot = path.join(home, 'sched');
+    const schedDir = path.join(schedRoot, 'proj');
+    recordBatchPrep(
+      schedDir,
+      ['b-1', 'b-2'],
+      S,
+      'env',
+      new Date('2026-09-29T10:30:00Z'),
+      new Map([
+        ['b-1', 3],
+        ['b-2', 1],
+      ])
+    );
+    // an unrelated old batch far in the past must not widen b-1's scan
+    recordBatchPrep(schedDir, ['old'], 'zzzzzzzz-old', 'env', new Date('2026-01-01T00:00:00Z'));
+    const paths = {
+      claudeProjectsDir: path.join(home, 'claude', 'projects'),
+      opencodeDb: path.join(home, 'none.db'),
+      schedRoot,
+      runsLog: path.join(home, 'runs.jsonl'),
+    };
+    const stats = batchPrepTokens(schedDir, ['b-1', 'b-2'], paths);
+    for (const b of ['b-1', 'b-2']) {
+      const scope = buildScopeOf(b, paths, home);
+      expect(scope).toBe(stats.get(b)?.billable_tokens);
+    }
+    const w = prepWindows([
+      { ts: '2026-09-29T10:30:00Z', batch: 'b-1', session_id: S, source: 'env' },
+      { ts: '2026-01-01T00:00:00Z', batch: 'old', session_id: 'zzzzzzzz-old', source: 'env' },
+    ]);
+    expect(prepScanRange(w, new Set(['b-1'])).sinceMs).toBeGreaterThan(
+      Date.parse('2026-09-01T00:00:00Z')
+    );
+    void applyPrepWindows;
+  });
+});
+
+function buildScopeOf(
+  batch: string,
+  paths: Parameters<typeof buildWindowReport>[1] extends infer D
+    ? D extends { paths?: infer P }
+      ? NonNullable<P>
+      : never
+    : never,
+  home: string
+): number {
+  const dir = path.join(home, 'store');
+  const report = buildScopeReport(
+    { batch, since: '2026-09-01T00:00:00Z' },
+    { paths, nowMs: Date.parse('2026-09-29T12:00:00Z'), storeDir: dir, host: os.hostname() }
+  );
+  return report.totals.total;
+}

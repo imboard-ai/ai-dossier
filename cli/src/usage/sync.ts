@@ -27,6 +27,9 @@ import {
 } from './store';
 
 const DAY = 86_400_000;
+// Limit: `sync` re-collects only CURSOR_OVERLAP_MS before its cursor, so an attribution change
+// (dispatch/prep join) to a row older than that is not re-persisted or re-sent; run
+// `usage sync --since <older>` to force a wider refresh.
 /** First-ever sync looks this far back; later ones resume from the ledger's newest row. */
 export const DEFAULT_INITIAL_SYNC_MS = 30 * DAY;
 /** Re-collect this far before the cursor: recent rows' attribution (dispatch/prep) can be refined after the fact. */
@@ -214,7 +217,8 @@ export function syncWithRemotes(
     const bundle = buildBundle(
       dir,
       local,
-      listHosts(dir).filter((h) => h !== host),
+      // The alias and the host's self-reported id can differ (ssh config vs os.hostname()).
+      listHosts(dir).filter((h) => h !== host && h !== results.get(host)?.pulled?.from),
       since
     );
     res.pushed_rows = bundle.rows;

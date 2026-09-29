@@ -49,7 +49,11 @@ import {
   readHostFile,
   usageStoreDir,
 } from '../usage/store';
-import { refreshLocal, syncWithRemotes } from '../usage/sync';
+import { refreshLocal, type SshRunner, syncWithRemotes } from '../usage/sync';
+
+/** Test seam: replace the ssh transport used by `usage sync --hosts`. */
+export const usageCommandDeps: { ssh?: SshRunner } = {};
+
 import type { Ledger, UsageRow } from '../usage/types';
 
 const MS: Record<string, number> = {
@@ -651,7 +655,7 @@ function registerLedgerCommands(cmd: Command): void {
       const remotes = remoteHosts.length
         ? syncWithRemotes(
             { hosts: remoteHosts, sinceMs, push: opts.push, pull: opts.pull },
-            { nowMs }
+            { nowMs, ssh: usageCommandDeps.ssh }
           )
         : [];
       if (opts.json) {
