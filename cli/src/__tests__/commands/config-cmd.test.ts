@@ -175,4 +175,84 @@ describe('config command', () => {
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Added registry 'secure'"));
     });
   });
+
+  describe('registry add/remove by name', () => {
+    beforeEach(() => {
+      // The global afterEach restores spies but does not clear automock call history.
+      vi.mocked(config.saveConfig).mockClear();
+      vi.mocked(config.saveConfig).mockReturnValue(true);
+    });
+
+    function configWithRegistries(): config.DossierConfig {
+      return {
+        defaultLlm: 'auto',
+        theme: 'auto',
+        auditLog: true,
+        schedTelemetry: true,
+        registries: {
+          internal: { url: 'https://dossier.example.com' },
+          public: { url: 'https://dossier-registry.vercel.app' },
+        },
+        defaultRegistry: 'internal',
+      };
+    }
+
+    it('should store an added registry under its name and make it the default', async () => {
+      const program = createTestProgram();
+      registerConfigCommand(program);
+
+      await expect(
+        program.parseAsync([
+          'node',
+          'dossier',
+          'config',
+          '--add-registry',
+          'internal',
+          '--url',
+          'https://dossier.example.com',
+          '--default',
+        ])
+      ).rejects.toThrow('process.exit(0)');
+
+      const saved = vi.mocked(config.saveConfig).mock.lastCall?.[0];
+      expect(saved?.registries).toEqual({
+        internal: { url: 'https://dossier.example.com', default: true },
+      });
+      expect(saved?.defaultRegistry).toBe('internal');
+    });
+
+    it('should remove a registry and clear it as the default', async () => {
+      vi.mocked(config.loadConfig).mockReturnValue(configWithRegistries());
+      const program = createTestProgram();
+      registerConfigCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'config', '--remove-registry', 'internal'])
+      ).rejects.toThrow('process.exit(0)');
+
+      const saved = vi.mocked(config.saveConfig).mock.lastCall?.[0];
+      expect(saved?.registries).toEqual({
+        public: { url: 'https://dossier-registry.vercel.app' },
+      });
+      expect(saved).not.toHaveProperty('defaultRegistry');
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringContaining("Removed registry 'internal'")
+      );
+    });
+
+    it('should exit 1 without saving when the registry to remove is not configured', async () => {
+      vi.mocked(config.loadConfig).mockReturnValue(configWithRegistries());
+      const program = createTestProgram();
+      registerConfigCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'config', '--remove-registry', 'missing'])
+      ).rejects.toThrow('process.exit(1)');
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining("Registry 'missing' not found")
+      );
+      expect(config.saveConfig).not.toHaveBeenCalled();
+    });
+  });
 });

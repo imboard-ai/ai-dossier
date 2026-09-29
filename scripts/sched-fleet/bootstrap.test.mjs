@@ -49,6 +49,7 @@ function bootstrapBox(status = '{"queue":[],"failed":[]}\n') {
   executable(join(bin, 'curl'), '#!/bin/sh\nexit 0\n');
   executable(
     join(bin, 'ai-dossier'),
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: shell parameter expansion in a stub script, not a JS placeholder
     '#!/bin/sh\nif [ "$2" = "status" ]; then cat "$STATUS_FILE"; else if [ -n "${MANIFEST_CAPTURE:-}" ] && [ "$5" = "--from-manifest" ]; then cat "$6" > "$MANIFEST_CAPTURE"; fi; printf \'enqueue ok\\n\'; fi\n'
   );
   executable(
@@ -96,7 +97,7 @@ describe('bootstrap.sh', () => {
       '{"queue":[{"issue":496,"status":"failed"},{"issue":500,"status":"queued"}],"failed":[{"issue":496,"status":"failed"}]}\n'
     );
     const manifestCapture = join(box.home, 'manifest.json');
-    writeFileSync(box.cronFile, '0 4 1 9 * ' + box.fleet + '/bootstrap.sh\n');
+    writeFileSync(box.cronFile, `0 4 1 9 * ${box.fleet}/bootstrap.sh\n`);
 
     runBootstrap(box, { MANIFEST_CAPTURE: manifestCapture });
 

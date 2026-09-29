@@ -18,19 +18,32 @@ import type { DossierNode, ExecutionPlan, FromDossierDeclaration } from './types
 const MAX_JOURNEYS = 1000;
 const journeyOutputStore = new Map<string, Map<string, Map<string, unknown>>>();
 
-export function initJourneyOutputs(journeyId: string): void {
-  if (!journeyOutputStore.has(journeyId)) {
-    // Evict oldest entry if at capacity
-    if (journeyOutputStore.size >= MAX_JOURNEYS) {
-      const oldest = journeyOutputStore.keys().next().value!;
+/**
+ * Return a journey's output map, creating it (and evicting the oldest journey
+ * when the store is at capacity) if it does not exist yet.
+ */
+function ensureJourneyOutputs(journeyId: string): Map<string, Map<string, unknown>> {
+  const existing = journeyOutputStore.get(journeyId);
+  if (existing) return existing;
+
+  // Evict oldest entry if at capacity
+  if (journeyOutputStore.size >= MAX_JOURNEYS) {
+    const oldest = journeyOutputStore.keys().next().value;
+    if (oldest !== undefined) {
       journeyOutputStore.delete(oldest);
       logger.warn('Journey output store at capacity, evicted oldest entry', {
         evicted: oldest,
         maxJourneys: MAX_JOURNEYS,
       });
     }
-    journeyOutputStore.set(journeyId, new Map());
   }
+  const journey = new Map<string, Map<string, unknown>>();
+  journeyOutputStore.set(journeyId, journey);
+  return journey;
+}
+
+export function initJourneyOutputs(journeyId: string): void {
+  ensureJourneyOutputs(journeyId);
 }
 
 /**
@@ -41,10 +54,7 @@ export function collectOutputs(
   dossierName: string,
   outputs: Record<string, unknown>
 ): void {
-  if (!journeyOutputStore.has(journeyId)) {
-    initJourneyOutputs(journeyId);
-  }
-  const journey = journeyOutputStore.get(journeyId)!;
+  const journey = ensureJourneyOutputs(journeyId);
   const existing = journey.get(dossierName) ?? new Map<string, unknown>();
   for (const [key, value] of Object.entries(outputs)) {
     existing.set(key, value);
@@ -110,8 +120,9 @@ export function validateGraphMappings(
         continue;
       }
 
-      const consumerPhase = phaseOf.get(name)!;
-      if (sourcePhase >= consumerPhase) {
+      // A consumer absent from the plan has no phase to order against.
+      const consumerPhase = phaseOf.get(name);
+      if (consumerPhase !== undefined && sourcePhase >= consumerPhase) {
         warnings.push(
           `"${name}" (phase ${consumerPhase}) declares input "${decl.output_name}" from ` +
             `"${decl.source_dossier}" (phase ${sourcePhase}), ` +

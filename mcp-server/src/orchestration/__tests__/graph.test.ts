@@ -370,6 +370,18 @@ describe('buildExecutionPlan', () => {
     expect(() => buildExecutionPlan(graph, 'a')).toThrow(CycleError);
   });
 
+  it('should name the dossier when an edge targets one missing from the graph', () => {
+    // Not producible by buildGraph, which drops edges to unknown dossiers.
+    const graph = {
+      nodes: new Map<string, DossierNode>([makeNode('a')]),
+      edges: [{ from: 'a', to: 'ghost', condition: 'required' as const }],
+    };
+
+    expect(() => buildExecutionPlan(graph, 'a')).toThrow(
+      'Dossier "ghost" is referenced by a graph edge but missing from the graph'
+    );
+  });
+
   it('should include conflicts in the plan', () => {
     const nodes = new Map<string, DossierNode>([
       makeNode('mysql', {

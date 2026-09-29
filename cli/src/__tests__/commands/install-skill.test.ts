@@ -69,7 +69,7 @@ describe('install-skill command', () => {
   it('--list badges skills also present in opencode', async () => {
     // claude skill dir + opencode wrapper dir both exist; both contain 'my-skill'.
     mockedFs.existsSync.mockReturnValue(true);
-    mockedFs.readdirSync.mockImplementation(((p: any) => {
+    mockedFs.readdirSync.mockImplementation((() => {
       // Called for the claude skills dir and for the opencode skills dir.
       return [{ name: 'my-skill', isDirectory: () => true }] as any;
     }) as any);
