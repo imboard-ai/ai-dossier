@@ -6228,6 +6228,97 @@ describe('#844 item 1: a member slot release and its eviction commit in ONE writ
   }, 60_000);
 });
 
+describe('#864: blocked and wrong-procedure eviction rails commit their slot release atomically', () => {
+  it('a self-reported hand-back is parked with its slot released at the crash point and is not redispatched', async () => {
+    const repo = scratchRepo();
+    const id = 'b-864-blocked';
+    const h = batchHarness(repo, ['--mode=batch', '--evict-members=8641'], { maxSlots: 1 });
+    h.enqueue([
+      { issue: 8641, mode: 'slot', batch: id, anchor: 8640, tier: 'mid' },
+      { issue: 8642, mode: 'slot', batch: id, tier: 'mid' },
+    ]);
+    await tickUntil(h, id, (b) => b.status === 'executing' && batchSlotPid(h, id) !== undefined);
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, id) as number)).toBe(true);
+
+    const crash = crashAfterSlotRelease(h, `batch:${id}`);
+    expect(() => h.tick()).toThrow('#844 injected crash');
+    crash.restart();
+
+    expect(h.state().slots.some((s) => s.unit === `batch:${id}`)).toBe(false);
+    expect(h.state().entries.find((e) => e.issue === 8641)).toMatchObject({
+      status: 'handed-back',
+      reason: 'test-failures',
+    });
+
+    await tickUntil(h, id, (b) => b.status === 'awaiting-merge');
+    expect(memberDispatchCount(h, id, 1, 8641)).toBe(1);
+  }, 60_000);
+
+  it('a repeated wrong procedure after its re-prompt is evicted with its slot released and is not redispatched', async () => {
+    const repo = scratchRepo();
+    const id = 'b-864-wrong';
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--wrong-procedure-members=8643', '--wrong-procedure-always=1'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([
+      { issue: 8643, mode: 'slot', batch: id, anchor: 8640, tier: 'mid' },
+      { issue: 8644, mode: 'slot', batch: id, tier: 'mid' },
+    ]);
+    await tickUntil(
+      h,
+      id,
+      (b) =>
+        b.reprompted_members.some((member) => member.issue === 8643) &&
+        batchSlotPid(h, id) !== undefined
+    );
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, id) as number)).toBe(true);
+
+    const crash = crashAfterSlotRelease(h, `batch:${id}`);
+    expect(() => h.tick()).toThrow('#844 injected crash');
+    crash.restart();
+
+    expect(h.state().slots.some((s) => s.unit === `batch:${id}`)).toBe(false);
+    expect(h.state().entries.find((e) => e.issue === 8643)?.status).toBe('evicted');
+    expect(findBatch(h.state(), id)?.evictions.map((e) => [e.issue, e.reason])).toEqual([
+      [8643, 'wrong-procedure'],
+    ]);
+
+    await tickUntil(h, id, (b) => b.status === 'awaiting-merge');
+    expect(memberDispatchCount(h, id, 1, 8643)).toBe(2);
+  }, 60_000);
+
+  it('a wrong procedure that already shipped is evicted with its slot released and is not redispatched', async () => {
+    const repo = scratchRepo();
+    const id = 'b-864-shipped';
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--wrong-procedure-members=8645', '--wrong-procedure-shipped=8646'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([
+      { issue: 8645, mode: 'slot', batch: id, anchor: 8640, tier: 'mid' },
+      { issue: 8647, mode: 'slot', batch: id, tier: 'mid' },
+    ]);
+    await tickUntil(h, id, (b) => b.status === 'executing' && batchSlotPid(h, id) !== undefined);
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, id) as number)).toBe(true);
+
+    const crash = crashAfterSlotRelease(h, `batch:${id}`);
+    expect(() => h.tick()).toThrow('#844 injected crash');
+    crash.restart();
+
+    expect(h.state().slots.some((s) => s.unit === `batch:${id}`)).toBe(false);
+    expect(h.state().entries.find((e) => e.issue === 8645)?.status).toBe('evicted');
+    expect(findBatch(h.state(), id)?.evictions.map((e) => [e.issue, e.reason])).toEqual([
+      [8645, 'wrong-procedure-shipped'],
+    ]);
+
+    await tickUntil(h, id, (b) => b.status === 'awaiting-merge');
+    expect(memberDispatchCount(h, id, 1, 8645)).toBe(1);
+  }, 60_000);
+});
+
 describe('#844 item 1: crash recovery finishes what the eviction would have done', () => {
   it('serial: an eviction that tripped the dissolve threshold, then crashed before pass 2, dissolves on restart instead of advancing', async () => {
     const repo = scratchRepo();
