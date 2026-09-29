@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { analyzeDryRun, type DryRunPlan, LEVEL_HIGH_MIN } from '../dry-run';
+import fixtures from './dry-run-review-fixtures.json';
 
 /** A dossier that DECLARES itself low risk: observed behaviour alone must drive the level. */
 function lowRiskDossier(body: string, frontmatter: Record<string, unknown> = {}): string {
@@ -337,7 +338,7 @@ describe('#933 ReDoS: analysis stays linear on large hostile input', () => {
     arithmetic: '(( '.repeat(N / 3),
     pipes: 'a|'.repeat(N / 2),
     wrappers: 'sudo env nohup '.repeat(N / 15),
-    'sh -c nesting': 'sh -c "'.repeat(2000) + 'rm -rf ~' + '"'.repeat(2000),
+    'sh -c nesting': `${'sh -c "'.repeat(2000)}rm -rf ~${'"'.repeat(2000)}`,
     'sed s///e': `sed 's/${'a/'.repeat(N / 2)}'`,
     'one giant line': `echo ${'a'.repeat(N)}; rm -rf ~`,
   };
@@ -389,5 +390,42 @@ describe('#933 ReDoS: analysis stays linear on large hostile input', () => {
   it('padding cannot push a dangerous command out of view', () => {
     const plan = analyze('bash', `echo ${'a'.repeat(100_000)}; rm -rf ~`);
     expect(destructiveListed(plan, 'rm -rf ~')).toBe(true);
+  });
+});
+
+describe('#933 review round 2: independent adversarial probe suite', () => {
+  // Every case is dangerous and declared low: each must reach high (or be listed as not analysable).
+  for (const c of fixtures as Array<{ name: string; lang: string; code: string }>) {
+    it(c.name, () => {
+      const plan = analyze(c.lang, c.code);
+      expect(atLeastHigh(plan), `${c.code} scored ${plan.risk_score}`).toBe(true);
+    });
+  }
+
+  it('unknown is not safe: unresolvable command words are listed as not analysable', () => {
+    for (const code of [
+      '$X -rf ~',
+      'X=rm; $X -rf ~',
+      "$'\\x72m' -rf ~",
+      '{rm,-rf,~}',
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: literal shell text under test
+      'rm${IFS}-rf${IFS}~',
+    ]) {
+      const plan = analyze('bash', code);
+      expect(
+        plan.commands.some((c) => c.reason?.startsWith('not analysable')),
+        code
+      ).toBe(true);
+      expect(plan.level).not.toBe('low');
+    }
+  });
+
+  it('does not flag quoted variables that are only arguments, [[ ]] tests or array appends', () => {
+    const plan = analyze(
+      'bash',
+      'gh issue view "$N"\n[[ -n "$A" && "$B" == "$A"* ]] && F=1 || F=0\narr+=("$N")\nls "$DIR"'
+    );
+    expect(plan.commands.some((c) => c.reason?.startsWith('not analysable'))).toBe(false);
+    expect(plan.level).toBe('low');
   });
 });

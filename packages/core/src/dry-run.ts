@@ -477,12 +477,28 @@ function unwrapAll(tokens: string[]): string[] {
 function stdinTargetOf(tokensIn: string[]): ExecTarget | null {
   const tokens = unwrapAll(tokensIn);
   if (tokens.length === 0) return null;
-  const ik = interpKind(tokens[0].replace(/^.*\//, ''));
-  if (!ik || ik === 'other') return null;
-  const args = tokens.slice(1);
-  if (args.some((a) => CODE_FLAG[ik].test(a))) return null;
-  if (args.includes('-s') || args.includes('-')) return ik;
-  return args.every((a) => a.startsWith('-')) ? ik : null;
+  const first = tokens[0].replace(/^.*\//, '');
+  if ((first === 'source' || first === '.') && tokens[1] === '/dev/stdin') return 'shell';
+  const ik = interpKind(first);
+  if (!ik) return null;
+  const target: ExecTarget = ik === 'other' ? 'shell' : ik;
+  const args: string[] = [];
+  for (let i = 1; i < tokens.length; i++) {
+    // Redirections (`< file`, `> out`, `2>&1`) are not arguments.
+    if (/^\d*[<>]/.test(tokens[i])) {
+      if (/^\d*[<>]+$/.test(tokens[i])) i++;
+      continue;
+    }
+    args.push(tokens[i]);
+  }
+  const codeIdx = args.findIndex((a) => CODE_FLAG[ik].test(a));
+  if (codeIdx >= 0) {
+    // `pwsh -Command -`, or `xargs sh -c` (the wrapper supplies the code): the program comes from stdin.
+    return args[codeIdx + 1] === undefined || args[codeIdx + 1] === '-' ? target : null;
+  }
+  if (args.some((a) => a === '-s' || a === '-' || a === '/dev/stdin' || a === '/proc/self/fd/0'))
+    return target;
+  return args.every((a) => a.startsWith('-')) ? target : null;
 }
 
 /** What a heredoc/pipe fed into this command line ends up executing, if anything. */
@@ -494,6 +510,13 @@ function execTargetOf(cmdText: string): ExecTarget | null {
   if (direct) return direct;
   if (SQL_CLIENTS.has(exe)) return 'sql';
   if (exe === 'ssh') return 'shell';
+  if (
+    /^(?:g?make|gmake)$/.test(exe) &&
+    tokens.some(
+      (t, i) => i > 0 && (t === '/dev/stdin' || t === '-') && /^-\w*f$|^--file$/.test(tokens[i - 1])
+    )
+  )
+    return 'shell';
   if (EXEC_HOSTS.has(exe)) {
     for (const t of tokens.slice(1)) {
       const ik = interpKind(t.replace(/^.*\//, ''));
@@ -559,7 +582,7 @@ function logicalLines(fence: Fence): Logical[] {
     }
     accCount++;
     if (/\\\s*$/.test(raw)) {
-      acc += `${raw.replace(/\\\s*$/, '')} `;
+      acc += raw.replace(/\\\s*$/, '');
       continue;
     }
     const joined = acc + raw;
@@ -632,13 +655,28 @@ interface Segment {
 }
 
 /** Split a shell line into simple commands on `&&`, `||`, `;`, `|`, `&`, `$(`, backticks, parens (quote-aware). */
+/** Blank `[[ ... ]]` test expressions: `&&` / `||` / `<` inside them are operators, not command separators. */
+function blankTests(s: string): string {
+  let out = s;
+  let from = 0;
+  for (let n = 0; n < 200; n++) {
+    const open = out.indexOf('[[', from);
+    if (open < 0) break;
+    const close = out.indexOf(']]', open + 2);
+    if (close < 0) break;
+    out = out.slice(0, open + 2) + ' '.repeat(close - open - 2) + out.slice(close);
+    from = close + 2;
+  }
+  return out;
+}
+
 function splitSegments(line: string): Segment[] {
-  const masked = maskQuotes(line);
+  const masked = blankTests(maskQuotes(line));
   const out: Segment[] = [];
   let last = 0;
   let sep = '';
   let group = 0;
-  const re = /&&|\|\||\|&|\||;|(?<![<>&\d])&(?![>&\d-])|\$\(|`|\(|\)/g;
+  const re = /&&|\|\||\|&|\||;|(?<![<>&\d])&(?![>&\d-])|\$\(|`|(?<!=)\(|\)/g;
   const push = (end: number) => {
     const text = line.slice(last, end).trim();
     if (text) out.push({ text, sep, group });
@@ -741,7 +779,18 @@ const SHELL_KEYWORDS = new Set([
   '!',
 ]);
 /** Keywords that introduce a command on the same segment (`then rm -rf ~`, `do rm $f`). */
-const LEADING_KEYWORDS = new Set(['then', 'do', 'else', 'elif', 'if', 'while', 'until', '!', '{']);
+const LEADING_KEYWORDS = new Set([
+  'then',
+  'do',
+  'else',
+  'elif',
+  'if',
+  'while',
+  'until',
+  '!',
+  '{',
+  'coproc',
+]);
 
 const READ_ONLY = new Set([
   'ls',
@@ -989,6 +1038,10 @@ interface Classified {
   stdinTarget: ExecTarget | null;
   /** Script file this command executes, if any. */
   execFile?: string;
+  /** Set when the analyzer cannot resolve what this command runs (unknown is not safe). */
+  opaque?: string;
+  /** Target of an input redirect (`sh < file`). */
+  inputFile?: string;
 }
 
 function nonFlags(tokens: string[]): string[] {
@@ -1041,6 +1094,10 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
   let network: Classified['network'];
   let reason: string | undefined;
   let execFile: string | undefined;
+  let opaque: string | undefined;
+  const opq = (why: string) => {
+    opaque ??= why;
+  };
 
   const bump = (k: DryRunKind) => {
     const order: DryRunKind[] = ['read', 'local_write', 'remote', 'destructive'];
@@ -1068,9 +1125,35 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
     rm = redir.exec(masked);
   }
 
-  for (const a of args) {
+  // Command word we cannot resolve statically: `$X -rf ~`, `${X}`, `$'\x72m'`, `{rm,-rf,~}`, `rm${IFS}-rf`.
+  if (/^\$|^\{[^}]*,/.test(inner[0]) || /\$\{?IFS\b/.test(cmd)) {
+    opq('command name comes from an expansion (variable, ANSI-C quote, brace expansion or $IFS)');
+  }
+  const inRedir = /(?:^|[^<>&\d])<\s*([^\s|&;<>()]+)/.exec(masked);
+  const inputFile = inRedir
+    ? rawLine.slice(
+        inRedir.index + inRedir[0].length - inRedir[1].length,
+        inRedir.index + inRedir[0].length
+      )
+    : undefined;
+
+  for (let ai = 0; ai < args.length; ai++) {
+    const a = args[ai];
     const m = CMD_VALUED_OPTION.exec(a);
     if (m) nested.push({ text: m[1].replace(/^exec=/, ''), lang: 'shell' });
+    else if (
+      /^--(?:to-command|checkpoint-action|use-compress-program|upload-pack|receive-pack|rsh|ssh-command|editor|pager|exec)$/.test(
+        a
+      ) ||
+      (exe === 'rsync' && a === '-e')
+    ) {
+      if (args[ai + 1]) nested.push({ text: args[ai + 1].replace(/^exec=/, ''), lang: 'shell' });
+    } else if (exe === 'ssh' || exe === 'scp' || exe === 'sftp') {
+      const om = /^-o(?:\s*(.*))?$/.exec(a);
+      const val = om ? om[1] || args[ai + 1] || '' : '';
+      const pm = /^(?:ProxyCommand|LocalCommand)\s*[= ]\s*(.+)$/i.exec(val);
+      if (pm) nested.push({ text: pm[1], lang: 'shell' });
+    }
   }
 
   const nestedFrom = (text: string, lang: ExecTarget = 'shell') => {
@@ -1088,7 +1171,6 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
     if (start >= 0) nestedFrom(args.slice(start).join(' '));
   };
 
-  let interpNested = false;
   switch (exe) {
     case 'rm':
     case 'rmdir':
@@ -1155,6 +1237,11 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
         bump('local_write');
       }
       for (const a of args) {
+        const em = /(?:^|;)\s*(?:\d+|\$)?\s*e\s+(\S.*)$/.exec(a.slice(0, 2000));
+        if (em) {
+          nestedFrom(em[1]);
+          bump('local_write');
+        }
         const m = /(?:^|;)\s*s(.)(?:(?!\1).){0,500}\1((?:(?!\1).){0,500})\1[gpiImM0-9]*e/.exec(
           a.slice(0, 2000)
         );
@@ -1177,7 +1264,10 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
       for (const m of prog.matchAll(
         /\|\s*"((?:[^"\\]|\\.)*)"|"((?:[^"\\]|\\.)*)"\s*\|\s*getline/g
       )) {
-        nestedFrom((m[1] ?? m[2]).replace(/\\(.)/g, '$1'));
+        const target = (m[1] ?? m[2]).replace(/\\(.)/g, '$1');
+        nestedFrom(target);
+        if (interpKind(target.trim().split(/\s+/)[0]) === 'shell')
+          opq('awk output is piped into a shell');
         found = true;
       }
       if (found || /\bsystem\s*\(|\|\s*getline|print[^;}]*\|\s*[^;}\s]/.test(prog))
@@ -1188,13 +1278,18 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
       const code = args.join(' ');
       nestedFrom(code);
       bump('local_write');
+      if (/\$|`/.test(code)) opq('eval of a string built from expansions');
       if (FETCH_SUBST.test(code)) destructive(REMOTE_EXEC_REASON);
       break;
     }
+    case 'alias':
+      if (args.some((a) => a.includes('='))) opq('alias definition (later use is not tracked)');
+      break;
     case 'source':
     case '.':
       bump('local_write');
       if (args[0]) execFile = args[0];
+      if (args[0] && /[$`<]/.test(args[0])) opq('sourced path is not a literal');
       break;
     case 'trap': {
       const action = nonFlags(args)[0];
@@ -1228,6 +1323,7 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
             a[1]
           );
           if (m) nestedFrom(m[1].replace(/^!/, ''));
+          if (/^core\.hooksPath=/i.test(a[1])) opq('git hooksPath runs arbitrary hooks');
         }
         a = ['-C', '-c', '--git-dir', '--work-tree', '--namespace'].includes(a[0])
           ? a.slice(2)
@@ -1327,12 +1423,29 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
       const mutates = (method !== '' && method !== 'GET' && method !== 'HEAD') || hasBody;
       network = { tool: exe, target: hostOf(url) ?? (url || 'unknown host'), mutates };
       bump(method === 'DELETE' ? 'destructive' : 'remote');
-      const oi = args.findIndex(
-        (x) => x === '-o' || x === '--output' || x === '-O' || x === '--output-document'
+      const oi = args.findIndex((x) =>
+        exe === 'curl' ? x === '-o' || x === '--output' : x === '-O' || x === '--output-document'
       );
       if (oi >= 0 && args[oi + 1] && args[oi + 1] !== '-') {
         files.push({ path: args[oi + 1], operation: 'write' });
         bump('remote');
+      } else if (
+        url &&
+        (exe === 'wget'
+          ? oi < 0
+          : args.some(
+              (x) => x === '-O' || x === '--remote-name' || /^-[A-Za-z]*O[A-Za-z]*$/.test(x)
+            ))
+      ) {
+        // `wget URL` / `curl -O URL` save under the URL's last path segment.
+        const name = url
+          .replace(/[?#].*$/, '')
+          .replace(/\/+$/, '')
+          .replace(/^.*\//, '');
+        if (name && !/^[a-z][a-z0-9+.-]*:$/i.test(name)) {
+          files.push({ path: name, operation: 'write' });
+          bump('remote');
+        }
       }
       break;
     }
@@ -1342,7 +1455,6 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
         bump('local_write');
         const codeIdx = args.findIndex((x) => CODE_FLAG[ik].test(x));
         if (codeIdx >= 0 && args[codeIdx + 1] !== undefined) {
-          interpNested = true;
           if (ik === 'powershell') {
             if (/^-(?:e|enc|encodedcommand)$/i.test(args[codeIdx]))
               destructive('encoded PowerShell command (opaque payload)');
@@ -1351,6 +1463,10 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
             const code = args[codeIdx + 1];
             nestedFrom(code, ik);
             if (FETCH_SUBST.test(code)) destructive(REMOTE_EXEC_REASON);
+            if (ik === 'shell' && /^\s*["']?\$\{?\w/.test(code))
+              opq('script string comes from a variable');
+          } else {
+            opq(`${exe} script string is not analysed`);
           }
         } else {
           const script = args.find((x) => !x.startsWith('-') && x !== '-');
@@ -1386,8 +1502,12 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
           else nestedAfterHost();
         }
       } else if (PACKAGE_MANAGERS.has(exe)) {
-        const sub = nonFlags(args)[0] ?? '';
-        if (sub === 'publish' || sub === 'unpublish') {
+        const words = nonFlags(args);
+        const pub = ['run', 'run-script', 'exec', 'test'].includes(words[0] ?? '')
+          ? undefined
+          : words.slice(0, 3).find((w) => w === 'publish' || w === 'unpublish');
+        const sub = pub ?? words[0] ?? '';
+        if (pub) {
           network = { tool: exe, target: sub, mutates: true };
           destructive();
         } else if (
@@ -1401,6 +1521,13 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
         } else {
           bump('local_write');
         }
+      } else if (
+        (exe === 'twine' && args.includes('upload')) ||
+        (exe === 'gem' && args.includes('push')) ||
+        (['poetry', 'uv', 'flit', 'hatch'].includes(exe) && args.includes('publish'))
+      ) {
+        network = { tool: exe, target: 'publish', mutates: true };
+        destructive();
       } else if (exe === 'docker' || exe === 'podman' || exe === 'docker-compose') {
         const sub = nonFlags(args)[0] ?? '';
         if (sub === 'push' || sub === 'pull' || sub === 'login') {
@@ -1421,7 +1548,8 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
         const sub = nonFlags(args)[0] ?? '';
         if (sub === 'publish' || sub === 'login') {
           network = { tool: exe, target: sub, mutates: sub === 'publish' };
-          bump('remote');
+          if (sub === 'publish') destructive();
+          else bump('remote');
         } else if (sub === 'run' || sub === 'pull' || sub === 'get') {
           network = { tool: exe, target: sub, mutates: false };
           bump('remote');
@@ -1448,7 +1576,7 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
     const text = inner[hs].length > 3 ? inner[hs].slice(3) : (inner[hs + 1] ?? '');
     if (target && text) nested.push({ text, lang: target });
   }
-  const stdinTarget = interpNested ? null : stdinTargetOf(inner);
+  const stdinTarget = stdinTargetOf(inner);
   return {
     kind,
     recognized,
@@ -1459,6 +1587,8 @@ function classifyCommand(cmd: string, rawLine: string): Classified | null {
     inner,
     stdinTarget,
     execFile,
+    opaque,
+    inputFile,
   };
 }
 
@@ -1546,7 +1676,9 @@ const normPath = (p: string) => p.replace(/^\.\//, '');
 const isFetch = (c: Classified | null): boolean =>
   !!c &&
   (FETCH_TOOLS.has(c.inner[0]?.replace(/^.*\//, '') ?? '') ||
-    (c.inner[0] === 'gh' && c.inner[1] === 'api'));
+    (c.inner[0] === 'gh' && c.inner[1] === 'api') ||
+    (interpKind(c.inner[0]?.replace(/^.*\//, '') ?? '') !== null &&
+      /urlopen|requests\.|urllib|fetch\s*\(|https?:\/\//.test(c.inner.slice(1).join(' '))));
 
 function isDecoder(c: Classified | null): boolean {
   if (!c) return false;
@@ -1642,9 +1774,13 @@ function analyzeShellText(clean: string, line: number, ctx: Ctx, depth: number) 
     }
     if (!c) return;
     // Unknown words after a pipe are almost always prose (`a|b|c` alternatives), not tools.
-    if (i > 0 && !c.recognized && c.files.length === 0) return;
+    if (i > 0 && !c.recognized && c.files.length === 0 && !c.opaque) return;
     let kind = c.kind;
     let reason = c.reason;
+    if (c.opaque) {
+      kind = 'destructive';
+      reason ??= `not analysable: ${c.opaque}`;
+    }
     const remoteExec = (why: string) => {
       kind = 'destructive';
       reason ??= why;
@@ -1679,7 +1815,11 @@ function analyzeShellText(clean: string, line: number, ctx: Ctx, depth: number) 
       remoteExec('remote code execution: fetched content is executed');
     }
 
-    if (isFetch(c)) for (const f of c.files) ctx.downloaded.add(normPath(f.path));
+    if (isFetch(c) || (prev.fetch && c.inner[0] === 'tee'))
+      for (const f of c.files) ctx.downloaded.add(normPath(f.path));
+    if (c.stdinTarget && c.inputFile && ctx.downloaded.has(normPath(c.inputFile))) {
+      remoteExec('executes a file that was downloaded earlier in the dossier');
+    }
     if (c.execFile && ctx.downloaded.has(normPath(c.execFile))) {
       remoteExec('executes a file that was downloaded earlier in the dossier');
     }

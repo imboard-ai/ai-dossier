@@ -68,6 +68,7 @@ describe('buildPlanFile', () => {
       [
         'commands',
         'declared',
+        'declared_vs_observed',
         'disclaimer',
         'dossier',
         'env',
@@ -79,6 +80,7 @@ describe('buildPlanFile', () => {
         'schema_version',
         'score_breakdown',
         'static_preview',
+        'unanalyzed_fences',
       ].sort()
     );
     expect(JSON.parse(JSON.stringify(file)).static_preview).toBe(true);

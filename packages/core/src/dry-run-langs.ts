@@ -75,7 +75,7 @@ const PY_EVAL = /\b(?:exec|eval)\s*\(/;
 const JS_EXEC =
   /(?<![\w.$])(?:execSync|execFileSync|spawnSync|spawn|execFile|exec|fork)\s*\(|\.(?:execSync|execFileSync|spawnSync|spawn|execFile)\s*\(|\b(?:child_process|childProcess|cp)\.exec\s*\(|\bBun\.(?:spawn|spawnSync)\s*\(|\bDeno\.Command\s*\(|\bexeca(?:Sync|Command|CommandSync)?\s*\(|(?<![\w$])\$\s*`|\bshell(?:js)?\.exec\s*\(|\bBun\.\$\s*`/g;
 const JS_DELETE =
-  /\b(?:fs|fsp|promises|fse|fsExtra)\.(?:rmSync|rmdirSync|unlinkSync|rm|rmdir|unlink|remove|removeSync|emptyDir|emptyDirSync)\s*\(|(?<![\w.$])(?:rmSync|unlinkSync|rmdirSync|rimraf|rimrafSync)\s*\(|\brimraf(?:\.sync)?\s*\(|\bDeno\.remove(?:Sync)?\s*\(/g;
+  /\b(?:fs|fsp|promises|fse|fsExtra)\.(?:rmSync|rmdirSync|unlinkSync|rm|rmdir|unlink|remove|removeSync|emptyDir|emptyDirSync)\s*\(|(?<![\w.$])(?:rmSync|unlinkSync|rmdirSync|rimraf|rimrafSync)\s*\(|\.(?:rmSync|unlinkSync|rmdirSync)\s*\(|\brimraf(?:\.sync)?\s*\(|\bDeno\.remove(?:Sync)?\s*\(/g;
 const JS_WRITE =
   /\b(?:fs|fsp|promises|fse|fsExtra)\.(?:writeFile|writeFileSync|appendFile|appendFileSync|mkdir|mkdirSync|copyFile|copyFileSync|rename|renameSync|cp|cpSync|createWriteStream|chmod|chmodSync|outputFile|outputFileSync)\s*\(|\bDeno\.writeTextFile(?:Sync)?\s*\(|\bBun\.write\s*\(/g;
 const JS_NET =
