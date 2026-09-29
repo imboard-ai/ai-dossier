@@ -242,10 +242,8 @@ describe('preserveWork security and robustness (#945 review)', () => {
     expect(filesIn(work.sha)).not.toContain('big.bin');
     expect(work.skipped.large).toBe(1);
     const many = Array.from({ length: 510 }, (_, i) => `f${String(i).padStart(4, '0')}.txt`);
-    const sel = selectRescuableUntracked(
-      wt,
-      many.map((f) => (fs.writeFileSync(path.join(wt, f), 'x'), f))
-    );
+    for (const f of many) fs.writeFileSync(path.join(wt, f), 'x');
+    const sel = selectRescuableUntracked(wt, many);
     expect(sel.allowed).toHaveLength(500);
     expect(sel.skipped.over_limit).toBe(10);
   });
