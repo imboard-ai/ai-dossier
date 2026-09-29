@@ -392,6 +392,49 @@ describe('composeBatch', () => {
       const r = composeBatch(picks, OPTS);
       expect(r.members).toHaveLength(6);
       expect(r.members.some((m) => m.source === 'backfill')).toBe(false);
+      expect(r.held).toEqual([expect.objectContaining({ issue: 3, reason: 'review-full-cap' })]);
+    });
+
+    it('under-min: says the held pick was admissible and that backfill ran dry', () => {
+      const r = composeBatch(
+        [
+          assessed(1, { review: 'full' }),
+          assessed(2, { review: 'full' }),
+          assessed(3, { review: 'full' }),
+        ],
+        OPTS
+      );
+      expect(r.status).toBe('under-min');
+      expect(r.recommendation).toBe(
+        'Only 2 member(s) fit (1 admissible pick(s) held over the caps), below min_members=3 — backfill ran dry; widen the backlog query or accept a small batch. Held for the next batch-prep run: #3 (review-full-cap).'
+      );
+    });
+
+    it('no-batch: a cap-held pick is offered to full-cycle too, not only deferred', () => {
+      const r = composeBatch([assessed(1, { review: 'full' }), assessed(2, { review: 'full' })], {
+        ...OPTS,
+        maxFullReview: 1,
+      });
+      expect(r.status).toBe('no-batch');
+      expect(r.recommendation).toContain('run #1 as a full-cycle issue');
+      expect(r.recommendation).toContain('#2 (review-full-cap)');
+      expect(r.recommendation).toContain('take them through full-cycle');
+    });
+
+    it('--max-full-review 0 says review=full is disabled, not that higher-ranked members took it', () => {
+      const r = composeBatch([assessed(1, { review: 'full' }), assessed(2), assessed(3)], {
+        ...OPTS,
+        maxFullReview: 0,
+      });
+      expect(r.held[0]?.note).toContain('review=full members are disabled (--max-full-review 0)');
+    });
+
+    it('backlog-only holds read "stays in the backlog", not "submit again"', () => {
+      const backlog = [1, 2, 3].map((n) => assessed(n, { source: 'backlog' }));
+      const r = composeBatch(backlog, { ...OPTS, picksMode: false, maxMembers: 2, minMembers: 2 });
+      expect(r.held[0]?.note).toContain('stays in the backlog');
+      expect(r.held[0]?.note).not.toContain('submit');
+      expect(r.recommendation).not.toContain('Held');
     });
 
     it('a held pick carries its review reasons, a next-run note, and is named in the recommendation', () => {
