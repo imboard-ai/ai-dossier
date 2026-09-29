@@ -22,6 +22,7 @@ import { describe, expect, it } from 'vitest';
 import {
   batchAnchorStillOpen,
   classifyOrphanAnchor,
+  type IssueCloseReader,
   membersShippedVerdict,
   type OpenAnchorIssue,
   ORPHAN_SWEEP_MAX_ANCHORS,
