@@ -190,7 +190,8 @@ describe('refresh-fleet.sh', () => {
     expect(res.status).toBe(0);
     expect(res.out).toContain('WARN skill collision imboard-ai/qa/qa-sheet-triage-skill');
     expect(res.out).toContain('1 collision(s) need manual attention');
-    expect(res.out).toContain('ok (skill collisions)');
+    expect(res.out).toContain('+skill-collisions');
+    expect(res.out).toContain('1 host(s) have skill collisions');
     expect(calls(box).some((c) => /--force/.test(c) && c.startsWith('install-skill'))).toBe(false);
   });
 
@@ -200,5 +201,81 @@ describe('refresh-fleet.sh', () => {
 
     expect(res.status).not.toBe(0);
     expect(res.out).toContain('no parseable JSON output');
+  });
+  it('fails when the CLI reports a registry listing failure', () => {
+    const box = fixture(undefined);
+    const res = runRefreshRaw(box, [], {
+      STUB_SKILL_JSON: JSON.stringify({ success: false, error: 'Could not list registry: boom' }),
+      STUB_SKILL_RC: '1',
+    });
+
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain(
+      'FAIL install-skill --all --owner imboard-ai — Could not list registry: boom'
+    );
+  });
+
+  it('fails when zero skills were installed, skipped or refused', () => {
+    const box = fixture(undefined);
+    const res = runRefreshRaw(box, [], {
+      STUB_SKILL_JSON: skillJson({ ok: 0, skipped: 0, failed: 0, collisions: 0 }),
+    });
+
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain('registry listed no skills');
+  });
+
+  it('does not excuse a non-1 exit code because collision rows exist', () => {
+    const box = fixture(undefined);
+    const json = skillJson({ ok: 1, skipped: 0, failed: 0, collisions: 1 }, [
+      { name: 'imboard-ai/qa/x-skill', status: 'collision', message: 'basename collides' },
+    ]);
+    const res = runRefreshRaw(box, [], { STUB_SKILL_JSON: json, STUB_SKILL_RC: '255' });
+
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain('exit 255, no failing rows reported');
+  });
+
+  it('parses pretty-printed JSON surrounded by stderr noise', () => {
+    const box = fixture(undefined);
+    const json = JSON.stringify(
+      { success: true, summary: { ok: 1, skipped: 0, failed: 0, collisions: 0 }, results: [] },
+      null,
+      2
+    );
+    const res = runRefreshRaw(box, [], {
+      STUB_SKILL_JSON: `warning: registry slow\n${json}\n(node:1) trailing warning`,
+    });
+
+    expect(res.status).toBe(0);
+    expect(res.out).toContain('ok   install-skill --all --owner imboard-ai (ok=1');
+  });
+
+  it('neutralizes control characters and newlines in remote-provided messages', () => {
+    const box = fixture(undefined);
+    const json = skillJson({ ok: 0, skipped: 0, failed: 1, collisions: 0 }, [
+      {
+        name: 'imboard-ai/skills/evil-skill',
+        status: 'failed',
+        message: 'x\u001b[2K\nCOLLISION fake — y',
+      },
+    ]);
+    const res = runRefreshRaw(box, [], { STUB_SKILL_JSON: json, STUB_SKILL_RC: '1' });
+
+    expect(res.status).not.toBe(0);
+    expect(res.out).not.toContain('\u001b');
+    expect(res.out).not.toContain('WARN skill collision fake');
+    expect(res.out).toContain(
+      'FAIL skill imboard-ai/skills/evil-skill — x?[2K / COLLISION fake — y'
+    );
+  });
+
+  it('prints the whole usage header for --help', () => {
+    const box = fixture(undefined);
+    const res = runRefreshRaw(box, ['--help']);
+
+    expect(res.status).toBe(0);
+    expect(res.out).toContain('--profile-projects');
+    expect(res.out).toContain('deliberately NOT passed');
   });
 });
