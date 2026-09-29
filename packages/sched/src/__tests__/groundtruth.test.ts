@@ -7,6 +7,7 @@ import {
   type GroundTruthMilestone,
   groundTruthExec,
   isBatchPhaseDone,
+  isBatchTailParked,
   isMemberBlocked,
   isMemberComplete,
   isParkedMilestone,
@@ -861,6 +862,22 @@ describe('createExecGroundTruth.mergedPrForBranch (#789)', () => {
 
 // --- #468: PR state, setup info, park detection ---
 
+describe('parsePrViewJson autoMergeRequest (#874/#887)', () => {
+  const pr = (extra: Record<string, unknown>) =>
+    JSON.stringify({ state: 'OPEN', mergedAt: null, mergeable: 'MERGEABLE', labels: [], ...extra });
+  it('a non-null autoMergeRequest object is a request', () => {
+    expect(
+      parsePrViewJson(
+        pr({ autoMergeRequest: { enabledAt: '2026-09-29T00:00:00Z', mergeMethod: 'SQUASH' } })
+      )?.autoMergeRequested
+    ).toBe(true);
+  });
+  it('null is a positive "no request"; an absent field is unknown', () => {
+    expect(parsePrViewJson(pr({ autoMergeRequest: null }))?.autoMergeRequested).toBe(false);
+    expect(parsePrViewJson(pr({}))?.autoMergeRequested).toBeUndefined();
+  });
+});
+
 describe('parsePrViewJson (#468 AC1)', () => {
   it('parses the gh pr view --json shape', () => {
     const stdout = JSON.stringify({
@@ -917,6 +934,21 @@ describe('isParkedMilestone (#468 park detection)', () => {
     run: 'r',
     at: '2026-08-29T12:00:00Z',
     keys,
+  });
+
+  it('an ATTACHED ship awaiting-merge is not a park (#887): the run is still merging', () => {
+    expect(
+      isParkedMilestone(milestone('ship', 'awaiting-merge', { pr: '55', ship_mode: 'attached' }))
+    ).toBe(false);
+    expect(
+      isParkedMilestone(milestone('ship', 'awaiting-merge', { pr: '55', ship_mode: 'detached' }))
+    ).toBe(true);
+    expect(
+      isBatchTailParked(
+        milestone('batch-ship', 'awaiting-merge', { pr: '55', ship_mode: 'attached' })
+      )
+    ).toBe(false);
+    expect(isBatchTailParked(milestone('batch-ship', 'awaiting-merge', { pr: '55' }))).toBe(true);
   });
 
   it('only ship/awaiting-merge milestones carrying pr= are parks', () => {

@@ -64,15 +64,32 @@ export function parseRepoMergeSettings(
   }
 }
 
+/** What one workflow file says about merging PRs carrying the `auto-merge` label. */
+export type WorkflowWatcherVerdict = 'watcher' | 'unknown' | 'none';
+
+/** The label as a whole token — never `auto-merge-blocked` or `dependabot-auto-merge`. */
+const AUTO_MERGE_LABEL_RE = /(?<![\w-])auto-merge(?![\w-])/;
+
+/** A step that actually merges (a text heuristic — the watcher's exact shape is the repo's business). */
+const MERGE_ACTION_RE =
+  /gh\s+pr\s+merge|pulls\.merge|merge_method|mergePullRequest|enablePullRequestAutoMerge|--auto\b/;
+
+/** A reusable workflow from ANOTHER repo (`uses: org/repo/.github/workflows/x.yml@ref`) — opaque to a text scan. */
+const REMOTE_WORKFLOW_RE = /uses:\s*['"]?(?!\.\/)[\w.-]+\/[\w.-]+\/\.github\/workflows\//;
+
 /**
- * Whether a workflow file's text is a merge watcher for the `auto-merge` label:
- * it mentions the label and is triggered by pull-request activity. Deliberately a
- * text heuristic — the watcher's exact shape is the repo's business — so it errs
- * toward "is a watcher" (a false `true` only keeps today's park behaviour; the
- * `none` verdict, which changes behaviour, needs EVERY workflow to miss).
+ * Classify one workflow file (#887): `watcher` when the label token AND a merge
+ * action both appear; `unknown` when the file cannot be judged from text — it
+ * names the label without a merge action here, or delegates to a remote reusable
+ * workflow; otherwise `none`. `unknown` exists because a wrong `none` fails a unit
+ * that would have merged, while a wrong `unknown` only keeps the safe attached ship.
+ * Triggers are deliberately not inspected: a cron sweeper, `check_suite`/`status`/
+ * `merge_group` watcher and a `pull_request` one are all the same watcher.
  */
-export function workflowActsOnAutoMergeLabel(text: string): boolean {
-  return /['"`]?auto-merge['"`]?/.test(text) && /pull_request|labeled|workflow_run/.test(text);
+export function classifyWorkflowText(text: string): WorkflowWatcherVerdict {
+  if (REMOTE_WORKFLOW_RE.test(text)) return 'unknown';
+  if (!AUTO_MERGE_LABEL_RE.test(text)) return 'none';
+  return MERGE_ACTION_RE.test(text) ? 'watcher' : 'unknown';
 }
 
 /** Verdict for a batch ship with no confirmed watcher: never `confirmed`. */
@@ -114,7 +131,7 @@ export function shipModeClause(
     return (
       `Ship per ship-issue's merge-mechanism check (${facts}). Detached ship (ship_mode=detached) is ` +
       'allowed ONLY once auto-merge is CONFIRMED: after requesting it, verify ' +
-      '`gh pr view <pr> --json autoMergeRequest` is non-null (or the watcher workflow has acted) — the ' +
+      '`gh pr view <pr> --json autoMergeRequest` is non-null (or, when a watcher workflow was detected, that the label is in place) — the ' +
       'label alone is not proof. If confirmed, ' +
       parkTail +
       ' If it is still null and no watcher workflow exists, do NOT park: wait for the required checks and ' +
@@ -131,7 +148,7 @@ export function shipModeClause(
   const attachedTail =
     kind === 'issue'
       ? 'confirm the merge, then run teardown and report.'
-      : 'confirm the merge, post the batch-ship awaiting-merge milestone with pr= on issue #{anchor}, and STOP — the scheduler dispatches the batch report.';
+      : 'confirm the merge, then post a final batch-ship awaiting-merge milestone with pr= and ship_evidence=self-merged on issue #{anchor} and STOP — the scheduler dispatches the batch report. While you work (CI wait, merge) every batch-ship milestone you post must carry ship_mode=attached, so the scheduler does not treat the run as parked.';
   return (
     `Ship ATTACHED (ship_mode=attached) — ${why} (${facts}). Do not park the PR and do not rely on the ` +
     '`auto-merge` label. After the review milestone (real reviewer agents in agents_done) and green ' +

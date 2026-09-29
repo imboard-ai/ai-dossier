@@ -11,15 +11,13 @@
  * and any consumer — supply fake ground truth and no subprocess runs.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { isTrustedAuthorAssociation } from '@ai-dossier/core';
 import { unwrapList } from './json';
 import {
+  classifyWorkflowText,
   type MergeMechanism,
   parseRepoMergeSettings,
   REPO_MERGE_SETTINGS_JQ,
-  workflowActsOnAutoMergeLabel,
 } from './merge-mechanism';
 import { createExecFn, type ExecFn } from './project';
 import { type BatchPhase, PHASES } from './types';
@@ -366,25 +364,47 @@ export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone 
 /** Repo merge settings change rarely; re-read at most this often (#887). */
 const MERGE_MECHANISM_TTL_MS = 10 * 60 * 1000;
 
-/** True/false when the workflows directory was readable, `null` when it was not. */
-function scanWatcherWorkflow(repoDir: string | undefined): boolean | null {
+/** Files whose presence means another merge bot may own the merge — opaque to sched. */
+const MERGE_BOT_CONFIGS = [
+  '.mergify.yml',
+  '.github/mergify.yml',
+  '.kodiak.toml',
+  '.github/.kodiak.toml',
+];
+
+/**
+ * Whether a label watcher exists, read from the REMOTE default branch (not the local checkout,
+ * which may be stale or on another branch): `true` = a workflow merges on the label,
+ * `false` = every workflow was read and none does, `null` = cannot tell (no readable
+ * remote ref, an unreadable file, a remote reusable workflow, a Mergify/Kodiak config).
+ */
+function scanWatcherWorkflow(exec: ExecFn, repoDir: string | undefined): boolean | null {
   if (repoDir === undefined) return null;
-  const dir = join(repoDir, '.github', 'workflows');
-  let files: string[];
-  try {
-    files = readdirSync(dir).filter((f) => /\.ya?ml$/i.test(f));
-  } catch (err) {
-    // No workflows directory at all is a positive "no watcher"; anything else is unreadable.
-    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? false : null;
-  }
-  for (const f of files) {
-    try {
-      if (workflowActsOnAutoMergeLabel(readFileSync(join(dir, f), 'utf8'))) return true;
-    } catch {
-      return null;
+  let ref: string | null = null;
+  let listing: string | null = null;
+  for (const candidate of ['origin/HEAD', 'origin/main', 'origin/master']) {
+    listing = exec('git', ['ls-tree', '--name-only', candidate, '.github/workflows/'], repoDir);
+    if (listing !== null) {
+      ref = candidate;
+      break;
     }
   }
-  return false;
+  if (ref === null) return null;
+  const bots = exec('git', ['ls-tree', '--name-only', ref, '--', ...MERGE_BOT_CONFIGS], repoDir);
+  if (bots === null || bots.trim() !== '') return null;
+  const files = (listing ?? '')
+    .split('\n')
+    .map((f) => f.trim())
+    .filter((f) => /\.ya?ml$/i.test(f));
+  let unknown = false;
+  for (const f of files) {
+    const text = exec('git', ['show', `${ref}:${f}`], repoDir);
+    if (text === null) return null;
+    const verdict = classifyWorkflowText(text);
+    if (verdict === 'watcher') return true;
+    if (verdict === 'unknown') unknown = true;
+  }
+  return unknown ? null : false;
 }
 
 /**
@@ -404,7 +424,7 @@ export function detectMergeMechanism(
   );
   return {
     nativeAutoMerge: settings?.nativeAutoMerge ?? null,
-    watcherWorkflow: scanWatcherWorkflow(repoDir),
+    watcherWorkflow: scanWatcherWorkflow(exec, repoDir),
     allowedMethods: settings?.allowedMethods ?? [],
   };
 }
@@ -1172,6 +1192,9 @@ export function isParkedMilestone(
 ): milestone is GroundTruthMilestone {
   if (milestone === null) return false;
   if (milestone.phase !== 'ship' || milestone.status !== 'awaiting-merge') return false;
+  // #887: an ATTACHED ship posts this milestone before its CI wait — the run is still
+  // driving the merge, so an exit here is unverified (redispatch), never a park.
+  if (milestone.keys.ship_mode === 'attached') return false;
   return prOfMilestone(milestone) !== null;
 }
 
@@ -1386,6 +1409,8 @@ export function isBatchTailParked(
 ): milestone is GroundTruthMilestone {
   if (milestone === null) return false;
   if (milestone.phase !== 'batch-ship' || milestone.status !== 'awaiting-merge') return false;
+  // #887: same rule as `isParkedMilestone` — an attached batch ship is still merging.
+  if (milestone.keys.ship_mode === 'attached') return false;
   return prOfMilestone(milestone) !== null;
 }
 

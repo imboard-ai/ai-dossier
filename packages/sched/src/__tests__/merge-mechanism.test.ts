@@ -1,29 +1,33 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createExecGroundTruth, detectMergeMechanism } from '../groundtruth';
 import {
+  classifyWorkflowText,
   type MergeMechanism,
   mergeMechanismVerdict,
   parseRepoMergeSettings,
   shipModeClause,
-  workflowActsOnAutoMergeLabel,
 } from '../merge-mechanism';
 
-const dirs: string[] = [];
-afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
-});
-
-function repoWith(workflows: Record<string, string>): string {
-  const dir = mkdtempSync(join(tmpdir(), 'sched-mm-'));
-  dirs.push(dir);
-  mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
-  for (const [f, text] of Object.entries(workflows)) {
-    writeFileSync(join(dir, '.github', 'workflows', f), text);
-  }
-  return dir;
+/** A fake exec over a remote tree: `files` maps a repo path to its text. */
+function fakeExec(opts: {
+  files?: Record<string, string>;
+  settings?: string | null;
+  noRef?: boolean;
+}) {
+  const files = opts.files ?? {};
+  return (file: string, args: string[]): string | null => {
+    if (file === 'gh') return opts.settings === undefined ? null : opts.settings;
+    if (opts.noRef) return null;
+    if (args[0] === 'ls-tree') {
+      const paths = args.slice(args.indexOf('--') + 1).filter(() => args.includes('--'));
+      if (args.includes('--')) return paths.filter((p) => p in files).join('\n');
+      return Object.keys(files)
+        .filter((f) => f.startsWith('.github/workflows/'))
+        .join('\n');
+    }
+    if (args[0] === 'show') return files[args[1].split(':')[1]] ?? null;
+    return null;
+  };
 }
 
 const settings = (auto: unknown) =>
@@ -65,55 +69,108 @@ describe('parseRepoMergeSettings', () => {
   });
 });
 
-describe('workflowActsOnAutoMergeLabel', () => {
-  it('matches a label-triggered watcher', () => {
+describe('classifyWorkflowText (#887)', () => {
+  it('a label-triggered merge watcher', () => {
     expect(
-      workflowActsOnAutoMergeLabel(
-        "on:\n  pull_request:\n    types: [labeled]\njobs:\n  m:\n    if: contains(github.event.pull_request.labels.*.name, 'auto-merge')"
+      classifyWorkflowText(
+        "on: pull_request\njobs:\n  m:\n    if: contains(github.event.pull_request.labels.*.name, 'auto-merge')\n    steps:\n      - run: gh pr merge --squash"
       )
-    ).toBe(true);
+    ).toBe('watcher');
   });
-  it('does not match an unrelated workflow', () => {
-    expect(workflowActsOnAutoMergeLabel('on: push\njobs: {}')).toBe(false);
+  it('a cron sweeper and a check_suite watcher are watchers too (triggers are not inspected)', () => {
+    for (const on of ['schedule:\n  - cron: "*/5 * * * *"', 'check_suite:', 'merge_group:']) {
+      expect(
+        classifyWorkflowText(
+          `on:\n  ${on}\njobs:\n  m:\n    steps:\n      - run: gh pr list --label auto-merge | xargs gh pr merge`
+        )
+      ).toBe('watcher');
+    }
+  });
+  it.each([
+    [
+      'auto-merge-blocked label only',
+      "if: contains(labels, 'auto-merge-blocked')\nrun: gh pr merge",
+    ],
+    ['dependabot-auto-merge', 'name: dependabot-auto-merge\nrun: gh pr merge --auto'],
+  ])('%s is not the label', (_n, text) => {
+    expect(classifyWorkflowText(text)).toBe('none');
+  });
+  it('the label without a merge action, or a remote reusable workflow, is unknown', () => {
+    expect(classifyWorkflowText("if: !contains(labels, 'auto-merge')\nrun: npm test")).toBe(
+      'unknown'
+    );
+    expect(
+      classifyWorkflowText('jobs:\n  m:\n    uses: org/.github/.github/workflows/merge.yml@main')
+    ).toBe('unknown');
+  });
+  it('an unrelated workflow is none; a LOCAL reusable workflow is not remote', () => {
+    expect(classifyWorkflowText('on: push\njobs: {}')).toBe('none');
+    expect(classifyWorkflowText('jobs:\n  a:\n    uses: ./.github/workflows/ci.yml')).toBe('none');
   });
 });
 
 describe('detectMergeMechanism (#887)', () => {
-  it('a repo with no watcher workflow and auto-merge disabled is none', () => {
-    const dir = repoWith({ 'ci.yml': 'on: push\njobs: {}' });
-    const m = detectMergeMechanism(() => settings(false), dir, null);
+  const CI = { '.github/workflows/ci.yml': 'on: push\njobs: {}' };
+  const WATCHER = {
+    '.github/workflows/w.yml':
+      'on: schedule\nrun: gh pr list --label auto-merge | xargs gh pr merge',
+  };
+  it('auto-merge disabled and no watcher is none', () => {
+    const m = detectMergeMechanism(fakeExec({ files: CI, settings: settings(false) }), '/r', null);
     expect(mergeMechanismVerdict(m)).toBe('none');
   });
-  it('native auto-merge allowed is confirmed', () => {
-    const dir = repoWith({});
-    expect(mergeMechanismVerdict(detectMergeMechanism(() => settings(true), dir, null))).toBe(
-      'confirmed'
-    );
+  it('native auto-merge allowed is confirmed (but the watcher stays false)', () => {
+    const m = detectMergeMechanism(fakeExec({ files: CI, settings: settings(true) }), '/r', null);
+    expect(mergeMechanismVerdict(m)).toBe('confirmed');
+    expect(m.watcherWorkflow).toBe(false);
   });
-  it('a watcher workflow is confirmed even when the api read fails', () => {
-    const dir = repoWith({
-      'w.yml': "on: pull_request\njobs:\n  a:\n    if: contains(labels, 'auto-merge')",
-    });
-    expect(mergeMechanismVerdict(detectMergeMechanism(() => null, dir, null))).toBe('confirmed');
+  it('a watcher is confirmed even when the api read fails', () => {
+    const m = detectMergeMechanism(fakeExec({ files: WATCHER, settings: null }), '/r', null);
+    expect(mergeMechanismVerdict(m)).toBe('confirmed');
   });
   it('a failed api read with no watcher is unknown, never none', () => {
-    const dir = repoWith({});
-    expect(mergeMechanismVerdict(detectMergeMechanism(() => null, dir, null))).toBe('unknown');
+    const m = detectMergeMechanism(fakeExec({ files: CI, settings: null }), '/r', null);
+    expect(mergeMechanismVerdict(m)).toBe('unknown');
   });
-  it('pins the api read to the verified repo and caches it', () => {
-    const dir = repoWith({});
+  it('no readable remote ref, a Mergify config, or an unreadable file => watcher unknown', () => {
+    expect(
+      detectMergeMechanism(fakeExec({ noRef: true, settings: settings(false) }), '/r', null)
+        .watcherWorkflow
+    ).toBeNull();
+    expect(
+      detectMergeMechanism(
+        fakeExec({
+          files: { ...CI, '.mergify.yml': 'pull_request_rules: []' },
+          settings: settings(false),
+        }),
+        '/r',
+        null
+      ).watcherWorkflow
+    ).toBeNull();
+    const unreadable = (file: string, args: string[]) =>
+      file === 'git' && args[0] === 'show'
+        ? null
+        : fakeExec({ files: CI, settings: settings(false) })(file, args);
+    expect(detectMergeMechanism(unreadable, '/r', null).watcherWorkflow).toBeNull();
+  });
+  it('pins the api read to the verified repo and caches it until the TTL passes', () => {
     const calls: string[][] = [];
     const gt = createExecGroundTruth(
-      (_f, args) => {
-        calls.push(args);
-        return settings(false);
+      (f, args, cwd) => {
+        if (f === 'gh') calls.push(args);
+        return fakeExec({ files: CI, settings: settings(false) })(f, args, cwd);
       },
-      { repoDir: dir, repo: 'o/r' }
+      { repoDir: '/r', repo: 'o/r' }
     );
     gt.mergeMechanism?.();
     gt.mergeMechanism?.();
     expect(calls).toHaveLength(1);
     expect(calls[0][1]).toBe('repos/o/r');
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + 11 * 60 * 1000);
+    gt.mergeMechanism?.();
+    vi.useRealTimers();
+    expect(calls).toHaveLength(2);
   });
 });
 
