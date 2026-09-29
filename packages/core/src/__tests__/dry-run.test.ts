@@ -103,7 +103,8 @@ describe('analyzeDryRun: command classification', () => {
     const plan = analyze(
       "gh pr create --title t --body \"$(cat <<'EOF'\nrm -rf / is only prose here\nEOF\n)\"\njq '.a\n | select(.b)' f.json"
     );
-    expect(plan.commands.map((c) => c.command.split(' ')[0])).toEqual(['gh', 'jq']);
+    // The `$(cat <<EOF ...)` substitution really runs `cat`; its heredoc body stays data.
+    expect(plan.commands.map((c) => c.command.split(' ')[0])).toEqual(['cat', 'gh', 'jq']);
     expect(plan.commands.some((c) => c.kind === 'destructive')).toBe(false);
   });
 

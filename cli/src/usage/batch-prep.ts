@@ -10,17 +10,28 @@
  * that session's spend — subagents included — to `batch:<id>`.
  *
  * An operator session outlives any one batch, so a record does not claim the
- * whole session: it claims the window since the previous record of the same
- * session (capped at {@link MAX_PREP_LOOKBACK_MS}) up to its own enqueue time.
- * That is an upper bound — unrelated operator work inside the window counts
- * too — and the figure is disclosed separately for that reason.
+ * whole session — it claims a window ending at its own enqueue time (#899):
+ *
+ *  - `marker`: the window starts at the session's first `ai-dossier run
+ *    …/batch-issues-preparation` (runs.jsonl records every run with its
+ *    session id) after the previous enqueue — a deterministic prep start, so
+ *    hours of unrelated work before the prep began are excluded;
+ *  - `prev-enqueue`: no marker; the window starts at the session's previous
+ *    enqueue (an upper bound — unrelated work in between counts);
+ *  - `lookback-cap`: neither; the window reaches back
+ *    {@link MAX_PREP_LOOKBACK_MS} (the loosest upper bound).
+ *
+ * One enqueue that creates several batches yields identical windows. Their
+ * rows are split across the batches in proportion to member count, so the
+ * per-batch figures always sum to the window's tokens — never double-count.
  */
 
 import * as path from 'node:path';
 import { appendJsonl, readJsonl } from '@ai-dossier/sched';
 import { collectLedger, defaultLedgerPaths, type LedgerPaths, rowTotal } from './ledger';
-import type { UsageRow } from './types';
-import { safeReaddir } from './util';
+import { rowKey } from './store';
+import type { PrepBasis, UsageRow } from './types';
+import { forEachLine, safeReaddir } from './util';
 
 export const BATCH_PREP_FILE = 'batch-prep.jsonl';
 
@@ -33,6 +44,17 @@ export interface BatchPrepRecord {
   session_id: string;
   /** How the session id was learned — the environment (deterministic) or an explicit flag. */
   source: 'env' | 'flag';
+  /** Members enqueued into this batch by the call — the weight when one call's window is split (#899). */
+  members?: number;
+}
+
+/** The dossier whose first run in a session marks the start of batch prep (#899). */
+export const PREP_DOSSIER = 'batch-issues-preparation';
+
+/** A deterministic prep start: an `ai-dossier run` of {@link PREP_DOSSIER} by a session. */
+export interface PrepMarker {
+  session_id: string;
+  startMs: number;
 }
 
 export interface PrepWindow {
@@ -40,6 +62,9 @@ export interface PrepWindow {
   session_id: string;
   fromMs: number;
   toMs: number;
+  basis: PrepBasis;
+  /** Split weight among the batches sharing this exact window (member count, at least 1). */
+  weight: number;
 }
 
 /** The calling Claude Code session, or null outside one. */
@@ -54,10 +79,13 @@ export function recordBatchPrep(
   batches: readonly string[],
   sessionId: string,
   source: BatchPrepRecord['source'],
-  now: Date = new Date()
+  now: Date = new Date(),
+  members?: ReadonlyMap<string, number>
 ): void {
   for (const batch of [...new Set(batches)]) {
     const record: BatchPrepRecord = { ts: now.toISOString(), batch, session_id: sessionId, source };
+    const count = members?.get(batch);
+    if (count !== undefined && count > 0) record.members = count;
     appendJsonl(path.join(schedDir, BATCH_PREP_FILE), record);
   }
 }
@@ -76,8 +104,40 @@ export function readBatchPrep(schedDir: string): BatchPrepRecord[] {
   }
 }
 
+/**
+ * Prep starts recorded in `runs.jsonl`: every `ai-dossier run` of
+ * {@link PREP_DOSSIER} that carries a session id. The log stamps completion, so
+ * the start is `timestamp - duration_ms`. Never throws.
+ */
+export function readPrepMarkers(runsLog: string): PrepMarker[] {
+  const out: PrepMarker[] = [];
+  forEachLine(runsLog, (line) => {
+    if (!line.includes(PREP_DOSSIER) || !line.includes('"session_id"')) return;
+    try {
+      const e = JSON.parse(line) as {
+        timestamp?: string;
+        dossier?: string;
+        session_id?: string | null;
+        duration_ms?: number | null;
+      };
+      if (!e.session_id || !e.dossier || !e.timestamp) return;
+      if (e.dossier !== PREP_DOSSIER && !e.dossier.endsWith(`/${PREP_DOSSIER}`)) return;
+      const endMs = Date.parse(e.timestamp);
+      if (Number.isNaN(endMs)) return;
+      const startMs = endMs - (typeof e.duration_ms === 'number' ? Math.max(0, e.duration_ms) : 0);
+      out.push({ session_id: e.session_id, startMs });
+    } catch {
+      // torn / foreign line
+    }
+  });
+  return out;
+}
+
 /** Records → the time window each one claims (see the module comment). */
-export function prepWindows(records: readonly BatchPrepRecord[]): PrepWindow[] {
+export function prepWindows(
+  records: readonly BatchPrepRecord[],
+  markers: readonly PrepMarker[] = []
+): PrepWindow[] {
   const sorted = [...records].sort(
     (a, b) => Date.parse(a.ts) - Date.parse(b.ts) || a.batch.localeCompare(b.batch)
   );
@@ -89,41 +149,102 @@ export function prepWindows(records: readonly BatchPrepRecord[]): PrepWindow[] {
       const otherMs = Date.parse(other.ts);
       if (other.session_id === r.session_id && otherMs < toMs) prevMs = Math.max(prevMs, otherMs);
     }
+    // Earliest prep run after the previous enqueue (and not after this one). A marker older than
+    // the lookback cap is treated as no marker: a prep run days ago in the same long-lived
+    // session is not evidence this batch's prep started then.
+    const capMs = toMs - MAX_PREP_LOOKBACK_MS;
+    let markerMs = Number.POSITIVE_INFINITY;
+    for (const m of markers) {
+      if (
+        m.session_id === r.session_id &&
+        m.startMs > prevMs &&
+        m.startMs >= capMs &&
+        m.startMs <= toMs
+      ) {
+        markerMs = Math.min(markerMs, m.startMs);
+      }
+    }
+    let fromMs: number;
+    let basis: PrepBasis;
+    if (Number.isFinite(markerMs)) {
+      fromMs = markerMs - 1; // rows are matched `ts > fromMs`; include the marker instant
+      basis = 'marker';
+    } else if (prevMs > capMs) {
+      fromMs = prevMs;
+      basis = 'prev-enqueue';
+    } else {
+      fromMs = capMs;
+      basis = 'lookback-cap';
+    }
     return {
       batch: r.batch,
       session_id: r.session_id,
-      fromMs: Math.max(prevMs, toMs - MAX_PREP_LOOKBACK_MS),
+      fromMs,
       toMs,
+      basis,
+      weight: r.members !== undefined && r.members > 0 ? r.members : 1,
     };
   });
 }
 
 /**
  * Stamp `batch:<id>` onto rows of a prep session (or its subagents) inside a
- * window. Rows already attributed to a dispatch keep that attribution; a row
- * two windows both claim (two batches from one enqueue call) goes to the first.
+ * window. Rows already attributed to a dispatch keep that attribution. Batches
+ * created by one enqueue share an identical window; its rows are dealt across
+ * them in proportion to their weights (member counts) by a hash of the row's stable
+ * key — each row goes whole to one batch, so per-batch sums equal the window total.
  */
 export function applyPrepWindows(rows: UsageRow[], windows: readonly PrepWindow[]): void {
   if (windows.length === 0) return;
+  const groups = new Map<string, PrepWindow[]>();
+  for (const w of windows) {
+    const key = `${w.session_id}\u0000${w.fromMs}\u0000${w.toMs}`;
+    const list = groups.get(key);
+    if (list) list.push(w);
+    else groups.set(key, [w]);
+  }
+  const byWindow = [...groups.values()];
   for (const row of rows) {
     if (row.unit !== null) continue;
     const root = row.session_id.split('/')[0];
     const ts = Date.parse(row.ts);
-    const hit = windows.find((w) => w.session_id === root && ts > w.fromMs && ts <= w.toMs);
+    const hit = byWindow.find(
+      (g) => g[0].session_id === root && ts > g[0].fromMs && ts <= g[0].toMs
+    );
     if (!hit) continue;
-    row.unit = `batch:${hit.batch}`;
-    row.batch = hit.batch;
+    const winner = hit.length > 1 ? pickWeighted(hit, rowKey(row)) : hit[0];
+    if (hit.length > 1) row.prep_split = hit.length;
+    row.unit = `batch:${winner.batch}`;
+    row.batch = winner.batch;
     row.role = 'prep';
+    row.prep_basis = winner.basis;
   }
 }
 
-/** Every project's records under `schedRoot`, as windows. */
-export function readAllPrepWindows(schedRoot: string): PrepWindow[] {
+/**
+ * Pick a window by weight from a hash of the row's stable key — the same row goes to
+ * the same batch in every view (`usage`, `sched stats`, a partial collection), and the
+ * shares converge on the weights. Batch order is fixed so the pick is reproducible.
+ */
+function pickWeighted(windows: readonly PrepWindow[], key: string): PrepWindow {
+  const ordered = [...windows].sort((a, b) => a.batch.localeCompare(b.batch));
+  const total = ordered.reduce((n, w) => n + w.weight, 0);
+  const point = (Number.parseInt(key.slice(0, 8), 16) / 0x1_0000_0000) * total;
+  let acc = 0;
+  for (const w of ordered) {
+    acc += w.weight;
+    if (point < acc) return w;
+  }
+  return ordered[ordered.length - 1];
+}
+
+/** Every project's records under `schedRoot`, as windows (markers read from `runsLog`). */
+export function readAllPrepWindows(schedRoot: string, runsLog: string): PrepWindow[] {
   const records: BatchPrepRecord[] = [];
   for (const project of safeReaddir(schedRoot)) {
     if (project.isDirectory()) records.push(...readBatchPrep(path.join(schedRoot, project.name)));
   }
-  return prepWindows(records);
+  return prepWindows(records, readPrepMarkers(runsLog));
 }
 
 export interface BatchPrepTokens {
@@ -131,6 +252,22 @@ export interface BatchPrepTokens {
   billable_tokens: number;
   sessions: number;
   messages: number;
+  /** How far back the window(s) reach — `marker` is exact-start; the others are upper bounds (#899). */
+  basis: PrepBasis | 'mixed';
+  /** True when a window was shared with sibling batches from one enqueue and split by member count. */
+  split: boolean;
+}
+
+/** Time range a scan needs for the wanted batches (their windows; siblings share theirs). */
+export function prepScanRange(
+  windows: readonly PrepWindow[],
+  wanted: ReadonlySet<string> | null
+): { sinceMs: number; untilMs: number } {
+  const w = windows.filter((x) => !wanted || wanted.has(x.batch));
+  return {
+    sinceMs: Math.min(...w.map((x) => x.fromMs)),
+    untilMs: Math.max(...w.map((x) => x.toMs)) + 1,
+  };
 }
 
 /**
@@ -144,19 +281,39 @@ export function batchPrepTokens(
   paths: LedgerPaths = defaultLedgerPaths()
 ): Map<string, BatchPrepTokens> {
   const wanted = batchIds ? new Set(batchIds) : null;
-  const records = readBatchPrep(schedDir).filter((r) => !wanted || wanted.has(r.batch));
+  // Windows come from ALL records: a batch's window is shared with its siblings
+  // from the same enqueue, so filtering first would hand it their share.
+  const records = readBatchPrep(schedDir);
   const out = new Map<string, BatchPrepTokens>();
-  if (records.length === 0) return out;
-  const windows = prepWindows(records);
+  if (!records.some((r) => !wanted || wanted.has(r.batch))) return out;
+  const windows = prepWindows(records, readPrepMarkers(paths.runsLog));
   const sessions = new Map<string, Set<string>>();
+  const bases = new Map<string, Set<PrepBasis>>();
   for (const w of windows) {
-    out.set(w.batch, out.get(w.batch) ?? { billable_tokens: 0, sessions: 0, messages: 0 });
+    if (wanted && !wanted.has(w.batch)) continue;
+    out.set(
+      w.batch,
+      out.get(w.batch) ?? {
+        billable_tokens: 0,
+        sessions: 0,
+        messages: 0,
+        basis: w.basis,
+        split: false,
+      }
+    );
     sessions.set(w.batch, (sessions.get(w.batch) ?? new Set()).add(w.session_id));
+    bases.set(w.batch, (bases.get(w.batch) ?? new Set()).add(w.basis));
   }
   for (const [batch, set] of sessions) (out.get(batch) as BatchPrepTokens).sessions = set.size;
+  for (const [batch, set] of bases) {
+    (out.get(batch) as BatchPrepTokens).basis = set.size === 1 ? [...set][0] : 'mixed';
+  }
+  // Only the wanted batches' windows (siblings share theirs) bound the scan — not every
+  // prep record ever written, which would read the whole transcript history.
+  const range = prepScanRange(windows, wanted);
   const { rows } = collectLedger({
-    sinceMs: Math.min(...windows.map((w) => w.fromMs)),
-    untilMs: Math.max(...windows.map((w) => w.toMs)) + 1,
+    sinceMs: range.sinceMs,
+    untilMs: range.untilMs,
     paths,
   });
   for (const row of rows) {
@@ -165,6 +322,7 @@ export function batchPrepTokens(
     if (!entry) continue;
     entry.billable_tokens += rowTotal(row);
     entry.messages += 1;
+    if (row.prep_split) entry.split = true;
   }
   return out;
 }

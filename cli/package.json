@@ -53,7 +53,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@ai-dossier/core": "^1.13.0",
+    "@ai-dossier/core": "^1.14.0",
     "@ai-dossier/sched": "^0.66.0",
     "@ai-dossier/worktree-pool": "^0.7.0",
     "commander": "^12.1.0",
