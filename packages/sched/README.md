@@ -1818,7 +1818,8 @@ Dispatched runs park their PR on `auto-merge` (detached ship mode) and exit — 
 a merge mechanism is confirmed** (#887). sched's watch only WAITS for a merge; it never merges,
 so the default prompts render `{ship_clause}` from `GroundTruth.mergeMechanism()` (`gh api
 repos/<r>` `allow_auto_merge` + allowed methods, and a scan of the remote default branch's
-`.github/workflows` for a label watcher; cached 10 min). A confirmed mechanism still parks only
+`.github/workflows` for a label watcher, both read through the GitHub API so a stale local
+`origin/*` ref can never hide a newly added watcher — #921; cached 10 min). A confirmed mechanism still parks only
 after `gh pr view --json autoMergeRequest` reads back non-null (the label is not proof); with no
 confirmed mechanism — or an unknown one — the run ships **attached** (waits for checks, merges
 with an allowed method) and blocks `no-merge-mechanism` if it cannot. A batch tail needs a
@@ -1826,7 +1827,8 @@ confirmed *watcher* (native auto-merge alone never confirms a detached batch shi
 `awaiting-merge` milestone carrying `ship_mode=attached` is not a park. Backstop for custom
 prompts: a parked, OPEN PR with no auto-merge request and no watcher (positively read absent —
 unknown never counts) that persists past 10 minutes fails `no-merge-mechanism`; the batch PR
-watch has no such backstop yet. The engine owns everything after the park:
+watch has the same backstop (#921): the batch blocks `no-merge-mechanism`, and the onset marker
+(`BatchEntry.no_merge_mechanism_since`) resets when a request lands. The engine owns everything after the park:
 
 1. **Park detection (AC1)** — an agent exit whose latest milestone is the ship
    phase's `awaiting-merge` (with `pr=`) is a VERIFIED park, not an unverified

@@ -476,6 +476,61 @@ describe('publish command', () => {
       expect(mockClient.publishDossier).not.toHaveBeenCalled();
     });
 
+    it('normalises a sidecar stamped with the default namespace to the namespace being published to (#921)', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? validEvidence // dossier: org/test-dossier — what `evidence add` stamps by default
+          : validDossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'publish',
+        'test.ds.md',
+        '--namespace',
+        'org/git',
+        '--yes',
+      ]);
+
+      expect(mockClient.publishDossier).toHaveBeenCalledTimes(1);
+      const [namespace, , , sentEvidence] = mockClient.publishDossier.mock.calls[0];
+      expect(namespace).toBe('org/git');
+      expect(JSON.parse(sentEvidence as string)).toMatchObject({
+        dossier: 'org/git/test-dossier',
+        version: '1.0.0',
+        checksum: { hash: validDossierChecksum },
+      });
+    });
+
+    it('still rejects a sidecar for a DIFFERENT dossier name (#921 normalises the namespace only)', async () => {
+      const otherName = JSON.stringify(
+        createEvidenceRecord({
+          dossier: 'org/other-dossier',
+          version: '1.0.0',
+          checksumHash: validDossierChecksum,
+        })
+      );
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? otherName
+          : validDossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerPublishCommand(program);
+      await expect(
+        program.parseAsync(['node', 'dossier', 'publish', 'test.ds.md', '--yes'])
+      ).rejects.toThrow();
+
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('does not match "org/test-dossier"')
+      );
+      expect(mockClient.publishDossier).not.toHaveBeenCalled();
+    });
+
     it('should exit 1 with the evidence sync hint on a mismatch', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockImplementation(((p: unknown) =>

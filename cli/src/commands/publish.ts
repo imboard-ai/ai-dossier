@@ -133,13 +133,28 @@ function resolveEvidenceForPublish(
     return null;
   }
 
-  const rawEvidence = fs.readFileSync(evidencePath, 'utf8');
+  let rawEvidence = fs.readFileSync(evidencePath, 'utf8');
   let evidenceRecord: EvidenceRecord;
   try {
     evidenceRecord = parseEvidence(rawEvidence);
   } catch (err: unknown) {
     console.error(`\n❌ Invalid evidence file: ${(err as Error).message}\n`);
     process.exit(1);
+  }
+
+  // #921: `evidence add` cannot know the registry path a dossier is published under (e.g.
+  // `imboard-ai/git/<name>`) and stamps its default namespace (`imboard-ai/<name>`). The
+  // namespace is where THIS publish goes, so it is authoritative: when only the namespace
+  // differs, normalise the sidecar to the real id instead of failing. A different NAME (or a
+  // stale version/checksum) is still a genuine mismatch and still fails below.
+  const publishedName = fullPath.slice(fullPath.lastIndexOf('/') + 1);
+  const recordedName = evidenceRecord.dossier.slice(evidenceRecord.dossier.lastIndexOf('/') + 1);
+  if (evidenceRecord.dossier !== fullPath && recordedName === publishedName) {
+    console.log(
+      `\nℹ️  Evidence sidecar named "${evidenceRecord.dossier}"; attaching it as "${fullPath}" (the namespace you are publishing to)\n`
+    );
+    evidenceRecord = { ...evidenceRecord, dossier: fullPath };
+    rawEvidence = `${JSON.stringify(evidenceRecord, null, 2)}\n`;
   }
 
   const mismatches = evidenceMatchesDossier(evidenceRecord, frontmatter, fullPath);

@@ -364,41 +364,68 @@ export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone 
 /** Repo merge settings change rarely; re-read at most this often (#887). */
 const MERGE_MECHANISM_TTL_MS = 10 * 60 * 1000;
 
-/** Files whose presence means another merge bot may own the merge — opaque to sched. */
-const MERGE_BOT_CONFIGS = [
-  '.mergify.yml',
-  '.github/mergify.yml',
-  '.kodiak.toml',
-  '.github/.kodiak.toml',
-];
+/** Config files whose presence means another merge bot may own the merge — opaque to sched. */
+const MERGE_BOT_CONFIG_RE =
+  /^(\.mergify\.yml|\.github\/mergify\.yml|\.kodiak\.toml|\.github\/\.kodiak\.toml)$/;
+const WORKFLOW_FILE_RE = /^\.github\/workflows\/[^/]+\.ya?ml$/i;
 
 /**
- * Whether a label watcher exists, read from the REMOTE default branch (not the local checkout,
- * which may be stale or on another branch): `true` = a workflow merges on the label,
- * `false` = every workflow was read and none does, `null` = cannot tell (no readable
- * remote ref, an unreadable file, a remote reusable workflow, a Mergify/Kodiak config).
+ * `gh api` jq projection: only the workflow files and merge-bot configs of the default
+ * branch's recursive tree (one call), plus the `truncated` flag (a truncated tree cannot
+ * prove a file is absent).
  */
-function scanWatcherWorkflow(exec: ExecFn, repoDir: string | undefined): boolean | null {
-  if (repoDir === undefined) return null;
-  let ref: string | null = null;
-  let listing: string | null = null;
-  for (const candidate of ['origin/HEAD', 'origin/main', 'origin/master']) {
-    listing = exec('git', ['ls-tree', '--name-only', candidate, '.github/workflows/'], repoDir);
-    if (listing !== null) {
-      ref = candidate;
-      break;
+const WATCHER_TREE_JQ =
+  '{truncated, blobs: [.tree[] | select(.type == "blob") | select(.path | test(' +
+  '"^(\\\\.github/workflows/[^/]+\\\\.ya?ml|\\\\.mergify\\\\.yml|\\\\.github/mergify\\\\.yml|\\\\.kodiak\\\\.toml|\\\\.github/\\\\.kodiak\\\\.toml)$"' +
+  ')) | {path, sha}]}';
+
+/** A git blob id — the only thing interpolated into the blob-read argv (CWE-88). */
+const BLOB_SHA_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * Whether a label watcher exists, read from the GitHub API for the repo's DEFAULT branch
+ * (`git/trees/HEAD`), never from a local `origin/*` ref: a checkout's remote-tracking refs
+ * are only as fresh as its last fetch, so a watcher added since would be invisible and a
+ * positive "no watcher" could fail a unit that would have merged (#921). The API is
+ * stateless (no checkout needed, no fetch, no ref mutation) and each blob is read by
+ * immutable sha. `true` = a workflow merges on the label, `false` = every workflow was
+ * read and none does, `null` = cannot tell (API failure, truncated tree, an unreadable
+ * file, a remote reusable workflow, a Mergify/Kodiak config).
+ */
+function scanWatcherWorkflow(
+  exec: ExecFn,
+  slug: string,
+  repoDir: string | undefined
+): boolean | null {
+  // No verified repo and no checkout: gh's `{owner}/{repo}` placeholders would resolve from an
+  // arbitrary cwd, so refuse to scan rather than read the wrong repo's workflows.
+  if (slug.includes('{') && repoDir === undefined) return null;
+  const tree = exec(
+    'gh',
+    ['api', `repos/${slug}/git/trees/HEAD?recursive=1`, '--jq', WATCHER_TREE_JQ],
+    repoDir
+  );
+  if (tree === null) return null;
+  let blobs: { path: string; sha: string }[];
+  try {
+    const obj = JSON.parse(tree) as { truncated?: unknown; blobs?: unknown };
+    if (obj.truncated !== false || !Array.isArray(obj.blobs)) return null;
+    blobs = obj.blobs as { path: string; sha: string }[];
+    if (blobs.some((b) => typeof b?.path !== 'string' || !BLOB_SHA_RE.test(String(b?.sha)))) {
+      return null;
     }
+  } catch {
+    return null;
   }
-  if (ref === null) return null;
-  const bots = exec('git', ['ls-tree', '--name-only', ref, '--', ...MERGE_BOT_CONFIGS], repoDir);
-  if (bots === null || bots.trim() !== '') return null;
-  const files = (listing ?? '')
-    .split('\n')
-    .map((f) => f.trim())
-    .filter((f) => /\.ya?ml$/i.test(f));
+  if (blobs.some((b) => MERGE_BOT_CONFIG_RE.test(b.path))) return null;
   let unknown = false;
-  for (const f of files) {
-    const text = exec('git', ['show', `${ref}:${f}`], repoDir);
+  for (const b of blobs) {
+    if (!WORKFLOW_FILE_RE.test(b.path)) continue;
+    const text = exec(
+      'gh',
+      ['api', '-H', 'Accept: application/vnd.github.raw', `repos/${slug}/git/blobs/${b.sha}`],
+      repoDir
+    );
     if (text === null) return null;
     const verdict = classifyWorkflowText(text);
     if (verdict === 'watcher') return true;
@@ -424,7 +451,7 @@ export function detectMergeMechanism(
   );
   return {
     nativeAutoMerge: settings?.nativeAutoMerge ?? null,
-    watcherWorkflow: scanWatcherWorkflow(exec, repoDir),
+    watcherWorkflow: scanWatcherWorkflow(exec, slug, repoDir),
     allowedMethods: settings?.allowedMethods ?? [],
   };
 }

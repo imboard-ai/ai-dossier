@@ -35,8 +35,6 @@ import {
   reconcileStaleBlockedBatches,
   tailMembersRefusal,
 } from '../batch-dispatch';
-// Same rationale as the `evictMemberAndContinue` import above: a test-only
-// path builder, not part of the package's public `index.ts` surface.
 import { batchMemberLogPath } from '../dispatch';
 import {
   abandonBatch,
@@ -87,6 +85,9 @@ import {
   transitionIssue,
   transitionSlot,
 } from '../index';
+// Same rationale as the `evictMemberAndContinue` import above: a test-only
+// path builder, not part of the package's public `index.ts` surface.
+import type { MergeMechanism } from '../merge-mechanism';
 import { writeApiErrorLog, writeToolUseLog } from './helpers/dispatch-log';
 import { stubGroundTruth } from './helpers/ground-truth';
 import { issueCloseTruth } from './helpers/issue-close-truth';
@@ -2547,9 +2548,10 @@ describe('#610: stale-milestone-ignored journals once per dispatch, not once per
  */
 function prWatchHarness(memberIssue: number, batchId: string, anchor: number, pr: number) {
   let truth: PrTruth | undefined;
+  let mechanism: MergeMechanism | undefined;
   const base = slotlessBatchHarness(
     'sched-batch-prwatch-',
-    stubGroundTruth({ prState: () => truth }),
+    stubGroundTruth({ prState: () => truth, mergeMechanism: () => mechanism }),
     (seeded, setupAt) => {
       let state = enqueueEntries(
         seeded,
@@ -2573,6 +2575,9 @@ function prWatchHarness(memberIssue: number, batchId: string, anchor: number, pr
     store,
     setTruth: (t: PrTruth | undefined) => {
       truth = t;
+    },
+    setMechanism: (m: MergeMechanism | undefined) => {
+      mechanism = m;
     },
     advanceNow: base.advanceNow,
     batch: () => findBatch(store.load(), batchId),
@@ -2600,6 +2605,110 @@ const HEALTHY_TRUTH: PrTruth = {
   mergeable: 'MERGEABLE',
   blocked: false,
 };
+
+const PARKED_NO_REQUEST_TRUTH: PrTruth = {
+  state: 'OPEN',
+  mergedAt: null,
+  mergeable: 'MERGEABLE',
+  blocked: false,
+  autoMergeRequested: false,
+};
+
+const NO_WATCHER: MergeMechanism = {
+  nativeAutoMerge: true,
+  watcherWorkflow: false,
+  allowedMethods: ['rebase'],
+};
+
+describe('#921: the batch PR watch blocks no-merge-mechanism on a parked PR nothing can merge', () => {
+  const GRACE = 11 * 60 * 1000;
+  const T0 = Date.parse('2026-09-29T10:00:00.000Z');
+  const at = (ms: number) => new Date(T0 + ms).toISOString();
+
+  it('arms on first sight, holds inside the grace window, then blocks with the reason after it persists', () => {
+    const h = prWatchHarness(921, 'b-nmm', 920, 9210);
+    h.setMechanism(NO_WATCHER);
+    h.setTruth(PARKED_NO_REQUEST_TRUTH);
+    h.advanceNow(at(0));
+    h.tick(); // arms only
+    expect(h.batch()?.status).toBe('awaiting-merge');
+    expect(h.batch()?.no_merge_mechanism_since).toBe(`9210@${at(0)}`);
+    h.advanceNow(at(200_000));
+    h.tick();
+    expect(h.batch()?.status).toBe('awaiting-merge');
+    h.advanceNow(at(GRACE));
+    h.tick();
+    expect(h.batch()?.status).toBe('blocked');
+    expect(h.batch()?.blocked_reason).toBe('no-merge-mechanism');
+    expect(h.journal.read().some((e) => e.event === 'batch-blocked')).toBe(true);
+  });
+
+  it.each([
+    ['a watcher workflow exists', { ...NO_WATCHER, watcherWorkflow: true }, false],
+    ['watcher detection unknown', { ...NO_WATCHER, watcherWorkflow: null }, false],
+    ['detection unavailable', undefined, false],
+    ['GitHub holds an auto-merge request', NO_WATCHER, true],
+  ] as const)('%s never fires (keeps watching)', (_n, mechanism, requested) => {
+    const h = prWatchHarness(921, 'b-nmm2', 920, 9211);
+    h.setMechanism(mechanism);
+    h.setTruth({ ...PARKED_NO_REQUEST_TRUTH, autoMergeRequested: requested });
+    h.advanceNow(at(0));
+    h.tick();
+    h.advanceNow(at(GRACE));
+    h.tick();
+    h.advanceNow(at(3 * GRACE));
+    h.tick();
+    expect(h.batch()?.status).toBe('awaiting-merge');
+    expect(h.batch()?.no_merge_mechanism_since ?? null).toBeNull();
+  });
+
+  it('a payload with no autoMergeRequest field (unknown) never fires', () => {
+    const h = prWatchHarness(921, 'b-nmm3', 920, 9212);
+    h.setMechanism(NO_WATCHER);
+    h.setTruth(HEALTHY_TRUTH);
+    h.advanceNow(at(0));
+    h.tick();
+    h.advanceNow(at(3 * GRACE));
+    h.tick();
+    expect(h.batch()?.status).toBe('awaiting-merge');
+  });
+
+  it('resets when a request lands, and re-arms from scratch (not off the old onset) afterwards', () => {
+    const h = prWatchHarness(921, 'b-nmm4', 920, 9213);
+    h.setMechanism(NO_WATCHER);
+    h.setTruth(PARKED_NO_REQUEST_TRUTH);
+    h.advanceNow(at(0));
+    h.tick(); // armed
+    h.setTruth({ ...PARKED_NO_REQUEST_TRUTH, autoMergeRequested: true });
+    h.advanceNow(at(GRACE));
+    h.tick();
+    expect(h.batch()?.status).toBe('awaiting-merge');
+    expect(h.batch()?.no_merge_mechanism_since ?? null).toBeNull();
+    h.setTruth(PARKED_NO_REQUEST_TRUTH);
+    h.advanceNow(at(2 * GRACE));
+    h.tick();
+    expect(h.batch()?.status).toBe('awaiting-merge'); // re-armed, not failed
+    expect(h.batch()?.no_merge_mechanism_since).toBe(`9213@${at(2 * GRACE)}`);
+  });
+
+  it('a merged PR is accepted even with the marker armed (MERGED wins)', () => {
+    const h = prWatchHarness(921, 'b-nmm5', 920, 9214);
+    h.setMechanism(NO_WATCHER);
+    h.setTruth(PARKED_NO_REQUEST_TRUTH);
+    h.advanceNow(at(0));
+    h.tick();
+    h.setTruth({
+      state: 'MERGED',
+      mergedAt: at(1000),
+      mergeable: null,
+      blocked: false,
+      autoMergeRequested: false,
+    });
+    h.advanceNow(at(GRACE));
+    h.tick();
+    expect(h.batch()?.status).not.toBe('blocked');
+  });
+});
 
 describe('#630: pr-watch-failed journals once per distinct condition, not once per tick', () => {
   it('AC1/AC5: three consecutive ticks against one unchanged watch failure produce exactly one entry; changing the reason produces a second', () => {

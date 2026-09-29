@@ -248,6 +248,46 @@ describe('evidence command', () => {
       expect(written.entries[0].evidence[0].session).toBe(VALID_SESSION);
     });
 
+    const runAddNoSidecar = async (extra: string[]) => {
+      mockedFs.existsSync.mockImplementation(
+        ((p: unknown) => !String(p).endsWith('.evidence.json')) as typeof fs.existsSync
+      );
+      mockedFs.readFileSync.mockReturnValue(dossierWithChecksum);
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'add',
+        'test.ds.md',
+        '--anchor',
+        'A',
+        '--rationale',
+        'B',
+        '--session',
+        VALID_SESSION,
+        ...extra,
+      ]);
+      return JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+    };
+
+    it('writes the full multi-segment id when --namespace carries it (#921)', async () => {
+      const written = await runAddNoSidecar(['--namespace', 'test-org/git']);
+      expect(written.dossier).toBe('test-org/git/test-dossier');
+      expect(console.log).not.toHaveBeenCalledWith(
+        expect.stringContaining('dossier namespace defaulted')
+      );
+    });
+
+    it('says so when a new sidecar falls back to the account default namespace (#921)', async () => {
+      const written = await runAddNoSidecar([]);
+      expect(written.dossier).toBe('test-org/test-dossier');
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringContaining('dossier namespace defaulted to "test-org"')
+      );
+    });
+
     it('should error without --session and without AI_DOSSIER_SESSION_ID', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockImplementation(((p: unknown) =>
