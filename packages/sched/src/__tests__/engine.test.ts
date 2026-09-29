@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildStatusReport,
   type EngineDeps,
@@ -57,6 +57,9 @@ function harness(
   existingDir?: string
 ) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'sched-engine-'));
+  // Per-harness unique dir, removed in afterEach — never swept by name prefix,
+  // which would delete a concurrent run's live dirs (#896).
+  if (!existingDir) REGISTRIES.push(dir);
   const store = new SchedStore(dir);
   const journal = new Journal(dir);
   // #524: runs.jsonl telemetry writes under EngineDeps.homeDir — a fresh
@@ -349,16 +352,6 @@ const REGISTRIES: string[] = [];
 afterEach(() => {
   for (const dir of REGISTRIES.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// One top-level sweep: every harness dir is a fresh `sched-engine-` tmpdir —
-// stale dirs from crashed runs never leak between tests.
-beforeEach(() => {
-  for (const name of fs.readdirSync(os.tmpdir())) {
-    if (name.startsWith('sched-engine-')) {
-      fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
-    }
   }
 });
 

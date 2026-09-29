@@ -36,6 +36,7 @@ export default defineConfig({
     },
   },
   test: {
+    globalSetup: ['../test-support/isolated-home.mjs'],
     globals: true,
     environment: 'node',
     exclude: ['**/worktrees/**', '**/node_modules/**', '**/dist/**'],
