@@ -1433,7 +1433,7 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   positive evidence: every member issue CLOSED as completed BY SHIPPED CODE (a
   PR merged into the batch's base, or a commit reachable from it — a hand close
   counts only when a merged same-repo PR into the base lists the issue as a
-  closing reference AND merged after the issue's last reopen, #799), and no member evicted, handed back (`decision-pending`, any
+  closing reference AND merged after the issue's last reopen, #799, and no later than its close, #850), and no member evicted, handed back (`decision-pending`, any
   case), requeued, or failed. The engine then comments on the anchor with each
   member's shipping PR or commit (marker `batch-close:v1`, honoured only on its
   own comments, so a rerun never double-posts) and closes it — journaled
