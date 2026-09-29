@@ -52,6 +52,52 @@ function optionValue(command, options) {
   return null;
 }
 
+const SETTING_OPTIONS = {
+  effort: ['--effort', '--reasoning-effort'],
+  variant: ['--variant'],
+};
+const SYNTHESIZED_LOW_VALUE = 'low';
+
+/** Copy of `command` with the last occurrence of any of `options` set to `value`. */
+function withOptionValue(command, options, value) {
+  const next = [...command];
+  for (let i = next.length - 1; i >= 0; i--) {
+    for (const option of options) {
+      if (next[i].startsWith(`${option}=`)) {
+        next[i] = `${option}=${value}`;
+        return next;
+      }
+      if (next[i] === option && next[i + 1] !== undefined && !next[i + 1].startsWith('--')) {
+        next[i + 1] = value;
+        return next;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Fallback for a profile whose tiers all use different models (e.g. anthropic =
+ * haiku / sonnet / opus): pick the tier with the highest ranked effort/variant and
+ * compare it against the same command at `low`. Same model on both sides, so the
+ * comparison stays unconfounded; the low side is synthesized, not a configured tier.
+ */
+export function selectSynthesizedPair(executors) {
+  let best = null;
+  for (const tier of TIER_ORDER) {
+    const executor = executors[tier];
+    if (!executor || executor.model === null) continue;
+    for (const setting of Object.keys(SETTING_OPTIONS)) {
+      const value = executor[setting];
+      if (typeof value !== 'string') continue;
+      const rank = EFFORT_RANK.get(value.toLowerCase());
+      if (rank === undefined || rank <= EFFORT_RANK.get(SYNTHESIZED_LOW_VALUE)) continue;
+      if (best === null || rank >= best.rank) best = { tier, setting, value, rank };
+    }
+  }
+  return best;
+}
+
 /**
  * Return the strongest same-model comparison available in a resolved profile.
  * A comparison is only useful when the command actually carries a differing
@@ -215,9 +261,25 @@ export function prepareProfile(config, profile, issue = 0) {
   const executors = tierExecutors(resolved);
   const pair = selectEffortPair(executors);
   if (pair === null) {
-    throw new Error(
-      `profile '${profile}' has no same-model tier pair with different --effort/--variant values`
-    );
+    const synth = selectSynthesizedPair(executors);
+    const highCommand = synth === null ? null : buildTierCommand(resolved, synth.tier, issue);
+    const lowCommand =
+      highCommand === null
+        ? null
+        : withOptionValue(highCommand, SETTING_OPTIONS[synth.setting], SYNTHESIZED_LOW_VALUE);
+    if (lowCommand === null) {
+      throw new Error(
+        `profile '${profile}' has no same-model tier pair with different --effort/--variant values, and no tier with an effort/variant above '${SYNTHESIZED_LOW_VALUE}' to compare against`
+      );
+    }
+    const model = executors[synth.tier].model;
+    return {
+      profile,
+      setting: synth.setting,
+      synthesized: true,
+      low: { tier: synth.tier, value: SYNTHESIZED_LOW_VALUE, model, ...commandDetails(lowCommand) },
+      max: { tier: synth.tier, value: synth.value, model, ...commandDetails(highCommand) },
+    };
   }
   const lowCommand = buildTierCommand(resolved, pair.lowTier, issue);
   const highCommand = buildTierCommand(resolved, pair.highTier, issue);
