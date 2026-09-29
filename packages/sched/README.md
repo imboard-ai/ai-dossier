@@ -374,7 +374,37 @@ This applies to `issue:<n>` unit dispatch (`dispatchAssignments`). `batch:<id>` 
 through a separate pass with its own claim/reconcile logic — see
 [Batch dispatch (#523)](#batch-dispatch-523) below.
 
-### Supervised deployment (#679)
+### Supervised deployment (#679, #945)
+
+**The way to run the engine is `ai-dossier sched service install`** (run it from the project's
+checkout). The engine is safe to kill at any instant, but it cannot restart itself — the service is
+what makes it come back by itself, so no session ever has to start, stop or babysit it.
+
+```bash
+ai-dossier sched service install [--alert-issue <n>]   # systemd user unit; cron watchdog if no systemd
+ai-dossier sched service status                         # supervised? engine live? heartbeat?
+ai-dossier sched service uninstall
+```
+
+- **systemd** (default when a user manager is running): writes
+  `~/.config/systemd/user/dossier-sched-<project>.service` — `Restart=always` (a clean exit, such as a
+  self-upgrade, comes back too), `KillMode=process`, `WorkingDirectory` = the checkout, and the
+  node/nvm `PATH` at install time (absolute entries only). It runs `sched start --auto-upgrade`
+  (opt out with `--no-auto-upgrade`); output goes to the journal (`journalctl --user -u <unit>`) and
+  the durable trail is the project's `events.jsonl`. Run `loginctl enable-linger $USER` once so it
+  starts at boot without a login. Re-running `install` is idempotent; a changed unit is restarted
+  (agents keep running).
+- **cron fallback** (no systemd): a tagged crontab block with `@reboot` and a per-minute
+  `sched ensure-running` watchdog. The watchdog starts a detached engine (output to
+  `<sched-dir>/engine.log`) when no live engine holds the lease, after raising the once-per-episode
+  stale-lease alert; starts are throttled to one per 30 s so a crash loop cannot storm. The engine
+  takes the lease atomically, so two watchdogs — or a watchdog plus the systemd unit — never run two
+  engines. To stop the engine on purpose under the watchdog: `sched ensure-running --disable`
+  (`--enable` to resume).
+- `--no-activate` renders the unit / cron block without calling `systemctl` or `crontab`; `--print`
+  prints it.
+
+The manual shapes below remain valid, and explain the rules the service encodes.
 
 Two supported shapes, one rule: **dispatched agents must outlive the tick or engine that
 spawned them.** Agents are spawned detached and unref'd precisely so they survive a sched

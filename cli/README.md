@@ -1409,8 +1409,10 @@ respectively; `get --json` includes the comment's `author`.
 ```bash
 ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--more-members-expected] [--deps 100,104] [--tier mechanical|mid|strong] [--priority <n>] [--repo owner/name]
 ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
-ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--json]
-ai-dossier sched status [--json] [--anchors]   # ⚠ health warnings: long pause, stale lease, stuck / stale-closed slots (#776), kept worktrees on done batches (#791)
+ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--alert-issue <n>] [--json]
+ai-dossier sched service install [--mode systemd|cron] [--alert-issue <n>] [--no-auto-upgrade] | uninstall | status   # THE way to run the engine (#945): systemd user unit or cron watchdog, restarts it by itself
+ai-dossier sched ensure-running [--disable|--enable]   # the cron watchdog: start the engine if no live one holds the lease
+ai-dossier sched status [--json] [--anchors] [--alert]   # ⚠ health warnings: long pause, stale lease, stuck / stale-closed slots (#776), kept worktrees on done batches (#791)
 ai-dossier sched pause | resume
 ai-dossier sched resume --batch <id>   # gate-inconclusive: re-run the gate (#583); blocked over landed work (dissolve-refused / tail-blocked / members-mismatch / respawn-cap:tail): re-run gate + tail over the landed members (#822)
 ai-dossier sched stop (--issue 42 | --batch b1) [--reason "..."]
