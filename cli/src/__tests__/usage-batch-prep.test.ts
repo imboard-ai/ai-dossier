@@ -13,6 +13,7 @@ import {
   MAX_PREP_LOOKBACK_MS,
   prepWindows,
   readBatchPrep,
+  readPrepMarkers,
   recordBatchPrep,
 } from '../usage/batch-prep';
 import type { UsageRow } from '../usage/types';
@@ -158,6 +159,178 @@ describe('batchPrepTokens', () => {
       runsLog: path.join(home, 'runs.jsonl'),
     });
     expect(out.get('b-none')).toBeUndefined();
-    expect(out.get('b-1')).toEqual({ billable_tokens: 2 * 135, sessions: 1, messages: 2 });
+    expect(out.get('b-1')).toEqual({
+      billable_tokens: 2 * 135,
+      sessions: 1,
+      messages: 2,
+      basis: 'lookback-cap',
+      split: false,
+    });
+  });
+});
+
+/** A Claude Code transcript with one assistant message per timestamp (135 tokens each). */
+function writeTranscript(home: string, stamps: string[]): { projects: string } {
+  const projectsDir = path.join(home, 'claude', 'projects', '-x');
+  fs.mkdirSync(projectsDir, { recursive: true });
+  const lines = stamps.map((ts) =>
+    JSON.stringify({
+      type: 'assistant',
+      sessionId: SESSION,
+      timestamp: ts,
+      cwd: '/x',
+      message: {
+        id: `m-${ts}`,
+        model: 'claude-x',
+        role: 'assistant',
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_read_input_tokens: 100,
+          cache_creation_input_tokens: 20,
+        },
+      },
+    })
+  );
+  fs.writeFileSync(path.join(projectsDir, `${SESSION}.jsonl`), `${lines.join('\n')}\n`);
+  return { projects: path.join(home, 'claude', 'projects') };
+}
+
+function writeRun(runsLog: string, dossier: string, isoEnd: string, durationMs = 1000): void {
+  fs.appendFileSync(
+    runsLog,
+    `${JSON.stringify({ timestamp: isoEnd, dossier, duration_ms: durationMs, session_id: SESSION })}\n`
+  );
+}
+
+describe('prep-start marker (#899)', () => {
+  const rec = (ts: string, batch: string, members?: number) => ({
+    ts,
+    batch,
+    session_id: SESSION,
+    source: 'env' as const,
+    ...(members ? { members } : {}),
+  });
+
+  it('readPrepMarkers picks only batch-issues-preparation runs and backs out the duration', () => {
+    const home = tmpDir();
+    const log = path.join(home, 'runs.jsonl');
+    writeRun(log, 'imboard-ai/git/batch-issues-preparation', '2026-09-29T09:50:02Z', 2000);
+    writeRun(log, 'imboard-ai/git/full-cycle-issue', '2026-09-29T09:00:00Z');
+    fs.appendFileSync(log, 'not json batch-issues-preparation "session_id"\n');
+    expect(readPrepMarkers(log)).toEqual([
+      { session_id: SESSION, startMs: Date.parse('2026-09-29T09:50:00Z') },
+    ]);
+  });
+
+  it('starts the window at the marker, ignoring markers already spent on an earlier enqueue', () => {
+    const marker = (iso: string) => ({ session_id: SESSION, startMs: Date.parse(iso) });
+    const [w1, w2] = prepWindows(
+      [rec('2026-09-29T10:30:00Z', 'b-1'), rec('2026-09-29T13:00:00Z', 'b-2')],
+      [marker('2026-09-29T09:50:00Z'), marker('2026-09-29T12:40:00Z')]
+    );
+    expect(w1.basis).toBe('marker');
+    expect(w1.fromMs).toBeGreaterThanOrEqual(Date.parse('2026-09-29T09:50:00Z') - 1);
+    expect(w1.fromMs).toBeLessThan(Date.parse('2026-09-29T09:50:00Z'));
+    expect(w2.basis).toBe('marker');
+    expect(w2.fromMs).toBeGreaterThan(Date.parse('2026-09-29T10:30:00Z'));
+    // A marker from before the previous enqueue does not extend the later window.
+    const [, late] = prepWindows(
+      [rec('2026-09-29T10:30:00Z', 'b-1'), rec('2026-09-29T13:00:00Z', 'b-2')],
+      [marker('2026-09-29T09:50:00Z')]
+    );
+    expect(late.basis).toBe('prev-enqueue');
+    expect(late.fromMs).toBe(Date.parse('2026-09-29T10:30:00Z'));
+  });
+
+  it('excludes unrelated work before the prep started; labels the fallback when there is no marker', () => {
+    const home = tmpDir();
+    const schedRoot = path.join(home, 'sched');
+    const schedDir = path.join(schedRoot, 'proj');
+    // Hours of unrelated orchestration (07:00-09:00, 5 msgs), then prep (09:50-10:20, 3 msgs).
+    const { projects } = writeTranscript(home, [
+      '2026-09-29T07:00:00.000Z',
+      '2026-09-29T07:30:00.000Z',
+      '2026-09-29T08:00:00.000Z',
+      '2026-09-29T08:30:00.000Z',
+      '2026-09-29T09:00:00.000Z',
+      '2026-09-29T09:51:00.000Z',
+      '2026-09-29T10:00:00.000Z',
+      '2026-09-29T10:20:00.000Z',
+    ]);
+    const runsLog = path.join(home, 'runs.jsonl');
+    const paths = {
+      claudeProjectsDir: projects,
+      opencodeDb: path.join(home, 'none.db'),
+      schedRoot,
+      runsLog,
+    };
+    recordBatchPrep(schedDir, ['b-1'], SESSION, 'env', new Date('2026-09-29T10:30:00Z'));
+
+    const without = batchPrepTokens(schedDir, ['b-1'], paths).get('b-1');
+    expect(without).toMatchObject({ messages: 8, basis: 'lookback-cap' });
+
+    writeRun(runsLog, 'imboard-ai/git/batch-issues-preparation', '2026-09-29T09:50:01Z', 1000);
+    const withMarker = batchPrepTokens(schedDir, ['b-1'], paths).get('b-1');
+    expect(withMarker).toEqual({
+      billable_tokens: 3 * 135,
+      sessions: 1,
+      messages: 3,
+      basis: 'marker',
+      split: false,
+    });
+  });
+
+  it('splits a multi-batch enqueue by member count: per-batch sums equal the window total', () => {
+    const home = tmpDir();
+    const schedRoot = path.join(home, 'sched');
+    const schedDir = path.join(schedRoot, 'proj');
+    const stamps = Array.from(
+      { length: 12 },
+      (_, i) => `2026-09-29T10:${String(i).padStart(2, '0')}:00.000Z`
+    );
+    const { projects } = writeTranscript(home, stamps);
+    const paths = {
+      claudeProjectsDir: projects,
+      opencodeDb: path.join(home, 'none.db'),
+      schedRoot,
+      runsLog: path.join(home, 'runs.jsonl'),
+    };
+    recordBatchPrep(
+      schedDir,
+      ['b-1', 'b-2'],
+      SESSION,
+      'env',
+      new Date('2026-09-29T10:30:00Z'),
+      new Map([
+        ['b-1', 3],
+        ['b-2', 1],
+      ])
+    );
+    const out = batchPrepTokens(schedDir, undefined, paths);
+    const a = out.get('b-1');
+    const b = out.get('b-2');
+    expect((a?.billable_tokens ?? 0) + (b?.billable_tokens ?? 0)).toBe(12 * 135);
+    expect(a?.messages).toBe(9);
+    expect(b?.messages).toBe(3);
+    expect(a?.split && b?.split).toBe(true);
+    // Asking for one batch must not hand it its sibling's share.
+    expect(batchPrepTokens(schedDir, ['b-2'], paths).get('b-2')?.billable_tokens).toBe(3 * 135);
+  });
+
+  it('applyPrepWindows deals a shared window by weight and leaves single-batch rows whole', () => {
+    const windows = prepWindows([
+      rec('2026-09-29T10:30:00Z', 'b-1', 1),
+      rec('2026-09-29T10:30:00Z', 'b-2', 1),
+    ]);
+    const rows = Array.from({ length: 6 }, (_, i) => row({ ts: `2026-09-29T10:0${i}:00.000Z` }));
+    applyPrepWindows(rows, windows);
+    const per = new Map<string, number>();
+    for (const r of rows) per.set(r.batch ?? '-', (per.get(r.batch ?? '-') ?? 0) + 1);
+    expect([...per.entries()].sort()).toEqual([
+      ['b-1', 3],
+      ['b-2', 3],
+    ]);
+    expect(rows.every((r) => r.prep_split === 2 && r.role === 'prep')).toBe(true);
   });
 });

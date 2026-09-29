@@ -8,6 +8,7 @@
 #   bash scripts/refresh-fleet.sh --hosts wls,hcc    # subset of machines
 #   bash scripts/refresh-fleet.sh --profiles-file path # use a different profile source
 #   bash scripts/refresh-fleet.sh --profile-projects a,b # also sync per-project scheduler profile maps
+#   bash scripts/refresh-fleet.sh --usage-sync       # afterwards merge the per-host token ledgers (#782)
 #   bash scripts/refresh-fleet.sh imboard-ai/git/ship-issue   # extra dossiers to pull, appended
 #
 # WHY THIS EXISTS
@@ -50,6 +51,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOSTS_DEFAULT="wls,hcc,hcc2"
 HOSTS="$HOSTS_DEFAULT"
 CLI_ONLY=0
+USAGE_SYNC=0
 EXTRA_TARGETS=()
 PROFILE_FILE="${SCHED_PROFILE_FILE:-$SCRIPT_DIR/sched-fleet/dispatch-profiles.json}"
 BOOTSTRAP_FILE="${SCHED_BOOTSTRAP_FILE:-$SCRIPT_DIR/sched-fleet/bootstrap.sh}"
@@ -76,6 +78,7 @@ DOSSIERS=(
 while [ $# -gt 0 ]; do
   case "$1" in
     --cli-only) CLI_ONLY=1 ;;
+    --usage-sync) USAGE_SYNC=1 ;;
     --hosts) HOSTS="${2:?--hosts needs a comma-separated list}"; shift ;;
     --hosts=*) HOSTS="${1#*=}" ;;
     --profiles-file) PROFILE_FILE="${2:?--profiles-file needs a JSON path}"; shift ;;
@@ -553,6 +556,27 @@ for host in "${HOST_LIST[@]}"; do
   fi
   echo
 done
+
+# #782: after every host has the current CLI, exchange the persisted token ledgers so
+# each host can answer `usage window --hosts all`. Runs from the driving host, which
+# is the only one with ssh reach (usage sync pulls from and pushes to the others).
+if [ "$USAGE_SYNC" -eq 1 ]; then
+  echo "== usage sync =="
+  OTHERS=()
+  for host in "${HOST_LIST[@]}"; do
+    { [ "$host" = "wls" ] || [ "$host" = "$(hostname)" ]; } || OTHERS+=("$host")
+  done
+  if [ "${#OTHERS[@]}" -eq 0 ]; then
+    echo "    skip no remote hosts selected"
+  else
+    OTHERS_CSV=$(IFS=,; echo "${OTHERS[*]}")
+    out=$(bash -lc "$REMOTE_PRELUDE
+\"\$AD\" usage sync --hosts '$OTHERS_CSV'" 2>&1); rc=$?
+    printf '%s\n' "$out" | sed 's/^/    /'
+    [ $rc -ne 0 ] && FAILED=1
+  fi
+  echo
+fi
 
 echo "== summary =="
 for host in "${HOST_LIST[@]}"; do

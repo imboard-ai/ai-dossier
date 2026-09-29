@@ -7,9 +7,17 @@
  *
  * Every view reads the source stores on demand (Claude Code transcripts,
  * opencode.db, sched dispatch logs/events, runs.jsonl) — read-only and
- * idempotent; nothing is written anywhere.
+ * idempotent. Multi-host (#782): `usage sync` persists this host's rows under
+ * ~/.dossier/usage and exchanges them with other hosts over ssh; the views take
+ * `--hosts all|<a,b>` to read the merged ledger.
+ *
+ *   ai-dossier usage sync [--hosts hcc,hcc2]     refresh + exchange with hosts
+ *   ai-dossier usage export [--all] [--out f]    this host's bundle (JSONL)
+ *   ai-dossier usage import <file|->             merge another host's bundle
+ *   ai-dossier usage hosts                       what the merged ledger holds
  */
 
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import type { Command } from 'commander';
 import { formatCost } from '../cost-format';
@@ -30,6 +38,18 @@ import {
   summarizeSessions,
   totalsOf,
 } from '../usage/ledger';
+import {
+  buildBundle,
+  hostFile,
+  importBundle,
+  isValidHostId,
+  listHosts,
+  localHostId,
+  mergedView,
+  readHostFile,
+  usageStoreDir,
+} from '../usage/store';
+import { refreshLocal, syncWithRemotes } from '../usage/sync';
 import type { Ledger, UsageRow } from '../usage/types';
 
 const MS: Record<string, number> = {
@@ -83,7 +103,57 @@ function clip(text: string | null, max: number): string {
 interface FilterOptions {
   provider?: string;
   source?: string;
+  /** `all` | `local` | comma-separated host ids — read the merged persisted ledger (#782). */
+  hosts?: string;
 }
+
+/** `--hosts` → host selection: undefined = live local only (legacy), null = every host, else the listed hosts. */
+function parseHostsOption(
+  spec: string | undefined,
+  local: string
+): readonly string[] | null | undefined {
+  if (spec === undefined) return undefined;
+  const list = spec
+    .split(',')
+    .map((h) => h.trim())
+    .filter(Boolean);
+  if (list.length === 0) fail([`--hosts needs 'all', 'local', or host ids (got '${spec}')`]);
+  if (list.includes('all')) return null;
+  const hosts = list.map((h) => (h === 'local' ? local : h));
+  for (const h of hosts) if (!isValidHostId(h)) fail([`--hosts: invalid host id '${h}'`]);
+  return hosts;
+}
+
+/** Live local collection, unioned with the persisted multi-host ledger when `--hosts` is given. */
+function collectForReport(
+  opts: FilterOptions,
+  sinceMs: number,
+  untilMs: number,
+  deps: WindowDeps
+): Ledger & { hosts: string[] } {
+  const local = deps.host ?? localHostId();
+  const ledger = collectLedger({
+    sinceMs,
+    untilMs,
+    paths: deps.paths ?? defaultLedgerPaths(),
+    host: local,
+    openOpenCode: deps.openOpenCode,
+  });
+  const selection = parseHostsOption(opts.hosts, local);
+  if (selection === undefined) return { ...ledger, hosts: [local] };
+  const merged = mergedView(
+    deps.storeDir ?? usageStoreDir(),
+    local,
+    ledger,
+    selection,
+    sinceMs,
+    untilMs
+  );
+  return { ...ledger, rows: merged.rows, limits: merged.limits, hosts: merged.hosts };
+}
+
+const HOST_SORT = (a: GroupTotals, b: GroupTotals) =>
+  b.total - a.total || a.key.localeCompare(b.key);
 
 function filterRows(rows: readonly UsageRow[], f: FilterOptions): UsageRow[] {
   const provider = f.provider?.toLowerCase();
@@ -128,6 +198,8 @@ export interface WindowDeps {
   paths?: LedgerPaths;
   nowMs?: number;
   host?: string;
+  /** Persisted-ledger directory (tests); default `~/.dossier/usage`. */
+  storeDir?: string;
   openOpenCode?: CollectOptions['openOpenCode'];
 }
 
@@ -135,6 +207,9 @@ export interface WindowReport {
   since: string;
   until: string;
   host: string;
+  /** Hosts whose rows the report covers (#782). */
+  hosts: string[];
+  by_host: GroupTotals[];
   collectors: Ledger['collectors'];
   model_coverage: number;
   totals: ReturnType<typeof totalsOf>;
@@ -161,13 +236,7 @@ export function buildWindowReport(opts: WindowOptions, deps: WindowDeps = {}): W
 
   // Collect back far enough that a limit hit early in the window still has
   // its full preceding window of consumers.
-  const ledger = collectLedger({
-    sinceMs: sinceMs - limitWindowMs,
-    untilMs,
-    paths: deps.paths ?? defaultLedgerPaths(),
-    host: deps.host,
-    openOpenCode: deps.openOpenCode,
-  });
+  const ledger = collectForReport(opts, sinceMs - limitWindowMs, untilMs, deps);
   const allRows = filterRows(ledger.rows, opts);
   const rows = allRows.filter((r) => Date.parse(r.ts) >= sinceMs);
   const limits = collapseLimitEvents(
@@ -194,6 +263,8 @@ export function buildWindowReport(opts: WindowOptions, deps: WindowDeps = {}): W
     since: new Date(sinceMs).toISOString(),
     until: new Date(untilMs).toISOString(),
     host: deps.host ?? os.hostname(),
+    hosts: ledger.hosts,
+    by_host: groupRows(rows, (r) => r.host).sort(HOST_SORT),
     collectors: ledger.collectors,
     model_coverage: modelCoverage(rows),
     totals,
@@ -212,7 +283,9 @@ export function buildWindowReport(opts: WindowOptions, deps: WindowDeps = {}): W
 export function renderWindowReport(report: WindowReport): string {
   const out: string[] = [];
   const t = report.totals;
-  out.push(`Usage window ${report.since} → ${report.until}  [host ${report.host}]`);
+  out.push(
+    `Usage window ${report.since} → ${report.until}  [${report.hosts.length > 1 ? `hosts ${report.hosts.join(', ')}` : `host ${report.host}`}]`
+  );
   out.push(
     `Collectors: ${report.collectors.map((c) => `${c.source}=${c.status === 'ok' ? c.rows : c.status}`).join('  ')}`
   );
@@ -226,6 +299,16 @@ export function renderWindowReport(report: WindowReport): string {
   if (t.messages === 0) {
     out.push('\nNo usage recorded in this window.');
   } else {
+    if (report.by_host.length > 1) {
+      out.push('\nBy host:');
+      out.push(
+        renderTable(
+          ['Host', ...TOKEN_HEADERS, 'Share'],
+          report.by_host.map((g) => [g.key, ...tokenCells(g), pct(g.total, t.total)]),
+          { align: ['left', ...TOKEN_ALIGN, 'right'], separator: true }
+        )
+      );
+    }
     out.push('\nBy model × source:');
     out.push(
       renderTable(
@@ -354,6 +437,8 @@ export interface ScopeReport {
   scope: { batch: string | null; issue: number | null };
   since: string;
   until: string;
+  hosts: string[];
+  by_host: GroupTotals[];
   collectors: Ledger['collectors'];
   model_coverage: number;
   totals: ReturnType<typeof totalsOf>;
@@ -370,13 +455,7 @@ export function buildScopeReport(opts: ScopeOptions, deps: WindowDeps = {}): Sco
   if (opts.issue !== undefined && (issue === null || Number.isNaN(issue))) {
     fail([`--issue must be an issue number (got '${opts.issue}')`]);
   }
-  const ledger = collectLedger({
-    sinceMs,
-    untilMs: nowMs,
-    paths: deps.paths ?? defaultLedgerPaths(),
-    host: deps.host,
-    openOpenCode: deps.openOpenCode,
-  });
+  const ledger = collectForReport(opts, sinceMs, nowMs, deps);
   const rows = filterRows(ledger.rows, opts).filter(
     (r) => (!opts.batch || r.batch === opts.batch) && (issue === null || r.issue === issue)
   );
@@ -384,6 +463,8 @@ export function buildScopeReport(opts: ScopeOptions, deps: WindowDeps = {}): Sco
     scope: { batch: opts.batch ?? null, issue },
     since: new Date(sinceMs).toISOString(),
     until: new Date(nowMs).toISOString(),
+    hosts: ledger.hosts,
+    by_host: groupRows(rows, (r) => r.host).sort(HOST_SORT),
     collectors: ledger.collectors,
     model_coverage: modelCoverage(rows),
     totals: totalsOf(rows),
@@ -411,6 +492,16 @@ export function renderScopeReport(report: ScopeReport): string {
   out.push(
     `Total: ${formatTokens(t.total)} tokens · model attributed: ${pct(report.model_coverage, 1)}${t.cost_usd ? ` · recorded cost ${formatCost(t.cost_usd)}` : ''}`
   );
+  if (report.by_host.length > 1) {
+    out.push('\nBy host:');
+    out.push(
+      renderTable(
+        ['Host', ...TOKEN_HEADERS, 'Share'],
+        report.by_host.map((g) => [g.key, ...tokenCells(g), pct(g.total, t.total)]),
+        { align: ['left', ...TOKEN_ALIGN, 'right'], separator: true }
+      )
+    );
+  }
   out.push('\nSessions:');
   out.push(renderSessionTable(report.sessions, t.total));
   out.push('\nBy model:');
@@ -438,11 +529,14 @@ export function registerUsageCommand(program: Command): void {
     .option('--issue <n>', 'Show every session attributed to an issue')
     .option(
       '--since <when>',
-      'How far back --batch/--issue look: a duration (30d) or ISO date',
-      '30d'
+      'How far back --batch/--issue look: a duration or ISO date (default 30d)'
     )
     .option('--provider <name>', 'Only this provider (anthropic, openai, zai, …)')
     .option('--source <list>', 'Only these sources: claude-code,opencode')
+    .option(
+      '--hosts <list>',
+      "Read the merged multi-host ledger: 'all', 'local', or host ids (a,b)"
+    )
     .option('--json', 'Output JSON')
     .action((opts: ScopeOptions) => {
       if (!opts.batch && opts.issue === undefined) {
@@ -464,6 +558,10 @@ export function registerUsageCommand(program: Command): void {
     .option('--source <list>', 'Only these sources: claude-code,opencode')
     .option('--top <n>', 'How many top sessions to list', '10')
     .option('--limit-window <duration>', 'Look-back used to explain each limit event', '5h')
+    .option(
+      '--hosts <list>',
+      "Read the merged multi-host ledger: 'all', 'local', or host ids (a,b)"
+    )
     .option('--json', 'Output JSON')
     .action((_opts: WindowOptions, command: Command) => {
       // optsWithGlobals: without positional options on the root program,
@@ -481,6 +579,10 @@ export function registerUsageCommand(program: Command): void {
     .option('--provider <name>', 'Only this provider')
     .option('--source <list>', 'Only these sources: claude-code,opencode')
     .option('--top <n>', 'How many top sessions to list', '10')
+    .option(
+      '--hosts <list>',
+      "Read the merged multi-host ledger: 'all', 'local', or host ids (a,b)"
+    )
     .option('--interval <duration>', 'Refresh interval', '30s')
     .option('--iterations <n>', 'Stop after this many renders (default: until interrupted)')
     .action(async (_opts: WindowOptions, command: Command) => {
@@ -497,5 +599,177 @@ export function registerUsageCommand(program: Command): void {
         console.log(`\n(refreshing every ${opts.interval ?? '30s'} — Ctrl-C to stop)`);
         if (i + 1 < max) await new Promise((resolve) => setTimeout(resolve, intervalMs));
       }
+    });
+
+  registerLedgerCommands(cmd);
+}
+
+// ---------------------------------------------------------------------------
+// persisted ledger + multi-host merge (#782)
+// ---------------------------------------------------------------------------
+
+function readStdin(): string {
+  return fs.readFileSync(0, 'utf-8');
+}
+
+function sinceOrFail(spec: string | undefined, nowMs: number): number | undefined {
+  if (spec === undefined) return undefined;
+  const ms = parseSince(spec, nowMs);
+  if (ms === null) fail([`--since must be a duration (30d) or ISO date (got '${spec}')`]);
+  return ms;
+}
+
+function registerLedgerCommands(cmd: Command): void {
+  cmd
+    .command('sync')
+    .description(
+      "Refresh this host's persisted ledger (~/.dossier/usage); with --hosts, exchange it with those hosts over ssh (pull + push, idempotent)"
+    )
+    .option('--hosts <list>', 'Other hosts to exchange with over ssh (e.g. hcc,hcc2)')
+    .option(
+      '--since <when>',
+      'Re-collect / exchange from here (default: incremental cursor, first run 30d)'
+    )
+    .option('--no-push', 'Only pull remote rows')
+    .option('--no-pull', 'Only push local rows')
+    .option('--json', 'Output JSON')
+    .action((_o, command: Command) => {
+      const opts = command.optsWithGlobals<{
+        hosts?: string;
+        since?: string;
+        push?: boolean;
+        pull?: boolean;
+        json?: boolean;
+      }>();
+      const nowMs = Date.now();
+      const sinceMs = sinceOrFail(opts.since, nowMs);
+      const local = refreshLocal({ nowMs }, sinceMs);
+      const remoteHosts = (opts.hosts ?? '')
+        .split(',')
+        .map((h) => h.trim())
+        .filter(Boolean);
+      const remotes = remoteHosts.length
+        ? syncWithRemotes(
+            { hosts: remoteHosts, sinceMs, push: opts.push, pull: opts.pull },
+            { nowMs }
+          )
+        : [];
+      if (opts.json) {
+        console.log(JSON.stringify({ local, remotes }, null, 2));
+      } else {
+        console.log(
+          `local ${local.host}: collected ${local.collected} rows since ${local.since} (+${local.added} new, ${local.updated} refreshed records) — ledger holds ${local.total}`
+        );
+        for (const r of remotes) {
+          if (!r.ok) {
+            console.log(`  ${r.host}: FAILED — ${r.error}`);
+            continue;
+          }
+          const p = r.pulled;
+          console.log(
+            `  ${r.host}: pulled ${p ? `${p.added} new / ${p.updated} refreshed / ${p.unchanged} unchanged (hosts: ${p.hosts.join(',') || '-'})` : 'skipped'}; pushed ${r.pushed_rows ?? 'skipped'} rows${r.push ? ` (+${r.push.added} new on ${r.host})` : ''}`
+          );
+        }
+      }
+      if (remotes.some((r) => !r.ok)) process.exitCode = 1;
+    });
+
+  cmd
+    .command('export')
+    .description("Write a JSONL bundle of this host's ledger (or --all hosts) to stdout or --out")
+    .option('--all', 'Include every persisted host, not just this one (what sync pulls)')
+    .option('--since <when>', 'Only rows at or after this (duration or ISO date)')
+    .option('--no-refresh', 'Do not re-collect local stores first')
+    .option('--out <file>', 'Write to a file instead of stdout')
+    .action((_o, command: Command) => {
+      const opts = command.optsWithGlobals<{
+        all?: boolean;
+        since?: string;
+        refresh?: boolean;
+        out?: string;
+      }>();
+      const nowMs = Date.now();
+      const host = localHostId();
+      if (opts.refresh !== false) refreshLocal({ nowMs });
+      const bundle = buildBundle(
+        usageStoreDir(),
+        host,
+        opts.all ? null : [host],
+        sinceOrFail(opts.since, nowMs) ?? 0
+      );
+      if (opts.out) {
+        fs.writeFileSync(opts.out, bundle.text);
+        console.error(`exported ${bundle.rows} rows to ${opts.out}`);
+      } else {
+        process.stdout.write(bundle.text);
+      }
+    });
+
+  cmd
+    .command('import <file>')
+    .description(
+      "Merge another host's bundle (a file, or '-' for stdin) into the ledger — idempotent"
+    )
+    .option('--json', 'Output JSON')
+    .action((file: string, _o, command: Command) => {
+      const opts = command.optsWithGlobals<{ json?: boolean }>();
+      let text: string;
+      try {
+        text = file === '-' ? readStdin() : fs.readFileSync(file, 'utf-8');
+      } catch (err) {
+        return fail([`cannot read ${file}: ${(err as Error).message}`]);
+      }
+      let result: ReturnType<typeof importBundle>;
+      try {
+        result = importBundle(usageStoreDir(), text, localHostId());
+      } catch (err) {
+        return fail([(err as Error).message]);
+      }
+      console.log(
+        opts.json
+          ? JSON.stringify(result)
+          : `imported: +${result.added} new, ${result.updated} refreshed, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.ignored_local} ignored (own host) — hosts: ${result.hosts.join(', ') || '-'}`
+      );
+    });
+
+  cmd
+    .command('hosts')
+    .description('List the hosts in the persisted ledger with row counts and time range')
+    .option('--json', 'Output JSON')
+    .action((_o, command: Command) => {
+      const opts = command.optsWithGlobals<{ json?: boolean }>();
+      const dir = usageStoreDir();
+      const hosts = listHosts(dir).map((host) => {
+        const d = readHostFile(hostFile(dir, host));
+        const ts = [...d.rows.values()].map((r) => r.ts).sort();
+        return {
+          host,
+          rows: d.rows.size,
+          limits: d.limits.size,
+          first: ts[0] ?? null,
+          last: ts[ts.length - 1] ?? null,
+          total_tokens: totalsOf([...d.rows.values()]).total,
+        };
+      });
+      if (opts.json) {
+        console.log(JSON.stringify({ local: localHostId(), dir, hosts }, null, 2));
+        return;
+      }
+      console.log(`Persisted usage ledger: ${dir} (this host: ${localHostId()})`);
+      console.log(
+        hosts.length === 0
+          ? 'No hosts yet — run `ai-dossier usage sync`.'
+          : renderTable(
+              ['Host', 'Rows', 'Tokens', 'First', 'Last'],
+              hosts.map((h) => [
+                h.host,
+                String(h.rows),
+                formatTokens(h.total_tokens),
+                h.first?.slice(0, 16) ?? '-',
+                h.last?.slice(0, 16) ?? '-',
+              ]),
+              { align: ['left', 'right', 'right', 'left', 'left'], separator: true }
+            )
+      );
     });
 }
