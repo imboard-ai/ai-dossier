@@ -278,4 +278,57 @@ describe('refresh-fleet.sh', () => {
     expect(res.out).toContain('--profile-projects');
     expect(res.out).toContain('deliberately NOT passed');
   });
+
+  it('mentions collisions on the final line even when another skill failed', () => {
+    const box = fixture(undefined);
+    const json = skillJson({ ok: 0, skipped: 0, failed: 1, collisions: 1 }, [
+      { name: 'imboard-ai/skills/a-skill', status: 'failed', message: 'boom' },
+      { name: 'imboard-ai/qa/b-skill', status: 'collision', message: 'basename collides' },
+    ]);
+    const res = runRefreshRaw(box, [], { STUB_SKILL_JSON: json, STUB_SKILL_RC: '1' });
+
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain('ONE OR MORE HOSTS FAILED');
+    expect(res.out).toContain('1 host(s) have skill collisions');
+  });
+
+  it('fails when the summary counts failures that no row explains', () => {
+    const box = fixture(undefined);
+    const json = skillJson({ ok: 1, skipped: 0, failed: 2, collisions: 0 });
+    const res = runRefreshRaw(box, [], { STUB_SKILL_JSON: json });
+
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain('FAIL skill (summary) — summary.failed=2');
+  });
+
+  it('fails on exit 0 when a row reports failed', () => {
+    const box = fixture(undefined);
+    const json = skillJson({ ok: 0, skipped: 0, failed: 1, collisions: 0 }, [
+      { name: 'imboard-ai/skills/a-skill', status: 'failed', message: 'boom' },
+    ]);
+    const res = runRefreshRaw(box, [], { STUB_SKILL_JSON: json, STUB_SKILL_RC: '0' });
+
+    expect(res.status).not.toBe(0);
+    expect(res.out).toContain('FAIL skill imboard-ai/skills/a-skill — boom');
+  });
+
+  it('survives a null entry in results without crashing the parser', () => {
+    const box = fixture(undefined);
+    const json = JSON.stringify({
+      success: true,
+      summary: { ok: 1, skipped: 0, failed: 0, collisions: 0 },
+      results: [null],
+    });
+    const res = runRefreshRaw(box, [], { STUB_SKILL_JSON: json });
+
+    expect(res.status).toBe(0);
+  });
+
+  it('accepts a v-prefixed host version', () => {
+    const box = fixture(undefined);
+    const res = runRefreshRaw(box, [], { STUB_VERSION: 'v0.82.0' });
+
+    expect(res.status).toBe(0);
+    expect(calls(box)).toContain('install-skill --all --owner imboard-ai --fresh --json');
+  });
 });
