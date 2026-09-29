@@ -484,6 +484,10 @@ export interface HeldIssue {
   packages: string[];
   readiness: number;
   reason: 'review-full-cap' | 'max-members';
+  /** Why `review=full` (prescreen findings); empty for `light`. */
+  review_reasons: string[];
+  /** What happens to it — held for the next batch-prep run, never an extra small batch (#951). */
+  note: string;
 }
 
 export interface BackfillCandidate {
@@ -592,11 +596,23 @@ function toMember(a: AssessedIssue, source: ComposedMember['source']): ComposedM
   };
 }
 
+function heldNote(a: AssessedIssue, reason: HeldIssue['reason'], opts: ComposeOptions): string {
+  const why =
+    reason === 'review-full-cap'
+      ? `the ≤ ${opts.maxFullReview} review=full cap is taken by higher-ranked members`
+      : `the batch is at max_members=${opts.maxMembers}`;
+  return `Held for the next batch — ${why}; submit #${a.issue} again in the next batch-prep run (no extra small batch is opened for it).`;
+}
+
 /**
  * Propose a composition from assessed issues. Picks first (they are the operator's intent) —
  * all admissible picks join, bounded by `maxMembers` and the `review=full` cap; then, while the
- * set is below its target (`minMembers` with picks, `maxMembers` from the backlog alone), backfill
- * from admissible backlog issues. Member order: picks, then backfill, each in selection order.
+ * set is below its target, backfill from admissible backlog issues. The picks-mode target is
+ * `minMembers`, raised to the number of admissible picks (capped at `maxMembers`) so that a pick
+ * held over the `review=full` cap has its slot refilled — #951 Option (b): an over-cap pick is
+ * held for the next batch-prep run and its slot backfilled (light while the cap is full), never
+ * split into an extra small batch. Backlog-only mode fills to `maxMembers`. Member order: picks,
+ * then backfill, each in selection order.
  */
 export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): CompositionResult {
   const admissible = assessed.filter((a) => a.admissible);
@@ -613,6 +629,8 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
       packages: a.packages,
       readiness: a.readiness.score,
       reason,
+      review_reasons: a.review === 'full' ? a.prescreen.map((r) => r.message) : [],
+      note: heldNote(a, reason, opts),
     });
 
   // 1. Operator picks — every admissible pick, up to the caps.
@@ -625,7 +643,9 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
   }
 
   // 2. Backfill / backlog fill.
-  const target = opts.picksMode ? Math.min(opts.minMembers, opts.maxMembers) : opts.maxMembers;
+  const target = opts.picksMode
+    ? Math.min(Math.max(opts.minMembers, picks.length), opts.maxMembers)
+    : opts.maxMembers;
   const backFill = fill(backlog, pickFill.taken, target, opts.maxFullReview);
   for (const a of backFill.taken)
     members.push(toMember(a, opts.picksMode ? 'backfill' : 'backlog'));
@@ -672,6 +692,11 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
       members.length === 1
         ? `Do not form a batch — run #${members[0].issue} as a full-cycle issue.`
         : 'Do not form a batch — nothing admissible.';
+  }
+  // Held PICKS are the operator's intent deferred — name them so the next run picks them up.
+  const heldPicks = held.filter((h) => h.source === 'pick');
+  if (heldPicks.length > 0) {
+    recommendation += ` Held for the next batch-prep run: ${heldPicks.map((h) => `#${h.issue} (${h.reason})`).join(', ')}.`;
   }
 
   return { status, members, held, backfill, shared_packages: shared, recommendation };

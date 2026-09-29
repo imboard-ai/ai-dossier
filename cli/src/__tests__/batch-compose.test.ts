@@ -353,6 +353,73 @@ describe('composeBatch', () => {
     expect(r.backfill).toEqual([]);
   });
 
+  describe('#951 Option (b): over-cap review=full PICKS are held and their slot backfilled light', () => {
+    it("refills a held pick's slot even when the remaining picks already reach min_members", () => {
+      // 5 picks, 3 review=full: 2 full + 2 light = 4 ≥ min_members, 1 held. Before #951 the
+      // held pick's slot stayed empty (backfill only ran below min_members).
+      const r = composeBatch(
+        [
+          assessed(1, { review: 'full' }),
+          assessed(2, { review: 'full' }),
+          assessed(3, { review: 'full' }),
+          assessed(4),
+          assessed(5),
+          assessed(20, { source: 'backlog', review: 'full' }),
+          assessed(21, { source: 'backlog' }),
+        ],
+        OPTS
+      );
+      expect(r.held.map((h) => [h.issue, h.reason])).toEqual([[3, 'review-full-cap']]);
+      // Picks in selection (rank) order — light before full at equal readiness — then backfill.
+      expect(r.members.map((m) => [m.issue, m.source])).toEqual([
+        [4, 'pick'],
+        [5, 'pick'],
+        [1, 'pick'],
+        [2, 'pick'],
+        [21, 'backfill'],
+      ]);
+      expect(r.members.filter((m) => m.review === 'full')).toHaveLength(2);
+    });
+
+    it('never backfills past max_members for a held slot', () => {
+      const picks = [
+        assessed(1, { review: 'full' }),
+        assessed(2, { review: 'full' }),
+        assessed(3, { review: 'full' }),
+        ...[4, 5, 6, 7].map((n) => assessed(n)),
+        assessed(20, { source: 'backlog' }),
+      ];
+      const r = composeBatch(picks, OPTS);
+      expect(r.members).toHaveLength(6);
+      expect(r.members.some((m) => m.source === 'backfill')).toBe(false);
+    });
+
+    it('a held pick carries its review reasons, a next-run note, and is named in the recommendation', () => {
+      const why = { check: 'text-floor' as const, message: "matches 'rule4-deploy-pipeline'" };
+      const r = composeBatch(
+        [
+          assessed(4355, { review: 'full', packages: ['packages/backend'] }),
+          assessed(4239, { review: 'full', packages: ['packages/backend'] }),
+          assessed(3549, { review: 'full', prescreen: [why] }),
+          assessed(1513, { source: 'backlog', packages: ['scripts'] }),
+        ],
+        OPTS
+      );
+      expect(r.members.map((m) => m.issue)).toEqual([4239, 4355, 1513]);
+      const [held] = r.held;
+      expect(held).toEqual(
+        expect.objectContaining({
+          issue: 3549,
+          reason: 'review-full-cap',
+          review_reasons: [why.message],
+        })
+      );
+      expect(held.note).toMatch(/next batch-prep run/);
+      expect(held.note).toContain('#3549');
+      expect(r.recommendation).toContain('#3549 (review-full-cap)');
+    });
+  });
+
   it('is deterministic — same input, same output', () => {
     const set = [
       assessed(5, { packages: ['cli'] }),

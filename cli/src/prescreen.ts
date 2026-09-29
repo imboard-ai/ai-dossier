@@ -8,8 +8,9 @@
  * text-keyword approximation of the risk-floor/new-package/deploy-pipeline rules, rule-9 open
  * dependencies, and — when a plan:v1 artifact is already on the issue — the path-based risk
  * floor and the >8-files rule). Everything it does not catch (rule 2 beyond the `migration`
- * keyword, rule 7 hard rollback, rule 8 visual/browser review, rules 5/6 diff/file size without
- * a plan artifact, rule 10 confidence) falls through to the classifier's own bounded
+ * keyword, rule 5 file count without a plan artifact, rule 6 predicted diff — no diff signal at
+ * all: a plan:v1 artifact carries predicted files only —, rule 7 hard rollback, rule 8
+ * visual/browser review, rule 10 confidence) falls through to the classifier's own bounded
  * mechanical-tier pass, which is the intended safety net — not a gap this module needs to close.
  *
  * v2 (#772): two outputs. `verdict: full` only for the EXCLUDING checks;

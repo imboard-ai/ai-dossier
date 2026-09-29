@@ -391,7 +391,11 @@ function renderText(r: ComposeReport): void {
   if (r.held.length > 0) {
     line();
     line('Admissible but held out:');
-    for (const h of r.held) line(`  #${h.issue}  review=${h.review}  ${h.reason}  ${h.title}`);
+    for (const h of r.held) {
+      line(`  #${h.issue}  review=${h.review}  ${h.reason}  (${h.source})  ${h.title}`);
+      for (const why of h.review_reasons) line(`      full because: ${why}`);
+      line(`      ${h.note}`);
+    }
   }
   if (r.excluded.length > 0) {
     line();
