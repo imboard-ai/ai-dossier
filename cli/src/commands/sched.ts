@@ -63,6 +63,7 @@ import {
   issueCloseReader,
   Journal,
   type KeptWorktreeReader,
+  killSlotAgent,
   LIVE_SLOT_STATUSES,
   LockTimeoutError,
   labelBlockReason,
@@ -1967,9 +1968,7 @@ function registerAbandonSubcommand(cmd: Command): void {
             // running in one of the batch's slots (a parallel member holds its
             // own) would keep working a unit the engine is about to redispatch.
             for (const slot of slotsForBatch(state, opts.batch as string)) {
-              if (slot.pid !== null && spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
-                spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
-              }
+              killSlotAgent(spawnDeps, slot);
             }
             const r = abandonBatch(state, opts.batch as string, reason);
             return { state: r.state, result: { requeued: r.requeued, anchor } };
@@ -2242,9 +2241,7 @@ function registerStopSubcommand(cmd: Command): void {
             : state.slots.filter((candidate) => candidate.unit === unit);
           let terminated = false;
           for (const slot of slots) {
-            if (slot.pid !== null && spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
-              terminated = spawnDeps.kill(slot.pid, slot.pid_start ?? undefined) || terminated;
-            }
+            terminated = killSlotAgent(spawnDeps, slot) || terminated;
           }
           const stopped = opts.batch
             ? stopBatch(state, opts.batch, opts.reason)

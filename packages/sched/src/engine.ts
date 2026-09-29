@@ -86,6 +86,7 @@ import {
   escalateTier,
   fileSizeOrZero,
   journalCmdModelFields,
+  killSlotAgent,
   priorWorkBranch,
   priorWorkInstruction,
   type ResolvedDispatch,
@@ -449,13 +450,7 @@ function journalSlotReleased(
 /** Kill the agent holding `unit`'s slot, if it is alive. */
 function killUnitAgent(ctx: TickCtx, state: SchedState, unit: string): void {
   const slot = slotOf(state, unit);
-  if (
-    slot &&
-    slot.pid !== null &&
-    ctx.deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
-  ) {
-    ctx.deps.spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
-  }
+  if (slot) killSlotAgent(ctx.deps.spawnDeps, slot);
 }
 
 // --- Poll (outside the lock) ---

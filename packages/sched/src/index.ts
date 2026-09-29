@@ -105,6 +105,7 @@ export {
   journalCmdModelFields,
   KILL_ESCALATION_MS,
   type KillSignal,
+  killSlotAgent,
   memberDispatchTier,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
