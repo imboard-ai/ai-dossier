@@ -38,6 +38,7 @@
   --muted: #9ba2ab;
   --line: #23272d;
   --line-strong: #363c45;
+  --input-line: #6b7380;
   --accent: #34d399;
   --accent-fg: #04140d;
   --accent-soft: rgba(52, 211, 153, 0.12);
@@ -72,6 +73,7 @@
     --muted: #4f5660;
     --line: #e3e6ea;
     --line-strong: #cdd2d9;
+    --input-line: #8a929c;
     --accent: #047857;
     --accent-fg: #ffffff;
     --accent-soft: rgba(4, 120, 87, 0.08);
@@ -113,10 +115,10 @@ a:focus-visible,
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
-summary:focus-visible {
+summary:focus-visible,
+pre:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
-  border-radius: 4px;
 }
 ::selection {
   background: var(--accent-soft);

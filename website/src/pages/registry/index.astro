@@ -84,23 +84,24 @@ const stamp = fetchedAt.slice(0, 16).replace('T', ' ') + ' UTC';
   .filters { display: flex; gap: 16px; flex-wrap: wrap; margin: 24px 0 8px; }
   .filters label { display: flex; flex-direction: column; font-size: .8rem; font-weight: 500; color: var(--muted); gap: 6px; }
   .filters input, .filters select {
-    font: inherit; font-size: .95rem; padding: 9px 12px; border-radius: var(--radius-sm); border: 1px solid var(--line-strong);
+    font: inherit; font-size: .95rem; padding: 9px 12px; border-radius: var(--radius-sm); border: 1px solid var(--input-line);
     background: var(--bg-soft); color: var(--fg); min-width: 220px; transition: border-color .15s;
   }
   .filters input:hover, .filters select:hover { border-color: var(--muted); }
-  #count { font-size: .85rem; }
+  #count { font-size: .85rem; min-height: 1.65em; }
   .grid { list-style: none; padding: 0; margin: 16px 0 0; display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
   .grid li {
     position: relative; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius);
     padding: 18px 20px 16px; background: var(--bg-soft); min-width: 0; transition: border-color .2s, background-color .2s, transform .2s;
   }
   .grid li:hover { border-color: var(--accent-line); background: var(--bg-raised); transform: translateY(-2px); }
-  .grid li:focus-within { border-color: var(--accent); }
+  .grid li:has(a:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
   .grid li[hidden] { display: none; }
   .grid h2 { font-size: var(--step-1); margin: 0 0 4px; }
   .grid h2 a { color: var(--fg); text-decoration: none; }
   .grid h2 a::after { content: ''; position: absolute; inset: 0; border-radius: var(--radius); }
   .grid h2 a:focus-visible { outline: none; }
+  .name, .desc, .meta { position: relative; z-index: 1; }
   .name { margin: 0 0 10px; }
   .name code { background: none; border: 0; padding: 0; color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
   .desc { margin: 0 0 14px; font-size: .92rem; color: var(--muted); flex: 1; }
