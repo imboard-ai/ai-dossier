@@ -441,6 +441,13 @@ export interface QueueEntry {
    */
   pr_watch_waiting_ticks: number;
   /**
+   * #887: `<pr>@<ISO time>` — when the watch first saw this parked PR with no auto-merge
+   * request and no confirmed watcher workflow. Optional (absent on older state); cleared
+   * the moment the condition stops holding. Keyed by PR number so a re-park elsewhere
+   * never inherits a stale onset.
+   */
+  no_merge_mechanism_since?: string | null;
+  /**
    * #776: ISO time the engine first saw this entry's GitHub issue CLOSED while
    * a cycle slot held it in `recovering` — the "stale-closed" flag. Once set,
    * the recovery rail never respawns the unit (a closed issue is shipped or

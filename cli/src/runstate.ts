@@ -118,20 +118,29 @@ const REVIEW_KEYS = ['head', 'fixed', 'escalated', 'agents_done', 'agents_pendin
 /** `agents_done` entries meaning "no review agent ran" — refused on `review done` (#804). */
 const ZERO_AGENT_ENTRIES: ReadonlySet<string> = new Set(['0', 'none', 'n/a', '-', 'null', 'nil']);
 
+/**
+ * `agents_done` entries that are real agents but NOT reviewers (#887): the deterministic
+ * prescreen runs before review and reviews nothing — a mechanical-tier requeue posted
+ * `review done agents_done=prescreen` 10 seconds after implement. Counted like a zero
+ * spelling, so `prescreen` alone (or with `none`) is refused, while `prescreen,security`
+ * still passes.
+ */
+const NON_REVIEWER_ENTRIES: ReadonlySet<string> = new Set(['prescreen']);
+
 /** The `reason=` a review that could not run at all hands back with (#804). */
 export const REVIEW_NOT_RUN_REASON = 'review-not-run';
 
 /**
  * Whether an `agents_done` value names no agent (#804): after splitting on `,`
  * and dropping blank entries, nothing is left or every entry is a zero spelling
- * (`0`, `none`, …) — so `none,none` or `,` cannot pass where `none` would not.
+ * (`0`, `none`, …) or a non-reviewer (`prescreen`, #887) — so `none,none` or `,` cannot pass where `none` would not.
  */
 function namesNoAgent(agentsDone: string): boolean {
   const entries = agentsDone
     .split(',')
     .map((e) => e.trim().toLowerCase())
     .filter((e) => e.length > 0);
-  return entries.every((e) => ZERO_AGENT_ENTRIES.has(e));
+  return entries.every((e) => ZERO_AGENT_ENTRIES.has(e) || NON_REVIEWER_ENTRIES.has(e));
 }
 
 export const PHASE_SPECS: Record<Phase, PhaseSpec> = {

@@ -346,6 +346,8 @@ describe('validateMilestone', () => {
       'none,none',
       '0,none',
       ',',
+      'prescreen',
+      'Prescreen,none',
     ])('rejects review done with agents_done=%s', (v) => {
       const errors = validateMilestone({
         phase: 'review',
@@ -366,6 +368,17 @@ describe('validateMilestone', () => {
           status: 'done',
           run: 'r-440-ab56',
           keys: reviewKeys('conformance'),
+        })
+      ).toEqual([]);
+    });
+
+    it('accepts prescreen alongside a real reviewer (#887)', () => {
+      expect(
+        validateMilestone({
+          phase: 'review',
+          status: 'done',
+          run: 'r-440-ab56',
+          keys: reviewKeys('prescreen,security'),
         })
       ).toEqual([]);
     });

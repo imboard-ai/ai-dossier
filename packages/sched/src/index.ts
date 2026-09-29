@@ -219,6 +219,12 @@ export {
   pickHardBlockLabel,
 } from './labels';
 export {
+  type MergeMechanism,
+  type MergeMechanismVerdict,
+  mergeMechanismVerdict,
+  shipModeClause,
+} from './merge-mechanism';
+export {
   CorruptStateError,
   type EngineLease,
   type EngineLeaseAcquisition,

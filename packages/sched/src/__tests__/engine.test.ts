@@ -12,6 +12,7 @@ import {
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
   type JournalEvent,
+  type MergeMechanism,
   type PrTruth,
   type RunFenceBinder,
   type RunFenceReleaser,
@@ -61,6 +62,18 @@ function harness(
   // which would delete a concurrent run's live dirs (#896).
   if (!existingDir) REGISTRIES.push(dir);
   const store = new SchedStore(dir);
+  // Tracks whether the state lock is held, so a test can prove a read happens outside it (#887).
+  let lockDepth = 0;
+  const rawWithLock = store.withLock.bind(store);
+  store.withLock = ((fn: Parameters<typeof rawWithLock>[0]) =>
+    rawWithLock((state) => {
+      lockDepth++;
+      try {
+        return fn(state);
+      } finally {
+        lockDepth--;
+      }
+    })) as typeof store.withLock;
   const journal = new Journal(dir);
   // #524: runs.jsonl telemetry writes under EngineDeps.homeDir — a fresh
   // tmp dir per harness, so no test ever touches the real machine's
@@ -109,7 +122,13 @@ function harness(
   const teardownCalls: Array<{ file: string; args: string[]; cwd?: string }> = [];
   /** Scriptable teardown subprocess behavior (default: every call fails). */
   let teardownScript: (file: string, args: string[]) => string | null = () => null;
+  let mergeMechanism: MergeMechanism | undefined;
+  let onMechanismRead: (() => void) | undefined;
   const groundTruth: GroundTruth = {
+    mergeMechanism: () => {
+      onMechanismRead?.();
+      return mergeMechanism;
+    },
     latestMilestone: (issue) =>
       unreachable.has(issue) ? undefined : (milestones.get(issue) ?? null),
     issueClosed: (issue) => closedIssues.has(issue),
@@ -323,6 +342,13 @@ function harness(
         at: at ?? clock.toISOString(),
         keys,
       }),
+    onMechanismRead: (fn: () => void) => {
+      onMechanismRead = fn;
+    },
+    lockHeld: () => lockDepth > 0,
+    setMergeMechanism: (m: MergeMechanism | undefined) => {
+      mergeMechanism = m;
+    },
     setPr: (pr: number, truth: Partial<PrTruth> & { state: PrTruth['state'] }) =>
       prStates.set(pr, {
         mergedAt: null,
@@ -2734,6 +2760,144 @@ describe('#468 AC3: watcher failure paths', () => {
     const result = h.tick();
     expect(result.failed).toEqual(['issue:101']);
     expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('auto-merge-blocked');
+  });
+
+  describe('#887: a PR parked where nothing can merge it', () => {
+    // ai-dossier's own shape: native auto-merge ALLOWED on the repo, no watcher — and #878 parked forever.
+    const NO_WATCHER: MergeMechanism = {
+      nativeAutoMerge: true,
+      watcherWorkflow: false,
+      allowedMethods: ['squash'],
+    };
+    const GRACE = 11 * 60 * 1000;
+
+    const parkedPolls = (h: ReturnType<typeof harness>, polls: number) => {
+      let last = h.tick();
+      for (let i = 1; i < polls; i++) {
+        h.advance(GRACE);
+        last = h.tick();
+      }
+      return last;
+    };
+
+    it('native auto-merge allowed but never requested: fails no-merge-mechanism only after it PERSISTS (never parked forever)', () => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(NO_WATCHER);
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: false });
+      h.advance(200_000);
+      // first sighting only arms the marker
+      expect(h.tick().failed).toEqual([]);
+      expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+      // a second poll inside the grace window still holds
+      h.advance(200_000);
+      expect(h.tick().failed).toEqual([]);
+      h.advance(GRACE);
+      const result = h.tick();
+      expect(result.failed).toEqual(['issue:101']);
+      expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('no-merge-mechanism');
+    });
+
+    it.each([
+      ['a watcher workflow exists', { ...NO_WATCHER, watcherWorkflow: true }, false],
+      [
+        'watcher detection unknown (Mergify, remote workflow, unreadable)',
+        { ...NO_WATCHER, watcherWorkflow: null },
+        false,
+      ],
+      ['detection unavailable', undefined, false],
+      ['GitHub holds an auto-merge request', NO_WATCHER, true],
+    ] as const)('%s → keeps watching indefinitely (unchanged park path)', (_name, mechanism, requested) => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(mechanism);
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: requested });
+      h.advance(200_000);
+      const result = parkedPolls(h, 3);
+      expect(result.failed).toEqual([]);
+      expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+    });
+
+    it('the streak resets when a request appears (a request that lands late is honoured)', () => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(NO_WATCHER);
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: false });
+      h.advance(200_000);
+      h.tick(); // armed
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: true });
+      h.advance(GRACE);
+      expect(h.tick().failed).toEqual([]);
+      expect(
+        h.state().entries.find((e) => e.issue === 101)?.no_merge_mechanism_since ?? null
+      ).toBeNull();
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: false });
+      h.advance(GRACE);
+      expect(h.tick().failed).toEqual([]); // re-armed, not failed off the old onset
+    });
+
+    it('a payload with no autoMergeRequest field never trips the backstop', () => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(NO_WATCHER);
+      h.setPr(55, { state: 'OPEN' });
+      h.advance(200_000);
+      expect(parkedPolls(h, 3).failed).toEqual([]);
+    });
+
+    it('the dispatched prompt carries the detected facts: attached when none, detached when confirmed', () => {
+      const none = harness();
+      none.setMergeMechanism({
+        nativeAutoMerge: false,
+        watcherWorkflow: false,
+        allowedMethods: [],
+      });
+      none.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+      none.tick();
+      expect(none.spawnCalls[0].prompt).toContain('ship_mode=attached');
+      expect(none.spawnCalls[0].prompt).not.toContain('{ship_clause}');
+
+      const native = harness();
+      native.setMergeMechanism(NO_WATCHER);
+      native.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+      native.tick();
+      expect(native.spawnCalls[0].prompt).toContain('ship_mode=detached');
+      expect(native.spawnCalls[0].prompt).toContain('autoMergeRequest');
+    });
+
+    it('the mechanism is read once per tick, before the state lock', () => {
+      const h = harness();
+      let reads = 0;
+      let underLock = false;
+      h.setMergeMechanism(NO_WATCHER);
+      h.onMechanismRead(() => {
+        reads++;
+        if (h.lockHeld()) underLock = true;
+      });
+      h.enqueue([
+        { issue: 101, mode: 'full', tier: 'mid' },
+        { issue: 102, mode: 'full', tier: 'mid' },
+      ]);
+      h.tick();
+      expect(reads).toBe(1);
+      expect(underLock).toBe(false);
+    });
+
+    it('an exit on an ATTACHED ship awaiting-merge is NOT parked — it is an unverified exit (redispatch)', () => {
+      const h = harness();
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+      h.tick();
+      h.milestones.set(101, {
+        phase: 'ship',
+        status: 'awaiting-merge',
+        run: 'r-101-ab12',
+        at: h.clock().toISOString(),
+        keys: { pr: '55', ship_mode: 'attached' },
+      });
+      h.alive.delete(h.spawnCalls[0].pid);
+      h.tick();
+      expect(h.state().entries.find((e) => e.issue === 101)?.status).not.toBe('parked');
+    });
   });
 
   it('OPEN and mergeable keeps watching (no failure, no slots)', () => {

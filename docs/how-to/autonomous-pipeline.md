@@ -38,8 +38,8 @@ where it deliberately stops and asks a human instead of guessing.
 
 | Project slug | Repo | Config |
 |---|---|---|
-| `imboard-ai-ai-dossier` | `imboard-ai/ai-dossier` | `max_slots=3`, `stall_timeout_ms=3600000` (1h), attached ship mode (self-merges; no auto-merge watcher) |
-| `imboard-ai-imboard-monorepo` | `imboard-ai/imboard-monorepo` | `max_slots=3`, `stall_timeout_ms=10800000` (3h — larger repo, longer builds), detached ship mode (parks the PR on auto-merge; the engine's PR watcher takes it from there) |
+| `imboard-ai-ai-dossier` | `imboard-ai/ai-dossier` | `max_slots=3`, `stall_timeout_ms=3600000` (1h), ship mode auto-selected per dispatch from the detected merge mechanism (#887): no auto-merge watcher, so runs ship attached unless native auto-merge is confirmed on the PR |
+| `imboard-ai-imboard-monorepo` | `imboard-ai/imboard-monorepo` | `max_slots=3`, `stall_timeout_ms=10800000` (3h — larger repo, longer builds), detached ship mode where a merge mechanism is confirmed (parks the PR on auto-merge; the engine's PR watcher takes it from there) |
 
 Both configs share the same tier ladder: `mechanical` → `haiku`, `mid` → `sonnet`,
 `strong` → `opus`. The engine escalates a unit one tier on a stall and dispatch can

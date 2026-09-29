@@ -119,6 +119,7 @@ import {
 } from './groundtruth';
 import { issueOfUnit, type Journal, unitEvent } from './journal';
 import { labelBlockReason, labelOfBlockReason, pickHardBlockLabel } from './labels';
+import type { MergeMechanism } from './merge-mechanism';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
@@ -367,6 +368,11 @@ interface TickCtx {
   config: SchedConfig;
   dispatch: ResolvedDispatch;
   result: TickResult;
+  /**
+   * The repo's merge mechanism (#887), fetched ONCE per tick before the state lock — a
+   * cache miss runs `gh api`, which must never happen under `store.withLock`.
+   */
+  mechanism: MergeMechanism | undefined;
 }
 
 function journal(
@@ -534,6 +540,37 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
  * from (but happens to share the string with) the GitHub label name.
  */
 const AUTO_MERGE_BLOCKED_REASON = 'auto-merge-blocked';
+
+/**
+ * #887: the `QueueEntry.reason` for a PR parked on `auto-merge` in a repo where
+ * nothing can merge it (no native auto-merge, no watcher workflow, no auto-merge
+ * request on the PR). The unit blocks loudly instead of waiting forever.
+ */
+const NO_MERGE_MECHANISM_REASON = 'no-merge-mechanism';
+
+/**
+ * #887: how long a parked PR may sit with no auto-merge request and no confirmed
+ * watcher before the unit blocks. The agent requests auto-merge moments after
+ * parking, so the condition must PERSIST across polls — the first sighting only
+ * arms the marker.
+ */
+const NO_MERGE_MECHANISM_GRACE_MS = 10 * 60 * 1000;
+
+/**
+ * #887: keyed on the PR, not on the repo's `allow_auto_merge` — ai-dossier allows native
+ * auto-merge and #878 still parked forever, because nothing ever REQUESTED it. A parked,
+ * still-OPEN PR that GitHub holds no auto-merge request for is unmergeable-by-itself
+ * unless a watcher acts on the label; only a POSITIVELY read absence of one (`false`;
+ * unknown/`null` never) lets this fire.
+ */
+function parkedWithoutMerger(ctx: TickCtx, truth: PrTruth): boolean {
+  return (
+    truth.state === 'OPEN' &&
+    truth.autoMergeRequested === false &&
+    ctx.mechanism !== undefined &&
+    ctx.mechanism.watcherWorkflow === false
+  );
+}
 
 /**
  * #501: how long after a unit fails `auto-merge-blocked` its PR stays
@@ -963,7 +1000,9 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
         // the same label the fence announced and the bind names (one spelling,
         // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
         // generation, never by matching this label (AC7).
-        slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined
+        slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined,
+        // #887: the repo's detected merge mechanism decides detached vs attached ship.
+        ctx.mechanism
       ),
       // #810: a requeued parked batch member continues from its member branch —
       // on the FIRST generation only: a takeover resumes its own run's pushed
@@ -2999,7 +3038,30 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
     }
     if (truth.state === 'CLOSED' && truth.mergedAt === null) {
       next = failWatch('pr-closed-unmerged');
+    } else if (parkedWithoutMerger(ctx, truth)) {
+      // #887: parked on a label nothing acts on — GitHub holds no auto-merge request and no
+      // watcher exists. sched's watch only waits, so once this has persisted past the grace
+      // window (marker keyed by PR number, so a re-park on another PR starts fresh), block.
+      const now = ctx.deps.now();
+      const mark = entry.no_merge_mechanism_since ?? null;
+      const armedAt = mark?.startsWith(`${entry.pr}@`)
+        ? Date.parse(mark.slice(`${entry.pr}@`.length))
+        : Number.NaN;
+      if (!Number.isNaN(armedAt) && now.getTime() - armedAt >= NO_MERGE_MECHANISM_GRACE_MS) {
+        next = failWatch(NO_MERGE_MECHANISM_REASON);
+      } else if (Number.isNaN(armedAt)) {
+        next = patchEntry(
+          next,
+          issue,
+          { no_merge_mechanism_since: `${entry.pr}@${now.toISOString()}` },
+          now,
+          false
+        );
+      }
     } else {
+      if (entry.no_merge_mechanism_since != null) {
+        next = patchEntry(next, issue, { no_merge_mechanism_since: null }, ctx.deps.now(), false);
+      }
       // OPEN (or mergeable UNKNOWN) — keep watching. #632: this tick's truth
       // is NOT "merge seen but not closed", so a waiting streak from an
       // earlier tick's merge-then-reverted flicker is over.
@@ -3340,9 +3402,10 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const labelPoll = pollLabels(deps, state0, config, dispatch);
   const labelVerifiedIssues = labelVerified(labelPoll);
   const closedPoll = pollClosed(deps, state0, config);
+  const mechanism = deps.groundTruth.mergeMechanism?.();
 
   const pass1 = deps.store.withLock((state) => {
-    const ctx: TickCtx = { deps, config, dispatch, result: emptyResult() };
+    const ctx: TickCtx = { deps, config, dispatch, result: emptyResult(), mechanism };
     let next = reconcileSlots(ctx, state, polled);
     next = reconcileParked(ctx, next, prPoll);
     next = reconcileStaleFailedParks(ctx, next, prPoll);
@@ -3373,7 +3436,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     }
     if (results.size > 0 || unreachable.length > 0) {
       result = deps.store.withLock((state) => {
-        const ctx: TickCtx = { deps, config, dispatch, result };
+        const ctx: TickCtx = { deps, config, dispatch, result, mechanism };
         let next = state;
         // #636: `setupInfo` answered for these — any unreachable streak is over.
         for (const issue of results.keys()) {

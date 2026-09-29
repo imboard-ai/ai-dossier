@@ -2115,6 +2115,8 @@ function spawnTailAgent(
   // before a slot is claimed — `blockBatchForOperator` posts a milestone, an
   // exec that must not run under the store lock).
   const before = deps.store.load();
+  // #887: read outside the store lock (a cache miss runs `gh api`).
+  const mechanism = deps.groundTruth.mergeMechanism?.();
   const pending = findBatch(before, batchId);
   if (pending) {
     const refusal = tailDispatchRefusal(before, pending);
@@ -2157,7 +2159,9 @@ function spawnTailAgent(
       batchId,
       batch.anchor,
       landed,
-      batch.worktree
+      batch.worktree,
+      // #887: the repo's detected merge mechanism decides detached vs attached ship.
+      mechanism
     );
     const logFile = batchTailLogPath(deps.store.runsDir, batchId);
     // #629: fences `handleDeadDispatchApiError`'s classification to this
