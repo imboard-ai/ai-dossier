@@ -1733,6 +1733,10 @@ export type JournalEventName =
   // "api_error"` — a confirmed provider-side wall, never an agent that ran.
   | 'dispatch-failure'
   | 'tick-failed'
+  // #883: the running engine adopted an edited config (`detail` = the dispatch diff), or
+  // rejected an invalid edit and kept the last good one.
+  | 'config-reloaded'
+  | 'config-reload-failed'
   | 'pr-parked'
   | 'merge-accepted'
   | 'pr-watch-failed'

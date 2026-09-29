@@ -3486,14 +3486,17 @@ function mergeBatchResult(result: TickResult, batch: BatchTickResult): TickResul
  */
 export async function runLoop(
   deps: EngineDeps,
-  config: SchedConfig,
+  configSource: SchedConfig | (() => SchedConfig),
   shouldStop: () => boolean,
   onTick?: (result: TickResult) => void
 ): Promise<void> {
-  const interval = resolveDispatch(config).reconcileIntervalMs;
+  // #883: a function source is consulted at the top of EVERY tick, so a config
+  // edit applies from the next tick on. The sleep interval is fixed at start.
+  const resolveConfig = typeof configSource === 'function' ? configSource : () => configSource;
+  const interval = resolveDispatch(resolveConfig()).reconcileIntervalMs;
   while (!shouldStop()) {
     try {
-      const result = tick(deps, config);
+      const result = tick(deps, resolveConfig());
       onTick?.(result);
     } catch (err) {
       const detail = `${(err as Error).name}: ${(err as Error).message}`;

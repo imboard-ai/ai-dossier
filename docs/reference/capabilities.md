@@ -273,7 +273,17 @@ preserved. A declared capability's verdict is never replaced by a detected-runne
 gate's stdout. A CI-parity script that prints only its own log gives every red run
 `readable: false`, so the batch blocks `suite-unreadable` instead of pinning the failure
 on a member. To keep attribution, have `gate.batch` emit a vitest JSON report on stdout
-(e.g. `--reporter=json` on its test step).
+(e.g. `--reporter=json` on its test step). The contract, for `gate.batch` and `test.full`
+alike: **stdout carries exactly one JSON document whose first `{` is
+`{ "testResults": [{ "name": "<repo-relative file>", "assertionResults": [{ "status": "failed", "fullName": "…" }] }] }`**
+(human output belongs on stderr; paths must be repo-relative, since they are matched against
+the members' changed paths). This repo's own `test.full` is `node scripts/test-report.mjs`
+(#893): it runs each workspace's vitest and the script tests one at a time with the JSON
+reporter, merges them into that document, and records a workspace that dies without a report
+as a failed record on its `package.json` so the run stays readable. A red run whose report
+names no member-owned test bisects; one that produces no document at all still blocks
+`suite-unreadable`, now with the tail of the failing output in the `suite-failed` journal
+detail.
 
 **Diff with three dots.** `origin/<base_branch>` moves whenever the batch worktree
 fetches. `git diff "$DOSSIER_BATCH_BASE"...HEAD` diffs from the merge-base and is stable;

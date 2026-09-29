@@ -582,6 +582,42 @@ describe('gate.batch capability (#777)', () => {
       expect(spawnSync).toHaveBeenCalledTimes(1);
     });
 
+    it('#893: absolute report paths are re-rooted repo-relative so overlap attribution can match them', () => {
+      const report = JSON.stringify({
+        testResults: [
+          {
+            name: '/wt/cli/src/__tests__/x.test.ts',
+            assertionResults: [{ status: 'failed', fullName: 'x fails' }],
+          },
+          {
+            name: 'packages/sched/src/__tests__/y.test.ts',
+            assertionResults: [{ status: 'failed', fullName: 'y fails' }],
+          },
+        ],
+      });
+      vi.mocked(spawnSync).mockReturnValue(
+        spawnResult({ status: 1, stdout: `${report}\n${envelope(id, 'task-failed', 1)}` })
+      );
+      const result = createBatchSuiteRunner(config())('/wt', CTX);
+      expect(result.failing.map((t) => t.id)).toEqual([
+        'cli/src/__tests__/x.test.ts::x fails',
+        'packages/sched/src/__tests__/y.test.ts::y fails',
+      ]);
+    });
+
+    it('#893: an unreadable red run carries the failing output tail from the envelope', () => {
+      const env = JSON.stringify({
+        capability: id,
+        outcome: 'task-failed',
+        exit_code: 1,
+        output_tail: 'registry: Error: Test timed out in 5000ms',
+      });
+      vi.mocked(spawnSync).mockReturnValue(spawnResult({ status: 1, stdout: `boom\n${env}` }));
+      const result = createBatchSuiteRunner(config())('/wt', CTX);
+      expect(result.readable).toBe(false);
+      expect(result.detail).toContain('output tail: registry: Error: Test timed out in 5000ms');
+    });
+
     it('task-failed without a report → unreadable (suite-unreadable block), no detection fallback', () => {
       vi.mocked(spawnSync).mockReturnValue(
         spawnResult({ status: 1, stdout: `boom\n${envelope(id, 'task-failed', 1)}` })
