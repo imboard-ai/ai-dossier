@@ -166,6 +166,25 @@ Every `cap run` — all four outcomes included — appends one JSON line to
 and (non-`ok` outcomes only, #583) `output_tail`. This mirrors the `runs.jsonl` dossier
 telemetry but stays a separate file because a capability execution is not a dossier run.
 
+When `cwd` is a git work tree the row also records what was verified (#941): `git_head`
+(`git rev-parse HEAD`), `git_tree` (`HEAD^{tree}`) and `dirty`. The tree is probed before
+and after the run; `dirty` is true if either probe found changes (tracked, staged, or
+untracked-not-ignored files — regardless of `status.showUntrackedFiles`/submodule-ignore
+config — or files hidden with `--assume-unchanged`/`--skip-worktree`, which includes
+sparse-checkout trees) or if the run moved HEAD or the tree. The probe strips `GIT_*`
+env, uses `--no-optional-locks`, and has a 10 s total budget; if it times out or errors,
+the row records `git_probe: "timeout"|"error"` with `dirty: true` (and a stderr warning).
+Rows outside a work tree omit all of these. Rows also record `git_prefix` (`git rev-parse --show-prefix`: the directory inside the repo the run happened in) and `command_hash` (sha256 of the manifest `command`). The dirty probe covers the whole repo even from a subdirectory (`ls-files -v -- :/`) and pins `core.fsmonitor=false`/`core.fileMode=true`. Every row also records `args` (the words after
+`--`) and `args_hash` (sha256 of the JSON array).
+
+`ai-dossier cap last-ok <id> (--tree <40|64-hex sha> | --here) [--prefix <dir>] [-- <args>]` prints the latest clean `ok`
+row for that capability, tree AND exact args (`gate.test -- --only smoke` never satisfies a
+full-gate lookup). Exit codes: 0 match, 1 no match (no output; dirty, probe-failed,
+failed, different-args and pre-`args_hash` rows never match), 2 error (bad `--tree`,
+unreadable log), 3 `auditLog` disabled (cannot answer). A torn line in the log is skipped.
+The match key is capability + tree + args + directory prefix (default: the current directory's own; `--prefix` overrides) + command hash, so a pass from `cli/` never satisfies a lookup from the root. `--tree` must come from a CLEAN tree — `--here` probes the current directory itself (tree + prefix) and exits 1 when it is dirty. The match key deliberately excludes: git-ignored files, toolchain/CLI versions, environment,
+and nested repos other than via submodule status.
+
 ## Capability id vocabulary
 
 Reserved vocabulary for cross-repo consistency (ids are a convention, not enforced —
