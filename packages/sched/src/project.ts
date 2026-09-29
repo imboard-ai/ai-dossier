@@ -45,8 +45,12 @@ export function createExecFn(
   };
 }
 
-/** Default exec: no timeout. */
-export const defaultExec: ExecFn = createExecFn();
+/**
+ * Default exec (#945): bounded. A synchronous exec with no timeout can wedge an
+ * engine tick — and with it every signal handler — forever.
+ */
+export const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
+export const defaultExec: ExecFn = createExecFn(DEFAULT_EXEC_TIMEOUT_MS);
 
 /** Characters permitted in a project directory name. */
 const SLUG_SAFE = /[^A-Za-z0-9._-]/g;

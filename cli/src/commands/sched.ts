@@ -35,6 +35,8 @@ import {
   buildStatusReport,
   type CommitInBase,
   CorruptStateError,
+  checkStaleLeaseAlert,
+  clearStoppingMarker,
   createConfigReloader,
   createExecFn,
   createExecGroundTruth,
@@ -60,6 +62,7 @@ import {
   formatBatchStatus,
   GIT_OID_RE,
   IllegalTransitionError,
+  installEngineExitLogging,
   isLandedResumableBlock,
   issueCloseReader,
   Journal,
@@ -77,11 +80,14 @@ import {
   parseManifest,
   pruneMemberBranches,
   readJsonl,
+  readStoppingMarker,
   recordTickFailure,
+  reportCrashRestart,
   reprioritizeBatch,
   reprioritizeIssue,
   requeueParkedMember,
   resolveDispatch,
+  resolveHungAfterMs,
   resolveProfiledDispatch,
   resolveProjectRepo,
   resolveProjectSlug,
@@ -102,6 +108,7 @@ import {
   tick,
   tierExecutors,
   unitEvent,
+  writeStoppingMarker,
 } from '@ai-dossier/sched';
 import { WARM_COMMAND_TIMEOUT_MS } from '@ai-dossier/worktree-pool';
 import type { Command } from 'commander';
@@ -140,6 +147,7 @@ import {
 import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
 import { hasSlotModeLatestMilestone } from '../runstate';
 import { renderValue } from '../runstate-stats';
+import { createAlertNotifier, parseAlertIssue } from '../sched-alert';
 import {
   aggregateRunLogEntries,
   type BatchAmortizationSummary,
@@ -279,6 +287,7 @@ interface ReprioritizeOptions extends SchedOptions {
 }
 
 interface StartOptions extends SchedOptions {
+  alertIssue?: string;
   interval?: number;
   once?: boolean;
   autoUpgrade?: boolean;
@@ -364,7 +373,9 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   );
   if (report.engine_lease) {
     lines.push(
-      `Engine lease: pid ${report.engine_lease.pid} (${report.engine_lease.alive ? 'live' : 'stale'})`
+      `Engine lease: pid ${report.engine_lease.pid} (${report.engine_lease.alive ? 'live' : 'stale'})${
+        report.engine_lease.updated_at ? `, last heartbeat ${report.engine_lease.updated_at}` : ''
+      }`
     );
   }
   if (report.last_tick_failure) {
@@ -1508,35 +1519,75 @@ function registerStatusSubcommand(cmd: Command): void {
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output the report as JSON')
     .option(
+      '--alert',
+      'Also raise the engine-down alert (once per stale episode) when the lease is stale with unfinished work — cron-able (#945); comments on --alert-issue / $DOSSIER_SCHED_ALERT_ISSUE if set'
+    )
+    .option('--alert-issue <n>', 'Tracking issue for --alert comments')
+    .option(
       '--anchors',
       "Also sweep open batch anchors — ledger-tracked (#768) and orphaned (#790, batches no longer in state.batches) — reads issue state from GitHub; run from the project's repository"
     )
-    .action(async (opts: SchedOptions & { anchors?: boolean }) => {
-      const { store, project } = resolveStore(opts);
-      try {
-        const report = buildStatusReport(
-          store.load(),
-          store.loadConfig(),
-          project,
-          store.engineLeaseStatus(),
-          new Date(),
-          opts.anchors === true ? anchorSweepFor(project) : undefined,
-          // #791: local git only, no network — runs by default, unlike --anchors.
-          keptWorktreeReaderFor()
-        );
-        // Cache-only (#537): `status` is a fast, offline-friendly diagnostic
-        // — it reads whatever `sched start` last cached rather than risking
-        // a multi-second hang on an unreachable npm registry.
-        const staleness = await checkEngineStaleness({ noFetch: true });
-        if (opts.json) {
-          console.log(JSON.stringify({ ...report, engine_staleness: staleness }, null, 2));
-        } else {
-          console.log(renderReport(report, staleness));
+    .action(
+      async (opts: SchedOptions & { anchors?: boolean; alert?: boolean; alertIssue?: string }) => {
+        const { store, project } = resolveStore(opts);
+        try {
+          if (opts.alert) {
+            // A watcher must never crash on its own input: a bad --alert-issue
+            // downgrades to stderr-only alerting.
+            let alertIssue: number | undefined;
+            try {
+              alertIssue = parseAlertIssue(opts.alertIssue);
+            } catch (err) {
+              process.stderr.write(
+                `⚠ sched status --alert: ${(err as Error).message} — alerting on stderr/journal only\n`
+              );
+            }
+            try {
+              checkStaleLeaseAlert(
+                store,
+                new Journal(store.dir),
+                createAlertNotifier(
+                  project,
+                  resolveProjectRepo(project, defaultExec) ?? undefined,
+                  alertIssue
+                ),
+                new Date(),
+                {
+                  hungAfterMs: resolveHungAfterMs(
+                    resolveDispatch(store.loadConfig()).reconcileIntervalMs
+                  ),
+                }
+              );
+            } catch (err) {
+              process.stderr.write(
+                `⚠ sched status --alert: alert check failed: ${(err as Error).message}\n`
+              );
+            }
+          }
+          const report = buildStatusReport(
+            store.load(),
+            store.loadConfig(),
+            project,
+            store.engineLeaseStatus(),
+            new Date(),
+            opts.anchors === true ? anchorSweepFor(project) : undefined,
+            // #791: local git only, no network — runs by default, unlike --anchors.
+            keptWorktreeReaderFor()
+          );
+          // Cache-only (#537): `status` is a fast, offline-friendly diagnostic
+          // — it reads whatever `sched start` last cached rather than risking
+          // a multi-second hang on an unreachable npm registry.
+          const staleness = await checkEngineStaleness({ noFetch: true });
+          if (opts.json) {
+            console.log(JSON.stringify({ ...report, engine_staleness: staleness }, null, 2));
+          } else {
+            console.log(renderReport(report, staleness));
+          }
+        } catch (err) {
+          handleKnownError(err);
         }
-      } catch (err) {
-        handleKnownError(err);
       }
-    });
+    );
 }
 
 interface PauseResumeOptions extends SchedOptions {
@@ -2484,10 +2535,22 @@ function registerStartSubcommand(cmd: Command): void {
       '--auto-upgrade',
       'Self-upgrade (npm i -g @ai-dossier/cli@latest) when the installed engine is behind npm latest and no unit is mid-dispatch'
     )
+    .option(
+      '--alert-issue <n>',
+      'Comment on this issue when the engine restarts after a crash (#945); default $DOSSIER_SCHED_ALERT_ISSUE. The alert is always journaled and printed to stderr'
+    )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output tick results as JSON')
     .action(async (opts: StartOptions) => {
       const { store, project } = resolveStore(opts);
+      // #945: a bad --alert-issue / $DOSSIER_SCHED_ALERT_ISSUE fails at startup,
+      // before any lease is taken — not hours later at the first crash alert.
+      let alertIssue: number | undefined;
+      try {
+        alertIssue = parseAlertIssue(opts.alertIssue);
+      } catch (err) {
+        fail([`--alert-issue: ${(err as Error).message}`]);
+      }
       const acquisition = store.acquireEngineLease();
       if (!acquisition.acquired) {
         // Timer overlap is expected: --once must produce no human or JSON noise.
@@ -2504,8 +2567,52 @@ function registerStartSubcommand(cmd: Command): void {
       // skips the `finally` below — release on the synchronous 'exit' event too
       // so no failed start/tick leaves a dead holder.json (false
       // stale-engine-lease warning). Release is idempotent (id-checked).
-      const releaseLease = () => store.releaseEngineLease(acquisition.lease);
+      // #945: EXCEPT after a crash — the lease left behind is the crash marker
+      // the next start / watcher turns into an alert.
+      let exitLogger: ReturnType<typeof installEngineExitLogging> | undefined;
+      const releaseLease = () => {
+        if (exitLogger?.shouldReleaseLease() ?? true) store.releaseEngineLease(acquisition.lease);
+      };
       process.once('exit', releaseLease);
+      const journalAtStart = new Journal(store.dir);
+      // #945/#920: installed IMMEDIATELY after the lease is taken so no later
+      // startup step can exit unlogged. SIGTERM/SIGINT request a graceful stop
+      // (bounded by a hard deadline); SIGHUP is journaled and ignored.
+      let stopping = false;
+      exitLogger = installEngineExitLogging({
+        journal: journalAtStart,
+        requestStop: () => {
+          stopping = true;
+          if (!opts.once) console.log('\n⏹ Stopping engine (spawned agents keep running)…');
+        },
+        markStopping: (signal) =>
+          writeStoppingMarker(store.dir, {
+            pid: process.pid,
+            signal,
+            at: new Date().toISOString(),
+          }),
+      });
+      const previousStop = readStoppingMarker(store.dir);
+      clearStoppingMarker(store.dir);
+      // `--once` runs from a timer: an engine-started line per run is spam.
+      if (!opts.once) {
+        journalAtStart.append({ event: 'engine-started', pid: process.pid, detail: 'loop' });
+      }
+      if (acquisition.reclaimed) {
+        reportCrashRestart(
+          journalAtStart,
+          acquisition.reclaimed,
+          createAlertNotifier(
+            project,
+            resolveProjectRepo(project, defaultExec) ?? undefined,
+            alertIssue
+          ),
+          new Date(),
+          previousStop !== null && previousStop.pid === acquisition.reclaimed.pid
+            ? previousStop
+            : null
+        );
+      }
       try {
         let config: SchedConfig;
         const startFingerprint = store.configFingerprint();
@@ -2751,6 +2858,7 @@ function registerStartSubcommand(cmd: Command): void {
           } else {
             console.log(`✓ [${project}] tick: ${describe(result)}`);
           }
+          exitLogger.logNormalExit('once tick complete');
           return;
         }
 
@@ -2759,12 +2867,6 @@ function registerStartSubcommand(cmd: Command): void {
         console.log(
           `▶ Scheduler engine running for ${project} (tick every ${interval}s, Ctrl-C to stop)`
         );
-        let stopping = false;
-        process.on('SIGINT', () => {
-          if (stopping) process.exit(130);
-          stopping = true;
-          console.log('\n⏹ Stopping engine (spawned agents keep running)…');
-        });
         await runLoop(
           deps,
           () => {
@@ -2786,6 +2888,8 @@ function registerStartSubcommand(cmd: Command): void {
             );
           }
         );
+        exitLogger.logNormalExit('loop returned after a stop request');
+        clearStoppingMarker(store.dir);
         console.log('⏹ Engine stopped');
       } finally {
         process.removeListener('exit', releaseLease);
