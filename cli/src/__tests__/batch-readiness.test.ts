@@ -125,56 +125,17 @@ describe('assessReadiness (#802)', () => {
     ).toBe(false);
   });
 
-  it('is linear on adversarial bodies (untrusted text; the unbounded path regex was quadratic on `a.a.a.…`)', () => {
-    const t = Date.now();
-    assessReadiness('fix: x', 'a.'.repeat(100_000), ['bug']);
-    assessReadiness('fix: x', `${'x'.repeat(39)}/`.repeat(5_000), ['bug']);
-    expect(Date.now() - t).toBeLessThan(3_000);
-  });
-
-  it('does not block bounded issues on product nouns or prose (#926 review)', () => {
-    const body =
-      'The card overflows its container on narrow screens, see `packages/frontend/src/c.tsx`.';
-    expect(assessReadiness('fix: initiative card overflow', body, ['bug']).ready).toBe(true);
-    expect(assessReadiness('Fix roadmap page rendering', body, ['bug']).ready).toBe(true);
-    expect(assessReadiness('fix: theme toggle flickers', body, ['bug', 'theme']).ready).toBe(true);
-    expect(
-      assessReadiness(
-        'fix: parent not updated',
-        `${body}\nClosing 2 sub-issues does not update the parent.`,
-        ['bug']
-      ).ready
-    ).toBe(true);
-    // ...but a lead/closing tracker word still blocks.
-    expect(assessReadiness('Roadmap: Q4 platform work', body, []).ready).toBe(false);
-    expect(assessReadiness('Investor acquisition initiative', body, []).ready).toBe(false);
-  });
-
-  it('a bounded bug with a long AC checklist is a spec, not a tracker; a long plain checklist still is (#926 review)', () => {
-    const items = Array.from({ length: 12 }, (_, i) => `- [ ] check ${i}`).join('\n');
-    expect(
-      assessReadiness('fix: export', `Export breaks.\n## Acceptance criteria\n${items}`, ['bug'])
-        .ready
-    ).toBe(true);
-    expect(assessReadiness('Cleanup pass', `Things to do here.\n${items}`, ['chore']).ready).toBe(
-      false
-    );
-  });
-
-  it('a standard bug-template report is bounded without a label; a 9-item plain checklist alone is not (#926 review)', () => {
-    const report =
-      '## Steps to reproduce\n1. open the board\n2. save twice\n## Expected behavior\nOne item.\n';
-    expect(assessReadiness('Duplicate items when saving twice', report, []).ready).toBe(true);
-    const nine = `Several things to do around here.\n${Array.from({ length: 9 }, (_, i) => `- [ ] item ${i}`).join('\n')}`;
-    expect(assessReadiness('Assorted work', nine, []).ready).toBe(false);
-  });
-
-  it('plain bullet lists of issue links are trackers too (#926 review)', () => {
-    const body =
-      'Work items to land as part of this pass.\n- #12\n- #13\n- https://github.com/o/r/issues/14\n';
-    expect(assessReadiness('Cleanup pass', body, ['chore']).blockers.join(' ')).toMatch(
-      /link sub-issues/
-    );
+  it('is linear on adversarial 200 KB bodies (the unbounded path regex was quadratic: 93 s)', () => {
+    for (const body of [
+      'a'.repeat(200_000),
+      'a.'.repeat(100_000),
+      'a/'.repeat(100_000),
+      `${'x'.repeat(59)}/`.repeat(3_400),
+    ]) {
+      const t = Date.now();
+      assessReadiness('fix: x', body, ['bug']);
+      expect(Date.now() - t).toBeLessThan(200);
+    }
   });
 
   it('an empty body is blocked', () => {

@@ -106,8 +106,15 @@ const BUG_REPORT_RE =
 const AC_CHECKLIST_MAX = 6;
 const PHASE_HEADING_RE = /^[ \t]{0,3}#{1,6}[ \t]*(?:phase|part|milestone|stage|wave)[ \t]*\d+/gim;
 const LIST_ITEM_RE = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+\S/gm;
-// Every quantifier bounded: the body is untrusted and an unbounded `(?:[\w.-]+\/)+` is quadratic on `a.a.a.…`.
-const CODE_PATH_RE = /(?:[\w.-]{1,60}\/){1,10}[\w.-]{1,60}\.[A-Za-z0-9]{1,6}\b/;
+// Tokenised first (whitespace/quotes/brackets), long tokens skipped, then an anchored bounded test:
+// linear in the body. An unbounded `(?:[\w.-]+\/)+` over the raw text is quadratic on `a.a.a.…`.
+const CODE_PATH_TOKEN_RE = /^(?:[\w.-]{1,60}\/){1,10}[\w.-]{1,60}\.[A-Za-z0-9]{1,6}$/;
+const MAX_PATH_TOKEN = 200;
+function namesCodePath(body: string): boolean {
+  return body
+    .split(/[\s`'"()[\]<>,;]+/)
+    .some((t) => t.length <= MAX_PATH_TOKEN && CODE_PATH_TOKEN_RE.test(t.replace(/[.:]+$/, '')));
+}
 
 export interface ReadinessAssessment {
   /** Soft score: higher = better specified. Ranks backfill; compared to {@link READINESS_FLOOR}. */
@@ -208,7 +215,7 @@ export function assessReadiness(
     score += 2;
     signals.push('bug-report structure (steps / expected / actual)');
   }
-  if (CODE_PATH_RE.test(body)) {
+  if (namesCodePath(body)) {
     score += 1;
     signals.push('names code paths');
   }
