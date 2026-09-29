@@ -194,7 +194,10 @@ async function handleDelete(
     if (!auth) return;
 
     log.info('Deleting dossier', { requestId, dossier: dossierName, version, user: auth.sub });
-    const result = await github.deleteDossier(dossierName, version || null, auth.sub);
+    const result = await github.deleteDossier(dossierName, {
+      expectedVersion: version || null,
+      removedBy: auth.sub,
+    });
 
     if (!result.found) {
       return notFound(res, 'DOSSIER_NOT_FOUND', `Dossier '${dossierName}' not found`, requestId);

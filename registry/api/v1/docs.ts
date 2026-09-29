@@ -73,7 +73,8 @@ const searchEndpoint = {
     per_page: 'number - Results per page (default: 20, max: 100)',
   },
   response: {
-    dossiers: 'array - List of matching dossier metadata',
+    dossiers:
+      'array - List of matching dossier metadata (each with published_by/published_at, null when not recorded)',
     pagination: paginationDoc,
   },
   errors: {
@@ -144,7 +145,8 @@ const publishDossierEndpoint = {
     title: 'string',
     content_url: 'string - CDN URL',
     published_at: 'string - ISO timestamp',
-    published_by: 'string - GitHub login of the authenticated publisher (from the verified token)',
+    published_by:
+      'string | null - GitHub login of the authenticated publisher (from the verified token); null only if the token subject is empty after sanitizing',
     evidence_url: 'string - CDN URL to the evidence sidecar (present only when evidence was sent)',
   },
   errors: {

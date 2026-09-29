@@ -31,6 +31,9 @@ export async function fetchManifestDossiers(): Promise<ManifestDossier[]> {
   return manifest.dossiers;
 }
 
+const nonEmptyString = (value: unknown): string | null =>
+  typeof value === 'string' && value.trim() ? value : null;
+
 /**
  * Publisher provenance for API responses. Entries published before #971 carry neither field;
  * they come back as `null` (never backfilled) and clients render that as "N/A".
@@ -40,14 +43,8 @@ export function publisherFields(dossier: ManifestDossier): {
   published_at: string | null;
 } {
   return {
-    published_by:
-      typeof dossier.published_by === 'string' && dossier.published_by
-        ? dossier.published_by
-        : null,
-    published_at:
-      typeof dossier.published_at === 'string' && dossier.published_at
-        ? dossier.published_at
-        : null,
+    published_by: nonEmptyString(dossier.published_by),
+    published_at: nonEmptyString(dossier.published_at),
   };
 }
 

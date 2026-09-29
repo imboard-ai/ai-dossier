@@ -178,12 +178,23 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
   const input = result.data;
 
   const { namespace, content, changelog, evidence } = input;
+  let publishedBy: string | null = null;
 
   try {
     const auth = await authorizePublish(req, res, namespace);
     if (!auth) return;
     // The publisher is the verified JWT subject — never anything from the request body.
-    const publishedBy = dossier.sanitizeCommitText(auth.sub) || null;
+    // publishDossier re-applies the same sanitizer at the commit boundary (idempotent).
+    publishedBy = dossier.sanitizeActor(auth.sub);
+    if (publishedBy !== auth.sub) {
+      log.warn('Publisher login sanitized or empty — provenance may be incomplete', {
+        requestId,
+        namespace,
+        user: auth.sub,
+        published_by: publishedBy,
+      });
+    }
+    log.info('Publishing dossier', { requestId, namespace, user: auth.sub });
 
     let parsed: ReturnType<typeof dossier.parseFrontmatter>;
     try {
@@ -230,15 +241,11 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
     }
     const changelogMessage = sanitizedChangelog || 'No changelog provided';
     const publishedAt = new Date().toISOString();
-    await github.publishDossier(
-      fullPath,
-      content,
-      parsed.frontmatter,
-      changelogMessage,
-      evidence ?? null,
+    await github.publishDossier(fullPath, content, parsed.frontmatter, changelogMessage, {
+      evidence: evidence ?? null,
       publishedBy,
-      publishedAt
-    );
+      publishedAt,
+    });
 
     log.info('Dossier published', {
       requestId,
@@ -270,7 +277,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       code: 'PUBLISH_ERROR',
       message: 'Failed to publish dossier',
       requestId,
-      context: { namespace },
+      context: { namespace, published_by: publishedBy },
     });
   }
 }

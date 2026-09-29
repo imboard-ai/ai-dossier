@@ -3,7 +3,7 @@ import type { DossierFrontmatter } from '@ai-dossier/core';
 import { getErrorMessage } from '@ai-dossier/core';
 import config from './config';
 import { DOSSIER_DEFAULTS, GITHUB_API_VERSION, USER_AGENT } from './constants';
-import { dossierFilePath, evidenceFilePath, sanitizeCommitText } from './dossier';
+import { dossierFilePath, evidenceFilePath, sanitizeActor } from './dossier';
 import createLogger from './logger';
 import type {
   DeleteResult,
@@ -156,7 +156,7 @@ export function withActorTrailer(
   key: ActorTrailerKey,
   login: string | null | undefined
 ): string {
-  const actor = login ? sanitizeCommitText(login) : '';
+  const actor = sanitizeActor(login);
   return actor ? `${message}\n\n${key}: ${actor}` : message;
 }
 
@@ -178,7 +178,8 @@ export async function getManifest(): Promise<Manifest> {
 
 export async function updateManifest(
   currentManifest: Manifest,
-  dossierEntry: ManifestDossier
+  dossierEntry: ManifestDossier,
+  publishedBy: string | null = null
 ): Promise<GitHubCommitResponse> {
   const { sha, ...manifest } = currentManifest;
 
@@ -198,7 +199,7 @@ export async function updateManifest(
       ? `Update manifest: ${dossierEntry.name} v${dossierEntry.version}`
       : `Add to manifest: ${dossierEntry.name} v${dossierEntry.version}`,
     'Published-By',
-    dossierEntry.published_by
+    publishedBy
   );
 
   return createOrUpdateFile('index.json', content, message, sha);
@@ -235,25 +236,44 @@ async function deleteEvidenceSidecar(
   return deleteFile(sidecarPath, message, existing.sha);
 }
 
+export interface PublishOptions {
+  /** Evidence sidecar JSON; null/absent removes any stale sidecar. */
+  evidence?: string | null;
+  /** Authenticated GitHub login (verified JWT `sub`) — recorded as trailer + manifest field. */
+  publishedBy?: string | null;
+  /** ISO timestamp recorded as `published_at`; defaults to now. */
+  publishedAt?: string;
+}
+
+export interface DeleteOptions {
+  /** Only delete if the manifest's current version matches. */
+  expectedVersion?: string | null;
+  /** Authenticated GitHub login recorded as a `Removed-By` trailer. */
+  removedBy?: string | null;
+}
+
 export async function publishDossier(
   fullPath: string,
   content: string,
   metadata: DossierFrontmatter,
   changelog: string,
-  evidence: string | null = null,
-  publishedBy: string | null = null,
-  publishedAt: string = new Date().toISOString()
+  options: PublishOptions = {}
 ): Promise<{
   file: GitHubCommitResponse;
   manifest: GitHubCommitResponse;
   evidence?: GitHubCommitResponse;
+  /** The sanitized publisher actually recorded (null when none). */
+  publishedBy: string | null;
+  publishedAt: string;
 }> {
   const filePath = dossierFilePath(fullPath);
   const sidecarPath = evidenceFilePath(fullPath);
 
   const existing = await getFileContent(filePath);
 
-  const publisher = publishedBy ? sanitizeCommitText(publishedBy) || null : null;
+  const evidence = options.evidence ?? null;
+  const publisher = sanitizeActor(options.publishedBy);
+  const publishedAt = options.publishedAt ?? new Date().toISOString();
   const fileMessage = withActorTrailer(
     existing
       ? `Update ${metadata.name} to v${metadata.version}: ${changelog}`
@@ -356,17 +376,25 @@ export async function publishDossier(
 
   let manifestResult: GitHubCommitResponse;
   try {
-    manifestResult = await updateManifest(manifest, dossierEntry);
+    manifestResult = await updateManifest(manifest, dossierEntry, publisher);
   } catch (err) {
     log.error('File written but manifest update failed — orphaned file needs cleanup', {
       filePath,
+      version: metadata.version,
+      published_by: publisher,
       error: getErrorMessage(err),
     });
     throw err;
   }
   log.info('Manifest updated', { step: '3/3', dossier: metadata.name });
 
-  return { file: fileResult, manifest: manifestResult, evidence: evidenceResult };
+  return {
+    file: fileResult,
+    manifest: manifestResult,
+    evidence: evidenceResult,
+    publishedBy: publisher,
+    publishedAt,
+  };
 }
 
 /** Best-effort: removes `<dossierName>`'s evidence sidecar if present. A failure is logged and
@@ -391,9 +419,10 @@ async function deleteEvidenceSidecarBestEffort(
 
 export async function deleteDossier(
   dossierName: string,
-  expectedVersion: string | null = null,
-  removedBy: string | null = null
+  options: DeleteOptions = {}
 ): Promise<DeleteResult> {
+  const expectedVersion = options.expectedVersion ?? null;
+  const removedBy = sanitizeActor(options.removedBy);
   const filePath = dossierFilePath(dossierName);
 
   const existing = await getFileContent(filePath);
@@ -449,6 +478,8 @@ export async function deleteDossier(
   } catch (err) {
     log.error('File deleted but manifest update failed — manual cleanup required', {
       filePath,
+      version: dossierEntry.version,
+      removed_by: removedBy,
       error: getErrorMessage(err),
     });
     throw err;

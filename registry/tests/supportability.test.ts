@@ -26,6 +26,7 @@ describe('successful mutation logging', () => {
     vi.doMock('../lib/dossier', () => ({
       validateNamespace: () => ({ valid: true }),
       sanitizeCommitText: (text: string) => text,
+      sanitizeActor: (login: string | null) => login || null,
       parseFrontmatter: () => ({
         frontmatter: { name: 'my-dossier', version: '1.0.0', title: 'My Dossier' },
         content: '# Hello',

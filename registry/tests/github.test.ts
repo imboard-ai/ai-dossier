@@ -137,7 +137,7 @@ describe('publishDossier', () => {
       .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
 
     const evidence = '{"evidence_schema_version":"1.0.0"}';
-    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', evidence);
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', { evidence });
 
     const puts = mockFetch.mock.calls
       .map((call, i) => ({
@@ -169,7 +169,7 @@ describe('publishDossier', () => {
       .mockResolvedValueOnce(NOT_FOUND) // GET index.json
       .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
 
-    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', null);
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', { evidence: null });
 
     const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
     expect(methods).toEqual(['GET', 'PUT', 'GET', 'DELETE', 'GET', 'PUT']);
@@ -187,7 +187,7 @@ describe('publishDossier', () => {
       .mockResolvedValueOnce(NOT_FOUND) // GET index.json
       .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
 
-    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', null);
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', { evidence: null });
 
     const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
     expect(methods).toEqual(['GET', 'PUT', 'GET', 'GET', 'PUT']);
@@ -208,7 +208,9 @@ describe('publishDossier', () => {
       }); // PUT sidecar fails
 
     await expect(
-      publishDossier('ns/test-dossier', '# content', metadata, 'changelog', '{"entries":[]}')
+      publishDossier('ns/test-dossier', '# content', metadata, 'changelog', {
+        evidence: '{"entries":[]}',
+      })
     ).rejects.toThrow(/500.*internal error/);
 
     const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
@@ -365,15 +367,11 @@ describe('publisher recording (#971)', () => {
       .mockResolvedValueOnce(NOT_FOUND) // GET index.json
       .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
 
-    await publishDossier(
-      'ns/test-dossier',
-      '# content',
-      metadata,
-      'changelog',
-      '{"evidence_schema_version":"1.0.0"}',
-      'alice',
-      '2026-09-29T00:00:00.000Z'
-    );
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', {
+      evidence: '{"evidence_schema_version":"1.0.0"}',
+      publishedBy: 'alice',
+      publishedAt: '2026-09-29T00:00:00.000Z',
+    });
 
     const messages = writeMessages();
     expect(messages).toHaveLength(3);
@@ -403,14 +401,9 @@ describe('publisher recording (#971)', () => {
       .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
 
     const spoofing = { ...(metadata as object), published_by: 'mallory' } as never;
-    await publishDossier(
-      'ns/test-dossier',
-      '# content',
-      spoofing,
-      'changelog',
-      null,
-      'eve\r\nSigned-off-by: mallory'
-    );
+    await publishDossier('ns/test-dossier', '# content', spoofing, 'changelog', {
+      publishedBy: 'eve\r\nSigned-off-by: mallory',
+    });
 
     const [contentMessage] = writeMessages();
     expect(contentMessage.split('\n')).toEqual([
@@ -431,7 +424,7 @@ describe('publisher recording (#971)', () => {
       .mockResolvedValueOnce(NOT_FOUND)
       .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } }));
 
-    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', null);
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', { evidence: null });
 
     for (const message of writeMessages()) {
       expect(message).not.toMatch(/Published-By/);
@@ -455,7 +448,7 @@ describe('publisher recording (#971)', () => {
       .mockResolvedValueOnce(jsonResponse({ commit: { sha: 'delete-evidence-sha' } }))
       .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha-2' } }));
 
-    await deleteDossier('ns/test-dossier', null, 'bob');
+    await deleteDossier('ns/test-dossier', { removedBy: 'bob' });
 
     const messages = writeMessages();
     expect(messages).toEqual([

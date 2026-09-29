@@ -236,9 +236,7 @@ describe('POST /dossiers (publish) with evidence', () => {
       expect.any(String),
       expect.any(Object),
       expect.any(String),
-      evidence,
-      'alice',
-      expect.any(String)
+      { evidence, publishedBy: 'alice', publishedAt: expect.any(String) }
     );
   });
 
@@ -262,9 +260,7 @@ describe('POST /dossiers (publish) with evidence', () => {
       expect.any(String),
       expect.any(Object),
       expect.any(String),
-      null,
-      'alice',
-      expect.any(String)
+      { evidence: null, publishedBy: 'alice', publishedAt: expect.any(String) }
     );
   });
 });
@@ -285,9 +281,9 @@ describe('publisher recording (#971)', () => {
     expect(getStatus()).toBe(201);
     const body = getBody() as { published_by?: string; published_at?: string };
     expect(body.published_by).toBe('alice');
-    const [, , , , , publishedBy, publishedAt] = mockPublishDossier.mock.calls[0];
-    expect(publishedBy).toBe('alice');
-    expect(publishedAt).toBe(body.published_at);
+    const options = mockPublishDossier.mock.calls[0][4];
+    expect(options?.publishedBy).toBe('alice');
+    expect(options?.publishedAt).toBe(body.published_at);
   });
 
   it('sanitizes control characters out of the JWT login before it reaches the commit layer', async () => {
@@ -303,7 +299,7 @@ describe('publisher recording (#971)', () => {
 
     expect(getStatus()).toBe(201);
     expect((getBody() as { published_by: string }).published_by).toBe('eveInjected: yes');
-    expect(mockPublishDossier.mock.calls[0][5]).toBe('eveInjected: yes');
+    expect(mockPublishDossier.mock.calls[0][4]?.publishedBy).toBe('eveInjected: yes');
   });
 
   it('GET detail returns published_by, and null for a legacy entry', async () => {

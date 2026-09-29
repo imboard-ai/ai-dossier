@@ -22,6 +22,14 @@ export function sanitizeCommitText(text: string): string {
 }
 
 /**
+ * Normalize an actor login (publisher / remover) for commit trailers and the manifest:
+ * sanitized like commit text; empty after sanitizing → null (nothing is recorded).
+ */
+export function sanitizeActor(login: string | null | undefined): string | null {
+  return login ? sanitizeCommitText(login) || null : null;
+}
+
+/**
  * Parse frontmatter from dossier content.
  * Delegates to @ai-dossier/core's parseDossierContent.
  */
