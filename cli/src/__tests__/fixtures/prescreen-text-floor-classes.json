@@ -1,0 +1,250 @@
+[
+  {
+    "id": "tp-auth-fix",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "fix: board share links skip authorization check",
+    "body": "Viewers can open a private board by guessing the share id. Enforce the authorization check in the share route.",
+    "labels": []
+  },
+  {
+    "id": "tp-stripe-webhook",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Stripe webhook signature is not verified",
+    "body": "The billing webhook accepts unsigned payloads. Verify the signature before processing.",
+    "labels": []
+  },
+  {
+    "id": "tp-terraform",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "infra: move the DR bucket into Terraform",
+    "body": "Fold the state bucket into the terraform stack so it is managed as code.",
+    "labels": []
+  },
+  {
+    "id": "tp-oauth-add",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Add Microsoft OAuth login",
+    "body": "Add Microsoft OAuth as a third sign-in method alongside Google and email OTP.",
+    "labels": []
+  },
+  {
+    "id": "tp-migration",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Migrate reports collection to the new schema",
+    "body": "Write the migration that renames the field and backfills defaults.",
+    "labels": []
+  },
+  {
+    "id": "tp-deploy-pipeline",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Speed up the deploy workflow",
+    "body": "The deploy step rebuilds the image even when the PR build already produced it.",
+    "labels": []
+  },
+  {
+    "id": "tp-secrets-rotate",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Rotate the leaked signing secret",
+    "body": "The production secret was committed. Rotate it and add a scanning rule.",
+    "labels": []
+  },
+  {
+    "id": "tp-not-working",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Login not working after payment",
+    "body": "Users who complete payment are bounced back to the login page and cannot open the board.",
+    "labels": []
+  },
+  {
+    "id": "tp-no-longer",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Invoices no longer generated for annual plans",
+    "body": "The billing job skips annual subscriptions since the last release.",
+    "labels": []
+  },
+  {
+    "id": "tp-without-breaking",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Refactor the plan picker without breaking billing",
+    "body": "Split the plan picker component. Billing state must keep working during the switch.",
+    "labels": []
+  },
+  {
+    "id": "tp-negated-and-real",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "No schema migration needed for the export fix",
+    "body": "The export button fails for large boards. Also tighten the authentication check on the export route.",
+    "labels": []
+  },
+  {
+    "id": "tp-new-package",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Create a new package for shared validators",
+    "body": "Extract the validators into a new package so both apps can import them.",
+    "labels": []
+  },
+  {
+    "id": "tp-checkout-flow",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Checkout page shows the wrong tax",
+    "body": "The checkout summary applies the tax rate of the previous region.",
+    "labels": []
+  },
+  {
+    "id": "tp-security-fix",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Security: escape board titles in the email digest",
+    "body": "Titles are interpolated into HTML unescaped; escape them.",
+    "labels": []
+  },
+  {
+    "id": "fp-neg-no-migration",
+    "klass": "negation",
+    "truth": "fp",
+    "title": "Add a retry to the export job",
+    "body": "Small change to the export retry loop. No migration, no backfill, no config change.",
+    "labels": []
+  },
+  {
+    "id": "fp-neg-not-a-migration",
+    "klass": "negation",
+    "truth": "fp",
+    "title": "Embedding index rebuild takes minutes",
+    "body": "Minutes, not a migration. Reindex once after the model swap.",
+    "labels": []
+  },
+  {
+    "id": "fp-neg-dropped",
+    "klass": "negation",
+    "truth": "fp",
+    "title": "Calendar sync via ICS feed",
+    "body": "The OAuth approach was explicitly dropped. We only publish a read-only ICS feed.",
+    "labels": []
+  },
+  {
+    "id": "fp-neg-without-schema-billing",
+    "klass": "negation",
+    "truth": "fp",
+    "title": "Fix tooltip overflow",
+    "body": "Pure CSS change with no schema, billing or auth changes.",
+    "labels": []
+  },
+  {
+    "id": "fp-file-routes",
+    "klass": "filename",
+    "truth": "fp",
+    "title": "Add integration test for registry route",
+    "body": "The route legacy-billing.routes.ts has no test. Add one covering the 404 path.",
+    "labels": []
+  },
+  {
+    "id": "fp-file-spec",
+    "klass": "filename",
+    "truth": "fp",
+    "title": "Flaky banner spec",
+    "body": "billing-banners.spec.ts fails intermittently on CI because of a timing assumption.",
+    "labels": []
+  },
+  {
+    "id": "fp-file-path",
+    "klass": "filename",
+    "truth": "fp",
+    "title": "Extract shared hook",
+    "body": "Move the hook out of packages/frontend/src/billing/usePlan into a shared folder.",
+    "labels": []
+  },
+  {
+    "id": "fp-file-workflows",
+    "klass": "filename",
+    "truth": "fp",
+    "title": "Trim the nightly workflow list",
+    "body": "Workflows: cloudflare, cost-audit, demo-reseed, deploy, docker-image-build, runner-health. Drop the unused ones from the summary.",
+    "labels": []
+  },
+  {
+    "id": "fp-sense-git-checkout",
+    "klass": "sense",
+    "truth": "fp",
+    "title": "Document the dev setup",
+    "body": "Run git checkout main and pull before starting. Add the steps to the README.",
+    "labels": []
+  },
+  {
+    "id": "fp-sense-repo-checkout",
+    "klass": "sense",
+    "truth": "fp",
+    "title": "Speed up the fixture tests",
+    "body": "The tests run on any checkout, with no live backend needed.",
+    "labels": []
+  },
+  {
+    "id": "fp-sense-security-types",
+    "klass": "sense",
+    "truth": "fp",
+    "title": "Cap table ownership summary",
+    "body": "Show ownership across all security types (common, preferred, options).",
+    "labels": []
+  },
+  {
+    "id": "fp-sense-auth-header",
+    "klass": "sense",
+    "truth": "fp",
+    "title": "Download endpoint doc",
+    "body": "Request: GET /packages/:id\nHeaders: Authorization\nResponse: 200 application/pdf",
+    "labels": []
+  },
+  {
+    "id": "fp-incidental-example",
+    "klass": "incidental",
+    "truth": "fp",
+    "title": "Improve empty-state copy on the boards page",
+    "body": "Use friendlier wording, like the one in the Stripe dashboard.",
+    "labels": []
+  },
+  {
+    "id": "fp-incidental-context",
+    "klass": "incidental",
+    "truth": "fp",
+    "title": "Add keyboard shortcut for search",
+    "body": "Handy for power users; shortcut list lives next to the billing settings link.",
+    "labels": []
+  },
+  {
+    "id": "tp-no-security-check",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Route has no security check on write access",
+    "body": "The PATCH handler never verifies who is writing.",
+    "labels": []
+  },
+  {
+    "id": "tp-rejected-after",
+    "klass": "tp",
+    "truth": "tp",
+    "title": "Authorization failures create misleading audit events",
+    "body": "Authorization failures and rejected writes are logged as success.",
+    "labels": []
+  },
+  {
+    "id": "fp-neg-not-a-security",
+    "klass": "negation",
+    "truth": "fp",
+    "title": "Tune the rate-limit rules",
+    "body": "Noisy bots hammer the search route; no security impact, just load.",
+    "labels": []
+  }
+]

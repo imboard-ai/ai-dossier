@@ -62,6 +62,38 @@ function wordMatch(text: string, keywords: readonly string[]): string | null {
   return null;
 }
 
+const RULE1_KEYWORDS = [
+  'authentication',
+  'authorization',
+  'oauth',
+  'sso',
+  'payment',
+  'payments',
+  'billing',
+  'invoice',
+  'invoices',
+  'checkout',
+  'stripe',
+  'migration',
+  'migrations',
+  'security',
+  'crypto',
+  'secret',
+  'secrets',
+  'credential',
+  'credentials',
+  'terraform',
+] as const;
+const RULE3_KEYWORDS = ['new package', 'new workspace', 'monorepo package'] as const;
+const RULE4_KEYWORDS = [
+  'deploy',
+  'deployment',
+  'ci/cd',
+  'cicd',
+  'release pipeline',
+  'rollback pipeline',
+] as const;
+
 export const TEXT_FLOOR_PATTERNS: readonly TextFloorPattern[] = [
   {
     // Deliberately NOT the bare words "auth"/"login"/"logout"/"schema"/"infra"/"infrastructure":
@@ -73,47 +105,26 @@ export const TEXT_FLOOR_PATTERNS: readonly TextFloorPattern[] = [
     // RFC-0001 rule 1 "infra/terraform" area names. Also approximates rule 2 (schema/data
     // migration) via "migration"/"migrations" — a rough approximation, not full rule-2 coverage.
     name: 'rule1-risk-floor-area',
-    match: (t) =>
-      wordMatch(t, [
-        'authentication',
-        'authorization',
-        'oauth',
-        'sso',
-        'payment',
-        'payments',
-        'billing',
-        'invoice',
-        'invoices',
-        'checkout',
-        'stripe',
-        'migration',
-        'migrations',
-        'security',
-        'crypto',
-        'secret',
-        'secrets',
-        'credential',
-        'credentials',
-        'terraform',
-      ]),
+    match: (t) => wordMatch(t, RULE1_KEYWORDS),
   },
   {
     name: 'rule3-new-package-workspace',
-    match: (t) => wordMatch(t, ['new package', 'new workspace', 'monorepo package']),
+    match: (t) => wordMatch(t, RULE3_KEYWORDS),
   },
   {
     name: 'rule4-deploy-pipeline',
-    match: (t) =>
-      wordMatch(t, [
-        'deploy',
-        'deployment',
-        'ci/cd',
-        'cicd',
-        'release pipeline',
-        'rollback pipeline',
-      ]),
+    match: (t) => wordMatch(t, RULE4_KEYWORDS),
   },
 ];
+
+/** Every text-floor keyword, longest first so a phrase wins over a word it contains. */
+const FLOOR_KEYWORD_RE = new RegExp(
+  `\\b(?:${[...RULE1_KEYWORDS, ...RULE3_KEYWORDS, ...RULE4_KEYWORDS]
+    .sort((a, b) => b.length - a.length)
+    .map(phrase)
+    .join('|')})\\b`,
+  'gi'
+);
 
 /**
  * Longest quoted span stripped before keyword matching — a bound so a body full
@@ -327,12 +338,108 @@ export function stripReferenceMaterial(body: string): string {
 }
 
 /**
+ * #784: text-floor false-positive classes a deterministic scan CAN separate from the change
+ * surface. Measured on 57 hand-labelled text-floor hits (#772): 24 false positives — 5 negated
+ * mentions, 4 unquoted file/spec/workflow names, 3 other word senses (the other 12 are incidental
+ * mentions, out of reach here). Each mask blanks (same length) only the offending span, never the
+ * whole issue: an issue that ALSO names a floor keyword outside any masked span still fires, so a
+ * negated or file-named mention can never hide a genuine one elsewhere in the text.
+ */
+
+/** Filename with a code/config/doc extension, unquoted: `legacy-billing.routes.ts`, `deploy.yml`. */
+const FILE_TOKEN_RE =
+  /[\w@~./-]{1,80}\.(?:tsx?|jsx?|mjs|cjs|json|ya?ml|md|mdx|sh|py|toml|sql|css|html|tf|go|rs)\b/gi;
+
+/** Path with two or more `/` (`packages/frontend/src/x`); a single slash is not enough — `ci/cd` is a keyword. */
+const PATH_TOKEN_RE = /[\w@~.-]{0,40}(?:\/[\w@~.-]{1,40}){2,}\/?/g;
+
+/** A comma list of 3+ short items; masked when at least two items are kebab-case names (`cost-audit, deploy, docker-image-build`). */
+const NAME_LIST_RE = /[\w-]{1,40}(?:[ \t]*,[ \t]*[\w-]{1,40}){2,}/g;
+const KEBAB_ITEM_RE = /^[a-z0-9]+(?:-[a-z0-9]+)+$/i;
+
+/** Other senses of a floor word: git's checkout, a repo checkout, financial security types, the HTTP Authorization header, Node's `crypto.*` API. */
+const WORD_SENSE_RES: readonly RegExp[] = [
+  /\b(?:git|gh(?:\s+pr)?|actions\/)\s*checkout\b/gi,
+  /\b(?:fresh|clean|shallow|local)\s+checkout\b/gi,
+  /\b(?:any|every|each)\s+checkout\b(?!\s+(?:flow|page|session|button|form|step|summary|total))/gi,
+  /\bsecurity\s+(?:types?|classes|prices?|symbols?|master)\b/gi,
+  /\bcrypto\.[a-z]\w*/gi,
+  /\bAuthorization\s*:/gi,
+  /\bAuthorization\s+headers?\b/gi,
+  /\bheaders?\s*:\s*Authorization\b/gi,
+];
+
+const blank = (m: string) => ' '.repeat(m.length);
+
+/**
+ * Negators directly in front of a keyword: `no`, `without`, `non`, `zero`, `not a/an/the/any`,
+ * with up to three list-ish words between ("no schema, billing or auth changes"). Kept narrow so
+ * a verb phrase is never read as a negated mention: bare `not` ("login not working after
+ * payment") and `no longer` do not qualify, and `without` allows one non-gerund word at most
+ * ("without breaking billing" still names the surface).
+ */
+const NEGATED_BEFORE_RES: readonly RegExp[] = [
+  /(?:^|[^\w-])(?:no(?!\s+(?:longer|more)\b)|non|zero|not\s+(?:a|an|the|any))[\s-]+(?:[\w-]+(?:,|\s+(?:or|and|nor))?\s+){0,3}$/i,
+  /(?:^|[^\w-])(?:not\s+(?:doing|building|adding|using|supporting)|won'?t\s+(?:do|build|add|use|support)|don'?t\s+(?:need|want))\s+(?:[\w-]+\s+){0,2}$/i,
+  /,\s*not\s+$/i,
+  /(?:^|[^\w-])without\s+(?:(?![\w-]*ing\b)[\w-]+\s+)?$/i,
+];
+
+/**
+ * A "no X" negation only counts when X ENDS its noun phrase — a list separator, `or`/`and`, or a
+ * scope noun ("no migration risk", "no billing changes"). "no security check on write access" is
+ * a bug report whose change surface IS the keyword, so the negator must not hide it.
+ */
+const NEGATOR_TARGET_END_RE =
+  /^(?:\s*(?:[,.;!?()\n]|$)|\s+(?:or|and|nor)\b|\s+(?:needed|required|changes?|risks?|impacts?|work|concerns?|steps?|involved|implications?|effects?)\b)/i;
+
+/** A negation AFTER the keyword within two words: "OAuth approach explicitly dropped", "billing is out of scope". */
+const NEGATED_AFTER_RE =
+  /^(?:\s+[\w/-]+){0,2}\s+(?:(?:is|are|was|were)\s+)?(?:explicitly\s+)?(?:dropped|descoped|out\s+of\s+scope|not\s+(?:needed|required|in\s+scope|applicable|affected)|ruled\s+out)\b/i;
+
+/** Longest text scanned either side of a keyword when looking for a negation. */
+const NEGATION_WINDOW = 60;
+
+/** Blank every floor keyword occurrence that is negated in its clause. */
+function maskNegatedMentions(text: string): string {
+  return text.replace(FLOOR_KEYWORD_RE, (match, offset: number, whole: string) => {
+    const before = whole.slice(Math.max(0, offset - NEGATION_WINDOW), offset);
+    const clauseBefore = before.slice(
+      Math.max(...['.', ';', '!', '?', '\n'].map((c) => before.lastIndexOf(c))) + 1
+    );
+    const after = whole.slice(offset + match.length, offset + match.length + NEGATION_WINDOW);
+    const negated =
+      (NEGATED_BEFORE_RES.some((re) => re.test(clauseBefore)) &&
+        NEGATOR_TARGET_END_RE.test(after)) ||
+      NEGATED_AFTER_RE.test(after);
+    return negated ? blank(match) : match;
+  });
+}
+
+/**
+ * #784: blank the false-positive spans of {@link stripQuotedSpans}' unquoted cousins — file/spec/
+ * workflow names, other word senses, and negated mentions — before the text floor runs.
+ */
+export function maskFloorFalsePositives(text: string): string {
+  let out = text.replace(FILE_TOKEN_RE, blank).replace(PATH_TOKEN_RE, blank);
+  out = out.replace(NAME_LIST_RE, (list) =>
+    list.split(',').filter((item) => KEBAB_ITEM_RE.test(item.trim())).length >= 2
+      ? blank(list)
+      : list
+  );
+  for (const re of WORD_SENSE_RES) out = out.replace(re, blank);
+  return maskNegatedMentions(out);
+}
+
+/**
  * The exact text the text floor scans (#772): title + section/provenance-filtered body + label
  * names, with quoted spans blanked (#627). Exported so measurement tooling
  * (`scripts/prescreen-backlog-measure.mjs`) and tests see precisely what the rule sees.
  */
 export function floorScanText(title: string, body: string, labels: readonly string[]): string {
-  return stripQuotedSpans(`${title}\n${stripReferenceMaterial(body)}\n${labels.join(' ')}`);
+  return maskFloorFalsePositives(
+    stripQuotedSpans(`${title}\n${stripReferenceMaterial(body)}\n${labels.join(' ')}`)
+  );
 }
 
 /** `Depends on #N` references resolved per issue; each costs a `gh` call downstream (command layer), same rationale as `MAX_ISSUE_SELECTION` (`issue-selection.ts`). */
