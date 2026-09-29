@@ -390,6 +390,10 @@ export interface BatchAmortizationSummary {
    */
   prep_tokens: number | null;
   prep_sessions: number;
+  /** #899: `marker` = exact prep start; otherwise an upper bound (`prev-enqueue` / `lookback-cap` / `mixed`). */
+  prep_basis?: string | null;
+  /** #899: the prep window was split with sibling batches from one enqueue (by member count). */
+  prep_split?: boolean;
 }
 
 /**
@@ -489,7 +493,7 @@ export function formatAmortizationLine(a: BatchAmortizationSummary): string {
   const prepNote =
     a.prep_tokens === null
       ? '; prep tokens n/a (no prep session recorded)'
-      : `; prep ${formatCount(a.prep_tokens)} tokens, not included above` +
+      : `; prep ${formatCount(a.prep_tokens)} tokens${a.prep_basis && a.prep_basis !== 'marker' ? ` (upper bound: no prep-start marker, window from ${a.prep_basis})` : ''}${a.prep_split ? ' (split across sibling batches by member count)' : ''}, not included above` +
         (denominator > 0
           ? ` (${formatCount(Math.round(a.prep_tokens / denominator))}/member)`
           : '');
