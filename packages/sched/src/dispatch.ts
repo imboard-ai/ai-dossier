@@ -28,6 +28,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SCHED_DISPATCH_EVENT } from '@ai-dossier/core';
 import { SAFE_REF_RE } from './attribution';
+import { type MergeMechanism, shipModeClause } from './merge-mechanism';
 import { sanitizeSlug } from './project';
 import {
   DEFAULT_FENCE_TAKEOVER_TIMEOUT_MS,
@@ -262,21 +263,23 @@ function withSupersessionCheckpoint(template: string): string {
 }
 
 /**
- * Default prompt sent on the child's stdin. Detached ship mode (#468): the
- * agent parks the PR on `auto-merge` and STOPS — the scheduler's PR watcher
- * owns the merge wait and dispatches teardown + report as tail work. The
- * fleet pattern of re-dispatching a full-cycle run for the tail is retired.
- * Operators wanting attached runs (agent drives to the final report itself)
- * override `dispatch.prompt` in config.json.
+ * Default prompt sent on the child's stdin. Ship mode is NOT hard-coded (#887): the
+ * `{ship_clause}` is rendered per dispatch from the repo's detected merge mechanism
+ * (`shipModeClause`). With a confirmed mechanism the agent parks the PR on `auto-merge`
+ * and STOPS (detached, #468) — the scheduler's PR watcher owns the merge wait and
+ * dispatches teardown + report as tail work. Without one (or when detection failed) the
+ * run ships attached and merges the PR itself, because sched's watch only waits and a
+ * parked PR in a repo with no watcher would never merge. A custom `dispatch.prompt`
+ * without the placeholder keeps its own wording (and the engine's parked-PR backstop
+ * still fails a park that no mechanism can merge). Operators wanting attached runs
+ * unconditionally override `dispatch.prompt` in config.json.
  */
 export const DEFAULT_PROMPT_TEMPLATE = withSupersessionCheckpoint(
   withNoBackgroundExit(
     'Run the full-cycle-issue workflow for GitHub issue #{issue} in this repository.\n\n' +
       'Begin by fetching the workflow: ai-dossier run imboard-ai/git/full-cycle-issue --pull\n\n' +
-      'Then execute it for issue #{issue} in detached ship mode (ship_mode=detached), following every ' +
-      'phase (gate, setup, plan, implement, review) without asking questions, until Phase 5 parks the ' +
-      'PR: apply the auto-merge label, post the awaiting-merge milestone, and STOP. Do not wait for ' +
-      'the merge, do not run teardown or report — the scheduler watches the PR and dispatches those.'
+      'Then execute it for issue #{issue}, following every phase (gate, setup, plan, implement, ' +
+      'review, ship) without asking questions. {ship_clause}'
   )
 );
 
@@ -394,9 +397,11 @@ export const DEFAULT_MEMBER_PROMPT_TEMPLATE = withNoBackgroundExit(
 
 /**
  * Default prompt for the batch tail agent (#523 AC3): aggregate review, then
- * batch-mode ship — parks the PR on `auto-merge` and stops, exactly like a
- * detached full-cycle run. The scheduler's batch PR watcher owns the merge
- * wait and dispatches the batch report agent as separate tail work.
+ * batch-mode ship. Like the full-cycle prompt, the ship mode is rendered from the
+ * repo's detected merge mechanism (`{ship_clause}`, #887): a confirmed mechanism parks
+ * the PR on `auto-merge` and stops; none merges it directly. Either way the agent ends
+ * by posting the batch-ship milestone with pr=, and the scheduler's batch PR watcher
+ * dispatches the batch report agent as separate tail work.
  */
 export const DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE = withSupersessionCheckpoint(
   withNoBackgroundExit(
@@ -406,9 +411,7 @@ export const DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE = withSupersessionCheckpoint(
       'ai-dossier run imboard-ai/git/ship-issue --pull\n\n' +
       'First run review-issue in aggregate mode (batch_id={batch}, members={members}), posting the ' +
       'batch-review milestone on issue #{anchor}. Then run ship-issue in batch mode (rebase-merge, ' +
-      'a `Closes` list for every member), applying the auto-merge label and posting the batch-ship ' +
-      'awaiting-merge milestone with pr= on issue #{anchor} — then STOP. Do not wait for the merge, ' +
-      'do not run the batch report — the scheduler watches the PR and dispatches that.'
+      'a `Closes` list for every member). {ship_clause}'
   )
 );
 
@@ -921,8 +924,19 @@ export function takeoverInstruction(issue: number, gen: number, slotLabel?: stri
  * `gen` is the runstate generation the agent owns; 0 (the default) is a first dispatch
  * and produces today's prompt unchanged.
  */
-export function buildPrompt(template: string, issue: number, gen = 0, slotLabel?: string): string {
-  const rendered = renderTemplate(template, { issue, gen });
+export function buildPrompt(
+  template: string,
+  issue: number,
+  gen = 0,
+  slotLabel?: string,
+  mechanism?: MergeMechanism
+): string {
+  const rendered = renderTemplate(template, {
+    // `ship_clause` first: its text may itself carry a placeholder (`{anchor}`) or none.
+    ship_clause: shipModeClause(mechanism, 'issue'),
+    issue,
+    gen,
+  });
   return gen > 0 ? `${rendered}\n\n${takeoverInstruction(issue, gen, slotLabel)}` : rendered;
 }
 
@@ -1180,9 +1194,11 @@ export function buildBatchTailPrompt(
   batch: string,
   anchor: number,
   members: readonly number[],
-  worktree: string
+  worktree: string,
+  mechanism?: MergeMechanism
 ): string {
   return renderTemplate(template, {
+    ship_clause: shipModeClause(mechanism, 'batch'),
     batch: flattenPromptValue(batch),
     anchor,
     members: members.join(','),

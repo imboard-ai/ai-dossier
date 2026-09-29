@@ -2157,7 +2157,9 @@ function spawnTailAgent(
       batchId,
       batch.anchor,
       landed,
-      batch.worktree
+      batch.worktree,
+      // #887: the repo's detected merge mechanism decides detached vs attached ship.
+      deps.groundTruth.mergeMechanism?.()
     );
     const logFile = batchTailLogPath(deps.store.runsDir, batchId);
     // #629: fences `handleDeadDispatchApiError`'s classification to this

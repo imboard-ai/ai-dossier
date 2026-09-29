@@ -11,8 +11,16 @@
  * and any consumer — supply fake ground truth and no subprocess runs.
  */
 
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { isTrustedAuthorAssociation } from '@ai-dossier/core';
 import { unwrapList } from './json';
+import {
+  type MergeMechanism,
+  parseRepoMergeSettings,
+  REPO_MERGE_SETTINGS_JQ,
+  workflowActsOnAutoMergeLabel,
+} from './merge-mechanism';
 import { createExecFn, type ExecFn } from './project';
 import { type BatchPhase, PHASES } from './types';
 
@@ -50,6 +58,12 @@ export interface PrTruth {
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
   /** True when the PR carries the `auto-merge-blocked` label (the watcher's block signal). */
   blocked: boolean;
+  /**
+   * True when GitHub has an auto-merge REQUEST on the PR (`autoMergeRequest`
+   * non-null, #874) — the label is not proof. Absent when the payload carried no
+   * such field (older fixtures); `false` is a positive "no request".
+   */
+  autoMergeRequested?: boolean;
 }
 
 /** Teardown inputs recovered from a run's `setup` milestone (#468 AC2). */
@@ -200,6 +214,13 @@ export interface GroundTruth {
    */
   prState(pr: number): PrTruth | undefined;
   /**
+   * #887: what will merge a PR parked on `auto-merge` — native auto-merge allowed
+   * on the repo and/or a watcher workflow. Optional and cached by the exec
+   * implementation; `undefined` (or an absent method) = not detected, which the
+   * callers treat as "unknown", never as "none".
+   */
+  mergeMechanism?(): MergeMechanism | undefined;
+  /**
    * The number of an OPEN pull request the fleet opened from `branch`, or
    * `null` when none exists (#596): the terminal recovery branch's
    * ground-truth check — a unit that exited unverified may have already
@@ -342,6 +363,52 @@ export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone 
   }
 }
 
+/** Repo merge settings change rarely; re-read at most this often (#887). */
+const MERGE_MECHANISM_TTL_MS = 10 * 60 * 1000;
+
+/** True/false when the workflows directory was readable, `null` when it was not. */
+function scanWatcherWorkflow(repoDir: string | undefined): boolean | null {
+  if (repoDir === undefined) return null;
+  const dir = join(repoDir, '.github', 'workflows');
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => /\.ya?ml$/i.test(f));
+  } catch (err) {
+    // No workflows directory at all is a positive "no watcher"; anything else is unreadable.
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? false : null;
+  }
+  for (const f of files) {
+    try {
+      if (workflowActsOnAutoMergeLabel(readFileSync(join(dir, f), 'utf8'))) return true;
+    } catch {
+      return null;
+    }
+  }
+  return false;
+}
+
+/**
+ * Detect the repo's merge mechanism (#887): `gh api repos/<r>` for
+ * `allow_auto_merge` + allowed methods, and a scan of `.github/workflows` for a
+ * label watcher. Pinned to the verified repo when there is one, else gh's
+ * `{owner}/{repo}` cwd placeholders. Never throws.
+ */
+export function detectMergeMechanism(
+  exec: ExecFn,
+  repoDir: string | undefined,
+  repo: { owner: string; name: string } | null
+): MergeMechanism {
+  const slug = repo !== null ? `${repo.owner}/${repo.name}` : '{owner}/{repo}';
+  const settings = parseRepoMergeSettings(
+    exec('gh', ['api', `repos/${slug}`, '--jq', REPO_MERGE_SETTINGS_JQ], repoDir)
+  );
+  return {
+    nativeAutoMerge: settings?.nativeAutoMerge ?? null,
+    watcherWorkflow: scanWatcherWorkflow(repoDir),
+    allowedMethods: settings?.allowedMethods ?? [],
+  };
+}
+
 /**
  * Ground truth backed by subprocess calls:
  * - `ai-dossier runstate last --issue N --json` — the milestone trail
@@ -377,6 +444,7 @@ export function createExecGroundTruth(
 ): GroundTruth {
   const runstateBin = opts.runstateBin ?? 'ai-dossier';
   const repo = opts.repo !== undefined ? parseRepoName(opts.repo) : null;
+  let mechanismCache: { at: number; value: MergeMechanism | undefined } | null = null;
   const truth: GroundTruth = {
     latestMilestone(issue: number): GroundTruthMilestone | null | undefined {
       const out = exec(
@@ -426,12 +494,21 @@ export function createExecGroundTruth(
           String(pr),
           ...(repo !== null ? ['-R', `${repo.owner}/${repo.name}`] : []),
           '--json',
-          'state,mergedAt,mergeable,labels',
+          'state,mergedAt,mergeable,labels,autoMergeRequest',
         ],
         opts.repoDir
       );
       if (out === null) return undefined; // poll failed — unreachable
       return parsePrViewJson(out) ?? undefined;
+    },
+    mergeMechanism(): MergeMechanism | undefined {
+      const now = Date.now();
+      if (mechanismCache !== null && now - mechanismCache.at < MERGE_MECHANISM_TTL_MS) {
+        return mechanismCache.value;
+      }
+      const value = detectMergeMechanism(exec, opts.repoDir, repo);
+      mechanismCache = { at: now, value };
+      return value;
     },
     openPrForBranch(branch: string): number | null | undefined {
       // Same `SAFE_REF_NAME` validation as `branchHead` (CWE-88): the branch
@@ -806,7 +883,9 @@ export function parsePrViewJson(stdout: string | null): PrTruth | null {
         ? mergeableRaw
         : null;
     const blocked = labelNames(obj.labels).includes('auto-merge-blocked');
-    return { state, mergedAt, mergeable, blocked };
+    return 'autoMergeRequest' in obj
+      ? { state, mergedAt, mergeable, blocked, autoMergeRequested: obj.autoMergeRequest !== null }
+      : { state, mergedAt, mergeable, blocked };
   } catch {
     return null;
   }

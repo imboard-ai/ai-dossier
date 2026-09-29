@@ -12,6 +12,7 @@ import {
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
   type JournalEvent,
+  type MergeMechanism,
   type PrTruth,
   type RunFenceBinder,
   type RunFenceReleaser,
@@ -109,7 +110,9 @@ function harness(
   const teardownCalls: Array<{ file: string; args: string[]; cwd?: string }> = [];
   /** Scriptable teardown subprocess behavior (default: every call fails). */
   let teardownScript: (file: string, args: string[]) => string | null = () => null;
+  let mergeMechanism: MergeMechanism | undefined;
   const groundTruth: GroundTruth = {
+    mergeMechanism: () => mergeMechanism,
     latestMilestone: (issue) =>
       unreachable.has(issue) ? undefined : (milestones.get(issue) ?? null),
     issueClosed: (issue) => closedIssues.has(issue),
@@ -323,6 +326,9 @@ function harness(
         at: at ?? clock.toISOString(),
         keys,
       }),
+    setMergeMechanism: (m: MergeMechanism | undefined) => {
+      mergeMechanism = m;
+    },
     setPr: (pr: number, truth: Partial<PrTruth> & { state: PrTruth['state'] }) =>
       prStates.set(pr, {
         mergedAt: null,
@@ -2734,6 +2740,67 @@ describe('#468 AC3: watcher failure paths', () => {
     const result = h.tick();
     expect(result.failed).toEqual(['issue:101']);
     expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('auto-merge-blocked');
+  });
+
+  describe('#887: a PR parked where nothing can merge it', () => {
+    const NONE: MergeMechanism = {
+      nativeAutoMerge: false,
+      watcherWorkflow: false,
+      allowedMethods: ['squash'],
+    };
+
+    it('no watcher, no native auto-merge, no request → failed no-merge-mechanism (never parked forever)', () => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(NONE);
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: false });
+      h.advance(200_000);
+      const result = h.tick();
+      expect(result.failed).toEqual(['issue:101']);
+      expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('no-merge-mechanism');
+    });
+
+    it.each([
+      ['native auto-merge confirmed', { ...NONE, nativeAutoMerge: true }, false],
+      ['a watcher workflow exists', { ...NONE, watcherWorkflow: true }, false],
+      ['detection unknown (gh failed)', { ...NONE, nativeAutoMerge: null }, false],
+      ['detection unavailable', undefined, false],
+      ['GitHub holds an auto-merge request', NONE, true],
+    ] as const)('%s → keeps watching (unchanged park path)', (_name, mechanism, requested) => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(mechanism);
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: requested });
+      h.advance(200_000);
+      const result = h.tick();
+      expect(result.failed).toEqual([]);
+      expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+    });
+
+    it('a payload with no autoMergeRequest field never trips the backstop', () => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(NONE);
+      h.setPr(55, { state: 'OPEN' });
+      h.advance(200_000);
+      expect(h.tick().failed).toEqual([]);
+    });
+
+    it('the dispatched prompt carries the detected facts: attached when none, detached when confirmed', () => {
+      const none = harness();
+      none.setMergeMechanism(NONE);
+      none.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+      none.tick();
+      expect(none.spawnCalls[0].prompt).toContain('ship_mode=attached');
+      expect(none.spawnCalls[0].prompt).not.toContain('{ship_clause}');
+
+      const native = harness();
+      native.setMergeMechanism({ ...NONE, nativeAutoMerge: true });
+      native.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+      native.tick();
+      expect(native.spawnCalls[0].prompt).toContain('ship_mode=detached');
+      expect(native.spawnCalls[0].prompt).toContain('autoMergeRequest');
+    });
   });
 
   it('OPEN and mergeable keeps watching (no failure, no slots)', () => {

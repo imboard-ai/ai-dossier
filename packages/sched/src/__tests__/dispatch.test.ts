@@ -2,11 +2,13 @@ import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import {
   buildAgentCommand,
+  buildBatchTailPrompt,
   buildFixPrompt,
   buildMemberPrompt,
   buildPrompt,
   buildReportPrompt,
   buildTierCommand,
+  DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE,
   DEFAULT_DISALLOWED_TOOLS,
   DEFAULT_DISPATCH_COMMAND,
   DEFAULT_FIX_PROMPT_TEMPLATE,
@@ -620,13 +622,45 @@ describe('createSpawnDeps (real processes)', () => {
 // --- #468: report dispatch ---
 
 describe('report dispatch (#468 AC2)', () => {
-  it('the default prompt is detached ship mode (park and stop)', () => {
+  it('the default prompt defers ship mode to the detected merge mechanism (#887)', () => {
     const resolved = resolveDispatch({ max_slots: 1 });
-    expect(resolved.prompt).toContain('detached');
-    expect(resolved.prompt).toContain('auto-merge');
-    expect(resolved.prompt).toContain('STOP');
+    // Not hard-coded: the template carries a placeholder, rendered per dispatch.
+    expect(resolved.prompt).toContain('{ship_clause}');
+    const confirmed = buildPrompt(resolved.prompt, 7, 0, undefined, {
+      nativeAutoMerge: true,
+      watcherWorkflow: false,
+      allowedMethods: ['squash'],
+    });
+    expect(confirmed).toContain('detached');
+    expect(confirmed).toContain('auto-merge');
+    expect(confirmed).toContain('STOP');
     // the tail is the scheduler's, not the agent's
-    expect(resolved.prompt).toContain('scheduler');
+    expect(confirmed).toContain('scheduler');
+    // a label is not proof
+    expect(confirmed).toContain('autoMergeRequest');
+  });
+
+  it.each([
+    ['none', { nativeAutoMerge: false, watcherWorkflow: false, allowedMethods: [] }],
+    ['unknown', { nativeAutoMerge: null, watcherWorkflow: false, allowedMethods: [] }],
+    ['undetected', undefined],
+  ] as const)('%s merge mechanism → attached ship, never a park (#887)', (_n, mechanism) => {
+    const full = buildPrompt(DEFAULT_PROMPT_TEMPLATE, 7, 0, undefined, mechanism);
+    expect(full).toContain('ship_mode=attached');
+    expect(full).toContain('no-merge-mechanism');
+    expect(full).not.toContain('and STOP. Do not wait for the merge');
+    const tail = buildBatchTailPrompt(
+      DEFAULT_BATCH_TAIL_PROMPT_TEMPLATE,
+      'b-1',
+      7,
+      [7, 8],
+      '/w',
+      mechanism
+    );
+    expect(tail).toContain('ship_mode=attached');
+    expect(tail).toContain('issue #7');
+    expect(tail).not.toContain('{anchor}');
+    expect(tail).not.toContain('{ship_clause}');
   });
 
   it('buildReportPrompt substitutes issue, pr, and cleanup', () => {
