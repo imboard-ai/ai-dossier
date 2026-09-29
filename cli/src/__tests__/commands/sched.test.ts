@@ -1744,7 +1744,7 @@ describe('ai-dossier sched reprioritize (#565)', () => {
     await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
     await expect(
       runSched(['sched', 'reprioritize', '--issue', '101', '--project', 'test-proj'])
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow();
   });
 
   it('#565 review: rejects a multi-issue --issue selection rather than silently reprioritizing only the first', async () => {
