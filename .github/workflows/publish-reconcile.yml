@@ -1,0 +1,50 @@
+name: Reconcile npm Publishes
+
+# Why this exists (#798):
+#   `publish-packages.yml` runs on the `push` event, and GitHub intermittently
+#   drops that event for a merge to main (no push-triggered workflow of any kind
+#   ran for the missing SHAs). A version bump merged that way is never
+#   published, and if it is the last merge of a burst nothing later rescues it.
+#
+#   Hourly, this asks publish-guard.mjs whether main has any package version
+#   that is not on npm and, only if so (and no publish run is already queued),
+#   dispatches publish-packages.yml — which re-checks and publishes in
+#   dependency order. Idempotent: a no-op when npm is up to date. It never
+#   publishes itself, so trusted-publishing (OIDC) stays bound to
+#   publish-packages.yml. See scripts/publish-reconcile.mjs.
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: publish-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          # publish-guard diffs HEAD against the commit each published version
+          # was built from (npm's gitHead).
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Dispatch publish if main has unpublished versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-reconcile.mjs
