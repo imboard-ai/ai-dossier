@@ -2530,7 +2530,8 @@ export function evictMemberAndContinue(
   now: Date,
   result: BatchTickResult,
   /** #844: the member's slot release (or any pre-write) — committed in the eviction's own write. */
-  preWrite?: (s: SchedState) => SchedState
+  preWrite?: (s: SchedState) => SchedState,
+  afterEvict?: () => void
 ): void {
   const { batchEnded, duplicate } = evictMemberDirectly(
     deps,
@@ -2542,6 +2543,7 @@ export function evictMemberAndContinue(
     preWrite
   );
   if (duplicate) return;
+  afterEvict?.();
   if (batchEnded) {
     result.failed.push(unit(batchId));
     return;
@@ -3143,7 +3145,7 @@ export function resumeBlockedGate(
  * full-cycle run is an independent unit), so unlike `engine.ts`'s per-unit log, a member's log file is
  * always one-shot and reading from offset 0 is always correct.
  */
-function recordMemberRunLog(
+function prepareMemberRunLog(
   deps: BatchDispatchDeps,
   dispatch: ResolvedDispatch,
   state: SchedState,
@@ -3153,7 +3155,7 @@ function recordMemberRunLog(
   memberIssue: number,
   slot: SlotEntry,
   now: Date
-): string | null {
+): { lastTool: string | null; append: () => void } | null {
   if (slot.status !== 'running' || slot.spawned_at === null) {
     journalEvent(deps, 'run-log-skipped', unit(batchId), {
       issue: memberIssue,
@@ -3192,17 +3194,42 @@ function recordMemberRunLog(
     tier,
   });
 
-  finalizeRunLogEntry(
-    runEntry,
-    logContent,
-    deps.homeDir,
-    (event, extra) => journalEvent(deps, event, unit(batchId), extra),
-    { issue: memberIssue, log: logFile }
-  );
+  return {
+    lastTool: parseLastToolUse(logContent),
+    append: () =>
+      finalizeRunLogEntry(
+        runEntry,
+        logContent,
+        deps.homeDir,
+        (event, extra) => journalEvent(deps, event, unit(batchId), extra),
+        { issue: memberIssue, log: logFile }
+      ),
+  };
+}
 
-  // #591: the last tool this member dispatch called — attributes an
-  // `agent-exited-unverified` failure to a concrete cause without opening the transcript.
-  return parseLastToolUse(logContent);
+function recordMemberRunLog(
+  deps: BatchDispatchDeps,
+  dispatch: ResolvedDispatch,
+  state: SchedState,
+  batchId: string,
+  memberIndex: number,
+  memberIssue: number,
+  slot: SlotEntry,
+  now: Date
+): string | null {
+  const runLog = prepareMemberRunLog(
+    deps,
+    dispatch,
+    state,
+    batchId,
+    memberIndex,
+    memberIssue,
+    slot,
+    now
+  );
+  if (runLog === null) return null;
+  runLog.append();
+  return runLog.lastTool;
 }
 
 /**
@@ -3774,7 +3801,7 @@ function reconcileMemberSlot(
     return;
   }
   if (read.blockedNow || read.dead) {
-    const lastTool = recordMemberRunLog(
+    const runLog = prepareMemberRunLog(
       deps,
       dispatch,
       state0,
@@ -3799,11 +3826,12 @@ function reconcileMemberSlot(
       batchId,
       batch,
       memberIssue,
-      memberFailureFor(read, lastTool),
+      memberFailureFor(read, runLog?.lastTool ?? null),
       now,
       result,
       // #844: released in the eviction's own write, never before it.
-      release
+      release,
+      () => runLog?.append()
     );
   }
 }
@@ -5861,7 +5889,8 @@ function evictParallelMember(
   now: Date,
   result: BatchTickResult,
   /** #844: the member's own slot release — committed in the eviction's write. */
-  release?: (s: SchedState) => SchedState
+  release?: (s: SchedState) => SchedState,
+  afterEvict?: () => void
 ): void {
   const { batchEnded, duplicate } = evictMemberDirectly(
     deps,
@@ -5883,6 +5912,7 @@ function evictParallelMember(
       )
   );
   if (duplicate) return;
+  afterEvict?.();
   result.failed.push(batchEnded ? unit(batchId) : batchMemberUnit(batchId, run.issue));
   if (batchEnded) return;
   teardownRunTree(deps, batchId, run, false, now);
@@ -6001,7 +6031,7 @@ function reconcileParallelMemberSlot(
     return;
   }
   if (read.blockedNow || read.dead) {
-    const lastTool = recordMemberRunLog(
+    const runLog = prepareMemberRunLog(
       deps,
       dispatch,
       state0,
@@ -6016,10 +6046,11 @@ function reconcileParallelMemberSlot(
       config,
       batchId,
       run,
-      memberFailureFor(read, lastTool),
+      memberFailureFor(read, runLog?.lastTool ?? null),
       now,
       result,
-      release
+      release,
+      () => runLog?.append()
     );
   }
 }

@@ -6057,6 +6057,36 @@ function crashAfterSlotRelease(
   };
 }
 
+/** Simulate death after a member eviction is durably committed, before telemetry. */
+function crashAfterMemberEviction(
+  h: BatchHarness,
+  batchId: string,
+  issue: number
+): { restart: () => void } {
+  const original = h.store.withLock.bind(h.store);
+  let fired = false;
+  h.store.withLock = (<T>(fn: Parameters<SchedStore['withLock']>[0]): T => {
+    if (fired) throw new Error('#863 injected crash: the engine is dead');
+    const alreadyEvicted = findBatch(h.store.load(), batchId)?.evictions.some(
+      (e) => e.issue === issue
+    );
+    const out = original(fn) as T;
+    const newlyEvicted = findBatch(h.store.load(), batchId)?.evictions.some(
+      (e) => e.issue === issue
+    );
+    if (!alreadyEvicted && newlyEvicted) {
+      fired = true;
+      throw new Error('#863 injected crash after durable member eviction');
+    }
+    return out;
+  }) as SchedStore['withLock'];
+  return {
+    restart: () => {
+      h.store.withLock = original;
+    },
+  };
+}
+
 /** How many times a batch member was dispatched — one `sched-dispatch` preamble per spawn. */
 function memberDispatchCount(h: BatchHarness, batchId: string, index: number, issue: number) {
   const log = batchMemberLogPath(h.store.runsDir, batchId, index, issue);
@@ -6068,6 +6098,46 @@ function memberDispatchCount(h: BatchHarness, batchId: string, index: number, is
 }
 
 describe('#844 item 1: a member slot release and its eviction commit in ONE write', () => {
+  it('#863: a post-eviction pre-telemetry crash loses the row rather than duplicating it on restart', async () => {
+    const repo = scratchRepo();
+    const id = 'b-863-run-log';
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--die-members=881'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([
+      { issue: 881, mode: 'slot', batch: id, anchor: 880, tier: 'mid' },
+      { issue: 882, mode: 'slot', batch: id, tier: 'mid' },
+    ]);
+    await tickUntil(
+      h,
+      id,
+      () => findBatch(h.state(), id)?.status === 'executing' && batchSlotPid(h, id) !== undefined
+    );
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, id) as number)).toBe(true);
+
+    const crash = crashAfterMemberEviction(h, id, 881);
+    expect(() => h.tick()).toThrow('#863 injected crash');
+    crash.restart();
+    h.tick();
+
+    // The eviction is durable, so restart continues with member 2 without
+    // revisiting member 1. This intentionally loses its telemetry row rather
+    // than risking an append-only runs.jsonl double count.
+    expect(findBatch(h.state(), id)?.evictions.map((e) => e.issue)).toContain(881);
+    const runsLog = path.join(h.homeDir, '.dossier', 'runs.jsonl');
+    const runs = fs.existsSync(runsLog)
+      ? fs
+          .readFileSync(runsLog, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line))
+          .filter((entry) => entry.unit === 'issue:881')
+      : [];
+    expect(runs).toHaveLength(0);
+  }, 60_000);
+
   it('serial: a crash right after the release write leaves the member evicted with its slot released, and it is never respawned', async () => {
     const repo = scratchRepo();
     const id = 'b-844-crash';
