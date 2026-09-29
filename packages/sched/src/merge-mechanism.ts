@@ -123,7 +123,7 @@ export function shipModeClause(
     );
   }
   const why =
-    kind === 'batch' && mechanism?.nativeAutoMerge === true && verdict !== 'confirmed'
+    kind === 'batch' && mechanism?.nativeAutoMerge === true
       ? 'a detached batch ship needs a label watcher workflow and none was confirmed'
       : verdict === 'none'
         ? 'neither native auto-merge nor a label watcher exists, so a parked PR would never merge'
