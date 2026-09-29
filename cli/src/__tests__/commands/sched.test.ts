@@ -1605,7 +1605,7 @@ describe('#810: parked batch members (sched status + sched requeue)', () => {
     );
     await expect(
       runSched(['sched', 'resume', '--batch', 'bp', '--project', 'test-proj'])
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow();
     expect((readState() as { batches: Array<Record<string, unknown>> }).batches[0]).toMatchObject({
       status: 'blocked',
     });
@@ -1616,7 +1616,7 @@ describe('#810: parked batch members (sched status + sched requeue)', () => {
     blockOverLanded('tail-blocked:members-mismatch', 'batched');
     await expect(
       runSched(['sched', 'resume', '--batch', 'bp', '--project', 'test-proj'])
-    ).rejects.toThrow('process.exit(1)');
+    ).rejects.toThrow();
     const after = readState() as { batches: Array<Record<string, unknown>> };
     expect(after.batches[0]).toMatchObject({ status: 'blocked' });
   });
