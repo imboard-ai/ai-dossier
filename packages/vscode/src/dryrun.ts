@@ -17,6 +17,16 @@ export function formatDryRun(plan: DryRunPlan): string {
     `Risk score: ${plan.risk_score}/100 (${plan.level}); declared risk_level: ${plan.dossier.declared_risk_level ?? 'none'}`,
     `Requires approval: ${plan.declared.requires_approval ? 'yes' : 'no'}`,
   ];
+  if (plan.declared_vs_observed?.mismatch) {
+    out.push(
+      `WARNING: declares ${plan.declared_vs_observed.declared_level ?? 'no risk_level'}, code blocks show ${plan.declared_vs_observed.observed_level}; the score follows observed behaviour.`
+    );
+  }
+  if ((plan.unanalyzed_fences?.length ?? 0) > 0) {
+    out.push(
+      `WARNING: ${plan.unanalyzed_fences.length} code block(s) in a language that is not analysed (${[...new Set(plan.unanalyzed_fences.map((f) => f.lang || 'unlabeled'))].join(', ')}); not reflected in the score.`
+    );
+  }
   out.push(
     ...section(
       'Commands',
