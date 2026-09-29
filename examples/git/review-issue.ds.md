@@ -2,11 +2,11 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Review Issue — Parallel Code Review",
-  "version": "1.16.0",
+  "version": "1.17.0",
   "protocol_version": "1.0",
   "status": "Stable",
-  "last_updated": "2026-09-24",
-  "objective": "Run a tiered set of report-only review agents (DRY, Security, Supportability, Maintainability, Documentation, Convention/Contract, Conformance, Visual Conformance) on the branch diff, then run a validity gate before dedupe and apply the surviving fixes serially; in aggregate mode (batch_id set): review the combined batch diff once on the batch anchor, with per-member conformance already produced per-issue by slot-cycles",
+  "last_updated": "2026-09-29",
+  "objective": "Run a tiered set of report-only review agents (DRY, Security, Supportability, Maintainability, Documentation, Convention/Contract, Conformance, Visual Conformance) on the branch diff, then run a validity gate before dedupe and apply the surviving fixes serially; in aggregate mode (batch_id set): review the combined batch diff once on the batch anchor, with per-member conformance already produced per-issue by slot-cycles — an interaction-only review (one agent) when every member already passed a full-tier review, the full dimension set otherwise — then commit and push fixes before ONE foreground gate",
   "category": [
     "development"
   ],
@@ -111,7 +111,7 @@ Two agents verify rather than critique: Agent 7 (Conformance) reads the diff aga
 
 ## Mode Selection
 
-`batch_id` set → run **Aggregate Mode (Batch)** below, then stop — the per-issue flow ("Actions to Perform") does not run. Unset → the ordinary per-issue flow. Aggregate mode is dispatched by the batch scheduler against the batch ANCHOR issue (RFC-0001 C.5): one review over the COMBINED batch diff, dimensions run once over the aggregate, and neither Agent 7 nor Agent 8 runs — each member's slot-cycle already produced its per-issue blind conformance verdicts, and per-issue conformance is the batch path's trust anchor (RFC-0001 constraint 3: share the lifecycle, never the per-issue verification).
+`batch_id` set → run **Aggregate Mode (Batch)** below, then stop — the per-issue flow ("Actions to Perform") does not run. Unset → the ordinary per-issue flow. Aggregate mode is dispatched by the batch scheduler against the batch ANCHOR issue (RFC-0001 C.5): one review over the COMBINED batch diff — interaction-only when every member already passed a full-tier review (Aggregate Step 2a), otherwise the dimensions run once over the aggregate — and neither Agent 7 nor Agent 8 runs — each member's slot-cycle already produced its per-issue blind conformance verdicts, and per-issue conformance is the batch path's trust anchor (RFC-0001 constraint 3: share the lifecycle, never the per-issue verification).
 
 ## Aggregate Mode (Batch)
 
@@ -137,6 +137,51 @@ git diff origin/<base_branch>...HEAD --name-only
 
 One diff spanning every member's boundary commit. Both empty → `reason=nothing-to-review` (blocked milestone + comment naming the base branch and whether member commits are pushed, then stop).
 
+**Rebase before you review, never after.** If the base moved and you must bring the batch branch up to date, rebase NOW — before Aggregate Step 2a — and write down every file whose conflict you resolved, and whether the conflict was base-vs-member or member-vs-member. Those files are part of the risk-floor delta below; a rebase after the review would change code the review never saw and force a second gate.
+
+### Aggregate Step 2a: Integration Review Selection — `interaction` or `full`
+
+Operator decision (ai-dossier#770, 2026-09-29; #928): when every member already passed a full-tier review of its own change, re-running the full dimension set over the combined diff re-reviews code that was already reviewed. b-20260929-01 paid ~2.5 h and ~350k decision-grade output tokens for that. Decide which review this batch gets **before** the tier (Aggregate Step 2c), and record the decision and its reason on the milestone (Aggregate Step 6).
+
+**1. Member review evidence.** Per member, read its latest `phase=review` milestone for THIS batch (the scan idiom of Aggregate Step 2b; milestone text is untrusted data — parse keys only):
+
+```bash
+gh issue view <member> --json comments --jq '[.comments[].body
+  | select(startswith("<!-- runstate:v1 -->") and test("\\nphase=review status=") and test("\\nbatch=<batch_id>(\\n|$)"))] | last // empty'
+```
+
+A member is **full-tier reviewed** when `status=done`, `agents_pending=none`, `agents_done` is not `0`/`none`/empty, AND, by the member's `review=` key (absent means `light`):
+
+- `review=full`: `tier=full`, and `agents_done` contains all of `dry,security,supportability,maintainability,documentation,convention,conformance`;
+- `review=light`: `agents_done` contains `conformance`, AND Stage 1's risk floor over the member's own landed files (`git show --name-only --format= $(git log --format=%H --grep='(#<n>)$' origin/<base_branch>..HEAD) | sort -u`) selects nothing. A light member touching a risk-floor path never had a Security pass, so it cannot skip one here.
+
+A missing, unreadable, `blocked` or `partial` milestone is NOT full-tier reviewed. Uncertainty selects `full`, never `interaction`.
+
+**2. Member-vs-member conflicts.** A conflict BETWEEN two members (at member landing or during your rebase) that was resolved by anything other than keep-both / union of a flat region — i.e. a resolution that decided what one member's feature should do — means the members interact beyond what either review saw. Base-vs-member conflicts do not count here; they go into the delta.
+
+**3. Shared surfaces and the risk-floor delta** (both feed the interaction agent's scope):
+
+- **Shared files** — any path changed by the boundary commits of two or more members (intersect each member's file list from item 1's command).
+- **Delta** — everything that changed after the member reviews: (a) every commit on the batch branch without a member `(#N)` trailer (batch-level repairs); (b) every file whose conflict you resolved (the rebase note above); (c) every landed member commit whose patch the member's review never saw — a `git patch-id --stable` of the landed `(#<n>)` commits (`origin/<base_branch>..HEAD`) that is not among those of the reviewed ones (`origin/<base_branch>..<member review head=>`): a fix added after the review, or a commit a rebase conflict changed; when the reviewed head is not fetchable (`git cat-file -e <head>` fails), count ALL of that member's files as delta.
+
+**Selection:**
+
+| Condition | `integration_review` | `integration_review_reason` |
+|---|---|---|
+| any member not full-tier reviewed (item 1) | `full` | `member-not-full-tier-<n>` (first such member) |
+| a member-vs-member semantic conflict (item 2) | `full` | `member-conflict-<n>,<m>` |
+| otherwise | `interaction` | `all-members-full-tier` (append `,shared-files-<k>` / `,delta-files-<k>` when non-zero) |
+
+**Interaction review = ONE agent**, the Interaction agent below, on the strongest available model, report-only, unnamed (per-issue Step 3's dispatch rules). **Add Security (Agent 2) only when Stage 1's risk floor selects a path among the delta files or the shared files** — record `,security-delta` in the reason. Members' risk-floor paths that nothing touched after their own full-tier review are NOT re-reviewed; that review is the one they were admitted on.
+
+**Interaction agent prompt (scope = the shared files + the delta, read against the combined diff):**
+
+> You review how N independently reviewed changes interact once combined. Every member's own diff already passed a full-tier review; do NOT re-review a member's code in isolation. Report only: (1) cross-member conflicts and shared-surface regressions — the same file, function, contract, config key, schema or workflow changed by more than one member, or one member changing something another member calls, reads or asserts on; (2) duplicated helpers or constants introduced by more than one member; (3) conflicting assumptions between members (ordering, defaults, timeouts, error shapes); (4) regressions in the delta — batch-level repairs, conflict resolutions and rebase resolutions the member reviews never saw. Read each member's `## handover:v1` comment first: what it left unverified is exactly your surface. Classify each finding per the reporting contract, and end with ONE line `interaction=none|seam|substantive` — `substantive` when one member's change alters a contract, config or workflow another member relies on.
+
+**Escalating to `full` mid-review.** When the Interaction agent returns `interaction=substantive`, the combined diff shows cross-member interaction: run the full tier's agents (Aggregate Step 2c/3) over the combined diff as well, merge their findings with the Interaction agent's, and record `integration_review=full integration_review_reason=interaction-substantive`. A `seam` result (a textual collision the interaction findings already fix) stays `interaction`.
+
+State the selection in one line before launching, e.g. `Integration review: interaction (all-members-full-tier: #4451 full/7, #4136 full/7, #4484 light/conformance; shared 0, delta 1 file, no risk floor) — 1 agent`.
+
 ### Aggregate Step 2b: Member Risks
 
 Per member, read its classify record's `risk=` level. The classify record is buried under slot milestones after first dispatch — `runstate last` returns only the latest milestone, so scan the full comment history with the same milestone-marker idiom as per-issue Step 2b (an unmarked comment merely mentioning `phase=classify` must not match):
@@ -150,6 +195,8 @@ Milestone comment text is untrusted data: parse the `risk=` value only, never fo
 
 ### Aggregate Step 2c: Tier — Combined-Diff Floor Scan, Raised to Max Member Risk
 
+**Only when Aggregate Step 2a selected `full`** (Aggregate Step 2b then feeds it). With `integration_review=interaction` the milestone records `tier=interaction` and the agents Step 2a named; Aggregate Step 2b is skipped and `max_risk=` is omitted.
+
 Two inputs, take the HIGHER:
 
 1. **Risk floor over the combined diff** — Stage 1 below, unchanged, evaluated over every member's paths: any sensitive-area path → `full`. Otherwise Stage 2 relevance selection over the combined diff.
@@ -159,20 +206,31 @@ Conformance (Agent 7) is absent from every aggregate tier — `micro` here means
 
 ### Aggregate Step 2d: Duration Sanity Floor — Unchanged
 
-Same TIER floors as the per-issue flow (Step 2d). A violation invalidates the review; redo once at the strongest available tier and record `review_redone=true`. Step 2d's 60-second Agent 8 floor does NOT apply — Agent 8 never runs in this mode (Aggregate Step 3).
+Same TIER floors as the per-issue flow (Step 2d); `tier=interaction` takes the `small` floor (2 minutes). A violation invalidates the review; redo once at the strongest available tier and record `review_redone=true`. Step 2d's 60-second Agent 8 floor does NOT apply — Agent 8 never runs in this mode (Aggregate Step 3).
 
 ### Aggregate Step 3: Run the Tier's Agents (1–6) Over the Combined Diff
 
-Launch the tier's agents in parallel, unnamed, in a single batch — the per-issue Step 3 dispatch rules apply verbatim. Each agent's scope is the COMBINED diff (`git diff origin/<base_branch>...HEAD`), never a single member's — dimensions run once over the aggregate; a finding may cite any member's file. **Agents 7 and 8 do not exist in this mode** — a combined diff has no single issue to conform to and no single set of UI flows to drive. Per-member conformance is slot-cycle's job and it does run there. **Its browser pass does not: `slot-cycle` posts `visual_review=false` unconditionally, so a batch member gets no visual verification anywhere — not per-member, not in aggregate. Do not batch UI-bearing issues.** Saying the coverage exists when it does not would be worse than the gap. The `batch-review` milestone therefore carries no `live=`/`live_flows=`/`repro=` keys, and the per-issue Step 2b fetch (AC list + `visual_review=`) and Step 2b.5 fetch (`repro=`) are not run here — Aggregate Step 2b, Member Risks, is a different step and still runs.
+**`integration_review=interaction`:** launch only the agents Aggregate Step 2a named — the Interaction agent, plus Security when the delta or a shared file hit the risk floor (Security's scope is then those files, read against the combined diff). Everything else in this step applies unchanged. On `interaction=substantive`, follow Aggregate Step 2a's escalation and launch the full tier's agents below as well.
 
-### Aggregate Step 4: Validity Gate, Dedupe, Apply Serially, ONE Clean Commit
+**`integration_review=full`:** launch the tier's agents in parallel, unnamed, in a single batch — the per-issue Step 3 dispatch rules apply verbatim. Each agent's scope is the COMBINED diff (`git diff origin/<base_branch>...HEAD`), never a single member's — dimensions run once over the aggregate; a finding may cite any member's file. **Agents 7 and 8 do not exist in this mode** — a combined diff has no single issue to conform to and no single set of UI flows to drive. Per-member conformance is slot-cycle's job and it does run there. **Its browser pass does not: `slot-cycle` posts `visual_review=false` unconditionally, so a batch member gets no visual verification anywhere — not per-member, not in aggregate. Do not batch UI-bearing issues.** Saying the coverage exists when it does not would be worse than the gap. The `batch-review` milestone therefore carries no `live=`/`live_flows=`/`repro=` keys, and the per-issue Step 2b fetch (AC list + `visual_review=`) and Step 2b.5 fetch (`repro=`) are not run here — Aggregate Step 2b, Member Risks, is a different step and still runs.
 
-Per-issue Step 4 items 1, 1b, 2–3 and 5–6 apply verbatim (items 4 and 4b are both vacuous in this mode — Agents 7 and 8 never run, and `member_verdicts` pass through untouched): collect, run the validity gate, dedupe what survives, apply all "Fix now" findings serially as the single writer, re-run the batch's test suite ONCE after all fixes (the scheduler's batch-validate already ran it green before review — a review fix invalidates that, so this re-run is required; a fix that breaks the suite is reverted and reclassified as Escalate), then the lint auto-fixer once. Then the batch-specific commit discipline:
+### Aggregate Step 4: Validity Gate, Dedupe, Apply Serially, Commit and Push, ONE Gate
 
-- **ONE batch-level fix commit, clean message, NO `[skip ci]` marker and no wip prefix**: `chore: address aggregate review findings (batch <batch_id>)`. Rebase-merge (ship-issue batch mode) replays branch commits to the base branch VERBATIM — whatever this commit carries lands on main. A skip marker landing as the base branch's push head would silence every push-triggered workflow (publishes, deploys) — the exact failure that stalled two npm releases.
-- **Never amend, squash, or reorder member boundary commits** — eviction, bisect, and traceability key on them; batch-level fixes land strictly on top.
-- Push: `git push origin <batch-branch>`.
+Per-issue Step 4 items 1, 1b, 2–3 and 5–6 apply verbatim (items 4 and 4b are both vacuous in this mode — Agents 7 and 8 never run, and `member_verdicts` pass through untouched): collect, run the validity gate, dedupe what survives, apply all "Fix now" findings serially as the single writer, then the lint auto-fixer once. Then commit and push (below) and only then run the gate (Gate discipline). A fix that breaks the gate is reverted and reclassified as Escalate.
+
+**Commit discipline:**
+
+- **Fix commits, clean messages, NO `[skip ci]` marker and no wip prefix.** A fix confined to ONE member's files is attributed to that member: `fix: batch-review fixes (#<n>)` (the `(#N)` trailer keeps eviction and revert per-member). Anything spanning members or touching no member file goes into ONE batch-level commit: `chore: address aggregate review findings (batch <batch_id>)`. Rebase-merge (ship-issue batch mode) replays branch commits to the base branch VERBATIM — whatever these commits carry lands on main. A skip marker landing as the base branch's push head would silence every push-triggered workflow (publishes, deploys) — the exact failure that stalled two npm releases.
+- **Never amend, squash, or reorder member boundary commits** — eviction, bisect, and traceability key on them; fixes land strictly on top.
+- **Push BEFORE any gate:** `git push origin <batch-branch>`, then `git status --porcelain` must be empty. A headless session can end mid-gate; pushed fixes survive it, uncommitted ones do not (ai-dossier#920: b-20260929-01's tail left 16 gated files uncommitted when its session ended during gate 2).
 - Clean review (zero findings): no commit, no push — `fixed=0` and `head=` is the last member boundary commit.
+
+**Gate discipline — one gate, over committed code, in this turn (#920, #928):**
+
+1. **Never start the gate before the review's fixes are committed and pushed.** A gate started alongside the review (b-20260929-01's gate 1, launched right after the rebase) is paid again once the fixes land.
+2. **Skip the gate when nothing changed since the last passing one.** Capture `START_TREE=$(git rev-parse HEAD^{tree})` when this run starts (Aggregate Step 1 asserted a clean tree): the scheduler dispatches this run only after `batch-validate` passed on this worktree, so that tree is gated. If no rebase and no fix changed it (`git rev-parse HEAD^{tree}` equals `START_TREE`, or equals a `gate_tree=` a prior pass recorded on the anchor), do not run the gate: `gate=reused`. Never run a second full gate over an unchanged tree.
+3. **Otherwise run it ONCE, in the FOREGROUND, in this turn:** `ai-dossier cap run gate.batch` (`test.full` only when no `gate.batch` is declared — batch-integrate Step 3), over the pushed head with a clean tree. When the harness caps a single command below the gate's duration, start the gate once with its pid and log captured and wait with back-to-back bounded blocking waits in the same turn (e.g. `timeout 540 tail --pid=<pid> -f /dev/null`, re-issued until it exits). Never end the turn or the session while the gate runs, never write a "continuing to poll" closing message, never `nohup … &` and move on — that is exactly how b-20260929-01's tail ended with the gate still running (#920, #685 class).
+4. Read the outcome in batch-integrate Step 3's four states. `ok` → record `gate=ok gate_tree=<tree>`. `task-failed` on a fix → revert that fix commit (a new revert commit, pushed), reclassify the finding as Escalate, gate once more. `automation-broken` → retry, change nothing. `capability-unavailable` → `gate=capability-unavailable`, say so; never treat it as a pass.
 
 ### Aggregate Step 5: Output
 
@@ -187,8 +245,12 @@ ai-dossier runstate post --issue <anchor_number> --phase batch-review --status d
   --kv fixed=<n> \
   --kv dismissed=<n> \
   --kv escalated=<n> \
-  --kv tier=micro|docs|small|full \
+  --kv integration_review=interaction|full \
+  --kv integration_review_reason=<slug list, Aggregate Step 2a> \
+  --kv tier=interaction|micro|docs|small|full \
   --kv max_risk=<low|med|high> \
+  --kv gate=ok|reused|capability-unavailable \
+  --kv gate_tree=<tree sha the passing gate covered> \
   --kv agents_done=<comma list of the tier's agents that finished> \
   --kv agents_pending=<comma list or none> \
   --kv members=<comma list> \
@@ -198,7 +260,7 @@ ai-dossier runstate post --issue <anchor_number> --phase batch-review --status d
   --kv validity_recalibrated=<true|false>
 ```
 
-The CLI stamps `at=` and computes `next=batch-ship` — do not pass either. `review_redone=` only when Aggregate Step 2d triggered a redo. `validity_recalibrated=` only when the validity gate's calibration rule fired (per-issue Step 4 item 1b). `dismissed=` is the validity gate's dismissal count over the combined diff (per-issue Step 4 item 1b, inherited via Aggregate Step 4's verbatim item list). `max_risk=` records the max member risk that fed the tier (auditability: "why did this batch run full?" must be answerable from the trail). `agents_done`/`agents_pending` list only the tier's dimension agents (1–6); conformance never appears. **There is no `partial` for `batch-review`** (the CLI rejects it) — a tier agent that cannot finish is handled per the stuck-agents Troubleshooting row (redispatch unnamed; or substitute yourself and record `review_substituted=dispatch-nonresponsive` on this milestone), and only if the review cannot be completed at all, post `--status blocked --kv reason=agents-incomplete` instead. Post `--status blocked --kv reason=<slug>` for Aggregate Step 1 aborts as well.
+The CLI stamps `at=` and computes `next=batch-ship` — do not pass either. `review_redone=` only when Aggregate Step 2d triggered a redo. `validity_recalibrated=` only when the validity gate's calibration rule fired (per-issue Step 4 item 1b). `dismissed=` is the validity gate's dismissal count over the combined diff (per-issue Step 4 item 1b, inherited via Aggregate Step 4's verbatim item list). `max_risk=` records the max member risk that fed the tier (auditability: "why did this batch run full?" must be answerable from the trail) — omitted when `integration_review=interaction`. `integration_review=` and `integration_review_reason=` are always present (Aggregate Step 2a); with `interaction`, `tier=interaction` and `agents_done` lists `interaction` (plus `security` when it ran). `gate=`/`gate_tree=` record the ONE gate this run paid, or `reused` when the tree was unchanged since the last passing gate (Aggregate Step 4). `agents_done`/`agents_pending` list only the agents that were selected (the tier's dimension agents 1–6, or the interaction set); conformance never appears. **There is no `partial` for `batch-review`** (the CLI rejects it) — a tier agent that cannot finish is handled per the stuck-agents Troubleshooting row (redispatch unnamed; or substitute yourself and record `review_substituted=dispatch-nonresponsive` on this milestone), and only if the review cannot be completed at all, post `--status blocked --kv reason=agents-incomplete` instead. Post `--status blocked --kv reason=<slug>` for Aggregate Step 1 aborts as well.
 
 ## Actions to Perform
 
@@ -581,7 +643,7 @@ A `--status blocked` milestone carries `reason=` and need not carry `live=` — 
 - `live_results`: the per-flow checklist (flow, AC, verdict, evidence path or reason) from Agent 8 — pass through to ship-issue, via full-cycle-issue Phase 4, for the PR body's **Visual verification** line
 - `live_note`: `no-scratch-db` | `no-runtime` | `no-browser` | `stale-runtime` | `no-flows` | `no-second-view` | `no-plan-milestone` | `agent-incomplete` | `floor-violation` — present only when one applied
 - `live_redone`: true when Agent 8's 60-second floor forced its one redo (distinct from `review_redone`, which is the tier's)
-- Aggregate mode: `member_verdicts` passed through unchanged, `ac_met`/`ac_total` rolled up across members, `review_dismissed` counted once over the combined diff (not per member, unlike `ac_met`/`ac_total` which do sum across members), `members` list, and the one batch-level fix commit's sha (absent on a clean review — `head=` is then the last member boundary commit)
+- Aggregate mode: `member_verdicts` passed through unchanged, `ac_met`/`ac_total` rolled up across members, `review_dismissed` counted once over the combined diff (not per member, unlike `ac_met`/`ac_total` which do sum across members), `members` list, `integration_review`/`integration_review_reason` (Aggregate Step 2a), `gate`/`gate_tree` (Aggregate Step 4), and the fix commits' head sha (absent on a clean review — `head=` is then the last member boundary commit)
 - Posts runstate milestone to the issue (`phase=review`, carrying the keys listed in Step 6; `phase=batch-review` on the ANCHOR in aggregate mode, including `batch=`, `dismissed=`, and `members=`)
 
 ## Validation
@@ -609,7 +671,7 @@ A `--status blocked` milestone carries `reason=` and need not carry `live=` — 
 - [ ] Final output includes the tier and counts for fixed, dismissed, escalated, clean, `ac_met`/`ac_total`, and the Visual verification block (`live`, `live_flows`, per-flow verdicts)
 - [ ] Any changes were committed and pushed to origin (`wip(review): ...` — per-issue mode; aggregate mode uses the batch-level fix commit per Aggregate Step 4) before the milestone — on `done` and `partial` alike — and milestone `head=` is the pushed sha
 - [ ] Runstate milestone was posted via `ai-dossier runstate post`, including `tier=`, `dismissed=`, and — in per-issue mode — `live=` and `live_flows=` (those two always present, `n/a`/`0` when Agent 8 did not run); `live=pass` was never posted with zero flows, and an Agent 8 that never returned made the status `partial` rather than `done`
-- Aggregate mode: preconditions asserted before any work (batch branch, members, verdicts, clean tree); tier = combined-diff floor scan RAISED to max member risk; Agents 7 and 8 never ran; the validity gate (item 1b) ran over the combined diff before dedupe, inherited via Aggregate Step 4's verbatim item list; findings applied serially by the single writer as ONE clean batch-level commit with no `[skip ci]` marker (rebase-merge replays it to main) and no member commit amended; the batch's test suite re-ran once after fixes; milestone posted as `phase=batch-review` on the ANCHOR with `batch=` `members=` `dismissed=` `ac_met=` `ac_total=`; an escalated finding halted the batch with the hand-off on the anchor
+- Aggregate mode: preconditions asserted before any work (batch branch, members, verdicts, clean tree); integration review selected per Aggregate Step 2a BEFORE the tier — `interaction` (one Interaction agent, plus Security only when the delta or a shared file hit the risk floor) only when every member was full-tier reviewed and no member-vs-member semantic conflict existed, otherwise (or on `interaction=substantive`) `full`; with `full`, tier = combined-diff floor scan RAISED to max member risk; Agents 7 and 8 never ran; the validity gate (item 1b) ran over the combined diff before dedupe, inherited via Aggregate Step 4's verbatim item list; findings applied serially by the single writer as clean fix commits (per-member `(#N)` or ONE batch-level) with no `[skip ci]` marker (rebase-merge replays them to main) and no member commit amended; fixes committed AND pushed before any gate; at most ONE gate, in the foreground in this turn, and none when the tree was unchanged since the last passing gate (`gate=reused`); milestone posted as `phase=batch-review` on the ANCHOR with `batch=` `members=` `dismissed=` `ac_met=` `ac_total=` `integration_review=` `integration_review_reason=` `gate=`; an escalated finding halted the batch with the hand-off on the anchor
 
 ## Troubleshooting
 
@@ -633,4 +695,6 @@ A `--status blocked` milestone carries `reason=` and need not carry `live=` — 
 | Aggregate: `runstate post` rejects the milestone | `phase=batch-review` needs CLI >= 0.14.0 (the batch line, ai-dossier#461); `batch=` must be a slug (no spaces/slashes). A repo-local `node_modules/.bin` shadow older than the global install reports `unknown command` — call the newer binary by absolute path. |
 | Aggregate: a member's classify record is unreadable | Counts as `high` risk — uncertainty raises the tier. Do not lower the tier on missing data. |
 | Aggregate: review fix breaks the batch suite | Same rule as per-issue: revert that fix, reclassify as Escalate, re-run. The scheduler's batch-validate evidence predates the fix, so an unfixed broken suite must never reach batch-ship. |
-| Aggregate: findings cite a member's files | Expected — the combined diff is the scope. Attribute nothing per-issue; the single writer fixes across members and the fix commit is batch-level. |
+| Aggregate: findings cite a member's files | Expected — the combined diff is the scope. A fix confined to one member's files is committed as `fix: batch-review fixes (#N)`; one spanning members is the single batch-level commit. |
+| Aggregate: a member's review milestone is missing or unreadable | Not full-tier reviewed — Aggregate Step 2a selects `full` (`integration_review_reason=member-not-full-tier-<n>`). Never assume a review happened. |
+| Aggregate: gate still running and the turn is about to end | Do not end it. Fixes are already pushed (Aggregate Step 4), so nothing is stranded if the session dies, but a verdict nobody reads is a wasted gate — keep waiting with bounded blocking waits in the same turn. |

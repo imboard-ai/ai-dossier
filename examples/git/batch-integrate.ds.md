@@ -3,11 +3,11 @@
   "dossier_schema_version": "1.0.0",
   "name": "batch-integrate",
   "title": "Batch Integrate — Verify N Members Once, Repair What Is Yours, Escalate What Is Not",
-  "version": "1.5.2",
+  "version": "1.6.0",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-09-25",
-  "objective": "Merge a batch's members onto its integration branch, run the repo's batch gate (gate.batch when declared) ONCE for all of them, repair mechanical failures, escalate semantic ones, never evict on a signal the verification cannot stand behind, run the risk-floor review over review=full members' commits, refuse to ship any member with no real review, release claims, and ship one PR",
+  "last_updated": "2026-09-29",
+  "objective": "Merge a batch's members onto its integration branch, run the repo's batch gate (gate.batch when declared) ONCE for all of them, repair mechanical failures, escalate semantic ones, never evict on a signal the verification cannot stand behind, run an interaction-only review when every member already passed a full-tier review (else the full reviewer set plus the risk-floor review over review=full members' commits), commit and push fixes before ONE foreground gate, refuse to ship any member with no real review, release claims, and ship one PR",
   "category": [
     "development",
     "orchestration"
@@ -159,7 +159,14 @@ Yet two of those three batches burned a **full expensive cycle** discovering one
 
 Invoke the repo's declared **batch gate** for the combined branch: `ai-dossier cap run gate.batch` when the capability manifest declares an active `gate.batch` — the repo's CI-parity gate, affected-scoped over the union of the members' diffs, the same gate one ordinary PR pays, paid once (#770 P8 / ai-dossier#777). Fall back to `test.full` only when no `gate.batch` is declared. The scheduler's `batch-validate` (sched with #777) already runs this ladder; when you invoke the gate yourself, keep to the same order. A repo whose only full gate declares itself timeout-prone and has no `gate.batch` is refused at enqueue — a batch that exists there was formed before the rule; say so, and expect `automation-broken` rather than a verdict.
 
-On imboard, `test.full` is documented as slower than any reasonable `cap run` timeout (two runs killed at 30 and 60 minutes); batches #4244 and #4253 blocked at `batch-validate` with `suite-unreadable`. That is why the batch gate is `gate.batch`, not the full suite. Then classify the outcome — **four ways, never two:**
+On imboard, `test.full` is documented as slower than any reasonable `cap run` timeout (two runs killed at 30 and 60 minutes); batches #4244 and #4253 blocked at `batch-validate` with `suite-unreadable`. That is why the batch gate is `gate.batch`, not the full suite. **Gate discipline — one gate, over committed code, in this turn (#920, #928).** b-20260929-01 paid three `gate.batch` runs (batch-validate, one started beside the review right after a rebase, one after the review fixes) and its tail ended its session while polling the last one, with 16 gated files uncommitted:
+
+1. **One gate for the merged members (here, or the scheduler's `batch-validate`), then at most ONE more after Step 5 — only if a rebase or the review's fixes changed the tree.** Rebase before the review, not after it; never start that re-gate before the fixes are committed and pushed. A gate run beside the review is paid again once its fixes land.
+2. **Commit and push every integration fix BEFORE any long gate**, attributed per member (`fix: batch-review fixes (#N)`) where a fix touches only that member's files, else one batch-level commit; then `git status --porcelain` is empty. A session that ends mid-gate then strands nothing.
+3. **Never run a second full gate when nothing changed since the last passing one.** Compare `git rev-parse HEAD^{tree}` with the tree the last passing gate covered (the tree at tail dispatch, which `batch-validate` gated, or a recorded `gate_tree=`). Equal → reuse that verdict (`gate=reused`).
+4. **Run the gate in the FOREGROUND, in this turn.** Where the harness caps one command below the gate's duration, start it once with its pid and log captured, then wait with back-to-back bounded blocking waits (`timeout 540 tail --pid=<pid> -f /dev/null`) in the same turn. Never `nohup … &` and end the turn, never a "continuing to poll" closing message.
+
+Then classify the outcome — **four ways, never two:**
 
 | Verdict | Meaning | Action |
 |---|---|---|
@@ -208,7 +215,16 @@ floor — auth, payments, migrations, security — was being decided by the CHEA
 answer then selected the model that did the work. A judgment feeding a capability choice should
 never be the least capable step in the chain.
 
-### Step 5: Aggregate review, plus the risk-floor review over `review=full` members
+### Step 5: Integration review — `interaction` when every member was full-tier reviewed, `full` otherwise
+
+**Select the review first (operator decision, ai-dossier#770 2026-09-29; #928).** Apply `imboard-ai/git/review-issue` **Aggregate Step 2a** — the single definition of this rule, shared with the scheduler's batch tail (which runs review-issue in aggregate mode):
+
+- **`interaction`** — every landed member passed Step 0 at a full tier (`review=full`: `tier=full` with all seven agents incl. `security` and `conformance`; `review=light`: `conformance`, with no risk-floor path in its own files), and no member-vs-member conflict was resolved semantically (Step 1). Run ONE Interaction agent on a decision-grade model (Step 4b) over the shared files (touched by ≥ 2 members) and the **risk-floor delta** — batch-level repairs, conflict and rebase resolutions, and any member commit whose patch the member's review never saw. Add Security only when the delta or a shared file hits the risk floor. Nothing a member's full-tier review already covered is reviewed again.
+- **`full`** — any member lacks that evidence (a `review=full` member whose `agents_done` lacks `security` included), a member-vs-member conflict needed a semantic resolution, or the Interaction agent reports `interaction=substantive`. Run the aggregate review and the risk-floor review below.
+
+Record `integration_review=interaction|full` and `integration_review_reason=<slug>` on the `batch-review` milestone, and name the choice and its reason in the PR body. Uncertainty selects `full`.
+
+With `full`:
 
 **Aggregate review — every member.** Review the combined diff for **cross-member interaction** — seams, duplicated helpers, conflicting assumptions between members. Per-issue acceptance criteria were already verified by each member's own conformance verdict; re-reviewing them here dilutes the pass over a large diff and finds less.
 
@@ -225,6 +241,8 @@ git diff origin/<base_branch>...HEAD -- $FILES   # the same files in the final c
 Run `imboard-ai/git/review-issue`'s Stage 1 risk-floor tier (`full`: every dimension agent, **Security** first among them) over that diff, on a decision-grade model (Step 4b). Also check every batch-level repair or conflict resolution that touched one of that member's files. Findings route like any other: mechanical → repair and verify (Step 4); semantic → escalate; an unresolvable security finding → evict that member, never ship around it. Name the risk-floor review per `review=full` member in the PR body.
 
 `review=light` members get the aggregate review only.
+
+**Then commit, push, and gate once** — Step 3's gate discipline: fixes committed (per member `(#N)` where confined to one member's files, otherwise one batch-level commit) and pushed BEFORE the gate, the gate run in the foreground in this turn, and no gate at all when the tree is unchanged since the last passing one.
 
 ### Step 6: Ship one PR
 
@@ -295,7 +313,9 @@ Everything you decide is read from an artifact. These rules exist because an act
 - Every surviving member merged, with per-issue commits intact
 - The repo's batch gate (`gate.batch` when declared) run **once** for the batch, not once per member
 - No member shipped without real review evidence — every shipped member's `phase=review` milestone names the agents that ran (never `agents_done=0`); a missing one was remedied by the parent (`review_by=parent`) or the member was evicted
-- Every `review=full` member (≤ 2) received the risk-floor review over its integrated commits, named in the PR body
+- The integration review was selected per review-issue Aggregate Step 2a and recorded as `integration_review=interaction|full` + reason on the `batch-review` milestone: `interaction` (one agent, plus Security only on a risk-floor delta) only when every member was full-tier reviewed and no member conflict was resolved semantically; `full` otherwise
+- With `full`, every `review=full` member (≤ 2) received the risk-floor review over its integrated commits, named in the PR body
+- Integration fixes committed and pushed before any long gate; at most one gate after the review, run in the foreground in this turn, and none when the tree was unchanged since the last passing gate
 - No member evicted on an `automation-broken` signal
 - Every repair verified against the affected member's own tests before commit
 - One PR, rebase-merged, closing every surviving member issue
