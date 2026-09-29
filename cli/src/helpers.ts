@@ -913,6 +913,15 @@ export function printRegistryNotFoundError(
  * Extract and format common dossier display fields from a registry list item.
  * Used by search and list commands to normalize metadata for display.
  */
+/**
+ * Render the registry's `published_by` for display. Versions published before the registry
+ * recorded publishers (#971) carry no value (null/absent) and render as "N/A" — they are never
+ * backfilled.
+ */
+export function formatPublishedBy(publishedBy: unknown): string {
+  return typeof publishedBy === 'string' && publishedBy.trim() ? publishedBy : 'N/A';
+}
+
 export function formatDossierFields(d: {
   name?: string;
   version?: string;

@@ -135,16 +135,18 @@ export async function fetchGitHubUser(
 
 /**
  * Authenticate + check publish/delete permission for a namespace.
- * Sends 401/403 error responses directly. Returns true if authorized.
+ * Sends 401/403 error responses directly. Returns the verified JWT payload if authorized,
+ * or null (response already sent). The payload's `sub` is the publisher's GitHub login — the
+ * only trusted source for who published; never take it from request input.
  */
 export async function authorizePublish(
   req: VercelRequest,
   res: VercelResponse,
   namespace: string,
   action: 'publish' | 'delete' = 'publish'
-): Promise<boolean> {
+): Promise<JwtPayload | null> {
   const jwtPayload = await authenticateRequest(req, res);
-  if (!jwtPayload) return false;
+  if (!jwtPayload) return null;
 
   const permission = canPublishTo(jwtPayload, namespace);
   if (!permission.allowed) {
@@ -162,10 +164,10 @@ export async function authorizePublish(
         namespace,
       },
     });
-    return false;
+    return null;
   }
 
-  return true;
+  return jwtPayload;
 }
 
 export async function fetchGitHubOrgs(accessToken: string): Promise<string[]> {

@@ -463,6 +463,7 @@ export function registerPublishCommand(program: Command): void {
                   version,
                   registry: targetRegistry.name,
                   content_url: result.content_url || null,
+                  published_by: result.published_by || null,
                   evidence_url: result.evidence_url || null,
                   evidence_check: evidenceCheck,
                   verification: {
@@ -484,6 +485,9 @@ export function registerPublishCommand(program: Command): void {
             }
             if (result.evidence_url) {
               console.log(`   Evidence: ${result.evidence_url}`);
+            }
+            if (result.published_by) {
+              console.log(`   Published by: ${result.published_by}`);
             }
             console.log(
               `\n   ⏳ CDN propagation: list, search and install-skill --all may lag up to ${cdnDelaySeconds / 60} min. Verify with:\n   $ ${verifyCommand}\n`

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockReq, createMockRes } from './helpers/mocks';
 
 vi.mock('../lib/auth', () => ({
-  authorizePublish: vi.fn().mockResolvedValue(true),
+  authorizePublish: vi.fn().mockResolvedValue({ sub: 'alice', email: null, orgs: [] }),
 }));
 
 vi.mock('../lib/github', async () => {
@@ -40,7 +40,7 @@ function makeReq(overrides: Parameters<typeof createMockReq>[0] = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockAuthorizePublish.mockResolvedValue(true);
+  mockAuthorizePublish.mockResolvedValue({ sub: 'alice', email: null, orgs: [] });
 });
 
 describe('GET .../evidence', () => {
@@ -236,7 +236,9 @@ describe('POST /dossiers (publish) with evidence', () => {
       expect.any(String),
       expect.any(Object),
       expect.any(String),
-      evidence
+      evidence,
+      'alice',
+      expect.any(String)
     );
   });
 
@@ -260,7 +262,74 @@ describe('POST /dossiers (publish) with evidence', () => {
       expect.any(String),
       expect.any(Object),
       expect.any(String),
-      null
+      null,
+      'alice',
+      expect.any(String)
     );
+  });
+});
+
+describe('publisher recording (#971)', () => {
+  it('201 carries published_by from the verified JWT, ignoring a published_by in the body', async () => {
+    const { default: handler } = await import('../api/v1/dossiers/index');
+    mockPublishDossier.mockResolvedValue({
+      file: { content: { sha: 'file-sha' }, commit: { sha: 'commit-sha' } } as never,
+      manifest: { content: { sha: 'manifest-sha' }, commit: { sha: 'commit-sha' } } as never,
+    });
+
+    const req = publishReq({ published_by: 'mallory' });
+    const { res, getStatus, getBody } = createMockRes();
+
+    await handler(req, res as unknown as VercelResponse);
+
+    expect(getStatus()).toBe(201);
+    const body = getBody() as { published_by?: string; published_at?: string };
+    expect(body.published_by).toBe('alice');
+    const [, , , , , publishedBy, publishedAt] = mockPublishDossier.mock.calls[0];
+    expect(publishedBy).toBe('alice');
+    expect(publishedAt).toBe(body.published_at);
+  });
+
+  it('sanitizes control characters out of the JWT login before it reaches the commit layer', async () => {
+    const { default: handler } = await import('../api/v1/dossiers/index');
+    mockAuthorizePublish.mockResolvedValue({ sub: 'eve\nInjected: yes', email: null, orgs: [] });
+    mockPublishDossier.mockResolvedValue({
+      file: { content: { sha: 'file-sha' }, commit: { sha: 'commit-sha' } } as never,
+      manifest: { content: { sha: 'manifest-sha' }, commit: { sha: 'commit-sha' } } as never,
+    });
+
+    const { res, getStatus, getBody } = createMockRes();
+    await handler(publishReq({}), res as unknown as VercelResponse);
+
+    expect(getStatus()).toBe(201);
+    expect((getBody() as { published_by: string }).published_by).toBe('eveInjected: yes');
+    expect(mockPublishDossier.mock.calls[0][5]).toBe('eveInjected: yes');
+  });
+
+  it('GET detail returns published_by, and null for a legacy entry', async () => {
+    const { default: handler } = await import('../api/v1/dossiers/[...name]');
+
+    mockGetManifest.mockResolvedValue({
+      dossiers: [{ ...manifestEntry, published_by: 'alice', published_at: '2026-09-29T00:00:00Z' }],
+      sha: 'manifest-sha',
+    });
+    let r = createMockRes();
+    await handler(
+      makeReq({ method: 'GET', query: { name: ['ns', 'test-dossier'] } }),
+      r.res as unknown as VercelResponse
+    );
+    expect(r.getStatus()).toBe(200);
+    expect(r.getBody()).toMatchObject({
+      published_by: 'alice',
+      published_at: '2026-09-29T00:00:00Z',
+    });
+
+    mockGetManifest.mockResolvedValue({ dossiers: [manifestEntry], sha: 'manifest-sha' });
+    r = createMockRes();
+    await handler(
+      makeReq({ method: 'GET', query: { name: ['ns', 'test-dossier'] } }),
+      r.res as unknown as VercelResponse
+    );
+    expect(r.getBody()).toMatchObject({ published_by: null, published_at: null });
   });
 });

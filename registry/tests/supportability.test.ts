@@ -25,6 +25,7 @@ describe('successful mutation logging', () => {
     }));
     vi.doMock('../lib/dossier', () => ({
       validateNamespace: () => ({ valid: true }),
+      sanitizeCommitText: (text: string) => text,
       parseFrontmatter: () => ({
         frontmatter: { name: 'my-dossier', version: '1.0.0', title: 'My Dossier' },
         content: '# Hello',
@@ -152,7 +153,7 @@ describe('auth error response includes namespace', () => {
 
     const result = await authModule.authorizePublish(req, res as any, 'other-org/some-dossier');
 
-    expect(result).toBe(false);
+    expect(result).toBeNull();
     expect(getStatus()).toBe(403);
     const body = getBody() as { error: { namespace: string; code: string } };
     expect(body.error.namespace).toBe('other-org/some-dossier');

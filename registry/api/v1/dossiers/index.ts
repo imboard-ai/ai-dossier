@@ -25,9 +25,6 @@ import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 const log = createLogger('dossiers/index');
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping dangerous chars
-const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
-
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
 
@@ -183,8 +180,10 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
   const { namespace, content, changelog, evidence } = input;
 
   try {
-    const authorized = await authorizePublish(req, res, namespace);
-    if (!authorized) return;
+    const auth = await authorizePublish(req, res, namespace);
+    if (!auth) return;
+    // The publisher is the verified JWT subject — never anything from the request body.
+    const publishedBy = dossier.sanitizeCommitText(auth.sub) || null;
 
     let parsed: ReturnType<typeof dossier.parseFrontmatter>;
     try {
@@ -225,17 +224,20 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
     }
 
     // Strip control characters (except space) to prevent git commit message injection
-    const sanitizedChangelog = changelog ? changelog.replace(CONTROL_CHARS, '').trim() : '';
+    const sanitizedChangelog = changelog ? dossier.sanitizeCommitText(changelog) : '';
     if (changelog && sanitizedChangelog !== changelog) {
       log.warn('Stripped control characters from changelog', { requestId, namespace });
     }
     const changelogMessage = sanitizedChangelog || 'No changelog provided';
+    const publishedAt = new Date().toISOString();
     await github.publishDossier(
       fullPath,
       content,
       parsed.frontmatter,
       changelogMessage,
-      evidence ?? null
+      evidence ?? null,
+      publishedBy,
+      publishedAt
     );
 
     log.info('Dossier published', {
@@ -243,6 +245,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       namespace,
       name: fullPath,
       version: parsed.frontmatter.version,
+      published_by: publishedBy,
       evidence: evidence !== undefined ? 'attached' : 'none',
     });
 
@@ -251,7 +254,8 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       version: parsed.frontmatter.version,
       title: parsed.frontmatter.title,
       content_url: config.getCdnUrl(dossier.dossierFilePath(fullPath)),
-      published_at: new Date().toISOString(),
+      published_at: publishedAt,
+      published_by: publishedBy,
       ...(evidence !== undefined
         ? { evidence_url: config.getCdnUrl(dossier.evidenceFilePath(fullPath)) }
         : {}),
