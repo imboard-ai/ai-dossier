@@ -22,6 +22,6 @@ export default defineConfig({
   ],
   markdown: {
     remarkPlugins: [remarkDocsLinks],
-    shikiConfig: { themes: { light: 'github-light', dark: 'github-dark' } },
+    shikiConfig: { themes: { light: 'github-light', dark: 'github-dark-default' } },
   },
 });

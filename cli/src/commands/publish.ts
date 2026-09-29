@@ -12,7 +12,7 @@ import {
   validateFrontmatter,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
-import { collectRepeatable, siblingEvidencePath } from '../helpers';
+import { collectRepeatable, formatPublishedBy, siblingEvidencePath } from '../helpers';
 import { getClientForRegistry } from '../registry-client';
 import { handleRegistryWriteError, requireWriteAuth } from '../write-auth';
 
@@ -463,6 +463,7 @@ export function registerPublishCommand(program: Command): void {
                   version,
                   registry: targetRegistry.name,
                   content_url: result.content_url || null,
+                  published_by: result.published_by || null,
                   evidence_url: result.evidence_url || null,
                   evidence_check: evidenceCheck,
                   verification: {
@@ -484,6 +485,9 @@ export function registerPublishCommand(program: Command): void {
             }
             if (result.evidence_url) {
               console.log(`   Evidence: ${result.evidence_url}`);
+            }
+            if (result.published_by) {
+              console.log(`   Published by: ${formatPublishedBy(result.published_by)}`);
             }
             console.log(
               `\n   ⏳ CDN propagation: list, search and install-skill --all may lag up to ${cdnDelaySeconds / 60} min. Verify with:\n   $ ${verifyCommand}\n`

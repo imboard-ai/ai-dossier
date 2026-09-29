@@ -31,6 +31,23 @@ export async function fetchManifestDossiers(): Promise<ManifestDossier[]> {
   return manifest.dossiers;
 }
 
+const nonEmptyString = (value: unknown): string | null =>
+  typeof value === 'string' && value.trim() ? value : null;
+
+/**
+ * Publisher provenance for API responses. Entries published before #971 carry neither field;
+ * they come back as `null` (never backfilled) and clients render that as "N/A".
+ */
+export function publisherFields(dossier: ManifestDossier): {
+  published_by: string | null;
+  published_at: string | null;
+} {
+  return {
+    published_by: nonEmptyString(dossier.published_by),
+    published_at: nonEmptyString(dossier.published_at),
+  };
+}
+
 export function normalizeDossier(dossier: ManifestDossier): ManifestDossier & { url: string } {
   if (!dossier.path) {
     throw new Error(`Cannot normalize dossier "${dossier.name}": missing path`);
@@ -48,6 +65,7 @@ export function normalizeDossier(dossier: ManifestDossier): ManifestDossier & { 
     tools_required: Array.isArray(dossier.tools_required)
       ? dossier.tools_required
       : DOSSIER_DEFAULTS.tools_required,
+    ...publisherFields(dossier),
     url: config.getCdnUrl(dossier.path),
   };
 }

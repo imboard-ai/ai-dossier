@@ -70,6 +70,59 @@ describe('info command', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Registry Dossier'));
   });
 
+  it('shows "Published by: <login>" for a registry dossier with a recorded publisher (#971)', async () => {
+    mockedFs.existsSync.mockReturnValue(false);
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      result: {
+        name: 'org/dossier',
+        title: 'D',
+        version: '1.0.0',
+        published_by: 'alice',
+        _registry: 'public',
+      },
+      errors: [],
+    });
+
+    const program = createTestProgram();
+    registerInfoCommand(program);
+    await expect(program.parseAsync(['node', 'dossier', 'info', 'org/dossier'])).rejects.toThrow();
+
+    expect(console.log).toHaveBeenCalledWith('   Published by: alice');
+  });
+
+  it('shows "Published by: N/A" for a legacy registry dossier with no recorded publisher (#971)', async () => {
+    mockedFs.existsSync.mockReturnValue(false);
+    vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+      result: {
+        name: 'org/dossier',
+        title: 'D',
+        version: '1.0.0',
+        published_by: null,
+        _registry: 'public',
+      },
+      errors: [],
+    });
+
+    const program = createTestProgram();
+    registerInfoCommand(program);
+    await expect(program.parseAsync(['node', 'dossier', 'info', 'org/dossier'])).rejects.toThrow();
+
+    expect(console.log).toHaveBeenCalledWith('   Published by: N/A');
+  });
+
+  it('does not show a publisher line for a local file (#971)', async () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(
+      '---dossier\n{"title":"Test","version":"1.0.0"}\n---\nBody'
+    );
+
+    const program = createTestProgram();
+    registerInfoCommand(program);
+    await expect(program.parseAsync(['node', 'dossier', 'info', 'test.ds.md'])).rejects.toThrow();
+
+    expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining('Published by'));
+  });
+
   it('should output JSON with --json', async () => {
     const content = '---dossier\n{"title":"Test","version":"1.0.0"}\n---\nBody';
     mockedFs.existsSync.mockReturnValue(true);

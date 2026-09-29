@@ -12,12 +12,13 @@ const { d } = Astro.props;
 const sig = d.signature;
 ---
 <Base title={`${d.title} (${d.name})`} description={d.description.slice(0, 200) || `${d.title} on the AI Dossier registry`}>
-  <p><a href="/registry/">&larr; All dossiers</a></p>
+  <p class="back"><a href="/registry/">&larr; All dossiers</a></p>
   <h1>{d.title}</h1>
   <p class="meta">
     <code>{d.name}</code>
     <span class="badge">v{d.version}</span>
     <span class={`badge risk-${d.riskLevel}`}>risk: {d.riskLevel}</span>
+    {sig && <span class="badge signed">signed</span>}
     {d.status && <span class="badge">{d.status}</span>}
   </p>
   <p>{d.description}</p>
@@ -65,7 +66,9 @@ const sig = d.signature;
 </Base>
 
 <style>
-  .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .back { margin: 0 0 16px; font-size: .9rem; }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   td code { overflow-wrap: anywhere; }
   th { width: 11em; }
+  h2 { padding-top: 1rem; }
 </style>
