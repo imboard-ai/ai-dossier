@@ -45,6 +45,8 @@ export interface UsageRow {
   batch: string | null;
   /** Scheduler unit (`issue:<n>`, `batch:<id>`) when the session was sched-dispatched. */
   unit: string | null;
+  /** `prep` when the row is batch-prep spend attributed to `batch` by enqueue-time session capture (#796). */
+  role?: 'prep';
 }
 
 /** A provider limit / rate-limit wall observed in a source store. */

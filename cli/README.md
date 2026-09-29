@@ -1336,6 +1336,13 @@ ai-dossier sched reprioritize --issue 42 --priority 20 | --batch b1 --priority 2
 ai-dossier sched stats [--issues 4,5|4..9] [--batch b1 --project owner-repo] [--json]
 ```
 
+Batch-prep cost (#796): `sched enqueue` records the calling Claude Code session
+(`CLAUDE_CODE_SESSION_ID`, or `--prep-session <id>`) per batch in
+`~/.dossier/sched/<project>/batch-prep.jsonl`. The usage ledger attributes that session's tokens
+(subagents included; window = since the session's previous enqueue, max 6h) to `batch:<id>`, and
+`sched stats --batch` / the model scorecard report them as `prep_tokens` — separate from, never
+inside, the per-member figures. An upper bound; batches formed before #796 read `n/a`.
+
 The deterministic core of batch cycles (RFC-0001): a queue, worker slots, typed
 issue/batch/slot state machines persisted to `~/.dossier/sched/<project>/state.json`
 (`<project>` = `owner-repo` slug, falling back to the repo basename — the same convention

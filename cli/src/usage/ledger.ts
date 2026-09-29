@@ -9,6 +9,7 @@
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { runsLogPath } from '@ai-dossier/core';
+import { applyPrepWindows, readAllPrepWindows } from './batch-prep';
 import { collectClaude, defaultClaudeProjectsDir } from './collect-claude';
 import {
   applyDispatchIndex,
@@ -99,6 +100,7 @@ export function collectLedger(opts: CollectOptions): Ledger {
 
   const index = indexDispatchLogs(opts.paths.schedRoot, opts.sinceMs);
   applyDispatchIndex(rows, index);
+  applyPrepWindows(rows, readAllPrepWindows(opts.paths.schedRoot));
   collectors.push({ source: 'sched-dispatch-logs', status: 'ok', rows: index.size });
 
   limits.push(...collectSchedLimitEvents(opts.paths.schedRoot, opts.sinceMs, opts.untilMs, host));
