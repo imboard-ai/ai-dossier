@@ -220,7 +220,7 @@ describe('install / uninstall / status against temp dirs (never the real systemd
   it('reports failure (ok=false) when systemctl enable or the crontab write fails', () => {
     const failing = installService(spec, 'systemd', {
       ...io,
-      run: (file, args) => (args.includes('enable') ? null : ''),
+      run: (_file, args) => (args.includes('enable') ? null : ''),
     });
     expect(failing.ok).toBe(false);
     expect(failing.notes.join(' ')).toMatch(/enable --now .* failed/);
