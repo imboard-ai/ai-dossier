@@ -35,15 +35,23 @@ export interface CapLogEntry {
   git_tree?: string;
   /** Tree was dirty before or after the run, or HEAD/tree moved during it (#941). */
   dirty?: boolean;
+  /** Directory inside the repo the run happened in (`--show-prefix`); part of the match key. */
+  git_prefix?: string;
   /** The git probe timed out or errored; `dirty` is then true (#941). */
   git_probe?: 'timeout' | 'error';
   /** Args passed after `--` to `cap run` (#941): `--only smoke` is not a full gate. */
   args?: string[];
+  /** sha256 of the manifest `command` string that ran — a changed command never matches. */
+  command_hash?: string;
   /** sha256 of the JSON args array — the match key for `cap last-ok`. */
   args_hash?: string;
 }
 
 /** Stable digest of a capability's extra args (order-sensitive). */
+export function hashCapCommand(command: string): string {
+  return crypto.createHash('sha256').update(command).digest('hex');
+}
+
 export function hashCapArgs(args: string[]): string {
   return crypto.createHash('sha256').update(JSON.stringify(args)).digest('hex');
 }
@@ -74,7 +82,7 @@ function parseRow(line: string): CapLogEntry | null {
 }
 
 /**
- * Latest `ok` row for `capability` invoked with exactly `args` that verified
+ * Latest `ok` row for `capability` invoked with exactly `args` (from `scope.prefix`, with `scope.commandHash`, when given) that verified
  * exactly `tree` on a clean working tree. Not part of the match key (by
  * design): git-ignored files, toolchain/CLI versions, env, nested repos.
  * A dirty row, a probe-failed row, or one without `args_hash` (pre-args
@@ -85,7 +93,8 @@ export function findLastOk(
   capability: string,
   tree: string,
   args: string[] = [],
-  file: string = CAP_LOG_FILE
+  file: string = CAP_LOG_FILE,
+  scope: { prefix?: string; commandHash?: string } = {}
 ): CapLogEntry | null {
   let raw: string;
   try {
@@ -106,7 +115,9 @@ export function findLastOk(
       row.git_tree === tree &&
       row.dirty === false &&
       !row.git_probe &&
-      row.args_hash === want
+      row.args_hash === want &&
+      (scope.prefix === undefined || row.git_prefix === scope.prefix) &&
+      (scope.commandHash === undefined || row.command_hash === scope.commandHash)
     ) {
       return row;
     }

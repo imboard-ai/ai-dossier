@@ -18,6 +18,8 @@ import { spawnSync } from 'node:child_process';
 export interface CapGitState {
   git_head: string;
   git_tree: string;
+  /** `git rev-parse --show-prefix`: where in the repo the run happened ('' = root, else `sub/dir/`). */
+  git_prefix: string;
   dirty: boolean;
   /** Set when the probe timed out or errored mid-way; `dirty` is then forced true. */
   git_probe?: 'timeout' | 'error';
@@ -42,13 +44,17 @@ type GitResult =
 function git(cwd: string, args: string[], deadline: number): GitResult {
   const remaining = deadline - Date.now();
   if (remaining <= 0) return { ok: false, kind: 'timeout', detail: 'probe budget exhausted' };
-  const res = spawnSync('git', ['--no-optional-locks', ...args], {
-    cwd,
-    env: probeEnv(),
-    encoding: 'utf8',
-    timeout: remaining,
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  const res = spawnSync(
+    'git',
+    ['--no-optional-locks', '-c', 'core.fsmonitor=false', '-c', 'core.fileMode=true', ...args],
+    {
+      cwd,
+      env: probeEnv(),
+      encoding: 'utf8',
+      timeout: remaining,
+      maxBuffer: 64 * 1024 * 1024,
+    }
+  );
   if (res.error) {
     const code = (res.error as NodeJS.ErrnoException).code;
     return {
@@ -75,14 +81,18 @@ function hasHiddenIndexFlags(lsFilesV: string): boolean {
  */
 export function captureGitState(cwd: string): CapGitState | null {
   const deadline = Date.now() + GIT_PROBE_BUDGET_MS;
-  const ids = git(cwd, ['rev-parse', '--is-inside-work-tree', 'HEAD', 'HEAD^{tree}'], deadline);
+  const ids = git(
+    cwd,
+    ['rev-parse', '--is-inside-work-tree', 'HEAD', 'HEAD^{tree}', '--show-prefix'],
+    deadline
+  );
   if (!ids.ok) {
     if (ids.kind === 'exit') return null;
     if (ids.kind === 'error') return null; // git missing / not spawnable
     process.stderr.write(`cap: git probe ${ids.kind}: ${ids.detail}\n`);
     return null;
   }
-  const [inside, git_head, git_tree] = ids.stdout.trim().split('\n');
+  const [inside, git_head, git_tree, git_prefix = ''] = ids.stdout.replace(/\n$/, '').split('\n');
   if (inside !== 'true' || !git_head || !git_tree) return null;
 
   const fail = (r: Extract<GitResult, { ok: false }>): CapGitState => {
@@ -90,7 +100,7 @@ export function captureGitState(cwd: string): CapGitState | null {
     process.stderr.write(
       `cap: git dirty check ${probe}: ${r.detail} — recording the run as dirty\n`
     );
-    return { git_head, git_tree, dirty: true, git_probe: probe };
+    return { git_head, git_tree, git_prefix, dirty: true, git_probe: probe };
   };
 
   const status = git(
@@ -99,11 +109,11 @@ export function captureGitState(cwd: string): CapGitState | null {
     deadline
   );
   if (!status.ok) return fail(status);
-  if (status.stdout.length > 0) return { git_head, git_tree, dirty: true };
+  if (status.stdout.length > 0) return { git_head, git_tree, git_prefix, dirty: true };
 
-  const flags = git(cwd, ['ls-files', '-v', '-z'], deadline);
+  const flags = git(cwd, ['ls-files', '-v', '-z', '--', ':/'], deadline);
   if (!flags.ok) return fail(flags);
-  return { git_head, git_tree, dirty: hasHiddenIndexFlags(flags.stdout) };
+  return { git_head, git_tree, git_prefix, dirty: hasHiddenIndexFlags(flags.stdout) };
 }
 
 /**
@@ -122,6 +132,7 @@ export function mergeGitStates(
   return {
     git_head: before.git_head,
     git_tree: before.git_tree,
+    git_prefix: before.git_prefix,
     dirty: before.dirty || after.dirty || moved,
     ...(probe ? { git_probe: probe } : {}),
   };

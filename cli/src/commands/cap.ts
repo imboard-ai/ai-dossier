@@ -19,7 +19,7 @@ import type { Command } from 'commander';
 import { CAP_ENVELOPE_FILE_ENV, CAP_ENVELOPE_MARKER, writeCapEnvelopeFile } from '../cap-envelope';
 import { captureGitState, mergeGitStates } from '../cap-git';
 import { initManifest, missingGateCapabilities, scaffoldManifest } from '../cap-init';
-import { appendCapLog, findLastOk, hashCapArgs } from '../cap-log';
+import { appendCapLog, findLastOk, hashCapArgs, hashCapCommand } from '../cap-log';
 import {
   AUTOMATION_DIR,
   CAPABILITY_EXIT_CODES,
@@ -188,29 +188,70 @@ export function registerCapCommand(program: Command): void {
         `Exit codes: ${LAST_OK_EXIT.match} match, ${LAST_OK_EXIT.noMatch} no match (no output; dirty, failed and different-args runs never match), ` +
         `${LAST_OK_EXIT.error} error (bad --tree, unreadable log), ${LAST_OK_EXIT.auditDisabled} audit log disabled (cannot answer) (#941)`
     )
-    .requiredOption('--tree <sha>', 'git tree sha, 40 hex (`git rev-parse HEAD^{tree}`)')
+    .option(
+      '--tree <sha>',
+      'git tree sha, 40 or 64 hex (`git rev-parse HEAD^{tree}`); must come from a CLEAN tree'
+    )
+    .option(
+      '--here',
+      'Probe the current directory instead: use its tree and prefix, exit 1 if the tree is dirty'
+    )
+    .option(
+      '--prefix <path>',
+      "Directory inside the repo the run happened in (default: the current directory's own prefix)"
+    )
     .allowUnknownOption(true)
-    .action((id: string, args: string[], opts: { tree: string }) => {
-      if (!/^[0-9a-f]{40}$/.test(opts.tree)) {
-        process.stderr.write(
-          `cap last-ok: --tree must be a 40-hex git tree sha, got '${opts.tree}'\n`
-        );
-        process.exit(LAST_OK_EXIT.error);
+    .action(
+      (id: string, args: string[], opts: { tree?: string; here?: boolean; prefix?: string }) => {
+        const cwd = process.cwd();
+        const here = captureGitState(cwd);
+        let tree = opts.tree;
+        if (opts.here) {
+          if (here === null) {
+            process.stderr.write('cap last-ok --here: not inside a git work tree with a commit\n');
+            process.exit(LAST_OK_EXIT.error);
+          }
+          if (here.dirty) process.exit(LAST_OK_EXIT.noMatch);
+          tree = here.git_tree;
+        }
+        if (tree === undefined || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) {
+          process.stderr.write(
+            `cap last-ok: --tree must be a 40- or 64-hex git tree sha (or use --here), got '${tree}'\n`
+          );
+          process.exit(LAST_OK_EXIT.error);
+        }
+        let commandHash: string | undefined;
+        try {
+          const entry = loadCapabilityManifest(cwd).capabilities[id];
+          if (!entry) process.exit(LAST_OK_EXIT.noMatch);
+          commandHash = hashCapCommand(entry.command);
+        } catch (err) {
+          if (err instanceof CapManifestError) {
+            process.stderr.write(`cap last-ok: ${err.message}\n`);
+            process.exit(LAST_OK_EXIT.error);
+          }
+          throw err;
+        }
+        if (getConfig('auditLog') === false) {
+          process.stderr.write('cap last-ok: auditLog is disabled — no caps.jsonl to consult\n');
+          process.exit(LAST_OK_EXIT.auditDisabled);
+        }
+        let row: ReturnType<typeof findLastOk>;
+        try {
+          row = findLastOk(id, tree, args, undefined, {
+            prefix: opts.prefix ?? here?.git_prefix ?? '',
+            commandHash,
+          });
+        } catch (err) {
+          process.stderr.write(
+            `cap last-ok: could not read caps.jsonl: ${(err as Error).message}\n`
+          );
+          process.exit(LAST_OK_EXIT.error);
+        }
+        if (!row) process.exit(LAST_OK_EXIT.noMatch);
+        console.log(JSON.stringify(row));
       }
-      if (getConfig('auditLog') === false) {
-        process.stderr.write('cap last-ok: auditLog is disabled — no caps.jsonl to consult\n');
-        process.exit(LAST_OK_EXIT.auditDisabled);
-      }
-      let row: ReturnType<typeof findLastOk>;
-      try {
-        row = findLastOk(id, opts.tree, args);
-      } catch (err) {
-        process.stderr.write(`cap last-ok: could not read caps.jsonl: ${(err as Error).message}\n`);
-        process.exit(LAST_OK_EXIT.error);
-      }
-      if (!row) process.exit(LAST_OK_EXIT.noMatch);
-      console.log(JSON.stringify(row));
-    });
+    );
 
   cap
     .command('run <id> [args...]')
@@ -235,6 +276,13 @@ export function registerCapCommand(program: Command): void {
       }
       // Probed before AND after: the row names the tree the run started on and
       // is dirty if the run (or anything before it) changed the work tree.
+      let commandHash: string | undefined;
+      try {
+        const entry = loadCapabilityManifest(cwd).capabilities[id];
+        if (entry) commandHash = hashCapCommand(entry.command);
+      } catch {
+        // runCapabilityFromCwd reports a bad manifest as the run's own outcome
+      }
       const gitBefore = captureGitState(cwd);
       const result = runCapabilityFromCwd(id, args, cwd, tailBytes);
       const gitState = mergeGitStates(gitBefore, gitBefore ? captureGitState(cwd) : null);
@@ -267,6 +315,7 @@ export function registerCapCommand(program: Command): void {
           cwd,
           args,
           args_hash: hashCapArgs(args),
+          ...(commandHash ? { command_hash: commandHash } : {}),
           ...(gitState ?? {}),
           ...(result.output_tail !== undefined ? { output_tail: result.output_tail } : {}),
         });

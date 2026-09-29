@@ -174,15 +174,15 @@ config — or files hidden with `--assume-unchanged`/`--skip-worktree`, which in
 sparse-checkout trees) or if the run moved HEAD or the tree. The probe strips `GIT_*`
 env, uses `--no-optional-locks`, and has a 10 s total budget; if it times out or errors,
 the row records `git_probe: "timeout"|"error"` with `dirty: true` (and a stderr warning).
-Rows outside a work tree omit all of these. Every row also records `args` (the words after
+Rows outside a work tree omit all of these. Rows also record `git_prefix` (`git rev-parse --show-prefix`: the directory inside the repo the run happened in) and `command_hash` (sha256 of the manifest `command`). The dirty probe covers the whole repo even from a subdirectory (`ls-files -v -- :/`) and pins `core.fsmonitor=false`/`core.fileMode=true`. Every row also records `args` (the words after
 `--`) and `args_hash` (sha256 of the JSON array).
 
-`ai-dossier cap last-ok <id> --tree <40-hex sha> [-- <args>]` prints the latest clean `ok`
+`ai-dossier cap last-ok <id> (--tree <40|64-hex sha> | --here) [--prefix <dir>] [-- <args>]` prints the latest clean `ok`
 row for that capability, tree AND exact args (`gate.test -- --only smoke` never satisfies a
 full-gate lookup). Exit codes: 0 match, 1 no match (no output; dirty, probe-failed,
 failed, different-args and pre-`args_hash` rows never match), 2 error (bad `--tree`,
 unreadable log), 3 `auditLog` disabled (cannot answer). A torn line in the log is skipped.
-The match key deliberately excludes: git-ignored files, toolchain/CLI versions, environment,
+The match key is capability + tree + args + directory prefix (default: the current directory's own; `--prefix` overrides) + command hash, so a pass from `cli/` never satisfies a lookup from the root. `--tree` must come from a CLEAN tree — `--here` probes the current directory itself (tree + prefix) and exits 1 when it is dirty. The match key deliberately excludes: git-ignored files, toolchain/CLI versions, environment,
 and nested repos other than via submodule status.
 
 ## Capability id vocabulary

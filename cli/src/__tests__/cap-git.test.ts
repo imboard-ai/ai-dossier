@@ -40,6 +40,7 @@ describe('captureGitState (#941)', () => {
     expect(captureGitState(dir)).toEqual({
       git_head: git(dir, 'rev-parse', 'HEAD'),
       git_tree: git(dir, 'rev-parse', 'HEAD^{tree}'),
+      git_prefix: '',
       dirty: false,
     });
     fs.writeFileSync(path.join(dir, 'x'), 'y');
@@ -73,6 +74,25 @@ describe('captureGitState (#941)', () => {
     } finally {
       git(dir, 'worktree', 'remove', '--force', wt);
     }
+  });
+
+  it('a probe from a subdirectory reports its prefix and still sees hidden edits elsewhere in the repo', () => {
+    initRepo(dir);
+    fs.mkdirSync(path.join(dir, 'sub'));
+    expect(captureGitState(path.join(dir, 'sub'))).toMatchObject({
+      git_prefix: 'sub/',
+      dirty: false,
+    });
+    git(dir, 'update-index', '--assume-unchanged', 'a.txt');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'hidden root edit');
+    expect(captureGitState(path.join(dir, 'sub'))?.dirty).toBe(true);
+  });
+
+  it('is not fooled by core.fileMode=false', () => {
+    initRepo(dir);
+    git(dir, 'config', 'core.fileMode', 'false');
+    fs.chmodSync(path.join(dir, 'a.txt'), 0o755);
+    expect(captureGitState(dir)?.dirty).toBe(true);
   });
 
   it('is not fooled by status.showUntrackedFiles=no', () => {
@@ -197,6 +217,28 @@ describe('findLastOk (#941)', () => {
     expect(findLastOk('gate.batch', 'T1', ['--only', 'other'], file)).toBeNull();
   });
 
+  it('matches only the same directory prefix and the same command hash', () => {
+    const file = path.join(dir, 'caps.jsonl');
+    write(file, [row({ git_prefix: 'cli/', command_hash: 'C1' })]);
+    expect(
+      findLastOk('gate.batch', 'T1', [], file, { prefix: 'cli/', commandHash: 'C1' })
+    ).not.toBeNull();
+    expect(findLastOk('gate.batch', 'T1', [], file, { prefix: '', commandHash: 'C1' })).toBeNull();
+    expect(
+      findLastOk('gate.batch', 'T1', [], file, { prefix: 'cli/', commandHash: 'C2' })
+    ).toBeNull();
+    write(file, [row({})]); // legacy row: no prefix / hash
+    expect(findLastOk('gate.batch', 'T1', [], file, { prefix: '' })).toBeNull();
+  });
+
+  it('a recovered torn row is still rejected when dirty or run with other args', () => {
+    const file = path.join(dir, 'caps.jsonl');
+    const dirtyRow = JSON.stringify(row({ dirty: true }));
+    const smoke = JSON.stringify(row({ args: ['x'], args_hash: hashCapArgs(['x']) }));
+    fs.writeFileSync(file, `{"timestamp":"tor${dirtyRow}\n{"timestamp":"tor${smoke}\n`);
+    expect(findLastOk('gate.batch', 'T1', [], file)).toBeNull();
+  });
+
   it('tolerates a torn line mid-file, even one glued to the next row', () => {
     const file = path.join(dir, 'caps.jsonl');
     const good = JSON.stringify(row({ timestamp: 'good' }));
@@ -240,9 +282,9 @@ describe('cap CLI wiring (#941)', () => {
     fs.rmSync(home, { recursive: true, force: true });
   });
 
-  const cli = (args: string[], env: Record<string, string> = {}) =>
+  const cli = (args: string[], env: Record<string, string> = {}, cwd: string = repo) =>
     spawnSync(tsxBin, [cliPath, ...args], {
-      cwd: repo,
+      cwd,
       encoding: 'utf8',
       timeout: 45_000,
       env: { ...process.env, HOME: home, ...env },
@@ -286,6 +328,32 @@ describe('cap CLI wiring (#941)', () => {
       expect(cli(['cap', 'last-ok', 'gate.test', '--tree', tree()]).status).toBe(3);
     }
   );
+
+  it(
+    'the run directory is part of the key: a pass from sub/ never satisfies last-ok from the root; --here works',
+    {
+      timeout: 120_000,
+    },
+    () => {
+      const sub = path.join(repo, 'sub');
+      fs.mkdirSync(sub);
+      fs.writeFileSync(path.join(sub, 'f.txt'), 'x');
+      git(repo, 'add', '-A');
+      git(repo, 'commit', '-q', '-m', 'sub');
+      expect(cli(['cap', 'run', 'gate.test'], {}, sub).status).toBe(0);
+      expect(cli(['cap', 'last-ok', 'gate.test', '--tree', tree()]).status).toBe(1); // from root
+      expect(cli(['cap', 'last-ok', 'gate.test', '--tree', tree()], {}, sub).status).toBe(0);
+      expect(cli(['cap', 'last-ok', 'gate.test', '--here'], {}, sub).status).toBe(0);
+      expect(cli(['cap', 'last-ok', 'gate.test', '--here']).status).toBe(1);
+      fs.writeFileSync(path.join(sub, 'dirty.txt'), 'x');
+      expect(cli(['cap', 'last-ok', 'gate.test', '--here'], {}, sub).status).toBe(1); // dirty tree
+    }
+  );
+
+  it('accepts 64-hex trees syntactically and rejects other lengths', () => {
+    expect(cli(['cap', 'last-ok', 'gate.test', '--tree', 'a'.repeat(64)]).status).toBe(1);
+    expect(cli(['cap', 'last-ok', 'gate.test', '--tree', 'a'.repeat(50)]).status).toBe(2);
+  });
 
   it('a run that dirties the tree is recorded dirty and never reused', { timeout: 60_000 }, () => {
     fs.writeFileSync(
