@@ -1189,6 +1189,70 @@ describe('#777: sched enqueue refuses a batch whose only full gate is timeout-pr
   });
 });
 
+describe('#645: sched enqueue warns when the member gate capabilities are undeclared', () => {
+  let repoDir: string;
+  let errors: string[];
+  const enqueueBatch = (extra: string[] = []) =>
+    runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '1,2',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--skip-plan-check',
+      '--project',
+      'test-proj',
+      ...extra,
+    ]);
+
+  beforeEach(() => {
+    repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-645-repo-'));
+    vi.spyOn(process, 'cwd').mockReturnValue(repoDir);
+    errors = [];
+    vi.spyOn(console, 'error').mockImplementation((msg) => {
+      errors.push(String(msg));
+    });
+  });
+  afterEach(() => fs.rmSync(repoDir, { recursive: true, force: true }));
+
+  it('warns (naming the ids and cap init) on a manifest-less repo, but still enqueues without dispatching', async () => {
+    await enqueueBatch();
+    const out = errors.join('\n');
+    expect(out).toContain('typecheck.run, test.focused');
+    expect(out).toContain('ai-dossier cap init');
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b1', members: [1, 2] });
+    // enqueue only records state: no agent process was launched.
+    expect(vi.mocked(execFileSync).mock.calls.some(([cmd]) => String(cmd).includes('claude'))).toBe(
+      false
+    );
+  });
+
+  it('--skip-gate-check silences the warning', async () => {
+    await enqueueBatch(['--skip-gate-check']);
+    expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
+  });
+
+  it('DOSSIER_SKIP_GATE_CHECK=1 silences the warning', async () => {
+    vi.stubEnv('DOSSIER_SKIP_GATE_CHECK', '1');
+    await enqueueBatch();
+    expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
+  });
+
+  it('stays silent once both ids are declared', async () => {
+    fs.mkdirSync(path.join(repoDir, '.dossier', 'automation'), { recursive: true });
+    fs.writeFileSync(
+      path.join(repoDir, '.dossier', 'automation', 'manifest.yaml'),
+      'version: 1\ncapabilities:\n  typecheck.run:\n    command: tsc\n  test.focused:\n    command: vitest\n'
+    );
+    await enqueueBatch();
+    expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
+  });
+});
+
 describe('ai-dossier sched pause/resume/abandon', () => {
   it('pauses and resumes, persisting the flag', async () => {
     await runSched(['sched', 'pause', '--project', 'test-proj']);

@@ -109,7 +109,8 @@ import {
   createBatchSuiteRunner,
 } from '../batch-suite-runner';
 import { envelopeFields, spawnCapRun } from '../cap-envelope';
-import { loadCapabilityManifest, timeoutReasonSpent } from '../capability';
+import { gateGapWarning, SKIP_GATE_CHECK_ENV } from '../cap-init';
+import { type CapabilityManifest, loadCapabilityManifest, timeoutReasonSpent } from '../capability';
 import { formatCost, formatCount } from '../cost-format';
 import { detectDispatchProfile, type ProfileCandidate } from '../dispatch-detect';
 import { formatAge, formatDurationMs } from '../duration';
@@ -243,6 +244,7 @@ interface EnqueueOptions extends SchedOptions {
   priority?: string;
   /** #603: bypass the slot-member plan:v1 pre-screen. */
   skipPlanCheck?: boolean;
+  skipGateCheck?: boolean;
   /** #707: the dispatch profile the batch records — overrides detection. */
   dispatch?: string;
 }
@@ -1005,6 +1007,10 @@ function screenSlotPreconditions(inputs: EnqueueInput[], repo?: string): void {
  * one), and degrade-not-crash on a malformed manifest (`cap run` reports that
  * itself at gate time). Only batches this call creates are screened: a
  * member joining an existing batch cannot un-form it.
+ *
+ * #645: the same manifest also feeds a non-blocking warning naming any
+ * undeclared member-gate capability ids (`gateGapWarning`), opt-out via
+ * `--skip-gate-check`.
  */
 function screenBatchGate(store: SchedStore, opts: EnqueueOptions, inputs: EnqueueInput[]): void {
   if (opts.repo !== undefined) return;
@@ -1018,14 +1024,19 @@ function screenBatchGate(store: SchedStore, opts: EnqueueOptions, inputs: Enqueu
     ),
   ];
   if (born.length === 0) return;
-  let refusal: string | null;
+  let manifest: CapabilityManifest;
   try {
-    refusal = batchGateRefusal(loadCapabilityManifest(process.cwd()));
+    manifest = loadCapabilityManifest(process.cwd());
   } catch {
     return;
   }
-  if (refusal === null) return;
-  fail([`Cannot form batch ${born.join(', ')}: ${refusal}`]);
+  const refusal = batchGateRefusal(manifest);
+  if (refusal !== null) fail([`Cannot form batch ${born.join(', ')}: ${refusal}`]);
+  // #645: a warning, never a block (#625) — the gate skip is legal, the silence is the bug.
+  if (!opts.skipGateCheck && !process.env[SKIP_GATE_CHECK_ENV]) {
+    const warning = gateGapWarning(manifest);
+    if (warning !== null) console.error(warning);
+  }
 }
 
 /** Append one `label-blocked`/`label-check-failed` journal event per outcome (#507 AC3). */
@@ -1252,6 +1263,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
     .option(
       '--skip-plan-check',
       'Enqueue slot members even when they carry no plan:v1 artifact (they will hand back with reason=no-plan-artifact unless a plan is posted before dispatch)'
+    )
+    .option(
+      '--skip-gate-check',
+      'Suppress the warning that the batch member gate capabilities (typecheck.run, test.focused) are undeclared — for repos that deliberately declare nothing (or set DOSSIER_SKIP_GATE_CHECK=1)'
     )
     .option(
       '--dispatch <profile>',
