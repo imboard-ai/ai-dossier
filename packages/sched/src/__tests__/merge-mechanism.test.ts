@@ -137,4 +137,16 @@ describe('shipModeClause (#887)', () => {
       expect(c).toContain('no-merge-mechanism');
     }
   });
+
+  it('batch: native auto-merge alone never confirms a detached batch ship (watcher required)', () => {
+    const native = { nativeAutoMerge: true, watcherWorkflow: false, allowedMethods: ['rebase'] };
+    const c = shipModeClause(native, 'batch');
+    expect(c).toContain('ship_mode=attached');
+    expect(c).toContain('needs a label watcher');
+    expect(shipModeClause({ ...native, watcherWorkflow: true }, 'batch')).toContain(
+      'ship_mode=detached'
+    );
+    // the same facts DO confirm a per-issue detached ship
+    expect(shipModeClause(native, 'issue')).toContain('ship_mode=detached');
+  });
 });

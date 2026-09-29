@@ -75,6 +75,14 @@ export function workflowActsOnAutoMergeLabel(text: string): boolean {
   return /['"`]?auto-merge['"`]?/.test(text) && /pull_request|labeled|workflow_run/.test(text);
 }
 
+/** Verdict for a batch ship with no confirmed watcher: never `confirmed`. */
+function mechanismWithoutBatchWatcher(m: MergeMechanism): MergeMechanismVerdict {
+  return mergeMechanismVerdict({
+    ...m,
+    nativeAutoMerge: m.nativeAutoMerge === true ? false : m.nativeAutoMerge,
+  });
+}
+
 /**
  * The ship-mode clause spliced into the default dispatch prompts
  * (`{ship_clause}`). It hands the agent the detected facts and defers the
@@ -84,7 +92,14 @@ export function shipModeClause(
   mechanism: MergeMechanism | undefined,
   kind: 'issue' | 'batch'
 ): string {
-  const verdict = mechanism === undefined ? 'unknown' : mergeMechanismVerdict(mechanism);
+  // A batch PR is rebase-merged and ship-issue's Batch Step 0 requires a WATCHER for a detached
+  // batch ship (`reason=no-watcher`), so native auto-merge alone never confirms one.
+  const verdict =
+    mechanism === undefined
+      ? 'unknown'
+      : kind === 'batch' && mechanism.watcherWorkflow !== true
+        ? mechanismWithoutBatchWatcher(mechanism)
+        : mergeMechanismVerdict(mechanism);
   const facts =
     mechanism === undefined
       ? 'merge mechanism: not detected'
@@ -108,9 +123,11 @@ export function shipModeClause(
     );
   }
   const why =
-    verdict === 'none'
-      ? 'neither native auto-merge nor a label watcher exists, so a parked PR would never merge'
-      : 'a merge mechanism could not be confirmed, so parking would be a guess';
+    kind === 'batch' && mechanism?.nativeAutoMerge === true && verdict !== 'confirmed'
+      ? 'a detached batch ship needs a label watcher workflow and none was confirmed'
+      : verdict === 'none'
+        ? 'neither native auto-merge nor a label watcher exists, so a parked PR would never merge'
+        : 'a merge mechanism could not be confirmed, so parking would be a guess';
   const attachedTail =
     kind === 'issue'
       ? 'confirm the merge, then run teardown and report.'
