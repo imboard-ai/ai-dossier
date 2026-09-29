@@ -1,0 +1,60 @@
+---
+import { getCollection, render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import { docsNav, titleOf } from '../../lib/docs-nav';
+
+export async function getStaticPaths() {
+  const entries = await getCollection('docs');
+  return entries.map((entry) => ({
+    params: { slug: entry.id === 'index' ? undefined : entry.id },
+    props: { entry },
+  }));
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+const nav = await docsNav();
+const title = titleOf(entry.id, entry.body);
+const current = entry.id === 'index' ? '' : entry.id;
+const source = `docs/${entry.filePath?.replace(/^.*?docs\//, '') ?? ''}`;
+const editUrl = `https://github.com/imboard-ai/ai-dossier/blob/main/${source}`;
+---
+<Base title={title} description={`${title}: AI Dossier documentation.`} wide>
+  <div class="layout">
+    <nav class="side" aria-label="Documentation">
+      <a href="/docs/" aria-current={current === '' ? 'page' : undefined}><strong>Overview</strong></a>
+      {nav.map((g) => (
+        <details open={current.startsWith(g.key)}>
+          <summary>{g.label}</summary>
+          <ul>
+            {g.items.map((i) => (
+              <li><a href={`/docs/${i.id}/`} aria-current={i.id === current ? 'page' : undefined}>{i.title}</a></li>
+            ))}
+          </ul>
+        </details>
+      ))}
+    </nav>
+    <article class="doc">
+      <Content />
+      <hr />
+      <p class="muted">Rendered from <a href={editUrl}><code>{source}</code></a> in the repository. Edit it there.</p>
+    </article>
+  </div>
+</Base>
+
+<style>
+  .layout { display: grid; gap: 32px; grid-template-columns: 250px minmax(0, 1fr); align-items: start; }
+  .side { position: sticky; top: 64px; max-height: calc(100vh - 80px); overflow-y: auto; font-size: .92rem; padding-right: 8px; }
+  .side ul { list-style: none; padding-left: 10px; margin: 4px 0 10px; }
+  .side li { margin: 2px 0; }
+  .side summary { cursor: pointer; font-weight: 600; margin-top: 8px; }
+  .side a { text-decoration: none; }
+  .side a[aria-current='page'] { font-weight: 700; text-decoration: underline; }
+  .doc { min-width: 0; max-width: 820px; }
+  .doc :global(h1) { margin-top: 0; }
+  .doc :global(h2), .doc :global(h3) { scroll-margin-top: 70px; }
+  @media (max-width: 800px) {
+    .layout { grid-template-columns: 1fr; }
+    .side { position: static; max-height: none; }
+  }
+</style>

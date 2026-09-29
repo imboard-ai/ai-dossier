@@ -31,6 +31,7 @@ import {
   type AssessedIssue,
   applyPickDependencies,
   assessIssue,
+  backfillTarget,
   COMPOSE_SCHEMA,
   type ComposeIssueInput,
   type ComposeRules,
@@ -391,7 +392,11 @@ function renderText(r: ComposeReport): void {
   if (r.held.length > 0) {
     line();
     line('Admissible but held out:');
-    for (const h of r.held) line(`  #${h.issue}  review=${h.review}  ${h.reason}  ${h.title}`);
+    for (const h of r.held) {
+      line(`  #${h.issue}  review=${h.review}  ${h.reason}  (${h.source})  ${h.title}`);
+      for (const why of h.review_reasons) line(`      full because: ${why}`);
+      line(`      ${h.note}`);
+    }
   }
   if (r.excluded.length > 0) {
     line();
@@ -518,12 +523,16 @@ function runCompose(opts: ComposeCliOptions): void {
     picksMode: picks.length > 0,
   };
 
-  // Backlog: explicitly requested, or automatic backfill when the picks alone cannot compose
-  // min_members (counted after the caps — five admissible review=full picks compose only two).
+  // Backlog: explicitly requested, or automatic backfill when the picks alone cannot fill the
+  // target — min_members, raised so a pick held over the review=full cap gets its slot refilled
+  // (#951). Counted after the caps: five admissible review=full picks compose only two.
   const wantBacklog = (): boolean => {
     if (opts.backlog) return true;
     if (opts.backfill === false) return false;
-    return composeBatch(assessAll(inputs), composeOpts).members.length < minMembers;
+    const assessedPicks = assessAll(inputs);
+    const admissiblePicks = assessedPicks.filter((a) => a.admissible && a.source === 'pick');
+    const target = backfillTarget(admissiblePicks.length, composeOpts);
+    return composeBatch(assessedPicks, composeOpts).members.length < target;
   };
 
   for (const i of inputs) if (i.error === undefined) knownState.set(i.issue, i.state);
@@ -620,7 +629,10 @@ export function registerBatchCommand(program: Command): void {
       '--backlog',
       'Also draw candidates from the open backlog (implied for backfill when picks fall short)'
     )
-    .option('--no-backfill', 'Never query the backlog to backfill short picks')
+    .option(
+      '--no-backfill',
+      "Never query the backlog to backfill short picks or a held pick's slot"
+    )
     .option(
       '--label <name>',
       'Backlog filter: only issues with this label (repeatable)',
