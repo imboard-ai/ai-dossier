@@ -33,7 +33,7 @@ const { command, label } = Astro.props;
   .box { position: relative; }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .cmd-label { font-size: .8rem; font-weight: 500; color: var(--muted); display: block; margin-bottom: 6px; }
-  .cmd pre { margin: 0; padding: 14px 76px 14px 16px; }
+  .cmd pre { margin: 0; padding: 14px 76px 14px 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .cmd pre::before { content: '$ '; color: var(--accent); user-select: none; }
   .copy {
     position: absolute; right: 8px; top: 10px; font: inherit; font-size: .78rem; font-weight: 600; padding: 4px 11px;
