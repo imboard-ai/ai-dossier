@@ -1,0 +1,103 @@
+---
+import Base from '../layouts/Base.astro';
+import { loadRegistry } from '../lib/registry.mjs';
+
+const registry = await loadRegistry();
+const repo = 'https://github.com/imboard-ai/ai-dossier';
+const example = `---dossier
+{
+  "name": "hello",
+  "title": "Hello World Dossier",
+  "version": "1.1.0",
+  "risk_level": "low",
+  "requires_approval": false,
+  "checksum": { "algorithm": "sha256", "hash": "2caae4c1…" },
+  "signature": { "algorithm": "ed25519", "key_id": "imboard-ai", "signature": "tleSPJ4T…" }
+}
+---
+# Hello World Dossier
+
+Instructions an AI agent follows, written in plain markdown.
+The header above is what makes them verifiable.`;
+---
+<Base title="AI Dossier" description="Verifiable, signed, versioned automation for AI agents. Write instructions in markdown, sign them, and let any agent verify before it runs.">
+  <section class="hero">
+    <h1>Automation for AI agents you can verify before it runs</h1>
+    <p class="lead">
+      A <strong>dossier</strong> is a reusable instruction set an AI agent executes, with an integrity
+      checksum, an Ed25519 signature, a declared risk level and a pinnable version. Think of a
+      package registry, but for agent skills and workflows.
+    </p>
+    <p class="cta">
+      <a class="btn" href="/docs/getting-started/quick-start/">Quick start</a>
+      <a class="btn secondary" href="/registry/">Browse {registry.dossiers.length || ''} dossiers</a>
+      <a class="btn secondary" href={repo}>GitHub</a>
+    </p>
+  </section>
+
+  <section aria-labelledby="how">
+    <h2 id="how">How it works</h2>
+    <ol class="steps">
+      <li><h3>1. Write</h3><p>Author instructions in markdown in a <code>.ds.md</code> file with a JSON header: name, version, risk level, tools required.</p></li>
+      <li><h3>2. Sign and publish</h3><p>The CLI computes the checksum, signs the file with your key and publishes it to the registry, or you host the file anywhere.</p></li>
+      <li><h3>3. Verify and run</h3><p>Before an agent acts, <code>ai-dossier verify</code> checks the checksum and signature and surfaces the declared risk. Then the agent executes it.</p></li>
+    </ol>
+  </section>
+
+  <section aria-labelledby="example">
+    <h2 id="example">What a dossier looks like</h2>
+    <pre><code>{example}</code></pre>
+    <p class="muted">Trimmed from the published <a href="/registry/getting-started/hello/">getting-started/hello</a> dossier.</p>
+  </section>
+
+  <section aria-labelledby="install">
+    <h2 id="install">Install</h2>
+    <div class="cards">
+      <div>
+        <h3>npm</h3>
+        <pre><code>npm install -g @ai-dossier/cli
+ai-dossier --help</code></pre>
+        <p class="muted">Needs Node 20+. Or try without installing: <code>npx @ai-dossier/cli verify &lt;file&gt;</code>.</p>
+      </div>
+      <div>
+        <h3>Standalone binary</h3>
+        <pre><code>curl -fsSL https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/install.sh | sh</code></pre>
+        <p class="muted">No Node.js required. Checksum-verified download from <a href={`${repo}/releases`}>GitHub releases</a> (Linux, macOS; Windows via Git Bash).</p>
+      </div>
+      <div>
+        <h3>VS Code extension</h3>
+        <p>Diagnostics, completion and a dry-run preview for <code>*.ds.md</code> files.</p>
+        <p class="muted">Marketplace listing is pending. Until then install the <code>.vsix</code> from a <a href={`${repo}/releases`}><code>vscode-v*</code> release</a>.</p>
+      </div>
+      <div>
+        <h3>Claude Code (MCP)</h3>
+        <pre><code>claude mcp add dossier --scope user -- \
+  npx @ai-dossier/mcp-server</code></pre>
+        <p class="muted"><a href="/docs/tutorials/mcp-quickstart/">MCP in 60 seconds</a></p>
+      </div>
+    </div>
+  </section>
+
+  <section aria-labelledby="explore">
+    <h2 id="explore">Explore</h2>
+    <ul class="links">
+      <li><a href="/docs/">Documentation</a>: concepts, protocol, security model, guides.</li>
+      <li><a href="/registry/">Registry browser</a>: search published dossiers, see risk level and signature details.</li>
+      <li><a href="/case-study/">Internal case study</a>: how we used dossiers to run our own issue pipeline.</li>
+      <li><a href={repo}>Source on GitHub</a> · <a href={`${repo}/releases`}>Releases</a></li>
+    </ul>
+  </section>
+</Base>
+
+<style>
+  .hero { padding: 24px 0 8px; }
+  .hero h1 { font-size: clamp(1.9rem, 5vw, 2.8rem); }
+  .lead { font-size: 1.15rem; color: var(--muted); max-width: 44em; }
+  .cta { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
+  .steps { list-style: none; padding: 0; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+  .steps li { border: 1px solid var(--line); border-radius: 10px; padding: 4px 18px 14px; background: var(--bg-soft); }
+  .steps h3 { margin-top: 12px; }
+  .cards { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+  .cards > div { border: 1px solid var(--line); border-radius: 10px; padding: 4px 16px 12px; min-width: 0; }
+  .links { padding-left: 1.2rem; }
+</style>
