@@ -484,6 +484,10 @@ export interface HeldIssue {
   packages: string[];
   readiness: number;
   reason: 'review-full-cap' | 'max-members';
+  /** Why `review=full` (prescreen findings); empty for `light`. */
+  review_reasons: string[];
+  /** What happens to it — held for the next batch-prep run, never an extra small batch (#951). */
+  note: string;
 }
 
 export interface BackfillCandidate {
@@ -588,15 +592,51 @@ function toMember(a: AssessedIssue, source: ComposedMember['source']): ComposedM
     source,
     packages: a.packages,
     readiness: a.readiness.score,
-    review_reasons: a.review === 'full' ? a.prescreen.map((r) => r.message) : [],
+    review_reasons: reviewReasons(a),
   };
+}
+
+/** Why an issue is `review=full` (its prescreen findings); empty for `light`. */
+function reviewReasons(a: AssessedIssue): string[] {
+  return a.review === 'full' ? a.prescreen.map((r) => r.message) : [];
+}
+
+/** Where a held issue goes — the same words the recommendation uses (#951). */
+const NEXT_RUN = 'the next batch-prep run';
+
+function heldNote(a: AssessedIssue, reason: HeldIssue['reason'], opts: ComposeOptions): string {
+  const why =
+    reason === 'max-members'
+      ? `the batch is at max_members=${opts.maxMembers}`
+      : opts.maxFullReview === 0
+        ? 'review=full members are disabled (--max-full-review 0)'
+        : `the ≤ ${opts.maxFullReview} review=full cap is taken by higher-ranked members`;
+  return a.source === 'pick'
+    ? `Held for ${NEXT_RUN} — ${why}; submit #${a.issue} again then (no extra small batch is opened for it).`
+    : `Held for ${NEXT_RUN} — ${why}; #${a.issue} stays in the backlog and ${NEXT_RUN} reconsiders it.`;
+}
+
+/**
+ * How many members the fill aims for. Picks mode fills every slot a pick asked for (#951): a pick
+ * held over the review=full cap has its slot refilled — light only, the cap is already full; a
+ * pick held for max-members changes nothing (members are already at `maxMembers`); otherwise this
+ * is `minMembers`, as before. Backlog-only mode fills to `maxMembers`. The command layer uses the
+ * same number to decide whether to fetch the backlog at all.
+ */
+export function backfillTarget(admissiblePicks: number, opts: ComposeOptions): number {
+  if (!opts.picksMode) return opts.maxMembers;
+  return Math.min(Math.max(opts.minMembers, admissiblePicks), opts.maxMembers);
 }
 
 /**
  * Propose a composition from assessed issues. Picks first (they are the operator's intent) —
  * all admissible picks join, bounded by `maxMembers` and the `review=full` cap; then, while the
- * set is below its target (`minMembers` with picks, `maxMembers` from the backlog alone), backfill
- * from admissible backlog issues. Member order: picks, then backfill, each in selection order.
+ * set is below its target, backfill from admissible backlog issues. The picks-mode target is
+ * `minMembers`, raised to the number of admissible picks (capped at `maxMembers`) so that a pick
+ * held over the `review=full` cap has its slot refilled — #951 Option (b): an over-cap pick is
+ * held for the next batch-prep run and its slot backfilled (light while the cap is full), never
+ * split into an extra small batch. Backlog-only mode fills to `maxMembers`. Member order: picks,
+ * then backfill, each in selection order.
  */
 export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): CompositionResult {
   const admissible = assessed.filter((a) => a.admissible);
@@ -613,6 +653,8 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
       packages: a.packages,
       readiness: a.readiness.score,
       reason,
+      review_reasons: reviewReasons(a),
+      note: heldNote(a, reason, opts),
     });
 
   // 1. Operator picks — every admissible pick, up to the caps.
@@ -625,7 +667,7 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
   }
 
   // 2. Backfill / backlog fill.
-  const target = opts.picksMode ? Math.min(opts.minMembers, opts.maxMembers) : opts.maxMembers;
+  const target = backfillTarget(picks.length, opts);
   const backFill = fill(backlog, pickFill.taken, target, opts.maxFullReview);
   for (const a of backFill.taken)
     members.push(toMember(a, opts.picksMode ? 'backfill' : 'backlog'));
@@ -658,6 +700,8 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
     .map(([p]) => p)
     .sort();
 
+  const heldPicks = held.filter((h) => h.source === 'pick');
+  const heldList = heldPicks.map((h) => `#${h.issue} (${h.reason})`).join(', ');
   let status: ComposeStatus;
   let recommendation: string;
   if (members.length >= opts.minMembers) {
@@ -665,13 +709,20 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
     recommendation = `Form one batch of ${members.length} on '${opts.baseBranch}' (${members.filter((m) => m.review === 'full').length} review=full).`;
   } else if (members.length >= MIN_FORMABLE_MEMBERS) {
     status = 'under-min';
-    recommendation = `Only ${members.length} admissible member(s), below min_members=${opts.minMembers} — widen the backlog query or accept a small batch.`;
+    recommendation = `Only ${members.length} member(s) fit${heldPicks.length > 0 ? ` (${heldPicks.length} admissible pick(s) held over the caps)` : ''}, below min_members=${opts.minMembers} — backfill ran dry; widen the backlog query or accept a small batch.`;
   } else {
     status = 'no-batch';
     recommendation =
       members.length === 1
         ? `Do not form a batch — run #${members[0].issue} as a full-cycle issue.`
         : 'Do not form a batch — nothing admissible.';
+  }
+  // Held PICKS are the operator's intent deferred — name them so the next run picks them up.
+  if (heldPicks.length > 0) {
+    recommendation +=
+      status === 'no-batch'
+        ? ` Also admissible but held by the caps: ${heldList} — no batch forms, so submit them again in ${NEXT_RUN} or take them through full-cycle.`
+        : ` Held for ${NEXT_RUN}: ${heldList}.`;
   }
 
   return { status, members, held, backfill, shared_packages: shared, recommendation };

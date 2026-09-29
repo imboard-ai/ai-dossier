@@ -347,6 +347,19 @@ describe('batch compose', () => {
     expect(r.members.map((m: { issue: number }) => m.issue)).toEqual([1, 2, 20]);
   });
 
+  it("fetches the backlog to refill a held pick's slot even when the picks reach min_members (#951)", async () => {
+    const full = (n: number) => ({ number: n, title: `fix: billing window ${n}` });
+    fakeGh([full(1), full(2), full(3), { number: 4 }, { number: 5 }], [{ number: 20 }]);
+
+    await compose('--issues', '1,2,3,4,5');
+
+    const r = report();
+    expect(ghCalls('list')).toHaveLength(1);
+    expect(r.held).toEqual([expect.objectContaining({ issue: 3, reason: 'review-full-cap' })]);
+    expect(r.members).toHaveLength(5);
+    expect(r.members).toContainEqual(expect.objectContaining({ issue: 20, source: 'backfill' }));
+  });
+
   it('reads the workspace layout from the target repo via gh api when --repo is given (#801)', async () => {
     const body = 'Touches `main/packages/frontend/src/a.tsx` and `main/scripts/ci.sh` for the fix.';
     fakeGh(
@@ -491,6 +504,25 @@ describe('batch compose', () => {
     const out = logged().join('\n');
     expect(out).toContain('status: ok');
     expect(out).toContain('#1  review=light  ready=');
+  });
+
+  it('text mode prints a held pick with its source, review reasons and next-run note (#951)', async () => {
+    const full = (n: number) => ({ number: n, title: `fix: billing window ${n}` });
+    fakeGh([full(1), full(2), full(3)], [{ number: 20 }]);
+
+    await runCommandTree(registerBatchCommand, [
+      'batch',
+      'compose',
+      '--project',
+      PROJECT,
+      '--issues',
+      '1,2,3',
+    ]);
+
+    const out = logged().join('\n');
+    expect(out).toContain('#3  review=full  review-full-cap  (pick)');
+    expect(out).toMatch(/#3 {2}review=full[\s\S]*full because: .*billing/);
+    expect(out).toContain('submit #3 again then (no extra small batch is opened for it)');
   });
 
   it('text mode strips terminal escapes from untrusted issue titles', async () => {
