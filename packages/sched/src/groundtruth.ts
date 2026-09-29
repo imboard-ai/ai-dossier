@@ -496,7 +496,10 @@ export function createExecGroundTruth(
     latestMilestone(issue: number): GroundTruthMilestone | null | undefined {
       const out = exec(
         runstateBin,
-        ['runstate', 'last', '--issue', String(issue), '--json'],
+        // #932: every consumer of these reads ACTS on the result, so only milestones from
+        // a repo owner / org member / collaborator count. An older CLI without --trusted
+        // errors out -> undefined (unreachable) -> fail closed.
+        ['runstate', 'last', '--issue', String(issue), '--trusted', '--json'],
         opts.repoDir
       );
       if (out === null) return undefined; // subprocess failed — unreachable, NOT known-absent
@@ -505,7 +508,7 @@ export function createExecGroundTruth(
     milestonesSince(issue: number, since: string): GroundTruthMilestone[] | undefined {
       const out = exec(
         runstateBin,
-        ['runstate', 'list', '--issue', String(issue), '--since', since, '--json'],
+        ['runstate', 'list', '--issue', String(issue), '--since', since, '--trusted', '--json'],
         opts.repoDir
       );
       return parseMilestoneListJson(out);

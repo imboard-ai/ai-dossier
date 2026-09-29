@@ -13,7 +13,7 @@
  */
 
 import { isTrustedAuthorAssociation } from '@ai-dossier/core';
-import { MAX_BODY_LENGTH, RUNSTATE_MARKER } from './runstate';
+import { MAX_BODY_LENGTH, type ParsedMilestone, parseMilestone, RUNSTATE_MARKER } from './runstate';
 
 /**
  * Opens every plan artifact comment. Unlike the runstate marker, it carries `head=` — the
@@ -482,4 +482,57 @@ export function newestTimestamp(comments: readonly TimestampedComment[]): string
     if (newest === null || time > newest.time) newest = { at: comment.createdAt, time };
   }
   return newest?.at ?? null;
+}
+
+/** An untrusted-author milestone a trusted read skipped. */
+export interface IgnoredMilestone {
+  author: string;
+  association: string;
+  phase: string;
+  status: string;
+}
+
+/**
+ * The runstate trail restricted to trusted authors (#932), plus the untrusted milestones
+ * NEWER than the latest trusted one (older untrusted ones are noise). Fails closed: an
+ * absent or non-string `authorAssociation` is untrusted.
+ */
+export function readTrustedMilestones(
+  raw: ReadonlyArray<{
+    body?: unknown;
+    authorAssociation?: unknown;
+    author?: { login?: unknown } | null;
+  }>
+): { milestones: ParsedMilestone[]; ignored: IgnoredMilestone[] } {
+  const milestones: ParsedMilestone[] = [];
+  const untrusted: Array<IgnoredMilestone & { index: number }> = [];
+  let floor = -1;
+  raw.forEach((c, index) => {
+    const parsed = parseMilestone(typeof c?.body === 'string' ? c.body : '');
+    if (parsed === null) return;
+    if (isTrustedAuthorAssociation(c?.authorAssociation)) {
+      milestones.push(parsed);
+      floor = index;
+    } else {
+      untrusted.push({
+        index,
+        author: typeof c?.author?.login === 'string' ? c.author.login : 'unknown',
+        association: typeof c?.authorAssociation === 'string' ? c.authorAssociation : 'unreported',
+        phase: parsed.phase,
+        status: parsed.status,
+      });
+    }
+  });
+  return { milestones, ignored: untrusted.filter((u) => u.index > floor) };
+}
+
+/** One-line warning naming the untrusted milestones a trusted read skipped. */
+export function ignoredMilestoneWarning(ignored: readonly IgnoredMilestone[]): string {
+  const who = ignored
+    .map(
+      (u) =>
+        `${JSON.stringify(u.author.slice(0, 40))} (${u.association}) phase=${JSON.stringify(u.phase.slice(0, 40))} status=${JSON.stringify(u.status.slice(0, 40))}`
+    )
+    .join(', ');
+  return `Ignored ${ignored.length} newer runstate milestone(s) from author(s) who are not repo owner / org member / collaborator: ${who} — only trusted milestones drive the scheduler.`;
 }
