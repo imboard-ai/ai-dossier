@@ -5,6 +5,8 @@ import {
   extractNewPredictedFiles,
   extractPredictedFiles,
   findLatestPlan,
+  findLatestTrustedPlan,
+  ignoredPlanWarning,
   isArtifactComment,
   isHeadSha,
   MAX_ARTIFACT_BODY_LENGTH,
@@ -13,6 +15,7 @@ import {
   parsePlanArtifact,
   parsePlanMarker,
   scanRiskFloor,
+  toAuthoredComments,
   validateArtifactBody,
 } from '../plan-artifact';
 
@@ -208,6 +211,73 @@ describe('findLatestPlan', () => {
 
   it('returns null for no comments at all', () => {
     expect(findLatestPlan([])).toBeNull();
+  });
+});
+
+describe('findLatestTrustedPlan (#808)', () => {
+  const sections =
+    '## Problem\n%\n\n## Acceptance Criteria\nx\n\n## Predicted Files\n\n## Approach\n\n## Test Scope\n';
+  const trusted = buildPlanComment('aaa1111', sections.replace('%', 'legit'));
+  const forged = buildPlanComment('bbb2222', sections.replace('%', 'forged'));
+
+  it('uses the latest artifact when its author has write access', () => {
+    const r = findLatestTrustedPlan([
+      { body: trusted, authorAssociation: 'COLLABORATOR' },
+      {
+        body: buildPlanComment('ccc3333', sections.replace('%', 'v2')),
+        authorAssociation: 'OWNER',
+      },
+    ]);
+    expect(r.latest?.artifact.head).toBe('ccc3333');
+    expect(r.ignored).toEqual([]);
+  });
+
+  it('ignores a NEWER artifact from a non-collaborator and reports it', () => {
+    const r = findLatestTrustedPlan([
+      { body: trusted, authorAssociation: 'MEMBER' },
+      { body: forged, authorAssociation: 'NONE', author: 'mallory' },
+    ]);
+    expect(r.latest?.artifact.head).toBe('aaa1111');
+    expect(r.latest?.index).toBe(0);
+    expect(r.ignored).toEqual([{ index: 1, author: 'mallory', association: 'NONE' }]);
+    expect(ignoredPlanWarning(r.ignored)).toContain('mallory');
+  });
+
+  it('does not report an untrusted artifact OLDER than the trusted one', () => {
+    const r = findLatestTrustedPlan([
+      { body: forged, authorAssociation: 'CONTRIBUTOR' },
+      { body: trusted, authorAssociation: 'OWNER' },
+    ]);
+    expect(r.latest?.artifact.head).toBe('aaa1111');
+    expect(r.ignored).toEqual([]);
+  });
+
+  it('returns no plan when every artifact is untrusted (a forged artifact is not a fallback)', () => {
+    const r = findLatestTrustedPlan([
+      { body: forged, authorAssociation: 'FIRST_TIME_CONTRIBUTOR' },
+    ]);
+    expect(r.latest).toBeNull();
+    expect(r.ignored).toHaveLength(1);
+  });
+
+  it('trusts an app/automation author reported as BOT', () => {
+    const r = findLatestTrustedPlan([{ body: trusted, authorAssociation: 'BOT' }]);
+    expect(r.latest?.artifact.head).toBe('aaa1111');
+  });
+
+  it('fails closed when gh does not report the association at all', () => {
+    const r = findLatestTrustedPlan(toAuthoredComments([{ body: forged }]));
+    expect(r.latest).toBeNull();
+    expect(r.ignored).toEqual([{ index: 0, author: 'unknown', association: 'unreported' }]);
+  });
+
+  it('toAuthoredComments tolerates malformed entries without throwing', () => {
+    expect(
+      toAuthoredComments([{ body: 5, authorAssociation: 7, author: null }, {} as never])
+    ).toEqual([
+      { body: '', authorAssociation: undefined, author: undefined },
+      { body: '', authorAssociation: undefined, author: undefined },
+    ]);
   });
 });
 

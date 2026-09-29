@@ -29,6 +29,7 @@ import {
   tryFetchComments,
 } from '../gh';
 import { parseIssueSelection } from '../issue-selection';
+import { WRITE_ACCESS_ASSOCIATIONS } from '../plan-artifact';
 import {
   activeFence,
   BATCH_PHASES,
@@ -538,13 +539,6 @@ function requirePostableBody(body: string, pairs: Array<[string, string]>): void
  * refused `post` use it, so one exit code means one thing everywhere.
  */
 export const FENCED_EXIT_CODE = 3;
-
-/**
- * Author associations GitHub reports for an account with write access to the repository.
- *
- * `BOT` is included: the workflows that post milestones frequently run as an app token.
- */
-const WRITE_ACCESS_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR', 'BOT']);
 
 /**
  * The trail read the FENCE decisions use: only comments from accounts with write access.

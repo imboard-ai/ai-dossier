@@ -130,7 +130,7 @@ import {
 import { pickHardBlockLabel } from '../hard-block-labels';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
-import { findLatestPlan } from '../plan-artifact';
+import { findLatestTrustedPlan, toAuthoredComments } from '../plan-artifact';
 import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
 import { hasSlotModeLatestMilestone } from '../runstate';
 import { renderValue } from '../runstate-stats';
@@ -966,7 +966,7 @@ function screenSlotPreconditions(inputs: EnqueueInput[], repo?: string): void {
         } else {
           const bodies = result.comments.map((c) => (typeof c?.body === 'string' ? c.body : ''));
           checked.set(input.issue, {
-            plan: findLatestPlan(bodies) !== null,
+            plan: findLatestTrustedPlan(toAuthoredComments(result.comments)).latest !== null,
             classify: hasSlotModeLatestMilestone(bodies),
           });
         }

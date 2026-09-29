@@ -207,4 +207,72 @@ describe('classify prescreen', () => {
     expect(code).toBe(1);
     expect(errored().some((line) => line.includes('--submitted-set'))).toBe(true);
   });
+
+  describe('plan:v1 author trust (#808)', () => {
+    const files = (n: number) =>
+      Array.from({ length: n }, (_, k) => `- \`packages/x/src/f${k}.ts\` — f`).join('\n');
+    const plan = (n: number, head: string) =>
+      `<!-- plan:v1 head=${head} -->\n\n## Problem\np\n\n## Acceptance Criteria\n- a\n\n## Predicted Files\n${files(n)}\n\n## Approach\nx\n\n## Test Scope\ny\n`;
+    const comment = (body: string, association: string | undefined, login = 'someone') => ({
+      body,
+      author: { login },
+      ...(association === undefined ? {} : { authorAssociation: association }),
+    });
+
+    function serve(comments: unknown[]): void {
+      execHandles((file, args) => {
+        if (file === 'gh' && args[4] === 'title,body,labels,state') return issueMetaJson();
+        if (file === 'gh' && args[4] === 'comments') return JSON.stringify({ comments });
+        throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
+      });
+    }
+    const run = () =>
+      runCommandTree(registerClassifyCommand, ['classify', 'prescreen', '--issue', '538']);
+
+    it("a stranger's benign newer plan does not hide the collaborator's >8-file plan; the skip is a warning", async () => {
+      serve([
+        comment(plan(9, 'aaa1111'), 'MEMBER', 'lead'),
+        comment(plan(1, 'bbb2222'), 'NONE', 'mallory'),
+      ]);
+      await run();
+      const out = loggedJson();
+      expect(out.plan_artifact).toBe('present');
+      expect(out.review).toBe('full');
+      expect(out.reasons).toEqual([expect.objectContaining({ check: 'file-count' })]);
+      expect(out.degraded).toBe(true);
+      expect((out.warnings as string[]).join('\n')).toMatch(/mallory/);
+    });
+
+    it('a trusted newer plan supersedes a trusted older one with no warning', async () => {
+      serve([comment(plan(9, 'aaa1111'), 'OWNER'), comment(plan(1, 'bbb2222'), 'COLLABORATOR')]);
+      await run();
+      const out = loggedJson();
+      expect(out.review).toBe('light');
+      expect(out.degraded).toBe(false);
+    });
+
+    it('an app/automation author (BOT) is trusted', async () => {
+      serve([comment(plan(9, 'aaa1111'), 'BOT', 'fleet[bot]')]);
+      await run();
+      expect(loggedJson().review).toBe('full');
+    });
+
+    it('a plan whose association gh did not report fails closed: treated as no artifact, warned, no crash', async () => {
+      serve([comment(plan(9, 'aaa1111'), undefined, 'lead')]);
+      const code = await run();
+      expect(code).toBeUndefined();
+      const out = loggedJson();
+      expect(out.plan_artifact).toBe('absent');
+      expect(out.degraded).toBe(true);
+      expect((out.warnings as string[]).join('\n')).toMatch(/unreported/);
+    });
+
+    it('a forged plan alone is not used (no trusted fallback) and is named', async () => {
+      serve([comment(plan(1, 'bbb2222'), 'CONTRIBUTOR', 'mallory')]);
+      await run();
+      const out = loggedJson();
+      expect(out.plan_artifact).toBe('absent');
+      expect((out.warnings as string[]).join('\n')).toMatch(/mallory/);
+    });
+  });
 });

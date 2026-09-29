@@ -245,6 +245,103 @@ export function findLatestPlan(commentBodies: string[]): LatestPlan | null {
 }
 
 /**
+ * Author associations GitHub reports for an account with write access to the repository.
+ *
+ * `BOT` is included: the workflows that post artifacts frequently run as an app token.
+ * Shared by every artifact reader that ACTS on a comment (runstate's fence read, the plan
+ * pre-screen) so the trusted set cannot drift between them.
+ */
+export const WRITE_ACCESS_ASSOCIATIONS: ReadonlySet<string> = new Set([
+  'OWNER',
+  'MEMBER',
+  'COLLABORATOR',
+  'BOT',
+]);
+
+/** A comment as the trusted-plan read needs it: body plus who wrote it. */
+export interface AuthoredComment {
+  body: string;
+  /** `authorAssociation` as gh reports it; `undefined` when gh did not report the field. */
+  authorAssociation?: string;
+  /** The author's login, for naming an ignored artifact. */
+  author?: string;
+}
+
+/** A plan:v1 artifact skipped because its author has no write access (#808). */
+export interface IgnoredPlan {
+  /** Index into the comments array that was passed in. */
+  index: number;
+  author: string;
+  /** `authorAssociation` as reported, or `'unreported'` when gh omitted the field. */
+  association: string;
+}
+
+/** The latest TRUSTED plan, plus every newer untrusted artifact that was passed over. */
+export interface TrustedPlanRead {
+  latest: LatestPlan | null;
+  /** Untrusted plan:v1 artifacts, oldest first — only those NEWER than `latest` matter to a caller. */
+  ignored: IgnoredPlan[];
+}
+
+/**
+ * The latest plan artifact whose author has write access (#808).
+ *
+ * A plan:v1 artifact is an issue comment anyone can post, and the deterministic
+ * pre-screen acts on its predicted files (the `file-count` exclusion and `path-floor`
+ * review reasons). Reading the LATEST artifact regardless of author lets a stranger post a
+ * benign artifact over a legitimate one and dodge both. This read walks the comments and
+ * only considers an artifact from {@link WRITE_ACCESS_ASSOCIATIONS}, falling back to the
+ * latest trusted one. Untrusted artifacts NEWER than the chosen one are reported in
+ * `ignored` so the caller can surface them; older untrusted ones are noise and dropped.
+ *
+ * Fails closed: an absent `authorAssociation` (an old gh that does not report it) is
+ * untrusted here — unlike runstate's fence read, whose failure mode is a denial of
+ * service, this one's is a bypassed safety floor.
+ */
+export function findLatestTrustedPlan(comments: readonly AuthoredComment[]): TrustedPlanRead {
+  let latest: LatestPlan | null = null;
+  const untrusted: IgnoredPlan[] = [];
+  comments.forEach((c, index) => {
+    const parsed = parsePlanArtifact(c.body);
+    if (parsed === null) return;
+    if (c.authorAssociation !== undefined && WRITE_ACCESS_ASSOCIATIONS.has(c.authorAssociation)) {
+      latest = { artifact: parsed, index };
+    } else {
+      untrusted.push({
+        index,
+        author: c.author && c.author !== '' ? c.author : 'unknown',
+        association: c.authorAssociation ?? 'unreported',
+      });
+    }
+  });
+  const floor = (latest as LatestPlan | null)?.index ?? -1;
+  return { latest, ignored: untrusted.filter((u) => u.index > floor) };
+}
+
+/** Project gh comments (`GhComment`-shaped, every field optional) into {@link AuthoredComment}s. */
+export function toAuthoredComments(
+  raw: ReadonlyArray<{
+    body?: unknown;
+    authorAssociation?: unknown;
+    author?: { login?: unknown } | null;
+  }>
+): AuthoredComment[] {
+  return raw.map((c) => ({
+    body: typeof c?.body === 'string' ? c.body : '',
+    authorAssociation: typeof c?.authorAssociation === 'string' ? c.authorAssociation : undefined,
+    author: typeof c?.author?.login === 'string' ? c.author.login : undefined,
+  }));
+}
+
+/** One-line warning naming the untrusted plan artifacts a trusted read skipped. */
+export function ignoredPlanWarning(ignored: readonly IgnoredPlan[]): string {
+  const who = ignored
+    .map((u) => `${JSON.stringify(u.author.slice(0, 40))} (${u.association})`)
+    .join(', ');
+  return `Ignored ${ignored.length} newer plan:v1 artifact(s) from author(s) without write access: ${who} — only OWNER/MEMBER/COLLABORATOR/BOT artifacts feed predicted files.`;
+}
+
+/**
  * Deterministic risk-floor patterns for the Predicted Files scan (#462 AC3).
  *
  * "Risk floor" is review vocabulary: the minimum review effort a change deserves. Paths

@@ -24,7 +24,7 @@ interface FakeIssue {
   labels?: string[];
   assignees?: string[];
   state?: string;
-  comments?: string[];
+  comments?: Array<string | { body: string; authorAssociation?: string; login?: string }>;
 }
 
 function ghIssue(i: FakeIssue): Record<string, unknown> {
@@ -35,7 +35,11 @@ function ghIssue(i: FakeIssue): Record<string, unknown> {
     labels: (i.labels ?? []).map((name) => ({ name })),
     assignees: (i.assignees ?? []).map((login) => ({ login })),
     state: i.state ?? 'OPEN',
-    comments: (i.comments ?? []).map((body) => ({ body })),
+    comments: (i.comments ?? []).map((c) =>
+      typeof c === 'string'
+        ? { body: c }
+        : { body: c.body, authorAssociation: c.authorAssociation, author: { login: c.login } }
+    ),
   };
 }
 
@@ -92,7 +96,40 @@ const compose = (...args: string[]) =>
     ...args,
   ]);
 
+/** A plan:v1 artifact predicting `n` distinct files under packages/. */
+function planBody(n: number, head: string): string {
+  const files = Array.from({ length: n }, (_, k) => `- \`packages/p${k}/src/f.ts\` — f`).join('\n');
+  return `<!-- plan:v1 head=${head} -->\n\n## Problem\np\n\n## Acceptance Criteria\n- a\n\n## Predicted Files\n${files}\n\n## Approach\nx\n\n## Test Scope\ny\n`;
+}
+
 describe('batch compose', () => {
+  it('reads predicted files only from a write-access plan:v1 author and warns about the ignored newer one (#808)', async () => {
+    fakeGh([
+      {
+        number: 1,
+        comments: [
+          { body: planBody(9, 'aaa1111'), authorAssociation: 'MEMBER', login: 'lead' },
+          { body: planBody(1, 'bbb2222'), authorAssociation: 'NONE', login: 'mallory' },
+        ],
+      },
+    ]);
+
+    await compose('--issues', '1');
+
+    const r = report();
+    expect(r.degraded).toBe(true);
+    expect(r.warnings.join('\n')).toMatch(/#1: Ignored 1 newer plan:v1.*mallory/);
+    // The legitimate 9-file artifact drove the assessment (the forged 1-file one did not
+    // replace it): the issue is a review=full member on the file-count rule.
+    expect(r.members).toEqual([
+      expect.objectContaining({
+        issue: 1,
+        review: 'full',
+        review_reasons: [expect.stringContaining('rule5-file-count')],
+      }),
+    ]);
+  });
+
   it('composes three clean picks with zero model calls — every subprocess is gh (#773 AC2)', async () => {
     fakeGh([{ number: 1 }, { number: 2 }, { number: 3 }]);
 
