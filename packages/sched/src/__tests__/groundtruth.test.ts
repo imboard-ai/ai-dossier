@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { timestampMs } from '../groundtruth';
 import {
   batchPhaseBlockedReason,
   createExecGroundTruth,
@@ -1232,6 +1233,7 @@ describe('parseIssueCloseTruthJson (#768)', () => {
         wrap({
           state: 'CLOSED',
           stateReason: 'COMPLETED',
+          createdAt: '2026-09-01T10:00:00Z',
           closedAt: '2026-09-12T10:00:00Z',
           labels: { nodes: [{ name: 'cycle:slot' }] },
           timelineItems: {
@@ -1262,6 +1264,7 @@ describe('parseIssueCloseTruthJson (#768)', () => {
       },
       closingPrs: [],
       closingPrsTruncated: false,
+      createdAt: '2026-09-01T10:00:00Z',
       closedAt: '2026-09-12T10:00:00Z',
     });
   });
@@ -1370,42 +1373,57 @@ describe('parseIssueCloseTruthJson (#768)', () => {
     ).toBeNull();
   });
 
-  it("#799: the close query asks GitHub for the last REOPENED_EVENT and each reference's mergedAt", () => {
+  /** The GraphQL text `issueCloseTruth` sends, captured from its first gh call. */
+  const capturedCloseQuery = (): string => {
     let query = '';
-    const gt = createExecGroundTruth(
+    createExecGroundTruth(
       (_cmd, args) => {
         query ||= args.find((a) => a.startsWith('query=')) ?? '';
         return null;
       },
       { repo: 'o/r' }
-    );
-    gt.issueCloseTruth?.(1);
+    ).issueCloseTruth?.(1);
+    return query;
+  };
+
+  it("#799: the close query asks GitHub for the last REOPENED_EVENT and each reference's mergedAt", () => {
+    const query = capturedCloseQuery();
     expect(query).toContain('reopens:timelineItems(itemTypes:[REOPENED_EVENT],last:1)');
     expect(query).toContain('... on ReopenedEvent{createdAt}');
     expect(query).toMatch(
-      /closedByPullRequestsReferences\([^)]*\)\{pageInfo\{hasNextPage\} nodes\{number merged mergedAt /
+      /closedByPullRequestsReferences\([^)]*\)\{.*nodes\{number merged mergedAt /
     );
   });
 
-  describe('#850: the close time and whether the closing-reference list is complete', () => {
-    const closedAt = (value: unknown) =>
-      parseIssueCloseTruthJson(wrap({ state: 'CLOSED', stateReason: 'COMPLETED', closedAt: value }))
-        ?.closedAt;
+  describe('#850: the creation and close times, and whether the closing-reference list is complete', () => {
+    const timeOf = (field: 'createdAt' | 'closedAt', value: unknown) =>
+      parseIssueCloseTruthJson(
+        wrap({ state: 'CLOSED', stateReason: 'COMPLETED', [field]: value })
+      )?.[field];
     const truncatedBy = (refs: unknown) =>
       parseIssueCloseTruthJson(
         wrap({ state: 'CLOSED', stateReason: 'COMPLETED', closedByPullRequestsReferences: refs })
       );
 
-    it("reads the issue's closedAt; a missing or unparseable one is null (unreadable), never a guessed time", () => {
-      expect(closedAt('2026-09-12T10:00:00Z')).toBe('2026-09-12T10:00:00Z');
-      expect(closedAt('2026-09-12T10:00:00.5Z')).toBe('2026-09-12T10:00:00.5Z');
-      expect(closedAt(undefined)).toBeNull();
-      expect(closedAt(null)).toBeNull();
-      expect(closedAt('garbage')).toBeNull();
-      expect(closedAt(1757671200000)).toBeNull();
-      // Loose strings `Date.parse` would accept are not GitHub's format either.
-      expect(closedAt('1')).toBeNull();
-      expect(closedAt('2026-09-12 10:00:00')).toBeNull();
+    it("reads the issue's createdAt and closedAt; a missing or unparseable one is null (unreadable), never a guessed time", () => {
+      for (const field of ['createdAt', 'closedAt'] as const) {
+        expect(timeOf(field, '2026-09-12T10:00:00Z')).toBe('2026-09-12T10:00:00Z');
+        expect(timeOf(field, '2026-09-12T10:00:00.5Z')).toBe('2026-09-12T10:00:00.5Z');
+        expect(timeOf(field, undefined)).toBeNull();
+        expect(timeOf(field, null)).toBeNull();
+        expect(timeOf(field, 'garbage')).toBeNull();
+        expect(timeOf(field, 1757671200000)).toBeNull();
+        // Loose strings `Date.parse` would accept are not GitHub's format either.
+        expect(timeOf(field, '1')).toBeNull();
+        expect(timeOf(field, '2026-09-12 10:00:00')).toBeNull();
+      }
+    });
+
+    it('timestampMs: epoch ms of a time the parser accepts, NaN for anything else', () => {
+      expect(timestampMs('2026-09-12T10:00:00Z')).toBe(Date.parse('2026-09-12T10:00:00Z'));
+      for (const loose of [null, undefined, '', 'garbage', '1', '2026-09', '2026-09-12', 17]) {
+        expect(timestampMs(loose)).toBeNaN();
+      }
     });
 
     it('flags a reference page GitHub says has more behind it; the page read is still kept', () => {
@@ -1434,32 +1452,12 @@ describe('parseIssueCloseTruthJson (#768)', () => {
       }
     });
 
-    it("the close query asks GitHub for the issue's closedAt and the reference page's hasNextPage", () => {
-      let query = '';
-      const gt = createExecGroundTruth(
-        (_cmd, args) => {
-          query ||= args.find((a) => a.startsWith('query=')) ?? '';
-          return null;
-        },
-        { repo: 'o/r' }
-      );
-      gt.issueCloseTruth?.(1);
-      expect(query).toContain('issue(number:$n){state stateReason closedAt ');
+    it("the close query asks GitHub for the issue's createdAt and closedAt, and a full page of references with its hasNextPage", () => {
+      const query = capturedCloseQuery();
+      expect(query).toContain('issue(number:$n){state stateReason createdAt closedAt ');
       expect(query).toContain(
-        'closedByPullRequestsReferences(first:10,includeClosedPrs:true){pageInfo{hasNextPage} nodes{'
+        'closedByPullRequestsReferences(first:100,includeClosedPrs:true){pageInfo{hasNextPage} nodes{'
       );
-    });
-
-    it('a MISSING issue carries no close time and a complete (empty) reference list', () => {
-      const exec: ExecFn = (_file, args) =>
-        args[0] === 'api' && args[1] === 'graphql' ? null : 'imboard-ai/imboard';
-      const gt = createExecGroundTruth(exec, { repo: 'imboard-ai/imboard' });
-      expect(gt.issueCloseTruth?.(99999)).toMatchObject({
-        state: 'MISSING',
-        closingPrs: [],
-        closingPrsTruncated: false,
-        closedAt: null,
-      });
     });
   });
 
@@ -1520,6 +1518,13 @@ describe('issueCloseTruth: a missing issue is not an outage (#768)', () => {
     const exec: ExecFn = (_file, args) =>
       args[0] === 'api' && args[1] === 'graphql' ? null : 'imboard-ai/imboard';
     const gt = createExecGroundTruth(exec, { repo: 'imboard-ai/imboard' });
-    expect(gt.issueCloseTruth?.(99999)?.state).toBe('MISSING');
+    // #850: with no times and a complete (empty) reference list — nothing to vouch with.
+    expect(gt.issueCloseTruth?.(99999)).toMatchObject({
+      state: 'MISSING',
+      closingPrs: [],
+      closingPrsTruncated: false,
+      createdAt: null,
+      closedAt: null,
+    });
   });
 });

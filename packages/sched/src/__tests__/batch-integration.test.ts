@@ -88,6 +88,7 @@ import {
 } from '../index';
 import { writeApiErrorLog, writeToolUseLog } from './helpers/dispatch-log';
 import { stubGroundTruth } from './helpers/ground-truth';
+import { issueCloseTruth } from './helpers/issue-close-truth';
 import { memberRun } from './helpers/member-run';
 
 const FIXTURES = fileURLToPath(new URL('./fixtures', import.meta.url));
@@ -3557,17 +3558,7 @@ describe('#789 review: pr-detect-ambiguous is scoped to ONE blocked stretch, lik
 function setIssueTruth(truthDir: string, issue: number, truth: Partial<IssueCloseTruth>): void {
   fs.writeFileSync(
     path.join(truthDir, `${issue}.issue.json`),
-    JSON.stringify({
-      state: 'OPEN',
-      stateReason: null,
-      labels: [],
-      closer: null,
-      closingPrs: [],
-      closingPrsTruncated: false,
-      lastReopenedAt: null,
-      closedAt: null,
-      ...truth,
-    })
+    JSON.stringify(issueCloseTruth(truth))
   );
 }
 
@@ -3602,6 +3593,27 @@ const COMPLETED_BY_PR = (pr: number): Partial<IssueCloseTruth> => ({
   state: 'CLOSED',
   stateReason: 'COMPLETED',
   closer: { kind: 'pr', number: pr, merged: true, baseRefName: 'main', repo: 'test-org/test-repo' },
+});
+
+/**
+ * A member closed as completed BY HAND (no closer) on 2026-09-12 10:00, vouched
+ * for only by one closing reference: PR `pr` of the project repo, merged into
+ * `main` at `mergedAt` (#768's imboard#4116 shape); `more` overrides any field
+ * (#799 `lastReopenedAt`, #850 `closedAt`/`createdAt`/`closingPrsTruncated`).
+ */
+const CLOSED_BY_HAND_REF = (
+  pr: number,
+  mergedAt: string,
+  more: Partial<IssueCloseTruth> = {}
+): Partial<IssueCloseTruth> => ({
+  state: 'CLOSED',
+  stateReason: 'COMPLETED',
+  closedAt: '2026-09-12T10:00:00Z',
+  closer: null,
+  closingPrs: [
+    { number: pr, merged: true, mergedAt, baseRefName: 'main', repo: 'test-org/test-repo' },
+  ],
+  ...more,
 });
 
 /** Commit a file straight to origin/main of the scratch repo and return its sha. */
@@ -3710,21 +3722,11 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
     // closed it by hand minutes later — so the close event has NO closer, and
     // only the merged closing reference vouches for it (#850: merged at or
     // before that close).
-    setIssueTruth(h.truthDir, 4116, {
-      state: 'CLOSED',
-      stateReason: 'COMPLETED',
-      closedAt: '2026-09-12T10:05:00Z',
-      closer: null,
-      closingPrs: [
-        {
-          number: 4255,
-          merged: true,
-          mergedAt: '2026-09-12T10:00:00Z',
-          baseRefName: 'main',
-          repo: 'test-org/test-repo',
-        },
-      ],
-    });
+    setIssueTruth(
+      h.truthDir,
+      4116,
+      CLOSED_BY_HAND_REF(4255, '2026-09-12T10:00:00Z', { closedAt: '2026-09-12T10:05:00Z' })
+    );
 
     const result = h.tick();
 
@@ -3750,10 +3752,13 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
   }, 60_000);
 
   // NEGATIVE: every shape without verified shipping evidence, or with a
-  // failure trail, keeps the anchor OPEN and is surfaced as needs-operator.
+  // failure trail, keeps the anchor OPEN and is surfaced as needs-operator —
+  // or, for a shape GitHub answered but could not settle, `unknown` (#850).
   const NEGATIVE_SHAPES: Array<{
     name: string;
     reason: string;
+    /** The sweep's verdict for the anchor; default `needs-operator`. */
+    verdict?: 'needs-operator' | 'unknown';
     arrange: (h: BatchHarness, batchId: string, repo: string) => void;
   }> = [
     {
@@ -3798,22 +3803,13 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
       name: 'a member closed by hand whose only merged closing reference predates its last reopen',
       reason: 'member-closed-by-hand-ref-pr-9781-predates-reopen:#7692',
       arrange: (h) =>
-        setIssueTruth(h.truthDir, 7692, {
-          state: 'CLOSED',
-          stateReason: 'COMPLETED',
-          closedAt: '2026-09-12T10:00:00Z',
-          closer: null,
-          closingPrs: [
-            {
-              number: 9781,
-              merged: true,
-              mergedAt: '2026-09-10T10:00:00Z',
-              baseRefName: 'main',
-              repo: 'test-org/test-repo',
-            },
-          ],
-          lastReopenedAt: '2026-09-11T10:00:00Z',
-        }),
+        setIssueTruth(
+          h.truthDir,
+          7692,
+          CLOSED_BY_HAND_REF(9781, '2026-09-10T10:00:00Z', {
+            lastReopenedAt: '2026-09-11T10:00:00Z',
+          })
+        ),
     },
     {
       // #850: closed by hand, and only THEN did a PR naming it (`Closes #N`)
@@ -3821,42 +3817,39 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
       name: 'a member closed by hand whose only merged closing reference merged AFTER that close',
       reason: 'member-closed-by-hand-ref-pr-9782-postdates-close:#7692',
       arrange: (h) =>
-        setIssueTruth(h.truthDir, 7692, {
-          state: 'CLOSED',
-          stateReason: 'COMPLETED',
-          closedAt: '2026-09-12T10:00:00Z',
-          closer: null,
-          closingPrs: [
-            {
-              number: 9782,
-              merged: true,
-              mergedAt: '2026-09-13T10:00:00Z',
-              baseRefName: 'main',
-              repo: 'test-org/test-repo',
-            },
-          ],
-        }),
+        setIssueTruth(h.truthDir, 7692, CLOSED_BY_HAND_REF(9782, '2026-09-13T10:00:00Z')),
+    },
+    {
+      // #850 review: the PR merged before the member even existed — only an
+      // edit made after the fact can have linked it.
+      name: 'a member closed by hand whose only merged closing reference predates the issue itself',
+      reason: 'member-closed-by-hand-ref-pr-9786-predates-issue:#7692',
+      arrange: (h) =>
+        setIssueTruth(h.truthDir, 7692, CLOSED_BY_HAND_REF(9786, '2026-08-31T10:00:00Z')),
     },
     {
       // #850: no readable close time — fail closed, never read as "no bound".
       name: 'a member closed by hand whose close time cannot be read',
       reason: 'member-closed-by-hand-close-time-unreadable:#7692',
       arrange: (h) =>
-        setIssueTruth(h.truthDir, 7692, {
-          state: 'CLOSED',
-          stateReason: 'COMPLETED',
-          closedAt: null,
-          closer: null,
-          closingPrs: [
-            {
-              number: 9783,
-              merged: true,
-              mergedAt: '2026-09-10T10:00:00Z',
-              baseRefName: 'main',
-              repo: 'test-org/test-repo',
-            },
-          ],
-        }),
+        setIssueTruth(
+          h.truthDir,
+          7692,
+          CLOSED_BY_HAND_REF(9783, '2026-09-10T10:00:00Z', { closedAt: null })
+        ),
+    },
+    {
+      // #850: closed by hand; the one reference read merged AFTER that close,
+      // and GitHub says more exist — one that vouches may be on the next page.
+      name: 'a member closed by hand whose closing-reference list is truncated',
+      reason: 'member-closed-by-hand-refs-truncated:#7692',
+      verdict: 'unknown',
+      arrange: (h) =>
+        setIssueTruth(
+          h.truthDir,
+          7692,
+          CLOSED_BY_HAND_REF(9785, '2026-09-13T10:00:00Z', { closingPrsTruncated: true })
+        ),
     },
     {
       name: 'a member closed by an UNMERGED PR',
@@ -3947,7 +3940,8 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
   ];
 
   for (const shape of NEGATIVE_SHAPES) {
-    it(`NEGATIVE — ${shape.name}: anchor stays open, batch not reconciled, shows needs-operator`, async () => {
+    const verdict = shape.verdict ?? 'needs-operator';
+    it(`NEGATIVE — ${shape.name}: anchor stays open, batch not reconciled, shows ${verdict}`, async () => {
       const batchId = `b-768-neg-${NEGATIVE_SHAPES.indexOf(shape)}`;
       const { h, repo } = await blockedBatchHarness(batchId, 7690, 7691, [7692]);
       setIssueTruth(h.truthDir, 7690, { labels: ['batch-epic'] });
@@ -3967,7 +3961,7 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
       expect(findBatch(h.state(), batchId)?.status).toBe(statusBefore);
       if (statusBefore === 'blocked') expect(fs.existsSync(worktree)).toBe(true);
       const row = sweepFor(h)?.find((a) => a.anchor === 7690);
-      expect(row?.verdict).toBe('needs-operator');
+      expect(row?.verdict).toBe(verdict);
       expect(row?.reasons.some((r) => r.startsWith(shape.reason))).toBe(true);
       expect(row?.members.map((m) => m.issue)).toEqual([7691, 7692]);
     }, 60_000);
@@ -4109,42 +4103,6 @@ describe('#768: a batch anchor closes off the happy path only on positive eviden
 
     expect(issueTruth(h.truthDir, 7695).state).toBe('OPEN');
     expect(sweepFor(h)?.find((a) => a.anchor === 7695)?.verdict).toBe('unknown');
-  }, 60_000);
-
-  it('#850: a member whose closing-reference list is truncated never closes the anchor — the sweep shows unknown with its own reason', async () => {
-    const { h, batchId } = await blockedBatchHarness('b-850-truncated', 7720, 7721, [7722]);
-    setIssueTruth(h.truthDir, 7720, { labels: ['batch-epic'] });
-    setIssueTruth(h.truthDir, 7721, COMPLETED_BY_PR(9784));
-    // Closed by hand; the one reference on the page read merged AFTER that
-    // close, and GitHub says more references exist beyond it.
-    setIssueTruth(h.truthDir, 7722, {
-      state: 'CLOSED',
-      stateReason: 'COMPLETED',
-      closedAt: '2026-09-12T10:00:00Z',
-      closer: null,
-      closingPrs: [
-        {
-          number: 9785,
-          merged: true,
-          mergedAt: '2026-09-13T10:00:00Z',
-          baseRefName: 'main',
-          repo: 'test-org/test-repo',
-        },
-      ],
-      closingPrsTruncated: true,
-    });
-    const statusBefore = findBatch(h.state(), batchId)?.status;
-
-    h.tick();
-    h.tick();
-
-    expect(issueTruth(h.truthDir, 7720).state).toBe('OPEN');
-    expect(ghWrites(h.truthDir)).toEqual([]);
-    expect(findBatch(h.state(), batchId)?.anchor_closed_at).toBeNull();
-    expect(findBatch(h.state(), batchId)?.status).toBe(statusBefore);
-    const row = sweepFor(h)?.find((a) => a.anchor === 7720);
-    expect(row?.verdict).toBe('unknown');
-    expect(row?.reasons).toEqual(['member-closed-by-hand-refs-truncated:#7722']);
   }, 60_000);
 });
 

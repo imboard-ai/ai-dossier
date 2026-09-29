@@ -1433,7 +1433,9 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   positive evidence: every member issue CLOSED as completed BY SHIPPED CODE (a
   PR merged into the batch's base, or a commit reachable from it — a hand close
   counts only when a merged same-repo PR into the base lists the issue as a
-  closing reference AND merged after the issue's last reopen, #799, and no later than its close, #850), and no member evicted, handed back (`decision-pending`, any
+  closing reference AND merged inside the issue's last open stretch: after its
+  last reopen, #799, or — never reopened — its creation, and no later than its
+  close, #850), and no member evicted, handed back (`decision-pending`, any
   case), requeued, or failed. The engine then comments on the anchor with each
   member's shipping PR or commit (marker `batch-close:v1`, honoured only on its
   own comments, so a rerun never double-posts) and closes it — journaled
@@ -1442,7 +1444,10 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   when the current directory is verified to be the project's repository (every
   `gh` call names it with `-R`). Any other shape leaves the anchor open;
   `status --anchors` lists every still-open anchor under
-  `== Open batch anchors ==` as `closable`, `needs-operator`, or `unknown`
+  `== Open batch anchors ==` as `closable`, `needs-operator`, or `unknown` (a
+  failed read, which stops the sweep's reads — or, #850, a member whose
+  closing-reference list is longer than the page read and holds no vouching
+  reference on it, `member-closed-by-hand-refs-truncated`, which stops nothing)
   (report-only and opt-in — without `--anchors`, `status` makes no GitHub call).
   That ledger sweep only ever walks `state.batches` — an anchor whose batch
   fell out of the ledger entirely (a lost or reset `state.json`; imboard#4244/
@@ -1457,7 +1462,8 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   `--json`; `null` when the sweep did not run OR the GitHub list call itself
   failed — see the stderr note either way) as `orphan-closable-candidate`,
   `orphan-needs-operator`, or `orphan-unknown` (a failed anchor/member read —
-  the sweep stops classifying at the first one) — deliberately never the
+  the sweep stops classifying at the first one — or, #850, a member whose
+  closing-reference list was truncated, which stops nothing) — deliberately never the
   ledger sweep's bare `closable`: without a ledger there is no
   eviction/requeue trail to rule out, so even a clean read is a candidate for
   a human to confirm, not an engine-actionable verdict. Classifies at most 20
