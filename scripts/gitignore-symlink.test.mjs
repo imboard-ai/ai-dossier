@@ -49,14 +49,14 @@ describe('gitignore node_modules symlink regression', () => {
     execSync('git commit -m "add gitignore"', { cwd: tempDir, stdio: 'pipe' });
 
     // Create node_modules symlink (as worktree warmers do)
-    const nodeModulesTarget = join(tmpdir(), 'node_modules-target');
-    execSync(`mkdir -p ${nodeModulesTarget}`, { shell: true });
-    symlinkSync(nodeModulesTarget, join(tempDir, 'node_modules'));
+    const nodeModulesTarget = mkdtempSync(join(tmpdir(), 'node-modules-'));
+    try {
+      symlinkSync(nodeModulesTarget, join(tempDir, 'node_modules'));
 
-    const status = execSync('git status --porcelain', { cwd: tempDir, encoding: 'utf-8' });
-    expect(status.trim()).toBe('');
-
-    // Cleanup target
-    rmSync(nodeModulesTarget, { recursive: true, force: true });
+      const status = execSync('git status --porcelain', { cwd: tempDir, encoding: 'utf-8' });
+      expect(status.trim()).toBe('');
+    } finally {
+      rmSync(nodeModulesTarget, { recursive: true, force: true });
+    }
   });
 });
