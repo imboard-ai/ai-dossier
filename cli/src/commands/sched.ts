@@ -144,6 +144,7 @@ import {
   summarizeBatchJournal,
 } from '../sched-run-stats';
 import { renderTable } from '../table';
+import { batchPrepTokens, currentSessionId, recordBatchPrep } from '../usage/batch-prep';
 
 /**
  * Batch-worktree `ai-dossier cap run <id>` runner for the per-member
@@ -231,6 +232,7 @@ interface SchedOptions {
 }
 
 interface EnqueueOptions extends SchedOptions {
+  prepSession?: string;
   issues?: string;
   mode?: string;
   batch?: string;
@@ -1039,6 +1041,24 @@ function screenBatchGate(store: SchedStore, opts: EnqueueOptions, inputs: Enqueu
   }
 }
 
+/**
+ * #796: tie the enqueuing session — batch-issues-preparation's — to every
+ * batch this call touched, so the usage ledger can attribute its classifier
+ * spend to `batch:<id>`. Code-side and deterministic: no reliance on the
+ * agent remembering to write a key. Silent when no session is knowable.
+ */
+function recordPrepSession(
+  store: SchedStore,
+  inputs: readonly EnqueueInput[],
+  flag: string | undefined
+): void {
+  const batches = inputs.map((i) => i.batch).filter((b): b is string => typeof b === 'string');
+  if (batches.length === 0) return;
+  const sessionId = flag ?? currentSessionId();
+  if (!sessionId) return;
+  recordBatchPrep(store.dir, batches, sessionId, flag ? 'flag' : 'env');
+}
+
 /** Append one `label-blocked`/`label-check-failed` journal event per outcome (#507 AC3). */
 function journalLabelScreen(store: SchedStore, blocked: EnqueueInput[], failed: number[]): void {
   if (blocked.length === 0 && failed.length === 0) return;
@@ -1253,6 +1273,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
     )
     .option('--from-manifest <path>', 'JSON file of entries (batch-prep output)')
     .option(
+      '--prep-session <id>',
+      "Session that did this batch's prep (#796; default: the calling Claude Code session from CLAUDE_CODE_SESSION_ID) — its tokens are attributed to the batch"
+    )
+    .option(
       '--more-members-expected',
       "With --batch: don't seal this batch yet — more members are coming in a later enqueue call"
     )
@@ -1424,6 +1448,8 @@ function registerEnqueueSubcommand(cmd: Command): void {
       } catch (err) {
         handleKnownError(err);
       }
+
+      recordPrepSession(store, inputs, opts.prepSession);
 
       const blocked = inputs.filter((input) => input.blocked_label);
       journalLabelScreen(store, blocked, failed);
@@ -1734,6 +1760,11 @@ function runBatchStats(opts: StatsOptions & { batch: string }): void {
   const overhead = entries.filter((e) => e.unit === `batch:${opts.batch}`);
   const overheadTotals = aggregateRunLogEntries(overhead);
   const amortization = batchAmortization(store, opts.batch, entries);
+  // #796: prep spend runs in the operator session; joined via `sched enqueue`'s recorded session.
+  // Null when this host recorded no prep session for the batch (e.g. formed before #796).
+  const prep = batchPrepTokens(store.dir, [opts.batch]).get(opts.batch) ?? null;
+  amortization.prep_tokens = prep?.billable_tokens ?? null;
+  amortization.prep_sessions = prep?.sessions ?? 0;
 
   if (opts.json) {
     console.log(

@@ -383,6 +383,13 @@ export interface BatchAmortizationSummary {
   /** Billable tokens per shipped member (or per landed member while unshipped). */
   tokens_per_member: number | null;
   by_model: ModelTokens[];
+  /**
+   * #796: billable tokens of the batch-prep session window(s) recorded by `sched enqueue`
+   * (an upper bound — see usage/batch-prep.ts). Disclosed separately, NOT in `billable_tokens`
+   * / `tokens_per_member`. Null when this host recorded no prep session for the batch.
+   */
+  prep_tokens: number | null;
+  prep_sessions: number;
 }
 
 /**
@@ -457,6 +464,8 @@ export function buildBatchAmortizationSummary({
     tokens_per_member:
       billable !== null && perMemberDenominator > 0 ? billable / perMemberDenominator : null,
     by_model: byModel,
+    prep_tokens: null,
+    prep_sessions: 0,
   };
 }
 
@@ -476,9 +485,17 @@ export function formatAmortizationLine(a: BatchAmortizationSummary): string {
           .map((m) => `${m.model ?? '<unknown>'} ${formatCount(m.billable_tokens)} ×${m.runs}`)
           .join(', ')
       : 'none recorded';
+  const denominator = a.members_shipped ?? a.members_landed;
+  const prepNote =
+    a.prep_tokens === null
+      ? '; prep tokens n/a (no prep session recorded)'
+      : `; prep ${formatCount(a.prep_tokens)} tokens, not included above` +
+        (denominator > 0
+          ? ` (${formatCount(Math.round(a.prep_tokens / denominator))}/member)`
+          : '');
   return [
     `Summary: ${a.members_enqueued} enqueued, ${a.members_landed} landed, ${a.evictions} evicted` +
       `${a.handed_back > 0 ? `, ${a.handed_back} handed back` : ''}; ${outcome};`,
-    `${formatCount(a.billable_tokens)} billable tokens${perMember}; by model: ${models}`,
+    `${formatCount(a.billable_tokens)} billable tokens${perMember}; by model: ${models}${prepNote}`,
   ].join(' ');
 }
