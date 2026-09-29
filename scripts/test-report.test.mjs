@@ -254,4 +254,14 @@ describe('workspaceDependents + changedPaths (#919)', () => {
     ]);
     expect(changedPaths(mkdtempSync(join(tmpdir(), 'test-report-nogit-')), {})).toBeNull();
   });
+
+  it('reports both sides of a rename so the source workspace is not skipped', () => {
+    sh('add', '-A');
+    sh('commit', '-qm', 'wip');
+    sh('mv', 'a/src.ts', 'c/moved.ts');
+    sh('commit', '-qm', 'move');
+    expect(changedPaths(root, { TEST_REPORT_BASE: 'main' })).toEqual(
+      expect.arrayContaining(['a/src.ts', 'c/moved.ts'])
+    );
+  });
 });

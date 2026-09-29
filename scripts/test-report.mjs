@@ -255,7 +255,7 @@ export function changedPaths(root, env = process.env) {
   for (const ref of candidates) {
     try {
       const base = git(root, ['merge-base', ref, 'HEAD']).trim();
-      const diff = git(root, ['diff', '--name-only', base]);
+      const diff = git(root, ['diff', '--name-only', '--no-renames', base]);
       const untracked = git(root, ['ls-files', '--others', '--exclude-standard']);
       return [...new Set(`${diff}\n${untracked}`.split('\n').filter(Boolean))];
     } catch {
