@@ -88,7 +88,11 @@ function isDelegatingSkill(body: string): boolean {
  * `skillName` is the filesystem directory name — used as a fallback when the JSON
  * has no `name` field (edge case: scaffold-project).
  */
-export function buildOpencodeWrapper(rawContent: string, skillName: string): string | null {
+export function buildOpencodeWrapper(
+  rawContent: string,
+  skillName: string,
+  source?: string
+): string | null {
   if (!isDossierFrontmatter(rawContent)) {
     return null;
   }
@@ -115,6 +119,11 @@ export function buildOpencodeWrapper(rawContent: string, skillName: string): str
     lines.push('allowedTools:');
     lines.push('  - Bash(ai-dossier run *)');
   }
+  // Provenance, so the opencode copy is as re-fetchable as the claude one.
+  if (source) {
+    lines.push(`x_source: ${source}`);
+    if (fm.version != null) lines.push(`version: ${yamlSingleQuote(String(fm.version))}`);
+  }
   lines.push('---');
 
   // Ensure exactly one blank line between frontmatter and body, then the body verbatim.
@@ -133,8 +142,12 @@ export function buildOpencodeWrapper(rawContent: string, skillName: string): str
  */
 export type WriteResult = 'created' | 'updated' | 'unchanged' | 'skipped';
 
-export function writeOpencodeWrapper(skillName: string, rawContent: string): WriteResult {
-  const wrapper = buildOpencodeWrapper(rawContent, skillName);
+export function writeOpencodeWrapper(
+  skillName: string,
+  rawContent: string,
+  source?: string
+): WriteResult {
+  const wrapper = buildOpencodeWrapper(rawContent, skillName, source);
   if (wrapper === null) return 'skipped';
 
   const targetDir = path.join(OPENCODE_SKILLS_DIR, skillName);
