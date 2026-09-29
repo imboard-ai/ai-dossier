@@ -56,13 +56,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "7b3afc9503fc53f814d067446b40d5d812908dcb55d1a4ab86eaa361fed02013"
+    "hash": "048d5fd93a2ab2a3d40c32c9d479b5660981c7970e851b7e6590ef1e5d879120"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "sL6aNnPIOsvE1y5kMEt4WaxTlPZgRf8QLcssDo+Z6eRQrorMF2nl7lLzQHnPr1sFQ6CEB25L/YqwJL/9jI1oDg==",
+    "signature": "RDHIG4Z3wqv78nD+FYBun2biRnj9RbR56YJls89xr8aWan0JTUHBM8gIrBhJFyP5xUoBvl9Xyk9YLbJKT8KTAg==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T14:56:05.698Z",
+    "signed_at": "2026-09-29T14:59:26.416Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -190,7 +190,7 @@ This is a DIFFERENT uncertainty than Step 5's floor rules (below), and resolves 
 If `confidence < 0.6` **because the bounded pass above genuinely could not ground its
 estimate** (a predicted path could not be confirmed from issue text, `est_files`/`est_diff`
 is a guess, `test_scope` cannot be determined) — do not immediately fall back to `mode=full`
-the way an unresolvable Step 5 floor rule does. Instead:
+the way an unresolvable Step 5 mode-floor rule does. Instead:
 
 1. Escalate this ONE dispatch to **mid tier**.
 2. Re-run Step 4's inspection with repo access this time: `git grep -l "<named module>"`,
@@ -208,9 +208,9 @@ Evaluate all ten rules explicitly, using Step 4 (or Step 4b's grounded re-pass, 
 
 **Rules 1, 4, 5 and 6 are REVIEW floors, not mode floors (#770 Option A; rules 4/5 extended by #818,
 rule 6 by #927).** A rule 1, 4, 5 or 6 hit sets `review=full` and leaves `mode` to the other rules.
-Every other rule (2, 3, 7–10) is a mode floor: a hit ⇒ `mode=full`. A risk-floor, deploy-pipeline,
-> 8-file or > 400-line issue is batchable as a `review=full` member (at most 2 per batch — the scheduler enforces the
-cap). Rule 8 (visual/browser) stays a mode floor: the batch gate has no browser stage.
+Every other rule (2, 3, 7–10) is a mode floor: a hit ⇒ `mode=full`. A risk-floor,
+deploy-pipeline, more-than-8-file or more-than-400-line issue is batchable as a `review=full`
+member (at most 2 per batch — the scheduler enforces the cap). Rule 8 (visual/browser) stays a mode floor: the batch gate has no browser stage.
 The one exception inside rule 1's territory: production data mutation or production ops (secret/SSM
 writes, DNS, prod DB writes) is rule 7, a mode floor.
 **Uncertainty on one of THESE rules counts as a hit** — on a MODE floor (2, 3, 7–10) that
@@ -325,7 +325,7 @@ text-floor`).
 - [ ] `verdict: "candidate"` ran Step 4 with NO repo access (`git grep`/`ls`) — only Step 4b's one escalated pass, if triggered, may touch the repo
 - [ ] Issue body AND comments read; plan:v1 artifact consumed when present (candidate path only)
 - [ ] All ten E.2 floor rules explicitly evaluated, each listed hit/miss in the rationale (candidate path only)
-- [ ] A floor rule (Step 5) that cannot be evaluated resolved to `full`; a confidence shortfall (Step 4b) escalated to ONE mid-tier repo-probing pass before resolving to `full`, never immediately
+- [ ] A floor rule (Step 5) that cannot be evaluated counted as a hit — `mode=full` on a mode floor (2, 3, 7–10), `review=full` on a review floor (1, 4, 5, 6); a confidence shortfall (Step 4b) escalated to ONE mid-tier repo-probing pass before resolving to `full`, never immediately
 - [ ] Milestone carries the eight classify keys plus `review=<light|full>` and passed CLI validation
 - [ ] `cycle:<mode>` label created (idempotent) and applied — or `dry_run` skipped both
 - [ ] Rationale comment posted (or `dry_run` skipped it)

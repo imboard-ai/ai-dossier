@@ -76,13 +76,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "f78711f710580a5b37af23dc621f2c0f3c35267e1c446bac4ec2ac1a3f90d3ed"
+    "hash": "a6d58ab2a9ef4931d18145a64d280ae1dbee951dfae43960e29cb999b9b65e0d"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "ctgGIw2ukCQrdub0d96oNISG5Ktc0xRpWvkNMOd7GM0im+Q5CTln1/bHsqATKywFM3gv2cR3gEL9b4R1cxoHAQ==",
+    "signature": "YsRF/KC7zbHLNIJti4p+Q7ncTfEoef5/THJfX96g4wHrIZSc9gZ5Vec+kylAojg79QbJM8JzL4/Y4phg2zX6AA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T14:54:41.045Z",
+    "signed_at": "2026-09-29T14:59:29.451Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -102,7 +102,7 @@ The judgment-heavy front door of Batch Cycles (RFC-0001 C.3): turn a raw issue l
 
 - `ai-dossier` CLI >= 0.61.0 (`batch compose` #773, `classify prescreen` schema `prescreen:v4` #772/#805/#818, `sched enqueue` manifest `review` field + the per-batch `review=full` cap #771, `plan post|get`, `runstate mint|post|last`). Beware shadow copies: a repo-local `node_modules/.bin/ai-dossier` can shadow the global install — when a documented command reports `unknown command`, call the newer binary by absolute path.
 - GitHub CLI (`gh`) installed and authenticated
-- `imboard-ai/git/issue-cycle-classifier` >= 1.4.0 available in the registry (it reads prescreen:v4, treats E.2 rules 1/4/5 as review floors and records `review`, #783/#805/#818)
+- `imboard-ai/git/issue-cycle-classifier` >= 1.5.0 available in the registry (it reads prescreen:v4, treats E.2 rules 1/4/5/6 as review floors and records `review`, #783/#805/#818/#927)
 - Run from the repository that owns the issues — dependency resolution, path grounding, and `sched enqueue`'s project detection run against it
 
 If `dispatch_profile` is supplied, first read `ai-dossier sched status --json` and
