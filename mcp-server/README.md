@@ -63,7 +63,7 @@ Then try:
 | Tool | Description |
 |------|-------------|
 | `list_dossiers` | Discover available dossiers in a directory. Scans for `*.ds.md` files and returns metadata. |
-| `read_dossier` | Read and parse a dossier file. Returns metadata and content. Should be called after `verify_dossier` passes. |
+| `read_dossier` | Read and parse a dossier file. Returns metadata and content. Should be called after `verify_dossier` passes. Pass `dry_run: true` to also get `dry_run_plan` (static preview). |
 | `search_dossiers` | Search the dossier registry for available dossiers by keyword and optional category filter. |
 
 ### Security Verification
@@ -78,7 +78,7 @@ Then try:
 | Tool | Description |
 |------|-------------|
 | `resolve_graph` | Resolve a dossier dependency graph into an execution plan. Produces a DAG with ordered phases, parallel groups, and conflict detection. |
-| `start_journey` | Start a journey session from a resolved and verified graph. Returns the first step's dossier content with injected context. |
+| `start_journey` | Start a journey session from a resolved and verified graph. Returns the first step's dossier content with injected context. With `dry_run: true` no session is created and a static per-step preview (files, commands, network, env, risk score) is returned instead. The preview is derived from declared metadata and code blocks; the executing agent may take other actions and the score is a heuristic, not a safety guarantee. |
 | `step_complete` | Mark the current journey step as complete or failed. Advances to the next step with context from previous outputs. |
 | `get_journey_status` | Get the current state of a journey: completed steps, current step, remaining steps, and collected outputs. |
 | `cancel_journey` | Cancel an active journey session. Returns a summary of what completed before cancellation. |

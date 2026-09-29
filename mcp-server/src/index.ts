@@ -37,7 +37,7 @@ import { createToolResponse } from './utils/response.js';
 // --- Zod schemas for tool input validation ---
 
 const VerifyDossierSchema = z.object({ path: z.string() });
-const ReadDossierSchema = z.object({ path: z.string() });
+const ReadDossierSchema = z.object({ path: z.string(), dry_run: z.boolean().optional() });
 const ListDossiersSchema = z.object({
   path: z.string().optional(),
   recursive: z.boolean().optional(),
@@ -51,7 +51,7 @@ const VerifyGraphSchema = z.object({
   graph_id: z.string().optional(),
   dossier: z.string().optional(),
 });
-const StartJourneySchema = z.object({ graph_id: z.string() });
+const StartJourneySchema = z.object({ graph_id: z.string(), dry_run: z.boolean().optional() });
 const StepCompleteSchema = z.object({
   journey_id: z.string(),
   outputs: z.record(z.unknown()).optional(),
@@ -126,6 +126,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             path: {
               type: 'string',
               description: 'Path to dossier file (.ds.md)',
+            },
+            dry_run: {
+              type: 'boolean',
+              description:
+                "Also return dry_run_plan: a STATIC preview (files, commands, network, env, risk_score 0-100) derived from the dossier's declared metadata and code blocks. The executing agent may take other actions; the score is a heuristic, not a safety guarantee.",
             },
           },
           required: ['path'],
@@ -205,13 +210,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'start_journey',
         description:
-          "Start a journey session from a resolved and verified graph. Creates a session, returns the first step's dossier content with any injected context. Call step_complete after executing each step.",
+          "Start a journey session from a resolved and verified graph. Creates a session, returns the first step's dossier content with any injected context. Call step_complete after executing each step. With dry_run: true, creates no session and instead returns a static per-step preview (files, commands, network, env, risk score).",
         inputSchema: {
           type: 'object',
           properties: {
             graph_id: {
               type: 'string',
               description: 'ID of a previously resolved graph (from resolve_graph)',
+            },
+            dry_run: {
+              type: 'boolean',
+              description:
+                "Preview only: no session is created. Returns a STATIC preview derived from each dossier's declared metadata and code blocks; the executing agent may take other actions, and the risk score is a heuristic, not a safety guarantee.",
             },
           },
           required: ['graph_id'],

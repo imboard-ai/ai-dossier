@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { type DossierFrontmatter, parseDossierContent } from '@ai-dossier/core';
+import { analyzeDryRun, type DossierFrontmatter, parseDossierContent } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import {
   cachedContentPath,
@@ -12,6 +12,7 @@ import {
   writeCachedContent,
 } from '../cache-resolver';
 import * as config from '../config';
+import { buildPlanFile, renderDryRun } from '../dry-run-render';
 import {
   type AgentExitError,
   type AgentRunUsage,
@@ -60,7 +61,11 @@ export function registerRunCommand(program: Command): void {
       '--allowed-tools <list>',
       'Comma- or space-separated allowed tools (headless only; claude only — opencode tool access lives in opencode.json)'
     )
-    .option('--dry-run', 'Show plan without executing')
+    .option(
+      '--dry-run',
+      'Show a static preview (files, commands, network, env, risk score) without executing'
+    )
+    .option('--plan-out <file>', 'With --dry-run: also write the plan as JSON to <file>')
     .option('--force', 'Skip the high-risk confirmation prompt')
     .option('--no-prompt', "Don't ask for confirmation")
     .option('--fresh', 'Skip cache, fetch fresh from registry')
@@ -82,6 +87,7 @@ export function registerRunCommand(program: Command): void {
           permissionMode?: string;
           allowedTools?: string;
           dryRun?: boolean;
+          planOut?: string;
           force?: boolean;
           prompt?: boolean;
           fresh?: boolean;
@@ -91,6 +97,10 @@ export function registerRunCommand(program: Command): void {
           skipAllChecks?: boolean;
         }
       ) => {
+        if (options.planOut && !options.dryRun) {
+          console.error('Error: --plan-out requires --dry-run');
+          process.exit(1);
+        }
         let resolvedFile = file;
         const isUrl = file.startsWith('http://') || file.startsWith('https://');
         const isLocalFile = !isUrl && fs.existsSync(path.resolve(file));
@@ -372,8 +382,8 @@ export function registerRunCommand(program: Command): void {
           );
         }
 
-        // Nested session detection
-        if (nestedHost !== null) {
+        // Nested session detection (a dry-run only previews, so it never hands off the dossier)
+        if (nestedHost !== null && !options.dryRun) {
           console.error(`ℹ️  Running inside ${nestedHost} — outputting dossier content\n`);
 
           finishRunLog({ verification: 'nested-skip', nested: true, exit_code: 0 });
@@ -442,23 +452,45 @@ export function registerRunCommand(program: Command): void {
 
         if (options.dryRun) {
           console.log('🧪 DRY RUN MODE - No execution\n');
-          console.log('Would execute:');
-          console.log(`   File: ${resolvedFile}`);
-          console.log(`   LLM: ${llmOption}`);
+          console.log(`File: ${resolvedFile}`);
+          console.log(`LLM:  ${llmOption}\n`);
 
           const llmToUse = detectLlm(llmOption as string, true);
           const descriptor = llmToUse
             ? buildLlmCommand(llmToUse, resolvedFile, options.headless, passthrough)
             : null;
+          const llmCommand = descriptor ? descriptor.description : null;
+
+          let exitCode = 0;
+          try {
+            const plan = analyzeDryRun(dossierContent);
+            for (const line of renderDryRun(plan, llmCommand)) console.log(line);
+            if (options.planOut) {
+              const planFile = buildPlanFile(plan, {
+                file: resolvedFile,
+                llm: String(llmOption),
+                command: llmCommand,
+              });
+              fs.writeFileSync(
+                path.resolve(options.planOut),
+                `${JSON.stringify(planFile, null, 2)}\n`
+              );
+              console.log(`\nPlan written to ${options.planOut}`);
+            }
+          } catch (err) {
+            console.error(
+              `Could not analyze dossier for dry-run: ${err instanceof Error ? err.message : String(err)}`
+            );
+            exitCode = 1;
+          }
           console.log(
-            `   Command: ${
-              descriptor ? descriptor.description : 'No LLM detected - would show error'
-            }\n`
+            exitCode === 0
+              ? '\n✅ All verifications passed - ready to execute'
+              : '\n❌ Dry-run analysis failed'
           );
-          console.log('✅ All verifications passed - ready to execute');
-          finishRunLog({ exit_code: 0 });
+          finishRunLog({ exit_code: exitCode });
           cleanupSecureTmp();
-          process.exit(0);
+          process.exit(exitCode);
         }
 
         console.log('🤖 Executing Dossier...\n');
