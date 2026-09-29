@@ -6,6 +6,7 @@ import {
   prepareProfile,
   schedulerConfigPath,
   selectEffortPair,
+  selectSynthesizedPair,
 } from './probe-effort.mjs';
 
 describe('selectEffortPair', () => {
@@ -140,5 +141,44 @@ describe('dispatch-profiles.json', () => {
       expect(prepared.low.command).toContain(prepared.low.model);
       expect(prepared.max.command).toContain(prepared.max.model);
     }
+  });
+
+  it('synthesizes a same-model low/max pair for anthropic (haiku / sonnet / opus tiers)', () => {
+    const profiles = JSON.parse(
+      readFileSync(resolve(import.meta.dirname, 'dispatch-profiles.json'), 'utf8')
+    );
+    const prepared = prepareProfile({ dispatch: { dispatch_profiles: profiles } }, 'anthropic');
+    expect(prepared.synthesized).toBe(true);
+    expect(prepared.low.tier).toBe('strong');
+    expect(prepared.max.tier).toBe('strong');
+    expect(prepared.low.model).toBe('opus');
+    expect(prepared.max.effort).toBe('max');
+    expect(prepared.low.effort).toBe('low');
+    // Only the effort value differs between the two spawned commands.
+    const diff = prepared.low.command.filter((arg, i) => arg !== prepared.max.command[i]);
+    expect(diff).toEqual(['low']);
+  });
+});
+
+describe('selectSynthesizedPair', () => {
+  const tier = (model, effort) => ({ model, effort, variant: null });
+
+  it('picks the highest-effort tier, preferring the stronger tier on ties', () => {
+    const pair = selectSynthesizedPair({
+      mechanical: tier('haiku', 'max'),
+      mid: tier('sonnet', 'medium'),
+      strong: tier('opus', 'max'),
+    });
+    expect(pair).toMatchObject({ tier: 'strong', setting: 'effort', value: 'max' });
+  });
+
+  it('returns null when no tier has an effort above low', () => {
+    expect(
+      selectSynthesizedPair({
+        mechanical: tier('haiku', 'low'),
+        mid: tier('sonnet', null),
+        strong: tier('opus', 'minimal'),
+      })
+    ).toBeNull();
   });
 });
