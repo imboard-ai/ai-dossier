@@ -4,11 +4,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  buildStatusWarnings,
   checkStaleLeaseAlert,
   createEmptyState,
   enqueueEntries,
+  HUNG_INTERVALS_ENV,
   Journal,
   reportCrashRestart,
+  resolveHungAfterMs,
   SchedStore,
 } from '../index';
 
@@ -16,8 +19,15 @@ const NOW = new Date('2026-09-29T12:00:00Z');
 
 /** A pid that is guaranteed dead: a child that already exited. */
 function deadPid(): number {
-  const r = spawnSync(process.execPath, ['-e', '0']);
-  return r.pid;
+  for (let i = 0; i < 20; i++) {
+    const { pid } = spawnSync(process.execPath, ['-e', '0']);
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+    }
+  }
+  throw new Error('could not obtain a dead pid');
 }
 
 describe('engine lease heartbeat, reclaim and alerts (#945)', () => {
@@ -100,6 +110,105 @@ describe('engine lease heartbeat, reclaim and alerts (#945)', () => {
     writeDeadLease('ep-2');
     expect(checkStaleLeaseAlert(store, journal, notify, NOW)).toBe('alerted');
     expect(notify).toHaveBeenCalledTimes(2);
+  });
+
+  it('a LIVE pid with a stale heartbeat is hung: alerts once per episode, clears when fresh', () => {
+    withWork();
+    const notify = vi.fn();
+    const acq = store.acquireEngineLease();
+    expect(acq.acquired).toBe(true);
+    store.touchEngineLease(new Date('2026-09-29T11:00:00Z')); // 60 min before NOW
+    const opts = { hungAfterMs: 10 * 60_000 };
+    expect(checkStaleLeaseAlert(store, journal, notify, NOW, opts)).toBe('alerted');
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ kind: 'engine-hung' }));
+    expect(checkStaleLeaseAlert(store, journal, notify, NOW, opts)).toBe('already-alerted');
+    expect(notify).toHaveBeenCalledOnce();
+    expect(journal.read().find((e) => e.event === 'stale-engine-lease-alert')?.reason).toBe(
+      'engine-hung'
+    );
+    // heartbeat resumes: alive, markers cleared, a later hang alerts again
+    store.touchEngineLease(NOW);
+    expect(checkStaleLeaseAlert(store, journal, notify, NOW, opts)).toBe('alive');
+    const later = new Date(NOW.getTime() + 60 * 60_000);
+    expect(checkStaleLeaseAlert(store, journal, notify, later, opts)).toBe('alerted');
+    expect(notify).toHaveBeenCalledTimes(2);
+    if (acq.acquired) store.releaseEngineLease(acq.lease);
+  });
+
+  it('a hung status warning needs a live pid, a heartbeat, and unfinished work', () => {
+    const state = enqueueEntries(createEmptyState(), [{ issue: 7, deps: [] }], NOW);
+    const lease = (o: Partial<{ alive: boolean; updated_at: string | null }>) => ({
+      pid: 1,
+      pid_start: null,
+      alive: true,
+      updated_at: '2026-09-29T11:00:00Z' as string | null,
+      ...o,
+    });
+    const kinds = (l: ReturnType<typeof lease>, st = state) =>
+      buildStatusWarnings(st, l, NOW, 10 * 60_000).map((w) => w.kind);
+    expect(kinds(lease({}))).toContain('engine-hung');
+    expect(kinds(lease({ updated_at: '2026-09-29T11:55:00Z' }))).not.toContain('engine-hung');
+    expect(kinds(lease({ updated_at: null }))).not.toContain('engine-hung');
+    expect(kinds(lease({ alive: false }))).not.toContain('engine-hung');
+    expect(kinds(lease({}), createEmptyState())).not.toContain('engine-hung');
+    expect(resolveHungAfterMs(60_000, {})).toBe(10 * 60_000);
+    expect(resolveHungAfterMs(1_000, {})).toBe(5 * 60_000);
+    expect(resolveHungAfterMs(60_000, { [HUNG_INTERVALS_ENV]: '3' })).toBe(5 * 60_000);
+  });
+
+  it('crash restart after a begun stop is reported as a wedged stop, not a crash', () => {
+    const notify = vi.fn();
+    reportCrashRestart(journal, { pid: 99, pid_start: null, updated_at: null }, notify, NOW, {
+      signal: 'SIGTERM',
+      at: 'T0',
+    });
+    expect(journal.read()[0]).toMatchObject({ reason: 'stop-interrupted' });
+    expect(notify).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'engine-restarted-after-stop-timeout' })
+    );
+  });
+
+  it('two racing watchers cannot both alert (O_EXCL episode marker)', () => {
+    withWork();
+    writeDeadLease('race');
+    const a = vi.fn();
+    const b = vi.fn();
+    checkStaleLeaseAlert(store, journal, a, NOW);
+    // simulate the loser: same episode, marker already exists
+    checkStaleLeaseAlert(store, journal, b, NOW);
+    expect(a).toHaveBeenCalledOnce();
+    expect(b).not.toHaveBeenCalled();
+  });
+
+  it('an unwritable store never throws out of the watcher (alerts anyway)', () => {
+    withWork();
+    writeDeadLease('ro');
+    const notify = vi.fn();
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const brokenJournal = {
+      append: () => {
+        throw new Error('EACCES');
+      },
+    } as unknown as Journal;
+    fs.chmodSync(dir, 0o500);
+    try {
+      expect(() => checkStaleLeaseAlert(store, brokenJournal, notify, NOW)).not.toThrow();
+      expect(notify).toHaveBeenCalledOnce();
+    } finally {
+      fs.chmodSync(dir, 0o700);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('heartbeat CAS: a lease reclaimed by another engine is never overwritten', () => {
+    const acq = store.acquireEngineLease();
+    expect(acq.acquired).toBe(true);
+    const leaseDir = path.join(dir, '.sched-engine-lease');
+    const holder = path.join(leaseDir, 'holder.json');
+    fs.writeFileSync(holder, JSON.stringify({ pid: 1, pid_start: null, id: 'someone-else' }));
+    store.touchEngineLease(NOW);
+    expect(JSON.parse(fs.readFileSync(holder, 'utf8')).id).toBe('someone-else');
+    expect(fs.readdirSync(leaseDir).filter((f) => f.includes('.tmp-'))).toEqual([]);
   });
 
   it('does not alert with no lease, a live lease, or nothing unfinished', () => {

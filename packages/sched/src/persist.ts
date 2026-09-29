@@ -290,13 +290,22 @@ export class SchedStore {
     const held = this.heldLease;
     if (held === null) return;
     const leasePath = path.join(this.dir, ENGINE_LEASE_DIR);
+    const tmp = path.join(leasePath, `${ENGINE_LEASE_HOLDER_FILE}.tmp-${process.pid}`);
     try {
       if (readEngineLeaseHolder(leasePath)?.id !== held.id) return;
       const next: EngineLease = { ...held, updated_at: now.toISOString() };
-      const tmp = path.join(leasePath, `${ENGINE_LEASE_HOLDER_FILE}.tmp-${process.pid}`);
       fs.writeFileSync(tmp, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+      // Compare-and-swap on the lease id, as late as the filesystem allows: a
+      // reclaim between the first check and here must not be overwritten by a
+      // stale heartbeat (rename has no CAS; this narrows the window to the
+      // gap between this read and the rename).
+      if (readEngineLeaseHolder(leasePath)?.id !== held.id) {
+        fs.rmSync(tmp, { force: true });
+        return;
+      }
       fs.renameSync(tmp, path.join(leasePath, ENGINE_LEASE_HOLDER_FILE));
     } catch {
+      fs.rmSync(tmp, { force: true });
       // Heartbeat is advisory; the pid-liveness check remains the source of truth.
     }
   }
