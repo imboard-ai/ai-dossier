@@ -2,10 +2,10 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Review Issue — Parallel Code Review",
-  "version": "1.15.0",
+  "version": "1.16.0",
   "protocol_version": "1.0",
   "status": "Stable",
-  "last_updated": "2026-09-09",
+  "last_updated": "2026-09-24",
   "objective": "Run a tiered set of report-only review agents (DRY, Security, Supportability, Maintainability, Documentation, Convention/Contract, Conformance, Visual Conformance) on the branch diff, then run a validity gate before dedupe and apply the surviving fixes serially; in aggregate mode (batch_id set): review the combined batch diff once on the batch anchor, with per-member conformance already produced per-issue by slot-cycles",
   "category": [
     "development"
@@ -81,13 +81,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "17e639d2706c8e936b5677a7c9a9d4787568a2aef6d4cd80eb0f0b1a79ab3d1c"
+    "hash": "bfdc0e4776edf3de7eca47f9b10be336c50051a1748e4af2f90a0cb18d90135a"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "rQnbLQZVvTiyAWRd2DPtrPpxwZbrUWe4NV6Ya497yaAeJGv75/LUosMopnc7PvO8FCyiwznldO0uvkd3khxuAg==",
+    "signature": "LyIB6WUMLfXx3dU02hSaHYjEgwZepfBmYl2v4sFtAJ2FPnSQTkHMU5knNqFr2eRWK2t7ZB+GJ97MWBezyuQlDA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T10:18:28.315Z",
+    "signed_at": "2026-09-24T16:49:36.437Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -409,6 +409,8 @@ Run this agent on the strongest available model — it is the run's trust anchor
 > You are verifying that the change does what the issue asked. You did NOT write this code. Your ONLY inputs are: (1) the issue body and comments — `gh issue view <N> --json title,body,comments`; (2) the diff — `git diff <base_branch>...HEAD` plus `git diff` for uncommitted changes; (3) this Acceptance Criteria list: <paste the `ac<n>=` lines fetched in Step 2b>; (4) `repro=<value fetched in Step 2b.5>`<paste `repro_note=` too when one was fetched> — the implement phase's bug-issue base-branch reproduction outcome. Do NOT read the planning document or any other agent's output.
 >
 > For each AC report exactly one of: `met <file:line>`, `not-met <why>`, `unverifiable <what test would prove it>`. `met` without a file:line citation is invalid — report it as `unverifiable`. **When `repro=green-on-base`: any AC describing the defect itself being fixed cannot be reported `met` on this input alone — report it `unverifiable` unless the diff itself adds or strengthens a test whose assertion exercises the defect path and could not have passed without the change in this diff; cite that test as `file:line`. You cannot run the suite against `<base_branch>` yourself — this diff-only citation is the evidence within your declared inputs. Every other `repro` value adds no constraint.**
+>
+> **Negative guarantees need a test that can fail.** An AC that promises something never happens — "report-only", "never closes/comments/edits", "no destructive command", "never writes", "does not block" — is `met` only when a test in the diff OBSERVES the forbidden side effect and would fail if it occurred: a recording double that captures every command/write issued during the real code path, asserted against a denylist (`issue close`, `worktree remove`, `rm`, …). A test that asserts on a constant it never sets (`const called = false; expect(called).toBe(false)`), counts function parameters, or only checks a return value does NOT prove the guarantee — report the AC `not-met <file:line>: vacuous negative test` and name the recording test that would prove it. The implementer must then show the new test failing with the forbidden action deliberately injected, and revert.
 >
 > **Report only — do NOT edit any file.** Return the per-AC verdict list; Step 4 acts on it.
 
