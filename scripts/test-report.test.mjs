@@ -8,6 +8,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import {
   changedPaths,
   discoverTestWorkspaces,
+  failLines,
   mergeRuns,
   recordsForRun,
   SCRIPTS_SUITE,
@@ -263,5 +264,32 @@ describe('workspaceDependents + changedPaths (#919)', () => {
     expect(changedPaths(root, { TEST_REPORT_BASE: 'main' })).toEqual(
       expect.arrayContaining(['a/package.json', 'c/moved.json'])
     );
+  });
+});
+
+describe('failLines (#919)', () => {
+  it('emits one FAIL line per failed assertion and none for passing suites', () => {
+    const merged = mergeRuns(
+      [
+        run({
+          exitCode: 1,
+          report: {
+            testResults: [
+              {
+                name: '/repo/cli/a.test.ts',
+                status: 'failed',
+                assertionResults: [
+                  { status: 'failed', fullName: 'a > x', title: 'x', failureMessages: ['boom'] },
+                  { status: 'passed', fullName: 'a > y', title: 'y' },
+                ],
+              },
+              { name: '/repo/cli/b.test.ts', status: 'passed', assertionResults: [] },
+            ],
+          },
+        }),
+      ],
+      ROOT
+    );
+    expect(failLines(merged)).toEqual(['FAIL cli/a.test.ts > a > x']);
   });
 });

@@ -121,6 +121,19 @@ export function recordsForRun(run, root) {
   return out;
 }
 
+/**
+ * One `FAIL <file> > <name>` line per failed assertion. Printed LAST on stderr:
+ * the capability's outputTail is the final 8 KB of stdout+stderr, so the JSON on
+ * stdout can fall out of it while these short lines survive (#919).
+ */
+export function failLines(merged) {
+  return merged.testResults.flatMap((r) =>
+    r.assertionResults
+      .filter((a) => a.status === 'failed')
+      .map((a) => `FAIL ${r.name} > ${firstLine(a.fullName) || firstLine(a.title)}`)
+  );
+}
+
 /** Merge per-suite runs into the single document the batch suite runner parses. Pure. */
 export function mergeRuns(runs, root) {
   const testResults = runs.flatMap((run) => recordsForRun(run, root));
@@ -334,6 +347,8 @@ async function main() {
     const merged = mergeRuns(runs, root);
     // The report is the FIRST `{` on stdout and nothing else is written there.
     process.stdout.write(`${JSON.stringify(merged)}\n`);
+    const fails = failLines(merged);
+    if (fails.length > 0) process.stderr.write(`\n${fails.join('\n')}\n`);
     process.exitCode = merged.success ? 0 : 1;
   } finally {
     rmSync(tmp, { recursive: true, force: true });
