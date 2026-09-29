@@ -70,6 +70,16 @@ describe('gateGapWarning (#645)', () => {
     expect(w).toContain('--skip-gate-check');
   });
 
+  it('#895: is null when the manifest opts out with gates: none-declared-on-purpose', () => {
+    expect(
+      gateGapWarning({
+        path: '/x/manifest.yaml',
+        capabilities: {},
+        gates: 'none-declared-on-purpose',
+      })
+    ).toBeNull();
+  });
+
   it('names only what is missing', () => {
     const w = gateGapWarning({
       path: '/x/manifest.yaml',

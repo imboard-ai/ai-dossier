@@ -154,10 +154,19 @@ export interface CapabilityEntry {
   timeoutProne?: boolean;
 }
 
+/**
+ * The one accepted value of the manifest's top-level `gates:` field (#895): a
+ * durable, reviewed statement that this repo deliberately declares no batch
+ * member gates, which silences `sched enqueue`'s undeclared-gate warning.
+ */
+export const GATES_NONE_DECLARED_ON_PURPOSE = 'none-declared-on-purpose';
+
 export interface CapabilityManifest {
   /** Absolute path of the manifest file, or null when no manifest exists. */
   path: string | null;
   capabilities: Record<string, CapabilityEntry>;
+  /** #895: `gates: none-declared-on-purpose` — the durable opt-out of the gate-gap warning. */
+  gates?: typeof GATES_NONE_DECLARED_ON_PURPOSE;
 }
 
 /** The manifest exists but does not conform to the schema. */
@@ -194,8 +203,8 @@ export function loadCapabilityManifest(cwd: string): CapabilityManifest {
     throw new CapManifestError(`${manifestPath}: cannot read: ${(err as Error).message}`);
   }
   try {
-    const capabilities = parseCapabilityManifest(text);
-    return { path: manifestPath, capabilities };
+    const { capabilities, gates } = parseManifestDocument(text);
+    return { path: manifestPath, capabilities, ...(gates ? { gates } : {}) };
   } catch (err) {
     if (err instanceof CapManifestError) {
       throw new CapManifestError(`${manifestPath}: ${err.message}`);
@@ -206,6 +215,14 @@ export function loadCapabilityManifest(cwd: string): CapabilityManifest {
 
 /** Parse and validate manifest YAML into the capability map. */
 export function parseCapabilityManifest(text: string): Record<string, CapabilityEntry> {
+  return parseManifestDocument(text).capabilities;
+}
+
+/** Parse and validate manifest YAML into the capability map plus document-level fields. */
+function parseManifestDocument(text: string): {
+  capabilities: Record<string, CapabilityEntry>;
+  gates?: typeof GATES_NONE_DECLARED_ON_PURPOSE;
+} {
   let doc: unknown;
   try {
     doc = parseYaml(text);
@@ -213,7 +230,7 @@ export function parseCapabilityManifest(text: string): Record<string, Capability
     throw new CapManifestError(`not valid YAML: ${(err as Error).message}`);
   }
   if (doc === null || doc === undefined) {
-    return {};
+    return { capabilities: {} };
   }
   if (typeof doc !== 'object' || Array.isArray(doc)) {
     throw new CapManifestError('root must be a mapping');
@@ -224,6 +241,12 @@ export function parseCapabilityManifest(text: string): Record<string, Capability
       `unsupported manifest version ${JSON.stringify(root.version)} — expected 1`
     );
   }
+  if (root.gates !== undefined && root.gates !== GATES_NONE_DECLARED_ON_PURPOSE) {
+    throw new CapManifestError(
+      `'gates:' must be '${GATES_NONE_DECLARED_ON_PURPOSE}' (the only accepted value), got ${JSON.stringify(root.gates)}`
+    );
+  }
+  const gates = root.gates === GATES_NONE_DECLARED_ON_PURPOSE ? root.gates : undefined;
   if (root.capabilities === undefined) {
     throw new CapManifestError("must have a 'capabilities:' mapping of id → entry");
   }
@@ -239,7 +262,7 @@ export function parseCapabilityManifest(text: string): Record<string, Capability
   for (const [id, raw] of Object.entries(root.capabilities)) {
     capabilities[id] = parseCapabilityEntry(id, raw);
   }
-  return capabilities;
+  return { capabilities, ...(gates ? { gates } : {}) };
 }
 
 function parseCapabilityEntry(id: string, raw: unknown): CapabilityEntry {

@@ -1534,12 +1534,38 @@ function spawnMemberAgent(
   const memberFlag = findEntry(state, memberIssue)?.stale_closed_at ?? null;
   if (memberFlag !== null || deps.groundTruth.issueClosed(memberIssue)) {
     let held = state;
+    const release = `sched stop --issue ${memberIssue}`;
     if (memberFlag === null) {
       journalEvent(deps, 'stale-closed', unit(batchId), {
         issue: memberIssue,
-        detail: `member issue #${memberIssue} is closed — will not spawn it; release it with \`sched stop --issue ${memberIssue}\``,
+        detail: `member issue #${memberIssue} is closed — will not spawn it; release it with \`${release}\``,
       });
-      held = patchEntry(state, memberIssue, { stale_closed_at: now.toISOString() }, now, false);
+      held = patchEntry(
+        state,
+        memberIssue,
+        { stale_closed_at: now.toISOString(), stale_closed_ticks: 1 },
+        now,
+        false
+      );
+    } else {
+      // #900: the hold is a stall, not a one-off — count it and re-announce on
+      // the shared streak cadence (#638) so journal alerting keeps seeing it.
+      // The streak starts at the flag time, so it is never "changed".
+      const entry = findEntry(state, memberIssue);
+      const streak = advanceStreak(
+        { since: memberFlag, ticks: entry?.stale_closed_ticks ?? 0 },
+        false,
+        now
+      );
+      if (streak.announce) {
+        journalEvent(deps, 'stale-closed', unit(batchId), {
+          issue: memberIssue,
+          ticks: streak.ticks,
+          since: streak.since,
+          detail: `batch ${batchId} still held by closed member #${memberIssue} (${streak.ticks} ticks since ${streak.since}) — release it with \`${release}\``,
+        });
+      }
+      held = patchEntry(state, memberIssue, { stale_closed_ticks: streak.ticks }, now, false);
     }
     return { ok: false, state: target.release(held) };
   }

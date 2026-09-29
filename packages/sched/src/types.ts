@@ -451,6 +451,14 @@ export interface QueueEntry {
    * Cleared only by a requeue (a fresh attempt). `null` = never flagged.
    */
   stale_closed_at: string | null;
+  /**
+   * #900: ticks a BATCH member's stale-closed hold has persisted, silent ticks
+   * included — drives the `advanceStreak` re-announce (every
+   * `JOURNAL_DEDUP_REANNOUNCE_TICKS`) so a held batch stays visible to
+   * journal-based alerting. Streak start is `stale_closed_at`. `0` when unflagged
+   * or flagged on the cycle rail (which does not count ticks).
+   */
+  stale_closed_ticks: number;
   enqueued_at: string;
   updated_at: string;
 }
