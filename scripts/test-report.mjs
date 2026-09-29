@@ -29,7 +29,7 @@
 // that path — rather than collapsing into `suite-unreadable`.
 // ------------------------------------------------------------------
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
@@ -159,6 +159,112 @@ export function discoverTestWorkspaces(root) {
     .sort();
 }
 
+// --- `--changed`: the per-member gate scopes itself to what the diff touched (#919) ---
+//
+// The batch member gate calls `test.focused` with only (worktree, capability id):
+// the capability contract carries no changed-paths, and the runner's cwd is the
+// member worktree. So the script derives them itself from git, and maps paths to
+// suites. Anything it cannot place falls back to the FULL run — a wrongly wide
+// gate is only slow, a wrongly narrow one lets a red member through.
+
+/** Suite id for the repo-script tests (`npm run test:scripts`). */
+export const SCRIPTS_SUITE = 'scripts';
+
+/** Root paths whose only tests are the repo-script tests. */
+const SCRIPTS_ONLY = [
+  /^scripts\//,
+  /^vitest\.scripts\.config\.mjs$/,
+  /^docs\//,
+  /^\.github\//,
+  /^[^/]+\.md$/,
+];
+
+/**
+ * Map each workspace dir to the workspace dirs that (transitively) depend on it:
+ * a change in `packages/core` must also run the suites that consume its build.
+ * Reads each workspace's package.json; `dirs` are the test workspaces.
+ */
+export function workspaceDependents(root, dirs) {
+  const pkgs = new Map();
+  for (const dir of dirs) {
+    const p = JSON.parse(readFileSync(join(root, dir, 'package.json'), 'utf-8'));
+    pkgs.set(dir, {
+      name: p.name,
+      deps: Object.keys({ ...p.dependencies, ...p.devDependencies, ...p.peerDependencies }),
+    });
+  }
+  const byName = new Map([...pkgs].map(([dir, p]) => [p.name, dir]));
+  const direct = new Map(dirs.map((d) => [d, new Set()]));
+  for (const [dir, p] of pkgs) {
+    for (const dep of p.deps) {
+      const target = byName.get(dep);
+      if (target !== undefined) direct.get(target).add(dir);
+    }
+  }
+  const closure = new Map();
+  for (const dir of dirs) {
+    const seen = new Set();
+    const queue = [dir];
+    while (queue.length > 0) {
+      for (const next of direct.get(queue.pop()) ?? []) {
+        if (!seen.has(next)) {
+          seen.add(next);
+          queue.push(next);
+        }
+      }
+    }
+    closure.set(dir, seen);
+  }
+  return closure;
+}
+
+/**
+ * Suites to run for a set of repo-relative changed paths. Pure.
+ *
+ * @param {string[]} paths
+ * @param {{ workspaces: string[], dependents: Map<string, Set<string>> }} ctx
+ * @returns {{ only: string[]|null, reason: string }} `only: null` means run everything
+ */
+export function suitesForChangedPaths(paths, { workspaces, dependents }) {
+  const only = new Set([SCRIPTS_SUITE]); // cheap, and covers root-level glue
+  for (const raw of paths) {
+    const path = raw.replace(/^\.\//, '');
+    const ws = workspaces
+      .filter((dir) => path === dir || path.startsWith(`${dir}/`))
+      .sort((a, b) => b.length - a.length)[0];
+    if (ws !== undefined) {
+      only.add(ws);
+      for (const dep of dependents.get(ws) ?? []) only.add(dep);
+    } else if (!SCRIPTS_ONLY.some((re) => re.test(path))) {
+      return { only: null, reason: `${path} maps to no workspace` };
+    }
+  }
+  return { only: [...only].sort(), reason: 'mapped' };
+}
+
+const git = (root, args) =>
+  execFileSync('git', args, { cwd: root, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+
+/**
+ * Repo-relative paths this checkout changed: committed since the merge-base with
+ * the base ref, plus uncommitted and untracked. Base is `$TEST_REPORT_BASE`, else
+ * `origin/main`, else `main`. Returns null when git cannot answer (caller runs full).
+ */
+export function changedPaths(root, env = process.env) {
+  const candidates = [env.TEST_REPORT_BASE, 'origin/main', 'main'].filter(Boolean);
+  for (const ref of candidates) {
+    try {
+      const base = git(root, ['merge-base', ref, 'HEAD']).trim();
+      const diff = git(root, ['diff', '--name-only', base]);
+      const untracked = git(root, ['ls-files', '--others', '--exclude-standard']);
+      return [...new Set(`${diff}\n${untracked}`.split('\n').filter(Boolean))];
+    } catch {
+      // try the next candidate
+    }
+  }
+  return null;
+}
+
 /** Run one `npm run` script with vitest's JSON reporter on top of the default one. */
 function runSuite({ label, dir, args }, root, tmp, index) {
   const outputFile = join(tmp, `report-${index}.json`);
@@ -196,7 +302,22 @@ async function main() {
   const tmp = mkdtempSync(join(tmpdir(), 'test-report-'));
   try {
     const onlyArg = process.argv.find((a) => a.startsWith('--only='));
-    const only = onlyArg ? onlyArg.slice('--only='.length).split(',') : null;
+    let only = onlyArg ? onlyArg.slice('--only='.length).split(',') : null;
+    if (only === null && process.argv.includes('--changed')) {
+      const workspaces = discoverTestWorkspaces(root);
+      const paths = changedPaths(root);
+      const plan =
+        paths === null
+          ? { only: null, reason: 'could not diff against a base ref' }
+          : suitesForChangedPaths(paths, {
+              workspaces,
+              dependents: workspaceDependents(root, workspaces),
+            });
+      process.stderr.write(
+        `test-report: --changed -> ${plan.only === null ? `FULL run (${plan.reason})` : plan.only.join(', ')}\n`
+      );
+      only = plan.only;
+    }
     const suites = [
       ...discoverTestWorkspaces(root).map((dir) => ({
         label: dir,

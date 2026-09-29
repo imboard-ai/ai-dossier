@@ -5,7 +5,16 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
-import { discoverTestWorkspaces, mergeRuns, recordsForRun, TAIL_CHARS } from './test-report.mjs';
+import {
+  changedPaths,
+  discoverTestWorkspaces,
+  mergeRuns,
+  recordsForRun,
+  SCRIPTS_SUITE,
+  suitesForChangedPaths,
+  TAIL_CHARS,
+  workspaceDependents,
+} from './test-report.mjs';
 
 const ROOT = '/repo';
 const run = (over) => ({
@@ -148,5 +157,101 @@ describe('test-report.mjs entrypoint (#893)', () => {
     const script = fileURLToPath(new URL('./test-report.mjs', import.meta.url));
     const out = execFileSync(process.execPath, [script, '--only=__none__'], { encoding: 'utf-8' });
     expect(JSON.parse(out)).toEqual({ success: true, numFailedTests: 0, testResults: [] });
+  });
+});
+
+describe('--changed suite mapping (#919)', () => {
+  const workspaces = ['cli', 'mcp-server', 'packages/core', 'packages/sched', 'registry'];
+  const dependents = new Map([
+    ['packages/core', new Set(['cli', 'packages/sched', 'registry', 'mcp-server'])],
+    ['packages/sched', new Set(['cli'])],
+    ['cli', new Set()],
+    ['mcp-server', new Set()],
+    ['registry', new Set()],
+  ]);
+  const plan = (paths) => suitesForChangedPaths(paths, { workspaces, dependents });
+
+  it('a single-workspace change runs that workspace plus the scripts suite', () => {
+    expect(plan(['registry/tests/auth.test.ts'])).toEqual({
+      only: [SCRIPTS_SUITE, 'registry'].sort(),
+      reason: 'mapped',
+    });
+  });
+
+  it('a library change also runs its dependents', () => {
+    expect(plan(['packages/sched/src/x.ts']).only).toEqual(['cli', 'packages/sched', 'scripts']);
+    expect(plan(['packages/core/src/x.ts']).only).toEqual([
+      'cli',
+      'mcp-server',
+      'packages/core',
+      'packages/sched',
+      'registry',
+      'scripts',
+    ]);
+  });
+
+  it('script, docs and root markdown changes run only the scripts suite', () => {
+    expect(plan(['scripts/a.mjs', 'docs/agent-traps.md', 'README.md']).only).toEqual(['scripts']);
+  });
+
+  it('an empty diff runs only the scripts suite', () => {
+    expect(plan([]).only).toEqual(['scripts']);
+  });
+
+  it('any unmappable path falls back to the full run', () => {
+    for (const p of [
+      'package-lock.json',
+      'test-support/isolated-home.mjs',
+      '.dossier/x.yaml',
+      'Makefile',
+    ]) {
+      const r = plan(['registry/a.ts', p]);
+      expect(r.only).toBeNull();
+      expect(r.reason).toContain(p);
+    }
+  });
+
+  it('does not treat a sibling dir sharing a prefix as the workspace', () => {
+    expect(plan(['cli-extras/a.ts']).only).toBeNull();
+  });
+});
+
+describe('workspaceDependents + changedPaths (#919)', () => {
+  const root = mkdtempSync(join(tmpdir(), 'test-report-dep-'));
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+  const sh = (...args) => execFileSync('git', args, { cwd: root, stdio: 'ignore' });
+  const write = (rel, body) => {
+    mkdirSync(join(root, rel, '..'), { recursive: true });
+    writeFileSync(join(root, rel), body);
+  };
+
+  it('computes the transitive dependents of each workspace', () => {
+    write('a/package.json', JSON.stringify({ name: '@x/a' }));
+    write('b/package.json', JSON.stringify({ name: '@x/b', dependencies: { '@x/a': '*' } }));
+    write('c/package.json', JSON.stringify({ name: '@x/c', devDependencies: { '@x/b': '*' } }));
+    const deps = workspaceDependents(root, ['a', 'b', 'c']);
+    expect([...deps.get('a')].sort()).toEqual(['b', 'c']);
+    expect([...deps.get('b')]).toEqual(['c']);
+    expect([...deps.get('c')]).toEqual([]);
+  });
+
+  it('lists committed, uncommitted and untracked paths since the base; null without git', () => {
+    sh('init', '-q', '-b', 'main');
+    sh('config', 'user.email', 't@t');
+    sh('config', 'user.name', 't');
+    sh('add', '-A');
+    sh('commit', '-qm', 'base');
+    sh('checkout', '-qb', 'member');
+    write('a/src.ts', '1');
+    sh('add', '-A');
+    sh('commit', '-qm', 'member');
+    write('b/package.json', JSON.stringify({ name: '@x/b', dependencies: { '@x/a': '1' } }));
+    write('c/new.ts', '2');
+    expect(changedPaths(root, { TEST_REPORT_BASE: 'main' }).sort()).toEqual([
+      'a/src.ts',
+      'b/package.json',
+      'c/new.ts',
+    ]);
+    expect(changedPaths(mkdtempSync(join(tmpdir(), 'test-report-nogit-')), {})).toBeNull();
   });
 });
